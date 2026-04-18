@@ -297,8 +297,8 @@ func TestEmojiImportZip_UnknownFileReturns400(t *testing.T) {
 func TestEmojiListV2_Basic(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "smile"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "wave"}))
+	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "smile", PublicURL: "https://example.com/smile.png"}))
+	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "wave", OriginalURL: "https://example.com/wave-orig.png"}))
 	h.SetEmojiRepo(repo)
 
 	rec := doPost(h.EmojiListV2, `{}`, adminUser)
@@ -310,6 +310,16 @@ func TestEmojiListV2_Basic(t *testing.T) {
 	assert.EqualValues(t, 2, resp["count"])
 	assert.EqualValues(t, 2, resp["allCount"])
 	assert.EqualValues(t, 1, resp["allPages"])
+	// packDetailedによりurl (= publicUrl || originalUrl) フィールドが含まれること
+	urlByName := map[string]string{}
+	for _, raw := range emojis {
+		em := raw.(map[string]any)
+		_, hasURL := em["url"]
+		assert.True(t, hasURL, "emoji should have url field")
+		urlByName[em["name"].(string)] = em["url"].(string)
+	}
+	assert.Equal(t, "https://example.com/smile.png", urlByName["smile"])
+	assert.Equal(t, "https://example.com/wave-orig.png", urlByName["wave"])
 }
 
 func TestEmojiListV2_NilRepo(t *testing.T) {

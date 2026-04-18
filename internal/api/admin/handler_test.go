@@ -886,10 +886,28 @@ func TestEmojiDelete_NilRepo(t *testing.T) {
 func TestEmojiList_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	emojiRepo := testutil.NewMockEmojiRepository()
-	emojiRepo.Emojis["smile@"] = &model.Emoji{ID: "e1", Name: "smile"}
+	emojiRepo.Emojis["smile@"] = &model.Emoji{ID: "e1", Name: "smile", PublicURL: "https://example.com/smile.png"}
 	h.SetEmojiRepo(emojiRepo)
 	rec := doPost(h.EmojiList, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "https://example.com/smile.png", rows[0]["url"])
+}
+
+func TestEmojiList_URLFallbackToOriginalUrl(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	// publicUrl空 → originalUrlにフォールバック
+	emojiRepo.Emojis["wave@"] = &model.Emoji{ID: "e2", Name: "wave", PublicURL: "", OriginalURL: "https://example.com/wave-orig.png"}
+	h.SetEmojiRepo(emojiRepo)
+	rec := doPost(h.EmojiList, `{}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "https://example.com/wave-orig.png", rows[0]["url"])
 }
 
 func TestEmojiList_NilRepo(t *testing.T) {

@@ -1018,7 +1018,7 @@ func (h *Handler) EmojiList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, emojis)
+	return c.JSON(http.StatusOK, entity.PackEmojiDetailedList(emojis))
 }
 
 // EmojiListV2 handles POST /api/v2/admin/emoji/list.
@@ -1037,7 +1037,7 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 	}
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusOK, emojiListV2Response{
-			Emojis:   []*model.Emoji{},
+			Emojis:   []entity.EmojiDetailed{},
 			Count:    0,
 			AllCount: 0,
 			AllPages: 0,
@@ -1092,9 +1092,10 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		allPages = int((allCount + int64(limit) - 1) / int64(limit))
 	}
 
+	packed := entity.PackEmojiDetailedList(emojis)
 	return c.JSON(http.StatusOK, emojiListV2Response{
-		Emojis:   emojis,
-		Count:    len(emojis),
+		Emojis:   packed,
+		Count:    len(packed),
 		AllCount: allCount,
 		AllPages: allPages,
 	})
@@ -1116,10 +1117,10 @@ type emojiV2QueryReq struct {
 }
 
 type emojiListV2Response struct {
-	Emojis   []*model.Emoji `json:"emojis"`
-	Count    int            `json:"count"`
-	AllCount int64          `json:"allCount"`
-	AllPages int            `json:"allPages"`
+	Emojis   []entity.EmojiDetailed `json:"emojis"`
+	Count    int                    `json:"count"`
+	AllCount int64                  `json:"allCount"`
+	AllPages int                    `json:"allPages"`
 }
 
 // --- Abuse Report endpoints ---
