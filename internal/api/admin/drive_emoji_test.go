@@ -310,16 +310,12 @@ func TestEmojiListV2_Basic(t *testing.T) {
 	assert.EqualValues(t, 2, resp["count"])
 	assert.EqualValues(t, 2, resp["allCount"])
 	assert.EqualValues(t, 1, resp["allPages"])
-	// packDetailedによりurl (= publicUrl || originalUrl) フィールドが含まれること
-	urlByName := map[string]string{}
+	// v2はpackDetailedAdmin相当: publicUrl/originalUrlを直接返す（computed urlは含まない）
 	for _, raw := range emojis {
 		em := raw.(map[string]any)
-		_, hasURL := em["url"]
-		assert.True(t, hasURL, "emoji should have url field")
-		urlByName[em["name"].(string)] = em["url"].(string)
+		_, hasPublicURL := em["publicUrl"]
+		assert.True(t, hasPublicURL, "v2 emoji should have publicUrl field")
 	}
-	assert.Equal(t, "https://example.com/smile.png", urlByName["smile"])
-	assert.Equal(t, "https://example.com/wave-orig.png", urlByName["wave"])
 }
 
 func TestEmojiListV2_NilRepo(t *testing.T) {

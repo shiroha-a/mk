@@ -1037,7 +1037,7 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 	}
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusOK, emojiListV2Response{
-			Emojis:   []entity.EmojiDetailed{},
+			Emojis:   []*model.Emoji{},
 			Count:    0,
 			AllCount: 0,
 			AllPages: 0,
@@ -1092,10 +1092,9 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		allPages = int((allCount + int64(limit) - 1) / int64(limit))
 	}
 
-	packed := entity.PackEmojiDetailedList(emojis)
 	return c.JSON(http.StatusOK, emojiListV2Response{
-		Emojis:   packed,
-		Count:    len(packed),
+		Emojis:   emojis,
+		Count:    len(emojis),
 		AllCount: allCount,
 		AllPages: allPages,
 	})
@@ -1117,10 +1116,10 @@ type emojiV2QueryReq struct {
 }
 
 type emojiListV2Response struct {
-	Emojis   []entity.EmojiDetailed `json:"emojis"`
-	Count    int                    `json:"count"`
-	AllCount int64                  `json:"allCount"`
-	AllPages int                    `json:"allPages"`
+	Emojis   []*model.Emoji `json:"emojis"`
+	Count    int            `json:"count"`
+	AllCount int64          `json:"allCount"`
+	AllPages int            `json:"allPages"`
 }
 
 // --- Abuse Report endpoints ---
