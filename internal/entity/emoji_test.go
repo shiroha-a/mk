@@ -55,7 +55,7 @@ func TestPackEmojiDetailed_AllFields(t *testing.T) {
 	assert.True(t, d.IsSensitive)
 	assert.True(t, d.LocalOnly)
 	assert.Equal(t, []string{"happy", "joy"}, d.Aliases)
-	assert.Equal(t, []string{"role1"}, d.RoleIdsThatCanBeUsedThisEmojiAsReaction)
+	assert.Equal(t, []string{"role1"}, d.RoleIDsThatCanBeUsedThisEmojiAsReaction)
 }
 
 func TestPackEmojiDetailed_NilSlicesReturnEmpty(t *testing.T) {
@@ -66,9 +66,9 @@ func TestPackEmojiDetailed_NilSlicesReturnEmpty(t *testing.T) {
 	}
 	d := PackEmojiDetailed(e)
 	assert.NotNil(t, d.Aliases, "aliases should be empty slice, not nil")
-	assert.NotNil(t, d.RoleIdsThatCanBeUsedThisEmojiAsReaction, "roleIds should be empty slice, not nil")
+	assert.NotNil(t, d.RoleIDsThatCanBeUsedThisEmojiAsReaction, "roleIds should be empty slice, not nil")
 	assert.Len(t, d.Aliases, 0)
-	assert.Len(t, d.RoleIdsThatCanBeUsedThisEmojiAsReaction, 0)
+	assert.Len(t, d.RoleIDsThatCanBeUsedThisEmojiAsReaction, 0)
 }
 
 func TestPackEmojiDetailedList(t *testing.T) {
@@ -98,7 +98,7 @@ func TestPackEmojiDetailed_DoesNotMutateInput(t *testing.T) {
 	}
 	d := PackEmojiDetailed(e)
 	d.Aliases[0] = "mutated"
-	d.RoleIdsThatCanBeUsedThisEmojiAsReaction[0] = "mutated"
+	d.RoleIDsThatCanBeUsedThisEmojiAsReaction[0] = "mutated"
 	assert.Equal(t, "orig", e.Aliases[0], "original aliases should not be mutated")
 	assert.Equal(t, "r1", e.RoleIDsThatCanBeUsedThisEmojiAsReaction[0], "original roleIds should not be mutated")
 }

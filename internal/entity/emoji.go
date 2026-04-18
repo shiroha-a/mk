@@ -14,7 +14,7 @@ type EmojiDetailed struct {
 	License                                 *string  `json:"license"`
 	IsSensitive                             bool     `json:"isSensitive"`
 	LocalOnly                               bool     `json:"localOnly"`
-	RoleIdsThatCanBeUsedThisEmojiAsReaction []string `json:"roleIdsThatCanBeUsedThisEmojiAsReaction"`
+	RoleIDsThatCanBeUsedThisEmojiAsReaction []string `json:"roleIdsThatCanBeUsedThisEmojiAsReaction"`
 }
 
 // PackEmojiDetailed converts a model.Emoji to an EmojiDetailed DTO.
@@ -38,7 +38,7 @@ func PackEmojiDetailed(e *model.Emoji) EmojiDetailed {
 		License:                                 e.License,
 		IsSensitive:                             e.IsSensitive,
 		LocalOnly:                               e.LocalOnly,
-		RoleIdsThatCanBeUsedThisEmojiAsReaction: roleIDs,
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: roleIDs,
 	}
 }
 
