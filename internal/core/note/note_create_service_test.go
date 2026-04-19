@@ -2,6 +2,7 @@ package note_test
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -396,48 +397,77 @@ func TestIsPureRenote(t *testing.T) {
 
 func ptrString(s string) *string { return &s }
 
+// waitHook blocks until done receives a signal or 5s timeout.
+func waitHook(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook did not fire within timeout")
+	}
+}
+
 // recordingHook captures fanout invocations for tests.
 type recordingHook struct {
-	called bool
+	called atomic.Bool
 	note   *model.Note
 	user   *model.User
+	done   chan struct{}
+}
+
+func newRecordingHook() *recordingHook {
+	return &recordingHook{done: make(chan struct{}, 1)}
 }
 
 func (h *recordingHook) OnNoteCreated(n *model.Note, u *model.User) {
-	h.called = true
+	h.called.Store(true)
 	h.note = n
 	h.user = u
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
 }
 
 func TestCreateService_FanoutHookInvoked(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingHook{}
+	hook := newRecordingHook()
 	svc.SetFanoutHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hello"
 	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
-	assert.True(t, hook.called)
+	waitHook(t, hook.done)
+	assert.True(t, hook.called.Load())
 	assert.Equal(t, created.ID, hook.note.ID)
 	assert.Equal(t, user, hook.user)
 }
 
 // recordingNotificationHook captures notification calls for tests.
 type recordingNotificationHook struct {
-	called       bool
+	called       atomic.Bool
 	gotNote      *model.Note
 	gotAuthor    *model.User
 	gotReplyTgt  *model.Note
 	gotRenoteTgt *model.Note
+	done         chan struct{}
+}
+
+func newRecordingNotificationHook() *recordingNotificationHook {
+	return &recordingNotificationHook{done: make(chan struct{}, 1)}
 }
 
 func (h *recordingNotificationHook) OnNoteCreated(n *model.Note, u *model.User, reply, renote *model.Note) {
-	h.called = true
+	h.called.Store(true)
 	h.gotNote = n
 	h.gotAuthor = u
 	h.gotReplyTgt = reply
 	h.gotRenoteTgt = renote
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
 }
 
 func TestCreateService_NotificationHookInvoked(t *testing.T) {
@@ -445,7 +475,7 @@ func TestCreateService_NotificationHookInvoked(t *testing.T) {
 	noteRepo.Notes["target"] = &model.Note{
 		ID: "target", UserID: "author", Visibility: model.NoteVisibilityPublic,
 	}
-	hook := &recordingNotificationHook{}
+	hook := newRecordingNotificationHook()
 	svc.SetNotificationHook(hook)
 
 	user := &model.User{ID: "u1"}
@@ -453,7 +483,8 @@ func TestCreateService_NotificationHookInvoked(t *testing.T) {
 	replyID := "target"
 	_, err := svc.Create(note.CreateInput{User: user, Text: &text, ReplyID: &replyID})
 	require.NoError(t, err)
-	assert.True(t, hook.called)
+	waitHook(t, hook.done)
+	assert.True(t, hook.called.Load())
 	assert.Equal(t, "target", hook.gotReplyTgt.ID)
 }
 
@@ -463,41 +494,52 @@ func TestCreateService_FanoutHookCalledOnFallbackPath(t *testing.T) {
 	noteRepo := &findFailNoteRepo{MockNoteRepository: testutil.NewMockNoteRepository()}
 	pollRepo := testutil.NewMockPollRepository()
 	svc := note.NewCreateService(noteRepo, pollRepo, idGen, nil)
-	hook := &recordingHook{}
+	hook := newRecordingHook()
 	svc.SetFanoutHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hi"
 	_, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
-	assert.True(t, hook.called)
+	waitHook(t, hook.done)
+	assert.True(t, hook.called.Load())
 	// fallbackパスではin.Userが埋め込まれる
 	assert.Equal(t, user, hook.note.User)
 }
 
 // recordingFederationHook captures federation hook calls for tests.
 type recordingFederationHook struct {
-	called bool
+	called atomic.Bool
 	note   *model.Note
 	user   *model.User
+	done   chan struct{}
+}
+
+func newRecordingFederationHook() *recordingFederationHook {
+	return &recordingFederationHook{done: make(chan struct{}, 1)}
 }
 
 func (h *recordingFederationHook) OnNoteCreated(n *model.Note, u *model.User) {
-	h.called = true
+	h.called.Store(true)
 	h.note = n
 	h.user = u
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
 }
 
 func TestCreateService_FederationHookInvoked(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingFederationHook{}
+	hook := newRecordingFederationHook()
 	svc.SetFederationHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hello"
 	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
-	assert.True(t, hook.called)
+	waitHook(t, hook.done)
+	assert.True(t, hook.called.Load())
 	assert.Equal(t, created.ID, hook.note.ID)
 }
 
@@ -506,8 +548,13 @@ type recordingChannelHook struct {
 	ensureCalled bool
 	ensureID     string
 	ensureErr    error
-	postedCalled bool
+	postedCalled atomic.Bool
 	postedID     string
+	postedDone   chan struct{}
+}
+
+func newRecordingChannelHook() *recordingChannelHook {
+	return &recordingChannelHook{postedDone: make(chan struct{}, 1)}
 }
 
 func (h *recordingChannelHook) EnsureChannelExists(channelID string) error {
@@ -517,13 +564,17 @@ func (h *recordingChannelHook) EnsureChannelExists(channelID string) error {
 }
 
 func (h *recordingChannelHook) OnNotePosted(channelID string) {
-	h.postedCalled = true
+	h.postedCalled.Store(true)
 	h.postedID = channelID
+	select {
+	case h.postedDone <- struct{}{}:
+	default:
+	}
 }
 
 func TestCreateService_ChannelHookEnsureAndOnPosted(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingChannelHook{}
+	hook := newRecordingChannelHook()
 	svc.SetChannelHook(hook)
 
 	user := &model.User{ID: "u1"}
@@ -531,15 +582,19 @@ func TestCreateService_ChannelHookEnsureAndOnPosted(t *testing.T) {
 	channelID := "ch1"
 	_, err := svc.Create(note.CreateInput{User: user, Text: &text, ChannelID: &channelID})
 	require.NoError(t, err)
+	// EnsureChannelExistsはCreate内で同期的に呼ばれる
 	assert.True(t, hook.ensureCalled)
 	assert.Equal(t, "ch1", hook.ensureID)
-	assert.True(t, hook.postedCalled)
+	// OnNotePostedは非同期
+	waitHook(t, hook.postedDone)
+	assert.True(t, hook.postedCalled.Load())
 	assert.Equal(t, "ch1", hook.postedID)
 }
 
 func TestCreateService_ChannelNotFound(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingChannelHook{ensureErr: errors.New("missing")}
+	hook := newRecordingChannelHook()
+	hook.ensureErr = errors.New("missing")
 	svc.SetChannelHook(hook)
 
 	user := &model.User{ID: "u1"}
@@ -560,47 +615,69 @@ func TestCreateService_NoChannelHookSkipsCheck(t *testing.T) {
 
 // recordingAntennaHook captures antenna hook calls for tests.
 type recordingAntennaHook struct {
-	called bool
+	called atomic.Bool
 	note   *model.Note
+	done   chan struct{}
+}
+
+func newRecordingAntennaHook() *recordingAntennaHook {
+	return &recordingAntennaHook{done: make(chan struct{}, 1)}
 }
 
 func (h *recordingAntennaHook) OnNoteCreated(n *model.Note, _ *model.User) {
-	h.called = true
+	h.called.Store(true)
 	h.note = n
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
 }
 
 func TestCreateService_AntennaHookInvoked(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingAntennaHook{}
+	hook := newRecordingAntennaHook()
 	svc.SetAntennaHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hello"
 	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
-	assert.True(t, hook.called)
+	waitHook(t, hook.done)
+	assert.True(t, hook.called.Load())
 	assert.Equal(t, created.ID, hook.note.ID)
 }
 
 // recordingIndexHook records calls into note.IndexHook so the create / delete
 // services の連携経路を検証できる。
 type recordingIndexHook struct {
-	created *model.Note
-	deleted *model.Note
+	created     *model.Note
+	deleted     *model.Note
+	createdDone chan struct{}
 }
 
-func (h *recordingIndexHook) OnNoteCreated(n *model.Note) { h.created = n }
+func newRecordingIndexHook() *recordingIndexHook {
+	return &recordingIndexHook{createdDone: make(chan struct{}, 1)}
+}
+
+func (h *recordingIndexHook) OnNoteCreated(n *model.Note) {
+	h.created = n
+	select {
+	case h.createdDone <- struct{}{}:
+	default:
+	}
+}
 func (h *recordingIndexHook) OnNoteDeleted(n *model.Note) { h.deleted = n }
 
 func TestCreateService_IndexHookInvoked(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingIndexHook{}
+	hook := newRecordingIndexHook()
 	svc.SetIndexHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hello"
 	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
+	waitHook(t, hook.createdDone)
 	require.NotNil(t, hook.created)
 	assert.Equal(t, created.ID, hook.created.ID)
 }
@@ -610,19 +687,31 @@ func TestCreateService_IndexHookInvoked(t *testing.T) {
 // out alongside the other registered hooks.
 type recordingChartHook struct {
 	created *model.Note
+	done    chan struct{}
 }
 
-func (h *recordingChartHook) OnNoteCreated(n *model.Note) { h.created = n }
+func newRecordingChartHook() *recordingChartHook {
+	return &recordingChartHook{done: make(chan struct{}, 1)}
+}
+
+func (h *recordingChartHook) OnNoteCreated(n *model.Note) {
+	h.created = n
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
+}
 
 func TestCreateService_ChartHookInvoked(t *testing.T) {
 	svc, _, _ := newCreateService(t)
-	hook := &recordingChartHook{}
+	hook := newRecordingChartHook()
 	svc.SetChartHook(hook)
 
 	user := &model.User{ID: "u1"}
 	text := "hello"
 	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
 	require.NoError(t, err)
+	waitHook(t, hook.done)
 	require.NotNil(t, hook.created)
 	assert.Equal(t, created.ID, hook.created.ID)
 }
@@ -1030,4 +1119,18 @@ func TestCreateService_NoMainStreamPublisher_NoEmit(t *testing.T) {
 		User: &model.User{ID: "alice"}, Text: &text, ReplyID: &replyID,
 	})
 	require.NoError(t, err)
+}
+
+func TestSafeGo_RecoversPanic(t *testing.T) {
+	done := make(chan struct{})
+	note.SafeGoForTest(func() {
+		defer func() { close(done) }()
+		panic("test panic")
+	})
+	select {
+	case <-done:
+		// パニックから回復して正常終了
+	case <-time.After(5 * time.Second):
+		t.Fatal("safeGo did not recover panic")
+	}
 }

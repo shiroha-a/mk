@@ -3,6 +3,7 @@ package users
 import (
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -207,44 +208,76 @@ func (h *Handler) Show(c echo.Context) error {
 	// Phase 7-3 (#245): ピン止めnote / ピン止めpage を埋める。
 	h.fillPinned(bundle.User, bundle.Profile, &detailed)
 
-	// viewerがログインしている場合、viewer依存フィールドを追加
+	// viewerがログインしている場合、viewer依存フィールドを並列取得する。
+	// 各リポジトリへのクエリは完全に独立しているためgoroutineで並列実行し、
+	// 全結果が揃ってからdetailedに反映する。
 	if viewer := middleware.GetUser(c); viewer != nil && viewer.ID != bundle.User.ID {
+		var (
+			isFollowing, isFollowed      bool
+			isBlocking, isBlocked        bool
+			isMuted, isRenoteMuted       bool
+			hasPendingFrom, hasPendingTo bool
+			followRec                    *model.Following
+			memo                         *model.UserMemo
+			wg                           sync.WaitGroup
+		)
+
 		if h.followingRepo != nil {
-			isFollowing, _ := h.followingRepo.Exists(viewer.ID, bundle.User.ID)
-			isFollowed, _ := h.followingRepo.Exists(bundle.User.ID, viewer.ID)
+			wg.Add(3)
+			go func() { defer wg.Done(); isFollowing, _ = h.followingRepo.Exists(viewer.ID, bundle.User.ID) }()
+			go func() { defer wg.Done(); isFollowed, _ = h.followingRepo.Exists(bundle.User.ID, viewer.ID) }()
+			go func() { defer wg.Done(); followRec, _ = h.followingRepo.FindByPair(viewer.ID, bundle.User.ID) }()
+		}
+		if h.blockingRepo != nil {
+			wg.Add(2)
+			go func() { defer wg.Done(); isBlocking, _ = h.blockingRepo.Exists(viewer.ID, bundle.User.ID) }()
+			go func() { defer wg.Done(); isBlocked, _ = h.blockingRepo.Exists(bundle.User.ID, viewer.ID) }()
+		}
+		if h.mutingRepo != nil {
+			wg.Add(1)
+			go func() { defer wg.Done(); isMuted, _ = h.mutingRepo.Exists(viewer.ID, bundle.User.ID) }()
+		}
+		if h.renoteMutingRepo != nil {
+			wg.Add(1)
+			go func() { defer wg.Done(); isRenoteMuted, _ = h.renoteMutingRepo.Exists(viewer.ID, bundle.User.ID) }()
+		}
+		if h.followRequestRepo != nil {
+			wg.Add(2)
+			go func() { defer wg.Done(); hasPendingFrom, _ = h.followRequestRepo.Exists(viewer.ID, bundle.User.ID) }()
+			go func() { defer wg.Done(); hasPendingTo, _ = h.followRequestRepo.Exists(bundle.User.ID, viewer.ID) }()
+		}
+		if h.memoRepo != nil {
+			wg.Add(1)
+			go func() { defer wg.Done(); memo, _ = h.memoRepo.FindByPair(viewer.ID, bundle.User.ID) }()
+		}
+
+		wg.Wait()
+
+		if h.followingRepo != nil {
 			detailed.IsFollowing = &isFollowing
 			detailed.IsFollowed = &isFollowed
-			// notify/withReplies はフォロー関係レコードから取得
-			if f, err := h.followingRepo.FindByPair(viewer.ID, bundle.User.ID); err == nil {
-				detailed.Notify = f.Notify
-				wr := f.WithReplies
+			if followRec != nil {
+				detailed.Notify = followRec.Notify
+				wr := followRec.WithReplies
 				detailed.WithReplies = &wr
 			}
 		}
 		if h.blockingRepo != nil {
-			isBlocking, _ := h.blockingRepo.Exists(viewer.ID, bundle.User.ID)
-			isBlocked, _ := h.blockingRepo.Exists(bundle.User.ID, viewer.ID)
 			detailed.IsBlocking = &isBlocking
 			detailed.IsBlocked = &isBlocked
 		}
 		if h.mutingRepo != nil {
-			isMuted, _ := h.mutingRepo.Exists(viewer.ID, bundle.User.ID)
 			detailed.IsMuted = &isMuted
 		}
 		if h.renoteMutingRepo != nil {
-			isRenoteMuted, _ := h.renoteMutingRepo.Exists(viewer.ID, bundle.User.ID)
 			detailed.IsRenoteMuted = &isRenoteMuted
 		}
 		if h.followRequestRepo != nil {
-			hasPendingFrom, _ := h.followRequestRepo.Exists(viewer.ID, bundle.User.ID)
-			hasPendingTo, _ := h.followRequestRepo.Exists(bundle.User.ID, viewer.ID)
 			detailed.HasPendingFollowRequestFromYou = &hasPendingFrom
 			detailed.HasPendingFollowRequestToYou = &hasPendingTo
 		}
-		if h.memoRepo != nil {
-			if memo, err := h.memoRepo.FindByPair(viewer.ID, bundle.User.ID); err == nil {
-				detailed.Memo = &memo.Memo
-			}
+		if h.memoRepo != nil && memo != nil {
+			detailed.Memo = &memo.Memo
 		}
 	}
 

@@ -3,6 +3,7 @@ package note
 
 import (
 	"errors"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -483,45 +484,38 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		finalNote.User = in.User
 	}
 
-	// 永続化が成功してからtimelineへ配信する。fanoutが失敗してもnote自体は
-	// 既に保存済みなので、ハンドラへはエラーを返さずベストエフォートとする。
+	// ベストエフォートフックを非同期で並列実行する。各フックは独立しており、
+	// 失敗してもノート作成自体は成功扱い。TS版と同様にfire-and-forgetで配信する。
 	if s.fanoutHook != nil {
-		s.fanoutHook.OnNoteCreated(finalNote, in.User)
+		safeGo(func() { s.fanoutHook.OnNoteCreated(finalNote, in.User) })
 	}
-	// 通知も同様にベストエフォート。
 	if s.notificationHook != nil {
-		s.notificationHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget)
+		safeGo(func() { s.notificationHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget) })
 	}
-	// AP配信もベストエフォート。
 	if s.federationHook != nil {
-		s.federationHook.OnNoteCreated(finalNote, in.User)
+		safeGo(func() { s.federationHook.OnNoteCreated(finalNote, in.User) })
 	}
-	// チャンネル投稿の lastNotedAt / notesCount 更新もベストエフォート。
 	if s.channelHook != nil && in.ChannelID != nil && *in.ChannelID != "" {
-		s.channelHook.OnNotePosted(*in.ChannelID)
+		chID := *in.ChannelID
+		safeGo(func() { s.channelHook.OnNotePosted(chID) })
 	}
-	// アンテナの fan-out もベストエフォート (失敗してもノート作成自体は成功)。
 	if s.antennaHook != nil {
-		s.antennaHook.OnNoteCreated(finalNote, in.User)
+		safeGo(func() { s.antennaHook.OnNoteCreated(finalNote, in.User) })
 	}
-	// 検索インデックスへの反映もベストエフォート。
 	if s.indexHook != nil {
-		s.indexHook.OnNoteCreated(finalNote)
+		safeGo(func() { s.indexHook.OnNoteCreated(finalNote) })
 	}
-	// チャート集計もベストエフォート。失敗してもノート作成自体は成功扱い。
 	if s.chartHook != nil {
-		s.chartHook.OnNoteCreated(finalNote)
+		safeGo(func() { s.chartHook.OnNoteCreated(finalNote) })
 	}
-	// Webhook配信もベストエフォート。
 	if s.webhookHook != nil {
-		s.webhookHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget)
+		safeGo(func() { s.webhookHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget) })
 	}
 	// reply / renote / mention 各イベントを対象local userのmainにemit。
 	// Misskey本家NoteCreateServiceと同じfan-out方針 (TS lines 792 / 809 / 935)。
 	s.publishNoteMainEvents(finalNote, in.User, replyTarget, renoteTarget)
 
-	// ユーザーのnotesCountをインクリメント (ベストエフォート)
-	_ = s.noteRepo.IncrementUserNotesCount(in.User.ID, 1)
+	safeGo(func() { _ = s.noteRepo.IncrementUserNotesCount(in.User.ID, 1) })
 
 	return finalNote, nil
 }
@@ -563,6 +557,19 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 		}
 		s.mainStreamPublisher.PublishMainEvent(uid, "mention", packed)
 	}
+}
+
+// safeGo runs fn in a new goroutine, recovering from panics.
+// ベストエフォートフックでパニックが発生してもプロセス全体が落ちないようにする。
+func safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("recovered panic in best-effort hook", "panic", r)
+			}
+		}()
+		fn()
+	}()
 }
 
 // mentionRegex matches @username and @username@host occurrences anywhere in

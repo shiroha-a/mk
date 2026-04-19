@@ -121,7 +121,7 @@ func (s *Server) setupRoutes() {
 	// Repositories
 	userRepo := repository.NewUserRepository(s.db)
 	noteRepo := repository.NewNoteRepository(s.db)
-	metaRepo := repository.NewMetaRepository(s.db)
+	metaRepo := repository.NewCachedMetaRepository(repository.NewMetaRepository(s.db))
 	// Seed the singleton meta row on first boot so that fresh installs
 	// can run /api/admin/accounts/create (initial setup) without tripping
 	// over a missing meta row.
