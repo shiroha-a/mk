@@ -27,12 +27,12 @@ func TestAnnouncementRepository_CRUD(t *testing.T) {
 	assert.Equal(t, "Test", found.Title)
 
 	// List (active)
-	items, err := repo.List(true, 10, 0)
+	items, err := repo.List(true, 10, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 
 	// List (all)
-	items, err = repo.List(false, 10, 0)
+	items, err = repo.List(false, 10, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 
@@ -62,21 +62,21 @@ func TestAnnouncementRepository_List_Pagination(t *testing.T) {
 	defer cleanupAnnouncement(t, a1.ID)
 	defer cleanupAnnouncement(t, a2.ID)
 
-	items, err := repo.List(true, 1, 0)
+	items, err := repo.List(true, 1, 0, "", "")
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 
-	items, err = repo.List(true, 10, 1)
+	items, err = repo.List(true, 10, 1, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 
 	// default limit
-	items, err = repo.List(true, 0, 0)
+	items, err = repo.List(true, 0, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 
 	// limit cap
-	items, err = repo.List(true, 999, 0)
+	items, err = repo.List(true, 999, 0, "", "")
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(items), 100)
 }
@@ -85,7 +85,7 @@ func TestAnnouncementRepository_List_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewAnnouncementRepository(testDB.WithContext(ctx))
-	_, err := repo.List(true, 10, 0)
+	_, err := repo.List(true, 10, 0, "", "")
 	assert.Error(t, err)
 }
 
@@ -102,7 +102,7 @@ func TestAnnouncementRepository_ListGlobal_ExcludesPerUser(t *testing.T) {
 	require.NoError(t, repo.Create(global))
 	require.NoError(t, repo.Create(targeted))
 
-	items, err := repo.ListGlobal(true, 100, 0)
+	items, err := repo.ListGlobal(true, 100, 0, "", "")
 	require.NoError(t, err)
 	ids := make(map[string]bool, len(items))
 	for _, a := range items {
@@ -121,18 +121,18 @@ func TestAnnouncementRepository_ListGlobal_Pagination(t *testing.T) {
 	require.NoError(t, repo.Create(a1))
 	require.NoError(t, repo.Create(a2))
 
-	items, err := repo.ListGlobal(true, 1, 0)
+	items, err := repo.ListGlobal(true, 1, 0, "", "")
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
 	// default limitとcap経路
-	items, err = repo.ListGlobal(true, 0, 0)
+	items, err = repo.ListGlobal(true, 0, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
-	items, err = repo.ListGlobal(true, 999, 0)
+	items, err = repo.ListGlobal(true, 999, 0, "", "")
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(items), 100)
 	// offset
-	items, err = repo.ListGlobal(true, 10, 1)
+	items, err = repo.ListGlobal(true, 10, 1, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 }
@@ -141,7 +141,7 @@ func TestAnnouncementRepository_ListGlobal_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewAnnouncementRepository(testDB.WithContext(ctx))
-	_, err := repo.ListGlobal(true, 10, 0)
+	_, err := repo.ListGlobal(true, 10, 0, "", "")
 	assert.Error(t, err)
 }
 
@@ -161,7 +161,7 @@ func TestAnnouncementRepository_ListForUser_IncludesGlobalAndOwnTargeted(t *test
 	require.NoError(t, repo.Create(mine))
 	require.NoError(t, repo.Create(others))
 
-	items, err := repo.ListForUser(me, true, 100, 0)
+	items, err := repo.ListForUser(me, true, 100, 0, "", "")
 	require.NoError(t, err)
 	ids := make(map[string]bool, len(items))
 	for _, a := range items {
@@ -181,16 +181,16 @@ func TestAnnouncementRepository_ListForUser_Pagination(t *testing.T) {
 	require.NoError(t, repo.Create(a1))
 	require.NoError(t, repo.Create(a2))
 
-	items, err := repo.ListForUser("u", true, 1, 0)
+	items, err := repo.ListForUser("u", true, 1, 0, "", "")
 	require.NoError(t, err)
 	assert.Len(t, items, 1)
-	items, err = repo.ListForUser("u", true, 0, 0)
+	items, err = repo.ListForUser("u", true, 0, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
-	items, err = repo.ListForUser("u", true, 999, 0)
+	items, err = repo.ListForUser("u", true, 999, 0, "", "")
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(items), 100)
-	items, err = repo.ListForUser("u", true, 10, 1)
+	items, err = repo.ListForUser("u", true, 10, 1, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 }
@@ -199,7 +199,7 @@ func TestAnnouncementRepository_ListForUser_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewAnnouncementRepository(testDB.WithContext(ctx))
-	_, err := repo.ListForUser("u", true, 10, 0)
+	_, err := repo.ListForUser("u", true, 10, 0, "", "")
 	assert.Error(t, err)
 }
 
@@ -217,7 +217,7 @@ func TestAnnouncementRepository_ListForUser_ActiveOnlyAppliesToGlobal(t *testing
 
 	// activeOnly=true の場合、inactive な global announcement も除外される
 	// はず(括弧無しだと isActive filter が global に適用されず漏れる)。
-	items, err := repo.ListForUser("some_user", true, 100, 0)
+	items, err := repo.ListForUser("some_user", true, 100, 0, "", "")
 	require.NoError(t, err)
 	for _, a := range items {
 		assert.NotEqual(t, inactive.ID, a.ID)

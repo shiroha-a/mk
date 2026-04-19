@@ -3303,10 +3303,16 @@ func (m *MockAnnouncementRepository) FindByID(id string) (*model.Announcement, e
 	return a, nil
 }
 
-func (m *MockAnnouncementRepository) List(activeOnly bool, limit, offset int) ([]*model.Announcement, error) {
+func (m *MockAnnouncementRepository) List(activeOnly bool, limit, offset int, sinceID, untilID string) ([]*model.Announcement, error) {
 	var result []*model.Announcement
 	for _, a := range m.Items {
 		if activeOnly && !a.IsActive {
+			continue
+		}
+		if sinceID != "" && a.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && a.ID >= untilID {
 			continue
 		}
 		result = append(result, a)
@@ -3314,14 +3320,20 @@ func (m *MockAnnouncementRepository) List(activeOnly bool, limit, offset int) ([
 	if limit <= 0 {
 		limit = 10
 	}
-	if offset >= len(result) {
-		return nil, nil
+	if sinceID == "" && untilID == "" {
+		if offset >= len(result) {
+			return nil, nil
+		}
+		end := min(offset+limit, len(result))
+		return result[offset:end], nil
 	}
-	end := min(offset+limit, len(result))
-	return result[offset:end], nil
+	if limit > len(result) {
+		limit = len(result)
+	}
+	return result[:limit], nil
 }
 
-func (m *MockAnnouncementRepository) ListGlobal(activeOnly bool, limit, offset int) ([]*model.Announcement, error) {
+func (m *MockAnnouncementRepository) ListGlobal(activeOnly bool, limit, offset int, sinceID, untilID string) ([]*model.Announcement, error) {
 	var result []*model.Announcement
 	for _, a := range m.Items {
 		if a.UserID != nil {
@@ -3330,19 +3342,31 @@ func (m *MockAnnouncementRepository) ListGlobal(activeOnly bool, limit, offset i
 		if activeOnly && !a.IsActive {
 			continue
 		}
+		if sinceID != "" && a.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && a.ID >= untilID {
+			continue
+		}
 		result = append(result, a)
 	}
 	if limit <= 0 {
 		limit = 10
 	}
-	if offset >= len(result) {
-		return nil, nil
+	if sinceID == "" && untilID == "" {
+		if offset >= len(result) {
+			return nil, nil
+		}
+		end := min(offset+limit, len(result))
+		return result[offset:end], nil
 	}
-	end := min(offset+limit, len(result))
-	return result[offset:end], nil
+	if limit > len(result) {
+		limit = len(result)
+	}
+	return result[:limit], nil
 }
 
-func (m *MockAnnouncementRepository) ListForUser(userID string, activeOnly bool, limit, offset int) ([]*model.Announcement, error) {
+func (m *MockAnnouncementRepository) ListForUser(userID string, activeOnly bool, limit, offset int, sinceID, untilID string) ([]*model.Announcement, error) {
 	var result []*model.Announcement
 	for _, a := range m.Items {
 		// per-user announcementのうち他ユーザー宛ては除外
@@ -3352,16 +3376,28 @@ func (m *MockAnnouncementRepository) ListForUser(userID string, activeOnly bool,
 		if activeOnly && !a.IsActive {
 			continue
 		}
+		if sinceID != "" && a.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && a.ID >= untilID {
+			continue
+		}
 		result = append(result, a)
 	}
 	if limit <= 0 {
 		limit = 10
 	}
-	if offset >= len(result) {
-		return nil, nil
+	if sinceID == "" && untilID == "" {
+		if offset >= len(result) {
+			return nil, nil
+		}
+		end := min(offset+limit, len(result))
+		return result[offset:end], nil
 	}
-	end := min(offset+limit, len(result))
-	return result[offset:end], nil
+	if limit > len(result) {
+		limit = len(result)
+	}
+	return result[:limit], nil
 }
 
 func (m *MockAnnouncementRepository) UpdateFields(id string, fields map[string]any) error {

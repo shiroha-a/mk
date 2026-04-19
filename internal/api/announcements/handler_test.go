@@ -80,6 +80,48 @@ func TestList_ActiveFalse(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestList_UntilID(t *testing.T) {
+	h, repo := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	id1 := idGen.Generate(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	id2 := idGen.Generate(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC))
+	id3 := idGen.Generate(time.Date(2024, 12, 1, 0, 0, 0, 0, time.UTC))
+	repo.Items[id1] = &model.Announcement{ID: id1, Title: "Old", Text: "t", IsActive: true}
+	repo.Items[id2] = &model.Announcement{ID: id2, Title: "Mid", Text: "t", IsActive: true}
+	repo.Items[id3] = &model.Announcement{ID: id3, Title: "New", Text: "t", IsActive: true}
+
+	// untilId=id3 → id3より古いものだけ返る（id1, id2）
+	rec := doPost(h.List, `{"untilId":"`+id3+`"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2)
+	for _, item := range resp {
+		assert.NotEqual(t, id3, item["id"])
+	}
+}
+
+func TestList_SinceID(t *testing.T) {
+	h, repo := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	id1 := idGen.Generate(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	id2 := idGen.Generate(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC))
+	id3 := idGen.Generate(time.Date(2024, 12, 1, 0, 0, 0, 0, time.UTC))
+	repo.Items[id1] = &model.Announcement{ID: id1, Title: "Old", Text: "t", IsActive: true}
+	repo.Items[id2] = &model.Announcement{ID: id2, Title: "Mid", Text: "t", IsActive: true}
+	repo.Items[id3] = &model.Announcement{ID: id3, Title: "New", Text: "t", IsActive: true}
+
+	// sinceId=id1 → id1より新しいものだけ返る（id2, id3）
+	rec := doPost(h.List, `{"sinceId":"`+id1+`"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2)
+	for _, item := range resp {
+		assert.NotEqual(t, id1, item["id"])
+	}
+}
+
 // --- ReadAnnouncement ---
 
 func TestReadAnnouncement_Success(t *testing.T) {
@@ -314,15 +356,15 @@ type failingListAnnouncementRepo struct {
 	*testutil.MockAnnouncementRepository
 }
 
-func (f *failingListAnnouncementRepo) List(_ bool, _, _ int) ([]*model.Announcement, error) {
+func (f *failingListAnnouncementRepo) List(_ bool, _, _ int, _, _ string) ([]*model.Announcement, error) {
 	return nil, assert.AnError
 }
 
-func (f *failingListAnnouncementRepo) ListGlobal(_ bool, _, _ int) ([]*model.Announcement, error) {
+func (f *failingListAnnouncementRepo) ListGlobal(_ bool, _, _ int, _, _ string) ([]*model.Announcement, error) {
 	return nil, assert.AnError
 }
 
-func (f *failingListAnnouncementRepo) ListForUser(_ string, _ bool, _, _ int) ([]*model.Announcement, error) {
+func (f *failingListAnnouncementRepo) ListForUser(_ string, _ bool, _, _ int, _, _ string) ([]*model.Announcement, error) {
 	return nil, assert.AnError
 }
 
