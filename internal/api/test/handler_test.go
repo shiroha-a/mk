@@ -13,6 +13,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +106,8 @@ func TestResetDB_FlushesRedisAndTables(t *testing.T) {
 	// meta テーブルに行を入れる (migration で必ず存在するテーブルなので安全)。
 	seedRow(t, testPg.DB, "meta", "m_reset_1")
 
-	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
+	metaRepo := repository.NewMetaRepository(testPg.DB)
+	h := NewHandler(testPg.DB, testRedis.Client, metaRepo, true)
 
 	c, rec := freshEchoContext()
 	require.NoError(t, h.ResetDB(c))
@@ -141,11 +143,12 @@ func TestResetDB_MetaInsertError_Returns500(t *testing.T) {
 		_ = testPg.DB.Exec(`ALTER TABLE "meta_test_backup" RENAME TO "meta"`).Error
 	})
 
-	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
+	metaRepo := repository.NewMetaRepository(testPg.DB)
+	h := NewHandler(testPg.DB, testRedis.Client, metaRepo, true)
 	c, rec := freshEchoContext()
 	err := h.ResetDB(c)
 
-	// meta テーブルが存在しないので INSERT が失敗し、500 が返る
+	// meta テーブルが存在しないので EnsureInitial が失敗し、500 が返る
 	require.Error(t, err)
 	var he *echo.HTTPError
 	require.True(t, errors.As(err, &he))
