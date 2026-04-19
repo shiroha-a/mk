@@ -589,7 +589,7 @@ func (s *Server) setupRoutes() {
 	// Cypress の resetState コマンドが依存する /api/reset-db はここで登録する。
 	// 本番で絶対に有効化してはならない (config.go 側で起動時 warning を出す)。
 	if s.config.TestMode {
-		testHandler := apitest.NewHandler(s.db, s.redis.Default, true)
+		testHandler := apitest.NewHandler(s.db, s.redis.Default, metaRepo, true)
 		api.POST("/reset-db", testHandler.ResetDB)
 		slog.Warn("test mode: /api/reset-db endpoint is registered", "url", s.config.URL)
 	}

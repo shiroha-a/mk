@@ -83,7 +83,7 @@ func quoteIdent(name string) string {
 }
 
 func TestResetDB_TestModeDisabled_Returns404(t *testing.T) {
-	h := NewHandler(nil, nil, false)
+	h := NewHandler(nil, nil, nil, false)
 
 	c, rec := freshEchoContext()
 	err := h.ResetDB(c)
@@ -105,7 +105,7 @@ func TestResetDB_FlushesRedisAndTables(t *testing.T) {
 	// meta テーブルに行を入れる (migration で必ず存在するテーブルなので安全)。
 	seedRow(t, testPg.DB, "meta", "m_reset_1")
 
-	h := NewHandler(testPg.DB, testRedis.Client, true)
+	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
 
 	c, rec := freshEchoContext()
 	require.NoError(t, h.ResetDB(c))
@@ -141,7 +141,7 @@ func TestResetDB_MetaInsertError_Returns500(t *testing.T) {
 		_ = testPg.DB.Exec(`ALTER TABLE "meta_test_backup" RENAME TO "meta"`).Error
 	})
 
-	h := NewHandler(testPg.DB, testRedis.Client, true)
+	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
 	c, rec := freshEchoContext()
 	err := h.ResetDB(c)
 
@@ -168,7 +168,7 @@ func TestResetDB_PreservesSchemaMigrations(t *testing.T) {
 		).Error)
 	}
 
-	h := NewHandler(testPg.DB, testRedis.Client, true)
+	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
 	c, _ := freshEchoContext()
 	require.NoError(t, h.ResetDB(c))
 
@@ -179,7 +179,7 @@ func TestResetDB_PreservesSchemaMigrations(t *testing.T) {
 
 func TestResetDB_NilDependencies(t *testing.T) {
 	// TestMode=true でも db/redis が nil なら reset は no-op 扱いで 204 を返す。
-	h := NewHandler(nil, nil, true)
+	h := NewHandler(nil, nil, nil, true)
 	c, rec := freshEchoContext()
 	require.NoError(t, h.ResetDB(c))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -192,7 +192,7 @@ func TestResetDB_RedisFlushError_Returns500(t *testing.T) {
 	brokenRedis := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	require.NoError(t, brokenRedis.Close())
 
-	h := NewHandler(testPg.DB, brokenRedis, true)
+	h := NewHandler(testPg.DB, brokenRedis, nil, true)
 	c, _ := freshEchoContext()
 	err := h.ResetDB(c)
 	require.Error(t, err)
@@ -237,7 +237,7 @@ func TestResetDB_DBError_HandlerReturns500(t *testing.T) {
 
 	// Redis 側は本物のクライアントのままだとキャンセル済み ctx で失敗する。
 	// 期待挙動としては 500 が返れば良い。
-	h := NewHandler(testPg.DB, testRedis.Client, true)
+	h := NewHandler(testPg.DB, testRedis.Client, nil, true)
 	err := h.ResetDB(c)
 	require.Error(t, err)
 	var he *echo.HTTPError
@@ -272,7 +272,7 @@ func TestResetDB_DBError_WithNilRedis(t *testing.T) {
 	requireContainers(t)
 
 	badDB := openBrokenDB(t)
-	h := NewHandler(badDB, nil, true)
+	h := NewHandler(badDB, nil, nil, true)
 	c, _ := freshEchoContext()
 	err := h.ResetDB(c)
 	require.Error(t, err)

@@ -31,6 +31,8 @@ func NewCachedMetaRepositoryWithTTL(inner MetaRepository, ttl time.Duration) *Ca
 }
 
 // Fetch returns the cached meta if still valid, otherwise fetches from DB.
+// 返却される *model.Meta はキャッシュ内部と同一ポインタのため、呼び出し側で
+// フィールドを変更してはならない（read-only）。
 func (c *CachedMetaRepository) Fetch() (*model.Meta, error) {
 	c.mu.RLock()
 	if c.val != nil && time.Since(c.at) < c.ttl {

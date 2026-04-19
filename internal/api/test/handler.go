@@ -14,6 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
+	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/gorm"
 )
 
@@ -35,6 +36,7 @@ const resetDBMaxRetries = 3
 type Handler struct {
 	db       *gorm.DB
 	redis    *redis.Client
+	metaRepo repository.MetaRepository
 	testMode bool
 }
 
@@ -43,10 +45,11 @@ type Handler struct {
 // db and redis are both required when testMode is true. They are accepted
 // regardless so that test code that spins up a zero-value Handler cannot
 // accidentally pass a nil dependency without it being caught by the runtime.
-func NewHandler(db *gorm.DB, redisClient *redis.Client, testMode bool) *Handler {
+func NewHandler(db *gorm.DB, redisClient *redis.Client, metaRepo repository.MetaRepository, testMode bool) *Handler {
 	return &Handler{
 		db:       db,
 		redis:    redisClient,
+		metaRepo: metaRepo,
 		testMode: testMode,
 	}
 }
@@ -77,11 +80,13 @@ func (h *Handler) ResetDB(c echo.Context) error {
 		}
 		// meta テーブルは TRUNCATE で消えるが、初期セットアップフロー
 		// (/api/admin/accounts/create) が `SELECT * FROM meta` を前提にしているので
-		// 空行を 1 つ再挿入する。id は singleton なので値は何でも良い。
-		// 全カラムは DB 側 default を持っているのでこれだけで有効な行になる。
-		if err := h.db.WithContext(ctx).Exec(`INSERT INTO "meta" ("id") VALUES ('meta-singleton') ON CONFLICT DO NOTHING`).Error; err != nil {
-			slog.Error("reset-db: meta re-init failed", "err", err)
-			return echo.NewHTTPError(http.StatusInternalServerError, "db reset failed")
+		// 空行を 1 つ再挿入する。MetaRepository 経由で行うことで
+		// CachedMetaRepository のキャッシュも無効化される。
+		if h.metaRepo != nil {
+			if err := h.metaRepo.EnsureInitial("meta-singleton"); err != nil {
+				slog.Error("reset-db: meta re-init failed", "err", err)
+				return echo.NewHTTPError(http.StatusInternalServerError, "db reset failed")
+			}
 		}
 	}
 
