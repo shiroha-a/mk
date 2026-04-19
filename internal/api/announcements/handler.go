@@ -213,13 +213,15 @@ func (h *Handler) AdminDelete(c echo.Context) error {
 // AdminList handles POST /api/admin/announcements/list.
 func (h *Handler) AdminList(c echo.Context) error {
 	var req struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
+		Limit   int    `json:"limit"`
+		Offset  int    `json:"offset"`
+		SinceID string `json:"sinceId"`
+		UntilID string `json:"untilId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	items, err := h.repo.List(false, req.Limit, req.Offset, "", "")
+	items, err := h.repo.List(false, req.Limit, req.Offset, req.SinceID, req.UntilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

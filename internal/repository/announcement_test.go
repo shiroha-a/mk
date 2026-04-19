@@ -195,6 +195,83 @@ func TestAnnouncementRepository_ListForUser_Pagination(t *testing.T) {
 	assert.NotEmpty(t, items)
 }
 
+func TestAnnouncementRepository_ListGlobal_CursorPagination(t *testing.T) {
+	repo := NewAnnouncementRepository(testDB)
+	// IDの辞書順 = 時系列順になるようにIDを付ける
+	a1 := &model.Announcement{ID: "ann_cur_a", Title: "A", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	a2 := &model.Announcement{ID: "ann_cur_b", Title: "B", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	a3 := &model.Announcement{ID: "ann_cur_c", Title: "C", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	defer cleanupAnnouncement(t, a1.ID)
+	defer cleanupAnnouncement(t, a2.ID)
+	defer cleanupAnnouncement(t, a3.ID)
+	require.NoError(t, repo.Create(a1))
+	require.NoError(t, repo.Create(a2))
+	require.NoError(t, repo.Create(a3))
+
+	// untilId: a3より古いもの → a1, a2
+	items, err := repo.ListGlobal(true, 100, 0, "", a3.ID)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(items))
+	for _, a := range items {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids[a1.ID])
+	assert.True(t, ids[a2.ID])
+	assert.False(t, ids[a3.ID])
+
+	// sinceId: a1より新しいもの → a2, a3
+	items, err = repo.ListGlobal(true, 100, 0, a1.ID, "")
+	require.NoError(t, err)
+	ids = make(map[string]bool, len(items))
+	for _, a := range items {
+		ids[a.ID] = true
+	}
+	assert.False(t, ids[a1.ID])
+	assert.True(t, ids[a2.ID])
+	assert.True(t, ids[a3.ID])
+
+	// sinceId + untilId: a1 < id < a3 → a2のみ
+	items, err = repo.ListGlobal(true, 100, 0, a1.ID, a3.ID)
+	require.NoError(t, err)
+	assert.Len(t, items, 1)
+	assert.Equal(t, a2.ID, items[0].ID)
+}
+
+func TestAnnouncementRepository_ListForUser_CursorPagination(t *testing.T) {
+	repo := NewAnnouncementRepository(testDB)
+	a1 := &model.Announcement{ID: "ann_ucur_a", Title: "A", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	a2 := &model.Announcement{ID: "ann_ucur_b", Title: "B", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	a3 := &model.Announcement{ID: "ann_ucur_c", Title: "C", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	defer cleanupAnnouncement(t, a1.ID)
+	defer cleanupAnnouncement(t, a2.ID)
+	defer cleanupAnnouncement(t, a3.ID)
+	require.NoError(t, repo.Create(a1))
+	require.NoError(t, repo.Create(a2))
+	require.NoError(t, repo.Create(a3))
+
+	// untilId: a3より古いもの → a1, a2
+	items, err := repo.ListForUser("u", true, 100, 0, "", a3.ID)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(items))
+	for _, a := range items {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids[a1.ID])
+	assert.True(t, ids[a2.ID])
+	assert.False(t, ids[a3.ID])
+
+	// sinceId: a1より新しいもの → a2, a3
+	items, err = repo.ListForUser("u", true, 100, 0, a1.ID, "")
+	require.NoError(t, err)
+	ids = make(map[string]bool, len(items))
+	for _, a := range items {
+		ids[a.ID] = true
+	}
+	assert.False(t, ids[a1.ID])
+	assert.True(t, ids[a2.ID])
+	assert.True(t, ids[a3.ID])
+}
+
 func TestAnnouncementRepository_ListForUser_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
