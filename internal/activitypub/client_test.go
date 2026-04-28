@@ -271,6 +271,37 @@ func TestClient_FetchUnsigned_BadURL(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestClient_FetchUnsignedJSON_AcceptHeader pins the Accept header used
+// for non-AP discovery endpoints (#474). Iceshrimp.NET returns a 406
+// envelope when the AP MIME types are sent, so plain JSON Accept must
+// be preserved.
+func TestClient_FetchUnsignedJSON_AcceptHeader(t *testing.T) {
+	var seenAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"links":[]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(nil, "")
+	_, err := c.FetchUnsignedJSON(srv.URL + "/.well-known/nodeinfo")
+	require.NoError(t, err)
+	assert.Equal(t, "application/json, */*", seenAccept,
+		"plain JSON Accept must be sent so strict implementations like Iceshrimp.NET do not 406")
+}
+
+func TestClient_FetchUnsignedJSON_NonOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := NewClient(nil, "")
+	_, err := c.FetchUnsignedJSON(srv.URL)
+	assert.Error(t, err)
+}
+
 func TestClient_FetchUnsigned_NetworkError(t *testing.T) {
 	c := NewClient(nil, "")
 	_, err := c.FetchUnsigned("http://127.0.0.1:1/")

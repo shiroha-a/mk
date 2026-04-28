@@ -28,7 +28,7 @@ type scriptedFetcher struct {
 	htmlErr  error
 }
 
-func (s *scriptedFetcher) FetchObjectUnsigned(_ string) ([]byte, error) {
+func (s *scriptedFetcher) FetchJSON(_ string) ([]byte, error) {
 	if s.idx >= len(s.bodies) {
 		return nil, errors.New("no more bodies")
 	}
@@ -188,10 +188,39 @@ func TestFetch_IconFromHTML(t *testing.T) {
 
 	got := repo.Instances["remote.example"]
 	require.NotNil(t, got.IconURL)
-	// apple-touch-iconが優先され、絶対URLのまま保存される。
+	// iconUrl: 高解像度の apple-touch-icon が優先される。
 	assert.Equal(t, "https://cdn.example/apple-touch.png", *got.IconURL)
 	require.NotNil(t, got.FaviconURL)
-	assert.Equal(t, "https://remote.example/favicon.ico", *got.FaviconURL)
+	// faviconUrl (#474): HTML の <link rel="icon"> URL を優先するように
+	// 修正。Iceshrimp.NET 等が `/favicon.ico` ではなく `/favicon.png` を
+	// 提供する場合に、404 を返す hardcode URL ではなく実 URL が保存される。
+	assert.Equal(t, "https://remote.example/favicon-16.png", *got.FaviconURL)
+}
+
+// TestFetch_IconFromHTML_RelIconOnly_UsesItForFavicon: Iceshrimp.NET 風の
+// HTML (apple-touch-icon は無く `<link rel="icon">` のみ) では、両方の
+// field が同じ icon URL を指す。これが #474 の本丸。
+func TestFetch_IconFromHTML_RelIconOnly_UsesItForFavicon(t *testing.T) {
+	// Iceshrimp.NET と同じパターン: icon のみで apple-touch-icon は無い
+	htmlBody := `<html><head>
+		<link rel="icon" type="image/png" href="/favicon.png">
+	</head></html>`
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := &scriptedFetcher{
+		bodies:   [][]byte{[]byte(discoveryBody), []byte(documentBody)},
+		htmlBody: []byte(htmlBody),
+	}
+	svc := instance.NewFetchMetadataService(repo, fetcher)
+	require.NoError(t, svc.Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.IconURL)
+	assert.Equal(t, "https://remote.example/favicon.png", *got.IconURL)
+	require.NotNil(t, got.FaviconURL)
+	// 旧実装では `/favicon.ico` 決め打ち → 404 → frontend で表示できない。
+	// 修正後は HTML の <link rel="icon"> が両 field に使われる。
+	assert.Equal(t, "https://remote.example/favicon.png", *got.FaviconURL)
 }
 
 func TestFetch_IconFromHTML_RelativeResolved(t *testing.T) {

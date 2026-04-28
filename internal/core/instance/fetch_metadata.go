@@ -16,10 +16,11 @@ import (
 // remote HTML. 実装は activitypub.Client の薄いラッパで十分。
 //
 // nodeinfo / .well-known は peer 認証を要求しない discovery endpoint なので
-// 署名 GET を付ける必要がない。FetchObjectUnsigned 経由で明示的に未署名
-// リクエストを投げる (#419)。
+// 署名 GET を付ける必要がない。FetchJSON 経由で plain JSON Accept を投げる
+// (#474: Iceshrimp.NET など strict な実装は AP MIME を Accept に渡すと 406)。
 type HTTPFetcher interface {
-	FetchObjectUnsigned(uri string) ([]byte, error)
+	// FetchJSON は Accept: application/json, */* で nodeinfo を取得する。
+	FetchJSON(uri string) ([]byte, error)
 	FetchHTML(uri string) ([]byte, error)
 }
 
@@ -144,36 +145,62 @@ func (s *FetchMetadataService) Fetch(host string) error {
 // 失わないため)。
 const maxInstanceURLLen = 256
 
-// fetchIcons attempts to extract iconUrl (from <link rel="icon">) and set
-// faviconUrl to the conventional /favicon.ico path. 本家Misskey の
-// FetchInstanceMetadataService と同様、faviconは実在検証せず `https://host/favicon.ico`
-// を決め打ちで保存する (frontendが404時は非表示になるだけなので害は小さい)。
+// fetchIcons extracts iconUrl (high-res, used by detailed instance views)
+// and faviconUrl (small, used by InstanceTicker) from the remote root HTML.
+//
+// Upstream Misskey distinguishes the two:
+//   - faviconUrl: prefer `<link rel="icon">`; only falls back to the
+//     conventional `/favicon.ico` when the HTML provides no link tag.
+//   - iconUrl:    prefer `<link rel="apple-touch-icon">` (high-res), then
+//     `<link rel="icon">`.
+//
+// Iceshrimp.NET serves `<link rel="icon" href="/favicon.png">` and does
+// not expose `/favicon.ico`. Hardcoding the latter as faviconUrl gives a
+// 404 in the InstanceTicker — frontend shows broken / empty image (#474).
+// Following the link tag fixes the icon for any non-Misskey-TS upstream
+// that uses a non-`.ico` favicon convention.
 func (s *FetchMetadataService) fetchIcons(host string) (iconURL, faviconURL string) {
 	rootURL := "https://" + host + "/"
-	// 画面に表示される favicon は frontend で fallback されるので、HTMLが
-	// 取得できなくても /favicon.ico は必ずセットする。
-	faviconURL = "https://" + host + "/favicon.ico"
 
 	body, err := s.fetcher.FetchHTML(rootURL)
 	if err != nil {
-		return "", faviconURL
+		// HTML 取得失敗 → 古い挙動 (`/favicon.ico` 決め打ち) でフォールバック。
+		// frontend は 404 時に非表示にするだけで害は小さい。
+		return "", "https://" + host + "/favicon.ico"
 	}
-	iconURL = parseIconFromHTML(body, rootURL)
+
+	icon, appleTouchIcon := parseIconLinks(body, rootURL)
+
+	// iconUrl (高解像度): apple-touch-icon があればそちらが綺麗なので優先。
+	iconURL = firstNonEmptyStr(appleTouchIcon, icon)
+
+	// faviconUrl: HTML の <link rel="icon"> を最優先 (Iceshrimp.NET 等の
+	// 非 .ico 慣習に追従)、無ければ /favicon.ico に決め打ちフォールバック。
+	// 256 文字超の icon URL は DB 制約で書けないので、その場合も
+	// hardcode フォールバックに落とす。
+	defaultFavicon := "https://" + host + "/favicon.ico"
+	if icon != "" && len(icon) <= maxInstanceURLLen {
+		faviconURL = icon
+	} else {
+		faviconURL = defaultFavicon
+	}
 	return iconURL, faviconURL
 }
 
-// parseIconFromHTML finds the first <link rel="icon"> or <link rel="apple-touch-icon">
-// in doc and returns its href resolved against pageURL. 解析失敗や該当なしは空文字。
-func parseIconFromHTML(body []byte, pageURL string) string {
+// parseIconLinks walks the HTML document and returns absolute URLs for
+// the first `<link rel="icon">` and the first `<link rel="apple-touch-icon">`
+// (or their precomposed/shortcut equivalents). Either string may be empty
+// when the corresponding tag is absent. URL は pageURL を base にして解決。
+func parseIconLinks(body []byte, pageURL string) (icon, appleTouchIcon string) {
 	doc, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	base, err := url.Parse(pageURL)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	var icon, appleTouchIcon string
+	var iconHref, appleHref string
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "link" {
@@ -182,12 +209,12 @@ func parseIconFromHTML(body []byte, pageURL string) string {
 			if href != "" {
 				switch rel {
 				case "icon", "shortcut icon":
-					if icon == "" {
-						icon = href
+					if iconHref == "" {
+						iconHref = href
 					}
 				case "apple-touch-icon", "apple-touch-icon-precomposed":
-					if appleTouchIcon == "" {
-						appleTouchIcon = href
+					if appleHref == "" {
+						appleHref = href
 					}
 				}
 			}
@@ -197,13 +224,17 @@ func parseIconFromHTML(body []byte, pageURL string) string {
 		}
 	}
 	walk(doc)
+	return resolveAgainstBase(iconHref, base), resolveAgainstBase(appleHref, base)
+}
 
-	// 本家優先順位に倣い、appleTouchIconの方が高解像度で綺麗なため優先する。
-	chosen := firstNonEmptyStr(appleTouchIcon, icon)
-	if chosen == "" {
+// resolveAgainstBase resolves href relative to base. Returns empty string
+// when href is empty or unparseable so callers can fall through to other
+// sources without having to nil-check error returns separately.
+func resolveAgainstBase(href string, base *url.URL) string {
+	if href == "" {
 		return ""
 	}
-	ref, err := url.Parse(chosen)
+	ref, err := url.Parse(href)
 	if err != nil {
 		return ""
 	}
@@ -230,7 +261,7 @@ func firstNonEmptyStr(vals ...string) string {
 
 // fetchDiscovery fetches /.well-known/nodeinfo and decodes the link list.
 func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, error) {
-	body, err := s.fetcher.FetchObjectUnsigned("https://" + host + "/.well-known/nodeinfo")
+	body, err := s.fetcher.FetchJSON("https://" + host + "/.well-known/nodeinfo")
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +274,7 @@ func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, 
 
 // fetchDocument fetches the actual nodeinfo document.
 func (s *FetchMetadataService) fetchDocument(href string) (*nodeinfoDocument, error) {
-	body, err := s.fetcher.FetchObjectUnsigned(href)
+	body, err := s.fetcher.FetchJSON(href)
 	if err != nil {
 		return nil, err
 	}

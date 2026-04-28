@@ -93,6 +93,14 @@ func (f *APFetcher) FetchHTML(uri string) ([]byte, error) {
 	return f.client.FetchHTML(uri)
 }
 
+// FetchJSON performs an unsigned GET with Accept: application/json, */*
+// for non-AP discovery endpoints (specifically nodeinfo, #474). Iceshrimp.NET
+// 等の strict 実装は AP MIME を Accept に渡すと 406 を返すため、nodeinfo
+// パスでは plain JSON を要求する必要がある。
+func (f *APFetcher) FetchJSON(uri string) ([]byte, error) {
+	return f.client.FetchUnsignedJSON(uri)
+}
+
 // shouldFallbackToUnsigned reports whether an error from a signed fetch
 // warrants retrying without the signature. AP の authorized-fetch 系の peer
 // は鍵検証失敗で 401 / 403 を返すので、この 2 つだけフォールバック対象に

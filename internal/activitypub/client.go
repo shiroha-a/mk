@@ -138,6 +138,37 @@ func (c *Client) FetchUnsigned(url string) ([]byte, error) {
 	return safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
 }
 
+// FetchUnsignedJSON performs an unsigned GET with `Accept: application/json, */*`.
+// Used for non-AP discovery endpoints that speak plain JSON (notably
+// `/.well-known/nodeinfo` and the nodeinfo 2.x documents themselves).
+//
+// Sending the AP-only Accept (`application/activity+json, application/ld+json`)
+// works for Misskey TS but is rejected by stricter implementations like
+// Iceshrimp.NET, which return a 406 Not Acceptable JSON envelope (#474).
+// Splitting this into a separate method keeps FetchUnsigned (= AP object
+// fetch) free of fallback logic and makes the request semantics explicit
+// at the call site.
+func (c *Client) FetchUnsignedJSON(url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json, */*")
+	if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		drainBody(resp)
+		return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
+	}
+	return safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+}
+
 // drainBodyLimit caps how many bytes `drainBody` is willing to read from
 // a non-2xx response before giving up on connection reuse. Most error
 // payloads (Misskey/Mastodon JSON error envelope, plain-text 4xx page) fit
