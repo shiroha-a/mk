@@ -181,3 +181,36 @@ func TestFailedToResolveRemoteUser(t *testing.T) {
 	assert.Equal(t, "FAILED_TO_RESOLVE_REMOTE_USER", errObj["code"])
 	assert.Equal(t, UUIDFailedToResolveRemoteUser, errObj["id"])
 }
+
+// #698 で追加したヘルパー: 2FA フロー (register-key / key-done /
+// remove-key / update-key / password-less / done) で利用される。
+// upstream に対応 ApiError が無い code (INVALID_TOKEN /
+// REGISTRATION_FAILED) は mk-go 固有 UUID、NO_SUCH_KEY /
+// NO_SECURITY_KEY は upstream UUID (typo 含む) を流用する。
+
+func TestInvalidToken(t *testing.T) {
+	errObj := InvalidToken()["error"].(map[string]any)
+	assert.Equal(t, "INVALID_TOKEN", errObj["code"])
+	assert.Equal(t, UUIDInvalidToken, errObj["id"])
+	assert.Equal(t, "Invalid token.", errObj["message"])
+}
+
+func TestRegistrationFailed(t *testing.T) {
+	errObj := RegistrationFailed()["error"].(map[string]any)
+	assert.Equal(t, "REGISTRATION_FAILED", errObj["code"])
+	assert.Equal(t, UUIDRegistrationFailed, errObj["id"])
+}
+
+func TestNoSuchKey(t *testing.T) {
+	errObj := NoSuchKey()["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_KEY", errObj["code"])
+	assert.Equal(t, UUIDNoSuchKey, errObj["id"])
+}
+
+func TestNoSecurityKey(t *testing.T) {
+	// upstream は singular `NO_SECURITY_KEY` (#698)。
+	// 旧 mk-go の `NO_SECURITY_KEYS` (plural) からのリネームを guard する。
+	errObj := NoSecurityKey()["error"].(map[string]any)
+	assert.Equal(t, "NO_SECURITY_KEY", errObj["code"])
+	assert.Equal(t, UUIDNoSecurityKey, errObj["id"])
+}
