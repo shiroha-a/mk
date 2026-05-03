@@ -126,6 +126,91 @@ func TestVote_MultipleAllowed(t *testing.T) {
 	assert.Equal(t, int64(1), pollRepo.Polls["n1"].Votes[1])
 }
 
+// stubEventPub captures pollVoted events so we can assert the streaming path.
+type stubEventPub struct {
+	noteID    string
+	eventType string
+	body      any
+	calls     int
+}
+
+func (s *stubEventPub) PublishToNoteStream(noteID, eventType string, body any) {
+	s.calls++
+	s.noteID = noteID
+	s.eventType = eventType
+	s.body = body
+}
+
+// stubFedHook captures federation hook fan-out so we can assert local vs
+// remote routing.
+type stubFedHook struct {
+	voteCalls   int
+	updateCalls int
+	lastChoice  int
+	lastName    string
+	lastTarget  string
+}
+
+func (s *stubFedHook) OnVote(voter *model.User, target *model.Note, choice int, choiceName string) {
+	s.voteCalls++
+	s.lastChoice = choice
+	s.lastName = choiceName
+	s.lastTarget = target.ID
+}
+func (s *stubFedHook) OnLocalPollUpdated(target *model.Note) {
+	s.updateCalls++
+	s.lastTarget = target.ID
+}
+
+func TestVote_PublishesPollVotedEvent(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
+	pub := &stubEventPub{}
+	svc.SetEventPublisher(pub)
+
+	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n1", 1))
+	assert.Equal(t, 1, pub.calls)
+	assert.Equal(t, "n1", pub.noteID)
+	assert.Equal(t, "pollVoted", pub.eventType)
+	body := pub.body.(map[string]any)
+	assert.Equal(t, 1, body["choice"])
+	assert.Equal(t, "viewer", body["userId"])
+}
+
+func TestVote_LocalPollFiresOnLocalPollUpdated(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n_local", "author", false, nil)
+	// note.UserHost is nil (default) -> local
+	hook := &stubFedHook{}
+	svc.SetFederationHook(hook)
+
+	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n_local", 0))
+	assert.Equal(t, 0, hook.voteCalls, "local poll must NOT trigger OnVote")
+	assert.Equal(t, 1, hook.updateCalls, "local poll vote must trigger OnLocalPollUpdated")
+	assert.Equal(t, "n_local", hook.lastTarget)
+}
+
+func TestVote_RemotePollFiresOnVote(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	host := "remote.example"
+	noteRepo.Notes["n_remote"] = &model.Note{
+		ID: "n_remote", UserID: "remoteUser", Visibility: model.NoteVisibilityPublic,
+		HasPoll: true, UserHost: &host,
+	}
+	pollRepo.Polls["n_remote"] = &model.Poll{
+		NoteID: "n_remote", Multiple: false,
+		Choices: pq.StringArray{"X", "Y"}, Votes: pq.Int64Array{0, 0},
+	}
+	hook := &stubFedHook{}
+	svc.SetFederationHook(hook)
+
+	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n_remote", 1))
+	assert.Equal(t, 1, hook.voteCalls, "remote poll vote must trigger OnVote")
+	assert.Equal(t, 0, hook.updateCalls, "remote poll vote must NOT trigger OnLocalPollUpdated")
+	assert.Equal(t, 1, hook.lastChoice)
+	assert.Equal(t, "Y", hook.lastName)
+}
+
 // failingPollVoteRepo lets us trigger CountByUserAndNote / Create errors.
 type failingPollVoteRepo struct {
 	*testutil.MockPollVoteRepository

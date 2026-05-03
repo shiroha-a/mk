@@ -406,6 +406,126 @@ func TestIngestNote_NoteCreateError(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// stubPollVoter records IngestNote → AP poll vote routing.
+type stubPollVoter struct {
+	calls []struct {
+		User   *model.User
+		NoteID string
+		Choice int
+	}
+	err error
+}
+
+func (s *stubPollVoter) Vote(user *model.User, noteID string, choice int) error {
+	s.calls = append(s.calls, struct {
+		User   *model.User
+		NoteID string
+		Choice int
+	}{user, noteID, choice})
+	return s.err
+}
+
+// TestIngestNote_APVoteRoutedToPollService covers the #690 fix where an
+// inbound AP Note with `name` + `inReplyTo` to a poll-bearing local note is
+// treated as a vote and routed to pollService.Vote, not persisted as a
+// reply note.
+func TestIngestNote_APVoteRoutedToPollService(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["pollNote"] = &model.Note{ID: "pollNote", UserID: "author", HasPoll: true, Visibility: model.NoteVisibilityPublic}
+	pollRepo := testutil.NewMockPollRepository()
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID: "pollNote", Choices: []string{"Apple", "Banana"}, Votes: []int64{0, 0},
+	}))
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	r.SetPollRepo(pollRepo)
+	voter := &stubPollVoter{}
+	r.SetPollVoter(voter)
+
+	body := []byte(`{
+		"id": "https://remote.example/users/alice#votes/pollNote",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"name": "Banana",
+		"inReplyTo": "https://example.com/notes/pollNote",
+		"to": ["https://example.com/users/author"]
+	}`)
+	got, err := r.IngestNote(body)
+	require.NoError(t, err)
+	assert.Nil(t, got, "AP vote must NOT create a note (caller skips fanout/notification)")
+	require.Len(t, voter.calls, 1, "pollVoter.Vote must be called exactly once")
+	assert.Equal(t, "pollNote", voter.calls[0].NoteID)
+	assert.Equal(t, 1, voter.calls[0].Choice, "Banana = choice index 1")
+}
+
+// TestIngestNote_APVoteUnknownChoiceFallsThrough verifies that if the
+// `name` does NOT match any poll choice, IngestNote falls through to
+// regular reply processing instead of swallowing the note silently.
+func TestIngestNote_APVoteUnknownChoiceFallsThrough(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["pollNote"] = &model.Note{ID: "pollNote", UserID: "author", HasPoll: true, Visibility: model.NoteVisibilityPublic}
+	pollRepo := testutil.NewMockPollRepository()
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID: "pollNote", Choices: []string{"Apple", "Banana"}, Votes: []int64{0, 0},
+	}))
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	r.SetPollRepo(pollRepo)
+	voter := &stubPollVoter{}
+	r.SetPollVoter(voter)
+
+	body := []byte(`{
+		"id": "https://remote.example/users/alice#votes/pollNote",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"name": "Cherry",
+		"inReplyTo": "https://example.com/notes/pollNote",
+		"to": ["https://example.com/users/author"]
+	}`)
+	got, err := r.IngestNote(body)
+	require.NoError(t, err)
+	require.NotNil(t, got, "unmatched choice falls through to reply note creation")
+	assert.Empty(t, voter.calls)
+	require.NotNil(t, got.ReplyID)
+	assert.Equal(t, "pollNote", *got.ReplyID)
+}
+
+// TestIngestNote_NormalReplyToPollNotConfusedAsVote verifies that a reply
+// note WITHOUT `name` is processed as a normal reply, not a vote.
+func TestIngestNote_NormalReplyToPollNotConfusedAsVote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["pollNote"] = &model.Note{ID: "pollNote", UserID: "author", HasPoll: true, Visibility: model.NoteVisibilityPublic}
+	pollRepo := testutil.NewMockPollRepository()
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID: "pollNote", Choices: []string{"Apple"}, Votes: []int64{0},
+	}))
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	r.SetPollRepo(pollRepo)
+	voter := &stubPollVoter{}
+	r.SetPollVoter(voter)
+
+	body := []byte(`{
+		"id": "https://remote.example/notes/normalreply",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "Just commenting on the poll",
+		"inReplyTo": "https://example.com/notes/pollNote",
+		"to": ["https://example.com/users/author"]
+	}`)
+	got, err := r.IngestNote(body)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Empty(t, voter.calls, "normal reply must not invoke pollVoter")
+	require.NotNil(t, got.ReplyID)
+}
+
 func TestIngestNote_ReplyToLocal(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()

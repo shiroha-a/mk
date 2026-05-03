@@ -528,9 +528,14 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 // PollService.deliverQuestionUpdate と同等で、配信先 instance が remote
 // follower 視点で count を最新化できる。RenderNote が既に Question 互換の
 // asPoll 出力をするので、それを wrap するだけ。
+//
+// Activity ID は `<noteURI>#updates/<RFC3339Nano>` で構成し、同一秒内に
+// 連続投票が発生した場合の Activity ID 衝突を防ぐ。受信側 instance は
+// Activity ID で idempotency dedup するため、衝突するとうしろ側 Update が
+// drop されて count が古いまま固定される (#690 review)。
 func (r *Renderer) RenderQuestionUpdate(n *model.Note, idGen id.Generator) *Update {
 	question := r.RenderNote(n, idGen)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	u := &Update{
 		Activity: Activity{
 			Object: Object{

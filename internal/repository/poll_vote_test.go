@@ -84,6 +84,49 @@ func TestPollVoteRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.ListByNoteID("a")
 	assert.Error(t, err)
+	_, err = repo.FindByUserAndNoteIDs("a", []string{"b"})
+	assert.Error(t, err)
+}
+
+// TestPollVoteRepository_FindByUserAndNoteIDs covers the batch lookup added
+// in #690 for entity.NoteFieldResolver to populate Poll.choices[i].IsVoted.
+func TestPollVoteRepository_FindByUserAndNoteIDs(t *testing.T) {
+	repo := NewPollVoteRepository(testDB)
+	user := insertTestUser(t, "u_fbun_1", "fbunuser")
+	defer cleanupUser(t, user.ID)
+	setupPollNote(t, "n_fbun_1", user.ID)
+	defer cleanupNote(t, "n_fbun_1")
+	setupPollNote(t, "n_fbun_2", user.ID)
+	defer cleanupNote(t, "n_fbun_2")
+
+	// 空入力は空 map を返す (no DB call)
+	out, err := repo.FindByUserAndNoteIDs("", []string{"x"})
+	require.NoError(t, err)
+	assert.Empty(t, out)
+	out, err = repo.FindByUserAndNoteIDs(user.ID, nil)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+
+	// 同 user が n_fbun_1 で 2 票 + n_fbun_2 で 1 票
+	require.NoError(t, repo.Create(&model.PollVote{ID: "v_fbun_1", UserID: user.ID, NoteID: "n_fbun_1", Choice: 0}))
+	require.NoError(t, repo.Create(&model.PollVote{ID: "v_fbun_2", UserID: user.ID, NoteID: "n_fbun_1", Choice: 2}))
+	require.NoError(t, repo.Create(&model.PollVote{ID: "v_fbun_3", UserID: user.ID, NoteID: "n_fbun_2", Choice: 1}))
+	defer cleanupPollVote(t, "v_fbun_1")
+	defer cleanupPollVote(t, "v_fbun_2")
+	defer cleanupPollVote(t, "v_fbun_3")
+
+	// 別 user の vote は混ざらない
+	other := insertTestUser(t, "u_fbun_2", "fbunother")
+	defer cleanupUser(t, other.ID)
+	require.NoError(t, repo.Create(&model.PollVote{ID: "v_fbun_4", UserID: other.ID, NoteID: "n_fbun_1", Choice: 1}))
+	defer cleanupPollVote(t, "v_fbun_4")
+
+	got, err := repo.FindByUserAndNoteIDs(user.ID, []string{"n_fbun_1", "n_fbun_2", "n_fbun_no_votes"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int{0, 2}, got["n_fbun_1"])
+	assert.Equal(t, []int{1}, got["n_fbun_2"])
+	_, has := got["n_fbun_no_votes"]
+	assert.False(t, has, "note with no votes must not appear in result map")
 }
 
 func TestPollRepository_FindByNoteIDAndIncrementVote(t *testing.T) {

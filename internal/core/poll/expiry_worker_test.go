@@ -184,6 +184,56 @@ func TestExpiryWorker_NotifierErrorContinuesBatch(t *testing.T) {
 	require.NotNil(t, pollRepo.Polls["n2"].NotifiedAt)
 }
 
+// TestExpiryWorker_Run_ProcessesBacklogThenStops verifies the loop runs the
+// initial tick (catching up backlog from before startup) and exits cleanly
+// when ctx is cancelled.
+func TestExpiryWorker_Run_ProcessesBacklogThenStops(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	w.interval = 50 * time.Millisecond
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool { return len(notif.calls) >= 1 },
+		2*time.Second, 10*time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not stop after ctx cancel")
+	}
+}
+
+// TestExpiryWorker_Run_NilWorkerNoOp は nil receiver / 未配線 repo の
+// Run() が即 return することを guard する (defensive: Service 構築直後で
+// 配線途中のままだった場合に goroutine が pinned しない)。
+func TestExpiryWorker_Run_NilWorkerNoOp(t *testing.T) {
+	var w *ExpiryWorker
+	w.Run(context.Background())
+	w2 := &ExpiryWorker{}
+	w2.Run(context.Background())
+}
+
+// TestNewExpiryWorker_DefaultsClampInterval covers the constructor's clamp
+// logic: 非正値の interval / batchSize は安全な default に置き換える。
+func TestNewExpiryWorker_DefaultsClampInterval(t *testing.T) {
+	w := NewExpiryWorker(nil, nil, nil, nil, nil, 0, 0)
+	require.NotNil(t, w)
+	assert.Equal(t, 60*time.Second, w.interval)
+	assert.Equal(t, 100, w.batchSize)
+
+	w2 := NewExpiryWorker(nil, nil, nil, nil, nil, -1, -1)
+	assert.Equal(t, 60*time.Second, w2.interval)
+	assert.Equal(t, 100, w2.batchSize)
+}
+
 func TestExpiryWorker_ContextCancelStopsTick(t *testing.T) {
 	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
 	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
