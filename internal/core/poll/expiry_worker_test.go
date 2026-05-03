@@ -3,6 +3,7 @@ package poll
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,20 +15,43 @@ import (
 )
 
 // recordingNotifier captures CreateInput calls so tests can verify the worker
-// dispatches `pollEnded` to the right user set.
+// dispatches `pollEnded` to the right user set. Goroutine-safe because
+// ExpiryWorker.Run の goroutine から writes が来る一方で test の assertion
+// 経路 (require.Eventually の polling) が並行読みする — `-race` 検出を
+// 防ぐため mu で保護する。
 type recordingNotifier struct {
+	mu    sync.Mutex
 	calls []notification.CreateInput
 	err   error
 }
 
 func (r *recordingNotifier) Create(_ context.Context, in notification.CreateInput) (*notification.Notification, error) {
+	r.mu.Lock()
 	r.calls = append(r.calls, in)
-	if r.err != nil {
-		return nil, r.err
+	err := r.err
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
 	// Notification 自体は NotifieeID を直接持たず Redis 鍵で識別するため、
 	// テストでは Type / NoteID のみ詰めて返す。
 	return &notification.Notification{Type: in.Type, NoteID: in.NoteID}, nil
+}
+
+// snapshot returns a copy of calls under the mutex so tests can iterate
+// safely without racing the writer goroutine.
+func (r *recordingNotifier) snapshot() []notification.CreateInput {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]notification.CreateInput, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+func (r *recordingNotifier) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
 }
 
 func newWorkerSetup(t *testing.T, now time.Time) (
@@ -73,11 +97,11 @@ func TestExpiryWorker_NotifiesAuthor(t *testing.T) {
 
 	require.NoError(t, w.Tick(context.Background()))
 
-	require.Len(t, notif.calls, 1)
-	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
-	assert.Equal(t, notification.TypePollEnded, notif.calls[0].Type)
-	assert.Equal(t, "n1", notif.calls[0].NoteID)
-	assert.Equal(t, "public", notif.calls[0].NoteVisibility)
+	require.Len(t, notif.snapshot(), 1)
+	assert.Equal(t, "alice", notif.snapshot()[0].NotifieeID)
+	assert.Equal(t, notification.TypePollEnded, notif.snapshot()[0].Type)
+	assert.Equal(t, "n1", notif.snapshot()[0].NoteID)
+	assert.Equal(t, "public", notif.snapshot()[0].NoteVisibility)
 	// notifiedAt is stamped so the next tick skips this poll.
 	require.NotNil(t, pollRepo.Polls["n1"].NotifiedAt)
 }
@@ -95,7 +119,7 @@ func TestExpiryWorker_NotifiesAuthorAndLocalVoters(t *testing.T) {
 	require.NoError(t, w.Tick(context.Background()))
 
 	notifiedIDs := []string{}
-	for _, c := range notif.calls {
+	for _, c := range notif.snapshot() {
 		notifiedIDs = append(notifiedIDs, c.NotifieeID)
 	}
 	assert.ElementsMatch(t, []string{"alice", "bob", "charlie"}, notifiedIDs)
@@ -111,8 +135,8 @@ func TestExpiryWorker_DedupesAuthorWhoAlsoVoted(t *testing.T) {
 
 	require.NoError(t, w.Tick(context.Background()))
 	// Only one notification despite alice being both author and voter.
-	require.Len(t, notif.calls, 1)
-	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
+	require.Len(t, notif.snapshot(), 1)
+	assert.Equal(t, "alice", notif.snapshot()[0].NotifieeID)
 }
 
 func TestExpiryWorker_SkipsRemoteVoters(t *testing.T) {
@@ -126,8 +150,8 @@ func TestExpiryWorker_SkipsRemoteVoters(t *testing.T) {
 	require.NoError(t, w.Tick(context.Background()))
 
 	// Only the local author gets a notification; remote voter is filtered.
-	require.Len(t, notif.calls, 1)
-	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
+	require.Len(t, notif.snapshot(), 1)
+	assert.Equal(t, "alice", notif.snapshot()[0].NotifieeID)
 }
 
 func TestExpiryWorker_SkipsAlreadyNotified(t *testing.T) {
@@ -140,7 +164,7 @@ func TestExpiryWorker_SkipsAlreadyNotified(t *testing.T) {
 
 	require.NoError(t, w.Tick(context.Background()))
 
-	assert.Empty(t, notif.calls, "already-notified poll must be skipped")
+	assert.Empty(t, notif.snapshot(), "already-notified poll must be skipped")
 }
 
 func TestExpiryWorker_SkipsNotYetExpired(t *testing.T) {
@@ -152,7 +176,7 @@ func TestExpiryWorker_SkipsNotYetExpired(t *testing.T) {
 
 	require.NoError(t, w.Tick(context.Background()))
 
-	assert.Empty(t, notif.calls)
+	assert.Empty(t, notif.snapshot())
 	assert.Nil(t, pollRepo.Polls["n1"].NotifiedAt)
 }
 
@@ -179,7 +203,7 @@ func TestExpiryWorker_NotifierErrorContinuesBatch(t *testing.T) {
 
 	// Notifier was called for both polls (best-effort) and both polls were
 	// stamped as notified so the next tick doesn't retry forever.
-	assert.Len(t, notif.calls, 2)
+	assert.Len(t, notif.snapshot(), 2)
 	require.NotNil(t, pollRepo.Polls["n1"].NotifiedAt)
 	require.NotNil(t, pollRepo.Polls["n2"].NotifiedAt)
 }
@@ -201,7 +225,7 @@ func TestExpiryWorker_Run_ProcessesBacklogThenStops(t *testing.T) {
 		close(done)
 	}()
 
-	require.Eventually(t, func() bool { return len(notif.calls) >= 1 },
+	require.Eventually(t, func() bool { return notif.callCount() >= 1 },
 		2*time.Second, 10*time.Millisecond)
 	cancel()
 	select {
@@ -244,5 +268,5 @@ func TestExpiryWorker_ContextCancelStopsTick(t *testing.T) {
 	cancel()
 	err := w.Tick(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
-	assert.Empty(t, notif.calls)
+	assert.Empty(t, notif.snapshot())
 }
