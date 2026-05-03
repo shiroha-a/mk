@@ -90,7 +90,7 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 	}
 
 	if !twofactor.Validate(req.Token, *profile.TwoFactorTempSecret) {
-		return c.JSON(http.StatusForbidden, apierr.Error("INVALID_TOKEN", "Invalid token.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	// バックアップコードを生成。crypto/rand 失敗は実質起きないが、起きた場合は
@@ -193,6 +193,11 @@ func (h *Handler) verify2FAToken(profile *model.UserProfile, token string) bool 
 	return twofactor.Validate(token, *profile.TwoFactorSecret)
 }
 
+// twoFAKeyNameMaxLen mirrors upstream の paramDef `name: { minLength: 1,
+// maxLength: 30 }`。frontend (`os.inputText`) も 30 文字制限を掛けているが、
+// API 直叩き経路の defense-in-depth として backend でも enforce する。
+const twoFAKeyNameMaxLen = 30
+
 // TwoFARegisterKey handles POST /api/i/2fa/register-key.
 // 1 段階目: パスワード + 2FA token 認証 + WebAuthn registration challenge を返す。
 // レスポンスは Misskey TS upstream と同じく PublicKeyCredentialCreationOptions
@@ -200,6 +205,11 @@ func (h *Handler) verify2FAToken(profile *model.UserProfile, token string) bool 
 //
 // 前提: ユーザーは既に TOTP で 2FA を有効化済みであること。security key は
 // 2FA の上に重ねる factor なので未有効化なら TWO_FACTOR_NOT_ENABLED を返す。
+//
+// 認証順序: requireWebAuthn で password を先に検証してから 2FA token を verify
+// する。upstream は逆順 (token → password) だが、片方だけ正しい状態の検出可否は
+// 対称なので情報リーク的に等価。`requireWebAuthn` を共有する都合で password 先に
+// 揃えている。
 func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	var req struct {
 		Password string `json:"password"`
@@ -213,7 +223,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 		return nil
 	}
 	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.Error("INVALID_TOKEN", "Invalid 2FA token.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {
 		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "bf32b864-449b-47b8-974e-f9a5468546f1"))
@@ -223,7 +233,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	creation, err := h.webauthnSvc.BeginRegistrationPrimary(c.Request().Context(), user, existing)
+	creation, err := h.webauthnSvc.BeginRegistration(c.Request().Context(), user, existing)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to begin registration.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -237,7 +247,9 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 // UserSecurityKey 行を作成する。リクエストボディは upstream 互換の
 // `{ password, token, name, credential }`。`credential` は browser の
 // `PublicKeyCredential.toJSON()` 出力 (ParsedCredentialCreationData フォーマット)。
-// session は user 単位の primary slot に保存されているので sessionId は不要 (#698)。
+// session は user 単位で 1 件保持されているので sessionId は不要 (#698)。
+//
+// 認証順序は TwoFARegisterKey と同じ (password → 2FA token)。
 func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	var req struct {
 		Password   string          `json:"password"`
@@ -251,12 +263,15 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	if req.Name == "" {
 		req.Name = "Security Key"
 	}
+	if len(req.Name) > twoFAKeyNameMaxLen {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
 	user, profile, ok := h.requireWebAuthn(c, req.Password)
 	if !ok {
 		return nil
 	}
 	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.Error("INVALID_TOKEN", "Invalid 2FA token.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {
 		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "798d6847-b1ed-4f9c-b1f9-163c42655995"))
@@ -273,9 +288,9 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "invalid credential payload.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	cred, err := h.webauthnSvc.FinishRegistrationPrimary(c.Request().Context(), user, existing, httpReq)
+	cred, err := h.webauthnSvc.FinishRegistration(c.Request().Context(), user, existing, httpReq)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("REGISTRATION_FAILED", "Failed to finish registration.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusForbidden, apierr.RegistrationFailed())
 	}
 
 	key := twofactor.CredentialToModel(cred, user.ID, req.Name)
@@ -310,7 +325,7 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 
 	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "Key not found.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
 	}
 
 	if remaining, err := h.securityKeyRepo.CountByUser(user.ID); err == nil && remaining == 0 {
@@ -338,7 +353,7 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 		return nil
 	}
 	if err := h.securityKeyRepo.UpdateName(req.CredentialID, user.ID, req.Name); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "Key not found.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -360,7 +375,7 @@ func (h *Handler) TwoFAPasswordLess(c echo.Context) error {
 	}
 	if req.Value {
 		if n, err := h.securityKeyRepo.CountByUser(user.ID); err != nil || n == 0 {
-			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SECURITY_KEYS", "Register at least one security key first.", "00000000-0000-0000-0000-000000000000"))
+			return c.JSON(http.StatusBadRequest, apierr.NoSecurityKey())
 		}
 	}
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{

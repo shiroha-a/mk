@@ -126,26 +126,27 @@ func (u *userAdapter) WebAuthnCredentials() []webauthn.Credential {
 
 // --- session storage ------------------------------------------------------
 
-// sessionKey returns the Redis key used to stash a SessionData blob between
-// begin and finish. The user id binds the session to one account so a stolen
-// sessionID alone cannot be replayed against a different victim.
-func sessionKey(userID, sessionID string) string {
+// loginSessionKey returns the Redis key used to stash a SessionData blob
+// between BeginLogin and FinishLogin. The user id binds the session to one
+// account so a stolen sessionID alone cannot be replayed against a different
+// victim. Login flow needs a sessionID round-trip because the same user may
+// have multiple in-flight assertion challenges (e.g., browser tab + mobile).
+func loginSessionKey(userID, sessionID string) string {
 	return "twofa:webauthn:" + userID + ":" + sessionID
 }
 
-// primarySessionKey is the Redis key for the upstream-compatible
+// registrationSessionKey is the Redis key for the upstream-compatible
 // single-in-flight-per-user mode used by /api/i/2fa/{register-key,key-done}.
 // Misskey TS の WebAuthnService と同じく client は session id を round-trip
 // しないため user 単位で 1 件の challenge だけ保持する。新規 challenge は
-// 既存を上書きする (#698)。login flow など session id round-trip が必要な
-// 経路は引き続き sessionKey() の方を使う。
-func primarySessionKey(userID string) string {
-	return "twofa:webauthn:" + userID + ":primary"
+// 既存を上書きする (#698)。
+func registrationSessionKey(userID string) string {
+	return "twofa:webauthn:" + userID + ":registration"
 }
 
-// putSession serializes the SessionData and stores it under a freshly generated
-// random session id with TTL.
-func (s *WebAuthnService) putSession(ctx context.Context, userID string, sd *webauthn.SessionData) (string, error) {
+// putLoginSession serializes the SessionData and stores it under a freshly
+// generated random session id with TTL.
+func (s *WebAuthnService) putLoginSession(ctx context.Context, userID string, sd *webauthn.SessionData) (string, error) {
 	if s == nil || s.redis == nil {
 		return "", ErrWebAuthnNotConfigured
 	}
@@ -157,18 +158,18 @@ func (s *WebAuthnService) putSession(ctx context.Context, userID string, sd *web
 	if err != nil {
 		return "", err
 	}
-	if err := s.redis.Set(ctx, sessionKey(userID, id), raw, webAuthnSessionTTL).Err(); err != nil {
+	if err := s.redis.Set(ctx, loginSessionKey(userID, id), raw, webAuthnSessionTTL).Err(); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-// takeSession loads-and-deletes a SessionData blob (single-use).
-func (s *WebAuthnService) takeSession(ctx context.Context, userID, sessionID string) (*webauthn.SessionData, error) {
+// takeLoginSession loads-and-deletes a SessionData blob (single-use).
+func (s *WebAuthnService) takeLoginSession(ctx context.Context, userID, sessionID string) (*webauthn.SessionData, error) {
 	if s == nil || s.redis == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
-	key := sessionKey(userID, sessionID)
+	key := loginSessionKey(userID, sessionID)
 	raw, err := s.redis.GetDel(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -199,37 +200,15 @@ var readRandom = cryptorand.Read
 
 // --- public API -----------------------------------------------------------
 
-// BeginRegistration starts a new credential registration. Returns the
-// CredentialCreation options (to be JSON-marshalled and shipped to the
-// browser) and a sessionID that the caller must round-trip back on the
-// finish step.
-func (s *WebAuthnService) BeginRegistration(ctx context.Context, user *model.User, existing []*model.UserSecurityKey) (*protocol.CredentialCreation, string, error) {
-	if s == nil || s.wa == nil {
-		return nil, "", ErrWebAuthnNotConfigured
-	}
-	adapter := &userAdapter{user: user, keys: existing}
-	creation, sd, err := s.wa.BeginRegistration(adapter)
-	if err != nil {
-		return nil, "", err
-	}
-	sid, err := s.putSession(ctx, user.ID, sd)
-	if err != nil {
-		return nil, "", err
-	}
-	return creation, sid, nil
-}
-
-// BeginRegistrationPrimary is the upstream-compatible variant of
-// BeginRegistration that stores the SessionData under a fixed per-user key
-// (no session id round-trip). Used by /api/i/2fa/register-key (#698).
-// Returns only the CredentialCreation options; no opaque sessionID for the
-// caller to track.
+// BeginRegistration starts a new credential registration. The SessionData
+// is stored under a fixed per-user key (no session id round-trip), matching
+// Misskey TS upstream の WebAuthnService.initiateRegistration (#698)。
 //
 // authenticatorSelection は Misskey TS upstream (`@simplewebauthn/server`) と
 // 同じく residentKey=required / userVerification=preferred を要求する。これが
 // 無いと一部の authenticator + browser 組合せ (特に passkey 経由の platform
 // authenticator) でダイアログは表示されるが credential が返らないケースがある。
-func (s *WebAuthnService) BeginRegistrationPrimary(ctx context.Context, user *model.User, existing []*model.UserSecurityKey) (*protocol.CredentialCreation, error) {
+func (s *WebAuthnService) BeginRegistration(ctx context.Context, user *model.User, existing []*model.UserSecurityKey) (*protocol.CredentialCreation, error) {
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
@@ -241,21 +220,21 @@ func (s *WebAuthnService) BeginRegistrationPrimary(ctx context.Context, user *mo
 	if err != nil {
 		return nil, err
 	}
-	if err := s.putPrimarySession(ctx, user.ID, sd); err != nil {
+	if err := s.putRegistrationSession(ctx, user.ID, sd); err != nil {
 		return nil, err
 	}
 	return creation, nil
 }
 
-// FinishRegistrationPrimary completes the upstream-compatible registration
-// flow started by BeginRegistrationPrimary. The SessionData is loaded by
-// user id alone (no client-supplied sessionID), matching Misskey TS
-// WebAuthnService (#698).
-func (s *WebAuthnService) FinishRegistrationPrimary(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, req *http.Request) (*webauthn.Credential, error) {
+// FinishRegistration verifies the registration response from the browser and
+// returns a Credential ready to be persisted as a UserSecurityKey row. The
+// SessionData is loaded by user id alone (no client-supplied sessionID),
+// matching Misskey TS WebAuthnService.verifyRegistration (#698).
+func (s *WebAuthnService) FinishRegistration(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, req *http.Request) (*webauthn.Credential, error) {
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
-	sd, err := s.takePrimarySession(ctx, user.ID)
+	sd, err := s.takeRegistrationSession(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +246,9 @@ func (s *WebAuthnService) FinishRegistrationPrimary(ctx context.Context, user *m
 	return cred, nil
 }
 
-// putPrimarySession overwrites any existing primary challenge so a fresh
-// register-key call after an abandoned attempt always works.
-func (s *WebAuthnService) putPrimarySession(ctx context.Context, userID string, sd *webauthn.SessionData) error {
+// putRegistrationSession overwrites any existing registration challenge so a
+// fresh register-key call after an abandoned attempt always works.
+func (s *WebAuthnService) putRegistrationSession(ctx context.Context, userID string, sd *webauthn.SessionData) error {
 	if s == nil || s.redis == nil {
 		return ErrWebAuthnNotConfigured
 	}
@@ -277,15 +256,16 @@ func (s *WebAuthnService) putPrimarySession(ctx context.Context, userID string, 
 	if err != nil {
 		return err
 	}
-	return s.redis.Set(ctx, primarySessionKey(userID), raw, webAuthnSessionTTL).Err()
+	return s.redis.Set(ctx, registrationSessionKey(userID), raw, webAuthnSessionTTL).Err()
 }
 
-// takePrimarySession loads-and-deletes the primary session blob (single-use).
-func (s *WebAuthnService) takePrimarySession(ctx context.Context, userID string) (*webauthn.SessionData, error) {
+// takeRegistrationSession loads-and-deletes the registration session blob
+// (single-use).
+func (s *WebAuthnService) takeRegistrationSession(ctx context.Context, userID string) (*webauthn.SessionData, error) {
 	if s == nil || s.redis == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
-	raw, err := s.redis.GetDel(ctx, primarySessionKey(userID)).Bytes()
+	raw, err := s.redis.GetDel(ctx, registrationSessionKey(userID)).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, ErrWebAuthnSessionNotFound
@@ -297,24 +277,6 @@ func (s *WebAuthnService) takePrimarySession(ctx context.Context, userID string)
 		return nil, err
 	}
 	return &sd, nil
-}
-
-// FinishRegistration verifies the registration response from the browser and
-// returns a Credential ready to be persisted as a UserSecurityKey row.
-func (s *WebAuthnService) FinishRegistration(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, sessionID string, req *http.Request) (*webauthn.Credential, error) {
-	if s == nil || s.wa == nil {
-		return nil, ErrWebAuthnNotConfigured
-	}
-	sd, err := s.takeSession(ctx, user.ID, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	adapter := &userAdapter{user: user, keys: existing}
-	cred, err := s.wa.FinishRegistration(adapter, *sd, req)
-	if err != nil {
-		return nil, err
-	}
-	return cred, nil
 }
 
 // BeginLogin starts an authentication assertion challenge for the given user.
@@ -329,7 +291,7 @@ func (s *WebAuthnService) BeginLogin(ctx context.Context, user *model.User, exis
 	if err != nil {
 		return nil, "", err
 	}
-	sid, err := s.putSession(ctx, user.ID, sd)
+	sid, err := s.putLoginSession(ctx, user.ID, sd)
 	if err != nil {
 		return nil, "", err
 	}
@@ -343,7 +305,7 @@ func (s *WebAuthnService) FinishLogin(ctx context.Context, user *model.User, exi
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
-	sd, err := s.takeSession(ctx, user.ID, sessionID)
+	sd, err := s.takeLoginSession(ctx, user.ID, sessionID)
 	if err != nil {
 		return nil, err
 	}

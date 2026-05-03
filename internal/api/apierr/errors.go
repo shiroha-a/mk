@@ -58,6 +58,27 @@ const (
 
 	// UUID for users/show (third_party/misskey/.../endpoints/users/show.ts).
 	UUIDFailedToResolveRemoteUser = "ef7b9be4-9cba-4e6f-ab41-90ed171c7d3c"
+
+	// UUIDInvalidToken は 2FA token 検証失敗 (i/2fa/{done,register-key,key-done})。
+	// upstream は plain `Error('authentication failed')` で UUID 無しなので
+	// mk-go 固有の安定 UUID を発番する (#673 Phase B / #698)。
+	UUIDInvalidToken = "f0fc0d2f-9805-432e-a69e-9898a4251660"
+
+	// UUIDRegistrationFailed は WebAuthn 登録失敗 (i/2fa/key-done)。
+	// upstream は verifyRegistration の throw を ApiError でなく素の Error で
+	// 投げる (UUID 無し) ので mk-go 固有 UUID。
+	UUIDRegistrationFailed = "1ddd78c8-1c1b-4077-a202-a64b16cebca1"
+
+	// UUIDNoSuchKey は upstream `i/2fa/update-key` の `noSuchKey` UUID。
+	// note: upstream の文字列 (`f9c5467f-d492-4d3c-9a8g-a70dacc86512`) は
+	// 4 セグメント目に `g` を含んでおり厳密には valid UUID ではないが、
+	// frontend / クライアントが文字列マッチで lookup する可能性があるので
+	// upstream の typo をそのまま採用する (mk-go 側で勝手に矯正しない)。
+	UUIDNoSuchKey = "f9c5467f-d492-4d3c-9a8g-a70dacc86512"
+
+	// UUIDNoSecurityKey は upstream `i/2fa/password-less` の `noKey` UUID。
+	// upstream typo (`9a8g`) を保持する理由は UUIDNoSuchKey と同じ。
+	UUIDNoSecurityKey = "f9c54d7f-d4c2-4d3c-9a8g-a70daac86512"
 )
 
 // InvalidParam returns a 400 INVALID_PARAM error response. The optional
@@ -203,4 +224,29 @@ func FailedToResolveRemoteUser() map[string]any {
 // RateLimitExceeded returns a 429 RATE_LIMIT_EXCEEDED error response.
 func RateLimitExceeded() map[string]any {
 	return Error("RATE_LIMIT_EXCEEDED", "Rate limit exceeded. Please try again later.", UUIDRateLimitExceeded)
+}
+
+// InvalidToken returns a 403 INVALID_TOKEN error response. Used by 2FA flows
+// when the supplied TOTP / backup code does not authenticate the user.
+func InvalidToken() map[string]any {
+	return Error("INVALID_TOKEN", "Invalid token.", UUIDInvalidToken)
+}
+
+// RegistrationFailed returns a 403 REGISTRATION_FAILED response. Used by
+// /api/i/2fa/key-done when the WebAuthn attestation does not verify.
+func RegistrationFailed() map[string]any {
+	return Error("REGISTRATION_FAILED", "Failed to finish registration.", UUIDRegistrationFailed)
+}
+
+// NoSuchKey returns a 404 NO_SUCH_KEY error response. Used by 2FA security
+// key management endpoints when the credentialId is not owned by the caller.
+func NoSuchKey() map[string]any {
+	return Error("NO_SUCH_KEY", "No such key.", UUIDNoSuchKey)
+}
+
+// NoSecurityKey returns a 400 NO_SECURITY_KEY response. Used by
+// /api/i/2fa/password-less when the user has no security key registered yet.
+// Upstream uses the singular `NO_SECURITY_KEY` code (not plural).
+func NoSecurityKey() map[string]any {
+	return Error("NO_SECURITY_KEY", "No security key.", UUIDNoSecurityKey)
 }

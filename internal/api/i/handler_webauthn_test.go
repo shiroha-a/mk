@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
+	"github.com/pquerna/otp/totp"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -16,14 +18,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// enableTOTP marks 2FA as enabled and registers a single backup code so test
-// callers can pass `"backup1"` as the 2FA token without dealing with the
-// time-window-dependent TOTP code path. (#698 で register-key / key-done が
-// 2FA token を要求するようになったため。)
-func enableTOTP(repo *testutil.MockUserRepository, uid string) {
+// enableTwoFactorWithBackupCodes marks 2FA as enabled and registers a known
+// backup code list so test callers can pass `"backup1"` as the 2FA token
+// without dealing with TOTP (which depends on real time windows). For tests
+// that need to exercise the TOTP code path specifically, use
+// enableTwoFactorWithTOTP instead. (#698)
+func enableTwoFactorWithBackupCodes(repo *testutil.MockUserRepository, uid string) {
 	p := repo.Profiles[uid]
 	p.TwoFactorEnabled = true
 	p.TwoFactorBackupSecret = pq.StringArray{"backup1", "backup2"}
+}
+
+// enableTwoFactorWithTOTP generates a fresh TOTP secret, stores it on the
+// profile, and returns it so the caller can compute valid codes via
+// totp.GenerateCode. backup codes are not populated, so the verify path is
+// guaranteed to go through TOTP.Validate (no backup-code shortcut).
+func enableTwoFactorWithTOTP(t *testing.T, repo *testutil.MockUserRepository, uid string) string {
+	t.Helper()
+	secret, _, err := twofactor.GenerateSecret("Misskey", uid)
+	require.NoError(t, err)
+	p := repo.Profiles[uid]
+	p.TwoFactorEnabled = true
+	p.TwoFactorSecret = &secret
+	p.TwoFactorBackupSecret = nil
+	return secret
 }
 
 // この test file は WebAuthn 関連 5 ハンドラの validation / wiring を網羅する。
@@ -181,7 +199,7 @@ func TestTwoFARegisterKey_TwoFactorNotEnabled(t *testing.T) {
 func TestTwoFARegisterKey_InvalidToken(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
-	enableTOTP(repo, "u1")
+	enableTwoFactorWithBackupCodes(repo, "u1")
 	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass","token":"wrong"}`, user)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
@@ -190,7 +208,7 @@ func TestTwoFARegisterKey_InvalidToken(t *testing.T) {
 func TestTwoFARegisterKey_Success(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
-	enableTOTP(repo, "u1")
+	enableTwoFactorWithBackupCodes(repo, "u1")
 	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass","token":"backup1"}`, user)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	// upstream 互換: PublicKeyCredentialCreationOptions そのものを返す
@@ -201,6 +219,18 @@ func TestTwoFARegisterKey_Success(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "sessionId")
 	// backup code が消費されている
 	assert.Equal(t, pq.StringArray{"backup2"}, repo.Profiles["u1"].TwoFactorBackupSecret)
+}
+
+func TestTwoFARegisterKey_TOTPSuccess(t *testing.T) {
+	// TOTP 直接検証経路 (verify2FAToken の non-backup-code 分岐) のカバレッジを確保。
+	h, repo, _ := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	secret := enableTwoFactorWithTOTP(t, repo, "u1")
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass","token":"`+code+`"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "challenge")
 }
 
 // --- TwoFAKeyDone ---
@@ -230,7 +260,7 @@ func TestTwoFAKeyDone_TwoFactorNotEnabled(t *testing.T) {
 func TestTwoFAKeyDone_InvalidToken(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
-	enableTOTP(repo, "u1")
+	enableTwoFactorWithBackupCodes(repo, "u1")
 	rec := postExtra(h.TwoFAKeyDone, `{"password":"pass","token":"wrong","credential":{"id":"x"}}`, user)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
@@ -239,10 +269,22 @@ func TestTwoFAKeyDone_InvalidToken(t *testing.T) {
 func TestTwoFAKeyDone_FailureBranch(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
-	enableTOTP(repo, "u1")
-	// 不正な attestation → primary session も無いので FinishRegistration が失敗 → 403
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	// 不正な attestation → registration session も無いので FinishRegistration が失敗 → 403
 	rec := postExtra(h.TwoFAKeyDone, `{"password":"pass","token":"backup1","credential":{"id":"x","rawId":"x","type":"public-key","response":{"attestationObject":"","clientDataJSON":""}}}`, user)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestTwoFAKeyDone_NameTooLong(t *testing.T) {
+	// upstream は paramDef で maxLength=30 を強制している。defense-in-depth で
+	// API 直叩き経路でも backend 側が拒否することを確認。
+	h, repo, _ := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	longName := "this-name-is-far-longer-than-the-maximum-allowed-30-chars"
+	body := `{"password":"pass","token":"backup1","name":"` + longName + `","credential":{"id":"x"}}`
+	rec := postExtra(h.TwoFAKeyDone, body, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
 }
 
 // --- TwoFARemoveKey ---
