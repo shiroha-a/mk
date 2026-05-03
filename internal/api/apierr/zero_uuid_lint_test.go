@@ -31,7 +31,14 @@ func TestZeroUUIDLint(t *testing.T) {
 	}
 
 	pendingExceptions := map[string]int{
-		"api/i/handler_2fa.go":        5, // INVALID_TOKEN / REGISTRATION_FAILED / NO_SUCH_KEY x2 / NO_SECURITY_KEYS
+		// TwoFADone INVALID_TOKEN / TwoFARegisterKey INVALID_TOKEN /
+		// TwoFAKeyDone INVALID_TOKEN / TwoFAKeyDone REGISTRATION_FAILED /
+		// TwoFARemoveKey NO_SUCH_KEY / TwoFAUpdateKey NO_SUCH_KEY /
+		// TwoFAPasswordLess NO_SECURITY_KEYS。upstream の register-key /
+		// key-done は 2FA 失敗時に `new Error('authentication failed')` を
+		// 投げる (ApiError でないので UUID 無し) ので、こちら側でも
+		// upstream UUID と紐づける素材が無い (#698)。
+		"api/i/handler_2fa.go":        7,
 		"api/notes/handler_drafts.go": 1, // NO_SUCH_DRAFT
 	}
 

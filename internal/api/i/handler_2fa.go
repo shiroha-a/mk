@@ -171,58 +171,95 @@ func (h *Handler) requireWebAuthn(c echo.Context, password string) (*model.User,
 	return user, profile, true
 }
 
+// verify2FAToken validates a TOTP token (or single-use backup code) against
+// the given profile. Backup codes are consumed in-place via UpdateProfileFields.
+// Returns true if the token authenticates the user.
+//
+// Misskey TS upstream の UserAuthService.twoFactorAuthenticate と同じ挙動:
+// backup code に hit したら使い捨てで消費し、それ以外は TOTP として検証する。
+func (h *Handler) verify2FAToken(profile *model.UserProfile, token string) bool {
+	if token == "" {
+		return false
+	}
+	if remaining, err := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), token); err == nil {
+		_ = h.userService.UpdateProfileFields(profile.UserID, map[string]any{
+			"twoFactorBackupSecret": pq.StringArray(remaining),
+		})
+		return true
+	}
+	if profile.TwoFactorSecret == nil {
+		return false
+	}
+	return twofactor.Validate(token, *profile.TwoFactorSecret)
+}
+
 // TwoFARegisterKey handles POST /api/i/2fa/register-key.
-// 1 段階目: パスワード認証 + WebAuthn registration challenge を返す。
-// レスポンスには Cypress / フロントエンドが finish 呼出時に必要な
-// `sessionId` (mk-go 内部の Redis セッション ID) と
-// `creation` (browser に渡す PublicKeyCredentialCreationOptions) が入る。
+// 1 段階目: パスワード + 2FA token 認証 + WebAuthn registration challenge を返す。
+// レスポンスは Misskey TS upstream と同じく PublicKeyCredentialCreationOptions
+// そのもの (frontend は `{publicKey: ...}` で wrap して使う) (#698)。
+//
+// 前提: ユーザーは既に TOTP で 2FA を有効化済みであること。security key は
+// 2FA の上に重ねる factor なので未有効化なら TWO_FACTOR_NOT_ENABLED を返す。
 func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	var req struct {
 		Password string `json:"password"`
+		Token    string `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password)
+	user, profile, ok := h.requireWebAuthn(c, req.Password)
 	if !ok {
 		return nil
+	}
+	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.Error("INVALID_TOKEN", "Invalid 2FA token.", "00000000-0000-0000-0000-000000000000"))
+	}
+	if !profile.TwoFactorEnabled {
+		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "bf32b864-449b-47b8-974e-f9a5468546f1"))
 	}
 
 	existing, err := h.securityKeyRepo.ListByUser(user.ID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	creation, sessionID, err := h.webauthnSvc.BeginRegistration(c.Request().Context(), user, existing)
+	creation, err := h.webauthnSvc.BeginRegistrationPrimary(c.Request().Context(), user, existing)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to begin registration.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"sessionId": sessionID,
-		"creation":  creation,
-	})
+	// frontend は `parseCreationOptionsFromJSON({publicKey: <res>})` で読むので、
+	// 内側の PublicKeyCredentialCreationOptions だけを返す。
+	return c.JSON(http.StatusOK, creation.Response)
 }
 
 // TwoFAKeyDone handles POST /api/i/2fa/key-done.
 // 2 段階目: ブラウザから返ってきた attestation response を検証して
-// UserSecurityKey 行を作成する。リクエストボディは `{ password, name,
-// sessionId, response }` で、`response` は browser の認証器 attestation オブジェクト
-// (ParsedCredentialCreationData フォーマット)。
+// UserSecurityKey 行を作成する。リクエストボディは upstream 互換の
+// `{ password, token, name, credential }`。`credential` は browser の
+// `PublicKeyCredential.toJSON()` 出力 (ParsedCredentialCreationData フォーマット)。
+// session は user 単位の primary slot に保存されているので sessionId は不要 (#698)。
 func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	var req struct {
-		Password  string          `json:"password"`
-		Name      string          `json:"name"`
-		SessionID string          `json:"sessionId"`
-		Response  json.RawMessage `json:"response"`
+		Password   string          `json:"password"`
+		Token      string          `json:"token"`
+		Name       string          `json:"name"`
+		Credential json.RawMessage `json:"credential"`
 	}
-	if err := c.Bind(&req); err != nil || req.Password == "" || req.SessionID == "" || len(req.Response) == 0 {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password / sessionId / response are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	if err := c.Bind(&req); err != nil || req.Password == "" || len(req.Credential) == 0 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password / credential are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	if req.Name == "" {
 		req.Name = "Security Key"
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password)
+	user, profile, ok := h.requireWebAuthn(c, req.Password)
 	if !ok {
 		return nil
+	}
+	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.Error("INVALID_TOKEN", "Invalid 2FA token.", "00000000-0000-0000-0000-000000000000"))
+	}
+	if !profile.TwoFactorEnabled {
+		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "798d6847-b1ed-4f9c-b1f9-163c42655995"))
 	}
 
 	existing, err := h.securityKeyRepo.ListByUser(user.ID)
@@ -231,12 +268,12 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	}
 
 	// go-webauthn の FinishRegistration は *http.Request からボディを読むので、
-	// JSON-RPC 経由で受け取った response を新しい http.Request にラップして渡す。
-	httpReq, err := wrapWebAuthnRequest(c.Request(), req.Response)
+	// JSON-RPC 経由で受け取った credential を新しい http.Request にラップして渡す。
+	httpReq, err := wrapWebAuthnRequest(c.Request(), req.Credential)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "invalid response payload.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "invalid credential payload.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	cred, err := h.webauthnSvc.FinishRegistration(c.Request().Context(), user, existing, req.SessionID, httpReq)
+	cred, err := h.webauthnSvc.FinishRegistrationPrimary(c.Request().Context(), user, existing, httpReq)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("REGISTRATION_FAILED", "Failed to finish registration.", "00000000-0000-0000-0000-000000000000"))
 	}
@@ -246,11 +283,9 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to persist key.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
-	// 1 つ以上の鍵が登録されたら user_profile.securityKeysAvailable +
-	// twoFactorEnabled を true にする。本家 Misskey と同じ挙動。
+	// security key 1 つ以上 → securityKeysAvailable=true。本家と同じ挙動。
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"securityKeysAvailable": true,
-		"twoFactorEnabled":      true,
 	})
 
 	return c.JSON(http.StatusOK, map[string]any{

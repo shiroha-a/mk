@@ -418,6 +418,155 @@ func buildAttestationResponse(t *testing.T, attObjectHex, clientDataJSONHex, cre
 	return body
 }
 
+// --- BeginRegistrationPrimary / FinishRegistrationPrimary (#698) ---
+//
+// upstream-compat な single-in-flight-per-user 経路。session id round-trip が
+// 無いので primary slot 1 つだけ Redis に保持する。
+
+func TestPrimarySessionKey(t *testing.T) {
+	assert.Equal(t, "twofa:webauthn:alice:primary", primarySessionKey("alice"))
+}
+
+func TestPutAndTakePrimarySession_Roundtrip(t *testing.T) {
+	requireRedis(t)
+	twofaTestRedis.FlushAll(context.Background())
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
+	require.NoError(t, err)
+
+	sd := makeFakeSessionData()
+	require.NoError(t, svc.putPrimarySession(context.Background(), "alice", sd))
+
+	got, err := svc.takePrimarySession(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, sd.Challenge, got.Challenge)
+
+	// take は single-use: 2 回目は ErrWebAuthnSessionNotFound
+	_, err = svc.takePrimarySession(context.Background(), "alice")
+	assert.ErrorIs(t, err, ErrWebAuthnSessionNotFound)
+}
+
+func TestPutPrimarySession_Overwrites(t *testing.T) {
+	requireRedis(t)
+	twofaTestRedis.FlushAll(context.Background())
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
+	require.NoError(t, err)
+
+	first := makeFakeSessionData()
+	first.Challenge = "first"
+	second := makeFakeSessionData()
+	second.Challenge = "second"
+
+	require.NoError(t, svc.putPrimarySession(context.Background(), "alice", first))
+	require.NoError(t, svc.putPrimarySession(context.Background(), "alice", second))
+
+	got, err := svc.takePrimarySession(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, "second", got.Challenge)
+}
+
+func TestPutPrimarySession_NilRedis(t *testing.T) {
+	svc := &WebAuthnService{}
+	err := svc.putPrimarySession(context.Background(), "alice", makeFakeSessionData())
+	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
+}
+
+func TestTakePrimarySession_NilRedis(t *testing.T) {
+	svc := &WebAuthnService{}
+	_, err := svc.takePrimarySession(context.Background(), "alice")
+	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
+}
+
+func TestTakePrimarySession_RedisError(t *testing.T) {
+	requireRedis(t)
+	c := redis.NewClient(&redis.Options{Addr: twofaTestRedis.Client.Options().Addr})
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", c)
+	require.NoError(t, err)
+	require.NoError(t, svc.putPrimarySession(context.Background(), "alice", makeFakeSessionData()))
+	require.NoError(t, c.Close())
+	_, err = svc.takePrimarySession(context.Background(), "alice")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrWebAuthnSessionNotFound)
+}
+
+func TestBeginRegistrationPrimary_NotConfigured(t *testing.T) {
+	svc := &WebAuthnService{}
+	_, err := svc.BeginRegistrationPrimary(context.Background(), &model.User{ID: "x"}, nil)
+	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
+}
+
+func TestFinishRegistrationPrimary_NotConfigured(t *testing.T) {
+	svc := &WebAuthnService{}
+	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
+	_, err := svc.FinishRegistrationPrimary(context.Background(), &model.User{ID: "x"}, nil, req)
+	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
+}
+
+func TestBeginRegistrationPrimary_Success(t *testing.T) {
+	requireRedis(t)
+	twofaTestRedis.FlushAll(context.Background())
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
+	require.NoError(t, err)
+	creation, err := svc.BeginRegistrationPrimary(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, creation)
+	assert.NotEmpty(t, creation.Response.Challenge)
+	// primary slot に SessionData が入っていること
+	got, err := svc.takePrimarySession(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Challenge)
+}
+
+func TestBeginRegistrationPrimary_PutSessionFails(t *testing.T) {
+	requireRedis(t)
+	c := redis.NewClient(&redis.Options{Addr: twofaTestRedis.Client.Options().Addr})
+	require.NoError(t, c.Close())
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", c)
+	require.NoError(t, err)
+	_, err = svc.BeginRegistrationPrimary(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil)
+	assert.Error(t, err)
+}
+
+func TestFinishRegistrationPrimary_SessionMissing(t *testing.T) {
+	requireRedis(t)
+	twofaTestRedis.FlushAll(context.Background())
+	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
+	_, err = svc.FinishRegistrationPrimary(context.Background(), &model.User{ID: "alice"}, nil, req)
+	assert.ErrorIs(t, err, ErrWebAuthnSessionNotFound)
+}
+
+func TestFinishRegistrationPrimary_Success(t *testing.T) {
+	requireRedis(t)
+	twofaTestRedis.FlushAll(context.Background())
+
+	// TestFinishRegistration_Success と同じ W3C ベクタを再利用
+	const (
+		attestationObjectHex = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220"
+		clientDataJSONHex    = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+		credentialIDHex      = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4"
+		challengeHex         = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+	)
+	body := buildAttestationResponse(t, attestationObjectHex, clientDataJSONHex, credentialIDHex)
+	challenge := encodeBase64URL(decodeHex(t, challengeHex))
+
+	svc, err := NewWebAuthnService("https://example.org", "Misskey", twofaTestRedis.Client)
+	require.NoError(t, err)
+
+	sd := &webauthn.SessionData{
+		Challenge:  challenge,
+		UserID:     []byte("test-user-id"),
+		CredParams: []protocol.CredentialParameter{{Type: protocol.PublicKeyCredentialType, Algorithm: webauthncose.AlgES256}},
+	}
+	require.NoError(t, svc.putPrimarySession(context.Background(), "test-user-id", sd))
+
+	httpReq := httptest.NewRequest("POST", "/", bytes.NewReader(body))
+	cred, err := svc.FinishRegistrationPrimary(context.Background(), &model.User{ID: "test-user-id", Username: "test"}, nil, httpReq)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	assert.Equal(t, decodeHex(t, credentialIDHex), cred.ID)
+}
+
 // --- ensure unused imports stay tidy ---
 
 var _ = redis.Nil

@@ -133,6 +133,16 @@ func sessionKey(userID, sessionID string) string {
 	return "twofa:webauthn:" + userID + ":" + sessionID
 }
 
+// primarySessionKey is the Redis key for the upstream-compatible
+// single-in-flight-per-user mode used by /api/i/2fa/{register-key,key-done}.
+// Misskey TS の WebAuthnService と同じく client は session id を round-trip
+// しないため user 単位で 1 件の challenge だけ保持する。新規 challenge は
+// 既存を上書きする (#698)。login flow など session id round-trip が必要な
+// 経路は引き続き sessionKey() の方を使う。
+func primarySessionKey(userID string) string {
+	return "twofa:webauthn:" + userID + ":primary"
+}
+
 // putSession serializes the SessionData and stores it under a freshly generated
 // random session id with TTL.
 func (s *WebAuthnService) putSession(ctx context.Context, userID string, sd *webauthn.SessionData) (string, error) {
@@ -207,6 +217,86 @@ func (s *WebAuthnService) BeginRegistration(ctx context.Context, user *model.Use
 		return nil, "", err
 	}
 	return creation, sid, nil
+}
+
+// BeginRegistrationPrimary is the upstream-compatible variant of
+// BeginRegistration that stores the SessionData under a fixed per-user key
+// (no session id round-trip). Used by /api/i/2fa/register-key (#698).
+// Returns only the CredentialCreation options; no opaque sessionID for the
+// caller to track.
+//
+// authenticatorSelection は Misskey TS upstream (`@simplewebauthn/server`) と
+// 同じく residentKey=required / userVerification=preferred を要求する。これが
+// 無いと一部の authenticator + browser 組合せ (特に passkey 経由の platform
+// authenticator) でダイアログは表示されるが credential が返らないケースがある。
+func (s *WebAuthnService) BeginRegistrationPrimary(ctx context.Context, user *model.User, existing []*model.UserSecurityKey) (*protocol.CredentialCreation, error) {
+	if s == nil || s.wa == nil {
+		return nil, ErrWebAuthnNotConfigured
+	}
+	adapter := &userAdapter{user: user, keys: existing}
+	creation, sd, err := s.wa.BeginRegistration(adapter, webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+		ResidentKey:      protocol.ResidentKeyRequirementRequired,
+		UserVerification: protocol.VerificationPreferred,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.putPrimarySession(ctx, user.ID, sd); err != nil {
+		return nil, err
+	}
+	return creation, nil
+}
+
+// FinishRegistrationPrimary completes the upstream-compatible registration
+// flow started by BeginRegistrationPrimary. The SessionData is loaded by
+// user id alone (no client-supplied sessionID), matching Misskey TS
+// WebAuthnService (#698).
+func (s *WebAuthnService) FinishRegistrationPrimary(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, req *http.Request) (*webauthn.Credential, error) {
+	if s == nil || s.wa == nil {
+		return nil, ErrWebAuthnNotConfigured
+	}
+	sd, err := s.takePrimarySession(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	adapter := &userAdapter{user: user, keys: existing}
+	cred, err := s.wa.FinishRegistration(adapter, *sd, req)
+	if err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// putPrimarySession overwrites any existing primary challenge so a fresh
+// register-key call after an abandoned attempt always works.
+func (s *WebAuthnService) putPrimarySession(ctx context.Context, userID string, sd *webauthn.SessionData) error {
+	if s == nil || s.redis == nil {
+		return ErrWebAuthnNotConfigured
+	}
+	raw, err := json.Marshal(sd)
+	if err != nil {
+		return err
+	}
+	return s.redis.Set(ctx, primarySessionKey(userID), raw, webAuthnSessionTTL).Err()
+}
+
+// takePrimarySession loads-and-deletes the primary session blob (single-use).
+func (s *WebAuthnService) takePrimarySession(ctx context.Context, userID string) (*webauthn.SessionData, error) {
+	if s == nil || s.redis == nil {
+		return nil, ErrWebAuthnNotConfigured
+	}
+	raw, err := s.redis.GetDel(ctx, primarySessionKey(userID)).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, ErrWebAuthnSessionNotFound
+		}
+		return nil, err
+	}
+	var sd webauthn.SessionData
+	if err := json.Unmarshal(raw, &sd); err != nil {
+		return nil, err
+	}
+	return &sd, nil
 }
 
 // FinishRegistration verifies the registration response from the browser and
