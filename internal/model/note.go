@@ -57,6 +57,10 @@ type Note struct {
 	Reply  *Note `gorm:"foreignKey:ReplyID" json:"reply,omitempty"`
 	Renote *Note `gorm:"foreignKey:RenoteID" json:"renote,omitempty"`
 	User   *User `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	// Poll は note.id ↔ poll.noteId の 1:1 リレーション。Preload しない経路
+	// (FindByID 単発など) では nil のまま。entity.PackNote が non-nil の
+	// ときだけ poll フィールドを response に詰める (#690)。
+	Poll *Poll `gorm:"foreignKey:NoteID;references:ID" json:"poll,omitempty"`
 }
 
 func (Note) TableName() string { return "note" }

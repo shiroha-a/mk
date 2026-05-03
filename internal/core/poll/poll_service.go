@@ -33,6 +33,26 @@ type NotificationHook interface {
 	OnPollVote(notifieeID, notifierID, noteID string, choice int)
 }
 
+// NoteEventPublisher emits a `noteUpdated` sub-event (e.g. pollVoted) on the
+// note's pubsub topic so subscribers (frontend WebSocket clients viewing the
+// note) get real-time updates without reloading. 循環依存回避のため interface
+// で受け取り、実装は internal/stream にある (#690 follow-up)。
+type NoteEventPublisher interface {
+	PublishToNoteStream(noteID string, eventType string, body any)
+}
+
+// FederationDeliveryHook delivers poll-related AP activities. Two paths:
+//   - OnVote: local user voted on a REMOTE poll → AP Note (vote) → author inbox
+//   - OnLocalPollUpdated: local poll's vote count changed (someone voted) →
+//     AP Update(Question) → all remote followers, so they refresh counts
+//     without re-fetching (#690)。
+//
+// 循環依存回避のため interface で受け取る (実装は core/federation)。
+type FederationDeliveryHook interface {
+	OnVote(voter *model.User, target *model.Note, choice int, choiceName string)
+	OnLocalPollUpdated(target *model.Note)
+}
+
 // Service manages poll voting.
 type Service struct {
 	noteRepo         repository.NoteRepository
@@ -41,6 +61,8 @@ type Service struct {
 	followingRepo    repository.FollowingRepository
 	idGen            id.Generator
 	notificationHook NotificationHook
+	eventPub         NoteEventPublisher
+	federationHook   FederationDeliveryHook
 	nowFn            func() time.Time
 }
 
@@ -66,6 +88,21 @@ func NewService(
 // SetNotificationHook attaches a NotificationHook used after a successful vote.
 func (s *Service) SetNotificationHook(h NotificationHook) {
 	s.notificationHook = h
+}
+
+// SetEventPublisher attaches a NoteEventPublisher used to broadcast pollVoted
+// events to subscribers of the target note. nil 配線時は publish skip
+// (フロントは reload で count を取り直すフォールバックに頼る、#690)。
+func (s *Service) SetEventPublisher(p NoteEventPublisher) {
+	s.eventPub = p
+}
+
+// SetFederationHook attaches a FederationDeliveryHook used after a vote is
+// recorded on a remote poll, so the choice is propagated to the remote
+// author's inbox via AP. nil 配線時は配信 skip — local-only deployments
+// で federation infra を持たないテスト環境でも poll が動く。
+func (s *Service) SetFederationHook(h FederationDeliveryHook) {
+	s.federationHook = h
 }
 
 // Vote records a vote for the given user/note/choice.
@@ -123,10 +160,37 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 	}
 	_ = s.pollRepo.IncrementVote(target.ID, choice, 1)
 
-	// 投票通知 (自分のノートへの投票はスキップ)
-	if s.notificationHook != nil && target.UserID != user.ID {
-		s.notificationHook.OnPollVote(target.UserID, user.ID, target.ID, choice)
+	// pollVoted を note の stream topic に publish して subscribe 中の
+	// frontend (note 詳細画面 / timeline) が reload なしで count を更新
+	// できるようにする (#690)。Misskey TS の PollService.vote と同じ payload。
+	if s.eventPub != nil {
+		s.eventPub.PublishToNoteStream(target.ID, "pollVoted", map[string]any{
+			"choice": choice,
+			"userId": user.ID,
+		})
 	}
+
+	// target が remote ならば AP Note (with name + inReplyTo) を author の
+	// inbox に配信して向こう側でも count に反映させる (#690)。local poll や
+	// hook 未配線時は no-op。
+	if s.federationHook != nil {
+		if target.UserHost != nil && *target.UserHost != "" {
+			s.federationHook.OnVote(user, target, choice, p.Choices[choice])
+		} else {
+			// target は local poll: 投票で更新された count を AP
+			// Update(Question) として follower に push する。これがないと
+			// 連合先 instance が古い count のままになる (Misskey TS の
+			// PollService.deliverQuestionUpdate と同等)。
+			s.federationHook.OnLocalPollUpdated(target)
+		}
+	}
+
+	// Misskey TS には per-vote の通知が無く (frontend の notification type にも
+	// 存在しない) ため、mk-go でも notificationHook.OnPollVote は呼び出さない。
+	// 過去の配線を残すと frontend が unknown type の notification を空 (= 「無」)
+	// で render してしまう (#690 user 報告)。pollEnded (期限切れ) は upstream
+	// にあるが本 service の責務外で別 path から発火する想定。
+	_ = s.notificationHook
 
 	return nil
 }

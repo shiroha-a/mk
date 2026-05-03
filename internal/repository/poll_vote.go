@@ -11,6 +11,11 @@ type PollVoteRepository interface {
 	FindByUserAndChoice(userID, noteID string, choice int) (*model.PollVote, error)
 	CountByUserAndNote(userID, noteID string) (int64, error)
 	ListByNoteID(noteID string) ([]*model.PollVote, error)
+	// FindByUserAndNoteIDs batch-fetches the viewer's votes across multiple
+	// notes so entity.NoteFieldResolver can populate Poll.choices[i].IsVoted
+	// in one query (#690). 戻り値は noteID → 投票した choice index list。
+	// 空 noteIDs 入力は空 map を返す (no DB call)。
+	FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string][]int, error)
 }
 
 type pollVoteRepository struct {
@@ -58,4 +63,23 @@ func (r *pollVoteRepository) ListByNoteID(noteID string) ([]*model.PollVote, err
 		return nil, err
 	}
 	return rows, nil
+}
+
+// FindByUserAndNoteIDs returns the viewer's votes grouped by noteID. Used by
+// entity.NoteFieldResolver to mark Poll.choices[i].IsVoted (#690).
+func (r *pollVoteRepository) FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string][]int, error) {
+	if userID == "" || len(noteIDs) == 0 {
+		return map[string][]int{}, nil
+	}
+	var rows []*model.PollVote
+	if err := r.db.
+		Where("\"userId\" = ? AND \"noteId\" IN ?", userID, noteIDs).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string][]int, len(rows))
+	for _, v := range rows {
+		out[v.NoteID] = append(out[v.NoteID], v.Choice)
+	}
+	return out, nil
 }

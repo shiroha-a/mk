@@ -112,6 +112,11 @@ type Note struct {
 	MisskeyContent string   `json:"_misskey_content,omitempty"`
 	MisskeyQuote   string   `json:"_misskey_quote,omitempty"`
 	QuoteURL       string   `json:"quoteUrl,omitempty"`
+	// Name は AP poll vote (Question への投票) で choice 名を運ぶ field。
+	// Misskey TS の vote AP payload は `{type: "Note", name: "<choice>",
+	// inReplyTo: <poll URI>}` 形式で、ApNoteService が name + inReplyTo の
+	// 組合せで vote と判定する。通常の投稿には付かない (#690)。
+	Name string `json:"name,omitempty"`
 	// Question (poll) fields — AP Question typeで使用
 	OneOf   []QuestionChoice `json:"oneOf,omitempty"`
 	AnyOf   []QuestionChoice `json:"anyOf,omitempty"`

@@ -98,6 +98,38 @@ func PackNote(n *model.Note, idGen id.Generator) NoteEntity {
 	return packNoteAtDepth(n, idGen, 0)
 }
 
+// packPoll maps a preloaded model.Poll onto the Misskey-compatible PollEntity.
+// nil 入力 (Poll relation が preload されていない / hasPoll=false) は nil を
+// 返し、上位の `json:"poll,omitempty"` で response から省略させる。
+//
+// IsVoted は viewer context が無いと判定できないため常に false で埋める
+// (#690 の最小修正範囲)。viewer の vote 判定は別 path で enrich する想定で、
+// 投稿直後の create response では「自分の投稿に自分はまだ vote していない」
+// が常に正解なので false 固定でも frontend 表示は正しい。
+func packPoll(p *model.Poll) *PollEntity {
+	if p == nil {
+		return nil
+	}
+	choices := make([]PollChoice, len(p.Choices))
+	for i, text := range p.Choices {
+		votes := 0
+		if i < len(p.Votes) {
+			votes = int(p.Votes[i])
+		}
+		choices[i] = PollChoice{Text: text, Votes: votes, IsVoted: false}
+	}
+	var expiresAt *string
+	if p.ExpiresAt != nil {
+		s := p.ExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		expiresAt = &s
+	}
+	return &PollEntity{
+		ExpiresAt: expiresAt,
+		Multiple:  p.Multiple,
+		Choices:   choices,
+	}
+}
+
 func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 	createdAt := ""
 	if t, err := idGen.ParseTime(n.ID); err == nil {
@@ -146,6 +178,7 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		VisibleUserIDs:     visibleUserIDs,
 		Mentions:           mentions,
 		HasPoll:            n.HasPoll,
+		Poll:               packPoll(n.Poll),
 	}
 
 	if n.User != nil {

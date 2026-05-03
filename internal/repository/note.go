@@ -118,12 +118,19 @@ func NewNoteRepository(db *gorm.DB) NoteRepository {
 // reply/renote targets (with their authors). NoteEntity の packer は
 // renote/reply の target note を埋めるためこれらの preload が必須。
 // GORM の preload は明示した relation しか辿らないので N+1 には成らない。
+//
+// Poll は note.hasPoll==true のとき 1:1 で attach する (#690)。Preload は
+// 自動的に hasPoll=false の note では何も読まないので overhead は小さい
+// (発行されるのは poll table への 1 IN 句 query)。
 func preloadNoteRelations(db *gorm.DB) *gorm.DB {
 	return db.Preload("User").
 		Preload("Renote").
 		Preload("Renote.User").
+		Preload("Renote.Poll").
 		Preload("Reply").
-		Preload("Reply.User")
+		Preload("Reply.User").
+		Preload("Reply.Poll").
+		Preload("Poll")
 }
 
 func (r *noteRepository) Create(note *model.Note) error {

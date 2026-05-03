@@ -320,6 +320,20 @@ func (s *Server) setupRoutes() {
 	// Polls
 	pollService := corepoll.NewService(noteRepo, pollRepo, pollVoteRepo, followingRepo, idGen)
 	pollService.SetNotificationHook(notificationHook)
+	// poll federation hook は deliverService が下で生成されるので、
+	// `pollService.SetFederationHook(...)` の呼び出しは deliverService 構築後
+	// (router.go:493 以降) に行う。下方の wire-up コメント参照。
+	// pollEnded 通知は周期 ticker (60s) で expiresAt < NOW() AND notifiedAt
+	// IS NULL を scan して著者 + ローカル投票者に発火する (#690)。Misskey TS
+	// は BullMQ delayed job で実装しているが mk-go では queue infra を経由
+	// せずに簡素な ticker で実現。partial index で空 scan のコストは最小。
+	pollExpiryWorker := corepoll.NewExpiryWorker(pollRepo, pollVoteRepo, noteRepo, userRepo, notificationService, 60*time.Second, 100)
+	pollExpiryCtx, pollExpiryCancel := context.WithCancel(context.Background())
+	go pollExpiryWorker.Run(pollExpiryCtx)
+	s.registerShutdownHook(func() { pollExpiryCancel() })
+	// pollVoted を note の stream topic に publish して subscribe 中の
+	// frontend (note 詳細 / timeline) が reload なしで count を更新できる
+	// ようにする (#690)。streamPubSub は下方で生成されるため遅延配線。
 
 	// Drive storage (Phase 4.9: Meta に基づいて Local / S3 を切り替え)
 	var driveStorage coredrive.Storage
@@ -436,6 +450,10 @@ func (s *Server) setupRoutes() {
 	publickeyRepo := repository.NewUserPublickeyRepository(s.db)
 	federationResolver.SetPublickeyRepo(publickeyRepo)
 	federationResolver.SetPollRepo(pollRepo)
+	// AP vote (Note.name + inReplyTo to a poll) を local poll service に
+	// 流して投票として記録する (#690)。これがないとリモートからの投票が
+	// 通常 reply として扱われ frontend に DM のように表示される。
+	federationResolver.SetPollVoter(pollService)
 	federationResolver.SetEmojiRepo(emojiRepo)
 	federationResolver.SetDriveFileRepo(driveFileRepo)
 	// AP attachment dimension probe (#461) 用 outbound HTTP client。
@@ -477,6 +495,10 @@ func (s *Server) setupRoutes() {
 	// AP delivery: DeliverService + フック登録 + asynq processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
 	deliverService.SetHostBlockChecker(instanceService)
+
+	// poll federation hook: ローカル user が remote poll に投票したら AP Note
+	// (with name + inReplyTo) を author の inbox に配信する (#690)。
+	pollService.SetFederationHook(corefederation.NewPollDeliveryHook(apRenderer, deliverService, userRepo, apURLs, idGen))
 
 	// Relay 連携 (#161): relay actor system account + relay.Service。
 	// relay.Service は AP delivery を必要とするので deliverService 構築の
@@ -968,6 +990,10 @@ func (s *Server) setupRoutes() {
 	// MyReaction / Channel の post-pack 解決は notes 以外でも必要 (#426)。
 	// 共通 resolver を 1 つだけ作って全 handler に注入する。
 	noteFieldResolver := entity.NewNoteFieldResolver(driveFileRepo, driveFolderRepo, userRepo, reactionRepo, channelRepo, idGen)
+	// viewer の poll vote から Poll.choices[i].IsVoted を埋める (#690)。
+	// frontend の MkPoll.vue が `showResult = isVoted || closed` を初期化に
+	// 使うため、これがないと「結果を見る」toggle が reload で揮発する。
+	noteFieldResolver.SetPollVoteLookup(pollVoteRepo)
 
 	// Notes endpoints
 	notesHandler := notes.NewHandler(noteRepo, noteCreateService, noteDeleteService, noteQueryService, timelineService, reactionService, pollService, searchService, idGen)
@@ -1485,6 +1511,11 @@ func (s *Server) setupRoutes() {
 	// 1. Redis pubsub bus (核となる publish/subscribe チャンネル)
 	streamPubSub := event.NewPubSubService(s.redis.Pubsub, "stream:")
 	streamBus := stream.NewEventPubSubBus(streamPubSub)
+
+	// pollVoted の noteStream publish 用に core/poll.Service へ event publisher
+	// を後付け配線する (#690)。Service 自体は streamPubSub 生成より前に作る
+	// ため、ここで SetEventPublisher する。
+	pollService.SetEventPublisher(stream.NewNoteEventPublisher(streamPubSub))
 
 	// 2. Channel registry: Misskey 互換のチャンネル名で各 factory を登録する
 	streamRegistry := stream.NewRegistry()

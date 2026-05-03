@@ -34,6 +34,13 @@ type ChannelLookup interface {
 	FindByIDs(ids []string) ([]*model.Channel, error)
 }
 
+// PollVoteLookup batch-fetches the viewer's votes across multiple notes so
+// the resolver can mark Poll.choices[i].IsVoted=true for the choices the
+// viewer has cast a vote on (#690). Returns noteID → []choice index.
+type PollVoteLookup interface {
+	FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string][]int, error)
+}
+
 // NoteFieldResolver applies post-pack file / viewer-dependent / channel
 // resolution to packed NoteEntity slices including their embedded Renote /
 // Reply targets (#426)。
@@ -50,6 +57,7 @@ type NoteFieldResolver struct {
 	fileOwner    FileOwnerLookup
 	noteReaction NoteReactionLookup
 	channel      ChannelLookup
+	pollVote     PollVoteLookup
 	idGen        id.Generator
 }
 
@@ -65,6 +73,16 @@ func NewNoteFieldResolver(driveFile DriveFileLookup, driveFolder DriveFolderLook
 		channel:      channel,
 		idGen:        idGen,
 	}
+}
+
+// SetPollVoteLookup attaches a PollVoteLookup so ResolveViewerFields populates
+// Poll.choices[i].IsVoted for the viewer (#690). Setter rather than
+// constructor arg to keep New… signature stable for existing call sites.
+func (r *NoteFieldResolver) SetPollVoteLookup(p PollVoteLookup) {
+	if r == nil {
+		return
+	}
+	r.pollVote = p
 }
 
 // Apply runs ResolveFiles + ResolveViewerFields in order. caller の典型 1 行
@@ -121,6 +139,23 @@ func (r *NoteFieldResolver) ResolveViewerFields(notes []NoteEntity, viewer *mode
 			if err == nil {
 				for i := range notes {
 					applyMyReaction(&notes[i], reactionMap)
+				}
+			}
+		}
+	}
+	// Poll.choices[i].IsVoted を viewer の poll_vote から populate (#690)。
+	// frontend MkPoll の `showResult = isVoted || closed` 判定が reload 後も
+	// true 維持されるため、結果表示 toggle が永続化される。
+	if viewer != nil && r.pollVote != nil {
+		var pollNoteIDs []string
+		for i := range notes {
+			pollNoteIDs = appendPollNoteIDs(pollNoteIDs, &notes[i])
+		}
+		if len(pollNoteIDs) > 0 {
+			voteMap, err := r.pollVote.FindByUserAndNoteIDs(viewer.ID, pollNoteIDs)
+			if err == nil {
+				for i := range notes {
+					applyMyPollVotes(&notes[i], voteMap)
 				}
 			}
 		}
@@ -238,6 +273,52 @@ func appendNoteIDs(dst []string, n *NoteEntity) []string {
 		dst = append(dst, n.Reply.ID)
 	}
 	return dst
+}
+
+// appendPollNoteIDs collects note IDs that have an attached poll (top-level
+// + Renote / Reply embed) so the viewer's votes can be batch-fetched.
+func appendPollNoteIDs(dst []string, n *NoteEntity) []string {
+	if n == nil {
+		return dst
+	}
+	if n.Poll != nil {
+		dst = append(dst, n.ID)
+	}
+	if n.Renote != nil && n.Renote.Poll != nil {
+		dst = append(dst, n.Renote.ID)
+	}
+	if n.Reply != nil && n.Reply.Poll != nil {
+		dst = append(dst, n.Reply.ID)
+	}
+	return dst
+}
+
+// applyMyPollVotes marks Poll.choices[i].IsVoted=true for the viewer's
+// recorded choices (#690). Operates on top-level + Renote / Reply embed.
+func applyMyPollVotes(n *NoteEntity, voteMap map[string][]int) {
+	if n == nil {
+		return
+	}
+	if n.Poll != nil {
+		applyVotedChoices(n.Poll, voteMap[n.ID])
+	}
+	if n.Renote != nil && n.Renote.Poll != nil {
+		applyVotedChoices(n.Renote.Poll, voteMap[n.Renote.ID])
+	}
+	if n.Reply != nil && n.Reply.Poll != nil {
+		applyVotedChoices(n.Reply.Poll, voteMap[n.Reply.ID])
+	}
+}
+
+func applyVotedChoices(p *PollEntity, choices []int) {
+	if p == nil || len(choices) == 0 {
+		return
+	}
+	for _, idx := range choices {
+		if idx >= 0 && idx < len(p.Choices) {
+			p.Choices[idx].IsVoted = true
+		}
+	}
 }
 
 func appendNoteChannelIDs(dst []string, n *NoteEntity) []string {

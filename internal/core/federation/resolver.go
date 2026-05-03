@@ -97,6 +97,7 @@ type Resolver struct {
 	chartHook       ChartHook                      // optional: 新規 remote user の集計
 	publickeyRepo   PublickeyStore                 // optional: 公開鍵の永続化
 	pollRepo        repository.PollRepository      // optional: Question(投票)のPoll作成
+	pollVoter       PollVoter                      // optional: AP vote (Note.name) の投票記録
 	emojiRepo       repository.EmojiRepository     // optional: リモート絵文字の永続化
 	driveFileRepo   repository.DriveFileRepository // optional: リモート添付の link 化
 	// imageProbeClient は image attachment の dimension probe (#461) で
@@ -173,6 +174,21 @@ func (r *Resolver) SetPublickeyRepo(repo PublickeyStore) {
 // SetPollRepo attaches a PollRepository for ingesting Question (poll) objects.
 func (r *Resolver) SetPollRepo(repo repository.PollRepository) {
 	r.pollRepo = repo
+}
+
+// PollVoter records a poll vote on behalf of a remote actor when an
+// inbound AP Note carries `name` + `inReplyTo` to a poll-bearing note
+// (Misskey TS の vote AP wire format)。実装は core/poll.Service。循環依存
+// 回避のため interface で受け取る。nil 配線時は federation 経由 vote が
+// 無視される (legacy / 元バグ挙動)。
+type PollVoter interface {
+	Vote(user *model.User, noteID string, choice int) error
+}
+
+// SetPollVoter attaches a PollVoter so AP votes are routed to the local
+// poll service instead of being mistakenly persisted as reply notes (#690)。
+func (r *Resolver) SetPollVoter(v PollVoter) {
+	r.pollVoter = v
 }
 
 // SetEmojiRepo attaches an EmojiRepository for extracting and upserting
@@ -599,17 +615,46 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	}
 	// 返信先がローカルに存在すれば紐付ける。リモート返信先の解決は後続 phase で
 	// 対応するため、現状では nil のままにする。
+	var replyTarget *model.Note
 	if apNote.InReplyTo != "" {
 		if id := r.extractLocalNoteID(apNote.InReplyTo); id != "" {
 			if reply, err := r.noteRepo.FindByID(id); err == nil {
-				note.ReplyID = &reply.ID
-				note.ReplyUserID = &reply.UserID
-				note.ReplyUserHost = reply.UserHost
+				replyTarget = reply
 			}
 		} else if reply, err := r.noteRepo.FindByURI(apNote.InReplyTo); err == nil {
-			note.ReplyID = &reply.ID
-			note.ReplyUserID = &reply.UserID
-			note.ReplyUserHost = reply.UserHost
+			replyTarget = reply
+		}
+		if replyTarget != nil {
+			note.ReplyID = &replyTarget.ID
+			note.ReplyUserID = &replyTarget.UserID
+			note.ReplyUserHost = replyTarget.UserHost
+		}
+	}
+	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が
+	// 入っていれば「投票」として処理し、note は作らずに早期 return する
+	// (#690)。Misskey TS の ApNoteService.create と同等の wire format。
+	// pollRepo / pollVoter 未配線環境では従来通り reply note として fall
+	// through する (legacy 互換)。
+	if replyTarget != nil && replyTarget.HasPoll && apNote.Name != "" && r.pollRepo != nil && r.pollVoter != nil {
+		if poll, err := r.pollRepo.FindByNoteID(replyTarget.ID); err == nil && poll != nil {
+			idx := -1
+			for i, c := range poll.Choices {
+				if c == apNote.Name {
+					idx = i
+					break
+				}
+			}
+			if idx >= 0 {
+				if err := r.pollVoter.Vote(actor, replyTarget.ID, idx); err != nil {
+					slog.Warn("federation: AP poll vote rejected",
+						"actor", actor.ID, "noteId", replyTarget.ID, "choice", apNote.Name, "err", err)
+				}
+				// vote として処理した場合、reply note は作成せず終了
+				// (note=nil で caller の fanout / notification も skip される)。
+				return nil, nil
+			}
+			slog.Warn("federation: AP poll vote choice not found",
+				"actor", actor.ID, "noteId", replyTarget.ID, "choice", apNote.Name)
 		}
 	}
 	// メンション抽出は本文と AP `tag` 配列の Mention 両方から行う。本文だけだと

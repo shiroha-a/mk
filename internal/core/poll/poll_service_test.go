@@ -186,27 +186,18 @@ func (h *recordingHook) OnPollVote(notifieeID, notifierID, noteID string, choice
 	h.choice = choice
 }
 
-func TestVote_NotificationHook(t *testing.T) {
+// TestVote_DoesNotInvokeNotificationHook: Misskey TS には per-vote の
+// notification 種別が無く (frontend が unknown type で空 body の通知を出して
+// しまう) ため mk-go でも hook を呼ばない契約 (#690)。NotificationHook 自体は
+// 別 path (例: pollEnded) で再利用される可能性があるので interface は残す。
+func TestVote_DoesNotInvokeNotificationHook(t *testing.T) {
 	svc, noteRepo, pollRepo, _ := newSvc(t)
 	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
 	hook := &recordingHook{}
 	svc.SetNotificationHook(hook)
 
 	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n1", 0))
-	assert.True(t, hook.called)
-	assert.Equal(t, "author", hook.notifiee)
-	assert.Equal(t, "viewer", hook.notifier)
-	assert.Equal(t, 0, hook.choice)
-}
-
-func TestVote_NotificationHookSelfSkipped(t *testing.T) {
-	svc, noteRepo, pollRepo, _ := newSvc(t)
-	seedPollNote(noteRepo, pollRepo, "n1", "viewer", false, nil)
-	hook := &recordingHook{}
-	svc.SetNotificationHook(hook)
-
-	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n1", 0))
-	assert.False(t, hook.called)
+	assert.False(t, hook.called, "vote must not trigger pollVote notification (Misskey TS has no such type)")
 }
 
 func TestVote_HappyPathIncrementsVotes(t *testing.T) {

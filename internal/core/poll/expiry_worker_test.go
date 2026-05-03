@@ -1,0 +1,198 @@
+package poll
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// recordingNotifier captures CreateInput calls so tests can verify the worker
+// dispatches `pollEnded` to the right user set.
+type recordingNotifier struct {
+	calls []notification.CreateInput
+	err   error
+}
+
+func (r *recordingNotifier) Create(_ context.Context, in notification.CreateInput) (*notification.Notification, error) {
+	r.calls = append(r.calls, in)
+	if r.err != nil {
+		return nil, r.err
+	}
+	// Notification 自体は NotifieeID を直接持たず Redis 鍵で識別するため、
+	// テストでは Type / NoteID のみ詰めて返す。
+	return &notification.Notification{Type: in.Type, NoteID: in.NoteID}, nil
+}
+
+func newWorkerSetup(t *testing.T, now time.Time) (
+	*ExpiryWorker, *testutil.MockPollRepository, *testutil.MockPollVoteRepository,
+	*testutil.MockNoteRepository, *testutil.MockUserRepository, *recordingNotifier,
+) {
+	t.Helper()
+	pollRepo := testutil.NewMockPollRepository()
+	voteRepo := testutil.NewMockPollVoteRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	userRepo := testutil.NewMockUserRepository()
+	notif := &recordingNotifier{}
+	w := NewExpiryWorker(pollRepo, voteRepo, noteRepo, userRepo, notif, 60*time.Second, 100)
+	w.SetClock(func() time.Time { return now })
+	return w, pollRepo, voteRepo, noteRepo, userRepo, notif
+}
+
+func seedExpiredPoll(t *testing.T, pollRepo *testutil.MockPollRepository, noteRepo *testutil.MockNoteRepository, noteID, authorID string, expiresAt time.Time) {
+	t.Helper()
+	require.NoError(t, noteRepo.Create(&model.Note{ID: noteID, UserID: authorID, HasPoll: true, Visibility: model.NoteVisibilityPublic}))
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID:    noteID,
+		UserID:    authorID,
+		Choices:   []string{"a", "b"},
+		Votes:     []int64{0, 0},
+		ExpiresAt: &expiresAt,
+	}))
+}
+
+func seedLocalUser(userRepo *testutil.MockUserRepository, id string) {
+	userRepo.Users[id] = &model.User{ID: id}
+}
+
+func seedRemoteUser(userRepo *testutil.MockUserRepository, id, host string) {
+	userRepo.Users[id] = &model.User{ID: id, Host: &host}
+}
+
+func TestExpiryWorker_NotifiesAuthor(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	require.Len(t, notif.calls, 1)
+	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
+	assert.Equal(t, notification.TypePollEnded, notif.calls[0].Type)
+	assert.Equal(t, "n1", notif.calls[0].NoteID)
+	assert.Equal(t, "public", notif.calls[0].NoteVisibility)
+	// notifiedAt is stamped so the next tick skips this poll.
+	require.NotNil(t, pollRepo.Polls["n1"].NotifiedAt)
+}
+
+func TestExpiryWorker_NotifiesAuthorAndLocalVoters(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, voteRepo, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedLocalUser(userRepo, "bob")
+	seedLocalUser(userRepo, "charlie")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	require.NoError(t, voteRepo.Create(&model.PollVote{ID: "v1", NoteID: "n1", UserID: "bob", Choice: 0}))
+	require.NoError(t, voteRepo.Create(&model.PollVote{ID: "v2", NoteID: "n1", UserID: "charlie", Choice: 1}))
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	notifiedIDs := []string{}
+	for _, c := range notif.calls {
+		notifiedIDs = append(notifiedIDs, c.NotifieeID)
+	}
+	assert.ElementsMatch(t, []string{"alice", "bob", "charlie"}, notifiedIDs)
+}
+
+func TestExpiryWorker_DedupesAuthorWhoAlsoVoted(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, voteRepo, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	// alice votes on her own poll
+	require.NoError(t, voteRepo.Create(&model.PollVote{ID: "v1", NoteID: "n1", UserID: "alice", Choice: 0}))
+
+	require.NoError(t, w.Tick(context.Background()))
+	// Only one notification despite alice being both author and voter.
+	require.Len(t, notif.calls, 1)
+	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
+}
+
+func TestExpiryWorker_SkipsRemoteVoters(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, voteRepo, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedRemoteUser(userRepo, "bob_remote", "remote.example")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	require.NoError(t, voteRepo.Create(&model.PollVote{ID: "v1", NoteID: "n1", UserID: "bob_remote", Choice: 0}))
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	// Only the local author gets a notification; remote voter is filtered.
+	require.Len(t, notif.calls, 1)
+	assert.Equal(t, "alice", notif.calls[0].NotifieeID)
+}
+
+func TestExpiryWorker_SkipsAlreadyNotified(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	notified := now.Add(-30 * time.Second)
+	pollRepo.Polls["n1"].NotifiedAt = &notified
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	assert.Empty(t, notif.calls, "already-notified poll must be skipped")
+}
+
+func TestExpiryWorker_SkipsNotYetExpired(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	// expires in the future
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(time.Hour))
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	assert.Empty(t, notif.calls)
+	assert.Nil(t, pollRepo.Polls["n1"].NotifiedAt)
+}
+
+func TestExpiryWorker_TickWithNilWorker(t *testing.T) {
+	var w *ExpiryWorker
+	assert.NoError(t, w.Tick(context.Background()))
+}
+
+func TestExpiryWorker_TickWithUnconfiguredRepo(t *testing.T) {
+	w := &ExpiryWorker{}
+	assert.NoError(t, w.Tick(context.Background()))
+}
+
+func TestExpiryWorker_NotifierErrorContinuesBatch(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedLocalUser(userRepo, "bob")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	seedExpiredPoll(t, pollRepo, noteRepo, "n2", "bob", now.Add(-time.Minute))
+	notif.err = errors.New("notify down")
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	// Notifier was called for both polls (best-effort) and both polls were
+	// stamped as notified so the next tick doesn't retry forever.
+	assert.Len(t, notif.calls, 2)
+	require.NotNil(t, pollRepo.Polls["n1"].NotifiedAt)
+	require.NotNil(t, pollRepo.Polls["n2"].NotifiedAt)
+}
+
+func TestExpiryWorker_ContextCancelStopsTick(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, notif := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := w.Tick(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, notif.calls)
+}

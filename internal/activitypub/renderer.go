@@ -71,6 +71,16 @@ func (b *URLBuilder) CreateActivityURI(noteID string) string {
 	return b.NoteURI(noteID) + "/activity"
 }
 
+// VoteActivityURI returns a stable URI for the AP `Note` representing a
+// poll vote. URI must be unique per (voter, target) pair to avoid
+// collisions when the same user votes on multiple polls. Misskey TS の
+// upstream wire format に合わせて fragment 形式 (`#votes/<targetNoteID>`)
+// を採用する (#690)。fragment 形式なら remote 側が既存 voter URL の
+// 同一性で actor を識別できる。
+func (b *URLBuilder) VoteActivityURI(voterID, targetNoteID string) string {
+	return b.UserURI(voterID) + "#votes/" + targetNoteID
+}
+
 // FollowURI returns the URI for a Follow activity.
 // followeeIDが完全なURIの場合はハッシュ化してパスセグメントに埋め込む。
 func (b *URLBuilder) FollowURI(followerID, followeeID string) string {
@@ -511,6 +521,68 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 		}
 		*tags = append(*tags, tag)
 	}
+}
+
+// RenderQuestionUpdate builds the AP `Update(Question)` activity broadcast to
+// followers when a local poll receives a vote (#690)。Misskey TS の
+// PollService.deliverQuestionUpdate と同等で、配信先 instance が remote
+// follower 視点で count を最新化できる。RenderNote が既に Question 互換の
+// asPoll 出力をするので、それを wrap するだけ。
+func (r *Renderer) RenderQuestionUpdate(n *model.Note, idGen id.Generator) *Update {
+	question := r.RenderNote(n, idGen)
+	now := time.Now().UTC().Format(time.RFC3339)
+	u := &Update{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.NoteURI(n.ID) + "#updates/" + now,
+				Type: "Update",
+			},
+			Actor:     r.urls.UserURI(n.UserID),
+			Published: now,
+			To:        question.To,
+			CC:        question.CC,
+		},
+		Object: question,
+	}
+	AddContext(u)
+	return u
+}
+
+// RenderVote builds the AP `Create(Note)` activity used to deliver a poll
+// vote to the remote poll author's inbox (#690)。Misskey TS の vote wire
+// format に合わせて Note は `name = <choice>` + `inReplyTo = <poll URI>` +
+// 空 `content` で構成する。target は voted-on poll note (remote)。targetURI
+// はリモート側の note.URI を使う (local URL で render すると相手が解決でき
+// ない)。authorURI は target.UserID から URLBuilder 経由で組み立てる。
+func (r *Renderer) RenderVote(voter *model.User, target *model.Note, targetURI, authorURI, choiceName string) *Create {
+	now := time.Now().UTC().Format(time.RFC3339)
+	noteID := r.urls.VoteActivityURI(voter.ID, target.ID)
+	note := &Note{
+		Object: Object{
+			ID:   noteID,
+			Type: "Note",
+		},
+		AttributedTo: r.urls.UserURI(voter.ID),
+		Content:      "",
+		Published:    now,
+		To:           []string{authorURI},
+		InReplyTo:    targetURI,
+		Name:         choiceName,
+	}
+	c := &Create{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.CreateActivityURI(noteID),
+				Type: "Create",
+			},
+			Actor:     r.urls.UserURI(voter.ID),
+			Published: now,
+			To:        []string{authorURI},
+		},
+		Object: note,
+	}
+	AddContext(c)
+	return c
 }
 
 // RenderCreate wraps a Note into a Create activity addressed to the same audience.

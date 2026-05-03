@@ -35,6 +35,10 @@ type failingPollRepo struct{}
 func (f *failingPollRepo) Create(_ *model.Poll) error                 { return stubError }
 func (f *failingPollRepo) FindByNoteID(_ string) (*model.Poll, error) { return nil, stubError }
 func (f *failingPollRepo) IncrementVote(_ string, _ int, _ int) error { return nil }
+func (f *failingPollRepo) ListExpiredUnnotified(_ time.Time, _ int) ([]*model.Poll, error) {
+	return nil, nil
+}
+func (f *failingPollRepo) MarkNotified(_ string, _ time.Time) error { return nil }
 
 // findFailNoteRepo creates successfully but FindByIDWithRelations always
 // fails (CreateService uses the full-relations variant for finalNote since

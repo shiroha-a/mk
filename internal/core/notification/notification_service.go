@@ -20,13 +20,21 @@ import (
 type Type string
 
 const (
-	TypeFollow              Type = "follow"
-	TypeMention             Type = "mention"
-	TypeReply               Type = "reply"
-	TypeRenote              Type = "renote"
-	TypeQuote               Type = "quote"
-	TypeReaction            Type = "reaction"
-	TypePollVote            Type = "pollVote"
+	TypeFollow   Type = "follow"
+	TypeMention  Type = "mention"
+	TypeReply    Type = "reply"
+	TypeRenote   Type = "renote"
+	TypeQuote    Type = "quote"
+	TypeReaction Type = "reaction"
+	// TypePollVote: per-vote 通知。Misskey TS には対応 type が無いため
+	// frontend が空 body で render してしまい運用上 noise だけが残る (#690)。
+	// service 側からは発火しない (poll_service が呼ばないように disable
+	// 済み)。type 自体は永続化済み notification の互換のため残す。
+	TypePollVote Type = "pollVote"
+	// TypePollEnded: アンケート期限切れ時の通知 (#690)。Misskey TS の
+	// EndedPollNotificationProcessor 相当。著者 + 投票者 (ローカルのみ) に
+	// 1 件ずつ作る。core/poll.ExpiryWorker が周期 ticker で発火させる。
+	TypePollEnded           Type = "pollEnded"
 	TypeReceiveFollowReq    Type = "receiveFollowRequest"
 	TypeFollowRequestAccept Type = "followRequestAccepted"
 	TypeExportCompleted     Type = "exportCompleted"

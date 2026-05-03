@@ -2073,6 +2073,37 @@ func (m *MockPollRepository) IncrementVote(noteID string, choice int, delta int)
 	return nil
 }
 
+// ListExpiredUnnotified mirrors the live repo: returns polls with expiresAt
+// before `now` and notifiedAt == nil. ordering by expiresAt ASC for
+// deterministic testing.
+func (m *MockPollRepository) ListExpiredUnnotified(now time.Time, limit int) ([]*model.Poll, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var rows []*model.Poll
+	for _, p := range m.Polls {
+		if p.ExpiresAt != nil && p.ExpiresAt.Before(now) && p.NotifiedAt == nil {
+			rows = append(rows, p)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].ExpiresAt.Before(*rows[j].ExpiresAt)
+	})
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+// MarkNotified stamps notifiedAt on the in-memory poll. unknown noteID is a
+// no-op (matches GORM's UPDATE WHERE behaviour for non-matching rows).
+func (m *MockPollRepository) MarkNotified(noteID string, t time.Time) error {
+	if p, ok := m.Polls[noteID]; ok {
+		p.NotifiedAt = &t
+	}
+	return nil
+}
+
 // MockPollVoteRepository is a test double for repository.PollVoteRepository.
 type MockPollVoteRepository struct {
 	Votes map[string]*model.PollVote // keyed by id
@@ -2114,6 +2145,25 @@ func (m *MockPollVoteRepository) ListByNoteID(noteID string) ([]*model.PollVote,
 		}
 	}
 	return rows, nil
+}
+
+// FindByUserAndNoteIDs mirrors the live repo: groups choices by noteID for the
+// given user across the requested noteIDs. Empty noteIDs returns empty map.
+func (m *MockPollVoteRepository) FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string][]int, error) {
+	out := map[string][]int{}
+	if userID == "" || len(noteIDs) == 0 {
+		return out, nil
+	}
+	want := make(map[string]bool, len(noteIDs))
+	for _, id := range noteIDs {
+		want[id] = true
+	}
+	for _, v := range m.Votes {
+		if v.UserID == userID && want[v.NoteID] {
+			out[v.NoteID] = append(out[v.NoteID], v.Choice)
+		}
+	}
+	return out, nil
 }
 
 // MockInstanceRepository is a test double for repository.InstanceRepository.
