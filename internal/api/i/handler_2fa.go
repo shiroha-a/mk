@@ -52,12 +52,19 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// frontend (settings/2fa.qrdialog.vue) は `qr` を `<img :src=...>` で
+	// 読み込むため、otpauth URI ではなく PNG data URL に変換する必要がある
+	// (#697)。Misskey TS upstream の QRCode.toDataURL(url) と同形式。
+	qrDataURL, err := twofactor.QRDataURL(uri)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
 
 	// tempSecretに保存 (doneで確認後にsecretに移動)
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{"twoFactorTempSecret": secret})
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"qr":     uri,
+		"qr":     qrDataURL,
 		"url":    uri,
 		"secret": secret,
 		"label":  user.Username,

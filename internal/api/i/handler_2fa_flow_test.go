@@ -26,6 +26,12 @@ func TestTwoFARegister_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.NotEmpty(t, resp["secret"])
 	assert.Equal(t, "Misskey", resp["issuer"])
+	// `url` は otpauth:// 形式 (authenticator アプリの「アプリで開く」用)、
+	// `qr` は PNG data URL (frontend が <img src=...> で読む用) — 両者は
+	// 別形式でなければならない (#697)。
+	assert.Contains(t, resp["url"], "otpauth://totp/")
+	assert.Contains(t, resp["qr"], "data:image/png;base64,",
+		"qr field must be a base64 PNG data URL so the frontend <img src=...> renders")
 
 	// tempSecret がプロファイルに書き込まれている
 	profile := repo.Profiles["u1"]

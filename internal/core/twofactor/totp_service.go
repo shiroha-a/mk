@@ -2,8 +2,20 @@
 package twofactor
 
 import (
+	"bytes"
+	"encoding/base64"
+	"fmt"
+	"image/png"
+
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
+
+// qrImageSize は frontend MkPoll 系コンポーネントが想定する QR コード画像
+// の 1 辺ピクセル数。Misskey TS upstream の `QRCode.toDataURL(url)` は
+// default 4x scale + 8px margin (= 約 200px 程度) を返すため、SP / desktop
+// どちらでも視認できるよう 256px で固定する。
+const qrImageSize = 256
 
 // GenerateSecret creates a new TOTP secret for a user.
 // Returns the secret key and the otpauth:// URI for QR code generation.
@@ -16,6 +28,30 @@ func GenerateSecret(issuer, accountName string) (secret string, uri string, err 
 		return "", "", err
 	}
 	return key.Secret(), key.URL(), nil
+}
+
+// QRDataURL renders the given otpauth:// URI into a base64-encoded PNG
+// `data:` URL suitable for direct use as `<img src="...">`. Misskey TS の
+// `i/2fa/register` endpoint は `QRCode.toDataURL(url)` で同形式の文字列を
+// 返しており、frontend (settings/2fa.qrdialog.vue) が `<img :src=
+// "twoFactorData.qr">` で読み込む契約 (#697)。
+//
+// 戻り値は "data:image/png;base64,..." 形式。pquerna/otp の Key.Image は
+// internally rsc.io/qr を使い QR モードを ALPHANUM か BYTE で自動選択する。
+func QRDataURL(uri string) (string, error) {
+	key, err := otp.NewKeyFromURL(uri)
+	if err != nil {
+		return "", fmt.Errorf("twofactor: parse otpauth uri: %w", err)
+	}
+	img, err := key.Image(qrImageSize, qrImageSize)
+	if err != nil {
+		return "", fmt.Errorf("twofactor: render qr image: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return "", fmt.Errorf("twofactor: encode qr png: %w", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // Validate checks if a TOTP code is valid for the given secret.
