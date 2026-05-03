@@ -86,17 +86,34 @@ func NewHandler(
 
 // User handles GET /users/:id with ActivityPub content negotiation.
 // AP clients (Accept: application/activity+json) receive the Person
-// document; other callers (browser reloads) are handed off to the
-// frontend fallback.
+// document; browser callers are 302-redirected to the canonical
+// `/@<username>` permalink so the SPA's userPage route can resolve.
+//
+// Misskey TS の ClientServerService.ts と同じ挙動: 共有 frontend は
+// `/users/:id` の SPA ルートを持たず `/@:acct` のみなので、QR code (frontend
+// が自分の id で組み立てる) や AP federation 由来のリンクから来た訪問者を
+// 確実に SPA で開けるよう backend で redirect する (#691)。リモート user
+// の場合は SPA 側でも canonical な remote URI を開かせるため Host 付きで
+// `/@username@host` 形式に redirect する。
 func (h *Handler) User(c echo.Context) error {
-	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
-		return h.serveNonAP(c)
-	}
 	id := c.Param("id")
 	bundle, err := h.userService.ShowByID(id)
 	if err != nil {
+		// 既存仕様: AP client は 404、browser も 404 (ID 不正)
 		return c.NoContent(http.StatusNotFound)
 	}
+
+	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
+		// browser は username 付き permalink に redirect。`Vary: Accept` で
+		// 同 URL に対する AP / browser の両 cache が混ざらないようにする。
+		acct := "/@" + bundle.User.Username
+		if bundle.User.Host != nil && *bundle.User.Host != "" {
+			acct += "@" + *bundle.User.Host
+		}
+		c.Response().Header().Set("Vary", "Accept")
+		return c.Redirect(http.StatusFound, acct)
+	}
+
 	// リモートユーザーへのリダイレクト相当は将来対応
 	if bundle.User.Host != nil {
 		return c.NoContent(http.StatusNotFound)

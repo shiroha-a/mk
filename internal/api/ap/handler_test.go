@@ -111,6 +111,58 @@ func TestUser_KeypairFetchError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// newBrowserReq builds a non-AP request (no application/activity+json in
+// Accept). Used to exercise the SPA / redirect fallback branch.
+func newBrowserReq(t *testing.T, paramName, paramValue string) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(echo.HeaderAccept, "text/html,application/xhtml+xml")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames(paramName)
+	c.SetParamValues(paramValue)
+	return c, rec
+}
+
+// TestUser_BrowserRedirectsToAcct guards #691 — frontend が QR code 等で
+// `/users/<id>` を生成するため、browser 経路では `/@<username>` permalink
+// にリダイレクトして SPA の userPage route に解決させる必要がある。
+func TestUser_BrowserRedirectsToAcct(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+	c, rec := newBrowserReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "/@alice", rec.Header().Get("Location"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"),
+		"Vary: Accept must be set so browser/AP responses do not collide in caches")
+}
+
+// TestUser_BrowserRedirectsRemoteToAcctWithHost ensures remote users get
+// their canonical `/@username@host` permalink so the SPA can fetch from
+// the right host when opened via `/users/<id>` (e.g. shared QR/code link).
+func TestUser_BrowserRedirectsRemoteToAcctWithHost(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	host := "remote.example"
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Username: "bob", Host: &host}
+
+	c, rec := newBrowserReq(t, "id", "u_remote")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "/@bob@remote.example", rec.Header().Get("Location"))
+}
+
+// TestUser_BrowserNotFound preserves the 404-on-missing-user behaviour for
+// the browser path so an invalid id doesn't redirect to a confusing /@.
+func TestUser_BrowserNotFound(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	c, rec := newBrowserReq(t, "id", "ghost")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestNote_Success(t *testing.T) {
 	h, _, noteRepo, _ := newHandler(t)
 	noteRepo.Notes["n1"] = &model.Note{
@@ -473,7 +525,11 @@ func TestUserByAcct_HTMLUsesFallback(t *testing.T) {
 	assert.Equal(t, "FRONTEND", rec.Body.String())
 }
 
-func TestUser_HTMLUsesFallback(t *testing.T) {
+// Browser path で `/users/<id>` を踏んだ場合は SPA fallback ではなく
+// `/@<username>` permalink への 302 redirect で SPA route に解決させる
+// (#691)。frontend は `/users/:id` SPA ルートを持たないので、ここで
+// SPA HTML を返しても not-found ページが描画されてしまう。
+func TestUser_HTMLRedirectsToAcct(t *testing.T) {
 	h, userRepo, _, _ := newHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
 	h.SetNonAPFallback(func(c echo.Context) error {
@@ -487,7 +543,8 @@ func TestUser_HTMLUsesFallback(t *testing.T) {
 	c.SetParamNames("id")
 	c.SetParamValues("u1")
 	require.NoError(t, h.User(c))
-	assert.Equal(t, "FRONTEND", rec.Body.String())
+	assert.Equal(t, http.StatusFound, rec.Code, "browser must be redirected, not served SPA HTML")
+	assert.Equal(t, "/@alice", rec.Header().Get("Location"))
 }
 
 func TestNote_HTMLUsesFallback(t *testing.T) {
