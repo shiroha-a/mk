@@ -163,6 +163,42 @@ func TestUser_BrowserNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestUser_BrowserSuspendedLocal404 matches upstream Misskey TS strict filter
+// (isSuspended: false on local user) — suspended local users return 404
+// instead of redirecting to a "user suspended" SPA page (#691 review).
+func TestUser_BrowserSuspendedLocal404(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	userRepo.Users["u_susp"] = &model.User{ID: "u_susp", Username: "alice", IsSuspended: true}
+
+	c, rec := newBrowserReq(t, "id", "u_susp")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestUser_BrowserVaryAcceptOnAllPaths guards that Vary: Accept is set on
+// every response (redirect / 404 / AP) so intermediate caches do not return
+// browser HTML to AP clients or vice versa (#691 review).
+func TestUser_BrowserVaryAcceptOnAllPaths(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+
+	// AP path
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+
+	// Browser redirect
+	c, rec = newBrowserReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+
+	// 404 path (AP)
+	c, rec = newReq(t, "id", "ghost")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
 func TestNote_Success(t *testing.T) {
 	h, _, noteRepo, _ := newHandler(t)
 	noteRepo.Notes["n1"] = &model.Note{

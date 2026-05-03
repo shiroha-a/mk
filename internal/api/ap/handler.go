@@ -96,6 +96,11 @@ func NewHandler(
 // の場合は SPA 側でも canonical な remote URI を開かせるため Host 付きで
 // `/@username@host` 形式に redirect する。
 func (h *Handler) User(c echo.Context) error {
+	// Vary: Accept は AP / browser の両分岐を持つすべての response に必要。
+	// content-negotiation 実行前に header を立てておけば、redirect / Person /
+	// 404 のいずれが返っても intermediate cache が誤配信しない (#691 review)。
+	c.Response().Header().Set("Vary", "Accept")
+
 	id := c.Param("id")
 	bundle, err := h.userService.ShowByID(id)
 	if err != nil {
@@ -104,13 +109,18 @@ func (h *Handler) User(c echo.Context) error {
 	}
 
 	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
-		// browser は username 付き permalink に redirect。`Vary: Accept` で
-		// 同 URL に対する AP / browser の両 cache が混ざらないようにする。
+		// suspended local user は upstream Misskey TS と同じく 404。SPA の
+		// `/@<username>` route に流すと「アカウントが見つかりません」UI が
+		// 出るが、upstream 仕様 (`isSuspended: false` filter) と合わせて
+		// backend 側で明示的に止める (#691 review)。
+		if (bundle.User.Host == nil || *bundle.User.Host == "") && bundle.User.IsSuspended {
+			return c.NoContent(http.StatusNotFound)
+		}
+		// browser は username 付き permalink に redirect。
 		acct := "/@" + bundle.User.Username
 		if bundle.User.Host != nil && *bundle.User.Host != "" {
 			acct += "@" + *bundle.User.Host
 		}
-		c.Response().Header().Set("Vary", "Accept")
 		return c.Redirect(http.StatusFound, acct)
 	}
 
