@@ -9,6 +9,7 @@ import (
 	"time"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -973,6 +974,8 @@ func TestEmojiUpdate_WritesModerationLog_WithExtendedFields(t *testing.T) {
 func TestEmojiUpdate_NoSuchEmojiOnMissingID(t *testing.T) {
 	// #650 問題 2: id が DB に無いケースは NO_SUCH_EMOJI を返す。以前は
 	// UpdateFields が RowsAffected を見ずに常に nil 返却で 204 になっていた。
+	// #729: UUID は upstream `684dec9d-...` (mk-go の旧 typo `684b7e7e-...`
+	// から修正) と完全一致することも assert する。
 	h, _, _, _ := newTestHandler(t)
 	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
 	rec := doPost(h.EmojiUpdate, `{"id":"ghost","name":"x"}`, adminUser)
@@ -982,6 +985,8 @@ func TestEmojiUpdate_NoSuchEmojiOnMissingID(t *testing.T) {
 	errField, ok := body["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "NO_SUCH_EMOJI", errField["code"])
+	assert.Equal(t, apierr.UUIDNoSuchEmoji, errField["id"])
+	assert.Equal(t, "684dec9d-a8c2-4364-9aa8-456c49cb1dc8", errField["id"], "UUID matches upstream noSuchEmoji")
 }
 
 func TestEmojiDelete_WritesModerationLog(t *testing.T) {

@@ -37,6 +37,12 @@ const (
 	UUIDNoSuchUser   = "4362f8dc-731f-4ad8-a694-be5a88922a24"
 	UUIDAccessDenied = "1fb7cb09-d46a-4fff-b8df-057708cce513"
 
+	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
+	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
+	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
+	// upstream に揃え直す (#729)。
+	UUIDNoSuchEmoji = "684dec9d-a8c2-4364-9aa8-456c49cb1dc8"
+
 	// UUIDs for notes/create errors (third_party/misskey/.../endpoints/notes/create.ts).
 	UUIDNoSuchRenoteTarget                                         = "b5c90186-4ab0-49c8-9bba-a1f76c282ba4"
 	UUIDCannotRenoteToAPureRenote                                  = "fd4cc33e-2a37-48dd-99cc-9b806eb2031a"
@@ -140,6 +146,13 @@ func NoSuchNote() map[string]any {
 // NoSuchUser returns a 404 NO_SUCH_USER error response.
 func NoSuchUser() map[string]any {
 	return Error("NO_SUCH_USER", "No such user.", UUIDNoSuchUser)
+}
+
+// NoSuchEmoji returns a 404 NO_SUCH_EMOJI error response (#729). upstream
+// `admin/emoji/update.ts` / `admin/emoji/copy.ts` の noSuchEmoji と code /
+// id / message を完全一致させる。
+func NoSuchEmoji() map[string]any {
+	return Error("NO_SUCH_EMOJI", "No such emoji.", UUIDNoSuchEmoji)
 }
 
 // NoSuchNoteDraft returns a 404 NO_SUCH_NOTE_DRAFT error response (#688 /

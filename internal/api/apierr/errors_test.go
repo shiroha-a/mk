@@ -53,6 +53,17 @@ func TestNoSuchNoteDraft(t *testing.T) {
 	assert.Equal(t, "No such note draft.", errObj["message"])
 }
 
+func TestNoSuchEmoji(t *testing.T) {
+	// #729: upstream admin/emoji/update.ts (id `684dec9d-...`) 互換。
+	// mk-go の旧 typo `684b7e7e-...` ではないことの guard も兼ねる。
+	result := NoSuchEmoji()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_EMOJI", errObj["code"])
+	assert.Equal(t, "684dec9d-a8c2-4364-9aa8-456c49cb1dc8", errObj["id"])
+	assert.Equal(t, UUIDNoSuchEmoji, errObj["id"])
+	assert.Equal(t, "No such emoji.", errObj["message"])
+}
+
 func TestAccessDenied(t *testing.T) {
 	result := AccessDenied()
 	errObj := result["error"].(map[string]any)

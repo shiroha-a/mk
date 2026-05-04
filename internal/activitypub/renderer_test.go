@@ -766,8 +766,9 @@ func (s *stubEmojiResolver) FindByNameAndHost(name string, _ *string) (*model.Em
 func TestRenderer_RenderNote_EmojiTag(t *testing.T) {
 	r := newRenderer()
 	emojiURI := "https://example.com/emojis/blobcat"
+	licenseText := "CC0"
 	r.SetEmojiResolver(&stubEmojiResolver{emojis: map[string]*model.Emoji{
-		"blobcat": {Name: "blobcat", PublicURL: "https://example.com/files/blobcat.webp", URI: &emojiURI},
+		"blobcat": {Name: "blobcat", PublicURL: "https://example.com/files/blobcat.webp", URI: &emojiURI, License: &licenseText},
 	}})
 	idGen := newIDGen(t)
 	n := &model.Note{
@@ -785,6 +786,11 @@ func TestRenderer_RenderNote_EmojiTag(t *testing.T) {
 	assert.Equal(t, ":blobcat:", et.Name)
 	assert.Equal(t, "https://example.com/files/blobcat.webp", et.Icon.URL)
 	assert.Equal(t, emojiURI, et.ID)
+	// #731: license は upstream Misskey TS と同じく `_misskey_license` wrapper で
+	// federation 出力する。受信側 instance はこれを拾って emoji.license に取り込む。
+	require.NotNil(t, et.License, "_misskey_license wrapper should be emitted")
+	require.NotNil(t, et.License.FreeText)
+	assert.Equal(t, "CC0", *et.License.FreeText)
 }
 
 func TestRenderer_RenderPerson_EmojiTag(t *testing.T) {

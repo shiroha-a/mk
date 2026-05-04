@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -237,6 +238,37 @@ func TestEmojiRepository_UpdateFields_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, after.Category)
 	assert.Equal(t, "happy", *after.Category)
+}
+
+// TestEmojiRepository_UpdateFields_AliasesEmptySlice は #729 regression
+// guard。`pq.StringArray{}` (空 slice) で aliases 列を更新する経路が
+// PostgreSQL の NOT NULL DEFAULT '{}' 制約と整合することを確認する。
+//
+// 旧 EmojiUpdate handler は `[]string` を直接 GORM に渡していて、空 slice
+// が NULL として serialize され "null value in column \"aliases\" violates
+// not-null constraint" で UpdateFields が失敗していた (frontend が
+// aliases:[] で送るたびに NO_SUCH_EMOJI が返る病状)。本 test は
+// `pq.StringArray` 経由の UpdateFields が成功することを保証する。
+func TestEmojiRepository_UpdateFields_AliasesEmptySlice(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e := &model.Emoji{
+		ID: "em_uf_alias", Name: "alias_target", OriginalURL: "https://x",
+		Aliases: pq.StringArray{"old"},
+	}
+	require.NoError(t, repo.Create(e))
+	defer cleanupEmoji(t, e.ID)
+
+	// 空 slice の pq.StringArray は SQL の '{}' に変換される
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray{}}))
+	after, err := repo.FindByID(e.ID)
+	require.NoError(t, err)
+	assert.Empty(t, []string(after.Aliases), "empty pq.StringArray should clear aliases without NULL constraint violation")
+
+	// 通常の値も問題なく更新できる
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray{"a", "b"}}))
+	after, err = repo.FindByID(e.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a", "b"}, []string(after.Aliases))
 }
 
 func TestEmojiRepository_UpdateFieldsMany(t *testing.T) {

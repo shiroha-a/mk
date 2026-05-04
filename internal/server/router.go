@@ -1348,7 +1348,13 @@ func (s *Server) setupRoutes() {
 	// Phase 7.4: drive/* — 全て実データハンドラに移行済み
 
 	// Static file serving for LocalStorage
-	// MIME type はファイル内容の先頭から自動判定する。
+	// MIME type はファイル内容の先頭から自動判定し、`http.ServeContent` で
+	// Range / If-Modified-Since / Content-Length 対応の正しい応答を返す。
+	//
+	// 旧実装は echo の `c.Stream` + `io.MultiReader` で chunked transfer に
+	// 倒していたが、Cloudflare Tunnel 経由のデプロイで bigger-than-buffer
+	// (33KB 程度) なファイルが truncate される問題があった (#730)。明示
+	// Content-Length + Cache-Control: no-transform でこれを回避する。
 	s.echo.GET("/files/:accessKey", func(c echo.Context) error {
 		key := c.Param("accessKey")
 		body, err := driveStorage.Get(key)
@@ -1357,13 +1363,40 @@ func (s *Server) setupRoutes() {
 		}
 		defer body.Close()
 
-		// 先頭512バイトを読んでMIME typeを判定
+		// LocalStorage は *os.File を返すので io.ReadSeeker として扱える。
+		// 互換性のため type assertion で seekable かを確認し、非対応 (将来
+		// S3 等の non-seekable storage を増やした場合) なら全 body を memory
+		// に読み込む fallback にフォールバックする。
+		seeker, ok := body.(io.ReadSeeker)
+		if !ok {
+			data, rerr := io.ReadAll(body)
+			if rerr != nil {
+				return c.NoContent(http.StatusInternalServerError)
+			}
+			seeker = bytes.NewReader(data)
+		}
+
+		// 先頭 512 バイト読んで MIME type を判定 → 元位置に戻す
 		buf := make([]byte, 512)
-		n, _ := body.Read(buf)
+		n, _ := seeker.Read(buf)
 		contentType := http.DetectContentType(buf[:n])
-		// 読んだ分 + 残りを連結して配信
-		mr := io.MultiReader(bytes.NewReader(buf[:n]), body)
-		return c.Stream(http.StatusOK, contentType, mr)
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
+		// `Cache-Control: no-transform` で Cloudflare Polish 等 CDN 中間層
+		// による画像再エンコードを抑止する (#730)。Polish は animated WebP
+		// を別 size で出力するため UDS デプロイ環境で「絵文字がチカチカ
+		// する + サイズが切れる」現象を起こす。`immutable` で長期 cache 化、
+		// `no-transform` で binary 1:1 配信を契約する。
+		c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable, no-transform")
+		c.Response().Header().Set(echo.HeaderContentType, contentType)
+		// http.ServeContent が Content-Length / Range / If-Modified-Since を
+		// 適切に処理する。modtime 不明なので零値を渡し ETag/Last-Modified は
+		// emit しないが、Cache-Control: immutable でクライアント側 cache は
+		// 効く。
+		http.ServeContent(c.Response(), c.Request(), key, time.Time{}, seeker)
+		return nil
 	})
 
 	// Media proxy endpoint

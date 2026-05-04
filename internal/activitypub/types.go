@@ -208,6 +208,19 @@ type EmojiTag struct {
 	Icon    Image  `json:"icon"`
 	ID      string `json:"id,omitempty"`
 	Updated string `json:"updated,omitempty"`
+	// License は upstream Misskey TS の AP renderer (renderEmoji) が
+	// `_misskey_license: { freeText: ... }` 構造で federate する license 情報
+	// (#731)。AP 標準には emoji license 概念が無いので Misskey 拡張として
+	// 送受信する。nil = 受信時 license フィールド無し / 送信時は wrapper を
+	// 出さない、non-nil = wrapper を出力 (FreeText が空でも対称性のため
+	// オブジェクトは出す)。`,omitempty` はポインタ nil でフィールド省略する。
+	License *MisskeyLicense `json:"_misskey_license,omitempty"`
+}
+
+// MisskeyLicense is the upstream `_misskey_license` AP extension wrapper.
+// Misskey TS の renderEmoji 互換 (`{freeText: emoji.license}`)。
+type MisskeyLicense struct {
+	FreeText *string `json:"freeText"`
 }
 
 // Activity is the base type embedded by all activity types.

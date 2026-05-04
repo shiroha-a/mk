@@ -525,6 +525,12 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 		if emoji.URI != nil {
 			tag.ID = *emoji.URI
 		}
+		// #731: upstream Misskey TS の renderEmoji と同じく `_misskey_license`
+		// を出力する。受信側 mk-go / Misskey TS は wrapper を見て license を
+		// 取り込む (extractEmojiTags)。emoji.License が nil でも、wrapper を
+		// 出力して FreeText: null を明示することで「license 未設定」を
+		// 連合先に伝える (upstream renderer の挙動と一致)。
+		tag.License = &MisskeyLicense{FreeText: emoji.License}
 		*tags = append(*tags, tag)
 	}
 }

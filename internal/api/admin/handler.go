@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -1419,7 +1420,12 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	// ErrRecordNotFound に昇格済み (#650 問題 2)).
 	before, err := h.emojiRepo.FindByID(req.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "684b7e7e-7e91-4e4c-a5cc-8050e4b8e0d8"))
+		// #729: 再現報告のため request 側 id と原因 (find vs update path) を
+		// log に残す。frontend 側で stale id を握っているのか、repo 側で
+		// 何か起きているのか切り分けに使う。
+		slog.WarnContext(c.Request().Context(), "EmojiUpdate: NO_SUCH_EMOJI on FindByID",
+			"id", req.ID, "err", err)
+		return c.JSON(http.StatusNotFound, apierr.NoSuchEmoji())
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
@@ -1429,7 +1435,12 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		fields["category"] = *req.Category
 	}
 	if req.Aliases != nil {
-		fields["aliases"] = req.Aliases
+		// `[]string` を直接 GORM に渡すと PostgreSQL の varchar[] 列に対して
+		// NULL として serialize される (#729)。`pq.StringArray` で wrap する
+		// と空 slice 含めて `'{}'` PostgreSQL array リテラルに正しく変換さ
+		// れる。Aliases 列は NOT NULL DEFAULT '{}' なので NULL 書き込みは
+		// 即制約違反でエラーになっていた。
+		fields["aliases"] = pq.StringArray(req.Aliases)
 	}
 	if req.License != nil {
 		fields["license"] = *req.License
@@ -1445,7 +1456,11 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if err := h.emojiRepo.UpdateFields(req.ID, fields); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "684b7e7e-7e91-4e4c-a5cc-8050e4b8e0d8"))
+		// #729: FindByID 直後の RowsAffected==0 はほぼ起こらない (concurrent
+		// delete 等のレース) ので診断 log で気付けるようにする。
+		slog.WarnContext(c.Request().Context(), "EmojiUpdate: NO_SUCH_EMOJI on UpdateFields",
+			"id", req.ID, "fields", fieldKeys(fields), "err", err)
+		return c.JSON(http.StatusNotFound, apierr.NoSuchEmoji())
 	}
 	after, err := h.emojiRepo.FindByID(req.ID)
 	if err != nil {
@@ -1459,6 +1474,18 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		"after":   after,
 	})
 	return c.NoContent(http.StatusNoContent)
+}
+
+// fieldKeys は map のキー一覧を sort 済み slice で返す診断 log 用 helper。
+// log 行に value を直接含めると long string が混じって読みにくいので key
+// のみ列挙する。
+func fieldKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // EmojiDelete handles POST /api/admin/emoji/delete.

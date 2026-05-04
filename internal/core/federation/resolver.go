@@ -987,6 +987,19 @@ func (r *Resolver) extractLocalNoteID(uri string) string {
 	return rest
 }
 
+// pointerStringsEqual returns true if both *string point to equal values
+// (nil/nil 同士も等しい)。upsertEmojis の license diff など、`*string` で
+// 「未指定」と「明示空文字列」を区別する経路で使う。
+func pointerStringsEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
 // mergeMentionIDs merges two ordered ID slices preserving order and removing
 // duplicates. text 由来 mention と AP `tag` Mention 由来 mention を合算する
 // (#397) ために使う。両方空なら nil ではなく非 nil 空 (pq の '{}' 既定値と
@@ -1169,12 +1182,21 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 		}
 		id, _ := m["id"].(string)
 		updated, _ := m["updated"].(string)
+		// upstream Misskey TS の renderEmoji は license を `_misskey_license`
+		// オブジェクト (`{freeText: string}`) で federate する (#731)。
+		// 欠落 / 不正型は nil で残し、明示的な "" との区別を保つ。
+		var license *activitypub.MisskeyLicense
+		if lic, ok := m["_misskey_license"].(map[string]any); ok {
+			free, _ := lic["freeText"].(string)
+			license = &activitypub.MisskeyLicense{FreeText: &free}
+		}
 		out = append(out, activitypub.EmojiTag{
 			Type:    "Emoji",
 			Name:    name,
 			Icon:    activitypub.Image{Type: "Image", URL: iconURL},
 			ID:      id,
 			Updated: updated,
+			License: license,
 		})
 	}
 	return out
@@ -1230,6 +1252,17 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.Str
 			if tag.ID != "" && (existing.URI == nil || *existing.URI != tag.ID) {
 				updates["uri"] = &tag.ID
 			}
+			// AP `_misskey_license.freeText` の差分も追従する (#731)。
+			// nil wrapper = AP tag に license フィールド無し → 既存値を温存
+			// (連合先が一時的に license export を停止した場合に上書きしない)。
+			// FreeText nil 内部 = wrapper はあるが空 → 明示的に空 license で上書き。
+			if tag.License != nil {
+				newLicense := tag.License.FreeText
+				existingLicense := existing.License
+				if !pointerStringsEqual(newLicense, existingLicense) {
+					updates["license"] = newLicense
+				}
+			}
 			if len(updates) > 0 {
 				if err := r.emojiRepo.UpdateFields(existing.ID, updates); err != nil {
 					// updateに失敗してもrow自体は存在するので名前は返してよい
@@ -1249,6 +1282,12 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.Str
 			Host:        &host,
 			OriginalURL: tag.Icon.URL,
 			PublicURL:   tag.Icon.URL,
+		}
+		// #731: AP `_misskey_license` 経由で federation 直後に保存。
+		// wrapper があれば FreeText (nil 含む) を取り込む、wrapper 自体が
+		// nil なら model.Emoji.License は nil のまま。
+		if tag.License != nil {
+			emoji.License = tag.License.FreeText
 		}
 		if uri != "" {
 			emoji.URI = &uri
