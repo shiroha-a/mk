@@ -326,6 +326,20 @@ func TestNotes_PagingSinceID(t *testing.T) {
 	assert.Equal(t, []string{id3, id2}, rows)
 }
 
+// #693 review #1: 同一 ms に同じアンテナへ複数回 pushNote しても XADD が
+// 失敗せず、両方が stream に格納されて一覧取得できる (旧 `<ms>-0` 固定実装は
+// monotonic 違反で 2 件目を drop していた)。
+func TestPushNote_SameMsDoesNotCollide(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	now := time.Now()
+	require.NoError(t, svc.pushNote(context.Background(), "a1", "n1", now))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", "n2", now), "同 ms でも 2 件目が成功すること")
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n1", "n2"}, rows)
+}
+
 // #693: 不正な ID (ParseTime 失敗) は無視されて全範囲が返る (安全側 fallback)。
 func TestNotes_PagingInvalidID(t *testing.T) {
 	svc, repo := newSvc(t)

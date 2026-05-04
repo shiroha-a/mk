@@ -289,6 +289,12 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	}
 	end := "+"
 	start := "-"
+	// `(<ms>-0` exclusive bound は entry id >= "<ms>-0" を全て除外する。
+	// pushNote が `<ms>-*` で seq を自動採番するので同 ms に複数 entry が
+	// 並びうるが、それらは boundary note と「タイ」とみなしてまとめて除外
+	// する (untilID の場合: 厳密に "古い" のみ返す; sinceID の場合は逆)。
+	// FE は最後に表示した note の id を渡してくるので、その note 自身を
+	// 含めると無限ループするのを避ける重要な不変条件。
 	if untilID != "" {
 		if t, err := s.idGen.ParseTime(untilID); err == nil {
 			end = fmt.Sprintf("(%d-0", t.UnixMilli())
@@ -346,8 +352,15 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 }
 
 // pushNote appends a note id to the antenna's Redis stream with MAXLEN trim.
+//
+// Stream entry id は `<unix_ms>-*` 形式で発番する: ms 部分は note の作成時刻
+// から派生させて時系列順序を保ち、seq 部分は Redis に auto-increment させる。
+// 旧実装の `<unix_ms>-0` 固定だと同一 ms に同じアンテナへ複数 note を push
+// した際に Redis Stream の monotonic 制約に違反して XADD が失敗していた
+// (#693 PR review #1)。`*` を使うと同 ms 内で seq=0,1,2,... と自動採番されて
+// 衝突しない。
 func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, now time.Time) error {
-	streamID := fmt.Sprintf("%d-0", now.UnixMilli())
+	streamID := fmt.Sprintf("%d-*", now.UnixMilli())
 	return s.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey(antennaID),
 		MaxLen: MaxNotesPerAntenna,
