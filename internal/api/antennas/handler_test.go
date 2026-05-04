@@ -3,12 +3,14 @@ package antennas
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
@@ -377,6 +379,46 @@ type failingNoteRepo struct {
 
 func (r *failingNoteRepo) FindManyByIDsWithUser(_ []string) ([]*model.Note, error) {
 	return nil, errors.New("boom")
+}
+
+// #693: handler が untilId / sinceId を service 層に渡し、結果として
+// stream の paging が効くこと。strictly older / newer な区切りで挙動が変わる
+// ことを e2e (redis 経由) で確認する。
+func TestNotes_PagingUntilId(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	// stream ID 衝突を避けるため antenna ID を test 専用に分ける。
+	repo.Antennas["a693u"] = &model.Antenna{ID: "a693u", UserID: "alice"}
+
+	t1 := time.Now()
+	idA := idGen.Generate(t1)
+	idB := idGen.Generate(t1.Add(time.Millisecond))
+	idC := idGen.Generate(t1.Add(2 * time.Millisecond))
+	entries := []struct {
+		noteID string
+		ms     int64
+	}{
+		{idA, t1.UnixMilli()},
+		{idB, t1.Add(time.Millisecond).UnixMilli()},
+		{idC, t1.Add(2 * time.Millisecond).UnixMilli()},
+	}
+	for _, e := range entries {
+		require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
+			Stream: "antennaTimeline:a693u",
+			ID:     fmt.Sprintf("%d-0", e.ms),
+			Values: map[string]any{"noteId": e.noteID},
+		}).Err())
+		noteRepo.Notes[e.noteID] = &model.Note{ID: e.noteID, UserID: "alice"}
+	}
+
+	// untilId = idC → strictly older
+	body := fmt.Sprintf(`{"antennaId":"a693u","untilId":%q}`, idC)
+	c, rec := newReq(t, body)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), idA)
+	assert.Contains(t, rec.Body.String(), idB)
+	assert.NotContains(t, rec.Body.String(), idC, "untilId 自身は含まれてはいけない")
 }
 
 func TestNotes_NoteRepoError(t *testing.T) {

@@ -252,7 +252,7 @@ func TestNotes_HappyPath(t *testing.T) {
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
 	require.NoError(t, svc.pushNote(context.Background(), "a1", "n1", time.Now()))
 	require.NoError(t, svc.pushNote(context.Background(), "a1", "n2", time.Now().Add(time.Millisecond)))
-	rows, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }
@@ -260,17 +260,17 @@ func TestNotes_HappyPath(t *testing.T) {
 func TestNotes_LimitClamping(t *testing.T) {
 	svc, repo := newSvc(t)
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
-	rows, err := svc.Notes(context.Background(), "u1", "a1", -1)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", -1, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, rows)
-	rows, err = svc.Notes(context.Background(), "u1", "a1", 9999)
+	rows, err = svc.Notes(context.Background(), "u1", "a1", 9999, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
 
 func TestNotes_NotFound(t *testing.T) {
 	svc, _ := newSvc(t)
-	_, err := svc.Notes(context.Background(), "u1", "missing", 10)
+	_, err := svc.Notes(context.Background(), "u1", "missing", 10, "", "")
 	assert.ErrorIs(t, err, ErrAntennaNotFound)
 }
 
@@ -278,8 +278,62 @@ func TestNotes_RedisError(t *testing.T) {
 	repo := testutil.NewMockAntennaRepository()
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
 	svc := NewService(repo, testutil.NewMockUserRepository(), closedClient(t), idGen)
-	_, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	_, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	assert.Error(t, err)
+}
+
+// #693: untilID で渡した noteID より strictly old なエントリだけ返ること。
+// FE の無限スクロールが「次のページ」を取りに来た時にこれが効かないと、
+// 同じ最新 N 件を毎回返してしまう。
+func TestNotes_PagingUntilID(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	// 3 件: 古→新の順 (idGen.Generate は時間 monotonic)
+	t1 := time.Now()
+	id1 := idGen.Generate(t1)
+	id2 := idGen.Generate(t1.Add(time.Millisecond))
+	id3 := idGen.Generate(t1.Add(2 * time.Millisecond))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id1, t1))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id2, t1.Add(time.Millisecond)))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id3, t1.Add(2*time.Millisecond)))
+
+	// untilID = id3 → strictly older だけ → id2, id1 (newest first)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", id3)
+	require.NoError(t, err)
+	assert.Equal(t, []string{id2, id1}, rows)
+
+	// untilID = id1 (= 一番古い) → さらに古いものは無いので空
+	rows, err = svc.Notes(context.Background(), "u1", "a1", 10, "", id1)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
+// #693: sinceID で渡した noteID より strictly new なエントリだけ返ること。
+func TestNotes_PagingSinceID(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	t1 := time.Now()
+	id1 := idGen.Generate(t1)
+	id2 := idGen.Generate(t1.Add(time.Millisecond))
+	id3 := idGen.Generate(t1.Add(2 * time.Millisecond))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id1, t1))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id2, t1.Add(time.Millisecond)))
+	require.NoError(t, svc.pushNote(context.Background(), "a1", id3, t1.Add(2*time.Millisecond)))
+
+	// sinceID = id1 → strictly newer → id3, id2 (newest first)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, id1, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{id3, id2}, rows)
+}
+
+// #693: 不正な ID (ParseTime 失敗) は無視されて全範囲が返る (安全側 fallback)。
+func TestNotes_PagingInvalidID(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	require.NoError(t, svc.pushNote(context.Background(), "a1", "n1", time.Now()))
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "not-an-id")
+	require.NoError(t, err)
+	assert.Len(t, rows, 1, "ParseTime 失敗時は全 range にフォールバックして既存挙動を維持")
 }
 
 func TestNotes_SkipsBadValue(t *testing.T) {
@@ -291,7 +345,7 @@ func TestNotes_SkipsBadValue(t *testing.T) {
 		ID:     "1-0",
 		Values: map[string]any{"other": "x"},
 	}).Err())
-	rows, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
@@ -330,7 +384,7 @@ func TestOnNoteCreated_HappyPath(t *testing.T) {
 	author := &model.User{ID: "author", Username: "alice"}
 	svc.OnNoteCreated(n, author)
 
-	rows, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n1"}, rows)
 }
@@ -400,7 +454,7 @@ func TestOnNoteCreated_NoMatchSkipped(t *testing.T) {
 		&model.User{ID: "author", Username: "alice"},
 	)
 
-	rows, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
@@ -688,7 +742,7 @@ func TestOnNoteCreated_ListSource_OnlyMemberNotesAppear(t *testing.T) {
 	n4 := &model.Note{ID: "n4", UserID: "dave", Text: &text4}
 	svc.OnNoteCreated(n4, &model.User{ID: "dave", Username: "dave"})
 
-	rows, err := svc.Notes(context.Background(), "owner", "ant1", 100)
+	rows, err := svc.Notes(context.Background(), "owner", "ant1", 100, "", "")
 	require.NoError(t, err)
 	// alice と carol のノートだけが含まれ、bob と dave のノートは含まれない
 	assert.Len(t, rows, 2)
@@ -737,7 +791,7 @@ func TestOnNoteCreated_ListSource_WithKeywords(t *testing.T) {
 		&model.User{ID: "bob", Username: "bob"},
 	)
 
-	rows, err := svc.Notes(context.Background(), "owner", "ant2", 100)
+	rows, err := svc.Notes(context.Background(), "owner", "ant2", 100, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n1"}, rows)
 }
@@ -850,7 +904,7 @@ func TestOnNoteCreated_ListSource_MemberRemoved(t *testing.T) {
 		&model.User{ID: "bob", Username: "bob"},
 	)
 
-	rows, err := svc.Notes(context.Background(), "owner", "ant-rm", 100)
+	rows, err := svc.Notes(context.Background(), "owner", "ant-rm", 100, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n-alice"}, rows)
 }

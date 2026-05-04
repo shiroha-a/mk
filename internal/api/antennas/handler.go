@@ -237,9 +237,15 @@ func (h *Handler) List(c echo.Context) error {
 }
 
 // NotesRequest is the request body for antennas/notes.
+//
+// SinceID / UntilID は upstream Misskey TS と同じ paging key (#693)。
+// 設定しないと FE が無限スクロールするたびに同じ最新 N 件を取り続けて
+// 「同じノートが何度も表示される」現象になる。
 type NotesRequest struct {
 	AntennaID string `json:"antennaId"`
 	Limit     int    `json:"limit"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
 }
 
 // Notes handles POST /api/antennas/notes.
@@ -249,7 +255,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.AntennaID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit)
+	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit, req.SinceID, req.UntilID)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):

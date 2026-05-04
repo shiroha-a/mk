@@ -265,9 +265,19 @@ func (s *Service) ListByUser(userID string) ([]*model.Antenna, error) {
 	return s.repo.ListByUser(userID)
 }
 
-// Notes returns the most recent note ids matched by the antenna, newest first.
+// Notes returns note ids matched by the antenna, newest first, optionally
+// constrained by `untilID` (strict upper bound — return notes strictly older)
+// or `sinceID` (strict lower bound — return notes strictly newer)。
 // limit <= 0 ならデフォルト 10、上限 100。
-func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit int) ([]string, error) {
+//
+// Redis Stream の entry id は `<unix_ms>-<seq>` 形式で、pushNote が note の
+// 作成時刻 (= idGen.ParseTime で取れる) から派生させて発番している。よって
+// untilID / sinceID で渡された noteID を ParseTime → unix_ms に変換し、Redis
+// Stream の exclusive range syntax (`(<id>`) で上限/下限を指定できる。
+//
+// untilID / sinceID が空なら全 range を見て最新 N 件を返す (旧挙動互換)。
+// パース失敗時は安全側に bound を緩める (= 全 range)。
+func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit int, sinceID, untilID string) ([]string, error) {
 	if _, err := s.Show(ownerID, antennaID); err != nil {
 		return nil, err
 	}
@@ -277,7 +287,19 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	if limit > 100 {
 		limit = 100
 	}
-	res, err := s.client.XRevRangeN(ctx, streamKey(antennaID), "+", "-", int64(limit)).Result()
+	end := "+"
+	start := "-"
+	if untilID != "" {
+		if t, err := s.idGen.ParseTime(untilID); err == nil {
+			end = fmt.Sprintf("(%d-0", t.UnixMilli())
+		}
+	}
+	if sinceID != "" {
+		if t, err := s.idGen.ParseTime(sinceID); err == nil {
+			start = fmt.Sprintf("(%d-0", t.UnixMilli())
+		}
+	}
+	res, err := s.client.XRevRangeN(ctx, streamKey(antennaID), end, start, int64(limit)).Result()
 	if err != nil {
 		return nil, err
 	}

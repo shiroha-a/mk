@@ -21,7 +21,7 @@ func TestNoteCreateHook_OnNoteCreatedForwards(t *testing.T) {
 		&model.User{ID: "u2", Username: "alice"},
 	)
 
-	rows, err := svc.Notes(context.Background(), "u1", "a1", 10)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n1"}, rows)
 }
