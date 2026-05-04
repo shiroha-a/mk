@@ -1367,8 +1367,18 @@ func (s *Server) setupRoutes() {
 		// 互換性のため type assertion で seekable かを確認し、非対応 (将来
 		// S3 等の non-seekable storage を増やした場合) なら全 body を memory
 		// に読み込む fallback にフォールバックする。
+		// modtime も *os.File なら Stat() から取得して If-Modified-Since の
+		// 304 経路を有効にする。それ以外は零値で http.ServeContent が
+		// Last-Modified を出さない (Cache-Control: immutable で代替)。
+		var modtime time.Time
 		seeker, ok := body.(io.ReadSeeker)
-		if !ok {
+		if ok {
+			if f, isFile := body.(*os.File); isFile {
+				if st, err := f.Stat(); err == nil {
+					modtime = st.ModTime()
+				}
+			}
+		} else {
 			data, rerr := io.ReadAll(body)
 			if rerr != nil {
 				return c.NoContent(http.StatusInternalServerError)
@@ -1392,10 +1402,9 @@ func (s *Server) setupRoutes() {
 		c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable, no-transform")
 		c.Response().Header().Set(echo.HeaderContentType, contentType)
 		// http.ServeContent が Content-Length / Range / If-Modified-Since を
-		// 適切に処理する。modtime 不明なので零値を渡し ETag/Last-Modified は
-		// emit しないが、Cache-Control: immutable でクライアント側 cache は
-		// 効く。
-		http.ServeContent(c.Response(), c.Request(), key, time.Time{}, seeker)
+		// 適切に処理する。modtime 取得できれば Last-Modified を発行して
+		// 304 経路も活きる。
+		http.ServeContent(c.Response(), c.Request(), key, modtime, seeker)
 		return nil
 	})
 

@@ -1896,10 +1896,15 @@ func TestExtractEmojiTags(t *testing.T) {
 		assert.Equal(t, "CC-BY-4.0", *got[0].License.FreeText)
 	})
 
-	t.Run("emoji tag with _misskey_license but null freeText", func(t *testing.T) {
+	t.Run("emoji tag _misskey_license null freeText keeps FreeText nil", func(t *testing.T) {
 		// upstream renderEmoji は emoji.license=null でも wrapper を出す。
-		// FreeText が JSON null の時は string assertion が失敗して空文字列に
-		// なるので、FreeText は &"" として残る (license 情報あり、内容は空)。
+		// 3 状態を区別する設計 (#731):
+		//   - wrapper 欠落 → License = nil ("license 情報が federate されて
+		//     いない", 既存値温存)
+		//   - wrapper あり + freeText=null → FreeText = nil ("license は明示
+		//     的に未設定", NULL 上書き OK)
+		//   - wrapper あり + freeText=string → 具体値
+		// JSON null は string assertion が失敗するので FreeText は nil のまま。
 		tags := []any{
 			map[string]any{
 				"type": "Emoji",
@@ -1916,8 +1921,7 @@ func TestExtractEmojiTags(t *testing.T) {
 		got := federation.ExtractEmojiTags(tags)
 		require.Len(t, got, 1)
 		require.NotNil(t, got[0].License, "wrapper present even when freeText is null")
-		require.NotNil(t, got[0].License.FreeText)
-		assert.Equal(t, "", *got[0].License.FreeText, "JSON null freeText → empty string in struct")
+		assert.Nil(t, got[0].License.FreeText, "JSON null freeText → FreeText nil (explicit no license)")
 	})
 
 	t.Run("non-emoji tags filtered out", func(t *testing.T) {

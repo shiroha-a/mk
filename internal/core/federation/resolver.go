@@ -1183,12 +1183,19 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 		id, _ := m["id"].(string)
 		updated, _ := m["updated"].(string)
 		// upstream Misskey TS の renderEmoji は license を `_misskey_license`
-		// オブジェクト (`{freeText: string}`) で federate する (#731)。
-		// 欠落 / 不正型は nil で残し、明示的な "" との区別を保つ。
+		// オブジェクト (`{freeText: string|null}`) で federate する (#731)。
+		// 3 状態を区別して保存する:
+		//   - wrapper 欠落 → License = nil ("license 情報が federate されて
+		//     いない" = 上書きしない)
+		//   - wrapper あり + freeText=null → FreeText = nil ("license は明示的
+		//     に未設定" = NULL 上書き OK)
+		//   - wrapper あり + freeText=string → FreeText = &string (具体値)
 		var license *activitypub.MisskeyLicense
 		if lic, ok := m["_misskey_license"].(map[string]any); ok {
-			free, _ := lic["freeText"].(string)
-			license = &activitypub.MisskeyLicense{FreeText: &free}
+			license = &activitypub.MisskeyLicense{}
+			if free, ok := lic["freeText"].(string); ok {
+				license.FreeText = &free
+			}
 		}
 		out = append(out, activitypub.EmojiTag{
 			Type:    "Emoji",
