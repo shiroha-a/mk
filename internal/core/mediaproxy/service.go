@@ -28,7 +28,8 @@ import (
 	_ "github.com/gen2brain/jpegxl"
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
-	_ "github.com/spakin/netpbm" // PBM/PGM/PPM/PAM input decode (#672 Phase 1)
+	_ "github.com/mrjoshuak/go-jpeg2000" // JP2/J2K input decode (#734)
+	_ "github.com/spakin/netpbm"         // PBM/PGM/PPM/PAM input decode (#672 Phase 1)
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -114,6 +115,14 @@ var browsersafeMIMEs = map[string]bool{
 	// TGA: pure Go decode (#672 Phase 1)。同上。
 	"image/x-tga":   true,
 	"image/x-targa": true,
+	// JPEG 2000 (JP2 file format / J2K codestream): pure Go decode (#734)。
+	// mrjoshuak/go-jpeg2000 が image.RegisterFormat 経由で JP2 / J2K の magic
+	// bytes (`\x00\x00\x00\x0cjP\x20\x20...` / `\xff\x4f\xff\x51`) を登録するので
+	// decodeImage 経由で透過的に処理される。convertible 経路で WebP/AVIF へ
+	// 変換出力。
+	"image/jp2":      true,
+	"image/jpeg2000": true,
+	"image/jpx":      true,
 	// JPEG XR / MNG: decode 用 pure Go library が無いため pass-through で
 	// 配信し browser ネイティブ対応 (Edge legacy / 一部 viewer plugin) に
 	// 委譲する (#672 Phase 1 partial)。完全 transcode は cgo 依存となる
@@ -655,7 +664,10 @@ func isConvertibleImage(mime string) bool {
 		// 透過的に扱える。output は WebP/AVIF/PNG への transcode 経路に乗る。
 		"image/x-portable-bitmap", "image/x-portable-graymap",
 		"image/x-portable-pixmap", "image/x-portable-anymap",
-		"image/x-tga", "image/x-targa":
+		"image/x-tga", "image/x-targa",
+		// #734: pure Go JPEG 2000 decoder (mrjoshuak/go-jpeg2000)。
+		// JP2/J2K 両方 magic bytes 登録済みなので imaging.Decode 経由。
+		"image/jp2", "image/jpeg2000", "image/jpx":
 		return true
 	default:
 		return false

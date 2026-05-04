@@ -1,6 +1,7 @@
 package mediaproxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	jpeg2000 "github.com/mrjoshuak/go-jpeg2000"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -372,6 +374,10 @@ func TestIsConvertibleImage(t *testing.T) {
 		{"image/x-portable-anymap", true},
 		{"image/x-tga", true},
 		{"image/x-targa", true},
+		// #734: pure Go JPEG 2000 decoder (mrjoshuak/go-jpeg2000)
+		{"image/jp2", true},
+		{"image/jpeg2000", true},
+		{"image/jpx", true},
 		// #672 Phase 1 partial: JXR / MNG は decode library が無く pass-through 用
 		// にのみ browsersafe 許可。convertible では無いので false。
 		{"image/jxr", false},
@@ -398,6 +404,8 @@ func TestBrowsersafeMIMEs(t *testing.T) {
 	// pass-through) で受け入れる
 	assert.True(t, browsersafeMIMEs["image/x-portable-pixmap"])
 	assert.True(t, browsersafeMIMEs["image/x-tga"])
+	assert.True(t, browsersafeMIMEs["image/jp2"])
+	assert.True(t, browsersafeMIMEs["image/jpeg2000"])
 	assert.True(t, browsersafeMIMEs["image/jxr"])
 	assert.True(t, browsersafeMIMEs["video/x-mng"])
 	assert.False(t, browsersafeMIMEs["application/javascript"])
@@ -618,6 +626,27 @@ func TestFetch_PassThrough_MNG(t *testing.T) {
 	assert.Equal(t, "video/x-mng", result.ContentType)
 	body, _ := io.ReadAll(result.Body)
 	assert.Equal(t, mngBytes, body)
+}
+
+// TestDecodeImage_JP2 は #734 で追加した JPEG 2000 pure Go decoder
+// (mrjoshuak/go-jpeg2000) の input 経路を確認する。Encode → Decode の
+// round-trip で bounds が保たれれば OK。標準 image.Decode 経由で動作する。
+func TestDecodeImage_JP2(t *testing.T) {
+	// 2x2 RGB image を JP2 で encode してから decode で読み直す
+	src := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	src.Set(0, 0, color.RGBA{R: 255, A: 255})
+	src.Set(1, 0, color.RGBA{G: 255, A: 255})
+	src.Set(0, 1, color.RGBA{B: 255, A: 255})
+	src.Set(1, 1, color.RGBA{R: 255, G: 255, A: 255})
+
+	var buf bytes.Buffer
+	require.NoError(t, jpeg2000.Encode(&buf, src, nil), "encode JP2")
+	require.NotEmpty(t, buf.Bytes())
+
+	img, err := decodeImage(buf.Bytes(), "image/jp2")
+	require.NoError(t, err)
+	assert.Equal(t, 2, img.Bounds().Dx())
+	assert.Equal(t, 2, img.Bounds().Dy())
 }
 
 // TestDecodeImage_TGA は #672 Phase 1 で追加した TGA decoder (blezek/tga)
