@@ -43,6 +43,16 @@ func TestNoSuchUser(t *testing.T) {
 	assert.Equal(t, UUIDNoSuchUser, errObj["id"])
 }
 
+func TestNoSuchNoteDraft(t *testing.T) {
+	// #688: upstream notes/drafts/{update,delete} 互換。code / id / message
+	// が完全一致することを保証する (frontend i18n lookup の安定性のため)。
+	result := NoSuchNoteDraft()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_NOTE_DRAFT", errObj["code"])
+	assert.Equal(t, UUIDNoSuchNoteDraft, errObj["id"])
+	assert.Equal(t, "No such note draft.", errObj["message"])
+}
+
 func TestAccessDenied(t *testing.T) {
 	result := AccessDenied()
 	errObj := result["error"].(map[string]any)

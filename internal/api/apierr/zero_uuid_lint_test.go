@@ -10,16 +10,14 @@ import (
 )
 
 // TestZeroUUIDLint walks internal/api/ and fails if any non-test source
-// file still contains the zero-UUID placeholder string. Phase A of #673
-// established that all generic codes (INVALID_PARAM / INTERNAL_ERROR /
-// NOT_FOUND) flow through apierr helpers with stable UUIDs; this lint
-// keeps regressions from sneaking back in.
+// file still contains the zero-UUID placeholder string. Phase A (#673) で
+// 汎用 code (INVALID_PARAM / INTERNAL_ERROR / NOT_FOUND) を helper 経由化
+// し、Phase B (#688) で endpoint 固有の zero-UUID もすべて upstream UUID に
+// 置き換えた。本 lint は placeholder 再導入の regression を CI で塞ぐ。
 //
-// Endpoint-specific codes still pending #673 Phase B (NO_SUCH_DRAFT) are
-// listed in pendingZeroUUIDOccurrences below as exceptions that this test
-// tolerates until each gets its proper upstream UUID. **DO NOT add new
-// entries** — instead pick the right Misskey TS UUID and use the apierr
-// helper.
+// **DO NOT add entries to pendingExceptions** — 新しい endpoint 固有 code
+// が必要なら apierr helper を新設 (例: NoSuchNoteDraft) して upstream Misskey
+// TS の UUID を採用すること。
 func TestZeroUUIDLint(t *testing.T) {
 	const placeholder = "00000000-0000-0000-0000-000000000000"
 
@@ -29,9 +27,10 @@ func TestZeroUUIDLint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pendingExceptions := map[string]int{
-		"api/notes/handler_drafts.go": 1, // NO_SUCH_DRAFT
-	}
+	// Phase B 完了後は空。zero-UUID が無いことを保証する pure regression
+	// guard として機能する。万が一新規導入が必要になったら、ここを増やす
+	// のではなく helper / UUID を新設する。
+	pendingExceptions := map[string]int{}
 
 	violations := map[string]int{}
 	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {

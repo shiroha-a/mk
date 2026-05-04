@@ -83,7 +83,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	}
 	draft, err := h.draftRepo.FindByIDAndUser(req.DraftID, user.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_DRAFT", "No such draft.", "00000000-0000-0000-0000-000000000000"))
+		return c.JSON(http.StatusNotFound, apierr.NoSuchNoteDraft())
 	}
 	if req.Text != nil {
 		draft.Text = req.Text

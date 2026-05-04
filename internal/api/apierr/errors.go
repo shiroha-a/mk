@@ -79,6 +79,12 @@ const (
 	// UUIDNoSecurityKey は upstream `i/2fa/password-less` の `noKey` UUID。
 	// upstream typo (`9a8g`) を保持する理由は UUIDNoSuchKey と同じ。
 	UUIDNoSecurityKey = "f9c54d7f-d4c2-4d3c-9a8g-a70daac86512"
+
+	// UUIDNoSuchNoteDraft は upstream `notes/drafts/{update,delete}` 共通の
+	// `noSuchNoteDraft` UUID (third_party/misskey/.../notes/drafts/update.ts)。
+	// code は upstream に合わせて `NO_SUCH_NOTE_DRAFT` を使う (#688 / #673
+	// Phase B)。
+	UUIDNoSuchNoteDraft = "49cd6b9d-848e-41ee-b0b9-adaca711a6b1"
 )
 
 // InvalidParam returns a 400 INVALID_PARAM error response. The optional
@@ -134,6 +140,13 @@ func NoSuchNote() map[string]any {
 // NoSuchUser returns a 404 NO_SUCH_USER error response.
 func NoSuchUser() map[string]any {
 	return Error("NO_SUCH_USER", "No such user.", UUIDNoSuchUser)
+}
+
+// NoSuchNoteDraft returns a 404 NO_SUCH_NOTE_DRAFT error response (#688 /
+// #673 Phase B). upstream `notes/drafts/{update,delete}` と code / id /
+// message を完全一致させる。
+func NoSuchNoteDraft() map[string]any {
+	return Error("NO_SUCH_NOTE_DRAFT", "No such note draft.", UUIDNoSuchNoteDraft)
 }
 
 // AccessDenied returns a 403 ACCESS_DENIED error response.

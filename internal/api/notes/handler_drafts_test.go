@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -165,9 +166,16 @@ func TestDraftsUpdate_Success(t *testing.T) {
 }
 
 func TestDraftsUpdate_NotFound(t *testing.T) {
+	// #688: 存在しない draftId 指定時に upstream notes/drafts/update 互換の
+	// NO_SUCH_NOTE_DRAFT (UUID 49cd6b9d-...) を返すこと。
 	h, _ := newDraftHandlerWithRepo()
 	rec := postDraft(h.DraftsUpdate, `{"draftId":"ghost"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_NOTE_DRAFT", errObj["code"])
+	assert.Equal(t, apierr.UUIDNoSuchNoteDraft, errObj["id"])
 }
 
 func TestDraftsUpdate_InvalidParam(t *testing.T) {
