@@ -109,6 +109,11 @@ type Handler struct {
 	systemAccountFetcher    SystemAccountFetcher
 	followingRepo           repository.FollowingRepository
 	unfollowEnqueuer        UnfollowEnqueuer
+	// instanceRepo は admin/federation/* の instance lookup / update を
+	// inject 可能にするための DI 口 (#676)。FederationUpdateInstance の
+	// log type 分岐をテストするため、`adminDB` 直叩きから repository 経由
+	// に剥がしている。未配線時は `adminDB` フォールバックは持たず no-op。
+	instanceRepo repository.InstanceRepository
 	// webhookTestClient は admin/system-webhook/test の fire-and-forget POST
 	// に使う SSRF-safe HTTP client。router.go で safehttp.WithProxy など共通
 	// outbound 設定を適用したものを差し込む (#638)。nil のときは default の
@@ -164,6 +169,13 @@ func (h *Handler) SetSystemAccountFetcher(f SystemAccountFetcher) {
 // SetFollowingRepo attaches a FollowingRepository for admin endpoints that
 // need to enumerate Following rows by host (e.g.
 // admin/federation/remove-all-following).
+// SetInstanceRepo wires an InstanceRepository for admin/federation handlers
+// to use when reading/updating instance rows. Without it,
+// FederationUpdateInstance early-returns 204 (#676)。
+func (h *Handler) SetInstanceRepo(r repository.InstanceRepository) {
+	h.instanceRepo = r
+}
+
 func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 	h.followingRepo = r
 }

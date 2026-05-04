@@ -1703,6 +1703,7 @@ func (s *Server) setupRoutes() {
 	modLogRepo := repository.NewModerationLogRepository(s.db)
 	recipientRepo := repository.NewAbuseReportNotificationRecipientRepository(s.db)
 	adminHandler := apiadmin.NewHandler(signupService, roleService, metaRepo, userRepo, idGen)
+	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetAbuseRepo(abuseReportRepo)
 	adminHandler.SetAbuseForwarder(coreabuse.NewForwarder(abuseReportRepo, sysAcctSvc, apRenderer, deliverService))
 	adminHandler.SetDeleteAccountEnqueuer(s.queueClient)
