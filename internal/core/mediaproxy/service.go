@@ -117,12 +117,14 @@ var browsersafeMIMEs = map[string]bool{
 	"image/x-targa": true,
 	// JPEG 2000 (JP2 file format / J2K codestream): pure Go decode (#734)。
 	// mrjoshuak/go-jpeg2000 が image.RegisterFormat 経由で JP2 / J2K の magic
-	// bytes (`\x00\x00\x00\x0cjP\x20\x20...` / `\xff\x4f\xff\x51`) を登録するので
-	// decodeImage 経由で透過的に処理される。convertible 経路で WebP/AVIF へ
-	// 変換出力。
+	// bytes (`\x00\x00\x00\x0cjP\x20\x20\r\n\x87\n` / `\xff\x4f\xff\x51`) を
+	// 登録するので decodeImage 経由で透過的に処理される。convertible 経路で
+	// WebP/AVIF へ変換出力。
 	"image/jp2":      true,
 	"image/jpeg2000": true,
-	"image/jpx":      true,
+	// JPX (Part 2 拡張) は library が "not fully supported" としているため
+	// convertible 経路には乗せず、pass-through のみ受け入れる。
+	"image/jpx": true,
 	// JPEG XR / MNG: decode 用 pure Go library が無いため pass-through で
 	// 配信し browser ネイティブ対応 (Edge legacy / 一部 viewer plugin) に
 	// 委譲する (#672 Phase 1 partial)。完全 transcode は cgo 依存となる
@@ -667,7 +669,9 @@ func isConvertibleImage(mime string) bool {
 		"image/x-tga", "image/x-targa",
 		// #734: pure Go JPEG 2000 decoder (mrjoshuak/go-jpeg2000)。
 		// JP2/J2K 両方 magic bytes 登録済みなので imaging.Decode 経由。
-		"image/jp2", "image/jpeg2000", "image/jpx":
+		// JPX (Part 2) は library 未対応のため除外 (browsersafe 側で
+		// pass-through のみ受け入れる)。
+		"image/jp2", "image/jpeg2000":
 		return true
 	default:
 		return false

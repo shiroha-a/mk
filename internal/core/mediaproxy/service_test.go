@@ -374,10 +374,12 @@ func TestIsConvertibleImage(t *testing.T) {
 		{"image/x-portable-anymap", true},
 		{"image/x-tga", true},
 		{"image/x-targa", true},
-		// #734: pure Go JPEG 2000 decoder (mrjoshuak/go-jpeg2000)
+		// #734: pure Go JPEG 2000 decoder (mrjoshuak/go-jpeg2000)。
+		// JP2/J2K は完全対応、JPX (Part 2) は library 未対応のため pass-through
+		// のみで convertible では false。
 		{"image/jp2", true},
 		{"image/jpeg2000", true},
-		{"image/jpx", true},
+		{"image/jpx", false},
 		// #672 Phase 1 partial: JXR / MNG は decode library が無く pass-through 用
 		// にのみ browsersafe 許可。convertible では無いので false。
 		{"image/jxr", false},
