@@ -206,6 +206,21 @@ func TestDraftsDelete_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestDraftsDelete_NotFound(t *testing.T) {
+	// #688 review follow-up: 存在しない draftId で削除しても upstream
+	// notes/drafts/delete.ts と同じく `NO_SUCH_NOTE_DRAFT` を返す。silent
+	// 204 だと frontend が「該当 draft が無い」を観測できないので 404 が
+	// 期待挙動。
+	h, _ := newDraftHandlerWithRepo()
+	rec := postDraft(h.DraftsDelete, `{"draftId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_NOTE_DRAFT", errObj["code"])
+	assert.Equal(t, apierr.UUIDNoSuchNoteDraft, errObj["id"])
+}
+
 // --- DraftsCount ---
 
 func TestDraftsCount_NilRepo(t *testing.T) {
