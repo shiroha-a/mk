@@ -1598,8 +1598,10 @@ func (s *Server) setupRoutes() {
 	chatService := corechat.NewService(chatRepo, idGen)
 	chatService.SetStreamingPublisher(chatPublisher)
 	chatService.SetMainStreamPublisher(mainStreamPublisher)
-	// CherryPick互換AP連合: リモートユーザー宛DMをMisskey:ChatMessageで配送
+	// CherryPick 互換 AP 連合: 1-on-1 DM を Create+Note(_misskey_talk:true) で配送 (#692)。
 	chatService.SetAPDelivery(userRepo, apRenderer, apURLs, deliverService)
+	// chatScope=followers/following/mutual 判定用に following repo を渡す (#692)。
+	chatService.SetFollowingRepo(followingRepo)
 	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
 	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。

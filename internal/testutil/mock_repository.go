@@ -449,6 +449,10 @@ func applyUserFields(u *model.User, fields map[string]any) {
 			if b, ok := v.(bool); ok {
 				u.HideOnlineStatus = b
 			}
+		case "chatScope":
+			if s, ok := v.(string); ok {
+				u.ChatScope = s
+			}
 		case "isSuspended":
 			if b, ok := v.(bool); ok {
 				u.IsSuspended = b

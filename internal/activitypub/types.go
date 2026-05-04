@@ -91,8 +91,12 @@ type Person struct {
 	MisskeyRequireSigninToViewContents  bool      `json:"_misskey_requireSigninToViewContents,omitempty"`
 	MisskeyMakeNotesFollowersOnlyBefore *int      `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
 	MisskeyMakeNotesHiddenBefore        *int      `json:"_misskey_makeNotesHiddenBefore,omitempty"`
-	MovedTo                             string    `json:"movedTo,omitempty"`
-	AlsoKnownAs                         []string  `json:"alsoKnownAs,omitempty"`
+	// MisskeyCanChat は CherryPick の chat 連合 capability flag (#692)。
+	// 受信側 instance が DM を受け付けるか (false なら拒絶) を表す boolean。
+	// pointer で持つことで「未指定 (= 旧実装 / 互換) → 許可」を区別する。
+	MisskeyCanChat *bool    `json:"_misskey_canChat,omitempty"`
+	MovedTo        string   `json:"movedTo,omitempty"`
+	AlsoKnownAs    []string `json:"alsoKnownAs,omitempty"`
 }
 
 // Note represents a note object (microblog post).
@@ -112,6 +116,10 @@ type Note struct {
 	MisskeyContent string   `json:"_misskey_content,omitempty"`
 	MisskeyQuote   string   `json:"_misskey_quote,omitempty"`
 	QuoteURL       string   `json:"quoteUrl,omitempty"`
+	// MisskeyTalk は CherryPick / レガシー Misskey のチャット連合 flag (#692)。
+	// `_misskey_talk: true` が立った Note は ApInboxService で chat message
+	// として処理される (notes テーブルではなく chat_messages テーブルに保存)。
+	MisskeyTalk bool `json:"_misskey_talk,omitempty"`
 	// Name は AP poll vote (Question への投票) で choice 名を運ぶ field。
 	// Misskey TS の vote AP payload は `{type: "Note", name: "<choice>",
 	// inReplyTo: <poll URI>}` 形式で、ApNoteService が name + inReplyTo の
@@ -296,20 +304,6 @@ type Move struct {
 	Target string `json:"target"`
 }
 
-// ChatMessageActivity represents a CherryPick-compatible `Misskey:ChatMessage`
-// activity used for 1-on-1 DM federation with Misskey v12 and compatible forks.
-// ActivityではなくObjectを埋め込みつつ、Actorを独立フィールドで持つ。
-// To はCherryPick互換のため string (配列ではない)。
-type ChatMessageActivity struct {
-	Object
-	Actor        string `json:"actor"`
-	AttributedTo string `json:"attributedTo"`
-	To           string `json:"to"`
-	Content      string `json:"content,omitempty"`
-	Tag          []any  `json:"tag,omitempty"`
-	Attachment   []any  `json:"attachment,omitempty"`
-}
-
 // MisskeyContext は Misskey/Mastodon/schema.org 拡張語彙を含むコンテキストオブジェクト。
 // TS版 contexts.ts と同等。
 var MisskeyContext = map[string]any{
@@ -330,6 +324,8 @@ var MisskeyContext = map[string]any{
 	"_misskey_content":                      "misskey:_misskey_content",
 	"_misskey_quote":                        "misskey:_misskey_quote",
 	"_misskey_reaction":                     "misskey:_misskey_reaction",
+	"_misskey_talk":                         "misskey:_misskey_talk",
+	"_misskey_canChat":                      "misskey:_misskey_canChat",
 	"_misskey_votes":                        "misskey:_misskey_votes",
 	"_misskey_summary":                      "misskey:_misskey_summary",
 	"_misskey_followedMessage":              "misskey:_misskey_followedMessage",
@@ -382,8 +378,6 @@ func AddContext(o any) {
 	case *Flag:
 		v.Context = ctx
 	case *Move:
-		v.Context = ctx
-	case *ChatMessageActivity:
 		v.Context = ctx
 	}
 }

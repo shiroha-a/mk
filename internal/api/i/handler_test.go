@@ -584,6 +584,40 @@ func TestUpdate_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #692: chatScope を i/update で受け付け、user テーブルに反映する。
+func TestUpdate_ChatScope_Persisted(t *testing.T) {
+	cases := []string{"everyone", "followers", "following", "mutual", "none"}
+	for _, scope := range cases {
+		t.Run(scope, func(t *testing.T) {
+			h, repo, _, _ := newTestHandler(t)
+			user := &model.User{ID: "user1", Username: "user1", ChatScope: "mutual", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+			repo.Users["user1"] = user
+			rec := post(h.Update, `{"chatScope":"`+scope+`"}`, user)
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, scope, repo.Users["user1"].ChatScope)
+		})
+	}
+}
+
+func TestUpdate_ChatScope_InvalidValue(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", ChatScope: "mutual", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	rec := post(h.Update, `{"chatScope":"NEVER_VALID"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "mutual", repo.Users["user1"].ChatScope, "不正値で update されないこと")
+}
+
+func TestUpdate_ChatScope_OmittedIsNoop(t *testing.T) {
+	// JSON に chatScope が含まれない update は ChatScope を変更しない。
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", ChatScope: "followers", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	rec := post(h.Update, `{"name":"new"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "followers", repo.Users["user1"].ChatScope)
+}
+
 func TestUpdate_UserNotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	user := &model.User{ID: "ghost"}

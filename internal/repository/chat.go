@@ -55,8 +55,28 @@ type ChatRepository interface {
 	// involving userID, ordered by recency.
 	ListHistory(userID string, limit int) ([]*model.ChatMessage, error)
 
+	// ListUserHistory is the DM-only variant: 1-on-1 conversations only,
+	// rooms excluded. Mirrors upstream ChatService.userHistory (#692)。
+	ListUserHistory(userID string, limit int) ([]*model.ChatMessage, error)
+
+	// ListRoomHistory is the room-only variant: per-room latest message,
+	// for rooms the user owns or has membership in. Mirrors upstream
+	// ChatService.roomHistory (#692)。
+	ListRoomHistory(userID string, limit int) ([]*model.ChatMessage, error)
+
 	// Mark all as read
 	MarkAllRead(userID string) error
+
+	// MarkAllReadFromUser bulk-marks all DM messages from `fromUserID` to
+	// `readerID` as read (appends readerID to `reads`). Used by user-timeline
+	// to clear the unread badge on chat open (#692, upstream
+	// ChatService.readUserChatMessage 相当)。
+	MarkAllReadFromUser(readerID, fromUserID string) error
+
+	// MarkAllReadInRoom bulk-marks all room messages in `roomID` (excluding
+	// reader's own) as read. Used by room-timeline (#692, upstream
+	// ChatService.readRoomChatMessage 相当)。
+	MarkAllReadInRoom(readerID, roomID string) error
 
 	// Reactions
 	AddReaction(messageID, reaction string) error
@@ -312,7 +332,81 @@ func (r *chatRepository) ListHistory(userID string, limit int) ([]*model.ChatMes
 		return nil, nil
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("ToUser").Preload("ToRoom").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+// ListUserHistory returns the latest DM (1-on-1) message per peer, ordered
+// by recency. Mirrors upstream ChatService.userHistory (#692)。room messages
+// (toRoomId IS NOT NULL) は対象外。
+func (r *chatRepository) ListUserHistory(userID string, limit int) ([]*model.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var ids []string
+	err := r.db.Raw(`
+		SELECT id FROM (
+			SELECT DISTINCT ON (conversation_key) *
+			FROM (
+				SELECT *, LEAST("fromUserId","toUserId") || '-' || GREATEST("fromUserId","toUserId") AS conversation_key
+				FROM "chat_message"
+				WHERE ("fromUserId" = ? OR "toUserId" = ?) AND "toRoomId" IS NULL
+			) sub
+			ORDER BY conversation_key, id DESC
+		) conversations
+		ORDER BY id DESC
+		LIMIT ?
+	`, userID, userID, limit).Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var msgs []*model.ChatMessage
+	if err := r.db.Preload("FromUser").Preload("ToUser").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+// ListRoomHistory returns the latest message per room that userID owns or
+// is a member of. Mirrors upstream ChatService.roomHistory (#692)。
+func (r *chatRepository) ListRoomHistory(userID string, limit int) ([]*model.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var ids []string
+	err := r.db.Raw(`
+		SELECT id FROM (
+			SELECT DISTINCT ON ("toRoomId") cm.*
+			FROM "chat_message" cm
+			WHERE cm."toRoomId" IS NOT NULL
+			AND (
+				EXISTS (SELECT 1 FROM "chat_room_membership" m WHERE m."roomId" = cm."toRoomId" AND m."userId" = ?)
+				OR EXISTS (SELECT 1 FROM "chat_room" cr WHERE cr."id" = cm."toRoomId" AND cr."ownerId" = ?)
+			)
+			ORDER BY "toRoomId", cm.id DESC
+		) conversations
+		ORDER BY id DESC
+		LIMIT ?
+	`, userID, userID, limit).Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var msgs []*model.ChatMessage
+	if err := r.db.Preload("FromUser").Preload("ToRoom").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -321,6 +415,24 @@ func (r *chatRepository) ListHistory(userID string, limit int) ([]*model.ChatMes
 func (r *chatRepository) MarkAllRead(userID string) error {
 	return r.db.Exec(`UPDATE "chat_message" SET "reads" = array_append("reads", ?) WHERE "toUserId" = ? AND NOT ("reads" @> ARRAY[?]::varchar[])`,
 		userID, userID, userID).Error
+}
+
+// MarkAllReadFromUser appends readerID to `reads` for every unread DM
+// where fromUserID -> readerID. Idempotent via NOT (reads @> ...) guard.
+func (r *chatRepository) MarkAllReadFromUser(readerID, fromUserID string) error {
+	return r.db.Exec(
+		`UPDATE "chat_message" SET "reads" = array_append("reads", ?) WHERE "fromUserId" = ? AND "toUserId" = ? AND NOT ("reads" @> ARRAY[?]::varchar[])`,
+		readerID, fromUserID, readerID, readerID,
+	).Error
+}
+
+// MarkAllReadInRoom appends readerID to `reads` for every unread room
+// message in roomID, except messages authored by readerID itself.
+func (r *chatRepository) MarkAllReadInRoom(readerID, roomID string) error {
+	return r.db.Exec(
+		`UPDATE "chat_message" SET "reads" = array_append("reads", ?) WHERE "toRoomId" = ? AND "fromUserId" <> ? AND NOT ("reads" @> ARRAY[?]::varchar[])`,
+		readerID, roomID, readerID, readerID,
+	).Error
 }
 
 func (r *chatRepository) AddReaction(messageID, reaction string) error {

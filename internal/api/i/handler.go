@@ -636,6 +636,9 @@ type UpdateRequest struct {
 	AutoSensitive     *bool   `json:"autoSensitive"`
 	NoCrawle          *bool   `json:"noCrawle"`
 	PreventAiLearning *bool   `json:"preventAiLearning"`
+	// ChatScope は 1-on-1 DM の受信許可レベル (#692)。
+	// upstream paramDef enum: everyone / followers / following / mutual / none
+	ChatScope *string `json:"chatScope"`
 	// Room は frontend の「部屋」機能用の任意スキーマ jsonb。
 	// 本家も object をそのまま受け取って上書き保存する (部分マージはしない)。
 	Room json.RawMessage `json:"room"`
@@ -783,6 +786,17 @@ func (h *Handler) Update(c echo.Context) error {
 			return c.JSON(apiErr.status, apiErr.body)
 		}
 		in.AvatarDecorations = &normalized
+	}
+	if req.ChatScope != nil {
+		// upstream paramDef と同じ enum のみ受け付ける (#692)。
+		// 不正値を弾かないと cherrypick の chatScope 判定 (none/followers/...)
+		// から漏れて "誰からも受信不能" のような壊れた状態を作りうる。
+		switch *req.ChatScope {
+		case "everyone", "followers", "following", "mutual", "none":
+			in.ChatScope = req.ChatScope
+		default:
+			return apierr.JSONInvalidParam(c)
+		}
 	}
 
 	bundle, err := h.userService.UpdateProfile(me.ID, in)

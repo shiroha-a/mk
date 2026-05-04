@@ -187,6 +187,25 @@ func TestPackUserDetailed_DefaultValues(t *testing.T) {
 	assert.Empty(t, detailed.VerifiedLinks)
 }
 
+// #692: chatScope を含めることで FE の /settings/privacy が `i/update` の
+// レスポンスから現在値を取り戻せる。expose を忘れると DB は更新されている
+// のに UI が "保存されない" 表示になる退行を防ぐ。
+func TestPackUserDetailed_ExposesChatScope(t *testing.T) {
+	cases := []string{"everyone", "followers", "following", "mutual", "none"}
+	for _, scope := range cases {
+		t.Run(scope, func(t *testing.T) {
+			u := &model.User{
+				ID:                "u",
+				Username:          "u",
+				ChatScope:         scope,
+				AvatarDecorations: datatypes.JSON([]byte("[]")),
+			}
+			detailed := PackUserDetailed(u, nil)
+			assert.Equal(t, scope, detailed.ChatScope)
+		})
+	}
+}
+
 func TestPackUserDetailed_NilProfile(t *testing.T) {
 	u := &model.User{
 		ID:                "user4",

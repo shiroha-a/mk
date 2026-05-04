@@ -76,6 +76,31 @@ func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	assert.False(t, p.ManuallyApproves)
 }
 
+func TestRenderer_RenderPerson_MisskeyCanChat(t *testing.T) {
+	// chatScope=='none' の local user は AP 上 `_misskey_canChat: false` を
+	// expose し、それ以外は true。pointer なので両ケースで non-nil (#692)。
+	cases := []struct {
+		scope string
+		want  bool
+	}{
+		{"", true},
+		{"everyone", true},
+		{"followers", true},
+		{"following", true},
+		{"mutual", true},
+		{"none", false},
+	}
+	r := newRenderer()
+	for _, tc := range cases {
+		t.Run(tc.scope, func(t *testing.T) {
+			u := &model.User{ID: "u1", Username: "alice", ChatScope: tc.scope}
+			p := r.RenderPerson(u, nil, "PUBKEY")
+			require.NotNil(t, p.MisskeyCanChat)
+			assert.Equal(t, tc.want, *p.MisskeyCanChat)
+		})
+	}
+}
+
 func newIDGen(t *testing.T) id.Generator {
 	t.Helper()
 	g, _ := id.NewGenerator("aidx")

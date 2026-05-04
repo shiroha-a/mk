@@ -272,6 +272,10 @@ type UpdateInput struct {
 	AutoSensitive     *bool
 	NoCrawle          *bool
 	PreventAiLearning *bool
+	// ChatScope は誰からのチャットを許可するか (1-on-1 DM 用)。
+	// 受け付けるのは "everyone" / "followers" / "following" / "mutual" / "none"
+	// (CherryPick / Misskey TS と同じ enum)。検証は呼び出し側 (#692)。
+	ChatScope *string
 	// Room は jsonb 列に書き込む生バイト列。nil の場合は更新しない。
 	// 呼び出し側で JSON として妥当であることを保証する必要がある。
 	Room *json.RawMessage
@@ -349,6 +353,9 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 	}
 	if in.PreventAiLearning != nil {
 		profileFields["preventAiLearning"] = *in.PreventAiLearning
+	}
+	if in.ChatScope != nil {
+		userFields["chatScope"] = *in.ChatScope
 	}
 	if in.Room != nil {
 		// GORM は map で渡された値を jsonb 列に直接書き込む。

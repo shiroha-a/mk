@@ -23,6 +23,13 @@ type UserLite struct {
 	Emojis            map[string]string      `json:"emojis"`
 	OnlineStatus      string                 `json:"onlineStatus"`
 	BadgeRoles        []any                  `json:"badgeRoles"`
+	// CanChat は upstream Misskey TS の boolean field (#692)。FE の
+	// /chat/room.vue が `!user.canChat` で「DM 受け付け不可」warning を
+	// 出すので、出さないと local user 同士で DM できないと誤表示される。
+	// mk-go では chatScope!='none' を簡易判定として使う (upstream は
+	// roleService.policy.chatAvailability を参照するが、mk-go は role
+	// policy がまだ chat に対応していないため chatScope 由来で代替)。
+	CanChat bool `json:"canChat"`
 	// Optional TS-compat fields (Phase 7-5a)。
 	// TS側は `requireSigninToViewContents: user.x === false ? undefined : true`
 	// なので、値が true のときのみ expose する (*bool を &true に設定、
@@ -56,12 +63,17 @@ type UserDetailed struct {
 	NotesCount          int            `json:"notesCount"`
 	FollowersVisibility string         `json:"followersVisibility"`
 	FollowingVisibility string         `json:"followingVisibility"`
-	CreatedAt           string         `json:"createdAt"`
-	UpdatedAt           *string        `json:"updatedAt"`
-	URI                 *string        `json:"uri"`
-	URL                 *string        `json:"url"`
-	PinnedNoteIDs       []string       `json:"pinnedNoteIds"`
-	PinnedNotes         []any          `json:"pinnedNotes"`
+	// ChatScope は 1-on-1 チャットの受信許可レベル (#692)。FE の
+	// /settings/privacy が `i/update` レスポンスから直接 `$i.chatScope` に
+	// 反映するため、この field を expose しないと UI が保存後に古い値で
+	// 再描画される (DB は更新されているのに UI が "保存されない" と見える)。
+	ChatScope     string   `json:"chatScope"`
+	CreatedAt     string   `json:"createdAt"`
+	UpdatedAt     *string  `json:"updatedAt"`
+	URI           *string  `json:"uri"`
+	URL           *string  `json:"url"`
+	PinnedNoteIDs []string `json:"pinnedNoteIds"`
+	PinnedNotes   []any    `json:"pinnedNotes"`
 	// PinnedPageID is the user_profile.pinnedPageId. PinnedPage is the fully
 	// packed page object corresponding to that id (nil when the user has no
 	// pinned page or the page has been deleted). Both are populated by the
@@ -128,6 +140,7 @@ func PackUserLite(u *model.User) UserLite {
 		Emojis:            make(map[string]string),
 		OnlineStatus:      "unknown",
 		BadgeRoles:        []any{},
+		CanChat:           u.ChatScope != "none",
 	}
 	// requireSigninToViewContents: true のときだけ出す (TS は false→undefined)
 	if u.RequireSigninToViewContents {
@@ -161,6 +174,7 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		VerifiedLinks:       []string{},
 		FollowersVisibility: "public",
 		FollowingVisibility: "public",
+		ChatScope:           u.ChatScope,
 		URI:                 u.URI,
 		PinnedNoteIDs:       []string{},
 		PinnedNotes:         []any{},

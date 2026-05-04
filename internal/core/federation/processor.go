@@ -600,10 +600,29 @@ func (p *Processor) handleAccept(act genericActivity) error {
 // Question (投票) はNote同様にIngestNoteで処理され、Pollレコードが自動作成される。
 // ノート取込み成功後、fanoutHookが配線されていればタイムライン/ストリーミングに
 // 配信する (#330)。
+//
+// `_misskey_talk: true` flag が立った Note は CherryPick / レガシー Misskey の
+// 1-on-1 chat federation。notes テーブルではなく chat_messages として処理する
+// ため IngestNote をスキップして chatService にルートする (#692)。
 func (p *Processor) handleCreate(act genericActivity) error {
 	actor, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
 		return err
+	}
+	// Note の `_misskey_talk` を覗き見て chat か通常 note かを分岐する。
+	// IngestNote が走る前に短絡しないと chat message が notes テーブルに
+	// 流れ込んでタイムラインを汚す。
+	if p.chatService != nil {
+		var probe struct {
+			Type        string          `json:"type"`
+			ID          string          `json:"id"`
+			Content     string          `json:"content"`
+			MisskeyTalk bool            `json:"_misskey_talk"`
+			To          json.RawMessage `json:"to"`
+		}
+		if err := json.Unmarshal(act.Object, &probe); err == nil && probe.MisskeyTalk && probe.Type == "Note" {
+			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
+		}
 	}
 	note, err := p.resolver.IngestNote(act.Object)
 	if err != nil {
@@ -1199,6 +1218,68 @@ func readActorString(act genericActivity) (string, error) {
 		return act.Actor, nil
 	}
 	return "", errors.New("inner activity missing actor")
+}
+
+// handleChatCreate processes a Note flagged with `_misskey_talk: true`
+// inside a Create activity (CherryPick / レガシー Misskey の 1-on-1 chat
+// federation, #692)。
+//
+// `to` は CherryPick の renderChatMessage が string[] で出すが、互換性のため
+// 単一文字列 / 配列の両方を受け付ける。配列の場合は先頭エントリを recipient
+// として扱う (1-on-1 DM 前提なので残りは無視)。複数 recipient (group chat)
+// は別 issue で対応。
+func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string, toRaw json.RawMessage) error {
+	if noteURI == "" {
+		return fmt.Errorf("chat create: missing note id")
+	}
+	if sender.IsLocal() {
+		return fmt.Errorf("chat create: sender %s is local (loopback?)", sender.ID)
+	}
+	to, err := readRecipientURI(toRaw)
+	if err != nil {
+		return fmt.Errorf("chat create: %w", err)
+	}
+	recipient, err := p.userRepo.FindByURI(to)
+	if err != nil {
+		if localID := p.resolver.ExtractLocalUserID(to); localID != "" {
+			recipient, err = p.userRepo.FindByID(localID)
+		}
+		if err != nil {
+			return fmt.Errorf("chat create: resolve recipient: %w", err)
+		}
+	}
+	if !recipient.IsLocal() {
+		return fmt.Errorf("chat create: recipient %s is not local", to)
+	}
+	_, err = p.chatService.CreateMessageViaAP(context.Background(), noteURI, sender, recipient.ID, content)
+	return err
+}
+
+// readRecipientURI extracts the first recipient URI from a `to` field that
+// may be either a JSON string or a JSON array of strings. Empty / missing
+// values produce an error so the caller can distinguish "malformed" from
+// "valid but addressed to public".
+func readRecipientURI(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", errors.New("missing 'to' field")
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		if single == "" {
+			return "", errors.New("'to' is empty")
+		}
+		return single, nil
+	}
+	var multi []string
+	if err := json.Unmarshal(raw, &multi); err == nil {
+		for _, s := range multi {
+			if s != "" {
+				return s, nil
+			}
+		}
+		return "", errors.New("'to' has no usable recipient")
+	}
+	return "", errors.New("'to' is neither string nor array")
 }
 
 // handleChatMessage processes an inbound Misskey:ChatMessage activity

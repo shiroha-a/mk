@@ -1204,6 +1204,114 @@ func TestProcess_ChatMessage_MissingTo(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// --- Chat federation (CherryPick: Create + Note(_misskey_talk:true), #692) ---
+//
+// CherryPick / レガシー Misskey の chat 連合 wire format。Create に Note を
+// 包んで `_misskey_talk: true` flag を立てる形。to は string[] で、handleCreate
+// が IngestNote の前に分岐して chatService にルートする。
+
+func TestProcess_CreateChat_HappyPath_ToArray(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+
+	body := []byte(`{
+		"id": "https://remote.example/activities/create-chat-1",
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm1",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "yo via cherrypick",
+			"to": ["https://example.com/users/bob"],
+			"_misskey_talk": true
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Equal(t, 1, chatSvc.called)
+	assert.Equal(t, "https://remote.example/chat-messages/cm1", chatSvc.lastURI)
+	assert.Equal(t, "bob", chatSvc.lastTo)
+	assert.Equal(t, "yo via cherrypick", chatSvc.lastText)
+}
+
+func TestProcess_CreateChat_HappyPath_ToString(t *testing.T) {
+	// to が array でなく単一 string でも受け付ける (legacy 実装互換)。
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+
+	body := []byte(`{
+		"id": "https://remote.example/activities/create-chat-2",
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm2",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "single recipient",
+			"to": "https://example.com/users/bob",
+			"_misskey_talk": true
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Equal(t, 1, chatSvc.called)
+	assert.Equal(t, "single recipient", chatSvc.lastText)
+}
+
+func TestProcess_CreateChat_FlagFalseFallsThroughToIngest(t *testing.T) {
+	// `_misskey_talk` flag が false / 無い場合は chat 経路に分岐せず通常の
+	// IngestNote 処理に流れる。chatService は呼ばれないことだけを assert。
+	// IngestNote の実 persist 動作は newFullProcessor 経由の既存
+	// TestProcess_CreateNote でカバーしている。
+	p, _, _, _ := newProcessor(t, aliceActor)
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+	body := []byte(`{
+		"id": "https://remote.example/activities/create-note-1",
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/notes/n1",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "regular post",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+	_ = p.Process(body)
+	assert.Equal(t, 0, chatSvc.called, "chat service must NOT be hit for non-chat notes")
+}
+
+func TestProcess_CreateChat_RecipientNotLocal(t *testing.T) {
+	// recipient が remote 解決されると loopback delivery として拒絶する。
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	remoteURI := "https://remote2.example/users/charlie"
+	remoteHost := "remote2.example"
+	repo.Users["charlie"] = &model.User{ID: "charlie", Username: "charlie", URI: &remoteURI, Host: &remoteHost}
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+
+	body := []byte(`{
+		"id": "https://remote.example/activities/create-chat-3",
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm3",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "wrong recipient",
+			"to": ["https://remote2.example/users/charlie"],
+			"_misskey_talk": true
+		}
+	}`)
+	err := p.Process(body)
+	assert.Error(t, err)
+	assert.Equal(t, 0, chatSvc.called)
+}
+
 // --- FanoutHook ---
 
 // fakeFanoutHook records OnNoteCreated calls for assertion. #569 で

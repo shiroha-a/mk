@@ -140,7 +140,15 @@ func (m *mockChatRepo) UpdateDeliveryStatus(_ string, _, _ bool) error { return 
 func (m *mockChatRepo) ListHistory(_ string, _ int) ([]*model.ChatMessage, error) {
 	return nil, nil
 }
+func (m *mockChatRepo) ListUserHistory(_ string, _ int) ([]*model.ChatMessage, error) {
+	return nil, nil
+}
+func (m *mockChatRepo) ListRoomHistory(_ string, _ int) ([]*model.ChatMessage, error) {
+	return nil, nil
+}
 func (m *mockChatRepo) MarkAllRead(_ string) error                         { return nil }
+func (m *mockChatRepo) MarkAllReadFromUser(_, _ string) error              { return nil }
+func (m *mockChatRepo) MarkAllReadInRoom(_, _ string) error                { return nil }
 func (m *mockChatRepo) AddReaction(_, _ string) error                      { return nil }
 func (m *mockChatRepo) RemoveReaction(_, _ string) error                   { return nil }
 func (m *mockChatRepo) UpdateInvitation(_ *model.ChatRoomInvitation) error { return nil }

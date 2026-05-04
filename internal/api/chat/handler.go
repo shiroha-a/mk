@@ -2,6 +2,7 @@ package chat
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -46,6 +47,11 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	case errors.Is(err, corechat.ErrInvalidTarget):
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	case errors.Is(err, corechat.ErrChatScopeViolation):
+		// CherryPick の `recipient is cannot chat (...)` 相当 (#692)。
+		// upstream は ApiError を持たず単なる Error を投げるので mk-go 固有
+		// code (RECIPIENT_CANNOT_CHAT) で返す。frontend の対応は別 issue。
+		return c.JSON(http.StatusForbidden, apierr.Error("RECIPIENT_CANNOT_CHAT", "Recipient does not allow chat from you.", "5e1fa6e8-1d2f-49a3-9c20-7a09be7b4c43"))
 	}
 	return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 }
@@ -74,8 +80,69 @@ func packMessage(m *model.ChatMessage) map[string]any {
 	return result
 }
 
+// packMessageWithCreatedAt augments packMessage with createdAt parsed from the
+// message ID. createdAt 欠落だと FE 側の MkTime が `Invalid Date` を表示し、
+// 一覧では NaN/NaN になる (#692)。
+func (h *Handler) packMessageWithCreatedAt(m *model.ChatMessage) map[string]any {
+	result := packMessage(m)
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(m.ID); err == nil {
+			result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
+	return result
+}
+
+// packMessageDetailed builds the upstream-compatible ChatMessage payload
+// expected by MkChatHistories.vue: createdAt (ID から派生)、fromUser、
+// toUser (DM の時)、toRoom (room の時)。upstream の
+// ChatEntityService.packMessageDetailed 相当 (#692)。
+//
+// FE は createdAt を `new Date(m.createdAt).getTime()` で sort key に使う
+// ので、欠損していると `NaN` になりリストが空になる。room メッセージは
+// `'room' in m` で判定して "other" のかわりに room を表示する。
+func (h *Handler) packMessageDetailed(m *model.ChatMessage) map[string]any {
+	result := h.packMessageWithCreatedAt(m)
+	if m.ToUser != nil {
+		result["toUser"] = packUser(m.ToUser)
+	}
+	if m.ToRoom != nil {
+		result["toRoom"] = packRoom(m.ToRoom)
+		// upstream の `'room' in m` 判定に合わせて `room` alias も入れる。
+		// 旧 chat 実装ではこの key で判定していた残存 client がある。
+		result["room"] = packRoom(m.ToRoom)
+	}
+	return result
+}
+
+// packUser produces the UserLite shape consumed by FE chat components.
+// FE の MkAvatar / MkUserName が `avatarUrl` / `avatarBlurhash` を読むため、
+// 含めないとアイコンが空のまま表示される (#692)。
+//
+// avatarUrl 未設定時は upstream Misskey TS と同様に `/identicon/<username>`
+// (リモートなら `<username>@<host>`) を fallback として返す。frontend は
+// `null` を受けるとデフォルト identicon URL を組み立てない実装が一部に
+// あるため、サーバ側で確実に URL を埋めておく。
 func packUser(u *model.User) map[string]any {
-	return map[string]any{"id": u.ID, "username": u.Username, "name": u.Name, "host": u.Host}
+	avatarURL := u.AvatarURL
+	if avatarURL == nil || *avatarURL == "" {
+		host := ""
+		if u.Host != nil {
+			host = "@" + *u.Host
+		}
+		identicon := "/identicon/" + u.Username + host
+		avatarURL = &identicon
+	}
+	return map[string]any{
+		"id":             u.ID,
+		"username":       u.Username,
+		"name":           u.Name,
+		"host":           u.Host,
+		"avatarUrl":      avatarURL,
+		"avatarBlurhash": u.AvatarBlurhash,
+		"isBot":          u.IsBot,
+		"isCat":          u.IsCat,
+	}
 }
 
 // --- Rooms ---
@@ -291,7 +358,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	if err != nil {
 		return h.mapChatErr(c, err)
 	}
-	return c.JSON(http.StatusOK, packMessage(msg))
+	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
 }
 
 // messagesCreateLegacy preserves pre-Phase-9.8 behaviour for callers that
@@ -306,7 +373,7 @@ func (h *Handler) messagesCreateLegacy(c echo.Context, user *model.User, text, t
 	if err := h.repo.CreateMessage(msg); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, packMessage(msg))
+	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
 }
 
 // MessagesShow handles POST /api/chat/messages/show.
@@ -321,7 +388,7 @@ func (h *Handler) MessagesShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 	}
-	return c.JSON(http.StatusOK, packMessage(msg))
+	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
 }
 
 // MessagesUpdate handles POST /api/chat/messages/update.
@@ -417,7 +484,7 @@ func (h *Handler) Messages(c echo.Context) error {
 	}
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
-		result[i] = packMessage(m)
+		result[i] = h.packMessageWithCreatedAt(m)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -435,7 +502,7 @@ func (h *Handler) MessagesSearch(c echo.Context) error {
 	msgs, _ := h.repo.SearchMessages(user.ID, req.Query, req.Limit)
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
-		result[i] = packMessage(m)
+		result[i] = h.packMessageWithCreatedAt(m)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -600,6 +667,11 @@ func (h *Handler) MessagesCreateToRoom(c echo.Context) error {
 }
 
 // UserTimeline handles POST /api/chat/messages/user-timeline.
+//
+// upstream の readUserChatMessage 相当: チャット画面を開いた瞬間に「相手 →
+// 自分」の DM をすべて既読としてマークする。FE は新着メッセージにしか
+// 'read' イベントを送らないので、initial load 時点の既読化はサーバ側で
+// やらないと unread badge がリロードのたびに復活する (#692)。
 func (h *Handler) UserTimeline(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
@@ -619,15 +691,22 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// 既読マーク (best effort; 失敗しても timeline 表示は継続)。
+	if err := h.repo.MarkAllReadFromUser(user.ID, req.UserID); err != nil {
+		slog.Warn("chat: MarkAllReadFromUser failed", "readerId", user.ID, "fromUserId", req.UserID, "err", err)
+	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, packMessage(m))
+		out = append(out, h.packMessageWithCreatedAt(m))
 	}
 	return c.JSON(http.StatusOK, out)
 }
 
 // RoomTimeline handles POST /api/chat/messages/room-timeline.
+//
+// upstream の readRoomChatMessage 相当 (#692)。
 func (h *Handler) RoomTimeline(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
 		Limit  int    `json:"limit"`
@@ -645,9 +724,12 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	if err := h.repo.MarkAllReadInRoom(user.ID, req.RoomID); err != nil {
+		slog.Warn("chat: MarkAllReadInRoom failed", "readerId", user.ID, "roomId", req.RoomID, "err", err)
+	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, packMessage(m))
+		out = append(out, h.packMessageWithCreatedAt(m))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -781,10 +863,17 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 // --- Other ---
 
 // History handles POST /api/chat/history.
+//
+// upstream `chat/history` は `room: bool` parameter を取り、true の時は
+// chat ルーム内の最新メッセージ、false (デフォルト) の時は 1-on-1 DM の
+// 最新メッセージを返す。FE の MkChatHistories.vue は両方を並行に呼んで
+// マージするため、room パラメータを正しくハンドリングしないと chat home
+// で何も描画されない (#692)。
 func (h *Handler) History(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit int `json:"limit"`
+		Limit int  `json:"limit"`
+		Room  bool `json:"room"`
 	}
 	_ = c.Bind(&req)
 	if req.Limit <= 0 {
@@ -793,13 +882,21 @@ func (h *Handler) History(c echo.Context) error {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
-	msgs, err := h.repo.ListHistory(user.ID, req.Limit)
+	var (
+		msgs []*model.ChatMessage
+		err  error
+	)
+	if req.Room {
+		msgs, err = h.repo.ListRoomHistory(user.ID, req.Limit)
+	} else {
+		msgs, err = h.repo.ListUserHistory(user.ID, req.Limit)
+	}
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, packMessage(m))
+		out = append(out, h.packMessageDetailed(m))
 	}
 	return c.JSON(http.StatusOK, out)
 }

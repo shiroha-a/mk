@@ -311,6 +311,16 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	if name := actor.Name; name != "" {
 		user.Name = &name
 	}
+	// remote actor の `_misskey_canChat` を chatScope に翻訳する (#692)。
+	// CherryPick / 連合先は granular な scope (followers/following/mutual)
+	// を AP に expose しないため、boolean (everyone/none) しか取れない。
+	// chatScope が "none" / "everyone" のどちらかになることを保証することで、
+	// chat service の canChat() が remote 相手でも正しく判定できる。
+	if actor.MisskeyCanChat != nil && !*actor.MisskeyCanChat {
+		user.ChatScope = "none"
+	} else {
+		user.ChatScope = "everyone"
+	}
 	if actor.Endpoints.SharedInbox != "" {
 		user.SharedInbox = &actor.Endpoints.SharedInbox
 	}
@@ -440,6 +450,17 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		bannerURL := actor.Image.URL
 		fields["bannerUrl"] = &bannerURL
 		existing.BannerURL = &bannerURL
+	}
+	// `_misskey_canChat` の更新を chatScope に反映 (#692)。flag 欠落時は
+	// 既存値を保持する (連合先がフィールドを export していない場合に上書き
+	// しないため)。
+	if actor.MisskeyCanChat != nil {
+		newScope := "everyone"
+		if !*actor.MisskeyCanChat {
+			newScope = "none"
+		}
+		fields["chatScope"] = newScope
+		existing.ChatScope = newScope
 	}
 	// AP Person Tag配列からカスタム絵文字を抽出してDBにupsert
 	if existing.Host != nil {

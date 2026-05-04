@@ -261,6 +261,12 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	p.MisskeyRequireSigninToViewContents = u.RequireSigninToViewContents
 	p.MisskeyMakeNotesFollowersOnlyBefore = u.MakeNotesFollowersOnlyBefore
 	p.MisskeyMakeNotesHiddenBefore = u.MakeNotesHiddenBefore
+	// `_misskey_canChat` は CherryPick 互換の chat 連合 capability flag。
+	// chatScope == "none" 以外なら true (everyone/followers/following/mutual)
+	// と公開する。granular な scope は受信側で local 強制されるので AP には
+	// boolean だけ流す (#692)。
+	canChat := u.ChatScope != "none"
+	p.MisskeyCanChat = &canChat
 
 	// profile から追加フィールドを埋める
 	if profile != nil {
@@ -871,24 +877,47 @@ func (r *Renderer) RenderMove(src *model.User, dstURI string) *Move {
 	return m
 }
 
-// RenderChatMessage returns a CherryPick-compatible Misskey:ChatMessage
-// activity for 1-on-1 DM federation. Only used when the recipient is a remote
-// user. The activity type is `Misskey:ChatMessage` (not a standard AS type).
-func (r *Renderer) RenderChatMessage(msg *model.ChatMessage, senderURI, recipientURI string) *ChatMessageActivity {
-	cm := &ChatMessageActivity{
+// RenderChatMessage returns a CherryPick-compatible Create activity wrapping
+// a Note flagged with `_misskey_talk: true`. ApRendererService.renderChatMessage
+// と同じ wire format を出すことで CherryPick / レガシー Misskey との 1-on-1
+// DM 連合互換性を確保する (#692)。
+//
+// 受け手側 (cherrypick の ApInboxService) は Note.`_misskey_talk` flag を見て
+// chat_messages テーブルに保存する。chat 専用 type ではなく標準 Note を
+// 使う設計なので、未対応の受信実装でも単なる note の Create として黙殺
+// (致命的なエラーは起きない) のが利点。
+func (r *Renderer) RenderChatMessage(msg *model.ChatMessage, senderURI, recipientURI string, published string) *Create {
+	noteURI := r.urls.ChatMessageURI(msg.ID)
+	note := &Note{
 		Object: Object{
-			ID:   r.urls.ChatMessageURI(msg.ID),
-			Type: "Misskey:ChatMessage",
+			ID:   noteURI,
+			Type: "Note",
 		},
-		Actor:        senderURI,
 		AttributedTo: senderURI,
-		To:           recipientURI,
+		Published:    published,
+		To:           []string{recipientURI},
+		MisskeyTalk:  true,
 	}
 	if msg.Text != nil {
-		cm.Content = *msg.Text
+		note.Content = *msg.Text
 	}
-	AddContext(cm)
-	return cm
+	c := &Create{
+		Activity: Activity{
+			Object: Object{
+				// Create activity の id は Note URI に "/activity" を付与した
+				// 派生 URI とする (cherrypick も同様に renderActivity 系で
+				// Create id を Note id から派生させる慣習)。
+				ID:   noteURI + "/activity",
+				Type: "Create",
+			},
+			Actor:     senderURI,
+			Published: published,
+			To:        []string{recipientURI},
+		},
+		Object: note,
+	}
+	AddContext(c)
+	return c
 }
 
 // addressing computes to/cc lists for a note based on visibility.

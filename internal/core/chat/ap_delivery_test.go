@@ -49,8 +49,14 @@ func TestCreateMessageToUser_DeliversToRemoteUser(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 	assert.Equal(t, 1, deliverer.called)
-	assert.Contains(t, string(deliverer.lastBody), "Misskey:ChatMessage")
-	assert.Contains(t, string(deliverer.lastBody), "hello remote")
+	body := string(deliverer.lastBody)
+	// CherryPick 互換 wire format: Create + Note(_misskey_talk:true) (#692)。
+	// 旧 `Misskey:ChatMessage` 独自 type は廃止。
+	assert.Contains(t, body, `"type":"Create"`)
+	assert.Contains(t, body, `"type":"Note"`)
+	assert.Contains(t, body, `"_misskey_talk":true`)
+	assert.Contains(t, body, "hello remote")
+	assert.NotContains(t, body, "Misskey:ChatMessage", "旧独自 activity type は廃止されたこと")
 }
 
 func TestCreateMessageToUser_SkipsLocalRecipient(t *testing.T) {
@@ -103,4 +109,134 @@ func TestCreateMessageViaAP_InvalidTarget(t *testing.T) {
 
 	_, err = svc.CreateMessageViaAP(context.Background(), "", &model.User{ID: "x"}, "", "hi")
 	assert.Error(t, err)
+}
+
+// --- chatScope (#692) ---
+//
+// recipient.chatScope 別に CreateMessageToUser / CreateMessageViaAP が
+// CherryPick の `recipient is cannot chat (...)` 相当の判定を行うことを確認。
+
+func newScopeService(t *testing.T) (*corechat.Service, *testutil.MockUserRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
+	chatRepo := newFakeRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corechat.NewService(chatRepo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	urls := activitypub.NewURLBuilder("https://local.example")
+	renderer := activitypub.NewRenderer(urls)
+	svc.SetAPDelivery(userRepo, renderer, urls, &fakeAPDeliverer{})
+	svc.SetFollowingRepo(followingRepo)
+	return svc, userRepo, followingRepo
+}
+
+func TestCreateMessageToUser_ScopeNone_Rejected(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "none"}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "blocked", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+}
+
+func TestCreateMessageToUser_ScopeEveryone_Allowed(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "everyone"}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+func TestCreateMessageToUser_ScopeFollowers_OnlyFollowers(t *testing.T) {
+	svc, userRepo, followingRepo := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "followers"}
+	// alice is NOT a follower of bob → rejected
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+	// alice follows bob (i.e., alice is a follower of bob) → allowed
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FollowerID: "alice", FolloweeID: "bob"}))
+	_, err = svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+func TestCreateMessageToUser_ScopeFollowing_OnlyFollowing(t *testing.T) {
+	svc, userRepo, followingRepo := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "following"}
+	// bob does NOT follow alice → rejected
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+	// bob follows alice → allowed
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice"}))
+	_, err = svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+func TestCreateMessageToUser_ScopeMutual(t *testing.T) {
+	svc, userRepo, followingRepo := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "mutual"}
+
+	// 0 directions → rejected
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+	// 1 direction → still rejected
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FollowerID: "alice", FolloweeID: "bob"}))
+	_, err = svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+	// 2 directions → allowed
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f2", FollowerID: "bob", FolloweeID: "alice"}))
+	_, err = svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+func TestCreateMessageToUser_RemoteRecipient_ScopeNone_Rejected(t *testing.T) {
+	// remote recipient の `_misskey_canChat: false` は resolver で
+	// chatScope = "none" に翻訳されるため、mk-go 側で事前 reject される (#692)。
+	svc, userRepo, _ := newScopeService(t)
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "none", Host: &remoteHost, URI: &remoteURI}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+}
+
+func TestCreateMessageToUser_RemoteRecipient_ScopeEveryone_Allowed(t *testing.T) {
+	// remote recipient で chatScope == "everyone" (`_misskey_canChat: true`
+	// 由来) なら mk-go 側は通過させ、granular な判定は remote 側に委ねる。
+	svc, userRepo, _ := newScopeService(t)
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "everyone", Host: &remoteHost, URI: &remoteURI}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+func TestCreateMessageToUser_RemoteRecipient_StaleMutualScope_NotRejected(t *testing.T) {
+	// 過去に作成された remote user は chatScope の DB default (= "mutual") の
+	// ままだが、followingRepo に follow 関係が無くても reject してはいけない。
+	// 「mk-go では remote の granular scope を判定しない」契約 (#692)。
+	svc, userRepo, _ := newScopeService(t)
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "mutual", Host: &remoteHost, URI: &remoteURI}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err, "remote の granular scope は無視され、'none' 以外は通過する")
+}
+
+func TestCreateMessageViaAP_ScopeEnforced(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "none"}
+	sender := &model.User{ID: "remote-alice", Username: "alice"}
+
+	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/cm/1", sender, "bob", "x")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
 }

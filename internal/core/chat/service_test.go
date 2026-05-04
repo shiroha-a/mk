@@ -152,7 +152,15 @@ func (r *fakeChatRepo) UpdateDeliveryStatus(_ string, _, _ bool) error { return 
 func (r *fakeChatRepo) ListHistory(_ string, _ int) ([]*model.ChatMessage, error) {
 	return nil, nil
 }
+func (r *fakeChatRepo) ListUserHistory(_ string, _ int) ([]*model.ChatMessage, error) {
+	return nil, nil
+}
+func (r *fakeChatRepo) ListRoomHistory(_ string, _ int) ([]*model.ChatMessage, error) {
+	return nil, nil
+}
 func (r *fakeChatRepo) MarkAllRead(_ string) error                         { return nil }
+func (r *fakeChatRepo) MarkAllReadFromUser(_, _ string) error              { return nil }
+func (r *fakeChatRepo) MarkAllReadInRoom(_, _ string) error                { return nil }
 func (r *fakeChatRepo) AddReaction(_, _ string) error                      { return nil }
 func (r *fakeChatRepo) RemoveReaction(_, _ string) error                   { return nil }
 func (r *fakeChatRepo) UpdateInvitation(_ *model.ChatRoomInvitation) error { return nil }
