@@ -2081,6 +2081,118 @@ func TestUpsertEmojis(t *testing.T) {
 		assert.Equal(t, "CC-BY-4.0", *e.License)
 	})
 
+	t.Run("updates existing license when AP tag has different value", func(t *testing.T) {
+		// #731: AP tag に新しい license が来たら既存値を上書きする経路。
+		// pointerStringsEqual の "1 つ nil / 値変化" 分岐をカバー。
+		repo := testutil.NewMockUserRepository()
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+		emojiRepo := testutil.NewMockEmojiRepository()
+		r.SetEmojiRepo(emojiRepo)
+
+		host := "remote.example"
+		oldLicense := "old"
+		emojiRepo.Emojis["chg@remote.example"] = &model.Emoji{
+			ID: "ex", Name: "chg", Host: &host,
+			OriginalURL: "https://remote.example/chg.webp",
+			PublicURL:   "https://remote.example/chg.webp",
+			License:     &oldLicense,
+		}
+
+		newLicense := "new-license"
+		tags := []activitypub.EmojiTag{
+			{
+				Type:    "Emoji",
+				Name:    ":chg:",
+				Icon:    activitypub.Image{Type: "Image", URL: "https://remote.example/chg.webp"},
+				License: &activitypub.MisskeyLicense{FreeText: &newLicense},
+			},
+		}
+		r.UpsertEmojis(tags, host)
+
+		e, err := emojiRepo.FindByNameAndHost("chg", &host)
+		require.NoError(t, err)
+		require.NotNil(t, e.License)
+		assert.Equal(t, "new-license", *e.License, "license should be updated to new value")
+	})
+
+	t.Run("no-op when license unchanged", func(t *testing.T) {
+		// #731: 同じ license が再 federate されても update 不要。
+		// pointerStringsEqual が true を返す経路をカバー。
+		repo := testutil.NewMockUserRepository()
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+		emojiRepo := testutil.NewMockEmojiRepository()
+		r.SetEmojiRepo(emojiRepo)
+
+		host := "remote.example"
+		same := "same-license"
+		emojiRepo.Emojis["nop@remote.example"] = &model.Emoji{
+			ID: "ex", Name: "nop", Host: &host,
+			OriginalURL: "https://remote.example/nop.webp",
+			PublicURL:   "https://remote.example/nop.webp",
+			License:     &same,
+		}
+
+		// 同じ license 値で再 federate
+		sameAgain := "same-license"
+		tags := []activitypub.EmojiTag{
+			{
+				Type:    "Emoji",
+				Name:    ":nop:",
+				Icon:    activitypub.Image{Type: "Image", URL: "https://remote.example/nop.webp"},
+				License: &activitypub.MisskeyLicense{FreeText: &sameAgain},
+			},
+		}
+		r.UpsertEmojis(tags, host)
+
+		e, err := emojiRepo.FindByNameAndHost("nop", &host)
+		require.NoError(t, err)
+		require.NotNil(t, e.License)
+		assert.Equal(t, "same-license", *e.License, "value unchanged")
+	})
+
+	t.Run("clears existing license when AP tag explicitly federates null freeText", func(t *testing.T) {
+		// #731: wrapper あり + freeText=null は "license を明示的に解除" の
+		// シグナル。既存 license を NULL で上書きする経路。pointerStringsEqual
+		// の "片方 nil" 分岐をカバー。
+		repo := testutil.NewMockUserRepository()
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+		emojiRepo := testutil.NewMockEmojiRepository()
+		r.SetEmojiRepo(emojiRepo)
+
+		host := "remote.example"
+		oldLicense := "to-clear"
+		emojiRepo.Emojis["clr@remote.example"] = &model.Emoji{
+			ID: "ex", Name: "clr", Host: &host,
+			OriginalURL: "https://remote.example/clr.webp",
+			PublicURL:   "https://remote.example/clr.webp",
+			License:     &oldLicense,
+		}
+
+		// freeText=nil (= JSON null 受信) で wrapper あり
+		tags := []activitypub.EmojiTag{
+			{
+				Type:    "Emoji",
+				Name:    ":clr:",
+				Icon:    activitypub.Image{Type: "Image", URL: "https://remote.example/clr.webp"},
+				License: &activitypub.MisskeyLicense{FreeText: nil},
+			},
+		}
+		r.UpsertEmojis(tags, host)
+
+		e, err := emojiRepo.FindByNameAndHost("clr", &host)
+		require.NoError(t, err)
+		assert.Nil(t, e.License, "explicit null freeText should clear existing license")
+	})
+
 	t.Run("preserves existing license when AP tag has no _misskey_license wrapper", func(t *testing.T) {
 		// #731: AP tag の `_misskey_license` が欠落している場合、既存 emoji の
 		// license は温存する (連合先が一時的に license export を停止しても

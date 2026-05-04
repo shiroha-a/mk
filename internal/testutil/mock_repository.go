@@ -1291,11 +1291,23 @@ func (m *MockEmojiRepository) UpdateFields(id string, fields map[string]any) err
 						e.Category = &s
 					}
 				case "license":
-					if s, ok := v.(string); ok {
+					// resolver の license diff path (#731) は *string を直接
+					// fields["license"] に入れる。handler 経路は string 値を
+					// 入れるので両方受ける (nil pointer は明示 NULL 化を表す)。
+					switch s := v.(type) {
+					case string:
 						e.License = &s
+					case *string:
+						e.License = s
 					}
 				case "aliases":
-					if arr, ok := v.([]string); ok {
+					// EmojiUpdate handler は pq.StringArray でラップして渡す
+					// (#729)。resolver / 旧 caller は []string を渡すので両方
+					// 受ける (PostgreSQL は同じ varchar[] に変換される)。
+					switch arr := v.(type) {
+					case pq.StringArray:
+						e.Aliases = arr
+					case []string:
 						e.Aliases = arr
 					}
 				case "isSensitive":
