@@ -90,6 +90,12 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 				"srcId", src.ID, "url", src.OriginalURL, "err", err)
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to fetch emoji image.", "0a4e0b9e-2d7c-4d6f-8f6b-1f9c2e9b4d83"))
 		}
+		// 不変条件 (#722): emoji.originalUrl は必ず drive_file.url と一致
+		// させる。`DriveFileRepository.DeleteOrphans` の cleanup guard が
+		// `NOT EXISTS (emoji.originalUrl = drive_file.url ...)` で system 所有
+		// emoji 画像を保護しているので、ここで df.URL 以外を入れると guard を
+		// すり抜けて cleanup で消える。webpublic 系列を直接 originalUrl に
+		// セットする変更を入れる際は cleanup 側も同時更新すること。
 		copied.OriginalURL = df.URL
 		if df.WebpublicURL != nil && *df.WebpublicURL != "" {
 			copied.PublicURL = *df.WebpublicURL

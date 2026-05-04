@@ -252,6 +252,11 @@ func (i *Importer) replaceEmoji(record metaRecord, body []byte) error {
 
 	now := i.now()
 	aliases := pq.StringArray(append([]string(nil), record.Emoji.Aliases...))
+	// 不変条件 (#722): emoji.originalUrl は drive_file.url と一致させる。
+	// `DriveFileRepository.DeleteOrphans` の cleanup guard は
+	// `NOT EXISTS (emoji.originalUrl = drive_file.url ...)` で system 所有
+	// emoji 画像を保護しているので、別 URL (webpublic 等) を originalUrl に
+	// 入れると cleanup で消える。
 	emoji := &model.Emoji{
 		ID:          i.deps.IDGen.Generate(now),
 		UpdatedAt:   &now,
