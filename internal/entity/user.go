@@ -135,14 +135,13 @@ func IdenticonURL(u *model.User) string {
 // DB を叩かない。cache miss / TTL 切れでのみ admin catalog の List を 1 回
 // 引く (#521 / #524 review)。
 func PackUserLite(u *model.User) UserLite {
-	resolved := IdenticonURL(u)
-	avatarURL := &resolved
+	avatarURL := IdenticonURL(u)
 	out := UserLite{
 		ID:                u.ID,
 		Name:              u.Name,
 		Username:          u.Username,
 		Host:              u.Host,
-		AvatarURL:         avatarURL,
+		AvatarURL:         &avatarURL,
 		AvatarBlurhash:    u.AvatarBlurhash,
 		AvatarDecorations: resolveAvatarDecorations(u.AvatarDecorations),
 		IsBot:             u.IsBot,

@@ -941,7 +941,9 @@ func TestPackMessageDetailed_FieldsPresent(t *testing.T) {
 	assert.NotNil(t, out["toRoom"])
 	// upstream FE 互換のため `room` alias も入る
 	assert.NotNil(t, out["room"])
-	// fromUser に avatarUrl の identicon fallback が入る
+	// fromUser に avatarUrl の identicon fallback が入る (assertion 失敗時は
+	// require.IsType がテスト終了させるので panic せずに見やすいエラーになる)。
+	require.IsType(t, map[string]any{}, out["fromUser"])
 	from := out["fromUser"].(map[string]any)
 	assert.Equal(t, "/identicon/from@remote.example", from["avatarUrl"])
 }

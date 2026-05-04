@@ -1500,6 +1500,9 @@ func TestRefreshActor_UpdatesChatScopeFromCanChat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := testutil.NewMockUserRepository()
 			uri := "https://remote.example/users/x"
+			// LastFetchedAt を TTL より十分過去にして shouldRefreshActor →
+			// refreshActor 経路を強制発火させる (resolveActorOnce の cold path
+			// 内で refresh が実際に走らないと canChat の取込みが行われない)。
 			stale := time.Now().Add(-48 * time.Hour)
 			repo.Users["existing"] = &model.User{
 				ID:            "existing",

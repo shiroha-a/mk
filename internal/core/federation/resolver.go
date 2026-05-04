@@ -318,8 +318,9 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	// chat service の canChat() が remote 相手でも正しく判定できる。
 	//
 	// 新規 fetch 時 (ここ) は flag 欠落 = everyone 扱い。`_misskey_canChat`
-	// 未対応の連合先 (Mastodon 等) はそもそも chat 連合できないので、誤って
-	// "none" に倒すと local 側で送信前 reject されて UX が悪化する。
+	// を export しない実装 (Mastodon / 古い Misskey / 一般的な AP 実装) は
+	// そもそも chat 連合できないので、誤って "none" に倒すと local 側で
+	// 送信前 reject されて UX が悪化するだけ。
 	// refresh 経路 (refreshActor) は flag 欠落 = 既存値保持 (連合先 server が
 	// フィールドを一時的に消した場合に scope を上書きしない安全策) で挙動が
 	// 異なる点に注意。
