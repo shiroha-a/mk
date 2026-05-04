@@ -520,6 +520,31 @@ func TestIngestNote_HashtagsFromCW(t *testing.T) {
 	assert.ElementsMatch(t, []string{"news"}, []string(note.Tags))
 }
 
+// #679 review #2: `name` に `#` prefix が付いていない非標準実装からの
+// Hashtag tag も defensive 補完によって正しく拾われる。upstream Misskey の
+// renderHashtag では起きないが将来の AP 実装互換性を guard する。
+func TestIngestNote_HashtagWithoutPrefixDefensive(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h-noprefix",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "no inline tag",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"tag": [
+			{"type": "Hashtag", "name": "golang"}
+		]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Contains(t, []string(note.Tags), "golang", "name に # が無くても defensive 補完で抽出される")
+}
+
 // #679: Hashtag 無しなら note.Tags は nil/empty で残る。
 func TestIngestNote_NoHashtags(t *testing.T) {
 	repo := testutil.NewMockUserRepository()

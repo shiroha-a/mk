@@ -1066,8 +1066,9 @@ func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 // 抽出と統一的に dedup / 正規化される (#679)。
 //
 // AP spec は `name` の format を厳密に規定していないため、`#` 無しで
-// 来る実装 (稀) のために defensive に prefix を補う。`name` が空のものは
-// スキップ。type 違いも skip。
+// 来る実装 (稀) のために defensive に prefix を補う。よって戻り値は
+// 必ずしも入力 `name` と完全一致しない (`"tag"` → `"#tag"` に書き換え
+// られる場合がある)。`name` が空のものはスキップ。type 違いも skip。
 func extractHashtagTagNames(tags []any) []string {
 	if len(tags) == 0 {
 		return nil
