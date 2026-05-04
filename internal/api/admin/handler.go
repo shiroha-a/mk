@@ -166,9 +166,6 @@ func (h *Handler) SetSystemAccountFetcher(f SystemAccountFetcher) {
 	h.systemAccountFetcher = f
 }
 
-// SetFollowingRepo attaches a FollowingRepository for admin endpoints that
-// need to enumerate Following rows by host (e.g.
-// admin/federation/remove-all-following).
 // SetInstanceRepo wires an InstanceRepository for admin/federation handlers
 // to use when reading/updating instance rows. Without it,
 // FederationUpdateInstance early-returns 204 (#676)。
@@ -176,6 +173,9 @@ func (h *Handler) SetInstanceRepo(r repository.InstanceRepository) {
 	h.instanceRepo = r
 }
 
+// SetFollowingRepo attaches a FollowingRepository for admin endpoints that
+// need to enumerate Following rows by host (e.g.
+// admin/federation/remove-all-following).
 func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 	h.followingRepo = r
 }

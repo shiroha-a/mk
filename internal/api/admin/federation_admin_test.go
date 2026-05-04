@@ -159,16 +159,22 @@ func TestFederationUpdateInstance(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, doPost(h.FederationUpdateInstance, `{}`, adminUser).Code)
 }
 
+// assertNoLogWritten は「指定期間内に log が 1 件も書かれない」ことを assert
+// する。time.Sleep + assert.Empty より flaky になりにくい (期間中ずっと empty
+// であることを poll する)。
+func assertNoLogWritten(t *testing.T, repo *testutil.MockModerationLogRepository) {
+	t.Helper()
+	assert.Never(t, func() bool { return len(repo.Snapshot()) > 0 }, 100*time.Millisecond, 5*time.Millisecond,
+		"moderation log を書いてはいけない")
+}
+
 // #676: instanceRepo 未配線なら request body の有無に関わらず 204 で no-op。
 func TestFederationUpdateInstance_NoOpWithoutInstanceRepo(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := attachModLog(t, h)
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","isSuspended":true}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	// 200ms 待っても log は出ないこと (instanceRepo 未配線なので before lookup
-	// 段階で early return している)。
-	time.Sleep(50 * time.Millisecond)
-	assert.Empty(t, repo.Snapshot(), "instanceRepo 未配線時は moderation log を書かない")
+	assertNoLogWritten(t, repo)
 }
 
 // #676: instance 行が存在しない host への update は no-op (FindByHost が err)。
@@ -179,8 +185,7 @@ func TestFederationUpdateInstance_HostNotFound(t *testing.T) {
 	repo := attachModLog(t, h)
 	rec := doPost(h.FederationUpdateInstance, `{"host":"ghost.example","isSuspended":true}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	time.Sleep(50 * time.Millisecond)
-	assert.Empty(t, repo.Snapshot(), "instance 不在なら何もログしない")
+	assertNoLogWritten(t, repo)
 }
 
 // #676: isSuspended=true への遷移で suspendRemoteInstance 1 件だけ書く。
@@ -239,8 +244,7 @@ func TestFederationUpdateInstance_SuspendNoChange_NoLog(t *testing.T) {
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","isSuspended":false}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	time.Sleep(50 * time.Millisecond)
-	assert.Empty(t, repo.Snapshot(), "状態が変わらない場合は log 不要")
+	assertNoLogWritten(t, repo)
 }
 
 // #676: moderationNote の before/after 差分で updateRemoteInstanceNote を書く。
@@ -282,8 +286,7 @@ func TestFederationUpdateInstance_NoteSameValue_NoLog(t *testing.T) {
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","moderationNote":"same"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	time.Sleep(50 * time.Millisecond)
-	assert.Empty(t, repo.Snapshot())
+	assertNoLogWritten(t, repo)
 }
 
 // #676: 1 リクエストで suspend + note を両方変更すると 2 log が出る。

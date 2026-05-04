@@ -176,6 +176,11 @@ func (h *Handler) FederationUpdateInstance(c echo.Context) error {
 	// 値コピーで snapshot を凍結する: UpdateFields の実装によっては同じ struct
 	// を mutate することがあり (例: in-memory mock)、後段の moderation log diff
 	// で before/after が両方 after 値になる退行を防ぐ。
+	//
+	// 注意: 浅 copy なので *string 等の pointer field は参照先を共有する。
+	// 現状 log で参照する `SuspensionState string` / `ModerationNote string`
+	// は scalar なので問題なし。pointer field を log に含める拡張が入った
+	// 時は deep copy への昇格を検討。
 	before := *beforePtr
 	if updates := req.updates(); len(updates) > 0 {
 		_ = h.instanceRepo.UpdateFields(req.Host, updates)
