@@ -27,6 +27,13 @@ func (h *Handler) DriveCleanup(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// SystemUserIDToken は `/api/admin/drive/files` の `userId` パラメータで
+// 「system 所有 (UserID IS NULL) の drive file」を一覧する特殊値。custom
+// emoji の copy / import zip 経路で蓄積される system file (#670 で導入)
+// を admin UI から可視化する経路 (#686)。`@` 接頭辞は実 user ID と衝突
+// しない (aidx ID は英数字のみ) ため安全。
+const SystemUserIDToken = "@system"
+
 // DriveFiles handles POST /api/admin/drive/files.
 func (h *Handler) DriveFiles(c echo.Context) error {
 	if h.driveFileRepo == nil {
@@ -45,6 +52,20 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 	_ = c.Bind(&req)
 	if req.Limit <= 0 || req.Limit > 100 {
 		req.Limit = 30
+	}
+	// userId に @system が指定されたら system file 専用 listing を返す。
+	// origin / host filter は意味を持たない (system file はユーザーに紐付か
+	// ないので) ので、type と pagination のみを取り回す。
+	if req.UserID == SystemUserIDToken {
+		files, err := h.driveFileRepo.ListSystemFiles(req.Type, req.UntilID, req.SinceID, req.Limit)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
+		out := make([]entity.DriveFileEntity, 0, len(files))
+		for _, f := range files {
+			out = append(out, h.packDriveFileAdmin(f))
+		}
+		return c.JSON(http.StatusOK, out)
 	}
 	switch req.Origin {
 	case "", "combined", "local", "remote":

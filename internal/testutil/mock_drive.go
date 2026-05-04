@@ -356,6 +356,40 @@ func (m *MockDriveFileRepository) ListForAdmin(userID, origin, host, fileType, u
 	return rows[:limit], nil
 }
 
+func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
+	rows := make([]*model.DriveFile, 0, len(m.Files))
+	for _, f := range m.Files {
+		if f.UserID != nil {
+			continue
+		}
+		if fileType != "" && !strings.HasPrefix(f.Type, fileType) {
+			continue
+		}
+		if untilID != "" && f.ID >= untilID {
+			continue
+		}
+		if sinceID != "" && f.ID <= sinceID {
+			continue
+		}
+		rows = append(rows, f)
+	}
+	// id DESC
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if rows[i].ID < rows[j].ID {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > len(rows) {
+		limit = len(rows)
+	}
+	return rows[:limit], nil
+}
+
 func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 	n := int64(0)
 	for id, f := range m.Files {

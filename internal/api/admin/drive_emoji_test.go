@@ -105,6 +105,52 @@ func TestDriveFiles_FiltersByTypePrefix(t *testing.T) {
 	assert.Equal(t, "d1", rows[0]["id"])
 }
 
+func TestDriveFiles_FiltersBySystemToken(t *testing.T) {
+	// #686: userId="@system" 指定時は system 所有 (UserID IS NULL) の drive
+	// file のみを返す。emoji copy / import zip 経路で蓄積される system file
+	// を admin UI から可視化するための経路。
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockDriveFileRepository()
+	u := "u1"
+	remoteUser := "u_remote"
+	host := "remote.example"
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys1", UserID: nil, Type: "image/png"}))
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys2", UserID: nil, Type: "image/jpeg"}))
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_user", UserID: &u, Type: "image/png"}))
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_remote", UserID: &remoteUser, UserHost: &host, Type: "image/png"}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveFiles, `{"userId":"@system","limit":10}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	gotIDs := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		gotIDs[r["id"].(string)] = true
+	}
+	assert.True(t, gotIDs["d_sys1"], "system file should be listed")
+	assert.True(t, gotIDs["d_sys2"], "system file should be listed")
+	assert.False(t, gotIDs["d_user"], "user-owned file must not appear")
+	assert.False(t, gotIDs["d_remote"], "remote-owned file must not appear")
+}
+
+func TestDriveFiles_SystemTokenWithTypeFilter(t *testing.T) {
+	// #686: @system token は type prefix filter と組み合わせ可能。MIME 種別で
+	// system file を絞り込めることを保証する (image/* だけ見たい等)。
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockDriveFileRepository()
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys_img", UserID: nil, Type: "image/png"}))
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys_zip", UserID: nil, Type: "application/zip"}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveFiles, `{"userId":"@system","type":"image/","limit":10}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "d_sys_img", rows[0]["id"])
+}
+
 func TestDriveShowFile_MissingBothFileIDAndURL(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())

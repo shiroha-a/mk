@@ -83,6 +83,9 @@ func (f *fakeDriveFileRepo) UpdateBulkFolder(_ []string, _ *string) error       
 func (f *fakeDriveFileRepo) ListForAdmin(_, _, _, _, _, _ string, _ int) ([]*model.DriveFile, error) {
 	return nil, nil
 }
+func (f *fakeDriveFileRepo) ListSystemFiles(_, _, _ string, _ int) ([]*model.DriveFile, error) {
+	return nil, nil
+}
 func (f *fakeDriveFileRepo) DeleteOrphans() (int64, error)     { return 0, nil }
 func (f *fakeDriveFileRepo) DeleteRemoteCache() (int64, error) { return 0, nil }
 func (f *fakeDriveFileRepo) DeleteByUser(_ string) (int64, error) {

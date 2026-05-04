@@ -24,6 +24,12 @@ type DriveFileRepository interface {
 	// origin is "local" / "remote" / "combined" ("combined" is the
 	// default). Empty host / type are no-ops.
 	ListForAdmin(userID, origin, host, fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
+	// ListSystemFiles returns drive files that are not owned by any user
+	// (userId IS NULL). #670 で導入した emoji copy / import zip の保管先
+	// system file を admin UI から可視化するための一覧 API (#686)。
+	// fileType は MIME prefix match (空なら無制約)、ID 範囲は他の admin
+	// listing と同一の semantics。
+	ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
 	FindByName(userID, name string, folderID *string) ([]*model.DriveFile, error)
 	ExistsByMD5(userID, md5 string) (bool, error)
 	ListByFileIDs(fileIDs []string) ([]*model.DriveFile, error)
@@ -217,6 +223,32 @@ func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, until
 	}
 	if fileType != "" {
 		// type is mimetype prefix match (e.g. "image/" matches image/png)
+		q = q.Where(`"type" LIKE ?`, fileType+"%")
+	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var rows []*model.DriveFile
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
+	q := r.db.Model(&model.DriveFile{}).Where(`"userId" IS NULL`)
+	if fileType != "" {
+		// MIME prefix match: ListForAdmin と semantics 統一 (e.g. "image/" で
+		// image/* を全部拾う)。
 		q = q.Where(`"type" LIKE ?`, fileType+"%")
 	}
 	if untilID != "" {

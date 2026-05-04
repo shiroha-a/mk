@@ -199,6 +199,71 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
+	// #686: UserID IS NULL の system file (custom emoji copy / import zip 経路で
+	// 蓄積される) を一覧する経路。type prefix と pagination が効くこと、
+	// user 所有 / remote 所有のファイルが混ざらないことを保証する。
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_sys_lst", "syslst")
+	defer cleanupUser(t, user.ID)
+
+	// system file 2 件 (image/png + application/zip)、user 所有 1 件、remote 所有 1 件
+	sysImg := newTestDriveFile("sys_img1", user.ID, "md5sysimg", nil)
+	sysImg.UserID = nil
+	sysImg.Type = "image/png"
+	sysZip := newTestDriveFile("sys_zip1", user.ID, "md5syszip", nil)
+	sysZip.UserID = nil
+	sysZip.Type = "application/zip"
+	userFile := newTestDriveFile("u_sys_uf", user.ID, "md5user", nil)
+	userFile.Type = "image/png"
+	remoteHost := "remote.example"
+	remoteFile := newTestDriveFile("u_sys_rf", user.ID, "md5remote", nil)
+	remoteFile.UserHost = &remoteHost
+	remoteFile.Type = "image/png"
+	require.NoError(t, repo.Create(sysImg))
+	require.NoError(t, repo.Create(sysZip))
+	require.NoError(t, repo.Create(userFile))
+	require.NoError(t, repo.Create(remoteFile))
+	defer cleanupDriveFile(t, sysImg.ID)
+	defer cleanupDriveFile(t, sysZip.ID)
+	defer cleanupDriveFile(t, userFile.ID)
+	defer cleanupDriveFile(t, remoteFile.ID)
+
+	// type 無指定: system file 2 件のみ
+	rows, err := repo.ListSystemFiles("", "", "", 10)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	assert.True(t, ids[sysImg.ID])
+	assert.True(t, ids[sysZip.ID])
+	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
+	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
+
+	// type=image/ で絞り込み: image/png のみ
+	rows, err = repo.ListSystemFiles("image/", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, sysImg.ID, rows[0].ID)
+
+	// limit 範囲外 (0 / 過大) でも error にならず default / clamp が効く
+	_, err = repo.ListSystemFiles("", "", "", 0)
+	require.NoError(t, err)
+	_, err = repo.ListSystemFiles("", "", "", 1000)
+	require.NoError(t, err)
+
+	// pagination: untilId と sinceId で範囲指定
+	rows, err = repo.ListSystemFiles("", sysZip.ID, "", 10) // sysZip より前 (= ID < sysZip)
+	require.NoError(t, err)
+	gotIDs := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		gotIDs[r.ID] = true
+	}
+	assert.True(t, gotIDs[sysImg.ID], "sysImg has smaller ID, should be included")
+	assert.False(t, gotIDs[sysZip.ID], "sysZip is the cutoff and should be excluded")
+}
+
 func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	repo := NewDriveFileRepository(testDB)
 	user := insertTestUser(t, "u_del_src", "dels")
