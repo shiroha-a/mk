@@ -503,6 +503,12 @@ func TestFetchRSS_Singleflight_CallerCancelDoesNotAbortPeers(t *testing.T) {
 	// ここで caller A をキャンセル。修正前なら fetchCtx に伝播して fetchFeed
 	// が ctx canceled で abort、B も 502 を受け取る。
 	cancelA()
+	// 修正前のコードで cancel 検知が http.Client → fetchFeed → closure に
+	// 伝播するのにかかる時間を確保する (regression guard 必須の wait)。
+	// 修正後は fetchCtx が caller から切り離されているのでこの 20ms の意味は
+	// 無いが、un-fixed code でテストが正しく failing する条件を作るには
+	// この sleep が無いと close(gate) が cancel 伝播より先に走って false
+	// negative になる。
 	time.Sleep(20 * time.Millisecond)
 
 	// gate を開けて upstream を返答させる。fetch が cancel されていなければ
@@ -512,6 +518,10 @@ func TestFetchRSS_Singleflight_CallerCancelDoesNotAbortPeers(t *testing.T) {
 
 	require.NoError(t, errA)
 	require.NoError(t, errB)
+	// A (キャンセル側) も 200 で完走するはず: writeCachedJSON は ctx を
+	// 観測しないので、キャンセルされていても response は body を書き出して
+	// 完了する。「A の cancel が response 自体を壊さない」契約の guard。
+	assert.Equal(t, http.StatusOK, recA.Code, "cancelled caller still completes the response")
 	// B (キャンセルしていない) は 200 で完走しているはず。これが 502 になっていたら
 	// caller cancel が peer に伝播してしまっている (regression)。
 	assert.Equal(t, http.StatusOK, recB.Code, "peer caller must not be aborted by sibling cancel")
