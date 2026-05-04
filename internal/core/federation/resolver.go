@@ -316,6 +316,13 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	// を AP に expose しないため、boolean (everyone/none) しか取れない。
 	// chatScope が "none" / "everyone" のどちらかになることを保証することで、
 	// chat service の canChat() が remote 相手でも正しく判定できる。
+	//
+	// 新規 fetch 時 (ここ) は flag 欠落 = everyone 扱い。`_misskey_canChat`
+	// 未対応の連合先 (Mastodon 等) はそもそも chat 連合できないので、誤って
+	// "none" に倒すと local 側で送信前 reject されて UX が悪化する。
+	// refresh 経路 (refreshActor) は flag 欠落 = 既存値保持 (連合先 server が
+	// フィールドを一時的に消した場合に scope を上書きしない安全策) で挙動が
+	// 異なる点に注意。
 	if actor.MisskeyCanChat != nil && !*actor.MisskeyCanChat {
 		user.ChatScope = "none"
 	} else {

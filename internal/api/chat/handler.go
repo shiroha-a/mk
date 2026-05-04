@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -52,6 +53,11 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 		// upstream は ApiError を持たず単なる Error を投げるので mk-go 固有
 		// code (RECIPIENT_CANNOT_CHAT) で返す。frontend の対応は別 issue。
 		return c.JSON(http.StatusForbidden, apierr.Error("RECIPIENT_CANNOT_CHAT", "Recipient does not allow chat from you.", "5e1fa6e8-1d2f-49a3-9c20-7a09be7b4c43"))
+	case errors.Is(err, corechat.ErrChatScopeUnconfigured):
+		// followingRepo 未配線。production では起きてはいけないので 500 と
+		// log で運用者に気付かせる (silent allow するより安全側)。
+		slog.Error("chat: followingRepo missing; chatScope granular check failed closed", "err", err)
+		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 }
@@ -117,28 +123,16 @@ func (h *Handler) packMessageDetailed(m *model.ChatMessage) map[string]any {
 
 // packUser produces the UserLite shape consumed by FE chat components.
 // FE の MkAvatar / MkUserName が `avatarUrl` / `avatarBlurhash` を読むため、
-// 含めないとアイコンが空のまま表示される (#692)。
-//
-// avatarUrl 未設定時は upstream Misskey TS と同様に `/identicon/<username>`
-// (リモートなら `<username>@<host>`) を fallback として返す。frontend は
-// `null` を受けるとデフォルト identicon URL を組み立てない実装が一部に
-// あるため、サーバ側で確実に URL を埋めておく。
+// 含めないとアイコンが空のまま表示される (#692)。avatarUrl 未設定時は
+// `entity.IdenticonURL` 経由で identicon URL に fallback する (TS upstream
+// `getIdenticonUrl` 相当)。
 func packUser(u *model.User) map[string]any {
-	avatarURL := u.AvatarURL
-	if avatarURL == nil || *avatarURL == "" {
-		host := ""
-		if u.Host != nil {
-			host = "@" + *u.Host
-		}
-		identicon := "/identicon/" + u.Username + host
-		avatarURL = &identicon
-	}
 	return map[string]any{
 		"id":             u.ID,
 		"username":       u.Username,
 		"name":           u.Name,
 		"host":           u.Host,
-		"avatarUrl":      avatarURL,
+		"avatarUrl":      entity.IdenticonURL(u),
 		"avatarBlurhash": u.AvatarBlurhash,
 		"isBot":          u.IsBot,
 		"isCat":          u.IsCat,

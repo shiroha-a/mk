@@ -107,6 +107,24 @@ type InstanceLite struct {
 	ThemeColor      *string `json:"themeColor"`
 }
 
+// IdenticonURL returns the avatar URL for u, falling back to the local
+// `/identicon/<username>(@<host>)` route when the user has no explicit
+// avatarUrl. Mirrors upstream Misskey TS の identicon URL 規則。
+//
+// 共有 helper として切り出してあるので、UserLite 以外のレスポンス
+// (e.g. internal/api/chat の packUser / internal/core/chat の packUserStream)
+// も同じ規則を使える (#692 / #708 review)。
+func IdenticonURL(u *model.User) string {
+	if u.AvatarURL != nil && *u.AvatarURL != "" {
+		return *u.AvatarURL
+	}
+	host := ""
+	if u.Host != nil {
+		host = "@" + *u.Host
+	}
+	return "/identicon/" + u.Username + host
+}
+
 // PackUserLite converts a model.User to a UserLite DTO.
 // Instance (nested remote instance info) must be pre-fetched by the caller
 // via InstanceRepository and assigned to the returned UserLite.Instance.
@@ -117,16 +135,8 @@ type InstanceLite struct {
 // DB を叩かない。cache miss / TTL 切れでのみ admin catalog の List を 1 回
 // 引く (#521 / #524 review)。
 func PackUserLite(u *model.User) UserLite {
-	avatarURL := u.AvatarURL
-	// avatarUrlがnullの場合、identiconを生成
-	if avatarURL == nil || *avatarURL == "" {
-		host := ""
-		if u.Host != nil {
-			host = "@" + *u.Host
-		}
-		identicon := "/identicon/" + u.Username + host
-		avatarURL = &identicon
-	}
+	resolved := IdenticonURL(u)
+	avatarURL := &resolved
 	out := UserLite{
 		ID:                u.ID,
 		Name:              u.Name,

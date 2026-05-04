@@ -81,6 +81,35 @@ func TestResolveActor_NewUser(t *testing.T) {
 	assert.Contains(t, pem, "FAKE")
 }
 
+// #692: 新規 fetch で `_misskey_canChat` を chatScope に翻訳する。
+// 欠落 / true は "everyone"、false は "none" にマップ。
+func TestResolveActor_NewUserCanChatTranslation(t *testing.T) {
+	cases := []struct {
+		name     string
+		bodyFlag string
+		want     string
+	}{
+		{"missing", "", "everyone"},
+		{"true", `, "_misskey_canChat": true`, "everyone"},
+		{"false", `, "_misskey_canChat": false`, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{
+				"id": "https://remote.example/users/alice",
+				"type": "Person",
+				"preferredUsername": "alice",
+				"inbox": "https://remote.example/users/alice/inbox",
+				"publicKey": {"publicKeyPem": "FAKE"}` + tc.bodyFlag + `
+			}`
+			r, _ := newResolver(t, body, nil)
+			user, err := r.ResolveActor("https://remote.example/users/alice")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, user.ChatScope)
+		})
+	}
+}
+
 func TestResolveActor_NewUserIngestsIconBanner(t *testing.T) {
 	// actor.icon / actor.image があれば avatarUrl / bannerUrl に取り込む。
 	body := `{
@@ -1451,6 +1480,50 @@ func TestResolveActor_OrganizationTypeDoesNotSetIsBot(t *testing.T) {
 	user, err := r.ResolveActor("https://remote.example/users/x")
 	require.NoError(t, err)
 	assert.False(t, user.IsBot)
+}
+
+// #692: refresh で `_misskey_canChat: false` を受け取ったら chatScope を
+// "none" に書き換える (DB / メモリ両方)。flag 欠落時は既存 chatScope を
+// 保持する (連合先が一時的に field を消した場合の保護)。
+func TestRefreshActor_UpdatesChatScopeFromCanChat(t *testing.T) {
+	cases := []struct {
+		name         string
+		bodyFlag     string
+		initialScope string
+		want         string
+	}{
+		{"false_flag_sets_none", `, "_misskey_canChat": false`, "everyone", "none"},
+		{"true_flag_sets_everyone", `, "_misskey_canChat": true`, "none", "everyone"},
+		{"missing_keeps_existing", "", "everyone", "everyone"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			uri := "https://remote.example/users/x"
+			stale := time.Now().Add(-48 * time.Hour)
+			repo.Users["existing"] = &model.User{
+				ID:            "existing",
+				Username:      "x",
+				URI:           &uri,
+				ChatScope:     tc.initialScope,
+				LastFetchedAt: &stale,
+			}
+			body := `{
+				"id": "https://remote.example/users/x",
+				"type": "Person",
+				"preferredUsername": "x",
+				"inbox": "https://remote.example/users/x/inbox",
+				"publicKey": {"publicKeyPem": "FAKE"}` + tc.bodyFlag + `
+			}`
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, user.ChatScope)
+		})
+	}
 }
 
 func TestRefreshActor_UpdatesIsBotOnTypeChange(t *testing.T) {

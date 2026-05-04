@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -109,10 +110,10 @@ func (s *Service) SetAPDelivery(userRepo repository.UserRepository, renderer *ac
 }
 
 // SetFollowingRepo wires the following repository so chatScope=followers /
-// following / mutual checks can be enforced (#692). 未配線時は scope check
-// が skip され、結果として "everyone" 相当に降格する (デフォルトの "mutual"
-// より緩いので、配線忘れは production で意図しない open relay を作る点に
-// 注意。Wire 側で必須配線にしておくこと)。
+// following / mutual checks can be enforced (#692). 未配線のままで granular
+// scope を持つ recipient へ送信しようとすると `canChat` が fail-closed で
+// reject する (旧実装の silent allow は意図しない open relay を作るため
+// PR #708 review で改めた)。production では必ず配線する。
 func (s *Service) SetFollowingRepo(repo repository.FollowingRepository) {
 	s.followingRepo = repo
 }
@@ -121,6 +122,12 @@ func (s *Service) SetFollowingRepo(repo repository.FollowingRepository) {
 // the recipient's chatScope does not allow the sender. CherryPick の
 // `Error('recipient is cannot chat (...)')` 相当 (#692)。
 var ErrChatScopeViolation = errors.New("chat scope violation")
+
+// ErrChatScopeUnconfigured is returned when canChat() needs to consult the
+// following graph (chatScope = followers / following / mutual) but no
+// FollowingRepository was wired. Treated as fail-closed (= reject) instead
+// of silently degrading to everyone, which would be an open relay (#708 review)。
+var ErrChatScopeUnconfigured = errors.New("chat scope check unconfigured: followingRepo missing")
 
 // canChat reports whether `sender` is allowed to send a 1-on-1 chat to
 // `recipient` based on recipient.chatScope. Returns nil when allowed.
@@ -136,7 +143,10 @@ var ErrChatScopeViolation = errors.New("chat scope violation")
 // (boolean) だけなので chatScope は "everyone" / "none" の二値しか取り得ない
 // (resolver で翻訳済み, #692)。granular な判定は受信側 instance に委ねる。
 //
-// followingRepo 未配線時は緩く everyone 相当 (production では必ず wire する想定)。
+// followingRepo 未配線で granular scope を判定しないといけない局面では
+// `ErrChatScopeUnconfigured` を返して fail-closed する (#708 review #2)。
+// silent に everyone 降格すると production の wiring 忘れが open relay に
+// なり、chatScope 設定が黙って無効化される。
 func (s *Service) canChat(sender, recipient *model.User) error {
 	if recipient == nil || sender == nil {
 		return nil
@@ -154,8 +164,10 @@ func (s *Service) canChat(sender, recipient *model.User) error {
 	case "", "everyone":
 		return nil
 	}
+	// granular scope (followers / following / mutual) は follow graph 必須。
+	// 未配線なら fail-closed する。
 	if s.followingRepo == nil {
-		return nil
+		return ErrChatScopeUnconfigured
 	}
 	switch recipient.ChatScope {
 	case "followers":
@@ -554,24 +566,15 @@ func (s *Service) packMessageStream(msg *model.ChatMessage) map[string]any {
 
 // packUserStream is a UserLite-shaped projection for stream payloads.
 // FE の MkAvatar / chat 一覧が avatarUrl / avatarBlurhash を読むため、
-// fromUser / toUser に含める。avatarUrl 未設定時は identicon URL に
-// fallback する (api/chat/handler.go の packUser と同じ規則, #692)。
+// fromUser / toUser に含める。avatarUrl 未設定時は `entity.IdenticonURL`
+// 経由で identicon URL に fallback する (#692)。
 func packUserStream(u *model.User) map[string]any {
-	avatarURL := u.AvatarURL
-	if avatarURL == nil || *avatarURL == "" {
-		host := ""
-		if u.Host != nil {
-			host = "@" + *u.Host
-		}
-		identicon := "/identicon/" + u.Username + host
-		avatarURL = &identicon
-	}
 	return map[string]any{
 		"id":             u.ID,
 		"username":       u.Username,
 		"name":           u.Name,
 		"host":           u.Host,
-		"avatarUrl":      avatarURL,
+		"avatarUrl":      entity.IdenticonURL(u),
 		"avatarBlurhash": u.AvatarBlurhash,
 		"isBot":          u.IsBot,
 		"isCat":          u.IsCat,

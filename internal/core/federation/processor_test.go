@@ -1285,6 +1285,93 @@ func TestProcess_CreateChat_FlagFalseFallsThroughToIngest(t *testing.T) {
 	assert.Equal(t, 0, chatSvc.called, "chat service must NOT be hit for non-chat notes")
 }
 
+// #692: handleChatCreate / readRecipientURI のエッジケース。
+
+func TestProcess_CreateChat_EmptyTo(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm-empty",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "no recipient",
+			"to": "",
+			"_misskey_talk": true
+		}
+	}`)
+	err := p.Process(body)
+	assert.Error(t, err)
+	assert.Equal(t, 0, chatSvc.called)
+}
+
+func TestProcess_CreateChat_ToNumber_Rejected(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm-num",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "weird",
+			"to": 42,
+			"_misskey_talk": true
+		}
+	}`)
+	err := p.Process(body)
+	assert.Error(t, err)
+	assert.Equal(t, 0, chatSvc.called)
+}
+
+func TestProcess_CreateChat_EmptyArrayTo(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm-empty-arr",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "no recipient",
+			"to": [""],
+			"_misskey_talk": true
+		}
+	}`)
+	err := p.Process(body)
+	assert.Error(t, err)
+	assert.Equal(t, 0, chatSvc.called)
+}
+
+func TestProcess_CreateChat_RecipientNotFound(t *testing.T) {
+	// FindByURI が err、ExtractLocalUserID も local URI でない → resolve 失敗。
+	p, _, _, _ := newProcessor(t, aliceActor)
+	chatSvc := &stubChatReceiver{}
+	p.SetChatService(chatSvc)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat-messages/cm-no-recip",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "x",
+			"to": "https://other.example/users/unknown",
+			"_misskey_talk": true
+		}
+	}`)
+	err := p.Process(body)
+	assert.Error(t, err)
+	assert.Equal(t, 0, chatSvc.called)
+}
+
 func TestProcess_CreateChat_RecipientNotLocal(t *testing.T) {
 	// recipient が remote 解決されると loopback delivery として拒絶する。
 	p, repo, _, _ := newProcessor(t, aliceActor)

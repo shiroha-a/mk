@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -773,10 +774,74 @@ func TestMembersUpdateMembership(t *testing.T) {
 
 func TestHistory(t *testing.T) {
 	h, _ := newTestHandler()
+	// default (room=false) → ListUserHistory に dispatch
 	rec := post(h.History, `{}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	rec2 := post(h.History, `{"limit":5}`, u1)
 	assert.Equal(t, http.StatusOK, rec2.Code)
+	// room=true → ListRoomHistory に dispatch (#692)
+	rec3 := post(h.History, `{"room":true,"limit":3}`, u1)
+	assert.Equal(t, http.StatusOK, rec3.Code)
+	// limit clamp: 0 → 10, 9999 → 100 (内部分岐の coverage 確保)
+	assert.Equal(t, http.StatusOK, post(h.History, `{"limit":0}`, u1).Code)
+	assert.Equal(t, http.StatusOK, post(h.History, `{"limit":9999}`, u1).Code)
+}
+
+// #692 review #7: UserTimeline / RoomTimeline がそれぞれ
+// MarkAllReadFromUser / MarkAllReadInRoom を呼んでチャット画面を開いた瞬間に
+// 既読化することを assert する (handler 側の wiring を guard)。
+type readMarkSpyRepo struct {
+	*mockChatRepo
+	markFromUserCalled struct{ reader, fromUser string }
+	markInRoomCalled   struct{ reader, room string }
+}
+
+func (m *readMarkSpyRepo) MarkAllReadFromUser(reader, fromUser string) error {
+	m.markFromUserCalled.reader = reader
+	m.markFromUserCalled.fromUser = fromUser
+	return nil
+}
+
+func (m *readMarkSpyRepo) MarkAllReadInRoom(reader, room string) error {
+	m.markInRoomCalled.reader = reader
+	m.markInRoomCalled.room = room
+	return nil
+}
+
+func TestUserTimeline_MarksReadOnOpen(t *testing.T) {
+	spy := &readMarkSpyRepo{mockChatRepo: newMock()}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(spy, idGen)
+	rec := post(h.UserTimeline, `{"userId":"u_other"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "u1", spy.markFromUserCalled.reader)
+	assert.Equal(t, "u_other", spy.markFromUserCalled.fromUser)
+}
+
+func TestRoomTimeline_MarksReadOnOpen(t *testing.T) {
+	spy := &readMarkSpyRepo{mockChatRepo: newMock()}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(spy, idGen)
+	rec := post(h.RoomTimeline, `{"roomId":"r_x"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "u1", spy.markInRoomCalled.reader)
+	assert.Equal(t, "r_x", spy.markInRoomCalled.room)
+}
+
+// MarkAllRead* が err を返しても timeline 自体は 200 を返す (best-effort)。
+type readMarkErrRepo struct {
+	*mockChatRepo
+}
+
+func (m *readMarkErrRepo) MarkAllReadFromUser(_, _ string) error { return errMock }
+func (m *readMarkErrRepo) MarkAllReadInRoom(_, _ string) error   { return errMock }
+
+func TestTimeline_BestEffortReadMark(t *testing.T) {
+	r := &readMarkErrRepo{mockChatRepo: newMock()}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(r, idGen)
+	assert.Equal(t, http.StatusOK, post(h.UserTimeline, `{"userId":"u2"}`, u1).Code)
+	assert.Equal(t, http.StatusOK, post(h.RoomTimeline, `{"roomId":"r1"}`, u1).Code)
 }
 
 func TestUnreadCount(t *testing.T) {
@@ -826,6 +891,59 @@ func TestReadAll(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.ReadAll, `{}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// #692: mapChatErr が ErrChatScopeViolation / ErrChatScopeUnconfigured を
+// それぞれ 403 / 500 にマップする。新規 error path の wiring guard。
+func TestMapChatErr_ChatScopeBranches(t *testing.T) {
+	h, _ := newTestHandler()
+	e := echo.New()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"violation", corechat.ErrChatScopeViolation, http.StatusForbidden},
+		{"unconfigured", corechat.ErrChatScopeUnconfigured, http.StatusInternalServerError},
+		{"unknown", errors.New("?"), http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			_ = h.mapChatErr(c, tc.err)
+			assert.Equal(t, tc.want, rec.Code)
+		})
+	}
+}
+
+// #692: packMessageDetailed は createdAt + toUser + toRoom を含めて返す。
+func TestPackMessageDetailed_FieldsPresent(t *testing.T) {
+	h, _ := newTestHandler()
+	idGen, _ := id.NewGenerator("aidx")
+	now := idGen.Generate(time.Now())
+	host := "remote.example"
+	roomID := "r1"
+	toUserID := "u_to"
+	msg := &model.ChatMessage{
+		ID:         now,
+		FromUserID: "u_from",
+		ToUserID:   &toUserID,
+		ToRoomID:   &roomID,
+		FromUser:   &model.User{ID: "u_from", Username: "from", Host: &host},
+		ToUser:     &model.User{ID: "u_to", Username: "to"},
+		ToRoom:     &model.ChatRoom{ID: roomID, Name: "Room"},
+		Reads:      pq.StringArray{},
+		Reactions:  pq.StringArray{},
+	}
+	out := h.packMessageDetailed(msg)
+	assert.NotEmpty(t, out["createdAt"], "createdAt が ID から派生して埋まること")
+	assert.NotNil(t, out["toUser"])
+	assert.NotNil(t, out["toRoom"])
+	// upstream FE 互換のため `room` alias も入る
+	assert.NotNil(t, out["room"])
+	// fromUser に avatarUrl の identicon fallback が入る
+	from := out["fromUser"].(map[string]any)
+	assert.Equal(t, "/identicon/from@remote.example", from["avatarUrl"])
 }
 
 func TestInvitationsIgnore(t *testing.T) {

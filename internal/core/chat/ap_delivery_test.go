@@ -240,3 +240,43 @@ func TestCreateMessageViaAP_ScopeEnforced(t *testing.T) {
 	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/cm/1", sender, "bob", "x")
 	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
 }
+
+// followingRepo 未配線で granular scope が設定されている場合は fail-closed
+// (`ErrChatScopeUnconfigured`) になる。production wiring 忘れが silent に
+// open relay 化するのを防ぐ (#708 review #2)。
+func TestCreateMessageToUser_GranularScope_NoFollowingRepo_FailClosed(t *testing.T) {
+	chatRepo := newFakeRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corechat.NewService(chatRepo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://local.example")
+	renderer := activitypub.NewRenderer(urls)
+	svc.SetAPDelivery(userRepo, renderer, urls, &fakeAPDeliverer{})
+	// SetFollowingRepo は意図的に呼ばない
+
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	for _, scope := range []string{"followers", "following", "mutual"} {
+		t.Run(scope, func(t *testing.T) {
+			userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: scope}
+			_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+			require.ErrorIs(t, err, corechat.ErrChatScopeUnconfigured)
+		})
+	}
+}
+
+// followingRepo 未配線でも "everyone" / "none" 判定は granular check 不要
+// なので通過する (none は ErrChatScopeViolation, everyone は OK)。
+func TestCreateMessageToUser_NonGranularScope_NoFollowingRepoOK(t *testing.T) {
+	chatRepo := newFakeRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corechat.NewService(chatRepo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://local.example")
+	renderer := activitypub.NewRenderer(urls)
+	svc.SetAPDelivery(userRepo, renderer, urls, &fakeAPDeliverer{})
+
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "everyone"}
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}

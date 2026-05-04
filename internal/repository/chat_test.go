@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/lib/pq"
@@ -305,6 +306,208 @@ func TestChatRepository_ListHistory(t *testing.T) {
 	histDef, err := repo.ListHistory(me.ID, 0)
 	require.NoError(t, err)
 	assert.Len(t, histDef, 3)
+}
+
+// #692: 履歴ゼロ件 → 空 slice (nil) を返す経路。limit clamp と異なり ids
+// 空の早期 return ブランチをカバー。
+func TestChatRepository_ListHistory_Variants_NoMessages(t *testing.T) {
+	repo := NewChatRepository(testDB)
+
+	uh, err := repo.ListUserHistory("nope_user_id", 10)
+	require.NoError(t, err)
+	assert.Empty(t, uh)
+	rh, err := repo.ListRoomHistory("nope_user_id", 10)
+	require.NoError(t, err)
+	assert.Empty(t, rh)
+}
+
+// #692: ListUserHistory は DM 限定 (toRoomId NULL) で per-peer 最新を返す。
+func TestChatRepository_ListUserHistory(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	me := insertTestUser(t, "u_chat_uh1", "chatuh1")
+	other1 := insertTestUser(t, "u_chat_uh2", "chatuh2")
+	other2 := insertTestUser(t, "u_chat_uh3", "chatuh3")
+	defer cleanupUser(t, me.ID)
+	defer cleanupUser(t, other1.ID)
+	defer cleanupUser(t, other2.ID)
+	room := &model.ChatRoom{ID: "cr_uh1", Name: "Room", OwnerID: me.ID}
+	require.NoError(t, repo.CreateRoom(room))
+	defer testDB.Exec(`DELETE FROM "chat_room" WHERE id = ?`, room.ID)
+
+	text := "msg"
+	// DM 2 件 (me<->other1)
+	for _, id := range []string{"cm_uh1", "cm_uh2"} {
+		m := &model.ChatMessage{
+			ID: id, FromUserID: me.ID, ToUserID: &other1.ID, Text: &text,
+			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		}
+		require.NoError(t, repo.CreateMessage(m))
+		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
+	}
+	dm3 := &model.ChatMessage{
+		ID: "cm_uh3", FromUserID: me.ID, ToUserID: &other2.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(dm3))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm3.ID)
+	// room メッセージ → ListUserHistory では除外されるはず
+	rm := &model.ChatMessage{
+		ID: "cm_uh4", FromUserID: me.ID, ToRoomID: &room.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(rm))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, rm.ID)
+
+	hist, err := repo.ListUserHistory(me.ID, 10)
+	require.NoError(t, err)
+	// 2 つの DM 会話 (me-other1, me-other2)。room は除外。
+	assert.Len(t, hist, 2)
+	for _, h := range hist {
+		assert.Nil(t, h.ToRoomID, "room メッセージが混入してはいけない")
+	}
+
+	// limit clamp: 0 -> 10, 大きすぎる値 -> 100
+	defHist, _ := repo.ListUserHistory(me.ID, 0)
+	assert.Len(t, defHist, 2)
+	clampHist, _ := repo.ListUserHistory(me.ID, 9999)
+	assert.Len(t, clampHist, 2)
+}
+
+// #692: ListRoomHistory は room 限定 (toRoomId NOT NULL かつ owner / member) で
+// per-room 最新を返す。
+func TestChatRepository_ListRoomHistory(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	owner := insertTestUser(t, "u_chat_rh1", "chatrh1")
+	other := insertTestUser(t, "u_chat_rh2", "chatrh2")
+	defer cleanupUser(t, owner.ID)
+	defer cleanupUser(t, other.ID)
+	r1 := &model.ChatRoom{ID: "cr_rh1", Name: "R1", OwnerID: owner.ID}
+	r2 := &model.ChatRoom{ID: "cr_rh2", Name: "R2", OwnerID: owner.ID}
+	require.NoError(t, repo.CreateRoom(r1))
+	require.NoError(t, repo.CreateRoom(r2))
+	defer testDB.Exec(`DELETE FROM "chat_room" WHERE id IN (?, ?)`, r1.ID, r2.ID)
+
+	text := "rmsg"
+	// r1 に 2 件、r2 に 1 件
+	for _, msg := range []*model.ChatMessage{
+		{ID: "cm_rh1", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
+		{ID: "cm_rh2", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
+		{ID: "cm_rh3", FromUserID: owner.ID, ToRoomID: &r2.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
+	} {
+		require.NoError(t, repo.CreateMessage(msg))
+		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, msg.ID)
+	}
+	// 1on1 DM は除外される
+	dm := &model.ChatMessage{
+		ID: "cm_rh4", FromUserID: owner.ID, ToUserID: &other.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(dm))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm.ID)
+
+	// owner は r1 / r2 のオーナーなので両方含む
+	hist, err := repo.ListRoomHistory(owner.ID, 10)
+	require.NoError(t, err)
+	assert.Len(t, hist, 2)
+	for _, h := range hist {
+		require.NotNil(t, h.ToRoomID)
+	}
+
+	// other はメンバーシップ無し → 空
+	histOther, err := repo.ListRoomHistory(other.ID, 10)
+	require.NoError(t, err)
+	assert.Empty(t, histOther)
+
+	// limit clamp
+	defHist, _ := repo.ListRoomHistory(owner.ID, 0)
+	assert.Len(t, defHist, 2)
+	clampHist, _ := repo.ListRoomHistory(owner.ID, 9999)
+	assert.Len(t, clampHist, 2)
+}
+
+// #692: MarkAllReadFromUser は (sender→reader) の DM だけを既読化し、
+// 他人発の DM や room メッセージには触らない。
+func TestChatRepository_MarkAllReadFromUser(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	reader := insertTestUser(t, "u_chat_mrf1", "chatmrf1")
+	sender := insertTestUser(t, "u_chat_mrf2", "chatmrf2")
+	stranger := insertTestUser(t, "u_chat_mrf3", "chatmrf3")
+	defer cleanupUser(t, reader.ID)
+	defer cleanupUser(t, sender.ID)
+	defer cleanupUser(t, stranger.ID)
+
+	text := "x"
+	// sender → reader (DM, 2 件)
+	for _, id := range []string{"cm_mrf_s1", "cm_mrf_s2"} {
+		m := &model.ChatMessage{
+			ID: id, FromUserID: sender.ID, ToUserID: &reader.ID, Text: &text,
+			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		}
+		require.NoError(t, repo.CreateMessage(m))
+		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
+	}
+	// stranger → reader (別人発、対象外)
+	mStranger := &model.ChatMessage{
+		ID: "cm_mrf_x", FromUserID: stranger.ID, ToUserID: &reader.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(mStranger))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mStranger.ID)
+
+	require.NoError(t, repo.MarkAllReadFromUser(reader.ID, sender.ID))
+
+	// sender 発のものは reads に reader が入る
+	mS1, err := repo.FindMessageByID("cm_mrf_s1")
+	require.NoError(t, err)
+	assert.Contains(t, []string(mS1.Reads), reader.ID)
+	// stranger 発のものは触られない
+	mX, err := repo.FindMessageByID("cm_mrf_x")
+	require.NoError(t, err)
+	assert.NotContains(t, []string(mX.Reads), reader.ID)
+
+	// 冪等性: 2 回呼んでもエラーにならず、reads が膨らまない
+	require.NoError(t, repo.MarkAllReadFromUser(reader.ID, sender.ID))
+	mAfter, err := repo.FindMessageByID("cm_mrf_s1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(strings.Join([]string(mAfter.Reads), ","), reader.ID))
+}
+
+// #692: MarkAllReadInRoom は同じ部屋の他人発メッセージを既読化、自分発は触らない。
+func TestChatRepository_MarkAllReadInRoom(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	owner := insertTestUser(t, "u_chat_mrr1", "chatmrr1")
+	other := insertTestUser(t, "u_chat_mrr2", "chatmrr2")
+	defer cleanupUser(t, owner.ID)
+	defer cleanupUser(t, other.ID)
+	room := &model.ChatRoom{ID: "cr_mrr", Name: "R", OwnerID: owner.ID}
+	require.NoError(t, repo.CreateRoom(room))
+	defer testDB.Exec(`DELETE FROM "chat_room" WHERE id = ?`, room.ID)
+
+	text := "y"
+	// other 発 (reader=owner にとって既読対象)
+	mOther := &model.ChatMessage{
+		ID: "cm_mrr_o1", FromUserID: other.ID, ToRoomID: &room.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(mOther))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mOther.ID)
+	// owner 自身発 (既読化対象外)
+	mSelf := &model.ChatMessage{
+		ID: "cm_mrr_self", FromUserID: owner.ID, ToRoomID: &room.ID, Text: &text,
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+	}
+	require.NoError(t, repo.CreateMessage(mSelf))
+	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mSelf.ID)
+
+	require.NoError(t, repo.MarkAllReadInRoom(owner.ID, room.ID))
+
+	mOtherAfter, err := repo.FindMessageByID("cm_mrr_o1")
+	require.NoError(t, err)
+	assert.Contains(t, []string(mOtherAfter.Reads), owner.ID)
+
+	mSelfAfter, err := repo.FindMessageByID("cm_mrr_self")
+	require.NoError(t, err)
+	assert.NotContains(t, []string(mSelfAfter.Reads), owner.ID, "自分発メッセージは既読化対象外")
 }
 
 func TestChatRepository_ListInvitationsByUserAndRoom(t *testing.T) {
