@@ -51,12 +51,15 @@ func TestMain(m *testing.M) {
 //
 // admin user 行は moderation_log の FK 制約を満たすために事前に seed する。
 // テスト末尾で削除する Cleanup を t.Cleanup で登録。
+//
+// 注意: t.Parallel() 非対応。共有 integrationDB と固定 host を使う test
+// 間で race / unique 制約衝突するため、本 helper を使う test は serial に
+// 走らせること。
 func newIntegrationHandler(t *testing.T) (*apiadmin.Handler, *model.User) {
 	t.Helper()
 	if integrationDB == nil {
 		t.Skip("integrationDB unavailable (set TEST_DB_HOST or run with Docker daemon for testcontainer)")
 	}
-	require.NotNil(t, integrationDB)
 
 	idGen, err := id.NewGenerator("aidx")
 	require.NoError(t, err)
@@ -95,6 +98,10 @@ func newIntegrationHandler(t *testing.T) (*apiadmin.Handler, *model.User) {
 
 // seedTestInstance は host で identify される instance 行を 1 つ seed する。
 // テスト末尾で host で削除する Cleanup を t.Cleanup で登録。
+//
+// 前回 test が異常終了して残骸が DB に残っているケースで Create が UNIQUE
+// 制約 (host) で fail しないよう、事前に同 host を pre-delete してから
+// 挿入する。これで CI の前回失敗 → 今回 setup 失敗の連鎖を防ぐ。
 func seedTestInstance(t *testing.T, host, modNote string, state model.SuspensionState) string {
 	t.Helper()
 	idGen, err := id.NewGenerator("aidx")
@@ -107,6 +114,8 @@ func seedTestInstance(t *testing.T, host, modNote string, state model.Suspension
 		ModerationNote:   modNote,
 		SuspensionState:  state,
 	}
+	// 前回 cleanup の取りこぼしを preemptive に掃除して create を idempotent にする。
+	integrationDB.Exec(`DELETE FROM "instance" WHERE host = ?`, host)
 	require.NoError(t, integrationDB.Create(inst).Error)
 	t.Cleanup(func() {
 		integrationDB.Exec(`DELETE FROM "instance" WHERE host = ?`, host)
@@ -170,11 +179,7 @@ func TestFederationUpdateInstance_IntegrationClearsModerationNoteToEmpty(t *test
 	assert.Equal(t, instID, parsed["id"])
 }
 
-// suspend / unsuspend 経路の SQL レベル integration test も書こうとしたが、
-// 実 DB に対して `req.IsSuspended` を true にして request を送ると instance
-// テーブルの `suspensionState` 列は更新されない — これは handler の
-// `req.updates()` が "isSuspended" boolean を GORM の `Updates(map)` に
-// 渡しているが、instance テーブルには `isSuspended` 列が存在せず
-// `suspensionState` 列 (varchar enum) しか無いことに由来する別バグ
-// (#696 review で発見)。本 issue (#696 = ModerationNote の guard) のスコープ
-// 外なので follow-up issue で別途追跡する。
+// suspend / unsuspend 経路の integration test は #724 (handler が
+// instance.isSuspended という存在しない列に UPDATE 試行する別バグ) を
+// 修正してから追加する。本 issue (#696) のスコープは moderationNote guard
+// のみ。
