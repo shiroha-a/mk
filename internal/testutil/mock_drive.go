@@ -9,6 +9,12 @@ import (
 // MockDriveFileRepository is a test double for repository.DriveFileRepository.
 type MockDriveFileRepository struct {
 	Files map[string]*model.DriveFile // keyed by ID
+	// EmojiReferencedURLs は DeleteOrphans の guard を mock するための「emoji
+	// が参照している drive_file.url 集合」。production の SQL では
+	// `NOT EXISTS (SELECT 1 FROM emoji WHERE originalUrl = drive_file.url)`
+	// で判定する経路を test 用に模倣する (#722)。空なら guard 無効 (= 旧来の
+	// userId NULL 全削除) で既存テスト互換。
+	EmojiReferencedURLs map[string]bool
 }
 
 func NewMockDriveFileRepository() *MockDriveFileRepository {
@@ -390,13 +396,21 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 	return rows[:limit], nil
 }
 
+// DeleteOrphans の mock は production SQL の semantics を model 化する:
+// userId NULL かつ EmojiReferencedURLs に URL が含まれない drive file を
+// 削除する。`EmojiReferencedURLs` を空のままにすると元来の挙動 (userId
+// NULL を全削除) と等価になるので、既存テストは無改修で通る (#722)。
 func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 	n := int64(0)
 	for id, f := range m.Files {
-		if f.UserID == nil {
-			delete(m.Files, id)
-			n++
+		if f.UserID != nil {
+			continue
 		}
+		if m.EmojiReferencedURLs[f.URL] {
+			continue
+		}
+		delete(m.Files, id)
+		n++
 	}
 	return n, nil
 }

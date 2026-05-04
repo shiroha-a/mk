@@ -270,8 +270,23 @@ func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string,
 	return rows, nil
 }
 
+// DeleteOrphans removes drive_file rows whose userId is NULL **and** are not
+// referenced by any custom emoji. Pure orphan files (例: 取り込み中断で残った
+// 中間 zip) は削除対象だが、#670 で導入された system 所有 emoji 画像 file
+// (emoji.originalUrl = drive_file.url で結ばれている) は cleanup で巻き込ま
+// れないように除外する (#722)。
+//
+// upstream Misskey TS の cleanup は単純に userId NULL を全消ししており、
+// 同様に emoji 画像も巻き込む構造的バグを内包しているが、mk-go では本
+// guard で local emoji asset を保護する。
 func (r *driveFileRepository) DeleteOrphans() (int64, error) {
-	tx := r.db.Where(`"userId" IS NULL`).Delete(&model.DriveFile{})
+	tx := r.db.Where(
+		`"userId" IS NULL AND NOT EXISTS (
+			SELECT 1 FROM "emoji" e
+			WHERE e."originalUrl" = "drive_file"."url"
+			   OR e."publicUrl"   = "drive_file"."url"
+		)`,
+	).Delete(&model.DriveFile{})
 	return tx.RowsAffected, tx.Error
 }
 

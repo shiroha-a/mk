@@ -188,6 +188,26 @@ func TestDriveCleanup_InvokesDeleteOrphans(t *testing.T) {
 	assert.Contains(t, repo.Files, "kept", "user-owned file should be kept")
 }
 
+// TestDriveCleanup_PreservesEmojiReferencedSystemFiles は #722 の handler 層
+// regression guard。emoji が参照する system 所有 drive_file は cleanup で
+// 巻き込まれないこと (= mock の EmojiReferencedURLs が ON だと該当 URL の
+// file は保持される) を assert する。SQL 層の guard は repository test で
+// 別途検証 (TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced)。
+func TestDriveCleanup_PreservesEmojiReferencedSystemFiles(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockDriveFileRepository()
+	emojiRefURL := "http://test/system_emoji.png"
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "pure_orph", UserID: nil, URL: "http://test/pure.bin"}))
+	require.NoError(t, repo.Create(&model.DriveFile{ID: "emoji_sys", UserID: nil, URL: emojiRefURL}))
+	repo.EmojiReferencedURLs = map[string]bool{emojiRefURL: true}
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotContains(t, repo.Files, "pure_orph", "pure orphan should be deleted")
+	assert.Contains(t, repo.Files, "emoji_sys", "emoji-referenced system file must be preserved")
+}
+
 func TestDriveCleanRemoteFiles_InvokesDeleteRemoteCache(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := testutil.NewMockDriveFileRepository()

@@ -315,6 +315,71 @@ func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced は #722
+// regression guard: emoji.originalUrl / publicUrl が参照している system 所有
+// drive_file は cleanup で巻き込まれずに保持されること。#670 で導入された
+// emoji copy / import zip の保管先が cleanup 実行で吹き飛ぶ即死バグの再発
+// 防止。
+func TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	emojiRepo := NewEmojiRepository(testDB)
+	user := insertTestUser(t, "u_orph_emoji", "orphemo")
+	defer cleanupUser(t, user.ID)
+
+	// orphan true (emoji 参照無し): 削除されるべき
+	pureOrphan := newTestDriveFile("orph_pure_722", user.ID, "md5o", nil)
+	pureOrphan.UserID = nil
+	pureOrphan.URL = "http://test/orph_pure_722.bin"
+
+	// emoji.originalUrl 参照あり (system file): 削除してはいけない
+	emojiOriginalRef := newTestDriveFile("emoji_orig_722", user.ID, "md5eo", nil)
+	emojiOriginalRef.UserID = nil
+	emojiOriginalRef.URL = "http://test/emoji_orig_722.png"
+
+	// emoji.publicUrl 参照あり (webpublic 経由系): 削除してはいけない
+	emojiPublicRef := newTestDriveFile("emoji_pub_722", user.ID, "md5ep", nil)
+	emojiPublicRef.UserID = nil
+	emojiPublicRef.URL = "http://test/emoji_pub_722.png"
+
+	require.NoError(t, repo.Create(pureOrphan))
+	require.NoError(t, repo.Create(emojiOriginalRef))
+	require.NoError(t, repo.Create(emojiPublicRef))
+	defer cleanupDriveFile(t, pureOrphan.ID)
+	defer cleanupDriveFile(t, emojiOriginalRef.ID)
+	defer cleanupDriveFile(t, emojiPublicRef.ID)
+
+	// 2 件 emoji 行を seed (1 件は originalUrl で参照、もう 1 件は publicUrl で参照)
+	emoOrig := &model.Emoji{
+		ID:          "e_orig_722",
+		Name:        "guard_emoji_orig_722",
+		OriginalURL: emojiOriginalRef.URL,
+		PublicURL:   emojiOriginalRef.URL,
+	}
+	emoPub := &model.Emoji{
+		ID:          "e_pub_722",
+		Name:        "guard_emoji_pub_722",
+		OriginalURL: "http://test/some_other_url.png", // originalUrl は別
+		PublicURL:   emojiPublicRef.URL,               // publicUrl で参照
+	}
+	require.NoError(t, emojiRepo.Create(emoOrig))
+	require.NoError(t, emojiRepo.Create(emoPub))
+	defer testDB.Exec(`DELETE FROM "emoji" WHERE id IN (?, ?)`, emoOrig.ID, emoPub.ID)
+
+	n, err := repo.DeleteOrphans()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, int64(1), "pureOrphan should be counted in deleted rows")
+
+	// pureOrphan は消えている
+	_, err = repo.FindByID(pureOrphan.ID)
+	assert.Error(t, err, "pure orphan must be deleted")
+
+	// emojiOriginalRef / emojiPublicRef は保持されている
+	_, err = repo.FindByID(emojiOriginalRef.ID)
+	assert.NoError(t, err, "emoji.originalUrl 参照の system file は保持される")
+	_, err = repo.FindByID(emojiPublicRef.ID)
+	assert.NoError(t, err, "emoji.publicUrl 参照の system file は保持される")
+}
+
 // --- 追加テスト (#260 repository coverage) ---
 
 func TestDriveFileRepository_FindByIDs(t *testing.T) {
