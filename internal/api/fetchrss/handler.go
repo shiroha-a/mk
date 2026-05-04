@@ -8,6 +8,7 @@ package fetchrss
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/mmcdole/gofeed"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/safehttp"
+	"golang.org/x/sync/singleflight"
 )
 
 // CacheSeconds matches the upstream Misskey `cacheSec: 60 * 3` declaration so
@@ -38,16 +40,53 @@ const MaxBodyBytes int64 = 1 << 20
 // FetchTimeout matches the upstream `timeout: 5000` ms used by Misskey TS.
 const FetchTimeout = 5 * time.Second
 
+// DefaultCacheMaxEntries は in-memory cache が同時に保持するエントリ数の
+// soft cap。攻撃者が大量の異なる URL を送り込むケースで無制限に成長しない
+// よう、超過時は最古 expiresAt のエントリを 1 件 evict する。
+//
+// 1024 は「現実的な widget 設置数 × 同時 actor 数」を超えるが OOM を起こさない
+// 値の経験則。TTL=180s なら 1 URL あたり数 KB 想定で max ~数 MB。
+const DefaultCacheMaxEntries = 1024
+
 // Handler serves /api/fetch-rss. The HTTP client must be wired with an
 // SSRF-safe transport (see internal/server/outbound_http.go); the handler
 // itself adds only request-shape validation and gofeed translation. Note
 // that safehttp.NewSSRFSafeTransport applies the private-IP guard on every
 // dial, so HTTP redirects to private IPs are also blocked — the handler
 // can rely on the transport for redirect-chain SSRF defense.
+//
+// Server-side cache: 同 URL への hit は TTL 期間中 in-memory に保持された
+// JSON body を直接書き戻し、upstream へのアクセスは行わない。同じ URL
+// に対する concurrent miss は singleflight で 1 fetch に集約する。エラー
+// レスポンスは cache しない (短期障害がある feed への retry を許す)。
 type Handler struct {
 	httpClient *http.Client
 	userAgent  string
 	parserPool *sync.Pool
+
+	// Cache configuration.
+	cacheTTL    time.Duration
+	cacheMaxLen int
+
+	// In-memory cache: URL → 既に packFeed 済みの JSON body。
+	// hit path で json.Marshal を回避するため pre-serialized で保持する。
+	cacheMu sync.Mutex
+	cache   map[string]cacheEntry
+
+	// singleflight: 同一 URL への concurrent fetch を 1 つに集約する。
+	// upstream への thundering herd を防ぐため、cache miss 中に到着した
+	// 後続リクエストは同じ Do 結果を共有する。
+	sf singleflight.Group
+
+	// now は cacheGet / cachePut で使う clock。テストで stub する。
+	now func() time.Time
+}
+
+// cacheEntry は in-memory cache の値。body は既に packFeed → json.Marshal を
+// 通った JSON bytes で、hit 時はこれを直接 ResponseWriter に書き出す。
+type cacheEntry struct {
+	body      []byte
+	expiresAt time.Time
 }
 
 // New builds a Handler bound to the given outbound HTTP client and User-Agent
@@ -62,7 +101,36 @@ func New(httpClient *http.Client, userAgent string) *Handler {
 		// gofeed.Parser の goroutine 安全性は明記されていないため pool 経由で
 		// 1 リクエスト 1 インスタンスに分離する。Pool reuse でアロケーションは
 		// 実質ゼロに保つ。
-		parserPool: &sync.Pool{New: func() any { return gofeed.NewParser() }},
+		parserPool:  &sync.Pool{New: func() any { return gofeed.NewParser() }},
+		cacheTTL:    time.Duration(CacheSeconds) * time.Second,
+		cacheMaxLen: DefaultCacheMaxEntries,
+		cache:       make(map[string]cacheEntry),
+		now:         time.Now,
+	}
+}
+
+// SetCacheTTL overrides the server-side cache TTL. Intended for tests; in
+// production the default (CacheSeconds * time.Second) matches the
+// Cache-Control header so client and server see the same freshness window.
+func (h *Handler) SetCacheTTL(d time.Duration) {
+	if d > 0 {
+		h.cacheTTL = d
+	}
+}
+
+// SetCacheMaxEntries overrides the soft cap on in-memory cache entries.
+// 0 以下は無視 (default を維持)。
+func (h *Handler) SetCacheMaxEntries(n int) {
+	if n > 0 {
+		h.cacheMaxLen = n
+	}
+}
+
+// SetClock injects a deterministic clock so cache TTL paths can be tested
+// without time.Sleep。
+func (h *Handler) SetClock(now func() time.Time) {
+	if now != nil {
+		h.now = now
 	}
 }
 
@@ -92,10 +160,38 @@ func (h *Handler) Fetch(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "url must be http(s).", "f5b2bd41-7c0a-4d49-b8c8-3d3a4d9b8e21"))
 	}
 
+	key := u.String()
+
+	// Cache hit fast path: TTL 内ならパースなしで JSON bytes をそのまま返す。
+	if body, ok := h.cacheGet(key); ok {
+		return writeCachedJSON(c, body)
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request().Context(), FetchTimeout)
 	defer cancel()
 
-	feed, err := h.fetchFeed(ctx, u.String())
+	// singleflight で同 URL への concurrent miss を 1 fetch に集約する。
+	// 後続 caller は同じ result を共有 (upstream に thundering herd を流さない)。
+	v, err, _ := h.sf.Do(key, func() (any, error) {
+		// singleflight 入場時にキャッシュを再確認: 直前の coalesced 呼び出しが
+		// 既に populate していれば再 fetch しない。
+		if body, ok := h.cacheGet(key); ok {
+			return body, nil
+		}
+		feed, ferr := h.fetchFeed(ctx, key)
+		if ferr != nil {
+			return nil, ferr
+		}
+		body, jerr := json.Marshal(packFeed(feed))
+		if jerr != nil {
+			return nil, jerr
+		}
+		// 成功時のみ cache に積む。エラーレスポンスは cache しない:
+		// short-lived な upstream 障害から復旧した直後に古い 502 を引きずらない
+		// ようにするのと、攻撃者がエラーを cache 占有に使うのを防ぐ。
+		h.cachePut(key, body)
+		return body, nil
+	})
 	if err != nil {
 		// SSRF block / dial fail / parse fail はすべて upstream 側の問題として
 		// 502 にまとめる。err.Error() を直接 client に返すと resolved IP や
@@ -103,12 +199,73 @@ func (h *Handler) Fetch(c echo.Context) error {
 		// ログに残す。frontend は items の有無しか見ていないので、stub と
 		// 同じく空 array を返す道もあるが、ウィジェット側で「取得失敗」と
 		// 「フィードが空」を区別したい運用に備えて explicit error にする。
-		slog.WarnContext(ctx, "fetch-rss upstream failed", "url", u.String(), "err", err)
+		slog.WarnContext(ctx, "fetch-rss upstream failed", "url", key, "err", err)
 		return c.JSON(http.StatusBadGateway, apierr.Error("UPSTREAM_ERROR", "Failed to fetch feed.", "0e0e1f5b-2c97-4f17-a51c-1f9c2e9b4d82"))
 	}
+	return writeCachedJSON(c, v.([]byte))
+}
 
-	c.Response().Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", CacheSeconds))
-	return c.JSON(http.StatusOK, packFeed(feed))
+// writeCachedJSON は echo.Context.JSON 相当の応答を pre-serialized body から
+// 書き出す。Cache-Control / Content-Type を echo の既定挙動と揃えることで、
+// cache hit / miss どちらの経路でもクライアントから見た response shape は
+// 同一になる (TS upstream とも整合)。
+func writeCachedJSON(c echo.Context, body []byte) error {
+	resp := c.Response()
+	resp.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", CacheSeconds))
+	resp.Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	resp.WriteHeader(http.StatusOK)
+	_, err := resp.Write(body)
+	return err
+}
+
+// cacheGet returns a cached body and true if a fresh entry exists for the
+// key, else nil/false。Lazy expiration: 期限切れ entry は読んだタイミングで
+// map から落とす (定期 sweeper を持たないので、再度同 URL が来た時に自然
+// 整理される)。
+func (h *Handler) cacheGet(key string) ([]byte, bool) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	e, ok := h.cache[key]
+	if !ok {
+		return nil, false
+	}
+	if h.now().After(e.expiresAt) {
+		delete(h.cache, key)
+		return nil, false
+	}
+	return e.body, true
+}
+
+// cachePut stores the body keyed by url with TTL = h.cacheTTL。容量超過時は
+// 最古 expiresAt の entry を 1 件 evict する (LRU ではなく LFRU 近似で十分)。
+// O(N) sweep だが N <= cacheMaxLen で実用上問題なし。
+func (h *Handler) cachePut(key string, body []byte) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if _, exists := h.cache[key]; !exists && len(h.cache) >= h.cacheMaxLen {
+		h.evictOldestLocked()
+	}
+	h.cache[key] = cacheEntry{
+		body:      body,
+		expiresAt: h.now().Add(h.cacheTTL),
+	}
+}
+
+// evictOldestLocked removes the cache entry with the earliest expiresAt.
+// Caller must hold cacheMu。同点時は map iteration 順序のため非決定だが、
+// 実害はない (どちらを落としても TTL 終了は秒オーダーで同じ)。
+func (h *Handler) evictOldestLocked() {
+	var oldestKey string
+	var oldestT time.Time
+	for k, v := range h.cache {
+		if oldestKey == "" || v.expiresAt.Before(oldestT) {
+			oldestKey = k
+			oldestT = v.expiresAt
+		}
+	}
+	if oldestKey != "" {
+		delete(h.cache, oldestKey)
+	}
 }
 
 // fetchFeed performs the GET + body cap + gofeed parse. Kept separate so
