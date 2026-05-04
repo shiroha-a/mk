@@ -16,11 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blezek/tga" // TGA input decode (#672 Phase 1)
 	"github.com/gen2brain/avif"
 	_ "github.com/gen2brain/heic" // HEIC/HEIF input decode (iPhone uploads)
 	_ "github.com/gen2brain/jpegxl"
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
+	_ "github.com/spakin/netpbm" // PBM/PGM/PPM/PAM input decode (#672 Phase 1)
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -97,24 +99,42 @@ var browsersafeMIMEs = map[string]bool{
 	"image/x-icon":             true,
 	"image/vnd.microsoft.icon": true,
 	"image/vnd.mozilla.apng":   true,
-	"audio/opus":               true,
-	"video/ogg":                true,
-	"audio/ogg":                true,
-	"application/ogg":          true,
-	"video/quicktime":          true,
-	"video/mp4":                true,
-	"audio/mp4":                true,
-	"video/x-m4v":              true,
-	"audio/x-m4a":              true,
-	"video/3gpp":               true,
-	"video/3gpp2":              true,
-	"video/mpeg":               true,
-	"audio/mpeg":               true,
-	"video/webm":               true,
-	"audio/webm":               true,
-	"audio/aac":                true,
-	"audio/flac":               true,
-	"audio/wav":                true,
+	// Netpbm 系 (PBM/PGM/PPM): pure Go decode (#672 Phase 1)。browser native
+	// 表示は無いが、convertible 判定で WebP/AVIF に変換されて配信される。
+	"image/x-portable-bitmap":  true,
+	"image/x-portable-graymap": true,
+	"image/x-portable-pixmap":  true,
+	"image/x-portable-anymap":  true,
+	// TGA: pure Go decode (#672 Phase 1)。同上。
+	"image/x-tga":   true,
+	"image/x-targa": true,
+	// JPEG XR / MNG: decode 用 pure Go library が無いため pass-through で
+	// 配信し browser ネイティブ対応 (Edge legacy / 一部 viewer plugin) に
+	// 委譲する (#672 Phase 1 partial)。完全 transcode は cgo 依存となる
+	// ため scope 外。
+	"image/jxr":          true,
+	"image/vnd.ms-photo": true,
+	"video/x-mng":        true,
+	"image/x-mng":        true,
+	"video/x-jng":        true,
+	"audio/opus":         true,
+	"video/ogg":          true,
+	"audio/ogg":          true,
+	"application/ogg":    true,
+	"video/quicktime":    true,
+	"video/mp4":          true,
+	"audio/mp4":          true,
+	"video/x-m4v":        true,
+	"audio/x-m4a":        true,
+	"video/3gpp":         true,
+	"video/3gpp2":        true,
+	"video/mpeg":         true,
+	"audio/mpeg":         true,
+	"video/webm":         true,
+	"audio/webm":         true,
+	"audio/aac":          true,
+	"audio/flac":         true,
+	"audio/wav":          true,
 }
 
 // ProxyResult is the output of proxy resolution + processing.
@@ -496,7 +516,7 @@ func (s *Service) processResize(data []byte, contentType string, width, height i
 		return makeResult(data, contentType), nil
 	}
 
-	img, err := decodeImage(data)
+	img, err := decodeImage(data, contentType)
 	if err != nil {
 		// デコード失敗時は元データをそのまま返す
 		return makeResult(data, contentType), nil
@@ -551,7 +571,7 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 		return makeResult(data, contentType), nil
 	}
 
-	img, err := decodeImage(data)
+	img, err := decodeImage(data, contentType)
 	if err == nil && exceedsPixelCap(img) {
 		return makeDummyPNG(), nil
 	}
@@ -622,14 +642,32 @@ func isConvertibleImage(mime string) bool {
 		// gen2brain wazero ベースの decoder で対応 (#637 M3/M4/M5):
 		// image/avif (in/out), image/heic, image/heif, image/jxl は input 専用
 		// として decode → WebP/AVIF 出力経路に乗せる。
-		"image/avif", "image/heic", "image/heif", "image/jxl":
+		"image/avif", "image/heic", "image/heif", "image/jxl",
+		// #672 Phase 1: pure Go decoder で input 対応。
+		// Netpbm 系 (spakin/netpbm) と TGA (ftrvxmtrx/tga) は Go の標準
+		// image.Decode に format register されるので decodeImage 経由で
+		// 透過的に扱える。output は WebP/AVIF/PNG への transcode 経路に乗る。
+		"image/x-portable-bitmap", "image/x-portable-graymap",
+		"image/x-portable-pixmap", "image/x-portable-anymap",
+		"image/x-tga", "image/x-targa":
 		return true
 	default:
 		return false
 	}
 }
 
-func decodeImage(data []byte) (image.Image, error) {
+func decodeImage(data []byte, contentType string) (image.Image, error) {
+	// TGA は magic bytes が無いため image.RegisterFormat 経由の自動 dispatch
+	// が他フォーマットを破壊する (ftrvxmtrx/tga の既知問題)。MIME type で
+	// 明示判定して blezek/tga (auto-register 無し) の Decode を直接呼ぶ
+	// (#672 Phase 1)。
+	if contentType == "image/x-tga" || contentType == "image/x-targa" {
+		img, err := tga.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return img, nil
+	}
 	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, err

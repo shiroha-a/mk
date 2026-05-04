@@ -365,6 +365,17 @@ func TestIsConvertibleImage(t *testing.T) {
 		// IANA 公式名 (vnd.microsoft.icon) と古い慣例 (x-icon) を両方許可 (#418)
 		{"image/x-icon", true},
 		{"image/vnd.microsoft.icon", true},
+		// #672 Phase 1: pure Go decoder で input transcode 対応
+		{"image/x-portable-bitmap", true},
+		{"image/x-portable-graymap", true},
+		{"image/x-portable-pixmap", true},
+		{"image/x-portable-anymap", true},
+		{"image/x-tga", true},
+		{"image/x-targa", true},
+		// #672 Phase 1 partial: JXR / MNG は decode library が無く pass-through 用
+		// にのみ browsersafe 許可。convertible では無いので false。
+		{"image/jxr", false},
+		{"video/x-mng", false},
 		{"image/svg+xml", false},
 		{"video/mp4", false},
 		{"text/plain", false},
@@ -383,6 +394,12 @@ func TestBrowsersafeMIMEs(t *testing.T) {
 	// favicon.ico の MIME alias 両方を許可 (#418)
 	assert.True(t, browsersafeMIMEs["image/x-icon"])
 	assert.True(t, browsersafeMIMEs["image/vnd.microsoft.icon"])
+	// #672 Phase 1 で追加した formats は browsersafe (decode 経路あり or
+	// pass-through) で受け入れる
+	assert.True(t, browsersafeMIMEs["image/x-portable-pixmap"])
+	assert.True(t, browsersafeMIMEs["image/x-tga"])
+	assert.True(t, browsersafeMIMEs["image/jxr"])
+	assert.True(t, browsersafeMIMEs["video/x-mng"])
 	assert.False(t, browsersafeMIMEs["application/javascript"])
 	assert.False(t, browsersafeMIMEs["text/html"])
 }
@@ -543,8 +560,54 @@ func TestResizeFit_SmallImage(t *testing.T) {
 }
 
 func TestDecodeImage_InvalidData(t *testing.T) {
-	_, err := decodeImage([]byte("not an image"))
+	_, err := decodeImage([]byte("not an image"), "image/jpeg")
 	assert.Error(t, err)
+}
+
+// TestDecodeImage_PPM は #672 Phase 1 で追加した Netpbm 系 (spakin/netpbm)
+// の input decode 経路が standard image.Decode 経由で動作することを確認する。
+// 単純な 2x2 PPM (P3) を decode して bounds が期待通りなら OK。
+func TestDecodeImage_PPM(t *testing.T) {
+	// P3 = ASCII PPM, 2x2, max=255。R G B が 4 ピクセル分。
+	ppm := []byte("P3\n2 2\n255\n255 0 0 0 255 0 0 0 255 255 255 0\n")
+	img, err := decodeImage(ppm, "image/x-portable-pixmap")
+	require.NoError(t, err)
+	assert.Equal(t, 2, img.Bounds().Dx())
+	assert.Equal(t, 2, img.Bounds().Dy())
+}
+
+// TestDecodeImage_TGA は #672 Phase 1 で追加した TGA decoder (blezek/tga)
+// が contentType 経由で manual dispatch されることを確認する。
+// blezek/tga は magic bytes 無し format のため image.RegisterFormat には載
+// せず、decodeImage 内で MIME type 判定で dispatch する設計。
+func TestDecodeImage_TGA(t *testing.T) {
+	// 最小 uncompressed TGA v2: header 18 + pixel 4 + footer 26 = 48 bytes。
+	// footer は v2 signature "TRUEVISION-XFILE" を含み、blezek/tga が
+	// SeekEnd-26 で読みに行く (footer 無いと "negative position" エラー)。
+	header := []byte{
+		0,    // ID length
+		0,    // color map type (none)
+		2,    // image type: uncompressed true-color
+		0, 0, // color map first index
+		0, 0, // color map length
+		0,    // color map entry size
+		0, 0, // x origin
+		0, 0, // y origin
+		1, 0, // width = 1
+		1, 0, // height = 1
+		32,   // bpp
+		0x28, // image descriptor: top-left origin (bit5=1) + 8 alpha bits
+	}
+	pixel := []byte{0x00, 0xff, 0x00, 0xff} // BGRA pixel (green opaque)
+	footer := make([]byte, 26)
+	// 4 bytes extension offset = 0, 4 bytes developer offset = 0
+	copy(footer[8:], "TRUEVISION-XFILE.\x00")
+	tgaBytes := append(append(header, pixel...), footer...)
+
+	img, err := decodeImage(tgaBytes, "image/x-tga")
+	require.NoError(t, err)
+	assert.Equal(t, 1, img.Bounds().Dx())
+	assert.Equal(t, 1, img.Bounds().Dy())
 }
 
 func TestEncodeWebP(t *testing.T) {
