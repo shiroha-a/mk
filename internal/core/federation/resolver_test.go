@@ -1511,6 +1511,129 @@ func TestResolveActor_ChartHookFiresOnNewUser(t *testing.T) {
 	assert.Equal(t, user.ID, hook.users[0])
 }
 
+// stubHashtagHook captures hashtag hook fires from the federation resolver.
+// #680: IngestNote / UpdateRemoteNote が note.Tags 非空時に呼ぶことを保証する。
+type stubHashtagHook struct {
+	calls []hashtagHookCall
+}
+
+type hashtagHookCall struct {
+	noteID   string
+	authorID string
+	tags     []string
+	isLocal  bool
+}
+
+func (s *stubHashtagHook) OnNoteCreated(n *model.Note, a *model.User) {
+	s.calls = append(s.calls, hashtagHookCall{
+		noteID:   n.ID,
+		authorID: a.ID,
+		tags:     []string(n.Tags),
+		isLocal:  a.IsLocal(),
+	})
+}
+
+func TestIngestNote_HashtagHookFiresOnRemoteIngest(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+
+	body := `{
+		"id": "https://remote.example/notes/hh1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "tagged #golang",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.Len(t, hook.calls, 1)
+	assert.Equal(t, note.ID, hook.calls[0].noteID)
+	assert.False(t, hook.calls[0].isLocal, "remote actor → isLocal=false")
+	assert.Contains(t, hook.calls[0].tags, "golang")
+}
+
+func TestIngestNote_HashtagHookSkipsWhenNoTags(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+
+	body := `{
+		"id": "https://remote.example/notes/hh2",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "no tags here",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	_, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Empty(t, hook.calls, "hashtag 抽出が空なら hook は呼ばれない")
+}
+
+func TestUpdateRemoteNote_HashtagHookFiresOnTagsChange(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/hh3"
+	host := "remote.example"
+	noteRepo.Notes["hh3"] = &model.Note{
+		ID: "hh3", URI: &uri, UserID: "alice-id", UserHost: &host,
+		Tags: []string{"old"},
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+
+	body := `{
+		"id": "https://remote.example/notes/hh3",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "edited and now tagged #news"
+	}`
+	_, err := r.UpdateRemoteNote([]byte(body))
+	require.NoError(t, err)
+	require.Len(t, hook.calls, 1)
+	assert.Equal(t, "hh3", hook.calls[0].noteID)
+	assert.Equal(t, "alice-id", hook.calls[0].authorID)
+	assert.False(t, hook.calls[0].isLocal)
+	assert.Contains(t, hook.calls[0].tags, "news")
+}
+
+func TestUpdateRemoteNote_HashtagHookSkipsWhenTagsUnchanged(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/hh4"
+	host := "remote.example"
+	noteRepo.Notes["hh4"] = &model.Note{
+		ID: "hh4", URI: &uri, UserID: "alice-id", UserHost: &host,
+		Tags: []string{"news"},
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+
+	body := `{
+		"id": "https://remote.example/notes/hh4",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "edit body but tag unchanged #news"
+	}`
+	_, err := r.UpdateRemoteNote([]byte(body))
+	require.NoError(t, err)
+	assert.Empty(t, hook.calls, "tags が変化しなければ hook は呼ばれない")
+}
+
 func TestResolveActor_FreshButCacheMissFetchError(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()

@@ -48,6 +48,14 @@ type ChartHook interface {
 	OnRemoteUserCreated(user *model.User)
 }
 
+// HashtagHook is invoked after a remote note has been freshly persisted
+// (or updated) so the hashtag subsystem can record per-tag mentioned
+// counts. パッケージ間の循環依存を避けるため interface で受け取る (実装は
+// core/hashtag.Service)。#680。
+type HashtagHook interface {
+	OnNoteCreated(note *model.Note, author *model.User)
+}
+
 // Errors returned by Resolver.
 var (
 	// ErrInvalidActor is returned when the fetched JSON cannot be parsed.
@@ -96,6 +104,7 @@ type Resolver struct {
 	actorTTL        time.Duration                  // アクター情報の最大寿命
 	instanceTracker InstanceTracker                // optional: ホスト発見を通知
 	chartHook       ChartHook                      // optional: 新規 remote user の集計
+	hashtagHook     HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
 	publickeyRepo   PublickeyStore                 // optional: 公開鍵の永続化
 	pollRepo        repository.PollRepository      // optional: Question(投票)のPoll作成
 	pollVoter       PollVoter                      // optional: AP vote (Note.name) の投票記録
@@ -164,6 +173,14 @@ func (r *Resolver) SetInstanceTracker(t InstanceTracker) {
 // been freshly created. nil 渡しは無効化と同義。
 func (r *Resolver) SetChartHook(h ChartHook) {
 	r.chartHook = h
+}
+
+// SetHashtagHook attaches a HashtagHook invoked after a remote note has
+// been ingested or updated, so the hashtag table mentionedUsersCount /
+// mentionedUserIds arrays stay in sync with /api/hashtags/list ranking
+// (#680)。nil 渡しは無効化と同義。
+func (r *Resolver) SetHashtagHook(h HashtagHook) {
+	r.hashtagHook = h
 }
 
 // SetPublickeyRepo attaches a PublickeyStore for persistent public key
@@ -745,6 +762,11 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	if r.pollRepo != nil && note.HasPoll {
 		r.createPollFromQuestion(note, &apNote)
 	}
+	// hashtag table の mentionedUsersCount / userIds 更新 (#680)。失敗は
+	// best-effort、note 取り込み自体は成功扱い (hook 内で log を残す)。
+	if r.hashtagHook != nil && len(note.Tags) > 0 {
+		r.hashtagHook.OnNoteCreated(note, actor)
+	}
 	return note, nil
 }
 
@@ -884,7 +906,8 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 		hashtagSources = append(hashtagSources, *existing.CW)
 	}
 	newTags := hashtag.Extract(hashtagSources...)
-	if !slices.Equal([]string(existing.Tags), newTags) {
+	tagsChanged := !slices.Equal([]string(existing.Tags), newTags)
+	if tagsChanged {
 		fields["tags"] = pq.StringArray(newTags)
 		existing.Tags = pq.StringArray(newTags)
 	}
@@ -906,6 +929,17 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 	}
 	if err := r.noteRepo.UpdateFields(existing.ID, fields); err != nil {
 		return nil, err
+	}
+	// hashtag table の更新は「tags が変化したかつ新規 tag がある」場合のみ呼ぶ
+	// (#680)。RecordMention は冪等なので二度叩いても害は無いが、UPDATE を毎回
+	// 走らせるのは無駄。tag が増えた / 入れ替わった場合に新規 tag 行が確保され
+	// 著者カウントが反映される。逆に tag が「減った」場合の数値減算は upstream
+	// Misskey TS も実装していない (新規 mention の積み上げ専用) ので追従しない。
+	if tagsChanged && len(newTags) > 0 && r.hashtagHook != nil {
+		// existing は user 情報を持たないので、UserID + UserHost から最小限の
+		// User を組む。HashtagHook は IsLocal() / ID しか参照しないので十分。
+		author := &model.User{ID: existing.UserID, Host: existing.UserHost}
+		r.hashtagHook.OnNoteCreated(existing, author)
 	}
 	return existing, nil
 }

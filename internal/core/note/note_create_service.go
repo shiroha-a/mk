@@ -142,6 +142,14 @@ type ChartHook interface {
 	OnNoteCreated(note *model.Note)
 }
 
+// HashtagHook is invoked after a note has been persisted so the hashtag
+// subsystem can record mentionedUsersCount / mentionedUserIds (#680)。
+// 各 tag に対して per-user dedup された upsert を実行する。失敗は best-effort
+// で握り潰す (note 作成自体は成功扱い)。
+type HashtagHook interface {
+	OnNoteCreated(note *model.Note, author *model.User)
+}
+
 // WebhookHook is invoked after a note has been persisted so that user
 // webhooks subscribed to `note` / `reply` / `renote` / `mention` events can
 // deliver the packed note to external endpoints. 循環依存を避けるため
@@ -171,6 +179,7 @@ type CreateService struct {
 	antennaHook         AntennaHook
 	indexHook           IndexHook
 	chartHook           ChartHook
+	hashtagHook         HashtagHook
 	webhookHook         WebhookHook
 	mainStreamPublisher MainStreamPublisher
 	userRepo            repository.UserRepository
@@ -272,6 +281,12 @@ func (s *CreateService) SetChartHook(h ChartHook) {
 // user webhooks subscribed to note / reply / renote / mention events can fire.
 func (s *CreateService) SetWebhookHook(h WebhookHook) {
 	s.webhookHook = h
+}
+
+// SetHashtagHook attaches a HashtagHook invoked after note creation so the
+// hashtag subsystem can update per-tag mentionedUsersCount / userIds (#680)。
+func (s *CreateService) SetHashtagHook(h HashtagHook) {
+	s.hashtagHook = h
 }
 
 // SetMainStreamPublisher attaches a publisher used to emit `reply`, `renote`,
@@ -596,6 +611,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	}
 	if s.chartHook != nil {
 		safeGo(func() { s.chartHook.OnNoteCreated(finalNote) })
+	}
+	if s.hashtagHook != nil {
+		safeGo(func() { s.hashtagHook.OnNoteCreated(finalNote, in.User) })
 	}
 	if s.webhookHook != nil {
 		safeGo(func() { s.webhookHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget) })

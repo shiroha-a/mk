@@ -862,6 +862,42 @@ func TestCreateService_ChartHookInvoked(t *testing.T) {
 	assert.Equal(t, created.ID, hook.created.ID)
 }
 
+// recordingHashtagHook は HashtagHook の発火を観測するための test double。
+type recordingHashtagHook struct {
+	note   *model.Note
+	author *model.User
+	done   chan struct{}
+}
+
+func newRecordingHashtagHook() *recordingHashtagHook {
+	return &recordingHashtagHook{done: make(chan struct{}, 1)}
+}
+
+func (h *recordingHashtagHook) OnNoteCreated(n *model.Note, a *model.User) {
+	h.note = n
+	h.author = a
+	select {
+	case h.done <- struct{}{}:
+	default:
+	}
+}
+
+func TestCreateService_HashtagHookInvoked(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	hook := newRecordingHashtagHook()
+	svc.SetHashtagHook(hook)
+
+	user := &model.User{ID: "u1"}
+	text := "hello #foo"
+	created, err := svc.Create(note.CreateInput{User: user, Text: &text})
+	require.NoError(t, err)
+	waitHook(t, hook.done)
+	require.NotNil(t, hook.note)
+	assert.Equal(t, created.ID, hook.note.ID)
+	require.NotNil(t, hook.author)
+	assert.Equal(t, user.ID, hook.author.ID)
+}
+
 func TestIsPureRenote_ModelNote(t *testing.T) {
 	renoteID := "r1"
 	text := "x"

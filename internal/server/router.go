@@ -76,6 +76,7 @@ import (
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
+	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
@@ -185,6 +186,7 @@ func (s *Server) setupRoutes() {
 	userListFavoriteRepo := repository.NewUserListFavoriteRepository(s.db)
 	retentionRepo := repository.NewRetentionAggregationRepository(s.db)
 	promoReadRepo := repository.NewPromoReadRepository(s.db)
+	hashtagRepo := repository.NewHashtagRepository(s.db)
 
 	// Core services
 	roleService := corerole.NewService(roleRepo, roleAssignmentRepo, metaRepo, idGen)
@@ -645,6 +647,13 @@ func (s *Server) setupRoutes() {
 	federationResolver.SetChartHook(chartHooks)
 	deliverProcessor.SetChartHook(chartHooks)
 	inboxProcessor.SetChartHook(chartHooks)
+
+	// Hashtag service: ノート作成 (local / federation 両経路) で hashtag table の
+	// mentionedUsersCount / mentionedUserIds を更新する (#680)。/api/hashtags/list
+	// 等の trends ranking はこの集計を見るので、未配線だと空集合のままになる。
+	hashtagService := corehashtag.NewService(hashtagRepo, idGen)
+	noteCreateService.SetHashtagHook(hashtagService)
+	federationResolver.SetHashtagHook(hashtagService)
 
 	// Chart cron processor: tickCharts (毎時) / resyncCharts (毎日) /
 	// cleanCharts (毎日) を queue.Scheduler 経由で受け取る。Scheduler
