@@ -117,10 +117,15 @@ func (h *Handler) DraftsDelete(c echo.Context) error {
 	// `NO_SUCH_NOTE_DRAFT` を返す。silent 204 だと frontend が削除確認 UI
 	// で「該当 draft が無い」フィードバックを出せないので、本家挙動に合わせて
 	// 404 を返すよう修正 (#688 review follow-up)。
-	if _, err := h.draftRepo.FindByIDAndUser(req.DraftID, user.ID); err != nil {
+	// Delete は RowsAffected を返すので、Find → Delete の 2 query 化を避け
+	// つつ TOCTOU race も発生しない (DB 1 文で atomic に「あれば削除」)。
+	rowsAffected, err := h.draftRepo.Delete(req.DraftID, user.ID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if rowsAffected == 0 {
 		return c.JSON(http.StatusNotFound, apierr.NoSuchNoteDraft())
 	}
-	_ = h.draftRepo.Delete(req.DraftID, user.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 

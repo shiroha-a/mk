@@ -56,8 +56,10 @@ func TestNoteDraftRepository_Full(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)
 
-	// Delete
-	require.NoError(t, repo.Delete("draft_1", user.ID))
+	// Delete: 該当行が存在するので RowsAffected = 1
+	rows, err := repo.Delete("draft_1", user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
 	_, err = repo.FindByIDAndUser("draft_1", user.ID)
 	assert.Error(t, err)
 
@@ -65,4 +67,10 @@ func TestNoteDraftRepository_Full(t *testing.T) {
 	count, err = repo.CountByUser(user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
+
+	// Delete on already-removed draft: 0 rows affected, no error。
+	// handler 側の "no such draft" 判定はこの 0 を見て 404 を返す。
+	rows, err = repo.Delete("draft_1", user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rows)
 }

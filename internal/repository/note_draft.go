@@ -11,7 +11,10 @@ type NoteDraftRepository interface {
 	FindByIDAndUser(id, userID string) (*model.NoteDraft, error)
 	ListByUser(userID string, limit int) ([]*model.NoteDraft, error)
 	Update(draft *model.NoteDraft) error
-	Delete(id, userID string) error
+	// Delete returns the number of rows affected so callers can detect
+	// "no such draft" without a separate FindByIDAndUser pre-check (single
+	// SQL round-trip + no TOCTOU race)。0 = 該当 draft なし、1 = 削除成功。
+	Delete(id, userID string) (int64, error)
 	CountByUser(userID string) (int64, error)
 }
 
@@ -51,8 +54,9 @@ func (r *noteDraftRepository) Update(draft *model.NoteDraft) error {
 	return r.db.Save(draft).Error
 }
 
-func (r *noteDraftRepository) Delete(id, userID string) error {
-	return r.db.Where(`"id" = ? AND "userId" = ?`, id, userID).Delete(&model.NoteDraft{}).Error
+func (r *noteDraftRepository) Delete(id, userID string) (int64, error) {
+	tx := r.db.Where(`"id" = ? AND "userId" = ?`, id, userID).Delete(&model.NoteDraft{})
+	return tx.RowsAffected, tx.Error
 }
 
 func (r *noteDraftRepository) CountByUser(userID string) (int64, error) {

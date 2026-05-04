@@ -73,9 +73,12 @@ func (m *mockDraftRepo) Update(d *model.NoteDraft) error {
 	m.drafts[d.ID] = d
 	return nil
 }
-func (m *mockDraftRepo) Delete(id, _ string) error {
+func (m *mockDraftRepo) Delete(id, _ string) (int64, error) {
+	if _, ok := m.drafts[id]; !ok {
+		return 0, nil
+	}
 	delete(m.drafts, id)
-	return nil
+	return 1, nil
 }
 func (m *mockDraftRepo) CountByUser(userID string) (int64, error) {
 	var count int64
