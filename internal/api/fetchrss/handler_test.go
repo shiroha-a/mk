@@ -1,6 +1,7 @@
 package fetchrss
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -416,9 +417,13 @@ func TestFetchRSS_Singleflight(t *testing.T) {
 		}(i)
 	}
 
-	// 全 caller が singleflight 待ちに揃うまで待機 → gate を開放
-	// (実装上、最初の goroutine が hits を 1 にするまで全員 sf.Do に
-	// 同 URL で入っているので、N 件の caller が同じ result を共有する)。
+	// 1 件目の goroutine が upstream に到達するまで polling で待つ
+	// (= sf.Do の closure 実行が始まったことの観測可能シグナル)。固定
+	// time.Sleep だと slow CI で前段が走り切らず flaky になり得るため。
+	waitForUpstreamHit(t, &hits, 1, 2*time.Second)
+	// 残り 19 caller も sf.Do に到達するまでの猶予 (sf.Do 内部で coalesce
+	// される時間)。closure 実行は既に始まっているので gate 解放前に到着すれば
+	// 全員が同じ result を共有する。
 	time.Sleep(50 * time.Millisecond)
 	close(gate)
 	wg.Wait()
@@ -428,6 +433,89 @@ func TestFetchRSS_Singleflight(t *testing.T) {
 	}
 	// 重要: upstream に届いた件数は 1 (singleflight が coalesce した)
 	assert.EqualValues(t, 1, hits.Load(), "concurrent fetches must coalesce to one upstream call")
+}
+
+// waitForUpstreamHit polls until the atomic counter reaches `want` or the
+// timeout elapses. fixed time.Sleep だと slow CI で flaky になりがちな
+// 「upstream に届いた」の同期を polling で観測する。
+func waitForUpstreamHit(t *testing.T, hits *atomic.Int32, want int32, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for hits.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("upstream hit did not reach %d within %v (got %d)", want, timeout, hits.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestFetchRSS_Singleflight_CallerCancelDoesNotAbortPeers: caller A の context
+// cancel が in-flight の upstream fetch を中断せず、coalesced peer B も成功する
+// ことを保証する (Devin review #720 FLAG-1 regression guard)。
+//
+// 修正前: sf.Do 内 fetch が caller A の request ctx を共有していたため、A の
+// disconnect で fetchFeed が ctx canceled error を返し B も 502 を受け取った。
+// 修正後: closure は context.Background() + 5s timeout で fetch するので
+// caller cancel から切り離される。
+func TestFetchRSS_Singleflight_CallerCancelDoesNotAbortPeers(t *testing.T) {
+	var hits atomic.Int32
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		<-gate
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+
+	target := "/api/fetch-rss?url=" + url.QueryEscape(srv.URL)
+
+	// Caller A: 途中で cancel する request context を持つ。
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	e := echo.New()
+	reqA := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctxA)
+	reqA.Header.Set("Content-Type", "application/json")
+	recA := httptest.NewRecorder()
+	cA := e.NewContext(reqA, recA)
+
+	// Caller B: cancel しない。同 URL なので sf.Do で A に coalesce される。
+	cB, recB := newRequestCtx(http.MethodGet, target)
+
+	// 重要: caller A が先に sf.Do に入って closure を実行する状態を保証する
+	// (= 後続 B が coalesce されるレースを再現可能にする)。
+	// goroutine scheduling だけだと B が先に走ることもあるので、A の upstream
+	// 到達 (hits == 1) を確認してから B を起動する。
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var errA error
+	go func() { defer wg.Done(); errA = h.Fetch(cA) }()
+	waitForUpstreamHit(t, &hits, 1, 2*time.Second)
+
+	// この時点で A が closure 実行中 (fetchFeed で gate 待機)。B を後から起動。
+	wg.Add(1)
+	var errB error
+	go func() { defer wg.Done(); errB = h.Fetch(cB) }()
+	// B が sf.Do に到達して coalesce されるための grace。
+	time.Sleep(50 * time.Millisecond)
+
+	// ここで caller A をキャンセル。修正前なら fetchCtx に伝播して fetchFeed
+	// が ctx canceled で abort、B も 502 を受け取る。
+	cancelA()
+	time.Sleep(20 * time.Millisecond)
+
+	// gate を開けて upstream を返答させる。fetch が cancel されていなければ
+	// body が読めて両 caller に同じ JSON が届く。
+	close(gate)
+	wg.Wait()
+
+	require.NoError(t, errA)
+	require.NoError(t, errB)
+	// B (キャンセルしていない) は 200 で完走しているはず。これが 502 になっていたら
+	// caller cancel が peer に伝播してしまっている (regression)。
+	assert.Equal(t, http.StatusOK, recB.Code, "peer caller must not be aborted by sibling cancel")
+	assert.EqualValues(t, 1, hits.Load(), "upstream should be hit only once")
 }
 
 // TestFetchRSS_ErrorNotCached: upstream 5xx の場合は cache されず、次回呼び出し

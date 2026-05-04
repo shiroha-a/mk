@@ -167,25 +167,36 @@ func (h *Handler) Fetch(c echo.Context) error {
 		return writeCachedJSON(c, body)
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request().Context(), FetchTimeout)
-	defer cancel()
-
 	// singleflight で同 URL への concurrent miss を 1 fetch に集約する。
 	// 後続 caller は同じ result を共有 (upstream に thundering herd を流さない)。
+	//
+	// 重要: closure 内 fetch の context は caller の request context から切り離す。
+	// Misskey TS の rss-parser 互換 timeout (5s) は維持しつつ、最初に sf.Do に
+	// 入った caller の disconnect / cancel が後続の coalesced caller を巻き
+	// 込まないようにする (Devin review #720 FLAG-1)。caller A の cancel で
+	// upstream HTTP を中断すると、その時点で A と一緒に sf.Do を待っている
+	// B/C/D も同じエラーを受け取って 502 になり、結果的に A が頻繁に切断する
+	// クライアントだと健康な feed でも 502 が返り続ける。
 	v, err, _ := h.sf.Do(key, func() (any, error) {
 		// singleflight 入場時にキャッシュを再確認: 直前の coalesced 呼び出しが
 		// 既に populate していれば再 fetch しない。
 		if body, ok := h.cacheGet(key); ok {
 			return body, nil
 		}
-		feed, ferr := h.fetchFeed(ctx, key)
+		fetchCtx, cancel := context.WithTimeout(context.Background(), FetchTimeout)
+		defer cancel()
+		feed, ferr := h.fetchFeed(fetchCtx, key)
 		if ferr != nil {
 			return nil, ferr
 		}
-		body, jerr := json.Marshal(packFeed(feed))
-		if jerr != nil {
+		// json.Encoder.Encode は trailing newline を付ける挙動なので、echo の
+		// c.JSON 既定 (json.NewEncoder で書き出し) と body bytes が完全一致
+		// する。cache hit / miss の response shape を 1 byte 単位で揃える。
+		var buf bytes.Buffer
+		if jerr := json.NewEncoder(&buf).Encode(packFeed(feed)); jerr != nil {
 			return nil, jerr
 		}
+		body := buf.Bytes()
 		// 成功時のみ cache に積む。エラーレスポンスは cache しない:
 		// short-lived な upstream 障害から復旧した直後に古い 502 を引きずらない
 		// ようにするのと、攻撃者がエラーを cache 占有に使うのを防ぐ。
@@ -199,7 +210,7 @@ func (h *Handler) Fetch(c echo.Context) error {
 		// ログに残す。frontend は items の有無しか見ていないので、stub と
 		// 同じく空 array を返す道もあるが、ウィジェット側で「取得失敗」と
 		// 「フィードが空」を区別したい運用に備えて explicit error にする。
-		slog.WarnContext(ctx, "fetch-rss upstream failed", "url", key, "err", err)
+		slog.WarnContext(c.Request().Context(), "fetch-rss upstream failed", "url", key, "err", err)
 		return c.JSON(http.StatusBadGateway, apierr.Error("UPSTREAM_ERROR", "Failed to fetch feed.", "0e0e1f5b-2c97-4f17-a51c-1f9c2e9b4d82"))
 	}
 	return writeCachedJSON(c, v.([]byte))
