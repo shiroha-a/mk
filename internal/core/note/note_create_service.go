@@ -146,6 +146,13 @@ type ChartHook interface {
 // subsystem can record mentionedUsersCount / mentionedUserIds (#680)。
 // 各 tag に対して per-user dedup された upsert を実行する。失敗は best-effort
 // で握り潰す (note 作成自体は成功扱い)。
+//
+// 実装契約 (#719): OnNoteCreated は **non-blocking** でなければならず、
+// repo 書き込みが必要な場合は実装側で goroutine を起こすこと。caller
+// (note_create_service / federation/resolver) は他 hook と異なり safeGo で
+// wrap せず直接呼び出すので、panic recovery も実装側の責務。本 contract は
+// federation 経路で tag 数 N に比例して inbox drain time が直列化する退行を
+// 構造的に防ぐためにある。
 type HashtagHook interface {
 	OnNoteCreated(note *model.Note, author *model.User)
 }

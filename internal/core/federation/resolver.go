@@ -52,6 +52,12 @@ type ChartHook interface {
 // (or updated) so the hashtag subsystem can record per-tag mentioned
 // counts. パッケージ間の循環依存を避けるため interface で受け取る (実装は
 // core/hashtag.Service)。#680。
+//
+// 実装契約 (#719): OnNoteCreated は **non-blocking** でなければならず、
+// repo 書き込みが必要な場合は実装側で goroutine を起こすこと。IngestNote /
+// UpdateRemoteNote は本 hook 結果を待たずに即時 return することで inbox
+// processor の drain time が tag 数に比例しないようにする。panic recovery
+// も実装側の責務。
 type HashtagHook interface {
 	OnNoteCreated(note *model.Note, author *model.User)
 }
