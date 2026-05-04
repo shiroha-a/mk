@@ -762,8 +762,10 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	if r.pollRepo != nil && note.HasPoll {
 		r.createPollFromQuestion(note, &apNote)
 	}
-	// hashtag table の mentionedUsersCount / userIds 更新 (#680)。失敗は
-	// best-effort、note 取り込み自体は成功扱い (hook 内で log を残す)。
+	// hashtag table の mentionedUsersCount / userIds 更新 (#680 / #719)。
+	// hook 実装 (core/hashtag.Service) が内部で goroutine を起こす
+	// fire-and-forget 設計なので、IngestNote から見ると即時 return する。
+	// inbox processor の drain time が tag 数に比例して伸びる退行を回避。
 	if r.hashtagHook != nil && len(note.Tags) > 0 {
 		r.hashtagHook.OnNoteCreated(note, actor)
 	}

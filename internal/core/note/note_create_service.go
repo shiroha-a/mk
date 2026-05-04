@@ -613,7 +613,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		safeGo(func() { s.chartHook.OnNoteCreated(finalNote) })
 	}
 	if s.hashtagHook != nil {
-		safeGo(func() { s.hashtagHook.OnNoteCreated(finalNote, in.User) })
+		// HashtagHook は実装側 (core/hashtag.Service) が内部で goroutine を
+		// 起こす fire-and-forget 設計 (#719)。caller での safeGo wrap は不要。
+		s.hashtagHook.OnNoteCreated(finalNote, in.User)
 	}
 	if s.webhookHook != nil {
 		safeGo(func() { s.webhookHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget) })
