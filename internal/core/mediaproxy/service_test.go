@@ -576,6 +576,50 @@ func TestDecodeImage_PPM(t *testing.T) {
 	assert.Equal(t, 2, img.Bounds().Dy())
 }
 
+// TestFetch_PassThrough_JXR は #672 Phase 1 partial: JPEG XR / MNG family
+// が browsersafeMIMEs に追加されたことで 415 で reject されず pass-through
+// で raw bytes が配信されることを assert する。pure Go decoder 無しの
+// formats が browser ネイティブ対応 (Edge legacy / viewer plugin) に委譲
+// される経路の regression guard。
+func TestFetch_PassThrough_JXR(t *testing.T) {
+	// 適当なバイト列 (実 JXR ファイル相当の最小マジック)。decoder は通らない
+	// ので中身が valid である必要は無い。
+	jxrBytes := []byte("II\xbc\x01" + "fakejxrpayload")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jxr")
+		w.Write(jxrBytes)
+	}))
+	defer ts.Close()
+
+	s := testService(map[string]bool{ts.URL + "/img.jxr": true})
+	result, err := s.Fetch(context.Background(), ts.URL+"/img.jxr", ModeDefault, FormatWebP)
+	require.NoError(t, err)
+	defer result.Body.Close()
+
+	assert.Equal(t, "image/jxr", result.ContentType, "JXR は pass-through で content-type 維持")
+	body, _ := io.ReadAll(result.Body)
+	assert.Equal(t, jxrBytes, body, "raw bytes がそのまま返る (transcode しない)")
+}
+
+// TestFetch_PassThrough_MNG は MNG が同様に pass-through されることを確認。
+func TestFetch_PassThrough_MNG(t *testing.T) {
+	mngBytes := []byte("\x8aMNG\r\n\x1a\n" + "fakemngpayload")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/x-mng")
+		w.Write(mngBytes)
+	}))
+	defer ts.Close()
+
+	s := testService(map[string]bool{ts.URL + "/anim.mng": true})
+	result, err := s.Fetch(context.Background(), ts.URL+"/anim.mng", ModeDefault, FormatWebP)
+	require.NoError(t, err)
+	defer result.Body.Close()
+
+	assert.Equal(t, "video/x-mng", result.ContentType)
+	body, _ := io.ReadAll(result.Body)
+	assert.Equal(t, mngBytes, body)
+}
+
 // TestDecodeImage_TGA は #672 Phase 1 で追加した TGA decoder (blezek/tga)
 // が contentType 経由で manual dispatch されることを確認する。
 // blezek/tga は magic bytes 無し format のため image.RegisterFormat には載

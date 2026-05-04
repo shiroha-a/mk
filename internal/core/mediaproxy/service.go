@@ -16,7 +16,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blezek/tga" // TGA input decode (#672 Phase 1)
+	// 注意 (#672 Phase 1): TGA decoder は `blezek/tga` (auto-register 無し)
+	// を採用し、`decodeImage` 内で MIME 判定で manual dispatch している。
+	// 同 fork 元の `github.com/ftrvxmtrx/tga` は init() で
+	// `image.RegisterFormat("tga", "", ...)` (magic bytes 空) するため、
+	// blank import すると他 image format (PNG/JPEG/WebP/...) の自動 dispatch
+	// を破壊する。**`_ "github.com/ftrvxmtrx/tga"` を絶対追加しないこと**。
+	"github.com/blezek/tga"
 	"github.com/gen2brain/avif"
 	_ "github.com/gen2brain/heic" // HEIC/HEIF input decode (iPhone uploads)
 	_ "github.com/gen2brain/jpegxl"
