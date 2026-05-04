@@ -19,6 +19,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -706,6 +707,20 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	if actor.Host != nil {
 		note.Emojis = r.upsertEmojis(extractEmojiTags(apNote.Tag), *actor.Host)
 	}
+	// hashtag は AP `tag` 配列の Hashtag entry と本文 / CW の両方から拾い、
+	// hashtag.Extract で case-insensitive dedup + 長さ truncate を一括処理
+	// する (#679)。`tag` 配列が空 / Hashtag を含まない実装 (古い Mastodon
+	// 等) でも本文 fallback で trends 集計に乗るようにする。
+	hashtagSources := extractHashtagTagNames(apNote.Tag)
+	if note.Text != nil {
+		hashtagSources = append(hashtagSources, *note.Text)
+	}
+	if note.CW != nil {
+		hashtagSources = append(hashtagSources, *note.CW)
+	}
+	if tags := hashtag.Extract(hashtagSources...); len(tags) > 0 {
+		note.Tags = pq.StringArray(tags)
+	}
 	// AP `attachment` 配列を drive_file 行に upsert (#378)。link 形式のみで
 	// 実 fetch はせず、frontend が drive_file.url 経由で remote 取得する。
 	note.FileIDs = r.upsertAttachments(extractAttachments(apNote.Attachment), &actor.ID, actor.Host)
@@ -851,6 +866,20 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 			fields["emojis"] = emojis
 			existing.Emojis = emojis
 		}
+	}
+	// hashtag は AP `tag` Hashtag entry + 編集後の本文 / CW から再抽出して
+	// 差分があれば更新 (#679)。IngestNote と同じ規則。
+	hashtagSources := extractHashtagTagNames(apNote.Tag)
+	if existing.Text != nil {
+		hashtagSources = append(hashtagSources, *existing.Text)
+	}
+	if existing.CW != nil {
+		hashtagSources = append(hashtagSources, *existing.CW)
+	}
+	newTags := hashtag.Extract(hashtagSources...)
+	if !slices.Equal([]string(existing.Tags), newTags) {
+		fields["tags"] = pq.StringArray(newTags)
+		existing.Tags = pq.StringArray(newTags)
 	}
 	// AP `attachment` 配列の差分を反映する (#378)。driveFileRepo 未設定時は
 	// upsertAttachments が空 slice を返すので何もしない (= 既存 fileIDs を
@@ -1019,6 +1048,35 @@ func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 			continue
 		}
 		out = append(out, u.ID)
+	}
+	return out
+}
+
+// extractHashtagTagNames parses the Tag array of a Note and returns the
+// `name` of every Hashtag entry (type="Hashtag"). upstream Misskey の
+// renderHashtag は `name: "#" + tag` 形式で出すので、戻り値も `#tag`
+// プレフィクス付き。呼び出し側で hashtag.Extract に渡せば本文由来の
+// 抽出と統一的に dedup / 正規化される (#679)。
+//
+// `name` が空のものはスキップ。type 違いも skip。
+func extractHashtagTagNames(tags []any) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		m, ok := tag.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := m["type"].(string); typ != "Hashtag" {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
 	}
 	return out
 }

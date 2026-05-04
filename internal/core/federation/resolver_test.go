@@ -425,6 +425,97 @@ func (f *failingNoteCreateRepo) Create(_ *model.Note) error {
 	return errors.New("create failed")
 }
 
+// #679: AP `tag` 配列の Hashtag entry を note.tags に取り込む。
+func TestIngestNote_HashtagsFromTagArray(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "no inline tag here",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"tag": [
+			{"type": "Hashtag", "name": "#golang", "href": "https://remote.example/tags/golang"},
+			{"type": "Hashtag", "name": "#federation"},
+			{"type": "Mention", "href": "https://remote.example/users/bob"}
+		]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"golang", "federation"}, []string(note.Tags), "Hashtag entries の name から #prefix を剥がして格納")
+}
+
+// #679: text 由来の hashtag fallback。Mastodon 等で `tag` 配列が無い実装でも
+// 本文 / CW から拾う。
+func TestIngestNote_HashtagsFromTextFallback(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h2",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "hello #golang and #federation world",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"golang", "federation"}, []string(note.Tags))
+}
+
+// #679: AP tag と text の両方に hashtag があれば case-insensitive で dedup される。
+func TestIngestNote_HashtagsMergeAndDedup(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h3",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "see #Golang and #news",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"tag": [
+			{"type": "Hashtag", "name": "#golang"}
+		]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	// "#golang" (tag 配列) と "#Golang" (text) は case-insensitive で同一視。
+	// hashtag.Extract は first-seen casing を保つので tag 配列が先で `golang`。
+	assert.ElementsMatch(t, []string{"golang", "news"}, []string(note.Tags))
+}
+
+// #679: Hashtag 無しなら note.Tags は nil/empty で残る。
+func TestIngestNote_NoHashtags(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h4",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "no tags here",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Empty(t, []string(note.Tags))
+}
+
 func TestIngestNote_NoteCreateError(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	noteRepo := &failingNoteCreateRepo{MockNoteRepository: testutil.NewMockNoteRepository()}
@@ -847,6 +938,36 @@ func TestUpdateRemoteNote_HappyPath(t *testing.T) {
 	assert.Equal(t, "edited content", *got.Text)
 	require.NotNil(t, got.CW)
 	assert.Equal(t, "edited cw", *got.CW)
+}
+
+// #679: UpdateRemoteNote が note.tags を再計算する。tag 配列が変わった場合に
+// DB tags も追従すること。
+func TestUpdateRemoteNote_RecalculatesHashtags(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	host := "remote.example"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host,
+		Tags: []string{"old"},
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/n1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "edited and now tagged #news",
+		"tag": [
+			{"type": "Hashtag", "name": "#federation"}
+		]
+	}`
+	got, err := r.UpdateRemoteNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.ElementsMatch(t, []string{"federation", "news"}, []string(got.Tags), "古い tags は捨て、tag 配列 + 本文 fallback で再構築")
 }
 
 func TestUpdateRemoteNote_NoNoteRepo(t *testing.T) {
