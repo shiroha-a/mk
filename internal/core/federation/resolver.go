@@ -869,6 +869,13 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 	}
 	// hashtag は AP `tag` Hashtag entry + 編集後の本文 / CW から再抽出して
 	// 差分があれば更新 (#679)。IngestNote と同じ規則。
+	//
+	// 順序依存に注意: 上の text 更新 (`if newText != "" { existing.Text = &newText }`)
+	// と CW 更新が既に適用済みの状態で `existing.Text` / `existing.CW` を
+	// 読むので、再抽出は更新後の値で行う。`if newText != ""` を skip した
+	// 場合は元の値を保つので、この場合も「現在の本文 + 新 tag」で再計算
+	// される。将来 text 更新ロジックを別関数に切り出す等の refactor が
+	// 入ったら、この順序依存も追従させること。
 	hashtagSources := extractHashtagTagNames(apNote.Tag)
 	if existing.Text != nil {
 		hashtagSources = append(hashtagSources, *existing.Text)
@@ -1058,7 +1065,9 @@ func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 // プレフィクス付き。呼び出し側で hashtag.Extract に渡せば本文由来の
 // 抽出と統一的に dedup / 正規化される (#679)。
 //
-// `name` が空のものはスキップ。type 違いも skip。
+// AP spec は `name` の format を厳密に規定していないため、`#` 無しで
+// 来る実装 (稀) のために defensive に prefix を補う。`name` が空のものは
+// スキップ。type 違いも skip。
 func extractHashtagTagNames(tags []any) []string {
 	if len(tags) == 0 {
 		return nil
@@ -1075,6 +1084,12 @@ func extractHashtagTagNames(tags []any) []string {
 		name, _ := m["name"].(string)
 		if name == "" {
 			continue
+		}
+		// `#` prefix 欠落は upstream の renderHashtag では起きないが、
+		// 他実装が `name: "tag"` だけ送ってきた場合に hashtag.Extract の
+		// 正規表現にマッチさせるため補完する。
+		if !strings.HasPrefix(name, "#") {
+			name = "#" + name
 		}
 		out = append(out, name)
 	}

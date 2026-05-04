@@ -496,6 +496,30 @@ func TestIngestNote_HashtagsMergeAndDedup(t *testing.T) {
 	assert.ElementsMatch(t, []string{"golang", "news"}, []string(note.Tags))
 }
 
+// #679: CW (summary) 由来の hashtag も抽出される。本文が無く CW にだけ
+// hashtag があるケース (sensitive note 等) で trends 集計に拾われないと
+// 取りこぼしになる。
+func TestIngestNote_HashtagsFromCW(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/h-cw",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "no inline tag",
+		"summary": "important #news here",
+		"sensitive": true,
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"news"}, []string(note.Tags))
+}
+
 // #679: Hashtag 無しなら note.Tags は nil/empty で残る。
 func TestIngestNote_NoHashtags(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
