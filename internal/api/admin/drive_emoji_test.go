@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -120,7 +121,10 @@ func TestDriveFiles_FiltersBySystemToken(t *testing.T) {
 	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_remote", UserID: &remoteUser, UserHost: &host, Type: "image/png"}))
 	h.SetDriveFileRepo(repo)
 
-	rec := doPost(h.DriveFiles, `{"userId":"@system","limit":10}`, adminUser)
+	// const apiadmin.SystemUserIDToken を直接参照することで、token 値を後で変更しても
+	// このテストが追従するようにする (文字列直書きを避ける)。
+	body := fmt.Sprintf(`{"userId":%q,"limit":10}`, apiadmin.SystemUserIDToken)
+	rec := doPost(h.DriveFiles, body, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
@@ -143,7 +147,8 @@ func TestDriveFiles_SystemTokenWithTypeFilter(t *testing.T) {
 	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys_zip", UserID: nil, Type: "application/zip"}))
 	h.SetDriveFileRepo(repo)
 
-	rec := doPost(h.DriveFiles, `{"userId":"@system","type":"image/","limit":10}`, adminUser)
+	body := fmt.Sprintf(`{"userId":%q,"type":"image/","limit":10}`, apiadmin.SystemUserIDToken)
+	rec := doPost(h.DriveFiles, body, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))

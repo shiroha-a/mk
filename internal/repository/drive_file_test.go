@@ -253,8 +253,9 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	_, err = repo.ListSystemFiles("", "", "", 1000)
 	require.NoError(t, err)
 
-	// pagination: untilId と sinceId で範囲指定
-	rows, err = repo.ListSystemFiles("", sysZip.ID, "", 10) // sysZip より前 (= ID < sysZip)
+	// pagination untilId: id < untilId (exclusive boundary)。sysZip より前
+	// なら sysImg が出て sysZip は出ない。
+	rows, err = repo.ListSystemFiles("", sysZip.ID, "", 10)
 	require.NoError(t, err)
 	gotIDs := make(map[string]bool, len(rows))
 	for _, r := range rows {
@@ -262,6 +263,18 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	}
 	assert.True(t, gotIDs[sysImg.ID], "sysImg has smaller ID, should be included")
 	assert.False(t, gotIDs[sysZip.ID], "sysZip is the cutoff and should be excluded")
+
+	// pagination sinceId: id > sinceId (exclusive boundary)。sysImg より後
+	// なら sysZip が出て sysImg は出ない。境界の semantics と sort 方向が
+	// untilId 経路と対称であることを保証する。
+	rows, err = repo.ListSystemFiles("", "", sysImg.ID, 10)
+	require.NoError(t, err)
+	gotIDs = make(map[string]bool, len(rows))
+	for _, r := range rows {
+		gotIDs[r.ID] = true
+	}
+	assert.True(t, gotIDs[sysZip.ID], "sysZip has larger ID, should be included")
+	assert.False(t, gotIDs[sysImg.ID], "sysImg is the cutoff and should be excluded")
 }
 
 func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
