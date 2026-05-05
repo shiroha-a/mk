@@ -6,15 +6,28 @@
 --      で絞り込む。
 --   2. ListMessagesByUser — 1-on-1 conversation の message 一覧。
 --      WHERE ("fromUserId" = ? AND "toUserId" = ?) OR ("fromUserId" = ? AND
---      "toUserId" = ?) を 2 回走らせる plan を高速化。
+--      "toUserId" = ?) を 2 回走らせる plan を高速化 (production volume で
+--      BitmapOr Scan に切り替わる plan)。
 --   3. SearchMessages — text ILIKE と組み合わせた DM 検索。
 --
 -- 既存の単一 index "IDX_chat_message_fromUserId" は他クエリ
 -- (例: ListHistory の DISTINCT ON 経路で fromUserId だけで絞るパス) で
 -- 引き続き有効なので残す。複合 index と prefix で重複するが index size の
--- overhead より plan 安定性を優先する。
+-- overhead より plan 安定性を優先する。これは upstream Misskey TS にも存在
+-- する既存 index で、drop-in 互換のため touch しない。
+--
+-- upstream Misskey TS には複合 index は無い (本 PR で mk-go 独自に追加する
+-- 最適化)。drop-in で TS DB を引き継いだ環境でも IF NOT EXISTS で安全に
+-- 適用できる。逆方向 (mk-go で立てた DB を TS に戻す) も TS 側がこの index
+-- を知らないだけで害なし。
 --
 -- 否定 array containment (NOT (reads @> ARRAY[?]::varchar[])) は GIN でも
 -- 高速化できないため reads 用 index は追加しない。
+--
+-- production (大規模 chat_message table) に適用する場合、本 CREATE INDEX
+-- は ACCESS EXCLUSIVE lock を取って書き込みを一時 block する。golang-migrate
+-- が transaction 内で実行するため CREATE INDEX CONCURRENTLY は使えない
+-- (transaction 外実行が必須)。lock 期間は table size に依存するが、運用上
+-- は深夜帯メンテで適用する想定。
 CREATE INDEX IF NOT EXISTS "IDX_chat_message_fromUserId_toUserId"
     ON "chat_message" ("fromUserId", "toUserId");
