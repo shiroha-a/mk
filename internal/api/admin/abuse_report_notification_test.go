@@ -6,18 +6,32 @@ import (
 	"testing"
 	"time"
 
+	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// setupRecipientHandler returns a handler with RecipientRepo wired and
+// optional seed rows. RecipientRepo を使う test の boilerplate (handler 構築
+// + repo 生成 + seed + SetRecipientRepo) を 1 行に圧縮する (#761)。
+// 戻り値の repo を直接 mutate して CreateErr 等の error injection も可能。
+func setupRecipientHandler(t *testing.T, seed ...*model.AbuseReportNotificationRecipient) (*apiadmin.Handler, *testutil.MockAbuseReportNotificationRecipientRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
+	for _, r := range seed {
+		require.NoError(t, repo.Create(r))
+	}
+	h.SetRecipientRepo(repo)
+	return h, repo
+}
+
 // --- AbuseReportNotificationRecipient ---
 
 func TestRecipientCreate_Success(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	h.SetRecipientRepo(repo)
+	h, _ := setupRecipientHandler(t)
 
 	rec := doPost(h.AbuseReportNotificationRecipientCreate,
 		`{"name":"ops","method":"email"}`, adminUser)
@@ -31,8 +45,7 @@ func TestRecipientCreate_Success(t *testing.T) {
 }
 
 func TestRecipientCreate_DefaultMethod(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetRecipientRepo(testutil.NewMockAbuseReportNotificationRecipientRepository())
+	h, _ := setupRecipientHandler(t)
 	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"ops"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got model.AbuseReportNotificationRecipient
@@ -41,20 +54,17 @@ func TestRecipientCreate_DefaultMethod(t *testing.T) {
 }
 
 func TestRecipientCreate_RepoError(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
+	h, repo := setupRecipientHandler(t)
 	repo.CreateErr = assertError{}
-	h.SetRecipientRepo(repo)
 	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"x"}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestRecipientList_ReturnsRows(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, repo.Create(&model.AbuseReportNotificationRecipient{ID: "r1", Name: "a", Method: "email"}))
-	require.NoError(t, repo.Create(&model.AbuseReportNotificationRecipient{ID: "r2", Name: "b", Method: "webhook"}))
-	h.SetRecipientRepo(repo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1", Name: "a", Method: "email"},
+		&model.AbuseReportNotificationRecipient{ID: "r2", Name: "b", Method: "webhook"},
+	)
 
 	rec := doPost(h.AbuseReportNotificationRecipientList, `{}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -64,10 +74,9 @@ func TestRecipientList_ReturnsRows(t *testing.T) {
 }
 
 func TestRecipientShow_FoundAndNotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, repo.Create(&model.AbuseReportNotificationRecipient{ID: "r1", Name: "ops", Method: "email"}))
-	h.SetRecipientRepo(repo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1", Name: "ops", Method: "email"},
+	)
 
 	rec := doPost(h.AbuseReportNotificationRecipientShow, `{"id":"r1"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -77,10 +86,9 @@ func TestRecipientShow_FoundAndNotFound(t *testing.T) {
 }
 
 func TestRecipientDelete_Removes(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, repo.Create(&model.AbuseReportNotificationRecipient{ID: "r1"}))
-	h.SetRecipientRepo(repo)
+	h, repo := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1"},
+	)
 
 	rec := doPost(h.AbuseReportNotificationRecipientDelete, `{"id":"r1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -88,12 +96,11 @@ func TestRecipientDelete_Removes(t *testing.T) {
 }
 
 func TestRecipientUpdate_PartialFields(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, repo.Create(&model.AbuseReportNotificationRecipient{
-		ID: "r1", Name: "old", Method: "email", IsActive: true,
-	}))
-	h.SetRecipientRepo(repo)
+	h, repo := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{
+			ID: "r1", Name: "old", Method: "email", IsActive: true,
+		},
+	)
 
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate,
 		`{"id":"r1","name":"new","method":"webhook","isActive":false}`, adminUser)
@@ -104,15 +111,13 @@ func TestRecipientUpdate_PartialFields(t *testing.T) {
 }
 
 func TestRecipientUpdate_NotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetRecipientRepo(testutil.NewMockAbuseReportNotificationRecipientRepository())
+	h, _ := setupRecipientHandler(t)
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate, `{"id":"missing","name":"x"}`, adminUser)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestRecipientUpdate_MissingID(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetRecipientRepo(testutil.NewMockAbuseReportNotificationRecipientRepository())
+	h, _ := setupRecipientHandler(t)
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate, `{}`, adminUser)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
@@ -151,8 +156,7 @@ func TestAbuseReportNotificationRecipientUpdate(t *testing.T) {
 // --- moderation log assertions (#665) ---
 
 func TestRecipientCreate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetRecipientRepo(testutil.NewMockAbuseReportNotificationRecipientRepository())
+	h, _ := setupRecipientHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"r","method":"email"}`, adminUser)
@@ -162,10 +166,9 @@ func TestRecipientCreate_WritesModerationLog(t *testing.T) {
 }
 
 func TestRecipientUpdate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	rcpRepo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, rcpRepo.Create(&model.AbuseReportNotificationRecipient{ID: "r1", Name: "old", Method: "email"}))
-	h.SetRecipientRepo(rcpRepo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1", Name: "old", Method: "email"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate, `{"id":"r1","name":"new"}`, adminUser)
@@ -180,10 +183,9 @@ func TestRecipientUpdate_WritesModerationLog(t *testing.T) {
 }
 
 func TestRecipientDelete_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	rcpRepo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, rcpRepo.Create(&model.AbuseReportNotificationRecipient{ID: "r1", Name: "doomed", Method: "email"}))
-	h.SetRecipientRepo(rcpRepo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1", Name: "doomed", Method: "email"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientDelete, `{"id":"r1"}`, adminUser)
@@ -195,8 +197,7 @@ func TestRecipientDelete_WritesModerationLog(t *testing.T) {
 // --- moderation log assertions (#665) ---
 
 func TestAbuseReportNotificationRecipientCreate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetRecipientRepo(testutil.NewMockAbuseReportNotificationRecipientRepository())
+	h, _ := setupRecipientHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"r1","method":"email"}`, adminUser)
@@ -206,10 +207,9 @@ func TestAbuseReportNotificationRecipientCreate_WritesModerationLog(t *testing.T
 }
 
 func TestAbuseReportNotificationRecipientUpdate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	rRepo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, rRepo.Create(&model.AbuseReportNotificationRecipient{ID: "r1", Name: "old"}))
-	h.SetRecipientRepo(rRepo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1", Name: "old"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate, `{"id":"r1","name":"new"}`, adminUser)
@@ -219,10 +219,9 @@ func TestAbuseReportNotificationRecipientUpdate_WritesModerationLog(t *testing.T
 }
 
 func TestAbuseReportNotificationRecipientDelete_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	rRepo := testutil.NewMockAbuseReportNotificationRecipientRepository()
-	require.NoError(t, rRepo.Create(&model.AbuseReportNotificationRecipient{ID: "r1"}))
-	h.SetRecipientRepo(rRepo)
+	h, _ := setupRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{ID: "r1"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AbuseReportNotificationRecipientDelete, `{"id":"r1"}`, adminUser)
