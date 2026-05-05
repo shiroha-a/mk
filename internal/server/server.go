@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
@@ -50,6 +52,56 @@ func (s *Server) registerShutdownHook(fn func()) {
 	s.shutdownHooks = append(s.shutdownHooks, fn)
 }
 
+// extractIPFallback recovers a client IP for requests where Echo's standard
+// extractor would return empty (typically UNIX domain socket connections
+// with no RemoteAddr, behind nginx + UDS). XFF を逆順に走査し trusted ranges
+// の外で最初に当たる解析可能な IP を返す。XFF が無ければ X-Real-IP に fallback。
+// 結果が空文字となる場合 (header が一切無い) は "" を返し、上位の機能
+// (signin record / user_ip / rate-limit) は空のまま記録する。
+func extractIPFallback(req *http.Request, trusted []*net.IPNet) string {
+	cleanCandidate := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "[")
+		s = strings.TrimSuffix(s, "]")
+		return s
+	}
+	isTrusted := func(ip net.IP) bool {
+		for _, n := range trusted {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		// untrusted side (client 側) を逆順走査で見つける
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := cleanCandidate(parts[i])
+			ip := net.ParseIP(candidate)
+			if ip == nil {
+				continue
+			}
+			if !isTrusted(ip) {
+				return ip.String()
+			}
+		}
+		// 全部 trusted ranges 内 (典型: client→nginx→mkgo が全部 private) なら
+		// 一番左の解析可能な IP を返す。XFF[0] は upstream proxy が書く client IP。
+		for _, p := range parts {
+			candidate := cleanCandidate(p)
+			if net.ParseIP(candidate) != nil {
+				return candidate
+			}
+		}
+	}
+	if r := cleanCandidate(req.Header.Get("X-Real-IP")); r != "" {
+		return r
+	}
+	return ""
+}
+
 // gzipConfig returns the GzipConfig used by the global middleware stack.
 // Shared with gzip_test.go so production and tests stay in sync.
 func gzipConfig() echomw.GzipConfig {
@@ -77,13 +129,25 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// reflection cost が下がって全 endpoint が広く高速化する。
 	e.JSONSerializer = fastJSONSerializer{}
 
-	// trustProxyからIPExtractorを構成
+	// trustProxyからIPExtractorを構成。Echo 標準の ExtractIPFromXFFHeader
+	// (echo/ip.go:252) は req.RemoteAddr が空文字 (UNIX domain socket 経由
+	// のとき net.SplitHostPort が "" を返す) のとき XFF 逆順走査で
+	// net.ParseIP("") が nil → directIP="" を早期 return してしまい、結果
+	// として c.RealIP() が常に空文字を返す。signin record / user_ip 記録 /
+	// rate-limit が破壊されるため (#703)、UDS で空が返ったときの fallback
+	// を独自に被せる。
 	if nets := config.ParseTrustProxy(cfg.TrustProxy); len(nets) > 0 {
 		var opts []echo.TrustOption
 		for _, n := range nets {
 			opts = append(opts, echo.TrustIPRange(n))
 		}
-		e.IPExtractor = echo.ExtractIPFromXFFHeader(opts...)
+		inner := echo.ExtractIPFromXFFHeader(opts...)
+		e.IPExtractor = func(req *http.Request) string {
+			if ip := inner(req); ip != "" {
+				return ip
+			}
+			return extractIPFallback(req, nets)
+		}
 	}
 
 	// Global middleware
