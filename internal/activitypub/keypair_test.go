@@ -98,7 +98,10 @@ func TestParseRSAPublicKey_NotRSA(t *testing.T) {
 	assert.Contains(t, err.Error(), "not an RSA")
 }
 
-// errReader is an io.Reader that always errors.
+// errReader is an io.Reader that always errors. signature_test.go の
+// TestSignRequest_RandError で randReader を差し替えるために共有する
+// (Go 1.26 で rsa.GenerateKey 系の random 引数は無視されるが、
+// rsa.SignPKCS1v15 / ed25519 経路では引き続き使われる)。
 type errReader struct{}
 
 func (errReader) Read(_ []byte) (int, error) { return 0, assertErr }
@@ -110,14 +113,3 @@ type sentinelErr struct{ msg string }
 func (e *sentinelErr) Error() string { return e.msg }
 
 func newSentinelErr(s string) error { return &sentinelErr{msg: s} }
-
-func TestGenerateRSAKeypair_RandError(t *testing.T) {
-	// Go 1.26 で crypto/rsa.GenerateKey の `random` 引数が完全に無視される
-	// 仕様に変更された (https://go.dev/doc/go1.26 crypto/rsa セクション、
-	// "The random parameter to GenerateKey ... is now ignored.") ため、
-	// SetRandReaderForTest で errReader を注入しても rsa.GenerateKey が
-	// それを消費せずに getrandom 経由で成功してしまう。entropy source 系
-	// のエラーを擬似できなくなったので skip。production の randReader 変数
-	// は ed25519.GenerateKey 経路で引き続き使われるため残す。
-	t.Skip("Go 1.26+: rsa.GenerateKey ignores random parameter (release notes)")
-}
