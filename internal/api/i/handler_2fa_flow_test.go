@@ -178,7 +178,10 @@ func TestTwoFAUpdateKey(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, postExtra(h.TwoFAUpdateKey, `{}`, stubUser).Code)
 }
 
+// upstream Misskey TS は paramDef で password を要求しないので、空 body でも
+// value=false 扱いで no-content 成功する (#758)。詳細な branch の test は
+// handler_webauthn_test.go の TestTwoFAPasswordLess_* 群を参照。
 func TestTwoFAPasswordLess(t *testing.T) {
 	h, _ := newExtraHandler(t)
-	assert.Equal(t, http.StatusBadRequest, postExtra(h.TwoFAPasswordLess, `{}`, stubUser).Code)
+	assert.Equal(t, http.StatusNoContent, postExtra(h.TwoFAPasswordLess, `{}`, stubUser).Code)
 }

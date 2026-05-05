@@ -390,25 +390,53 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 // TwoFAPasswordLess handles POST /api/i/2fa/password-less.
 // `usePasswordLessLogin` フラグを切り替える。WebAuthn 鍵が登録されていないと
 // 有効化できない (パスワードレスログインの前提が成立しないため)。
+//
+// upstream Misskey TS は paramDef を `{value: boolean}` (required: ['value'])
+// で password を要求しない (#758)。secure endpoint なので RequireAuth
+// middleware で session ベース認証が済んでいる前提。mk-go も合わせて
+// password 必須を撤回する。
 func (h *Handler) TwoFAPasswordLess(c echo.Context) error {
 	var req struct {
-		Password string `json:"password"`
-		Value    bool   `json:"value"`
+		Value bool `json:"value"`
 	}
-	if err := c.Bind(&req); err != nil || req.Password == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "invalid request body.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password)
-	if !ok {
-		return nil
+	user := middleware.GetUser(c)
+	if user == nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	if req.Value {
-		if n, err := h.securityKeyRepo.CountByUser(user.ID); err != nil || n == 0 {
+		// security key が無いと passwordless 有効化不可。upstream は同じ
+		// branch で profile を `usePasswordLessLogin=false` に巻き戻して
+		// から error を返すので mk-go も合わせる。WebAuthn 未配線
+		// (securityKeyRepo == nil) は鍵 0 件と等価扱い。
+		hasKey := false
+		if h.securityKeyRepo != nil {
+			if n, err := h.securityKeyRepo.CountByUser(user.ID); err == nil && n > 0 {
+				hasKey = true
+			}
+		}
+		if !hasKey {
+			_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+				"usePasswordLessLogin": false,
+			})
 			return c.JSON(http.StatusBadRequest, apierr.NoSecurityKey())
 		}
 	}
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"usePasswordLessLogin": req.Value,
 	})
+	// frontend の main-boot.ts は `meUpdated` payload を
+	// updateCurrentAccountPartial で部分 merge する。usePasswordLessLogin は
+	// /api/i 経路の private profile field 群に属し、entity.PackUserDetailed が
+	// 含まないため publishMeUpdated (UserDetailed publish) では更新が
+	// 反映されない (#758 / #707 follow-up)。partial payload で当該 field
+	// だけ送って frontend の $i を更新する。
+	if h.mainStreamPublisher != nil {
+		h.mainStreamPublisher.PublishMainEvent(user.ID, "meUpdated", map[string]any{
+			"usePasswordLessLogin": req.Value,
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
 }

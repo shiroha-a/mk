@@ -344,25 +344,40 @@ func TestTwoFAUpdateKey_Success(t *testing.T) {
 }
 
 // --- TwoFAPasswordLess ---
+//
+// upstream Misskey TS は paramDef を `{value: boolean}` で password を
+// 要求しない (#758)。本 endpoint は session で認証済み前提なので mk-go も
+// 合わせている。
 
-func TestTwoFAPasswordLess_NoPassword(t *testing.T) {
-	h, _, _ := newWebAuthnHandler(t)
-	rec := postExtra(h.TwoFAPasswordLess, `{}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+// value 未指定 (空 body) は default false 扱いで no-content 成功する。
+// upstream の paramDef は required:['value'] だが mk-go の echo Bind は
+// JSON body 欠落を default 値で埋めるので、ここで bad request にしない。
+func TestTwoFAPasswordLess_EmptyBodyDefaultsFalse(t *testing.T) {
+	h, repo, _ := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	repo.Profiles["u1"].UsePasswordLessLogin = true
+	rec := postExtra(h.TwoFAPasswordLess, `{}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.False(t, repo.Profiles["u1"].UsePasswordLessLogin)
 }
 
+// value=true で security key 0 件 → noKey error + profile が
+// usePasswordLessLogin=false に巻き戻される (upstream 互換)。
 func TestTwoFAPasswordLess_EnableNoKeys(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
-	rec := postExtra(h.TwoFAPasswordLess, `{"password":"pass","value":true}`, user)
+	repo.Profiles["u1"].UsePasswordLessLogin = true
+	rec := postExtra(h.TwoFAPasswordLess, `{"value":true}`, user)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.False(t, repo.Profiles["u1"].UsePasswordLessLogin,
+		"upstream rolls back the flag before throwing noKey")
 }
 
 func TestTwoFAPasswordLess_EnableWithKey(t *testing.T) {
 	h, repo, skRepo := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "k1", UserID: "u1"}))
-	rec := postExtra(h.TwoFAPasswordLess, `{"password":"pass","value":true}`, user)
+	rec := postExtra(h.TwoFAPasswordLess, `{"value":true}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, repo.Profiles["u1"].UsePasswordLessLogin)
 }
@@ -371,7 +386,7 @@ func TestTwoFAPasswordLess_Disable(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	repo.Profiles["u1"].UsePasswordLessLogin = true
-	rec := postExtra(h.TwoFAPasswordLess, `{"password":"pass","value":false}`, user)
+	rec := postExtra(h.TwoFAPasswordLess, `{"value":false}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.False(t, repo.Profiles["u1"].UsePasswordLessLogin)
 }
