@@ -7,18 +7,58 @@ import (
 	"testing"
 	"time"
 
+	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// setupAdHandler returns a handler with AdRepo wired and optional seed rows.
+// AdRepo を使う test の boilerplate (handler 構築 + repo 生成 + seed +
+// SetAdRepo) を 1 行に圧縮する (#761)。戻り値の repo を直接 mutate して
+// CreateErr 等の error injection も可能。
+func setupAdHandler(t *testing.T, seed ...*model.Ad) (*apiadmin.Handler, *testutil.MockAdRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockAdRepository()
+	for _, ad := range seed {
+		require.NoError(t, repo.Create(ad))
+	}
+	h.SetAdRepo(repo)
+	return h, repo
+}
+
+// setupAvatarDecorationHandler returns a handler with AvatarDecorationRepo
+// wired and optional seed rows. Ad helper と同じ contract (#761)。
+func setupAvatarDecorationHandler(t *testing.T, seed ...*model.AvatarDecoration) (*apiadmin.Handler, *testutil.MockAvatarDecorationRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockAvatarDecorationRepository()
+	for _, d := range seed {
+		require.NoError(t, repo.Create(d))
+	}
+	h.SetAvatarDecorationRepo(repo)
+	return h, repo
+}
+
+// setupInviteHandler returns a handler with InviteRepo (RegistrationTicket
+// repo) wired and optional seed rows. Ad helper と同じ contract (#761)。
+func setupInviteHandler(t *testing.T, seed ...*model.RegistrationTicket) (*apiadmin.Handler, *testutil.MockRegistrationTicketRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockRegistrationTicketRepository()
+	for _, tkt := range seed {
+		require.NoError(t, repo.Create(tkt))
+	}
+	h.SetInviteRepo(repo)
+	return h, repo
+}
+
 // --- Ad ---------------------------------------------------------------------
 
 func TestAdCreate_Success(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
-	h.SetAdRepo(repo)
+	h, repo := setupAdHandler(t)
 	rec := doPost(h.AdCreate,
 		`{"url":"https://x","imageUrl":"https://y","place":"square","memo":"m","priority":"high","ratio":2,"dayOfWeek":3,"expiresAt":1760000000000,"startsAt":1759000000000,"isSensitive":true}`,
 		adminUser)
@@ -33,16 +73,13 @@ func TestAdCreate_Success(t *testing.T) {
 }
 
 func TestAdCreate_MissingRequired(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAdRepo(testutil.NewMockAdRepository())
+	h, _ := setupAdHandler(t)
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.AdCreate, `{"url":""}`, adminUser).Code)
 }
 
 func TestAdCreate_Defaults(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
-	h.SetAdRepo(repo)
+	h, _ := setupAdHandler(t)
 	rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got model.Ad
@@ -53,25 +90,21 @@ func TestAdCreate_Defaults(t *testing.T) {
 }
 
 func TestAdCreate_RepoError(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
+	h, repo := setupAdHandler(t)
 	repo.CreateErr = assertError{}
-	h.SetAdRepo(repo)
 	rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestAdList_Paginated(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
+	ads := make([]*model.Ad, 5)
 	for i := 0; i < 5; i++ {
-		id := fmt.Sprintf("a%02d", i)
-		require.NoError(t, repo.Create(&model.Ad{
-			ID: id, URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+		ads[i] = &model.Ad{
+			ID: fmt.Sprintf("a%02d", i), URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
 			StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(time.Hour),
-		}))
+		}
 	}
-	h.SetAdRepo(repo)
+	h, _ := setupAdHandler(t, ads...)
 
 	rec := doPost(h.AdList, `{"limit":3,"offset":0}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -83,12 +116,9 @@ func TestAdList_Paginated(t *testing.T) {
 }
 
 func TestAdUpdate_PartialFields(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
-	require.NoError(t, repo.Create(&model.Ad{
-		ID: "a1", URL: "old", Place: "square", Priority: "middle", Ratio: 1, ImageURL: "i",
-	}))
-	h.SetAdRepo(repo)
+	h, repo := setupAdHandler(t,
+		&model.Ad{ID: "a1", URL: "old", Place: "square", Priority: "middle", Ratio: 1, ImageURL: "i"},
+	)
 
 	rec := doPost(h.AdUpdate,
 		`{"id":"a1","url":"new","priority":"high"}`, adminUser)
@@ -98,15 +128,13 @@ func TestAdUpdate_PartialFields(t *testing.T) {
 }
 
 func TestAdUpdate_NotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAdRepo(testutil.NewMockAdRepository())
+	h, _ := setupAdHandler(t)
 	assert.Equal(t, http.StatusNotFound,
 		doPost(h.AdUpdate, `{"id":"missing","url":"x"}`, adminUser).Code)
 }
 
 func TestAdUpdate_MissingID(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAdRepo(testutil.NewMockAdRepository())
+	h, _ := setupAdHandler(t)
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.AdUpdate, `{}`, adminUser).Code)
 }
@@ -115,14 +143,13 @@ func TestAdUpdate_MissingID(t *testing.T) {
 // ケースとして扱う (nil なら変更なし)。handler 側の millisOrNow 適用で now に
 // 読み替えてしまう regression を防ぐ。
 func TestAdUpdate_ExplicitZeroExpiresAtStays1970(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
-	require.NoError(t, repo.Create(&model.Ad{
-		ID: "a1", URL: "u", Place: "square", Priority: "middle", Ratio: 1, ImageURL: "i",
-		StartsAt:  time.Now(),
-		ExpiresAt: time.Now().Add(time.Hour),
-	}))
-	h.SetAdRepo(repo)
+	h, repo := setupAdHandler(t,
+		&model.Ad{
+			ID: "a1", URL: "u", Place: "square", Priority: "middle", Ratio: 1, ImageURL: "i",
+			StartsAt:  time.Now(),
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	)
 
 	rec := doPost(h.AdUpdate, `{"id":"a1","expiresAt":0}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -133,10 +160,7 @@ func TestAdUpdate_ExplicitZeroExpiresAtStays1970(t *testing.T) {
 }
 
 func TestAdDelete_WithRepo(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAdRepository()
-	require.NoError(t, repo.Create(&model.Ad{ID: "a1"}))
-	h.SetAdRepo(repo)
+	h, repo := setupAdHandler(t, &model.Ad{ID: "a1"})
 
 	rec := doPost(h.AdDelete, `{"id":"a1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -146,9 +170,7 @@ func TestAdDelete_WithRepo(t *testing.T) {
 // --- AvatarDecorations ------------------------------------------------------
 
 func TestAvatarDecorationsCreate_Success(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAvatarDecorationRepository()
-	h.SetAvatarDecorationRepo(repo)
+	h, _ := setupAvatarDecorationHandler(t)
 	rec := doPost(h.AvatarDecorationsCreate,
 		`{"name":"deco","description":"d","url":"https://i","roleIdsThatCanBeUsedThisDecoration":["r1","r2"]}`,
 		adminUser)
@@ -160,18 +182,16 @@ func TestAvatarDecorationsCreate_Success(t *testing.T) {
 }
 
 func TestAvatarDecorationsCreate_MissingName(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAvatarDecorationRepo(testutil.NewMockAvatarDecorationRepository())
+	h, _ := setupAvatarDecorationHandler(t)
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.AvatarDecorationsCreate, `{"url":"https://i"}`, adminUser).Code)
 }
 
 func TestAvatarDecorationsList_WithRepo(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAvatarDecorationRepository()
-	require.NoError(t, repo.Create(&model.AvatarDecoration{ID: "d1", Name: "a"}))
-	require.NoError(t, repo.Create(&model.AvatarDecoration{ID: "d2", Name: "b"}))
-	h.SetAvatarDecorationRepo(repo)
+	h, _ := setupAvatarDecorationHandler(t,
+		&model.AvatarDecoration{ID: "d1", Name: "a"},
+		&model.AvatarDecoration{ID: "d2", Name: "b"},
+	)
 	rec := doPost(h.AvatarDecorationsList, `{}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []model.AvatarDecoration
@@ -180,10 +200,9 @@ func TestAvatarDecorationsList_WithRepo(t *testing.T) {
 }
 
 func TestAvatarDecorationsUpdate_Success(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAvatarDecorationRepository()
-	require.NoError(t, repo.Create(&model.AvatarDecoration{ID: "d1", Name: "old", URL: "u"}))
-	h.SetAvatarDecorationRepo(repo)
+	h, repo := setupAvatarDecorationHandler(t,
+		&model.AvatarDecoration{ID: "d1", Name: "old", URL: "u"},
+	)
 	rec := doPost(h.AvatarDecorationsUpdate,
 		`{"id":"d1","name":"new","roleIdsThatCanBeUsedThisDecoration":["r"]}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -192,24 +211,19 @@ func TestAvatarDecorationsUpdate_Success(t *testing.T) {
 }
 
 func TestAvatarDecorationsUpdate_NotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAvatarDecorationRepo(testutil.NewMockAvatarDecorationRepository())
+	h, _ := setupAvatarDecorationHandler(t)
 	assert.Equal(t, http.StatusNotFound,
 		doPost(h.AvatarDecorationsUpdate, `{"id":"missing","name":"x"}`, adminUser).Code)
 }
 
 func TestAvatarDecorationsUpdate_MissingID(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAvatarDecorationRepo(testutil.NewMockAvatarDecorationRepository())
+	h, _ := setupAvatarDecorationHandler(t)
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.AvatarDecorationsUpdate, `{}`, adminUser).Code)
 }
 
 func TestAvatarDecorationsDelete_WithRepo(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockAvatarDecorationRepository()
-	require.NoError(t, repo.Create(&model.AvatarDecoration{ID: "d1"}))
-	h.SetAvatarDecorationRepo(repo)
+	h, repo := setupAvatarDecorationHandler(t, &model.AvatarDecoration{ID: "d1"})
 	rec := doPost(h.AvatarDecorationsDelete, `{"id":"d1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.NotContains(t, repo.Decorations, "d1")
@@ -218,9 +232,7 @@ func TestAvatarDecorationsDelete_WithRepo(t *testing.T) {
 // --- Invite -----------------------------------------------------------------
 
 func TestInviteCreate_Default(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockRegistrationTicketRepository()
-	h.SetInviteRepo(repo)
+	h, _ := setupInviteHandler(t)
 	rec := doPost(h.InviteCreate, `{}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
@@ -233,9 +245,7 @@ func TestInviteCreate_Default(t *testing.T) {
 }
 
 func TestInviteCreate_MultipleCount(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockRegistrationTicketRepository()
-	h.SetInviteRepo(repo)
+	h, _ := setupInviteHandler(t)
 	rec := doPost(h.InviteCreate, `{"count":5}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
@@ -244,9 +254,7 @@ func TestInviteCreate_MultipleCount(t *testing.T) {
 }
 
 func TestInviteCreate_CountClampedToMax(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockRegistrationTicketRepository()
-	h.SetInviteRepo(repo)
+	h, _ := setupInviteHandler(t)
 	rec := doPost(h.InviteCreate, `{"count":250}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
@@ -255,20 +263,18 @@ func TestInviteCreate_CountClampedToMax(t *testing.T) {
 }
 
 func TestInviteCreate_InvalidExpiresAt(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetInviteRepo(testutil.NewMockRegistrationTicketRepository())
+	h, _ := setupInviteHandler(t)
 	rec := doPost(h.InviteCreate, `{"expiresAt":"not-a-date"}`, adminUser)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestInviteList_FilterUnused(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockRegistrationTicketRepository()
 	usedBy := "u1"
 	usedAt := time.Now()
-	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "t1", Code: "c1"}))
-	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "t2", Code: "c2", UsedByID: &usedBy, UsedAt: &usedAt}))
-	h.SetInviteRepo(repo)
+	h, _ := setupInviteHandler(t,
+		&model.RegistrationTicket{ID: "t1", Code: "c1"},
+		&model.RegistrationTicket{ID: "t2", Code: "c2", UsedByID: &usedBy, UsedAt: &usedAt},
+	)
 
 	rec := doPost(h.InviteList, `{"type":"unused"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -400,8 +406,7 @@ func TestInviteCreate(t *testing.T) {
 // --- moderation log assertions (#662 + #665) ---
 
 func TestAdCreate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAdRepo(testutil.NewMockAdRepository())
+	h, _ := setupAdHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
@@ -411,10 +416,9 @@ func TestAdCreate_WritesModerationLog(t *testing.T) {
 }
 
 func TestAdUpdate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	adRepo := testutil.NewMockAdRepository()
-	require.NoError(t, adRepo.Create(&model.Ad{ID: "ad1", URL: "https://x", ImageURL: "https://y"}))
-	h.SetAdRepo(adRepo)
+	h, _ := setupAdHandler(t,
+		&model.Ad{ID: "ad1", URL: "https://x", ImageURL: "https://y"},
+	)
 	repo := attachModLog(t, h)
 
 	url := "https://updated"
@@ -431,10 +435,9 @@ func TestAdUpdate_WritesModerationLog(t *testing.T) {
 }
 
 func TestAdDelete_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	adRepo := testutil.NewMockAdRepository()
-	require.NoError(t, adRepo.Create(&model.Ad{ID: "ad1", URL: "https://x", ImageURL: "https://y"}))
-	h.SetAdRepo(adRepo)
+	h, _ := setupAdHandler(t,
+		&model.Ad{ID: "ad1", URL: "https://x", ImageURL: "https://y"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AdDelete, `{"id":"ad1"}`, adminUser)
@@ -444,8 +447,7 @@ func TestAdDelete_WritesModerationLog(t *testing.T) {
 }
 
 func TestInviteCreate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetInviteRepo(testutil.NewMockRegistrationTicketRepository())
+	h, _ := setupInviteHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.InviteCreate, `{"count":2}`, adminUser)
@@ -459,8 +461,7 @@ func TestInviteCreate_WritesModerationLog(t *testing.T) {
 }
 
 func TestAvatarDecorationsCreate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetAvatarDecorationRepo(testutil.NewMockAvatarDecorationRepository())
+	h, _ := setupAvatarDecorationHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AvatarDecorationsCreate, `{"name":"crown","url":"https://x"}`, adminUser)
@@ -470,10 +471,9 @@ func TestAvatarDecorationsCreate_WritesModerationLog(t *testing.T) {
 }
 
 func TestAvatarDecorationsUpdate_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	avatarRepo := testutil.NewMockAvatarDecorationRepository()
-	require.NoError(t, avatarRepo.Create(&model.AvatarDecoration{ID: "d1", Name: "crown"}))
-	h.SetAvatarDecorationRepo(avatarRepo)
+	h, _ := setupAvatarDecorationHandler(t,
+		&model.AvatarDecoration{ID: "d1", Name: "crown"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AvatarDecorationsUpdate, `{"id":"d1","name":"jewel"}`, adminUser)
@@ -483,10 +483,9 @@ func TestAvatarDecorationsUpdate_WritesModerationLog(t *testing.T) {
 }
 
 func TestAvatarDecorationsDelete_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	avatarRepo := testutil.NewMockAvatarDecorationRepository()
-	require.NoError(t, avatarRepo.Create(&model.AvatarDecoration{ID: "d1", Name: "doomed"}))
-	h.SetAvatarDecorationRepo(avatarRepo)
+	h, _ := setupAvatarDecorationHandler(t,
+		&model.AvatarDecoration{ID: "d1", Name: "doomed"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.AvatarDecorationsDelete, `{"id":"d1"}`, adminUser)
