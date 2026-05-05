@@ -2462,11 +2462,11 @@ func applyInstanceFields(i *model.Instance, fields map[string]any) {
 				}
 			}
 		// isBlocked / isSilenced は model.Instance に対応 field が無く DB
-		// schema にも存在しない (#715 で二重カラム統合議論中)。mock では
-		// 明示的に case を持つことで「silently drop されている」状態を
-		// visible にし、将来 model 拡張で field が増えたら修正点が明確になる。
+		// schema にも存在しない (#715 で二重カラム統合議論中)。明示的に
+		// case を持つことで「silently drop されている」状態を visible に
+		// し、将来 model 拡張で field が増えたら修正点が明確になる。
+		// 空 body は意図的: 受け取って何もしない。
 		case "isBlocked", "isSilenced":
-			_ = v
 		}
 	}
 }
