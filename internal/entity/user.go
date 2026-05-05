@@ -11,11 +11,14 @@ import (
 // instance as optional TS-compat fields. All use omitempty so absent values
 // are elided from the response (TS: `?? undefined` / `?: undefined`).
 type UserLite struct {
-	ID                string                 `json:"id"`
-	Name              *string                `json:"name"`
-	Username          string                 `json:"username"`
-	Host              *string                `json:"host"`
-	AvatarURL         *string                `json:"avatarUrl"`
+	ID       string  `json:"id"`
+	Name     *string `json:"name"`
+	Username string  `json:"username"`
+	Host     *string `json:"host"`
+	// AvatarURL は upstream Misskey TS 互換で常に non-null。
+	// avatarId が無い / DB の avatarUrl が空のときは IdenticonURL() が
+	// /identicon/<username>(@<host>) にフォールバックする (#710)。
+	AvatarURL         string                 `json:"avatarUrl"`
 	AvatarBlurhash    *string                `json:"avatarBlurhash"`
 	AvatarDecorations []AvatarDecorationItem `json:"avatarDecorations"`
 	IsBot             bool                   `json:"isBot"`
@@ -135,13 +138,12 @@ func IdenticonURL(u *model.User) string {
 // DB を叩かない。cache miss / TTL 切れでのみ admin catalog の List を 1 回
 // 引く (#521 / #524 review)。
 func PackUserLite(u *model.User) UserLite {
-	avatarURL := IdenticonURL(u)
 	out := UserLite{
 		ID:                u.ID,
 		Name:              u.Name,
 		Username:          u.Username,
 		Host:              u.Host,
-		AvatarURL:         &avatarURL,
+		AvatarURL:         IdenticonURL(u),
 		AvatarBlurhash:    u.AvatarBlurhash,
 		AvatarDecorations: resolveAvatarDecorations(u.AvatarDecorations),
 		IsBot:             u.IsBot,

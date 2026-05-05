@@ -32,7 +32,7 @@ func TestPackUserLite(t *testing.T) {
 	assert.Equal(t, "user1", lite.ID)
 	assert.Equal(t, "testuser", lite.Username)
 	assert.Equal(t, &name, lite.Name)
-	assert.Equal(t, &avatarURL, lite.AvatarURL)
+	assert.Equal(t, avatarURL, lite.AvatarURL)
 	assert.Equal(t, &blurhash, lite.AvatarBlurhash)
 	assert.True(t, lite.IsBot)
 	assert.False(t, lite.IsCat)
@@ -56,8 +56,7 @@ func TestPackUserLite_NilFields(t *testing.T) {
 	assert.Nil(t, lite.Name)
 	assert.Nil(t, lite.Host)
 	// avatarUrlがnullの場合、identiconにフォールバック
-	require.NotNil(t, lite.AvatarURL)
-	assert.Equal(t, "/identicon/minimal", *lite.AvatarURL)
+	assert.Equal(t, "/identicon/minimal", lite.AvatarURL)
 	assert.Nil(t, lite.AvatarBlurhash)
 }
 
@@ -70,8 +69,7 @@ func TestPackUserLite_IdenticonWithHost(t *testing.T) {
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
 	lite := PackUserLite(u)
-	require.NotNil(t, lite.AvatarURL)
-	assert.Equal(t, "/identicon/alice@remote.example", *lite.AvatarURL)
+	assert.Equal(t, "/identicon/alice@remote.example", lite.AvatarURL)
 }
 
 func TestPackUserLite_ExistingAvatarURL(t *testing.T) {
@@ -83,8 +81,7 @@ func TestPackUserLite_ExistingAvatarURL(t *testing.T) {
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
 	lite := PackUserLite(u)
-	require.NotNil(t, lite.AvatarURL)
-	assert.Equal(t, "https://example.com/avatar.png", *lite.AvatarURL)
+	assert.Equal(t, "https://example.com/avatar.png", lite.AvatarURL)
 }
 
 func TestPackUserDetailed(t *testing.T) {
