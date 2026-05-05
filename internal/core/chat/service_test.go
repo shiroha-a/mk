@@ -16,8 +16,11 @@ import (
 )
 
 // fakeChatRepo / newFakeRepo は testutil.MockChatRepository に集約された
-// (#709)。本ファイル / ap_delivery_test.go は newFakeRepo() のエイリアスを
-// 使い続けるが、実体は MockChatRepository。
+// (#709)。本ファイル / ap_delivery_test.go の呼び出し点を保つために alias
+// を残しているが、新規 test は testutil.NewMockChatRepository() を直接
+// 呼ぶこと。既存呼び出しも段階的に置換していく方針。
+//
+// Deprecated: use testutil.NewMockChatRepository directly.
 func newFakeRepo() *testutil.MockChatRepository {
 	return testutil.NewMockChatRepository()
 }
