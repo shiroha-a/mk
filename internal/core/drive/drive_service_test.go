@@ -2,6 +2,7 @@ package drive_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"image"
@@ -52,7 +53,7 @@ func newSvc(t *testing.T) (*drive.Service, *testutil.MockDriveFileRepository, *t
 // remote emoji images without binding them to the operator's account.
 func TestUpload_NilUserSystemFile(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
-	f, err := svc.Upload(drive.UploadInput{Body: []byte("hello"), Name: "x.bin"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{Body: []byte("hello"), Name: "x.bin"})
 	require.NoError(t, err)
 	require.NotNil(t, f)
 	assert.Nil(t, f.UserID)
@@ -63,7 +64,7 @@ func TestUpload_NilUserSystemFile(t *testing.T) {
 func TestUpload_HappyPath(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hello"), Name: "hello.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hello"), Name: "hello.txt"})
 	require.NoError(t, err)
 	assert.Equal(t, "hello.txt", f.Name)
 	assert.Len(t, fileRepo.Files, 1)
@@ -90,7 +91,7 @@ func TestUpload_PublishesDriveFileCreatedOnMain(t *testing.T) {
 	svc.SetMainStreamPublisher(pub)
 
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hello"), Name: "hello.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hello"), Name: "hello.txt"})
 	require.NoError(t, err)
 
 	require.Len(t, pub.calls, 1)
@@ -106,15 +107,15 @@ func TestUpload_PublishesDriveFileCreatedOnMain(t *testing.T) {
 func TestUpload_NoMainPublisher_NoEmit(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	// SetMainStreamPublisherを呼ばない状態でもUpload自体は成功する。
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("hi"), Name: "hi.txt"})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("hi"), Name: "hi.txt"})
 	require.NoError(t, err)
 }
 
 func TestUpload_DedupByMD5(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	first, _ := svc.Upload(drive.UploadInput{User: user, Body: []byte("data"), Name: "a"})
-	second, _ := svc.Upload(drive.UploadInput{User: user, Body: []byte("data"), Name: "b"})
+	first, _ := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("data"), Name: "a"})
+	second, _ := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("data"), Name: "b"})
 	assert.Equal(t, first.ID, second.ID)
 	assert.Len(t, fileRepo.Files, 1)
 }
@@ -122,9 +123,9 @@ func TestUpload_DedupByMD5(t *testing.T) {
 func TestUpload_ForceSkipsDedup(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	_, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("d"), Name: "a"})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("d"), Name: "a"})
 	require.NoError(t, err)
-	_, err = svc.Upload(drive.UploadInput{User: user, Body: []byte("d"), Name: "a", Force: true})
+	_, err = svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("d"), Name: "a", Force: true})
 	require.NoError(t, err)
 	assert.Len(t, fileRepo.Files, 2)
 }
@@ -132,7 +133,7 @@ func TestUpload_ForceSkipsDedup(t *testing.T) {
 func TestUpload_FolderNotFound(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	folderID := "ghost"
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x"), FolderID: &folderID})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x"), FolderID: &folderID})
 	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
@@ -141,7 +142,7 @@ func TestUpload_FolderAccessDenied(t *testing.T) {
 	other := "other"
 	folderRepo.Folders["fid"] = &model.DriveFolder{ID: "fid", UserID: &other}
 	folderID := "fid"
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x"), FolderID: &folderID})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x"), FolderID: &folderID})
 	require.ErrorIs(t, err, drive.ErrAccessDenied)
 }
 
@@ -158,7 +159,7 @@ func TestUpload_RepoCreateError(t *testing.T) {
 	repo := &failingFileRepo{MockDriveFileRepository: testutil.NewMockDriveFileRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(repo, testutil.NewMockDriveFolderRepository(), drive.NewLocalStorage(t.TempDir(), ""), idGen)
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -166,7 +167,7 @@ func TestUpload_StoragePutError(t *testing.T) {
 	storage := brokenStorage(t)
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(testutil.NewMockDriveFileRepository(), testutil.NewMockDriveFolderRepository(), storage, idGen)
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
 	assert.Error(t, err)
 }
 
@@ -180,7 +181,7 @@ func TestUpload_AccessKeyGenError(t *testing.T) {
 	defer restore()
 
 	svc, _, _ := newSvc(t)
-	_, err := svc.Upload(drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
 	assert.Error(t, err)
 }
 
@@ -372,7 +373,7 @@ func TestDelete_NotFound(t *testing.T) {
 func TestDelete_HappyPath(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	created, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("x"), Name: "x"})
+	created, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("x"), Name: "x"})
 	require.NoError(t, err)
 	require.NoError(t, svc.Delete(user, created.ID))
 	assert.Empty(t, fileRepo.Files)
@@ -589,7 +590,7 @@ func TestUpload_PublishesStreamingEvent(t *testing.T) {
 	pub := &stubDriveStreamPublisher{}
 	svc.SetStreamingPublisher(pub)
 	user := &model.User{ID: "u1"}
-	_, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"u1:fileCreated"}, pub.events)
 }
@@ -597,7 +598,7 @@ func TestUpload_PublishesStreamingEvent(t *testing.T) {
 func TestUpdate_PublishesStreamingEvent(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 
 	pub := &stubDriveStreamPublisher{}
@@ -611,7 +612,7 @@ func TestUpdate_PublishesStreamingEvent(t *testing.T) {
 func TestDelete_PublishesStreamingEvent(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 
 	pub := &stubDriveStreamPublisher{}
@@ -634,7 +635,7 @@ func TestUpload_FiresChartHook(t *testing.T) {
 	hook := &stubChartHook{}
 	svc.SetChartHook(hook)
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{f.ID}, hook.uploaded)
 }
@@ -642,7 +643,7 @@ func TestUpload_FiresChartHook(t *testing.T) {
 func TestDelete_FiresChartHook(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 
 	hook := &stubChartHook{}
@@ -734,7 +735,7 @@ func TestUpload_WithImageProcessor_JPEG(t *testing.T) {
 
 	user := &model.User{ID: "u1"}
 	jpegData := testJPEGBytes(800, 600)
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: jpegData, Name: "photo.jpg"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: jpegData, Name: "photo.jpg"})
 	require.NoError(t, err)
 	assert.Len(t, fileRepo.Files, 1)
 
@@ -762,7 +763,7 @@ func TestUpload_WithImageProcessor_PNG_LargeWebpublic(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	// 2048超えの PNG → webpublic 生成
 	pngData := testPNGBytes(3000, 2000)
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: pngData, Name: "big.png"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: pngData, Name: "big.png"})
 	require.NoError(t, err)
 
 	assert.NotNil(t, f.ThumbnailURL)
@@ -778,7 +779,7 @@ func TestUpload_WithImageProcessor_SmallJPEG_NoWebpublic(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	// 2048以下 + EXIF なし → webpublic 不要
 	jpegData := testJPEGBytes(400, 300)
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: jpegData, Name: "small.jpg"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: jpegData, Name: "small.jpg"})
 	require.NoError(t, err)
 
 	assert.NotNil(t, f.ThumbnailURL) // サムネイルは生成
@@ -790,7 +791,7 @@ func TestUpload_WithoutImageProcessor_TextFile(t *testing.T) {
 	// ImageProcessor 未設定
 
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("hello"), Name: "test.txt"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hello"), Name: "test.txt"})
 	require.NoError(t, err)
 
 	assert.Nil(t, f.ThumbnailURL)
@@ -803,7 +804,7 @@ func TestUpload_WithImageProcessor_NonImage(t *testing.T) {
 	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 
 	user := &model.User{ID: "u1"}
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: []byte("not an image"), Name: "data.bin"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("not an image"), Name: "data.bin"})
 	require.NoError(t, err)
 
 	// テキストは画像処理対象外
@@ -832,7 +833,7 @@ func TestUpload_WithVideoProcessor(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	// video/mp4 のMIMEを強制するため、バイナリに MP4 ヘッダを付与
 	mp4Header := []byte{0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70} // ftyp box
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: mp4Header, Name: "clip.mp4"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: mp4Header, Name: "clip.mp4"})
 	require.NoError(t, err)
 
 	// http.DetectContentType が video/mp4 を返す場合のみサムネイル生成
@@ -849,7 +850,7 @@ func TestDelete_CleansUpThumbnailAndWebpublic(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	// 2048 超えの JPEG → thumbnail + webpublic 生成
 	jpegData := testJPEGBytes(3000, 2000)
-	f, err := svc.Upload(drive.UploadInput{User: user, Body: jpegData, Name: "large.jpg"})
+	f, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: jpegData, Name: "large.jpg"})
 	require.NoError(t, err)
 	require.NotNil(t, f.ThumbnailAccessKey)
 	require.NotNil(t, f.WebpublicAccessKey)
@@ -909,7 +910,7 @@ func TestUpload_ImageProcessor_RepoCreateErrorRollback(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	// 2048超え → thumbnail + webpublic 両方生成 → Create失敗 → 全ロールバック
 	jpegData := testJPEGBytes(3000, 2000)
-	_, err := svc.Upload(drive.UploadInput{User: user, Body: jpegData, Name: "photo.jpg"})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: jpegData, Name: "photo.jpg"})
 	assert.Error(t, err)
 
 	// storage のファイルがロールバックされていることを確認

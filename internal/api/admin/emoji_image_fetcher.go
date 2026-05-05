@@ -95,7 +95,7 @@ func (f *EmojiImageFetcherImpl) FetchAndStore(ctx context.Context, imageURL stri
 	// drive.Service.Upload は md5 dedup を既に skip していて Force は no-op
 	// になるが、user 付きで本 fetcher を再利用する将来経路 (例: emoji 単発
 	// 追加 UI) で「重複しても新しいファイルを作る」契約を読み手に明示する。
-	df, err := f.driveSvc.Upload(drive.UploadInput{
+	df, err := f.driveSvc.Upload(ctx, drive.UploadInput{
 		User:  user,
 		Body:  body,
 		Name:  driveName,

@@ -317,6 +317,11 @@ proxyBypassHosts:
 #   - SaaS: Cloudflare Workers AI / AWS Rekognition / Google Vision SafeSearch
 # wire format が違う場合は operator 側で thin proxy を被せて合わせる。
 #nsfwDetectorUrl: http://nsfw-detector:8080/score
+# 1 行 HTTP header を注入 (SaaS 直叩き用、例: Cloudflare Workers AI、AWS
+# Rekognition gateway 等)。"Name: value" 形式。空なら header 注入なし (#751)。
+#nsfwDetectorAuthHeader: "Authorization: Bearer <api-key>"
+# 1 リクエストあたりの timeout (Go duration 形式)。0 / 未指定なら 30s。
+#nsfwDetectorTimeout: 60s
 
 # For security reasons, uploading attachments from the intranet is
 # prohibited; exceptions can be allowed here. Default is empty.

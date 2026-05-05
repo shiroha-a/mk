@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -180,8 +181,16 @@ type Source struct {
 	// backend に ML runtime を抱えない方針なので、operator が任意の互換
 	// service を立てて URL を指定する。Wire: POST body=image/video bytes,
 	// Content-Type=<MIME>, response JSON `{"score": float64}` (0..1)。
-	NSFWDetectorURL string          `mapstructure:"nsfwDetectorUrl"`
-	Logging         *LoggingOptions `mapstructure:"logging"`
+	NSFWDetectorURL string `mapstructure:"nsfwDetectorUrl"`
+	// NSFWDetectorAuthHeader は detector への 1 行 HTTP header。例:
+	// "Authorization: Bearer xxxxx" / "X-API-Key: xxxxx"。SaaS detector
+	// (Cloudflare Workers AI / AWS Rekognition 等) を thin proxy なしで
+	// 直接呼ぶための設定 (#751)。空なら header 注入なし。
+	NSFWDetectorAuthHeader string `mapstructure:"nsfwDetectorAuthHeader"`
+	// NSFWDetectorTimeout は detector への 1 リクエストあたりの timeout
+	// (Go duration、例: "60s" / "2m")。0 / 未指定なら 30s (#751)。
+	NSFWDetectorTimeout time.Duration   `mapstructure:"nsfwDetectorTimeout"`
+	Logging             *LoggingOptions `mapstructure:"logging"`
 
 	PerChannelMaxNoteCacheCount  *int   `mapstructure:"perChannelMaxNoteCacheCount"`
 	PerUserNotificationsMaxCount *int   `mapstructure:"perUserNotificationsMaxCount"`
@@ -286,6 +295,8 @@ type Config struct {
 	VideoThumbnailGenerator      string
 	VideoThumbnailGeneratorMode  string
 	NSFWDetectorURL              string
+	NSFWDetectorAuthHeader       string
+	NSFWDetectorTimeout          time.Duration
 	UserAgent                    string
 	PerChannelMaxNoteCacheCount  int
 	PerUserNotificationsMaxCount int
@@ -507,6 +518,8 @@ func resolve(src *Source) (*Config, error) {
 		VideoThumbnailGenerator:      strings.TrimRight(src.VideoThumbnailGenerator, "/"),
 		VideoThumbnailGeneratorMode:  normalizeVideoThumbMode(src.VideoThumbnailGeneratorMode),
 		NSFWDetectorURL:              strings.TrimRight(src.NSFWDetectorURL, "/"),
+		NSFWDetectorAuthHeader:       src.NSFWDetectorAuthHeader,
+		NSFWDetectorTimeout:          src.NSFWDetectorTimeout,
 		UserAgent:                    fmt.Sprintf("Misskey-Go/%s (%s)", MkGoVersion, src.URL),
 		PerChannelMaxNoteCacheCount:  perChannelMaxNoteCacheCount,
 		PerUserNotificationsMaxCount: perUserNotificationsMaxCount,

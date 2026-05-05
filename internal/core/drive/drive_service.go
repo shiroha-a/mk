@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/entity"
@@ -166,7 +167,11 @@ type UploadInput struct {
 // 検出 / stream publish はいずれも skip する。custom emoji のリモート→
 // local コピー (#670) など、誰のものでもないがインスタンスが管理する
 // アセット用。
-func (s *Service) Upload(in UploadInput) (*model.DriveFile, error) {
+//
+// ctx は upload リクエストの context (#749)。sensitive media detection の
+// 外部 detector 呼び出しでこの ctx を伝播するため、caller は client が
+// 切断したら detector もキャンセルされることを期待できる。
+func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile, error) {
 	// in.Body は []byte なので bytes.Reader 経由のAnalyseFileは失敗しない。
 	// AnalyseFile自体は io.Reader を取るがエラー経路はここでは到達しない。
 	info, _ := AnalyseFile(bytes.NewReader(in.Body))
@@ -271,7 +276,7 @@ func (s *Service) Upload(in UploadInput) (*model.DriveFile, error) {
 
 	// Sensitive media detection フック (system file は user 紐付きが無いので skip)
 	if !f.IsSensitive && in.User != nil {
-		f.IsSensitive = s.detectSensitive(in.User, in.Body, info.MimeType)
+		f.IsSensitive = s.detectSensitive(ctx, in.User, in.Body, info.MimeType)
 	}
 
 	if err := s.fileRepo.Create(f); err != nil {
@@ -308,7 +313,10 @@ func (s *Service) Upload(in UploadInput) (*model.DriveFile, error) {
 
 // detectSensitive runs sensitive media detection based on meta config.
 // ベストエフォート: detector 未設定やエラー時は false を返す。
-func (s *Service) detectSensitive(user *model.User, body []byte, mime string) bool {
+//
+// ctx は upload リクエストの context を伝播する (#749)。client が早期に
+// 切断したら detector 呼び出しもキャンセルされる。
+func (s *Service) detectSensitive(ctx context.Context, user *model.User, body []byte, mime string) bool {
 	cfg := s.sensitiveCfg
 
 	// mediaSilencedHosts: リモートユーザーのホストが silenced ならば無条件 sensitive
@@ -330,8 +338,12 @@ func (s *Service) detectSensitive(user *model.User, body []byte, mime string) bo
 		return false
 	}
 
-	score, err := s.sensitiveDetector.Detect(context.Background(), body, mime)
+	score, err := s.sensitiveDetector.Detect(ctx, body, mime)
 	if err != nil {
+		// detector が落ちていても upload 自体は通す best-effort 実装だが、
+		// silently 飲み込むと「自動付与が動いていない」ことに operator が
+		// 気付けない (#750)。warn ログだけ残す。body 内容は出さない (privacy)。
+		slog.Warn("drive: sensitive detector failed", "mime", mime, "err", err)
 		return false
 	}
 

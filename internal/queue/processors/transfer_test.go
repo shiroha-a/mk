@@ -22,7 +22,7 @@ import (
 
 type stubTransferDriveSaver struct{}
 
-func (stubTransferDriveSaver) Upload(in drive.UploadInput) (*model.DriveFile, error) {
+func (stubTransferDriveSaver) Upload(_ context.Context, in drive.UploadInput) (*model.DriveFile, error) {
 	return &model.DriveFile{ID: "f_" + in.Name, Name: in.Name}, nil
 }
 

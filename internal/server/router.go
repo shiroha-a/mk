@@ -371,7 +371,14 @@ func (s *Server) setupRoutes() {
 		}
 		var nsfwDetector coredrive.SensitiveDetector
 		if url := s.config.NSFWDetectorURL; url != "" {
-			nsfwDetector = coredrive.NewHTTPDetector(url, s.outboundClient(30*time.Second))
+			timeout := s.config.NSFWDetectorTimeout
+			if timeout <= 0 {
+				timeout = coredrive.DefaultHTTPDetectorTimeout
+			}
+			nsfwDetector = coredrive.NewHTTPDetectorWithOptions(url, s.outboundClient(timeout), coredrive.HTTPDetectorOptions{
+				AuthHeader: s.config.NSFWDetectorAuthHeader,
+				Timeout:    timeout,
+			})
 		}
 		driveService.SetSensitiveDetection(nsfwDetector, sensCfg)
 	}

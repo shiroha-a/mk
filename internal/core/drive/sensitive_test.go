@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -85,6 +86,101 @@ func TestHTTPDetector_InvalidJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// AuthHeader 設定時に request header に乗ることを確認 (#751)。
+func TestHTTPDetector_AuthHeaderInjected(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetectorWithOptions(srv.URL, nil, HTTPDetectorOptions{
+		AuthHeader: "Authorization: Bearer secret-xyz",
+	})
+	_, err := d.Detect(context.Background(), []byte("data"), "image/png")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer secret-xyz", got)
+}
+
+// AuthHeader が "X-API-Key:" のような独自 header でも注入される。
+func TestHTTPDetector_AuthHeaderCustomKey(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Api-Key")
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetectorWithOptions(srv.URL, nil, HTTPDetectorOptions{
+		AuthHeader: "X-API-Key: my-key-1234",
+	})
+	_, err := d.Detect(context.Background(), []byte("data"), "image/png")
+	require.NoError(t, err)
+	assert.Equal(t, "my-key-1234", got)
+}
+
+// AuthHeader 空のときは Authorization header が乗らない (default 挙動)。
+func TestHTTPDetector_NoAuthHeaderWhenEmpty(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetectorWithOptions(srv.URL, nil, HTTPDetectorOptions{})
+	_, err := d.Detect(context.Background(), []byte("data"), "image/png")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// AuthHeader が malformed (":" 無し) なら header 注入をスキップして
+// 通常の request になる (panic / 落ちない)。
+func TestHTTPDetector_AuthHeaderMalformedSkipped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetectorWithOptions(srv.URL, nil, HTTPDetectorOptions{
+		AuthHeader: "no-colon-string",
+	})
+	_, err := d.Detect(context.Background(), []byte("data"), "image/png")
+	require.NoError(t, err)
+}
+
+// Timeout を opts で 1ms に設定すると、サーバが 50ms 寝ている間に
+// context.WithTimeout が deadline exceeded を起こす。
+func TestHTTPDetector_TimeoutFromOptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetectorWithOptions(srv.URL, nil, HTTPDetectorOptions{
+		Timeout: 1 * time.Millisecond,
+	})
+	_, err := d.Detect(context.Background(), []byte("data"), "image/png")
+	assert.Error(t, err)
+}
+
+// caller の ctx を cancel すると Detect も中断する (#749 propagation)。
+func TestHTTPDetector_ContextCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+	}))
+	defer srv.Close()
+
+	d := NewHTTPDetector(srv.URL, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 即座に cancel
+	_, err := d.Detect(ctx, []byte("data"), "image/png")
+	assert.Error(t, err)
+}
+
 // --- detectSensitive (Service method) tests ---
 
 // stubDetector returns the configured score / err.
@@ -106,7 +202,7 @@ func TestDetectSensitive_NoDetector(t *testing.T) {
 	s.SetSensitiveDetection(nil, SensitiveConfig{
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }
 
 // SilencedHost match は detector を呼ばずに true を返す。
@@ -118,7 +214,7 @@ func TestDetectSensitive_SilencedHostShortCircuit(t *testing.T) {
 		SetFlagAutomatically: false, // silenced は flag 設定とは無関係
 		SilencedHosts:        []string{"bad.example.com"},
 	})
-	assert.True(t, s.detectSensitive(&model.User{Host: &host}, []byte("data"), "image/png"))
+	assert.True(t, s.detectSensitive(context.Background(), &model.User{Host: &host}, []byte("data"), "image/png"))
 }
 
 // SetFlagAutomatically=false なら detector は呼ばれず false。
@@ -127,7 +223,7 @@ func TestDetectSensitive_FlagDisabled(t *testing.T) {
 	s.SetSensitiveDetection(stubDetector{score: 0.99}, SensitiveConfig{
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: false,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }
 
 // Detection mode が remote で local user → detector skip → false。
@@ -136,7 +232,7 @@ func TestDetectSensitive_DetectionModeMismatch(t *testing.T) {
 	s.SetSensitiveDetection(stubDetector{score: 0.99}, SensitiveConfig{
 		Detection: "remote", Sensitivity: "medium", SetFlagAutomatically: true,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }
 
 // 動画 MIME + EnableForVideos=false → detector skip → false。
@@ -146,7 +242,7 @@ func TestDetectSensitive_VideoSkipWhenDisabled(t *testing.T) {
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 		EnableForVideos: false,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "video/mp4"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "video/mp4"))
 }
 
 // 動画 MIME + EnableForVideos=true + score>=threshold → true。
@@ -156,7 +252,7 @@ func TestDetectSensitive_VideoEnabledAndAboveThreshold(t *testing.T) {
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 		EnableForVideos: true,
 	})
-	assert.True(t, s.detectSensitive(&model.User{}, []byte("data"), "video/mp4"))
+	assert.True(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "video/mp4"))
 }
 
 // score >= threshold → true。
@@ -165,7 +261,7 @@ func TestDetectSensitive_AboveThreshold(t *testing.T) {
 	s.SetSensitiveDetection(stubDetector{score: 0.7}, SensitiveConfig{
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 	})
-	assert.True(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.True(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }
 
 // score < threshold → false。
@@ -174,7 +270,7 @@ func TestDetectSensitive_BelowThreshold(t *testing.T) {
 	s.SetSensitiveDetection(stubDetector{score: 0.4}, SensitiveConfig{
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }
 
 // detector がエラーを返したら false (best-effort)。
@@ -183,5 +279,5 @@ func TestDetectSensitive_DetectorError(t *testing.T) {
 	s.SetSensitiveDetection(stubDetector{err: errors.New("net fail")}, SensitiveConfig{
 		Detection: "all", Sensitivity: "medium", SetFlagAutomatically: true,
 	})
-	assert.False(t, s.detectSensitive(&model.User{}, []byte("data"), "image/png"))
+	assert.False(t, s.detectSensitive(context.Background(), &model.User{}, []byte("data"), "image/png"))
 }

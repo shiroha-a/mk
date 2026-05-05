@@ -193,7 +193,7 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			continue
 		}
 
-		if err := i.replaceEmoji(record, imgBody); err != nil {
+		if err := i.replaceEmoji(ctx, record, imgBody); err != nil {
 			slog.Warn("emoji import: replace failed", "name", record.Emoji.Name, "err", err)
 			result.Skipped++
 			continue
@@ -219,7 +219,7 @@ func readZipEntry(f *zip.File) ([]byte, error) {
 // resolves the requesting user up front to fail-fast on missing accounts, but
 // the user is *not* propagated here because the resulting drive file is
 // system-owned (see Upload comment below for #670 rationale).
-func (i *Importer) replaceEmoji(record metaRecord, body []byte) error {
+func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []byte) error {
 	// 既存 local 絵文字 (同名) は上書きのために先に削除する。
 	// 本家 Misskey では emojisRepository.delete({ name, host: IsNull() }) 相当。
 	if existing, err := i.deps.EmojiRepo.FindByNameAndHost(record.Emoji.Name, nil); err == nil && existing != nil {
@@ -232,7 +232,7 @@ func (i *Importer) replaceEmoji(record metaRecord, body []byte) error {
 	// に紐付けると ロール変更 / アカウント削除 で巻き込まれて表示が壊れる。
 	// User: nil の経路では drive.Service.Upload が md5 dedup を skip するため
 	// Force: true は実質 no-op だが、明示性のため残す。
-	uploaded, err := i.deps.Uploader.Upload(drive.UploadInput{
+	uploaded, err := i.deps.Uploader.Upload(ctx, drive.UploadInput{
 		Body:  body,
 		Name:  record.FileName,
 		Force: true,

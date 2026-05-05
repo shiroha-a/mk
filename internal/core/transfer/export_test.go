@@ -27,7 +27,7 @@ type fakeDriveSaver struct {
 	err     error
 }
 
-func (f *fakeDriveSaver) Upload(in drive.UploadInput) (*model.DriveFile, error) {
+func (f *fakeDriveSaver) Upload(_ context.Context, in drive.UploadInput) (*model.DriveFile, error) {
 	if f.err != nil {
 		return nil, f.err
 	}

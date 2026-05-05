@@ -161,7 +161,7 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 		in.Force = true
 	}
 
-	f, err := h.svc.Upload(in)
+	f, err := h.svc.Upload(c.Request().Context(), in)
 	if err != nil {
 		switch {
 		case errors.Is(err, coredrive.ErrFolderNotFound):

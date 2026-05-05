@@ -43,7 +43,7 @@ const (
 // DriveSaver writes a byte buffer as a DriveFile for a given user. Implemented
 // by *drive.Service in production.
 type DriveSaver interface {
-	Upload(in drive.UploadInput) (*model.DriveFile, error)
+	Upload(ctx context.Context, in drive.UploadInput) (*model.DriveFile, error)
 }
 
 // DriveReader fetches a previously-uploaded DriveFile and streams its stored
@@ -155,7 +155,7 @@ func (e *Exporter) Export(ctx context.Context, userID, exportType string) (*mode
 		return nil, fmt.Errorf("export %s: %w", exportType, err)
 	}
 
-	file, err := e.deps.Drive.Upload(drive.UploadInput{
+	file, err := e.deps.Drive.Upload(ctx, drive.UploadInput{
 		User:  user,
 		Body:  body,
 		Name:  name,
