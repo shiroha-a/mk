@@ -24,10 +24,11 @@
 -- 否定 array containment (NOT (reads @> ARRAY[?]::varchar[])) は GIN でも
 -- 高速化できないため reads 用 index は追加しない。
 --
--- production (大規模 chat_message table) に適用する場合、本 CREATE INDEX
--- は ACCESS EXCLUSIVE lock を取って書き込みを一時 block する。golang-migrate
--- が transaction 内で実行するため CREATE INDEX CONCURRENTLY は使えない
--- (transaction 外実行が必須)。lock 期間は table size に依存するが、運用上
--- は深夜帯メンテで適用する想定。
+-- 本 CREATE INDEX は ACCESS EXCLUSIVE lock を取って書き込みを一時 block
+-- するが、golang-migrate v4 の postgres driver は migration を transaction
+-- 外で実行する (postgres.go:296 で直接 ExecContext) ので、large table 用
+-- には CREATE INDEX CONCURRENTLY を直接書ける (#754 で確認、本 migration
+-- は小規模 chat_message かつ既存 production 影響を最小化したいので通常
+-- 形を採用)。次回 large table への index 追加では CONCURRENTLY を採用する。
 CREATE INDEX IF NOT EXISTS "IDX_chat_message_fromUserId_toUserId"
     ON "chat_message" ("fromUserId", "toUserId");
