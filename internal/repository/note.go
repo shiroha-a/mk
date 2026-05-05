@@ -600,7 +600,7 @@ func (r *noteRepository) ListGlobalTimeline(limit int, sinceID, untilID string, 
 // 行数を返す。ループは呼び出し側 (CleanRemoteNotesProcessor) が sleep / ctx
 // cancellation 付きで回す。
 // ON DELETE CASCADE が reactions / replies 等に効く前提。
-// misskey-go の note テーブルには createdAt カラムが無い (aidx ID から時刻を
+// mk-go の note テーブルには createdAt カラムが無い (aidx ID から時刻を
 // 導出する設計) ため、ID 文字列の lexicographic 比較で時刻切り捨てを行う。
 func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (int64, error) {
 	if batchSize <= 0 {

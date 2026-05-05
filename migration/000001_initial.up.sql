@@ -1,4 +1,4 @@
--- Initial schema for Misskey Go
+-- Initial schema for mk-go
 -- Compatible with existing Misskey TypeScript database schema
 
 -- Enum types

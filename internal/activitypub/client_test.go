@@ -27,7 +27,7 @@ func TestClient_PostSigned(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(nil, "misskey-go-test")
+	c := NewClient(nil, "mk-go-test")
 	resp, err := c.PostSigned(srv.URL+"/inbox", []byte(`{"type":"Create"}`), key)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -79,11 +79,11 @@ func TestClient_GetSigned_WithUserAgent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(nil, "misskey-go-test/1.0")
+	c := NewClient(nil, "mk-go-test/1.0")
 	resp, err := c.GetSigned(srv.URL+"/", key, "")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, "misskey-go-test/1.0", seenUA)
+	assert.Equal(t, "mk-go-test/1.0", seenUA)
 }
 
 func TestClient_GetSigned_AcceptOverride(t *testing.T) {

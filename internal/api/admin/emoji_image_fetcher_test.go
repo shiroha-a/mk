@@ -68,14 +68,14 @@ func TestEmojiImageFetcher_FetchAndStore_Success(t *testing.T) {
 	const pixel = "\x89PNG\r\n\x1a\n" // PNG magic so AnalyseFile detects image/png
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Contains(t, r.Header.Get("Accept"), "image/")
-		assert.Equal(t, "Misskey-Go/test", r.Header.Get("User-Agent"))
+		assert.Equal(t, "mk-go/test", r.Header.Get("User-Agent"))
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte(pixel))
 	}))
 	t.Cleanup(srv.Close)
 
 	driveSvc, fileRepo := newDriveService(t)
-	f := NewEmojiImageFetcher(&http.Client{Timeout: 5 * time.Second, Transport: srv.Client().Transport}, driveSvc, "Misskey-Go/test")
+	f := NewEmojiImageFetcher(&http.Client{Timeout: 5 * time.Second, Transport: srv.Client().Transport}, driveSvc, "mk-go/test")
 
 	// nil user で「system 所有 drive file」として upload する (#670)。
 	// Misskey TS uploadFromUrl({user: null}) と等価。

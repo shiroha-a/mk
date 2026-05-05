@@ -1,5 +1,5 @@
 {
-  "name": "misskey-go",
+  "name": "mk-go",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
   "workspaceFolder": "/workspace",

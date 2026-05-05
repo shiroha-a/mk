@@ -1,5 +1,5 @@
 #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Misskey-Go configuration (UDS-only stack)
+# mk-go configuration (UDS-only stack)
 #
 # このファイルは `deploy/uds/config/default.yml.example` です。
 # `compose.uds.yaml` 系列スタック (HTTP / PostgreSQL / Redis すべて
@@ -7,7 +7,7 @@
 # default.ymlを作成してください:
 #   cp deploy/uds/config/default.yml.example deploy/uds/config/default.yml
 #
-# Misskey本家 .config/example.ymlをベースに、Go実装 (misskey-go)
+# Misskey本家 .config/example.ymlをベースに、Go実装 (mk-go)
 # 固有の項目とUDSスタック特有の設定を加えています。
 #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

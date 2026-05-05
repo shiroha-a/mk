@@ -29,12 +29,8 @@ func TestVersion2_1(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "2.1", resp["version"])
 	sw := resp["software"].(map[string]any)
-	assert.Equal(t, "misskey-go", sw["name"])
-	assert.Contains(t, sw["version"], "compatible: misskey 0.0.0")
-}
-
-func TestNodeinfoVersion(t *testing.T) {
-	assert.Equal(t, "0.0.1 (compatible: misskey 2026.3.2)", nodeinfoVersion("0.0.1", "2026.3.2"))
+	assert.Equal(t, "mk-go", sw["name"])
+	assert.Equal(t, config.MkGoVersion, sw["version"])
 }
 
 // admin で設定した Meta.Name / Description がnodeinfo.metadata に反映される

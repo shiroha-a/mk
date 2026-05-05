@@ -1,7 +1,7 @@
 -- Phase: Misskey DB スキーマとの完全互換化 (issue #21)
--- 本家 Misskey (TypeScript) と misskey-go の DB 差分を埋めるための一括 migration。
+-- 本家 Misskey (TypeScript) と mk-go の DB 差分を埋めるための一括 migration。
 -- 以下 5 つのサブ変更を 1 ファイルにまとめている:
---   1. poll_vote.createdAt の除去 (misskey-go 側の余剰カラム)
+--   1. poll_vote.createdAt の除去 (mk-go 側の余剰カラム)
 --   2. user_profile に 3 カラム追加 (twoFactorBackupSecret / clientData / room)
 --   3. meta に 58 カラム追加 (branding / captcha / sensitiveMedia / urlPreview /
 --      cacheTuning / deepL / stats / reactions / singleUserMode など)
@@ -12,14 +12,14 @@
 -- =============================================================================
 -- 1. poll_vote.createdAt の除去
 -- =============================================================================
--- 本家 Misskey の PollVote エンティティには createdAt カラムが無い。misskey-go
+-- 本家 Misskey の PollVote エンティティには createdAt カラムが無い。mk-go
 -- 側で書き込みのみ行っており読み取り参照はないため、安全に除去できる。
 ALTER TABLE "poll_vote" DROP COLUMN IF EXISTS "createdAt";
 
 -- =============================================================================
 -- 2. user_profile に 3 カラム追加
 -- =============================================================================
--- 本家 Misskey UserProfile に存在するが misskey-go 側で未追加だったフィールド。
+-- 本家 Misskey UserProfile に存在するが mk-go 側で未追加だったフィールド。
 -- 機能実装 (2FA backup code / UI client data / chat room metadata) は後続
 -- issue で行う。DB レベルでの互換性のみを確保する。
 ALTER TABLE "user_profile"
@@ -200,11 +200,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS "IDX_promo_read_userId_noteId" ON "promo_read"
 -- 5. TypeORM 互換 migrations テーブル
 -- =============================================================================
 -- 本家 Misskey (TypeORM) は起動時に "migrations" テーブルを参照して未実行の
--- migration を検出しようとする。misskey-go は golang-migrate の
+-- migration を検出しようとする。mk-go は golang-migrate の
 -- "schema_migrations" を使うので両者は共存できる。
 --
 -- 互換性を確保するため、本家で既知の全 migration エントリを seed することで、
--- misskey-go で動かした DB を本家 Misskey に差し替えたときに「全て適用済み」
+-- mk-go で動かした DB を本家 Misskey に差し替えたときに「全て適用済み」
 -- と認識させる。これにより DB migration 不要で両者を行き来できる。
 CREATE TABLE IF NOT EXISTS "migrations" (
     "id" SERIAL PRIMARY KEY,

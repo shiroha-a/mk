@@ -1,6 +1,6 @@
-# Misskey-TSからMisskey-Goへの移行ガイド
+# Misskey-TSからmk-goへの移行ガイド
 
-本ガイドでは、既存のMisskey-TSインスタンスのバックエンドをMisskey-Goに置き換え、同じデータベース・Redis・フロントエンド資産を共有させる手順を説明する。
+本ガイドでは、既存のMisskey-TSインスタンスのバックエンドをmk-goに置き換え、同じデータベース・Redis・フロントエンド資産を共有させる手順を説明する。
 
 ## 前提条件
 
@@ -12,8 +12,8 @@
 ## 1. クローンとビルド
 
 ```bash
-git clone --recursive https://github.com/shiroha-a/mk.git misskey-go
-cd misskey-go
+git clone --recursive https://github.com/shiroha-a/mk.git mk-go
+cd mk-go
 go build -o built/misskey ./cmd/misskey
 ```
 
@@ -21,7 +21,7 @@ go build -o built/misskey ./cmd/misskey
 
 ## 2. フロントエンド資産の準備
 
-Misskey-GoはMisskey-TSと同じフロントエンドを利用する。2つの方法がある。
+mk-goはMisskey-TSと同じフロントエンドを利用する。2つの方法がある。
 
 ### 方法A: submoduleのフロントエンドをビルド (推奨)
 
@@ -29,7 +29,7 @@ Misskey-GoはMisskey-TSと同じフロントエンドを利用する。2つの�
 make e2e-frontend-build
 ```
 
-Docker内でフロントエンドがビルドされ、成果物は `third_party/misskey/built/` 配下に配置される。Misskey-Goはデフォルトでこのパスを参照するため、環境変数の設定は不要。
+Docker内でフロントエンドがビルドされ、成果物は `third_party/misskey/built/` 配下に配置される。mk-goはデフォルトでこのパスを参照するため、環境変数の設定は不要。
 
 ### 方法B: 既存のMisskey-TSのビルド済み資産を使う
 
@@ -69,7 +69,7 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 ## 4. データベースマイグレーション
 
-Misskey-Goは既存のMisskey-TSテーブルには手を加えず、独自のテーブルを追加する形で共存する。既存データは保持される。
+mk-goは既存のMisskey-TSテーブルには手を加えず、独自のテーブルを追加する形で共存する。既存データは保持される。
 
 ```bash
 # ローカルビルドの場合
@@ -81,7 +81,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 これによりGo側で必要な追加テーブル (`app`, `auth_session`, `webhook`, `sw_subscription`, `chat_room`, `chat_message`, `bubble_game_record` 等) が作成される。
 
-> **補足:** Misskey-Goのマイグレーションは追加のみで、既存のMisskey-TSテーブルを変更しない。両バックエンドは同じデータベース上で共存できる。
+> **補足:** mk-goのマイグレーションは追加のみで、既存のMisskey-TSテーブルを変更しない。両バックエンドは同じデータベース上で共存できる。
 
 ## 5. Misskey-TSの停止
 
@@ -95,7 +95,7 @@ pm2 stop misskey
 docker compose stop web
 ```
 
-## 6. Misskey-Goの起動
+## 6. mk-goの起動
 
 ```bash
 ./built/misskey -config .config/default.yml
@@ -123,11 +123,11 @@ docker compose stop web
 docker compose up -d
 ```
 
-Misskey-GoがPostgreSQLおよびRedisと共に起動する。詳細は `docker-compose.yml` を参照。
+mk-goがPostgreSQLおよびRedisと共に起動する。詳細は `docker-compose.yml` を参照。
 
 ### Docker container の UID
 
-Misskey-Go のコンテナは Misskey-TS と同じ **UID/GID 991** で起動する。`./files` (drive ファイルストレージ) を host volume mount している場合、ホスト側ディレクトリは UID 991 が書き込めるパーミッションでなければならない。
+mk-go のコンテナは Misskey-TS と同じ **UID/GID 991** で起動する。`./files` (drive ファイルストレージ) を host volume mount している場合、ホスト側ディレクトリは UID 991 が書き込めるパーミッションでなければならない。
 
 - **TS から swap する場合**: 既に `./files` の中身が UID 991 で書かれているのでそのまま動く (drop-in 互換)
 - **mk-go-only から旧 root 構成 (#621 以前) で運用していた場合**: 一度だけ `sudo chown -R 991:991 ./files` で所有権を揃える必要がある
@@ -136,10 +136,10 @@ Misskey-Go のコンテナは Misskey-TS と同じ **UID/GID 991** で起動す�
 
 Misskey-TSに戻す場合の手順:
 
-1. Misskey-Goを停止する
+1. mk-goを停止する
 2. 従来通りMisskey-TSを起動する
 
-データベースは双方向に互換性があり、Misskey-Goが追加したテーブルはMisskey-TSからは無視される。
+データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
 ## 既知の制限
 

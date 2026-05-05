@@ -16,10 +16,10 @@ BUILD_DIR=./built
 # Go parameters
 GOFLAGS=-trimpath
 
-# バージョン情報: submodule の package.json があれば Misskey バージョンを自動取得
-MKGO_VERSION ?= 0.0.1
-MISSKEY_PKG_JSON = third_party/misskey/package.json
-MISSKEY_VERSION ?= $(shell [ -f $(MISSKEY_PKG_JSON) ] && grep -o '"version": *"[^"]*"' $(MISSKEY_PKG_JSON) | head -1 | grep -o '"[^"]*"$$' | tr -d '"' || echo "2026.3.2")
+# バージョン情報。MisskeyVersion は /api/meta の version フィールド
+# (Misskey TS 互換クライアント向け) で使われる。drop-in 互換のため固定値。
+MKGO_VERSION ?= 0.0.1-experimental
+MISSKEY_VERSION ?= 2026.3.2
 LDFLAGS=-s -w \
 	-X github.com/shiroha-a/mk/internal/config.MkGoVersion=$(MKGO_VERSION) \
 	-X github.com/shiroha-a/mk/internal/config.MisskeyVersion=$(MISSKEY_VERSION)
@@ -62,7 +62,7 @@ migrate-create:
 
 # Docker
 docker-build:
-	docker build -t misskey-go .
+	docker build -t mk-go .
 
 docker-up:
 	docker compose up -d

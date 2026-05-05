@@ -1,5 +1,5 @@
 #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Misskey-Go configuration (Docker)
+# mk-go configuration (Docker)
 #
 # このファイルは `.config/docker.yml.example` です。
 # Dockerfile が build 時に `.config/docker.yml.example` を image 内の

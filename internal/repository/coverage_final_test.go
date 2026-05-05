@@ -271,7 +271,7 @@ func TestUserRepository_ListRemoteInboxes_Branches(t *testing.T) {
 }
 
 // note.DeleteExpiredRemoteNotes のテスト: aidx ID cutoff でリモートノートを
-// 削除する挙動を確認する。misskey-go は note."createdAt" カラムを持たないため、
+// 削除する挙動を確認する。mk-go は note."createdAt" カラムを持たないため、
 // id 文字列の lexicographic 比較で時刻境界を判定する。
 func TestNoteRepository_DeleteExpiredRemoteNotes(t *testing.T) {
 	nr := NewNoteRepository(testDB)

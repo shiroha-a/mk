@@ -1,11 +1,11 @@
 #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Misskey-Go configuration
+# mk-go configuration
 #
 # このファイルは `.config/default.yml.example` です。
 # 初回セットアップ時に以下を実行して default.yml を作成してください:
 #   cp .config/default.yml.example .config/default.yml
 #
-# Misskey 本家 .config/example.yml をベースに、Go 実装 (misskey-go)
+# Misskey 本家 .config/example.yml をベースに、Go 実装 (mk-go)
 # 固有の項目を追記しています。
 #━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -45,7 +45,7 @@ url: https://example.tld/
 #   ┌───────────────────────┐
 #───┘ Port and TLS settings └───────────────────────────────────
 
-# The port that your Misskey-Go server should listen on.
+# The port that your mk-go server should listen on.
 port: 3000
 
 # UNIX domain socket support (mk-go specific).

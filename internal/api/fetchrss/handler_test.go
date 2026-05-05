@@ -63,7 +63,7 @@ const sampleAtom = `<?xml version="1.0" encoding="utf-8"?>
 
 // testUserAgent is the UA string used for handler-under-test wiring. Static
 // so individual tests can assert on it without threading the value around.
-const testUserAgent = "Misskey-Go/test (https://example.test)"
+const testUserAgent = "mk-go/test (https://example.test)"
 
 // startFeedServer launches an httptest server returning the supplied body and
 // returns a Handler whose HTTP client targets that server. We bypass SSRF
@@ -85,7 +85,7 @@ func newRequestCtx(method, target string) (echo.Context, *httptest.ResponseRecor
 func TestFetchRSS_BasicRSS2(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Contains(t, r.Header.Get("Accept"), "application/rss+xml")
-		// Misskey-Go/<ver> 相当の UA が付くことを guard する。UA 必須の RSS
+		// mk-go/<ver> 相当の UA が付くことを guard する。UA 必須の RSS
 		// 配信サーバ (Cloudflare 含む) で 403 にならない契約の regression 検知。
 		assert.Equal(t, testUserAgent, r.Header.Get("User-Agent"))
 		w.Header().Set("Content-Type", "application/rss+xml")

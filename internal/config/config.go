@@ -12,10 +12,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-// MkGoVersion is the misskey-go version. Override at build time via:
+// MkGoVersion is the mk-go version. Override at build time via:
 //
 //	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoVersion=1.0.0"
-var MkGoVersion = "0.0.1"
+var MkGoVersion = "0.0.1-experimental"
 
 // MisskeyVersion is the compatible Misskey version. Override at build time via:
 //
@@ -520,7 +520,7 @@ func resolve(src *Source) (*Config, error) {
 		NSFWDetectorURL:              strings.TrimRight(src.NSFWDetectorURL, "/"),
 		NSFWDetectorAuthHeader:       src.NSFWDetectorAuthHeader,
 		NSFWDetectorTimeout:          src.NSFWDetectorTimeout,
-		UserAgent:                    fmt.Sprintf("Misskey-Go/%s (%s)", MkGoVersion, src.URL),
+		UserAgent:                    fmt.Sprintf("mk-go/%s (%s)", MkGoVersion, src.URL),
 		PerChannelMaxNoteCacheCount:  perChannelMaxNoteCacheCount,
 		PerUserNotificationsMaxCount: perUserNotificationsMaxCount,
 		DeactivateAntennaThreshold:   deactivateAntennaThreshold,

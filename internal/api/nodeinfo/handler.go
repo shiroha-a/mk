@@ -48,11 +48,6 @@ func (h *Handler) SetClock(now func() time.Time) {
 	}
 }
 
-// nodeinfoVersion builds the version string for NodeInfo.
-func nodeinfoVersion(mkgoVersion, misskeyVersion string) string {
-	return mkgoVersion + " (compatible: misskey " + misskeyVersion + ")"
-}
-
 // Version2_1 handles GET /nodeinfo/2.1.
 func (h *Handler) Version2_1(c echo.Context) error {
 	nodeName := h.cfg.Host
@@ -130,8 +125,8 @@ func (h *Handler) Version2_1(c echo.Context) error {
 	resp := map[string]any{
 		"version": "2.1",
 		"software": map[string]any{
-			"name":       "misskey-go",
-			"version":    nodeinfoVersion(config.MkGoVersion, h.cfg.Version),
+			"name":       "mk-go",
+			"version":    config.MkGoVersion,
 			"repository": "https://github.com/shiroha-a/mk",
 		},
 		"protocols": []string{"activitypub"},
