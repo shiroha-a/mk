@@ -240,10 +240,13 @@ proxyBypassHosts:
 #mediaProxy: https://example.com/proxy
 #mediaProxySecret: change-me
 
-# Video thumbnail generator. The bundled UDS stack runs nekonoverse/video-thumb
-# listening on /run/video-thumb/sock; the POST multipart wire is the default
-# (see videoThumbnailGeneratorMode below).
-videoThumbnailGenerator: unix:///run/video-thumb/sock
+# Video thumbnail generator. compose.uds.yaml.example に nekonoverse/
+# video-thumb service を同梱しているが default では disabled。動画サムネを
+# 生成したい operator は compose.uds.yaml の `video-thumb` block / socket
+# mount / `video_thumb_sock` volume を全て有効化し、以下も有効化する。
+# 設定が無ければ mk-go は video request に dummy PNG を返すだけで外部
+# generator を呼ばない。
+#videoThumbnailGenerator: unix:///run/video-thumb/sock
 # "post" (default, mk-go style — forwards multipart bytes) or "get"
 # (Misskey TS-compat — sends the source URL via query string for the
 # generator to fetch).

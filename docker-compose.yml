@@ -59,17 +59,19 @@ services:
   # を返してもらう。app コンテナとは Docker network 内で通信し、公開
   # ポートは持たない (origin 側は mk-go の /proxy 経由でしか到達しない)。
   #
-  # mk-go 側で `videoThumbnailGenerator: http://video-thumb:8005` を設定
-  # することで wire される。UDS deployment では compose.uds.yaml.example
-  # の video-thumb service が socket mount で接続する。
+  # default では disabled。動画サムネを生成したい operator は以下を
+  # コメントアウト解除し、加えて .config/docker.yml の
+  # `videoThumbnailGenerator: http://video-thumb:8005` も有効化する。
+  # 設定が無ければ mk-go は video request に dummy PNG を返すだけで
+  # 外部 generator を呼ばない。
   #
   # 互換 image: ghcr.io/nekonoverse/video-thumb (POST /thumbnail multipart)。
   # Misskey TS 互換の GET 経路を使いたい場合は
   # `videoThumbnailGeneratorMode: get` を設定し、対応 image
   # (`GET /thumbnail.webp?thumbnail=1&url=<URL>`) に差し替える。
-  video-thumb:
-    image: ghcr.io/nekonoverse/video-thumb:unstable
-    restart: unless-stopped
+  #video-thumb:
+  #  image: ghcr.io/nekonoverse/video-thumb:unstable
+  #  restart: unless-stopped
 
 volumes:
   db_data:

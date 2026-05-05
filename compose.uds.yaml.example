@@ -59,23 +59,28 @@ services:
     restart: unless-stopped
 
   # Video thumbnail generator (#637 M2). UDS-only stack 全体に揃えて TCP は
-  # 開かず named volume 経由の socket だけで mk-go と通信する。mk-go 側は
-  # `videoThumbnailGenerator: unix:///run/video-thumb/sock` を設定すれば
-  # 自動で UDS dialer 経由で接続する。
+  # 開かず named volume 経由の socket だけで mk-go と通信する。
+  #
+  # default では disabled。動画サムネを生成したい operator は本 service と
+  # 下の `mkgo` service の `video_thumb_sock` volume mount、および
+  # volumes セクションの `video_thumb_sock` 定義をコメントアウト解除し、
+  # config に `videoThumbnailGenerator: unix:///run/video-thumb/sock` を
+  # 設定する。設定が無ければ mk-go は video request に dummy PNG を返す
+  # だけで外部 generator を呼ばない。
   #
   # nekonoverse/video-thumb は `UDS_PATH` env で UDS listen に切替えられる
   # 仕様。default の wire mode "post" (multipart POST) と互換。Misskey TS
   # 互換の GET 経路に切替えたい場合は mk-go 側で
   # `videoThumbnailGeneratorMode: get` を設定し、対応 image に差し替える。
-  video-thumb:
-    image: ghcr.io/nekonoverse/video-thumb:unstable
-    environment:
-      UDS_PATH: /run/video-thumb/sock
-    volumes:
-      - video_thumb_sock:/run/video-thumb
-    networks:
-      - mkgo-uds
-    restart: unless-stopped
+  #video-thumb:
+  #  image: ghcr.io/nekonoverse/video-thumb:unstable
+  #  environment:
+  #    UDS_PATH: /run/video-thumb/sock
+  #  volumes:
+  #    - video_thumb_sock:/run/video-thumb
+  #  networks:
+  #    - mkgo-uds
+  #  restart: unless-stopped
 
   mkgo:
     build:
@@ -107,7 +112,9 @@ services:
       - mkgo_sock:/run/mkgo
       # video thumbnail generator socket (#637 M2)。read-only で良い:
       # mk-go は connect するだけで、socket 自体は video-thumb 側が作る。
-      - video_thumb_sock:/run/video-thumb
+      # default 無効化に伴いコメントアウト。video-thumb を使うときは
+      # 本行と上の video-thumb service block の両方を有効化する。
+      #- video_thumb_sock:/run/video-thumb
     healthcheck:
       # UDS 経由なので curl --unix-socket を使う (wget は UDS 非対応)。
       # /healthz は router.go で公開している health check エンドポイント。
@@ -155,4 +162,5 @@ volumes:
   pg_sock:
   valkey_sock:
   mkgo_sock:
-  video_thumb_sock:
+  # video-thumb service と組で有効化する。
+  #video_thumb_sock:

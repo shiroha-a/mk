@@ -180,11 +180,14 @@ proxyBypassHosts:
 
 #mediaProxy: https://example.com/proxy
 
-# Video thumbnail generator. The bundled docker-compose ships a `video-thumb`
-# service (nekonoverse/video-thumb, listens on 8005). Default wire mode
-# "post" forwards multipart bytes — see default.yml.example for the "get"
-# Misskey TS-compat alternative.
-videoThumbnailGenerator: http://video-thumb:8005
+# Video thumbnail generator. docker-compose.yml に `video-thumb` service
+# (nekonoverse/video-thumb) を同梱しているが default では disabled。
+# 動画サムネを生成したい operator は docker-compose.yml の `video-thumb`
+# block と以下の行を両方コメントアウト解除する。
+# 設定が無ければ mk-go は video request に dummy PNG を返すだけで外部
+# generator を呼ばない。default wire mode "post" は multipart bytes 転送、
+# Misskey TS 互換の "get" 経路は default.yml.example を参照。
+#videoThumbnailGenerator: http://video-thumb:8005
 #videoThumbnailGeneratorMode: post
 
 #allowedPrivateNetworks:
