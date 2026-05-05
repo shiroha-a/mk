@@ -4,6 +4,7 @@
 package hashtag
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -95,6 +96,36 @@ func (s *Service) WaitForPendingWrites() {
 		return
 	}
 	s.pending.Wait()
+}
+
+// Shutdown は in-flight worker goroutine が drain するか ctx 期限切れまで
+// 待つ。production の SIGTERM / graceful shutdown 経路で呼ばれる (#727)。
+// fire-and-forget worker (#719) が DB write 中に process が落ちると
+// hashtag table の集計がスキップされるが、idempotent な RecordMention
+// なので次回同タグ note 受信時に再カウントされる。それでも shutdown
+// 時の error log を抑え観測ノイズを下げるためにここで drain する。
+//
+// ctx==nil なら無期限 wait (test 用、production は ShutdownContext を
+// 必ず timeout 付きで渡す前提)。
+func (s *Service) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		s.pending.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // noteCreatedAt は note ID から作成時刻を再計算するためのヘルパ。idGen の

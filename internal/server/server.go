@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
+	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -40,6 +41,10 @@ type Server struct {
 	queueScheduler *queue.Scheduler
 	queueInspector *queue.Inspector
 	chartMgmt      *chart.ManagementService
+	// hashtagService は graceful shutdown で in-flight worker を drain する
+	// ために参照する (#727)。fire-and-forget な OnNoteCreated worker (#719) が
+	// SIGTERM 時に途中 kill されるのを避ける。
+	hashtagService *corehashtag.Service
 
 	// shutdownHooks はShutdown()時にqueue/HTTP echoより先に呼ばれる
 	// ティッカー系ジョブの停止用。publisher goroutineをcleanに止める。
@@ -280,6 +285,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// 登録順にshutdown hookを走らせる。publisher goroutineをclean停止。
 	for _, hook := range s.shutdownHooks {
 		hook()
+	}
+	// hashtag service の in-flight worker (#719 fire-and-forget) を ctx 期限
+	// 内で drain する (#727)。typical case では即返り、長時間動く worker は
+	// ctx timeout で諦める (idempotent な RecordMention なので次回再カウント)。
+	if s.hashtagService != nil {
+		if err := s.hashtagService.Shutdown(ctx); err != nil {
+			slog.Warn("hashtag service shutdown timed out", "err", err)
+		}
 	}
 	if s.chartMgmt != nil {
 		s.chartMgmt.Stop(ctx)

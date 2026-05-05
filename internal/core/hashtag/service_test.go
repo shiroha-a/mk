@@ -1,6 +1,7 @@
 package hashtag
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -203,4 +204,68 @@ func TestService_WaitForPendingWrites_NilReceiver(t *testing.T) {
 	// 呼ばないが、test infra の defensive check。
 	var s *Service
 	s.WaitForPendingWrites()
+}
+
+// pending worker が既に drain 済み (or 0 件) なら Shutdown は ctx 関係なく
+// 即 return する (#727)。
+func TestService_Shutdown_NoPendingReturnsImmediately(t *testing.T) {
+	s, _ := newTestService(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown should succeed when nothing is pending: %v", err)
+	}
+}
+
+// in-flight worker があるとき、ctx 期限切れ前に worker が drain すれば
+// nil error を返す。
+func TestService_Shutdown_DrainsPending(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := &slowRepo{block: make(chan struct{})}
+	s := &Service{repo: repo, idGen: idGen}
+	user := &model.User{ID: "u1"}
+	note := &model.Note{Tags: pq.StringArray{"#a"}}
+	s.OnNoteCreated(note, user)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(repo.block) // worker を unblock
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown should drain in time: %v", err)
+	}
+}
+
+// ctx が期限切れになると Shutdown は ctx.Err() を返す (worker は drain
+// 待たず諦める)。production の SIGTERM 時に shutdown timeout を超えて
+// 待ち続けないことの guard。
+func TestService_Shutdown_RespectsContextDeadline(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := &slowRepo{block: make(chan struct{})}
+	s := &Service{repo: repo, idGen: idGen}
+	user := &model.User{ID: "u1"}
+	note := &model.Note{Tags: pq.StringArray{"#a"}}
+	s.OnNoteCreated(note, user)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := s.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("Shutdown should return ctx.Err() when worker is still blocked")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown should return DeadlineExceeded, got %v", err)
+	}
+	close(repo.block) // cleanup: worker を unblock して goroutine leak 防止
+}
+
+// nil *Service の Shutdown は no-op。
+func TestService_Shutdown_NilReceiver(t *testing.T) {
+	var s *Service
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("nil Shutdown should be no-op: %v", err)
+	}
 }

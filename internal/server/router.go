@@ -669,6 +669,8 @@ func (s *Server) setupRoutes() {
 	hashtagService := corehashtag.NewService(hashtagRepo, idGen)
 	noteCreateService.SetHashtagHook(hashtagService)
 	federationResolver.SetHashtagHook(hashtagService)
+	// graceful shutdown 経路で in-flight worker を drain する参照を保持 (#727)。
+	s.hashtagService = hashtagService
 
 	// Chart cron processor: tickCharts (毎時) / resyncCharts (毎日) /
 	// cleanCharts (毎日) を queue.Scheduler 経由で受け取る。Scheduler
