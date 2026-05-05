@@ -1564,10 +1564,15 @@ func (s *Server) setupRoutes() {
 	streamPubSub := event.NewPubSubService(s.redis.Pubsub, "stream:")
 	streamBus := stream.NewEventPubSubBus(streamPubSub)
 
-	// pollVoted の noteStream publish 用に core/poll.Service へ event publisher
-	// を後付け配線する (#690)。Service 自体は streamPubSub 生成より前に作る
-	// ため、ここで SetEventPublisher する。
-	pollService.SetEventPublisher(stream.NewNoteEventPublisher(streamPubSub))
+	// pollVoted / reacted / unreacted / deleted を noteStream:<id> に publish
+	// する共通 publisher。subNote / sn メッセージで購読しているクライアントへ
+	// リアクション・削除イベントが流れる (#690 / #700)。pollService /
+	// reactionService / noteDeleteService は streamPubSub 生成より前に作るため、
+	// ここで後付け配線する。
+	noteEventPub := stream.NewNoteEventPublisher(streamPubSub)
+	pollService.SetEventPublisher(noteEventPub)
+	reactionService.SetNoteStreamHook(&reactionNoteStreamAdapter{pub: noteEventPub})
+	noteDeleteService.SetNoteStreamHook(&noteDeleteStreamAdapter{pub: noteEventPub})
 
 	// 2. Channel registry: Misskey 互換のチャンネル名で各 factory を登録する
 	streamRegistry := stream.NewRegistry()
@@ -2433,6 +2438,45 @@ type notifReaderAdapter struct {
 
 func (a *notifReaderAdapter) ReadAll(userID string) error {
 	return a.svc.MarkAllAsRead(context.Background(), userID)
+}
+
+// reactionNoteStreamAdapter bridges core/reaction.NoteStreamHook to the
+// shared stream.NoteEventPublisher. Misskey TS upstream の wire format に
+// 揃え、`{type: "reacted"|"unreacted", body: {reaction, emoji?, userId}}`
+// を `noteStream:<noteID>` に publish する (#700)。
+type reactionNoteStreamAdapter struct {
+	pub *stream.NoteEventPublisher
+}
+
+func (a *reactionNoteStreamAdapter) OnReacted(noteID, userID, reaction string, emoji *corereaction.NoteStreamEmoji) {
+	body := map[string]any{
+		"reaction": reaction,
+		"userId":   userID,
+		"emoji":    nil,
+	}
+	if emoji != nil {
+		body["emoji"] = map[string]any{"name": emoji.Name, "url": emoji.URL}
+	}
+	a.pub.PublishToNoteStream(noteID, "reacted", body)
+}
+
+func (a *reactionNoteStreamAdapter) OnUnreacted(noteID, userID, reaction string) {
+	a.pub.PublishToNoteStream(noteID, "unreacted", map[string]any{
+		"reaction": reaction,
+		"userId":   userID,
+	})
+}
+
+// noteDeleteStreamAdapter bridges core/note.DeleteNoteStreamHook to the
+// shared stream.NoteEventPublisher (#700)。
+type noteDeleteStreamAdapter struct {
+	pub *stream.NoteEventPublisher
+}
+
+func (a *noteDeleteStreamAdapter) OnNoteDeleted(noteID string, deletedAt time.Time) {
+	a.pub.PublishToNoteStream(noteID, "deleted", map[string]any{
+		"deletedAt": deletedAt.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // instanceActorSigner is the SignerProvider used by APFetcher to sign

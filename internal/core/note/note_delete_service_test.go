@@ -3,6 +3,7 @@ package note_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/model"
@@ -187,4 +188,49 @@ func TestDeleteService_TimelineHookInvoked(t *testing.T) {
 	assert.Equal(t, "n1", hook.note.ID)
 	require.NotNil(t, hook.author)
 	assert.Equal(t, "user1", hook.author.ID)
+}
+
+// recordingDeleteNoteStreamHook captures noteStream publish hook calls (#700)。
+type recordingDeleteNoteStreamHook struct {
+	called    bool
+	noteID    string
+	deletedAt time.Time
+}
+
+func (h *recordingDeleteNoteStreamHook) OnNoteDeleted(noteID string, deletedAt time.Time) {
+	h.called = true
+	h.noteID = noteID
+	h.deletedAt = deletedAt
+}
+
+// 削除に成功すると `noteStream:<id>` 用の hook が `deleted` payload を
+// 1 度だけ受け取ることを確認する。
+func TestDeleteService_NoteStreamHookInvoked(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "user1"}
+	svc := note.NewDeleteService(noteRepo)
+	hook := &recordingDeleteNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	before := time.Now()
+	require.NoError(t, svc.Delete(&model.User{ID: "user1"}, "n1"))
+	after := time.Now()
+	assert.True(t, hook.called)
+	assert.Equal(t, "n1", hook.noteID)
+	// deletedAt は呼び出し前後の time.Now() の間に収まる。
+	assert.False(t, hook.deletedAt.Before(before))
+	assert.False(t, hook.deletedAt.After(after))
+}
+
+// 削除が失敗 (権限なし) した場合 noteStream hook は呼ばれない。
+func TestDeleteService_NoteStreamHookNotFiredOnFailure(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "owner"}
+	svc := note.NewDeleteService(noteRepo)
+	hook := &recordingDeleteNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	err := svc.Delete(&model.User{ID: "intruder"}, "n1")
+	require.Error(t, err)
+	assert.False(t, hook.called)
 }

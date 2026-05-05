@@ -511,3 +511,160 @@ func TestService_ChartHook_OnCreate(t *testing.T) {
 	require.Len(t, hook.created, 1)
 	assert.Equal(t, [2]string{"viewer", "n1"}, hook.created[0])
 }
+
+// recordingNoteStreamHook captures noteStream publish hook calls (#700)。
+type recordingNoteStreamHook struct {
+	reacted   []reactedCall
+	unreacted []unreactedCall
+}
+
+type reactedCall struct {
+	noteID, userID, reaction string
+	emoji                    *reaction.NoteStreamEmoji
+}
+
+type unreactedCall struct {
+	noteID, userID, reaction string
+}
+
+func (h *recordingNoteStreamHook) OnReacted(noteID, userID, rx string, emoji *reaction.NoteStreamEmoji) {
+	h.reacted = append(h.reacted, reactedCall{noteID, userID, rx, emoji})
+}
+
+func (h *recordingNoteStreamHook) OnUnreacted(noteID, userID, rx string) {
+	h.unreacted = append(h.unreacted, unreactedCall{noteID, userID, rx})
+}
+
+// 通常 (Unicode) リアクション付与で `reacted` が emoji=nil で publish される。
+func TestService_NoteStreamHook_OnCreate_Unicode(t *testing.T) {
+	svc, repo, _, _, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", "👍")
+	require.NoError(t, err)
+	require.Len(t, hook.reacted, 1)
+	assert.Equal(t, "n1", hook.reacted[0].noteID)
+	assert.Equal(t, "viewer", hook.reacted[0].userID)
+	assert.Equal(t, "👍", hook.reacted[0].reaction)
+	assert.Nil(t, hook.reacted[0].emoji)
+	assert.Empty(t, hook.unreacted)
+}
+
+// ローカルカスタム絵文字なら emoji 名 `name@.` と publicUrl が wire 化される。
+func TestService_NoteStreamHook_OnCreate_LocalCustomEmoji(t *testing.T) {
+	svc, repo, _, emojiRepo, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	emojiRepo.Emojis["smile@"] = &model.Emoji{
+		Name:        "smile",
+		PublicURL:   "https://example.test/emoji/smile.webp",
+		OriginalURL: "https://example.test/emoji/smile-orig.webp",
+	}
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":smile:")
+	require.NoError(t, err)
+	require.Len(t, hook.reacted, 1)
+	assert.Equal(t, ":smile@.:", hook.reacted[0].reaction)
+	require.NotNil(t, hook.reacted[0].emoji)
+	assert.Equal(t, "smile@.", hook.reacted[0].emoji.Name)
+	assert.Equal(t, "https://example.test/emoji/smile.webp", hook.reacted[0].emoji.URL)
+}
+
+// publicUrl 空なら originalUrl にフォールバックする (TS upstream 互換)。
+func TestService_NoteStreamHook_OnCreate_PublicURLFallbackToOriginal(t *testing.T) {
+	svc, repo, _, emojiRepo, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	emojiRepo.Emojis["smile@"] = &model.Emoji{
+		Name:        "smile",
+		PublicURL:   "",
+		OriginalURL: "https://example.test/emoji/smile-orig.webp",
+	}
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":smile:")
+	require.NoError(t, err)
+	require.Len(t, hook.reacted, 1)
+	require.NotNil(t, hook.reacted[0].emoji)
+	assert.Equal(t, "https://example.test/emoji/smile-orig.webp", hook.reacted[0].emoji.URL)
+}
+
+// リモートカスタム絵文字は `name@host` で wire 化される。
+func TestService_NoteStreamHook_OnCreate_RemoteCustomEmoji(t *testing.T) {
+	svc, repo, _, emojiRepo, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	host := "remote.example"
+	emojiRepo.Emojis["smile@remote.example"] = &model.Emoji{
+		Name:      "smile",
+		Host:      &host,
+		PublicURL: "https://remote.example/emoji/smile.webp",
+	}
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":smile@remote.example:")
+	require.NoError(t, err)
+	require.Len(t, hook.reacted, 1)
+	assert.Equal(t, ":smile@remote.example:", hook.reacted[0].reaction)
+	require.NotNil(t, hook.reacted[0].emoji)
+	assert.Equal(t, "smile@remote.example", hook.reacted[0].emoji.Name)
+}
+
+// Delete 経路で `unreacted` が `:name@.:` 形式で publish される。
+func TestService_NoteStreamHook_OnDelete(t *testing.T) {
+	svc, repo, _, emojiRepo, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	emojiRepo.Emojis["smile@"] = &model.Emoji{Name: "smile"}
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":smile:")
+	require.NoError(t, err)
+	require.NoError(t, svc.Delete(&model.User{ID: "viewer"}, "n1"))
+	require.Len(t, hook.unreacted, 1)
+	assert.Equal(t, "n1", hook.unreacted[0].noteID)
+	assert.Equal(t, "viewer", hook.unreacted[0].userID)
+	assert.Equal(t, ":smile@.:", hook.unreacted[0].reaction)
+}
+
+// 同じ user が別 reaction に置き換えた場合は upstream 互換で reacted のみ
+// 1 度だけ発火、unreacted は走らない。
+func TestService_NoteStreamHook_OnReplace_NoUnreacted(t *testing.T) {
+	svc, repo, _, _, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", "👍")
+	require.NoError(t, err)
+	_, err = svc.Create(&model.User{ID: "viewer"}, "n1", "🎉")
+	require.NoError(t, err)
+	require.Len(t, hook.reacted, 2)
+	assert.Equal(t, "👍", hook.reacted[0].reaction)
+	assert.Equal(t, "🎉", hook.reacted[1].reaction)
+	assert.Empty(t, hook.unreacted, "置き換え経路では unreacted は呼ばない (upstream 挙動)")
+}
+
+// 古い `:name:` 形式 (TS-era DB レコード) で保存された reaction を Delete
+// した場合も canonical `:name@.:` で wire 化される。
+func TestService_NoteStreamHook_OnDelete_LegacyShortForm(t *testing.T) {
+	svc, noteRepo, reactRepo, _, _ := newService(t)
+	seedNote(noteRepo, "n1", "author", model.NoteVisibilityPublic)
+	// Delete 経路は reactRepo.FindByPair で legacy `:smile:` 形式の record を
+	// 拾う想定。canonical 化は decodeReactionForStream が担う。
+	reactRepo.Reactions["legacy"] = &model.NoteReaction{
+		ID:       "legacy",
+		UserID:   "viewer",
+		NoteID:   "n1",
+		Reaction: ":smile:",
+	}
+	hook := &recordingNoteStreamHook{}
+	svc.SetNoteStreamHook(hook)
+
+	require.NoError(t, svc.Delete(&model.User{ID: "viewer"}, "n1"))
+	require.Len(t, hook.unreacted, 1)
+	assert.Equal(t, ":smile@.:", hook.unreacted[0].reaction)
+}

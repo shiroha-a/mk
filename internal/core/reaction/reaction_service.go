@@ -85,6 +85,24 @@ type WebhookHook interface {
 	OnReactionCreated(note *model.Note, reactor *model.User, reaction string)
 }
 
+// NoteStreamEmoji is the custom-emoji descriptor included in the
+// `reacted` payload published to `noteStream:<noteID>`. Name は TS upstream の
+// wire format に合わせて `<short>@<host>` または `<short>@.` (local) 形式。
+type NoteStreamEmoji struct {
+	Name string
+	URL  string
+}
+
+// NoteStreamHook is invoked after a reaction is created or removed so the
+// stream layer can publish `reacted` / `unreacted` events to the per-note
+// `noteStream:<noteID>` topic. This drives real-time WebSocket updates for
+// clients that have called `subNote` / `sn` (#700)。実装は server 配線層で
+// stream.NoteEventPublisher を注入する adapter として与える。
+type NoteStreamHook interface {
+	OnReacted(noteID, userID, reaction string, emoji *NoteStreamEmoji)
+	OnUnreacted(noteID, userID, reaction string)
+}
+
 // Service manages note reactions.
 type Service struct {
 	noteRepo         repository.NoteRepository
@@ -97,6 +115,7 @@ type Service struct {
 	federationHook   FederationHook
 	chartHook        ChartHook
 	webhookHook      WebhookHook
+	noteStreamHook   NoteStreamHook
 	countWriter      ReactionCountWriter
 }
 
@@ -154,6 +173,13 @@ func (s *Service) SetChartHook(h ChartHook) {
 // created so that user webhooks subscribed to the reaction event can fire.
 func (s *Service) SetWebhookHook(h WebhookHook) {
 	s.webhookHook = h
+}
+
+// SetNoteStreamHook attaches a NoteStreamHook invoked after a reaction is
+// created or removed so the stream layer can publish reacted/unreacted
+// events to the per-note pubsub topic (#700)。
+func (s *Service) SetNoteStreamHook(h NoteStreamHook) {
+	s.noteStreamHook = h
 }
 
 // Create attaches a reaction by user to the target note.
@@ -236,6 +262,11 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 	if s.webhookHook != nil {
 		s.webhookHook.OnReactionCreated(target, user, reaction)
 	}
+	// noteStream に reacted を publish して subNote 購読中の WebSocket
+	// クライアントへ即時反映する (#700)。
+	if s.noteStreamHook != nil {
+		s.noteStreamHook.OnReacted(target.ID, user.ID, decodeReactionForStream(reaction), s.resolveStreamEmoji(reaction))
+	}
 
 	return reaction, nil
 }
@@ -259,6 +290,11 @@ func (s *Service) Delete(user *model.User, noteID string) error {
 	_ = s.countWriter.Increment(target.ID, existing.Reaction, -1)
 	if s.federationHook != nil {
 		s.federationHook.OnReactionRemoved(user, target, existing.Reaction)
+	}
+	// noteStream に unreacted を publish して subNote 購読中の WebSocket
+	// クライアントへ即時反映する (#700)。
+	if s.noteStreamHook != nil {
+		s.noteStreamHook.OnUnreacted(target.ID, user.ID, decodeReactionForStream(existing.Reaction))
 	}
 	return nil
 }
@@ -347,6 +383,63 @@ func reactionVariants(normalized string) []string {
 		return []string{normalized, ":" + m[1] + ":"}
 	}
 	return []string{normalized}
+}
+
+// decodeReactionForStream returns the canonical wire form of a reaction
+// string for noteStream payload (`:name@host:` / `:name@.:` for custom emoji,
+// raw string for unicode/legacy). 上流 ReactionService.ts の decodeReaction と
+// 同形式で、ホスト省略時 `.` を補う。normalizeReaction と違い emoji 存在検証
+// やフォールバックは行わない (DB に既に保存された値をそのまま wire 化する用途)。
+func decodeReactionForStream(raw string) string {
+	m := customEmojiPattern.FindStringSubmatch(raw)
+	if m == nil {
+		return raw
+	}
+	name := m[1]
+	host := "."
+	if len(m) >= 3 && m[2] != "" && m[2] != "." {
+		host = m[2]
+	}
+	return ":" + name + "@" + host + ":"
+}
+
+// resolveStreamEmoji returns the NoteStreamEmoji descriptor for a custom
+// reaction, looking up the emoji in the repository. Returns nil for
+// unicode / legacy reactions or when the emoji is unknown. URL は
+// publicUrl 優先で originalUrl に fallback する (上流互換)。
+func (s *Service) resolveStreamEmoji(reaction string) *NoteStreamEmoji {
+	m := customEmojiPattern.FindStringSubmatch(reaction)
+	if m == nil {
+		return nil
+	}
+	name := m[1]
+	host := ""
+	if len(m) >= 3 {
+		host = m[2]
+	}
+	if host == "." {
+		host = ""
+	}
+	var hostPtr *string
+	if host != "" {
+		hostPtr = &host
+	}
+	emoji, err := s.emojiRepo.FindByNameAndHost(name, hostPtr)
+	if err != nil || emoji == nil {
+		return nil
+	}
+	url := emoji.PublicURL
+	if url == "" {
+		url = emoji.OriginalURL
+	}
+	suffix := host
+	if suffix == "" {
+		suffix = "."
+	}
+	return &NoteStreamEmoji{
+		Name: name + "@" + suffix,
+		URL:  url,
+	}
 }
 
 // isPureRenote reports whether the given note is a pure renote (no text/cw/files/poll).
