@@ -258,6 +258,30 @@ func (s *Service) Search(query string, limit, offset int, origin string) ([]*mod
 	return s.userRepo.SearchByUsername(strings.ToLower(q), limit, offset, origin)
 }
 
+// SearchByUsernameAndHost narrows username prefix matches to a specific host
+// (or local users when host is nil/empty). upstream Misskey TS の
+// users/search-by-username-and-host endpoint と同じ semantics (#766)。
+//   - host=nil or empty → host IS NULL (local users)
+//   - host=*string      → 当該 host のみ (case-insensitive)
+func (s *Service) SearchByUsernameAndHost(username string, host *string, limit int) ([]*model.User, error) {
+	q := strings.TrimSpace(strings.TrimPrefix(username, "@"))
+	if q == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	// upstream は host="" / null を local 扱いにするので合わせる。
+	var hostNorm *string
+	if host != nil {
+		h := strings.ToLower(strings.TrimSpace(*host))
+		if h != "" {
+			hostNorm = &h
+		}
+	}
+	return s.userRepo.SearchByUsernameAndHost(strings.ToLower(q), hostNorm, limit)
+}
+
 // UpdateInput represents the editable fields of a user profile.
 // Each pointer is interpreted as "leave unchanged when nil".
 type UpdateInput struct {

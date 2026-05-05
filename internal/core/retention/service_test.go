@@ -55,6 +55,9 @@ func (s *stubUserRepo) IncrementFollowersCount(string, int) error               
 func (s *stubUserRepo) SearchByUsername(string, int, int, string) ([]*model.User, error) {
 	return nil, nil
 }
+func (s *stubUserRepo) SearchByUsernameAndHost(string, *string, int) ([]*model.User, error) {
+	return nil, nil
+}
 func (s *stubUserRepo) UpdateUser(string, map[string]any) error               { return nil }
 func (s *stubUserRepo) UpdateProfile(string, map[string]any) error            { return nil }
 func (s *stubUserRepo) CreateProfile(*model.UserProfile) error                { return nil }

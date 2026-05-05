@@ -115,10 +115,9 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
-	// search-by-username-and-host は host を自前 filter する想定の endpoint
-	// だが、現状 host filter していない (#763 以前からの状態)。本 PR では
-	// origin filter を導入するが、このパスは "" (combined) で従来挙動を維持。
-	users, err := h.userService.Search(req.Username, req.Limit, 0, "")
+	// host=nil → local user、host=*string → 当該 host のみで絞り込む
+	// (#766 fix、upstream Misskey TS の同 endpoint と同じ semantics)。
+	users, err := h.userService.SearchByUsernameAndHost(req.Username, req.Host, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

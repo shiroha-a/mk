@@ -49,6 +49,11 @@ type UserRepository interface {
 	// SearchOriginLocal / SearchOriginRemote / SearchOriginCombined を使う。
 	// 空文字列 / 未知値は SearchOriginCombined と同等扱い。
 	SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error)
+	// SearchByUsernameAndHost は username prefix と host を SQL で絞り込む
+	// (#766)。host=nil は local (host IS NULL)、host=*string は当該 host
+	// (case-insensitive) のみ。upstream Misskey TS の同名 endpoint と同じ
+	// semantics。caller は username / host を pre-lowercase して渡すこと。
+	SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error)
 	UpdateUser(userID string, fields map[string]any) error
 	UpdateProfile(userID string, fields map[string]any) error
 	CreateProfile(profile *model.UserProfile) error
@@ -226,6 +231,27 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 		Order("\"followersCount\" DESC, id ASC").
 		Limit(limit).
 		Offset(offset).
+		Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// SearchByUsernameAndHost narrows username prefix matches to a specific host
+// (or local users when host is nil). #766 fix: SearchByUsername の origin
+// 軸では「特定 host への絞り込み」ができないので分離した sibling method。
+// host comparison は lower(host) = lower(?) で case-insensitive。
+func (r *userRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
+	var users []*model.User
+	q := r.db.Where("\"usernameLower\" LIKE ?", query+"%")
+	if host != nil {
+		q = q.Where("lower(\"host\") = lower(?)", *host)
+	} else {
+		q = q.Where("\"host\" IS NULL")
+	}
+	if err := q.
+		Order("\"followersCount\" DESC, id ASC").
+		Limit(limit).
 		Find(&users).Error; err != nil {
 		return nil, err
 	}

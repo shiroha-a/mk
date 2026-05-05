@@ -195,6 +195,34 @@ func (m *MockUserRepository) SearchByUsername(query string, limit, offset int, o
 	return matches[offset:end], nil
 }
 
+// SearchByUsernameAndHost narrows the prefix match to a specific host (or
+// local users when host is nil). #766 fix と同じ contract で、host
+// comparison は case-insensitive。
+func (m *MockUserRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
+	var matches []*model.User
+	for _, u := range m.Users {
+		if !(len(u.UsernameLower) >= len(query) && u.UsernameLower[:len(query)] == query) {
+			continue
+		}
+		if host == nil {
+			if u.Host == nil {
+				matches = append(matches, u)
+			}
+			continue
+		}
+		if u.Host == nil {
+			continue
+		}
+		if strings.EqualFold(*u.Host, *host) {
+			matches = append(matches, u)
+		}
+	}
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches, nil
+}
+
 func (m *MockUserRepository) UpdateUser(userID string, fields map[string]any) error {
 	u, ok := m.Users[userID]
 	if !ok {

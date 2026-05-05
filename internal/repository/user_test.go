@@ -396,6 +396,59 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 }
 
+// host filter (#766): host=nil は local (host IS NULL) のみ、host=*string
+// は当該 host のみ返す。host comparison は case-insensitive。
+// IDX_user_usernameLower_local_unique 制約があるので local user は 1 つに
+// 留め、remote 同士は host が違えば同 username でも OK な前提で組む。
+func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	local := insertTestUser(t, "u_sh_local", "hosttest")
+	defer cleanupUser(t, local.ID)
+	remoteHost := "remote.example"
+	remote := insertTestUser(t, "u_sh_remote", "hosttest_r")
+	require.NoError(t, repo.UpdateUser(remote.ID, map[string]any{"host": remoteHost}))
+	defer cleanupUser(t, remote.ID)
+	otherHost := "other.example"
+	other := insertTestUser(t, "u_sh_other", "hosttest_o")
+	require.NoError(t, repo.UpdateUser(other.ID, map[string]any{"host": otherHost}))
+	defer cleanupUser(t, other.ID)
+
+	t.Run("host=nil returns only local", func(t *testing.T) {
+		out, err := repo.SearchByUsernameAndHost("hosttest", nil, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID])
+		assert.False(t, ids[remote.ID])
+		assert.False(t, ids[other.ID])
+	})
+
+	t.Run("host=remote returns only that host", func(t *testing.T) {
+		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.False(t, ids[local.ID])
+		assert.True(t, ids[remote.ID])
+		assert.False(t, ids[other.ID])
+	})
+
+	t.Run("host comparison is case-insensitive", func(t *testing.T) {
+		upper := "REMOTE.EXAMPLE"
+		out, err := repo.SearchByUsernameAndHost("hosttest", &upper, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[remote.ID])
+	})
+}
+
 func TestUserRepository_UpdateUser(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	user := insertTestUser(t, "u_up_1", "updateuser1")

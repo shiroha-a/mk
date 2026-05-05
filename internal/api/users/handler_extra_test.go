@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/users"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -136,6 +137,43 @@ func TestSearchByUsernameAndHost_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #766: host が指定されたら当該 host の user のみ返す。host=nil なら local
+// user (host IS NULL) のみ。"全 host のマッチを返す" 旧挙動の regression
+// guard。
+func TestSearchByUsernameAndHost_FiltersByHost(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	remote := "remote.example"
+	other := "other.example"
+	userRepo.Users["u_local"] = &model.User{ID: "u_local", Username: "alice", UsernameLower: "alice"}
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Username: "alice", UsernameLower: "alice", Host: &remote}
+	userRepo.Users["u_other"] = &model.User{ID: "u_other", Username: "alice", UsernameLower: "alice", Host: &other}
+
+	// host 未指定 / 空文字 → local user のみ
+	for _, body := range []string{`{"username":"alice"}`, `{"username":"alice","host":""}`} {
+		rec := postExtra(h.SearchByUsernameAndHost, body, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var got []entity.UserLite
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		require.Len(t, got, 1, "body=%s should return only local user", body)
+		assert.Equal(t, "u_local", got[0].ID)
+	}
+
+	// host 指定 → 当該 host の user のみ (local や別 host の user は除外)
+	rec := postExtra(h.SearchByUsernameAndHost, `{"username":"alice","host":"remote.example"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []entity.UserLite
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "u_remote", got[0].ID)
+
+	// case-insensitive な host 比較
+	rec = postExtra(h.SearchByUsernameAndHost, `{"username":"alice","host":"REMOTE.EXAMPLE"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "u_remote", got[0].ID)
+}
+
 // --- UpdateMemo ---
 
 func TestUpdateMemo_Success(t *testing.T) {
@@ -190,7 +228,7 @@ type failingSearchRepo struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingSearchRepo) SearchByUsername(_ string, _, _ int, _ string) ([]*model.User, error) {
+func (f *failingSearchRepo) SearchByUsernameAndHost(_ string, _ *string, _ int) ([]*model.User, error) {
 	return nil, assert.AnError
 }
 
