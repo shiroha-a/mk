@@ -252,11 +252,12 @@ proxyBypassHosts:
 # generator to fetch).
 #videoThumbnailGeneratorMode: post
 
-# NSFW sensitive media detection (#406)。default 無効。互換 service の HTTP
-# URL を指定すると自動 isSensitive 付与が動く。詳細 (wire 仕様 / 互換 image
-# 候補) は default.yml.example を参照。HTTP only (unix:// は将来拡張)、
-# UDS-only stack でも detector は overlay network 経由で 1 service のみ
-# TCP listen させる構成で対応する。
+# NSFW sensitive media detection (#406). Disabled by default. Set this to
+# a compatible service's HTTP URL to enable auto isSensitive flagging.
+# See default.yml.example for the wire spec and reference compatible
+# images. HTTP only (unix:// is a future extension); for UDS-only stacks,
+# expose the detector as the single TCP-listening service over the
+# overlay network.
 #nsfwDetectorUrl: http://nsfw-detector:8080/score
 
 #allowedPrivateNetworks:

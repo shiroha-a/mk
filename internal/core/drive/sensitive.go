@@ -127,13 +127,18 @@ func NewHTTPDetector(url string, client *http.Client) *HTTPDetector {
 
 // NewHTTPDetectorWithOptions is the explicit form for callers that need to
 // configure auth header / timeout (#751)。
+//
+// per-request timeout は Detect 内の context.WithTimeout で一本化して制御
+// するので、client.Timeout は明示的にセットしない (caller が production の
+// outbound client を渡す場合はその client が持つ timeout がさらに上限となる、
+// テストで nil 渡しの場合は context-only)。
 func NewHTTPDetectorWithOptions(url string, client *http.Client, opts HTTPDetectorOptions) *HTTPDetector {
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultHTTPDetectorTimeout
 	}
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		client = &http.Client{}
 	}
 	return &HTTPDetector{
 		url:        url,

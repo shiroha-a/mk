@@ -300,27 +300,30 @@ proxyBypassHosts:
 #videoThumbnailGenerator: unix:///run/video-thumb/sock
 #videoThumbnailGeneratorMode: post
 
-# NSFW sensitive media detection. mk-go は backend に ML runtime を抱えない
-# 方針 (#406)。動画サムネと同じく default 無効で、operator が外部 detector
-# service の URL を指定したときのみ自動 isSensitive 付与が動く。動作モード
-# (検出範囲 / 閾値 / 動画対象 / silenced hosts) は admin 設定 (meta) 経由で
-# upstream Misskey TS 互換に制御する。
+# NSFW sensitive media detection. mk-go does not bundle an ML runtime in
+# the backend (#406). Disabled by default; auto isSensitive flagging only
+# runs when an operator points `nsfwDetectorUrl` at a compatible external
+# service. The detection mode (scope / threshold / videos / silenced
+# hosts) is controlled via admin meta settings, matching upstream Misskey
+# TS behavior.
 #
-# Wire (mk-go が呼ぶ仕様):
+# Wire (called by mk-go):
 #   POST <url> with raw image/video bytes
 #   Content-Type: <MIME>
 #   Response: JSON {"score": float64}  (0.0=safe ~ 1.0=NSFW)
 #
-# 参考の互換 image (operator が選択):
+# Reference compatible images (operator's choice):
 #   - andresribeiro/nsfwjs-docker (TypeScript / nsfwjs)
 #   - germesdev/nsfw_detector / nikos-glikis/nsfw-docker (Yahoo OpenNSFW)
 #   - SaaS: Cloudflare Workers AI / AWS Rekognition / Google Vision SafeSearch
-# wire format が違う場合は operator 側で thin proxy を被せて合わせる。
+# If the wire format differs, the operator should run a thin proxy to
+# adapt it.
 #nsfwDetectorUrl: http://nsfw-detector:8080/score
-# 1 行 HTTP header を注入 (SaaS 直叩き用、例: Cloudflare Workers AI、AWS
-# Rekognition gateway 等)。"Name: value" 形式。空なら header 注入なし (#751)。
+# Inject a single HTTP header for direct SaaS calls (Cloudflare Workers AI,
+# AWS Rekognition gateway, etc.). "Name: value" format. Empty disables
+# injection (#751).
 #nsfwDetectorAuthHeader: "Authorization: Bearer <api-key>"
-# 1 リクエストあたりの timeout (Go duration 形式)。0 / 未指定なら 30s。
+# Per-request timeout (Go duration). 0 / unset defaults to 30s.
 #nsfwDetectorTimeout: 60s
 
 # For security reasons, uploading attachments from the intranet is
