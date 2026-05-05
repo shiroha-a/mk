@@ -62,6 +62,38 @@ type assertError struct{}
 
 func (assertError) Error() string { return "stub failure" }
 
+// setupDriveFileHandler returns a handler with DriveFileRepo wired and
+// optional seed rows. boilerplate (handler 構築 + repo 生成 + seed +
+// SetDriveFileRepo) を 1 行に圧縮する (#761)。drive_emoji_test 以外の
+// admin test (例: moderation_test の DeleteAllFilesOfUser) からも利用
+// できるよう handler_test.go に置く。戻り値の repo を直接 mutate して
+// EmojiReferencedURLs 等の追加設定も可能。
+func setupDriveFileHandler(t *testing.T, seed ...*model.DriveFile) (*apiadmin.Handler, *testutil.MockDriveFileRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockDriveFileRepository()
+	for _, df := range seed {
+		require.NoError(t, repo.Create(df))
+	}
+	h.SetDriveFileRepo(repo)
+	return h, repo
+}
+
+// setupAbuseReportHandler returns a handler with AbuseRepo wired and
+// optional seed rows. moderation_test / forward_abuse_report_test の両方
+// で UpdateAbuseUserReport / ForwardAbuseUserReport の modlog 検証に
+// 使う (#761 Phase 2)。
+func setupAbuseReportHandler(t *testing.T, seed ...*model.AbuseUserReport) (*apiadmin.Handler, *testutil.MockAbuseReportRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockAbuseReportRepository()
+	for _, r := range seed {
+		require.NoError(t, repo.Create(r))
+	}
+	h.SetAbuseRepo(repo)
+	return h, repo
+}
+
 // TestSetDriveFileRepo / TestSetAdminDB exist only to ensure the public
 // setters keep compiling; the real wiring is exercised end-to-end by the
 // per-handler tests.

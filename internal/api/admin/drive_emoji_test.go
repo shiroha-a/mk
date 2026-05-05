@@ -17,23 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupDriveFileHandler returns a handler with DriveFileRepo wired and
-// optional seed rows. boilerplate (handler 構築 + repo 生成 + seed +
-// SetDriveFileRepo) を 1 行に圧縮する (#761)。戻り値の repo を直接 mutate
-// して EmojiReferencedURLs 等の追加設定も可能。
-func setupDriveFileHandler(t *testing.T, seed ...*model.DriveFile) (*apiadmin.Handler, *testutil.MockDriveFileRepository) {
-	t.Helper()
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
-	for _, df := range seed {
-		require.NoError(t, repo.Create(df))
-	}
-	h.SetDriveFileRepo(repo)
-	return h, repo
-}
-
 // setupEmojiHandler returns a handler with EmojiRepo wired and optional
-// seed rows. DriveFile helper と同じ contract (#761)。
+// seed rows. setupDriveFileHandler (handler_test.go) と同じ contract
+// (#761)。
 func setupEmojiHandler(t *testing.T, seed ...*model.Emoji) (*apiadmin.Handler, *testutil.MockEmojiRepository) {
 	t.Helper()
 	h, _, _, _ := newTestHandler(t)

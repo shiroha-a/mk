@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
-	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,14 +92,13 @@ func TestDeleteAllFilesOfUser(t *testing.T) {
 // にあったが、handler が moderation.go にあるため discoverability 改善で
 // こちらに移動した (#581 review INFO-1)。
 func TestDeleteAllFilesOfUser_DeletesOnlyTargetUserFiles(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	u1 := "u1"
 	u2 := "u2"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "f1", UserID: &u1}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "f2", UserID: &u1}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "f3", UserID: &u2}))
-	h.SetDriveFileRepo(repo)
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "f1", UserID: &u1},
+		&model.DriveFile{ID: "f2", UserID: &u1},
+		&model.DriveFile{ID: "f3", UserID: &u2},
+	)
 
 	rec := doPost(h.DeleteAllFilesOfUser, `{"userId":"u1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -149,10 +147,9 @@ func TestUnsetUserBanner_WritesModerationLog(t *testing.T) {
 
 func TestUpdateAbuseUserReport_WritesModerationLog(t *testing.T) {
 	// #664: resolveAbuseReport log を出すことを確認。
-	h, _, _, _ := newTestHandler(t)
-	abuseRepo := testutil.NewMockAbuseReportRepository()
-	require.NoError(t, abuseRepo.Create(&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"}))
-	h.SetAbuseRepo(abuseRepo)
+	h, _ := setupAbuseReportHandler(t,
+		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1"}`, adminUser)

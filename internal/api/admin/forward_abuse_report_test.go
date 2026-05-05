@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
-	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,10 +47,9 @@ func TestForwardAbuseUserReport_ForwarderError(t *testing.T) {
 func TestForwardAbuseUserReport_WritesModerationLog(t *testing.T) {
 	// forwarder 未配線 fallback path で abuseRepo の DB フラグが立った時に
 	// forwardAbuseReport log が書かれることを確認。
-	h, _, _, _ := newTestHandler(t)
-	abuseRepo := testutil.NewMockAbuseReportRepository()
-	require.NoError(t, abuseRepo.Create(&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"}))
-	h.SetAbuseRepo(abuseRepo)
+	h, _ := setupAbuseReportHandler(t,
+		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.ForwardAbuseUserReport, `{"reportId":"r1"}`, adminUser)
