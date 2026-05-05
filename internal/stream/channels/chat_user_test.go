@@ -86,7 +86,7 @@ func TestChatUserChannel_OnClientMessage_Read(t *testing.T) {
 	svc, repo := newChatSvc(t)
 	text := "hi"
 	toID := "alice"
-	repo.messages["m1"] = &model.ChatMessage{
+	repo.Messages["m1"] = &model.ChatMessage{
 		ID: "m1", FromUserID: "bob", ToUserID: &toID, Text: &text,
 	}
 	ctx := newCtx(&model.User{ID: "alice"})

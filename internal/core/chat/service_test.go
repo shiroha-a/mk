@@ -10,162 +10,16 @@ import (
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// --- fake repository ---
-
-type fakeChatRepo struct {
-	mu          sync.Mutex
-	rooms       map[string]*model.ChatRoom
-	messages    map[string]*model.ChatMessage
-	memberships map[string]*model.ChatRoomMembership // key: userID:roomID
-
-	createErr error
-	updateErr error
-	deleteErr error
-}
-
-func newFakeRepo() *fakeChatRepo {
-	return &fakeChatRepo{
-		rooms:       make(map[string]*model.ChatRoom),
-		messages:    make(map[string]*model.ChatMessage),
-		memberships: make(map[string]*model.ChatRoomMembership),
-	}
-}
-
-func (r *fakeChatRepo) CreateRoom(room *model.ChatRoom) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rooms[room.ID] = room
-	return nil
-}
-func (r *fakeChatRepo) FindRoomByID(id string) (*model.ChatRoom, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if room, ok := r.rooms[id]; ok {
-		return room, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *fakeChatRepo) UpdateRoom(_ *model.ChatRoom) error                   { return nil }
-func (r *fakeChatRepo) DeleteRoom(_ string) error                            { return nil }
-func (r *fakeChatRepo) ListRoomsByOwner(_ string) ([]*model.ChatRoom, error) { return nil, nil }
-func (r *fakeChatRepo) ListJoinedRooms(_ string) ([]*model.ChatRoom, error)  { return nil, nil }
-
-func (r *fakeChatRepo) CreateMessage(msg *model.ChatMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.createErr != nil {
-		return r.createErr
-	}
-	clone := *msg
-	r.messages[msg.ID] = &clone
-	return nil
-}
-func (r *fakeChatRepo) FindMessageByID(id string) (*model.ChatMessage, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if msg, ok := r.messages[id]; ok {
-		clone := *msg
-		return &clone, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *fakeChatRepo) UpdateMessage(msg *model.ChatMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.updateErr != nil {
-		return r.updateErr
-	}
-	clone := *msg
-	r.messages[msg.ID] = &clone
-	return nil
-}
-func (r *fakeChatRepo) DeleteMessage(id string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.deleteErr != nil {
-		return r.deleteErr
-	}
-	delete(r.messages, id)
-	return nil
-}
-func (r *fakeChatRepo) ListMessagesByRoom(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) ListMessagesByUser(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) SearchMessages(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) CreateMembership(m *model.ChatRoomMembership) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.memberships[m.UserID+":"+m.RoomID] = m
-	return nil
-}
-func (r *fakeChatRepo) FindMembership(userID, roomID string) (*model.ChatRoomMembership, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if m, ok := r.memberships[userID+":"+roomID]; ok {
-		return m, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *fakeChatRepo) UpdateMembership(_ *model.ChatRoomMembership) error { return nil }
-func (r *fakeChatRepo) DeleteMembership(_, _ string) error                 { return nil }
-func (r *fakeChatRepo) ListMembersByRoom(roomID string) ([]*model.ChatRoomMembership, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]*model.ChatRoomMembership, 0)
-	for _, m := range r.memberships {
-		if m.RoomID == roomID {
-			out = append(out, m)
-		}
-	}
-	return out, nil
-}
-func (r *fakeChatRepo) CreateInvitation(_ *model.ChatRoomInvitation) error { return nil }
-func (r *fakeChatRepo) DeleteInvitation(_ string) error                    { return nil }
-func (r *fakeChatRepo) FindInvitation(_, _ string) (*model.ChatRoomInvitation, error) {
-	return nil, errors.New("not found")
-}
-func (r *fakeChatRepo) CountUnread(_ string) (int64, error) { return 0, nil }
-func (r *fakeChatRepo) MarkRead(userID, messageID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if msg, ok := r.messages[messageID]; ok {
-		msg.Reads = append(msg.Reads, userID)
-	}
-	return nil
-}
-func (r *fakeChatRepo) ListInvitationsByUser(_ string, _ bool) ([]*model.ChatRoomInvitation, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) ListInvitationsByRoom(_ string) ([]*model.ChatRoomInvitation, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) UpdateDeliveryStatus(_ string, _, _ bool) error { return nil }
-func (r *fakeChatRepo) ListHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) ListUserHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) ListRoomHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *fakeChatRepo) MarkAllRead(_ string) error                         { return nil }
-func (r *fakeChatRepo) MarkAllReadFromUser(_, _ string) error              { return nil }
-func (r *fakeChatRepo) MarkAllReadInRoom(_, _ string) error                { return nil }
-func (r *fakeChatRepo) AddReaction(_, _ string) error                      { return nil }
-func (r *fakeChatRepo) RemoveReaction(_, _ string) error                   { return nil }
-func (r *fakeChatRepo) UpdateInvitation(_ *model.ChatRoomInvitation) error { return nil }
-func (r *fakeChatRepo) FindMessageByURI(_ string) (*model.ChatMessage, error) {
-	return nil, errors.New("not found")
+// fakeChatRepo / newFakeRepo は testutil.MockChatRepository に集約された
+// (#709)。本ファイル / ap_delivery_test.go は newFakeRepo() のエイリアスを
+// 使い続けるが、実体は MockChatRepository。
+func newFakeRepo() *testutil.MockChatRepository {
+	return testutil.NewMockChatRepository()
 }
 
 // --- capture publisher ---
@@ -217,7 +71,7 @@ func (p *stubMainPublisher) PublishMainEvent(userID, eventType string, body any)
 
 // --- helper ---
 
-func newSvc(t *testing.T) (*corechat.Service, *fakeChatRepo, *capturePublisher) {
+func newSvc(t *testing.T) (*corechat.Service, *testutil.MockChatRepository, *capturePublisher) {
 	t.Helper()
 	repo := newFakeRepo()
 	pub := &capturePublisher{}
@@ -264,7 +118,7 @@ func TestCreateMessageToUser_EmptyRecipient(t *testing.T) {
 
 func TestCreateMessageToUser_RepoError(t *testing.T) {
 	svc, repo, pub := newSvc(t)
-	repo.createErr = errors.New("db boom")
+	repo.CreateErr = errors.New("db boom")
 	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
 	assert.Error(t, err)
 	assert.Empty(t, pub.userCalls)
@@ -272,11 +126,11 @@ func TestCreateMessageToUser_RepoError(t *testing.T) {
 
 // --- CreateMessageToRoom ---
 
-func seedRoom(t *testing.T, repo *fakeChatRepo, id string, owner string, members ...string) {
+func seedRoom(t *testing.T, repo *testutil.MockChatRepository, id string, owner string, members ...string) {
 	t.Helper()
-	repo.rooms[id] = &model.ChatRoom{ID: id, Name: "test-room", OwnerID: owner}
+	repo.Rooms[id] = &model.ChatRoom{ID: id, Name: "test-room", OwnerID: owner}
 	for _, u := range members {
-		repo.memberships[u+":"+id] = &model.ChatRoomMembership{UserID: u, RoomID: id}
+		repo.Memberships[u+":"+id] = &model.ChatRoomMembership{UserID: u, RoomID: id}
 	}
 }
 
@@ -421,7 +275,7 @@ func TestCreateMessageToRoom_WithFile(t *testing.T) {
 func TestCreateMessageToRoom_RepoError(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	seedRoom(t, repo, "r1", "alice")
-	repo.createErr = errors.New("db boom")
+	repo.CreateErr = errors.New("db boom")
 	_, err := svc.CreateMessageToRoom(context.Background(), "alice", "r1", "hi", "")
 	assert.Error(t, err)
 }
@@ -465,7 +319,7 @@ func TestDeleteMessage_NotAuthor(t *testing.T) {
 func TestDeleteMessage_RepoError(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	msg, _ := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
-	repo.deleteErr = errors.New("db boom")
+	repo.DeleteErr = errors.New("db boom")
 	err := svc.DeleteMessage(context.Background(), "alice", msg.ID)
 	assert.Error(t, err)
 }
@@ -513,7 +367,7 @@ func TestUpdateMessage_NotAuthor(t *testing.T) {
 func TestUpdateMessage_RepoError(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	msg, _ := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
-	repo.updateErr = errors.New("db boom")
+	repo.UpdateErr = errors.New("db boom")
 	_, err := svc.UpdateMessage(context.Background(), "alice", msg.ID, "edited")
 	assert.Error(t, err)
 }
@@ -589,7 +443,7 @@ func TestMarkRead_AppendsToReads(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	msg, _ := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
 	require.NoError(t, svc.MarkReadByMessageID(context.Background(), "bob", msg.ID))
-	stored := repo.messages[msg.ID]
+	stored := repo.Messages[msg.ID]
 	require.NotNil(t, stored)
 	assert.Equal(t, pq.StringArray{"bob"}, stored.Reads)
 }

@@ -2,120 +2,22 @@ package channels
 
 import (
 	"encoding/json"
-	"errors"
-	"sync"
 	"testing"
 
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// --- minimal in-memory chat repo for channel wiring ---
+// chat 用 fake repo は testutil.MockChatRepository に集約された (#709)。
 
-type chatFakeRepo struct {
-	mu          sync.Mutex
-	rooms       map[string]*model.ChatRoom
-	messages    map[string]*model.ChatMessage
-	memberships map[string]*model.ChatRoomMembership
-}
-
-func newChatFakeRepo() *chatFakeRepo {
-	return &chatFakeRepo{
-		rooms:       make(map[string]*model.ChatRoom),
-		messages:    make(map[string]*model.ChatMessage),
-		memberships: make(map[string]*model.ChatRoomMembership),
-	}
-}
-
-func (r *chatFakeRepo) CreateRoom(rm *model.ChatRoom) error { r.rooms[rm.ID] = rm; return nil }
-func (r *chatFakeRepo) FindRoomByID(id string) (*model.ChatRoom, error) {
-	if rm, ok := r.rooms[id]; ok {
-		return rm, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *chatFakeRepo) UpdateRoom(_ *model.ChatRoom) error                   { return nil }
-func (r *chatFakeRepo) DeleteRoom(_ string) error                            { return nil }
-func (r *chatFakeRepo) ListRoomsByOwner(_ string) ([]*model.ChatRoom, error) { return nil, nil }
-func (r *chatFakeRepo) ListJoinedRooms(_ string) ([]*model.ChatRoom, error)  { return nil, nil }
-func (r *chatFakeRepo) CreateMessage(msg *model.ChatMessage) error {
-	r.messages[msg.ID] = msg
-	return nil
-}
-func (r *chatFakeRepo) FindMessageByID(id string) (*model.ChatMessage, error) {
-	if m, ok := r.messages[id]; ok {
-		return m, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *chatFakeRepo) UpdateMessage(_ *model.ChatMessage) error { return nil }
-func (r *chatFakeRepo) DeleteMessage(_ string) error             { return nil }
-func (r *chatFakeRepo) ListMessagesByRoom(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) ListMessagesByUser(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) SearchMessages(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) CreateMembership(m *model.ChatRoomMembership) error {
-	r.memberships[m.UserID+":"+m.RoomID] = m
-	return nil
-}
-func (r *chatFakeRepo) FindMembership(userID, roomID string) (*model.ChatRoomMembership, error) {
-	if m, ok := r.memberships[userID+":"+roomID]; ok {
-		return m, nil
-	}
-	return nil, errors.New("not found")
-}
-func (r *chatFakeRepo) UpdateMembership(_ *model.ChatRoomMembership) error { return nil }
-func (r *chatFakeRepo) DeleteMembership(_, _ string) error                 { return nil }
-func (r *chatFakeRepo) ListMembersByRoom(_ string) ([]*model.ChatRoomMembership, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) CreateInvitation(_ *model.ChatRoomInvitation) error { return nil }
-func (r *chatFakeRepo) DeleteInvitation(_ string) error                    { return nil }
-func (r *chatFakeRepo) FindInvitation(_, _ string) (*model.ChatRoomInvitation, error) {
-	return nil, errors.New("not found")
-}
-func (r *chatFakeRepo) CountUnread(_ string) (int64, error) { return 0, nil }
-func (r *chatFakeRepo) MarkRead(_, _ string) error          { return nil }
-func (r *chatFakeRepo) ListInvitationsByUser(_ string, _ bool) ([]*model.ChatRoomInvitation, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) ListInvitationsByRoom(_ string) ([]*model.ChatRoomInvitation, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) UpdateDeliveryStatus(_ string, _, _ bool) error { return nil }
-func (r *chatFakeRepo) ListHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) ListUserHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) ListRoomHistory(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
-}
-func (r *chatFakeRepo) MarkAllRead(_ string) error                         { return nil }
-func (r *chatFakeRepo) MarkAllReadFromUser(_, _ string) error              { return nil }
-func (r *chatFakeRepo) MarkAllReadInRoom(_, _ string) error                { return nil }
-func (r *chatFakeRepo) AddReaction(_, _ string) error                      { return nil }
-func (r *chatFakeRepo) RemoveReaction(_, _ string) error                   { return nil }
-func (r *chatFakeRepo) UpdateInvitation(_ *model.ChatRoomInvitation) error { return nil }
-func (r *chatFakeRepo) FindMessageByURI(_ string) (*model.ChatMessage, error) {
-	return nil, errors.New("not found")
-}
-
-// --- test helpers ---
-
-func newChatSvc(t *testing.T) (*corechat.Service, *chatFakeRepo) {
+func newChatSvc(t *testing.T) (*corechat.Service, *testutil.MockChatRepository) {
 	t.Helper()
-	repo := newChatFakeRepo()
+	repo := testutil.NewMockChatRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	return corechat.NewService(repo, idGen), repo
 }
@@ -129,8 +31,8 @@ var _ stream.Channel = (*ChatUserChannel)(nil)
 
 func TestChatRoomChannel_Init_Member(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
-	repo.memberships["bob:r1"] = &model.ChatRoomMembership{UserID: "bob", RoomID: "r1"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Memberships["bob:r1"] = &model.ChatRoomMembership{UserID: "bob", RoomID: "r1"}
 
 	ctx := newCtx(&model.User{ID: "bob"})
 	ch := NewChatRoomFactory(svc).New(ctx)
@@ -141,7 +43,7 @@ func TestChatRoomChannel_Init_Member(t *testing.T) {
 
 func TestChatRoomChannel_Init_OwnerImplicitMember(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
@@ -152,7 +54,7 @@ func TestChatRoomChannel_Init_OwnerImplicitMember(t *testing.T) {
 
 func TestChatRoomChannel_Init_NotMember(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 
 	ctx := newCtx(&model.User{ID: "carol"})
 	ch := NewChatRoomFactory(svc).New(ctx)
@@ -191,7 +93,7 @@ func TestChatRoomChannel_Init_BadJSON(t *testing.T) {
 
 func TestChatRoomChannel_OnRedisEvent_Forwards(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -202,7 +104,7 @@ func TestChatRoomChannel_OnRedisEvent_Forwards(t *testing.T) {
 
 func TestChatRoomChannel_OnRedisEvent_Invalid(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -212,7 +114,7 @@ func TestChatRoomChannel_OnRedisEvent_Invalid(t *testing.T) {
 
 func TestChatRoomChannel_OnRedisEvent_NoType(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -222,9 +124,9 @@ func TestChatRoomChannel_OnRedisEvent_NoType(t *testing.T) {
 
 func TestChatRoomChannel_OnClientMessage_Read(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	textStr := "hi"
-	repo.messages["m1"] = &model.ChatMessage{
+	repo.Messages["m1"] = &model.ChatMessage{
 		ID: "m1", FromUserID: "alice", ToRoomID: strPtr("r1"), Text: &textStr,
 	}
 	ctx := newCtx(&model.User{ID: "alice"})
@@ -236,7 +138,7 @@ func TestChatRoomChannel_OnClientMessage_Read(t *testing.T) {
 
 func TestChatRoomChannel_OnClientMessage_UnknownType(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -246,7 +148,7 @@ func TestChatRoomChannel_OnClientMessage_UnknownType(t *testing.T) {
 
 func TestChatRoomChannel_OnClientMessage_ReadEmptyID(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -255,7 +157,7 @@ func TestChatRoomChannel_OnClientMessage_ReadEmptyID(t *testing.T) {
 
 func TestChatRoomChannel_OnClientMessage_ReadBadJSON(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
@@ -285,7 +187,7 @@ func TestChatRoomChannel_OnClientMessage_ReadServiceError(t *testing.T) {
 
 func TestChatRoomChannel_Dispose(t *testing.T) {
 	svc, repo := newChatSvc(t)
-	repo.rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
 	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
