@@ -52,6 +52,30 @@ func (s *Server) registerShutdownHook(fn func()) {
 	s.shutdownHooks = append(s.shutdownHooks, fn)
 }
 
+// buildIPExtractor returns an echo.IPExtractor that wraps Echo's standard
+// XFF extractor with a UDS-safe fallback. Echo 標準の ExtractIPFromXFFHeader
+// (echo/ip.go:252) は req.RemoteAddr が空文字 (UNIX domain socket 経由のとき
+// net.SplitHostPort が "" を返す) のとき XFF 逆順走査で net.ParseIP("") が
+// nil → directIP="" を早期 return してしまい、c.RealIP() が常に空文字を
+// 返す。signin record / user_ip 記録 / rate-limit が破壊されるため (#703)、
+// inner が空文字を返したケースのみ extractIPFallback で補う。
+//
+// 通常 (TCP listen) 経路では inner が valid IP を返すため fallback は走らず、
+// 既存挙動と完全に互換。
+func buildIPExtractor(trusted []*net.IPNet) echo.IPExtractor {
+	opts := make([]echo.TrustOption, 0, len(trusted))
+	for _, n := range trusted {
+		opts = append(opts, echo.TrustIPRange(n))
+	}
+	inner := echo.ExtractIPFromXFFHeader(opts...)
+	return func(req *http.Request) string {
+		if ip := inner(req); ip != "" {
+			return ip
+		}
+		return extractIPFallback(req, trusted)
+	}
+}
+
 // extractIPFallback recovers a client IP for requests where Echo's standard
 // extractor would return empty (typically UNIX domain socket connections
 // with no RemoteAddr, behind nginx + UDS). XFF を逆順に走査し trusted ranges
@@ -129,25 +153,9 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// reflection cost が下がって全 endpoint が広く高速化する。
 	e.JSONSerializer = fastJSONSerializer{}
 
-	// trustProxyからIPExtractorを構成。Echo 標準の ExtractIPFromXFFHeader
-	// (echo/ip.go:252) は req.RemoteAddr が空文字 (UNIX domain socket 経由
-	// のとき net.SplitHostPort が "" を返す) のとき XFF 逆順走査で
-	// net.ParseIP("") が nil → directIP="" を早期 return してしまい、結果
-	// として c.RealIP() が常に空文字を返す。signin record / user_ip 記録 /
-	// rate-limit が破壊されるため (#703)、UDS で空が返ったときの fallback
-	// を独自に被せる。
+	// trustProxyからIPExtractorを構成。詳細は buildIPExtractor のコメント。
 	if nets := config.ParseTrustProxy(cfg.TrustProxy); len(nets) > 0 {
-		var opts []echo.TrustOption
-		for _, n := range nets {
-			opts = append(opts, echo.TrustIPRange(n))
-		}
-		inner := echo.ExtractIPFromXFFHeader(opts...)
-		e.IPExtractor = func(req *http.Request) string {
-			if ip := inner(req); ip != "" {
-				return ip
-			}
-			return extractIPFallback(req, nets)
-		}
+		e.IPExtractor = buildIPExtractor(nets)
 	}
 
 	// Global middleware

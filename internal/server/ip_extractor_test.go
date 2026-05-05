@@ -104,3 +104,51 @@ func TestExtractIPFallback_XFFAllUnparseableFallbackToRealIP(t *testing.T) {
 	got := extractIPFallback(req, trusted)
 	assert.Equal(t, "203.0.113.99", got)
 }
+
+// 通常の TCP listen 経路 (RemoteAddr あり) では inner extractor の結果を
+// そのまま返し fallback は走らない。wire path の regression を防ぐ。
+func TestBuildIPExtractor_TCPDirectPath(t *testing.T) {
+	extractor := buildIPExtractor(parseTrustedDefault(t))
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	// 通常 TCP では net.SplitHostPort で取れる形式
+	req.RemoteAddr = "203.0.113.42:54321"
+
+	got := extractor(req)
+	assert.Equal(t, "203.0.113.42", got)
+}
+
+// inner extractor が untrusted な valid IP を返した場合そのまま返す。
+// trustProxy 越しに正規にアクセスされたケース。
+func TestBuildIPExtractor_TrustedProxyXFF(t *testing.T) {
+	extractor := buildIPExtractor(parseTrustedDefault(t))
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "172.21.0.5:12345" // trusted (private)
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 172.21.0.1")
+
+	got := extractor(req)
+	assert.Equal(t, "203.0.113.7", got)
+}
+
+// UDS 経由 (RemoteAddr="") で inner が空を返すケースを fallback が拾う。
+// 本 PR の regression を直接 lock down する critical path。
+func TestBuildIPExtractor_UDSFallbackPath(t *testing.T) {
+	extractor := buildIPExtractor(parseTrustedDefault(t))
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "" // UDS
+	req.Header.Set("X-Forwarded-For", "2405:6585:d720:e4:a090:d3d9:7372:f96a, 172.21.0.1")
+
+	got := extractor(req)
+	assert.Equal(t, "2405:6585:d720:e4:a090:d3d9:7372:f96a", got)
+}
+
+// trusted 引数が nil/空でも buildIPExtractor 自体は構築できる
+// (router 側では len(nets) > 0 で配線するため通常は呼ばれないが、
+// API として nil-safe であることの保険)。
+func TestBuildIPExtractor_NoTrustedRanges(t *testing.T) {
+	extractor := buildIPExtractor(nil)
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.42:54321"
+
+	got := extractor(req)
+	assert.Equal(t, "203.0.113.42", got)
+}
