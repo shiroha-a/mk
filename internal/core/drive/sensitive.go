@@ -1,10 +1,10 @@
 package drive
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -156,7 +156,10 @@ func (d *HTTPDetector) Detect(ctx context.Context, body []byte, mime string) (fl
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.url, io.NopCloser(strings.NewReader(string(body))))
+	// bytes.NewReader 直接で OK。`io.NopCloser(strings.NewReader(string(body)))`
+	// は []byte → string → []byte で 2 回 copy する典型的な anti-pattern。
+	// http.NewRequestWithContext は io.Reader を受けて Close 不要 (内部で nil 確認)。
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.url, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("sensitive: request creation: %w", err)
 	}
