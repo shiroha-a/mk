@@ -112,9 +112,12 @@ func (e *sentinelErr) Error() string { return e.msg }
 func newSentinelErr(s string) error { return &sentinelErr{msg: s} }
 
 func TestGenerateRSAKeypair_RandError(t *testing.T) {
-	restore := SetRandReaderForTest(errReader{})
-	defer restore()
-
-	_, _, err := GenerateRSAKeypair()
-	require.Error(t, err)
+	// Go 1.26 で crypto/rsa.GenerateKey の `random` 引数が完全に無視される
+	// 仕様に変更された (https://go.dev/doc/go1.26 crypto/rsa セクション、
+	// "The random parameter to GenerateKey ... is now ignored.") ため、
+	// SetRandReaderForTest で errReader を注入しても rsa.GenerateKey が
+	// それを消費せずに getrandom 経由で成功してしまう。entropy source 系
+	// のエラーを擬似できなくなったので skip。production の randReader 変数
+	// は ed25519.GenerateKey 経路で引き続き使われるため残す。
+	t.Skip("Go 1.26+: rsa.GenerateKey ignores random parameter (release notes)")
 }

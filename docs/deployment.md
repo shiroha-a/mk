@@ -106,7 +106,7 @@ make migrate-up
 ./built/misskey -config .config/default.yml
 ```
 
-前提条件: Go 1.25+ (ビルド時)、PostgreSQL 16+、Redis 7+。
+前提条件: Go 1.26+ (ビルド時)、PostgreSQL 16+、Redis 7+。
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 

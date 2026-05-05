@@ -5,7 +5,7 @@
 # runner) でも default frontend が 1.5+ になる現代では `1.7` で問題なし。
 
 # Stage 1: Build Go binary
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Step 2 (#618) で chai2010/webp → gen2brain/webp (libwebp on wazero/WASM) に
 # 切替えたので cgo 依存はゼロ。build-base (gcc + musl libc) は不要になった。

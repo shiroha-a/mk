@@ -4,7 +4,7 @@
 
 ## 前提条件
 
-- Go 1.25+
+- Go 1.26+
 - PostgreSQL 16+ (既存のMisskey-TSデータベース)
 - Redis 7+
 - git

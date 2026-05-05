@@ -12,7 +12,7 @@
 
 | Component | Library | 用途 |
 |-----------|---------|------|
-| 言語 | **Go 1.25** | `go.mod`でバージョン管理 |
+| 言語 | **Go 1.26** | `go.mod`でバージョン管理 |
 | Webフレームワーク | **Echo v4** (`labstack/echo/v4`) | HTTPルーティング、ミドルウェア、WebSocket |
 | ORM | **GORM** (`gorm.io/gorm`) | PostgreSQLアクセス |
 | Migration | **golang-migrate** (`golang-migrate/migrate/v4`) | SQLベースのマイグレーション |

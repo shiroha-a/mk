@@ -7,7 +7,7 @@
 VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/containers)拡張をインストールして開く。
 
 `.devcontainer/`の構成:
-- Go 1.25 + PostgreSQL + Redis (network_mode: host)
+- Go 1.26 + PostgreSQL + Redis (network_mode: host)
 - golang-migrate、Node.js 22、pnpmがプリインストール
 - `postCreate.sh`で初期化
 
@@ -19,7 +19,7 @@ make dev
 ### ローカル環境
 
 前提条件:
-- Go 1.25+
+- Go 1.26+
 - PostgreSQL 16+
 - Redis 7+
 - Docker (testcontainers用、テスト実行に必要)
