@@ -321,6 +321,13 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 // publishMeUpdated は upstream `meUpdated` event を main stream に流す。
 // 失敗は best-effort で握り潰す (publishing は副次的なので main flow を
 // 止めない)。userService.ShowByID で User + Profile を 1 度に取得する。
+//
+// frontend (main-boot.ts) は payload を updateCurrentAccountPartial で
+// 部分 merge するので、本 helper が送る UserDetailed の field がそのまま
+// `$i` に反映される。ただし entity.PackUserDetailed は private profile
+// field (usePasswordLessLogin / autoAcceptFollowed 等) を含まないため、
+// それらを更新する endpoint は publishMeUpdatedPartial で当該 field
+// だけ送る (#758)。
 func (h *Handler) publishMeUpdated(userID string) {
 	if h.mainStreamPublisher == nil {
 		return
@@ -332,6 +339,18 @@ func (h *Handler) publishMeUpdated(userID string) {
 	}
 	packed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
 	h.mainStreamPublisher.PublishMainEvent(userID, "meUpdated", packed)
+}
+
+// publishMeUpdatedPartial は specific field のみを `meUpdated` payload と
+// して送る。frontend は updateCurrentAccountPartial で部分 merge する
+// ので、entity.PackUserDetailed が含まない private profile field を
+// 更新した endpoint がこの helper で当該 field だけ publish できる
+// (#758)。fields が空 / mainStreamPublisher 未配線なら no-op。
+func (h *Handler) publishMeUpdatedPartial(userID string, fields map[string]any) {
+	if h.mainStreamPublisher == nil || len(fields) == 0 {
+		return
+	}
+	h.mainStreamPublisher.PublishMainEvent(userID, "meUpdated", fields)
 }
 
 // TwoFARemoveKey handles POST /api/i/2fa/remove-key.
@@ -427,16 +446,12 @@ func (h *Handler) TwoFAPasswordLess(c echo.Context) error {
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"usePasswordLessLogin": req.Value,
 	})
-	// frontend の main-boot.ts は `meUpdated` payload を
-	// updateCurrentAccountPartial で部分 merge する。usePasswordLessLogin は
-	// /api/i 経路の private profile field 群に属し、entity.PackUserDetailed が
-	// 含まないため publishMeUpdated (UserDetailed publish) では更新が
-	// 反映されない (#758 / #707 follow-up)。partial payload で当該 field
-	// だけ送って frontend の $i を更新する。
-	if h.mainStreamPublisher != nil {
-		h.mainStreamPublisher.PublishMainEvent(user.ID, "meUpdated", map[string]any{
-			"usePasswordLessLogin": req.Value,
-		})
-	}
+	// usePasswordLessLogin は /api/i 経路の private profile field 群に属し、
+	// entity.PackUserDetailed が含まないため publishMeUpdated (UserDetailed
+	// publish) では frontend の $i に反映されない (#758)。partial helper で
+	// 当該 field だけ送る。
+	h.publishMeUpdatedPartial(user.ID, map[string]any{
+		"usePasswordLessLogin": req.Value,
+	})
 	return c.NoContent(http.StatusNoContent)
 }
