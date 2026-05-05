@@ -91,11 +91,9 @@ func (s *Service) OnNoteCreated(note *model.Note, author *model.User) {
 // WaitForPendingWrites blocks until all in-flight OnNoteCreated goroutines
 // finish. Production code does not call this — it exists so unit tests can
 // observe the post-write repo state deterministically without polling.
+// 無期限 ctx (context.TODO) で Shutdown を呼んで実装を共有し drift を防ぐ。
 func (s *Service) WaitForPendingWrites() {
-	if s == nil {
-		return
-	}
-	s.pending.Wait()
+	_ = s.Shutdown(context.TODO())
 }
 
 // Shutdown は in-flight worker goroutine が drain するか ctx 期限切れまで
@@ -105,8 +103,7 @@ func (s *Service) WaitForPendingWrites() {
 // なので次回同タグ note 受信時に再カウントされる。それでも shutdown
 // 時の error log を抑え観測ノイズを下げるためにここで drain する。
 //
-// ctx==nil なら無期限 wait (test 用、production は ShutdownContext を
-// 必ず timeout 付きで渡す前提)。
+// 無期限 wait したい (test 等) なら context.TODO() を渡す。
 func (s *Service) Shutdown(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -116,10 +113,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		s.pending.Wait()
 		close(done)
 	}()
-	if ctx == nil {
-		<-done
-		return nil
-	}
 	select {
 	case <-done:
 		return nil
