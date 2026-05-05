@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -162,6 +163,21 @@ func TestFederationUpdateInstance(t *testing.T) {
 // assertNoLogWritten は「指定期間内に log が 1 件も書かれない」ことを assert
 // する。time.Sleep + assert.Empty より flaky になりにくい (期間中ずっと empty
 // であることを poll する)。
+// setupFederationUpdateInstance returns a configured handler + modlog repo
+// pre-populated with the given instance row. before=nil なら instance を
+// seed しない (host-not-found / no-instance-repo シナリオ用)。FederationUpdate
+// Instance 系 test の boilerplate を 1 行にまとめる (#716)。
+func setupFederationUpdateInstance(t *testing.T, before *model.Instance) (*apiadmin.Handler, *testutil.MockModerationLogRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	instRepo := testutil.NewMockInstanceRepository()
+	if before != nil {
+		require.NoError(t, instRepo.Create(before))
+	}
+	h.SetInstanceRepo(instRepo)
+	return h, attachModLog(t, h)
+}
+
 func assertNoLogWritten(t *testing.T, repo *testutil.MockModerationLogRepository) {
 	t.Helper()
 	assert.Never(t, func() bool { return len(repo.Snapshot()) > 0 }, 100*time.Millisecond, 5*time.Millisecond,
@@ -179,10 +195,7 @@ func TestFederationUpdateInstance_NoOpWithoutInstanceRepo(t *testing.T) {
 
 // #676: instance 行が存在しない host への update は no-op (FindByHost が err)。
 func TestFederationUpdateInstance_HostNotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	h, repo := setupFederationUpdateInstance(t, nil)
 	rec := doPost(h.FederationUpdateInstance, `{"host":"ghost.example","isSuspended":true}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assertNoLogWritten(t, repo)
@@ -190,15 +203,11 @@ func TestFederationUpdateInstance_HostNotFound(t *testing.T) {
 
 // #676: isSuspended=true への遷移で suspendRemoteInstance 1 件だけ書く。
 func TestFederationUpdateInstance_WritesSuspendLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:              "inst-1",
 		Host:            "remote.example",
 		SuspensionState: model.SuspensionStateNone, // before: 未停止
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","isSuspended":true}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
@@ -214,15 +223,11 @@ func TestFederationUpdateInstance_WritesSuspendLog(t *testing.T) {
 
 // #676: suspended → unsuspended 遷移で unsuspendRemoteInstance を書く。
 func TestFederationUpdateInstance_WritesUnsuspendLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:              "inst-2",
 		Host:            "remote.example",
 		SuspensionState: model.SuspensionStateManuallySuspended, // before: 停止中
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","isSuspended":false}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
@@ -232,15 +237,11 @@ func TestFederationUpdateInstance_WritesUnsuspendLog(t *testing.T) {
 
 // #676: isSuspended が状態と一致 (no-change) なら log を書かない。
 func TestFederationUpdateInstance_SuspendNoChange_NoLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:              "inst-3",
 		Host:            "remote.example",
 		SuspensionState: model.SuspensionStateNone,
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","isSuspended":false}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -249,15 +250,11 @@ func TestFederationUpdateInstance_SuspendNoChange_NoLog(t *testing.T) {
 
 // #676: moderationNote の before/after 差分で updateRemoteInstanceNote を書く。
 func TestFederationUpdateInstance_WritesModerationNoteLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:             "inst-4",
 		Host:           "remote.example",
 		ModerationNote: "old note",
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","moderationNote":"new note"}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
@@ -274,15 +271,11 @@ func TestFederationUpdateInstance_WritesModerationNoteLog(t *testing.T) {
 
 // #676: moderationNote が同じ値なら log 無し (空文字列で clear のケースを除く)。
 func TestFederationUpdateInstance_NoteSameValue_NoLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:             "inst-5",
 		Host:           "remote.example",
 		ModerationNote: "same",
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	rec := doPost(h.FederationUpdateInstance, `{"host":"remote.example","moderationNote":"same"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -291,16 +284,12 @@ func TestFederationUpdateInstance_NoteSameValue_NoLog(t *testing.T) {
 
 // #676: 1 リクエストで suspend + note を両方変更すると 2 log が出る。
 func TestFederationUpdateInstance_WritesBothLogs(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	instRepo := testutil.NewMockInstanceRepository()
-	require.NoError(t, instRepo.Create(&model.Instance{
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
 		ID:              "inst-6",
 		Host:            "remote.example",
 		SuspensionState: model.SuspensionStateNone,
 		ModerationNote:  "old",
-	}))
-	h.SetInstanceRepo(instRepo)
-	repo := attachModLog(t, h)
+	})
 
 	body := `{"host":"remote.example","isSuspended":true,"moderationNote":"new"}`
 	rec := doPost(h.FederationUpdateInstance, body, adminUser)
