@@ -36,7 +36,13 @@ type UserRepository interface {
 	// UPDATE していたが、CachedUserRepository wrapper の invalidate を
 	// 通すため userRepo 経由に統一する (Devin review #552 BUG-2)。
 	IncrementNotesCount(userID string, delta int) error
-	SearchByUsername(query string, limit, offset int) ([]*model.User, error)
+	// SearchByUsername は usernameLower の prefix で user を検索する。
+	// origin は upstream Misskey TS と同じ semantics:
+	//   "local"    → host IS NULL のみ
+	//   "remote"   → host IS NOT NULL のみ
+	//   "combined" / 空文字列 / その他 → filter なし
+	// (#763)。
+	SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error)
 	UpdateUser(userID string, fields map[string]any) error
 	UpdateProfile(userID string, fields map[string]any) error
 	CreateProfile(profile *model.UserProfile) error
@@ -199,10 +205,18 @@ func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
 
 // SearchByUsername returns users whose usernameLower starts with the given query.
 // Phase 4でMeilisearch統合予定だが、現状は単純なLIKE検索のみ。
-func (r *userRepository) SearchByUsername(query string, limit, offset int) ([]*model.User, error) {
+//
+// origin で host filter を切り替える (#763)。
+func (r *userRepository) SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error) {
 	var users []*model.User
-	if err := r.db.
-		Where("\"usernameLower\" LIKE ?", query+"%").
+	q := r.db.Where("\"usernameLower\" LIKE ?", query+"%")
+	switch origin {
+	case "local":
+		q = q.Where("\"host\" IS NULL")
+	case "remote":
+		q = q.Where("\"host\" IS NOT NULL")
+	}
+	if err := q.
 		Order("\"followersCount\" DESC, id ASC").
 		Limit(limit).
 		Offset(offset).

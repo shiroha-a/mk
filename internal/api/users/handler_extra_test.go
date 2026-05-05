@@ -190,7 +190,7 @@ type failingSearchRepo struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingSearchRepo) SearchByUsername(_ string, _, _ int) ([]*model.User, error) {
+func (f *failingSearchRepo) SearchByUsername(_ string, _, _ int, _ string) ([]*model.User, error) {
 	return nil, assert.AnError
 }
 

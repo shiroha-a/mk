@@ -334,9 +334,66 @@ func TestUserRepository_SearchByUsername(t *testing.T) {
 	b := insertTestUser(t, "u_sb_2", "searchbeta")
 	defer cleanupUser(t, b.ID)
 
-	out, err := repo.SearchByUsername("search", 10, 0)
+	out, err := repo.SearchByUsername("search", 10, 0, "")
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(out), 2)
+}
+
+// origin filter (#763): "local" は host IS NULL のみ、"remote" は IS NOT NULL
+// のみ返す。"combined" / "" は両方返す。
+func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	local := insertTestUser(t, "u_so_local", "originlocal")
+	defer cleanupUser(t, local.ID)
+	remoteHost := "remote.example"
+	remote := insertTestUser(t, "u_so_remote", "originremote")
+	// host を後付けで設定 (insertTestUser は host=nil で作る前提)。
+	require.NoError(t, repo.UpdateUser(remote.ID, map[string]any{"host": remoteHost}))
+	defer cleanupUser(t, remote.ID)
+
+	t.Run("local only excludes remote", func(t *testing.T) {
+		out, err := repo.SearchByUsername("origin", 10, 0, "local")
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID], "local user should appear")
+		assert.False(t, ids[remote.ID], "remote user should NOT appear in local-only search")
+	})
+
+	t.Run("remote only excludes local", func(t *testing.T) {
+		out, err := repo.SearchByUsername("origin", 10, 0, "remote")
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.False(t, ids[local.ID], "local user should NOT appear in remote-only search")
+		assert.True(t, ids[remote.ID], "remote user should appear")
+	})
+
+	t.Run("combined returns both", func(t *testing.T) {
+		out, err := repo.SearchByUsername("origin", 10, 0, "combined")
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID])
+		assert.True(t, ids[remote.ID])
+	})
+
+	t.Run("empty origin treated as combined", func(t *testing.T) {
+		out, err := repo.SearchByUsername("origin", 10, 0, "")
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID])
+		assert.True(t, ids[remote.ID])
+	})
 }
 
 func TestUserRepository_UpdateUser(t *testing.T) {
@@ -358,7 +415,7 @@ func TestUserRepository_SearchByUsername_QueryError(t *testing.T) {
 	db := testDB.WithContext(ctx)
 	repo := NewUserRepository(db)
 
-	_, err := repo.SearchByUsername("anything", 10, 0)
+	_, err := repo.SearchByUsername("anything", 10, 0, "")
 	assert.Error(t, err)
 }
 

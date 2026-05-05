@@ -373,8 +373,11 @@ func (h *Handler) Show(c echo.Context) error {
 
 // SearchRequest is the request body for users/search.
 type SearchRequest struct {
-	Query  string `json:"query"`
-	Limit  int    `json:"limit"`
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+	// Origin は upstream Misskey TS と同じ enum: "local" / "remote" /
+	// "combined" (default)。空 / 不明値は "combined" 扱い (#763)。
+	Origin string `json:"origin"`
 	Offset int    `json:"offset"`
 }
 
@@ -388,7 +391,7 @@ func (h *Handler) Search(c echo.Context) error {
 		req.Limit = 10
 	}
 
-	users, err := h.userService.Search(req.Query, req.Limit, req.Offset)
+	users, err := h.userService.Search(req.Query, req.Limit, req.Offset, req.Origin)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

@@ -181,7 +181,7 @@ func (m *MockUserRepository) IncrementFollowersCount(userID string, delta int) e
 	return nil
 }
 
-func (m *MockUserRepository) SearchByUsername(query string, limit, offset int) ([]*model.User, error) {
+func (m *MockUserRepository) SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error) {
 	var matches []*model.User
 	for _, u := range m.Users {
 		if len(u.UsernameLower) >= len(query) && u.UsernameLower[:len(query)] == query {

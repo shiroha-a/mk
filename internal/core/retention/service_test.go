@@ -52,12 +52,14 @@ func (s *stubUserRepo) FindByUsernameLower(string, *string) (*model.User, error)
 func (s *stubUserRepo) FindProfileByUserID(string) (*model.UserProfile, error)   { return nil, nil }
 func (s *stubUserRepo) IncrementFollowingCount(string, int) error                { return nil }
 func (s *stubUserRepo) IncrementFollowersCount(string, int) error                { return nil }
-func (s *stubUserRepo) SearchByUsername(string, int, int) ([]*model.User, error) { return nil, nil }
-func (s *stubUserRepo) UpdateUser(string, map[string]any) error                  { return nil }
-func (s *stubUserRepo) UpdateProfile(string, map[string]any) error               { return nil }
-func (s *stubUserRepo) CreateProfile(*model.UserProfile) error                   { return nil }
-func (s *stubUserRepo) ListUsers(model.UserListFilter) ([]*model.User, error)    { return nil, nil }
-func (s *stubUserRepo) ListRemoteInboxes() ([]string, error)                     { return nil, nil }
+func (s *stubUserRepo) SearchByUsername(string, int, int, string) ([]*model.User, error) {
+	return nil, nil
+}
+func (s *stubUserRepo) UpdateUser(string, map[string]any) error               { return nil }
+func (s *stubUserRepo) UpdateProfile(string, map[string]any) error            { return nil }
+func (s *stubUserRepo) CreateProfile(*model.UserProfile) error                { return nil }
+func (s *stubUserRepo) ListUsers(model.UserListFilter) ([]*model.User, error) { return nil, nil }
+func (s *stubUserRepo) ListRemoteInboxes() ([]string, error)                  { return nil, nil }
 func (s *stubUserRepo) FindProfileByVerifyCode(string) (*model.UserProfile, error) {
 	return nil, nil
 }

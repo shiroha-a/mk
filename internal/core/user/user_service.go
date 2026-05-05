@@ -242,7 +242,12 @@ func (s *Service) ListRecommendations(viewerID string, activeSince time.Time, li
 
 // Search returns users whose username matches the prefix query.
 // 空のクエリは空のリストを返す。
-func (s *Service) Search(query string, limit, offset int) ([]*model.User, error) {
+//
+// origin は upstream Misskey TS の users/search の `origin` param 互換 (#763)。
+//   - "local"    → host IS NULL のみ
+//   - "remote"   → host IS NOT NULL のみ
+//   - "combined" / 空 → filter なし (default)
+func (s *Service) Search(query string, limit, offset int, origin string) ([]*model.User, error) {
 	q := strings.TrimSpace(strings.TrimPrefix(query, "@"))
 	if q == "" {
 		return nil, nil
@@ -250,7 +255,7 @@ func (s *Service) Search(query string, limit, offset int) ([]*model.User, error)
 	if limit <= 0 {
 		limit = 10
 	}
-	return s.userRepo.SearchByUsername(strings.ToLower(q), limit, offset)
+	return s.userRepo.SearchByUsername(strings.ToLower(q), limit, offset, origin)
 }
 
 // UpdateInput represents the editable fields of a user profile.
