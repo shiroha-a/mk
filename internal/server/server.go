@@ -15,7 +15,6 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
-	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -41,19 +40,19 @@ type Server struct {
 	queueScheduler *queue.Scheduler
 	queueInspector *queue.Inspector
 	chartMgmt      *chart.ManagementService
-	// hashtagService は graceful shutdown で in-flight worker を drain する
-	// ために参照する (#727)。fire-and-forget な OnNoteCreated worker (#719) が
-	// SIGTERM 時に途中 kill されるのを避ける。
-	hashtagService *corehashtag.Service
 
-	// shutdownHooks はShutdown()時にqueue/HTTP echoより先に呼ばれる
-	// ティッカー系ジョブの停止用。publisher goroutineをcleanに止める。
-	shutdownHooks []func()
+	// shutdownHooks は Shutdown() 時に queue / HTTP echo より先に呼ばれる。
+	// ctx-aware にすることで graceful drain (例: hashtag service の
+	// in-flight worker、#727) を hook で wire できる。シンプルな
+	// stop/close 系 hook は引数 _ で受け流すだけ。
+	shutdownHooks []func(context.Context)
 }
 
 // registerShutdownHook registers fn to be invoked during Shutdown.
 // Hooks run in registration order before the asynq / echo shutdown.
-func (s *Server) registerShutdownHook(fn func()) {
+// ctx は Shutdown() の caller から伝播され、graceful drain の deadline
+// として使える (#764)。
+func (s *Server) registerShutdownHook(fn func(context.Context)) {
 	s.shutdownHooks = append(s.shutdownHooks, fn)
 }
 
@@ -282,17 +281,11 @@ func (s *Server) Start() error {
 // Shutdown gracefully shuts down the server, the asynq worker and
 // any background services such as the chart management loop.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// 登録順にshutdown hookを走らせる。publisher goroutineをclean停止。
+	// 登録順に shutdown hook を走らせる。publisher goroutine の clean 停止と、
+	// graceful drain が必要な service (hashtag #727 等) の Shutdown(ctx) を
+	// 兼ねる。hook が ctx を取るので timeout 共有が可能 (#764)。
 	for _, hook := range s.shutdownHooks {
-		hook()
-	}
-	// hashtag service の in-flight worker (#719 fire-and-forget) を ctx 期限
-	// 内で drain する (#727)。typical case では即返り、長時間動く worker は
-	// ctx timeout で諦める (idempotent な RecordMention なので次回再カウント)。
-	if s.hashtagService != nil {
-		if err := s.hashtagService.Shutdown(ctx); err != nil {
-			slog.Warn("hashtag service shutdown timed out", "err", err)
-		}
+		hook(ctx)
 	}
 	if s.chartMgmt != nil {
 		s.chartMgmt.Stop(ctx)

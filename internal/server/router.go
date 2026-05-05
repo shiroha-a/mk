@@ -332,7 +332,7 @@ func (s *Server) setupRoutes() {
 	pollExpiryWorker := corepoll.NewExpiryWorker(pollRepo, pollVoteRepo, noteRepo, userRepo, notificationService, 60*time.Second, 100)
 	pollExpiryCtx, pollExpiryCancel := context.WithCancel(context.Background())
 	go pollExpiryWorker.Run(pollExpiryCtx)
-	s.registerShutdownHook(func() { pollExpiryCancel() })
+	s.registerShutdownHook(func(_ context.Context) { pollExpiryCancel() })
 	// pollVoted を note の stream topic に publish して subscribe 中の
 	// frontend (note 詳細 / timeline) が reload なしで count を更新できる
 	// ようにする (#690)。streamPubSub は下方で生成されるため遅延配線。
@@ -507,7 +507,7 @@ func (s *Server) setupRoutes() {
 	// 縮退する (#569)。
 	instanceTouchBuffer := coreinstance.NewTouchBuffer(instanceService, time.Second)
 	instanceTouchBuffer.Start(context.Background())
-	s.registerShutdownHook(func() { instanceTouchBuffer.Close() })
+	s.registerShutdownHook(func(_ context.Context) { instanceTouchBuffer.Close() })
 
 	// AP delivery: DeliverService + フック登録 + asynq processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
@@ -669,8 +669,16 @@ func (s *Server) setupRoutes() {
 	hashtagService := corehashtag.NewService(hashtagRepo, idGen)
 	noteCreateService.SetHashtagHook(hashtagService)
 	federationResolver.SetHashtagHook(hashtagService)
-	// graceful shutdown 経路で in-flight worker を drain する参照を保持 (#727)。
-	s.hashtagService = hashtagService
+	// graceful shutdown 経路で in-flight worker (#719 fire-and-forget) を ctx
+	// 期限内に drain する (#727)。typical case では即返り、長時間動く worker は
+	// ctx timeout で諦める (idempotent な RecordMention なので次回再カウント)。
+	// #764: 旧版は Server.hashtagService field 経由で Shutdown() から呼ばれて
+	// いたが、ctx-aware hook 化で field 不要になった。
+	s.registerShutdownHook(func(ctx context.Context) {
+		if err := hashtagService.Shutdown(ctx); err != nil {
+			slog.Warn("hashtag service shutdown timed out", "err", err)
+		}
+	})
 
 	// Chart cron processor: tickCharts (毎時) / resyncCharts (毎日) /
 	// cleanCharts (毎日) を queue.Scheduler 経由で受け取る。Scheduler
@@ -1633,12 +1641,12 @@ func (s *Server) setupRoutes() {
 	// として渡して requestLog 応答に historical 値を返せるようにする (#571 item 2)。
 	serverStatsPub := stream.NewServerStatsPublisher(streamPubSub, 0)
 	serverStatsPub.Start()
-	s.registerShutdownHook(serverStatsPub.Stop)
+	s.registerShutdownHook(func(_ context.Context) { serverStatsPub.Stop() })
 	streamRegistry.Register("serverStats", channels.NewServerStatsFactory(serverStatsPub))
 	if s.queueInspector != nil {
 		queueStatsPub := stream.NewQueueStatsPublisher(&queueStatsInspectorAdapter{inner: s.queueInspector}, streamPubSub, 0)
 		queueStatsPub.Start()
-		s.registerShutdownHook(queueStatsPub.Stop)
+		s.registerShutdownHook(func(_ context.Context) { queueStatsPub.Stop() })
 		streamRegistry.Register("queueStats", channels.NewQueueStatsFactory(queueStatsPub))
 	} else {
 		// queueInspector が無い起動 (テスト等) では fallback factory で空配列のみ返す
