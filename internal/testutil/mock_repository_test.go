@@ -88,3 +88,63 @@ func TestMockMeta_Update_RejectsInvalidArrayValue(t *testing.T) {
 		assert.Equal(t, []string{"ok.example"}, []string(repo.Meta.BlockedHosts))
 	})
 }
+
+// admin/federation/update-instance handler が送る boolean key (isSuspended /
+// isBlocked / isSilenced) を mock 上で受けたときの挙動を確認する (#714)。
+//
+//   - isSuspended は SuspensionState enum に変換される
+//   - isBlocked / isSilenced は対応 model field が無いので silently drop
+//     (case を明示的に持つことで「未対応」を visible 化)
+func TestApplyInstanceFields_SuspendedBoolean(t *testing.T) {
+	repo := NewMockInstanceRepository()
+	const host = "remote.example"
+	require.NoError(t, repo.Create(&model.Instance{
+		ID:              "inst1",
+		Host:            host,
+		SuspensionState: model.SuspensionStateNone,
+	}))
+
+	t.Run("isSuspended true → SuspensionState ManuallySuspended", func(t *testing.T) {
+		require.NoError(t, repo.UpdateFields(host, map[string]any{
+			"isSuspended": true,
+		}))
+		got, err := repo.FindByHost(host)
+		require.NoError(t, err)
+		assert.Equal(t, model.SuspensionStateManuallySuspended, got.SuspensionState)
+	})
+
+	t.Run("isSuspended false → SuspensionState None", func(t *testing.T) {
+		require.NoError(t, repo.UpdateFields(host, map[string]any{
+			"isSuspended": false,
+		}))
+		got, err := repo.FindByHost(host)
+		require.NoError(t, err)
+		assert.Equal(t, model.SuspensionStateNone, got.SuspensionState)
+	})
+}
+
+// isBlocked / isSilenced は model 側に対応 field が無いので silently drop
+// される。case を明示的に追加した目的は「未対応」を visible にすること
+// なので、UpdateFields 呼び出しが panic / error にならず、SuspensionState
+// 等の他 field が壊れないことを確認する (#714)。
+func TestApplyInstanceFields_BlockedSilencedNoOp(t *testing.T) {
+	repo := NewMockInstanceRepository()
+	const host = "remote.example"
+	require.NoError(t, repo.Create(&model.Instance{
+		ID:              "inst2",
+		Host:            host,
+		SuspensionState: model.SuspensionStateManuallySuspended,
+		ModerationNote:  "before",
+	}))
+
+	require.NoError(t, repo.UpdateFields(host, map[string]any{
+		"isBlocked":  true,
+		"isSilenced": true,
+	}))
+
+	got, err := repo.FindByHost(host)
+	require.NoError(t, err)
+	// 既存 field は保持される。
+	assert.Equal(t, model.SuspensionStateManuallySuspended, got.SuspensionState)
+	assert.Equal(t, "before", got.ModerationNote)
+}

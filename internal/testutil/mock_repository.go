@@ -2444,6 +2444,29 @@ func applyInstanceFields(i *model.Instance, fields map[string]any) {
 			if s, ok := v.(string); ok {
 				i.ModerationNote = s
 			}
+		// admin/federation/update-instance handler が送る boolean key を
+		// mock 上で受けたときの挙動 (#714)。
+		//
+		// isSuspended は upstream Misskey TS の旧 schema 由来の boolean key。
+		// mk-go では SuspensionState enum で管理しているので、mock 上では
+		// handler の意図を mirror して boolean → SuspensionState 変換を行う
+		// (true → ManuallySuspended、false → None)。
+		// production の handler 側 bug (existence しない列に UPDATE 試行) は
+		// #724 で別途修正される。
+		case "isSuspended":
+			if b, ok := v.(bool); ok {
+				if b {
+					i.SuspensionState = model.SuspensionStateManuallySuspended
+				} else {
+					i.SuspensionState = model.SuspensionStateNone
+				}
+			}
+		// isBlocked / isSilenced は model.Instance に対応 field が無く DB
+		// schema にも存在しない (#715 で二重カラム統合議論中)。mock では
+		// 明示的に case を持つことで「silently drop されている」状態を
+		// visible にし、将来 model 拡張で field が増えたら修正点が明確になる。
+		case "isBlocked", "isSilenced":
+			_ = v
 		}
 	}
 }
