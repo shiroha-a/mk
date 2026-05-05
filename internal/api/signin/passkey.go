@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -66,6 +67,10 @@ func (h *Handler) SigninWithPasskey(c echo.Context) error {
 
 	user, cred, err := h.webauthnSvc.FinishPasskeyLogin(c.Request().Context(), req.Context, httpReq, h.resolvePasskeyUser)
 	if err != nil {
+		// frontend には汎用 403 を返すが backend log には何で落ちたかを残す
+		// (#707 の調査用)。原因例: challenge mismatch / origin / RPID 不一致 /
+		// credential format problem / user_handle 解決失敗。
+		slog.Warn("signin: webauthn FinishPasskeyLogin failed", "context", req.Context, "err", err)
 		return c.JSON(http.StatusForbidden, errBody("b18c89a7-5b5e-4cec-bb5b-0419f332d430"))
 	}
 	return h.finishPasskeySignin(c, user, cred)

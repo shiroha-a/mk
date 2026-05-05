@@ -267,6 +267,11 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 		}
 		cred, werr := h.webauthnSvc.FinishLogin(c.Request().Context(), user, keys, httpReq)
 		if werr != nil {
+			// 失敗の root cause (challenge mismatch / origin / credential format
+			// 等) は webauthn library 内部で発生する。frontend には汎用 403 を
+			// 返すが backend log には何で落ちたかを残しておくと #707 系の
+			// 「パスキーの検証に失敗しました」報告の調査に役立つ。
+			slog.Warn("signin: webauthn FinishLogin failed", "userId", user.ID, "err", werr)
 			return c.JSON(http.StatusForbidden, errBody("93b86c4b-72f9-40eb-9815-798928603d1e"))
 		}
 		// counter 更新 (clone 検出用)

@@ -116,6 +116,21 @@ func (u *userAdapter) WebAuthnCredentials() []webauthn.Credential {
 				SignCount: uint32(k.Counter),
 			},
 		}
+		// BackupEligible / BackupState フラグを DB から復元する (#707)。
+		// 登録時の credentialDeviceType / credentialBackedUp 列に upstream
+		// Misskey TS と同じ規約で保存している (singleDevice = BE=false、
+		// multiDevice = BE=true)。Cloud sync passkey の認証時に go-webauthn
+		// が Flags.BackupEligible を AuthenticatorData の BE flag と比較する
+		// ので、復元せずに default false のままだと必ず mismatch エラー
+		// ("Backup Eligible flag inconsistency") になる。
+		// NULL (#707 修正前の登録データ) は default false で復元する: 該当
+		// passkey は再登録が必要。
+		if k.CredentialDeviceType != nil && *k.CredentialDeviceType == "multiDevice" {
+			cred.Flags.BackupEligible = true
+		}
+		if k.CredentialBackedUp != nil {
+			cred.Flags.BackupState = *k.CredentialBackedUp
+		}
 		for _, t := range k.Transports {
 			cred.Transport = append(cred.Transport, protocol.AuthenticatorTransport(t))
 		}
@@ -420,5 +435,18 @@ func CredentialToModel(cred *webauthn.Credential, userID, name string) *model.Us
 	if len(transports) > 0 {
 		out.Transports = pq.StringArray(transports)
 	}
+	// BackupEligible / BackupState フラグを upstream Misskey TS 互換の
+	// credentialDeviceType / credentialBackedUp 列に保存する (#707)。
+	// これを保存していないと WebAuthnCredentials() の復元時に
+	// Flags.BackupEligible が default false になり、Cloud sync passkey
+	// (登録時 BE=true) の認証時に go-webauthn の整合性チェックで mismatch
+	// エラーになる。
+	deviceType := "singleDevice"
+	if cred.Flags.BackupEligible {
+		deviceType = "multiDevice"
+	}
+	out.CredentialDeviceType = &deviceType
+	backedUp := cred.Flags.BackupState
+	out.CredentialBackedUp = &backedUp
 	return out
 }

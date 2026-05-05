@@ -324,6 +324,60 @@ func TestUserAdapter_CredentialsRoundtrip(t *testing.T) {
 	assert.Len(t, creds[0].Transport, 2)
 }
 
+// DB に保存された credentialDeviceType=multiDevice / credentialBackedUp=true
+// (Cloud sync passkey) が webauthn.Credential.Flags に正しく復元される (#707)。
+// 復元しないと go-webauthn の認証時に Backup Eligible mismatch エラーになる。
+func TestUserAdapter_RestoresBackupFlags(t *testing.T) {
+	device := "multiDevice"
+	backedUp := true
+	keys := []*model.UserSecurityKey{
+		{
+			ID:                   "AAEC",
+			PublicKey:            "AwQF",
+			Counter:              1,
+			CredentialDeviceType: &device,
+			CredentialBackedUp:   &backedUp,
+		},
+	}
+	a := &userAdapter{user: &model.User{ID: "x"}, keys: keys}
+	creds := a.WebAuthnCredentials()
+	require.Len(t, creds, 1)
+	assert.True(t, creds[0].Flags.BackupEligible)
+	assert.True(t, creds[0].Flags.BackupState)
+}
+
+// device-bound (singleDevice) は BackupEligible=false で復元される。
+func TestUserAdapter_RestoresSingleDeviceFlags(t *testing.T) {
+	device := "singleDevice"
+	backedUp := false
+	keys := []*model.UserSecurityKey{
+		{
+			ID:                   "AAEC",
+			PublicKey:            "AwQF",
+			CredentialDeviceType: &device,
+			CredentialBackedUp:   &backedUp,
+		},
+	}
+	a := &userAdapter{user: &model.User{ID: "x"}, keys: keys}
+	creds := a.WebAuthnCredentials()
+	require.Len(t, creds, 1)
+	assert.False(t, creds[0].Flags.BackupEligible)
+	assert.False(t, creds[0].Flags.BackupState)
+}
+
+// 古いレコード (Flag 列が NULL、本 PR 修正前に登録された passkey) は default
+// false で復元される。Cloud sync passkey の場合は再登録が必要になる。
+func TestUserAdapter_NilFlagsDefaultFalse(t *testing.T) {
+	keys := []*model.UserSecurityKey{
+		{ID: "AAEC", PublicKey: "AwQF"},
+	}
+	a := &userAdapter{user: &model.User{ID: "x"}, keys: keys}
+	creds := a.WebAuthnCredentials()
+	require.Len(t, creds, 1)
+	assert.False(t, creds[0].Flags.BackupEligible)
+	assert.False(t, creds[0].Flags.BackupState)
+}
+
 func TestUserAdapter_SkipsBadEncoding(t *testing.T) {
 	keys := []*model.UserSecurityKey{
 		{ID: "not!base64url", PublicKey: "AwQF"},
@@ -352,6 +406,32 @@ func TestCredentialToModel_WithTransports(t *testing.T) {
 	m := CredentialToModel(cred, "alice", "Yubikey")
 	assert.Equal(t, "Yubikey", m.Name)
 	assert.Equal(t, []string{"usb", "ble"}, []string(m.Transports))
+}
+
+// BackupEligible / BackupState フラグが DB 列 (credentialDeviceType /
+// credentialBackedUp) に正しく保存される (#707)。Cloud sync passkey
+// (BE=true) を保存するときに multiDevice として記録される必要がある。
+func TestCredentialToModel_BackupEligibleSaved(t *testing.T) {
+	cred := makeFakeCredential([]byte{1}, []byte{2}, 0, nil)
+	cred.Flags.BackupEligible = true
+	cred.Flags.BackupState = true
+	m := CredentialToModel(cred, "alice", "Phone")
+	require.NotNil(t, m.CredentialDeviceType)
+	assert.Equal(t, "multiDevice", *m.CredentialDeviceType)
+	require.NotNil(t, m.CredentialBackedUp)
+	assert.True(t, *m.CredentialBackedUp)
+}
+
+// device-bound (Yubikey 等、BE=false) は singleDevice として記録される。
+func TestCredentialToModel_DeviceBoundSaved(t *testing.T) {
+	cred := makeFakeCredential([]byte{1}, []byte{2}, 0, nil)
+	cred.Flags.BackupEligible = false
+	cred.Flags.BackupState = false
+	m := CredentialToModel(cred, "alice", "Yubikey")
+	require.NotNil(t, m.CredentialDeviceType)
+	assert.Equal(t, "singleDevice", *m.CredentialDeviceType)
+	require.NotNil(t, m.CredentialBackedUp)
+	assert.False(t, *m.CredentialBackedUp)
 }
 
 // --- key helpers ---

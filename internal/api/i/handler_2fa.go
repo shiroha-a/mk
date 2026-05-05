@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
@@ -290,6 +292,7 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	}
 	cred, err := h.webauthnSvc.FinishRegistration(c.Request().Context(), user, existing, httpReq)
 	if err != nil {
+		slog.Warn("2fa: webauthn FinishRegistration failed", "userId", user.ID, "err", err)
 		return c.JSON(http.StatusForbidden, apierr.RegistrationFailed())
 	}
 
@@ -303,10 +306,32 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 		"securityKeysAvailable": true,
 	})
 
+	// upstream Misskey TS と同じく `meUpdated` を publish して frontend の
+	// `$i` (current user 状態) を即時更新する (#707)。これが無いと UI の
+	// 設定→セキュリティ→パスキー一覧に登録直後の鍵が出ず、ユーザーは
+	// 「登録できなかった」と誤認する。
+	h.publishMeUpdated(user.ID)
+
 	return c.JSON(http.StatusOK, map[string]any{
 		"id":   key.ID,
 		"name": key.Name,
 	})
+}
+
+// publishMeUpdated は upstream `meUpdated` event を main stream に流す。
+// 失敗は best-effort で握り潰す (publishing は副次的なので main flow を
+// 止めない)。userService.ShowByID で User + Profile を 1 度に取得する。
+func (h *Handler) publishMeUpdated(userID string) {
+	if h.mainStreamPublisher == nil {
+		return
+	}
+	bundle, err := h.userService.ShowByID(userID)
+	if err != nil {
+		slog.Warn("2fa: meUpdated: load user failed", "userId", userID, "err", err)
+		return
+	}
+	packed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+	h.mainStreamPublisher.PublishMainEvent(userID, "meUpdated", packed)
 }
 
 // TwoFARemoveKey handles POST /api/i/2fa/remove-key.
@@ -334,6 +359,8 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 			"usePasswordLessLogin":  false,
 		})
 	}
+	// upstream 互換: 削除でも `meUpdated` を publish して frontend UI を即時更新 (#707)。
+	h.publishMeUpdated(user.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -355,6 +382,8 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	if err := h.securityKeyRepo.UpdateName(req.CredentialID, user.ID, req.Name); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
 	}
+	// 表示名変更も meUpdated で UI 反映 (#707)。
+	h.publishMeUpdated(user.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 
