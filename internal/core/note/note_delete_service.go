@@ -109,6 +109,13 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 		return ErrNoteAccessDenied
 	}
 
+	// 上流 NoteDeleteService が Delete 冒頭で deletedAt を確定させ publish と
+	// federation の Delete activity 両方に渡しているのに合わせ、ここで一度
+	// 取得して noteStream publish に使う。federation 側は別途自分で時刻を
+	// 決めるが、本実装でも publish 直前に再取得すると noteStream の
+	// deletedAt と federation activity の timestamp に不要な差が出るため。
+	deletedAt := time.Now()
+
 	if err := s.noteRepo.Delete(note); err != nil {
 		return err
 	}
@@ -137,7 +144,7 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 	// noteStream に deleted を publish して subNote 購読中の WebSocket
 	// クライアントへ即時反映する (#700)。失敗はベストエフォート。
 	if s.noteStreamHook != nil {
-		s.noteStreamHook.OnNoteDeleted(note.ID, time.Now())
+		s.noteStreamHook.OnNoteDeleted(note.ID, deletedAt)
 	}
 	return nil
 }
