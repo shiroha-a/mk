@@ -17,6 +17,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupDriveFileHandler returns a handler with DriveFileRepo wired and
+// optional seed rows. boilerplate (handler 構築 + repo 生成 + seed +
+// SetDriveFileRepo) を 1 行に圧縮する (#761)。戻り値の repo を直接 mutate
+// して EmojiReferencedURLs 等の追加設定も可能。
+func setupDriveFileHandler(t *testing.T, seed ...*model.DriveFile) (*apiadmin.Handler, *testutil.MockDriveFileRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockDriveFileRepository()
+	for _, df := range seed {
+		require.NoError(t, repo.Create(df))
+	}
+	h.SetDriveFileRepo(repo)
+	return h, repo
+}
+
+// setupEmojiHandler returns a handler with EmojiRepo wired and optional
+// seed rows. DriveFile helper と同じ contract (#761)。
+func setupEmojiHandler(t *testing.T, seed ...*model.Emoji) (*apiadmin.Handler, *testutil.MockEmojiRepository) {
+	t.Helper()
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockEmojiRepository()
+	for _, e := range seed {
+		require.NoError(t, repo.Create(e))
+	}
+	h.SetEmojiRepo(repo)
+	return h, repo
+}
+
 type failingListV2EmojiRepo struct {
 	*testutil.MockEmojiRepository
 }
@@ -48,13 +76,12 @@ func (f *failingListV2EmojiRepo) CountV2(_ model.EmojiV2Filter) (int64, error) {
 // --- Drive ------------------------------------------------------------------
 
 func TestDriveFiles_FiltersByOrigin(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	localUser := "u1"
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d1", UserID: &localUser, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d2", UserHost: &remoteHost, Type: "image/jpeg"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d1", UserID: &localUser, Type: "image/png"},
+		&model.DriveFile{ID: "d2", UserHost: &remoteHost, Type: "image/jpeg"},
+	)
 
 	rec := doPost(h.DriveFiles, `{"origin":"remote","limit":10}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -68,15 +95,14 @@ func TestDriveFiles_FiltersByUserID(t *testing.T) {
 	// admin/user/<id> のドライブタブは userId だけを送ってくる (#471)。
 	// upstream は userId 指定時に origin / hostname を読まないので、それに
 	// 合わせて他ユーザーの remote ファイルが混ざらないことを確認する。
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	target := "u_target"
 	other := "u_other"
 	otherHost := "remote.example"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_t1", UserID: &target, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_t2", UserID: &target, UserHost: &otherHost, Type: "image/jpeg"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_o1", UserID: &other, UserHost: &otherHost, Type: "image/png"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d_t1", UserID: &target, Type: "image/png"},
+		&model.DriveFile{ID: "d_t2", UserID: &target, UserHost: &otherHost, Type: "image/jpeg"},
+		&model.DriveFile{ID: "d_o1", UserID: &other, UserHost: &otherHost, Type: "image/png"},
+	)
 
 	rec := doPost(h.DriveFiles, `{"userId":"u_target","limit":10}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -92,12 +118,11 @@ func TestDriveFiles_FiltersByUserID(t *testing.T) {
 }
 
 func TestDriveFiles_FiltersByTypePrefix(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	u := "u1"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d1", UserID: &u, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d2", UserID: &u, Type: "video/mp4"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d1", UserID: &u, Type: "image/png"},
+		&model.DriveFile{ID: "d2", UserID: &u, Type: "video/mp4"},
+	)
 
 	rec := doPost(h.DriveFiles, `{"type":"image/","limit":10}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -111,16 +136,15 @@ func TestDriveFiles_FiltersBySystemToken(t *testing.T) {
 	// #686: userId="@system" 指定時は system 所有 (UserID IS NULL) の drive
 	// file のみを返す。emoji copy / import zip 経路で蓄積される system file
 	// を admin UI から可視化するための経路。
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	u := "u1"
 	remoteUser := "u_remote"
 	host := "remote.example"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys1", UserID: nil, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys2", UserID: nil, Type: "image/jpeg"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_user", UserID: &u, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_remote", UserID: &remoteUser, UserHost: &host, Type: "image/png"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d_sys1", UserID: nil, Type: "image/png"},
+		&model.DriveFile{ID: "d_sys2", UserID: nil, Type: "image/jpeg"},
+		&model.DriveFile{ID: "d_user", UserID: &u, Type: "image/png"},
+		&model.DriveFile{ID: "d_remote", UserID: &remoteUser, UserHost: &host, Type: "image/png"},
+	)
 
 	// const apiadmin.SystemUserIDToken を直接参照することで、token 値を後で変更しても
 	// このテストが追従するようにする (文字列直書きを避ける)。
@@ -142,11 +166,10 @@ func TestDriveFiles_FiltersBySystemToken(t *testing.T) {
 func TestDriveFiles_SystemTokenWithTypeFilter(t *testing.T) {
 	// #686: @system token は type prefix filter と組み合わせ可能。MIME 種別で
 	// system file を絞り込めることを保証する (image/* だけ見たい等)。
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys_img", UserID: nil, Type: "image/png"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d_sys_zip", UserID: nil, Type: "application/zip"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d_sys_img", UserID: nil, Type: "image/png"},
+		&model.DriveFile{ID: "d_sys_zip", UserID: nil, Type: "application/zip"},
+	)
 
 	body := fmt.Sprintf(`{"userId":%q,"type":"image/","limit":10}`, apiadmin.SystemUserIDToken)
 	rec := doPost(h.DriveFiles, body, adminUser)
@@ -158,30 +181,27 @@ func TestDriveFiles_SystemTokenWithTypeFilter(t *testing.T) {
 }
 
 func TestDriveShowFile_MissingBothFileIDAndURL(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
+	h, _ := setupDriveFileHandler(t)
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.DriveShowFile, `{}`, adminUser).Code)
 }
 
 func TestDriveShowFile_ByFileID(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	u := "u1"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "d1", UserID: &u, Name: "a.png", Type: "image/png"}))
-	h.SetDriveFileRepo(repo)
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d1", UserID: &u, Name: "a.png", Type: "image/png"},
+	)
 
 	rec := doPost(h.DriveShowFile, `{"fileId":"d1"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestDriveCleanup_InvokesDeleteOrphans(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "orphan1"}))
 	u := "u1"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "kept", UserID: &u}))
-	h.SetDriveFileRepo(repo)
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "orphan1"},
+		&model.DriveFile{ID: "kept", UserID: &u},
+	)
 
 	rec := doPost(h.DriveCleanup, `{}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -195,13 +215,12 @@ func TestDriveCleanup_InvokesDeleteOrphans(t *testing.T) {
 // file は保持される) を assert する。SQL 層の guard は repository test で
 // 別途検証 (TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced)。
 func TestDriveCleanup_PreservesEmojiReferencedSystemFiles(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	emojiRefURL := "http://test/system_emoji.png"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "pure_orph", UserID: nil, URL: "http://test/pure.bin"}))
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "emoji_sys", UserID: nil, URL: emojiRefURL}))
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "pure_orph", UserID: nil, URL: "http://test/pure.bin"},
+		&model.DriveFile{ID: "emoji_sys", UserID: nil, URL: emojiRefURL},
+	)
 	repo.EmojiReferencedURLs = map[string]bool{emojiRefURL: true}
-	h.SetDriveFileRepo(repo)
 
 	rec := doPost(h.DriveCleanup, `{}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -210,13 +229,12 @@ func TestDriveCleanup_PreservesEmojiReferencedSystemFiles(t *testing.T) {
 }
 
 func TestDriveCleanRemoteFiles_InvokesDeleteRemoteCache(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockDriveFileRepository()
 	host := "remote.example"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "remote1", IsLink: true, UserHost: &host}))
 	u := "u1"
-	require.NoError(t, repo.Create(&model.DriveFile{ID: "local1", UserID: &u}))
-	h.SetDriveFileRepo(repo)
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "remote1", IsLink: true, UserHost: &host},
+		&model.DriveFile{ID: "local1", UserID: &u},
+	)
 
 	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -227,13 +245,12 @@ func TestDriveCleanRemoteFiles_InvokesDeleteRemoteCache(t *testing.T) {
 // --- Emoji ------------------------------------------------------------------
 
 func TestEmojiListRemote_Pagination(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	host := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha", Host: &host}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "beta", Host: &host}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e3", Name: "gamma", Host: nil})) // local
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha", Host: &host},
+		&model.Emoji{ID: "e2", Name: "beta", Host: &host},
+		&model.Emoji{ID: "e3", Name: "gamma", Host: nil}, // local
+	)
 
 	rec := doPost(h.EmojiListRemote, `{"limit":10}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -244,12 +261,11 @@ func TestEmojiListRemote_Pagination(t *testing.T) {
 }
 
 func TestEmojiListRemote_FilterByQuery(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	host := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "cat_smile", Host: &host}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "dog_run", Host: &host}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "cat_smile", Host: &host},
+		&model.Emoji{ID: "e2", Name: "dog_run", Host: &host},
+	)
 
 	rec := doPost(h.EmojiListRemote, `{"query":"cat","limit":10}`, adminUser)
 	var rows []map[string]any
@@ -261,13 +277,12 @@ func TestEmojiListRemote_FilterByQuery(t *testing.T) {
 func TestEmojiCopy_DuplicateNameReturns400(t *testing.T) {
 	// Misskey TS 互換 (#650 問題 1): copy は元 name のまま local 化するため、
 	// 同名の local emoji が既存だと DUPLICATE_NAME を返す。
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
 	// remote の "smile" を copy しようとするが、local にも同名 "smile" 存在。
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "smile", Host: &remoteHost, OriginalURL: "https://x"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e_local", Name: "smile", OriginalURL: "https://y"}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "smile", Host: &remoteHost, OriginalURL: "https://x"},
+		&model.Emoji{ID: "e_local", Name: "smile", OriginalURL: "https://y"},
+	)
 
 	rec := doPost(h.EmojiCopy, `{"emojiId":"e1"}`, adminUser)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -290,11 +305,10 @@ func findEmojiByID(t *testing.T, repo *testutil.MockEmojiRepository, id string) 
 func TestEmojiCopy_Success(t *testing.T) {
 	// remote → local copy: copy 先が host=nil で同名 local emoji が無い
 	// ので 200 を返す (Misskey TS 互換、#650 問題 1)。
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "unique", Host: &remoteHost, OriginalURL: "https://x"}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "unique", Host: &remoteHost, OriginalURL: "https://x"},
+	)
 
 	rec := doPost(h.EmojiCopy, `{"emojiId":"e1"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -308,8 +322,7 @@ func TestEmojiCopy_Success(t *testing.T) {
 }
 
 func TestEmojiCopy_NotFound(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	h, _ := setupEmojiHandler(t)
 	assert.Equal(t, http.StatusNotFound,
 		doPost(h.EmojiCopy, `{"emojiId":"missing"}`, adminUser).Code)
 }
@@ -344,15 +357,14 @@ func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, use
 // new local emoji (#670). Without this rewrite the local copy stays bound to
 // the remote server's URL and breaks when that server deletes the file.
 func TestEmojiCopy_StoresInDrive(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "src1", Name: "happy", Host: &remoteHost,
-		OriginalURL: "https://remote.example/emoji/happy.png",
-		PublicURL:   "https://remote.example/emoji/happy.png",
-	}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{
+			ID: "src1", Name: "happy", Host: &remoteHost,
+			OriginalURL: "https://remote.example/emoji/happy.png",
+			PublicURL:   "https://remote.example/emoji/happy.png",
+		},
+	)
 
 	webpub := "https://local.example/files/webpub.png"
 	webpubType := "image/webp"
@@ -394,14 +406,13 @@ func TestEmojiCopy_StoresInDrive(t *testing.T) {
 // TestEmojiCopy_StoresInDrive_NoWebpublic falls back to df.URL / df.Type
 // when the drive file has no webpublic variant (e.g. small images).
 func TestEmojiCopy_StoresInDrive_NoWebpublic(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "src1", Name: "tiny", Host: &remoteHost,
-		OriginalURL: "https://remote.example/emoji/tiny.png",
-	}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{
+			ID: "src1", Name: "tiny", Host: &remoteHost,
+			OriginalURL: "https://remote.example/emoji/tiny.png",
+		},
+	)
 
 	fetcher := &fakeEmojiImageFetcher{
 		returnDF: &model.DriveFile{
@@ -428,14 +439,13 @@ func TestEmojiCopy_StoresInDrive_NoWebpublic(t *testing.T) {
 // the copy (no row created) instead of silently falling back to the remote
 // URL — falling back would re-introduce the #670 symptom.
 func TestEmojiCopy_FetcherErrorReturns500(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "src1", Name: "happy", Host: &remoteHost,
-		OriginalURL: "https://remote.example/emoji/happy.png",
-	}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{
+			ID: "src1", Name: "happy", Host: &remoteHost,
+			OriginalURL: "https://remote.example/emoji/happy.png",
+		},
+	)
 
 	fetcher := &fakeEmojiImageFetcher{returnErr: assert.AnError}
 	h.SetEmojiImageFetcher(fetcher)
@@ -454,15 +464,14 @@ func TestEmojiCopy_FetcherErrorReturns500(t *testing.T) {
 // before the upgrade, etc). Without this fallback every test handler would
 // have to wire a drive stub.
 func TestEmojiCopy_FetcherUnsetUsesLegacyURL(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "src1", Name: "happy", Host: &remoteHost,
-		OriginalURL: "https://remote.example/emoji/happy.png",
-		PublicURL:   "https://remote.example/emoji/happy.png",
-	}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{
+			ID: "src1", Name: "happy", Host: &remoteHost,
+			OriginalURL: "https://remote.example/emoji/happy.png",
+			PublicURL:   "https://remote.example/emoji/happy.png",
+		},
+	)
 
 	rec := doPost(h.EmojiCopy, `{"emojiId":"src1"}`, adminUser)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -473,11 +482,10 @@ func TestEmojiCopy_FetcherUnsetUsesLegacyURL(t *testing.T) {
 }
 
 func TestEmojiSetCategoryBulk_BatchUpdate(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "beta"}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha"},
+		&model.Emoji{ID: "e2", Name: "beta"},
+	)
 
 	rec := doPost(h.EmojiSetCategoryBulk,
 		`{"ids":["e1","e2"],"category":"animals"}`, adminUser)
@@ -489,10 +497,9 @@ func TestEmojiSetCategoryBulk_BatchUpdate(t *testing.T) {
 }
 
 func TestEmojiSetLicenseBulk_BatchUpdate(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha"}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha"},
+	)
 
 	rec := doPost(h.EmojiSetLicenseBulk, `{"ids":["e1"],"license":"CC-BY-4.0"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -501,11 +508,10 @@ func TestEmojiSetLicenseBulk_BatchUpdate(t *testing.T) {
 }
 
 func TestEmojiSetAliasesBulk_BatchUpdate(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "beta"}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha"},
+		&model.Emoji{ID: "e2", Name: "beta"},
+	)
 
 	rec := doPost(h.EmojiSetAliasesBulk,
 		`{"ids":["e1","e2"],"aliases":["x","y"]}`, adminUser)
@@ -515,10 +521,9 @@ func TestEmojiSetAliasesBulk_BatchUpdate(t *testing.T) {
 }
 
 func TestEmojiAddAliasesBulk_Merges(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"existing"}}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"existing"}},
+	)
 
 	rec := doPost(h.EmojiAddAliasesBulk,
 		`{"ids":["e1"],"aliases":["new1","new2"]}`, adminUser)
@@ -528,10 +533,9 @@ func TestEmojiAddAliasesBulk_Merges(t *testing.T) {
 }
 
 func TestEmojiAddAliasesBulk_DedupesAgainstExisting(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"a", "b"}}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"a", "b"}},
+	)
 
 	rec := doPost(h.EmojiAddAliasesBulk,
 		`{"ids":["e1"],"aliases":["b","c"]}`, adminUser)
@@ -540,10 +544,9 @@ func TestEmojiAddAliasesBulk_DedupesAgainstExisting(t *testing.T) {
 }
 
 func TestEmojiRemoveAliasesBulk_Filters(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"a", "b", "c"}}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha", Aliases: []string{"a", "b", "c"}},
+	)
 
 	rec := doPost(h.EmojiRemoveAliasesBulk,
 		`{"ids":["e1"],"aliases":["b"]}`, adminUser)
@@ -552,12 +555,11 @@ func TestEmojiRemoveAliasesBulk_Filters(t *testing.T) {
 }
 
 func TestEmojiDeleteBulk_Batch(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "alpha"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "beta"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e3", Name: "gamma"}))
-	h.SetEmojiRepo(repo)
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "alpha"},
+		&model.Emoji{ID: "e2", Name: "beta"},
+		&model.Emoji{ID: "e3", Name: "gamma"},
+	)
 
 	rec := doPost(h.EmojiDeleteBulk, `{"ids":["e1","e3"]}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -571,8 +573,7 @@ func TestEmojiDeleteBulk_Batch(t *testing.T) {
 }
 
 func TestEmojiImportZip_UnknownFileReturns400(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
+	h, _ := setupDriveFileHandler(t)
 	h.SetEmojiImportEnqueuer(&stubEmojiImportEnqueuer{})
 	rec := doPost(h.EmojiImportZip, `{"fileId":"missing"}`, adminUser)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -581,11 +582,10 @@ func TestEmojiImportZip_UnknownFileReturns400(t *testing.T) {
 // --- EmojiListV2 -------------------------------------------------------------
 
 func TestEmojiListV2_Basic(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "smile", PublicURL: "https://example.com/smile.png"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "wave", OriginalURL: "https://example.com/wave-orig.png"}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "smile", PublicURL: "https://example.com/smile.png"},
+		&model.Emoji{ID: "e2", Name: "wave", OriginalURL: "https://example.com/wave-orig.png"},
+	)
 
 	rec := doPost(h.EmojiListV2, `{}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -621,12 +621,11 @@ func TestEmojiListV2_InvalidJSON(t *testing.T) {
 }
 
 func TestEmojiListV2_HostType(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	host := "remote.example"
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "local_only"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "remote_one", Host: &host}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "local_only"},
+		&model.Emoji{ID: "e2", Name: "remote_one", Host: &host},
+	)
 
 	// local のみ
 	rec := doPost(h.EmojiListV2, `{"query":{"hostType":"local"}}`, adminUser)
@@ -652,12 +651,11 @@ func TestEmojiListV2_HostType(t *testing.T) {
 }
 
 func TestEmojiListV2_QueryFilter(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "cat_smile"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "dog_run"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e3", Name: "caterpillar"}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "cat_smile"},
+		&model.Emoji{ID: "e2", Name: "dog_run"},
+		&model.Emoji{ID: "e3", Name: "caterpillar"},
+	)
 
 	rec := doPost(h.EmojiListV2, `{"query":{"name":"cat"}}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -672,23 +670,22 @@ func TestEmojiListV2_QueryFilter(t *testing.T) {
 // originalUrl filter を渡してくる。handler / model / repo がこれらを
 // 受けないと silent ignore で「検索しても全件出る」状態になる。
 func TestEmojiListV2_URIFilter(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
 	hostA := "alpha.example"
 	hostB := "beta.example"
 	uriA := "https://alpha.example/emojis/x"
 	uriB := "https://beta.example/emojis/y"
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "e1", Name: "x", Host: &hostA, URI: &uriA,
-		OriginalURL: "https://alpha-cdn.example/x.png",
-		PublicURL:   "https://alpha-cdn.example/x.png",
-	}))
-	require.NoError(t, repo.Create(&model.Emoji{
-		ID: "e2", Name: "y", Host: &hostB, URI: &uriB,
-		OriginalURL: "https://beta-cdn.example/y.png",
-		PublicURL:   "https://beta-cdn.example/y.png",
-	}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{
+			ID: "e1", Name: "x", Host: &hostA, URI: &uriA,
+			OriginalURL: "https://alpha-cdn.example/x.png",
+			PublicURL:   "https://alpha-cdn.example/x.png",
+		},
+		&model.Emoji{
+			ID: "e2", Name: "y", Host: &hostB, URI: &uriB,
+			OriginalURL: "https://beta-cdn.example/y.png",
+			PublicURL:   "https://beta-cdn.example/y.png",
+		},
+	)
 
 	t.Run("uri filter narrows to alpha", func(t *testing.T) {
 		rec := doPost(h.EmojiListV2, `{"query":{"uri":"alpha.example"}}`, adminUser)
@@ -720,13 +717,12 @@ func TestEmojiListV2_URIFilter(t *testing.T) {
 }
 
 func TestEmojiListV2_Pagination(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
+	seeds := make([]*model.Emoji, 5)
 	for i := 0; i < 5; i++ {
 		id := "e" + string(rune('1'+i))
-		require.NoError(t, repo.Create(&model.Emoji{ID: id, Name: "emoji_" + id}))
+		seeds[i] = &model.Emoji{ID: id, Name: "emoji_" + id}
 	}
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t, seeds...)
 
 	// page 1, limit 2
 	rec := doPost(h.EmojiListV2, `{"limit":2,"page":1}`, adminUser)
@@ -746,12 +742,11 @@ func TestEmojiListV2_Pagination(t *testing.T) {
 }
 
 func TestEmojiListV2_SortKeys(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "beta"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "alpha"}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e3", Name: "gamma"}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "beta"},
+		&model.Emoji{ID: "e2", Name: "alpha"},
+		&model.Emoji{ID: "e3", Name: "gamma"},
+	)
 
 	// name ASC
 	rec := doPost(h.EmojiListV2, `{"sortKeys":["+name"]}`, adminUser)
@@ -773,11 +768,10 @@ func TestEmojiListV2_SortKeys(t *testing.T) {
 }
 
 func TestEmojiListV2_SensitiveFilter(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "safe", IsSensitive: false}))
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e2", Name: "nsfw", IsSensitive: true}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "safe", IsSensitive: false},
+		&model.Emoji{ID: "e2", Name: "nsfw", IsSensitive: true},
+	)
 
 	rec := doPost(h.EmojiListV2, `{"query":{"isSensitive":true}}`, adminUser)
 	var resp map[string]any
@@ -788,10 +782,9 @@ func TestEmojiListV2_SensitiveFilter(t *testing.T) {
 }
 
 func TestEmojiListV2_LimitClamped(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	repo := testutil.NewMockEmojiRepository()
-	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "a"}))
-	h.SetEmojiRepo(repo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "a"},
+	)
 
 	// limit > 100 は100にクランプされる
 	rec := doPost(h.EmojiListV2, `{"limit":999}`, adminUser)
@@ -923,8 +916,7 @@ func TestEmojiImportZip_EnqueueFailure(t *testing.T) {
 // --- moderation log assertions (#661 + #650) ---
 
 func TestEmojiAdd_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	h, _ := setupEmojiHandler(t)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.EmojiAdd, `{"name":"smile","url":"https://example/smile.png"}`, adminUser)
@@ -942,10 +934,9 @@ func TestEmojiAdd_WritesModerationLog(t *testing.T) {
 func TestEmojiUpdate_WritesModerationLog_WithExtendedFields(t *testing.T) {
 	// #650 問題 2 + #661: Misskey 互換の license/isSensitive/localOnly が
 	// 永続化されること、updateCustomEmoji log に before/after が入ること。
-	h, _, _, _ := newTestHandler(t)
-	emojiRepo := testutil.NewMockEmojiRepository()
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e1", Name: "smile"}))
-	h.SetEmojiRepo(emojiRepo)
+	h, emojiRepo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "smile"},
+	)
 	repo := attachModLog(t, h)
 
 	body := `{"id":"e1","name":"smile2","license":"CC0","isSensitive":true,"localOnly":true}`
@@ -976,8 +967,7 @@ func TestEmojiUpdate_NoSuchEmojiOnMissingID(t *testing.T) {
 	// UpdateFields が RowsAffected を見ずに常に nil 返却で 204 になっていた。
 	// #729: UUID は upstream `684dec9d-...` (mk-go の旧 typo `684b7e7e-...`
 	// から修正) と完全一致することも assert する。
-	h, _, _, _ := newTestHandler(t)
-	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	h, _ := setupEmojiHandler(t)
 	rec := doPost(h.EmojiUpdate, `{"id":"ghost","name":"x"}`, adminUser)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	var body map[string]any
@@ -990,10 +980,9 @@ func TestEmojiUpdate_NoSuchEmojiOnMissingID(t *testing.T) {
 }
 
 func TestEmojiDelete_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	emojiRepo := testutil.NewMockEmojiRepository()
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e1", Name: "doomed"}))
-	h.SetEmojiRepo(emojiRepo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "doomed"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.EmojiDelete, `{"id":"e1"}`, adminUser)
@@ -1009,11 +998,10 @@ func TestEmojiDelete_WritesModerationLog(t *testing.T) {
 }
 
 func TestEmojiCopy_WritesModerationLog(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	emojiRepo := testutil.NewMockEmojiRepository()
 	remoteHost := "remote.example"
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e1", Name: "wave", Host: &remoteHost}))
-	h.SetEmojiRepo(emojiRepo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "wave", Host: &remoteHost},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.EmojiCopy, `{"emojiId":"e1"}`, adminUser)
@@ -1026,12 +1014,11 @@ func TestEmojiCopy_WritesModerationLog(t *testing.T) {
 func TestEmojiDeleteBulk_WritesPerEmojiLog(t *testing.T) {
 	// Misskey TS 互換: delete-bulk は対象絵文字数だけ deleteCustomEmoji
 	// log を出す (CustomEmojiService.deleteBulk の for ループ相当)。
-	h, _, _, _ := newTestHandler(t)
-	emojiRepo := testutil.NewMockEmojiRepository()
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e1", Name: "a"}))
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e2", Name: "b"}))
-	require.NoError(t, emojiRepo.Create(&model.Emoji{ID: "e3", Name: "c"}))
-	h.SetEmojiRepo(emojiRepo)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "a"},
+		&model.Emoji{ID: "e2", Name: "b"},
+		&model.Emoji{ID: "e3", Name: "c"},
+	)
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.EmojiDeleteBulk, `{"ids":["e1","e2","e3"]}`, adminUser)
@@ -1048,16 +1035,15 @@ func TestEmojiDeleteBulk_WritesPerEmojiLog(t *testing.T) {
 // calls), so 数千件の operation でも N goroutine + N round-trips に
 // fan-out しない。
 func TestEmojiDeleteBulk_BatchedSingleInsert(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	emojiRepo := testutil.NewMockEmojiRepository()
 	const n = 50
 	ids := make([]string, 0, n)
+	emojis := make([]*model.Emoji, 0, n)
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("e%d", i)
 		ids = append(ids, id)
-		require.NoError(t, emojiRepo.Create(&model.Emoji{ID: id, Name: id}))
+		emojis = append(emojis, &model.Emoji{ID: id, Name: id})
 	}
-	h.SetEmojiRepo(emojiRepo)
+	h, _ := setupEmojiHandler(t, emojis...)
 	repo := attachModLog(t, h)
 
 	body, err := json.Marshal(map[string]any{"ids": ids})
