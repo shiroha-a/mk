@@ -79,7 +79,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 通常の `CREATE INDEX` は ACCESS EXCLUSIVE lock を取って書き込みを一時 block するが、`CONCURRENTLY` 付きなら Share lock のみで online で適用できる。production の数百万行クラスのテーブルでは推奨。
 
 注意点:
-- migration ファイル内に複数 statement を入れるなら `x-multi-statement=true` URL 拡張が必要 (現状未使用)
+- **`CONCURRENTLY` を含む migration は single-statement にする**。複数 statement を入れて途中で失敗すると、transaction 外実行ゆえ部分適用 (一部 statement だけ反映、残りは未適用) になり手動 cleanup が必要になる。1 ファイル 1 index が安全
+- migration ファイル内に複数 statement を入れるなら `x-multi-statement=true` URL 拡張が必要 (現状未使用、`CONCURRENTLY` migration では避けること)
 - `CONCURRENTLY` は失敗時に invalid index が残るので down migration で `DROP INDEX IF EXISTS` を必ず書く
 
 ### Docker
