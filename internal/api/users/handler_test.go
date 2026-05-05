@@ -596,6 +596,32 @@ func TestSearch_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// origin enum validation (#763): upstream paramDef enum と一致しない値は
+// 400 で reject。空 / local / remote / combined は OK。
+func TestSearch_OriginEnumValidation(t *testing.T) {
+	h, _ := newTestHandler(t)
+	tt := []struct {
+		origin string
+		want   int
+	}{
+		{"", http.StatusOK},              // default → combined
+		{"local", http.StatusOK},         // upstream enum
+		{"remote", http.StatusOK},        // upstream enum
+		{"combined", http.StatusOK},      // upstream enum
+		{"all", http.StatusBadRequest},   // typo
+		{"LOCAL", http.StatusBadRequest}, // case mismatch (upstream は lower-case 厳格)
+		{"none", http.StatusBadRequest},  // 別 enum 由来
+		{"foo", http.StatusBadRequest},   // garbage
+	}
+	for _, tc := range tt {
+		t.Run(tc.origin, func(t *testing.T) {
+			body := `{"query":"test","origin":"` + tc.origin + `"}`
+			rec := post(h.Search, body)
+			assert.Equal(t, tc.want, rec.Code, "origin=%q expected %d", tc.origin, tc.want)
+		})
+	}
+}
+
 // --- Notes ---
 
 func TestNotes_Success(t *testing.T) {
