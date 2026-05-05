@@ -164,15 +164,15 @@ func TestFederationUpdateInstance(t *testing.T) {
 // する。time.Sleep + assert.Empty より flaky になりにくい (期間中ずっと empty
 // であることを poll する)。
 // setupFederationUpdateInstance returns a configured handler + modlog repo
-// pre-populated with the given instance row. before=nil なら instance を
-// seed しない (host-not-found / no-instance-repo シナリオ用)。FederationUpdate
-// Instance 系 test の boilerplate を 1 行にまとめる (#716)。
-func setupFederationUpdateInstance(t *testing.T, before *model.Instance) (*apiadmin.Handler, *testutil.MockModerationLogRepository) {
+// pre-populated with the given instance row. instance=nil なら seed しない
+// (host-not-found / no-instance-repo シナリオ用)。FederationUpdateInstance
+// 系 test の boilerplate を 1 行にまとめる (#716)。
+func setupFederationUpdateInstance(t *testing.T, instance *model.Instance) (*apiadmin.Handler, *testutil.MockModerationLogRepository) {
 	t.Helper()
 	h, _, _, _ := newTestHandler(t)
 	instRepo := testutil.NewMockInstanceRepository()
-	if before != nil {
-		require.NoError(t, instRepo.Create(before))
+	if instance != nil {
+		require.NoError(t, instRepo.Create(instance))
 	}
 	h.SetInstanceRepo(instRepo)
 	return h, attachModLog(t, h)
