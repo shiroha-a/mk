@@ -6,7 +6,7 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 
 ## 特徴
 
-- Go 1.25 / Echo v4 / GORM + pgx / go-redis v9 / asynq
+- Go 1.26 / Echo v4 / GORM + pgx / go-redis v9 / asynq
 - Misskeyフロントエンド(SPA)をそのまま配信
 - TypeScript版と同じPostgreSQL/Redisを共有、無停止で移行可能
 - ActivityPub連合対応（HTTP Signatures、リモートオブジェクト解決、配信キュー）
@@ -28,7 +28,7 @@ docker compose up -d
 
 ## ローカルビルド
 
-前提: Go 1.25+、PostgreSQL 16+、Redis 7+、Docker (テスト用)
+前提: Go 1.26+、PostgreSQL 16+、Redis 7+、Docker (テスト用)
 
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git
