@@ -129,16 +129,27 @@ type federationUpdateInstanceRequest struct {
 // fields explicitly sent in the request are included so the caller can
 // "clear" string fields by sending "" (and not "leave unchanged" via
 // omitting the field).
+//
+// upstream Misskey TS の admin/federation/update-instance は wire 上では
+// `isSuspended bool` を受けるが、mk-go の `instance` table は
+// `suspensionState varchar` enum (`none` / `manuallySuspended` / 等) で
+// 管理しており `isSuspended` 列は存在しない (#715 / #724)。boolean を
+// enum に変換して GORM Updates 用 map に詰める。
+//
+// `isBlocked` / `isSilenced` は upstream にも対応 column が無く、mk-go
+// schema にも存在しない。silently drop。将来 schema 拡張で対応 column が
+// 増えたら本関数で変換を足す。
 func (req federationUpdateInstanceRequest) updates() map[string]any {
 	out := map[string]any{}
 	if req.IsSuspended != nil {
-		out["isSuspended"] = *req.IsSuspended
-	}
-	if req.IsBlocked != nil {
-		out["isBlocked"] = *req.IsBlocked
-	}
-	if req.IsSilenced != nil {
-		out["isSilenced"] = *req.IsSilenced
+		// admin が「suspend する」を選んだら manuallySuspended、解除は none。
+		// auto-suspend (goneSuspended / autoSuspendedForNotResponding) はこの
+		// 経路では生成されず、別 path で発生する。
+		if *req.IsSuspended {
+			out["suspensionState"] = string(model.SuspensionStateManuallySuspended)
+		} else {
+			out["suspensionState"] = string(model.SuspensionStateNone)
+		}
 	}
 	if req.ModerationNote != nil {
 		// pointer != nil なら明示的に送信されたので空文字列でも反映する。
@@ -183,7 +194,12 @@ func (h *Handler) FederationUpdateInstance(c echo.Context) error {
 	// 時は deep copy への昇格を検討。
 	before := *beforePtr
 	if updates := req.updates(); len(updates) > 0 {
-		_ = h.instanceRepo.UpdateFields(req.Host, updates)
+		if err := h.instanceRepo.UpdateFields(req.Host, updates); err != nil {
+			// silently 握り潰すと #724 のように DB 列ミスマッチで NO-OP に
+			// なって moderation log だけ書き込まれる症状が再発する。warn
+			// で残すことで運用者が気付ける。
+			slog.Warn("admin: instance UpdateFields failed", "host", req.Host, "err", err)
+		}
 	}
 	// suspend / unsuspend と moderationNote 変更で個別 log を出す。
 	// SuspensionState != "none" を「suspended」と扱う。

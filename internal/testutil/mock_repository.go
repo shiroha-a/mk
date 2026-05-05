@@ -2437,36 +2437,19 @@ func applyInstanceFields(i *model.Instance, fields map[string]any) {
 				i.NotRespondingSince = t
 			}
 		case "suspensionState":
-			if s, ok := v.(model.SuspensionState); ok {
+			// production の handler は `string(model.SuspensionState...)` を渡す
+			// (#715 / #724 で整理) ので string も受け付ける。直接 enum 型で
+			// 渡す内部 caller の互換も維持。
+			switch s := v.(type) {
+			case model.SuspensionState:
 				i.SuspensionState = s
+			case string:
+				i.SuspensionState = model.SuspensionState(s)
 			}
 		case "moderationNote":
 			if s, ok := v.(string); ok {
 				i.ModerationNote = s
 			}
-		// admin/federation/update-instance handler が送る boolean key を
-		// mock 上で受けたときの挙動 (#714)。
-		//
-		// isSuspended は upstream Misskey TS の旧 schema 由来の boolean key。
-		// mk-go では SuspensionState enum で管理しているので、mock 上では
-		// handler の意図を mirror して boolean → SuspensionState 変換を行う
-		// (true → ManuallySuspended、false → None)。
-		// production の handler 側 bug (existence しない列に UPDATE 試行) は
-		// #724 で別途修正される。
-		case "isSuspended":
-			if b, ok := v.(bool); ok {
-				if b {
-					i.SuspensionState = model.SuspensionStateManuallySuspended
-				} else {
-					i.SuspensionState = model.SuspensionStateNone
-				}
-			}
-		// isBlocked / isSilenced は model.Instance に対応 field が無く DB
-		// schema にも存在しない (#715 で二重カラム統合議論中)。明示的に
-		// case を持つことで「silently drop されている」状態を visible に
-		// し、将来 model 拡張で field が増えたら修正点が明確になる。
-		// 空 body は意図的: 受け取って何もしない。
-		case "isBlocked", "isSilenced":
 		}
 	}
 }

@@ -42,9 +42,13 @@ func TestFederationUpdateInstanceRequest_NotePointerSemantics(t *testing.T) {
 }
 
 // TestFederationUpdateInstanceRequest_UpdatesIncludesAllSentFields は他の
-// pointer fields (isSuspended/isBlocked/isSilenced) が送信されたときだけ
-// updates に含まれる契約を guard する。partial update 互換のため同じ
-// pointer-vs-default 区別が必要。
+// pointer fields が送信されたときだけ updates に含まれる契約を guard する。
+// partial update 互換のため同じ pointer-vs-default 区別が必要。
+//
+// #715 / #724: isSuspended は SQL 列に存在しないので suspensionState enum に
+// 変換する。isBlocked / isSilenced は対応 DB 列が無く mk-go schema にも無い
+// ため updates から落とす (silently dropped、存在しない列への UPDATE で
+// SQL エラーになるのを防ぐ)。
 func TestFederationUpdateInstanceRequest_UpdatesIncludesAllSentFields(t *testing.T) {
 	tt := true
 	ff := false
@@ -60,19 +64,24 @@ func TestFederationUpdateInstanceRequest_UpdatesIncludesAllSentFields(t *testing
 			want: map[string]any{},
 		},
 		{
-			name: "isSuspended true",
+			name: "isSuspended true → suspensionState manuallySuspended",
 			req:  federationUpdateInstanceRequest{IsSuspended: &tt},
-			want: map[string]any{"isSuspended": true},
+			want: map[string]any{"suspensionState": "manuallySuspended"},
 		},
 		{
-			name: "isBlocked false",
+			name: "isSuspended false → suspensionState none",
+			req:  federationUpdateInstanceRequest{IsSuspended: &ff},
+			want: map[string]any{"suspensionState": "none"},
+		},
+		{
+			name: "isBlocked dropped (no column)",
 			req:  federationUpdateInstanceRequest{IsBlocked: &ff},
-			want: map[string]any{"isBlocked": false},
+			want: map[string]any{},
 		},
 		{
-			name: "isSilenced true",
+			name: "isSilenced dropped (no column)",
 			req:  federationUpdateInstanceRequest{IsSilenced: &tt},
-			want: map[string]any{"isSilenced": true},
+			want: map[string]any{},
 		},
 		{
 			name: "moderationNote set",
@@ -86,8 +95,8 @@ func TestFederationUpdateInstanceRequest_UpdatesIncludesAllSentFields(t *testing
 				ModerationNote: &note,
 			},
 			want: map[string]any{
-				"isSuspended": true, "isBlocked": false, "isSilenced": true,
-				"moderationNote": "n",
+				"suspensionState": "manuallySuspended",
+				"moderationNote":  "n",
 			},
 		},
 	}

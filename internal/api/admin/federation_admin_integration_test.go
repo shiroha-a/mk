@@ -179,7 +179,54 @@ func TestFederationUpdateInstance_IntegrationClearsModerationNoteToEmpty(t *test
 	assert.Equal(t, instID, parsed["id"])
 }
 
-// suspend / unsuspend 経路の integration test は #724 (handler が
-// instance.isSuspended という存在しない列に UPDATE 試行する別バグ) を
-// 修正してから追加する。本 issue (#696) のスコープは moderationNote guard
-// のみ。
+// TestFederationUpdateInstance_IntegrationSuspendsInstance は #715 / #724
+// 修正の regression guard。handler が `isSuspended bool` を `suspensionState`
+// enum に変換して GORM Updates に渡し、実 DB の suspensionState 列が更新
+// されることを確認する。修正前は `out["isSuspended"] = bool` が存在しない
+// 列への UPDATE になり silently NO-OP だった。
+func TestFederationUpdateInstance_IntegrationSuspendsInstance(t *testing.T) {
+	h, admin := newIntegrationHandler(t)
+	host := "remote-int-suspend.example"
+	instID := seedTestInstance(t, host, "", model.SuspensionStateNone)
+
+	// suspend
+	rec := doPost(h.FederationUpdateInstance,
+		`{"host":"`+host+`","isSuspended":true}`, admin)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	var got model.Instance
+	require.NoError(t, integrationDB.First(&got, "host = ?", host).Error)
+	assert.Equal(t, model.SuspensionStateManuallySuspended, got.SuspensionState,
+		"suspensionState column should be updated by handler conversion")
+	assert.Equal(t, instID, got.ID)
+
+	// moderation log
+	require.Eventually(t, func() bool {
+		var c int64
+		integrationDB.Raw(
+			`SELECT COUNT(*) FROM "moderation_log" WHERE "userId" = ? AND "type" = ?`,
+			admin.ID, "suspendRemoteInstance",
+		).Scan(&c)
+		return c == 1
+	}, 500*time.Millisecond, 5*time.Millisecond,
+		"suspendRemoteInstance log should be persisted")
+
+	// unsuspend
+	rec = doPost(h.FederationUpdateInstance,
+		`{"host":"`+host+`","isSuspended":false}`, admin)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	require.NoError(t, integrationDB.First(&got, "host = ?", host).Error)
+	assert.Equal(t, model.SuspensionStateNone, got.SuspensionState,
+		"suspensionState should be reset to none on unsuspend")
+
+	require.Eventually(t, func() bool {
+		var c int64
+		integrationDB.Raw(
+			`SELECT COUNT(*) FROM "moderation_log" WHERE "userId" = ? AND "type" = ?`,
+			admin.ID, "unsuspendRemoteInstance",
+		).Scan(&c)
+		return c == 1
+	}, 500*time.Millisecond, 5*time.Millisecond,
+		"unsuspendRemoteInstance log should be persisted")
+}
