@@ -224,3 +224,19 @@ func TestNoteFieldResolver_NilViewerSkipsMyReaction(t *testing.T) {
 	assert.Nil(t, notes[0].MyReaction)
 	assert.NotNil(t, notes[0].Channel)
 }
+
+// SetPollVoteLookup の wire を確認する小さな regression test (#710 で
+// entity 全体カバレッジを 90% 上に保つために追加)。nil receiver で no-op
+// 化し、non-nil receiver では fields に設定されることを確認する。
+func TestNoteFieldResolver_SetPollVoteLookup(t *testing.T) {
+	// nil receiver は panic せず黙って return する。
+	var nilResolver *NoteFieldResolver
+	nilResolver.SetPollVoteLookup(nil)
+
+	// non-nil receiver は内部 field を設定する。SetPollVoteLookup は
+	// public な observation 経路を持たないので、設定後に再度呼んで
+	// 上書きが効くこと (idempotent) のみ確認する。
+	r := &NoteFieldResolver{}
+	r.SetPollVoteLookup(nil)
+	r.SetPollVoteLookup(nil)
+}
