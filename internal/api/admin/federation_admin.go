@@ -117,6 +117,12 @@ func (h *Handler) FederationRemoveAllFollowing(c echo.Context) error {
 // json.Unmarshal は欠落 field を nil pointer のまま残すので、両者を JSON
 // decode 境界で正しく分離できる。string 型だと "" がデフォルト値と区別でき
 // ず空文字列で note を消す操作が無視される (元バグ)。
+//
+// IsBlocked / IsSilenced は upstream Misskey TS の wire 互換のため受信する
+// が、対応 DB 列が無く mk-go schema にも upstream にも存在しないため
+// updates() で silently drop される (#715 / #724)。frontend がスイッチを
+// 操作しても効果なし、将来 schema 拡張で対応 column が増えたら updates()
+// に変換 case を足す。
 type federationUpdateInstanceRequest struct {
 	Host           string  `json:"host"`
 	IsSuspended    *bool   `json:"isSuspended"`
