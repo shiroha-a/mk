@@ -300,6 +300,24 @@ proxyBypassHosts:
 #videoThumbnailGenerator: unix:///run/video-thumb/sock
 #videoThumbnailGeneratorMode: post
 
+# NSFW sensitive media detection. mk-go は backend に ML runtime を抱えない
+# 方針 (#406)。動画サムネと同じく default 無効で、operator が外部 detector
+# service の URL を指定したときのみ自動 isSensitive 付与が動く。動作モード
+# (検出範囲 / 閾値 / 動画対象 / silenced hosts) は admin 設定 (meta) 経由で
+# upstream Misskey TS 互換に制御する。
+#
+# Wire (mk-go が呼ぶ仕様):
+#   POST <url> with raw image/video bytes
+#   Content-Type: <MIME>
+#   Response: JSON {"score": float64}  (0.0=safe ~ 1.0=NSFW)
+#
+# 参考の互換 image (operator が選択):
+#   - andresribeiro/nsfwjs-docker (TypeScript / nsfwjs)
+#   - germesdev/nsfw_detector / nikos-glikis/nsfw-docker (Yahoo OpenNSFW)
+#   - SaaS: Cloudflare Workers AI / AWS Rekognition / Google Vision SafeSearch
+# wire format が違う場合は operator 側で thin proxy を被せて合わせる。
+#nsfwDetectorUrl: http://nsfw-detector:8080/score
+
 # For security reasons, uploading attachments from the intranet is
 # prohibited; exceptions can be allowed here. Default is empty.
 #allowedPrivateNetworks:

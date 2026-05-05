@@ -355,7 +355,12 @@ func (s *Server) setupRoutes() {
 	driveService.SetImageProcessor(imgProcessor)
 	driveService.SetVideoProcessor(coredrive.NewFFmpegVideoProcessor(imgProcessor, nil))
 
-	// Sensitive media detection (issue #44)
+	// Sensitive media detection (#44 / #406)。mk-go は backend に ML runtime
+	// を抱えないので、operator が任意の互換 service を立てて URL を
+	// `nsfwDetectorUrl` 設定に書く。URL が空なら detector=nil で自動付与は
+	// 走らず、手動 isSensitive フラグのみ機能する (default)。動作モード
+	// (Detection mode / Sensitivity / SetFlagAutomatically / EnableForVideos /
+	// SilencedHosts) は admin の `meta` カラム経由で TS 互換に制御。
 	if sensMeta, err := metaRepo.Fetch(); err == nil {
 		sensCfg := coredrive.SensitiveConfig{
 			Detection:            sensMeta.SensitiveMediaDetection,
@@ -364,8 +369,11 @@ func (s *Server) setupRoutes() {
 			EnableForVideos:      sensMeta.EnableSensitiveMediaDetectionForVideos,
 			SilencedHosts:        sensMeta.MediaSilencedHosts,
 		}
-		// 外部 detection URL は config に追加可能 (未設定なら detector = nil で no-op)
-		driveService.SetSensitiveDetection(nil, sensCfg)
+		var nsfwDetector coredrive.SensitiveDetector
+		if url := s.config.NSFWDetectorURL; url != "" {
+			nsfwDetector = coredrive.NewHTTPDetector(url, s.outboundClient(30*time.Second))
+		}
+		driveService.SetSensitiveDetection(nsfwDetector, sensCfg)
 	}
 
 	// Export / Import workers (Phase 9.4): drive に保存するエクスポートと

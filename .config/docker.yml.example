@@ -190,6 +190,11 @@ proxyBypassHosts:
 #videoThumbnailGenerator: http://video-thumb:8005
 #videoThumbnailGeneratorMode: post
 
+# NSFW sensitive media detection (#406)。default 無効。operator が好きな
+# 互換 service を立てて URL を指定する。default.yml.example の同セクション
+# に wire 仕様と互換 image 候補を記載している。
+#nsfwDetectorUrl: http://nsfw-detector:8080/score
+
 #allowedPrivateNetworks:
 #  - '127.0.0.1/32'
 

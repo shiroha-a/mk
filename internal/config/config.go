@@ -174,8 +174,14 @@ type Source struct {
 	//   "get"                   — GET <gen>/thumbnail.webp?thumbnail=1&url=<URL>
 	//                             Misskey TS の videoThumbnailGenerator 仕様
 	//                             に互換 (#637 review)。
-	VideoThumbnailGeneratorMode string          `mapstructure:"videoThumbnailGeneratorMode"`
-	Logging                     *LoggingOptions `mapstructure:"logging"`
+	VideoThumbnailGeneratorMode string `mapstructure:"videoThumbnailGeneratorMode"`
+	// NSFWDetectorURL は外部 NSFW 判定 service の endpoint。空なら自動判定
+	// disabled で手動 isSensitive フラグのみ機能する (#406)。mk-go は
+	// backend に ML runtime を抱えない方針なので、operator が任意の互換
+	// service を立てて URL を指定する。Wire: POST body=image/video bytes,
+	// Content-Type=<MIME>, response JSON `{"score": float64}` (0..1)。
+	NSFWDetectorURL string          `mapstructure:"nsfwDetectorUrl"`
+	Logging         *LoggingOptions `mapstructure:"logging"`
 
 	PerChannelMaxNoteCacheCount  *int   `mapstructure:"perChannelMaxNoteCacheCount"`
 	PerUserNotificationsMaxCount *int   `mapstructure:"perUserNotificationsMaxCount"`
@@ -279,6 +285,7 @@ type Config struct {
 	MediaProxySecret             []byte
 	VideoThumbnailGenerator      string
 	VideoThumbnailGeneratorMode  string
+	NSFWDetectorURL              string
 	UserAgent                    string
 	PerChannelMaxNoteCacheCount  int
 	PerUserNotificationsMaxCount int
@@ -499,6 +506,7 @@ func resolve(src *Source) (*Config, error) {
 		MediaProxySecret:             mediaProxySecret,
 		VideoThumbnailGenerator:      strings.TrimRight(src.VideoThumbnailGenerator, "/"),
 		VideoThumbnailGeneratorMode:  normalizeVideoThumbMode(src.VideoThumbnailGeneratorMode),
+		NSFWDetectorURL:              strings.TrimRight(src.NSFWDetectorURL, "/"),
 		UserAgent:                    fmt.Sprintf("Misskey-Go/%s (%s)", MkGoVersion, src.URL),
 		PerChannelMaxNoteCacheCount:  perChannelMaxNoteCacheCount,
 		PerUserNotificationsMaxCount: perUserNotificationsMaxCount,
