@@ -352,7 +352,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	defer cleanupUser(t, remote.ID)
 
 	t.Run("local only excludes remote", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, "local")
+		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginLocal)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -363,7 +363,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 
 	t.Run("remote only excludes local", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, "remote")
+		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginRemote)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -374,7 +374,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 
 	t.Run("combined returns both", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, "combined")
+		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginCombined)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
