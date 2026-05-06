@@ -22,6 +22,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +41,7 @@ func preCacheReversiFederationVersion(t *testing.T, serverDB int, host string) {
 	c := goredis.NewClient(&goredis.Options{Addr: redisAddr, DB: serverDB})
 	t.Cleanup(func() { _ = c.Close() })
 	key := "reversi:federation:version:" + host
-	require.NoError(t, c.Set(context.Background(), key, "1.1.0-mkgo", 30*time.Second).Err())
+	require.NoError(t, c.Set(context.Background(), key, corereversi.ReversiVersion, 30*time.Second).Err())
 }
 
 // reversiInvitationsContains は viewer の /api/reversi/invitations を呼び、
@@ -212,8 +213,8 @@ func TestReversi_ReactionURIInboxNoCrash(t *testing.T) {
 	resetDB(t, serverA)
 	resetDB(t, serverB)
 
-	alice := signup(t, serverA, "alice", nil)
-	_ = alice
+	// 本 test は inbox endpoint の URI parser だけを exercise するので
+	// alice / bob の signup は不要。reset-db で空 DB を確保するだけで足りる。
 	// random session id (UUID-like)。実 game 行は無くてよい (本 test の対象は
 	// inbox の URI ルーティングが panic しないことのみ)。
 	var sidBytes [16]byte
@@ -242,6 +243,6 @@ func TestReversi_ReactionURIInboxNoCrash(t *testing.T) {
 	// 4xx 経路を踏む。重要なのは 5xx (panic / 想定外 internal error) を返さ
 	// ないこと。reversi session URI のパース branch で nil deref していたら
 	// 500 が返るので、そうなっていないことを確認する。
-	assert.Less(t, resp.StatusCode, 500,
+	assert.LessOrEqual(t, resp.StatusCode, 499,
 		"inbox should not 5xx on a Like targeting a reversi session URI (path parser must not panic)")
 }

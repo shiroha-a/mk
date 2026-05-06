@@ -241,9 +241,17 @@ func (s *Server) StartBackgroundForTest() error {
 		return fmt.Errorf("start queue worker: %w", err)
 	}
 	if s.queueScheduler != nil {
-		_ = s.queueScheduler.RegisterChartJobs()
-		_ = s.queueScheduler.RegisterInstanceRefreshJob()
-		_ = s.queueScheduler.RegisterRetentionJob()
+		// Server.Start と同じく Register エラーは観測可能にする (test 出力の
+		// noise にはならない、Register 失敗は scheduler driver 不具合の signal)。
+		if err := s.queueScheduler.RegisterChartJobs(); err != nil {
+			slog.Warn("chart scheduler register failed", "err", err)
+		}
+		if err := s.queueScheduler.RegisterInstanceRefreshJob(); err != nil {
+			slog.Warn("instance refresh scheduler register failed", "err", err)
+		}
+		if err := s.queueScheduler.RegisterRetentionJob(); err != nil {
+			slog.Warn("retention scheduler register failed", "err", err)
+		}
 		if err := s.queueScheduler.Start(); err != nil {
 			slog.Warn("scheduler start failed", "err", err)
 		}
