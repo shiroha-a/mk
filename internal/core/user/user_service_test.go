@@ -3,6 +3,7 @@ package user_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/user"
@@ -796,4 +797,71 @@ func TestUpdateProfileFields(t *testing.T) {
 	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
 	err := svc.UpdateProfileFields("u1", map[string]any{"description": "new"})
 	require.NoError(t, err)
+}
+
+// #766: SearchByUsernameAndHost の各分岐を service レイヤーで覆う。
+func TestService_SearchByUsernameAndHost(t *testing.T) {
+	svc, userRepo, _, _ := newFullSvc(t)
+	remoteHost := "remote.example"
+	otherHost := "other.example"
+	userRepo.Users["u_local"] = &model.User{ID: "u_local", Username: "alice", UsernameLower: "alice"}
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Username: "alice", UsernameLower: "alice", Host: &remoteHost}
+	userRepo.Users["u_other"] = &model.User{ID: "u_other", Username: "alice", UsernameLower: "alice", Host: &otherHost}
+
+	t.Run("empty query returns nil", func(t *testing.T) {
+		out, err := svc.SearchByUsernameAndHost("", nil, 10)
+		require.NoError(t, err)
+		assert.Nil(t, out)
+	})
+
+	t.Run("@ prefix is stripped", func(t *testing.T) {
+		out, err := svc.SearchByUsernameAndHost("@alice", nil, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	t.Run("host=nil filters to local", func(t *testing.T) {
+		out, err := svc.SearchByUsernameAndHost("alice", nil, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	t.Run("host=empty string treated as local", func(t *testing.T) {
+		empty := ""
+		out, err := svc.SearchByUsernameAndHost("alice", &empty, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	t.Run("host=specific narrows to that host", func(t *testing.T) {
+		out, err := svc.SearchByUsernameAndHost("alice", &remoteHost, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_remote", out[0].ID)
+	})
+
+	t.Run("host comparison is case-insensitive", func(t *testing.T) {
+		upper := "REMOTE.EXAMPLE"
+		out, err := svc.SearchByUsernameAndHost("alice", &upper, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_remote", out[0].ID)
+	})
+
+	t.Run("limit defaults to 10 when zero", func(t *testing.T) {
+		// 11 件 local user を仕込んで limit 未指定で 10 に clamp されることを確認
+		repo2 := testutil.NewMockUserRepository()
+		for i := 0; i < 11; i++ {
+			id := fmt.Sprintf("u_many_%02d", i)
+			repo2.Users[id] = &model.User{ID: id, Username: "many", UsernameLower: "many"}
+		}
+		idGen, _ := id.NewGenerator("aidx")
+		s2 := user.NewService(repo2, testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), idGen)
+		out, err := s2.SearchByUsernameAndHost("many", nil, 0)
+		require.NoError(t, err)
+		assert.Len(t, out, 10)
+	})
 }
