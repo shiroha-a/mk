@@ -97,11 +97,16 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 // packDriveFileSchema which exposes both `folder` and `user`.
 //
 // 注: 戻り値は upstream の `pack(file, { detail: true, withUser: true })`
-// 相当 (= owner ID と user 込み)。upstream で `pack(file, { self: true })`
-// 経路 (= drive/files/create) を呼ぶ endpoint では userId / user / folder
-// を null にする必要があり、本関数を直接 c.JSON に渡すと drift する
-// (#812)。self path 用に新 helper を作るか、呼び出し側で post-fixup する
-// こと。
+// 相当 (= owner ID と user 込み) で drive/files/show のような detail 経路
+// で使う。それ以外の経路は対応する helper を使うこと:
+//
+//   - `drive/files/create` (= self single, `pack(file, { self: true })`):
+//     `packDriveFileSelfSingle` (#812)
+//   - `drive/files/find` / `find-by-hash` (= self list,
+//     `packMany(files, { self: true })`):
+//     `packDriveFileSelfList` (#818)
+//
+// 本関数を上記 self 経路で直接 c.JSON に渡すと shape drift する。
 func (h *Handler) packDriveFileFull(f *model.DriveFile) entity.DriveFileEntity {
 	// list loop (FilesList / FilesFind / Stream) からも呼ばれ、1ファイル
 	// 当たり最大2 DB read (O(N) queries)が発生する。1ページ上限が10-100
@@ -122,6 +127,26 @@ func (h *Handler) packDriveFileFull(f *model.DriveFile) entity.DriveFileEntity {
 	return entity.PackDriveFileWithRelations(f, h.idGen, folder, user)
 }
 
+// packDriveFileSelfSingle packs a drive file for the "self single" path used
+// by drive/files/create.
+//
+// upstream Misskey TS は `pack(file, { self: true })` (= withUser=false /
+// detail=false) を呼び、`folder=null` / `user=null` / `userId=null` を
+// 返す (DriveFileEntityService.ts:191-222)。mk-go は packDriveFileFull が
+// 常に folder / user を resolve するため、helper で post-fixup して shape
+// を整合させる (#812 / #818)。
+//
+// drive/files/find / find-by-hash の self list path とは異なり userId も
+// **null にする** 点に注意 (= pack は detail=false で userId を返さない、
+// packNullable とは別経路)。
+func (h *Handler) packDriveFileSelfSingle(f *model.DriveFile) entity.DriveFileEntity {
+	e := h.packDriveFileFull(f)
+	e.Folder = nil
+	e.UserID = nil
+	e.User = nil
+	return e
+}
+
 // packDriveFileSelfList packs a drive file for the "self list" path used by
 // drive/files/find と drive/files/find-by-hash.
 //
@@ -131,8 +156,8 @@ func (h *Handler) packDriveFileFull(f *model.DriveFile) entity.DriveFileEntity {
 // false)。mk-go は packDriveFileFull が常に folder / user を resolve する
 // ため、helper で post-fixup して shape を整合させる (#818)。
 //
-// drive/files/create の self path (#812) とは異なり userId は **owner ID
-// を維持** する点に注意 (= packNullable は userId を常時返す)。
+// drive/files/create の self single path (#812) とは異なり userId は
+// **owner ID を維持** する点に注意 (= packNullable は userId を常時返す)。
 func (h *Handler) packDriveFileSelfList(f *model.DriveFile) entity.DriveFileEntity {
 	e := h.packDriveFileFull(f)
 	e.Folder = nil
@@ -197,14 +222,11 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	// upstream `drive/files/create` は `pack(file, { self: true })` で
-	// userId / user を null にする (= withUser がデフォルト false)。本実装も
-	// 同 shape に揃える (#812)。show / find 等の他 endpoint は別 packing で
-	// owner ID を出すので維持。
-	out := h.packDriveFileFull(f)
-	out.UserID = nil
-	out.User = nil
-	return c.JSON(http.StatusOK, out)
+	// upstream `drive/files/create` は `pack(file, { self: true })` の
+	// self single path 経路 (#812)。helper が folder / userId / user を
+	// 一律 null 化する (旧 inline 版は folder の nil 化を見落としていて
+	// folderId 指定 upload で drift していたが、helper 化で同時に解消)。
+	return c.JSON(http.StatusOK, h.packDriveFileSelfSingle(f))
 }
 
 // FileIDRequest is the body for show/delete and similar single-file ops.
