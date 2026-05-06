@@ -58,8 +58,10 @@ test.describe('drive: files/create', () => {
     expect(file.id).toBeTruthy();
     expect(file.name).toBe('tiny.png');
     expect(file.type).toBe('image/png');
-    expect(typeof file.url).toBe('string');
-    expect(file.url.length).toBeGreaterThan(0);
+    // url は scheme 必須で strict assert する。文字列断片や path-only な値が
+    // 混入する regression を弾く (= scheme は backend config 依存で http/https
+    // どちらも valid)。
+    expect(file.url).toMatch(/^https?:\/\//);
     expect(file.size).toBe(tinyPNG.length);
 
     // files/show で同 file を取得して shape 整合を確認。
