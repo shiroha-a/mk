@@ -34,35 +34,42 @@ jobs:
 
     strategy:
       fail-fast: false
+      # matrix.include で backend 固有の make target / compose 引数 /
+      # prepull コマンドを variables 化する。各 step は条件分岐なしで
+      # `${{ matrix.* }}` を展開するだけになり DRY を担保する。
       matrix:
-        backend: [mk-go, ts]
+        include:
+          - backend: mk-go
+            up_target: playwright-up
+            test_target: playwright-test
+            down_target: playwright-down
+            compose_args: -f docker-compose.playwright.yml
+            # 本 repo Dockerfile を使うので外部 image pre-pull 不要。
+            prepull: ""
+          - backend: ts
+            up_target: playwright-ts-up
+            test_target: playwright-ts-test
+            down_target: playwright-ts-down
+            compose_args: -f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml
+            # upstream image は build 並列で pre-pull すると wallclock が
+            # 短縮できる (= compose up 内の pull 開始前に dedupe される)。
+            # version は docker-compose.playwright.ts.yml と sync。
+            prepull: docker pull misskey/misskey:2026.3.2 &
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || 'develop' }}
 
-      # TS backend job のみ upstream image を pre-pull (= build と並列)。
-      # mk-go job は本 repo Dockerfile を使うので不要。
-      - name: Pre-pull Misskey TS image
-        if: matrix.backend == 'ts'
-        run: docker pull misskey/misskey:2026.3.2 &
+      - name: Pre-pull image (TS only)
+        if: matrix.prepull != ''
+        run: ${{ matrix.prepull }}
 
       - name: Bring up stack
-        run: |
-          if [ "${{ matrix.backend }}" = "ts" ]; then
-            make playwright-ts-up
-          else
-            make playwright-up
-          fi
+        run: make ${{ matrix.up_target }}
 
       - name: Run Playwright
-        run: |
-          if [ "${{ matrix.backend }}" = "ts" ]; then
-            make playwright-ts-test
-          else
-            make playwright-test
-          fi
+        run: make ${{ matrix.test_target }}
 
       # 失敗時のみ playwright test-results (trace / screenshot 含む) を保存。
       - name: Upload test-results on failure
@@ -80,13 +87,8 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/playwright-logs
-          if [ "${{ matrix.backend }}" = "ts" ]; then
-            docker compose -f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml logs \
-              > /tmp/playwright-logs/compose.log 2>&1 || true
-          else
-            docker compose -f docker-compose.playwright.yml logs \
-              > /tmp/playwright-logs/compose.log 2>&1 || true
-          fi
+          docker compose ${{ matrix.compose_args }} logs \
+            > /tmp/playwright-logs/compose.log 2>&1 || true
 
       - name: Upload logs artifact on failure
         if: failure()
@@ -99,9 +101,4 @@ jobs:
 
       - name: Final teardown
         if: always()
-        run: |
-          if [ "${{ matrix.backend }}" = "ts" ]; then
-            make playwright-ts-down >/dev/null 2>&1 || true
-          else
-            make playwright-down >/dev/null 2>&1 || true
-          fi
+        run: make ${{ matrix.down_target }} >/dev/null 2>&1 || true
