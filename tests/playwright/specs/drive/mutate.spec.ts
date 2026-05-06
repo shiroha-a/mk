@@ -86,19 +86,30 @@ test.describe('drive: files/update + files/delete', () => {
       fileId: uploaded.id,
     });
     expect(delResp.status()).toBe(204);
+
+    // 削除確定確認: files/show で取得不可 (= 4xx)。
+    //
     // upstream Misskey TS は files/delete が 204 を返した後、actual な
     // DB row 削除を async (= job queue) で行う形になっており、204 直後の
     // show が 200 を返す race がある (= TS image で 2-3/3 の頻度で発現)。
-    // mk-go は同期 delete で常に 4xx を返すが、両 backend で pass する
-    // spec のため delete 後に短い sleep を挟んで async 完了を待つ。
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    // 削除確定確認: files/show で取得不可 (= 4xx)。
-    const showResp = await callApi(request, 'drive/files/show', {
-      i: me.token,
-      fileId: uploaded.id,
-    });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
-    expect(showResp.status()).toBeLessThan(500);
+    // mk-go は同期 delete で常に 4xx を返す。
+    //
+    // 固定 sleep より expect.poll で polling する方が TS の async 削除
+    // タイミング変動 (= job queue 負荷次第) にも自動追従し、必要最小の
+    // 待ち時間で済む。status は mk-go=404 / TS=400 の drift があるが
+    // 「4xx 範囲」で両 backend pass。
+    await expect
+      .poll(
+        async () => {
+          const resp = await callApi(request, 'drive/files/show', {
+            i: me.token,
+            fileId: uploaded.id,
+          });
+          const s = resp.status();
+          return s >= 400 && s < 500;
+        },
+        { timeout: 5000, intervals: [100, 200, 500, 1000] },
+      )
+      .toBe(true);
   });
 });
