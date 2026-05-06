@@ -241,18 +241,6 @@ func (s *Server) Handler() http.Handler {
 // 部分だけ抽出する。
 //
 // production code から呼ばないこと。
-// SetSyncDeliverHookForTest replaces the asynq deliver enqueue with the
-// supplied synchronous hook. e2e_federation 系テストで queue worker 経由の
-// deliver が動かない/動かしたくないシナリオで、sign + HTTP POST を inline
-// で実行する用途。fn=nil で本番経路 (queue) に戻る。
-//
-// production code から呼ばないこと (#780)。
-func (s *Server) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload) error) {
-	if s.deliverSvc != nil {
-		s.deliverSvc.SetSyncDeliverHookForTest(fn)
-	}
-}
-
 func (s *Server) StartBackgroundForTest() error {
 	if err := s.queueServer.Start(); err != nil {
 		return fmt.Errorf("start queue worker: %w", err)
@@ -274,6 +262,18 @@ func (s *Server) StartBackgroundForTest() error {
 		}
 	}
 	return nil
+}
+
+// SetSyncDeliverHookForTest replaces the asynq deliver enqueue with the
+// supplied synchronous hook. e2e_federation 系テストで queue worker 経由の
+// deliver が動かない/動かしたくないシナリオで、sign + HTTP POST を inline
+// で実行する用途。fn=nil で本番経路 (queue) に戻る。
+//
+// production code から呼ばないこと (#780)。
+func (s *Server) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload) error) {
+	if s.deliverSvc != nil {
+		s.deliverSvc.SetSyncDeliverHookForTest(fn)
+	}
 }
 
 // Start begins listening on the configured port (or UNIX domain socket) and
