@@ -37,8 +37,14 @@ jobs:
           # 指定する (Devin #375 #1)。
           ref: ${{ inputs.ref || 'develop' }}
 
-      - name: Pre-pull Misskey TS image (parallel with build)
-        run: docker pull misskey/misskey:2025.2.1 &
+      - name: Pre-pull Misskey TS image
+        # 旧版は `&` で background 化していたが、GitHub Actions の `run:`
+        # step は step 終了で shell process が exit するため background
+        # process の継続が runner 環境で保証されない (= pre-pull 効果が
+        # 不確実)。foreground で完了を待ち、続く `make dropin-swap-test`
+        # 内の同 image pull は docker daemon の cache hit で 0s で済む方が
+        # 確実。playwright.yml (#816) と同じ判断。
+        run: docker pull misskey/misskey:2025.2.1
 
       # bash orchestrator + pytest を実行する。stage ログは標準出力に流れる。
       - name: Run dropin swap test

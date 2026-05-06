@@ -42,10 +42,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Pre-pull heavy images in background
+      - name: Pre-pull heavy images
+        # 旧版は `&` で background 化していたが、GitHub Actions の `run:`
+        # step は step 終了で shell process が exit するため background
+        # process の継続が runner 環境で保証されない (= pre-pull 効果が
+        # 不確実)。foreground で完了を待ち、続く `make dropin-frontend-*`
+        # 内の同 image pull は docker daemon の cache hit で 0s で済む方が
+        # 確実。playwright.yml (#816) と同じ判断。2 image を順次 pull。
         run: |
-          docker pull misskey/misskey:2025.2.1 &
-          docker pull cypress/included:15.11.0 &
+          docker pull misskey/misskey:2025.2.1
+          docker pull cypress/included:15.11.0
 
       - name: Run dropin frontend e2e
         # DROPIN_LOG_DIR をセットして orchestrator の cleanup trap に失敗時
