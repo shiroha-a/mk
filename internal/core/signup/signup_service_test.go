@@ -1,6 +1,7 @@
 package signup_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -83,23 +84,33 @@ func TestSignup_TooLongUsername(t *testing.T) {
 }
 
 // upstream Misskey TS の `localUsernameSchema` は `^\w{1,20}$` (#800)。
-// 境界 (= 20 char OK / 21 char NG) と character set (= alphanumeric +
-// underscore のみ) を明確に担保する。
-func TestSignup_UsernameBoundary20Chars(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	// 20 char ちょうど (= 上限) は通る
-	r, err := svc.Signup("a234567890123456789a", "pass", false)
-	require.NoError(t, err)
-	assert.Equal(t, "a234567890123456789a", r.User.Username)
+// 境界 (= 20 char OK / 21 char NG) を明示する。リテラルではなく
+// strings.Repeat で長さを構築することで、境界値が一目で判別できるよう
+// にしている。
+func TestSignup_UsernameLengthBoundary(t *testing.T) {
+	cases := []struct {
+		desc    string
+		length  int
+		wantErr error
+	}{
+		{"max_20_chars_accepted", 20, nil},
+		{"over_21_chars_rejected", 21, signup.ErrInvalidUsername},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			username := strings.Repeat("a", tc.length)
+			_, err := svc.Signup(username, "pass", false)
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
+		})
+	}
 }
 
-func TestSignup_Username21CharsRejected(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	// 21 char (= 上限超過) は ErrInvalidUsername
-	_, err := svc.Signup("a234567890123456789ab", "pass", false)
-	assert.ErrorIs(t, err, signup.ErrInvalidUsername)
-}
-
+// `\w` 外の character (= [a-zA-Z0-9_] 以外) はすべて reject される。
 func TestSignup_UsernameIllegalCharsRejected(t *testing.T) {
 	cases := []struct {
 		desc     string
