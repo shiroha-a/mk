@@ -1,9 +1,14 @@
-// #744 Phase 1: signup helper.
+// #744 Phase 1: signup / signin helper.
 // upstream Misskey TS の signup-flow / signin-flow と互換な request を投げ、
 // 取得した access token を spec から再利用できる形にする。
+//
+// 注: root account (admin/accounts/create) の作成と
+// disableRegistration=false の切替は globalSetup で行う (spec 開始前に
+// 1 度だけ)。本 fixture では signup-flow / signin-flow の通常経路のみ
+// 提供する。
 
 import type { APIRequestContext } from '@playwright/test';
-import { createRootAccount } from './api';
+import { callApi } from './api';
 
 export interface Principal {
   id: string;
@@ -11,20 +16,44 @@ export interface Principal {
   username: string;
 }
 
-// signupRoot creates the very first account on the freshly-bootstrapped
-// instance via admin/accounts/create. upstream Misskey TS と互換挙動で、
-// 2 回目以降の同 endpoint は 403。
+// signupUser creates a regular (non-root) account via /api/signup. Phase 1
+// では captcha / email 認証は disabled な instance config を使うので
+// username + password だけで通る。複数回呼んでも username が違えば成功。
 //
-// **冪等性の前提**: 本 helper を 2 回呼ぶには間に DB volume の clean が
-// 必要 (= `make playwright-down` → `make playwright-up`)。Phase 1 では
-// stack を毎回 fresh で立てる前提なので問題ない。複数 spec が同一 stack
-// で走る後続 PR では globalSetup で DB reset を組み込むか、signup-flow
-// 経路 (= 通常 user 作成) の helper を追加する想定。
-export async function signupRoot(
+// 同 instance で並列に user を作る spec はこの helper を使う (root 1 人
+// しか作れない signupRoot と違って複数 user が必要な test に対応する)。
+export async function signupUser(
   request: APIRequestContext,
-  username = 'alice',
+  username: string,
   password = 'password1234',
 ): Promise<Principal> {
-  const created = await createRootAccount(request, username, password);
-  return { ...created, username };
+  const resp = await callApi(request, 'signup', { username, password });
+  if (resp.status() !== 200) {
+    throw new Error(`signup failed: ${resp.status()} ${await resp.text()}`);
+  }
+  const body = await resp.json();
+  return { id: body.id, token: body.token, username };
+}
+
+// signin posts /api/signin-flow and returns the access token. upstream
+// Misskey TS は #705 で本家準拠化されており、レスポンスは
+// `{finished: true, i: <token>}`。
+//
+// signin-flow が 2FA / passkey 経路に分岐するアカウント (= step 1 で
+// `next: 'totp' | 'passkey'`) は本 helper では扱わない。Phase 1 では
+// password のみの signin path を test する。
+export async function signin(
+  request: APIRequestContext,
+  username: string,
+  password: string,
+): Promise<string> {
+  const resp = await callApi(request, 'signin-flow', { username, password });
+  if (resp.status() !== 200) {
+    throw new Error(`signin-flow failed: ${resp.status()} ${await resp.text()}`);
+  }
+  const body = await resp.json();
+  if (!body.i) {
+    throw new Error(`signin-flow returned no token: ${JSON.stringify(body)}`);
+  }
+  return body.i as string;
 }

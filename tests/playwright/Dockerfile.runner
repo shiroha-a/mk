@@ -9,6 +9,13 @@
 # 後続 PR で必要に応じて bump する。
 FROM mcr.microsoft.com/playwright:v1.49.1-jammy
 
+# globalSetup から redis-cli を呼んで rate limit counter を flush する
+# (#744 PR-2): mk-go の signup endpoint は IP base で 1h 5 回 hardcoded で
+# spec 累積で 429 になる。test 開始時に Redis を空にすれば毎回 fresh。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends redis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /work
 
 # package.json と package-lock.json を先 copy して node_modules を image に

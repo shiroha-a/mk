@@ -4,6 +4,10 @@ import { defineConfig } from '@playwright/test';
 // projects / use.storageState を拡張する。
 export default defineConfig({
   testDir: './specs',
+  // globalSetup: Redis を flush して rate limit counter をゼロから始める
+  // (#744 PR-2)。signup endpoint の 1h 5 回制限が test 累積で 429 になる
+  // のを防ぐ。詳細は global-setup.ts のコメント参照。
+  globalSetup: './global-setup.ts',
   // 各 spec はタイムアウト 30s を上限。signup / signin など API レイテンシ
   // しか伴わないので余裕を持たせて 30s で十分。
   timeout: 30_000,

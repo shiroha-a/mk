@@ -1,27 +1,33 @@
-// #744 Phase 1 smoke: 最初の root signup が通り、取得した token で /api/i が
-// 自分の user 情報を返すことを確認する。本 spec は upstream Misskey TS の
-// API 規約を期待値とし、mk-go が同じ shape のレスポンスを返すか検証する。
+// #744 Phase 1 smoke: globalSetup が root を用意した状態で /api/i が
+// upstream Misskey TS と同じ shape を返すことを確認する。
 //
-// API 互換が崩れたら本 spec が fail する (= drop-in 互換 regression を
-// 検出)。
+// PR-1 の構成では本 spec が直接 admin/accounts/create を叩いていたが、
+// PR-2 で globalSetup に admin 系 setup を集約した (= 複数 spec が rate
+// limit や disableRegistration の制約に引っかからないように)。本 spec は
+// globalSetup の動作確認も兼ねる: root credentials が `.auth/root.json` に
+// 書き出され、それを使って /api/i が valid response を返せること。
 
+import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupRoot } from '../../fixtures/auth';
 
-test.describe('smoke: signup + i', () => {
-  test('first signup creates a root user and /api/i returns it', async ({ request }) => {
-    const me = await signupRoot(request, 'alice', 'password1234');
-    expect(me.id).toBeTruthy();
-    expect(me.token).toBeTruthy();
-    expect(me.username).toBe('alice');
+interface RootFixture {
+  id: string;
+  token: string;
+  username: string;
+}
 
-    // /api/i は token を body.i に乗せて取得。upstream Misskey TS と同 shape:
-    // { id, username, isAdmin?, ... } を期待する。
-    const resp = await callApi(request, 'i', { i: me.token });
+test.describe('smoke: root via globalSetup + /api/i', () => {
+  test('root credentials persist and hydrate via /api/i', async ({ request }) => {
+    const root: RootFixture = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+    expect(root.id).toBeTruthy();
+    expect(root.token).toBeTruthy();
+    expect(root.username).toBe('alice');
+
+    const resp = await callApi(request, 'i', { i: root.token });
     expect(resp.status()).toBe(200);
     const body = await resp.json();
-    expect(body.id).toBe(me.id);
+    expect(body.id).toBe(root.id);
     expect(body.username).toBe('alice');
   });
 });

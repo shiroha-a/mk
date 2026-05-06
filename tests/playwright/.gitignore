@@ -3,3 +3,5 @@ node_modules/
 test-results/
 playwright-report/
 package-lock.json
+# globalSetup が root credentials を書き出す fixture ディレクトリ (#744 PR-2)。
+.auth/

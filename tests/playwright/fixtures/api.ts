@@ -23,21 +23,3 @@ export async function callApi(
     failOnStatusCode: false,
   });
 }
-
-// admin/accounts/create は root 作成時のみ通る。upstream Misskey TS は
-// 1 回目の signup で root を作成、2 回目以降の同 endpoint は 403。
-// signup helper として「最初の呼び出しなら root が作成される」前提。
-export async function createRootAccount(
-  request: APIRequestContext,
-  username: string,
-  password: string,
-): Promise<{ id: string; token: string }> {
-  const resp = await callApi(request, 'admin/accounts/create', { username, password });
-  if (resp.status() !== 200) {
-    throw new Error(
-      `admin/accounts/create failed: ${resp.status()} ${await resp.text()}`,
-    );
-  }
-  const body = await resp.json();
-  return { id: body.id, token: body.token };
-}
