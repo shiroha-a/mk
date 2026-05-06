@@ -266,12 +266,7 @@ func TestSigninFlow_CaptchaBlocksMissingToken(t *testing.T) {
 	// `throw new FastifyReplyError(400, err)` を投げる (SigninApiService.ts)
 	// ため、mk-go も #810 で同 Fastify shape に揃える。
 	rec := doPost(h.SigninFlow, `{"username":"capuser2","password":"pass"}`)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	require.EqualValues(t, http.StatusBadRequest, body["statusCode"])
-	require.Equal(t, "Bad Request", body["error"])
-	require.Equal(t, "Error: CAPTCHA_FAILED", body["message"])
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "CAPTCHA_FAILED")
 }
 
 func TestSigninFlow_CaptchaSkippedFor2FAUsers(t *testing.T) {
