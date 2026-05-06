@@ -262,10 +262,16 @@ func TestSigninFlow_CaptchaBlocksMissingToken(t *testing.T) {
 	captchaSvc := captcha.NewService(&model.Meta{EnableTestcaptcha: true})
 	h.SetCaptcha(captchaSvc)
 
-	// testcaptcha-response を送らないので CAPTCHA 検証失敗。
-	// TS upstream は 400 を返す (#705)。
+	// testcaptcha-response を送らないので CAPTCHA 検証失敗。upstream は
+	// `throw new FastifyReplyError(400, err)` を投げる (SigninApiService.ts)
+	// ため、mk-go も #810 で同 Fastify shape に揃える。
 	rec := doPost(h.SigninFlow, `{"username":"capuser2","password":"pass"}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.EqualValues(t, http.StatusBadRequest, body["statusCode"])
+	require.Equal(t, "Bad Request", body["error"])
+	require.Equal(t, "Error: CAPTCHA_FAILED", body["message"])
 }
 
 func TestSigninFlow_CaptchaSkippedFor2FAUsers(t *testing.T) {

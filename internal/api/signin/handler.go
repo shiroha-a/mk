@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -212,7 +213,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 			Testcaptcha: req.TestcaptchaResponse,
 		}
 		if err := h.captchaSvc.Verify(c.Request().Context(), tokens); err != nil {
-			return c.JSON(http.StatusBadRequest, errBody("ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+			// upstream は captcha 失敗時に Fastify-style reply error を返す
+			// (SigninApiService.ts:186-213 の 5 provider どれも `throw new
+			// FastifyReplyError(400, err)`)。mk-go も同 shape に揃える (#810)。
+			return apierr.FastifyReply(c, http.StatusBadRequest, "CAPTCHA_FAILED")
 		}
 	}
 

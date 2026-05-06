@@ -234,29 +234,39 @@ func (h *Handler) Signup(c echo.Context) error {
 
 // SignupPending handles POST /api/signup-pending. Misskey TS 互換: code を
 // 受け取り、対応する user_pending を本登録に昇格して { id, i: token } を返す。
+//
+// upstream `SignupApiService.signupPending` は handler 全体を try-catch で
+// 囲み catch 節で `throw new FastifyReplyError(400, ...)` を投げるため、
+// 既知 error も unknown error も status 400 + Fastify shape で返る。
+// mk-go も #809 で status/shape を upstream に揃える (旧 mk-go は
+// NO_SUCH_CODE=404 / EXPIRED=410 / INVITATION_ALREADY_USED=409 /
+// INVITATION_REVOKED=410 と独自 status を返していて drop-in 互換が崩れて
+// いた)。INTERNAL_ERROR (default catch) のみ server-side error として 500
+// を維持する (upstream の 400 を再現すると true internal failure が 400 に
+// 丸まり sanity check 上望ましくないため意図的 drift)。
 func (h *Handler) SignupPending(c echo.Context) error {
 	var req struct {
 		Code string `json:"code"`
 	}
 	if err := c.Bind(&req); err != nil || req.Code == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "code is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 	}
 	result, err := h.signupService.PromotePending(req.Code)
 	if err != nil {
 		switch err {
 		case coresignup.ErrPendingNotFound:
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CODE", "No such pending registration.", "1e53842e-b7f4-4e1c-8f1e-8d0a2d9b0c7e"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "NO_SUCH_CODE")
 		case coresignup.ErrPendingExpired:
-			return c.JSON(http.StatusGone, apierr.Error("EXPIRED", "Pending registration has expired.", "9c2bc685-fa0a-4e6f-bf6f-5f4f8c0c3a3a"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "EXPIRED")
 		case coresignup.ErrUsernameAlreadyExists:
 			return duplicatedUsernameError(c)
 		case coresignup.ErrInvitationAlreadyUsed:
-			return c.JSON(http.StatusConflict, apierr.Error("INVITATION_ALREADY_USED", "Invitation already used.", "5b81b5e2-2c0b-4d8a-9b71-1a3e1d4d3f6a"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "INVITATION_ALREADY_USED")
 		case coresignup.ErrInvitationRevoked:
 			// admin が ticket を削除した状態 (#610 item 2)。AlreadyUsed と区別。
-			return c.JSON(http.StatusGone, apierr.Error("INVITATION_REVOKED", "Invitation has been revoked.", "9b1aa3e7-f8e7-4c92-8d7c-2c0e5b9d8a4b"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "INVITATION_REVOKED")
 		default:
-			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+			return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 		}
 	}
 	// 招待コード消費 — Service の tx 経路では tx 内で MarkUsed 済 (#604)。
