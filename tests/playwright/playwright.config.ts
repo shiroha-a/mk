@@ -20,10 +20,14 @@ export default defineConfig({
   // Phase 1 では全 spec を chromium で 1 回ずつ実行。multi-browser は
   // CI 統合 PR で `projects` を追加する。
   use: {
-    baseURL: process.env.MK_BASE_URL ?? 'http://mkgo:3000',
+    baseURL: process.env.MK_BASE_URL ?? 'https://mkgo.local',
     // API テスト中心なので screenshot / trace は失敗時のみで十分。
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
+    // nginx tls proxy が self-signed cert を提供する (#817 part2)。
+    // Playwright はそれを accept できる必要がある。`request` fixture と
+    // `page` fixture の両方に効く。
+    ignoreHTTPSErrors: true,
   },
   // CI 並列度の調整は CI 統合 PR で。本 PR はローカル直列実行。
   workers: 1,

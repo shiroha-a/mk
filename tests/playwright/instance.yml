@@ -1,4 +1,9 @@
-url: http://mkgo:3000/
+# `https://mkgo.local` (= nginx tls proxy alias) 経由で叩く。WebAuthn の
+# RPID は URL の hostname (= `mkgo.local`) を使うため `.` を含む host が
+# 必須 (go-webauthn が単一ラベルを reject)。詳細は
+# docker-compose.playwright.yml の nginx-tls service コメント参照
+# (#817 part2)。
+url: https://mkgo.local/
 port: 3000
 
 db:

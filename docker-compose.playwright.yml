@@ -62,6 +62,24 @@ services:
       redis: {condition: service_healthy}
     networks: [playwright]
 
+  # nginx TLS proxy (#817 part2)。
+  # Browser の WebAuthn API は secure context (HTTPS) を要求するため、
+  # mk-go (HTTP 3000) の前に nginx を立てて self-signed cert で HTTPS
+  # terminate する。Playwright runner は `ignoreHTTPSErrors: true` で
+  # cert chain の validation を bypass する。
+  # `mkgo.local` alias を nginx に付与して、WebAuthn の RPID 検証も
+  # 同時に通す (= `.` を含む hostname、go-webauthn が要求)。
+  nginx-tls:
+    build:
+      context: ./tests/playwright/nginx
+      dockerfile: Dockerfile
+    depends_on:
+      mkgo: {condition: service_healthy}
+    networks:
+      playwright:
+        aliases:
+          - mkgo.local
+
   # Playwright runner. profiles: [test] で `up -d` の対象から外し、
   # 明示的に `--profile test run` で起動する (cypress runner と同 pattern)。
   playwright-runner:
@@ -71,7 +89,14 @@ services:
       dockerfile: Dockerfile.runner
     environment:
       # mkgo backend への接続先。spec から fixtures 経由で参照する。
-      MK_BASE_URL: http://mkgo:3000
+      # nginx TLS proxy (`mkgo.local` alias) 経由で HTTPS で叩く (#817 part2)。
+      # WebAuthn は secure context が必須なため。`ignoreHTTPSErrors` を
+      # playwright config 側で立て、self-signed cert を accept する。
+      MK_BASE_URL: https://mkgo.local
+      # Node global WebSocket (streaming spec が使う) は WHATWG 準拠で
+      # `rejectUnauthorized` option がない。env で TLS verify を bypass
+      # する (= test 環境のみ、self-signed cert を accept する目的)。
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
     volumes:
       # spec ファイルと playwright.config.ts は test 実行時に変更されること
       # があるので bind mount で読み込む。生成物 (test-results/) は host に
@@ -84,6 +109,8 @@ services:
     working_dir: /work
     depends_on:
       mkgo: {condition: service_healthy}
+      # nginx-tls は MK_BASE_URL=https://mkgo.local の解決先。
+      nginx-tls: {condition: service_started}
     networks: [playwright]
 
 networks:

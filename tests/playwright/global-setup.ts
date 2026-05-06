@@ -29,7 +29,10 @@ export default async function globalSetup(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log('[globalSetup] redis FLUSHDB done');
 
-  const ctx = await createRequest.newContext();
+  // self-signed cert を accept する。playwright.config.ts の use 設定は
+  // spec scope のみなので globalSetup には届かない (= globalSetup は
+  // request context を独立に作るため明示指定が必要、#817 part2 で HTTPS 化)。
+  const ctx = await createRequest.newContext({ ignoreHTTPSErrors: true });
   try {
     // 2. Root 作成 (admin/accounts/create は 1 回目だけ通る)
     const createResp = await ctx.post(`${baseURL}/api/admin/accounts/create`, {

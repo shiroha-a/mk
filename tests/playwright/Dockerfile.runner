@@ -5,9 +5,10 @@
 # 理由は、後続 PR で page.goto ベース spec を追加するときに browser が
 # 即座に使えるよう構成を固定しておきたいため。
 #
-# 公式 v1.49 を pin。Playwright は upstream リリースで API 微調整するので
-# 後続 PR で必要に応じて bump する。
-FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+# 公式 v1.59 を pin。package.json の @playwright/test と base image の
+# version は両方を sync する必要がある (caret 範囲で npm install が新版
+# に切り替わると base image の browser binary と不一致になる)。
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy
 
 # globalSetup から redis-cli を呼んで rate limit counter を flush する
 # (#744 PR-2): mk-go の signup endpoint は IP base で 1h 5 回 hardcoded で
