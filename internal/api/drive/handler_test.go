@@ -339,6 +339,14 @@ func TestFilesFindByHash_Success(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesFindByHash(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+	// upstream `packMany(files, { self: true })` 経路 (#818): folder / user
+	// は null、userId は owner ID 維持。
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "u1", resp[0]["userId"])
+	assert.Nil(t, resp[0]["folder"])
+	assert.Nil(t, resp[0]["user"])
 }
 
 func TestFilesFindByHash_InvalidParam(t *testing.T) {
@@ -605,6 +613,14 @@ func TestFilesFind_Success(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesFind(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+	// upstream `packMany(files, { self: true })` 経路 (#818): folder / user
+	// は null、userId は owner ID 維持。
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "u1", resp[0]["userId"])
+	assert.Nil(t, resp[0]["folder"])
+	assert.Nil(t, resp[0]["user"])
 }
 
 func TestFilesFind_InvalidParam(t *testing.T) {

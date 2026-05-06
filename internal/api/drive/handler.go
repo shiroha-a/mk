@@ -122,6 +122,24 @@ func (h *Handler) packDriveFileFull(f *model.DriveFile) entity.DriveFileEntity {
 	return entity.PackDriveFileWithRelations(f, h.idGen, folder, user)
 }
 
+// packDriveFileSelfList packs a drive file for the "self list" path used by
+// drive/files/find と drive/files/find-by-hash.
+//
+// upstream Misskey TS は `packMany(files, { self: true })` 経由で
+// `packNullable` を呼び、`folder=null` / `user=null` / `userId=owner ID`
+// を返す (DriveFileEntityService.ts:225-261, withUser/detail デフォルト
+// false)。mk-go は packDriveFileFull が常に folder / user を resolve する
+// ため、helper で post-fixup して shape を整合させる (#818)。
+//
+// drive/files/create の self path (#812) とは異なり userId は **owner ID
+// を維持** する点に注意 (= packNullable は userId を常時返す)。
+func (h *Handler) packDriveFileSelfList(f *model.DriveFile) entity.DriveFileEntity {
+	e := h.packDriveFileFull(f)
+	e.Folder = nil
+	e.User = nil
+	return e
+}
+
 // readMultipartFile extracts the uploaded file's bytes and original filename.
 // テスト用に差し替え可能な変数として定義する。Open()/ReadAll()はechoの
 // multipartパース後ではメモリまたはtempfile由来のreaderしか返さないため
@@ -278,7 +296,8 @@ func (h *Handler) FilesFindByHash(c echo.Context) error {
 	if err != nil {
 		return mapFileError(c, err)
 	}
-	return c.JSON(http.StatusOK, []entity.DriveFileEntity{h.packDriveFileFull(f)})
+	// upstream `packMany(files, { self: true })` 経路 (#818)。
+	return c.JSON(http.StatusOK, []entity.DriveFileEntity{h.packDriveFileSelfList(f)})
 }
 
 // FoldersCreateRequest is the body for drive/folders/create.
@@ -456,7 +475,8 @@ func (h *Handler) FilesFind(c echo.Context) error {
 	}
 	out := make([]entity.DriveFileEntity, 0, len(files))
 	for _, f := range files {
-		out = append(out, h.packDriveFileFull(f))
+		// upstream `packMany(files, { self: true })` 経路 (#818)。
+		out = append(out, h.packDriveFileSelfList(f))
 	}
 	return c.JSON(http.StatusOK, out)
 }
