@@ -56,8 +56,8 @@ func (s *QueryService) Show(viewer *model.User, noteID string) (*model.Note, err
 // 設計を採るため (#799) — drop-in 互換のために合わせる。
 //
 // timeline / replies / renotes / children 等の二次経路は引き続き
-// CanSeeNote (= requireVisible) で filter する。federation 経路 (Show)
-// も visibility check 維持で leak しない。
+// CanSeeNote (= requireVisible) で filter する。federation 経路
+// (= ap/handler の Show callsite) も visibility check 維持で leak しない。
 func (s *QueryService) ShowForAPI(noteID string) (*model.Note, error) {
 	n, err := s.noteRepo.FindByIDWithRelations(noteID)
 	if err != nil {

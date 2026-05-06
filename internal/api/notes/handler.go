@@ -292,7 +292,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	viewer := middleware.GetUser(c)
-	n, err := h.lookupVisible(viewer, req.NoteID)
+	n, err := h.lookupForShow(req.NoteID)
 	if err != nil {
 		return apierr.JSONNoSuchNote(c)
 	}
@@ -303,7 +303,7 @@ func (h *Handler) Show(c echo.Context) error {
 	return c.JSON(http.StatusOK, s[0])
 }
 
-// lookupVisible fetches the note for the /api/notes/show endpoint.
+// lookupForShow fetches the note for the /api/notes/show endpoint.
 //
 // upstream Misskey TS は ID 指定の notes/show では visibility 違反でも
 // note を返す (= ID を既に知っている viewer には公開する設計、#799)。
@@ -314,9 +314,7 @@ func (h *Handler) Show(c echo.Context) error {
 //
 // QueryService が wire されていない場合は ErrNoteNotFound を返して安全
 // 側に倒す (= production では router.go で常に wire される)。
-func (h *Handler) lookupVisible(viewer *model.User, noteID string) (*model.Note, error) {
-	_ = viewer // visibility filter は kicked、viewer 引数は将来の block
-	// 検査 (#TBD) のため signature に残す
+func (h *Handler) lookupForShow(noteID string) (*model.Note, error) {
 	if h.queryService == nil {
 		return nil, note.ErrNoteNotFound
 	}
