@@ -37,10 +37,17 @@ test.describe('streaming: localTimeline', () => {
     const me = await signupUser(request, randomUsername('strm'));
     const ws = new WebSocket(`${wsURL}/streaming?i=${me.token}`);
 
-    // WS open を待つ。失敗時は test timeout に任せる。
+    // WS open を待つ。close (= server 側 reject) も即 fail として
+    // 報告する (= test の 5s timeout 待ちを避け、原因を message に
+    // 反映できる)。
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', () => reject(new Error('ws connection failed')), { once: true });
+      ws.addEventListener('error', () => reject(new Error('ws connection error')), { once: true });
+      ws.addEventListener(
+        'close',
+        (ev) => reject(new Error(`ws closed before open: code=${ev.code} reason=${ev.reason || '(empty)'}`)),
+        { once: true },
+      );
     });
 
     // localTimeline channel を subscribe。subId は client 任意で event の
