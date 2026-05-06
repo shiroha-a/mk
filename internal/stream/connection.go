@@ -68,8 +68,10 @@ type Connection struct {
 	// hardMuteRules は viewer の user_profile.hardMutedWords をそのまま保持する
 	// jsonb 由来 byte slice (#787)。streaming channel が per-note dispatch 時に
 	// notesfilter.MatchOne でこの rules と照合し、match したら send しない。
-	// 認証時に router が一度だけ fetch してセットする想定で、接続中は
-	// immutable に扱う (= 設定変更は次回 reconnect で反映)。
+	// 認証時に router が一度だけ fetch、また i/update 経由で reload 通知
+	// (#791) が来たときに更新される。read (per-publish) と write (reload) が
+	// 並行するので hardMuteMu で protect する。
+	hardMuteMu    sync.RWMutex
 	hardMuteRules []byte
 }
 
@@ -102,21 +104,24 @@ func (c *Connection) User() *model.User { return c.user }
 
 // SetHardMuteRules attaches the viewer's persisted hardMutedWords (raw jsonb
 // from user_profile) so timeline channels can drop matching notes before
-// sending them to the client (#787). Called once after authentication.
-//
-// rules は接続 lifetime の snapshot として保持される。ユーザーが i/update で
-// hardMutedWords を変更しても次回の WebSocket reconnect まで反映されない —
-// per-publish lookup を避けることで streaming hot path の DB query を 0 に
-// 保つトレードオフ。即時反映が必要になったら i/update から該当 user の
-// connection に invalidate signal を流す follow-up を別 issue で検討する。
+// sending them to the client (#787). Called once after authentication and
+// then again whenever a wordmute reload event for this user arrives via
+// pubsub (#791) so changes propagate without forcing the client to reconnect.
 func (c *Connection) SetHardMuteRules(rules []byte) {
+	c.hardMuteMu.Lock()
 	c.hardMuteRules = rules
+	c.hardMuteMu.Unlock()
 }
 
-// HardMuteRules returns the persisted hardMutedWords rules attached at
-// connection setup time. Returns nil for anonymous connections / when
-// the lookup failed / when the user has no rule set.
-func (c *Connection) HardMuteRules() []byte { return c.hardMuteRules }
+// HardMuteRules returns the currently active hardMutedWords rules. Safe for
+// concurrent read while SetHardMuteRules updates the value (#791).
+// Returns nil for anonymous connections / when the lookup failed / when the
+// user has no rule set.
+func (c *Connection) HardMuteRules() []byte {
+	c.hardMuteMu.RLock()
+	defer c.hardMuteMu.RUnlock()
+	return c.hardMuteRules
+}
 
 // SetPermissions attaches OAuth2 permission scopes for this connection.
 // トークン経由で接続された場合に、AccessToken の permission 配列を渡す想定。

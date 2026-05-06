@@ -82,6 +82,25 @@ type Handler struct {
 	// emailValidationClient は verifymail / truemail SaaS への outbound に
 	// 使う SSRF-safe HTTP client (#638)。nil ならデフォルトクライアント。
 	emailValidationClient *http.Client
+	// hardMutePublisher は i/update で hardMutedWords を変更したときに
+	// streaming connection に reload signal を流す (#791)。未配線時は
+	// publish skip = 旧挙動 (= reconnect で反映)。
+	hardMutePublisher HardMutePublisher
+}
+
+// HardMutePublisher publishes a wordmute reload event for the given user.
+// Implementation lives in router.go (Redis pubsub adapter), the handler
+// only depends on this minimal interface.
+type HardMutePublisher interface {
+	PublishHardMuteReload(userID string)
+}
+
+// SetHardMutePublisher wires a publisher that emits wordmute reload events
+// when i/update changes hardMutedWords (#791). Optional; nil disables the
+// realtime reload path (the streaming connection still picks up the new
+// rules at the next reconnect).
+func (h *Handler) SetHardMutePublisher(p HardMutePublisher) {
+	h.hardMutePublisher = p
 }
 
 // SetEmailValidationClient wires the outbound HTTP client used by
@@ -871,6 +890,13 @@ func (h *Handler) Update(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("BANNER_NOT_AN_IMAGE", "The file specified as a banner is not an image.", "75aedb19-2afd-4e6d-87fc-67941256fa60"))
 		}
 		return apierr.JSONInternalError(c)
+	}
+
+	// hardMutedWords が変更された場合は streaming connection に reload signal
+	// を流して即時反映する (#791)。soft (mutedWords) は frontend が /api/i から
+	// 取り直して client-side で filter するので publish 不要。
+	if in.HardMutedWords != nil && h.hardMutePublisher != nil {
+		h.hardMutePublisher.PublishHardMuteReload(me.ID)
 	}
 
 	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))

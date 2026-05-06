@@ -735,6 +735,69 @@ func TestUpdate_ProhibitedWordEmptyListSkipped(t *testing.T) {
 
 // #787 ワードミュート (mutedWords / hardMutedWords) の persist。
 
+// stubHardMutePublisher records published userIDs so tests can assert
+// whether i/update fired the wordmute reload event (#791).
+type stubHardMutePublisher struct {
+	published []string
+}
+
+func (s *stubHardMutePublisher) PublishHardMuteReload(userID string) {
+	s.published = append(s.published, userID)
+}
+
+// #791: hardMutedWords 変更時に publish が走ること。
+func TestUpdate_HardMutedWordsTriggersReload(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	pub := &stubHardMutePublisher{}
+	h.SetHardMutePublisher(pub)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := post(h.Update, `{"hardMutedWords":["spoiler"]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"user1"}, pub.published)
+}
+
+// soft mute (mutedWords) の変更だけでは publish しないこと (= reload 不要)。
+func TestUpdate_SoftMutedWordsDoesNotTriggerReload(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	pub := &stubHardMutePublisher{}
+	h.SetHardMutePublisher(pub)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := post(h.Update, `{"mutedWords":[["foo"]]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, pub.published, "soft mute changes must not trigger reload")
+}
+
+// publisher 未配線時 (= production の wire 失敗 / test default) は publish 試行
+// しないこと (= panic / nil deref しない)。
+func TestUpdate_HardMutedWordsNoPublisherIsNoOp(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	// SetHardMutePublisher は呼ばない
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := post(h.Update, `{"hardMutedWords":["x"]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestUpdate_MutedWordsAccepted(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{

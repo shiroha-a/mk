@@ -1637,6 +1637,11 @@ func (s *Server) setupRoutes() {
 	// 1 度だけ user_profile を引き、以降の publish では cache された rules を
 	// 各 timeline channel が参照する。
 	streamManager.SetHardMuteLookup(&hardMuteLookupAdapter{userRepo: userRepo})
+	// hardMutedWords 変更時に reload event を受け取って該当 connection の
+	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
+	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
+	streamManager.SubscribeWordMuteReload()
+	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
 	notePublisher := stream.NewNotePublisher(streamPubSub, idGen)
 	notePublisher.SetEmojiLookup(emojiRepo)
 	notePublisher.SetInstanceLookup(instanceRepo)
@@ -2499,6 +2504,25 @@ func (a *hardMuteLookupAdapter) HardMutedWordsForUser(userID string) []byte {
 		return nil
 	}
 	return []byte(profile.HardMutedWords)
+}
+
+// hardMutePublisherAdapter bridges PubSubService to i.HardMutePublisher so
+// i/update can flush a wordmute reload event to every active streaming
+// connection of the user (#791). Failures are logged but never bubbled — the
+// API response should not fail just because the realtime nudge couldn't be
+// delivered (clients still pick up the new rules at the next reconnect).
+type hardMutePublisherAdapter struct {
+	pubsub *event.PubSubService
+}
+
+func (a *hardMutePublisherAdapter) PublishHardMuteReload(userID string) {
+	if a.pubsub == nil || userID == "" {
+		return
+	}
+	payload := stream.WordMuteReloadPayload{UserID: userID}
+	if err := a.pubsub.Publish(context.Background(), stream.WordMuteReloadTopic, payload); err != nil {
+		slog.Warn("router: wordmute reload publish failed", "userID", userID, "err", err)
+	}
 }
 
 // reactionNoteStreamAdapter bridges core/reaction.NoteStreamHook to the

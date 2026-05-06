@@ -91,8 +91,39 @@ func (m *Manager) Get(id string) *Connection {
 	return m.conns[id]
 }
 
+// RefreshHardMuteRules re-fetches userID's hardMutedWords from the wired
+// lookup and pushes the result to every active connection owned by that
+// user (#791). Called by the wordmute reload subscriber when i/update
+// publishes a change.
+//
+// hardMute lookup が未配線 / userID が空 の場合は no-op。線形 scan だが
+// reload 頻度は word mute 編集の瞬間のみで O(N) で十分。
+func (m *Manager) RefreshHardMuteRules(userID string) {
+	if m.hardMute == nil || userID == "" {
+		return
+	}
+	rules := m.hardMute.HardMutedWordsForUser(userID)
+	m.mu.RLock()
+	targets := make([]*Connection, 0)
+	for _, c := range m.conns {
+		if u := c.User(); u != nil && u.ID == userID {
+			targets = append(targets, c)
+		}
+	}
+	m.mu.RUnlock()
+	// SetHardMuteRules は lock 外で呼ぶ — Connection の internal mutex が
+	// あるので thread-safe、Manager の mu は早めに release してデッドロック
+	// 経路を作らない。
+	for _, c := range targets {
+		c.SetHardMuteRules(rules)
+	}
+}
+
 // Shutdown closes every registered connection. サーバー停止時に呼ぶ。
 func (m *Manager) Shutdown() {
+	// pubsub subscriber goroutine を先に停止して、停止中の connection に
+	// reload signal が届かないようにする (#791)。
+	m.UnsubscribeWordMuteReload()
 	m.mu.Lock()
 	conns := make([]*Connection, 0, len(m.conns))
 	for _, c := range m.conns {
