@@ -3,12 +3,14 @@ package role
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/gorm"
 )
 
 var (
@@ -74,6 +76,9 @@ func NewService(
 // user.isRoot column for drop-in compatibility with Misskey TS DBs that
 // don't populate meta.rootUserId (#785). Optional; when nil the service
 // behaves as before (meta.rootUserId-only check).
+//
+// 想定は wire-time only (server.setupRoutes 経由)。HTTP リスナー起動後の
+// 再代入は isRootUser 側の concurrent read と race するので呼ばないこと。
 func (s *Service) SetUserRepo(r repository.UserRepository) {
 	s.userRepo = r
 }
@@ -139,8 +144,19 @@ func (s *Service) isRootUser(userID string) bool {
 		return true
 	}
 	if s.userRepo != nil {
-		if u, err := s.userRepo.FindByID(userID); err == nil && u != nil && u.IsRoot {
-			return true
+		u, err := s.userRepo.FindByID(userID)
+		switch {
+		case err == nil:
+			if u != nil && u.IsRoot {
+				return true
+			}
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			// 削除済みユーザー / 不正な userID は root ではない、ログ不要。
+		default:
+			// 接続不良などの transient な障害は観測したい (admin path 限定で
+			// 頻度が低いのでログコストは無視できる)。
+			slog.Warn("role.isRootUser: userRepo.FindByID failed",
+				"userID", userID, "err", err)
 		}
 	}
 	return false

@@ -64,6 +64,56 @@ func TestIsAdministrator_RootUser(t *testing.T) {
 	assert.True(t, svc.IsAdministrator("root1"))
 }
 
+// drop-in 互換 (#785): TS DB を引き継いだ場合は meta.rootUserId が nil の
+// まま user.isRoot=true で root が記録されるので、SetUserRepo 経由で
+// fallback できる必要がある。
+func TestIsAdministrator_DropInRoot_UserIsRootFallback(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{ID: "x"} // RootUserID は nil
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "alice", Username: "alice", IsRoot: true}))
+	svc.SetUserRepo(userRepo)
+
+	assert.True(t, svc.IsAdministrator("alice"))
+}
+
+// user.isRoot=false のユーザーを fallback で誤って root 判定しないこと。
+func TestIsAdministrator_DropIn_NonRootUser_NotPromoted(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "bob", Username: "bob", IsRoot: false}))
+	svc.SetUserRepo(userRepo)
+
+	assert.False(t, svc.IsAdministrator("bob"))
+}
+
+// SetUserRepo 未配線時は従来どおり meta.rootUserId のみで判定する
+// (後方互換性 regression guard)。
+func TestIsAdministrator_NoUserRepoWired_BehavesAsBefore(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	rootID := "root1"
+	metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &rootID}
+	// SetUserRepo は呼ばない
+
+	assert.True(t, svc.IsAdministrator("root1"))
+	assert.False(t, svc.IsAdministrator("other"))
+}
+
+// userRepo.FindByID が transient error (RecordNotFound 以外) を返した場合は
+// silent に false 扱い (admin 昇格に倒さない方が安全)。slog.Warn は出すが
+// 現状 logger を inject しないので副作用のみ確認。
+func TestIsAdministrator_UserRepoTransientError_FallsThrough(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	svc.SetUserRepo(&errorUserRepo{
+		MockUserRepository: testutil.NewMockUserRepository(),
+		err:                assert.AnError,
+	})
+
+	assert.False(t, svc.IsAdministrator("alice"))
+}
+
 func TestIsAdministrator_AdminRole(t *testing.T) {
 	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
 	metaRepo.Meta = &model.Meta{ID: "x"}
@@ -640,6 +690,20 @@ func TestListByRole_RepoError(t *testing.T) {
 
 	_, err := svc.ListByRole("r1", "", "", 10)
 	assert.Error(t, err)
+}
+
+// errorUserRepo は FindByID で任意の error を返す UserRepository stub。
+// ErrRecordNotFound 以外の transient な error 経路 (#785 fallback の
+// silent failure 動作) を検証するために MockUserRepository を embed する
+// (他のメソッドが将来呼ばれても nil deref しないよう必ず初期化済みの mock
+// をセットすること)。
+type errorUserRepo struct {
+	*testutil.MockUserRepository
+	err error
+}
+
+func (e *errorUserRepo) FindByID(_ string) (*model.User, error) {
+	return nil, e.err
 }
 
 // failingListByRoleAssignRepo は ListByRole で error を返す stub。
