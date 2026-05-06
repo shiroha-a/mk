@@ -36,6 +36,10 @@ type testServer struct {
 var (
 	serverA *testServer
 	serverB *testServer
+	// redisAddr は両 server が共有する Redis container の addr。reversi
+	// federation check 用 cache key を直接 pre-populate するなど、test 側で
+	// Redis を直接触る必要があるシナリオ (#435) で使う。
+	redisAddr string
 )
 
 func TestMain(m *testing.M) {
@@ -89,7 +93,7 @@ func TestMain(m *testing.M) {
 		Host:    addrB,
 	}
 
-	redisAddr := fmt.Sprintf("%s:%d", testRedis.Host(), testRedis.Port())
+	redisAddr = fmt.Sprintf("%s:%d", testRedis.Host(), testRedis.Port())
 
 	// サーバーA: Redis DB 0
 	redisOptsA := config.RedisOptions{
@@ -138,6 +142,13 @@ func TestMain(m *testing.M) {
 	}
 	tsA.Start()
 	defer tsA.Close()
+	// reversi 等の deliver queue 経由のテスト用に asynq worker を起動
+	// (#435)。Server.Start() は HTTP listener も込みで動かしてしまうので、
+	// e2e は test 側で listener を握る都合上 background 部分だけ起動する。
+	if err := srvA.StartBackgroundForTest(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e_federation: queue worker A start: %v\n", err)
+		os.Exit(1)
+	}
 
 	// サーバーB: Redis DB 1
 	redisOptsB := config.RedisOptions{
@@ -184,6 +195,10 @@ func TestMain(m *testing.M) {
 	}
 	tsB.Start()
 	defer tsB.Close()
+	if err := srvB.StartBackgroundForTest(); err != nil {
+		fmt.Fprintf(os.Stderr, "e2e_federation: queue worker B start: %v\n", err)
+		os.Exit(1)
+	}
 
 	os.Exit(m.Run())
 }
