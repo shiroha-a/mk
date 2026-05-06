@@ -21,15 +21,25 @@ import (
 // (= third_party の models/User.ts:319) に整合する username 検証 regex。
 // `^\w{1,20}$` 相当で `\w` = [a-zA-Z0-9_]、length 1-20。
 //
+// Go の regexp は RE2 default で `\w` が ASCII の [0-9A-Za-z_] に限定されるため
+// upstream JS の `\w` と挙動が一致する。意図を明示するため明示的に文字クラスを
+// 書き下している (Unicode property を含めない契約をコード上に固定する目的)。
+//
 // 旧 mk-go は length 128 文字まで許容していて drop-in で TS instance に
 // 引き継いだ後 frontend (= TS の username schema) で reject される
 // regression があった (#800)。
 var localUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
-// isValidLocalUsername reports whether the given username is acceptable
-// as a local user's account name. upstream Misskey TS と同じ制約。
-func isValidLocalUsername(username string) bool {
-	return localUsernamePattern.MatchString(username)
+// normalizeAndValidateUsername trims surrounding whitespace and validates
+// the username against upstream Misskey TS の `localUsernameSchema`. 返り値
+// の username は trim 済みなので、caller はそのまま小文字化や DB 永続化に
+// 利用してよい。validation 失敗時は ErrInvalidUsername を返す。
+func normalizeAndValidateUsername(username string) (string, error) {
+	username = strings.TrimSpace(username)
+	if !localUsernamePattern.MatchString(username) {
+		return "", ErrInvalidUsername
+	}
+	return username, nil
 }
 
 var (
@@ -140,9 +150,9 @@ type SignupResult struct {
 // Signup creates a new local user with the given username and password.
 // isInitialSetup=true の場合、作成したユーザーを rootUser に設定する。
 func (s *Service) Signup(username, password string, isInitialSetup bool) (*SignupResult, error) {
-	username = strings.TrimSpace(username)
-	if !isValidLocalUsername(username) {
-		return nil, ErrInvalidUsername
+	username, err := normalizeAndValidateUsername(username)
+	if err != nil {
+		return nil, err
 	}
 
 	// ユーザー名の重複チェック
@@ -252,9 +262,9 @@ func generatePendingCode() string {
 // 成功時に SignupResult.InvitationTicketID 経由で handler に伝える
 // (招待制 + email 確認制併用時の MarkUsed 用)。
 func (s *Service) CreatePending(username, email, password string, invitationTicketID *string) (*model.UserPending, error) {
-	username = strings.TrimSpace(username)
-	if !isValidLocalUsername(username) {
-		return nil, ErrInvalidUsername
+	username, err := normalizeAndValidateUsername(username)
+	if err != nil {
+		return nil, err
 	}
 	lower := strings.ToLower(username)
 
