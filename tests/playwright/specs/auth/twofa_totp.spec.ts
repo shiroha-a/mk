@@ -39,10 +39,19 @@ test.describe('auth: 2FA (TOTP)', () => {
     expect(typeof regBody.secret).toBe('string');
     expect(regBody.secret.length).toBeGreaterThan(0);
 
-    // 2FA done: secret から TOTP code を生成して送信、2FA enable。
-    // upstream / mk-go ともに 200 + { backupCodes: [...] } を返す。
-    const enableToken = authenticator.generate(regBody.secret);
-    const doneResp = await callApi(request, 'i/2fa/done', { i: me.token, token: enableToken });
+    // TOTP code を 1 回だけ生成して、2fa/done と signin-flow step 2 の
+    // 両方で同じ token を再利用する。
+    //
+    // upstream の TOTP verify (UserAuthService.twoFactorAuthenticate) は
+    // `window: 5` (= 前後 5 step ≈ ±150s) で valid 判定し、used token
+    // list は持たない (= replay 拒否なし)。よって 1 回 generate した code
+    // は ~5 分間使い回せる。これにより spec 内の 30s window 跨ぎで code が
+    // 変わる flake を構造的に排除する。
+    const totpToken = authenticator.generate(regBody.secret);
+
+    // 2FA done: 2FA enable。upstream / mk-go ともに 200 + { backupCodes:
+    // [...] } を返す。
+    const doneResp = await callApi(request, 'i/2fa/done', { i: me.token, token: totpToken });
     expect(doneResp.status()).toBe(200);
     const doneBody = await doneResp.json();
     expect(Array.isArray(doneBody.backupCodes)).toBe(true);
@@ -59,11 +68,8 @@ test.describe('auth: 2FA (TOTP)', () => {
     // upstream Misskey TS は signin rate limit に minInterval: 1000ms が
     // ある (SigninApiService.ts) ので、step 1 と step 2 を 1 秒以上
     // 空けて呼ぶ必要がある。1.1s 待機で margin。
-    // generate() は 30s window 単位なので、step 1 と step 2 で同じ code が
-    // 出ることが多い (= 1.1s 程度の delay では window 跨ぎは起きにくい)。
     await new Promise((resolve) => setTimeout(resolve, 1100));
-    const signinToken = authenticator.generate(regBody.secret);
-    const step2Resp = await callApi(request, 'signin-flow', { username, password, token: signinToken });
+    const step2Resp = await callApi(request, 'signin-flow', { username, password, token: totpToken });
     expect(step2Resp.status()).toBe(200);
     const step2Body = await step2Resp.json();
     expect(step2Body.finished).toBe(true);
