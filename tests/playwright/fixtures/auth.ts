@@ -1,11 +1,11 @@
 // #744 Phase 1: signup / signin helper.
-// upstream Misskey TS の signup-flow / signin-flow と互換な request を投げ、
+// upstream Misskey TS と互換な /api/signup と /api/signin-flow を叩き、
 // 取得した access token を spec から再利用できる形にする。
 //
 // 注: root account (admin/accounts/create) の作成と
 // disableRegistration=false の切替は globalSetup で行う (spec 開始前に
-// 1 度だけ)。本 fixture では signup-flow / signin-flow の通常経路のみ
-// 提供する。
+// 1 度だけ)。本 fixture では signup endpoint と signin-flow の通常経路
+// のみ提供する。
 
 import type { APIRequestContext } from '@playwright/test';
 import { callApi } from './api';
@@ -20,8 +20,8 @@ export interface Principal {
 // では captcha / email 認証は disabled な instance config を使うので
 // username + password だけで通る。複数回呼んでも username が違えば成功。
 //
-// 同 instance で並列に user を作る spec はこの helper を使う (root 1 人
-// しか作れない signupRoot と違って複数 user が必要な test に対応する)。
+// 同 instance で複数 user が必要な spec はこの helper を使う
+// (admin/accounts/create は 1 度しか通らないので root 専用)。
 export async function signupUser(
   request: APIRequestContext,
   username: string,

@@ -8,8 +8,13 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('auth: signin-flow rejects invalid credentials', () => {
+  test.beforeAll(() => {
+    resetRateLimit();
+  });
+
   test('wrong password is rejected without a token', async ({ request }) => {
     const username = `signin_invalid_${Date.now()}`;
     await signupUser(request, username, 'correct-password');

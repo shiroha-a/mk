@@ -8,8 +8,15 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { signin, signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('auth: signin-flow', () => {
+  test.beforeAll(() => {
+    // signup endpoint の 1h 5 回 rate limit (#744) を毎 spec 開始前に
+    // ゼロから始める。複数 spec で連続して signup する設計を支える。
+    resetRateLimit();
+  });
+
   test('signin returns a working access token', async ({ request }) => {
     // signup で fresh user を作る。username は時間 uniq で他 spec / 並列実行と
     // 衝突しないようにする (`workers: 1` でも安全側)。
@@ -18,16 +25,13 @@ test.describe('auth: signin-flow', () => {
     expect(created.id).toBeTruthy();
     expect(created.token).toBeTruthy();
 
-    // 取得した user で signin-flow を叩いて別の token を取得する。signin が
-    // 通れば「username + password で auth できる」ことが確認できる。
+    // 取得した user で signin-flow を叩いて access token を取得し、その
+    // token で /api/i が hydrate できることを確認する。signup が返す
+    // token と signin が返す token の同一性は upstream 仕様の動く部分
+    // (= mk-go / TS で異なる可能性) なので assert しない。
     const token = await signin(request, username, 'password1234');
     expect(token).toBeTruthy();
-    // signin token と signup の戻り token は同じか別かは upstream 仕様次第。
-    // mk-go では signup が作る token と signin が取り出す token は別物
-    // (= signin は新しい access_token を発行する) ので、ここでは「いずれの
-    // token も /api/i に対して valid であること」だけ assert する。
 
-    // /api/i で hydrate して username を確認する。
     const me = await callApi(request, 'i', { i: token });
     expect(me.status()).toBe(200);
     const body = await me.json();

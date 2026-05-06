@@ -16,25 +16,18 @@
 // root の credentials は `.auth/root.json` に書き出して spec から読める
 // ようにする。複数 spec で root token を再利用するための fixture。
 
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { request as createRequest } from '@playwright/test';
+import { resetRateLimit } from './fixtures/rate_limit';
 
 const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
 
 export default async function globalSetup(): Promise<void> {
-  // 1. Redis flush
-  try {
-    execFileSync('redis-cli', ['-h', 'redis', 'FLUSHDB'], {
-      stdio: 'pipe',
-      timeout: 5_000,
-    });
-    // eslint-disable-next-line no-console
-    console.log('[globalSetup] redis FLUSHDB done');
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[globalSetup] redis FLUSHDB failed (continuing):', err);
-  }
+  // 1. Redis flush (#744 PR-2). 失敗は throw して fail-fast にする —
+  // silent warn だと後段の signup spec が 429 で fail して原因が見えない。
+  resetRateLimit();
+  // eslint-disable-next-line no-console
+  console.log('[globalSetup] redis FLUSHDB done');
 
   const ctx = await createRequest.newContext();
   try {

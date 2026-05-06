@@ -9,8 +9,13 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('auth: signup-flow', () => {
+  test.beforeAll(() => {
+    resetRateLimit();
+  });
+
   test('multiple users can sign up and each gets a working token', async ({ request }) => {
     const stamp = Date.now();
     const usernames = [`user_a_${stamp}`, `user_b_${stamp}`];
@@ -33,8 +38,15 @@ test.describe('auth: signup-flow', () => {
     }
   });
 
-  // 注: duplicate username の test は signup endpoint を 2 連続で叩くため、
-  // mk-go の signup rate limit (1h 5 回) と signin_invalid spec / signin
-  // spec の signup と合わせて 6 回目で 429 になる。後続 PR で beforeEach
-  // の Redis flush helper を整備してから duplicate spec を追加する。
+  test('duplicate username is rejected', async ({ request }) => {
+    const username = `dupe_${Date.now()}`;
+    await signupUser(request, username, 'password1234');
+
+    // 同 username で 2 度目の signup は USERNAME_ALREADY_EXISTS で 409。
+    // upstream Misskey TS と同じ error code / status を返す shape 互換。
+    const resp = await callApi(request, 'signup', { username, password: 'password1234' });
+    expect(resp.status()).toBe(409);
+    const body = await resp.json();
+    expect(body.error?.code).toBe('USERNAME_ALREADY_EXISTS');
+  });
 });
