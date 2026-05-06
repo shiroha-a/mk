@@ -16,19 +16,23 @@ import { callApi } from './api';
 const USERNAME_MAX = 20;
 
 // randomUsername returns a uniq, validation-safe username for use in spec.
-// `Date.now()` は 13 桁 epoch なので prefix と合わせて簡単に 20 文字を
-// 超えるが、本関数は full 8 文字 hex random suffix を使い、prefix を
-// 短くスライスして必ず 20 文字以内に収める。
+// 8 文字 hex random suffix + "_" + prefix で max 20 文字に収める。upstream
+// の username regex は `^\w{1,20}$` で underscore 1 つは可。suffix は hex
+// (= alphanumeric) のみなので追加の sanitize 不要。
 //
-// upstream の username regex は `^\w{1,20}$` で underscore 1 つは可。
-// suffix は hex (= alphanumeric) のみなので追加の sanitize 不要。
+// prefix が長すぎる場合は **silent に切り捨てず throw** する。spec 作成時
+// に意図と違う username に縮められて debug 困難になる事故を防ぐ。
 export function randomUsername(prefix: string): string {
   // 8 hex chars = 32 bit random で test 内 uniq には十分 (collision は
   // 1 / 2^32 ~ 10^-10 オーダー)。
   const suffix = randomBytes(4).toString('hex');
-  // prefix + "_" + 8 hex = max 20 → prefix は 11 chars までに切る。
-  const safePrefix = prefix.slice(0, USERNAME_MAX - suffix.length - 1);
-  return `${safePrefix}_${suffix}`;
+  const maxPrefix = USERNAME_MAX - suffix.length - 1;
+  if (prefix.length > maxPrefix) {
+    throw new Error(
+      `randomUsername: prefix '${prefix}' exceeds ${maxPrefix} chars`,
+    );
+  }
+  return `${prefix}_${suffix}`;
 }
 
 export interface Principal {

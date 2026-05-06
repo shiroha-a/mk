@@ -51,6 +51,9 @@ test.describe('notes: visibility boundary', () => {
   // どちらが "正解" かは drop-in 互換性の方針次第だが、ひとまず本 spec は
   // skip し、本来の visibility 検証は notes/timeline 経路 (= follow graph と
   // visibility filter の組み合わせ) で別 PR にて行う。
-  test.skip('followers-only note is hidden from stranger (TS=200/mk-go=4xx drift)', async () => {});
-  test.skip('specified note is hidden from non-listed user (TS=200/mk-go=4xx drift)', async () => {});
+  // test.fixme で「後で書き直す予定」を semantic に表現する (= test.skip
+  // が "永続的 skip" の意なので、issue close 後に unblock する意図には
+  // fixme が適切)。
+  test.fixme('followers-only note is hidden from stranger (TS=200/mk-go=4xx drift)', async () => {});
+  test.fixme('specified note is hidden from non-listed user (TS=200/mk-go=4xx drift)', async () => {});
 });

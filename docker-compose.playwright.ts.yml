@@ -26,7 +26,10 @@ services:
       NODE_TLS_REJECT_UNAUTHORIZED: "0"
       TZ: Asia/Tokyo
     volumes:
-      - ./tests/playwright/instance.ts.yml:/misskey/.config/default.yml:ro
+      # mk-go base と config を共有 (instance.yml は両 backend 互換)。
+      # mk-go base の mount path は /app/.config/default.yml だが、TS image は
+      # /misskey/.config/default.yml で読むので path だけ overlay で書き換え。
+      - ./tests/playwright/instance.yml:/misskey/.config/default.yml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/ping | grep -q pong"]
       interval: 5s

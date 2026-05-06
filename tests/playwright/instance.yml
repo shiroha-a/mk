@@ -26,6 +26,11 @@ redisForTimelines:
 
 id: aidx
 
+# 注: 本 config は mk-go binary (docker-compose.playwright.yml) と TS image
+# (docker-compose.playwright.ts.yml overlay) の **両方で共有** する。差分が
+# 発生したら別 file に分けるが、現状 db/redis hostname も同じなので 1 file
+# で済む。
+#
 # Playwright phase 1 は federation を行わないが、mk-go init で
 # allowedPrivateNetworks が空配列のときに WARN が出るので最低限を入れる。
 allowedPrivateNetworks:
