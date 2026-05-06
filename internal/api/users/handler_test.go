@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1095,4 +1096,43 @@ func TestShow_IsFollowing(t *testing.T) {
 
 	rec := postStub(h.Show, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #739: SetEmojiRepo / SetReactionReader / SetNoteFieldResolver の setter を
+// 配線して非 nil 経路の lookup を踏む。populateUserEmojis も Show 経由で
+// 実行されるよう emoji 行を仕込む。
+func TestSetters_WireOptionalDeps(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["u1"] = &model.User{
+		ID: "u1", Username: "alice", UsernameLower: "alice",
+		Emojis:            []string{"smile"},
+		AvatarDecorations: datatypes.JSON("[]"),
+	}
+
+	emojiRepo := testutil.NewMockEmojiRepository()
+	require.NoError(t, emojiRepo.Create(&model.Emoji{
+		ID: "e1", Name: "smile", PublicURL: "https://x/smile.png",
+	}))
+	h.SetEmojiRepo(emojiRepo)
+	h.SetInstanceRepo(testutil.NewMockInstanceRepository())
+	h.SetReactionReader(stubBufferedReactions{})
+	h.SetNoteFieldResolver(nil) // Apply は r==nil で no-op (#739)
+
+	rec := postStub(h.Show, `{"userId":"u1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// populateUserEmojis が emoji を URL に解決して emojis map に出すこと
+	emojis, _ := resp["emojis"].(map[string]any)
+	require.NotNil(t, emojis, "emojis should be populated when emojiRepo is wired")
+	assert.Equal(t, "https://x/smile.png", emojis["smile"])
+}
+
+// stubBufferedReactions implements entity.BufferedReactionsReader as a no-op
+// for setter wiring tests (#739)。
+type stubBufferedReactions struct{}
+
+func (stubBufferedReactions) GetBufferedMany(_ context.Context, _ []string) (map[string]map[string]int64, error) {
+	return map[string]map[string]int64{}, nil
 }

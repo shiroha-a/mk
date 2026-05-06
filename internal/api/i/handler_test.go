@@ -1519,3 +1519,34 @@ func TestMe_PinnedPage_NoPinnedPageID(t *testing.T) {
 	assert.Nil(t, resp["pinnedPageId"])
 	assert.Nil(t, resp["pinnedPage"])
 }
+
+// #739: 多くの setter (SetNoteFieldResolver / SetInstanceRepo / SetEmojiRepo /
+// SetReactionReader) は wire のみで lookup の non-nil 分岐は別パスで踏む。
+// ここでは構築 + setter 呼び出しのみで panic しないことを担保する。
+func TestSetters_NotPanic(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetNoteFieldResolver(nil)
+	h.SetInstanceRepo(testutil.NewMockInstanceRepository())
+	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	h.SetReactionReader(stubBufferedReactions{})
+}
+
+// stubBufferedReactions implements entity.BufferedReactionsReader as a no-op
+// for setter wiring tests (#739)。
+type stubBufferedReactions struct{}
+
+func (stubBufferedReactions) GetBufferedMany(_ context.Context, _ []string) (map[string]map[string]int64, error) {
+	return map[string]map[string]int64{}, nil
+}
+
+// #739: verifyURL は serverURL fallback と path 結合の単純関数だが UpdateEmail
+// 経路で email 送信が起きないと cover されない。直接呼んで両分岐 (serverURL
+// 未設定 / 設定済み) を担保する。
+func TestVerifyURL(t *testing.T) {
+	h := &Handler{}
+	// serverURL 未設定 → https://localhost フォールバック
+	assert.Equal(t, "https://localhost/verify-email/abc", h.verifyURL("abc"))
+
+	h2 := &Handler{serverURL: "https://example.com"}
+	assert.Equal(t, "https://example.com/verify-email/abc", h2.verifyURL("abc"))
+}

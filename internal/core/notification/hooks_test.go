@@ -368,6 +368,33 @@ func TestHook_OnFollowRequested(t *testing.T) {
 	assert.Equal(t, TypeReceiveFollowReq, out[0].Type)
 }
 
+// #739: OnFollowRejected は受信側 (followee) の receiveFollowRequest 通知を
+// follower の通知者 ID で絞って削除する。本家 TS と同じ semantics で、
+// rejected を follower 側に積まない (notification spam 抑制)。
+func TestHook_OnFollowRejected(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	// 既存の receive-follow-request 通知を alice (followee) 側に作っておく
+	h.OnFollowRequested("bob", "alice")
+	out, err := svc.List(context.Background(), "alice", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, TypeReceiveFollowReq, out[0].Type)
+
+	// reject されたら follower=bob 由来の receive-follow-request 通知を削除
+	h.OnFollowRejected("bob", "alice")
+	out, err = svc.List(context.Background(), "alice", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "receiveFollowRequest from rejected follower should be removed")
+}
+
+// nil hook は no-op。OnFollowRejected の guard 分岐を踏む。
+func TestHook_OnFollowRejected_NilSvcNoop(t *testing.T) {
+	h := &Hook{}
+	// パニックしないことを確認
+	h.OnFollowRejected("bob", "alice")
+}
+
 func TestHook_OnFollowAccepted(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addLocalUser(repo, "bob", "bob")

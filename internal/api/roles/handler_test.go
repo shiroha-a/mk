@@ -1,6 +1,7 @@
 package roles_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -213,3 +214,36 @@ func TestNotes_LimitClamped(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// stubBufferedReactions implements entity.BufferedReactionsReader. 戻り値が
+// 空マップでも reactionReader() が non-nil を返す経路を踏ませる。
+type stubBufferedReactions struct{}
+
+func (stubBufferedReactions) GetBufferedMany(_ context.Context, _ []string) (map[string]map[string]int64, error) {
+	return map[string]map[string]int64{}, nil
+}
+
+// SetInstanceRepo / SetEmojiRepo / SetReactionReader / SetNoteFieldResolver
+// を wire した状態で Notes を呼び、各 setter が field を設定し lookup の
+// non-nil 分岐 (instanceLookup / emojiLookup) を踏むことを確認する。これら
+// setter は他 handler でも同じ pattern なので回帰検知の意味も兼ねる (#739)。
+func TestSettersWireOptionalDeps(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+
+	instanceRepo := testutil.NewMockInstanceRepository()
+	h.SetInstanceRepo(instanceRepo)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	h.SetEmojiRepo(emojiRepo)
+	h.SetReactionReader(stubBufferedReactions{})
+	h.SetNoteFieldResolver(nil) // Apply は r==nil で no-op
+
+	mock := &mockRoleNotesQuery{
+		Notes: []*model.Note{
+			{ID: "n1", UserID: "u1", Text: strPtr("hello"), Visibility: "public"},
+		},
+	}
+	h.SetNotesQuery(mock)
+	rec := doPost(h.Notes, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+}

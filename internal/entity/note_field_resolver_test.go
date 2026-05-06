@@ -2,6 +2,7 @@ package entity
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -239,4 +240,118 @@ func TestNoteFieldResolver_SetPollVoteLookup(t *testing.T) {
 	r := &NoteFieldResolver{}
 	r.SetPollVoteLookup(nil)
 	r.SetPollVoteLookup(nil)
+}
+
+// stubPollVoteLookup is a fake PollVoteLookup that returns a pre-configured
+// noteID → [choice indices] map. Used to drive the appendPollNoteIDs /
+// applyMyPollVotes / applyVotedChoices coverage gap (#739)。
+type stubPollVoteLookup struct {
+	votes map[string][]int
+}
+
+func (s *stubPollVoteLookup) FindByUserAndNoteIDs(_ string, _ []string) (map[string][]int, error) {
+	return s.votes, nil
+}
+
+// #739: ResolveViewerFields 経由で appendPollNoteIDs / applyMyPollVotes /
+// applyVotedChoices を全部踏ませる。top-level / Renote / Reply の 3 経路を
+// すべて含む note slice を組み立てる。
+func TestNoteFieldResolver_ResolveViewerFields_PollVoted(t *testing.T) {
+	mkPoll := func() *PollEntity {
+		return &PollEntity{Choices: []PollChoice{{Text: "a"}, {Text: "b"}, {Text: "c"}}}
+	}
+	notes := []NoteEntity{
+		{
+			ID:   "top",
+			Poll: mkPoll(),
+			Renote: &NoteEntity{
+				ID:   "renoteTarget",
+				Poll: mkPoll(),
+			},
+			Reply: &NoteEntity{
+				ID:   "replyTarget",
+				Poll: mkPoll(),
+			},
+		},
+	}
+
+	r := &NoteFieldResolver{
+		pollVote: &stubPollVoteLookup{
+			votes: map[string][]int{
+				"top":          {0},
+				"renoteTarget": {1},
+				"replyTarget":  {2},
+				// 範囲外 index も混ぜて applyVotedChoices の bounds check
+				// (idx >= 0 && idx < len) を踏ませる
+			},
+		},
+	}
+	viewer := &model.User{ID: "v1"}
+	r.ResolveViewerFields(notes, viewer)
+
+	assert.True(t, notes[0].Poll.Choices[0].IsVoted, "top: choice 0")
+	assert.True(t, notes[0].Renote.Poll.Choices[1].IsVoted, "renote: choice 1")
+	assert.True(t, notes[0].Reply.Poll.Choices[2].IsVoted, "reply: choice 2")
+}
+
+// applyVotedChoices の bounds check (idx out of range) と空 choices guard
+// 経路を踏む。
+func TestNoteFieldResolver_ResolveViewerFields_PollVoted_OutOfRange(t *testing.T) {
+	notes := []NoteEntity{
+		{
+			ID: "top",
+			Poll: &PollEntity{
+				Choices: []PollChoice{{Text: "a"}},
+			},
+		},
+	}
+	r := &NoteFieldResolver{
+		pollVote: &stubPollVoteLookup{
+			votes: map[string][]int{"top": {99, -1}}, // 範囲外なので無視される
+		},
+	}
+	r.ResolveViewerFields(notes, &model.User{ID: "v1"})
+	// 範囲外のため何もマークされない
+	assert.False(t, notes[0].Poll.Choices[0].IsVoted)
+}
+
+// #739: packPoll の主要分岐を unit test。nil / choices/votes mismatch /
+// expiresAt 非 nil をすべて踏む。
+func TestPackPoll(t *testing.T) {
+	// nil → nil
+	assert.Nil(t, packPoll(nil))
+
+	// choices < votes (votes 余り無視)
+	p := &model.Poll{
+		Choices: []string{"a", "b"},
+		Votes:   pq.Int64Array{3, 7, 99}, // 99 は破棄される
+	}
+	got := packPoll(p)
+	require.NotNil(t, got)
+	require.Len(t, got.Choices, 2)
+	assert.Equal(t, "a", got.Choices[0].Text)
+	assert.Equal(t, 3, got.Choices[0].Votes)
+	assert.Equal(t, 7, got.Choices[1].Votes)
+	assert.Nil(t, got.ExpiresAt)
+
+	// expiresAt 非 nil → ISO8601 ms 文字列
+	t1 := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	p2 := &model.Poll{
+		Choices:   []string{"x"},
+		Votes:     pq.Int64Array{0},
+		ExpiresAt: &t1,
+	}
+	got2 := packPoll(p2)
+	require.NotNil(t, got2.ExpiresAt)
+	assert.Equal(t, "2026-05-06T12:00:00.000Z", *got2.ExpiresAt)
+
+	// votes < choices (choices 多い → votes=0 で埋まる)
+	p3 := &model.Poll{
+		Choices: []string{"a", "b", "c"},
+		Votes:   pq.Int64Array{1},
+	}
+	got3 := packPoll(p3)
+	assert.Equal(t, 1, got3.Choices[0].Votes)
+	assert.Equal(t, 0, got3.Choices[1].Votes)
+	assert.Equal(t, 0, got3.Choices[2].Votes)
 }

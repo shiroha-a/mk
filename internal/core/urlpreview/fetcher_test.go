@@ -146,3 +146,31 @@ func TestHashURL(t *testing.T) {
 	assert.NotEqual(t, h1, h3)
 	assert.Len(t, h1, 64)
 }
+
+// #739: SummaryProxyURL が設定されていれば fetchViaProxy 経由で取得する経路。
+// proxy が JSON で Result 相当を返すと正しく decode される。
+func TestFetcher_FetchViaProxy_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "https://example.com/page", r.URL.Query().Get("url"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"title":"From Proxy","url":"https://example.com/page"}`))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, SummaryProxyURL: srv.URL})
+	res, err := f.Fetch(context.Background(), "https://example.com/page")
+	require.NoError(t, err)
+	require.NotNil(t, res.Title)
+	assert.Equal(t, "From Proxy", *res.Title)
+}
+
+// proxy が malformed JSON を返した場合は ErrFetchFailed。
+func TestFetcher_FetchViaProxy_BadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer srv.Close()
+	f := newTestFetcher(Config{Enabled: true, SummaryProxyURL: srv.URL})
+	_, err := f.Fetch(context.Background(), "https://example.com/page")
+	assert.ErrorIs(t, err, ErrFetchFailed)
+}

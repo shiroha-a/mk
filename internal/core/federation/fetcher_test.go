@@ -196,6 +196,32 @@ func TestStatusError_PreservesLegacyErrorString(t *testing.T) {
 	assert.True(t, strings.HasPrefix(se.Error(), "unexpected status:"))
 }
 
+// #739: APFetcher.FetchObjectUnsigned (peer 認証不要 endpoint 用) と
+// FetchJSON (Iceshrimp.NET nodeinfo 互換) を coverage 化。
+func TestAPFetcher_FetchObjectUnsigned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"x"}`))
+	}))
+	defer srv.Close()
+	f := NewAPFetcher(activitypub.NewClient(nil, "test"))
+	body, err := f.FetchObjectUnsigned(srv.URL)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"object":"x"`)
+}
+
+func TestAPFetcher_FetchJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// nodeinfo 経路は plain JSON Accept を要求する
+		assert.Contains(t, r.Header.Get("Accept"), "application/json")
+		_, _ = w.Write([]byte(`{"version":"2.1"}`))
+	}))
+	defer srv.Close()
+	f := NewAPFetcher(activitypub.NewClient(nil, "test"))
+	body, err := f.FetchJSON(srv.URL)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"version":"2.1"`)
+}
+
 func TestAPFetcher_FetchHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

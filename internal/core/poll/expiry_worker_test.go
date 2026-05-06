@@ -270,3 +270,35 @@ func TestExpiryWorker_ContextCancelStopsTick(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Empty(t, notif.snapshot())
 }
+
+// #739: Run の nil-receiver / unconfigured guard 分岐を踏む。loop 入る前に
+// 早期 return することを確認 (Tick 経由ではなく Run 直呼び)。
+func TestExpiryWorker_Run_NilWorkerReturns(t *testing.T) {
+	var w *ExpiryWorker
+	w.Run(context.Background()) // パニックせず即座に return
+}
+
+func TestExpiryWorker_Run_UnconfiguredRepoReturns(t *testing.T) {
+	w := &ExpiryWorker{}
+	w.Run(context.Background()) // パニックせず即座に return
+}
+
+// #739: notifyOne の nil-poll guard 分岐を踏む。
+func TestExpiryWorker_NotifyOne_NilPoll(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, _, _, _, _, _ := newWorkerSetup(t, now)
+	w.notifyOne(context.Background(), nil, now) // パニックせず no-op
+}
+
+// #739: Tick で ctx を予め cancel しておくと、batch loop の途中で ctx.Err()
+// により early return する。
+func TestExpiryWorker_Tick_CtxCancelMidBatch(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	w, pollRepo, _, noteRepo, userRepo, _ := newWorkerSetup(t, now)
+	seedLocalUser(userRepo, "alice")
+	seedExpiredPoll(t, pollRepo, noteRepo, "n1", "alice", now.Add(-time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 既に cancel 済み
+	err := w.Tick(ctx)
+	assert.Error(t, err) // ctx.Err() がそのまま返る
+}

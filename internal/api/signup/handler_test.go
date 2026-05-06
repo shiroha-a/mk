@@ -576,3 +576,32 @@ func TestSignupPending_MarksInvitationTicketUsed(t *testing.T) {
 	// MarkUsed が呼ばれて ticket.ID → user.ID が記録される
 	assert.Equal(t, userID, tickets.markUsed["ticket_inv1"])
 }
+
+// --- coverage 補完 (#739): Signup / SignupPending の error 分岐を network 化 ---
+
+// 129 文字 username → service が ErrInvalidUsername を返す。email-required path
+// 経由で 400 INVALID_PARAM が返ることを確認する。
+func TestSignup_EmailRequired_InvalidUsername(t *testing.T) {
+	h, _, metaRepo := newTestHandler(t)
+	metaRepo.Meta.EmailRequiredForSignup = true
+	long := strings.Repeat("a", 129)
+	rec := doPost(h.Signup, `{"username":"`+long+`","password":"pass","emailAddress":"x@example.com"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// preserved username が email-required path で USED_USERNAME を返すこと。
+func TestSignup_EmailRequired_ReservedUsername(t *testing.T) {
+	h, _, metaRepo := newTestHandler(t)
+	metaRepo.Meta.EmailRequiredForSignup = true
+	metaRepo.Meta.PreservedUsernames = []string{"admin"}
+	rec := doPost(h.Signup, `{"username":"admin","password":"pass","emailAddress":"x@example.com"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	resp := parseResp(t, rec)
+	errField, _ := resp["error"].(map[string]any)
+	assert.Equal(t, "USED_USERNAME", errField["code"])
+}
+
+// 注: SignupPending の ErrInvitationAlreadyUsed / ErrInvitationRevoked は
+// service.PromotePending の **tx 経路** (db + ticketRepo wired) でのみ発火し、
+// mock ベース handler test では再現不可。これらの coverage は repository /
+// service integration test 側で別途担保する想定で本 handler test では skip。

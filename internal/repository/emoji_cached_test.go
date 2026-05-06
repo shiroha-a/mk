@@ -189,3 +189,19 @@ func TestCachedEmojiRepository_InvalidatePublic(t *testing.T) {
 	assert.Equal(t, int64(2), inner.listLocalCalls.Load(),
 		"explicit Invalidate() should drop the cache")
 }
+
+// #739: 単純 delegate read-only methods の coverage 補完。inner mock を
+// counting せずに通すだけで wrapper が panic / wrap せず素通りすること。
+func TestCachedEmojiRepository_ReadOnlyDelegations(t *testing.T) {
+	inner := &countingEmojiRepo{emojis: []*model.Emoji{{ID: "e1", Name: "smile"}}}
+	cached := repository.NewCachedEmojiRepository(inner)
+
+	_, _ = cached.FindByNameAndHost("smile", nil)
+	_, _ = cached.FindByID("e1")
+	_, _ = cached.FindManyByIDs([]string{"e1"})
+	_, _ = cached.FindManyByNamesAndHost([]string{"smile"}, nil)
+	_, _ = cached.ListWithFilter("", "", true, "", "", 10, 0)
+	_, _ = cached.ListRemoteWithFilter("", "remote.example", "", "", 10, 0)
+	_, _ = cached.ListV2(model.EmojiV2Filter{})
+	_, _ = cached.CountV2(model.EmojiV2Filter{})
+}

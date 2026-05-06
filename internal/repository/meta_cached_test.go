@@ -158,3 +158,15 @@ func TestCachedMetaRepository_ConcurrentFetch(t *testing.T) {
 	// ダブルチェックロックにより1〜数回のFetchで済む
 	assert.LessOrEqual(t, inner.fetchCount.Load(), int32(3))
 }
+
+// #739: NewCachedMetaRepository (default 5-min TTL constructor) を coverage 化。
+// 中身は WithTTL と同じだが default TTL 経路が踏まれていなかった。
+func TestNewCachedMetaRepository_DefaultTTL(t *testing.T) {
+	inner := &countingMetaRepo{
+		meta: &model.Meta{ID: "m1"},
+	}
+	cached := repository.NewCachedMetaRepository(inner)
+	m, err := cached.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, "m1", m.ID)
+}
