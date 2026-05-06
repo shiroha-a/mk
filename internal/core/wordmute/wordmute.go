@@ -16,7 +16,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
-	"sync"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // Match returns true if the given combined text should be muted by any of
@@ -92,25 +93,38 @@ var regexLiteral = regexp.MustCompile(`^/(.+)/([gimsuy]*)$`)
 // `(?P<name>...)` (named group) は flag 設定ではないので一致させない。
 var inlineFlagPrefix = regexp.MustCompile(`^\(\?[imsU]+[):]`)
 
+// parsedCacheSize は parsedCache の size cap。TS upstream の AhoCorasick
+// cache (`acCache.size > 1000`) と同じ閾値で、active user × rule revision
+// が多くなっても memory が monotonic に grow しないようにする (#790)。
+const parsedCacheSize = 1000
+
 // parsedCache stores the parsed rule slice keyed by the *raw* JSON bytes.
 // Hot TL paths call Match many times with the same per-user rule set; parsing
-// once per request is cheap but parsing per-note would be wasteful.
+// once per request is cheap but parsing per-note would be wasteful。LRU で
+// size cap しているため、user が rule を更新して古い JSON byte 列の entry が
+// dangling しても oldest から evict されて bound が保たれる。
 //
-// 上限: 同じ rule JSON は 1 entry に dedupe されるが、ユーザーが rule を
-// 更新するたびに新しい key が増え、古い key は GC されず dangling する
-// (= rule revision に対して monotonic に grow する)。大規模インスタンスで
-// 長時間運用するなら LRU 化を検討する (TS upstream は `acCache.size > 1000`
-// で oldest を delete している)。現状は実装簡略のため単純 sync.Map で受けて
-// いる。
-var parsedCache sync.Map // string -> []rule
+// hashicorp/golang-lru/v2 は内部で mutex を持ち、Add/Get は thread-safe。
+// 並行 hot path で何度呼ばれても race にならない。
+var parsedCache *lru.Cache[string, []rule]
+
+func init() {
+	c, err := lru.New[string, []rule](parsedCacheSize)
+	if err != nil {
+		// lru.New は size > 0 で panic しない実装なので実質到達しないが、
+		// 万一に備えて compile-time に近い fail-fast にする。
+		panic("wordmute: failed to init parsedCache: " + err.Error())
+	}
+	parsedCache = c
+}
 
 func parse(raw []byte) []rule {
 	if len(raw) == 0 {
 		return nil
 	}
 	key := string(raw)
-	if v, ok := parsedCache.Load(key); ok {
-		return v.([]rule)
+	if v, ok := parsedCache.Get(key); ok {
+		return v
 	}
 	var entries []json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {
@@ -123,7 +137,7 @@ func parse(raw []byte) []rule {
 			out = append(out, r)
 		}
 	}
-	parsedCache.Store(key, out)
+	parsedCache.Add(key, out)
 	return out
 }
 

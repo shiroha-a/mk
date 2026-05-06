@@ -156,3 +156,62 @@ func TestMatch_ConcurrentSafe(t *testing.T) {
 		assert.True(t, wordmute.Match(rules, "a b"))
 	}
 }
+
+// #790: parsedCache が size cap 化されていることを確認する。
+//
+// 実装は internal な LRU なので、外側からは「N+α 個の異なる rules JSON で
+// Match を呼んでも memory が線形に増えず、再度叩いた時に dedupe される
+// (= cache hit する) 動作」が保証されればよい。size cap の絶対値 (= 1000)
+// に依存した assert は実装変更で壊れるので、cap 超過後でも match 自体が
+// 正しく動くことだけを担保する。
+func TestMatch_ParsedCacheSurvivesCapacity(t *testing.T) {
+	// 1100 個の異なる rules を順に投入 (= cap 1000 を超える)。
+	// それぞれ異なる単一キーワードで、対応 text に hit することを確認する。
+	for i := 0; i < 1100; i++ {
+		// 一意な keyword を含む rules JSON を組む。文字列 escape 不要な範囲。
+		kw := "kw-" + string(rune('a'+(i%26))) + "-" + itoa(i)
+		rules := []byte(`["` + kw + `"]`)
+		text := "prefix " + kw + " suffix"
+		assert.True(t, wordmute.Match(rules, text),
+			"freshly-added rule must match its keyword (i=%d)", i)
+	}
+
+	// cap 超過後でも、最後に add した rule は cache に残っており再 match 可能。
+	last := []byte(`["kw-z-1099"]`)
+	assert.True(t, wordmute.Match(last, "kw-z-1099 hits"))
+}
+
+// cap 超過で evict された古い rule JSON を再投入したとき、re-parse 経路が
+// 正しく動いて再び match できることを担保する。eviction 後の correctness
+// regression を防ぐ regression guard。
+func TestMatch_EvictedRuleReParsesCorrectly(t *testing.T) {
+	first := []byte(`["original-keyword"]`)
+	// 最初に投入して match 確認。
+	assert.True(t, wordmute.Match(first, "find original-keyword here"))
+
+	// 1100 個 add で必ず first が evict される (cap=1000)。
+	for i := 0; i < 1100; i++ {
+		rules := []byte(`["filler-` + itoa(i) + `"]`)
+		_ = wordmute.Match(rules, "noop")
+	}
+
+	// first を再投入: cache miss で re-parse され、match path も生きていること。
+	assert.True(t, wordmute.Match(first, "find original-keyword again"))
+	assert.False(t, wordmute.Match(first, "no match here"))
+}
+
+// 内部で itoa を呼ぶための小さい helper (strconv 依存を増やさない)。
+// 0-9999 の範囲しか使わないので簡素に書く。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [10]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
