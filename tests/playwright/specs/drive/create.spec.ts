@@ -58,10 +58,12 @@ test.describe('drive: files/create', () => {
     expect(file.id).toBeTruthy();
     expect(file.name).toBe('tiny.png');
     expect(file.type).toBe('image/png');
-    // url は scheme 必須で strict assert する。文字列断片や path-only な値が
-    // 混入する regression を弾く (= scheme は backend config 依存で http/https
-    // どちらも valid)。
-    expect(file.url).toMatch(/^https?:\/\//);
+    // url は scheme + host + `/files/` path prefix を strict に assert。
+    // upstream / mk-go (router.go:1392 で `/files/:accessKey` を提供) どちら
+    // も `/files/<accessKey>` を返すので、URL drift (= path-only / 別 endpoint
+    // / scheme 欠落) を catch できる。scheme は backend config 依存で http/https
+    // どちらも valid。
+    expect(file.url).toMatch(/^https?:\/\/[^/]+\/files\//);
     expect(file.size).toBe(tinyPNG.length);
 
     // files/show で同 file を取得して shape 整合を確認。create と show で
