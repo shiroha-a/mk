@@ -11,6 +11,12 @@
 #     run --rm playwright-runner
 #   docker compose -f docker-compose.playwright.yml down -v
 
+# project name は repo dir 名 (default = `mk`) と衝突して UDS 本番の
+# `mk-postgres-1` / `mk-redis-1` / `mk-mkgo-1` container を取り合うので、
+# 明示的に別 project に分離する。これにより `make playwright-down -v` でも
+# UDS service は touch されない。
+name: mk-playwright
+
 services:
   postgres:
     image: postgres:16-alpine

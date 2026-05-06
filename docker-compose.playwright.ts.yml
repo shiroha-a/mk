@@ -1,5 +1,8 @@
 # docker-compose.playwright.ts.yml — #744 Phase 1 TS validation overlay.
 #
+# project name は base (docker-compose.playwright.yml) の `name: mk-playwright`
+# を引き継ぐ。overlay 単独で起動することはないので明示は不要。
+#
 # spec は upstream Misskey TS の API 互換挙動を期待値として書いている。
 # 本 overlay は backend を `misskey/misskey:2026.3.2` に置き換えて、上流の
 # 真の挙動で spec が pass することを baseline として確認する。
