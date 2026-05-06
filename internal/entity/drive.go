@@ -36,11 +36,14 @@ type DriveFileEntity struct {
 	WebpublicURL *string             `json:"webpublicUrl"`
 	FolderID     *string             `json:"folderId"`
 	UserID       *string             `json:"userId"`
-	// Folder は optional (TS schema: folder?: DriveFolder | null)。caller が
-	// pre-fetch してセットする。nil のときは omitempty で JSON から省略。
-	Folder *DriveFolderEntity `json:"folder,omitempty"`
-	// User は optional (TS schema: user?: UserLite | null)。同上。
-	User *UserLite `json:"user,omitempty"`
+	// Folder は upstream が detail packing で常に出す (= null or DriveFolder)。
+	// 旧実装は omitempty で省略していたが drop-in shape drift だったため #812
+	// で外した。caller (= packDriveFileFull) で pre-fetch してセットし、未設定
+	// なら nil → JSON `null` として出す。
+	Folder *DriveFolderEntity `json:"folder"`
+	// User も upstream の detail packing で常に出す (= null or UserLite)。
+	// 同じく #812 で omitempty を外した。
+	User *UserLite `json:"user"`
 }
 
 // PackDriveFile converts a model.DriveFile to a DriveFileEntity. The Folder
@@ -119,7 +122,7 @@ func isImageMime(t string) bool {
 // PackDriveFileWithRelations is PackDriveFile + optional folder/user
 // embedding. The caller is responsible for fetching the related rows (so
 // batch/cached access is possible). Pass nil for fields you do not want to
-// expose — omitempty keeps the JSON output clean.
+// expose — JSON 上は `null` として出る (#812 で omitempty を外した)。
 func PackDriveFileWithRelations(f *model.DriveFile, idGen id.Generator, folder *model.DriveFolder, user *model.User) DriveFileEntity {
 	out := PackDriveFile(f, idGen)
 	if folder != nil {

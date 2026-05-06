@@ -97,6 +97,10 @@ func TestFilesCreate_AllFormFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "renamed.txt", resp["name"])
 	assert.Equal(t, true, resp["isSensitive"])
+	// upstream `pack(file, { self: true })` (= withUser=false) に整合し、
+	// userId / user は null を返す (#812)。
+	assert.Nil(t, resp["userId"])
+	assert.Nil(t, resp["user"])
 }
 
 func TestFilesCreate_NoFile(t *testing.T) {

@@ -172,7 +172,14 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.packDriveFileFull(f))
+	// upstream `drive/files/create` は `pack(file, { self: true })` で
+	// userId / user を null にする (= withUser がデフォルト false)。本実装も
+	// 同 shape に揃える (#812)。show / find 等の他 endpoint は別 packing で
+	// owner ID を出すので維持。
+	out := h.packDriveFileFull(f)
+	out.UserID = nil
+	out.User = nil
+	return c.JSON(http.StatusOK, out)
 }
 
 // FileIDRequest is the body for show/delete and similar single-file ops.

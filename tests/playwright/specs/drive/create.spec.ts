@@ -10,10 +10,9 @@
 //
 // を assert する。
 //
-// 注: `userId` は drift がある (upstream は `withUser=false` で常時 null、
-// mk-go は owner ID を返す)。本 spec では assert しない。drop-in 互換 fix
-// は別 issue (#812) で tracking。fix 後は本 spec の userId assertion を
-// 復活させる。
+// upstream は `pack(file, { self: true })` (= withUser=false) で userId
+// と user を null にする。mk-go も #812 で同 shape に揃え済 = 本 spec で
+// strict assert する。
 //
 // Phase 1 残 spec の中で最も isolation が clean (= signup 経路で fresh
 // user / 他 spec への副作用なし) なため最初に入れる。streaming /
@@ -65,6 +64,13 @@ test.describe('drive: files/create', () => {
     // どちらも valid。
     expect(file.url).toMatch(/^https?:\/\/[^/]+\/files\//);
     expect(file.size).toBe(tinyPNG.length);
+    // upstream `pack(file, { self: true })` (= withUser=false / detail=false)
+    // 経路に整合。folder / userId / user は全て null。mk-go は #812 で
+    // userId/user の handler 修正 + entity DriveFile の omitempty 解除で
+    // 同 shape に揃えている。
+    expect(file.folder).toBeNull();
+    expect(file.userId).toBeNull();
+    expect(file.user).toBeNull();
 
     // files/show で同 file を取得して shape 整合を確認。create と show で
     // identifier 系 (id) だけでなく metadata (name/type/size) も一致する
