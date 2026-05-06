@@ -4,7 +4,7 @@
 // visibility) を持つことを確認する。
 
 import { expect, test } from '@playwright/test';
-import { signupUser } from '../../fixtures/auth';
+import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
@@ -14,7 +14,7 @@ test.describe('notes: create', () => {
   });
 
   test('creates a public note and returns the expected shape', async ({ request }) => {
-    const username = `notes_create_${Date.now()}`;
+    const username = randomUsername('nCre');
     const me = await signupUser(request, username);
 
     const note = await createNote(request, me.token, {
@@ -29,7 +29,7 @@ test.describe('notes: create', () => {
   });
 
   test('respects cw (content warning) when supplied', async ({ request }) => {
-    const username = `notes_cw_${Date.now()}`;
+    const username = randomUsername('nCw');
     const me = await signupUser(request, username);
 
     const note = await createNote(request, me.token, {

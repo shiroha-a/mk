@@ -1,0 +1,35 @@
+# docker-compose.playwright.ts.yml — #744 Phase 1 TS validation overlay.
+#
+# spec は upstream Misskey TS の API 互換挙動を期待値として書いている。
+# 本 overlay は backend を `misskey/misskey:2026.3.2` に置き換えて、上流の
+# 真の挙動で spec が pass することを baseline として確認する。
+# (mk-go 単体 stack は docker-compose.playwright.yml、両者で同 spec が
+# pass = drop-in 互換が保証される、という設計。)
+#
+# 使い方:
+#   docker compose \
+#     -f docker-compose.playwright.yml \
+#     -f docker-compose.playwright.ts.yml up -d --build
+#   docker compose \
+#     -f docker-compose.playwright.yml \
+#     -f docker-compose.playwright.ts.yml --profile test \
+#     run --rm playwright-runner
+#
+# Service name `mkgo` は base から引き継ぎ (= playwright runner の env も
+# 変えなくて済む)。中身は TS image に置き換える形。
+
+services:
+  mkgo:
+    image: misskey/misskey:2026.3.2
+    build: !reset null
+    environment:
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      TZ: Asia/Tokyo
+    volumes:
+      - ./tests/playwright/instance.ts.yml:/misskey/.config/default.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/ping | grep -q pong"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

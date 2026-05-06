@@ -3,7 +3,7 @@
 // 系の error で reject する shape。
 
 import { expect, test } from '@playwright/test';
-import { signupUser } from '../../fixtures/auth';
+import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote, deleteNote, showNoteRaw } from '../../fixtures/notes';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
@@ -13,7 +13,7 @@ test.describe('notes: delete', () => {
   });
 
   test('owner can delete their own note', async ({ request }) => {
-    const username = `notes_delete_${Date.now()}`;
+    const username = randomUsername('nDel');
     const me = await signupUser(request, username);
     const note = await createNote(request, me.token, {
       text: 'will be deleted',
@@ -31,9 +31,8 @@ test.describe('notes: delete', () => {
   });
 
   test('non-owner cannot delete another user note', async ({ request }) => {
-    const stamp = Date.now();
-    const owner = await signupUser(request, `notes_delete_owner_${stamp}`);
-    const stranger = await signupUser(request, `notes_delete_stranger_${stamp}`);
+    const owner = await signupUser(request, randomUsername('nDelOw'));
+    const stranger = await signupUser(request, randomUsername('nDelSt'));
 
     const note = await createNote(request, owner.token, {
       text: 'mine to keep',

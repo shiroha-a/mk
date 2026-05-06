@@ -7,7 +7,7 @@
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signin, signupUser } from '../../fixtures/auth';
+import { randomUsername, signin, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('auth: signin-flow', () => {
@@ -18,9 +18,10 @@ test.describe('auth: signin-flow', () => {
   });
 
   test('signin returns a working access token', async ({ request }) => {
-    // signup で fresh user を作る。username は時間 uniq で他 spec / 並列実行と
-    // 衝突しないようにする (`workers: 1` でも安全側)。
-    const username = `signin_${Date.now()}`;
+    // signup で fresh user を作る。randomUsername で 20 文字 + alphanumeric
+    // 制約を満たす uniq username を作成 (upstream Misskey TS の username
+    // 仕様に整合)。
+    const username = randomUsername('signin');
     const created = await signupUser(request, username, 'password1234');
     expect(created.id).toBeTruthy();
     expect(created.token).toBeTruthy();

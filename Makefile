@@ -329,3 +329,19 @@ playwright-down:
 
 playwright-logs:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) logs -f
+
+# Playwright TS validation (#744 Phase 1)
+#
+# 同 spec を upstream Misskey TS image (= 真の互換挙動の baseline) に対しても
+# 走らせる。両方で pass = drop-in 互換が確認される、片方のみ pass = drift /
+# spec 誤りとして調査対象。
+PLAYWRIGHT_TS_OVERLAY=docker-compose.playwright.ts.yml
+
+playwright-ts-up:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) up -d --build
+
+playwright-ts-test:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm playwright-runner
+
+playwright-ts-down:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) down -v

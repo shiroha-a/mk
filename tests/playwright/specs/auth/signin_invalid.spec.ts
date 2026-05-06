@@ -7,7 +7,7 @@
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupUser } from '../../fixtures/auth';
+import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('auth: signin-flow rejects invalid credentials', () => {
@@ -16,7 +16,7 @@ test.describe('auth: signin-flow rejects invalid credentials', () => {
   });
 
   test('wrong password is rejected without a token', async ({ request }) => {
-    const username = `signin_invalid_${Date.now()}`;
+    const username = randomUsername('siInv');
     await signupUser(request, username, 'correct-password');
 
     // 違う password で signin-flow を叩く。upstream の signin-flow は password
@@ -37,7 +37,7 @@ test.describe('auth: signin-flow rejects invalid credentials', () => {
 
   test('non-existent username is rejected without a token', async ({ request }) => {
     const resp = await callApi(request, 'signin-flow', {
-      username: `ghost_${Date.now()}`,
+      username: randomUsername('ghost'),
       password: 'whatever',
     });
     expect(resp.status()).toBeGreaterThanOrEqual(400);
