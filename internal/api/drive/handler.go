@@ -286,7 +286,10 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 	if err != nil {
 		return mapFileError(c, err)
 	}
-	return c.JSON(http.StatusOK, h.packDriveFileFull(f))
+	// upstream は updateFile 後 `pack(file.id, { self: true })` を返す
+	// (= self single shape、DriveService.ts)。本実装も #812 の create と
+	// 同じ self single helper を使う (folder / userId / user 全 null)。
+	return c.JSON(http.StatusOK, h.packDriveFileSelfSingle(f))
 }
 
 // FilesDelete handles POST /api/drive/files/delete.

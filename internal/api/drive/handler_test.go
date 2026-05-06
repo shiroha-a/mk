@@ -227,6 +227,13 @@ func TestFilesUpdate_Success(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+	// upstream `pack(file.id, { self: true })` (= self single) に整合し、
+	// folder / userId / user は null を返す (#829 PR-A)。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["folder"])
+	assert.Nil(t, resp["userId"])
+	assert.Nil(t, resp["user"])
 }
 
 func TestFilesUpdate_InvalidParam(t *testing.T) {
