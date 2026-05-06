@@ -1,6 +1,7 @@
 package wordmute_test
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/wordmute"
@@ -169,7 +170,7 @@ func TestMatch_ParsedCacheSurvivesCapacity(t *testing.T) {
 	// それぞれ異なる単一キーワードで、対応 text に hit することを確認する。
 	for i := 0; i < 1100; i++ {
 		// 一意な keyword を含む rules JSON を組む。文字列 escape 不要な範囲。
-		kw := "kw-" + string(rune('a'+(i%26))) + "-" + itoa(i)
+		kw := "kw-" + string(rune('a'+(i%26))) + "-" + strconv.Itoa(i)
 		rules := []byte(`["` + kw + `"]`)
 		text := "prefix " + kw + " suffix"
 		assert.True(t, wordmute.Match(rules, text),
@@ -191,27 +192,11 @@ func TestMatch_EvictedRuleReParsesCorrectly(t *testing.T) {
 
 	// 1100 個 add で必ず first が evict される (cap=1000)。
 	for i := 0; i < 1100; i++ {
-		rules := []byte(`["filler-` + itoa(i) + `"]`)
+		rules := []byte(`["filler-` + strconv.Itoa(i) + `"]`)
 		_ = wordmute.Match(rules, "noop")
 	}
 
 	// first を再投入: cache miss で re-parse され、match path も生きていること。
 	assert.True(t, wordmute.Match(first, "find original-keyword again"))
 	assert.False(t, wordmute.Match(first, "no match here"))
-}
-
-// 内部で itoa を呼ぶための小さい helper (strconv 依存を増やさない)。
-// 0-9999 の範囲しか使わないので簡素に書く。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [10]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
