@@ -44,6 +44,11 @@ type DeliverService struct {
 	keypairRepo   repository.UserKeypairRepository
 	urls          *activitypub.URLBuilder
 	hostBlocker   HostBlockChecker
+	// syncDeliverHook, when non-nil, replaces the asynq enqueue with an
+	// inline call to the hook. test 専用で federation deliver の queue 経路
+	// を bypass し、sign + HTTP POST を同期実行する e2e_federation 用。
+	// production code から SetSyncDeliverHook を呼ばないこと (#780)。
+	syncDeliverHook func(payload queue.DeliverPayload) error
 }
 
 // NewDeliverService constructs a DeliverService.
@@ -67,6 +72,16 @@ func NewDeliverService(
 // 呼ばれ、ブロック対象ホストの inbox にはエンキューしない。
 func (s *DeliverService) SetHostBlockChecker(c HostBlockChecker) {
 	s.hostBlocker = c
+}
+
+// SetSyncDeliverHookForTest replaces the asynq enqueue with an inline
+// synchronous call. Used by e2e_federation tests to bypass the queue layer
+// and exercise the sign + POST + inbox handling path directly. Not for
+// production use (#780).
+//
+// fn=nil restores the default (queue) path.
+func (s *DeliverService) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload) error) {
+	s.syncDeliverHook = fn
 }
 
 // DeliverActivity enqueues a deliver job for each unique inbox in inboxes.
@@ -97,6 +112,13 @@ func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inbox
 			Body:   body,
 			KeyID:  keyID,
 			KeyPEM: keyPEM,
+		}
+		if s.syncDeliverHook != nil {
+			// test 経路 (#780): queue を経由せず inline で sign + POST。
+			if err := s.syncDeliverHook(payload); err != nil {
+				return fmt.Errorf("sync deliver to %s: %w", inbox, err)
+			}
+			continue
 		}
 		if err := s.enqueuer.EnqueueDeliver(payload); err != nil {
 			return fmt.Errorf("enqueue deliver to %s: %w", inbox, err)

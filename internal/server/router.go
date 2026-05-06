@@ -512,6 +512,9 @@ func (s *Server) setupRoutes() {
 	// AP delivery: DeliverService + フック登録 + asynq processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
 	deliverService.SetHostBlockChecker(instanceService)
+	// test (#780) で queue を bypass して同期 deliver する hook を後付けで
+	// 差し替えられるよう、Server から参照を保持する。
+	s.deliverSvc = deliverService
 
 	// poll federation hook: ローカル user が remote poll に投票したら AP Note
 	// (with name + inReplyTo) を author の inbox に配信する (#690)。

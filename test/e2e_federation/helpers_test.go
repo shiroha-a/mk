@@ -49,6 +49,11 @@ func signup(t *testing.T, srv *testServer, username string, admin *userToken) *u
 }
 
 // resetDB は指定サーバーの /api/reset-db を呼んでDBをリセットする。
+//
+// reset-db は meta テーブルを TRUNCATE して default 値で再 INSERT するので
+// federation = 'none' (全 host deny) に戻ってしまう。e2e_federation は
+// localhost↔localhost で federation を駆動するので 'all' (制限なし) に
+// 上書きしてから返す (#780)。
 func resetDB(t *testing.T, srv *testServer) {
 	t.Helper()
 	resp := srvAPIPost(t, srv, "reset-db", nil)
@@ -58,6 +63,14 @@ func resetDB(t *testing.T, srv *testServer) {
 		require.Failf(t, "reset-db failed", "server=%s status=%d body=%s",
 			srv.Host, resp.StatusCode, string(body))
 	}
+	// reset-db 後に federation を relax する。CachedMetaRepository は
+	// EnsureInitial で cache invalidate されるので、次の Fetch で 'all' を
+	// 拾える。
+	db := dbAGlobal
+	if srv == serverB {
+		db = dbBGlobal
+	}
+	require.NoError(t, db.Exec(`UPDATE meta SET "federation" = 'all'`).Error)
 }
 
 // srvAPIPost は POST /api/<path> を指定サーバーに送る。

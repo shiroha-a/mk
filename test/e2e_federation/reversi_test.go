@@ -110,14 +110,10 @@ func warmRemoteUserCache(t *testing.T, srv *testServer, fromUser *userToken, rem
 // /api/reversi/match を呼ぶと、B 側の bob の invitations 一覧に alice が
 // 表示される (= AP Invite が federation 経由で処理された)。
 //
-// 現状 SKIP: e2e_federation harness は同期的な /api/ap/show 経路 (server-to-
-// server pull) のみ動作検証されており、async deliver queue 経由の push 経路
-// (asynq job → signed POST → 相手 inbox 処理) を駆動する wiring が存在
-// しない。Server.StartBackgroundForTest で queue worker は起動するが、
-// deliver 実体が実 inbox に着弾する所までは現状の test infra では追えない。
-// 本格的な round-trip 確認は別 issue (federation queue test infra) で対応。
+// deliver queue 経路は test 環境で動かないので main_test.go で
+// SetSyncDeliverHookForTest を wire し、sign + HTTP POST を inline 実行
+// する形で round-trip を駆動する (#780)。
 func TestReversi_LocalInviteRoundTrip(t *testing.T) {
-	t.Skip("federation deliver queue test infra is out of scope for #435 — see PR body")
 	resetDB(t, serverA)
 	resetDB(t, serverB)
 
@@ -156,10 +152,9 @@ func TestReversi_LocalInviteRoundTrip(t *testing.T) {
 // /api/reversi/cancel-match を呼ぶと AP Leave が相手に飛んで、B 側の row が
 // 消える (= bob の invitations から alice が消える)。
 //
-// 現状 SKIP: TestReversi_LocalInviteRoundTrip と同じ理由で deliver queue の
-// 駆動が test harness 上で未対応。
+// sync deliver hook (main_test.go の SetSyncDeliverHookForTest) で AP
+// deliver を inline で駆動する (#780)。
 func TestReversi_CancelMatchUndoesPreStart(t *testing.T) {
-	t.Skip("federation deliver queue test infra is out of scope for #435 — see PR body")
 	resetDB(t, serverA)
 	resetDB(t, serverB)
 

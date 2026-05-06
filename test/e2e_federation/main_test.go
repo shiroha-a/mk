@@ -14,16 +14,45 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/cache"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// makeSyncDeliverHook builds a synchronous AP deliver function for tests
+// (#780). 本番経路は asynq queue 経由だが test では queue worker pickup
+// が確認できないので、sign + HTTP POST を inline 実行する。
+//
+// HTTP client は SSRF transport を含めない (e2e は loopback で localhost
+// のみ POST するため)。失敗時 (非 2xx / 接続エラー) は error を返すので
+// DeliverService 側で deliver 経路の error として扱われる。
+func makeSyncDeliverHook() func(queue.DeliverPayload) error {
+	apClient := activitypub.NewClient(&http.Client{Timeout: 10 * time.Second}, "mk-go-e2e-test")
+	return func(p queue.DeliverPayload) error {
+		key, err := activitypub.NewPrivateKey(p.KeyID, p.KeyPEM)
+		if err != nil {
+			return fmt.Errorf("parse key: %w", err)
+		}
+		resp, err := apClient.PostSigned(p.Inbox, p.Body, key)
+		if err != nil {
+			return fmt.Errorf("post signed to %s: %w", p.Inbox, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("inbox %s returned %d", p.Inbox, resp.StatusCode)
+		}
+		return nil
+	}
+}
 
 // testServer はテスト用サーバーの接続情報を保持する。
 type testServer struct {
@@ -40,6 +69,11 @@ var (
 	// federation check 用 cache key を直接 pre-populate するなど、test 側で
 	// Redis を直接触る必要があるシナリオ (#435) で使う。
 	redisAddr string
+	// dbAGlobal / dbBGlobal は両 server の gorm.DB。reset-db 後に
+	// meta.federation を上書きする等、test 側で DB を直接触る必要が
+	// あるシナリオ (#780) で使う。
+	dbAGlobal *gorm.DB
+	dbBGlobal *gorm.DB
 )
 
 func TestMain(m *testing.M) {
@@ -94,6 +128,10 @@ func TestMain(m *testing.M) {
 	}
 
 	redisAddr = fmt.Sprintf("%s:%d", testRedis.Host(), testRedis.Port())
+	// 後続の resetDB / 個別 test から meta.federation を 'all' に上書きする
+	// ために両 DB を package-level variable に export する (#780)。
+	dbAGlobal = testDB.DB
+	dbBGlobal = dbB
 
 	// サーバーA: Redis DB 0
 	redisOptsA := config.RedisOptions{
@@ -149,6 +187,10 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "e2e_federation: queue worker A start: %v\n", err)
 		os.Exit(1)
 	}
+	// queue 経由の deliver が test 環境で動かないので sync deliver hook で
+	// bypass する (#780)。inbox 受信側 (= 相手 server) は sign POST を 200/202
+	// で受けて federation processor を回す。
+	srvA.SetSyncDeliverHookForTest(makeSyncDeliverHook())
 
 	// サーバーB: Redis DB 1
 	redisOptsB := config.RedisOptions{
@@ -199,6 +241,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "e2e_federation: queue worker B start: %v\n", err)
 		os.Exit(1)
 	}
+	srvB.SetSyncDeliverHookForTest(makeSyncDeliverHook())
 
 	os.Exit(m.Run())
 }

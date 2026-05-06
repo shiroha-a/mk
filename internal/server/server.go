@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
+	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -40,6 +41,10 @@ type Server struct {
 	queueScheduler *queue.Scheduler
 	queueInspector *queue.Inspector
 	chartMgmt      *chart.ManagementService
+	// deliverSvc は federation deliver service への参照。本番では asynq
+	// 経由で deliver を enqueue するが、test (#780) で queue を bypass する
+	// ための SetSyncDeliverHookForTest を呼べるよう参照を保持する。
+	deliverSvc *corefederation.DeliverService
 
 	// shutdownHooks は Shutdown() 時に queue / HTTP echo より先に呼ばれる。
 	// ctx-aware にすることで graceful drain (例: hashtag service の
@@ -236,6 +241,18 @@ func (s *Server) Handler() http.Handler {
 // 部分だけ抽出する。
 //
 // production code から呼ばないこと。
+// SetSyncDeliverHookForTest replaces the asynq deliver enqueue with the
+// supplied synchronous hook. e2e_federation 系テストで queue worker 経由の
+// deliver が動かない/動かしたくないシナリオで、sign + HTTP POST を inline
+// で実行する用途。fn=nil で本番経路 (queue) に戻る。
+//
+// production code から呼ばないこと (#780)。
+func (s *Server) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload) error) {
+	if s.deliverSvc != nil {
+		s.deliverSvc.SetSyncDeliverHookForTest(fn)
+	}
+}
+
 func (s *Server) StartBackgroundForTest() error {
 	if err := s.queueServer.Start(); err != nil {
 		return fmt.Errorf("start queue worker: %w", err)
