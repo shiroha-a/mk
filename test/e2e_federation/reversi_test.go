@@ -346,7 +346,7 @@ func TestReversi_PutStonePropagates(t *testing.T) {
 // /api/reversi/surrender を呼ぶと AP Leave が B に飛び、両 server で
 // IsEnded=true / WinnerID=bob になる (#435 case 4)。
 func TestReversi_SurrenderEndsBothSides(t *testing.T) {
-	alice, bob, gameAID, gameBID, _, _ := readyAndStart(t)
+	alice, _, gameAID, gameBID, _, _ := readyAndStart(t)
 
 	resp := srvAPIPost(t, serverA, "reversi/surrender", map[string]any{
 		"i":      alice.Token,
@@ -369,17 +369,16 @@ func TestReversi_SurrenderEndsBothSides(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// 最終 assertion: 両 DB の row が IsEnded=true で、winner はそれぞれ
-	// 自分から見て相手 (bob).
+	// 最終 assertion: 両 DB の row が IsEnded=true。winner ID は server 間で
+	// cached remote user の ID が異なるので strict 比較せず、終局フラグのみ
+	// を見る (alice surrender → 勝者は bob、両 server で同じ semantics)。
 	for _, ck := range []struct {
-		db        *gorm.DB
-		id        string
-		expectWin string
+		db *gorm.DB
+		id string
 	}{
-		{dbAGlobal, gameAID, bob.ID}, // A 側 bob は cached remote user
-		{dbBGlobal, gameBID, bob.ID},
+		{dbAGlobal, gameAID},
+		{dbBGlobal, gameBID},
 	} {
-		_ = ck.expectWin // winner ID は server 間で異なる cached user ID なので strict 比較しない
 		var ended bool
 		require.NoError(t, ck.db.Raw(
 			`SELECT "isEnded" FROM reversi_game WHERE id = ?`, ck.id,
