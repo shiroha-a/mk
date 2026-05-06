@@ -19,8 +19,12 @@ type WordMuteReloadPayload struct {
 
 // SubscribeWordMuteReload starts listening on the WordMuteReload topic via
 // the wired PubSubBus and refreshes the matching connection's rules when
-// a payload arrives. Idempotent — calling twice subscribes twice (caller
-// must avoid that), and the goroutine lives until bus.Unsubscribe is called.
+// a payload arrives. The subscriber goroutine lives until
+// UnsubscribeWordMuteReload (= Manager.Shutdown) is called.
+//
+// **同一 Manager に対して 1 度だけ呼ぶこと**。複数回呼ぶと handler が
+// 二重登録されて reload event を重複処理する。production では router の
+// setupRoutes で 1 度だけ wire する想定。
 //
 // bus が nil なら subscribe しない (= no-op、reload は永続的に届かないが
 // snapshot fetch だけは引き続き機能する)。

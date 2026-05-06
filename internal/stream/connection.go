@@ -117,6 +117,10 @@ func (c *Connection) SetHardMuteRules(rules []byte) {
 // concurrent read while SetHardMuteRules updates the value (#791).
 // Returns nil for anonymous connections / when the lookup failed / when the
 // user has no rule set.
+//
+// 戻り値は internal slice の参照 — caller は **絶対に mutate しないこと**。
+// per-publish hot path で defensive copy を避けるための約束で、現状の唯一の
+// caller (notesfilter.MatchOne) は read-only で扱う。
 func (c *Connection) HardMuteRules() []byte {
 	c.hardMuteMu.RLock()
 	defer c.hardMuteMu.RUnlock()
