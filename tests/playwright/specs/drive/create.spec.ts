@@ -21,17 +21,10 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { tinyPNG } from '../../fixtures/files';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
-const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
-
-// 1x1 transparent PNG, 67 bytes。test 内で独自 image を生成すると node の
-// Sharp/Canvas 依存が増えるので、固定の minimal PNG を base64 で持つ方が
-// 楽 + deterministic。
-const tinyPNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-  'base64',
-);
+const baseURL = process.env.MK_BASE_URL ?? 'https://mkgo.local';
 
 test.describe('drive: files/create', () => {
   test.beforeAll(() => {

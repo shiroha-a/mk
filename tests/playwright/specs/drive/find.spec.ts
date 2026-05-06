@@ -21,15 +21,10 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { tinyPNG } from '../../fixtures/files';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 const baseURL = process.env.MK_BASE_URL ?? 'https://mkgo.local';
-
-// 1x1 transparent PNG, 67 bytes (drive/create.spec.ts と同じ fixture)。
-const tinyPNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-  'base64',
-);
 
 test.describe('drive: files/find + find-by-hash', () => {
   test.beforeAll(() => {
