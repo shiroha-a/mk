@@ -360,6 +360,21 @@ Issueの作成・操作には`gh`コマンドを使う（`gh issue create`, `gh 
   drop-in 互換 regression は nightly で検出する運用。
 - 失敗時は docker compose logs を `dropin-logs` artifact として 14 日保持。
 
+### `playwright` workflow (nightly)
+
+- `.github/workflows/playwright.yml` で Phase 1 Playwright spec を毎日 17:00
+  UTC (= JST 02:00) に develop に対して実行する。
+- matrix で `backend = [mk-go, ts]` の 2 job を並列実行 (= 両 backend で
+  drop-in shape 互換が維持されることを担保)。`fail-fast: false` で片方失敗
+  しても他方は完走。
+- `workflow_dispatch` で任意の ref に対して手動実行も可。
+- PR の required check には**含めない** (TS image pull + spec 増加で実行
+  時間が伸びる + 外部 image flaky 要素)。drop-in shape regression は
+  nightly で検出する運用。
+- 失敗時は `tests/playwright/test-results/` (trace / screenshot 含む) と
+  docker compose logs を `playwright-results-<backend>` /
+  `playwright-logs-<backend>` artifact として 14 日保持。
+
 ### CI失敗時の対応
 
 - カバレッジ不足 → テストケースを追加してから再push。
@@ -446,6 +461,7 @@ Issueの作成・操作には`gh`コマンドを使う（`gh issue create`, `gh 
 
 本ドキュメントの主要な変更履歴。新規変更時は一番上に追記する（日付降順）。
 
+- **2026-05-07**: Playwright nightly CI workflow (#744 関連) を追加。`.github/workflows/playwright.yml` で Phase 1 spec を毎日 17:00 UTC に develop で実行する。matrix で `backend = [mk-go, ts]` の 2 job を並列実行し、`fail-fast: false` で両 backend の drop-in shape regression を独立に監視する。失敗時は `tests/playwright/test-results/` (trace/screenshot 含む) と docker compose logs を artifact 化 (14 日保持)。dropin-e2e (18:00 UTC) / dropin-frontend-e2e (19:00 UTC) と被らない時刻に scheduling。
 - **2026-05-04**: Signin の TOTP / passkey フローを Misskey TS upstream と再互換化 (#705)。`/api/signin-flow` で 2FA + security key ユーザに対して `next: 'passkey'` + `authRequest` (PublicKeyCredentialRequestOptionsJSON) を返すよう修正 (旧: `'captcha-keys'` + `assertion` 2 段ラップ + クライアント sessionId 要求)、challenge を Redis に user-keyed で保存して sessionId round-trip を撤廃、TOTP / WebAuthn 失敗時のエラー ID を本家準拠に揃え (`cdf1235b-...` / `93b86c4b-...`)、step 1 の `next` を 2FA 無効ユーザに常に `'captcha'` を返すよう変更。新たに `/api/signin-with-passkey` (passwordless passkey login の init+verify 2 段) を実装し `BeginPasskeyLogin`/`FinishPasskeyLogin` を `WebAuthnService` に追加。E2E (`e2e/cypress/e2e/webauthn.cy.ts`) も新プロトコルに更新し、TS 互換 spec をローカル spec パスに含めるよう `cypress.config.ts` を拡張。
 - **2026-05-01**: inbox worker drain time 短縮 (#569)。\`MarkRequestReceived\` を per-host で 1s buffer に集約する \`InstanceTouchBuffer\` 導入、federation processor の \`handleCreate\` で Reply/Renote 関係が無い fresh note への redundant \`hydrateNoteForFanout\` (DB SELECT) を skip、fanoutHook / notificationHook を local note service と同じく \`safeGo\` で async 化。queue-bench で **asynq drain 29.3s → 22.4s (-24%)、mkq 45.7s → 34.0s (-26%)**。worker concurrency / mkq 上流 Lua 最適化は scope 外 (公正比較維持のため)。
 - **2026-05-01**: inbox handler を verify-in-worker 化 (#565)。HTTP handler は body+signature 関連 header を payload に詰めて 202 即返し、signature verify / host block / instance touch / chart hook は inbox worker (queue/processors) 側で実行する Misskey TS 互換アーキテクチャに変更。queue-bench で mk-go の inbound HTTP 受信 rps が **684/685 → 2812/3017 (4.1-4.4x)** に改善し、TS-BullMQ (1064 rps) を **2.6-2.8x 上回る**。これにより mk-go 全 endpoint が TS 同等以上を達成。security trade-off: unsigned/malformed activity は worker で drop されるため queue が一時的に膨らむ可能性あり (CDN/WAF 層で粗い filter を入れる前提)。

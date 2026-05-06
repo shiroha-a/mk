@@ -1,0 +1,107 @@
+name: Playwright (nightly)
+
+# #744 Phase 1 の Playwright spec を nightly で TS image + mk-go の両 backend
+# に対して実行し、drop-in shape drift / 連動 endpoint の regression を自動
+# 検知する。
+#
+# - schedule: 毎日 17:00 UTC (≒ JST 02:00)。dropin-e2e (18:00 UTC) /
+#   dropin-frontend-e2e (19:00 UTC) と被らせない
+# - workflow_dispatch: 任意の ref に対して手動実行可能
+# - PR の required check には**入れない**。spec 数が増えれば実行時間が伸び
+#   るのと、外部 image pull (TS image) が flaky 要素になる可能性があるため
+# - matrix: backend = [mk-go, ts] で並列実行。片方が失敗しても他方は完走
+# - 失敗時は playwright test-results + docker compose logs を artifact 化
+
+on:
+  schedule:
+    # 毎日 17:00 UTC (= JST 02:00)。develop ブランチに対して走る。
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch / tag / SHA to test"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  spec:
+    name: spec (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [mk-go, ts]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'develop' }}
+
+      # TS backend job のみ upstream image を pre-pull (= build と並列)。
+      # mk-go job は本 repo Dockerfile を使うので不要。
+      - name: Pre-pull Misskey TS image
+        if: matrix.backend == 'ts'
+        run: docker pull misskey/misskey:2026.3.2 &
+
+      - name: Bring up stack
+        run: |
+          if [ "${{ matrix.backend }}" = "ts" ]; then
+            make playwright-ts-up
+          else
+            make playwright-up
+          fi
+
+      - name: Run Playwright
+        run: |
+          if [ "${{ matrix.backend }}" = "ts" ]; then
+            make playwright-ts-test
+          else
+            make playwright-test
+          fi
+
+      # 失敗時のみ playwright test-results (trace / screenshot 含む) を保存。
+      - name: Upload test-results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ matrix.backend }}
+          path: tests/playwright/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # 失敗時のみ docker compose logs を artifact 化して原因調査できる
+      # ようにする。
+      - name: Capture docker compose logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/playwright-logs
+          if [ "${{ matrix.backend }}" = "ts" ]; then
+            docker compose -f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml logs \
+              > /tmp/playwright-logs/compose.log 2>&1 || true
+          else
+            docker compose -f docker-compose.playwright.yml logs \
+              > /tmp/playwright-logs/compose.log 2>&1 || true
+          fi
+
+      - name: Upload logs artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-logs-${{ matrix.backend }}
+          path: /tmp/playwright-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Final teardown
+        if: always()
+        run: |
+          if [ "${{ matrix.backend }}" = "ts" ]; then
+            make playwright-ts-down >/dev/null 2>&1 || true
+          else
+            make playwright-down >/dev/null 2>&1 || true
+          fi
