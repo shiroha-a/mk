@@ -69,6 +69,29 @@ func TestMatch_RegexGlobalFlagIsNoOp(t *testing.T) {
 	assert.True(t, wordmute.Match(rules, "first abc and second abc"))
 }
 
+// non-capture group `(?:...)` で始まる pattern には flag を inject する
+// (= inline flag prefix と誤認しない)。
+func TestMatch_RegexNonCaptureGroupGetsFlagInjected(t *testing.T) {
+	// `m` flag を要求 → `(?:foo)` の前に `(?m)` が付かないと改行後の foo に hit しない。
+	rules := []byte(`["/^(?:foo)/m"]`)
+	assert.True(t, wordmute.Match(rules, "header line\nfoo body"))
+}
+
+// named group `(?P<name>...)` で始まる pattern にも flag を inject する。
+func TestMatch_RegexNamedGroupGetsFlagInjected(t *testing.T) {
+	rules := []byte(`["/(?P<head>FOO)/i"]`)
+	assert.True(t, wordmute.Match(rules, "lowercase foo here"))
+}
+
+// pattern が既に inline flag group で始まる場合は二重指定を避けて skip する。
+func TestMatch_RegexInlineFlagPrefixNotDoubled(t *testing.T) {
+	// `(?i)foo` は既に case-insensitive を指定しているので、外側で `(?i)` を
+	// 重ねても compile error にしない (Go regexp は (?i)(?i) も valid だが
+	// 意図的に skip しておく方が安全)。
+	rules := []byte(`["/(?i)foo/i"]`)
+	assert.True(t, wordmute.Match(rules, "FOO bar"))
+}
+
 func TestMatch_RegexInvalidIsIgnored(t *testing.T) {
 	rules := []byte(`["/[unclosed/"]`)
 	// Compilation failure must downgrade silently — never panic, never throw.

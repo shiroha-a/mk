@@ -86,15 +86,22 @@ type regexRule struct {
 // the canonical form.
 var regexLiteral = regexp.MustCompile(`^/(.+)/([gimsuy]*)$`)
 
+// inlineFlagPrefix detects an existing `(?flags)` or `(?flags:...)` inline
+// flag group at the start of a pattern. 既に inline flag を含んでいるなら
+// 二重指定を避けるため flag 注入を skip する。`(?:...)` (non-capture) や
+// `(?P<name>...)` (named group) は flag 設定ではないので一致させない。
+var inlineFlagPrefix = regexp.MustCompile(`^\(\?[imsU]+[):]`)
+
 // parsedCache stores the parsed rule slice keyed by the *raw* JSON bytes.
 // Hot TL paths call Match many times with the same per-user rule set; parsing
 // once per request is cheap but parsing per-note would be wasteful.
 //
-// Bound: 実質的に「(active user 数) × (各 user の rule revision)」で抑えられる。
-// rule を変更すると古い JSON byte 列に対応する entry が dangling し続けるので、
-// 大規模インスタンスで運用する場合は LRU 化を検討する (TS upstream は
-// `acCache.size > 1000` で oldest を delete している)。現状は実装簡略のため
-// 単純 sync.Map で受けている。
+// 上限: 同じ rule JSON は 1 entry に dedupe されるが、ユーザーが rule を
+// 更新するたびに新しい key が増え、古い key は GC されず dangling する
+// (= rule revision に対して monotonic に grow する)。大規模インスタンスで
+// 長時間運用するなら LRU 化を検討する (TS upstream は `acCache.size > 1000`
+// で oldest を delete している)。現状は実装簡略のため単純 sync.Map で受けて
+// いる。
 var parsedCache sync.Map // string -> []rule
 
 func parse(raw []byte) []rule {
@@ -141,7 +148,10 @@ func parseEntry(e json.RawMessage) rule {
 			if strings.ContainsRune(flags, 's') {
 				inline += "s"
 			}
-			if inline != "" && !strings.HasPrefix(pattern, "(?") {
+			// 二重指定回避: pattern が既に inline flag group `(?ims)` で始まる
+			// 場合のみ skip する。`(?:...)` / `(?P<n>...)` 等の non-flag group
+			// に対しては flag を inject しないと意図した m / s 等が消えてしまう。
+			if inline != "" && !inlineFlagPrefix.MatchString(pattern) {
 				pattern = "(?" + inline + ")" + pattern
 			}
 			re, err := regexp.Compile(pattern)
