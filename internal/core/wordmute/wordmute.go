@@ -88,8 +88,13 @@ var regexLiteral = regexp.MustCompile(`^/(.+)/([gimsuy]*)$`)
 
 // parsedCache stores the parsed rule slice keyed by the *raw* JSON bytes.
 // Hot TL paths call Match many times with the same per-user rule set; parsing
-// once per request is cheap but parsing per-note would be wasteful. Cache size
-// is bounded by user count × tabs so a simple sync.Map is fine.
+// once per request is cheap but parsing per-note would be wasteful.
+//
+// Bound: 実質的に「(active user 数) × (各 user の rule revision)」で抑えられる。
+// rule を変更すると古い JSON byte 列に対応する entry が dangling し続けるので、
+// 大規模インスタンスで運用する場合は LRU 化を検討する (TS upstream は
+// `acCache.size > 1000` で oldest を delete している)。現状は実装簡略のため
+// 単純 sync.Map で受けている。
 var parsedCache sync.Map // string -> []rule
 
 func parse(raw []byte) []rule {
@@ -119,10 +124,25 @@ func parseEntry(e json.RawMessage) rule {
 	var s string
 	if err := json.Unmarshal(e, &s); err == nil {
 		// Misskey TS upstream allows /regex/flags literal as a string entry.
+		// Flags は upstream RE2 (TS) 仕様の i/m/s をサポートする。Go の regexp は
+		// inline flag (?ims) が必要なので prefix で組み立てる。g (global) は Go
+		// regexp の default 動作 (= 全 match) と等価なので無視。u/y は近い等価
+		// 機能が無いが、Go regexp は default で UTF-8 解釈するため u は実質的
+		// に常時 ON、y (sticky) は streaming 用途では使われないので no-op。
 		if m := regexLiteral.FindStringSubmatch(s); m != nil {
 			pattern, flags := m[1], m[2]
-			if strings.ContainsRune(flags, 'i') && !strings.HasPrefix(pattern, "(?i)") {
-				pattern = "(?i)" + pattern
+			var inline string
+			if strings.ContainsRune(flags, 'i') {
+				inline += "i"
+			}
+			if strings.ContainsRune(flags, 'm') {
+				inline += "m"
+			}
+			if strings.ContainsRune(flags, 's') {
+				inline += "s"
+			}
+			if inline != "" && !strings.HasPrefix(pattern, "(?") {
+				pattern = "(?" + inline + ")" + pattern
 			}
 			re, err := regexp.Compile(pattern)
 			if err != nil {

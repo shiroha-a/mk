@@ -45,6 +45,30 @@ func TestMatch_RegexCaseInsensitiveFlag(t *testing.T) {
 	assert.True(t, wordmute.Match(rules, "match abc42 here"))
 }
 
+// upstream RE2 (TS) の m / s flag を Go の (?m) / (?s) に変換すること。
+func TestMatch_RegexMultilineFlag(t *testing.T) {
+	rules := []byte(`["/^bad/m"]`)
+	// 1行目がマッチしない場合でも、改行後の行頭にマッチすれば hit。
+	assert.True(t, wordmute.Match(rules, "ok line\nbad line"))
+}
+
+func TestMatch_RegexDotallFlag(t *testing.T) {
+	rules := []byte(`["/foo.bar/s"]`)
+	// dotall 無しでは . が \n にマッチしないが、s flag で改行をまたいで hit する。
+	assert.True(t, wordmute.Match(rules, "foo\nbar"))
+}
+
+func TestMatch_RegexCombinedFlags(t *testing.T) {
+	rules := []byte(`["/^foo.bar/ims"]`)
+	assert.True(t, wordmute.Match(rules, "header\nFOO\nBAR"))
+}
+
+// g flag は Go regexp の default 動作と同義なので prefix を組み立てなくて OK。
+func TestMatch_RegexGlobalFlagIsNoOp(t *testing.T) {
+	rules := []byte(`["/abc/g"]`)
+	assert.True(t, wordmute.Match(rules, "first abc and second abc"))
+}
+
 func TestMatch_RegexInvalidIsIgnored(t *testing.T) {
 	rules := []byte(`["/[unclosed/"]`)
 	// Compilation failure must downgrade silently — never panic, never throw.

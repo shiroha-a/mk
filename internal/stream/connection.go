@@ -103,6 +103,12 @@ func (c *Connection) User() *model.User { return c.user }
 // SetHardMuteRules attaches the viewer's persisted hardMutedWords (raw jsonb
 // from user_profile) so timeline channels can drop matching notes before
 // sending them to the client (#787). Called once after authentication.
+//
+// rules は接続 lifetime の snapshot として保持される。ユーザーが i/update で
+// hardMutedWords を変更しても次回の WebSocket reconnect まで反映されない —
+// per-publish lookup を避けることで streaming hot path の DB query を 0 に
+// 保つトレードオフ。即時反映が必要になったら i/update から該当 user の
+// connection に invalidate signal を流す follow-up を別 issue で検討する。
 func (c *Connection) SetHardMuteRules(rules []byte) {
 	c.hardMuteRules = rules
 }

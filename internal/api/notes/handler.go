@@ -554,6 +554,11 @@ func (h *Handler) BulkShow(c echo.Context) error {
 // SearchByTag) が本関数を経由するので、hardMutedWords の filter (#787) は
 // PackNotes に渡す前に一括で適用する。viewer == nil / userRepo 未配線 /
 // 規則無し のいずれも no-op に倒す best-effort 設計。
+//
+// 注意: filter を意図的に bypass したい admin 系 path (例: モデレーション目的で
+// 隠さず全件を見せたい / pinned notes 等) は本関数を経由せず entity.PackNotes
+// を直接呼ぶ慣習。pinned (i/show, users/show) と i/favorites は upstream に
+// 揃えて既に packMany を経由していない。
 func (h *Handler) packMany(ctx context.Context, notes []*model.Note, viewer *model.User) []entity.NoteEntity {
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
