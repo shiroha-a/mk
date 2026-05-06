@@ -201,12 +201,28 @@ func TestWebFingerClient_LookupActorURI_DedupesConcurrentCalls(t *testing.T) {
 		}`)
 	})
 
-	const N = 16
+	const (
+		// concurrentCallers は 1 acct への並行 lookup 数。
+		concurrentCallers = 16
+		// enterTimeout は全 goroutine が LookupActorURI に到達するまでの上限。
+		// 通常は ms 以下で完了するが、CI race 環境でも余裕を持たせる。
+		enterTimeout = 2 * time.Second
+		// singleflightSettle は LookupActorURI に入ってから singleflight.Do の
+		// 内部 mutex 取得 + key 登録が完了するまでの内部 race window。CI race
+		// 環境でも μs オーダーで終わる想定だが、数倍のマージンを確保する。
+		singleflightSettle = 20 * time.Millisecond
+		// maxFetches は dedupe が機能している前提での HTTP fetch 数の上限。
+		// 完全 collapse なら 1 fetch、scheduling 由来の二段ウェーブで 3-4 まで
+		// 届くことがあるので concurrentCallers/4 (= 4) を許容する。dedupe が
+		// 完全破綻すると calls == concurrentCallers になるため regression 検出
+		// 能力は維持される。
+		maxFetches = concurrentCallers / 4
+	)
 	var wg sync.WaitGroup
 	var entered atomic.Int64
-	results := make([]string, N)
-	errs := make([]error, N)
-	for i := 0; i < N; i++ {
+	results := make([]string, concurrentCallers)
+	errs := make([]error, concurrentCallers)
+	for i := 0; i < concurrentCallers; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -217,30 +233,23 @@ func TestWebFingerClient_LookupActorURI_DedupesConcurrentCalls(t *testing.T) {
 	// 全 goroutine が LookupActorURI 呼び出し直前まで来たことを確認する
 	// (= singleflight.Do に enqueue されるまでもう一息)。spin-wait で
 	// 待つが timeout を切って test がハングしないようにする。
-	deadline := time.Now().Add(2 * time.Second)
-	for entered.Load() < int64(N) {
+	deadline := time.Now().Add(enterTimeout)
+	for entered.Load() < int64(concurrentCallers) {
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d/%d goroutines reached LookupActorURI", entered.Load(), N)
+			t.Fatalf("only %d/%d goroutines reached LookupActorURI", entered.Load(), concurrentCallers)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// LookupActorURI に入った直後と singleflight.Do の内部 mutex 取得には
-	// わずかなずれがある。leader が handler 内 (gate 待ち) に到達して、後続
-	// が singleflight 集約に乗るまでの時間を確実に与える。
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(singleflightSettle)
 	close(gate)
 	wg.Wait()
 
-	for i := 0; i < N; i++ {
+	for i := 0; i < concurrentCallers; i++ {
 		require.NoError(t, errs[i], "call %d", i)
 		assert.Equal(t, "https://example.com/users/alice", results[i])
 	}
-	// 16 並行が 1-2 fetch に collapse されるのを期待するが、scheduling 次第
-	// で leader 完了 → 後続が新 leader になる二段ウェーブで 3-4 まで届く。
-	// dedupe が完全に壊れた regression は呼び出し数 == N で容易に検出できる
-	// ので、閾値は N/4 (= 4) に取って scheduling 起因の flake を吸収する。
-	assert.LessOrEqual(t, calls.Load(), int64(N/4),
-		"singleflight must collapse concurrent same-acct lookups; got %d HTTP fetches for %d callers", calls.Load(), N)
+	assert.LessOrEqual(t, calls.Load(), int64(maxFetches),
+		"singleflight must collapse concurrent same-acct lookups; got %d HTTP fetches for %d callers", calls.Load(), concurrentCallers)
 }
 
 func TestIsActivityPubLinkType(t *testing.T) {
