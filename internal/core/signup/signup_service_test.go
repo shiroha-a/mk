@@ -101,16 +101,22 @@ func TestSignup_Username21CharsRejected(t *testing.T) {
 }
 
 func TestSignup_UsernameIllegalCharsRejected(t *testing.T) {
-	svc, _, _ := newTestService(t)
-	for _, name := range []string{
-		"alice-bob", // hyphen 不可
-		"alice.bob", // dot 不可
-		"alice@bob", // @ 不可
-		"alice bob", // space 不可 (TrimSpace で trim されない middle space)
-		"アリス",       // 非 ASCII 不可
-	} {
-		_, err := svc.Signup(name, "pass", false)
-		assert.ErrorIs(t, err, signup.ErrInvalidUsername, "name=%q", name)
+	cases := []struct {
+		desc     string
+		username string
+	}{
+		{"hyphen", "alice-bob"},
+		{"dot", "alice.bob"},
+		{"at_sign", "alice@bob"},
+		{"middle_space", "alice bob"},
+		{"non_ascii_japanese", "アリス"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			_, err := svc.Signup(tc.username, "pass", false)
+			assert.ErrorIs(t, err, signup.ErrInvalidUsername)
+		})
 	}
 }
 
