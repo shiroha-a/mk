@@ -38,6 +38,14 @@ type Service struct {
 	assignmentRepo repository.RoleAssignmentRepository
 	metaRepo       repository.MetaRepository
 	idGen          id.Generator
+	// userRepo は drop-in 互換 (#785) のため optional に注入される。
+	// Misskey TS upstream で signup された root user は user.isRoot=true で
+	// 識別され meta.rootUserId は set されない。drop-in で TS DB を引き継いだ
+	// mk-go は meta.rootUserId が nil → isRootUser false → admin path で 403
+	// となる regression を防ぐため、user.isRoot フラグを fallback として
+	// 確認する。本番経路 (mk-go pure) では meta.rootUserId が常に set される
+	// ので setter で wire しなくても挙動は変わらない (= 後方互換性は保たれる)。
+	userRepo repository.UserRepository
 
 	// userRoleCache は GetUserRoles 結果の per-user TTL キャッシュ
 	// (sync.Map で hot path に lock を持ち込まない)。Assign / Unassign で
@@ -60,6 +68,14 @@ func NewService(
 		metaRepo:       metaRepo,
 		idGen:          idGen,
 	}
+}
+
+// SetUserRepo wires a UserRepository so isRootUser can fall back to the
+// user.isRoot column for drop-in compatibility with Misskey TS DBs that
+// don't populate meta.rootUserId (#785). Optional; when nil the service
+// behaves as before (meta.rootUserId-only check).
+func (s *Service) SetUserRepo(r repository.UserRepository) {
+	s.userRepo = r
 }
 
 // InvalidateUserRoleCache drops the cached role list for userID. Out-of-band
@@ -111,13 +127,23 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	return roles, nil
 }
 
-// isRootUser checks if the user is the root user (meta.rootUserId).
+// isRootUser checks if the user is the root user.
+//
+//  1. meta.rootUserId と一致 (mk-go native パス)
+//  2. user.isRoot=true (drop-in 互換、Misskey TS DB から引き継いだ場合の
+//     fallback。userRepo が SetUserRepo で wire 済みのときのみ確認、#785)
+//
+// userRepo 未配線でも (1) のみで動作するので既存テスト互換性は保たれる。
 func (s *Service) isRootUser(userID string) bool {
-	meta, err := s.metaRepo.Fetch()
-	if err != nil {
-		return false
+	if meta, err := s.metaRepo.Fetch(); err == nil && meta.RootUserID != nil && *meta.RootUserID == userID {
+		return true
 	}
-	return meta.RootUserID != nil && *meta.RootUserID == userID
+	if s.userRepo != nil {
+		if u, err := s.userRepo.FindByID(userID); err == nil && u != nil && u.IsRoot {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAdministrator checks if the user has any administrator role or is root.

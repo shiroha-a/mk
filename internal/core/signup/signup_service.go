@@ -159,6 +159,11 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 		Token:             &token,
 		IsExplorable:      true,
 		AvatarDecorations: []byte("[]"),
+		// drop-in 互換 (#785): Misskey TS と同じ意味で初回 signup user を
+		// isRoot=true でマークしておく。mk-go pure 経路では meta.rootUserId
+		// で root を判定するので冗長だが、TS との bidirectional drop-in を
+		// 担保するためマーカーを揃える。
+		IsRoot: isInitialSetup,
 	}
 	if err := s.userRepo.Create(user); err != nil {
 		return nil, err

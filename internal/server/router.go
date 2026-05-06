@@ -190,6 +190,11 @@ func (s *Server) setupRoutes() {
 
 	// Core services
 	roleService := corerole.NewService(roleRepo, roleAssignmentRepo, metaRepo, idGen)
+	// drop-in 互換 (#785): Misskey TS は signup root user を user.isRoot=true で
+	// マークし meta.rootUserId は set しない。TS DB を引き継いだ mk-go では
+	// meta.rootUserId=nil となり admin paths で 403 が返る regression を防ぐ
+	// ため、role.Service に userRepo を渡して user.isRoot fallback を有効化する。
+	roleService.SetUserRepo(userRepo)
 	signupService := coresignup.NewService(userRepo, metaRepo, idGen)
 	// ActivityPub 配信のためにローカルユーザーは RSA 鍵対を必要とする。
 	signupService.SetKeypairRepo(keypairRepo)

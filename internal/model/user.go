@@ -10,13 +10,19 @@ import (
 // User represents the `user` table.
 // Misskey互換のカラム名・型を維持する
 type User struct {
-	ID                           string         `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	UpdatedAt                    *time.Time     `gorm:"column:updatedAt;type:timestamp with time zone" json:"updatedAt"`
-	LastFetchedAt                *time.Time     `gorm:"column:lastFetchedAt;type:timestamp with time zone" json:"lastFetchedAt"`
-	LastActiveDate               *time.Time     `gorm:"column:lastActiveDate;type:timestamp with time zone" json:"lastActiveDate"`
-	HideOnlineStatus             bool           `gorm:"column:hideOnlineStatus;default:false" json:"hideOnlineStatus"`
-	Username                     string         `gorm:"column:username;type:varchar(128);not null" json:"username"`
-	UsernameLower                string         `gorm:"column:usernameLower;type:varchar(128);not null" json:"usernameLower"`
+	ID               string     `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	UpdatedAt        *time.Time `gorm:"column:updatedAt;type:timestamp with time zone" json:"updatedAt"`
+	LastFetchedAt    *time.Time `gorm:"column:lastFetchedAt;type:timestamp with time zone" json:"lastFetchedAt"`
+	LastActiveDate   *time.Time `gorm:"column:lastActiveDate;type:timestamp with time zone" json:"lastActiveDate"`
+	HideOnlineStatus bool       `gorm:"column:hideOnlineStatus;default:false" json:"hideOnlineStatus"`
+	Username         string     `gorm:"column:username;type:varchar(128);not null" json:"username"`
+	UsernameLower    string     `gorm:"column:usernameLower;type:varchar(128);not null" json:"usernameLower"`
+	// IsRoot: Misskey TS upstream の "instance root" マーカー。drop-in 互換
+	// (TS で signup した最初のユーザーは isRoot=true 行を持つが mk-go の
+	// rootUserId フィールドは set されていない) のため、本フィールドを読み
+	// 取って role.Service.IsAdministrator が true を返すよう fallback する
+	// (#785)。mk-go signup でも同時に true を書く (forward compat)。
+	IsRoot                       bool           `gorm:"column:isRoot;default:false" json:"isRoot"`
 	Name                         *string        `gorm:"column:name;type:varchar(128)" json:"name"`
 	FollowersCount               int            `gorm:"column:followersCount;default:0" json:"followersCount"`
 	FollowingCount               int            `gorm:"column:followingCount;default:0" json:"followingCount"`
