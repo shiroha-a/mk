@@ -25,8 +25,9 @@ export interface CreatedNote {
 
 // createNote posts /api/notes/create with the given token + body and returns
 // the resulting note's minimal shape. upstream Misskey TS の response は
-// `{ createdNote: { id, text, cw, userId, visibility, ... } }` で、本 helper
-// では spec が必要な field のみ抽出する (= drift しても spec が壊れにくい)。
+// `{ createdNote: { id, text, cw, userId, visibility, ... } }` で wrap される。
+// mk-go が wrap せず body 直返しに drift したら本 helper は throw する
+// (= 互換 regression をsilent に通さない)。
 export async function createNote(
   request: APIRequestContext,
   token: string,
@@ -37,8 +38,12 @@ export async function createNote(
     throw new Error(`notes/create failed: ${resp.status()} ${await resp.text()}`);
   }
   const body = await resp.json();
-  const n = body.createdNote ?? body; // 防衛: 一部経路で createdNote が
-  // wrapper されない実装があった場合に備えて両方受け止める
+  if (!body.createdNote) {
+    throw new Error(
+      `notes/create: missing createdNote wrapper: ${JSON.stringify(body)}`,
+    );
+  }
+  const n = body.createdNote;
   return {
     id: n.id,
     text: n.text ?? null,

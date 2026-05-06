@@ -5,14 +5,15 @@
 //
 // upstream Misskey TS は:
 //   - public: 誰でも閲覧可
-//   - home:   author の follower / follower のフォロイー範囲で閲覧可
-//             (notes/show では author 以外でも 200 を返す実装が一般的)
 //   - followers: follower 限定。stranger は 4xx
 //   - specified: visibleUserIds 列挙された user 限定。stranger は 4xx
 //
 // 本 spec は author + stranger 2 user で「stranger が見えるべきか」を
 // 端的にチェックする。federation や follow を必要とせず mk-go single
 // instance で実行可能。
+//
+// `home` visibility は follow graph の挙動 (follower で見える / 第三者は
+// 不可視) が要るので別 spec で扱う想定。本 PR scope 外。
 
 import { expect, test } from '@playwright/test';
 import { signupUser } from '../../fixtures/auth';
