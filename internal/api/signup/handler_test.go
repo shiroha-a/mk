@@ -80,6 +80,19 @@ func parseResp(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	return resp
 }
 
+// assertFastifyError は upstream Misskey TS の Fastify-style reply error
+// shape (= {statusCode, error, message}) を expectations に対して assert
+// する。#802 で signup endpoint の username / captcha 系 error を upstream
+// に揃えたため、対応 test はこの helper を使う。
+func assertFastifyError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
+	t.Helper()
+	require.Equal(t, status, rec.Code)
+	resp := parseResp(t, rec)
+	require.EqualValues(t, status, resp["statusCode"])
+	require.Equal(t, http.StatusText(status), resp["error"])
+	require.Equal(t, "Error: "+code, resp["message"])
+}
+
 // --- Success ---
 
 func TestSignup_Success(t *testing.T) {
@@ -131,23 +144,16 @@ func TestSignup_DuplicateUsername(t *testing.T) {
 	h, userRepo, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "taken", UsernameLower: "taken"}
 	rec := doPost(h.Signup, `{"username":"taken","password":"pass"}`)
-	// upstream Misskey TS と整合 (#798): 400 + DUPLICATED_USERNAME
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-
-	resp := parseResp(t, rec)
-	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "DUPLICATED_USERNAME", errObj["code"])
+	// upstream Misskey TS と整合 (#798 status, #802 shape): 400 +
+	// Fastify-style reply error の `Error: DUPLICATED_USERNAME` message。
+	assertFastifyError(t, rec, http.StatusBadRequest, "DUPLICATED_USERNAME")
 }
 
 func TestSignup_ReservedUsername(t *testing.T) {
 	h, _, metaRepo := newTestHandler(t)
 	metaRepo.Meta.PreservedUsernames = []string{"admin", "root"}
 	rec := doPost(h.Signup, `{"username":"admin","password":"pass"}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-
-	resp := parseResp(t, rec)
-	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "USED_USERNAME", errObj["code"])
+	assertFastifyError(t, rec, http.StatusBadRequest, "USED_USERNAME")
 }
 
 // --- Meta errors ---
@@ -356,11 +362,8 @@ func TestSignup_CaptchaFailed(t *testing.T) {
 
 	// testcaptcha-response が空 → 検証失敗
 	rec := doPost(h.Signup, `{"username":"alice","password":"pass"}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-
-	resp := parseResp(t, rec)
-	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "CAPTCHA_FAILED", errObj["code"])
+	// upstream は captcha 失敗を Fastify-style reply error で返す (#802)。
+	assertFastifyError(t, rec, http.StatusBadRequest, "CAPTCHA_FAILED")
 }
 
 func TestSignup_CaptchaSuccess(t *testing.T) {
@@ -598,10 +601,7 @@ func TestSignup_EmailRequired_ReservedUsername(t *testing.T) {
 	metaRepo.Meta.EmailRequiredForSignup = true
 	metaRepo.Meta.PreservedUsernames = []string{"admin"}
 	rec := doPost(h.Signup, `{"username":"admin","password":"pass","emailAddress":"x@example.com"}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	resp := parseResp(t, rec)
-	errField, _ := resp["error"].(map[string]any)
-	assert.Equal(t, "USED_USERNAME", errField["code"])
+	assertFastifyError(t, rec, http.StatusBadRequest, "USED_USERNAME")
 }
 
 // 注: SignupPending の ErrInvitationAlreadyUsed / ErrInvitationRevoked は

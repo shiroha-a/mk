@@ -97,20 +97,17 @@ type signupRequest struct {
 
 // duplicatedUsernameError は username 重複時の error response を返す。
 //
-// upstream Misskey TS は \`/api/signup\` の username 重複を 400 +
-// DUPLICATED_USERNAME で返す (third_party の SignupApiService.ts:174)。
-// mk-go も同 status / code に揃える (#798)。UUID は mk-go 内部の identifier
-// として既存値を保持 (= TS は UUID を返さない / frontend は code で
-// switch するので互換性に影響なし)。
+// upstream Misskey TS は \`/api/signup\` の username 重複を Fastify-style
+// reply error 形式 \`{statusCode:400, error:"Bad Request",
+// message:"Error: DUPLICATED_USERNAME"}\` で返す (third_party の
+// SignupApiService.ts:174 で \`throw new FastifyReplyError(400,
+// 'DUPLICATED_USERNAME')\`)。mk-go も同 status / shape に揃える
+// (#798 で status / code、#802 で body shape)。
 //
 // signup-pending 経路 / 通常 signup / signup-pending promote の 3 箇所から
 // 参照されるので helper 化している。
 func duplicatedUsernameError(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error(
-		"DUPLICATED_USERNAME",
-		"Username already exists.",
-		"0a504947-b888-4a99-9f62-8c4a0f3a3dab",
-	))
+	return apierr.FastifyReply(c, http.StatusBadRequest, "DUPLICATED_USERNAME")
 }
 
 // Signup handles POST /api/signup.
@@ -145,7 +142,10 @@ func (h *Handler) Signup(c echo.Context) error {
 			Testcaptcha: req.TestcaptchaResponse,
 		}
 		if err := h.captchaSvc.Verify(c.Request().Context(), tokens); err != nil {
-			return c.JSON(http.StatusBadRequest, apierr.Error("CAPTCHA_FAILED", "Captcha verification failed.", "bdc32ef5-b0f4-40c0-b767-673b2e3e1f5a"))
+			// upstream は captcha verify 失敗時に Fastify-style reply error
+			// (`throw new FastifyReplyError(400, err)`) を返す (SignupApiService.ts:81)。
+			// shape を揃えて drop-in 互換を担保する (#802)。
+			return apierr.FastifyReply(c, http.StatusBadRequest, "CAPTCHA_FAILED")
 		}
 	}
 
@@ -167,16 +167,22 @@ func (h *Handler) Signup(c echo.Context) error {
 		}
 		pending, perr := h.signupService.CreatePending(req.Username, req.EmailAddress, req.Password, ticketID)
 		if perr != nil {
+			// upstream は username 系 error を Fastify-style reply error
+			// で投げる (SignupApiService.ts:174-184)。mk-go も同 shape に揃える
+			// (#802)。INVALID_PARAM は upstream 上流に対応 code が無いが
+			// (= signupService 内部の generic catch で error.toString() を
+			// message に詰める形) drop-in でも shape を揃える方が consumer 側
+			// で 1 経路に統一できるので Fastify-style にする。
 			if perr == coresignup.ErrUsernameAlreadyExists {
 				return duplicatedUsernameError(c)
 			}
 			if perr == coresignup.ErrInvalidUsername {
-				return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid username.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+				return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 			}
 			if perr == coresignup.ErrUsernameReserved {
-				return c.JSON(http.StatusBadRequest, apierr.Error("USED_USERNAME", "That username is reserved.", "4b54bee6-2c25-42c3-a10f-7d0d1fbd91f9"))
+				return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 			}
-			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+			return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 		}
 		if h.emailSender != nil {
 			siteName := "Misskey"
@@ -204,16 +210,18 @@ func (h *Handler) Signup(c echo.Context) error {
 
 	result, err := h.signupService.Signup(req.Username, req.Password, false)
 	if err != nil {
+		// upstream の `/api/signup` は username 系 error を Fastify-style
+		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。
 		if err == coresignup.ErrUsernameAlreadyExists {
 			return duplicatedUsernameError(c)
 		}
 		if err == coresignup.ErrInvalidUsername {
-			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid username.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 		}
 		if err == coresignup.ErrUsernameReserved {
-			return c.JSON(http.StatusBadRequest, apierr.Error("USED_USERNAME", "That username is reserved.", "4b54bee6-2c25-42c3-a10f-7d0d1fbd91f9"))
+			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 		}
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 	}
 
 	// invitation code使用済みにする

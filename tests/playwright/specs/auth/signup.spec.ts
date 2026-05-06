@@ -41,15 +41,15 @@ test.describe('auth: signup-flow', () => {
     const username = randomUsername('dupe');
     await signupUser(request, username, 'password1234');
 
-    // upstream Misskey TS と mk-go (#798 fix 後) は status 400 + code
-    // DUPLICATED_USERNAME を返す。ただし error response の body shape は
-    // upstream (Fastify) = `{statusCode, error, message: "Error: DUPLICATED_USERNAME"}`、
-    // mk-go = `{error: {code: "DUPLICATED_USERNAME", id, message}}` と
-    // drift がある (#802 で別途 tracking)。本 spec は両者で pass するよう
-    // body 全文中に DUPLICATED_USERNAME 文字列が含まれることだけ確認する。
+    // upstream Misskey TS と mk-go (#798 status / #802 shape fix 後) は
+    // status 400 + Fastify-style reply error
+    // `{statusCode:400, error:"Bad Request", message:"Error: DUPLICATED_USERNAME"}`
+    // を返す。本 spec は両者の strict shape を assert する。
     const resp = await callApi(request, 'signup', { username, password: 'password1234' });
     expect(resp.status()).toBe(400);
-    const text = await resp.text();
-    expect(text).toContain('DUPLICATED_USERNAME');
+    const body = await resp.json();
+    expect(body.statusCode).toBe(400);
+    expect(body.error).toBe('Bad Request');
+    expect(body.message).toBe('Error: DUPLICATED_USERNAME');
   });
 });
