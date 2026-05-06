@@ -51,10 +51,14 @@ jobs:
             test_target: playwright-ts-test
             down_target: playwright-ts-down
             compose_args: -f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml
-            # upstream image は build 並列で pre-pull すると wallclock が
-            # 短縮できる (= compose up 内の pull 開始前に dedupe される)。
-            # version は docker-compose.playwright.ts.yml と sync。
-            prepull: docker pull misskey/misskey:2026.3.2 &
+            # upstream image を先取りで pull しておく。次 step の compose up
+            # と並列化するために `&` background 化したい誘惑があるが、GitHub
+            # Actions の `run:` step は step 終了で shell が exit するため
+            # background process の継続が保証されない (= pre-pull 効果が
+            # 不確実)。foreground で完了を待ち、続く compose up 内の同
+            # image pull は docker daemon の cache hit で 0s で済む方が
+            # 確実。version は docker-compose.playwright.ts.yml と sync。
+            prepull: docker pull misskey/misskey:2026.3.2
 
     steps:
       - uses: actions/checkout@v4
