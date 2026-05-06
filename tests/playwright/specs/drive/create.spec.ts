@@ -64,7 +64,10 @@ test.describe('drive: files/create', () => {
     expect(file.url).toMatch(/^https?:\/\//);
     expect(file.size).toBe(tinyPNG.length);
 
-    // files/show で同 file を取得して shape 整合を確認。
+    // files/show で同 file を取得して shape 整合を確認。create と show で
+    // identifier 系 (id) だけでなく metadata (name/type/size) も一致する
+    // ことを assert することで、内部 state が正しく persist されたことを
+    // strict に担保する。
     const showResp = await callApi(request, 'drive/files/show', {
       i: me.token,
       fileId: file.id,
@@ -72,6 +75,8 @@ test.describe('drive: files/create', () => {
     expect(showResp.status()).toBe(200);
     const got = await showResp.json();
     expect(got.id).toBe(file.id);
-    expect(got.name).toBe('tiny.png');
+    expect(got.name).toBe(file.name);
+    expect(got.type).toBe(file.type);
+    expect(got.size).toBe(file.size);
   });
 });
