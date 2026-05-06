@@ -11,11 +11,11 @@
 // `Error.toString()` の output (= "Error: <message>") を反映するため
 // `"Error: " + code` で組み立てる。
 //
-// 対応 endpoint は #802 で確定した 4 つ:
-//   - POST /api/signup
-//   - POST /api/signup-pending
-//   - POST /api/signin-flow
-//   - POST /api/signin-with-passkey
+// drop-in 互換上、Fastify-style 化が必要な endpoint 候補は 4 つ:
+//   - POST /api/signup            ← #802 Phase 1 で対応済 (= 本ファイルの初版)
+//   - POST /api/signup-pending    ← Phase 2 (status drift も並行で別途整理)
+//   - POST /api/signin-flow       ← Phase 3 (rate-limit / captcha 等の混在 shape を整理)
+//   - POST /api/signin-with-passkey ← Phase 3
 //
 // それ以外の `/api/*` endpoint は upstream 上流でも Misskey misc 形式を
 // 返すため、引き続き Error()/ErrorEcho() を使うこと。
