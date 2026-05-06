@@ -82,6 +82,38 @@ func TestSignup_TooLongUsername(t *testing.T) {
 	assert.ErrorIs(t, err, signup.ErrInvalidUsername)
 }
 
+// upstream Misskey TS の `localUsernameSchema` は `^\w{1,20}$` (#800)。
+// 境界 (= 20 char OK / 21 char NG) と character set (= alphanumeric +
+// underscore のみ) を明確に担保する。
+func TestSignup_UsernameBoundary20Chars(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	// 20 char ちょうど (= 上限) は通る
+	r, err := svc.Signup("a234567890123456789a", "pass", false)
+	require.NoError(t, err)
+	assert.Equal(t, "a234567890123456789a", r.User.Username)
+}
+
+func TestSignup_Username21CharsRejected(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	// 21 char (= 上限超過) は ErrInvalidUsername
+	_, err := svc.Signup("a234567890123456789ab", "pass", false)
+	assert.ErrorIs(t, err, signup.ErrInvalidUsername)
+}
+
+func TestSignup_UsernameIllegalCharsRejected(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	for _, name := range []string{
+		"alice-bob", // hyphen 不可
+		"alice.bob", // dot 不可
+		"alice@bob", // @ 不可
+		"alice bob", // space 不可 (TrimSpace で trim されない middle space)
+		"アリス",       // 非 ASCII 不可
+	} {
+		_, err := svc.Signup(name, "pass", false)
+		assert.ErrorIs(t, err, signup.ErrInvalidUsername, "name=%q", name)
+	}
+}
+
 func TestSignup_PreservedUsernameRejected(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
 	// meta.preservedUsernames に "admin" が入っている想定。

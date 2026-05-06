@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,21 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+// localUsernamePattern は upstream Misskey TS の `localUsernameSchema`
+// (= third_party の models/User.ts:319) に整合する username 検証 regex。
+// `^\w{1,20}$` 相当で `\w` = [a-zA-Z0-9_]、length 1-20。
+//
+// 旧 mk-go は length 128 文字まで許容していて drop-in で TS instance に
+// 引き継いだ後 frontend (= TS の username schema) で reject される
+// regression があった (#800)。
+var localUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
+
+// isValidLocalUsername reports whether the given username is acceptable
+// as a local user's account name. upstream Misskey TS と同じ制約。
+func isValidLocalUsername(username string) bool {
+	return localUsernamePattern.MatchString(username)
+}
 
 var (
 	// ErrUsernameAlreadyExists is returned when the username is taken.
@@ -125,7 +141,7 @@ type SignupResult struct {
 // isInitialSetup=true の場合、作成したユーザーを rootUser に設定する。
 func (s *Service) Signup(username, password string, isInitialSetup bool) (*SignupResult, error) {
 	username = strings.TrimSpace(username)
-	if username == "" || len(username) > 128 {
+	if !isValidLocalUsername(username) {
 		return nil, ErrInvalidUsername
 	}
 
@@ -237,7 +253,7 @@ func generatePendingCode() string {
 // (招待制 + email 確認制併用時の MarkUsed 用)。
 func (s *Service) CreatePending(username, email, password string, invitationTicketID *string) (*model.UserPending, error) {
 	username = strings.TrimSpace(username)
-	if username == "" || len(username) > 128 {
+	if !isValidLocalUsername(username) {
 		return nil, ErrInvalidUsername
 	}
 	lower := strings.ToLower(username)
