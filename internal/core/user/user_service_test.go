@@ -356,6 +356,34 @@ func TestService_UpdateProfile_Success(t *testing.T) {
 	assert.True(t, bundle.User.IsBot)
 }
 
+// #787: ワードミュート (mutedWords / hardMutedWords) の persist。
+func TestService_UpdateProfile_MutedWords(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+	mw := json.RawMessage([]byte(`[["foo"],["bar","baz"]]`))
+	hmw := json.RawMessage([]byte(`["spoiler"]`))
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		MutedWords:     &mw,
+		HardMutedWords: &hmw,
+	})
+	require.NoError(t, err)
+
+	got := repo.Profiles["u1"]
+	require.NotNil(t, got)
+	assert.JSONEq(t, `[["foo"],["bar","baz"]]`, string(got.MutedWords))
+	assert.JSONEq(t, `["spoiler"]`, string(got.HardMutedWords))
+
+	// 後続更新で `[]` を渡すと clear。
+	clear := json.RawMessage([]byte(`[]`))
+	_, err = svc.UpdateProfile("u1", user.UpdateInput{MutedWords: &clear})
+	require.NoError(t, err)
+	got = repo.Profiles["u1"]
+	assert.JSONEq(t, `[]`, string(got.MutedWords))
+	// hardMutedWords は omit されたので不変。
+	assert.JSONEq(t, `["spoiler"]`, string(got.HardMutedWords))
+}
+
 // #467: avatarId に SET / CLEAR / 不明 ID / 他人ファイル / 非画像 MIME を
 // 与えたときの挙動を確認する。banner も同経路 (applyMediaUpdate を共有)
 // なので avatar 側で代表させる。

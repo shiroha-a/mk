@@ -8,6 +8,14 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
+// HardMuteRulesLookup returns the persisted hardMutedWords (raw jsonb) for
+// the given user, or nil when the lookup fails / user has no rules. The
+// streaming Manager calls this once at connection setup so timeline channels
+// can drop matching notes per-publish (#787).
+type HardMuteRulesLookup interface {
+	HardMutedWordsForUser(userID string) []byte
+}
+
 // Manager owns the set of live streaming connections. Channel registry と
 // PubSub bus を握り、各 connection に Dispatcher を割り当てて pubsub →
 // channel のルーティングを行う。
@@ -18,6 +26,7 @@ type Manager struct {
 	registry    *Registry
 	bus         PubSubBus
 	notifReader NotificationReader
+	hardMute    HardMuteRulesLookup
 }
 
 // NewManager constructs a Manager with no live connections. registry / bus が
@@ -36,11 +45,23 @@ func (m *Manager) SetNotificationReader(nr NotificationReader) {
 	m.notifReader = nr
 }
 
+// SetHardMuteLookup wires a lookup that returns the viewer's persisted
+// hardMutedWords (#787). Called at connection setup; nil disables the
+// per-publish hard mute filter.
+func (m *Manager) SetHardMuteLookup(l HardMuteRulesLookup) {
+	m.hardMute = l
+}
+
 // Accept implements api/streaming.ConnectionAcceptor. *websocket.Conn から
 // Connection を組み立て、Dispatcher 経由で channel framework に橋渡しする。
 func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 	id := m.allocateID()
 	c := NewConnection(id, user, ws)
+	if m.hardMute != nil && user != nil {
+		// 接続後、最初の channel publish より前に rules を attach。fetch 失敗は
+		// nil 返却で degrade — streaming は filter 無しで動き続ける (#787)。
+		c.SetHardMuteRules(m.hardMute.HardMutedWordsForUser(user.ID))
+	}
 	dispatcher := NewDispatcher(c, m.registry, m.bus)
 	if m.notifReader != nil {
 		dispatcher.SetNotificationReader(m.notifReader)

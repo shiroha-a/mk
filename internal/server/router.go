@@ -1115,6 +1115,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))
 	usersHandler.SetPageRepo(pageRepo)
 	usersHandler.SetNoteFieldResolver(noteFieldResolver)
+	usersHandler.SetUserRepo(userRepo)
 	api.POST("/users/show", usersHandler.Show)
 	api.POST("/users/search", usersHandler.Search)
 	api.POST("/users/notes", usersHandler.Notes)
@@ -1536,6 +1537,7 @@ func (s *Server) setupRoutes() {
 	channelsHandler.SetEmojiRepo(emojiRepo)
 	channelsHandler.SetReactionReader(reactionCountWriter)
 	channelsHandler.SetNoteFieldResolver(noteFieldResolver)
+	channelsHandler.SetUserRepo(userRepo)
 
 	// Antennas endpoints (Phase 4.3)
 	antennasHandler := antennas.NewHandler(antennaService, noteRepo, idGen)
@@ -1543,6 +1545,7 @@ func (s *Server) setupRoutes() {
 	antennasHandler.SetEmojiRepo(emojiRepo)
 	antennasHandler.SetReactionReader(reactionCountWriter)
 	antennasHandler.SetNoteFieldResolver(noteFieldResolver)
+	antennasHandler.SetUserRepo(userRepo)
 	api.POST("/antennas/create", antennasHandler.Create, middleware.RequireAuth())
 	api.POST("/antennas/show", antennasHandler.Show, middleware.RequireAuth())
 	api.POST("/antennas/update", antennasHandler.Update, middleware.RequireAuth())
@@ -1557,6 +1560,7 @@ func (s *Server) setupRoutes() {
 	clipsHandler.SetEmojiRepo(emojiRepo)
 	clipsHandler.SetReactionReader(reactionCountWriter)
 	clipsHandler.SetNoteFieldResolver(noteFieldResolver)
+	clipsHandler.SetUserRepo(userRepo)
 	api.POST("/clips/create", clipsHandler.Create, middleware.RequireAuth())
 	api.POST("/clips/show", clipsHandler.Show)
 	api.POST("/clips/update", clipsHandler.Update, middleware.RequireAuth())
@@ -1629,6 +1633,10 @@ func (s *Server) setupRoutes() {
 	streamManager := stream.NewManager(streamRegistry, streamBus)
 	// readNotificationメッセージをnotificationServiceに橋渡しする
 	streamManager.SetNotificationReader(&notifReaderAdapter{svc: notificationService})
+	// hardMutedWords (#787) 用の rules lookup を wire。connection 確立時に
+	// 1 度だけ user_profile を引き、以降の publish では cache された rules を
+	// 各 timeline channel が参照する。
+	streamManager.SetHardMuteLookup(&hardMuteLookupAdapter{userRepo: userRepo})
 	notePublisher := stream.NewNotePublisher(streamPubSub, idGen)
 	notePublisher.SetEmojiLookup(emojiRepo)
 	notePublisher.SetInstanceLookup(instanceRepo)
@@ -1764,6 +1772,7 @@ func (s *Server) setupRoutes() {
 	rolesHandler.SetEmojiRepo(emojiRepo)
 	rolesHandler.SetReactionReader(reactionCountWriter)
 	rolesHandler.SetNoteFieldResolver(noteFieldResolver)
+	rolesHandler.SetUserRepo(userRepo)
 	api.POST("/roles/list", rolesHandler.List)
 	api.POST("/roles/show", rolesHandler.Show)
 	api.POST("/roles/users", rolesHandler.Users)
@@ -2471,6 +2480,25 @@ type notifReaderAdapter struct {
 
 func (a *notifReaderAdapter) ReadAll(userID string) error {
 	return a.svc.MarkAllAsRead(context.Background(), userID)
+}
+
+// hardMuteLookupAdapter bridges UserRepository to stream.HardMuteRulesLookup
+// so the streaming Manager can attach the persisted hardMutedWords (#787) at
+// connection setup. Returns nil on lookup failure / empty rule set so the
+// streaming filter degrades to no-op rather than dropping the connection.
+type hardMuteLookupAdapter struct {
+	userRepo repository.UserRepository
+}
+
+func (a *hardMuteLookupAdapter) HardMutedWordsForUser(userID string) []byte {
+	if a.userRepo == nil || userID == "" {
+		return nil
+	}
+	profile, err := a.userRepo.FindProfileByUserID(userID)
+	if err != nil || profile == nil || len(profile.HardMutedWords) == 0 {
+		return nil
+	}
+	return []byte(profile.HardMutedWords)
 }
 
 // reactionNoteStreamAdapter bridges core/reaction.NoteStreamHook to the

@@ -394,6 +394,15 @@ func (c *channelContext) Send(msgType string, body any) error {
 func (c *channelContext) Subscribe(topic string)   { c.dispatcher.subscribe(c.id, topic) }
 func (c *channelContext) Unsubscribe(topic string) { c.dispatcher.unsubscribe(c.id, topic) }
 
+// HardMuteRules forwards the connection-level hardMutedWords rule set so
+// timeline channels can drop matching notes before sending (#787).
+func (c *channelContext) HardMuteRules() []byte {
+	if c.dispatcher.conn == nil {
+		return nil
+	}
+	return c.dispatcher.conn.HardMuteRules()
+}
+
 // --- readNotification / subNote / unsubNote ---
 
 // handleReadNotification marks all notifications as read for the connected user.

@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -50,6 +51,15 @@ type Handler struct {
 	pageRepo             repository.PageRepository
 	piningRepo           repository.UserNotePiningRepository
 	fieldRes             *entity.NoteFieldResolver
+	// userRepo は users/notes / users/search-by-username-and-host 経由で
+	// 表示する note list の hardMutedWords filter (#787) に使う。
+	userRepo repository.UserRepository
+}
+
+// SetUserRepo wires a UserRepository so users/notes filters out notes that
+// match the viewer's hardMutedWords (#787).
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
@@ -458,6 +468,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	viewer := middleware.GetUser(c)
+	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)
 	return c.JSON(http.StatusOK, out)

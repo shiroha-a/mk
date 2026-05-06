@@ -31,7 +31,7 @@ func (c *LocalTimelineChannel) Init(params json.RawMessage) error {
 
 // OnRedisEvent forwards a JSON-encoded note payload as a `note` event.
 func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -62,7 +62,7 @@ func (c *GlobalTimelineChannel) Init(params json.RawMessage) error {
 	return nil
 }
 func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -100,7 +100,7 @@ func (c *HomeTimelineChannel) Init(params json.RawMessage) error {
 }
 
 func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -142,7 +142,7 @@ func (c *HybridTimelineChannel) Init(params json.RawMessage) error {
 }
 
 func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))

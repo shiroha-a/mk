@@ -639,6 +639,20 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			case []byte:
 				p.Room = val
 			}
+		case "mutedWords":
+			switch val := v.(type) {
+			case string:
+				p.MutedWords = []byte(val)
+			case []byte:
+				p.MutedWords = val
+			}
+		case "hardMutedWords":
+			switch val := v.(type) {
+			case string:
+				p.HardMutedWords = []byte(val)
+			case []byte:
+				p.HardMutedWords = val
+			}
 		case "clientData":
 			switch val := v.(type) {
 			case string:

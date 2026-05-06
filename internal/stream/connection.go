@@ -64,6 +64,13 @@ type Connection struct {
 
 	handler      MessageHandler
 	closeHandler CloseHandler
+
+	// hardMuteRules は viewer の user_profile.hardMutedWords をそのまま保持する
+	// jsonb 由来 byte slice (#787)。streaming channel が per-note dispatch 時に
+	// notesfilter.MatchOne でこの rules と照合し、match したら send しない。
+	// 認証時に router が一度だけ fetch してセットする想定で、接続中は
+	// immutable に扱う (= 設定変更は次回 reconnect で反映)。
+	hardMuteRules []byte
 }
 
 // NewConnection wraps an upgraded WebSocket. id は呼び出し側 (Manager) が一意
@@ -92,6 +99,18 @@ func (c *Connection) ID() string { return c.id }
 
 // User returns the authenticated user, or nil for anonymous connections.
 func (c *Connection) User() *model.User { return c.user }
+
+// SetHardMuteRules attaches the viewer's persisted hardMutedWords (raw jsonb
+// from user_profile) so timeline channels can drop matching notes before
+// sending them to the client (#787). Called once after authentication.
+func (c *Connection) SetHardMuteRules(rules []byte) {
+	c.hardMuteRules = rules
+}
+
+// HardMuteRules returns the persisted hardMutedWords rules attached at
+// connection setup time. Returns nil for anonymous connections / when
+// the lookup failed / when the user has no rule set.
+func (c *Connection) HardMuteRules() []byte { return c.hardMuteRules }
 
 // SetPermissions attaches OAuth2 permission scopes for this connection.
 // トークン経由で接続された場合に、AccessToken の permission 配列を渡す想定。

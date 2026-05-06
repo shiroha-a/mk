@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corechannel "github.com/shiroha-a/mk/internal/core/channel"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -26,6 +27,14 @@ type Handler struct {
 	emojiRepo     repository.EmojiRepository
 	bufReader     entity.BufferedReactionsReader
 	fieldRes      *entity.NoteFieldResolver
+	// userRepo は channels/timeline の hardMutedWords filter (#787)。
+	userRepo repository.UserRepository
+}
+
+// SetUserRepo wires a UserRepository so channels/timeline filters out notes
+// that match the viewer's hardMutedWords (#787).
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
 }
 
 // ChannelFollowingChecker covers the subset of ChannelFollowingRepository
@@ -349,6 +358,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	viewer := middleware.GetUser(c)
+	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
 	out := make([]any, 0, len(entities))

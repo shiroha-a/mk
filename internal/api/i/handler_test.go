@@ -733,6 +733,111 @@ func TestUpdate_ProhibitedWordEmptyListSkipped(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #787 ワードミュート (mutedWords / hardMutedWords) の persist。
+
+func TestUpdate_MutedWordsAccepted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := post(h.Update, `{"mutedWords":[["foo"],["bar","baz"]],"hardMutedWords":["spoiler"]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	got := repo.Profiles["user1"]
+	require.NotNil(t, got)
+	assert.JSONEq(t, `[["foo"],["bar","baz"]]`, string(got.MutedWords))
+	assert.JSONEq(t, `["spoiler"]`, string(got.HardMutedWords))
+}
+
+func TestUpdate_MutedWordsEmptyArrayClears(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:         "user1",
+		MutedWords:     datatypes.JSON([]byte(`[["pre-existing"]]`)),
+		HardMutedWords: datatypes.JSON([]byte(`["pre-existing"]`)),
+		Fields:         datatypes.JSON([]byte("[]")),
+	}
+
+	rec := post(h.Update, `{"mutedWords":[],"hardMutedWords":[]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	got := repo.Profiles["user1"]
+	assert.JSONEq(t, `[]`, string(got.MutedWords))
+	assert.JSONEq(t, `[]`, string(got.HardMutedWords))
+}
+
+func TestUpdate_MutedWordsOmittedLeavesUnchanged(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:     "user1",
+		MutedWords: datatypes.JSON([]byte(`[["keep"]]`)),
+		Fields:     datatypes.JSON([]byte("[]")),
+	}
+
+	rec := post(h.Update, `{"name":"renamed"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	got := repo.Profiles["user1"]
+	assert.JSONEq(t, `[["keep"]]`, string(got.MutedWords))
+}
+
+func TestUpdate_MutedWordsNonArrayRejected(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+
+	// 文字列やオブジェクトは reject (frontend 不正実装の防御)。
+	rec := post(h.Update, `{"mutedWords":"foo"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec2 := post(h.Update, `{"hardMutedWords":{"oops":true}}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec2.Code)
+}
+
+func TestUpdate_MutedWordsExplicitNullIsOmit(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:     "user1",
+		MutedWords: datatypes.JSON([]byte(`[["keep"]]`)),
+		Fields:     datatypes.JSON([]byte("[]")),
+	}
+
+	// upstream paramDef は nullable: false だが、frontend 不具合で null が
+	// 来たケースは clear ではなく omit と同義に倒す (誤クリア事故防止)。
+	rec := post(h.Update, `{"mutedWords":null}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	got := repo.Profiles["user1"]
+	assert.JSONEq(t, `[["keep"]]`, string(got.MutedWords))
+}
+
 func TestUpdate_RoomOmittedLeavesUnchanged(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{

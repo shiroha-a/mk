@@ -54,6 +54,10 @@ type ChannelContext interface {
 	Subscribe(topic string)
 	// Unsubscribe stops listening on a topic.
 	Unsubscribe(topic string)
+	// HardMuteRules returns the viewer's persisted hardMutedWords (raw jsonb).
+	// Timeline channels use it to drop matching notes per-publish (#787).
+	// Returns nil when the connection is anonymous / has no rule set.
+	HardMuteRules() []byte
 }
 
 // PermittedChannel is an optional interface a Channel can implement to

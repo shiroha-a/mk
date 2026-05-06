@@ -878,3 +878,23 @@ func countOccurrences(slice []string, target string) int {
 	}
 	return n
 }
+
+// #787: channelContext.HardMuteRules forwards from Connection.HardMuteRules.
+func TestChannelContext_HardMuteRules(t *testing.T) {
+	conn := NewConnection("c1", nil, newFakeConn())
+	conn.SetHardMuteRules([]byte(`["foo"]`))
+	d := NewDispatcher(conn, nil, newStubBus())
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	if got := ctx.HardMuteRules(); string(got) != `["foo"]` {
+		t.Fatalf("HardMuteRules = %q", got)
+	}
+}
+
+// nil connection (= disconnected) でも panic せず nil を返す。
+func TestChannelContext_HardMuteRules_NilConn(t *testing.T) {
+	d := &Dispatcher{}
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	if got := ctx.HardMuteRules(); got != nil {
+		t.Fatalf("expected nil, got %q", got)
+	}
+}

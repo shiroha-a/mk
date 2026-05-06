@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -24,6 +25,15 @@ type Handler struct {
 	emojiRepo    repository.EmojiRepository
 	bufReader    entity.BufferedReactionsReader
 	fieldRes     *entity.NoteFieldResolver
+	// userRepo は antennas/notes の hardMutedWords filter (#787) のために
+	// viewer profile を引く。未配線時は filter skip。
+	userRepo repository.UserRepository
+}
+
+// SetUserRepo wires a UserRepository so antennas/notes filters out notes that
+// match the viewer's hardMutedWords (#787).
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
 }
 
 // SetNoteFieldResolver attaches the shared resolver that fills Files /
@@ -269,6 +279,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)
 	out := make([]any, 0, len(entities))

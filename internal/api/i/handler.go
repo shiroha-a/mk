@@ -1,6 +1,7 @@
 package i
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -650,6 +651,15 @@ type UpdateRequest struct {
 	// `[]` (空配列) なら全外し、`[{id,...}, ...]` で上書き。各要素は
 	// avatar_decoration テーブルに登録された id を参照する。
 	AvatarDecorations *[]AvatarDecorationInput `json:"avatarDecorations"`
+	// MutedWords / HardMutedWords は ワードミュート設定 (#787)。
+	// frontend は upstream Misskey TS と同じ `[["foo"], ["bar","baz"]]` 形式
+	// (内側 array が AND、外側が OR) を JSON で送ってくるので変換せず jsonb
+	// 列にそのまま保存する。Bind が json.RawMessage に詰めた段階で内部構造
+	// (string / regex) は触らない。soft mute は frontend が `/api/i` のレス
+	// ポンスから読んで client-side filter、hard mute は backend が TL fetch
+	// 時に CheckWordMute で除外する。
+	MutedWords     json.RawMessage `json:"mutedWords"`
+	HardMutedWords json.RawMessage `json:"hardMutedWords"`
 }
 
 // AvatarDecorationInput is one entry of the avatarDecorations array on
@@ -700,6 +710,37 @@ func backupCodesStock(profile *model.UserProfile) string {
 		return "full"
 	}
 	return "partial"
+}
+
+// normalizeMutedWords validates and normalizes the mutedWords / hardMutedWords
+// payload from i/update. Returns (raw, ok, err): ok=false means "field not
+// present in request" (caller should leave the column unchanged); err != nil
+// means the payload is invalid (caller should 400 the request).
+//
+// Accepts only top-level JSON arrays (including the empty array which clears
+// the column). Internal structure (string | array of string for AND-grouping,
+// regex literals like `/foo/i`) is forwarded verbatim — frontend matches the
+// same wire format and the backend CheckWordMute helper interprets it later.
+func normalizeMutedWords(raw json.RawMessage) (json.RawMessage, bool, error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	// `null` は明示的に omit と同義 (frontend が clear 意図で送ることは無い、
+	// upstream paramDef も nullable: false)。
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, false, nil
+	}
+	// top-level が配列であることだけ確認する (内側は CheckWordMute が解釈)。
+	var v any
+	if err := json.Unmarshal(trimmed, &v); err != nil {
+		return nil, false, err
+	}
+	if _, ok := v.([]any); !ok {
+		return nil, false, errors.New("mutedWords must be an array")
+	}
+	out := append(json.RawMessage(nil), trimmed...)
+	return out, true, nil
 }
 
 // containsProhibitedWord reports whether name contains any entry from words
@@ -773,6 +814,20 @@ func (h *Handler) Update(c echo.Context) error {
 		// バイト列を格納する。改変されないよう独自のスライスにコピーする。
 		room := append(json.RawMessage(nil), req.Room...)
 		in.Room = &room
+	}
+	// ワードミュート (#787)。空 byte = field 未指定 (omit) なので不変。
+	// `[]` (= 2 byte の空配列) はクリア要求として通す。validation は配列形式
+	// であることだけ。upstream paramDef も内側構造は `array of (string |
+	// string[])` で、要素 0 個も許容する。
+	if mw, ok, err := normalizeMutedWords(req.MutedWords); err != nil {
+		return apierr.JSONInvalidParam(c)
+	} else if ok {
+		in.MutedWords = &mw
+	}
+	if mw, ok, err := normalizeMutedWords(req.HardMutedWords); err != nil {
+		return apierr.JSONInvalidParam(c)
+	} else if ok {
+		in.HardMutedWords = &mw
 	}
 	if req.AvatarID != nil {
 		in.AvatarID = req.AvatarID

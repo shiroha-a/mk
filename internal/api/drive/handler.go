@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -487,6 +488,7 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	viewer := middleware.GetUser(c)
+	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)
 	return c.JSON(http.StatusOK, out)

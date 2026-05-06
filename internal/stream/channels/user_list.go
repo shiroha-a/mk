@@ -46,7 +46,7 @@ func (c *UserListChannel) Init(params json.RawMessage) error {
 }
 
 func (c *UserListChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))

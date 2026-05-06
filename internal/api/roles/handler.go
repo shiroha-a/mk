@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -27,6 +28,14 @@ type Handler struct {
 	emojiRepo    repository.EmojiRepository
 	bufReader    entity.BufferedReactionsReader
 	fieldRes     *entity.NoteFieldResolver
+	// userRepo は roles/notes の hardMutedWords filter (#787)。
+	userRepo repository.UserRepository
+}
+
+// SetUserRepo wires a UserRepository so roles/notes filters out notes that
+// match the viewer's hardMutedWords (#787).
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
@@ -167,6 +176,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	viewer := middleware.GetUser(c)
+	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
 	out := make([]any, 0, len(entities))

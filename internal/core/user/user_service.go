@@ -324,6 +324,15 @@ type UpdateInput struct {
 	// `[{id,angle,flipH,offsetX,offsetY}, ...]` で上書き。検証 (catalog
 	// 存在 / role 制限 / 個数上限) はハンドラ側で実施済 (#521)。
 	AvatarDecorations *[]byte
+	// MutedWords / HardMutedWords は jsonb 列にそのまま書き込む。upstream
+	// Misskey TS が受ける `[["foo"], ["bar","baz"]]` 形式 (= 内側配列が AND、
+	// 外側が OR) を変換せず保存する。nil = 不変、`[]` = クリア、配列値 = 上書き。
+	// JSON 構造の妥当性 (= top-level array であること) はハンドラ側で検証する。
+	// 反映: soft mute は frontend の check-word-mute.ts が `/api/i` レスポンスから
+	// 読み取って描画時 filter する。hard mute は本 service と TL handler 経由で
+	// CheckWordMute helper が note を除外する (#787)。
+	MutedWords     *json.RawMessage
+	HardMutedWords *json.RawMessage
 }
 
 // UpdateProfile applies the non-nil fields to the user and user_profile rows.
@@ -390,6 +399,12 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 		// GORM は map で渡された値を jsonb 列に直接書き込む。
 		// []byte を渡すと bytea 扱いされてしまうので string にキャストする。
 		profileFields["room"] = string(*in.Room)
+	}
+	if in.MutedWords != nil {
+		profileFields["mutedWords"] = string(*in.MutedWords)
+	}
+	if in.HardMutedWords != nil {
+		profileFields["hardMutedWords"] = string(*in.HardMutedWords)
 	}
 	if in.AvatarDecorations != nil {
 		// avatarDecorations は user (not user_profile) 側の jsonb 列。

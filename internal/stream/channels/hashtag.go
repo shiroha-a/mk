@@ -37,7 +37,7 @@ func (c *HashtagChannel) Init(params json.RawMessage) error {
 }
 
 func (c *HashtagChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))

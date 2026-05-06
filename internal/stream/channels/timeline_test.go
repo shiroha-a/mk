@@ -13,14 +13,15 @@ import (
 
 // stubContext implements stream.ChannelContext for tests.
 type stubContext struct {
-	mu        sync.Mutex
-	id        string
-	user      any
-	subs      []string
-	unsubs    []string
-	sentType  []string
-	sentBody  []any
-	sendError error
+	mu            sync.Mutex
+	id            string
+	user          any
+	subs          []string
+	unsubs        []string
+	sentType      []string
+	sentBody      []any
+	sendError     error
+	hardMuteRules []byte
 }
 
 func (s *stubContext) ID() string { return s.id }
@@ -42,6 +43,7 @@ func (s *stubContext) Unsubscribe(topic string) {
 	defer s.mu.Unlock()
 	s.unsubs = append(s.unsubs, topic)
 }
+func (s *stubContext) HardMuteRules() []byte { return s.hardMuteRules }
 
 func newCtx(user any) *stubContext {
 	return &stubContext{id: "ch1", user: user}

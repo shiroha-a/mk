@@ -36,7 +36,7 @@ func (c *RoleTimelineChannel) Init(params json.RawMessage) error {
 }
 
 func (c *RoleTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload) {
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))

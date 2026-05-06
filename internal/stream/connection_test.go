@@ -290,3 +290,16 @@ func TestConnection_AccessorsExposeUserAndID(t *testing.T) {
 	assert.Equal(t, "c-alpha", c.ID())
 	assert.Equal(t, user, c.User())
 }
+
+// #787: SetHardMuteRules / HardMuteRules round-trip。
+func TestConnection_HardMuteRules(t *testing.T) {
+	c := NewConnection("c1", nil, nil)
+	if got := c.HardMuteRules(); got != nil {
+		t.Fatalf("default HardMuteRules = %v, want nil", got)
+	}
+	rules := []byte(`["foo"]`)
+	c.SetHardMuteRules(rules)
+	if got := c.HardMuteRules(); string(got) != string(rules) {
+		t.Fatalf("HardMuteRules = %q, want %q", got, rules)
+	}
+}

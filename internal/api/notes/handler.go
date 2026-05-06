@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/core/search"
@@ -548,7 +549,13 @@ func (h *Handler) BulkShow(c echo.Context) error {
 // Files / MyReaction / Channel の解決は entity.NoteFieldResolver に切り出して
 // あり、他の PackNotes 利用 handler (antennas / users / pinned 等) と共通化
 // している (#426)。
+//
+// 全 list endpoint (TL / Search / Conversation / Mentions / UserList /
+// SearchByTag) が本関数を経由するので、hardMutedWords の filter (#787) は
+// PackNotes に渡す前に一括で適用する。viewer == nil / userRepo 未配線 /
+// 規則無し のいずれも no-op に倒す best-effort 設計。
 func (h *Handler) packMany(ctx context.Context, notes []*model.Note, viewer *model.User) []entity.NoteEntity {
+	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldResolver().Apply(out, viewer)
 	return out
