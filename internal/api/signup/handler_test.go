@@ -131,11 +131,12 @@ func TestSignup_DuplicateUsername(t *testing.T) {
 	h, userRepo, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "taken", UsernameLower: "taken"}
 	rec := doPost(h.Signup, `{"username":"taken","password":"pass"}`)
-	assert.Equal(t, http.StatusConflict, rec.Code)
+	// upstream Misskey TS と整合 (#798): 400 + DUPLICATED_USERNAME
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	resp := parseResp(t, rec)
 	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "USERNAME_ALREADY_EXISTS", errObj["code"])
+	assert.Equal(t, "DUPLICATED_USERNAME", errObj["code"])
 }
 
 func TestSignup_ReservedUsername(t *testing.T) {
@@ -218,7 +219,8 @@ func TestSignup_EmailRequired_DuplicateUsername(t *testing.T) {
 	h := apisignup.NewHandler(svc, metaRepo, idGen)
 
 	rec := doPost(h.Signup, `{"username":"alice","password":"pass","emailAddress":"a@example.com"}`)
-	assert.Equal(t, http.StatusConflict, rec.Code)
+	// upstream 整合 (#798): duplicate は 400 + DUPLICATED_USERNAME。
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, pendingRepo.Rows)
 }
 
@@ -499,7 +501,8 @@ func TestSignupPending_UsernameClash(t *testing.T) {
 	require.NoError(t, userRepo.Create(&model.User{ID: "u_c2", Username: "Clash2", UsernameLower: "clash2"}))
 
 	rec := doPost(h.SignupPending, `{"code":"`+row.Code+`"}`)
-	assert.Equal(t, http.StatusConflict, rec.Code)
+	// upstream 整合 (#798): duplicate は 400 + DUPLICATED_USERNAME。
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // emailSender が未設定でも pending row 自体は作られて 204 を返す (テスト用 setup)

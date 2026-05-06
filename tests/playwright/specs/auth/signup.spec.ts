@@ -41,12 +41,15 @@ test.describe('auth: signup-flow', () => {
     const username = randomUsername('dupe');
     await signupUser(request, username, 'password1234');
 
-    // 同 username で 2 度目の signup は client error (4xx) で reject。
-    // 注: 具体 status code は upstream Misskey TS (= 400) と mk-go (= 409
-    // USERNAME_ALREADY_EXISTS) で drift している (#798 で別途 tracking)。
-    // 本 spec は両者で pass するよう 4xx 範囲で assert する。
+    // upstream Misskey TS と mk-go (#798 fix 後) は status 400 + code
+    // DUPLICATED_USERNAME を返す。ただし error response の body shape は
+    // upstream (Fastify) = `{statusCode, error, message: "Error: DUPLICATED_USERNAME"}`、
+    // mk-go = `{error: {code: "DUPLICATED_USERNAME", id, message}}` と
+    // drift がある (#802 で別途 tracking)。本 spec は両者で pass するよう
+    // body 全文中に DUPLICATED_USERNAME 文字列が含まれることだけ確認する。
     const resp = await callApi(request, 'signup', { username, password: 'password1234' });
-    expect(resp.status()).toBeGreaterThanOrEqual(400);
-    expect(resp.status()).toBeLessThan(500);
+    expect(resp.status()).toBe(400);
+    const text = await resp.text();
+    expect(text).toContain('DUPLICATED_USERNAME');
   });
 });
