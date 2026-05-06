@@ -1,0 +1,85 @@
+# docker-compose.playwright.yml — #744 Phase 1 PR-1
+#
+# Playwright e2e 基盤の最小構成。mk-go 単体 + postgres + redis + Playwright
+# runner で API/streaming を target に spec を実行する。frontend は本 PR
+# では bundle しない (= cypress dropin と同じ API 中心構成、page.goto は
+# 後続 PR で frontend bundling を追加するときに導入する)。
+#
+# 使い方:
+#   docker compose -f docker-compose.playwright.yml up -d --build
+#   docker compose -f docker-compose.playwright.yml --profile test \
+#     run --rm playwright-runner
+#   docker compose -f docker-compose.playwright.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: misskey
+      POSTGRES_USER: misskey
+      POSTGRES_PASSWORD: testpass
+    healthcheck:
+      test: pg_isready -U misskey
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [playwright]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: redis-cli ping
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [playwright]
+
+  mkgo:
+    build:
+      context: .
+      # tests/federation/common/Dockerfile.mkgo は migrate + server を両方
+      # build して entrypoint で migrate up を走らせる。Playwright phase 1
+      # は federation 不要なので最小 binary 起動 + migrate up で十分。
+      dockerfile: tests/federation/common/Dockerfile.mkgo
+    environment:
+      TZ: Asia/Tokyo
+    volumes:
+      - ./tests/playwright/instance.yml:/app/.config/default.yml:ro
+    healthcheck:
+      test: ["CMD", "/app/misskey", "-healthcheck", "-config", ".config/default.yml"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [playwright]
+
+  # Playwright runner. profiles: [test] で `up -d` の対象から外し、
+  # 明示的に `--profile test run` で起動する (cypress runner と同 pattern)。
+  playwright-runner:
+    profiles: [test]
+    build:
+      context: ./tests/playwright
+      dockerfile: Dockerfile.runner
+    environment:
+      # mkgo backend への接続先。spec から fixtures 経由で参照する。
+      MK_BASE_URL: http://mkgo:3000
+    volumes:
+      # spec ファイルと playwright.config.ts は test 実行時に変更されること
+      # があるので bind mount で読み込む。生成物 (test-results/) は host に
+      # 残るので gitignore で除外する。
+      - ./tests/playwright:/work
+      # bind mount が image 焼き付けの /work/node_modules を上書きしないよう
+      # anonymous volume で保護する。これにより npm install (Dockerfile.runner)
+      # の結果が container 内で生き続ける。
+      - /work/node_modules
+    working_dir: /work
+    depends_on:
+      mkgo: {condition: service_healthy}
+    networks: [playwright]
+
+networks:
+  playwright:
+    driver: bridge

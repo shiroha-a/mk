@@ -1,0 +1,23 @@
+# Playwright runner image for #744 Phase 1.
+#
+# 公式 Playwright image は browser を内蔵しているが本 PR では API 中心
+# spec のみ実行するので browser は使わない。それでも公式 image にしておく
+# 理由は、後続 PR で page.goto ベース spec を追加するときに browser が
+# 即座に使えるよう構成を固定しておきたいため。
+#
+# 公式 v1.49 を pin。Playwright は upstream リリースで API 微調整するので
+# 後続 PR で必要に応じて bump する。
+FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+
+WORKDIR /work
+
+# package.json と package-lock.json を先 copy して node_modules を image に
+# 焼く。spec / config は volume mount で渡すので image rebuild なしで反復
+# できる (cypress runner と同 pattern)。
+COPY package.json package-lock.json* ./
+RUN npm install --no-audit --no-fund
+
+# ENTRYPOINT に npx を使うと global npx cache に playwright を再 install し
+# /work/node_modules を見落とすので、image 内の local binary を直接呼ぶ。
+ENTRYPOINT ["./node_modules/.bin/playwright"]
+CMD ["test"]

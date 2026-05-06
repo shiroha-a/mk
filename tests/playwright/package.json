@@ -1,0 +1,14 @@
+{
+  "name": "mk-playwright",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright e2e for mk-go (#744). Spec is written against upstream Misskey TS behaviour and run against mk-go to detect compat regressions.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "typescript": "^5.6.3"
+  }
+}

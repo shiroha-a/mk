@@ -310,3 +310,22 @@ queue-bench-down:
 
 queue-bench-logs:
 	docker compose -f $(QUEUE_BENCH_COMPOSE) logs -f
+
+# Playwright e2e (#744 Phase 1)
+#
+# upstream Misskey TS 互換挙動を期待値に書いた spec を mk-go backend に
+# 対して走らせ、drop-in 互換 regression を検出する。Phase 1 PR-1 では
+# 基盤 + smoke 1 spec のみ。後続 PR で spec 拡充 + CI 統合する。
+PLAYWRIGHT_COMPOSE=docker-compose.playwright.yml
+
+playwright-up:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) up -d --build
+
+playwright-test:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm playwright-runner
+
+playwright-down:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) down -v
+
+playwright-logs:
+	docker compose -f $(PLAYWRIGHT_COMPOSE) logs -f
