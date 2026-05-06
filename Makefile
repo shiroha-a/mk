@@ -322,7 +322,10 @@ playwright-up:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) up -d --build
 
 playwright-test:
-	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm playwright-runner
+	# `--build` を付けて runner image を rebuild check させる。package.json
+	# 更新時に node_modules が古いままにならないよう、毎回 build context を
+	# 確認する (cache hit なら ms 単位で済むので overhead 無視可)。
+	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm --build playwright-runner
 
 playwright-down:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) down -v
@@ -341,7 +344,8 @@ playwright-ts-up:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) up -d --build
 
 playwright-ts-test:
-	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm playwright-runner
+	# `playwright-test` と同じく `--build` で runner image を最新化する。
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm --build playwright-runner
 
 playwright-ts-down:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) down -v
