@@ -376,7 +376,7 @@ func TestReversi_SurrenderEndsBothSides(t *testing.T) {
 		id        string
 		expectWin string
 	}{
-		{dbAGlobal, gameAID, bob.ID},  // A 側 bob は cached remote user
+		{dbAGlobal, gameAID, bob.ID}, // A 側 bob は cached remote user
 		{dbBGlobal, gameBID, bob.ID},
 	} {
 		_ = ck.expectWin // winner ID は server 間で異なる cached user ID なので strict 比較しない
