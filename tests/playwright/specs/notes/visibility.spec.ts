@@ -40,20 +40,42 @@ test.describe('notes: visibility boundary', () => {
     expect(resp.status()).toBe(200);
   });
 
-  // 注: followers-only / specified note の `notes/show` 経路は upstream
-  // Misskey TS と mk-go で挙動が drift している (#799 で tracking):
+  // upstream Misskey TS と mk-go (#799 fix 後) は、`notes/show` で直接 ID
+  // 指定された note は visibility 違反でも 200 で返す (= "ID を既に知って
+  // いる viewer には公開する" 設計)。timeline / replies / renotes 等の
+  // 二次経路は引き続き visibility filter で除外される。
   //
-  //   - upstream TS: 直接 ID 指定の `notes/show` は visibility 違反でも 200
-  //     を返す (= visibility filter は timeline 経路のみで適用、note ID を
-  //     既に知っている viewer には公開する設計)
-  //   - mk-go: `notes/show` で visibility 違反を 4xx で reject (TS より strict)
-  //
-  // どちらが "正解" かは drop-in 互換性の方針次第だが、ひとまず本 spec は
-  // skip し、本来の visibility 検証は notes/timeline 経路 (= follow graph と
-  // visibility filter の組み合わせ) で別 PR にて行う。
-  // test.fixme で「後で書き直す予定」を semantic に表現する (= test.skip
-  // が "永続的 skip" の意なので、issue close 後に unblock する意図には
-  // fixme が適切)。
-  test.fixme('followers-only note is hidden from stranger (TS=200/mk-go=4xx drift)', async () => {});
-  test.fixme('specified note is hidden from non-listed user (TS=200/mk-go=4xx drift)', async () => {});
+  // 本 spec は「stranger でも `notes/show` で 200 を返す」のを assert する。
+  // visibility filter が壊れる方向の regression は timeline 系 spec (Phase
+  // 1 残作業の home/local/global timeline) で別途 cover する。
+  test('followers-only note is returned by notes/show even to stranger', async ({ request }) => {
+    const author = await signupUser(request, randomUsername('vFoA'));
+    const stranger = await signupUser(request, randomUsername('vFoS'));
+    const note = await createNote(request, author.token, {
+      text: 'followers only',
+      visibility: 'followers',
+    });
+
+    const resp = await showNoteRaw(request, stranger.token, note.id);
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.id).toBe(note.id);
+    expect(body.visibility).toBe('followers');
+  });
+
+  test('specified note is returned by notes/show even to non-listed user', async ({ request }) => {
+    const author = await signupUser(request, randomUsername('vSpA'));
+    const stranger = await signupUser(request, randomUsername('vSpS'));
+    const note = await createNote(request, author.token, {
+      text: 'private DM',
+      visibility: 'specified',
+      visibleUserIds: [author.id],
+    });
+
+    const resp = await showNoteRaw(request, stranger.token, note.id);
+    expect(resp.status()).toBe(200);
+    const body = await resp.json();
+    expect(body.id).toBe(note.id);
+    expect(body.visibility).toBe('specified');
+  });
 });

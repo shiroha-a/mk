@@ -303,17 +303,24 @@ func (h *Handler) Show(c echo.Context) error {
 	return c.JSON(http.StatusOK, s[0])
 }
 
-// lookupVisible fetches the note via QueryService, which applies the
-// visibility check (followers / specified visibility / blocks).
-// QueryService が wire されていない場合は visibility check を経ない
-// fallback で followers/specified の note が漏洩する security regression
-// risk があるため、nil なら ErrNoteNotFound を返して安全側に倒す (#445)。
-// production では router.go で常に wire されるのでこの分岐は通らない。
+// lookupVisible fetches the note for the /api/notes/show endpoint.
+//
+// upstream Misskey TS は ID 指定の notes/show では visibility 違反でも
+// note を返す (= ID を既に知っている viewer には公開する設計、#799)。
+// drop-in 互換のため mk-go も follow-only / specified note を 200 で
+// 返す。timeline / replies / renotes 等の二次経路では引き続き
+// requireVisible (CanSeeNote) で filter するので、visibility leak は
+// "直接 ID を知っている人にだけ" に留まる。
+//
+// QueryService が wire されていない場合は ErrNoteNotFound を返して安全
+// 側に倒す (= production では router.go で常に wire される)。
 func (h *Handler) lookupVisible(viewer *model.User, noteID string) (*model.Note, error) {
+	_ = viewer // visibility filter は kicked、viewer 引数は将来の block
+	// 検査 (#TBD) のため signature に残す
 	if h.queryService == nil {
 		return nil, note.ErrNoteNotFound
 	}
-	return h.queryService.Show(viewer, noteID)
+	return h.queryService.ShowForAPI(noteID)
 }
 
 // DeleteRequest is the request body for notes/delete.

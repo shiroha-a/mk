@@ -34,12 +34,33 @@ func (s *QueryService) SetThreadMutingRepo(r repository.NoteThreadMutingReposito
 // Show returns the requested note if it exists and the viewer can see it.
 // viewerはnil可 (未認証ユーザー)。返り値は handler 側で pack されるため、
 // Renote / Reply embed まで full preload する (#425 重量経路)。
+//
+// **visibility check 込み**。federation 経路 (= internal/api/ap で AP
+// 経由 lookup する用) では使うが、HTTP API の notes/show は ID 指定なら
+// visibility 違反でも note を返す upstream 仕様 (#799) なので、そちらは
+// ShowForAPI を使うこと。
 func (s *QueryService) Show(viewer *model.User, noteID string) (*model.Note, error) {
 	n, err := s.noteRepo.FindByIDWithRelations(noteID)
 	if err != nil {
 		return nil, ErrNoteNotFound
 	}
 	if !CanSeeNote(viewer, n, s.followingRepo) {
+		return nil, ErrNoteNotFound
+	}
+	return n, nil
+}
+
+// ShowForAPI returns the requested note for the HTTP /api/notes/show
+// endpoint without applying the followers-only / specified visibility
+// check. upstream Misskey TS が「ID を既に知っている viewer には公開する」
+// 設計を採るため (#799) — drop-in 互換のために合わせる。
+//
+// timeline / replies / renotes / children 等の二次経路は引き続き
+// CanSeeNote (= requireVisible) で filter する。federation 経路 (Show)
+// も visibility check 維持で leak しない。
+func (s *QueryService) ShowForAPI(noteID string) (*model.Note, error) {
+	n, err := s.noteRepo.FindByIDWithRelations(noteID)
+	if err != nil {
 		return nil, ErrNoteNotFound
 	}
 	return n, nil

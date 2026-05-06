@@ -40,6 +40,31 @@ func TestQueryService_Show_Visible(t *testing.T) {
 	assert.Equal(t, "n1", got.ID)
 }
 
+// ShowForAPI は upstream Misskey TS の notes/show 互換挙動 (#799)。
+// visibility 違反でも note を返す (= ID 指定の lookup は公開する設計)。
+func TestQueryService_ShowForAPI_ReturnsFollowersNoteToStranger(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	got, err := svc.ShowForAPI("n1")
+	require.NoError(t, err)
+	assert.Equal(t, "n1", got.ID)
+}
+
+func TestQueryService_ShowForAPI_ReturnsSpecifiedNoteToStranger(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilitySpecified}
+	got, err := svc.ShowForAPI("n1")
+	require.NoError(t, err)
+	assert.Equal(t, "n1", got.ID)
+}
+
+// 不存在は ShowForAPI でも ErrNoteNotFound (= 404 path)。
+func TestQueryService_ShowForAPI_NotFound(t *testing.T) {
+	svc, _, _ := newQueryService(t)
+	_, err := svc.ShowForAPI("missing")
+	require.ErrorIs(t, err, note.ErrNoteNotFound)
+}
+
 func TestQueryService_ListRenotes(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
