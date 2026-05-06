@@ -7,6 +7,11 @@
 #
 # Run via `make dropin-up` / `make dropin-test` / `make dropin-down`.
 
+# project name は repo dir 名 (default = `mk`) と衝突して UDS 本番の
+# `mk-postgres-1` 等の container を取り合うので、別 project に分離する
+# (#804 follow-up)。`down -v` でも UDS service / volume は touch されない。
+name: mk-dropin
+
 services:
   # ── Certificate Generator ──────────────────────────────────
   certs:

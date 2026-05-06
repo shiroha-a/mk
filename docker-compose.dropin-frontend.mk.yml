@@ -1,5 +1,8 @@
 # docker-compose.dropin-frontend.mk.yml — Phase 14-3 (#394) overlay.
 #
+# project name は base (docker-compose.dropin-frontend.yml) の
+# `name: mk-dropin-frontend` を引き継ぐ (#804 follow-up)。
+#
 # 使い方:
 #   docker compose \
 #     -f docker-compose.dropin-frontend.yml \

@@ -8,6 +8,10 @@
 #   docker compose -f docker-compose.dropin-frontend.yml up -d
 #   docker compose -f docker-compose.dropin-frontend.yml --profile test run --rm cypress-runner
 
+# project name を別に分離 (#804 follow-up)。default `mk` だと UDS 本番の
+# container 群と衝突するので明示的に切る。
+name: mk-dropin-frontend
+
 services:
   # ── Certificate Generator ──────────────────────────────────
   certs:

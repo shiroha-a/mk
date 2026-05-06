@@ -1,5 +1,8 @@
 # docker-compose.dropin.mk.yml — Phase 13-2 (#367) overlay.
 #
+# project name は base (docker-compose.dropin.yml) の `name: mk-dropin` を
+# 引き継ぐ (#804 follow-up)。
+#
 # 使い方:
 #   docker compose \
 #     -f docker-compose.dropin.yml \

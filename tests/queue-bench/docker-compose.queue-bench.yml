@@ -1,3 +1,7 @@
+# project name を別に分離 (#804 follow-up)。default だと UDS 本番の
+# container 群と衝突する。
+name: mk-queue-bench
+
 services:
   certs:
     image: alpine:3.21
