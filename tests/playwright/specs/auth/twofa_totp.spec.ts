@@ -7,14 +7,17 @@
 //
 // 本 spec は両 backend 共通で:
 //   1. signup user → /api/i/2fa/register で TOTP secret 取得
-//   2. otplib で TOTP code 生成 → /api/i/2fa/done で 2FA enable
-//   3. /api/signin-flow (step 1: username + password) → next: 'totp' assert
-//   4. otplib で TOTP code 再生成 → /api/signin-flow (step 2: token) →
-//      finished: true, i: <token> assert
+//   2. otplib で TOTP code を 1 回生成 (= 同 code を以降の全 verify で再利用)
+//   3. /api/i/2fa/done で 2FA enable (token として上記 code を送信)
+//   4. /api/signin-flow (step 1: username + password) → next: 'totp' assert
+//   5. /api/signin-flow (step 2: token=同 code) → finished: true, i: <token> assert
 //
-// を strict に検証する。WebAuthn (passkey) 経路は別 spec (#817 part2 で
-// 個別 PR 予定、`@simplewebauthn/server` で credential を programmatically
-// 生成する設計)。
+// を strict に検証する。同 code 再利用の根拠は upstream の TOTP verify が
+// `window: 5` + replay 拒否なし (= UserAuthService.twoFactorAuthenticate)
+// で ~5 分間使い回せるため (詳細は spec 内 inline コメント参照)。
+//
+// WebAuthn (passkey) 経路は別 spec (#817 part2 で個別 PR 予定、
+// `@simplewebauthn/server` で credential を programmatically 生成する設計)。
 
 import { expect, test } from '@playwright/test';
 import { authenticator } from 'otplib';
