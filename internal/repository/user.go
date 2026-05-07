@@ -241,9 +241,23 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 // (or local users when host is nil). #766 fix: SearchByUsername の origin
 // 軸では「特定 host への絞り込み」ができないので分離した sibling method。
 // host comparison は lower(host) = lower(?) で case-insensitive。
+//
+// upstream Misskey TS の UserSearchService.searchByUsernameAndHost も同様に
+// usernameLower prefix match + host case-insensitive prefix match を適用し、
+// `isSuspended = FALSE` で suspended user を除外する (#878)。mk-go も同 filter
+// を共有して drop-in 互換を維持する。
+//
+// なお upstream TS は logged-in caller に対して updatedAt > / <= threshold の
+// 4-query 優先順位 (followee active/inactive + non-followee active/inactive)
+// を適用する。これは新規 signup user (updatedAt = NULL) を search 結果から
+// 除外する quirk があり、brand-new user の discoverability を悪化させる。
+// mk-go では本 quirk を意図的に採用せず、followersCount DESC + id ASC の
+// 単純な sort を維持する (= 新規 user も即 search hit する)。詳細は #878。
 func (r *userRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
 	var users []*model.User
-	q := r.db.Where("\"usernameLower\" LIKE ?", query+"%")
+	q := r.db.
+		Where("\"usernameLower\" LIKE ?", query+"%").
+		Where("\"isSuspended\" = false")
 	if host != nil {
 		q = q.Where("lower(\"host\") = lower(?)", *host)
 	} else {

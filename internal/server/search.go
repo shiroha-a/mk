@@ -16,7 +16,11 @@ import (
 //   - meilisearch (with meilisearch host configured) → MeilisearchProvider
 //   - sqlPgroonga                                    → SQLLikeProvider using
 //     the PGroonga `&@~` operator (requires the pgroonga extension)
+//   - none                                           → NoopProvider
+//     (notes/search は 400 UNAVAILABLE で reject、upstream Misskey TS と
+//     同 strict-mode、#877)
 //   - sqlLike / unset (with no meilisearch host)     → SQLLikeProvider (ILIKE)
+//     (mk-go 既定、軽量 deployment 向けの fallback)
 func buildSearchProvider(
 	cfg *config.Config,
 	noteRepo repository.NoteRepository,
@@ -45,8 +49,14 @@ func buildSearchProvider(
 	if provider == "sqlpgroonga" {
 		return coresearch.NewSQLPgroongaProvider(noteRepo, followingRepo)
 	}
+	// "none" は upstream TS strict-mode (= notes/search を 400 UNAVAILABLE
+	// で reject、#877)。SQL LIKE fallback を持たない deployment ですら
+	// drop-in compat を維持したい operator 向けの opt-in。
+	if provider == "none" {
+		return coresearch.NewNoopProvider()
+	}
 	// fulltextSearch.provider が "sqlLike" / 未設定 / 不明な値の場合は
-	// SQL ILIKE フォールバック。
+	// SQL ILIKE フォールバック (mk-go 既定)。
 	return coresearch.NewSQLLikeProvider(noteRepo, followingRepo)
 }
 

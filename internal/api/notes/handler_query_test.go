@@ -182,6 +182,28 @@ func TestSearch_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestSearch_NoopProviderReturnsUnavailable verifies that NoopProvider
+// (= fulltextSearch.provider="none") の ErrUnavailable は handler 層で
+// 400 UNAVAILABLE に翻訳されること (#877)。upstream Misskey TS の
+// notes/search 未配備時の error shape と一致。
+func TestSearch_NoopProviderReturnsUnavailable(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	pollRepo := testutil.NewMockPollRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	createSvc := corenote.NewCreateService(noteRepo, pollRepo, idGen, nil)
+	deleteSvc := corenote.NewDeleteService(noteRepo)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	searchSvc := search.NewService(search.NewNoopProvider())
+	h := NewHandler(noteRepo, createSvc, deleteSvc, querySvc, nil, nil, nil, searchSvc, idGen)
+
+	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"hello"}`)
+	require.NoError(t, h.Search(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"code":"UNAVAILABLE"`)
+	assert.Contains(t, body, "0b44998d-77aa-4427-80d0-d2c9b8523011")
+}
+
 // TestSearch_NoSearchService verifies the early-out branch when search is
 // not configured at all (e.g. test handlers built without injecting one).
 func TestSearch_NoSearchService(t *testing.T) {

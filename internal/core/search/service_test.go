@@ -85,7 +85,9 @@ func TestService_NilProviderFallsBackToNoop(t *testing.T) {
 	svc := NewService(nil)
 	require.NoError(t, svc.IndexNote(&model.Note{ID: "x"}))
 	require.NoError(t, svc.UnindexNote(&model.Note{ID: "x"}))
-	out, err := svc.SearchNote(nil, "x", SearchOpts{}, Pagination{Limit: 5})
-	require.NoError(t, err)
-	assert.Empty(t, out)
+	// nil provider → NoopProvider (#877 で SearchNote は ErrUnavailable を
+	// 返すように改修)。caller (handler) 側で 400 UNAVAILABLE に翻訳する
+	// 想定。
+	_, err := svc.SearchNote(nil, "x", SearchOpts{}, Pagination{Limit: 5})
+	require.ErrorIs(t, err, ErrUnavailable)
 }

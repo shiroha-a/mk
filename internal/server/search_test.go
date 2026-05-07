@@ -108,6 +108,19 @@ func TestBuildSearchProvider_MeilisearchWithoutHostFallsBack(t *testing.T) {
 	require.IsType(t, &coresearch.SQLLikeProvider{}, p)
 }
 
+// TestBuildSearchProvider_NoneSelectsNoop verifies that fulltextSearch.provider
+// = "none" returns a NoopProvider so notes/search responds with 400
+// UNAVAILABLE (= upstream Misskey TS strict-mode、#877)。
+func TestBuildSearchProvider_NoneSelectsNoop(t *testing.T) {
+	repo, idGen := newRepoAndIDGen(t)
+	cfg := &config.Config{FulltextSearch: &config.FulltextSearchOptions{Provider: "none"}}
+	p := buildSearchProvider(cfg, repo, nil, idGen)
+	require.IsType(t, &coresearch.NoopProvider{}, p)
+
+	_, err := p.SearchNote(nil, "hello", coresearch.SearchOpts{}, coresearch.Pagination{Limit: 10})
+	require.ErrorIs(t, err, coresearch.ErrUnavailable)
+}
+
 func TestBuildMeilisearchHost(t *testing.T) {
 	cases := []struct {
 		name string

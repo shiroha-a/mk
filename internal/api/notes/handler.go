@@ -468,6 +468,11 @@ func (h *Handler) Search(c echo.Context) error {
 		if errors.Is(err, search.ErrEmptyQuery) {
 			return apierr.JSONInvalidParam(c)
 		}
+		// fulltextSearch.provider="none" 時は ErrUnavailable を 400
+		// UNAVAILABLE に翻訳する (= upstream Misskey TS と同 shape、#877)。
+		if errors.Is(err, search.ErrUnavailable) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Search of notes unavailable.", "0b44998d-77aa-4427-80d0-d2c9b8523011"))
+		}
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))

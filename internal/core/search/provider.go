@@ -17,6 +17,12 @@ import (
 // blank search query. ハンドラ層で 400 BadRequest に変換する想定。
 var ErrEmptyQuery = errors.New("search query is empty")
 
+// ErrUnavailable is returned by NoopProvider.SearchNote when the operator has
+// explicitly disabled note search (= fulltextSearch.provider="none")。
+// upstream Misskey TS と同 semantics で、ハンドラ層で 400 UNAVAILABLE
+// (id: 0b44998d-77aa-4427-80d0-d2c9b8523011) に変換する想定 (#877)。
+var ErrUnavailable = errors.New("search backend is not available")
+
 // NoteDocument is the projection of a model.Note that gets stored in an
 // external full-text search index (typically Meilisearch). SQL backends do not
 // use this type — they query the live `note` table directly.

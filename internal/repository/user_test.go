@@ -447,6 +447,23 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		}
 		assert.True(t, ids[remote.ID])
 	})
+
+	// upstream Misskey TS は isSuspended=TRUE の user を search 結果から
+	// 除外する。mk-go も #878 fix で同 filter を適用するので、suspend した
+	// user が hit から消えること。
+	t.Run("isSuspended user is filtered out", func(t *testing.T) {
+		require.NoError(t, repo.UpdateUser(local.ID, map[string]any{"isSuspended": true}))
+		t.Cleanup(func() {
+			_ = repo.UpdateUser(local.ID, map[string]any{"isSuspended": false})
+		})
+		out, err := repo.SearchByUsernameAndHost("hosttest", nil, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.False(t, ids[local.ID], "suspended user must not appear in search")
+	})
 }
 
 func TestUserRepository_UpdateUser(t *testing.T) {
