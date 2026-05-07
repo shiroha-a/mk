@@ -82,6 +82,25 @@ func TestService_Create_LegacyTranslation(t *testing.T) {
 	assert.Equal(t, "👍", r)
 }
 
+// TestService_Create_VariationSelectorStripped covers the #864 fix where
+// Unicode emoji variation selector (U+FE0F) is stripped during normalization
+// so that mk-go saves the same canonical form as upstream Misskey TS.
+func TestService_Create_VariationSelectorStripped(t *testing.T) {
+	svc, repo, reactRepo, _, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	// "\u2764\ufe0f" (= "❤️" with variation selector) should be normalized
+	// to "\u2764" (= "❤" without VS-16).
+	r, err := svc.Create(&model.User{ID: "viewer"}, "n1", "\u2764\ufe0f")
+	require.NoError(t, err)
+	assert.Equal(t, "\u2764", r)
+	require.Len(t, reactRepo.Reactions, 1)
+	// reactRepo.Reactions は id-keyed map なので、唯一の entry の Reaction
+	// 文字列が strip 後の `❤` (= U+2764) になっていることを確認。
+	for _, rec := range reactRepo.Reactions {
+		assert.Equal(t, "\u2764", rec.Reaction)
+	}
+}
+
 func TestService_Create_AlreadyReactedSame(t *testing.T) {
 	svc, repo, _, _, _ := newService(t)
 	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
