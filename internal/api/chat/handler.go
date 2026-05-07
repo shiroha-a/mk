@@ -120,13 +120,24 @@ func packMessage(m *model.ChatMessage) map[string]any {
 }
 
 // packMessageWithCreatedAt augments packMessage with createdAt parsed from the
-// message ID. createdAt 欠落だと FE 側の MkTime が `Invalid Date` を表示し、
-// 一覧では NaN/NaN になる (#692)。
+// message ID and the eager-loaded file (if any). createdAt 欠落だと FE 側の
+// MkTime が `Invalid Date` を表示し、一覧では NaN/NaN になる (#692)。
+//
+// file field は upstream packedChatMessageSchema の `file: optional/nullable
+// (DriveFile)` に対応し、m.File が Preload で eager load されている場合のみ
+// pack する (#855 PR-C)。chat repository の主要 list/find query で
+// Preload("File") を行う前提。create-to-user 直後の response は CreateMessage
+// が file を eager load しないため、file field 不在となる現状制約あり (= TS
+// upstream とは差分、follow-up issue で create response も file を含めるよう
+// 修正予定)。
 func (h *Handler) packMessageWithCreatedAt(m *model.ChatMessage) map[string]any {
 	result := packMessage(m)
 	if h.idGen != nil {
 		if t, err := h.idGen.ParseTime(m.ID); err == nil {
 			result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+		if m.File != nil {
+			result["file"] = entity.PackDriveFile(m.File, h.idGen)
 		}
 	}
 	return result

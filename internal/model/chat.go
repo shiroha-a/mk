@@ -30,9 +30,10 @@ type ChatMessage struct {
 	IsDelivering    bool           `gorm:"column:isDelivering;default:false" json:"isDelivering"`
 	IsDeliverFailed bool           `gorm:"column:isDeliverFailed;default:false" json:"isDeliverFailed"`
 
-	FromUser *User     `gorm:"foreignKey:FromUserID" json:"fromUser,omitempty"`
-	ToUser   *User     `gorm:"foreignKey:ToUserID" json:"toUser,omitempty"`
-	ToRoom   *ChatRoom `gorm:"foreignKey:ToRoomID" json:"toRoom,omitempty"`
+	FromUser *User      `gorm:"foreignKey:FromUserID" json:"fromUser,omitempty"`
+	ToUser   *User      `gorm:"foreignKey:ToUserID" json:"toUser,omitempty"`
+	ToRoom   *ChatRoom  `gorm:"foreignKey:ToRoomID" json:"toRoom,omitempty"`
+	File     *DriveFile `gorm:"foreignKey:FileID" json:"file,omitempty"`
 }
 
 func (ChatMessage) TableName() string { return "chat_message" }

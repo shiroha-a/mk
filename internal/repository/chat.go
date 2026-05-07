@@ -136,7 +136,7 @@ func (r *chatRepository) CreateMessage(msg *model.ChatMessage) error {
 
 func (r *chatRepository) FindMessageByID(id string) (*model.ChatMessage, error) {
 	var msg model.ChatMessage
-	if err := r.db.Preload("FromUser").Where(`"id" = ?`, id).First(&msg).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("File").Where(`"id" = ?`, id).First(&msg).Error; err != nil {
 		return nil, err
 	}
 	return &msg, nil
@@ -144,7 +144,7 @@ func (r *chatRepository) FindMessageByID(id string) (*model.ChatMessage, error) 
 
 func (r *chatRepository) FindMessageByURI(uri string) (*model.ChatMessage, error) {
 	var msg model.ChatMessage
-	if err := r.db.Preload("FromUser").Where(`"uri" = ?`, uri).First(&msg).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("File").Where(`"uri" = ?`, uri).First(&msg).Error; err != nil {
 		return nil, err
 	}
 	return &msg, nil
@@ -163,7 +163,7 @@ func (r *chatRepository) ListMessagesByRoom(roomID string, limit int) ([]*model.
 		limit = 20
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Where(`"toRoomId" = ?`, roomID).
+	if err := r.db.Preload("FromUser").Preload("File").Where(`"toRoomId" = ?`, roomID).
 		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (r *chatRepository) ListMessagesByUser(userID, otherUserID string, limit in
 		limit = 20
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").
+	if err := r.db.Preload("FromUser").Preload("File").
 		Where(`("fromUserId" = ? AND "toUserId" = ?) OR ("fromUserId" = ? AND "toUserId" = ?)`,
 			userID, otherUserID, otherUserID, userID).
 		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
@@ -189,7 +189,7 @@ func (r *chatRepository) SearchMessages(userID, query string, limit int) ([]*mod
 		limit = 20
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").
+	if err := r.db.Preload("FromUser").Preload("File").
 		Where(`("fromUserId" = ? OR "toUserId" = ?) AND "text" ILIKE ?`, userID, userID, "%"+query+"%").
 		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
 		return nil, err
@@ -332,7 +332,7 @@ func (r *chatRepository) ListHistory(userID string, limit int) ([]*model.ChatMes
 		return nil, nil
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("ToUser").Preload("ToRoom").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("ToUser").Preload("ToRoom").Preload("File").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -369,7 +369,7 @@ func (r *chatRepository) ListUserHistory(userID string, limit int) ([]*model.Cha
 		return nil, nil
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("ToUser").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("ToUser").Preload("File").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -406,7 +406,7 @@ func (r *chatRepository) ListRoomHistory(userID string, limit int) ([]*model.Cha
 		return nil, nil
 	}
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("ToRoom").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
+	if err := r.db.Preload("FromUser").Preload("ToRoom").Preload("File").Where("id IN ?", ids).Order("id DESC").Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
