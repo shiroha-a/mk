@@ -133,7 +133,9 @@ func TestReactions_NoSuchUser(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// target が remote user (host が non-empty) → 400 IS_REMOTE_USER。
+// target が remote user (host が non-nil) → 400 IS_REMOTE_USER。
+// upstream TS は `host !== null` で判定するので、host=="" の row も remote
+// 扱いになる (= mk-go も nil 判定のみ)。
 func TestReactions_RemoteUser(t *testing.T) {
 	h, userRepo, _ := newReactionsHandler(t)
 	host := "remote.example"
