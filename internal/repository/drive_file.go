@@ -31,6 +31,9 @@ type DriveFileRepository interface {
 	// listing と同一の semantics。
 	ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
 	FindByName(userID, name string, folderID *string) ([]*model.DriveFile, error)
+	// CountByFolder は drive/folders/show の detail mode pack 用に、
+	// 指定 folder 内に直下で属する file 数を返す (#845)。
+	CountByFolder(folderID string) (int, error)
 	ExistsByMD5(userID, md5 string) (bool, error)
 	ListByFileIDs(fileIDs []string) ([]*model.DriveFile, error)
 	UsageByUser(userID string) (int64, error)
@@ -177,6 +180,15 @@ func (r *driveFileRepository) ExistsByMD5(userID, md5 string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// CountByFolder returns the number of files directly in the given folder.
+func (r *driveFileRepository) CountByFolder(folderID string) (int, error) {
+	var n int64
+	if err := r.db.Model(&model.DriveFile{}).Where(`"folderId" = ?`, folderID).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 func (r *driveFileRepository) ListByFileIDs(fileIDs []string) ([]*model.DriveFile, error) {

@@ -13,6 +13,10 @@ type DriveFolderRepository interface {
 	Delete(f *model.DriveFolder) error
 	ListByUser(userID string, parentID *string, untilID, sinceID string, limit int) ([]*model.DriveFolder, error)
 	HasChildren(folderID string) (bool, error)
+	// CountChildFolders は detail mode pack 用に「直下の sub-folder 数」を
+	// 返す (#845)。HasChildren は exists check で folder + file を兼ねるが、
+	// 本 method は folder のみ厳密に count する。
+	CountChildFolders(parentID string) (int, error)
 	FindByName(userID, name string, parentID *string) ([]*model.DriveFolder, error)
 }
 
@@ -68,6 +72,15 @@ func (r *driveFolderRepository) ListByUser(userID string, parentID *string, unti
 		return nil, err
 	}
 	return rows, nil
+}
+
+// CountChildFolders returns the number of immediate sub-folders.
+func (r *driveFolderRepository) CountChildFolders(parentID string) (int, error) {
+	var n int64
+	if err := r.db.Model(&model.DriveFolder{}).Where(`"parentId" = ?`, parentID).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // HasChildren reports whether the folder has any nested folders or files.

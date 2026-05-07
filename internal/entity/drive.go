@@ -142,9 +142,18 @@ type DriveFolderEntity struct {
 	CreatedAt string  `json:"createdAt"`
 	Name      string  `json:"name"`
 	ParentID  *string `json:"parentId"`
+	// detail mode (= drive/folders/show) で埋まる field 群 (#845)。
+	// upstream Misskey TS は `pack(folder, { detail: true })` で返す。
+	// default mode (= folders/create / update / find) では omitempty で
+	// 省略され、shape は default 4 field のまま。
+	FoldersCount *int               `json:"foldersCount,omitempty"`
+	FilesCount   *int               `json:"filesCount,omitempty"`
+	Parent       *DriveFolderEntity `json:"parent,omitempty"`
 }
 
-// PackDriveFolder converts a model.DriveFolder to a DriveFolderEntity.
+// PackDriveFolder converts a model.DriveFolder to a DriveFolderEntity in
+// **default mode** (= 4 field のみ)。folders/create / update / find /
+// (file pack 内の embedded folder) で使う。
 func PackDriveFolder(f *model.DriveFolder, idGen id.Generator) DriveFolderEntity {
 	createdAt := ""
 	if t, err := idGen.ParseTime(f.ID); err == nil {

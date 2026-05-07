@@ -117,6 +117,16 @@ func (m *MockDriveFileRepository) ExistsByMD5(userID, md5 string) (bool, error) 
 	return false, nil
 }
 
+func (m *MockDriveFileRepository) CountByFolder(folderID string) (int, error) {
+	n := 0
+	for _, f := range m.Files {
+		if f.FolderID != nil && *f.FolderID == folderID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *MockDriveFileRepository) ListByFileIDs(ids []string) ([]*model.DriveFile, error) {
 	return m.FindByIDs(ids)
 }
@@ -308,6 +318,16 @@ func (m *MockDriveFolderRepository) HasChildren(folderID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (m *MockDriveFolderRepository) CountChildFolders(parentID string) (int, error) {
+	n := 0
+	for _, f := range m.Folders {
+		if f.ParentID != nil && *f.ParentID == parentID {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (m *MockDriveFileRepository) ListForAdmin(userID, origin, host, fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {

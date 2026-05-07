@@ -77,6 +77,7 @@ func (f *fakeDriveFileRepo) FindByName(_, _ string, _ *string) ([]*model.DriveFi
 	return nil, nil
 }
 func (f *fakeDriveFileRepo) ExistsByMD5(_, _ string) (bool, error)                { return false, nil }
+func (f *fakeDriveFileRepo) CountByFolder(_ string) (int, error)                  { return 0, nil }
 func (f *fakeDriveFileRepo) ListByFileIDs(_ []string) ([]*model.DriveFile, error) { return nil, nil }
 func (f *fakeDriveFileRepo) UsageByUser(_ string) (int64, error)                  { return 0, nil }
 func (f *fakeDriveFileRepo) UpdateBulkFolder(_ []string, _ *string) error         { return nil }

@@ -442,13 +442,54 @@ func TestFoldersCreate_RepoError(t *testing.T) {
 // --- FoldersShow ---
 
 func TestFoldersShow_Success(t *testing.T) {
-	h, _, folderRepo := newHandler(t)
+	h, _, folderRepo := newHandlerWithRepos(t)
 	uid := "u1"
 	folderRepo.Folders["p"] = &model.DriveFolder{ID: "p", Name: "Test", UserID: &uid}
 	c, rec := newJSONReq(t, `{"folderId":"p"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersShow(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+	// upstream `pack(folder, { detail: true })` (#845): foldersCount /
+	// filesCount は 0 (= 子なし)、parent は parentId=nil なので nil。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 0, resp["foldersCount"])
+	assert.EqualValues(t, 0, resp["filesCount"])
+	assert.Nil(t, resp["parent"])
+}
+
+// detail mode: 親 folder + 子 folder + 子内の file を持つ shape の確認 (#845)。
+func TestFoldersShow_DetailWithChildren(t *testing.T) {
+	h, fileRepo, folderRepo := newHandlerWithRepos(t)
+	uid := "u1"
+	parentID := "p"
+	childID := "c"
+	folderRepo.Folders[parentID] = &model.DriveFolder{ID: parentID, Name: "P", UserID: &uid}
+	folderRepo.Folders[childID] = &model.DriveFolder{ID: childID, Name: "C", UserID: &uid, ParentID: &parentID}
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, FolderID: &parentID}
+	fileRepo.Files["f2"] = &model.DriveFile{ID: "f2", UserID: &uid, FolderID: &parentID}
+
+	c, rec := newJSONReq(t, `{"folderId":"`+parentID+`"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FoldersShow(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 1, resp["foldersCount"])
+	assert.EqualValues(t, 2, resp["filesCount"])
+	assert.Nil(t, resp["parent"])
+
+	// 子 folder show: parent (= 親) が recursive に埋まる。
+	c2, rec2 := newJSONReq(t, `{"folderId":"`+childID+`"}`)
+	setUser(c2, "u1")
+	require.NoError(t, h.FoldersShow(c2))
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp2 map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	parent, ok := resp2["parent"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, parentID, parent["id"])
+	assert.EqualValues(t, 1, parent["foldersCount"])
 }
 
 func TestFoldersShow_InvalidParam(t *testing.T) {

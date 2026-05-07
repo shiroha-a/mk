@@ -1,18 +1,12 @@
 // #829 drive 拡張 PR-B: drive/folders CRUD + nest 表示。
 //
-// upstream Misskey TS と mk-go (一部 drift) は drive/folders の各 endpoint
+// upstream Misskey TS と mk-go (#845 fix 後) は drive/folders の各 endpoint
 // で以下の shape を返す:
 //   - /api/drive/folders/create / update / find: default mode
 //     `{ id, createdAt, name, parentId }`
 //   - /api/drive/folders/show: detail mode = default 4 field +
-//     `{ foldersCount, filesCount, parent? }` (upstream のみ、mk-go は
-//     default mode のまま = drift、#845 で tracking)
+//     `{ foldersCount, filesCount, parent? }` (両 backend で揃う、#845 fix 済)
 //   - /api/drive/folders/delete: 204 NoContent
-//
-// 本 spec は両 backend pass のため **default 4 field のみ strict assert**。
-// detail mode の追加 field (foldersCount / filesCount / parent) drift は
-// #845 で fix する。fix 後は本 spec の show response で detail field の
-// strict assert を追加する想定。
 //
 // 検証する round-trip:
 //   1. folder create → 4 field shape assert
@@ -46,7 +40,8 @@ test.describe('drive: folders CRUD', () => {
     expect(created.parentId).toBeNull();
     expect(typeof created.createdAt).toBe('string');
 
-    // show (= default 4 field のみ strict assert、detail field は drift で別 issue)
+    // show: default 4 field + detail field (foldersCount/filesCount/parent)
+    // を strict assert (#845 で両 backend で揃った)。
     const showResp = await callApi(request, 'drive/folders/show', {
       i: me.token,
       folderId: created.id,
@@ -56,6 +51,10 @@ test.describe('drive: folders CRUD', () => {
     expect(got.id).toBe(created.id);
     expect(got.name).toBe('CRUD-folder');
     expect(got.parentId).toBeNull();
+    // detail field (子なし state なので 0、parentId=nil なので parent なし)。
+    expect(got.foldersCount).toBe(0);
+    expect(got.filesCount).toBe(0);
+    expect(got.parent).toBeUndefined();
 
     // update: rename
     const updateResp = await callApi(request, 'drive/folders/update', {
@@ -114,7 +113,8 @@ test.describe('drive: folders CRUD', () => {
     const child = await childResp.json();
     expect(child.parentId).toBe(parent.id);
 
-    // show でも parentId が一致
+    // show でも parentId が一致 + detail field の parent (recursive pack)
+    // が親 folder を埋める (#845)。
     const showResp = await callApi(request, 'drive/folders/show', {
       i: me.token,
       folderId: child.id,
@@ -122,5 +122,13 @@ test.describe('drive: folders CRUD', () => {
     expect(showResp.status()).toBe(200);
     const got = await showResp.json();
     expect(got.parentId).toBe(parent.id);
+    expect(got.foldersCount).toBe(0);
+    expect(got.filesCount).toBe(0);
+    // parent recursive detail pack: 親 folder の id / foldersCount=1 (= 子
+    // を 1 個持つ) を確認。
+    expect(got.parent).toBeDefined();
+    expect(got.parent.id).toBe(parent.id);
+    expect(got.parent.foldersCount).toBe(1);
+    expect(got.parent.filesCount).toBe(0);
   });
 });
