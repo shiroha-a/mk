@@ -103,11 +103,17 @@ test.describe('chat: rooms', () => {
     // me !== owner なので membership / invitation lookup が走り、
     // invitationExists = true (= 招待が pending)、isMuted = false (まだ
     // member ではないので mute 状態なし) になる (#855 PR-B)。
-    if (inv.room) {
-      expect(inv.room.id).toBe(room.id);
-      expect(inv.room.invitationExists).toBe(true);
-      expect(inv.room.isMuted).toBe(false);
+    // 両 backend で `room` field が必ず付く前提なので、不在は contract 違反
+    // として明示 throw で fail させる (pollForNotification / tl.find と同
+    // guard pattern)。
+    if (!inv.room) {
+      throw new Error(
+        `invitations/inbox entry for room ${room.id} did not include room field`,
+      );
     }
+    expect(inv.room.id).toBe(room.id);
+    expect(inv.room.invitationExists).toBe(true);
+    expect(inv.room.isMuted).toBe(false);
 
     // invitee が rooms/join { roomId } で room に join (= membership 確立)。
     // upstream Misskey TS は invitations/accept endpoint を持たず、invite
