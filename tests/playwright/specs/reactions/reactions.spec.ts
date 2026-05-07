@@ -82,10 +82,11 @@ test.describe('reactions: create / delete round-trip', () => {
     expect(listResp.status()).toBe(200);
     const list = (await listResp.json()) as ReactionListEntry[];
     expect(Array.isArray(list)).toBe(true);
-    const found = list.find((r) => r.user.id === reactor.id);
-    if (!found) {
-      throw new Error(`notes/reactions did not contain reactor (id=${reactor.id})`);
-    }
+    // 1 reactor / 1 reaction の context なので list は厳密に 1 件。両
+    // backend で余計な entry や欠落 drift があれば即 fail する。
+    expect(list.length).toBe(1);
+    const found = list[0];
+    expect(found.user.id).toBe(reactor.id);
     // type は upstream / mk-go ともに reaction string をそのまま返す。
     // unicode emoji は raw、custom emoji は `:name@.:` 形式 (本 spec では
     // unicode のみ assert)。
