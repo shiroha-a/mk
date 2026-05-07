@@ -195,16 +195,24 @@ func (h *Handler) packRoomDetailed(r *model.ChatRoom, meID string) map[string]an
 // FE は createdAt を `new Date(m.createdAt).getTime()` で sort key に使う
 // ので、欠損していると `NaN` になりリストが空になる。room メッセージは
 // `'room' in m` で判定して "other" のかわりに room を表示する。
-func (h *Handler) packMessageDetailed(m *model.ChatMessage) map[string]any {
+//
+// meID は viewer (request 主体) の user ID。toRoom の `isMuted` /
+// `invitationExists` を viewer 視点で計算する (#860 PR-D)。空文字列を渡した
+// 場合は packRoomDetailed が lookup を skip して両 false 固定。
+//
+// 注: upstream の packMessageDetailed は `isRead` を返さない (json-schema
+// 上 optional)。mk-go も同様に含めない。`isRead` は packMessageLite 系で
+// 返される設計と推定されるが、追加は別 issue (#860 残 scope) で扱う。
+func (h *Handler) packMessageDetailed(m *model.ChatMessage, meID string) map[string]any {
 	result := h.packMessageWithCreatedAt(m)
 	if m.ToUser != nil {
 		result["toUser"] = packUser(m.ToUser)
 	}
 	if m.ToRoom != nil {
-		result["toRoom"] = h.packRoomWithCreatedAt(m.ToRoom)
+		result["toRoom"] = h.packRoomDetailed(m.ToRoom, meID)
 		// upstream の `'room' in m` 判定に合わせて `room` alias も入れる。
 		// 旧 chat 実装ではこの key で判定していた残存 client がある。
-		result["room"] = h.packRoomWithCreatedAt(m.ToRoom)
+		result["room"] = h.packRoomDetailed(m.ToRoom, meID)
 	}
 	return result
 }
@@ -448,7 +456,15 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	if err != nil {
 		return h.mapChatErr(c, err)
 	}
-	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
+	// CreateMessage は File を eager load しないので、fileId 付き message は
+	// File を post-fetch して response の `file` field を含めるようにする
+	// (#860)。reload に失敗した場合は fall through で file 不在のまま返す。
+	if msg.FileID != nil && msg.File == nil {
+		if reloaded, err := h.repo.FindMessageByID(msg.ID); err == nil {
+			msg = reloaded
+		}
+	}
+	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
 }
 
 // messagesCreateLegacy preserves pre-Phase-9.8 behaviour for callers that
@@ -463,11 +479,17 @@ func (h *Handler) messagesCreateLegacy(c echo.Context, user *model.User, text, t
 	if err := h.repo.CreateMessage(msg); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
+	if msg.FileID != nil && msg.File == nil {
+		if reloaded, err := h.repo.FindMessageByID(msg.ID); err == nil {
+			msg = reloaded
+		}
+	}
+	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
 }
 
 // MessagesShow handles POST /api/chat/messages/show.
 func (h *Handler) MessagesShow(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		MessageID string `json:"messageId"`
 	}
@@ -478,7 +500,7 @@ func (h *Handler) MessagesShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 	}
-	return c.JSON(http.StatusOK, h.packMessageWithCreatedAt(msg))
+	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
 }
 
 // MessagesUpdate handles POST /api/chat/messages/update.
@@ -574,7 +596,7 @@ func (h *Handler) Messages(c echo.Context) error {
 	}
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
-		result[i] = h.packMessageWithCreatedAt(m)
+		result[i] = h.packMessageDetailed(m, user.ID)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -592,7 +614,7 @@ func (h *Handler) MessagesSearch(c echo.Context) error {
 	msgs, _ := h.repo.SearchMessages(user.ID, req.Query, req.Limit)
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
-		result[i] = h.packMessageWithCreatedAt(m)
+		result[i] = h.packMessageDetailed(m, user.ID)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -787,7 +809,7 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, h.packMessageWithCreatedAt(m))
+		out = append(out, h.packMessageDetailed(m, user.ID))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -819,7 +841,7 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, h.packMessageWithCreatedAt(m))
+		out = append(out, h.packMessageDetailed(m, user.ID))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -988,7 +1010,7 @@ func (h *Handler) History(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, h.packMessageDetailed(m))
+		out = append(out, h.packMessageDetailed(m, user.ID))
 	}
 	return c.JSON(http.StatusOK, out)
 }

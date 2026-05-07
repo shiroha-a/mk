@@ -12,12 +12,11 @@
 //   5. receiver の user-timeline で取得した message が `file` field を含み、
 //      DriveFile shape (id / name / type / size) が upload と整合する
 //
-// 注: upstream / mk-go ともに create-to-user response 自体は file を含む
-// (= packMessageDetailed が同 endpoint で使われている) が、mk-go の
-// CreateMessage 経路は file を eager load しないため create response 直後の
-// `file` 不在となる drift がある。本 spec は user-timeline (= Preload("File")
-// 済み) 経路で file shape を確認する。create response の file 包含は
-// follow-up (#855 完結後の別 issue) で扱う。
+// upstream / mk-go ともに create-to-user response 自体に file を含める
+// (= packMessageDetailed 経由)。mk-go は #860 PR-D で create response 後に
+// File を post-fetch する形に整え、両 backend で同 shape を返すようにした。
+// 本 spec は create response と user-timeline 両方で file shape を strict
+// assert する。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -82,6 +81,15 @@ test.describe('chat: DM with file attachment', () => {
     expect(sendResp.status()).toBe(200);
     const sent = (await sendResp.json()) as ChatMessageWithFile;
     expect(sent.fileId).toBe(file.id);
+    // create response 直後でも file field が含まれることを strict assert
+    // (#860 PR-D で post-fetch するように修正)。
+    if (!sent.file) {
+      throw new Error(`create response (id=${sent.id}) did not include file field despite fileId set`);
+    }
+    expect(sent.file.id).toBe(file.id);
+    expect(sent.file.name).toBe('chat-attach.png');
+    expect(sent.file.type).toBe('image/png');
+    expect(sent.file.size).toBe(tinyPNG.length);
 
     // receiver の user-timeline で取得 → file field が DriveFile shape で
     // 含まれていることを確認 (Preload("File") 経路で eager load される)。

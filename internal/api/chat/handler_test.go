@@ -800,7 +800,7 @@ func TestPackMessageDetailed_FieldsPresent(t *testing.T) {
 		Reads:      pq.StringArray{},
 		Reactions:  pq.StringArray{},
 	}
-	out := h.packMessageDetailed(msg)
+	out := h.packMessageDetailed(msg, "u_from")
 	assert.NotEmpty(t, out["createdAt"], "createdAt が ID から派生して埋まること")
 	assert.NotNil(t, out["toUser"])
 	assert.NotNil(t, out["toRoom"])

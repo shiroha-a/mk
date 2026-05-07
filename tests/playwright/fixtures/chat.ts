@@ -7,6 +7,7 @@
 // `toUserId` / `toRoomId` / `text` / `fileId` は optional として定義する。
 // upstream / mk-go ともに値が無い場合は JSON response から field を omit する
 // (#851 fix 後)。
+//
 export interface ChatMessage {
   id: string;
   fromUserId: string;
