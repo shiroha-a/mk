@@ -181,6 +181,116 @@ func TestService_HybridTimeline_DBFallback(t *testing.T) {
 	assert.Len(t, out, 1)
 }
 
+// hybrid DB fallback の merge / dedup / sort path を直接 cover する
+// (#819 PR-fix)。home / local がそれぞれ異なる note を返す mock を用意し、
+// 結果が ID 単位で dedup され、ID 降順で並ぶことを check する。
+type splitTimelineRepo struct {
+	*testutil.MockNoteRepository
+	homeNotes  []*model.Note
+	localNotes []*model.Note
+}
+
+func (r *splitTimelineRepo) ListHomeTimeline(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
+	return r.homeNotes, nil
+}
+func (r *splitTimelineRepo) ListLocalTimeline(_ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
+	return r.localNotes, nil
+}
+
+func TestService_HybridDBFallback_DedupAndSort(t *testing.T) {
+	testRedis.FlushAll(context.Background())
+	repo := &splitTimelineRepo{
+		MockNoteRepository: testutil.NewMockNoteRepository(),
+		homeNotes: []*model.Note{
+			{ID: "n3", UserID: "viewer", Visibility: model.NoteVisibilityPublic},
+			{ID: "n1", UserID: "viewer", Visibility: model.NoteVisibilityPublic},
+		},
+		localNotes: []*model.Note{
+			{ID: "n2", UserID: "outsider", Visibility: model.NoteVisibilityPublic},
+			// n1 は home / local の両方に出現する想定 (= dedup 対象)
+			{ID: "n1", UserID: "outsider", Visibility: model.NoteVisibilityPublic},
+		},
+	}
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	svc := NewService(fanout, repo, testutil.NewMockFollowingRepository())
+
+	out, err := svc.HybridTimeline(context.Background(), &model.User{ID: "viewer"}, "", "", 10, TimelineFilter{})
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	// dedup 後に ID 降順 sort されていること。
+	assert.Equal(t, "n3", out[0].ID)
+	assert.Equal(t, "n2", out[1].ID)
+	assert.Equal(t, "n1", out[2].ID)
+}
+
+// limit > 全件 のとき余分な truncate が走らないこと。逆に limit < 全件 の
+// truncate path は別 test で扱う想定で、本 test は merge dedup path のみを
+// fix する。
+func TestService_HybridDBFallback_LimitTruncate(t *testing.T) {
+	testRedis.FlushAll(context.Background())
+	repo := &splitTimelineRepo{
+		MockNoteRepository: testutil.NewMockNoteRepository(),
+		homeNotes: []*model.Note{
+			{ID: "n5", UserID: "viewer", Visibility: model.NoteVisibilityPublic},
+			{ID: "n4", UserID: "viewer", Visibility: model.NoteVisibilityPublic},
+		},
+		localNotes: []*model.Note{
+			{ID: "n3", UserID: "outsider", Visibility: model.NoteVisibilityPublic},
+			{ID: "n2", UserID: "outsider", Visibility: model.NoteVisibilityPublic},
+			{ID: "n1", UserID: "outsider", Visibility: model.NoteVisibilityPublic},
+		},
+	}
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	svc := NewService(fanout, repo, testutil.NewMockFollowingRepository())
+
+	// limit=3 < 全 5 件 → ID 降順で先頭 3 件 (n5/n4/n3) のみ。
+	out, err := svc.HybridTimeline(context.Background(), &model.User{ID: "viewer"}, "", "", 3, TimelineFilter{})
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	assert.Equal(t, "n5", out[0].ID)
+	assert.Equal(t, "n4", out[1].ID)
+	assert.Equal(t, "n3", out[2].ID)
+}
+
+// hybridDBFallback の error 分岐 cover: home query / local query それぞれの
+// error を Service 層が透過することを check (#819 PR-fix)。
+type failingHybridRepo struct {
+	*testutil.MockNoteRepository
+	failHome  bool
+	failLocal bool
+}
+
+func (r *failingHybridRepo) ListHomeTimeline(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
+	if r.failHome {
+		return nil, assert.AnError
+	}
+	return nil, nil
+}
+func (r *failingHybridRepo) ListLocalTimeline(_ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
+	if r.failLocal {
+		return nil, assert.AnError
+	}
+	return nil, nil
+}
+
+func TestService_HybridDBFallback_HomeError(t *testing.T) {
+	testRedis.FlushAll(context.Background())
+	repo := &failingHybridRepo{MockNoteRepository: testutil.NewMockNoteRepository(), failHome: true}
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	svc := NewService(fanout, repo, testutil.NewMockFollowingRepository())
+	_, err := svc.HybridTimeline(context.Background(), &model.User{ID: "viewer"}, "", "", 10, TimelineFilter{})
+	assert.Error(t, err)
+}
+
+func TestService_HybridDBFallback_LocalError(t *testing.T) {
+	testRedis.FlushAll(context.Background())
+	repo := &failingHybridRepo{MockNoteRepository: testutil.NewMockNoteRepository(), failLocal: true}
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	svc := NewService(fanout, repo, testutil.NewMockFollowingRepository())
+	_, err := svc.HybridTimeline(context.Background(), &model.User{ID: "viewer"}, "", "", 10, TimelineFilter{})
+	assert.Error(t, err)
+}
+
 func TestService_HomeTimeline_DefaultLimit(t *testing.T) {
 	svc, _, _ := newTestServiceWithRepo(t)
 	out, err := svc.HomeTimeline(context.Background(), &model.User{ID: "u"}, "", "", 0, TimelineFilter{})

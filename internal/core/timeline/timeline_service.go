@@ -156,6 +156,11 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 // (#819 で Playwright spec が detect)。本 helper は両 query 結果を ID 単位で
 // dedup → ID 降順 sort → limit 截断する。pagination (sinceID/untilID) は両
 // query に同じ値を渡すので merged 結果の boundary は upstream と一致する。
+//
+// 各 query は単独で limit 件まで返すので merged 後の最大件数は 2*limit、
+// dedup と truncate を経て最終的に <= limit 件。逆に両 query の和が limit
+// に届かなければ best-effort で limit 未満の結果を返す (= upstream parity、
+// pagination は keyset 方式で次 page 取得時に補完される設計)。
 func (s *Service) hybridDBFallback(viewer *model.User, untilID, sinceID string, limit int, filter TimelineFilter) ([]*model.Note, error) {
 	dbFilter := toDBFilter(filter, viewer.ID)
 	homeNotes, err := s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)

@@ -22,6 +22,10 @@ export interface TimelineNote {
 // 4 つの timeline endpoint で共通の request body を受け付けるので、endpoint
 // だけ切り替える。token は null 可 (= local / global は 未ログイン user 用
 // path もあるが、本 helper は spec から token 付きで呼ぶ前提)。
+//
+// 注意: token 引数を渡すと body.i は上書きされる (= 認証 token は引数側で
+// 一元管理する設計)。一方 body.limit は明示があれば尊重し、未指定時のみ
+// default 100 を補う (= caller が limit を絞りたい spec を書ける)。
 export async function fetchTimelineNotes(
   request: APIRequestContext,
   endpoint: string,
