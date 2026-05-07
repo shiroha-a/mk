@@ -4,6 +4,7 @@ package reaction
 import (
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/note"
@@ -369,7 +370,19 @@ func (s *Service) normalizeReaction(raw string, actorHost *string) string {
 		// 見つからなければFallbackにする
 		return FallbackReaction
 	}
-	return raw
+	// Unicode emoji は variation selector (U+FE0F) を strip して upstream
+	// Misskey TS と同じ canonical form に揃える (#864)。同じ emoji の異なる
+	// encode (例: U+2764 と U+2764 + U+FE0F) を 1 つの key として扱う。
+	return stripVariationSelector(raw)
+}
+
+// stripVariationSelector removes Unicode emoji variation selector (U+FE0F)
+// from the input. emoji-style 表示用の variation selector は実体の emoji
+// codepoint を変えないため、reaction key の正規化として safe に削除できる。
+// upstream Misskey TS は同様の正規化を行うため、両 backend の reaction
+// 文字列を揃えるのに必要 (#864)。
+func stripVariationSelector(s string) string {
+	return strings.ReplaceAll(s, "\ufe0f", "")
 }
 
 // localCanonicalPattern matches the canonical local emoji form `:name@.:`.

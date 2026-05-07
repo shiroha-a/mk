@@ -8,11 +8,9 @@
 //   - 1 個目の reaction (`👍`) は unset され、2 個目 (heart) のみ残る
 //   - reactions object は 1 key / count=1 になる
 //
-// 同時に検出した drift (#864 で fix 予定): mk-go は `❤️` (variation selector
-// `\ufe0f` 付き) を保存、upstream TS は `❤` に normalize する。本 spec は
-// `startsWith('❤')` で variation selector の有無を吸収して「置き換え」挙動
-// 自体を strict 確認する。#864 fix 完了後は strict 文字列比較 (`'❤'` 固定)
-// に置き換える follow-up を予定。
+// emoji variation selector の正規化 (#864 で fix 済) により、両 backend
+// ともに reaction 文字列を `'❤'` (variation selector strip) で保存する。
+// 本 spec は heart の reaction key を `'❤'` で strict 比較する。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -62,14 +60,10 @@ test.describe('reactions: different-reaction replay (replaced, not duplicated)',
     expect(showResp.status()).toBe(200);
     const shown = (await showResp.json()) as { reactions: Record<string, number> };
     // 1 reactor / 1 reaction なので reactions object は 1 key のみ。
-    expect(Object.keys(shown.reactions)).toHaveLength(1);
-    // 1 個目の reaction (`👍`) は置き換えで unset されているので存在しない。
-    expect(shown.reactions['👍']).toBeUndefined();
-    // 2 個目の heart は variation selector の drift がある (mk-go: `❤️`,
-    // TS: `❤`)。emoji 正規化の drift fix は別 issue で扱う scope のため、
-    // 本 spec では heart の prefix で吸収して count = 1 を strict 確認。
-    const newKey = Object.keys(shown.reactions)[0];
-    expect(newKey.startsWith('❤')).toBe(true);
-    expect(shown.reactions[newKey]).toBe(1);
+    // 両 backend で variation selector を strip した `'❤'` で保存される
+    // (#864 fix 後)。Object.keys 全体を strict 比較することで余計な key の
+    // drift と heart の表記揺れを同時に検出する。
+    expect(Object.keys(shown.reactions)).toEqual(['❤']);
+    expect(shown.reactions['❤']).toBe(1);
   });
 });
