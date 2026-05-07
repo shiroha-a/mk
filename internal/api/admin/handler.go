@@ -1361,10 +1361,18 @@ func (h *Handler) RolesUpdateDefaultPolicies(c echo.Context) error {
 func (h *Handler) SetEmojiRepo(r repository.EmojiRepository) { h.emojiRepo = r }
 
 // EmojiAdd handles POST /api/admin/emoji/add.
+//
+// upstream Misskey TS は `fileId` を必須として drive 経由でしか emoji を
+// 登録できない設計だが、mk-go は legacy で `url` 直接受けも維持する。両 path
+// をサポートして drop-in 互換を保つ:
+//   - `fileId` 指定時: drive_file から URL を resolve して保存 (= upstream 互換)
+//   - `url` 直接指定時: そのまま保存 (legacy)
+//   - 両方なし: 400 INVALID_PARAM
 func (h *Handler) EmojiAdd(c echo.Context) error {
 	var req struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
+		Name   string `json:"name"`
+		URL    string `json:"url"`
+		FileID string `json:"fileId"`
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1372,11 +1380,22 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	url := req.URL
+	if url == "" && req.FileID != "" && h.driveFileRepo != nil {
+		f, err := h.driveFileRepo.FindByID(req.FileID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
+		}
+		url = f.URL
+	}
+	if url == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url or fileId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	e := &model.Emoji{
 		ID:          h.idGen.Generate(time.Now()),
 		Name:        req.Name,
-		OriginalURL: req.URL,
-		PublicURL:   req.URL,
+		OriginalURL: url,
+		PublicURL:   url,
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
