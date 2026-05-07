@@ -62,10 +62,15 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 	return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 }
 
+// packRoom returns the bare ChatRoom shape without createdAt.
+// 多くの endpoint は createdAt 付きで返す必要があるので、通常は
+// packRoomWithCreatedAt 経由で呼ぶ。本関数を直接使うのは createdAt が
+// 不要な内部用途だけ。
+//
+// upstream Misskey TS の packedChatRoomSchema は `isArchived` を返さない。
+// mk-go も互換のため field を出力しない (#851)。archived state は別経路で
+// 取得する設計を踏襲する。
 func packRoom(r *model.ChatRoom) map[string]any {
-	// upstream Misskey TS の packedChatRoomSchema は `isArchived` を返さない。
-	// mk-go も互換のため field を出力しない (#851)。archived state は別経路で
-	// 取得する設計を踏襲する。
 	result := map[string]any{
 		"id": r.ID, "name": r.Name, "ownerId": r.OwnerID,
 		"description": r.Description,
@@ -84,11 +89,15 @@ func packRoom(r *model.ChatRoom) map[string]any {
 // 注: m.URI は remote chat message の AP canonical URI (federation 内部用途)
 // だが、upstream の packedChatMessageSchema には `uri` field が無いため
 // 外部 response には含めない。
+//
+// 注: m.Reads (chat_message.reads) は mk-go 独自の DB column で、upstream の
+// packedChatMessageSchema には対応 field が無い。response から omit して
+// upstream 互換に揃える (#855)。既読判定 (isRead) は別途 hint 経由で
+// computed する設計に移行予定。
 func packMessage(m *model.ChatMessage) map[string]any {
 	result := map[string]any{
 		"id":         m.ID,
 		"fromUserId": m.FromUserID,
-		"reads":      m.Reads,
 		"reactions":  m.Reactions,
 	}
 	if m.ToUserID != nil {
@@ -122,6 +131,20 @@ func (h *Handler) packMessageWithCreatedAt(m *model.ChatMessage) map[string]any 
 	return result
 }
 
+// packRoomWithCreatedAt augments packRoom with createdAt parsed from the
+// room ID. upstream の packedChatRoomSchema は createdAt を必須 field と
+// するため、room を返す全 endpoint は本 method 経由で createdAt を含める
+// (packMessageWithCreatedAt と同 pattern, #855)。
+func (h *Handler) packRoomWithCreatedAt(r *model.ChatRoom) map[string]any {
+	result := packRoom(r)
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(r.ID); err == nil {
+			result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
+	return result
+}
+
 // packMessageDetailed builds the upstream-compatible ChatMessage payload
 // expected by MkChatHistories.vue: createdAt (ID から派生)、fromUser、
 // toUser (DM の時)、toRoom (room の時)。upstream の
@@ -136,10 +159,10 @@ func (h *Handler) packMessageDetailed(m *model.ChatMessage) map[string]any {
 		result["toUser"] = packUser(m.ToUser)
 	}
 	if m.ToRoom != nil {
-		result["toRoom"] = packRoom(m.ToRoom)
+		result["toRoom"] = h.packRoomWithCreatedAt(m.ToRoom)
 		// upstream の `'room' in m` 判定に合わせて `room` alias も入れる。
 		// 旧 chat 実装ではこの key で判定していた残存 client がある。
-		result["room"] = packRoom(m.ToRoom)
+		result["room"] = h.packRoomWithCreatedAt(m.ToRoom)
 	}
 	return result
 }
@@ -181,7 +204,7 @@ func (h *Handler) RoomsCreate(c echo.Context) error {
 	if err := h.repo.CreateRoom(room); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, packRoom(room))
+	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
 }
 
 // RoomsShow handles POST /api/chat/rooms/show.
@@ -196,7 +219,7 @@ func (h *Handler) RoomsShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
 	}
-	return c.JSON(http.StatusOK, packRoom(room))
+	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
 }
 
 // RoomsUpdate handles POST /api/chat/rooms/update.
@@ -223,7 +246,7 @@ func (h *Handler) RoomsUpdate(c echo.Context) error {
 	if err := h.repo.UpdateRoom(room); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, packRoom(room))
+	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
 }
 
 // RoomsDelete handles POST /api/chat/rooms/delete.
@@ -249,7 +272,7 @@ func (h *Handler) RoomsOwned(c echo.Context) error {
 	rooms, _ := h.repo.ListRoomsByOwner(user.ID)
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
-		result[i] = packRoom(r)
+		result[i] = h.packRoomWithCreatedAt(r)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -260,7 +283,7 @@ func (h *Handler) RoomsJoined(c echo.Context) error {
 	rooms, _ := h.repo.ListJoinedRooms(user.ID)
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
-		result[i] = packRoom(r)
+		result[i] = h.packRoomWithCreatedAt(r)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -787,7 +810,7 @@ func (h *Handler) InvitationsInbox(c echo.Context) error {
 	for _, inv := range rows {
 		entry := map[string]any{"id": inv.ID, "roomId": inv.RoomID, "userId": inv.UserID}
 		if inv.Room != nil {
-			entry["room"] = packRoom(inv.Room)
+			entry["room"] = h.packRoomWithCreatedAt(inv.Room)
 		}
 		out = append(out, entry)
 	}

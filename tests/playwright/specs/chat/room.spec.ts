@@ -61,6 +61,10 @@ test.describe('chat: rooms', () => {
     expect(room.name).toBe(roomName);
     expect(room.ownerId).toBe(owner.id);
     expect(room.description).toBe('spec room');
+    // createdAt は ISO 8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`)。upstream は ID から
+    // 派生する必須 field、mk-go は #855 PR-A 以降で同 pattern。Date.parse で
+    // 有効な timestamp として読めることを check (秒精度の drift は許容)。
+    expect(Number.isFinite(Date.parse(room.createdAt))).toBe(true);
     // upstream の packedChatRoomSchema には `isArchived` が無いため
     // mk-go も #851 fix 以降は返さない。本 spec では archived state は
     // assert しない (= field 不在を許容)。

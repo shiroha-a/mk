@@ -19,8 +19,12 @@ export interface ChatMessage {
 // ChatRoom は chat/rooms/* response の最小 shape。upstream の
 // `packedChatRoomSchema` に揃え、`isArchived` は含めない (#851 fix 後)。
 // archived state は別経路で取得する設計。
+//
+// `createdAt` は upstream 必須 field (ID から派生)、mk-go も #855 PR-A
+// 以降で全 chat/rooms/* endpoint が含めて返す。
 export interface ChatRoom {
   id: string;
+  createdAt: string;
   name: string;
   ownerId: string;
   description: string;
