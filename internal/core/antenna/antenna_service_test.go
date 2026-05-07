@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -185,6 +186,21 @@ func TestUpdate_InvalidSource(t *testing.T) {
 	bogus := model.AntennaSource("bogus")
 	_, err := svc.Update("u1", "a1", UpdateInput{Src: &bogus})
 	assert.ErrorIs(t, err, ErrInvalidSource)
+}
+
+// Update で empty Users を渡しても、UpdateFields に pq.StringArray
+// として渡されることを担保する (#896 と同 pattern)。plain []string で
+// 渡すと production の GORM 経由で NULL 化して NOT NULL 制約違反になる。
+func TestUpdate_EmptyUsersWrappedAsStringArray(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	emptyUsers := []string{}
+	_, err := svc.Update("u1", "a1", UpdateInput{Users: &emptyUsers})
+	require.NoError(t, err)
+	require.Contains(t, repo.LastUpdates, "users")
+	v, ok := repo.LastUpdates["users"].(pq.StringArray)
+	require.True(t, ok, "users should be pq.StringArray, got %T", repo.LastUpdates["users"])
+	assert.Empty(t, v)
 }
 
 func TestUpdate_RepoError(t *testing.T) {

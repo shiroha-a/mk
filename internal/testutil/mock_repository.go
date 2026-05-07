@@ -3305,6 +3305,10 @@ type MockAntennaRepository struct {
 	Antennas  map[string]*model.Antenna
 	CreateErr error
 	UpdateErr error
+	// LastUpdates は UpdateFields に最後に渡された fields map を capture
+	// する。caller が pq.StringArray 等で正しく wrap しているかを test 側で
+	// assert するため (#896 と同 pattern)。
+	LastUpdates map[string]any
 }
 
 // NewMockAntennaRepository creates an empty MockAntennaRepository.
@@ -3329,6 +3333,7 @@ func (m *MockAntennaRepository) FindByID(id string) (*model.Antenna, error) {
 }
 
 func (m *MockAntennaRepository) UpdateFields(antennaID string, fields map[string]any) error {
+	m.LastUpdates = fields
 	if m.UpdateErr != nil {
 		return m.UpdateErr
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -209,7 +210,11 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 		fields["userListId"] = in.UserListID
 	}
 	if in.Users != nil {
-		fields["users"] = *in.Users
+		// model.Antenna.Users は pq.StringArray なので plain []string で
+		// 渡すと GORM が空 slice を NULL に倒す drift がある (#896 と同 pattern)。
+		// Create と同じく pq.StringArray で wrap して空配列 '{}' として
+		// 書き込ませる。
+		fields["users"] = pq.StringArray(*in.Users)
 	}
 	if in.Keywords != nil {
 		// Marshal of [][]string never fails.
