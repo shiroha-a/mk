@@ -145,7 +145,11 @@ func (s *Service) Update(ownerID, flashID string, in UpdateInput) (*model.Flash,
 		fields["script"] = *in.Script
 	}
 	if in.Permissions != nil {
-		fields["permissions"] = *in.Permissions
+		// GORM の Updates(map) で plain []string を渡すと、空 slice が
+		// pq.StringArray の Valuer を経由しないまま NULL に倒れて
+		// NOT NULL 制約違反 (SQLSTATE 23502) になる (#896)。Create と同じ
+		// pq.StringArray で wrap して空配列 '{}' として書き込ませる。
+		fields["permissions"] = pq.StringArray(*in.Permissions)
 	}
 	if in.Visibility != nil {
 		fields["visibility"] = *in.Visibility

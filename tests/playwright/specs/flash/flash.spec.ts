@@ -56,15 +56,16 @@ test.describe('flash: CRUD round-trip', () => {
     expect(Array.isArray(myList)).toBe(true);
     expect(myList.find((f: { id: string }) => f.id === created.id)).toBeTruthy();
 
-    // update — permissions は optional field なので update payload から
-    // 省く。空配列 [] を送ると mk-go 側で pq.StringArray が NULL に倒れて
-    // NOT NULL 制約違反になる drift があり、別 issue で追跡する (#896)。
+    // update — permissions に空配列 [] を渡しても NOT NULL 制約に当たらず
+    // 200 で更新できる (#896 で fix)。pq.StringArray wrap の regression
+    // guard として frontend と同じ payload を送る。
     const updateResp = await callApi(request, 'flash/update', {
       i: me.token,
       flashId: created.id,
       title: 'Updated Play',
       summary: 'updated summary',
       script: '<:: "updated">',
+      permissions: [],
       visibility: 'public',
     });
     expect([200, 204]).toContain(updateResp.status());
