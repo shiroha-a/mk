@@ -51,9 +51,11 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
-	// パスワード検証
+	// パスワード検証。upstream Misskey TS は ApiError(meta.errors.incorrectPassword)
+	// を framework が 400 (= client error) に変換する (#885)。mk-go も
+	// drop-in 互換のため 400 に揃える (旧 mk-go は 403)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "e86c14a4-0da8-4571-8f36-8a2e9f9b3a00"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "e86c14a4-0da8-4571-8f36-8a2e9f9b3a00"))
 	}
 
 	fields := map[string]any{

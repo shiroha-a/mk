@@ -60,6 +60,17 @@ func NewAuthMiddleware(userRepo repository.UserRepository, accessTokenRepo repos
 	}
 }
 
+// InvalidateToken removes a token entry from the auth cache so the next
+// /api/i request with that token re-resolves through the DB (= will fail
+// after `users.token` was rotated by i/regenerate-token、#884 security
+// fix)。本 method は i.TokenInvalidator interface の実装。
+func (a *AuthMiddleware) InvalidateToken(token string) {
+	if token == "" {
+		return
+	}
+	a.tokenCache.invalidate(token)
+}
+
 // Authenticate is an Echo middleware that extracts and validates the user token.
 // It does NOT reject unauthenticated requests - it just sets the user if valid.
 func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {

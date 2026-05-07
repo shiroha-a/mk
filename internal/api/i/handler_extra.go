@@ -31,8 +31,11 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
+	// upstream Misskey TS は raw `throw new Error('authentication failed')` を
+	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
+	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.CurrentPassword)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
@@ -58,8 +61,11 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
+	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
+	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
+	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	// isSuspended + isDeleted を true に設定 (論理削除)
@@ -151,16 +157,30 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
+	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
+	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
+	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	newToken := hex.EncodeToString(b)
 
+	var oldToken string
+	if u.Token != nil {
+		oldToken = *u.Token
+	}
 	if err := h.userService.UpdateUserFields(u.ID, map[string]any{"token": newToken}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// 旧 token が auth middleware の cache で生き残ると regenerate の主目的
+	// (= 旧 token 失効) が機能しない (#884)。invalidator が wire されている
+	// 場合は old token entry を即時削除する。production では router で必ず
+	// wire される。
+	if h.authInvalidator != nil && oldToken != "" {
+		h.authInvalidator.InvalidateToken(oldToken)
 	}
 	// TS本家 regenerate-token.ts:60 と同じく、token再生成成功後にmainへ
 	// publishする。body無し(type のみで、他セッションはtoken無効化を
@@ -168,7 +188,11 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 	if h.mainStreamPublisher != nil {
 		h.mainStreamPublisher.PublishMainEvent(u.ID, "myTokenRegenerated", nil)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"token": newToken})
+	// upstream Misskey TS は body なしの 204 No Content を返す (= 新 token
+	// は myTokenRegenerated WS event 経由で client に伝達する設計、#883)。
+	// 旧 mk-go は 200 + {token} で同期的に返していたが drop-in 互換のため
+	// 揃える。
+	return c.NoContent(http.StatusNoContent)
 }
 
 // ClaimAchievement handles POST /api/i/claim-achievement.

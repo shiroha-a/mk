@@ -86,6 +86,19 @@ type Handler struct {
 	// streaming connection に reload signal を流す (#791)。未配線時は
 	// publish skip = 旧挙動 (= reconnect で反映)。
 	hardMutePublisher HardMutePublisher
+	// authInvalidator は i/regenerate-token で旧 token を auth middleware
+	// の cache から即時削除するために使う (#884)。未配線時は cache TTL
+	// (30 秒) 待ちで stale 旧 token が auth 通過する security regression が
+	// 残るので production では必ず wire する。
+	authInvalidator TokenInvalidator
+}
+
+// TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive
+// 操作後に auth cache の旧 token entry を即時削除するための interface
+// (#884)。実装は internal/server/middleware/auth.go の AuthMiddleware が
+// 担当する。circular import を避けるため interface 経由で受け取る。
+type TokenInvalidator interface {
+	InvalidateToken(token string)
 }
 
 // HardMutePublisher publishes a wordmute reload event for the given user.
@@ -122,6 +135,13 @@ func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
 // 循環依存を避けるためinterfaceで受け取る(実装はinternal/stream)。
 type MainStreamPublisher interface {
 	PublishMainEvent(userID, eventType string, body any)
+}
+
+// SetAuthInvalidator attaches a token invalidator so RegenerateToken and
+// other sensitive endpoints can drop the old token from the auth cache
+// immediately (#884、security regression fix)。
+func (h *Handler) SetAuthInvalidator(inv TokenInvalidator) {
+	h.authInvalidator = inv
 }
 
 // SetMainStreamPublisher attaches a publisher used to emit events on

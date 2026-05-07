@@ -1155,6 +1155,10 @@ func (s *Server) setupRoutes() {
 	iHandler.SetRegistryRepo(registryRepo)
 	iHandler.SetMetaRepo(metaRepo)
 	iHandler.SetServerURL(s.config.URL)
+	// i/regenerate-token で旧 token を auth cache から即時削除する (#884)。
+	// 未配線だと cache TTL 経過まで旧 token が auth 通過する security
+	// regression が残るので production では必ず wire する。
+	iHandler.SetAuthInvalidator(s.auth)
 	// i/update-email の verifymail / truemail SaaS 呼び出しも SSRF-safe
 	// transport + forward proxy 経由にする (#638)。
 	iHandler.SetEmailValidationClient(s.outboundClient(10 * time.Second))

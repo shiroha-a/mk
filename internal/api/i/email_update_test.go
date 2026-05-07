@@ -12,8 +12,10 @@ func TestUpdateEmail_WrongPassword(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	pwd := hashPassword("secret")
 	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Password: &pwd}
-	// パスワードが間違っているので 403
-	assert.Equal(t, http.StatusForbidden, postExtra(h.UpdateEmail, `{"password":"wrong"}`, stubUser).Code)
+	// upstream Misskey TS は ApiError(meta.errors.incorrectPassword) を
+	// framework が 400 (= client error) に変換 (#885)。drop-in 互換のため
+	// mk-go も 400 に揃える (旧 mk-go は 403)。
+	assert.Equal(t, http.StatusBadRequest, postExtra(h.UpdateEmail, `{"password":"wrong"}`, stubUser).Code)
 }
 
 func TestUpdateEmail_ClearEmail(t *testing.T) {

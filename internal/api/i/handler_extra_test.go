@@ -79,7 +79,9 @@ func TestChangePassword_WrongPassword(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
 	rec := postExtra(h.ChangePassword, `{"currentPassword":"wrong","newPassword":"x"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream Misskey TS は raw `throw new Error` を framework が 401 へ
+	// 変換 (#885)。drop-in 互換のため 401 に揃える (旧 mk-go は 403)。
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestChangePassword_NoProfile(t *testing.T) {
@@ -112,7 +114,8 @@ func TestDeleteAccount_WrongPassword(t *testing.T) {
 	user := setupUserWithPassword(repo, "u1", "pass")
 	_ = user
 	rec := postExtra(h.DeleteAccount, `{"password":"wrong"}`, repo.Users["u1"])
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream Misskey TS と drop-in 互換: 401 (#885)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestDeleteAccount_NoProfile(t *testing.T) {
@@ -207,11 +210,8 @@ func TestRegenerateToken_Success(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	rec := postExtra(h.RegenerateToken, `{"password":"pass"}`, user)
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp["token"])
+	// upstream Misskey TS と drop-in 互換のため 204 No Content (#883)。
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestRegenerateToken_WrongPassword(t *testing.T) {
@@ -219,7 +219,9 @@ func TestRegenerateToken_WrongPassword(t *testing.T) {
 	user := setupUserWithPassword(repo, "u1", "pass")
 	_ = user
 	rec := postExtra(h.RegenerateToken, `{"password":"wrong"}`, repo.Users["u1"])
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream Misskey TS は raw `throw new Error('incorrect password')` →
+	// framework が 401 (#885)。
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestRegenerateToken_NoProfile(t *testing.T) {
@@ -251,13 +253,42 @@ func TestRegenerateToken_PublishesMyTokenRegenerated(t *testing.T) {
 	pub := &stubIMainStreamPublisher{}
 	h.SetMainStreamPublisher(pub)
 	rec := postExtra(h.RegenerateToken, `{"password":"pass"}`, user)
-	require.Equal(t, http.StatusOK, rec.Code)
+	// 204 No Content (= drop-in 互換、#883)
+	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	require.Len(t, pub.calls, 1)
 	assert.Equal(t, "u1", pub.calls[0].userID)
 	assert.Equal(t, "myTokenRegenerated", pub.calls[0].eventType)
 	// TS本家はbody無し (type のみ) のため nil であること。
 	assert.Nil(t, pub.calls[0].body)
+}
+
+// stubTokenInvalidator captures InvalidateToken calls for assertion.
+type stubTokenInvalidator struct {
+	calls []string
+}
+
+func (s *stubTokenInvalidator) InvalidateToken(token string) {
+	s.calls = append(s.calls, token)
+}
+
+// TestRegenerateToken_InvalidatesOldToken verifies #884: the old API token
+// must be removed from the auth cache so it stops being accepted by /api/i.
+func TestRegenerateToken_InvalidatesOldToken(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	oldToken := "old-token-value"
+	user.Token = &oldToken
+	repo.Users["u1"] = user
+
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	rec := postExtra(h.RegenerateToken, `{"password":"pass"}`, user)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	require.Len(t, inv.calls, 1, "old token must be invalidated exactly once")
+	assert.Equal(t, oldToken, inv.calls[0])
 }
 
 // --- Error path tests ---

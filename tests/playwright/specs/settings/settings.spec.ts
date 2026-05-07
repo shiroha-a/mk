@@ -15,14 +15,19 @@
 // notification 設定 (notificationRecieveConfig) は mk-go では read-only で
 // 常に空 map を返しているため round-trip 化が困難 → 別 spec scope。
 //
-// drop-in shape drift (= 別 issue で揃える):
+// drift fix history (closed):
 //   - #883 i/regenerate-token return shape: TS=204 / mk-go=200+{token}
+//     → mk-go を 204 に揃え (PR fix)
 //   - #884 旧 API token invalidation: TS=即時 reject / mk-go=cache 経由で
-//     旧 token が引き続き auth 通過するセキュリティ drift
+//     旧 token が引き続き auth 通過していた security regression
+//     → mk-go の auth cache から旧 token を即時削除 (PR fix)
 //   - #885 password 検証失敗時の status: TS は endpoint ごとに 400/401 /
-//     mk-go は一律 403 で揺れる
-//   本 spec は positive path のみに絞り、status drift / 旧 token round-trip
-//   は別 spec scope。
+//     mk-go は一律 403 で揺れていた
+//     → mk-go を endpoint 別に 401 (raw Error) / 400 (ApiError) に揃え
+//
+// 本 spec は drift fix 後の strict round-trip を担保する設計に更新済。
+// 旧 token round-trip (regenerate 後の /api/i 4xx) も #884 fix の
+// regression guard として追加。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -66,20 +71,25 @@ test.describe('settings: security / API token / email', () => {
     expect(body.i.length).toBeGreaterThan(0);
   });
 
-  test('regenerate-token: 2xx response indicates success on both backends', async ({
+  test('regenerate-token: 204 No Content + old token immediately invalidated', async ({
     request,
   }) => {
     const me = await signupUser(request, randomUsername('rtA'));
 
-    // regenerate-token (TS=204、mk-go=200+{token} の drop-in shape drift
-    // を 2xx range で吸収。新 token を含むかは backend 依存なので strict
-    // 検査しない、新 token round-trip は別 spec で扱う想定)。
+    // upstream Misskey TS と mk-go (#883 / #884 fix 後) は両方とも 204 を
+    // 返す drop-in shape。新 token は myTokenRegenerated WS event 経由で
+    // client に通達される設計 (= body には含まない)。
     const regenResp = await callApi(request, 'i/regenerate-token', {
       i: me.token,
       password: DEFAULT_TEST_PASSWORD,
     });
-    expect(regenResp.status()).toBeGreaterThanOrEqual(200);
-    expect(regenResp.status()).toBeLessThan(300);
+    expect(regenResp.status()).toBe(204);
+
+    // 旧 token は auth cache から即時削除され、以降 /api/i で 4xx
+    // (= 401 等) で reject される (#884 security regression fix)。
+    const oldI = await callApi(request, 'i', { i: me.token });
+    expect(oldI.status()).toBeGreaterThanOrEqual(400);
+    expect(oldI.status()).toBeLessThan(500);
   });
 
   test('update-email: clearing email returns 200 + null email in response', async ({
