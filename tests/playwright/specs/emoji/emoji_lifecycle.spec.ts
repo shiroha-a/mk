@@ -40,14 +40,32 @@ interface AdminEmojiListEntry {
 }
 
 test.describe('emoji: admin lifecycle (add / update / list / delete)', () => {
+  // assertion 失敗時に DB に orphan emoji が残らないよう、test 単位で
+  // afterEach cleanup する。describe scope に id を hoist して closure で
+  // capture する pattern (= /api/emojis spec の try/finally と同等の安全性)。
+  let createdEmojiId: string | undefined;
+  let rootToken: string | undefined;
+
   test.beforeAll(() => {
     resetRateLimit();
+  });
+
+  test.afterEach(async ({ request }) => {
+    if (createdEmojiId && rootToken) {
+      await callApi(request, 'admin/emoji/delete', {
+        i: rootToken,
+        id: createdEmojiId,
+      });
+    }
+    createdEmojiId = undefined;
+    rootToken = undefined;
   });
 
   test('admin adds, updates, lists, then deletes a custom emoji', async ({
     request,
   }) => {
     const root: RootFixture = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+    rootToken = root.token;
     const emojiName = 'spec_lc_' + Math.random().toString(16).slice(2, 8);
 
     // upload tinyPNG → fileId 取得
@@ -70,18 +88,19 @@ test.describe('emoji: admin lifecycle (add / update / list / delete)', () => {
     expect(addResp.status()).toBe(200);
     const added = (await addResp.json()) as { id: string };
     expect(typeof added.id).toBe('string');
+    createdEmojiId = added.id;
 
-    // list で query 検索 → 追加 emoji が含まれること
-    const list1 = await callApi(request, 'admin/emoji/list', {
+    // add 直後 list で query 検索 → 追加 emoji が含まれること
+    const listAfterAdd = await callApi(request, 'admin/emoji/list', {
       i: root.token,
       query: emojiName,
       limit: 10,
     });
-    expect(list1.status()).toBe(200);
-    const list1Body = (await list1.json()) as AdminEmojiListEntry[];
-    const found1 = list1Body.find((e) => e.id === added.id);
-    expect(found1).toBeDefined();
-    expect(found1!.name).toBe(emojiName);
+    expect(listAfterAdd.status()).toBe(200);
+    const listAfterAddBody = (await listAfterAdd.json()) as AdminEmojiListEntry[];
+    const foundAfterAdd = listAfterAddBody.find((e) => e.id === added.id);
+    expect(foundAfterAdd).toBeDefined();
+    expect(foundAfterAdd!.name).toBe(emojiName);
 
     // update で category を設定
     const newCategory = 'spec-cat-' + Math.random().toString(16).slice(2, 6);
@@ -92,17 +111,17 @@ test.describe('emoji: admin lifecycle (add / update / list / delete)', () => {
     });
     expect(updResp.status()).toBe(204);
 
-    // 再度 list で category が反映されていること
-    const list2 = await callApi(request, 'admin/emoji/list', {
+    // update 後 list で category が反映されていること
+    const listAfterUpdate = await callApi(request, 'admin/emoji/list', {
       i: root.token,
       query: emojiName,
       limit: 10,
     });
-    expect(list2.status()).toBe(200);
-    const list2Body = (await list2.json()) as AdminEmojiListEntry[];
-    const found2 = list2Body.find((e) => e.id === added.id);
-    expect(found2).toBeDefined();
-    expect(found2!.category).toBe(newCategory);
+    expect(listAfterUpdate.status()).toBe(200);
+    const listAfterUpdateBody = (await listAfterUpdate.json()) as AdminEmojiListEntry[];
+    const foundAfterUpdate = listAfterUpdateBody.find((e) => e.id === added.id);
+    expect(foundAfterUpdate).toBeDefined();
+    expect(foundAfterUpdate!.category).toBe(newCategory);
 
     // delete
     const delResp = await callApi(request, 'admin/emoji/delete', {
@@ -110,15 +129,17 @@ test.describe('emoji: admin lifecycle (add / update / list / delete)', () => {
       id: added.id,
     });
     expect(delResp.status()).toBe(204);
+    // 正規 path で delete 済 = afterEach cleanup の必要なし。
+    createdEmojiId = undefined;
 
-    // 一覧から消えていること
-    const list3 = await callApi(request, 'admin/emoji/list', {
+    // delete 後 list から消えていること
+    const listAfterDelete = await callApi(request, 'admin/emoji/list', {
       i: root.token,
       query: emojiName,
       limit: 10,
     });
-    expect(list3.status()).toBe(200);
-    const list3Body = (await list3.json()) as AdminEmojiListEntry[];
-    expect(list3Body.some((e) => e.id === added.id)).toBe(false);
+    expect(listAfterDelete.status()).toBe(200);
+    const listAfterDeleteBody = (await listAfterDelete.json()) as AdminEmojiListEntry[];
+    expect(listAfterDeleteBody.some((e) => e.id === added.id)).toBe(false);
   });
 });
