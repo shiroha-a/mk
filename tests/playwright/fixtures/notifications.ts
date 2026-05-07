@@ -38,5 +38,12 @@ export async function pollForNotification(
       { timeout: 5000, intervals: [100, 200, 500, 1000] },
     )
     .toBe(true);
-  return found!;
+  // expect.poll が toBe(true) を満たした iteration で必ず found が set
+  // される。predicate match を guard で再表現することで、!-assertion を
+  // 使わずに型を narrow する (= 意図 = "match と found 設定は同期" を
+  // 読み手に明示)。
+  if (!found) {
+    throw new Error('pollForNotification: matched but `found` was not set (unreachable)');
+  }
+  return found;
 }
