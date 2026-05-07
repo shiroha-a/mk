@@ -39,3 +39,38 @@ func TestLoadMutedChannelIDs_EmptyResultReturnsNil(t *testing.T) {
 	h.SetChannelMutingRepo(repo)
 	assert.Nil(t, h.loadMutedChannelIDs(&model.User{ID: "viewer"}))
 }
+
+// loadRenoteMutedUserIDs は viewer の renote-mute mutee 一覧を返す (#903)。
+// MutedChannelIDs と同 pattern で 4 case (基本 / anonymous / repo nil /
+// 空結果) を guard する。internal/api/notes の coverage 90% threshold を
+// 維持するために必須。
+func TestLoadRenoteMutedUserIDs(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockRenoteMutingRepository()
+	require.NoError(t, repo.Create(&model.RenoteMuting{ID: "rm1", MuterID: "viewer", MuteeID: "muted-1"}))
+	require.NoError(t, repo.Create(&model.RenoteMuting{ID: "rm2", MuterID: "viewer", MuteeID: "muted-2"}))
+	require.NoError(t, repo.Create(&model.RenoteMuting{ID: "rm3", MuterID: "other", MuteeID: "other-mute"}))
+	h.SetRenoteMutingRepo(repo)
+
+	viewer := &model.User{ID: "viewer"}
+	ids := h.loadRenoteMutedUserIDs(viewer)
+	assert.ElementsMatch(t, []string{"muted-1", "muted-2"}, ids)
+}
+
+func TestLoadRenoteMutedUserIDs_AnonymousReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetRenoteMutingRepo(testutil.NewMockRenoteMutingRepository())
+	assert.Nil(t, h.loadRenoteMutedUserIDs(nil))
+}
+
+func TestLoadRenoteMutedUserIDs_RepoUnsetReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	assert.Nil(t, h.loadRenoteMutedUserIDs(&model.User{ID: "viewer"}))
+}
+
+func TestLoadRenoteMutedUserIDs_EmptyResultReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockRenoteMutingRepository()
+	h.SetRenoteMutingRepo(repo)
+	assert.Nil(t, h.loadRenoteMutedUserIDs(&model.User{ID: "viewer"}))
+}
