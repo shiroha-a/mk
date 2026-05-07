@@ -23,17 +23,10 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { type ChatMessage } from '../../fixtures/chat';
-import { tinyPNG } from '../../fixtures/files';
+import { type DriveFile, tinyPNG } from '../../fixtures/files';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 const baseURL = process.env.MK_BASE_URL ?? 'https://mkgo.local';
-
-interface DriveFile {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-}
 
 interface ChatMessageWithFile extends ChatMessage {
   fileId?: string;

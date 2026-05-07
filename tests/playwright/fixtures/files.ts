@@ -12,3 +12,14 @@ export const tinyPNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
   'base64',
 );
+
+// drive/files/* response の最小 shape。upstream の packedDriveFileSchema
+// で必須 field のうち identity + 基本 metadata のみ含む。md5 / blurhash /
+// url / createdAt 等の詳細 field を assert する spec は本 interface を
+// extends で拡張する (#855 PR-C で chat 添付 spec から共有開始)。
+export interface DriveFile {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+}
