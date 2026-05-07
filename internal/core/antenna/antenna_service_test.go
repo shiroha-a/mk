@@ -880,6 +880,9 @@ func (r *failingUserListRepo) RemoveMember(_, _ string) error                 { 
 func (r *failingUserListRepo) ListMembers(_ string) ([]*model.UserListMembership, error) {
 	return nil, errors.New("list members error")
 }
+func (r *failingUserListRepo) ListMembersByListIDs(_ []string) (map[string][]string, error) {
+	return nil, errors.New("list members by ids error")
+}
 func (r *failingUserListRepo) UpdateList(_ string, _ map[string]any) error { return nil }
 func (r *failingUserListRepo) UpdateMembership(_, _ string, _ bool) error  { return nil }
 func (r *failingUserListRepo) ListIDsByMember(_ string) ([]string, error)  { return nil, nil }

@@ -4245,6 +4245,26 @@ func (m *MockUserListRepository) ListMembers(listID string) ([]*model.UserListMe
 	return result, nil
 }
 
+// ListMembersByListIDs returns userIDs grouped by listID. Mirrors the
+// production batch fetch (#876) but iterates the in-memory slice.
+func (m *MockUserListRepository) ListMembersByListIDs(listIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string)
+	if len(listIDs) == 0 {
+		return out, nil
+	}
+	want := make(map[string]struct{}, len(listIDs))
+	for _, id := range listIDs {
+		want[id] = struct{}{}
+	}
+	for _, mem := range m.Members {
+		if _, ok := want[mem.UserListID]; !ok {
+			continue
+		}
+		out[mem.UserListID] = append(out[mem.UserListID], mem.UserID)
+	}
+	return out, nil
+}
+
 func (m *MockUserListRepository) UpdateList(id string, fields map[string]any) error {
 	list, ok := m.Lists[id]
 	if !ok {

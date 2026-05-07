@@ -734,16 +734,60 @@ func TestUpdateMeta_InvalidJSON(t *testing.T) {
 
 // --- Roles endpoints ---
 
+// fullRoleCreatePayload は upstream Misskey TS が paramDef で required と
+// する 13 field を満たした最小 payload (#889)。新 field のうち model.Role
+// に未対応なもの (color / iconUrl / target / condFormula /
+// canEditMembersByModerator / policies) は payload としては受け付けるが
+// persist しない。
+const fullRoleCreatePayload = `{
+	"name": "Admin",
+	"description": "",
+	"color": null,
+	"iconUrl": null,
+	"target": "manual",
+	"condFormula": {},
+	"isPublic": true,
+	"isModerator": false,
+	"isAdministrator": true,
+	"asBadge": false,
+	"canEditMembersByModerator": false,
+	"displayOrder": 0,
+	"policies": {}
+}`
+
 func TestRolesCreate_Success(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	rec := doPost(h.RolesCreate, `{"name":"Admin","isAdministrator":true}`, nil)
+	rec := doPost(h.RolesCreate, fullRoleCreatePayload, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, roleRepo.Roles, 1)
 }
 
 func TestRolesCreate_InvalidParam(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
+	// 空 payload → 13 required field 不足で 400 (#889)
 	rec := doPost(h.RolesCreate, `{}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// upstream paramDef で required な field が一部欠けると 400 (#889)。
+// description だけ欠けたケースを代表として検証する。
+func TestRolesCreate_PartialPayloadRejected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	// description を抜いた payload
+	rec := doPost(h.RolesCreate, `{
+		"name": "X",
+		"color": null,
+		"iconUrl": null,
+		"target": "manual",
+		"condFormula": {},
+		"isPublic": true,
+		"isModerator": false,
+		"isAdministrator": false,
+		"asBadge": false,
+		"canEditMembersByModerator": false,
+		"displayOrder": 0,
+		"policies": {}
+	}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -1053,7 +1097,9 @@ func TestRolesCreate_ErrorFromService(t *testing.T) {
 	roleSvc := role.NewService(failRepo, assignRepo, metaRepo, idGen)
 	userRepo := testutil.NewMockUserRepository()
 	h := apiadmin.NewHandler(signup.NewService(userRepo, metaRepo, idGen), roleSvc, metaRepo, userRepo, idGen)
-	rec := doPost(h.RolesCreate, `{"name":"Test"}`, nil)
+	// #889 fullRoleCreatePayload で 13 required field を満たして 500 path
+	// (= service error) を test する。
+	rec := doPost(h.RolesCreate, fullRoleCreatePayload, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -1566,7 +1612,8 @@ func TestRolesCreate_WritesModerationLog(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := attachModLog(t, h)
 
-	rec := doPost(h.RolesCreate, `{"name":"Mod"}`, adminUser)
+	// #889 fullRoleCreatePayload で 13 required field を満たす。
+	rec := doPost(h.RolesCreate, fullRoleCreatePayload, adminUser)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)

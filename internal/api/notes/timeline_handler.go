@@ -48,6 +48,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 			IncludeLocalRenotes:   req.IncludeLocalRenotes,
 			AllowPartial:          req.AllowPartial,
 			MutedChannelIDs:       h.loadMutedChannelIDs(viewer),
+			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 		}
 		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, true)
@@ -92,6 +93,7 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			IncludeLocalRenotes:   req.IncludeLocalRenotes,
 			AllowPartial:          req.AllowPartial,
 			MutedChannelIDs:       h.loadMutedChannelIDs(viewer),
+			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 		}
 		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, true)
@@ -116,6 +118,22 @@ func (h *Handler) loadMutedChannelIDs(viewer *model.User) []string {
 	ids := make([]string, 0, len(rows))
 	for _, m := range rows {
 		ids = append(ids, m.ChannelID)
+	}
+	return ids
+}
+
+// loadMutedUserIDs returns userIDs that viewer has muted (active mutes only,
+// non-expired). nil for anonymous viewers or when the repo is not wired.
+// repository error は best-effort で nil 扱いにし slog.Warn で観測する
+// (= channel mute 同様の pattern、#874)。
+func (h *Handler) loadMutedUserIDs(viewer *model.User) []string {
+	if viewer == nil || h.mutingRepo == nil {
+		return nil
+	}
+	ids, err := h.mutingRepo.ListMuteeIDs(viewer.ID)
+	if err != nil {
+		slog.Warn("timeline: failed to load muted users", "userId", viewer.ID, "err", err)
+		return nil
 	}
 	return ids
 }

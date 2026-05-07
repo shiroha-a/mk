@@ -16,6 +16,10 @@ type MutingRepository interface {
 	// ListByMuter supports cursor (sinceID/untilID) and offset pagination.
 	// Cursor 指定時は offset を無視 (upstream makePaginationQuery と一致)。
 	ListByMuter(muterID, sinceID, untilID string, limit, offset int) ([]*model.Muting, error)
+	// ListMuteeIDs returns the muteeIDs of active (non-expired) mute rows
+	// for muterID. timeline endpoint で muted user の note を除外する
+	// filter 用 (#874)。
+	ListMuteeIDs(muterID string) ([]string, error)
 }
 
 type mutingRepository struct {
@@ -73,6 +77,23 @@ func (r *mutingRepository) ListByMuter(muterID, sinceID, untilID string, limit, 
 		return nil, err
 	}
 	return rows, nil
+}
+
+// ListMuteeIDs returns muteeIDs where muterID has an active (non-expired)
+// mute. timeline endpoint で muted user の note を除外する filter 用 (#874)。
+func (r *mutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	now := time.Now()
+	if err := r.db.Model(&model.Muting{}).
+		Where(`"muterId" = ?`, muterID).
+		Where(`"expiresAt" IS NULL OR "expiresAt" > ?`, now).
+		Pluck(`"muteeId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // RenoteMutingRepository provides data access for the `renote_muting` table.

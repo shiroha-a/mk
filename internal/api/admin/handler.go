@@ -691,10 +691,35 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 	if t, err := h.idGen.ParseTime(u.ID); err == nil {
 		resp["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
-	// RoleService integration
+	// RoleService integration (#888): isAdmin / isModerator に加え、
+	// upstream Misskey TS の admin/show-user response shape では
+	// `roles` / `policies` も top-level で expected。frontend admin
+	// moderation view は user.roles / user.policies を直接参照するので
+	// 埋めないと UI が正しく動かない。
 	if h.roleService != nil {
 		resp["isAdmin"] = h.roleService.IsAdministrator(u.ID)
 		resp["isModerator"] = h.roleService.IsModerator(u.ID)
+		// roles: GetUserRoles は assigned + expired 除外済 list を返す
+		// (= 即時 active な role の minimal shape)。
+		if userRoles, rerr := h.roleService.GetUserRoles(u.ID); rerr == nil {
+			resp["roles"] = userRoles
+		}
+		// policies: assigned roles を merge した user-specific policy
+		// (= upstream の RolePolicies 互換)。default override だけでなく
+		// user の役割に基づいて差し替わる。
+		resp["policies"] = h.roleService.GetUserPolicies(u.ID)
+	}
+	// signins / roleAssigns / isHibernated / lastActiveDate は upstream
+	// admin/show-user shape の必須 field (#888)。mk-go では signin 履歴と
+	// role assignment 詳細を別 endpoint で取得する設計なので空配列 / null
+	// で填めて shape compat を保つ (full integration は別 issue scope)。
+	resp["signins"] = []any{}
+	resp["roleAssigns"] = []any{}
+	resp["isHibernated"] = false
+	if u.LastActiveDate != nil {
+		resp["lastActiveDate"] = u.LastActiveDate.UTC().Format("2006-01-02T15:04:05.000Z")
+	} else {
+		resp["lastActiveDate"] = nil
 	}
 	return resp
 }
@@ -1094,27 +1119,68 @@ func coerceMetaArrayFields(fields map[string]any) {
 // --- Role endpoints ---
 
 // RolesCreate handles POST /api/admin/roles/create.
+//
+// upstream Misskey TS の paramDef は 13 field を required で要求する
+// (name / description / color / iconUrl / target / condFormula / isPublic /
+// isModerator / isAdministrator / asBadge / canEditMembersByModerator /
+// displayOrder / policies)。drop-in 互換のため mk-go も同 field を accept
+// し、`name` 以外も非 nil 必須に揃える (#889)。
+//
+// なお model.Role の現 schema に存在しない field (color / iconUrl / target /
+// condFormula / canEditMembersByModerator / policies) は payload として受け
+// 取るが現 model に persist しない (= 将来 migration で col 追加するまで
+// payload acceptance のみ)。frontend からの "all 13 fields supplied" 要件は
+// これで満たせる。
 func (h *Handler) RolesCreate(c echo.Context) error {
 	var req struct {
-		Name            string `json:"name"`
-		Description     string `json:"description"`
-		IsModerator     bool   `json:"isModerator"`
-		IsAdministrator bool   `json:"isAdministrator"`
-		IsPublic        bool   `json:"isPublic"`
-		AsBadge         bool   `json:"asBadge"`
-		IsExplorable    bool   `json:"isExplorable"`
-		DisplayOrder    int    `json:"displayOrder"`
+		Name                      *string         `json:"name"`
+		Description               *string         `json:"description"`
+		Color                     *string         `json:"color"`
+		IconURL                   *string         `json:"iconUrl"`
+		Target                    *string         `json:"target"`
+		CondFormula               *map[string]any `json:"condFormula"`
+		IsPublic                  *bool           `json:"isPublic"`
+		IsModerator               *bool           `json:"isModerator"`
+		IsAdministrator           *bool           `json:"isAdministrator"`
+		IsExplorable              *bool           `json:"isExplorable"` // optional (TS も default false)
+		AsBadge                   *bool           `json:"asBadge"`
+		CanEditMembersByModerator *bool           `json:"canEditMembersByModerator"`
+		DisplayOrder              *int            `json:"displayOrder"`
+		Policies                  *map[string]any `json:"policies"`
 	}
-	if err := c.Bind(&req); err != nil || req.Name == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	r, err := h.roleService.Create(req.Name, req.Description, role.CreateOptions{
-		IsModerator:     req.IsModerator,
-		IsAdministrator: req.IsAdministrator,
-		IsPublic:        req.IsPublic,
-		AsBadge:         req.AsBadge,
-		IsExplorable:    req.IsExplorable,
-		DisplayOrder:    req.DisplayOrder,
+	// upstream paramDef の required field を非 nil で要求する (= partial
+	// payload を 400 で reject、TS 互換、#889)。
+	// color / iconUrl は upstream paramDef で nullable: true。JSON で null
+	// 送出時に Go の `*string` が nil になり「field 不在」と区別できない
+	// ため required check から除外する (= TS は `null` 可で accept、mk-go
+	// では実 require は省略するが TS frontend の payload は通る)。
+	if req.Name == nil || *req.Name == "" ||
+		req.Description == nil ||
+		req.Target == nil ||
+		req.CondFormula == nil ||
+		req.IsPublic == nil ||
+		req.IsModerator == nil ||
+		req.IsAdministrator == nil ||
+		req.AsBadge == nil ||
+		req.CanEditMembersByModerator == nil ||
+		req.DisplayOrder == nil ||
+		req.Policies == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Required parameters missing.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	description := ""
+	if req.Description != nil {
+		description = *req.Description
+	}
+	r, err := h.roleService.Create(*req.Name, description, role.CreateOptions{
+		IsModerator:     *req.IsModerator,
+		IsAdministrator: *req.IsAdministrator,
+		IsPublic:        *req.IsPublic,
+		AsBadge:         *req.AsBadge,
+		IsExplorable:    req.IsExplorable != nil && *req.IsExplorable,
+		DisplayOrder:    *req.DisplayOrder,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

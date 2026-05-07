@@ -22,6 +22,9 @@ type UserListRepository interface {
 	AddMember(m *model.UserListMembership) error
 	RemoveMember(listID, userID string) error
 	ListMembers(listID string) ([]*model.UserListMembership, error)
+	// ListMembersByListIDs returns userIDs grouped by listID in 1 query
+	// (= users/lists/list の N+1 を消す batch fetch、#876)。
+	ListMembersByListIDs(listIDs []string) (map[string][]string, error)
 	UpdateList(id string, fields map[string]any) error
 	UpdateMembership(listID, userID string, withReplies bool) error
 	// ListsContainingMember returns lists owned by ownerID that include
@@ -116,6 +119,31 @@ func (r *userListRepository) ListIDsByMember(userID string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// ListMembersByListIDs returns userIDs grouped by listID in a single SELECT.
+// users/lists/list の per-list N+1 query を消すための batch fetch (#876)。
+// listIDs が空なら空 map を返す。row 順は保証しないので caller 側で並び順
+// に依存しないこと。
+func (r *userListRepository) ListMembersByListIDs(listIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string)
+	if len(listIDs) == 0 {
+		return out, nil
+	}
+	type row struct {
+		UserListID string `gorm:"column:userListId"`
+		UserID     string `gorm:"column:userId"`
+	}
+	var rows []row
+	if err := r.db.Model(&model.UserListMembership{}).
+		Where(`"userListId" IN ?`, listIDs).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.UserListID] = append(out[r.UserListID], r.UserID)
+	}
+	return out, nil
 }
 
 func (r *userListRepository) ListsContainingMember(ownerID, memberUserID string) ([]*model.UserList, error) {

@@ -13,6 +13,11 @@ type TimelineFilter struct {
 	IncludeLocalRenotes   *bool    // nil=true。home/hybridのみ
 	AllowPartial          bool     // trueならRedis結果が不足でもDBフォールバックしない
 	MutedChannelIDs       []string // 指定があれば channelId が一致するノートを除外
+	// MutedUserIDs は viewer が mute した user の note を除外する filter
+	// 用 (#874)。nil なら filter 無効、空 slice なら filter 有効だが除外
+	// 対象なし。renote の場合は renoteUserId も check する (= upstream
+	// Misskey TS の muting JOIN と同 semantics)。
+	MutedUserIDs []string
 }
 
 // boolDefault returns *b if non-nil, else def.
@@ -45,6 +50,14 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		}
 	}
 
+	var mutedUsers map[string]struct{}
+	if len(f.MutedUserIDs) > 0 {
+		mutedUsers = make(map[string]struct{}, len(f.MutedUserIDs))
+		for _, id := range f.MutedUserIDs {
+			mutedUsers[id] = struct{}{}
+		}
+	}
+
 	out := make([]*model.Note, 0, len(notes))
 	for _, n := range notes {
 		if f.WithFiles && len(n.FileIDs) == 0 {
@@ -56,6 +69,19 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		if mutedChannels != nil && n.ChannelID != nil {
 			if _, muted := mutedChannels[*n.ChannelID]; muted {
 				continue
+			}
+		}
+		// user mute filter: 投稿者が muted user なら除外。renote の場合は
+		// renote 元 user も check する (= upstream Misskey TS の muting JOIN
+		// と同 semantics、#874)。
+		if mutedUsers != nil {
+			if _, muted := mutedUsers[n.UserID]; muted {
+				continue
+			}
+			if n.RenoteUserID != nil {
+				if _, muted := mutedUsers[*n.RenoteUserID]; muted {
+					continue
+				}
 			}
 		}
 		// withReplies=false: 他人への返信を除外 (自分への返信は残す)

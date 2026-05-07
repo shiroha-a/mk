@@ -1044,6 +1044,10 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetNoteReactionRepo(reactionRepo)
 	notesHandler.SetChannelRepo(channelRepo)
 	notesHandler.SetChannelMutingRepo(channelMutingRepo)
+	// timeline endpoint で muted user の note を除外する filter (#874)。
+	// 未配線だと user mute は read 時に効かず、cache のみ DB 整合の状態
+	// になる security/UX regression が残る。production では必ず wire する。
+	notesHandler.SetMutingRepo(mutingRepo)
 	notesHandler.SetInstanceRepo(instanceRepo)
 	notesHandler.SetEmojiRepo(emojiRepo)
 	notesHandler.SetReactionReader(reactionCountWriter)

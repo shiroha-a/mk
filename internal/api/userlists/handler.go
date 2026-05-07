@@ -29,18 +29,29 @@ func NewHandler(repo repository.UserListRepository, idGen id.Generator) *Handler
 // List handles POST /api/users/lists/list.
 //
 // upstream Misskey TS と同じ packed shape ({id, createdAt, name, userIds,
-// isPublic}) で返す (#871)。userIds は ListMembers で fetch して埋める。
-// 旧 mk-go は model.UserList の生 JSON を返しており createdAt / userIds が
-// 欠落していた。
+// isPublic}) で返す (#871)。userIds は ListMembersByListIDs で 1 query batch
+// fetch する (= per-list N+1 を回避、#876)。
 func (h *Handler) List(c echo.Context) error {
 	user := middleware.GetUser(c)
 	lists, err := h.repo.ListByUser(user.ID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	listIDs := make([]string, 0, len(lists))
+	for _, l := range lists {
+		listIDs = append(listIDs, l.ID)
+	}
+	membersByList, err := h.repo.ListMembersByListIDs(listIDs)
+	if err != nil {
+		// repo error は best-effort で空 map にフォールバックして shape を保つ
+		// (= memberIDs helper と同 pattern、entity.PackUserList が [] で
+		// serialize する)。観測のため slog.Warn は残す。
+		slog.Warn("users/lists/list: failed to batch fetch members", "userId", user.ID, "error", err)
+		membersByList = map[string][]string{}
+	}
 	out := make([]entity.UserList, 0, len(lists))
 	for _, l := range lists {
-		out = append(out, entity.PackUserList(l, h.memberIDs(l.ID), h.idGen))
+		out = append(out, entity.PackUserList(l, membersByList[l.ID], h.idGen))
 	}
 	return c.JSON(http.StatusOK, out)
 }

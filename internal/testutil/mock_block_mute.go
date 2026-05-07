@@ -114,6 +114,27 @@ func (m *MockMutingRepository) ListByMuter(muterID, sinceID, untilID string, lim
 	return paginateMutings(rows, sinceID, untilID, limit, offset), nil
 }
 
+// ListMuteeIDs returns muteeIDs for muterID where the mute is active
+// (= ExpiresAt nil or in future). production の挙動と同じ filter logic で
+// timeline test の user mute 経路を担保する (#874)。
+func (m *MockMutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	now := time.Now()
+	for _, r := range m.Mutings {
+		if r.MuterID != muterID {
+			continue
+		}
+		if r.ExpiresAt != nil && !r.ExpiresAt.After(now) {
+			continue
+		}
+		ids = append(ids, r.MuteeID)
+	}
+	return ids, nil
+}
+
 // MockRenoteMutingRepository is a test double for repository.RenoteMutingRepository.
 type MockRenoteMutingRepository struct {
 	Mutings map[string]*model.RenoteMuting

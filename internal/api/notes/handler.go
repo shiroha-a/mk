@@ -39,6 +39,7 @@ type Handler struct {
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
+	mutingRepo        repository.MutingRepository
 	instanceRepo      repository.InstanceRepository
 	emojiRepo         repository.EmojiRepository
 	driveFolderRepo   repository.DriveFolderRepository
@@ -55,6 +56,13 @@ type Handler struct {
 // can exclude notes posted to channels the viewer has muted.
 func (h *Handler) SetChannelMutingRepo(r repository.ChannelMutingRepository) {
 	h.channelMutingRepo = r
+}
+
+// SetMutingRepo attaches a MutingRepository so timeline handlers can exclude
+// notes whose author / renote-source the viewer has muted (= upstream Misskey
+// TS の muting JOIN と同 semantics、#874)。
+func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
+	h.mutingRepo = r
 }
 
 // SetTranslator attaches a DeepL translator for /api/notes/translate.
