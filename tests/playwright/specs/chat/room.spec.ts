@@ -5,8 +5,11 @@
 //     (id / name / ownerId / description / isArchived) が 200 OK で返る
 //   - chat/rooms/invitations/create { roomId, userId } で owner が invitee に
 //     招待を送る (204)
-//   - chat/rooms/invitations/accept { roomId } で invitee 側が招待を受諾し
-//     room membership が作成される (204)
+//   - chat/rooms/invitations/inbox で invitee 側に届いた invitation list を
+//     取得できる
+//   - chat/rooms/join { roomId } で invite 受信側が room に参加する (204)。
+//     upstream は invitations/accept endpoint を持たず、本 path で join する
+//     設計のため両 backend 共通の参加 path として使う
 //   - membership がある user は chat/messages/create-to-room { toRoomId, text }
 //     で room 宛 message を投稿でき、chat/messages/room-timeline { roomId }
 //     で room 内 message を取得できる
@@ -15,9 +18,10 @@
 //   1. owner + invitee signup
 //   2. owner が room 作成 → response shape を assert
 //   3. owner が invitee に invitation 作成
-//   4. invitee が invitation accept (= membership 確立)
-//   5. invitee が room に message 投稿 → response shape を assert
-//   6. owner が room-timeline 取得 → 投稿 message が含まれることを確認
+//   4. invitee が invitations/inbox で invitation 受信を確認
+//   5. invitee が rooms/join で room 参加 (= membership 確立)
+//   6. invitee が room に message 投稿 → response shape を assert
+//   7. owner が room-timeline 取得 → 投稿 message が含まれることを確認
 //
 // 注: chatMessage notification は別 PR (PR-C) で扱う。本 spec は room CRUD +
 // membership + room messages の最小 round-trip にフォーカス。
