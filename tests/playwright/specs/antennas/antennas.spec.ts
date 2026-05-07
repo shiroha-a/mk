@@ -77,9 +77,9 @@ test.describe('antennas: CRUD round-trip', () => {
     expect(typeof created.id).toBe('string');
     createdAntennaId = created.id;
     // userId は upstream TS の packed antenna shape では不在 (= antenna は
-    // 自分専用なので owner field を返さない設計)、mk-go は `userId` を含む。
-    // 両 backend で共通する identity (id / name / src / keywords) のみ assert
-    // する LCD pattern にする。
+    // 自分専用なので owner field を返さない設計)、mk-go は `userId` を含む
+    // drift がある (#904 で追跡)。両 backend で共通する identity (id / name
+    // / src / keywords) のみ assert する LCD pattern にする。
     expect(created.name).toBe(name);
     expect(created.src).toBe('all');
     expect(created.keywords).toEqual([['hello']]);
