@@ -89,10 +89,16 @@ test.describe('chat: DM messages', () => {
     const tl = (await tlResp.json()) as ChatMessage[];
     expect(Array.isArray(tl)).toBe(true);
 
+    // `find` の return が undefined なら spec の前提 (= sent message が
+    // receiver の user-timeline で見える) が崩れているので明示 throw で
+    // fail させる。!-assertion ではなく guard で型を narrow する pattern は
+    // pollForNotification (#848) / pollUnread (#850) と揃える。
     const found = tl.find((m) => m.id === sent.id);
-    expect(found).toBeDefined();
-    expect(found!.fromUserId).toBe(sender.id);
-    expect(found!.toUserId).toBe(receiver.id);
-    expect(found!.text).toBe(text);
+    if (!found) {
+      throw new Error(`user-timeline did not contain sent message (id=${sent.id})`);
+    }
+    expect(found.fromUserId).toBe(sender.id);
+    expect(found.toUserId).toBe(receiver.id);
+    expect(found.text).toBe(text);
   });
 });
