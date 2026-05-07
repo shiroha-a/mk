@@ -33,12 +33,30 @@ interface Antenna {
 }
 
 test.describe('antennas: CRUD round-trip', () => {
+  // assertion 失敗時に DB に orphan antenna が残らないよう、test 単位で
+  // afterEach cleanup する。正規 path で delete 済の場合は idempotent に
+  // 4xx を許容する (= 削除済 antenna への delete は NO_SUCH_ANTENNA)。
+  let createdAntennaId: string | undefined;
+  let userToken: string | undefined;
+
   test.beforeAll(() => {
     resetRateLimit();
   });
 
+  test.afterEach(async ({ request }) => {
+    if (createdAntennaId && userToken) {
+      await callApi(request, 'antennas/delete', {
+        i: userToken,
+        antennaId: createdAntennaId,
+      });
+    }
+    createdAntennaId = undefined;
+    userToken = undefined;
+  });
+
   test('create / show / list / update / delete round-trip', async ({ request }) => {
     const me = await signupUser(request, randomUsername('antA'));
+    userToken = me.token;
     const name = `antenna_${Math.random().toString(16).slice(2, 8)}`;
 
     // create
@@ -57,6 +75,7 @@ test.describe('antennas: CRUD round-trip', () => {
     expect(createResp.status()).toBe(200);
     const created = (await createResp.json()) as Antenna;
     expect(typeof created.id).toBe('string');
+    createdAntennaId = created.id;
     // userId は upstream TS の packed antenna shape では不在 (= antenna は
     // 自分専用なので owner field を返さない設計)、mk-go は `userId` を含む。
     // 両 backend で共通する identity (id / name / src / keywords) のみ assert
@@ -110,6 +129,8 @@ test.describe('antennas: CRUD round-trip', () => {
       antennaId: created.id,
     });
     expect([200, 204]).toContain(deleteResp.status());
+    // 正規 path で delete 済 = afterEach cleanup の必要なし
+    createdAntennaId = undefined;
 
     // delete 後の show は 4xx (NO_SUCH_ANTENNA)
     const showAfterDelete = await callApi(request, 'antennas/show', {
