@@ -62,10 +62,11 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 	return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 }
 
-// packRoom returns the bare ChatRoom shape without createdAt.
-// 多くの endpoint は createdAt 付きで返す必要があるので、通常は
-// packRoomWithCreatedAt 経由で呼ぶ。本関数を直接使うのは createdAt が
-// 不要な内部用途だけ。
+// packRoom returns the bare ChatRoom shape used by packRoomWithCreatedAt.
+// createdAt は wrapper 側で ID 派生で付与するため、本関数は packRoom*
+// helper の内部実装として packRoomWithCreatedAt 経由でのみ呼ぶこと。
+// 直接 caller として使うと createdAt が抜けて upstream 互換 contract を
+// 破る (= packedChatRoomSchema は createdAt 必須)。
 //
 // upstream Misskey TS の packedChatRoomSchema は `isArchived` を返さない。
 // mk-go も互換のため field を出力しない (#851)。archived state は別経路で
