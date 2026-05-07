@@ -2,6 +2,7 @@ package userlists
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -87,10 +88,19 @@ func (h *Handler) Show(c echo.Context) error {
 // memberIDs returns the userId list of members of the given list.
 // repo error は best-effort で nil を返し、entity.PackUserList 側で空配列
 // として serialize される (= 部分結果でも shape は保つ、production では
-// router で必ず repo wire 済)。
+// router で必ず repo wire 済)。transient error は運用で観測したいので
+// slog.Warn で記録する (= blocking handler の fetchBlockeeMap と同 pattern)。
+//
+// NOTE (#876): users/lists/list は N list 持つ user に対し本 helper を N 回
+// 呼んでおり N+1 query になる。perf 改善は ListMembersByListIDs batch fetch
+// で別 issue (#876) として追跡。
 func (h *Handler) memberIDs(listID string) []string {
 	members, err := h.repo.ListMembers(listID)
-	if err != nil || len(members) == 0 {
+	if err != nil {
+		slog.Warn("users/lists: failed to fetch members", "listId", listID, "error", err)
+		return nil
+	}
+	if len(members) == 0 {
 		return nil
 	}
 	ids := make([]string, 0, len(members))

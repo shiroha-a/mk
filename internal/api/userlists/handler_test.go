@@ -139,6 +139,32 @@ func TestList_Error(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// failingMembersRepo は ListMembers だけ error を返す stub。memberIDs
+// helper の error fallback path (= repo error 時に slog.Warn して nil を
+// 返し、PackUserList が空配列で serialize する) を cover する (#871)。
+type failingMembersRepo struct {
+	*testutil.MockUserListRepository
+}
+
+func (f *failingMembersRepo) ListMembers(_ string) ([]*model.UserListMembership, error) {
+	return nil, assert.AnError
+}
+
+func TestList_MembersErrorFallsBackToEmptyUserIds(t *testing.T) {
+	repo := &failingMembersRepo{testutil.NewMockUserListRepository()}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "broken-members"}
+	idGen, _ := id.NewGenerator("aidx")
+	h := userlists.NewHandler(repo, idGen)
+	rec := doPost(h.List, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	// repo error でも shape は保たれ userIds は [] で出る (= upstream parity)。
+	assert.Equal(t, []any{}, out[0]["userIds"])
+}
+
 type failingCreateRepo struct {
 	*testutil.MockUserListRepository
 }
