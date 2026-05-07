@@ -18,8 +18,7 @@
 // 既読化の副作用を持つ (#420)。本 spec で間に挟むと mark-all-as-read 単体
 // の効果が検証できなくなるため、unread 状態の確認は /api/i のみで行う。
 
-import { expect, test } from '@playwright/test';
-import type { APIRequestContext } from '@playwright/test';
+import { expect, test, type APIRequestContext } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { type NotificationBody } from '../../fixtures/notifications';
@@ -44,7 +43,7 @@ async function pollUnread(
   token: string,
   predicate: (u: UnreadFields) => boolean,
 ): Promise<UnreadFields> {
-  let snapshot: UnreadFields = { unreadNotificationsCount: 0, hasUnreadNotification: false };
+  let snapshot: UnreadFields | undefined;
   await expect
     .poll(
       async () => {
@@ -60,6 +59,12 @@ async function pollUnread(
       { timeout: 5000, intervals: [100, 200, 500, 1000] },
     )
     .toBe(true);
+  // expect.poll が toBe(true) を満たした iteration で必ず snapshot が set
+  // される。!-assertion ではなく guard で表現することで、predicate match と
+  // snapshot 設定の同期関係を読み手に明示する (pollForNotification と同 pattern)。
+  if (!snapshot) {
+    throw new Error('pollUnread: matched but `snapshot` was not set (unreachable)');
+  }
   return snapshot;
 }
 
