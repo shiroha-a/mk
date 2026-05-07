@@ -107,6 +107,138 @@ func TestReactions_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// 以下 #821 PR-D で stub から本実装に書き換えた users/reactions の各 path
+// を cover する。userRepo / noteReactionRepo を wire するので
+// newExtraHandler とは別の構築 helper を使う。
+
+func newReactionsHandler(t *testing.T) (*users.Handler, *testutil.MockUserRepository, *testutil.MockNoteReactionRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	userSvc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	h := users.NewHandler(userSvc, nil, noteRepo, idGen)
+	h.SetUserRepo(userRepo)
+	rxRepo := testutil.NewMockNoteReactionRepository()
+	h.SetNoteReactionRepo(rxRepo)
+	return h, userRepo, rxRepo
+}
+
+// target user が存在しない → 404 NO_SUCH_USER。
+func TestReactions_NoSuchUser(t *testing.T) {
+	h, _, _ := newReactionsHandler(t)
+	rec := postExtra(h.Reactions, `{"userId":"missing"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// target が remote user (host が non-empty) → 400 IS_REMOTE_USER。
+func TestReactions_RemoteUser(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	host := "remote.example"
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Host: &host}
+	rec := postExtra(h.Reactions, `{"userId":"u_remote"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// publicReactions=false で viewer != target → 403 REACTIONS_NOT_PUBLIC。
+func TestReactions_NotPublic(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	userRepo.Users["u_target"] = &model.User{ID: "u_target"}
+	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: false}
+	rec := postExtra(h.Reactions, `{"userId":"u_target"}`, &model.User{ID: "u_viewer"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// self view (viewer == target) なら publicReactions=false でも取得可能。
+func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
+	h, userRepo, rxRepo := newReactionsHandler(t)
+	userRepo.Users["u_self"] = &model.User{ID: "u_self"}
+	userRepo.Profiles["u_self"] = &model.UserProfile{UserID: "u_self", PublicReactions: false}
+	// reactor self の reaction を 1 件投入。User / Note を Preload 相当で
+	// セットする (mock は静的に詰めるだけ)。
+	noteText := "hi"
+	rxRepo.Reactions["rx1"] = &model.NoteReaction{
+		ID:       "rx1",
+		UserID:   "u_self",
+		NoteID:   "n1",
+		Reaction: "👍",
+		User:     &model.User{ID: "u_self", Username: "self"},
+		Note:     &model.Note{ID: "n1", UserID: "u_other", Text: &noteText},
+	}
+	rec := postExtra(h.Reactions, `{"userId":"u_self","limit":150}`, &model.User{ID: "u_self"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+	entry := list[0]
+	assert.Equal(t, "rx1", entry["id"])
+	assert.Equal(t, "👍", entry["type"])
+	require.NotNil(t, entry["user"])
+	require.NotNil(t, entry["note"])
+	note, _ := entry["note"].(map[string]any)
+	assert.Equal(t, "n1", note["id"])
+	assert.Equal(t, "u_other", note["userId"])
+	assert.Equal(t, "hi", note["text"])
+}
+
+// publicReactions=true (default) で viewer != target → list を返す。
+func TestReactions_PublicReactions(t *testing.T) {
+	h, userRepo, rxRepo := newReactionsHandler(t)
+	userRepo.Users["u_pub"] = &model.User{ID: "u_pub"}
+	userRepo.Profiles["u_pub"] = &model.UserProfile{UserID: "u_pub", PublicReactions: true}
+	rxRepo.Reactions["rx2"] = &model.NoteReaction{
+		ID:       "rx2",
+		UserID:   "u_pub",
+		NoteID:   "n2",
+		Reaction: "❤",
+	}
+	rec := postExtra(h.Reactions, `{"userId":"u_pub"}`, &model.User{ID: "u_viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+}
+
+// noteReactionRepo が wire されていない (= test stub 構成) なら空配列を
+// 返す互換 path を維持する。
+func TestReactions_NoteReactionRepoNotWired(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	userSvc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	h := users.NewHandler(userSvc, nil, noteRepo, idGen)
+	h.SetUserRepo(userRepo)
+	userRepo.Users["u_x"] = &model.User{ID: "u_x"}
+	userRepo.Profiles["u_x"] = &model.UserProfile{UserID: "u_x", PublicReactions: true}
+	// noteReactionRepo を SetNoteReactionRepo していない状態。
+	rec := postExtra(h.Reactions, `{"userId":"u_x"}`, &model.User{ID: "u_x"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	assert.Len(t, list, 0)
+}
+
+// noteReactionRepo.ListByUserID がエラー → 500 INTERNAL_ERROR。
+type failingListByUserIDRepo struct {
+	*testutil.MockNoteReactionRepository
+}
+
+func (f *failingListByUserIDRepo) ListByUserID(_ string, _, _ string, _ int) ([]*model.NoteReaction, error) {
+	return nil, assert.AnError
+}
+
+func TestReactions_ListError(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	userRepo.Users["u_e"] = &model.User{ID: "u_e"}
+	userRepo.Profiles["u_e"] = &model.UserProfile{UserID: "u_e", PublicReactions: true}
+	h.SetNoteReactionRepo(&failingListByUserIDRepo{testutil.NewMockNoteReactionRepository()})
+	rec := postExtra(h.Reactions, `{"userId":"u_e"}`, &model.User{ID: "u_e"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 // --- FeaturedNotes ---
 
 func TestFeaturedNotes_Success(t *testing.T) {
