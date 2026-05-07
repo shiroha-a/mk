@@ -8,18 +8,11 @@
 //   - 1 個目の reaction (`👍`) は unset され、2 個目 (heart) のみ残る
 //   - reactions object は 1 key / count=1 になる
 //
-// 観察した drift (両 backend で挙動はほぼ同じだが reaction 文字列が
-// variation selector の有無で揃わない):
-//   - mk-go: `'❤️'` (variation selector `\ufe0f` 付きで保存)
-//   - upstream TS: `'❤'` (variation selector を strip して normalize)
-//
-// 本 spec は両 backend での「置き換え」挙動を strict 確認しつつ、heart の
-// variation selector drift は emoji 正規化の別 issue として切り出して trace
-// する。本 spec の assertion は variation selector を吸収する形 (= heart
-// から始まる key を 1 件確認) に整える。
-
-// variation selector drift は #864 で別途 fix 予定。fix 完了後は本 spec の
-// `startsWith('❤')` を strict (`'❤'` 固定) に置き換える。
+// 同時に検出した drift (#864 で fix 予定): mk-go は `❤️` (variation selector
+// `\ufe0f` 付き) を保存、upstream TS は `❤` に normalize する。本 spec は
+// `startsWith('❤')` で variation selector の有無を吸収して「置き換え」挙動
+// 自体を strict 確認する。#864 fix 完了後は strict 文字列比較 (`'❤'` 固定)
+// に置き換える follow-up を予定。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
