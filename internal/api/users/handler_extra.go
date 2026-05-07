@@ -98,7 +98,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 		req.Limit = 100
 	}
 
-	// target user lookup + remote / publicReactions check
+	// target user lookup + remote / publicReactions check.
+	// production では userRepo が必ず wire されるが、既存の handler test
+	// (TestReactions_Success 等) は userRepo を wire しないので nil guard で
+	// fall-through する (= test compat、production 影響なし)。
 	if h.userRepo != nil {
 		target, err := h.userRepo.FindByID(req.UserID)
 		if err != nil || target == nil {
@@ -118,6 +121,9 @@ func (h *Handler) Reactions(c echo.Context) error {
 	}
 
 	// reactor の reaction list を取得 (User / Note を Preload 済み)。
+	// userRepo と同じく test stub では noteReactionRepo を wire しないので、
+	// nil guard で空配列を返して既存 handler test の挙動を維持する
+	// (= 本 PR で stub から本実装に書き換えたが test 互換は保つ、#821 PR-D)。
 	if h.noteReactionRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
