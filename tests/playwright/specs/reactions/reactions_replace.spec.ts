@@ -85,6 +85,10 @@ test.describe('reactions: same-reaction replay (1 user 1 reaction)', () => {
     });
     expect(showResp.status()).toBe(200);
     const shown = (await showResp.json()) as { reactions: Record<string, number> };
+    // 1 user 1 reaction の context なので reactions object は `👍` のみ
+    // 含む。余計な key (= reactor 以外の reaction や同 reactor の多重
+    // reaction) があれば drift として即 fail させる。
+    expect(Object.keys(shown.reactions)).toEqual(['👍']);
     expect(shown.reactions['👍']).toBe(1);
   });
 });
