@@ -355,18 +355,23 @@ func TestToDBFilter_UseMutingSubquery(t *testing.T) {
 	out := toDBFilter(TimelineFilter{}, "viewer1")
 	assert.True(t, out.UseMutingSubquery, "viewerID 有なら subquery を使う")
 	assert.Equal(t, "viewer1", out.ViewerID)
-	assert.Empty(t, out.MutedUserIDs, "literal は伝搬しない")
 
 	out = toDBFilter(TimelineFilter{}, "")
 	assert.False(t, out.UseMutingSubquery, "anonymous viewer では subquery off")
 	assert.Equal(t, "", out.ViewerID)
+
+	// MutedUserIDs literal は SQL 経路に**伝搬しない**ことを明示的に
+	// 検証する (#894)。subquery 経路が production の SQL 経路で、literal
+	// は test override 専用の design intent を regression guard として固定。
+	out = toDBFilter(TimelineFilter{MutedUserIDs: []string{"u1", "u2"}}, "viewer2")
+	assert.Empty(t, out.MutedUserIDs, "literal は意図的に drop し subquery に委譲する")
 
 	// MutedChannelIDs / その他 filter はそのまま伝搬する (regression guard)。
 	withReplies := true
 	out = toDBFilter(TimelineFilter{
 		MutedChannelIDs: []string{"ch1"},
 		WithReplies:     &withReplies,
-	}, "viewer2")
+	}, "viewer3")
 	assert.Equal(t, []string{"ch1"}, out.MutedChannelIDs)
 	assert.NotNil(t, out.WithReplies)
 	assert.True(t, *out.WithReplies)
