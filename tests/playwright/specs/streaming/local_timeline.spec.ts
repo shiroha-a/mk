@@ -24,7 +24,12 @@ import { expect, test } from '@playwright/test';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
+import {
+  awaitChannelEvent,
+  awaitSubscribeBuffer,
+  openStream,
+  subscribeChannel,
+} from '../../fixtures/streaming';
 
 test.describe('streaming: localTimeline', () => {
   test.beforeAll(() => {
@@ -44,7 +49,7 @@ test.describe('streaming: localTimeline', () => {
 
     // subscribe 確定までの短時間バッファ。upstream は ack を返さないので
     // 厳密に待つ手段はなく、200ms で実用上十分。
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await awaitSubscribeBuffer();
 
     const note = await createNote(request, me.token, {
       text: 'streaming hello',

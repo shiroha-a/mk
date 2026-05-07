@@ -57,6 +57,14 @@ export interface ChannelEvent<T> {
   body: T;
 }
 
+// awaitSubscribeBuffer は subscribe → publish の race を防ぐための短時間
+// バッファ。upstream は subscribe ack を返さないので、connect message が
+// server に到達して channel registry に登録されるまでの猶予として 200ms
+// 待つ (streaming spec で実用上十分と確認済み)。
+export async function awaitSubscribeBuffer(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 200));
+}
+
 // awaitChannelEvent registers a message listener and resolves with the
 // first matching `{type:"channel"}` envelope's `body`. Caller-supplied
 // `match` decides whether the event is the target. Rejects on timeout.

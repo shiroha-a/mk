@@ -17,11 +17,16 @@
 // reaction.spec.ts と同 pattern。fixtures/streaming.ts の helper 群を流用。
 
 import { expect, test } from '@playwright/test';
-import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
+import { type NotificationBody, pollForNotification } from '../../fixtures/notifications';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
+import {
+  awaitChannelEvent,
+  awaitSubscribeBuffer,
+  openStream,
+  subscribeChannel,
+} from '../../fixtures/streaming';
 
 test.describe('notifications: mention', () => {
   test.beforeAll(() => {
@@ -35,14 +40,13 @@ test.describe('notifications: mention', () => {
     const ws = await openStream(me.token);
     const subId = subscribeChannel(ws, 'main');
 
-    type NotificationBody = { id: string; type: string; userId?: string };
     const notifEventPromise = awaitChannelEvent<NotificationBody>(
       ws,
       (env) =>
         env.id === subId && env.type === 'notification' && env.body?.type === 'mention',
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await awaitSubscribeBuffer();
 
     // sender が me を mention する note を投稿。
     await createNote(request, sender.token, {
@@ -57,22 +61,12 @@ test.describe('notifications: mention', () => {
     ws.close();
 
     // /api/i/notifications でも同 notification が取得できる (= 永続化)。
-    let httpNotif: NotificationBody | undefined;
-    await expect
-      .poll(
-        async () => {
-          const resp = await callApi(request, 'i/notifications', { i: me.token });
-          if (resp.status() !== 200) return false;
-          const list = (await resp.json()) as NotificationBody[];
-          httpNotif = list.find((n) => n.type === 'mention' && n.userId === sender.id);
-          return httpNotif !== undefined;
-        },
-        { timeout: 5000, intervals: [100, 200, 500, 1000] },
-      )
-      .toBe(true);
-
-    expect(httpNotif).toBeDefined();
-    expect(httpNotif!.type).toBe('mention');
-    expect(httpNotif!.userId).toBe(sender.id);
+    const httpNotif = await pollForNotification(
+      request,
+      me.token,
+      (n) => n.type === 'mention' && n.userId === sender.id,
+    );
+    expect(httpNotif.type).toBe('mention');
+    expect(httpNotif.userId).toBe(sender.id);
   });
 });

@@ -23,8 +23,14 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
+import { type NotificationBody, pollForNotification } from '../../fixtures/notifications';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
+import {
+  awaitChannelEvent,
+  awaitSubscribeBuffer,
+  openStream,
+  subscribeChannel,
+} from '../../fixtures/streaming';
 
 test.describe('notifications: reaction', () => {
   test.beforeAll(() => {
@@ -40,7 +46,6 @@ test.describe('notifications: reaction', () => {
     const subId = subscribeChannel(ws, 'main');
 
     // notification event 受信用 Promise を投稿前に登録 (= race 回避)。
-    type NotificationBody = { id: string; type: string; userId?: string; reaction?: string };
     const notifEventPromise = awaitChannelEvent<NotificationBody>(
       ws,
       (env) =>
@@ -48,7 +53,7 @@ test.describe('notifications: reaction', () => {
     );
 
     // subscribe 確定までの短時間バッファ (streaming spec と同根拠)。
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await awaitSubscribeBuffer();
 
     // me が public note 投稿。
     const note = await createNote(request, me.token, {
@@ -76,23 +81,14 @@ test.describe('notifications: reaction', () => {
 
     // /api/i/notifications でも同 notification が取得できる (= 永続化)。
     // notification の登録は async (= queue 経由) なので polling で待つ。
-    let httpNotif: NotificationBody | undefined;
-    await expect
-      .poll(
-        async () => {
-          const resp = await callApi(request, 'i/notifications', { i: me.token });
-          if (resp.status() !== 200) return false;
-          const list = (await resp.json()) as NotificationBody[];
-          httpNotif = list.find((n) => n.type === 'reaction' && n.userId === reactor.id);
-          return httpNotif !== undefined;
-        },
-        { timeout: 5000, intervals: [100, 200, 500, 1000] },
-      )
-      .toBe(true);
+    const httpNotif = await pollForNotification(
+      request,
+      me.token,
+      (n) => n.type === 'reaction' && n.userId === reactor.id,
+    );
 
     // 取得した notification が WS event と整合する shape を持つ。
-    expect(httpNotif).toBeDefined();
-    expect(httpNotif!.type).toBe('reaction');
-    expect(httpNotif!.userId).toBe(reactor.id);
+    expect(httpNotif.type).toBe('reaction');
+    expect(httpNotif.userId).toBe(reactor.id);
   });
 });

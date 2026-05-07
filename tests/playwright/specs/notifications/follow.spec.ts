@@ -18,8 +18,14 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { type NotificationBody, pollForNotification } from '../../fixtures/notifications';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
+import {
+  awaitChannelEvent,
+  awaitSubscribeBuffer,
+  openStream,
+  subscribeChannel,
+} from '../../fixtures/streaming';
 
 test.describe('notifications: follow', () => {
   test.beforeAll(() => {
@@ -33,14 +39,13 @@ test.describe('notifications: follow', () => {
     const ws = await openStream(me.token);
     const subId = subscribeChannel(ws, 'main');
 
-    type NotificationBody = { id: string; type: string; userId?: string };
     const notifEventPromise = awaitChannelEvent<NotificationBody>(
       ws,
       (env) =>
         env.id === subId && env.type === 'notification' && env.body?.type === 'follow',
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await awaitSubscribeBuffer();
 
     // follower が me を follow する。
     const followResp = await callApi(request, 'following/create', {
@@ -57,22 +62,12 @@ test.describe('notifications: follow', () => {
     ws.close();
 
     // /api/i/notifications でも同 notification が取得できる (= 永続化)。
-    let httpNotif: NotificationBody | undefined;
-    await expect
-      .poll(
-        async () => {
-          const resp = await callApi(request, 'i/notifications', { i: me.token });
-          if (resp.status() !== 200) return false;
-          const list = (await resp.json()) as NotificationBody[];
-          httpNotif = list.find((n) => n.type === 'follow' && n.userId === follower.id);
-          return httpNotif !== undefined;
-        },
-        { timeout: 5000, intervals: [100, 200, 500, 1000] },
-      )
-      .toBe(true);
-
-    expect(httpNotif).toBeDefined();
-    expect(httpNotif!.type).toBe('follow');
-    expect(httpNotif!.userId).toBe(follower.id);
+    const httpNotif = await pollForNotification(
+      request,
+      me.token,
+      (n) => n.type === 'follow' && n.userId === follower.id,
+    );
+    expect(httpNotif.type).toBe('follow');
+    expect(httpNotif.userId).toBe(follower.id);
   });
 });
