@@ -456,15 +456,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	if err != nil {
 		return h.mapChatErr(c, err)
 	}
-	// CreateMessage は File を eager load しないので、fileId 付き message は
-	// File を post-fetch して response の `file` field を含めるようにする
-	// (#860)。reload に失敗した場合は fall through で file 不在のまま返す。
-	if msg.FileID != nil && msg.File == nil {
-		if reloaded, err := h.repo.FindMessageByID(msg.ID); err == nil {
-			msg = reloaded
-		}
-	}
-	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
+	return c.JSON(http.StatusOK, h.packMessageDetailed(h.reloadIfFilePending(msg), user.ID))
 }
 
 // messagesCreateLegacy preserves pre-Phase-9.8 behaviour for callers that
@@ -479,12 +471,23 @@ func (h *Handler) messagesCreateLegacy(c echo.Context, user *model.User, text, t
 	if err := h.repo.CreateMessage(msg); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	if msg.FileID != nil && msg.File == nil {
-		if reloaded, err := h.repo.FindMessageByID(msg.ID); err == nil {
-			msg = reloaded
-		}
+	return c.JSON(http.StatusOK, h.packMessageDetailed(h.reloadIfFilePending(msg), user.ID))
+}
+
+// reloadIfFilePending re-fetches the message via FindMessageByID (which
+// preloads File) when the message has a fileId but no eager-loaded File
+// yet. CreateMessage 経路は File を Preload しないので、create response の
+// `file` field を upstream packMessageDetailed と同 shape にするための
+// post-fetch helper (#860 PR-D)。reload に失敗した場合は元の msg をその
+// まま返す (= file 不在で fall-through)。
+func (h *Handler) reloadIfFilePending(msg *model.ChatMessage) *model.ChatMessage {
+	if msg == nil || msg.FileID == nil || msg.File != nil {
+		return msg
 	}
-	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
+	if reloaded, err := h.repo.FindMessageByID(msg.ID); err == nil {
+		return reloaded
+	}
+	return msg
 }
 
 // MessagesShow handles POST /api/chat/messages/show.
