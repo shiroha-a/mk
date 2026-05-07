@@ -21,6 +21,10 @@ type NoteReactionRepository interface {
 	// noteIDをキーとしたmapを返す。
 	FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string]*model.NoteReaction, error)
 	ListByNoteID(noteID string, untilID, sinceID string, limit int, reactions []string) ([]*model.NoteReaction, error)
+	// ListByUserID returns reactions made by the given user, with User and Note
+	// preloaded for packing. upstream Misskey TS の users/reactions endpoint
+	// 用 (reactor 視点の reaction list)。
+	ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error)
 }
 
 type noteReactionRepository struct {
@@ -82,6 +86,25 @@ func (r *noteReactionRepository) ListByNoteID(noteID string, untilID, sinceID st
 	} else if len(reactions) > 1 {
 		q = q.Where("reaction IN ?", reactions)
 	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListByUserID returns reactions made by the given user. upstream Misskey TS
+// の users/reactions endpoint で使う reactor 視点の list。User / Note を
+// preload して pack 時に追加 query が走らないようにする。pagination は
+// ListByNoteID と同じ keyset 方式 (paginationOrder で DESC 既定)。
+func (r *noteReactionRepository) ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
+	var rows []*model.NoteReaction
+	q := r.db.Preload("User").Preload("Note").Where("\"userId\" = ?", userID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}

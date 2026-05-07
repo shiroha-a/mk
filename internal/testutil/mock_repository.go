@@ -1281,6 +1281,42 @@ func (m *MockNoteReactionRepository) ListByNoteID(noteID, untilID, sinceID strin
 	return rows, nil
 }
 
+// ListByUserID returns reactions made by a user. paginationOrder と同じく
+// sinceID 単独指定時のみ ASC、それ以外 DESC (ListByNoteID と同 logic)。
+func (m *MockNoteReactionRepository) ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
+	var rows []*model.NoteReaction
+	for _, r := range m.Reactions {
+		if r.UserID != userID {
+			continue
+		}
+		if untilID != "" && r.ID >= untilID {
+			continue
+		}
+		if sinceID != "" && r.ID <= sinceID {
+			continue
+		}
+		rows = append(rows, r)
+	}
+	asc := sinceID != "" && untilID == ""
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if asc {
+				if rows[i].ID > rows[j].ID {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			} else {
+				if rows[i].ID < rows[j].ID {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			}
+		}
+	}
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 // MockEmojiRepository is a test double for repository.EmojiRepository.
 type MockEmojiRepository struct {
 	// keyed by "name@host" (host="" for local)

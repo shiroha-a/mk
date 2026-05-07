@@ -54,12 +54,21 @@ type Handler struct {
 	// userRepo は users/notes / users/search-by-username-and-host 経由で
 	// 表示する note list の hardMutedWords filter (#787) に使う。
 	userRepo repository.UserRepository
+	// noteReactionRepo は users/reactions endpoint で reactor 視点の reaction
+	// list を取得するために使う (#821 PR-D)。
+	noteReactionRepo repository.NoteReactionRepository
 }
 
 // SetUserRepo wires a UserRepository so users/notes filters out notes that
 // match the viewer's hardMutedWords (#787).
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetNoteReactionRepo wires the NoteReactionRepository for users/reactions
+// (= reactor 視点の reaction list、#821 PR-D)。
+func (h *Handler) SetNoteReactionRepo(r repository.NoteReactionRepository) {
+	h.noteReactionRepo = r
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /

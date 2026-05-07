@@ -1116,6 +1116,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetPageRepo(pageRepo)
 	usersHandler.SetNoteFieldResolver(noteFieldResolver)
 	usersHandler.SetUserRepo(userRepo)
+	usersHandler.SetNoteReactionRepo(reactionRepo)
 	api.POST("/users/show", usersHandler.Show)
 	api.POST("/users/search", usersHandler.Search)
 	api.POST("/users/notes", usersHandler.Notes)
