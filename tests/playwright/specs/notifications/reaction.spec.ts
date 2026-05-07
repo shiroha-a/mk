@@ -24,9 +24,7 @@ import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-
-const baseURL = process.env.MK_BASE_URL ?? 'https://mkgo.local';
-const wsURL = baseURL.replace(/^http/, 'ws');
+import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
 
 test.describe('notifications: reaction', () => {
   test.beforeAll(() => {
@@ -38,49 +36,16 @@ test.describe('notifications: reaction', () => {
     const reactor = await signupUser(request, randomUsername('ntfB'));
 
     // me が main channel を subscribe。
-    const ws = new WebSocket(`${wsURL}/streaming?i=${me.token}`);
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', () => reject(new Error('ws connection error')), { once: true });
-      ws.addEventListener(
-        'close',
-        (ev) => reject(new Error(`ws closed before open: code=${ev.code} reason=${ev.reason || '(empty)'}`)),
-        { once: true },
-      );
-    });
-
-    const subId = 'sub-' + Math.random().toString(16).slice(2);
-    ws.send(JSON.stringify({
-      type: 'connect',
-      body: { channel: 'main', id: subId, params: {} },
-    }));
+    const ws = await openStream(me.token);
+    const subId = subscribeChannel(ws, 'main');
 
     // notification event 受信用 Promise を投稿前に登録 (= race 回避)。
     type NotificationBody = { id: string; type: string; userId?: string; reaction?: string };
-    const notifEventPromise = new Promise<NotificationBody>((resolve, reject) => {
-      const handler = (ev: MessageEvent) => {
-        let msg: { type?: string; body?: { id?: string; type?: string; body?: NotificationBody } };
-        try {
-          msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
-        } catch {
-          return;
-        }
-        if (
-          msg.type === 'channel' &&
-          msg.body?.id === subId &&
-          msg.body.type === 'notification' &&
-          msg.body.body?.type === 'reaction'
-        ) {
-          ws.removeEventListener('message', handler);
-          resolve(msg.body.body);
-        }
-      };
-      ws.addEventListener('message', handler);
-      setTimeout(() => {
-        ws.removeEventListener('message', handler);
-        reject(new Error('did not receive reaction notification within timeout'));
-      }, 5000);
-    });
+    const notifEventPromise = awaitChannelEvent<NotificationBody>(
+      ws,
+      (env) =>
+        env.id === subId && env.type === 'notification' && env.body?.type === 'reaction',
+    );
 
     // subscribe 確定までの短時間バッファ (streaming spec と同根拠)。
     await new Promise((resolve) => setTimeout(resolve, 200));

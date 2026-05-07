@@ -24,9 +24,7 @@ import { expect, test } from '@playwright/test';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { createNote } from '../../fixtures/notes';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-
-const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
-const wsURL = baseURL.replace(/^http/, 'ws');
+import { awaitChannelEvent, openStream, subscribeChannel } from '../../fixtures/streaming';
 
 test.describe('streaming: localTimeline', () => {
   test.beforeAll(() => {
@@ -35,49 +33,14 @@ test.describe('streaming: localTimeline', () => {
 
   test('subscribed user receives a note event for a local public note', async ({ request }) => {
     const me = await signupUser(request, randomUsername('strm'));
-    const ws = new WebSocket(`${wsURL}/streaming?i=${me.token}`);
-
-    // WS open を待つ。close (= server 側 reject) も即 fail として
-    // 報告する (= test の 5s timeout 待ちを避け、原因を message に
-    // 反映できる)。
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', () => reject(new Error('ws connection error')), { once: true });
-      ws.addEventListener(
-        'close',
-        (ev) => reject(new Error(`ws closed before open: code=${ev.code} reason=${ev.reason || '(empty)'}`)),
-        { once: true },
-      );
-    });
-
-    // localTimeline channel を subscribe。subId は client 任意で event の
-    // round-trip 確認に使う。
-    const subId = 'sub-' + Math.random().toString(16).slice(2);
-    ws.send(JSON.stringify({
-      type: 'connect',
-      body: { channel: 'localTimeline', id: subId, params: {} },
-    }));
+    const ws = await openStream(me.token);
+    const subId = subscribeChannel(ws, 'localTimeline');
 
     // 投稿 event 受信用の Promise を先に登録 (= 投稿 → 受信の race を防ぐ)。
-    const noteEventPromise = new Promise<{ id: string; text?: string }>((resolve, reject) => {
-      const handler = (ev: MessageEvent) => {
-        let msg: { type?: string; body?: { id?: string; type?: string; body?: { id: string; text?: string } } };
-        try {
-          msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
-        } catch {
-          return;
-        }
-        if (msg.type === 'channel' && msg.body?.id === subId && msg.body.type === 'note' && msg.body.body) {
-          ws.removeEventListener('message', handler);
-          resolve(msg.body.body);
-        }
-      };
-      ws.addEventListener('message', handler);
-      setTimeout(() => {
-        ws.removeEventListener('message', handler);
-        reject(new Error('did not receive note event within timeout'));
-      }, 5000);
-    });
+    const noteEventPromise = awaitChannelEvent<{ id: string; text?: string }>(
+      ws,
+      (env) => env.id === subId && env.type === 'note',
+    );
 
     // subscribe 確定までの短時間バッファ。upstream は ack を返さないので
     // 厳密に待つ手段はなく、200ms で実用上十分。
