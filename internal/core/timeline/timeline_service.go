@@ -207,10 +207,14 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		IncludeLocalRenotes:   f.IncludeLocalRenotes,
 		ViewerID:              viewerID,
 		MutedChannelIDs:       f.MutedChannelIDs,
-		// MutedUserIDs を SQL push-down に伝搬する (#892)。Redis path の
-		// post-fetch ApplyFilter は依然 MutedUserIDs を見るので、cache hit
-		// と DB fallback の両経路で同 semantics になる。
-		MutedUserIDs: f.MutedUserIDs,
+		// production の SQL 経路では muting テーブルへの subquery で filter
+		// する (#894)。viewer 単位で bind parameter 数が固定 (2) なので
+		// heavy-mute viewer (>1000 mute) でも planning コストが膨らまない。
+		// Redis cache 経路 (in-memory ApplyFilter) は引き続き
+		// TimelineFilter.MutedUserIDs (loadMutedUserIDs で事前取得) を使う。
+		// MutedUserIDs literal は test override 用に残す (本 toDBFilter から
+		// は伝搬しない)。
+		UseMutingSubquery: viewerID != "",
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -1016,6 +1017,93 @@ func TestNoteRepository_ListLocalTimeline_MutedUsersFilter(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, rows, 2, "SQL push-down で limit ぶん non-muted note が fill されること (#892)")
+}
+
+// TestNoteRepository_ListLocalTimeline_MutedUsersSubquery は production
+// 経路 (UseMutingSubquery=true + ViewerID) で muting テーブルへ subquery
+// する filter が正しく動作することを確認する (#894)。muting row の
+// expiresAt が NULL / 未来 / 過去の 3 ケースで active mute だけ filter
+// に効くこと、renote 元 user の mute も同時に弾かれることを担保する。
+func TestNoteRepository_ListLocalTimeline_MutedUsersSubquery(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	mutingRepo := NewMutingRepository(testDB)
+	viewer := insertTestUser(t, "u_mus_v", "musv")
+	defer cleanupUser(t, viewer.ID)
+	mutedAuthor := insertTestUser(t, "u_mus_m", "musm")
+	defer cleanupUser(t, mutedAuthor.ID)
+	expiredMutedAuthor := insertTestUser(t, "u_mus_e", "muse")
+	defer cleanupUser(t, expiredMutedAuthor.ID)
+	mutedRenoteSrc := insertTestUser(t, "u_mus_rs", "musrs")
+	defer cleanupUser(t, mutedRenoteSrc.ID)
+	okAuthor := insertTestUser(t, "u_mus_o", "muso")
+	defer cleanupUser(t, okAuthor.ID)
+
+	// active mute (expiresAt nil)
+	activeMute := &model.Muting{ID: "mute_us_a", MuterID: viewer.ID, MuteeID: mutedAuthor.ID}
+	require.NoError(t, mutingRepo.Create(activeMute))
+	defer cleanupMuting(t, activeMute.ID)
+
+	// active mute (renote 元)
+	renoteMute := &model.Muting{ID: "mute_us_r", MuterID: viewer.ID, MuteeID: mutedRenoteSrc.ID}
+	require.NoError(t, mutingRepo.Create(renoteMute))
+	defer cleanupMuting(t, renoteMute.ID)
+
+	// expired mute (subquery で除外されるべき = 該当 user の note は filter 通過する)
+	pastTime := time.Now().Add(-1 * time.Hour)
+	expiredMute := &model.Muting{ID: "mute_us_e", MuterID: viewer.ID, MuteeID: expiredMutedAuthor.ID, ExpiresAt: &pastTime}
+	require.NoError(t, mutingRepo.Create(expiredMute))
+	defer cleanupMuting(t, expiredMute.ID)
+
+	mkPlain := func(id, uid string) *model.Note {
+		text := "x"
+		return &model.Note{
+			ID: id, UserID: uid, Text: &text,
+			Visibility: model.NoteVisibilityPublic,
+			Reactions:  datatypes.JSON([]byte("{}")),
+		}
+	}
+
+	// muted active author の note (除外)
+	mutedNote := mkPlain("n_mus_m", mutedAuthor.ID)
+	require.NoError(t, repo.Create(mutedNote))
+	defer cleanupNote(t, mutedNote.ID)
+
+	// expired mute author の note (含まれる = subquery が NOW() フィルタを尊重)
+	expiredAuthorNote := mkPlain("n_mus_e", expiredMutedAuthor.ID)
+	require.NoError(t, repo.Create(expiredAuthorNote))
+	defer cleanupNote(t, expiredAuthorNote.ID)
+
+	// renote (= ok author が mutedRenoteSrc を renote。renoteUserId が active
+	// mute なので除外)
+	renoteSrc := mkPlain("n_mus_src", mutedRenoteSrc.ID)
+	require.NoError(t, repo.Create(renoteSrc))
+	defer cleanupNote(t, renoteSrc.ID)
+	renote := &model.Note{
+		ID: "n_mus_renote", UserID: okAuthor.ID,
+		RenoteID: &renoteSrc.ID, RenoteUserID: &mutedRenoteSrc.ID,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(renote))
+	defer cleanupNote(t, renote.ID)
+
+	// ok plain note (含まれる)
+	okNote := mkPlain("n_mus_ok", okAuthor.ID)
+	require.NoError(t, repo.Create(okNote))
+	defer cleanupNote(t, okNote.ID)
+
+	// production 経路: UseMutingSubquery=true / MutedUserIDs 空
+	rows, err := repo.ListLocalTimeline(100, "", "", model.TimelineDBFilter{
+		ViewerID:          viewer.ID,
+		UseMutingSubquery: true,
+	})
+	require.NoError(t, err)
+	ids := idsOf(rows)
+	assert.NotContains(t, ids, mutedNote.ID, "active mute author の note は除外")
+	assert.NotContains(t, ids, renoteSrc.ID, "active mute author の plain note (renote 元) も除外")
+	assert.NotContains(t, ids, renote.ID, "renoteUserId が active mute の renote も除外")
+	assert.Contains(t, ids, expiredAuthorNote.ID, "expired mute は subquery で除外され filter 通過")
+	assert.Contains(t, ids, okNote.ID, "ok author の note は含まれる")
 }
 
 // TestNoteRepository_ListHomeTimeline_MutedUsersWithFollowFilter は HomeTimeline

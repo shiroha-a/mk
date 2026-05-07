@@ -533,14 +533,25 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		// バイパスしてしまう (SQL優先順位: AND > OR)。
 		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, f.MutedChannelIDs)
 	}
-	if len(f.MutedUserIDs) > 0 {
-		// muted user の note を SQL 段階で除外する (#892)。post-fetch filter
-		// と異なり limit ぶん fill された non-muted note を 1 query で取得
-		// できるので、heavy-mute viewer (例: 数千 mutee) でも timeline 件数
-		// が一時的に limit 未満になる UX regression を回避できる。
-		// renote 元 user が muted のケースもここで一緒に弾く (= upstream
-		// Misskey TS QueryService の muting JOIN と同 semantics)。
-		// 2 条件を 1 つの Where にまとめて intent を 1 行で読めるようにする。
+	// muted user filter は 2 経路を持つ (#892 / #894):
+	//   1. UseMutingSubquery=true: muting テーブルへの subquery (production)。
+	//      bind parameter が viewer 単位で 2 つ ($viewerID を 2 度) のみで、
+	//      mute 件数に比例しないので heavy-mute viewer でも planning コスト
+	//      が膨らまない。
+	//   2. MutedUserIDs literal: 既存テスト互換のための override path
+	//      (test や非 viewer 駆動経路で muteeID 集合を直接指定したいとき)。
+	//      Subquery が使えるなら 1. を優先。
+	// 共通の WHERE は: userId NOT IN (mutees) AND
+	//                  (renoteUserId IS NULL OR renoteUserId NOT IN (mutees))
+	if f.UseMutingSubquery && f.ViewerID != "" {
+		// muting subquery: active mute (= ExpiresAt NULL or future) のみ拾う。
+		// mutingRepository.ListMuteeIDs と同じ semantics を SQL 内で表現。
+		mutingSub := `SELECT "muteeId" FROM "muting" WHERE "muterId" = ? AND ("expiresAt" IS NULL OR "expiresAt" > NOW())`
+		q = q.Where(
+			`"userId" NOT IN (`+mutingSub+`) AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN (`+mutingSub+`))`,
+			f.ViewerID, f.ViewerID,
+		)
+	} else if len(f.MutedUserIDs) > 0 {
 		q = q.Where(`"userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
 	}
 	return q
