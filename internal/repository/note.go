@@ -540,8 +540,8 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		// が一時的に limit 未満になる UX regression を回避できる。
 		// renote 元 user が muted のケースもここで一緒に弾く (= upstream
 		// Misskey TS QueryService の muting JOIN と同 semantics)。
-		q = q.Where(`"userId" NOT IN ?`, f.MutedUserIDs)
-		q = q.Where(`("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs)
+		// 2 条件を 1 つの Where にまとめて intent を 1 行で読めるようにする。
+		q = q.Where(`"userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
 	}
 	return q
 }
