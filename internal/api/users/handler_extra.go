@@ -108,10 +108,14 @@ func (h *Handler) Reactions(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
 		}
 		// remote user は upstream でも display を制限している。
-		if target.Host != nil && *target.Host != "" {
+		// upstream TS は `host !== null` で判定するので mk-go も nil 判定に
+		// 揃える (host="" の row は実際には DB に書かれないが、揺らぎ抑止)。
+		if target.Host != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("IS_REMOTE_USER", "Currently unavailable to display reactions of remote users.", "6b95fa98-8cf9-2350-e284-f0ffdb54a805"))
 		}
 		// self view 以外は publicReactions check。
+		// profile 行が無い (= nil) 場合は DB 列 default の `true` 扱いで
+		// fall-through する (upstream TS の getUserPolicies と同 semantics)。
 		if viewer == nil || viewer.ID != req.UserID {
 			profile := h.userService.GetProfile(req.UserID)
 			if profile != nil && !profile.PublicReactions {

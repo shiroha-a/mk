@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/users"
@@ -151,15 +152,18 @@ func TestReactions_NotPublic(t *testing.T) {
 }
 
 // self view (viewer == target) なら publicReactions=false でも取得可能。
+// あわせて Preload された User / Note が出力 entry に詰まること、
+// idGen.ParseTime で createdAt が ISO8601 形式に整形されることも check。
 func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 	h, userRepo, rxRepo := newReactionsHandler(t)
 	userRepo.Users["u_self"] = &model.User{ID: "u_self"}
 	userRepo.Profiles["u_self"] = &model.UserProfile{UserID: "u_self", PublicReactions: false}
-	// reactor self の reaction を 1 件投入。User / Note を Preload 相当で
-	// セットする (mock は静的に詰めるだけ)。
+	// createdAt の format check のため real aidx を使う (= ParseTime が成功)。
+	idGen, _ := id.NewGenerator("aidx")
+	rxID := idGen.Generate(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
 	noteText := "hi"
-	rxRepo.Reactions["rx1"] = &model.NoteReaction{
-		ID:       "rx1",
+	rxRepo.Reactions[rxID] = &model.NoteReaction{
+		ID:       rxID,
 		UserID:   "u_self",
 		NoteID:   "n1",
 		Reaction: "👍",
@@ -173,7 +177,7 @@ func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 	require.Len(t, list, 1)
 	entry := list[0]
-	assert.Equal(t, "rx1", entry["id"])
+	assert.Equal(t, rxID, entry["id"])
 	assert.Equal(t, "👍", entry["type"])
 	require.NotNil(t, entry["user"])
 	require.NotNil(t, entry["note"])
@@ -181,6 +185,12 @@ func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 	assert.Equal(t, "n1", note["id"])
 	assert.Equal(t, "u_other", note["userId"])
 	assert.Equal(t, "hi", note["text"])
+	// createdAt は ISO8601 ms 精度で出る (= 2026-05-07T12:00:00.000Z)。
+	createdAt, ok := entry["createdAt"].(string)
+	require.True(t, ok, "createdAt should be a string")
+	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", createdAt)
+	require.NoError(t, err, "createdAt=%q should be ISO8601 ms", createdAt)
+	assert.Equal(t, 2026, parsed.Year())
 }
 
 // publicReactions=true (default) で viewer != target → list を返す。
