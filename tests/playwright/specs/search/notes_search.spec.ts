@@ -58,11 +58,13 @@ test.describe('search: notes/search text round-trip', () => {
     });
     if (resp.status() === 200) {
       // mk-go SQL LIKE fallback 等、search backend が動く場合
-      // unique 文字列で必ず hit する。
+      // unique 文字列で必ず hit し、text shape も regression guard する
+      // (= packNote が text を含む shape を返すこと)。
       const list = (await resp.json()) as SearchedNote[];
       expect(Array.isArray(list)).toBe(true);
       const hit = list.find((n) => n.id === note.id);
       expect(hit).toBeDefined();
+      expect(hit?.text).toContain(unique);
     } else {
       // upstream Misskey TS 等 external search backend 必須環境では
       // 400 UNAVAILABLE を返す (= playwright stack に meilisearch 不在)。

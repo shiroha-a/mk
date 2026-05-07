@@ -45,5 +45,4 @@ test.describe('search: users/search round-trip', () => {
     expect(hit).toBeDefined();
     expect(hit!.username).toBe(me.username);
   });
-
 });
