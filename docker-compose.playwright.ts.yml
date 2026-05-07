@@ -39,3 +39,11 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+
+  # Playwright runner に「TS backend で実行中」と伝える marker。spec 側は
+  # process.env.MK_BACKEND_TYPE で TS 限定の skip 等を制御する (#882 で
+  # import-zip async download が TS の got HTTPS で self-signed cert を
+  # 弾く問題への workaround)。
+  playwright-runner:
+    environment:
+      MK_BACKEND_TYPE: ts

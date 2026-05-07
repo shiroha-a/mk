@@ -1538,7 +1538,12 @@ func (m *MockEmojiRepository) UpdateFieldsMany(ids []string, fields map[string]a
 					e.License = &s
 				}
 			case "aliases":
-				if arr, ok := v.([]string); ok {
+				// production 経路は pq.StringArray で wrap して渡す (#882
+				// で発覚した character varying[] vs record drift を回避)。
+				// test/legacy で plain []string を渡す呼び出しもあるので両対応。
+				if arr, ok := v.(pq.StringArray); ok {
+					e.Aliases = []string(arr)
+				} else if arr, ok := v.([]string); ok {
 					e.Aliases = arr
 				}
 			case "updatedAt":
