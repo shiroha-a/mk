@@ -26,7 +26,7 @@
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { randomUsername, signupUser } from '../../fixtures/auth';
+import { DEFAULT_TEST_PASSWORD, randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('settings: security / API token / email', () => {
@@ -45,7 +45,7 @@ test.describe('settings: security / API token / email', () => {
     // change-password
     const changeResp = await callApi(request, 'i/change-password', {
       i: me.token,
-      currentPassword: 'password1234', // signupUser default
+      currentPassword: DEFAULT_TEST_PASSWORD,
       newPassword,
     });
     expect(changeResp.status()).toBe(204);
@@ -76,7 +76,7 @@ test.describe('settings: security / API token / email', () => {
     // 検査しない、新 token round-trip は別 spec で扱う想定)。
     const regenResp = await callApi(request, 'i/regenerate-token', {
       i: me.token,
-      password: 'password1234',
+      password: DEFAULT_TEST_PASSWORD,
     });
     expect(regenResp.status()).toBeGreaterThanOrEqual(200);
     expect(regenResp.status()).toBeLessThan(300);
@@ -99,7 +99,7 @@ test.describe('settings: security / API token / email', () => {
     // 設定なら null 許容、200 で更新 self を返す drop-in shape。
     const updResp = await callApi(request, 'i/update-email', {
       i: me.token,
-      password: 'password1234',
+      password: DEFAULT_TEST_PASSWORD,
       email: null,
     });
     expect(updResp.status()).toBe(200);
@@ -114,5 +114,4 @@ test.describe('settings: security / API token / email', () => {
     const afterBody = await after.json();
     expect(afterBody.email ?? null).toBeNull();
   });
-
 });

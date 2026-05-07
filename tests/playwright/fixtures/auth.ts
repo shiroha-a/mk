@@ -41,6 +41,12 @@ export interface Principal {
   username: string;
 }
 
+// DEFAULT_TEST_PASSWORD is the password used by signupUser when caller does
+// not specify one. spec 側で signin-flow / i/change-password / i/update-email
+// 等を叩く際にこの定数を再利用すれば signupUser の default が変わっても
+// 同期する (= 個別 spec 内で 'password1234' を直書きしない、#827 review)。
+export const DEFAULT_TEST_PASSWORD = 'password1234';
+
 // signupUser creates a regular (non-root) account via /api/signup. Phase 1
 // では captcha / email 認証は disabled な instance config を使うので
 // username + password だけで通る。複数回呼んでも username が違えば成功。
@@ -50,7 +56,7 @@ export interface Principal {
 export async function signupUser(
   request: APIRequestContext,
   username: string,
-  password = 'password1234',
+  password = DEFAULT_TEST_PASSWORD,
 ): Promise<Principal> {
   const resp = await callApi(request, 'signup', { username, password });
   if (resp.status() !== 200) {
