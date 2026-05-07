@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,6 +74,32 @@ func TestAntennaRepository_UpdateFields(t *testing.T) {
 func TestAntennaRepository_UpdateFields_NoOp(t *testing.T) {
 	repo := NewAntennaRepository(testDB)
 	require.NoError(t, repo.UpdateFields("any", nil))
+}
+
+// UpdateFields で users に空 pq.StringArray を渡しても NOT NULL 制約違反
+// を起こさないこと (#896 と同 pattern)。core/antenna.Service.Update が
+// pq.StringArray() で wrap せずに plain []string を渡していた時、GORM が
+// NULL に倒して 23502 を起こしていた regression guard。
+func TestAntennaRepository_UpdateFields_EmptyUsers(t *testing.T) {
+	repo := NewAntennaRepository(testDB)
+	user := insertTestUser(t, "u_ar_users", "antusersuser")
+	defer cleanupUser(t, user.ID)
+
+	a := newTestAntenna("ant_cr_users", user.ID, "users")
+	a.Users = pq.StringArray{"u1", "u2"}
+	require.NoError(t, repo.Create(a))
+	defer cleanupAntenna(t, a.ID)
+
+	// 空 users で update — pq.StringArray{} なら '{}' に serialize、
+	// plain []string{} だと GORM が NULL に倒す drift。
+	require.NoError(t, repo.UpdateFields(a.ID, map[string]any{
+		"users": pq.StringArray{},
+	}))
+
+	got, err := repo.FindByID(a.ID)
+	require.NoError(t, err)
+	assert.NotNil(t, got.Users, "users は NULL にならず空配列で保存される")
+	assert.Empty(t, got.Users)
 }
 
 func TestAntennaRepository_Delete(t *testing.T) {
