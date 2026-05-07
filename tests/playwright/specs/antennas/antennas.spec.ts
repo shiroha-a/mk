@@ -1,0 +1,128 @@
+// Phase 3 #833: antennas CRUD round-trip。
+//
+// upstream Misskey TS と mk-go は両方とも:
+//   - antennas/create で antenna 設定 (name, src, keywords, etc) を送る
+//   - antennas/show で antennaId 指定で取得
+//   - antennas/list で自分の antenna 一覧
+//   - antennas/update で部分更新 (name / keywords / etc)
+//   - antennas/delete で削除
+//
+// antennas/notes (= timeline 経路) は #819 で別 cover 済。本 spec は CRUD
+// 部分に集中する。
+//
+// keywords は [[group_a_kw1, group_a_kw2], [group_b_kw1]] の形で AND-of-OR
+// 構造。spec では deterministic な単純 keyword で round-trip のみ確認する。
+
+import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
+import { randomUsername, signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
+
+interface Antenna {
+  id: string;
+  userId: string;
+  name: string;
+  src: string;
+  keywords?: string[][];
+  excludeKeywords?: string[][];
+  caseSensitive?: boolean;
+  withReplies?: boolean;
+  withFile?: boolean;
+  localOnly?: boolean;
+  isActive?: boolean;
+}
+
+test.describe('antennas: CRUD round-trip', () => {
+  test.beforeAll(() => {
+    resetRateLimit();
+  });
+
+  test('create / show / list / update / delete round-trip', async ({ request }) => {
+    const me = await signupUser(request, randomUsername('antA'));
+    const name = `antenna_${Math.random().toString(16).slice(2, 8)}`;
+
+    // create
+    const createResp = await callApi(request, 'antennas/create', {
+      i: me.token,
+      name,
+      src: 'all',
+      keywords: [['hello']],
+      excludeKeywords: [],
+      users: [],
+      caseSensitive: false,
+      withReplies: false,
+      withFile: false,
+      localOnly: false,
+    });
+    expect(createResp.status()).toBe(200);
+    const created = (await createResp.json()) as Antenna;
+    expect(typeof created.id).toBe('string');
+    // userId は upstream TS の packed antenna shape では不在 (= antenna は
+    // 自分専用なので owner field を返さない設計)、mk-go は `userId` を含む。
+    // 両 backend で共通する identity (id / name / src / keywords) のみ assert
+    // する LCD pattern にする。
+    expect(created.name).toBe(name);
+    expect(created.src).toBe('all');
+    expect(created.keywords).toEqual([['hello']]);
+
+    // show
+    const showResp = await callApi(request, 'antennas/show', {
+      i: me.token,
+      antennaId: created.id,
+    });
+    expect(showResp.status()).toBe(200);
+    const shown = (await showResp.json()) as Antenna;
+    expect(shown.id).toBe(created.id);
+    expect(shown.name).toBe(name);
+
+    // list で自分の antenna が含まれる
+    const listResp = await callApi(request, 'antennas/list', { i: me.token });
+    expect(listResp.status()).toBe(200);
+    const list = (await listResp.json()) as Antenna[];
+    expect(Array.isArray(list)).toBe(true);
+    expect(list.find((a) => a.id === created.id)).toBeTruthy();
+
+    // update — name + keywords を変更、空 keywords / users で同 drift 経路も touch
+    const newName = `${name}_updated`;
+    const updateResp = await callApi(request, 'antennas/update', {
+      i: me.token,
+      antennaId: created.id,
+      name: newName,
+      keywords: [['hi', 'world']],
+      // empty users で antenna_service.go::Update の pq.StringArray wrap path
+      // を実行 (#896 の同 anti-pattern を fix 済 = NOT NULL 違反にならない)。
+      users: [],
+    });
+    expect([200, 204]).toContain(updateResp.status());
+
+    const showAfterUpdate = await callApi(request, 'antennas/show', {
+      i: me.token,
+      antennaId: created.id,
+    });
+    expect(showAfterUpdate.status()).toBe(200);
+    const updated = (await showAfterUpdate.json()) as Antenna;
+    expect(updated.name).toBe(newName);
+    expect(updated.keywords).toEqual([['hi', 'world']]);
+
+    // delete
+    const deleteResp = await callApi(request, 'antennas/delete', {
+      i: me.token,
+      antennaId: created.id,
+    });
+    expect([200, 204]).toContain(deleteResp.status());
+
+    // delete 後の show は 4xx (NO_SUCH_ANTENNA)
+    const showAfterDelete = await callApi(request, 'antennas/show', {
+      i: me.token,
+      antennaId: created.id,
+    });
+    expect(showAfterDelete.status()).toBeGreaterThanOrEqual(400);
+    expect(showAfterDelete.status()).toBeLessThan(500);
+
+    // list からも消える
+    const listAfterDelete = await callApi(request, 'antennas/list', { i: me.token });
+    expect(listAfterDelete.status()).toBe(200);
+    const listAfter = (await listAfterDelete.json()) as Antenna[];
+    expect(listAfter.find((a) => a.id === created.id)).toBeFalsy();
+  });
+});
