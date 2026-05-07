@@ -191,7 +191,9 @@ func TestCreate_Blocked(t *testing.T) {
 	h.followingService.SetBlockingChecker(&stubBlockedChecker{blockerID: "bob", blockeeID: "alice"})
 
 	rec := postJSON(h.Create, `{"userId": "bob"}`, alice)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream Misskey TS と同じ 400 BLOCKED (= drop-in 互換、#872)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"BLOCKED"`)
 }
 
 func TestCreate_InvalidParam(t *testing.T) {

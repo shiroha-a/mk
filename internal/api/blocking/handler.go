@@ -36,6 +36,11 @@ type PairRequest struct {
 }
 
 // Create handles POST /api/blocking/create.
+//
+// upstream Misskey TS と同じく成功時は 200 + 対象 blockee の UserDetailed
+// (= isBlocking=true 反映) を返す。frontend (vue) が即時 redraw するため
+// 必要 (#870)。userRepo が wire されない test stub では legacy 互換で
+// 204 No Content にフォールバック。
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req PairRequest
@@ -54,10 +59,13 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return h.respondPackedUser(c, req.UserID)
 }
 
 // Delete handles POST /api/blocking/delete.
+//
+// 同じく upstream TS は 200 + UserDetailed (isBlocking=false 反映) を返す。
+// userRepo 未 wire 時は 204 No Content フォールバック (#870)。
 func (h *Handler) Delete(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req PairRequest
@@ -73,7 +81,24 @@ func (h *Handler) Delete(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return h.respondPackedUser(c, req.UserID)
+}
+
+// respondPackedUser fetches the target user + profile via userRepo and writes
+// a 200 + UserDetailed response. userRepo 未 wire (= 既存 test stub) なら
+// legacy 204 を返す互換 path に落ちる (production では router で必ず wire
+// されるので影響なし、#870)。lookup 失敗時も best-effort 204 にフォール
+// バックして block / unblock の副作用 (= state 反映) を尊重する。
+func (h *Handler) respondPackedUser(c echo.Context, userID string) error {
+	if h.userRepo == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	target, err := h.userRepo.FindByID(userID)
+	if err != nil || target == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	profile, _ := h.userRepo.FindProfileByUserID(userID)
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(target, profile, h.idGen))
 }
 
 // ListRequest is the request body for blocking/list.

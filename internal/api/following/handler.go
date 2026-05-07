@@ -52,7 +52,10 @@ func (h *Handler) Create(c echo.Context) error {
 		case errors.Is(err, corefollowing.ErrAlreadyFollowing), errors.Is(err, corefollowing.ErrAlreadyRequested):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FOLLOWING", "You are already following that user.", "35387507-38c7-4cb9-9197-300b93783fa0"))
 		case errors.Is(err, corefollowing.ErrBlocked):
-			return c.JSON(http.StatusForbidden, apierr.Error("BLOCKED", "You are blocked by that user.", "c4ab57cc-4e41-45e9-bfd9-584f61e35ce0"))
+			// upstream Misskey TS の following/create は BLOCKED を 400 で
+			// 返す (kind: 'client')。旧 mk-go は 403 で返していたが drop-in
+			// 互換のため 400 に揃える (#872)。
+			return c.JSON(http.StatusBadRequest, apierr.Error("BLOCKED", "You are blocked by that user.", "c4ab57cc-4e41-45e9-bfd9-584f61e35ce0"))
 		default:
 			return apierr.JSONInternalError(c)
 		}

@@ -50,7 +50,9 @@ func TestCreate_Success(t *testing.T) {
 	c, rec := newReq(t, `{"userId":"bob"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// upstream Misskey TS と同じ 200 + UserDetailed (= drop-in 互換、#870)。
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"id":"bob"`)
 }
 
 func TestCreate_InvalidParam(t *testing.T) {
@@ -135,7 +137,9 @@ func TestDelete_Success(t *testing.T) {
 	c2, rec := newReq(t, `{"userId":"bob"}`)
 	setUser(c2, "alice")
 	require.NoError(t, h.Delete(c2))
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// upstream Misskey TS と同じ 200 + UserDetailed (#870)。
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"id":"bob"`)
 }
 
 func TestDelete_InvalidParam(t *testing.T) {
