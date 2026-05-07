@@ -223,9 +223,9 @@ func TestService_HybridDBFallback_DedupAndSort(t *testing.T) {
 	assert.Equal(t, "n1", out[2].ID)
 }
 
-// limit > 全件 のとき余分な truncate が走らないこと。逆に limit < 全件 の
-// truncate path は別 test で扱う想定で、本 test は merge dedup path のみを
-// fix する。
+// limit < 全件 のとき merged 結果が ID 降順先頭 limit 件に truncate される
+// path を直接 cover する (#819 PR-fix)。home / local 計 5 件投入、limit=3
+// で先頭 3 件だけが返ることを check。
 func TestService_HybridDBFallback_LimitTruncate(t *testing.T) {
 	testRedis.FlushAll(context.Background())
 	repo := &splitTimelineRepo{
