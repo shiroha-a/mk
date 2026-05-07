@@ -22,10 +22,17 @@ export interface ChatMessage {
 //
 // `createdAt` は upstream 必須 field (ID から派生)、mk-go も #855 PR-A
 // 以降で全 chat/rooms/* endpoint が含めて返す。
+//
+// `isMuted` / `invitationExists` は upstream optional だが、mk-go は
+// handler 経由 response で常に boolean を返す (#855 PR-B 以降)。
+// owner === me の場合は両方 false (= owner は自身の room なので mute も
+// invitation も無関係)、それ以外は membership / invitation lookup の結果。
 export interface ChatRoom {
   id: string;
   createdAt: string;
   name: string;
   ownerId: string;
   description: string;
+  isMuted: boolean;
+  invitationExists: boolean;
 }

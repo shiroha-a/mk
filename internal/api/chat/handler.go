@@ -146,6 +146,36 @@ func (h *Handler) packRoomWithCreatedAt(r *model.ChatRoom) map[string]any {
 	return result
 }
 
+// packRoomDetailed augments packRoomWithCreatedAt with viewer (= meID) -
+// specific optional field `isMuted` / `invitationExists`。upstream Misskey
+// TS の ChatEntityService.packRoom と同じ semantics:
+//   - meID が空、または me === room.OwnerID の場合は lookup を skip
+//     (= owner は自身の room なので mute も invitation も無関係、両 false)
+//   - me !== owner の場合のみ membership / invitation を lookup する
+//
+// upstream packedChatRoomSchema は両 field を `optional: true` で定義する
+// が、mk-go は handler 経由 response で常に boolean を返す (= 利用側が
+// undefined / boolean のどちらか分岐を考えずに済むよう一貫させる、#855)。
+//
+// caller が meID を渡せない場面 (例: federation 経由の eager pack や
+// 内部用途) では packRoomWithCreatedAt をそのまま使う。
+func (h *Handler) packRoomDetailed(r *model.ChatRoom, meID string) map[string]any {
+	result := h.packRoomWithCreatedAt(r)
+	isMuted := false
+	invitationExists := false
+	if meID != "" && meID != r.OwnerID {
+		if mem, err := h.repo.FindMembership(meID, r.ID); err == nil && mem != nil {
+			isMuted = mem.IsMuted
+		}
+		if _, err := h.repo.FindInvitation(meID, r.ID); err == nil {
+			invitationExists = true
+		}
+	}
+	result["isMuted"] = isMuted
+	result["invitationExists"] = invitationExists
+	return result
+}
+
 // packMessageDetailed builds the upstream-compatible ChatMessage payload
 // expected by MkChatHistories.vue: createdAt (ID から派生)、fromUser、
 // toUser (DM の時)、toRoom (room の時)。upstream の
@@ -205,11 +235,12 @@ func (h *Handler) RoomsCreate(c echo.Context) error {
 	if err := h.repo.CreateRoom(room); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
+	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
 }
 
 // RoomsShow handles POST /api/chat/rooms/show.
 func (h *Handler) RoomsShow(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
 	}
@@ -220,7 +251,7 @@ func (h *Handler) RoomsShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
 	}
-	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
+	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
 }
 
 // RoomsUpdate handles POST /api/chat/rooms/update.
@@ -247,7 +278,7 @@ func (h *Handler) RoomsUpdate(c echo.Context) error {
 	if err := h.repo.UpdateRoom(room); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, h.packRoomWithCreatedAt(room))
+	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
 }
 
 // RoomsDelete handles POST /api/chat/rooms/delete.
@@ -273,7 +304,10 @@ func (h *Handler) RoomsOwned(c echo.Context) error {
 	rooms, _ := h.repo.ListRoomsByOwner(user.ID)
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
-		result[i] = h.packRoomWithCreatedAt(r)
+		// 全 room の owner = user.ID (= 一覧の filter 条件)。packRoomDetailed は
+		// 内部で me === owner check で lookup を skip し isMuted/invitationExists
+		// を false に固定する。
+		result[i] = h.packRoomDetailed(r, user.ID)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -284,7 +318,11 @@ func (h *Handler) RoomsJoined(c echo.Context) error {
 	rooms, _ := h.repo.ListJoinedRooms(user.ID)
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
-		result[i] = h.packRoomWithCreatedAt(r)
+		// joined 一覧は本人が member の room なので room ごとに membership
+		// lookup が走る (= isMuted を返すため)。upstream は packRooms hint で
+		// bulk fetch するが、本実装は per-room lookup (= 件数 N の clean fetch)。
+		// hint cache 化は別 issue で扱う。
+		result[i] = h.packRoomDetailed(r, user.ID)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -811,7 +849,9 @@ func (h *Handler) InvitationsInbox(c echo.Context) error {
 	for _, inv := range rows {
 		entry := map[string]any{"id": inv.ID, "roomId": inv.RoomID, "userId": inv.UserID}
 		if inv.Room != nil {
-			entry["room"] = h.packRoomWithCreatedAt(inv.Room)
+			// inbox は本人が invitee (= owner ではない)。lookup で
+			// invitationExists = true、isMuted = false (まだ非 member) になる。
+			entry["room"] = h.packRoomDetailed(inv.Room, user.ID)
 		}
 		out = append(out, entry)
 	}

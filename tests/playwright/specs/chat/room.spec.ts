@@ -65,6 +65,11 @@ test.describe('chat: rooms', () => {
     // 派生する必須 field、mk-go は #855 PR-A 以降で同 pattern。Date.parse で
     // 有効な timestamp として読めることを check (秒精度の drift は許容)。
     expect(Number.isFinite(Date.parse(room.createdAt))).toBe(true);
+    // owner === me で room を作成した直後なので、upstream / mk-go (#855 PR-B
+    // 以降) ともに isMuted / invitationExists は false。owner check で repo
+    // lookup が skip される設計。
+    expect(room.isMuted).toBe(false);
+    expect(room.invitationExists).toBe(false);
     // upstream の packedChatRoomSchema には `isArchived` が無いため
     // mk-go も #851 fix 以降は返さない。本 spec では archived state は
     // assert しない (= field 不在を許容)。
@@ -85,10 +90,23 @@ test.describe('chat: rooms', () => {
       i: invitee.token,
     });
     expect(inboxResp.status()).toBe(200);
-    const inbox = (await inboxResp.json()) as { id: string; roomId: string }[];
+    const inbox = (await inboxResp.json()) as {
+      id: string;
+      roomId: string;
+      room?: ChatRoom;
+    }[];
     const inv = inbox.find((x) => x.roomId === room.id);
     if (!inv) {
       throw new Error(`invitations/inbox did not contain invitation for room ${room.id}`);
+    }
+    // inbox の `room` field で invitee 視点の packRoomDetailed shape を確認:
+    // me !== owner なので membership / invitation lookup が走り、
+    // invitationExists = true (= 招待が pending)、isMuted = false (まだ
+    // member ではないので mute 状態なし) になる (#855 PR-B)。
+    if (inv.room) {
+      expect(inv.room.id).toBe(room.id);
+      expect(inv.room.invitationExists).toBe(true);
+      expect(inv.room.isMuted).toBe(false);
     }
 
     // invitee が rooms/join { roomId } で room に join (= membership 確立)。
