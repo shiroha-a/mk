@@ -28,7 +28,7 @@ test.describe('reversi: match invitation + cancel round-trip', () => {
     // A が B に対戦招待を送る。match の return shape は backend で drift:
     //   - upstream Misskey TS: 204 No Content (= invitation 投函のみ)
     //   - mk-go: 200 + game body (= 即座に game row を返す)
-    // 両 backend で動く LCD として 200 / 204 両許容、body 検証は省く。
+    // 両 backend で動く LCD として 200 / 204 両許容、body 検証は省く (#898)。
     // game row の存在は B 視点 invitations + show-game で別途確認する。
     const matchResp = await callApi(request, 'reversi/match', {
       i: A.token,
@@ -48,7 +48,7 @@ test.describe('reversi: match invitation + cancel round-trip', () => {
     // A が cancel-match で pending 招待を取り消す。両 backend で 2xx を返す
     // ことを担保する。cancel 後の invitations 側の cleanup tail は backend で
     // drift (TS は Redis pending invitation entry を残し、mk-go は game row
-    // 削除と同時に list からも消える) があり別 issue 候補なので、ここでは
+    // 削除と同時に list からも消える、#899 で追跡) があるので、ここでは
     // cancel API の return shape のみ検証する。
     const cancelResp = await callApi(request, 'reversi/cancel-match', { i: A.token });
     expect([200, 204]).toContain(cancelResp.status());
