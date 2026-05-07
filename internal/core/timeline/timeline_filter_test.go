@@ -232,3 +232,47 @@ func TestApplyFilter_MutedUsersEmptyIsNoop(t *testing.T) {
 	out2 := ApplyFilter(notes, "viewer", TimelineFilter{MutedUserIDs: []string{}})
 	assert.Len(t, out2, 2)
 }
+
+// renote-mute は投稿者が renote-muted で **かつ** pure renote の場合のみ
+// 除外 (#903)。投稿者の plain note / quote renote はそのまま通る。
+func TestApplyFilter_RenoteMutedPureRenoteExcluded(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("1", withUser("muted-renoter"), withRenote),
+		makeNote("2", withUser("ok-renoter"), withRenote),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{
+		RenoteMutedUserIDs: []string{"muted-renoter"},
+	})
+	assert.Len(t, out, 1)
+	assert.Equal(t, "2", out[0].ID)
+}
+
+// renote-mute は **plain note は通す** (regular mute との違い、#903)。
+// 投稿者が renote-mute されていても、その人の plain な note は表示する。
+func TestApplyFilter_RenoteMutedPlainNoteKept(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("1", withUser("muted-renoter"), withText),   // plain note
+		makeNote("2", withUser("muted-renoter"), withRenote), // pure renote → skip
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{
+		RenoteMutedUserIDs: []string{"muted-renoter"},
+	})
+	assert.Len(t, out, 1)
+	assert.Equal(t, "1", out[0].ID, "plain note (text 付き) は renote-mute 対象外")
+}
+
+// renote-mute は **quote renote (text 付き / file 付き renote) も通す**
+// (#903、isPureRenote が false なので skip 対象外)。
+func TestApplyFilter_RenoteMutedQuoteRenoteKept(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("1", withUser("muted-renoter"), withRenote, withText),  // quote renote
+		makeNote("2", withUser("muted-renoter"), withRenote, withFiles), // file 付き renote
+		makeNote("3", withUser("muted-renoter"), withRenote),            // pure renote → skip
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{
+		RenoteMutedUserIDs: []string{"muted-renoter"},
+	})
+	assert.Len(t, out, 2)
+	assert.Equal(t, "1", out[0].ID)
+	assert.Equal(t, "2", out[1].ID)
+}

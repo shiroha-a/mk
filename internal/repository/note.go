@@ -569,9 +569,13 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	// renote の note のみ除外する。投稿者の plain note / quote renote は
 	// そのまま通す。upstream Misskey TS の
 	// generateMutedUserRelatedRenotesQuery と同 semantics。
-	//   - subquery 経路 (UseRenoteMutingSubquery=true): renote_muting への
-	//     NOT EXISTS で bind parameter を viewer 単位に固定 (#894 と同 pattern)
-	//   - literal 経路: test override 用、現 production からは未使用
+	//
+	// SQL は subquery 経路のみ実装 (UseRenoteMutingSubquery=true 必須):
+	// renote_muting への NOT EXISTS で bind parameter を viewer 単位に固定
+	// (#894 user-mute subquery と同 pattern)。user-mute のような literal
+	// path (RenoteMutedUserIDs を直接 IN) は現状 test/production とも未使用
+	// なので未実装。必要になったら同 file の MutedUserIDs literal 分岐と
+	// 同 pattern で追加可能。
 	// pure renote condition: text IS NULL AND fileIds = '{}' AND renoteId IS NOT NULL
 	if f.UseRenoteMutingSubquery && f.ViewerID != "" {
 		q = q.Where(

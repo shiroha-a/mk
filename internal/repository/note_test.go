@@ -1106,6 +1106,79 @@ func TestNoteRepository_ListLocalTimeline_MutedUsersSubquery(t *testing.T) {
 	assert.Contains(t, ids, okNote.ID, "ok author の note は含まれる")
 }
 
+// TestNoteRepository_ListLocalTimeline_RenoteMutedSubquery は production
+// 経路 (UseRenoteMutingSubquery=true + ViewerID) で renote_muting への
+// NOT EXISTS subquery が pure renote のみ除外し、plain note / quote
+// renote は通すことを直接 verify する (#903)。
+func TestNoteRepository_ListLocalTimeline_RenoteMutedSubquery(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	renoteMutingRepo := NewRenoteMutingRepository(testDB)
+	viewer := insertTestUser(t, "u_rms_v", "rmsv")
+	defer cleanupUser(t, viewer.ID)
+	mutedRenoter := insertTestUser(t, "u_rms_m", "rmsm")
+	defer cleanupUser(t, mutedRenoter.ID)
+	srcAuthor := insertTestUser(t, "u_rms_s", "rmss")
+	defer cleanupUser(t, srcAuthor.ID)
+
+	// viewer renote-mutes mutedRenoter
+	rmRec := &model.RenoteMuting{ID: "rms_mute", MuterID: viewer.ID, MuteeID: mutedRenoter.ID}
+	require.NoError(t, renoteMutingRepo.Create(rmRec))
+	defer cleanupRenoteMuting(t, rmRec.ID)
+
+	// mutedRenoter の plain note (= renote ではない、含まれるべき)
+	plainText := "plain"
+	plainNote := &model.Note{
+		ID: "n_rms_plain", UserID: mutedRenoter.ID, Text: &plainText,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(plainNote))
+	defer cleanupNote(t, plainNote.ID)
+
+	// srcAuthor の original note (renote 元)
+	srcText := "src"
+	srcNote := &model.Note{
+		ID: "n_rms_src", UserID: srcAuthor.ID, Text: &srcText,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(srcNote))
+	defer cleanupNote(t, srcNote.ID)
+
+	// mutedRenoter の pure renote (除外されるべき)
+	pureRenote := &model.Note{
+		ID: "n_rms_pure", UserID: mutedRenoter.ID,
+		RenoteID: &srcNote.ID, RenoteUserID: &srcAuthor.ID,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(pureRenote))
+	defer cleanupNote(t, pureRenote.ID)
+
+	// mutedRenoter の quote renote (text 付き、含まれるべき)
+	quoteText := "quote!"
+	quoteRenote := &model.Note{
+		ID: "n_rms_quote", UserID: mutedRenoter.ID, Text: &quoteText,
+		RenoteID: &srcNote.ID, RenoteUserID: &srcAuthor.ID,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(quoteRenote))
+	defer cleanupNote(t, quoteRenote.ID)
+
+	rows, err := repo.ListLocalTimeline(100, "", "", model.TimelineDBFilter{
+		ViewerID:                viewer.ID,
+		UseRenoteMutingSubquery: true,
+	})
+	require.NoError(t, err)
+	ids := idsOf(rows)
+
+	assert.Contains(t, ids, plainNote.ID, "plain note は renote-mute 対象外")
+	assert.Contains(t, ids, srcNote.ID, "src author の note は対象外 (= viewer は src を mute していない)")
+	assert.Contains(t, ids, quoteRenote.ID, "quote renote (text 付き) は通る")
+	assert.NotContains(t, ids, pureRenote.ID, "muted renoter の pure renote のみ除外")
+}
+
 // TestNoteRepository_ListHomeTimeline_MutedUsersWithFollowFilter は HomeTimeline
 // で MutedUserIDs と follow 制約が両立することを確認する (#892)。muted user は
 // follow していても home から除外されるべき、かつ MutedUserIDs の OR 節バグで

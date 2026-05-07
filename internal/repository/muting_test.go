@@ -160,4 +160,35 @@ func TestRenoteMutingRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.ListByMuter("a", "", "", 10, 0)
 	assert.Error(t, err)
+	_, err = repo.ListMuteeIDs("a")
+	assert.Error(t, err)
+}
+
+// ListMuteeIDs は muterID の renote-mute 全 muteeID を返す (#903 timeline
+// filter 用)。renote_muting には expiresAt が無いので active filter は不要、
+// 空 muterID は nil を返す。
+func TestRenoteMutingRepository_ListMuteeIDs(t *testing.T) {
+	repo := NewRenoteMutingRepository(testDB)
+	u1 := insertTestUser(t, "u_rmlm_1", "rmlm1")
+	u2 := insertTestUser(t, "u_rmlm_2", "rmlm2")
+	u3 := insertTestUser(t, "u_rmlm_3", "rmlm3")
+	defer cleanupUser(t, u1.ID)
+	defer cleanupUser(t, u2.ID)
+	defer cleanupUser(t, u3.ID)
+
+	rec1 := &model.RenoteMuting{ID: "rmlm_1", MuterID: u1.ID, MuteeID: u2.ID}
+	require.NoError(t, repo.Create(rec1))
+	defer cleanupRenoteMuting(t, rec1.ID)
+	rec2 := &model.RenoteMuting{ID: "rmlm_2", MuterID: u1.ID, MuteeID: u3.ID}
+	require.NoError(t, repo.Create(rec2))
+	defer cleanupRenoteMuting(t, rec2.ID)
+
+	ids, err := repo.ListMuteeIDs(u1.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{u2.ID, u3.ID}, ids)
+
+	// muterID 空は nil 返却 (viewer==nil の short-circuit と整合)
+	ids, err = repo.ListMuteeIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, ids)
 }
