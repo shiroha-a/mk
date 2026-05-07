@@ -4,6 +4,7 @@ package drive
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -384,12 +385,19 @@ func (h *Handler) packDriveFolderDetail(f *model.DriveFolder) entity.DriveFolder
 	foldersCount := 0
 	filesCount := 0
 	if h.folderRepo != nil {
-		if n, err := h.folderRepo.CountChildFolders(f.ID); err == nil {
+		if n, err := h.folderRepo.CountChildFolders(f.ID); err != nil {
+			// silent 0 を返すと真の DB error と空 state が区別できないので
+			// 運用 debug 用に Warn で記録する。frontend には response が
+			// 0 で返るので影響なし。
+			slog.Warn("packDriveFolderDetail: CountChildFolders failed", "folderID", f.ID, "err", err)
+		} else {
 			foldersCount = n
 		}
 	}
 	if h.fileRepo != nil {
-		if n, err := h.fileRepo.CountByFolder(f.ID); err == nil {
+		if n, err := h.fileRepo.CountByFolder(f.ID); err != nil {
+			slog.Warn("packDriveFolderDetail: CountByFolder failed", "folderID", f.ID, "err", err)
+		} else {
 			filesCount = n
 		}
 	}
@@ -399,6 +407,9 @@ func (h *Handler) packDriveFolderDetail(f *model.DriveFolder) entity.DriveFolder
 		if parent, err := h.folderRepo.FindByID(*f.ParentID); err == nil {
 			parentPacked := h.packDriveFolderDetail(parent)
 			e.Parent = &parentPacked
+		} else {
+			// parent FindByID error は recursion 切断の原因。同上で Warn。
+			slog.Warn("packDriveFolderDetail: parent FindByID failed", "folderID", f.ID, "parentID", *f.ParentID, "err", err)
 		}
 	}
 	return e
