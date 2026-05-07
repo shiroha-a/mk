@@ -55,11 +55,10 @@ async function assertChartShape(
   const data = (await resp.json()) as Record<string, unknown>;
   const leaves = flattenLeafArrays(data);
   expect(leaves.length, `${endpoint} should have at least 1 number[] leaf`).toBeGreaterThan(0);
+  // flattenLeafArrays が `every typeof === 'number'` で filter 済なので
+  // 各要素の type 再 assert は不要 (= dead code 削除、length のみ確認)。
   for (const leaf of leaves) {
     expect(leaf.length, `${endpoint} leaf array should have length=${LIMIT}`).toBe(LIMIT);
-    for (const n of leaf) {
-      expect(typeof n).toBe('number');
-    }
   }
 }
 
