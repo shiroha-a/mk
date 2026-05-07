@@ -18,9 +18,11 @@ import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
+// Antenna の packed shape (upstream Misskey TS と mk-go #904 fix 後で
+// 一致)。userId field は両 backend で **含まない** (= antenna は user-scoped、
+// frontend が呼出主の id を別経路で持つ設計)。
 interface Antenna {
   id: string;
-  userId: string;
   name: string;
   src: string;
   keywords?: string[][];
@@ -73,13 +75,13 @@ test.describe('antennas: CRUD round-trip', () => {
       localOnly: false,
     });
     expect(createResp.status()).toBe(200);
-    const created = (await createResp.json()) as Antenna;
+    // packed antenna は upstream Misskey TS / mk-go (#904 fix 後) いずれも
+    // userId を含まない。両 backend の shape を strict に揃えた regression
+    // guard として userId 不在を直接 assert する。
+    const created = (await createResp.json()) as Record<string, unknown>;
     expect(typeof created.id).toBe('string');
-    createdAntennaId = created.id;
-    // userId は upstream TS の packed antenna shape では不在 (= antenna は
-    // 自分専用なので owner field を返さない設計)、mk-go は `userId` を含む
-    // drift がある (#904 で追跡)。両 backend で共通する identity (id / name
-    // / src / keywords) のみ assert する LCD pattern にする。
+    createdAntennaId = created.id as string;
+    expect(created.userId).toBeUndefined();
     expect(created.name).toBe(name);
     expect(created.src).toBe('all');
     expect(created.keywords).toEqual([['hello']]);

@@ -2,6 +2,7 @@ package antennas
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -71,6 +72,24 @@ func TestCreate_Success(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestCreate_NoUserIdInResponse は #904 で fix した shape drift の
+// regression guard。upstream Misskey TS の packAntenna は userId を
+// embed しないので、mk-go も同 shape (= userId field なし) で揃える。
+func TestCreate_NoUserIdInResponse(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	_, ok := body["userId"]
+	assert.False(t, ok, "antennaToMap response must not include userId (#904)")
+	// 必須 field の existence は念のため touch しておく (drift で吸い込ま
+	// れないように reverse の guard)。
+	assert.Equal(t, "alpha", body["name"])
 }
 
 func TestCreate_BadJSON(t *testing.T) {

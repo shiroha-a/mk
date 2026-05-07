@@ -23,6 +23,13 @@ type TimelineFilter struct {
 	// MutedUserIDs が toDBFilter 経由で SQL の NOT IN として push-down
 	// されるので、両経路で同 semantics に保たれる (#892)。
 	MutedUserIDs []string
+	// RenoteMutedUserIDs は viewer が renote-mute した user の **pure renote**
+	// だけを除外する filter (#903)。MutedUserIDs と異なり:
+	//   - 投稿者の plain note (= text あり / file 付き / quote renote 含む) は
+	//     **そのまま表示**
+	//   - pure renote (= text なし / file なし / renoteId あり) のみ skip
+	// upstream Misskey TS の generateMutedUserRelatedRenotesQuery と同 semantics。
+	RenoteMutedUserIDs []string
 }
 
 // boolDefault returns *b if non-nil, else def.
@@ -63,6 +70,14 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		}
 	}
 
+	var renoteMutedUsers map[string]struct{}
+	if len(f.RenoteMutedUserIDs) > 0 {
+		renoteMutedUsers = make(map[string]struct{}, len(f.RenoteMutedUserIDs))
+		for _, id := range f.RenoteMutedUserIDs {
+			renoteMutedUsers[id] = struct{}{}
+		}
+	}
+
 	out := make([]*model.Note, 0, len(notes))
 	for _, n := range notes {
 		if f.WithFiles && len(n.FileIDs) == 0 {
@@ -87,6 +102,15 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 				if _, muted := mutedUsers[*n.RenoteUserID]; muted {
 					continue
 				}
+			}
+		}
+		// renote-mute filter: 投稿者が renote-muted で **かつ** pure renote
+		// の場合のみ除外する (= upstream の generateMutedUserRelatedRenotesQuery
+		// と同 semantics、#903)。投稿者の plain note / quote renote はそのまま
+		// 通す。renote 元の userId は対象外 (= renote-mute は renoter 視点)。
+		if renoteMutedUsers != nil && isPureRenote(n) {
+			if _, muted := renoteMutedUsers[n.UserID]; muted {
+				continue
 			}
 		}
 		// withReplies=false: 他人への返信を除外 (自分への返信は残す)

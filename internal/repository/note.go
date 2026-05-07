@@ -565,6 +565,20 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	} else if len(f.MutedUserIDs) > 0 {
 		q = q.Where(`"userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
 	}
+	// renote-mute filter (#903): 投稿者が renote-muted で **かつ** pure
+	// renote の note のみ除外する。投稿者の plain note / quote renote は
+	// そのまま通す。upstream Misskey TS の
+	// generateMutedUserRelatedRenotesQuery と同 semantics。
+	//   - subquery 経路 (UseRenoteMutingSubquery=true): renote_muting への
+	//     NOT EXISTS で bind parameter を viewer 単位に固定 (#894 と同 pattern)
+	//   - literal 経路: test override 用、現 production からは未使用
+	// pure renote condition: text IS NULL AND fileIds = '{}' AND renoteId IS NOT NULL
+	if f.UseRenoteMutingSubquery && f.ViewerID != "" {
+		q = q.Where(
+			`NOT (EXISTS (SELECT 1 FROM "renote_muting" rm WHERE rm."muterId" = ? AND rm."muteeId" = "note"."userId") AND text IS NULL AND "fileIds" = '{}' AND "renoteId" IS NOT NULL)`,
+			f.ViewerID,
+		)
+	}
 	return q
 }
 

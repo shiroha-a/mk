@@ -168,6 +168,23 @@ func (m *MockRenoteMutingRepository) Exists(muterID, muteeID string) (bool, erro
 	return err == nil, nil
 }
 
+// ListMuteeIDs returns muteeIDs of all renote-mute rows for muterID.
+// timeline endpoint で renote-mute された user の pure renote を除外する
+// filter 用 (#903)。renote_muting には expiresAt が無いので active filter 不要。
+func (m *MockRenoteMutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	for _, r := range m.Mutings {
+		if r.MuterID != muterID {
+			continue
+		}
+		ids = append(ids, r.MuteeID)
+	}
+	return ids, nil
+}
+
 func (m *MockRenoteMutingRepository) ListByMuter(muterID, sinceID, untilID string, limit, offset int) ([]*model.RenoteMuting, error) {
 	var rows []*model.RenoteMuting
 	for _, r := range m.Mutings {

@@ -40,6 +40,7 @@ type Handler struct {
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
 	mutingRepo        repository.MutingRepository
+	renoteMutingRepo  repository.RenoteMutingRepository
 	instanceRepo      repository.InstanceRepository
 	emojiRepo         repository.EmojiRepository
 	driveFolderRepo   repository.DriveFolderRepository
@@ -63,6 +64,13 @@ func (h *Handler) SetChannelMutingRepo(r repository.ChannelMutingRepository) {
 // TS の muting JOIN と同 semantics、#874)。
 func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
 	h.mutingRepo = r
+}
+
+// SetRenoteMutingRepo attaches a RenoteMutingRepository so timeline handlers
+// can exclude pure renotes by users the viewer has renote-muted (#903)。
+// upstream Misskey TS の generateMutedUserRelatedRenotesQuery と同 semantics。
+func (h *Handler) SetRenoteMutingRepo(r repository.RenoteMutingRepository) {
+	h.renoteMutingRepo = r
 }
 
 // SetTranslator attaches a DeepL translator for /api/notes/translate.

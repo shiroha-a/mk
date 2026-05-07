@@ -1048,6 +1048,10 @@ func (s *Server) setupRoutes() {
 	// 未配線だと user mute は read 時に効かず、cache のみ DB 整合の状態
 	// になる security/UX regression が残る。production では必ず wire する。
 	notesHandler.SetMutingRepo(mutingRepo)
+	// timeline endpoint で renote-muted user の pure renote を除外する
+	// filter (#903)。未配線だと renote-mute は read 時に効かず、frontend
+	// で消えるべき renote が表示され続ける。production では必ず wire する。
+	notesHandler.SetRenoteMutingRepo(renoteMutingRepo)
 	notesHandler.SetInstanceRepo(instanceRepo)
 	notesHandler.SetEmojiRepo(emojiRepo)
 	notesHandler.SetReactionReader(reactionCountWriter)

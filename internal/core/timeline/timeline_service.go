@@ -215,6 +215,9 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		// MutedUserIDs literal は test override 用に残す (本 toDBFilter から
 		// は伝搬しない)。
 		UseMutingSubquery: viewerID != "",
+		// renote-mute も同様に subquery 経路を使う (#903)。pure renote 条件
+		// は applyTimelineFilter 側で組み立てる。
+		UseRenoteMutingSubquery: viewerID != "",
 	}
 }
 

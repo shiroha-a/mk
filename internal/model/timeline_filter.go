@@ -28,4 +28,10 @@ type TimelineDBFilter struct {
 	// PostgreSQL の planning コスト / parameter limit に達しない。
 	// MutedUserIDs より優先 (両方 set されたら subquery が勝つ)。
 	UseMutingSubquery bool
+	// UseRenoteMutingSubquery が true の場合、ViewerID を使って
+	// renote_muting テーブルへの subquery で **pure renote のみ** を除外
+	// する filter を適用する (#903)。MutedUserIDs と異なり投稿者の plain
+	// note は通す。upstream Misskey TS の
+	// generateMutedUserRelatedRenotesQuery と同 semantics。
+	UseRenoteMutingSubquery bool
 }

@@ -290,10 +290,12 @@ func (h *Handler) Notes(c echo.Context) error {
 }
 
 func antennaToMap(a *model.Antenna) map[string]any {
+	// upstream Misskey TS の packAntenna は userId field を embed しない
+	// (= antenna は user-scoped で frontend が呼出 user の id を別経路で持つ
+	// 設計、#904)。drop-in 互換維持のため mk-go も同 shape に揃える。
 	return map[string]any{
 		"id":              a.ID,
 		"createdAt":       a.LastUsedAt,
-		"userId":          a.UserID,
 		"name":            a.Name,
 		"src":             a.Src,
 		"userListId":      a.UserListID,

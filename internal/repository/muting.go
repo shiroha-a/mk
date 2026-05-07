@@ -104,6 +104,10 @@ type RenoteMutingRepository interface {
 	Exists(muterID, muteeID string) (bool, error)
 	// ListByMuter supports cursor (sinceID/untilID) and offset pagination.
 	ListByMuter(muterID, sinceID, untilID string, limit, offset int) ([]*model.RenoteMuting, error)
+	// ListMuteeIDs returns the muteeIDs of renote-mute rows for muterID.
+	// timeline endpoint で renote-mute されたユーザーの pure renote を
+	// 除外する filter 用 (#903)。MutingRepository.ListMuteeIDs と同 shape。
+	ListMuteeIDs(muterID string) ([]string, error)
 }
 
 type renoteMutingRepository struct {
@@ -139,6 +143,22 @@ func (r *renoteMutingRepository) Exists(muterID, muteeID string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// ListMuteeIDs returns muteeIDs of all renote-mute rows for muterID.
+// renote_muting には expiresAt が無いので active filter は不要 (= 解除は
+// row delete で完結)。MutingRepository.ListMuteeIDs と同 shape (#903)。
+func (r *renoteMutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.RenoteMuting{}).
+		Where(`"muterId" = ?`, muterID).
+		Pluck(`"muteeId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (r *renoteMutingRepository) ListByMuter(muterID, sinceID, untilID string, limit, offset int) ([]*model.RenoteMuting, error) {
