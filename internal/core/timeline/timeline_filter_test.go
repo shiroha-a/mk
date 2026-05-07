@@ -191,3 +191,44 @@ func TestApplyFilter_MutedChannelsEmptyIsNoop(t *testing.T) {
 	out := ApplyFilter(notes, "", TimelineFilter{})
 	assert.Len(t, out, 2)
 }
+
+func TestApplyFilter_MutedUsersExcluded(t *testing.T) {
+	// author = note 投稿者。muted-author の note は除外される (#874)。
+	notes := []*model.Note{
+		makeNote("1", withUser("normal")),
+		makeNote("2", withUser("muted-author")),
+		makeNote("3", withUser("normal2")),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{
+		MutedUserIDs: []string{"muted-author"},
+	})
+	assert.Len(t, out, 2)
+	assert.Equal(t, "1", out[0].ID)
+	assert.Equal(t, "3", out[1].ID)
+}
+
+func TestApplyFilter_MutedRenoteSourceExcluded(t *testing.T) {
+	// renote 元 user が muted の場合、renote note 自体も除外する
+	// (= upstream Misskey TS の muting JOIN と同 semantics、#874)。
+	notes := []*model.Note{
+		makeNote("1", withUser("normal"), withRenote, withRenoteUser("muted-source")),
+		makeNote("2", withUser("normal"), withRenote, withRenoteUser("ok-source")),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{
+		MutedUserIDs: []string{"muted-source"},
+	})
+	assert.Len(t, out, 1)
+	assert.Equal(t, "2", out[0].ID)
+}
+
+func TestApplyFilter_MutedUsersEmptyIsNoop(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("1", withUser("any")),
+		makeNote("2", withUser("any2")),
+	}
+	// nil / 空 slice は filter 無効 (= 従来挙動)
+	out := ApplyFilter(notes, "viewer", TimelineFilter{MutedUserIDs: nil})
+	assert.Len(t, out, 2)
+	out2 := ApplyFilter(notes, "viewer", TimelineFilter{MutedUserIDs: []string{}})
+	assert.Len(t, out2, 2)
+}

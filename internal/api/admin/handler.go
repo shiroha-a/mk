@@ -700,9 +700,14 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		resp["isAdmin"] = h.roleService.IsAdministrator(u.ID)
 		resp["isModerator"] = h.roleService.IsModerator(u.ID)
 		// roles: GetUserRoles は assigned + expired 除外済 list を返す
-		// (= 即時 active な role の minimal shape)。
+		// (= 即時 active な role の minimal shape)。err 時は frontend が
+		// `user.roles.map(...)` で例外を吐かないよう空配列に fallback し
+		// slog.Warn で観測する (= signins / roleAssigns の空配列扱いと揃え)。
 		if userRoles, rerr := h.roleService.GetUserRoles(u.ID); rerr == nil {
 			resp["roles"] = userRoles
+		} else {
+			slog.Warn("admin/show-user: failed to load roles", "userId", u.ID, "err", rerr)
+			resp["roles"] = []any{}
 		}
 		// policies: assigned roles を merge した user-specific policy
 		// (= upstream の RolePolicies 互換)。default override だけでなく
@@ -1170,11 +1175,7 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 		req.Policies == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Required parameters missing.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	description := ""
-	if req.Description != nil {
-		description = *req.Description
-	}
-	r, err := h.roleService.Create(*req.Name, description, role.CreateOptions{
+	r, err := h.roleService.Create(*req.Name, *req.Description, role.CreateOptions{
 		IsModerator:     *req.IsModerator,
 		IsAdministrator: *req.IsAdministrator,
 		IsPublic:        *req.IsPublic,

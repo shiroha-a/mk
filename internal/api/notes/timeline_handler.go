@@ -63,6 +63,7 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 			WithReplies:     req.WithReplies,
 			AllowPartial:    req.AllowPartial,
 			MutedChannelIDs: h.loadMutedChannelIDs(viewer),
+			MutedUserIDs:    h.loadMutedUserIDs(viewer),
 		}
 		return h.timelineService.LocalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, false)
@@ -76,6 +77,7 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 			WithRenotes:     req.WithRenotes,
 			AllowPartial:    req.AllowPartial,
 			MutedChannelIDs: h.loadMutedChannelIDs(viewer),
+			MutedUserIDs:    h.loadMutedUserIDs(viewer),
 		}
 		return h.timelineService.GlobalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, false)

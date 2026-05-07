@@ -75,6 +75,48 @@ func TestMutingRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.ListByMuter("a", "", "", 10, 0)
 	assert.Error(t, err)
+	_, err = repo.ListMuteeIDs("a")
+	assert.Error(t, err)
+}
+
+// ListMuteeIDs は active (非 expired) な mute だけを返すこと、空 muterID は
+// nil を返すことを確認する (#874 timeline filter 用)。
+func TestMutingRepository_ListMuteeIDs(t *testing.T) {
+	repo := NewMutingRepository(testDB)
+	u1 := insertTestUser(t, "u_mlmid_1", "mlmid1")
+	u2 := insertTestUser(t, "u_mlmid_2", "mlmid2")
+	u3 := insertTestUser(t, "u_mlmid_3", "mlmid3")
+	u4 := insertTestUser(t, "u_mlmid_4", "mlmid4")
+	defer cleanupUser(t, u1.ID)
+	defer cleanupUser(t, u2.ID)
+	defer cleanupUser(t, u3.ID)
+	defer cleanupUser(t, u4.ID)
+
+	// active (no expiry)
+	active := &model.Muting{ID: "mlm_active", MuterID: u1.ID, MuteeID: u2.ID}
+	require.NoError(t, repo.Create(active))
+	defer cleanupMuting(t, active.ID)
+
+	// active (future expiry)
+	future := time.Now().Add(1 * time.Hour)
+	activeFuture := &model.Muting{ID: "mlm_active_future", MuterID: u1.ID, MuteeID: u3.ID, ExpiresAt: &future}
+	require.NoError(t, repo.Create(activeFuture))
+	defer cleanupMuting(t, activeFuture.ID)
+
+	// expired
+	past := time.Now().Add(-1 * time.Hour)
+	expired := &model.Muting{ID: "mlm_expired", MuterID: u1.ID, MuteeID: u4.ID, ExpiresAt: &past}
+	require.NoError(t, repo.Create(expired))
+	defer cleanupMuting(t, expired.ID)
+
+	ids, err := repo.ListMuteeIDs(u1.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{u2.ID, u3.ID}, ids)
+
+	// muterID 空は nil 返却 (#874 viewer==nil の short-circuit と整合)
+	ids, err = repo.ListMuteeIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, ids)
 }
 
 func TestRenoteMutingRepository_CRUD(t *testing.T) {
