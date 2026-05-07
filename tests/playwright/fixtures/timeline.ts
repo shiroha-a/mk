@@ -48,16 +48,21 @@ export async function fetchTimelineNotes(
 // or the timeout elapses. timeline fanout は async (Redis) なので note 投稿
 // 直後は反映が遅れる可能性があり、5s 範囲で段階的に retry する (notification
 // 用 pollForNotification と同 pattern)。見つからなければ assertion 失敗。
+//
+// body は endpoint 固有の追加 param (= 例: user-list-timeline の listId、
+// channel-timeline の channelId) を渡したい場合に使う。fetchTimelineNotes
+// と同じく body.i / body.limit は helper 管理。
 export async function pollForTimelineNote(
   request: APIRequestContext,
   endpoint: string,
   token: string | null,
   noteId: string,
+  body: Record<string, unknown> = {},
 ): Promise<void> {
   await expect
     .poll(
       async () => {
-        const notes = await fetchTimelineNotes(request, endpoint, token);
+        const notes = await fetchTimelineNotes(request, endpoint, token, body);
         return notes.some((n) => n.id === noteId);
       },
       { timeout: 5000, intervals: [100, 200, 500, 1000] },
