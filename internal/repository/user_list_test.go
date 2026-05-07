@@ -78,7 +78,15 @@ func TestUserListRepository_ListMembers_Error(t *testing.T) {
 	repo := NewUserListRepository(testDB.WithContext(ctx))
 	_, err := repo.ListMembers("x")
 	assert.Error(t, err)
-	_, err = repo.ListMembersByListIDs([]string{"x"})
+}
+
+// cancel 済 context で ListMembersByListIDs が err を伝播することを確認する
+// (handler 側 best-effort fallback の発動経路担保、#876)。
+func TestUserListRepository_ListMembersByListIDs_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	repo := NewUserListRepository(testDB.WithContext(ctx))
+	_, err := repo.ListMembersByListIDs([]string{"x"})
 	assert.Error(t, err)
 }
 
