@@ -77,9 +77,13 @@ func packRoom(r *model.ChatRoom) map[string]any {
 }
 
 // packMessage builds the ChatMessage response shape used across chat
-// endpoints. nil pointer field (toUserId / toRoomId / text / fileId / uri) は
+// endpoints. nil pointer field (toUserId / toRoomId / text / fileId) は
 // upstream の TypeORM 由来 undefined 挙動に揃え、JSON response から omit する
 // (= map に key を入れない、#851)。
+//
+// 注: m.URI は remote chat message の AP canonical URI (federation 内部用途)
+// だが、upstream の packedChatMessageSchema には `uri` field が無いため
+// 外部 response には含めない。
 func packMessage(m *model.ChatMessage) map[string]any {
 	result := map[string]any{
 		"id":         m.ID,
@@ -98,9 +102,6 @@ func packMessage(m *model.ChatMessage) map[string]any {
 	}
 	if m.FileID != nil {
 		result["fileId"] = *m.FileID
-	}
-	if m.URI != nil {
-		result["uri"] = *m.URI
 	}
 	if m.FromUser != nil {
 		result["fromUser"] = packUser(m.FromUser)
