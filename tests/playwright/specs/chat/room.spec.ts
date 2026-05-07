@@ -1,0 +1,155 @@
+// #822 Phase 2 chat spec: room CRUD + invite + room messages の round-trip。
+//
+// upstream Misskey TS と mk-go は両方とも:
+//   - chat/rooms/create で owner が room を作成 → ChatRoom object
+//     (id / name / ownerId / description / isArchived) が 200 OK で返る
+//   - chat/rooms/invitations/create { roomId, userId } で owner が invitee に
+//     招待を送る (204)
+//   - chat/rooms/invitations/accept { roomId } で invitee 側が招待を受諾し
+//     room membership が作成される (204)
+//   - membership がある user は chat/messages/create-to-room { toRoomId, text }
+//     で room 宛 message を投稿でき、chat/messages/room-timeline { roomId }
+//     で room 内 message を取得できる
+//
+// 本 spec は両 backend 共通で:
+//   1. owner + invitee signup
+//   2. owner が room 作成 → response shape を assert
+//   3. owner が invitee に invitation 作成
+//   4. invitee が invitation accept (= membership 確立)
+//   5. invitee が room に message 投稿 → response shape を assert
+//   6. owner が room-timeline 取得 → 投稿 message が含まれることを確認
+//
+// 注: chatMessage notification は別 PR (PR-C) で扱う。本 spec は room CRUD +
+// membership + room messages の最小 round-trip にフォーカス。
+//
+// shape drift (#851): upstream TS は null field を omit、mk-go は明示 null
+// を返すため、room message の toUserId 等は両表現を falsy 吸収する。
+
+import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
+import { randomUsername, signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
+
+interface ChatRoom {
+  id: string;
+  name: string;
+  ownerId: string;
+  description: string | null;
+  isArchived: boolean;
+}
+
+interface ChatMessage {
+  id: string;
+  fromUserId: string;
+  toUserId: string | null;
+  toRoomId: string | null;
+  text: string | null;
+  createdAt: string;
+}
+
+test.describe('chat: rooms', () => {
+  test.beforeAll(() => {
+    resetRateLimit();
+  });
+
+  test('owner creates room, invites user, user accepts and posts a message', async ({
+    request,
+  }) => {
+    const owner = await signupUser(request, randomUsername('rmO'));
+    const invitee = await signupUser(request, randomUsername('rmI'));
+
+    // owner が room を作成。
+    const roomName = 'rm-' + Math.random().toString(16).slice(2, 8);
+    const createResp = await callApi(request, 'chat/rooms/create', {
+      i: owner.token,
+      name: roomName,
+      description: 'spec room',
+    });
+    expect(createResp.status()).toBe(200);
+    const room = (await createResp.json()) as ChatRoom;
+    expect(typeof room.id).toBe('string');
+    expect(room.id.length).toBeGreaterThan(0);
+    expect(room.name).toBe(roomName);
+    expect(room.ownerId).toBe(owner.id);
+    expect(room.description).toBe('spec room');
+    // upstream TS は false / null を field から omit する drift があり (#851)、
+    // mk-go は明示的に false を返す。本 spec の主眼は room creation 直後は
+    // archived ではないことなので、両表現を falsy として吸収する。
+    expect(room.isArchived ?? false).toBe(false);
+
+    // owner が invitee に invitation を作成 (204 No Content)。
+    const inviteResp = await callApi(request, 'chat/rooms/invitations/create', {
+      i: owner.token,
+      roomId: room.id,
+      userId: invitee.id,
+    });
+    expect(inviteResp.status()).toBeGreaterThanOrEqual(200);
+    expect(inviteResp.status()).toBeLessThan(300);
+
+    // invitee が invitations/inbox で受信した invitation を確認 (= invite が
+    // 永続化されていることを assert)。invitations/inbox の round-trip 自体も
+    // ここでカバーされる。
+    const inboxResp = await callApi(request, 'chat/rooms/invitations/inbox', {
+      i: invitee.token,
+    });
+    expect(inboxResp.status()).toBe(200);
+    const inbox = (await inboxResp.json()) as { id: string; roomId: string }[];
+    const inv = inbox.find((x) => x.roomId === room.id);
+    if (!inv) {
+      throw new Error(`invitations/inbox did not contain invitation for room ${room.id}`);
+    }
+
+    // invitee が rooms/join { roomId } で room に join (= membership 確立)。
+    // upstream Misskey TS は invitations/accept endpoint を持たず、invite
+    // 受信側は rooms/join を呼んで参加する設計。mk-go も rooms/join 単独で
+    // membership を確立できる (invite チェック無しで join 可能なゆるさあり、
+    // upstream の invite 必須は別 spec で扱う)。
+    const joinResp = await callApi(request, 'chat/rooms/join', {
+      i: invitee.token,
+      roomId: room.id,
+    });
+    expect(joinResp.status()).toBeGreaterThanOrEqual(200);
+    expect(joinResp.status()).toBeLessThan(300);
+
+    // invitee が room に message 投稿 (200)。
+    const text = 'room hello ' + Math.random().toString(16).slice(2, 8);
+    const sendResp = await callApi(request, 'chat/messages/create-to-room', {
+      i: invitee.token,
+      toRoomId: room.id,
+      text,
+    });
+    expect(sendResp.status()).toBe(200);
+    const sent = (await sendResp.json()) as ChatMessage;
+    expect(typeof sent.id).toBe('string');
+    expect(sent.fromUserId).toBe(invitee.id);
+    expect(sent.toRoomId).toBe(room.id);
+    // upstream TS は null field を omit、mk-go は明示的に null を返す
+    // drift (#851)。本 spec の主眼は DM ではなく room message であることなので
+    // 両表現を falsy として吸収する。#851 fix 後に `toBeNull()` で strict 化。
+    expect(sent.toUserId ?? null).toBeNull();
+    expect(sent.text).toBe(text);
+    expect(Number.isFinite(Date.parse(sent.createdAt))).toBe(true);
+
+    // owner が room-timeline で確認 → 投稿 message が含まれる。
+    const tlResp = await callApi(request, 'chat/messages/room-timeline', {
+      i: owner.token,
+      roomId: room.id,
+      limit: 10,
+    });
+    expect(tlResp.status()).toBe(200);
+    const tl = (await tlResp.json()) as ChatMessage[];
+    expect(Array.isArray(tl)).toBe(true);
+
+    // `find` の return が undefined なら spec の前提 (= 投稿 message が
+    // room-timeline で見える) が崩れているので明示 throw で fail させる。
+    // pollForNotification (#848) / pollUnread (#850) / messages_dm (#852)
+    // と同 guard pattern。
+    const found = tl.find((m) => m.id === sent.id);
+    if (!found) {
+      throw new Error(`room-timeline did not contain sent message (id=${sent.id})`);
+    }
+    expect(found.fromUserId).toBe(invitee.id);
+    expect(found.toRoomId).toBe(room.id);
+    expect(found.text).toBe(text);
+  });
+});
