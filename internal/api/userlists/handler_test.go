@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/userlists"
@@ -168,15 +169,19 @@ func TestList_MembersErrorFallsBackToEmptyUserIds(t *testing.T) {
 
 // memberIDs の happy path: ListMembers が member を返す場合に userIds が
 // 正しく埋まること (#871 shape の core path)。failingMembersRepo を使わない
-// 標準 mock 経由で AddMember → Show で round-trip する。
-func TestShow_PopulatedUserIds(t *testing.T) {
+// 標準 mock 経由で AddMember → Show で round-trip する。命名は List 側の
+// TestList_MembersErrorFallsBackToEmptyUserIds と対称になるよう統一。
+func TestShow_PopulatedUserIdsAreReturnedFromMembers(t *testing.T) {
 	h, repo := newTestHandler(t)
-	repo.Lists["l3"] = &model.UserList{ID: "l3", UserID: "u1", Name: "with-members"}
+	idGen, _ := id.NewGenerator("aidx")
+	listID := idGen.Generate(time.Now())
+	memberMembershipID := idGen.Generate(time.Now())
+	repo.Lists[listID] = &model.UserList{ID: listID, UserID: "u1", Name: "with-members"}
 	require.NoError(t, repo.AddMember(&model.UserListMembership{
-		ID: "ulm_a", UserListID: "l3", UserID: "member1",
+		ID: memberMembershipID, UserListID: listID, UserID: "member1",
 	}))
 
-	rec := doPost(h.Show, `{"listId":"l3"}`, &model.User{ID: "u1"})
+	rec := doPost(h.Show, `{"listId":"`+listID+`"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
