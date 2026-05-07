@@ -56,7 +56,8 @@ test.describe('emoji: custom emoji add + reaction round-trip', () => {
 
     // upstream Misskey TS は admin/emoji/add で fileId を必須とするため、
     // 先に drive/files/create で image を upload して fileId を取得する。
-    // mk-go も #864 同 PR で fileId 受け付けに対応。
+    // mk-go も #824 PR-A で fileId 受け付けに対応 (= 本 spec と同 PR で
+    // handler 拡張)。
     const uploadResp = await request.post(`${baseURL}/api/drive/files/create`, {
       multipart: {
         i: root.token,
