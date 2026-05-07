@@ -534,21 +534,32 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, f.MutedChannelIDs)
 	}
 	// muted user filter は 2 経路を持つ (#892 / #894):
-	//   1. UseMutingSubquery=true: muting テーブルへの subquery (production)。
+	//   1. UseMutingSubquery=true: muting テーブルへの NOT EXISTS (production)。
 	//      bind parameter が viewer 単位で 2 つ ($viewerID を 2 度) のみで、
 	//      mute 件数に比例しないので heavy-mute viewer でも planning コスト
 	//      が膨らまない。
 	//   2. MutedUserIDs literal: 既存テスト互換のための override path
 	//      (test や非 viewer 駆動経路で muteeID 集合を直接指定したいとき)。
 	//      Subquery が使えるなら 1. を優先。
-	// 共通の WHERE は: userId NOT IN (mutees) AND
-	//                  (renoteUserId IS NULL OR renoteUserId NOT IN (mutees))
+	// 共通の WHERE は: userId が active mute されておらず、かつ renoteUserId
+	// が NULL でなければ renoteUserId も active mute されていないこと。
 	if f.UseMutingSubquery && f.ViewerID != "" {
-		// muting subquery: active mute (= ExpiresAt NULL or future) のみ拾う。
-		// mutingRepository.ListMuteeIDs と同じ semantics を SQL 内で表現。
-		mutingSub := `SELECT "muteeId" FROM "muting" WHERE "muterId" = ? AND ("expiresAt" IS NULL OR "expiresAt" > NOW())`
+		// NOT EXISTS による anti-join (Postgres planner が semi-join 相当に
+		// 最適化、IDX_muting_muterId_muteeId 複合 index で seek)。NOT IN
+		// subquery より NULL 取り扱いがロバストかつ index 使用が明確。
+		// active mute = expiresAt nil or future、mutingRepository.ListMuteeIDs
+		// と同 semantics を SQL 内で表現。
+		//
+		// Postgres NOW() は transaction 開始時刻 (= query 内で constant)。
+		// in-memory ApplyFilter (Redis cache 経路) は Go time.Now() を使う
+		// が、mutingRepo.ListMuteeIDs と timeline 取得は同一 request 内 (=
+		// サブ秒) で連続実行されるため、境界 expiresAt の片方に倒れて 2
+		// 経路で挙動が分岐する race window は無視できる。
+		notExistsForCol := func(col string) string {
+			return `NOT EXISTS (SELECT 1 FROM "muting" m WHERE m."muterId" = ? AND m."muteeId" = ` + col + ` AND (m."expiresAt" IS NULL OR m."expiresAt" > NOW()))`
+		}
 		q = q.Where(
-			`"userId" NOT IN (`+mutingSub+`) AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN (`+mutingSub+`))`,
+			notExistsForCol(`"note"."userId"`)+` AND ("renoteUserId" IS NULL OR `+notExistsForCol(`"note"."renoteUserId"`)+`)`,
 			f.ViewerID, f.ViewerID,
 		)
 	} else if len(f.MutedUserIDs) > 0 {

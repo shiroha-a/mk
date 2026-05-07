@@ -346,3 +346,28 @@ func TestMergeIDs_LimitClamping(t *testing.T) {
 	assert.Equal(t, "d", out[0])
 	assert.Equal(t, "c", out[1])
 }
+
+// toDBFilter は viewerID が non-empty のとき UseMutingSubquery=true を set
+// する production 経路を担保する (#894)。anonymous viewer (= "") では
+// subquery 経路を使わず literal MutedUserIDs もそのまま 0 件で SQL filter
+// は no-op になる。
+func TestToDBFilter_UseMutingSubquery(t *testing.T) {
+	out := toDBFilter(TimelineFilter{}, "viewer1")
+	assert.True(t, out.UseMutingSubquery, "viewerID 有なら subquery を使う")
+	assert.Equal(t, "viewer1", out.ViewerID)
+	assert.Empty(t, out.MutedUserIDs, "literal は伝搬しない")
+
+	out = toDBFilter(TimelineFilter{}, "")
+	assert.False(t, out.UseMutingSubquery, "anonymous viewer では subquery off")
+	assert.Equal(t, "", out.ViewerID)
+
+	// MutedChannelIDs / その他 filter はそのまま伝搬する (regression guard)。
+	withReplies := true
+	out = toDBFilter(TimelineFilter{
+		MutedChannelIDs: []string{"ch1"},
+		WithReplies:     &withReplies,
+	}, "viewer2")
+	assert.Equal(t, []string{"ch1"}, out.MutedChannelIDs)
+	assert.NotNil(t, out.WithReplies)
+	assert.True(t, *out.WithReplies)
+}
