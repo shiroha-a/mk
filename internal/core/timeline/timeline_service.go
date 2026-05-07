@@ -207,6 +207,10 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		IncludeLocalRenotes:   f.IncludeLocalRenotes,
 		ViewerID:              viewerID,
 		MutedChannelIDs:       f.MutedChannelIDs,
+		// MutedUserIDs を SQL push-down に伝搬する (#892)。Redis path の
+		// post-fetch ApplyFilter は依然 MutedUserIDs を見るので、cache hit
+		// と DB fallback の両経路で同 semantics になる。
+		MutedUserIDs: f.MutedUserIDs,
 	}
 }
 

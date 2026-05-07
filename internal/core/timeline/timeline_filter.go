@@ -17,6 +17,11 @@ type TimelineFilter struct {
 	// 用 (#874)。nil なら filter 無効、空 slice なら filter 有効だが除外
 	// 対象なし。renote の場合は renoteUserId も check する (= upstream
 	// Misskey TS の muting JOIN と同 semantics)。
+	//
+	// この in-memory ApplyFilter は Redis fanout 経路 (cached note ID から
+	// 解決した note slice) で動作する。DB fallback path では同じ
+	// MutedUserIDs が toDBFilter 経由で SQL の NOT IN として push-down
+	// されるので、両経路で同 semantics に保たれる (#892)。
 	MutedUserIDs []string
 }
 

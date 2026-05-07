@@ -533,6 +533,16 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		// バイパスしてしまう (SQL優先順位: AND > OR)。
 		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, f.MutedChannelIDs)
 	}
+	if len(f.MutedUserIDs) > 0 {
+		// muted user の note を SQL 段階で除外する (#892)。post-fetch filter
+		// と異なり limit ぶん fill された non-muted note を 1 query で取得
+		// できるので、heavy-mute viewer (例: 数千 mutee) でも timeline 件数
+		// が一時的に limit 未満になる UX regression を回避できる。
+		// renote 元 user が muted のケースもここで一緒に弾く (= upstream
+		// Misskey TS QueryService の muting JOIN と同 semantics)。
+		q = q.Where(`"userId" NOT IN ?`, f.MutedUserIDs)
+		q = q.Where(`("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs)
+	}
 	return q
 }
 
