@@ -26,8 +26,9 @@
 // 注: chatMessage notification は別 PR (PR-C) で扱う。本 spec は room CRUD +
 // membership + room messages の最小 round-trip にフォーカス。
 //
-// shape drift (#851): upstream TS は null field を omit、mk-go は明示 null
-// を返すため、room message の toUserId 等は両表現を falsy 吸収する。
+// shape: upstream の packedChatRoomSchema に揃え、`isArchived` は含まれない。
+// chat message も値が無い field (toUserId 等) は JSON response から omit
+// される (#851 fix 済)。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -60,10 +61,9 @@ test.describe('chat: rooms', () => {
     expect(room.name).toBe(roomName);
     expect(room.ownerId).toBe(owner.id);
     expect(room.description).toBe('spec room');
-    // upstream TS は false / null を field から omit する drift があり (#851)、
-    // mk-go は明示的に false を返す。本 spec の主眼は room creation 直後は
-    // archived ではないことなので、両表現を falsy として吸収する。
-    expect(room.isArchived ?? false).toBe(false);
+    // upstream の packedChatRoomSchema には `isArchived` が無いため
+    // mk-go も #851 fix 以降は返さない。本 spec では archived state は
+    // assert しない (= field 不在を許容)。
 
     // owner が invitee に invitation を作成 (204 No Content)。
     const inviteResp = await callApi(request, 'chat/rooms/invitations/create', {
@@ -111,10 +111,10 @@ test.describe('chat: rooms', () => {
     expect(typeof sent.id).toBe('string');
     expect(sent.fromUserId).toBe(invitee.id);
     expect(sent.toRoomId).toBe(room.id);
-    // upstream TS は null field を omit、mk-go は明示的に null を返す
-    // drift (#851)。本 spec の主眼は DM ではなく room message であることなので
-    // 両表現を falsy として吸収する。#851 fix 後に `toBeNull()` で strict 化。
-    expect(sent.toUserId ?? null).toBeNull();
+    // upstream / mk-go ともに値が無い field を JSON response から omit する
+    // (#851 fix 後)。本 spec の room message では DM ではないため `toUserId`
+    // は undefined になる。
+    expect(sent.toUserId).toBeUndefined();
     expect(sent.text).toBe(text);
     expect(Number.isFinite(Date.parse(sent.createdAt))).toBe(true);
 

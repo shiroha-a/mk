@@ -63,9 +63,12 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 }
 
 func packRoom(r *model.ChatRoom) map[string]any {
+	// upstream Misskey TS の packedChatRoomSchema は `isArchived` を返さない。
+	// mk-go も互換のため field を出力しない (#851)。archived state は別経路で
+	// 取得する設計を踏襲する。
 	result := map[string]any{
 		"id": r.ID, "name": r.Name, "ownerId": r.OwnerID,
-		"description": r.Description, "isArchived": r.IsArchived,
+		"description": r.Description,
 	}
 	if r.Owner != nil {
 		result["owner"] = packUser(r.Owner)
@@ -73,12 +76,31 @@ func packRoom(r *model.ChatRoom) map[string]any {
 	return result
 }
 
+// packMessage builds the ChatMessage response shape used across chat
+// endpoints. nil pointer field (toUserId / toRoomId / text / fileId / uri) は
+// upstream の TypeORM 由来 undefined 挙動に揃え、JSON response から omit する
+// (= map に key を入れない、#851)。
 func packMessage(m *model.ChatMessage) map[string]any {
 	result := map[string]any{
-		"id": m.ID, "fromUserId": m.FromUserID,
-		"toUserId": m.ToUserID, "toRoomId": m.ToRoomID,
-		"text": m.Text, "reads": m.Reads,
-		"fileId": m.FileID, "reactions": m.Reactions,
+		"id":         m.ID,
+		"fromUserId": m.FromUserID,
+		"reads":      m.Reads,
+		"reactions":  m.Reactions,
+	}
+	if m.ToUserID != nil {
+		result["toUserId"] = *m.ToUserID
+	}
+	if m.ToRoomID != nil {
+		result["toRoomId"] = *m.ToRoomID
+	}
+	if m.Text != nil {
+		result["text"] = *m.Text
+	}
+	if m.FileID != nil {
+		result["fileId"] = *m.FileID
+	}
+	if m.URI != nil {
+		result["uri"] = *m.URI
 	}
 	if m.FromUser != nil {
 		result["fromUser"] = packUser(m.FromUser)

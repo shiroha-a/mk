@@ -61,11 +61,10 @@ test.describe('chat: DM messages', () => {
     expect(sent.id.length).toBeGreaterThan(0);
     expect(sent.fromUserId).toBe(sender.id);
     expect(sent.toUserId).toBe(receiver.id);
-    // upstream TS は null の field を omit する (= undefined)、mk-go は
-    // 明示的に null を返す drift がある (#851)。本 spec の主眼は room では
-    // ないことなので、両表現を falsy として吸収。#851 fix 後に `toBeNull()`
-    // で strict 化する。
-    expect(sent.toRoomId ?? null).toBeNull();
+    // upstream / mk-go ともに値が無い field を JSON response から omit する
+    // (#851 fix 後)。本 spec の DM 投稿では room ではないため `toRoomId` は
+    // undefined になる。
+    expect(sent.toRoomId).toBeUndefined();
     expect(sent.text).toBe(text);
     // createdAt は ISO 8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`)。Date.parse で
     // 有効な timestamp として読めることだけ確認 (秒精度の drift は許容)。
