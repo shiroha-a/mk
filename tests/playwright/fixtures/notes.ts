@@ -13,6 +13,8 @@ export interface NoteCreateInput {
   cw?: string;
   visibility?: Visibility;
   visibleUserIds?: string[];
+  replyId?: string;
+  renoteId?: string;
 }
 
 export interface CreatedNote {
