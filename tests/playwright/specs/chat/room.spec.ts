@@ -32,24 +32,8 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { type ChatMessage, type ChatRoom } from '../../fixtures/chat';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-
-interface ChatRoom {
-  id: string;
-  name: string;
-  ownerId: string;
-  description: string | null;
-  isArchived: boolean;
-}
-
-interface ChatMessage {
-  id: string;
-  fromUserId: string;
-  toUserId: string | null;
-  toRoomId: string | null;
-  text: string | null;
-  createdAt: string;
-}
 
 test.describe('chat: rooms', () => {
   test.beforeAll(() => {

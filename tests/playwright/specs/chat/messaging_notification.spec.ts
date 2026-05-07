@@ -30,6 +30,7 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { type ChatMessage } from '../../fixtures/chat';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import {
   awaitChannelEvent,
@@ -37,12 +38,6 @@ import {
   openStream,
   subscribeChannel,
 } from '../../fixtures/streaming';
-
-interface ChatMessage {
-  id: string;
-  fromUserId: string;
-  text: string | null;
-}
 
 // /api/i の hasUnreadChatMessages を expect.poll で predicate を満たすまで
 // 待つ。chat の write は同期だが、TS は Redis 反映遅延を吸収するため

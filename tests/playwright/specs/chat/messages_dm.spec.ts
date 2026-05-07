@@ -21,16 +21,8 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
+import { type ChatMessage } from '../../fixtures/chat';
 import { resetRateLimit } from '../../fixtures/rate_limit';
-
-interface ChatMessage {
-  id: string;
-  fromUserId: string;
-  toUserId: string | null;
-  toRoomId: string | null;
-  text: string | null;
-  createdAt: string;
-}
 
 test.describe('chat: DM messages', () => {
   test.beforeAll(() => {
