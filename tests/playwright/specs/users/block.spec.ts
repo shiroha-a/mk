@@ -5,7 +5,8 @@
 //   - blocking/create { userId } で block 関係を作成 (返却 status は backend 間
 //     で drift あり、本 spec は 2xx range で許容)
 //   - blocking/list で blockee 一覧を取得 ({ id, blockeeId, blockee? } 配列)
-//   - blockee からの following/create は 403 BLOCKED で reject される
+//   - blockee からの following/create は reject される (= 4xx、具体 status は
+//     backend 間で異なるが error code は両者 BLOCKED)
 //   - blocking/delete で関係解除 (= 同じく 2xx range)
 //   - 解除後は再 follow 可能
 //
@@ -20,7 +21,7 @@
 // 本 spec は両 backend 共通で:
 //   1. A / B signup
 //   2. A が B を block → blocking/list に B が出る
-//   3. B が A を follow しようとして 403 BLOCKED で reject されること
+//   3. B が A を follow しようとして 4xx で reject されること
 //   4. A が B を unblock → blocking/list から B が消え、B は A を follow
 //      できる
 

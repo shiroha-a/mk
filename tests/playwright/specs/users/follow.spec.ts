@@ -3,7 +3,7 @@
 // upstream Misskey TS と mk-go は両方とも:
 //   - following/create { userId } で follow 関係を確立し、対象 user の
 //     UserDetailed entity を返す
-//   - users/following { userId } で fhollower 視点の following list を取得
+//   - users/following { userId } で follower 視点の following list を取得
 //     (response は { id, followerId, followeeId, follower?, followee? } の
 //     relation array)
 //   - following/delete { userId } で関係を解除し、users/following list から

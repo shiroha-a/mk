@@ -8,7 +8,11 @@
 //
 // 本 spec は両 backend 共通で CRUD round-trip のみ cover する。timeline
 // filter 連動 (= mute 後に対象 user の note が timeline から除外) は
-// 両 backend で挙動が分散しており別 spec scope (本 PR では扱わない)。
+// 両 backend で挙動が分散しており本 PR の scope 外:
+//   - upstream Misskey TS は timeline endpoint で muting JOIN を使い filter 済
+//   - mk-go は現状 timeline endpoint 側に user mute filter 未実装
+//     (internal/core/timeline/timeline_filter.go は channel mute のみ)
+// 後続 spec / drift fix issue で別途整備する。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
