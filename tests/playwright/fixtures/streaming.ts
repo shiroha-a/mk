@@ -1,13 +1,15 @@
 // Misskey の streaming WebSocket helper。streaming spec (#815) と
 // notifications spec (#823, #847) で共有する。
 //
-// 主な責務:
-//   - openMainStream / openTimelineStream: WS connect + open 待ち + close
-//     (server reject) も即 fail として報告
-//   - subscribeChannel: subscribe message 送信 (= ack 不在のため fire and
-//     forget、200ms バッファは caller が制御)
-//   - awaitChannelEvent: 指定 channel + event type の最初の 1 通を待ち、
-//     timeout で reject。spec 上で 5s 既定。
+// 提供 API:
+//   - openStream(token): /streaming?i=<token> に WS connect + open 待ち。
+//     close (= server reject) / error は即 fail として報告
+//   - subscribeChannel(ws, channel, params?): channel subscribe message を
+//     送信し subId を返す (= ack 不在のため fire and forget、subscribe
+//     確定までの 200ms バッファは caller が制御)
+//   - awaitChannelEvent<T>(ws, match, timeoutMs?): caller-supplied match
+//     関数で channel envelope を絞り込み、最初の 1 通の body を resolve、
+//     timeout で reject。spec 上 5s 既定。
 
 const baseURL = process.env.MK_BASE_URL ?? 'https://mkgo.local';
 const wsURL = baseURL.replace(/^http/, 'ws');
