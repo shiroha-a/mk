@@ -39,11 +39,14 @@ test.describe('notifications: receiveFollowRequest', () => {
     const me = await signupUser(request, randomUsername('frqA'));
 
     // me を locked account にして follow approval 必須にする。
+    // status は 200 / 204 が両 backend で揃って 2xx であることだけ保証する
+    // (200 vs 204 drift の検出は i/update 専用 spec の責務)。
     const lockResp = await callApi(request, 'i/update', {
       i: me.token,
       isLocked: true,
     });
-    expect(lockResp.status()).toBe(200);
+    expect(lockResp.status()).toBeGreaterThanOrEqual(200);
+    expect(lockResp.status()).toBeLessThan(300);
 
     const requester = await signupUser(request, randomUsername('frqB'));
 
