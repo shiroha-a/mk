@@ -22,13 +22,20 @@ import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('utility root endpoints shape', () => {
-  test.beforeAll(() => {
+  // 4 auth-required endpoint で 4 回 signup すると IP rate limit (5 / 1h) を
+  // 圧迫する。1 user を beforeAll で作って共有することで signup 数を 1 に
+  // 抑える (#909 review N1)。anonymous endpoint (get-avatar-decorations /
+  // pinned-users) は token 不要なので user 不要。
+  let token: string | null = null;
+
+  test.beforeAll(async ({ request }) => {
     resetRateLimit();
+    const me = await signupUser(request, randomUsername('utl'));
+    token = me.token;
   });
 
   test('stats returns counter shape', async ({ request }) => {
-    const me = await signupUser(request, randomUsername('utlA'));
-    const resp = await callApi(request, 'stats', { i: me.token });
+    const resp = await callApi(request, 'stats', { i: token });
     expect(resp.status()).toBe(200);
     const body = (await resp.json()) as Record<string, unknown>;
     // upstream Misskey TS / mk-go 共通の必須 field
@@ -44,8 +51,7 @@ test.describe('utility root endpoints shape', () => {
   });
 
   test('server-info returns hardware metadata', async ({ request }) => {
-    const me = await signupUser(request, randomUsername('utlS'));
-    const resp = await callApi(request, 'server-info', { i: me.token });
+    const resp = await callApi(request, 'server-info', { i: token });
     expect(resp.status()).toBe(200);
     const body = (await resp.json()) as Record<string, unknown>;
     // 両 backend で必ず存在する hardware metadata field 群。
@@ -57,8 +63,7 @@ test.describe('utility root endpoints shape', () => {
   });
 
   test('get-online-users-count returns numeric count', async ({ request }) => {
-    const me = await signupUser(request, randomUsername('utlO'));
-    const resp = await callApi(request, 'get-online-users-count', { i: me.token });
+    const resp = await callApi(request, 'get-online-users-count', { i: token });
     expect(resp.status()).toBe(200);
     const body = (await resp.json()) as { count?: unknown };
     expect(typeof body.count).toBe('number');
@@ -83,8 +88,7 @@ test.describe('utility root endpoints shape', () => {
   });
 
   test('retention returns aggregated array shape', async ({ request }) => {
-    const me = await signupUser(request, randomUsername('utlR'));
-    const resp = await callApi(request, 'retention', { i: me.token });
+    const resp = await callApi(request, 'retention', { i: token });
     expect(resp.status()).toBe(200);
     const body = await resp.json();
     // retention は { date, users, data: { day_offset_X: count } }[] の
