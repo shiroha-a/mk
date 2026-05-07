@@ -3,6 +3,7 @@ package timeline
 import (
 	"context"
 	"errors"
+	"sort"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -139,11 +140,55 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 		}
 		notes = ApplyFilter(notes, viewer.ID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, toDBFilter(filter, viewer.ID))
+			return s.hybridDBFallback(viewer, untilID, sinceID, limit, filter)
 		}
 		return notes, nil
 	}
-	return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, toDBFilter(filter, viewer.ID))
+	return s.hybridDBFallback(viewer, untilID, sinceID, limit, filter)
+}
+
+// hybridDBFallback queries the home and local timelines from the database and
+// merges them. upstream Misskey TS と同 semantics: hybrid (= social) timeline
+// は home (followee + 自分) と local (= 同 instance の public) の和集合を返す。
+//
+// 旧実装は ListHomeTimeline のみを呼んでおり、follow 関係が無い viewer に
+// とって local public note (= 同 instance の他 user の public) が落ちていた
+// (#819 で Playwright spec が detect)。本 helper は両 query 結果を ID 単位で
+// dedup → ID 降順 sort → limit 截断する。pagination (sinceID/untilID) は両
+// query に同じ値を渡すので merged 結果の boundary は upstream と一致する。
+func (s *Service) hybridDBFallback(viewer *model.User, untilID, sinceID string, limit int, filter TimelineFilter) ([]*model.Note, error) {
+	dbFilter := toDBFilter(filter, viewer.ID)
+	homeNotes, err := s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)
+	if err != nil {
+		return nil, err
+	}
+	localNotes, err := s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, dbFilter)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(homeNotes)+len(localNotes))
+	out := make([]*model.Note, 0, len(homeNotes)+len(localNotes))
+	for _, n := range homeNotes {
+		if _, dup := seen[n.ID]; dup {
+			continue
+		}
+		seen[n.ID] = struct{}{}
+		out = append(out, n)
+	}
+	for _, n := range localNotes {
+		if _, dup := seen[n.ID]; dup {
+			continue
+		}
+		seen[n.ID] = struct{}{}
+		out = append(out, n)
+	}
+	// ID 降順 sort (= upstream と同じ keyset 順)。aidx は時系列で単調増加
+	// するので ID 文字列の lexicographic 比較で十分。
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // toDBFilter converts a TimelineFilter to a model.TimelineDBFilter.
