@@ -296,6 +296,38 @@ func TestEmojiRepository_UpdateFieldsMany(t *testing.T) {
 	require.NoError(t, repo.UpdateFieldsMany([]string{e1.ID}, map[string]any{}))
 }
 
+// TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray は #882 で
+// 発覚した bulk drift の regression guard。core/api/admin の bulk handler
+// は plain []string を渡すと GORM が record literal `('a','b')` を生成
+// して SQLSTATE 42804 (column type mismatch) になっていた。pq.StringArray
+// で wrap した場合に array literal `'{a,b}'` として正しく serialize され
+// ることを確認する (UpdateFields_AliasesEmptySlice の bulk 版)。
+func TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e1 := &model.Emoji{ID: "em_ufm_a1", Name: "ufm_a1", OriginalURL: "https://x"}
+	e2 := &model.Emoji{ID: "em_ufm_a2", Name: "ufm_a2", OriginalURL: "https://y"}
+	require.NoError(t, repo.Create(e1))
+	require.NoError(t, repo.Create(e2))
+	defer cleanupEmoji(t, e1.ID)
+	defer cleanupEmoji(t, e2.ID)
+
+	// 通常の値: pq.StringArray wrap で 2 emoji 同時 update
+	require.NoError(t, repo.UpdateFieldsMany([]string{e1.ID, e2.ID}, map[string]any{
+		"aliases": pq.StringArray{"alpha", "beta"},
+	}))
+	a1, _ := repo.FindByID(e1.ID)
+	a2, _ := repo.FindByID(e2.ID)
+	assert.Equal(t, []string{"alpha", "beta"}, []string(a1.Aliases))
+	assert.Equal(t, []string{"alpha", "beta"}, []string(a2.Aliases))
+
+	// 空 slice: NOT NULL 制約に当たらず '{}' として保存される
+	require.NoError(t, repo.UpdateFieldsMany([]string{e1.ID, e2.ID}, map[string]any{
+		"aliases": pq.StringArray{},
+	}))
+	a1, _ = repo.FindByID(e1.ID)
+	assert.Empty(t, []string(a1.Aliases))
+}
+
 func TestEmojiRepository_DeleteMany(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 

@@ -42,7 +42,13 @@ func (h *Handler) EmojiAddAliasesBulk(c echo.Context) error {
 		// SQLSTATE 42804 (column type mismatch) になる drift がある
 		// (#896 と同 pattern)。pq.StringArray で wrap して
 		// `'{a,b}'` array literal として書き込ませる。
-		_ = h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(merged)})
+		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(merged)}); err != nil {
+			// per-emoji 失敗は bulk 操作全体を中断せず log で観測する
+			// (#882 で発覚した silent failure 防止)。複数件のうち一部が
+			// 失敗しても他の emoji は更新したい意図。
+			slog.WarnContext(c.Request().Context(), "admin/emoji/add-aliases-bulk: per-emoji update failed",
+				"emojiId", e.ID, "err", err)
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -286,7 +292,12 @@ func (h *Handler) EmojiRemoveAliasesBulk(c echo.Context) error {
 		}
 		// pq.StringArray wrap (#896 と同 pattern) — add-aliases-bulk と
 		// 同じ理由で plain []string では SQLSTATE 42804 になる。
-		_ = h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(filtered)})
+		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(filtered)}); err != nil {
+			// per-emoji 失敗は他 emoji への影響を避けるため warn log で
+			// 観測しつつ continue する (add-aliases-bulk と同 policy)。
+			slog.WarnContext(c.Request().Context(), "admin/emoji/remove-aliases-bulk: per-emoji update failed",
+				"emojiId", e.ID, "err", err)
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }
