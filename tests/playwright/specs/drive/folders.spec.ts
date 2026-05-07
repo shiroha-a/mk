@@ -6,12 +6,13 @@
 //     `{ id, createdAt, name, parentId }`
 //   - /api/drive/folders/show: detail mode = default 4 field +
 //     `{ foldersCount, filesCount, parent? }` (upstream のみ、mk-go は
-//     default mode のまま = drift、別 issue 候補)
+//     default mode のまま = drift、#845 で tracking)
 //   - /api/drive/folders/delete: 204 NoContent
 //
 // 本 spec は両 backend pass のため **default 4 field のみ strict assert**。
 // detail mode の追加 field (foldersCount / filesCount / parent) drift は
-// 後続 issue で個別検証する。
+// #845 で fix する。fix 後は本 spec の show response で detail field の
+// strict assert を追加する想定。
 //
 // 検証する round-trip:
 //   1. folder create → 4 field shape assert
