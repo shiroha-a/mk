@@ -109,4 +109,11 @@ test.describe('i/registry K-V CRUD round-trip', () => {
       scope,
     });
   });
+
+  // domain field の挙動には backend drift があり別 issue で追跡する (#907):
+  //   - mk-go: regular user token でも `domain: <free-string>` を accept、
+  //     domain による namespace isolation が機能
+  //   - upstream TS: regular user token + free-string domain では 400 を返す
+  //     (= app token (accessToken) 経由でないと domain を指定できない)
+  // 本 spec scope では domain 経路を直接 verify しない LCD に留める。
 });

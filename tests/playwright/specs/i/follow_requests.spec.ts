@@ -77,6 +77,12 @@ test.describe('following/requests round-trip', () => {
     expect(sentAfter.status()).toBe(200);
     const sentAfterBody = (await sentAfter.json()) as FollowRequestEntry[];
     expect(sentAfterBody.find((r) => r.followee?.id === B.id)).toBeFalsy();
+
+    // 受信側 (B) の list からも A が消える (= 両方向 cleanup を担保)
+    const listAfterReject = await callApi(request, 'following/requests/list', { i: B.token });
+    expect(listAfterReject.status()).toBe(200);
+    const listAfterRejectBody = (await listAfterReject.json()) as FollowRequestEntry[];
+    expect(listAfterRejectBody.find((r) => r.follower?.id === A.id)).toBeFalsy();
   });
 
   test('accept path: C → D(locked) request → D accepts → users/following reflects', async ({
@@ -108,6 +114,16 @@ test.describe('following/requests round-trip', () => {
     expect(followingResp.status()).toBe(200);
     const followingList = (await followingResp.json()) as Array<{ followeeId: string }>;
     expect(followingList.find((f) => f.followeeId === D.id)).toBeDefined();
+
+    // 反対側 (D の followers) でも C が含まれる = 両方向に follow 関係が
+    // 整合的に成立していることを担保する
+    const followersResp = await callApi(request, 'users/followers', {
+      i: D.token,
+      userId: D.id,
+    });
+    expect(followersResp.status()).toBe(200);
+    const followersList = (await followersResp.json()) as Array<{ followerId: string }>;
+    expect(followersList.find((f) => f.followerId === C.id)).toBeDefined();
   });
 
   test('cancel path: E → F(locked) request → E cancels → list cleared', async ({
