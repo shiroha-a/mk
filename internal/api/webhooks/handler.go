@@ -31,6 +31,18 @@ func isValidWebhookEventType(t string) bool {
 	return ok
 }
 
+// validateOnArray は upstream Misskey TS の paramDef.on.items.enum と同等の
+// 検証を行う (#939)。各要素が webhookEventTypes に含まれていなければ false
+// を返す。空配列 / nil は valid (paramDef では required ではない)。
+func validateOnArray(on []string) bool {
+	for _, e := range on {
+		if !isValidWebhookEventType(e) {
+			return false
+		}
+	}
+	return true
+}
+
 // TestDispatcher is the minimal interface the Test endpoint uses to enqueue
 // a synthetic webhook payload. 循環依存を避けるため interface で受ける
 // (実装は core/webhook.Service 経由、dispatch through DispatchUser)。
@@ -81,6 +93,9 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" || req.URL == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name and url are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	if !validateOnArray(req.On) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "on must contain only webhookEventTypes values.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
 	webhook := &model.Webhook{
@@ -144,6 +159,9 @@ func (h *Handler) Update(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.WebhookID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "webhookId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	if !validateOnArray(req.On) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "on must contain only webhookEventTypes values.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
 	w, err := h.repo.FindByIDAndUserID(req.WebhookID, user.ID)

@@ -134,6 +134,13 @@ func TestCreate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestCreate_InvalidOnEnum(t *testing.T) {
+	// upstream paramDef.on.items.enum: webhookEventTypes (#939)。
+	h, _ := newTestHandler()
+	rec := post(h.Create, `{"name":"test","url":"https://example.com","on":["note","unknownEvent"]}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestCreate_Error(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.createErr = errMock
@@ -226,6 +233,14 @@ func TestUpdate_NotFound(t *testing.T) {
 func TestUpdate_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Update, `{}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_InvalidOnEnum(t *testing.T) {
+	// upstream paramDef.on.items.enum: webhookEventTypes (#939)。
+	h, repo := newTestHandler()
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: pq.StringArray{}}
+	rec := post(h.Update, `{"webhookId":"w1","on":["note","unknownEvent"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
