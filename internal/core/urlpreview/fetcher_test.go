@@ -40,6 +40,48 @@ func TestFetcher_FetchAndParse(t *testing.T) {
 	assert.Equal(t, "World", *result.Description)
 }
 
+// Shift_JIS の HTML response が UTF-8 に正規化されて parse される (#942)。
+// Content-Type header に charset=shift_jis を載せて charset.NewReader が
+// 自動判定することを確認する。
+func TestFetcher_ShiftJISCharset(t *testing.T) {
+	// 「こんにちは」を Shift_JIS で encode したバイト列。
+	sjisHello := []byte{0x82, 0xb1, 0x82, 0xf1, 0x82, 0xc9, 0x82, 0xbf, 0x82, 0xcd}
+	body := []byte(`<html><head><meta property="og:title" content="`)
+	body = append(body, sjisHello...)
+	body = append(body, []byte(`"></head></html>`)...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=shift_jis")
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, result.Title)
+	assert.Equal(t, "こんにちは", *result.Title)
+}
+
+// charset=euc-jp も同様に正規化される。
+func TestFetcher_EUCJPCharset(t *testing.T) {
+	// 「テスト」を EUC-JP で encode。
+	eucHello := []byte{0xa5, 0xc6, 0xa5, 0xb9, 0xa5, 0xc8}
+	body := []byte(`<html><head><meta property="og:title" content="`)
+	body = append(body, eucHello...)
+	body = append(body, []byte(`"></head></html>`)...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=euc-jp")
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, result.Title)
+	assert.Equal(t, "テスト", *result.Title)
+}
+
 func TestFetcher_NonHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")

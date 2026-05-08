@@ -498,6 +498,16 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 		data = frame
 		contentType = frameMIME
 	}
+	// アニメ形式 (GIF / APNG) は image.Decode が 1 frame しか返さないため
+	// resize 経路に乗せると静止画化される (#941)。emoji / avatar / preview の
+	// ようにアニメ表示が期待される mode では pass-through で保持する。
+	// static / badge は明示的に静止画を要求しているので従来通り decode する。
+	if isAnimatedFormat(contentType) {
+		switch mode {
+		case ModeEmoji, ModeAvatar, ModePreview:
+			return s.passThrough(data, contentType)
+		}
+	}
 	switch mode {
 	case ModeEmoji:
 		return s.processResize(data, contentType, 0, emojiHeight, out)
@@ -645,6 +655,21 @@ func makeResult(data []byte, contentType string) *ProxyResult {
 		Body:        io.NopCloser(bytes.NewReader(data)),
 		ContentType: contentType,
 	}
+}
+
+// isAnimatedFormat returns true for image MIME types that natively encode
+// multi-frame animation (GIF, APNG variants)。
+//
+// Go の image.Decode は 1 frame しか取り出さないため、resize 経路に乗せると
+// 静止画化されてしまう (#941)。emoji / avatar / preview のように「アニメ
+// 表示が期待される」mode では pass-through すべき MIME 群。
+func isAnimatedFormat(mime string) bool {
+	switch mime {
+	case "image/gif", "image/apng",
+		"image/vnd.mozilla.apng":
+		return true
+	}
+	return false
 }
 
 // isConvertibleImage returns true if the MIME type can be decoded and converted.

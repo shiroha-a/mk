@@ -1125,6 +1125,9 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetNoteFieldResolver(noteFieldResolver)
 	usersHandler.SetUserRepo(userRepo)
 	usersHandler.SetNoteReactionRepo(reactionRepo)
+	usersHandler.SetRemoteStatsFetcher(&remoteStatsFetcherAdapter{
+		fetcher: corefederation.NewRemoteStatsFetcher(nil),
+	})
 	api.POST("/users/show", usersHandler.Show)
 	api.POST("/users/search", usersHandler.Search)
 	api.POST("/users/notes", usersHandler.Notes)
@@ -2658,6 +2661,26 @@ func (s *instanceActorSigner) Signer() (*activitypub.PrivateKey, error) {
 		return loaded, nil
 	}
 	return nil, corefederation.ErrNoSigner
+}
+
+// remoteStatsFetcherAdapter は corefederation.RemoteStatsFetcher を
+// users.RemoteStatsFetcher interface に橋渡しする (#943)。layered architecture
+// (api → core → repository) を保つため users package が federation を直接 import
+// しない設計を維持する。
+type remoteStatsFetcherAdapter struct {
+	fetcher *corefederation.RemoteStatsFetcher
+}
+
+func (a *remoteStatsFetcherAdapter) Fetch(ctx context.Context, host, username string) *users.RemoteUserStatsView {
+	stats := a.fetcher.Fetch(ctx, host, username)
+	if stats == nil {
+		return nil
+	}
+	return &users.RemoteUserStatsView{
+		NotesCount:     stats.NotesCount,
+		FollowersCount: stats.FollowersCount,
+		FollowingCount: stats.FollowingCount,
+	}
 }
 
 // loadLocked performs the actual systemaccount + keypair + PEM parse. mu を

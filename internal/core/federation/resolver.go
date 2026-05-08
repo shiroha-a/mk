@@ -632,7 +632,11 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	// 遅延配送 / origin downtime 後の bulk push などで note が遅れて届くケース
+	// では AP の `published` を採用しないと timeline 上の並びが受信時刻順に
+	// なってしまい remote とずれる (#940)。time-based ID (aidx 等) なので
+	// idGen.Generate に published を渡せば自動的に tl 並びも remote 一致する。
+	now := parseAPPublishedTime(apNote.Published, time.Now())
 	noteURI := apNote.ID
 	note := &model.Note{
 		ID:         r.idGen.Generate(now),

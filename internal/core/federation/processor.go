@@ -185,6 +185,9 @@ type genericActivity struct {
 	Actor  string          `json:"actor"`
 	Object json.RawMessage `json:"object"`
 	ID     string          `json:"id"`
+	// Published は Announce などで activity 自体の発火時刻を表す (#940)。
+	// 遅延配送された Renote の timeline 並びを origin と揃えるために使う。
+	Published string `json:"published"`
 	// To は reversi Invite の配送先を読むために保持する。string と []string
 	// 両方を受け入れるため RawMessage で保持し、必要な時点で解釈する。
 	To json.RawMessage `json:"to"`
@@ -787,7 +790,9 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 			return nil
 		}
 	}
-	now := nowFn()
+	// 遅延配送 Announce では activity.published を採用して timeline 並びを
+	// origin と揃える (#940)。空 / parse 不可なら nowFn にフォールバック。
+	now := parseAPPublishedTime(act.Published, nowFn())
 	renote := &model.Note{
 		ID:         p.resolver.idGen.Generate(now),
 		UserID:     announcer.ID,

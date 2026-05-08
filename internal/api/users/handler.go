@@ -57,6 +57,29 @@ type Handler struct {
 	// noteReactionRepo は users/reactions endpoint で reactor 視点の reaction
 	// list を取得するために使う (#821 PR-D)。
 	noteReactionRepo repository.NoteReactionRepository
+	// remoteStatsFetcher は remote user の users/show で notesCount /
+	// followersCount / followingCount を origin instance から取得して上書き
+	// 表示するための fetcher (#943)。nil なら local 観測値を fallback。
+	remoteStatsFetcher RemoteStatsFetcher
+}
+
+// RemoteStatsFetcher abstracts the federation.RemoteStatsFetcher so wiring is
+// nil-tolerant (= test handler doesn't need a real federation package).
+type RemoteStatsFetcher interface {
+	Fetch(ctx context.Context, host, username string) *RemoteUserStatsView
+}
+
+// RemoteUserStatsView mirrors federation.RemoteUserStats. 同型を package に
+// import せず interface 経由で渡せるようにするための view 構造体。
+type RemoteUserStatsView struct {
+	NotesCount     int
+	FollowersCount int
+	FollowingCount int
+}
+
+// SetRemoteStatsFetcher wires the remote stats fetcher (#943).
+func (h *Handler) SetRemoteStatsFetcher(f RemoteStatsFetcher) {
+	h.remoteStatsFetcher = f
 }
 
 // SetUserRepo wires a UserRepository so users/notes filters out notes that
@@ -297,6 +320,19 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	detailed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+
+	// remote user の場合は origin instance の /api/users/show から実際の counts
+	// を取得して上書きする (#943)。Misskey TS は自インスタンス観測値のみ集計する
+	// 仕様で remote user の数値が実体より小さく出るが、本拡張で「リモートサーバー
+	// 上の実値」を表示する。失敗時は local 観測値 (PackUserDetailed の値) を
+	// fallback として残す。
+	if h.remoteStatsFetcher != nil && bundle.User.Host != nil && *bundle.User.Host != "" {
+		if stats := h.remoteStatsFetcher.Fetch(c.Request().Context(), *bundle.User.Host, bundle.User.Username); stats != nil {
+			detailed.NotesCount = stats.NotesCount
+			detailed.FollowersCount = stats.FollowersCount
+			detailed.FollowingCount = stats.FollowingCount
+		}
+	}
 
 	// リモートユーザーの場合、Instance情報を付与
 	if bundle.User.Host != nil && h.instanceRepo != nil {

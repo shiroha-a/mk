@@ -16,6 +16,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/safehttp"
+	"golang.org/x/net/html/charset"
 )
 
 var (
@@ -180,7 +181,16 @@ func (f *Fetcher) fetchAndParse(ctx context.Context, rawURL string) (*Result, er
 		return &Result{URL: rawURL, Player: PlayerResult{Allow: []string{}}}, nil
 	}
 
-	body := io.LimitReader(resp.Body, f.cfg.MaxContentLength)
+	// charset.NewReader が Content-Type の charset と HTML <meta charset> を
+	// 自動判定して UTF-8 に正規化する。Shift_JIS / EUC-JP / ISO-2022-JP の
+	// 日本語ページで title / description が文字化けする drift を解消 (#942)。
+	limited := io.LimitReader(resp.Body, f.cfg.MaxContentLength)
+	body, err := charset.NewReader(limited, ct)
+	if err != nil {
+		// charset 判定不能 / unsupported encoding は raw bytes でフォールバック。
+		// ParseHTML は UTF-8 仮定だが、ASCII / UTF-8 互換ページなら問題なく動く。
+		body = limited
+	}
 	result := ParseHTML(body, rawURL)
 
 	// oEmbed discovery: HTML 中に <link rel="alternate" type=

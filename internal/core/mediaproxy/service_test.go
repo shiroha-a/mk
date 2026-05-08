@@ -245,6 +245,51 @@ func TestFetch_RemoteImage_Badge(t *testing.T) {
 	assert.Equal(t, "image/png", result.ContentType)
 }
 
+// アニメ GIF 等の multi-frame 形式は emoji / avatar / preview mode で
+// pass-through されることを確認する (#941)。Go の image.Decode は 1 frame
+// しか返さないため resize 経路に乗せると静止化してしまうため。
+func TestFetch_RemoteImage_AnimatedGIF_PassThroughOnEmoji(t *testing.T) {
+	gifData := []byte("GIF89a") // valid な animation でなくとも MIME type で判定される
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Write(gifData)
+	}))
+	defer ts.Close()
+	s := testService(map[string]bool{ts.URL + "/anim.gif": true})
+
+	for _, mode := range []ProxyMode{ModeEmoji, ModeAvatar, ModePreview} {
+		result, err := s.Fetch(context.Background(), ts.URL+"/anim.gif", mode, FormatWebP)
+		require.NoError(t, err, "mode=%v", mode)
+		assert.Equal(t, "image/gif", result.ContentType, "mode=%v should preserve animated MIME", mode)
+		result.Body.Close()
+	}
+}
+
+func TestFetch_RemoteImage_AnimatedAPNG_PassThroughOnEmoji(t *testing.T) {
+	pngData := makePNG()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/apng")
+		w.Write(pngData)
+	}))
+	defer ts.Close()
+	s := testService(map[string]bool{ts.URL + "/anim.apng": true})
+
+	result, err := s.Fetch(context.Background(), ts.URL+"/anim.apng", ModeEmoji, FormatWebP)
+	require.NoError(t, err)
+	defer result.Body.Close()
+	assert.Equal(t, "image/apng", result.ContentType)
+}
+
+func TestIsAnimatedFormat(t *testing.T) {
+	assert.True(t, isAnimatedFormat("image/gif"))
+	assert.True(t, isAnimatedFormat("image/apng"))
+	assert.True(t, isAnimatedFormat("image/vnd.mozilla.apng"))
+	assert.False(t, isAnimatedFormat("image/png"))
+	assert.False(t, isAnimatedFormat("image/jpeg"))
+	assert.False(t, isAnimatedFormat("image/webp"))
+	assert.False(t, isAnimatedFormat(""))
+}
+
 func TestFetch_Remote404(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
