@@ -104,6 +104,10 @@ test.describe('app + auth/session 3rd party flow', () => {
     expect(typeof userkey.accessToken).toBe('string');
     expect(userkey.accessToken!.length).toBeGreaterThan(0);
     expect(userkey.user?.id).toBe(me.id);
+    // userkey が me.token (= signup で取得した session token) と等しくない
+    // = app 経由で新規 access token が発行されている。session 流用の regression
+    // を防ぐ。
+    expect(userkey.accessToken).not.toBe(me.token);
 
     // 7. 取得 token で /api/i が叩ける = 認証完了
     //

@@ -39,6 +39,10 @@ test.describe('miauth/gen-token round-trip', () => {
     const genBody = (await genResp.json()) as { token?: string };
     expect(typeof genBody.token).toBe('string');
     expect(genBody.token!.length).toBeGreaterThan(0);
+    // me.token (signup で取得した session token) とは別の新規 access token が
+    // 発行されているはず。miauth が単に既存 session を返すだけの実装になって
+    // いた場合に detect できる。
+    expect(genBody.token).not.toBe(me.token);
 
     // 取得 token で /api/i が叩ける = 認証完成
     const iResp = await callApi(request, 'i', { i: genBody.token });
