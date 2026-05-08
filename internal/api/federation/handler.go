@@ -3,6 +3,7 @@ package federation
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -114,6 +115,7 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		if errors.Is(err, coreinstance.ErrInstanceNotFound) {
 			return c.NoContent(http.StatusNoContent)
 		}
+		slog.Error("federation/show-instance: FindByHost failed", "host", req.Host, "err", err)
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, instanceToMap(inst))
