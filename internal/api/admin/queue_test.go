@@ -222,6 +222,21 @@ func TestQueueRetryJob_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestQueueRetryJob_RunTaskError(t *testing.T) {
+	// precheck pass 後に RunTask 自体が失敗する race condition (precheck と
+	// RunTask の間に別 admin が削除した等)。RemoveJob と symmetric。
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"tid1": {ID: "tid1", Queue: "deliver"},
+		},
+		runErr: errors.New("not found"),
+	}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueRetryJob, `{"queue":"deliver","id":"tid1"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestQueuePromoteJobs_RunsScheduledAndRetry(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{
