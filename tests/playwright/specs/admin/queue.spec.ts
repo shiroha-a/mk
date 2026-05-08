@@ -32,9 +32,7 @@ test.describe('admin/queue/* shape compat', () => {
     root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
   });
 
-  // upstream Misskey TS は paramDef で queue + state 必須、mk-go は permissive。
-  // 両 backend で動く params (= queue: 'deliver', state: ['active'] 等) を
-  // 渡して shape compat を verify する LCD strategy。
+  // upstream Misskey TS の paramDef に合わせて queue + state を必須化済 (#929 A)。
   test('admin/queue/jobs returns array shape', async ({ request }) => {
     const resp = await callApi(request, 'admin/queue/jobs', {
       i: root.token,
@@ -127,26 +125,23 @@ test.describe('admin/queue/* shape compat', () => {
     expect([400, 404]).toContain(resp.status());
   });
 
-  // retry-job / remove-job: 不明 id の挙動は backend 間で差あり。
-  //   - mk-go: asynq DeleteTask / RunTask が idempotent な場合 204 を返すこと
-  //     がある (= 内部 task store が「該当 id 無し」を success 扱い)
-  //   - TS (BullMQ): 通常 4xx
-  // どちらも frontend 側は「削除済」扱いするため LCD で吸収。
-  test('admin/queue/retry-job returns 2xx/4xx for unknown id', async ({ request }) => {
+  // mk-go は asynq DeleteTask / RunTask の idempotent 挙動を GetTaskInfo
+  // precheck で TS と同じ 4xx に揃えた (#929 B)。
+  test('admin/queue/retry-job returns 4xx for unknown id', async ({ request }) => {
     const resp = await callApi(request, 'admin/queue/retry-job', {
       i: root.token,
       queue: 'deliver',
       id: 'nonexistent-job-id',
     });
-    expect([200, 204, 400, 404]).toContain(resp.status());
+    expect([400, 404]).toContain(resp.status());
   });
 
-  test('admin/queue/remove-job returns 2xx/4xx for unknown id', async ({ request }) => {
+  test('admin/queue/remove-job returns 4xx for unknown id', async ({ request }) => {
     const resp = await callApi(request, 'admin/queue/remove-job', {
       i: root.token,
       queue: 'deliver',
       id: 'nonexistent-job-id',
     });
-    expect([200, 204, 400, 404]).toContain(resp.status());
+    expect([400, 404]).toContain(resp.status());
   });
 });

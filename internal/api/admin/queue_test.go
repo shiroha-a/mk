@@ -85,19 +85,23 @@ func (s *stubQueueInspector) QueueMetrics(q, kind string) (*apiadmin.QueueMetric
 // --- Queue --------------------------------------------------------------------
 
 func TestQueueClear_WithInspector(t *testing.T) {
+	// queue + state 指定で対象 queue 1 つだけが clear される (#929 A の strict 化後)。
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{queues: []string{"deliver", "inbox"}}
+	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
-	rec := doPost(h.QueueClear, `{}`, adminUser)
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"wait"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.ElementsMatch(t, []string{"deliver", "inbox"}, insp.deleteAllHits)
+	assert.Equal(t, []string{"deliver"}, insp.deleteAllHits)
 }
 
-func TestQueueClear_QueuesError(t *testing.T) {
+func TestQueueClear_MissingParams(t *testing.T) {
+	// upstream Misskey TS paramDef で queue + state は required (#929 A)。
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{queuesErr: errors.New("redis down")}
+	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
-	assert.Equal(t, http.StatusInternalServerError, doPost(h.QueueClear, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueClear, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueClear, `{"queue":"deliver"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueClear, `{"state":"wait"}`, adminUser).Code)
 }
 
 func TestQueueJobs_FilterByQueueAndState(t *testing.T) {
@@ -121,21 +125,14 @@ func TestQueueJobs_FilterByQueueAndState(t *testing.T) {
 	assert.Equal(t, "a1", rows[0]["id"])
 }
 
-func TestQueueJobs_AllQueuesPendingDefault(t *testing.T) {
+func TestQueueJobs_MissingParams(t *testing.T) {
+	// upstream Misskey TS paramDef で queue + state は required (#929 A)。
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{
-		queues: []string{"deliver", "inbox"},
-		pending: map[string][]*apiadmin.QueueTaskSummary{
-			"deliver": {{ID: "d1", Queue: "deliver"}},
-			"inbox":   {{ID: "i1", Queue: "inbox"}},
-		},
-	}
+	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
-	rec := doPost(h.QueueJobs, `{}`, adminUser)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var rows []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
-	assert.Len(t, rows, 2)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueJobs, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueJobs, `{"queue":"deliver"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueJobs, `{"state":"wait"}`, adminUser).Code)
 }
 
 func TestQueueShowJob_Found(t *testing.T) {
@@ -164,7 +161,14 @@ func TestQueueShowJob_NotFoundWithInspector(t *testing.T) {
 
 func TestQueueRemoveJob_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{}
+	// asynq DeleteTask は不明 id で nil を返す (idempotent) ため、existence
+	// 確認用に GetTaskInfo を事前 hit する (#929 B)。stub の task map に
+	// 入れて GetTaskInfo を pass させる。
+	insp := &stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"tid1": {ID: "tid1", Queue: "deliver"},
+		},
+	}
 	h.SetQueueInspector(insp)
 	rec := doPost(h.QueueRemoveJob, `{"queue":"deliver","id":"tid1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -172,8 +176,10 @@ func TestQueueRemoveJob_Success(t *testing.T) {
 }
 
 func TestQueueRemoveJob_NotFound(t *testing.T) {
+	// task map が空 = GetTaskInfo が "not found" を返すケース。idempotent な
+	// asynq DeleteTask に到達せず precheck で 404 (#929 B)。
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{deleteErr: errors.New("not found")}
+	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
 	rec := doPost(h.QueueRemoveJob, `{"queue":"deliver","id":"x"}`, adminUser)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -181,17 +187,29 @@ func TestQueueRemoveJob_NotFound(t *testing.T) {
 
 func TestQueueRetryJob_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	insp := &stubQueueInspector{}
+	insp := &stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"tid1": {ID: "tid1", Queue: "deliver"},
+		},
+	}
 	h.SetQueueInspector(insp)
 	rec := doPost(h.QueueRetryJob, `{"queue":"deliver","id":"tid1"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, []string{"tid1"}, insp.runCalls)
 }
 
+func TestQueueRetryJob_NotFound(t *testing.T) {
+	// 不明 id は GetTaskInfo precheck で 404。RunTask は idempotent (#929 B)。
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueRetryJob, `{"queue":"deliver","id":"x"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestQueuePromoteJobs_RunsScheduledAndRetry(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{
-		queues: []string{"deliver"},
 		scheduled: map[string][]*apiadmin.QueueTaskSummary{
 			"deliver": {{ID: "s1"}, {ID: "s2"}},
 		},
@@ -201,7 +219,8 @@ func TestQueuePromoteJobs_RunsScheduledAndRetry(t *testing.T) {
 	}
 	h.SetQueueInspector(insp)
 
-	rec := doPost(h.QueuePromoteJobs, `{}`, adminUser)
+	// queue は paramDef required (#929 A)。
+	rec := doPost(h.QueuePromoteJobs, `{"queue":"deliver"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
@@ -212,10 +231,9 @@ func TestQueuePromoteJobs_RunsScheduledAndRetry(t *testing.T) {
 func TestQueueQueueStats_WithInspector(t *testing.T) {
 	// frontend admin/job-queue.vue が期待する Misskey Bull shape
 	// ({name, counts:{active,delayed,waiting,...}, metrics:..., db:...})
-	// を返すことを検証する。
+	// を返すことを検証する (#929 A の strict 化後は単一 queue のみ)。
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{
-		queues: []string{"deliver"},
 		info: map[string]*apiadmin.QueueInfoResult{
 			"deliver": {Queue: "deliver", Size: 5, Pending: 3, Active: 1, Completed: 10, Failed: 2, Scheduled: 0, Retry: 1},
 		},
@@ -227,14 +245,12 @@ func TestQueueQueueStats_WithInspector(t *testing.T) {
 		},
 	}
 	h.SetQueueInspector(insp)
-	rec := doPost(h.QueueQueueStats, `{}`, adminUser)
+	rec := doPost(h.QueueQueueStats, `{"queue":"deliver"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	deliver, ok := got["deliver"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "deliver", deliver["name"])
-	counts, ok := deliver["counts"].(map[string]any)
+	assert.Equal(t, "deliver", got["name"])
+	counts, ok := got["counts"].(map[string]any)
 	require.True(t, ok)
 	assert.EqualValues(t, 1, counts["active"])
 	assert.EqualValues(t, 3, counts["waiting"])
@@ -242,7 +258,7 @@ func TestQueueQueueStats_WithInspector(t *testing.T) {
 	assert.EqualValues(t, 1, counts["delayed"])
 
 	// metrics shape: data 配列と count が driver から伝播。
-	metrics, ok := deliver["metrics"].(map[string]any)
+	metrics, ok := got["metrics"].(map[string]any)
 	require.True(t, ok)
 	completed, ok := metrics["completed"].(map[string]any)
 	require.True(t, ok)
@@ -398,24 +414,21 @@ func TestQueueDeliverDelayed_PagingCrossesBoundary(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
-// QueueJobs で queue 未指定時、複数キューを走査しても合計 limit を超えない
-// ことを確認する。
-func TestQueueJobs_MultiQueueCappedAtLimit(t *testing.T) {
+// QueueJobs は単一 queue でも limit を超えない件数しか返さないことを確認する。
+func TestQueueJobs_SingleQueueCappedAtLimit(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{
-		queues: []string{"deliver", "inbox"},
 		pending: map[string][]*apiadmin.QueueTaskSummary{
 			"deliver": {{ID: "d1"}, {ID: "d2"}, {ID: "d3"}},
-			"inbox":   {{ID: "i1"}, {ID: "i2"}},
 		},
 	}
 	h.SetQueueInspector(insp)
 
-	rec := doPost(h.QueueJobs, `{"limit":2}`, adminUser)
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":"wait","limit":2}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
-	assert.Len(t, rows, 2, "multi-queue fan-out must still respect limit")
+	assert.Len(t, rows, 2, "single-queue output must respect limit")
 }
 
 // --- thin nil-inspector smoke tests ---
@@ -426,7 +439,9 @@ func TestQueueJobs_MultiQueueCappedAtLimit(t *testing.T) {
 
 func TestQueueClear(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.QueueClear, `{}`, adminUser).Code)
+	// queue/state 欠落は 400、required 揃いの正規 bind は nil inspector で 204
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueClear, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusNoContent, doPost(h.QueueClear, `{"queue":"deliver","state":"wait"}`, adminUser).Code)
 }
 
 func TestQueueDeliverDelayed(t *testing.T) {
@@ -441,17 +456,21 @@ func TestQueueInboxDelayed(t *testing.T) {
 
 func TestQueueJobs(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusOK, doPost(h.QueueJobs, `{}`, adminUser).Code)
+	// queue/state 欠落は 400、required 揃いの正規 bind は nil inspector で 200 (空配列)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueJobs, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusOK, doPost(h.QueueJobs, `{"queue":"deliver","state":"wait"}`, adminUser).Code)
 }
 
 func TestQueuePromoteJobs(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.QueuePromoteJobs, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueuePromoteJobs, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusNoContent, doPost(h.QueuePromoteJobs, `{"queue":"deliver"}`, adminUser).Code)
 }
 
 func TestQueueQueueStats(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusOK, doPost(h.QueueQueueStats, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueQueueStats, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusOK, doPost(h.QueueQueueStats, `{"queue":"deliver"}`, adminUser).Code)
 }
 
 func TestQueueQueues(t *testing.T) {

@@ -33,8 +33,10 @@ func setupAbuseRecipientHandler(t *testing.T, seed ...*model.AbuseReportNotifica
 func TestRecipientCreate_Success(t *testing.T) {
 	h, _ := setupAbuseRecipientHandler(t)
 
+	// upstream Misskey TS paramDef: name + method + isActive required、
+	// method=email では userId 必須 (#929 C)。
 	rec := doPost(h.AbuseReportNotificationRecipientCreate,
-		`{"name":"ops","method":"email"}`, adminUser)
+		`{"name":"ops","method":"email","isActive":true,"userId":"u1"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var got model.AbuseReportNotificationRecipient
@@ -44,19 +46,33 @@ func TestRecipientCreate_Success(t *testing.T) {
 	assert.True(t, got.IsActive)
 }
 
-func TestRecipientCreate_DefaultMethod(t *testing.T) {
+func TestRecipientCreate_MissingRequired(t *testing.T) {
+	// upstream paramDef で name + method + isActive は required (#929 C)。
 	h, _ := setupAbuseRecipientHandler(t)
-	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"ops"}`, adminUser)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var got model.AbuseReportNotificationRecipient
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	assert.Equal(t, "email", got.Method)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.AbuseReportNotificationRecipientCreate, `{}`, adminUser).Code)
+	// method 欠落
+	assert.Equal(t, http.StatusBadRequest, doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"ops","isActive":true}`, adminUser).Code)
+	// isActive 欠落
+	assert.Equal(t, http.StatusBadRequest, doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"ops","method":"email"}`, adminUser).Code)
+}
+
+func TestRecipientCreate_CorrelationCheck(t *testing.T) {
+	// method=email なら userId 必須、method=webhook なら systemWebhookId 必須 (#929 C)。
+	h, _ := setupAbuseRecipientHandler(t)
+	rec := doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"ops","method":"email","isActive":true}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"ops","method":"webhook","isActive":true}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRecipientCreate_RepoError(t *testing.T) {
 	h, repo := setupAbuseRecipientHandler(t)
 	repo.CreateErr = assertError{}
-	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"x"}`, adminUser)
+	rec := doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"x","method":"email","isActive":true,"userId":"u1"}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -159,7 +175,8 @@ func TestRecipientCreate_WritesModerationLog(t *testing.T) {
 	h, _ := setupAbuseRecipientHandler(t)
 	repo := attachModLog(t, h)
 
-	rec := doPost(h.AbuseReportNotificationRecipientCreate, `{"name":"r","method":"email"}`, adminUser)
+	rec := doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"r","method":"email","isActive":true,"userId":"u1"}`, adminUser)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
 	assert.Equal(t, "createAbuseReportNotificationRecipient", repo.Snapshot()[0].Type)

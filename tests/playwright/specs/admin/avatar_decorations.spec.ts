@@ -33,9 +33,7 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
   test('create → list で含まれる → update → delete round-trip', async ({ request }) => {
     const name = `spec_deco_${randomUUID()}`;
 
-    // 1. create (両 backend ともに 200 + decoration object を返す。
-    //  create は INSERT で空 string[] が '{}' リテラルとして通るので
-    //  update と異なり drift にならない、#931 参照)
+    // 1. create (両 backend ともに 200 + decoration object を返す)
     const createResp = await callApi(request, 'admin/avatar-decorations/create', {
       i: root.token,
       name,
@@ -56,18 +54,15 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
     expect(found, 'created decoration should appear in list').toBeDefined();
     const decoId = found!.id;
 
-    // 3. update で description 変更
-    // roleIdsThatCanBeUsedThisDecoration: [] を送ると mk-go の GORM
-    // Updates(map) が空 string[] を NULL 化して制約違反になる drift
-    // (#896 / #900 と同 class、本 spec で発覚 → #931 として起票済)。
-    // spec scope では update に role 配列を含めない (= 既存値維持) ことで
-    // 両 backend で動かす。#931 fix 後に role 配列付きの strict 化を予定。
+    // 3. update で description + 空 roleIds 配列。#931 fix 後は空配列でも
+    // 両 backend で 204 (mk-go は pq.StringArray でラップして '{}' を保存)。
     const updResp = await callApi(request, 'admin/avatar-decorations/update', {
       i: root.token,
       id: decoId,
       name,
       description: 'updated by spec',
       url: 'https://example.invalid/deco.png',
+      roleIdsThatCanBeUsedThisDecoration: [],
     });
     expect(updResp.status()).toBe(204);
 

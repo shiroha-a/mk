@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
@@ -108,7 +110,9 @@ func (h *Handler) AvatarDecorationsUpdate(c echo.Context) error {
 		fields["url"] = *req.URL
 	}
 	if req.RoleIDs != nil {
-		fields["roleIdsThatCanBeUsedThisDecoration"] = *req.RoleIDs
+		// pq.StringArray でラップしないと GORM Updates(map) が空 string[] を
+		// NULL 化して NOT NULL 制約違反になる (#931、#896 / #900 / #901 と同 class)。
+		fields["roleIdsThatCanBeUsedThisDecoration"] = pq.StringArray(*req.RoleIDs)
 	}
 	if err := h.avatarDecoRepo.UpdateFields(req.ID, fields); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())

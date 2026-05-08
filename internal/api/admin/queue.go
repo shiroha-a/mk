@@ -13,16 +13,19 @@ import (
 
 // QueueClear handles POST /api/admin/queue/clear.
 func (h *Handler) QueueClear(c echo.Context) error {
+	// upstream Misskey TS は paramDef で queue + state を required にしている (#929)。
+	// mk-go も同 shape に揃え、permissive な「全 queue 一括 clear」を弾く。
+	var req struct {
+		Queue string `json:"queue"`
+		State string `json:"state"`
+	}
+	if err := c.Bind(&req); err != nil || req.Queue == "" || req.State == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and state are required."))
+	}
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	queues, err := h.queueInspector.Queues()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-	}
-	for _, q := range queues {
-		_, _ = h.queueInspector.DeleteAllPendingTasks(q)
-	}
+	_, _ = h.queueInspector.DeleteAllPendingTasks(req.Queue)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -91,9 +94,6 @@ func (h *Handler) listDelayedTasks(c echo.Context, queueName string) error {
 // mk-go は asynq バックなので Bull state 名を asynq の list 呼び出しに
 // マッピングする。合計 limit を超えないよう走査中に切り詰める。
 func (h *Handler) QueueJobs(c echo.Context) error {
-	if h.queueInspector == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
 	// state は string でも string[] でも受け取れるようにする (frontend は
 	// 配列、既存テストや admin CLI からは単一文字列でくる可能性がある)。
 	var req struct {
@@ -103,7 +103,13 @@ func (h *Handler) QueueJobs(c echo.Context) error {
 		Page   int             `json:"page"`
 		Search string          `json:"search"`
 	}
-	_ = c.Bind(&req)
+	if err := c.Bind(&req); err != nil || req.Queue == "" || len(req.State) == 0 {
+		// upstream Misskey TS は paramDef で queue + state を required にしている (#929)。
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and state are required."))
+	}
+	if h.queueInspector == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	if req.Limit <= 0 || req.Limit > 100 {
 		req.Limit = 30
 	}
@@ -111,14 +117,9 @@ func (h *Handler) QueueJobs(c echo.Context) error {
 		req.Page = 1
 	}
 	states := parseStateField(req.State)
+	// queue は paramDef で required 化済 (上の req.Queue == "" で 400 を返す)
+	// ので必ず非空。ここは単一 queue のみを対象にする。
 	queues := []string{req.Queue}
-	if req.Queue == "" {
-		qs, err := h.queueInspector.Queues()
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-		}
-		queues = qs
-	}
 	seen := make(map[string]struct{}, req.Limit)
 	out := make([]map[string]any, 0, req.Limit)
 outer:
@@ -195,29 +196,30 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 
 // QueuePromoteJobs handles POST /api/admin/queue/promote-jobs.
 func (h *Handler) QueuePromoteJobs(c echo.Context) error {
-	// asynq に bulk promote API が無いため、全キューの scheduled/retry を 1 ページ
-	// 分ずつ拾って RunTask で逐次 promote する。大量投入時は後続のページを
-	// クライアント側で再呼び出しする運用。
+	// asynq に bulk promote API が無いため、対象 queue の scheduled/retry を
+	// 1 ページずつ拾って RunTask で逐次 promote する。大量投入時は後続の
+	// ページを クライアント側で再呼び出しする運用。
+	// upstream Misskey TS は paramDef で queue を required にしている (#929)。
+	var req struct {
+		Queue string `json:"queue"`
+	}
+	if err := c.Bind(&req); err != nil || req.Queue == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue is required."))
+	}
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	queues, err := h.queueInspector.Queues()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-	}
 	promoted := 0
-	for _, q := range queues {
-		for _, state := range []string{"scheduled", "retry"} {
-			var rows []*QueueTaskSummary
-			if state == "scheduled" {
-				rows, _ = h.queueInspector.ListScheduledTasks(q, 1, 100)
-			} else {
-				rows, _ = h.queueInspector.ListRetryTasks(q, 1, 100)
-			}
-			for _, t := range rows {
-				if err := h.queueInspector.RunTask(q, t.ID); err == nil {
-					promoted++
-				}
+	for _, state := range []string{"scheduled", "retry"} {
+		var rows []*QueueTaskSummary
+		if state == "scheduled" {
+			rows, _ = h.queueInspector.ListScheduledTasks(req.Queue, 1, 100)
+		} else {
+			rows, _ = h.queueInspector.ListRetryTasks(req.Queue, 1, 100)
+		}
+		for _, t := range rows {
+			if err := h.queueInspector.RunTask(req.Queue, t.ID); err == nil {
+				promoted++
 			}
 		}
 	}
@@ -316,36 +318,23 @@ func metricsToFrontend(m *QueueMetricsResult, fallbackCount int64) ([]int64, int
 // はなくゼロ埋めの shape を返して、フロント側の queueInfo が stale に
 // ならないようにする。
 func (h *Handler) QueueQueueStats(c echo.Context) error {
-	if h.queueInspector == nil {
-		return c.JSON(http.StatusOK, map[string]any{})
-	}
+	// upstream Misskey TS は paramDef で queue を required にしている (#929)。
 	var req struct {
 		Queue string `json:"queue"`
 	}
-	_ = c.Bind(&req)
-	if req.Queue != "" {
-		info, err := h.queueInspector.GetQueueInfo(req.Queue)
-		if err != nil || info == nil {
-			completed, failed := h.fetchQueueMetrics(req.Queue)
-			return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed))
-		}
+	if err := c.Bind(&req); err != nil || req.Queue == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue is required."))
+	}
+	if h.queueInspector == nil {
+		return c.JSON(http.StatusOK, map[string]any{})
+	}
+	info, err := h.queueInspector.GetQueueInfo(req.Queue)
+	if err != nil || info == nil {
 		completed, failed := h.fetchQueueMetrics(req.Queue)
-		return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed))
+		return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed))
 	}
-	queues, err := h.queueInspector.Queues()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-	}
-	out := map[string]any{}
-	for _, q := range queues {
-		info, err := h.queueInspector.GetQueueInfo(q)
-		if err != nil {
-			continue
-		}
-		completed, failed := h.fetchQueueMetrics(q)
-		out[q] = shapeQueueForFrontend(info, completed, failed)
-	}
-	return c.JSON(http.StatusOK, out)
+	completed, failed := h.fetchQueueMetrics(req.Queue)
+	return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed))
 }
 
 // fetchQueueMetrics queries the inspector for completed / failed
@@ -395,6 +384,12 @@ func (h *Handler) QueueRemoveJob(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// asynq DeleteTask は不明 task id でも nil error を返す (= idempotent)
+	// が、upstream Misskey TS は 4xx を返す。drop-in 互換のため事前に
+	// GetTaskInfo で存在確認して、無ければ 404 を返す (#929)。
+	if _, err := h.queueInspector.GetTaskInfo(req.Queue, req.ID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.NotFound())
+	}
 	if err := h.queueInspector.DeleteTask(req.Queue, req.ID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -412,6 +407,11 @@ func (h *Handler) QueueRetryJob(c echo.Context) error {
 	}
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// asynq RunTask も不明 id で nil を返す idempotent 挙動。drop-in 互換の
+	// ため事前に GetTaskInfo で存在確認 (#929)。
+	if _, err := h.queueInspector.GetTaskInfo(req.Queue, req.ID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
 	if err := h.queueInspector.RunTask(req.Queue, req.ID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())

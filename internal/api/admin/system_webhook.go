@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
@@ -193,7 +195,9 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 		fields["secret"] = *req.Secret
 	}
 	if req.On != nil {
-		fields["on"] = *req.On
+		// pq.StringArray でラップしないと GORM Updates(map) が空 string[] を
+		// NULL 化して NOT NULL 制約違反になる (#932、#931 / #896 と同 class)。
+		fields["on"] = pq.StringArray(*req.On)
 	}
 	if req.IsActive != nil {
 		fields["isActive"] = *req.IsActive

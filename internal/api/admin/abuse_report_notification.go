@@ -18,14 +18,24 @@ func (h *Handler) AbuseReportNotificationRecipientCreate(c echo.Context) error {
 	var req struct {
 		Name            string  `json:"name"`
 		Method          string  `json:"method"`
+		IsActive        *bool   `json:"isActive"`
 		UserID          *string `json:"userId"`
 		SystemWebhookID *string `json:"systemWebhookId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
-	if req.Method == "" {
-		req.Method = "email"
+	// upstream Misskey TS は paramDef で isActive / name / method を required
+	// にしている。さらに method='email' のとき userId 必須、method='webhook'
+	// のとき systemWebhookId 必須の相関 check を行う (#929)。
+	if req.Name == "" || req.Method == "" || req.IsActive == nil {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("name / method / isActive are required."))
+	}
+	if req.Method == "email" && (req.UserID == nil || *req.UserID == "") {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CORRELATION_CHECK_EMAIL", "If \"method\" is email, \"userId\" must be set.", "348bb8ae-575a-6fe9-4327-5811999def8f"))
+	}
+	if req.Method == "webhook" && (req.SystemWebhookID == nil || *req.SystemWebhookID == "") {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CORRELATION_CHECK_WEBHOOK", "If \"method\" is webhook, \"systemWebhookId\" must be set.", "b0c15051-de2d-29ef-260c-9585cddd701a"))
 	}
 	r := &model.AbuseReportNotificationRecipient{
 		ID:              h.idGen.Generate(time.Now()),
@@ -33,7 +43,7 @@ func (h *Handler) AbuseReportNotificationRecipientCreate(c echo.Context) error {
 		Method:          req.Method,
 		UserID:          req.UserID,
 		SystemWebhookID: req.SystemWebhookID,
-		IsActive:        true,
+		IsActive:        *req.IsActive,
 	}
 	if err := h.recipientRepo.Create(r); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())

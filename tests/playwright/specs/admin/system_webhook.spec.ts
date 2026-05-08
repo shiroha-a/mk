@@ -68,14 +68,10 @@ test.describe('admin/system-webhook/* CRUD', () => {
     expect(shown.id).toBe(webhookId);
     expect(shown.name).toBe(name);
 
-    // 4. update で isActive を切替
-    // 両 backend を満たす update payload が存在しない drift (#932):
-    //   - upstream TS: paramDef `required: ['id', 'isActive', 'name', 'on', 'url']`
-    //     のため `on` を送らないと 400
-    //   - mk-go: GORM Updates(map) で `on: [...]` が pq.StringArray なしで
-    //     NULL 化して 500 (#931 avatar-decorations と同 class、#932 として起票)
-    // → on を送ると mk-go 500 / 送らないと TS 400。本 spec では on 込みで送り、
-    //   両 backend を [200, 204, 500] LCD で吸収する。#932 fix 後に strict 化予定。
+    // 4. update で isActive を切替。upstream TS paramDef は
+    //    required: ['id','isActive','name','on','url'] なので全 field 必須。
+    //    mk-go 側は #932 で pq.StringArray ラップ済 (空 string[] が NULL 化
+    //    して NOT NULL 違反になる drift を解消)。
     const updResp = await callApi(request, 'admin/system-webhook/update', {
       i: root.token,
       id: webhookId,
@@ -85,16 +81,16 @@ test.describe('admin/system-webhook/* CRUD', () => {
       url: 'https://example.invalid/webhook-updated',
       secret: 'spec-secret-updated',
     });
-    expect([200, 204, 500]).toContain(updResp.status());
+    expect(updResp.status()).toBe(200);
 
     // 5. test (= 仮想 webhook を発火)。実 HTTP 配信は test 環境で fail
-    //    するが、handler 側は dispatch を試みて 204 を返すはず。
+    //    するが、handler 側は dispatch を試みて 204 を返す (両 backend)。
     const testResp = await callApi(request, 'admin/system-webhook/test', {
       i: root.token,
       webhookId,
       type: 'abuseReport',
     });
-    expect([200, 204, 500]).toContain(testResp.status());
+    expect([200, 204]).toContain(testResp.status());
 
     // 6. delete
     const delResp = await callApi(request, 'admin/system-webhook/delete', {

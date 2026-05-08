@@ -5641,7 +5641,12 @@ func (m *MockSystemWebhookRepository) UpdateAdminFields(id string, fields map[st
 				w.Secret = s
 			}
 		case "on":
-			if arr, ok := v.([]string); ok {
+			// production code は pq.StringArray でラップして送る (#932)。
+			// 旧 path との互換のため []string も受ける。
+			switch arr := v.(type) {
+			case pq.StringArray:
+				w.On = []string(arr)
+			case []string:
 				w.On = arr
 			}
 		case "isActive":
@@ -5970,7 +5975,12 @@ func (m *MockAvatarDecorationRepository) UpdateFields(id string, fields map[stri
 				d.URL = s
 			}
 		case "roleIdsThatCanBeUsedThisDecoration":
-			if arr, ok := v.([]string); ok {
+			// production code は pq.StringArray でラップして送る (#931)。
+			// 旧 path との互換のため []string も受ける。
+			switch arr := v.(type) {
+			case pq.StringArray:
+				d.RoleIDs = []string(arr)
+			case []string:
 				d.RoleIDs = arr
 			}
 		case "updatedAt":
