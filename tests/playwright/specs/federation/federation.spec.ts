@@ -4,7 +4,7 @@
 // delivery / remote resolve は drop-in pytest が cover するので、本 spec は
 // **API レベル shape** の drop-in 互換のみ確認する LCD strategy:
 //   - federation/instances: list shape (= 配列)
-//   - federation/show-instance: unknown host → 404
+//   - federation/show-instance: unknown host → 204 (TS) or 404 (mk-go drift #915)
 //   - federation/followers / following / users: unknown host → 空配列 shape
 //   - federation/stats: 集計 4 field の shape (= 配列 + number)
 
@@ -35,35 +35,17 @@ test.describe('federation/* shape compat', () => {
     expect([204, 404]).toContain(resp.status());
   });
 
-  test('federation/followers returns empty array for unknown host', async ({ request }) => {
-    const resp = await callApi(request, 'federation/followers', {
-      host: 'no-such-host-spec.invalid',
+  // 3 endpoint (followers / following / users) は同じ shape を返すため、
+  // unknown host で空配列を返すこと だけを共通 assert として一括検証する。
+  for (const endpoint of ['federation/followers', 'federation/following', 'federation/users']) {
+    test(`${endpoint} returns empty array for unknown host`, async ({ request }) => {
+      const resp = await callApi(request, endpoint, {
+        host: 'no-such-host-spec.invalid',
+      });
+      expect(resp.status()).toBe(200);
+      expect(await resp.json()).toEqual([]);
     });
-    expect(resp.status()).toBe(200);
-    const body = await resp.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body.length).toBe(0);
-  });
-
-  test('federation/following returns empty array for unknown host', async ({ request }) => {
-    const resp = await callApi(request, 'federation/following', {
-      host: 'no-such-host-spec.invalid',
-    });
-    expect(resp.status()).toBe(200);
-    const body = await resp.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body.length).toBe(0);
-  });
-
-  test('federation/users returns empty array for unknown host', async ({ request }) => {
-    const resp = await callApi(request, 'federation/users', {
-      host: 'no-such-host-spec.invalid',
-    });
-    expect(resp.status()).toBe(200);
-    const body = await resp.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body.length).toBe(0);
-  });
+  }
 
   test('federation/stats returns aggregated counter shape', async ({ request }) => {
     const resp = await callApi(request, 'federation/stats', { limit: 5 });
