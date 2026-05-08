@@ -31,6 +31,11 @@ redisForTimelines:
 
 id: aidx
 
+# mk-go binary 用の job queue driver。default は mkq だが、Playwright env では
+# 明示して default 変更時の意図せぬ切替を防ぐ。TS image (docker-compose.playwright.ts.yml
+# overlay) では BullMQ 固定で、本キーは TS 側に渡されても無視されるので副作用なし。
+jobQueueDriver: mkq
+
 # 注: 本 config は mk-go binary (docker-compose.playwright.yml) と TS image
 # (docker-compose.playwright.ts.yml overlay) の **両方で共有** する。差分が
 # 発生したら別 file に分けるが、現状 db/redis hostname も同じなので 1 file

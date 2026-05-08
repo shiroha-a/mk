@@ -117,30 +117,25 @@ func (h *Handler) QueueJobs(c echo.Context) error {
 		req.Page = 1
 	}
 	states := parseStateField(req.State)
-	// queue は paramDef で required 化済 (上の req.Queue == "" で 400 を返す)
-	// ので必ず非空。ここは単一 queue のみを対象にする。
-	queues := []string{req.Queue}
 	seen := make(map[string]struct{}, req.Limit)
 	out := make([]map[string]any, 0, req.Limit)
 outer:
-	for _, q := range queues {
-		for _, state := range states {
-			rows, err := h.listTasksForState(q, state, req.Page, req.Limit)
-			if err != nil {
+	for _, state := range states {
+		rows, err := h.listTasksForState(req.Queue, state, req.Page, req.Limit)
+		if err != nil {
+			continue
+		}
+		for _, t := range rows {
+			if len(out) >= req.Limit {
+				break outer
+			}
+			// state指定が複数重なる (例: all タブ) とき同じ task が
+			// 重複しないよう ID で de-dup する。
+			if _, dup := seen[t.ID]; dup {
 				continue
 			}
-			for _, t := range rows {
-				if len(out) >= req.Limit {
-					break outer
-				}
-				// state指定が複数重なる (例: all タブ) とき同じ task が
-				// 重複しないよう ID で de-dup する。
-				if _, dup := seen[t.ID]; dup {
-					continue
-				}
-				seen[t.ID] = struct{}{}
-				out = append(out, packTaskSummary(t))
-			}
+			seen[t.ID] = struct{}{}
+			out = append(out, packTaskSummary(t))
 		}
 	}
 	return c.JSON(http.StatusOK, out)

@@ -185,6 +185,21 @@ func TestQueueRemoveJob_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestQueueRemoveJob_DeleteTaskError(t *testing.T) {
+	// precheck は pass するが DeleteTask 自体が失敗する race condition を guard。
+	// (例: precheck と DeleteTask の間に他 admin が削除済) 引き続き 404 を返す。
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"tid1": {ID: "tid1", Queue: "deliver"},
+		},
+		deleteErr: errors.New("not found"),
+	}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueRemoveJob, `{"queue":"deliver","id":"tid1"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestQueueRetryJob_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{

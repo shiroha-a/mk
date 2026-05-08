@@ -12,9 +12,6 @@ import (
 
 // AbuseReportNotificationRecipientCreate handles POST /api/admin/abuse-report/notification-recipient/create.
 func (h *Handler) AbuseReportNotificationRecipientCreate(c echo.Context) error {
-	if h.recipientRepo == nil {
-		return c.NoContent(http.StatusNoContent)
-	}
 	var req struct {
 		Name            string  `json:"name"`
 		Method          string  `json:"method"`
@@ -25,17 +22,28 @@ func (h *Handler) AbuseReportNotificationRecipientCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
-	// upstream Misskey TS は paramDef で isActive / name / method を required
-	// にしている。さらに method='email' のとき userId 必須、method='webhook'
-	// のとき systemWebhookId 必須の相関 check を行う (#929)。
+	// upstream Misskey TS の paramDef:
+	//   required: ['isActive', 'name', 'method']
+	//   method.enum: ['email', 'webhook']
+	// + method='email' で userId 必須、method='webhook' で systemWebhookId 必須
+	// の相関 check (third_party/misskey/.../notification-recipient/create.ts、#929)。
+	// nil-repo branch より先に validate して、不正リクエストを早期 reject する。
 	if req.Name == "" || req.Method == "" || req.IsActive == nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("name / method / isActive are required."))
 	}
+	if req.Method != "email" && req.Method != "webhook" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("method must be 'email' or 'webhook'."))
+	}
+	// 相関 check の error code / id は upstream create.ts の meta.errors 定義と
+	// 一致 (CORRELATION_CHECK_EMAIL=348bb8ae-..., CORRELATION_CHECK_WEBHOOK=b0c15051-...)。
 	if req.Method == "email" && (req.UserID == nil || *req.UserID == "") {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CORRELATION_CHECK_EMAIL", "If \"method\" is email, \"userId\" must be set.", "348bb8ae-575a-6fe9-4327-5811999def8f"))
 	}
 	if req.Method == "webhook" && (req.SystemWebhookID == nil || *req.SystemWebhookID == "") {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CORRELATION_CHECK_WEBHOOK", "If \"method\" is webhook, \"systemWebhookId\" must be set.", "b0c15051-de2d-29ef-260c-9585cddd701a"))
+	}
+	if h.recipientRepo == nil {
+		return c.NoContent(http.StatusNoContent)
 	}
 	r := &model.AbuseReportNotificationRecipient{
 		ID:              h.idGen.Generate(time.Now()),

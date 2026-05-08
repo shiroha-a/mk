@@ -68,6 +68,14 @@ func TestRecipientCreate_CorrelationCheck(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestRecipientCreate_InvalidMethod(t *testing.T) {
+	// upstream paramDef は method.enum: ['email', 'webhook'] を強制 (#929 C)。
+	h, _ := setupAbuseRecipientHandler(t)
+	rec := doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"ops","method":"slack","isActive":true,"userId":"u1"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestRecipientCreate_RepoError(t *testing.T) {
 	h, repo := setupAbuseRecipientHandler(t)
 	repo.CreateErr = assertError{}
@@ -146,7 +154,11 @@ func TestRecipientUpdate_MissingID(t *testing.T) {
 
 func TestAbuseReportNotificationRecipientCreate(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.AbuseReportNotificationRecipientCreate, `{}`, adminUser).Code)
+	// required 欠落は 400 (validate-first ordering、#929 C)。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.AbuseReportNotificationRecipientCreate, `{}`, adminUser).Code)
+	// required 揃いの正規 bind は nil recipientRepo で 204
+	assert.Equal(t, http.StatusNoContent, doPost(h.AbuseReportNotificationRecipientCreate,
+		`{"name":"ops","method":"email","isActive":true,"userId":"u1"}`, adminUser).Code)
 }
 
 func TestAbuseReportNotificationRecipientDelete(t *testing.T) {
