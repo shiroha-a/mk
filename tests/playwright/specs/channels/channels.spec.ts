@@ -36,7 +36,7 @@ test.describe('channels/* full round-trip', () => {
     resetRateLimit();
   });
 
-  test('create / show / update / search / featured / owned / follow / followed / timeline', async ({
+  test('create → show → update → search → featured → owned → follow → favorite → mute → unfollow round-trip', async ({
     request,
   }) => {
     const me = await signupUser(request, randomUsername('ch'));
@@ -108,6 +108,15 @@ test.describe('channels/* full round-trip', () => {
     const followed = (await followedResp.json()) as Channel[];
     expect(followed.find((c) => c.id === channelId)).toBeDefined();
 
+    // 8b. show 再取得で viewer-aware field (isFollowing) が反映されている
+    //     ことを verify (= follow が状態として観測できる)。
+    const showAfterFollow = await callApi(request, 'channels/show', {
+      i: me.token,
+      channelId,
+    });
+    expect(showAfterFollow.status()).toBe(200);
+    expect((await showAfterFollow.json()).isFollowing).toBe(true);
+
     // 9. timeline (= channel 内 note 一覧、empty で OK)
     const tlResp = await callApi(request, 'channels/timeline', {
       channelId,
@@ -129,6 +138,14 @@ test.describe('channels/* full round-trip', () => {
     expect(myFavResp.status()).toBe(200);
     const myFavs = (await myFavResp.json()) as Channel[];
     expect(myFavs.find((c) => c.id === channelId)).toBeDefined();
+
+    // show 再取得で isFavorited も反映されていること。
+    const showAfterFav = await callApi(request, 'channels/show', {
+      i: me.token,
+      channelId,
+    });
+    expect(showAfterFav.status()).toBe(200);
+    expect((await showAfterFav.json()).isFavorited).toBe(true);
 
     const unfavResp = await callApi(request, 'channels/unfavorite', {
       i: me.token,
