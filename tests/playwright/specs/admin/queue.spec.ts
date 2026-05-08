@@ -104,7 +104,9 @@ test.describe('admin/queue/* shape compat', () => {
       queue: 'deliver',
       state: 'wait',
     });
-    expect([200, 204]).toContain(resp.status());
+    // 両 backend ともに 204 No Content (= mk-go: c.NoContent / TS: handler
+    // null return → Endpoint base 204) を返すので strict 化。
+    expect(resp.status()).toBe(204);
   });
 
   test('admin/queue/promote-jobs succeeds (empty test queue)', async ({ request }) => {
