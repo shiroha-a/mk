@@ -41,8 +41,10 @@ func TestAccessTokenRepository_FindByHashOrToken(t *testing.T) {
 	user := insertTestUser(t, "u_atfh_1", "tokenuser_or")
 	defer cleanupUser(t, user.ID)
 
-	// app/auth flow を再現: hash = sha256(token + secret) で保存され、
-	// raw token 列で middleware が hit することを確認する。
+	// 2 種類の token を作って両 path を verify する:
+	//   miauthToken = miauth/gen-token と同じ shape (hash 列で hit する)
+	//   appToken    = auth/accept と同じ shape (hash = sha256(token+secret) なので
+	//                 hash 列では miss、raw token 列で hit する)
 	miauthToken := &model.AccessToken{
 		ID:     "at_atfh_miauth",
 		Token:  "raw_miauth_xyz",

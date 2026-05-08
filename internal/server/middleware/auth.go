@@ -278,13 +278,9 @@ func (a *AuthMiddleware) resolveUser(token string) (*model.User, error) {
 		return user, nil
 	}
 
-	// access tokenのhashで検索。
-	// upstream Misskey TS の AuthenticateService が hash 列 OR token 列の
-	// dual lookup を 1 query で行う pattern (#910) を再現する:
-	//   - miauth/gen-token は hash = sha256(token) → hash 列で hit
-	//   - auth/accept は hash = sha256(token + app.secret) → hash 列で miss、
-	//     token (raw) 列で hit する経路で resolve される
-	// これにより app-issued token も middleware で正しく認証できる。
+	// hash 列 (miauth: sha256(token)) と token 列 (raw, app/auth) を 1 query
+	// で OR 検索する。upstream Misskey TS の AuthenticateService と同 pattern
+	// (#910)。両 index がある前提で BitmapOr scan に乗る。
 	hash := sha256Hash(token)
 	accessToken, err := a.accessTokenRepo.FindByHashOrToken(hash, token)
 	if err != nil {
