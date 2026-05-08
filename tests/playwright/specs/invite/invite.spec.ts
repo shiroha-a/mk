@@ -59,10 +59,8 @@ test.describe('invite/* CRUD round-trip', () => {
     // upstream paramDef は `remaining: nullable: true` で、TS は inviteLimit policy
     // が無い user (root を含む) で null を返す。mk-go は numeric を返すケースが
     // あるので number | null を許容する LCD で固定する。
-    expect(['number', 'object']).toContain(typeof limitBody.remaining);
-    if (typeof limitBody.remaining === 'object') {
-      expect(limitBody.remaining).toBeNull();
-    }
+    const remaining = limitBody.remaining;
+    expect(remaining === null || typeof remaining === 'number').toBe(true);
 
     // delete
     const deleteResp = await callApi(request, 'invite/delete', {

@@ -9,6 +9,7 @@
 // app/auth/session 経路と異なり app 登録不要で軽量。frontend が config 画面で
 // API token を直接生成する pattern にも使われる。
 
+import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
@@ -24,9 +25,9 @@ test.describe('miauth/gen-token round-trip', () => {
 
     // upstream Misskey TS は paramDef で `session` を required: ['session', 'permission']
     // としており null でも OK だが key 自体が無いと 400 を返す。mk-go は session を
-    // optional 扱いだが、shape 互換のために常に session を送る (frontend miauth
-    // 画面が UUID を生成して付ける挙動と一致させる)。
-    const session = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(16)}`;
+    // optional 扱いだが、shape 互換のために常に session を送る。frontend miauth
+    // 画面が UUID v4 を生成して付ける挙動と厳密に一致させる。
+    const session = randomUUID();
     const genResp = await callApi(request, 'miauth/gen-token', {
       i: me.token,
       session,
