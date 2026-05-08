@@ -7,7 +7,7 @@
 //   - reversi/match: 招待を投函。upstream は 204 / mk-go は 200+body の
 //     drift がある (#898 wontfix、両 backend で `[200, 204]` 許容)
 //   - reversi/cancel-match: 自分の pending invitation を一括 cancel → 204
-//   - reversi/show-game: gameId 必須、unknown は 404
+//   - reversi/show-game: gameId 必須、unknown は 4xx (TS 400 / mk-go 404 LCD)
 //   - reversi/invitations: viewer 宛 pending 一覧 (= UserLite 配列)。
 //     cancel 後の cleanup は backend 間で挙動差あり (#899 wontfix)、本 spec
 //     では cancel 後の disappearance を strict-assert しない LCD 戦略。
@@ -16,7 +16,6 @@
 //   - 実際の game state machine (= READY → playing → end)。WebSocket driven、
 //     spec scope を超える。surrender / verify も同じ理由でスキップ。
 
-import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
@@ -70,13 +69,15 @@ test.describe('reversi/* multiplayer shape compat', () => {
     expect(found?.username).toBe(inviter.username);
 
     // 3. inviter が cancel-match で自分の pending を取り下げ → 204。
+    //    両 backend ともに 204 No Content を返すので strict 化。
     const cancelResp = await callApi(request, 'reversi/cancel-match', {
       i: inviter.token,
     });
-    expect([200, 204]).toContain(cancelResp.status());
+    expect(cancelResp.status()).toBe(204);
     // cancel 後の invitations cleanup 挙動は backend 間で差あり (#899 wontfix):
     //   - mk-go: row 削除 + Redis cleanup で即時消える
     //   - TS:    Redis ZSET entry が残置されるので invitee 側からは依然として見える
-    // どちらの shape も「機能的には正しい」ので strict-assert はしない。
+    // どちらの shape も「機能的には正しい」ので strict-assert はしない (= no
+    // further assertion below)。
   });
 });
