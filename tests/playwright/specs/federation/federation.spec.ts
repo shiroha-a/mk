@@ -4,7 +4,7 @@
 // delivery / remote resolve は drop-in pytest が cover するので、本 spec は
 // **API レベル shape** の drop-in 互換のみ確認する LCD strategy:
 //   - federation/instances: list shape (= 配列)
-//   - federation/show-instance: unknown host → 204 (TS) or 404 (mk-go drift #915)
+//   - federation/show-instance: unknown host → 204 (両 backend 共通、#915 fix 済)
 //   - federation/followers / following / users: unknown host → 空配列 shape
 //   - federation/stats: 集計 4 field の shape (= 配列 + number)
 
@@ -25,14 +25,13 @@ test.describe('federation/* shape compat', () => {
     expect(Array.isArray(body)).toBe(true);
   });
 
-  test('federation/show-instance returns no-content for unknown host', async ({ request }) => {
-    // upstream Misskey TS は 204 No Content (= 該当 instance 行なし)、mk-go は
-    // 現状 404 + error body を返す drift がある (#915)。両者を LCD で許容し、
-    // drift 解消後に 204 strict に絞る予定。
+  test('federation/show-instance returns 204 for unknown host', async ({ request }) => {
+    // 該当 instance 行なし → upstream Misskey TS / mk-go (#915 fix 済) ともに
+    // 204 No Content (= null 相当)。
     const resp = await callApi(request, 'federation/show-instance', {
       host: 'no-such-host-spec.invalid',
     });
-    expect([204, 404]).toContain(resp.status());
+    expect(resp.status()).toBe(204);
   });
 
   // 3 endpoint (followers / following / users) は同じ shape を返すため、

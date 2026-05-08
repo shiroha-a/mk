@@ -106,9 +106,10 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 	}
 	inst, err := h.svc.FindByHost(req.Host)
 	if err != nil {
-		// Service.FindByHost は常に ErrInstanceNotFound にラップされるため
-		// 404 のみを返す。
-		return notFound(c)
+		// upstream Misskey TS は該当 instance 行がないとき 204 No Content を
+		// 返す (= null 相当)。frontend admin の lookup UI も 204 を「未知 host」
+		// として扱うため drop-in 互換でもこの shape に合わせる (#915)。
+		return c.NoContent(http.StatusNoContent)
 	}
 	return c.JSON(http.StatusOK, instanceToMap(inst))
 }
@@ -149,8 +150,4 @@ func instanceToMap(inst *model.Instance) map[string]any {
 		"infoUpdatedAt":           inst.InfoUpdatedAt,
 		"moderationNote":          inst.ModerationNote,
 	}
-}
-
-func notFound(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_INSTANCE", "No such instance.", "8be60c3a-6f3a-4d3e-8a13-ba81b9b2c1c8"))
 }
