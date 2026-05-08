@@ -60,7 +60,10 @@ test.describe('invite/* CRUD round-trip', () => {
     // が無い user (root を含む) で null を返す。mk-go は numeric を返すケースが
     // あるので number | null を許容する LCD で固定する。
     const remaining = limitBody.remaining;
-    expect(remaining === null || typeof remaining === 'number').toBe(true);
+    expect(
+      remaining === null || typeof remaining === 'number',
+      `remaining should be number | null, got ${typeof remaining}: ${JSON.stringify(remaining)}`,
+    ).toBe(true);
 
     // delete
     const deleteResp = await callApi(request, 'invite/delete', {
