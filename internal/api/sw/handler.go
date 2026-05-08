@@ -1,10 +1,14 @@
 package sw
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -90,8 +94,15 @@ func (h *Handler) ShowRegistration(c echo.Context) error {
 	if err != nil {
 		// upstream Misskey TS は handler が null を return すると Endpoint base
 		// が 204 No Content に変換する。mk-go は明示的に 200 + JSON null を
-		// 返していたため drop-in 互換性が崩れていた (#918)。204 に揃える。
-		return c.NoContent(http.StatusNoContent)
+		// 返していたため drop-in 互換性が崩れていた (#918)。
+		// gorm.ErrRecordNotFound は 204、それ以外 (DB connection error 等) は
+		// 500 + slog で観測性確保 (#917 federation/show-instance と同 pattern)。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.NoContent(http.StatusNoContent)
+		}
+		slog.Error("sw/show-registration: FindByUserAndEndpoint failed",
+			"userId", user.ID, "endpoint", req.Endpoint, "err", err)
+		return apierr.JSONInternalError(c)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
@@ -114,7 +125,15 @@ func (h *Handler) UpdateRegistration(c echo.Context) error {
 
 	sub, err := h.repo.FindByUserAndEndpoint(user.ID, req.Endpoint)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REGISTRATION", "No such registration.", "b09d8066-8064-5613-efb6-0e963b21d012"))
+		// gorm.ErrRecordNotFound は 404 (= upstream / 旧実装と一致)、
+		// それ以外 (DB connection error 等) は 500 + slog で観測性確保
+		// (#917 / #918 と同 pattern)。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REGISTRATION", "No such registration.", "b09d8066-8064-5613-efb6-0e963b21d012"))
+		}
+		slog.Error("sw/update-registration: FindByUserAndEndpoint failed",
+			"userId", user.ID, "endpoint", req.Endpoint, "err", err)
+		return apierr.JSONInternalError(c)
 	}
 
 	if req.SendReadMessage != nil {

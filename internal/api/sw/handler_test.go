@@ -2,17 +2,20 @@ package sw
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // --- Mock Repositories ---
@@ -23,6 +26,10 @@ type mockSwRepo struct {
 	subs      map[string]*model.SwSubscription // userID:endpoint -> sub
 	createErr error
 	updateErr error
+	// findErr injects an arbitrary error from FindByUserAndEndpoint regardless
+	// of map state. 非 NotFound DB error の handler 分岐 (#918 / #917 観測性
+	// pattern) を test するため。
+	findErr error
 }
 
 func newMockSwRepo() *mockSwRepo {
@@ -30,11 +37,16 @@ func newMockSwRepo() *mockSwRepo {
 }
 
 func (m *mockSwRepo) FindByUserAndEndpoint(userID, endpoint string) (*model.SwSubscription, error) {
+	if m.findErr != nil {
+		return nil, m.findErr
+	}
 	key := userID + ":" + endpoint
 	if s, ok := m.subs[key]; ok {
 		return s, nil
 	}
-	return nil, errMock
+	// 実 repo (gorm) と同じく ErrRecordNotFound を返す。handler は errors.Is で
+	// not-found / DB error を区別する設計。
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (m *mockSwRepo) FindByUserID(userID string) ([]*model.SwSubscription, error) {
@@ -190,6 +202,16 @@ func TestShowRegistration_NotFound(t *testing.T) {
 	assert.Empty(t, rec.Body.String(), "204 response should have empty body")
 }
 
+// TestShowRegistration_DBError は #918 review fix の regression guard。
+// gorm.ErrRecordNotFound 以外の error (= DB 障害等) は 204 で潰さず、500 で
+// 観測性を保つ (#917 federation/show-instance と同 pattern)。
+func TestShowRegistration_DBError(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.findErr = errors.New("connection reset by peer")
+	rec := post(h.ShowRegistration, `{"endpoint":"https://x"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestShowRegistration_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.ShowRegistration, `{}`, &model.User{ID: "u1"})
@@ -224,6 +246,16 @@ func TestUpdateRegistration_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.UpdateRegistration, `{"endpoint":"https://ghost"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestUpdateRegistration_DBError は #918 review fix の regression guard。
+// gorm.ErrRecordNotFound 以外の error (= DB 障害等) は 404 で潰さず、500 で
+// 観測性を保つ。
+func TestUpdateRegistration_DBError(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.findErr = errors.New("connection reset by peer")
+	rec := post(h.UpdateRegistration, `{"endpoint":"https://x"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestUpdateRegistration_InvalidParam(t *testing.T) {
