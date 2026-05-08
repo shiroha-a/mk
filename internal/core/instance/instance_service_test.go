@@ -306,6 +306,20 @@ func TestService_FindByHost_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, instance.ErrInstanceNotFound)
 }
 
+// TestService_FindByHost_DBError は #915 review fix の regression guard。
+// repo が gorm.ErrRecordNotFound 以外の error を返した場合、Service は raw
+// err を保ち ErrInstanceNotFound に潰さないこと。観測性 (= 500 + alert)
+// を確保するため。
+func TestService_FindByHost_DBError(t *testing.T) {
+	svc, repo, _ := newService(t)
+	dbErr := errors.New("connection reset by peer")
+	repo.FindByHostErr = dbErr
+	_, err := svc.FindByHost("alpha.example")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, instance.ErrInstanceNotFound)
+	assert.ErrorIs(t, err, dbErr)
+}
+
 func TestService_List(t *testing.T) {
 	svc, repo, _ := newService(t)
 	repo.Instances["alpha.example"] = &model.Instance{ID: "i1", Host: "alpha.example"}

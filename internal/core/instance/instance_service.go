@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
+	"gorm.io/gorm"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -274,7 +275,14 @@ func (s *Service) UpdateModerationNote(host, note string) error {
 func (s *Service) FindByHost(host string) (*model.Instance, error) {
 	inst, err := s.repo.FindByHost(host)
 	if err != nil {
-		return nil, ErrInstanceNotFound
+		// gorm.ErrRecordNotFound のみ ErrInstanceNotFound に正規化、それ以外
+		// (DB connection error 等) は呼び出し側で 500 / alert に流せるよう
+		// raw err を保つ。旧実装は全 err を ErrInstanceNotFound に潰していて
+		// 観測性が落ちていた (#915 review)。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrInstanceNotFound
+		}
+		return nil, err
 	}
 	return inst, nil
 }

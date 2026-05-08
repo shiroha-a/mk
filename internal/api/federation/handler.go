@@ -2,6 +2,7 @@
 package federation
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -109,7 +110,11 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		// upstream Misskey TS は該当 instance 行がないとき 204 No Content を
 		// 返す (= null 相当)。frontend admin の lookup UI も 204 を「未知 host」
 		// として扱うため drop-in 互換でもこの shape に合わせる (#915)。
-		return c.NoContent(http.StatusNoContent)
+		// DB 障害等の真の error は 500 として観測性を保つ。
+		if errors.Is(err, coreinstance.ErrInstanceNotFound) {
+			return c.NoContent(http.StatusNoContent)
+		}
+		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, instanceToMap(inst))
 }

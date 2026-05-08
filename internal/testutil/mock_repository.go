@@ -2286,6 +2286,10 @@ type MockInstanceRepository struct {
 	Instances map[string]*model.Instance // keyed by host
 	CreateErr error
 	UpdateErr error
+	// FindByHostErr injects an arbitrary error from FindByHost regardless of
+	// the in-memory map state. Used to exercise non-NotFound DB error paths
+	// (#915 review: Service must surface raw err for observability).
+	FindByHostErr error
 }
 
 // NewMockInstanceRepository creates an empty MockInstanceRepository.
@@ -2302,6 +2306,9 @@ func (m *MockInstanceRepository) Create(i *model.Instance) error {
 }
 
 func (m *MockInstanceRepository) FindByHost(host string) (*model.Instance, error) {
+	if m.FindByHostErr != nil {
+		return nil, m.FindByHostErr
+	}
 	i, ok := m.Instances[host]
 	if !ok {
 		return nil, ErrNotFound

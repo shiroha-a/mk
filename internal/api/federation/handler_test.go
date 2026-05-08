@@ -148,6 +148,17 @@ func TestShowInstance_NotFound(t *testing.T) {
 	assert.Empty(t, rec.Body.String(), "204 response should have empty body")
 }
 
+// TestShowInstance_DBError は #915 review fix の regression guard。
+// Service が raw DB error を返したら handler は 500 を返し、未知 host
+// (= 204) と同じ扱いにしないこと。観測性確保。
+func TestShowInstance_DBError(t *testing.T) {
+	h, repo := newHandler(t)
+	repo.FindByHostErr = errors.New("connection reset by peer")
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 // TestShowInstance_FederatingFlags verifies that the response includes the
 // computed federating / subscribing / publishing fields expected by misskey-js.
 func TestShowInstance_FederatingFlags(t *testing.T) {
