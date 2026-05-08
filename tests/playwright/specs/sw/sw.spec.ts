@@ -98,18 +98,13 @@ test.describe('sw/* push subscription round-trip', () => {
     });
     expect([200, 204]).toContain(unregResp.status());
 
-    // 6. unregister 後の show は「該当 row なし」を意味する empty response。
-    // upstream Misskey TS は null return を 204 No Content に変換、mk-go は
-    // 200 + JSON null を返す drift がある (#918)。両者を LCD で許容、drift
-    // 解消後に 204 strict に絞る予定。
+    // 6. unregister 後の show は 204 No Content (= 該当 row なし)。
+    // upstream Misskey TS / mk-go (#918 fix 済) ともに同 shape。
     const showFinal = await callApi(request, 'sw/show-registration', {
       i: me.token,
       endpoint,
     });
-    expect([200, 204]).toContain(showFinal.status());
-    if (showFinal.status() === 200) {
-      expect(await showFinal.json()).toBeNull();
-    }
+    expect(showFinal.status()).toBe(204);
   });
 
   test('register same endpoint twice returns already-subscribed', async ({ request }) => {

@@ -88,7 +88,10 @@ func (h *Handler) ShowRegistration(c echo.Context) error {
 
 	sub, err := h.repo.FindByUserAndEndpoint(user.ID, req.Endpoint)
 	if err != nil {
-		return c.JSON(http.StatusOK, nil)
+		// upstream Misskey TS は handler が null を return すると Endpoint base
+		// が 204 No Content に変換する。mk-go は明示的に 200 + JSON null を
+		// 返していたため drop-in 互換性が崩れていた (#918)。204 に揃える。
+		return c.NoContent(http.StatusNoContent)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

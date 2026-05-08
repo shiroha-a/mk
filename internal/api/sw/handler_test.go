@@ -180,11 +180,14 @@ func TestShowRegistration_Found(t *testing.T) {
 	assert.Equal(t, "u1", resp["userId"])
 }
 
+// TestShowRegistration_NotFound: upstream Misskey TS と同じく該当 row なし
+// は 204 No Content を返す。旧実装は 200 + JSON null だったが、drop-in 互換
+// のため 204 に揃えた (#918)。
 func TestShowRegistration_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.ShowRegistration, `{"endpoint":"https://ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "null\n", rec.Body.String())
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String(), "204 response should have empty body")
 }
 
 func TestShowRegistration_InvalidParam(t *testing.T) {
