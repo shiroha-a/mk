@@ -115,6 +115,24 @@ func post(handler func(echo.Context) error, body string, user *model.User) *http
 	return rec
 }
 
+// --- validateOnArray helper (#939) ---
+
+func TestValidateOnArray(t *testing.T) {
+	// nil / 空配列は valid (paramDef では required ではないため許容)。
+	assert.True(t, validateOnArray(nil))
+	assert.True(t, validateOnArray([]string{}))
+	// upstream webhookEventTypes に含まれる値は全て valid。
+	assert.True(t, validateOnArray([]string{"note", "follow", "reaction"}))
+	assert.True(t, validateOnArray([]string{
+		"mention", "unfollow", "follow", "followed",
+		"note", "reply", "renote", "reaction",
+	}))
+	// 1 つでも enum 違反があれば invalid (途中までが valid でも全体を reject)。
+	assert.False(t, validateOnArray([]string{"foo"}))
+	assert.False(t, validateOnArray([]string{"note", "foo"}))
+	assert.False(t, validateOnArray([]string{"note", "Note"})) // case-sensitive
+}
+
 // --- Create ---
 
 func TestCreate_Success(t *testing.T) {
