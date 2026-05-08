@@ -15,6 +15,7 @@
 // upstream の rate limit (30sec minInterval, 120/hour) は spec 1 回叩きで
 // 影響なし。
 
+import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
@@ -37,7 +38,9 @@ test.describe('bubble-game/* register + ranking round-trip', () => {
     // seed は upstream / mk-go ともに「Unix ms epoch を文字列化したもの」を
     // 期待し、5 時間以内である必要がある。直近の Date.now() を文字列化。
     const seed = String(Date.now());
-    const gameMode = `spec_${Math.random().toString(16).slice(2, 8)}`;
+    // gameMode を unique 文字列にして他 record と分離。worker 並列化時の
+    // 衝突を避けるため UUID v4 を使う (= miauth / sw spec と同 pattern)。
+    const gameMode = `spec_${randomUUID()}`;
     const score = 999_999_999;
 
     const regResp = await callApi(request, 'bubble-game/register', {
@@ -48,7 +51,8 @@ test.describe('bubble-game/* register + ranking round-trip', () => {
       gameMode,
       gameVersion: 1,
     });
-    expect([200, 204]).toContain(regResp.status());
+    // upstream / mk-go ともに 204 No Content (= return value なし)。
+    expect(regResp.status()).toBe(204);
 
     const rankResp = await callApi(request, 'bubble-game/ranking', { gameMode });
     expect(rankResp.status()).toBe(200);
@@ -65,7 +69,7 @@ test.describe('bubble-game/* register + ranking round-trip', () => {
   test('ranking with unknown gameMode returns empty array', async ({ request }) => {
     // anonymous 可 (= requireCredential: false)。未登録 gameMode は空配列。
     const resp = await callApi(request, 'bubble-game/ranking', {
-      gameMode: `nope_${Math.random().toString(16).slice(2, 8)}`,
+      gameMode: `nope_${randomUUID()}`,
     });
     expect(resp.status()).toBe(200);
     expect(await resp.json()).toEqual([]);
