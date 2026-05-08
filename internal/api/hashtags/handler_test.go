@@ -85,6 +85,12 @@ func TestList_SortRequired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().List, `{}`).Code)
 }
 
+// TestList_SortEnum: upstream paramDef は sort を 12 値の enum 限定にしている。
+// mk-go も同 enum に絞り、未定義 sort 値で 400 を返す (#925 review nit)。
+func TestList_SortEnum(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().List, `{"sort":"bogus"}`).Code)
+}
+
 func TestList_DBError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().List, `{"sort":"+mentionedUsers"}`).Code)
 }
@@ -119,9 +125,10 @@ func TestShow_Found(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "rustlang")
 }
 
-// TestShow_NotFound: upstream Misskey TS は ApiError 既定動作で 400 +
-// NO_SUCH_HASHTAG body を返す (#925)。404 ではなく 400 に揃える。
-func TestShow_NotFound(t *testing.T) {
+// TestShow_BadRequestForUnknownTag: upstream Misskey TS は ApiError 既定動作
+// で 400 + NO_SUCH_HASHTAG body を返す (#925)。404 ではなく 400 に揃える。
+// HTTP semantics 的には 404 が自然だが drop-in 互換を優先する。
+func TestShow_BadRequestForUnknownTag(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Show, `{"tag":"ghost"}`).Code)
 }
 
@@ -268,4 +275,10 @@ func TestUsers_InvalidParam(t *testing.T) {
 // required にしている。tag だけだと 400 (#925)。
 func TestUsers_SortRequired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test"}`).Code)
+}
+
+// TestUsers_SortEnum: upstream paramDef は sort を 6 値の enum 限定。
+// 未定義 sort で 400 を返すこと (#925 review nit)。
+func TestUsers_SortEnum(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test","sort":"bogus"}`).Code)
 }
