@@ -19,14 +19,11 @@ import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
 test.describe('i/* read shape compat', () => {
-  test.beforeAll(() => {
-    resetRateLimit();
-  });
-
-  // 1 user signup を beforeAll 相当で再利用 (= signup rate limit 圧迫回避)。
+  // 1 user signup を beforeAll で再利用 (= signup rate limit 圧迫回避)。
   let userToken: string;
 
   test.beforeAll(async ({ request }) => {
+    resetRateLimit();
     const me = await signupUser(request, randomUsername('iext'));
     userToken = me.token;
   });
