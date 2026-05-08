@@ -7,12 +7,10 @@
 //   4. auth/session/show { token } で session 情報を確認 (pending state)
 //   5. user が auth/accept { token } で承認 (要 user token)
 //   6. auth/session/userkey { appSecret, token } で access token を取得
+//   7. その access token で /api/i が叩ける = 認証完成
 //
-// mk-go の auth middleware には hash 不整合 drift (#910) があり、userkey で
-// 受け取った access token を middleware 経由 (例: /api/i) で叩くと 401 に
-// なる。本 spec では shape 互換 (= userkey が accessToken + user.id を返す)
-// までを drop-in compat の境界として固定し、token を実際に middleware に
-// 通す経路は drift 解消 (#910) 後に別 spec で再 enable する。
+// upstream Misskey の app token (= 3rd party 用) と /signin-flow の i-token
+// (= ユーザー直接 login) を区別する設計の round-trip 全体を 1 spec で検証。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -30,9 +28,7 @@ test.describe('app + auth/session 3rd party flow', () => {
     resetRateLimit();
   });
 
-  // テスト名は userkey の shape 互換確認まで。最終的な /api/i 検証は #910
-  // drift 解消後に enable する。
-  test('app/create → auth/session/generate → accept → userkey shape compat', async ({
+  test('app/create → auth/session/generate → accept → userkey → /api/i works', async ({
     request,
   }) => {
     const me = await signupUser(request, randomUsername('app'));
@@ -109,13 +105,13 @@ test.describe('app + auth/session 3rd party flow', () => {
     // を防ぐ。
     expect(userkey.accessToken).not.toBe(me.token);
 
-    // 7. 取得 token で /api/i が叩ける = 認証完了
-    //
-    // mk-go では auth/accept で access_token を sha256(token + app.Secret) で
-    // store する一方、middleware は sha256(token) で lookup するため hash
-    // 不整合で 401 になる drift がある (#910)。upstream Misskey TS と shape は
-    // 一致するが行為レベルで token が使えないため、drop-in 互換 verify は
-    // userkey の shape (= accessToken + user.id) までで打ち切り、token を
-    // middleware 経由で叩くアサーションは drift 解消 (#910) 後に再 enable する。
+    // 7. 取得 token で /api/i が叩ける = 認証完了。
+    // mk-go では auth/accept で access_token を sha256(token + app.secret) で
+    // store するため、middleware は hash 列 OR token (raw) 列の dual lookup
+    // で resolve する (#910)。upstream Misskey TS と同じ pattern。
+    const iResp = await callApi(request, 'i', { i: userkey.accessToken });
+    expect(iResp.status()).toBe(200);
+    const iBody = (await iResp.json()) as { id: string };
+    expect(iBody.id).toBe(me.id);
   });
 });

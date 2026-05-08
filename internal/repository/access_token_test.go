@@ -35,3 +35,50 @@ func TestAccessTokenRepository_FindByHash_NotFound(t *testing.T) {
 	_, err := repo.FindByHash("nonexistent_hash")
 	assert.Error(t, err)
 }
+
+func TestAccessTokenRepository_FindByHashOrToken(t *testing.T) {
+	repo := NewAccessTokenRepository(testDB)
+	user := insertTestUser(t, "u_atfh_1", "tokenuser_or")
+	defer cleanupUser(t, user.ID)
+
+	// app/auth flow を再現: hash = sha256(token + secret) で保存され、
+	// raw token 列で middleware が hit することを確認する。
+	miauthToken := &model.AccessToken{
+		ID:     "at_atfh_miauth",
+		Token:  "raw_miauth_xyz",
+		Hash:   "hash_miauth_xyz",
+		UserID: user.ID,
+	}
+	require.NoError(t, testDB.Create(miauthToken).Error)
+	defer testDB.Exec(`DELETE FROM "access_token" WHERE id = ?`, miauthToken.ID)
+
+	appToken := &model.AccessToken{
+		ID:     "at_atfh_app",
+		Token:  "raw_app_xyz",
+		Hash:   "hash_app_with_secret",
+		UserID: user.ID,
+	}
+	require.NoError(t, testDB.Create(appToken).Error)
+	defer testDB.Exec(`DELETE FROM "access_token" WHERE id = ?`, appToken.ID)
+
+	t.Run("hits via hash column (miauth path)", func(t *testing.T) {
+		found, err := repo.FindByHashOrToken("hash_miauth_xyz", "raw_miauth_xyz")
+		require.NoError(t, err)
+		assert.Equal(t, miauthToken.ID, found.ID)
+		assert.NotNil(t, found.User)
+	})
+
+	t.Run("hits via token column (app/auth path)", func(t *testing.T) {
+		// hash 値は middleware が知らない (= sha256(token+secret))。
+		// raw token 列で OR 検索が hit するはず。
+		found, err := repo.FindByHashOrToken("sha256_of_raw_app_xyz_alone", "raw_app_xyz")
+		require.NoError(t, err)
+		assert.Equal(t, appToken.ID, found.ID)
+		assert.NotNil(t, found.User)
+	})
+
+	t.Run("not found when neither matches", func(t *testing.T) {
+		_, err := repo.FindByHashOrToken("nonexistent_hash", "nonexistent_token")
+		assert.Error(t, err)
+	})
+}

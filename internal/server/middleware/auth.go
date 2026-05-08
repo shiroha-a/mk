@@ -278,9 +278,15 @@ func (a *AuthMiddleware) resolveUser(token string) (*model.User, error) {
 		return user, nil
 	}
 
-	// access tokenのhashで検索
+	// access tokenのhashで検索。
+	// upstream Misskey TS の AuthenticateService が hash 列 OR token 列の
+	// dual lookup を 1 query で行う pattern (#910) を再現する:
+	//   - miauth/gen-token は hash = sha256(token) → hash 列で hit
+	//   - auth/accept は hash = sha256(token + app.secret) → hash 列で miss、
+	//     token (raw) 列で hit する経路で resolve される
+	// これにより app-issued token も middleware で正しく認証できる。
 	hash := sha256Hash(token)
-	accessToken, err := a.accessTokenRepo.FindByHash(hash)
+	accessToken, err := a.accessTokenRepo.FindByHashOrToken(hash, token)
 	if err != nil {
 		// not-found 系は cache に積まない: 失効後 30 秒間 stale を返さない
 		// ようにするのと、未知 token 連打への DDoS を rate limiter 側に任せる

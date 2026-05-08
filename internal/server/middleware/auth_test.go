@@ -275,6 +275,47 @@ func TestAuthenticate_AccessToken(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestAuthenticate_AppIssuedAccessToken は #910 drift fix の regression guard:
+// auth/accept は hash = sha256(token + app.secret) で保存するため、
+// middleware が hash 列だけで lookup すると 401 になる。token (raw) 列での
+// fallback (FindByHashOrToken) で resolve されることを確認する。
+func TestAuthenticate_AppIssuedAccessToken(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+
+	user := &model.User{ID: "user_app_1", Username: "appuser"}
+	rawToken := "raw_app_token_xyz"
+	// app/auth flow と同じく hash は raw token そのものではなく
+	// raw + secret の sha256 で別値。middleware の sha256(rawToken) は
+	// 一致しないので、token 列 fallback でしか resolve できない。
+	hashWithSecret := sha256Hash(rawToken + "app_secret_value")
+	tokenRepo.Tokens[hashWithSecret] = &model.AccessToken{
+		ID:     "at_app_1",
+		Token:  rawToken,
+		Hash:   hashWithSecret,
+		UserID: user.ID,
+		User:   user,
+	}
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		u := GetUser(c)
+		assert.NotNil(t, u)
+		assert.Equal(t, "user_app_1", u.ID)
+		return c.String(http.StatusOK, "ok")
+	})
+
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestAuthenticate_JSONBodyToken(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()

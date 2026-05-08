@@ -2007,6 +2007,22 @@ func (m *MockAccessTokenRepository) FindByHash(hash string) (*model.AccessToken,
 	return t, nil
 }
 
+// FindByHashOrToken は実 repo の WHERE hash = ? OR token = ? を再現する。
+// 実 repo は hash 列と token 列の OR 検索を 1 query で行うため、mock も
+// 両条件を順に評価する。Tokens map は hash key で持っているので、token 列
+// 検索は線形探索になるが test scope では問題ない。
+func (m *MockAccessTokenRepository) FindByHashOrToken(hash, rawToken string) (*model.AccessToken, error) {
+	if t, ok := m.Tokens[hash]; ok {
+		return t, nil
+	}
+	for _, t := range m.Tokens {
+		if t.Token == rawToken {
+			return t, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (m *MockAccessTokenRepository) FindByID(id string) (*model.AccessToken, error) {
 	for _, t := range m.Tokens {
 		if t.ID == id {

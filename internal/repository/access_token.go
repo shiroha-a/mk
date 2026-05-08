@@ -8,6 +8,17 @@ import (
 // AccessTokenRepository provides data access for access tokens.
 type AccessTokenRepository interface {
 	FindByHash(hash string) (*model.AccessToken, error)
+	// FindByHashOrToken は middleware 用の dual lookup。
+	// upstream Misskey TS の AuthenticateService が
+	//   WHERE hash = ? OR token = ?
+	// で参照している pattern を 1 query に集約する。
+	//
+	//  - miauth/gen-token は hash = sha256(token) で保存 → hash 列で hit
+	//  - auth/accept は hash = sha256(token + app.secret) で保存 → token 列で hit
+	//
+	// 2 経路を 1 query にすることで middleware ホットパスでの追加 round trip を
+	// 避けつつ、app-issued token も miauth token も一律で resolve できる (#910)。
+	FindByHashOrToken(hash, rawToken string) (*model.AccessToken, error)
 	FindByID(id string) (*model.AccessToken, error)
 	ListByUserID(userID string) ([]*model.AccessToken, error)
 	// ListByUserIDPreloadApp は /i/apps 用に App を JOIN し、sort で
@@ -33,6 +44,17 @@ func NewAccessTokenRepository(db *gorm.DB) AccessTokenRepository {
 func (r *accessTokenRepository) FindByHash(hash string) (*model.AccessToken, error) {
 	var token model.AccessToken
 	if err := r.db.Where("hash = ?", hash).Preload("User").First(&token).Error; err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
+func (r *accessTokenRepository) FindByHashOrToken(hash, rawToken string) (*model.AccessToken, error) {
+	var token model.AccessToken
+	if err := r.db.
+		Where(`"hash" = ? OR "token" = ?`, hash, rawToken).
+		Preload("User").
+		First(&token).Error; err != nil {
 		return nil, err
 	}
 	return &token, nil
