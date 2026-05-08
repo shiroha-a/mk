@@ -145,7 +145,7 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 	if req.TokenID == "" && req.Token == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	var tokenID string
+	var tokenID, rawToken string
 	if req.TokenID != "" {
 		tok, err := h.accessTokenRepo.FindByID(req.TokenID)
 		if err != nil {
@@ -155,10 +155,14 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 			return apierr.JSONAccessDenied(c)
 		}
 		tokenID = tok.ID
+		rawToken = tok.Token
 	} else {
-		// DBはSHA-256ハッシュを格納しているため、生tokenをハッシュ化して検索
+		// hash 列 (miauth: sha256(token)) と token 列 (raw, app/auth) を 1 query
+		// で OR 検索する。middleware と同じ pattern (#910 / #913)。これにより
+		// app/auth flow で発行された access token も raw token 文字列で revoke
+		// できる。
 		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Token)))
-		tok, err := h.accessTokenRepo.FindByHash(hash)
+		tok, err := h.accessTokenRepo.FindByHashOrToken(hash, req.Token)
 		if err != nil {
 			return c.NoContent(http.StatusNoContent)
 		}
@@ -166,9 +170,16 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 			return apierr.JSONAccessDenied(c)
 		}
 		tokenID = tok.ID
+		rawToken = tok.Token
 	}
 	if err := h.accessTokenRepo.DeleteByID(tokenID); err != nil {
 		return apierr.JSONInternalError(c)
+	}
+	// auth middleware の token cache に entry が残っていると revoke の効果が
+	// 30 秒 (= cache TTL) 遅延して、上流互換ではなくなる。regenerate-token
+	// と同じく invalidator が wire されている場合は即時削除する。
+	if h.authInvalidator != nil && rawToken != "" {
+		h.authInvalidator.InvalidateToken(rawToken)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

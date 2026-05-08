@@ -179,6 +179,59 @@ func TestRevokeToken_ByTokenHash(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// TestRevokeToken_ByRawTokenForAppIssuedToken は #913 drift fix の
+// regression guard: app/auth flow で発行された access token は
+// hash = sha256(token + app.secret) で保存されているため、middleware と
+// 同じく raw token 列の OR fallback でしか resolve できない。
+// FindByHashOrToken に切替後は raw token で revoke できる。
+func TestRevokeToken_ByRawTokenForAppIssuedToken(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	repo := testutil.NewMockAccessTokenRepository()
+	rawToken := "raw_app_xyz"
+	// hash は sha256(token + secret) で raw token とは別値。SHA-256(rawToken)
+	// だけでは hit しないので、token 列 fallback でのみ resolve できる shape。
+	hashWithSecret := "hash_app_with_secret_value"
+	repo.Tokens[hashWithSecret] = &model.AccessToken{
+		ID:     "at_app_1",
+		Token:  rawToken,
+		Hash:   hashWithSecret,
+		UserID: stubUser.ID,
+	}
+	h.SetAccessTokenRepo(repo)
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	rec := postExtra(h.RevokeToken, `{"token":"`+rawToken+`"}`, stubUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := repo.FindByID("at_app_1")
+	assert.Error(t, err, "token should be deleted after revoke")
+	// auth middleware の cache に残ると revoke の効果が遅延する。
+	// invalidator が raw token で呼ばれていることを確認 (= drop-in 互換)。
+	require.Equal(t, []string{rawToken}, inv.calls)
+}
+
+// TestRevokeToken_InvalidatorByTokenIDPath は tokenId 経由の revoke でも
+// cache invalidation が走ることを確認 (= miauth 経路 / app 経路の両方で
+// stale cache を残さない)。
+func TestRevokeToken_InvalidatorByTokenIDPath(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	repo := testutil.NewMockAccessTokenRepository()
+	rawToken := "raw_byid_xyz"
+	repo.Tokens["h_byid"] = &model.AccessToken{
+		ID:     "at_byid_1",
+		Token:  rawToken,
+		Hash:   "h_byid",
+		UserID: stubUser.ID,
+	}
+	h.SetAccessTokenRepo(repo)
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	rec := postExtra(h.RevokeToken, `{"tokenId":"at_byid_1"}`, stubUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{rawToken}, inv.calls)
+}
+
 func TestRevokeToken_NoParams(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	h.SetAccessTokenRepo(testutil.NewMockAccessTokenRepository())
