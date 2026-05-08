@@ -4,6 +4,11 @@
 //   - hashtags/list / search / trend: 配列
 //   - hashtags/show: 非存在 tag → 4xx or null (LCD)
 //   - hashtags/users: 非存在 tag → 空配列
+//
+// 本 spec では papering over した drift が #925 として記録されている:
+// upstream は paramDef で sort 必須、tag 長さ validate を行うが mk-go は
+// permissive。両 backend が動く params (= sort 込み / 短い tag) を渡すこと
+// で spec 自体は両環境で pass するが、drop-in 互換性は厳密には完全ではない。
 
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
