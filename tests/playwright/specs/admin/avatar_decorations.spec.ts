@@ -57,8 +57,9 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
     // 3. update で description 変更
     // roleIdsThatCanBeUsedThisDecoration: [] を送ると mk-go の GORM
     // Updates(map) が空 string[] を NULL 化して制約違反になる drift
-    // (#896 / #900 と同 class) を踏む。spec scope では update に role 配列を
-    // 含めない (= 既存値維持) ことで両 backend で動かす。drift 詳細は別 issue。
+    // (#896 / #900 と同 class、本 spec で発覚 → #931 として起票済)。
+    // spec scope では update に role 配列を含めない (= 既存値維持) ことで
+    // 両 backend で動かす。#931 fix 後に role 配列付きの strict 化を予定。
     const updResp = await callApi(request, 'admin/avatar-decorations/update', {
       i: root.token,
       id: decoId,
