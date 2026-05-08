@@ -10,6 +10,7 @@
 // 実 push 配信は browser-side / push server 必要なので scope 外。本 spec は
 // CRUD round-trip の shape 整合のみ verify する。
 
+import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
@@ -24,7 +25,8 @@ test.describe('sw/* push subscription round-trip', () => {
     const me = await signupUser(request, randomUsername('sw'));
     // dummy push endpoint + key (= 実 VAPID 検証は backend で行わないので、
     // 構造化された non-empty string を入れれば shape 互換 verify には十分)。
-    const endpoint = `https://push.example.test/${Math.random().toString(16).slice(2, 10)}`;
+    // worker 並列化時の endpoint 衝突を避けるため UUID v4 で path を組む。
+    const endpoint = `https://push.example.test/${randomUUID()}`;
     const auth = 'spec-auth-key';
     const publickey = 'spec-publickey-base64url';
 
@@ -70,7 +72,15 @@ test.describe('sw/* push subscription round-trip', () => {
       sendReadMessage: true,
     });
     expect(updResp.status()).toBe(200);
-    const updBody = (await updResp.json()) as { sendReadMessage?: boolean };
+    const updBody = (await updResp.json()) as {
+      userId?: string;
+      endpoint?: string;
+      sendReadMessage?: boolean;
+    };
+    // upstream / mk-go 共通で全 3 field 返るので shape 互換を register / show と
+    // 同じ強度で verify する。
+    expect(updBody.userId).toBe(me.id);
+    expect(updBody.endpoint).toBe(endpoint);
     expect(updBody.sendReadMessage).toBe(true);
 
     // 4. show 再取得で update 反映確認
@@ -104,7 +114,7 @@ test.describe('sw/* push subscription round-trip', () => {
 
   test('register same endpoint twice returns already-subscribed', async ({ request }) => {
     const me = await signupUser(request, randomUsername('sw2'));
-    const endpoint = `https://push.example.test/${Math.random().toString(16).slice(2, 10)}`;
+    const endpoint = `https://push.example.test/${randomUUID()}`;
     const params = {
       i: me.token,
       endpoint,
