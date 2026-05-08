@@ -55,32 +55,38 @@ func cleanup() {
 
 func TestList_Success(t *testing.T) {
 	cleanup()
-	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{}`).Code)
+	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"sort":"+mentionedUsers"}`).Code)
 }
 
 func TestList_WithData(t *testing.T) {
 	cleanup()
 	testDB.Create(&model.Hashtag{ID: "ht1", Name: "golang", MentionedUsersCount: 5})
 	defer cleanup()
-	rec := doPost(newHandler().List, `{"limit":10}`)
+	rec := doPost(newHandler().List, `{"limit":10,"sort":"+mentionedUsers"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "golang")
 }
 
 func TestList_WithOffset(t *testing.T) {
-	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"limit":5,"offset":1}`).Code)
+	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"limit":5,"offset":1,"sort":"+mentionedUsers"}`).Code)
 }
 
 func TestList_LimitCap(t *testing.T) {
-	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"limit":999}`).Code)
+	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"limit":999,"sort":"+mentionedUsers"}`).Code)
 }
 
 func TestList_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().List, `invalid`).Code)
 }
 
+// TestList_SortRequired: upstream Misskey TS は paramDef で sort を required
+// にしている。mk-go も同 shape に揃え、sort 抜きは 400 で弾く (#925)。
+func TestList_SortRequired(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().List, `{}`).Code)
+}
+
 func TestList_DBError(t *testing.T) {
-	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().List, `{}`).Code)
+	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().List, `{"sort":"+mentionedUsers"}`).Code)
 }
 
 // --- Search ---
@@ -113,8 +119,10 @@ func TestShow_Found(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "rustlang")
 }
 
+// TestShow_NotFound: upstream Misskey TS は ApiError 既定動作で 400 +
+// NO_SUCH_HASHTAG body を返す (#925)。404 ではなく 400 に揃える。
 func TestShow_NotFound(t *testing.T) {
-	assert.Equal(t, http.StatusNotFound, doPost(newHandler().Show, `{"tag":"ghost"}`).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Show, `{"tag":"ghost"}`).Code)
 }
 
 func TestShow_InvalidParam(t *testing.T) {
@@ -249,9 +257,15 @@ func TestTrend_VisibilityFilterExcludesPrivate(t *testing.T) {
 // --- Users ---
 
 func TestUsers_Success(t *testing.T) {
-	assert.Equal(t, http.StatusOK, doPost(newHandler().Users, `{"tag":"test"}`).Code)
+	assert.Equal(t, http.StatusOK, doPost(newHandler().Users, `{"tag":"test","sort":"+follower"}`).Code)
 }
 
 func TestUsers_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{}`).Code)
+}
+
+// TestUsers_SortRequired: upstream Misskey TS は paramDef で sort も
+// required にしている。tag だけだと 400 (#925)。
+func TestUsers_SortRequired(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test"}`).Code)
 }

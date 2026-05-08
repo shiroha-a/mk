@@ -98,7 +98,7 @@ test.describe('channels/* full round-trip', () => {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(followResp.status());
+    expect(followResp.status()).toBe(204);
 
     // 8. followed で含まれる
     const followedResp = await callApi(request, 'channels/followed', {
@@ -130,7 +130,7 @@ test.describe('channels/* full round-trip', () => {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(favResp.status());
+    expect(favResp.status()).toBe(204);
 
     const myFavResp = await callApi(request, 'channels/my-favorites', {
       i: me.token,
@@ -151,14 +151,14 @@ test.describe('channels/* full round-trip', () => {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(unfavResp.status());
+    expect(unfavResp.status()).toBe(204);
 
     // 11. mute/create → mute/list → mute/delete
     const muteCreateResp = await callApi(request, 'channels/mute/create', {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(muteCreateResp.status());
+    expect(muteCreateResp.status()).toBe(204);
 
     const muteListResp = await callApi(request, 'channels/mute/list', {
       i: me.token,
@@ -171,14 +171,14 @@ test.describe('channels/* full round-trip', () => {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(muteDeleteResp.status());
+    expect(muteDeleteResp.status()).toBe(204);
 
     // 12. unfollow → 204
     const unfollowResp = await callApi(request, 'channels/unfollow', {
       i: me.token,
       channelId,
     });
-    expect([200, 204]).toContain(unfollowResp.status());
+    expect(unfollowResp.status()).toBe(204);
   });
 
   test('channels/show returns negative for unknown channelId', async ({ request }) => {

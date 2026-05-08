@@ -2,13 +2,13 @@
 //
 // 5 endpoint すべて anonymous (= requireCredential: false)、shape verify のみ:
 //   - hashtags/list / search / trend: 配列
-//   - hashtags/show: 非存在 tag → 4xx or null (LCD)
+//   - hashtags/show: 非存在 tag → 400 + NO_SUCH_HASHTAG (= #925 fix で揃え)
 //   - hashtags/users: 非存在 tag → 空配列
 //
-// 本 spec では papering over した drift が #925 として記録されている:
-// upstream は paramDef で sort 必須、tag 長さ validate を行うが mk-go は
-// permissive。両 backend が動く params (= sort 込み / 短い tag) を渡すこと
-// で spec 自体は両環境で pass するが、drop-in 互換性は厳密には完全ではない。
+// #925 fix で mk-go を upstream 揃えに厳格化済:
+//   - hashtags/list: sort 必須
+//   - hashtags/users: tag + sort 必須
+//   - hashtags/show: 不明 tag は 400 NO_SUCH_HASHTAG (= ApiError 既定 status)
 
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
@@ -59,12 +59,12 @@ test.describe('hashtags/* shape compat', () => {
     expect(await resp.json()).toEqual([]);
   });
 
-  test('hashtags/show returns negative for unknown tag', async ({ request }) => {
-    // 実観測した backend 別 status:
-    //   - upstream Misskey TS: 400 (= paramDef tag length/format validation)
-    //   - mk-go: 200 (= 空集計 result) または 404 NO_SUCH_HASHTAG
-    // どちらも frontend 側で「not found」扱い。drift 詳細は #925。
+  test('hashtags/show returns 400 NO_SUCH_HASHTAG for unknown tag', async ({ request }) => {
+    // 両 backend ともに 400 + NO_SUCH_HASHTAG body (= ApiError 既定 status、
+    // #925 fix で mk-go 揃え済)。
     const resp = await callApi(request, 'hashtags/show', { tag: cleanTag });
-    expect([200, 204, 400, 404]).toContain(resp.status());
+    expect(resp.status()).toBe(400);
+    const body = (await resp.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('NO_SUCH_HASHTAG');
   });
 });
