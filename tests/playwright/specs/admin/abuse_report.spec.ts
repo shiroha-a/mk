@@ -6,6 +6,7 @@
 //
 // すべて moderator 権限要、root token を再利用する。
 
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -44,14 +45,10 @@ test.describe('admin/abuse-* shape compat', () => {
   test('notification-recipient: create → list → show → update → delete round-trip', async ({
     request,
   }) => {
-    // upstream Misskey TS は method='email' のとき root user の email アドレス
-    // 設定を要求し、未設定だと EMAIL_ADDRESS_NOT_SET (400) を返す。
-    // test 環境 root には email がないため、TS では fail する想定だったが、
-    // mk-go は permissive で同 check 無し。両 backend で動かすために TS で
-    // 失敗するケースを skip する手と、test 環境 root に email を設定する手が
-    // ある。今回は LCD で create が 200 or 400 のいずれかを許容、200 のときは
-    // round-trip 続行する形にする。
-    const name = `spec_recipient_${Math.random().toString(16).slice(2, 8)}`;
+    // TS は method='email' で root の email 未設定の場合 EMAIL_ADDRESS_NOT_SET
+    // (400) を返す。mk-go は同 check 無し。両 backend で動かすため [200, 400]
+    // LCD し、400 のとき後続 step を skip する設計 (drift 詳細は別 issue 候補)。
+    const name = `spec_recipient_${randomUUID()}`;
 
     // 1. create
     // upstream Misskey TS は paramDef で isActive / name / method を required
