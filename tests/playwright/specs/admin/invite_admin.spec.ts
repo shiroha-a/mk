@@ -29,7 +29,7 @@ test.describe('admin/invite/* round-trip', () => {
   });
 
   test('admin/invite/create → admin/invite/list で含まれる', async ({ request }) => {
-    // 1. create
+    // 1. create (= count 枚の ticket を発行、1 で十分)
     const createResp = await callApi(request, 'admin/invite/create', {
       i: root.token,
       count: 1,

@@ -6,6 +6,7 @@
 //   - admin/announcements/list: 配列 (= 全 announcement、archived 含む)
 //   - admin/announcements/update: title / text 等を変更
 
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -32,7 +33,7 @@ test.describe('admin/announcements/* list + update', () => {
   });
 
   test('create → list → update → delete round-trip', async ({ request }) => {
-    const title = `spec_admin_ann_${Math.random().toString(16).slice(2, 8)}`;
+    const title = `spec_admin_ann_${randomUUID()}`;
 
     // 1. create (= 既存 spec と同じ)
     const createResp = await callApi(request, 'admin/announcements/create', {

@@ -34,11 +34,12 @@ test.describe('admin/relays/* CRUD', () => {
     const inbox = `https://example.invalid/${randomUUID()}/inbox`;
 
     // 1. add (= 仮想 inbox)
+    // mk-go: c.JSON(StatusOK, relay) / TS: handler returns relay → Endpoint base 200。
+    // 両 backend ともに 200 + relay object を返すので strict。
     const addResp = await callApi(request, 'admin/relays/add', {
       i: root.token,
       inbox,
     });
-    // mk-go: 200 + relay obj / TS: 200 + relay obj。両 backend で 200 を期待。
     expect(addResp.status()).toBe(200);
 
     // 2. list で含まれる
