@@ -60,9 +60,10 @@ test.describe('hashtags/* shape compat', () => {
   });
 
   test('hashtags/show returns negative for unknown tag', async ({ request }) => {
-    // upstream Misskey TS は tag の長さ / 形式を厳格に validate するため、
-    // 長い random string で 400 を返すケースあり。mk-go は post-lookup で
-    // 404 / 200+empty を返す。両方を 4xx 範囲で許容する LCD。
+    // 実観測した backend 別 status:
+    //   - upstream Misskey TS: 400 (= paramDef tag length/format validation)
+    //   - mk-go: 200 (= 空集計 result) または 404 NO_SUCH_HASHTAG
+    // どちらも frontend 側で「not found」扱い。drift 詳細は #925。
     const resp = await callApi(request, 'hashtags/show', { tag: cleanTag });
     expect([200, 204, 400, 404]).toContain(resp.status());
   });

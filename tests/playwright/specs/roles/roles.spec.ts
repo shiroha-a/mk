@@ -1,6 +1,6 @@
-// Phase 4 PR-B: roles/* (public 側) shape spec。admin/roles/* は別 (#826 で
-// cover 済)。本 spec は frontend が roles list / show / users / notes を
-// 叩く経路を verify する。
+// Phase 4 PR-B: roles/* (public 側) shape spec。admin/roles/* は別 (PR #890
+// で cover 済 / #826 issue close)。本 spec は frontend が roles list / show
+// / users / notes を叩く経路を verify する。
 //
 //   - roles/list (auth required): 配列
 //   - roles/show / users / notes: roleId 不明で 4xx (= reversi/show-game pattern)
