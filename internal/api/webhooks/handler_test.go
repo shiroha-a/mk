@@ -195,15 +195,16 @@ func TestShow_InvalidParam(t *testing.T) {
 // --- Update ---
 
 func TestUpdate_Success(t *testing.T) {
+	// upstream Misskey TS の i/webhooks/update は body 無しの 204 を返すので
+	// drop-in 互換のため mk-go 側も 204 + body 無しに揃える (#936)。
 	h, repo := newTestHandler()
 	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "old", URL: "https://old.example", On: pq.StringArray{}}
 	rec := post(h.Update, `{"webhookId":"w1","name":"new","url":"https://new.example","on":["follow"],"active":false}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "new", resp["name"])
-	assert.Equal(t, false, resp["active"])
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String())
+	// repo に反映されていることを確認 (caller は別途 i/webhooks/show で取り直す前提)
+	assert.Equal(t, "new", repo.webhooks["w1"].Name)
+	assert.False(t, repo.webhooks["w1"].Active)
 }
 
 func TestUpdate_Partial(t *testing.T) {
@@ -212,7 +213,7 @@ func TestUpdate_Partial(t *testing.T) {
 	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "name", URL: "https://example.com", Secret: secret, On: pq.StringArray{}}
 	newSecret := "newsecret"
 	rec := post(h.Update, `{"webhookId":"w1","secret":"`+newSecret+`"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, newSecret, repo.webhooks["w1"].Secret)
 }
 
@@ -296,16 +297,20 @@ func TestTest_Success(t *testing.T) {
 	assert.Equal(t, "note", disp.calls[0].eventType)
 }
 
-func TestTest_DefaultTypeIsNote(t *testing.T) {
+func TestTest_TypeRequired(t *testing.T) {
+	// upstream paramDef は webhookId + type 両方を required にしている (#937)。
 	h, repo := newTestHandler()
 	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1"}
-	disp := &stubDispatcher{}
-	h.SetDispatcher(disp)
-
 	rec := post(h.Test, `{"webhookId":"w1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	require.Len(t, disp.calls, 1)
-	assert.Equal(t, "note", disp.calls[0].eventType)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestTest_InvalidType(t *testing.T) {
+	// upstream paramDef は type に webhookEventTypes enum を強制 (#937)。
+	h, repo := newTestHandler()
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1"}
+	rec := post(h.Test, `{"webhookId":"w1","type":"unknownEvent"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTest_NoDispatcherStillReturns204(t *testing.T) {
@@ -317,7 +322,7 @@ func TestTest_NoDispatcherStillReturns204(t *testing.T) {
 
 func TestTest_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
-	rec := post(h.Test, `{"webhookId":"ghost"}`, &model.User{ID: "u1"})
+	rec := post(h.Test, `{"webhookId":"ghost","type":"note"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 

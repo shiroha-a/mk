@@ -58,11 +58,8 @@ test.describe('i/webhooks/* CRUD', () => {
     const shown = (await showResp.json()) as UserWebhook;
     expect(shown.id).toBe(webhookId);
 
-    // 4. update
-    // upstream TS は paramDef で `on` 必須、mk-go は GORM Updates(map) で
-    // pq.StringArray ラップ無しの []string が NULL 化して 500 になる drift
-    // (#932 admin/system-webhook と同 class)。両 backend pass する payload
-    // が存在しないため [200, 204, 500] LCD で吸収する。
+    // 4. update。upstream TS は body 無しの 204 を返す (#936 fix 後は mk-go も
+    //    204 統一)。caller が更新後 row を必要なら i/webhooks/show で取り直す。
     const updResp = await callApi(request, 'i/webhooks/update', {
       i: userToken,
       webhookId,
@@ -72,15 +69,16 @@ test.describe('i/webhooks/* CRUD', () => {
       on: ['mention'],
       isActive: false,
     });
-    expect([200, 204, 500]).toContain(updResp.status());
+    expect(updResp.status()).toBe(204);
 
-    // 5. test (= 仮想 webhook を発火)
+    // 5. test (= 仮想 webhook を発火)。upstream paramDef は webhookId + type 必須 +
+    //    type に webhookEventTypes enum 制約 (#937 fix 後は mk-go も同 strictness)。
     const testResp = await callApi(request, 'i/webhooks/test', {
       i: userToken,
       webhookId,
       type: 'mention',
     });
-    expect([200, 204, 500]).toContain(testResp.status());
+    expect(testResp.status()).toBe(204);
 
     // 6. delete
     const delResp = await callApi(request, 'i/webhooks/delete', {
