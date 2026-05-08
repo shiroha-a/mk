@@ -36,7 +36,7 @@ test.describe('admin/ad/* CRUD round-trip', () => {
     const memo = `spec_ad_${randomUUID()}`;
     const expiresAt = Date.now() + 60 * 60 * 1000; // 1時間後
 
-    // 1. create
+    // 1. create (両 backend ともに 200 + ad object を返す)
     const createResp = await callApi(request, 'admin/ad/create', {
       i: root.token,
       url: 'https://example.invalid/ad',
@@ -49,7 +49,7 @@ test.describe('admin/ad/* CRUD round-trip', () => {
       expiresAt,
       startsAt: Date.now(),
     });
-    expect([200, 204]).toContain(createResp.status());
+    expect(createResp.status()).toBe(200);
 
     // 2. list で memo が含まれる
     const listResp = await callApi(request, 'admin/ad/list', { i: root.token });
@@ -60,7 +60,7 @@ test.describe('admin/ad/* CRUD round-trip', () => {
     expect(found, 'created ad should appear in list').toBeDefined();
     const adId = found!.id;
 
-    // 3. update で memo を変更
+    // 3. update (両 backend ともに 204 No Content を返す)
     const updResp = await callApi(request, 'admin/ad/update', {
       i: root.token,
       id: adId,
@@ -74,14 +74,14 @@ test.describe('admin/ad/* CRUD round-trip', () => {
       expiresAt,
       startsAt: Date.now(),
     });
-    expect([200, 204]).toContain(updResp.status());
+    expect(updResp.status()).toBe(204);
 
-    // 4. delete
+    // 4. delete (両 backend ともに 204 No Content を返す)
     const delResp = await callApi(request, 'admin/ad/delete', {
       i: root.token,
       id: adId,
     });
-    expect([200, 204]).toContain(delResp.status());
+    expect(delResp.status()).toBe(204);
 
     // 5. list 再取得で消えている
     const listAfter = await callApi(request, 'admin/ad/list', { i: root.token });

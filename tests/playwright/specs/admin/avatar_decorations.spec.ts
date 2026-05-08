@@ -33,7 +33,9 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
   test('create → list で含まれる → update → delete round-trip', async ({ request }) => {
     const name = `spec_deco_${randomUUID()}`;
 
-    // 1. create
+    // 1. create (両 backend ともに 200 + decoration object を返す。
+    //  create は INSERT で空 string[] が '{}' リテラルとして通るので
+    //  update と異なり drift にならない、#931 参照)
     const createResp = await callApi(request, 'admin/avatar-decorations/create', {
       i: root.token,
       name,
@@ -41,7 +43,7 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
       url: 'https://example.invalid/deco.png',
       roleIdsThatCanBeUsedThisDecoration: [],
     });
-    expect([200, 204]).toContain(createResp.status());
+    expect(createResp.status()).toBe(200);
 
     // 2. list で含まれる
     const listResp = await callApi(request, 'admin/avatar-decorations/list', {
@@ -67,14 +69,14 @@ test.describe('admin/avatar-decorations/* CRUD round-trip', () => {
       description: 'updated by spec',
       url: 'https://example.invalid/deco.png',
     });
-    expect([200, 204]).toContain(updResp.status());
+    expect(updResp.status()).toBe(204);
 
-    // 4. delete
+    // 4. delete (両 backend ともに 204 No Content)
     const delResp = await callApi(request, 'admin/avatar-decorations/delete', {
       i: root.token,
       id: decoId,
     });
-    expect([200, 204]).toContain(delResp.status());
+    expect(delResp.status()).toBe(204);
 
     // 5. list 再取得で消えている
     const listAfter = await callApi(request, 'admin/avatar-decorations/list', {
