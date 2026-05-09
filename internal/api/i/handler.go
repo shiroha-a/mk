@@ -97,8 +97,15 @@ type Handler struct {
 // 操作後に auth cache の旧 token entry を即時削除するための interface
 // (#884)。実装は internal/server/middleware/auth.go の AuthMiddleware が
 // 担当する。circular import を避けるため interface 経由で受け取る。
+//
+// InvalidateTokensForUser は user 自身が複数 device から log-in している
+// ケースで「自分の全 session を即時失効したい」操作 (i/delete-account 等)
+// で使う (#965)。token 単独削除では他端末の cache が最大 30s stale 続け、
+// 削除済 user 名義で操作可能な攻撃面が残るため (PR #966 で admin 経路
+// から要求された same-shape gap)。
 type TokenInvalidator interface {
 	InvalidateToken(token string)
+	InvalidateTokensForUser(userID string)
 }
 
 // HardMutePublisher publishes a wordmute reload event for the given user.
@@ -164,6 +171,25 @@ func (h *Handler) invalidateRequestTokenCache(c echo.Context) {
 		return
 	}
 	h.authInvalidator.InvalidateToken(tok)
+}
+
+// invalidateUserTokenCache removes every cached entry that resolves to the
+// given userID, across all of the user's tokens (native login + access
+// tokens / multi-device sessions). Self-mutation that affects the entire
+// session set (e.g. i/delete-account 論理削除) calls this so other devices
+// of the same user are also locked out within the cache TTL window
+// (#967, sibling of admin-side #966 user-token invalidate).
+//
+// noop when invalidator is not wired or userID is empty. invalidateRequest
+// TokenCache (token 単独削除) との関係: 本 helper は user 全 token を対象
+// にするので、自分以外の device session も即時 cache から消える上位互換。
+// 自分 1 device しか想定しない update 系では request-token helper の方が
+// 軽い (O(1) vs O(N))。
+func (h *Handler) invalidateUserTokenCache(userID string) {
+	if h.authInvalidator == nil || userID == "" {
+		return
+	}
+	h.authInvalidator.InvalidateTokensForUser(userID)
 }
 
 // SetMainStreamPublisher attaches a publisher used to emit events on

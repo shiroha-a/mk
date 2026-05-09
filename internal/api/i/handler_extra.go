@@ -75,14 +75,14 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// 論理削除直後の auth bypass を防ぐ (#962 P0)。helper の詳細は handler.go
-	// の invalidateRequestTokenCache を参照。本 endpoint 固有の motivation:
-	// isSuspended / isDeleted は cached User 上の field なので、invalidate を
-	// 呼ばないと cache TTL (30s) 内は middleware の P2 gate
-	// (auth.go #962 P2) も cache hit 経路では fire しない (cached value が
-	// stale = isSuspended:false のまま)。本 invalidate で cache 経由の最後の
-	// 抜け道を塞ぐ。
-	h.invalidateRequestTokenCache(c)
+	// 論理削除直後の auth bypass を防ぐ (#962 P0 + #967)。本 user は web /
+	// mobile / 3rd party app など複数 device で session を持ち得るので、
+	// 本 request の token のみ invalidate (#963 で当初実装) では他 device
+	// の token cache が最大 30s stale 続け、削除済 user 名義での操作が可能。
+	// admin/suspend-user (#966) と同 shape の self-bypass に対応するため、
+	// user-level invalidate を呼んで自分の全 device session を 1 query で
+	// 失効させる。helper の詳細は handler.go の invalidateUserTokenCache。
+	h.invalidateUserTokenCache(u.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 

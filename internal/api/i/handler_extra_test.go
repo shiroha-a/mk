@@ -132,29 +132,26 @@ func TestDeleteAccount_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// #962 P0: 論理削除完了後に auth middleware の tokenCache を invalidate
-// する。同じ token の次 request で stale な user (isSuspended=false) で
-// API 通過する security regression を防ぐ。
-func TestDeleteAccount_InvalidatesTokenCacheOnSuccess(t *testing.T) {
+// #962 P0 + #967: 論理削除完了後に auth middleware の tokenCache を
+// **user 単位で** invalidate する。本 user の他 device session
+// (= 別 token を持つ web / mobile / 3rd party app セッション) も即時
+// 失効させ、削除済 user 名義での操作が cache TTL 内 (最大 30s) に
+// 残らないようにする。
+func TestDeleteAccount_InvalidatesAllUserTokens(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 
 	inv := &stubTokenInvalidator{}
 	h.SetAuthInvalidator(inv)
 
-	// middleware が context に詰める想定の auth token を直接 set する。
-	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"password":"pass"}`))
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
-	c.Set(string(middleware.UserContextKey), user)
-	c.Set(string(middleware.TokenContextKey), "victim-session-token")
-
-	require.NoError(t, h.DeleteAccount(c))
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	require.Equal(t, []string{"victim-session-token"}, inv.calls,
-		"DeleteAccount 成功時は本 request の token を即時 invalidate するべき")
+	require.Equal(t, []string{"u1"}, inv.userCalls,
+		"DeleteAccount 成功時は user の全 token を invalidate するべき (admin/suspend-user #966 と同 shape の self-bypass を塞ぐ)")
+	// token 単独 invalidate (#963) からの移行で、token-base は呼ばれない
+	// 想定。# 967 では他 device session も含めて全部消すのが目的。
+	assert.Empty(t, inv.calls,
+		"user-level invalidate に切り替えたので token 単独 invalidate は呼ばれない")
 }
 
 // invalidator が wire されていないとき (test 直叩き / router 配線忘れ) は
@@ -167,22 +164,6 @@ func TestDeleteAccount_NoInvalidatorIsNoop(t *testing.T) {
 	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, repo.Users["u1"].IsDeleted)
-}
-
-// invalidator は wire 済みだが context に token が無いケースは invalidate
-// を skip し handler は 204 で完了する (#960 と同等の defensive)。core 削除
-// 挙動は token 有無に依存しないので IsDeleted は確実に立つ。
-func TestDeleteAccount_NoTokenInContextIsNoop(t *testing.T) {
-	h, repo := newExtraHandler(t)
-	user := setupUserWithPassword(repo, "u1", "pass")
-
-	inv := &stubTokenInvalidator{}
-	h.SetAuthInvalidator(inv)
-
-	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.True(t, repo.Users["u1"].IsDeleted, "token 不在でも core 削除挙動は実行される")
-	assert.Empty(t, inv.calls, "token が context に無いとき invalidate は呼ばれない")
 }
 
 // --- Favorites ---
@@ -316,13 +297,20 @@ func TestRegenerateToken_PublishesMyTokenRegenerated(t *testing.T) {
 	assert.Nil(t, pub.calls[0].body)
 }
 
-// stubTokenInvalidator captures InvalidateToken calls for assertion.
+// stubTokenInvalidator captures InvalidateToken / InvalidateTokensForUser
+// calls for assertion. token-base (#884) と user-base (#965/#967) の両 API
+// を持つ TokenInvalidator interface を test 内で full にスタブ化する。
 type stubTokenInvalidator struct {
-	calls []string
+	calls     []string // token-base 履歴
+	userCalls []string // user-base 履歴 (for #967 / i/delete-account)
 }
 
 func (s *stubTokenInvalidator) InvalidateToken(token string) {
 	s.calls = append(s.calls, token)
+}
+
+func (s *stubTokenInvalidator) InvalidateTokensForUser(userID string) {
+	s.userCalls = append(s.userCalls, userID)
 }
 
 // TestRegenerateToken_InvalidatesOldToken verifies #884: the old API token
