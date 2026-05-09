@@ -89,6 +89,23 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 				return next(c)
 			}
 
+			// 論理削除 / 凍結された user を anonymous request 扱いに落とす
+			// (#962 P2)。upstream Misskey は signin handler で isSuspended
+			// だけ check しているが (signin/handler.go:112)、有効 token を
+			// 既に持っている session は post-auth pipeline では gate されず、
+			// tokenCache (30s TTL) 経由でも bypass できてしまう。本 gate を
+			// 入れることで cache miss → DB fetch 経路では確実に弾ける。
+			//
+			// 限界: cache hit (= 凍結前にキャッシュされた entry) は stale
+			// な isSuspended=false を返すので gate は fire しない。
+			// self-mutation 経由 (i/delete-account #962 P0) は handler 側
+			// で InvalidateToken を呼ぶので 30s → μs window。admin 経由
+			// (admin/suspend-user 等、他 user の token を強制 invalidate
+			// する経路) は本 PR scope 外、別 issue で追跡する想定。
+			if user.IsSuspended || user.IsDeleted {
+				return next(c)
+			}
+
 			c.Set(string(UserContextKey), user)
 			// handler 側でこの request の auth token を引きたいケースがある
 			// (例: i/update が成功後に tokenCache を invalidate する目的、

@@ -75,28 +75,14 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// auth middleware の tokenCache (30s TTL) は token → user object を保持
-	// しているため、論理削除直後でも cache 内の旧 user (isSuspended=false /
-	// isDeleted=false) で同じ token が auth を通過してしまう。middleware は
-	// 現状 isSuspended / isDeleted gate を持たない (signin handler 内のみ)
-	// ので、cache 経由の bypass を防ぐには handler 側で本 request の token
-	// entry を即時 invalidate するのが現実解 (#962 P0)。次 request は cache
-	// miss → DB から fresh fetch、middleware 通過後の handler が isDeleted な
-	// user の操作を弾く前提 (= middleware level の gate は #962 P2 で別途)。
-	// infrastructure は #884 / #960 と共通の TokenInvalidator interface を
-	// 再利用、新規 wiring は不要。
-	//
-	// なお UpdateUserFields commit と本 invalidate の間の race window
-	// (μs オーダー) は本 fix では塞げない: 並行 request が同 token で
-	// middleware cache hit (stale) → handler 実行に到達した直後に本
-	// invalidate が走るケース。完全防衛は #962 P2 (middleware が DB fetch
-	// ごとに isSuspended / isDeleted を gate する) が必要。本 fix は
-	// 30s window → μs window への defense-in-depth 第一段。
-	if h.authInvalidator != nil {
-		if tok := middleware.GetToken(c); tok != "" {
-			h.authInvalidator.InvalidateToken(tok)
-		}
-	}
+	// 論理削除直後の auth bypass を防ぐ (#962 P0)。helper の詳細は handler.go
+	// の invalidateRequestTokenCache を参照。本 endpoint 固有の motivation:
+	// isSuspended / isDeleted は cached User 上の field なので、invalidate を
+	// 呼ばないと cache TTL (30s) 内は middleware の P2 gate
+	// (auth.go #962 P2) も cache hit 経路では fire しない (cached value が
+	// stale = isSuspended:false のまま)。本 invalidate で cache 経由の最後の
+	// 抜け道を塞ぐ。
+	h.invalidateRequestTokenCache(c)
 	return c.NoContent(http.StatusNoContent)
 }
 

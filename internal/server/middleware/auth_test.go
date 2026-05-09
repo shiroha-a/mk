@@ -98,6 +98,86 @@ func TestGetToken_NotAuthenticated(t *testing.T) {
 	assert.Equal(t, "", GetToken(c))
 }
 
+// #962 P2: 論理削除 / 凍結された user は middleware 段階で anonymous
+// request 扱いに落とす。cache miss → DB fetch path で gate が fire する
+// ことを担保する。
+func TestAuthenticate_SuspendedUserTreatedAsAnonymous(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+
+	suspended := &model.User{ID: "u1", Username: "suspended", IsSuspended: true}
+	token := "suspended-user-token"
+	userRepo.Tokens[token] = suspended
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		assert.Nil(t, GetUser(c), "凍結 user は context に attach されない")
+		assert.Equal(t, "", GetToken(c), "凍結 user は token も context に attach されない")
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+}
+
+func TestAuthenticate_DeletedUserTreatedAsAnonymous(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+
+	deleted := &model.User{ID: "u2", Username: "deleted", IsDeleted: true}
+	token := "deleted-user-token"
+	userRepo.Tokens[token] = deleted
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		assert.Nil(t, GetUser(c), "削除済 user は context に attach されない")
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+}
+
+// 凍結 → RequireAuth gate と組み合わせると 401 になることを担保。
+// signin handler 以外の認証要 endpoint は middleware 通過時点で
+// CREDENTIAL_REQUIRED で弾かれる (= 30s attack window が closed)。
+func TestRequireAuth_SuspendedRejected(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+
+	suspended := &model.User{ID: "u3", Username: "frozen", IsSuspended: true}
+	token := "another-suspended-token"
+	userRepo.Tokens[token] = suspended
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	// Authenticate → RequireAuth の chain は production の認証要 endpoint
+	// と同じ pipeline。
+	chained := auth.Authenticate()(RequireAuth()(func(c echo.Context) error {
+		t.Fatal("RequireAuth は通過するべきでない")
+		return nil
+	}))
+	require.NoError(t, chained(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"凍結 user は RequireAuth で 401 が返る")
+}
+
 func TestAuthenticate_QueryParam(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()

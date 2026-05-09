@@ -144,6 +144,28 @@ func (h *Handler) SetAuthInvalidator(inv TokenInvalidator) {
 	h.authInvalidator = inv
 }
 
+// invalidateRequestTokenCache removes the current request's token entry
+// from the auth middleware tokenCache so that subsequent requests with the
+// same token are forced to re-resolve user state from DB. Self-mutation
+// handlers call this after committing changes that would otherwise be
+// invisible to subsequent middleware.GetUser(c) reads within the cache
+// TTL window (#960 / #962 P0).
+//
+// noop when invalidator is not wired (= unit test or router-config drift)
+// or when no token is in the request context (= request was authenticated
+// via a non-token mechanism, or middleware wiring drift). Defensive nil-
+// guard so handler success paths do not regress on minor wiring changes.
+func (h *Handler) invalidateRequestTokenCache(c echo.Context) {
+	if h.authInvalidator == nil {
+		return
+	}
+	tok := middleware.GetToken(c)
+	if tok == "" {
+		return
+	}
+	h.authInvalidator.InvalidateToken(tok)
+}
+
 // SetMainStreamPublisher attaches a publisher used to emit events on
 // /api/i/* endpoints (currently `myTokenRegenerated`). Optional — nil
 // disables emit.
@@ -944,21 +966,11 @@ func (h *Handler) Update(c echo.Context) error {
 		h.hardMutePublisher.PublishHardMuteReload(me.ID)
 	}
 
-	// auth middleware の tokenCache (30 秒 TTL) は token → user object を
-	// キャッシュしているため、name / description などの mutable field を
-	// 更新しても、同じ token で次の request が来たとき stale な user が
-	// attach され続ける。本来 cache の効く期間 (TTL 内) は profile が
-	// 「自分から見て」即時反映されるべきなので、現在の token entry を
-	// invalidate して次回 lookup で DB から fresh fetch させる (#960)。
-	// invalidate 対象は本 request の認証 token のみ (= 他デバイスの session
-	// は影響なし)。infrastructure としては #884 で導入された
-	// TokenInvalidator interface (regenerate-token / change-password 用)
-	// を再利用しており、本 handler 専用の wiring は追加していない。
-	if h.authInvalidator != nil {
-		if tok := middleware.GetToken(c); tok != "" {
-			h.authInvalidator.InvalidateToken(tok)
-		}
-	}
+	// auth middleware の tokenCache (30 秒 TTL) は name / description などの
+	// mutable field を持つ user object を保持するため、更新後も同じ token で
+	// stale な値が返り続けてしまう。helper 経由で本 request の token を即時
+	// invalidate して、次回 lookup で DB から fresh fetch させる (#960)。
+	h.invalidateRequestTokenCache(c)
 
 	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
 }
