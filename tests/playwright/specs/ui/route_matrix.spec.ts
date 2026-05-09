@@ -74,23 +74,27 @@ test.describe('UI: authenticated SPA route matrix', () => {
   // 足りないので spec 単位で延長する。各 case の navigation は最大 15-20s。
   test.setTimeout(180_000);
 
-  // signin を全 case で 1 回だけ走らせるため beforeAll に集約はせず、
-  // 1 つの test 内で chain する形にする。worker 同時起動だと idempotency
-  // 保証が複雑になるため、1 spec 1 worker (config の workers: 1) を活用する。
+  // signin を全 case で 1 回だけ走らせて時間効率を取る。各 route navigation
+  // は test.step() で wrap して Playwright の HTML report 上で個別 step
+  // として可視化する (= 1 route 失敗時に他が pass 扱いになるわけではないが、
+  // どの route が原因かを step trace で 1 jump で特定できる)。
   test('walk all authenticated routes and verify navbar persists', async ({ page, baseURL }) => {
     await uiSigninAsRoot(page, baseURL, root);
 
     for (const route of AUTH_ROUTES) {
-      const resp = await page.goto(`${baseURL}${route.path}`, { waitUntil: 'domcontentloaded' });
-      expect(resp, `goto ${route.path} returned null response`).not.toBeNull();
-      expect(resp!.status(), `${route.label} should return 200 (SPA fallback)`).toBe(200);
+      // eslint-disable-next-line no-loop-func
+      await test.step(`navigate ${route.path} (${route.label})`, async () => {
+        const resp = await page.goto(`${baseURL}${route.path}`, { waitUntil: 'domcontentloaded' });
+        expect(resp, `goto ${route.path} returned null response`).not.toBeNull();
+        expect(resp!.status(), `${route.label} should return 200 (SPA fallback)`).toBe(200);
 
-      // hydration 完了確認: navbar の post button が visible (= authenticated
-      // state 維持 + Vue mount 成功)
-      await expect(
-        page.locator('[data-cy-open-post-form]').first(),
-        `${route.label} should hydrate with authenticated navbar`,
-      ).toBeVisible({ timeout: 20_000 });
+        // hydration 完了確認: navbar の post button が visible (= authenticated
+        // state 維持 + Vue mount 成功)
+        await expect(
+          page.locator('[data-cy-open-post-form]').first(),
+          `${route.label} should hydrate with authenticated navbar`,
+        ).toBeVisible({ timeout: 20_000 });
+      });
     }
   });
 });

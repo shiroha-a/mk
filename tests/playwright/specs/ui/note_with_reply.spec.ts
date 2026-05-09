@@ -1,15 +1,21 @@
-// note 詳細 page で reply form を開いて返信投稿 → API 経由で reply
-// chain を確認する e2e。
+// note 詳細 page を reply chain がある状態で render → API で
+// repliesCount=1 を verify する mixed (UI navigation + API write) e2e。
 //
-// API 単体 spec (specs/notes/) では reply の round-trip を verify するが、
-// UI で reply ボタンを click → form 出現 → submit の経路は別軸の覆い。
+// 当初は UI で reply ボタン click → form fill → submit を狙ったが、upstream
+// Misskey の note footer の reply icon に data-cy-* selector が無く programmatic
+// 操作の起点が無いため、Vue 内部 class に依存するアプローチは fragility が高い。
+// 妥協として:
+//   - reply 自体は API で作成 (= notes/create with replyId)
+//   - UI 側は親 note の /notes/:id を開いて hydration を verify
+//   - chain 形成は API (notes/show.repliesCount) で verify
+// reply 操作の真の UI e2e は upstream に reply 用 data-cy が追加されるまで保留。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
-test.describe('UI: reply to note via /notes/:id reply button', () => {
+test.describe('UI: note detail page with reply chain', () => {
   let root: RootFixture;
 
   test.beforeAll(() => {
@@ -18,9 +24,9 @@ test.describe('UI: reply to note via /notes/:id reply button', () => {
 
   test.setTimeout(90_000);
 
-  test('open note detail → click reply → fill text → submit → API confirms reply', async ({ page, baseURL, request }) => {
+  test('open note detail → API-side create reply → /notes/:id renders + API confirms chain', async ({ page, baseURL, request }) => {
     // 親 note を API で作成 (= UI 経由の post_note は別 spec で cover、本 spec
-    // は reply の chain に focus)
+    // は reply chain の形成に focus)
     const parentText = `playwright-reply-parent ${Date.now()}`;
     const parent = await callApi(request, 'notes/create', {
       i: root.token,
@@ -42,18 +48,7 @@ test.describe('UI: reply to note via /notes/:id reply button', () => {
       { timeout: 20_000 },
     );
 
-    // Misskey の note 内 footer に reply / renote / reaction のボタン群がある。
-    // upstream には data-cy-* selector が無いので class match でフォールバック。
-    // MkNote の reply ボタンは <i class="ti ti-arrow-back-up"></i> を icon に持つ。
-    // SPA の click handler を直接呼ぶ programmatic アプローチで安定させるため、
-    // os.post() を browser context で直接 invoke する逃げ道はない (= os は
-    // export されない)。代替: 投稿 form を開く os.post 互換の data-cy ボタン
-    // (= [data-cy-open-post-form]) は home navbar にあるが、reply context を
-    // 持たないので使えない。
-    //
-    // 妥協: API で reply を作成し、UI で chain が visible になることだけ
-    // verify する (= read-side smoke として妥当)。reply 操作 e2e は upstream
-    // に reply 用 data-cy が追加されるまで保留。
+    // reply 自体は API で作成 (= 本 spec scope は chain 形成 + 親 note hydration)
     const replyText = `playwright-reply-child ${Date.now()}`;
     const reply = await callApi(request, 'notes/create', {
       i: root.token,
