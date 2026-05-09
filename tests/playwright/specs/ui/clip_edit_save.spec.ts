@@ -1,0 +1,120 @@
+// /clips/:id ページの header pencil button → MkFormDialog で name 編集 →
+// OK で /api/clips/update が走ることを verify する write-flow spec。
+//
+// clip.vue の headerActions は MkPageHeader headerActions = `ti-pencil`
+// アイコンの button のみ (own clip + signed in 時)。click すると
+// os.form() で MkFormDialog が popup し、name / description / isPublic
+// の 3 fields が並ぶ。最初の text input が name なのでそこを書き換えて
+// MkFormDialog の OK button を click すれば update round-trip が走る。
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+
+test.describe('UI: /clips/:id edit name round-trip', () => {
+  let root: RootFixture;
+
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+
+  test.setTimeout(60_000);
+
+  test('header pencil → MkFormDialog rename → /api/clips/update', async ({
+    page,
+    baseURL,
+    request,
+  }) => {
+    // 1. test 用 clip を API で create
+    const initialName = `pw-clip-${Date.now()}`;
+    const createResp = await request.post(`${baseURL}/api/clips/create`, {
+      ignoreHTTPSErrors: true,
+      data: { i: root.token, name: initialName, isPublic: false },
+    });
+    expect(createResp.status()).toBe(200);
+    const clip = await createResp.json();
+    const clipId: string = clip.id;
+    expect(clipId).toBeTruthy();
+
+    // 2. clip 詳細ページを開いて hydrate を待つ
+    await uiSigninAsRoot(page, baseURL, root);
+    const resp = await page.goto(`${baseURL}/clips/${clipId}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    expect(resp!.status()).toBe(200);
+    await page.waitForFunction(
+      (n) => document.body.textContent?.includes(n) ?? false,
+      initialName,
+      { timeout: 20_000 },
+    );
+
+    // 3. header の pencil アイコン button (= edit handler) が hydrate
+    // するまで待ってから click。複数 ti-pencil が居るとき (= ページ内
+    // 別 button) と区別するため、MkPageHeader の headerActions に属する
+    // button (`<button><i class="ti ti-pencil">`) のうち最初の 1 個を
+    // 取る。clip own user の clip detail で edit は他に置き換えが無い。
+    await page.waitForFunction(
+      () => {
+        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+        return btns.some((b) => b.querySelector('i.ti-pencil') !== null);
+      },
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const editBtn = btns.find((b) => b.querySelector('i.ti-pencil') !== null);
+      editBtn?.click();
+    });
+
+    // 4. MkFormDialog が popup → 最初の text input (= name) が見える
+    await page.waitForFunction(
+      () => {
+        const inputs = Array.from(document.querySelectorAll('input')) as HTMLInputElement[];
+        return inputs.filter((i) => i.type === 'text').length >= 1;
+      },
+      { timeout: 10_000 },
+    );
+
+    // 5. 新しい name を投入。MkFormDialog 内の text input は name で、
+    // settings layout の MkSuperMenu search 入力 (type=search) と被らない
+    // よう type=text のみ抽出。dialog mount 直後の最初 type=text が name。
+    const newName = `pw-clip-renamed-${Date.now()}`;
+    await page.evaluate((name) => {
+      const inputs = Array.from(document.querySelectorAll('input')) as HTMLInputElement[];
+      const textInputs = inputs.filter((i) => i.type === 'text');
+      const target = textInputs[textInputs.length - 1];
+      if (!target) return;
+      target.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(target, name);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }, newName);
+
+    // 6. MkFormDialog OK → clips/update round-trip
+    const updateResp = page.waitForResponse(
+      (r) => r.url().includes('/api/clips/update') && r.status() < 300,
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const ok = document.querySelector(
+        '[data-cy-modal-dialog-ok]',
+      ) as HTMLButtonElement | null;
+      ok?.click();
+    });
+    const update = await updateResp;
+    expect(update.status()).toBeLessThan(300);
+
+    // 7. API GET で round-trip verify
+    const showResp = await request.post(`${baseURL}/api/clips/show`, {
+      ignoreHTTPSErrors: true,
+      data: { i: root.token, clipId },
+    });
+    expect(showResp.status()).toBe(200);
+    const shown = await showResp.json();
+    expect(shown.id).toBe(clipId);
+    expect(shown.name).toBe(newName);
+  });
+});

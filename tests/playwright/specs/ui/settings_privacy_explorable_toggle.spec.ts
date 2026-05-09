@@ -42,14 +42,18 @@ test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
       ) as HTMLInputElement[];
       cbs[6]?.click();
     });
-    // mk-go の i/update 応答は entity.PackUserDetailed 経由で、現状
-    // isExplorable field を含まない drift がある (upstream UserDetailed には
-    // 含まれる)。本 spec では status 200 + user object 形だけ verify する
-    // (= 7 番目の switch click で /api/i/update が走ったことを担保、本 PR
-    // の scope は UI 操作 → API round-trip までなので drift は別 issue)。
+    // #968 (PR #969) で MeDetailed packer が導入され、i/update 応答に
+    // isExplorable / noCrawle / preventAiLearning など self-view-only field
+    // が含まれるようになった。本 spec では「7 番目の switch を click した
+    // 後、応答 body の isExplorable が toggle 後の値 (= boolean) を返す」
+    // ことを strict assert する。click 前の値が観測しにくいので、boolean
+    // 型であることを担保するに留める (true/false どちらでも通すため
+    // toggle 方向に依存しない、初期 DB 状態 default:true の前提で false
+    // 期待だが、prior run の影響で逆向きにもなり得るため)。
     const update = await updateResp;
     const body = await update.json();
     expect(body.id).toBeTruthy();
     expect(body.username).toBe(root.username);
+    expect(typeof body.isExplorable).toBe('boolean');
   });
 });
