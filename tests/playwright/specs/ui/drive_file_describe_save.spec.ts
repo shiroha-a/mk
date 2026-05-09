@@ -1,0 +1,135 @@
+// /my/drive/file/:fileId で description button (kvEditBtn) → MkModalWindow
+// (MkFileCaptionEditWindow) → caption textarea 編集 → OK → /api/drive/files/update
+// で comment 更新が round-trip する write-flow spec。
+//
+// drive.file.info.vue:182 の describe() は os.popupAsyncWithDialog で
+// MkFileCaptionEditWindow を popup する。dialog 内には MkTextarea (autofocus)
+// が 1 つあり、OK click で `done(caption)` callback → comment field を
+// drive/files/update に流す (空文字なら null clear)。
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+
+test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
+  let root: RootFixture;
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+  test.setTimeout(60_000);
+
+  test('describe button → caption textarea → OK → /api/drive/files/update', async ({
+    page,
+    baseURL,
+    request,
+  }) => {
+    // 1. test 用 file を upload
+    const fileName = `pw-cap-${Date.now()}.png`;
+    const uploadResp = await request.post(`${baseURL}/api/drive/files/create`, {
+      ignoreHTTPSErrors: true,
+      multipart: {
+        i: root.token,
+        file: {
+          name: fileName,
+          mimeType: 'image/png',
+          buffer: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+            'base64',
+          ),
+        },
+      },
+    });
+    expect(uploadResp.status()).toBe(200);
+    const file = await uploadResp.json();
+    const fileId: string = file.id;
+    expect(fileId).toBeTruthy();
+
+    // 2. detail page open
+    await uiSigninAsRoot(page, baseURL, root);
+    const resp = await page.goto(`${baseURL}/my/drive/file/${fileId}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    expect(resp!.status()).toBe(200);
+
+    // hydrate を file 名で確認
+    await page.waitForFunction(
+      (n) => document.body.textContent?.includes(n) ?? false,
+      file.name,
+      { timeout: 20_000 },
+    );
+
+    // 3. describe button (= kvEditBtn 系のうち、内部に "Description" 文字列を
+    // 含む button) を click。drive.file.info.vue にはレイアウト上 2 つの
+    // kvEditBtn (move folder / describe) があり、describe は MkKeyValue
+    // の key text が "Description"。最初の hit で当てる。
+    await page.waitForFunction(
+      () => {
+        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+        return btns.some(
+          (b) =>
+            (b.textContent ?? '').includes('Description') &&
+            b.querySelector('i.ti-pencil') !== null,
+        );
+      },
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const target = btns.find(
+        (b) =>
+          (b.textContent ?? '').includes('Description') &&
+          b.querySelector('i.ti-pencil') !== null,
+      );
+      target?.click();
+    });
+
+    // 4. MkModalWindow + MkTextarea が出現するまで待つ。caption textarea は
+    // autofocus 属性付き。テキスト入力は post_note.spec.ts と同じ native
+    // value setter pattern。
+    await page.waitForFunction(
+      () => document.querySelectorAll('textarea').length >= 1,
+      { timeout: 10_000 },
+    );
+
+    const caption = `pw-caption-${Date.now()}`;
+    await page.evaluate((c) => {
+      const tas = Array.from(document.querySelectorAll('textarea')) as HTMLTextAreaElement[];
+      const target = tas[tas.length - 1];
+      if (!target) return;
+      target.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(target, c);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }, caption);
+
+    // 5. OK button (MkModalWindow `:withOkButton` で footer に primary OK)
+    // → drive/files/update が走る
+    const updateResp = page.waitForResponse(
+      (r) => r.url().includes('/api/drive/files/update') && r.status() < 300,
+      { timeout: 15_000 },
+    );
+    // MkModalWindow の OK は data-cy- ではなく primary text "Ok" / "OK"。
+    // 念のため textContent で当てる。
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const ok = btns.find(
+        (b) =>
+          !b.disabled && /^(Ok|OK|オーケー)$/i.test((b.textContent ?? '').trim()),
+      );
+      ok?.click();
+    });
+    await updateResp;
+
+    // 6. API 経由で comment 反映 verify
+    const showResp = await request.post(`${baseURL}/api/drive/files/show`, {
+      ignoreHTTPSErrors: true,
+      data: { i: root.token, fileId },
+    });
+    expect(showResp.status()).toBe(200);
+    const shown = await showResp.json();
+    expect(shown.comment).toBe(caption);
+  });
+});

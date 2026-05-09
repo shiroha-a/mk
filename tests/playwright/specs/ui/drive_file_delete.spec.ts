@@ -1,0 +1,94 @@
+// /my/drive/file/:fileId で trash button を click → confirm dialog OK →
+// /api/drive/files/delete が round-trip する write-flow spec。
+//
+// drive.file.info.vue の deleteFile() は os.confirm warning → 承諾後に
+// drive/files/delete を叩く。ボタンは fileQuickActionsOthers 内、ti-trash
+// アイコン + danger style。post / sensitive ボタンと違い trash は唯一の
+// danger color。
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+
+test.describe('UI: /my/drive/file/:fileId delete flow', () => {
+  let root: RootFixture;
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+  test.setTimeout(60_000);
+
+  test('trash button → confirm OK → /api/drive/files/delete', async ({
+    page,
+    baseURL,
+    request,
+  }) => {
+    // 1. test 用 file を upload
+    const fileName = `pw-del-${Date.now()}.png`;
+    const uploadResp = await request.post(`${baseURL}/api/drive/files/create`, {
+      ignoreHTTPSErrors: true,
+      multipart: {
+        i: root.token,
+        file: {
+          name: fileName,
+          mimeType: 'image/png',
+          buffer: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+            'base64',
+          ),
+        },
+      },
+    });
+    expect(uploadResp.status()).toBe(200);
+    const file = await uploadResp.json();
+    const fileId: string = file.id;
+    expect(fileId).toBeTruthy();
+
+    // 2. detail page を開いて hydrate を待つ
+    await uiSigninAsRoot(page, baseURL, root);
+    const resp = await page.goto(`${baseURL}/my/drive/file/${fileId}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    expect(resp!.status()).toBe(200);
+
+    // trash button (= ti-trash icon を持つ button) hydrate を待つ
+    await page.waitForFunction(
+      () => {
+        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+        return btns.some((b) => b.querySelector('i.ti-trash') !== null);
+      },
+      { timeout: 20_000 },
+    );
+
+    // 3. trash click → confirm dialog 出現
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const trash = btns.find((b) => b.querySelector('i.ti-trash') !== null);
+      trash?.click();
+    });
+
+    await page.waitForFunction(
+      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      { timeout: 10_000 },
+    );
+
+    // 4. OK → drive/files/delete round-trip
+    const deleteResp = page.waitForResponse(
+      (r) => r.url().includes('/api/drive/files/delete') && r.status() < 300,
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const ok = document.querySelector(
+        '[data-cy-modal-dialog-ok]',
+      ) as HTMLButtonElement | null;
+      ok?.click();
+    });
+    await deleteResp;
+
+    // 5. API 経由で 削除確認 — show は 404 を返す
+    const showResp = await request.post(`${baseURL}/api/drive/files/show`, {
+      ignoreHTTPSErrors: true,
+      data: { i: root.token, fileId },
+    });
+    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+  });
+});
