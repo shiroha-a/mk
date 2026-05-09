@@ -1126,7 +1126,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetUserRepo(userRepo)
 	usersHandler.SetNoteReactionRepo(reactionRepo)
 	usersHandler.SetRemoteStatsFetcher(&remoteStatsFetcherAdapter{
-		fetcher: corefederation.NewRemoteStatsFetcher(nil),
+		fetcher: corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.outboundOpts()...),
 	})
 	api.POST("/users/show", usersHandler.Show)
 	api.POST("/users/search", usersHandler.Search)

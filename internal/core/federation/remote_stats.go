@@ -8,9 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/safehttp"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -22,9 +24,16 @@ type RemoteUserStats struct {
 	FollowingCount int
 }
 
-// remoteStatsTTL は cache 有効期間。counter は数分単位で動くが、毎 request
-// 取りに行くと remote 負荷が大きいので 1 時間で fold (#943)。
+// remoteStatsTTL は positive cache 有効期間 (= remote が valid response を返した
+// 場合)。counter は数分単位で動くが、毎 request 取りに行くと remote 負荷が
+// 大きいので 1 時間で fold (#943)。
 const remoteStatsTTL = 1 * time.Hour
+
+// remoteStatsNegativeTTL は negative cache 有効期間 (= remote が 4xx / timeout /
+// malformed JSON を返した場合)。一時的な downtime / Mastodon のような互換性無し
+// instance を 1h 単位で負キャッシュすると stale 期間が長過ぎるため 5 分に短縮
+// (#943 review)。
+const remoteStatsNegativeTTL = 5 * time.Minute
 
 // remoteStatsTimeout は remote /api/users/show の単一 fetch timeout。
 const remoteStatsTimeout = 5 * time.Second
@@ -39,6 +48,10 @@ const remoteStatsTimeout = 5 * time.Second
 //
 // 失敗時は静かに nil を返す (= caller は local 観測値を fallback として使う)。
 // 同一 (host, username) への並行 fetch は singleflight で fold する。
+//
+// SSRF 対策として fetcher は safehttp の SSRF-safe transport を使い、host が
+// localhost / private IP / metadata service に解決される場合は接続前に
+// reject する (allowedPrivateNetworks で個別許可可)。
 type RemoteStatsFetcher struct {
 	client *http.Client
 	cache  sync.Map // key=host|username → cachedRemoteStats
@@ -48,39 +61,86 @@ type RemoteStatsFetcher struct {
 type cachedRemoteStats struct {
 	stats   *RemoteUserStats
 	fetched time.Time
+	ttl     time.Duration
 }
 
-// NewRemoteStatsFetcher constructs a fetcher with the given HTTP client.
-// nil client は default (timeout 付き) にフォールバック。
-func NewRemoteStatsFetcher(client *http.Client) *RemoteStatsFetcher {
-	if client == nil {
-		client = &http.Client{Timeout: remoteStatsTimeout}
+// NewRemoteStatsFetcher constructs a fetcher with a SSRF-safe HTTP transport
+// built from allowedPrivateNetworks (= config.AllowedPrivateNetworks 互換) と
+// optional safehttp.Option (e.g. WithProxy)。
+//
+// urlpreview / mediaproxy と同じく safehttp 経由で組み立てる pattern (#943
+// review SSRF guard)。
+func NewRemoteStatsFetcher(allowedPrivateNetworks []string, opts ...safehttp.Option) *RemoteStatsFetcher {
+	transport := safehttp.NewSSRFSafeTransport(allowedPrivateNetworks, opts...)
+	return &RemoteStatsFetcher{
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   remoteStatsTimeout,
+		},
 	}
-	return &RemoteStatsFetcher{client: client}
+}
+
+// newRemoteStatsFetcherWithTransport はテスト専用 constructor。redirectTransport
+// 等で httptest server に向け直したい場合に使う。production では
+// NewRemoteStatsFetcher を使うこと。
+func newRemoteStatsFetcherWithTransport(rt http.RoundTripper) *RemoteStatsFetcher {
+	return &RemoteStatsFetcher{
+		client: &http.Client{
+			Transport: rt,
+			Timeout:   remoteStatsTimeout,
+		},
+	}
 }
 
 // Fetch returns cached stats if available and fresh, otherwise fetches from
 // the remote /api/users/show endpoint. Returns nil if the host or username is
-// empty, or if the remote call fails / returns malformed payload.
+// empty / malformed, or if the remote call fails / returns malformed payload.
 func (f *RemoteStatsFetcher) Fetch(ctx context.Context, host, username string) *RemoteUserStats {
 	if f == nil || host == "" || username == "" {
 		return nil
 	}
+	if !isValidHost(host) {
+		// host に / ? # @ space などが混入した URL injection 攻撃を防ぐ
+		// (#943 review)。federation の webfinger 経由で sanitize されるはず
+		// だが、念のため二重 check。
+		return nil
+	}
 	key := host + "|" + username
 	if v, ok := f.cache.Load(key); ok {
-		if entry, ok := v.(cachedRemoteStats); ok && time.Since(entry.fetched) < remoteStatsTTL {
+		if entry, ok := v.(cachedRemoteStats); ok && time.Since(entry.fetched) < entry.ttl {
 			return entry.stats
 		}
 	}
 	v, _, _ := f.group.Do(key, func() (any, error) {
 		stats := f.fetchRemote(ctx, host, username)
-		f.cache.Store(key, cachedRemoteStats{stats: stats, fetched: time.Now()})
+		ttl := remoteStatsTTL
+		if stats == nil {
+			ttl = remoteStatsNegativeTTL
+		}
+		f.cache.Store(key, cachedRemoteStats{stats: stats, fetched: time.Now(), ttl: ttl})
 		return stats, nil
 	})
 	if stats, ok := v.(*RemoteUserStats); ok {
 		return stats
 	}
 	return nil
+}
+
+// isValidHost checks that host is a plain hostname (optionally with port) and
+// does not contain URL-meaningful characters. Reject `/`, `?`, `#`, `@`, ` `
+// 等が混入した host で URL を組むと別 path / 別 host が叩かれて SSRF / spoof
+// になるため、url.Parse 経由で host parse 結果が input と一致することを確認する。
+func isValidHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	parsed, err := url.Parse("https://" + host + "/")
+	if err != nil {
+		return false
+	}
+	// Host は parser が optional port 込みで保持。input host 全体が parser
+	// の Host と一致しない場合 (= path / query / userinfo が混入していた場合) は reject。
+	return parsed.Host == host && parsed.Path == "/"
 }
 
 // fetchRemote performs the actual HTTP POST to https://<host>/api/users/show.
