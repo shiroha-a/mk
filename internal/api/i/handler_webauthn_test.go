@@ -433,8 +433,10 @@ func TestPublishMeUpdatedPartial_EmptyFieldsIsNoop(t *testing.T) {
 // publishMeUpdated (full MeDetailed): publisher が wire されていれば
 // userService.ShowByID 経由で User+Profile を packed publish する。
 // payload は upstream Misskey TS と同じ MeDetailed shape (#968)。
-// UserDetailed shape に戻る regression を catch するため、body の型と
-// MeDetailed 拡張 field の存在を assert する。
+// UserDetailed shape に戻る regression を catch するため、body の型が
+// entity.MeDetailed であることと UserLite 由来 field が embed 経由で
+// live であることを assert する。MeDetailed 拡張 field 11 個自体の
+// transfer は entity 側の TestPackMeDetailed_* でカバー済み。
 func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	setupUserWithPassword(repo, "u1", "pass")
