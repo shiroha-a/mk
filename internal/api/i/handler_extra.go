@@ -81,7 +81,9 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// の token cache が最大 30s stale 続け、削除済 user 名義での操作が可能。
 	// admin/suspend-user (#966) と同 shape の self-bypass に対応するため、
 	// user-level invalidate を呼んで自分の全 device session を 1 query で
-	// 失効させる。helper の詳細は handler.go の invalidateUserTokenCache。
+	// 失効させる。self-delete は user lifetime で高々 1 度の操作なので、
+	// 本 helper の O(N) cache scan cost は許容範囲。helper の詳細は
+	// handler.go の invalidateUserTokenCache を参照。
 	h.invalidateUserTokenCache(u.ID)
 	return c.NoContent(http.StatusNoContent)
 }
