@@ -132,6 +132,57 @@ func TestDeleteAccount_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #962 P0: 論理削除完了後に auth middleware の tokenCache を invalidate
+// する。同じ token の次 request で stale な user (isSuspended=false) で
+// API 通過する security regression を防ぐ。
+func TestDeleteAccount_InvalidatesTokenCacheOnSuccess(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	// middleware が context に詰める想定の auth token を直接 set する。
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"password":"pass"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	c.Set(string(middleware.TokenContextKey), "victim-session-token")
+
+	require.NoError(t, h.DeleteAccount(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{"victim-session-token"}, inv.calls,
+		"DeleteAccount 成功時は本 request の token を即時 invalidate するべき")
+}
+
+// invalidator が wire されていないとき (test 直叩き / router 配線忘れ) は
+// 削除自体は成功して 204 を返す。core 削除挙動が invalidator dependency に
+// 引きずられない defensive。
+func TestDeleteAccount_NoInvalidatorIsNoop(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Users["u1"].IsDeleted)
+}
+
+// invalidator は wire 済みだが context に token が無いケースは invalidate
+// を skip し handler は 204 で完了する (#960 と同等の defensive)。
+func TestDeleteAccount_NoTokenInContextIsNoop(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, inv.calls, "token が context に無いとき invalidate は呼ばれない")
+}
+
 // --- Favorites ---
 
 func TestFavorites_Success(t *testing.T) {

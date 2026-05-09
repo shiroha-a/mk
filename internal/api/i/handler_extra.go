@@ -75,6 +75,21 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// auth middleware の tokenCache (30s TTL) は token → user object を保持
+	// しているため、論理削除直後でも cache 内の旧 user (isSuspended=false /
+	// isDeleted=false) で同じ token が auth を通過してしまう。middleware は
+	// 現状 isSuspended / isDeleted gate を持たない (signin handler 内のみ)
+	// ので、cache 経由の bypass を防ぐには handler 側で本 request の token
+	// entry を即時 invalidate するのが現実解 (#962 P0)。次 request は cache
+	// miss → DB から fresh fetch、middleware 通過後の handler が isDeleted な
+	// user の操作を弾く前提 (= middleware level の gate は #962 P2 で別途)。
+	// infrastructure は #884 / #960 と共通の TokenInvalidator interface を
+	// 再利用、新規 wiring は不要。
+	if h.authInvalidator != nil {
+		if tok := middleware.GetToken(c); tok != "" {
+			h.authInvalidator.InvalidateToken(tok)
+		}
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
