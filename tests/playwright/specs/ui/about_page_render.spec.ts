@@ -18,11 +18,13 @@ test.describe('UI: /about renders public instance overview', () => {
 
     // instance.name は admin/update-meta で未設定なら null になり host
     // (= mkgo.local) で fallback される。test 環境の baseURL host を
-    // body 検索するのが最も移植性が高い hydration sign。
-    const host = new URL(baseURL!).host;
+    // body 検索するのが最も移植性が高い hydration sign。port 付きの
+    // baseURL でも body には hostname のみが出るので hostname (port 抜き)
+    // を使う。
+    const hostname = new URL(baseURL!).hostname;
     await page.waitForFunction(
       (h) => document.body.textContent?.includes(h) ?? false,
-      host,
+      hostname,
       { timeout: 20_000 },
     );
   });

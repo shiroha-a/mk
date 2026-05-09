@@ -24,15 +24,16 @@ test.describe('UI: /admin/branding page hydrates form controls', () => {
     const resp = await page.goto(`${baseURL}/admin/branding`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
-    // entrancePageStyle (radios) + iconUrl / bannerUrl 等 (input type=url)
-    // + visitor switches など、複数の form 要素が必ず render される。
-    // 5+ input/radio/switch が visible になれば form 全体が hydrate された
-    // と判定 (= admin/meta が前段で fetch されてから初めて MkRadios が
-    // 値を bind する pipeline)。
+    // /admin/branding 固有 sign: definePage の title が i18n.ts.branding
+    // (= "Branding") + iconUrl の MkInput type=url が必ず存在する。
+    // 単に input 数だけだと home dashboard の widgets でも通るので、
+    // 「Branding」文字列 + url input >=1 + 全 input >=5 の AND で固有性確保。
     await page.waitForFunction(
       () => {
-        const inputs = document.querySelectorAll('input').length;
-        return inputs >= 5;
+        const text = document.body.textContent ?? '';
+        const allInputs = document.querySelectorAll('input').length;
+        const urlInputs = document.querySelectorAll('input[type="url"]').length;
+        return text.includes('Branding') && allInputs >= 5 && urlInputs >= 1;
       },
       { timeout: 20_000 },
     );

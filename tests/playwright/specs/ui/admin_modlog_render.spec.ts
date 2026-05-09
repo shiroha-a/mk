@@ -23,9 +23,17 @@ test.describe('UI: /admin/modlog page hydrates filter controls', () => {
     const resp = await page.goto(`${baseURL}/admin/modlog`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
-    // type select + moderator input + paginator control = input >= 1
+    // /admin/modlog 固有 sign: definePage の title が
+    // i18n.ts.moderationLogs (= "Moderation logs") なので、
+    // 同文字列 + filter input が両方揃うことを verify する。
+    // home dashboard に streaming される input でも 1 件だけは満たすが、
+    // "Moderation logs" は modlog page 以外では出ない。
     await page.waitForFunction(
-      () => document.querySelectorAll('input').length >= 1,
+      () => {
+        const text = document.body.textContent ?? '';
+        const inputs = document.querySelectorAll('input').length;
+        return text.includes('Moderation logs') && inputs >= 1;
+      },
       { timeout: 20_000 },
     );
   });
