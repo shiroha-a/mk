@@ -24,6 +24,44 @@ export interface DriveFile {
   size: number;
 }
 
+// uploadTinyPNG は test 用の 1x1 透過 PNG を /api/drive/files/create に
+// multipart で upload する helper。drive 系 spec が複数で同 pattern を
+// 抱えていたので集約 (#967 batch4 review)。call sites:
+//   - drive_file_rename / drive_file_toggle_sensitive / drive_file_delete
+//   - drive_file_describe_save / drive_file_detail_render
+// 失敗時はキャッチ側で test を fail させたいので、status と body を
+// そのまま返さず正常系で DriveFile を返し、異常系は throw する。
+import type { APIRequestContext } from '@playwright/test';
+
+export async function uploadTinyPNG(
+  request: APIRequestContext,
+  baseURL: string,
+  token: string,
+  name: string,
+): Promise<DriveFile> {
+  const resp = await request.post(`${baseURL}/api/drive/files/create`, {
+    ignoreHTTPSErrors: true,
+    multipart: {
+      i: token,
+      file: {
+        name,
+        mimeType: 'image/png',
+        buffer: tinyPNG,
+      },
+    },
+  });
+  if (resp.status() !== 200) {
+    throw new Error(
+      `drive/files/create failed: ${resp.status()} ${await resp.text()}`,
+    );
+  }
+  const body = (await resp.json()) as DriveFile;
+  if (!body.id) {
+    throw new Error(`drive/files/create returned no id: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 // CRC32 lookup table for ZIP fixture builder (#882). standard polynomial
 // 0xEDB88320 (= reflected 0x04C11DB7)。一度だけ計算して以降は table 参照。
 const CRC32_TABLE = (() => {

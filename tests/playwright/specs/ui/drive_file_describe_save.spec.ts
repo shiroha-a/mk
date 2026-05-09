@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { uploadTinyPNG } from '../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
@@ -24,25 +25,8 @@ test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
     request,
   }) => {
     // 1. test 用 file を upload
-    const fileName = `pw-cap-${Date.now()}.png`;
-    const uploadResp = await request.post(`${baseURL}/api/drive/files/create`, {
-      ignoreHTTPSErrors: true,
-      multipart: {
-        i: root.token,
-        file: {
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: Buffer.from(
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-            'base64',
-          ),
-        },
-      },
-    });
-    expect(uploadResp.status()).toBe(200);
-    const file = await uploadResp.json();
-    const fileId: string = file.id;
-    expect(fileId).toBeTruthy();
+    const file = await uploadTinyPNG(request, baseURL!, root.token, `pw-cap-${Date.now()}.png`);
+    const fileId = file.id;
 
     // 2. detail page open
     await uiSigninAsRoot(page, baseURL, root);

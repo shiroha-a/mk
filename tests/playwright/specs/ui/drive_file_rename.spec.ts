@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { uploadTinyPNG } from '../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /my/drive/file/:fileId rename round-trip', () => {
@@ -26,26 +27,9 @@ test.describe('UI: /my/drive/file/:fileId rename round-trip', () => {
     request,
   }) => {
     // 1. test 用 drive file を upload
-    const initialName = `pw-rename-${Date.now()}.png`;
-    const driveResp = await request.post(`${baseURL}/api/drive/files/create`, {
-      ignoreHTTPSErrors: true,
-      multipart: {
-        i: root.token,
-        file: {
-          name: initialName,
-          mimeType: 'image/png',
-          buffer: Buffer.from(
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-            'base64',
-          ),
-        },
-      },
-    });
-    expect(driveResp.status()).toBe(200);
-    const file = await driveResp.json();
-    const fileId: string = file.id;
-    const oldName: string = file.name;
-    expect(fileId).toBeTruthy();
+    const file = await uploadTinyPNG(request, baseURL!, root.token, `pw-rename-${Date.now()}.png`);
+    const fileId = file.id;
+    const oldName = file.name;
 
     // 2. detail page を開いて hydrate を待つ
     await uiSigninAsRoot(page, baseURL, root);
