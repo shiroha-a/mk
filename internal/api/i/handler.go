@@ -951,7 +951,9 @@ func (h *Handler) Update(c echo.Context) error {
 	// 「自分から見て」即時反映されるべきなので、現在の token entry を
 	// invalidate して次回 lookup で DB から fresh fetch させる (#960)。
 	// invalidate 対象は本 request の認証 token のみ (= 他デバイスの session
-	// は影響なし)。
+	// は影響なし)。infrastructure としては #884 で導入された
+	// TokenInvalidator interface (regenerate-token / change-password 用)
+	// を再利用しており、本 handler 専用の wiring は追加していない。
 	if h.authInvalidator != nil {
 		if tok := middleware.GetToken(c); tok != "" {
 			h.authInvalidator.InvalidateToken(tok)
