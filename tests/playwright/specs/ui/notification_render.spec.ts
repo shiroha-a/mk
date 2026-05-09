@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupUser } from '../../fixtures/auth';
+import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
@@ -26,7 +26,7 @@ test.describe('UI: notification timeline renders after API-triggered follow', ()
   test('a fresh follower user appears in /my/notifications after follow', async ({ page, baseURL, request }) => {
     // root を follow する fresh user を作成 (= follow 通知が root inbox に届く)
     const followerName = `follwer${Date.now().toString().slice(-9)}`;
-    const follower = await signupUser(request, followerName, 'password1234');
+    const follower = await signupUser(request, followerName, DEFAULT_TEST_PASSWORD);
 
     const followResp = await callApi(request, 'following/create', {
       i: follower.token,

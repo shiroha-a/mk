@@ -18,6 +18,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { type APIRequestContext, request as createRequest } from '@playwright/test';
+import { DEFAULT_TEST_PASSWORD } from './fixtures/auth';
 import { resetRateLimit } from './fixtures/rate_limit';
 
 const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
@@ -25,9 +26,11 @@ const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
 // root credentials は globalSetup と spec 全体で共有する。username / password
 // 値は spec 内で hardcode されている箇所 (= signin form 入力等) があるが、
 // 本 file では「create / signin の payload」と「.auth/root.json の username」
-// の整合性を維持する責務として 1 箇所に集約する。
+// の整合性を維持する責務として 1 箇所に集約する。password は fixtures/auth.ts
+// の DEFAULT_TEST_PASSWORD を再利用 (= signupUser / uiSigninAsRoot と source
+// of truth を一本化、#827 review)。
 const ROOT_USERNAME = 'alice';
-const ROOT_PASSWORD = 'password1234';
+const ROOT_PASSWORD = DEFAULT_TEST_PASSWORD;
 
 interface RootCreds {
   id: string;

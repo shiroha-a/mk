@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupUser } from '../../fixtures/auth';
+import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
@@ -24,7 +24,7 @@ test.describe('UI: /@:acct/followers and /@:acct/following render relations', ()
 
   test('follower username appears in /@alice/followers and /@<follower>/following', async ({ page, baseURL, request }) => {
     const followerName = `flwlist${Date.now().toString().slice(-9)}`;
-    const follower = await signupUser(request, followerName, 'password1234');
+    const follower = await signupUser(request, followerName, DEFAULT_TEST_PASSWORD);
 
     const followResp = await callApi(request, 'following/create', {
       i: follower.token,

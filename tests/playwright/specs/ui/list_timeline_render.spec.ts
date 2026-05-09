@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupUser } from '../../fixtures/auth';
+import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import { pollForTimelineNote } from '../../fixtures/timeline';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
@@ -26,7 +26,7 @@ test.describe('UI: /timeline/list/:id renders user-list-timeline notes', () => {
 
   test('owner sees member note in /timeline/list/:id after pushing member + posting note', async ({ page, baseURL, request }) => {
     const memberName = `lstmem${Date.now().toString().slice(-9)}`;
-    const member = await signupUser(request, memberName, 'password1234');
+    const member = await signupUser(request, memberName, DEFAULT_TEST_PASSWORD);
 
     // root が user-list を作成
     const listResp = await callApi(request, 'users/lists/create', {
