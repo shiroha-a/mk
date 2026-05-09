@@ -84,11 +84,14 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
     });
     await deleteResp;
 
-    // 5. API 経由で 削除確認 — show は 404 を返す
+    // 5. API 経由で 削除確認 — drive/files/show は削除済 file に対して
+    // 404 + NO_SUCH_FILE error code を返す (handler.go:466 確認)。
     const showResp = await request.post(`${baseURL}/api/drive/files/show`, {
       ignoreHTTPSErrors: true,
       data: { i: root.token, fileId },
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_FILE');
   });
 });

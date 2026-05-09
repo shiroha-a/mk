@@ -36,11 +36,12 @@ test.describe('UI: /settings/profile birthday save flow', () => {
     );
 
     // YYYY-MM-DD format。run ごとに変わる値で実機 round-trip を担保する
-    // (累積実行で同 値が連続すると "保存しない" 判定で hit する可能性を
-    // 回避するため、1990 〜 2010 の range で deterministic にズラす)。
-    const epochDay = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
-    const dayInRange = epochDay % 365;
-    const year = 1990 + (epochDay % 21);
+    // (連続 run で同値だと "未変更" 判定で MkInput の Save button が出ず
+    // timeout する)。秒単位の resolution で 1990 〜 2010 範囲をズラすので、
+    // 同秒内連続 run でない限り値が衝突しない。
+    const seconds = Math.floor(Date.now() / 1000);
+    const dayInRange = seconds % 365;
+    const year = 1990 + (seconds % 21);
     const baseDate = new Date(year, 0, 1);
     baseDate.setDate(baseDate.getDate() + dayInRange);
     const newBirthday = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(baseDate.getDate()).padStart(2, '0')}`;

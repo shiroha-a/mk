@@ -105,19 +105,18 @@ test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
       target.dispatchEvent(new Event('input', { bubbles: true }));
     }, caption);
 
-    // 5. OK button (MkModalWindow `:withOkButton` で footer に primary OK)
-    // → drive/files/update が走る
+    // 5. OK button → drive/files/update が走る。MkModalWindow.vue:15 の OK
+    // button は `{{ i18n.ts.done }} <i class="ti ti-check">` で text は
+    // i18n 依存 ("Done" / "完了" 等) だが ti-check icon は固定。/my/drive/file
+    // 詳細 page には他の ti-check icon button が無いので構造ベースで安定。
     const updateResp = page.waitForResponse(
       (r) => r.url().includes('/api/drive/files/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    // MkModalWindow の OK は data-cy- ではなく primary text "Ok" / "OK"。
-    // 念のため textContent で当てる。
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
       const ok = btns.find(
-        (b) =>
-          !b.disabled && /^(Ok|OK|オーケー)$/i.test((b.textContent ?? '').trim()),
+        (b) => !b.disabled && b.querySelector('i.ti-check') !== null,
       );
       ok?.click();
     });
