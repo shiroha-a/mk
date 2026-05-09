@@ -54,12 +54,21 @@ func TestIsValidHost(t *testing.T) {
 	assert.True(t, isValidHost("xn--example.com")) // IDN punycode
 	assert.True(t, isValidHost("a.b.c.example.com"))
 
+	// IPv4 / IPv6 リテラル host も accept (本番 SSRF guard は DNS resolve 段階
+	// で別途 private IP を block するため、syntax レイヤでは pass)。
+	assert.True(t, isValidHost("192.0.2.1"))
+	assert.True(t, isValidHost("192.0.2.1:8080"))
+	assert.True(t, isValidHost("[::1]"))
+	assert.True(t, isValidHost("[2001:db8::1]:8443"))
+
 	// URL injection を試みる host は全 reject。
 	assert.False(t, isValidHost("evil.com/path"))
 	assert.False(t, isValidHost("evil.com?query=1"))
 	assert.False(t, isValidHost("evil.com#frag"))
 	assert.False(t, isValidHost("user@evil.com"))
-	assert.False(t, isValidHost("evil.com /path")) // space
+	assert.False(t, isValidHost("user:pass@evil.com")) // userinfo with password
+	assert.False(t, isValidHost("evil.com /path"))     // space
+	assert.False(t, isValidHost("evil.com\x00"))       // NUL byte
 	assert.False(t, isValidHost(""))
 }
 
