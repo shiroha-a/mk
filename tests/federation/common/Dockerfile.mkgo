@@ -31,6 +31,26 @@ WORKDIR /app
 COPY --from=builder /app/built/misskey /app/misskey
 COPY --from=builder /app/built/migrate /app/migrate
 COPY --from=builder /app/migration /app/migration
+
+# Frontend asset bundle (Playwright frontend operation 用)。本家 Dockerfile と
+# 同 layout で COPY + 環境変数で path を bind する。host で `make e2e-frontend-build`
+# が実行され `third_party/misskey/built/` 系が存在することが前提。federation /
+# drop-in test で frontend 不要の場合は単に reference されないだけで害はない。
+COPY --from=builder /app/third_party/misskey/built/_frontend_vite_ /app/built/_frontend_vite_
+COPY --from=builder /app/third_party/misskey/built/_frontend_dist_ /app/built/_frontend_dist_
+COPY --from=builder /app/third_party/misskey/built/_sw_dist_ /app/built/_sw_dist_
+COPY --from=builder /app/third_party/misskey/packages/frontend/assets /app/client-assets
+COPY --from=builder /app/third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg /app/twemoji
+COPY --from=builder /app/third_party/misskey/packages/backend/assets /app/static-assets
+COPY --from=builder /app/third_party/misskey/assets /app/repo-assets
+ENV MISSKEY_FRONTEND_DIR=/app/built/_frontend_vite_
+ENV MISSKEY_FRONTEND_DIST_DIR=/app/built/_frontend_dist_
+ENV MISSKEY_SW_DIST_DIR=/app/built/_sw_dist_
+ENV MISSKEY_CLIENT_ASSETS_DIR=/app/client-assets
+ENV MISSKEY_TWEMOJI_DIR=/app/twemoji
+ENV MISSKEY_STATIC_DIR=/app/static-assets
+ENV MISSKEY_REPO_ASSETS_DIR=/app/repo-assets
+
 COPY tests/federation/common/mkgo-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
