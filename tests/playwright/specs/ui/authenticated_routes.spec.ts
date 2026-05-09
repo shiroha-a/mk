@@ -33,10 +33,10 @@ test.describe('UI: authenticated route navigation', () => {
     await page.goto(`${baseURL}/my`, { waitUntil: 'domcontentloaded' });
 
     // user profile page には username が必ず render される。
-    // <h1> や <span> 内に @alice / alice@ の文字列があれば mount 成功。
+    // <h1> や <span> 内に @<username> / <username>@ の文字列があれば mount 成功。
     await page.waitForFunction(
       (username) => document.body.textContent?.includes(username) ?? false,
-      'alice',
+      root.username,
       { timeout: 20_000 },
     );
   });

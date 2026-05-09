@@ -1,20 +1,21 @@
-// /@:user の profile page で i/update-applied description が API hydration
-// 経由で render されることを verify する spec。
+// /@:user の profile page で i/update-applied description / fields が API
+// hydration 経由で render されることを verify する spec。
 //
 // API spec (specs/users/profile.spec.ts) は users/show のレスポンス shape
 // を verify する API-only。本 spec は MkUserHome + MkMfm chain で
 // description が body に出ることまで covers する。
 //
-// 注: profile fields も同 path で render したいが mk-go の i/update が
-// fields パラメータを drop している drift がある (#956)。本 spec は #956
-// fix まで description のみ verify する。
+// 注: profile fields は mk-go の i/update が fields パラメータを drop して
+// いる drift がある (#956)。fields 検証は別 test に切り出して test.fail で
+// XFAIL マーク化、fix された瞬間に CI が "expected to fail but passed" で
+// 落ちて修正側が本マーカーを外す圧力になる。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-import { signupUser } from '../../fixtures/auth';
+import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
-test.describe('UI: /@:user renders profile description', () => {
+test.describe('UI: /@:user renders profile description / fields', () => {
   test.beforeAll(() => {
     resetRateLimit();
   });
@@ -23,7 +24,7 @@ test.describe('UI: /@:user renders profile description', () => {
 
   test('/@<user> shows i/update-applied description', async ({ page, baseURL, request }) => {
     const userName = `profrnd${Date.now().toString().slice(-9)}`;
-    const user = await signupUser(request, userName, 'password1234');
+    const user = await signupUser(request, userName, DEFAULT_TEST_PASSWORD);
 
     const description = `playwright-profile-desc ${Date.now()}`;
 
@@ -44,5 +45,26 @@ test.describe('UI: /@:user renders profile description', () => {
       description,
       { timeout: 20_000 },
     );
+  });
+
+  // #956: i/update が fields を drop しているため /api/i のレスポンス上
+  // fields=[] になる。fix 後は本 test が pass するため XFAIL マーカーを
+  // 外す圧力になる。
+  test.fail('/api/i round-trips fields after i/update (#956 drift)', async ({ request }) => {
+    const userName = `proffld${Date.now().toString().slice(-9)}`;
+    const user = await signupUser(request, userName, DEFAULT_TEST_PASSWORD);
+
+    const fieldName = `playwright-field-${Date.now()}`;
+    const fieldValue = 'https://example.invalid/playwright';
+    const updateResp = await callApi(request, 'i/update', {
+      i: user.token,
+      fields: [{ name: fieldName, value: fieldValue }],
+    });
+    expect(updateResp.status()).toBe(200);
+
+    const meResp = await callApi(request, 'i', { i: user.token });
+    expect(meResp.status()).toBe(200);
+    const me = await meResp.json();
+    expect(me.fields).toEqual([{ name: fieldName, value: fieldValue }]);
   });
 });

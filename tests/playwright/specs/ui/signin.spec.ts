@@ -6,8 +6,8 @@
 // して維持されているので fragility が低い。
 //
 // 本 spec は以下の段階を実 browser で踏む:
-//   1. globalSetup で作成済 root (alice / password1234) の credential を
-//      使って signin form を開く
+//   1. globalSetup で作成済 root (alice / DEFAULT_TEST_PASSWORD) の credential
+//      を使って signin form を開く
 //   2. username + password を form に入力 → submit
 //   3. /api/signin-flow が 200 で完了
 //   4. 認証済 home に navbar (= [data-cy-open-post-form] を含む) が hydrate
@@ -19,12 +19,8 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
-
-interface RootFixture {
-  id: string;
-  token: string;
-  username: string;
-}
+import { DEFAULT_TEST_PASSWORD } from '../../fixtures/auth';
+import type { RootFixture } from '../../fixtures/ui_auth';
 
 test.describe('UI: signin via form', () => {
   let root: RootFixture;
@@ -58,7 +54,7 @@ test.describe('UI: signin via form', () => {
       (resp) => resp.url().includes('/api/signin-flow') && resp.status() === 200,
       { timeout: 15_000 },
     );
-    await page.locator('[data-cy-signin-password] input').fill('password1234');
+    await page.locator('[data-cy-signin-password] input').fill(DEFAULT_TEST_PASSWORD);
     await page.locator('[data-cy-signin-password] input').press('Enter');
     await signinResp;
 

@@ -42,10 +42,12 @@ test.describe('UI: extra content pages render after API-side create', () => {
 
   // /@:username/pages/:pageName route は frontend (page.vue) が
   // pages/show に { username, name } を投げるが、mk-go の ShowRequest は
-  // { pageId } か { userId, name } のみ accept する (#955 drift)。fix まで
-  // skip 扱い。fix 後は前 commit (= title 文字列で waitForFunction) を
-  // 再有効化する想定。
-  test.skip('navigate to /@alice/pages/:slug after creating a user page via API (#955 drift)', async ({ page, baseURL, request }) => {
+  // { pageId } か { userId, name } のみ accept する (#955 drift)。
+  //
+  // test.fail で XFAIL マーク。#955 fix 後は test 実体が pass するように
+  // なるが、fail マークが付いている限り CI が "expected to fail but passed"
+  // で落ちる → 修正側が本マーカーを外す圧力になる (= skip と違って自動検出)。
+  test.fail('navigate to /@alice/pages/:slug after creating a user page via API (#955 drift)', async ({ page, baseURL, request }) => {
     const title = `playwright-page ${Date.now()}`;
     const slug = `pw${Date.now()}`;
     const create = await callApi(request, 'i/pages/create', {

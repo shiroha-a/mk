@@ -16,6 +16,7 @@
 //   home の hydration 完了 = signin が backend → frontend まで通った)
 
 import { expect, type Page } from '@playwright/test';
+import { DEFAULT_TEST_PASSWORD } from './auth';
 
 export interface RootFixture {
   id: string;
@@ -23,8 +24,8 @@ export interface RootFixture {
   username: string;
 }
 
-// signin form 経由で alice として認証する。globalSetup が `password1234` で
-// root を作成している前提 (tests/playwright/global-setup.ts)。
+// signin form 経由で alice として認証する。globalSetup が DEFAULT_TEST_PASSWORD
+// で root を作成している前提 (tests/playwright/global-setup.ts)。
 export async function uiSigninAsRoot(page: Page, baseURL: string, root: RootFixture): Promise<void> {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto(`${baseURL}/`, { waitUntil: 'domcontentloaded' });
@@ -39,7 +40,7 @@ export async function uiSigninAsRoot(page: Page, baseURL: string, root: RootFixt
     (resp) => resp.url().includes('/api/signin-flow') && resp.status() === 200,
     { timeout: 15_000 },
   );
-  await page.locator('[data-cy-signin-password] input').fill('password1234');
+  await page.locator('[data-cy-signin-password] input').fill(DEFAULT_TEST_PASSWORD);
   await page.locator('[data-cy-signin-password] input').press('Enter');
   await signinResp;
 

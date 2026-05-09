@@ -56,25 +56,35 @@ test.describe('UI: note detail page with attached drive file', () => {
     const resp = await page.goto(`${baseURL}/notes/${noteId}`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
-    // note text + file img の DOM 出現を verify。MkMediaList は <img> tag を
-    // mount する (= 通常 sensitive flag 付きでない限り direct img)。img の src に
-    // drive file url が入る = drive file URL の host を含む img が出る。
     await page.waitForFunction(
       (text) => document.body.textContent?.includes(text) ?? false,
       noteText,
       { timeout: 20_000 },
     );
-    await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('img')).some((img) => /\/files\//.test(img.src)),
-      { timeout: 20_000 },
-    );
 
-    // backend 側で files が attach されている (= notes/show 経由) ことを verify
+    // backend 側で files が attach されている (= notes/show 経由) ことを verify。
+    // shown.files[0].url は drive file の actual URL (= file.accessKey ベースで
+    // construct、mk-go では `/files/<accessKey>`)。drive file の id (= ULID)
+    // と accessKey (= 32 hex) は別物なので id では match しない。
     const showResp = await callApi(request, 'notes/show', { i: root.token, noteId });
     expect(showResp.status()).toBe(200);
     const shown = await showResp.json();
     expect(Array.isArray(shown.files), 'files should be array').toBe(true);
     expect(shown.files.length, 'note should have 1 file attached').toBe(1);
     expect(shown.files[0].id).toBe(driveFile.id);
+
+    // MkMediaList は file.url を href にした <a> + 内部 <img> (= thumbnailUrl
+    // 経由の別 host になりうる) を mount する。href は file.url 直リンクなので
+    // pathname で照合すれば偽陽性を避けつつ proxy / 直接配信 両 shape OK。
+    const fileUrl: string = shown.files[0].url;
+    expect(typeof fileUrl, 'file.url should be a string').toBe('string');
+    const filePath = new URL(fileUrl).pathname;
+    await page.waitForFunction(
+      (path) =>
+        Array.from(document.querySelectorAll('a')).some((a) => a.href.includes(path)) ||
+        Array.from(document.querySelectorAll('img')).some((img) => img.src.includes(path)),
+      filePath,
+      { timeout: 20_000 },
+    );
   });
 });
