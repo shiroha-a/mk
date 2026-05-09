@@ -438,9 +438,15 @@ func TestPackMeDetailed_NilProfile(t *testing.T) {
 
 	assert.True(t, me.IsExplorable)
 	assert.True(t, me.HideOnlineStatus)
-	// profile-derived field は zero value のまま (model default に倣う)。
+	// profile が nil の fallback path では profile 由来 field は Go zero
+	// (= bool false) になる。DB の column default (例: preventAiLearning は
+	// `default:true`) とは一致しないが、これは Profile fetch が失敗した
+	// 例外パスでのみ発火する。frontend は次の /api/i fetch で正しい値を
+	// 取り直す前提なので、ここで DB default 相当に倒す必要はない。
 	assert.False(t, me.NoCrawle)
 	assert.False(t, me.PreventAiLearning)
+	assert.False(t, me.InjectFeaturedNote)
+	assert.False(t, me.ReceiveAnnouncementEmail)
 }
 
 // #968: serialized JSON が drop-in 互換 key 名 (isExplorable / noCrawle 等)

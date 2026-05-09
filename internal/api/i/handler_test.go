@@ -581,12 +581,14 @@ func TestUpdate_ResponseContainsMeDetailedFields(t *testing.T) {
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	// 値そのものは update path の persistence test で網羅されているので、
-	// ここでは「key が response shape に含まれている」ことだけ検証する。
-	assert.Contains(t, body, "isExplorable")
-	assert.Contains(t, body, "noCrawle")
-	assert.Contains(t, body, "preventAiLearning")
-	assert.Contains(t, body, "hideOnlineStatus")
+	// MeDetailed 拡張の全 11 field が key として response shape に含まれること。
+	// UserDetailed shape に戻る regression を「key 存在」で素通ししないように、
+	// 更新を要求した 4 field については値が **新値** を返していることも確認する。
+	assert.Equal(t, false, body["isExplorable"], "MeDetailed field isExplorable は update 後の新値を返す")
+	assert.Equal(t, true, body["noCrawle"])
+	assert.Equal(t, true, body["preventAiLearning"])
+	assert.Equal(t, true, body["hideOnlineStatus"])
+	// 残り field は key 存在のみ verify (値は他 test でカバー済み)。
 	assert.Contains(t, body, "isDeleted")
 	assert.Contains(t, body, "alwaysMarkNsfw")
 	assert.Contains(t, body, "autoSensitive")
