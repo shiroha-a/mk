@@ -637,6 +637,22 @@ func TestUpdate_FieldsPersisted(t *testing.T) {
 	)
 }
 
+// 空配列 fields=[] を投げると現状を `[]` で上書き (= clear)。nil との挙動
+// 差別化を handler 経路で確認する。
+func TestUpdate_FieldsEmptyClears(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID: "user1",
+		Fields: datatypes.JSON([]byte(`[{"name":"x","value":"y"}]`)),
+	}
+
+	rec := post(h.Update, `{"fields":[]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, string(repo.Profiles["user1"].Fields))
+}
+
 // upstream paramDef は maxItems 16。それ超えは INVALID_PARAM (400)。
 func TestUpdate_FieldsTooMany(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)

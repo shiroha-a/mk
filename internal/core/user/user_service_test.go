@@ -409,15 +409,24 @@ func TestService_UpdateProfile_Fields(t *testing.T) {
 		string(got.Fields),
 	)
 
+	// nil (= 省略) は不変。Fields=[{x,y}, ...] 状態で他 field のみ更新
+	// しても Fields が消えないことを pinpoint で verify する (= "Fields が
+	// nil なら touch しない" 性質)。Description ptr-to-ptr で更新する。
+	desc := "new description"
+	descPtr := &desc
+	_, err = svc.UpdateProfile("u1", user.UpdateInput{Description: &descPtr})
+	require.NoError(t, err)
+	got = repo.Profiles["u1"]
+	assert.JSONEq(t,
+		`[{"name":"blog","value":"https://example.com"},{"name":"whitespace-name","value":"v"},{"name":"x","value":"y"}]`,
+		string(got.Fields),
+	)
+	require.NotNil(t, got.Description)
+	assert.Equal(t, desc, *got.Description)
+
 	// 後続更新で空 slice を渡すと clear (= [] 書き込み)。
 	empty := []user.FieldItem{}
 	_, err = svc.UpdateProfile("u1", user.UpdateInput{Fields: &empty})
-	require.NoError(t, err)
-	got = repo.Profiles["u1"]
-	assert.JSONEq(t, `[]`, string(got.Fields))
-
-	// nil (= 省略) は不変。一度 [] に clear した後で nil 渡しても [] のまま。
-	_, err = svc.UpdateProfile("u1", user.UpdateInput{})
 	require.NoError(t, err)
 	got = repo.Profiles["u1"]
 	assert.JSONEq(t, `[]`, string(got.Fields))
