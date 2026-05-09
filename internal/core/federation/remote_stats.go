@@ -93,10 +93,7 @@ func NewRemoteStatsFetcher(allowedPrivateNetworks []string, opts ...safehttp.Opt
 // 等で httptest server に向け直したい場合に使う。production では
 // NewRemoteStatsFetcher を使うこと。
 func newRemoteStatsFetcherWithTransport(rt http.RoundTripper) *RemoteStatsFetcher {
-	return newFetcherWithClient(&http.Client{
-		Transport: rt,
-		Timeout:   remoteStatsTimeout,
-	}, remoteStatsCacheSize)
+	return newRemoteStatsFetcherWithCacheSize(rt, remoteStatsCacheSize)
 }
 
 // newRemoteStatsFetcherWithCacheSize はテスト専用 constructor で cache cap
