@@ -85,7 +85,10 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
     await deleteResp;
 
     // 5. API 経由で 削除確認 — drive/files/show は削除済 file に対して
-    // 404 + NO_SUCH_FILE error code を返す (handler.go:466 確認)。
+    // 404 + NO_SUCH_FILE error code + 固定 UUID を返す (handler.go:466
+    // 確認)。code に加えて UUID も verify することで code rename 系の
+    // refactor regression も catch する。UUID は upstream Misskey TS と
+    // 一致する Misskey-compat ID なので drift 検出にも有効。
     const showResp = await request.post(`${baseURL}/api/drive/files/show`, {
       ignoreHTTPSErrors: true,
       data: { i: root.token, fileId },
@@ -93,5 +96,6 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
     expect(showResp.status()).toBe(404);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_FILE');
+    expect(showBody.error?.id).toBe('067bc436-2718-4795-b0fb-ecbe43949e31');
   });
 });
