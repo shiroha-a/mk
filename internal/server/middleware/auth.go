@@ -74,6 +74,22 @@ func (a *AuthMiddleware) InvalidateToken(token string) {
 	a.tokenCache.invalidate(token)
 }
 
+// InvalidateTokensForUser drops every cached entry that resolves to the
+// given userID, across all of the user's tokens (native login + access
+// tokens). Admin actions (suspend / unsuspend / delete-account) call this
+// so the target user is locked out of (or restored back into) the cache
+// without waiting up to 30s for natural TTL expiry (#965). #884 の
+// InvalidateToken は本 request の token 単独削除なので、admin が他 user
+// の全 session を即時失効したいケースには別 method が要る。
+//
+// noop when userID is empty.
+func (a *AuthMiddleware) InvalidateTokensForUser(userID string) {
+	if userID == "" {
+		return
+	}
+	a.tokenCache.invalidateByUserID(userID)
+}
+
 // Authenticate is an Echo middleware that extracts and validates the user token.
 // It does NOT reject unauthenticated requests - it just sets the user if valid.
 func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {

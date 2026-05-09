@@ -98,6 +98,44 @@ func TestGetToken_NotAuthenticated(t *testing.T) {
 	assert.Equal(t, "", GetToken(c))
 }
 
+// #965: admin が target user を suspend / unsuspend / delete したとき、
+// target の全 token cache entry を 1 回で削除する exported method。
+// AuthMiddleware は admin handler の UserTokenInvalidator interface を
+// duck-typed で実装する。
+func TestAuthMiddleware_InvalidateTokensForUser(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	// 直接 cache に詰めて exported method の挙動だけを isolate に test する。
+	auth.tokenCache.put("a", &model.User{ID: "u1"})
+	auth.tokenCache.put("b", &model.User{ID: "u1"})
+	auth.tokenCache.put("c", &model.User{ID: "u2"})
+
+	auth.InvalidateTokensForUser("u1")
+
+	if _, ok := auth.tokenCache.get("a"); ok {
+		t.Error("u1 token a が残っている")
+	}
+	if _, ok := auth.tokenCache.get("b"); ok {
+		t.Error("u1 token b が残っている")
+	}
+	if _, ok := auth.tokenCache.get("c"); !ok {
+		t.Error("u2 token c が誤って削除された")
+	}
+}
+
+func TestAuthMiddleware_InvalidateTokensForUser_EmptyUserIDIsNoop(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+	auth.tokenCache.put("a", &model.User{ID: "u1"})
+	auth.InvalidateTokensForUser("")
+	if _, ok := auth.tokenCache.get("a"); !ok {
+		t.Error("userID 空で invalidate が走って巻き添えになった")
+	}
+}
+
 // #962 P2: 論理削除 / 凍結された user は middleware 段階で anonymous
 // request 扱いに落とす。cache miss → DB fetch path で gate が fire する
 // ことを担保する。

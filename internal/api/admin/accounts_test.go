@@ -120,6 +120,44 @@ func TestAccountsDelete_EnqueueFailureIsLogged(t *testing.T) {
 		doPost(h.AccountsDelete, `{"userId":"u1"}`, adminUser).Code)
 }
 
+// #965: 論理削除直後の auth bypass 防止のため、AccountsDelete / DeleteAccount
+// 成功時に target user の全 token cache を即時 invalidate することを担保。
+func TestAccountsDelete_InvalidatesTargetTokenCache(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.AccountsDelete, `{"userId":"u1"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{"u1"}, inv.calls,
+		"AccountsDelete 成功時は target の全 token cache を invalidate するべき")
+}
+
+func TestDeleteAccount_InvalidatesTargetTokenCache(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u9"] = &model.User{ID: "u9"}
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.DeleteAccount, `{"userId":"u9"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{"u9"}, inv.calls,
+		"DeleteAccount (admin variant) 成功時も同様")
+}
+
+// userId 空のときは UpdateUser を呼ばないので invalidate も skip する
+// (defensive、空打ちを避ける)。
+func TestAccountsDelete_EmptyUserIDDoesNotInvalidate(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.AccountsDelete, `{}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, inv.calls, "userId 空のとき invalidate は呼ばれない")
+}
+
 func TestDeleteAccountAdmin(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	assert.Equal(t, http.StatusNoContent, doPost(h.DeleteAccount, `{}`, adminUser).Code)

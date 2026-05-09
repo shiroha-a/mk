@@ -80,6 +80,30 @@ func (c *tokenCache) invalidate(token string) {
 	c.m.Delete(token)
 }
 
+// invalidateByUserID removes every cached entry whose resolved user has
+// the given userID, regardless of which token is keying the entry. Used
+// when admin actions (suspend / unsuspend / delete-account) change a
+// user's middleware-relevant fields and need to drop the stale cached
+// view across all of that user's sessions/tokens at once (#965).
+//
+// The implementation is a linear sync.Map.Range. Steady-state cache size
+// is bounded by active sessions within the TTL window (typically O(1k)),
+// so per-call cost is sub-millisecond. Admin invalidation events are
+// rare, so this is acceptable without maintaining a reverse userID→tokens
+// index.
+func (c *tokenCache) invalidateByUserID(userID string) {
+	if userID == "" {
+		return
+	}
+	c.m.Range(func(k, v any) bool {
+		entry, ok := v.(*cachedAuthEntry)
+		if ok && entry.user != nil && entry.user.ID == userID {
+			c.m.Delete(k)
+		}
+		return true
+	})
+}
+
 // sweep walks the entire cache and removes expired entries. Cheap when the
 // cache is small (which is the steady state thanks to the periodic sweep
 // cadence on `put`).

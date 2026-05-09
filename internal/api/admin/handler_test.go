@@ -359,6 +359,67 @@ func TestUnsuspendUser_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// --- #965: admin が target user を suspend/unsuspend したとき、target の
+// 全 token cache entry を即時 invalidate する。SuspendUser / UnsuspendUser
+// 成功時に UserTokenInvalidator が呼ばれることを確認する。
+
+// stubUserTokenInvalidator captures InvalidateTokensForUser calls.
+type stubUserTokenInvalidator struct {
+	calls []string
+}
+
+func (s *stubUserTokenInvalidator) InvalidateTokensForUser(userID string) {
+	s.calls = append(s.calls, userID)
+}
+
+func TestSuspendUser_InvalidatesTargetTokenCache(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.SuspendUser, `{"userId":"u1"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{"u1"}, inv.calls,
+		"SuspendUser 成功時は target の全 token cache を invalidate するべき")
+}
+
+func TestUnsuspendUser_InvalidatesTargetTokenCache(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", IsSuspended: true}
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.UnsuspendUser, `{"userId":"u1"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, []string{"u1"}, inv.calls,
+		"UnsuspendUser 成功時も cache 内 stale isSuspended=true を消すために invalidate するべき")
+}
+
+// invalidator 未配線時は handler が panic / fail せず通常レスポンスを返す
+// (test 直叩き / router 配線忘れ時の defensive)。
+func TestSuspendUser_NoInvalidatorIsNoop(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+	rec := doPost(h.SuspendUser, `{"userId":"u1"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, userRepo.Users["u1"].IsSuspended,
+		"invalidator 未配線でも core suspend 動作は止まらない")
+}
+
+// SuspendUser が target を見つけられない (= UpdateUser 前に NotFound) と
+// invalidate は呼ばない。404 を返した時点で cache に target の entry が
+// 存在する保証もないので、空打ちを避ける。
+func TestSuspendUser_NotFoundDoesNotInvalidate(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	inv := &stubUserTokenInvalidator{}
+	h.SetUserTokenInvalidator(inv)
+
+	rec := doPost(h.SuspendUser, `{"userId":"ghost"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, inv.calls, "target 不在のとき invalidate は呼ばれない")
+}
+
 // --- AdminMeta / UpdateMeta ---
 
 func TestAdminMeta_Success(t *testing.T) {

@@ -120,6 +120,43 @@ type Handler struct {
 	// outbound 設定を適用したものを差し込む (#638)。nil のときは default の
 	// 10s timeout client にフォールバックする (テスト容易性のため)。
 	webhookTestClient *http.Client
+	// userTokenInvalidator は admin が他 user を suspend / unsuspend /
+	// 論理削除した直後に target user の全 tokenCache entry を即時失効する
+	// ために使う (#965)。i/regenerate-token (#884) や i/update (#960) と
+	// 同じ AuthMiddleware が「token 単独削除」「user 全 token 削除」の 2
+	// 種類の API を提供しており、admin 経由は後者を使う。production では
+	// router で必ず wire する (未配線時は 30s cache TTL 待ちで stale 旧 user
+	// が auth 通過する security regression が残る)。
+	userTokenInvalidator UserTokenInvalidator
+}
+
+// UserTokenInvalidator drops every cached auth entry for the given userID
+// (= all sessions / API tokens belonging to that user) so the next
+// authenticated request from any of those tokens re-resolves through the
+// DB. Implemented by middleware.AuthMiddleware. Used by admin actions
+// that change a user's middleware-relevant fields (isSuspended /
+// isDeleted) — see #965.
+type UserTokenInvalidator interface {
+	InvalidateTokensForUser(userID string)
+}
+
+// SetUserTokenInvalidator wires the AuthMiddleware so admin/suspend-user
+// / admin/unsuspend-user / admin/accounts/delete drop the target user's
+// cached auth entries immediately. production では必ず wire すること
+// (未配線時は最大 30 秒 stale window が残る)。
+func (h *Handler) SetUserTokenInvalidator(inv UserTokenInvalidator) {
+	h.userTokenInvalidator = inv
+}
+
+// invalidateUserTokenCache は target user の全 token cache entry を即時
+// 失効させる helper。invalidator 未配線 / userID 空のときは noop。本
+// helper を経由することで suspend / unsuspend / delete 等の admin 操作
+// から共通の defensive guard を保てる (#965)。
+func (h *Handler) invalidateUserTokenCache(userID string) {
+	if h.userTokenInvalidator == nil || userID == "" {
+		return
+	}
+	h.userTokenInvalidator.InvalidateTokensForUser(userID)
 }
 
 // EmailSender sends a plain-text email (to, subject, body). Same signature
@@ -746,6 +783,9 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// 凍結直後の auth bypass 防止 (#965)。target の全 token cache entry を
+	// 即時削除し、middleware 通過後の P2 gate (#964) に依存せず確実に弾く。
+	h.invalidateUserTokenCache(req.UserID)
 	h.logUserActionWithUser(c, moderationlog.LogSuspend, user)
 	return c.NoContent(http.StatusNoContent)
 }
@@ -767,6 +807,11 @@ func (h *Handler) UnsuspendUser(c echo.Context) error {
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": false}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// 凍結解除直後に target の全 token cache entry を invalidate する (#965)。
+	// cache 内に isSuspended=true な stale user が残っていると middleware の
+	// P2 gate (#964) が cache hit 経路でも fire してしまい、解除済 user が
+	// 認証通らない逆方向の bug になる。
+	h.invalidateUserTokenCache(req.UserID)
 	h.logUserActionWithUser(c, moderationlog.LogUnsuspend, user)
 	return c.NoContent(http.StatusNoContent)
 }

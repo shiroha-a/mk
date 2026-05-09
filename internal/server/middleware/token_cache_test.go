@@ -90,3 +90,46 @@ func TestTokenCache_Invalidate(t *testing.T) {
 	_, ok := c.get("tok")
 	assert.False(t, ok)
 }
+
+// #965: admin が target user を suspend したとき、target の全 token cache
+// entry (= 複数 device からログイン中の native + access token) を 1 回で
+// 削除できる必要がある。userID で linear scan + delete する。
+func TestTokenCache_InvalidateByUserID(t *testing.T) {
+	c := newTokenCache()
+	c.put("native-tok", &model.User{ID: "u1"})
+	c.put("access-tok-1", &model.User{ID: "u1"})
+	c.put("access-tok-2", &model.User{ID: "u1"})
+	c.put("other-user-tok", &model.User{ID: "u2"})
+
+	c.invalidateByUserID("u1")
+
+	if _, ok := c.get("native-tok"); ok {
+		t.Error("u1 native token entry が残っている")
+	}
+	if _, ok := c.get("access-tok-1"); ok {
+		t.Error("u1 access token 1 entry が残っている")
+	}
+	if _, ok := c.get("access-tok-2"); ok {
+		t.Error("u1 access token 2 entry が残っている")
+	}
+	if _, ok := c.get("other-user-tok"); !ok {
+		t.Error("u2 の token entry が誤って削除された (= 巻き添え)")
+	}
+}
+
+func TestTokenCache_InvalidateByUserID_EmptyUserIDIsNoop(t *testing.T) {
+	// userID="" を渡されたとき全 entry が消える事故を防ぐ defensive。
+	c := newTokenCache()
+	c.put("tok", &model.User{ID: "u1"})
+	c.invalidateByUserID("")
+	_, ok := c.get("tok")
+	assert.True(t, ok, "userID 空のとき invalidate は noop であるべき")
+}
+
+func TestTokenCache_InvalidateByUserID_NoMatchIsNoop(t *testing.T) {
+	c := newTokenCache()
+	c.put("tok", &model.User{ID: "u1"})
+	c.invalidateByUserID("nonexistent")
+	_, ok := c.get("tok")
+	assert.True(t, ok, "match なしのとき他 entry は触らない")
+}

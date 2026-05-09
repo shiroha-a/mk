@@ -1822,6 +1822,14 @@ func (s *Server) setupRoutes() {
 	modLogRepo := repository.NewModerationLogRepository(s.db)
 	recipientRepo := repository.NewAbuseReportNotificationRecipientRepository(s.db)
 	adminHandler := apiadmin.NewHandler(signupService, roleService, metaRepo, userRepo, idGen)
+	// admin/suspend-user / admin/unsuspend-user / admin/accounts/delete が
+	// target user の全 token cache entry を即時 invalidate するために、
+	// auth middleware を inject する (#965)。未配線時は 30 秒 cache TTL 待ち
+	// で stale な user が auth 通過する security regression が残るので
+	// production では必ず wire する。i/regenerate-token (#884) と同じく
+	// AuthMiddleware が duck-typed で UserTokenInvalidator interface を
+	// 満たしている。
+	adminHandler.SetUserTokenInvalidator(s.auth)
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetAbuseRepo(abuseReportRepo)
 	adminHandler.SetAbuseForwarder(coreabuse.NewForwarder(abuseReportRepo, sysAcctSvc, apRenderer, deliverService))
