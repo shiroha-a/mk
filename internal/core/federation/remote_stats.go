@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/shiroha-a/mk/internal/safehttp"
 	"golang.org/x/sync/singleflight"
 )
@@ -38,6 +38,12 @@ const remoteStatsNegativeTTL = 5 * time.Minute
 // remoteStatsTimeout は remote /api/users/show の単一 fetch timeout。
 const remoteStatsTimeout = 5 * time.Second
 
+// remoteStatsCacheSize は LRU cache の最大 entry 数 (#945)。 unique
+// (host, username) 組み合わせがこれを超えると最古使用の entry から evict
+// される。10000 で typical instance の active remote user 数を十分覆える
+// (1 entry あたり ~80 byte → 上限 800KB 程度の memory footprint)。
+const remoteStatsCacheSize = 10000
+
 // RemoteStatsFetcher fetches notes/followers/following counts from a remote
 // Misskey-compatible instance and caches the result.
 //
@@ -52,9 +58,14 @@ const remoteStatsTimeout = 5 * time.Second
 // SSRF 対策として fetcher は safehttp の SSRF-safe transport を使い、host が
 // localhost / private IP / metadata service に解決される場合は接続前に
 // reject する (allowedPrivateNetworks で個別許可可)。
+//
+// cache は size-bounded LRU (hashicorp/golang-lru/v2) で構成し、unique
+// (host, username) 組み合わせの増加に対する unbounded growth を防ぐ (#945)。
+// TTL は per-entry で持ち、read 時に判定する (LRU library 自体は size
+// eviction のみで TTL を扱わない)。
 type RemoteStatsFetcher struct {
 	client *http.Client
-	cache  sync.Map // key=host|username → cachedRemoteStats
+	cache  *lru.Cache[string, cachedRemoteStats]
 	group  singleflight.Group
 }
 
@@ -72,24 +83,27 @@ type cachedRemoteStats struct {
 // review SSRF guard)。
 func NewRemoteStatsFetcher(allowedPrivateNetworks []string, opts ...safehttp.Option) *RemoteStatsFetcher {
 	transport := safehttp.NewSSRFSafeTransport(allowedPrivateNetworks, opts...)
-	return &RemoteStatsFetcher{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   remoteStatsTimeout,
-		},
-	}
+	return newFetcherWithClient(&http.Client{
+		Transport: transport,
+		Timeout:   remoteStatsTimeout,
+	})
 }
 
 // newRemoteStatsFetcherWithTransport はテスト専用 constructor。redirectTransport
 // 等で httptest server に向け直したい場合に使う。production では
 // NewRemoteStatsFetcher を使うこと。
 func newRemoteStatsFetcherWithTransport(rt http.RoundTripper) *RemoteStatsFetcher {
-	return &RemoteStatsFetcher{
-		client: &http.Client{
-			Transport: rt,
-			Timeout:   remoteStatsTimeout,
-		},
-	}
+	return newFetcherWithClient(&http.Client{
+		Transport: rt,
+		Timeout:   remoteStatsTimeout,
+	})
+}
+
+// newFetcherWithClient は cache 構築まで含めた共通 constructor。lru.New は
+// size > 0 で error を返さない実装なので panic は発生しない。
+func newFetcherWithClient(client *http.Client) *RemoteStatsFetcher {
+	cache, _ := lru.New[string, cachedRemoteStats](remoteStatsCacheSize)
+	return &RemoteStatsFetcher{client: client, cache: cache}
 }
 
 // Fetch returns cached stats if available and fresh, otherwise fetches from
@@ -106,10 +120,13 @@ func (f *RemoteStatsFetcher) Fetch(ctx context.Context, host, username string) *
 		return nil
 	}
 	key := host + "|" + username
-	if v, ok := f.cache.Load(key); ok {
-		if entry, ok := v.(cachedRemoteStats); ok && time.Since(entry.fetched) < entry.ttl {
+	if entry, ok := f.cache.Get(key); ok {
+		if time.Since(entry.fetched) < entry.ttl {
 			return entry.stats
 		}
+		// expired entry は明示的に Remove して LRU の age 順序を更新しない。
+		// (Get で hot 化しないようにする)。
+		f.cache.Remove(key)
 	}
 	v, _, _ := f.group.Do(key, func() (any, error) {
 		stats := f.fetchRemote(ctx, host, username)
@@ -117,7 +134,7 @@ func (f *RemoteStatsFetcher) Fetch(ctx context.Context, host, username string) *
 		if stats == nil {
 			ttl = remoteStatsNegativeTTL
 		}
-		f.cache.Store(key, cachedRemoteStats{stats: stats, fetched: time.Now(), ttl: ttl})
+		f.cache.Add(key, cachedRemoteStats{stats: stats, fetched: time.Now(), ttl: ttl})
 		return stats, nil
 	})
 	if stats, ok := v.(*RemoteUserStats); ok {
