@@ -377,3 +377,102 @@ func TestPackUserForFollowStreamEvent(t *testing.T) {
 		assert.Contains(t, string(b), `"hasPendingFollowRequestFromYou":false`)
 	})
 }
+
+// #968: PackMeDetailed が User / UserProfile から self-view-only field を
+// 全て transfer することを確認する。i/update の response はフロントの
+// updateCurrentAccountPartial にそのまま流れ込むので、欠損すると session
+// state が stale なまま残る。
+func TestPackMeDetailed_TransfersSelfViewFields(t *testing.T) {
+	u := &model.User{
+		ID:                "me1",
+		Username:          "me",
+		IsExplorable:      false,
+		IsDeleted:         true,
+		HideOnlineStatus:  true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID:                   "me1",
+		NoCrawle:                 true,
+		PreventAiLearning:        false,
+		AutoSensitive:            true,
+		CarefulBot:               true,
+		AutoAcceptFollowed:       true,
+		AlwaysMarkNsfw:           true,
+		ReceiveAnnouncementEmail: false,
+		InjectFeaturedNote:       false,
+		Fields:                   datatypes.JSON([]byte("[]")),
+	}
+
+	me := PackMeDetailed(u, profile)
+
+	assert.False(t, me.IsExplorable)
+	assert.True(t, me.IsDeleted)
+	assert.True(t, me.HideOnlineStatus)
+	assert.True(t, me.NoCrawle)
+	assert.False(t, me.PreventAiLearning)
+	assert.True(t, me.AutoSensitive)
+	assert.True(t, me.CarefulBot)
+	assert.True(t, me.AutoAcceptFollowed)
+	assert.True(t, me.AlwaysMarkNsfw)
+	assert.False(t, me.ReceiveAnnouncementEmail)
+	assert.False(t, me.InjectFeaturedNote)
+
+	// UserDetailed embed が機能していることも確認する。
+	assert.Equal(t, "me1", me.ID)
+	assert.Equal(t, "me", me.Username)
+}
+
+// #968: profile が nil でも panic せず、User 由来の self-view field のみ
+// transfer されること。Profile fetch が失敗した fallback path で必要。
+func TestPackMeDetailed_NilProfile(t *testing.T) {
+	u := &model.User{
+		ID:                "me2",
+		Username:          "noprof",
+		IsExplorable:      true,
+		HideOnlineStatus:  true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+
+	me := PackMeDetailed(u, nil)
+
+	assert.True(t, me.IsExplorable)
+	assert.True(t, me.HideOnlineStatus)
+	// profile が nil の fallback path では profile 由来 field は Go zero
+	// (= bool false) になる。DB の column default (例: preventAiLearning は
+	// `default:true`) とは一致しないが、これは Profile fetch が失敗した
+	// 例外パスでのみ発火する。frontend は次の /api/i fetch で正しい値を
+	// 取り直す前提なので、ここで DB default 相当に倒す必要はない。
+	assert.False(t, me.NoCrawle)
+	assert.False(t, me.PreventAiLearning)
+	assert.False(t, me.InjectFeaturedNote)
+	assert.False(t, me.ReceiveAnnouncementEmail)
+}
+
+// #968: serialized JSON が drop-in 互換 key 名 (isExplorable / noCrawle 等)
+// を出すこと。フロントの updateCurrentAccountPartial が key 名で merge
+// するので、key drift があると session には反映されない。
+func TestPackMeDetailed_SerializedJSON(t *testing.T) {
+	u := &model.User{
+		ID:                "me3",
+		Username:          "json",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID:            "me3",
+		NoCrawle:          true,
+		PreventAiLearning: true,
+		Fields:            datatypes.JSON([]byte("[]")),
+	}
+
+	me := PackMeDetailed(u, profile)
+	b, err := json.Marshal(me)
+	require.NoError(t, err)
+	s := string(b)
+	assert.Contains(t, s, `"isExplorable":true`)
+	assert.Contains(t, s, `"noCrawle":true`)
+	assert.Contains(t, s, `"preventAiLearning":true`)
+	assert.Contains(t, s, `"hideOnlineStatus":false`)
+	assert.Contains(t, s, `"isDeleted":false`)
+}

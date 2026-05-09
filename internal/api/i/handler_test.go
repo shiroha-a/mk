@@ -558,6 +558,52 @@ func TestUpdate_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #968: i/update の response は MeDetailed shape (= isExplorable / noCrawle /
+// preventAiLearning など self-view-only field を含む) を返すこと。
+// フロントの updateCurrentAccountPartial が key 名で merge するため、
+// 欠損があると保存後も session が stale なまま残る regression を防ぐ。
+func TestUpdate_ResponseContainsMeDetailedFields(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID: "user1",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	rec := post(h.Update, `{"isExplorable":false,"noCrawle":true,"preventAiLearning":true,"hideOnlineStatus":true}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	// MeDetailed 拡張の全 11 field が key として response shape に含まれること。
+	// UserDetailed shape に戻る regression を「key 存在」で素通ししないように、
+	// 更新を要求した 4 field については値が **新値** を返していることも確認する。
+	assert.Equal(t, false, body["isExplorable"], "MeDetailed field isExplorable は update 後の新値を返す")
+	assert.Equal(t, true, body["noCrawle"])
+	assert.Equal(t, true, body["preventAiLearning"])
+	assert.Equal(t, true, body["hideOnlineStatus"])
+	// 残り field は key 存在のみ verify (値は他 test でカバー済み)。
+	assert.Contains(t, body, "isDeleted")
+	assert.Contains(t, body, "alwaysMarkNsfw")
+	assert.Contains(t, body, "autoSensitive")
+	assert.Contains(t, body, "carefulBot")
+	assert.Contains(t, body, "autoAcceptFollowed")
+	assert.Contains(t, body, "receiveAnnouncementEmail")
+	assert.Contains(t, body, "injectFeaturedNote")
+	// MeDetailed が UserDetailed を embed していることの健全性 check。
+	// 将来うっかり embed を外すと「Me 拡張だけ」の壊れた shape になるので
+	// UserLite (id/username) と UserDetailed (isLocked) 由来 field の存在を確認。
+	assert.Contains(t, body, "id")
+	assert.Contains(t, body, "username")
+	assert.Contains(t, body, "isLocked")
+}
+
 func TestUpdate_FollowedMessageAndPublicReactions(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{

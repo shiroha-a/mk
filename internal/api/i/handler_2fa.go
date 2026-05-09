@@ -323,11 +323,13 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 // 止めない)。userService.ShowByID で User + Profile を 1 度に取得する。
 //
 // frontend (main-boot.ts) は payload を updateCurrentAccountPartial で
-// 部分 merge するので、本 helper が送る UserDetailed の field がそのまま
-// `$i` に反映される。ただし entity.PackUserDetailed は private profile
-// field (usePasswordLessLogin / autoAcceptFollowed 等) を含まないため、
-// それらを更新する endpoint は publishMeUpdatedPartial で当該 field
-// だけ送る (#758)。
+// 部分 merge するので、本 helper が送る MeDetailed の field がそのまま
+// `$i` に反映される。upstream Misskey TS の meUpdated stream は
+// MeDetailed shape を流すため、entity.PackMeDetailed で isExplorable /
+// noCrawle / preventAiLearning など self-view-only field も含めて送る
+// (#968)。なお usePasswordLessLogin など UserProfile 由来でも MeDetailed
+// に含まれない field は publishMeUpdatedPartial で個別 publish する
+// (#758 経緯)。
 func (h *Handler) publishMeUpdated(userID string) {
 	if h.mainStreamPublisher == nil {
 		return
@@ -337,7 +339,7 @@ func (h *Handler) publishMeUpdated(userID string) {
 		slog.Warn("2fa: meUpdated: load user failed", "userId", userID, "err", err)
 		return
 	}
-	packed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+	packed := entity.PackMeDetailed(bundle.User, bundle.Profile, h.idGen)
 	h.mainStreamPublisher.PublishMainEvent(userID, "meUpdated", packed)
 }
 
