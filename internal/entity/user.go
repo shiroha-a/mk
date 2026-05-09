@@ -98,6 +98,55 @@ type UserDetailed struct {
 	Memo                           *string `json:"memo,omitempty"`
 }
 
+// MeDetailed extends UserDetailed with fields that upstream Misskey TS
+// exposes only when the viewer is the user themselves (i.e. /api/i,
+// /api/i/update, and meUpdated stream events). These fields originate
+// from UserEntityService.ts:590-630 (`MeDetailed` shape).
+//
+// Privacy boundary: do NOT use PackMeDetailed for /api/users/show or
+// any "viewing another user" path — the fields below are deliberately
+// scoped to self-view (#968 / sibling of #693 ChatScope drift).
+type MeDetailed struct {
+	UserDetailed
+	IsExplorable             bool `json:"isExplorable"`
+	IsDeleted                bool `json:"isDeleted"`
+	HideOnlineStatus         bool `json:"hideOnlineStatus"`
+	NoCrawle                 bool `json:"noCrawle"`
+	PreventAiLearning        bool `json:"preventAiLearning"`
+	AutoSensitive            bool `json:"autoSensitive"`
+	CarefulBot               bool `json:"carefulBot"`
+	AutoAcceptFollowed       bool `json:"autoAcceptFollowed"`
+	AlwaysMarkNsfw           bool `json:"alwaysMarkNsfw"`
+	ReceiveAnnouncementEmail bool `json:"receiveAnnouncementEmail"`
+	InjectFeaturedNote       bool `json:"injectFeaturedNote"`
+}
+
+// PackMeDetailed packs a self-view user payload, extending PackUserDetailed
+// with MeDetailed fields. Self-mutation handlers (i/update, i/2fa/*)
+// should use this instead of PackUserDetailed so frontend's
+// updateCurrentAccountPartial receives the full $i shape; otherwise
+// privacy-scoped fields like isExplorable / noCrawle stay stale in the
+// session (#968).
+func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) MeDetailed {
+	out := MeDetailed{
+		UserDetailed:     PackUserDetailed(u, profile, idGens...),
+		IsExplorable:     u.IsExplorable,
+		IsDeleted:        u.IsDeleted,
+		HideOnlineStatus: u.HideOnlineStatus,
+	}
+	if profile != nil {
+		out.NoCrawle = profile.NoCrawle
+		out.PreventAiLearning = profile.PreventAiLearning
+		out.AutoSensitive = profile.AutoSensitive
+		out.CarefulBot = profile.CarefulBot
+		out.AutoAcceptFollowed = profile.AutoAcceptFollowed
+		out.AlwaysMarkNsfw = profile.AlwaysMarkNsfw
+		out.ReceiveAnnouncementEmail = profile.ReceiveAnnouncementEmail
+		out.InjectFeaturedNote = profile.InjectFeaturedNote
+	}
+	return out
+}
+
 // InstanceLite is the minimal instance info embedded in UserLite for remote
 // users. Populated by the caller from InstanceRepository when needed; packers
 // keep it nil to avoid DB access on hot paths.

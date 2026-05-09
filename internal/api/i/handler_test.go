@@ -558,6 +558,44 @@ func TestUpdate_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #968: i/update の response は MeDetailed shape (= isExplorable / noCrawle /
+// preventAiLearning など self-view-only field を含む) を返すこと。
+// フロントの updateCurrentAccountPartial が key 名で merge するため、
+// 欠損があると保存後も session が stale なまま残る regression を防ぐ。
+func TestUpdate_ResponseContainsMeDetailedFields(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID: "user1",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	rec := post(h.Update, `{"isExplorable":false,"noCrawle":true,"preventAiLearning":true,"hideOnlineStatus":true}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	// 値そのものは update path の persistence test で網羅されているので、
+	// ここでは「key が response shape に含まれている」ことだけ検証する。
+	assert.Contains(t, body, "isExplorable")
+	assert.Contains(t, body, "noCrawle")
+	assert.Contains(t, body, "preventAiLearning")
+	assert.Contains(t, body, "hideOnlineStatus")
+	assert.Contains(t, body, "isDeleted")
+	assert.Contains(t, body, "alwaysMarkNsfw")
+	assert.Contains(t, body, "autoSensitive")
+	assert.Contains(t, body, "carefulBot")
+	assert.Contains(t, body, "autoAcceptFollowed")
+	assert.Contains(t, body, "receiveAnnouncementEmail")
+	assert.Contains(t, body, "injectFeaturedNote")
+}
+
 func TestUpdate_FollowedMessageAndPublicReactions(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{

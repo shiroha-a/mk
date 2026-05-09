@@ -998,7 +998,12 @@ func (h *Handler) Update(c echo.Context) error {
 	// invalidate して、次回 lookup で DB から fresh fetch させる (#960)。
 	h.invalidateRequestTokenCache(c)
 
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
+	// upstream Misskey TS UserEntityService.ts:590-630 の MeDetailed shape を
+	// drop-in 互換で返す。i/update のレスポンスはフロントの
+	// updateCurrentAccountPartial にそのまま流し込まれるため、isExplorable /
+	// noCrawle / preventAiLearning など self-view-only field が UserDetailed
+	// 側に無いと session の `$i` が更新されず stale なまま残る (#968)。
+	return c.JSON(http.StatusOK, entity.PackMeDetailed(bundle.User, bundle.Profile, h.idGen))
 }
 
 // avatarDecorationAPIError carries a (status, body) pair from
