@@ -8,12 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
-
-interface RootFixture {
-  id: string;
-  token: string;
-  username: string;
-}
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: post note via composer modal', () => {
   let root: RootFixture;
@@ -25,29 +20,7 @@ test.describe('UI: post note via composer modal', () => {
   test.setTimeout(90_000);
 
   test('signin → open composer → fill text → submit → API confirms note', async ({ page, baseURL, request }) => {
-    // viewport を明示的に desktop size にする (= sidebar navbar が collapsed
-    // にならず投稿ボタンが clickable になる)。Playwright default は 1280x720
-    // だが、念のため Misskey の widescreen breakpoint を超える size に設定。
-    await page.setViewportSize({ width: 1600, height: 900 });
-
-    // signin (signin.spec.ts と同 flow を duplicate; helper 抽出は modal 安定後)
-    await page.goto(`${baseURL}/`, { waitUntil: 'domcontentloaded' });
-    await page.locator('[data-cy-signin]').first().click();
-    await expect(page.locator('[data-cy-signin-page-input]')).toBeVisible({ timeout: 10_000 });
-    await page.locator('[data-cy-signin-username] input').fill(root.username);
-    await page.locator('[data-cy-signin-username] input').press('Enter');
-    await expect(page.locator('[data-cy-signin-page-password]')).toBeVisible({ timeout: 10_000 });
-    const signinResp = page.waitForResponse(
-      (resp) => resp.url().includes('/api/signin-flow') && resp.status() === 200,
-      { timeout: 15_000 },
-    );
-    await page.locator('[data-cy-signin-password] input').fill('password1234');
-    await page.locator('[data-cy-signin-password] input').press('Enter');
-    await signinResp;
-
-    // 認証済 home で navbar の投稿ボタンが hydrate されるまで待つ
-    const postBtn = page.locator('[data-cy-open-post-form]').first();
-    await expect(postBtn).toBeVisible({ timeout: 15_000 });
+    await uiSigninAsRoot(page, baseURL, root);
 
     // 投稿 form を開く。click 自体は CSS transition / overlay 干渉を avoid する
     // ため force: true。modal が popup で attach されるまで waitForFunction で

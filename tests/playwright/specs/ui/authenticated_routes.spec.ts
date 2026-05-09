@@ -14,34 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
-
-interface RootFixture {
-  id: string;
-  token: string;
-  username: string;
-}
-
-// signin helper — UI 操作で alice として認証してから baseURL 起点の
-// 認証済 state を返す。signin.spec.ts の flow を duplicate (= 後で
-// support/auth.ts に集約予定)。
-async function uiSigninAsRoot(page: import('@playwright/test').Page, baseURL: string, root: RootFixture) {
-  await page.setViewportSize({ width: 1600, height: 900 });
-  await page.goto(`${baseURL}/`, { waitUntil: 'domcontentloaded' });
-  await page.locator('[data-cy-signin]').first().click();
-  await expect(page.locator('[data-cy-signin-page-input]')).toBeVisible({ timeout: 10_000 });
-  await page.locator('[data-cy-signin-username] input').fill(root.username);
-  await page.locator('[data-cy-signin-username] input').press('Enter');
-  await expect(page.locator('[data-cy-signin-page-password]')).toBeVisible({ timeout: 10_000 });
-  const signinResp = page.waitForResponse(
-    (resp) => resp.url().includes('/api/signin-flow') && resp.status() === 200,
-    { timeout: 15_000 },
-  );
-  await page.locator('[data-cy-signin-password] input').fill('password1234');
-  await page.locator('[data-cy-signin-password] input').press('Enter');
-  await signinResp;
-  // 認証済 home の hydration を最終確認 (= navbar の post button が visible)
-  await expect(page.locator('[data-cy-open-post-form]').first()).toBeVisible({ timeout: 15_000 });
-}
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: authenticated route navigation', () => {
   let root: RootFixture;
@@ -104,5 +77,19 @@ test.describe('UI: authenticated route navigation', () => {
     // 完了まで時間がかかる。最低限 navbar (= [data-cy-open-post-form]) が
     // 維持されていれば authenticated state が維持されている確認になる。
     await expect(page.locator('[data-cy-open-post-form]').first()).toBeVisible({ timeout: 15_000 });
+  });
+
+  test('navigate to /@alice (own profile by username)', async ({ page, baseURL }) => {
+    await uiSigninAsRoot(page, baseURL, root);
+
+    const resp = await page.goto(`${baseURL}/@${root.username}`, { waitUntil: 'domcontentloaded' });
+    expect(resp!.status()).toBe(200);
+
+    // user profile page には username が必ず render される。
+    await page.waitForFunction(
+      (username) => document.body.textContent?.includes(username) ?? false,
+      root.username,
+      { timeout: 20_000 },
+    );
   });
 });
