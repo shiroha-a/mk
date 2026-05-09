@@ -85,6 +85,13 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// user の操作を弾く前提 (= middleware level の gate は #962 P2 で別途)。
 	// infrastructure は #884 / #960 と共通の TokenInvalidator interface を
 	// 再利用、新規 wiring は不要。
+	//
+	// なお UpdateUserFields commit と本 invalidate の間の race window
+	// (μs オーダー) は本 fix では塞げない: 並行 request が同 token で
+	// middleware cache hit (stale) → handler 実行に到達した直後に本
+	// invalidate が走るケース。完全防衛は #962 P2 (middleware が DB fetch
+	// ごとに isSuspended / isDeleted を gate する) が必要。本 fix は
+	// 30s window → μs window への defense-in-depth 第一段。
 	if h.authInvalidator != nil {
 		if tok := middleware.GetToken(c); tok != "" {
 			h.authInvalidator.InvalidateToken(tok)

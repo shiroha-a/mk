@@ -170,7 +170,8 @@ func TestDeleteAccount_NoInvalidatorIsNoop(t *testing.T) {
 }
 
 // invalidator は wire 済みだが context に token が無いケースは invalidate
-// を skip し handler は 204 で完了する (#960 と同等の defensive)。
+// を skip し handler は 204 で完了する (#960 と同等の defensive)。core 削除
+// 挙動は token 有無に依存しないので IsDeleted は確実に立つ。
 func TestDeleteAccount_NoTokenInContextIsNoop(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
@@ -180,6 +181,7 @@ func TestDeleteAccount_NoTokenInContextIsNoop(t *testing.T) {
 
 	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Users["u1"].IsDeleted, "token 不在でも core 削除挙動は実行される")
 	assert.Empty(t, inv.calls, "token が context に無いとき invalidate は呼ばれない")
 }
 
