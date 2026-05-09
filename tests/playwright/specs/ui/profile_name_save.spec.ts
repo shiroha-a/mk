@@ -1,14 +1,20 @@
 // /settings/profile で name MkInput を編集 → manualSave button click →
-// /api/i で更新確認する **真の write-flow** spec。
+// /api/i/update 応答 body に新 name が反映されることを verify する
+// **真の write-flow** spec。
 //
 // MkInput (manualSave) は input 値変更で `<MkButton :class="$style.save">`
 // を表示する。click すると updated event → os.apiWithDialog('i/update', ...)
-// で name が persist される。本 spec は前後で /api/i.name を比較して
-// round-trip を verify する。
+// で name が persist される。本 spec は i/update の response body
+// (= updated user object) で round-trip を verify する。
 //
-// 注意: /settings/* は親 layout の MkSuperMenu に search MkInput (type=search)
+// 注意 1: /settings/* は親 layout の MkSuperMenu に search MkInput (type=search)
 // があり、page 全体 input[0] はこの search box。form 本体の name input を
 // 取るには type !== "search" で filter が必要 (#744 batch3)。
+//
+// 注意 2: /api/i 経由の DB round-trip 検証は意図的にしていない。auth
+// middleware の tokenCache (30s TTL, auth.go:42) は i/update で invalidate
+// されないため、更新直後の /api/i は stale な値を返す (#744 batch3 で
+// 発覚 → #960 で実装側を修正予定、修正後は /api/i round-trip に戻す)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';

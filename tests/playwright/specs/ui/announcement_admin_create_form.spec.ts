@@ -60,18 +60,23 @@ test.describe('UI: /admin/announcements create form flow', () => {
         const titleInput = (
           Array.from(document.querySelectorAll('input')) as HTMLInputElement[]
         ).find((i) => i.value === 'New announcement');
-        if (titleInput) {
-          titleInput.focus();
-          const inputSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype,
-            'value',
-          )?.set;
-          inputSetter?.call(titleInput, t);
-          titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        // text textarea (= 新 folder 内最初の textarea。default 空)。
-        // page 全体で最初の textarea で問題なし (新 folder は最上位 unshift)。
-        const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null;
+        if (!titleInput) return;
+        titleInput.focus();
+        const inputSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )?.set;
+        inputSetter?.call(titleInput, t);
+        titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        // text textarea を取得する scope は title input から最近接の MkFolder
+        // 内に絞る。page 全体 first textarea を取ると post form modal 等の
+        // 他 textarea を踏む可能性があるため (#744 batch3 review)。MkFolder
+        // は scoped CSS module で `_MkFolder_<hash>` 形式のクラス名になる。
+        const folder = titleInput.closest('[class*="MkFolder"]');
+        const textarea = (folder ?? document).querySelector(
+          'textarea',
+        ) as HTMLTextAreaElement | null;
         if (textarea) {
           textarea.focus();
           const taSetter = Object.getOwnPropertyDescriptor(

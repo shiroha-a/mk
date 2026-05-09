@@ -69,9 +69,10 @@ test.describe('UI: /admin/ads create form flow', () => {
       { u: adUrl, i: adImageUrl },
     );
 
-    // admin/ad/create response 捕捉して Save click
+    // admin/ad/create response 捕捉して Save click。
+    // mk-go 側 (admin/ad.go:62) は成功時 200 + ad object を返す。
     const createResp = page.waitForResponse(
-      (r) => r.url().includes('/api/admin/ad/create') && r.status() < 400,
+      (r) => r.url().includes('/api/admin/ad/create') && r.status() === 200,
       { timeout: 15_000 },
     );
     await page.evaluate(() => {
