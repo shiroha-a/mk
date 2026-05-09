@@ -61,12 +61,15 @@
 | `following` | フォロー・アンフォロー・リクエスト承認 |
 | `reaction` | リアクション付与・削除 |
 | `timeline` | Redis fanoutによるタイムライン配信 |
-| `federation` | AP配信・受信・リモートオブジェクト解決 |
+| `federation` | AP配信・受信・リモートオブジェクト解決、`RemoteStatsFetcher` (リモート users/show counts 取得、#943) |
 | `drive` | ファイルストレージ (Local/S3)、画像変換 |
+| `mediaproxy` | リモート画像のキャッシュ proxy。GIF/APNG はアニメ pass-through (#941)、AVIF/HEIC/JXL decode 等 |
+| `urlpreview` | OG/Twitter/oEmbed プレビュー取得。`charset.NewReader` で Shift_JIS/EUC-JP 等の自動正規化 (#942) |
 | `notification` | 通知生成・配信 |
 | `chart` | 統計チャートエンジン (12エンジン) |
 | `search` | 全文検索 (Meilisearch / SQLフォールバック) |
 | `twofactor` | TOTP/WebAuthn認証 |
+| `wordmute` | 単語ミュートのパース・キャッシュ (LRU、#790) |
 
 ### `internal/repository/` (データアクセス、46ファイル)
 
@@ -106,15 +109,20 @@ Misskey-TSのテーブルと1:1対応するGORM構造体。
 
 ### `internal/queue/` (ジョブキュー)
 
-asynq (Redisベース) によるバックグラウンドジョブ。`processors/`配下にタスク実装:
+driver は `mkq` (BullMQ wire-compatible、デフォルト) または `asynq` (legacy)。設定 `jobQueueDriver` で切替 (#571 audit、#563 で 3-way bench 後 mkq を default 化)。`processors/`配下にタスク実装:
 
 - `deliver` — AP配信 (リトライ付き)
+- `inbox` — AP受信 (#565 で verify-in-worker 化、HTTP handler は 202 即返し)
 - `webhook` — Webhook送信
 - `webpush` — Web Push通知
 - `emoji_import` — カスタム絵文字インポート
 - `clean_remote_notes` — リモートノートクリーンアップ
 - `reaction_flush` — リアクションバッファのDB書き込み
 - `transfer` — アカウント移行
+
+### `internal/safehttp/`
+
+SSRF-safe HTTP transport を提供 (`NewSSRFSafeTransport`)。private IP / loopback / metadata service への接続を DNS resolve 段階で reject。`urlpreview` / `mediaproxy` / federation の `RemoteStatsFetcher` で共通利用。
 
 ### `internal/stream/` (WebSocket)
 
@@ -196,9 +204,9 @@ Misskeyは用途別に複数のRedis接続を持つ。設定で同一ホスト�
 
 ## マイグレーション
 
-`migration/`ディレクトリにgolang-migrate用のSQLファイルを配置 (000001〜000036)。
+`migration/`ディレクトリにgolang-migrate用のSQLファイルを配置 (000001 ~ 000047、2026-05-09 時点)。
 
-TS版Misskeyの既存テーブルには追加のみで破壊的変更を行わない。Go固有のテーブル追加とカラム追加はすべてIF NOT EXISTS付き。
+TS版Misskeyの既存テーブルには追加のみで破壊的変更を行わない。Go固有のテーブル追加とカラム追加はすべてIF NOT EXISTS付き。drop-in テスト (#367) で発見した補完カラム (`note.pageCount` / `note.renoteChannelId`) は `000039_dropin_compat.up.sql` で追加済。
 
 ```bash
 make migrate-up      # 最新まで適用

@@ -2,14 +2,17 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.3.2**
+互換バージョン: **Misskey 2026.3.2** (base) + drift backlog 適用済 (実質 2026.5.x 相当の挙動)
 
 ## 特徴
 
-- Go 1.26 / Echo v4 / GORM + pgx / go-redis v9 / asynq
+- Go 1.26 / Echo v4 / GORM + pgx / go-redis v9
 - Misskeyフロントエンド(SPA)をそのまま配信
 - TypeScript版と同じPostgreSQL/Redisを共有、無停止で移行可能
 - ActivityPub連合対応（HTTP Signatures、リモートオブジェクト解決、配信キュー）
+- ジョブキューは `mkq` (BullMQ wire-compat、デフォルト) または `asynq`
+- Playwright e2e で両 backend (mk-go / TS) を nightly 比較、drop-in 互換 regression を検出
+- `RemoteStatsFetcher` でリモートユーザーの notesCount / followersCount / followingCount を origin から取得 (mk-go 独自拡張)
 
 ## クイックスタート (Docker Compose)
 
@@ -78,7 +81,11 @@ go test -race -count=1 -timeout 10m \
 | [コントリビューション](docs/contributing.md) | Issue/PR運用、レビュー基準 |
 | [TS版からの移行](docs/migration-from-ts.md) | 既存Misskeyからの移行手順 |
 | [E2Eテスト](docs/e2e.md) | Cypressによるフロントエンドテスト |
+| [Drop-in e2e (pytest)](docs/dropin-e2e.md) | TS-A backend を mk-A に差し替えた state preservation 検証 |
+| [Drop-in frontend e2e (cypress)](docs/dropin-frontend-e2e.md) | 3 TS instance + cypress で frontend 視点の互換 |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
+| [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
+| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.5.0 → 2026.5.1 の backend 差分 (`yyyymmdd*` 命名) |
 
 ## ライセンス
 

@@ -21,6 +21,8 @@
 | `resolver.go` | リモートアクター/ノートの取得・永続化。公開鍵の2層キャッシュ (メモリ+DB, TTL 24h) |
 | `deliver_service.go` | 配信ジョブのエンキュー。フォロワーのInbox収集、ホストブロック判定 |
 | `processor.go` | 受信Activityのディスパッチ (Follow, Create, Like, Announce, Delete, Update等) |
+| `published_time.go` | AP `published` を parse + clock skew (5min) / 過去 10 年 floor で fallback (#940) |
+| `remote_stats.go` | リモート user の notesCount/followersCount/followingCount を origin の `/api/users/show` から取得 (mk-go 独自拡張、#943)。LRU cache size cap 10000 (#945)、SSRF guard 経由 |
 | `note_delivery_hook.go` | ノート公開時にCreate/Announceを配信 |
 | `following_delivery_hook.go` | フォロー/アンフォロー/承認時にFollow/Undo/Acceptを配信 |
 | `reaction_delivery_hook.go` | リアクション時にLikeを配信 |
@@ -82,20 +84,57 @@ DeliverProcessor (asynqワーカー)
 
 ## Inbox処理
 
-`internal/api/inbox/handler.go`がShared InboxとユーザーInboxの両方を処理する。
+`internal/api/inbox/handler.go`がShared InboxとユーザーInboxの両方を処理する。**verify-in-worker 化済 (#565)**: HTTP handler では body + signature header を payload として queue に詰めて 202 即返し、verify は inbox worker (asynq processor) で行う。これにより HTTP 受信スループットが TS の 2.6-2.8x。
 
-**処理フロー:**
+**HTTP handler フロー (同期、軽量):**
 1. リクエストボディ読み取り
-2. Signatureヘッダー解析
-3. `keyId`からアクター解決
-4. 公開鍵取得 (キャッシュ優先)
-5. 署名検証
-6. ホストブロックチェック
-7. インスタンスメタデータ更新
-8. チャートメトリクス記録
-9. Processorにディスパッチ
+2. queue/processors の inbox 用 payload を作成 (body + signature header)
+3. asynq enqueue
+4. 202 Accepted 即返し
+
+**inbox worker フロー (非同期、`internal/queue/processors/inbox.go`):**
+1. payload から body / Signature header を復元
+2. Signature 解析 → `keyId` からアクター解決
+3. 公開鍵取得 (キャッシュ優先) → 署名検証
+4. ホストブロックチェック
+5. インスタンスメタデータ更新 (`InstanceTouchBuffer` で per-host 1s buffer 集約、#569)
+6. チャートメトリクス記録
+7. Processor にディスパッチ
+8. fanoutHook / notificationHook を `safeGo` で async 発火 (#569)
 
 未対応のActivity種別にも202 Acceptedを返す (エラーにしない)。
+
+## 遅延配送 note の createdAt (#940)
+
+origin instance の downtime / 遅延配送等で過去の note が遅れて inbox に到着した場合、AP Object の `published` field を parse して time-based ID (aidx) に渡すことで timeline 並びを origin と揃える。
+
+- 受け入れ: RFC3339 / RFC3339Nano
+- spoof guard: 未来側 `+5min` skew tolerance を超える値は受信時刻にフォールバック
+- parse バグ guard: 過去 10 年以上前の値もフォールバック
+- 該当 helper: `internal/core/federation/published_time.go` の `parseAPPublishedTime`
+
+## AP variant handling
+
+upstream / 他実装が出してくる variant に対するロバスト性 (一部は #947 配下で対応中):
+
+| variant | 状態 |
+|---|---|
+| `published` parse + 異常値 fallback | ✅ 対応済 (#940) |
+| `attributedTo` / `actor` の string / object 双方受け入れ | 🟡 #947 配下で対応予定 (upstream #17340) |
+| `alsoKnownAs` の array / string 双方受け入れ | 🟡 #947 配下で対応予定 (upstream #17275) |
+| 存在しない Actor の Delete を ignore | 🟡 #947 配下で対応予定 (upstream #17294) |
+| リレー由来 Announce で renote を作らず元 note を直接 publish | 🟡 #947 配下で対応予定 (upstream #17308) |
+| ブロック中インスタンスの inbox job 蓄積防止 | 🟡 #947 配下で対応予定 (upstream #17336) |
+
+## RemoteStatsFetcher (mk-go 独自拡張、#943)
+
+upstream Misskey TS の `users/show` は **自インスタンスで観測した範囲** のみで notesCount / followersCount / followingCount を集計するため、リモートユーザーの数値が実体より小さく表示される。mk-go は user.Host が non-local の場合、origin instance の `/api/users/show` を https POST で叩いて公開 counts を取得し、上書き表示する。
+
+- LRU cache: size cap 10000 / positive TTL 1h / negative TTL 5min (#945)
+- SSRF guard: `safehttp.NewSSRFSafeTransport` 経由
+- host validation: URL injection (`/`, `?`, `#`, `@`, ` `) を url.Parse で reject
+- 失敗時は silent fallback で local 観測値を維持
+- フォロー一覧 / フォロワー一覧 endpoint は **自インスタンス上に存在する関係のみ** (= 数値だけ remote、一覧は local の非対称設計)
 
 ## レンダリング
 

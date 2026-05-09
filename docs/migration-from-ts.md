@@ -141,18 +141,36 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
+## drop-in 互換性の現状 (2026-05-09 時点)
+
+Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint cover (54.3%)** を mk-go と Misskey TS の両 backend で nightly 検証中。発見した drop-in 互換 drift は 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
+
+- **API endpoint 互換**: 主要 endpoint (admin / notes / users / i / drive / chat / reactions / timeline / emoji / auth / federation / channels / hashtags / roles 等) は両 backend で同 status / 同 shape を返す
+- **WebSocket チャンネル**: 19/19 実装済 (#125)
+- **ActivityPub 連合**: 主要 Activity (Create / Delete / Update / Follow / Accept / Reject / Undo / Like / Announce / Block / Flag / Move / Add/Remove) は送受信対応 (詳細: [federation.md](federation.md))
+
 ## 既知の制限
 
-### 未実装の機能
+### 未実装 / 設計差異
 
 - **公開サインアップのメール認証フロー** — `emailRequiredForSignup` 有効時の pending user → メール確認フローは未実装
-- **Reversi** — ゲーム一覧は取得できるがリアルタイム対戦は未実装
+- **Reversi リアルタイム対戦** — ゲーム一覧 / WebSocket チャンネル / multiplayer は実装済 (Phase 3 spec verified)、初期実装 (#417) 由来の手動検証経路あり
 - **サーバーマシン統計** — `enableServerMachineStats` 有効時に CPU/メモリ/ディスク情報を返すが、gopsutil相当の詳細度はない
+- **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go 独自設計)
+- **Identicon** — 生成される自動アバターの見た目が若干異なる
+- **search backend** — `notes/search` で Meilisearch 必須化 (#877)、未設定インスタンスは 400 を返す (TS と同一挙動)
+- **2026.4.0 / 2026.5.0 / 2026.5.1 への upstream 追従** — #947 tracker 配下で sub-task 化中。詳細: [docs/update/](update/)
+
+### mk-go 独自挙動 (TS にない拡張)
+
+- **リモートユーザー counts**: `users/show` でリモートユーザーの notesCount / followersCount / followingCount を origin instance の `/api/users/show` から取得して上書き (#943)。TS は自インスタンス観測値のみ表示するため数値が小さくなる問題を解消。フォロー一覧 / フォロワー一覧は引き続き local user のみ
+- **mediaproxy アニメ pass-through**: GIF / APNG をリアクション / 絵文字ピッカー / プレビューで静止化せずに pass-through (#941)
+- **URL preview の charset 自動正規化**: Shift_JIS / EUC-JP / ISO-2022-JP 等のページで title / description が文字化けしない (#942)
+- **inbox handler の verify-in-worker 化** (#565): HTTP 受信スループットが TS の 2.6-2.8x
 
 ### Misskey-TSとの差異
 
 - **タイムライン** — Redisキャッシュが空の場合 (サーバー再起動直後等) はDBクエリにフォールバックする
-- **Identicon** — 生成される自動アバターの見た目が若干異なる
 - **通知** — WebSocketによるリアルタイム配信は対応しているが、一部のイベントタイプで差異がある可能性がある
 
 ## トラブルシューティング
