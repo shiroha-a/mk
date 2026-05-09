@@ -22,6 +22,13 @@ import { resetRateLimit } from './fixtures/rate_limit';
 
 const baseURL = process.env.MK_BASE_URL ?? 'http://mkgo:3000';
 
+// root credentials は globalSetup と spec 全体で共有する。username / password
+// 値は spec 内で hardcode されている箇所 (= signin form 入力等) があるが、
+// 本 file では「create / signin の payload」と「.auth/root.json の username」
+// の整合性を維持する責務として 1 箇所に集約する。
+const ROOT_USERNAME = 'alice';
+const ROOT_PASSWORD = 'password1234';
+
 interface RootCreds {
   id: string;
   token: string;
@@ -32,12 +39,17 @@ interface RootCreds {
 // を返す。既存の場合は null を返して caller に signin fallback を委譲する。
 async function tryCreateRoot(ctx: APIRequestContext): Promise<RootCreds | null> {
   const resp = await ctx.post(`${baseURL}/api/admin/accounts/create`, {
-    data: { username: 'alice', password: 'password1234' },
+    data: { username: ROOT_USERNAME, password: ROOT_PASSWORD },
     failOnStatusCode: false,
   });
   if (resp.status() === 200) {
     const body = await resp.json();
-    return { id: body.id, token: body.token, username: 'alice' };
+    if (typeof body.id !== 'string' || typeof body.token !== 'string') {
+      throw new Error(
+        `globalSetup admin/accounts/create returned malformed body: ${JSON.stringify(body)}`,
+      );
+    }
+    return { id: body.id, token: body.token, username: ROOT_USERNAME };
   }
   // 既存 alice (= 403 ACCESS_DENIED) は idempotent re-run の正常系。
   // それ以外 (5xx 等) は本当に失敗しているので throw する。
@@ -55,7 +67,7 @@ async function signinAsExistingRoot(ctx: APIRequestContext): Promise<RootCreds> 
   // 2FA なし user は signin-flow に { username, password } を送ると
   // { finished: true, id, i: token } が返る (internal/api/signin/handler.go:118)。
   const resp = await ctx.post(`${baseURL}/api/signin-flow`, {
-    data: { username: 'alice', password: 'password1234' },
+    data: { username: ROOT_USERNAME, password: ROOT_PASSWORD },
     failOnStatusCode: false,
   });
   if (resp.status() !== 200) {
@@ -64,12 +76,12 @@ async function signinAsExistingRoot(ctx: APIRequestContext): Promise<RootCreds> 
     );
   }
   const body = await resp.json();
-  if (!body.finished || !body.i) {
+  if (!body.finished || typeof body.id !== 'string' || typeof body.i !== 'string') {
     throw new Error(
-      `globalSetup signin-flow returned non-final state: ${JSON.stringify(body)}`,
+      `globalSetup signin-flow returned non-final / malformed state: ${JSON.stringify(body)}`,
     );
   }
-  return { id: body.id, token: body.i, username: 'alice' };
+  return { id: body.id, token: body.i, username: ROOT_USERNAME };
 }
 
 export default async function globalSetup(): Promise<void> {
