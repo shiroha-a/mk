@@ -623,6 +623,79 @@ func TestUpdate_FollowedMessageAndPublicReactions(t *testing.T) {
 	assert.False(t, p.PublicReactions)
 }
 
+// #972: i/update が autoAcceptFollowed / carefulBot / injectFeaturedNote /
+// receiveAnnouncementEmail を受け付けて profile に persist することを確認
+// する。これらは upstream Misskey TS i/update.ts:178-188 paramDef に存在
+// するが、mk-go では UpdateRequest struct から抜けていて silent drop される
+// drift があった。response 側 (PackMeDetailed #969) には含まれていたので
+// 「読めるが書けない」asymmetric drift を 4 field 同時に解消する。
+func TestUpdate_ProfileBoolFields_972(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	// 既定値とは逆向きに設定して、reset 期待値が「未設定の Go zero」と
+	// 区別できる初期 state を作る。
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:                   "user1",
+		Fields:                   datatypes.JSON([]byte("[]")),
+		AutoAcceptFollowed:       false,
+		CarefulBot:               false,
+		InjectFeaturedNote:       true,
+		ReceiveAnnouncementEmail: true,
+	}
+
+	rec := post(h.Update, `{"autoAcceptFollowed":true,"carefulBot":true,"injectFeaturedNote":false,"receiveAnnouncementEmail":false}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	p := repo.Profiles["user1"]
+	assert.True(t, p.AutoAcceptFollowed, "autoAcceptFollowed が persist される")
+	assert.True(t, p.CarefulBot, "carefulBot が persist される")
+	assert.False(t, p.InjectFeaturedNote, "injectFeaturedNote が persist される")
+	assert.False(t, p.ReceiveAnnouncementEmail, "receiveAnnouncementEmail が persist される")
+
+	// response body も MeDetailed shape (#969) で 4 field を新値で返す。
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, true, body["autoAcceptFollowed"])
+	assert.Equal(t, true, body["carefulBot"])
+	assert.Equal(t, false, body["injectFeaturedNote"])
+	assert.Equal(t, false, body["receiveAnnouncementEmail"])
+}
+
+// #972: 4 field を omit した update は対応 profile field を変えない (= nil
+// pointer は no-op) ことを確認する。partial-update セマンティクスの担保。
+func TestUpdate_ProfileBoolFields_OmittedIsNoop(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{
+		ID:                "user1",
+		Username:          "user1",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:                   "user1",
+		Fields:                   datatypes.JSON([]byte("[]")),
+		AutoAcceptFollowed:       true,
+		CarefulBot:               true,
+		InjectFeaturedNote:       false,
+		ReceiveAnnouncementEmail: false,
+	}
+
+	// 別 field のみ更新する request — 4 field は不変であるべき。
+	rec := post(h.Update, `{"isLocked":true}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	p := repo.Profiles["user1"]
+	assert.True(t, p.AutoAcceptFollowed, "omit した autoAcceptFollowed は不変")
+	assert.True(t, p.CarefulBot, "omit した carefulBot は不変")
+	assert.False(t, p.InjectFeaturedNote, "omit した injectFeaturedNote は不変")
+	assert.False(t, p.ReceiveAnnouncementEmail, "omit した receiveAnnouncementEmail は不変")
+}
+
 func TestUpdate_InvalidJSON(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	user := &model.User{ID: "user1"}

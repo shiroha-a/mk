@@ -724,6 +724,14 @@ type UpdateRequest struct {
 	AutoSensitive     *bool   `json:"autoSensitive"`
 	NoCrawle          *bool   `json:"noCrawle"`
 	PreventAiLearning *bool   `json:"preventAiLearning"`
+	// 以下 4 field は upstream Misskey TS i/update.ts:178-188 の paramDef に
+	// あり、profile の bool 設定として persist される。response 側は
+	// MeDetailed packer (#969) 経由で含まれていたが、UpdateRequest struct
+	// から抜けていて silent drop される asymmetric drift があった (#972)。
+	AutoAcceptFollowed       *bool `json:"autoAcceptFollowed"`
+	CarefulBot               *bool `json:"carefulBot"`
+	InjectFeaturedNote       *bool `json:"injectFeaturedNote"`
+	ReceiveAnnouncementEmail *bool `json:"receiveAnnouncementEmail"`
 	// ChatScope は 1-on-1 DM の受信許可レベル (#692)。
 	// upstream paramDef enum: everyone / followers / following / mutual / none
 	ChatScope *string `json:"chatScope"`
@@ -868,16 +876,24 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// 全 *bool field は req と in の field type が一致するので struct literal
+	// で直接代入する。req.X が nil なら in.X も nil (= service 側で no-op
+	// 扱い) になり、`if != nil` block 経由と意味的に等価。
 	in := user.UpdateInput{
-		IsLocked:          req.IsLocked,
-		IsBot:             req.IsBot,
-		IsCat:             req.IsCat,
-		IsExplorable:      req.IsExplorable,
-		HideOnlineStatus:  req.HideOnlineStatus,
-		AlwaysMarkNsfw:    req.AlwaysMarkNsfw,
-		AutoSensitive:     req.AutoSensitive,
-		NoCrawle:          req.NoCrawle,
-		PreventAiLearning: req.PreventAiLearning,
+		IsLocked:                 req.IsLocked,
+		IsBot:                    req.IsBot,
+		IsCat:                    req.IsCat,
+		IsExplorable:             req.IsExplorable,
+		HideOnlineStatus:         req.HideOnlineStatus,
+		AlwaysMarkNsfw:           req.AlwaysMarkNsfw,
+		AutoSensitive:            req.AutoSensitive,
+		NoCrawle:                 req.NoCrawle,
+		PreventAiLearning:        req.PreventAiLearning,
+		PublicReactions:          req.PublicReactions,
+		AutoAcceptFollowed:       req.AutoAcceptFollowed,
+		CarefulBot:               req.CarefulBot,
+		InjectFeaturedNote:       req.InjectFeaturedNote,
+		ReceiveAnnouncementEmail: req.ReceiveAnnouncementEmail,
 	}
 	if req.Name != nil {
 		// 表示名の禁止ワードチェック。meta 未注入 / 未設定時は素通りする。
@@ -904,9 +920,6 @@ func (h *Handler) Update(c echo.Context) error {
 	}
 	if req.FollowedMessage != nil {
 		in.FollowedMessage = &req.FollowedMessage
-	}
-	if req.PublicReactions != nil {
-		in.PublicReactions = req.PublicReactions
 	}
 	if len(req.Room) > 0 {
 		// json.RawMessage は親の Unmarshal が構文チェック済みの

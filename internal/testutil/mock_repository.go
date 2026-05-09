@@ -589,6 +589,22 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			if b, ok := v.(bool); ok {
 				p.PreventAiLearning = b
 			}
+		case "autoAcceptFollowed":
+			if b, ok := v.(bool); ok {
+				p.AutoAcceptFollowed = b
+			}
+		case "carefulBot":
+			if b, ok := v.(bool); ok {
+				p.CarefulBot = b
+			}
+		case "injectFeaturedNote":
+			if b, ok := v.(bool); ok {
+				p.InjectFeaturedNote = b
+			}
+		case "receiveAnnouncementEmail":
+			if b, ok := v.(bool); ok {
+				p.ReceiveAnnouncementEmail = b
+			}
 		case "password":
 			if s, ok := v.(string); ok {
 				p.Password = &s

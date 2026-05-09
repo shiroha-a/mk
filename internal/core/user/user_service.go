@@ -301,6 +301,14 @@ type UpdateInput struct {
 	AutoSensitive     *bool
 	NoCrawle          *bool
 	PreventAiLearning *bool
+	// 以下 4 field は upstream Misskey TS i/update.ts:178-188 の paramDef に
+	// あり profile 側に persist される bool 設定。response 側 MeDetailed
+	// packer (#969) には含まれていたが、UpdateInput / UpdateRequest 側で
+	// 抜けていて silent drop される drift があった (#972)。
+	AutoAcceptFollowed       *bool
+	CarefulBot               *bool
+	InjectFeaturedNote       *bool
+	ReceiveAnnouncementEmail *bool
 	// ChatScope は誰からのチャットを許可するか (1-on-1 DM 用)。
 	// 受け付けるのは "everyone" / "followers" / "following" / "mutual" / "none"
 	// (CherryPick / Misskey TS と同じ enum)。検証は呼び出し側 (#692)。
@@ -404,6 +412,20 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 	}
 	if in.PreventAiLearning != nil {
 		profileFields["preventAiLearning"] = *in.PreventAiLearning
+	}
+	// #972: upstream paramDef にあるが mk-go で抜けていた 4 field を
+	// profile に persist する。
+	if in.AutoAcceptFollowed != nil {
+		profileFields["autoAcceptFollowed"] = *in.AutoAcceptFollowed
+	}
+	if in.CarefulBot != nil {
+		profileFields["carefulBot"] = *in.CarefulBot
+	}
+	if in.InjectFeaturedNote != nil {
+		profileFields["injectFeaturedNote"] = *in.InjectFeaturedNote
+	}
+	if in.ReceiveAnnouncementEmail != nil {
+		profileFields["receiveAnnouncementEmail"] = *in.ReceiveAnnouncementEmail
 	}
 	if in.ChatScope != nil {
 		userFields["chatScope"] = *in.ChatScope
