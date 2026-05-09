@@ -86,7 +86,7 @@ func NewRemoteStatsFetcher(allowedPrivateNetworks []string, opts ...safehttp.Opt
 	return newFetcherWithClient(&http.Client{
 		Transport: transport,
 		Timeout:   remoteStatsTimeout,
-	})
+	}, remoteStatsCacheSize)
 }
 
 // newRemoteStatsFetcherWithTransport はテスト専用 constructor。redirectTransport
@@ -96,14 +96,28 @@ func newRemoteStatsFetcherWithTransport(rt http.RoundTripper) *RemoteStatsFetche
 	return newFetcherWithClient(&http.Client{
 		Transport: rt,
 		Timeout:   remoteStatsTimeout,
-	})
+	}, remoteStatsCacheSize)
+}
+
+// newRemoteStatsFetcherWithCacheSize はテスト専用 constructor で cache cap
+// を override する。production で eviction を起こすには 10000 entry 必要で
+// 単体テスト上現実的でないため、size を override して LRU 挙動を verify する。
+func newRemoteStatsFetcherWithCacheSize(rt http.RoundTripper, cacheSize int) *RemoteStatsFetcher {
+	return newFetcherWithClient(&http.Client{
+		Transport: rt,
+		Timeout:   remoteStatsTimeout,
+	}, cacheSize)
 }
 
 // newFetcherWithClient は cache 構築まで含めた共通 constructor。
-// remoteStatsCacheSize は compile-time const (10000 > 0) のため lru.New が
-// error を返す経路には到達しない (lru.New は size <= 0 でのみ error)。
-func newFetcherWithClient(client *http.Client) *RemoteStatsFetcher {
-	cache, _ := lru.New[string, cachedRemoteStats](remoteStatsCacheSize)
+// production の remoteStatsCacheSize は compile-time const (10000 > 0) のため
+// lru.New が error を返す経路には到達しない (lru.New は size <= 0 でのみ
+// error)。test 経由で size <= 0 が渡された場合は 1 entry で fallback。
+func newFetcherWithClient(client *http.Client, cacheSize int) *RemoteStatsFetcher {
+	if cacheSize <= 0 {
+		cacheSize = 1
+	}
+	cache, _ := lru.New[string, cachedRemoteStats](cacheSize)
 	return &RemoteStatsFetcher{client: client, cache: cache}
 }
 

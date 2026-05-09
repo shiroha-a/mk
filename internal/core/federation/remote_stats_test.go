@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -142,13 +141,9 @@ func TestRemoteStatsFetcher_LRUEvictionAtCap(t *testing.T) {
 		_, _ = w.Write([]byte(`{"notesCount":1,"followersCount":0,"followingCount":0}`))
 	}))
 	defer srv.Close()
-	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
-	// production cap (10000) は test では eviction を起こせないので、size 2
-	// の小さい LRU に差し替える。本番 path 全体は variable cap でない設計
-	// (= compile-time const) のため、test 内でだけ field を直接 mutate する。
-	smallCache, err := lru.New[string, cachedRemoteStats](2)
-	require.NoError(t, err)
-	f.cache = smallCache
+	// production cap (10000) は test では eviction を起こせないので、size 2 で
+	// 構築する test-only constructor を使う。
+	f := newRemoteStatsFetcherWithCacheSize(redirectTransport{target: srv.URL}, 2)
 
 	// 3 つの (host, username) を populate。oldest "a" は evict される想定。
 	require.NotNil(t, f.Fetch(context.Background(), "a", "u"))
