@@ -13,9 +13,8 @@
 //   4. 認証済 home に navbar (= [data-cy-open-post-form] を含む) が hydrate
 //      されることを verify
 //
-// note 投稿 (composer modal 経由) は upstream Misskey の `os.post()` が global
-// modal stack を経由するため Vue 側 hydration timing の依存が多い。次 iteration
-// で modal mount を待つ helper を追加して別 spec として extend する。
+// composer modal 経由で note 投稿する write-flow は post_note.spec.ts 側で
+// cover している。本 spec は signin form chain だけに focus する。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';

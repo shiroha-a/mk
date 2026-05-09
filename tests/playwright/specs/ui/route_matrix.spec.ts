@@ -82,7 +82,6 @@ test.describe('UI: authenticated SPA route matrix', () => {
     await uiSigninAsRoot(page, baseURL, root);
 
     for (const route of AUTH_ROUTES) {
-      // eslint-disable-next-line no-loop-func
       await test.step(`navigate ${route.path} (${route.label})`, async () => {
         const resp = await page.goto(`${baseURL}${route.path}`, { waitUntil: 'domcontentloaded' });
         expect(resp, `goto ${route.path} returned null response`).not.toBeNull();
