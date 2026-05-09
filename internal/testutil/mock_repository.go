@@ -653,6 +653,16 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			case []byte:
 				p.HardMutedWords = val
 			}
+		case "fields":
+			// production の core/user.UpdateProfile は trim + 空 entry 排除
+			// 後の JSON を `string(json.Marshal(...))` で渡す。テストでは
+			// []byte / string どちらでも受け取れるようにしておく (#956)。
+			switch val := v.(type) {
+			case string:
+				p.Fields = []byte(val)
+			case []byte:
+				p.Fields = append([]byte(nil), val...)
+			}
 		case "clientData":
 			switch val := v.(type) {
 			case string:

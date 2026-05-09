@@ -618,6 +618,46 @@ func TestUpdate_ChatScope_OmittedIsNoop(t *testing.T) {
 	assert.Equal(t, "followers", repo.Users["user1"].ChatScope)
 }
 
+// #956: i/update で fields を accept して user_profile.fields に persist する。
+// trim と空 entry 排除は core/user 側で行う。本 test は handler 経由で
+// fields が core まで届くことを確認する。
+func TestUpdate_FieldsPersisted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := post(h.Update, `{"fields":[{"name":"  blog ","value":" https://example.com "},{"name":"","value":"empty"},{"name":"x","value":"y"}]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	p := repo.Profiles["user1"]
+	require.NotNil(t, p)
+	assert.JSONEq(t,
+		`[{"name":"blog","value":"https://example.com"},{"name":"x","value":"y"}]`,
+		string(p.Fields),
+	)
+}
+
+// upstream paramDef は maxItems 16。それ超えは INVALID_PARAM (400)。
+func TestUpdate_FieldsTooMany(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
+
+	// 17 entries
+	items := ""
+	for i := 0; i < 17; i++ {
+		if i > 0 {
+			items += ","
+		}
+		items += `{"name":"a","value":"b"}`
+	}
+	rec := post(h.Update, `{"fields":[`+items+`]}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 失敗したので fields は不変 ([] のまま)
+	assert.JSONEq(t, `[]`, string(repo.Profiles["user1"].Fields))
+}
+
 func TestUpdate_UserNotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	user := &model.User{ID: "ghost"}

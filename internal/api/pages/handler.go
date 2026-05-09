@@ -25,11 +25,14 @@ type MainStreamPublisher interface {
 	PublishMainEvent(userID, eventType string, body any)
 }
 
-// UserBundleSource fetches a user + profile bundle used to pack the caller
-// for the `pageEvent` body. Narrow interface — satisfied by
+// UserBundleSource fetches a user + profile bundle. ShowByID is used to pack
+// the caller for the `pageEvent` body emitted from /api/page-push, and
+// ShowByUsername is used to resolve the upstream-compatible
+// {username, name} shape on /api/pages/show (#955). Satisfied by
 // *core/user.Service.
 type UserBundleSource interface {
 	ShowByID(id string) (*coreuser.UserWithProfile, error)
+	ShowByUsername(username string, host *string) (*coreuser.UserWithProfile, error)
 }
 
 // Handler handles page-related API endpoints.
@@ -105,12 +108,15 @@ func (h *Handler) Create(c echo.Context) error {
 	return c.JSON(http.StatusOK, h.pageToMap(p))
 }
 
-// ShowRequest is the request body for pages/show. pageId か (userId, name) の
-// どちらかを指定する。
+// ShowRequest is the request body for pages/show. upstream Misskey TS の
+// paramDef は anyOf で 3 形を accept する: {pageId} / {userId, name} /
+// {username, name} (#955)。frontend (page.vue) は 3 つ目の {username, name}
+// を投げてくるので、本 struct も同 shape を受ける。
 type ShowRequest struct {
-	PageID string `json:"pageId"`
-	UserID string `json:"userId"`
-	Name   string `json:"name"`
+	PageID   string `json:"pageId"`
+	UserID   string `json:"userId"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
 }
 
 // Show handles POST /api/pages/show.
@@ -133,6 +139,18 @@ func (h *Handler) Show(c echo.Context) error {
 		p, err = h.svc.Show(requesterID, req.PageID)
 	case req.UserID != "" && req.Name != "":
 		p, err = h.svc.ShowByName(requesterID, req.UserID, req.Name)
+	case req.Username != "" && req.Name != "":
+		// {username, name} 経路 (#955): username で local user を引いて
+		// その user.id + name で page を引く。upstream は host=NULL の
+		// local user 縛り (= remote の page は連合経路で配信されない)。
+		if h.userSource == nil {
+			return apierr.JSONInternalError(c)
+		}
+		bundle, ulerr := h.userSource.ShowByUsername(req.Username, nil)
+		if ulerr != nil || bundle == nil || bundle.User == nil {
+			return notFound(c)
+		}
+		p, err = h.svc.ShowByName(requesterID, bundle.User.ID, req.Name)
 	default:
 		return apierr.JSONInvalidParam(c)
 	}

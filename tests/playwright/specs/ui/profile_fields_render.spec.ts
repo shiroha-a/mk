@@ -5,10 +5,9 @@
 // を verify する API-only。本 spec は MkUserHome + MkMfm chain で
 // description が body に出ることまで covers する。
 //
-// 注: profile fields は mk-go の i/update が fields パラメータを drop して
-// いる drift がある (#956)。fields 検証は別 test に切り出して test.fail で
-// XFAIL マーク化、fix された瞬間に CI が "expected to fail but passed" で
-// 落ちて修正側が本マーカーを外す圧力になる。
+// fields の round-trip も #956 で i/update に Fields を accept するよう
+// 拡張済 (trim + 空 entry 排除 + maxItems 16 cap)。本 spec では /api/i 上で
+// fields が trim 済の name/value で round-trip されることを verify する。
 
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
@@ -47,10 +46,9 @@ test.describe('UI: /@:user renders profile description / fields', () => {
     );
   });
 
-  // #956: i/update が fields を drop しているため /api/i のレスポンス上
-  // fields=[] になる。fix 後は本 test が pass するため XFAIL マーカーを
-  // 外す圧力になる。
-  test.fail('/api/i round-trips fields after i/update (#956 drift)', async ({ request }) => {
+  // #956 fix 後: i/update に fields を投げると user_profile.fields に persist
+  // されて /api/i が round-trip 値を返す。
+  test('/api/i round-trips fields after i/update', async ({ request }) => {
     const userName = `proffld${Date.now().toString().slice(-9)}`;
     const user = await signupUser(request, userName, DEFAULT_TEST_PASSWORD);
 

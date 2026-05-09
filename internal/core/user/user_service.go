@@ -333,6 +333,19 @@ type UpdateInput struct {
 	// CheckWordMute helper が note を除外する (#787)。
 	MutedWords     *json.RawMessage
 	HardMutedWords *json.RawMessage
+	// Fields は user_profile.fields の上書き値 (#956)。nil なら不変、
+	// 空 slice なら全消去、要素ありなら正規化後 (= 名前 / 値 ともに trim
+	// した上で空 entry を除外) を jsonb に書き込む。upstream paramDef は
+	// maxItems 16 で、本 service は呼び出し側が cap 済の slice を渡す
+	// 前提 (api/i ハンドラ側で長さ検証する)。
+	Fields *[]FieldItem
+}
+
+// FieldItem represents one row of user_profile.fields. upstream Misskey の
+// PropertyValue 連合経路にも乗る shape (= name / value ペア)。
+type FieldItem struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // UpdateProfile applies the non-nil fields to the user and user_profile rows.
@@ -410,6 +423,26 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 		// avatarDecorations は user (not user_profile) 側の jsonb 列。
 		// Room と同じく []byte ではなく string で渡して bytea 化を防ぐ。
 		userFields["avatarDecorations"] = string(*in.AvatarDecorations)
+	}
+	if in.Fields != nil {
+		// upstream Misskey TS 互換 (#956): name / value をそれぞれ trim して
+		// 両方非空の entry のみ残す。空 slice 渡しはクリア (= []) として
+		// 書き込む。jsonb 列なので []byte でなく string キャストで bytea
+		// 化を防ぐ。
+		normalized := make([]FieldItem, 0, len(*in.Fields))
+		for _, f := range *in.Fields {
+			n := strings.TrimSpace(f.Name)
+			v := strings.TrimSpace(f.Value)
+			if n == "" || v == "" {
+				continue
+			}
+			normalized = append(normalized, FieldItem{Name: n, Value: v})
+		}
+		raw, err := json.Marshal(normalized)
+		if err != nil {
+			return nil, err
+		}
+		profileFields["fields"] = string(raw)
 	}
 
 	// avatarId / bannerId 更新 (#467)。driveFileRepo 未配線時は media

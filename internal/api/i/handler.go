@@ -699,6 +699,18 @@ type UpdateRequest struct {
 	// 時に CheckWordMute で除外する。
 	MutedWords     json.RawMessage `json:"mutedWords"`
 	HardMutedWords json.RawMessage `json:"hardMutedWords"`
+	// Fields はプロフィール上の name/value ペア (#956)。upstream paramDef は
+	// `array of {name, value}` で maxItems 16。nil (= 省略) は不変、`[]` で
+	// クリア、要素ありで上書き。core/user 側で trim + 空 entry 排除を行う。
+	Fields *[]FieldInput `json:"fields"`
+}
+
+// FieldInput is the {name, value} shape accepted by i/update for profile
+// fields (#956). upstream paramDef のように name / value を string で
+// 受け取り、core/user 側で trim + 空 entry 除外を行う。
+type FieldInput struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // AvatarDecorationInput is one entry of the avatarDecorations array on
@@ -891,6 +903,19 @@ func (h *Handler) Update(c echo.Context) error {
 		default:
 			return apierr.JSONInvalidParam(c)
 		}
+	}
+	if req.Fields != nil {
+		// upstream paramDef は maxItems 16。超過は INVALID_PARAM で弾く
+		// (= cherrypick / Misskey TS と同じ挙動)。各要素の trim / 空除外は
+		// core/user 側で行う。
+		if len(*req.Fields) > 16 {
+			return apierr.JSONInvalidParam(c)
+		}
+		items := make([]user.FieldItem, len(*req.Fields))
+		for i, f := range *req.Fields {
+			items[i] = user.FieldItem{Name: f.Name, Value: f.Value}
+		}
+		in.Fields = &items
 	}
 
 	bundle, err := h.userService.UpdateProfile(me.ID, in)

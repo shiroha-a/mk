@@ -127,6 +127,41 @@ func TestShow_ByName(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestShow_ByUsername(t *testing.T) {
+	// #955: pages/show が {username, name} 経路も accept する。upstream
+	// frontend (page.vue) はこの shape を投げるので drop-in 互換に必須。
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	h.SetUserSource(&stubUserSource{
+		byUsernameBundle: &coreuser.UserWithProfile{User: &model.User{ID: "alice", Username: "alice"}},
+	})
+	c, rec := newReq(t, `{"username":"alice","name":"alpha"}`)
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestShow_ByUsername_UserNotFound(t *testing.T) {
+	// username が存在しない場合は 404 (= NO_SUCH_PAGE と同じ shape) を
+	// 返す。upstream は user 不在も page 不在もまとめて noSuchPage に
+	// 集約する設計。
+	h, _, _ := newHandler(t)
+	h.SetUserSource(&stubUserSource{
+		byUsernameErr: errors.New("user not found"),
+	})
+	c, rec := newReq(t, `{"username":"ghost","name":"alpha"}`)
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestShow_ByUsername_NoLookupConfigured(t *testing.T) {
+	// userSource 未注入の場合、{username, name} 経路は internal error
+	// (= 通常配線では起こらないが defense-in-depth)。
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"username":"alice","name":"alpha"}`)
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestShow_BadJSON(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{not`)
@@ -517,11 +552,23 @@ func (s *stubMainStreamPublisher) PublishMainEvent(userID, eventType string, bod
 }
 
 type stubUserSource struct {
-	bundle *coreuser.UserWithProfile
-	err    error
+	bundle           *coreuser.UserWithProfile
+	err              error
+	byUsernameBundle *coreuser.UserWithProfile
+	byUsernameErr    error
 }
 
 func (s *stubUserSource) ShowByID(_ string) (*coreuser.UserWithProfile, error) {
+	return s.bundle, s.err
+}
+
+func (s *stubUserSource) ShowByUsername(_ string, _ *string) (*coreuser.UserWithProfile, error) {
+	// byUsernameBundle / byUsernameErr が個別にセットされていれば優先、
+	// 無ければ ShowByID と同じ bundle を返す (= 既存の page-push test での
+	// stub 動作を維持)。
+	if s.byUsernameBundle != nil || s.byUsernameErr != nil {
+		return s.byUsernameBundle, s.byUsernameErr
+	}
 	return s.bundle, s.err
 }
 
