@@ -27,10 +27,13 @@ test.describe('UI: public SPA pages with API hydration', () => {
     const resp = await page.goto(`${baseURL}/channels`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
-    // channels page には title or any heading が render される。loading
-    // overlay も含めて textContent が ある程度の長さになる
+    // channels page は MkPagination + tab buttons (Trending / Featured /
+    // Following / Owned / Search) を mount する。logged-out でも tab 切替
+    // 不能なだけで button 自体は render される。<h1> + button 1 つ以上を
+    // 確認すれば「PageWithHeader + tabs hydrate 完了」のサインになる。
     await page.waitForFunction(
-      () => (document.body.textContent?.length ?? 0) > 100,
+      () =>
+        document.querySelector('h1') !== null && document.querySelectorAll('button').length > 0,
       { timeout: 20_000 },
     );
   });
@@ -40,9 +43,12 @@ test.describe('UI: public SPA pages with API hydration', () => {
     const resp = await page.goto(`${baseURL}/tags/test`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
-    // hashtag が空でも component は mount される。最低限 SPA ルーターが
-    // 該当 page を選んだ確認として navbar (logged-out では login button) を
-    // verify する代わりに、textContent 長で sanity check。
+    // logged-out 状態の /tags/:tag は upstream Misskey が visitor dashboard
+    // fallback (= sign-up wall + local timeline preview) に流す挙動なので、
+    // hashtag header element は render されない。本 spec の意図は「SPA route
+    // が 200 を返して何らかの content が hydrate される」までの smoke で、
+    // hashtag 固有の hydration verify は authenticated 視点が必要なため別
+    // spec の scope (route_matrix で navbar smoke 経由で間接 cover)。
     await page.waitForFunction(
       () => (document.body.textContent?.length ?? 0) > 100,
       { timeout: 20_000 },

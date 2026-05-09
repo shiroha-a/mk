@@ -6,10 +6,12 @@
 // title / mount root / asset の応答 200 を確認することで「frontend が見える」
 // 状態を回帰検出する。
 //
-// 注: 本 spec は SPA 内の DOM 操作 (signup → signin → post 等) までは行わない。
-// upstream Misskey の frontend は Vue 3 + Pinia で構成され selector が版毎に
-// 変わるため、操作系 e2e は cypress (`tests/dropin_frontend/`) 側で行う設計。
-// 本 spec は最低限「frontend がロードされて Vue が mount できる」ところまで。
+// 注: 本 spec は最低限「frontend がロードされて Vue が mount できる」ところ
+// までで、SPA 内の DOM 操作には踏み込まない。実 click を伴う UI 操作は
+// data-cy-* selector 経由で specs/ui/*.spec.ts (signin / post_note /
+// content_pages_extra 等) に分離した。なお drop-in 切替シナリオ (= TS から
+// mk-go へ DB を引き継いで切替) を視点にした視覚回帰は cypress
+// (`tests/dropin_frontend/`) 側で別途 cover している。
 
 import { expect, test } from '@playwright/test';
 
@@ -33,22 +35,42 @@ test.describe('smoke: frontend SPA loads', () => {
 
   test('frontend asset (manifest.json) is served', async ({ request, baseURL }) => {
     // Vite manifest が frontend ビルドから配信されているかを確認。manifest
-    // が無いと SPA は 起動できない。
+    // が無いと SPA は起動できない。注: `/_frontend_vite_/manifest.json` は
+    // Vite asset manifest、`/manifest.json` は PWA manifest で別物。SPA
+    // fallback router は manifest.json 経路に index.html を返してくる
+    // ことがある (= 200 + HTML body) ので、JSON parse + object 判定まで
+    // 通った時点で「真の manifest が配信されている」と判定する。
     const candidates = [
       `${baseURL}/_frontend_vite_/manifest.json`,
       `${baseURL}/manifest.json`,
     ];
-    let manifestServed = false;
+    type ManifestResult = { url: string; body: Record<string, unknown> };
+    let result: ManifestResult | null = null;
+    const attempts: string[] = [];
     for (const url of candidates) {
       const resp = await request.get(url);
-      if (resp.status() === 200) {
-        manifestServed = true;
-        const body = await resp.text();
-        // JSON っぽい中身であること (= 実体ある index ファイル)
-        expect(body).toMatch(/[{[]/);
-        break;
+      if (resp.status() !== 200) {
+        attempts.push(`${url} → status ${resp.status()}`);
+        continue;
       }
+      const body = await resp.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        attempts.push(`${url} → 200 but not JSON (HTML fallback?)`);
+        continue;
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        attempts.push(`${url} → 200 + JSON but not an object`);
+        continue;
+      }
+      result = { url, body: parsed as Record<string, unknown> };
+      break;
     }
-    expect(manifestServed, `manifest.json not found at any candidate: ${candidates.join(', ')}`).toBe(true);
+    expect(
+      result,
+      `no manifest.json candidate returned a JSON object. tried:\n  ${attempts.join('\n  ')}`,
+    ).not.toBeNull();
   });
 });
