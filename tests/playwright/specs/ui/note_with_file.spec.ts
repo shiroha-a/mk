@@ -1,0 +1,80 @@
+// note 詳細 page を画像 file 添付状態で render → MkMediaList が file を
+// reflect することを verify する mixed e2e。
+//
+// drive file は multipart で /api/drive/files/create に upload (= 既存
+// content_pages.spec.ts の gallery で使う 1x1 PNG を使い回し)。fileIds 込みで
+// notes/create し、/notes/:id を navigate して file の name が body に
+// 含まれることを smoke する。
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
+import type { RootFixture } from '../../fixtures/ui_auth';
+
+test.describe('UI: note detail page with attached drive file', () => {
+  let root: RootFixture;
+
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+
+  test.setTimeout(30_000);
+
+  test('open /notes/:id after notes/create with fileIds → media filename appears', async ({ page, baseURL, request }) => {
+    // 1x1 transparent PNG を drive に upload
+    const driveResp = await request.post(`${baseURL}/api/drive/files/create`, {
+      ignoreHTTPSErrors: true,
+      multipart: {
+        i: root.token,
+        file: {
+          name: `pw-note-pixel-${Date.now()}.png`,
+          mimeType: 'image/png',
+          buffer: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+            'base64',
+          ),
+        },
+      },
+    });
+    expect(driveResp.status()).toBe(200);
+    const driveFile = await driveResp.json();
+    expect(driveFile.id).toBeTruthy();
+    expect(driveFile.name).toBeTruthy();
+
+    const noteText = `playwright-note-with-file ${Date.now()}`;
+    const noteResp = await callApi(request, 'notes/create', {
+      i: root.token,
+      text: noteText,
+      visibility: 'public',
+      fileIds: [driveFile.id],
+    });
+    expect(noteResp.status()).toBe(200);
+    const noteBody = await noteResp.json();
+    const noteId = noteBody.createdNote.id;
+
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const resp = await page.goto(`${baseURL}/notes/${noteId}`, { waitUntil: 'domcontentloaded' });
+    expect(resp!.status()).toBe(200);
+
+    // note text + file img の DOM 出現を verify。MkMediaList は <img> tag を
+    // mount する (= 通常 sensitive flag 付きでない限り direct img)。img の src に
+    // drive file url が入る = drive file URL の host を含む img が出る。
+    await page.waitForFunction(
+      (text) => document.body.textContent?.includes(text) ?? false,
+      noteText,
+      { timeout: 20_000 },
+    );
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('img')).some((img) => /\/files\//.test(img.src)),
+      { timeout: 20_000 },
+    );
+
+    // backend 側で files が attach されている (= notes/show 経由) ことを verify
+    const showResp = await callApi(request, 'notes/show', { i: root.token, noteId });
+    expect(showResp.status()).toBe(200);
+    const shown = await showResp.json();
+    expect(Array.isArray(shown.files), 'files should be array').toBe(true);
+    expect(shown.files.length, 'note should have 1 file attached').toBe(1);
+    expect(shown.files[0].id).toBe(driveFile.id);
+  });
+});
