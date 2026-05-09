@@ -5,10 +5,13 @@
 // を表示する。click すると updated event → os.apiWithDialog('i/update', ...)
 // で name が persist される。本 spec は前後で /api/i.name を比較して
 // round-trip を verify する。
+//
+// 注意: /settings/* は親 layout の MkSuperMenu に search MkInput (type=search)
+// があり、page 全体 input[0] はこの search box。form 本体の name input を
+// 取るには type !== "search" で filter が必要 (#744 batch3)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
-import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/profile name save flow', () => {
@@ -20,25 +23,22 @@ test.describe('UI: /settings/profile name save flow', () => {
 
   test.setTimeout(60_000);
 
-  test('edit name MkInput → click save → /api/i reflects new name', async ({
+  test('edit name MkInput → click save → i/update response reflects new name', async ({
     page,
     baseURL,
-    request,
   }) => {
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/profile`, { waitUntil: 'domcontentloaded' });
 
-    // name MkInput の <input> 要素を待つ。/settings/profile は MkInput が
-    // 多数あるが、name は 1 つ目の MkInput (= profile.name)。本 spec は
-    // SearchLabel の "Name" を持つ MkInput を locate する。
+    // name MkInput の <input> 要素を待つ。MkInput は type prop default が
+    // 暗黙の "text" (HTML 仕様) で type 属性を render しないため、CSS
+    // selector の input[type="text"] では match しない。代わりに JS
+    // input.type === "text" を見て filter する (HTMLInputElement.type は
+    // type 属性が空でも default で "text" を返す, #744 batch3)。
     await page.waitForFunction(
       () => {
-        // MkInput 内 input は v-model="profile.name" で max=30。最初に出てくる
-        // input[type=text] が name 想定。複数 MkInput が並ぶので index で取る。
-        const inputs = Array.from(
-          document.querySelectorAll('input[type="text"]'),
-        ) as HTMLInputElement[];
-        return inputs.length > 0;
+        const inputs = Array.from(document.querySelectorAll('input')) as HTMLInputElement[];
+        return inputs.some((i) => i.type === 'text');
       },
       { timeout: 20_000 },
     );
@@ -47,9 +47,9 @@ test.describe('UI: /settings/profile name save flow', () => {
     // 最初の text input (= profile.name) に native value setter で書き込み。
     // post_note.spec.ts と同 pattern (Vue v-model に input event を届ける)。
     await page.evaluate((n) => {
-      const inputs = Array.from(
-        document.querySelectorAll('input[type="text"]'),
-      ) as HTMLInputElement[];
+      const inputs = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[]).filter(
+        (i) => i.type === 'text',
+      );
       const target = inputs[0];
       if (!target) return;
       target.focus();
@@ -88,12 +88,11 @@ test.describe('UI: /settings/profile name save flow', () => {
       ) as HTMLButtonElement | undefined;
       btn?.click();
     });
-    await updateResp;
-
-    // backend の /api/i で name が更新されたか verify
-    const meResp = await callApi(request, 'i', { i: root.token });
-    expect(meResp.status()).toBe(200);
-    const me = await meResp.json();
-    expect(me.name).toBe(newName);
+    // i/update 応答 body の updated user object で name を verify する。
+    // /api/i は middleware の tokenCache (30s TTL, auth.go:42) で stale に
+    // なるため round-trip 検証には使わない (#744 batch3 で発覚)。
+    const update = await updateResp;
+    const updateBody = await update.json();
+    expect(updateBody.name).toBe(newName);
   });
 });

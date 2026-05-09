@@ -42,14 +42,30 @@ test.describe('UI: follow button click toggles following relation', () => {
       { timeout: 20_000 },
     );
 
-    // following/create response を捕捉して Follow button click。
-    // MkFollowButton は <span :class="$style.text">Follow</span> を含むので
-    // exact name="Follow" button を locator で取る。
+    // MkFollowButton click → prefer.alwaysConfirmFollow=true (def.ts:370)
+    // で os.confirm() dialog が出る → OK click が follow API trigger。
+    // programmatic dispatchEvent で直接 button の click handler を呼び、
+    // dialog 出現を待ってから data-cy-modal-dialog-ok を click する
+    // (#744 batch3 で発覚)。
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(
+        (b) => (b.textContent ?? '').trim() === 'Follow',
+      ) as HTMLButtonElement | undefined;
+      btn?.click();
+    });
+    // confirm dialog 出現待ち
+    await page.waitForFunction(
+      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      { timeout: 10_000 },
+    );
     const followResp = page.waitForResponse(
       (r) => r.url().includes('/api/following/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.getByRole('button', { name: 'Follow', exact: true }).first().click();
+    await page.evaluate(() => {
+      const ok = document.querySelector('[data-cy-modal-dialog-ok]') as HTMLButtonElement | null;
+      ok?.click();
+    });
     await followResp;
 
     // backend で users/show を引いて isFollowing=true を verify

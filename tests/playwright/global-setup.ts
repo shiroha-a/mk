@@ -120,6 +120,27 @@ export default async function globalSetup(): Promise<void> {
       );
     }
 
+    // 4. accountSetupWizard を -1 に設定して MkUserSetupDialog (初回 wizard
+    // modal) の自動表示を抑止する。pizzax store 'base' の `where: 'account'`
+    // entry は i/registry に scope=['client', 'base'] で persist される。
+    // wizard が出ると programmatic click でも modal overlay 上の MkButton
+    // (= 別 z-index) を踏んで原 page の Save / Follow button click が
+    // intercept される (#744 batch3 で発覚)。
+    const wizardResp = await ctx.post(`${baseURL}/api/i/registry/set`, {
+      data: {
+        i: root.token,
+        scope: ['client', 'base'],
+        key: 'accountSetupWizard',
+        value: -1,
+      },
+      failOnStatusCode: false,
+    });
+    if (wizardResp.status() !== 200 && wizardResp.status() !== 204) {
+      throw new Error(
+        `globalSetup i/registry/set accountSetupWizard failed: ${wizardResp.status()} ${await wizardResp.text()}`,
+      );
+    }
+
     // root credentials を spec から読めるように file 出力
     mkdirSync('.auth', { recursive: true });
     writeFileSync('.auth/root.json', JSON.stringify(root));
