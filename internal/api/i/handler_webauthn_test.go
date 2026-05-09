@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -429,8 +430,11 @@ func TestPublishMeUpdatedPartial_EmptyFieldsIsNoop(t *testing.T) {
 	assert.Empty(t, pub.calls, "no PublishMainEvent for empty fields")
 }
 
-// publishMeUpdated (full UserDetailed): publisher が wire されていれば
+// publishMeUpdated (full MeDetailed): publisher が wire されていれば
 // userService.ShowByID 経由で User+Profile を packed publish する。
+// payload は upstream Misskey TS と同じ MeDetailed shape (#968)。
+// UserDetailed shape に戻る regression を catch するため、body の型と
+// MeDetailed 拡張 field の存在を assert する。
 func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	setupUserWithPassword(repo, "u1", "pass")
@@ -441,7 +445,12 @@ func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	require.Len(t, pub.calls, 1)
 	assert.Equal(t, "u1", pub.calls[0].userID)
 	assert.Equal(t, "meUpdated", pub.calls[0].eventType)
-	assert.NotNil(t, pub.calls[0].body)
+	require.NotNil(t, pub.calls[0].body)
+
+	me, ok := pub.calls[0].body.(entity.MeDetailed)
+	require.True(t, ok, "publishMeUpdated body は MeDetailed であるべき (UserDetailed shape に戻る regression)")
+	// embed が壊れていないことの sanity check (UserLite 由来 field)。
+	assert.Equal(t, "u1", me.ID)
 }
 
 // publishMeUpdated: 存在しない userID は ShowByID で err → publish せず

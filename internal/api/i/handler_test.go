@@ -596,6 +596,12 @@ func TestUpdate_ResponseContainsMeDetailedFields(t *testing.T) {
 	assert.Contains(t, body, "autoAcceptFollowed")
 	assert.Contains(t, body, "receiveAnnouncementEmail")
 	assert.Contains(t, body, "injectFeaturedNote")
+	// MeDetailed が UserDetailed を embed していることの健全性 check。
+	// 将来うっかり embed を外すと「Me 拡張だけ」の壊れた shape になるので
+	// UserLite (id/username) と UserDetailed (isLocked) 由来 field の存在を確認。
+	assert.Contains(t, body, "id")
+	assert.Contains(t, body, "username")
+	assert.Contains(t, body, "isLocked")
 }
 
 func TestUpdate_FollowedMessageAndPublicReactions(t *testing.T) {
