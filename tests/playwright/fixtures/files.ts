@@ -5,6 +5,8 @@
 // node の Sharp/Canvas 依存が増えるので、固定の minimal PNG を base64 で
 // 持つ方が deterministic + 軽量。
 
+import type { APIRequestContext } from '@playwright/test';
+
 // 1x1 transparent PNG, 67 bytes。base64 decode 結果も deterministic で
 // md5 (= file content hash) も常に同じになる = find-by-hash spec で
 // 検証 anchor として使える。
@@ -26,13 +28,9 @@ export interface DriveFile {
 
 // uploadTinyPNG は test 用の 1x1 透過 PNG を /api/drive/files/create に
 // multipart で upload する helper。drive 系 spec が複数で同 pattern を
-// 抱えていたので集約 (#967 batch4 review)。call sites:
-//   - drive_file_rename / drive_file_toggle_sensitive / drive_file_delete
-//   - drive_file_describe_save / drive_file_detail_render
+// 抱えていたので集約 (#967 batch4 review)。
 // 失敗時はキャッチ側で test を fail させたいので、status と body を
 // そのまま返さず正常系で DriveFile を返し、異常系は throw する。
-import type { APIRequestContext } from '@playwright/test';
-
 export async function uploadTinyPNG(
   request: APIRequestContext,
   baseURL: string,

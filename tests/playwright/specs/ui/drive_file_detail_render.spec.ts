@@ -7,6 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { uploadTinyPNG } from '../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /my/drive/file/:fileId hydrates file metadata', () => {
@@ -25,25 +26,8 @@ test.describe('UI: /my/drive/file/:fileId hydrates file metadata', () => {
     // 検証する (= 自分が指定した name と一致するとは限らない)。本 spec の
     // scope は drive file detail page hydration の smoke なので、ID で
     // 引いた file の name が body に出れば十分。
-    const fileName = `pw-drive-detail-${Date.now()}.png`;
-    const driveResp = await request.post(`${baseURL}/api/drive/files/create`, {
-      ignoreHTTPSErrors: true,
-      multipart: {
-        i: root.token,
-        file: {
-          name: fileName,
-          mimeType: 'image/png',
-          buffer: Buffer.from(
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-            'base64',
-          ),
-        },
-      },
-    });
-    expect(driveResp.status()).toBe(200);
-    const file = await driveResp.json();
-    expect(file.id, 'drive/files/create should return file id').toBeTruthy();
-    const actualName: string = file.name;
+    const file = await uploadTinyPNG(request, baseURL!, root.token, `pw-drive-detail-${Date.now()}.png`);
+    const actualName = file.name;
     expect(typeof actualName).toBe('string');
 
     await uiSigninAsRoot(page, baseURL, root);
