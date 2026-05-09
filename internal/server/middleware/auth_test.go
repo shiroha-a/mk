@@ -61,6 +61,43 @@ func TestAuthenticate_BearerToken(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// #960: handler が現在 request の auth token を取得できる必要がある
+// (i/update 成功後に tokenCache を invalidate する目的)。Authenticate
+// middleware は raw token を context に詰める。
+func TestAuthenticate_PutsTokenInContext(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+
+	user := &model.User{ID: "user1", Username: "testuser"}
+	nativeToken := "abcdef1234567890"
+	userRepo.Tokens[nativeToken] = user
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+nativeToken)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		assert.Equal(t, nativeToken, GetToken(c),
+			"middleware は raw auth token を context にそのまま積むべき")
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+}
+
+func TestGetToken_NotAuthenticated(t *testing.T) {
+	// 未認証 request では GetToken は空文字を返す (panic しない)。
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	assert.Equal(t, "", GetToken(c))
+}
+
 func TestAuthenticate_QueryParam(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()

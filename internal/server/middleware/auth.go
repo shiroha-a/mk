@@ -26,7 +26,10 @@ var errOrphanedAccessToken = errors.New("auth: access_token references a deleted
 
 type contextKey string
 
-const UserContextKey contextKey = "misskeyUser"
+const (
+	UserContextKey  contextKey = "misskeyUser"
+	TokenContextKey contextKey = "misskeyToken"
+)
 
 // lastActiveUpdateInterval は同一ユーザーの lastActiveDate 書き込みを抑制
 // する間隔。本家 TS は WebSocket 接続中 5 分おきに更新する (#421)。HTTP
@@ -87,6 +90,11 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 			}
 
 			c.Set(string(UserContextKey), user)
+			// handler 側でこの request の auth token を引きたいケースがある
+			// (例: i/update が成功後に tokenCache を invalidate する目的、
+			// #960)。raw token をそのまま context に積む。app/auth 経由の
+			// access_token / native login token どちらも同じキーで取得可能。
+			c.Set(string(TokenContextKey), token)
 			a.touchLastActive(user.ID)
 			return next(c)
 		}
@@ -159,6 +167,20 @@ func GetUser(c echo.Context) *model.User {
 		return nil
 	}
 	return u
+}
+
+// GetToken returns the raw auth token used for the current request, or
+// empty string if the request was not authenticated. Handlers that perform
+// self-mutation (e.g. i/update) use this to invalidate the auth middleware's
+// tokenCache entry so subsequent requests read fresh user state from DB
+// instead of returning stale cached values within the 30s TTL window
+// (#960).
+func GetToken(c echo.Context) string {
+	t, ok := c.Get(string(TokenContextKey)).(string)
+	if !ok {
+		return ""
+	}
+	return t
 }
 
 // RoleChecker abstracts role checking to avoid circular dependency with core/role.

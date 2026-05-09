@@ -653,6 +653,60 @@ func TestUpdate_FieldsEmptyClears(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(repo.Profiles["user1"].Fields))
 }
 
+// #960: Update が成功した後に auth middleware の tokenCache を invalidate
+// する。同じ token の次 request で stale な user object が返るのを防ぐ。
+// invalidator が wire されており request context に token がある場合のみ
+// invalidate を呼ぶ — どちらが欠けても panic / 不正呼び出しにならない。
+func TestUpdate_InvalidatesTokenCacheOnSuccess(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	// middleware が context に詰める想定の auth token を直接 set する。
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"updated"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	c.Set(string(middleware.TokenContextKey), "the-current-request-token")
+
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"the-current-request-token"}, inv.calls,
+		"成功した i/update は本 request の token を invalidate するべき")
+}
+
+func TestUpdate_NoInvalidatorIsNoop(t *testing.T) {
+	// invalidator が wire されていないとき (production では必ず wire するが
+	// 単体 test や router 配線忘れ時) は invalidate skip して 200 を返す。
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+
+	rec := post(h.Update, `{"name":"updated"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestUpdate_NoTokenInContextIsNoop(t *testing.T) {
+	// invalidator は wire 済みだが context に token が無いケース (= 認証
+	// pipeline が新旧混在している過渡期や unit test 直叩き)。invalidate
+	// 呼び出しは skip し、handler は 200 で完了する。
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+
+	inv := &stubTokenInvalidator{}
+	h.SetAuthInvalidator(inv)
+
+	rec := post(h.Update, `{"name":"updated"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, inv.calls, "token が context に無いとき invalidate は呼ばれない")
+}
+
 // upstream paramDef は maxItems 16。それ超えは INVALID_PARAM (400)。
 func TestUpdate_FieldsTooMany(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)

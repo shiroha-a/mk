@@ -1,23 +1,22 @@
 // /settings/profile で name MkInput を編集 → manualSave button click →
-// /api/i/update 応答 body に新 name が反映されることを verify する
+// /api/i/update + /api/i 両方で新 name が反映されることを verify する
 // **真の write-flow** spec。
 //
 // MkInput (manualSave) は input 値変更で `<MkButton :class="$style.save">`
 // を表示する。click すると updated event → os.apiWithDialog('i/update', ...)
-// で name が persist される。本 spec は i/update の response body
-// (= updated user object) で round-trip を verify する。
+// で name が persist される。本 spec は i/update 応答 + /api/i の 2 段で
+// round-trip を verify する (= auth middleware tokenCache が i/update 後に
+// 正しく invalidate されることを backend regression test として担保、#960)。
 //
-// 注意 1: /settings/* は親 layout の MkSuperMenu に search MkInput (type=search)
+// 注意: /settings/* は親 layout の MkSuperMenu に search MkInput (type=search)
 // があり、page 全体 input[0] はこの search box。form 本体の name input を
-// 取るには type !== "search" で filter が必要 (#744 batch3)。
-//
-// 注意 2: /api/i 経由の DB round-trip 検証は意図的にしていない。auth
-// middleware の tokenCache (30s TTL, auth.go:42) は i/update で invalidate
-// されないため、更新直後の /api/i は stale な値を返す (#744 batch3 で
-// 発覚 → #960 で実装側を修正予定、修正後は /api/i round-trip に戻す)。
+// 取るには `i.type === "text"` filter が必要 (MkInput type prop default は
+// 暗黙の "text" で type 属性を render しないため input[type="text"] では
+// match しない、#744 batch3)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/profile name save flow', () => {
@@ -29,9 +28,10 @@ test.describe('UI: /settings/profile name save flow', () => {
 
   test.setTimeout(60_000);
 
-  test('edit name MkInput → click save → i/update response reflects new name', async ({
+  test('edit name MkInput → click save → i/update + /api/i both reflect new name', async ({
     page,
     baseURL,
+    request,
   }) => {
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/profile`, { waitUntil: 'domcontentloaded' });
@@ -94,11 +94,17 @@ test.describe('UI: /settings/profile name save flow', () => {
       ) as HTMLButtonElement | undefined;
       btn?.click();
     });
-    // i/update 応答 body の updated user object で name を verify する。
-    // /api/i は middleware の tokenCache (30s TTL, auth.go:42) で stale に
-    // なるため round-trip 検証には使わない (#744 batch3 で発覚)。
+    // i/update 応答 body は更新後 user object を返す (handler が fresh fetch)。
     const update = await updateResp;
     const updateBody = await update.json();
     expect(updateBody.name).toBe(newName);
+
+    // 同じ token で /api/i を読み直す。i/update は auth middleware の
+    // tokenCache を invalidate するため (#960)、cache TTL (30s) 内でも
+    // fresh user が返る。
+    const meResp = await callApi(request, 'i', { i: root.token });
+    expect(meResp.status()).toBe(200);
+    const me = await meResp.json();
+    expect(me.name).toBe(newName);
   });
 });
