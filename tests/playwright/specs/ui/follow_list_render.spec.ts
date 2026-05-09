@@ -9,12 +9,14 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { signupUser } from '../../fixtures/auth';
+import { resetRateLimit } from '../../fixtures/rate_limit';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /@:acct/followers and /@:acct/following render relations', () => {
   let root: RootFixture;
 
   test.beforeAll(() => {
+    resetRateLimit();
     root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
   });
 
