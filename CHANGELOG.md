@@ -154,3 +154,5 @@ Misskey TS 2 インスタンス + pytest で federation smoke + 状態継承を�
 - フォロー、リアクション、通知
 - WebSocketストリーミング
 - ActivityPub送信/受信
+- ジョブキュー (asynq)
+- 検索 (Meilisearch/SQLフォールバック)
