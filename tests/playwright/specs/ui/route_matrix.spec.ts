@@ -24,8 +24,12 @@ const AUTH_ROUTES: RouteCase[] = [
   { path: '/timeline/global', label: 'timeline/global' },
   { path: '/timeline/hybrid', label: 'timeline/hybrid' },
   // discovery / explore
-  { path: '/explore/users', label: 'explore/users' },
-  { path: '/explore/tags', label: 'explore/tags' },
+  // /explore は単体 route。tab は initialTab prop に hash 経由で渡されるが、
+  // 連続 page.goto で hash だけ変えると Playwright は null response を返す
+  // (= same-document navigation 扱い) ので、route_matrix では default tab
+  // 経路だけを cover する。tab 別 hydration verify は専用 spec
+  // (specs/ui/explore_users_render.spec.ts) で行う。
+  { path: '/explore', label: 'explore (default = featured)' },
   // i / 自アカウント系
   { path: '/my/favorites', label: 'my/favorites' },
   { path: '/my/clips', label: 'my/clips' },
@@ -55,7 +59,7 @@ const AUTH_ROUTES: RouteCase[] = [
   { path: '/admin/overview', label: 'admin/overview' },
   { path: '/admin/users', label: 'admin/users' },
   { path: '/admin/emojis', label: 'admin/emojis' },
-  { path: '/admin/queue', label: 'admin/queue' },
+  { path: '/admin/job-queue', label: 'admin/job-queue' },
   { path: '/admin/federation', label: 'admin/federation' },
   { path: '/admin/abuses', label: 'admin/abuses' },
   { path: '/admin/announcements', label: 'admin/announcements' },
