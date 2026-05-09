@@ -1,0 +1,72 @@
+// /settings/profile の "advancedSettings" MkFolder を expand → isBot
+// switch (folder 内 2 番目の checkbox) を toggle → /api/i/update が走る
+// write-flow spec。
+//
+// profile.vue の advancedSettings 折り畳み内には isCat / isBot 2 個の
+// MkSwitch があり、expand 後の checkbox 列の (folder 前 N 個) + 2 番目が
+// isBot。サインアップ直後は folder 前は 0 個なので isBot = index 1。
+// (profile.vue:142-147)
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+
+test.describe('UI: /settings/profile isBot toggle flow', () => {
+  let root: RootFixture;
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+  test.setTimeout(60_000);
+
+  test('expand advancedSettings folder → toggle isBot → /api/i/update', async ({
+    page,
+    baseURL,
+  }) => {
+    await uiSigninAsRoot(page, baseURL, root);
+    await page.goto(`${baseURL}/settings/profile`, {
+      waitUntil: 'domcontentloaded',
+    });
+
+    await page.waitForFunction(
+      () => document.querySelectorAll('input').length >= 2,
+      { timeout: 20_000 },
+    );
+
+    const beforeCheckboxes = await page.evaluate(
+      () => document.querySelectorAll('input[type="checkbox"]').length,
+    );
+
+    // settings/profile の MkFolder は metadataEdit と advancedSettings の 2 つ。
+    // advancedSettings を expand したいので headers[1] を click (= 2 個目の
+    // folder)。 metadataEdit は 1 個目。
+    await page.evaluate(() => {
+      const headers = Array.from(
+        document.querySelectorAll('[data-cy-folder-header]'),
+      ) as HTMLElement[];
+      headers[1]?.click();
+    });
+    await page.waitForFunction(
+      (n) => document.querySelectorAll('input[type="checkbox"]').length >= n + 2,
+      beforeCheckboxes,
+      { timeout: 10_000 },
+    );
+
+    // isCat (index = beforeCheckboxes) の次 = isBot (index + 1)
+    const updateResp = page.waitForResponse(
+      (r) => r.url().includes('/api/i/update') && r.status() < 300,
+      { timeout: 15_000 },
+    );
+    await page.evaluate((before) => {
+      const cbs = Array.from(
+        document.querySelectorAll('input[type="checkbox"]'),
+      ) as HTMLInputElement[];
+      cbs[before + 1]?.click();
+    }, beforeCheckboxes);
+    const update = await updateResp;
+    const body = await update.json();
+    // isBot は UserDetailed (= UserLite 由来 since IsBot is in MiUser) で
+    // /api/i/update 応答にも含まれる。値そのものは boolean を strict 確認。
+    expect(body.id).toBeTruthy();
+    expect(typeof body.isBot).toBe('boolean');
+  });
+});
