@@ -876,6 +876,9 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// 全 *bool field は req と in の field type が一致するので struct literal
+	// で直接代入する。req.X が nil なら in.X も nil (= service 側で no-op
+	// 扱い) になり、`if != nil` block 経由と意味的に等価。
 	in := user.UpdateInput{
 		IsLocked:                 req.IsLocked,
 		IsBot:                    req.IsBot,
@@ -886,6 +889,7 @@ func (h *Handler) Update(c echo.Context) error {
 		AutoSensitive:            req.AutoSensitive,
 		NoCrawle:                 req.NoCrawle,
 		PreventAiLearning:        req.PreventAiLearning,
+		PublicReactions:          req.PublicReactions,
 		AutoAcceptFollowed:       req.AutoAcceptFollowed,
 		CarefulBot:               req.CarefulBot,
 		InjectFeaturedNote:       req.InjectFeaturedNote,
@@ -916,9 +920,6 @@ func (h *Handler) Update(c echo.Context) error {
 	}
 	if req.FollowedMessage != nil {
 		in.FollowedMessage = &req.FollowedMessage
-	}
-	if req.PublicReactions != nil {
-		in.PublicReactions = req.PublicReactions
 	}
 	if len(req.Room) > 0 {
 		// json.RawMessage は親の Unmarshal が構文チェック済みの
