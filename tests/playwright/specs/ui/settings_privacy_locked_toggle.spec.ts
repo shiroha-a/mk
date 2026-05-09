@@ -12,6 +12,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy isLocked toggle flow', () => {
@@ -24,7 +25,13 @@ test.describe('UI: /settings/privacy isLocked toggle flow', () => {
   test('toggle isLocked switch → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion を効かせるため、初期 state を false (= DB default)
+    // に reset。prior run 累積で true のまま残っていると click で false に
+    // 反転して期待と逆になるので、明示的に既知 state から始める。
+    await callApi(request, 'i/update', { i: root.token, isLocked: false });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -46,9 +53,7 @@ test.describe('UI: /settings/privacy isLocked toggle flow', () => {
     });
     const update = await updateResp;
     const body = await update.json();
-    // updated user object には isLocked が含まれる (true / false どちらでも、
-    // 状態が toggle されたこと自体を verify する)。
-    expect(body).toHaveProperty('isLocked');
-    expect(typeof body.isLocked).toBe('boolean');
+    // beforeAll の API reset で false から始まるので、click 後は必ず true。
+    expect(body.isLocked).toBe(true);
   });
 });

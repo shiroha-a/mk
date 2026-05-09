@@ -7,6 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy preventAiLearning toggle flow', () => {
@@ -19,7 +20,11 @@ test.describe('UI: /settings/privacy preventAiLearning toggle flow', () => {
   test('toggle preventAiLearning switch (6th) → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion のため初期 state を true (= DB default) に reset。
+    await callApi(request, 'i/update', { i: root.token, preventAiLearning: true });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -42,6 +47,8 @@ test.describe('UI: /settings/privacy preventAiLearning toggle flow', () => {
     const update = await updateResp;
     const body = await update.json();
     expect(body.id).toBeTruthy();
-    expect(typeof body.preventAiLearning).toBe('boolean');
+    // beforeAll の API reset で true から始まるので、click 後は必ず false
+    // (#969 で MeDetailed shape に preventAiLearning が含まれる)。
+    expect(body.preventAiLearning).toBe(false);
   });
 });

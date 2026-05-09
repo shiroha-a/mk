@@ -11,6 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/profile isCat toggle flow', () => {
@@ -23,7 +24,13 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
   test('expand advancedSettings folder → toggle isCat → /api/i/update', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion を効かせるため、初期 state を false に reset。
+    // prior run の累積で isCat=true のまま残っていると click で false に
+    // 反転して期待と逆になるので、明示的に既知 state から始める。
+    await callApi(request, 'i/update', { i: root.token, isCat: false });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/profile`, {
       waitUntil: 'domcontentloaded',
@@ -35,25 +42,26 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
       { timeout: 20_000 },
     );
 
-    // 折りたたみ folder ("advancedSettings") を expand。folder 内には
-    // isCat / isBot の 2 個の MkSwitch (= input[type=checkbox]) があり、
-    // 折りたたみ状態では DOM に出ない (Vue の v-if 相当)。
-    // 「click 前 checkbox 数」を測ってから folder を click し、checkbox
-    // 数が 2 増えたことで expand 成功を verify する。
+    // settings/profile の MkFolder は metadataEdit (1 つ目) と
+    // advancedSettings (2 つ目) の 2 つ。advancedSettings の折りたたみ
+    // 内には isCat / isBot の 2 個の MkSwitch (= input[type=checkbox])
+    // があり、折りたたみ状態では DOM に出ない (Vue の v-if 相当)。
+    // 「click 前 checkbox 数」を測ってから headers[1] (= advancedSettings)
+    // を click し、checkbox 数が 2 増えたことで expand 成功を verify する。
+    // metadataEdit (headers[0]) を expand しても checkbox は増えないので
+    // 必ず headers[1] を選ぶこと (#969 review round の bug fix)。
     const beforeCheckboxes = await page.evaluate(
       () => document.querySelectorAll('input[type="checkbox"]').length,
     );
 
-    // settings/profile の MkFolder header は唯一: advancedSettings。
-    // [data-cy-folder-header] で取れる (MkFolder の標準 attribute)。
     await page.evaluate(() => {
       const headers = Array.from(
         document.querySelectorAll('[data-cy-folder-header]'),
       ) as HTMLElement[];
-      headers[0]?.click();
+      headers[1]?.click();
     });
     await page.waitForFunction(
-      (n) => document.querySelectorAll('input[type="checkbox"]').length > n,
+      (n) => document.querySelectorAll('input[type="checkbox"]').length >= n + 2,
       beforeCheckboxes,
       { timeout: 10_000 },
     );
@@ -72,10 +80,10 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
     }, beforeCheckboxes);
     const update = await updateResp;
     const body = await update.json();
-    // i/update は MeDetailed shape を返す (#969 で fix 済) 前提の strict
-    // assert: isCat field が boolean で含まれる。クリック前 false 期待
-    // だが prior run 累積で逆向きにもなり得るので boolean 型のみ確認。
+    // beforeAll の API reset で isCat=false から始まるので、click 後は
+    // 必ず true が返る strict assertion。i/update が MeDetailed shape を
+    // 返すことも併せて verify (#969)。
     expect(body.id).toBeTruthy();
-    expect(typeof body.isCat).toBe('boolean');
+    expect(body.isCat).toBe(true);
   });
 });

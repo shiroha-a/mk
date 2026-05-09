@@ -6,6 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy noCrawle toggle flow', () => {
@@ -18,7 +19,12 @@ test.describe('UI: /settings/privacy noCrawle toggle flow', () => {
   test('toggle noCrawle switch (5th) → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion を効かせるため初期 state を false (= DB default)
+    // に reset。
+    await callApi(request, 'i/update', { i: root.token, noCrawle: false });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -43,5 +49,8 @@ test.describe('UI: /settings/privacy noCrawle toggle flow', () => {
     const update = await updateResp;
     const body = await update.json();
     expect(body.id).toBeTruthy();
+    // beforeAll の API reset で false から始まるので、click 後は必ず true
+    // (#969 の MeDetailed packer 経由で noCrawle が body に含まれる)。
+    expect(body.noCrawle).toBe(true);
   });
 });

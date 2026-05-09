@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/profile isBot toggle flow', () => {
@@ -21,7 +22,11 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
   test('expand advancedSettings folder → toggle isBot → /api/i/update', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion のため初期 state を false (= DB default) に reset。
+    await callApi(request, 'i/update', { i: root.token, isBot: false });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/profile`, {
       waitUntil: 'domcontentloaded',
@@ -64,9 +69,10 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
     }, beforeCheckboxes);
     const update = await updateResp;
     const body = await update.json();
-    // isBot は UserDetailed (= UserLite 由来 since IsBot is in MiUser) で
-    // /api/i/update 応答にも含まれる。値そのものは boolean を strict 確認。
+    // beforeAll の API reset で false から始まるので、click 後は必ず true
+    // (isBot は UserDetailed = UserLite 由来 field なので i/update body に
+    // 元から含まれる)。
     expect(body.id).toBeTruthy();
-    expect(typeof body.isBot).toBe('boolean');
+    expect(body.isBot).toBe(true);
   });
 });

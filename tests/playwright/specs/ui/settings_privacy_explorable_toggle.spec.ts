@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
@@ -21,7 +22,13 @@ test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
   test('toggle isExplorable switch (7th) → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion を効かせるため、初期 state を true (= DB default)
+    // に reset。prior run 累積で false のまま残っていると click で true に
+    // 反転して期待と逆になるので、明示的に既知 state から始める。
+    await callApi(request, 'i/update', { i: root.token, isExplorable: true });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -42,18 +49,13 @@ test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
       ) as HTMLInputElement[];
       cbs[6]?.click();
     });
-    // #968 (PR #969) で MeDetailed packer が導入され、i/update 応答に
-    // isExplorable / noCrawle / preventAiLearning など self-view-only field
-    // が含まれるようになった。本 spec では「7 番目の switch を click した
-    // 後、応答 body の isExplorable が toggle 後の値 (= boolean) を返す」
-    // ことを strict assert する。click 前の値が観測しにくいので、boolean
-    // 型であることを担保するに留める (true/false どちらでも通すため
-    // toggle 方向に依存しない、初期 DB 状態 default:true の前提で false
-    // 期待だが、prior run の影響で逆向きにもなり得るため)。
+    // beforeAll の API reset で isExplorable=true から始まるので、click
+    // 後は必ず false が返る strict assertion。i/update が MeDetailed
+    // shape (#968 / PR #969) を返すことも併せて verify。
     const update = await updateResp;
     const body = await update.json();
     expect(body.id).toBeTruthy();
     expect(body.username).toBe(root.username);
-    expect(typeof body.isExplorable).toBe('boolean');
+    expect(body.isExplorable).toBe(false);
   });
 });

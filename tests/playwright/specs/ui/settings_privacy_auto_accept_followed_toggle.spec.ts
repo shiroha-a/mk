@@ -7,6 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy autoAcceptFollowed toggle flow', () => {
@@ -19,7 +20,11 @@ test.describe('UI: /settings/privacy autoAcceptFollowed toggle flow', () => {
   test('toggle autoAcceptFollowed switch (2nd) → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion のため初期 state を false (= DB default) に reset。
+    await callApi(request, 'i/update', { i: root.token, autoAcceptFollowed: false });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -41,10 +46,9 @@ test.describe('UI: /settings/privacy autoAcceptFollowed toggle flow', () => {
     });
     const update = await updateResp;
     const body = await update.json();
-    // #969 で MeDetailed packer 経由になり autoAcceptFollowed が body に
-    // 含まれる前提の strict assert (boolean 型のみ確認、prior run 累積で
-    // 値の向きは予測できないため)。
+    // beforeAll の API reset で false から始まるので、click 後は必ず true
+    // (#969 の MeDetailed packer 経由で autoAcceptFollowed が body に含まれる)。
     expect(body.id).toBeTruthy();
-    expect(typeof body.autoAcceptFollowed).toBe('boolean');
+    expect(body.autoAcceptFollowed).toBe(true);
   });
 });

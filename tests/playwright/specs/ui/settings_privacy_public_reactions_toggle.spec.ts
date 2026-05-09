@@ -3,6 +3,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/privacy publicReactions toggle flow', () => {
@@ -15,7 +16,11 @@ test.describe('UI: /settings/privacy publicReactions toggle flow', () => {
   test('toggle publicReactions switch (3rd) → /api/i/update round-trips', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // 値 strict assertion のため初期 state を true (= DB default) に reset。
+    await callApi(request, 'i/update', { i: root.token, publicReactions: true });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/settings/privacy`, { waitUntil: 'domcontentloaded' });
 
@@ -37,7 +42,7 @@ test.describe('UI: /settings/privacy publicReactions toggle flow', () => {
     });
     const update = await updateResp;
     const body = await update.json();
-    expect(body).toHaveProperty('publicReactions');
-    expect(typeof body.publicReactions).toBe('boolean');
+    // beforeAll の API reset で true から始まるので、click 後は必ず false。
+    expect(body.publicReactions).toBe(false);
   });
 });
