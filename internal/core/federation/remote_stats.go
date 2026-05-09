@@ -99,8 +99,9 @@ func newRemoteStatsFetcherWithTransport(rt http.RoundTripper) *RemoteStatsFetche
 	})
 }
 
-// newFetcherWithClient は cache 構築まで含めた共通 constructor。lru.New は
-// size > 0 で error を返さない実装なので panic は発生しない。
+// newFetcherWithClient は cache 構築まで含めた共通 constructor。
+// remoteStatsCacheSize は compile-time const (10000 > 0) のため lru.New が
+// error を返す経路には到達しない (lru.New は size <= 0 でのみ error)。
 func newFetcherWithClient(client *http.Client) *RemoteStatsFetcher {
 	cache, _ := lru.New[string, cachedRemoteStats](remoteStatsCacheSize)
 	return &RemoteStatsFetcher{client: client, cache: cache}
