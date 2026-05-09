@@ -69,14 +69,14 @@ test.describe('UI: /admin/announcements create form flow', () => {
         inputSetter?.call(titleInput, t);
         titleInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // text textarea を取得する scope は title input から最近接の MkFolder
-        // 内に絞る。page 全体 first textarea を取ると post form modal 等の
-        // 他 textarea を踏む可能性があるため (#744 batch3 review)。MkFolder
-        // は scoped CSS module で `_MkFolder_<hash>` 形式のクラス名になる。
-        const folder = titleInput.closest('[class*="MkFolder"]');
-        const textarea = (folder ?? document).querySelector(
-          'textarea',
-        ) as HTMLTextAreaElement | null;
+        // text textarea は page 全体の first textarea でよい。本 page
+        // (/admin/announcements) は announcement folder 群の MkTextarea
+        // しか textarea を持たず、新 folder は unshift で最上位に追加される
+        // ため document.querySelector('textarea') は確定で新 folder のもの。
+        // CSS module が production build で `xxKsY` 等の hash 名に潰れる
+        // ため `[class*="MkFolder"]` での scope 限定は機能しない (vite
+        // generateScopedName, #744 batch3 review)。
+        const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null;
         if (textarea) {
           textarea.focus();
           const taSetter = Object.getOwnPropertyDescriptor(
