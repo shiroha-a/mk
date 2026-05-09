@@ -82,7 +82,7 @@ Playwright spec を両 backend で走らせる中で観測した「TS と mk-go 
 | #799 | notes/show で visibility 違反時の挙動 (200 で stub note を返す) |
 | #874 | timeline endpoint で user mute filter を追加 (#892 / #894 で perf 最適化) |
 | #876 | users/lists/list の N+1 query を batch fetch に最適化 |
-| #877 | notes/search の external search backend 必須要件 (Meilisearch 未設定で 400) |
+| #877 | notes/search の external search backend 互換: `fulltextSearch.provider: "none"` を opt-in で追加し upstream TS strict-mode (400 UNAVAILABLE) に揃える経路を提供 (mk-go 既定は SQL LIKE fallback で従来通り動く) |
 | #878 | users/search-by-username-and-host の suspend filter |
 
 #### drive
@@ -265,7 +265,7 @@ drop-in テスト (#367) で発見した補完カラム:
 
 - **Identicon の外見** — TS版と生成アルゴリズムが異なるため、アイコン未設定ユーザーの表示が異なる
 - **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go は独自設計)
-- **search backend** — Meilisearch 必須 (mk-go の DB SQL LIKE fallback は upstream に揃え無効化済、#877)
+- **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= PostgreSQL `ILIKE` fallback、Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
 - **2026.4.0 / 2026.5.0 / 2026.5.1 由来の追従未対応** — `#947` tracker 配下、`docs/update/2026050{0,1}diff.md` 参照
   - 連合互換性に直接関わるもの (alsoKnownAs / actor 正規化 / リレー Announce / etc.) は高優先 sub-task として個別 PR 化中
 

@@ -158,7 +158,7 @@ Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint c
 - **サーバーマシン統計** — `enableServerMachineStats` 有効時に CPU/メモリ/ディスク情報を返すが、gopsutil相当の詳細度はない
 - **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go 独自設計)
 - **Identicon** — 生成される自動アバターの見た目が若干異なる
-- **search backend** — `notes/search` で Meilisearch 必須化 (#877)、未設定インスタンスは 400 を返す (TS と同一挙動)
+- **search backend** — `notes/search` の provider は `fulltextSearch.provider` で切替。既定 `sqlLike` で **Meilisearch 不要のまま動く** (PostgreSQL `ILIKE` fallback)。upstream TS strict-mode (400 UNAVAILABLE) で揃えたい operator は `provider: "none"` を opt-in で選べる (#877)。Meilisearch / pgroonga は optional
 - **2026.4.0 / 2026.5.0 / 2026.5.1 への upstream 追従** — #947 tracker 配下で sub-task 化中。詳細: [docs/update/](update/)
 
 ### mk-go 独自挙動 (TS にない拡張)

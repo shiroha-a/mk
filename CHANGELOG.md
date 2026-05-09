@@ -26,7 +26,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #799: notes/show で visibility 違反時の挙動 (200 で stub note)
 - #874 + perf #892 / #894: timeline endpoint で user mute filter 追加 + SQL push-down + muting subquery 化
 - #876: users/lists/list の N+1 query を batch fetch に
-- #877: notes/search の external search backend 必須 (Meilisearch 未設定で 400)
+- #877: notes/search の `fulltextSearch.provider: "none"` opt-in (= upstream TS strict-mode 互換 400 UNAVAILABLE) を追加。mk-go 既定は引き続き `sqlLike` fallback で動く
 - #878: users/search-by-username-and-host suspend filter
 
 #### drive
