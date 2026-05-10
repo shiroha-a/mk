@@ -52,10 +52,12 @@ test.describe('UI: note 3-dot menu mute thread flow', () => {
       },
       { timeout: 15_000 },
     );
+    // MkNote.vue:157 は `@mousedown.prevent="showMenu()"`。click event で
+    // 反応しないので mousedown dispatch。詳細 note_delete_via_menu コメント。
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
       const target = btns.find((b) => b.querySelector('i.ti-dots') !== null);
-      target?.click();
+      target?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
     });
 
     await page.waitForFunction(

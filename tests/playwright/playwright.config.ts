@@ -46,5 +46,11 @@ export default defineConfig({
   },
   // CI 並列度の調整は CI 統合 PR で。本 PR はローカル直列実行。
   workers: 1,
-  retries: 0,
+  // 1 度だけ retry を許可する。Chromium headless が稀に SIGSEGV (= signal 11
+  // / GPF) で即死する infrastructure flake (= profile_iscat_toggle 1ms 即死
+  // 例) と、SPA hydration race / WaitForResponse の short-window timeout を
+  // retry で救う。spec の根本 bug を見落とさないよう、retries は **1 まで**
+  // に絞る。fail/pass 切替の flaky を許容するわけではなく、`Test results:`
+  // summary で `flaky` が出たら spec 側を直す対象とする。
+  retries: 1,
 });

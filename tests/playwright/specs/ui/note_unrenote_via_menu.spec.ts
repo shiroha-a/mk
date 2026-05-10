@@ -81,6 +81,9 @@ test.describe('UI: own note unrenote via menu flow', () => {
       },
       { timeout: 15_000 },
     );
+    // MkNote.vue:28 の renoteTime button は `@mousedown.prevent` のため
+    // click event では popup が開かない。mousedown を dispatch する。詳細は
+    // note_delete_via_menu.spec.ts のコメント参照。
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
       const target = btns.find(
@@ -88,7 +91,7 @@ test.describe('UI: own note unrenote via menu flow', () => {
           b.querySelector('i.ti-repeat') !== null &&
           !b.querySelector('i.ti-fw'),
       );
-      target?.click();
+      target?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
     });
 
     // 5. popup menu の "Unrenote" item (ti-fw ti-trash, danger) を click

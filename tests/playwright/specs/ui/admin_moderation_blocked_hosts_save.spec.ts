@@ -34,9 +34,21 @@ test.describe('UI: /admin/moderation blockedHosts save flow', () => {
         waitUntil: 'domcontentloaded',
       });
 
+      // 「`folder header が >= 5 個` という count 条件で待つと、folder が遅延
+      // hydrate するインスタンスで稀に 20s 超えて 60s test timeout に達する
+      // 回帰がある (実機観察)。本来 spec が必要なのは "Blocked hosts" header
+      // の存在だけなので、count ではなく target text を含む header の存在を
+      // 直接待つ条件に切替える。folder 数が将来増減しても影響を受けない。
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
-        { timeout: 20_000 },
+        () => {
+          const headers = Array.from(
+            document.querySelectorAll('[data-cy-folder-header]'),
+          ) as HTMLElement[];
+          return headers.some((h) =>
+            (h.textContent ?? '').includes('Blocked hosts'),
+          );
+        },
+        { timeout: 30_000 },
       );
 
       // "Blocked hosts" folder を expand

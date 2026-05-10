@@ -57,8 +57,12 @@ test.describe('UI: note 3-dot menu delete flow', () => {
     );
 
     // 3. 3-dot menu button (= ti-dots icon を持つ footer button) を click。
-    // MkNote.vue:157-158 では mousedown で popupMenu を起動する。Playwright の
-    // dispatchEvent でも click event が走るので問題ない。
+    // MkNote.vue:157 は `@mousedown.prevent="showMenu()"` で mousedown event
+    // のみで popup を起動する (= click だけだと一切反応しない)。HTMLElement
+    // の `.click()` は click event しか発火しないため、ここでは mousedown を
+    // 明示 dispatch する。footer の他 button (renote / clip / renoteTime) も
+    // 同 pattern で listener が mousedown のため、ti-* footer button への
+    // 操作は全て mousedown dispatch を使う規約。
     await page.waitForFunction(
       () => {
         const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
@@ -69,7 +73,7 @@ test.describe('UI: note 3-dot menu delete flow', () => {
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
       const target = btns.find((b) => b.querySelector('i.ti-dots') !== null);
-      target?.click();
+      target?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
     });
 
     // 4. popup menu が DOM に現れる。menu item は <i class="ti-fw ti-XXX">

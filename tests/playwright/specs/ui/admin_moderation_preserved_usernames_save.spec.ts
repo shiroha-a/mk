@@ -37,10 +37,19 @@ test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
         waitUntil: 'domcontentloaded',
       });
 
-      // folder header が hydrate するまで待つ
+      // count 条件 (>= 5) ではなく target text を含む header の存在を直接
+      // 待つ。folder hydrate 遅延で 60s test timeout する flake を回避。
+      // 詳細は admin_moderation_blocked_hosts_save の同コメント参照。
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
-        { timeout: 20_000 },
+        () => {
+          const headers = Array.from(
+            document.querySelectorAll('[data-cy-folder-header]'),
+          ) as HTMLElement[];
+          return headers.some((h) =>
+            (h.textContent ?? '').includes('Preserved usernames'),
+          );
+        },
+        { timeout: 30_000 },
       );
 
       // "Preserved usernames" folder を expand
