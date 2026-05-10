@@ -47,7 +47,34 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
       { timeout: 20_000 },
     );
 
-    // 3. Delete button (= "Delete" text を持つ button) hydrate を待つ
+    // 3. Settings folder を expand。my-lists/list.vue:10 の最初の MkFolder
+    // (= settings) は defaultOpen 無しなので closed で start。MkFolder は
+    // `v-else-if="openedAtLeastOnce"` で content を lazy mount するため、
+    // 一度も開いてない folder の Delete button は DOM に存在しない。
+    // header text "Settings" (en-US.yml の `settings:`) で expand してから
+    // Delete button を待つ。
+    await page.waitForFunction(
+      () => {
+        const headers = Array.from(
+          document.querySelectorAll('[data-cy-folder-header]'),
+        ) as HTMLElement[];
+        return headers.some((h) =>
+          (h.textContent ?? '').includes('Settings'),
+        );
+      },
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const headers = Array.from(
+        document.querySelectorAll('[data-cy-folder-header]'),
+      ) as HTMLElement[];
+      const target = headers.find((h) =>
+        (h.textContent ?? '').includes('Settings'),
+      );
+      target?.click();
+    });
+
+    // Delete button (= "Delete" text を持つ button) hydrate を待つ
     await page.waitForFunction(
       () => {
         const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];

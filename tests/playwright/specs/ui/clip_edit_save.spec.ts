@@ -94,14 +94,23 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
     }, newName);
 
     // 6. MkFormDialog OK → clips/update round-trip
+    // 注: `[data-cy-modal-dialog-ok]` 属性は MkDialog.vue (= os.confirm /
+    // os.alert 系) にしかない。MkFormDialog.vue (= os.form 経由) は
+    // MkModalWindow の `<MkButton primary gradate small rounded>{{
+    // i18n.ts.done }} <i class="ti ti-check">` (MkModalWindow.vue:15) を
+    // OK にしており data-cy 無し。"Done" text + ti-check icon で識別する。
     const updateResp = page.waitForResponse(
       (r) => r.url().includes('/api/clips/update') && r.status() < 300,
       { timeout: 15_000 },
     );
     await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
-      ) as HTMLButtonElement | null;
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const ok = btns.find(
+        (b) =>
+          !b.disabled &&
+          b.querySelector('i.ti-check') !== null &&
+          (b.textContent ?? '').includes('Done'),
+      );
       ok?.click();
     });
     const update = await updateResp;

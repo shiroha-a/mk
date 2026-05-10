@@ -56,18 +56,23 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
       { timeout: 20_000 },
     );
 
-    // 4. 該当 report の "Resolve (accept)" button (= ti-check icon を持つ
-    // button) を click。複数 report があり得るので comment を含む section
-    // 内の button を絞る (= MkAbuseReport の root 内に ti-check button)。
+    // 4. "Resolve (accept)" button (= ti-check icon) を click。
+    //
+    // 旧実装は「comment text を含み内部に ti-check button を持つ `<div>`」
+    // という selector だったが、textContent.includes 判定で **body / main 等
+    // page-level 親の div** が先に hit して、その親の最初の ti-check button
+    // を click していた可能性。abuse list 上の resolve button ではなく
+    // 別の button (page header / sidebar) を click していたため API が
+    // 走らず 15s timeout していた。
+    //
+    // setup で signup → 1 件の abuse report を作って即解決する flow なので、
+    // /admin/abuses 上の **最初の ti-check button = 該当 report の accept**
+    // と前提できる。シンプルに button-level で取る方が安定。
     await page.waitForFunction(
-      (c) => {
-        const els = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
-        return els.some((el) => {
-          if (!(el.textContent ?? '').includes(c)) return false;
-          return el.querySelector('button i.ti-check') !== null;
-        });
+      () => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        return btns.some((b) => b.querySelector('i.ti-check') !== null);
       },
-      comment,
       { timeout: 15_000 },
     );
 
@@ -77,18 +82,11 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
         r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate((c) => {
-      const els = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
-      const target = els.find((el) => {
-        if (!(el.textContent ?? '').includes(c)) return false;
-        return el.querySelector('button i.ti-check') !== null;
-      });
-      if (!target) return;
-      const acceptBtn = Array.from(target.querySelectorAll('button')).find(
-        (b) => b.querySelector('i.ti-check') !== null,
-      ) as HTMLButtonElement | undefined;
-      acceptBtn?.click();
-    }, comment);
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const target = btns.find((b) => b.querySelector('i.ti-check') !== null);
+      target?.click();
+    });
     await resolveResp;
   });
 });

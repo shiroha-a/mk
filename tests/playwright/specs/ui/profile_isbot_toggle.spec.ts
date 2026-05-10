@@ -42,13 +42,18 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
     );
 
     // settings/profile の MkFolder は metadataEdit と advancedSettings の 2 つ。
-    // advancedSettings を expand したいので headers[1] を click (= 2 個目の
-    // folder)。 metadataEdit は 1 個目。
+    // 旧実装は `headers[1]` で advancedSettings を取っていたが、上部 settings
+    // sidebar (= MkSuperMenu) や SearchMarker inlining で MkFolder が増減する
+    // 可能性があるため、**i18n label "Advanced settings" で identify**。
+    // en-US.yml の `advancedSettings: "Advanced settings"` を直 reference。
     await page.evaluate(() => {
       const headers = Array.from(
         document.querySelectorAll('[data-cy-folder-header]'),
       ) as HTMLElement[];
-      headers[1]?.click();
+      const target = headers.find((h) =>
+        (h.textContent ?? '').includes('Advanced settings'),
+      );
+      target?.click();
     });
     await page.waitForFunction(
       (n) => document.querySelectorAll('input[type="checkbox"]').length >= n + 2,

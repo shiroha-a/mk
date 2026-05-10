@@ -30,10 +30,14 @@ test.describe('UI: /admin/user suspend toggle flow', () => {
     const target = await signupUser(request, username);
     expect(target.id).toBeTruthy();
 
-    // 2. /admin/user?userId=:id を root として開く
+    // 2. /admin/user/:userId を root として開く。
+    // upstream の route definition (router.definition.ts:381) は
+    // **path-based** `/admin/user/:userId` で query string `?userId=` ではない。
+    // 旧実装は query 渡しで not-found に近い page (= 404 fallback) に navigate
+    // し、username が body に出ず 20s timeout していた。
     await uiSigninAsRoot(page, baseURL, root);
     const resp = await page.goto(
-      `${baseURL}/admin/user?userId=${target.id}`,
+      `${baseURL}/admin/user/${target.id}`,
       { waitUntil: 'domcontentloaded' },
     );
     expect(resp!.status()).toBe(200);

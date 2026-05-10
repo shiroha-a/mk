@@ -30,14 +30,40 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
       waitUntil: 'domcontentloaded',
     });
 
-    // page hydrate を待つ — Export button (= ti-download icon を持つ button)
-    // が 1 個以上 mount するまで。
+    // account-data.vue は SearchMarker > outer MkFolder (closed) > inner
+    // MkFolder defaultOpen > Export button という入れ子構造。outer MkFolder は
+    // `openedAtLeastOnce` false 初期値で content を lazy mount するため、
+    // 一度開かない限り Export button は DOM に存在しない (#979 fix)。
+    // "All notes" outer folder を expand する。
+    await page.waitForFunction(
+      () => {
+        const headers = Array.from(
+          document.querySelectorAll('[data-cy-folder-header]'),
+        ) as HTMLElement[];
+        return headers.some((h) =>
+          (h.textContent ?? '').includes('All notes'),
+        );
+      },
+      { timeout: 20_000 },
+    );
+    await page.evaluate(() => {
+      const headers = Array.from(
+        document.querySelectorAll('[data-cy-folder-header]'),
+      ) as HTMLElement[];
+      const target = headers.find((h) =>
+        (h.textContent ?? '').includes('All notes'),
+      );
+      target?.click();
+    });
+
+    // expand 後、Export button (= ti-download icon を持つ button) が mount
+    // するまで待つ
     await page.waitForFunction(
       () => {
         const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
         return btns.some((b) => b.querySelector('i.ti-download') !== null);
       },
-      { timeout: 20_000 },
+      { timeout: 15_000 },
     );
 
     // 最初の "Export" button (= "Notes" section の export) を click

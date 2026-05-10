@@ -31,10 +31,12 @@ test.describe('UI: /admin/user moderationNote save flow', () => {
     const target = await signupUser(request, username);
     expect(target.id).toBeTruthy();
 
-    // 2. /admin/user?userId=:id を root として開く
+    // 2. /admin/user/:userId を root として開く。upstream route は
+    // path-based (router.definition.ts:381 = `/admin/user/:userId`)。
+    // query string では not-found fallback に流れて hydrate しない。
     await uiSigninAsRoot(page, baseURL, root);
     const resp = await page.goto(
-      `${baseURL}/admin/user?userId=${target.id}`,
+      `${baseURL}/admin/user/${target.id}`,
       { waitUntil: 'domcontentloaded' },
     );
     expect(resp!.status()).toBe(200);

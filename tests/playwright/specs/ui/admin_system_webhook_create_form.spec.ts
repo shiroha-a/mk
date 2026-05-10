@@ -78,7 +78,10 @@ test.describe('UI: /admin/system-webhook create flow', () => {
       { t: title, u: url },
     );
 
-    // Save button (= primary, "Save" text を持つ button)
+    // Submit button = MkSystemWebhookEditor.vue:84 の `<MkButton primary
+    // rounded :disabled="disableSubmitButton" @click="onSubmitClicked">`
+    // で text は **`i18n.ts.ok`** = `"OK"` (en-US.yml)。"Save" ではない。
+    // ti-check icon + "OK" text + non-disabled で識別する。
     const createResp = page.waitForResponse(
       (r) =>
         r.url().includes('/api/admin/system-webhook/create') && r.status() < 300,
@@ -87,7 +90,10 @@ test.describe('UI: /admin/system-webhook create flow', () => {
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
       const save = btns.find(
-        (b) => !b.disabled && (b.textContent ?? '').trim().match(/Save/i),
+        (b) =>
+          !b.disabled &&
+          b.querySelector('i.ti-check') !== null &&
+          (b.textContent ?? '').includes('OK'),
       );
       save?.click();
     });
