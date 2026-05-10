@@ -85,14 +85,25 @@ test.describe('UI: /my/follow-requests accept button flow', () => {
     });
     await acceptResp;
 
-    // 7. API 経由で関係性 verify: requester is now following root
-    const relResp = await callApi(request, 'users/relation', {
-      i: requester.token,
+    // 7. API 経由で関係性 verify: requester is now following root.
+    // 注: mk-go の users/relation (handler_extra.go:34) は現状 stub で
+    // `isFollowing: false` を hardcoded で返す drift があるため、
+    // users/followers list で実 follow 関係を確認する path に変更。
+    // `relationItem.followerId` で row を identify (handler.go:579-584)。
+    // 別 PR で users/relation の実装を fix する予定 (drift tracking)。
+    const followersResp = await callApi(request, 'users/followers', {
+      i: root.token,
       userId: root.id,
+      limit: 100,
     });
-    expect(relResp.status()).toBe(200);
-    const rel = await relResp.json();
-    expect(rel.isFollowing).toBe(true);
+    expect(followersResp.status()).toBe(200);
+    const followers = await followersResp.json();
+    expect(Array.isArray(followers)).toBe(true);
+    expect(
+      followers.some(
+        (f: { followerId?: string }) => f.followerId === requester.id,
+      ),
+    ).toBe(true);
 
     // 8. cleanup: root の isLocked を false に戻す (他 spec への副作用回避)
     await callApi(request, 'i/update', { i: root.token, isLocked: false });

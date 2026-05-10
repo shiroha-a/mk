@@ -97,21 +97,15 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
       { timeout: 10_000 },
     );
 
-    // 7. invitee.username を type → search 結果が出る
-    await page.evaluate((u) => {
-      const inputs = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[]).filter(
-        (i) => i.type === 'text',
-      );
-      const target = inputs[inputs.length - 1];
-      if (!target) return;
-      target.focus();
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        'value',
-      )?.set;
-      setter?.call(target, u);
-      target.dispatchEvent(new Event('input', { bubbles: true }));
-    }, invitee.username);
+    // 7. invitee.username を type → search 結果が出る。
+    // 旧実装は native `dispatchEvent(new Event('input'))` で v-model bind を
+    // trigger していたが、何らかの timing で MkInput の `@update:modelValue`
+    // → search() chain が走らないケースがあり、search 結果が DOM に出ず
+    // 後段の wait が timeout していた。Playwright の `locator.fill()` は
+    // 内部で keystroke emulation + input event を自動 dispatch するので、
+    // Vue v-model が確実に反応する。`.last()` で dialog 内の最新 mount
+    // input を取る。
+    await page.locator('input[type="text"]').last().fill(invitee.username);
 
     // 8. 検索結果リストに invitee が出るまで待つ
     await page.waitForFunction(

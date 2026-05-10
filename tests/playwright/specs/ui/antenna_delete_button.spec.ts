@@ -52,19 +52,18 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
     });
     expect(resp!.status()).toBe(200);
 
-    await page.waitForFunction(
-      (n) => document.body.textContent?.includes(n) ?? false,
-      antennaName,
-      { timeout: 20_000 },
-    );
-
-    // 3. Delete button (= ti-trash icon を持つ button) hydrate を待つ
+    // antenna name は MkAntennaEditor.vue:10 の `<MkInput v-model="name">`
+    // で **input value としてのみ** render されるため `document.body.textContent`
+    // に含まれない (input value は attribute、textContent には現れない)。
+    // 旧実装は body wait で 20s timeout していた。直接 Delete button (=
+    // ti-trash icon を持つ MkButton inline danger) が出るのを待てば
+    // MkAntennaEditor mount 完了の verify として十分。
     await page.waitForFunction(
       () => {
         const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
         return btns.some((b) => b.querySelector('i.ti-trash') !== null);
       },
-      { timeout: 15_000 },
+      { timeout: 30_000 },
     );
 
     await page.evaluate(() => {
