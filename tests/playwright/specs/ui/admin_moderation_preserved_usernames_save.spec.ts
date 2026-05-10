@@ -46,7 +46,7 @@ test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
             document.querySelectorAll('[data-cy-folder-header]'),
           ) as HTMLElement[];
           return headers.some((h) =>
-            (h.textContent ?? '').includes('Preserved usernames'),
+            (h.textContent ?? '').includes('Reserved usernames'),
           );
         },
         { timeout: 30_000 },
@@ -58,7 +58,7 @@ test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
           document.querySelectorAll('[data-cy-folder-header]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
-          (h.textContent ?? '').includes('Preserved usernames'),
+          (h.textContent ?? '').includes('Reserved usernames'),
         );
         target?.click();
       });

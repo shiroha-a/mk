@@ -60,13 +60,22 @@ test.describe('UI: /settings/avatar-decoration attach via dialog flow', () => {
     );
 
     // 5. 該当 decoration の card を click (= openDecoration → XDialog)
-    // XDecoration は内部で `<img>` を持つ。decoration name を含む親要素を
-    // 探して click する。
+    // avatar-decoration.decoration.vue の root は `<div :class="$style.root"
+    // @click="emit('click')">` で CSS module の root class を持つ。元の
+    // `div, button` 全部対象 + textContent.includes selector は body 等の
+    // page-level 親要素を pickup して click を listener 持たない要素に投げ、
+    // XDialog が出ないまま 90s timeout する flake になっていた。
+    // `[class*="decorations"]` (= 親 grid container) 内の `[class*="root"]`
+    // (= XDecoration root) で精度高く絞る。CSS module hash の差分は
+    // `[class*="..."]` で吸収。
     await page.evaluate((n) => {
-      const els = Array.from(document.querySelectorAll('[class*="decoration"], div, button')) as HTMLElement[];
-      const target = els.find(
-        (el) => (el.textContent ?? '').trim().includes(n) && el.querySelector('img') !== null,
-      );
+      const roots: Element[] = [];
+      document.querySelectorAll('[class*="decorations"]').forEach((c) => {
+        c.querySelectorAll('[class*="root"]').forEach((r) => roots.push(r));
+      });
+      const target = roots.find(
+        (el) => (el.textContent ?? '').includes(n),
+      ) as HTMLElement | undefined;
       target?.click();
     }, decorationName);
 

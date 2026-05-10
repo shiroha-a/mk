@@ -45,7 +45,7 @@ test.describe('UI: /admin/moderation blockedHosts save flow', () => {
             document.querySelectorAll('[data-cy-folder-header]'),
           ) as HTMLElement[];
           return headers.some((h) =>
-            (h.textContent ?? '').includes('Blocked hosts'),
+            (h.textContent ?? '').includes('Blocked Instances'),
           );
         },
         { timeout: 30_000 },
@@ -57,7 +57,7 @@ test.describe('UI: /admin/moderation blockedHosts save flow', () => {
           document.querySelectorAll('[data-cy-folder-header]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
-          (h.textContent ?? '').includes('Blocked hosts'),
+          (h.textContent ?? '').includes('Blocked Instances'),
         );
         target?.click();
       });
