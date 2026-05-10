@@ -53,6 +53,8 @@ test.describe('UI: /settings/email emailNotification_mention toggle flow', () =>
     // は mk-go の `entity.PackMeDetailed` が emailNotificationTypes field を
     // 含まない drift で false。drift fix は別 PR、本 spec は round-trip 自体
     // の verify に絞る。
+    // TODO: MeDetailed packer に emailNotificationTypes が追加されたら
+    // `expect(Array.isArray(body.emailNotificationTypes)).toBe(true)` を復活する。
     expect(body.id).toBeTruthy();
   });
 });

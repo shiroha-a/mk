@@ -91,6 +91,12 @@ test.describe('UI: /my/follow-requests accept button flow', () => {
     // users/followers list で実 follow 関係を確認する path に変更。
     // `relationItem.followerId` で row を identify (handler.go:579-584)。
     // 別 PR で users/relation の実装を fix する予定 (drift tracking)。
+    //
+    // limit=100 は test isolation 前提 (= root の follower は本 spec 内で
+    // signup する 1 user だけ)。他 spec が global state を残して root の
+    // follower が 100 件を超えると flake する余地があるが、現状の test
+    // 構成 (= signup 系 spec は self-create user で root を follow しない)
+    // では問題ない。
     const followersResp = await callApi(request, 'users/followers', {
       i: root.token,
       userId: root.id,

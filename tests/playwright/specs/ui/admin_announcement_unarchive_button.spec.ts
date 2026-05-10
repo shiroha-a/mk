@@ -63,16 +63,14 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
       waitUntil: 'domcontentloaded',
     });
 
-    // 3. MkSelect container hydrate 待ち。MkSelect.vue は current value text
-    // (= "Active") を含む `[class*="input"]` 構造で render する。
+    // 3. MkSelect container hydrate 待ち。MkSelect.vue:11 は tabindex="0" を
+    // 持つ div で current value text (= "Active") を含む構造で render する。
+    // attribute selector で MkSelect 候補に絞り込んでから text 一致を見る
+    // (page 上の別 div で textContent === 'Active' な要素との誤 hit を回避)。
     await page.waitForFunction(
       () => {
-        const els = Array.from(document.querySelectorAll('div'));
-        return els.some(
-          (el) =>
-            (el.textContent ?? '').trim() === 'Active' &&
-            el.tabIndex >= 0,
-        );
+        const els = Array.from(document.querySelectorAll('div[tabindex="0"]'));
+        return els.some((el) => (el.textContent ?? '').trim() === 'Active');
       },
       { timeout: 20_000 },
     );
@@ -81,12 +79,10 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
     // のため click event では popup が出ない。mousedown を dispatch する。
     // (= MkNote footer button と同 pattern)
     await page.evaluate(() => {
-      const els = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
-      const target = els.find(
-        (el) =>
-          (el.textContent ?? '').trim() === 'Active' &&
-          el.tabIndex >= 0,
-      );
+      const els = Array.from(
+        document.querySelectorAll('div[tabindex="0"]'),
+      ) as HTMLDivElement[];
+      const target = els.find((el) => (el.textContent ?? '').trim() === 'Active');
       target?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
     });
 
