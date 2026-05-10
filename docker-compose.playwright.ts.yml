@@ -28,6 +28,15 @@ services:
     environment:
       NODE_TLS_REJECT_UNAUTHORIZED: "0"
       TZ: Asia/Tokyo
+      # upstream RateLimiterService は `NODE_ENV !== 'production'` で
+      # `disabled = true` になる (packages/backend/src/server/api/RateLimiterService.ts)。
+      # mk-go 側は instance.yml の `disableEndpointRateLimits: true` で off に
+      # したが TS 側は同 flag を解釈しないので、NODE_ENV を上書きして全 off
+      # にする。production image は build 済 dist/ を起動するので NODE_ENV を
+      # 'test' に変えても起動経路は同じで、frontend bundle も built 済を
+      # 使う (= 実 production と同 build)。spec が verify する API shape /
+      # UI 動作には影響しない。
+      NODE_ENV: test
     volumes:
       # mk-go base と config を共有 (instance.yml は両 backend 互換)。
       # mk-go base の mount path は /app/.config/default.yml だが、TS image は
