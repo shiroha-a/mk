@@ -5,6 +5,8 @@
 // external-services.vue では各サービス別に MkFolder + Save button を
 // 持つ。folder は SearchMarker 経由で defaultOpen でないので、folder
 // header を expand する必要あり。1 番目 = Google Analytics。
+//
+// 注: state mutation が発生しないので cleanup は不要 (admin_branding_save と同じ)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';

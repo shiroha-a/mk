@@ -37,13 +37,28 @@ test.describe('smoke: SPA public route navigation', () => {
       // SPA は index.html を返すので 200 (= mk-go の frontend.go fallback も同じ挙動)
       expect(resp!.status(), `${path} should return 200 (SPA fallback)`).toBe(200);
 
-      // title が空でない (= <title> tag が backend template から render されている)
+      // Vue mount 完了まで待つ。domcontentloaded の時点では loader spinner
+      // しか出ていないので、それを pass 条件にすると動画上は真っ白の
+      // loading 画面のまま完了してしまう (= 実 SPA は動作確認できていない)。
+      // mount root の child / 主要 interactive element の出現を待って
+      // 実 content がある状態を verify する。
+      await page.waitForFunction(
+        () => {
+          const app = document.querySelector('#app, #misskey_app');
+          if (app && app.children.length > 0) return true;
+          return (
+            document.querySelector('main, nav, button[type], a[href]:not([href=""])') !== null
+          );
+        },
+        { timeout: 20_000 },
+      );
+
       const title = await page.title();
       expect(title.length, `${path} should have non-empty <title>`).toBeGreaterThan(0);
 
-      // body 内 HTML が non-trivial (= loader + boot script が injection されている)
+      // body 内 DOM が hydrate 済 content を含むことを再確認。
       const bodyHTML = await page.evaluate(() => document.body.innerHTML);
-      expect(bodyHTML.length, `${path} body should be > 50 chars (loader rendered)`).toBeGreaterThan(50);
+      expect(bodyHTML.length, `${path} body should be > 50 chars (hydrated)`).toBeGreaterThan(50);
     });
   }
 });

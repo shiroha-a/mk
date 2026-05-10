@@ -32,6 +32,16 @@ import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
+// 本 spec は CDP Virtual Authenticator の receptacle として page fixture を
+// 使うが、navigate 先が /api/ping (= JSON endpoint) で実 UI は表示されない
+// (= 動画は真っ白)。video が debug 価値ゼロなので本 spec のみ off にする。
+// trace / screenshot の retain-on-failure は維持。
+//
+// 注: `test.use({ video: ... })` は describe 内に置くと
+// "Cannot use({ video }) in a describe group, because it forces a new worker"
+// で reject されるので必ず file top-level に置く。
+test.use({ video: 'off' });
+
 test.describe('auth: 2FA (WebAuthn passkey)', () => {
   test.beforeAll(() => {
     resetRateLimit();

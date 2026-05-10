@@ -5,6 +5,8 @@
 // 何も変更せずに Save するだけで update-meta が走る (= 現在値を再 commit)。
 // frontend は disableEmail / SMTP host 等の既存値を re-send するので
 // regression は起きない。
+//
+// 注: state mutation が発生しないので cleanup は不要 (admin_branding_save と同じ)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';

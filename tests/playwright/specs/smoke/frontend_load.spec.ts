@@ -21,14 +21,27 @@ test.describe('smoke: frontend SPA loads', () => {
     expect(resp).not.toBeNull();
     expect(resp!.status()).toBe(200);
 
-    // SPA の mount root (Misskey は #app + body の data 属性で初期化する)。
-    // build によって root id は変わりうるので、最低限 head の title と body
-    // が空でないことだけ確認する。
+    // SPA の mount root (Misskey は #app / #misskey_app に Vue を mount)。
+    // domcontentloaded だけだと loader spinner だけが render された状態で
+    // pass してしまい (動画上は真っ白の loading 画面)、実 SPA boot を
+    // verify できない。Vue mount 完了の兆候 (mount root に child element /
+    // interactive element の出現) を待って "実 content がある" 状態を確認。
+    await page.waitForFunction(
+      () => {
+        const app = document.querySelector('#app, #misskey_app');
+        if (app && app.children.length > 0) return true;
+        // SPA boot 中に main / nav / button が hydrate していれば OK
+        return (
+          document.querySelector('main, nav, button[type], a[href]:not([href=""])') !== null
+        );
+      },
+      { timeout: 20_000 },
+    );
+
     const title = await page.title();
     expect(title.length).toBeGreaterThan(0);
 
-    // body 内の text + DOM が空ではない (= Misskey loader か mount root の
-    // 何らかの要素が描画されている)
+    // body 内 DOM が hydrate 済みの content を含むことを再確認。
     const bodyHTML = await page.evaluate(() => document.body.innerHTML);
     expect(bodyHTML.length).toBeGreaterThan(50);
   });

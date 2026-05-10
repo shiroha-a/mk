@@ -8,6 +8,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /admin/moderation prohibitedWords save flow', () => {
@@ -20,61 +21,78 @@ test.describe('UI: /admin/moderation prohibitedWords save flow', () => {
   test('expand Prohibited words folder → edit textarea → Save → /api/admin/update-meta', async ({
     page,
     baseURL,
+    request,
   }) => {
-    await uiSigninAsRoot(page, baseURL, root);
-    await page.goto(`${baseURL}/admin/moderation`, {
-      waitUntil: 'domcontentloaded',
+    // setup: 既知 state (空 list) に reset。
+    await callApi(request, 'admin/update-meta', {
+      i: root.token,
+      prohibitedWords: [],
     });
 
-    await page.waitForFunction(
-      () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
-      { timeout: 20_000 },
-    );
-
-    // "Prohibited words" folder を expand。"Prohibited words" は
-    // "Prohibited words for username" と prefix が被るので、textContent が
-    // "Prohibited words" で始まり "username" を含まないものを選ぶ。
-    await page.evaluate(() => {
-      const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
-      ) as HTMLElement[];
-      const target = headers.find((h) => {
-        const t = (h.textContent ?? '').trim();
-        return t.startsWith('Prohibited words') && !t.toLowerCase().includes('username');
+    try {
+      await uiSigninAsRoot(page, baseURL, root);
+      await page.goto(`${baseURL}/admin/moderation`, {
+        waitUntil: 'domcontentloaded',
       });
-      target?.click();
-    });
 
-    await page.waitForFunction(
-      () => document.querySelectorAll('textarea').length >= 1,
-      { timeout: 10_000 },
-    );
-
-    const newValue = `bad-word-${Date.now()}\noffensive\nspam`;
-    await page.evaluate((v) => {
-      const tas = Array.from(document.querySelectorAll('textarea')) as HTMLTextAreaElement[];
-      const target = tas[0];
-      if (!target) return;
-      target.focus();
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        'value',
-      )?.set;
-      setter?.call(target, v);
-      target.dispatchEvent(new Event('input', { bubbles: true }));
-    }, newValue);
-
-    const updateResp = page.waitForResponse(
-      (r) => r.url().includes('/api/admin/update-meta') && r.status() < 300,
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const save = btns.find(
-        (b) => !b.disabled && (b.textContent ?? '').includes('Save'),
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
+        { timeout: 20_000 },
       );
-      save?.click();
-    });
-    await updateResp;
+
+      // "Prohibited words" folder を expand。"Prohibited words" は
+      // "Prohibited words for username" と prefix が被るので、textContent が
+      // "Prohibited words" で始まり "username" を含まないものを選ぶ。
+      await page.evaluate(() => {
+        const headers = Array.from(
+          document.querySelectorAll('[data-cy-folder-header]'),
+        ) as HTMLElement[];
+        const target = headers.find((h) => {
+          const t = (h.textContent ?? '').trim();
+          return t.startsWith('Prohibited words') && !t.toLowerCase().includes('username');
+        });
+        target?.click();
+      });
+
+      await page.waitForFunction(
+        () => document.querySelectorAll('textarea').length >= 1,
+        { timeout: 10_000 },
+      );
+
+      const newValue = `bad-word-${Date.now()}\noffensive\nspam`;
+      await page.evaluate((v) => {
+        const tas = Array.from(document.querySelectorAll('textarea')) as HTMLTextAreaElement[];
+        const target = tas[0];
+        if (!target) return;
+        target.focus();
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(target, v);
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      }, newValue);
+
+      const updateResp = page.waitForResponse(
+        (r) => r.url().includes('/api/admin/update-meta') && r.status() < 300,
+        { timeout: 15_000 },
+      );
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+        const save = btns.find(
+          (b) => !b.disabled && (b.textContent ?? '').includes('Save'),
+        );
+        save?.click();
+      });
+      await updateResp;
+    } finally {
+      // cleanup: prohibitedWords が残ると以降の note 投稿 spec が "Note
+      // contains prohibited words" で fail する isolation 破壊を引き起こす
+      // ため、必ず空に戻す。pass / fail どちらでも cleanup を実行。
+      await callApi(request, 'admin/update-meta', {
+        i: root.token,
+        prohibitedWords: [],
+      });
+    }
   });
 });

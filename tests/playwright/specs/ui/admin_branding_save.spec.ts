@@ -3,6 +3,10 @@
 //
 // admin/branding.vue はインスタンスのアイコン / 名前 / 説明等の form。
 // Save click で現在値を commit (branding.vue:148 / 197)。
+//
+// 注: 本 spec は form の field を変更せず**現状値をそのまま再 commit する**
+// だけなので state mutation が発生せず、cleanup は不要。将来的に field を
+// 書き換える test を追加するなら try/finally で原値復元が必要 (#974 review)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';

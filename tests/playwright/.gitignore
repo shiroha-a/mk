@@ -3,5 +3,8 @@ node_modules/
 test-results/
 playwright-report/
 package-lock.json
+# json reporter の出力 (= playwright.config.ts の `reporter: ... ['json', { outputFile: 'results.json' }]`)。
+# spec 実行のたびに上書きされる ephemeral file。
+results.json
 # globalSetup が root credentials を書き出す fixture ディレクトリ (#744 PR-2)。
 .auth/

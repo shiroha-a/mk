@@ -13,6 +13,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /admin/security IP logging form save flow', () => {
@@ -25,7 +26,14 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
   test('expand Log IP address folder → toggle switch → Save → /api/admin/update-meta', async ({
     page,
     baseURL,
+    request,
   }) => {
+    // setup: 既知 state (false) に reset。
+    await callApi(request, 'admin/update-meta', {
+      i: root.token,
+      enableIpLogging: false,
+    });
+
     await uiSigninAsRoot(page, baseURL, root);
     await page.goto(`${baseURL}/admin/security`, {
       waitUntil: 'domcontentloaded',
@@ -84,5 +92,12 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
       btn?.click();
     });
     await updateResp;
+
+    // cleanup: 念のため false に戻す。残るとログ容量を肥大させるが、本 spec
+    // で on にした影響を最小化する目的。
+    await callApi(request, 'admin/update-meta', {
+      i: root.token,
+      enableIpLogging: false,
+    });
   });
 });

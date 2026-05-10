@@ -36,6 +36,14 @@ id: aidx
 # overlay) では BullMQ 固定で、本キーは TS 側に渡されても無視されるので副作用なし。
 jobQueueDriver: mkq
 
+# Playwright env で全 endpoint の rate limit を無効化する。signin (1s 間隔) /
+# notes/create (per-min 上限) / signup (per-IP) などで spec が cascade fail
+# するのを防ぐため。`disableEndpointRateLimits` は mk-go 独自拡張で TS image
+# 側は黙って無視 (= 効果は mk-go side のみ)。`enableIpRateLimit: false` も
+# 念のため明示。**production には絶対に入れない (CLAUDE.md にも warn)**。
+disableEndpointRateLimits: true
+enableIpRateLimit: false
+
 # 注: 本 config は mk-go binary (docker-compose.playwright.yml) と TS image
 # (docker-compose.playwright.ts.yml overlay) の **両方で共有** する。差分が
 # 発生したら別 file に分けるが、現状 db/redis hostname も同じなので 1 file
