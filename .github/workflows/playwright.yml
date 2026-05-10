@@ -75,7 +75,9 @@ jobs:
       - name: Run Playwright
         run: make ${{ matrix.test_target }}
 
-      # 失敗時のみ playwright test-results (trace / screenshot 含む) を保存。
+      # 失敗時のみ playwright test-results (trace / screenshot / video 含む)
+      # を保存。video は popup menu / contextmenu / multi-step interaction
+      # failure の debug 価値が高い。
       - name: Upload test-results on failure
         if: failure()
         uses: actions/upload-artifact@v4

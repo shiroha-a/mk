@@ -24,6 +24,13 @@ export default defineConfig({
     // API テスト中心なので screenshot / trace は失敗時のみで十分。
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
+    // 失敗時のみ動画を保存する。batch 5 以降は popup menu / contextmenu /
+    // MkUserSelectDialog 等 multi-step interaction が増え、失敗時のスクショ
+    // 1 枚では原因特定が辛くなった。retain-on-failure は CI artifact 容量
+    // を抑えつつ、debug 価値の高い fail run のみ動画を残す。
+    // pass 時は browser context close 時に video を破棄するので、storage
+    // の累積 footprint は最小。size は 800x600 デフォルトで OK。
+    video: 'retain-on-failure',
     // nginx tls proxy が self-signed cert を提供する (#817 part2)。
     // Playwright はそれを accept できる必要がある。`request` fixture と
     // `page` fixture の両方に効く。
