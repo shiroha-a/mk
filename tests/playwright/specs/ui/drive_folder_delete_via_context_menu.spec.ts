@@ -52,33 +52,25 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
     );
 
     // 3. 該当 folder element を探して contextmenu event を dispatch。
-    // MkDrive.folder.vue:11 で folder root に @contextmenu.stop bind。
-    // folder name を含む element の中で contextmenu listener を持つ
-    // root を探す方法は複雑なので、name text を含む最も内側の div を
-    // 取り、上方に折りたたんで contextmenu を発火する。
+    // MkDrive.folder.vue の root div は draggable="true" attribute を持つ
+    // 唯一の (folder name text を含む) 要素。これで child count に依存
+    // しない安定 selector になる。bubbling で listener (= 同 root に bind)
+    // に到達する。
     await page.evaluate((n) => {
-      const els = Array.from(document.querySelectorAll('div, button, a')) as HTMLElement[];
-      const target = els.find(
-        (el) =>
-          (el.textContent ?? '').trim() === n ||
-          // textContent が完全一致しなければ name + 周辺 (例: アイコン子要素)
-          ((el.textContent ?? '').includes(n) && el.children.length <= 3),
-      );
+      const draggables = Array.from(
+        document.querySelectorAll('[draggable="true"]'),
+      ) as HTMLElement[];
+      const target = draggables.find((el) => (el.textContent ?? '').includes(n));
       if (!target) return;
-      // contextmenu event を target 自体と親 5 階層に dispatch
-      // (Vue の listener は親が capture する設計のため)。
-      let node: HTMLElement | null = target;
-      for (let i = 0; i < 6 && node; i++) {
-        const ev = new MouseEvent('contextmenu', {
+      target.dispatchEvent(
+        new MouseEvent('contextmenu', {
           bubbles: true,
           cancelable: true,
           button: 2,
           buttons: 2,
           view: window,
-        });
-        node.dispatchEvent(ev);
-        node = node.parentElement;
-      }
+        }),
+      );
     }, folderName);
 
     // 4. popup menu の "Delete" item (ti-fw ti-trash) を待って click

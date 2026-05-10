@@ -45,27 +45,24 @@ test.describe('UI: /my/drive folder rename via context menu flow', () => {
       { timeout: 20_000 },
     );
 
-    // 2. 該当 folder element に contextmenu event を dispatch
+    // 2. 該当 folder element に contextmenu event を dispatch。
+    // MkDrive.folder.vue の root div は draggable="true" attribute を持つ
+    // 唯一の (folder name text を含む) 要素。delete spec と同 pattern。
     await page.evaluate((n) => {
-      const els = Array.from(document.querySelectorAll('div, button, a')) as HTMLElement[];
-      const target = els.find(
-        (el) =>
-          (el.textContent ?? '').trim() === n ||
-          ((el.textContent ?? '').includes(n) && el.children.length <= 3),
-      );
+      const draggables = Array.from(
+        document.querySelectorAll('[draggable="true"]'),
+      ) as HTMLElement[];
+      const target = draggables.find((el) => (el.textContent ?? '').includes(n));
       if (!target) return;
-      let node: HTMLElement | null = target;
-      for (let i = 0; i < 6 && node; i++) {
-        const ev = new MouseEvent('contextmenu', {
+      target.dispatchEvent(
+        new MouseEvent('contextmenu', {
           bubbles: true,
           cancelable: true,
           button: 2,
           buttons: 2,
           view: window,
-        });
-        node.dispatchEvent(ev);
-        node = node.parentElement;
-      }
+        }),
+      );
     }, initialName);
 
     // 3. popup menu の "Rename" item (ti-fw ti-forms) を click

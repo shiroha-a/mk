@@ -28,6 +28,12 @@ export default defineConfig({
     // Playwright はそれを accept できる必要がある。`request` fixture と
     // `page` fixture の両方に効く。
     ignoreHTTPSErrors: true,
+    // i18n 依存 selector (button textContent === 'Save' 等) を持つ spec が
+    // batch 5 で多数生まれた (PR #974)。CI runner / 開発者ローカル の OS
+    // locale で日本語 UI に切り替わると一斉に fail するので、browser locale
+    // を en-US に固定する。Misskey TS frontend は browser locale を
+    // i18n key 解決に使うので、これで全 spec の text 前提が安定する。
+    locale: 'en-US',
   },
   // CI 並列度の調整は CI 統合 PR で。本 PR はローカル直列実行。
   workers: 1,
