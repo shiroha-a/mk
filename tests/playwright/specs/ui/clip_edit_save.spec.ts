@@ -99,6 +99,8 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
     // MkModalWindow の `<MkButton primary gradate small rounded>{{
     // i18n.ts.done }} <i class="ti ti-check">` (MkModalWindow.vue:15) を
     // OK にしており data-cy 無し。"Done" text + ti-check icon で識別する。
+    // 注: `"Done"` は `i18n.ts.done` = en-US value (en-US.yml: `done: "Done"`)。
+    // playwright.config.ts の `locale: 'en-US'` 強制設定に依存。
     const updateResp = page.waitForResponse(
       (r) => r.url().includes('/api/clips/update') && r.status() < 300,
       { timeout: 15_000 },
