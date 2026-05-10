@@ -1,0 +1,59 @@
+// /settings/account-data の "Export notes" button click → /api/i/export-notes
+// が round-trip する write-flow spec。
+//
+// account-data.vue:21 の MkButton primary は ti-download icon + "Export"
+// text。click すると misskeyApi('i/export-notes', {}) を直接叩く (line 200)。
+// page 内には export* / import* button が複数あるが、各 section は MkFolder
+// で囲まれ、最初の section が "Notes" なので 1 番目の Export button が
+// exportNotes に対応する。
+//
+// download / dialog 演出は無く、success alert が即出る。本 spec は API
+// round-trip を verify する形。
+
+import { readFileSync } from 'node:fs';
+import { expect, test } from '@playwright/test';
+import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+
+test.describe('UI: /settings/account-data export notes button flow', () => {
+  let root: RootFixture;
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+  test.setTimeout(60_000);
+
+  test('first Export button → /api/i/export-notes', async ({
+    page,
+    baseURL,
+  }) => {
+    await uiSigninAsRoot(page, baseURL, root);
+    await page.goto(`${baseURL}/settings/account-data`, {
+      waitUntil: 'domcontentloaded',
+    });
+
+    // page hydrate を待つ — Export button (= ti-download icon を持つ button)
+    // が 1 個以上 mount するまで。
+    await page.waitForFunction(
+      () => {
+        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+        return btns.some((b) => b.querySelector('i.ti-download') !== null);
+      },
+      { timeout: 20_000 },
+    );
+
+    // 最初の "Export" button (= "Notes" section の export) を click
+    const exportResp = page.waitForResponse(
+      (r) => r.url().includes('/api/i/export-notes') && r.status() < 300,
+      { timeout: 15_000 },
+    );
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const target = btns.find(
+        (b) =>
+          b.querySelector('i.ti-download') !== null &&
+          (b.textContent ?? '').includes('Export'),
+      );
+      target?.click();
+    });
+    await exportResp;
+  });
+});
