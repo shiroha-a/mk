@@ -80,16 +80,23 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
     // addEventListener-based なので element.onclick property には現れない
     // (= 旧 spec の `node.onclick` 判定は常に false で fallback img.click()
     // に到達 → bubbling は通るが listener が走らない race の場面があり
-    // 90s timeout していた)。`[class*="decorations"]` 親 grid 内の
-    // `[class*="root"]` で XDecoration root を直接特定し、url を含む img を
-    // 持つ root だけを target に絞る。CSS module hash 差分は `[class*="..."]`
-    // で吸収。avatar-decoration.vue 上部 (attached) → 下部 (available) の
-    // DOM 順なので find() で最初に hit するのは attached side (= 装着済)。
+    // 90s timeout していた)。
+    //
+    // avatar-decoration.vue は **上部 = 装着済 (attached) / 下部 = 利用可能
+    // (available)** の 2 つの `[class*="decorations"]` grid を持ち、本 spec
+    // の setup では同じ decoration が両方に表示される。`querySelectorAll` は
+    // DOM 順を保証するので 0 番目 (= attached) container を strict に取り、
+    // 下部 available 側を誤って click してしまう risk を排除する。
+    // CSS module hash 差分は `[class*="..."]` で吸収。
     await page.evaluate((u) => {
-      const roots: Element[] = [];
-      document.querySelectorAll('[class*="decorations"]').forEach((c) => {
-        c.querySelectorAll('[class*="root"]').forEach((r) => roots.push(r));
-      });
+      const containers = Array.from(
+        document.querySelectorAll('[class*="decorations"]'),
+      );
+      const attachedContainer = containers[0];
+      if (!attachedContainer) return;
+      const roots = Array.from(
+        attachedContainer.querySelectorAll('[class*="root"]'),
+      );
       const target = roots.find((el) => {
         const img = el.querySelector('img') as HTMLImageElement | null;
         return img !== null && img.src.includes(u);
