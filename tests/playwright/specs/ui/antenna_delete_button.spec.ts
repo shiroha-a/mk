@@ -91,11 +91,15 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
     });
     await deleteResp;
 
-    // 5. API 経由で削除確認 — antennas/show は 404 を返す
+    // 5. API 経由で削除確認 — antennas/show は 404 + NO_SUCH_ANTENNA を返す
+    // (antennas/handler.go:315、UUID 3a1fb010-b54c-4f28-9a06-a5c7c7c1c33a)。
     const showResp = await callApi(request, 'antennas/show', {
       i: root.token,
       antennaId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_ANTENNA');
+    expect(showBody.error?.id).toBe('3a1fb010-b54c-4f28-9a06-a5c7c7c1c33a');
   });
 });

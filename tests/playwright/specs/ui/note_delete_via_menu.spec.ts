@@ -107,11 +107,15 @@ test.describe('UI: note 3-dot menu delete flow', () => {
     });
     await deleteResp;
 
-    // 7. API 経由で削除確認 — notes/show は 404 を返す
+    // 7. API 経由で削除確認 — notes/show は 404 + NO_SUCH_NOTE を返す
+    // (apierr.NoSuchNote() = handler.go:357、UUID 24fcbfc6-2e37-42b6-8388-c29b3861a08d)
     const showResp = await callApi(request, 'notes/show', {
       i: root.token,
       noteId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_NOTE');
+    expect(showBody.error?.id).toBe('24fcbfc6-2e37-42b6-8388-c29b3861a08d');
   });
 });

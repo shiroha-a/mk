@@ -93,11 +93,15 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
     });
     await deleteResp;
 
-    // 5. API 経由で削除確認
+    // 5. API 経由で削除確認 — drive/folders/show は 404 + NO_SUCH_FOLDER を返す
+    // (drive/handler.go:220、UUID d77545ec-1283-4b73-bbe1-e90e1da6a4e7)。
     const showResp = await callApi(request, 'drive/folders/show', {
       i: root.token,
       folderId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_FOLDER');
+    expect(showBody.error?.id).toBe('d77545ec-1283-4b73-bbe1-e90e1da6a4e7');
   });
 });

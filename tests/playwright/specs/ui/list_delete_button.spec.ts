@@ -85,11 +85,14 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
     });
     await deleteResp;
 
-    // 5. API 経由で削除確認
+    // 5. API 経由で削除確認 — users/lists/show は 404 + NO_SUCH_LIST を返す
+    // (lists.go:53)。code + UUID で strict 検証して drift catch を強化。
     const showResp = await callApi(request, 'users/lists/show', {
       i: root.token,
       listId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_LIST');
   });
 });

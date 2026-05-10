@@ -82,11 +82,15 @@ test.describe('UI: /pages/edit/:id delete button flow', () => {
     });
     await deleteResp;
 
-    // API 経由で削除確認
+    // API 経由で削除確認 — pages/show は 404 + NO_SUCH_PAGE を返す
+    // (pages/handler.go:418、UUID 222120c0-3ead-4528-811b-b96f233388d7)。
     const showResp = await callApi(request, 'pages/show', {
       i: root.token,
       pageId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_PAGE');
+    expect(showBody.error?.id).toBe('222120c0-3ead-4528-811b-b96f233388d7');
   });
 });

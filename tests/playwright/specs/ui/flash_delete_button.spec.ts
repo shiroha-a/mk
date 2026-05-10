@@ -76,11 +76,15 @@ test.describe('UI: /play/:id/edit delete button flow', () => {
     });
     await deleteResp;
 
-    // 削除確認
+    // 削除確認 — flash/show は 404 + NO_SUCH_FLASH を返す
+    // (flash/handler.go:371、UUID f0d34a1a-d29a-401d-90ba-1982122b5630)。
     const showResp = await callApi(request, 'flash/show', {
       i: root.token,
       flashId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_FLASH');
+    expect(showBody.error?.id).toBe('f0d34a1a-d29a-401d-90ba-1982122b5630');
   });
 });

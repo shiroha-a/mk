@@ -116,7 +116,9 @@ test.describe('UI: own note unrenote via menu flow', () => {
       i: root.token,
       noteId: renoteNoteId,
     });
-    expect(showResp.status()).toBeGreaterThanOrEqual(400);
+    expect(showResp.status()).toBe(404);
+    const showBody = await showResp.json();
+    expect(showBody.error?.code).toBe('NO_SUCH_NOTE');
 
     // cleanup: 元 note も削除
     await callApi(request, 'notes/delete', {

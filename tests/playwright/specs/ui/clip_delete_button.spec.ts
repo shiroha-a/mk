@@ -81,6 +81,7 @@ test.describe('UI: /clips/:id delete button flow', () => {
     await deleteResp;
 
     // 5. API 経由で削除確認 — clips/show は 404 + NO_SUCH_CLIP を返す
+    // (clips/handler.go:337、UUID f4a9c0c6-a6c3-4a07-8e6b-0a4f2b1a27e9)。
     const showResp = await request.post(`${baseURL}/api/clips/show`, {
       ignoreHTTPSErrors: true,
       data: { i: root.token, clipId },
@@ -88,5 +89,6 @@ test.describe('UI: /clips/:id delete button flow', () => {
     expect(showResp.status()).toBe(404);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_CLIP');
+    expect(showBody.error?.id).toBe('f4a9c0c6-a6c3-4a07-8e6b-0a4f2b1a27e9');
   });
 });
