@@ -3,6 +3,7 @@ package drive
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -501,6 +502,10 @@ func mapFolderError(c echo.Context, err error, ep folderEndpoint) error {
 			id = "f7974dac-2c0d-4a27-926e-23583b28e98e"
 		case folderEndpointDelete:
 			id = "1069098f-c281-440f-b085-f9932edbe091"
+		default:
+			// 将来 endpoint を追加して switch case を漏らすと UUID drift で
+			// frontend / spec が壊れるので fail-fast する。
+			panic(fmt.Sprintf("mapFolderError: unknown folderEndpoint %d", ep))
 		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
 	case errors.Is(err, coredrive.ErrParentFolderNotFound):

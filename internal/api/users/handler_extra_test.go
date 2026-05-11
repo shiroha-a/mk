@@ -2,6 +2,7 @@ package users_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,6 +79,58 @@ func TestRelation_NilViewer(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, false, resp["isFollowing"])
 	assert.Equal(t, false, resp["isBlocking"])
+}
+
+// failingFollowingRepo always returns a non-NotFound error so the warn path
+// (#984) can be exercised — `users/relation` should silently fall back to
+// false and emit slog.Warn instead of leaking the error to the response.
+type failingFollowingRepo struct {
+	*testutil.MockFollowingRepository
+}
+
+func (f *failingFollowingRepo) FindByPair(_, _ string) (*model.Following, error) {
+	return nil, errors.New("simulated transient DB error")
+}
+
+// TestRelation_TransientDBErrorFallsBackToFalse: non-NotFound error from
+// repo should not propagate; relation field stays false. Smoke test the
+// warnRelErr path.
+func TestRelation_TransientDBErrorFallsBackToFalse(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	repo := &failingFollowingRepo{MockFollowingRepository: testutil.NewMockFollowingRepository()}
+	h.SetFollowingRepo(repo)
+
+	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isFollowing"])
+	assert.Equal(t, false, resp["isFollowed"])
+}
+
+// TestRelation_PartialDirection covers the case where only one direction of
+// a follow exists (u1 → u2 follow, no reverse). Guards against cross-talk
+// regressions where bidirectional fields are mistakenly tied together.
+func TestRelation_PartialDirection(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	followingRepo := testutil.NewMockFollowingRepository()
+	h.SetFollowingRepo(followingRepo)
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FollowerID: "u1", FolloweeID: "u2"}))
+
+	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// u1 → u2 follow のみ。逆方向 (= u2 → u1) は存在しない。
+	assert.Equal(t, true, resp["isFollowing"])
+	assert.Equal(t, false, resp["isFollowed"])
+	// 他 relation も全 false に保たれること (cross-talk regression guard)。
+	assert.Equal(t, false, resp["hasPendingFollowRequestFromYou"])
+	assert.Equal(t, false, resp["hasPendingFollowRequestToYou"])
+	assert.Equal(t, false, resp["isBlocking"])
+	assert.Equal(t, false, resp["isBlocked"])
+	assert.Equal(t, false, resp["isMuted"])
+	assert.Equal(t, false, resp["isRenoteMuted"])
 }
 
 // TestRelation_PopulatedRelations wires the 5 repos and seeds rows so every

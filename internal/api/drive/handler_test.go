@@ -583,10 +583,10 @@ func TestFoldersUpdate_NotFound(t *testing.T) {
 	// #977: folders/update target not found UUID は f7974dac-...
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	if errObj, ok := body["error"].(map[string]any); ok {
-		assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
-		assert.Equal(t, "f7974dac-2c0d-4a27-926e-23583b28e98e", errObj["id"])
-	}
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
+	assert.Equal(t, "f7974dac-2c0d-4a27-926e-23583b28e98e", errObj["id"])
 }
 
 // #977: folders/update で parent が未存在のときに NO_SUCH_PARENT_FOLDER
