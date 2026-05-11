@@ -33,9 +33,11 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 		instanceDesc := ""
 		iconURL := "/static-assets/icons/192.png"
 		themeColor := "#86b300"
-		// mascotImageUrl は splash 中央のローディング画像に使う。meta 値が
-		// あれば優先、なければ /assets/ai.png にフォールバック (本家挙動)。
-		mascotURL := "/assets/ai.png"
+		// splash 中央のアイコンは upstream `_splash.tsx` 互換で server
+		// iconUrl を使う (= 管理者が設定したインスタンス画像)。未設定なら
+		// `/static-assets/splash.png` (Misskey ロゴ) にフォールバック。
+		// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#)
+		splashIconURL := "/static-assets/splash.png"
 		metaJSON := "{}"
 		if m, err := metaRepo.Fetch(); err == nil {
 			if m.Name != nil && *m.Name != "" {
@@ -46,12 +48,10 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 			}
 			if m.IconURL != nil && *m.IconURL != "" {
 				iconURL = *m.IconURL
+				splashIconURL = *m.IconURL
 			}
 			if m.ThemeColor != nil && *m.ThemeColor != "" {
 				themeColor = *m.ThemeColor
-			}
-			if m.MascotImageURL != nil && *m.MascotImageURL != "" {
-				mascotURL = *m.MascotImageURL
 			}
 			metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver)
 		}
@@ -97,15 +97,16 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 </head><body>
 <noscript><p>Please turn on your JavaScript</p></noscript>
 <div id="splash">
-<div style="padding:64px;text-align:center">
-<img src="%s" alt="" style="max-width:160px;height:auto;display:block;margin:0 auto 16px"/>
-<p>Loading...</p>
+<img id="splashIcon" src="%s" />
+<div id="splashSpinner">
+<svg class="spinner bg" viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g transform="matrix(1,0,0,1,12,12)"><circle cx="64" cy="64" r="64" style="fill:none;stroke:currentColor;stroke-width:24px;"/></g></svg>
+<svg class="spinner fg" viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g transform="matrix(1,0,0,1,12,12)"><path d="M128,64C128,28.654 99.346,0 64,0C99.346,0 128,28.654 128,64Z" style="fill:none;stroke:currentColor;stroke-width:24px;"/></g></svg>
 </div>
 </div>
 </body></html>`, instanceName, instanceName, instanceDesc, iconURL, cfg.URL,
 			themeColor, cfg.URL, instanceName, iconURL, viteClientTag, cssLinkTags,
 			cfg.Version, clientEntryJS,
-			time.Now().UnixMilli(), metaJSON, mascotURL)
+			time.Now().UnixMilli(), metaJSON, splashIconURL)
 
 		return c.HTML(http.StatusOK, html)
 	}
