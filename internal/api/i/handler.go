@@ -564,27 +564,36 @@ func (h *Handler) Me(c echo.Context) error {
 	// 1 request あたり Marshal + Unmarshal が 1 回ずつ走るが、/api/i は
 	// per-session 数回の頻度なので影響は無視できる。順序保証は不要
 	// (JSON object は順序不定)。
+	//
+	// errors are infeasible: MeDetailed struct は JSON-safe な primitive と
+	// slice / map のみで構成され、`any` 型 field を含まない。万一将来 non-
+	// marshalable な field が追加されても、(*json.UnsupportedTypeError) は
+	// CI の TestMe_PreservesMeDetailedFields で即検出される (= empty resp
+	// で field 不在 assertion が落ちる)。silent leak には繋がらない。
 	me := entity.PackMeDetailed(u, profile, h.idGen)
 	b, _ := json.Marshal(me)
 	resp := map[string]any{}
 	_ = json.Unmarshal(b, &resp)
 
 	// MeDetailed packer に乗っていない /api/i 固有 field を上書き / 追加。
+	// avatarId / bannerId / chatScope は PackUserDetailed 経由で同 value が
+	// 既に乗っているので override 不要 (#987 review で重複削除)。
 	resp["movedTo"] = u.MovedToURI
 	resp["alsoKnownAs"] = u.AlsoKnownAs
 	resp["lastFetchedAt"] = nil
-	resp["avatarId"] = u.AvatarID
-	resp["bannerId"] = u.BannerID
-	resp["chatScope"] = u.ChatScope
+	// canChat は upstream では role policy の chatAvailability 由来だが、
+	// mk-go は PackUserLite で chatScope != "none" 由来になっており、さらに
+	// 本 handler では self-view 用に true hardcode で override している。
+	// 二重 drift は別途 #988 で tracking。本 PR では既存挙動を保つ。
 	resp["canChat"] = true
+	// memo / moderationNote は UserDetailed.Memo (omitempty) / MeDetailed
+	// 構造体に無いため、JSON unmarshal 後の resp map に key が出ない。
+	// /api/i の response shape を後方互換に保つため key 自体は出す
+	// (= "memo": null)。
 	resp["memo"] = nil
 	resp["moderationNote"] = nil
 	// isSilenced は role policy 由来で /api/i 固有 (MeDetailed には無い)。
 	resp["isSilenced"] = h.isSilenced(u.ID)
-
-	// MeDetailed の followedMessage は packer 既定で profile から merge
-	// するが、profile == nil の fallback path だと nil で出る。
-	// PackUserDetailed 内で適切に処理されるので追加 override は不要。
 
 	// Private fields from profile (MeDetailed scope 外)
 	if profile != nil {

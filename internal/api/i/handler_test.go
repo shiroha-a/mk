@@ -366,6 +366,42 @@ func TestJsonbArray(t *testing.T) {
 	}
 }
 
+// TestMe_PackUserDetailedFieldsFlowThrough: #987 review で removed
+// した explicit override (avatarId / bannerId / chatScope) が
+// PackUserDetailed → MeDetailed embed 経由でも正しく resp に乗ること。
+func TestMe_PackUserDetailedFieldsFlowThrough(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+
+	avatarID := "av-flow"
+	bannerID := "bn-flow"
+	user := &model.User{
+		ID:                "user-flow",
+		Username:          "flowthrough",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+		ChatScope:         "followers",
+		AvatarID:          &avatarID,
+		BannerID:          &bannerID,
+	}
+	userRepo.Profiles["user-flow"] = &model.UserProfile{
+		UserID: "user-flow",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+
+	require.NoError(t, h.Me(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// 3 field とも explicit override 削除後も MeDetailed embed 経由で乗る
+	assert.Equal(t, "av-flow", resp["avatarId"])
+	assert.Equal(t, "bn-flow", resp["bannerId"])
+	assert.Equal(t, "followers", resp["chatScope"])
+}
+
 func TestMe_AvatarAndBannerIDs(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 
