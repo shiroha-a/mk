@@ -18,7 +18,7 @@ GOFLAGS=-trimpath
 
 # バージョン情報。MisskeyVersion は /api/meta の version フィールド
 # (Misskey TS 互換クライアント向け) で使われる。drop-in 互換のため固定値。
-MKGO_VERSION ?= 0.0.1-experimental
+MKGO_VERSION ?= 0.9.0
 MISSKEY_VERSION ?= 2026.3.2
 LDFLAGS=-s -w \
 	-X github.com/shiroha-a/mk/internal/config.MkGoVersion=$(MKGO_VERSION) \
