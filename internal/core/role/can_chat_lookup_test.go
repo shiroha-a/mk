@@ -56,6 +56,18 @@ func TestCanChatLookup_TypeMismatch(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// nil provider / nil adapter で panic せず ok=false を返すこと
+// (= entity 側 default で fallback できる defensive guard)。
+func TestCanChatLookup_NilProvider(t *testing.T) {
+	lookup := role.NewCanChatLookup(nil)
+	_, ok := lookup.LookupCanChat("u1")
+	assert.False(t, ok)
+
+	var nilAdapter *role.CanChatLookupAdapter
+	_, ok = nilAdapter.LookupCanChat("u1")
+	assert.False(t, ok)
+}
+
 // DefaultPolicies() の chatAvailability が "available" であることを検証
 // (= 既定で全 user が canChat=true で動く)。
 func TestDefaultPolicies_ChatAvailabilityAvailable(t *testing.T) {

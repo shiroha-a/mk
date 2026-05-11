@@ -73,3 +73,19 @@ func TestPackUserLite_CanChatIgnoresChatScope(t *testing.T) {
 		assert.False(t, PackUserLite(u).CanChat, "scope=%s should not affect canChat", scope)
 	}
 }
+
+// BenchmarkPackUserLite_CanChatLookup measures the per-pack overhead of the
+// canChat lookup. 100 user bulk pack (= users/show userIds path 最大値) で
+// 数 µs / pack を期待する。lookup が hot path 化したときの regression を
+// 検出する baseline (#988)。
+func BenchmarkPackUserLite_CanChatLookup(b *testing.B) {
+	b.Cleanup(func() { SetCanChatLookup(nil) })
+	SetCanChatLookup(&stubCanChatLookup{results: map[string]bool{"u1": true}})
+	u := &model.User{ID: "u1", Username: "bench", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = PackUserLite(u)
+	}
+}
