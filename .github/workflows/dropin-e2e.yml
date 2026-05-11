@@ -36,6 +36,28 @@ jobs:
           # 監視するもので、`develop` への変更が対象なので明示的に develop を
           # 指定する (Devin #375 #1)。
           ref: ${{ inputs.ref || 'develop' }}
+          # tests/federation/common/Dockerfile.mkgo が
+          # third_party/misskey/built/ + assets/ を COPY するので submodule
+          # を先に展開しないと docker build が "failed to compute cache key"
+          # で死ぬ (#954 で frontend bundle COPY が追加され、2026-05-09
+          # nightly から本問題が顕在化)。
+          submodules: recursive
+
+      # Dockerfile.mkgo が third_party/misskey/built/_frontend_vite_ 等を
+      # COPY する。これは `pnpm build` の成果物で submodule に commit され
+      # ていないので、docker build より前に host で run しておく。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build third_party/misskey frontend bundle
+        working-directory: third_party/misskey
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Pre-pull Misskey TS image
         # 旧版は `&` で background 化していたが、GitHub Actions の `run:`

@@ -64,6 +64,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || 'develop' }}
+          # tests/federation/common/Dockerfile.mkgo が
+          # third_party/misskey/built/ + assets/ を COPY するので、submodule
+          # を先に展開しないと docker build が "failed to compute cache key:
+          # ... not found" で死ぬ (#954 で frontend bundle COPY が追加されて
+          # 2026-05-09 nightly から本問題が顕在化)。
+          submodules: recursive
+
+      # mk-go backend は Dockerfile.mkgo で third_party/misskey/built/
+      # _frontend_vite_ / _frontend_dist_ / _sw_dist_ を COPY する。これらは
+      # `pnpm build` の成果物で、submodule に commit されていない。CI で
+      # 都度 build する (build context に焼き込んで docker build に渡す)。
+      # TS overlay (upstream image を pull) では本 step を skip して時間を節約。
+      - name: Set up Node.js
+        if: matrix.backend == 'mk-go'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build third_party/misskey frontend bundle
+        if: matrix.backend == 'mk-go'
+        working-directory: third_party/misskey
+        # pnpm install --frozen-lockfile + pnpm build。初回は 5-10 分かかる
+        # (vite + sw + twemoji asset 抽出)。docker build 時に build context
+        # から COPY されるので、image build より前に host で run しておく。
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Pre-pull image (TS only)
         if: matrix.prepull != ''
