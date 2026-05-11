@@ -24,6 +24,11 @@ var (
 	ErrFileNotFound = errors.New("drive file not found")
 	// ErrFolderNotFound is returned when the target folder does not exist.
 	ErrFolderNotFound = errors.New("drive folder not found")
+	// ErrParentFolderNotFound is returned when the parent folder referenced
+	// by a create/update operation does not exist. Distinct from
+	// ErrFolderNotFound so that drive/folders/update can map this to the
+	// upstream NO_SUCH_PARENT_FOLDER code (#977).
+	ErrParentFolderNotFound = errors.New("drive parent folder not found")
 	// ErrAccessDenied is returned when a file/folder is owned by another user.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrFolderNotEmpty is returned when attempting to delete a folder that
@@ -599,7 +604,10 @@ func (s *Service) UpdateFolder(user *model.User, id string, in UpdateFolderInput
 		if *in.ParentID != nil {
 			parent, err := s.folderRepo.FindByID(**in.ParentID)
 			if err != nil {
-				return nil, ErrFolderNotFound
+				// folders/update では parent が未存在のときに upstream は
+				// NO_SUCH_PARENT_FOLDER (#977) を返すので、target 不在の
+				// ErrFolderNotFound と区別する。
+				return nil, ErrParentFolderNotFound
 			}
 			if parent.UserID == nil || *parent.UserID != user.ID {
 				return nil, ErrAccessDenied

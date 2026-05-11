@@ -476,3 +476,83 @@ func TestPackMeDetailed_SerializedJSON(t *testing.T) {
 	assert.Contains(t, s, `"hideOnlineStatus":false`)
 	assert.Contains(t, s, `"isDeleted":false`)
 }
+
+// #985: notification 3 field (emailNotificationTypes /
+// mutingNotificationTypes / notificationRecieveConfig) のデフォルト値が
+// JSON に乗ること + emailNotificationTypes の default が upstream と一致。
+func TestPackMeDetailed_NotificationDefaults(t *testing.T) {
+	u := &model.User{
+		ID:                "me4",
+		Username:          "default-notif",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID: "me4",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	me := PackMeDetailed(u, profile)
+
+	assert.Equal(t, []string{"follow", "receiveFollowRequest"}, me.EmailNotificationTypes)
+	assert.Equal(t, []string{}, me.MutingNotificationTypes)
+	assert.Equal(t, map[string]any{}, me.NotificationRecieveConfig)
+
+	b, err := json.Marshal(me)
+	require.NoError(t, err)
+	s := string(b)
+	assert.Contains(t, s, `"emailNotificationTypes":["follow","receiveFollowRequest"]`)
+	assert.Contains(t, s, `"mutingNotificationTypes":[]`)
+	assert.Contains(t, s, `"notificationRecieveConfig":{}`)
+}
+
+// #985: profile JSON column に値が入っているときに override されることを
+// 確認 (emailNotificationTypes / notificationRecieveConfig の path をカバー)。
+func TestPackMeDetailed_NotificationOverride(t *testing.T) {
+	u := &model.User{
+		ID:                "me5",
+		Username:          "override-notif",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID:                    "me5",
+		EmailNotificationTypes:    datatypes.JSON([]byte(`["mention"]`)),
+		NotificationRecieveConfig: datatypes.JSON([]byte(`{"mention":{"type":"following"}}`)),
+		Fields:                    datatypes.JSON([]byte("[]")),
+	}
+
+	me := PackMeDetailed(u, profile)
+	assert.Equal(t, []string{"mention"}, me.EmailNotificationTypes)
+	require.Contains(t, me.NotificationRecieveConfig, "mention")
+}
+
+// #985: profile が nil の fallback path でも 3 field は default で埋まる。
+func TestPackMeDetailed_NotificationNilProfile(t *testing.T) {
+	u := &model.User{
+		ID:                "me6",
+		Username:          "nilprof-notif",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	me := PackMeDetailed(u, nil)
+	assert.Equal(t, []string{"follow", "receiveFollowRequest"}, me.EmailNotificationTypes)
+	assert.Equal(t, []string{}, me.MutingNotificationTypes)
+	assert.Equal(t, map[string]any{}, me.NotificationRecieveConfig)
+}
+
+// #985: profile column の JSON が壊れているときは default に倒し silent
+// fallback する (parse error は ignore)。
+func TestPackMeDetailed_NotificationMalformed(t *testing.T) {
+	u := &model.User{
+		ID:                "me7",
+		Username:          "malformed-notif",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID:                    "me7",
+		EmailNotificationTypes:    datatypes.JSON([]byte(`not-json`)),
+		NotificationRecieveConfig: datatypes.JSON([]byte(`not-json`)),
+		Fields:                    datatypes.JSON([]byte("[]")),
+	}
+	me := PackMeDetailed(u, profile)
+	assert.Equal(t, []string{"follow", "receiveFollowRequest"}, me.EmailNotificationTypes)
+	assert.Equal(t, map[string]any{}, me.NotificationRecieveConfig)
+}

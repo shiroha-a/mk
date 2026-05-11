@@ -68,6 +68,59 @@ func TestRelation_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestRelation_NilViewer covers the unauthenticated branch — Relation returns
+// 200 with all relation flags false (matches upstream behavior).
+func TestRelation_NilViewer(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	rec := postExtra(h.Relation, `{"userId":"u2"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isFollowing"])
+	assert.Equal(t, false, resp["isBlocking"])
+}
+
+// TestRelation_PopulatedRelations wires the 5 repos and seeds rows so every
+// bool field flips to true. Validates #984 drift fix: handler returns real
+// DB-backed state instead of hardcoded false.
+func TestRelation_PopulatedRelations(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	followingRepo := testutil.NewMockFollowingRepository()
+	followRequestRepo := testutil.NewMockFollowRequestRepository()
+	blockingRepo := testutil.NewMockBlockingRepository()
+	mutingRepo := testutil.NewMockMutingRepository()
+	renoteMutingRepo := testutil.NewMockRenoteMutingRepository()
+	h.SetFollowingRepo(followingRepo)
+	h.SetFollowRequestRepo(followRequestRepo)
+	h.SetBlockingRepo(blockingRepo)
+	h.SetMutingRepo(mutingRepo)
+	h.SetRenoteMutingRepo(renoteMutingRepo)
+
+	// 双方向の follow / request / block + viewer→target の mute / renote-mute
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FollowerID: "u1", FolloweeID: "u2"}))
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f2", FollowerID: "u2", FolloweeID: "u1"}))
+	require.NoError(t, followRequestRepo.Create(&model.FollowRequest{ID: "fr1", FollowerID: "u1", FolloweeID: "u2"}))
+	require.NoError(t, followRequestRepo.Create(&model.FollowRequest{ID: "fr2", FollowerID: "u2", FolloweeID: "u1"}))
+	require.NoError(t, blockingRepo.Create(&model.Blocking{ID: "b1", BlockerID: "u1", BlockeeID: "u2"}))
+	require.NoError(t, blockingRepo.Create(&model.Blocking{ID: "b2", BlockerID: "u2", BlockeeID: "u1"}))
+	require.NoError(t, mutingRepo.Create(&model.Muting{ID: "m1", MuterID: "u1", MuteeID: "u2"}))
+	require.NoError(t, renoteMutingRepo.Create(&model.RenoteMuting{ID: "rm1", MuterID: "u1", MuteeID: "u2"}))
+
+	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "u2", resp["id"])
+	assert.Equal(t, true, resp["isFollowing"])
+	assert.Equal(t, true, resp["isFollowed"])
+	assert.Equal(t, true, resp["hasPendingFollowRequestFromYou"])
+	assert.Equal(t, true, resp["hasPendingFollowRequestToYou"])
+	assert.Equal(t, true, resp["isBlocking"])
+	assert.Equal(t, true, resp["isBlocked"])
+	assert.Equal(t, true, resp["isMuted"])
+	assert.Equal(t, true, resp["isRenoteMuted"])
+}
+
 // --- ReportAbuse ---
 
 func TestReportAbuse_Success(t *testing.T) {

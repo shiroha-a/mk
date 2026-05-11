@@ -33,6 +33,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #812: drive/files/create userId / user / folder shape
 - #818: drive/files/find / find-by-hash の packMany self path
 - #845: drive/folders/show detail mode (parent / counts)
+- #977: drive/folders 系の `NO_SUCH_FOLDER` UUID を endpoint 別 (create `53326628-...` / show `d74ab9eb-...` / update `f7974dac-...` / delete `1069098f-...`) に分割。`folders/update` の parent 不在を `NO_SUCH_PARENT_FOLDER` (`ce104e3a-...`) として区別するため `ErrParentFolderNotFound` を追加
 
 #### chat
 - #851 / #855 / #860: chat packMessage / packRoom の null 省略 / field set drift
@@ -42,6 +43,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #870: blocking/create / delete return shape (UserDetailed 返却)
 - #871: users/lists/create response shape (createdAt / userIds / isPublic)
 - #872: blocked → following/create reject status (400)
+- #984: users/relation を stub から実装に切替。viewer ↔ target の follow / follow-request / block / mute / renote-mute 状態を 5 repo (`following` / `follow_request` / `blocking` / `muting` / `renote_muting`) から実 DB 状態として返す
 
 #### settings / token
 - #883: i/regenerate-token return shape (204)
@@ -49,6 +51,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #885: i/update-email error status 標準化
 - #910: app-issued access token を auth middleware で dual lookup (raw → hash)
 - #913: i/revoke-token も dual lookup + cache invalidation
+- #985: `entity.PackMeDetailed` に `emailNotificationTypes` / `mutingNotificationTypes` / `notificationRecieveConfig` を追加。i/update 経路でも 3 field が返るようになり、frontend の `updateCurrentAccountPartial` が settings/email 等の toggle 後に local state を正しく反映できる。値は `user_profile` の JSON column を unmarshal して取得し、parse 失敗時は upstream default (`["follow","receiveFollowRequest"]` / `[]` / `{}`) に倒す
 
 #### admin
 - #888: admin/show-user shape (roles / policies / signins / roleAssigns / isHibernated / lastActiveDate)

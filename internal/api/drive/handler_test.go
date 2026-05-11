@@ -407,6 +407,13 @@ func TestFoldersCreate_ParentNotFound(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersCreate(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #977: folders/create の parent 不在 UUID は 53326628-...
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
+	assert.Equal(t, "53326628-a00d-40a6-a3cd-8975105c0f95", errObj["id"])
 }
 
 func TestFoldersCreate_AccessDenied(t *testing.T) {
@@ -506,6 +513,13 @@ func TestFoldersShow_NotFound(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersShow(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #977: folders/show の target 不在 UUID は d74ab9eb-...
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
+	assert.Equal(t, "d74ab9eb-bb09-4bba-bf24-fb58f761e1e9", errObj["id"])
 }
 
 func TestFoldersShow_AccessDenied(t *testing.T) {
@@ -566,6 +580,31 @@ func TestFoldersUpdate_NotFound(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersUpdate(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #977: folders/update target not found UUID は f7974dac-...
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	if errObj, ok := body["error"].(map[string]any); ok {
+		assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
+		assert.Equal(t, "f7974dac-2c0d-4a27-926e-23583b28e98e", errObj["id"])
+	}
+}
+
+// #977: folders/update で parent が未存在のときに NO_SUCH_PARENT_FOLDER
+// (UUID ce104e3a-...) を返すこと。ErrParentFolderNotFound branch のカバー。
+func TestFoldersUpdate_ParentNotFound(t *testing.T) {
+	h, _, folderRepo := newHandler(t)
+	uid := "u1"
+	folderRepo.Folders["c"] = &model.DriveFolder{ID: "c", UserID: &uid}
+	c, rec := newJSONReq(t, `{"folderId":"c","parentId":"ghost"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FoldersUpdate(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_PARENT_FOLDER", errObj["code"])
+	assert.Equal(t, "ce104e3a-faaf-49d5-b459-10ff0cbbcaa1", errObj["id"])
 }
 
 // --- FoldersDelete ---
@@ -594,6 +633,13 @@ func TestFoldersDelete_NotFound(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersDelete(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #977: folders/delete の UUID は 1069098f-...
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_FOLDER", errObj["code"])
+	assert.Equal(t, "1069098f-c281-440f-b085-f9932edbe091", errObj["id"])
 }
 
 func TestFoldersDelete_NotEmpty(t *testing.T) {

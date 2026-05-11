@@ -344,7 +344,7 @@ func (h *Handler) FoldersCreate(c echo.Context) error {
 	}
 	f, err := h.svc.CreateFolder(user, req.Name, req.ParentID)
 	if err != nil {
-		return mapFolderError(c, err)
+		return mapFolderError(c, err, folderEndpointCreate)
 	}
 	return c.JSON(http.StatusOK, entity.PackDriveFolder(f, h.idGen))
 }
@@ -367,7 +367,7 @@ func (h *Handler) FoldersShow(c echo.Context) error {
 	}
 	f, err := h.svc.ShowFolder(user, req.FolderID)
 	if err != nil {
-		return mapFolderError(c, err)
+		return mapFolderError(c, err, folderEndpointShow)
 	}
 	return c.JSON(http.StatusOK, h.packDriveFolderDetail(f))
 }
@@ -440,7 +440,7 @@ func (h *Handler) FoldersUpdate(c echo.Context) error {
 	}
 	f, err := h.svc.UpdateFolder(user, req.FolderID, in)
 	if err != nil {
-		return mapFolderError(c, err)
+		return mapFolderError(c, err, folderEndpointUpdate)
 	}
 	return c.JSON(http.StatusOK, entity.PackDriveFolder(f, h.idGen))
 }
@@ -453,7 +453,7 @@ func (h *Handler) FoldersDelete(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	if err := h.svc.DeleteFolder(user, req.FolderID); err != nil {
-		return mapFolderError(c, err)
+		return mapFolderError(c, err, folderEndpointDelete)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -472,10 +472,42 @@ func mapFileError(c echo.Context, err error) error {
 	return apierr.JSONInternalError(c)
 }
 
-func mapFolderError(c echo.Context, err error) error {
+// folderEndpoint identifies which drive/folders endpoint produced a folder
+// error, so that mapFolderError can return the upstream-canonical UUID for
+// NO_SUCH_FOLDER. Misskey TS uses a distinct UUID per endpoint (#977):
+//   - create: 53326628-a00d-40a6-a3cd-8975105c0f95 (parent not found)
+//   - show:   d74ab9eb-bb09-4bba-bf24-fb58f761e1e9
+//   - update: f7974dac-2c0d-4a27-926e-23583b28e98e (target not found)
+//   - delete: 1069098f-c281-440f-b085-f9932edbe091
+type folderEndpoint int
+
+const (
+	folderEndpointCreate folderEndpoint = iota
+	folderEndpointShow
+	folderEndpointUpdate
+	folderEndpointDelete
+)
+
+func mapFolderError(c echo.Context, err error, ep folderEndpoint) error {
 	switch {
 	case errors.Is(err, coredrive.ErrFolderNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "ea8fb7a5-af77-4a08-b608-c0218176cd73"))
+		var id string
+		switch ep {
+		case folderEndpointCreate:
+			id = "53326628-a00d-40a6-a3cd-8975105c0f95"
+		case folderEndpointShow:
+			id = "d74ab9eb-bb09-4bba-bf24-fb58f761e1e9"
+		case folderEndpointUpdate:
+			id = "f7974dac-2c0d-4a27-926e-23583b28e98e"
+		case folderEndpointDelete:
+			id = "1069098f-c281-440f-b085-f9932edbe091"
+		}
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
+	case errors.Is(err, coredrive.ErrParentFolderNotFound):
+		// folders/update のみ NO_SUCH_PARENT_FOLDER を区別する。
+		// folders/create の parent 不在は upstream も NO_SUCH_FOLDER 扱い
+		// (ErrParentFolderNotFound はそもそも CreateFolder では返らない)。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PARENT_FOLDER", "No such parent folder.", "ce104e3a-faaf-49d5-b459-10ff0cbbcaa1"))
 	case errors.Is(err, coredrive.ErrAccessDenied):
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 	case errors.Is(err, coredrive.ErrFolderNotEmpty):

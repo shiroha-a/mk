@@ -23,11 +23,9 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
   });
   test.setTimeout(60_000);
 
-  // mk-go の `mapFolderError` (internal/api/drive/handler.go:478) が
-  // drive/folders/show / drive/folders/delete に対して `ea8fb7a5-...` を
-  // 返しており upstream (`d74ab9eb-...` / `1069098f-...`) と drift。
-  // 詳細は #977。drift fix がマージされたら本 skip を解除する。
-  test.skip('contextmenu folder → Delete → /api/drive/folders/delete', async ({
+  // #977 drift fix で endpoint 別の upstream-canonical UUID を返すように
+  // 修正済み (drive/folders/show: `d74ab9eb-...`)。
+  test('contextmenu folder → Delete → /api/drive/folders/delete', async ({
     page,
     baseURL,
     request,
@@ -98,7 +96,7 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
     await deleteResp;
 
     // 5. API 経由で削除確認 — drive/folders/show は 404 + NO_SUCH_FOLDER を返す
-    // (drive/handler.go:220、UUID d77545ec-1283-4b73-bbe1-e90e1da6a4e7)。
+    // (#977 drift fix 後の UUID `d74ab9eb-bb09-4bba-bf24-fb58f761e1e9`)。
     const showResp = await callApi(request, 'drive/folders/show', {
       i: root.token,
       folderId,
@@ -106,6 +104,6 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
     expect(showResp.status()).toBe(404);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_FOLDER');
-    expect(showBody.error?.id).toBe('d77545ec-1283-4b73-bbe1-e90e1da6a4e7');
+    expect(showBody.error?.id).toBe('d74ab9eb-bb09-4bba-bf24-fb58f761e1e9');
   });
 });

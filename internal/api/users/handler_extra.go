@@ -19,9 +19,16 @@ func (h *Handler) SetAbuseRepo(r repository.AbuseReportRepository) {
 }
 
 // Relation handles POST /api/users/relation.
-// ユーザー間の関係 (フォロー/ブロック/ミュート等) を返す。
+// upstream Misskey TS `users/relation.ts` (= getRelation in
+// server/api/common/getRelation.ts) と同 semantics で viewer と target の
+// follow / follow-request / block / mute / renote-mute の関係性を返す。
+//
+// repo が wired されていない (= legacy handler test) では該当 field を false
+// に保つので production runtime には影響しない (router で必ず wired される)。
+// viewer が unauthenticated でも middleware.GetUser が non-nil を返さないだけ
+// で 401 にはならない (= 関係性は全 false で返る、upstream も viewer 必須)。
 func (h *Handler) Relation(c echo.Context) error {
-	_ = middleware.GetUser(c) // 認証チェック
+	viewer := middleware.GetUser(c)
 	var req struct {
 		UserID string `json:"userId"`
 	}
@@ -29,7 +36,7 @@ func (h *Handler) Relation(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	return c.JSON(http.StatusOK, map[string]any{
+	out := map[string]any{
 		"id":                             req.UserID,
 		"isFollowing":                    false,
 		"isFollowed":                     false,
@@ -39,7 +46,51 @@ func (h *Handler) Relation(c echo.Context) error {
 		"isBlocked":                      false,
 		"isMuted":                        false,
 		"isRenoteMuted":                  false,
-	})
+	}
+
+	if viewer == nil {
+		return c.JSON(http.StatusOK, out)
+	}
+
+	// FindByPair は対 row が無いとき (rec, err) = (nil, err) で返るため、
+	// 存在判定は rec != nil で行う。DB error は default の false に倒すので
+	// silent (frontend は falsy display で fallback)。
+	if h.followingRepo != nil {
+		if rec, _ := h.followingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+			out["isFollowing"] = true
+		}
+		if rec, _ := h.followingRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+			out["isFollowed"] = true
+		}
+	}
+	if h.followRequestRepo != nil {
+		if rec, _ := h.followRequestRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+			out["hasPendingFollowRequestFromYou"] = true
+		}
+		if rec, _ := h.followRequestRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+			out["hasPendingFollowRequestToYou"] = true
+		}
+	}
+	if h.blockingRepo != nil {
+		if rec, _ := h.blockingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+			out["isBlocking"] = true
+		}
+		if rec, _ := h.blockingRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+			out["isBlocked"] = true
+		}
+	}
+	if h.mutingRepo != nil {
+		if rec, _ := h.mutingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+			out["isMuted"] = true
+		}
+	}
+	if h.renoteMutingRepo != nil {
+		if rec, _ := h.renoteMutingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+			out["isRenoteMuted"] = true
+		}
+	}
+
+	return c.JSON(http.StatusOK, out)
 }
 
 // ReportAbuse handles POST /api/users/report-abuse.

@@ -692,9 +692,28 @@ func (h *Handler) Me(c echo.Context) error {
 	} else {
 		resp["securityKeysList"] = []any{}
 	}
-	resp["mutingNotificationTypes"] = []any{}
-	resp["notificationRecieveConfig"] = map[string]any{}
-	resp["emailNotificationTypes"] = []string{"follow", "receiveFollowRequest"}
+	// upstream `MeDetailed` の notification-related 3 field (#985)。
+	// PackMeDetailed と同じ default + profile JSON 由来の値を入れる
+	// (i/update 経路と一貫性を持たせるため)。
+	resp["mutingNotificationTypes"] = []string{}
+	notifConf := map[string]any{}
+	emailTypes := []string{"follow", "receiveFollowRequest"}
+	if profile != nil {
+		if raw := []byte(profile.EmailNotificationTypes); len(raw) > 0 {
+			var arr []string
+			if err := json.Unmarshal(raw, &arr); err == nil {
+				emailTypes = arr
+			}
+		}
+		if raw := []byte(profile.NotificationRecieveConfig); len(raw) > 0 {
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err == nil && m != nil {
+				notifConf = m
+			}
+		}
+	}
+	resp["notificationRecieveConfig"] = notifConf
+	resp["emailNotificationTypes"] = emailTypes
 
 	// createdAt は ID から復元
 	if t, err := h.idGen.ParseTime(u.ID); err == nil {

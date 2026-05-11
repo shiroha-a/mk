@@ -47,14 +47,10 @@ test.describe('UI: /settings/email emailNotification_mention toggle flow', () =>
     });
     const update = await updateResp;
     const body = await update.json();
-    // spec の主目的は「switch toggle → /api/i/update round-trip」の verify。
-    // i/update response が 200 + body.id truthy なら toggle 動作は確認済。
-    // 旧 assertion `expect(Array.isArray(body.emailNotificationTypes)).toBe(true)`
-    // は mk-go の `entity.PackMeDetailed` が emailNotificationTypes field を
-    // 含まない drift で false。drift fix は別 PR、本 spec は round-trip 自体
-    // の verify に絞る。
-    // TODO: MeDetailed packer に emailNotificationTypes が追加されたら
-    // `expect(Array.isArray(body.emailNotificationTypes)).toBe(true)` を復活する。
+    // #985 drift fix で PackMeDetailed に emailNotificationTypes が追加され、
+    // i/update response にも乗るようになった (default ["follow",
+    // "receiveFollowRequest"] または profile JSON column の値)。
     expect(body.id).toBeTruthy();
+    expect(Array.isArray(body.emailNotificationTypes)).toBe(true);
   });
 });

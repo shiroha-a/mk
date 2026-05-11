@@ -485,7 +485,8 @@ func TestUpdateFolder_ParentNotFound(t *testing.T) {
 	pid := "ghost"
 	pidPtr := &pid
 	_, err := svc.UpdateFolder(&model.User{ID: "u1"}, "c", drive.UpdateFolderInput{ParentID: &pidPtr})
-	require.ErrorIs(t, err, drive.ErrFolderNotFound)
+	// #977: target 不在の ErrFolderNotFound と区別する distinct error。
+	require.ErrorIs(t, err, drive.ErrParentFolderNotFound)
 }
 
 func TestUpdateFolder_ParentAccessDenied(t *testing.T) {

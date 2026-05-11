@@ -1,6 +1,8 @@
 package entity
 
 import (
+	"encoding/json"
+
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
@@ -119,6 +121,17 @@ type MeDetailed struct {
 	AlwaysMarkNsfw           bool `json:"alwaysMarkNsfw"`
 	ReceiveAnnouncementEmail bool `json:"receiveAnnouncementEmail"`
 	InjectFeaturedNote       bool `json:"injectFeaturedNote"`
+	// EmailNotificationTypes is the list of email-notification categories the
+	// user opted in for. Defaults to ["follow", "receiveFollowRequest"] when
+	// the profile column is absent (#985).
+	EmailNotificationTypes []string `json:"emailNotificationTypes"`
+	// MutingNotificationTypes is kept as an empty slice for backward
+	// compatibility — upstream UserEntityService.ts:615 returns `[]` with
+	// a "後方互換性のため" comment (#985).
+	MutingNotificationTypes []string `json:"mutingNotificationTypes"`
+	// NotificationRecieveConfig retains the (sic) upstream typo so frontends
+	// can read state without renaming. Empty map when unset (#985).
+	NotificationRecieveConfig map[string]any `json:"notificationRecieveConfig"`
 }
 
 // PackMeDetailed packs a self-view user payload, extending PackUserDetailed
@@ -133,6 +146,11 @@ func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Gene
 		IsExplorable:     u.IsExplorable,
 		IsDeleted:        u.IsDeleted,
 		HideOnlineStatus: u.HideOnlineStatus,
+		// default は upstream UserEntityService と同じ値。profile が
+		// non-nil なら下で JSON column から上書きする。
+		EmailNotificationTypes:    []string{"follow", "receiveFollowRequest"},
+		MutingNotificationTypes:   []string{},
+		NotificationRecieveConfig: map[string]any{},
 	}
 	if profile != nil {
 		out.NoCrawle = profile.NoCrawle
@@ -143,6 +161,21 @@ func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Gene
 		out.AlwaysMarkNsfw = profile.AlwaysMarkNsfw
 		out.ReceiveAnnouncementEmail = profile.ReceiveAnnouncementEmail
 		out.InjectFeaturedNote = profile.InjectFeaturedNote
+		// EmailNotificationTypes / NotificationRecieveConfig は jsonb カラム
+		// なので JSON unmarshal してから out にコピーする。parse error は
+		// default に倒す (silent — frontend は default で動作可能)。
+		if raw := []byte(profile.EmailNotificationTypes); len(raw) > 0 {
+			var arr []string
+			if err := json.Unmarshal(raw, &arr); err == nil {
+				out.EmailNotificationTypes = arr
+			}
+		}
+		if raw := []byte(profile.NotificationRecieveConfig); len(raw) > 0 {
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err == nil && m != nil {
+				out.NotificationRecieveConfig = m
+			}
+		}
 	}
 	return out
 }
