@@ -106,6 +106,7 @@ Playwright spec を両 backend で走らせる中で観測した「TS と mk-go 
 | #871 | users/lists/create response shape (createdAt / userIds / isPublic 含む) |
 | #872 | blocked → following/create reject status (400) |
 | #984 | users/relation を stub から実装に切替。viewer ↔ target の follow / follow-request / block / mute / renote-mute を 5 repo (`following` / `follow_request` / `blocking` / `muting` / `renote_muting`) から実 DB 状態として返す |
+| #970 | `/api/users/show` で viewer===target のとき MeDetailed 拡張 field を merge (upstream `pack(user, me)` 互換)。`entity.AsMeDetailed` helper で pre-built UserDetailed を promote |
 
 #### settings / token
 | # | 内容 |
@@ -116,6 +117,7 @@ Playwright spec を両 backend で走らせる中で観測した「TS と mk-go 
 | #910 | app-issued access token を auth middleware で dual lookup (raw → hash) |
 | #913 | i/revoke-token も dual lookup + cache invalidation 化 |
 | #985 | `entity.PackMeDetailed` に `emailNotificationTypes` / `mutingNotificationTypes` / `notificationRecieveConfig` を追加 (i/update 経路で frontend `$i` state が settings/email 等の toggle 後に正しく反映される) |
+| #971 | `/api/i` Me handler を `PackMeDetailed` ベースに refactor。JSON round-trip で 11 self-view field + notification 3 field の重複コード 25 行を削除、MeDetailed packer 更新時に自動追従 |
 
 #### admin
 | # | 内容 |

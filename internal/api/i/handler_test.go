@@ -199,6 +199,72 @@ func TestMe_Success(t *testing.T) {
 	assert.Nil(t, resp["alsoKnownAs"])
 }
 
+// TestMe_PreservesMeDetailedFields: #971 — Me handler を PackMeDetailed base
+// に refactor した後も、MeDetailed の 11 self-view field + notification 3
+// field がすべて response に乗っていることを確認する regression guard。
+func TestMe_PreservesMeDetailedFields(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+
+	user := &model.User{
+		ID:                "user2",
+		Username:          "merefactor",
+		IsExplorable:      true,
+		IsDeleted:         false,
+		HideOnlineStatus:  true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	userRepo.Profiles["user2"] = &model.UserProfile{
+		UserID:                    "user2",
+		NoCrawle:                  true,
+		PreventAiLearning:         false,
+		AutoSensitive:             true,
+		CarefulBot:                true,
+		AutoAcceptFollowed:        true,
+		AlwaysMarkNsfw:            true,
+		ReceiveAnnouncementEmail:  false,
+		InjectFeaturedNote:        false,
+		EmailNotificationTypes:    datatypes.JSON([]byte(`["mention","reply"]`)),
+		NotificationRecieveConfig: datatypes.JSON([]byte(`{"mention":{"type":"following"}}`)),
+		Fields:                    datatypes.JSON([]byte("[]")),
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+
+	require.NoError(t, h.Me(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// 11 MeDetailed self-view field
+	assert.Equal(t, true, resp["isExplorable"])
+	assert.Equal(t, false, resp["isDeleted"])
+	assert.Equal(t, true, resp["hideOnlineStatus"])
+	assert.Equal(t, true, resp["noCrawle"])
+	assert.Equal(t, false, resp["preventAiLearning"])
+	assert.Equal(t, true, resp["autoSensitive"])
+	assert.Equal(t, true, resp["carefulBot"])
+	assert.Equal(t, true, resp["autoAcceptFollowed"])
+	assert.Equal(t, true, resp["alwaysMarkNsfw"])
+	assert.Equal(t, false, resp["receiveAnnouncementEmail"])
+	assert.Equal(t, false, resp["injectFeaturedNote"])
+
+	// #985 notification 3 field (profile JSON column 由来)
+	emailTypes, ok := resp["emailNotificationTypes"].([]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{"mention", "reply"}, emailTypes)
+	mutingTypes, ok := resp["mutingNotificationTypes"].([]any)
+	require.True(t, ok)
+	assert.Empty(t, mutingTypes)
+	notifConf, ok := resp["notificationRecieveConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, notifConf, "mention")
+}
+
 func TestMe_LoggedInDays(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 

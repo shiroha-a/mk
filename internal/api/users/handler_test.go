@@ -354,6 +354,138 @@ func TestShow_UsernameNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestShow_SelfViewReturnsMeDetailed: #970 — `/api/users/show` で viewer===target
+// のとき MeDetailed 拡張 field (isExplorable / noCrawle / emailNotificationTypes
+// 等) を merge して返すこと。
+func TestShow_SelfViewReturnsMeDetailed(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+
+	self := &model.User{
+		ID:                "self1",
+		Username:          "selfuser",
+		IsExplorable:      true,
+		IsDeleted:         false,
+		HideOnlineStatus:  true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	userRepo.Users["self1"] = self
+	userRepo.Profiles["self1"] = &model.UserProfile{
+		UserID:                    "self1",
+		NoCrawle:                  true,
+		PreventAiLearning:         false,
+		AlwaysMarkNsfw:            true,
+		EmailNotificationTypes:    datatypes.JSON([]byte(`["mention"]`)),
+		NotificationRecieveConfig: datatypes.JSON([]byte(`{"mention":{"type":"following"}}`)),
+		Fields:                    datatypes.JSON([]byte("[]")),
+	}
+
+	body := `{"userId":"self1"}`
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/show", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), self)
+
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// MeDetailed-only field が出ること
+	assert.Equal(t, true, resp["isExplorable"])
+	assert.Equal(t, false, resp["isDeleted"])
+	assert.Equal(t, true, resp["hideOnlineStatus"])
+	assert.Equal(t, true, resp["noCrawle"])
+	assert.Equal(t, false, resp["preventAiLearning"])
+	assert.Equal(t, true, resp["alwaysMarkNsfw"])
+	// #985 notification 3 field (profile JSON column 由来)
+	emailTypes, ok := resp["emailNotificationTypes"].([]any)
+	require.True(t, ok)
+	require.Len(t, emailTypes, 1)
+	assert.Equal(t, "mention", emailTypes[0])
+	notifConf, ok := resp["notificationRecieveConfig"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, notifConf, "mention")
+	// 通常 UserDetailed field も残る
+	assert.Equal(t, "self1", resp["id"])
+	assert.Equal(t, "selfuser", resp["username"])
+}
+
+// TestShow_NonSelfViewExcludesMeDetailed: viewer != target なら MeDetailed
+// 拡張 field は出さない (privacy boundary)。
+func TestShow_NonSelfViewExcludesMeDetailed(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+
+	target := &model.User{
+		ID:                "target1",
+		Username:          "target",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	userRepo.Users["target1"] = target
+	userRepo.Profiles["target1"] = &model.UserProfile{
+		UserID:                 "target1",
+		NoCrawle:               true,
+		EmailNotificationTypes: datatypes.JSON([]byte(`["mention"]`)),
+		Fields:                 datatypes.JSON([]byte("[]")),
+	}
+	viewer := &model.User{ID: "viewer1", Username: "viewer"}
+
+	body := `{"userId":"target1"}`
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/show", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), viewer)
+
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// MeDetailed-only field が漏れていないこと
+	_, hasIsExplorable := resp["isExplorable"]
+	assert.False(t, hasIsExplorable, "isExplorable must not leak for non-self view")
+	_, hasNoCrawle := resp["noCrawle"]
+	assert.False(t, hasNoCrawle, "noCrawle must not leak for non-self view")
+	_, hasEmailNotif := resp["emailNotificationTypes"]
+	assert.False(t, hasEmailNotif, "emailNotificationTypes must not leak for non-self view")
+}
+
+// TestShow_AnonymousViewExcludesMeDetailed: viewer == nil でも UserDetailed
+// shape (= 公開 field のみ) を返す。
+func TestShow_AnonymousViewExcludesMeDetailed(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+	target := &model.User{
+		ID:                "target1",
+		Username:          "target",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	userRepo.Users["target1"] = target
+	userRepo.Profiles["target1"] = &model.UserProfile{
+		UserID: "target1",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	body := `{"userId":"target1"}`
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/show", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	// viewer は context に set しない (= anonymous)
+
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasIsExplorable := resp["isExplorable"]
+	assert.False(t, hasIsExplorable)
+}
+
 func TestShow_ViewerDependentFields(t *testing.T) {
 	h, userRepo := newTestHandler(t)
 

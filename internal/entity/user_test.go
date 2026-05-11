@@ -538,6 +538,41 @@ func TestPackMeDetailed_NotificationNilProfile(t *testing.T) {
 	assert.Equal(t, map[string]any{}, me.NotificationRecieveConfig)
 }
 
+// #970: AsMeDetailed が pre-built UserDetailed の embed 値を保持しつつ
+// MeDetailed-only field を layering する direct entry test。users/show の
+// self-view branch が build 済の detailed (= remote stats / instance /
+// emojis / pinned / viewer-dependent fields を含む) を渡しても上書きされず、
+// 11 self-view field + notification 3 field のみが追加されること。
+func TestAsMeDetailed_PreservesEmbeddedUserDetailed(t *testing.T) {
+	u := &model.User{
+		ID:                "as1",
+		Username:          "asuser",
+		IsExplorable:      true,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	profile := &model.UserProfile{
+		UserID:   "as1",
+		NoCrawle: true,
+		Fields:   datatypes.JSON([]byte("[]")),
+	}
+	// pre-built UserDetailed に external な後付け修正 (= users/show が行う
+	// remote stats / pinned 反映に相当) を加えたものを base として渡す。
+	d := PackUserDetailed(u, profile)
+	d.NotesCount = 42
+	pinnedIDs := []string{"note1", "note2"}
+	d.PinnedNoteIDs = pinnedIDs
+
+	me := AsMeDetailed(d, u, profile)
+
+	// 後付け修正値は保持されている
+	assert.Equal(t, 42, me.NotesCount)
+	assert.Equal(t, pinnedIDs, me.PinnedNoteIDs)
+	// MeDetailed-only field が layering される
+	assert.True(t, me.IsExplorable)
+	assert.True(t, me.NoCrawle)
+	assert.Equal(t, []string{"follow", "receiveFollowRequest"}, me.EmailNotificationTypes)
+}
+
 // #985: profile column の JSON が壊れているときは default に倒し silent
 // fallback する (parse error は ignore)。
 func TestPackMeDetailed_NotificationMalformed(t *testing.T) {

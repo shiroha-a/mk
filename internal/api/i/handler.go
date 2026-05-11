@@ -549,81 +549,53 @@ func (h *Handler) RegistryRemove(c echo.Context) error {
 }
 
 // Me handles POST /api/i - returns the authenticated user's info.
+//
+// MeDetailed (UserLite + UserDetailed + 11 self-view + notification 3) は
+// entity.PackMeDetailed 経由で一括展開し、`/api/i` 固有の private field
+// (email / mutedWords / twoFactor* / clientData / role / unread 等) を
+// resp map に merge する design (#971)。MeDetailed packer に新 field が
+// 追加されたとき自動追従する。
 func (h *Handler) Me(c echo.Context) error {
 	u := middleware.GetUser(c)
 
 	profile := h.userService.GetProfile(u.ID)
 
-	detailed := entity.PackUserDetailed(u, profile, h.idGen)
+	// MeDetailed を JSON round-trip で map に展開して base にする。
+	// 1 request あたり Marshal + Unmarshal が 1 回ずつ走るが、/api/i は
+	// per-session 数回の頻度なので影響は無視できる。順序保証は不要
+	// (JSON object は順序不定)。
+	me := entity.PackMeDetailed(u, profile, h.idGen)
+	b, _ := json.Marshal(me)
+	resp := map[string]any{}
+	_ = json.Unmarshal(b, &resp)
 
-	// /api/i returns additional private fields
-	resp := map[string]any{
-		// UserLite fields
-		"id":                u.ID,
-		"name":              detailed.Name,
-		"username":          detailed.Username,
-		"host":              detailed.Host,
-		"avatarUrl":         detailed.AvatarURL,
-		"avatarBlurhash":    detailed.AvatarBlurhash,
-		"avatarDecorations": detailed.AvatarDecorations,
-		"isBot":             detailed.IsBot,
-		"isCat":             detailed.IsCat,
-		"emojis":            detailed.Emojis,
-		"onlineStatus":      detailed.OnlineStatus,
-		"badgeRoles":        detailed.BadgeRoles,
-		// UserDetailed fields
-		"bannerUrl":      detailed.BannerURL,
-		"bannerBlurhash": detailed.BannerBlurhash,
-		"isLocked":       detailed.IsLocked,
-		"isSilenced":     h.isSilenced(u.ID),
-		"isSuspended":    detailed.IsSuspended,
-		"description":    detailed.Description,
-		"location":       detailed.Location,
-		"birthday":       detailed.Birthday,
-		"lang":           detailed.Lang,
-		"fields":         detailed.Fields,
-		"verifiedLinks":  detailed.VerifiedLinks,
-		"followersCount": detailed.FollowersCount,
-		"followingCount": detailed.FollowingCount,
-		"notesCount":     detailed.NotesCount,
-		"uri":            detailed.URI,
-		"url":            detailed.URL,
-		"movedTo":        u.MovedToURI,
-		"alsoKnownAs":    u.AlsoKnownAs,
-		"updatedAt":      detailed.UpdatedAt,
-		"lastFetchedAt":  nil,
-		// MeDetailed fields
-		"avatarId":            u.AvatarID,
-		"bannerId":            u.BannerID,
-		"followersVisibility": detailed.FollowersVisibility,
-		"followingVisibility": detailed.FollowingVisibility,
-		"chatScope":           u.ChatScope,
-		"canChat":             true,
-		"followedMessage":     nil,
-		"memo":                nil,
-		"moderationNote":      nil,
-		"hideOnlineStatus":    u.HideOnlineStatus,
-	}
+	// MeDetailed packer に乗っていない /api/i 固有 field を上書き / 追加。
+	resp["movedTo"] = u.MovedToURI
+	resp["alsoKnownAs"] = u.AlsoKnownAs
+	resp["lastFetchedAt"] = nil
+	resp["avatarId"] = u.AvatarID
+	resp["bannerId"] = u.BannerID
+	resp["chatScope"] = u.ChatScope
+	resp["canChat"] = true
+	resp["memo"] = nil
+	resp["moderationNote"] = nil
+	// isSilenced は role policy 由来で /api/i 固有 (MeDetailed には無い)。
+	resp["isSilenced"] = h.isSilenced(u.ID)
 
-	// Private fields from profile
+	// MeDetailed の followedMessage は packer 既定で profile から merge
+	// するが、profile == nil の fallback path だと nil で出る。
+	// PackUserDetailed 内で適切に処理されるので追加 override は不要。
+
+	// Private fields from profile (MeDetailed scope 外)
 	if profile != nil {
 		resp["email"] = profile.Email
 		resp["emailVerified"] = profile.EmailVerified
-		resp["autoAcceptFollowed"] = profile.AutoAcceptFollowed
-		resp["noCrawle"] = profile.NoCrawle
-		resp["preventAiLearning"] = profile.PreventAiLearning
-		resp["alwaysMarkNsfw"] = profile.AlwaysMarkNsfw
-		resp["autoSensitive"] = profile.AutoSensitive
-		resp["carefulBot"] = profile.CarefulBot
-		resp["injectFeaturedNote"] = profile.InjectFeaturedNote
-		resp["receiveAnnouncementEmail"] = profile.ReceiveAnnouncementEmail
 		resp["twoFactorEnabled"] = profile.TwoFactorEnabled
 		resp["usePasswordLessLogin"] = profile.UsePasswordLessLogin
 		resp["mutedWords"] = profile.MutedWords
 		resp["hardMutedWords"] = profile.HardMutedWords
 		resp["mutedInstances"] = profile.MutedInstances
 		resp["publicReactions"] = profile.PublicReactions
-		resp["followedMessage"] = profile.FollowedMessage
 		resp["loggedInDays"] = len(profile.LoggedInDates)
 		resp["achievements"] = jsonbArray(profile.Achievements)
 		resp["securityKeys"] = profile.SecurityKeysAvailable
@@ -665,8 +637,7 @@ func (h *Handler) Me(c echo.Context) error {
 	}
 	resp["isAdmin"] = isAdmin
 	resp["isModerator"] = isMod
-	resp["isDeleted"] = u.IsDeleted
-	resp["isExplorable"] = u.IsExplorable
+	// isDeleted / isExplorable は PackMeDetailed 由来で base 展開済 (#971)。
 	// 未読系フィールドを依存する repo / service から実際に引く。
 	// 未wireのものは false/0/[] にフォールバックする (テスト互換)。
 	// antenna / channel / specifiedNotes は別issueで追跡中のためここでは false 固定。
@@ -692,28 +663,8 @@ func (h *Handler) Me(c echo.Context) error {
 	} else {
 		resp["securityKeysList"] = []any{}
 	}
-	// upstream `MeDetailed` の notification-related 3 field (#985)。
-	// PackMeDetailed と同じ default + profile JSON 由来の値を入れる
-	// (i/update 経路と一貫性を持たせるため)。
-	resp["mutingNotificationTypes"] = []string{}
-	notifConf := map[string]any{}
-	emailTypes := []string{"follow", "receiveFollowRequest"}
-	if profile != nil {
-		if raw := []byte(profile.EmailNotificationTypes); len(raw) > 0 {
-			var arr []string
-			if err := json.Unmarshal(raw, &arr); err == nil {
-				emailTypes = arr
-			}
-		}
-		if raw := []byte(profile.NotificationRecieveConfig); len(raw) > 0 {
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err == nil && m != nil {
-				notifConf = m
-			}
-		}
-	}
-	resp["notificationRecieveConfig"] = notifConf
-	resp["emailNotificationTypes"] = emailTypes
+	// MeDetailed の notification-related 3 field (#985) は PackMeDetailed 経由で
+	// base 展開済 (#971 で集約)。ここで追加 override は不要。
 
 	// createdAt は ID から復元
 	if t, err := h.idGen.ParseTime(u.ID); err == nil {

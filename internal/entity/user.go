@@ -141,8 +141,22 @@ type MeDetailed struct {
 // privacy-scoped fields like isExplorable / noCrawle stay stale in the
 // session (#968).
 func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) MeDetailed {
+	return AsMeDetailed(PackUserDetailed(u, profile, idGens...), u, profile)
+}
+
+// AsMeDetailed promotes a pre-built UserDetailed payload into MeDetailed by
+// layering on the self-view-only fields sourced from User + UserProfile.
+// Used directly by users/show (#970) when viewer===target to mirror
+// upstream's `pack(user, me)` semantics, and indirectly by PackMeDetailed
+// which builds a fresh UserDetailed first.
+//
+// Why a separate helper: users/show already does additional work on the
+// pre-built UserDetailed (remote stats / instance / emojis / pinned /
+// viewer-dependent fields). Re-running PackUserDetailed would lose that
+// work, so we promote the existing UserDetailed in-place.
+func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeDetailed {
 	out := MeDetailed{
-		UserDetailed:     PackUserDetailed(u, profile, idGens...),
+		UserDetailed:     d,
 		IsExplorable:     u.IsExplorable,
 		IsDeleted:        u.IsDeleted,
 		HideOnlineStatus: u.HideOnlineStatus,

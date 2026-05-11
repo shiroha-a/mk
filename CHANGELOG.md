@@ -44,6 +44,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #871: users/lists/create response shape (createdAt / userIds / isPublic)
 - #872: blocked → following/create reject status (400)
 - #984: users/relation を stub から実装に切替。viewer ↔ target の follow / follow-request / block / mute / renote-mute 状態を 5 repo (`following` / `follow_request` / `blocking` / `muting` / `renote_muting`) から実 DB 状態として返す
+- #970: `/api/users/show` で viewer===target のとき MeDetailed 拡張 field (isExplorable / noCrawle / emailNotificationTypes 等 14 個) を merge して返すよう拡張。upstream `pack(user, me)` semantics と一致させ、`/api/users/show?username=me` 経由でも `/api/i` と同じ shape を保つ。新規 helper `entity.AsMeDetailed` で pre-built UserDetailed を promote する design
 
 #### settings / token
 - #883: i/regenerate-token return shape (204)
@@ -52,6 +53,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #910: app-issued access token を auth middleware で dual lookup (raw → hash)
 - #913: i/revoke-token も dual lookup + cache invalidation
 - #985: `entity.PackMeDetailed` に `emailNotificationTypes` / `mutingNotificationTypes` / `notificationRecieveConfig` を追加。i/update 経路でも 3 field が返るようになり、frontend の `updateCurrentAccountPartial` が settings/email 等の toggle 後に local state を正しく反映できる。値は `user_profile` の JSON column を unmarshal して取得し、parse 失敗時は upstream default (`["follow","receiveFollowRequest"]` / `[]` / `{}`) に倒す
+- #971: `/api/i` Me handler を `PackMeDetailed` ベースに refactor。JSON round-trip で MeDetailed を resp map base に展開し、固有 field (email / mutedWords / twoFactor / clientData / role / unread 等) を merge する design。重複コード 25 行削減、MeDetailed packer 更新時に自動追従
 
 #### admin
 - #888: admin/show-user shape (roles / policies / signins / roleAssigns / isHibernated / lastActiveDate)

@@ -428,6 +428,14 @@ func (h *Handler) Show(c echo.Context) error {
 		}
 	}
 
+	// viewer===target の self-view では upstream `pack(user, me)` 互換で
+	// MeDetailed 拡張 field (isExplorable / noCrawle 等 11 個 + #985 で
+	// 追加した notification 3 field) を merge して返す (#970)。これにより
+	// frontend が `/api/users/show?username=me` 経由で自分のプロフィールを
+	// 開いたとき、`/api/i` 経由の $i と field set を一致させられる。
+	if viewer != nil && viewer.ID == bundle.User.ID {
+		return c.JSON(http.StatusOK, entity.AsMeDetailed(detailed, bundle.User, bundle.Profile))
+	}
 	return c.JSON(http.StatusOK, detailed)
 }
 
