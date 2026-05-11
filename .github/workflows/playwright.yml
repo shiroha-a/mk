@@ -76,18 +76,37 @@ jobs:
       # `pnpm build` の成果物で、submodule に commit されていない。CI で
       # 都度 build する (build context に焼き込んで docker build に渡す)。
       # TS overlay (upstream image を pull) では本 step を skip して時間を節約。
-      - name: Set up Node.js
+      #
+      # actions/cache で built/ + node_modules を pin。submodule の
+      # pnpm-lock.yaml hash をキーに使うので、Misskey upstream を pin し
+      # 直さない限り cache hit で pnpm install + build をまるごと skip
+      # (5-10 min → 数秒に短縮)。
+      - name: Cache misskey workspace (built + node_modules)
+        id: cache-misskey
         if: matrix.backend == 'mk-go'
+        uses: actions/cache@v4
+        with:
+          # packages/*/node_modules で全 workspace package を glob 対応
+          # (新 package 追加時に手動更新不要)。built/ は pnpm build の成果物。
+          path: |
+            third_party/misskey/node_modules
+            third_party/misskey/packages/*/node_modules
+            third_party/misskey/built
+          key: misskey-workspace-${{ runner.os }}-${{ hashFiles('third_party/misskey/pnpm-lock.yaml') }}
+
+      - name: Set up Node.js
+        if: matrix.backend == 'mk-go' && steps.cache-misskey.outputs.cache-hit != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Build third_party/misskey frontend bundle
-        if: matrix.backend == 'mk-go'
+        if: matrix.backend == 'mk-go' && steps.cache-misskey.outputs.cache-hit != 'true'
         working-directory: third_party/misskey
         # pnpm install --frozen-lockfile + pnpm build。初回は 5-10 分かかる
         # (vite + sw + twemoji asset 抽出)。docker build 時に build context
         # から COPY されるので、image build より前に host で run しておく。
+        # 以降の nightly は cache hit で本 step を skip する。
         run: |
           corepack enable
           corepack prepare pnpm@latest --activate

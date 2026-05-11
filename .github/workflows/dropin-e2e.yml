@@ -46,12 +46,30 @@ jobs:
       # Dockerfile.mkgo が third_party/misskey/built/_frontend_vite_ 等を
       # COPY する。これは `pnpm build` の成果物で submodule に commit され
       # ていないので、docker build より前に host で run しておく。
+      #
+      # actions/cache で built/ + node_modules を pin (playwright.yml と同じ
+      # 戦略)。submodule の pnpm-lock.yaml hash をキーに使うので、Misskey
+      # upstream を pin し直さない限り cache hit で 5-10 min → 数秒に短縮。
+      - name: Cache misskey workspace (built + node_modules)
+        id: cache-misskey
+        uses: actions/cache@v4
+        with:
+          # packages/*/node_modules で全 workspace package を glob 対応
+          # (新 package 追加時に手動更新不要)。built/ は pnpm build の成果物。
+          path: |
+            third_party/misskey/node_modules
+            third_party/misskey/packages/*/node_modules
+            third_party/misskey/built
+          key: misskey-workspace-${{ runner.os }}-${{ hashFiles('third_party/misskey/pnpm-lock.yaml') }}
+
       - name: Set up Node.js
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Build third_party/misskey frontend bundle
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
         working-directory: third_party/misskey
         run: |
           corepack enable
