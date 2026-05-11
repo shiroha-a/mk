@@ -31,9 +31,10 @@ type UserLite struct {
 	// CanChat は upstream Misskey TS の boolean field (#692)。FE の
 	// /chat/room.vue が `!user.canChat` で「DM 受け付け不可」warning を
 	// 出すので、出さないと local user 同士で DM できないと誤表示される。
-	// mk-go では chatScope!='none' を簡易判定として使う (upstream は
-	// roleService.policy.chatAvailability を参照するが、mk-go は role
-	// policy がまだ chat に対応していないため chatScope 由来で代替)。
+	// upstream 互換で role policy の `chatAvailability === "available"`
+	// 由来で計算する (#988)。PackUserLite が resolveCanChat() 経由で
+	// CanChatLookup を呼び、router で wired される。lookup が unwired
+	// の path (= 単体テスト等) は default `true` で fallback。
 	CanChat bool `json:"canChat"`
 	// Optional TS-compat fields (Phase 7-5a)。
 	// TS側は `requireSigninToViewContents: user.x === false ? undefined : true`
@@ -247,7 +248,12 @@ func PackUserLite(u *model.User) UserLite {
 		Emojis:            make(map[string]string),
 		OnlineStatus:      "unknown",
 		BadgeRoles:        []any{},
-		CanChat:           u.ChatScope != "none",
+		// upstream `chatAvailability === 'available'` 互換 (#988)。
+		// 旧実装は `u.ChatScope != "none"` で user 自身の受信設定を返して
+		// いたが、upstream は role policy の chatAvailability を見る
+		// (admin が role に設定する権限)。lookup が wire されていない
+		// path (= 既存 unit test 等) は default true で fallback する。
+		CanChat: resolveCanChat(u.ID),
 	}
 	// requireSigninToViewContents: true のときだけ出す (TS は false→undefined)
 	if u.RequireSigninToViewContents {

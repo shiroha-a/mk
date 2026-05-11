@@ -1231,6 +1231,10 @@ func (s *Server) setupRoutes() {
 	// 共有 catalog resolver を entity package に登録する (#521)。catalog は
 	// admin 管理で低頻度更新のため 30s TTL の in-memory cache で十分。
 	entity.SetAvatarDecorationLookup(avatardecoration.NewResolver(avatarDecorationRepo))
+	// PackUserLite の canChat を role policy 由来 (= upstream
+	// `chatAvailability === "available"`) に揃える (#988)。roleService 自体
+	// が in-memory cache を持つ (#761) ので追加 DB 負荷は実質ゼロ。
+	entity.SetCanChatLookup(corerole.NewCanChatLookup(roleService))
 	iHandler.SetNoteFieldResolver(noteFieldResolver)
 	// announcementRepoは後続で構築されるため SetupAdditional() 相当の順序依存があるが、
 	// 現状 announcementRepo := ... の行がここより後にあるため下で wire する。

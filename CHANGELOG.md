@@ -45,6 +45,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #872: blocked → following/create reject status (400)
 - #984: users/relation を stub から実装に切替。viewer ↔ target の follow / follow-request / block / mute / renote-mute 状態を 5 repo (`following` / `follow_request` / `blocking` / `muting` / `renote_muting`) から実 DB 状態として返す
 - #970: `/api/users/show` で viewer===target のとき MeDetailed 拡張 field (isExplorable / noCrawle / emailNotificationTypes 等 14 個) を merge して返すよう拡張。upstream `pack(user, me)` semantics と一致させ、`/api/users/show?username=me` 経由でも `/api/i` と同じ shape を保つ。新規 helper `entity.AsMeDetailed` で pre-built UserDetailed を promote する design
+- #988: `canChat` 二重 drift 解消。`PackUserLite` が \`u.ChatScope != "none"\` でなく **role policy の `chatAvailability === "available"`** から derive するように変更 (upstream `UserEntityService.ts:561` 互換)。新規 `entity.CanChatLookup` interface を `internal/entity/can_chat.go` に追加し、`role.CanChatLookupAdapter` で role.Service を bridge する design (= `entity.SetAvatarDecorationLookup` と同 pattern)。`/api/i` Me handler の `resp["canChat"] = true` hardcode も撤去し、self-view でも role policy が反映される
 
 #### settings / token
 - #883: i/regenerate-token return shape (204)

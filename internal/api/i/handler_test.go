@@ -14,6 +14,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
@@ -197,6 +198,44 @@ func TestMe_Success(t *testing.T) {
 	assert.Equal(t, false, resp["securityKeys"])
 	assert.Nil(t, resp["movedTo"])
 	assert.Nil(t, resp["alsoKnownAs"])
+}
+
+// TestMe_CanChatFromRolePolicy: #988 — Me handler が canChat を role policy
+// 由来で返すこと (旧 hardcode `resp["canChat"] = true` を撤去後の regression
+// guard)。CanChatLookup を wire して false を返すと self-view でも false。
+func TestMe_CanChatFromRolePolicy(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+
+	t.Cleanup(func() { entity.SetCanChatLookup(nil) })
+	entity.SetCanChatLookup(&stubMeCanChatLookup{result: false})
+
+	user := &model.User{
+		ID:                "user-canchat",
+		Username:          "blocked",
+		ChatScope:         "all", // 旧実装ではこの値で true 固定だった
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	userRepo.Profiles["user-canchat"] = &model.UserProfile{
+		UserID: "user-canchat",
+		Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+
+	require.NoError(t, h.Me(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["canChat"])
+}
+
+type stubMeCanChatLookup struct{ result bool }
+
+func (s *stubMeCanChatLookup) LookupCanChat(_ string) (bool, bool) {
+	return s.result, true
 }
 
 // TestMe_PreservesMeDetailedFields: #971 — Me handler を PackMeDetailed base

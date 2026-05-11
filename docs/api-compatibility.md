@@ -107,6 +107,7 @@ Playwright spec を両 backend で走らせる中で観測した「TS と mk-go 
 | #872 | blocked → following/create reject status (400) |
 | #984 | users/relation を stub から実装に切替。viewer ↔ target の follow / follow-request / block / mute / renote-mute を 5 repo (`following` / `follow_request` / `blocking` / `muting` / `renote_muting`) から実 DB 状態として返す |
 | #970 | `/api/users/show` で viewer===target のとき MeDetailed 拡張 field を merge (upstream `pack(user, me)` 互換)。`entity.AsMeDetailed` helper で pre-built UserDetailed を promote |
+| #988 | `canChat` 二重 drift 解消: PackUserLite が role policy `chatAvailability === "available"` 由来に切替 (旧 chatScope 比較を撤回) + Me handler の hardcode true override も撤去。新規 `entity.CanChatLookup` interface で entity ↔ role.Service を decouple |
 
 #### settings / token
 | # | 内容 |

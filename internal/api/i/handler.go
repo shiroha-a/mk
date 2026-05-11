@@ -581,11 +581,10 @@ func (h *Handler) Me(c echo.Context) error {
 	resp["movedTo"] = u.MovedToURI
 	resp["alsoKnownAs"] = u.AlsoKnownAs
 	resp["lastFetchedAt"] = nil
-	// canChat は upstream では role policy の chatAvailability 由来だが、
-	// mk-go は PackUserLite で chatScope != "none" 由来になっており、さらに
-	// 本 handler では self-view 用に true hardcode で override している。
-	// 二重 drift は別途 #988 で tracking。本 PR では既存挙動を保つ。
-	resp["canChat"] = true
+	// canChat は PackMeDetailed → UserLite 経由で role policy
+	// chatAvailability === 'available' を見るようになった (#988)。
+	// 旧 self-view 用 hardcode `resp["canChat"] = true` を撤去し、
+	// upstream と同じ role policy ベースの判定に揃える。
 	// memo / moderationNote は UserDetailed.Memo (omitempty) / MeDetailed
 	// 構造体に無いため、JSON unmarshal 後の resp map に key が出ない。
 	// /api/i の response shape を後方互換に保つため key 自体は出す
