@@ -36,7 +36,7 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 		// splash 中央のアイコンは upstream `_splash.tsx` 互換で server
 		// iconUrl を使う (= 管理者が設定したインスタンス画像)。未設定なら
 		// `/static-assets/splash.png` (Misskey ロゴ) にフォールバック。
-		// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#)
+		// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
 		splashIconURL := "/static-assets/splash.png"
 		metaJSON := "{}"
 		if m, err := metaRepo.Fetch(); err == nil {

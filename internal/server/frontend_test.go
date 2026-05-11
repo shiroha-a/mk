@@ -80,11 +80,13 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 
 		body := rec.Body.String()
 		// splash img には反映されないこと (mascotImageUrl は /api/meta で
-		// frontend が別用途で使う field、splash のアイコンではない)
+		// frontend が別用途で使う field、splash のアイコンではない)。
+		// strings.Index は見つからない場合 -1 を返すので、有効な offset は
+		// >= 0 で check する (relative offset なので 0 もあり得る)。
 		splashStart := strings.Index(body, `<img id="splashIcon"`)
+		require.GreaterOrEqual(t, splashStart, 0, "splashIcon img not found in body")
 		splashEnd := strings.Index(body[splashStart:], `</div>`)
-		require.Greater(t, splashStart, 0)
-		require.Greater(t, splashEnd, 0)
+		require.GreaterOrEqual(t, splashEnd, 0, "closing </div> not found after splashIcon")
 		splashSection := body[splashStart : splashStart+splashEnd]
 		assert.NotContains(t, splashSection, mascot,
 			"mascot URL should not appear in splash img")

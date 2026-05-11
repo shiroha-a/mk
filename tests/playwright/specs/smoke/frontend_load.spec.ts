@@ -46,6 +46,25 @@ test.describe('smoke: frontend SPA loads', () => {
     expect(bodyHTML.length).toBeGreaterThan(50);
   });
 
+  // splash 画面の DOM 構造が upstream `_splash.tsx` 互換であること (#993)。
+  // page.goto だと Vue mount で splash が消えるので、raw HTML を fetch して
+  // initial response の markup を verify する。
+  test('initial HTML contains upstream-compatible splash markup', async ({ request, baseURL }) => {
+    const resp = await request.get(`${baseURL}/`);
+    expect(resp.status()).toBe(200);
+    const html = await resp.text();
+    // splash 構造の必須要素
+    expect(html).toContain('<div id="splash">');
+    expect(html).toContain('<img id="splashIcon"');
+    expect(html).toContain('<div id="splashSpinner">');
+    // spinner 2 SVG (bg = static circle, fg = rotating arc)
+    expect(html).toContain('class="spinner bg"');
+    expect(html).toContain('class="spinner fg"');
+    // 旧 mascot (ai.png) や placeholder text は出ないこと
+    expect(html).not.toContain('src="/assets/ai.png"');
+    expect(html).not.toContain('<p>Loading...</p>');
+  });
+
   test('frontend asset (manifest.json) is served', async ({ request, baseURL }) => {
     // Vite manifest が frontend ビルドから配信されているかを確認。manifest
     // が無いと SPA は起動できない。注: `/_frontend_vite_/manifest.json` は
