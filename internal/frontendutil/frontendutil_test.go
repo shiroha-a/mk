@@ -103,6 +103,94 @@ func TestDetectClientEntry_ValidManifest(t *testing.T) {
 	info := DetectClientEntry()
 	assert.Equal(t, "assets/boot.abc.js", info.Script)
 	assert.Equal(t, []string{"assets/style.def.css"}, info.CSS)
+	assert.Nil(t, info.ModulePreloads)
+}
+
+// Verify that DetectClientEntry walks the entry's import chain recursively and
+// aggregates CSS from all imported chunks (upstream HtmlTemplateService#collectViteAssetFiles parity).
+// Without this, lazy-loaded SFC `<style scoped>` chunks (e.g. MkCustomEmoji /
+// MkMention) would be missing at first paint and the components fall back to
+// the browser's native <img> sizing (= 通常より明らかに大きい症状).
+func TestDetectClientEntry_WalksImports(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+	manifest := `{
+		"src/_boot_.ts": {
+			"file": "scripts/boot.js",
+			"isEntry": true,
+			"css": ["assets/entry.css"],
+			"imports": ["_chunk-a.js", "_chunk-b.js"]
+		},
+		"_chunk-a.js": {
+			"file": "scripts/chunk-a.js",
+			"css": ["assets/chunk-a.css"],
+			"imports": ["_chunk-c.js"]
+		},
+		"_chunk-b.js": {
+			"file": "scripts/chunk-b.js",
+			"css": ["assets/chunk-b.css"]
+		},
+		"_chunk-c.js": {
+			"file": "scripts/chunk-c.js",
+			"css": ["assets/chunk-c.css"]
+		}
+	}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0644))
+
+	info := DetectClientEntry()
+	assert.Equal(t, "scripts/boot.js", info.Script)
+	// Entry CSS + chunk-a / chunk-b (= entry の直接 import) + chunk-c (= recursive)
+	// が全て収集される。順序は entry → entry.imports[0] → entry.imports[0] の sub-import
+	// → entry.imports[1] (深さ優先)。
+	assert.Equal(t, []string{
+		"assets/entry.css",
+		"assets/chunk-a.css",
+		"assets/chunk-c.css",
+		"assets/chunk-b.css",
+	}, info.CSS)
+	// modulePreloads は entry の直接 import のみ (= 1 hop)。
+	assert.Equal(t, []string{
+		"scripts/chunk-a.js",
+		"scripts/chunk-b.js",
+	}, info.ModulePreloads)
+}
+
+// Cycles or duplicate imports must not cause infinite recursion or duplicate
+// CSS / preload entries. seenChunks は recursive walk 全体で共有されるため、
+// chunk-b は chunk-a の sub-import として先に visit され、top-level の visit
+// で skip される (= modulePreloads には入らない)。upstream の
+// collectViteAssetFiles と同じ挙動。
+func TestDetectClientEntry_DedupAndCycle(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+	manifest := `{
+		"src/_boot_.ts": {
+			"file": "scripts/boot.js",
+			"isEntry": true,
+			"css": ["assets/entry.css"],
+			"imports": ["_chunk-a.js", "_chunk-b.js"]
+		},
+		"_chunk-a.js": {
+			"file": "scripts/chunk-a.js",
+			"css": ["assets/shared.css"],
+			"imports": ["_chunk-b.js"]
+		},
+		"_chunk-b.js": {
+			"file": "scripts/chunk-b.js",
+			"css": ["assets/shared.css"],
+			"imports": ["_chunk-a.js"]
+		}
+	}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0644))
+
+	info := DetectClientEntry()
+	assert.Equal(t, []string{
+		"assets/entry.css",
+		"assets/shared.css",
+	}, info.CSS)
+	assert.Equal(t, []string{
+		"scripts/chunk-a.js",
+	}, info.ModulePreloads)
 }
 
 func TestDetectClientEntry_InvalidJSON(t *testing.T) {

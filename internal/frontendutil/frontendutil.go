@@ -78,32 +78,87 @@ func RepoAssetsDir() string {
 	return filepath.Join(frontendBase, "assets")
 }
 
-// ClientEntryInfo holds the Vite entry point script and its CSS dependencies.
+// ClientEntryInfo holds the Vite entry point script, CSS dependencies, and
+// module preloads collected from the manifest by walking the entry's import chain.
 type ClientEntryInfo struct {
-	Script string
-	CSS    []string
+	Script         string
+	CSS            []string
+	ModulePreloads []string
 }
 
-// DetectClientEntry reads the Vite manifest to find the entry script and CSS.
-// ビルド済みアセットが存在しない場合は空値を返す (dev mode)。
+// DetectClientEntry reads the Vite manifest to find the entry script and all
+// CSS files (= entry の直接 CSS + entry が import する全 chunk の CSS を再帰的に
+// 集めたもの)。upstream TS の HtmlTemplateService#collectViteAssetFiles と同じ動作。
+// Vite は SFC `<style scoped>` を chunk 単位の CSS file に切り出すため、entry が
+// 同期 import する chunk の CSS も最初に link しないと、それらの component (例:
+// MkCustomEmoji / MkMention) のスタイルが当たらない。ビルド済みアセットが存在し
+// ない場合は空値を返す (dev mode)。
 func DetectClientEntry() ClientEntryInfo {
 	manifestPath := filepath.Join(FrontendDir(), "manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return ClientEntryInfo{}
 	}
-	var manifest map[string]struct {
+	type manifestChunk struct {
 		File    string   `json:"file"`
 		IsEntry bool     `json:"isEntry"`
 		CSS     []string `json:"css"`
+		Imports []string `json:"imports"`
 	}
+	var manifest map[string]manifestChunk
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return ClientEntryInfo{}
 	}
-	if entry, ok := manifest["src/_boot_.ts"]; ok {
-		return ClientEntryInfo{Script: entry.File, CSS: entry.CSS}
+	entry, ok := manifest["src/_boot_.ts"]
+	if !ok {
+		return ClientEntryInfo{}
 	}
-	return ClientEntryInfo{}
+
+	seenChunks := map[string]struct{}{}
+	seenCSS := map[string]struct{}{}
+	var cssFiles []string
+	var modulePreloads []string
+
+	addCSS := func(files []string) {
+		for _, f := range files {
+			if _, dup := seenCSS[f]; dup {
+				continue
+			}
+			seenCSS[f] = struct{}{}
+			cssFiles = append(cssFiles, f)
+		}
+	}
+	addCSS(entry.CSS)
+
+	var walk func(imports []string, recursive bool)
+	walk = func(imports []string, recursive bool) {
+		for _, id := range imports {
+			if _, dup := seenChunks[id]; dup {
+				continue
+			}
+			seenChunks[id] = struct{}{}
+			chunk, ok := manifest[id]
+			if !ok {
+				continue
+			}
+			addCSS(chunk.CSS)
+			if len(chunk.Imports) > 0 {
+				walk(chunk.Imports, true)
+			}
+			// modulePreloads は entry が同期 import する 1 hop の chunk だけ
+			// (= recursive=false の呼び出し時のみ)。upstream と同じ挙動。
+			if !recursive {
+				modulePreloads = append(modulePreloads, chunk.File)
+			}
+		}
+	}
+	walk(entry.Imports, false)
+
+	return ClientEntryInfo{
+		Script:         entry.File,
+		CSS:            cssFiles,
+		ModulePreloads: modulePreloads,
+	}
 }
 
 // AssetsHandler returns a handler that tries to serve files from primary dir
