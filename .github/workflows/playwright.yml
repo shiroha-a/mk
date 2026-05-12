@@ -58,7 +58,7 @@ jobs:
             # 不確実)。foreground で完了を待ち、続く compose up 内の同
             # image pull は docker daemon の cache hit で 0s で済む方が
             # 確実。version は docker-compose.playwright.ts.yml と sync。
-            prepull: docker pull misskey/misskey:2026.3.2
+            prepull: docker pull misskey/misskey:2026.5.1
             # #978 で NODE_ENV=test を入れた副作用で compile-config が
             # /misskey/.config/test.yml を look up し、production image の
             # .config dir が空のため migrate 失敗で container 起動できない
