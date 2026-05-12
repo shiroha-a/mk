@@ -51,7 +51,23 @@ make uds-frontend-build
 
 数分〜10分かかる。docker daemon が必要。UDS / dropin / e2e いずれも同じビルド成果物を共有する。
 
-### 1-5. migration 適用
+### 1-5. UDS production stack の再ビルド
+
+[compose.uds.yaml](../compose.uds.yaml) で本番運用している場合、Misskey TS の prebuilt image を pull しているわけではなく **mk-go バイナリ + submodule の静的アセットを image に焼き込んでビルドしている** ([`deploy/uds/Dockerfile.mkgo`](../deploy/uds/Dockerfile.mkgo) の `COPY . .` 経由)。submodule update + frontend rebuild 後に image を作り直さないと古い asset が image にキャッシュされたまま:
+
+```bash
+# 1-1 / 1-2 と 1-4 を済ませた状態 (= submodule + frontend asset が最新) で
+docker compose -f compose.uds.yaml up --build -d
+```
+
+**重要**:
+- `--build` フラグ必須。`docker compose up -d` 単体だと前回 build 済の image が再利用され、submodule 更新が反映されない
+- 確実に再ビルドさせたい場合は `--build --force-recreate` を併用
+- `make uds-frontend-build` を skip すると Dockerfile builder の sanity check (`test -f .../1f004.svg` 等) で早期 fail する
+
+`postgres` / `valkey` / `nginx` / `video-thumb` 等の外部 image は Misskey 無関係なので submodule bump で影響を受けない。
+
+### 1-6. migration 適用
 
 submodule bump PR には mk-go 側の migration が同梱されることが多い (例: PR #998 の `migration/000048_avatar_decoration_category.{up,down}.sql`)。本番環境では:
 
