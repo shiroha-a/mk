@@ -71,7 +71,7 @@ func TestMain(m *testing.M) {
 		Hostname:          "127.0.0.1",
 		Scheme:            "http",
 		WsScheme:          "ws",
-		Version:           "2026.3.2",
+		Version:           config.MisskeyVersion,
 		TestMode:          true,
 		ID:                "aidx",
 		Redis:             redisOpts,

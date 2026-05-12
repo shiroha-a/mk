@@ -68,7 +68,7 @@ var testAllowedCIDRs = []string{"127.0.0.0/8", "::1/128"}
 func testService(allowedURLs map[string]bool) *Service {
 	return NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{}},
 		&mockAllowlist{allowed: allowedURLs},
 		[]byte("test-secret"),
@@ -307,7 +307,7 @@ func TestFetch_LocalFile(t *testing.T) {
 
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{"abc123": imgData}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),
@@ -479,7 +479,7 @@ func TestFetch_SVG_ReturnsDummyPNG(t *testing.T) {
 func TestFetch_LocalFile_NotFound(t *testing.T) {
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),
@@ -493,7 +493,7 @@ func TestFetch_LocalFile_NotFound(t *testing.T) {
 func TestFetch_LocalFile_EmptyAccessKey(t *testing.T) {
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),
@@ -508,7 +508,7 @@ func TestFetch_LocalFile_WithPathSegments(t *testing.T) {
 	imgData := makePNG()
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{"abc123": imgData}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),
@@ -526,7 +526,7 @@ func TestFetch_LocalFile_Emoji(t *testing.T) {
 	imgData := makePNG()
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{"emoji1": imgData}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),
@@ -798,7 +798,7 @@ func TestAuthorize_AllowlistError(t *testing.T) {
 	// errorAllowlistはIsAllowedURLでエラーを返す
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{}},
 		&errorAllowlist{},
 		[]byte("test-secret"),
@@ -820,7 +820,7 @@ func TestFetch_LocalFile_TooLarge(t *testing.T) {
 	bigData := make([]byte, maxDownload+100)
 	s := NewService(
 		"https://example.com",
-		"Misskey/2026.3.2 (https://example.com)",
+		"Misskey/2026.5.1 (https://example.com)",
 		&mockStorage{files: map[string][]byte{"big": bigData}},
 		&mockAllowlist{allowed: map[string]bool{}},
 		[]byte("test-secret"),

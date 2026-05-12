@@ -18,7 +18,7 @@ import (
 
 func newTestHandler() (*Handler, *testutil.MockMetaRepository) {
 	cfg := &config.Config{
-		Version: "2026.3.2",
+		Version: config.MisskeyVersion,
 		URL:     "https://misskey.example.com",
 	}
 	metaRepo := testutil.NewMockMetaRepository()
@@ -55,7 +55,7 @@ func TestMeta(t *testing.T) {
 	assert.Equal(t, "Test Instance", resp["name"])
 	assert.Equal(t, "A test instance", resp["description"])
 	assert.Equal(t, "admin", resp["maintainerName"])
-	assert.Equal(t, "2026.3.2", resp["version"])
+	assert.Equal(t, config.MisskeyVersion, resp["version"])
 	assert.Equal(t, "https://misskey.example.com", resp["uri"])
 	assert.Equal(t, float64(3000), resp["maxNoteTextLength"])
 
@@ -360,7 +360,7 @@ func TestMeta_DetailFalse(t *testing.T) {
 	// 基本フィールドが含まれる
 	assert.Equal(t, "Instance", resp["name"])
 	assert.Equal(t, true, resp["enableHcaptcha"])
-	assert.Equal(t, "2026.3.2", resp["version"])
+	assert.Equal(t, config.MisskeyVersion, resp["version"])
 	// 省かれるフィールド
 	assert.Nil(t, resp["features"])
 	assert.Nil(t, resp["policies"])
@@ -511,7 +511,7 @@ func TestPolicyBool(t *testing.T) {
 // providesTarballはconfig.PublishTarballInsteadOfProvideRepositoryUrlをそのまま返す。
 func TestMeta_ProvidesTarball(t *testing.T) {
 	cfg := &config.Config{
-		Version: "2026.3.2",
+		Version: config.MisskeyVersion,
 		URL:     "https://misskey.example.com",
 		PublishTarballInsteadOfProvideRepositoryUrl: true,
 	}
@@ -548,7 +548,7 @@ func TestMeta_ProvidesTarball_DefaultFalse(t *testing.T) {
 // sentryForFrontendはconfig.SentryForFrontend mapをそのまま返し、空なら null。
 func TestMeta_SentryForFrontend_Populated(t *testing.T) {
 	cfg := &config.Config{
-		Version: "2026.3.2",
+		Version: config.MisskeyVersion,
 		URL:     "https://misskey.example.com",
 		SentryForFrontend: map[string]any{
 			"options": map[string]any{"dsn": "https://sentry.example/1"},
