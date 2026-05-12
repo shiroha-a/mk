@@ -133,6 +133,9 @@ WantedBy=multi-user.target
 
 mk-goはMisskeyのSPAフロントエンドをそのまま配信する。フロントエンドは`third_party/misskey`サブモジュールからビルドする。
 
+> **submodule bump 後の追従手順** (= 新 Misskey TS release を取り込んだ PR をマージした後):
+> 詳細は [upstream-catch-up.md](./upstream-catch-up.md#1-既存環境への適用--submodule-bump-pr-マージ後) 参照。`git pull` だけでは submodule の working tree は更新されないため、`git pull --recurse-submodules` または `git submodule update --init --recursive` が必要。frontend asset は `make uds-frontend-build` で再ビルド。
+
 環境変数でアセットディレクトリを指定:
 
 | 環境変数 | 内容 |
