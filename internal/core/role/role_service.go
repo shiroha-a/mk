@@ -56,6 +56,14 @@ const (
 	// し、isSensitive=false への変更も拒否する。#1028 で drive service /
 	// i/update gate と共に enforcement 追加。
 	PolicyAlwaysMarkNsfw = "alwaysMarkNsfw"
+
+	// 以下は #1025 で admin 系 endpoint の gate に使う policy key。upstream
+	// Misskey TS は ApiCallService.ts で requiredRolePolicy のみで gate し
+	// (requireModerator/Admin flag は admin/emoji や avatar-decorations に
+	// 付いていない)、admin role 持ちのみ自動 bypass する semantics。mk-go も
+	// middleware.RequireRolePolicy 経由で同 挙動に揃える。
+	PolicyCanManageCustomEmojis      = "canManageCustomEmojis"
+	PolicyCanManageAvatarDecorations = "canManageAvatarDecorations"
 )
 
 // roleCacheTTL は GetUserRoles キャッシュの有効期限。Misskey TS 同等の

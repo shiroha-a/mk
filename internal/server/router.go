@@ -1920,10 +1920,16 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/abuse-user-reports", adminHandler.AbuseReports, middleware.RequireModerator(roleService))
 	api.POST("/admin/resolve-abuse-user-report", adminHandler.ResolveAbuseReport, middleware.RequireModerator(roleService))
 	api.POST("/admin/show-moderation-logs", adminHandler.ShowModerationLogs, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/add", adminHandler.EmojiAdd, middleware.RequireAdmin(roleService))
-	api.POST("/admin/emoji/update", adminHandler.EmojiUpdate, middleware.RequireAdmin(roleService))
-	api.POST("/admin/emoji/delete", adminHandler.EmojiDelete, middleware.RequireAdmin(roleService))
-	api.POST("/admin/emoji/list", adminHandler.EmojiList, middleware.RequireAdmin(roleService))
+	// admin/emoji/* と admin/avatar-decorations/* は upstream Misskey TS の
+	// ApiCallService.ts が requiredRolePolicy (canManageCustomEmojis /
+	// canManageAvatarDecorations) のみで gate する (requireModerator/Admin
+	// flag は設定されていない) ため、mk-go も RequireRolePolicy に揃える
+	// (#1025)。admin role 持ちは HasRolePolicy 内で常に true → 自動 bypass、
+	// それ以外は role で明示的に policy=true 必要。
+	api.POST("/admin/emoji/add", adminHandler.EmojiAdd, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/update", adminHandler.EmojiUpdate, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/delete", adminHandler.EmojiDelete, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/list", adminHandler.EmojiList, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/announcements/create", announcementHandler.AdminCreate, middleware.RequireAdmin(roleService))
 	api.POST("/admin/announcements/update", announcementHandler.AdminUpdate, middleware.RequireAdmin(roleService))
 	api.POST("/admin/announcements/delete", announcementHandler.AdminDelete, middleware.RequireAdmin(roleService))
@@ -1952,23 +1958,23 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/ad/delete", adminHandler.AdDelete, middleware.RequireModerator(roleService))
 	api.POST("/admin/ad/list", adminHandler.AdList, middleware.RequireModerator(roleService))
 	api.POST("/admin/ad/update", adminHandler.AdUpdate, middleware.RequireModerator(roleService))
-	api.POST("/admin/avatar-decorations/create", adminHandler.AvatarDecorationsCreate, middleware.RequireModerator(roleService))
-	api.POST("/admin/avatar-decorations/delete", adminHandler.AvatarDecorationsDelete, middleware.RequireModerator(roleService))
-	api.POST("/admin/avatar-decorations/list", adminHandler.AvatarDecorationsList, middleware.RequireModerator(roleService))
-	api.POST("/admin/avatar-decorations/update", adminHandler.AvatarDecorationsUpdate, middleware.RequireModerator(roleService))
+	api.POST("/admin/avatar-decorations/create", adminHandler.AvatarDecorationsCreate, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageAvatarDecorations))
+	api.POST("/admin/avatar-decorations/delete", adminHandler.AvatarDecorationsDelete, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageAvatarDecorations))
+	api.POST("/admin/avatar-decorations/list", adminHandler.AvatarDecorationsList, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageAvatarDecorations))
+	api.POST("/admin/avatar-decorations/update", adminHandler.AvatarDecorationsUpdate, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageAvatarDecorations))
 	api.POST("/admin/drive/clean-remote-files", adminHandler.DriveCleanRemoteFiles, middleware.RequireModerator(roleService))
 	api.POST("/admin/drive/cleanup", adminHandler.DriveCleanup, middleware.RequireModerator(roleService))
 	api.POST("/admin/drive/files", adminHandler.DriveFiles, middleware.RequireModerator(roleService))
 	api.POST("/admin/drive/show-file", adminHandler.DriveShowFile, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/add-aliases-bulk", adminHandler.EmojiAddAliasesBulk, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/copy", adminHandler.EmojiCopy, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/delete-bulk", adminHandler.EmojiDeleteBulk, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/import-zip", adminHandler.EmojiImportZip, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/list-remote", adminHandler.EmojiListRemote, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireModerator(roleService))
-	api.POST("/admin/emoji/set-license-bulk", adminHandler.EmojiSetLicenseBulk, middleware.RequireModerator(roleService))
+	api.POST("/admin/emoji/add-aliases-bulk", adminHandler.EmojiAddAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/copy", adminHandler.EmojiCopy, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/delete-bulk", adminHandler.EmojiDeleteBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/import-zip", adminHandler.EmojiImportZip, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/list-remote", adminHandler.EmojiListRemote, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/set-license-bulk", adminHandler.EmojiSetLicenseBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/federation/delete-all-files", adminHandler.FederationDeleteAllFiles, middleware.RequireModerator(roleService))
 	api.POST("/admin/federation/refresh-remote-instance-metadata", adminHandler.FederationRefreshRemoteInstanceMetadata, middleware.RequireModerator(roleService))
 	api.POST("/admin/federation/remove-all-following", adminHandler.FederationRemoveAllFollowing, middleware.RequireModerator(roleService))
@@ -2418,7 +2424,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/page-push", pagesHandler.PagePush, middleware.RequireAuth())
 
 	// v2/admin/emoji/list — v2はページネーション情報付きオブジェクトを返す専用ハンドラ
-	api.POST("/v2/admin/emoji/list", adminHandler.EmojiListV2, middleware.RequireAdmin(roleService))
+	api.POST("/v2/admin/emoji/list", adminHandler.EmojiListV2, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 
 	// --- その他の残りエンドポイント ---
 	// test — フロントエンドのテスト用
