@@ -50,6 +50,10 @@ const (
 	// で reject、mk-go も apierr.RestrictedByRole で同 shape を返す。
 	PolicyCanPublicNote     = "canPublicNote"
 	PolicyCanUpdateBioMedia = "canUpdateBioMedia"
+	// PolicyAlwaysMarkNsfw — true なら user の drive upload を強制 NSFW 化
+	// し、isSensitive=false への変更も拒否する。#1028 で drive service /
+	// i/update gate と共に enforcement 追加。
+	PolicyAlwaysMarkNsfw = "alwaysMarkNsfw"
 )
 
 // roleCacheTTL は GetUserRoles キャッシュの有効期限。Misskey TS 同等の

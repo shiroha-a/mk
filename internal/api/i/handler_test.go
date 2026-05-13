@@ -781,6 +781,77 @@ func TestUpdate_AvatarID_AdminBypass(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "admin は policy=false でもバイパス")
 }
 
+// #1028: i/update で alwaysMarkNsfw role policy=true の user が profile flag
+// を変更しようとしたら restrictedByRole (= 403)。
+func TestUpdate_AlwaysMarkNsfw_RestrictedByRole(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"alwaysMarkNsfw": true},
+	})
+
+	rec := post(h.Update, `{"alwaysMarkNsfw":false}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=true で 403")
+	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
+	assert.Contains(t, rec.Body.String(), "8feff0ba-5ab5-585b-31f4-4df816663fad")
+}
+
+// policy=true でも true 設定 (= NSFW 維持) は意味的に重複でも reject される。
+// upstream は `typeof ps.alwaysMarkNsfw === 'boolean'` 条件で gate するので
+// true/false どちらの代入も等しく rejected (admin 強制 marker への user 介入
+// を一切禁じる)。
+func TestUpdate_AlwaysMarkNsfw_RestrictedEvenForTrue(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"alwaysMarkNsfw": true},
+	})
+
+	rec := post(h.Update, `{"alwaysMarkNsfw":true}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestUpdate_AlwaysMarkNsfw_AllowedWhenPolicyFalse(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"alwaysMarkNsfw": false},
+	})
+
+	rec := post(h.Update, `{"alwaysMarkNsfw":true}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "policy=false なら通常成功")
+}
+
+// admin / moderator は alwaysMarkNsfw policy gate を bypass する。
+func TestUpdate_AlwaysMarkNsfw_AdminBypass(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		admin:    true,
+		policies: map[string]any{"alwaysMarkNsfw": true},
+	})
+
+	rec := post(h.Update, `{"alwaysMarkNsfw":false}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "admin は policy=true でもバイパス")
+}
+
+// req.alwaysMarkNsfw 省略時は policy 無関係に通る (= 他 field 更新を妨げない)。
+func TestUpdate_AlwaysMarkNsfw_OmittedSkipsGate(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"alwaysMarkNsfw": true},
+	})
+
+	rec := post(h.Update, `{"name":"new name"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "省略時は gate 通過")
+}
+
 func TestUpdate_Success(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{

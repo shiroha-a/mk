@@ -857,6 +857,21 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream Misskey TS i/update.ts: role policy alwaysMarkNsfw=true の user は
+	// profile flag を変更できない (admin 強制 NSFW marker の保護、#1028)。
+	//
+	// 「許可型」policy (canUpdateBioMedia 等) と挙動が逆で、true = 制限 ON な
+	// 「禁止型」policy なので、HasRolePolicy の admin bypass (admin に対して
+	// 常に true を返す) を使うと admin が逆に制限されてしまう。GetUserPolicies
+	// で生値を直接見て、admin / moderator は明示的に bypass する。
+	if req.AlwaysMarkNsfw != nil && h.roleProvider != nil &&
+		!h.roleProvider.IsAdministrator(me.ID) && !h.roleProvider.IsModerator(me.ID) {
+		policies := h.roleProvider.GetUserPolicies(me.ID)
+		if v, ok := policies[role.PolicyAlwaysMarkNsfw].(bool); ok && v {
+			return apierr.JSONRestrictedByRole(c)
+		}
+	}
+
 	// 全 *bool field は req と in の field type が一致するので struct literal
 	// で直接代入する。req.X が nil なら in.X も nil (= service 側で no-op
 	// 扱い) になり、`if != nil` block 経由と意味的に等価。

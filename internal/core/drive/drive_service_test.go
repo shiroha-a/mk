@@ -210,9 +210,19 @@ func TestShow_OtherUserDenied(t *testing.T) {
 // moderator なら所有者でなくても見られる (upstream Misskey と一致)。
 // リモート添付メディアの詳細表示は file.userId が remote user ID 固定
 // になるので、この経路がないと管理者でも 403 で見られない。
-type fakeMod struct{ moderators map[string]bool }
+type fakeMod struct {
+	moderators map[string]bool
+	policies   map[string]map[string]any // userID -> policies (nil = no override)
+}
 
 func (f *fakeMod) IsModerator(userID string) bool { return f.moderators[userID] }
+
+func (f *fakeMod) GetUserPolicies(userID string) map[string]any {
+	if f.policies == nil {
+		return nil
+	}
+	return f.policies[userID]
+}
 
 func TestShow_ModeratorBypass(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
@@ -305,6 +315,173 @@ func TestDelete_ModeratorCannotDeleteOthersFile(t *testing.T) {
 
 	err := svc.Delete(&model.User{ID: "u1"}, "f1")
 	require.ErrorIs(t, err, drive.ErrAccessDenied)
+}
+
+// --- #1028: role policy gate (alwaysMarkNsfw / uploadableFileTypes) ---
+
+// alwaysMarkNsfw=true の user の upload は IsSensitive=true で保存される。
+func TestUpload_AlwaysMarkNsfwForcesSensitive(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"alwaysMarkNsfw": true},
+		},
+	})
+
+	user := &model.User{ID: "u1"}
+	f, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("img"), Name: "x.txt", IsSensitive: false,
+	})
+	require.NoError(t, err)
+	assert.True(t, f.IsSensitive, "role policy alwaysMarkNsfw=true で強制 sensitive")
+	assert.Len(t, fileRepo.Files, 1)
+}
+
+// uploadableFileTypes allowlist に match しない mime は ErrUnallowedFileType。
+func TestUpload_UploadableFileTypesRejectsMismatch(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"uploadableFileTypes": []string{"image/*"}},
+		},
+	})
+	// AnalyseFile は body から mime を検出する。"hello" は text/plain になる
+	// ので image/* allowlist に match しない。
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("hello text body content"), Name: "x.txt",
+	})
+	require.ErrorIs(t, err, drive.ErrUnallowedFileType)
+}
+
+// uploadableFileTypes に wildcard ("*") があれば全許可。
+func TestUpload_UploadableFileTypesWildcardAllows(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"uploadableFileTypes": []string{"*"}},
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("hello"), Name: "x.txt",
+	})
+	require.NoError(t, err)
+}
+
+// moderator は uploadableFileTypes allowlist を bypass する。
+func TestUpload_ModeratorBypassesUploadableFileTypes(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		moderators: map[string]bool{"u1": true},
+		policies: map[string]map[string]any{
+			"u1": {"uploadableFileTypes": []string{"image/*"}},
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("hello text body"), Name: "x.txt",
+	})
+	require.NoError(t, err, "moderator は allowlist mismatch でも通る")
+}
+
+// policies map が nil (= test fixture / wire 未配線) のときは gate skip。
+func TestUpload_RoleCheckerNoPoliciesSkipsGate(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{}) // policies nil
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("anything"), Name: "x.txt",
+	})
+	require.NoError(t, err)
+}
+
+// system file (User == nil) は role policy gate の対象外 (= emoji copy 等)。
+func TestUpload_SystemFileBypassesPolicy(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"uploadableFileTypes": []string{"image/*"}},
+		},
+	})
+	// User == nil は system file 経路、policy 対象外。
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		Body: []byte("anything"), Name: "x.txt",
+	})
+	require.NoError(t, err)
+}
+
+// alwaysMarkNsfw=true の user は自分の file の isSensitive=false 化を拒否される。
+func TestUpdate_AlwaysMarkNsfwBlocksUnsensitive(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: true}
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"alwaysMarkNsfw": true},
+		},
+	})
+
+	notSensitive := false
+	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{IsSensitive: &notSensitive})
+	require.ErrorIs(t, err, drive.ErrCannotUnmarkSensitive)
+}
+
+// 同 user でも IsSensitive=true への変更は通常通り許可される。
+func TestUpdate_AlwaysMarkNsfwAllowsKeepingSensitive(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: false}
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"alwaysMarkNsfw": true},
+		},
+	})
+
+	sensitive := true
+	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{IsSensitive: &sensitive})
+	require.NoError(t, err)
+}
+
+// policy false の user は通常通り isSensitive を clear できる。
+func TestUpdate_NoAlwaysMarkNsfwAllowsUnsensitive(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: true}
+	svc.SetRoleChecker(&fakeMod{}) // policies nil = gate skip
+
+	notSensitive := false
+	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{IsSensitive: &notSensitive})
+	require.NoError(t, err)
+}
+
+// mimeAllowedByPolicy / normalizeMimePatterns の direct unit test。pattern
+// マッチング (wildcard / prefix / exact / empty / 型不一致) を保証する。
+func TestMimeAllowedByPolicy_PatternMatching(t *testing.T) {
+	tests := []struct {
+		name    string
+		mime    string
+		raw     any
+		allowed bool
+	}{
+		{"wildcard *", "image/png", []string{"*"}, true},
+		{"wildcard */*", "video/mp4", []string{"*/*"}, true},
+		{"prefix image/* matches", "image/jpeg", []string{"image/*"}, true},
+		{"prefix image/* mismatches", "video/mp4", []string{"image/*"}, false},
+		{"exact match", "application/json", []string{"application/json"}, true},
+		{"no match", "application/zip", []string{"image/*", "text/*"}, false},
+		{"empty string entries are skipped", "image/png", []string{"", "image/*"}, true},
+		{"nil policy is fail-soft allow", "image/png", nil, true},
+		{"empty list is fail-soft allow", "image/png", []string{}, true},
+		{"[]any from JSON unmarshal", "image/png", []any{"image/*"}, true},
+		{"[]any with non-string entries skipped", "image/png", []any{42, "image/*"}, true},
+		{"wrong type fail-soft allow", "image/png", "image/*", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.allowed, drive.MimeAllowedByPolicyForTest(tc.mime, tc.raw))
+		})
+	}
 }
 
 func TestUpdate_FolderNotFound(t *testing.T) {

@@ -54,3 +54,9 @@ func (s *Service) GenerateAltsForTest(body []byte, mimeType string) (
 	}
 	return result.thumbnail, result.webpublic, result.blurhash
 }
+
+// MimeAllowedByPolicyForTest exposes mimeAllowedByPolicy so external tests
+// can exercise the helper's pattern-matching logic directly (#1028).
+func MimeAllowedByPolicyForTest(mime string, raw any) bool {
+	return mimeAllowedByPolicy(mime, raw)
+}

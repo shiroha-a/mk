@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/entity"
@@ -34,6 +35,16 @@ var (
 	// ErrFolderNotEmpty is returned when attempting to delete a folder that
 	// still has children.
 	ErrFolderNotEmpty = errors.New("folder is not empty")
+	// ErrUnallowedFileType is returned when an upload's MIME type is not
+	// covered by the user's `uploadableFileTypes` role policy. Handler
+	// translates this into upstream's UNALLOWED_FILE_TYPE error code
+	// (UUID 4becd248-...) (#1028).
+	ErrUnallowedFileType = errors.New("unallowed file type")
+	// ErrCannotUnmarkSensitive is returned when a user with the
+	// `alwaysMarkNsfw=true` role policy tries to clear `isSensitive` on
+	// their own drive file. Handler translates this into the drive-specific
+	// RESTRICTED_BY_ROLE response (UUID 7f59dccb-...) (#1028).
+	ErrCannotUnmarkSensitive = errors.New("cannot unmark sensitive while alwaysMarkNsfw policy is active")
 )
 
 // StreamingPublisher receives drive file life-cycle events so that
@@ -61,11 +72,18 @@ type ChartHook interface {
 	OnFileDeleted(file *model.DriveFile)
 }
 
-// RoleChecker abstracts moderator-role lookup so Show can match upstream
-// Misskey's "moderators can view any file" semantics without taking a
-// hard dep on core/role (avoids circular imports).
+// RoleChecker abstracts moderator-role + policy lookups so Show /
+// Upload / Update can honour upstream Misskey's role-policy semantics
+// without taking a hard dep on core/role (avoids circular imports).
+//
+// IsModerator is consumed by Show ("moderators can view any file") and
+// Upload (moderators bypass uploadableFileTypes allowlist).
+// GetUserPolicies is consumed by Upload (alwaysMarkNsfw / uploadableFileTypes)
+// and Update (alwaysMarkNsfw guard against clearing isSensitive). nil
+// policies map disables the gate (= test fixture). (#1028)
 type RoleChecker interface {
 	IsModerator(userID string) bool
+	GetUserPolicies(userID string) map[string]any
 }
 
 // Service manages drive files and folders.
@@ -181,6 +199,28 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	// AnalyseFile自体は io.Reader を取るがエラー経路はここでは到達しない。
 	info, _ := AnalyseFile(bytes.NewReader(in.Body))
 
+	// role policy gate (#1028)。system file (in.User == nil) は policy 対象外。
+	// upstream Misskey TS DriveService と同様、moderator は uploadableFileTypes
+	// allowlist を bypass し、それ以外の user は allowlist match を要求する。
+	// alwaysMarkNsfw policy が true なら IsSensitive を強制 true にし、
+	// sensitive detection は実行しても無意味なので skip フラグを立てる。
+	var rolePolicyForceSensitive bool
+	if in.User != nil && s.roleChecker != nil {
+		isModerator := s.roleChecker.IsModerator(in.User.ID)
+		policies := s.roleChecker.GetUserPolicies(in.User.ID)
+		if !isModerator && policies != nil {
+			if !mimeAllowedByPolicy(info.MimeType, policies["uploadableFileTypes"]) {
+				return nil, ErrUnallowedFileType
+			}
+		}
+		if policies != nil {
+			if v, ok := policies["alwaysMarkNsfw"].(bool); ok && v {
+				rolePolicyForceSensitive = true
+				in.IsSensitive = true
+			}
+		}
+	}
+
 	if in.User != nil && !in.Force {
 		if existing, err := s.fileRepo.FindByMD5(in.User.ID, info.MD5); err == nil {
 			return existing, nil
@@ -280,7 +320,9 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	}
 
 	// Sensitive media detection フック (system file は user 紐付きが無いので skip)
-	if !f.IsSensitive && in.User != nil {
+	// alwaysMarkNsfw role policy が true の user は既に IsSensitive=true で
+	// 確定しているので detect の意味がない、skip して負荷を減らす (#1028)。
+	if !f.IsSensitive && !rolePolicyForceSensitive && in.User != nil {
 		f.IsSensitive = s.detectSensitive(ctx, in.User, in.Body, info.MimeType)
 	}
 
@@ -499,6 +541,18 @@ func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.Dr
 		fields["folderId"] = *in.FolderID
 	}
 	if in.IsSensitive != nil {
+		// alwaysMarkNsfw role policy が true の user は isSensitive を false
+		// に変更できない (upstream DriveService.updateFile と同 logic、#1028)。
+		// 自分自身の policy なので file.userId == user.ID 前提で role を見る。
+		// moderator bypass はしない (= owner が自分の policy を見るのみ)。
+		if !*in.IsSensitive && f.IsSensitive && s.roleChecker != nil {
+			policies := s.roleChecker.GetUserPolicies(user.ID)
+			if policies != nil {
+				if v, ok := policies["alwaysMarkNsfw"].(bool); ok && v {
+					return nil, ErrCannotUnmarkSensitive
+				}
+			}
+		}
 		fields["isSensitive"] = *in.IsSensitive
 	}
 	if err := s.fileRepo.Update(f.ID, fields); err != nil {
@@ -649,4 +703,70 @@ func newAccessKey() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// mimeAllowedByPolicy reports whether mime matches any pattern in the
+// `uploadableFileTypes` role policy. raw は GetUserPolicies map から取り出した
+// any 値で、想定は `[]string` または `[]any` (JSON unmarshal 経由)。型不一致や
+// 空 / nil は **deny** ではなく upstream 互換のため **allow** に倒す (= policy
+// 未設定 / 未集約のときは制限を加えない fail-soft)。
+//
+// パターン:
+//   - "*" / "*/*" → 全許可
+//   - "image/*" など末尾 "/*" → prefix match (= "image/" で始まる)
+//   - それ以外 → 完全一致
+func mimeAllowedByPolicy(mime string, raw any) bool {
+	patterns := normalizeMimePatterns(raw)
+	// 取り出せなかった (= policy 未集約) ケースは fail-soft で許可。
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, p := range patterns {
+		switch {
+		case p == "*" || p == "*/*":
+			return true
+		case strings.HasSuffix(p, "/*"):
+			if strings.HasPrefix(mime, p[:len(p)-1]) {
+				return true
+			}
+		default:
+			if mime == p {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeMimePatterns coerces the `uploadableFileTypes` policy value into
+// a []string. Accepts []string (DefaultPolicies), []any (JSON unmarshal),
+// or nil. 各 entry は trim され、空文字は除外する (upstream の `type.trim()
+// === ” continue` と同 logic)。
+func normalizeMimePatterns(raw any) []string {
+	switch v := raw.(type) {
+	case nil:
+		return nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
