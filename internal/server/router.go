@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	cryptorand "crypto/rand"
 	"io"
 	"net/http"
 	"net/http/pprof"
@@ -39,6 +38,7 @@ import (
 	apihashtags "github.com/shiroha-a/mk/internal/api/hashtags"
 	"github.com/shiroha-a/mk/internal/api/i"
 	"github.com/shiroha-a/mk/internal/api/inbox"
+	apiinvite "github.com/shiroha-a/mk/internal/api/invite"
 	"github.com/shiroha-a/mk/internal/api/meta"
 	"github.com/shiroha-a/mk/internal/api/mute"
 	"github.com/shiroha-a/mk/internal/api/nodeinfo"
@@ -2298,172 +2298,19 @@ func (s *Server) setupRoutes() {
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth())
 
-	// invite/create — 招待コード作成。canInvite role policy gate を #1020 で
-	// 追加 (default false なので role で明示的に許可した user のみ作成可)。
-	// inviteLimit / inviteLimitCycle / inviteExpirationTime policy は #1029 PR-2
-	// で enforcement。upstream Misskey TS `invite/create.ts` と同 semantics で
-	// time-window count >= inviteLimit なら 400 reject、expiresAt は policy
-	// で決定 (0 / 未設定なら null = 無期限)。
-	api.POST("/invite/create", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		now := time.Now()
-
-		// inviteLimit / inviteLimitCycle gate (#1029 PR-2)。
-		// upstream は `if (policies.inviteLimit)` で 0 / falsy は skip = 無制限。
-		// inviteLimitCycle の単位は分 (= * 60 * 1000 ms)。
-		policies := roleService.GetUserPolicies(user.ID)
-		if invLimit, ok := policies["inviteLimit"].(int); ok && invLimit > 0 {
-			cycleMin := 0
-			if v, ok2 := policies["inviteLimitCycle"].(int); ok2 {
-				cycleMin = v
-			}
-			sinceID := idGen.Generate(now.Add(-time.Duration(cycleMin) * time.Minute))
-			count, err := signupTicketRepo.CountByCreatorSince(user.ID, sinceID)
-			if err != nil {
-				return apierr.JSONInternalError(c)
-			}
-			if count >= int64(invLimit) {
-				return apierr.JSONExceededLimitOfCreateInviteCode(c)
-			}
-		}
-
-		// inviteExpirationTime (= 分単位) が truthy なら expiresAt を set。
-		// 0 / 未設定なら null (= 無期限) を維持。
-		var expiresAt *time.Time
-		if v, ok := policies["inviteExpirationTime"].(int); ok && v > 0 {
-			exp := now.Add(time.Duration(v) * time.Minute)
-			expiresAt = &exp
-		}
-
-		ticket := &model.RegistrationTicket{
-			ID:          idGen.Generate(now),
-			Code:        generateInviteCode(),
-			CreatedByID: &user.ID,
-			ExpiresAt:   expiresAt,
-		}
-		if err := s.db.Create(ticket).Error; err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]any{
-				"error": map[string]any{
-					"message": "Internal error.",
-					"code":    "INTERNAL_ERROR",
-					"id":      "5d37dbcb-891e-41ca-a3d6-e690c97775ac",
-				},
-			})
-		}
-		createdBy := entity.PackUserLite(user)
-		resp := map[string]any{
-			"id":        ticket.ID,
-			"code":      ticket.Code,
-			"expiresAt": ticket.ExpiresAt,
-			"createdBy": createdBy,
-			"usedBy":    nil,
-			"usedAt":    nil,
-			"used":      false,
-		}
-		if t, err := idGen.ParseTime(ticket.ID); err == nil {
-			resp["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
-		}
-		return c.JSON(http.StatusOK, resp)
-	},
+	// invite/* — 招待コード user-scope 4 endpoint。canInvite role policy gate
+	// (#1020) + inviteLimit / inviteLimitCycle / inviteExpirationTime (#1029
+	// PR-2) は handler 側で enforcement。handler 抽出後の unit test は
+	// internal/api/invite/handler_test.go を参照。
+	inviteHandler := apiinvite.NewHandler(signupTicketRepo, idGen)
+	inviteHandler.SetRolePolicyProvider(roleService)
+	api.POST("/invite/create", inviteHandler.Create,
 		middleware.RequireAuth(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite))
 
-	// invite/list — 招待コード一覧 (認証必須)
-	api.POST("/invite/list", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		var req struct {
-			Limit   int    `json:"limit"`
-			SinceID string `json:"sinceId"`
-			UntilID string `json:"untilId"`
-		}
-		_ = c.Bind(&req)
-		if req.Limit <= 0 {
-			req.Limit = 30
-		}
-		if req.Limit > 100 {
-			req.Limit = 100
-		}
-		q := s.db.Model(&model.RegistrationTicket{}).
-			Where(`"createdById" = ?`, user.ID).
-			Order("id DESC").
-			Limit(req.Limit)
-		if req.SinceID != "" {
-			q = q.Where("id > ?", req.SinceID)
-		}
-		if req.UntilID != "" {
-			q = q.Where("id < ?", req.UntilID)
-		}
-		var tickets []*model.RegistrationTicket
-		if err := q.Find(&tickets).Error; err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		out := make([]map[string]any, 0, len(tickets))
-		for _, t := range tickets {
-			entry := map[string]any{
-				"id":        t.ID,
-				"code":      t.Code,
-				"expiresAt": t.ExpiresAt,
-				"createdBy": nil,
-				"usedBy":    nil,
-				"usedAt":    t.UsedAt,
-				"used":      t.UsedByID != nil,
-			}
-			if ts, err := idGen.ParseTime(t.ID); err == nil {
-				entry["createdAt"] = ts.UTC().Format("2006-01-02T15:04:05.000Z")
-			}
-			out = append(out, entry)
-		}
-		return c.JSON(http.StatusOK, out)
-	}, middleware.RequireAuth())
-
-	// invite/delete — 自分が作成した招待コード削除
-	api.POST("/invite/delete", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		var req struct {
-			InviteID string `json:"inviteId"`
-		}
-		if err := c.Bind(&req); err != nil || req.InviteID == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "inviteId is required.", "code": "INVALID_PARAM", "id": "3d81ceae-475f-4600-b2a8-2bc116157532"}})
-		}
-		var ticket model.RegistrationTicket
-		if err := s.db.Where("id = ?", req.InviteID).First(&ticket).Error; err != nil {
-			return c.NoContent(http.StatusNoContent)
-		}
-		if ticket.CreatedByID == nil || *ticket.CreatedByID != user.ID {
-			return c.JSON(http.StatusForbidden, map[string]any{"error": map[string]any{"message": "Access denied.", "code": "ACCESS_DENIED", "id": "1fb7cb09-d46a-4fff-b8df-057708cce513"}})
-		}
-		if err := s.db.Where("id = ?", req.InviteID).Delete(&model.RegistrationTicket{}).Error; err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "Internal error.", "code": "INTERNAL_ERROR", "id": "5d37dbcb-891e-41ca-a3d6-e690c97775ac"}})
-		}
-		return c.NoContent(http.StatusNoContent)
-	}, middleware.RequireAuth())
-
-	// invite/limit — 残り招待枠 (inviteLimit - inviteLimitCycle 内に作成
-	// された invite 数)。upstream `invite/limit.ts` と同 semantics で
-	// `policies.inviteLimit` falsy なら null (= 無制限)、それ以外なら
-	// max(0, inviteLimit - count) を返す (#1029 PR-2)。
-	api.POST("/invite/limit", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		policies := roleService.GetUserPolicies(user.ID)
-		invLimit, hasLimit := policies["inviteLimit"].(int)
-		if !hasLimit || invLimit <= 0 {
-			return c.JSON(http.StatusOK, map[string]any{"remaining": nil})
-		}
-		cycleMin := 0
-		if v, ok := policies["inviteLimitCycle"].(int); ok {
-			cycleMin = v
-		}
-		sinceID := idGen.Generate(time.Now().Add(-time.Duration(cycleMin) * time.Minute))
-		count, err := signupTicketRepo.CountByCreatorSince(user.ID, sinceID)
-		if err != nil {
-			return apierr.JSONInternalError(c)
-		}
-		remaining := int64(invLimit) - count
-		if remaining < 0 {
-			remaining = 0
-		}
-		return c.JSON(http.StatusOK, map[string]any{"remaining": remaining})
-	}, middleware.RequireAuth())
+	api.POST("/invite/list", inviteHandler.List, middleware.RequireAuth())
+	api.POST("/invite/delete", inviteHandler.Delete, middleware.RequireAuth())
+	api.POST("/invite/limit", inviteHandler.Limit, middleware.RequireAuth())
 
 	// notes (plain) — bulk note lookup by noteIds
 	api.POST("/notes", notesHandler.BulkShow)
@@ -2576,19 +2423,6 @@ func (s *Server) setupRoutes() {
 
 	// Frontend HTML shell — SPA catchall (最後に登録)
 	s.echo.GET("/*", frontend)
-}
-
-// generateInviteCode creates a random invite code string.
-func generateInviteCode() string {
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 8)
-	if _, err := io.ReadFull(cryptorand.Reader, b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	for i := range b {
-		b[i] = chars[b[i]%byte(len(chars))]
-	}
-	return string(b)
 }
 
 // notifReaderAdapter bridges stream.NotificationReader to

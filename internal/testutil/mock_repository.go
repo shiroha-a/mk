@@ -6154,6 +6154,47 @@ func (m *MockRegistrationTicketRepository) CountByCreatorSince(creatorID, sinceI
 	return count, nil
 }
 
+func (m *MockRegistrationTicketRepository) FindByID(id string) (*model.RegistrationTicket, error) {
+	if t, ok := m.Tickets[id]; ok {
+		return t, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *MockRegistrationTicketRepository) ListByCreator(creatorID, sinceID, untilID string, limit int) ([]*model.RegistrationTicket, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var rows []*model.RegistrationTicket
+	for _, t := range m.Tickets {
+		if t.CreatedByID == nil || *t.CreatedByID != creatorID {
+			continue
+		}
+		if sinceID != "" && t.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && t.ID >= untilID {
+			continue
+		}
+		rows = append(rows, t)
+	}
+	// id DESC sort
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if rows[i].ID < rows[j].ID {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 func (m *MockRegistrationTicketRepository) Delete(id string) error {
 	delete(m.Tickets, id)
 	return nil
