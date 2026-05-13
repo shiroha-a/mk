@@ -450,6 +450,12 @@ func coerceToBaseType(base, override any) any {
 		}
 	case float64:
 		if f, ok := override.(float64); ok {
+			// float64 base はそのまま受ける (DefaultPolicies に該当する base 型
+			// は現状存在しないが、将来 float64 policy が追加されたとき NaN/Inf
+			// が consumer に漏れないよう guard する)。
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return base
+			}
 			return f
 		}
 		if i, ok := override.(int); ok {
@@ -459,14 +465,22 @@ func coerceToBaseType(base, override any) any {
 	return override
 }
 
-// isFiniteAndInRange returns true when v is a finite float64 that fits
-// within [lo, hi] as a float. Used by numeric coercers to guard against
-// NaN / +-Inf and overflowing casts when truncating to int / int64.
-func isFiniteAndInRange(v float64, lo, hi int64) bool {
+// isFiniteAndInRange returns true when v is a finite float64 that can be
+// truncated to an int / int64 without overflow. lo / hi are taken as float64
+// so callers can use untyped consts like `math.MinInt` / `math.MaxInt`
+// (their underlying type is `int`, which is platform-dependent — taking
+// float64 here keeps the helper portable on 32-bit builds).
+//
+// 上限は `<` で厳密比較する。`float64(math.MaxInt64)` は IEEE 754 で表現
+// できず `2^63` に丸まるため、`v == 2^63` で受け入れると `int64(v)` の
+// 結果が implementation-defined になる。`v < hi` でその境界を弾く。
+// 下限の `>= lo` は `math.MinInt*` (= -2^N) が float64 で exactly 表現
+// できるので等号を許容して OK。
+func isFiniteAndInRange(v, lo, hi float64) bool {
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return false
 	}
-	return v >= float64(lo) && v <= float64(hi)
+	return v >= lo && v < hi
 }
 
 // policyEntry pairs a role's effective value for a given policy key with

@@ -223,6 +223,36 @@ func TestCoerceToBaseType_RejectsInvalidFloat(t *testing.T) {
 	// base int64 の場合
 	assert.Equal(t, int64(99), coerceToBaseType(int64(99), math.NaN()))
 	assert.Equal(t, int64(99), coerceToBaseType(int64(99), math.Inf(1)))
+	// base float64 の場合: NaN / Inf も base に倒す (DefaultPolicies に
+	// float64 policy は現状無いが将来追加された時に consumer に漏らさない)。
+	assert.Equal(t, float64(0.5), coerceToBaseType(float64(0.5), math.NaN()))
+	assert.Equal(t, float64(0.5), coerceToBaseType(float64(0.5), math.Inf(1)))
+	assert.Equal(t, float64(0.5), coerceToBaseType(float64(0.5), math.Inf(-1)))
+}
+
+// `float64(math.MaxInt64)` は IEEE 754 で表現できず `2^63` に丸まるため、
+// strict less-than guard でこの境界値も reject する (= int64(2^63) が
+// implementation-defined になる落とし穴を踏まない)。
+func TestCoerceToBaseType_Rejects2Pow63Boundary(t *testing.T) {
+	overflow := float64(math.MaxInt64) // 実体は 2^63、math.MaxInt64+1 相当
+	assert.Equal(t, int64(99), coerceToBaseType(int64(99), overflow))
+	// 同じ値は int base でも (64-bit platform 想定で) reject される。
+	assert.Equal(t, 99, coerceToBaseType(99, overflow))
+}
+
+// isFiniteAndInRange の境界条件を直接 cover する。caller の coerceToBaseType
+// / maxNumberAsInt 経由 test だけでなく helper 単体としての挙動も保証する。
+func TestIsFiniteAndInRange(t *testing.T) {
+	// finite + 範囲内 → true (下限は等号許容、上限は厳密 less-than)。
+	assert.True(t, isFiniteAndInRange(0, -100, 100))
+	assert.True(t, isFiniteAndInRange(-100, -100, 100), "lo 境界は inclusive")
+	assert.False(t, isFiniteAndInRange(100, -100, 100), "hi 境界は exclusive")
+	assert.False(t, isFiniteAndInRange(101, -100, 100))
+	assert.False(t, isFiniteAndInRange(-101, -100, 100))
+	// NaN / +-Inf は常に false。
+	assert.False(t, isFiniteAndInRange(math.NaN(), -100, 100))
+	assert.False(t, isFiniteAndInRange(math.Inf(1), -100, 100))
+	assert.False(t, isFiniteAndInRange(math.Inf(-1), -100, 100))
 }
 
 func TestMaxNumberAsInt_NoUsableValues(t *testing.T) {
