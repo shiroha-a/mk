@@ -29,6 +29,12 @@ var (
 	ErrAlreadyClipped = errors.New("note is already clipped")
 	// ErrNotClipped is returned when there is no clip_note row to remove.
 	ErrNotClipped = errors.New("note is not clipped")
+	// ErrTooManyClips は Create で clipLimit 超過 (#1029、upstream
+	// tooManyClips)。
+	ErrTooManyClips = errors.New("clip limit exceeded")
+	// ErrTooManyClipNotes は AddNote で noteEachClipsLimit 超過 (#1029、
+	// upstream tooManyClipNotes)。
+	ErrTooManyClipNotes = errors.New("clip note limit exceeded")
 )
 
 // Service provides clip CRUD plus AddNote / RemoveNote / Notes operations.
@@ -38,6 +44,20 @@ type Service struct {
 	notes    repository.NoteRepository
 	idGen    id.Generator
 	clock    func() time.Time
+	// rolePolicyProvider は clipLimit / noteEachClipsLimit の gate に使う
+	// (#1029)。nil 時は gate skip。
+	rolePolicyProvider RolePolicyProvider
+}
+
+// RolePolicyProvider abstracts role-policy lookup for clip count limits (#1029)。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so Create / AddNote
+// enforce the clipLimit / noteEachClipsLimit role policies (#1029).
+func (s *Service) SetRolePolicyProvider(p RolePolicyProvider) {
+	s.rolePolicyProvider = p
 }
 
 // NewService constructs a clip Service.
@@ -78,6 +98,18 @@ func (s *Service) Create(in CreateInput) (*model.Clip, error) {
 	}
 	if in.OwnerID == "" {
 		return nil, errors.New("ownerId is required")
+	}
+	// clipLimit role policy gate (#1029)。
+	if s.rolePolicyProvider != nil {
+		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["clipLimit"].(int); ok && limit >= 0 {
+			existing, err := s.repo.ListByUser(in.OwnerID, "", "", 9999, 0)
+			if err != nil {
+				return nil, err
+			}
+			if len(existing) >= limit {
+				return nil, ErrTooManyClips
+			}
+		}
 	}
 	now := s.clock()
 	c := &model.Clip{
@@ -173,6 +205,20 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	}
 	if _, err := s.noteRepo.FindByPair(clipID, noteID); err == nil {
 		return ErrAlreadyClipped
+	}
+	// noteEachClipsLimit role policy gate (#1029)。clip 内 note 数の上限を
+	// owner の policy で評価する (clip 自体は owner-only mutation なので
+	// ownerID と一致する)。
+	if s.rolePolicyProvider != nil {
+		if limit, ok := s.rolePolicyProvider.GetUserPolicies(ownerID)["noteEachClipsLimit"].(int); ok && limit >= 0 {
+			existing, err := s.noteRepo.ListByClip(clipID, "", "", 9999)
+			if err != nil {
+				return err
+			}
+			if len(existing) >= limit {
+				return ErrTooManyClipNotes
+			}
+		}
 	}
 	now := s.clock()
 	cn := &model.ClipNote{

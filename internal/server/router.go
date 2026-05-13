@@ -213,6 +213,8 @@ func (s *Server) setupRoutes() {
 	noteQueryService.SetFavoriteRepo(noteFavoriteRepo)
 	noteQueryService.SetThreadMutingRepo(noteThreadMutingRepo)
 	userService := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	// PinNote の上限を role policy `pinLimit` で override 可能にする (#1029)。
+	userService.SetRolePolicyProvider(roleService)
 	// /api/i/update の avatarId / bannerId 経路 (#467) で drive_file の
 	// 所有権検証 + URL コピーが必要なため、driveFileRepo を配線する。
 	userService.SetDriveFileRepository(driveFileRepo)
@@ -250,6 +252,7 @@ func (s *Server) setupRoutes() {
 	antennaService := coreantenna.NewService(antennaRepo, userRepo, s.redis.Default, idGen)
 	antennaService.SetFollowingRepo(followingRepo)
 	antennaService.SetUserListRepo(userListRepo)
+	antennaService.SetRolePolicyProvider(roleService) // #1029: antennaLimit
 	// Phase 7-2 follow-up (#271): antenna 着信時に所有者の unread row を
 	// 作成して /api/i の hasUnreadAntenna に反映する。
 	antennaNoteUnreadRepo := repository.NewAntennaNoteUnreadRepository(s.db)
@@ -258,6 +261,7 @@ func (s *Server) setupRoutes() {
 
 	// Clips (Phase 4.4)
 	clipService := coreclip.NewService(clipRepo, clipNoteRepo, noteRepo, idGen)
+	clipService.SetRolePolicyProvider(roleService) // #1029: clipLimit / noteEachClipsLimit
 
 	// Pages / Flash (Phase 4.5)
 	pageService := corepage.NewService(pageRepo, pageLikeRepo, idGen)
@@ -1286,6 +1290,7 @@ func (s *Server) setupRoutes() {
 	// i/webhooks/* — Webhook管理 (実データ)
 	webhookHandler := apiwebhooks.NewHandler(webhookRepo, idGen)
 	webhookHandler.SetDispatcher(webhookService)
+	webhookHandler.SetRolePolicyProvider(roleService) // #1029: webhookLimit
 	api.POST("/i/webhooks/create", webhookHandler.Create, middleware.RequireAuth())
 	api.POST("/i/webhooks/list", webhookHandler.List, middleware.RequireAuth())
 	api.POST("/i/webhooks/show", webhookHandler.Show, middleware.RequireAuth())
@@ -1819,6 +1824,7 @@ func (s *Server) setupRoutes() {
 
 	// User lists (Phase 6)
 	userListHandler := apiuserlists.NewHandler(userListRepo, idGen)
+	userListHandler.SetRolePolicyProvider(roleService) // #1029: userListLimit / userEachUserListsLimit
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireAuth())
 	api.POST("/users/lists/create", userListHandler.Create, middleware.RequireAuth())
 	api.POST("/users/lists/show", userListHandler.Show, middleware.RequireAuth())

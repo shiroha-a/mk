@@ -246,6 +246,54 @@ func (d *duplicateAddMemberRepo) AddMember(_ *model.UserListMembership) error {
 	return repository.ErrUserListDuplicateMember
 }
 
+// #1029: userListLimit / userEachUserListsLimit role policy gate test。
+type stubRolePolicyProvider struct {
+	policies map[string]any
+}
+
+func (s *stubRolePolicyProvider) GetUserPolicies(_ string) map[string]any {
+	return s.policies
+}
+
+func TestCreate_UserListLimitExceeded(t *testing.T) {
+	h, repo := newTestHandler(t)
+	// 既に 2 list 保有
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	repo.Lists["l2"] = &model.UserList{ID: "l2", UserID: "u1"}
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"userListLimit": 2,
+	}})
+	rec := doPost(h.Create, `{"name":"third"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_USERLISTS")
+	assert.Contains(t, rec.Body.String(), "0cf21a28-7715-4f39-a20d-777bfdb8d138")
+}
+
+func TestCreate_UserListLimit_PassesUnderLimit(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"userListLimit": 10,
+	}})
+	rec := doPost(h.Create, `{"name":"My List"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code, "limit 内なら通常成功")
+}
+
+func TestPush_UserEachUserListsLimitExceeded(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	repo.Members = []*model.UserListMembership{
+		{ID: "m1", UserListID: "l1", UserID: "u_a"},
+		{ID: "m2", UserListID: "l1", UserID: "u_b"},
+	}
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"userEachUserListsLimit": 2,
+	}})
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u_c"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_USERS")
+	assert.Contains(t, rec.Body.String(), "2dd9752e-a338-413d-8eec-41814430989b")
+}
+
 func TestPush_AlreadyAdded(t *testing.T) {
 	repo := &duplicateAddMemberRepo{testutil.NewMockUserListRepository()}
 	repo.Lists["l1"] = &model.UserList{ID: "l1"}

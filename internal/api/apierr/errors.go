@@ -57,6 +57,19 @@ const (
 	// `gtlAvailable` role policy が false のときに 403 で reject する (#1026)。
 	UUIDGtlDisabled = "0332fc13-6ab2-4427-ae80-a9fadffd1a6b"
 
+	// 以下は #1029 PR-1 (count limit 系 9 endpoint) で使う policy 違反 UUID。
+	// すべて upstream Misskey TS の各 endpoint で `if (currentCount >=
+	// policies.xxxLimit)` で reject する経路と一致 (= 値の手書き整合)。
+	UUIDPinLimitExceeded  = "72dab508-c64d-498f-8740-a8eec1ba385a" // i/pin
+	UUIDTooManyAntennas   = "faf47050-e8b5-438c-913c-db2b1576fde4" // antennas/create
+	UUIDTooManyWebhooks   = "87a9bb19-111e-4e37-81d3-a3e7426453b0" // i/webhooks/create
+	UUIDTooManyClips      = "920f7c2d-6208-4b76-8082-e632020f5883" // clips/create
+	UUIDTooManyClipNotes  = "f0dba960-ff73-4615-8df4-d6ac5d9dc118" // clips/add-note
+	UUIDTooManyUserLists  = "0cf21a28-7715-4f39-a20d-777bfdb8d138" // users/lists/create
+	UUIDTooManyUsers      = "2dd9752e-a338-413d-8eec-41814430989b" // users/lists/push
+	UUIDTooManyNoteDrafts = "9ee33bbe-fde3-4c71-9b51-e50492c6b9c8" // notes/drafts/create
+	UUIDTooManyMutedWords = "010665b1-a211-42d2-bc64-8f6609d79785" // i/update mutedWords
+
 	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
 	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
 	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
@@ -220,6 +233,59 @@ func LtlDisabled() map[string]any {
 // policy が false のときに返す (#1026)。
 func GtlDisabled() map[string]any {
 	return Error("GTL_DISABLED", "Global timeline has been disabled.", UUIDGtlDisabled)
+}
+
+// 以下は #1029 PR-1 count limit 系 9 endpoint で使う error helper。すべて
+// 400 Bad Request で返す upstream 互換 (= ApiCallService が ApiError 400
+// で投げる経路)。caller は role policy 値と現在 count を比較し、超過時に
+// 該当 helper を呼ぶ。
+
+// PinLimitExceeded returns the upstream `pinLimitExceeded` shape (i/pin)。
+func PinLimitExceeded() map[string]any {
+	return Error("PIN_LIMIT_EXCEEDED", "You can not pin notes any more.", UUIDPinLimitExceeded)
+}
+
+// TooManyAntennas returns the upstream `tooManyAntennas` shape (antennas/create)。
+func TooManyAntennas() map[string]any {
+	return Error("TOO_MANY_ANTENNAS", "You cannot create antenna any more.", UUIDTooManyAntennas)
+}
+
+// TooManyWebhooks returns the upstream `tooManyWebhooks` shape (i/webhooks/create)。
+func TooManyWebhooks() map[string]any {
+	return Error("TOO_MANY_WEBHOOKS", "You cannot create webhook any more.", UUIDTooManyWebhooks)
+}
+
+// TooManyClips returns the upstream `tooManyClips` shape (clips/create)。
+func TooManyClips() map[string]any {
+	return Error("TOO_MANY_CLIPS", "You cannot create clip any more.", UUIDTooManyClips)
+}
+
+// TooManyClipNotes returns the upstream `tooManyClipNotes` shape (clips/add-note)。
+func TooManyClipNotes() map[string]any {
+	return Error("TOO_MANY_CLIP_NOTES", "You cannot add notes to the clip any more.", UUIDTooManyClipNotes)
+}
+
+// TooManyUserLists returns the upstream `tooManyUserLists` shape (users/lists/create)。
+func TooManyUserLists() map[string]any {
+	return Error("TOO_MANY_USERLISTS", "You cannot create user list any more.", UUIDTooManyUserLists)
+}
+
+// TooManyUsers returns the upstream `tooManyUsers` shape (users/lists/push)。
+// upstream は code "TOO_MANY_USERS" でやや generic、context は "users on user list" に限定。
+func TooManyUsers() map[string]any {
+	return Error("TOO_MANY_USERS", "You can not push users any more.", UUIDTooManyUsers)
+}
+
+// TooManyNoteDrafts returns the upstream `NoteDraftService` の IdentifiableError
+// shape (notes/drafts/create)。upstream は code が無く message のみだが、mk-go は
+// `TOO_MANY_NOTE_DRAFTS` という code を発番して frontend が分岐できるようにする。
+func TooManyNoteDrafts() map[string]any {
+	return Error("TOO_MANY_NOTE_DRAFTS", "Too many drafts.", UUIDTooManyNoteDrafts)
+}
+
+// TooManyMutedWords returns the upstream `tooManyMutedWords` shape (i/update mutedWords)。
+func TooManyMutedWords() map[string]any {
+	return Error("TOO_MANY_MUTED_WORDS", "Too many muted words.", UUIDTooManyMutedWords)
 }
 
 // NoSuchRenoteTarget returns a 404 NO_SUCH_RENOTE_TARGET error response.

@@ -104,6 +104,9 @@ func (h *Handler) Create(c echo.Context) error {
 		IsPublic:    req.IsPublic,
 	})
 	if err != nil {
+		if errors.Is(err, coreclip.ErrTooManyClips) {
+			return apierr.JSONTooManyClips(c)
+		}
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, clipToMap(cl))
@@ -249,6 +252,8 @@ func (h *Handler) AddNote(c echo.Context) error {
 			return notFoundNote(c)
 		case errors.Is(err, coreclip.ErrAlreadyClipped):
 			return alreadyClipped(c)
+		case errors.Is(err, coreclip.ErrTooManyClipNotes):
+			return apierr.JSONTooManyClipNotes(c)
 		}
 		return apierr.JSONInternalError(c)
 	}

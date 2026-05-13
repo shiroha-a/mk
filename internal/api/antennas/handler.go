@@ -123,9 +123,12 @@ func (h *Handler) Create(c echo.Context) error {
 	})
 	if err != nil {
 		// Name は事前 invalidParam で弾いているため、ここに来るのは
-		// ErrInvalidSource か repo エラーのみ。
+		// ErrInvalidSource か repo エラー、または antennaLimit 超過のみ。
 		if errors.Is(err, coreantenna.ErrInvalidSource) {
 			return apierr.JSONInvalidParam(c)
+		}
+		if errors.Is(err, coreantenna.ErrTooManyAntennas) {
+			return apierr.JSONTooManyAntennas(c)
 		}
 		return apierr.JSONInternalError(c)
 	}

@@ -52,9 +52,16 @@ type TestDispatcher interface {
 
 // Handler handles i/webhooks/* endpoints.
 type Handler struct {
-	repo       repository.WebhookRepository
-	idGen      id.Generator
-	dispatcher TestDispatcher
+	repo               repository.WebhookRepository
+	idGen              id.Generator
+	dispatcher         TestDispatcher
+	rolePolicyProvider RolePolicyProvider
+}
+
+// RolePolicyProvider abstracts role-policy lookup for `webhookLimit`
+// enforcement (#1029)。実装は core/role.Service。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
 }
 
 // NewHandler creates a new webhooks handler.
@@ -66,6 +73,12 @@ func NewHandler(repo repository.WebhookRepository, idGen id.Generator) *Handler 
 // a synthetic test payload through the production pipeline.
 func (h *Handler) SetDispatcher(d TestDispatcher) {
 	h.dispatcher = d
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so Create enforces the
+// `webhookLimit` role policy (#1029).
+func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
+	h.rolePolicyProvider = p
 }
 
 func packWebhook(w *model.Webhook) map[string]any {
@@ -96,6 +109,20 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 	if !validateOnArray(req.On) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "on must contain only webhookEventTypes values.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+
+	// webhookLimit role policy gate (#1029)。policy 経由で取得した上限と
+	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip。
+	if h.rolePolicyProvider != nil {
+		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["webhookLimit"].(int); ok && limit >= 0 {
+			existing, err := h.repo.ListByUserID(user.ID)
+			if err != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if len(existing) >= limit {
+				return apierr.JSONTooManyWebhooks(c)
+			}
+		}
 	}
 
 	webhook := &model.Webhook{

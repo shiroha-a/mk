@@ -76,6 +76,24 @@ type Service struct {
 	// 所有者検証 + image MIME チェックするのに使う。未配線時は media
 	// 更新経路全体を skip して旧来挙動 (avatar / banner 不変) に戻す。
 	driveFileRepo repository.DriveFileRepository
+	// rolePolicyProvider は PinNote の上限を role policy `pinLimit` で
+	// override するのに使う (#1029)。nil 時は MaxPinnedNotes 定数 fallback
+	// (= 旧挙動互換)。実装は core/role.Service。
+	rolePolicyProvider RolePolicyProvider
+}
+
+// RolePolicyProvider abstracts role-policy lookup used to override default
+// limits with admin-authored values. 実装は core/role.Service の
+// GetUserPolicies (#1029)。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so the user service can
+// honour role-policy overrides for limits like pinLimit (#1029). nil 時は
+// MaxPinnedNotes 定数 fallback の旧挙動を維持する。
+func (s *Service) SetRolePolicyProvider(p RolePolicyProvider) {
+	s.rolePolicyProvider = p
 }
 
 // NewService creates a new user Service.
@@ -604,7 +622,15 @@ func (s *Service) PinNote(userID, noteID string) error {
 	if err != nil {
 		return err
 	}
-	if count >= MaxPinnedNotes {
+	// role policy `pinLimit` で上限を override (#1029)。未配線 / key 不在 /
+	// 非 int の場合は MaxPinnedNotes 定数 fallback (= 旧挙動互換)。
+	limit := MaxPinnedNotes
+	if s.rolePolicyProvider != nil {
+		if v, ok := s.rolePolicyProvider.GetUserPolicies(userID)["pinLimit"].(int); ok {
+			limit = v
+		}
+	}
+	if count >= limit {
 		return ErrPinLimitExceeded
 	}
 

@@ -151,6 +151,36 @@ func TestDraftsCreate_Error(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// #1029: noteDraftLimit role policy gate test。
+type draftStubPolicyProvider struct {
+	policies map[string]any
+}
+
+func (s *draftStubPolicyProvider) GetUserPolicies(_ string) map[string]any {
+	return s.policies
+}
+
+func TestDraftsCreate_NoteDraftLimitExceeded(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1"}
+	repo.drafts["d2"] = &model.NoteDraft{ID: "d2", UserID: "u1"}
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{
+		"noteDraftLimit": 2,
+	}})
+	rec := postDraft(h.DraftsCreate, `{"text":"third"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_NOTE_DRAFTS")
+}
+
+func TestDraftsCreate_NoteDraftLimit_PassesUnderLimit(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{
+		"noteDraftLimit": 10,
+	}})
+	rec := postDraft(h.DraftsCreate, `{"text":"draft"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 // --- DraftsUpdate ---
 
 func TestDraftsUpdate_NilRepo(t *testing.T) {

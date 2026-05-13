@@ -17,13 +17,26 @@ import (
 
 // Handler handles users/lists API endpoints.
 type Handler struct {
-	repo  repository.UserListRepository
-	idGen id.Generator
+	repo               repository.UserListRepository
+	idGen              id.Generator
+	rolePolicyProvider RolePolicyProvider
+}
+
+// RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
+// `userEachUserListsLimit` enforcement (#1029)。実装は core/role.Service。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
 }
 
 // NewHandler creates a new userlists Handler.
 func NewHandler(repo repository.UserListRepository, idGen id.Generator) *Handler {
 	return &Handler{repo: repo, idGen: idGen}
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so Create / Push enforce
+// the userListLimit / userEachUserListsLimit role policies (#1029).
+func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
+	h.rolePolicyProvider = p
 }
 
 // List handles POST /api/users/lists/list.
@@ -67,6 +80,18 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// userListLimit role policy gate (#1029)。
+	if h.rolePolicyProvider != nil {
+		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["userListLimit"].(int); ok && limit >= 0 {
+			existing, err := h.repo.ListByUser(user.ID)
+			if err != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if len(existing) >= limit {
+				return apierr.JSONTooManyUserLists(c)
+			}
+		}
 	}
 	list := &model.UserList{
 		ID:     h.idGen.Generate(time.Now()),
@@ -130,8 +155,23 @@ func (h *Handler) Push(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ListID == "" || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId and userId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if _, err := h.repo.FindByID(req.ListID); err != nil {
+	list, err := h.repo.FindByID(req.ListID)
+	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+	}
+	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
+	// で評価する (upstream は owner = me 経路、mk-go も owner.UserID と me 一致
+	// を確認する access gate は別途必要だが本 PR scope 外、limit 単独で gate)。
+	if h.rolePolicyProvider != nil {
+		if limit, ok := h.rolePolicyProvider.GetUserPolicies(list.UserID)["userEachUserListsLimit"].(int); ok && limit >= 0 {
+			members, err := h.repo.ListMembers(list.ID)
+			if err != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if len(members) >= limit {
+				return apierr.JSONTooManyUsers(c)
+			}
+		}
 	}
 	m := &model.UserListMembership{
 		ID:         h.idGen.Generate(time.Now()),

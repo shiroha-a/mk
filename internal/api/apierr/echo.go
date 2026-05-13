@@ -63,6 +63,54 @@ func JSONGtlDisabled(c echo.Context) error {
 	return c.JSON(http.StatusForbidden, GtlDisabled())
 }
 
+// #1029 PR-1: count limit 系 helpers。すべて 400 Bad Request (upstream
+// ApiError の default behaviour と一致)。
+
+// JSONPinLimitExceeded writes a 400 PIN_LIMIT_EXCEEDED response.
+func JSONPinLimitExceeded(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, PinLimitExceeded())
+}
+
+// JSONTooManyAntennas writes a 400 TOO_MANY_ANTENNAS response.
+func JSONTooManyAntennas(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyAntennas())
+}
+
+// JSONTooManyWebhooks writes a 400 TOO_MANY_WEBHOOKS response.
+func JSONTooManyWebhooks(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyWebhooks())
+}
+
+// JSONTooManyClips writes a 400 TOO_MANY_CLIPS response.
+func JSONTooManyClips(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyClips())
+}
+
+// JSONTooManyClipNotes writes a 400 TOO_MANY_CLIP_NOTES response.
+func JSONTooManyClipNotes(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyClipNotes())
+}
+
+// JSONTooManyUserLists writes a 400 TOO_MANY_USERLISTS response.
+func JSONTooManyUserLists(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyUserLists())
+}
+
+// JSONTooManyUsers writes a 400 TOO_MANY_USERS response.
+func JSONTooManyUsers(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyUsers())
+}
+
+// JSONTooManyNoteDrafts writes a 400 TOO_MANY_NOTE_DRAFTS response.
+func JSONTooManyNoteDrafts(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyNoteDrafts())
+}
+
+// JSONTooManyMutedWords writes a 400 TOO_MANY_MUTED_WORDS response.
+func JSONTooManyMutedWords(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyMutedWords())
+}
+
 // JSONNoSuchRenoteTarget writes a 404 NO_SUCH_RENOTE_TARGET response to the client.
 func JSONNoSuchRenoteTarget(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchRenoteTarget())

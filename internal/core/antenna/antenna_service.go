@@ -25,6 +25,9 @@ var (
 	ErrAntennaNotFound = errors.New("antenna not found")
 	// ErrAntennaNameRequired is returned when name is empty on Create / Update.
 	ErrAntennaNameRequired = errors.New("antenna name is required")
+	// ErrTooManyAntennas is returned by Create when the user already owns
+	// `antennaLimit` antennas (#1029, upstream tooManyAntennas)。
+	ErrTooManyAntennas = errors.New("antenna limit exceeded")
 	// ErrAccessDenied is returned when a user attempts to update / delete an
 	// antenna they do not own.
 	ErrAccessDenied = errors.New("not the owner of this antenna")
@@ -51,6 +54,20 @@ type Service struct {
 	client        *redis.Client
 	idGen         id.Generator
 	clock         func() time.Time
+	// rolePolicyProvider は Create で antennaLimit gate に使う (#1029)。
+	// nil 時は gate skip (旧挙動互換)。
+	rolePolicyProvider RolePolicyProvider
+}
+
+// RolePolicyProvider abstracts role-policy lookup for antenna count limits (#1029).
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so Create enforces the
+// `antennaLimit` role policy (#1029).
+func (s *Service) SetRolePolicyProvider(p RolePolicyProvider) {
+	s.rolePolicyProvider = p
 }
 
 // NewService constructs an antenna Service. userRepo は現状未使用だが、将来
@@ -126,6 +143,19 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 	}
 	if !validSource(in.Src) {
 		return nil, ErrInvalidSource
+	}
+	// antennaLimit role policy gate (#1029)。policy 経由で取得した上限と
+	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip (旧挙動)。
+	if s.rolePolicyProvider != nil {
+		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["antennaLimit"].(int); ok && limit >= 0 {
+			existing, err := s.repo.ListByUser(in.OwnerID)
+			if err != nil {
+				return nil, err
+			}
+			if len(existing) >= limit {
+				return nil, ErrTooManyAntennas
+			}
+		}
 	}
 	// Marshal of [][]string never fails, so we ignore the error.
 	keywords, _ := json.Marshal(normalizeKeywords(in.Keywords))

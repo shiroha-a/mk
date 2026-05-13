@@ -123,6 +123,36 @@ func TestJSONGtlDisabled(t *testing.T) {
 	assert.Equal(t, UUIDGtlDisabled, errObj["id"])
 }
 
+// #1029 PR-1: JSON* helpers が 400 Bad Request + 正しい code/id を返す
+// table-driven test。
+func TestJSONCountLimitHelpers(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func(echo.Context) error
+		code string
+		uuid string
+	}{
+		{"PinLimitExceeded", JSONPinLimitExceeded, "PIN_LIMIT_EXCEEDED", UUIDPinLimitExceeded},
+		{"TooManyAntennas", JSONTooManyAntennas, "TOO_MANY_ANTENNAS", UUIDTooManyAntennas},
+		{"TooManyWebhooks", JSONTooManyWebhooks, "TOO_MANY_WEBHOOKS", UUIDTooManyWebhooks},
+		{"TooManyClips", JSONTooManyClips, "TOO_MANY_CLIPS", UUIDTooManyClips},
+		{"TooManyClipNotes", JSONTooManyClipNotes, "TOO_MANY_CLIP_NOTES", UUIDTooManyClipNotes},
+		{"TooManyUserLists", JSONTooManyUserLists, "TOO_MANY_USERLISTS", UUIDTooManyUserLists},
+		{"TooManyUsers", JSONTooManyUsers, "TOO_MANY_USERS", UUIDTooManyUsers},
+		{"TooManyNoteDrafts", JSONTooManyNoteDrafts, "TOO_MANY_NOTE_DRAFTS", UUIDTooManyNoteDrafts},
+		{"TooManyMutedWords", JSONTooManyMutedWords, "TOO_MANY_MUTED_WORDS", UUIDTooManyMutedWords},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := invoke(t, tc.fn)
+			assert.Equal(t, http.StatusBadRequest, code, "all count-limit helpers return 400")
+			errObj := body["error"].(map[string]any)
+			assert.Equal(t, tc.code, errObj["code"])
+			assert.Equal(t, tc.uuid, errObj["id"])
+		})
+	}
+}
+
 func TestJSONNoSuchRenoteTarget(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchRenoteTarget)
 	assert.Equal(t, http.StatusNotFound, code)

@@ -800,6 +800,30 @@ func backupCodesStock(profile *model.UserProfile) string {
 	return "partial"
 }
 
+// countMuteWords returns the total number of entries in a muted-words
+// payload, flattening AND-groups. mirrors upstream Misskey TS i/update.ts
+// `checkMuteWordCount`: 各 entry が string なら 1、array なら array.length
+// を加算する (#1029)。raw が nil / 空なら 0。
+func countMuteWords(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var arr []any
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return 0
+	}
+	length := 0
+	for _, item := range arr {
+		switch v := item.(type) {
+		case string:
+			length++
+		case []any:
+			length += len(v)
+		}
+	}
+	return length
+}
+
 // normalizeMutedWords validates and normalizes the mutedWords / hardMutedWords
 // payload from i/update. Returns (raw, ok, err): ok=false means "field not
 // present in request" (caller should leave the column unchanged); err != nil
@@ -930,11 +954,28 @@ func (h *Handler) Update(c echo.Context) error {
 	if mw, ok, err := normalizeMutedWords(req.MutedWords); err != nil {
 		return apierr.JSONInvalidParam(c)
 	} else if ok {
+		// wordMuteLimit role policy gate (#1029)。upstream
+		// `checkMuteWordCount(mutedWords, policies.wordMuteLimit)` と同 logic。
+		if h.roleProvider != nil {
+			if limit, lok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); lok && limit >= 0 {
+				if countMuteWords(mw) > limit {
+					return apierr.JSONTooManyMutedWords(c)
+				}
+			}
+		}
 		in.MutedWords = &mw
 	}
 	if mw, ok, err := normalizeMutedWords(req.HardMutedWords); err != nil {
 		return apierr.JSONInvalidParam(c)
 	} else if ok {
+		// hardMutedWords も同 policy で gate (#1029)。
+		if h.roleProvider != nil {
+			if limit, lok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); lok && limit >= 0 {
+				if countMuteWords(mw) > limit {
+					return apierr.JSONTooManyMutedWords(c)
+				}
+			}
+		}
 		in.HardMutedWords = &mw
 	}
 	// upstream Misskey TS i/update.ts: avatarId / bannerId が non-null 文字列で

@@ -112,6 +112,37 @@ func TestGtlDisabled(t *testing.T) {
 	assert.Equal(t, "Global timeline has been disabled.", errObj["message"])
 }
 
+// #1029 PR-1: count limit 系 9 helper の code/id/message を upstream に
+// 揃えていることを seal する table-driven test (typo / 値ずれの regression
+// guard、coverage 維持兼任)。
+func TestCountLimitHelpers(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func() map[string]any
+		code string
+		uuid string
+	}{
+		{"PinLimitExceeded", PinLimitExceeded, "PIN_LIMIT_EXCEEDED", UUIDPinLimitExceeded},
+		{"TooManyAntennas", TooManyAntennas, "TOO_MANY_ANTENNAS", UUIDTooManyAntennas},
+		{"TooManyWebhooks", TooManyWebhooks, "TOO_MANY_WEBHOOKS", UUIDTooManyWebhooks},
+		{"TooManyClips", TooManyClips, "TOO_MANY_CLIPS", UUIDTooManyClips},
+		{"TooManyClipNotes", TooManyClipNotes, "TOO_MANY_CLIP_NOTES", UUIDTooManyClipNotes},
+		{"TooManyUserLists", TooManyUserLists, "TOO_MANY_USERLISTS", UUIDTooManyUserLists},
+		{"TooManyUsers", TooManyUsers, "TOO_MANY_USERS", UUIDTooManyUsers},
+		{"TooManyNoteDrafts", TooManyNoteDrafts, "TOO_MANY_NOTE_DRAFTS", UUIDTooManyNoteDrafts},
+		{"TooManyMutedWords", TooManyMutedWords, "TOO_MANY_MUTED_WORDS", UUIDTooManyMutedWords},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := tc.fn()
+			errObj := result["error"].(map[string]any)
+			assert.Equal(t, tc.code, errObj["code"])
+			assert.Equal(t, tc.uuid, errObj["id"])
+			assert.NotEmpty(t, errObj["message"], "message should be non-empty")
+		})
+	}
+}
+
 func TestNoSuchRenoteTarget(t *testing.T) {
 	result := NoSuchRenoteTarget()
 	errObj := result["error"].(map[string]any)

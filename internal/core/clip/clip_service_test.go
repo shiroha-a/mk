@@ -32,6 +32,46 @@ func TestCreate_HappyPath(t *testing.T) {
 	assert.Len(t, repo.Clips, 1)
 }
 
+// #1029: clipLimit role policy gate test。
+type stubRolePolicyProvider struct {
+	policies map[string]any
+}
+
+func (s *stubRolePolicyProvider) GetUserPolicies(_ string) map[string]any { return s.policies }
+
+func TestCreate_ClipLimitExceeded(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	repo.Clips["c2"] = &model.Clip{ID: "c2", UserID: "u1"}
+	svc.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"clipLimit": 2,
+	}})
+	_, err := svc.Create(clip.CreateInput{OwnerID: "u1", Name: "third"})
+	require.ErrorIs(t, err, clip.ErrTooManyClips)
+}
+
+func TestCreate_ClipLimit_PassesUnderLimit(t *testing.T) {
+	svc, _, _, _ := newSvc(t)
+	svc.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"clipLimit": 10,
+	}})
+	_, err := svc.Create(clip.CreateInput{OwnerID: "u1", Name: "first"})
+	require.NoError(t, err)
+}
+
+func TestAddNote_NoteEachClipsLimitExceeded(t *testing.T) {
+	svc, repo, noteRepo, notes := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	noteRepo.Entries["cn1"] = &model.ClipNote{ID: "cn1", ClipID: "c1", NoteID: "old1"}
+	noteRepo.Entries["cn2"] = &model.ClipNote{ID: "cn2", ClipID: "c1", NoteID: "old2"}
+	svc.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"noteEachClipsLimit": 2,
+	}})
+	err := svc.AddNote("u1", "c1", "n1")
+	require.ErrorIs(t, err, clip.ErrTooManyClipNotes)
+}
+
 func TestCreate_NameRequired(t *testing.T) {
 	svc, _, _, _ := newSvc(t)
 	_, err := svc.Create(clip.CreateInput{OwnerID: "u1"})

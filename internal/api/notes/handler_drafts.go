@@ -51,6 +51,19 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	if req.Visibility == "" {
 		req.Visibility = "public"
 	}
+	// noteDraftLimit role policy gate (#1029)。policyProvider は #1026 で
+	// 配線済 (timeline gate と共用)。CountByUser で current 件数を取得。
+	if h.policyProvider != nil {
+		if limit, ok := h.policyProvider.GetUserPolicies(user.ID)["noteDraftLimit"].(int); ok && limit >= 0 {
+			count, err := h.draftRepo.CountByUser(user.ID)
+			if err != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if int(count) >= limit {
+				return apierr.JSONTooManyNoteDrafts(c)
+			}
+		}
+	}
 	draft := &model.NoteDraft{
 		ID:         h.idGen.Generate(time.Now()),
 		UserID:     user.ID,
