@@ -89,6 +89,17 @@ type Service struct {
 	// admin/roles/update が roleRepo を直接叩く経路は TTL でしかカバー
 	// できないが、roleCacheTTL = 5 min で staleness は bounded (#300 3-5)。
 	userRoleCache sync.Map // userID -> *roleCacheEntry
+
+	// rolesListCache は roleRepo.List() 結果の TTL キャッシュ (#1030)。
+	// evaluateConditionalRoles から呼ばれて全 role を fetch する経路で、cache
+	// miss 時に毎リクエスト全 role を DB から取ってしまう問題への対策。
+	// 上流 Misskey TS の rolesCache (= RoleService の global) と等価。
+	// userRoleCache (per-user) は同じ TTL 内で先に hit するので、本 cache が
+	// fire するのは cache miss / TTL 失効 / conditional role 評価が要る user
+	// に限られる。Create / UpdateFields / Delete で flush する。
+	rolesListMu        sync.Mutex
+	rolesListCache     []*model.Role
+	rolesListExpiresAt time.Time
 }
 
 // NewService constructs a RoleService.
@@ -128,12 +139,47 @@ func (s *Service) InvalidateUserRoleCache(userID string) {
 
 // InvalidateAllRoleCaches drops every cached entry. Used when a role is
 // deleted (we don't know which users were assigned without an extra DB hit,
-// so the simplest safe action is to flush the whole cache).
+// so the simplest safe action is to flush the whole cache). 全 user role
+// cache に加え roleRepo.List() cache (#1030) も flush する。
 func (s *Service) InvalidateAllRoleCaches() {
 	s.userRoleCache.Range(func(k, _ any) bool {
 		s.userRoleCache.Delete(k)
 		return true
 	})
+	s.invalidateRolesListCache()
+}
+
+// listRolesCached returns the role list backed by a single-slot TTL cache
+// (#1030). roleRepo.List() 直接 access の代替で、evaluateConditionalRoles の
+// hot path で全 role fetch を amortize する。TTL 失効 / cache miss 時のみ
+// roleRepo.List() を叩く。
+//
+// Create / UpdateFields / Delete で cache invalidate する設計だが、外部経路
+// (admin/roles の直接 repo 更新等) は TTL でしか cover できない。
+// roleCacheTTL = 5 min で staleness は bounded (= userRoleCache と同 trade-off)。
+func (s *Service) listRolesCached() ([]*model.Role, error) {
+	s.rolesListMu.Lock()
+	defer s.rolesListMu.Unlock()
+	if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
+		return s.rolesListCache, nil
+	}
+	roles, err := s.roleRepo.List()
+	if err != nil {
+		return nil, err
+	}
+	s.rolesListCache = roles
+	s.rolesListExpiresAt = time.Now().Add(roleCacheTTL)
+	return roles, nil
+}
+
+// invalidateRolesListCache clears the rolesListCache so the next call hits
+// roleRepo.List() again. Called from Create / UpdateFields / Delete and
+// from InvalidateAllRoleCaches.
+func (s *Service) invalidateRolesListCache() {
+	s.rolesListMu.Lock()
+	defer s.rolesListMu.Unlock()
+	s.rolesListCache = nil
+	s.rolesListExpiresAt = time.Time{}
 }
 
 // GetUserRoles returns all active roles applied to the user. The returned
@@ -195,7 +241,7 @@ func (s *Service) evaluateConditionalRoles(userID string, assigned []*model.Role
 	if s.userRepo == nil {
 		return nil
 	}
-	allRoles, err := s.roleRepo.List()
+	allRoles, err := s.listRolesCached()
 	if err != nil {
 		return nil
 	}
@@ -705,6 +751,10 @@ func (s *Service) Create(name, description string, opts CreateOptions) (*model.R
 	if err := s.roleRepo.Create(role); err != nil {
 		return nil, err
 	}
+	// 新規 role を追加したので role list cache を invalidate (#1030)。
+	// conditional role が増える可能性があり、stale cache だと evaluation で
+	// 見逃すため。
+	s.invalidateRolesListCache()
 	return role, nil
 }
 
@@ -760,6 +810,11 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	if err := s.roleRepo.UpdateFields(id, fields); err != nil {
 		return nil, err
 	}
+	// CondFormula / Target / Policies が変わると evaluateConditionalRoles の
+	// 結果が変わるので role list cache を invalidate (#1030)。具体的な field
+	// を区別せず一律 flush するのは admin 経路で頻度が低いから (= 5min stale
+	// な userRoleCache と同 trade-off)。
+	s.invalidateRolesListCache()
 	return s.roleRepo.FindByID(id)
 }
 
