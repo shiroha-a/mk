@@ -176,6 +176,54 @@ func TestCreate_Error(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// --- webhookLimit role policy gate (#1029) ---
+
+type stubRolePolicyProvider struct {
+	policies map[string]any
+}
+
+func (s *stubRolePolicyProvider) GetUserPolicies(_ string) map[string]any { return s.policies }
+
+func TestCreate_WebhookLimitExceeded(t *testing.T) {
+	h, repo := newTestHandler()
+	// 既に 2 webhook 保有
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: pq.StringArray{}}
+	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", On: pq.StringArray{}}
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"webhookLimit": 2,
+	}})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_WEBHOOKS")
+	assert.Contains(t, rec.Body.String(), "87a9bb19-111e-4e37-81d3-a3e7426453b0")
+}
+
+func TestCreate_WebhookLimit_PassesUnderLimit(t *testing.T) {
+	h, _ := newTestHandler()
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"webhookLimit": 10,
+	}})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code, "limit 内なら通常成功")
+}
+
+// failCountRepo は CountByUserID だけ error を返す stub。webhookLimit gate
+// で count 取得が失敗した場合に 500 を返すパスを検証する。
+type failCountRepo struct{ *mockWebhookRepo }
+
+func (f *failCountRepo) CountByUserID(_ string) (int64, error) { return 0, errMock }
+
+func TestCreate_WebhookLimit_CountError(t *testing.T) {
+	repo := newMockRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(&failCountRepo{repo}, idGen)
+	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"webhookLimit": 5,
+	}})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 // --- List ---
 
 func TestList_Success(t *testing.T) {
