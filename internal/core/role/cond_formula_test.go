@@ -2,6 +2,7 @@ package role
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -191,25 +192,37 @@ func TestEvalCond_UnknownType(t *testing.T) {
 // 変換ロジックが consumer 側 type assert の安全性を担保するので、direct
 // unit test で 100% に近い coverage を狙う。
 func TestCoerceToBaseType(t *testing.T) {
-	// base が int の場合: float64 → int / int → int / 型不一致 (string) は素通し。
-	assert.Equal(t, 42, coerceToBaseType(0, float64(42)))
+	// base が int の場合: int / float64 / 型不一致 (string) は素通し。
 	assert.Equal(t, 42, coerceToBaseType(0, 42))
+	assert.Equal(t, 42, coerceToBaseType(0, float64(42)))
 	assert.Equal(t, "x", coerceToBaseType(0, "x"))
 
-	// base が int64 の場合: float64 / int / それ以外。
-	assert.Equal(t, int64(7), coerceToBaseType(int64(0), float64(7)))
+	// base が int64 の場合: int64 / int / float64 / それ以外は素通し。
+	assert.Equal(t, int64(7), coerceToBaseType(int64(0), int64(7)))
 	assert.Equal(t, int64(7), coerceToBaseType(int64(0), 7))
+	assert.Equal(t, int64(7), coerceToBaseType(int64(0), float64(7)))
 	assert.Equal(t, true, coerceToBaseType(int64(0), true))
 
-	// base が float64 の場合: int → float64、float64 → 素通し。
-	assert.Equal(t, float64(3), coerceToBaseType(float64(0), 3))
-	// float64 override は switch 内で型一致 case が無いため fallthrough して
-	// override をそのまま返す (= float64 の数値はもとから float64 で返る)。
+	// base が float64 の場合: float64 / int / それ以外は素通し。
 	assert.Equal(t, float64(3.5), coerceToBaseType(float64(0), float64(3.5)))
+	assert.Equal(t, float64(3), coerceToBaseType(float64(0), 3))
+	assert.Equal(t, "x", coerceToBaseType(float64(0), "x"))
 
 	// base が bool / string / slice 等は素通し。
 	assert.Equal(t, true, coerceToBaseType(false, true))
 	assert.Equal(t, "value", coerceToBaseType("base", "value"))
+}
+
+// coerce は NaN / +-Inf / int レンジ超過の float64 を silently truncate せず
+// base に倒す (admin UI で異常値が入ってきた場合の fail-soft)。
+func TestCoerceToBaseType_RejectsInvalidFloat(t *testing.T) {
+	// base int の場合
+	assert.Equal(t, 99, coerceToBaseType(99, math.NaN()))
+	assert.Equal(t, 99, coerceToBaseType(99, math.Inf(1)))
+	assert.Equal(t, 99, coerceToBaseType(99, math.Inf(-1)))
+	// base int64 の場合
+	assert.Equal(t, int64(99), coerceToBaseType(int64(99), math.NaN()))
+	assert.Equal(t, int64(99), coerceToBaseType(int64(99), math.Inf(1)))
 }
 
 func TestMaxNumberAsInt_NoUsableValues(t *testing.T) {
@@ -218,20 +231,30 @@ func TestMaxNumberAsInt_NoUsableValues(t *testing.T) {
 	assert.Equal(t, 99, got)
 }
 
+func TestMaxNumberAsInt_SkipsInvalidFloat(t *testing.T) {
+	// NaN / Inf は silently skip。usable entry が無ければ base に倒す。
+	got := maxNumberAsInt([]any{math.NaN(), math.Inf(1), math.Inf(-1)}, 99)
+	assert.Equal(t, 99, got)
+	// NaN/Inf 混在でも valid な float entry があれば、それを int に丸めて返す。
+	got = maxNumberAsInt([]any{math.NaN(), float64(42), math.Inf(1)}, 99)
+	assert.Equal(t, 42, got)
+}
+
 func TestAggregateChatAvailability_AvailableShortCircuit(t *testing.T) {
 	// "available" を含む場合は readonly / unavailable をスキップして即返す。
 	got := aggregateChatAvailability([]any{"readonly", "unavailable", "available"})
 	assert.Equal(t, "available", got)
 }
 
-func TestAggregatePolicyValues_UnknownBaseFallsBack(t *testing.T) {
-	// base が slice 型 (uploadableFileTypes 相当) のとき: aggregator が
-	// "base を維持" の default branch に落ちる。
+// uploadableFileTypes 相当の slice 型 base と空 values の 2 fallback を
+// 確認する (= base が aggregator の switch default branch に落ちる経路)。
+func TestAggregatePolicyValues_SliceBaseAndEmptyValues(t *testing.T) {
+	// slice base: override があっても集約 semantics が無いので base 維持。
 	base := []string{"image/*"}
 	got := aggregatePolicyValues("uploadableFileTypes", base, []any{[]string{"video/*"}})
 	assert.Equal(t, base, got)
 
-	// values が空なら base を返す。
+	// values が空なら型に依らず base を返す。
 	assert.Equal(t, 42, aggregatePolicyValues("anything", 42, nil))
 }
 

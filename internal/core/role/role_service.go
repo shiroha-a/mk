@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -418,28 +419,54 @@ func (s *Service) applyMetaBasePolicies(base map[string]any) {
 // numbers) into the base default's Go type so downstream consumers can
 // type-assert safely. Only int / int64 / float64 numeric coercions are
 // handled; bool / string / slice values pass through unchanged.
+//
+// NaN / +-Inf / overflow を伴う float64 は silently truncate せず base に
+// 倒す (= 不正値 fail-soft)。Admin UI 経由で異常値が入っても overflow した
+// 整数を consumer に渡さない安全策。
 func coerceToBaseType(base, override any) any {
 	switch base.(type) {
 	case int:
-		if f, ok := override.(float64); ok {
-			return int(f)
-		}
 		if i, ok := override.(int); ok {
 			return i
 		}
-	case int64:
 		if f, ok := override.(float64); ok {
-			return int64(f)
+			if !isFiniteAndInRange(f, math.MinInt, math.MaxInt) {
+				return base
+			}
+			return int(f)
+		}
+	case int64:
+		if i, ok := override.(int64); ok {
+			return i
 		}
 		if i, ok := override.(int); ok {
 			return int64(i)
 		}
+		if f, ok := override.(float64); ok {
+			if !isFiniteAndInRange(f, math.MinInt64, math.MaxInt64) {
+				return base
+			}
+			return int64(f)
+		}
 	case float64:
+		if f, ok := override.(float64); ok {
+			return f
+		}
 		if i, ok := override.(int); ok {
 			return float64(i)
 		}
 	}
 	return override
+}
+
+// isFiniteAndInRange returns true when v is a finite float64 that fits
+// within [lo, hi] as a float. Used by numeric coercers to guard against
+// NaN / +-Inf and overflowing casts when truncating to int / int64.
+func isFiniteAndInRange(v float64, lo, hi int64) bool {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
+	return v >= float64(lo) && v <= float64(hi)
 }
 
 // policyEntry pairs a role's effective value for a given policy key with
@@ -540,6 +567,8 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 // that fail type assertion. base is returned when no usable entry exists.
 // JSON unmarshal で role policy の数値が float64 になっているケース (= role
 // admin UI 由来の override) も拾えるよう、float64 を int に丸めて比較する。
+// NaN / +-Inf / overflow した float64 entry は coerceToBaseType と同じく
+// silently skip する (= 不正値が aggregator を汚染しない fail-soft)。
 func maxNumberAsInt(values []any, base any) any {
 	var best int
 	found := false
@@ -551,6 +580,9 @@ func maxNumberAsInt(values []any, base any) any {
 				found = true
 			}
 		case float64:
+			if !isFiniteAndInRange(x, math.MinInt, math.MaxInt) {
+				continue
+			}
 			xi := int(x)
 			if !found || xi > best {
 				best = xi
