@@ -294,9 +294,10 @@ func TestGetUserPolicies_MetaBasePolicyOverridesDefault(t *testing.T) {
 	}
 	policies := svc.GetUserPolicies("u1")
 	assert.Equal(t, true, policies["canSearchNotes"], "meta.policies の base override が反映")
-	// JSON の数値は float64 で unmarshal される。base override は型を強制
-	// しないので float64(200) になる (旧 last-wins と同 semantics)。
-	assert.Equal(t, float64(200), policies["driveCapacityMb"])
+	// #1020 review: meta.policies 経由の数値も base の型 (int) に丸められて
+	// 入る。これにより consumer 側の type assert (`policies[key].(int)`) が
+	// role override / meta override どちらの経路でも安全に動く。
+	assert.Equal(t, 200, policies["driveCapacityMb"])
 	// 未上書きの key は default が維持される
 	assert.Equal(t, 20, policies["mentionLimit"])
 }
@@ -416,6 +417,77 @@ func TestGetUserPolicies_PriorityZeroFallback(t *testing.T) {
 	policies := svc.GetUserPolicies("u1")
 	// useDefault=true の role しか無い場合は base (= default false) のまま。
 	assert.Equal(t, false, policies["canSearchNotes"])
+}
+
+// 複数 role × 全 useDefault: 全 role が当該 policy で default を選んでいる
+// 場合、bool OR aggregator も base に倒れる。
+// 一方で 1 つでも override true を持つ role があれば、別 role が
+// useDefault=true (base=false) であっても OR で true に上がる cross-test。
+func TestGetUserPolicies_MultipleRolesUseDefaultCross(t *testing.T) {
+	t.Run("all use default → base のまま false", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+			Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":true,"priority":0,"value":true}}`))}
+		roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+			Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":true,"priority":0,"value":true}}`))}
+		assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+		assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+		policies := svc.GetUserPolicies("u1")
+		assert.Equal(t, false, policies["canSearchNotes"], "全 role useDefault なら base false")
+	})
+
+	t.Run("1 つだけ override=true なら全体 true", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+			Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":true,"priority":0,"value":false}}`))}
+		roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+			Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
+		assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+		assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+		policies := svc.GetUserPolicies("u1")
+		assert.Equal(t, true, policies["canSearchNotes"], "1 role でも override true なら OR で true")
+	})
+
+	t.Run("role に当該 policy entry が無い (= 別 policy のみ override)", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		// r1 は canInvite のみ持って canSearchNotes は entry 無し (= 暗黙 useDefault)。
+		roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+			Policies: datatypes.JSON([]byte(`{"canInvite":{"useDefault":false,"priority":0,"value":true}}`))}
+		assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+		policies := svc.GetUserPolicies("u1")
+		assert.Equal(t, false, policies["canSearchNotes"], "当該 policy entry 不在 = useDefault 扱いで base")
+		assert.Equal(t, true, policies["canInvite"], "別 policy の override は影響しない")
+	})
+}
+
+// meta.policies 経由の数値が base の型 (int) に丸められることを cross-check。
+// role override (maxNumberAsInt 経由) と meta override (coerceToBaseType 経由)
+// の両方で同じ Go 型が返ることを保証する (= consumer の type assert 安全性)。
+func TestGetUserPolicies_NumericCoercion(t *testing.T) {
+	t.Run("meta.policies が int に丸まる", func(t *testing.T) {
+		svc, _, _, metaRepo := newTestService(t)
+		metaRepo.Meta = &model.Meta{ID: "x",
+			Policies: datatypes.JSON([]byte(`{"pinLimit":7}`))}
+
+		policies := svc.GetUserPolicies("u1")
+		v, ok := policies["pinLimit"].(int)
+		require.True(t, ok, "meta override 経由でも int を返す")
+		assert.Equal(t, 7, v)
+	})
+	t.Run("role override も同じ int 型", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+			Policies: datatypes.JSON([]byte(`{"pinLimit":{"useDefault":false,"priority":0,"value":12}}`))}
+		assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+		policies := svc.GetUserPolicies("u1")
+		v, ok := policies["pinLimit"].(int)
+		require.True(t, ok, "role override 経由でも int を返す")
+		assert.Equal(t, 12, v)
+	})
 }
 
 func TestAssign_Success(t *testing.T) {

@@ -186,6 +186,55 @@ func TestEvalCond_UnknownType(t *testing.T) {
 	assert.False(t, EvalCond(&model.User{}, nil, CondFormula{Type: "definitelyNotAType"}, nil))
 }
 
+// coerceToBaseType / maxNumberAsInt / aggregateChatAvailability は internal
+// helper だが、JSON 値 (float64) → base 型 (int / int64 / float64) の
+// 変換ロジックが consumer 側 type assert の安全性を担保するので、direct
+// unit test で 100% に近い coverage を狙う。
+func TestCoerceToBaseType(t *testing.T) {
+	// base が int の場合: float64 → int / int → int / 型不一致 (string) は素通し。
+	assert.Equal(t, 42, coerceToBaseType(0, float64(42)))
+	assert.Equal(t, 42, coerceToBaseType(0, 42))
+	assert.Equal(t, "x", coerceToBaseType(0, "x"))
+
+	// base が int64 の場合: float64 / int / それ以外。
+	assert.Equal(t, int64(7), coerceToBaseType(int64(0), float64(7)))
+	assert.Equal(t, int64(7), coerceToBaseType(int64(0), 7))
+	assert.Equal(t, true, coerceToBaseType(int64(0), true))
+
+	// base が float64 の場合: int → float64、float64 → 素通し。
+	assert.Equal(t, float64(3), coerceToBaseType(float64(0), 3))
+	// float64 override は switch 内で型一致 case が無いため fallthrough して
+	// override をそのまま返す (= float64 の数値はもとから float64 で返る)。
+	assert.Equal(t, float64(3.5), coerceToBaseType(float64(0), float64(3.5)))
+
+	// base が bool / string / slice 等は素通し。
+	assert.Equal(t, true, coerceToBaseType(false, true))
+	assert.Equal(t, "value", coerceToBaseType("base", "value"))
+}
+
+func TestMaxNumberAsInt_NoUsableValues(t *testing.T) {
+	// 全 entry が int / float64 以外 → base を返す (found=false path)。
+	got := maxNumberAsInt([]any{"not a number", true, nil}, 99)
+	assert.Equal(t, 99, got)
+}
+
+func TestAggregateChatAvailability_AvailableShortCircuit(t *testing.T) {
+	// "available" を含む場合は readonly / unavailable をスキップして即返す。
+	got := aggregateChatAvailability([]any{"readonly", "unavailable", "available"})
+	assert.Equal(t, "available", got)
+}
+
+func TestAggregatePolicyValues_UnknownBaseFallsBack(t *testing.T) {
+	// base が slice 型 (uploadableFileTypes 相当) のとき: aggregator が
+	// "base を維持" の default branch に落ちる。
+	base := []string{"image/*"}
+	got := aggregatePolicyValues("uploadableFileTypes", base, []any{[]string{"video/*"}})
+	assert.Equal(t, base, got)
+
+	// values が空なら base を返す。
+	assert.Equal(t, 42, aggregatePolicyValues("anything", 42, nil))
+}
+
 func TestCondFormula_UnmarshalErrors(t *testing.T) {
 	// invalid outer JSON は error を伝搬する。
 	var f CondFormula

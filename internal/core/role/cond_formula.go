@@ -89,7 +89,7 @@ func (c *CondFormula) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	// "not" の operand は CondFormula、それ以外 (numeric comparator) は int。
-	switch raw.Type {
+	switch c.Type {
 	case CondTypeNot:
 		nested := new(CondFormula)
 		if err := json.Unmarshal(raw.Value, nested); err != nil {

@@ -392,6 +392,11 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 // override) onto the default policies map. Best-effort: meta fetch /
 // JSON unmarshal の失敗は silently skip して default のままにする
 // (= upstream TS と同じ fail-soft 挙動)。
+//
+// JSON unmarshal は数値を float64 に倒すため、key が DefaultPolicies で int
+// として宣言されている場合は明示的に int へ丸めて整合性を保つ (#1020 review:
+// consumer 側の `policies[key].(int)` type assert が float64 で panic する
+// regression を防ぐ)。base に無い未知 key は型情報が無いので素通し。
 func (s *Service) applyMetaBasePolicies(base map[string]any) {
 	if s.metaRepo == nil {
 		return
@@ -405,8 +410,36 @@ func (s *Service) applyMetaBasePolicies(base map[string]any) {
 		return
 	}
 	for k, v := range metaPolicies {
-		base[k] = v
+		base[k] = coerceToBaseType(base[k], v)
 	}
+}
+
+// coerceToBaseType normalises a JSON-decoded value (typically float64 for
+// numbers) into the base default's Go type so downstream consumers can
+// type-assert safely. Only int / int64 / float64 numeric coercions are
+// handled; bool / string / slice values pass through unchanged.
+func coerceToBaseType(base, override any) any {
+	switch base.(type) {
+	case int:
+		if f, ok := override.(float64); ok {
+			return int(f)
+		}
+		if i, ok := override.(int); ok {
+			return i
+		}
+	case int64:
+		if f, ok := override.(float64); ok {
+			return int64(f)
+		}
+		if i, ok := override.(int); ok {
+			return int64(i)
+		}
+	case float64:
+		if i, ok := override.(int); ok {
+			return float64(i)
+		}
+	}
+	return override
 }
 
 // policyEntry pairs a role's effective value for a given policy key with
@@ -508,8 +541,7 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 // JSON unmarshal で role policy の数値が float64 になっているケース (= role
 // admin UI 由来の override) も拾えるよう、float64 を int に丸めて比較する。
 func maxNumberAsInt(values []any, base any) any {
-	b, _ := base.(int)
-	best := b
+	var best int
 	found := false
 	for _, v := range values {
 		switch x := v.(type) {
