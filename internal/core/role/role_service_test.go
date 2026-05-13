@@ -1,6 +1,7 @@
 package role_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -1010,6 +1011,40 @@ func TestUpdateFields_InvalidatesRoleListCache(t *testing.T) {
 
 	_, _ = svc.GetUserRoles("u2") // 別 user で確認
 	assert.Equal(t, 2, roleRepo.listCalls)
+}
+
+// 並行 cache miss でも roleRepo.List() は single-flight 相当で 1 回しか
+// 発火しないことを担保する (#1035 review: RWMutex 化に伴う double-check
+// pattern の regression guard、-race で並行性も検証する)。
+func TestListRolesCached_ConcurrentMissSingleFlight(t *testing.T) {
+	svc, roleRepo, _ := newServiceWithCountingRoleRepo(t)
+	roleRepo.Roles["r-bot"] = &model.Role{
+		ID:          "r-bot",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+	}
+	userRepo := testutil.NewMockUserRepository()
+	// 複数 user を作って evaluateConditionalRoles を並行に起動できるようにする
+	for i := 0; i < 20; i++ {
+		uid := "u" + string(rune('a'+i))
+		require.NoError(t, userRepo.Create(&model.User{ID: uid, Username: uid, IsBot: true}))
+	}
+	svc.SetUserRepo(userRepo)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		uid := "u" + string(rune('a'+i))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = svc.GetUserRoles(uid)
+		}()
+	}
+	wg.Wait()
+	// 全 20 goroutine が cache miss から開始しても、double-check pattern で
+	// roleRepo.List() は 1 回しか呼ばれない (= single-flight 相当)。
+	assert.Equal(t, 1, roleRepo.listCalls,
+		"concurrent cache miss should de-dup to single roleRepo.List() call")
 }
 
 // Delete (= InvalidateAllRoleCaches 経由) で role list cache も flush される。

@@ -97,7 +97,11 @@ type Service struct {
 	// userRoleCache (per-user) は同じ TTL 内で先に hit するので、本 cache が
 	// fire するのは cache miss / TTL 失効 / conditional role 評価が要る user
 	// に限られる。Create / UpdateFields / Delete で flush する。
-	rolesListMu        sync.Mutex
+	//
+	// sync.RWMutex で hot path (cache hit) を RLock に倒し、cache miss /
+	// invalidate の writer のみ Lock を取る。複数 goroutine が同時に cache
+	// hit する場合のロック競合を排除する (#1035 review)。
+	rolesListMu        sync.RWMutex
 	rolesListCache     []*model.Role
 	rolesListExpiresAt time.Time
 }
@@ -157,7 +161,26 @@ func (s *Service) InvalidateAllRoleCaches() {
 // Create / UpdateFields / Delete で cache invalidate する設計だが、外部経路
 // (admin/roles の直接 repo 更新等) は TTL でしか cover できない。
 // roleCacheTTL = 5 min で staleness は bounded (= userRoleCache と同 trade-off)。
+//
+// 返却される slice は **shared snapshot** で、caller は read-only に扱う
+// (mutate 不可、append / sort 等で書き換えない)。複数 goroutine が同 cache
+// snapshot を同時に iterate するので、要素 (*model.Role) の field mutate
+// もしない。mutation が要るなら slices.Clone(...) で copy を取ってから操作する。
 func (s *Service) listRolesCached() ([]*model.Role, error) {
+	// Fast path: RLock で cache hit を確認、cache hit なら lock を即座に
+	// 解放して return。複数 goroutine の hot path 並列実行を許す。
+	s.rolesListMu.RLock()
+	if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
+		roles := s.rolesListCache
+		s.rolesListMu.RUnlock()
+		return roles, nil
+	}
+	s.rolesListMu.RUnlock()
+
+	// Slow path: write lock で cache を更新。再 check で double-check pattern
+	// (= 他 goroutine が RUnlock 〜 Lock 間に cache を埋めた場合、重複 fetch
+	// を避ける)。これにより同時 cache miss する N goroutine でも roleRepo.List()
+	// は通常 1 回しか発火しない (single-flight 相当)。
 	s.rolesListMu.Lock()
 	defer s.rolesListMu.Unlock()
 	if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
