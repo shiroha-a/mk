@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -164,6 +165,81 @@ func TestResolveActor_NewUserWithoutIconBanner(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, user.AvatarURL)
 	assert.Nil(t, user.BannerURL)
+}
+
+// --- #1022: remote actor summary → UserProfile.description ---
+
+// AP `summary` (= リモートユーザの bio) を UserProfile.description に取り込む。
+// profile 行も同時に作成される (= 旧実装は user 行のみ作成していた regression)。
+func TestResolveActor_NewUserIngestsDescription(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"summary": "<p>Hello from remote!</p>",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err, "profile 行が作成される (back-fill 経路の前提)")
+	require.NotNil(t, profile.Description)
+	assert.Equal(t, "<p>Hello from remote!</p>", *profile.Description)
+}
+
+// `_misskey_summary` がある場合は AP `summary` より優先される (upstream
+// ApPersonService と同じ logic、MFM が壊れずに保存される)。
+func TestResolveActor_NewUserPrefersMisskeySummary(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"summary": "<p>HTML summary</p>",
+		"_misskey_summary": "**MFM summary**",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, profile.Description)
+	assert.Equal(t, "**MFM summary**", *profile.Description)
+}
+
+// summary 無し actor も profile 行は作成され、Description は nil。
+// 既存 production DB の back-fill 経路 (next refresh で追記) が成立する前提。
+func TestResolveActor_NewUserNoSummary(t *testing.T) {
+	r, repo := newResolver(t, sampleActor, nil)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Nil(t, profile.Description, "summary 無しは Description nil")
+}
+
+// 2048 rune を超える summary は varchar(2048) 制約に合わせて truncate。
+// rune 単位で切ることで UTF-8 multibyte 文字境界が壊れない。
+func TestResolveActor_NewUserDescriptionTruncated(t *testing.T) {
+	long := strings.Repeat("あ", 2100) // 2100 rune
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"summary": "` + long + `",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, profile.Description)
+	assert.Equal(t, 2048, len([]rune(*profile.Description)))
 }
 
 func TestResolveActor_ExistingUser(t *testing.T) {
@@ -1195,6 +1271,77 @@ func TestResolveActor_TTLRefresh(t *testing.T) {
 	pem, err := r.PublicKeyForActor("existing")
 	require.NoError(t, err)
 	assert.Contains(t, pem, "REFRESHED")
+}
+
+// refresh 時に actor.summary を UserProfile.description に同期する (#1022)。
+// profile 行が既に存在するケース (= post-fix で新規取り込まれた user) は
+// UpdateProfile 経由で description を上書きする。
+func TestResolveActor_TTLRefreshUpdatesDescription(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://remote.example/users/alice"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID:            "existing",
+		Username:      "alice",
+		URI:           &uri,
+		LastFetchedAt: &old,
+	}
+	oldDesc := "old bio"
+	repo.Profiles["existing"] = &model.UserProfile{
+		UserID:      "existing",
+		Description: &oldDesc,
+	}
+	updated := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"summary": "new bio",
+		"publicKey": {"publicKeyPem": "REFRESHED"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(updated)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	require.NotNil(t, repo.Profiles["existing"].Description)
+	assert.Equal(t, "new bio", *repo.Profiles["existing"].Description)
+}
+
+// 既存 user で profile 行が無い (= 本 fix 以前に取り込まれた remote user) は
+// refresh 経路で back-fill される (#1022)。production の漸進的な救済経路。
+func TestResolveActor_TTLRefreshBackfillsProfile(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://remote.example/users/alice"
+	old := time.Now().Add(-48 * time.Hour)
+	host := "remote.example"
+	repo.Users["existing"] = &model.User{
+		ID:            "existing",
+		Username:      "alice",
+		Host:          &host,
+		URI:           &uri,
+		LastFetchedAt: &old,
+	}
+	// profile 行は意図的に未作成
+	updated := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"summary": "back-filled bio",
+		"publicKey": {"publicKeyPem": "REFRESHED"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(updated)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID("existing")
+	require.NoError(t, err, "back-fill で profile 行が作成される")
+	require.NotNil(t, profile.Description)
+	assert.Equal(t, "back-filled bio", *profile.Description)
 }
 
 func TestResolveActor_TTLRefreshUpdatesIconBanner(t *testing.T) {

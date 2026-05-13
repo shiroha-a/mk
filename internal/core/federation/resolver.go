@@ -382,12 +382,53 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
 	}
+	// remote actor の bio (= AP `summary` または `_misskey_summary`) を
+	// `user_profile.description` に取り込む (#1022)。profile 行を作成しないと
+	// 既存の Description 取得経路が常に NULL を返してしまい、frontend で
+	// 自己紹介欄が空のまま表示される regression につながる。
+	hostCopy := host
+	profile := &model.UserProfile{
+		UserID:      user.ID,
+		Description: extractRemoteDescription(actor),
+		UserHost:    &hostCopy,
+	}
+	if err := r.userRepo.CreateProfile(profile); err != nil {
+		// profile 作成失敗時は user 取り込みは成立させる (= 次回 refreshActor
+		// で back-fill する経路を維持)。production race / fixture 衝突など
+		// transient な失敗時に actor resolve 自体まで道連れにしない。
+		slog.Warn("create remote user profile failed", "userId", user.ID, "err", err)
+	}
 	r.cachePublicKey(user.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
 	r.notifyInstance(host)
 	if r.chartHook != nil {
 		r.chartHook.OnRemoteUserCreated(user)
 	}
 	return user, nil
+}
+
+// extractRemoteDescription returns the actor's bio mapped to
+// UserProfile.Description. upstream `ApPersonService` の logic と同じく
+// `_misskey_summary` (MFM そのまま) を優先し、なければ AP `summary` (HTML
+// or plain text) を採用する。upstream は htmlToMfm で MFM 変換してから保存
+// するが、mk-go には未実装なので生 HTML をそのまま保存する (= frontend
+// 側で render される、見た目は upstream と完全互換ではないが Empty 化は
+// 回避される。HTML→MFM 変換は将来の別 issue で扱う)。
+// varchar(2048) 制約を rune 単位で respect し、空は nil で表す。
+func extractRemoteDescription(actor *activitypub.Person) *string {
+	var raw string
+	if actor.MisskeySummary != "" {
+		raw = actor.MisskeySummary
+	} else if actor.Summary != "" {
+		raw = actor.Summary
+	}
+	if raw == "" {
+		return nil
+	}
+	const maxLen = 2048
+	if runes := []rune(raw); len(runes) > maxLen {
+		raw = string(runes[:maxLen])
+	}
+	return &raw
 }
 
 // ForceResolveActor resolves an actor and always re-fetches the profile,
@@ -503,6 +544,20 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	existing.LastFetchedAt = &now
 	// UpdateUserエラーはベストエフォートで無視 (次回再試行される)
 	_ = r.userRepo.UpdateUser(existing.ID, fields)
+	// UserProfile.Description (#1022)。actor.Summary が変わった場合に追従する。
+	// profile 行が無いケース (= 本 fix 以前に取り込まれた remote user) は
+	// back-fill する。Update / Create のいずれも best-effort で fail しても
+	// user 更新は維持する。
+	desc := extractRemoteDescription(actor)
+	if _, err := r.userRepo.FindProfileByUserID(existing.ID); err != nil {
+		_ = r.userRepo.CreateProfile(&model.UserProfile{
+			UserID:      existing.ID,
+			Description: desc,
+			UserHost:    existing.Host,
+		})
+	} else {
+		_ = r.userRepo.UpdateProfile(existing.ID, map[string]any{"description": desc})
+	}
 	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
 	if existing.Host != nil {
 		r.notifyInstance(*existing.Host)
