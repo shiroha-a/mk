@@ -951,30 +951,41 @@ func (h *Handler) Update(c echo.Context) error {
 	// `[]` (= 2 byte の空配列) はクリア要求として通す。validation は配列形式
 	// であることだけ。upstream paramDef も内側構造は `array of (string |
 	// string[])` で、要素 0 個も許容する。
+	// wordMuteLimit role policy gate (#1029)。upstream
+	// `checkMuteWordCount(mutedWords, policies.wordMuteLimit)` と同 logic。
+	// mutedWords / hardMutedWords 両方が指定された request で同 policy を 2 度
+	// lookup しないよう、helper closure で memoize する (canUpdateBioMedia と
+	// 同 pattern, upstream の `policies ??= await ...` と等価)。
+	var (
+		wordMuteLimitChecked bool
+		wordMuteLimitValue   int
+		wordMuteLimitOk      bool
+	)
+	wordMuteLimit := func() (int, bool) {
+		if !wordMuteLimitChecked {
+			wordMuteLimitChecked = true
+			if h.roleProvider != nil {
+				if v, ok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); ok && v >= 0 {
+					wordMuteLimitValue = v
+					wordMuteLimitOk = true
+				}
+			}
+		}
+		return wordMuteLimitValue, wordMuteLimitOk
+	}
 	if mw, ok, err := normalizeMutedWords(req.MutedWords); err != nil {
 		return apierr.JSONInvalidParam(c)
 	} else if ok {
-		// wordMuteLimit role policy gate (#1029)。upstream
-		// `checkMuteWordCount(mutedWords, policies.wordMuteLimit)` と同 logic。
-		if h.roleProvider != nil {
-			if limit, lok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); lok && limit >= 0 {
-				if countMuteWords(mw) > limit {
-					return apierr.JSONTooManyMutedWords(c)
-				}
-			}
+		if limit, lok := wordMuteLimit(); lok && countMuteWords(mw) > limit {
+			return apierr.JSONTooManyMutedWords(c)
 		}
 		in.MutedWords = &mw
 	}
 	if mw, ok, err := normalizeMutedWords(req.HardMutedWords); err != nil {
 		return apierr.JSONInvalidParam(c)
 	} else if ok {
-		// hardMutedWords も同 policy で gate (#1029)。
-		if h.roleProvider != nil {
-			if limit, lok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); lok && limit >= 0 {
-				if countMuteWords(mw) > limit {
-					return apierr.JSONTooManyMutedWords(c)
-				}
-			}
+		if limit, lok := wordMuteLimit(); lok && countMuteWords(mw) > limit {
+			return apierr.JSONTooManyMutedWords(c)
 		}
 		in.HardMutedWords = &mw
 	}

@@ -59,7 +59,7 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if int(count) >= limit {
+			if count >= int64(limit) {
 				return apierr.JSONTooManyNoteDrafts(c)
 			}
 		}
