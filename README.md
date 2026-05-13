@@ -2,7 +2,7 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.3.2** (base) + drift backlog 適用済 (実質 2026.5.x 相当の挙動)
+互換バージョン: **Misskey 2026.5.1**
 
 ## 特徴
 
