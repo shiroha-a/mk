@@ -1325,44 +1325,13 @@ func (s *Server) setupRoutes() {
 	api.POST("/i/registry/keys", iHandler.RegistryKeys, middleware.RequireAuth())
 	api.POST("/i/registry/scopes-with-domain", iHandler.RegistryScopesWithDomain, middleware.RequireAuth())
 
-	// i/export-* — データエクスポート (asynqキューにエンキュー)
-	for _, exportType := range []string{
-		"notes", "following", "blocking", "mute", "favorites", "user-lists", "antennas", "clips",
-	} {
-		et := exportType
-		api.POST("/i/export-"+et, func(c echo.Context) error {
-			user := middleware.GetUser(c)
-			if s.queueClient != nil {
-				_ = s.queueClient.EnqueueExport(queue.ExportPayload{UserID: user.ID, Type: et})
-			}
-			return c.NoContent(http.StatusNoContent)
-		}, middleware.RequireAuth())
-	}
-	// i/import-* — データインポート (asynqキューにエンキュー)。本 for-loop は
-	// 上方の explicit api.POST("/i/import-*", iHandler.Import*) と同じ path を
-	// 後勝ちで上書きするため、policy gate もここに必要 (#1020)。
-	// importType (kebab-case path 断片) と PolicyKey の対応は手書きで持つ。
-	importPolicyByType := map[string]string{
-		"following":  corerole.PolicyCanImportFollowing,
-		"blocking":   corerole.PolicyCanImportBlocking,
-		"muting":     corerole.PolicyCanImportMuting,
-		"user-lists": corerole.PolicyCanImportUserLists,
-		"antennas":   corerole.PolicyCanImportAntennas,
-	}
-	for _, importType := range []string{
-		"following", "blocking", "muting", "user-lists", "antennas",
-	} {
-		it := importType
-		api.POST("/i/import-"+it, func(c echo.Context) error {
-			user := middleware.GetUser(c)
-			if s.queueClient != nil {
-				_ = s.queueClient.EnqueueImport(queue.ImportPayload{UserID: user.ID, Type: it})
-			}
-			return c.NoContent(http.StatusNoContent)
-		},
-			middleware.RequireAuth(),
-			middleware.RequireRolePolicy(roleService, importPolicyByType[it]))
-	}
+	// i/export-* / i/import-* は上方 (line ~1245-1265) の explicit registration
+	// が active (iHandler.Export* / Import* via transfer_handler.go) で、proper
+	// な typed transfer.ExportXxx 定数と fileId 受け取りロジックを持つ。
+	// かつて本箇所に generic for-loop による登録が同 path で重複していたが
+	// (#1020 で気づいた pre-existing pattern)、それは fileId を受けず string
+	// literal "following" 等を直接 type に渡す壊れた version で、Echo の
+	// route override 経由で active 実装を蹴る悪影響があった。#1031 で削除済。
 
 	// Hashtags endpoints (Phase 6)
 	hashtagsHandler := apihashtags.NewHandler(s.db)
