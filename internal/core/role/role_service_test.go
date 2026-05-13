@@ -425,10 +425,33 @@ func TestGetUserPolicies_UploadableFileTypesMetaOverrideAggregated(t *testing.T)
 	policies := svc.GetUserPolicies("u1")
 	got, ok := policies["uploadableFileTypes"].([]string)
 	require.True(t, ok, "meta override 経由でも []string 型で返る")
-	// role override の image/* が set union 結果に現れる。
-	// base override (text/*) は priority 0 fallback で全 role の base 値と
-	// して集約に含まれる: 単一 role なので role の override のみ flatten。
+	// 本 test の seal point は **meta override が []any のまま aggregator を
+	// bypass しない** こと。挙動: base override (text/*) は set union 集約に
+	// 参加せず、role override (= useDefault:false の値) のみが flatten される
+	// (upstream Misskey TS の calc も同 logic)。結果は role の image/* のみ。
 	assert.Equal(t, []string{"image/*"}, got)
+}
+
+// 全 role が useDefault の場合は base 値 (meta.policies 経由含む) が反映される
+// regression guard。aggregator は useDefault entry の場合 base 値を candidate
+// として使うので、結果は set union 後 base そのもの。本 test は base override
+// が「集約に参加しない」のではなく「useDefault 経路では base が候補として
+// 使われる」挙動を seal する。
+func TestGetUserPolicies_UploadableFileTypesAllUseDefaultUsesBase(t *testing.T) {
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	// meta.policies で base allowlist を ["text/*", "audio/*"] に
+	metaRepo.Meta = &model.Meta{ID: "x",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":["text/*","audio/*"]}`))}
+	// role は当該 policy で useDefault=true (= base 値を採用)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":true,"priority":0,"value":["IGNORED"]}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	policies := svc.GetUserPolicies("u1")
+	got, ok := policies["uploadableFileTypes"].([]string)
+	require.True(t, ok)
+	// base = ["text/*", "audio/*"] が candidate になり、set union 後 sort 済。
+	assert.Equal(t, []string{"audio/*", "text/*"}, got)
 }
 
 // 複数 role の uploadableFileTypes が set union で merge される (= 「より

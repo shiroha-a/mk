@@ -709,6 +709,14 @@ func aggregateStringSetUnion(values []any, baseVal any) any {
 // []string, trimming whitespace and skipping empty entries. Accepts
 // []string / []any / nil。型不一致は nil で返す (= caller 側で fail-soft)。
 //
+// 戻り値の semantics:
+//   - 型不一致 (string / int / map など slice 以外) → nil
+//   - slice 型で 0 件入力 / 全 entry が空文字 / 型不一致 → 非 nil の空 slice
+//     ([]string{})
+//
+// caller は「使える entry の有無」を見るときは `len(...) > 0` で判定する
+// (`!= nil` だと 0 件の空 slice も「あり」扱いになる)。
+//
 // drive package の normalizeMimePatterns と同等の logic だが、role 側で
 // 集約に使うため独立 helper を持つ (パッケージ境界を越えるより少量の
 // duplicate を許容)。
