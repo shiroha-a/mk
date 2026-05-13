@@ -478,6 +478,38 @@ func TestUpload_DriveLimitsZeroSkipsGate(t *testing.T) {
 	require.NoError(t, err, "policy 0 は upstream falsy 相当で gate skip")
 }
 
+// usageErrRepo は UsageByUser だけ error を返す stub。driveCapacityMb gate
+// で DB error が transient に起きた場合、usage=0 で握り潰さず internal
+// error として伝播することを確認する (#1041 review feedback)。
+type usageErrRepo struct {
+	*testutil.MockDriveFileRepository
+}
+
+func (r *usageErrRepo) UsageByUser(_ string) (int64, error) {
+	return 0, errors.New("transient db error")
+}
+
+func TestUpload_DriveCapacityUsageErrorPropagates(t *testing.T) {
+	fileRepo := &usageErrRepo{MockDriveFileRepository: testutil.NewMockDriveFileRepository()}
+	storage := drive.NewLocalStorage(t.TempDir(), "")
+	idGen, _ := id.NewGenerator("aidx")
+	svc := drive.NewService(fileRepo, testutil.NewMockDriveFolderRepository(), storage, idGen)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"driveCapacityMb": 1},
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("hello"), Name: "x.txt",
+	})
+	require.Error(t, err)
+	// wrap で原因を保持していることを確認 (handler 側は default 500 経路に流す)
+	assert.Contains(t, err.Error(), "calc drive usage")
+	// 同 error は ErrNoFreeSpace でも MaxFileSize でもないので errors.Is で識別不能
+	assert.False(t, errors.Is(err, drive.ErrNoFreeSpace))
+}
+
 // system file (User == nil) は role policy gate の対象外 (= emoji copy 等)。
 func TestUpload_SystemFileBypassesPolicy(t *testing.T) {
 	svc, _, _ := newSvc(t)

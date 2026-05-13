@@ -152,6 +152,60 @@ func TestFilesCreate_RepoError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// --- #1029 PR-2: drive policy handler-level mapping ---
+
+// driveRoleStub は coredrive.RoleChecker を実装する最小 stub。
+// moderator 判定は常に false、policies は固定 map を返す。
+type driveRoleStub struct {
+	policies map[string]any
+}
+
+func (s *driveRoleStub) IsModerator(_ string) bool               { return false }
+func (s *driveRoleStub) GetUserPolicies(_ string) map[string]any { return s.policies }
+
+func newHandlerWithPolicy(t *testing.T, policies map[string]any) (*Handler, *testutil.MockDriveFileRepository) {
+	t.Helper()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	folderRepo := testutil.NewMockDriveFolderRepository()
+	folderRepo.FilesRef = fileRepo
+	storage := coredrive.NewLocalStorage(t.TempDir(), "https://example.com/files")
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coredrive.NewService(fileRepo, folderRepo, storage, idGen)
+	svc.SetRoleChecker(&driveRoleStub{policies: policies})
+	return NewHandler(svc, idGen), fileRepo
+}
+
+// maxFileSizeMb 超過は 400 MAX_FILE_SIZE_EXCEEDED で upstream UUID と完全一致。
+func TestFilesCreate_MaxFileSizeExceeded(t *testing.T) {
+	h, _ := newHandlerWithPolicy(t, map[string]any{"maxFileSizeMb": 1})
+	// 2MB body (= 1MB cap 超過)
+	body := strings.Repeat("a", 2*1024*1024)
+	c, rec := newMultipartReq(t, "x.bin", body, nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "MAX_FILE_SIZE_EXCEEDED")
+	assert.Contains(t, rec.Body.String(), "f9e4e5f3-4df4-40b5-b400-f236945f7073")
+}
+
+// driveCapacityMb 超過 (= 既存 usage + 新 file > capacity) は 400 NO_FREE_SPACE。
+func TestFilesCreate_NoFreeSpace(t *testing.T) {
+	h, fileRepo := newHandlerWithPolicy(t, map[string]any{
+		// size gate は余裕、capacity が tight
+		"maxFileSizeMb":   100,
+		"driveCapacityMb": 1,
+	})
+	owner := "u1"
+	// 1MB 既存使用中 + 任意の新 file → capacity 超過
+	fileRepo.Files["existing"] = &model.DriveFile{ID: "existing", UserID: &owner, Size: 1024 * 1024}
+	c, rec := newMultipartReq(t, "x.txt", "small body content", nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_FREE_SPACE")
+	assert.Contains(t, rec.Body.String(), "c6244ed2-a39a-4e1c-bf93-f0fbd7764fa6")
+}
+
 // --- FilesShow ---
 
 func TestFilesShow_Success(t *testing.T) {

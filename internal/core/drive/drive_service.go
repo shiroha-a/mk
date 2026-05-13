@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -244,7 +245,14 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 			}
 			if mb, ok := policies["driveCapacityMb"].(int); ok && mb > 0 {
 				capBytes := int64(mb) * 1024 * 1024
-				usage, _ := s.fileRepo.UsageByUser(in.User.ID)
+				// UsageByUser の DB error を握り潰すと usage=0 として gate を
+				// pass してしまい driveCapacityMb 制限が事実上効かなくなる。
+				// production の transient DB error 時に黙って upload を許可する
+				// のは避けたいので明示的に internal error として伝播する。
+				usage, err := s.fileRepo.UsageByUser(in.User.ID)
+				if err != nil {
+					return nil, fmt.Errorf("calc drive usage: %w", err)
+				}
 				if usage+int64(len(info.Body)) > capBytes {
 					return nil, ErrNoFreeSpace
 				}
