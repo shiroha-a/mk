@@ -110,6 +110,10 @@ func TestClipRepository_ListByUser(t *testing.T) {
 	rows, err := repo.ListByUser(user.ID, "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 3)
+
+	count, err := repo.CountByUser(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
 }
 
 func TestClipRepository_ListByUser_LimitClamp(t *testing.T) {
@@ -128,6 +132,8 @@ func TestClipRepository_ListByUser_QueryError(t *testing.T) {
 	db := testDB.WithContext(ctx)
 	repo := NewClipRepository(db)
 	_, err := repo.ListByUser("nobody", "", "", 10, 0)
+	assert.Error(t, err)
+	_, err = repo.CountByUser("nobody")
 	assert.Error(t, err)
 }
 

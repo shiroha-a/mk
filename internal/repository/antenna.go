@@ -12,6 +12,10 @@ type AntennaRepository interface {
 	UpdateFields(antennaID string, fields map[string]any) error
 	Delete(a *model.Antenna) error
 	ListByUser(userID string) ([]*model.Antenna, error)
+	// CountByUser returns the number of antennas owned by userID. Used by
+	// antennaLimit policy gate so we don't have to fetch all rows just to
+	// count them (#1029 PR-1 follow-up).
+	CountByUser(userID string) (int64, error)
 	ListAllActive() ([]*model.Antenna, error)
 }
 
@@ -57,6 +61,17 @@ func (r *antennaRepository) ListByUser(userID string) ([]*model.Antenna, error) 
 		return nil, err
 	}
 	return rows, nil
+}
+
+// CountByUser returns the number of antennas owned by the given user.
+func (r *antennaRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.Antenna{}).
+		Where(`"userId" = ?`, userID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ListAllActive returns every antenna with isActive=true. NoteCreate イベント

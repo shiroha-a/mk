@@ -84,11 +84,11 @@ func (h *Handler) Create(c echo.Context) error {
 	// userListLimit role policy gate (#1029)。
 	if h.rolePolicyProvider != nil {
 		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["userListLimit"].(int); ok && limit >= 0 {
-			existing, err := h.repo.ListByUser(user.ID)
+			count, err := h.repo.CountByUser(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if len(existing) >= limit {
+			if count >= int64(limit) {
 				return apierr.JSONTooManyUserLists(c)
 			}
 		}
@@ -164,11 +164,11 @@ func (h *Handler) Push(c echo.Context) error {
 	// を確認する access gate は別途必要だが本 PR scope 外、limit 単独で gate)。
 	if h.rolePolicyProvider != nil {
 		if limit, ok := h.rolePolicyProvider.GetUserPolicies(list.UserID)["userEachUserListsLimit"].(int); ok && limit >= 0 {
-			members, err := h.repo.ListMembers(list.ID)
+			count, err := h.repo.CountMembers(list.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if len(members) >= limit {
+			if count >= int64(limit) {
 				return apierr.JSONTooManyUsers(c)
 			}
 		}

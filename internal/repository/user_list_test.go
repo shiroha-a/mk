@@ -32,6 +32,10 @@ func TestUserListRepository_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, lists, 1)
 
+	count, err := repo.CountByUser("ul_owner")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
 	require.NoError(t, repo.Delete(list.ID))
 	_, err = repo.FindByID(list.ID)
 	assert.Error(t, err)
@@ -59,6 +63,10 @@ func TestUserListRepository_Members(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, members, 1)
 
+	count, err := repo.CountMembers(list.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
 	require.NoError(t, repo.RemoveMember(list.ID, "ul_m1"))
 	members, _ = repo.ListMembers(list.ID)
 	assert.Empty(t, members)
@@ -70,6 +78,8 @@ func TestUserListRepository_ListByUser_Error(t *testing.T) {
 	repo := NewUserListRepository(testDB.WithContext(ctx))
 	_, err := repo.ListByUser("x")
 	assert.Error(t, err)
+	_, err = repo.CountByUser("x")
+	assert.Error(t, err)
 }
 
 func TestUserListRepository_ListMembers_Error(t *testing.T) {
@@ -77,6 +87,8 @@ func TestUserListRepository_ListMembers_Error(t *testing.T) {
 	cancel()
 	repo := NewUserListRepository(testDB.WithContext(ctx))
 	_, err := repo.ListMembers("x")
+	assert.Error(t, err)
+	_, err = repo.CountMembers("x")
 	assert.Error(t, err)
 }
 

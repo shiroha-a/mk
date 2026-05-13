@@ -102,11 +102,11 @@ func (s *Service) Create(in CreateInput) (*model.Clip, error) {
 	// clipLimit role policy gate (#1029)。
 	if s.rolePolicyProvider != nil {
 		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["clipLimit"].(int); ok && limit >= 0 {
-			existing, err := s.repo.ListByUser(in.OwnerID, "", "", 9999, 0)
+			count, err := s.repo.CountByUser(in.OwnerID)
 			if err != nil {
 				return nil, err
 			}
-			if len(existing) >= limit {
+			if count >= int64(limit) {
 				return nil, ErrTooManyClips
 			}
 		}
@@ -211,11 +211,11 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	// ownerID と一致する)。
 	if s.rolePolicyProvider != nil {
 		if limit, ok := s.rolePolicyProvider.GetUserPolicies(ownerID)["noteEachClipsLimit"].(int); ok && limit >= 0 {
-			existing, err := s.noteRepo.ListByClip(clipID, "", "", 9999)
+			count, err := s.noteRepo.CountByClip(clipID)
 			if err != nil {
 				return err
 			}
-			if len(existing) >= limit {
+			if count >= int64(limit) {
 				return ErrTooManyClipNotes
 			}
 		}

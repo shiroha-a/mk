@@ -75,6 +75,7 @@ func (r *stubUserWebhookRepo) FindByIDAndUserID(_, _ string) (*model.Webhook, er
 	return nil, nil
 }
 func (r *stubUserWebhookRepo) ListByUserID(_ string) ([]*model.Webhook, error) { return nil, nil }
+func (r *stubUserWebhookRepo) CountByUserID(_ string) (int64, error)           { return 0, nil }
 func (r *stubUserWebhookRepo) ListActiveByUserID(_ string) ([]*model.Webhook, error) {
 	return nil, nil
 }

@@ -72,6 +72,16 @@ func (m *mockWebhookRepo) ListActiveByUserID(userID string) ([]*model.Webhook, e
 	return result, nil
 }
 
+func (m *mockWebhookRepo) CountByUserID(userID string) (int64, error) {
+	var count int64
+	for _, w := range m.webhooks {
+		if w.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *mockWebhookRepo) Update(w *model.Webhook) error {
 	if m.updateErr != nil {
 		return m.updateErr

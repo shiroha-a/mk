@@ -51,6 +51,11 @@ func TestWebhookRepository_Full(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
+	// CountByUserID
+	count, err := repo.CountByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
 	// Update
 	found.Name = "Updated Hook"
 	require.NoError(t, repo.Update(found))

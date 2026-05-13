@@ -14,6 +14,9 @@ type ClipRepository interface {
 	// ListByUser returns clips owned by userID with cursor (sinceID/untilID)
 	// or offset pagination. Empty cursors fall back to offset.
 	ListByUser(userID string, sinceID, untilID string, limit, offset int) ([]*model.Clip, error)
+	// CountByUser returns the number of clips owned by userID. Used by
+	// clipLimit policy gate (#1029 PR-1 follow-up).
+	CountByUser(userID string) (int64, error)
 	// ListPublicByUser returns only public clips owned by userID. Used by
 	// users/clips when the viewer is not the owner so LIMIT applies to the
 	// already-filtered set. Same cursor semantics as ListByUser.
@@ -78,6 +81,17 @@ func (r *clipRepository) ListByUser(userID, sinceID, untilID string, limit, offs
 		return nil, err
 	}
 	return rows, nil
+}
+
+// CountByUser returns the number of clips owned by the given user.
+func (r *clipRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.Clip{}).
+		Where(`"userId" = ?`, userID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *clipRepository) ListPublicByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.Clip, error) {

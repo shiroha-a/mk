@@ -115,11 +115,11 @@ func (h *Handler) Create(c echo.Context) error {
 	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip。
 	if h.rolePolicyProvider != nil {
 		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["webhookLimit"].(int); ok && limit >= 0 {
-			existing, err := h.repo.ListByUserID(user.ID)
+			count, err := h.repo.CountByUserID(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if len(existing) >= limit {
+			if count >= int64(limit) {
 				return apierr.JSONTooManyWebhooks(c)
 			}
 		}

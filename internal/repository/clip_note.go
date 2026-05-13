@@ -11,6 +11,9 @@ type ClipNoteRepository interface {
 	Delete(cn *model.ClipNote) error
 	FindByPair(clipID, noteID string) (*model.ClipNote, error)
 	ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error)
+	// CountByClip returns the number of notes in the given clip. Used by
+	// noteEachClipsLimit policy gate (#1029 PR-1 follow-up).
+	CountByClip(clipID string) (int64, error)
 }
 
 type clipNoteRepository struct {
@@ -36,6 +39,17 @@ func (r *clipNoteRepository) FindByPair(clipID, noteID string) (*model.ClipNote,
 		return nil, err
 	}
 	return &cn, nil
+}
+
+// CountByClip returns the number of notes in the given clip.
+func (r *clipNoteRepository) CountByClip(clipID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.ClipNote{}).
+		Where(`"clipId" = ?`, clipID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ListByClip returns the entries for a clip with since/until pagination on

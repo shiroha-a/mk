@@ -890,9 +890,11 @@ func (r *failingUserListRepo) FindByID(_ string) (*model.UserList, error) {
 	return nil, errors.New("boom")
 }
 func (r *failingUserListRepo) ListByUser(_ string) ([]*model.UserList, error) { return nil, nil }
+func (r *failingUserListRepo) CountByUser(_ string) (int64, error)            { return 0, nil }
 func (r *failingUserListRepo) Delete(_ string) error                          { return nil }
 func (r *failingUserListRepo) AddMember(_ *model.UserListMembership) error    { return nil }
 func (r *failingUserListRepo) RemoveMember(_, _ string) error                 { return nil }
+func (r *failingUserListRepo) CountMembers(_ string) (int64, error)           { return 0, nil }
 func (r *failingUserListRepo) ListMembers(_ string) ([]*model.UserListMembership, error) {
 	return nil, errors.New("list members error")
 }

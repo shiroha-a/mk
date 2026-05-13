@@ -128,6 +128,10 @@ func TestAntennaRepository_ListByUser(t *testing.T) {
 	rows, err := repo.ListByUser(user.ID)
 	require.NoError(t, err)
 	assert.Len(t, rows, 3)
+
+	count, err := repo.CountByUser(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
 }
 
 func TestAntennaRepository_ListAllActive(t *testing.T) {
@@ -164,5 +168,7 @@ func TestAntennaRepository_QueryErrors(t *testing.T) {
 	_, err := repo.ListByUser("any")
 	assert.Error(t, err)
 	_, err = repo.ListAllActive()
+	assert.Error(t, err)
+	_, err = repo.CountByUser("any")
 	assert.Error(t, err)
 }

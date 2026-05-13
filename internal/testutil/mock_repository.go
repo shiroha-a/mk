@@ -2651,6 +2651,16 @@ func (m *MockClipRepository) ListByUser(userID, sinceID, untilID string, limit, 
 	return paginateClips(rows, sinceID, untilID, limit, offset), nil
 }
 
+func (m *MockClipRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	for _, c := range m.Clips {
+		if c.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *MockClipRepository) ListPublicByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.Clip, error) {
 	var rows []*model.Clip
 	for _, c := range m.Clips {
@@ -2759,6 +2769,16 @@ func (m *MockClipNoteRepository) FindByPair(clipID, noteID string) (*model.ClipN
 		}
 	}
 	return nil, ErrNotFound
+}
+
+func (m *MockClipNoteRepository) CountByClip(clipID string) (int64, error) {
+	var count int64
+	for _, cn := range m.Entries {
+		if cn.ClipID == clipID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *MockClipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
@@ -3422,6 +3442,16 @@ func (m *MockAntennaRepository) ListByUser(userID string) ([]*model.Antenna, err
 		}
 	}
 	return rows, nil
+}
+
+func (m *MockAntennaRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	for _, a := range m.Antennas {
+		if a.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *MockAntennaRepository) ListAllActive() ([]*model.Antenna, error) {
@@ -4278,6 +4308,16 @@ func (m *MockUserListRepository) ListByUser(userID string) ([]*model.UserList, e
 	return result, nil
 }
 
+func (m *MockUserListRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	for _, l := range m.Lists {
+		if l.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *MockUserListRepository) Delete(id string) error {
 	delete(m.Lists, id)
 	return nil
@@ -4297,6 +4337,16 @@ func (m *MockUserListRepository) RemoveMember(listID, userID string) error {
 	}
 	m.Members = filtered
 	return nil
+}
+
+func (m *MockUserListRepository) CountMembers(listID string) (int64, error) {
+	var count int64
+	for _, mem := range m.Members {
+		if mem.UserListID == listID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *MockUserListRepository) ListMembers(listID string) ([]*model.UserListMembership, error) {

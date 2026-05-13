@@ -18,10 +18,16 @@ type UserListRepository interface {
 	Create(list *model.UserList) error
 	FindByID(id string) (*model.UserList, error)
 	ListByUser(userID string) ([]*model.UserList, error)
+	// CountByUser returns the number of lists owned by userID. Used by
+	// userListLimit policy gate (#1029 PR-1 follow-up).
+	CountByUser(userID string) (int64, error)
 	Delete(id string) error
 	AddMember(m *model.UserListMembership) error
 	RemoveMember(listID, userID string) error
 	ListMembers(listID string) ([]*model.UserListMembership, error)
+	// CountMembers returns the number of members in the given list. Used by
+	// userEachUserListsLimit policy gate (#1029 PR-1 follow-up).
+	CountMembers(listID string) (int64, error)
 	// ListMembersByListIDs returns userIDs grouped by listID in 1 query
 	// (= users/lists/list の N+1 を消す batch fetch、#876)。
 	ListMembersByListIDs(listIDs []string) (map[string][]string, error)
@@ -63,6 +69,17 @@ func (r *userListRepository) ListByUser(userID string) ([]*model.UserList, error
 	return lists, nil
 }
 
+// CountByUser returns the number of lists owned by the given user.
+func (r *userListRepository) CountByUser(userID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.UserList{}).
+		Where(`"userId" = ?`, userID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (r *userListRepository) Delete(id string) error {
 	return r.db.Where("id = ?", id).Delete(&model.UserList{}).Error
 }
@@ -83,6 +100,17 @@ func (r *userListRepository) AddMember(m *model.UserListMembership) error {
 func (r *userListRepository) RemoveMember(listID, userID string) error {
 	return r.db.Where("\"userListId\" = ? AND \"userId\" = ?", listID, userID).
 		Delete(&model.UserListMembership{}).Error
+}
+
+// CountMembers returns the number of members in the given list.
+func (r *userListRepository) CountMembers(listID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.UserListMembership{}).
+		Where(`"userListId" = ?`, listID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *userListRepository) ListMembers(listID string) ([]*model.UserListMembership, error) {

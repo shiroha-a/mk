@@ -148,11 +148,11 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip (旧挙動)。
 	if s.rolePolicyProvider != nil {
 		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["antennaLimit"].(int); ok && limit >= 0 {
-			existing, err := s.repo.ListByUser(in.OwnerID)
+			count, err := s.repo.CountByUser(in.OwnerID)
 			if err != nil {
 				return nil, err
 			}
-			if len(existing) >= limit {
+			if count >= int64(limit) {
 				return nil, ErrTooManyAntennas
 			}
 		}

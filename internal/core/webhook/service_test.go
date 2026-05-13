@@ -63,6 +63,7 @@ func (r *fakeWebhookRepo) FindByIDAndUserID(_, _ string) (*model.Webhook, error)
 func (r *fakeWebhookRepo) ListByUserID(_ string) ([]*model.Webhook, error) {
 	return nil, nil
 }
+func (r *fakeWebhookRepo) CountByUserID(_ string) (int64, error) { return 0, nil }
 func (r *fakeWebhookRepo) ListActiveByUserID(userID string) ([]*model.Webhook, error) {
 	if r.listEr != nil {
 		return nil, r.listEr

@@ -13,6 +13,9 @@ type WebhookRepository interface {
 	FindByID(id string) (*model.Webhook, error)
 	FindByIDAndUserID(id, userID string) (*model.Webhook, error)
 	ListByUserID(userID string) ([]*model.Webhook, error)
+	// CountByUserID returns the number of webhooks owned by userID. Used by
+	// webhookLimit policy gate (#1029 PR-1 follow-up).
+	CountByUserID(userID string) (int64, error)
 	ListActiveByUserID(userID string) ([]*model.Webhook, error)
 	Update(webhook *model.Webhook) error
 	UpdateLatestStatus(id string, sentAt time.Time, status int) error
@@ -54,6 +57,17 @@ func (r *webhookRepository) ListByUserID(userID string) ([]*model.Webhook, error
 		return nil, err
 	}
 	return webhooks, nil
+}
+
+// CountByUserID returns the number of webhooks owned by the given user.
+func (r *webhookRepository) CountByUserID(userID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.Webhook{}).
+		Where(`"userId" = ?`, userID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *webhookRepository) ListActiveByUserID(userID string) ([]*model.Webhook, error) {

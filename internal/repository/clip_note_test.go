@@ -42,6 +42,10 @@ func TestClipNoteRepository_LifeCycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 
+	count, err := repo.CountByClip(c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
 	require.NoError(t, repo.Delete(cn))
 	_, err = repo.FindByPair(c.ID, n.ID)
 	assert.Error(t, err)
@@ -99,5 +103,7 @@ func TestClipNoteRepository_ListByClip_QueryError(t *testing.T) {
 	db := testDB.WithContext(ctx)
 	repo := NewClipNoteRepository(db)
 	_, err := repo.ListByClip("any", "", "", 10)
+	assert.Error(t, err)
+	_, err = repo.CountByClip("any")
 	assert.Error(t, err)
 }
