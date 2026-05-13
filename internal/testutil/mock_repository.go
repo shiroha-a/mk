@@ -6144,6 +6144,16 @@ func (m *MockRegistrationTicketRepository) List(filter string, limit, offset int
 	return rows[offset:end], nil
 }
 
+func (m *MockRegistrationTicketRepository) CountByCreatorSince(creatorID, sinceID string) (int64, error) {
+	var count int64
+	for _, t := range m.Tickets {
+		if t.CreatedByID != nil && *t.CreatedByID == creatorID && t.ID > sinceID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *MockRegistrationTicketRepository) Delete(id string) error {
 	delete(m.Tickets, id)
 	return nil

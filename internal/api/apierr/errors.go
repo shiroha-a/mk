@@ -70,6 +70,12 @@ const (
 	UUIDTooManyNoteDrafts = "9ee33bbe-fde3-4c71-9b51-e50492c6b9c8" // notes/drafts/create
 	UUIDTooManyMutedWords = "010665b1-a211-42d2-bc64-8f6609d79785" // i/update mutedWords
 
+	// 以下は #1029 PR-2 (drive + invite policy enforcement) で使う UUID。
+	// upstream Misskey TS の対応 endpoint と完全一致 (= drop-in 互換)。
+	UUIDExceededLimitOfCreateInviteCode = "8b165dd3-6f37-4557-8db1-73175d63c641" // invite/create
+	UUIDMaxFileSizeExceeded             = "f9e4e5f3-4df4-40b5-b400-f236945f7073" // drive/files/create (maxFileSizeMb)
+	UUIDNoFreeSpace                     = "c6244ed2-a39a-4e1c-bf93-f0fbd7764fa6" // drive/files/create (driveCapacityMb)
+
 	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
 	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
 	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
@@ -286,6 +292,30 @@ func TooManyNoteDrafts() map[string]any {
 // TooManyMutedWords returns the upstream `tooManyMutedWords` shape (i/update mutedWords)。
 func TooManyMutedWords() map[string]any {
 	return Error("TOO_MANY_MUTED_WORDS", "Too many muted words.", UUIDTooManyMutedWords)
+}
+
+// ExceededLimitOfCreateInviteCode returns the upstream `invite/create` shape
+// triggered when the inviteLimit / inviteLimitCycle policy is exceeded.
+func ExceededLimitOfCreateInviteCode() map[string]any {
+	return Error(
+		"EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE",
+		"You have exceeded the limit for creating an invitation code.",
+		UUIDExceededLimitOfCreateInviteCode,
+	)
+}
+
+// MaxFileSizeExceeded returns the upstream `drive/files/create` shape thrown
+// when the uploaded file size is larger than `maxFileSizeMb`. Upstream uses
+// IdentifiableError without an explicit code, so mk-go assigns
+// `MAX_FILE_SIZE_EXCEEDED` for frontend branching.
+func MaxFileSizeExceeded() map[string]any {
+	return Error("MAX_FILE_SIZE_EXCEEDED", "Max file size exceeded.", UUIDMaxFileSizeExceeded)
+}
+
+// NoFreeSpace returns the upstream `drive/files/create` shape thrown when the
+// user's drive usage plus the uploaded file size exceeds `driveCapacityMb`.
+func NoFreeSpace() map[string]any {
+	return Error("NO_FREE_SPACE", "No free space.", UUIDNoFreeSpace)
 }
 
 // NoSuchRenoteTarget returns a 404 NO_SUCH_RENOTE_TARGET error response.

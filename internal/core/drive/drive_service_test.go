@@ -396,6 +396,88 @@ func TestUpload_RoleCheckerNoPoliciesSkipsGate(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// --- #1029 PR-2: maxFileSizeMb / driveCapacityMb gate ---
+
+// maxFileSizeMb 超過の upload は ErrMaxFileSizeExceeded で reject される。
+func TestUpload_MaxFileSizeExceeded(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"maxFileSizeMb": 1}, // = 1MB cap
+		},
+	})
+	user := &model.User{ID: "u1"} // Host == nil = local user
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: make([]byte, 2*1024*1024), Name: "x.bin",
+	})
+	require.ErrorIs(t, err, drive.ErrMaxFileSizeExceeded)
+}
+
+// driveCapacityMb 超過 (= 既存 usage + 新 file > capacity) は ErrNoFreeSpace。
+func TestUpload_NoFreeSpace(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	// 既に 1MB 使用中、capacity 1MB → 新規 upload はサイズ不問で reject。
+	fileRepo.Files["existing"] = &model.DriveFile{ID: "existing", UserID: &owner, Size: 1024 * 1024}
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"driveCapacityMb": 1, "maxFileSizeMb": 100}, // size gate は余裕、capacity が tight
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("hello world data text"), Name: "x.txt",
+	})
+	require.ErrorIs(t, err, drive.ErrNoFreeSpace)
+}
+
+// remote user は本 gate を skip する (= mk-go に expireOldFile が未実装な為)。
+func TestUpload_RemoteUserBypassesCapacityGates(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"maxFileSizeMb": 1, "driveCapacityMb": 1},
+		},
+	})
+	remoteHost := "remote.example"
+	user := &model.User{ID: "u1", Host: &remoteHost}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: make([]byte, 2*1024*1024), Name: "x.bin",
+	})
+	require.NoError(t, err, "remote user は drive policy gate を skip する")
+}
+
+// limit 内 (= size <= maxFileSizeMb かつ usage+size <= driveCapacityMb) なら通る。
+func TestUpload_DriveLimitsPassUnderThreshold(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"maxFileSizeMb": 1, "driveCapacityMb": 1},
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: []byte("small body"), Name: "x.txt",
+	})
+	require.NoError(t, err)
+}
+
+// maxFileSizeMb / driveCapacityMb が 0 (= unset) なら gate skip。upstream
+// `if (policies.maxFileSizeMb)` で 0 falsy = 無制限。
+func TestUpload_DriveLimitsZeroSkipsGate(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"maxFileSizeMb": 0, "driveCapacityMb": 0},
+		},
+	})
+	user := &model.User{ID: "u1"}
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: user, Body: make([]byte, 2*1024*1024), Name: "x.bin",
+	})
+	require.NoError(t, err, "policy 0 は upstream falsy 相当で gate skip")
+}
+
 // system file (User == nil) は role policy gate の対象外 (= emoji copy 等)。
 func TestUpload_SystemFileBypassesPolicy(t *testing.T) {
 	svc, _, _ := newSvc(t)

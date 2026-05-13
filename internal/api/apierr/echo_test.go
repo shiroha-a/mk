@@ -141,6 +141,9 @@ func TestJSONCountLimitHelpers(t *testing.T) {
 		{"TooManyUsers", JSONTooManyUsers, "TOO_MANY_USERS", UUIDTooManyUsers},
 		{"TooManyNoteDrafts", JSONTooManyNoteDrafts, "TOO_MANY_NOTE_DRAFTS", UUIDTooManyNoteDrafts},
 		{"TooManyMutedWords", JSONTooManyMutedWords, "TOO_MANY_MUTED_WORDS", UUIDTooManyMutedWords},
+		{"ExceededLimitOfCreateInviteCode", JSONExceededLimitOfCreateInviteCode, "EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE", UUIDExceededLimitOfCreateInviteCode},
+		{"MaxFileSizeExceeded", JSONMaxFileSizeExceeded, "MAX_FILE_SIZE_EXCEEDED", UUIDMaxFileSizeExceeded},
+		{"NoFreeSpace", JSONNoFreeSpace, "NO_FREE_SPACE", UUIDNoFreeSpace},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -227,6 +227,10 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNALLOWED_FILE_TYPE",
 				"Cannot upload the file because it is an unallowed file type.",
 				"4becd248-7f2c-48c4-a9f0-75edc4f9a1ea"))
+		case errors.Is(err, coredrive.ErrMaxFileSizeExceeded):
+			return apierr.JSONMaxFileSizeExceeded(c)
+		case errors.Is(err, coredrive.ErrNoFreeSpace):
+			return apierr.JSONNoFreeSpace(c)
 		}
 		return apierr.JSONInternalError(c)
 	}

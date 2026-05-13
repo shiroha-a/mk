@@ -142,3 +142,42 @@ func TestRegistrationTicketRepository_FindByIDForUpdateTx_NotFound(t *testing.T)
 	})
 	assert.Error(t, err)
 }
+
+// CountByCreatorSince は creatorID + id > sinceID の組み合わせで rolling
+// window count を返す (#1029 PR-2 で invite/create + invite/limit が使う)。
+func TestRegistrationTicketRepository_CountByCreatorSince(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rt_cc_1", "rt_cc_2", "rt_cc_3", "rt_cc_other")
+	defer cleanupInvite(t, "rt_cc_1", "rt_cc_2", "rt_cc_3", "rt_cc_other")
+	u := insertTestUser(t, "rt_cc_user", "rtccu")
+	defer cleanupUser(t, u.ID)
+	other := insertTestUser(t, "rt_cc_other_user", "rtcco")
+	defer cleanupUser(t, other.ID)
+
+	// creatorID と id (時刻 prefix) で window を切る。アルファベット順比較で
+	// id > sinceID を満たすので rt_cc_2 / rt_cc_3 のみ count される。
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_cc_1", Code: "ccc-1", CreatedByID: &u.ID}))
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_cc_2", Code: "ccc-2", CreatedByID: &u.ID}))
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_cc_3", Code: "ccc-3", CreatedByID: &u.ID}))
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_cc_other", Code: "ccc-other", CreatedByID: &other.ID}))
+
+	count, err := repo.CountByCreatorSince(u.ID, "rt_cc_1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), count)
+
+	// 他 creator は count されない
+	count, err = repo.CountByCreatorSince(u.ID, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+
+	count, err = repo.CountByCreatorSince(other.ID, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+}
+
+// cancelled context で error 経路を通すことで coverage を担保する。
+func TestRegistrationTicketRepository_CountByCreatorSince_Error(t *testing.T) {
+	repo := NewRegistrationTicketRepository(cancelledDB(t))
+	_, err := repo.CountByCreatorSince("any", "")
+	assert.Error(t, err)
+}

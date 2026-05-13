@@ -48,6 +48,14 @@ type RegistrationTicketRepository interface {
 	// `now` is passed by callers so tests can supply a deterministic clock
 	// when evaluating the `expired` filter.
 	List(filter string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error)
+	// CountByCreatorSince returns the number of tickets created by creatorID
+	// whose ID compares strictly greater than sinceID. Used by
+	// invite/create + invite/limit endpoints to enforce the
+	// inviteLimit + inviteLimitCycle role policy (#1029 PR-2). aidx 型 ID
+	// は時刻 prefix を持つので id 比較で「特定時刻以降に作成された」レコード
+	// を絞り込める (upstream は typeorm `MoreThan(idService.gen(time))` で
+	// 同じセマンティクスを実現している)。
+	CountByCreatorSince(creatorID, sinceID string) (int64, error)
 	Delete(id string) error
 }
 
@@ -118,6 +126,17 @@ func (r *registrationTicketRepository) List(filter string, limit, offset int, no
 		return nil, err
 	}
 	return rows, nil
+}
+
+// CountByCreatorSince counts tickets created by creatorID with id > sinceID.
+func (r *registrationTicketRepository) CountByCreatorSince(creatorID, sinceID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.RegistrationTicket{}).
+		Where(`"createdById" = ? AND "id" > ?`, creatorID, sinceID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *registrationTicketRepository) Delete(id string) error {

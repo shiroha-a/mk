@@ -2300,12 +2300,46 @@ func (s *Server) setupRoutes() {
 
 	// invite/create — 招待コード作成。canInvite role policy gate を #1020 で
 	// 追加 (default false なので role で明示的に許可した user のみ作成可)。
+	// inviteLimit / inviteLimitCycle / inviteExpirationTime policy は #1029 PR-2
+	// で enforcement。upstream Misskey TS `invite/create.ts` と同 semantics で
+	// time-window count >= inviteLimit なら 400 reject、expiresAt は policy
+	// で決定 (0 / 未設定なら null = 無期限)。
 	api.POST("/invite/create", func(c echo.Context) error {
 		user := middleware.GetUser(c)
+		now := time.Now()
+
+		// inviteLimit / inviteLimitCycle gate (#1029 PR-2)。
+		// upstream は `if (policies.inviteLimit)` で 0 / falsy は skip = 無制限。
+		// inviteLimitCycle の単位は分 (= * 60 * 1000 ms)。
+		policies := roleService.GetUserPolicies(user.ID)
+		if invLimit, ok := policies["inviteLimit"].(int); ok && invLimit > 0 {
+			cycleMin := 0
+			if v, ok2 := policies["inviteLimitCycle"].(int); ok2 {
+				cycleMin = v
+			}
+			sinceID := idGen.Generate(now.Add(-time.Duration(cycleMin) * time.Minute))
+			count, err := signupTicketRepo.CountByCreatorSince(user.ID, sinceID)
+			if err != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if count >= int64(invLimit) {
+				return apierr.JSONExceededLimitOfCreateInviteCode(c)
+			}
+		}
+
+		// inviteExpirationTime (= 分単位) が truthy なら expiresAt を set。
+		// 0 / 未設定なら null (= 無期限) を維持。
+		var expiresAt *time.Time
+		if v, ok := policies["inviteExpirationTime"].(int); ok && v > 0 {
+			exp := now.Add(time.Duration(v) * time.Minute)
+			expiresAt = &exp
+		}
+
 		ticket := &model.RegistrationTicket{
-			ID:          idGen.Generate(time.Now()),
+			ID:          idGen.Generate(now),
 			Code:        generateInviteCode(),
 			CreatedByID: &user.ID,
+			ExpiresAt:   expiresAt,
 		}
 		if err := s.db.Create(ticket).Error; err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]any{
@@ -2404,11 +2438,31 @@ func (s *Server) setupRoutes() {
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth())
 
-	// invite/limit — 残り招待枠を返す (policies から取得、簡易実装)
+	// invite/limit — 残り招待枠 (inviteLimit - inviteLimitCycle 内に作成
+	// された invite 数)。upstream `invite/limit.ts` と同 semantics で
+	// `policies.inviteLimit` falsy なら null (= 無制限)、それ以外なら
+	// max(0, inviteLimit - count) を返す (#1029 PR-2)。
 	api.POST("/invite/limit", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]any{
-			"remaining": 0,
-		})
+		user := middleware.GetUser(c)
+		policies := roleService.GetUserPolicies(user.ID)
+		invLimit, hasLimit := policies["inviteLimit"].(int)
+		if !hasLimit || invLimit <= 0 {
+			return c.JSON(http.StatusOK, map[string]any{"remaining": nil})
+		}
+		cycleMin := 0
+		if v, ok := policies["inviteLimitCycle"].(int); ok {
+			cycleMin = v
+		}
+		sinceID := idGen.Generate(time.Now().Add(-time.Duration(cycleMin) * time.Minute))
+		count, err := signupTicketRepo.CountByCreatorSince(user.ID, sinceID)
+		if err != nil {
+			return apierr.JSONInternalError(c)
+		}
+		remaining := int64(invLimit) - count
+		if remaining < 0 {
+			remaining = 0
+		}
+		return c.JSON(http.StatusOK, map[string]any{"remaining": remaining})
 	}, middleware.RequireAuth())
 
 	// notes (plain) — bulk note lookup by noteIds

@@ -111,6 +111,22 @@ func JSONTooManyMutedWords(c echo.Context) error {
 	return c.JSON(http.StatusBadRequest, TooManyMutedWords())
 }
 
+// JSONExceededLimitOfCreateInviteCode writes a 400 response thrown when the
+// inviteLimit / inviteLimitCycle policy is exceeded.
+func JSONExceededLimitOfCreateInviteCode(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, ExceededLimitOfCreateInviteCode())
+}
+
+// JSONMaxFileSizeExceeded writes a 400 MAX_FILE_SIZE_EXCEEDED response.
+func JSONMaxFileSizeExceeded(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, MaxFileSizeExceeded())
+}
+
+// JSONNoFreeSpace writes a 400 NO_FREE_SPACE response.
+func JSONNoFreeSpace(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, NoFreeSpace())
+}
+
 // JSONNoSuchRenoteTarget writes a 404 NO_SUCH_RENOTE_TARGET response to the client.
 func JSONNoSuchRenoteTarget(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchRenoteTarget())
