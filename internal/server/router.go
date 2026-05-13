@@ -205,6 +205,9 @@ func (s *Server) setupRoutes() {
 	noteCreateService.SetDriveFileRepo(driveFileRepo)
 	noteCreateService.SetMetaRepo(metaRepo)
 	noteCreateService.SetChannelRepo(channelRepo)
+	// canPublicNote=false の user の public note を home に降格させる
+	// silencing 機構 (#1024)。
+	noteCreateService.SetSilencingProvider(roleService)
 	noteDeleteService := corenote.NewDeleteService(noteRepo)
 	noteQueryService := corenote.NewQueryService(noteRepo, followingRepo)
 	noteQueryService.SetFavoriteRepo(noteFavoriteRepo)

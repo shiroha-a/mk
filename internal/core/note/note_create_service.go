@@ -173,6 +173,15 @@ type MainStreamPublisher interface {
 	PublishMainEvent(userID, eventType string, body any)
 }
 
+// SilencingProvider reports whether a user has been silenced by their role
+// policies (= canPublicNote=false). When wired, CreateService demotes
+// `visibility=public` notes from non-channel posts to `home` to match
+// upstream Misskey TS NoteCreateService behaviour (#1024). 循環依存を避ける
+// ため interface で受け取り、実装は core/role.Service が提供する。
+type SilencingProvider interface {
+	IsSilenced(userID string) bool
+}
+
 // CreateService provides note creation logic.
 type CreateService struct {
 	noteRepo            repository.NoteRepository
@@ -194,11 +203,19 @@ type CreateService struct {
 	driveFileRepo       repository.DriveFileRepository
 	metaRepo            repository.MetaRepository
 	channelRepo         repository.ChannelRepository
+	silencingProvider   SilencingProvider
 }
 
 // SetUserRepo attaches a UserRepository for resolving mention usernames to IDs.
 func (s *CreateService) SetUserRepo(r repository.UserRepository) {
 	s.userRepo = r
+}
+
+// SetSilencingProvider attaches a SilencingProvider so public-visibility
+// notes from `canPublicNote=false` users are demoted to `home` (#1024).
+// nil 時は demotion skip (= 旧挙動)。
+func (s *CreateService) SetSilencingProvider(p SilencingProvider) {
+	s.silencingProvider = p
 }
 
 // SetBlockingRepo attaches a BlockingRepository for detecting reply/renote
@@ -317,6 +334,17 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	visibility := in.Visibility
 	if visibility == "" {
 		visibility = model.NoteVisibilityPublic
+	}
+
+	// canPublicNote=false の user が channel 外の public note を投げた場合、
+	// upstream Misskey TS の NoteCreateService と同様に visibility を home
+	// に降格する (silencing)。連合互換性のため reject ではなく降格扱い (=
+	// 投稿は成功するが timeline 表出範囲だけ絞られる)。channel 内の note は
+	// channel 機構自体が露出範囲を管理するので降格しない (#1024)。
+	if visibility == model.NoteVisibilityPublic && (in.ChannelID == nil || *in.ChannelID == "") {
+		if s.silencingProvider != nil && s.silencingProvider.IsSilenced(in.User.ID) {
+			visibility = model.NoteVisibilityHome
+		}
 	}
 
 	// プロhibited wordsチェック (meta.prohibitedWordsマッチ)

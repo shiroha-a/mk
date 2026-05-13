@@ -82,6 +82,17 @@ func TestRolePermissionDenied(t *testing.T) {
 	assert.Equal(t, "You are not assigned to a required role.", errObj["message"])
 }
 
+// #1024: upstream i/update.ts の restrictedByRole と code / id / message が
+// 一致することを seal。フィールド単位 policy 制限 (canUpdateBioMedia 等) で
+// 共通利用する。
+func TestRestrictedByRole(t *testing.T) {
+	result := RestrictedByRole()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "RESTRICTED_BY_ROLE", errObj["code"])
+	assert.Equal(t, UUIDRestrictedByRole, errObj["id"])
+	assert.Equal(t, "This feature is restricted by your role.", errObj["message"])
+}
+
 func TestNoSuchRenoteTarget(t *testing.T) {
 	result := NoSuchRenoteTarget()
 	errObj := result["error"].(map[string]any)

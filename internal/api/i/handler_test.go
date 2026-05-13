@@ -500,6 +500,19 @@ func (s *stubRoleProvider) GetUserPolicies(_ string) map[string]any {
 	return map[string]any{}
 }
 
+// HasRolePolicy mirrors core/role.Service: admin / moderator は常に true、
+// それ以外は policies map から bool 値を取り出す。未配線 / 非 bool は false。
+func (s *stubRoleProvider) HasRolePolicy(_, policyKey string) bool {
+	if s.admin || s.moderator {
+		return true
+	}
+	if s.policies == nil {
+		return false
+	}
+	v, ok := s.policies[policyKey].(bool)
+	return ok && v
+}
+
 func TestMe_WithRoleProvider(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetRoleProvider(&stubRoleProvider{
@@ -685,6 +698,88 @@ func TestMe_ClientDataAndRoomEmptyNormalized(t *testing.T) {
 }
 
 // --- Update ---
+
+// #1024: avatarId / bannerId 指定時の canUpdateBioMedia gate。
+func TestUpdate_AvatarID_RestrictedByRole(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+
+	// policies map で canUpdateBioMedia=false を設定 (admin/moderator フラグ
+	// なし → HasRolePolicy が false を返す stub)。
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"canUpdateBioMedia": false},
+	})
+
+	rec := post(h.Update, `{"avatarId":"file1"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=false で 403")
+	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
+	assert.Contains(t, rec.Body.String(), "8feff0ba-5ab5-585b-31f4-4df816663fad")
+}
+
+func TestUpdate_AvatarID_AllowedWhenPolicyTrue(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"canUpdateBioMedia": true},
+	})
+
+	rec := post(h.Update, `{"avatarId":"file1"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "policy=true なら通常成功")
+}
+
+func TestUpdate_AvatarID_NullClearAllowedRegardlessOfPolicy(t *testing.T) {
+	// avatarId=null (= 解除) は policy gate の対象外 (= 自分の avatar 解除は
+	// いつでも可能、設定 (新規 set) のみ制限する upstream 互換挙動)。
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"canUpdateBioMedia": false},
+	})
+
+	rec := post(h.Update, `{"avatarId":null}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "null clear は gate 対象外")
+}
+
+func TestUpdate_BannerID_RestrictedByRole(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		policies: map[string]any{"canUpdateBioMedia": false},
+	})
+
+	rec := post(h.Update, `{"bannerId":"file2"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
+}
+
+// roleProvider 未配線時は gate を skip (= 旧挙動互換)。
+func TestUpdate_AvatarID_NoRoleProviderSkipsGate(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	// SetRoleProvider を呼ばない
+	rec := post(h.Update, `{"avatarId":"file1"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// admin / moderator は policy override で常に通る (HasRolePolicy 仕様)。
+func TestUpdate_AvatarID_AdminBypass(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	h.SetRoleProvider(&stubRoleProvider{
+		admin:    true,
+		policies: map[string]any{"canUpdateBioMedia": false},
+	})
+
+	rec := post(h.Update, `{"avatarId":"file1"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "admin は policy=false でもバイパス")
+}
 
 func TestUpdate_Success(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)

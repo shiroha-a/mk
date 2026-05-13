@@ -42,6 +42,13 @@ const (
 	// #1012 経由で初導入)。channels/create 等の policy-gated endpoint が共通で使う。
 	UUIDRolePermissionDenied = "7f86f06f-7e15-4057-8561-f4b6d4ac755a"
 
+	// UUIDRestrictedByRole は upstream `i/update` の `restrictedByRole` UUID
+	// (third_party/misskey/.../endpoints/i/update.ts:115)。policy 制限により
+	// 個別フィールドの更新を拒否する経路で使う (#1024)。
+	// `RolePermissionDenied` (= requiredRolePolicy 違反) と区別する: 後者は
+	// endpoint 全体への access 拒否、本 code はフィールド単位の制限。
+	UUIDRestrictedByRole = "8feff0ba-5ab5-585b-31f4-4df816663fad"
+
 	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
 	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
 	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
@@ -180,6 +187,17 @@ func RolePermissionDenied() map[string]any {
 	return Error("ROLE_PERMISSION_DENIED",
 		"You are not assigned to a required role.",
 		UUIDRolePermissionDenied)
+}
+
+// RestrictedByRole returns a 403 RESTRICTED_BY_ROLE error response.
+// upstream `i/update` の `restrictedByRole` と同 shape
+// (message: "This feature is restricted by your role.", id: 8feff0ba-...)。
+// フィールド単位の policy 制限 (e.g. canUpdateBioMedia / alwaysMarkNsfw /
+// avatarDecorationLimit) で個別フィールドの更新を拒否するときに使う (#1024)。
+func RestrictedByRole() map[string]any {
+	return Error("RESTRICTED_BY_ROLE",
+		"This feature is restricted by your role.",
+		UUIDRestrictedByRole)
 }
 
 // NoSuchRenoteTarget returns a 404 NO_SUCH_RENOTE_TARGET error response.

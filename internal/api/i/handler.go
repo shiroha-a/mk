@@ -32,6 +32,9 @@ type RoleProvider interface {
 	IsSilenced(userID string) bool
 	GetUserRoles(userID string) ([]*model.Role, error)
 	GetUserPolicies(userID string) map[string]any
+	// HasRolePolicy gates per-policy field updates (canUpdateBioMedia 等)
+	// 単発 lookup なので caller は GetUserPolicies を介さずに済む (#1024)。
+	HasRolePolicy(userID, policyKey string) bool
 }
 
 // EmailSender sends an email message (subject + text + optional HTML).
@@ -920,9 +923,22 @@ func (h *Handler) Update(c echo.Context) error {
 		in.HardMutedWords = &mw
 	}
 	if req.AvatarID != nil {
+		// upstream Misskey TS i/update.ts: avatarId 指定時は canUpdateBioMedia
+		// policy を gate。null (= 解除) は policy なしで通過させる (= 自分の
+		// avatar 解除はいつでも可能、設定だけ制限される #1024)。
+		if v := req.AvatarID; v != nil && *v != "" {
+			if h.roleProvider != nil && !h.roleProvider.HasRolePolicy(me.ID, "canUpdateBioMedia") {
+				return apierr.JSONRestrictedByRole(c)
+			}
+		}
 		in.AvatarID = req.AvatarID
 	}
 	if req.BannerID != nil {
+		if v := req.BannerID; v != nil && *v != "" {
+			if h.roleProvider != nil && !h.roleProvider.HasRolePolicy(me.ID, "canUpdateBioMedia") {
+				return apierr.JSONRestrictedByRole(c)
+			}
+		}
 		in.BannerID = req.BannerID
 	}
 	if req.AvatarDecorations != nil {

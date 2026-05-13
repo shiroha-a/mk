@@ -99,6 +99,14 @@ func TestJSONAccessDenied(t *testing.T) {
 	assert.Equal(t, UUIDAccessDenied, errObj["id"])
 }
 
+func TestJSONRestrictedByRole(t *testing.T) {
+	code, body := invoke(t, JSONRestrictedByRole)
+	assert.Equal(t, http.StatusForbidden, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "RESTRICTED_BY_ROLE", errObj["code"])
+	assert.Equal(t, UUIDRestrictedByRole, errObj["id"])
+}
+
 func TestJSONNoSuchRenoteTarget(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchRenoteTarget)
 	assert.Equal(t, http.StatusNotFound, code)
