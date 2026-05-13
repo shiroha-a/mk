@@ -37,6 +37,17 @@ func (r *TimelineRequest) normalize() {
 	}
 }
 
+// Policy keys consumed by timeline gates. notes package 内 private const に
+// 留めて core/role への依存を増やさない (= TimelinePolicyProvider interface の
+// narrow design と整合)。値は role package の Policy* 定数と一致させる必要が
+// あり、ずれると gate が動かなくなるので doc コメントで参照を明記する。
+const (
+	// policyKeyLtlAvailable = role.PolicyLtlAvailable。
+	policyKeyLtlAvailable = "ltlAvailable"
+	// policyKeyGtlAvailable = role.PolicyGtlAvailable。
+	policyKeyGtlAvailable = "gtlAvailable"
+)
+
 // timelineAvailable reports whether the timeline endpoint gated by the
 // given policy key (= "ltlAvailable" / "gtlAvailable") is enabled for the
 // current viewer. upstream Misskey TS handler は `getUserPolicies(me ?
@@ -45,7 +56,12 @@ func (r *TimelineRequest) normalize() {
 // 渡して base policies を引く (= core/role.Service.GetUserPolicies の
 // 匿名経路と同 semantics、#1026)。
 //
-// policyProvider 未配線時は gate skip (= 旧挙動互換、test fixture 用)。
+// policyProvider 未配線時は gate skip (test fixture / 旧挙動互換)。policy
+// が bool true でない場合は **fail-closed で reject** する: upstream の
+// `if (!policies.ltlAvailable)` 評価 (= undefined / false どちらも falsy
+// 扱い) と挙動を揃える。production 経路では DefaultPolicies が常に bool を
+// 返すのでこの差は発火しないが、厳密互換性のため fail-closed で揃える
+// (#1038 review)。
 func (h *Handler) timelineAvailable(c echo.Context, policyKey string) bool {
 	if h.policyProvider == nil {
 		return true
@@ -56,7 +72,7 @@ func (h *Handler) timelineAvailable(c echo.Context, policyKey string) bool {
 	}
 	policies := h.policyProvider.GetUserPolicies(userID)
 	v, ok := policies[policyKey].(bool)
-	return !ok || v // 未知 key は fail-soft で許可 (= 旧挙動互換)
+	return ok && v
 }
 
 // Timeline handles POST /api/notes/timeline (home timeline).
@@ -79,7 +95,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 
 // LocalTimeline handles POST /api/notes/local-timeline.
 func (h *Handler) LocalTimeline(c echo.Context) error {
-	if !h.timelineAvailable(c, "ltlAvailable") {
+	if !h.timelineAvailable(c, policyKeyLtlAvailable) {
 		return apierr.JSONLtlDisabled(c)
 	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
@@ -98,7 +114,7 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 
 // GlobalTimeline handles POST /api/notes/global-timeline.
 func (h *Handler) GlobalTimeline(c echo.Context) error {
-	if !h.timelineAvailable(c, "gtlAvailable") {
+	if !h.timelineAvailable(c, policyKeyGtlAvailable) {
 		return apierr.JSONGtlDisabled(c)
 	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
@@ -118,7 +134,7 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 func (h *Handler) HybridTimeline(c echo.Context) error {
 	// upstream: hybrid-timeline は ltlAvailable で gate する (gtl ではなく
 	// ltl 側 policy を見るのは「ローカルタイムライン + social の hybrid」だから)。
-	if !h.timelineAvailable(c, "ltlAvailable") {
+	if !h.timelineAvailable(c, policyKeyLtlAvailable) {
 		return apierr.JSONLtlDisabled(c)
 	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {

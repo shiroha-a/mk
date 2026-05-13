@@ -277,9 +277,11 @@ func TestLocalTimeline_NoPolicyProviderSkipsGate(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// policies map に該当 key が無い場合は fail-soft で許可 (= upstream は明示的
-// に key を返すが、mk-go の type assert 失敗時は安全側で gate skip)。
-func TestLocalTimeline_MissingPolicyKeyIsFailSoft(t *testing.T) {
+// policies map に該当 key が無い / 非 bool の場合は **fail-closed で reject**
+// する (upstream の `if (!policies.ltlAvailable)` 評価と挙動を揃える、#1038
+// review)。production 経路では DefaultPolicies が常に bool を返すのでこの
+// path は発火しないが、test fixture で seal して挙動を固定する。
+func TestLocalTimeline_MissingPolicyKeyDenies(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
 	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
 	h.SetPolicyProvider(&stubTimelinePolicyProvider{
@@ -290,7 +292,23 @@ func TestLocalTimeline_MissingPolicyKeyIsFailSoft(t *testing.T) {
 
 	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
 	require.NoError(t, h.LocalTimeline(c))
-	assert.Equal(t, http.StatusInternalServerError, rec.Code, "key 不在は fail-soft 許可")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "key 不在は fail-closed reject")
+	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
+}
+
+// 非 bool 値 (e.g., 文字列) も fail-closed で reject される regression guard。
+func TestLocalTimeline_NonBoolPolicyValueDenies(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"": {"ltlAvailable": "yes"}, // 文字列 (production では起きないが defensive)
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "非 bool は fail-closed")
 }
 
 func TestTimeline_HappyPathHome(t *testing.T) {
