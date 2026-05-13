@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -623,15 +625,13 @@ func filterByPriority(entries []policyEntry, prio int) []any {
 }
 
 // aggregatePolicyValues applies the per-key aggregator (bool OR / numeric
-// max / chatAvailability ranked) to the supplied candidate values. The
-// fallback for unrecognized shapes is the baseVal so unknown policies
-// behave like "useDefault for every role".
+// max / chatAvailability ranked / []string set union) to the supplied
+// candidate values. The fallback for unrecognized shapes is the baseVal
+// so unknown policies behave like "useDefault for every role".
 //
 // Only the types actually present in `DefaultPolicies()` are wired here:
-// bool, int, and string (chatAvailability)。slice (uploadableFileTypes) は
-// upstream TS でも集約 semantics が定義されていない (= 通常は base / role
-// 個別値のいずれかが一意に有効) ので、本実装でも base を維持する。新規 policy
-// 追加で int64 / float64 / 他の type が必要になったらここに分岐を追加する。
+// bool, int, string (chatAvailability), []string (uploadableFileTypes)。
+// 新規 policy 追加で int64 / float64 / 他の type が必要になったら分岐を追加。
 func aggregatePolicyValues(key string, baseVal any, values []any) any {
 	if len(values) == 0 {
 		return baseVal
@@ -651,9 +651,76 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 			return aggregateChatAvailability(values)
 		}
 		return baseVal
+	case []string:
+		// upstream RoleService.calc('uploadableFileTypes', set union) と等価。
+		// 全 role の値を flatten + trim + 空文字 skip した set union を deterministic
+		// に sort して返す。各 entry は []string (DefaultPolicies) または []any
+		// (JSON unmarshal 経由) のどちらでも accept する (#1034)。
+		return aggregateStringSetUnion(values, baseVal)
 	default:
-		// uploadableFileTypes など slice 型は base を維持。
 		return baseVal
+	}
+}
+
+// aggregateStringSetUnion merges the supplied candidate values into a
+// deterministic []string by set union. Each candidate may be []string
+// (DefaultPolicies / Go literal) or []any (JSON unmarshal 由来)。trim +
+// 空文字 skip で upstream Misskey TS `RoleService.calc` の per-entry trim と
+// 一致させる。
+//
+// 全候補から取り出せた string が 1 個も無いときは baseVal をそのまま返す
+// (= "全 role が空 list / 不正 値の場合 base default を維持" の fail-soft)。
+func aggregateStringSetUnion(values []any, baseVal any) any {
+	set := make(map[string]struct{})
+	for _, v := range values {
+		for _, s := range normalizeStringSlice(v) {
+			set[s] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return baseVal
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeStringSlice coerces a JSON-decoded or Go literal slice into a
+// []string, trimming whitespace and skipping empty entries. Accepts
+// []string / []any / nil。型不一致は nil で返す (= caller 側で fail-soft)。
+//
+// drive package の normalizeMimePatterns と同等の logic だが、role 側で
+// 集約に使うため独立 helper を持つ (パッケージ境界を越えるより少量の
+// duplicate を許容)。
+func normalizeStringSlice(raw any) []string {
+	switch v := raw.(type) {
+	case nil:
+		return nil
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
 	}
 }
 

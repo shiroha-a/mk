@@ -391,20 +391,38 @@ func TestGetUserPolicies_MetaPoliciesFallbacks(t *testing.T) {
 	})
 }
 
-// uploadableFileTypes は slice 型なので集約しない (base を維持する)。
-// role が override してもまだ集約 semantics が無いので base のままになる
-// (= upstream TS と同等の behavior、専用 sub-issue で将来対応)。
-func TestGetUserPolicies_SlicePolicyKeepsBase(t *testing.T) {
+// #1034: uploadableFileTypes は set union で集約される。role の override は
+// JSON unmarshal で []any 型として渡るが、aggregator がそれを取り出して
+// set union 化する。
+func TestGetUserPolicies_UploadableFileTypesSingleRoleOverride(t *testing.T) {
 	svc, roleRepo, assignRepo, _ := newTestService(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
 		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":false,"priority":0,"value":["image/jpeg"]}}`))}
 	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
 
 	policies := svc.GetUserPolicies("u1")
-	// base の slice が維持される (upgrade 時に専用 sub-issue で集約 semantics を
-	// 定義してから aggregator を追加する想定の placeholder)。
-	_, ok := policies["uploadableFileTypes"].([]string)
-	assert.True(t, ok, "uploadableFileTypes の base 型は []string で維持される")
+	got, ok := policies["uploadableFileTypes"].([]string)
+	require.True(t, ok, "set union 結果は []string 型で返る")
+	assert.Equal(t, []string{"image/jpeg"}, got)
+}
+
+// 複数 role の uploadableFileTypes が set union で merge される (= 「より
+// 寛容な方向への集約」、upstream Misskey TS の calc('uploadableFileTypes',
+// set union) と等価)。
+func TestGetUserPolicies_UploadableFileTypesMultiRoleUnion(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":false,"priority":0,"value":["image/png","image/jpeg"]}}`))}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":false,"priority":0,"value":["image/png","video/mp4"]}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+	policies := svc.GetUserPolicies("u1")
+	got, ok := policies["uploadableFileTypes"].([]string)
+	require.True(t, ok)
+	// r1 + r2 の和集合、sort 順 (image/jpeg, image/png, video/mp4)
+	assert.Equal(t, []string{"image/jpeg", "image/png", "video/mp4"}, got)
 }
 
 // priority=0 fallback: 全 role が default を選んでいても、最終 aggregator は

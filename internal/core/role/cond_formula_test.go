@@ -276,16 +276,66 @@ func TestAggregateChatAvailability_AvailableShortCircuit(t *testing.T) {
 	assert.Equal(t, "available", got)
 }
 
-// uploadableFileTypes 相当の slice 型 base と空 values の 2 fallback を
-// 確認する (= base が aggregator の switch default branch に落ちる経路)。
-func TestAggregatePolicyValues_SliceBaseAndEmptyValues(t *testing.T) {
-	// slice base: override があっても集約 semantics が無いので base 維持。
+// #1034: slice 型 base (uploadableFileTypes 等) は set union で集約される。
+// 旧 KeepsBase 挙動からの差分: 単一 override は set union で抽出され、
+// override に書かれた pattern が結果に現れる。
+func TestAggregatePolicyValues_SliceBaseSetUnion(t *testing.T) {
 	base := []string{"image/*"}
 	got := aggregatePolicyValues("uploadableFileTypes", base, []any{[]string{"video/*"}})
-	assert.Equal(t, base, got)
+	// upstream RoleService.calc(...set union) と等価。base は集約対象外で
+	// override 値のみから set を作るので base "image/*" は結果に含まれない。
+	assert.Equal(t, []string{"video/*"}, got)
+}
 
-	// values が空なら型に依らず base を返す。
+// values が空なら型に依らず base を返す (= 旧来挙動の維持)。
+func TestAggregatePolicyValues_EmptyValuesReturnsBase(t *testing.T) {
 	assert.Equal(t, 42, aggregatePolicyValues("anything", 42, nil))
+}
+
+// set union の deterministic 出力 + entry trim + 空文字 skip を直接 cover。
+func TestAggregatePolicyValues_SliceSetUnionDeterministic(t *testing.T) {
+	base := []string{"image/*"}
+	// 複数 role 由来の override を flatten + dedup + trim + sort
+	got := aggregatePolicyValues("uploadableFileTypes", base, []any{
+		[]string{"image/*", "  text/* "}, // trim される
+		[]string{"video/*", "image/*"},   // dedup される
+		[]string{"audio/*", ""},          // 空文字は skip
+	})
+	// sort 後の deterministic 順
+	assert.Equal(t, []string{"audio/*", "image/*", "text/*", "video/*"}, got)
+}
+
+// JSON unmarshal 由来の []any も []string と同じく accept する。
+func TestAggregatePolicyValues_SliceSetUnionFromJSONAny(t *testing.T) {
+	base := []string{"image/*"}
+	got := aggregatePolicyValues("uploadableFileTypes", base, []any{
+		[]any{"image/*", "video/*"},
+	})
+	assert.Equal(t, []string{"image/*", "video/*"}, got)
+}
+
+// 全候補から取り出せた entry が 0 個なら base を返す (= fail-soft)。
+func TestAggregatePolicyValues_SliceSetUnionEmptyFallsBackToBase(t *testing.T) {
+	base := []string{"image/*"}
+	// values は空 slice の override / 空文字のみの override / 型不一致の混在。
+	got := aggregatePolicyValues("uploadableFileTypes", base, []any{
+		[]string{},   // 空 slice
+		[]string{""}, // 空文字のみ
+		42,           // 型不一致
+	})
+	// 結果 set が空なので base が返る。
+	assert.Equal(t, base, got)
+}
+
+// normalizeStringSlice の direct unit test (型 coercion 全 path)。
+func TestNormalizeStringSlice(t *testing.T) {
+	assert.Nil(t, normalizeStringSlice(nil))
+	assert.Equal(t, []string{"a", "b"}, normalizeStringSlice([]string{"a", " b "}))
+	assert.Equal(t, []string{}, normalizeStringSlice([]string{"", "  "}))
+	assert.Equal(t, []string{"x"}, normalizeStringSlice([]any{42, "x", true, "  "}))
+	// 型不一致 (string / slice ではない) は nil
+	assert.Nil(t, normalizeStringSlice("not a slice"))
+	assert.Nil(t, normalizeStringSlice(42))
 }
 
 func TestCondFormula_UnmarshalErrors(t *testing.T) {
