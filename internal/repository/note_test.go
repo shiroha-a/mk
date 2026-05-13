@@ -368,6 +368,45 @@ func TestNoteRepository_ListByUserID(t *testing.T) {
 	assert.Len(t, out, 2)
 }
 
+// ListByUserIDFiltered は upstream users/notes 互換の 4 種 filter (#1021)。
+func TestNoteRepository_ListByUserIDFiltered(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_lf_1", "lfuser")
+	defer cleanupUser(t, user.ID)
+
+	// 4 種類のノートを seed (file 添付 / reply / pure renote / 通常)。
+	text := "plain"
+	notes := []*model.Note{
+		{ID: "n_lf_plain", UserID: user.ID, Text: &text, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
+		{ID: "n_lf_file", UserID: user.ID, Text: &text, FileIDs: pq.StringArray{"f1"}, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	// withFiles=false の defaults (= withReplies=true / withRenotes=true /
+	// withChannelNotes=false)。channel=false の filter は本ケースで影響なし。
+	out, err := repo.ListByUserIDFiltered(user.ID, "", "", 10, false, true, true, false)
+	require.NoError(t, err)
+	assert.Len(t, out, 2)
+
+	// withFiles=true で file 添付のみ
+	out, err = repo.ListByUserIDFiltered(user.ID, "", "", 10, true, true, true, false)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "n_lf_file", out[0].ID)
+}
+
+func TestNoteRepository_ListByUserIDFiltered_QueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	db := testDB.WithContext(ctx)
+	repo := NewNoteRepository(db)
+	_, err := repo.ListByUserIDFiltered("a", "", "", 10, true, true, true, false)
+	assert.Error(t, err)
+}
+
 func TestNoteRepository_FindManyByIDsWithUser(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "u_lst_2", "listuser2")

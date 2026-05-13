@@ -496,11 +496,19 @@ func (h *Handler) Search(c echo.Context) error {
 }
 
 // NotesRequest is the request body for users/notes.
+// withFiles / withReplies / withRenotes / withChannelNotes は upstream の
+// paramDef と同じ optional boolean。pointer で受けることで JSON 上の
+// "未指定" を upstream paramDef のデフォルトに置き換える経路を確保する
+// (#1021)。
 type NotesRequest struct {
-	UserID  string `json:"userId"`
-	Limit   int    `json:"limit"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	UserID           string `json:"userId"`
+	Limit            int    `json:"limit"`
+	SinceID          string `json:"sinceId"`
+	UntilID          string `json:"untilId"`
+	WithFiles        *bool  `json:"withFiles"`
+	WithReplies      *bool  `json:"withReplies"`
+	WithRenotes      *bool  `json:"withRenotes"`
+	WithChannelNotes *bool  `json:"withChannelNotes"`
 }
 
 // Notes handles POST /api/users/notes.
@@ -520,7 +528,26 @@ func (h *Handler) Notes(c echo.Context) error {
 		return apierr.JSONNoSuchUser(c)
 	}
 
-	notes, err := h.noteRepo.ListByUserID(req.UserID, req.UntilID, req.SinceID, req.Limit)
+	// upstream paramDef のデフォルトに合わせる (= withFiles=false /
+	// withReplies=true / withRenotes=true / withChannelNotes=false)。
+	withFiles := false
+	if req.WithFiles != nil {
+		withFiles = *req.WithFiles
+	}
+	withReplies := true
+	if req.WithReplies != nil {
+		withReplies = *req.WithReplies
+	}
+	withRenotes := true
+	if req.WithRenotes != nil {
+		withRenotes = *req.WithRenotes
+	}
+	withChannelNotes := false
+	if req.WithChannelNotes != nil {
+		withChannelNotes = *req.WithChannelNotes
+	}
+
+	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, req.UntilID, req.SinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

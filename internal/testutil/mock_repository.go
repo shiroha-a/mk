@@ -975,6 +975,39 @@ func (m *MockNoteRepository) ListByUserID(userID string, untilID, sinceID string
 	}, untilID, sinceID, limit), nil
 }
 
+// ListByUserIDFiltered は ListByUserID に upstream `users/notes` 互換の
+// filter 引数を適用した版。production GORM impl と同 logic で predicate に
+// 詰めて listFiltered に委譲する (#1021)。bool 4 引数は repository interface
+// の signature に整合 (= struct を介さない理由は testutil ↔ repository の
+// import cycle 回避)。
+func (m *MockNoteRepository) ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
+	return m.listFiltered(func(n *model.Note) bool {
+		if n.UserID != userID {
+			return false
+		}
+		if withFiles && len(n.FileIDs) == 0 {
+			return false
+		}
+		if !withReplies && n.ReplyID != nil {
+			return false
+		}
+		if !withRenotes {
+			// pure renote (text / fileIds / poll 全て空 + renoteId あり) を除外
+			text := ""
+			if n.Text != nil {
+				text = *n.Text
+			}
+			if n.RenoteID != nil && text == "" && len(n.FileIDs) == 0 && !n.HasPoll {
+				return false
+			}
+		}
+		if !withChannelNotes && n.ChannelID != nil {
+			return false
+		}
+		return true
+	}, untilID, sinceID, limit), nil
+}
+
 func (m *MockNoteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, error) {
 	out := make([]*model.Note, 0, len(ids))
 	for _, id := range ids {

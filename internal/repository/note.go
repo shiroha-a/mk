@@ -55,6 +55,17 @@ type NoteRepository interface {
 	IncrementCount(noteID, column string, delta int) error
 	IncrementReaction(noteID, reaction string, delta int) error
 	ListByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListByUserIDFiltered returns notes owned by userID with upstream
+	// `users/notes` filter parameters applied. 4 つの bool は upstream paramDef
+	// と同じ semantics で各々:
+	//   - withFiles: true なら fileIds 非空のみ (デフォルト false)
+	//   - withReplies: false なら reply を除外 (デフォルト true)
+	//   - withRenotes: false なら pure renote を除外 (デフォルト true)
+	//   - withChannelNotes: false なら channel 投稿を除外 (デフォルト false)
+	//
+	// caller (handler) は JSON pointer field から bool 値を必ず upstream の
+	// デフォルトに合わせて詰めること (#1021)。
+	ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error)
 	ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
 	ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
@@ -248,6 +259,43 @@ func (r *noteRepository) ListByUserID(userID string, untilID, sinceID string, li
 	}
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
+	}
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&notes).Error; err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
+// ListByUserIDFiltered は ListByUserID に upstream 互換 filter を加えた版。
+// fileIds 非空 / replyId / renoteId / channelId それぞれの SQL filter を
+// optional に追加する。bool 引数は upstream paramDef のデフォルトに合わせて
+// handler 側で必ず詰めること (例: handler は withReplies=true / withRenotes=true
+// / withChannelNotes=false で渡す)。filter struct ではなく bool 引数で受ける
+// のは testutil ↔ repository の import cycle を避けるため (#1021)。
+func (r *noteRepository) ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
+	var notes []*model.Note
+	q := preloadNoteRelations(r.db).Where(`"userId" = ?`, userID)
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if withFiles {
+		// upstream TL filter (`applyTimelineFilter` 同 file 内) と同じ式。
+		// 空 array リテラル `'{}'` と比較することで「fileIds 非空」を絞り込める。
+		q = q.Where(`"fileIds" != '{}'`)
+	}
+	if !withReplies {
+		q = q.Where(`"replyId" IS NULL`)
+	}
+	if !withRenotes {
+		// pure renote (= text / fileIds / poll 全て空 + renoteId あり) を除外する。
+		// quote (= text あり + renoteId) は通常の投稿として残す。
+		q = q.Where(`NOT ("renoteId" IS NOT NULL AND "text" IS NULL AND "fileIds" = '{}' AND "hasPoll" = false)`)
+	}
+	if !withChannelNotes {
+		q = q.Where(`"channelId" IS NULL`)
 	}
 	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&notes).Error; err != nil {
 		return nil, err

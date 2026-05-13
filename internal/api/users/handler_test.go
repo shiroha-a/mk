@@ -780,6 +780,112 @@ func TestNotes_Success(t *testing.T) {
 	assert.Len(t, out, 1)
 }
 
+// --- #1021: withFiles / withReplies / withRenotes / withChannelNotes filter ---
+
+// 4 種類のノート (text のみ / file 添付あり / reply / pure renote / channel) を
+// 同 user に seed し、各 filter で期待数が返ることを確認する。upstream
+// `users/notes` paramDef のデフォルトは withFiles=false / withReplies=true /
+// withRenotes=true / withChannelNotes=false。
+func seedNotesForFilter(t *testing.T, repo *testutil.MockNoteRepository) {
+	t.Helper()
+	text := "plain text"
+	repo.Notes["nf_plain"] = &model.Note{
+		ID: "nf_plain", UserID: "user1", Text: &text,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	repo.Notes["nf_file"] = &model.Note{
+		ID: "nf_file", UserID: "user1", Text: &text, FileIDs: []string{"f1"},
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	parentID := "nf_plain"
+	repo.Notes["nf_reply"] = &model.Note{
+		ID: "nf_reply", UserID: "user1", Text: &text, ReplyID: &parentID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	renoteID := "external_target"
+	repo.Notes["nf_renote"] = &model.Note{
+		ID: "nf_renote", UserID: "user1", RenoteID: &renoteID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	channelID := "ch1"
+	repo.Notes["nf_channel"] = &model.Note{
+		ID: "nf_channel", UserID: "user1", Text: &text, ChannelID: &channelID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+}
+
+func TestNotes_DefaultFilters(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	// channel は除外、その他 (plain / file / reply / renote) は含む
+	assert.Len(t, out, 4, "default: withChannelNotes=false で channel のみ除外")
+}
+
+func TestNotes_WithFiles(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withFiles": true}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1, "file 添付ノートのみ")
+	assert.Equal(t, "nf_file", out[0]["id"])
+}
+
+func TestNotes_WithoutReplies(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withReplies": false}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	for _, n := range out {
+		assert.NotEqual(t, "nf_reply", n["id"], "reply が除外される")
+	}
+}
+
+func TestNotes_WithoutRenotes(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withRenotes": false}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	for _, n := range out {
+		assert.NotEqual(t, "nf_renote", n["id"], "pure renote が除外される")
+	}
+}
+
+func TestNotes_WithChannelNotes(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withChannelNotes": true}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	var hasChannel bool
+	for _, n := range out {
+		if n["id"] == "nf_channel" {
+			hasChannel = true
+		}
+	}
+	assert.True(t, hasChannel, "withChannelNotes=true で channel 投稿が含まれる")
+}
+
 func TestNotes_LimitClamp(t *testing.T) {
 	h, repo := newTestHandler(t)
 	addTestUser(repo)
@@ -1017,6 +1123,10 @@ type failingNoteRepo struct {
 }
 
 func (f *failingNoteRepo) ListByUserID(_ string, _, _ string, _ int) ([]*model.Note, error) {
+	return nil, assertErr
+}
+
+func (f *failingNoteRepo) ListByUserIDFiltered(_, _, _ string, _ int, _, _, _, _ bool) ([]*model.Note, error) {
 	return nil, assertErr
 }
 
