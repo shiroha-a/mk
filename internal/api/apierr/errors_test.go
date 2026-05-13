@@ -93,6 +93,25 @@ func TestRestrictedByRole(t *testing.T) {
 	assert.Equal(t, "This feature is restricted by your role.", errObj["message"])
 }
 
+// #1026: upstream notes/local-timeline.ts の ltlDisabled と code / id /
+// message が一致することを seal。hybrid-timeline からも同 UUID で reject。
+func TestLtlDisabled(t *testing.T) {
+	result := LtlDisabled()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "LTL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDLtlDisabled, errObj["id"])
+	assert.Equal(t, "Local timeline has been disabled.", errObj["message"])
+}
+
+// #1026: upstream notes/global-timeline.ts の gtlDisabled と一致を seal。
+func TestGtlDisabled(t *testing.T) {
+	result := GtlDisabled()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "GTL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDGtlDisabled, errObj["id"])
+	assert.Equal(t, "Global timeline has been disabled.", errObj["message"])
+}
+
 func TestNoSuchRenoteTarget(t *testing.T) {
 	result := NoSuchRenoteTarget()
 	errObj := result["error"].(map[string]any)

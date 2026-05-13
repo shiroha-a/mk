@@ -107,6 +107,22 @@ func TestJSONRestrictedByRole(t *testing.T) {
 	assert.Equal(t, UUIDRestrictedByRole, errObj["id"])
 }
 
+func TestJSONLtlDisabled(t *testing.T) {
+	code, body := invoke(t, JSONLtlDisabled)
+	assert.Equal(t, http.StatusForbidden, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "LTL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDLtlDisabled, errObj["id"])
+}
+
+func TestJSONGtlDisabled(t *testing.T) {
+	code, body := invoke(t, JSONGtlDisabled)
+	assert.Equal(t, http.StatusForbidden, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "GTL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDGtlDisabled, errObj["id"])
+}
+
 func TestJSONNoSuchRenoteTarget(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchRenoteTarget)
 	assert.Equal(t, http.StatusNotFound, code)
