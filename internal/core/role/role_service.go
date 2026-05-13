@@ -43,6 +43,13 @@ const (
 	PolicyCanImportMuting    = "canImportMuting"
 	PolicyCanImportUserLists = "canImportUserLists"
 	PolicyCanImportAntennas  = "canImportAntennas"
+
+	// 以下は #1024 でフィールド単位 gate に使う policy key。endpoint 全体の
+	// access 拒否ではなく、特定 field (avatarId / bannerId / note watermark
+	// 等) の更新を拒否する経路で使う。Misskey TS は restrictedByRole error
+	// で reject、mk-go も apierr.RestrictedByRole で同 shape を返す。
+	PolicyCanPublicNote     = "canPublicNote"
+	PolicyCanUpdateBioMedia = "canUpdateBioMedia"
 )
 
 // roleCacheTTL は GetUserRoles キャッシュの有効期限。Misskey TS 同等の

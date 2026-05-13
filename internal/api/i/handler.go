@@ -922,22 +922,30 @@ func (h *Handler) Update(c echo.Context) error {
 	} else if ok {
 		in.HardMutedWords = &mw
 	}
+	// upstream Misskey TS i/update.ts: avatarId / bannerId が non-null 文字列で
+	// 指定された場合に canUpdateBioMedia policy gate。null (= 解除) は対象外
+	// (= 自分の avatar/banner 解除は常に可、設定だけ制限される #1024)。
+	// avatarId と bannerId 両方が指定された request で同 policy を 2 度 lookup
+	// しないよう、helper closure で memoize する (upstream の
+	// `policies ??= await ...` と同 pattern)。
+	var bioMediaChecked, bioMediaAllowed bool
+	canUpdateBioMedia := func() bool {
+		if !bioMediaChecked {
+			bioMediaAllowed = h.roleProvider == nil ||
+				h.roleProvider.HasRolePolicy(me.ID, role.PolicyCanUpdateBioMedia)
+			bioMediaChecked = true
+		}
+		return bioMediaAllowed
+	}
 	if req.AvatarID != nil {
-		// upstream Misskey TS i/update.ts: avatarId 指定時は canUpdateBioMedia
-		// policy を gate。null (= 解除) は policy なしで通過させる (= 自分の
-		// avatar 解除はいつでも可能、設定だけ制限される #1024)。
-		if v := req.AvatarID; v != nil && *v != "" {
-			if h.roleProvider != nil && !h.roleProvider.HasRolePolicy(me.ID, "canUpdateBioMedia") {
-				return apierr.JSONRestrictedByRole(c)
-			}
+		if v := req.AvatarID; v != nil && *v != "" && !canUpdateBioMedia() {
+			return apierr.JSONRestrictedByRole(c)
 		}
 		in.AvatarID = req.AvatarID
 	}
 	if req.BannerID != nil {
-		if v := req.BannerID; v != nil && *v != "" {
-			if h.roleProvider != nil && !h.roleProvider.HasRolePolicy(me.ID, "canUpdateBioMedia") {
-				return apierr.JSONRestrictedByRole(c)
-			}
+		if v := req.BannerID; v != nil && *v != "" && !canUpdateBioMedia() {
+			return apierr.JSONRestrictedByRole(c)
 		}
 		in.BannerID = req.BannerID
 	}

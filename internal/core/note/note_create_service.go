@@ -341,7 +341,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// に降格する (silencing)。連合互換性のため reject ではなく降格扱い (=
 	// 投稿は成功するが timeline 表出範囲だけ絞られる)。channel 内の note は
 	// channel 機構自体が露出範囲を管理するので降格しない (#1024)。
-	if visibility == model.NoteVisibilityPublic && (in.ChannelID == nil || *in.ChannelID == "") {
+	//
+	// channel 判定は upstream の `data.channel == null` に厳密対応させて
+	// `in.ChannelID == nil` のみとする。空文字 channelID は API として
+	// 不正値だが、空文字を「非 channel」と扱うと upstream で channel 扱い
+	// される request を mk-go で降格してしまう挙動差が出る (= 互換性破壊)。
+	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
 		if s.silencingProvider != nil && s.silencingProvider.IsSilenced(in.User.ID) {
 			visibility = model.NoteVisibilityHome
 		}

@@ -137,27 +137,36 @@ func TestCreateService_SilencedHomeNoteUnchanged(t *testing.T) {
 	assert.Equal(t, model.NoteVisibilityHome, created.Visibility)
 }
 
+// channel 内の public note は channel 機構が露出範囲を管理するので silencing
+// 対象外 (upstream NoteCreateService.ts も同 logic)。channelHook stub で
+// channel 存在チェックを通過させて、降格されずに public のまま保存される
+// ことを確認する。
+type stubChannelHook struct{ exists bool }
+
+func (h *stubChannelHook) EnsureChannelExists(_ string) error {
+	if !h.exists {
+		return note.ErrChannelNotFound
+	}
+	return nil
+}
+
+func (h *stubChannelHook) OnNotePosted(_, _, _ string) {}
+
 func TestCreateService_SilencedChannelNoteNotDemoted(t *testing.T) {
-	// channel 内の public note は channel 機構が露出範囲を管理するので
-	// silencing 対象外 (upstream NoteCreateService.ts も同 logic)。
-	svc, noteRepo, _ := newCreateService(t)
-	_ = noteRepo
+	svc, _, _ := newCreateService(t)
 	svc.SetSilencingProvider(&silencingStub{silenced: true})
-	// channelHook 経由で channel 存在チェックが要るので、ここでは channel
-	// 機能を skip するため ChannelID 空文字経由は使わず、channelID 指定で
-	// channelHook stub 経由のセットアップが必要。本 test は scope 簡略化の
-	// ため "channelHook 未配線 + ChannelID 非 nil 文字列なし" の経路で
-	// silencing skip を確認する: in.ChannelID == nil ブランチ。
+	svc.SetChannelHook(&stubChannelHook{exists: true})
+
 	user := &model.User{ID: "user1"}
 	text := "hello"
-	// ChannelID 空文字 (= 非 channel post) の場合は silencing 適用。
+	channelID := "ch1"
 	created, err := svc.Create(note.CreateInput{
 		User: user, Text: &text, Visibility: model.NoteVisibilityPublic,
-		ChannelID: ptr(""),
+		ChannelID: &channelID,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
-		"ChannelID 空文字 = 非 channel post なので silencing 適用")
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
+		"silenced user でも channel post は降格しない (channel 機構が露出管理)")
 }
 
 func TestCreateService_SilencingProviderNilSkipped(t *testing.T) {
@@ -171,9 +180,6 @@ func TestCreateService_SilencingProviderNilSkipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility)
 }
-
-// ptr is a small helper for string pointer fields used in test cases.
-func ptr(s string) *string { return &s }
 
 func TestCreateService_RequiresContent(t *testing.T) {
 	svc, _, _ := newCreateService(t)
