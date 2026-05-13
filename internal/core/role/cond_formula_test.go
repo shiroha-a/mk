@@ -208,9 +208,36 @@ func TestCoerceToBaseType(t *testing.T) {
 	assert.Equal(t, float64(3), coerceToBaseType(float64(0), 3))
 	assert.Equal(t, "x", coerceToBaseType(float64(0), "x"))
 
-	// base が bool / string / slice 等は素通し。
+	// base が bool / string は素通し。
 	assert.Equal(t, true, coerceToBaseType(false, true))
 	assert.Equal(t, "value", coerceToBaseType("base", "value"))
+}
+
+// #1036 review: base が []string (uploadableFileTypes 等) のときの coerce。
+// JSON unmarshal は []any で来るので []string に丸める。これで後段の
+// aggregatePolicyValues の case []string 分岐が meta.policies override 経由
+// でも fire するようになり、set union 集約が一貫して動く。
+func TestCoerceToBaseType_StringSlice(t *testing.T) {
+	base := []string{"image/*"}
+
+	// []any (JSON unmarshal 由来) → []string に正規化
+	got := coerceToBaseType(base, []any{"image/*", " video/* "})
+	assert.Equal(t, []string{"image/*", "video/*"}, got)
+
+	// []string はそのまま返す
+	assert.Equal(t, []string{"a"}, coerceToBaseType(base, []string{"a"}))
+
+	// 空文字 entry は normalize で skip される
+	got = coerceToBaseType(base, []any{"image/*", "", "  "})
+	assert.Equal(t, []string{"image/*"}, got)
+
+	// 完全に空 (normalize 後 0 件) は base にフォールバック
+	got = coerceToBaseType(base, []any{"", "  "})
+	assert.Equal(t, base, got)
+
+	// 型不一致 (string / object 等) は base にフォールバック
+	assert.Equal(t, base, coerceToBaseType(base, "not a slice"))
+	assert.Equal(t, base, coerceToBaseType(base, 42))
 }
 
 // coerce は NaN / +-Inf / int レンジ超過の float64 を silently truncate せず

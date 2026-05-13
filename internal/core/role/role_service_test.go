@@ -406,6 +406,31 @@ func TestGetUserPolicies_UploadableFileTypesSingleRoleOverride(t *testing.T) {
 	assert.Equal(t, []string{"image/jpeg"}, got)
 }
 
+// #1036 review: meta.policies で uploadableFileTypes を override しても、
+// JSON unmarshal 由来の []any が coerceToBaseType で []string に丸まり、
+// 後段の aggregator が case []string にマッチして set union 集約が動く。
+// 旧 (#1034 だけだった) 実装では base 型が []any のまま残り、aggregator
+// の switch が default fall through して base 維持 (= 集約 bypass) する
+// regression があった。
+func TestGetUserPolicies_UploadableFileTypesMetaOverrideAggregated(t *testing.T) {
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	// meta.policies で base allowlist を ["text/*"] に絞る
+	metaRepo.Meta = &model.Meta{ID: "x",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":["text/*"]}`))}
+	// role override で image/* を追加
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":false,"priority":0,"value":["image/*"]}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	policies := svc.GetUserPolicies("u1")
+	got, ok := policies["uploadableFileTypes"].([]string)
+	require.True(t, ok, "meta override 経由でも []string 型で返る")
+	// role override の image/* が set union 結果に現れる。
+	// base override (text/*) は priority 0 fallback で全 role の base 値と
+	// して集約に含まれる: 単一 role なので role の override のみ flatten。
+	assert.Equal(t, []string{"image/*"}, got)
+}
+
 // 複数 role の uploadableFileTypes が set union で merge される (= 「より
 // 寛容な方向への集約」、upstream Misskey TS の calc('uploadableFileTypes',
 // set union) と等価)。

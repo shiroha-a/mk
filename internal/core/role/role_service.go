@@ -543,6 +543,23 @@ func coerceToBaseType(base, override any) any {
 		if i, ok := override.(int); ok {
 			return float64(i)
 		}
+	case []string:
+		// uploadableFileTypes 等の slice 型 policy。JSON unmarshal は
+		// `[]any` で返すので `[]string` に coerce する (#1034 follow-up:
+		// aggregator の `case []string` 経路を bypass しないために必要)。
+		// trim + 空文字 skip は normalizeStringSlice に委譲して role 内で
+		// 一貫させる。
+		if s, ok := override.([]string); ok {
+			return s
+		}
+		// normalizeStringSlice は 0 件のときも non-nil な空 slice を返すので、
+		// len で判定する (= 「override は slice だが全 entry が空文字 / 型
+		// 不一致で 0 件残らなかった」case は base にフォールバック)。
+		if normalized := normalizeStringSlice(override); len(normalized) > 0 {
+			return normalized
+		}
+		// 型不一致 (object / bool 等) や normalize 後 0 件は base に倒す。
+		return base
 	}
 	return override
 }
