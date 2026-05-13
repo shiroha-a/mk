@@ -64,6 +64,14 @@ const (
 	// middleware.RequireRolePolicy 経由で同 挙動に揃える。
 	PolicyCanManageCustomEmojis      = "canManageCustomEmojis"
 	PolicyCanManageAvatarDecorations = "canManageAvatarDecorations"
+
+	// 以下は #1026 で timeline endpoint の gate に使う policy key。匿名アクセス
+	// 可な経路 (local-timeline / global-timeline) と認証必須経路 (hybrid-
+	// timeline) の両方で使う。upstream Misskey TS は handler 内で
+	// `getUserPolicies(me ? me.id : null)` を呼んで匿名なら base policies の
+	// 値を見る pattern (空文字 userID で同等)。
+	PolicyLtlAvailable = "ltlAvailable"
+	PolicyGtlAvailable = "gtlAvailable"
 )
 
 // roleCacheTTL は GetUserRoles キャッシュの有効期限。Misskey TS 同等の

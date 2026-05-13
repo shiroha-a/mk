@@ -170,6 +170,129 @@ func TestHybridTimeline_FanoutError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// #1026: ltlAvailable / gtlAvailable role policy gate。匿名でも認証済みでも
+// 同じ pattern で gate される (upstream Misskey TS の getUserPolicies(me ?
+// me.id : null) 経路と同 semantics、handler 内 gate)。
+type stubTimelinePolicyProvider struct {
+	policiesByUser map[string]map[string]any // userID -> policies (""=anonymous)
+}
+
+func (s *stubTimelinePolicyProvider) GetUserPolicies(userID string) map[string]any {
+	if p, ok := s.policiesByUser[userID]; ok {
+		return p
+	}
+	return map[string]any{}
+}
+
+func TestLocalTimeline_LtlDisabled_Anonymous(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"": {"ltlAvailable": false},
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=false で 403")
+	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
+	assert.Contains(t, rec.Body.String(), "45a6eb02-7695-4393-b023-dd3be9aaaefd")
+}
+
+func TestLocalTimeline_LtlDisabled_AuthenticatedUser(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"alice": {"ltlAvailable": false},
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	setAuthUser(c, &model.User{ID: "alice"})
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
+}
+
+func TestLocalTimeline_LtlEnabled_PassesThrough(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"": {"ltlAvailable": true},
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c))
+	// policy=true なら gate 通過、後段の failing service で 500 になる
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestGlobalTimeline_GtlDisabled(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"": {"gtlAvailable": false},
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/global-timeline", `{}`)
+	require.NoError(t, h.GlobalTimeline(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "GTL_DISABLED")
+	assert.Contains(t, rec.Body.String(), "0332fc13-6ab2-4427-ae80-a9fadffd1a6b")
+}
+
+// hybrid-timeline は ltlAvailable で gate する (= upstream と同 logic)。
+// gtlAvailable=false でも hybrid は許可される (= ltl が effective なので)。
+func TestHybridTimeline_LtlDisabledRejects(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"alice": {"ltlAvailable": false, "gtlAvailable": true},
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/hybrid-timeline", `{}`)
+	setAuthUser(c, &model.User{ID: "alice"})
+	require.NoError(t, h.HybridTimeline(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "hybrid は ltlAvailable で gate")
+	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
+}
+
+// policyProvider 未配線時は gate を skip する (= 旧挙動互換 / test fixture)。
+func TestLocalTimeline_NoPolicyProviderSkipsGate(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	// SetPolicyProvider を呼ばない
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c))
+	// gate を skip して後段の failing service で 500
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// policies map に該当 key が無い場合は fail-soft で許可 (= upstream は明示的
+// に key を返すが、mk-go の type assert 失敗時は安全側で gate skip)。
+func TestLocalTimeline_MissingPolicyKeyIsFailSoft(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	h.SetPolicyProvider(&stubTimelinePolicyProvider{
+		policiesByUser: map[string]map[string]any{
+			"": {}, // empty policies map (= key 不在)
+		},
+	})
+
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "key 不在は fail-soft 許可")
+}
+
 func TestTimeline_HappyPathHome(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
 	noteID := seedTimelineNote(noteRepo)

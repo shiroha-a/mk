@@ -53,6 +53,16 @@ func JSONRestrictedByRole(c echo.Context) error {
 	return c.JSON(http.StatusForbidden, RestrictedByRole())
 }
 
+// JSONLtlDisabled writes a 403 LTL_DISABLED response. 詳細は LtlDisabled の doc。
+func JSONLtlDisabled(c echo.Context) error {
+	return c.JSON(http.StatusForbidden, LtlDisabled())
+}
+
+// JSONGtlDisabled writes a 403 GTL_DISABLED response. 詳細は GtlDisabled の doc。
+func JSONGtlDisabled(c echo.Context) error {
+	return c.JSON(http.StatusForbidden, GtlDisabled())
+}
+
 // JSONNoSuchRenoteTarget writes a 404 NO_SUCH_RENOTE_TARGET response to the client.
 func JSONNoSuchRenoteTarget(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchRenoteTarget())

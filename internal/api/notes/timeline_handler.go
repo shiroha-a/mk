@@ -37,6 +37,28 @@ func (r *TimelineRequest) normalize() {
 	}
 }
 
+// timelineAvailable reports whether the timeline endpoint gated by the
+// given policy key (= "ltlAvailable" / "gtlAvailable") is enabled for the
+// current viewer. upstream Misskey TS handler は `getUserPolicies(me ?
+// me.id : null)` で匿名でも base policies (DefaultPolicies + meta.policies
+// merge) を返す pattern なので、mk-go も viewer が nil なら userID="" を
+// 渡して base policies を引く (= core/role.Service.GetUserPolicies の
+// 匿名経路と同 semantics、#1026)。
+//
+// policyProvider 未配線時は gate skip (= 旧挙動互換、test fixture 用)。
+func (h *Handler) timelineAvailable(c echo.Context, policyKey string) bool {
+	if h.policyProvider == nil {
+		return true
+	}
+	var userID string
+	if viewer := middleware.GetUser(c); viewer != nil {
+		userID = viewer.ID
+	}
+	policies := h.policyProvider.GetUserPolicies(userID)
+	v, ok := policies[policyKey].(bool)
+	return !ok || v // 未知 key は fail-soft で許可 (= 旧挙動互換)
+}
+
 // Timeline handles POST /api/notes/timeline (home timeline).
 func (h *Handler) Timeline(c echo.Context) error {
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
@@ -57,6 +79,9 @@ func (h *Handler) Timeline(c echo.Context) error {
 
 // LocalTimeline handles POST /api/notes/local-timeline.
 func (h *Handler) LocalTimeline(c echo.Context) error {
+	if !h.timelineAvailable(c, "ltlAvailable") {
+		return apierr.JSONLtlDisabled(c)
+	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:          req.WithFiles,
@@ -73,6 +98,9 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 
 // GlobalTimeline handles POST /api/notes/global-timeline.
 func (h *Handler) GlobalTimeline(c echo.Context) error {
+	if !h.timelineAvailable(c, "gtlAvailable") {
+		return apierr.JSONGtlDisabled(c)
+	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:          req.WithFiles,
@@ -88,6 +116,11 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 
 // HybridTimeline handles POST /api/notes/hybrid-timeline.
 func (h *Handler) HybridTimeline(c echo.Context) error {
+	// upstream: hybrid-timeline は ltlAvailable で gate する (gtl ではなく
+	// ltl 側 policy を見るのは「ローカルタイムライン + social の hybrid」だから)。
+	if !h.timelineAvailable(c, "ltlAvailable") {
+		return apierr.JSONLtlDisabled(c)
+	}
 	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:             req.WithFiles,

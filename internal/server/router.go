@@ -1061,6 +1061,11 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetDriveFolderRepo(driveFolderRepo)
 	notesHandler.SetUserRepo(userRepo)
 	notesHandler.SetUserListRepo(userListRepo)
+	// LocalTimeline / GlobalTimeline / HybridTimeline で ltlAvailable /
+	// gtlAvailable role policy を gate するために配線 (#1026)。匿名 viewer に
+	// 対しては GetUserPolicies("") が base policies を返すので、admin が
+	// meta.policies で全 user に対して TL を無効化できる。
+	notesHandler.SetPolicyProvider(roleService)
 	if m, err := metaRepo.Fetch(); err == nil {
 		notesHandler.SetUGCVisibility(m.UgcVisibilityForVisitor)
 		if m.DeeplAuthKey != nil && *m.DeeplAuthKey != "" {

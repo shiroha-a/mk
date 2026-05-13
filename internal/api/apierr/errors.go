@@ -49,6 +49,14 @@ const (
 	// endpoint 全体への access 拒否、本 code はフィールド単位の制限。
 	UUIDRestrictedByRole = "8feff0ba-5ab5-585b-31f4-4df816663fad"
 
+	// UUIDLtlDisabled は upstream `notes/local-timeline` の `ltlDisabled` UUID。
+	// `ltlAvailable` role policy が false のときに 403 で reject する (#1026)。
+	// hybrid-timeline からも同 UUID で reject する upstream 仕様。
+	UUIDLtlDisabled = "45a6eb02-7695-4393-b023-dd3be9aaaefd"
+	// UUIDGtlDisabled は upstream `notes/global-timeline` の `gtlDisabled` UUID。
+	// `gtlAvailable` role policy が false のときに 403 で reject する (#1026)。
+	UUIDGtlDisabled = "0332fc13-6ab2-4427-ae80-a9fadffd1a6b"
+
 	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
 	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
 	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
@@ -198,6 +206,20 @@ func RestrictedByRole() map[string]any {
 	return Error("RESTRICTED_BY_ROLE",
 		"This feature is restricted by your role.",
 		UUIDRestrictedByRole)
+}
+
+// LtlDisabled returns a 403 LTL_DISABLED error response. upstream
+// `notes/local-timeline` / `notes/hybrid-timeline` の `ltlDisabled` と同
+// shape。`ltlAvailable` role policy が false のときに返す (#1026)。
+func LtlDisabled() map[string]any {
+	return Error("LTL_DISABLED", "Local timeline has been disabled.", UUIDLtlDisabled)
+}
+
+// GtlDisabled returns a 403 GTL_DISABLED error response. upstream
+// `notes/global-timeline` の `gtlDisabled` と同 shape。`gtlAvailable` role
+// policy が false のときに返す (#1026)。
+func GtlDisabled() map[string]any {
+	return Error("GTL_DISABLED", "Global timeline has been disabled.", UUIDGtlDisabled)
 }
 
 // NoSuchRenoteTarget returns a 404 NO_SUCH_RENOTE_TARGET error response.

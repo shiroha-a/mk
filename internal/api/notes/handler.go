@@ -51,6 +51,26 @@ type Handler struct {
 	// "all" (default), "local", "none"
 	ugcVisibility string
 	translator    *translate.DeepLClient
+	// policyProvider は LocalTimeline / GlobalTimeline / HybridTimeline で
+	// ltlAvailable / gtlAvailable policy を gate するために使う (#1026)。
+	// 匿名 viewer (userID="") に対しても base policies を返す upstream 互換
+	// semantics で、middleware ではなく handler 内で gate する。
+	policyProvider TimelinePolicyProvider
+}
+
+// TimelinePolicyProvider abstracts the role-policy lookup used by timeline
+// gating. core/role.Service が実装する。匿名 viewer (userID="") に対しては
+// base policies (DefaultPolicies + meta.policies) を返す upstream 互換挙動
+// を要求する (#1026)。
+type TimelinePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetPolicyProvider wires a TimelinePolicyProvider so timeline endpoints
+// gate access by ltlAvailable / gtlAvailable role policy (#1026). nil 時は
+// gate を skip する (= test 経路 / 旧挙動互換)。
+func (h *Handler) SetPolicyProvider(p TimelinePolicyProvider) {
+	h.policyProvider = p
 }
 
 // SetChannelMutingRepo attaches a ChannelMutingRepository so timeline handlers
