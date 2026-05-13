@@ -29,6 +29,19 @@ const (
 	// PolicyCanCreateChannel gates /api/channels/create (upstream Misskey
 	// #17121 / triage #1012)。
 	PolicyCanCreateChannel = "canCreateChannel"
+
+	// 以下は #1020 audit で middleware gate に昇格したもの。実 enforcement は
+	// internal/server/middleware/role_policy.go の RequireRolePolicy 経由。
+	// default 値はいずれも role_service.go の DefaultPolicies() を参照。
+	PolicyCanSearchNotes     = "canSearchNotes"
+	PolicyCanSearchUsers     = "canSearchUsers"
+	PolicyCanUseTranslator   = "canUseTranslator"
+	PolicyCanInvite          = "canInvite"
+	PolicyCanImportFollowing = "canImportFollowing"
+	PolicyCanImportBlocking  = "canImportBlocking"
+	PolicyCanImportMuting    = "canImportMuting"
+	PolicyCanImportUserLists = "canImportUserLists"
+	PolicyCanImportAntennas  = "canImportAntennas"
 )
 
 // roleCacheTTL は GetUserRoles キャッシュの有効期限。Misskey TS 同等の
@@ -111,8 +124,17 @@ func (s *Service) InvalidateAllRoleCaches() {
 	})
 }
 
-// GetUserRoles returns all active (non-expired) roles assigned to the user.
+// GetUserRoles returns all active roles applied to the user. The returned
+// slice is the union of (a) manually assigned roles that have not expired
+// and (b) `target=conditional` roles whose `condFormula` evaluates to true
+// for the user. Mirrors upstream Misskey TS `RoleService.getUserRoles` so
+// admin-authored conditional roles (e.g. "base role for all local users")
+// take effect at gate sites like HasRolePolicy (#1020).
+//
 // 結果は roleCacheTTL 期間 in-memory にキャッシュされる (#300 3-5)。
+// Conditional 評価結果も同じ cache に乗るので、user の followers/notes
+// count などが変動しても最大 5 分の反映遅延がある点に注意 (= upstream TS
+// と同じ trade-off)。
 func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	if userID == "" {
 		return nil, nil
@@ -128,17 +150,76 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	if err != nil {
 		return nil, err
 	}
-	roles := make([]*model.Role, 0, len(assignments))
+	assignedRoles := make([]*model.Role, 0, len(assignments))
 	for _, a := range assignments {
 		if a.Role != nil {
-			roles = append(roles, a.Role)
+			assignedRoles = append(assignedRoles, a.Role)
 		}
 	}
+
+	// Conditional role 評価: 全 role を fetch して target=conditional のみを
+	// formula 評価で絞り込む。assigned roles と matched conditional の和集合
+	// を返す。upstream TS の getUserRoles と同じ順 (assigned が先)。
+	//
+	// roleRepo / userRepo どちらかが未配線なら、conditional 評価は skip して
+	// assigned のみを返す (= 旧挙動)。test 経路で userRepo 未注入のケースに
+	// 配慮した soft-fail。
+	condRoles := s.evaluateConditionalRoles(userID, assignedRoles)
+	roles := append(assignedRoles, condRoles...)
 	s.userRoleCache.Store(userID, &roleCacheEntry{
 		roles:     roles,
 		expiresAt: time.Now().Add(roleCacheTTL),
 	})
 	return roles, nil
+}
+
+// evaluateConditionalRoles returns the subset of `target=conditional`
+// roles whose `condFormula` evaluates to true for the user. Best-effort:
+// when prerequisites are missing (no userRepo wired, role list fetch
+// fails, user lookup fails, formula JSON malformed) we return nil so
+// callers fall back to assigned roles only. Matches upstream TS where
+// evalCond swallows all errors as false.
+func (s *Service) evaluateConditionalRoles(userID string, assigned []*model.Role) []*model.Role {
+	if s.userRepo == nil {
+		return nil
+	}
+	allRoles, err := s.roleRepo.List()
+	if err != nil {
+		return nil
+	}
+	// 早期 short-circuit: conditional role が 1 つも無いなら user fetch を
+	// 省略する (= upstream TS と同 optimization)。これで大多数のインスタンス
+	// では DB round-trip が 1 回減る。
+	hasCond := false
+	for _, r := range allRoles {
+		if r != nil && r.Target == model.RoleTargetConditional {
+			hasCond = true
+			break
+		}
+	}
+	if !hasCond {
+		return nil
+	}
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil || user == nil {
+		return nil
+	}
+	matched := make([]*model.Role, 0)
+	for _, r := range allRoles {
+		if r == nil || r.Target != model.RoleTargetConditional {
+			continue
+		}
+		var formula CondFormula
+		// CondFormula は datatypes.JSON。未設定だと "{}" が入っていて
+		// type が空文字列のため EvalCond で false に倒れる。
+		if err := json.Unmarshal(r.CondFormula, &formula); err != nil {
+			continue
+		}
+		if EvalCond(user, assigned, formula, s.idGen) {
+			matched = append(matched, r)
+		}
+	}
+	return matched
 }
 
 // isRootUser checks if the user is the root user.
@@ -241,45 +322,237 @@ func (s *Service) HasRolePolicy(userID, policyKey string) bool {
 	return ok && b
 }
 
-// GetUserPolicies computes merged policies for a user based on assigned roles.
-// デフォルトポリシーにロール固有のポリシーをマージする。
-func (s *Service) GetUserPolicies(userID string) map[string]any {
-	policies := DefaultPolicies()
-
-	roles, err := s.GetUserRoles(userID)
-	if err != nil || len(roles) == 0 {
-		return policies
-	}
-
-	// ロールポリシーのマージ (数値はmax、boolはOR)
-	// 簡略化版: ロールの policies JSON から useDefault=false のものを適用
-	for _, r := range roles {
-		applyRolePolicies(policies, r)
-	}
-
-	return policies
+// rolePolicyOverride mirrors the on-disk shape of one entry in
+// `Role.policies`:
+//
+//	{ "<key>": { "useDefault": bool, "priority": 0|1|2, "value": any } }
+type rolePolicyOverride struct {
+	UseDefault bool `json:"useDefault"`
+	Priority   int  `json:"priority"`
+	Value      any  `json:"value"`
 }
 
-// applyRolePolicies merges role-specific policy overrides into the base policies.
-func applyRolePolicies(base map[string]any, role *model.Role) {
-	if len(role.Policies) == 0 {
-		return
+// GetUserPolicies returns the user's effective role policies. The
+// computation mirrors upstream Misskey TS `RoleService.getUserPolicies`
+// so admin-authored policy overrides take effect identically (#1020):
+//
+//  1. Base policies = `DefaultPolicies()` merged with `meta.policies`
+//     (admin が UI で設定する全 user 適用 base override)。
+//  2. 各 policy key について、user の全 role (manual + conditional) から
+//     その key の override を集める。entry が無い role は `useDefault=true,
+//     priority=0` 扱い。
+//  3. 最高 priority (2 → 1 → 0) のグループだけを aggregator で集約する:
+//     - bool policies は `vs.some(v => v === true)` 相当 (OR)
+//     - 数値 policies は `Math.max(...vs)` 相当
+//     - `chatAvailability` は available > readonly > unavailable で優先集約
+//  4. `useDefault=true` の override は base policies[name] を採用する。
+//
+// userID が "" の場合は base policies のみを返す (= upstream の userId==null
+// と同等)。
+func (s *Service) GetUserPolicies(userID string) map[string]any {
+	basePolicies := DefaultPolicies()
+	s.applyMetaBasePolicies(basePolicies)
+
+	if userID == "" {
+		return basePolicies
 	}
-	// role.Policies は {"key": {"useDefault": bool, "priority": int, "value": any}} 形式
-	var rolePolicies map[string]struct {
-		UseDefault bool `json:"useDefault"`
-		Priority   int  `json:"priority"`
-		Value      any  `json:"value"`
+	roles, err := s.GetUserRoles(userID)
+	if err != nil {
+		// role 取得失敗時は base policies で fallback (upstream は throw
+		// するが、mk-go は fail-soft で gate を default 値に倒す)。
+		return basePolicies
 	}
-	if err := json.Unmarshal(role.Policies, &rolePolicies); err != nil {
-		return
+	if len(roles) == 0 {
+		return basePolicies
 	}
-	for key, p := range rolePolicies {
-		if p.UseDefault {
+
+	// 各 role の policies JSON を Unmarshal して一度だけ展開する。
+	roleOverrides := make([]map[string]rolePolicyOverride, 0, len(roles))
+	for _, r := range roles {
+		if r == nil || len(r.Policies) == 0 {
+			roleOverrides = append(roleOverrides, nil)
 			continue
 		}
-		base[key] = p.Value
+		var m map[string]rolePolicyOverride
+		if err := json.Unmarshal(r.Policies, &m); err != nil {
+			roleOverrides = append(roleOverrides, nil)
+			continue
+		}
+		roleOverrides = append(roleOverrides, m)
 	}
+
+	out := make(map[string]any, len(basePolicies))
+	for key, baseVal := range basePolicies {
+		out[key] = computePolicy(key, baseVal, roleOverrides)
+	}
+	return out
+}
+
+// applyMetaBasePolicies overlays `meta.policies` (admin UI 設定の base
+// override) onto the default policies map. Best-effort: meta fetch /
+// JSON unmarshal の失敗は silently skip して default のままにする
+// (= upstream TS と同じ fail-soft 挙動)。
+func (s *Service) applyMetaBasePolicies(base map[string]any) {
+	if s.metaRepo == nil {
+		return
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil || meta == nil || len(meta.Policies) == 0 {
+		return
+	}
+	var metaPolicies map[string]any
+	if err := json.Unmarshal(meta.Policies, &metaPolicies); err != nil {
+		return
+	}
+	for k, v := range metaPolicies {
+		base[k] = v
+	}
+}
+
+// policyEntry pairs a role's effective value for a given policy key with
+// its declared priority (0/1/2). Used internally by computePolicy.
+type policyEntry struct {
+	priority int
+	value    any
+}
+
+// computePolicy resolves the effective value for a single policy key by
+// applying upstream TS priority cascade + per-key aggregator. baseVal is
+// the merged default+meta value used when a role specifies useDefault=true
+// or when no role has an override.
+func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolicyOverride) any {
+	// 各 role について本 policy の override を組み立てる。entry 無し =
+	// priority=0, useDefault=true (= base にフォールバック) として扱う。
+	collected := make([]policyEntry, 0, len(roleOverrides))
+	for _, m := range roleOverrides {
+		if m == nil {
+			collected = append(collected, policyEntry{priority: 0, value: baseVal})
+			continue
+		}
+		p, ok := m[key]
+		if !ok {
+			collected = append(collected, policyEntry{priority: 0, value: baseVal})
+			continue
+		}
+		if p.UseDefault {
+			collected = append(collected, policyEntry{priority: p.Priority, value: baseVal})
+		} else {
+			collected = append(collected, policyEntry{priority: p.Priority, value: p.Value})
+		}
+	}
+	// upstream: priority 2 → 1 → 0 の順で「該当 priority に少なくとも 1 件
+	// あればそのグループだけ aggregate」。fallback の priority 0 は全 role
+	// を対象とする (= entry が無い role の priority=0 default も含めて集約)。
+	for _, prio := range []int{2, 1} {
+		group := filterByPriority(collected, prio)
+		if len(group) > 0 {
+			return aggregatePolicyValues(key, baseVal, group)
+		}
+	}
+	// priority=0 fallback: 全 entry を対象に集約する (= 各 role が default
+	// fallback でも、複数 role の数値 max / bool OR が反映される)。
+	values := make([]any, 0, len(collected))
+	for _, e := range collected {
+		values = append(values, e.value)
+	}
+	return aggregatePolicyValues(key, baseVal, values)
+}
+
+func filterByPriority(entries []policyEntry, prio int) []any {
+	out := make([]any, 0, len(entries))
+	for _, e := range entries {
+		if e.priority == prio {
+			out = append(out, e.value)
+		}
+	}
+	return out
+}
+
+// aggregatePolicyValues applies the per-key aggregator (bool OR / numeric
+// max / chatAvailability ranked) to the supplied candidate values. The
+// fallback for unrecognized shapes is the baseVal so unknown policies
+// behave like "useDefault for every role".
+//
+// Only the types actually present in `DefaultPolicies()` are wired here:
+// bool, int, and string (chatAvailability)。slice (uploadableFileTypes) は
+// upstream TS でも集約 semantics が定義されていない (= 通常は base / role
+// 個別値のいずれかが一意に有効) ので、本実装でも base を維持する。新規 policy
+// 追加で int64 / float64 / 他の type が必要になったらここに分岐を追加する。
+func aggregatePolicyValues(key string, baseVal any, values []any) any {
+	if len(values) == 0 {
+		return baseVal
+	}
+	switch baseVal.(type) {
+	case bool:
+		for _, v := range values {
+			if b, ok := v.(bool); ok && b {
+				return true
+			}
+		}
+		return false
+	case int:
+		return maxNumberAsInt(values, baseVal)
+	case string:
+		if key == "chatAvailability" {
+			return aggregateChatAvailability(values)
+		}
+		return baseVal
+	default:
+		// uploadableFileTypes など slice 型は base を維持。
+		return baseVal
+	}
+}
+
+// maxNumberAsInt picks the maximum int across values, ignoring entries
+// that fail type assertion. base is returned when no usable entry exists.
+// JSON unmarshal で role policy の数値が float64 になっているケース (= role
+// admin UI 由来の override) も拾えるよう、float64 を int に丸めて比較する。
+func maxNumberAsInt(values []any, base any) any {
+	b, _ := base.(int)
+	best := b
+	found := false
+	for _, v := range values {
+		switch x := v.(type) {
+		case int:
+			if !found || x > best {
+				best = x
+				found = true
+			}
+		case float64:
+			xi := int(x)
+			if !found || xi > best {
+				best = xi
+				found = true
+			}
+		}
+	}
+	if !found {
+		return base
+	}
+	return best
+}
+
+// aggregateChatAvailability picks the most permissive value among
+// {available, readonly, unavailable}, mirroring upstream TS. When the
+// supplied values contain a typed entry, that one wins over fallback to
+// the base default — the function always returns one of the three literal
+// strings ("available" / "readonly" / "unavailable").
+func aggregateChatAvailability(values []any) any {
+	hasReadonly := false
+	for _, v := range values {
+		if s, ok := v.(string); ok {
+			switch s {
+			case "available":
+				return "available"
+			case "readonly":
+				hasReadonly = true
+			}
+		}
+	}
+	if hasReadonly {
+		return "readonly"
+	}
+	return "unavailable"
 }
 
 // Assign assigns a role to a user with an optional expiration.

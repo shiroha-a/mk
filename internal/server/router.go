@@ -1071,7 +1071,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/replies", notesHandler.Replies)
 	api.POST("/notes/children", notesHandler.Children)
 	api.POST("/notes/conversation", notesHandler.Conversation)
-	api.POST("/notes/search", notesHandler.Search)
+	api.POST("/notes/search", notesHandler.Search,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchNotes))
 	api.POST("/notes/state", notesHandler.State, middleware.RequireAuth())
 	api.POST("/notes/timeline", notesHandler.Timeline, middleware.RequireAuth())
 	api.POST("/notes/local-timeline", notesHandler.LocalTimeline)
@@ -1093,7 +1095,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/user-list-timeline", notesHandler.UserListTimeline, middleware.RequireAuth())
 	api.POST("/notes/search-by-tag", notesHandler.SearchByTag)
 	api.POST("/notes/clips", notesHandler.Clips)
-	api.POST("/notes/translate", notesHandler.Translate)
+	api.POST("/notes/translate", notesHandler.Translate,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanUseTranslator))
 	api.POST("/notes/show-partial-bulk", notesHandler.ShowPartialBulk)
 	// notes/drafts + notes/thread-muting + notes/polls/recommendation (実データ)
 	notesHandler.SetDraftRepo(repository.NewNoteDraftRepository(s.db))
@@ -1129,7 +1133,9 @@ func (s *Server) setupRoutes() {
 		fetcher: corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.outboundOpts()...),
 	})
 	api.POST("/users/show", usersHandler.Show)
-	api.POST("/users/search", usersHandler.Search)
+	api.POST("/users/search", usersHandler.Search,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchUsers))
 	api.POST("/users/notes", usersHandler.Notes)
 	api.POST("/users/followers", usersHandler.Followers)
 	api.POST("/users/following", usersHandler.Following)
@@ -1137,7 +1143,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/users/report-abuse", usersHandler.ReportAbuse, middleware.RequireAuth())
 	api.POST("/users/reactions", usersHandler.Reactions)
 	api.POST("/users/featured-notes", usersHandler.FeaturedNotes)
-	api.POST("/users/search-by-username-and-host", usersHandler.SearchByUsernameAndHost)
+	api.POST("/users/search-by-username-and-host", usersHandler.SearchByUsernameAndHost,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchUsers))
 	api.POST("/users/update-memo", usersHandler.UpdateMemo, middleware.RequireAuth())
 	usersHandler.SetAbuseRepo(repository.NewAbuseReportRepository(s.db))
 	usersHandler.SetMemoRepo(repository.NewUserMemoRepository(s.db))
@@ -1249,11 +1257,23 @@ func (s *Server) setupRoutes() {
 	api.POST("/i/export-user-lists", iHandler.ExportUserLists, middleware.RequireAuth())
 	api.POST("/i/export-antennas", iHandler.ExportAntennas, middleware.RequireAuth())
 	api.POST("/i/export-clips", iHandler.ExportClips, middleware.RequireAuth())
-	api.POST("/i/import-following", iHandler.ImportFollowing, middleware.RequireAuth())
-	api.POST("/i/import-blocking", iHandler.ImportBlocking, middleware.RequireAuth())
-	api.POST("/i/import-muting", iHandler.ImportMuting, middleware.RequireAuth())
-	api.POST("/i/import-user-lists", iHandler.ImportUserLists, middleware.RequireAuth())
-	api.POST("/i/import-antennas", iHandler.ImportAntennas, middleware.RequireAuth())
+	// i/import-* の canImport* role policy gate は #1020 で追加。policy=false
+	// の user (default 全 false) は 403 ROLE_PERMISSION_DENIED を返す。
+	api.POST("/i/import-following", iHandler.ImportFollowing,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportFollowing))
+	api.POST("/i/import-blocking", iHandler.ImportBlocking,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportBlocking))
+	api.POST("/i/import-muting", iHandler.ImportMuting,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportMuting))
+	api.POST("/i/import-user-lists", iHandler.ImportUserLists,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportUserLists))
+	api.POST("/i/import-antennas", iHandler.ImportAntennas,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportAntennas))
 
 	// i/webhooks/* — Webhook管理 (実データ)
 	webhookHandler := apiwebhooks.NewHandler(webhookRepo, idGen)
@@ -1315,7 +1335,17 @@ func (s *Server) setupRoutes() {
 			return c.NoContent(http.StatusNoContent)
 		}, middleware.RequireAuth())
 	}
-	// i/import-* — データインポート (asynqキューにエンキュー)
+	// i/import-* — データインポート (asynqキューにエンキュー)。本 for-loop は
+	// 上方の explicit api.POST("/i/import-*", iHandler.Import*) と同じ path を
+	// 後勝ちで上書きするため、policy gate もここに必要 (#1020)。
+	// importType (kebab-case path 断片) と PolicyKey の対応は手書きで持つ。
+	importPolicyByType := map[string]string{
+		"following":  corerole.PolicyCanImportFollowing,
+		"blocking":   corerole.PolicyCanImportBlocking,
+		"muting":     corerole.PolicyCanImportMuting,
+		"user-lists": corerole.PolicyCanImportUserLists,
+		"antennas":   corerole.PolicyCanImportAntennas,
+	}
 	for _, importType := range []string{
 		"following", "blocking", "muting", "user-lists", "antennas",
 	} {
@@ -1326,7 +1356,9 @@ func (s *Server) setupRoutes() {
 				_ = s.queueClient.EnqueueImport(queue.ImportPayload{UserID: user.ID, Type: it})
 			}
 			return c.NoContent(http.StatusNoContent)
-		}, middleware.RequireAuth())
+		},
+			middleware.RequireAuth(),
+			middleware.RequireRolePolicy(roleService, importPolicyByType[it]))
 	}
 
 	// Hashtags endpoints (Phase 6)
@@ -1543,8 +1575,11 @@ func (s *Server) setupRoutes() {
 	channelsHandler.SetFavoriteRepo(channelFavoriteRepo)
 	channelsHandler.SetMutingRepo(channelMutingRepo)
 	channelsHandler.SetFollowingRepo(channelFollowingRepo)
-	channelsHandler.SetRoleChecker(roleService)
-	api.POST("/channels/create", channelsHandler.Create, middleware.RequireAuth())
+	// channels/create の canCreateChannel gate は #1020 で middleware に
+	// 昇格 (handler 内 RolePolicyChecker → middleware.RequireRolePolicy)。
+	api.POST("/channels/create", channelsHandler.Create,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanCreateChannel))
 	api.POST("/channels/show", channelsHandler.Show)
 	api.POST("/channels/update", channelsHandler.Update, middleware.RequireAuth())
 	api.POST("/channels/follow", channelsHandler.Follow, middleware.RequireAuth())
@@ -2274,7 +2309,8 @@ func (s *Server) setupRoutes() {
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth())
 
-	// invite/create — 招待コード作成 (認証必須)
+	// invite/create — 招待コード作成。canInvite role policy gate を #1020 で
+	// 追加 (default false なので role で明示的に許可した user のみ作成可)。
 	api.POST("/invite/create", func(c echo.Context) error {
 		user := middleware.GetUser(c)
 		ticket := &model.RegistrationTicket{
@@ -2305,7 +2341,9 @@ func (s *Server) setupRoutes() {
 			resp["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
 		return c.JSON(http.StatusOK, resp)
-	}, middleware.RequireAuth())
+	},
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite))
 
 	// invite/list — 招待コード一覧 (認証必須)
 	api.POST("/invite/list", func(c echo.Context) error {

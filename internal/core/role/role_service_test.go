@@ -184,7 +184,12 @@ func TestGetUserPolicies_WithRoleOverride(t *testing.T) {
 	}
 
 	policies := svc.GetUserPolicies("user1")
-	assert.Equal(t, float64(500), policies["driveCapacityMb"])
+	// #1020 で aggregator が base 型 (int) を維持するように。旧 impl の素朴な
+	// `base[key] = p.Value` は JSON unmarshal の float64 をそのまま代入していた
+	// ため float64(500) を返していたが、それは consumer 側 type assertion が
+	// 壊れる原因にもなっていた。新 impl は upstream TS の Math.max 同等を
+	// base 型で実装する (= 数値は int / int64 / float64 各々を維持)。
+	assert.Equal(t, 500, policies["driveCapacityMb"])
 }
 
 func TestGetUserPolicies_UseDefaultTrue_NotOverridden(t *testing.T) {
@@ -214,6 +219,203 @@ func TestGetUserPolicies_InvalidJSON(t *testing.T) {
 	policies := svc.GetUserPolicies("user1")
 	// 不正なJSONの場合はデフォルト値がそのまま返る
 	assert.Equal(t, 100, policies["driveCapacityMb"])
+}
+
+// --- #1020: 3 種類の role (manual / conditional) + base policies (meta.policies)
+// + priority aggregation を覆う追加テスト群 ---
+
+// Conditional role が isBot=true の user に自動付与され、policy が反映される。
+func TestGetUserRoles_ConditionalRole_Matched(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "bot1", Username: "bot", IsBot: true}))
+	svc.SetUserRepo(userRepo)
+
+	// target=conditional の role で「bot 用 canSearchNotes=true」
+	roleRepo.Roles["r-bot"] = &model.Role{
+		ID:          "r-bot",
+		Name:        "BotRole",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`)),
+	}
+
+	roles, err := svc.GetUserRoles("bot1")
+	require.NoError(t, err)
+	require.Len(t, roles, 1, "bot user は conditional role でマッチして付与される")
+	assert.Equal(t, "BotRole", roles[0].Name)
+
+	// HasRolePolicy も反映される (本 PR の middleware gate と一直線)。
+	assert.True(t, svc.HasRolePolicy("bot1", role.PolicyCanSearchNotes))
+}
+
+// Conditional role の formula が false に評価される user には付与されない。
+func TestGetUserRoles_ConditionalRole_NotMatched(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u1", Username: "alice", IsBot: false}))
+	svc.SetUserRepo(userRepo)
+
+	roleRepo.Roles["r-bot"] = &model.Role{
+		ID:          "r-bot",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`)),
+	}
+
+	roles, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.Empty(t, roles, "isBot=false の user は formula 不一致で 0 件")
+	// canSearchNotes は default false のまま
+	assert.False(t, svc.HasRolePolicy("u1", role.PolicyCanSearchNotes))
+}
+
+// userRepo 未配線 → conditional 評価 skip (= 旧挙動と同等の fail-safe)。
+func TestGetUserRoles_ConditionalSkippedWhenUserRepoNotWired(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["r-bot"] = &model.Role{
+		ID:          "r-bot",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+	}
+	roles, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.Empty(t, roles, "userRepo 未配線では conditional 評価しない")
+}
+
+// meta.policies の base override が適用される (= 全 user に効く"ベースロール"
+// 相当)。Role assignment 無しでも反映される。
+func TestGetUserPolicies_MetaBasePolicyOverridesDefault(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	// meta.policies で canSearchNotes を全員 true に上書き
+	metaRepo.Meta = &model.Meta{
+		ID:       "x",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":true,"driveCapacityMb":200}`)),
+	}
+	policies := svc.GetUserPolicies("u1")
+	assert.Equal(t, true, policies["canSearchNotes"], "meta.policies の base override が反映")
+	// JSON の数値は float64 で unmarshal される。base override は型を強制
+	// しないので float64(200) になる (旧 last-wins と同 semantics)。
+	assert.Equal(t, float64(200), policies["driveCapacityMb"])
+	// 未上書きの key は default が維持される
+	assert.Equal(t, 20, policies["mentionLimit"])
+}
+
+// 複数 role の bool policy は OR で集約される (canSearchNotes が 1 role でも
+// true なら true)。
+func TestGetUserPolicies_BoolPolicyORAcrossRoles(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":false}}`))}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+	policies := svc.GetUserPolicies("u1")
+	assert.Equal(t, true, policies["canSearchNotes"], "r1=false でも r2=true なら OR で true")
+}
+
+// 数値 policy は max で集約される。
+func TestGetUserPolicies_NumericPolicyMaxAcrossRoles(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"driveCapacityMb":{"useDefault":false,"priority":0,"value":200}}`))}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+		Policies: datatypes.JSON([]byte(`{"driveCapacityMb":{"useDefault":false,"priority":0,"value":500}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+	policies := svc.GetUserPolicies("u1")
+	assert.Equal(t, 500, policies["driveCapacityMb"], "r1=200, r2=500 → max=500")
+}
+
+// priority 2 は priority 1 を勝つ。priority 2 でだけ override されている
+// 場合、priority 1 / 0 の値は無視される。
+func TestGetUserPolicies_PriorityCascade(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r-high"] = &model.Role{ID: "r-high",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":2,"value":false}}`))}
+	roleRepo.Roles["r-low"] = &model.Role{ID: "r-low",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":1,"value":true}}`))}
+	assignRepo.Assignments["u1:r-high"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r-high"}
+	assignRepo.Assignments["u1:r-low"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r-low"}
+
+	policies := svc.GetUserPolicies("u1")
+	// priority=2 の false が勝つ (priority=1 の true は集約対象外)。
+	assert.Equal(t, false, policies["canSearchNotes"])
+}
+
+// chatAvailability は available > readonly > unavailable で集約される。
+func TestGetUserPolicies_ChatAvailabilityRanking(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"chatAvailability":{"useDefault":false,"priority":0,"value":"readonly"}}`))}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2",
+		Policies: datatypes.JSON([]byte(`{"chatAvailability":{"useDefault":false,"priority":0,"value":"unavailable"}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignRepo.Assignments["u1:r2"] = &model.RoleAssignment{ID: "a2", UserID: "u1", RoleID: "r2"}
+
+	policies := svc.GetUserPolicies("u1")
+	// readonly が available より弱いので、readonly + unavailable → readonly
+	assert.Equal(t, "readonly", policies["chatAvailability"])
+}
+
+// 空 userID は base policies (default + meta.policies merge 後) のみを返す。
+func TestGetUserPolicies_EmptyUserIDReturnsBaseOnly(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{ID: "x",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":true}`))}
+
+	policies := svc.GetUserPolicies("")
+	assert.Equal(t, true, policies["canSearchNotes"], "userID=\"\" でも meta.policies は反映")
+	assert.Equal(t, 20, policies["mentionLimit"], "default はそのまま")
+}
+
+// meta.policies が空 / 不正 JSON / fetch エラーのときは default のままで silently
+// 続行する (fail-soft、upstream TS 互換)。
+func TestGetUserPolicies_MetaPoliciesFallbacks(t *testing.T) {
+	t.Run("invalid JSON falls back to default", func(t *testing.T) {
+		svc, _, _, metaRepo := newTestService(t)
+		metaRepo.Meta = &model.Meta{ID: "x", Policies: datatypes.JSON([]byte(`not-json`))}
+		policies := svc.GetUserPolicies("")
+		assert.Equal(t, false, policies["canSearchNotes"], "不正 JSON は無視されて default")
+	})
+	t.Run("empty policies leaves default", func(t *testing.T) {
+		svc, _, _, metaRepo := newTestService(t)
+		metaRepo.Meta = &model.Meta{ID: "x", Policies: datatypes.JSON([]byte(``))}
+		policies := svc.GetUserPolicies("")
+		assert.Equal(t, false, policies["canSearchNotes"])
+	})
+}
+
+// uploadableFileTypes は slice 型なので集約しない (base を維持する)。
+// role が override してもまだ集約 semantics が無いので base のままになる
+// (= upstream TS と同等の behavior、専用 sub-issue で将来対応)。
+func TestGetUserPolicies_SlicePolicyKeepsBase(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"uploadableFileTypes":{"useDefault":false,"priority":0,"value":["image/jpeg"]}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	policies := svc.GetUserPolicies("u1")
+	// base の slice が維持される (upgrade 時に専用 sub-issue で集約 semantics を
+	// 定義してから aggregator を追加する想定の placeholder)。
+	_, ok := policies["uploadableFileTypes"].([]string)
+	assert.True(t, ok, "uploadableFileTypes の base 型は []string で維持される")
+}
+
+// priority=0 fallback: 全 role が default を選んでいても、最終 aggregator は
+// base を返す (regression: priority-2/1 が一件も無い時に空集合で集約しない)。
+func TestGetUserPolicies_PriorityZeroFallback(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1",
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":true,"priority":0,"value":false}}`))}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	policies := svc.GetUserPolicies("u1")
+	// useDefault=true の role しか無い場合は base (= default false) のまま。
+	assert.Equal(t, false, policies["canSearchNotes"])
 }
 
 func TestAssign_Success(t *testing.T) {

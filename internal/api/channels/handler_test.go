@@ -73,64 +73,10 @@ func TestCreate_NameRequired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// stubRoleChecker は RolePolicyChecker の test stub。指定 user / policy の組合せだけ
-// true を返し、それ以外は false。
-type stubRoleChecker struct {
-	allow map[string]bool // key = userID + "|" + policy
-}
-
-func newStubRoleChecker() *stubRoleChecker {
-	return &stubRoleChecker{allow: map[string]bool{}}
-}
-
-func (s *stubRoleChecker) HasRolePolicy(userID, policyKey string) bool {
-	return s.allow[userID+"|"+policyKey]
-}
-
-func (s *stubRoleChecker) Set(userID, policyKey string, allow bool) {
-	s.allow[userID+"|"+policyKey] = allow
-}
-
-// upstream Misskey #17121 (= 2026.5.1 fix / triage #1012): channels/create は
-// canCreateChannel role policy を gate する。policy=true なら通常成功、false なら
-// 403 ROLE_PERMISSION_DENIED。
-func TestCreate_RolePolicyAllowed(t *testing.T) {
-	h, _, _, _ := newHandler(t)
-	checker := newStubRoleChecker()
-	checker.Set("alice", "canCreateChannel", true)
-	h.SetRoleChecker(checker)
-
-	c, rec := newReq(t, `{"name":"alpha","color":"#abcdef"}`)
-	setUser(c, "alice")
-	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusOK, rec.Code, "canCreateChannel=true なら通常成功")
-}
-
-func TestCreate_RolePolicyDenied(t *testing.T) {
-	h, _, _, _ := newHandler(t)
-	checker := newStubRoleChecker()
-	// alice は何も設定しない → canCreateChannel=false (deny)
-	h.SetRoleChecker(checker)
-
-	c, rec := newReq(t, `{"name":"alpha","color":"#abcdef"}`)
-	setUser(c, "alice")
-	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code, "canCreateChannel=false で 403")
-	assert.Contains(t, rec.Body.String(), "ROLE_PERMISSION_DENIED")
-	assert.Contains(t, rec.Body.String(), "7f86f06f-7e15-4057-8561-f4b6d4ac755a")
-}
-
-// RolePolicyChecker 未配線 (= 旧挙動) では policy gate を skip して通常成功。
-// 既存 TestCreate_Success が同経路だが、roleChecker 未配線時の skip を明示する
-// regression guard として複製しておく。
-func TestCreate_NoRoleCheckerSkipsGate(t *testing.T) {
-	h, _, _, _ := newHandler(t)
-	// SetRoleChecker を呼ばない
-	c, rec := newReq(t, `{"name":"alpha","color":"#abcdef"}`)
-	setUser(c, "alice")
-	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusOK, rec.Code, "checker 未配線なら policy gate skip")
-}
+// canCreateChannel role policy gate は #1020 で middleware.RequireRolePolicy に
+// 昇格したため、本 handler test は policy gate を持たない (= 旧 stubRoleChecker /
+// TestCreate_RolePolicyAllowed / Denied / NoRoleCheckerSkipsGate は middleware
+// 側の TestRequireRolePolicy_* に移管した)。
 
 // failingChannelRepo causes Create to fail.
 type failingChannelRepo struct {

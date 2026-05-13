@@ -9,7 +9,6 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corechannel "github.com/shiroha-a/mk/internal/core/channel"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
-	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -30,25 +29,6 @@ type Handler struct {
 	fieldRes      *entity.NoteFieldResolver
 	// userRepo は channels/timeline の hardMutedWords filter (#787)。
 	userRepo repository.UserRepository
-	// roleChecker は channels/create の canCreateChannel policy gate
-	// (upstream Misskey #17121 / triage #1012)。nil 時は policy check を skip
-	// (= 旧挙動の "全 user に作成許可" を維持)。
-	roleChecker RolePolicyChecker
-}
-
-// RolePolicyChecker reports whether a user has a given role policy enabled.
-// 実装は core/role.Service。channels package で local 定義しておき、他 endpoint
-// が同種 gate を必要としたら共有先 (例: server/middleware) に昇格させる方針。
-// 現状は narrow contract を維持して cross-package 結合を増やさない。
-type RolePolicyChecker interface {
-	HasRolePolicy(userID, policyKey string) bool
-}
-
-// SetRoleChecker wires a RolePolicyChecker so channels/create can gate channel
-// creation by the `canCreateChannel` role policy (upstream #17121 / triage
-// #1012). nil 時は policy check を skip (= 旧挙動)。
-func (h *Handler) SetRoleChecker(c RolePolicyChecker) {
-	h.roleChecker = c
 }
 
 // SetUserRepo wires a UserRepository so channels/timeline filters out notes
@@ -149,15 +129,11 @@ type CreateRequest struct {
 }
 
 // Create handles POST /api/channels/create.
+//
+// canCreateChannel role policy gate は #1020 で router 側の
+// middleware.RequireRolePolicy に昇格済み。handler 内では policy を見ない。
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
-	// upstream Misskey #17121 (= 2026.5.1 fix / triage #1012): canCreateChannel
-	// role policy で channel 作成を gate する。default true なので role assign
-	// 無しの user は通過、admin が個別 user 用の role で false を設定すると拒否。
-	// roleChecker 未配線時は skip (= 旧挙動、移行期の test 互換)。
-	if h.roleChecker != nil && !h.roleChecker.HasRolePolicy(user.ID, corerole.PolicyCanCreateChannel) {
-		return apierr.JSONRolePermissionDenied(c)
-	}
 	var req CreateRequest
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return apierr.JSONInvalidParam(c)
