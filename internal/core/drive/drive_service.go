@@ -544,7 +544,15 @@ func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.Dr
 		// alwaysMarkNsfw role policy が true の user は isSensitive を false
 		// に変更できない (upstream DriveService.updateFile と同 logic、#1028)。
 		// 自分自身の policy なので file.userId == user.ID 前提で role を見る。
-		// moderator bypass はしない (= owner が自分の policy を見るのみ)。
+		//
+		// moderator bypass はしない (= 上の findOwnedFile() が moderator にも
+		// owner-only を強制する設計と整合)。admin が自分にも alwaysMarkNsfw を
+		// 持つ場合、自分の file も例外なく sensitive 維持する (= self-restriction、
+		// upstream は file.userId 起点で policies を見る semantics で同挙動)。
+		// 「自分の role を override したい admin は role 編集経由で剥がす」が
+		// 公式の脱出経路。i/update の admin bypass とは目的が異なる: i/update
+		// は profile field 設定の意思表明への gate、drive Update は実 file 属性
+		// の操作。
 		if !*in.IsSensitive && f.IsSensitive && s.roleChecker != nil {
 			policies := s.roleChecker.GetUserPolicies(user.ID)
 			if policies != nil {

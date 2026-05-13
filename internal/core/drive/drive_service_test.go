@@ -427,11 +427,32 @@ func TestUpdate_AlwaysMarkNsfwBlocksUnsensitive(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrCannotUnmarkSensitive)
 }
 
-// 同 user でも IsSensitive=true への変更は通常通り許可される。
+// alwaysMarkNsfw=true でも sensitive=true への変更は通常通り許可される。
+// gate 対象は sensitive=false への "clear" のみで、sensitive=true 化や既存
+// sensitive 維持は gate 対象外 (= NSFW marker を強化する方向への変更は妨げない)。
+func TestUpdate_AlwaysMarkNsfwAllowsSettingSensitive(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	// sensitive=false の file を sensitive=true に上げる経路 (= NSFW 強化)。
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: false}
+	svc.SetRoleChecker(&fakeMod{
+		policies: map[string]map[string]any{
+			"u1": {"alwaysMarkNsfw": true},
+		},
+	})
+
+	sensitive := true
+	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{IsSensitive: &sensitive})
+	require.NoError(t, err)
+}
+
+// alwaysMarkNsfw=true で既に sensitive な file の sensitive=true 維持も通常通り。
+// gate condition (`!*in.IsSensitive && f.IsSensitive`) が false なので通過する
+// regression guard (= "sensitive→sensitive の noop でも 403 で死ぬ" を防ぐ)。
 func TestUpdate_AlwaysMarkNsfwAllowsKeepingSensitive(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	owner := "u1"
-	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: false}
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, IsSensitive: true}
 	svc.SetRoleChecker(&fakeMod{
 		policies: map[string]map[string]any{
 			"u1": {"alwaysMarkNsfw": true},
