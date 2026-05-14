@@ -163,6 +163,22 @@ func TestUserList_WithReplies(t *testing.T) {
 	require.Len(t, ctx.sentType, 1)
 }
 
+// #1063: UserList channel は per-membership の withReplies (= upstream
+// `MiUserListMembership.withReplies`) を持つべきだが mk-go 側に model が
+// 無いため未実装。本 PR で noteFilter.shouldEmit から reply blanket-drop
+// を撤廃した副作用で、connect param `withReplies=false` でも reply が
+// pass-through する暫定挙動になっている。完全 upstream 互換 (= per-member
+// gate) は別 issue で対応する想定。本テストは暫定挙動の regression guard
+// で、将来 per-member gate を入れたら drop 側に書き換える。
+func TestUserList_WithRepliesFalse_ReplyPassthrough(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1","withReplies":false}`))
+	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
+}
+
 // --- RoleTimeline ---
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {

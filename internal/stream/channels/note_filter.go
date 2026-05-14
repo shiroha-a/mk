@@ -157,9 +157,14 @@ const (
 // paramWithReplies は connect 時の `withReplies` boolean。upstream で param
 // を持たない home-timeline では呼び出し側が常に false を渡す。
 //
-// JSON unmarshal 失敗時は pass-through。これは shouldEmit と同じ defensive
-// 設計で、payload が壊れているなら gate しないほうが「全 user に表示しない」
-// より副作用が小さい。
+// Defensive 設計の早期 return が 2 段ある:
+//
+//  1. mode == replyGateGlobal は unmarshal すら行わずに pass-through する
+//     (upstream `global-timeline.ts` には reply gate が無いため hot path
+//     のコストも最小化する意図)。
+//  2. JSON unmarshal 失敗時も pass-through する。payload が壊れているなら
+//     gate しないほうが「全 user に表示しない」より副作用が小さいため。
+//     これは shouldEmit と同じポリシー。
 func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, paramWithReplies bool, mode replyGateMode) bool {
 	if mode == replyGateGlobal {
 		return true
@@ -232,5 +237,10 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 		}
 		return true
 	}
+	// 未知の replyGateMode は保守的に pass-through する。replyGateGlobal は
+	// 関数頭で早期 return 済み、それ以外の既存 mode は上の switch ですべて
+	// return する設計なので、ここに到達するのは将来 mode を追加し忘れた
+	// 場合のみ。production には影響しないが「panic より degrade」に倒す方が
+	// 既存 streaming filter の defensive 方針と整合する。
 	return true
 }

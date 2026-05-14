@@ -146,6 +146,13 @@ func (c *Connection) HardMuteRules() []byte {
 // 渡すと "follow 情報なし" 扱いになり escape hatch (= 自分の reply / reply
 // to me / self-thread) のみで reply が通る upstream default 挙動に degrade
 // する。
+//
+// 並行安全: 本 method は内部 map を直接 mutate せず、**新しい map を全置換**
+// する設計。FollowingSnapshot() で返した古い map は channel.OnRedisEvent が
+// 読み込み中でも安全に GC される (Go の map read は同じ map に対する
+// concurrent write が無ければ thread-safe)。**将来 refresh subscriber
+// (#791 と同等) を実装するときも必ず「新しい map を作って Set する」パターン
+// を守ること** — 既存 map を mutate すると in-flight な reader と race する。
 func (c *Connection) SetFollowingSnapshot(snap map[string]bool) {
 	c.followingMu.Lock()
 	c.followingSnapshot = snap

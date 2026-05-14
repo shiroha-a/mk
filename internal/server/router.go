@@ -2479,6 +2479,9 @@ func (a *hardMuteLookupAdapter) HardMutedWordsForUser(userID string) []byte {
 // viewer's followee list at connection setup (#1063). 戻り値は followeeID →
 // withReplies の map で、home/hybrid/local timeline の reply gate に使う。
 //
+// 依存: `repository.FollowingRepository.ListFollowing(userID, limit, offset)`
+// (`internal/repository/following.go`)。既存 method なので追加配線は不要。
+//
 // fetch は ListFollowing をページネーションで全件読みだす。フォロー数 N が
 // 巨大な場合 (10K+) のメモリ / DB 負荷はあるが、upstream Misskey TS も同等
 // な map を connection ごとに保持しているので drop-in 互換性回復のためには
@@ -2486,6 +2489,12 @@ func (a *hardMuteLookupAdapter) HardMutedWordsForUser(userID string) []byte {
 // 200 / 上限は 10000 で cap し、それ以上 follow している power user は
 // snapshot から外れて escape hatch のみ動作する degrade に倒す (= 旧来の
 // "全 reply drop" よりは upstream 寄り)。
+//
+// 改善案 (本 PR scope outside): 同一 user の WebSocket 再接続ごとに毎回
+// 全 followee を fetch するので、tab 多重・短期再接続の多い production
+// では DB 負荷になる。per-user LRU cache を Manager に持たせれば
+// connection accept のコストを下げられる。invalidation は Following 変更
+// の subscriber (#791 と同じパターン) で粒度を合わせる想定。
 type followingSnapshotAdapter struct {
 	repo repository.FollowingRepository
 }

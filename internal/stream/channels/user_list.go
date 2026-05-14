@@ -8,6 +8,19 @@ import (
 )
 
 // UserListChannel forwards notes from members of a user list.
+//
+// upstream `user-list.ts` は per-membership の withReplies (= 各 list member
+// の MiUserListMembership.withReplies) で reply を gate する設計だが、mk-go
+// にはまだ list membership に紐づく withReplies model が無いため、本 channel
+// は connect 時の `withReplies` boolean param のみで gate する暫定実装。
+//
+// #1063 で noteFilter.shouldEmit から reply blanket-drop を撤廃した副作用で、
+// 現状は `withReplies=false` でも reply が pass-through する。upstream の
+// 「per-member withReplies が default false で reply を drop」semantics より
+// 緩い (= 全 member の reply を見せる) degrade だが、旧 mk-go の「list 全体で
+// reply を drop」よりは upstream 寄り。完全互換 (= per-member gate) は
+// `model.UserListMembership.WithReplies` 追加と Init での map snapshot
+// 取得を伴うので別 issue で扱う想定。
 type UserListChannel struct {
 	ctx    stream.ChannelContext
 	topic  string

@@ -51,16 +51,16 @@ func TestShouldEmit_RenoteWithFilesAllowed(t *testing.T) {
 // home/hybrid/local channel に揃った semantics で、reply 表示可否は
 // replyShouldEmit が channel ごとに判定する)。WithReplies フィールドは
 // connect param 互換のために残っているが、shouldEmit からは参照しない。
-func TestShouldEmit_ReplyPassthrough(t *testing.T) {
-	f := noteFilter{WithRenotes: true, WithReplies: false, WithFiles: false}
+// 旧テスト名 `TestShouldEmit_ReplyFiltered` (`WithReplies=false → drop`) /
+// `TestShouldEmit_ReplyAllowed` (`WithReplies=true → pass`) は drift 挙動の
+// assertion だったので、`WithReplies` 真偽どちらでも pass-through すること
+// を 1 つの test で並列に検証する形に統合した。
+func TestShouldEmit_ReplyAlwaysPassthrough(t *testing.T) {
 	payload := []byte(`{"text":"reply","replyId":"p1"}`)
-	assert.True(t, f.shouldEmit(payload, nil, ""))
-}
-
-func TestShouldEmit_ReplyAllowed(t *testing.T) {
-	f := noteFilter{WithRenotes: true, WithReplies: true, WithFiles: false}
-	payload := []byte(`{"text":"reply","replyId":"p1"}`)
-	assert.True(t, f.shouldEmit(payload, nil, ""))
+	for _, with := range []bool{false, true} {
+		f := noteFilter{WithRenotes: true, WithReplies: with, WithFiles: false}
+		assert.True(t, f.shouldEmit(payload, nil, ""), "WithReplies=%v should not affect shouldEmit", with)
+	}
 }
 
 // #1063: replyShouldEmit の 3 escape hatch と followee snapshot gate を覆う。
