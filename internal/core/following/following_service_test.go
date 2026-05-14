@@ -124,7 +124,7 @@ func TestFollow_Success(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
 
-	res, err := svc.Follow("alice", "bob")
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	require.NotNil(t, res.Following)
 	assert.Nil(t, res.Request)
@@ -138,7 +138,7 @@ func TestFollow_LockedUser_CreatesRequest(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
 
-	res, err := svc.Follow("alice", "bob")
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Nil(t, res.Following)
 	require.NotNil(t, res.Request)
@@ -147,6 +147,69 @@ func TestFollow_LockedUser_CreatesRequest(t *testing.T) {
 	// counterは更新されない
 	assert.Equal(t, 0, userRepo.Users["alice"].FollowingCount)
 	assert.Equal(t, 0, userRepo.Users["bob"].FollowersCount)
+}
+
+// #1056: Follow に渡した FollowOptions.WithReplies が auto-accept (followee not
+// locked) path で新規 Following row に反映されることを検証する。
+func TestFollow_WithReplies_True_PersistedOnFollowing(t *testing.T) {
+	svc, userRepo, fRepo, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{WithReplies: true})
+	require.NoError(t, err)
+	require.NotNil(t, res.Following)
+	assert.True(t, res.Following.WithReplies, "FollowResult.Following.WithReplies should reflect FollowOptions.WithReplies")
+
+	// fRepo に書き込まれた row も同じ値
+	require.Len(t, fRepo.Followings, 1)
+	for _, f := range fRepo.Followings {
+		assert.True(t, f.WithReplies, "persisted Following row should have WithReplies=true")
+	}
+}
+
+// #1056: WithReplies=false (default) でも明示的に false で保存される。
+func TestFollow_WithReplies_False_PersistedAsFalse(t *testing.T) {
+	svc, userRepo, fRepo, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{WithReplies: false})
+	require.NoError(t, err)
+	require.NotNil(t, res.Following)
+	assert.False(t, res.Following.WithReplies)
+
+	require.Len(t, fRepo.Followings, 1)
+	for _, f := range fRepo.Followings {
+		assert.False(t, f.WithReplies)
+	}
+}
+
+// #1056: locked followee path では FollowRequest row に WithReplies が保存され、
+// AcceptRequest 経由で Following row に propagate される。
+func TestFollow_WithReplies_True_LockedFolloweeRequestThenAccept(t *testing.T) {
+	svc, userRepo, fRepo, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true) // locked
+
+	// Step 1: Follow with WithReplies=true → FollowRequest が作られる
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{WithReplies: true})
+	require.NoError(t, err)
+	require.NotNil(t, res.Request)
+	assert.True(t, res.Request.WithReplies, "FollowRequest should carry WithReplies=true from Follow options")
+
+	require.Len(t, frRepo.Requests, 1)
+	for _, r := range frRepo.Requests {
+		assert.True(t, r.WithReplies, "persisted FollowRequest row should have WithReplies=true")
+	}
+
+	// Step 2: bob (followee) が AcceptRequest → Following row に propagate
+	require.NoError(t, svc.AcceptRequest("bob", "alice"))
+	require.Len(t, fRepo.Followings, 1)
+	for _, f := range fRepo.Followings {
+		assert.True(t, f.WithReplies, "accepted Following row should inherit WithReplies from FollowRequest")
+	}
+	assert.Empty(t, frRepo.Requests, "FollowRequest should be deleted after accept")
 }
 
 // stubMainStreamPublisher captures PublishMainEvent calls for assertion.
@@ -171,7 +234,7 @@ func TestFollow_LockedUser_PublishesReceiveFollowRequest(t *testing.T) {
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	require.Len(t, pub.calls, 1)
@@ -215,7 +278,7 @@ func TestFollow_LockedUser_InvokesFederationHook(t *testing.T) {
 	fed := &stubFederationHook{}
 	svc.SetFederationHook(fed)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"alice->bob"}, fed.followed)
@@ -232,7 +295,7 @@ func TestFollow_PublicUser_InvokesOutboundFollowOnly(t *testing.T) {
 	fed := &stubFederationHook{}
 	svc.SetFederationHook(fed)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"alice->bob"}, fed.followed)
@@ -246,7 +309,7 @@ func TestFollow_PublicUser_DoesNotPublishReceiveFollowRequest(t *testing.T) {
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	// 注: #290 以降 public user への follow でも `follow` / `followed` を
 	// emit するようになったため、ここでは receiveFollowRequest が含まれて
@@ -263,7 +326,7 @@ func TestFollow_PublicUser_PublishesFollowAndFollowed(t *testing.T) {
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	require.Len(t, pub.calls, 2)
@@ -281,7 +344,7 @@ func TestUnfollow_PublishesUnfollow(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	// Follow 成功で入った publish を無視するため、ここから publisher を差し替え。
@@ -325,7 +388,7 @@ func TestFollow_SelfFollow(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 
-	_, err := svc.Follow("alice", "alice")
+	_, err := svc.Follow("alice", "alice", following.FollowOptions{})
 	assert.True(t, errors.Is(err, following.ErrSelfFollow))
 }
 
@@ -333,7 +396,7 @@ func TestFollow_FolloweeNotFound(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 
-	_, err := svc.Follow("alice", "missing")
+	_, err := svc.Follow("alice", "missing", following.FollowOptions{})
 	assert.True(t, errors.Is(err, following.ErrFolloweeNotFound))
 }
 
@@ -341,7 +404,7 @@ func TestFollow_FollowerNotFound(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "bob", false)
 
-	_, err := svc.Follow("missing", "bob")
+	_, err := svc.Follow("missing", "bob", following.FollowOptions{})
 	assert.True(t, errors.Is(err, following.ErrFolloweeNotFound))
 }
 
@@ -350,9 +413,9 @@ func TestFollow_AlreadyFollowing(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
-	_, err = svc.Follow("alice", "bob")
+	_, err = svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.True(t, errors.Is(err, following.ErrAlreadyFollowing))
 }
 
@@ -361,9 +424,9 @@ func TestFollow_AlreadyRequested(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
-	_, err = svc.Follow("alice", "bob")
+	_, err = svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.True(t, errors.Is(err, following.ErrAlreadyRequested))
 }
 
@@ -371,7 +434,7 @@ func TestUnfollow_Success(t *testing.T) {
 	svc, userRepo, fRepo, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	err = svc.Unfollow("alice", "bob")
@@ -418,7 +481,7 @@ func TestFollow_ChartHookInvoked(t *testing.T) {
 	hook := &recordingChartHook{}
 	svc.SetChartHook(hook)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	require.Len(t, hook.follows, 1)
 	assert.Equal(t, [2]string{"alice", "bob"}, hook.follows[0])
@@ -428,7 +491,7 @@ func TestUnfollow_ChartHookInvoked(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	hook := &recordingChartHook{}
@@ -443,7 +506,7 @@ func TestAcceptRequest_ChartHookInvoked(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	hook := &recordingChartHook{}
@@ -458,7 +521,7 @@ func TestAcceptRequest_Success(t *testing.T) {
 	svc, userRepo, fRepo, frRepo := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	err = svc.AcceptRequest("bob", "alice")
@@ -479,7 +542,7 @@ func TestAcceptRequest_PublishesFollowAndFollowed(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	// Follow() でキャプチャされた receiveFollowRequest を除外するため
@@ -504,7 +567,7 @@ func TestRejectRequest_Success(t *testing.T) {
 	svc, userRepo, fRepo, frRepo := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	err = svc.RejectRequest("bob", "alice")
@@ -523,7 +586,7 @@ func TestCancelRequest_Success(t *testing.T) {
 	svc, userRepo, _, frRepo := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	err = svc.CancelRequest("alice", "bob")
@@ -547,7 +610,7 @@ func TestCancelRequest_InvokesUnfollowHook(t *testing.T) {
 	addUser(t, userRepo, "bob", true)
 	fed := &stubFederationHook{}
 	svc.SetFederationHook(fed)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	// Follow() の中で OnLocalFollowed が呼ばれているはずなのでリセットして
 	// cancel 分だけを観察する。
@@ -566,7 +629,7 @@ func TestCancelRequest_PublishesUnfollowEvent(t *testing.T) {
 	addUser(t, userRepo, "bob", true)
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	// Follow() 内の receiveFollowRequest は followee (bob) 宛。cancel 分を
 	// 観察するためリセット。
@@ -585,7 +648,7 @@ func TestRejectRequest_InvokesFederationHookForRemoteFollower(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	fhook := &recordingFederationHook{}
 	svc.SetFederationHook(fhook)
@@ -603,7 +666,7 @@ func TestRejectRequest_PublishesUnfollowEvent(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
@@ -620,8 +683,8 @@ func TestListReceivedRequests(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "carol", false)
 	addUser(t, userRepo, "bob", true)
-	_, _ = svc.Follow("alice", "bob")
-	_, _ = svc.Follow("carol", "bob")
+	_, _ = svc.Follow("alice", "bob", following.FollowOptions{})
+	_, _ = svc.Follow("carol", "bob", following.FollowOptions{})
 
 	rows, err := svc.ListReceivedRequests("bob", 100, "", "")
 	require.NoError(t, err)
@@ -633,8 +696,8 @@ func TestListReceivedFollowing(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
 	addUser(t, userRepo, "carol", false)
-	_, _ = svc.Follow("bob", "alice")
-	_, _ = svc.Follow("carol", "alice")
+	_, _ = svc.Follow("bob", "alice", following.FollowOptions{})
+	_, _ = svc.Follow("carol", "alice", following.FollowOptions{})
 
 	rows, err := svc.ListReceivedFollowing("alice", 10, 0)
 	require.NoError(t, err)
@@ -646,8 +709,8 @@ func TestListSentFollowing(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
 	addUser(t, userRepo, "carol", false)
-	_, _ = svc.Follow("alice", "bob")
-	_, _ = svc.Follow("alice", "carol")
+	_, _ = svc.Follow("alice", "bob", following.FollowOptions{})
+	_, _ = svc.Follow("alice", "carol", following.FollowOptions{})
 
 	rows, err := svc.ListSentFollowing("alice", 10, 0)
 	require.NoError(t, err)
@@ -659,8 +722,8 @@ func TestListSentRequests(t *testing.T) {
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", true)
 	addUser(t, userRepo, "dave", true)
-	_, _ = svc.Follow("alice", "bob")
-	_, _ = svc.Follow("alice", "dave")
+	_, _ = svc.Follow("alice", "bob", following.FollowOptions{})
+	_, _ = svc.Follow("alice", "dave", following.FollowOptions{})
 
 	rows, err := svc.ListSentRequests("alice", 100, "", "")
 	require.NoError(t, err)
@@ -686,7 +749,7 @@ func TestFollow_ExistsError(t *testing.T) {
 	frRepo := testutil.NewMockFollowRequestRepository()
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -697,7 +760,7 @@ func TestFollow_CreateError(t *testing.T) {
 	frRepo := testutil.NewMockFollowRequestRepository()
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -709,7 +772,7 @@ func TestFollow_RequestExistsError(t *testing.T) {
 	frRepo := &failingFollowRequestRepo{MockFollowRequestRepository: testutil.NewMockFollowRequestRepository(), failExists: true}
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -721,7 +784,7 @@ func TestFollow_RequestCreateError(t *testing.T) {
 	frRepo := &failingFollowRequestRepo{MockFollowRequestRepository: testutil.NewMockFollowRequestRepository(), failCreate: true}
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -733,7 +796,7 @@ func TestFollow_IncrementFollowingError(t *testing.T) {
 	frRepo := testutil.NewMockFollowRequestRepository()
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -745,7 +808,7 @@ func TestFollow_IncrementFollowersError(t *testing.T) {
 	frRepo := testutil.NewMockFollowRequestRepository()
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -866,7 +929,7 @@ func TestService_NotificationHook_OnFollow(t *testing.T) {
 	hook := &recordingHook{}
 	svc.SetNotificationHook(hook)
 
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bob->alice"}, hook.follows)
 }
@@ -878,7 +941,7 @@ func TestService_NotificationHook_OnFollowRequest(t *testing.T) {
 	hook := &recordingHook{}
 	svc.SetNotificationHook(hook)
 
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bob->alice"}, hook.requests)
 }
@@ -902,7 +965,7 @@ func TestFollow_BlockedByFollowee(t *testing.T) {
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{"alice->bob": true}})
 
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	require.ErrorIs(t, err, following.ErrBlocked)
 }
 
@@ -912,7 +975,7 @@ func TestFollow_BlockedFollowee(t *testing.T) {
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{"bob->alice": true}})
 
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	require.ErrorIs(t, err, following.ErrBlocked)
 }
 
@@ -921,7 +984,7 @@ func TestFollow_BlockingCheckerReverseError(t *testing.T) {
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingChecker{err: stubError})
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -943,7 +1006,7 @@ func TestFollow_BlockingCheckerForwardError(t *testing.T) {
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingCheckerForwardError{})
-	_, err := svc.Follow("bob", "alice")
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
 	assert.ErrorIs(t, err, stubError)
 }
 
@@ -1002,7 +1065,7 @@ func TestService_FederationHook_OnFollow(t *testing.T) {
 	hook := &recordingFederationHook{}
 	svc.SetFederationHook(hook)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"alice->bob"}, hook.follows)
 }
@@ -1011,7 +1074,7 @@ func TestService_FederationHook_OnUnfollow(t *testing.T) {
 	svc, ur, _, _ := newSvc(t)
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	hook := &recordingFederationHook{}
 	svc.SetFederationHook(hook)
@@ -1026,7 +1089,7 @@ func TestService_FederationHook_OnUnfollow_UserLookupFailure(t *testing.T) {
 	svc, ur, _, _ := newSvc(t)
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	hook := &recordingFederationHook{}
 	svc.SetFederationHook(hook)
@@ -1076,7 +1139,7 @@ func TestFollow_RemoteFollower_BumpsInstanceFollowers(t *testing.T) {
 	remote := addUser(t, userRepo, "remote_user", false)
 	remote.Host = &host
 
-	_, err := svc.Follow("remote_user", "alice_local")
+	_, err := svc.Follow("remote_user", "alice_local", following.FollowOptions{})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, instanceRepo.Instances[host].FollowersCount)
@@ -1095,7 +1158,7 @@ func TestFollow_LocalFollowsRemote_BumpsInstanceFollowing(t *testing.T) {
 	remote := addUser(t, userRepo, "remote_user", false)
 	remote.Host = &host
 
-	_, err := svc.Follow("alice_local", "remote_user")
+	_, err := svc.Follow("alice_local", "remote_user", following.FollowOptions{})
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, instanceRepo.Instances[host].FollowersCount)
@@ -1114,7 +1177,7 @@ func TestUnfollow_DecrementsInstanceCounters(t *testing.T) {
 	remote := addUser(t, userRepo, "remote_user", false)
 	remote.Host = &host
 
-	_, err := svc.Follow("remote_user", "alice_local")
+	_, err := svc.Follow("remote_user", "alice_local", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 6, instanceRepo.Instances[host].FollowersCount)
 
@@ -1130,7 +1193,7 @@ func TestFollow_LocalLocal_DoesNotTouchInstance(t *testing.T) {
 
 	addUser(t, userRepo, "alice", false)
 	addUser(t, userRepo, "bob", false)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 
 	assert.Empty(t, instanceRepo.Instances, "local-only follow は instance row を触らない")
@@ -1161,7 +1224,7 @@ func TestFollow_NoInstanceRepoStillWorks(t *testing.T) {
 	svc, userRepo, fRepo, _ := newSvc(t)
 	addUser(t, userRepo, "a", false)
 	addUser(t, userRepo, "b", false)
-	_, err := svc.Follow("a", "b")
+	_, err := svc.Follow("a", "b", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Len(t, fRepo.Followings, 1)
 }

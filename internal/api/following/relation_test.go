@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -30,7 +31,7 @@ func TestInvalidate_Success(t *testing.T) {
 	follower := &model.User{ID: "follower", Username: "f", UsernameLower: "f"}
 	userRepo.Users[admin.ID] = admin
 	userRepo.Users[follower.ID] = follower
-	_, _ = h.followingService.Follow(follower.ID, admin.ID)
+	_, _ = h.followingService.Follow(follower.ID, admin.ID, corefollowing.FollowOptions{})
 
 	rec := postJSON(h.Invalidate, `{"userId":"follower"}`, admin)
 	assert.Equal(t, http.StatusNoContent, rec.Code)

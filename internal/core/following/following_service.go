@@ -45,6 +45,17 @@ type FollowResult struct {
 	Request *model.FollowRequest
 }
 
+// FollowOptions controls behavior of the Follow operation.
+// upstream Misskey TS UserFollowingService.follow() の options object と
+// 同等の役割。今後 silent / requestId 等の field を追加する余地を残す。
+type FollowOptions struct {
+	// WithReplies sets the initial value of `Following.withReplies` (and the
+	// bridging `FollowRequest.withReplies` for locked followees) for the
+	// newly created row. fanout 層が follower の per-followee setting として
+	// 参照する (#1056 / PR #1055)。
+	WithReplies bool
+}
+
 // NotificationHook is invoked after follow/follow-request events to create
 // notification entries. パッケージ間の循環依存を避けるためinterfaceで受け取る。
 type NotificationHook interface {
@@ -203,7 +214,7 @@ func (s *Service) adjustInstanceCountsForFollowing(f *model.Following, delta int
 // Phase 2 Step B implementation only handles local follows. Federation
 // (HTTP signatures, AP delivery), block checks, and notifications are
 // added in later phases.
-func (s *Service) Follow(followerID, followeeID string) (*FollowResult, error) {
+func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*FollowResult, error) {
 	if followerID == followeeID {
 		return nil, ErrSelfFollow
 	}
@@ -252,6 +263,7 @@ func (s *Service) Follow(followerID, followeeID string) (*FollowResult, error) {
 			FolloweeID:   followeeID,
 			FollowerHost: follower.Host,
 			FolloweeHost: followee.Host,
+			WithReplies:  opts.WithReplies,
 		}
 		if err := s.followRequestRepo.Create(req); err != nil {
 			return nil, err
@@ -283,6 +295,7 @@ func (s *Service) Follow(followerID, followeeID string) (*FollowResult, error) {
 		FolloweeID:   followeeID,
 		FollowerHost: follower.Host,
 		FolloweeHost: followee.Host,
+		WithReplies:  opts.WithReplies,
 	}
 	if err := s.followingRepo.Create(f); err != nil {
 		return nil, err
@@ -394,6 +407,7 @@ func (s *Service) AcceptRequest(followeeID, followerID string) error {
 		FolloweeID:   req.FolloweeID,
 		FollowerHost: req.FollowerHost,
 		FolloweeHost: req.FolloweeHost,
+		WithReplies:  req.WithReplies,
 	}
 	if err := s.followingRepo.Create(f); err != nil {
 		return err

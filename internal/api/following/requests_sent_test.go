@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -20,7 +21,7 @@ func TestRequestsSent_PopulatesFollowerFollowee(t *testing.T) {
 	locked := &model.User{ID: "locked", Username: "locked", UsernameLower: "locked", IsLocked: true}
 	userRepo.Users[me.ID] = me
 	userRepo.Users[locked.ID] = locked
-	_, _ = h.followingService.Follow(me.ID, locked.ID) // ends in FollowRequest
+	_, _ = h.followingService.Follow(me.ID, locked.ID, corefollowing.FollowOptions{}) // ends in FollowRequest
 
 	rec := postJSON(h.RequestsSent, `{}`, me)
 	assert.Equal(t, http.StatusOK, rec.Code)

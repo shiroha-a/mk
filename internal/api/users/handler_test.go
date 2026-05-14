@@ -918,7 +918,7 @@ func TestFollowers_Success(t *testing.T) {
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
 	fSvc := h.followingService
-	_, err := fSvc.Follow("follower1", "user1")
+	_, err := fSvc.Follow("follower1", "user1", corefollowing.FollowOptions{})
 	require.NoError(t, err)
 
 	rec := post(h.Followers, `{"userId": "user1"}`)
@@ -984,7 +984,7 @@ func TestFollowers_BatchFetchesUsers(t *testing.T) {
 			ID: uid, Username: uid, UsernameLower: uid,
 			AvatarDecorations: datatypes.JSON([]byte("[]")),
 		}
-		_, err := fSvc.Follow(uid, "target")
+		_, err := fSvc.Follow(uid, "target", corefollowing.FollowOptions{})
 		require.NoError(t, err)
 	}
 
@@ -1047,7 +1047,7 @@ func TestFollowing_Success(t *testing.T) {
 		UsernameLower:     "followee1",
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
-	_, err := h.followingService.Follow("user1", "followee1")
+	_, err := h.followingService.Follow("user1", "followee1", corefollowing.FollowOptions{})
 	require.NoError(t, err)
 
 	rec := post(h.Following, `{"userId": "user1"}`)

@@ -45,7 +45,14 @@ func (h *Handler) Create(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"))
 	}
 
-	if _, err := h.followingService.Follow(me.ID, req.UserID); err != nil {
+	// withReplies 引数を Service に伝搬する (#1056)。upstream Misskey TS の
+	// /api/following/create は follow 作成時に withReplies 初期値を受け取り、
+	// Following row (locked followee の場合は FollowRequest row) に保存する。
+	opts := corefollowing.FollowOptions{}
+	if req.WithReplies != nil {
+		opts.WithReplies = *req.WithReplies
+	}
+	if _, err := h.followingService.Follow(me.ID, req.UserID, opts); err != nil {
 		switch {
 		case errors.Is(err, corefollowing.ErrSelfFollow):
 			return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOWEE_IS_YOURSELF", "Followee is yourself.", "26fbe7bb-a331-4857-af17-205b426669a9"))

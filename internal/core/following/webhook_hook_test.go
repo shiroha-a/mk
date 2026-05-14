@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +45,7 @@ func TestService_WebhookHook_FollowAndUnfollow(t *testing.T) {
 	hook := &recordingWebhookHook{}
 	svc.SetWebhookHook(hook)
 
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, hook.follows)
 	assert.Equal(t, 1, hook.followedFlag)
@@ -63,7 +64,7 @@ func TestService_WebhookHook_AcceptRequest(t *testing.T) {
 	svc.SetWebhookHook(hook)
 
 	// FollowRequest を作る (この時点では WebhookHook.OnFollow は呼ばれない)
-	_, err := svc.Follow("alice", "bob")
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 0, hook.follows)
 

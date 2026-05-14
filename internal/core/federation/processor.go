@@ -416,7 +416,10 @@ func (p *Processor) handleFollow(act genericActivity) error {
 	if err != nil {
 		return errors.New("unknown followee")
 	}
-	result, err := p.followingService.Follow(follower.ID, followee.ID)
+	// inbound AP Follow は AP protocol で withReplies を運ばないので
+	// FollowOptions{} (default false) で作成する (#1056)。remote follower の
+	// per-followee withReplies preference は AP protocol 範囲外。
+	result, err := p.followingService.Follow(follower.ID, followee.ID, corefollowing.FollowOptions{})
 	alreadyFollowing := errors.Is(err, corefollowing.ErrAlreadyFollowing)
 	// ErrAlreadyRequested はlocked followeeへの再送。既に FollowRequest が
 	// 存在するので何もしなくて良い (Accept は承認時に送られる)。エラーとして

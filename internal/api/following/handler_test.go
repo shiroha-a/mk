@@ -158,6 +158,69 @@ func TestCreate_SelfFollow(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// newTestHandlerWithRepos exposes the mock repositories so that tests can
+// verify persisted row state (used by #1056 WithReplies tests).
+func newTestHandlerWithRepos(t *testing.T) (*Handler, *testutil.MockUserRepository, *testutil.MockFollowingRepository, *testutil.MockFollowRequestRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	fRepo := testutil.NewMockFollowingRepository()
+	frRepo := testutil.NewMockFollowRequestRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	fSvc := corefollowing.NewService(userRepo, fRepo, frRepo, idGen)
+	uSvc := coreuser.NewService(userRepo, nil, nil, nil)
+	return NewHandler(fSvc, uSvc), userRepo, fRepo, frRepo
+}
+
+// #1056: POST /api/following/create with withReplies=true should persist
+// `Following.withReplies=true` on the new row (auto-accept path).
+func TestCreate_WithReplies_True_PersistedOnFollowingRow(t *testing.T) {
+	h, userRepo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(userRepo, "alice", false)
+	addUser(userRepo, "bob", false)
+
+	rec := postJSON(h.Create, `{"userId": "bob", "withReplies": true}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, fRepo.Followings, 1)
+	for _, f := range fRepo.Followings {
+		assert.Equal(t, "alice", f.FollowerID)
+		assert.Equal(t, "bob", f.FolloweeID)
+		assert.True(t, f.WithReplies, "withReplies=true should be persisted on the Following row (#1056)")
+	}
+}
+
+// #1056: withReplies が省略された場合は default false で row が作られる。
+func TestCreate_WithReplies_Omitted_DefaultFalse(t *testing.T) {
+	h, userRepo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(userRepo, "alice", false)
+	addUser(userRepo, "bob", false)
+
+	rec := postJSON(h.Create, `{"userId": "bob"}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, fRepo.Followings, 1)
+	for _, f := range fRepo.Followings {
+		assert.False(t, f.WithReplies, "withReplies omitted should default to false")
+	}
+}
+
+// #1056: locked followee 経由でも withReplies が FollowRequest row に反映される。
+func TestCreate_WithReplies_True_LockedFollowee_PersistedOnFollowRequestRow(t *testing.T) {
+	h, userRepo, _, frRepo := newTestHandlerWithRepos(t)
+	alice := addUser(userRepo, "alice", false)
+	addUser(userRepo, "bob", true) // locked
+
+	rec := postJSON(h.Create, `{"userId": "bob", "withReplies": true}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, frRepo.Requests, 1)
+	for _, r := range frRepo.Requests {
+		assert.Equal(t, "alice", r.FollowerID)
+		assert.Equal(t, "bob", r.FolloweeID)
+		assert.True(t, r.WithReplies, "withReplies=true should be persisted on the FollowRequest row (#1056)")
+	}
+}
+
 func TestCreate_AlreadyFollowing(t *testing.T) {
 	h, repo := newTestHandler(t)
 	alice := addUser(repo, "alice", false)
@@ -360,9 +423,9 @@ func TestListRequests_PopulatesFollowerAndPaginates(t *testing.T) {
 	addUser(repo, "alice", false)
 	addUser(repo, "carol", false)
 	addUser(repo, "dave", false)
-	_, _ = h.followingService.Follow("alice", bob.ID)
-	_, _ = h.followingService.Follow("carol", bob.ID)
-	_, _ = h.followingService.Follow("dave", bob.ID)
+	_, _ = h.followingService.Follow("alice", bob.ID, corefollowing.FollowOptions{})
+	_, _ = h.followingService.Follow("carol", bob.ID, corefollowing.FollowOptions{})
+	_, _ = h.followingService.Follow("dave", bob.ID, corefollowing.FollowOptions{})
 
 	rec := postJSON(h.ListRequests, `{}`, bob)
 	require.Equal(t, http.StatusOK, rec.Code)
