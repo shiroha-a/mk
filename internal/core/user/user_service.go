@@ -83,8 +83,9 @@ type Service struct {
 	// selfHostname は SearchByUsernameAndHost で「host==self-hostname → local
 	// 限定」を判定するために保持する (upstream UserSearchService と互換、
 	// #1064)。空文字なら remap を skip して "." 一致のみ local 限定にする。
-	// SetSelfHostname 内で lowercase 正規化して格納する (search 側 per-call
-	// の ToLower を省くため)。
+	// SetSelfHostname 内で TrimSpace + lowercase に正規化して格納する
+	// (search 側 per-call の ToLower を省くためと、whitespace のみ入力で
+	// remap が無意味に有効化される edge case の防御)。
 	selfHostname string
 }
 
