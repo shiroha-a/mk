@@ -8,8 +8,13 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
-// importFollowing parses a CSV body of `acct[,withReplies=bool]` lines and
-// applies a follow for each. Remote users must already exist locally.
+// importFollowing parses a CSV body of `acct` lines and applies a follow for
+// each. Remote users must already exist locally.
+//
+// upstream Misskey TS の CSV export 形式は `acct[,withReplies=bool]` を取るが、
+// mk-go の current 実装は first field (acct) のみ parse し withReplies は
+// default false で固定する。FollowOptions を threading する対応は #1056
+// follow-up で実装予定 (adapters.go の TODO comment 参照)。
 func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult, error) {
 	if i.deps.Following == nil {
 		return nil, fmt.Errorf("following service not configured")
