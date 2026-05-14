@@ -219,7 +219,7 @@ func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
 //
 // origin で host filter を切り替える (#763)。
 //
-// query は escapeSQLLikePattern で SQL LIKE wildcard (`\\` / `%` / `_`) を
+// query は escapeSQLLikePattern で SQL LIKE wildcard (`\` / `%` / `_`) を
 // escape する (#1061)。username は仕様上 `_` を含めうるため、escape 無しだと
 // `alice_bob` を search すると `alice1bob` 等の関係ない user も hit してしまう。
 // upstream Misskey TS UserSearchService.ts:197 と同じ semantics。

@@ -551,15 +551,23 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 		assert.Empty(t, out, "literal `%` should not match any actual host (= regression guard for `%` wildcard escape)")
 	})
 
-	// #1061: username 側も同じく escape されること。host="" でも username
-	// query 内の `_` が literal として扱われる。
+	// #1061: SearchByUsernameAndHost の username 側も escape されること。
+	// 上記 setup の `wildtest_u` (literal `_` を含む) に対し、`_` の位置に
+	// 別文字が入った negative candidate `wildtestX` を seed し、escape 有りなら
+	// `wildtestX` が hit しないことを直接 verify する。host filter は両 user に
+	// 共通の `with_underscore.example` を設定して、host filter で偶然絞り込まれて
+	// pass する false negative を排除する。
+	negativeCandidate := insertTestUser(t, "u_we_n", "wildtestX")
+	defer cleanupUser(t, negativeCandidate.ID)
+	require.NoError(t, repo.UpdateUser(negativeCandidate.ID, map[string]any{"host": "with_underscore.example"}))
+
 	t.Run("username underscore is escaped", func(t *testing.T) {
-		// 上記 setup の wildtest_u (host="with_underscore.example") と
-		// wildtest_a (host="witha.example") を再利用する。
-		// `wildtest_` username prefix で escape 有り → literal `_` として扱われ
-		// `wildtest_u` / `wildtest_a` 共に hit する (両者の username が
-		// `wildtest_` で始まる literal なので)。なお `wildtesta` 等は存在しない
-		// が、もし存在したら escape されないと hit してしまう。
+		// `wildtest_` username prefix を escape 有りで literal `_` として扱う:
+		//   - `wildtest_u` (literal `_` を含む) → hit
+		//   - `wildtestX` (`_` の位置に `X`) → escape 無しなら `_` wildcard 解釈で
+		//     hit してしまうが、escape 有りなら hit しない (regression guard)
+		// 両 user の host を同じく `with_underscore.example` に設定したので、
+		// 結果差は username escape 由来であることが特定できる。
 		withUnderscoreHost := "with_underscore.example"
 		out, err := repo.SearchByUsernameAndHost("wildtest_", &withUnderscoreHost, 10)
 		require.NoError(t, err)
@@ -568,6 +576,7 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 			ids[u.ID] = true
 		}
 		assert.True(t, ids[withUnderscore.ID], "literal username `wildtest_` should match `wildtest_u`")
+		assert.False(t, ids[negativeCandidate.ID], "literal `_` should NOT match `wildtestX` (= regression guard for username `_` wildcard escape, #1061)")
 	})
 }
 
