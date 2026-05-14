@@ -17,9 +17,10 @@ import (
 // --- Stubs for core service interfaces ---
 
 type fakeFollowingService struct {
-	calls    [][2]string
-	lastOpts transfer.FollowOptions
-	err      error
+	calls     [][2]string
+	callsOpts []transfer.FollowOptions // per-call FollowOptions の履歴 (#1058)
+	lastOpts  transfer.FollowOptions
+	err       error
 }
 
 func (f *fakeFollowingService) Follow(followerID, followeeID string, opts transfer.FollowOptions) (any, error) {
@@ -27,6 +28,7 @@ func (f *fakeFollowingService) Follow(followerID, followeeID string, opts transf
 		return nil, f.err
 	}
 	f.calls = append(f.calls, [2]string{followerID, followeeID})
+	f.callsOpts = append(f.callsOpts, opts)
 	f.lastOpts = opts
 	return nil, nil
 }
@@ -145,6 +147,11 @@ func TestImport_Following_AppliesEachRow(t *testing.T) {
 	assert.Equal(t, 2, res.Applied)
 	assert.Equal(t, 0, res.Skipped)
 	assert.Len(t, fs.calls, 2)
+	// per-row の withReplies が独立に Service へ threading される (#1058)。
+	// lastOpts (last call のみ) ではなく callsOpts (全 call の履歴) で verify する。
+	require.Len(t, fs.callsOpts, 2)
+	assert.True(t, fs.callsOpts[0].WithReplies, "row 1 (bob,withReplies=true) should propagate WithReplies=true")
+	assert.False(t, fs.callsOpts[1].WithReplies, "row 2 (carol,withReplies=false) should propagate WithReplies=false")
 	require.Len(t, notifier.calls, 1)
 	assert.Equal(t, "importCompleted", string(notifier.calls[0].Type))
 	assert.Equal(t, "following", notifier.calls[0].Extra["importedEntity"])
