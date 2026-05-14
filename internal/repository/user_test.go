@@ -339,6 +339,32 @@ func TestUserRepository_SearchByUsername(t *testing.T) {
 	assert.GreaterOrEqual(t, len(out), 2)
 }
 
+// #1061: username の SQL LIKE wildcard (`_`) が escape される。
+// upstream Misskey TS UserSearchService.ts:197 と同 semantics。
+func TestUserRepository_SearchByUsername_LikeWildcardEscape(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	// `_` literal を含む username (= upstream 仕様 `[a-zA-Z0-9_]` で許容される)
+	withUnderscore := insertTestUser(t, "u_uwe_u", "wild_user")
+	defer cleanupUser(t, withUnderscore.ID)
+	// `_` の位置が任意 1 文字に置き換えられた candidate (= escape 無しだと
+	// `_` wildcard 解釈で hit してしまう)
+	withDigit := insertTestUser(t, "u_uwe_d", "wild1user")
+	defer cleanupUser(t, withDigit.ID)
+
+	t.Run("underscore in query is escaped to literal", func(t *testing.T) {
+		// `wild_` prefix で escape 有り → literal `_` として扱われ
+		// `wild_user` のみ hit、`wild1user` は hit しない
+		out, err := repo.SearchByUsername("wild_", 10, 0, "")
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[withUnderscore.ID], "literal `_` should match `wild_user`")
+		assert.False(t, ids[withDigit.ID], "literal `_` should NOT match `wild1user` (= regression guard for `_` wildcard escape, #1061)")
+	})
+}
+
 // origin filter (#763): "local" は host IS NULL のみ、"remote" は IS NOT NULL
 // のみ返す。"combined" / "" は両方返す。
 func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
@@ -523,6 +549,25 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, 10)
 		require.NoError(t, err)
 		assert.Empty(t, out, "literal `%` should not match any actual host (= regression guard for `%` wildcard escape)")
+	})
+
+	// #1061: username 側も同じく escape されること。host="" でも username
+	// query 内の `_` が literal として扱われる。
+	t.Run("username underscore is escaped", func(t *testing.T) {
+		// 上記 setup の wildtest_u (host="with_underscore.example") と
+		// wildtest_a (host="witha.example") を再利用する。
+		// `wildtest_` username prefix で escape 有り → literal `_` として扱われ
+		// `wildtest_u` / `wildtest_a` 共に hit する (両者の username が
+		// `wildtest_` で始まる literal なので)。なお `wildtesta` 等は存在しない
+		// が、もし存在したら escape されないと hit してしまう。
+		withUnderscoreHost := "with_underscore.example"
+		out, err := repo.SearchByUsernameAndHost("wildtest_", &withUnderscoreHost, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[withUnderscore.ID], "literal username `wildtest_` should match `wildtest_u`")
 	})
 }
 

@@ -218,9 +218,14 @@ func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
 // Phase 4でMeilisearch統合予定だが、現状は単純なLIKE検索のみ。
 //
 // origin で host filter を切り替える (#763)。
+//
+// query は escapeSQLLikePattern で SQL LIKE wildcard (`\\` / `%` / `_`) を
+// escape する (#1061)。username は仕様上 `_` を含めうるため、escape 無しだと
+// `alice_bob` を search すると `alice1bob` 等の関係ない user も hit してしまう。
+// upstream Misskey TS UserSearchService.ts:197 と同じ semantics。
 func (r *userRepository) SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error) {
 	var users []*model.User
-	q := r.db.Where("\"usernameLower\" LIKE ?", query+"%")
+	q := r.db.Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%")
 	switch origin {
 	case SearchOriginLocal:
 		q = q.Where("\"host\" IS NULL")
@@ -252,12 +257,11 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 // を共有して drop-in 互換を維持する。
 //
 // LIKE wildcard (`%` / `_`) の escape:
-//   - host 側: escapeSQLLikePattern で escape (#1054)。意図しない wildcard
-//     match を防ぐため。
-//   - username 側: 現状 escape していない (= 既存挙動)。username は upstream
-//     仕様で `[a-zA-Z0-9_]` だが `_` も使えるため `_` を含む username の
-//     prefix 検索は意図しない match を起こす可能性がある。本 PR scope outside
-//     なので将来別 issue で対応。
+//   - host 側: escapeSQLLikePattern で escape (#1054)。
+//   - username 側: 同じく escapeSQLLikePattern で escape (#1061)。username 仕様
+//     で `_` が許容されるため、escape 無しだと `alice_bob` を search すると
+//     `_` を 1 文字 wildcard と解釈して `alice1bob` 等の関係ない user も
+//     hit してしまう。upstream Misskey TS UserSearchService.ts:197 と一致。
 //
 // なお upstream TS は logged-in caller に対して updatedAt > / <= threshold の
 // 4-query 優先順位 (followee active/inactive + non-followee active/inactive)
@@ -268,7 +272,7 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 func (r *userRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
 	var users []*model.User
 	q := r.db.
-		Where("\"usernameLower\" LIKE ?", query+"%").
+		Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%").
 		Where("\"isSuspended\" = false")
 	if host != nil {
 		q = q.Where(`lower("host") LIKE lower(?) ESCAPE '\'`, escapeSQLLikePattern(*host)+"%")
