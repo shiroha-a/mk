@@ -46,7 +46,10 @@ func (f *fakeEnqueuer) EnqueueSystemWebhook(_ context.Context, p queue.WebhookPa
 	return nil
 }
 func (f *fakeEnqueuer) EnqueueInbox(_ context.Context, _ queue.InboxPayload) error { return nil }
-func (f *fakeEnqueuer) Close() error                                               { return nil }
+func (f *fakeEnqueuer) EnqueuePostScheduledNote(_ queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
+	return nil
+}
+func (f *fakeEnqueuer) Close() error { return nil }
 
 // --- fake webhook repos ---
 

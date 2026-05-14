@@ -76,6 +76,12 @@ const (
 	UUIDMaxFileSizeExceeded             = "f9e4e5f3-4df4-40b5-b400-f236945f7073" // drive/files/create (maxFileSizeMb)
 	UUIDNoFreeSpace                     = "c6244ed2-a39a-4e1c-bf93-f0fbd7764fa6" // drive/files/create (driveCapacityMb)
 
+	// 以下は #1040 (scheduled note 機能) で使う UUID。upstream
+	// notes/drafts/create endpoint の error meta と完全一致。
+	UUIDTooManyScheduledNotes     = "c3275f19-4558-4c59-83e1-4f684b5fab66" // drafts/create scheduledNoteLimit 超過
+	UUIDScheduledAtRequired       = "94a89a43-3591-400a-9c17-dd166e71fdfa" // isActuallyScheduled=true で scheduledAt=null
+	UUIDScheduledAtMustBeInFuture = "b34d0c1b-996f-4e34-a428-c636d98df457" // scheduledAt <= now
+
 	// UUIDNoSuchEmoji は upstream `admin/emoji/update` の `noSuchEmoji` UUID
 	// (third_party/misskey/.../endpoints/admin/emoji/update.ts:24)。mk-go の
 	// 旧実装は `684b7e7e-...` という typo'd 値を返していた regression を
@@ -316,6 +322,24 @@ func MaxFileSizeExceeded() map[string]any {
 // user's drive usage plus the uploaded file size exceeds `driveCapacityMb`.
 func NoFreeSpace() map[string]any {
 	return Error("NO_FREE_SPACE", "No free space.", UUIDNoFreeSpace)
+}
+
+// TooManyScheduledNotes returns the upstream `notes/drafts/create` shape thrown
+// when the user has reached the `scheduledNoteLimit` role policy.
+func TooManyScheduledNotes() map[string]any {
+	return Error("TOO_MANY_SCHEDULED_NOTES", "You cannot create scheduled notes any more.", UUIDTooManyScheduledNotes)
+}
+
+// ScheduledAtRequired returns the upstream shape thrown when
+// `isActuallyScheduled=true` is set without a `scheduledAt` timestamp.
+func ScheduledAtRequired() map[string]any {
+	return Error("SCHEDULED_AT_REQUIRED", "scheduledAt is required when isActuallyScheduled is true.", UUIDScheduledAtRequired)
+}
+
+// ScheduledAtMustBeInFuture returns the upstream shape thrown when the
+// requested `scheduledAt` is not strictly in the future.
+func ScheduledAtMustBeInFuture() map[string]any {
+	return Error("SCHEDULED_AT_MUST_BE_IN_FUTURE", "scheduledAt must be in the future.", UUIDScheduledAtMustBeInFuture)
 }
 
 // NoSuchRenoteTarget returns a 404 NO_SUCH_RENOTE_TARGET error response.

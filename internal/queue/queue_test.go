@@ -397,6 +397,29 @@ func TestClient_EnqueueExport(t *testing.T) {
 	assert.Equal(t, queue.TaskTypeExport, tasks[0].Type)
 }
 
+func TestClient_EnqueuePostScheduledNote(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushTestRedis(t)
+
+	c := queue.NewClient(newDriver())
+	defer func() { _ = c.Close() }()
+
+	// caller は WithProcessIn で delay を渡す想定 (= scheduledAt - now)。
+	require.NoError(t, c.EnqueuePostScheduledNote(
+		queue.PostScheduledNotePayload{NoteDraftID: "d1"},
+		driver.WithProcessIn(time.Hour),
+	))
+
+	insp := asynq.NewInspector(redisOpt())
+	defer func() { _ = insp.Close() }()
+
+	// delayed task は scheduled state で観測される
+	tasks, err := insp.ListScheduledTasks(queue.QueueName)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, queue.TaskTypePostScheduledNote, tasks[0].Type)
+}
+
 func TestClient_EnqueueImport(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
@@ -768,6 +791,20 @@ func TestNewUnfollowTask_RoundTrip(t *testing.T) {
 
 func TestDecodeUnfollowPayload_MalformedReturnsError(t *testing.T) {
 	_, err := queue.DecodeUnfollowPayload([]byte(`not-json`))
+	require.Error(t, err)
+}
+
+func TestNewPostScheduledNoteTask_RoundTrip(t *testing.T) {
+	payload := queue.PostScheduledNotePayload{NoteDraftID: "d1"}
+	task := queue.NewPostScheduledNoteTask(payload)
+	require.Equal(t, queue.TaskTypePostScheduledNote, task.Type())
+	got, err := queue.DecodePostScheduledNotePayload(task.Payload())
+	require.NoError(t, err)
+	require.Equal(t, "d1", got.NoteDraftID)
+}
+
+func TestDecodePostScheduledNotePayload_MalformedReturnsError(t *testing.T) {
+	_, err := queue.DecodePostScheduledNotePayload([]byte(`not-json`))
 	require.Error(t, err)
 }
 

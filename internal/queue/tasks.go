@@ -66,6 +66,13 @@ const TaskTypeInstanceRefresh = "maintenance:instanceRefresh"
 // `processors.RetentionAggregateProcessor`.
 const TaskTypeRetentionAggregate = "maintenance:retentionAggregate"
 
+// TaskTypePostScheduledNote is the task type for publishing a scheduled note
+// (= `note_draft` with `isActuallyScheduled=true`) once its `scheduledAt`
+// time has arrived. Enqueued by `notes/drafts/create` with WithProcessIn
+// (= scheduledAt - now) and consumed by
+// `processors.PostScheduledNoteProcessor` (#1040)。
+const TaskTypePostScheduledNote = "note:postScheduled"
+
 // TaskTypeInbox is the task type for inbound ActivityPub activity
 // processing (#534). Enqueued by the inbox HTTP handler after signature
 // verification, and consumed by a worker that calls
@@ -313,6 +320,29 @@ func DecodeUnfollowPayload(body []byte) (UnfollowPayload, error) {
 	var p UnfollowPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return UnfollowPayload{}, err
+	}
+	return p, nil
+}
+
+// PostScheduledNotePayload identifies a draft scheduled for future publish.
+// upstream `PostScheduledNoteJobData { noteDraftId }` と shape 一致 (#1040)。
+type PostScheduledNotePayload struct {
+	NoteDraftID string `json:"noteDraftId"`
+}
+
+// NewPostScheduledNoteTask serializes a PostScheduledNotePayload into a
+// driver.Task.
+func NewPostScheduledNoteTask(payload PostScheduledNotePayload) driver.Task {
+	body, _ := json.Marshal(payload)
+	return driver.RawTask{TypeName: TaskTypePostScheduledNote, Body: body}
+}
+
+// DecodePostScheduledNotePayload extracts a PostScheduledNotePayload from a
+// task body.
+func DecodePostScheduledNotePayload(body []byte) (PostScheduledNotePayload, error) {
+	var p PostScheduledNotePayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return PostScheduledNotePayload{}, err
 	}
 	return p, nil
 }

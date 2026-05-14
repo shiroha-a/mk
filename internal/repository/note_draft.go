@@ -9,6 +9,10 @@ import (
 type NoteDraftRepository interface {
 	Create(draft *model.NoteDraft) error
 	FindByIDAndUser(id, userID string) (*model.NoteDraft, error)
+	// FindByID returns the draft by primary key without ownership check.
+	// Used by internal worker paths (= scheduled note processor) that act on
+	// behalf of the draft owner stored in the row (#1040)。
+	FindByID(id string) (*model.NoteDraft, error)
 	ListByUser(userID string, limit int) ([]*model.NoteDraft, error)
 	Update(draft *model.NoteDraft) error
 	// Delete returns the number of rows affected so callers can detect
@@ -16,6 +20,10 @@ type NoteDraftRepository interface {
 	// SQL round-trip + no TOCTOU race)。0 = 該当 draft なし、1 = 削除成功。
 	Delete(id, userID string) (int64, error)
 	CountByUser(userID string) (int64, error)
+	// CountScheduledByUser returns the number of drafts owned by userID that
+	// are flagged with isActuallyScheduled=true. Used to enforce
+	// scheduledNoteLimit role policy (#1040)。
+	CountScheduledByUser(userID string) (int64, error)
 }
 
 type noteDraftRepository struct {
@@ -62,6 +70,24 @@ func (r *noteDraftRepository) Delete(id, userID string) (int64, error) {
 func (r *noteDraftRepository) CountByUser(userID string) (int64, error) {
 	var count int64
 	if err := r.db.Model(&model.NoteDraft{}).Where(`"userId" = ?`, userID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (r *noteDraftRepository) FindByID(id string) (*model.NoteDraft, error) {
+	var d model.NoteDraft
+	if err := r.db.Where(`"id" = ?`, id).First(&d).Error; err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (r *noteDraftRepository) CountScheduledByUser(userID string) (int64, error) {
+	var count int64
+	if err := r.db.Model(&model.NoteDraft{}).
+		Where(`"userId" = ? AND "isActuallyScheduled" = true`, userID).
+		Count(&count).Error; err != nil {
 		return 0, err
 	}
 	return count, nil

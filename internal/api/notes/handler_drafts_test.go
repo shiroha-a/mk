@@ -2,10 +2,16 @@ package notes
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -84,6 +90,23 @@ func (m *mockDraftRepo) CountByUser(userID string) (int64, error) {
 	var count int64
 	for _, d := range m.drafts {
 		if d.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (m *mockDraftRepo) FindByID(id string) (*model.NoteDraft, error) {
+	if d, ok := m.drafts[id]; ok {
+		return d, nil
+	}
+	return nil, errors.New("note draft not found")
+}
+
+func (m *mockDraftRepo) CountScheduledByUser(userID string) (int64, error) {
+	var count int64
+	for _, d := range m.drafts {
+		if d.UserID == userID && d.IsActuallyScheduled {
 			count++
 		}
 	}
@@ -304,4 +327,84 @@ func TestPollsRecommendation(t *testing.T) {
 	rec := postDraft(h.PollsRecommendation, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "[]\n", rec.Body.String())
+}
+
+// --- #1040: scheduled note (drafts/create with scheduledAt) ---
+
+// scheduledEnqueueStub captures EnqueuePostScheduledNote calls for assertion.
+type scheduledEnqueueStub struct {
+	calls []queue.PostScheduledNotePayload
+	err   error
+}
+
+func (s *scheduledEnqueueStub) EnqueuePostScheduledNote(p queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.calls = append(s.calls, p)
+	return nil
+}
+
+func futureMs(d time.Duration) int64 {
+	return time.Now().Add(d).UnixMilli()
+}
+
+func TestDraftsCreate_ScheduledHappy(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, repo.drafts, 1)
+	require.Len(t, enq.calls, 1, "scheduled draft 1 件で enqueue が 1 度走る")
+	// draft.IsActuallyScheduled=true で保存される
+	for _, d := range repo.drafts {
+		assert.True(t, d.IsActuallyScheduled)
+		require.NotNil(t, d.ScheduledAt)
+	}
+}
+
+func TestDraftsCreate_ScheduledAtRequired(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	rec := postDraft(h.DraftsCreate, `{"text":"hi","isActuallyScheduled":true}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "SCHEDULED_AT_REQUIRED")
+	assert.Contains(t, rec.Body.String(), "94a89a43-3591-400a-9c17-dd166e71fdfa")
+}
+
+func TestDraftsCreate_ScheduledAtMustBeInFuture(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d,"isActuallyScheduled":true}`, past)
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "SCHEDULED_AT_MUST_BE_IN_FUTURE")
+	assert.Contains(t, rec.Body.String(), "b34d0c1b-996f-4e34-a428-c636d98df457")
+}
+
+func TestDraftsCreate_ScheduledNoteLimitExceeded(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", IsActuallyScheduled: true}
+	repo.drafts["d2"] = &model.NoteDraft{ID: "d2", UserID: "u1", IsActuallyScheduled: true}
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{
+		"scheduledNoteLimit": 2,
+	}})
+	body := fmt.Sprintf(`{"text":"third","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+	assert.Contains(t, rec.Body.String(), "c3275f19-4558-4c59-83e1-4f684b5fab66")
+}
+
+// isActuallyScheduled=false で scheduledAt が指定されても enqueue は走らない
+// (= 単なる「下書きとしての希望時刻」)。
+func TestDraftsCreate_ScheduledAtWithoutActuallyScheduled(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d}`, futureMs(time.Hour))
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, enq.calls, "isActuallyScheduled=false なら enqueue されない")
 }

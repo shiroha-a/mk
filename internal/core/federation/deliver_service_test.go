@@ -44,6 +44,9 @@ func (s *stubEnqueuer) EnqueueInbox(_ context.Context, _ queue.InboxPayload) err
 	return nil
 }
 func (s *stubEnqueuer) Close() error { return nil }
+func (s *stubEnqueuer) EnqueuePostScheduledNote(_ queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
+	return nil
+}
 
 func newDeliverService(t *testing.T) (*federation.DeliverService, *stubEnqueuer, *testutil.MockUserRepository, *testutil.MockFollowingRepository, *testutil.MockUserKeypairRepository) {
 	t.Helper()

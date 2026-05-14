@@ -134,6 +134,9 @@ func TestCountLimitHelpers(t *testing.T) {
 		{"ExceededLimitOfCreateInviteCode", ExceededLimitOfCreateInviteCode, "EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE", UUIDExceededLimitOfCreateInviteCode},
 		{"MaxFileSizeExceeded", MaxFileSizeExceeded, "MAX_FILE_SIZE_EXCEEDED", UUIDMaxFileSizeExceeded},
 		{"NoFreeSpace", NoFreeSpace, "NO_FREE_SPACE", UUIDNoFreeSpace},
+		{"TooManyScheduledNotes", TooManyScheduledNotes, "TOO_MANY_SCHEDULED_NOTES", UUIDTooManyScheduledNotes},
+		{"ScheduledAtRequired", ScheduledAtRequired, "SCHEDULED_AT_REQUIRED", UUIDScheduledAtRequired},
+		{"ScheduledAtMustBeInFuture", ScheduledAtMustBeInFuture, "SCHEDULED_AT_MUST_BE_IN_FUTURE", UUIDScheduledAtMustBeInFuture},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

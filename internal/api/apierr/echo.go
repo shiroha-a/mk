@@ -127,6 +127,21 @@ func JSONNoFreeSpace(c echo.Context) error {
 	return c.JSON(http.StatusBadRequest, NoFreeSpace())
 }
 
+// JSONTooManyScheduledNotes writes a 400 TOO_MANY_SCHEDULED_NOTES response.
+func JSONTooManyScheduledNotes(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, TooManyScheduledNotes())
+}
+
+// JSONScheduledAtRequired writes a 400 SCHEDULED_AT_REQUIRED response.
+func JSONScheduledAtRequired(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, ScheduledAtRequired())
+}
+
+// JSONScheduledAtMustBeInFuture writes a 400 SCHEDULED_AT_MUST_BE_IN_FUTURE response.
+func JSONScheduledAtMustBeInFuture(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, ScheduledAtMustBeInFuture())
+}
+
 // JSONNoSuchRenoteTarget writes a 404 NO_SUCH_RENOTE_TARGET response to the client.
 func JSONNoSuchRenoteTarget(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchRenoteTarget())

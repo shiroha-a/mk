@@ -37,7 +37,10 @@ func (r *recordingEnqueuer) EnqueueSystemWebhook(context.Context, queue.WebhookP
 	return nil
 }
 func (r *recordingEnqueuer) EnqueueInbox(context.Context, queue.InboxPayload) error { return nil }
-func (r *recordingEnqueuer) Close() error                                           { return nil }
+func (r *recordingEnqueuer) EnqueuePostScheduledNote(queue.PostScheduledNotePayload, ...driver.EnqueueOption) error {
+	return nil
+}
+func (r *recordingEnqueuer) Close() error { return nil }
 
 func newHookSetup(t *testing.T) (*PollDeliveryHook, *recordingEnqueuer, *testutil.MockUserRepository, *testutil.MockUserKeypairRepository, id.Generator) {
 	t.Helper()

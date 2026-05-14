@@ -33,10 +33,22 @@ func TestNoteDraftRepository_Full(t *testing.T) {
 	_, err = repo.FindByIDAndUser("ghost", user.ID)
 	assert.Error(t, err)
 
+	// FindByID (= ownership 非考慮、worker 経路 / #1040)
+	foundByID, err := repo.FindByID("draft_1")
+	require.NoError(t, err)
+	assert.Equal(t, "draft text", *foundByID.Text)
+	_, err = repo.FindByID("ghost")
+	assert.Error(t, err)
+
 	// ListByUser
 	list, err := repo.ListByUser(user.ID, 10)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
+
+	// CountScheduledByUser (#1040): 通常 draft は isActuallyScheduled=false なので 0
+	scheduled, err := repo.CountScheduledByUser(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), scheduled)
 
 	// ListByUser - default limit
 	list2, err := repo.ListByUser(user.ID, 0)

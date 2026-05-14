@@ -58,6 +58,7 @@ type Enqueuer interface {
 	EnqueueUserWebhook(ctx context.Context, payload WebhookPayload) error
 	EnqueueSystemWebhook(ctx context.Context, payload WebhookPayload) error
 	EnqueueInbox(ctx context.Context, payload InboxPayload) error
+	EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts ...driver.EnqueueOption) error
 	Close() error
 }
 
@@ -123,6 +124,15 @@ func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOp
 	}
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypeDeliver, body, merged...)
+}
+
+// EnqueuePostScheduledNote enqueues a deferred publish task for a draft
+// flagged with `isActuallyScheduled=true`. caller は WithProcessIn(delay)
+// で `scheduledAt - now` を指定する想定 (#1040)。
+func (c *Client) EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts ...driver.EnqueueOption) error {
+	body := mustMarshal(payload)
+	merged := append([]driver.EnqueueOption{driver.WithQueue(QueueName)}, opts...)
+	return c.inner.Enqueue(context.Background(), TaskTypePostScheduledNote, body, merged...)
 }
 
 // EnqueueExport puts an export task on the queue.

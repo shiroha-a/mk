@@ -18,6 +18,8 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -56,6 +58,23 @@ type Handler struct {
 	// 匿名 viewer (userID="") に対しても base policies を返す upstream 互換
 	// semantics で、middleware ではなく handler 内で gate する。
 	policyProvider TimelinePolicyProvider
+	// scheduledNoteEnqueuer は drafts/create で `isActuallyScheduled=true`
+	// の draft を delayed queue に enqueue するための narrow interface (#1040)。
+	// nil 時は enqueue を skip する (= test fixture / queue 未配線パス互換)。
+	scheduledNoteEnqueuer ScheduledNoteEnqueuer
+}
+
+// ScheduledNoteEnqueuer abstracts the delayed enqueue path used by
+// drafts/create. Implemented by *queue.Client (= EnqueuePostScheduledNote)。
+type ScheduledNoteEnqueuer interface {
+	EnqueuePostScheduledNote(payload queue.PostScheduledNotePayload, opts ...driver.EnqueueOption) error
+}
+
+// SetScheduledNoteEnqueuer wires a delayed queue client used by drafts/create
+// when the request asks for a scheduled publish (#1040). nil disables the
+// enqueue path (= test fixture / unwired)。
+func (h *Handler) SetScheduledNoteEnqueuer(e ScheduledNoteEnqueuer) {
+	h.scheduledNoteEnqueuer = e
 }
 
 // TimelinePolicyProvider abstracts the role-policy lookup used by timeline

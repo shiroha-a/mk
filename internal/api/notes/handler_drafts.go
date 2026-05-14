@@ -7,6 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -34,16 +36,21 @@ func (h *Handler) DraftsList(c echo.Context) error {
 }
 
 // DraftsCreate handles POST /api/notes/drafts/create.
+// upstream `notes/drafts/create.ts` 互換で scheduledAt / isActuallyScheduled
+// を受け入れ、scheduledNoteLimit policy gate + 遅延 queue enqueue を行う
+// (#1040)。
 func (h *Handler) DraftsCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	if h.draftRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		Text       *string  `json:"text"`
-		CW         *string  `json:"cw"`
-		Visibility string   `json:"visibility"`
-		FileIDs    []string `json:"fileIds"`
+		Text                *string  `json:"text"`
+		CW                  *string  `json:"cw"`
+		Visibility          string   `json:"visibility"`
+		FileIDs             []string `json:"fileIds"`
+		ScheduledAt         *int64   `json:"scheduledAt"`
+		IsActuallyScheduled bool     `json:"isActuallyScheduled"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
@@ -51,10 +58,29 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	if req.Visibility == "" {
 		req.Visibility = "public"
 	}
+	// scheduledAt の validation (#1040)。upstream は ms epoch (`integer`)
+	// で受け取って Date 化、time.Now() より将来であることを要求する。
+	// isActuallyScheduled=false なら scheduledAt は単なる「下書きとして保持
+	// する希望時刻」扱いで、queue enqueue / future check は行わない。
+	now := time.Now()
+	var scheduledAt *time.Time
+	if req.ScheduledAt != nil {
+		t := time.UnixMilli(*req.ScheduledAt)
+		scheduledAt = &t
+	}
+	if req.IsActuallyScheduled {
+		if scheduledAt == nil {
+			return c.JSON(http.StatusBadRequest, apierr.ScheduledAtRequired())
+		}
+		if !scheduledAt.After(now) {
+			return c.JSON(http.StatusBadRequest, apierr.ScheduledAtMustBeInFuture())
+		}
+	}
 	// noteDraftLimit role policy gate (#1029)。policyProvider は #1026 で
 	// 配線済 (timeline gate と共用)。CountByUser で current 件数を取得。
 	if h.policyProvider != nil {
-		if limit, ok := h.policyProvider.GetUserPolicies(user.ID)["noteDraftLimit"].(int); ok && limit >= 0 {
+		policies := h.policyProvider.GetUserPolicies(user.ID)
+		if limit, ok := policies["noteDraftLimit"].(int); ok && limit >= 0 {
 			count, err := h.draftRepo.CountByUser(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
@@ -63,17 +89,45 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 				return apierr.JSONTooManyNoteDrafts(c)
 			}
 		}
+		// scheduledNoteLimit gate (#1040)。isActuallyScheduled draft の数を
+		// 集計して上限と比較する。upstream `NoteDraftService.create` と同 logic。
+		if req.IsActuallyScheduled {
+			if limit, ok := policies["scheduledNoteLimit"].(int); ok && limit >= 0 {
+				count, err := h.draftRepo.CountScheduledByUser(user.ID)
+				if err != nil {
+					return apierr.JSONInternalError(c)
+				}
+				if count >= int64(limit) {
+					return apierr.JSONTooManyScheduledNotes(c)
+				}
+			}
+		}
 	}
 	draft := &model.NoteDraft{
-		ID:         h.idGen.Generate(time.Now()),
-		UserID:     user.ID,
-		Text:       req.Text,
-		CW:         req.CW,
-		Visibility: req.Visibility,
-		FileIDs:    req.FileIDs,
+		ID:                  h.idGen.Generate(now),
+		UserID:              user.ID,
+		Text:                req.Text,
+		CW:                  req.CW,
+		Visibility:          req.Visibility,
+		FileIDs:             req.FileIDs,
+		ScheduledAt:         scheduledAt,
+		IsActuallyScheduled: req.IsActuallyScheduled,
 	}
 	if err := h.draftRepo.Create(draft); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	// scheduled の場合は遅延 queue に投入 (= upstream の `schedule(draft)`
+	// と等価、delay = scheduledAt - now)。enqueue 失敗時は draft を残しつつ
+	// 500 を返し、frontend に再試行を促す (draft 残しは upstream と同じく
+	// 削除しない方が観測可能で安全)。
+	if req.IsActuallyScheduled && h.scheduledNoteEnqueuer != nil {
+		delay := scheduledAt.Sub(now)
+		if err := h.scheduledNoteEnqueuer.EnqueuePostScheduledNote(
+			queue.PostScheduledNotePayload{NoteDraftID: draft.ID},
+			driver.WithProcessIn(delay),
+		); err != nil {
+			return apierr.JSONInternalError(c)
+		}
 	}
 	return c.JSON(http.StatusOK, packDraft(draft, h.idGen))
 }

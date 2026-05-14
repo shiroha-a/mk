@@ -1112,7 +1112,15 @@ func (s *Server) setupRoutes() {
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanUseTranslator))
 	api.POST("/notes/show-partial-bulk", notesHandler.ShowPartialBulk)
 	// notes/drafts + notes/thread-muting + notes/polls/recommendation (実データ)
-	notesHandler.SetDraftRepo(repository.NewNoteDraftRepository(s.db))
+	noteDraftRepo := repository.NewNoteDraftRepository(s.db)
+	notesHandler.SetDraftRepo(noteDraftRepo)
+	notesHandler.SetScheduledNoteEnqueuer(s.queueClient)
+
+	// PostScheduledNote processor (#1040): delayed queue 経由で draft を
+	// note 化する。dependencies は既存 noteCreateService + userRepo + 上記
+	// noteDraftRepo を共有する。
+	postScheduledNoteProcessor := processors.NewPostScheduledNoteProcessor(noteDraftRepo, userRepo, noteCreateService)
+	s.queueServer.Handle(queue.TaskTypePostScheduledNote, postScheduledNoteProcessor.Handle)
 	api.POST("/notes/drafts/list", notesHandler.DraftsList, middleware.RequireAuth())
 	api.POST("/notes/drafts/create", notesHandler.DraftsCreate, middleware.RequireAuth())
 	api.POST("/notes/drafts/update", notesHandler.DraftsUpdate, middleware.RequireAuth())
