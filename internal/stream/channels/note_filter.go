@@ -181,9 +181,16 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 	// 自分の reply は followee snapshot や withReplies 設定に依存せず常に pass。
 	isMe := viewerID != "" && note.UserID == viewerID
 
-	// localTimeline は anonymous viewer に対して reply gate を一切かけない
-	// (upstream `if (note.reply && this.user && ...)` の `this.user` 条件)。
-	if mode == replyGateLocal && viewerID == "" {
+	// localTimeline / hybridTimeline は anonymous viewer に対して reply gate
+	// を一切かけない (upstream `if (note.reply && this.user && ...)` の
+	// `this.user` 条件相当)。upstream hybrid-timeline は requireCredential=true
+	// なので「anonymous hybrid」状態は upstream に存在しないが、mk-go は legacy
+	// 互換で anonymous viewer にも hybrid 購読を許しており、その場合 followee
+	// snapshot を一切持たない (snap=nil)。default 分岐に落とすと selfThread 以外
+	// の reply が全て drop されて旧 mk-go (`WithReplies=true → 全 pass`) より
+	// 厳しい挙動になるので、anonymous local と同じく pass-through に倒す。
+	// homeTimeline は Init で anonymous 自体を no-op にするのでここには来ない。
+	if (mode == replyGateLocal || mode == replyGateHybrid) && viewerID == "" {
 		return true
 	}
 

@@ -51,16 +51,20 @@ func TestShouldEmit_RenoteWithFilesAllowed(t *testing.T) {
 // home/hybrid/local channel に揃った semantics で、reply 表示可否は
 // replyShouldEmit が channel ごとに判定する)。WithReplies フィールドは
 // connect param 互換のために残っているが、shouldEmit からは参照しない。
-// 旧テスト名 `TestShouldEmit_ReplyFiltered` (`WithReplies=false → drop`) /
+// 旧テスト `TestShouldEmit_ReplyFiltered` (`WithReplies=false → drop`) /
 // `TestShouldEmit_ReplyAllowed` (`WithReplies=true → pass`) は drift 挙動の
-// assertion だったので、`WithReplies` 真偽どちらでも pass-through すること
-// を 1 つの test で並列に検証する形に統合した。
-func TestShouldEmit_ReplyAlwaysPassthrough(t *testing.T) {
+// assertion だったので、`WithReplies=false` でも reply が pass-through する
+// ことだけ assert すれば不変条件として十分。`WithReplies=true` 側は shouldEmit
+// から見ると同じコードパスを通るので別 case にしない。
+//
+// 将来 shouldEmit が reply gate を再導入したら本テストが失敗する想定で、
+// reply 判定の責務が `replyShouldEmit` に集約されている前提を守る regression
+// guard として機能する。
+func TestShouldEmit_ReplyPassesIndependentOfWithReplies(t *testing.T) {
+	f := noteFilter{WithRenotes: true, WithReplies: false, WithFiles: false}
 	payload := []byte(`{"text":"reply","replyId":"p1"}`)
-	for _, with := range []bool{false, true} {
-		f := noteFilter{WithRenotes: true, WithReplies: with, WithFiles: false}
-		assert.True(t, f.shouldEmit(payload, nil, ""), "WithReplies=%v should not affect shouldEmit", with)
-	}
+	assert.True(t, f.shouldEmit(payload, nil, ""),
+		"shouldEmit must not gate reply based on WithReplies (#1063); reply decisions belong to replyShouldEmit")
 }
 
 // #1063: replyShouldEmit の 3 escape hatch と followee snapshot gate を覆う。
@@ -139,6 +143,20 @@ func TestReplyShouldEmit_LocalAnonymousPassesAllReplies(t *testing.T) {
 	// かけない (`if (note.reply && this.user && ...)` の this.user が false)。
 	payload := []byte(`{"userId":"author","replyId":"p1","reply":{"userId":"target","visibility":"public"}}`)
 	assert.True(t, replyShouldEmit(payload, "", nil, false, replyGateLocal))
+}
+
+// #1063 follow-up: hybridTimeline は upstream で `requireCredential=true` なので
+// 「anonymous hybrid」状態は本来発生しないが、mk-go は legacy 互換で anonymous
+// viewer にも hybrid 購読を許している。snap=nil + selfThread 以外で全 reply
+// drop すると旧 mk-go (= `WithReplies=true → 全 pass`) より厳しくなる方向の
+// リグレッションになるので、anonymous local と同じく pass-through に揃える。
+func TestReplyShouldEmit_HybridAnonymousPassesAllReplies(t *testing.T) {
+	payload := []byte(`{"userId":"author","replyId":"p1","reply":{"userId":"target","visibility":"public"}}`)
+	assert.True(t, replyShouldEmit(payload, "", nil, false, replyGateHybrid))
+	// followers visibility の reply も同様に pass する。anonymous なので
+	// followers-visibility check を強行しても snap が無く必ず drop してしまうため。
+	payloadFollowers := []byte(`{"userId":"author","replyId":"p1","reply":{"userId":"target","visibility":"followers"}}`)
+	assert.True(t, replyShouldEmit(payloadFollowers, "", nil, false, replyGateHybrid))
 }
 
 func TestReplyShouldEmit_LocalConnectParamWithRepliesPasses(t *testing.T) {

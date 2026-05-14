@@ -217,3 +217,16 @@ func TestHybridTimeline_ConnectParamWithRepliesAllowsForeignReply(t *testing.T) 
 	ch.OnRedisEvent(payload)
 	require.Len(t, ctx.sentType, 1)
 }
+
+// #1063 follow-up: anonymous viewer の hybrid channel でも reply は
+// pass-through する (upstream の `this.user` ガードを mk-go の legacy anonymous
+// hybrid 経路にも反映)。旧来 `WithReplies=true → 全 pass` の挙動と整合させる
+// ためのリグレッション guard。
+func TestHybridTimeline_AnonymousReplyPassthrough(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHybridTimeline(ctx)
+	require.NoError(t, ch.Init(nil))
+	payload := []byte(`{"userId":"author","replyId":"p1","reply":{"userId":"target","visibility":"public"}}`)
+	ch.OnRedisEvent(payload)
+	require.Len(t, ctx.sentType, 1)
+}
