@@ -80,6 +80,10 @@ type Service struct {
 	// override するのに使う (#1029)。nil 時は MaxPinnedNotes 定数 fallback
 	// (= 旧挙動互換)。実装は core/role.Service。
 	rolePolicyProvider RolePolicyProvider
+	// selfHostname は SearchByUsernameAndHost で「host==self-hostname → local
+	// 限定」を判定するために保持する (upstream UserSearchService と互換、
+	// #1064)。空文字なら remap を skip して "." 一致のみ local 限定にする。
+	selfHostname string
 }
 
 // RolePolicyProvider abstracts role-policy lookup used to override default
@@ -135,6 +139,14 @@ func (s *Service) SetDriveFileRepository(repo repository.DriveFileRepository) {
 // leaves ShowByUsername DB-only.
 func (s *Service) SetRemoteUserResolver(r RemoteUserResolver) {
 	s.remoteResolver = r
+}
+
+// SetSelfHostname records the running instance's canonical hostname so that
+// SearchByUsernameAndHost can map `host==self-hostname` to "local only" the
+// same way upstream UserSearchService does (#1064). Empty string disables the
+// remap (only the literal `"."` keeps the local-only shortcut).
+func (s *Service) SetSelfHostname(hostname string) {
+	s.selfHostname = hostname
 }
 
 // UserWithProfile bundles a user and its profile for handlers.
@@ -276,11 +288,19 @@ func (s *Service) Search(query string, limit, offset int, origin string) ([]*mod
 	return s.userRepo.SearchByUsername(strings.ToLower(q), limit, offset, origin)
 }
 
-// SearchByUsernameAndHost narrows username prefix matches to a specific host
-// (or local users when host is nil/empty). upstream Misskey TS の
-// users/search-by-username-and-host endpoint と同じ semantics (#766)。
-//   - host=nil or empty → host IS NULL (local users)
-//   - host=*string      → 当該 host のみ (case-insensitive)
+// SearchByUsernameAndHost narrows username prefix matches with a host filter.
+// upstream Misskey TS の users/search-by-username-and-host endpoint と同じ
+// semantics (#766 / #1064):
+//   - host=nil or empty  → host filter なし (= local + remote 両方)
+//   - host="." or self-hostname → local 限定 (host IS NULL)
+//   - host=その他       → 当該 host の prefix match (case-insensitive)
+//
+// #1064 fix: 旧来は host=nil で local 強制していたが、frontend MkAutocomplete
+// は `@alice` だけ入力したとき host=undefined を送るため、これだと remote user
+// 候補が一切出ない。upstream `generateUserQueryBuilder` も `params.host`
+// falsy で host filter を skip するので合わせる。"." と self-hostname だけ
+// local 限定への remap を Service 側で行う (= self-hostname は Service 設定
+// から引く)。
 func (s *Service) SearchByUsernameAndHost(username string, host *string, limit int) ([]*model.User, error) {
 	q := strings.TrimSpace(strings.TrimPrefix(username, "@"))
 	if q == "" {
@@ -289,15 +309,20 @@ func (s *Service) SearchByUsernameAndHost(username string, host *string, limit i
 	if limit <= 0 {
 		limit = 10
 	}
-	// upstream は host="" / null を local 扱いにするので合わせる。
 	var hostNorm *string
+	localOnly := false
 	if host != nil {
 		h := strings.ToLower(strings.TrimSpace(*host))
-		if h != "" {
+		switch {
+		case h == "":
+			// falsy → host filter なし。hostNorm は nil のままにする。
+		case h == "." || (s.selfHostname != "" && h == strings.ToLower(s.selfHostname)):
+			localOnly = true
+		default:
 			hostNorm = &h
 		}
 	}
-	return s.userRepo.SearchByUsernameAndHost(strings.ToLower(q), hostNorm, limit)
+	return s.userRepo.SearchByUsernameAndHost(strings.ToLower(q), hostNorm, localOnly, limit)
 }
 
 // UpdateInput represents the editable fields of a user profile.

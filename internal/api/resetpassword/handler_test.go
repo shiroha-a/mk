@@ -42,7 +42,7 @@ func (m *mockUserRepo) IncrementFollowersCount(string, int) error { return nil }
 func (m *mockUserRepo) SearchByUsername(string, int, int, string) ([]*model.User, error) {
 	return nil, nil
 }
-func (m *mockUserRepo) SearchByUsernameAndHost(string, *string, int) ([]*model.User, error) {
+func (m *mockUserRepo) SearchByUsernameAndHost(string, *string, bool, int) ([]*model.User, error) {
 	return nil, nil
 }
 func (m *mockUserRepo) UpdateUser(string, map[string]any) error               { return nil }

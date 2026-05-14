@@ -50,10 +50,15 @@ type UserRepository interface {
 	// 空文字列 / 未知値は SearchOriginCombined と同等扱い。
 	SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error)
 	// SearchByUsernameAndHost は username prefix と host を SQL で絞り込む
-	// (#766)。host=nil は local (host IS NULL)、host=*string は当該 host
-	// (case-insensitive) のみ。upstream Misskey TS の同名 endpoint と同じ
-	// semantics。caller は username / host を pre-lowercase して渡すこと。
-	SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error)
+	// (#766 / #1054 / #1064)。upstream Misskey TS の同名 endpoint と同じ
+	// semantics:
+	//   - localOnly=true       → host IS NULL (= local 限定)
+	//   - localOnly=false / host=nil → host filter なし (= local + remote 両方返す)
+	//   - localOnly=false / host=*string → lower("host") LIKE lower(?) ESCAPE '\'
+	//     (prefix match)
+	// caller は username / host を pre-lowercase して渡すこと。self-hostname
+	// や "." の取り扱い (= local 限定への remap) は Service レイヤで行う。
+	SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error)
 	UpdateUser(userID string, fields map[string]any) error
 	UpdateProfile(userID string, fields map[string]any) error
 	CreateProfile(profile *model.UserProfile) error
@@ -242,9 +247,24 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 	return users, nil
 }
 
-// SearchByUsernameAndHost narrows username prefix matches to a specific host
-// (or local users when host is nil). #766 fix: SearchByUsername の origin
-// 軸では「特定 host への絞り込み」ができないので分離した sibling method。
+// SearchByUsernameAndHost narrows username prefix matches with a host filter.
+// #766 fix: SearchByUsername の origin 軸では「特定 host への絞り込み」が
+// できないので分離した sibling method。
+//
+// 3-state semantics (upstream Misskey TS の UserSearchService と一致):
+//   - localOnly=true            → "host" IS NULL (= local 限定)
+//   - localOnly=false, host=nil → host filter なし (= local + remote 両方)
+//   - localOnly=false, host=ptr → lower("host") LIKE lower(?) ESCAPE '\'
+//     (prefix match)
+//
+// #1064 fix: 旧来 host=nil で local 強制していたが、upstream
+// `generateUserQueryBuilder` は `params.host` falsy 時に host filter を一切
+// 付けない (= local + remote 両方返す) ため drop-in 互換性違反だった。
+// frontend MkAutocomplete は `@alice` だけ入力したとき host=undefined を送る
+// ので、host=nil でも remote user を候補に含める必要がある。upstream で
+// local 限定にしたい場合は `host === config.hostname` か `host === '.'` で
+// gate する設計なので、その判定は Service 側 (= self-hostname を知っている
+// 層) で行い、ここには `localOnly` フラグで降ろす。
 //
 // host comparison は upstream Misskey TS の UserSearchService と一致させて
 // `lower(host) LIKE lower(?) || '%'` の prefix match (#1054)。frontend の
@@ -269,15 +289,16 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 // 除外する quirk があり、brand-new user の discoverability を悪化させる。
 // mk-go では本 quirk を意図的に採用せず、followersCount DESC + id ASC の
 // 単純な sort を維持する (= 新規 user も即 search hit する)。詳細は #878。
-func (r *userRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
+func (r *userRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
 	var users []*model.User
 	q := r.db.
 		Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%").
 		Where("\"isSuspended\" = false")
-	if host != nil {
-		q = q.Where(`lower("host") LIKE lower(?) ESCAPE '\'`, escapeSQLLikePattern(*host)+"%")
-	} else {
+	switch {
+	case localOnly:
 		q = q.Where("\"host\" IS NULL")
+	case host != nil:
+		q = q.Where(`lower("host") LIKE lower(?) ESCAPE '\'`, escapeSQLLikePattern(*host)+"%")
 	}
 	if err := q.
 		Order("\"followersCount\" DESC, id ASC").

@@ -195,26 +195,38 @@ func (m *MockUserRepository) SearchByUsername(query string, limit, offset int, o
 	return matches[offset:end], nil
 }
 
-// SearchByUsernameAndHost narrows the prefix match to a specific host (or
-// local users when host is nil). #766 fix と同じ contract で、host
-// comparison は case-insensitive。
-func (m *MockUserRepository) SearchByUsernameAndHost(query string, host *string, limit int) ([]*model.User, error) {
+// SearchByUsernameAndHost narrows the prefix match with a 3-state host filter
+// (#766 / #1054 / #1064 contract):
+//   - localOnly=true       → u.Host == nil のみ
+//   - localOnly=false, host=nil → host filter なし (= local + remote 両方)
+//   - localOnly=false, host=ptr → u.Host が *host の prefix match (case-insensitive)
+//
+// upstream `lower("host") LIKE lower(?) || '%'` を string prefix で
+// 模倣する。
+func (m *MockUserRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
 	var matches []*model.User
+	hostPrefix := ""
+	if host != nil {
+		hostPrefix = strings.ToLower(*host)
+	}
 	for _, u := range m.Users {
 		if !(len(u.UsernameLower) >= len(query) && u.UsernameLower[:len(query)] == query) {
 			continue
 		}
-		if host == nil {
+		switch {
+		case localOnly:
 			if u.Host == nil {
 				matches = append(matches, u)
 			}
-			continue
-		}
-		if u.Host == nil {
-			continue
-		}
-		if strings.EqualFold(*u.Host, *host) {
+		case host == nil:
 			matches = append(matches, u)
+		default:
+			if u.Host == nil {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(*u.Host), hostPrefix) {
+				matches = append(matches, u)
+			}
 		}
 	}
 	if limit > 0 && len(matches) > limit {

@@ -875,7 +875,10 @@ func TestUpdateProfileFields(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// #766: SearchByUsernameAndHost の各分岐を service レイヤーで覆う。
+// #766 / #1064: SearchByUsernameAndHost の各分岐を service レイヤーで覆う。
+// upstream UserSearchService.generateUserQueryBuilder と同じく、host=falsy は
+// filter 無し (local + remote)、host="." or self-hostname は local 限定、
+// それ以外は host prefix match。
 func TestService_SearchByUsernameAndHost(t *testing.T) {
 	svc, userRepo, _, _ := newFullSvc(t)
 	remoteHost := "remote.example"
@@ -890,26 +893,84 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 		assert.Nil(t, out)
 	})
 
-	t.Run("@ prefix is stripped", func(t *testing.T) {
+	t.Run("@ prefix is stripped and host=nil returns local+remote", func(t *testing.T) {
 		out, err := svc.SearchByUsernameAndHost("@alice", nil, 10)
 		require.NoError(t, err)
-		require.Len(t, out, 1)
-		assert.Equal(t, "u_local", out[0].ID)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids["u_local"], "@ prefix should strip and host=nil returns local")
+		assert.True(t, ids["u_remote"], "host=nil should include remote")
+		assert.True(t, ids["u_other"], "host=nil should include other host too")
 	})
 
-	t.Run("host=nil filters to local", func(t *testing.T) {
+	// #1064: host=nil は upstream `params.host` falsy 経路で host filter なし
+	// = local + remote 両方返す。旧来は local 限定だったが drift だった。
+	t.Run("host=nil returns local and remote", func(t *testing.T) {
 		out, err := svc.SearchByUsernameAndHost("alice", nil, 10)
 		require.NoError(t, err)
-		require.Len(t, out, 1)
-		assert.Equal(t, "u_local", out[0].ID)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids["u_local"])
+		assert.True(t, ids["u_remote"])
+		assert.True(t, ids["u_other"])
 	})
 
-	t.Run("host=empty string treated as local", func(t *testing.T) {
+	t.Run("host=empty string is treated as nil (no filter)", func(t *testing.T) {
 		empty := ""
 		out, err := svc.SearchByUsernameAndHost("alice", &empty, 10)
 		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids["u_local"])
+		assert.True(t, ids["u_remote"])
+		assert.True(t, ids["u_other"])
+	})
+
+	// #1064: "." は upstream で local 限定への shortcut。
+	t.Run("host=. returns only local", func(t *testing.T) {
+		dot := "."
+		out, err := svc.SearchByUsernameAndHost("alice", &dot, 10)
+		require.NoError(t, err)
 		require.Len(t, out, 1)
 		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	// #1064: host が自 hostname と一致したら local 限定に remap される。
+	t.Run("host=self-hostname returns only local", func(t *testing.T) {
+		svc.SetSelfHostname("my.example")
+		t.Cleanup(func() { svc.SetSelfHostname("") })
+		self := "my.example"
+		out, err := svc.SearchByUsernameAndHost("alice", &self, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	// 自 hostname 比較は case-insensitive。
+	t.Run("self-hostname remap is case-insensitive", func(t *testing.T) {
+		svc.SetSelfHostname("My.Example")
+		t.Cleanup(func() { svc.SetSelfHostname("") })
+		upper := "MY.EXAMPLE"
+		out, err := svc.SearchByUsernameAndHost("alice", &upper, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	// selfHostname 未設定なら "." 以外の input は host filter として扱われる。
+	t.Run("self-hostname unset leaves other inputs as host filter", func(t *testing.T) {
+		other := "my.example"
+		out, err := svc.SearchByUsernameAndHost("alice", &other, 10)
+		require.NoError(t, err)
+		// selfHostname 未設定なので "my.example" prefix match。仕込み user に
+		// `my.example` host を持つものは無いので 0 件。
+		assert.Empty(t, out)
 	})
 
 	t.Run("host=specific narrows to that host", func(t *testing.T) {
@@ -922,6 +983,15 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 	t.Run("host comparison is case-insensitive", func(t *testing.T) {
 		upper := "REMOTE.EXAMPLE"
 		out, err := svc.SearchByUsernameAndHost("alice", &upper, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_remote", out[0].ID)
+	})
+
+	// #1054 / #1060: host prefix match は維持される。`rem` で remote.example が hit。
+	t.Run("host prefix matches remote host", func(t *testing.T) {
+		prefix := "rem"
+		out, err := svc.SearchByUsernameAndHost("alice", &prefix, 10)
 		require.NoError(t, err)
 		require.Len(t, out, 1)
 		assert.Equal(t, "u_remote", out[0].ID)

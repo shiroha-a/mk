@@ -422,8 +422,11 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 }
 
-// host filter (#766): host=nil は local (host IS NULL) のみ、host=*string
-// は当該 host のみ返す。host comparison は case-insensitive。
+// host filter 3-state semantics (#766 / #1054 / #1064):
+//   - localOnly=true        → host IS NULL のみ
+//   - localOnly=false, host=nil → host filter なし (= local + remote 両方)
+//   - localOnly=false, host=ptr → 当該 host の prefix match (case-insensitive)
+//
 // IDX_user_usernameLower_local_unique 制約があるので local user は 1 つに
 // 留め、remote 同士は host が違えば同 username でも OK な前提で組む。
 func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
@@ -439,8 +442,28 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 	require.NoError(t, repo.UpdateUser(other.ID, map[string]any{"host": otherHost}))
 	defer cleanupUser(t, other.ID)
 
-	t.Run("host=nil returns only local", func(t *testing.T) {
-		out, err := repo.SearchByUsernameAndHost("hosttest", nil, 10)
+	// #1064: host=nil + localOnly=false は upstream の `params.host` falsy 経路
+	// と同じ semantics で、host filter を一切付けずに local + remote 両方返す。
+	// 旧来 (#766) は local 強制だったが、frontend MkAutocomplete が `@alice`
+	// だけ入力した状態で host=undefined を送るため、それでは remote user 候補
+	// が一切出なくなる drop-in 互換性違反だった。
+	t.Run("host=nil returns local and remote", func(t *testing.T) {
+		out, err := repo.SearchByUsernameAndHost("hosttest", nil, false, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID], "host=nil should include local user")
+		assert.True(t, ids[remote.ID], "host=nil should include remote.example user")
+		assert.True(t, ids[other.ID], "host=nil should include other.example user")
+	})
+
+	// #1064: localOnly=true は upstream で host==config.hostname / "." 一致を
+	// Service レイヤで判定した結果、repo に降りてくるフラグ。host IS NULL の
+	// user のみ返る。host pointer は無視される。
+	t.Run("localOnly=true returns only local", func(t *testing.T) {
+		out, err := repo.SearchByUsernameAndHost("hosttest", nil, true, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -452,7 +475,7 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 	})
 
 	t.Run("host=remote returns only that host", func(t *testing.T) {
-		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, 10)
+		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -465,7 +488,7 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 
 	t.Run("host comparison is case-insensitive", func(t *testing.T) {
 		upper := "REMOTE.EXAMPLE"
-		out, err := repo.SearchByUsernameAndHost("hosttest", &upper, 10)
+		out, err := repo.SearchByUsernameAndHost("hosttest", &upper, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -482,7 +505,7 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		t.Cleanup(func() {
 			_ = repo.UpdateUser(local.ID, map[string]any{"isSuspended": false})
 		})
-		out, err := repo.SearchByUsernameAndHost("hosttest", nil, 10)
+		out, err := repo.SearchByUsernameAndHost("hosttest", nil, true, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -497,7 +520,7 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 	// で remote user 候補が一切出ない。
 	t.Run("host prefix match hits remote users", func(t *testing.T) {
 		prefix := "rem"
-		out, err := repo.SearchByUsernameAndHost("hosttest", &prefix, 10)
+		out, err := repo.SearchByUsernameAndHost("hosttest", &prefix, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -531,7 +554,7 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 		// escape 有りなら literal `_` として扱われ、`with_underscore.example`
 		// のみ hit する。
 		prefix := "with_"
-		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, 10)
+		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -546,7 +569,7 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 		// confirm するため: `%` を渡しても全 host にマッチする wildcard と
 		// しては解釈されず、literal `%` を含む host のみ hit する (= 0 件)。
 		prefix := "%"
-		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, 10)
+		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, false, 10)
 		require.NoError(t, err)
 		assert.Empty(t, out, "literal `%` should not match any actual host (= regression guard for `%` wildcard escape)")
 	})
@@ -569,7 +592,7 @@ func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T)
 		// 両 user の host を同じく `with_underscore.example` に設定したので、
 		// 結果差は username escape 由来であることが特定できる。
 		withUnderscoreHost := "with_underscore.example"
-		out, err := repo.SearchByUsernameAndHost("wildtest_", &withUnderscoreHost, 10)
+		out, err := repo.SearchByUsernameAndHost("wildtest_", &withUnderscoreHost, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {

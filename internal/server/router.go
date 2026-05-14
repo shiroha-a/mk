@@ -218,6 +218,10 @@ func (s *Server) setupRoutes() {
 	// /api/i/update の avatarId / bannerId 経路 (#467) で drive_file の
 	// 所有権検証 + URL コピーが必要なため、driveFileRepo を配線する。
 	userService.SetDriveFileRepository(driveFileRepo)
+	// users/search-by-username-and-host で host=<self-hostname> 入力時に
+	// local 限定にする upstream 互換 remap (#1064) のため、自 hostname を
+	// Service に渡す。空文字なら remap は "." 一致のみになる。
+	userService.SetSelfHostname(s.config.Hostname)
 	followingService := corefollowing.NewService(userRepo, followingRepo, followRequestRepo, idGen)
 	// remote instance の followersCount / followingCount を Follow/Unfollow 時に
 	// incremental 更新する (#596)。未配線でも本機能には影響しないが、admin

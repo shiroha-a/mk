@@ -387,9 +387,9 @@ func TestSearchByUsernameAndHost_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// #766: host が指定されたら当該 host の user のみ返す。host=nil なら local
-// user (host IS NULL) のみ。"全 host のマッチを返す" 旧挙動の regression
-// guard。
+// #766 / #1064: host filter の 3-state semantics を handler 経由で覆う。
+//   - host 未指定 / 空文字 → host filter なし (= local + remote)
+//   - host 指定 → 当該 host の prefix match (case-insensitive)
 func TestSearchByUsernameAndHost_FiltersByHost(t *testing.T) {
 	h, userRepo, _ := newExtraHandler(t)
 	remote := "remote.example"
@@ -398,17 +398,25 @@ func TestSearchByUsernameAndHost_FiltersByHost(t *testing.T) {
 	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Username: "alice", UsernameLower: "alice", Host: &remote}
 	userRepo.Users["u_other"] = &model.User{ID: "u_other", Username: "alice", UsernameLower: "alice", Host: &other}
 
-	// host 未指定 / 空文字 → local user のみ
+	// #1064: host 未指定 / 空文字 → local + remote 両方返す。
+	// 旧来は local 限定だったが、frontend MkAutocomplete が `@alice` だけ
+	// 入力した状態で host=undefined を送るので、それでは remote candidate
+	// が一切出ない drop-in 互換性違反だった。
 	for _, body := range []string{`{"username":"alice"}`, `{"username":"alice","host":""}`} {
 		rec := postExtra(h.SearchByUsernameAndHost, body, nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 		var got []entity.UserLite
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-		require.Len(t, got, 1, "body=%s should return only local user", body)
-		assert.Equal(t, "u_local", got[0].ID)
+		ids := make(map[string]bool, len(got))
+		for _, u := range got {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids["u_local"], "body=%s should include local user", body)
+		assert.True(t, ids["u_remote"], "body=%s should include remote user", body)
+		assert.True(t, ids["u_other"], "body=%s should include other-host user", body)
 	}
 
-	// host 指定 → 当該 host の user のみ (local や別 host の user は除外)
+	// host 指定 → 当該 host の prefix match user のみ (local や別 host の user は除外)
 	rec := postExtra(h.SearchByUsernameAndHost, `{"username":"alice","host":"remote.example"}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got []entity.UserLite
@@ -422,6 +430,13 @@ func TestSearchByUsernameAndHost_FiltersByHost(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got, 1)
 	assert.Equal(t, "u_remote", got[0].ID)
+
+	// #1064: host="." は local 限定 (upstream の shortcut)。
+	rec = postExtra(h.SearchByUsernameAndHost, `{"username":"alice","host":"."}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "u_local", got[0].ID)
 }
 
 // --- UpdateMemo ---
@@ -478,7 +493,7 @@ type failingSearchRepo struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingSearchRepo) SearchByUsernameAndHost(_ string, _ *string, _ int) ([]*model.User, error) {
+func (f *failingSearchRepo) SearchByUsernameAndHost(_ string, _ *string, _ bool, _ int) ([]*model.User, error) {
 	return nil, assert.AnError
 }
 
