@@ -229,7 +229,7 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 		if len(rows) == 0 {
 			return
 		}
-		// reply note は follower の \`following.withReplies\` 設定で push 制御
+		// reply note は follower の `following.withReplies` 設定で push 制御
 		// する (#1047 / upstream 互換)。
 		//   - 通常 note (= replyId nil) → 全 follower に push
 		//   - self-thread (= replyUserId = userId) → 全 follower に push (= TL

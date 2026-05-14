@@ -88,6 +88,89 @@ func TestNoteRepository_ListHomeTimeline_MutedChannelFilter(t *testing.T) {
 	// 返ってしまう。ここでは他ユーザーがいないので fan-out テストは省略。
 }
 
+// TestNoteRepository_ListHomeTimeline_WithRepliesFalse_SelfThreadOnly は #1047
+// で導入された upstream 互換の reply filter semantics を SQL 層で直接検証する。
+//
+// 期待値:
+//   - reply 無し note: 通過
+//   - self-thread (replyUserId = note.userId): 通過
+//   - 他人宛 reply (replyUserId != note.userId): 除外
+//
+// ViewerID 引数の有無に関わらず同 semantics となる (旧実装の
+// `replyUserId = viewerID` 分岐は撤廃済)。
+func TestNoteRepository_ListHomeTimeline_WithRepliesFalse_SelfThreadOnly(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+
+	viewer := insertTestUser(t, "u_rep_v", "repviewer")
+	defer cleanupUser(t, viewer.ID)
+	author := insertTestUser(t, "u_rep_a", "repauthor")
+	defer cleanupUser(t, author.ID)
+	other := insertTestUser(t, "u_rep_o", "repother")
+	defer cleanupUser(t, other.ID)
+
+	// viewer は author をフォロー (home timeline に含める)
+	require.NoError(t, testDB.Exec(
+		`INSERT INTO "following" (id, "followerId", "followeeId") VALUES (?, ?, ?)`,
+		"flw_rep", viewer.ID, author.ID,
+	).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "flw_rep")
+
+	text := "hi"
+	plain := &model.Note{
+		ID: "n_rep_plain", UserID: author.ID, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	// self-thread: author 自身への reply
+	selfReplyTargetID := "n_rep_plain"
+	selfThread := &model.Note{
+		ID: "n_rep_self", UserID: author.ID, Text: &text,
+		Visibility:  model.NoteVisibilityPublic,
+		Reactions:   datatypes.JSON([]byte("{}")),
+		ReplyID:     &selfReplyTargetID,
+		ReplyUserID: &author.ID,
+	}
+	// 他人宛 reply: author → other
+	otherReplyTargetID := "n_rep_target_other"
+	otherUserID := other.ID
+	otherReplyTarget := &model.Note{
+		ID: otherReplyTargetID, UserID: other.ID, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	otherReply := &model.Note{
+		ID: "n_rep_other", UserID: author.ID, Text: &text,
+		Visibility:  model.NoteVisibilityPublic,
+		Reactions:   datatypes.JSON([]byte("{}")),
+		ReplyID:     &otherReplyTargetID,
+		ReplyUserID: &otherUserID,
+	}
+	require.NoError(t, repo.Create(plain))
+	require.NoError(t, repo.Create(otherReplyTarget))
+	require.NoError(t, repo.Create(selfThread))
+	require.NoError(t, repo.Create(otherReply))
+	defer cleanupNote(t, plain.ID)
+	defer cleanupNote(t, otherReplyTarget.ID)
+	defer cleanupNote(t, selfThread.ID)
+	defer cleanupNote(t, otherReply.ID)
+
+	withReplies := false
+	filter := model.TimelineDBFilter{
+		ViewerID:    viewer.ID,
+		WithReplies: &withReplies,
+	}
+	rows, err := repo.ListHomeTimeline(viewer.ID, 50, "", "", filter)
+	require.NoError(t, err)
+
+	ids := make(map[string]bool, len(rows))
+	for _, n := range rows {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids[plain.ID], "plain note (reply 無し) は通過すべき")
+	assert.True(t, ids[selfThread.ID], "self-thread (replyUserId = userId) は通過すべき")
+	assert.False(t, ids[otherReply.ID], "他人宛 reply (replyUserId != userId) は除外されるべき")
+}
+
 func TestNoteRepository_CreateAndFindByID(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "u_ncf_1", "noteuser1")
