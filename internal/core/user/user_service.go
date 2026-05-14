@@ -148,11 +148,14 @@ func (s *Service) SetRemoteUserResolver(r RemoteUserResolver) {
 // same way upstream UserSearchService does (#1064). Empty string disables the
 // remap (only the literal `"."` keeps the local-only shortcut).
 //
-// 入力は setter 内で lowercase 正規化して保持する。search の per-call ホット
-// パスで毎回 strings.ToLower するのを避けるため (autocomplete は per-keystroke
-// で呼ばれる)。
+// 入力は setter 内で TrimSpace + lowercase に正規化して保持する。search の
+// per-call ホットパスで毎回 strings.ToLower するのを避けるためと、
+// whitespace のみ入力 (= "  ") で remap が無意味に有効化される edge case を
+// 防ぐ防御。実 caller は `s.config.Hostname` (= `url.Hostname()` 由来) で
+// whitespace が入る経路は通常 無いが、Setter contract として境界条件を
+// 確実にする。
 func (s *Service) SetSelfHostname(hostname string) {
-	s.selfHostname = strings.ToLower(hostname)
+	s.selfHostname = strings.ToLower(strings.TrimSpace(hostname))
 }
 
 // UserWithProfile bundles a user and its profile for handlers.

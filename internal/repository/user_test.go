@@ -474,9 +474,10 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		assert.False(t, ids[other.ID])
 	})
 
-	t.Run("host=remote narrows to host prefix match", func(t *testing.T) {
+	t.Run("host=remoteHost narrows to host prefix match", func(t *testing.T) {
 		// `remote.example` (exact) を渡すと same-host の user のみ hit。
-		// `other.example` は prefix が異なるので除外。
+		// `other.example` は prefix が異なるので除外。test 名は service test の
+		// 同等 case (`host=remoteHost narrows to host prefix match`) と命名統一。
 		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))

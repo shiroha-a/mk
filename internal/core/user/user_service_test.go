@@ -966,6 +966,34 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 		assert.Equal(t, "u_local", out[0].ID)
 	})
 
+	// SetSelfHostname は input を TrimSpace してから保存するので、whitespace
+	// 込みで設定しても "." 一致のみ local 限定に degrade することは無く、
+	// hostname だけ抽出されて正しく remap が機能する。
+	t.Run("self-hostname is trimmed on set", func(t *testing.T) {
+		svc.SetSelfHostname("  my.example  ")
+		t.Cleanup(func() { svc.SetSelfHostname("") })
+		self := "my.example"
+		out, err := svc.SearchByUsernameAndHost("alice", &self, 10)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		assert.Equal(t, "u_local", out[0].ID)
+	})
+
+	// whitespace のみの input は空文字と同じ扱い (= remap disabled、"." 一致のみ
+	// local 限定)。SetSelfHostname の TrimSpace が空にしたケースで remap が
+	// 誤って効かないことを regression guard。
+	t.Run("self-hostname whitespace-only is treated as unset", func(t *testing.T) {
+		svc.SetSelfHostname("   ")
+		t.Cleanup(func() { svc.SetSelfHostname("") })
+		// 任意の host 文字列を与えても local 限定にならない (= host filter として動く)。
+		other := "my.example"
+		out, err := svc.SearchByUsernameAndHost("alice", &other, 10)
+		require.NoError(t, err)
+		// 仕込み user に `my.example` host を持つものは無いので 0 件。
+		// remap が誤って効いて local 1 件返ったらこの assertion が落ちる。
+		assert.Empty(t, out)
+	})
+
 	// selfHostname 未設定なら "." 以外の input は host filter として扱われる。
 	// 前の subtest の cleanup に依存せず冒頭で明示的に "" を Set する。
 	t.Run("self-hostname unset leaves other inputs as host filter", func(t *testing.T) {
