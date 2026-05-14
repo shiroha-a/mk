@@ -403,6 +403,16 @@ func (c *channelContext) HardMuteRules() []byte {
 	return c.dispatcher.conn.HardMuteRules()
 }
 
+// FollowingSnapshot forwards the connection-level followee map so timeline
+// channels can gate reply notes per upstream Misskey の
+// `this.following[note.userId]?.withReplies` semantics (#1063).
+func (c *channelContext) FollowingSnapshot() map[string]bool {
+	if c.dispatcher.conn == nil {
+		return nil
+	}
+	return c.dispatcher.conn.FollowingSnapshot()
+}
+
 // --- readNotification / subNote / unsubNote ---
 
 // handleReadNotification marks all notifications as read for the connected user.

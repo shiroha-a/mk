@@ -16,17 +16,30 @@ type HardMuteRulesLookup interface {
 	HardMutedWordsForUser(userID string) []byte
 }
 
+// FollowingSnapshotLookup returns a map of `followeeID -> withReplies` for the
+// given user. Used by the streaming Manager to snapshot the viewer's followee
+// list at connection setup so timeline channels can gate reply notes per
+// upstream Misskey の `this.following[note.userId]?.withReplies` semantics
+// (#1063)。lookup 失敗 / anonymous は nil を返す。snapshot は 1 回 fetch
+// するだけで、現状 follow 変更時の refresh subscriber は未実装 (= 接続を
+// 張り直すまで stale)。これは "自分の reply 等の 3 escape hatch" には影響
+// しない degrade なので drop-in 互換性回復は完了する。
+type FollowingSnapshotLookup interface {
+	FollowingSnapshotForUser(userID string) map[string]bool
+}
+
 // Manager owns the set of live streaming connections. Channel registry と
 // PubSub bus を握り、各 connection に Dispatcher を割り当てて pubsub →
 // channel のルーティングを行う。
 type Manager struct {
-	mu          sync.RWMutex
-	conns       map[string]*Connection
-	nextID      atomic.Uint64
-	registry    *Registry
-	bus         PubSubBus
-	notifReader NotificationReader
-	hardMute    HardMuteRulesLookup
+	mu              sync.RWMutex
+	conns           map[string]*Connection
+	nextID          atomic.Uint64
+	registry        *Registry
+	bus             PubSubBus
+	notifReader     NotificationReader
+	hardMute        HardMuteRulesLookup
+	followingLookup FollowingSnapshotLookup
 }
 
 // NewManager constructs a Manager with no live connections. registry / bus が
@@ -52,6 +65,15 @@ func (m *Manager) SetHardMuteLookup(l HardMuteRulesLookup) {
 	m.hardMute = l
 }
 
+// SetFollowingSnapshotLookup wires a lookup that returns the viewer's followee
+// map (followeeID -> withReplies). Called at connection setup so timeline
+// channels can apply upstream Misskey の reply gate (#1063). nil disables
+// the per-publish followee gate and channels fall back to the 3 escape
+// hatches only.
+func (m *Manager) SetFollowingSnapshotLookup(l FollowingSnapshotLookup) {
+	m.followingLookup = l
+}
+
 // Accept implements api/streaming.ConnectionAcceptor. *websocket.Conn から
 // Connection を組み立て、Dispatcher 経由で channel framework に橋渡しする。
 func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
@@ -61,6 +83,12 @@ func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 		// 接続後、最初の channel publish より前に rules を attach。fetch 失敗は
 		// nil 返却で degrade — streaming は filter 無しで動き続ける (#787)。
 		c.SetHardMuteRules(m.hardMute.HardMutedWordsForUser(user.ID))
+	}
+	if m.followingLookup != nil && user != nil {
+		// 接続後、最初の channel publish より前に followee snapshot を attach。
+		// fetch 失敗 (= lookup nil 返却) は anonymous 同等に degrade し、reply
+		// gate は escape hatch のみで動く (#1063)。
+		c.SetFollowingSnapshot(m.followingLookup.FollowingSnapshotForUser(user.ID))
 	}
 	dispatcher := NewDispatcher(c, m.registry, m.bus)
 	if m.notifReader != nil {

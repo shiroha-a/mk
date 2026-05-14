@@ -58,6 +58,14 @@ type ChannelContext interface {
 	// Timeline channels use it to drop matching notes per-publish (#787).
 	// Returns nil when the connection is anonymous / has no rule set.
 	HardMuteRules() []byte
+	// FollowingSnapshot returns the viewer's followee map (followeeID →
+	// withReplies). Timeline channels use it to gate reply notes per-publish
+	// (#1063) the same way upstream Misskey checks
+	// `this.following[note.userId]?.withReplies`. Returns nil when the
+	// connection is anonymous or the lookup is unwired — in that case channels
+	// should fall back to the 3 escape hatches only (= drop reply unless
+	// reply-to-me / isMe / self-thread).
+	FollowingSnapshot() map[string]bool
 }
 
 // PermittedChannel is an optional interface a Channel can implement to

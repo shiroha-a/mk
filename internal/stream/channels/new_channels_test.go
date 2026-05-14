@@ -163,6 +163,22 @@ func TestUserList_WithReplies(t *testing.T) {
 	require.Len(t, ctx.sentType, 1)
 }
 
+// #1063: UserList channel は per-membership の withReplies (= upstream
+// `MiUserListMembership.withReplies`) を持つべきだが mk-go 側に model が
+// 無いため未実装。本 PR で noteFilter.shouldEmit から reply blanket-drop
+// を撤廃した副作用で、connect param `withReplies=false` でも reply が
+// pass-through する暫定挙動になっている。完全 upstream 互換 (= per-member
+// gate) は別 issue で対応する想定。本テストは暫定挙動の regression guard
+// で、将来 per-member gate を入れたら drop 側に書き換える。
+func TestUserList_WithRepliesFalse_ReplyPassthrough(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1","withReplies":false}`))
+	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
+}
+
 // --- RoleTimeline ---
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {
@@ -355,12 +371,17 @@ func TestHashtag_FilteredRenote(t *testing.T) {
 	assert.Empty(t, ctx.sentType)
 }
 
-func TestChannelTimeline_FilteredReply(t *testing.T) {
+// #1063: ChannelTimeline (Misskey の channel 機能 timeline) は upstream
+// `channel.ts` に reply gate を持たない。withReplies connect param に関わらず
+// reply は pass-through する。旧テストは「withReplies=false で reply を drop」
+// する drift 挙動を assertion していたので新 semantics に揃える。
+func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
 	ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`))
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
-	assert.Empty(t, ctx.sentType)
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 func TestRoleTimeline_FilteredRenote(t *testing.T) {
@@ -412,14 +433,17 @@ func TestLocalTimeline_FilterPureRenote(t *testing.T) {
 	require.Len(t, ctx.sentType, 1)
 }
 
-func TestGlobalTimeline_FilterReply(t *testing.T) {
+// #1063: upstream `global-timeline.ts` は reply gate を持たない。reply は
+// 常に pass-through する。旧テストは drift 挙動の assertion だったので新
+// semantics に揃える。
+func TestGlobalTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewGlobalTimeline(ctx)
 	ch.Init(json.RawMessage(`{"withReplies":false}`))
 
-	// リプライはフィルタされる（デフォルトでfalse）
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
-	assert.Empty(t, ctx.sentType)
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 func TestHomeTimeline_WithFiles(t *testing.T) {

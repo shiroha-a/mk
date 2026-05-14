@@ -73,6 +73,18 @@ type Connection struct {
 	// 並行するので hardMuteMu で protect する。
 	hardMuteMu    sync.RWMutex
 	hardMuteRules []byte
+
+	// followingSnapshot は viewer の followee 一覧と各 followee の withReplies
+	// 設定を保持する map (#1063)。HomeTimelineChannel / HybridTimelineChannel /
+	// LocalTimelineChannel が reply note の表示可否を決めるときに upstream の
+	// `this.following[note.userId]?.withReplies` 相当の参照を行う。snapshot は
+	// 接続確立時に 1 回 fetch する。Following 変更時に refresh する subscriber
+	// は将来 #1063 follow-up で導入する想定だが、現状の接続単位の精度でも
+	// "自分の reply が流れない" / "self-thread が流れない" / "reply-to-me が
+	// 流れない" の 3 escape hatch には影響しないため drop-in 互換性回復は
+	// 完了する。read (per-publish) と write (refresh) は followingMu で protect。
+	followingMu       sync.RWMutex
+	followingSnapshot map[string]bool
 }
 
 // NewConnection wraps an upgraded WebSocket. id は呼び出し側 (Manager) が一意
@@ -125,6 +137,38 @@ func (c *Connection) HardMuteRules() []byte {
 	c.hardMuteMu.RLock()
 	defer c.hardMuteMu.RUnlock()
 	return c.hardMuteRules
+}
+
+// SetFollowingSnapshot attaches the viewer's followee map (followeeID →
+// withReplies) so timeline channels can apply upstream Misskey の
+// `this.following[note.userId]?.withReplies` 相当の reply gate (#1063)。
+// 接続確立時に router の lookup が呼ばれ、その結果をここで保持する。nil を
+// 渡すと "follow 情報なし" 扱いになり escape hatch (= 自分の reply / reply
+// to me / self-thread) のみで reply が通る upstream default 挙動に degrade
+// する。
+//
+// 並行安全: 本 method は内部 map を直接 mutate せず、**新しい map を全置換**
+// する設計。FollowingSnapshot() で返した古い map は channel.OnRedisEvent が
+// 読み込み中でも安全に GC される (Go の map read は同じ map に対する
+// concurrent write が無ければ thread-safe)。**将来 refresh subscriber
+// (#791 と同等) を実装するときも必ず「新しい map を作って Set する」パターン
+// を守ること** — 既存 map を mutate すると in-flight な reader と race する。
+func (c *Connection) SetFollowingSnapshot(snap map[string]bool) {
+	c.followingMu.Lock()
+	c.followingSnapshot = snap
+	c.followingMu.Unlock()
+}
+
+// FollowingSnapshot returns the viewer's followee map. Safe for concurrent
+// read while SetFollowingSnapshot updates the value. Returns nil for
+// anonymous connections / when the lookup is unwired or failed.
+//
+// 戻り値は internal map の参照。caller は **mutate しないこと** — read-only
+// で扱う前提で defensive copy を省略している。
+func (c *Connection) FollowingSnapshot() map[string]bool {
+	c.followingMu.RLock()
+	defer c.followingMu.RUnlock()
+	return c.followingSnapshot
 }
 
 // SetPermissions attaches OAuth2 permission scopes for this connection.
