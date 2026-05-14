@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -286,4 +287,105 @@ func TestPostScheduledNote_NoPoll(t *testing.T) {
 	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
 	require.Len(t, pub.calls, 1)
 	assert.Nil(t, pub.calls[0].Poll, "hasPoll=false の draft は Poll 設定なし")
+}
+
+// --- #1045 Phase 2-B: notification ---
+
+// stubNotifier captures Create calls for assertion. err != nil で
+// notification 発火経路が publish 結果を損なわないことを確認する。
+type stubNotifier struct {
+	calls []notification.CreateInput
+	err   error
+}
+
+func (s *stubNotifier) Create(_ context.Context, in notification.CreateInput) (*notification.Notification, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	s.calls = append(s.calls, in)
+	return &notification.Notification{ID: "stub-notif", Type: in.Type}, nil
+}
+
+// publish 成功時は scheduledNotePosted 通知が 1 度発火し、payload に
+// publish した note.ID が乗る。
+func TestPostScheduledNote_NotifiesOnPosted(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+	notif := &stubNotifier{}
+	p.SetNotifier(notif)
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	require.Len(t, pub.calls, 1, "publish は 1 度")
+	require.Len(t, notif.calls, 1, "posted 通知が 1 度発火")
+	assert.Equal(t, "u1", notif.calls[0].NotifieeID)
+	assert.Equal(t, notification.TypeScheduledNotePosted, notif.calls[0].Type)
+	assert.Equal(t, "n_published", notif.calls[0].NoteID,
+		"publish した note の ID が通知に乗る")
+}
+
+// publish 失敗時は scheduledNotePostFailed 通知が発火し、payload の Extra
+// に noteDraftId が乗る。publish error 自体は handler 戻り値で伝播する。
+func TestPostScheduledNote_NotifiesOnFailed(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+	pub.err = errors.New("publish boom")
+	notif := &stubNotifier{}
+	p.SetNotifier(notif)
+
+	err := p.Handle(context.Background(), taskFor("d1"))
+	require.Error(t, err, "publish 失敗は handler error で伝播")
+	require.Len(t, notif.calls, 1, "postFailed 通知が 1 度発火")
+	assert.Equal(t, "u1", notif.calls[0].NotifieeID)
+	assert.Equal(t, notification.TypeScheduledNotePostFailed, notif.calls[0].Type)
+	require.NotNil(t, notif.calls[0].Extra)
+	assert.Equal(t, "d1", notif.calls[0].Extra["noteDraftId"])
+}
+
+// notifier 自体が error を返しても publish 経路 (= handler 戻り値) には
+// 影響しない (= best-effort)。
+func TestPostScheduledNote_NotifierErrorDoesNotBreakPublish(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+	p.SetNotifier(&stubNotifier{err: errors.New("notif boom")})
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")),
+		"notification 失敗は handler error にしない")
+	assert.Len(t, pub.calls, 1, "publish 自体は走る")
+}
+
+// notifier 未配線 (= Phase 2-A 互換挙動) でも publish 経路は通常動作する。
+func TestPostScheduledNote_NoNotifierConfigured(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+	// SetNotifier 呼ばない → nil
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	assert.Len(t, pub.calls, 1)
 }

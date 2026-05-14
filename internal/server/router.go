@@ -1124,6 +1124,9 @@ func (s *Server) setupRoutes() {
 	// at-least-once delivery で job が二重 fire しても重複 publish を防ぐ。
 	postScheduledNoteProcessor.SetLock(processors.NewRedisScheduledNoteLock(
 		s.redis.Default, s.config.Redis.KeyPrefix(), 0))
+	// publish 結果通知 (#1045 Phase 2-B): scheduledNotePosted (= 成功) /
+	// scheduledNotePostFailed (= 失敗) を user の通知 stream に発火する。
+	postScheduledNoteProcessor.SetNotifier(notificationService)
 	s.queueServer.Handle(queue.TaskTypePostScheduledNote, postScheduledNoteProcessor.Handle)
 	api.POST("/notes/drafts/list", notesHandler.DraftsList, middleware.RequireAuth())
 	api.POST("/notes/drafts/create", notesHandler.DraftsCreate, middleware.RequireAuth())

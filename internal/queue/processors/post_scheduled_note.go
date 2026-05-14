@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -59,6 +60,15 @@ type ScheduledNotePublisher interface {
 	Create(in note.CreateInput) (*model.Note, error)
 }
 
+// ScheduledNoteNotifier dispatches the scheduled note publish result to the
+// notification system. upstream Misskey TS の \`NotificationService.create\`
+// と同 contract で、posted (= 成功時 noteId) / postFailed (= 失敗時
+// noteDraftId) の 2 種を発火する (#1045 Phase 2-B)。nil の場合は notification
+// skip (= Phase 2-A 時点の slog のみ挙動と互換)。
+type ScheduledNoteNotifier interface {
+	Create(ctx context.Context, in notification.CreateInput) (*notification.Notification, error)
+}
+
 // PostScheduledNoteProcessor publishes a note from a previously-stored
 // `note_draft` row whose `isActuallyScheduled=true` and `scheduledAt` has
 // arrived. upstream `PostScheduledNoteProcessorService` の Go port (#1040)。
@@ -69,6 +79,8 @@ type PostScheduledNoteProcessor struct {
 	// lock は idempotency 用 (#1045 Phase 2-A)。nil の場合は lock skip = Phase 1
 	// と同等の at-least-once 挙動 (= test fixture / 未配線 path)。
 	lock ScheduledNoteLock
+	// notifier は publish 結果通知用 (#1045 Phase 2-B)。nil で発火 skip。
+	notifier ScheduledNoteNotifier
 }
 
 // NewPostScheduledNoteProcessor wires the processor with its dependencies.
@@ -81,6 +93,14 @@ func NewPostScheduledNoteProcessor(drafts ScheduledNoteDraftRepo, users Schedule
 // (#1045 Phase 2-A)。
 func (p *PostScheduledNoteProcessor) SetLock(l ScheduledNoteLock) {
 	p.lock = l
+}
+
+// SetNotifier wires the notification dispatcher used to fire
+// \`scheduledNotePosted\` / \`scheduledNotePostFailed\` on publish completion
+// (#1045 Phase 2-B)。nil disables (= notification skip)、production では
+// core/notification.Service を配線する。
+func (p *PostScheduledNoteProcessor) SetNotifier(n ScheduledNoteNotifier) {
+	p.notifier = n
 }
 
 // Handle implements the asynq task handler signature. It decodes the payload,
@@ -173,14 +193,39 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 		}
 		in.Poll = pollInput
 	}
-	if _, err := p.publisher.Create(in); err != nil {
+	publishedNote, err := p.publisher.Create(in)
+	if err != nil {
 		// publish 失敗時は asynq retry に任せ、draft 行はそのまま残す
-		// (= 次回 retry で再試行可能)。upstream は notification を発火する
-		// が mk-go はまだ scheduledNotePostFailed notification type を持た
-		// ないので log のみ。
+		// (= 次回 retry で再試行可能)。同時に user に postFailed 通知を
+		// 1 度だけ発火する (= upstream \`scheduledNotePostFailed\` と同 shape、
+		// extra に noteDraftId)。
 		slog.Warn("scheduled note publish failed",
 			"noteDraftId", payload.NoteDraftID, "userId", draft.UserID, "err", err)
+		if p.notifier != nil {
+			if _, nerr := p.notifier.Create(ctx, notification.CreateInput{
+				NotifieeID: draft.UserID,
+				Type:       notification.TypeScheduledNotePostFailed,
+				Extra:      map[string]any{"noteDraftId": draft.ID},
+			}); nerr != nil {
+				// notification 失敗は publish error 経路に影響させない (= retry
+				// 中に多重通知を避ける best-effort)。
+				slog.Warn("scheduled note postFailed notification failed",
+					"noteDraftId", payload.NoteDraftID, "err", nerr)
+			}
+		}
 		return fmt.Errorf("publish scheduled note: %w", err)
+	}
+	// publish 成功通知 (#1045 Phase 2-B)。upstream は \`noteId\` を引数で渡し、
+	// frontend が note を embed して表示する。
+	if p.notifier != nil {
+		if _, nerr := p.notifier.Create(ctx, notification.CreateInput{
+			NotifieeID: draft.UserID,
+			Type:       notification.TypeScheduledNotePosted,
+			NoteID:     publishedNote.ID,
+		}); nerr != nil {
+			slog.Warn("scheduled note posted notification failed",
+				"noteDraftId", payload.NoteDraftID, "err", nerr)
+		}
 	}
 	if _, err := p.drafts.Delete(draft.ID, draft.UserID); err != nil {
 		// publish 成功 + draft 削除失敗時は draft が残るだけで二重 publish

@@ -39,6 +39,12 @@ const (
 	TypeFollowRequestAccept Type = "followRequestAccepted"
 	TypeExportCompleted     Type = "exportCompleted"
 	TypeImportCompleted     Type = "importCompleted"
+	// TypeScheduledNotePosted / TypeScheduledNotePostFailed は upstream
+	// Misskey TS の \`PostScheduledNoteProcessorService\` が発火する 2 種類
+	// の通知 (#1045 Phase 2-B)。posted は \`noteId\` を Extra (or NoteID) に
+	// 持ち、postFailed は \`noteDraftId\` を Extra に持つ。
+	TypeScheduledNotePosted     Type = "scheduledNotePosted"
+	TypeScheduledNotePostFailed Type = "scheduledNotePostFailed"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.
