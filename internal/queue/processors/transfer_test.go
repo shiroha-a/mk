@@ -52,7 +52,9 @@ func (stubMutingSvc) Mute(_, muteeID string, _ *time.Time) (*model.Muting, error
 
 type stubFollowingSvc struct{}
 
-func (stubFollowingSvc) Follow(_, _ string) (any, error) { return nil, nil }
+func (stubFollowingSvc) Follow(_, _ string, _ transfer.FollowOptions) (any, error) {
+	return nil, nil
+}
 
 // --- Builders ---
 

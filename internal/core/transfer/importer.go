@@ -17,8 +17,20 @@ import (
 )
 
 // FollowingService is the subset of core/following.Service used by imports.
+//
+// FollowOptions 引数 (#1058) で CSV row 由来の withReplies 等の preference を
+// threading する。adapter layer で corefollowing.FollowOptions に bridge する
+// ため transfer package 単位で interface を切る (= core/following 直接依存を
+// 避ける)。
 type FollowingService interface {
-	Follow(followerID, followeeID string) (any, error)
+	Follow(followerID, followeeID string, opts FollowOptions) (any, error)
+}
+
+// FollowOptions mirrors the relevant subset of corefollowing.FollowOptions
+// that CSV imports need to threading. Currently only WithReplies is parsed
+// from the CSV row.
+type FollowOptions struct {
+	WithReplies bool
 }
 
 // BlockingService is the subset of core/blocking.Service used by imports.

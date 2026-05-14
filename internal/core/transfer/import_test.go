@@ -17,15 +17,17 @@ import (
 // --- Stubs for core service interfaces ---
 
 type fakeFollowingService struct {
-	calls [][2]string
-	err   error
+	calls    [][2]string
+	lastOpts transfer.FollowOptions
+	err      error
 }
 
-func (f *fakeFollowingService) Follow(followerID, followeeID string) (any, error) {
+func (f *fakeFollowingService) Follow(followerID, followeeID string, opts transfer.FollowOptions) (any, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	f.calls = append(f.calls, [2]string{followerID, followeeID})
+	f.lastOpts = opts
 	return nil, nil
 }
 
@@ -146,6 +148,33 @@ func TestImport_Following_AppliesEachRow(t *testing.T) {
 	require.Len(t, notifier.calls, 1)
 	assert.Equal(t, "importCompleted", string(notifier.calls[0].Type))
 	assert.Equal(t, "following", notifier.calls[0].Extra["importedEntity"])
+}
+
+// #1058: CSV row の withReplies=true が FollowOptions として Service に threading
+// される。fakeFollowingService が last call の opts を保存しているので、最後の
+// row の opts が WithReplies=true である事を検証する。
+func TestImport_Following_ThreadsWithReplies(t *testing.T) {
+	deps, user, fs, _, _, _ := newImporterDeps(t,
+		[]byte("bob,withReplies=true\n"))
+	imp := transfer.NewImporter(deps)
+	res, err := imp.Import(context.Background(), user.ID, transfer.ImportFollowing, "fid")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Applied)
+	require.Len(t, fs.calls, 1)
+	assert.True(t, fs.lastOpts.WithReplies, "FollowOptions.WithReplies should be propagated from CSV row")
+}
+
+// #1058: withReplies field を省略した CSV row では default false が threading
+// される (= upstream 仕様準拠)。
+func TestImport_Following_DefaultsWithRepliesFalseWhenOmitted(t *testing.T) {
+	deps, user, fs, _, _, _ := newImporterDeps(t,
+		[]byte("bob\n"))
+	imp := transfer.NewImporter(deps)
+	res, err := imp.Import(context.Background(), user.ID, transfer.ImportFollowing, "fid")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Applied)
+	require.Len(t, fs.calls, 1)
+	assert.False(t, fs.lastOpts.WithReplies, "missing withReplies field should default to false")
 }
 
 func TestImport_Following_SkipsUnknown(t *testing.T) {
@@ -338,6 +367,6 @@ func TestParseAcct_Malformed(t *testing.T) {
 func TestFollowingServiceAdapter(t *testing.T) {
 	// Adapter accepts nil receiver safely.
 	var a *transfer.FollowingServiceAdapter
-	_, err := a.Follow("f", "g")
+	_, err := a.Follow("f", "g", transfer.FollowOptions{})
 	assert.NoError(t, err)
 }

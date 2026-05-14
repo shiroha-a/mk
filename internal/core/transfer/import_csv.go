@@ -8,13 +8,19 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
-// importFollowing parses a CSV body of `acct` lines and applies a follow for
-// each. Remote users must already exist locally.
+// importFollowing parses a CSV body of `acct[,key=value...]` lines and applies
+// a follow for each. Remote users must already exist locally.
 //
-// upstream Misskey TS の CSV export 形式は `acct[,withReplies=bool]` を取るが、
-// mk-go の current 実装は first field (acct) のみ parse し withReplies は
-// default false で固定する。FollowOptions を threading する対応は #1056
-// follow-up で実装予定 (adapters.go の TODO comment 参照)。
+// Supported optional fields (key=value form, comma-separated after the acct):
+//   - `withReplies=true|false`: initial value for `following.withReplies`. Any
+//     other value (or absence) defaults to false (= upstream-equivalent loose
+//     parsing, matching `value === 'true'` semantics).
+//
+// upstream Misskey TS の export-following CSV は `acct,withReplies=BOOL` 2 fields
+// で row を出力する (ExportFollowingProcessorService.ts:98)。upstream の import
+// 側 (ImportFollowingProcessorService.ts:75) は `parts.slice(2)` で parse する
+// バグがあり 2-fields export と整合しないが、mk-go は `parts[1:]` から parse して
+// 実 export format と一致させる。
 func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult, error) {
 	if i.deps.Following == nil {
 		return nil, fmt.Errorf("following service not configured")
@@ -22,7 +28,7 @@ func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult
 	lines := scanCSV(body)
 	res := &ImportResult{Total: len(lines)}
 	for _, line := range lines {
-		acctStr := strings.TrimSpace(strings.SplitN(line, ",", 2)[0])
+		acctStr, opts := parseFollowingCSVLine(line)
 		target, err := i.resolveTargetUser(acctStr)
 		if err != nil || target == nil {
 			res.Skipped++
@@ -33,7 +39,7 @@ func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult
 			res.Skipped++
 			continue
 		}
-		if _, err := i.deps.Following.Follow(user.ID, target.ID); err != nil {
+		if _, err := i.deps.Following.Follow(user.ID, target.ID, opts); err != nil {
 			res.Skipped++
 			logSkip(ImportFollowing, acctStr, err)
 			continue
@@ -41,6 +47,30 @@ func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult
 		res.Applied++
 	}
 	return res, nil
+}
+
+// parseFollowingCSVLine splits a CSV row into its acct field and any optional
+// `key=value` fields, returning the acct and a populated FollowOptions.
+//
+// 不正な field (= `=` を含まない trailing fragment や未知の key) は silently
+// skip する (= upstream の `switch (key)` で default なしの挙動と一致)。
+func parseFollowingCSVLine(line string) (string, FollowOptions) {
+	parts := strings.Split(line, ",")
+	acct := strings.TrimSpace(parts[0])
+	var opts FollowOptions
+	for _, kv := range parts[1:] {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "withReplies":
+			// upstream Misskey TS の `value === 'true'` と同 semantics: 文字列
+			// "true" 以外は (空文字 / "false" / "invalid" 等) すべて false。
+			opts.WithReplies = v == "true"
+		}
+	}
+	return acct, opts
 }
 
 // importBlocking parses `acct` lines and applies a block per entry.

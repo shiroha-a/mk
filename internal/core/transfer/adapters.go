@@ -16,13 +16,14 @@ func NewFollowingServiceAdapter(svc *corefollowing.Service) *FollowingServiceAda
 	return &FollowingServiceAdapter{svc: svc}
 }
 
-// Follow delegates to core/following.Service.Follow with default options.
-// CSV import の `withReplies=bool` field 解析は未実装 (import_csv.go:11 の
-// godoc は intent 表記であって実装はまだ first field しか読まない)。実装する
-// 際は本 adapter シグネチャを拡張して FollowOptions を threading する。
-func (a *FollowingServiceAdapter) Follow(followerID, followeeID string) (any, error) {
+// Follow delegates to core/following.Service.Follow, bridging transfer's
+// FollowOptions to corefollowing.FollowOptions. CSV import 側で parse された
+// withReplies (#1058) を Service まで threading する。
+func (a *FollowingServiceAdapter) Follow(followerID, followeeID string, opts FollowOptions) (any, error) {
 	if a == nil || a.svc == nil {
 		return nil, nil
 	}
-	return a.svc.Follow(followerID, followeeID, corefollowing.FollowOptions{})
+	return a.svc.Follow(followerID, followeeID, corefollowing.FollowOptions{
+		WithReplies: opts.WithReplies,
+	})
 }

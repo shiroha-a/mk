@@ -16,7 +16,7 @@ func TestNewFollowingServiceAdapter_ConstructsWithRealType(t *testing.T) {
 	a := transfer.NewFollowingServiceAdapter(svc)
 	assert.NotNil(t, a)
 	// Follow on a nil inner returns (nil, nil) via the guard.
-	out, err := a.Follow("f", "g")
+	out, err := a.Follow("f", "g", transfer.FollowOptions{})
 	assert.NoError(t, err)
 	assert.Nil(t, out)
 }
