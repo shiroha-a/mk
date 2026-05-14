@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/model"
@@ -26,6 +27,24 @@ import (
 type ScheduledNoteDraftRepo interface {
 	FindByID(id string) (*model.NoteDraft, error)
 	Delete(id, userID string) (int64, error)
+}
+
+// ScheduledNoteLock provides app-level idempotency for scheduled note publish.
+// asynq の at-least-once delivery で job が二度 fire しても TryAcquire が
+// 1 度しか true を返さないことで重複 publish を防止する (#1045 Phase 2-A)。
+//
+// DB schema 不変な実装 (Redis SETNX + TTL 等) を選ぶことで upstream Misskey
+// TS の `note_draft` schema と完全互換のまま重複 publish 耐性を確保する。
+//
+// 実装は nil 可 (= 失敗時 / 未配線時は TryAcquire が常に true を返す挙動と
+// 等価で、Phase 1 の旧経路と互換)。production は redis-backed 実装を必ず
+// 配線するべき。
+type ScheduledNoteLock interface {
+	// TryAcquire returns (true, nil) when this caller is the first to claim
+	// the lock for draftID (= publish に進める), or (false, nil) when another
+	// retry already holds it (= silent skip). err != nil なら lock backend
+	// 自体の障害なので caller は retry に任せる。
+	TryAcquire(ctx context.Context, draftID string) (bool, error)
 }
 
 // ScheduledNoteUserRepo abstracts the single user lookup needed to call
@@ -47,11 +66,21 @@ type PostScheduledNoteProcessor struct {
 	drafts    ScheduledNoteDraftRepo
 	users     ScheduledNoteUserRepo
 	publisher ScheduledNotePublisher
+	// lock は idempotency 用 (#1045 Phase 2-A)。nil の場合は lock skip = Phase 1
+	// と同等の at-least-once 挙動 (= test fixture / 未配線 path)。
+	lock ScheduledNoteLock
 }
 
 // NewPostScheduledNoteProcessor wires the processor with its dependencies.
 func NewPostScheduledNoteProcessor(drafts ScheduledNoteDraftRepo, users ScheduledNoteUserRepo, publisher ScheduledNotePublisher) *PostScheduledNoteProcessor {
 	return &PostScheduledNoteProcessor{drafts: drafts, users: users, publisher: publisher}
+}
+
+// SetLock wires an app-level idempotency lock. nil disables (= Phase 1 互換)。
+// production では Redis-backed 実装を配線して重複 publish を防止する
+// (#1045 Phase 2-A)。
+func (p *PostScheduledNoteProcessor) SetLock(l ScheduledNoteLock) {
+	p.lock = l
 }
 
 // Handle implements the asynq task handler signature. It decodes the payload,
@@ -63,10 +92,28 @@ func NewPostScheduledNoteProcessor(drafts ScheduledNoteDraftRepo, users Schedule
 // will be retried automatically. A draft that vanished (= user deleted it
 // before fire time) is treated as a no-op (= return nil) — upstream behaves
 // the same way (`if (draft == null || ...) return`)。
-func (p *PostScheduledNoteProcessor) Handle(_ context.Context, task driver.Task) error {
+func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Task) error {
 	payload, err := queue.DecodePostScheduledNotePayload(task.Payload())
 	if err != nil {
 		return fmt.Errorf("decode payload: %w", err)
+	}
+	// idempotency lock 取得 (#1045 Phase 2-A)。asynq の at-least-once
+	// delivery で job が二度 fire した場合、最初の retry が lock を保持し、
+	// 後続 retry は false を得て silent skip する。lock 未配線なら常に
+	// true (= Phase 1 互換挙動、production race 受容)。
+	if p.lock != nil {
+		ok, lockErr := p.lock.TryAcquire(ctx, payload.NoteDraftID)
+		if lockErr != nil {
+			// lock backend error は retry に任せる (asynq が exponential
+			// backoff で再試行する)。返した error は queue 側で log される。
+			return fmt.Errorf("acquire scheduled note lock: %w", lockErr)
+		}
+		if !ok {
+			// 他 retry が処理中 / 完了済み。本 caller は何もしない。
+			slog.Info("scheduled note already being published, skipping",
+				"noteDraftId", payload.NoteDraftID)
+			return nil
+		}
 	}
 	draft, err := p.drafts.FindByID(payload.NoteDraftID)
 	if err != nil {
@@ -105,6 +152,26 @@ func (p *PostScheduledNoteProcessor) Handle(_ context.Context, task driver.Task)
 	if draft.ReactionAcceptance != nil {
 		ra := *draft.ReactionAcceptance
 		in.ReactionAcceptance = &ra
+	}
+	// Poll の復元 (#1045 Phase 2-D)。upstream
+	// `PostScheduledNoteProcessorService.process` と同 logic で:
+	//   - hasPoll=false なら Poll=nil (= 設定なし)
+	//   - hasPoll=true なら PollChoices / PollMultiple / PollExpiresAt または
+	//     PollExpiredAfter から `*time.Time` 期限を復元
+	//   - PollExpiredAfter (= 経過 ms) 優先、無ければ PollExpiresAt (= 絶対時刻)
+	if draft.HasPoll {
+		pollInput := &note.PollInput{
+			Choices:  draft.PollChoices,
+			Multiple: draft.PollMultiple,
+		}
+		if draft.PollExpiredAfter != nil {
+			exp := time.Now().Add(time.Duration(*draft.PollExpiredAfter) * time.Millisecond)
+			pollInput.ExpiresAt = &exp
+		} else if draft.PollExpiresAt != nil {
+			exp := *draft.PollExpiresAt
+			pollInput.ExpiresAt = &exp
+		}
+		in.Poll = pollInput
 	}
 	if _, err := p.publisher.Create(in); err != nil {
 		// publish 失敗時は asynq retry に任せ、draft 行はそのまま残す

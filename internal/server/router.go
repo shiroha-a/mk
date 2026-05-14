@@ -1120,6 +1120,10 @@ func (s *Server) setupRoutes() {
 	// note 化する。dependencies は既存 noteCreateService + userRepo + 上記
 	// noteDraftRepo を共有する。
 	postScheduledNoteProcessor := processors.NewPostScheduledNoteProcessor(noteDraftRepo, userRepo, noteCreateService)
+	// idempotency lock を Redis SETNX で配線 (#1045 Phase 2-A)。asynq の
+	// at-least-once delivery で job が二重 fire しても重複 publish を防ぐ。
+	postScheduledNoteProcessor.SetLock(processors.NewRedisScheduledNoteLock(
+		s.redis.Default, s.config.Redis.KeyPrefix(), 0))
 	s.queueServer.Handle(queue.TaskTypePostScheduledNote, postScheduledNoteProcessor.Handle)
 	api.POST("/notes/drafts/list", notesHandler.DraftsList, middleware.RequireAuth())
 	api.POST("/notes/drafts/create", notesHandler.DraftsCreate, middleware.RequireAuth())

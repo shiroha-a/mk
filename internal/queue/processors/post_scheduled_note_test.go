@@ -161,3 +161,129 @@ func TestPostScheduledNote_PayloadDecodeError(t *testing.T) {
 func timeFromMs(ms int64) time.Time {
 	return time.UnixMilli(ms)
 }
+
+// --- #1045 Phase 2-A: idempotency lock ---
+
+type stubLock struct {
+	acquired bool
+	err      error
+	calls    int
+}
+
+func (s *stubLock) TryAcquire(_ context.Context, _ string) (bool, error) {
+	s.calls++
+	return s.acquired, s.err
+}
+
+func TestPostScheduledNote_LockAcquired_PublishesOnce(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+	lock := &stubLock{acquired: true}
+	p.SetLock(lock)
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	assert.Equal(t, 1, lock.calls, "lock は 1 度だけ取得試行")
+	require.Len(t, pub.calls, 1, "占有成功なら publish")
+}
+
+func TestPostScheduledNote_LockBusy_SkipsPublish(t *testing.T) {
+	drafts := map[string]*model.NoteDraft{
+		"d1": {ID: "d1", UserID: "u1", IsActuallyScheduled: true},
+	}
+	p, _, pub := newProcessor(drafts, map[string]*model.User{"u1": {ID: "u1"}})
+	p.SetLock(&stubLock{acquired: false})
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	assert.Empty(t, pub.calls, "lock 占有失敗時は publish しない")
+}
+
+func TestPostScheduledNote_LockError_Retries(t *testing.T) {
+	drafts := map[string]*model.NoteDraft{
+		"d1": {ID: "d1", UserID: "u1", IsActuallyScheduled: true},
+	}
+	p, _, _ := newProcessor(drafts, map[string]*model.User{"u1": {ID: "u1"}})
+	p.SetLock(&stubLock{err: errors.New("redis down")})
+
+	err := p.Handle(context.Background(), taskFor("d1"))
+	require.Error(t, err, "lock backend error は retry 用に伝播")
+}
+
+// --- #1045 Phase 2-D: poll restoration ---
+
+// PollExpiredAfter (= 相対 ms) が指定された draft は publish 時に
+// `time.Now() + d ms` で expiresAt を計算する (= upstream
+// PostScheduledNoteProcessorService と同 logic)。
+func TestPostScheduledNote_WithPollExpiredAfter(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	expiredAfter := int64(60 * 60 * 1000) // 1 hour in ms
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+			HasPoll:          true,
+			PollChoices:      []string{"a", "b"},
+			PollMultiple:     true,
+			PollExpiredAfter: &expiredAfter,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	require.Len(t, pub.calls, 1)
+	require.NotNil(t, pub.calls[0].Poll, "poll が CreateInput に伝播")
+	assert.Equal(t, []string{"a", "b"}, pub.calls[0].Poll.Choices)
+	assert.True(t, pub.calls[0].Poll.Multiple)
+	require.NotNil(t, pub.calls[0].Poll.ExpiresAt)
+	// publish 時刻 + 1h が ExpiresAt になっている (= 数秒のズレを許容)
+	assert.WithinDuration(t, time.Now().Add(time.Hour), *pub.calls[0].Poll.ExpiresAt, 5*time.Second)
+}
+
+// PollExpiredAfter なし、PollExpiresAt のみ指定された draft は絶対時刻が
+// そのまま CreateInput.Poll.ExpiresAt に渡る。
+func TestPostScheduledNote_WithPollExpiresAtFallback(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	expiresAt := time.Now().Add(48 * time.Hour)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+			HasPoll:       true,
+			PollChoices:   []string{"yes", "no"},
+			PollExpiresAt: &expiresAt,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	require.Len(t, pub.calls, 1)
+	require.NotNil(t, pub.calls[0].Poll)
+	require.NotNil(t, pub.calls[0].Poll.ExpiresAt)
+	assert.WithinDuration(t, expiresAt, *pub.calls[0].Poll.ExpiresAt, time.Second)
+}
+
+// hasPoll=false の draft は CreateInput.Poll=nil で publish。
+func TestPostScheduledNote_NoPoll(t *testing.T) {
+	scheduledAt := timeFromMs(1234)
+	drafts := map[string]*model.NoteDraft{
+		"d1": {
+			ID: "d1", UserID: "u1", Visibility: "public",
+			IsActuallyScheduled: true, ScheduledAt: &scheduledAt,
+			HasPoll: false,
+		},
+	}
+	users := map[string]*model.User{"u1": {ID: "u1"}}
+	p, _, pub := newProcessor(drafts, users)
+
+	require.NoError(t, p.Handle(context.Background(), taskFor("d1")))
+	require.Len(t, pub.calls, 1)
+	assert.Nil(t, pub.calls[0].Poll, "hasPoll=false の draft は Poll 設定なし")
+}
