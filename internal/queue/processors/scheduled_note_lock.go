@@ -2,6 +2,7 @@ package processors
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -46,16 +47,21 @@ func NewRedisScheduledNoteLock(client *redis.Client, keyPrefix string, ttl time.
 // (= another retry holds the lock), or (_, err) when Redis itself is
 // unreachable so the asynq retry path can back off. SetArgs を使う理由は
 // go-redis 公式の `SetNX(key, val, ttl)` が deprecated 化されたため。
+//
+// err の判別は: nil (= 占有成功) / redis.Nil (= 占有失敗) / それ以外 (=
+// backend 障害)。`out == "OK"` の文字列マッチではなく err の有無で判定する
+// ことで go-redis の将来的な戻り値型変更にも追従できる。
 func (l *RedisScheduledNoteLock) TryAcquire(ctx context.Context, draftID string) (bool, error) {
-	out, err := l.redis.SetArgs(ctx, l.keyPrefix+draftID, "1", redis.SetArgs{Mode: "NX", TTL: l.ttl}).Result()
-	if err != nil {
-		// redis.Nil = key already exists (= 競合) → 占有失敗、retry でも
-		// 結果は同じ。
-		if err == redis.Nil {
-			return false, nil
-		}
+	_, err := l.redis.SetArgs(ctx, l.keyPrefix+draftID, "1", redis.SetArgs{Mode: "NX", TTL: l.ttl}).Result()
+	switch {
+	case err == nil:
+		// SET NX 成功 = この caller が初占有者。
+		return true, nil
+	case errors.Is(err, redis.Nil):
+		// key 既存 = 他 retry が保持中。silent skip させる。
+		return false, nil
+	default:
+		// Redis backend 障害 / context cancel など。asynq retry に任せる。
 		return false, err
 	}
-	// SET NX が成功すると "OK" を返す。それ以外は失敗扱い。
-	return out == "OK", nil
 }
