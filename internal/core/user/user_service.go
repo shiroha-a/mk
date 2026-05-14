@@ -83,6 +83,8 @@ type Service struct {
 	// selfHostname は SearchByUsernameAndHost で「host==self-hostname → local
 	// 限定」を判定するために保持する (upstream UserSearchService と互換、
 	// #1064)。空文字なら remap を skip して "." 一致のみ local 限定にする。
+	// SetSelfHostname 内で lowercase 正規化して格納する (search 側 per-call
+	// の ToLower を省くため)。
 	selfHostname string
 }
 
@@ -145,8 +147,12 @@ func (s *Service) SetRemoteUserResolver(r RemoteUserResolver) {
 // SearchByUsernameAndHost can map `host==self-hostname` to "local only" the
 // same way upstream UserSearchService does (#1064). Empty string disables the
 // remap (only the literal `"."` keeps the local-only shortcut).
+//
+// 入力は setter 内で lowercase 正規化して保持する。search の per-call ホット
+// パスで毎回 strings.ToLower するのを避けるため (autocomplete は per-keystroke
+// で呼ばれる)。
 func (s *Service) SetSelfHostname(hostname string) {
-	s.selfHostname = hostname
+	s.selfHostname = strings.ToLower(hostname)
 }
 
 // UserWithProfile bundles a user and its profile for handlers.
@@ -316,7 +322,9 @@ func (s *Service) SearchByUsernameAndHost(username string, host *string, limit i
 		switch {
 		case h == "":
 			// falsy → host filter なし。hostNorm は nil のままにする。
-		case h == "." || (s.selfHostname != "" && h == strings.ToLower(s.selfHostname)):
+		case h == "." || (s.selfHostname != "" && h == s.selfHostname):
+			// selfHostname は SetSelfHostname で lowercase 済みなので
+			// 直接比較できる (#1064)。
 			localOnly = true
 		default:
 			hostNorm = &h

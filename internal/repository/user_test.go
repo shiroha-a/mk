@@ -474,7 +474,9 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		assert.False(t, ids[other.ID])
 	})
 
-	t.Run("host=remote returns only that host", func(t *testing.T) {
+	t.Run("host=remote narrows to host prefix match", func(t *testing.T) {
+		// `remote.example` (exact) を渡すと same-host の user のみ hit。
+		// `other.example` は prefix が異なるので除外。
 		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, false, 10)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
@@ -483,6 +485,22 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		}
 		assert.False(t, ids[local.ID])
 		assert.True(t, ids[remote.ID])
+		assert.False(t, ids[other.ID])
+	})
+
+	// #1064 contract: localOnly=true は host pointer を無視して host IS NULL の
+	// user のみを返す。Service レイヤは self-hostname / "." remap 時に
+	// hostNorm=nil を渡すので production 経路では併存しないが、interface
+	// contract として明示する regression guard。
+	t.Run("localOnly=true ignores host pointer", func(t *testing.T) {
+		out, err := repo.SearchByUsernameAndHost("hosttest", &remoteHost, true, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[local.ID], "localOnly=true should include local user even with host=remoteHost")
+		assert.False(t, ids[remote.ID], "localOnly=true should exclude remote even with matching host pointer")
 		assert.False(t, ids[other.ID])
 	})
 

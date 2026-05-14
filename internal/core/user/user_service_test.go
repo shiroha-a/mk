@@ -942,6 +942,9 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 	})
 
 	// #1064: host が自 hostname と一致したら local 限定に remap される。
+	// 各 selfHostname 関連 subtest は冒頭で明示的に初期状態を Set し、
+	// `t.Cleanup` の実行順序に依存しない (= 個別 `-run` 実行や test reorder
+	// 耐性のため)。
 	t.Run("host=self-hostname returns only local", func(t *testing.T) {
 		svc.SetSelfHostname("my.example")
 		t.Cleanup(func() { svc.SetSelfHostname("") })
@@ -964,7 +967,9 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 	})
 
 	// selfHostname 未設定なら "." 以外の input は host filter として扱われる。
+	// 前の subtest の cleanup に依存せず冒頭で明示的に "" を Set する。
 	t.Run("self-hostname unset leaves other inputs as host filter", func(t *testing.T) {
+		svc.SetSelfHostname("")
 		other := "my.example"
 		out, err := svc.SearchByUsernameAndHost("alice", &other, 10)
 		require.NoError(t, err)
@@ -973,7 +978,7 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 		assert.Empty(t, out)
 	})
 
-	t.Run("host=specific narrows to that host", func(t *testing.T) {
+	t.Run("host=remoteHost narrows to host prefix match", func(t *testing.T) {
 		out, err := svc.SearchByUsernameAndHost("alice", &remoteHost, 10)
 		require.NoError(t, err)
 		require.Len(t, out, 1)

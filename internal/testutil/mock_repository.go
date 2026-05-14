@@ -201,8 +201,14 @@ func (m *MockUserRepository) SearchByUsername(query string, limit, offset int, o
 //   - localOnly=false, host=nil → host filter なし (= local + remote 両方)
 //   - localOnly=false, host=ptr → u.Host が *host の prefix match (case-insensitive)
 //
-// upstream `lower("host") LIKE lower(?) || '%'` を string prefix で
-// 模倣する。
+// upstream `lower("host") LIKE lower(?) || '%'` を string prefix で模倣する。
+//
+// なお mock は production 側の SQL LIKE wildcard escape (#1054 / #1061 で
+// `%` / `_` / `\` を literal 化する `escapeSQLLikePattern`) を**実装しない**。
+// wildcard escape semantics は repository 側 testcontainer test
+// (`TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape`) で
+// 検証する分担にしている。mock を使う上位 (service / handler) test では
+// wildcard を含む host を渡さないこと。
 func (m *MockUserRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
 	var matches []*model.User
 	hostPrefix := ""
