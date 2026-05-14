@@ -22,6 +22,11 @@ func viewerIDFromCtx(ctx stream.ChannelContext) string {
 
 // noteFilter provides client-controlled filtering for timeline channels.
 // タイムラインチャンネルのconnectパラメータで指定されるフィルタ条件。
+//
+// #1063 以降、reply の表示可否は noteFilter からは判定しない (= per-channel
+// な upstream Misskey TS 互換ロジックに分離した、replyShouldEmit 参照)。
+// `WithReplies` field は upstream `local-timeline` / `hybrid-timeline` の
+// connect param と互換性を保つために残しつつ、shouldEmit からは参照しない。
 type noteFilter struct {
 	WithRenotes bool `json:"withRenotes"`
 	WithReplies bool `json:"withReplies"`
@@ -46,18 +51,32 @@ func parseNoteFilter(params json.RawMessage) noteFilter {
 	return f
 }
 
-// notePayload is the minimal structure needed for filtering decisions.
-// hardMutedWords (#787) も同 struct で見るので user / cw を含める。
-type notePayload struct {
-	UserID   string   `json:"userId"`
-	Text     *string  `json:"text"`
-	CW       *string  `json:"cw"`
-	RenoteID *string  `json:"renoteId"`
-	ReplyID  *string  `json:"replyId"`
-	FileIDs  []string `json:"fileIds"`
+// replyMeta is the embedded `note.reply` slice. upstream Misskey TS の
+// NoteEntityService.pack が `reply.userId` / `reply.visibility` を埋めてくる
+// 前提に揃える (#1063)。embed が欠如している場合、reply gate は 3 escape
+// hatch のうち "reply.userId" を参照する 2 つを判定できないので
+// conservative に drop する側に倒す。
+type replyMeta struct {
+	UserID     string `json:"userId"`
+	Visibility string `json:"visibility"`
 }
 
-// shouldEmit returns true if the note passes all filter conditions.
+// notePayload is the minimal structure needed for filtering decisions.
+// hardMutedWords (#787) も同 struct で見るので user / cw を含める。
+// #1063 で reply 関連を replyMeta 経由で取り込み、reply gate で参照する。
+type notePayload struct {
+	UserID   string     `json:"userId"`
+	Text     *string    `json:"text"`
+	CW       *string    `json:"cw"`
+	RenoteID *string    `json:"renoteId"`
+	ReplyID  *string    `json:"replyId"`
+	FileIDs  []string   `json:"fileIds"`
+	Reply    *replyMeta `json:"reply,omitempty"`
+}
+
+// shouldEmit returns true if the note passes non-reply filter conditions
+// (renote / file / hardmute). reply の表示可否は channel ごとに異なる
+// semantics で別途 replyShouldEmit が判定する (#1063)。
 //
 // hardMuteRules (#787) には viewer の user_profile.hardMutedWords (jsonb) を
 // そのまま渡す。空 / nil なら hard mute は no-op。viewerID は self skip 用、
@@ -72,11 +91,6 @@ func (f *noteFilter) shouldEmit(payload []byte, hardMuteRules []byte, viewerID s
 	// 純リノート（テキストなし + renoteIdあり + ファイルなし）をフィルタ
 	// timeline_filter.goのisPureRenoteと一致させる
 	if !f.WithRenotes && note.Text == nil && note.RenoteID != nil && len(note.FileIDs) == 0 {
-		return false
-	}
-
-	// リプライをフィルタ
-	if !f.WithReplies && note.ReplyID != nil {
 		return false
 	}
 
@@ -99,5 +113,124 @@ func (f *noteFilter) shouldEmit(payload []byte, hardMuteRules []byte, viewerID s
 		}
 	}
 
+	return true
+}
+
+// replyGateMode controls how replyShouldEmit decides emission per timeline
+// channel. upstream Misskey TS の各 channel impl と semantics を揃える
+// (#1063)。
+type replyGateMode int
+
+const (
+	// replyGateHome is the homeTimeline semantics. snapshot が
+	// `note.userId` の withReplies=true を持つなら通常 pass (visibility が
+	// followers なら follow 関係を別途 check)、それ以外は 3 escape hatch のみ
+	// (reply.userId === me / note.userId === me / reply.userId === note.userId)。
+	// upstream `home-timeline.ts` には withReplies connect param が無いので、
+	// paramWithReplies は無視する。
+	replyGateHome replyGateMode = iota
+
+	// replyGateHybrid is the hybridTimeline semantics. replyGateHome と同じ
+	// だが connect param `withReplies` を followee.withReplies と OR で評価する
+	// (upstream `hybrid-timeline.ts`)。
+	replyGateHybrid
+
+	// replyGateLocal is the localTimeline semantics. upstream `local-timeline`
+	// は authenticated viewer 限定で reply を gate し、`!this.withReplies && !
+	// this.following[note.userId]?.withReplies` のとき 3 escape hatch を判定する
+	// (= anonymous は anyway pass-through、つまり global と同じ)。
+	replyGateLocal
+
+	// replyGateGlobal disables reply filtering entirely. upstream
+	// `global-timeline` は reply 制御を持たない。
+	replyGateGlobal
+)
+
+// replyShouldEmit decides whether to emit `payload` given the channel-mode
+// semantics, the viewer's followee snapshot, and the connect param
+// `withReplies`. payload は packed NoteEntity の JSON。
+//
+// snapshot は ChannelContext.FollowingSnapshot() の返り値 (followeeID →
+// withReplies)。anonymous / lookup 未配線時は nil。nil 時は `snap[X]` が
+// 必ず false / "key 無し" を返すので gate は 3 escape hatch のみで動く。
+//
+// paramWithReplies は connect 時の `withReplies` boolean。upstream で param
+// を持たない home-timeline では呼び出し側が常に false を渡す。
+//
+// JSON unmarshal 失敗時は pass-through。これは shouldEmit と同じ defensive
+// 設計で、payload が壊れているなら gate しないほうが「全 user に表示しない」
+// より副作用が小さい。
+func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, paramWithReplies bool, mode replyGateMode) bool {
+	if mode == replyGateGlobal {
+		return true
+	}
+	var note notePayload
+	if err := json.Unmarshal(payload, &note); err != nil {
+		return true
+	}
+	if note.ReplyID == nil {
+		return true
+	}
+
+	// upstream `isMe = this.user!.id === note.userId` の escape hatch。
+	// 自分の reply は followee snapshot や withReplies 設定に依存せず常に pass。
+	isMe := viewerID != "" && note.UserID == viewerID
+
+	// localTimeline は anonymous viewer に対して reply gate を一切かけない
+	// (upstream `if (note.reply && this.user && ...)` の `this.user` 条件)。
+	if mode == replyGateLocal && viewerID == "" {
+		return true
+	}
+
+	if isMe {
+		return true
+	}
+
+	// reply embed が欠如している場合は reply.userId 参照ができないので
+	// "reply.userId === me" / "reply.userId === note.userId" の判定が
+	// 不能。conservative に drop して fanout 側 / DB 側で正しく拾われる
+	// (= リロード時に表示される) フォールバックに倒す。
+	if note.Reply == nil {
+		return false
+	}
+
+	replyToMe := viewerID != "" && note.Reply.UserID == viewerID
+	selfThread := note.Reply.UserID == note.UserID
+
+	var followeeWithReplies bool
+	if snap != nil {
+		followeeWithReplies = snap[note.UserID]
+	}
+
+	switch mode {
+	case replyGateHome, replyGateHybrid:
+		// upstream `home-timeline.ts` / `hybrid-timeline.ts` の reply gate。
+		// home は paramWithReplies を見ず、hybrid のみ followee.withReplies と
+		// OR で評価する点が違うので mode で switch する。
+		paramOR := mode == replyGateHybrid && paramWithReplies
+		if followeeWithReplies || paramOR {
+			// followers visibility への reply は follow 関係を別途 check
+			// (upstream の "自分のフォローしていないユーザーの visibility:
+			// followers な投稿への返信は弾く" branch)。snap に reply.userId
+			// が含まれていない (= follow していない) かつ自分宛でもないなら drop。
+			if note.Reply.Visibility == "followers" && !replyToMe {
+				if _, follows := snap[note.Reply.UserID]; !follows {
+					return false
+				}
+			}
+			return true
+		}
+		// 残り 2 escape hatch (replyToMe / selfThread)。isMe は上で抜けている。
+		return replyToMe || selfThread
+
+	case replyGateLocal:
+		// local-timeline は anonymous で reply gate 不要、authenticated 時のみ
+		// `!this.withReplies && !following[note.userId].withReplies` → 3 escape
+		// hatch のみで pass。
+		if !followeeWithReplies && !paramWithReplies {
+			return replyToMe || selfThread
+		}
+		return true
+	}
 	return true
 }

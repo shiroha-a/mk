@@ -303,3 +303,17 @@ func TestConnection_HardMuteRules(t *testing.T) {
 		t.Fatalf("HardMuteRules = %q, want %q", got, rules)
 	}
 }
+
+// #1063: SetFollowingSnapshot / FollowingSnapshot round-trip。
+func TestConnection_FollowingSnapshot(t *testing.T) {
+	c := NewConnection("c1", nil, nil)
+	if got := c.FollowingSnapshot(); got != nil {
+		t.Fatalf("default FollowingSnapshot = %v, want nil", got)
+	}
+	snap := map[string]bool{"u1": true, "u2": false}
+	c.SetFollowingSnapshot(snap)
+	got := c.FollowingSnapshot()
+	if len(got) != 2 || !got["u1"] || got["u2"] {
+		t.Fatalf("FollowingSnapshot = %v, want %v", got, snap)
+	}
+}

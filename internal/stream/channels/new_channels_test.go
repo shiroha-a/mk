@@ -355,12 +355,17 @@ func TestHashtag_FilteredRenote(t *testing.T) {
 	assert.Empty(t, ctx.sentType)
 }
 
-func TestChannelTimeline_FilteredReply(t *testing.T) {
+// #1063: ChannelTimeline (Misskey の channel 機能 timeline) は upstream
+// `channel.ts` に reply gate を持たない。withReplies connect param に関わらず
+// reply は pass-through する。旧テストは「withReplies=false で reply を drop」
+// する drift 挙動を assertion していたので新 semantics に揃える。
+func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
 	ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`))
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
-	assert.Empty(t, ctx.sentType)
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 func TestRoleTimeline_FilteredRenote(t *testing.T) {
@@ -412,14 +417,17 @@ func TestLocalTimeline_FilterPureRenote(t *testing.T) {
 	require.Len(t, ctx.sentType, 1)
 }
 
-func TestGlobalTimeline_FilterReply(t *testing.T) {
+// #1063: upstream `global-timeline.ts` は reply gate を持たない。reply は
+// 常に pass-through する。旧テストは drift 挙動の assertion だったので新
+// semantics に揃える。
+func TestGlobalTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewGlobalTimeline(ctx)
 	ch.Init(json.RawMessage(`{"withReplies":false}`))
 
-	// リプライはフィルタされる（デフォルトでfalse）
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
-	assert.Empty(t, ctx.sentType)
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 func TestHomeTimeline_WithFiles(t *testing.T) {

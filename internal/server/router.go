@@ -1690,6 +1690,11 @@ func (s *Server) setupRoutes() {
 	// 1 度だけ user_profile を引き、以降の publish では cache された rules を
 	// 各 timeline channel が参照する。
 	streamManager.SetHardMuteLookup(&hardMuteLookupAdapter{userRepo: userRepo})
+	// followeeSnapshot (#1063): home/hybrid/local timeline channel が reply gate
+	// に使う「followeeID -> withReplies」map を接続確立時に 1 回だけ fetch する。
+	// 失敗 / anonymous は nil 返却で degrade — channel は 3 escape hatch のみで
+	// 動く (= 旧来の "全 reply drop" よりは upstream 互換に近い)。
+	streamManager.SetFollowingSnapshotLookup(&followingSnapshotAdapter{repo: followingRepo})
 	// hardMutedWords 変更時に reload event を受け取って該当 connection の
 	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
@@ -2467,6 +2472,51 @@ func (a *hardMuteLookupAdapter) HardMutedWordsForUser(userID string) []byte {
 		return nil
 	}
 	return []byte(profile.HardMutedWords)
+}
+
+// followingSnapshotAdapter bridges FollowingRepository to
+// stream.FollowingSnapshotLookup so the streaming Manager can snapshot the
+// viewer's followee list at connection setup (#1063). 戻り値は followeeID →
+// withReplies の map で、home/hybrid/local timeline の reply gate に使う。
+//
+// fetch は ListFollowing をページネーションで全件読みだす。フォロー数 N が
+// 巨大な場合 (10K+) のメモリ / DB 負荷はあるが、upstream Misskey TS も同等
+// な map を connection ごとに保持しているので drop-in 互換性回復のためには
+// 必要なコスト。pageSize は upstream の channel-following-service と同じく
+// 200 / 上限は 10000 で cap し、それ以上 follow している power user は
+// snapshot から外れて escape hatch のみ動作する degrade に倒す (= 旧来の
+// "全 reply drop" よりは upstream 寄り)。
+type followingSnapshotAdapter struct {
+	repo repository.FollowingRepository
+}
+
+func (a *followingSnapshotAdapter) FollowingSnapshotForUser(userID string) map[string]bool {
+	if a.repo == nil || userID == "" {
+		return nil
+	}
+	const pageSize = 200
+	const maxEntries = 10000
+	snap := make(map[string]bool)
+	offset := 0
+	for {
+		rows, err := a.repo.ListFollowing(userID, pageSize, offset)
+		if err != nil {
+			return snap
+		}
+		if len(rows) == 0 {
+			return snap
+		}
+		for _, r := range rows {
+			snap[r.FolloweeID] = r.WithReplies
+			if len(snap) >= maxEntries {
+				return snap
+			}
+		}
+		if len(rows) < pageSize {
+			return snap
+		}
+		offset += pageSize
+	}
 }
 
 // hardMutePublisherAdapter bridges PubSubService to i.HardMutePublisher so

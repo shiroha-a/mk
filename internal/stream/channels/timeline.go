@@ -30,8 +30,15 @@ func (c *LocalTimelineChannel) Init(params json.RawMessage) error {
 }
 
 // OnRedisEvent forwards a JSON-encoded note payload as a `note` event.
+// reply の表示可否は upstream `local-timeline.ts` に揃え (#1063)、認証済み
+// viewer に対してのみ followee.withReplies / connect param withReplies /
+// 3 escape hatch を OR で評価する。
 func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+	viewerID := viewerIDFromCtx(c.ctx)
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateLocal) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -61,8 +68,16 @@ func (c *GlobalTimelineChannel) Init(params json.RawMessage) error {
 	c.ctx.Subscribe("globalTimeline")
 	return nil
 }
+
+// OnRedisEvent forwards a JSON-encoded note payload as a `note` event.
+// upstream `global-timeline.ts` は reply に関する gate を一切持たない (#1063)
+// ので、ここでも replyShouldEmit を呼ばずに pass-through 相当の挙動になる。
 func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+	viewerID := viewerIDFromCtx(c.ctx)
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateGlobal) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -99,8 +114,17 @@ func (c *HomeTimelineChannel) Init(params json.RawMessage) error {
 	return nil
 }
 
+// OnRedisEvent forwards a JSON-encoded note payload as a `note` event.
+// reply 表示可否は upstream `home-timeline.ts` 互換で、followee の
+// withReplies snapshot + 3 escape hatch (isMe / replyToMe / selfThread)
+// で決める (#1063)。upstream には connect param withReplies が無い ので、
+// replyShouldEmit の paramWithReplies には false を渡す。
 func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+	viewerID := viewerIDFromCtx(c.ctx)
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), false, replyGateHome) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -141,8 +165,16 @@ func (c *HybridTimelineChannel) Init(params json.RawMessage) error {
 	return nil
 }
 
+// OnRedisEvent forwards a JSON-encoded note payload as a `note` event.
+// upstream `hybrid-timeline.ts` の reply gate は homeTimeline と同じ形だが、
+// connect param `withReplies` を followee.withReplies と OR して評価する点
+// が違う (#1063)。
 func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+	viewerID := viewerIDFromCtx(c.ctx)
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateHybrid) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
