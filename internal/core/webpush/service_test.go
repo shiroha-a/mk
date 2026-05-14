@@ -41,7 +41,9 @@ func (f *fakeEnqueuer) EnqueueInbox(_ context.Context, _ queue.InboxPayload) err
 func (f *fakeEnqueuer) EnqueuePostScheduledNote(_ queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
 	return nil
 }
-func (f *fakeEnqueuer) Close() error { return nil }
+func (f *fakeEnqueuer) ClearScheduledNote(_ string) error { return nil }
+func (f *fakeEnqueuer) SupportsScheduledNote() bool       { return true }
+func (f *fakeEnqueuer) Close() error                      { return nil }
 
 func TestService_PushNotification_Enqueues(t *testing.T) {
 	enq := &fakeEnqueuer{}

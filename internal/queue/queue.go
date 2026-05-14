@@ -12,6 +12,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -59,6 +60,19 @@ type Enqueuer interface {
 	EnqueueSystemWebhook(ctx context.Context, payload WebhookPayload) error
 	EnqueueInbox(ctx context.Context, payload InboxPayload) error
 	EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts ...driver.EnqueueOption) error
+	// ClearScheduledNote は noteDraftId に該当する全 delayed task を queue
+	// から削除する。upstream Misskey TS の `NoteDraftService.clearSchedule`
+	// と同 pattern で線形探索 (= page-by-page で全 delayed task を走査し、
+	// payload.NoteDraftID 一致を DeleteTask)。caller (NoteDraftService.update
+	// / delete) が re-schedule / unschedule する際に呼ぶ (#1045 Phase 2-C)。
+	ClearScheduledNote(draftID string) error
+	// SupportsScheduledNote は driver が scheduled note 機能 (= delayed
+	// enqueue + clearSchedule の確実な動作) を提供するかを返す。mk-go の
+	// asynq driver は task ID 仕様の制約で確実な clearSchedule が困難な
+	// ため false。mkq driver は true (#1045 Phase 2-C)。handler はこの
+	// flag が false なら scheduled note 作成を `TOO_MANY_SCHEDULED_NOTES`
+	// で拒否する。
+	SupportsScheduledNote() bool
 	Close() error
 }
 
@@ -71,6 +85,14 @@ type Enqueuer interface {
 // は実質ゼロ。
 type Client struct {
 	inner driver.Client
+	// inspector は ClearScheduledNote 等の delayed task 走査経路で使う
+	// (#1045 Phase 2-C)。enqueue 経路は inner.Client のみ使用、inspector
+	// は lazy に Driver から取得しキャッシュする。
+	inspector driver.Inspector
+	// supportsScheduledNote は scheduled note 機能が確実に動作する driver
+	// (= mkq) で wire 時に true、それ以外 (= asynq) は false。handler の
+	// scheduled note 経路で capability gate として参照する (#1045 Phase 2-C)。
+	supportsScheduledNote bool
 
 	mu       sync.RWMutex
 	policies PolicyMap
@@ -78,7 +100,27 @@ type Client struct {
 
 // NewClient constructs a Client backed by the supplied driver.
 func NewClient(d driver.Driver) *Client {
-	return &Client{inner: d.Client()}
+	return &Client{
+		inner:     d.Client(),
+		inspector: d.Inspector(),
+	}
+}
+
+// SetSupportsScheduledNote toggles the driver capability flag exposed via
+// `SupportsScheduledNote`. wire 時に driver kind を見て router で設定する
+// (= mkq → true, asynq → false)。default は false (= 安全側)。
+func (c *Client) SetSupportsScheduledNote(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.supportsScheduledNote = b
+}
+
+// SupportsScheduledNote returns the capability flag. handler はこの flag が
+// false なら scheduled note 作成を `TOO_MANY_SCHEDULED_NOTES` で拒否する。
+func (c *Client) SupportsScheduledNote() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.supportsScheduledNote
 }
 
 // SetPolicy registers a runtime Policy for queueName. EnqueueDeliver
@@ -133,6 +175,61 @@ func (c *Client) EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts
 	body := mustMarshal(payload)
 	merged := append([]driver.EnqueueOption{driver.WithQueue(QueueName)}, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypePostScheduledNote, body, merged...)
+}
+
+// clearScheduledNotePageSize は ClearScheduledNote の line scan で 1 度に
+// fetch する task 件数。inspector の page 単位走査で memory pressure を
+// 抑えつつ大量 delayed task の場合も全件走査できる pragmatic な閾値。
+const clearScheduledNotePageSize = 100
+
+// ClearScheduledNote scans the deliver queue's delayed bucket for tasks
+// matching noteDraftId == draftID and deletes them. inspector が未配線の
+// 場合は no-op (= test fixture / wire 未配線 path)。upstream の線形探索
+// と同 pattern (`getJobs(['delayed', 'waiting', 'active'])` → match →
+// `job.remove()`) を asynq/mkq の inspector API で再現する。
+//
+// 削除 failure は集約して error として返す。partial success 時も err 経路
+// に流すことで caller (DraftsUpdate / DraftsDelete) が log を残し handler
+// 戻り値で 500 を返せるようにする。
+func (c *Client) ClearScheduledNote(draftID string) error {
+	if c.inspector == nil {
+		return nil
+	}
+	page := 1
+	var firstErr error
+	for {
+		tasks, err := c.inspector.ListScheduledTasks(QueueName, page, clearScheduledNotePageSize)
+		if err != nil {
+			return fmt.Errorf("list scheduled tasks: %w", err)
+		}
+		if len(tasks) == 0 {
+			break
+		}
+		for _, t := range tasks {
+			if t.Type != TaskTypePostScheduledNote {
+				continue
+			}
+			payload, derr := DecodePostScheduledNotePayload(t.Payload)
+			if derr != nil {
+				// 破損 payload は skip (caller の問題ではなく、開発時に
+				// payload 型を変えた際の遷移期 noise を握り潰す)。
+				continue
+			}
+			if payload.NoteDraftID != draftID {
+				continue
+			}
+			if derr := c.inspector.DeleteTask(QueueName, t.ID); derr != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("delete task %s: %w", t.ID, derr)
+				}
+			}
+		}
+		if len(tasks) < clearScheduledNotePageSize {
+			break
+		}
+		page++
+	}
+	return firstErr
 }
 
 // EnqueueExport puts an export task on the queue.

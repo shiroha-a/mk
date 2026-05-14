@@ -66,8 +66,13 @@ type Handler struct {
 
 // ScheduledNoteEnqueuer abstracts the delayed enqueue path used by
 // drafts/create. Implemented by *queue.Client (= EnqueuePostScheduledNote)。
+// SupportsScheduledNote returns whether the underlying driver provides
+// reliable schedule cancel (= mkq yes, asynq no) so handler can degrade
+// to "feature disabled" on asynq (#1045 Phase 2-C)。
 type ScheduledNoteEnqueuer interface {
 	EnqueuePostScheduledNote(payload queue.PostScheduledNotePayload, opts ...driver.EnqueueOption) error
+	ClearScheduledNote(draftID string) error
+	SupportsScheduledNote() bool
 }
 
 // SetScheduledNoteEnqueuer wires a delayed queue client used by drafts/create

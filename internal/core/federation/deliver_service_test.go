@@ -47,6 +47,8 @@ func (s *stubEnqueuer) Close() error { return nil }
 func (s *stubEnqueuer) EnqueuePostScheduledNote(_ queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
 	return nil
 }
+func (s *stubEnqueuer) ClearScheduledNote(_ string) error { return nil }
+func (s *stubEnqueuer) SupportsScheduledNote() bool       { return true }
 
 func newDeliverService(t *testing.T) (*federation.DeliverService, *stubEnqueuer, *testutil.MockUserRepository, *testutil.MockFollowingRepository, *testutil.MockUserKeypairRepository) {
 	t.Helper()

@@ -420,6 +420,51 @@ func TestClient_EnqueuePostScheduledNote(t *testing.T) {
 	assert.Equal(t, queue.TaskTypePostScheduledNote, tasks[0].Type)
 }
 
+func TestClient_ClearScheduledNote_RemovesMatchingTasks(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushTestRedis(t)
+	c := queue.NewClient(newDriver())
+	defer func() { _ = c.Close() }()
+
+	require.NoError(t, c.EnqueuePostScheduledNote(
+		queue.PostScheduledNotePayload{NoteDraftID: "target"},
+		driver.WithProcessIn(time.Hour),
+	))
+	require.NoError(t, c.EnqueuePostScheduledNote(
+		queue.PostScheduledNotePayload{NoteDraftID: "other"},
+		driver.WithProcessIn(time.Hour),
+	))
+
+	require.NoError(t, c.ClearScheduledNote("target"))
+
+	insp := asynq.NewInspector(redisOpt())
+	defer func() { _ = insp.Close() }()
+	tasks, err := insp.ListScheduledTasks(queue.QueueName)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1, "target だけ消えて other は残る")
+	payload, err := queue.DecodePostScheduledNotePayload(tasks[0].Payload)
+	require.NoError(t, err)
+	assert.Equal(t, "other", payload.NoteDraftID)
+}
+
+// inspector 未配線 (= test 用 fake driver や zero-value Client) でも
+// ClearScheduledNote は no-op で error しない。
+func TestClient_ClearScheduledNote_NilInspectorIsNoop(t *testing.T) {
+	// queue.NewClient 経由ではなく直接 zero-value Client を組んで
+	// inspector=nil の状態を作る (= production では起こらないが defensive)。
+	var c queue.Client
+	assert.NoError(t, c.ClearScheduledNote("x"))
+}
+
+func TestClient_SupportsScheduledNote_FlagToggle(t *testing.T) {
+	var c queue.Client
+	assert.False(t, c.SupportsScheduledNote(), "default は false")
+	c.SetSupportsScheduledNote(true)
+	assert.True(t, c.SupportsScheduledNote())
+	c.SetSupportsScheduledNote(false)
+	assert.False(t, c.SupportsScheduledNote())
+}
+
 func TestClient_EnqueueImport(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)

@@ -333,8 +333,10 @@ func TestPollsRecommendation(t *testing.T) {
 
 // scheduledEnqueueStub captures EnqueuePostScheduledNote calls for assertion.
 type scheduledEnqueueStub struct {
-	calls []queue.PostScheduledNotePayload
-	err   error
+	calls    []queue.PostScheduledNotePayload
+	cleared  []string
+	err      error
+	disabled bool // true で SupportsScheduledNote が false を返す (= asynq driver の simulate 用)
 }
 
 func (s *scheduledEnqueueStub) EnqueuePostScheduledNote(p queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
@@ -343,6 +345,18 @@ func (s *scheduledEnqueueStub) EnqueuePostScheduledNote(p queue.PostScheduledNot
 	}
 	s.calls = append(s.calls, p)
 	return nil
+}
+
+func (s *scheduledEnqueueStub) ClearScheduledNote(draftID string) error {
+	s.cleared = append(s.cleared, draftID)
+	return nil
+}
+
+// SupportsScheduledNote: default true (= mkq driver と同 capability)。
+// `disabled=true` を set すると false を返し asynq driver の挙動を simulate
+// する (= handler 側 capability gate test 用)。
+func (s *scheduledEnqueueStub) SupportsScheduledNote() bool {
+	return !s.disabled
 }
 
 func futureMs(d time.Duration) int64 {
@@ -407,4 +421,93 @@ func TestDraftsCreate_ScheduledAtWithoutActuallyScheduled(t *testing.T) {
 	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Empty(t, enq.calls, "isActuallyScheduled=false なら enqueue されない")
+}
+
+// driver capability が false (= asynq driver) のときは scheduled note 作成を
+// TOO_MANY_SCHEDULED_NOTES で reject する (#1045 Phase 2-C)。
+func TestDraftsCreate_AsynqDriverDisablesScheduled(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{disabled: true}
+	h.SetScheduledNoteEnqueuer(enq)
+	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+	assert.Empty(t, enq.calls, "capability false なら enqueue されない")
+}
+
+// --- #1045 Phase 2-C: DraftsUpdate / DraftsDelete scheduled note 経路 ---
+
+// scheduledAt を変更すると旧 delayed task を clear して新時刻で re-enqueue。
+func TestDraftsUpdate_RescheduleClearsAndReenqueues(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	oldT := time.Now().Add(time.Hour)
+	repo.drafts["d1"] = &model.NoteDraft{
+		ID: "d1", UserID: "u1", IsActuallyScheduled: true, ScheduledAt: &oldT,
+	}
+	body := fmt.Sprintf(`{"draftId":"d1","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(2*time.Hour))
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"d1"}, enq.cleared, "旧 task を clear")
+	require.Len(t, enq.calls, 1, "新 task を 1 度 enqueue")
+	assert.Equal(t, "d1", enq.calls[0].NoteDraftID)
+}
+
+// isActuallyScheduled=false への切り替えは clear のみ (= 再 enqueue しない)。
+func TestDraftsUpdate_UnscheduleClearsOnly(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	t1 := time.Now().Add(time.Hour)
+	repo.drafts["d1"] = &model.NoteDraft{
+		ID: "d1", UserID: "u1", IsActuallyScheduled: true, ScheduledAt: &t1,
+	}
+	body := `{"draftId":"d1","isActuallyScheduled":false}`
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"d1"}, enq.cleared, "clear は呼ばれる")
+	assert.Empty(t, enq.calls, "isActuallyScheduled=false で再 enqueue は走らない")
+}
+
+// scheduled 関連の field が無い update では clear / enqueue 経路は走らない
+// (= 旧挙動互換、scheduledAt 既存 draft への text 編集等を阻害しない)。
+func TestDraftsUpdate_NonScheduledChangeDoesNotTouchQueue(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	t1 := time.Now().Add(time.Hour)
+	repo.drafts["d1"] = &model.NoteDraft{
+		ID: "d1", UserID: "u1", IsActuallyScheduled: true, ScheduledAt: &t1,
+	}
+	body := `{"draftId":"d1","text":"updated"}`
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, enq.cleared)
+	assert.Empty(t, enq.calls)
+}
+
+// asynq driver では update での scheduled 切替も reject (= capability gate)。
+func TestDraftsUpdate_AsynqDriverDisablesScheduled(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{disabled: true}
+	h.SetScheduledNoteEnqueuer(enq)
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1"}
+	body := fmt.Sprintf(`{"draftId":"d1","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+}
+
+// Delete 経由でも旧 delayed task を clear する (= unschedule された draft の
+// processor 早期 fire を防ぐ best-effort)。
+func TestDraftsDelete_ClearsScheduledNote(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1"}
+	rec := postDraft(h.DraftsDelete, `{"draftId":"d1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"d1"}, enq.cleared)
 }

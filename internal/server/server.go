@@ -203,6 +203,11 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	}
 	queueClient := queue.NewClient(queueDriver)
 	applyClientPolicies(queueClient, cfg)
+	// scheduled note 機能の driver capability (= mkq のみ確実に動作、asynq
+	// は task ID 仕様の制約で clearSchedule が困難なため無効化)。空文字列
+	// は mkq に正規化される config 経路だが defensive に判定する
+	// (#1045 Phase 2-C)。
+	queueClient.SetSupportsScheduledNote(cfg.JobQueueDriver == "" || cfg.JobQueueDriver == "mkq")
 	queueServer := queue.NewServer(queueDriver)
 	queueScheduler := queue.NewScheduler(queueDriver)
 	queueInspector := queue.NewInspector(queueDriver)

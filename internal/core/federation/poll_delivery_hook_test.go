@@ -40,7 +40,9 @@ func (r *recordingEnqueuer) EnqueueInbox(context.Context, queue.InboxPayload) er
 func (r *recordingEnqueuer) EnqueuePostScheduledNote(queue.PostScheduledNotePayload, ...driver.EnqueueOption) error {
 	return nil
 }
-func (r *recordingEnqueuer) Close() error { return nil }
+func (r *recordingEnqueuer) ClearScheduledNote(string) error { return nil }
+func (r *recordingEnqueuer) SupportsScheduledNote() bool     { return true }
+func (r *recordingEnqueuer) Close() error                    { return nil }
 
 func newHookSetup(t *testing.T) (*PollDeliveryHook, *recordingEnqueuer, *testutil.MockUserRepository, *testutil.MockUserKeypairRepository, id.Generator) {
 	t.Helper()

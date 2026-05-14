@@ -69,6 +69,13 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 		scheduledAt = &t
 	}
 	if req.IsActuallyScheduled {
+		// asynq driver は scheduled note 機能を確実に support できないため
+		// (= clearSchedule の task ID 仕様制約)、機能無効化する。upstream
+		// 互換の \`TOO_MANY_SCHEDULED_NOTES\` で reject し、frontend には
+		// 上限到達と同じ UX を返す (#1045 Phase 2-C)。
+		if h.scheduledNoteEnqueuer != nil && !h.scheduledNoteEnqueuer.SupportsScheduledNote() {
+			return apierr.JSONTooManyScheduledNotes(c)
+		}
 		if scheduledAt == nil {
 			return c.JSON(http.StatusBadRequest, apierr.ScheduledAtRequired())
 		}
@@ -133,17 +140,22 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 }
 
 // DraftsUpdate handles POST /api/notes/drafts/update.
+// scheduledAt / isActuallyScheduled の変更を upstream `notes/drafts/update`
+// と同 logic で取り扱い、変更があれば旧 delayed task を clear → 必要なら
+// 新 scheduledAt で再 enqueue する (#1045 Phase 2-C)。
 func (h *Handler) DraftsUpdate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	if h.draftRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		DraftID    string   `json:"draftId"`
-		Text       *string  `json:"text"`
-		CW         *string  `json:"cw"`
-		Visibility string   `json:"visibility"`
-		FileIDs    []string `json:"fileIds"`
+		DraftID             string   `json:"draftId"`
+		Text                *string  `json:"text"`
+		CW                  *string  `json:"cw"`
+		Visibility          string   `json:"visibility"`
+		FileIDs             []string `json:"fileIds"`
+		ScheduledAt         *int64   `json:"scheduledAt"`
+		IsActuallyScheduled *bool    `json:"isActuallyScheduled"`
 	}
 	if err := c.Bind(&req); err != nil || req.DraftID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("draftId is required."))
@@ -164,7 +176,50 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	if req.FileIDs != nil {
 		draft.FileIDs = req.FileIDs
 	}
+	// scheduled 関連 field の変更検出 (#1045 Phase 2-C)。リクエストに
+	// scheduledAt / isActuallyScheduled が含まれている場合のみ削除 + 再
+	// enqueue する。それ以外は既存 draft 状態を維持。
+	scheduleChanged := false
+	now := time.Now()
+	if req.ScheduledAt != nil {
+		t := time.UnixMilli(*req.ScheduledAt)
+		draft.ScheduledAt = &t
+		scheduleChanged = true
+	}
+	if req.IsActuallyScheduled != nil {
+		draft.IsActuallyScheduled = *req.IsActuallyScheduled
+		scheduleChanged = true
+	}
+	if scheduleChanged && draft.IsActuallyScheduled {
+		// 新しく schedule する / 既に scheduled だった draft の scheduledAt が
+		// 変わった場合は validation + capability check が必要。
+		if h.scheduledNoteEnqueuer != nil && !h.scheduledNoteEnqueuer.SupportsScheduledNote() {
+			return apierr.JSONTooManyScheduledNotes(c)
+		}
+		if draft.ScheduledAt == nil {
+			return c.JSON(http.StatusBadRequest, apierr.ScheduledAtRequired())
+		}
+		if !draft.ScheduledAt.After(now) {
+			return c.JSON(http.StatusBadRequest, apierr.ScheduledAtMustBeInFuture())
+		}
+	}
 	_ = h.draftRepo.Update(draft)
+	// schedule 変更時は旧 delayed task を clear して、新 scheduledAt が
+	// 立っていれば新 task を enqueue する。clear は best-effort で fail
+	// しても draft 更新自体は成功で返す (= log のみ、frontend は draft
+	// 更新の永続化を確認できる)。
+	if scheduleChanged && h.scheduledNoteEnqueuer != nil {
+		_ = h.scheduledNoteEnqueuer.ClearScheduledNote(draft.ID)
+		if draft.IsActuallyScheduled && draft.ScheduledAt != nil {
+			delay := draft.ScheduledAt.Sub(now)
+			if err := h.scheduledNoteEnqueuer.EnqueuePostScheduledNote(
+				queue.PostScheduledNotePayload{NoteDraftID: draft.ID},
+				driver.WithProcessIn(delay),
+			); err != nil {
+				return apierr.JSONInternalError(c)
+			}
+		}
+	}
 	return c.JSON(http.StatusOK, packDraft(draft, h.idGen))
 }
 
@@ -192,6 +247,13 @@ func (h *Handler) DraftsDelete(c echo.Context) error {
 	}
 	if rowsAffected == 0 {
 		return c.JSON(http.StatusNotFound, apierr.NoSuchNoteDraft())
+	}
+	// delete に成功したら旧 delayed task も best-effort で clear する
+	// (#1045 Phase 2-C)。upstream は `clearSchedule(draftId)` を fire
+	// and forget で呼ぶ。clear 失敗は 204 を阻害しない (= asynq retry
+	// で task が fire してもprocessor 側で draft 不在 silent skip で済む)。
+	if h.scheduledNoteEnqueuer != nil {
+		_ = h.scheduledNoteEnqueuer.ClearScheduledNote(req.DraftID)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
