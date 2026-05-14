@@ -464,6 +464,66 @@ func TestUserRepository_SearchByUsernameAndHost(t *testing.T) {
 		}
 		assert.False(t, ids[local.ID], "suspended user must not appear in search")
 	})
+
+	// #1054: host を途中まで入力した (= prefix) 状態でも remote user が hit する。
+	// frontend MkAutocomplete が `@alice@rem` のような prefix で API を叩くので、
+	// `host = "rem"` で `remote.example` の user が hit しないと autocomplete
+	// で remote user 候補が一切出ない。
+	t.Run("host prefix match hits remote users", func(t *testing.T) {
+		prefix := "rem"
+		out, err := repo.SearchByUsernameAndHost("hosttest", &prefix, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[remote.ID], "host=rem prefix should hit remote.example user")
+		assert.False(t, ids[other.ID], "host=rem prefix should not hit other.example user")
+		assert.False(t, ids[local.ID], "host prefix should not hit local user (host IS NULL)")
+	})
+}
+
+// #1054: SQL LIKE wildcard (`%` / `_`) は host 引数中に含まれた場合 escape
+// されて literal として扱われる。これにより悪意 / 偶発の wildcard 注入で
+// 意図しない user が hit するのを防ぐ。
+func TestUserRepository_SearchByUsernameAndHost_LikeWildcardEscape(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	// `_` literal を含む host を持つ remote user
+	withUnderscore := insertTestUser(t, "u_we_u", "wildtest_u")
+	defer cleanupUser(t, withUnderscore.ID)
+	require.NoError(t, repo.UpdateUser(withUnderscore.ID, map[string]any{"host": "with_underscore.example"}))
+
+	// `a` を 1 文字目に持つ別 host (= SQL LIKE で `_` wildcard 1 文字 match の
+	// 場合に意図せず hit してしまう candidate)
+	withoutUnderscore := insertTestUser(t, "u_we_a", "wildtest_a")
+	defer cleanupUser(t, withoutUnderscore.ID)
+	require.NoError(t, repo.UpdateUser(withoutUnderscore.ID, map[string]any{"host": "witha.example"}))
+
+	t.Run("underscore is escaped to literal", func(t *testing.T) {
+		// `with_` を prefix として渡す。escape 無しだと `_` は 1 文字 wildcard
+		// として扱われ `witha.example` (= `_` の位置に `a` がある) も hit する。
+		// escape 有りなら literal `_` として扱われ、`with_underscore.example`
+		// のみ hit する。
+		prefix := "with_"
+		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, 10)
+		require.NoError(t, err)
+		ids := make(map[string]bool, len(out))
+		for _, u := range out {
+			ids[u.ID] = true
+		}
+		assert.True(t, ids[withUnderscore.ID], "literal `_` should match `with_underscore.example`")
+		assert.False(t, ids[withoutUnderscore.ID], "literal `_` should NOT match `witha.example` (= regression guard for `_` wildcard escape)")
+	})
+
+	t.Run("percent is escaped to literal", func(t *testing.T) {
+		// `%` を含む host name は実運用ではほぼ無いが、escape されることを
+		// confirm するため: `%` を渡しても全 host にマッチする wildcard と
+		// しては解釈されず、literal `%` を含む host のみ hit する (= 0 件)。
+		prefix := "%"
+		out, err := repo.SearchByUsernameAndHost("wildtest", &prefix, 10)
+		require.NoError(t, err)
+		assert.Empty(t, out, "literal `%` should not match any actual host (= regression guard for `%` wildcard escape)")
+	})
 }
 
 func TestUserRepository_UpdateUser(t *testing.T) {

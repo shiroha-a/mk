@@ -240,12 +240,24 @@ func (r *userRepository) SearchByUsername(query string, limit, offset int, origi
 // SearchByUsernameAndHost narrows username prefix matches to a specific host
 // (or local users when host is nil). #766 fix: SearchByUsername の origin
 // 軸では「特定 host への絞り込み」ができないので分離した sibling method。
-// host comparison は lower(host) = lower(?) で case-insensitive。
+//
+// host comparison は upstream Misskey TS の UserSearchService と一致させて
+// `lower(host) LIKE lower(?) || '%'` の prefix match (#1054)。frontend の
+// MkAutocomplete は `@alice@rem` のように host を途中まで入力した状態で
+// API を叩くため、完全一致だと remote user 候補が一切出ない。
 //
 // upstream Misskey TS の UserSearchService.searchByUsernameAndHost も同様に
 // usernameLower prefix match + host case-insensitive prefix match を適用し、
 // `isSuspended = FALSE` で suspended user を除外する (#878)。mk-go も同 filter
 // を共有して drop-in 互換を維持する。
+//
+// LIKE wildcard (`%` / `_`) の escape:
+//   - host 側: escapeSQLLikePattern で escape (#1054)。意図しない wildcard
+//     match を防ぐため。
+//   - username 側: 現状 escape していない (= 既存挙動)。username は upstream
+//     仕様で `[a-zA-Z0-9_]` だが `_` も使えるため `_` を含む username の
+//     prefix 検索は意図しない match を起こす可能性がある。本 PR scope outside
+//     なので将来別 issue で対応。
 //
 // なお upstream TS は logged-in caller に対して updatedAt > / <= threshold の
 // 4-query 優先順位 (followee active/inactive + non-followee active/inactive)
@@ -259,7 +271,7 @@ func (r *userRepository) SearchByUsernameAndHost(query string, host *string, lim
 		Where("\"usernameLower\" LIKE ?", query+"%").
 		Where("\"isSuspended\" = false")
 	if host != nil {
-		q = q.Where("lower(\"host\") = lower(?)", *host)
+		q = q.Where(`lower("host") LIKE lower(?) ESCAPE '\'`, escapeSQLLikePattern(*host)+"%")
 	} else {
 		q = q.Where("\"host\" IS NULL")
 	}
