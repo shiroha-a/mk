@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -96,7 +97,14 @@ func (h *Handler) packInviteTickets(rows []*model.RegistrationTicket) []map[stri
 			ids = append(ids, id)
 		}
 		users, err := h.userRepo.FindManyByIDs(ids)
-		if err == nil {
+		if err != nil {
+			// graceful degrade: bulk fetch 失敗時は全 createdBy / usedBy が
+			// null で返って frontend は旧 fallback (= "system" / "不明") に倒れる
+			// が、admin list 自体は表示できる方が UX 優先。operator が原因を
+			// 追える程度に Warn を残す (= silent fallback の観測性確保)。
+			slog.Warn("admin/invite: bulk fetch user failed for invite pack",
+				"err", err, "count", len(ids))
+		} else {
 			for _, u := range users {
 				userMap[u.ID] = u
 			}
