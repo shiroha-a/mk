@@ -96,11 +96,26 @@ func (p *PostScheduledNoteProcessor) SetLock(l ScheduledNoteLock) {
 }
 
 // SetNotifier wires the notification dispatcher used to fire
-// \`scheduledNotePosted\` / \`scheduledNotePostFailed\` on publish completion
+// `scheduledNotePosted` / `scheduledNotePostFailed` on publish completion
 // (#1045 Phase 2-B)。nil disables (= notification skip)、production では
 // core/notification.Service を配線する。
 func (p *PostScheduledNoteProcessor) SetNotifier(n ScheduledNoteNotifier) {
 	p.notifier = n
+}
+
+// logNotificationErr classifies a notification dispatch error and emits the
+// appropriate log level. graceful shutdown / deadline cancel は normal な
+// 運用シナリオなので Warn に出さず Debug に格下げする (= log noise を抑え、
+// 真の notification backend 障害だけ Warn で観測する、#1045 Phase 2-B
+// follow-up)。
+func logNotificationErr(action string, draftID string, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		slog.Debug("scheduled note notification skipped during shutdown",
+			"action", action, "noteDraftId", draftID, "err", err)
+		return
+	}
+	slog.Warn("scheduled note notification failed",
+		"action", action, "noteDraftId", draftID, "err", err)
 }
 
 // Handle implements the asynq task handler signature. It decodes the payload,
@@ -209,13 +224,12 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 			}); nerr != nil {
 				// notification 失敗は publish error 経路に影響させない (= retry
 				// 中に多重通知を避ける best-effort)。
-				slog.Warn("scheduled note postFailed notification failed",
-					"noteDraftId", payload.NoteDraftID, "err", nerr)
+				logNotificationErr("postFailed", payload.NoteDraftID, nerr)
 			}
 		}
 		return fmt.Errorf("publish scheduled note: %w", err)
 	}
-	// publish 成功通知 (#1045 Phase 2-B)。upstream は \`noteId\` を引数で渡し、
+	// publish 成功通知 (#1045 Phase 2-B)。upstream は `noteId` を引数で渡し、
 	// frontend が note を embed して表示する。
 	if p.notifier != nil {
 		if _, nerr := p.notifier.Create(ctx, notification.CreateInput{
@@ -223,8 +237,7 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 			Type:       notification.TypeScheduledNotePosted,
 			NoteID:     publishedNote.ID,
 		}); nerr != nil {
-			slog.Warn("scheduled note posted notification failed",
-				"noteDraftId", payload.NoteDraftID, "err", nerr)
+			logNotificationErr("posted", payload.NoteDraftID, nerr)
 		}
 	}
 	if _, err := p.drafts.Delete(draft.ID, draft.UserID); err != nil {

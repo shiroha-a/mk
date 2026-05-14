@@ -374,6 +374,18 @@ func TestPostScheduledNote_NotifierErrorDoesNotBreakPublish(t *testing.T) {
 	assert.Len(t, pub.calls, 1, "publish 自体は走る")
 }
 
+// logNotificationErr は graceful shutdown / deadline 系 error を Debug に
+// 格下げし、通常 error は Warn のまま残す。panic しないことを smoke 確認
+// (= slog の出力先は別管理なので、ここでは分岐のカバレッジ確保が目的)。
+func TestLogNotificationErr_ShutdownErrorsAreDebug(t *testing.T) {
+	logNotificationErr("posted", "d1", context.Canceled)
+	logNotificationErr("postFailed", "d1", context.DeadlineExceeded)
+}
+
+func TestLogNotificationErr_GenericErrorsAreWarn(t *testing.T) {
+	logNotificationErr("posted", "d1", errors.New("boom"))
+}
+
 // notifier 未配線 (= Phase 2-A 互換挙動) でも publish 経路は通常動作する。
 func TestPostScheduledNote_NoNotifierConfigured(t *testing.T) {
 	scheduledAt := timeFromMs(1234)
