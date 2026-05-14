@@ -229,7 +229,21 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 		if len(rows) == 0 {
 			return
 		}
+		// reply note は follower の \`following.withReplies\` 設定で push 制御
+		// する (#1047 / upstream 互換)。
+		//   - 通常 note (= replyId nil) → 全 follower に push
+		//   - self-thread (= replyUserId = userId) → 全 follower に push (= TL
+		//     filter で `replyUserId = note.userId` 経路で残るので fanout でも
+		//     全 push する semantics)
+		//   - その他 reply (= 他人宛 reply) → withReplies=true の follower のみ push
+		// これにより「他人 A → 他人 B reply」が default で他 follower の TL に
+		// 流れず、Misskey TS の `following.withReplies` setting と完全互換に。
+		isReply := n.ReplyID != nil
+		isSelfThread := isReply && n.ReplyUserID != nil && *n.ReplyUserID == n.UserID
 		for _, f := range rows {
+			if isReply && !isSelfThread && !f.WithReplies {
+				continue
+			}
 			h.pushWithLimit(ctx, HomeTimelineName(f.FollowerID), n.ID, homeCap)
 			if h.publisher != nil {
 				h.publisher.PublishNote("homeTimeline:"+f.FollowerID, n, author)

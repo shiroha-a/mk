@@ -49,7 +49,14 @@ func isPureRenote(n *model.Note) bool {
 // viewerID is the currently authenticated user's ID (empty string if anonymous).
 func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*model.Note {
 	withRenotes := boolDefault(f.WithRenotes, true)
-	withReplies := boolDefault(f.WithReplies, false)
+	// withReplies は in-memory filter では参照しない (#1047)。upstream Misskey
+	// TS の Home TL Redis cache 経路 (`fanoutTimelineEndpointService.timeline`)
+	// と同じく、cache に乗っている note は filter なしで pass-through する。
+	// reply の表示制御は fanout 側で `following.withReplies` を見て push を
+	// 制御するため、cache に乗る note 集合自体が既に正しい。
+	// DB fallback (= cache miss) では repo.applyTimelineFilter で
+	// `replyUserId = note.userId` (self-thread のみ残す) upstream 互換 filter
+	// が走る。
 	includeMyRenotes := boolDefault(f.IncludeMyRenotes, true)
 	includeRenotedMyNotes := boolDefault(f.IncludeRenotedMyNotes, true)
 	includeLocalRenotes := boolDefault(f.IncludeLocalRenotes, true)
@@ -113,12 +120,10 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 				continue
 			}
 		}
-		// withReplies=false: 他人への返信を除外 (自分への返信は残す)
-		if !withReplies && n.ReplyID != nil {
-			if viewerID == "" || (n.ReplyUserID != nil && *n.ReplyUserID != viewerID) {
-				continue
-			}
-		}
+		// withReplies=false 時の Redis cache 経路は filter なし pass-through
+		// (#1047)。upstream Misskey TS の Home TL と同じく、cache に乗る note
+		// 集合は fanout 側で既に正しい (= follower の following.withReplies
+		// 設定で push 制御済) ので、in-memory で再 filter しない。
 		if isPureRenote(n) {
 			// includeMyRenotes=false: 自分がした pure renote を除外
 			if !includeMyRenotes && viewerID != "" && n.UserID == viewerID {

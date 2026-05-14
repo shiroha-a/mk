@@ -558,12 +558,20 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}')`)
 	}
 	if f.WithReplies != nil && !*f.WithReplies {
-		if f.ViewerID != "" {
-			// 自分への返信は残す
-			q = q.Where(`("replyId" IS NULL OR "replyUserId" = ?)`, f.ViewerID)
-		} else {
-			q = q.Where(`"replyId" IS NULL`)
-		}
+		// upstream Misskey TS Home TL と完全一致: `replyId IS NULL` か、
+		// reply の場合は self-thread (= replyUserId = note.userId) のみ残す
+		// (#1047)。
+		//
+		// 自分が他人にした reply (= userId=self / replyUserId=other) はこの
+		// DB fallback では除外される。ただし production の cache hit 経路では
+		// fanout (= OnNoteCreated) が自分の HomeTL stream に push しているので
+		// 通常運用は自分の reply も TL に表示される (= Redis 経路は pass-through)。
+		// DB fallback は cache miss / 古い note の case のみ走るので user 体験
+		// への影響は限定的、その時点で upstream と完全互換に倒す。
+		//
+		// 「他人 → 他人 reply」を per-followee で表示するかは fanout 層で
+		// `following.withReplies` を見て push 制御する (= upstream 互換)。
+		q = q.Where(`("replyId" IS NULL OR "replyUserId" = "note"."userId")`)
 	}
 	if f.IncludeMyRenotes != nil && !*f.IncludeMyRenotes && f.ViewerID != "" {
 		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "userId" = ?)`, f.ViewerID)

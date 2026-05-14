@@ -78,19 +78,21 @@ func TestApplyFilter_WithRenotes_Default(t *testing.T) {
 	assert.Len(t, out, 2)
 }
 
-func TestApplyFilter_WithReplies_False(t *testing.T) {
+// #1047: ApplyFilter (in-memory) は withReplies を参照しない pass-through。
+// reply の表示制御は fanout 側で `following.withReplies` を見て push を
+// 制御するため、cache に乗った note は全部 TL に表示される (= upstream の
+// fanoutTimelineEndpointService.timeline と同 logic)。
+func TestApplyFilter_WithReplies_PassThrough(t *testing.T) {
 	notes := []*model.Note{
 		makeNote("1"),
-		makeNote("2", withReply),     // 他人への返信 → 除外
+		makeNote("2", withReply),     // 他人への返信 → cache 経路では残る
 		makeNote("3", withReplySelf), // 自分への返信 → 残る
 	}
 	out := ApplyFilter(notes, "viewer", TimelineFilter{WithReplies: boolPtr(false)})
-	assert.Len(t, out, 2)
-	assert.Equal(t, "1", out[0].ID)
-	assert.Equal(t, "3", out[1].ID)
+	assert.Len(t, out, 3, "in-memory filter は withReplies を参照しない (#1047)")
 }
 
-func TestApplyFilter_WithReplies_True(t *testing.T) {
+func TestApplyFilter_WithReplies_TruePassThrough(t *testing.T) {
 	notes := []*model.Note{
 		makeNote("1"),
 		makeNote("2", withReply),
@@ -99,14 +101,15 @@ func TestApplyFilter_WithReplies_True(t *testing.T) {
 	assert.Len(t, out, 2)
 }
 
-func TestApplyFilter_WithReplies_NoViewer(t *testing.T) {
+// viewer 不在 (= anonymous) でも reply filter は cache 経路で適用しない。
+// upstream の noteFilter にも anonymous 向けの reply filter は無い。
+func TestApplyFilter_WithReplies_NoViewerPassThrough(t *testing.T) {
 	notes := []*model.Note{
 		makeNote("1"),
 		makeNote("2", withReply),
 	}
-	// viewerなし + withReplies=false → 全返信除外
 	out := ApplyFilter(notes, "", TimelineFilter{WithReplies: boolPtr(false)})
-	assert.Len(t, out, 1)
+	assert.Len(t, out, 2, "anonymous でも in-memory filter は適用しない (#1047)")
 }
 
 func TestApplyFilter_IncludeMyRenotes_False(t *testing.T) {

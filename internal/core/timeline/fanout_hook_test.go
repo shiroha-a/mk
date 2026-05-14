@@ -121,6 +121,91 @@ func TestFanoutHook_FanoutsToFollowers(t *testing.T) {
 	}
 }
 
+// 他人宛 reply は WithReplies=true の follower にだけ push される (#1047)。
+// upstream Misskey TS の `following.withReplies` setting と互換にするため、
+// fanout 段階で per-follower flag を見て push を制御する。
+func TestFanoutHook_ReplyToOtherSkipsFollowersWithoutWithReplies(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	// follower1 は withReplies=false (default), follower2 は true
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: false}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "follower2", FolloweeID: "author", WithReplies: true}
+
+	noteID := idGen.Generate(time.Now())
+	replyID := "reply-target"
+	otherUser := "other-user"
+	n := &model.Note{
+		ID:          noteID,
+		UserID:      "author",
+		Visibility:  model.NoteVisibilityPublic,
+		ReplyID:     &replyID,
+		ReplyUserID: &otherUser, // 他人宛 reply
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// follower1 (withReplies=false) は受け取らない
+	out, err := fanout.Get(ctx, HomeTimelineName("follower1"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "follower1 should not receive reply when WithReplies=false")
+
+	// follower2 (withReplies=true) は受け取る
+	out, err = fanout.Get(ctx, HomeTimelineName("follower2"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "follower2 should receive reply when WithReplies=true")
+
+	// author 本人の home には常に push される
+	out, err = fanout.Get(ctx, HomeTimelineName("author"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "author's own home should always receive own reply")
+}
+
+// self-thread (replyUserId == userId) は WithReplies 設定に関わらず全 follower
+// に push される (#1047)。upstream の TL filter で `replyUserId = note.userId`
+// 経路で残るので fanout でも全 push する semantics。
+func TestFanoutHook_SelfThreadReplyFanoutsToAllFollowers(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: false}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "follower2", FolloweeID: "author", WithReplies: true}
+
+	noteID := idGen.Generate(time.Now())
+	replyID := "reply-target"
+	selfID := "author"
+	n := &model.Note{
+		ID:          noteID,
+		UserID:      "author",
+		Visibility:  model.NoteVisibilityPublic,
+		ReplyID:     &replyID,
+		ReplyUserID: &selfID, // self-thread
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// withReplies=false でも self-thread は受け取る
+	for _, fid := range []string{"follower1", "follower2"} {
+		out, err := fanout.Get(ctx, HomeTimelineName(fid), "", "", 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{noteID}, out, "follower %s should receive self-thread reply regardless of WithReplies", fid)
+	}
+}
+
+// 通常 note (reply 無し) は WithReplies 設定に関わらず全 follower に push される。
+func TestFanoutHook_NonReplyFanoutsToAllFollowers(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: false}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "follower2", FolloweeID: "author", WithReplies: true}
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	for _, fid := range []string{"follower1", "follower2"} {
+		out, err := fanout.Get(ctx, HomeTimelineName(fid), "", "", 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{noteID}, out, "follower %s should receive non-reply note regardless of WithReplies", fid)
+	}
+}
+
 // failingFollowingRepo errors out on ListFollowers to exercise the warning path.
 type failingFollowingRepo struct {
 	*testutil.MockFollowingRepository
