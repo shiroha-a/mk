@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -69,9 +70,52 @@ func (h *Handler) InviteCreate(c echo.Context) error {
 
 // packInviteTickets transforms RegistrationTicket rows into the
 // Misskey-compatible InviteCodeEntityService.pack shape.
+//
+// createdBy / usedBy field を `nil` で hardcode していた旧実装では frontend
+// が「system」「不明（メール認証待ち）」の fallback 表示に倒れていた
+// (#1048 / #1049)。upstream `InviteCodeEntityService.packMany` と同じく、
+// 全 row 分の createdById / usedById を 1 度の FindManyByIDs で bulk fetch
+// (= N+1 回避) し、UserLite DTO で pack する。
 func (h *Handler) packInviteTickets(rows []*model.RegistrationTicket) []map[string]any {
-	// Misskey 本家 InviteCodeEntityService.pack と同じ形にする。
-	// createdAt は aidx ID から抽出、used は usedAt の有無で導出する。
+	// step 1: createdBy / usedBy で参照される全 user ID を集約 (dedup)。
+	idSet := make(map[string]struct{})
+	for _, t := range rows {
+		if t.CreatedByID != nil {
+			idSet[*t.CreatedByID] = struct{}{}
+		}
+		if t.UsedByID != nil {
+			idSet[*t.UsedByID] = struct{}{}
+		}
+	}
+	// step 2: 1 度の bulk fetch で全 user を取得。userRepo 未配線 path (=
+	// test fixture) では空 map で fallback、旧挙動と互換に振る舞う。
+	userMap := make(map[string]*model.User, len(idSet))
+	if len(idSet) > 0 && h.userRepo != nil {
+		ids := make([]string, 0, len(idSet))
+		for id := range idSet {
+			ids = append(ids, id)
+		}
+		users, err := h.userRepo.FindManyByIDs(ids)
+		if err == nil {
+			for _, u := range users {
+				userMap[u.ID] = u
+			}
+		}
+	}
+	// step 3: pack。userMap に hit すれば UserLite DTO、miss なら null。
+	// upstream は relations join で `createdBy` 自体が null の case (=
+	// 既に user が削除された ticket) と区別しない。本実装も同 trade-off。
+	packUser := func(id *string) any {
+		if id == nil {
+			return nil
+		}
+		u, ok := userMap[*id]
+		if !ok {
+			return nil
+		}
+		return entity.PackUserLite(u)
+	}
+
 	out := make([]map[string]any, 0, len(rows))
 	for _, t := range rows {
 		var createdAt *string
@@ -93,8 +137,8 @@ func (h *Handler) packInviteTickets(rows []*model.RegistrationTicket) []map[stri
 			"code":        t.Code,
 			"expiresAt":   expiresAt,
 			"createdAt":   createdAt,
-			"createdBy":   nil,
-			"usedBy":      nil,
+			"createdBy":   packUser(t.CreatedByID),
+			"usedBy":      packUser(t.UsedByID),
 			"usedAt":      usedAt,
 			"used":        t.UsedAt != nil,
 			"createdById": t.CreatedByID,

@@ -336,6 +336,75 @@ func TestInviteList_FilterUnused(t *testing.T) {
 	assert.Equal(t, false, rows[0]["used"])
 }
 
+// #1048 / #1049: createdBy / usedBy が hardcoded nil で返って frontend で
+// "system" / "不明（メール認証待ち）" 表示に倒れていた regression の seal。
+// userRepo を wire して bulk fetch + UserLite pack 経路を確認する。
+func TestInviteList_PacksCreatedByAndUsedBy(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	adminName := "alice admin"
+	signupName := "bob signed up"
+	userRepo.Users["u_admin"] = &model.User{ID: "u_admin", Username: "alice", Name: &adminName}
+	userRepo.Users["u_used"] = &model.User{ID: "u_used", Username: "bob", Name: &signupName}
+
+	repo := testutil.NewMockRegistrationTicketRepository()
+	createdBy := "u_admin"
+	usedBy := "u_used"
+	usedAt := time.Now()
+	require.NoError(t, repo.Create(&model.RegistrationTicket{
+		ID: "t1", Code: "c1", CreatedByID: &createdBy,
+	}))
+	require.NoError(t, repo.Create(&model.RegistrationTicket{
+		ID: "t2", Code: "c2", CreatedByID: &createdBy,
+		UsedByID: &usedBy, UsedAt: &usedAt,
+	}))
+	h.SetInviteRepo(repo)
+
+	rec := doPost(h.InviteList, `{"type":"all"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+
+	// 結果を id で lookup table 化 (List は id DESC で来るが順依存を避ける)
+	byID := make(map[string]map[string]any, len(rows))
+	for _, r := range rows {
+		byID[r["id"].(string)] = r
+	}
+
+	// t1: createdBy のみ pack される、usedBy は null
+	t1 := byID["t1"]
+	require.NotNil(t, t1["createdBy"], "createdBy が UserLite で pack される")
+	createdByT1, ok := t1["createdBy"].(map[string]any)
+	require.True(t, ok, "createdBy は map (= UserLite shape)")
+	assert.Equal(t, "u_admin", createdByT1["id"])
+	assert.Equal(t, "alice", createdByT1["username"])
+	assert.Nil(t, t1["usedBy"])
+
+	// t2: createdBy + usedBy 両方 pack される
+	t2 := byID["t2"]
+	require.NotNil(t, t2["createdBy"])
+	require.NotNil(t, t2["usedBy"])
+	usedByT2, ok := t2["usedBy"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "u_used", usedByT2["id"])
+	assert.Equal(t, "bob", usedByT2["username"])
+}
+
+// createdById / usedById が NULL の ticket (= migration 経由の旧 row 等) は
+// createdBy / usedBy も null を返す (= 従来挙動と互換)。
+func TestInviteList_NilUserIDsReturnNilPackedFields(t *testing.T) {
+	h, _ := setupInviteHandler(t,
+		&model.RegistrationTicket{ID: "t1", Code: "c1"}, // createdById / usedById 両方 nil
+	)
+	rec := doPost(h.InviteList, `{"type":"all"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Nil(t, rows[0]["createdBy"])
+	assert.Nil(t, rows[0]["usedBy"])
+}
+
 // --- Promo ------------------------------------------------------------------
 
 // stubNoteFinder satisfies admin.NoteFinder with just FindByID.
