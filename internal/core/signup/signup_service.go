@@ -152,6 +152,17 @@ func (s *Service) SetWebhookHook(h WebhookHook) {
 	s.webhookHook = h
 }
 
+// txInserter abstracts `tx.Create(value).Error` so the tx-create error wrap
+// path of maybeCreateEd25519Keypair can be unit-tested without spinning up a
+// real PostgreSQL transaction. `*gorm.DB` satisfies this interface natively.
+//
+// PromotePending tx 経路の tx error path は idGen が毎回新規 ULID を返す関係で
+// integration test での FK / PK violation 再現が困難なため、最小の interface
+// 抽出だけで unit test 可能な形に切り出している (#1075 follow-up)。
+type txInserter interface {
+	Create(value any) *gorm.DB
+}
+
 // maybeCreateEd25519Keypair generates and stores an Ed25519 keypair for the
 // given user when keypairExtraRepo is wired. tx が non-nil なら同 tx 内で
 // INSERT し、nil なら repository の Upsert を使う。keypairExtraRepo 未配線
@@ -159,7 +170,7 @@ func (s *Service) SetWebhookHook(h WebhookHook) {
 //
 // systemaccount.completeFromOrphan と error wrap 形式を揃え、log で発生個所が
 // 追えるようにする。
-func (s *Service) maybeCreateEd25519Keypair(tx *gorm.DB, userID string) error {
+func (s *Service) maybeCreateEd25519Keypair(tx txInserter, userID string) error {
 	if s.keypairExtraRepo == nil {
 		return nil
 	}
