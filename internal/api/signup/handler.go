@@ -182,6 +182,9 @@ func (h *Handler) Signup(c echo.Context) error {
 			if perr == coresignup.ErrUsernameReserved {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 			}
+			if errors.Is(perr, coresignup.ErrPasswordTooLong) {
+				return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
+			}
 			return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 		}
 		if h.emailSender != nil {
@@ -220,6 +223,9 @@ func (h *Handler) Signup(c echo.Context) error {
 		}
 		if err == coresignup.ErrUsernameReserved {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
+		}
+		if errors.Is(err, coresignup.ErrPasswordTooLong) {
+			return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
 		}
 		return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 	}

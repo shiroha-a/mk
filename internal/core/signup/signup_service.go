@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -66,6 +67,12 @@ var (
 	// completed the email verification. AlreadyUsed と区別することで frontend
 	// が「使用済」「失効」をローカライズで分けられる (#610 item 2)。
 	ErrInvitationRevoked = errors.New("invitation revoked")
+	// ErrPasswordTooLong is returned when the supplied password exceeds the
+	// 72-byte limit of bcrypt. Go の bcrypt は 73 byte 以上で
+	// ErrPasswordTooLong を返すが Node の bcrypt は silent truncation する。
+	// mk-go 側で 400 に変換しておかないと、空 hash が DB に書かれて user が
+	// 永久 login 不能になる (#1075)。
+	ErrPasswordTooLong = errors.New("password too long")
 )
 
 // PendingSignupTTL is the default lifetime of a pending signup row. Misskey TS
@@ -170,8 +177,17 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 		}
 	}
 
-	// パスワードハッシュ (bcrypt.DefaultCostで有効なパスワードに対して失敗しない)
-	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node の
+	// bcrypt が silent truncation するのと異なり、Go の bcrypt は error にする
+	// ため、ここで拾わないと空 hash が DB に書かれて user が永久 login 不能に
+	// なる (#1075)。
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+			return nil, ErrPasswordTooLong
+		}
+		return nil, fmt.Errorf("signup: bcrypt hash password: %w", err)
+	}
 
 	// native token 生成 (16文字hex)
 	token := generateToken()
@@ -277,7 +293,13 @@ func (s *Service) CreatePending(username, email, password string, invitationTick
 		return nil, ErrUsernameReserved
 	}
 
-	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+			return nil, ErrPasswordTooLong
+		}
+		return nil, fmt.Errorf("signup: bcrypt hash password: %w", err)
+	}
 	now := time.Now()
 	row := &model.UserPending{
 		ID:                 s.idGen.Generate(now),

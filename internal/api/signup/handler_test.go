@@ -143,6 +143,15 @@ func TestSignup_ReservedUsername(t *testing.T) {
 	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "USED_USERNAME")
 }
 
+// 73 byte 以上の password は bcrypt の制限超過で 400 + PASSWORD_TOO_LONG を返す (#1075)。
+func TestSignup_PasswordTooLong(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+	longPw := strings.Repeat("a", 73)
+	body := `{"username":"alice","password":"` + longPw + `"}`
+	rec := doPost(h.Signup, body)
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "PASSWORD_TOO_LONG")
+}
+
 // --- Meta errors ---
 
 func TestSignup_MetaFetchError(t *testing.T) {

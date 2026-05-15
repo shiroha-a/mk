@@ -198,6 +198,31 @@ func TestSignup_ProfileCreateError(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// 72 byte password は bcrypt の上限ぴったりで通る。73 byte は ErrPasswordTooLong を返す (#1075)。
+func TestSignup_PasswordLengthBoundary(t *testing.T) {
+	cases := []struct {
+		desc   string
+		length int
+		want   error
+	}{
+		{"max_72_bytes_accepted", 72, nil},
+		{"over_73_bytes_rejected", 73, signup.ErrPasswordTooLong},
+		{"way_over_rejected", 200, signup.ErrPasswordTooLong},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			svc, _, _ := newTestService(t)
+			pw := strings.Repeat("a", tc.length)
+			_, err := svc.Signup("user1", pw, false)
+			if tc.want == nil {
+				require.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSignup_TokenIs16Chars(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	result, err := svc.Signup("user1", "pass", false)
@@ -236,6 +261,19 @@ func TestSignup_KeypairCreateError(t *testing.T) {
 }
 
 // --- Pending signup (#595) ---
+
+// CreatePending 経路でも 73 byte 以上 password は ErrPasswordTooLong (#1075)。
+func TestCreatePending_PasswordTooLong(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+
+	pw := strings.Repeat("a", 73)
+	_, err := svc.CreatePending("user1", "user1@example.com", pw, nil)
+	assert.ErrorIs(t, err, signup.ErrPasswordTooLong)
+	// pending row も作成されない (early return)
+	assert.Empty(t, pendingRepo.Rows)
+}
 
 func TestCreatePending_Success(t *testing.T) {
 	svc, _, _ := newTestService(t)

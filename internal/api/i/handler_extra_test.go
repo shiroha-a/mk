@@ -98,6 +98,17 @@ func TestChangePassword_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// 73 byte 以上の newPassword は bcrypt の上限を超えるため 400 + PASSWORD_TOO_LONG (#1075)。
+func TestChangePassword_NewPasswordTooLong(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "oldpass")
+	longPw := strings.Repeat("a", 73)
+	body := `{"currentPassword":"oldpass","newPassword":"` + longPw + `"}`
+	rec := postExtra(h.ChangePassword, body, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "PASSWORD_TOO_LONG")
+}
+
 // --- DeleteAccount ---
 
 func TestDeleteAccount_Success(t *testing.T) {
