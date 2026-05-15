@@ -285,6 +285,9 @@ type failingUpsertKeypairExtraRepo struct{}
 func (f *failingUpsertKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error {
 	return assert.AnError
 }
+func (f *failingUpsertKeypairExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) error {
+	return assert.AnError
+}
 func (f *failingUpsertKeypairExtraRepo) FindByUserID(_ string) (*model.UserKeypairExtra, error) {
 	return nil, testutil.ErrNotFound
 }

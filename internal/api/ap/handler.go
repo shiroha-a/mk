@@ -98,27 +98,70 @@ func (h *Handler) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
 }
 
 // lookupEd25519PublicKey returns the Ed25519 public key for the local user
-// when keypairExtraRepo is wired AND an Ed25519 row exists. It returns nil on
-// any of: repo unwired / row missing / PEM parse failure (fail-soft to RSA
-// only — drop-in 互換維持)。
+// when keypairExtraRepo is wired. P1 マイグレーション前から存在する旧 user
+// には user_keypair_extra に行が無いため、ErrRecordNotFound のときに lazy
+// backfill (鍵生成 + InsertIfAbsent + 再 lookup) を行って actor JSON に
+// assertionMethod を expose する (#1072)。生成失敗 / PEM parse 失敗のいずれも
+// nil を返して RSA only にフォールバックする。
 //
-// "row missing" は P5 backfill 前の通常状態なので silently skip するが、
-// それ以外の DB error / PEM parse error は診断のため warn log を出す。これが
-// 無いと一時的 PostgreSQL 障害で全 user の actor JSON から Ed25519 が消える
-// silent degradation が発生したとき気付けない。
+// 並列 actor JSON 生成で同 user に対して複数 goroutine が backfill を
+// 開始しても、InsertIfAbsent (ON CONFLICT DO NOTHING) で 最初に書かれた
+// 行が残り、後続は再 lookup で既存行を取得する → race-safe。
+//
+// DB error (= ErrRecordNotFound 以外) と PEM parse error は診断のため
+// slog.Warn を出す。
 func (h *Handler) lookupEd25519PublicKey(userID string) ed25519.PublicKey {
 	if h.keypairExtraRepo == nil {
 		return nil
 	}
 	row, err := h.keypairExtraRepo.FindByUserID(userID)
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			slog.Warn("ed25519 keypair lookup failed",
-				"userID", userID, "error", err)
-		}
+	if err == nil {
+		return h.parseEd25519PublicKeyOrLog(userID, row.Ed25519PublicKey)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		slog.Warn("ed25519 keypair lookup failed",
+			"userID", userID, "error", err)
 		return nil
 	}
-	pub, err := activitypub.ParseEd25519PublicKeyPEM(row.Ed25519PublicKey)
+	// 行なし → P5 lazy backfill 経路
+	return h.backfillEd25519PublicKey(userID)
+}
+
+// backfillEd25519PublicKey generates a fresh Ed25519 keypair for a local user
+// that pre-dates the P1 migration, persists it via InsertIfAbsent (race-safe),
+// and returns the public key for the renderer. Any failure path returns nil
+// → RSA only fallback。
+func (h *Handler) backfillEd25519PublicKey(userID string) ed25519.PublicKey {
+	privPEM, pubPEM, err := activitypub.GenerateEd25519Keypair()
+	if err != nil {
+		slog.Warn("ed25519 backfill keypair generate failed",
+			"userID", userID, "error", err)
+		return nil
+	}
+	if err := h.keypairExtraRepo.InsertIfAbsent(&model.UserKeypairExtra{
+		UserID:            userID,
+		Ed25519PublicKey:  pubPEM,
+		Ed25519PrivateKey: privPEM,
+	}); err != nil {
+		slog.Warn("ed25519 backfill insert failed",
+			"userID", userID, "error", err)
+		return nil
+	}
+	// 並列 backfill で別 goroutine が先に書いた可能性があるので、再 lookup
+	// で確実に永続化された行の公開鍵を返す。
+	row, err := h.keypairExtraRepo.FindByUserID(userID)
+	if err != nil {
+		slog.Warn("ed25519 backfill re-lookup failed",
+			"userID", userID, "error", err)
+		return nil
+	}
+	return h.parseEd25519PublicKeyOrLog(userID, row.Ed25519PublicKey)
+}
+
+// parseEd25519PublicKeyOrLog parses an Ed25519 PEM and logs on failure.
+// Shared by lookup / backfill paths.
+func (h *Handler) parseEd25519PublicKeyOrLog(userID, pemStr string) ed25519.PublicKey {
+	pub, err := activitypub.ParseEd25519PublicKeyPEM(pemStr)
 	if err != nil {
 		slog.Warn("ed25519 PEM parse failed",
 			"userID", userID, "error", err)

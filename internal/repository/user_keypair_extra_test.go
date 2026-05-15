@@ -43,6 +43,34 @@ func TestUserKeypairExtraRepository_UpsertAndFind(t *testing.T) {
 	assert.Equal(t, "PRIVKEY_v2", got.Ed25519PrivateKey)
 }
 
+// InsertIfAbsent は ON CONFLICT DO NOTHING 動作:
+//   - 既存行が無いとき → 新規挿入
+//   - 既存行があるとき → no-op (= 旧 row 保持、新 row 廃棄) → race-safe な
+//     lazy backfill primitive (#1072)。
+func TestUserKeypairExtraRepository_InsertIfAbsent(t *testing.T) {
+	repo := NewUserKeypairExtraRepository(testDB)
+	user := insertTestUser(t, "u_kpx_iia", "kpx_iia")
+	defer cleanupUser(t, user.ID)
+	defer cleanupUserKeypairExtra(t, user.ID)
+
+	// 1 回目: 新規挿入
+	require.NoError(t, repo.InsertIfAbsent(&model.UserKeypairExtra{
+		UserID: user.ID, Ed25519PublicKey: "PUB1", Ed25519PrivateKey: "PRIV1",
+	}))
+	got, err := repo.FindByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PUB1", got.Ed25519PublicKey)
+
+	// 2 回目: 既存行があるので no-op (旧 row が保持される)
+	require.NoError(t, repo.InsertIfAbsent(&model.UserKeypairExtra{
+		UserID: user.ID, Ed25519PublicKey: "PUB2", Ed25519PrivateKey: "PRIV2",
+	}))
+	got, err = repo.FindByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PUB1", got.Ed25519PublicKey, "既存行は保持される (race-safe)")
+	assert.Equal(t, "PRIV1", got.Ed25519PrivateKey)
+}
+
 func TestUserKeypairExtraRepository_Delete(t *testing.T) {
 	repo := NewUserKeypairExtraRepository(testDB)
 	user := insertTestUser(t, "u_kpx_2", "kpx2")

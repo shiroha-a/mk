@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -139,18 +140,56 @@ func TestUser_WithEd25519Keypair_ExposesAssertionMethod(t *testing.T) {
 	assert.Contains(t, body, `#ed25519-key`)
 }
 
-// keypairExtraRepo は wire 済だが該当 user に Ed25519 行がない場合 →
-// AssertionMethod は出力されない (fail-soft fallback)。
-func TestUser_WithEd25519Repo_NoRowForUser(t *testing.T) {
+// keypairExtraRepo が wire 済 + 該当 user に Ed25519 行が無い場合は P5 lazy
+// backfill が走り、新規鍵が生成・保存されて actor JSON に assertionMethod
+// が expose される (#1072)。
+func TestUser_WithEd25519Repo_NoRowForUser_TriggersLazyBackfill(t *testing.T) {
 	h, userRepo, _, keypairRepo := newHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
 	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
-	h.SetKeypairExtraRepo(testutil.NewMockUserKeypairExtraRepository())
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	h.SetKeypairExtraRepo(extra)
 
 	c, rec := newReq(t, "id", "u1")
 	require.NoError(t, h.User(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
+	// backfill 後は assertionMethod が出力される
+	assert.Contains(t, rec.Body.String(), `"assertionMethod"`)
+	assert.Contains(t, rec.Body.String(), `"Multikey"`)
+	assert.Contains(t, rec.Body.String(), `#ed25519-key`)
+	// mock 上に新規 row が保存されている
+	row, ok := extra.Keypairs["u1"]
+	require.True(t, ok)
+	assert.Contains(t, row.Ed25519PublicKey, "PUBLIC KEY")
+	assert.Contains(t, row.Ed25519PrivateKey, "PRIVATE KEY")
+}
+
+// 並列 actor JSON 生成で同 user に対する複数 lookup が同時に走っても、
+// InsertIfAbsent (ON CONFLICT DO NOTHING) で最初に書かれた行が残り、後続は
+// 再 lookup で既存行を取得する race-safe 性質を確認する (#1072)。
+func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	h.SetKeypairExtraRepo(extra)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, rec := newReq(t, "id", "u1")
+			require.NoError(t, h.User(c))
+			assert.Equal(t, http.StatusOK, rec.Code)
+		}()
+	}
+	wg.Wait()
+
+	// 8 並列で backfill しても DB 上は 1 行だけ
+	row, ok := extra.Keypairs["u1"]
+	require.True(t, ok)
+	assert.NotEmpty(t, row.Ed25519PublicKey)
 }
 
 // keypairExtraRepo の FindByUserID が gorm.ErrRecordNotFound 以外の DB error
@@ -160,7 +199,8 @@ type failingKeypairExtraRepo struct {
 	err error
 }
 
-func (f *failingKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error { return f.err }
+func (f *failingKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error         { return f.err }
+func (f *failingKeypairExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) error { return f.err }
 func (f *failingKeypairExtraRepo) FindByUserID(_ string) (*model.UserKeypairExtra, error) {
 	return nil, f.err
 }
@@ -171,6 +211,32 @@ func TestUser_WithEd25519Repo_DBError_FailsSoft(t *testing.T) {
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
 	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
 	h.SetKeypairExtraRepo(&failingKeypairExtraRepo{err: errors.New("connection refused")})
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
+}
+
+// backfill 経路で InsertIfAbsent が DB error を返した場合 → assertionMethod
+// は出ず RSA only に fail-soft。
+type insertFailingExtraRepo struct {
+	*testutil.MockUserKeypairExtraRepository
+	insertErr error
+}
+
+func (i *insertFailingExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) error {
+	return i.insertErr
+}
+
+func TestUser_LazyBackfill_InsertFailureFallsBackToRSAOnly(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+	h.SetKeypairExtraRepo(&insertFailingExtraRepo{
+		MockUserKeypairExtraRepository: testutil.NewMockUserKeypairExtraRepository(),
+		insertErr:                      errors.New("constraint violation"),
+	})
 
 	c, rec := newReq(t, "id", "u1")
 	require.NoError(t, h.User(c))
