@@ -170,6 +170,13 @@ type txInserter interface {
 //
 // systemaccount.completeFromOrphan と error wrap 形式を揃え、log で発生個所が
 // 追えるようにする。
+//
+// IMPORTANT: tx には untyped nil (= `nil` literal) または有効な `*gorm.DB` を
+// 渡すこと。typed nil の `*gorm.DB` を渡すと interface comparison で not-nil
+// 扱いになり (`var tx *gorm.DB = nil; var i txInserter = tx; i != nil` が true)、
+// `tx.Create(...)` で nil deref panic になる。現 callsite (Signup /
+// promotePendingNoTx は literal nil、promotePendingTx は Begin 直後の valid tx)
+// はこれを満たすので問題ないが、新規 callsite を追加する際の罠。
 func (s *Service) maybeCreateEd25519Keypair(tx txInserter, userID string) error {
 	if s.keypairExtraRepo == nil {
 		return nil
