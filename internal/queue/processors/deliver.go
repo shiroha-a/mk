@@ -141,8 +141,12 @@ func (p *DeliverProcessor) recordEd25519Failure(host string) {
 		return
 	}
 	if n == 1 {
-		// 初回 INCR で TTL を設定 (window がスライドする)
-		_ = p.redis.Expire(ctx, ed25519FailKey(host), ed25519FailWindow).Err()
+		// 初回 INCR で TTL を設定 (window がスライドする)。Expire 失敗時は
+		// key が TTL なしで残り counter が永続蓄積するリスクがあるので診断の
+		// ために log を出す (#1080 review #2 follow-up)。
+		if err := p.redis.Expire(ctx, ed25519FailKey(host), ed25519FailWindow).Err(); err != nil {
+			slog.Warn("ed25519 fail counter TTL set failed", "host", host, "error", err)
+		}
 	}
 	if n >= ed25519FailThreshold {
 		slog.Warn("ed25519 fail threshold reached, degrading host",

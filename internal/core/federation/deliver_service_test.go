@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
@@ -211,6 +212,63 @@ func TestDeliverToUser_RecipientCapabilityCachedAcrossCalls(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), countingRepo.listCalls.Load(),
 		"recipient capability は cache 経由で 1 回だけ DB 経由")
+}
+
+// capability cache の TTL (5min) が経過したら次の deliver で再 fetch される。
+// SetClock 経由で時間進行を deterministic に制御する。
+func TestDeliverToUser_CapabilityCacheExpiresAfterTTL(t *testing.T) {
+	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	svc.SetKeypairExtraRepo(&stubKeypairExtraRepo{rows: map[string]*model.UserKeypairExtra{
+		"alice": {UserID: "alice", Ed25519PublicKey: "P", Ed25519PrivateKey: "K"},
+	}})
+	countingRepo := &countingPublickeyExtraRepo{stubPublickeyExtraRepo: stubPublickeyExtraRepo{}}
+	require.NoError(t, countingRepo.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "k", KeyPEM: "P", Alg: model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(countingRepo)
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	svc.SetClock(func() time.Time { return now })
+
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+
+	// 1 回目: cache miss → DB query
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	assert.Equal(t, int32(1), countingRepo.listCalls.Load())
+
+	// TTL 内: cache hit → DB query なし
+	now = now.Add(4 * time.Minute)
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	assert.Equal(t, int32(1), countingRepo.listCalls.Load(), "TTL 内は cache hit")
+
+	// TTL 超過: cache miss → 再 DB query
+	now = now.Add(2 * time.Minute) // 合計 6 min 経過
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	assert.Equal(t, int32(2), countingRepo.listCalls.Load(), "TTL 経過で refetch")
+}
+
+// capability lookup が DB error を返した場合、cache には書き込まれず次回も
+// retry される (= 一時的 DB 障害が "Ed25519 capable 永続化" として cache されない)。
+func TestDeliverToUser_CapabilityLookupDBErrorNotCached(t *testing.T) {
+	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	svc.SetKeypairExtraRepo(&stubKeypairExtraRepo{rows: map[string]*model.UserKeypairExtra{
+		"alice": {UserID: "alice", Ed25519PublicKey: "P", Ed25519PrivateKey: "K"},
+	}})
+	// publickeyExtraRepo は常に error を返す
+	failingRepo := &countingPublickeyExtraRepo{stubPublickeyExtraRepo: stubPublickeyExtraRepo{failErr: errors.New("db down")}}
+	svc.SetPublickeyExtraRepo(failingRepo)
+
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+
+	// 2 回 deliver: DB error なので cache に入らず、両方とも DB を叩く
+	for i := 0; i < 2; i++ {
+		require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	}
+	assert.Equal(t, int32(2), failingRepo.listCalls.Load(), "DB error は cache せず retry")
 }
 
 // sender Ed25519 鍵の cache も同様。

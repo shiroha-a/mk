@@ -3699,6 +3699,9 @@ func (s *stubPublickeyExtraRepo) FindByKeyID(keyID string) (*model.UserPublickey
 func (s *stubPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublickeyExtra, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.failErr != nil {
+		return nil, s.failErr
+	}
 	var out []model.UserPublickeyExtra
 	for _, pk := range s.entries {
 		if pk.UserID == userID {
