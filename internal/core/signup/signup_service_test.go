@@ -277,15 +277,18 @@ func TestSignup_WithKeypairExtraRepo(t *testing.T) {
 	assert.NotEmpty(t, kx.Ed25519PrivateKey)
 }
 
+// failingUpsertKeypairExtraRepo は Upsert だけ意図的に失敗させる test double。
+// FindByUserID / Delete は呼ばれない想定だが、将来 helper が existence check で
+// 呼んでも誤動作しないよう ErrNotFound / 成功を返す defense-in-depth な挙動にする。
 type failingUpsertKeypairExtraRepo struct{}
 
 func (f *failingUpsertKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error {
 	return assert.AnError
 }
 func (f *failingUpsertKeypairExtraRepo) FindByUserID(_ string) (*model.UserKeypairExtra, error) {
-	return nil, assert.AnError
+	return nil, testutil.ErrNotFound
 }
-func (f *failingUpsertKeypairExtraRepo) Delete(_ string) error { return assert.AnError }
+func (f *failingUpsertKeypairExtraRepo) Delete(_ string) error { return nil }
 
 func TestSignup_KeypairExtraUpsertError(t *testing.T) {
 	svc, _, _ := newTestService(t)

@@ -156,13 +156,16 @@ func (s *Service) SetWebhookHook(h WebhookHook) {
 // given user when keypairExtraRepo is wired. tx が non-nil なら同 tx 内で
 // INSERT し、nil なら repository の Upsert を使う。keypairExtraRepo 未配線
 // (= mock テスト or 未対応 deployment) の場合は何もせず nil を返す。
+//
+// systemaccount.completeFromOrphan と error wrap 形式を揃え、log で発生個所が
+// 追えるようにする。
 func (s *Service) maybeCreateEd25519Keypair(tx *gorm.DB, userID string) error {
 	if s.keypairExtraRepo == nil {
 		return nil
 	}
 	privPEM, pubPEM, err := activitypub.GenerateEd25519Keypair()
 	if err != nil {
-		return err
+		return fmt.Errorf("signup: generate ed25519 keypair: %w", err)
 	}
 	row := &model.UserKeypairExtra{
 		UserID:            userID,
@@ -170,9 +173,15 @@ func (s *Service) maybeCreateEd25519Keypair(tx *gorm.DB, userID string) error {
 		Ed25519PrivateKey: privPEM,
 	}
 	if tx != nil {
-		return tx.Create(row).Error
+		if err := tx.Create(row).Error; err != nil {
+			return fmt.Errorf("signup: create ed25519 keypair (tx): %w", err)
+		}
+		return nil
 	}
-	return s.keypairExtraRepo.Upsert(row)
+	if err := s.keypairExtraRepo.Upsert(row); err != nil {
+		return fmt.Errorf("signup: create ed25519 keypair: %w", err)
+	}
+	return nil
 }
 
 // SignupResult holds the created user and their native token.
