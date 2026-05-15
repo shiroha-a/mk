@@ -122,6 +122,20 @@ func ParseRSAPublicKey(pemStr string) (*rsa.PublicKey, error) {
 	return pub.(*rsa.PublicKey), nil
 }
 
+// ParseEd25519PublicKeyPEM decodes a PEM-encoded Ed25519 public key
+// (PKIX SubjectPublicKeyInfo). Errors are returned when the PEM is missing,
+// malformed, or contains a non-Ed25519 key (= caller can fall back to RSA).
+func ParseEd25519PublicKeyPEM(pemStr string) (ed25519.PublicKey, error) {
+	pub, kt, err := ParsePublicKey(pemStr)
+	if err != nil {
+		return nil, err
+	}
+	if kt != KeyTypeEd25519 {
+		return nil, errors.New("not an Ed25519 public key")
+	}
+	return pub.(ed25519.PublicKey), nil
+}
+
 // ParsePublicKey decodes a PEM-encoded public key and reports its type.
 // RSA / Ed25519を識別できる。それ以外は "unsupported public key type" で
 // 拒否する (Misskeyフェデレーションでは ECDSA等は事実上使われていない)。

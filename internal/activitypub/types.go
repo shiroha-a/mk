@@ -51,6 +51,15 @@ const ContextURL = "https://www.w3.org/ns/activitystreams"
 // SecurityContextURL is the W3C security vocabulary used for HTTP Signatures.
 const SecurityContextURL = "https://w3id.org/security/v1"
 
+// MultikeyContextURL is the W3C Multikey vocabulary (FEP-521a) used to expose
+// Ed25519 public keys via Person.assertionMethod[]. Fedibird / Mastodon
+// glitch-soc などが解釈可能。
+const MultikeyContextURL = "https://w3id.org/security/multikey/v1"
+
+// DataIntegrityContextURL is the W3C VC Data Integrity vocabulary that defines
+// the `assertionMethod` term used to attach Multikey entries to actors.
+const DataIntegrityContextURL = "https://w3id.org/security/data-integrity/v1"
+
 // Public is the magic IRI used to denote a publicly addressable activity.
 const Public = "https://www.w3.org/ns/activitystreams#Public"
 
@@ -93,6 +102,24 @@ type PublicKey struct {
 	Owner        string `json:"owner"`
 	PublicKeyPEM string `json:"publicKeyPem"`
 }
+
+// Multikey represents a single FEP-521a Multikey entry expose-d via
+// Person.assertionMethod[]. Used by mk-go to publish Ed25519 public keys
+// alongside the legacy RSA-only `publicKey` field, so capability-aware
+// receivers can verify HTTP Signatures with Ed25519 if the local user owns
+// an Ed25519 keypair.
+//
+// PublicKeyMultibase encodes the raw key with the standard "z" + base58btc +
+// multicodec prefix format (see internal/activitypub/multikey.go).
+type Multikey struct {
+	ID                 string `json:"id"`
+	Type               string `json:"type"`
+	Controller         string `json:"controller"`
+	PublicKeyMultibase string `json:"publicKeyMultibase"`
+}
+
+// MultikeyType is the canonical `type` value for a Multikey entry.
+const MultikeyType = "Multikey"
 
 // Endpoints holds the endpoints sub-object for an Actor.
 type Endpoints struct {
@@ -138,6 +165,11 @@ type Person struct {
 	MisskeyCanChat *bool        `json:"_misskey_canChat,omitempty"`
 	MovedTo        string       `json:"movedTo,omitempty"`
 	AlsoKnownAs    APStringList `json:"alsoKnownAs,omitempty"`
+	// AssertionMethod は FEP-521a Multikey 形式で expose する追加公開鍵リスト
+	// (mk-go では現状 Ed25519 のみ)。omitempty なので Ed25519 鍵を持たない
+	// user / TS で signup した user では出力されず、drop-in 互換を維持する
+	// (#1067 / #1069)。
+	AssertionMethod []Multikey `json:"assertionMethod,omitempty"`
 }
 
 // Note represents a note object (microblog post).
@@ -394,6 +426,19 @@ var MisskeyContext = map[string]any{
 // 不変として扱うこと。各オブジェクトには newContext() で新しいコピーを渡す。
 var fullContext = []any{ContextURL, SecurityContextURL, MisskeyContext}
 
+// personContext は Person actor 専用の拡張コンテキスト。FEP-521a の
+// `assertionMethod` (Multikey) を JSON-LD term として認識させるため、
+// fullContext に Multikey / Data-Integrity vocabulary を append している。
+// Note / Activity 等の他オブジェクトは Multikey を含まないので fullContext
+// 側は変更せず、Person 出力のみ context を拡張する設計 (#1067 / #1069)。
+var personContext = []any{
+	ContextURL,
+	SecurityContextURL,
+	MultikeyContextURL,
+	DataIntegrityContextURL,
+	MisskeyContext,
+}
+
 // newContext returns a fresh copy of fullContext so callers cannot
 // accidentally mutate the shared template via append.
 func newContext() []any {
@@ -402,13 +447,24 @@ func newContext() []any {
 	return c
 }
 
+// newPersonContext returns a fresh copy of personContext (= fullContext +
+// Multikey / Data-Integrity vocab) for Person actor output.
+func newPersonContext() []any {
+	c := make([]any, len(personContext))
+	copy(c, personContext)
+	return c
+}
+
 // AddContext attaches the standard AS+security+Misskey context to any object
 // that embeds Object. 配列で持つことで複数 vocabulary を表現する。
+// Person 専用には Multikey / Data-Integrity vocabulary を追加で含めて、
+// `assertionMethod` term を JSON-LD として正しく解釈可能にする。
 func AddContext(o any) {
 	ctx := newContext()
 	switch v := o.(type) {
 	case *Person:
-		v.Context = ctx
+		v.Context = newPersonContext()
+		return
 	case *Note:
 		v.Context = ctx
 	case *Create:

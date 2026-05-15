@@ -111,6 +111,68 @@ func TestUser_KeypairFetchError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// FEP-521a Multikey expose 経路 (#1067 / #1069):
+// keypairExtraRepo を wire し、Ed25519 鍵を持つ user の actor JSON に
+// assertionMethod[] が出力されることを確認する。
+func TestUser_WithEd25519Keypair_ExposesAssertionMethod(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+
+	// Ed25519 鍵対を生成して PEM で extra repo に格納
+	_, edPubPEM, err := activitypub.GenerateEd25519Keypair()
+	require.NoError(t, err)
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	require.NoError(t, extra.Upsert(&model.UserKeypairExtra{
+		UserID:            "u1",
+		Ed25519PublicKey:  edPubPEM,
+		Ed25519PrivateKey: "STUB",
+	}))
+	h.SetKeypairExtraRepo(extra)
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `"assertionMethod"`)
+	assert.Contains(t, body, `"Multikey"`)
+	assert.Contains(t, body, `#ed25519-key`)
+}
+
+// keypairExtraRepo は wire 済だが該当 user に Ed25519 行がない場合 →
+// AssertionMethod は出力されない (fail-soft fallback)。
+func TestUser_WithEd25519Repo_NoRowForUser(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+	h.SetKeypairExtraRepo(testutil.NewMockUserKeypairExtraRepository())
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
+}
+
+// keypairExtraRepo が wire 済 + Ed25519 row はあるが PEM が壊れている場合 →
+// silently skip して AssertionMethod を omit する (= RSA only に fail-soft)。
+func TestUser_WithEd25519Repo_MalformedPEM_FailsSoft(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	require.NoError(t, extra.Upsert(&model.UserKeypairExtra{
+		UserID:            "u1",
+		Ed25519PublicKey:  "NOT-A-VALID-PEM",
+		Ed25519PrivateKey: "STUB",
+	}))
+	h.SetKeypairExtraRepo(extra)
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
+}
+
 // newBrowserReq builds a non-AP request (no application/activity+json in
 // Accept). Used to exercise the SPA / redirect fallback branch.
 func newBrowserReq(t *testing.T, paramName, paramValue string) (echo.Context, *httptest.ResponseRecorder) {

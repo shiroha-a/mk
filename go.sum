@@ -229,8 +229,16 @@ github.com/modern-go/reflect2 v1.0.2 h1:xBagoLtFs94CBntxluKeaWgTMpvLxC4ur3nMaC9G
 github.com/modern-go/reflect2 v1.0.2/go.mod h1:yWuevngMOJpCy52FWWMvUC8ws7m/LJsjYzDa0/r8luk=
 github.com/morikuni/aec v1.0.0 h1:nP9CBfwrvYnBRgY6qfDQkygYDmYwOilePFkwzv4dU8A=
 github.com/morikuni/aec v1.0.0/go.mod h1:BbKIizmSmc5MMPqRYbxO4ZU0S0+P200+tUnFx7PXmsc=
+github.com/mr-tron/base58 v1.3.0 h1:K6Y13R2h+dku0wOqKtecgRnBUBPrZzLZy5aIj8lCcJI=
+github.com/mr-tron/base58 v1.3.0/go.mod h1:2BuubE67DCSWwVfx37JWNG8emOC0sHEU4/HpcYgCLX8=
 github.com/mrjoshuak/go-jpeg2000 v1.2.1 h1:6k+J+YkJx676Pofom8rCx35J69Hc3PvzUZ3cytkIfzo=
 github.com/mrjoshuak/go-jpeg2000 v1.2.1/go.mod h1:Zvb2bdmP52/rpmJOuzMo1HQR75zex//CvqEvopdTweo=
+github.com/multiformats/go-base32 v0.1.0 h1:pVx9xoSPqEIQG8o+UbAe7DNi51oej1NtK+aGkbLYxPE=
+github.com/multiformats/go-base32 v0.1.0/go.mod h1:Kj3tFY6zNr+ABYMqeUNeGvkIC/UYgtWibDcT0rExnbI=
+github.com/multiformats/go-base36 v0.2.0 h1:lFsAbNOGeKtuKozrtBsAkSVhv1p9D0/qedU9rQyccr0=
+github.com/multiformats/go-base36 v0.2.0/go.mod h1:qvnKE++v+2MWCfePClUEjE78Z7P2a1UV0xHgWc0hkp4=
+github.com/multiformats/go-multibase v0.3.0 h1:8helZD2+4Db7NNWFiktk2NePbF0boolBe6bDQvM4r68=
+github.com/multiformats/go-multibase v0.3.0/go.mod h1:MoBLQPCkRTOL3eveIPO81860j2AQY8JwcnNlRkGRUfI=
 github.com/oklog/ulid/v2 v2.1.1 h1:suPZ4ARWLOJLegGFiZZ1dFAkqzhMjL3J1TzI+5wHz8s=
 github.com/oklog/ulid/v2 v2.1.1/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=

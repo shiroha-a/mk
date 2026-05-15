@@ -1,6 +1,8 @@
 package activitypub
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"strings"
 	"testing"
@@ -55,7 +57,7 @@ func TestRenderer_RenderPerson(t *testing.T) {
 		IsLocked:     true,
 		IsExplorable: true,
 	}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Equal(t, "https://example.com/users/u1", p.ID)
 	assert.Equal(t, "Person", p.Type)
 	assert.Equal(t, "alice", p.PreferredUsername)
@@ -70,10 +72,47 @@ func TestRenderer_RenderPerson(t *testing.T) {
 func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "alice"}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Empty(t, p.Name)
 	assert.Nil(t, p.Icon)
 	assert.False(t, p.ManuallyApproves)
+}
+
+func TestRenderer_RenderPerson_AssertionMethodOmittedWhenNoEd25519(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u1", Username: "alice"}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	// Ed25519 鍵を持たない user (= TS で signup された / backfill 未済) は
+	// AssertionMethod を出さず upstream actor JSON と shape を揃える。
+	assert.Empty(t, p.AssertionMethod)
+}
+
+func TestRenderer_RenderPerson_AssertionMethodWithEd25519(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u1", Username: "alice"}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	p := r.RenderPerson(u, nil, "PUBKEY", pub)
+
+	require.Len(t, p.AssertionMethod, 1)
+	am := p.AssertionMethod[0]
+	assert.Equal(t, "https://example.com/users/u1#ed25519-key", am.ID)
+	assert.Equal(t, MultikeyType, am.Type)
+	assert.Equal(t, "https://example.com/users/u1", am.Controller)
+	// publicKeyMultibase は z6Mk... prefix (Ed25519 Multikey 仕様)
+	assert.True(t, strings.HasPrefix(am.PublicKeyMultibase, "z6Mk"))
+
+	// round-trip で正しく decode できることを確認
+	decoded, err := DecodeEd25519Multikey(am.PublicKeyMultibase)
+	require.NoError(t, err)
+	assert.Equal(t, pub, decoded)
+
+	// @context に Multikey vocabulary が含まれている
+	ctx, ok := p.Context.([]any)
+	require.True(t, ok, "person context should be a slice")
+	assert.Contains(t, ctx, MultikeyContextURL)
+	assert.Contains(t, ctx, DataIntegrityContextURL)
 }
 
 func TestRenderer_RenderPerson_MisskeyCanChat(t *testing.T) {
@@ -94,7 +133,7 @@ func TestRenderer_RenderPerson_MisskeyCanChat(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.scope, func(t *testing.T) {
 			u := &model.User{ID: "u1", Username: "alice", ChatScope: tc.scope}
-			p := r.RenderPerson(u, nil, "PUBKEY")
+			p := r.RenderPerson(u, nil, "PUBKEY", nil)
 			require.NotNil(t, p.MisskeyCanChat)
 			assert.Equal(t, tc.want, *p.MisskeyCanChat)
 		})
@@ -499,7 +538,7 @@ func TestRenderer_RenderDelete(t *testing.T) {
 func TestRenderer_RenderPerson_Bot(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "bot", IsBot: true}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Equal(t, "Service", p.Type)
 }
 
@@ -519,7 +558,7 @@ func TestRenderer_RenderPerson_WithProfile(t *testing.T) {
 		FollowedMessage: &followedMsg,
 		Fields:          fields,
 	}
-	p := r.RenderPerson(u, profile, "PUBKEY")
+	p := r.RenderPerson(u, profile, "PUBKEY", nil)
 	assert.Contains(t, p.Summary, "<b>hello</b>")
 	assert.Equal(t, desc, p.MisskeySummary)
 	assert.Equal(t, "2000-01-01", p.VcardBday)
@@ -548,7 +587,7 @@ func TestRenderer_RenderPerson_BannerAndMovedTo(t *testing.T) {
 		AlsoKnownAs: &alsoKnownAs,
 		Featured:    &featured,
 	}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Image)
 	assert.Equal(t, banner, p.Image.URL)
 	assert.Equal(t, movedTo, p.MovedTo)
@@ -566,7 +605,7 @@ func TestRenderer_RenderPerson_MisskeyExtensionFields(t *testing.T) {
 		MakeNotesFollowersOnlyBefore: &before,
 		MakeNotesHiddenBefore:        nil,
 	}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.True(t, p.MisskeyRequireSigninToViewContents)
 	require.NotNil(t, p.MisskeyMakeNotesFollowersOnlyBefore)
 	assert.Equal(t, 30, *p.MisskeyMakeNotesFollowersOnlyBefore)
@@ -576,7 +615,7 @@ func TestRenderer_RenderPerson_MisskeyExtensionFields(t *testing.T) {
 func TestRenderer_RenderPerson_MisskeyExtensionFields_Defaults(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "alice"}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	// デフォルト (false / nil) は omitempty で出力されない
 	assert.False(t, p.MisskeyRequireSigninToViewContents)
 	assert.Nil(t, p.MisskeyMakeNotesFollowersOnlyBefore)
@@ -803,7 +842,7 @@ func TestRenderer_RenderPerson_EmojiTag(t *testing.T) {
 		Username: "alice",
 		Emojis:   pq.StringArray{"verified"},
 	}
-	p := r.RenderPerson(u, nil, "PUBKEY")
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.Len(t, p.Tag, 1)
 	et, ok := p.Tag[0].(EmojiTag)
 	require.True(t, ok)

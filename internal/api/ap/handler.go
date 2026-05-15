@@ -2,6 +2,7 @@
 package ap
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -29,14 +30,15 @@ type RemoteResolver interface {
 
 // Handler handles ActivityPub resource endpoints.
 type Handler struct {
-	renderer       *activitypub.Renderer
-	userService    *coreuser.Service
-	queryService   *corenote.QueryService
-	keypairRepo    repository.UserKeypairRepository
-	idGen          id.Generator
-	remoteFetcher  RemoteFetcher
-	remoteResolver RemoteResolver
-	nonAPFallback  echo.HandlerFunc
+	renderer         *activitypub.Renderer
+	userService      *coreuser.Service
+	queryService     *corenote.QueryService
+	keypairRepo      repository.UserKeypairRepository
+	keypairExtraRepo repository.UserKeypairExtraRepository
+	idGen            id.Generator
+	remoteFetcher    RemoteFetcher
+	remoteResolver   RemoteResolver
+	nonAPFallback    echo.HandlerFunc
 }
 
 // SetRemote attaches remote AP fetcher and resolver.
@@ -82,6 +84,33 @@ func NewHandler(
 		keypairRepo:  keypairRepo,
 		idGen:        idGen,
 	}
+}
+
+// SetKeypairExtraRepo wires the Ed25519 keypair repository so that actor JSON
+// responses can include `assertionMethod[]` Multikey entries for users that
+// own an Ed25519 keypair (#1067 / #1069). Optional: 未配線でも RSA only で
+// 動き、upstream Misskey TS と同一の actor JSON shape を維持する。
+func (h *Handler) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
+	h.keypairExtraRepo = r
+}
+
+// lookupEd25519PublicKey returns the Ed25519 public key for the local user
+// when keypairExtraRepo is wired AND an Ed25519 row exists. It returns nil on
+// any of: repo unwired / row missing / PEM parse failure (fail-soft to RSA
+// only — drop-in 互換維持)。
+func (h *Handler) lookupEd25519PublicKey(userID string) ed25519.PublicKey {
+	if h.keypairExtraRepo == nil {
+		return nil
+	}
+	row, err := h.keypairExtraRepo.FindByUserID(userID)
+	if err != nil {
+		return nil
+	}
+	pub, err := activitypub.ParseEd25519PublicKeyPEM(row.Ed25519PublicKey)
+	if err != nil {
+		return nil
+	}
+	return pub
 }
 
 // User handles GET /users/:id with ActivityPub content negotiation.
@@ -132,7 +161,7 @@ func (h *Handler) User(c echo.Context) error {
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey)
+	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey, h.lookupEd25519PublicKey(bundle.User.ID))
 	return writeActivityJSON(c, person)
 }
 
@@ -163,7 +192,7 @@ func (h *Handler) UserByAcct(c echo.Context) error {
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey)
+	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey, h.lookupEd25519PublicKey(bundle.User.ID))
 	return writeActivityJSON(c, person)
 }
 
@@ -312,7 +341,7 @@ func (h *Handler) resolveLocal(uri string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey), nil
+		return h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey, h.lookupEd25519PublicKey(bundle.User.ID)), nil
 	}
 	return nil, http.ErrNotSupported
 }

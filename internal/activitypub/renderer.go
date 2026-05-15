@@ -1,6 +1,7 @@
 package activitypub
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -215,8 +216,11 @@ func (r *Renderer) SetHost(host string) {
 
 // RenderPerson packs a local user into a Person actor object.
 // profile は nil でもよい (その場合 summary 等のフィールドは省略される)。
-// publicKeyPEM はリポジトリから取得した公開鍵PEM文字列。
-func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publicKeyPEM string) *Person {
+// publicKeyPEM はリポジトリから取得した RSA 公開鍵 PEM 文字列。
+// ed25519PublicKey が non-nil の場合は FEP-521a Multikey 形式で
+// `assertionMethod[]` に追加 expose する (#1067 / #1069)。Encode 失敗時は
+// silently skip して RSA のみ出力する fail-soft 動作。
+func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publicKeyPEM string, ed25519PublicKey ed25519.PublicKey) *Person {
 	uri := r.urls.UserURI(u.ID)
 
 	actorType := actorTypeForUser(u)
@@ -242,6 +246,21 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 		ManuallyApproves: u.IsLocked,
 		Discoverable:     u.IsExplorable,
 		IsCat:            u.IsCat,
+	}
+	// Ed25519 鍵を持つ user に対しては assertionMethod に Multikey として
+	// 追加 expose する。Fedibird など FEP-521a 対応サーバーが Ed25519 鍵で
+	// HTTP Signature を verify できるようにするための拡張 (#1067 / #1069)。
+	// keyId fragment は `#ed25519-key` を採用 (Fedibird / Mastodon glitch-soc
+	// と同じ慣習)。
+	if ed25519PublicKey != nil {
+		if mb, err := EncodeEd25519Multikey(ed25519PublicKey); err == nil {
+			p.AssertionMethod = []Multikey{{
+				ID:                 uri + "#ed25519-key",
+				Type:               MultikeyType,
+				Controller:         uri,
+				PublicKeyMultibase: mb,
+			}}
+		}
 	}
 	if u.AvatarURL != nil {
 		p.Icon = &Image{Type: "Image", URL: *u.AvatarURL}
