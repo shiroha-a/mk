@@ -37,6 +37,7 @@ func cleanupSignupRows(t *testing.T, db *gorm.DB, prefix string) {
 	db.Exec(`DELETE FROM "user_pending" WHERE id LIKE ? OR username LIKE ?`, prefix+"%", prefix+"%")
 	db.Exec(`DELETE FROM "user_profile" WHERE "userId" IN (SELECT id FROM "user" WHERE id LIKE ? OR "usernameLower" LIKE ?)`, prefix+"%", prefix+"%")
 	db.Exec(`DELETE FROM "user_keypair" WHERE "userId" LIKE ?`, prefix+"%")
+	db.Exec(`DELETE FROM "user_keypair_extra" WHERE "userId" LIKE ?`, prefix+"%")
 	db.Exec(`DELETE FROM "user" WHERE id LIKE ? OR "usernameLower" LIKE ?`, prefix+"%", prefix+"%")
 	db.Exec(`DELETE FROM "registration_ticket" WHERE id LIKE ? OR code LIKE ?`, prefix+"%", prefix+"%")
 }
@@ -238,6 +239,30 @@ func TestPromotePending_TxCreatesKeypair(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, kp.PublicKey)
 	assert.NotEmpty(t, kp.PrivateKey)
+}
+
+// tx 経路で keypairExtraRepo が wire されていれば Ed25519 鍵対も同 tx で作成される。
+// FEP-521a Multikey 対応 (#1067 / #1068)。
+func TestPromotePending_TxCreatesKeypairExtra(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itkpx_"
+	defer cleanupSignupRows(t, db, prefix)
+
+	svc := newTxService(t, db)
+	keypairRepo := repository.NewUserKeypairRepository(db)
+	keypairExtraRepo := repository.NewUserKeypairExtraRepository(db)
+	svc.SetKeypairRepo(keypairRepo)
+	svc.SetKeypairExtraRepo(keypairExtraRepo)
+
+	row, err := svc.CreatePending(prefix+"kpx", "kpx@it.example", "pw", nil)
+	require.NoError(t, err)
+	result, err := svc.PromotePending(row.Code)
+	require.NoError(t, err)
+
+	kx, err := keypairExtraRepo.FindByUserID(result.User.ID)
+	require.NoError(t, err)
+	assert.Contains(t, kx.Ed25519PublicKey, "PUBLIC KEY")
+	assert.Contains(t, kx.Ed25519PrivateKey, "PRIVATE KEY")
 }
 
 // tx 経路で webhook hook が wire されていれば commit 後に発火する。

@@ -89,11 +89,12 @@ type WebhookHook interface {
 
 // Service handles user registration.
 type Service struct {
-	userRepo    repository.UserRepository
-	metaRepo    repository.MetaRepository
-	keypairRepo repository.UserKeypairRepository
-	pendingRepo repository.UserPendingRepository
-	ticketRepo  repository.RegistrationTicketRepository
+	userRepo         repository.UserRepository
+	metaRepo         repository.MetaRepository
+	keypairRepo      repository.UserKeypairRepository
+	keypairExtraRepo repository.UserKeypairExtraRepository
+	pendingRepo      repository.UserPendingRepository
+	ticketRepo       repository.RegistrationTicketRepository
 	// db は PromotePending を transaction 化して partial failure rollback と
 	// invitation ticket の SELECT FOR UPDATE ロックを実現する用途。未設定 (nil)
 	// なら従来の repo-based 非 tx パスにフォールバックする (mock テスト用)。
@@ -136,10 +137,42 @@ func (s *Service) SetKeypairRepo(r repository.UserKeypairRepository) {
 	s.keypairRepo = r
 }
 
+// SetKeypairExtraRepo wires the user keypair extra repository. When set,
+// Signup will also generate an Ed25519 keypair alongside the RSA one and
+// store it in user_keypair_extra so the actor JSON can publish it via
+// assertionMethod[] (FEP-521a Multikey). Optional: 未配線でも RSA only で動く
+// (= upstream Misskey TS と完全に同じ挙動)。
+func (s *Service) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
+	s.keypairExtraRepo = r
+}
+
 // SetWebhookHook attaches a WebhookHook invoked after user creation so that
 // system webhooks subscribed to `userCreated` can fire.
 func (s *Service) SetWebhookHook(h WebhookHook) {
 	s.webhookHook = h
+}
+
+// maybeCreateEd25519Keypair generates and stores an Ed25519 keypair for the
+// given user when keypairExtraRepo is wired. tx が non-nil なら同 tx 内で
+// INSERT し、nil なら repository の Upsert を使う。keypairExtraRepo 未配線
+// (= mock テスト or 未対応 deployment) の場合は何もせず nil を返す。
+func (s *Service) maybeCreateEd25519Keypair(tx *gorm.DB, userID string) error {
+	if s.keypairExtraRepo == nil {
+		return nil
+	}
+	privPEM, pubPEM, err := activitypub.GenerateEd25519Keypair()
+	if err != nil {
+		return err
+	}
+	row := &model.UserKeypairExtra{
+		UserID:            userID,
+		Ed25519PublicKey:  pubPEM,
+		Ed25519PrivateKey: privPEM,
+	}
+	if tx != nil {
+		return tx.Create(row).Error
+	}
+	return s.keypairExtraRepo.Upsert(row)
 }
 
 // SignupResult holds the created user and their native token.
@@ -238,6 +271,10 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 		}); err != nil {
 			return nil, err
 		}
+	}
+	// Ed25519 keypair (FEP-521a Multikey 用)。keypairExtraRepo wire 時のみ。
+	if err := s.maybeCreateEd25519Keypair(nil, userID); err != nil {
+		return nil, err
 	}
 
 	// 初回セットアップの場合は rootUserId を設定
@@ -444,6 +481,10 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 				return err
 			}
 		}
+		// Ed25519 keypair も同 tx 内で発行 (#1067 / #1068)
+		if err := s.maybeCreateEd25519Keypair(tx, userID); err != nil {
+			return err
+		}
 
 		// pending row 削除
 		if err := tx.Where("id = ?", pending.ID).Delete(&model.UserPending{}).Error; err != nil {
@@ -532,6 +573,9 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 		}); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.maybeCreateEd25519Keypair(nil, userID); err != nil {
+		return nil, err
 	}
 	_ = s.pendingRepo.Delete(pending.ID)
 

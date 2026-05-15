@@ -4038,6 +4038,34 @@ func (m *MockUserKeypairRepository) FindByUserID(userID string) (*model.UserKeyp
 	return k, nil
 }
 
+// MockUserKeypairExtraRepository is a test double for
+// repository.UserKeypairExtraRepository.
+type MockUserKeypairExtraRepository struct {
+	Keypairs map[string]*model.UserKeypairExtra // keyed by userID
+}
+
+func NewMockUserKeypairExtraRepository() *MockUserKeypairExtraRepository {
+	return &MockUserKeypairExtraRepository{Keypairs: make(map[string]*model.UserKeypairExtra)}
+}
+
+func (m *MockUserKeypairExtraRepository) Upsert(k *model.UserKeypairExtra) error {
+	m.Keypairs[k.UserID] = k
+	return nil
+}
+
+func (m *MockUserKeypairExtraRepository) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
+	k, ok := m.Keypairs[userID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return k, nil
+}
+
+func (m *MockUserKeypairExtraRepository) Delete(userID string) error {
+	delete(m.Keypairs, userID)
+	return nil
+}
+
 // MockFollowingRepository is a test double for repository.FollowingRepository.
 type MockFollowingRepository struct {
 	Followings map[string]*model.Following // keyed by ID

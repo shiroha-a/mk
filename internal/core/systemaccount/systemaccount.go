@@ -21,11 +21,12 @@ import (
 // Service fetches (or lazily creates) the built-in system users used
 // for subsystem-to-AP interactions. 各 kind は一意なので 1 行のみ。
 type Service struct {
-	userRepo    repository.UserRepository
-	keypairRepo repository.UserKeypairRepository
-	saRepo      repository.SystemAccountRepository
-	idGen       id.Generator
-	clock       func() time.Time
+	userRepo         repository.UserRepository
+	keypairRepo      repository.UserKeypairRepository
+	keypairExtraRepo repository.UserKeypairExtraRepository
+	saRepo           repository.SystemAccountRepository
+	idGen            id.Generator
+	clock            func() time.Time
 }
 
 // NewService constructs a Service.
@@ -49,6 +50,14 @@ func (s *Service) SetClock(now func() time.Time) {
 	if now != nil {
 		s.clock = now
 	}
+}
+
+// SetKeypairExtraRepo wires the Ed25519 keypair repository. When set, system
+// account creation also generates an Ed25519 keypair so the actor JSON can
+// publish it via assertionMethod[] (FEP-521a Multikey). Optional: 未配線でも
+// RSA only で動く。
+func (s *Service) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
+	s.keypairExtraRepo = r
 }
 
 // Fetch returns the system user for the given kind, creating it if
@@ -121,6 +130,23 @@ func (s *Service) completeFromOrphan(kind string, user *model.User) (*model.User
 			PrivateKey: privPEM,
 		}); kerr != nil {
 			return nil, fmt.Errorf("systemaccount: create keypair: %w", kerr)
+		}
+	}
+	// Ed25519 keypair も idempotent に発行・保存 (#1067 / #1068)。
+	// keypairExtraRepo 未配線時は何もしない (= RSA only fallback)。
+	if s.keypairExtraRepo != nil {
+		if _, err := s.keypairExtraRepo.FindByUserID(user.ID); err != nil {
+			privPEM, pubPEM, kerr := activitypub.GenerateEd25519Keypair()
+			if kerr != nil {
+				return nil, fmt.Errorf("systemaccount: generate ed25519 keypair: %w", kerr)
+			}
+			if kerr := s.keypairExtraRepo.Upsert(&model.UserKeypairExtra{
+				UserID:            user.ID,
+				Ed25519PublicKey:  pubPEM,
+				Ed25519PrivateKey: privPEM,
+			}); kerr != nil {
+				return nil, fmt.Errorf("systemaccount: create ed25519 keypair: %w", kerr)
+			}
 		}
 	}
 	if err := s.saRepo.Create(&model.SystemAccount{

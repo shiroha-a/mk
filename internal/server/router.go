@@ -153,6 +153,7 @@ func (s *Server) setupRoutes() {
 	driveFileRepo := repository.NewDriveFileRepository(s.db)
 	driveFolderRepo := repository.NewDriveFolderRepository(s.db)
 	keypairRepo := repository.NewUserKeypairRepository(s.db)
+	keypairExtraRepo := repository.NewUserKeypairExtraRepository(s.db)
 	instanceRepo := repository.NewInstanceRepository(s.db)
 	// instance.{followersCount,followingCount} はリアルタイム incremental
 	// 維持の hook が未実装で常に 0 → admin/overview の federation pie chart
@@ -198,6 +199,8 @@ func (s *Server) setupRoutes() {
 	signupService := coresignup.NewService(userRepo, metaRepo, idGen)
 	// ActivityPub 配信のためにローカルユーザーは RSA 鍵対を必要とする。
 	signupService.SetKeypairRepo(keypairRepo)
+	// FEP-521a Multikey 対応で Ed25519 鍵対も併発行 (#1067 / #1068)。
+	signupService.SetKeypairExtraRepo(keypairExtraRepo)
 	noteCreateService := corenote.NewCreateService(noteRepo, pollRepo, idGen, followingRepo)
 	// Phase 7-1 follow-up (#254): 本家互換の残存 error 検出ロジック用依存を注入。
 	// Setter経由なのでテストでは任意に省略可能。既存の同repository変数を再利用。
@@ -541,6 +544,8 @@ func (s *Server) setupRoutes() {
 	// 直後でセットアップする。admin/relays ハンドラへ注入し、Accept/Reject
 	// inbox 処理で status を更新できるように processor にも渡す。
 	sysAcctSvc := coresystemaccount.NewService(userRepo, keypairRepo, repository.NewSystemAccountRepository(s.db), idGen)
+	// FEP-521a Multikey 対応で system account も Ed25519 鍵対を併発行 (#1067 / #1068)。
+	sysAcctSvc.SetKeypairExtraRepo(keypairExtraRepo)
 	relaySvc := corerelay.NewService(repository.NewRelayRepository(s.db), sysAcctSvc, apRenderer, deliverService, idGen)
 
 	// AP fetch のデフォルト signer に instance.actor を配線する (#419)。

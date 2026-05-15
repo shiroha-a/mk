@@ -218,3 +218,61 @@ func idGenFor(t *testing.T) id.Generator {
 	require.NoError(t, err)
 	return g
 }
+
+func TestFetch_GeneratesEd25519KeypairWhenWired(t *testing.T) {
+	svc, _, _, _ := newService(t)
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	svc.SetKeypairExtraRepo(extra)
+
+	user, err := svc.Fetch("relay")
+	require.NoError(t, err)
+	kx, ok := extra.Keypairs[user.ID]
+	require.True(t, ok)
+	assert.Contains(t, kx.Ed25519PublicKey, "PUBLIC KEY")
+	assert.Contains(t, kx.Ed25519PrivateKey, "PRIVATE KEY")
+}
+
+func TestFetch_SkipsEd25519WhenExtraRepoNotWired(t *testing.T) {
+	svc, _, keypairRepo, _ := newService(t)
+
+	user, err := svc.Fetch("relay")
+	require.NoError(t, err)
+	// RSA 鍵だけ作られる (extra repo 未配線で skip される)
+	_, ok := keypairRepo.Keypairs[user.ID]
+	assert.True(t, ok)
+}
+
+func TestFetch_Ed25519IdempotentAcrossSecondCall(t *testing.T) {
+	svc, _, _, _ := newService(t)
+	extra := testutil.NewMockUserKeypairExtraRepository()
+	svc.SetKeypairExtraRepo(extra)
+
+	user, err := svc.Fetch("relay")
+	require.NoError(t, err)
+	firstPub := extra.Keypairs[user.ID].Ed25519PublicKey
+
+	// 2 回目 Fetch しても鍵は変わらない (idempotent)
+	_, err = svc.Fetch("relay")
+	require.NoError(t, err)
+	assert.Equal(t, firstPub, extra.Keypairs[user.ID].Ed25519PublicKey)
+}
+
+type failingExtraUpsert struct {
+	*testutil.MockUserKeypairExtraRepository
+	err error
+}
+
+func (f *failingExtraUpsert) Upsert(_ *model.UserKeypairExtra) error { return f.err }
+
+func TestFetch_ErrorBubblesFromEd25519KeypairCreate(t *testing.T) {
+	svc, _, _, _ := newService(t)
+	extra := &failingExtraUpsert{
+		MockUserKeypairExtraRepository: testutil.NewMockUserKeypairExtraRepository(),
+		err:                            errors.New("ed25519 db down"),
+	}
+	svc.SetKeypairExtraRepo(extra)
+
+	_, err := svc.Fetch("relay")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ed25519")
+}
