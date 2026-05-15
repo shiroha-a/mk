@@ -169,16 +169,21 @@ def test_post_swap_alice_actor_exposes_ed25519_assertion_method(
         "Multikey @context entry missing — lazy backfill or renderer drift"
     )
 
-    # assertionMethod[0] が Ed25519 Multikey 形式
+    # assertionMethod[0] が Ed25519 Multikey 形式。controller / id は
+    # scheme + host + path まで完全一致で固定し、host 部分が誤って attacker
+    # 経由の URL になる regression を防ぐ (#1084 review #2 / #3 / #4)。
+    expected_actor_url = f"https://{A_DOMAIN}/users/{alice['id']}"
     ams = actor.get("assertionMethod")
     assert isinstance(ams, list) and len(ams) >= 1, (
         f"lazy backfill did not expose assertionMethod (got: {ams!r})"
     )
     am = ams[0]
     assert am.get("type") == "Multikey", f"unexpected type: {am.get('type')!r}"
-    assert am.get("controller", "").endswith(f"/users/{alice['id']}")
-    assert am.get("id", "").endswith("#ed25519-key"), (
-        f"keyId fragment must be #ed25519-key (got: {am.get('id')!r})"
+    assert am.get("controller") == expected_actor_url, (
+        f"controller mismatch: {am.get('controller')!r} != {expected_actor_url!r}"
+    )
+    assert am.get("id") == f"{expected_actor_url}#ed25519-key", (
+        f"keyId mismatch: {am.get('id')!r} != {expected_actor_url}#ed25519-key"
     )
     pkb = am.get("publicKeyMultibase", "")
     assert pkb.startswith("z6Mk"), (
