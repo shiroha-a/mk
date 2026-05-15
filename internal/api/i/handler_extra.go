@@ -45,7 +45,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
-			return c.JSON(http.StatusBadRequest, apierr.Error("PASSWORD_TOO_LONG", "Password too long (bcrypt max 72 bytes).", "f2e62243-b80a-43e4-9b17-329b422deded"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("PASSWORD_TOO_LONG", "Password is too long.", "f2e62243-b80a-43e4-9b17-329b422deded"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

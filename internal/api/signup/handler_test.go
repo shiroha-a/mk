@@ -208,6 +208,26 @@ func TestSignup_EmailRequired_CreatesPendingAndSendsEmail(t *testing.T) {
 	}
 }
 
+// emailRequiredForSignup=true 経路でも 73 byte 以上 password は CreatePending が
+// ErrPasswordTooLong を返し、handler が 400 + PASSWORD_TOO_LONG に変換する (#1075)。
+// user_pending row は作成されない (early return)。
+func TestSignup_EmailRequired_PasswordTooLong(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", EmailRequiredForSignup: true}
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coresignup.NewService(userRepo, metaRepo, idGen)
+	svc.SetUserPendingRepo(pendingRepo)
+	h := apisignup.NewHandler(svc, metaRepo, idGen)
+
+	longPw := strings.Repeat("a", 73)
+	body := `{"username":"alice","password":"` + longPw + `","emailAddress":"alice@example.com"}`
+	rec := doPost(h.Signup, body)
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "PASSWORD_TOO_LONG")
+	assert.Empty(t, pendingRepo.Rows, "pending row は作成されない")
+}
+
 // emailRequiredForSignup=true でも username が空なら通常の INVALID_PARAM 経路
 func TestSignup_EmailRequired_DuplicateUsername(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()

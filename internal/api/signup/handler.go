@@ -173,13 +173,13 @@ func (h *Handler) Signup(c echo.Context) error {
 			// (= signupService 内部の generic catch で error.toString() を
 			// message に詰める形) drop-in でも shape を揃える方が consumer 側
 			// で 1 経路に統一できるので Fastify-style にする。
-			if perr == coresignup.ErrUsernameAlreadyExists {
+			if errors.Is(perr, coresignup.ErrUsernameAlreadyExists) {
 				return duplicatedUsernameError(c)
 			}
-			if perr == coresignup.ErrInvalidUsername {
+			if errors.Is(perr, coresignup.ErrInvalidUsername) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 			}
-			if perr == coresignup.ErrUsernameReserved {
+			if errors.Is(perr, coresignup.ErrUsernameReserved) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 			}
 			if errors.Is(perr, coresignup.ErrPasswordTooLong) {
@@ -215,13 +215,13 @@ func (h *Handler) Signup(c echo.Context) error {
 	if err != nil {
 		// upstream の `/api/signup` は username 系 error を Fastify-style
 		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。
-		if err == coresignup.ErrUsernameAlreadyExists {
+		if errors.Is(err, coresignup.ErrUsernameAlreadyExists) {
 			return duplicatedUsernameError(c)
 		}
-		if err == coresignup.ErrInvalidUsername {
+		if errors.Is(err, coresignup.ErrInvalidUsername) {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 		}
-		if err == coresignup.ErrUsernameReserved {
+		if errors.Is(err, coresignup.ErrUsernameReserved) {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 		}
 		if errors.Is(err, coresignup.ErrPasswordTooLong) {
