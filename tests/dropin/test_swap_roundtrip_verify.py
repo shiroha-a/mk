@@ -88,12 +88,23 @@ def test_roundtrip_bob_can_react_to_alice_note(
     """TS-B (= bob) から TS-A 戻し後の alice の note にリアクションを付け、
     alice 側 (TS-A) に federation 経由で届くことを確認する。逆方向
     (TS-B → TS-A) の deliver も RSA で動く evidence。
+
+    本 test は前段 test に依存せず独立に動くよう、自身で reaction target
+    note を作って bob 側に伝搬するまで待ってからリアクションを付ける。
     """
-    # 先ほどの test で送った roundtrip note を bob 側で探す
-    note_text = "dropin-roundtrip-after-ts-restore"
+    target_text = "dropin-roundtrip-bob-react-target"
+    instance_a.create_note(target_text)
+
+    def _arrived_on_b() -> bool:
+        tl = instance_b._api("notes/timeline", {"limit": 40})
+        return any(n.get("text") == target_text for n in tl)
+
+    assert poll_until(
+        _arrived_on_b, timeout=120, desc="bob receives roundtrip reaction-target note"
+    )
+
     tl_b = instance_b._api("notes/timeline", {"limit": 40})
-    target = next((n for n in tl_b if n.get("text") == note_text), None)
-    assert target is not None, "roundtrip note must be visible on B before reacting"
+    target = next(n for n in tl_b if n.get("text") == target_text)
 
     try:
         instance_b.react(target["id"], "🎉")
