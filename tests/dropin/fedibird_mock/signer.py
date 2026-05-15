@@ -97,7 +97,7 @@ def http_signature_verify(
             return f"{method.lower()} {path}"
         return headers.get(name.lower(), "")
 
-    signing_input = "\n".join(f"{h}: {_lookup(h)}" if h != "(request-target)" else f"(request-target): {method.lower()} {path}" for h in header_list).encode()
+    signing_input = "\n".join(f"{h}: {_lookup(h)}" for h in header_list).encode()
 
     try:
         if algorithm == "rsa-sha256":

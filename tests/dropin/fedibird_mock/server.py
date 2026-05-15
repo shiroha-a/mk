@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from flask import Flask, jsonify, request
 
-from multikey import encode_ed25519_multikey
+from multikey import decode_ed25519_multikey, encode_ed25519_multikey
 from signer import (
     http_signature_verify,
     parse_pem_public_key,
@@ -85,12 +85,19 @@ def _resolve_remote_public_key(key_id: str):
     if isinstance(pk, dict) and pk.get("id") == key_id:
         pub = parse_pem_public_key(pk.get("publicKeyPem", ""))
     if pub is None:
+        # P4 capability-gated outbound 経路で mk-A は recipient (= mock) が
+        # assertionMethod を持つことを検出して Ed25519 sign で送ってくる。
+        # mock 側は keyId 一致の Multikey を decode して Ed25519PublicKey を
+        # 作る必要がある (= 旧 review で skip していた経路 / #1086 follow-up)。
         for am in actor.get("assertionMethod") or []:
-            if am.get("id") == key_id:
-                # NB: mock では Multikey の decode は不要 (mk → mock 経路は
-                # 通常 RSA #main-key で sign される)。ここで Ed25519 が必要に
-                # なる経路があれば DecodeEd25519Multikey 相当を追加する。
-                break
+            if am.get("id") != key_id or am.get("type") != "Multikey":
+                continue
+            mb = am.get("publicKeyMultibase") or ""
+            try:
+                pub = decode_ed25519_multikey(mb)
+            except ValueError:
+                pass
+            break
     if pub is not None:
         with _remote_keys_lock:
             _remote_keys[key_id] = pub
