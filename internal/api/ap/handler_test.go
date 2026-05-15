@@ -166,7 +166,10 @@ func TestUser_WithEd25519Repo_NoRowForUser_TriggersLazyBackfill(t *testing.T) {
 
 // 並列 actor JSON 生成で同 user に対する複数 lookup が同時に走っても、
 // InsertIfAbsent (ON CONFLICT DO NOTHING) で最初に書かれた行が残り、後続は
-// 再 lookup で既存行を取得する race-safe 性質を確認する (#1072)。
+// 再 lookup で既存行を取得する race-safe 性質を確認する (#1072)。さらに
+// singleflight (#1081 follow-up) によって 8 並列でも 1 つの publicKey
+// Multibase string が全 goroutine で観測されることを assert する (#1081
+// review #4)。
 func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
 	h, userRepo, _, keypairRepo := newHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
@@ -174,6 +177,11 @@ func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
 	extra := testutil.NewMockUserKeypairExtraRepository()
 	h.SetKeypairExtraRepo(extra)
 
+	// 全 goroutine が actor JSON 内で見た公開鍵を集約して同一であることを assert
+	var (
+		mu        sync.Mutex
+		seenMKeys []string
+	)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -182,6 +190,17 @@ func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
 			c, rec := newReq(t, "id", "u1")
 			require.NoError(t, h.User(c))
 			assert.Equal(t, http.StatusOK, rec.Code)
+			// レスポンス JSON の publicKeyMultibase を抽出
+			body := rec.Body.String()
+			if idx := strings.Index(body, `"publicKeyMultibase":"`); idx >= 0 {
+				start := idx + len(`"publicKeyMultibase":"`)
+				end := strings.Index(body[start:], `"`)
+				if end > 0 {
+					mu.Lock()
+					seenMKeys = append(seenMKeys, body[start:start+end])
+					mu.Unlock()
+				}
+			}
 		}()
 	}
 	wg.Wait()
@@ -190,6 +209,14 @@ func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
 	row, ok := extra.Keypairs["u1"]
 	require.True(t, ok)
 	assert.NotEmpty(t, row.Ed25519PublicKey)
+
+	// 全 goroutine で観測した publicKeyMultibase は完全に同一 (= race で
+	// 鍵分裂しない)。長さ 8 + 全要素同値で sanity check。
+	require.Len(t, seenMKeys, 8, "全 goroutine が publicKeyMultibase を観測")
+	for i := 1; i < len(seenMKeys); i++ {
+		assert.Equal(t, seenMKeys[0], seenMKeys[i],
+			"全 goroutine で同一 Multikey が見える (= 鍵分裂なし)")
+	}
 }
 
 // keypairExtraRepo の FindByUserID が gorm.ErrRecordNotFound 以外の DB error
@@ -199,8 +226,10 @@ type failingKeypairExtraRepo struct {
 	err error
 }
 
-func (f *failingKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error         { return f.err }
-func (f *failingKeypairExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) error { return f.err }
+func (f *failingKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error { return f.err }
+func (f *failingKeypairExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) (bool, error) {
+	return false, f.err
+}
 func (f *failingKeypairExtraRepo) FindByUserID(_ string) (*model.UserKeypairExtra, error) {
 	return nil, f.err
 }
@@ -225,8 +254,8 @@ type insertFailingExtraRepo struct {
 	insertErr error
 }
 
-func (i *insertFailingExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) error {
-	return i.insertErr
+func (i *insertFailingExtraRepo) InsertIfAbsent(_ *model.UserKeypairExtra) (bool, error) {
+	return false, i.insertErr
 }
 
 func TestUser_LazyBackfill_InsertFailureFallsBackToRSAOnly(t *testing.T) {

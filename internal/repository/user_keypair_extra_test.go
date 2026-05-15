@@ -53,18 +53,22 @@ func TestUserKeypairExtraRepository_InsertIfAbsent(t *testing.T) {
 	defer cleanupUser(t, user.ID)
 	defer cleanupUserKeypairExtra(t, user.ID)
 
-	// 1 回目: 新規挿入
-	require.NoError(t, repo.InsertIfAbsent(&model.UserKeypairExtra{
+	// 1 回目: 新規挿入 → inserted=true
+	inserted, err := repo.InsertIfAbsent(&model.UserKeypairExtra{
 		UserID: user.ID, Ed25519PublicKey: "PUB1", Ed25519PrivateKey: "PRIV1",
-	}))
+	})
+	require.NoError(t, err)
+	assert.True(t, inserted, "初回 insert は inserted=true")
 	got, err := repo.FindByUserID(user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "PUB1", got.Ed25519PublicKey)
 
-	// 2 回目: 既存行があるので no-op (旧 row が保持される)
-	require.NoError(t, repo.InsertIfAbsent(&model.UserKeypairExtra{
+	// 2 回目: 既存行があるので no-op (旧 row が保持される) → inserted=false
+	inserted, err = repo.InsertIfAbsent(&model.UserKeypairExtra{
 		UserID: user.ID, Ed25519PublicKey: "PUB2", Ed25519PrivateKey: "PRIV2",
-	}))
+	})
+	require.NoError(t, err)
+	assert.False(t, inserted, "既存行ありの場合 inserted=false")
 	got, err = repo.FindByUserID(user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "PUB1", got.Ed25519PublicKey, "既存行は保持される (race-safe)")

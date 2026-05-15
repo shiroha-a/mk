@@ -102,15 +102,15 @@ func (s *stubKeypairExtraRepo) Upsert(k *model.UserKeypairExtra) error {
 	return nil
 }
 
-func (s *stubKeypairExtraRepo) InsertIfAbsent(k *model.UserKeypairExtra) error {
+func (s *stubKeypairExtraRepo) InsertIfAbsent(k *model.UserKeypairExtra) (bool, error) {
 	if s.rows == nil {
 		s.rows = map[string]*model.UserKeypairExtra{}
 	}
 	if _, exists := s.rows[k.UserID]; exists {
-		return nil
+		return false, nil
 	}
 	s.rows[k.UserID] = k
-	return nil
+	return true, nil
 }
 
 func (s *stubKeypairExtraRepo) FindByUserID(userID string) (*model.UserKeypairExtra, error) {

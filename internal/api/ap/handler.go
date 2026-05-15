@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
@@ -42,6 +43,10 @@ type Handler struct {
 	remoteFetcher    RemoteFetcher
 	remoteResolver   RemoteResolver
 	nonAPFallback    echo.HandlerFunc
+	// backfillGroup collapses parallel lazy-backfill 経路の Generate +
+	// InsertIfAbsent を同 user ID で 1 回に集約する。多 goroutine が
+	// 同時に backfill しても entropy / CPU を浪費しない (#1081 review #1)。
+	backfillGroup singleflight.Group
 }
 
 // SetRemote attaches remote AP fetcher and resolver.
@@ -131,24 +136,52 @@ func (h *Handler) lookupEd25519PublicKey(userID string) ed25519.PublicKey {
 // that pre-dates the P1 migration, persists it via InsertIfAbsent (race-safe),
 // and returns the public key for the renderer. Any failure path returns nil
 // → RSA only fallback。
+//
+// 同 userID への並行 backfill は singleflight で 1 回に集約され、Generate +
+// InsertIfAbsent + 再 lookup を多 goroutine が個別に走らせる無駄を抑える
+// (#1081 review #1)。InsertIfAbsent の戻り値 inserted で「自分が書いた」
+// 「他が先に書いた」を区別し、inserted=true なら自身が生成した PEM を
+// そのまま返して再 FindByUserID を skip (= 1 query 削減 #1081 review #2)。
 func (h *Handler) backfillEd25519PublicKey(userID string) ed25519.PublicKey {
+	val, _, _ := h.backfillGroup.Do(userID, func() (any, error) {
+		// 失敗時に typed-nil の ed25519.PublicKey を返すと caller 側で
+		// `val == nil` が false になる (interface comparison の罠)。明示的に
+		// untyped nil を return して check が正しく short-circuit するように
+		// する。
+		if pub := h.runEd25519Backfill(userID); pub != nil {
+			return pub, nil
+		}
+		return nil, nil
+	})
+	if val == nil {
+		return nil
+	}
+	return val.(ed25519.PublicKey)
+}
+
+func (h *Handler) runEd25519Backfill(userID string) ed25519.PublicKey {
 	privPEM, pubPEM, err := activitypub.GenerateEd25519Keypair()
 	if err != nil {
 		slog.Warn("ed25519 backfill keypair generate failed",
 			"userID", userID, "error", err)
 		return nil
 	}
-	if err := h.keypairExtraRepo.InsertIfAbsent(&model.UserKeypairExtra{
+	inserted, err := h.keypairExtraRepo.InsertIfAbsent(&model.UserKeypairExtra{
 		UserID:            userID,
 		Ed25519PublicKey:  pubPEM,
 		Ed25519PrivateKey: privPEM,
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("ed25519 backfill insert failed",
 			"userID", userID, "error", err)
 		return nil
 	}
-	// 並列 backfill で別 goroutine が先に書いた可能性があるので、再 lookup
-	// で確実に永続化された行の公開鍵を返す。
+	if inserted {
+		// 自身が書いた行 → 生成済 PEM をそのまま返す (1 query 削減)
+		return h.parseEd25519PublicKeyOrLog(userID, pubPEM)
+	}
+	// 並列 race (= singleflight 期間外の重複 backfill) で別 goroutine が
+	// 先に書いた → 再 lookup で永続化された別公開鍵を取得
 	row, err := h.keypairExtraRepo.FindByUserID(userID)
 	if err != nil {
 		slog.Warn("ed25519 backfill re-lookup failed",
