@@ -1,6 +1,8 @@
 package federation_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3657,6 +3659,51 @@ func TestResolveNote_DedupesConcurrentCalls(t *testing.T) {
 
 func ptrString(s string) *string { return &s }
 
+// stubPublickeyExtraRepo は FEP-521a Multikey 永続化用の in-memory mock。
+// resolver の cacheAssertionMethods / PublicKeyForKeyID 経路を unit test
+// から exercise するために使う (#1067 / #1070)。
+type stubPublickeyExtraRepo struct {
+	mu      sync.RWMutex
+	entries map[string]*model.UserPublickeyExtra // keyed by keyID
+	upserts []model.UserPublickeyExtra
+	failErr error
+}
+
+func (s *stubPublickeyExtraRepo) Upsert(pk *model.UserPublickeyExtra) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failErr != nil {
+		return s.failErr
+	}
+	if s.entries == nil {
+		s.entries = make(map[string]*model.UserPublickeyExtra)
+	}
+	s.entries[pk.KeyID] = pk
+	s.upserts = append(s.upserts, *pk)
+	return nil
+}
+
+func (s *stubPublickeyExtraRepo) FindByKeyID(keyID string) (*model.UserPublickeyExtra, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if pk, ok := s.entries[keyID]; ok {
+		return pk, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *stubPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublickeyExtra, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []model.UserPublickeyExtra
+	for _, pk := range s.entries {
+		if pk.UserID == userID {
+			out = append(out, *pk)
+		}
+	}
+	return out, nil
+}
+
 // stubPublickeyRepo は keys map race test 用の minimal な PublickeyStore
 // 実装。本物の publickey_repo は GORM 経由なのでテストでは差し替える。
 type stubPublickeyRepo struct {
@@ -3681,6 +3728,138 @@ func (s *stubPublickeyRepo) Upsert(pk *model.UserPublickey) error {
 	}
 	s.entries[pk.UserID] = pk
 	return nil
+}
+
+// Ed25519 鍵を持つ remote actor を fetch して assertionMethod を
+// user_publickey_extra に upsert する (#1067 / #1070)。
+func TestResolveActor_PersistsAssertionMethod(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {
+			"id": "https://remote.example/users/alice#main-key",
+			"owner": "https://remote.example/users/alice",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+		},
+		"assertionMethod": [{
+			"id": "https://remote.example/users/alice#ed25519-key",
+			"type": "Multikey",
+			"controller": "https://remote.example/users/alice",
+			"publicKeyMultibase": "` + mb + `"
+		}]
+	}`
+
+	r, _ := newResolver(t, body, nil)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	row, err := extra.FindByKeyID("https://remote.example/users/alice#ed25519-key")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, row.UserID)
+	assert.Equal(t, model.AlgEd25519, row.Alg)
+	assert.Contains(t, row.KeyPEM, "PUBLIC KEY")
+
+	// round-trip: 保存された PEM から元の Ed25519 公開鍵を復元できる
+	parsed, err := activitypub.ParseEd25519PublicKeyPEM(row.KeyPEM)
+	require.NoError(t, err)
+	assert.Equal(t, pub, parsed)
+}
+
+// 不正な Multikey (Multibase decode 失敗) が混ざっていても、正常な entry は
+// upsert される (silently skip + warn log)。
+func TestResolveActor_SkipsMalformedAssertionMethod(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {
+			"id": "https://remote.example/users/alice#main-key",
+			"owner": "https://remote.example/users/alice",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+		},
+		"assertionMethod": [
+			{"id": "https://remote.example/users/alice#bad", "type": "Multikey", "controller": "x", "publicKeyMultibase": "INVALID"},
+			{"id": "https://remote.example/users/alice#ed25519-key", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"},
+			{"id": "https://remote.example/users/alice#non-multikey", "type": "JsonWebKey", "controller": "x", "publicKeyMultibase": "z6Mk..."}
+		]
+	}`
+
+	r, _ := newResolver(t, body, nil)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	_, err = r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	// 不正 entry / 非 Multikey type は skip され、正常な Ed25519 のみ upsert される
+	rows, err := extra.ListByUserID(extra.upserts[0].UserID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "https://remote.example/users/alice#ed25519-key", rows[0].KeyID)
+}
+
+// PublicKeyForKeyID は user_publickey_extra (Ed25519 / Multikey) を最初に探し、
+// miss なら user_publickey (RSA) を fallback で返す dual lookup を行う (#1070)。
+func TestPublicKeyForKeyID_DualLookup(t *testing.T) {
+	r, _ := newResolver(t, sampleActor, nil)
+	pkRepo := &stubPublickeyRepo{entries: map[string]*model.UserPublickey{}}
+	r.SetPublickeyRepo(pkRepo)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	// user_publickey に RSA primary key を seed
+	require.NoError(t, pkRepo.Upsert(&model.UserPublickey{
+		UserID: "alice", KeyID: "https://remote.example/users/alice#main-key",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nRSA-FAKE\n-----END PUBLIC KEY-----",
+	}))
+	// user_publickey_extra に Ed25519 を seed
+	require.NoError(t, extra.Upsert(&model.UserPublickeyExtra{
+		UserID: "alice", KeyID: "https://remote.example/users/alice#ed25519-key",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nED25519-FAKE\n-----END PUBLIC KEY-----",
+		Alg:    model.AlgEd25519,
+	}))
+
+	// Ed25519 keyId 一致 → extra から返る
+	pem, err := r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#ed25519-key")
+	require.NoError(t, err)
+	assert.Contains(t, pem, "ED25519-FAKE")
+
+	// RSA keyId (= extra に無し) → PublicKeyForActor fallback で RSA primary が返る
+	pem, err = r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#main-key")
+	require.NoError(t, err)
+	assert.Contains(t, pem, "RSA-FAKE")
+}
+
+// publickeyExtraRepo 未配線でも PublicKeyForKeyID は PublicKeyForActor と
+// 等価な挙動を保つ (= drop-in 互換)。
+func TestPublicKeyForKeyID_WithoutExtraRepoFallsBackToActor(t *testing.T) {
+	r, _ := newResolver(t, sampleActor, nil)
+	pkRepo := &stubPublickeyRepo{entries: map[string]*model.UserPublickey{}}
+	r.SetPublickeyRepo(pkRepo)
+	require.NoError(t, pkRepo.Upsert(&model.UserPublickey{
+		UserID: "alice", KeyID: "https://remote.example/users/alice#main-key",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nFALLBACK\n-----END PUBLIC KEY-----",
+	}))
+
+	pem, err := r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#ed25519-key")
+	require.NoError(t, err)
+	assert.Contains(t, pem, "FALLBACK")
 }
 
 // 複数 goroutine が異なる actor の PublicKeyForActor を並行に呼ぶと、内部

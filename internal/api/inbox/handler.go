@@ -222,7 +222,8 @@ func (h *Handler) verifySignature(req *http.Request) (*model.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	pem, err := h.resolver.PublicKeyForActor(actor.ID)
+	// keyId fragment ベースで Ed25519 / RSA を dispatch する (#1067 / #1070)。
+	pem, err := h.resolver.PublicKeyForKeyID(actor.ID, parsed.KeyID)
 	if err != nil {
 		return nil, err
 	}

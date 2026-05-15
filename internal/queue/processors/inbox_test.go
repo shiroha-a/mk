@@ -106,6 +106,13 @@ func (s *stubVerifier) PublicKeyForActor(_ string) (string, error) {
 	return s.pubKey, nil
 }
 
+// PublicKeyForKeyID は dual lookup を mock では行わず、常に primary key を
+// 返す。Ed25519 / keyId fragment 別 dispatch のテストは federation.Resolver
+// 側の integration test で cover する。
+func (s *stubVerifier) PublicKeyForKeyID(actorID, _ string) (string, error) {
+	return s.PublicKeyForActor(actorID)
+}
+
 type stubBlocker struct{ blocked, allowed func(string) bool }
 
 func (s *stubBlocker) IsBlocked(h string) bool {

@@ -28,9 +28,15 @@ type FederationProcessor interface {
 // signed with that actor's published public key. Implemented by
 // federation.Resolver in production. nil の場合 verify を skip するので、
 // payload に headers が無い (= legacy 形式) ケースと同様に扱う。
+//
+// PublicKeyForKeyID は signature header の keyId fragment (`#main-key` /
+// `#ed25519-key` 等) に対応する PEM を返す。user_publickey_extra (FEP-521a
+// Multikey) を先に探し、miss なら user_publickey の primary key (RSA) を
+// fallback で返す → drop-in 互換維持 (#1067 / #1070)。
 type SignatureVerifier interface {
 	ResolveActor(actorURI string) (*model.User, error)
 	PublicKeyForActor(actorID string) (string, error)
+	PublicKeyForKeyID(actorID, keyID string) (string, error)
 }
 
 // HostBlockChecker reports whether a host is on the blocked list and whether
@@ -176,7 +182,8 @@ func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User,
 	if err != nil {
 		return nil, err
 	}
-	pem, err := p.verifier.PublicKeyForActor(actor.ID)
+	// keyId fragment ベースで Ed25519 / RSA を dispatch する (#1067 / #1070)。
+	pem, err := p.verifier.PublicKeyForKeyID(actor.ID, parsed.KeyID)
 	if err != nil {
 		return nil, err
 	}

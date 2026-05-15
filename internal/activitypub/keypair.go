@@ -122,6 +122,22 @@ func ParseRSAPublicKey(pemStr string) (*rsa.PublicKey, error) {
 	return pub.(*rsa.PublicKey), nil
 }
 
+// MarshalEd25519PublicKeyPEM encodes an Ed25519 public key into the PKIX
+// SubjectPublicKeyInfo PEM form so it can be stored in user_publickey_extra
+// alongside RSA keys (= 同一テーブルで ParsePublicKey が type-dispatch 可能)。
+// 入力 key の長さは ed25519.PublicKeySize (= 32 byte) でなければならない。
+func MarshalEd25519PublicKeyPEM(pub ed25519.PublicKey) (string, error) {
+	if len(pub) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("invalid ed25519 public key size %d", len(pub))
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", err
+	}
+	block := &pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}
+	return string(pem.EncodeToMemory(block)), nil
+}
+
 // ParseEd25519PublicKeyPEM decodes a PEM-encoded Ed25519 public key
 // (PKIX SubjectPublicKeyInfo). Errors are returned when the PEM is missing,
 // malformed, or contains a non-Ed25519 key (= caller can fall back to RSA).

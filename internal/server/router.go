@@ -485,6 +485,9 @@ func (s *Server) setupRoutes() {
 	federationResolver := corefederation.NewResolver(userRepo, noteRepo, apURLs, apFetcher, idGen)
 	publickeyRepo := repository.NewUserPublickeyRepository(s.db)
 	federationResolver.SetPublickeyRepo(publickeyRepo)
+	// FEP-521a Multikey 対応で remote actor の assertionMethod[] を parse して
+	// user_publickey_extra に persist する (#1067 / #1070)。
+	federationResolver.SetPublickeyExtraRepo(repository.NewUserPublickeyExtraRepository(s.db))
 	federationResolver.SetPollRepo(pollRepo)
 	// AP vote (Note.name + inReplyTo to a poll) を local poll service に
 	// 流して投票として記録する (#690)。これがないとリモートからの投票が

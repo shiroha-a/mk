@@ -88,6 +88,17 @@ type PublickeyStore interface {
 	FindByUserID(userID string) (*model.UserPublickey, error)
 }
 
+// PublickeyExtraStore abstracts persistence of *additional* remote actor
+// public keys (Ed25519 / Multikey) for FEP-521a compliant peers. Resolver
+// upserts here when an inbound actor JSON includes `assertionMethod[]`
+// (#1067 / #1070). `user_publickey_extra` table backs this in production;
+// tests use an in-memory mock.
+type PublickeyExtraStore interface {
+	Upsert(pk *model.UserPublickeyExtra) error
+	FindByKeyID(keyID string) (*model.UserPublickeyExtra, error)
+	ListByUserID(userID string) ([]model.UserPublickeyExtra, error)
+}
+
 // Resolver fetches remote actors / notes and persists them in the local
 // user / note tables.
 //
@@ -104,18 +115,19 @@ type Resolver struct {
 	// access を保護する。queue worker や inbox handler は別 actor を並行
 	// 処理するため、ロック無しの map read/write は runtime panic を起こす
 	// (Devin review #555 FLAG-1)。
-	keysMu          sync.RWMutex
-	keys            map[string]publicKeyEntry      // userID → publicKey + fetchedAt
-	clock           func() time.Time               // テストで差し替える時計
-	actorTTL        time.Duration                  // アクター情報の最大寿命
-	instanceTracker InstanceTracker                // optional: ホスト発見を通知
-	chartHook       ChartHook                      // optional: 新規 remote user の集計
-	hashtagHook     HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
-	publickeyRepo   PublickeyStore                 // optional: 公開鍵の永続化
-	pollRepo        repository.PollRepository      // optional: Question(投票)のPoll作成
-	pollVoter       PollVoter                      // optional: AP vote (Note.name) の投票記録
-	emojiRepo       repository.EmojiRepository     // optional: リモート絵文字の永続化
-	driveFileRepo   repository.DriveFileRepository // optional: リモート添付の link 化
+	keysMu             sync.RWMutex
+	keys               map[string]publicKeyEntry      // userID → publicKey + fetchedAt
+	clock              func() time.Time               // テストで差し替える時計
+	actorTTL           time.Duration                  // アクター情報の最大寿命
+	instanceTracker    InstanceTracker                // optional: ホスト発見を通知
+	chartHook          ChartHook                      // optional: 新規 remote user の集計
+	hashtagHook        HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
+	publickeyRepo      PublickeyStore                 // optional: 公開鍵の永続化 (RSA)
+	publickeyExtraRepo PublickeyExtraStore            // optional: 追加公開鍵 (Ed25519 / Multikey) の永続化
+	pollRepo           repository.PollRepository      // optional: Question(投票)のPoll作成
+	pollVoter          PollVoter                      // optional: AP vote (Note.name) の投票記録
+	emojiRepo          repository.EmojiRepository     // optional: リモート絵文字の永続化
+	driveFileRepo      repository.DriveFileRepository // optional: リモート添付の link 化
 	// imageProbeClient は image attachment の dimension probe (#461) で
 	// 使う outbound HTTP client。SSRF-safe transport (router.go で
 	// safehttp.NewSSRFSafeTransport を適用したもの) を渡す前提で、
@@ -193,6 +205,14 @@ func (r *Resolver) SetHashtagHook(h HashtagHook) {
 // storage. nil 渡しは無効化と同義 (in-memory only に戻る)。
 func (r *Resolver) SetPublickeyRepo(repo PublickeyStore) {
 	r.publickeyRepo = repo
+}
+
+// SetPublickeyExtraRepo attaches a PublickeyExtraStore for persistent
+// additional public key storage (FEP-521a Multikey / Ed25519). nil 渡しは
+// 無効化と同義: ResolveActor は actor の assertionMethod[] を parse せず、
+// PublicKeyForKeyID は user_publickey (RSA) のみを返す (#1067 / #1070)。
+func (r *Resolver) SetPublickeyExtraRepo(repo PublickeyExtraStore) {
+	r.publickeyExtraRepo = repo
 }
 
 // SetPollRepo attaches a PollRepository for ingesting Question (poll) objects.
@@ -399,6 +419,7 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 		slog.Warn("create remote user profile failed", "userId", user.ID, "err", err)
 	}
 	r.cachePublicKey(user.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	r.cacheAssertionMethods(user.ID, actor.AssertionMethod)
 	r.notifyInstance(host)
 	if r.chartHook != nil {
 		r.chartHook.OnRemoteUserCreated(user)
@@ -559,6 +580,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		_ = r.userRepo.UpdateProfile(existing.ID, map[string]any{"description": desc})
 	}
 	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	r.cacheAssertionMethods(existing.ID, actor.AssertionMethod)
 	if existing.Host != nil {
 		r.notifyInstance(*existing.Host)
 	}
@@ -596,6 +618,7 @@ func (r *Resolver) refreshPublicKey(userID, uri string) {
 		return
 	}
 	r.cachePublicKey(userID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	r.cacheAssertionMethods(userID, actor.AssertionMethod)
 }
 
 // cachePublicKey stores a PEM in the in-memory cache and optionally persists
@@ -613,6 +636,59 @@ func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
 			slog.Warn("failed to persist public key", "userId", userID, "err", err)
 		}
 	}
+}
+
+// cacheAssertionMethods parses FEP-521a Multikey entries from a remote actor's
+// `assertionMethod[]` and upserts the recognised Ed25519 keys into
+// user_publickey_extra (#1067 / #1070). decode 失敗・非 Ed25519 multicodec・
+// その他不正 entry は warn log + skip して RSA only にフォールバックする。
+// publickeyExtraRepo 未配線 (= 旧 deployment) のときは何もしない。
+func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multikey) {
+	if r.publickeyExtraRepo == nil || len(ams) == 0 {
+		return
+	}
+	for _, am := range ams {
+		if am.Type != activitypub.MultikeyType || am.ID == "" || am.PublicKeyMultibase == "" {
+			continue
+		}
+		pub, err := activitypub.DecodeEd25519Multikey(am.PublicKeyMultibase)
+		if err != nil {
+			slog.Warn("assertionMethod decode failed",
+				"userID", userID, "keyID", am.ID, "error", err)
+			continue
+		}
+		pemStr, err := activitypub.MarshalEd25519PublicKeyPEM(pub)
+		if err != nil {
+			slog.Warn("assertionMethod PEM marshal failed",
+				"userID", userID, "keyID", am.ID, "error", err)
+			continue
+		}
+		if err := r.publickeyExtraRepo.Upsert(&model.UserPublickeyExtra{
+			UserID: userID,
+			KeyID:  am.ID,
+			KeyPEM: pemStr,
+			Alg:    model.AlgEd25519,
+		}); err != nil {
+			slog.Warn("assertionMethod persist failed",
+				"userID", userID, "keyID", am.ID, "error", err)
+		}
+	}
+}
+
+// PublicKeyForKeyID returns the PEM-encoded public key whose keyId matches the
+// given fragment URI. user_publickey_extra (Ed25519 / Multikey) を最初に探し、
+// miss なら user_publickey の primary key (RSA) を返す fallback semantics。
+// 受信した HTTP Signature の keyId fragment (e.g. `#main-key` / `#ed25519-key`)
+// から正しい公開鍵を選ぶための path で、in-memory cache は介さない (= 永続層
+// の最新値で verify する。assertionMethod が削除されたら次回 fetch で extra
+// 行が古いままになる可能性はあるが、verify はそれでも通る = 後方互換)。
+func (r *Resolver) PublicKeyForKeyID(actorID, keyID string) (string, error) {
+	if r.publickeyExtraRepo != nil && keyID != "" {
+		if row, err := r.publickeyExtraRepo.FindByKeyID(keyID); err == nil {
+			return row.KeyPEM, nil
+		}
+	}
+	return r.PublicKeyForActor(actorID)
 }
 
 // ResolveActorByKeyID resolves an actor based on the keyId fragment URI.
