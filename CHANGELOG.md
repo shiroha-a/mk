@@ -2,6 +2,19 @@
 
 ## 互換バージョン: Misskey 2026.3.2 (base) + drift backlog 適用済 (実質 2026.5.x 相当の挙動)
 
+### Phase 17 — Ed25519 サポート (FEP-521a Multikey, #1067 完了)
+
+mk-go 独自の先行実装として、HTTP Signature の Ed25519 対応を 6 phase で導入。Fedibird (Mastodon フォーク) など FEP-521a 対応サーバーが Ed25519 鍵を expose する流れに先んじて、upstream Misskey TS が未対応の Ed25519 を mk-go では capability-gated で sign/verify する。
+
+- P1 (#1068 / PR #1074): schema migration + 鍵生成 配線。`user_keypair_extra` / `user_publickey_extra` add-only table、signup / systemaccount で RSA と並行発行
+- P2 (#1069 / PR #1078): Renderer で `assertionMethod[]` expose + Multikey encode helper (`github.com/multiformats/go-multibase` 利用)
+- P3 (#1070 / PR #1079): Resolver で remote actor の `assertionMethod[]` parse → `user_publickey_extra` upsert + keyId dual lookup + stale key 自動削除 (key rotation 対応 / security fix)
+- P4 (#1071 / PR #1080): Outbound deliver で capability-gated Ed25519 sign + Redis INCR ベースの 4xx degrade safeguard (閾値 3 / 60s window) + 5min cache + singleflight
+- P5 (#1072 / PR #1081): 既存 local user の lazy backfill (= TS で signup された旧 user に対しても actor JSON 初回 fetch で Ed25519 鍵を自動発行) + singleflight 集約
+- P6 (#1073 / PR #1084): drop-in test に MUST シナリオ (mk-A 切替後の actor JSON で Ed25519 expose / 再 fetch で安定) を追加。SHOULD (mk → TS 戻し連合継続 #1082) / NICE-TO-HAVE (Fedibird mock との Ed25519 verify #1083) は follow-up issue で別途対応
+
+drop-in 互換: 既存 `user_keypair` / `user_publickey` テーブル untouched、Misskey TS は新規 extra テーブル無視 → TS 戻し時の連合継続。`PASSWORD_TOO_LONG` 以外の error code drift も発生せず。
+
 ### Phase 16 — Playwright e2e Phase 1-4 (#744 完了)
 
 両 backend (mk-go / Misskey TS) 並列実行で drop-in 互換 regression を nightly 監視する基盤を 4 phase で整備:

@@ -141,6 +141,84 @@ def test_post_swap_alice_can_reply(
     assert poll_until(_arrived, timeout=120, desc="bob receives reply from mk-A alice")
 
 
+def test_post_swap_alice_actor_exposes_ed25519_assertion_method(
+    instance_a: MisskeyLikeClient,
+    alice: dict,
+) -> None:
+    """P6 (#1073): mk-A 切替後に alice の actor JSON が FEP-521a Multikey
+    形式で Ed25519 公開鍵を `assertionMethod[]` として expose することを
+    検証する。alice は TS-A で signup された旧 user (= P1 マイグレーション前)
+    なので、user_keypair_extra に行が無い状態 → mk-A の lazy backfill が
+    動いて新規 Ed25519 鍵を発行・保存 → actor JSON で expose、の e2e 経路を
+    確認する。
+    """
+    resp = instance_a.http.get(
+        f"/users/{alice['id']}",
+        headers={"Accept": "application/activity+json"},
+    )
+    assert resp.status_code == 200, (
+        f"expected 200 from actor endpoint, got {resp.status_code}"
+    )
+    actor = resp.json()
+
+    # @context に Multikey / Data-Integrity vocab が含まれる
+    ctx = actor.get("@context")
+    assert isinstance(ctx, list), "@context should be an array for Person actor"
+    ctx_strs = [c for c in ctx if isinstance(c, str)]
+    assert "https://w3id.org/security/multikey/v1" in ctx_strs, (
+        "Multikey @context entry missing — lazy backfill or renderer drift"
+    )
+
+    # assertionMethod[0] が Ed25519 Multikey 形式
+    ams = actor.get("assertionMethod")
+    assert isinstance(ams, list) and len(ams) >= 1, (
+        f"lazy backfill did not expose assertionMethod (got: {ams!r})"
+    )
+    am = ams[0]
+    assert am.get("type") == "Multikey", f"unexpected type: {am.get('type')!r}"
+    assert am.get("controller", "").endswith(f"/users/{alice['id']}")
+    assert am.get("id", "").endswith("#ed25519-key"), (
+        f"keyId fragment must be #ed25519-key (got: {am.get('id')!r})"
+    )
+    pkb = am.get("publicKeyMultibase", "")
+    assert pkb.startswith("z6Mk"), (
+        f"Ed25519 Multikey prefix should be z6Mk... (got: {pkb[:8]!r})"
+    )
+
+    # publicKey (RSA) も並行で expose されている — drop-in 互換維持
+    pub = actor.get("publicKey", {})
+    assert "publicKeyPem" in pub, "RSA publicKey must coexist with assertionMethod"
+
+
+def test_post_swap_alice_actor_ed25519_stable_across_refetch(
+    instance_a: MisskeyLikeClient,
+    alice: dict,
+) -> None:
+    """P6 (#1073): backfill 後の Ed25519 鍵が persistent であることを確認。
+    2 回連続で actor JSON を fetch して publicKeyMultibase が同一であれば、
+    lazy backfill が初回のみ実行され、以後は user_keypair_extra に永続化
+    された行が再利用されている (= 鍵 rotation していない)。
+    """
+    def _fetch_multikey() -> str:
+        resp = instance_a.http.get(
+            f"/users/{alice['id']}",
+            headers={"Accept": "application/activity+json"},
+        )
+        assert resp.status_code == 200
+        actor = resp.json()
+        ams = actor.get("assertionMethod") or []
+        assert ams and isinstance(ams, list)
+        return ams[0].get("publicKeyMultibase", "")
+
+    first = _fetch_multikey()
+    second = _fetch_multikey()
+    assert first == second, (
+        "publicKeyMultibase changed across re-fetch — backfill is not "
+        "persisted or InsertIfAbsent semantics broken"
+    )
+    assert first.startswith("z6Mk")
+
+
 def test_post_swap_alice_can_react(
     instance_a: MisskeyLikeClient,
     instance_b: MisskeyLikeClient,
