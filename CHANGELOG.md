@@ -11,7 +11,9 @@ mk-go 独自の先行実装として、HTTP Signature の Ed25519 対応を 6 ph
 - P3 (#1070 / PR #1079): Resolver で remote actor の `assertionMethod[]` parse → `user_publickey_extra` upsert + keyId dual lookup + stale key 自動削除 (key rotation 対応 / security fix)
 - P4 (#1071 / PR #1080): Outbound deliver で capability-gated Ed25519 sign + Redis INCR ベースの 4xx degrade safeguard (閾値 3 / 60s window) + 5min cache + singleflight
 - P5 (#1072 / PR #1081): 既存 local user の lazy backfill (= TS で signup された旧 user に対しても actor JSON 初回 fetch で Ed25519 鍵を自動発行) + singleflight 集約
-- P6 (#1073 / PR #1084): drop-in test に MUST シナリオ (mk-A 切替後の actor JSON で Ed25519 expose / 再 fetch で安定) を追加。SHOULD (mk → TS 戻し連合継続 #1082) / NICE-TO-HAVE (Fedibird mock との Ed25519 verify #1083) は follow-up issue で別途対応
+- P6 (#1073 / PR #1084): drop-in test に MUST シナリオ (mk-A 切替後の actor JSON で Ed25519 expose / 再 fetch で安定) を追加
+- P6 follow-up SHOULD (#1082 / PR #1085): mk-A → TS-A 戻し時の連合継続を drop-in test (`run-swap-test.sh` stage 7-9) で検証
+- P6 follow-up NICE-TO-HAVE (#1083 / PR #1086): Python ベースの Fedibird-like ActivityPub mock (`tests/dropin/fedibird_mock/`) と `run-fedibird-test.sh` orchestrator + `test_fedibird_ed25519.py` 3 経路 (actor fetch / mock→mk-A inbox Ed25519 sign / mk-A→mock outbound Ed25519 sign) を追加
 
 drop-in 互換: 既存 `user_keypair` / `user_publickey` テーブル untouched、Misskey TS は新規 extra テーブル無視 → TS 戻し時の連合継続。`PASSWORD_TOO_LONG` 以外の error code drift も発生せず。
 
