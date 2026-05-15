@@ -38,12 +38,14 @@ type HostBlockChecker interface {
 // 配信先計算と enqueue を分離するため、実際のHTTP送信は queue/processors の
 // DeliverProcessor が担当する。
 type DeliverService struct {
-	enqueuer      queue.Enqueuer
-	userRepo      repository.UserRepository
-	followingRepo repository.FollowingRepository
-	keypairRepo   repository.UserKeypairRepository
-	urls          *activitypub.URLBuilder
-	hostBlocker   HostBlockChecker
+	enqueuer           queue.Enqueuer
+	userRepo           repository.UserRepository
+	followingRepo      repository.FollowingRepository
+	keypairRepo        repository.UserKeypairRepository
+	keypairExtraRepo   repository.UserKeypairExtraRepository   // optional: sender Ed25519 鍵
+	publickeyExtraRepo repository.UserPublickeyExtraRepository // optional: recipient capability 判定
+	urls               *activitypub.URLBuilder
+	hostBlocker        HostBlockChecker
 	// syncDeliverHook, when non-nil, replaces the asynq enqueue with an
 	// inline call to the hook. test 専用で federation deliver の queue 経路
 	// を bypass し、sign + HTTP POST を同期実行する e2e_federation 用。
@@ -74,6 +76,21 @@ func (s *DeliverService) SetHostBlockChecker(c HostBlockChecker) {
 	s.hostBlocker = c
 }
 
+// SetKeypairExtraRepo wires the Ed25519 keypair repository so sender が
+// Ed25519 鍵を持つ場合に DeliverActivityWithRecipient 経路で Ed25519 sign
+// 情報を payload に詰めることができる。未配線なら全配送 RSA fallback
+// (= 旧 deployment と完全互換 / drop-in 維持) (#1067 / #1071)。
+func (s *DeliverService) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
+	s.keypairExtraRepo = r
+}
+
+// SetPublickeyExtraRepo wires the remote Multikey repository so recipient の
+// Ed25519 capability を user_publickey_extra で判定できる。未配線なら全配送
+// RSA fallback (#1067 / #1071)。
+func (s *DeliverService) SetPublickeyExtraRepo(r repository.UserPublickeyExtraRepository) {
+	s.publickeyExtraRepo = r
+}
+
 // SetSyncDeliverHookForTest replaces the asynq enqueue with an inline
 // synchronous call. Used by e2e_federation tests to bypass the queue layer
 // and exercise the sign + POST + inbox handling path directly. Not for
@@ -86,14 +103,38 @@ func (s *DeliverService) SetSyncDeliverHookForTest(fn func(payload queue.Deliver
 
 // DeliverActivity enqueues a deliver job for each unique inbox in inboxes.
 // signerUserID は署名に使うローカルユーザー。ブロック対象ホストの inbox は
-// スキップする。
+// スキップする。受信者の actor 情報を caller が持たない経路 (= followers /
+// inbox list ベース) は RSA only で配送される。受信者 actor URI が分かる
+// 場合は DeliverActivityWithRecipient を使うと FEP-521a Multikey 対応サーバー
+// 向けに Ed25519 sign が試行される (#1067 / #1071)。
 func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inboxes []string) error {
+	return s.deliverInternal(signerUserID, body, inboxes, nil)
+}
+
+// DeliverActivityWithRecipient is DeliverActivity + recipient capability based
+// Ed25519 sign 試行。recipient が user_publickey_extra に Ed25519 鍵を持ち、
+// sender が user_keypair_extra に Ed25519 鍵を持つ場合、payload に Ed25519
+// 鍵情報も詰める (DeliverProcessor 側で実際の sign 分岐 + degrade safeguard
+// を担う)。recipient == nil なら DeliverActivity と等価動作 (#1067 / #1071)。
+func (s *DeliverService) DeliverActivityWithRecipient(signerUserID string, body []byte, inboxes []string, recipient *model.User) error {
+	return s.deliverInternal(signerUserID, body, inboxes, recipient)
+}
+
+func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inboxes []string, recipient *model.User) error {
 	if len(inboxes) == 0 {
 		return nil
 	}
 	keyID, keyPEM, err := s.signerCredentials(signerUserID)
 	if err != nil {
 		return err
+	}
+	// Ed25519 sign 経路を試行できるのは recipient が Ed25519 capable
+	// (assertionMethod を持つ) + sender が Ed25519 keypair を持つ両方が
+	// 真のときのみ。どちらかが false なら edKeyID/edPrivPEM は空のまま payload
+	// に詰められ、DeliverProcessor は従来通り RSA で sign する。
+	var edKeyID, edPrivPEM string
+	if recipient != nil && s.recipientIsEd25519Capable(recipient) {
+		edKeyID, edPrivPEM = s.signerEd25519Credentials(signerUserID)
 	}
 	seen := make(map[string]struct{}, len(inboxes))
 	for _, inbox := range inboxes {
@@ -108,10 +149,12 @@ func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inbox
 		}
 		seen[inbox] = struct{}{}
 		payload := queue.DeliverPayload{
-			Inbox:  inbox,
-			Body:   body,
-			KeyID:  keyID,
-			KeyPEM: keyPEM,
+			Inbox:          inbox,
+			Body:           body,
+			KeyID:          keyID,
+			KeyPEM:         keyPEM,
+			Ed25519KeyID:   edKeyID,
+			Ed25519PrivPEM: edPrivPEM,
 		}
 		if s.syncDeliverHook != nil {
 			// test 経路 (#780): queue を経由せず inline で sign + POST。
@@ -125,6 +168,35 @@ func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inbox
 		}
 	}
 	return nil
+}
+
+// recipientIsEd25519Capable reports whether the recipient actor has at least
+// one Ed25519 entry in user_publickey_extra (= 受信側が FEP-521a Multikey で
+// Ed25519 を expose している)。未配線時 / DB error / 行なしのいずれも false
+// (= 安全側で RSA fallback)。
+func (s *DeliverService) recipientIsEd25519Capable(recipient *model.User) bool {
+	if s.publickeyExtraRepo == nil || recipient == nil {
+		return false
+	}
+	rows, err := s.publickeyExtraRepo.ListByUserID(recipient.ID)
+	if err != nil {
+		return false
+	}
+	return len(rows) > 0
+}
+
+// signerEd25519Credentials returns (keyId, PEM) for the local signer's
+// Ed25519 keypair. 未配線時 / 鍵未発行 (= P5 backfill 前の旧 user) のいずれも
+// 空文字列を返し、caller 側で RSA only にフォールバックする。
+func (s *DeliverService) signerEd25519Credentials(userID string) (string, string) {
+	if s.keypairExtraRepo == nil {
+		return "", ""
+	}
+	kp, err := s.keypairExtraRepo.FindByUserID(userID)
+	if err != nil {
+		return "", ""
+	}
+	return s.urls.UserURI(userID) + "#ed25519-key", kp.Ed25519PrivateKey
 }
 
 // isBlockedInbox returns true when the inbox URL points at a host the local
@@ -157,7 +229,8 @@ func (s *DeliverService) DeliverToFollowers(signerUserID string, body []byte) er
 
 // DeliverToUser enqueues a delivery to a single recipient user. Local users
 // are skipped (no AP delivery needed). リモートユーザーの sharedInbox があれば
-// 優先する。
+// 優先する。recipient actor が既知なので FEP-521a Multikey による Ed25519
+// sign を試行する経路 (DeliverActivityWithRecipient) を使う (#1067 / #1071)。
 func (s *DeliverService) DeliverToUser(signerUserID string, recipient *model.User, body []byte) error {
 	if recipient == nil || recipient.IsLocal() {
 		return nil
@@ -166,7 +239,7 @@ func (s *DeliverService) DeliverToUser(signerUserID string, recipient *model.Use
 	if inbox == "" {
 		return nil
 	}
-	return s.DeliverActivity(signerUserID, body, []string{inbox})
+	return s.DeliverActivityWithRecipient(signerUserID, body, []string{inbox}, recipient)
 }
 
 // signerCredentials returns the keyId URI and PEM private key for a local

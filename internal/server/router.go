@@ -534,6 +534,10 @@ func (s *Server) setupRoutes() {
 	// AP delivery: DeliverService + フック登録 + asynq processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
 	deliverService.SetHostBlockChecker(instanceService)
+	// FEP-521a Multikey 対応で recipient capable + sender Ed25519 鍵あり 経路で
+	// Ed25519 sign を試行できるよう wire (#1067 / #1071)。
+	deliverService.SetKeypairExtraRepo(keypairExtraRepo)
+	deliverService.SetPublickeyExtraRepo(repository.NewUserPublickeyExtraRepository(s.db))
 	// test (#780) で queue を bypass して同期 deliver する hook を後付けで
 	// 差し替えられるよう、Server から参照を保持する。
 	s.deliverSvc = deliverService
@@ -573,6 +577,10 @@ func (s *Server) setupRoutes() {
 	deliverProcessor := processors.NewDeliverProcessor(apClient)
 	// 配信結果に応じて instance.isNotResponding を更新する
 	deliverProcessor.SetResponseHook(instanceService)
+	// FEP-521a Multikey 対応で host 単位の Ed25519 degrade flag を Redis に
+	// 持つ (#1067 / #1071)。Ed25519 sign 失敗時 5min 同 host を RSA only に
+	// 縮退する safety net。
+	deliverProcessor.SetRedis(s.redis.Default)
 	// deliverSuspendedSoftware: 対象インスタンスへの配送をスキップする
 	if suspMeta, err := metaRepo.Fetch(); err == nil && len(suspMeta.DeliverSuspendedSoftware) > 0 {
 		deliverProcessor.SetSuspendedChecker(

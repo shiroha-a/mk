@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -51,11 +53,61 @@ type DeliverProcessor struct {
 	responseHook     ResponseHook
 	chartHook        ChartHook
 	suspendedChecker SuspendedChecker
+	// redis is used for the per-host Ed25519 degrade flag (#1067 / #1071).
+	// 未配線時は capability gate なしの楽観動作 (= payload に Ed25519 鍵が
+	// あれば必ず Ed25519 sign を試す) になるが、production では必須。
+	redis *redis.Client
 }
 
 // NewDeliverProcessor constructs a DeliverProcessor.
 func NewDeliverProcessor(signer HTTPSigner) *DeliverProcessor {
 	return &DeliverProcessor{signer: signer}
+}
+
+// SetRedis attaches a Redis client used to persist per-host Ed25519 degrade
+// flags. Ed25519 sign + POST が 4xx で失敗した host は `ed25519:degrade:<host>`
+// に EX=300 で記録され、以後 5 分間は同 host への配送が即 RSA fallback される
+// (= "assertionMethod を expose しているが Ed25519 verify が壊れている" 実装
+// に対する safety net #1067 / #1071)。
+func (p *DeliverProcessor) SetRedis(c *redis.Client) {
+	p.redis = c
+}
+
+// ed25519DegradeTTL is how long a host stays degraded after an Ed25519 4xx
+// failure. 5 分は production observation で「broken impl の修正 deploy」に
+// 必要な時間より長い (= 改善が deploy されれば自動回復する) ことを想定。
+const ed25519DegradeTTL = 5 * time.Minute
+
+func ed25519DegradeKey(host string) string {
+	return "ed25519:degrade:" + host
+}
+
+// isEd25519Degraded reports whether the host has the Ed25519 degrade flag
+// set in Redis. Redis 未配線 or empty host or Redis 障害は false (= 安全側
+// で Ed25519 試行を継続)。
+func (p *DeliverProcessor) isEd25519Degraded(host string) bool {
+	if p.redis == nil || host == "" {
+		return false
+	}
+	n, err := p.redis.Exists(context.Background(), ed25519DegradeKey(host)).Result()
+	if err != nil {
+		// Redis 障害時は flag 判定不能 → 安全側に倒して "未 degrade" 扱い
+		// (= 引き続き Ed25519 試行)。flag セット側も同じく fail-soft なので
+		// 一時的 Redis 障害でも deliver は止まらない。
+		return false
+	}
+	return n > 0
+}
+
+// markEd25519Degraded sets the Ed25519 degrade flag for the host with the
+// default TTL. Redis 未配線 or empty host or Redis error は best-effort skip。
+func (p *DeliverProcessor) markEd25519Degraded(host string) {
+	if p.redis == nil || host == "" {
+		return
+	}
+	if err := p.redis.Set(context.Background(), ed25519DegradeKey(host), "1", ed25519DegradeTTL).Err(); err != nil {
+		slog.Warn("ed25519 degrade flag set failed", "host", host, "error", err)
+	}
 }
 
 // SetSuspendedChecker attaches a checker for deliverSuspendedSoftware.
@@ -116,26 +168,21 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		return fmt.Errorf("decode deliver payload: %w: %w", err, driver.SkipRetry)
 	}
 
-	key, err := activitypub.NewPrivateKey(payload.KeyID, payload.KeyPEM)
-	if err != nil {
-		// 鍵が壊れているジョブも同様にスキップする。
-		return fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
-	}
-
 	// deliverSuspendedSoftware: 対象インスタンスの software がリストに該当すればスキップ
-	if p.suspendedChecker != nil {
-		host := hostFromInbox(payload.Inbox)
-		if host != "" && p.suspendedChecker.IsSuspended(host) {
-			slog.Info("ap deliver: skip (software suspended)", "inbox", payload.Inbox)
-			return nil
-		}
+	host := hostFromInbox(payload.Inbox)
+	if p.suspendedChecker != nil && host != "" && p.suspendedChecker.IsSuspended(host) {
+		slog.Info("ap deliver: skip (software suspended)", "inbox", payload.Inbox)
+		return nil
 	}
 
-	resp, err := p.signer.PostSigned(payload.Inbox, payload.Body, key)
+	// Ed25519 sign 経路: payload に Ed25519 鍵情報があり (= DeliverService が
+	// recipient capable と判定) かつ host が degrade flag に立っていない
+	// (= 過去 5min 以内に Ed25519 4xx 失敗がない) ときに試す (#1067 / #1071)。
+	useEd25519 := payload.Ed25519PrivPEM != "" && !p.isEd25519Degraded(host)
+
+	resp, err := p.sendOnce(payload, useEd25519)
 	if err != nil {
-		// ネットワークエラーや接続失敗はリトライする。
-		slog.Warn("ap deliver: post failed",
-			"inbox", payload.Inbox, "err", err)
+		// network error / parse error は再投函。詳細は sendOnce 内で log 済。
 		p.recordError(payload.Inbox)
 		return err
 	}
@@ -143,6 +190,27 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
+
+	// Ed25519 sign で 4xx が返った場合は host を degrade して RSA で 1 回 retry
+	// する safety net。"assertionMethod を expose しているが Ed25519 verify が
+	// 壊れている" broken impl 対策。retry も失敗したら通常 4xx 経路で扱う。
+	if useEd25519 && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusGone && resp.StatusCode != http.StatusNotFound {
+		slog.Warn("ap deliver: ed25519 4xx, degrading host + retry with RSA",
+			"host", host, "status", resp.StatusCode)
+		p.markEd25519Degraded(host)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		var retryErr error
+		resp, retryErr = p.sendOnce(payload, false) // false = RSA
+		if retryErr != nil {
+			p.recordError(payload.Inbox)
+			return retryErr
+		}
+		defer func() {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
@@ -170,4 +238,37 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		p.recordError(payload.Inbox)
 		return errors.New("server error: " + resp.Status)
 	}
+}
+
+// sendOnce performs one signed POST attempt. useEd25519=true なら
+// payload.Ed25519KeyID + Ed25519PrivPEM で sign、それ以外は RSA。鍵 parse 失敗
+// 時は (useEd25519=true ならば) RSA に fallback する。RSA 鍵自体が壊れている
+// 場合は driver.SkipRetry で投函を中止。
+func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 bool) (*http.Response, error) {
+	if useEd25519 {
+		key, err := activitypub.NewEd25519PrivateKey(payload.Ed25519KeyID, payload.Ed25519PrivPEM)
+		if err == nil {
+			resp, perr := p.signer.PostSigned(payload.Inbox, payload.Body, key)
+			if perr != nil {
+				slog.Warn("ap deliver: ed25519 post failed",
+					"inbox", payload.Inbox, "err", perr)
+				return nil, perr
+			}
+			return resp, nil
+		}
+		slog.Warn("ap deliver: ed25519 key parse failed, falling back to RSA",
+			"inbox", payload.Inbox, "err", err)
+		// fallthrough: RSA で sign
+	}
+	key, err := activitypub.NewPrivateKey(payload.KeyID, payload.KeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
+	}
+	resp, perr := p.signer.PostSigned(payload.Inbox, payload.Body, key)
+	if perr != nil {
+		slog.Warn("ap deliver: post failed",
+			"inbox", payload.Inbox, "err", perr)
+		return nil, perr
+	}
+	return resp, nil
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -154,6 +156,144 @@ func TestDeliverProcessor_BadKey_SkipsRetry(t *testing.T) {
 	err := p.Handle(context.Background(), makeTask(t, payload))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, driver.SkipRetry)
+}
+
+// --- Ed25519 sign / capability gate / degrade safeguard (#1067 / #1071) ---
+
+// recordingSigner records every PostSigned call so multi-call test (Ed25519
+// 4xx → RSA retry) can assert which keyId was used in each attempt.
+type recordingSigner struct {
+	responses []*http.Response // pop in order
+	errs      []error
+	calls     []string // recorded KeyID for each call
+}
+
+func (r *recordingSigner) PostSigned(_ string, _ []byte, key *activitypub.PrivateKey) (*http.Response, error) {
+	if key != nil {
+		r.calls = append(r.calls, key.KeyID)
+	}
+	if len(r.responses) == 0 && len(r.errs) == 0 {
+		return okResponse(http.StatusOK), nil
+	}
+	if len(r.errs) > 0 && r.errs[0] != nil {
+		err := r.errs[0]
+		r.errs = r.errs[1:]
+		if len(r.responses) > 0 {
+			r.responses = r.responses[1:]
+		}
+		return nil, err
+	}
+	resp := r.responses[0]
+	r.responses = r.responses[1:]
+	if len(r.errs) > 0 {
+		r.errs = r.errs[1:]
+	}
+	return resp, nil
+}
+
+// generateTestEd25519Key returns a freshly minted PEM-encoded Ed25519 (PKCS8)
+// private key for the processor to parse via activitypub.NewEd25519PrivateKey.
+func generateTestEd25519Key(t *testing.T) string {
+	t.Helper()
+	priv, _, err := activitypub.GenerateEd25519Keypair()
+	require.NoError(t, err)
+	return priv
+}
+
+// payload に Ed25519 鍵情報がある場合、processor は Ed25519 で sign する。
+func TestDeliverProcessor_Ed25519_PreferredWhenPayloadHasKey(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = generateTestEd25519Key(t)
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.Ed25519KeyID, signer.calls[0], "Ed25519 key was used for signing")
+}
+
+// payload に Ed25519 鍵情報がない場合は従来通り RSA で sign される。
+func TestDeliverProcessor_Ed25519_AbsentFallbackToRSA(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+
+	payload := makePayload(t) // Ed25519KeyID / Ed25519PrivPEM は空
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.KeyID, signer.calls[0], "RSA key was used")
+}
+
+// Ed25519 PEM が壊れていれば RSA に fallback する (fail-soft)。
+func TestDeliverProcessor_Ed25519_MalformedKeyFallsBackToRSA(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = "NOT A VALID PEM"
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.KeyID, signer.calls[0])
+}
+
+// Ed25519 sign で 4xx が返ったら host を degrade flag に立てて RSA で再送する。
+// 同一 task 内で 2 回 PostSigned が呼ばれ、それぞれ Ed25519 → RSA の順。
+func TestDeliverProcessor_Ed25519_4xxTriggersDegradeAndRSARetry(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	signer := &recordingSigner{
+		responses: []*http.Response{
+			okResponse(http.StatusBadRequest),
+			okResponse(http.StatusOK),
+		},
+	}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetRedis(rdb)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = generateTestEd25519Key(t)
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 2, "Ed25519 4xx → RSA retry の 2 段送信")
+	assert.Equal(t, payload.Ed25519KeyID, signer.calls[0])
+	assert.Equal(t, payload.KeyID, signer.calls[1])
+
+	// Redis に degrade flag が立っている
+	ok, err := rdb.Exists(context.Background(), "ed25519:degrade:remote.example").Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, ok)
+}
+
+// degrade flag が立っている host への deliver は最初から RSA で送られる。
+func TestDeliverProcessor_Ed25519_DegradeFlagSkipsEd25519(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	// 事前に degrade flag を立てる
+	require.NoError(t, rdb.Set(context.Background(), "ed25519:degrade:remote.example", "1", 0).Err())
+
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetRedis(rdb)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = generateTestEd25519Key(t)
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.KeyID, signer.calls[0], "degrade flag により最初から RSA で送信")
 }
 
 // stubResponseHook captures host events for assertions.

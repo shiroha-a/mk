@@ -3717,6 +3717,29 @@ func (s *stubPublickeyExtraRepo) DeleteByKeyID(userID, keyID string) error {
 	return nil
 }
 
+// 以下は repository.UserPublickeyExtraRepository interface 完全実装のための
+// stub。resolver test では使わないが、同 package 内の deliver_service_test
+// で stub を流用するために必要 (#1067 / #1071)。
+func (s *stubPublickeyExtraRepo) FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if pk, ok := s.entries[keyID]; ok && pk.UserID == userID {
+		return pk, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *stubPublickeyExtraRepo) DeleteByUserID(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for keyID, pk := range s.entries {
+		if pk.UserID == userID {
+			delete(s.entries, keyID)
+		}
+	}
+	return nil
+}
+
 // stubPublickeyRepo は keys map race test 用の minimal な PublickeyStore
 // 実装。本物の publickey_repo は GORM 経由なのでテストでは差し替える。
 type stubPublickeyRepo struct {

@@ -84,6 +84,129 @@ type stubBlocker struct {
 func (s *stubBlocker) IsBlocked(host string) bool { return s.blocked[host] }
 func (s *stubBlocker) IsAllowed(host string) bool { return !s.disallowed[host] }
 
+// --- Ed25519 capability gate (#1067 / #1071) ---
+
+// stubKeypairExtraRepo implements repository.UserKeypairExtraRepository in
+// memory for capability tests.
+type stubKeypairExtraRepo struct {
+	rows map[string]*model.UserKeypairExtra
+}
+
+func (s *stubKeypairExtraRepo) Upsert(k *model.UserKeypairExtra) error {
+	if s.rows == nil {
+		s.rows = map[string]*model.UserKeypairExtra{}
+	}
+	s.rows[k.UserID] = k
+	return nil
+}
+
+func (s *stubKeypairExtraRepo) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
+	if k, ok := s.rows[userID]; ok {
+		return k, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *stubKeypairExtraRepo) Delete(_ string) error { return nil }
+
+// recipient (= remote user) が user_publickey_extra に Ed25519 行を持ち、
+// sender も user_keypair_extra に Ed25519 鍵を持つときだけ payload に
+// Ed25519 鍵情報が詰められる。
+func TestDeliverToUser_WithEd25519CapableRecipient_AddsEd25519Payload(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+
+	// sender に Ed25519 鍵 wire
+	kpExtra := &stubKeypairExtraRepo{}
+	require.NoError(t, kpExtra.Upsert(&model.UserKeypairExtra{
+		UserID: "alice", Ed25519PublicKey: "PUB-ED", Ed25519PrivateKey: "PRIV-ED",
+	}))
+	svc.SetKeypairExtraRepo(kpExtra)
+
+	// recipient (= bob) を Ed25519 capable に設定
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+	pkExtra := &stubPublickeyExtraRepo{}
+	require.NoError(t, pkExtra.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "https://remote.example/users/bob#ed25519-key",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nB\n-----END PUBLIC KEY-----",
+		Alg:    model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(pkExtra)
+
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{"type":"Create"}`)))
+	require.Len(t, enq.calls, 1)
+	got := enq.calls[0]
+	assert.Equal(t, "https://example.com/users/alice#ed25519-key", got.Ed25519KeyID)
+	assert.Equal(t, "PRIV-ED", got.Ed25519PrivPEM)
+	assert.Equal(t, "PEM-DATA", got.KeyPEM, "RSA も並行で詰められる (Processor 側 fallback 用)")
+}
+
+// recipient が Ed25519 capable でない → payload に Ed25519 鍵情報なし
+// (= 従来通り RSA only)。
+func TestDeliverToUser_WithRSAOnlyRecipient_NoEd25519Payload(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+
+	kpExtra := &stubKeypairExtraRepo{}
+	require.NoError(t, kpExtra.Upsert(&model.UserKeypairExtra{
+		UserID: "alice", Ed25519PublicKey: "PUB-ED", Ed25519PrivateKey: "PRIV-ED",
+	}))
+	svc.SetKeypairExtraRepo(kpExtra)
+
+	// recipient (= bob) は Ed25519 capable でない (= ListByUserID が空 slice)
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+	svc.SetPublickeyExtraRepo(&stubPublickeyExtraRepo{})
+
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	require.Len(t, enq.calls, 1)
+	assert.Empty(t, enq.calls[0].Ed25519KeyID)
+	assert.Empty(t, enq.calls[0].Ed25519PrivPEM)
+}
+
+// sender が Ed25519 鍵を持たない (= P5 backfill 前の旧 user) なら payload に
+// Ed25519 情報なし。
+func TestDeliverToUser_SenderWithoutEd25519Key_NoEd25519Payload(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+
+	// sender の Ed25519 鍵を wire しない (keypairExtraRepo 未配線 = nil)
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+	pkExtra := &stubPublickeyExtraRepo{}
+	require.NoError(t, pkExtra.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "k", KeyPEM: "P", Alg: model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(pkExtra)
+
+	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	require.Len(t, enq.calls, 1)
+	assert.Empty(t, enq.calls[0].Ed25519KeyID)
+}
+
+// DeliverActivity (= recipient 不明な経路) は常に Ed25519 鍵情報を詰めない。
+func TestDeliverActivity_NoRecipientNoEd25519Payload(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+
+	// extra repo を wire しても、recipient が渡らない経路では Ed25519 詰めない
+	kpExtra := &stubKeypairExtraRepo{}
+	require.NoError(t, kpExtra.Upsert(&model.UserKeypairExtra{
+		UserID: "alice", Ed25519PublicKey: "P", Ed25519PrivateKey: "K",
+	}))
+	svc.SetKeypairExtraRepo(kpExtra)
+	pkExtra := &stubPublickeyExtraRepo{}
+	require.NoError(t, pkExtra.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "k", KeyPEM: "P", Alg: model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(pkExtra)
+
+	require.NoError(t, svc.DeliverActivity("alice", []byte(`{}`), []string{"https://remote.example/inbox"}))
+	require.Len(t, enq.calls, 1)
+	assert.Empty(t, enq.calls[0].Ed25519KeyID, "recipient 不明経路は RSA only")
+}
+
 func TestDeliverActivity_SkipsBlockedHosts(t *testing.T) {
 	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)

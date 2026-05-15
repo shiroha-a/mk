@@ -128,6 +128,14 @@ type DeliverPayload struct {
 	KeyID string `json:"keyId"`
 	// KeyPEM is the PEM-encoded RSA private key for signing the request.
 	KeyPEM string `json:"keyPem"`
+	// Ed25519KeyID is the Ed25519 HTTP Signature keyId
+	// (e.g. https://example.com/users/u1#ed25519-key) で、recipient が FEP-521a
+	// Multikey で Ed25519 を expose していると DeliverService が判断したとき
+	// のみ詰める。未設定なら DeliverProcessor は従来通り RSA で sign する
+	// (#1067 / #1071)。
+	Ed25519KeyID string `json:"ed25519KeyId,omitempty"`
+	// Ed25519PrivPEM is the PEM-encoded Ed25519 (PKCS8) private key.
+	Ed25519PrivPEM string `json:"ed25519PrivPem,omitempty"`
 }
 
 // NewDeliverTask serializes the payload into a driver.Task ready to
