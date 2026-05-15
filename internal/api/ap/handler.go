@@ -4,6 +4,8 @@ package ap
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/gorm"
 )
 
 // RemoteFetcher fetches remote ActivityPub objects.
@@ -98,16 +101,27 @@ func (h *Handler) SetKeypairExtraRepo(r repository.UserKeypairExtraRepository) {
 // when keypairExtraRepo is wired AND an Ed25519 row exists. It returns nil on
 // any of: repo unwired / row missing / PEM parse failure (fail-soft to RSA
 // only — drop-in 互換維持)。
+//
+// "row missing" は P5 backfill 前の通常状態なので silently skip するが、
+// それ以外の DB error / PEM parse error は診断のため warn log を出す。これが
+// 無いと一時的 PostgreSQL 障害で全 user の actor JSON から Ed25519 が消える
+// silent degradation が発生したとき気付けない。
 func (h *Handler) lookupEd25519PublicKey(userID string) ed25519.PublicKey {
 	if h.keypairExtraRepo == nil {
 		return nil
 	}
 	row, err := h.keypairExtraRepo.FindByUserID(userID)
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("ed25519 keypair lookup failed",
+				"userID", userID, "error", err)
+		}
 		return nil
 	}
 	pub, err := activitypub.ParseEd25519PublicKeyPEM(row.Ed25519PublicKey)
 	if err != nil {
+		slog.Warn("ed25519 PEM parse failed",
+			"userID", userID, "error", err)
 		return nil
 	}
 	return pub

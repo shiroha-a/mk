@@ -87,6 +87,17 @@ func TestRenderer_RenderPerson_AssertionMethodOmittedWhenNoEd25519(t *testing.T)
 	assert.Empty(t, p.AssertionMethod)
 }
 
+// 32 byte 以外の "Ed25519" 鍵 (= 仕様違反) を渡した場合は EncodeEd25519Multikey
+// が error を返し、Renderer は assertionMethod を omit して fail-soft で
+// 動作する (#1067 / #1069)。
+func TestRenderer_RenderPerson_InvalidEd25519KeySize_FailsSoft(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u1", Username: "alice"}
+	short := ed25519.PublicKey(make([]byte, 16)) // 仕様違反
+	p := r.RenderPerson(u, nil, "PUBKEY", short)
+	assert.Empty(t, p.AssertionMethod)
+}
+
 func TestRenderer_RenderPerson_AssertionMethodWithEd25519(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "alice"}

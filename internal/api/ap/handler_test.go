@@ -153,6 +153,31 @@ func TestUser_WithEd25519Repo_NoRowForUser(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
 }
 
+// keypairExtraRepo の FindByUserID が gorm.ErrRecordNotFound 以外の DB error
+// を返した場合も AssertionMethod を omit して RSA only で 200 を返す
+// (fail-soft)。silent degradation の診断は slog.Warn 経由で記録される。
+type failingKeypairExtraRepo struct {
+	err error
+}
+
+func (f *failingKeypairExtraRepo) Upsert(_ *model.UserKeypairExtra) error { return f.err }
+func (f *failingKeypairExtraRepo) FindByUserID(_ string) (*model.UserKeypairExtra, error) {
+	return nil, f.err
+}
+func (f *failingKeypairExtraRepo) Delete(_ string) error { return f.err }
+
+func TestUser_WithEd25519Repo_DBError_FailsSoft(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUBKEY"}
+	h.SetKeypairExtraRepo(&failingKeypairExtraRepo{err: errors.New("connection refused")})
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"assertionMethod"`)
+}
+
 // keypairExtraRepo が wire 済 + Ed25519 row はあるが PEM が壊れている場合 →
 // silently skip して AssertionMethod を omit する (= RSA only に fail-soft)。
 func TestUser_WithEd25519Repo_MalformedPEM_FailsSoft(t *testing.T) {

@@ -251,7 +251,9 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	// 追加 expose する。Fedibird など FEP-521a 対応サーバーが Ed25519 鍵で
 	// HTTP Signature を verify できるようにするための拡張 (#1067 / #1069)。
 	// keyId fragment は `#ed25519-key` を採用 (Fedibird / Mastodon glitch-soc
-	// と同じ慣習)。
+	// と同じ慣習)。encode error (= key size != 32 byte) は production では
+	// 発火しない理論上の defensive path だが、診断のため warn log を出して
+	// silent omission を回避する。
 	if ed25519PublicKey != nil {
 		if mb, err := EncodeEd25519Multikey(ed25519PublicKey); err == nil {
 			p.AssertionMethod = []Multikey{{
@@ -260,6 +262,9 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 				Controller:         uri,
 				PublicKeyMultibase: mb,
 			}}
+		} else {
+			slog.Warn("ed25519 multikey encode failed",
+				"userID", u.ID, "error", err)
 		}
 	}
 	if u.AvatarURL != nil {
