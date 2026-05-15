@@ -239,9 +239,9 @@ func TestDeliverProcessor_Ed25519_MalformedKeyFallsBackToRSA(t *testing.T) {
 	assert.Equal(t, payload.KeyID, signer.calls[0])
 }
 
-// Ed25519 sign で 4xx が返ったら host を degrade flag に立てて RSA で再送する。
-// 同一 task 内で 2 回 PostSigned が呼ばれ、それぞれ Ed25519 → RSA の順。
-func TestDeliverProcessor_Ed25519_4xxTriggersDegradeAndRSARetry(t *testing.T) {
+// Ed25519 sign で 4xx が返ったら fail counter を INCR し、3 件未満なら
+// degrade flag は立てずに RSA で再送する (= 1 件 false positive を防ぐ)。
+func TestDeliverProcessor_Ed25519_4xxIncrementsCounterButNoDegrade(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -266,10 +266,47 @@ func TestDeliverProcessor_Ed25519_4xxTriggersDegradeAndRSARetry(t *testing.T) {
 	assert.Equal(t, payload.Ed25519KeyID, signer.calls[0])
 	assert.Equal(t, payload.KeyID, signer.calls[1])
 
-	// Redis に degrade flag が立っている
-	ok, err := rdb.Exists(context.Background(), "ed25519:degrade:remote.example").Result()
+	// fail counter は 1、degrade flag は立たない (= threshold=3 で trip するため)
+	cnt, err := rdb.Get(context.Background(), "ed25519:fail:remote.example").Result()
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, ok)
+	assert.Equal(t, "1", cnt)
+	degraded, err := rdb.Exists(context.Background(), "ed25519:degrade:remote.example").Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, degraded, "1 件失敗では degrade は立たない")
+}
+
+// 3 件連続 Ed25519 4xx で fail counter が threshold (3) に達したら degrade
+// flag が立つ。以後 5min は同 host への deliver が即 RSA に縮退する。
+func TestDeliverProcessor_Ed25519_3xFailureTripsDegrade(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+
+	// 3 件分の Ed25519 4xx + 3 件分の RSA retry 200 を用意
+	signer := &recordingSigner{
+		responses: []*http.Response{
+			okResponse(http.StatusBadRequest), okResponse(http.StatusOK),
+			okResponse(http.StatusBadRequest), okResponse(http.StatusOK),
+			okResponse(http.StatusBadRequest), okResponse(http.StatusOK),
+		},
+	}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetRedis(rdb)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = generateTestEd25519Key(t)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	}
+
+	// counter が threshold に達して degrade flag が立つ
+	degraded, err := rdb.Exists(context.Background(), "ed25519:degrade:remote.example").Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, degraded, "3 件失敗で degrade 確定")
 }
 
 // degrade flag が立っている host への deliver は最初から RSA で送られる。

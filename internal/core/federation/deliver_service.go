@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/model"
@@ -32,6 +34,23 @@ type HostBlockChecker interface {
 	IsAllowed(host string) bool
 }
 
+// ed25519CacheTTL is how long recipient capability / sender Ed25519 keypair
+// lookups stay in the in-memory cache. 5 分は actor refresh の actorTTL より
+// 短く、Ed25519 鍵 rotation を検出する時間としては十分。capabilityCache に
+// 入ったあとは同 recipient への deliver で DB を叩かない (#1080 review #2/#3)。
+const ed25519CacheTTL = 5 * time.Minute
+
+type ed25519CapEntry struct {
+	capable   bool
+	fetchedAt time.Time
+}
+
+type ed25519SignerEntry struct {
+	keyID     string
+	privPEM   string
+	fetchedAt time.Time
+}
+
 // DeliverService computes recipient inboxes and enqueues HTTP-signed delivery
 // jobs onto the asynq queue.
 //
@@ -51,6 +70,13 @@ type DeliverService struct {
 	// を bypass し、sign + HTTP POST を同期実行する e2e_federation 用。
 	// production code から SetSyncDeliverHook を呼ばないこと (#780)。
 	syncDeliverHook func(payload queue.DeliverPayload) error
+	// capCache / signerCache は recipient capability / sender Ed25519 鍵の
+	// 短期 in-memory cache (#1080 review #2/#3)。多 deliver で DB を叩く
+	// N+1 を抑えるため、TTL 5min で lookup を memoize する。actor 削除 /
+	// 鍵 rotation 後は TTL 経過で自動的に refresh される。
+	capCache    sync.Map         // string (userID) -> ed25519CapEntry
+	signerCache sync.Map         // string (userID) -> ed25519SignerEntry
+	clock       func() time.Time // テストで差し替え可能
 }
 
 // NewDeliverService constructs a DeliverService.
@@ -67,6 +93,7 @@ func NewDeliverService(
 		followingRepo: followingRepo,
 		keypairRepo:   keypairRepo,
 		urls:          urls,
+		clock:         time.Now,
 	}
 }
 
@@ -173,30 +200,58 @@ func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inbox
 // recipientIsEd25519Capable reports whether the recipient actor has at least
 // one Ed25519 entry in user_publickey_extra (= 受信側が FEP-521a Multikey で
 // Ed25519 を expose している)。未配線時 / DB error / 行なしのいずれも false
-// (= 安全側で RSA fallback)。
+// (= 安全側で RSA fallback)。capCache で TTL 5min 結果を memoize し、N+1
+// query を抑える (#1080 review #2)。
 func (s *DeliverService) recipientIsEd25519Capable(recipient *model.User) bool {
 	if s.publickeyExtraRepo == nil || recipient == nil {
 		return false
 	}
+	if cached, ok := s.capCache.Load(recipient.ID); ok {
+		entry := cached.(ed25519CapEntry)
+		if s.clock().Sub(entry.fetchedAt) <= ed25519CacheTTL {
+			return entry.capable
+		}
+	}
 	rows, err := s.publickeyExtraRepo.ListByUserID(recipient.ID)
 	if err != nil {
+		// DB error は cache せず次回 retry させる
 		return false
 	}
-	return len(rows) > 0
+	capable := len(rows) > 0
+	s.capCache.Store(recipient.ID, ed25519CapEntry{
+		capable:   capable,
+		fetchedAt: s.clock(),
+	})
+	return capable
 }
 
 // signerEd25519Credentials returns (keyId, PEM) for the local signer's
 // Ed25519 keypair. 未配線時 / 鍵未発行 (= P5 backfill 前の旧 user) のいずれも
-// 空文字列を返し、caller 側で RSA only にフォールバックする。
+// 空文字列を返し、caller 側で RSA only にフォールバックする。signerCache で
+// TTL 5min 結果を memoize し、N+1 query を抑える (#1080 review #3)。
 func (s *DeliverService) signerEd25519Credentials(userID string) (string, string) {
 	if s.keypairExtraRepo == nil {
 		return "", ""
 	}
+	if cached, ok := s.signerCache.Load(userID); ok {
+		entry := cached.(ed25519SignerEntry)
+		if s.clock().Sub(entry.fetchedAt) <= ed25519CacheTTL {
+			return entry.keyID, entry.privPEM
+		}
+	}
 	kp, err := s.keypairExtraRepo.FindByUserID(userID)
 	if err != nil {
+		// 鍵未発行は cache に空 entry を入れて再 query を抑える
+		s.signerCache.Store(userID, ed25519SignerEntry{fetchedAt: s.clock()})
 		return "", ""
 	}
-	return s.urls.UserURI(userID) + "#ed25519-key", kp.Ed25519PrivateKey
+	keyID := s.urls.UserURI(userID) + "#ed25519-key"
+	s.signerCache.Store(userID, ed25519SignerEntry{
+		keyID:     keyID,
+		privPEM:   kp.Ed25519PrivateKey,
+		fetchedAt: s.clock(),
+	})
+	return keyID, kp.Ed25519PrivateKey
 }
 
 // isBlockedInbox returns true when the inbox URL points at a host the local

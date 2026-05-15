@@ -73,13 +73,28 @@ func (p *DeliverProcessor) SetRedis(c *redis.Client) {
 	p.redis = c
 }
 
-// ed25519DegradeTTL is how long a host stays degraded after an Ed25519 4xx
-// failure. 5 分は production observation で「broken impl の修正 deploy」に
-// 必要な時間より長い (= 改善が deploy されれば自動回復する) ことを想定。
+// ed25519DegradeTTL is how long a host stays degraded after the failure
+// counter reaches threshold. 5 分は production observation で「broken impl の
+// 修正 deploy」に必要な時間より長い (= 改善が deploy されれば自動回復する)
+// ことを想定。
 const ed25519DegradeTTL = 5 * time.Minute
+
+// ed25519FailWindow defines the sliding window the failure counter is held in.
+// 1 つの transient 4xx で degrade が立つのを防ぐ目的で、60s の window 内に
+// threshold 件以上の失敗があったときだけ degrade を立てる。
+const ed25519FailWindow = 60 * time.Second
+
+// ed25519FailThreshold is the number of failures within ed25519FailWindow
+// required to trip the degrade flag. 1 件の false positive (= 受信側 transient
+// error) で host 全体を縮退するのを避けるため 3 を採用。
+const ed25519FailThreshold = 3
 
 func ed25519DegradeKey(host string) string {
 	return "ed25519:degrade:" + host
+}
+
+func ed25519FailKey(host string) string {
+	return "ed25519:fail:" + host
 }
 
 // isEd25519Degraded reports whether the host has the Ed25519 degrade flag
@@ -107,6 +122,32 @@ func (p *DeliverProcessor) markEd25519Degraded(host string) {
 	}
 	if err := p.redis.Set(context.Background(), ed25519DegradeKey(host), "1", ed25519DegradeTTL).Err(); err != nil {
 		slog.Warn("ed25519 degrade flag set failed", "host", host, "error", err)
+	}
+}
+
+// recordEd25519Failure increments the per-host failure counter and trips the
+// degrade flag once it reaches ed25519FailThreshold within ed25519FailWindow.
+// 1 件の transient 4xx で host 全体縮退するのを避け、連続失敗のときだけ縮退
+// させる設計 (#1080 review #4)。Redis 未配線 or Redis error は best-effort
+// skip して 楽観的 Ed25519 試行を継続。
+func (p *DeliverProcessor) recordEd25519Failure(host string) {
+	if p.redis == nil || host == "" {
+		return
+	}
+	ctx := context.Background()
+	n, err := p.redis.Incr(ctx, ed25519FailKey(host)).Result()
+	if err != nil {
+		slog.Warn("ed25519 fail counter incr failed", "host", host, "error", err)
+		return
+	}
+	if n == 1 {
+		// 初回 INCR で TTL を設定 (window がスライドする)
+		_ = p.redis.Expire(ctx, ed25519FailKey(host), ed25519FailWindow).Err()
+	}
+	if n >= ed25519FailThreshold {
+		slog.Warn("ed25519 fail threshold reached, degrading host",
+			"host", host, "count", n)
+		p.markEd25519Degraded(host)
 	}
 }
 
@@ -186,7 +227,14 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		p.recordError(payload.Inbox)
 		return err
 	}
+	// closure 内の resp は defer 実行時の現在値を見る (= retry 後の resp も
+	// 同じ defer 1 つで cleanup される)。retry 経路では古い resp を手動 Close
+	// したあと `resp = nil` してから新 resp を代入することで double Close を
+	// 回避する設計 (#1080 review #1)。
 	defer func() {
+		if resp == nil {
+			return
+		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
@@ -195,21 +243,18 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	// する safety net。"assertionMethod を expose しているが Ed25519 verify が
 	// 壊れている" broken impl 対策。retry も失敗したら通常 4xx 経路で扱う。
 	if useEd25519 && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusGone && resp.StatusCode != http.StatusNotFound {
-		slog.Warn("ap deliver: ed25519 4xx, degrading host + retry with RSA",
+		slog.Warn("ap deliver: ed25519 4xx, recording failure + retry with RSA",
 			"host", host, "status", resp.StatusCode)
-		p.markEd25519Degraded(host)
+		p.recordEd25519Failure(host)
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		var retryErr error
-		resp, retryErr = p.sendOnce(payload, false) // false = RSA
+		resp = nil // defer の double Close を避ける
+		retryResp, retryErr := p.sendOnce(payload, false)
 		if retryErr != nil {
 			p.recordError(payload.Inbox)
 			return retryErr
 		}
-		defer func() {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}()
+		resp = retryResp // defer は新 resp を Close する
 	}
 
 	switch {

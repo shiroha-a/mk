@@ -3,6 +3,7 @@ package federation_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -183,6 +184,81 @@ func TestDeliverToUser_SenderWithoutEd25519Key_NoEd25519Payload(t *testing.T) {
 	require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
 	require.Len(t, enq.calls, 1)
 	assert.Empty(t, enq.calls[0].Ed25519KeyID)
+}
+
+// recipient capability の TTL cache が hit すると 2 回目以降の DeliverToUser
+// で publickeyExtraRepo を叩かない (#1080 review #2: N+1 抑制)。
+func TestDeliverToUser_RecipientCapabilityCachedAcrossCalls(t *testing.T) {
+	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	svc.SetKeypairExtraRepo(&stubKeypairExtraRepo{rows: map[string]*model.UserKeypairExtra{
+		"alice": {UserID: "alice", Ed25519PublicKey: "P", Ed25519PrivateKey: "K"},
+	}})
+	countingRepo := &countingPublickeyExtraRepo{
+		stubPublickeyExtraRepo: stubPublickeyExtraRepo{},
+	}
+	require.NoError(t, countingRepo.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "k", KeyPEM: "P", Alg: model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(countingRepo)
+
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+
+	// 2 回 deliver しても ListByUserID は 1 回しか呼ばれない (cache hit)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	}
+	assert.Equal(t, int32(1), countingRepo.listCalls.Load(),
+		"recipient capability は cache 経由で 1 回だけ DB 経由")
+}
+
+// sender Ed25519 鍵の cache も同様。
+func TestDeliverToUser_SenderEd25519KeyCachedAcrossCalls(t *testing.T) {
+	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	countingKpRepo := &countingKeypairExtraRepo{
+		stubKeypairExtraRepo: stubKeypairExtraRepo{rows: map[string]*model.UserKeypairExtra{
+			"alice": {UserID: "alice", Ed25519PublicKey: "P", Ed25519PrivateKey: "K"},
+		}},
+	}
+	svc.SetKeypairExtraRepo(countingKpRepo)
+	pkExtra := &stubPublickeyExtraRepo{}
+	require.NoError(t, pkExtra.Upsert(&model.UserPublickeyExtra{
+		UserID: "bob", KeyID: "k", KeyPEM: "P", Alg: model.AlgEd25519,
+	}))
+	svc.SetPublickeyExtraRepo(pkExtra)
+
+	host := "remote.example"
+	bob := &model.User{ID: "bob", Username: "bob", Host: &host, Inbox: strPtr("https://remote.example/users/bob/inbox")}
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, svc.DeliverToUser("alice", bob, []byte(`{}`)))
+	}
+	assert.Equal(t, int32(1), countingKpRepo.findCalls.Load(),
+		"sender Ed25519 鍵は cache 経由で 1 回だけ DB 経由")
+}
+
+// countingPublickeyExtraRepo wraps stubPublickeyExtraRepo to record how many
+// times ListByUserID is called, for the capability cache tests.
+type countingPublickeyExtraRepo struct {
+	stubPublickeyExtraRepo
+	listCalls atomic.Int32
+}
+
+func (c *countingPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublickeyExtra, error) {
+	c.listCalls.Add(1)
+	return c.stubPublickeyExtraRepo.ListByUserID(userID)
+}
+
+type countingKeypairExtraRepo struct {
+	stubKeypairExtraRepo
+	findCalls atomic.Int32
+}
+
+func (c *countingKeypairExtraRepo) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
+	c.findCalls.Add(1)
+	return c.stubKeypairExtraRepo.FindByUserID(userID)
 }
 
 // DeliverActivity (= recipient 不明な経路) は常に Ed25519 鍵情報を詰めない。

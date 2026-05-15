@@ -82,6 +82,31 @@ DeliverProcessor (asynqワーカー)
 - その他の4xx: 永続的失敗、リトライしない
 - 5xx / ネットワークエラー: リトライ (不調状態としてマーク)
 
+### Ed25519署名 (capability-gated, #1067 / #1071)
+
+配送先 actor が FEP-521a Multikey で Ed25519 を expose し、sender が `user_keypair_extra` に Ed25519 鍵を持つ場合のみ Ed25519 で sign を試行する。それ以外は従来通り RSA で sign。
+
+**capability 判定の流れ:**
+
+1. `DeliverToUser(signerUserID, recipient *model.User, body)` で recipient が既知
+2. `recipientIsEd25519Capable(recipient)`: `user_publickey_extra` を `ListByUserID(recipient.ID)` で確認 (TTL 5min の in-memory cache あり、N+1 抑制)
+3. capable で sender も Ed25519 鍵を持つ → `DeliverPayload.Ed25519KeyID` / `Ed25519PrivPEM` に詰めて enqueue
+4. `DeliverProcessor` 側で Ed25519 sign を試行、4xx (410/404 除く) で失敗したら Redis に `ed25519:fail:{host}` を INCR
+5. 60s window 内に 3 件以上失敗 → `ed25519:degrade:{host}` を EX=5min で立てる
+6. degrade flag 立ち host への次回 deliver は最初から RSA で sign (= broken impl safety net)
+
+`DeliverActivity` / `DeliverToFollowers` 経路 (recipient 不明) は RSA only で動く。
+
+### Redis に格納される秘密情報
+
+DeliverPayload は `KeyPEM` (RSA private key) および `Ed25519PrivPEM` (Ed25519 private key) を含んだ JSON として asynq queue (= Redis) に書き込まれる。これは upstream Misskey TS の BullMQ payload と同じ pattern だが、本番運用では以下が推奨される:
+
+- **Redis 通信の TLS 化** (in-transit 暗号化)
+- **Redis の persistence 暗号化** (encrypt-at-rest、Disk full encryption / Redis Enterprise の透過暗号化など)
+- queue worker と Redis 間のネットワーク隔離 (private VPC / Unix socket)
+
+特に Ed25519 / RSA いずれも HTTP Signature の identity を担う秘密情報のため、queue server を信頼境界の内側に置くこと。
+
 ## Inbox処理
 
 `internal/api/inbox/handler.go`がShared InboxとユーザーInboxの両方を処理する。**verify-in-worker 化済 (#565)**: HTTP handler では body + signature header を payload として queue に詰めて 202 即返し、verify は inbox worker (asynq processor) で行う。これにより HTTP 受信スループットが TS の 2.6-2.8x。
