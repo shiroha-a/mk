@@ -63,6 +63,31 @@ func TestUserPublickeyExtraRepository_MultipleKeysPerUser(t *testing.T) {
 	assert.Len(t, rows, 2)
 }
 
+func TestUserPublickeyExtraRepository_DeleteByKeyID(t *testing.T) {
+	repo := NewUserPublickeyExtraRepository(testDB)
+	user := insertTestUser(t, "u_upkx_dkid", "upkx_dkid")
+	defer cleanupUser(t, user.ID)
+	defer cleanupUserPublickeyExtra(t, user.ID)
+
+	require.NoError(t, repo.Upsert(&model.UserPublickeyExtra{
+		UserID: user.ID, KeyID: "k1", KeyPEM: "PEM1", Alg: model.AlgEd25519,
+	}))
+	require.NoError(t, repo.Upsert(&model.UserPublickeyExtra{
+		UserID: user.ID, KeyID: "k2", KeyPEM: "PEM2", Alg: model.AlgEd25519,
+	}))
+
+	// k1 のみ削除 → k2 は残る (key rotation シナリオの primitive)
+	require.NoError(t, repo.DeleteByKeyID(user.ID, "k1"))
+
+	rows, err := repo.ListByUserID(user.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "k2", rows[0].KeyID)
+
+	// 存在しない (userId, keyId) の delete は no-op (GORM Delete は 0 row でも nil)
+	assert.NoError(t, repo.DeleteByKeyID(user.ID, "non_existent"))
+}
+
 func TestUserPublickeyExtraRepository_DeleteByUserID(t *testing.T) {
 	repo := NewUserPublickeyExtraRepository(testDB)
 	user := insertTestUser(t, "u_upkx_3", "upkx3")
@@ -101,5 +126,7 @@ func TestUserPublickeyExtraRepository_QueryErrors(t *testing.T) {
 	_, err = repo.ListByUserID("x")
 	assert.Error(t, err)
 	err = repo.DeleteByUserID("x")
+	assert.Error(t, err)
+	err = repo.DeleteByKeyID("x", "k")
 	assert.Error(t, err)
 }

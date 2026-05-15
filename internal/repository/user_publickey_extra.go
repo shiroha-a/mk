@@ -15,6 +15,10 @@ type UserPublickeyExtraRepository interface {
 	FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error)
 	FindByKeyID(keyID string) (*model.UserPublickeyExtra, error)
 	ListByUserID(userID string) ([]model.UserPublickeyExtra, error)
+	// DeleteByKeyID deletes a single (userID, keyID) row. resolver が actor
+	// fetch 時に assertionMethod[] から消えた keyId を purge する用途 (key
+	// rotation で古い Ed25519 鍵による rogue verify を防ぐ #1070 follow-up)。
+	DeleteByKeyID(userID, keyID string) error
 	DeleteByUserID(userID string) error
 }
 
@@ -56,6 +60,10 @@ func (r *userPublickeyExtraRepository) ListByUserID(userID string) ([]model.User
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *userPublickeyExtraRepository) DeleteByKeyID(userID, keyID string) error {
+	return r.db.Where(`"userId" = ? AND "keyId" = ?`, userID, keyID).Delete(&model.UserPublickeyExtra{}).Error
 }
 
 func (r *userPublickeyExtraRepository) DeleteByUserID(userID string) error {

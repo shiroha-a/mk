@@ -24,6 +24,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/sync/singleflight"
+	"gorm.io/gorm"
 )
 
 // HTTPFetcher abstracts the HTTP client used for fetching remote AP objects.
@@ -93,10 +94,16 @@ type PublickeyStore interface {
 // upserts here when an inbound actor JSON includes `assertionMethod[]`
 // (#1067 / #1070). `user_publickey_extra` table backs this in production;
 // tests use an in-memory mock.
+//
+// DeleteByKeyID は resolver が cacheAssertionMethods で actor JSON から消えた
+// 旧 keyId を purge するために使う。これが無いと remote が Ed25519 鍵を
+// rotate した後も古い鍵が user_publickey_extra に残り、compromised key で
+// の rogue verify を許してしまう (#1070 follow-up)。
 type PublickeyExtraStore interface {
 	Upsert(pk *model.UserPublickeyExtra) error
 	FindByKeyID(keyID string) (*model.UserPublickeyExtra, error)
 	ListByUserID(userID string) ([]model.UserPublickeyExtra, error)
+	DeleteByKeyID(userID, keyID string) error
 }
 
 // Resolver fetches remote actors / notes and persists them in the local
@@ -638,15 +645,23 @@ func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
 	}
 }
 
-// cacheAssertionMethods parses FEP-521a Multikey entries from a remote actor's
-// `assertionMethod[]` and upserts the recognised Ed25519 keys into
-// user_publickey_extra (#1067 / #1070). decode 失敗・非 Ed25519 multicodec・
-// その他不正 entry は warn log + skip して RSA only にフォールバックする。
-// publickeyExtraRepo 未配線 (= 旧 deployment) のときは何もしない。
+// cacheAssertionMethods reconciles a remote actor's FEP-521a `assertionMethod[]`
+// with our user_publickey_extra rows (#1067 / #1070):
+//
+//  1. 各 Multikey entry を decode して PEM 化 → user_publickey_extra に upsert
+//  2. 既存 row のうち、今回の actor JSON に存在しない keyId は purge (delete)
+//
+// 2 が無いと remote が Ed25519 鍵を rotate した後も古い鍵が残り、攻撃者が
+// compromised key で署名した activity が verify 通ってしまうので security
+// 上必須。publickeyExtraRepo 未配線 (= 旧 deployment) のときは何もしない。
+// 不正な entry (非 Multikey type / decode 失敗 / persist 失敗) は warn log
+// + skip して RSA only にフォールバックする (fail-soft)。
 func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multikey) {
-	if r.publickeyExtraRepo == nil || len(ams) == 0 {
+	if r.publickeyExtraRepo == nil {
 		return
 	}
+	// 1. 新 entries の upsert + 受領 keyId set を構築
+	receivedKeyIDs := make(map[string]bool, len(ams))
 	for _, am := range ams {
 		if am.Type != activitypub.MultikeyType || am.ID == "" || am.PublicKeyMultibase == "" {
 			continue
@@ -671,6 +686,23 @@ func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multik
 		}); err != nil {
 			slog.Warn("assertionMethod persist failed",
 				"userID", userID, "keyID", am.ID, "error", err)
+			continue
+		}
+		receivedKeyIDs[am.ID] = true
+	}
+	// 2. actor JSON に無い既存 keyId を purge (key rotation 対応)
+	existing, err := r.publickeyExtraRepo.ListByUserID(userID)
+	if err != nil {
+		slog.Warn("assertionMethod list failed", "userID", userID, "error", err)
+		return
+	}
+	for _, row := range existing {
+		if receivedKeyIDs[row.KeyID] {
+			continue
+		}
+		if err := r.publickeyExtraRepo.DeleteByKeyID(userID, row.KeyID); err != nil {
+			slog.Warn("stale assertionMethod delete failed",
+				"userID", userID, "keyID", row.KeyID, "error", err)
 		}
 	}
 }
@@ -680,12 +712,21 @@ func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multik
 // miss なら user_publickey の primary key (RSA) を返す fallback semantics。
 // 受信した HTTP Signature の keyId fragment (e.g. `#main-key` / `#ed25519-key`)
 // から正しい公開鍵を選ぶための path で、in-memory cache は介さない (= 永続層
-// の最新値で verify する。assertionMethod が削除されたら次回 fetch で extra
-// 行が古いままになる可能性はあるが、verify はそれでも通る = 後方互換)。
+// の最新値で verify する)。
+//
+// `gorm.ErrRecordNotFound` (= keyId 一致なし = 通常状態) は silent fallback、
+// それ以外の DB error は診断のため slog.Warn を出す (= silent degradation を
+// 回避)。stale assertion key の削除は cacheAssertionMethods 側で actor fetch
+// 時に diff & delete するため、ここでは古い行が引っかかる可能性は最小化される。
 func (r *Resolver) PublicKeyForKeyID(actorID, keyID string) (string, error) {
 	if r.publickeyExtraRepo != nil && keyID != "" {
-		if row, err := r.publickeyExtraRepo.FindByKeyID(keyID); err == nil {
+		row, err := r.publickeyExtraRepo.FindByKeyID(keyID)
+		if err == nil {
 			return row.KeyPEM, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("publickeyExtra lookup failed",
+				"actorID", actorID, "keyID", keyID, "error", err)
 		}
 	}
 	return r.PublicKeyForActor(actorID)

@@ -23,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // stubFetcher returns canned bytes/error for FetchObject.
@@ -3689,7 +3690,10 @@ func (s *stubPublickeyExtraRepo) FindByKeyID(keyID string) (*model.UserPublickey
 	if pk, ok := s.entries[keyID]; ok {
 		return pk, nil
 	}
-	return nil, errors.New("not found")
+	// production の gorm 経由 repository は ErrRecordNotFound を返すので、
+	// stub も同じ semantic を返して PublicKeyForKeyID の DB error と "行なし"
+	// の区別 path をテスト経由でも walk できるようにする (#1070 follow-up)。
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (s *stubPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublickeyExtra, error) {
@@ -3702,6 +3706,15 @@ func (s *stubPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublic
 		}
 	}
 	return out, nil
+}
+
+func (s *stubPublickeyExtraRepo) DeleteByKeyID(userID, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pk, ok := s.entries[keyID]; ok && pk.UserID == userID {
+		delete(s.entries, keyID)
+	}
+	return nil
 }
 
 // stubPublickeyRepo は keys map race test 用の minimal な PublickeyStore
@@ -3844,6 +3857,73 @@ func TestPublicKeyForKeyID_DualLookup(t *testing.T) {
 	pem, err = r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#main-key")
 	require.NoError(t, err)
 	assert.Contains(t, pem, "RSA-FAKE")
+}
+
+// 同じ actor を refresh する経路で stale keyId が削除されることを検証する。
+// 1 回目 ResolveActor で 2 keys を seed → actorTTL を 0 に強制 → 2 回目で
+// 1 key だけになった body を返す fetcher に切り替え → 旧 1 key が purge される。
+func TestResolveActor_RefreshRemovesStaleAssertionMethod(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	bodyTwoKeys := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"id": "https://remote.example/users/alice#main-key", "owner": "x", "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"},
+		"assertionMethod": [
+			{"id": "https://remote.example/users/alice#old-key", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"},
+			{"id": "https://remote.example/users/alice#new-key", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"}
+		]
+	}`
+	bodyOneKey := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"id": "https://remote.example/users/alice#main-key", "owner": "x", "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"},
+		"assertionMethod": [
+			{"id": "https://remote.example/users/alice#new-key", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"}
+		]
+	}`
+
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	swappable := &swappableFetcher{body: bodyTwoKeys}
+	r := federation.NewResolver(repo, noteRepo, urls, swappable, idGen)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+	r.SetActorTTL(time.Nanosecond) // 即時 refresh をトリガするため極短 TTL
+
+	// 1 回目: 2 keys が seed される
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	rows, _ := extra.ListByUserID(user.ID)
+	require.Len(t, rows, 2)
+
+	// 2 回目: fetcher を 1 key body に差し替えて refresh をトリガ (TTL 失効済)
+	swappable.body = bodyOneKey
+	time.Sleep(2 * time.Nanosecond) // TTL を確実に超過させる
+	_, err = r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	rows, _ = extra.ListByUserID(user.ID)
+	require.Len(t, rows, 1, "stale #old-key は purge されて #new-key のみ残る")
+	assert.Equal(t, "https://remote.example/users/alice#new-key", rows[0].KeyID)
+}
+
+// swappableFetcher は body を test 中に差し替えられる stubFetcher 派生。
+type swappableFetcher struct {
+	body string
+}
+
+func (s *swappableFetcher) FetchObject(_ string) ([]byte, error) {
+	return []byte(s.body), nil
 }
 
 // publickeyExtraRepo 未配線でも PublicKeyForKeyID は PublicKeyForActor と
