@@ -269,3 +269,19 @@ func TestJSONFailedToResolveRemoteUser(t *testing.T) {
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "FAILED_TO_RESOLVE_REMOTE_USER", errObj["code"])
 }
+
+func TestJSONRolePermissionDenied(t *testing.T) {
+	code, body := invoke(t, JSONRolePermissionDenied)
+	assert.Equal(t, http.StatusForbidden, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "ROLE_PERMISSION_DENIED", errObj["code"])
+	assert.Equal(t, UUIDRolePermissionDenied, errObj["id"])
+}
+
+func TestJSONRateLimitExceeded(t *testing.T) {
+	code, body := invoke(t, JSONRateLimitExceeded)
+	assert.Equal(t, http.StatusTooManyRequests, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "RATE_LIMIT_EXCEEDED", errObj["code"])
+	assert.Equal(t, UUIDRateLimitExceeded, errObj["id"])
+}

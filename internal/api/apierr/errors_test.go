@@ -281,6 +281,12 @@ func TestFailedToResolveRemoteUser(t *testing.T) {
 	assert.Equal(t, UUIDFailedToResolveRemoteUser, errObj["id"])
 }
 
+func TestRateLimitExceeded(t *testing.T) {
+	errObj := RateLimitExceeded()["error"].(map[string]any)
+	assert.Equal(t, "RATE_LIMIT_EXCEEDED", errObj["code"])
+	assert.Equal(t, UUIDRateLimitExceeded, errObj["id"])
+}
+
 // #698 で追加したヘルパー: 2FA フロー (register-key / key-done /
 // remove-key / update-key / password-less / done) で利用される。
 // upstream に対応 ApiError が無い code (INVALID_TOKEN /

@@ -32,7 +32,7 @@ func newTestFlash(id, ownerID, title string) *model.Flash {
 
 func TestFlashRepository_CreateAndFindByID(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_1", "flashuser1")
+	user := insertTestUser(t, "u_fla_1", "flashuser1")
 	defer cleanupUser(t, user.ID)
 
 	f := newTestFlash("fl_cr_1", user.ID, "alpha")
@@ -52,7 +52,7 @@ func TestFlashRepository_FindByID_NotFound(t *testing.T) {
 
 func TestFlashRepository_UpdateFields(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_2", "flashuser2")
+	user := insertTestUser(t, "u_fla_2", "flashuser2")
 	defer cleanupUser(t, user.ID)
 
 	f := newTestFlash("fl_cr_2", user.ID, "beta")
@@ -106,7 +106,7 @@ func TestFlashRepository_UpdateFields_EmptyPermissions(t *testing.T) {
 
 func TestFlashRepository_Delete(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_3", "flashuser3")
+	user := insertTestUser(t, "u_fla_3", "flashuser3")
 	defer cleanupUser(t, user.ID)
 
 	f := newTestFlash("fl_cr_3", user.ID, "gamma")
@@ -118,7 +118,7 @@ func TestFlashRepository_Delete(t *testing.T) {
 
 func TestFlashRepository_IncrementCount(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_4", "flashuser4")
+	user := insertTestUser(t, "u_fla_4", "flashuser4")
 	defer cleanupUser(t, user.ID)
 
 	f := newTestFlash("fl_cr_4", user.ID, "delta")
@@ -133,7 +133,7 @@ func TestFlashRepository_IncrementCount(t *testing.T) {
 
 func TestFlashRepository_ListByUser(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_5", "flashuser5")
+	user := insertTestUser(t, "u_fla_5", "flashuser5")
 	defer cleanupUser(t, user.ID)
 
 	for _, id := range []string{"fl_lst_1", "fl_lst_2", "fl_lst_3"} {
@@ -168,7 +168,7 @@ func TestFlashRepository_ListByUser_QueryError(t *testing.T) {
 
 func TestFlashRepository_ListFeatured(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_6", "flashuser6")
+	user := insertTestUser(t, "u_fla_6", "flashuser6")
 	defer cleanupUser(t, user.ID)
 
 	flashes := []*model.Flash{
@@ -213,7 +213,7 @@ func TestFlashRepository_ListFeatured_QueryError(t *testing.T) {
 
 func TestFlashRepository_Search(t *testing.T) {
 	repo := NewFlashRepository(testDB)
-	user := insertTestUser(t, "u_fr_7", "flashuser7")
+	user := insertTestUser(t, "u_fla_7", "flashuser7")
 	defer cleanupUser(t, user.ID)
 
 	titles := map[string]string{

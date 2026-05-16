@@ -226,7 +226,7 @@ func TestFetch_GeneratesEd25519KeypairWhenWired(t *testing.T) {
 
 	user, err := svc.Fetch("relay")
 	require.NoError(t, err)
-	kx, ok := extra.Keypairs[user.ID]
+	kx, ok := extra.Get(user.ID)
 	require.True(t, ok)
 	assert.Contains(t, kx.Ed25519PublicKey, "PUBLIC KEY")
 	assert.Contains(t, kx.Ed25519PrivateKey, "PRIVATE KEY")
@@ -249,12 +249,16 @@ func TestFetch_Ed25519IdempotentAcrossSecondCall(t *testing.T) {
 
 	user, err := svc.Fetch("relay")
 	require.NoError(t, err)
-	firstPub := extra.Keypairs[user.ID].Ed25519PublicKey
+	first, ok := extra.Get(user.ID)
+	require.True(t, ok)
+	firstPub := first.Ed25519PublicKey
 
 	// 2 回目 Fetch しても鍵は変わらない (idempotent)
 	_, err = svc.Fetch("relay")
 	require.NoError(t, err)
-	assert.Equal(t, firstPub, extra.Keypairs[user.ID].Ed25519PublicKey)
+	second, ok := extra.Get(user.ID)
+	require.True(t, ok)
+	assert.Equal(t, firstPub, second.Ed25519PublicKey)
 }
 
 type failingExtraUpsert struct {
