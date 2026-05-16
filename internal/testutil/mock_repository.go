@@ -4040,7 +4040,13 @@ func (m *MockUserKeypairRepository) FindByUserID(userID string) (*model.UserKeyp
 
 // MockUserKeypairExtraRepository is a test double for
 // repository.UserKeypairExtraRepository.
+//
+// `Keypairs` map は concurrent backfill (= TestUser_LazyBackfill_RaceSafe
+// のような 8 goroutine 並列で InsertIfAbsent + FindByUserID を呼ぶシナリオ)
+// で race detector に検出されるため、全 method を mu で保護する (#1067
+// follow-up: CI shard 2 flaky 解消)。
 type MockUserKeypairExtraRepository struct {
+	mu       sync.RWMutex
 	Keypairs map[string]*model.UserKeypairExtra // keyed by userID
 }
 
@@ -4049,6 +4055,8 @@ func NewMockUserKeypairExtraRepository() *MockUserKeypairExtraRepository {
 }
 
 func (m *MockUserKeypairExtraRepository) Upsert(k *model.UserKeypairExtra) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Keypairs[k.UserID] = k
 	return nil
 }
@@ -4058,6 +4066,8 @@ func (m *MockUserKeypairExtraRepository) Upsert(k *model.UserKeypairExtra) error
 // row already existed (= ON CONFLICT DO NOTHING semantic of the production
 // repository).
 func (m *MockUserKeypairExtraRepository) InsertIfAbsent(k *model.UserKeypairExtra) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, exists := m.Keypairs[k.UserID]; exists {
 		return false, nil
 	}
@@ -4066,6 +4076,8 @@ func (m *MockUserKeypairExtraRepository) InsertIfAbsent(k *model.UserKeypairExtr
 }
 
 func (m *MockUserKeypairExtraRepository) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	k, ok := m.Keypairs[userID]
 	if !ok {
 		return nil, ErrNotFound
@@ -4074,6 +4086,8 @@ func (m *MockUserKeypairExtraRepository) FindByUserID(userID string) (*model.Use
 }
 
 func (m *MockUserKeypairExtraRepository) Delete(userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.Keypairs, userID)
 	return nil
 }
