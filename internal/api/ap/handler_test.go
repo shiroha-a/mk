@@ -158,7 +158,7 @@ func TestUser_WithEd25519Repo_NoRowForUser_TriggersLazyBackfill(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"Multikey"`)
 	assert.Contains(t, rec.Body.String(), `#ed25519-key`)
 	// mock 上に新規 row が保存されている
-	row, ok := extra.Keypairs["u1"]
+	row, ok := extra.Get("u1")
 	require.True(t, ok)
 	assert.Contains(t, row.Ed25519PublicKey, "PUBLIC KEY")
 	assert.Contains(t, row.Ed25519PrivateKey, "PRIVATE KEY")
@@ -206,7 +206,7 @@ func TestUser_LazyBackfill_RaceSafe(t *testing.T) {
 	wg.Wait()
 
 	// 8 並列で backfill しても DB 上は 1 行だけ
-	row, ok := extra.Keypairs["u1"]
+	row, ok := extra.Get("u1")
 	require.True(t, ok)
 	assert.NotEmpty(t, row.Ed25519PublicKey)
 

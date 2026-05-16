@@ -4092,6 +4092,16 @@ func (m *MockUserKeypairExtraRepository) Delete(userID string) error {
 	return nil
 }
 
+// Get は test assertion 用の helper。テスト側で `m.Keypairs[id]` を直接
+// 読むと future の並列 assertion で race を踏むリスクがあるため、必ず
+// この helper 経由で読み出すこと (= mu.RLock 経由)。
+func (m *MockUserKeypairExtraRepository) Get(userID string) (*model.UserKeypairExtra, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	k, ok := m.Keypairs[userID]
+	return k, ok
+}
+
 // MockFollowingRepository is a test double for repository.FollowingRepository.
 type MockFollowingRepository struct {
 	Followings map[string]*model.Following // keyed by ID
