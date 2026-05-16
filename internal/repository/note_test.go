@@ -584,7 +584,7 @@ func TestNoteRepository_IncrementReaction(t *testing.T) {
 
 func TestNoteRepository_IncrementCount(t *testing.T) {
 	repo := NewNoteRepository(testDB)
-	user := insertTestUser(t, "u_inc_1", "incuser")
+	user := insertTestUser(t, "u_n_inc_1", "incuser1")
 	defer cleanupUser(t, user.ID)
 
 	note := &model.Note{
@@ -1473,7 +1473,7 @@ func TestNoteRepository_ListByFileID_Cursor(t *testing.T) {
 
 func TestNoteRepository_IncrementUserNotesCount(t *testing.T) {
 	repo := NewNoteRepository(testDB)
-	user := insertTestUser(t, "u_inc_1", "incuser")
+	user := insertTestUser(t, "u_n_inc_2", "incuser2")
 	defer cleanupUser(t, user.ID)
 
 	require.NoError(t, repo.IncrementUserNotesCount(user.ID, 3))

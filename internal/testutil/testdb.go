@@ -29,7 +29,16 @@ func OpenTestDB() (*gorm.DB, error) {
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		host, port, user, pass, name, sslmode)
 
-	return gorm.Open(postgres.Open(dsn), &gorm.Config{
+	// PreferSimpleProtocol: pgx の auto-prepared statement cache を無効化する。
+	// 共有 testDB を多 test で再利用する CI 環境で、軽微な schema 差分 (= AutoMigrate
+	// による additive 変更や test 経路で DDL 相当が走るケース) のあと再 query すると
+	// `ERROR: cached plan must not change result type` が偶発的に出る (#1089)。
+	// simple protocol に倒すと server 側 prepared statement を作らないため本問題が
+	// 構造的に消える。性能は落ちるが test では問題ない。
+	return gorm.Open(postgres.New(postgres.Config{
+		DSN:                  dsn,
+		PreferSimpleProtocol: true,
+	}), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 }
