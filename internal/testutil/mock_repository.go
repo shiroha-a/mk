@@ -4041,23 +4041,24 @@ func (m *MockUserKeypairRepository) FindByUserID(userID string) (*model.UserKeyp
 // MockUserKeypairExtraRepository is a test double for
 // repository.UserKeypairExtraRepository.
 //
-// `Keypairs` map は concurrent backfill (= TestUser_LazyBackfill_RaceSafe
+// `keypairs` map は concurrent backfill (= TestUser_LazyBackfill_RaceSafe
 // のような 8 goroutine 並列で InsertIfAbsent + FindByUserID を呼ぶシナリオ)
-// で race detector に検出されるため、全 method を mu で保護する (#1067
-// follow-up: CI shard 2 flaky 解消)。
+// で race detector に検出されるため、全 method を mu で保護する (#1091)。
+// field を unexport にして外部からの直接 read を実装で塞ぎ、必ず
+// `Get(userID)` 経由で読み出させる。
 type MockUserKeypairExtraRepository struct {
 	mu       sync.RWMutex
-	Keypairs map[string]*model.UserKeypairExtra // keyed by userID
+	keypairs map[string]*model.UserKeypairExtra // keyed by userID
 }
 
 func NewMockUserKeypairExtraRepository() *MockUserKeypairExtraRepository {
-	return &MockUserKeypairExtraRepository{Keypairs: make(map[string]*model.UserKeypairExtra)}
+	return &MockUserKeypairExtraRepository{keypairs: make(map[string]*model.UserKeypairExtra)}
 }
 
 func (m *MockUserKeypairExtraRepository) Upsert(k *model.UserKeypairExtra) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Keypairs[k.UserID] = k
+	m.keypairs[k.UserID] = k
 	return nil
 }
 
@@ -4068,17 +4069,17 @@ func (m *MockUserKeypairExtraRepository) Upsert(k *model.UserKeypairExtra) error
 func (m *MockUserKeypairExtraRepository) InsertIfAbsent(k *model.UserKeypairExtra) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.Keypairs[k.UserID]; exists {
+	if _, exists := m.keypairs[k.UserID]; exists {
 		return false, nil
 	}
-	m.Keypairs[k.UserID] = k
+	m.keypairs[k.UserID] = k
 	return true, nil
 }
 
 func (m *MockUserKeypairExtraRepository) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	k, ok := m.Keypairs[userID]
+	k, ok := m.keypairs[userID]
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -4088,17 +4089,18 @@ func (m *MockUserKeypairExtraRepository) FindByUserID(userID string) (*model.Use
 func (m *MockUserKeypairExtraRepository) Delete(userID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.Keypairs, userID)
+	delete(m.keypairs, userID)
 	return nil
 }
 
-// Get は test assertion 用の helper。テスト側で `m.Keypairs[id]` を直接
-// 読むと future の並列 assertion で race を踏むリスクがあるため、必ず
-// この helper 経由で読み出すこと (= mu.RLock 経由)。
+// Get は test assertion 用の helper。production interface の FindByUserID は
+// error 返却で "not found vs DB error" を区別するが、test では存在の有無
+// だけ確認したいケースが多いため `(value, ok)` 形式で expose する。内部
+// map は unexport なので、外部からの read は必ず本 helper を通る。
 func (m *MockUserKeypairExtraRepository) Get(userID string) (*model.UserKeypairExtra, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	k, ok := m.Keypairs[userID]
+	k, ok := m.keypairs[userID]
 	return k, ok
 }
 

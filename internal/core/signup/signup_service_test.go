@@ -271,7 +271,7 @@ func TestSignup_WithKeypairExtraRepo(t *testing.T) {
 	require.NoError(t, err)
 
 	// Ed25519 鍵が併発行されている
-	kx, ok := keypairExtraRepo.Keypairs[result.User.ID]
+	kx, ok := keypairExtraRepo.Get(result.User.ID)
 	require.True(t, ok)
 	assert.NotEmpty(t, kx.Ed25519PublicKey)
 	assert.NotEmpty(t, kx.Ed25519PrivateKey)
@@ -461,7 +461,7 @@ func TestPromotePending_WithKeypairExtra(t *testing.T) {
 
 	result, err := svc.PromotePending(row.Code)
 	require.NoError(t, err)
-	kx, ok := keypairExtraRepo.Keypairs[result.User.ID]
+	kx, ok := keypairExtraRepo.Get(result.User.ID)
 	require.True(t, ok, "ed25519 keypair must be created during PromotePending")
 	assert.Contains(t, kx.Ed25519PublicKey, "PUBLIC KEY")
 }
