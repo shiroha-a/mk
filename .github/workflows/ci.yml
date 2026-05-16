@@ -170,3 +170,32 @@ jobs:
             echo "$diff"
             exit 1
           fi
+
+      # 重複 fixture ID lint (#1094 / #1089 follow-up)。
+      # internal/repository テストで insertTestUser / insertRemoteTestUser
+      # が同じ ID リテラルを 2 つ以上の caller で使うと、 cleanup 失敗時に
+      # 行残留 → 次 test の PK 衝突を起こす (#1089 で 17 箇所観測)。caller
+      # ごとに unique な ID を強制するための regression guard。
+      #
+      # 将来 caller-aware な runtime seed (insertTestUser 内部で
+      # runtime.Caller から prefix 生成) を入れれば本 lint は不要になる
+      # が、user.id が CHARACTER(16) で既存 ID 最長 12 char のため
+      # prefix 余裕が 4 char しか無く、schema 変更を伴う大改修となるため
+      # 現状は本 lint で網を張る運用とする (#1094 の中期対応として継続検討)。
+      - name: Check duplicate test fixture IDs
+        run: |
+          set -e
+          dupes=$(grep -rhn 'insertTestUser(t, "\|insertRemoteTestUser(t, "' \
+            internal/repository/*_test.go \
+            | awk -F'"' '{print $2}' | sort | uniq -c | sort -rn \
+            | awk '$1 > 1' || true)
+          if [ -n "$dupes" ]; then
+            echo "Duplicate test fixture IDs detected (#1094 / #1089):"
+            echo "$dupes"
+            echo ""
+            echo "Each insertTestUser / insertRemoteTestUser caller must use"
+            echo "a unique ID literal across the repository package. Rename"
+            echo "the duplicates to file-specific prefixes (e.g. u_<file>_*)."
+            exit 1
+          fi
+          echo "No duplicate test fixture IDs."
