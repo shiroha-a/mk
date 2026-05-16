@@ -1,0 +1,40 @@
+# Drop-in fedibird overlay (#1083).
+#
+# 既存 dropin stack (docker-compose.dropin.yml + docker-compose.dropin.mk.yml)
+# に Fedibird-like ActivityPub mock を追加する overlay。
+#
+# Usage:
+#   docker compose \
+#     -f docker-compose.dropin.yml \
+#     -f docker-compose.dropin.mk.yml \
+#     -f docker-compose.dropin.fedibird.yml up -d --build
+#
+# orchestrator: tests/dropin/run-fedibird-test.sh
+
+name: mk-dropin
+
+services:
+  fedibird-mock:
+    build:
+      context: ./tests/dropin/fedibird_mock
+    environment:
+      FEDIBIRD_DOMAIN: fedibird-mock.test
+    volumes:
+      - certs:/certs:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    networks:
+      dropin:
+        aliases:
+          - fedibird-mock.test
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request, ssl; urllib.request.urlopen('https://localhost/_test/healthz', context=ssl._create_unverified_context()).read()
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s

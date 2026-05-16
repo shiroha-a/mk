@@ -8,7 +8,10 @@ set -e
 CERT_DIR=/certs
 mkdir -p "$CERT_DIR"
 
-DOMAINS="a b"
+# `fedibird-mock.test` は #1083 で追加された Fedibird-like ActivityPub mock
+# のホスト名。drop-in fedibird overlay で起動するときに mock 用の cert を
+# bundle.pem に含めて mk-A の trust store に読ませる必要がある。
+DOMAINS="a b fedibird-mock.test"
 
 for domain in $DOMAINS; do
   if [ ! -f "$CERT_DIR/$domain.crt" ]; then

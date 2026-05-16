@@ -2,7 +2,7 @@
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-down federation-misskey-logs \
 	dropin-up dropin-down dropin-test dropin-logs \
-	dropin-mk-up dropin-mk-test dropin-mk-down dropin-mk-logs dropin-swap-test \
+	dropin-mk-up dropin-mk-test dropin-mk-down dropin-mk-logs dropin-swap-test dropin-fedibird-test \
 	dropin-frontend-up dropin-frontend-down dropin-frontend-baseline dropin-frontend-logs \
 	dropin-frontend-mk-up dropin-frontend-mk-down dropin-frontend-swap-test \
 	e2e-submodule-init e2e-frontend-build e2e-deps e2e-run e2e-open \
@@ -132,6 +132,13 @@ dropin-mk-logs:
 #   5. test_swap_verify.py で state preserved + 新規 federation を確認
 dropin-swap-test:
 	./tests/dropin/run-swap-test.sh
+
+# Drop-in fedibird-mock e2e (#1083) — base + mk + fedibird overlay の stack で
+# Fedibird-like ActivityPub mock を立てて、mk-A との Ed25519 双方向 verify を
+# walks through する。ed25519 P2-P5 が実 federation 経路で動くことを担保する
+# nightly 用 e2e。
+dropin-fedibird-test:
+	./tests/dropin/run-fedibird-test.sh
 
 # Drop-in frontend e2e (#380 / Phase 14) ― 3 Misskey TS インスタンス上で
 # cypress を回して、共有 TS フロントエンドから観測可能なアクティビティの
