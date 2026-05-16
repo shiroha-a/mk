@@ -241,11 +241,19 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
 	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
 
-	// type=image/ で絞り込み: image/png のみ
+	// type=image/ で絞り込み: 本 test の fixture では sysImg のみ image/* に該当。
+	// 他 test が UserID=NULL + Type=image/* な system file 行を残しても本 test を
+	// 巻き込まないよう、 fixture ID で scoped assert する (#1098)。
 	rows, err = repo.ListSystemFiles("image/", "", "", 10)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	assert.Equal(t, sysImg.ID, rows[0].ID)
+	ids = make(map[string]bool, len(rows))
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	assert.True(t, ids[sysImg.ID], "sysImg (image/png) should appear in image/ filter")
+	assert.False(t, ids[sysZip.ID], "sysZip (application/zip) must not appear")
+	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
+	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
 
 	// limit 範囲外 (0 / 過大) でも error にならず default / clamp が効く
 	_, err = repo.ListSystemFiles("", "", "", 0)
