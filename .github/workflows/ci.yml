@@ -185,14 +185,22 @@ jobs:
       - name: Check duplicate test fixture IDs
         run: |
           set -e
-          dupes=$(grep -rhn 'insertTestUser(t, "\|insertRemoteTestUser(t, "' \
+          dupes=$(grep -rh 'insertTestUser(t, "\|insertRemoteTestUser(t, "' \
             internal/repository/*_test.go \
             | awk -F'"' '{print $2}' | sort | uniq -c | sort -rn \
-            | awk '$1 > 1' || true)
+            | awk '$1 > 1')
           if [ -n "$dupes" ]; then
             echo "Duplicate test fixture IDs detected (#1094 / #1089):"
-            echo "$dupes"
             echo ""
+            # 各重複 ID について file:line を併記して reviewer が CI ログだけで
+            # 犯人を特定できるようにする (= 手動 grep 不要)。
+            while IFS= read -r line; do
+              count=$(echo "$line" | awk '{print $1}')
+              id=$(echo "$line" | awk '{print $2}')
+              echo "  $id (used $count times):"
+              grep -n "\"$id\"" internal/repository/*_test.go | sed 's/^/    /'
+              echo ""
+            done <<< "$dupes"
             echo "Each insertTestUser / insertRemoteTestUser caller must use"
             echo "a unique ID literal across the repository package. Rename"
             echo "the duplicates to file-specific prefixes (e.g. u_<file>_*)."
