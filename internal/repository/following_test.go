@@ -177,7 +177,7 @@ func TestFollowingRepository_ListRemoteFollowerInboxes(t *testing.T) {
 
 func TestUserRepository_IncrementFollowingCount(t *testing.T) {
 	repo := NewUserRepository(testDB)
-	user := insertTestUser(t, "u_inc_1", "incuser")
+	user := insertTestUser(t, "u_f_inc_1", "fincuser1")
 	defer cleanupUser(t, user.ID)
 
 	require.NoError(t, repo.IncrementFollowingCount(user.ID, 1))
