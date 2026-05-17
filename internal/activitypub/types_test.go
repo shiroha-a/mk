@@ -296,6 +296,23 @@ func TestImage_UnmarshalJSON_Malformed(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// 先頭が空白文字 (= JSON formatter 由来) でも array / object の判別が
+// 正しく動く。for-switch 内の whitespace skip 経路の guard。
+func TestImage_UnmarshalJSON_LeadingWhitespace(t *testing.T) {
+	t.Run("whitespace + object", func(t *testing.T) {
+		var img Image
+		err := json.Unmarshal([]byte("   \n\t {\"type\":\"Image\",\"url\":\"https://example.com/a.png\"}"), &img)
+		assert.NoError(t, err)
+		assert.Equal(t, "https://example.com/a.png", img.URL)
+	})
+	t.Run("whitespace + array", func(t *testing.T) {
+		var img Image
+		err := json.Unmarshal([]byte(" \r\n [{\"type\":\"Image\",\"url\":\"https://example.com/b.png\"}]"), &img)
+		assert.NoError(t, err)
+		assert.Equal(t, "https://example.com/b.png", img.URL)
+	})
+}
+
 // 報告経路の end-to-end guard: iceshrimp 風 actor JSON (array 形式 icon /
 // image) を Person に unmarshal して avatar/banner URL が正しく抽出される
 // ことを確認。

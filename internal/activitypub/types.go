@@ -3,9 +3,15 @@
 package activitypub
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 )
+
+// jsonNullLiteral is the byte representation of the JSON null literal.
+// Pre-declared so Image.UnmarshalJSON can use bytes.Equal without an
+// allocation on every call (= avoids string(data) heap conversion).
+var jsonNullLiteral = []byte("null")
 
 // APStringList accepts JSON values that may be either a single string or a
 // []string, and exposes them uniformly as []string. ActivityPub spec で
@@ -153,9 +159,9 @@ type Image struct {
 // チェック) が「avatar 無し」として扱えるようにする。
 func (i *Image) UnmarshalJSON(data []byte) error {
 	// "null" は親 decoder が *Image を nil pointer のままにするので
-	// 本関数は呼ばれないが、上位 field が値型 (`Image` 直) の場合に届く
-	// ことがあるので明示的に no-op する。
-	if string(data) == "null" {
+	// 本関数は呼ばれないが、上位 field が値型 (`Image` 直、例: EmojiTag.Icon)
+	// の場合に届くことがあるので明示的に no-op する。bytes.Equal で alloc 0。
+	if bytes.Equal(data, jsonNullLiteral) {
 		return nil
 	}
 	// 先頭の非空白文字で array / object を判別する。array は AS2.0 で許容。
