@@ -140,7 +140,17 @@ func (h *Handler) AbuseReportNotificationRecipientUpdate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
-	before, _ := h.recipientRepo.FindByID(req.ID)
+	// 不存在 ID は早期に 404 で報告する。旧版は before の取得失敗 (= 不存在)
+	// を捨てて後続の Update(GORM) に頼っていたが、enum / correlation check が
+	// 入った後 (#1108) は「不存在 ID + 不完全 method payload」のケースで
+	// correlation_check の 400 が先に発火して NotFound が永遠に返らない
+	// edge case が生まれていた。エラー優先順位を「不存在 → 入力不正」の順
+	// に揃えて、admin UI / CLI が ID typo を確実に 404 として受け取れる
+	// ようにする (sweep follow-up)。
+	before, err := h.recipientRepo.FindByID(req.ID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.NotFound())
+	}
 	fields := map[string]any{}
 	if req.Name != nil {
 		fields["name"] = *req.Name
