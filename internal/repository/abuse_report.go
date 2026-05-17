@@ -9,7 +9,12 @@ import (
 type AbuseReportRepository interface {
 	Create(r *model.AbuseUserReport) error
 	FindByID(id string) (*model.AbuseUserReport, error)
-	List(resolved *bool, limit, offset int) ([]*model.AbuseUserReport, error)
+	// List returns abuse reports filtered by state and reporter/target user
+	// origin, paginated via cursor (sinceID / untilID) ordered by id DESC.
+	// reporterOrigin / targetUserOrigin accept "local" / "remote" /
+	// "combined" (or empty = combined). origin filter は対応する Host 列の
+	// IS NULL / IS NOT NULL で判定する (= upstream Misskey TS と同じ pattern)。
+	List(resolved *bool, reporterOrigin, targetUserOrigin, sinceID, untilID string, limit int) ([]*model.AbuseUserReport, error)
 	UpdateFields(id string, fields map[string]any) error
 }
 
@@ -34,11 +39,36 @@ func (r *abuseReportRepository) FindByID(id string) (*model.AbuseUserReport, err
 	return &report, nil
 }
 
-func (r *abuseReportRepository) List(resolved *bool, limit, offset int) ([]*model.AbuseUserReport, error) {
+func (r *abuseReportRepository) List(resolved *bool, reporterOrigin, targetUserOrigin, sinceID, untilID string, limit int) ([]*model.AbuseUserReport, error) {
 	q := r.db.Preload("TargetUser").Preload("Reporter").Preload("Assignee").
 		Order("id DESC")
 	if resolved != nil {
 		q = q.Where("resolved = ?", *resolved)
+	}
+	// origin filter: "local" → Host が NULL (= local user)、"remote" → Host が
+	// NOT NULL (= remote user)、"combined" / 空文字列は条件追加なし (= all)。
+	// upstream Misskey TS と同じ semantics。reporterOrigin と targetUserOrigin
+	// は独立に AND される。
+	switch reporterOrigin {
+	case "local":
+		q = q.Where(`"reporterHost" IS NULL`)
+	case "remote":
+		q = q.Where(`"reporterHost" IS NOT NULL`)
+	}
+	switch targetUserOrigin {
+	case "local":
+		q = q.Where(`"targetUserHost" IS NULL`)
+	case "remote":
+		q = q.Where(`"targetUserHost" IS NOT NULL`)
+	}
+	// cursor pagination (keyset): id DESC 順なので untilID は「より古い id」、
+	// sinceID は「より新しい id」を取り出す方向。frontend MkPagination の
+	// untilId 経路がメインの fix 対象 (#1114)。
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
 	}
 	if limit <= 0 {
 		limit = 10
@@ -47,9 +77,6 @@ func (r *abuseReportRepository) List(resolved *bool, limit, offset int) ([]*mode
 		limit = 100
 	}
 	q = q.Limit(limit)
-	if offset > 0 {
-		q = q.Offset(offset)
-	}
 	var reports []*model.AbuseUserReport
 	if err := q.Find(&reports).Error; err != nil {
 		return nil, err

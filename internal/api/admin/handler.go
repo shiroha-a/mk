@@ -1956,11 +1956,34 @@ type emojiListV2Response struct {
 // --- Abuse Report endpoints ---
 
 // AbuseReports handles POST /api/admin/abuse-user-reports.
+//
+// upstream paramDef (= packages/backend/src/server/api/endpoints/admin/
+// abuse-user-reports.ts) で受ける主要 field を frontend (= MkPagination
+// + pages/admin/abuses.vue) と互換にする:
+//
+//   - sinceId / untilId — cursor pagination (#1114 root cause)
+//   - state             — 'all' | 'unresolved' | 'resolved'
+//   - reporterOrigin    — 'combined' | 'local' | 'remote'
+//   - targetUserOrigin  — 'combined' | 'local' | 'remote'
+//   - limit             — default 10 / max 100
+//
+// 旧 mk-go は `resolved` boolean / `limit` / `offset` しか受けず、frontend が
+// 送る untilId を無視して同じ first page を返し続けて MkPagination が末尾
+// 検知できず無限ロードになっていた (= 過去 #487 / #488 / #491 / #493 / #520
+// / #712 と完全に同 pattern)。
+//
+// 後方互換: 旧 `resolved` boolean field は引き続き受け付ける (= 旧 client /
+// 既存 e2e 互換)。`state` と `resolved` の両方が来た場合は `state` を優先
+// する (= upstream paramDef での enum 優先 pattern と同じ)。
 func (h *Handler) AbuseReports(c echo.Context) error {
 	var req struct {
-		Resolved *bool `json:"resolved"`
-		Limit    int   `json:"limit"`
-		Offset   int   `json:"offset"`
+		Resolved         *bool  `json:"resolved"`
+		State            string `json:"state"`
+		ReporterOrigin   string `json:"reporterOrigin"`
+		TargetUserOrigin string `json:"targetUserOrigin"`
+		SinceID          string `json:"sinceId"`
+		UntilID          string `json:"untilId"`
+		Limit            int    `json:"limit"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1968,11 +1991,47 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	if h.abuseRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	reports, err := h.abuseRepo.List(req.Resolved, req.Limit, req.Offset)
+	// state enum 優先、無ければ legacy boolean fallback。'all' / 空文字列は
+	// 「フィルタなし (= resolved 列で絞らない)」を意味する。
+	resolved := req.Resolved
+	switch req.State {
+	case "unresolved":
+		v := false
+		resolved = &v
+	case "resolved":
+		v := true
+		resolved = &v
+	case "all", "":
+		// 何もしない (= legacy boolean fallback または「全件」)
+	default:
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "state must be 'all', 'unresolved', or 'resolved'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// origin enum 検証: 空文字列 / 'combined' / 'local' / 'remote' 以外は reject
+	// (= silent fallback で全件返すと「local だけ見たかった」が裏切られて
+	// 静かに drop-in regression になるため)。
+	if !isValidOrigin(req.ReporterOrigin) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "reporterOrigin must be 'combined', 'local', or 'remote'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if !isValidOrigin(req.TargetUserOrigin) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "targetUserOrigin must be 'combined', 'local', or 'remote'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, req.SinceID, req.UntilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.JSON(http.StatusOK, reports)
+}
+
+// isValidOrigin returns true if s is one of the valid origin filter values
+// accepted by admin endpoints ('combined' / 'local' / 'remote') or empty.
+// 'combined' と 空文字列は「フィルタなし」として等価扱い。
+func isValidOrigin(s string) bool {
+	switch s {
+	case "", "combined", "local", "remote":
+		return true
+	default:
+		return false
+	}
 }
 
 // ResolveAbuseReport handles POST /api/admin/resolve-abuse-user-report.

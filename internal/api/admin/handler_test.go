@@ -1602,7 +1602,7 @@ type failingAbuseListRepo struct {
 	*testutil.MockAbuseReportRepository
 }
 
-func (f *failingAbuseListRepo) List(_ *bool, _ int, _ int) ([]*model.AbuseUserReport, error) {
+func (f *failingAbuseListRepo) List(_ *bool, _, _, _, _ string, _ int) ([]*model.AbuseUserReport, error) {
 	return nil, assert.AnError
 }
 
@@ -1611,6 +1611,147 @@ func TestAbuseReports_ListError(t *testing.T) {
 	h.SetAbuseRepo(&failingAbuseListRepo{testutil.NewMockAbuseReportRepository()})
 	rec := doPost(h.AbuseReports, `{}`, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// PR for #1114 regression guard: untilId cursor を渡すと、それより小さい
+// id (= 古い report) のみが返ることを確認する。旧 mk-go は untilId を無視
+// していたため、frontend MkPagination が末尾検知できず無限ロードする
+// 直接の root cause だった。
+func TestAbuseReports_CursorUntilId_ExcludesNewerReports(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	// id DESC 順なので "r3" → "r2" → "r1" の順で返る。
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	abuseRepo.Reports["r2"] = &model.AbuseUserReport{ID: "r2"}
+	abuseRepo.Reports["r3"] = &model.AbuseUserReport{ID: "r3"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"untilId":"r2"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// untilId=r2 → id < r2 のみ → r1 だけ
+	require.Len(t, resp, 1)
+	assert.Equal(t, "r1", resp[0]["id"])
+}
+
+// PR for #1114: sinceId cursor も同様に動く (id > sinceId)。
+func TestAbuseReports_CursorSinceId_ExcludesOlderReports(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	abuseRepo.Reports["r2"] = &model.AbuseUserReport{ID: "r2"}
+	abuseRepo.Reports["r3"] = &model.AbuseUserReport{ID: "r3"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"sinceId":"r2"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// sinceId=r2 → id > r2 のみ → r3 だけ
+	require.Len(t, resp, 1)
+	assert.Equal(t, "r3", resp[0]["id"])
+}
+
+// PR for #1114: state='unresolved' で resolved=false の report のみ返る
+// (frontend 既定値、= upstream paramDef 互換)。
+func TestAbuseReports_StateUnresolved_FiltersByResolved(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["unr"] = &model.AbuseUserReport{ID: "unr", Resolved: false}
+	abuseRepo.Reports["res"] = &model.AbuseUserReport{ID: "res", Resolved: true}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"state":"unresolved"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "unr", resp[0]["id"])
+}
+
+// state='resolved' で resolved=true の report のみ返る。
+func TestAbuseReports_StateResolved_FiltersByResolved(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["unr"] = &model.AbuseUserReport{ID: "unr", Resolved: false}
+	abuseRepo.Reports["res"] = &model.AbuseUserReport{ID: "res", Resolved: true}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"state":"resolved"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "res", resp[0]["id"])
+}
+
+// state='all' / 空文字列は legacy `resolved` boolean に fallback。
+// 互換維持の guard (= 旧 client / 既存 e2e が boolean を送ってくるケース)。
+func TestAbuseReports_LegacyResolvedBool_StillRespected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["unr"] = &model.AbuseUserReport{ID: "unr", Resolved: false}
+	abuseRepo.Reports["res"] = &model.AbuseUserReport{ID: "res", Resolved: true}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"resolved":true}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "res", resp[0]["id"])
+}
+
+// 不正 state 値は 400 で reject。silent fallback (= 全件返す) を許すと
+// 「`state` の typo に気付かず全部表示される drop-in regression」が
+// 静かに起きるため、PR #1102 / #1108 と同方針で明示 reject。
+func TestAbuseReports_InvalidState_Rejected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetAbuseRepo(testutil.NewMockAbuseReportRepository())
+	rec := doPost(h.AbuseReports, `{"state":"bogus"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// reporterOrigin / targetUserOrigin の不正値も 400 で reject。
+func TestAbuseReports_InvalidOrigin_Rejected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetAbuseRepo(testutil.NewMockAbuseReportRepository())
+
+	rec := doPost(h.AbuseReports, `{"reporterOrigin":"bogus"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doPost(h.AbuseReports, `{"targetUserOrigin":"bogus"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// reporterOrigin='local' は reporterHost IS NULL のみを通す。
+// handler レイヤでは mock repo にフィルタ責務を委ねるので、ここでは
+// handler の origin field 受け渡しと repo 側の filter 連動を確認する。
+func TestAbuseReports_OriginFilter_RoundTrip(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	remote := "remote.example.com"
+	abuseRepo.Reports["loc"] = &model.AbuseUserReport{ID: "loc"}
+	abuseRepo.Reports["rem"] = &model.AbuseUserReport{
+		ID:             "rem",
+		ReporterHost:   &remote,
+		TargetUserHost: &remote,
+	}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{"reporterOrigin":"local"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "loc", resp[0]["id"])
+
+	rec = doPost(h.AbuseReports, `{"reporterOrigin":"remote"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "rem", resp[0]["id"])
 }
 
 type failingModLogListRepo struct {

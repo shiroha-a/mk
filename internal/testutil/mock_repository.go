@@ -4941,22 +4941,53 @@ func (m *MockAbuseReportRepository) FindByID(id string) (*model.AbuseUserReport,
 	return r, nil
 }
 
-func (m *MockAbuseReportRepository) List(resolved *bool, limit, offset int) ([]*model.AbuseUserReport, error) {
+func (m *MockAbuseReportRepository) List(resolved *bool, reporterOrigin, targetUserOrigin, sinceID, untilID string, limit int) ([]*model.AbuseUserReport, error) {
 	var result []*model.AbuseUserReport
 	for _, r := range m.Reports {
 		if resolved != nil && r.Resolved != *resolved {
 			continue
 		}
+		switch reporterOrigin {
+		case "local":
+			if r.ReporterHost != nil {
+				continue
+			}
+		case "remote":
+			if r.ReporterHost == nil {
+				continue
+			}
+		}
+		switch targetUserOrigin {
+		case "local":
+			if r.TargetUserHost != nil {
+				continue
+			}
+		case "remote":
+			if r.TargetUserHost == nil {
+				continue
+			}
+		}
+		// keyset cursor: id DESC 順に通すための prefilter。
+		if untilID != "" && r.ID >= untilID {
+			continue
+		}
+		if sinceID != "" && r.ID <= sinceID {
+			continue
+		}
 		result = append(result, r)
 	}
+	// 並び順は production repo と合わせて id DESC。
+	sort.Slice(result, func(i, j int) bool { return result[i].ID > result[j].ID })
 	if limit <= 0 {
 		limit = 10
 	}
-	if offset >= len(result) {
-		return nil, nil
+	if limit > 100 {
+		limit = 100
 	}
-	end := min(offset+limit, len(result))
-	return result[offset:end], nil
+	if limit < len(result) {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 func (m *MockAbuseReportRepository) UpdateFields(id string, fields map[string]any) error {
