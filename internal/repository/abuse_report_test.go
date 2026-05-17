@@ -70,10 +70,13 @@ func TestAbuseReportRepository_List_Pagination(t *testing.T) {
 	defer cleanupAbuseReport(t, r1.ID)
 	defer cleanupAbuseReport(t, r2.ID)
 
-	// limit=1 で 1 件だけ返る
+	// limit=1 で 1 件だけ返り、かつ id DESC 順なので新しい方 (ar_p2) が来る。
+	// 単なる len 1 ではなく id まで assert することで Order("id DESC") の
+	// regression を guard する (= 旧 mock 修正時の sort 忘れを catch する系)。
 	reports, err := repo.List(nil, "", "", "", "", 1)
 	require.NoError(t, err)
-	assert.Len(t, reports, 1)
+	require.Len(t, reports, 1)
+	assert.Equal(t, "ar_p2", reports[0].ID, "limit=1 with id DESC should return the newer report")
 
 	// untilID cursor: id < ar_p2 を要求すると ar_p1 のみ来る (#1114 core)
 	reports, err = repo.List(nil, "", "", "", "ar_p2", 10)

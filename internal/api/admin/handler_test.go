@@ -1686,6 +1686,27 @@ func TestAbuseReports_StateResolved_FiltersByResolved(t *testing.T) {
 	assert.Equal(t, "res", resp[0]["id"])
 }
 
+// state と legacy resolved boolean の両方が送られた場合、state を優先する。
+// GoDoc に「state 優先」と明記してある契約の regression guard。
+// (例: 古い admin UI が `resolved:false` をデフォルト送出しつつ、新 UI が
+// `state:"resolved"` を選択した場合、state 側が勝つべき。)
+func TestAbuseReports_StateOverridesLegacyResolved(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["unr"] = &model.AbuseUserReport{ID: "unr", Resolved: false}
+	abuseRepo.Reports["res"] = &model.AbuseUserReport{ID: "res", Resolved: true}
+	h.SetAbuseRepo(abuseRepo)
+
+	// state='resolved' を送りつつ resolved=false も送る → state 優先で
+	// resolved=true の report のみ返るべき。
+	rec := doPost(h.AbuseReports, `{"state":"resolved","resolved":false}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "res", resp[0]["id"])
+}
+
 // state='all' / 空文字列は legacy `resolved` boolean に fallback。
 // 互換維持の guard (= 旧 client / 既存 e2e が boolean を送ってくるケース)。
 func TestAbuseReports_LegacyResolvedBool_StillRespected(t *testing.T) {
