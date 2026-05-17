@@ -239,3 +239,90 @@ func TestPerson_AlsoKnownAs_BothForms(t *testing.T) {
 		assert.Nil(t, p.AlsoKnownAs)
 	})
 }
+
+// PR #1110: AS2.0 spec で `icon` / `image` は単一 object または array を
+// 許容する (#dfn-icon)。iceshrimp / 一部 Pleroma fork が array 形式で
+// multi-resolution icon を expose しており、旧 mk-go は単一 object のみ
+// 受理していたため avatar URL が取れず TL の @mention 横にアイコンが
+// 表示されない bug があった (#1110)。Image.UnmarshalJSON で両形式を
+// 吸収する upstream-compat 修正の regression guard。
+func TestImage_UnmarshalJSON_SingleObject(t *testing.T) {
+	var img Image
+	err := json.Unmarshal([]byte(`{"type":"Image","url":"https://example.com/a.png"}`), &img)
+	assert.NoError(t, err)
+	assert.Equal(t, "Image", img.Type)
+	assert.Equal(t, "https://example.com/a.png", img.URL)
+}
+
+func TestImage_UnmarshalJSON_Array_PicksFirstWithURL(t *testing.T) {
+	var img Image
+	data := []byte(`[
+		{"type":"Image","url":""},
+		{"type":"Image","url":"https://example.com/large.png"},
+		{"type":"Image","url":"https://example.com/small.png"}
+	]`)
+	err := json.Unmarshal(data, &img)
+	assert.NoError(t, err)
+	assert.Equal(t, "https://example.com/large.png", img.URL,
+		"upstream behavior: take first item with non-empty url")
+}
+
+func TestImage_UnmarshalJSON_Array_AllEmptyURLs(t *testing.T) {
+	var img Image
+	err := json.Unmarshal([]byte(`[{"type":"Image","url":""},{"type":"Image"}]`), &img)
+	assert.NoError(t, err)
+	assert.Equal(t, "", img.URL, "empty array of empty-url items leaves zero value")
+}
+
+func TestImage_UnmarshalJSON_EmptyArray(t *testing.T) {
+	var img Image
+	err := json.Unmarshal([]byte(`[]`), &img)
+	assert.NoError(t, err)
+	assert.Equal(t, "", img.URL)
+	assert.Equal(t, "", img.Type)
+}
+
+func TestImage_UnmarshalJSON_Null(t *testing.T) {
+	var img Image
+	err := json.Unmarshal([]byte(`null`), &img)
+	assert.NoError(t, err)
+	assert.Equal(t, "", img.URL)
+}
+
+func TestImage_UnmarshalJSON_Malformed(t *testing.T) {
+	var img Image
+	// 文字列など object/array でない type は単一 object 経路で error を返す。
+	err := json.Unmarshal([]byte(`"some-string"`), &img)
+	assert.Error(t, err)
+}
+
+// 報告経路の end-to-end guard: iceshrimp 風 actor JSON (array 形式 icon /
+// image) を Person に unmarshal して avatar/banner URL が正しく抽出される
+// ことを確認。
+func TestPerson_UnmarshalJSON_ArrayIconAndImage(t *testing.T) {
+	body := []byte(`{
+		"type": "Person",
+		"id": "https://iceshrimp.example/users/alice",
+		"inbox": "https://iceshrimp.example/inbox",
+		"outbox": "https://iceshrimp.example/users/alice/outbox",
+		"followers": "https://iceshrimp.example/users/alice/followers",
+		"following": "https://iceshrimp.example/users/alice/following",
+		"preferredUsername": "alice",
+		"publicKey": {"id":"x","owner":"y","publicKeyPem":"z"},
+		"icon": [
+			{"type":"Image","url":"https://iceshrimp.example/avatar.png"}
+		],
+		"image": [
+			{"type":"Image","url":"https://iceshrimp.example/banner.png"}
+		]
+	}`)
+	var p Person
+	err := json.Unmarshal(body, &p)
+	assert.NoError(t, err)
+	if assert.NotNil(t, p.Icon) {
+		assert.Equal(t, "https://iceshrimp.example/avatar.png", p.Icon.URL)
+	}
+	if assert.NotNil(t, p.Image) {
+		assert.Equal(t, "https://iceshrimp.example/banner.png", p.Image.URL)
+	}
+}

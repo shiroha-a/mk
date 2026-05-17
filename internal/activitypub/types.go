@@ -132,6 +132,65 @@ type Image struct {
 	URL  string `json:"url"`
 }
 
+// UnmarshalJSON accepts both forms allowed by ActivityStreams 2.0 for
+// `icon` / `image` properties:
+//
+//	"icon": {"type": "Image", "url": "https://..."}
+//	"icon": [{"type": "Image", "url": "..."}, {"type": "Image", "url": "..."}]
+//
+// 参照: https://www.w3.org/TR/activitystreams-vocabulary/#dfn-icon
+//
+// 旧 mk-go は単一 object 形のみ受理しており、iceshrimp / 一部 Pleroma fork
+// など array 形式で multi-resolution アイコンを expose する実装からの actor
+// fetch が JSON unmarshal 失敗で avatar/banner 取得漏れになっていた (= TL の
+// `@mention` 横にアイコンが出ない症状)。upstream Misskey TS の
+// `ApPersonService.resolveAvatarAndBanner` は array 形式を `find(item =>
+// item.url)` で pick する semantics なので mk-go も同等に揃える。
+//
+// 不正な JSON (string / number 等) は単一 object として decode を試みた後の
+// error を返す (= 既存挙動を保つ defense)。null / 空 array / object with
+// 空 url は Image{} (zero value) を残し、呼び出し側 (`actor.Icon.URL != ""`
+// チェック) が「avatar 無し」として扱えるようにする。
+func (i *Image) UnmarshalJSON(data []byte) error {
+	// "null" は親 decoder が *Image を nil pointer のままにするので
+	// 本関数は呼ばれないが、上位 field が値型 (`Image` 直) の場合に届く
+	// ことがあるので明示的に no-op する。
+	if string(data) == "null" {
+		return nil
+	}
+	// 先頭の非空白文字で array / object を判別する。array は AS2.0 で許容。
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '[':
+			var arr []Image
+			if err := json.Unmarshal(data, &arr); err != nil {
+				return err
+			}
+			// upstream と同じく url が non-empty な最初の要素を採用する。
+			// すべて空 url なら zero value を残して呼び出し側に判断を委ねる。
+			for _, item := range arr {
+				if item.URL != "" {
+					*i = item
+					return nil
+				}
+			}
+			return nil
+		default:
+			// 単一 object 形式。alias で recursion を回避しつつ decode。
+			type imageAlias Image
+			var alias imageAlias
+			if err := json.Unmarshal(data, &alias); err != nil {
+				return err
+			}
+			*i = Image(alias)
+			return nil
+		}
+	}
+	return nil
+}
+
 // Person represents a user actor.
 type Person struct {
 	Object
