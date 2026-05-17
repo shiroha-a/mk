@@ -523,6 +523,38 @@ func TestUpdateMeta_EmptyHostArrayClearsList(t *testing.T) {
 	assert.Empty(t, []string(metaRepo.Meta.BlockedHosts))
 }
 
+// PR #1108 sweep: upstream enum 制約付き field の silent corruption 防止。
+// sensitiveMediaDetection が enum 外の値で送られたら 400 reject。
+func TestUpdateMeta_InvalidSensitiveMediaDetectionRejected(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.SensitiveMediaDetection = "none"
+
+	rec := doPost(h.UpdateMeta, `{"sensitiveMediaDetection":"purple"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 不正値は DB に書かれない
+	assert.Equal(t, "none", metaRepo.Meta.SensitiveMediaDetection)
+}
+
+// federation が drastic な network 遮断を引き起こす enum なので silent
+// fallback を絶対に許さない (admin の typo で 全 federation が止まる
+// 事故を防ぐ)。
+func TestUpdateMeta_InvalidFederationRejected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"federation":"weird"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 正常値はそのまま通る (regression guard: enum 検証が誤って正常値も
+// reject していないことを確認)。
+func TestUpdateMeta_ValidEnumValuesAccepted(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta,
+		`{"sensitiveMediaDetection":"all","sensitiveMediaDetectionSensitivity":"high","federation":"specified","ugcVisibilityForVisitor":"local"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "all", metaRepo.Meta.SensitiveMediaDetection)
+	assert.Equal(t, "high", metaRepo.Meta.SensitiveMediaDetectionSensitivity)
+}
+
 // JSON null は coerceMetaArrayFields が空配列に揃える (#590 review #2)。
 // varchar[] 列は migration で NOT NULL DEFAULT '{}' なので、null を素通し
 // すると real repo で制約違反になり UPDATE 全体が rollback する。admin の
@@ -1470,9 +1502,52 @@ func TestResolveAbuseReport_WithRepo(t *testing.T) {
 	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
 	h.SetAbuseRepo(abuseRepo)
 
+	// resolvedAs 未送出 → null クリア (upstream `cw ?? text ?? ''` 同様の
+	// nullable enum 挙動、PR #1108 で対応)。
 	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, abuseRepo.Reports["r1"].Resolved)
+	assert.Nil(t, abuseRepo.Reports["r1"].ResolvedAs)
+}
+
+// PR #1108 regression guard: resolvedAs='reject' を受け付ける (旧版は
+// `"accept"` を hard-code していて reject 判定が記録されなかった)。
+func TestResolveAbuseReport_AcceptsReject(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1","resolvedAs":"reject"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, abuseRepo.Reports["r1"].ResolvedAs)
+	assert.Equal(t, "reject", *abuseRepo.Reports["r1"].ResolvedAs)
+}
+
+// resolvedAs='accept' を明示送出した場合も正しく保存される。
+func TestResolveAbuseReport_AcceptsAccept(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1","resolvedAs":"accept"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, abuseRepo.Reports["r1"].ResolvedAs)
+	assert.Equal(t, "accept", *abuseRepo.Reports["r1"].ResolvedAs)
+}
+
+// 不正値は upstream enum check と同じく 400 reject。
+func TestResolveAbuseReport_InvalidResolvedAsReturns400(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1","resolvedAs":"maybe"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 不正値で row は変更されない
+	assert.False(t, abuseRepo.Reports["r1"].Resolved)
 }
 
 func TestResolveAbuseReport_NotFound(t *testing.T) {

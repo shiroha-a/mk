@@ -183,14 +183,22 @@ func (h *Handler) ReadAnnouncement(c echo.Context) error {
 // --- Admin endpoints ---
 
 // AdminCreate handles POST /api/admin/announcements/create.
+//
+// upstream paramDef は icon を `enum: ['info', 'warning', 'error', 'success']`、
+// display を `enum: ['normal', 'banner', 'dialog']` で制約する (#1108 sweep)。
+// 旧 mk-go は enum validation 無く silent fallback で任意値を accept していた
+// (admin の typo が DB に書かれる drift)。本 fix で upstream 同等の enum reject。
 func (h *Handler) AdminCreate(c echo.Context) error {
 	var req struct {
-		Title    string  `json:"title"`
-		Text     string  `json:"text"`
-		ImageURL *string `json:"imageUrl"`
-		Icon     string  `json:"icon"`
-		Display  string  `json:"display"`
-		UserID   *string `json:"userId"`
+		Title                  string  `json:"title"`
+		Text                   string  `json:"text"`
+		ImageURL               *string `json:"imageUrl"`
+		Icon                   string  `json:"icon"`
+		Display                string  `json:"display"`
+		ForExistingUsers       *bool   `json:"forExistingUsers"`
+		Silence                *bool   `json:"silence"`
+		NeedConfirmationToRead *bool   `json:"needConfirmationToRead"`
+		UserID                 *string `json:"userId"`
 	}
 	if err := c.Bind(&req); err != nil || req.Title == "" || req.Text == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "title and text are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -198,8 +206,14 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 	if req.Icon == "" {
 		req.Icon = "info"
 	}
+	if !isValidAnnouncementIcon(req.Icon) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "icon must be 'info', 'warning', 'error', or 'success'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	if req.Display == "" {
 		req.Display = "normal"
+	}
+	if !isValidAnnouncementDisplay(req.Display) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "display must be 'normal', 'banner', or 'dialog'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	a := &model.Announcement{
 		ID:       h.idGen.Generate(time.Now()),
@@ -210,6 +224,15 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 		Display:  req.Display,
 		IsActive: true,
 		UserID:   req.UserID,
+	}
+	if req.ForExistingUsers != nil {
+		a.ForExistingUsers = *req.ForExistingUsers
+	}
+	if req.Silence != nil {
+		a.Silence = *req.Silence
+	}
+	if req.NeedConfirmationToRead != nil {
+		a.NeedConfirmationToRead = *req.NeedConfirmationToRead
 	}
 	if err := h.repo.Create(a); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -228,13 +251,48 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 	return c.JSON(http.StatusOK, a)
 }
 
+// isValidAnnouncementIcon reports whether v matches upstream's
+// `icon: enum: ['info', 'warning', 'error', 'success']`.
+func isValidAnnouncementIcon(v string) bool {
+	switch v {
+	case "info", "warning", "error", "success":
+		return true
+	}
+	return false
+}
+
+// isValidAnnouncementDisplay reports whether v matches upstream's
+// `display: enum: ['normal', 'banner', 'dialog']`.
+func isValidAnnouncementDisplay(v string) bool {
+	switch v {
+	case "normal", "banner", "dialog":
+		return true
+	}
+	return false
+}
+
 // AdminUpdate handles POST /api/admin/announcements/update.
+//
+// upstream paramDef は id 以外 全 field optional partial update を受け取り、
+// imageUrl (nullable) / icon (enum) / display (enum) / forExistingUsers /
+// silence / needConfirmationToRead を含む 10 field を accept する (#1108
+// sweep)。旧 mk-go は 4 field (id/title/text/isActive) しか受け取らず、
+// admin UI で「icon を warning に変える」「display を dialog に変える」
+// 等の更新が一切 DB に書かれない drop-in regression があった (= PR #1102
+// RolesUpdate と同種の field 欠落 drift)。本 fix で upstream 全 field に
+// 拡張 + icon / display は enum 検証で silent 書き換えを防ぐ。
 func (h *Handler) AdminUpdate(c echo.Context) error {
 	var req struct {
-		ID       string  `json:"id"`
-		Title    *string `json:"title"`
-		Text     *string `json:"text"`
-		IsActive *bool   `json:"isActive"`
+		ID                     string  `json:"id"`
+		Title                  *string `json:"title"`
+		Text                   *string `json:"text"`
+		ImageURL               *string `json:"imageUrl"`
+		Icon                   *string `json:"icon"`
+		Display                *string `json:"display"`
+		ForExistingUsers       *bool   `json:"forExistingUsers"`
+		Silence                *bool   `json:"silence"`
+		NeedConfirmationToRead *bool   `json:"needConfirmationToRead"`
+		IsActive               *bool   `json:"isActive"`
 	}
 	if err := c.Bind(&req); err != nil || req.ID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "id is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -250,6 +308,36 @@ func (h *Handler) AdminUpdate(c echo.Context) error {
 	}
 	if req.Text != nil {
 		fields["text"] = *req.Text
+	}
+	if req.ImageURL != nil {
+		// upstream nullable: 空文字 → null クリア (= PR #1102 color/iconUrl
+		// と同じ Go *string ↔ JSON null 制約 workaround)。
+		if *req.ImageURL == "" {
+			fields["imageUrl"] = nil
+		} else {
+			fields["imageUrl"] = *req.ImageURL
+		}
+	}
+	if req.Icon != nil {
+		if !isValidAnnouncementIcon(*req.Icon) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "icon must be 'info', 'warning', 'error', or 'success'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		fields["icon"] = *req.Icon
+	}
+	if req.Display != nil {
+		if !isValidAnnouncementDisplay(*req.Display) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "display must be 'normal', 'banner', or 'dialog'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		fields["display"] = *req.Display
+	}
+	if req.ForExistingUsers != nil {
+		fields["forExistingUsers"] = *req.ForExistingUsers
+	}
+	if req.Silence != nil {
+		fields["silence"] = *req.Silence
+	}
+	if req.NeedConfirmationToRead != nil {
+		fields["needConfirmationToRead"] = *req.NeedConfirmationToRead
 	}
 	if req.IsActive != nil {
 		fields["isActive"] = *req.IsActive

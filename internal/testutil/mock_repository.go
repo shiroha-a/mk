@@ -1984,6 +1984,18 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			if s, ok := v.(string); ok {
 				m.Meta.Federation = s
 			}
+		case "sensitiveMediaDetection":
+			if s, ok := v.(string); ok {
+				m.Meta.SensitiveMediaDetection = s
+			}
+		case "sensitiveMediaDetectionSensitivity":
+			if s, ok := v.(string); ok {
+				m.Meta.SensitiveMediaDetectionSensitivity = s
+			}
+		case "ugcVisibilityForVisitor":
+			if s, ok := v.(string); ok {
+				m.Meta.UgcVisibilityForVisitor = s
+			}
 		case "federationHosts":
 			setStrArr(&m.Meta.FederationHosts, k, v)
 		case "blockedHosts":
@@ -4768,6 +4780,32 @@ func (m *MockAnnouncementRepository) UpdateFields(id string, fields map[string]a
 	if v, ok := fields["title"]; ok {
 		a.Title = v.(string)
 	}
+	if v, ok := fields["text"]; ok {
+		a.Text = v.(string)
+	}
+	if v, ok := fields["imageUrl"]; ok {
+		switch s := v.(type) {
+		case nil:
+			a.ImageURL = nil
+		case string:
+			a.ImageURL = &s
+		}
+	}
+	if v, ok := fields["icon"]; ok {
+		a.Icon = v.(string)
+	}
+	if v, ok := fields["display"]; ok {
+		a.Display = v.(string)
+	}
+	if v, ok := fields["forExistingUsers"]; ok {
+		a.ForExistingUsers = v.(bool)
+	}
+	if v, ok := fields["silence"]; ok {
+		a.Silence = v.(bool)
+	}
+	if v, ok := fields["needConfirmationToRead"]; ok {
+		a.NeedConfirmationToRead = v.(bool)
+	}
 	if v, ok := fields["isActive"]; ok {
 		a.IsActive = v.(bool)
 	}
@@ -4930,8 +4968,14 @@ func (m *MockAbuseReportRepository) UpdateFields(id string, fields map[string]an
 		r.Resolved = v.(bool)
 	}
 	if v, ok := fields["resolvedAs"]; ok {
-		s := v.(string)
-		r.ResolvedAs = &s
+		// nil 値は null クリア (upstream `resolvedAs: null` 経路)。string 値は
+		// そのまま set。それ以外の型は test 経路で panic させず無視 (defensive)。
+		switch s := v.(type) {
+		case nil:
+			r.ResolvedAs = nil
+		case string:
+			r.ResolvedAs = &s
+		}
 	}
 	return nil
 }

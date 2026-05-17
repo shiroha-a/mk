@@ -126,12 +126,41 @@ func TestRecipientUpdate_PartialFields(t *testing.T) {
 		},
 	)
 
+	// method='webhook' に切り替えるなら systemWebhookId も同 payload に含める
+	// 必要がある (upstream correlation check と同 semantics、PR #1108 で追加)。
 	rec := doPost(h.AbuseReportNotificationRecipientUpdate,
-		`{"id":"r1","name":"new","method":"webhook","isActive":false}`, adminUser)
+		`{"id":"r1","name":"new","method":"webhook","systemWebhookId":"w1","isActive":false}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "new", repo.Recipients["r1"].Name)
 	assert.Equal(t, "webhook", repo.Recipients["r1"].Method)
 	assert.False(t, repo.Recipients["r1"].IsActive)
+}
+
+// PR #1108: method 変更時の correlation check が動作することの regression guard。
+// method='webhook' なのに systemWebhookId 未指定 → 400 (silent drift 防止)。
+func TestRecipientUpdate_MethodWithoutCounterpartReturns400(t *testing.T) {
+	h, _ := setupAbuseRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{
+			ID: "r1", Name: "old", Method: "email", IsActive: true,
+			// 既存 row に SystemWebhookID は無い
+		},
+	)
+	rec := doPost(h.AbuseReportNotificationRecipientUpdate,
+		`{"id":"r1","method":"webhook"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CORRELATION_CHECK_WEBHOOK")
+}
+
+// upstream enum: ['email', 'webhook'] 以外の値は 400 reject。
+func TestRecipientUpdate_InvalidMethodReturns400(t *testing.T) {
+	h, _ := setupAbuseRecipientHandler(t,
+		&model.AbuseReportNotificationRecipient{
+			ID: "r1", Name: "old", Method: "email", IsActive: true,
+		},
+	)
+	rec := doPost(h.AbuseReportNotificationRecipientUpdate,
+		`{"id":"r1","method":"sms"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRecipientUpdate_NotFound(t *testing.T) {

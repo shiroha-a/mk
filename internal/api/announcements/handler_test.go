@@ -167,6 +167,36 @@ func TestAdminCreate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// PR #1108 sweep: icon が upstream enum 外の値で送られたら 400 reject。
+func TestAdminCreate_InvalidIconReturns400(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","icon":"weird"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// display が upstream enum 外の値で送られたら 400 reject。
+func TestAdminCreate_InvalidDisplayReturns400(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","display":"weird"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 新規 fields (forExistingUsers / silence / needConfirmationToRead) が persist される。
+func TestAdminCreate_PersistsExtraBoolFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	rec := doPost(h.AdminCreate,
+		`{"title":"X","text":"Y","forExistingUsers":true,"silence":true,"needConfirmationToRead":true}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, repo.Items, 1)
+	var a *model.Announcement
+	for _, v := range repo.Items {
+		a = v
+	}
+	assert.True(t, a.ForExistingUsers)
+	assert.True(t, a.Silence)
+	assert.True(t, a.NeedConfirmationToRead)
+}
+
 // stubMainStreamPublisher captures PublishMainEvent calls.
 type stubMainStreamPublisher struct {
 	calls []mainEventCall
@@ -317,6 +347,57 @@ func TestAdminUpdate_AllFields(t *testing.T) {
 	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Old", IsActive: true}
 	rec := doPost(h.AdminUpdate, `{"id":"a1","title":"New","text":"txt","isActive":false}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// PR #1108 sweep: 旧 mk-go は icon / display / imageUrl / forExistingUsers /
+// silence / needConfirmationToRead を AdminUpdate で受け取っておらず、admin
+// UI で変えても DB に反映されない drop-in regression があった。本 test
+// で全 6 field の persist を guard する (= PR #1102 RolesUpdate と同種の
+// guard pattern)。
+func TestAdminUpdate_PersistsExtendedFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Old", Icon: "info", Display: "normal"}
+	rec := doPost(h.AdminUpdate,
+		`{"id":"a1","imageUrl":"https://example.com/i.png","icon":"warning","display":"banner","forExistingUsers":true,"silence":true,"needConfirmationToRead":true}`,
+		nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	a := repo.Items["a1"]
+	require.NotNil(t, a.ImageURL)
+	assert.Equal(t, "https://example.com/i.png", *a.ImageURL)
+	assert.Equal(t, "warning", a.Icon)
+	assert.Equal(t, "banner", a.Display)
+	assert.True(t, a.ForExistingUsers)
+	assert.True(t, a.Silence)
+	assert.True(t, a.NeedConfirmationToRead)
+}
+
+// icon が enum 外 → 400 reject。
+func TestAdminUpdate_InvalidIconReturns400(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Old", Icon: "info"}
+	rec := doPost(h.AdminUpdate, `{"id":"a1","icon":"weird"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// silent corruption しない
+	assert.Equal(t, "info", repo.Items["a1"].Icon)
+}
+
+// display が enum 外 → 400 reject。
+func TestAdminUpdate_InvalidDisplayReturns400(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Old", Display: "normal"}
+	rec := doPost(h.AdminUpdate, `{"id":"a1","display":"weird"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "normal", repo.Items["a1"].Display)
+}
+
+// imageUrl="" は null クリア (color/iconUrl の RolesUpdate と同方針)。
+func TestAdminUpdate_ImageURLEmptyClears(t *testing.T) {
+	h, repo := newTestHandler(t)
+	img := "https://example.com/i.png"
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Old", ImageURL: &img}
+	rec := doPost(h.AdminUpdate, `{"id":"a1","imageUrl":""}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, repo.Items["a1"].ImageURL)
 }
 
 func TestAdminUpdate_InvalidParam(t *testing.T) {

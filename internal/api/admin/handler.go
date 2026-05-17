@@ -969,6 +969,16 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	}
 	// "i" フィールドを除外 (auth token)
 	delete(fields, "i")
+	// upstream update-meta.ts の enum 制約を持つ field を pre-validate (#1108
+	// sweep)。silent fallback で不正値が DB に書かれる drift を防ぐ:
+	// sensitiveMediaDetection が "purple" のような不正値で保存されると
+	// downstream consumer (media detection service) が default に倒れて
+	// admin の意図と乖離する。federation / ugcVisibilityForVisitor は
+	// drastic な network 遮断や匿名 view 不可化を引き起こすので、こちらは
+	// silent corruption 防止としても重要。
+	if err := validateUpdateMetaEnums(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
 	// 本家互換の camelCase alias (tosUrl 等) を使うが、DB 側は
 	// packages/backend/src/models/Meta.ts と同じ正規名で保持している。
@@ -1094,6 +1104,51 @@ func renameUpdateMetaFields(fields map[string]any) {
 			delete(fields, alias)
 		}
 	}
+}
+
+// updateMetaEnumAllowed enumerates upstream update-meta.ts の `enum: [...]`
+// 制約付き field とその許容値集合 (#1108 sweep)。silent fallback を
+// 防ぐため UpdateMeta の入口で reject する。upstream 同様 nil / 未送出
+// は no-op (= field 自体が fields map に無いので validate 対象外)。
+//
+// clientOptions.entrancePageStyle は nested object なので別途 dict 構造
+// で扱う必要がある。本 helper は top-level enum のみ対象。entrancePage
+// Style は admin UI 改修が他系列より少ない前提 + nested handler 不在の
+// ため本 sweep の scope 外 (= 別 PR で nested validator を追加するなら
+// follow-up)。
+var updateMetaEnumAllowed = map[string]map[string]struct{}{
+	"sensitiveMediaDetection":            {"none": {}, "all": {}, "local": {}, "remote": {}},
+	"sensitiveMediaDetectionSensitivity": {"medium": {}, "low": {}, "high": {}, "veryLow": {}, "veryHigh": {}},
+	"federation":                         {"all": {}, "none": {}, "specified": {}},
+	"ugcVisibilityForVisitor":            {"all": {}, "local": {}, "none": {}},
+}
+
+// validateUpdateMetaEnums returns an error when fields map contains an
+// enum-constrained key whose value isn't in the allowed set. nil / non-string
+// values are reject (= upstream の json schema validator が string + enum で
+// 制約する semantics に合わせる)。
+func validateUpdateMetaEnums(fields map[string]any) error {
+	for key, allowed := range updateMetaEnumAllowed {
+		v, ok := fields[key]
+		if !ok {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			return errors.New(key + " must be a string")
+		}
+		if _, ok := allowed[s]; !ok {
+			// 許容値は alphabetical sort で error 文に並べる (= deterministic
+			// error message、test の assert.Contains が安定する)。
+			keys := make([]string, 0, len(allowed))
+			for k := range allowed {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return errors.New(key + " must be one of: " + strings.Join(keys, ", "))
+		}
+	}
+	return nil
 }
 
 // metaArrayColumns enumerates every varchar[] column on `meta` that admin
@@ -1921,9 +1976,21 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 }
 
 // ResolveAbuseReport handles POST /api/admin/resolve-abuse-user-report.
+//
+// upstream paramDef:
+//
+//	reportId:    string (required)
+//	resolvedAs:  enum ['accept', 'reject', null], nullable
+//
+// 旧 mk-go は `resolvedAs` を `"accept"` 固定にしていたため、admin が
+// reject (= 「報告は不適切」判定) を選んでも accept として記録され、
+// abuse handling の判定結果が反映されない drop-in regression があった
+// (PR #1108 sweep)。本 fix で upstream paramDef 通り `resolvedAs` を
+// accept し enum 検証する。
 func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 	var req struct {
-		ReportID string `json:"reportId"`
+		ReportID   string  `json:"reportId"`
+		ResolvedAs *string `json:"resolvedAs"`
 	}
 	if err := c.Bind(&req); err != nil || req.ReportID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "reportId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1931,12 +1998,27 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 	if h.abuseRepo == nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REPORT", "No such report.", "ac2cf84c-3c73-44f0-8e8f-0e76f2cb5eb3"))
 	}
-	resolvedAs := "accept"
-	err := h.abuseRepo.UpdateFields(req.ReportID, map[string]any{
-		"resolved":   true,
-		"resolvedAs": resolvedAs,
-	})
-	if err != nil {
+	// upstream enum: ['accept', 'reject', null]。null は「未送出」+ JSON null
+	// 両方を「resolve したが判定保留」として扱う (= column も null)。
+	// 不正値は silent fallback せず 400 で reject (PR #1102 の RolesUpdate.target
+	// fix と同方針: 既存 row の resolvedAs が意図せず書き換わる silent
+	// corruption を防ぐ)。
+	fields := map[string]any{"resolved": true}
+	switch {
+	case req.ResolvedAs == nil:
+		fields["resolvedAs"] = nil
+	case *req.ResolvedAs == "accept":
+		fields["resolvedAs"] = "accept"
+	case *req.ResolvedAs == "reject":
+		fields["resolvedAs"] = "reject"
+	case *req.ResolvedAs == "":
+		// 明示的空文字も null 扱い (frontend が `null` の代わりに `""` を送る
+		// 互換ケース、cf. PR #1102 color clear 経路と同じ workaround)。
+		fields["resolvedAs"] = nil
+	default:
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "resolvedAs must be 'accept', 'reject', or null.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if err := h.abuseRepo.UpdateFields(req.ReportID, fields); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REPORT", "No such report.", "ac2cf84c-3c73-44f0-8e8f-0e76f2cb5eb3"))
 	}
 	return c.NoContent(http.StatusNoContent)
