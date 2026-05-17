@@ -353,21 +353,33 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 	}
 
+	// meta を 1 度だけ fetch して sensitive / prohibited 両 check に reuse (#PR-A
+	// perf bundle)。旧版は両 helper が独立に Fetch を呼んでいて L1 cache cold
+	// な環境では note 作成あたり 2 round-trip 発生していた。Fetch 失敗は両
+	// helper とも fail-open (返り値 nil 扱いで素通し) なので、ここでも error
+	// は捨てて meta=nil で先に進む = 振る舞いは旧版と完全一致。
+	var meta *model.Meta
+	if s.metaRepo != nil {
+		if m, err := s.metaRepo.Fetch(); err == nil {
+			meta = m
+		}
+	}
+
 	// meta.sensitiveWords にマッチする text / CW を持つ public note は home に
-	// 降格する (upstream Misskey TS NoteCreateService.ts:467-471 と同一挙動)。
-	// channel 内は降格対象外 (上の silencing と同じ理由)。投稿は成功するが
-	// public timeline / federation broadcast から外れる effect で、admin が
-	// 設定したセンシティブワード設定が実機で効くようにする (drop-in regression
-	// fix)。upstream と同じく filter は `/regex/flags` または space 区切り AND
-	// match。
+	// 降格する (upstream Misskey TS NoteCreateService.ts:467-471 と同一挙動 +
+	// PR #1106 で CW/text 独立 check に強化済)。channel 内は降格対象外
+	// (上の silencing と同じ理由)。投稿は成功するが public timeline /
+	// federation broadcast から外れる effect で、admin が設定したセンシティブ
+	// ワード設定が実機で効くようにする (drop-in regression fix)。upstream と
+	// 同じく filter は `/regex/flags` または space 区切り AND match。
 	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
-		if s.matchesSensitiveWords(in.Text, in.CW) {
+		if matchesSensitiveWords(meta, in.Text, in.CW) {
 			visibility = model.NoteVisibilityHome
 		}
 	}
 
 	// プロhibited wordsチェック (meta.prohibitedWordsマッチ)
-	if err := s.checkProhibitedWords(in.Text, in.CW); err != nil {
+	if err := checkProhibitedWords(meta, in.Text, in.CW); err != nil {
 		return nil, err
 	}
 
@@ -876,23 +888,20 @@ func sameChannel(a, b *string) bool {
 // upstream Misskey TS NoteCreateService.ts:469 は `cw ?? text ?? ”` で 1
 // field だけを check する JS nullish coalescing 仕様で、admin が CW を
 // 設定するだけで text 側の sensitive 検出を bypass できる known な穴が
-// ある。mk-go では PR #1105 (drop-in fix) で upstream parity を維持して
-// いたが、本 PR で **CW と text を独立に check** し bypass を塞ぐ。
+// ある。mk-go では PR #1105 (drop-in fix) で upstream parity を維持し、
+// PR #1106 で **CW と text を独立に check** して bypass を塞いだ。
 //
 // 各 field を独立に IsKeyWordIncluded に渡すことで、regex フィルタの
 // `^/$` boundary も field 単位で正しく解釈される (concat 案だと改行
 // 越境 match が発生して挙動が予測しにくくなる)。
 //
-// metaRepo 未設定または sensitiveWords が空 → false (no match)。helper
-// errors (meta fetch 失敗) も fail-open で false: 反映漏れの方が「投稿が
-// 思わぬ form で blocked される」より影響軽微で、upstream も同タイミング
-// で throw しないので挙動も揃う。
-func (s *CreateService) matchesSensitiveWords(text, cw *string) bool {
-	if s.metaRepo == nil {
-		return false
-	}
-	meta, err := s.metaRepo.Fetch()
-	if err != nil || meta == nil || len(meta.SensitiveWords) == 0 {
+// meta は呼び元の Create が 1 度だけ fetch して渡す (perf: 連続 Fetch を
+// 統合)。meta が nil または sensitiveWords が空 → false (no match)。
+// caller が fetch error で nil を渡すケースも fail-open で false: 反映漏れ
+// の方が「投稿が思わぬ form で blocked される」より影響軽微で、upstream
+// も同タイミングで throw しないので挙動も揃う。
+func matchesSensitiveWords(meta *model.Meta, text, cw *string) bool {
+	if meta == nil || len(meta.SensitiveWords) == 0 {
 		return false
 	}
 	words := []string(meta.SensitiveWords)
@@ -907,13 +916,11 @@ func (s *CreateService) matchesSensitiveWords(text, cw *string) bool {
 
 // checkProhibitedWords scans text + cw for any word listed in
 // meta.prohibitedWords. Returns ErrContainsProhibitedWords on match.
-// MetaRepo未設定、または prohibitedWords が空ならskipする。
-func (s *CreateService) checkProhibitedWords(text, cw *string) error {
-	if s.metaRepo == nil {
-		return nil
-	}
-	meta, err := s.metaRepo.Fetch()
-	if err != nil || meta == nil || len(meta.ProhibitedWords) == 0 {
+// meta が nil または prohibitedWords が空なら skip する (= caller の
+// fetch error も nil 渡しで fail-open される)。meta は呼び元の Create が
+// 1 度だけ fetch して渡す (perf: matchesSensitiveWords と統合)。
+func checkProhibitedWords(meta *model.Meta, text, cw *string) error {
+	if meta == nil || len(meta.ProhibitedWords) == 0 {
 		return nil
 	}
 	haystacks := make([]string, 0, 2)

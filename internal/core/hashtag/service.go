@@ -74,26 +74,17 @@ func (s *Service) OnNoteCreated(note *model.Note, author *model.User) {
 	}
 	isLocal := author.IsLocal()
 	// 入力を goroutine 起動前に複製して capture race を防ぐ。
-	// (caller が同 *model.Note を後段で mutate しても safe)
-	// + upstream HashtagService.updateHashtagsRanking と同じく hiddenTags /
-	// sensitiveWords にマッチする tag は record しない (= featured / trends
-	// に出ないように filter する drop-in compat)。filter は同期的に取得して
-	// goroutine 起動後の DB アクセスを 1 つ減らす。
-	hidden, sensitive := s.fetchHiddenAndSensitive()
-	tags := make([]string, 0, len(note.Tags))
+	// (caller が同 *model.Note を後段で mutate しても safe)。空 tag のみ
+	// 同期的に弾いて、hiddenTags / sensitiveWords filter は goroutine 内に
+	// 移して caller (note_create / federation/resolver) の同期 thread から
+	// DB fetch 待ちを完全に除く (= fire-and-forget 設計の本来の意図)。
+	rawTags := make([]string, 0, len(note.Tags))
 	for _, name := range note.Tags {
-		if name == "" {
-			continue
+		if name != "" {
+			rawTags = append(rawTags, name)
 		}
-		if isHiddenTag(name, hidden) {
-			continue
-		}
-		if keyword.IsKeyWordIncluded(name, sensitive) {
-			continue
-		}
-		tags = append(tags, name)
 	}
-	if len(tags) == 0 {
+	if len(rawTags) == 0 {
 		return
 	}
 	authorID := author.ID
@@ -105,7 +96,19 @@ func (s *Service) OnNoteCreated(note *model.Note, author *model.User) {
 				slog.Error("hashtag: panic in OnNoteCreated worker", "panic", r)
 			}
 		}()
-		for _, name := range tags {
+		// upstream HashtagService.updateHashtagsRanking と同じく hiddenTags /
+		// sensitiveWords にマッチする tag は record しない (= featured /
+		// trends に出ないように filter する drop-in compat)。meta fetch を
+		// 含めて goroutine 内で完結させることで caller 同期 thread の DB
+		// 待ちを完全に除く。
+		hidden, sensitive := s.fetchHiddenAndSensitive()
+		for _, name := range rawTags {
+			if isHiddenTag(name, hidden) {
+				continue
+			}
+			if keyword.IsKeyWordIncluded(name, sensitive) {
+				continue
+			}
 			hid := s.idGen.Generate(createdAt)
 			if err := s.repo.RecordMention(hid, name, authorID, isLocal); err != nil {
 				slog.Warn("hashtag: RecordMention failed", "name", name, "userID", authorID, "err", err)
