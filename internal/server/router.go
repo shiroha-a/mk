@@ -1303,6 +1303,12 @@ func (s *Server) setupRoutes() {
 	// `chatAvailability === "available"`) に揃える (#988)。roleService 自体
 	// が in-memory cache を持つ (#761) ので追加 DB 負荷は実質ゼロ。
 	entity.SetCanChatLookup(corerole.NewCanChatLookup(roleService))
+	// PackUserLite / PackUserDetailed の `badgeRoles` / `roles` field を
+	// role assignment から populate (#1103)。旧 mk-go は両 field を空配列
+	// hard-code していたため、admin が公開ロールを assign しても profile
+	// に表示されなかった。roleService.GetUserRoles も in-memory cache 経由
+	// (#761) で hot path コスト無し。
+	entity.SetUserRolesLookup(corerole.NewUserRolesLookup(roleService))
 	iHandler.SetNoteFieldResolver(noteFieldResolver)
 	// announcementRepoは後続で構築されるため SetupAdditional() 相当の順序依存があるが、
 	// 現状 announcementRepo := ... の行がここより後にあるため下で wire する。

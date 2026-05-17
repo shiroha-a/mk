@@ -247,7 +247,7 @@ func PackUserLite(u *model.User) UserLite {
 		IsCat:             u.IsCat,
 		Emojis:            make(map[string]string),
 		OnlineStatus:      "unknown",
-		BadgeRoles:        []any{},
+		BadgeRoles:        packBadgeRoles(u),
 		// upstream `chatAvailability === 'available'` 互換 (#988)。
 		// 旧実装は `u.ChatScope != "none"` で user 自身の受信設定を返して
 		// いたが、upstream は role policy の chatAvailability を見る
@@ -291,7 +291,7 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		URI:                 u.URI,
 		PinnedNoteIDs:       []string{},
 		PinnedNotes:         []any{},
-		Roles:               []any{},
+		Roles:               packPublicRoles(u),
 		// DBデフォルト値 (user_profileのpublicReactions DEFAULT true)
 		PublicReactions: true,
 	}
