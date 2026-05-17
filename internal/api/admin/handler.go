@@ -2019,7 +2019,37 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, reports)
+	// model.AbuseUserReport は createdAt 列を持たず aidx ID 先頭 8 文字に
+	// timestamp を埋め込んでいる。frontend (MkAbuseReport.vue) は
+	// `<MkTime :time="report.createdAt"/>` を直接読むため、aidx から派生
+	// した createdAt 文字列を response に注入する。ShowModerationLogs と
+	// 同パターン (#1116)。embedded struct で既存 field を JSON inline、
+	// CreatedAt だけ上乗せする。
+	out := make([]packedAbuseReport, 0, len(reports))
+	for _, r := range reports {
+		p := packedAbuseReport{AbuseUserReport: r}
+		if s, err := aidxCreatedAtString(h.idGen, r.ID); err == nil {
+			p.CreatedAt = s
+		} else if !errors.Is(err, ErrIDGenMissing) {
+			// idGen は wired されているのに parse 失敗した場合のみログに残す。
+			// 非 aidx 形式の legacy ID 等で createdAt が出せない時に frontend
+			// 側で「日時の解析が失敗しました。」が出る原因を後追いできるように
+			// する (ShowModerationLogs と同 pattern)。
+			slog.DebugContext(c.Request().Context(), "abuseReport: createdAt derive failed",
+				"reportId", r.ID, "err", err)
+		}
+		out = append(out, p)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// packedAbuseReport wraps model.AbuseUserReport and adds the derived
+// `createdAt` field (= aidx ID から派生した ISO 8601 timestamp) that the
+// frontend `MkAbuseReport.vue` expects. embedded struct を使って既存の
+// `id` / `targetUser` / `reporter` 等の field を JSON inline で温存する。
+type packedAbuseReport struct {
+	*model.AbuseUserReport
+	CreatedAt string `json:"createdAt,omitempty"`
 }
 
 // isValidOrigin returns true if s is one of the valid origin filter values
