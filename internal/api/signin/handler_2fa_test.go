@@ -127,6 +127,50 @@ func Test2FA_TOTP_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// Test2FA_TOTP_ReplayRejected: 同じ TOTP コードを 2 回目以降に送ったときは
+// acceptance window 内でも 403 で refuse されること (RFC 6238 §5.2)。
+// Redis backed replay guard を wire した状態で検証する。
+func Test2FA_TOTP_ReplayRejected(t *testing.T) {
+	if signinTestRedis == nil {
+		t.Skip("redis testcontainer required")
+	}
+	h, repo := newTestHandler(t)
+	secret := "JBSWY3DPEHPK3PXP"
+	newTestUserWithTOTP(repo, "alice", "pass", secret, nil)
+	h.SetTOTPReplayGuard(twofactor.NewRedisReplayGuard(redisClientFromTest(t)))
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+
+	// 1 回目は通る
+	rec1 := doPost(h.SigninFlow, `{"username":"alice","password":"pass","token":"`+token+`"}`)
+	require.Equal(t, http.StatusOK, rec1.Code)
+	var step3 map[string]any
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &step3))
+	assert.Equal(t, true, step3["finished"])
+
+	// 2 回目は replay として 403
+	rec2 := doPost(h.SigninFlow, `{"username":"alice","password":"pass","token":"`+token+`"}`)
+	assert.Equal(t, http.StatusForbidden, rec2.Code, "same TOTP code must not be reusable within acceptance window")
+}
+
+// Test2FA_TOTP_NilGuard_AllowsReplay は guard 未配線時の fail-open 挙動を guard する。
+// production では必ず wire するが、unit test / dev 環境で nil でも回帰せず以前と同じ挙動を保つ。
+func Test2FA_TOTP_NilGuard_AllowsReplay(t *testing.T) {
+	h, repo := newTestHandler(t)
+	secret := "JBSWY3DPEHPK3PXP"
+	newTestUserWithTOTP(repo, "alice", "pass", secret, nil)
+	// guard 未配線 (h.totpReplayGuard == nil)
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	rec1 := doPost(h.SigninFlow, `{"username":"alice","password":"pass","token":"`+token+`"}`)
+	assert.Equal(t, http.StatusOK, rec1.Code)
+	// nil guard では replay protection 無しなので 2 回目も通る (= 後方互換 fallback)
+	rec2 := doPost(h.SigninFlow, `{"username":"alice","password":"pass","token":"`+token+`"}`)
+	assert.Equal(t, http.StatusOK, rec2.Code)
+}
+
 // --- Backup codes ---
 
 func Test2FA_BackupCode_Success(t *testing.T) {

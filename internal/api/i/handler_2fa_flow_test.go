@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/pquerna/otp/totp"
+	goredis "github.com/redis/go-redis/v9"
+	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,6 +104,63 @@ func TestTwoFADone_InvalidToken(t *testing.T) {
 
 	rec := postExtra(h.TwoFADone, `{"token":"000000"}`, user)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// newReplayGuard は miniredis-backed ReplayGuard を返す。テスト終了時に自動 close。
+func newReplayGuard(t *testing.T) twofactor.ReplayGuard {
+	t.Helper()
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	return twofactor.NewRedisReplayGuard(client)
+}
+
+// TestTwoFADone_ReplayRejected: i/2fa/done でも TOTP replay 保護が効くこと。
+// 実運用では done 後 tempSecret が消えるので二度目は別 path で弾かれるが、
+// guard の挙動を 3 経路で揃えるための回帰テスト。
+func TestTwoFADone_ReplayRejected(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	tempSecret := "JBSWY3DPEHPK3PXP"
+	repo.Profiles["u1"].TwoFactorTempSecret = &tempSecret
+	h.SetTOTPReplayGuard(newReplayGuard(t))
+
+	token, err := totp.GenerateCode(tempSecret, time.Now())
+	require.NoError(t, err)
+
+	// 1 回目は通る (= 2FA が enable され tempSecret が secret に昇格)
+	rec1 := postExtra(h.TwoFADone, `{"token":"`+token+`"}`, user)
+	require.Equal(t, http.StatusOK, rec1.Code)
+
+	// 2 回目: tempSecret を意図的に同じ値で復活させ、純粋に「同じ TOTP コードを
+	// もう一度送ったら refuse される」ことを検証する。replay guard が無ければ
+	// (= 旧実装) ここで再度 200 を返してしまう。
+	repo.Profiles["u1"].TwoFactorTempSecret = &tempSecret
+	rec2 := postExtra(h.TwoFADone, `{"token":"`+token+`"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec2.Code, "same TOTP code must be refused as replay on the second submit")
+}
+
+// TestVerify2FAToken_ReplayRejected: verify2FAToken 経由
+// (TwoFARegisterKey / TwoFAKeyDone から呼ばれる sensitive 操作) でも TOTP
+// replay 保護が効くこと。
+func TestVerify2FAToken_ReplayRejected(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	setupUserWithPassword(repo, "u1", "pass")
+	secret := "JBSWY3DPEHPK3PXP"
+	repo.Profiles["u1"].TwoFactorSecret = &secret
+	repo.Profiles["u1"].TwoFactorEnabled = true
+	h.SetTOTPReplayGuard(newReplayGuard(t))
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	profile := repo.Profiles["u1"]
+
+	// 1 回目は accept
+	assert.True(t, h.verify2FAToken(t.Context(), profile, token))
+	// 2 回目は refuse (replay)
+	assert.False(t, h.verify2FAToken(t.Context(), profile, token))
 }
 
 func TestTwoFAUnregister_Success(t *testing.T) {

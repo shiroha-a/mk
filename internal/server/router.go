@@ -1049,6 +1049,13 @@ func (s *Server) setupRoutes() {
 		signinHandler.SetWebAuthn(webauthnSvc, userSecurityKeyRepo)
 	}
 
+	// TOTP replay guard — accept した TOTP コードを Redis に SETNX で
+	// 記録し、acceptance window 内 (~90s) の再利用を refuse する
+	// (RFC 6238 §5.2)。upstream Misskey TS は持たない mk-go 独自 hardening。
+	// signin と /api/i の 2 経路で共通の guard を共有する。
+	totpReplayGuard := coretwofactor.NewRedisReplayGuard(s.redis.Default)
+	signinHandler.SetTOTPReplayGuard(totpReplayGuard)
+
 	// Emojis endpoints (public)
 	emojisHandler := apiemojis.NewHandler(emojiRepo)
 	api.POST("/emojis", emojisHandler.Emojis)
@@ -1218,6 +1225,7 @@ func (s *Server) setupRoutes() {
 	registryRepo := repository.NewRegistryRepository(s.db)
 	iHandler := i.NewHandler(userService, idGen)
 	iHandler.SetRoleProvider(roleService)
+	iHandler.SetTOTPReplayGuard(totpReplayGuard)
 	iHandler.SetRegistryRepo(registryRepo)
 	iHandler.SetMetaRepo(metaRepo)
 	iHandler.SetServerURL(s.config.URL)

@@ -2,6 +2,7 @@ package i
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -91,7 +92,13 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "2FA registration not started.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
-	if !twofactor.Validate(req.Token, *profile.TwoFactorTempSecret) {
+	// ValidateWithReplay は同一コードの replay を refuse する (RFC 6238 §5.2)。
+	// temp secret は確認後すぐ permanent secret に昇格されるため strictly
+	// 必要ではないが、3 経路で挙動を揃える方が監査・テスト時の予測可能性が
+	// 高い。副作用: TwoFADone 成功直後 (~30s 以内) に同じ code で signin を
+	// 試みると replay として 403 になる (permanent secret に同 value で昇格
+	// するため Redis slot に hit する)。次の TOTP step に進めば解消する。
+	if !twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, req.Token, *profile.TwoFactorTempSecret) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
@@ -179,7 +186,9 @@ func (h *Handler) requireWebAuthn(c echo.Context, password string) (*model.User,
 //
 // Misskey TS upstream の UserAuthService.twoFactorAuthenticate と同じ挙動:
 // backup code に hit したら使い捨てで消費し、それ以外は TOTP として検証する。
-func (h *Handler) verify2FAToken(profile *model.UserProfile, token string) bool {
+// TOTP 経路は ValidateWithReplay で同一コードの replay を refuse する
+// (RFC 6238 §5.2 / mk-go 独自 hardening、upstream Misskey TS は持たない)。
+func (h *Handler) verify2FAToken(ctx context.Context, profile *model.UserProfile, token string) bool {
 	if token == "" {
 		return false
 	}
@@ -192,7 +201,7 @@ func (h *Handler) verify2FAToken(profile *model.UserProfile, token string) bool 
 	if profile.TwoFactorSecret == nil {
 		return false
 	}
-	return twofactor.Validate(token, *profile.TwoFactorSecret)
+	return twofactor.ValidateWithReplay(ctx, h.totpReplayGuard, profile.UserID, token, *profile.TwoFactorSecret)
 }
 
 // twoFAKeyNameMaxLen mirrors upstream の paramDef `name: { minLength: 1,
@@ -231,7 +240,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	if !ok {
 		return nil
 	}
-	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {
@@ -279,7 +288,7 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	if !ok {
 		return nil
 	}
-	if profile.TwoFactorEnabled && !h.verify2FAToken(profile, req.Token) {
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {

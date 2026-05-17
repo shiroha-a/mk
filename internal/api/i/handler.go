@@ -94,6 +94,11 @@ type Handler struct {
 	// (30 秒) 待ちで stale 旧 token が auth 通過する security regression が
 	// 残るので production では必ず wire する。
 	authInvalidator TokenInvalidator
+	// totpReplayGuard は i/2fa/done / 2fa-gated 操作で同一 TOTP コードの
+	// 二度使いを refuse する (RFC 6238 §5.2 / mk-go 独自 hardening、upstream
+	// Misskey TS は持たない)。nil なら無保護 (= unit test / dev fallback)。
+	// production では必ず wire する。
+	totpReplayGuard twofactor.ReplayGuard
 }
 
 // TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive
@@ -200,6 +205,14 @@ func (h *Handler) invalidateUserTokenCache(userID string) {
 // disables emit.
 func (h *Handler) SetMainStreamPublisher(p MainStreamPublisher) {
 	h.mainStreamPublisher = p
+}
+
+// SetTOTPReplayGuard wires the per-user replay guard used to refuse a
+// TOTP code that was already consumed within its acceptance window
+// (RFC 6238 §5.2). nil disables the protection. Affects i/2fa/done and
+// any sensitive endpoint that re-checks the TOTP via verify2FAToken.
+func (h *Handler) SetTOTPReplayGuard(g twofactor.ReplayGuard) {
+	h.totpReplayGuard = g
 }
 
 // SetInstanceRepo attaches an InstanceRepository so favorites/notifications

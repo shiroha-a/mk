@@ -46,6 +46,7 @@ type Handler struct {
 	signinRepo          repository.SigninRepository
 	idGen               id.Generator
 	mainStreamPublisher MainStreamPublisher
+	totpReplayGuard     twofactor.ReplayGuard
 }
 
 // SetIPLogger attaches an IPLogger and enables IP logging.
@@ -83,6 +84,14 @@ func (h *Handler) SetWebAuthn(svc *twofactor.WebAuthnService, repo repository.Us
 // event after a successful login. Optional — nil disables emit.
 func (h *Handler) SetMainStreamPublisher(p MainStreamPublisher) {
 	h.mainStreamPublisher = p
+}
+
+// SetTOTPReplayGuard wires the per-user replay guard used to refuse a
+// TOTP code that was already consumed within its acceptance window
+// (RFC 6238 §5.2). nil disables the protection (= upstream-compatible
+// fallback for unit tests / dev environments without Redis).
+func (h *Handler) SetTOTPReplayGuard(g twofactor.ReplayGuard) {
+	h.totpReplayGuard = g
 }
 
 // Signin handles POST /api/signin.
@@ -245,7 +254,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 			return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 		}
 		// まず TOTP を試す。失敗したらバックアップコードにフォールバック。
-		if profile.TwoFactorSecret != nil && twofactor.Validate(*req.Token, *profile.TwoFactorSecret) {
+		// ValidateWithReplay は RFC 6238 §5.2 に従い同コードの 2 回目以降
+		// (acceptance window 内) を拒否する (mk-go 独自 hardening、upstream
+		// Misskey TS は持たない)。
+		if profile.TwoFactorSecret != nil && twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, *req.Token, *profile.TwoFactorSecret) {
 			return h.ok(c, user)
 		}
 		if remaining, berr := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), *req.Token); berr == nil {
