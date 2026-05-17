@@ -1008,16 +1008,17 @@ func TestRolesUpdate_NullableColorClear(t *testing.T) {
 	assert.Nil(t, got.IconURL)
 }
 
-// target 不正値 ("weird" 等) は upstream-compat で manual に倒される。
-// frontend が誤った値を送っても 400 にはせず安全側に default すれば、
-// admin が一時的に壊れた payload を送っても role 自体は壊れない。
-func TestRolesUpdate_InvalidTargetFallsBackToManual(t *testing.T) {
+// target 不正値 ("weird" 等) は upstream Misskey TS と同じく 400 で reject。
+// 旧版 (PR #1102 first commit) は silent に manual に倒していたが、frontend
+// の typo で conditional role が意図せず manual に書き換わる silent
+// corruption の方が深刻なので、enum validation を upstream に揃える。
+func TestRolesUpdate_InvalidTargetReturns400(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "X", Target: model.RoleTargetConditional}
 	rec := doPost(h.RolesUpdate, `{"roleId":"r1","target":"weird"}`, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code)
-	got := roleRepo.Roles["r1"]
-	assert.Equal(t, model.RoleTargetManual, got.Target)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// gate で弾かれているので Target は元のまま (silent corruption しない)
+	assert.Equal(t, model.RoleTargetConditional, roleRepo.Roles["r1"].Target)
 }
 
 // condFormula が JSON object でないと bind 段階で 400 (= request struct の
@@ -1029,6 +1030,30 @@ func TestRolesUpdate_CondFormulaNonObjectRejected(t *testing.T) {
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "X"}
 	rec := doPost(h.RolesUpdate, `{"roleId":"r1","condFormula":"not-an-object"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// Create 経路でも target 不正値は 400 で reject (Update 経路と shape を揃える)。
+func TestRolesCreate_InvalidTargetReturns400(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	payload := `{
+		"name": "Cap",
+		"description": "",
+		"color": null,
+		"iconUrl": null,
+		"target": "weird",
+		"condFormula": {},
+		"isPublic": false,
+		"isModerator": false,
+		"isAdministrator": false,
+		"asBadge": false,
+		"canEditMembersByModerator": false,
+		"displayOrder": 0,
+		"policies": {}
+	}`
+	rec := doPost(h.RolesCreate, payload, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 不正 payload で role は作られない
+	assert.Empty(t, roleRepo.Roles)
 }
 
 // Create でも preserveAssignmentOnMoveAccount が persist されることを assert

@@ -1237,11 +1237,17 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 	if req.PreserveAssignmentOnMoveAccount != nil {
 		opts.PreserveAssignmentOnMoveAccount = *req.PreserveAssignmentOnMoveAccount
 	}
-	// Target は upstream で "manual" / "conditional" のみ。未知値は manual に倒す。
-	if *req.Target == string(model.RoleTargetConditional) {
-		opts.Target = model.RoleTargetConditional
-	} else {
+	// Target は upstream paramDef で `enum: ['manual', 'conditional']`。
+	// nest.js framework が unknown を 400 で reject するので、mk-go も
+	// silent fallback せず 400 を返す (新規 role なので Update 経路ほど
+	// 破壊的ではないが、shape を upstream に揃える)。
+	switch *req.Target {
+	case string(model.RoleTargetManual):
 		opts.Target = model.RoleTargetManual
+	case string(model.RoleTargetConditional):
+		opts.Target = model.RoleTargetConditional
+	default:
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "target must be 'manual' or 'conditional'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// CondFormula / Policies は JSON object → datatypes.JSON (= []byte) に Marshal。
 	// upstream は object 全体をそのまま column に書くだけで内部構造は consumer 任せ。
@@ -1356,11 +1362,18 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		}
 	}
 	if req.Target != nil {
-		// upstream は "manual" / "conditional" のみ。未知値は manual に倒す。
-		if *req.Target == string(model.RoleTargetConditional) {
-			fields["target"] = model.RoleTargetConditional
-		} else {
+		// upstream paramDef は `enum: ['manual', 'conditional']` で nest.js
+		// framework が unknown 値を 400 で reject する。mk-go も silent
+		// fallback (旧版は unknown → manual) せずに 400 を返す方が、frontend
+		// の typo 等で **既存 conditional role が意図せず manual に書き換わる
+		// silent corruption** を防げる。
+		switch *req.Target {
+		case string(model.RoleTargetManual):
 			fields["target"] = model.RoleTargetManual
+		case string(model.RoleTargetConditional):
+			fields["target"] = model.RoleTargetConditional
+		default:
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "target must be 'manual' or 'conditional'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 		}
 	}
 	if req.CondFormula != nil {
