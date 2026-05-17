@@ -930,11 +930,21 @@ func TestRolesUpdate_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-func TestRolesUpdate_AllFields(t *testing.T) {
+// TestRolesUpdate_BasicFieldsCompat: 旧来 5 field (name/description/
+// isModerator/isAdministrator/isPublic) のみ送る payload が backward
+// compatible で通ること。新規 10 field の persistence は別 test 群
+// (TestRolesUpdate_Persists*) で網羅する。
+func TestRolesUpdate_BasicFieldsCompat(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Old"}
 	rec := doPost(h.RolesUpdate, `{"roleId":"r1","name":"New","description":"desc","isModerator":true,"isAdministrator":true,"isPublic":true}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	got := roleRepo.Roles["r1"]
+	assert.Equal(t, "New", got.Name)
+	assert.Equal(t, "desc", got.Description)
+	assert.True(t, got.IsModerator)
+	assert.True(t, got.IsAdministrator)
+	assert.True(t, got.IsPublic)
 }
 
 // PR #1102 regression guard: RolesUpdate が policies を実際に persist する
@@ -996,6 +1006,59 @@ func TestRolesUpdate_NullableColorClear(t *testing.T) {
 	got := roleRepo.Roles["r1"]
 	assert.Nil(t, got.Color)
 	assert.Nil(t, got.IconURL)
+}
+
+// target 不正値 ("weird" 等) は upstream-compat で manual に倒される。
+// frontend が誤った値を送っても 400 にはせず安全側に default すれば、
+// admin が一時的に壊れた payload を送っても role 自体は壊れない。
+func TestRolesUpdate_InvalidTargetFallsBackToManual(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "X", Target: model.RoleTargetConditional}
+	rec := doPost(h.RolesUpdate, `{"roleId":"r1","target":"weird"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got := roleRepo.Roles["r1"]
+	assert.Equal(t, model.RoleTargetManual, got.Target)
+}
+
+// condFormula が JSON object でないと bind 段階で 400 (= request struct の
+// *map[string]any に string をマップできない)。これは Go の json binding が
+// 担保するので、handler 内部の json.Marshal error path は実質到達しないが、
+// payload validation の shape を契約として guard する。
+func TestRolesUpdate_CondFormulaNonObjectRejected(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "X"}
+	rec := doPost(h.RolesUpdate, `{"roleId":"r1","condFormula":"not-an-object"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// Create でも preserveAssignmentOnMoveAccount が persist されることを assert
+// (TestRolesCreate_PersistsAllFields の payload に含めていなかったため別 case で補完)。
+func TestRolesCreate_PersistsPreserveAssignmentOnMoveAccount(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	payload := `{
+		"name": "Sticky",
+		"description": "",
+		"color": null,
+		"iconUrl": null,
+		"target": "manual",
+		"condFormula": {},
+		"isPublic": false,
+		"isModerator": false,
+		"isAdministrator": false,
+		"asBadge": false,
+		"canEditMembersByModerator": false,
+		"preserveAssignmentOnMoveAccount": true,
+		"displayOrder": 0,
+		"policies": {}
+	}`
+	rec := doPost(h.RolesCreate, payload, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var r *model.Role
+	for _, v := range roleRepo.Roles {
+		r = v
+	}
+	require.NotNil(t, r)
+	assert.True(t, r.PreserveAssignmentOnMoveAccount)
 }
 
 func TestRolesUpdate_NotFound(t *testing.T) {

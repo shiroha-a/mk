@@ -897,12 +897,11 @@ func (s *Service) Create(name, description string, opts CreateOptions) (*model.R
 	if err := s.roleRepo.Create(role); err != nil {
 		return nil, err
 	}
-	// 新規 role を追加したので role list cache を invalidate (#1030)。
-	// conditional role が増える可能性があり、stale cache だと evaluation で
-	// 見逃すため。conditional role の condFormula 評価には全 user の userRole
-	// Cache も古くなるため、policies / target / condFormula 持ちで作られた
-	// role は user cache も flush する (#TODO: 引数で判別する代わりに保守的
-	// に全 flush)。
+	// 新規 role 追加時は条件分岐せず常に全 cache を flush する。理由:
+	//  (a) conditional role の場合は condFormula 評価で全 user の userRole
+	//      Cache に影響が出る (= 既存 user が新規 role に hit するかも)。
+	//  (b) opts から「conditional or not」を判別して flush 範囲を絞ることも
+	//      可能だが、admin role 作成は超低頻度 (~週 1) なので最適化価値が低い。
 	s.InvalidateAllRoleCaches()
 	return role, nil
 }

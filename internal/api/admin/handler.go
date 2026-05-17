@@ -1334,7 +1334,13 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		fields["description"] = *req.Description
 	}
 	if req.Color != nil {
-		// upstream nullable: 空文字 → null として保存 (= 「色なし」に戻す)。
+		// mk-go specific drift: upstream は `null` 送出時に column を null
+		// クリアするが、Go の `*string` JSON binding では「field 未送出」と
+		// 「null 明示」を区別できず両者とも nil pointer になる。frontend が
+		// クリア意図で `null` を送ったケースを救済するため、空文字 ("") も
+		// null クリアとして扱う運用にする。upstream は "" を空文字として
+		// 保存するので、theoretically 「色を文字 0 個に設定」したい場合の
+		// 挙動は乖離するが、実用上「色 = empty string」は存在しない (#1102)。
 		if *req.Color == "" {
 			fields["color"] = nil
 		} else {
@@ -1342,6 +1348,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		}
 	}
 	if req.IconURL != nil {
+		// 上記 Color と同じ理由で空文字を null クリア扱いする。
 		if *req.IconURL == "" {
 			fields["iconUrl"] = nil
 		} else {
