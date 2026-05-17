@@ -1147,6 +1147,32 @@ func TestCreateService_ContainsProhibitedWords(t *testing.T) {
 	assert.ErrorIs(t, err, note.ErrContainsProhibitedWords)
 }
 
+// PR #1107 perf regression guard: Create が meta を **1 回だけ** fetch する
+// ことを assert。旧版は matchesSensitiveWords / checkProhibitedWords が
+// それぞれ独立に Fetch を呼んでいて L1 cache cold な環境では note 作成
+// あたり 2 round-trip 発生していた。caller 側で 1 度 fetch して両 helper
+// に渡す pure 関数 shape に refactor 済 — その不変条件を guard する。
+func TestCreateService_MetaFetchOnlyOncePerCreate(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{
+		ID:              "m1",
+		SensitiveWords:  []string{"spoiler"},
+		ProhibitedWords: []string{"badword"},
+	}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "hello world"
+	_, err := svc.Create(note.CreateInput{
+		User:       &model.User{ID: "u1"},
+		Text:       &text,
+		Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, metaRepo.FetchCalls,
+		"Create should fetch meta exactly once (consolidated across sensitive + prohibited check)")
+}
+
 // meta.sensitiveWords にマッチする text を持つ public note は home に降格する
 // (upstream NoteCreateService と同 semantics、テストユーザー報告の症状)。
 func TestCreateService_SensitiveWordsDemotesPublicToHome(t *testing.T) {

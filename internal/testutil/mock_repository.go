@@ -1869,8 +1869,16 @@ func mockILIKE(value, substr string) bool {
 }
 
 // MockMetaRepository is a test double for repository.MetaRepository.
+//
+// FetchCalls tracks how many times Fetch has been invoked. Tests asserting
+// perf invariants (例: "Create が meta を 1 度しか fetch しない") can read
+// this counter directly. zero-value initialised, so existing tests that
+// don't touch FetchCalls are unaffected. Not goroutine-safe (= no atomic);
+// callers that run Fetch concurrently and inspect the counter must guard
+// access externally — handler tests are sequential per-test so this is OK.
 type MockMetaRepository struct {
-	Meta *model.Meta
+	Meta       *model.Meta
+	FetchCalls int
 }
 
 func NewMockMetaRepository() *MockMetaRepository {
@@ -1878,6 +1886,7 @@ func NewMockMetaRepository() *MockMetaRepository {
 }
 
 func (m *MockMetaRepository) Fetch() (*model.Meta, error) {
+	m.FetchCalls++
 	if m.Meta == nil {
 		return nil, ErrNotFound
 	}

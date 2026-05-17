@@ -353,11 +353,11 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 	}
 
-	// meta を 1 度だけ fetch して sensitive / prohibited 両 check に reuse (#PR-A
-	// perf bundle)。旧版は両 helper が独立に Fetch を呼んでいて L1 cache cold
-	// な環境では note 作成あたり 2 round-trip 発生していた。Fetch 失敗は両
-	// helper とも fail-open (返り値 nil 扱いで素通し) なので、ここでも error
-	// は捨てて meta=nil で先に進む = 振る舞いは旧版と完全一致。
+	// meta を 1 度だけ fetch して sensitive / prohibited 両 check に reuse
+	// (PR #1107 perf bundle)。旧版は両 helper が独立に Fetch を呼んでいて L1
+	// cache cold な環境では note 作成あたり 2 round-trip 発生していた。Fetch
+	// 失敗は両 helper とも fail-open (返り値 nil 扱いで素通し) なので、ここ
+	// でも error は捨てて meta=nil で先に進む = 振る舞いは旧版と完全一致。
 	var meta *model.Meta
 	if s.metaRepo != nil {
 		if m, err := s.metaRepo.Fetch(); err == nil {
