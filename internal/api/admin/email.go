@@ -8,6 +8,11 @@ import (
 )
 
 // SendEmail handles POST /api/admin/send-email.
+//
+// 内部で smtp.SubjectBodySenderFromMeta を経由することで、router.go の他
+// 3 経路 (signup / reset / i/update-email) と SMTP 設定読み出しロジック
+// (= per-call 再 Fetch + smtpSecure 反映 + 未設定時 no-op) を共有する。
+// goroutine 内で送信して呼び出し元に 204 を即返すのは admin UI 既存挙動。
 func (h *Handler) SendEmail(c echo.Context) error {
 	var req struct {
 		To      string `json:"to"`
@@ -17,16 +22,9 @@ func (h *Handler) SendEmail(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.To == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// SMTP送信
 	if h.metaRepo != nil {
-		m, err := h.metaRepo.Fetch()
-		if err == nil && m.EnableEmail && m.SmtpHost != nil && m.Email != nil {
-			port := 587
-			if m.SmtpPort != nil {
-				port = *m.SmtpPort
-			}
-			go smtp.SendWithOptions(*m.SmtpHost, port, m.SmtpUser, m.SmtpPass, *m.Email, req.To, req.Subject, req.Text, smtp.Options{ProxyURL: h.smtpProxyURL, Secure: m.SmtpSecure})
-		}
+		sender := smtp.SubjectBodySenderFromMeta(h.metaRepo, h.smtpProxyURL)
+		go sender(req.To, req.Subject, req.Text)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

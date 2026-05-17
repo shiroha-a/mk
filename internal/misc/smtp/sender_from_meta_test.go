@@ -2,7 +2,6 @@ package smtp
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -225,12 +224,3 @@ func TestSubjectBodySenderFromMeta_UnconfiguredIsNoOp(t *testing.T) {
 // helper: strPtr is locally defined in this test file to avoid pulling
 // the server helper into a different package. Kept tiny + private.
 func strPtr(s string) *string { return &s }
-
-// 圧縮した sanity check: port int 変換が test helper として動くこと。
-func TestPortConversion_Sanity(t *testing.T) {
-	// arbitrary string conversion check; strconv usage above 経路の依存を
-	// 担保するため import 利用を明示。
-	if _, err := strconv.Atoi("587"); err != nil {
-		t.Fatal(err)
-	}
-}
