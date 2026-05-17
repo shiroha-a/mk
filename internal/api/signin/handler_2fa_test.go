@@ -130,6 +130,10 @@ func Test2FA_TOTP_InvalidToken(t *testing.T) {
 // Test2FA_TOTP_ReplayRejected: 同じ TOTP コードを 2 回目以降に送ったときは
 // acceptance window 内でも 403 で refuse されること (RFC 6238 §5.2)。
 // Redis backed replay guard を wire した状態で検証する。
+//
+// test-unique な KeyPrefix を渡しているのは、共有 signinTestRedis に対して
+// `-count=N` (N≥2) や他テストとの key 衝突で flaky になることを防ぐため。
+// production の prefix (= "mk:2fa:totp:used") とは別空間で動かす。
 func Test2FA_TOTP_ReplayRejected(t *testing.T) {
 	if signinTestRedis == nil {
 		t.Skip("redis testcontainer required")
@@ -137,7 +141,10 @@ func Test2FA_TOTP_ReplayRejected(t *testing.T) {
 	h, repo := newTestHandler(t)
 	secret := "JBSWY3DPEHPK3PXP"
 	newTestUserWithTOTP(repo, "alice", "pass", secret, nil)
-	h.SetTOTPReplayGuard(twofactor.NewRedisReplayGuard(redisClientFromTest(t)))
+	h.SetTOTPReplayGuard(&twofactor.RedisReplayGuard{
+		Client:    redisClientFromTest(t),
+		KeyPrefix: "test:" + t.Name(),
+	})
 
 	token, err := totp.GenerateCode(secret, time.Now())
 	require.NoError(t, err)
