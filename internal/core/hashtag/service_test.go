@@ -95,10 +95,9 @@ func TestService_OnNoteCreated_LocalUser(t *testing.T) {
 	}
 }
 
-// PR #1103 regression guard: meta.sensitiveWords にマッチする tag は
-// RecordMention されない (= featured / trends に出ない、upstream
-// HashtagService.updateHashtagsRanking と同 semantics)。テストユーザー
-// 報告経路と合わせて drop-in 互換を回復する。
+// meta.sensitiveWords にマッチする tag は RecordMention されない (= featured
+// / trends に出ない、upstream HashtagService.updateHashtagsRanking と同
+// semantics)。テストユーザー報告経路と合わせて drop-in 互換を回復する。
 func TestService_OnNoteCreated_SkipsSensitiveTags(t *testing.T) {
 	s, repo := newTestService(t)
 	metaRepo := testutil.NewMockMetaRepository()

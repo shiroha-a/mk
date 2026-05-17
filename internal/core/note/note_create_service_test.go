@@ -1147,9 +1147,8 @@ func TestCreateService_ContainsProhibitedWords(t *testing.T) {
 	assert.ErrorIs(t, err, note.ErrContainsProhibitedWords)
 }
 
-// PR #1103 regression guard: meta.sensitiveWords にマッチする text を持つ
-// public note は home に降格する (upstream NoteCreateService と同 semantics、
-// テストユーザー報告の症状)。
+// meta.sensitiveWords にマッチする text を持つ public note は home に降格する
+// (upstream NoteCreateService と同 semantics、テストユーザー報告の症状)。
 func TestCreateService_SensitiveWordsDemotesPublicToHome(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 	metaRepo := testutil.NewMockMetaRepository()
@@ -1163,6 +1162,47 @@ func TestCreateService_SensitiveWordsDemotesPublicToHome(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
 		"public note matching sensitiveWords must be demoted to home")
+}
+
+// upstream parity: CW が non-nil なら text は評価されない (`cw ?? text`)。
+// CW を設定すれば text に sensitive word を仕込んでも降格されない、という
+// upstream の known な bypass 経路を mk-go も忠実に保存する。**security
+// 観点では穴だが、drop-in 互換のため意図的に upstream に揃える**。
+// mk-go-strict 化 (CW+text 両方 check) は別 PR で議論。
+func TestCreateService_SensitiveWordsCWShadowsText_UpstreamParity(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	cw := "harmless cw"
+	text := "this body contains a spoiler"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, CW: &cw, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
+		"CW が non-nil の場合は text を評価しない (upstream NoteCreateService.ts:469 と同 `cw ?? text` semantics)")
+}
+
+// upstream parity: CW=&"" (空文字を明示) も "non-nil" 扱いで text は評価
+// されない (JS nullish coalescing は "" を non-nullish と扱う)。実用上は
+// admin が空 CW を送るケースはあまり無いが、edge-case を upstream と
+// 揃えるための regression guard。
+func TestCreateService_SensitiveWordsEmptyCWShadowsText_UpstreamParity(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	empty := ""
+	text := "this body contains a spoiler"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, CW: &empty, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
+		"CW=&\"\" (non-nil 空文字) も text を shadow する (JS nullish coalescing)")
 }
 
 // CW フィールドも match 対象 (upstream は cw ?? text を見るので、CW が match

@@ -25,9 +25,10 @@ import (
 type Service struct {
 	repo  repository.HashtagRepository
 	idGen id.Generator
-	// metaRepo は hiddenTags / sensitiveWords filter で使う (#TODO link)。
-	// 未配線なら filter skip = 全 tag を record する旧挙動 (= drop-in
-	// fallback)。production の router.go は必ず wire する。
+	// metaRepo は hiddenTags / sensitiveWords filter で使う (upstream
+	// HashtagService.updateHashtagsRanking と同 semantics)。未配線なら
+	// filter skip = 全 tag を record する旧挙動 (= drop-in fallback)。
+	// production の router.go は必ず wire する。
 	metaRepo repository.MetaRepository
 	// pending は in-flight worker goroutine 数を追跡する。production では
 	// 参照されないが、unit test が WaitForPendingWrites() 経由で完了を
