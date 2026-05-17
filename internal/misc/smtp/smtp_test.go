@@ -787,6 +787,99 @@ func TestBuildMessage_TransferEncodingIs8bit(t *testing.T) {
 	}
 }
 
+// PR for #1111: Options.Secure=true で client 側が SMTP greeting を受ける
+// 前に TLS handshake を開始することを確認する。TLS record の最初のバイト
+// は 0x16 (= ContentTypeHandshake) なので、server 側で最初の 1 byte を
+// 読んでこれが 0x16 なら implicit TLS を attempt したと判定する。
+//
+// 自己署名 cert + RootCAs 注入は test の複雑度が大きいのでここでは
+// handshake 完了は問わない (= server 側が cert を提示しないので client
+// 側は handshake error で接続を閉じる、それで OK — 目的は「TLS を
+// 開始する経路に入った」ことの検証)。
+func TestSendMessage_Secure_InitiatesTLSHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	sawClientHello := make(chan bool, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			sawClientHello <- false
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _ := conn.Read(buf)
+		sawClientHello <- (n == 1 && buf[0] == 0x16)
+	}()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SendMessage panicked: %v", r)
+		}
+	}()
+	SendMessage("127.0.0.1", port, nil, nil, "f@e.test", "t@e.test",
+		Message{Subject: "s", Text: "b"}, Options{Secure: true})
+
+	select {
+	case got := <-sawClientHello:
+		if !got {
+			t.Error("expected first byte to be 0x16 (TLS ClientHello) when Secure=true")
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("server side timed out waiting for client bytes")
+	}
+}
+
+// Secure=false の対照 test: client は greeting を待ってから EHLO を送るので、
+// server 側が greeting を送らなければ client は何も送って来ない (= 接続を
+// timeout で閉じる)。最初に受信したいずれかのバイトが 0x16 (TLS) でない
+// ことを確認する。
+func TestSendMessage_PlainTCP_DoesNotInitiateTLSHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	gotClientHello := make(chan bool, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			gotClientHello <- false
+			return
+		}
+		defer conn.Close()
+		// greeting 送らず client が何を送ってくるかだけ観察。implicit TLS
+		// 経路なら 0x16 が即届く、plain SMTP 経路なら greeting 待ちなので
+		// timeout まで何も来ない。
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, 1)
+		n, _ := conn.Read(buf)
+		gotClientHello <- (n == 1 && buf[0] == 0x16)
+	}()
+
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	SendMessage("127.0.0.1", port, nil, nil, "f@e.test", "t@e.test",
+		Message{Subject: "s", Text: "b"}, Options{Secure: false})
+
+	select {
+	case got := <-gotClientHello:
+		if got {
+			t.Error("Secure=false path should not start with TLS ClientHello")
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("server side timed out")
+	}
+}
+
 // random boundary (#600 item 4 review): 同じ入力でも 2 回呼ぶと boundary が変わる
 func TestBuildMessage_RandomBoundary(t *testing.T) {
 	a := buildMessage("f@e.test", "t@e.test", "S", "x", "<p>x</p>")

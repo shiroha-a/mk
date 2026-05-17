@@ -33,6 +33,14 @@ type Options struct {
 	// プロトコルを指定): `socks5://user:pass@host:1080` または
 	// `http://host:3128` (HTTP CONNECT)。空文字なら direct dial。
 	ProxyURL string
+
+	// Secure selects implicit TLS (= smtps://, typically port 465) over
+	// the SMTP TCP connection, before the SMTP greeting. Mirrors
+	// `meta.smtpSecure` (upstream Misskey TS は Nodemailer の
+	// `secure: true` に対応する)。false なら従来通り plain TCP で
+	// SMTP greeting を受けてから STARTTLS にアップグレードする (= port
+	// 587 の submission 経路)。
+	Secure bool
 }
 
 // Message bundles the body parts of an email. Subject + Text are required;
@@ -91,6 +99,22 @@ func SendMessage(host string, port int, user, pass *string, from, to string, msg
 		return
 	}
 
+	// Implicit TLS (= smtps:// / port 465 etc.): SMTP greeting を受ける前に
+	// TCP connection を TLS で包む。handshake には dialSMTP と同じ 10s 上限
+	// を deadline で適用してから handshake 後にクリアする (= 以後の SMTP
+	// command は標準の wire timeout に従う)。
+	if opts.Secure {
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			slog.Warn("email: implicit TLS handshake failed", "error", err, "host", host)
+			_ = conn.Close()
+			return
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+		conn = tlsConn
+	}
+
 	c, err := gosmtp.NewClient(conn, host)
 	if err != nil {
 		slog.Warn("email: smtp client failed", "error", err)
@@ -98,8 +122,15 @@ func SendMessage(host string, port int, user, pass *string, from, to string, msg
 	}
 	defer c.Close()
 
-	if err := c.StartTLS(tlsConfig); err != nil {
-		slog.Debug("email: STARTTLS not supported", "error", err)
+	// Implicit TLS 経由なら既に encrypted なので STARTTLS は不要 (= server が
+	// EHLO 応答で STARTTLS を提供しない設定が普通)。それ以外の経路は従来
+	// 通り STARTTLS を attempt。失敗時は Warn に昇格 — 認証情報を平文で
+	// 送る fallback は危険度が高いため operator が気付ける level にする。
+	if !opts.Secure {
+		if err := c.StartTLS(tlsConfig); err != nil {
+			slog.Warn("email: STARTTLS upgrade failed, continuing without encryption",
+				"error", err, "host", host)
+		}
 	}
 
 	if auth != nil {

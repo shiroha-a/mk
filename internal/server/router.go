@@ -977,20 +977,10 @@ func (s *Server) setupRoutes() {
 	// 旧 gormTicketStore wrapper を直接 repo に置き換え (#610 item 1)。
 	signupHandler.SetTicketStore(signupTicketRepo)
 	signupHandler.SetTestMode(s.config.TestMode)
-	// emailRequiredForSignup フローの確認メール送信。SMTP infra が enabled の
-	// ときのみ closure を渡す (reset-password と同じパターン)。
-	if signupSmtpMeta, err := metaRepo.Fetch(); err == nil && signupSmtpMeta.EnableEmail && signupSmtpMeta.Email != nil && signupSmtpMeta.SmtpHost != nil {
-		fromAddr := *signupSmtpMeta.Email
-		host := *signupSmtpMeta.SmtpHost
-		port := 587
-		if signupSmtpMeta.SmtpPort != nil {
-			port = *signupSmtpMeta.SmtpPort
-		}
-		smtpUser, smtpPass := signupSmtpMeta.SmtpUser, signupSmtpMeta.SmtpPass
-		signupHandler.SetEmailSender(s.config.URL, func(to string, msg miscsmtp.Message) {
-			miscsmtp.SendMessage(host, port, smtpUser, smtpPass, fromAddr, to, msg, miscsmtp.Options{ProxyURL: s.config.ProxySmtp})
-		})
-	}
+	// emailRequiredForSignup フローの確認メール送信。常に sender を配線し、
+	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
+	// 再起動なしに反映される (#1112)。smtpSecure も meta 経由で反映 (#1111)。
+	signupHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
 	api.POST("/signup", signupHandler.Signup)
 	api.POST("/signup-pending", signupHandler.SignupPending)
 
@@ -1028,18 +1018,9 @@ func (s *Server) setupRoutes() {
 	resetReqRepo := repository.NewPasswordResetRequestRepository(s.db)
 	resetHandler := apiresetpassword.NewHandler(userRepo, resetReqRepo, idGen)
 	resetHandler.SetServerURL(s.config.URL)
-	if smtpMeta2, err := metaRepo.Fetch(); err == nil && smtpMeta2.EnableEmail && smtpMeta2.Email != nil && smtpMeta2.SmtpHost != nil {
-		fromAddr := *smtpMeta2.Email
-		host := *smtpMeta2.SmtpHost
-		port := 587
-		if smtpMeta2.SmtpPort != nil {
-			port = *smtpMeta2.SmtpPort
-		}
-		smtpUser, smtpPass := smtpMeta2.SmtpUser, smtpMeta2.SmtpPass
-		resetHandler.SetEmailSender(func(to string, msg miscsmtp.Message) {
-			miscsmtp.SendMessage(host, port, smtpUser, smtpPass, fromAddr, to, msg, miscsmtp.Options{ProxyURL: s.config.ProxySmtp})
-		})
-	}
+	// password reset の確認メール送信。配線パターンは signup と同じく
+	// SenderFromMeta で per-call 再 Fetch、runtime 設定変更追従 (#1112)。
+	resetHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
 	api.POST("/request-reset-password", resetHandler.RequestReset)
 	api.POST("/reset-password", resetHandler.Reset)
 
@@ -1241,19 +1222,10 @@ func (s *Server) setupRoutes() {
 	// i/update-email の verifymail / truemail SaaS 呼び出しも SSRF-safe
 	// transport + forward proxy 経由にする (#638)。
 	iHandler.SetEmailValidationClient(s.outboundClient(10 * time.Second))
-	// SMTP メール送信を i/update-email 用に注入する。meta の SMTP 設定に従う。
-	if smtpMeta, err := metaRepo.Fetch(); err == nil && smtpMeta.EnableEmail && smtpMeta.Email != nil && smtpMeta.SmtpHost != nil {
-		fromAddr := *smtpMeta.Email
-		host := *smtpMeta.SmtpHost
-		port := 587
-		if smtpMeta.SmtpPort != nil {
-			port = *smtpMeta.SmtpPort
-		}
-		smtpUser, smtpPass := smtpMeta.SmtpUser, smtpMeta.SmtpPass
-		iHandler.SetEmailSender(func(to string, msg miscsmtp.Message) {
-			miscsmtp.SendMessage(host, port, smtpUser, smtpPass, fromAddr, to, msg, miscsmtp.Options{ProxyURL: s.config.ProxySmtp})
-		})
-	}
+	// SMTP メール送信を i/update-email 用に注入する。meta の SMTP 設定に従い、
+	// SenderFromMeta が closure 内で per-call 再 Fetch するため admin UI の
+	// 設定変更は即座に反映される (#1112)。smtpSecure 反映は #1111。
+	iHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
 	if webauthnSvc != nil {
 		iHandler.SetWebAuthn(webauthnSvc, userSecurityKeyRepo)
 	}
@@ -1924,18 +1896,10 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetServerURL(s.config.URL)
 	adminHandler.SetConfigSetupPassword(s.config.SetupPassword)
 	adminHandler.SetSMTPProxyURL(s.config.ProxySmtp)
-	if smtpMetaAdmin, err := metaRepo.Fetch(); err == nil && smtpMetaAdmin.EnableEmail && smtpMetaAdmin.Email != nil && smtpMetaAdmin.SmtpHost != nil {
-		fromAddr := *smtpMetaAdmin.Email
-		host := *smtpMetaAdmin.SmtpHost
-		port := 587
-		if smtpMetaAdmin.SmtpPort != nil {
-			port = *smtpMetaAdmin.SmtpPort
-		}
-		smtpUser, smtpPass := smtpMetaAdmin.SmtpUser, smtpMetaAdmin.SmtpPass
-		adminHandler.SetEmailSender(func(to, subject, body string) {
-			miscsmtp.SendWithOptions(host, port, smtpUser, smtpPass, fromAddr, to, subject, body, miscsmtp.Options{ProxyURL: s.config.ProxySmtp})
-		})
-	}
+	// admin/reset-password の確認メール送信。per-call 再 Fetch (#1112) +
+	// smtpSecure 反映 (#1111)。admin.EmailSender は (to, subject, body)
+	// 形式なので SubjectBodySenderFromMeta で wrap する。
+	adminHandler.SetEmailSender(miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp))
 	modLogService := coremodlog.New(modLogRepo, idGen)
 	adminHandler.SetModLogService(modLogService)
 	// announcements (別パッケージの Handler) も AdminCreate/Update/Delete で
