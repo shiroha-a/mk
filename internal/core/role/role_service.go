@@ -13,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -865,38 +866,66 @@ func (s *Service) Unassign(userID, roleID string) error {
 // Create creates a new role.
 func (s *Service) Create(name, description string, opts CreateOptions) (*model.Role, error) {
 	now := time.Now()
+	target := model.RoleTargetManual
+	if opts.Target == model.RoleTargetConditional {
+		target = model.RoleTargetConditional
+	}
 	role := &model.Role{
-		ID:              s.idGen.Generate(now),
-		UpdatedAt:       now,
-		LastUsedAt:      now,
-		Name:            name,
-		Description:     description,
-		IsModerator:     opts.IsModerator,
-		IsAdministrator: opts.IsAdministrator,
-		IsPublic:        opts.IsPublic,
-		AsBadge:         opts.AsBadge,
-		IsExplorable:    opts.IsExplorable,
-		Target:          model.RoleTargetManual,
-		DisplayOrder:    opts.DisplayOrder,
+		ID:                              s.idGen.Generate(now),
+		UpdatedAt:                       now,
+		LastUsedAt:                      now,
+		Name:                            name,
+		Description:                     description,
+		Color:                           opts.Color,
+		IconURL:                         opts.IconURL,
+		IsModerator:                     opts.IsModerator,
+		IsAdministrator:                 opts.IsAdministrator,
+		IsPublic:                        opts.IsPublic,
+		AsBadge:                         opts.AsBadge,
+		IsExplorable:                    opts.IsExplorable,
+		Target:                          target,
+		DisplayOrder:                    opts.DisplayOrder,
+		CanEditMembersByModerator:       opts.CanEditMembersByModerator,
+		PreserveAssignmentOnMoveAccount: opts.PreserveAssignmentOnMoveAccount,
+	}
+	if len(opts.CondFormula) > 0 {
+		role.CondFormula = opts.CondFormula
+	}
+	if len(opts.Policies) > 0 {
+		role.Policies = opts.Policies
 	}
 	if err := s.roleRepo.Create(role); err != nil {
 		return nil, err
 	}
 	// 新規 role を追加したので role list cache を invalidate (#1030)。
 	// conditional role が増える可能性があり、stale cache だと evaluation で
-	// 見逃すため。
-	s.invalidateRolesListCache()
+	// 見逃すため。conditional role の condFormula 評価には全 user の userRole
+	// Cache も古くなるため、policies / target / condFormula 持ちで作られた
+	// role は user cache も flush する (#TODO: 引数で判別する代わりに保守的
+	// に全 flush)。
+	s.InvalidateAllRoleCaches()
 	return role, nil
 }
 
 // CreateOptions holds optional parameters for role creation.
+//
+// Color / IconURL は upstream paramDef で nullable; nil ポインタはそのまま
+// 「設定なし」を意味する。CondFormula / Policies は upstream JSON object で、
+// nil / 空なら model のデフォルト ("{}") が使われる。
 type CreateOptions struct {
-	IsModerator     bool
-	IsAdministrator bool
-	IsPublic        bool
-	AsBadge         bool
-	IsExplorable    bool
-	DisplayOrder    int
+	Color                           *string
+	IconURL                         *string
+	Target                          model.RoleTarget
+	CondFormula                     datatypes.JSON
+	IsModerator                     bool
+	IsAdministrator                 bool
+	IsPublic                        bool
+	AsBadge                         bool
+	IsExplorable                    bool
+	DisplayOrder                    int
+	Policies                        datatypes.JSON
+	CanEditMembersByModerator       bool
+	PreserveAssignmentOnMoveAccount bool
 }
 
 // Show returns a role by ID.
@@ -941,11 +970,15 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	if err := s.roleRepo.UpdateFields(id, fields); err != nil {
 		return nil, err
 	}
-	// CondFormula / Target / Policies が変わると evaluateConditionalRoles の
-	// 結果が変わるので role list cache を invalidate (#1030)。具体的な field
-	// を区別せず一律 flush するのは admin 経路で頻度が低いから (= 5min stale
-	// な userRoleCache と同 trade-off)。
-	s.invalidateRolesListCache()
+	// role の field 変更は (a) conditional role の評価結果に直結
+	// (target / condFormula) または (b) 既に role assigned の user の policy
+	// 結果に直結 (policies / isModerator / isAdministrator) する。前者は
+	// rolesListCache のみで十分だが後者は per-user userRoleCache も flush
+	// しないと最大 5min stale な policy が返り続け、admin の意図と乖離して
+	// 「policy 反映されない」となる (PR #1102 で塞ぐ user 報告経路)。
+	// admin 経由 update は頻度が低いので、field 差分判定せず常に全 cache を
+	// flush する保守的選択を取る。
+	s.InvalidateAllRoleCaches()
 	return s.roleRepo.FindByID(id)
 }
 

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -1171,33 +1172,34 @@ func coerceMetaArrayFields(fields map[string]any) {
 
 // RolesCreate handles POST /api/admin/roles/create.
 //
-// upstream Misskey TS の paramDef は 13 field を required で要求する
-// (name / description / color / iconUrl / target / condFormula / isPublic /
-// isModerator / isAdministrator / asBadge / canEditMembersByModerator /
-// displayOrder / policies)。drop-in 互換のため mk-go も同 field を accept
-// し、`name` 以外も非 nil 必須に揃える (#889)。
+// upstream Misskey TS の paramDef は 14 field を required (一部 nullable) で
+// 受け取る (name / description / color / iconUrl / target / condFormula /
+// isPublic / isModerator / isAdministrator / isExplorable / asBadge /
+// canEditMembersByModerator / displayOrder / policies)。mk-go も drop-in
+// 互換のため同 field を accept する (#889)。
 //
-// なお model.Role の現 schema に存在しない field (color / iconUrl / target /
-// condFormula / canEditMembersByModerator / policies) は payload として受け
-// 取るが現 model に persist しない (= 将来 migration で col 追加するまで
-// payload acceptance のみ)。frontend からの "all 13 fields supplied" 要件は
-// これで満たせる。
+// model.Role の全 column を実際に persist する (PR #1102 で配線完了)。
+// 旧版は policies / condFormula / color / iconUrl / target / canEdit
+// MembersByModerator を request で受け取りつつ /dev/null に流していた
+// ため、admin UI から policy / 色 / アイコン等を設定しても DB に書かれず
+// 「ロール設定が反映されない」現象になっていた。
 func (h *Handler) RolesCreate(c echo.Context) error {
 	var req struct {
-		Name                      *string         `json:"name"`
-		Description               *string         `json:"description"`
-		Color                     *string         `json:"color"`
-		IconURL                   *string         `json:"iconUrl"`
-		Target                    *string         `json:"target"`
-		CondFormula               *map[string]any `json:"condFormula"`
-		IsPublic                  *bool           `json:"isPublic"`
-		IsModerator               *bool           `json:"isModerator"`
-		IsAdministrator           *bool           `json:"isAdministrator"`
-		IsExplorable              *bool           `json:"isExplorable"` // optional (TS も default false)
-		AsBadge                   *bool           `json:"asBadge"`
-		CanEditMembersByModerator *bool           `json:"canEditMembersByModerator"`
-		DisplayOrder              *int            `json:"displayOrder"`
-		Policies                  *map[string]any `json:"policies"`
+		Name                            *string         `json:"name"`
+		Description                     *string         `json:"description"`
+		Color                           *string         `json:"color"`
+		IconURL                         *string         `json:"iconUrl"`
+		Target                          *string         `json:"target"`
+		CondFormula                     *map[string]any `json:"condFormula"`
+		IsPublic                        *bool           `json:"isPublic"`
+		IsModerator                     *bool           `json:"isModerator"`
+		IsAdministrator                 *bool           `json:"isAdministrator"`
+		IsExplorable                    *bool           `json:"isExplorable"`
+		AsBadge                         *bool           `json:"asBadge"`
+		CanEditMembersByModerator       *bool           `json:"canEditMembersByModerator"`
+		PreserveAssignmentOnMoveAccount *bool           `json:"preserveAssignmentOnMoveAccount"`
+		DisplayOrder                    *int            `json:"displayOrder"`
+		Policies                        *map[string]any `json:"policies"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1221,14 +1223,39 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 		req.Policies == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Required parameters missing.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	r, err := h.roleService.Create(*req.Name, *req.Description, role.CreateOptions{
-		IsModerator:     *req.IsModerator,
-		IsAdministrator: *req.IsAdministrator,
-		IsPublic:        *req.IsPublic,
-		AsBadge:         *req.AsBadge,
-		IsExplorable:    req.IsExplorable != nil && *req.IsExplorable,
-		DisplayOrder:    *req.DisplayOrder,
-	})
+	opts := role.CreateOptions{
+		Color:                     req.Color,
+		IconURL:                   req.IconURL,
+		IsPublic:                  *req.IsPublic,
+		IsModerator:               *req.IsModerator,
+		IsAdministrator:           *req.IsAdministrator,
+		AsBadge:                   *req.AsBadge,
+		IsExplorable:              req.IsExplorable != nil && *req.IsExplorable,
+		DisplayOrder:              *req.DisplayOrder,
+		CanEditMembersByModerator: *req.CanEditMembersByModerator,
+	}
+	if req.PreserveAssignmentOnMoveAccount != nil {
+		opts.PreserveAssignmentOnMoveAccount = *req.PreserveAssignmentOnMoveAccount
+	}
+	// Target は upstream で "manual" / "conditional" のみ。未知値は manual に倒す。
+	if *req.Target == string(model.RoleTargetConditional) {
+		opts.Target = model.RoleTargetConditional
+	} else {
+		opts.Target = model.RoleTargetManual
+	}
+	// CondFormula / Policies は JSON object → datatypes.JSON (= []byte) に Marshal。
+	// upstream は object 全体をそのまま column に書くだけで内部構造は consumer 任せ。
+	if cf, err := json.Marshal(*req.CondFormula); err == nil {
+		opts.CondFormula = cf
+	} else {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "condFormula must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if pol, err := json.Marshal(*req.Policies); err == nil {
+		opts.Policies = pol
+	} else {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "policies must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	r, err := h.roleService.Create(*req.Name, *req.Description, opts)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -1264,14 +1291,33 @@ func (h *Handler) RolesList(c echo.Context) error {
 }
 
 // RolesUpdate handles POST /api/admin/roles/update.
+//
+// upstream Misskey TS の paramDef は 15 field を accept (roleId 以外はすべて
+// optional partial update)。旧 mk-go は 5 field しか accept しておらず、
+// admin UI で **policies / color / iconUrl / target / condFormula / asBadge /
+// isExplorable / displayOrder / canEditMembersByModerator / preserveAssignment
+// OnMoveAccount** を変えても DB に書かれず「ロール設定が反映されない」現象
+// になっていた (PR #1102)。特に policies field の欠落は「canPublicNote 等の
+// ポリシーが UI 上で trueに見えても実際は default 値のまま」という drop-in
+// regression 重大度高めの bug。本 fix で upstream 15 field 全部を pipe する。
 func (h *Handler) RolesUpdate(c echo.Context) error {
 	var req struct {
-		RoleID          string  `json:"roleId"`
-		Name            *string `json:"name"`
-		Description     *string `json:"description"`
-		IsModerator     *bool   `json:"isModerator"`
-		IsAdministrator *bool   `json:"isAdministrator"`
-		IsPublic        *bool   `json:"isPublic"`
+		RoleID                          string          `json:"roleId"`
+		Name                            *string         `json:"name"`
+		Description                     *string         `json:"description"`
+		Color                           *string         `json:"color"`
+		IconURL                         *string         `json:"iconUrl"`
+		Target                          *string         `json:"target"`
+		CondFormula                     *map[string]any `json:"condFormula"`
+		IsModerator                     *bool           `json:"isModerator"`
+		IsAdministrator                 *bool           `json:"isAdministrator"`
+		IsPublic                        *bool           `json:"isPublic"`
+		IsExplorable                    *bool           `json:"isExplorable"`
+		AsBadge                         *bool           `json:"asBadge"`
+		CanEditMembersByModerator       *bool           `json:"canEditMembersByModerator"`
+		PreserveAssignmentOnMoveAccount *bool           `json:"preserveAssignmentOnMoveAccount"`
+		DisplayOrder                    *int            `json:"displayOrder"`
+		Policies                        *map[string]any `json:"policies"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1287,6 +1333,36 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	if req.Description != nil {
 		fields["description"] = *req.Description
 	}
+	if req.Color != nil {
+		// upstream nullable: 空文字 → null として保存 (= 「色なし」に戻す)。
+		if *req.Color == "" {
+			fields["color"] = nil
+		} else {
+			fields["color"] = *req.Color
+		}
+	}
+	if req.IconURL != nil {
+		if *req.IconURL == "" {
+			fields["iconUrl"] = nil
+		} else {
+			fields["iconUrl"] = *req.IconURL
+		}
+	}
+	if req.Target != nil {
+		// upstream は "manual" / "conditional" のみ。未知値は manual に倒す。
+		if *req.Target == string(model.RoleTargetConditional) {
+			fields["target"] = model.RoleTargetConditional
+		} else {
+			fields["target"] = model.RoleTargetManual
+		}
+	}
+	if req.CondFormula != nil {
+		cf, err := json.Marshal(*req.CondFormula)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "condFormula must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		fields["condFormula"] = cf
+	}
 	if req.IsModerator != nil {
 		fields["isModerator"] = *req.IsModerator
 	}
@@ -1295,6 +1371,28 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	}
 	if req.IsPublic != nil {
 		fields["isPublic"] = *req.IsPublic
+	}
+	if req.IsExplorable != nil {
+		fields["isExplorable"] = *req.IsExplorable
+	}
+	if req.AsBadge != nil {
+		fields["asBadge"] = *req.AsBadge
+	}
+	if req.CanEditMembersByModerator != nil {
+		fields["canEditMembersByModerator"] = *req.CanEditMembersByModerator
+	}
+	if req.PreserveAssignmentOnMoveAccount != nil {
+		fields["preserveAssignmentOnMoveAccount"] = *req.PreserveAssignmentOnMoveAccount
+	}
+	if req.DisplayOrder != nil {
+		fields["displayOrder"] = *req.DisplayOrder
+	}
+	if req.Policies != nil {
+		pol, err := json.Marshal(*req.Policies)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "policies must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		fields["policies"] = pol
 	}
 	if len(fields) == 0 {
 		// 全フィールドが nil = 何も変更しないリクエスト。before == after の

@@ -796,10 +796,9 @@ func TestUpdateMeta_InvalidJSON(t *testing.T) {
 // --- Roles endpoints ---
 
 // fullRoleCreatePayload は upstream Misskey TS が paramDef で required と
-// する 13 field を満たした最小 payload (#889)。新 field のうち model.Role
-// に未対応なもの (color / iconUrl / target / condFormula /
-// canEditMembersByModerator / policies) は payload としては受け付けるが
-// persist しない。
+// する 13 field を満たした最小 payload (#889)。**PR #1102 以降**は全 field
+// が DB に persist される (旧版は color / iconUrl / target / condFormula /
+// canEditMembersByModerator / policies を /dev/null に流していた)。
 const fullRoleCreatePayload = `{
 	"name": "Admin",
 	"description": "",
@@ -821,6 +820,52 @@ func TestRolesCreate_Success(t *testing.T) {
 	rec := doPost(h.RolesCreate, fullRoleCreatePayload, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, roleRepo.Roles, 1)
+}
+
+// PR #1102 regression guard: RolesCreate が policies / color / target /
+// condFormula 等を実際に persist することを assert。旧版は受け取りつつ
+// /dev/null に流していたため admin UI で設定したロール設定が反映されなかった。
+func TestRolesCreate_PersistsAllFields(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	color := "#ff0000"
+	icon := "https://example.com/i.png"
+	payload := `{
+		"name": "Cap",
+		"description": "limited role",
+		"color": "` + color + `",
+		"iconUrl": "` + icon + `",
+		"target": "conditional",
+		"condFormula": {"type":"isLocal"},
+		"isPublic": true,
+		"isModerator": false,
+		"isAdministrator": false,
+		"isExplorable": true,
+		"asBadge": true,
+		"canEditMembersByModerator": true,
+		"displayOrder": 7,
+		"policies": {"canPublicNote": false, "mentionLimit": 5}
+	}`
+	rec := doPost(h.RolesCreate, payload, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, roleRepo.Roles, 1)
+	var r *model.Role
+	for _, v := range roleRepo.Roles {
+		r = v
+	}
+	assert.Equal(t, "Cap", r.Name)
+	assert.Equal(t, "limited role", r.Description)
+	require.NotNil(t, r.Color)
+	assert.Equal(t, color, *r.Color)
+	require.NotNil(t, r.IconURL)
+	assert.Equal(t, icon, *r.IconURL)
+	assert.Equal(t, model.RoleTargetConditional, r.Target)
+	assert.Equal(t, true, r.IsExplorable)
+	assert.Equal(t, true, r.AsBadge)
+	assert.Equal(t, true, r.CanEditMembersByModerator)
+	assert.Equal(t, 7, r.DisplayOrder)
+	// CondFormula / Policies は JSON bytes として保存される。
+	assert.JSONEq(t, `{"type":"isLocal"}`, string(r.CondFormula))
+	assert.JSONEq(t, `{"canPublicNote":false,"mentionLimit":5}`, string(r.Policies))
 }
 
 func TestRolesCreate_InvalidParam(t *testing.T) {
@@ -890,6 +935,67 @@ func TestRolesUpdate_AllFields(t *testing.T) {
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Old"}
 	rec := doPost(h.RolesUpdate, `{"roleId":"r1","name":"New","description":"desc","isModerator":true,"isAdministrator":true,"isPublic":true}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// PR #1102 regression guard: RolesUpdate が policies を実際に persist する
+// ことを assert (user 報告経路、canPublicNote が UI 上で反映されない bug)。
+func TestRolesUpdate_PersistsPolicies(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Limited"}
+	rec := doPost(h.RolesUpdate,
+		`{"roleId":"r1","policies":{"canPublicNote":false,"ltlAvailable":false}}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got := roleRepo.Roles["r1"]
+	require.NotNil(t, got)
+	assert.JSONEq(t, `{"canPublicNote":false,"ltlAvailable":false}`, string(got.Policies))
+}
+
+// PR #1102 regression guard: 追加 field (color / iconUrl / target /
+// condFormula / asBadge / isExplorable / displayOrder / canEditMembersBy
+// Moderator / preserveAssignmentOnMoveAccount) が全部 persist されること。
+func TestRolesUpdate_PersistsAllUpstreamFields(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Old"}
+	payload := `{
+		"roleId":"r1",
+		"color":"#abcdef",
+		"iconUrl":"https://example.com/i.png",
+		"target":"conditional",
+		"condFormula":{"type":"isLocal"},
+		"isExplorable":true,
+		"asBadge":true,
+		"canEditMembersByModerator":true,
+		"preserveAssignmentOnMoveAccount":true,
+		"displayOrder":42
+	}`
+	rec := doPost(h.RolesUpdate, payload, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got := roleRepo.Roles["r1"]
+	require.NotNil(t, got)
+	require.NotNil(t, got.Color)
+	assert.Equal(t, "#abcdef", *got.Color)
+	require.NotNil(t, got.IconURL)
+	assert.Equal(t, "https://example.com/i.png", *got.IconURL)
+	assert.Equal(t, model.RoleTargetConditional, got.Target)
+	assert.JSONEq(t, `{"type":"isLocal"}`, string(got.CondFormula))
+	assert.Equal(t, true, got.IsExplorable)
+	assert.Equal(t, true, got.AsBadge)
+	assert.Equal(t, true, got.CanEditMembersByModerator)
+	assert.Equal(t, true, got.PreserveAssignmentOnMoveAccount)
+	assert.Equal(t, 42, got.DisplayOrder)
+}
+
+// upstream nullable な color / iconUrl を空文字で送ると null クリアされる。
+func TestRolesUpdate_NullableColorClear(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	c := "#abcdef"
+	icon := "https://example.com/i.png"
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "X", Color: &c, IconURL: &icon}
+	rec := doPost(h.RolesUpdate, `{"roleId":"r1","color":"","iconUrl":""}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got := roleRepo.Roles["r1"]
+	assert.Nil(t, got.Color)
+	assert.Nil(t, got.IconURL)
 }
 
 func TestRolesUpdate_NotFound(t *testing.T) {

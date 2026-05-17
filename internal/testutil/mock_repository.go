@@ -5051,6 +5051,35 @@ func (m *MockRoleRepository) UpdateFields(id string, fields map[string]any) erro
 	if v, ok := fields["description"]; ok {
 		r.Description = v.(string)
 	}
+	if v, ok := fields["color"]; ok {
+		// nil → クリア (upstream nullable)、string → set
+		if v == nil {
+			r.Color = nil
+		} else if s, ok := v.(string); ok {
+			r.Color = &s
+		}
+	}
+	if v, ok := fields["iconUrl"]; ok {
+		if v == nil {
+			r.IconURL = nil
+		} else if s, ok := v.(string); ok {
+			r.IconURL = &s
+		}
+	}
+	if v, ok := fields["target"]; ok {
+		// model.RoleTarget (string-based enum)。string も受け入れて defensive。
+		switch t := v.(type) {
+		case model.RoleTarget:
+			r.Target = t
+		case string:
+			r.Target = model.RoleTarget(t)
+		}
+	}
+	if v, ok := fields["condFormula"]; ok {
+		if b, ok := v.([]byte); ok {
+			r.CondFormula = b
+		}
+	}
 	if v, ok := fields["isModerator"]; ok {
 		r.IsModerator = v.(bool)
 	}
@@ -5059,6 +5088,26 @@ func (m *MockRoleRepository) UpdateFields(id string, fields map[string]any) erro
 	}
 	if v, ok := fields["isPublic"]; ok {
 		r.IsPublic = v.(bool)
+	}
+	if v, ok := fields["isExplorable"]; ok {
+		r.IsExplorable = v.(bool)
+	}
+	if v, ok := fields["asBadge"]; ok {
+		r.AsBadge = v.(bool)
+	}
+	if v, ok := fields["canEditMembersByModerator"]; ok {
+		r.CanEditMembersByModerator = v.(bool)
+	}
+	if v, ok := fields["preserveAssignmentOnMoveAccount"]; ok {
+		r.PreserveAssignmentOnMoveAccount = v.(bool)
+	}
+	if v, ok := fields["displayOrder"]; ok {
+		r.DisplayOrder = v.(int)
+	}
+	if v, ok := fields["policies"]; ok {
+		if b, ok := v.([]byte); ok {
+			r.Policies = b
+		}
 	}
 	return nil
 }

@@ -1079,6 +1079,36 @@ func TestUpdateFields_InvalidatesRoleListCache(t *testing.T) {
 	assert.Equal(t, 2, roleRepo.listCalls)
 }
 
+// PR #1102 regression guard: UpdateFields は **userRoleCache** も flush する。
+// 旧版は rolesListCache だけ flush していて、既に assigned 済 user の policy
+// 評価は per-user TTL (5min) の間 stale policies を返し続け、admin で policy
+// を変えても効かない現象になっていた。InvalidateAllRoleCaches を呼ぶよう
+// 修正したので、UpdateFields 直後に同 user の GetUserRoles を呼ぶと
+// assignmentRepo.ListByUser が再 fire する (cache が live なら叩かない)。
+func TestUpdateFields_InvalidatesUserRoleCache(t *testing.T) {
+	svc, roleRepo, assignRepo := newServiceWithCountingAssign(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Old"}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{
+		ID: "a1", UserID: "u1", RoleID: "r1",
+	}
+
+	// warm cache
+	_, _ = svc.GetUserRoles("u1")
+	require.Equal(t, 1, assignRepo.listByUserCalls)
+	// 2 度目は cache hit
+	_, _ = svc.GetUserRoles("u1")
+	require.Equal(t, 1, assignRepo.listByUserCalls)
+
+	// admin が policy を update する経路を模擬
+	_, err := svc.UpdateFields("r1", map[string]any{"name": "New"})
+	require.NoError(t, err)
+
+	// userRoleCache["u1"] が flush されているので、GetUserRoles は再 listing
+	_, _ = svc.GetUserRoles("u1")
+	assert.Equal(t, 2, assignRepo.listByUserCalls,
+		"UpdateFields must flush userRoleCache so admin policy changes take effect immediately")
+}
+
 // 並行 cache miss でも roleRepo.List() は single-flight 相当で 1 回しか
 // 発火しないことを担保する (#1035 review: RWMutex 化に伴う double-check
 // pattern の regression guard、-race で並行性も検証する)。
