@@ -1164,12 +1164,11 @@ func TestCreateService_SensitiveWordsDemotesPublicToHome(t *testing.T) {
 		"public note matching sensitiveWords must be demoted to home")
 }
 
-// upstream parity: CW が non-nil なら text は評価されない (`cw ?? text`)。
-// CW を設定すれば text に sensitive word を仕込んでも降格されない、という
-// upstream の known な bypass 経路を mk-go も忠実に保存する。**security
-// 観点では穴だが、drop-in 互換のため意図的に upstream に揃える**。
-// mk-go-strict 化 (CW+text 両方 check) は別 PR で議論。
-func TestCreateService_SensitiveWordsCWShadowsText_UpstreamParity(t *testing.T) {
+// mk-go independent hardening (Ed25519 / TOTP replay と同系列): upstream
+// は `cw ?? text` で CW を設定すれば text 側の sensitive 検出を bypass
+// できる known gap を持つが、mk-go は CW と text を独立に check して bypass
+// を塞ぐ。harmless な CW を被せても text に sensitive word があれば降格する。
+func TestCreateService_SensitiveWordsCWHarmlessTextMatch_StrictDemotes(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
@@ -1181,15 +1180,14 @@ func TestCreateService_SensitiveWordsCWShadowsText_UpstreamParity(t *testing.T) 
 		User: &model.User{ID: "u1"}, Text: &text, CW: &cw, Visibility: model.NoteVisibilityPublic,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
-		"CW が non-nil の場合は text を評価しない (upstream NoteCreateService.ts:469 と同 `cw ?? text` semantics)")
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
+		"mk-go strict: text 側に sensitive word があれば CW の有無に関わらず降格 (= upstream bypass を塞ぐ)")
 }
 
-// upstream parity: CW=&"" (空文字を明示) も "non-nil" 扱いで text は評価
-// されない (JS nullish coalescing は "" を non-nullish と扱う)。実用上は
-// admin が空 CW を送るケースはあまり無いが、edge-case を upstream と
-// 揃えるための regression guard。
-func TestCreateService_SensitiveWordsEmptyCWShadowsText_UpstreamParity(t *testing.T) {
+// 空 CW + text match のケースも同じく降格する (CW="" は意味的に「CW なし」
+// だが upstream は non-nullish 扱いで text を skip していた、mk-go は両方
+// check するので両者の挙動差は出ない)。
+func TestCreateService_SensitiveWordsEmptyCWTextMatch_StrictDemotes(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
@@ -1201,8 +1199,41 @@ func TestCreateService_SensitiveWordsEmptyCWShadowsText_UpstreamParity(t *testin
 		User: &model.User{ID: "u1"}, Text: &text, CW: &empty, Visibility: model.NoteVisibilityPublic,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
-		"CW=&\"\" (non-nil 空文字) も text を shadow する (JS nullish coalescing)")
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
+		"mk-go strict: 空 CW でも text を独立に check するので降格する")
+}
+
+// 両 field とも match するケースは当然降格する (early return で CW 側で
+// 即 true を返すので text の評価まで到達しないが、final 結果は同じ)。
+func TestCreateService_SensitiveWordsBothCWAndTextMatch_Demotes(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	cw := "spoiler tag"
+	text := "this body also contains a spoiler"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, CW: &cw, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility)
+}
+
+// neither match のケースは降格しない。CW="" + text="clean" + word="spoiler"。
+func TestCreateService_SensitiveWordsNeitherMatch_NotDemoted(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	cw := "harmless"
+	text := "clean body"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, CW: &cw, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility)
 }
 
 // CW フィールドも match 対象 (upstream は cw ?? text を見るので、CW が match

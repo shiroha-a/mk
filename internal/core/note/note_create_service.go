@@ -870,16 +870,18 @@ func sameChannel(a, b *string) bool {
 // word listed in meta.sensitiveWords. Used by Create to demote public note
 // visibility to home.
 //
-// upstream Misskey TS NoteCreateService.ts:469 はちょうど 1 field だけを
-// helper に渡す:
+// **mk-go independent hardening (Ed25519 / TOTP replay / bcrypt 72-byte と
+// 同系列の judgment call、upstream には存在しない strict 化)**:
 //
-//	isKeyWordIncluded(data.cw ?? data.text ?? '', sensitiveWords)
+// upstream Misskey TS NoteCreateService.ts:469 は `cw ?? text ?? ”` で 1
+// field だけを check する JS nullish coalescing 仕様で、admin が CW を
+// 設定するだけで text 側の sensitive 検出を bypass できる known な穴が
+// ある。mk-go では PR #1105 (drop-in fix) で upstream parity を維持して
+// いたが、本 PR で **CW と text を独立に check** し bypass を塞ぐ。
 //
-// JS の nullish coalescing semantics に従い CW が non-nil なら CW のみ
-// (空文字も含めて) を見る = 「CW を設定すれば text の sensitive 検出を
-// bypass できる」upstream 仕様。mk-go も drop-in 互換のため同挙動を維持
-// する。CW + text 両方 check する mk-go-strict 化は **本 PR の scope 外**
-// (= 必要なら別 PR で mk-go independent hardening として議論)。
+// 各 field を独立に IsKeyWordIncluded に渡すことで、regex フィルタの
+// `^/$` boundary も field 単位で正しく解釈される (concat 案だと改行
+// 越境 match が発生して挙動が予測しにくくなる)。
 //
 // metaRepo 未設定または sensitiveWords が空 → false (no match)。helper
 // errors (meta fetch 失敗) も fail-open で false: 反映漏れの方が「投稿が
@@ -893,29 +895,14 @@ func (s *CreateService) matchesSensitiveWords(text, cw *string) bool {
 	if err != nil || meta == nil || len(meta.SensitiveWords) == 0 {
 		return false
 	}
-	haystack := pickHaystackForSensitive(text, cw)
-	if haystack == "" {
-		return false
+	words := []string(meta.SensitiveWords)
+	if cw != nil && *cw != "" && keyword.IsKeyWordIncluded(*cw, words) {
+		return true
 	}
-	return keyword.IsKeyWordIncluded(haystack, []string(meta.SensitiveWords))
-}
-
-// pickHaystackForSensitive mirrors upstream's `data.cw ?? data.text ?? ”`:
-// CW が non-nil ならその値 (空文字を含む) を返し、CW が nil なら text、
-// 両方 nil なら空文字。
-//
-// JS の nullish coalescing と完全に揃える。例えば cw=&"" (admin が CW を
-// 明示的に空文字で送ったケース) では cw が "non-nil" 扱いされ、text は
-// 評価されない。upstream の known な bypass 経路を保存するための忠実な
-// 移植 (mk-go-strict 化は別議論)。
-func pickHaystackForSensitive(text, cw *string) string {
-	if cw != nil {
-		return *cw
+	if text != nil && *text != "" && keyword.IsKeyWordIncluded(*text, words) {
+		return true
 	}
-	if text != nil {
-		return *text
-	}
-	return ""
+	return false
 }
 
 // checkProhibitedWords scans text + cw for any word listed in
