@@ -1796,6 +1796,46 @@ func TestAbuseReports_NonAidxID_OmitsCreatedAt(t *testing.T) {
 	assert.False(t, has, "non-aidx ID should omit createdAt entirely (omitempty)")
 }
 
+// PR for #1116: GORM Preload で nested に bind される *User
+// (TargetUser / Reporter / Assignee) も packedAbuseReport の embedded
+// inline で正しく JSON 出力されることを確認する。frontend MkAbuseReport.vue
+// は `report.targetUser.avatarUrl` / `report.reporter.username` 等を直接
+// 描画するため、embedded marshalling 経路で nested object が落ちると
+// アバター / 名前等が一斉に表示されなくなる。
+func TestAbuseReports_EmbeddedFieldsPreserved_NestedUsers(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{
+		ID:           "r1",
+		TargetUserID: "u_t",
+		ReporterID:   "u_r",
+		TargetUser:   &model.User{ID: "u_t", Username: "victim"},
+		Reporter:     &model.User{ID: "u_r", Username: "accuser"},
+	}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+
+	// targetUser / reporter が nested object として inline されること
+	tu, ok := resp[0]["targetUser"].(map[string]any)
+	require.True(t, ok, "targetUser must be a nested object, got %T", resp[0]["targetUser"])
+	assert.Equal(t, "u_t", tu["id"])
+	assert.Equal(t, "victim", tu["username"])
+
+	rep, ok := resp[0]["reporter"].(map[string]any)
+	require.True(t, ok, "reporter must be a nested object, got %T", resp[0]["reporter"])
+	assert.Equal(t, "u_r", rep["id"])
+	assert.Equal(t, "accuser", rep["username"])
+
+	// Assignee は未設定 (= nil) なので omitempty で消える
+	_, hasAssignee := resp[0]["assignee"]
+	assert.False(t, hasAssignee, "nil Assignee should be omitted by omitempty")
+}
+
 // PR for #1116: existing fields (id / resolved / targetUser 等) が
 // packedAbuseReport の embedded inline で温存されることを確認する。
 // embedded struct を使った JSON marshalling regression guard。
