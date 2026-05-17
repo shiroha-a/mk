@@ -10,6 +10,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
 // fakeRepo is an in-memory test double for repository.HashtagRepository.
@@ -91,6 +92,68 @@ func TestService_OnNoteCreated_LocalUser(t *testing.T) {
 		if calls[i].id == "" {
 			t.Errorf("call[%d].id empty (idGen.Generate not called)", i)
 		}
+	}
+}
+
+// PR #1103 regression guard: meta.sensitiveWords にマッチする tag は
+// RecordMention されない (= featured / trends に出ない、upstream
+// HashtagService.updateHashtagsRanking と同 semantics)。テストユーザー
+// 報告経路と合わせて drop-in 互換を回復する。
+func TestService_OnNoteCreated_SkipsSensitiveTags(t *testing.T) {
+	s, repo := newTestService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: pq.StringArray{"nsfw"}}
+	s.SetMetaRepo(metaRepo)
+
+	user := &model.User{ID: "u1"}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#nsfw", "#safe"}}
+
+	s.OnNoteCreated(note, user)
+	s.WaitForPendingWrites()
+
+	calls := repo.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 RecordMention call (sensitive tag filtered), got %d", len(calls))
+	}
+	if calls[0].name != "#safe" {
+		t.Errorf("expected '#safe' to remain, got %q", calls[0].name)
+	}
+}
+
+// meta.hiddenTags にマッチする tag も同じく skip される (upstream は
+// updateHashtagsRanking 内で hiddenTags / sensitiveWords を順次チェック)。
+// case-insensitive 比較 (= normalizeForSearch と同等)。
+func TestService_OnNoteCreated_SkipsHiddenTags(t *testing.T) {
+	s, repo := newTestService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", HiddenTags: pq.StringArray{"#HIDDEN"}}
+	s.SetMetaRepo(metaRepo)
+
+	user := &model.User{ID: "u1"}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#hidden", "#visible"}}
+
+	s.OnNoteCreated(note, user)
+	s.WaitForPendingWrites()
+
+	calls := repo.snapshotCalls()
+	if len(calls) != 1 || calls[0].name != "#visible" {
+		t.Fatalf("expected only #visible to be recorded (case-insensitive hidden match), got %+v", calls)
+	}
+}
+
+// metaRepo 未配線時は filter skip = 全 tag 通る (= 旧挙動への fail-safe)。
+func TestService_OnNoteCreated_NoMetaRepoMeansNoFilter(t *testing.T) {
+	s, repo := newTestService(t)
+	// SetMetaRepo を呼ばない
+
+	user := &model.User{ID: "u1"}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#nsfw", "#anything"}}
+
+	s.OnNoteCreated(note, user)
+	s.WaitForPendingWrites()
+
+	if got := len(repo.snapshotCalls()); got != 2 {
+		t.Errorf("expected 2 RecordMention calls when metaRepo unwired, got %d", got)
 	}
 }
 

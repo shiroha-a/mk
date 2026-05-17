@@ -702,6 +702,11 @@ func (s *Server) setupRoutes() {
 	// mentionedUsersCount / mentionedUserIds を更新する (#680)。/api/hashtags/list
 	// 等の trends ranking はこの集計を見るので、未配線だと空集合のままになる。
 	hashtagService := corehashtag.NewService(hashtagRepo, idGen)
+	// meta.hiddenTags / meta.sensitiveWords を見て tag の record / featuring
+	// を skip するため metaRepo を inject (upstream HashtagService.updateHashtags
+	// Ranking と同 semantics、未配線だと sensitive tag が featured に出る
+	// drop-in regression が再発するので必ず wire する)。
+	hashtagService.SetMetaRepo(metaRepo)
 	noteCreateService.SetHashtagHook(hashtagService)
 	federationResolver.SetHashtagHook(hashtagService)
 	// graceful shutdown 経路で in-flight worker (#719 fire-and-forget) を ctx

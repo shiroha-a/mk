@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -348,6 +349,19 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// される request を mk-go で降格してしまう挙動差が出る (= 互換性破壊)。
 	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
 		if s.silencingProvider != nil && s.silencingProvider.IsSilenced(in.User.ID) {
+			visibility = model.NoteVisibilityHome
+		}
+	}
+
+	// meta.sensitiveWords にマッチする text / CW を持つ public note は home に
+	// 降格する (upstream Misskey TS NoteCreateService.ts:467-471 と同一挙動)。
+	// channel 内は降格対象外 (上の silencing と同じ理由)。投稿は成功するが
+	// public timeline / federation broadcast から外れる effect で、admin が
+	// 設定したセンシティブワード設定が実機で効くようにする (drop-in regression
+	// fix)。upstream と同じく filter は `/regex/flags` または space 区切り AND
+	// match。
+	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
+		if s.matchesSensitiveWords(in.Text, in.CW) {
 			visibility = model.NoteVisibilityHome
 		}
 	}
@@ -850,6 +864,44 @@ func sameChannel(a, b *string) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// matchesSensitiveWords reports whether text or cw contains any word listed
+// in meta.sensitiveWords. Used by Create to demote public note visibility to
+// home (mirroring upstream NoteCreateService behavior).
+//
+// metaRepo 未設定または sensitiveWords が空 → false (no match)。helper
+// errors (meta fetch 失敗) も fail-open で false: 反映漏れの方が「投稿が
+// 思わぬ form で blocked される」より影響軽微なので、match 判定では fail
+// open する。upstream は同タイミングで throw しないので挙動も揃う。
+func (s *CreateService) matchesSensitiveWords(text, cw *string) bool {
+	if s.metaRepo == nil {
+		return false
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil || meta == nil || len(meta.SensitiveWords) == 0 {
+		return false
+	}
+	haystack := joinTextAndCW(text, cw)
+	if haystack == "" {
+		return false
+	}
+	return keyword.IsKeyWordIncluded(haystack, []string(meta.SensitiveWords))
+}
+
+// joinTextAndCW concatenates cw and text in a stable shape (cw first,
+// text second, newline separator) to mirror upstream UtilityService.concat
+// MentionsAndUrls の概念で、複数 field を 1 つの haystack として扱う。
+// 両 field とも nil なら空文字を返す。
+func joinTextAndCW(text, cw *string) string {
+	parts := make([]string, 0, 2)
+	if cw != nil && *cw != "" {
+		parts = append(parts, *cw)
+	}
+	if text != nil && *text != "" {
+		parts = append(parts, *text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // checkProhibitedWords scans text + cw for any word listed in

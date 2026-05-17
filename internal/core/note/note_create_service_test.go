@@ -1147,6 +1147,106 @@ func TestCreateService_ContainsProhibitedWords(t *testing.T) {
 	assert.ErrorIs(t, err, note.ErrContainsProhibitedWords)
 }
 
+// PR #1103 regression guard: meta.sensitiveWords にマッチする text を持つ
+// public note は home に降格する (upstream NoteCreateService と同 semantics、
+// テストユーザー報告の症状)。
+func TestCreateService_SensitiveWordsDemotesPublicToHome(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "this contains a spoiler about the ending"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
+		"public note matching sensitiveWords must be demoted to home")
+}
+
+// CW フィールドも match 対象 (upstream は cw ?? text を見るので、CW が match
+// するだけでも降格)。
+func TestCreateService_SensitiveWordsMatchesCWAlone(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"nsfw"}}
+	svc.SetMetaRepo(metaRepo)
+
+	cw := "nsfw content warning"
+	text := "innocent body text"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, CW: &cw, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility)
+}
+
+// upstream-compat regex フィルタが解釈されること。
+func TestCreateService_SensitiveWordsRegexFilter(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{`/SPOIL.*/i`}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "this is a spoiler"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility)
+}
+
+// 元 visibility が home / followers / specified のときは降格対象外
+// (upstream も `data.visibility === 'public'` でしか降格しない)。
+func TestCreateService_SensitiveWordsHomeNoteUnchanged(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "spoiler in home post"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityHome,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility,
+		"home note は元から home なので降格は no-op")
+}
+
+// channel 内の note は降格対象外 (channel が露出範囲を別管理するため
+// upstream NoteCreateService も同じく対象外)。
+func TestCreateService_SensitiveWordsChannelNoteNotDemoted(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: []string{"spoiler"}}
+	svc.SetMetaRepo(metaRepo)
+
+	channelID := "ch1"
+	text := "spoiler in channel post"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic, ChannelID: &channelID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility,
+		"channel 内 note は sensitiveWords でも降格しない")
+}
+
+// sensitiveWords が空 (旧 mk-go の挙動) なら通常通り public のまま。
+func TestCreateService_SensitiveWordsEmptyMetaUnchanged(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: nil}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "regular content"
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility)
+}
+
 func TestCreateService_ContainsTooManyMentions(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 	// 21 メンションで default limit (20) 超過

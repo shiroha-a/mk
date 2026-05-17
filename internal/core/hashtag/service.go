@@ -6,10 +6,12 @@ package hashtag
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -23,6 +25,10 @@ import (
 type Service struct {
 	repo  repository.HashtagRepository
 	idGen id.Generator
+	// metaRepo は hiddenTags / sensitiveWords filter で使う (#TODO link)。
+	// 未配線なら filter skip = 全 tag を record する旧挙動 (= drop-in
+	// fallback)。production の router.go は必ず wire する。
+	metaRepo repository.MetaRepository
 	// pending は in-flight worker goroutine 数を追跡する。production では
 	// 参照されないが、unit test が WaitForPendingWrites() 経由で完了を
 	// 待つために使う。
@@ -32,6 +38,13 @@ type Service struct {
 // NewService constructs a HashtagService.
 func NewService(repo repository.HashtagRepository, idGen id.Generator) *Service {
 	return &Service{repo: repo, idGen: idGen}
+}
+
+// SetMetaRepo wires a MetaRepository so OnNoteCreated can filter tags that
+// match meta.hiddenTags or meta.sensitiveWords (upstream HashtagService
+// updateHashtagsRanking と同 semantics)。未配線時は filter skip = 旧挙動。
+func (s *Service) SetMetaRepo(r repository.MetaRepository) {
+	s.metaRepo = r
 }
 
 // OnNoteCreated is the HashtagHook implementation: for every tag in
@@ -61,11 +74,23 @@ func (s *Service) OnNoteCreated(note *model.Note, author *model.User) {
 	isLocal := author.IsLocal()
 	// 入力を goroutine 起動前に複製して capture race を防ぐ。
 	// (caller が同 *model.Note を後段で mutate しても safe)
+	// + upstream HashtagService.updateHashtagsRanking と同じく hiddenTags /
+	// sensitiveWords にマッチする tag は record しない (= featured / trends
+	// に出ないように filter する drop-in compat)。filter は同期的に取得して
+	// goroutine 起動後の DB アクセスを 1 つ減らす。
+	hidden, sensitive := s.fetchHiddenAndSensitive()
 	tags := make([]string, 0, len(note.Tags))
 	for _, name := range note.Tags {
-		if name != "" {
-			tags = append(tags, name)
+		if name == "" {
+			continue
 		}
+		if isHiddenTag(name, hidden) {
+			continue
+		}
+		if keyword.IsKeyWordIncluded(name, sensitive) {
+			continue
+		}
+		tags = append(tags, name)
 	}
 	if len(tags) == 0 {
 		return
@@ -119,6 +144,38 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// fetchHiddenAndSensitive returns (hiddenTags, sensitiveWords) from meta,
+// or (nil, nil) when metaRepo is not wired / fetch failed / both empty.
+// Best-effort: meta fetch 失敗時は filter skip = 旧挙動 (= 全 tag 通る)
+// に fail-open する。filter 漏れの方が「tag が突然 featured から消える」
+// より影響軽微。
+func (s *Service) fetchHiddenAndSensitive() (hidden []string, sensitive []string) {
+	if s.metaRepo == nil {
+		return nil, nil
+	}
+	m, err := s.metaRepo.Fetch()
+	if err != nil || m == nil {
+		return nil, nil
+	}
+	if len(m.HiddenTags) == 0 && len(m.SensitiveWords) == 0 {
+		return nil, nil
+	}
+	return []string(m.HiddenTags), []string(m.SensitiveWords)
+}
+
+// isHiddenTag は tag が hiddenTags 集合に case-insensitive で含まれるかを判定。
+// upstream は normalizeForSearch (= lowercase) で比較しているので mk-go も
+// strings.EqualFold で同等にする。tag は extract 時に lowercase 化されている
+// が、admin が hiddenTags に大文字混じりを設定するケースを救済する。
+func isHiddenTag(tag string, hidden []string) bool {
+	for _, h := range hidden {
+		if strings.EqualFold(tag, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // noteCreatedAt は note ID から作成時刻を再計算するためのヘルパ。idGen の
