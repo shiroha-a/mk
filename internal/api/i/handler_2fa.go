@@ -48,15 +48,18 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
-	}
-	// 2FA gate: upstream Misskey TS (2fa/register.ts) は twoFactorEnabled
-	// なら token 必須 (= 既に 2FA 有効な user が secret を上書き再登録
-	// するケース)。mk-go では旧来 password だけで通っていたため、password
-	// 漏洩 = 既存 2FA を攻撃者がコントロールする secret に置き換え可能だった。
+	// 2FA gate: upstream Misskey TS (2fa/register.ts:68/80) は twoFactorEnabled
+	// なら token 必須 (= 既に 2FA 有効な user が secret を上書き再登録するケース)。
+	// **必ず password check より先**: upstream は token-then-password 順なので、
+	// wrong-password + wrong-token 同時送信時に upstream は INVALID_TOKEN を返す
+	// (= mk-go も同じ shape にしないと frontend の error UI 分岐が崩れる)。
+	// mk-go では旧来 password だけで通っていたため、password 漏洩 = 既存 2FA を
+	// 攻撃者がコントロールする secret に置き換え可能だった。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	secret, uri, err := twofactor.GenerateSecret("Misskey", user.Username)
@@ -145,15 +148,18 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
-	}
-	// 2FA gate: upstream Misskey TS (2fa/unregister.ts) は twoFactorEnabled
-	// なら token 必須。mk-go では旧来 password だけで通っていたため、password
-	// 漏洩 = 2FA bypass で 2FA 無効化 → 以後の sensitive 操作も password
-	// だけで通る連鎖が成立していた。
+	// 2FA gate: upstream Misskey TS (2fa/unregister.ts:53/65) は twoFactorEnabled
+	// なら token 必須。**必ず password check より先**: upstream は token-then-
+	// password 順なので、wrong-password + wrong-token 同時送信時 upstream は
+	// INVALID_TOKEN を返す (= mk-go も同じ shape にしないと drop-in 違反)。
+	// mk-go では旧来 password だけで通っていたため、password 漏洩 = 2FA bypass
+	// で 2FA 無効化 → 以後の sensitive 操作も password だけで通る連鎖が成立
+	// していた。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
@@ -389,6 +395,12 @@ func (h *Handler) publishMeUpdatedPartial(userID string, fields map[string]any) 
 
 // TwoFARemoveKey handles POST /api/i/2fa/remove-key.
 // 自分の鍵 1 つを削除する。残り 0 件になったら securityKeysAvailable を false にする。
+//
+// 注: requireWebAuthn は使わず checks を inline している。upstream Misskey
+// TS (2fa/remove-key.ts:57/69) は **TOTP gate → password check** 順なので、
+// password を先に check する requireWebAuthn だと wrong-password + wrong-
+// token 時の error code が upstream と drift する (INCORRECT_PASSWORD vs
+// INVALID_TOKEN)。drop-in 互換性のため upstream 順で並べ直す。
 func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	var req struct {
 		Password     string `json:"password"`
@@ -398,15 +410,24 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Password == "" || req.CredentialID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password and credentialId are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, profile, ok := h.requireWebAuthn(c, req.Password)
-	if !ok {
-		return nil
+	if h.webauthnSvc == nil || h.securityKeyRepo == nil {
+		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "WebAuthn is not configured.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// 2FA gate: upstream Misskey TS (2fa/remove-key.ts) は twoFactorEnabled
-	// なら token 必須。passkey 削除は 2FA の物理 factor を 1 つ抜く操作なので、
-	// password だけで通すと 2FA 強度が degrade する経路になっていた。
+	user := middleware.GetUser(c)
+	if user == nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+	profile := h.userService.GetProfile(user.ID)
+	if profile == nil || profile.Password == nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+	// 2FA gate (passkey 削除は 2FA の物理 factor を 1 つ抜く操作なので強い
+	// 認証が必要)。**必ず password check より先** に置く (upstream 順)。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil {

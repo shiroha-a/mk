@@ -344,6 +344,23 @@ func TestTwoFARemoveKey_With2FA_AcceptsBackupCode(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// upstream order regression guard: TwoFARemoveKey でも wrong-password +
+// wrong-token は upstream 順 (TOTP first) で INVALID_TOKEN を返す。
+// requireWebAuthn helper の呼び出し順序を入れ替えた回帰防止。
+func TestTwoFARemoveKey_With2FA_WrongPasswordAndToken_ReturnsTokenError(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u1", Name: "k", PublicKey: "pk",
+	}))
+	rec := postExtra(h.TwoFARemoveKey, `{"password":"wrong","credentialId":"key1","token":"wrong"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN",
+		"TOTP gate must fire before password check (upstream Misskey TS order)")
+	assert.NotContains(t, rec.Body.String(), "INCORRECT_PASSWORD")
+}
+
 // --- TwoFAUpdateKey ---
 
 func TestTwoFAUpdateKey_MissingFields(t *testing.T) {

@@ -76,6 +76,21 @@ func TestTwoFARegister_With2FA_AcceptsBackupCode(t *testing.T) {
 	assert.NotNil(t, repo.Profiles["u1"].TwoFactorTempSecret)
 }
 
+// upstream order regression guard: wrong-password + wrong-token を同時送信
+// したとき、upstream Misskey TS は TOTP gate を先に評価して INVALID_TOKEN
+// (authentication failed) を返す。mk-go も同じ shape にしないと frontend の
+// error UI 分岐 (TOTP 再入力 vs password 再入力) が崩れる。
+func TestTwoFARegister_With2FA_WrongPasswordAndToken_ReturnsTokenError(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	rec := postExtra(h.TwoFARegister, `{"password":"wrong","token":"wrong"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN",
+		"TOTP gate must fire before password check (upstream Misskey TS order)")
+	assert.NotContains(t, rec.Body.String(), "INCORRECT_PASSWORD")
+}
+
 func TestTwoFADone_Success(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
@@ -216,6 +231,22 @@ func TestTwoFAUnregister_MissingTOTP_With2FAEnabled(t *testing.T) {
 	rec := postExtra(h.TwoFAUnregister, `{"password":"pass"}`, user)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+}
+
+// upstream order regression guard (see TestTwoFARegister_With2FA_WrongPassword
+// AndToken_ReturnsTokenError)。unregister 経路でも同様。
+func TestTwoFAUnregister_With2FA_WrongPasswordAndToken_ReturnsTokenError(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	secret := "JBSWY3DPEHPK3PXP"
+	repo.Profiles["u1"].TwoFactorSecret = &secret
+	repo.Profiles["u1"].TwoFactorEnabled = true
+
+	rec := postExtra(h.TwoFAUnregister, `{"password":"wrong","token":"wrong"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN",
+		"TOTP gate must fire before password check (upstream Misskey TS order)")
+	assert.NotContains(t, rec.Body.String(), "INCORRECT_PASSWORD")
 }
 
 func TestTwoFAUnregister_WrongPassword(t *testing.T) {
