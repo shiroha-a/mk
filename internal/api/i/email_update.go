@@ -41,6 +41,7 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	var req struct {
 		Password string  `json:"password"`
 		Email    *string `json:"email"`
+		Token    string  `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
@@ -49,6 +50,16 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
 		return apierr.JSONInternalError(c)
+	}
+
+	// 2FA gate: upstream Misskey TS (update-email.ts) は twoFactorEnabled
+	// なら token 必須。mk-go では旧来 password だけで通っていたため、
+	// password 漏洩 = 2FA bypass で email 乗っ取り → password reset で
+	// account takeover まで到達可能だった (drop-in regression、認証強度
+	// として最も影響が大きい経路の 1 つ)。verify2FAToken 経由なので
+	// replay 保護も自動で効く。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	// パスワード検証。upstream Misskey TS は ApiError(meta.errors.incorrectPassword)

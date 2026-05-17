@@ -22,6 +22,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	var req struct {
 		CurrentPassword string `json:"currentPassword"`
 		NewPassword     string `json:"newPassword"`
+		Token           string `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil || req.CurrentPassword == "" || req.NewPassword == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "currentPassword and newPassword are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -30,6 +31,15 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+
+	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
+	// なら token 必須 + twoFactorAuthenticate で検証する。mk-go では旧来
+	// password だけで通っていたため password 漏洩 = 2FA bypass で password
+	// 変更可能だった (drop-in regression)。verify2FAToken 経由なので RFC
+	// 6238 §5.2 の replay 保護も自動で効く。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	// upstream Misskey TS は raw `throw new Error('authentication failed')` を
@@ -61,6 +71,7 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	u := middleware.GetUser(c)
 	var req struct {
 		Password string `json:"password"`
+		Token    string `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -69,6 +80,14 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+
+	// 2FA gate: upstream Misskey TS (delete-account.ts) は twoFactorEnabled
+	// なら token 必須。mk-go では旧来 password だけで通っていたため、
+	// password 漏洩 = 2FA bypass で account 削除可能だった (drop-in
+	// regression)。verify2FAToken 経由なので replay 保護も自動で効く。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` を

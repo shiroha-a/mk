@@ -39,6 +39,7 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		Password string `json:"password"`
+		Token    string `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
@@ -49,6 +50,13 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	}
+	// 2FA gate: upstream Misskey TS (2fa/register.ts) は twoFactorEnabled
+	// なら token 必須 (= 既に 2FA 有効な user が secret を上書き再登録
+	// するケース)。mk-go では旧来 password だけで通っていたため、password
+	// 漏洩 = 既存 2FA を攻撃者がコントロールする secret に置き換え可能だった。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	secret, uri, err := twofactor.GenerateSecret("Misskey", user.Username)
@@ -128,6 +136,7 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		Password string `json:"password"`
+		Token    string `json:"token"`
 	}
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
@@ -138,6 +147,13 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
 		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	}
+	// 2FA gate: upstream Misskey TS (2fa/unregister.ts) は twoFactorEnabled
+	// なら token 必須。mk-go では旧来 password だけで通っていたため、password
+	// 漏洩 = 2FA bypass で 2FA 無効化 → 以後の sensitive 操作も password
+	// だけで通る連鎖が成立していた。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
@@ -376,14 +392,21 @@ func (h *Handler) publishMeUpdatedPartial(userID string, fields map[string]any) 
 func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	var req struct {
 		Password     string `json:"password"`
+		Token        string `json:"token"`
 		CredentialID string `json:"credentialId"`
 	}
 	if err := c.Bind(&req); err != nil || req.Password == "" || req.CredentialID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password and credentialId are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password)
+	user, profile, ok := h.requireWebAuthn(c, req.Password)
 	if !ok {
 		return nil
+	}
+	// 2FA gate: upstream Misskey TS (2fa/remove-key.ts) は twoFactorEnabled
+	// なら token 必須。passkey 削除は 2FA の物理 factor を 1 つ抜く操作なので、
+	// password だけで通すと 2FA 強度が degrade する経路になっていた。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil {

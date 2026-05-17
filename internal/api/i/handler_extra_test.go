@@ -98,6 +98,26 @@ func TestChangePassword_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TOTP gate (upstream drop-in 互換): 2FA 有効ユーザが token 無しで
+// change-password を呼ぶと 403 INVALID_TOKEN で refuse される。
+func TestChangePassword_With2FA_RequiresToken(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "oldpass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	rec := postExtra(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+}
+
+// 2FA 有効でも valid token (backup code) を渡せば成功する。
+func TestChangePassword_With2FA_AcceptsBackupCode(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "oldpass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	rec := postExtra(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass","token":"backup1"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
 // 73 byte 以上の newPassword は bcrypt の上限を超えるため 400 + PASSWORD_TOO_LONG (#1075)。
 func TestChangePassword_NewPasswordTooLong(t *testing.T) {
 	h, repo := newExtraHandler(t)
@@ -141,6 +161,29 @@ func TestDeleteAccount_InvalidParam(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	rec := postExtra(h.DeleteAccount, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TOTP gate (upstream drop-in 互換): 2FA 有効ユーザが token 無しで
+// delete-account を呼ぶと 403 INVALID_TOKEN で refuse される。
+func TestDeleteAccount_With2FA_RequiresToken(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+	// gate で弾かれているので account は削除されていないこと
+	assert.False(t, repo.Users["u1"].IsDeleted)
+}
+
+// 2FA 有効でも valid token (backup code) を渡せば成功する。
+func TestDeleteAccount_With2FA_AcceptsBackupCode(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	rec := postExtra(h.DeleteAccount, `{"password":"pass","token":"backup1"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Users["u1"].IsDeleted)
 }
 
 // #962 P0 + #967: 論理削除完了後に auth middleware の tokenCache を

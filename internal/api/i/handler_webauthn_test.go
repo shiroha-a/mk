@@ -317,6 +317,33 @@ func TestTwoFARemoveKey_Success(t *testing.T) {
 	assert.False(t, repo.Profiles["u1"].UsePasswordLessLogin)
 }
 
+// TOTP gate (upstream drop-in 互換): 2FA 有効ユーザが token 無しで
+// remove-key を呼ぶと 403 INVALID_TOKEN で refuse される。passkey 削除は
+// 2FA の物理 factor を抜く操作なので強い認証が必要。
+func TestTwoFARemoveKey_With2FA_RequiresToken(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u1", Name: "k", PublicKey: "pk",
+	}))
+	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"key1"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+}
+
+// 2FA 有効でも valid token (backup code) を渡せば key を削除できる。
+func TestTwoFARemoveKey_With2FA_AcceptsBackupCode(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u1", Name: "k", PublicKey: "pk",
+	}))
+	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"key1","token":"backup1"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
 // --- TwoFAUpdateKey ---
 
 func TestTwoFAUpdateKey_MissingFields(t *testing.T) {

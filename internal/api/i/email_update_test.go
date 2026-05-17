@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -43,6 +44,37 @@ func TestUpdateEmail_NoProfile(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	// profile がない → 500
 	assert.Equal(t, http.StatusInternalServerError, postExtra(h.UpdateEmail, `{"password":"x"}`, stubUser).Code)
+}
+
+// TOTP gate (upstream drop-in 互換): 2FA 有効ユーザが token 無しで
+// update-email を呼ぶと 403 INVALID_TOKEN で refuse される。email 乗っ取り
+// から password reset → account takeover の連鎖を防ぐ最重要 gate の 1 つ。
+func TestUpdateEmail_With2FA_RequiresToken(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	pwd := hashPassword("secret")
+	repo.Profiles["u1"] = &model.UserProfile{
+		UserID:                "u1",
+		Password:              &pwd,
+		TwoFactorEnabled:      true,
+		TwoFactorBackupSecret: pq.StringArray{"backup1", "backup2"},
+	}
+	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":"attacker@example.com"}`, stubUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+}
+
+// 2FA 有効でも valid token (backup code) を渡せば成功する。
+func TestUpdateEmail_With2FA_AcceptsBackupCode(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	pwd := hashPassword("secret")
+	repo.Profiles["u1"] = &model.UserProfile{
+		UserID:                "u1",
+		Password:              &pwd,
+		TwoFactorEnabled:      true,
+		TwoFactorBackupSecret: pq.StringArray{"backup1", "backup2"},
+	}
+	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":"new@example.com","token":"backup1"}`, stubUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestVerifyEmail_InvalidCode(t *testing.T) {
