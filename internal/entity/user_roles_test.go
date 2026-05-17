@@ -168,3 +168,24 @@ func TestPackUserLite_IncludesBadgeRoles(t *testing.T) {
 	assert.Equal(t, "Cool", br["name"])
 	assert.Equal(t, &icon, br["iconUrl"])
 }
+
+// PackUserDetailed: lookup 未配線時は `roles: []` で出力する (= 旧 mk-go
+// と同じ shape で JSON serialise 時に `[]` になる)。報告経路の end-to-end
+// fallback として、本 PR の wire が万一 router から外れても frontend が
+// `null` で壊れず空配列で安全に描画できることを担保する。
+func TestPackUserDetailed_RolesEmptyWhenLookupUnwired(t *testing.T) {
+	t.Cleanup(func() { SetUserRolesLookup(nil) })
+	SetUserRolesLookup(nil)
+	d := PackUserDetailed(&model.User{ID: "u1", Username: "alice"}, nil)
+	assert.NotNil(t, d.Roles, "Roles must be [] not nil so JSON output is `[]`")
+	assert.Empty(t, d.Roles)
+}
+
+// PackUserLite: 同上、lookup 未配線時の `badgeRoles: []` fallback を guard。
+func TestPackUserLite_BadgeRolesEmptyWhenLookupUnwired(t *testing.T) {
+	t.Cleanup(func() { SetUserRolesLookup(nil) })
+	SetUserRolesLookup(nil)
+	lite := PackUserLite(&model.User{ID: "u1", Username: "alice"})
+	assert.NotNil(t, lite.BadgeRoles)
+	assert.Empty(t, lite.BadgeRoles)
+}
