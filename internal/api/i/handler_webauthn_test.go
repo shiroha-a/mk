@@ -234,6 +234,39 @@ func TestTwoFARegisterKey_TOTPSuccess(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "challenge")
 }
 
+// Cross-endpoint replay regression guard: signin で消費した TOTP コードを
+// TwoFARegisterKey で再利用しようとすると 403 INVALID_TOKEN で refuse される。
+// router.go で signin と /api/i に同一 guard インスタンスを inject している
+// ことが前提 (PR #1100)。本 test は guard を直接 MarkUsed して signin 消費
+// を模擬し、shared-guard 経由の cross-endpoint protection を assert する。
+func TestTwoFARegisterKey_TOTPReplayFromSignin_Blocked(t *testing.T) {
+	h, repo, _ := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	secret := enableTwoFactorWithTOTP(t, repo, "u1")
+
+	// test-unique KeyPrefix で他テスト / -count=N の汚染を回避。
+	guard := &twofactor.RedisReplayGuard{
+		Client:    iTestRedis.Client,
+		KeyPrefix: "test:" + t.Name(),
+	}
+	h.SetTOTPReplayGuard(guard)
+
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+
+	// signin で TOTP を消費したことを模擬: guard を直接叩いて (u1, code) を
+	// used にする。signin handler の ValidateWithReplay と同じ key shape。
+	ok, err := guard.MarkUsed(t.Context(), "u1", code)
+	require.NoError(t, err)
+	require.True(t, ok, "first MarkUsed should set the slot")
+
+	// 同じ TOTP コードを TwoFARegisterKey に送る → refuse されるべき。
+	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass","token":"`+code+`"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"TOTP code consumed by signin must be refused by TwoFARegisterKey (cross-endpoint replay protection)")
+	assert.Contains(t, rec.Body.String(), "INVALID_TOKEN")
+}
+
 // --- TwoFAKeyDone ---
 
 func TestTwoFAKeyDone_MissingFields(t *testing.T) {
