@@ -1203,8 +1203,8 @@ func TestCreateService_SensitiveWordsEmptyCWTextMatch_StrictDemotes(t *testing.T
 		"mk-go strict: 空 CW でも text を独立に check するので降格する")
 }
 
-// 両 field とも match するケースは当然降格する (early return で CW 側で
-// 即 true を返すので text の評価まで到達しないが、final 結果は同じ)。
+// 両 field とも match するケースは当然降格する (negative case
+// "NeitherMatch" と pair で、4 象限の片側 2 つを test 経由で固める)。
 func TestCreateService_SensitiveWordsBothCWAndTextMatch_Demotes(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 	metaRepo := testutil.NewMockMetaRepository()
