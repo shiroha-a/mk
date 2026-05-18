@@ -164,6 +164,16 @@ func (s *Server) Start() error {
 			// trade-off の通り pool-of-Workers では rate limit が単一
 			// Worker 時と一致しない。#1126 queue-bench で挙動を検証予定。
 			optsBase = append(optsBase, mkq.WithRateLimit(rl, time.Second))
+			if concurrency > 1 {
+				// operator が rate limit を「合計 N jobs/sec」と認識する誤読を
+				// 防ぐため、両方を非自明値に設定したケースで startup ログを出す。
+				// docs/configuration.md と #1124 PR 説明に同 trade-off を記載。
+				slog.Warn("mkqdriver: rate limit applies per-Worker; effective total rate = rl × concurrency",
+					"queue", name,
+					"rl", rl,
+					"concurrency", concurrency,
+					"effective_total_per_sec", rl*concurrency)
+			}
 		}
 		if s.maxMetricsPoints > 0 {
 			// BullMQ-compatible per-queue metrics opt-in。
@@ -175,8 +185,16 @@ func (s *Server) Start() error {
 			handler:  dispatch,
 			optsBase: optsBase,
 		}
-		if err := pool.resizeLocked(concurrency); err != nil {
+		// `*Locked` 名 method の convention で pool.mu を保持。新規構築直後の
+		// pool で外部参照は無いため race は無いが、convention 一貫性のため。
+		pool.mu.Lock()
+		spawnErr := pool.resizeLocked(concurrency)
+		if spawnErr != nil {
 			pool.shutdownLocked()
+		}
+		pool.mu.Unlock()
+		if spawnErr != nil {
+			// partial 既存 pools を cleanup してから error 返却。
 			for _, p := range pools {
 				p.mu.Lock()
 				p.shutdownLocked()
@@ -185,7 +203,8 @@ func (s *Server) Start() error {
 			s.mu.Lock()
 			s.started = false
 			s.mu.Unlock()
-			return fmt.Errorf("mkqdriver: start workers for %q: %w", name, err)
+			return fmt.Errorf("mkqdriver: start workers for %q (after %d queues started successfully): %w",
+				name, len(pools), spawnErr)
 		}
 		pools[name] = pool
 	}

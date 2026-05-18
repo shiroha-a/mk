@@ -103,6 +103,13 @@ cp .config/docker.yml.example .config/docker.yml
 > - `asynq`: handler middleware で `golang.org/x/time/rate.Limiter.Wait` する設計。共有 worker pool で動くため、レート制限中の deliver タスクが多数 pending していると worker が `Wait` で寝てしまい、他 queue (push / export / webhook / maintenance) のタスクが starvation する可能性あり。これは asynq に per-queue pull-rate 制御 API が無いことに起因する根源的制約。
 > - `mkq`: `mkq.WithRateLimit` で **worker pull レイヤ** に制御が入るため、レート制限が他 queue の処理を阻害しない。
 > - **本格的に rate limit を運用するなら `mkq` driver を推奨**。
+>
+> **`mkq` driver の rate limit は per-Worker (#1124)**:
+> - mk-go の `mkq` driver は queue ごとに **N 個の `mkq.Worker`** を起動する pool-of-Workers 構造で運用される (auto-scale (#1120) と queue 単位 dynamic Resize を実現するため)。
+> - `mkq.WithRateLimit` は **個々の Worker に独立に適用** されるため、`deliverJobConcurrency: N` + `deliverJobPerSec: rl` の組み合わせでは **合計 dispatch rate = N × rl** になる。
+> - 例: `deliverJobConcurrency: 4` + `deliverJobPerSec: 100` → 実 dispatch 上限は **400 jobs/sec** (= 4 × 100)、設定値 100 ではない。
+> - 起動時に該当条件 (rl > 0 かつ concurrency > 1) で `slog.Warn` で effective rate を通知する。auto-scale (#1125) 配線後は Resize 時にも同 effective rate が再計算される。
+> - 連合先に rate limit を厳密に守る運用が必要な場合は `deliverJobPerSec` を `<合計目標> / <deliverJobConcurrency>` で割って設定すること。
 
 ### メディア
 
