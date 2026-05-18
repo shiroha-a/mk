@@ -56,19 +56,25 @@ operator がこの計算を host ごとにやることは現実的でない。
 
 `jobQueueAutoScale: true` を opt-in flag として導入し、**AIMD (additive-increase, multiplicative-decrease) controller** が queue depth / dispatch wait を観測しながら worker 数を `[minWorkers, maxWorkers]` の範囲で自動調整する。
 
-operator が握る knob は **2 個に縮約**:
+operator が握る knob は **2 個 (+ optional 1 個) に縮約**:
 
 ```yaml
 jobQueueAutoScale: true
-maxWorkers: <DefaultMaxWorkers>     # 詳細は §3.6
+maxWorkers: <DefaultMaxWorkers>           # per-queue 上限 (詳細は §3.6)
 # minWorkers (default 4) / autoScaleCooldownSeconds (default 1) は通常触らない
+# maxWorkersGlobal: 256                   # optional: 全 queue 合計の hard cap (multi-pod 環境用)
 ```
 
-`maxWorkers` のデフォルト計算 (本 ADR 全体で参照する単一定義) :
+`maxWorkers` の semantics と default 計算 (本 ADR 全体で参照する単一定義):
 
 ```
-DefaultMaxWorkers = runtime.NumCPU() × 8
+DefaultMaxWorkers = runtime.NumCPU() × 16        # per-queue 上限
+                                                  # 8-core で 128 per queue (deliver 想定 sizing)
 ```
+
+**`maxWorkers` は per-queue の上限**として解釈する (= "deliver 1 queue が単独でこの数まで膨張できる")。global cap は `maxWorkersGlobal` (optional) で表現し、default は無制限 (= per-queue cap × auto-scale 対象 queue 数 まで膨張し得る)。
+
+multi-pod 等で cluster 全体の DB/Redis pool を守りたい operator のみ `maxWorkersGlobal` を明示設定する (§3.5 で詳述)。
 
 既存の `deliverJobConcurrency` 等が明示設定されている場合は **個別 knob を尊重** (= controller を無効化)、後方互換を完全に維持する。
 
@@ -80,15 +86,23 @@ DefaultMaxWorkers = runtime.NumCPU() × 8
 
 **初期実装は AIMD on queue depth** を採用する。
 
-- queue depth が `upThreshold` (= 現 worker 数 × 4) を超えたら additive-increase
-- queue depth が `downThreshold` (= 現 worker 数 × 0.5) を下回ったら multiplicative-decrease
+scale 判定の trigger:
 
-理由:
+| direction | 条件 | 補足 |
+|---|---|---|
+| scale-up | queue depth > 現 worker 数 × 4 | 1 観測で即発火 (spike 対応優先) |
+| scale-down | queue depth == 0 が **5 cycle (= 5 秒)** 連続 | sustained idle 必須、transient な処理追いつきでは発火しない |
+
+scale-down に hysteresis を入れる理由: AIMD 文脈で「TCP packet loss」に相当する明確な signal が queue には無い。`queue depth < N×0.5` 等の閾値だと、worker が一瞬追いついた瞬間 (job 1 件処理完了直後) に発火して oscillation を起こしやすい。**sustained-idle** (= 5 cycle 連続で空) のみ発火に絞れば、worker が真に過剰なときだけ縮める。
+
+理由 (AIMD 採用):
 - AIMD は TCP congestion control で 30 年の運用実績がある oscillation-safe algorithm
 - dispatch wait p95 を直接見る PI controller は理論上より賢いが tuning が難しく、初期 release で失敗する確率が高い
 - queue depth は Redis ZCARD 1 op で取得可能、観測コストが極小
 
 将来 PI controller への差し替えは `Controller` interface 経由で可能に設計する (#1123 で interface 定義)。
+
+**注**: upThreshold 倍率 4 / sustained-idle cycle 数 5 は **#1123 controller unit test + #1126 queue-bench で実測 tuning する暫定値** であり、初期 release 後に operator feedback で調整する可能性あり。
 
 ### 3.2 scope: per-queue
 
@@ -97,18 +111,22 @@ global controller (driver 1 つで全 queue 統合) ではなく、**queue ご�
 理由:
 - deliver と inbox は workload 性質が全く違う (I/O bound vs CPU-mixed)
 - 1 queue (e.g. deliver) の spike が他 queue の worker を奪うのは望ましくない
-- per-queue は実装が単純で、global cap は別途 `maxWorkers` で表現できる
+- per-queue は実装が単純
 
-global cap は `maxWorkers` を **driver 全体の総 budget** として解釈し、controller は per-queue で `maxWorkers / len(queues)` までスケールする。
+各 queue の controller は `maxWorkers` (per-queue 上限、§2 で定義) までスケールする。`maxWorkersGlobal` (optional) が設定されている場合、全 queue worker 合計がこの値を超えるスケール要求は controller 側で reject する (= maxWorkersGlobal 達した時点でそれ以上スケールできない)。
+
+`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= deliver-heavy ワークロードで deliver が単独で 128 worker まで使える、他は idle で min=4)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
 
 ### 3.3 scale unit: AI `+max(1, N×0.25)` / MD `N×0.5`
 
 | direction | step | 根拠 |
 |---|---|---|
 | **scale-up** | `+max(1, N×0.25)` (additive) | TCP-AIMD と同じ、conservative にスケール、4 step で倍増 |
-| **scale-down** | `N×0.5` (multiplicative) | 急減で idle resource 解放を速くする、cost-bound design 重視 |
+| **scale-down** | `N×0.5` (multiplicative) | 5-cycle sustained idle で発火 (§3.1)、急減で idle resource 解放を速くする |
 
 doubling は spike 時に高速だが overshoot で oscillation を起こしやすく、TCP slow-start の経験から AIMD の方が安定。
+
+**Controller の time 依存性**: scale-up cool-down と sustained-idle カウントには `Clock` interface を注入する設計とし、unit test で fake clock を差し替えて deterministic に挙動を検証する (#1123 で interface 定義)。実装は `clockwork.NewRealClock()` 相当を default に持つ。
 
 ### 3.4 cool-down: 1 秒
 
@@ -126,11 +144,11 @@ scale event 間の最小 interval は **1 秒**。
 - pod 2 も独立に maxWorkers=128 までスケール
 - → cluster 合計 256 worker、DB pool 飽和
 
-初期 release では **協調なし** とし、operator は **per-process budget を operator が割る前提**で `maxWorkers` を設定する。cluster-wide budget の協調機構 (Redis 上の lease token 等) は将来 issue (#1120 tracker の「非ゴール」セクションに明示)。
+初期 release では **協調なし** とし、operator は **per-process budget を operator が割る前提** で `maxWorkers` (per-queue) と `maxWorkersGlobal` (per-process 全 queue 合計) を設定する。cluster-wide budget の協調機構 (Redis 上の lease token 等) は将来 issue (#1120 tracker の「非ゴール」セクションに明示)。
 
 multi-pod 運用への現実的アドバイス:
-- 「pod 数 × per-pod maxWorkers ≦ DB pool size × 0.8」を operator が確認
-- 例: 3 pod、DB pool=100 → per-pod maxWorkers=24 を推奨
+- 「pod 数 × per-pod `maxWorkersGlobal` ≦ DB pool size × 0.8」を operator が確認
+- 例: 3 pod、DB pool=100 → per-pod `maxWorkersGlobal=24` を推奨 (各 queue は更に `maxWorkers` で分割される)
 
 ### 3.6 既存 knob との優先順位
 
@@ -141,8 +159,11 @@ multi-pod 運用への現実的アドバイス:
 ```
 
 - `deliverJobConcurrency: N` が明示設定 → controller は当該 queue を **管理対象から外す**、N 固定で動作
-- `maxWorkers: M` 設定 → controller の上限として使う
-- 両方未設定 → `DefaultMaxWorkers` (§2 で定義) を採用
+- `maxWorkers: M` 設定 → controller の per-queue 上限として使う (§2)
+- 両方未設定 → `DefaultMaxWorkers` (§2 で定義、per-queue) を採用
+- `maxWorkersGlobal: G` (optional) → 全 queue worker 合計の hard cap (§3.2)
+
+`len(controllers) == 0` (全 queue に個別 knob 指定された) のケースでは controller goroutine を一切起動しない (= 完全に従来挙動と同じ)。
 
 これにより:
 - 既存 operator (固定 knob 使用) は `jobQueueAutoScale: true` を後付けしても影響なし
@@ -180,8 +201,8 @@ multi-pod 運用への現実的アドバイス:
 │                                                              │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │  MetricCollector (Prometheus)                        │   │
-│  │  - mk_job_queue_worker_count{queue}                 │   │
-│  │  - mk_job_queue_depth{queue}                        │   │
+│  │  - mk_job_workers_active{queue}                     │   │
+│  │  - mk_job_queue_pending{queue}                      │   │
 │  │  - mk_job_dispatch_wait_seconds{queue}              │   │
 │  │  - mk_job_scale_events_total{queue, direction}      │   │
 │  └─────────────────────────────────────────────────────┘   │
@@ -195,13 +216,16 @@ Server 起動時:
   if cfg.JobQueueAutoScale:
     for queue in [deliver, inbox, export, push, webhook]:
       if !cfg.<queue>JobConcurrency.IsSet():
-        controllers[queue] = NewAIMDController(min, max/len(queues), cooldown)
+        controllers[queue] = NewAIMDController(min, cfg.MaxWorkers, cooldown, clock)
         go controllers[queue].Run(ctx)  # 1s tick で observe + decide
+  # controllers が空 (全 queue に個別 knob) なら goroutine 一切起動しない
 
 ticker (per controller, 1s):
   depth = Redis.ZCARD(queue)
   current = driver.WorkerCount(queue)
   action = controller.Observe(depth, current)
+  if cfg.MaxWorkersGlobal != 0 and globalSumWouldExceed(action):
+    action = NoOp  # global cap で reject
   switch action:
     case ScaleUp(n):
       driver.Resize(queue, n)
@@ -212,10 +236,17 @@ ticker (per controller, 1s):
     case NoOp:
       ;
 
+runtime kill switch (operator が SIGHUP / admin endpoint で発火):
+  for c in controllers:
+    c.Disable()       # ticker 停止、worker 数は現状維持 (= 固定値運用に degenerate)
+  # operator は次の restart で config の jobQueueAutoScale: false を読み直す
+
 Server 停止時:
-  cancel(ctx)  # controller goroutine 終了
-  driver.Close()  # worker graceful drain
+  cancel(ctx)         # controller goroutine 終了
+  driver.Close()      # worker graceful drain
 ```
+
+runtime kill switch は **auto-scale が cluster を喰い尽くして restart も困難になった非常時** の脱出経路。SIGHUP handler は将来 issue (#1125 wiring 段階で実装)、初期 release では `jobQueueAutoScale: false` + restart で代替。
 
 ### 4.2 cost-bounded design
 
@@ -259,10 +290,10 @@ mkqdriver.Server
 
 #### trade-off
 
-- ✓ mkq library 変更不要、upstream とすぐ整合
-- ✓ scale-down の granularity が 1 worker 単位、stop も Worker 単位で graceful
-- ✗ N=128 のとき mkq.Worker が 128 個動く = WithConcurrency(128) の 1 Worker より overhead 微増 (内部 dispatch loop が 128 本動く)
-- ✗ overhead 評価は #1124 の integration test で測定、許容できない場合は mkq library に Resize API を追加する PR を別途検討
+- **Pro**: mkq library 変更不要、upstream とすぐ整合
+- **Pro**: scale-down の granularity が 1 worker 単位、stop も Worker 単位で graceful
+- **Con**: N=128 のとき mkq.Worker が 128 個動く = WithConcurrency(128) の 1 Worker より overhead 微増 (内部 dispatch loop が 128 本動く)
+- **Con**: overhead 評価は #1124 の integration test で測定、許容できない場合は mkq library に Resize API を追加する PR を別途検討
 
 ### 5.2 asynqdriver
 
@@ -276,13 +307,17 @@ asynq library は `Concurrency` を Server 構築時に固定する設計で、�
 
 ### 6.1 Prometheus metric (#1122 で先行 export)
 
+[Prometheus metric naming convention](https://prometheus.io/docs/practices/naming/) に従い、gauge は無 suffix or unit suffix、counter は `_total` suffix:
+
 | metric name | type | labels | 説明 |
 |---|---|---|---|
-| `mk_job_queue_worker_count` | gauge | queue | 各 queue の active worker goroutine 数 |
-| `mk_job_queue_depth` | gauge | queue | Redis ZCARD 値 (pending job 数) |
+| `mk_job_workers_active` | gauge | queue | 各 queue の active worker goroutine 数 |
+| `mk_job_queue_pending` | gauge | queue | Redis ZCARD 値 (pending job 数) |
 | `mk_job_dispatch_wait_seconds` | histogram | queue | enqueue → dispatch までの待ち時間 |
 | `mk_job_processing_seconds` | histogram | queue, status | job 処理時間 (success / failure) |
 | `mk_job_scale_events_total` | counter | queue, direction | auto-scale 起動回数 (up / down) |
+
+(gauge に `_count` を使うと counter の `_total` と意味的に混同しやすいため避ける。`_active` は「現在値」を明確に示す慣例 suffix)
 
 ### 6.2 logging
 
@@ -346,10 +381,10 @@ testcontainers-go で実 Redis 起動。
 
 | # | PR | 単独 merge | 配線 trigger |
 |---|---|---|---|
-| 1 | #1122 metric export | ✓ | 常時 export、controller 未稼働 |
-| 2 | #1123 AIMD controller library | ✓ | library のみ、配線なし |
-| 3 | #1124 mkqdriver Resize | ✓ | Resize API 追加のみ、auto 起動なし |
-| 4 | #1125 queue_factory wiring | ✓ | `jobQueueAutoScale: true` 時のみ起動、default false |
+| 1 | #1122 metric export | yes | 常時 export、controller 未稼働 |
+| 2 | #1123 AIMD controller library | yes | library のみ、配線なし |
+| 3 | #1124 mkqdriver Resize | yes | Resize API 追加のみ、auto 起動なし |
+| 4 | #1125 queue_factory wiring | yes | `jobQueueAutoScale: true` 時のみ起動、default false |
 | 5 | #1126 queue-bench report | data only | merge gate ではなく documentation |
 
 各 PR は revert 可能、controller の挙動に問題が出ても #1125 を revert すれば固定運用に完全復帰する。
@@ -364,10 +399,11 @@ testcontainers-go で実 Redis 起動。
 
 1. config に `jobQueueAutoScale: true` を追加 (他は何も変えない)
 2. 既存の `deliverJobConcurrency` 等は **削除する** (controller に管理させる、残すと固定値が優先)
-3. `maxWorkers: <値>` を設定 (default: `runtime.NumCPU() × 8`、明示推奨)
-4. mk-go を再起動
-5. grafana / prometheus で `mk_job_queue_worker_count` が動的に変化することを確認
-6. `mk_job_scale_events_total` で scale 発火頻度を観測、必要なら `maxWorkers` を調整
+3. `maxWorkers: <値>` を per-queue 上限として設定 (default: `runtime.NumCPU() × 16`、明示推奨)
+4. multi-pod 環境の場合のみ `maxWorkersGlobal: <値>` (全 queue worker 合計 cap) も設定
+5. mk-go を再起動
+6. grafana / prometheus で `mk_job_workers_active{queue}` が動的に変化することを確認
+7. `mk_job_scale_events_total{queue,direction}` で scale 発火頻度を観測、必要なら `maxWorkers` を調整
 
 ### 9.3 panic switch (障害時)
 
