@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	apiannouncements "github.com/shiroha-a/mk/internal/api/announcements"
@@ -111,7 +109,6 @@ import (
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
-	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
 	"github.com/shiroha-a/mk/internal/queue/processors"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -779,15 +776,8 @@ func (s *Server) setupRoutes() {
 	// 認証は付かない (Prometheus 慣例) ので、operator は nginx / LB ACL で
 	// access 制限する想定。詳細は docs/design/auto-scale-job-workers.md §6.1。
 	if s.config.EnableMetrics {
-		metrics := queuemetrics.New()
-		metrics.BindDriver(s.queueDriver)
-		registry := prometheus.NewRegistry()
-		if err := metrics.Register(registry); err != nil {
+		if err := wireMetricsEndpoint(s.echo, s.queueDriver); err != nil {
 			slog.Error("server: failed to register queue metrics", "err", err)
-		} else {
-			s.echo.GET("/metrics", echo.WrapHandler(promhttp.HandlerFor(registry, promhttp.HandlerOpts{
-				EnableOpenMetrics: true,
-			})))
 		}
 	}
 

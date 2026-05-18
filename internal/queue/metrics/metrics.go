@@ -109,7 +109,8 @@ func New() *Metrics {
 
 // BindDriver wires the pull-based gauges (workers_active / queue_pending) to
 // the given driver.Driver. Calling BindDriver multiple times replaces the
-// previous binding (= last caller wins).
+// previous binding (= last caller wins). Call order vs Register is free —
+// scrapeErrors is wired here directly so BindDriver-after-Register also works.
 //
 // Gauges are evaluated lazily on each scrape, so a non-running driver
 // (Server not yet Start()ed) shows zero without erroring (driver.WorkerCount
@@ -119,7 +120,10 @@ func (m *Metrics) BindDriver(d driver.Driver) {
 		m.pullCollector = nil
 		return
 	}
-	m.pullCollector = &driverCollector{driver: d}
+	m.pullCollector = &driverCollector{
+		driver:       d,
+		scrapeErrors: m.ScrapeErrorsTotal,
+	}
 }
 
 // Register attaches all owned collectors to r. Returns the first error to
@@ -134,7 +138,6 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 		m.ScrapeErrorsTotal,
 	}
 	if m.pullCollector != nil {
-		m.pullCollector.scrapeErrors = m.ScrapeErrorsTotal
 		collectors = append(collectors, m.pullCollector)
 	}
 	for _, c := range collectors {
@@ -162,14 +165,13 @@ type driverCollector struct {
 }
 
 var (
-	// workersActiveDesc help text notes the asynq quirk: asynq shares a
-	// single worker pool across queues, so for asynq backend every queue
-	// label reports the same pool-wide value (per-queue priority is handled
-	// internally via asynq priority weights). The mkq backend reports the
-	// true per-queue pool size.
+	// workersActiveDesc reports per-queue worker pool size on mkq backend.
+	// asynq backend semantics (pool-wide value reported per queue label)
+	// are documented in docs/configuration.md alongside the enableMetrics
+	// flag rather than being shoved into the Help text.
 	workersActiveDesc = prometheus.NewDesc(
 		"mk_job_workers_active",
-		"Number of currently active worker goroutines per queue. NOTE: when using the asynq backend this is pool-wide and identical for all queue labels (asynq shares one pool); the mkq backend reports the true per-queue value.",
+		"Number of active worker goroutines per queue (asynq backend reports pool-wide; see docs/configuration.md).",
 		[]string{"queue"}, nil,
 	)
 	queuePendingDesc = prometheus.NewDesc(
