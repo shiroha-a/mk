@@ -122,7 +122,7 @@ global controller (driver 1 つで全 queue 統合) ではなく、**queue ご�
 | direction | step | 根拠 |
 |---|---|---|
 | **scale-up** | `+max(1, N×0.25)` (additive) | TCP-AIMD と同じ、conservative にスケール、4 step で倍増 |
-| **scale-down** | `N×0.5` (multiplicative) | 5-cycle sustained idle で発火 (§3.1)、急減で idle resource 解放を速くする |
+| **scale-down** | `N×0.5` (multiplicative) | 5-cycle sustained idle で発火 (§3.1)、無負荷状態と判定された worker を半減して Redis / DB 接続を返却 |
 
 doubling は spike 時に高速だが overshoot で oscillation を起こしやすく、TCP slow-start の経験から AIMD の方が安定。
 
@@ -130,11 +130,11 @@ doubling は spike 時に高速だが overshoot で oscillation を起こしや�
 
 ### 3.4 cool-down: 1 秒
 
-scale event 間の最小 interval は **1 秒**。
+scale event 発火後の **連続発火抑止 interval は 1 秒** (scale-up / scale-down 両方とも対称)。
 
 - queue は ms スケールで変動するが、1 秒の遅延は drain time 全体 (10s-60s) に対し許容範囲
 - Redis ZCARD を毎 100ms で叩く負荷は許容できないため、観測周期 = cool-down = 1s で統一
-- ハイステリシス無し (scale up / down 両方とも同じ 1s)
+- cool-down は「発火後の sleep」のみ。scale-down 発火の **gate** には別途 §3.1 の 5-cycle sustained-idle hysteresis があり、こちらは「無負荷の確証を待つ」目的で機能が分離されている (cool-down ≠ sustained-idle)。
 
 ### 3.5 multi-process 協調: 初期 release は no coordination
 
@@ -144,7 +144,7 @@ scale event 間の最小 interval は **1 秒**。
 - pod 2 も独立に maxWorkers=128 までスケール
 - → cluster 合計 256 worker、DB pool 飽和
 
-初期 release では **協調なし** とし、operator は **per-process budget を operator が割る前提** で `maxWorkers` (per-queue) と `maxWorkersGlobal` (per-process 全 queue 合計) を設定する。cluster-wide budget の協調機構 (Redis 上の lease token 等) は将来 issue (#1120 tracker の「非ゴール」セクションに明示)。
+初期 release では **協調なし** とし、operator が **per-process budget を自分で割る前提** で `maxWorkers` (per-queue) と `maxWorkersGlobal` (per-process 全 queue 合計) を設定する。cluster-wide budget の協調機構 (Redis 上の lease token 等) は将来 issue (#1120 tracker の「非ゴール」セクションに明示)。
 
 multi-pod 運用への現実的アドバイス:
 - 「pod 数 × per-pod `maxWorkersGlobal` ≦ DB pool size × 0.8」を operator が確認
@@ -162,6 +162,8 @@ multi-pod 運用への現実的アドバイス:
 - `maxWorkers: M` 設定 → controller の per-queue 上限として使う (§2)
 - 両方未設定 → `DefaultMaxWorkers` (§2 で定義、per-queue) を採用
 - `maxWorkersGlobal: G` (optional) → 全 queue worker 合計の hard cap (§3.2)
+
+config struct での「未設定」表現は **`*int` ポインタ型 + `nil` = 未設定** で判定する (mk-go 既存 pattern `internal/config/config.go` の `DeliverJobConcurrency *int` 等と同じ)。`0` を「無制限」or「禁止」の sentinel に再利用しない (operator が `maxWorkersGlobal: 0` を書いた意図が判別可能になるよう)。
 
 `len(controllers) == 0` (全 queue に個別 knob 指定された) のケースでは controller goroutine を一切起動しない (= 完全に従来挙動と同じ)。
 
@@ -224,7 +226,7 @@ ticker (per controller, 1s):
   depth = Redis.ZCARD(queue)
   current = driver.WorkerCount(queue)
   action = controller.Observe(depth, current)
-  if cfg.MaxWorkersGlobal != 0 and globalSumWouldExceed(action):
+  if cfg.MaxWorkersGlobal != nil and globalSumWouldExceed(action, *cfg.MaxWorkersGlobal):
     action = NoOp  # global cap で reject
   switch action:
     case ScaleUp(n):
@@ -337,10 +339,10 @@ operator が「いつ何が起きたか」を grep で追えること。
 
 ### 6.3 docs/configuration.md 更新
 
-- 新 config の説明
-- 既存 knob との優先順位
-- multi-pod 運用での `maxWorkers` 推奨値計算式
-- panic switch (auto-scale off) 手順
+- 新 config の説明 (`jobQueueAutoScale` / `maxWorkers` / `maxWorkersGlobal` / `minWorkers` / `autoScaleCooldownSeconds`)
+- 既存 knob との優先順位 (§3.6)
+- multi-pod 運用での `maxWorkersGlobal` 推奨値計算式 (§3.5)
+- panic switch (auto-scale off) 手順 (§9.3)
 
 ## 7. tests strategy
 
@@ -348,12 +350,13 @@ operator が「いつ何が起きたか」を grep で追えること。
 
 `internal/queue/autoscale/aimd_test.go` で AIMDController の state machine を table-driven test で全 transition を網羅:
 
-- scale-up trigger (depth > upThreshold)
-- scale-down trigger (depth < downThreshold)
-- cool-down 中の no-op
-- max bound 到達時の cap
-- min bound 到達時の floor
-- time injection (fake time での deterministic test)
+- scale-up trigger (depth > N × 4 で 1 観測即発火、§3.1)
+- scale-down trigger (depth == 0 が 5 cycle 連続したときのみ発火、transient idle では発火しない、§3.1)
+- cool-down 中の no-op (1 秒以内の連続発火を抑止、§3.4)
+- max bound 到達時の cap (`maxWorkers` を超えない)
+- min bound 到達時の floor (`minWorkers` 以下にならない)
+- `maxWorkersGlobal` 到達時の reject (controller 側で NoOp、§3.2)
+- time injection (fake Clock での deterministic test、§3.3)
 
 実 Redis 不要、pure logic test。
 
@@ -408,12 +411,12 @@ testcontainers-go で実 Redis 起動。
 ### 9.3 panic switch (障害時)
 
 ```yaml
-jobQueueAutoScale: false  # この 1 行で固定値 fallback
-deliverJobConcurrency: 64 # 固定値を明示
-inboxJobConcurrency:   32
+jobQueueAutoScale: false      # この 1 行で固定値 fallback
+deliverJobConcurrency: <値>   # 障害発生前の固定値、または runtime.NumCPU() × 8 を目安
+inboxJobConcurrency:   <値>   # 同上 (inbox は I/O 比が低いので deliver の半分が目安)
 ```
 
-再起動で固定運用に戻る。controller goroutine も終了するため leak しない。
+再起動で固定運用に戻る。controller goroutine も終了するため leak しない。**経験則の目安値** (8-core 想定): `deliverJobConcurrency: 64` / `inboxJobConcurrency: 32`。実 workload で問題が出ない場合は default (`16`) のまま `jobQueueAutoScale: false` でも可。
 
 ## 10. open issues / 将来 work
 
