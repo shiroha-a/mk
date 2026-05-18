@@ -826,6 +826,23 @@ func TestLoad_EnablePprof_DefaultFalse(t *testing.T) {
 	assert.False(t, cfg.EnablePprof)
 }
 
+func TestLoad_EnableMetrics(t *testing.T) {
+	yaml := testYAML + `
+enableMetrics: true
+`
+	path := writeTestConfig(t, yaml)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.EnableMetrics)
+}
+
+func TestLoad_EnableMetrics_DefaultFalse(t *testing.T) {
+	path := writeTestConfig(t, testYAML)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, cfg.EnableMetrics)
+}
+
 // TestRedisOptions_KeyPrefix は #362 drop-in 互換の回帰テスト。
 // TS 本家の ioredis keyPrefix (`<host>:`) と同じ形式の prefix を返すことを確認する。
 func TestRedisOptions_KeyPrefix(t *testing.T) {

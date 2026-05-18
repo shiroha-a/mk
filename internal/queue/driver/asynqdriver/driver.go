@@ -75,6 +75,24 @@ func (d *Driver) Scheduler() driver.Scheduler {
 	return d.scheduler
 }
 
+// WorkerCount returns the configured Concurrency for the asynq pool.
+// asynq shares a single worker pool across all queues, so the same value
+// is reported for every qname (the per-queue priority is handled by
+// asynq internally via queue priority weights, not by separate pools).
+// Before Server() is called this returns 0, matching the driver.Driver
+// contract for unstarted drivers.
+//
+// 注: 本 driver は #1120 tracker の auto-scale 対象外 (ADR §5.2)。値は
+// 静的 Config 由来で runtime 変化しない。
+func (d *Driver) WorkerCount(qname string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.server == nil {
+		return 0
+	}
+	return d.serverCfg.Concurrency
+}
+
 // Close releases every constructed sub-service. Components that
 // have not been built yet are skipped. Errors are aggregated so a
 // failure in one Close does not mask the others.

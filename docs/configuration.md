@@ -39,6 +39,8 @@ cp .config/docker.yml.example .config/docker.yml
 | `disableEndpointRateLimits` | bool | `false` | per-endpoint rate limit table 全体を無効化。Misskey TS の `NODE_ENV=development` 相当で、ベンチマーク等で公正比較する用途専用。**本番で絶対に使わない** |
 | `pidFile` | string | - | PIDファイルパス |
 | `testMode` | bool | `false` | テスト用エンドポイント(/api/reset-db)を有効化。**本番で絶対に使わない** |
+| `enablePprof` | bool | `false` | `/debug/pprof/*` ハンドラを公開。ローカルプロファイリング専用。**本番で絶対に使わない**。`MK_ENABLEPPROF`で上書き可。 |
+| `enableMetrics` | bool | `false` | Prometheus `/metrics` エンドポイントを公開。job queue 系 metric (`mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` / `mk_job_processing_seconds` / `mk_job_scale_events_total`) を expose。認証無しで公開されるため、外部公開する場合は nginx / LB ACL で access 制限すること。詳細は `docs/design/auto-scale-job-workers.md` §6.1。`MK_ENABLEMETRICS`で上書き可。 |
 | `jobQueueDriver` | string | `"mkq"` | ジョブキュー実装の選択。`mkq` (デフォルト、推奨) または `asynq` (legacy)。`mkq` は BullMQ wire-compatible で admin queue 画面が Misskey TS frontend 前提のまま動く + per-queue concurrency / rate-limit が効く。`asynq` は **将来削除予定** (mkq の安定性確保後) のため新規 deploy は `mkq` 推奨。`MK_JOBQUEUEDRIVER`で上書き可。 |
 
 ### データベース (`db.*`)

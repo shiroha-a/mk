@@ -210,6 +210,15 @@ type Source struct {
 	// For local profiling only; must not be enabled in production.
 	EnablePprof bool `mapstructure:"enablePprof"`
 
+	// EnableMetrics registers a Prometheus /metrics endpoint exposing the
+	// job-queue metrics defined in internal/queue/metrics (worker count /
+	// queue depth / scale events). Defaults to false. Operators that
+	// scrape from grafana / HPA should set true and gate access via
+	// nginx / load-balancer ACLs since the endpoint is unauthenticated.
+	// See docs/design/auto-scale-job-workers.md §6.1 for the metric
+	// catalog.
+	EnableMetrics bool `mapstructure:"enableMetrics"`
+
 	// SentryForBackend enables Sentry error tracking for the Go server. Nil
 	// disables Sentry entirely (production default).
 	SentryForBackend *SentryBackendOptions `mapstructure:"sentryForBackend"`
@@ -314,6 +323,10 @@ type Config struct {
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	EnablePprof bool
 
+	// EnableMetrics registers the Prometheus /metrics endpoint. See
+	// internal/queue/metrics for the exposed metric catalog.
+	EnableMetrics bool
+
 	// SentryForBackend, when non-nil, enables Sentry error tracking for the
 	// Go server.
 	SentryForBackend *SentryBackendOptions
@@ -390,6 +403,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"logging.sql.disableQueryTruncation",
 		"logging.sql.enableQueryParamLogging",
 		"enablePprof",
+		"enableMetrics",
 		"sentryForBackend.options.dsn",
 		"sentryForBackend.options.environment",
 		"jobQueueDriver",
@@ -529,8 +543,9 @@ func resolve(src *Source) (*Config, error) {
 
 		TrustProxy: resolveTrustProxy(src.TrustProxy),
 
-		TestMode:    src.TestMode,
-		EnablePprof: src.EnablePprof,
+		TestMode:      src.TestMode,
+		EnablePprof:   src.EnablePprof,
+		EnableMetrics: src.EnableMetrics,
 
 		SentryForBackend:  src.SentryForBackend,
 		SentryForFrontend: src.SentryForFrontend,

@@ -127,4 +127,14 @@ type Driver interface {
 	Inspector() Inspector
 	Scheduler() Scheduler
 	Close() error
+
+	// WorkerCount returns the number of worker goroutines currently
+	// dedicated to qname. Drivers that share a single worker pool across
+	// queues (e.g. asynq) return the pool-wide Concurrency for every
+	// qname. Drivers that have not started their Server yet return 0.
+	//
+	// Used by the Prometheus metrics layer (`mk_job_workers_active`) and
+	// later by the auto-scale controller (#1120 tracker) to read the
+	// current pool size when computing scale decisions.
+	WorkerCount(qname string) int
 }
