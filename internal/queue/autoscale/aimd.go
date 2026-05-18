@@ -46,6 +46,9 @@ type AIMDConfig struct {
 
 	// CooldownDuration is the minimum time between scale events
 	// (scale-up or scale-down). ADR §3.4 fixes this at 1 second.
+	// Setting 0 disables cool-down entirely (every Observe tick may
+	// scale), which is useful for tests but not recommended in
+	// production (oscillation risk).
 	//
 	// 注: 上記 2 field と同じく operator-facing config 化しない。
 	CooldownDuration time.Duration
@@ -110,16 +113,22 @@ func NewAIMDController(cfg AIMDConfig) (*AIMDController, error) {
 //     the last scale event, return NoOp regardless of signal.
 //  2. scale-up gate: if QueueDepth > CurrentWorkers × UpThresholdMultiplier,
 //     propose additive-increase to min(CurrentWorkers + max(1, ⌈N×0.25⌉),
-//     MaxWorkers). Resets the idle counter.
-//  3. sustained-idle gate: if QueueDepth == 0, increment the idle
-//     counter; once it reaches SustainedIdleCycles, propose
-//     multiplicative-decrease to max(⌊CurrentWorkers × 0.5⌋,
-//     MinWorkers). Any non-zero observation resets the counter.
+//     MaxWorkers). Resets the idle counter unconditionally (the load
+//     surge is the canonical "definitely not idle" signal, regardless of
+//     whether the controller is at-max).
+//  3. sustained-idle gate: if QueueDepth == 0 AND CurrentWorkers >
+//     MinWorkers, increment the idle counter; once it reaches
+//     SustainedIdleCycles, propose multiplicative-decrease to
+//     max(⌊CurrentWorkers × 0.5⌋, MinWorkers). Any non-zero observation
+//     resets the counter. At-min skips this stage entirely (early NoOp
+//     + counter reset for clean state) so the wasteful "accumulate to
+//     threshold → reset → NoOp" loop never runs.
 //
 // At-bound cases (CurrentWorkers == MaxWorkers and we want to scale up,
 // or CurrentWorkers == MinWorkers and we want to scale down) return
 // NoOp rather than a scale action with delta=0 — callers should not
-// call driver.Resize redundantly.
+// call driver.Resize redundantly. Both at-bound paths also clear the
+// idle counter, so state remains consistent across mode transitions.
 func (c *AIMDController) Observe(metric ObservedMetric) ControlAction {
 	now := c.cfg.Clock.Now()
 
@@ -149,9 +158,12 @@ func (c *AIMDController) Observe(metric ObservedMetric) ControlAction {
 	//
 	// at-min での早期 return: 既に MinWorkers なら counter 自体を進めない。
 	// counter を進めた末に「threshold 到達 → reset → NoOp」の意味のないサイクル
-	// を回さない最適化。動作は前者と equivalent (どちらも結局 NoOp)。
+	// を回さない最適化。counter は念のため明示リセット (操作中の MinWorkers
+	// config 変更や driver 側外部リセット等で at-min に飛び込んだ際の state
+	// leak を防ぐ、scale-up at-max 経路と対称)。
 	if metric.QueueDepth == 0 {
 		if metric.CurrentWorkers <= c.cfg.MinWorkers {
+			c.idleCycleCount = 0
 			return ControlAction{Kind: ActionNoOp}
 		}
 		c.idleCycleCount++

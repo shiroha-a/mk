@@ -219,11 +219,15 @@ func TestObserve_ScaleDownFlooredAtMin(t *testing.T) {
 // returns NoOp on sustained idle (no redundant Resize call) AND that
 // the early-return optimisation keeps the idle counter at 0 (= we
 // avoid the wasteful "accumulate to threshold → reset → NoOp" loop).
+//
+// Additionally exercises the explicit counter reset on at-min entry
+// (= mid-cycle transition to at-min from a partially-accumulated state
+// clears the counter, matching the scale-up at-max symmetry).
 func TestObserve_ScaleDownNoopAtMin(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	cfg := validConfig(clock)
 	cfg.MinWorkers = 4
-	cfg.SustainedIdleCycles = 5 // ADR デフォルト値で挙動確認
+	cfg.SustainedIdleCycles = 5
 	ctrl, err := NewAIMDController(cfg)
 	require.NoError(t, err)
 
@@ -236,6 +240,15 @@ func TestObserve_ScaleDownNoopAtMin(t *testing.T) {
 	}
 	assert.Equal(t, 0, ctrl.idleCycleCount,
 		"at-min idle path must not advance the idle counter (early-return optimisation)")
+
+	// mid-cycle transition: 先に counter を 3 まで貯めてから at-min に
+	// 飛び込み、明示リセットされることを確認 (driver 側で外部に worker を
+	// 削減される等のレアケース対策)。
+	ctrl.idleCycleCount = 3
+	action := ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: 4})
+	assert.Equal(t, ActionNoOp, action.Kind)
+	assert.Equal(t, 0, ctrl.idleCycleCount,
+		"at-min early return must reset the idle counter (symmetry with scale-up at-max reset)")
 }
 
 // TestObserve_CooldownGate verifies that a scale-up event followed by
