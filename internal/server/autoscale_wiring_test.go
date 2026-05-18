@@ -342,6 +342,53 @@ func TestStartAutoScale_NilRunnerStopIsNoop(t *testing.T) {
 	assert.NotPanics(t, func() { r.Stop(context.Background()) })
 }
 
+// panickingDriver wraps scriptableDriver and panics from Resize after
+// `panicAfter` calls so we can test the tick goroutine's recover().
+type panickingDriver struct {
+	*scriptableDriver
+	panicAfter atomic.Int32
+}
+
+func (p *panickingDriver) Resize(qname string, n int) error {
+	if p.panicAfter.Add(-1) < 0 {
+		panic("test-induced resize panic")
+	}
+	return p.scriptableDriver.Resize(qname, n)
+}
+
+// TestStartAutoScale_TickRecoversFromPanic verifies that a panic from
+// drv.Resize inside the per-queue tick goroutine is recovered (logged
+// at Error level) rather than crashing the process. wg.Done still runs
+// via defer so Stop() does not hang waiting for the leaked goroutine.
+func TestStartAutoScale_TickRecoversFromPanic(t *testing.T) {
+	cfg := &config.Config{JobQueueAutoScale: true}
+	inner := newScriptableDriver(nil)
+	inner.setPending("deliver", 1000) // 高 depth で scale-up trigger
+	d := &panickingDriver{scriptableDriver: inner}
+	// 初回 + 1 tick で発火する Resize までは success、その次の Resize で panic。
+	// 初期 Resize × 5 queue + 1 tick の Resize で 6 = panic 発火タイミング。
+	d.panicAfter.Store(6)
+
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+
+	// panic で deliver の tick goroutine が死ぬまで待ち、Stop が hang
+	// しない (= deferred wg.Done が recover 経由でも走る) ことを確認。
+	time.Sleep(2 * time.Second)
+
+	done := make(chan struct{})
+	go func() {
+		runner.Stop(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop hung after panic; wg.Done likely missed in recover path")
+	}
+}
+
 // TestStartAutoScale_InitialResizeFailureDoesNotPreventStart verifies
 // that a transient Resize failure during initial setup is logged but
 // allowed (controller retries on next tick), so a temporary Redis

@@ -84,13 +84,15 @@ func startAutoScale(
 			"server: jobQueueAutoScale=true requires a driver that supports Resize; current driver returned ErrResizeNotSupported (%w)", err)
 	}
 
-	min := defaultMinWorkers
+	// 変数名は Go 1.21+ builtin min / max を shadow しないよう
+	// minWorkers / maxWorkers と書く。
+	minWorkers := defaultMinWorkers
 	if cfg.MinWorkers != nil && *cfg.MinWorkers > 0 {
-		min = *cfg.MinWorkers
+		minWorkers = *cfg.MinWorkers
 	}
-	maxW := runtime.NumCPU() * 16
+	maxWorkers := runtime.NumCPU() * 16
 	if cfg.MaxWorkers != nil && *cfg.MaxWorkers > 0 {
-		maxW = *cfg.MaxWorkers
+		maxWorkers = *cfg.MaxWorkers
 	}
 	cooldown := time.Second
 	if cfg.AutoScaleCooldownSeconds != nil && *cfg.AutoScaleCooldownSeconds > 0 {
@@ -100,10 +102,10 @@ func startAutoScale(
 	// startup validation: minWorkers floor × queue 数 が maxWorkersGlobal を
 	// 超えると scaling headroom 無し (ADR §3.6)。
 	if cfg.MaxWorkersGlobal != nil && *cfg.MaxWorkersGlobal > 0 {
-		if floor := min * len(queues); floor > *cfg.MaxWorkersGlobal {
+		if floor := minWorkers * len(queues); floor > *cfg.MaxWorkersGlobal {
 			return nil, fmt.Errorf(
 				"server: minWorkers floor (min=%d × %d auto-scaled queues = %d) exceeds maxWorkersGlobal=%d",
-				min, len(queues), floor, *cfg.MaxWorkersGlobal)
+				minWorkers, len(queues), floor, *cfg.MaxWorkersGlobal)
 		}
 	}
 
@@ -117,8 +119,8 @@ func startAutoScale(
 	for _, qname := range queues {
 		ctrl, err := autoscale.NewAIMDController(autoscale.AIMDConfig{
 			Queue:                 qname,
-			MinWorkers:            min,
-			MaxWorkers:            maxW,
+			MinWorkers:            minWorkers,
+			MaxWorkers:            maxWorkers,
 			UpThresholdMultiplier: 4.0,
 			SustainedIdleCycles:   5,
 			CooldownDuration:      cooldown,
@@ -130,11 +132,14 @@ func startAutoScale(
 
 		// 初期 worker 数を最低 minWorkers にする。Resize 失敗時は warn
 		// log のみで起動継続 (= driver 未 ready 等で transient、次 tick で
-		// retry)。
-		if err := drv.Resize(qname, min); err != nil {
+		// retry)。setWorkerCount は Resize 成功時のみ commit して、
+		// globalSumWouldExceed に stale data が混入するのを防ぐ (失敗時の
+		// initial worker count は次 tick の Resize 成功で正常化する)。
+		if err := drv.Resize(qname, minWorkers); err != nil {
 			slog.Warn("server: initial Resize failed; controller will retry", "queue", qname, "err", err)
+		} else {
+			runner.setWorkerCount(qname, drv.WorkerCount(qname))
 		}
-		runner.setWorkerCount(qname, drv.WorkerCount(qname))
 
 		runner.wg.Add(1)
 		go runner.tick(runCtx, qname, ctrl, drv, metrics, cfg.MaxWorkersGlobal)
@@ -142,7 +147,7 @@ func startAutoScale(
 
 	slog.Info("server: autoscale started",
 		"managed", queues, "skipped", skipped,
-		"min", min, "max", maxW,
+		"min", minWorkers, "max", maxWorkers,
 		"cooldownSec", int(cooldown/time.Second),
 		"globalCap", maxWorkersGlobalDescription(cfg.MaxWorkersGlobal))
 	return runner, nil
@@ -196,6 +201,17 @@ func (r *autoscaleRunner) tick(
 	globalCap *int,
 ) {
 	defer r.wg.Done()
+	// panic recovery: ctrl.Observe / drv.Resize / inspector 経由の panic で
+	// goroutine が死ぬと当該 queue が controller 管理外になる (server
+	// restart まで復旧不能)。stack trace を log に残して goroutine を
+	// clean shutdown する (= wg.Done が defer で実行される)。production
+	// resilience のため。
+	defer func() {
+		if v := recover(); v != nil {
+			slog.Error("server: autoscale tick panic; controller for queue is now stopped until server restart",
+				"queue", qname, "panic", v)
+		}
+	}()
 
 	// 観測周期 = 1Hz (ADR §3.4 で cool-down と統一)。Ticker は cancel で
 	// 即停止できるよう ctx.Done と select する。
@@ -256,7 +272,8 @@ func (r *autoscaleRunner) setWorkerCount(qname string, n int) {
 }
 
 // globalSumWouldExceed returns true when committing `target` workers for
-// `qname` would push the sum across all auto-scaled queues over cap.
+// `qname` would push the sum across all auto-scaled queues over
+// `globalCap`.
 //
 // 注 (best-effort TOCTOU): check と subsequent Resize の間に他 ticker
 // goroutine が独自 Resize を commit すると、実 cluster 合計は cap を
@@ -265,7 +282,9 @@ func (r *autoscaleRunner) setWorkerCount(qname string, n int) {
 // 込みで設定すること (ADR §3.5 multi-pod アドバイスと同様)。real
 // "strict cap" を要求する場合は cluster-wide coordinator (将来 issue)
 // が必要。
-func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, cap int) bool {
+//
+// 引数名は Go builtin `cap` を shadow しないよう globalCap を使う。
+func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, globalCap int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sum := target
@@ -275,7 +294,7 @@ func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, cap int) bo
 		}
 		sum += c
 	}
-	return sum > cap
+	return sum > globalCap
 }
 
 // autoScaledQueues returns the queue names that should be controller-
