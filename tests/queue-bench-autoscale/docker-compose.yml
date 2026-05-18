@@ -116,6 +116,9 @@ services:
       BLACKHOLE_URL: http://blackhole:8080
       REDIS_HOST: redis:6379
       DB_HOST: postgres
+      DB_USER: misskey
+      DB_PASS: testpass
+      DB_NAME: misskey
       SCENARIO: ${SCENARIO:-fixed16}
       OUTBOUND_NOTES: ${OUTBOUND_NOTES:-10}
       FOLLOWERS: ${FOLLOWERS:-50}

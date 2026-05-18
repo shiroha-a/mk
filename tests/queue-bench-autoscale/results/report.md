@@ -1,6 +1,6 @@
 # Auto-scale comparison bench (#1126)
 
-Generated at: 2026-05-18T15:51:34.652793+00:00
+Generated at: 2026-05-18T23:16:54.480797+00:00
 
 ## Setup
 
@@ -21,9 +21,9 @@ Generated at: 2026-05-18T15:51:34.652793+00:00
 
 | Scenario | Drain time | Throughput (jobs/s) | Hits |
 |---|---|---|---|
-| `fixed16` | 0.193s | 155.8 | 30 |
-| `fixed64` | 3.923s | 7.6 | 30 |
-| `auto` | 0.188s | 160.0 | 30 |
+| `fixed16` | 0.196s | 153.3 | 30 |
+| `fixed64` | 5.791s | 5.2 | 30 |
+| `auto` | 0.194s | 154.9 | 30 |
 
 ## Redis connections
 
@@ -32,8 +32,8 @@ Generated at: 2026-05-18T15:51:34.652793+00:00
 | Scenario | Idle clients | Busy clients |
 |---|---|---|
 | `fixed16` | 47 | 50 |
-| `fixed64` | 85 | 86 |
-| `auto` | 34 | 35 |
+| `fixed64` | 85 | 90 |
+| `auto` | 36 | 41 |
 
 ## Post submit time
 
@@ -41,9 +41,9 @@ notes/create POST の **submit** にかかった時間 (= HTTP response 受け�
 
 | Scenario | Post submit |
 |---|---|
-| `fixed16` | 0.034s |
-| `fixed64` | 0.037s |
-| `auto` | 0.057s |
+| `fixed16` | 0.037s |
+| `fixed64` | 0.062s |
+| `auto` | 0.038s |
 
 ## Raw results
 
@@ -55,11 +55,12 @@ notes/create POST の **submit** にかかった時間 (= HTTP response 受け�
   "outbound_notes": 3,
   "followers_per_note": 10,
   "expected_deliver_jobs": 30,
-  "post_submit_s": 0.034,
-  "drain_time_s": 0.193,
+  "post_failures": 0,
+  "post_submit_s": 0.037,
+  "drain_time_s": 0.196,
   "drain_timed_out": false,
   "blackhole_hits": 30,
-  "throughput_jobs_per_s": 155.8,
+  "throughput_jobs_per_s": 153.3,
   "idle_redis_clients": 47,
   "busy_redis_clients": 50
 }
@@ -73,13 +74,14 @@ notes/create POST の **submit** にかかった時間 (= HTTP response 受け�
   "outbound_notes": 3,
   "followers_per_note": 10,
   "expected_deliver_jobs": 30,
-  "post_submit_s": 0.037,
-  "drain_time_s": 3.923,
+  "post_failures": 0,
+  "post_submit_s": 0.062,
+  "drain_time_s": 5.791,
   "drain_timed_out": false,
   "blackhole_hits": 30,
-  "throughput_jobs_per_s": 7.6,
+  "throughput_jobs_per_s": 5.2,
   "idle_redis_clients": 85,
-  "busy_redis_clients": 86
+  "busy_redis_clients": 90
 }
 ```
 
@@ -91,12 +93,13 @@ notes/create POST の **submit** にかかった時間 (= HTTP response 受け�
   "outbound_notes": 3,
   "followers_per_note": 10,
   "expected_deliver_jobs": 30,
-  "post_submit_s": 0.057,
-  "drain_time_s": 0.188,
+  "post_failures": 0,
+  "post_submit_s": 0.038,
+  "drain_time_s": 0.194,
   "drain_timed_out": false,
   "blackhole_hits": 30,
-  "throughput_jobs_per_s": 160.0,
-  "idle_redis_clients": 34,
-  "busy_redis_clients": 35
+  "throughput_jobs_per_s": 154.9,
+  "idle_redis_clients": 36,
+  "busy_redis_clients": 41
 }
 ```

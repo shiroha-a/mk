@@ -45,19 +45,24 @@ POLL_INTERVAL_S = 0.1
 IDLE_OBSERVE_S = float(os.environ.get("IDLE_OBSERVE_S", "10"))
 RESULTS_DIR = "/results"
 
-DB_USER = "misskey"
-DB_PASS = "testpass"
-DB_NAME = "misskey"
+# DB credentials は compose の POSTGRES_* と同期する必要がある。env 経由で
+# 1 箇所定義 (= compose) に集約し、driver は default だけ持つ形で drift を回避。
+DB_USER = os.environ.get("DB_USER", "misskey")
+DB_PASS = os.environ.get("DB_PASS", "testpass")
+DB_NAME = os.environ.get("DB_NAME", "misskey")
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def aidx_id(prefix: str = "b") -> str:
-    """ULID-ish ID matching mk-go's `aidx` generator (= time-base36 +
-    nodeID + counter). Good enough for a unique test ID."""
+    """Returns a 16-char unique ID with `a` + prefix char + 14 random
+    base36 chars. Matches mk-go aidx の **長さだけ** を模倣する (実 aidx
+    は time-base36 8 + nodeID 4 + counter 4 で timeline ordering を保証
+    するが、本 helper は完全ランダムで ordering 保証なし)。bench では
+    create 順 = ID 順を仮定しないので問題ない。"""
     alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-    rand = "".join(secrets.choice(alphabet) for _ in range(10))
-    return f"a{prefix[:1]}{rand[:14]}"
+    rand = "".join(secrets.choice(alphabet) for _ in range(14))
+    return f"a{prefix[:1]}{rand}"
 
 
 def verify_federation_enabled() -> None:
@@ -94,43 +99,51 @@ def signup_admin() -> tuple[str, str]:
 
 def insert_blackhole_followers(local_user_id: str, count: int) -> None:
     """Insert N remote follower users pointing at blackhole + follow rows.
-    Reuses the SQL pattern from tests/queue-bench/common/seed.py:111.
+
+    `executemany` で 2 batch round-trip に集約 (FOLLOWERS=100 で 2 round-trip、
+    旧 1-row-per-INSERT 設計の 200 round-trip 比 100x 削減)。bench の前段
+    overhead が無視できる範囲に。
     """
     print(f"[seed] inserting {count} blackhole followers", flush=True)
+    user_rows: list[tuple] = []
+    follow_rows: list[tuple] = []
+    for i in range(count):
+        fid = aidx_id("b")
+        username = f"black{i:04d}"
+        # Per-follower unique inbox so DeliverActivity's seen dedup map
+        # does not collapse the burst into a single job. blackhole は
+        # port 8080 で listen するので明示。
+        uri = f"http://blackhole:8080/users/{fid}"
+        inbox = f"http://blackhole:8080/inbox/{fid}"
+        user_rows.append((fid, username, username.lower(), "blackhole",
+                          uri, inbox, inbox))
+        follow_rows.append((aidx_id("f"), fid, local_user_id, "blackhole",
+                            inbox, inbox))
+
     with psycopg.connect(host=DB_HOST, user=DB_USER, password=DB_PASS,
                          dbname=DB_NAME) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
-            for i in range(count):
-                fid = aidx_id("b")
-                username = f"black{i:04d}"
-                uri = f"http://blackhole:8080/users/{fid}"
-                # Per-follower unique inbox so DeliverActivity's seen
-                # dedup map does not collapse the burst into a single job.
-                # blackhole は port 8080 で listen するので明示。
-                inbox = f"http://blackhole:8080/inbox/{fid}"
-                cur.execute(
-                    """
-                    INSERT INTO "user" (id, username, "usernameLower", host,
-                                        uri, inbox, "sharedInbox")
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
-                    """,
-                    (fid, username, username.lower(), "blackhole",
-                     uri, inbox, inbox),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO following (id, "followerId", "followeeId",
-                                          "followerHost", "followeeHost",
-                                          "followerInbox", "followeeInbox",
-                                          "followerSharedInbox", "followeeSharedInbox")
-                    VALUES (%s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (aidx_id("f"), fid, local_user_id, "blackhole",
-                     inbox, inbox),
-                )
+            cur.executemany(
+                """
+                INSERT INTO "user" (id, username, "usernameLower", host,
+                                    uri, inbox, "sharedInbox")
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                user_rows,
+            )
+            cur.executemany(
+                """
+                INSERT INTO following (id, "followerId", "followeeId",
+                                      "followerHost", "followeeHost",
+                                      "followerInbox", "followeeInbox",
+                                      "followerSharedInbox", "followeeSharedInbox")
+                VALUES (%s, %s, %s, %s, NULL, %s, NULL, %s, NULL)
+                ON CONFLICT DO NOTHING
+                """,
+                follow_rows,
+            )
 
 
 def reset_blackhole() -> None:
@@ -168,7 +181,11 @@ def queue_depth_total() -> int:
         rc.close()
 
 
-def post_note(token: str, n: int) -> None:
+def post_note(token: str, n: int, failures: list[int]) -> None:
+    """Posts one note. On failure, log and append to `failures` (caller-
+    owned list). Caller passes a shared mutable list so failures across
+    threads are observable without locking (list.append is thread-safe
+    via the GIL for built-in list ops)."""
     try:
         httpx.post(
             f"{APP_URL}/api/notes/create",
@@ -179,6 +196,7 @@ def post_note(token: str, n: int) -> None:
         )
     except Exception as e:
         print(f"[bench] post_note #{n} failed: {e}", flush=True)
+        failures.append(n)
 
 
 def drain_loop(expected_hits: int, started_at: float) -> tuple[float, int]:
@@ -219,8 +237,9 @@ def main() -> None:
     expected_hits = OUTBOUND_NOTES * FOLLOWERS
     print(f"[{SCENARIO}] posting {OUTBOUND_NOTES} notes "
           f"(expected {expected_hits} deliver jobs)", flush=True)
+    post_failures: list[int] = []
     threads = [
-        threading.Thread(target=post_note, args=(token, i), daemon=True)
+        threading.Thread(target=post_note, args=(token, i, post_failures), daemon=True)
         for i in range(OUTBOUND_NOTES)
     ]
     for t in threads:
@@ -229,16 +248,21 @@ def main() -> None:
         t.join(timeout=60)
     post_submit = time.monotonic() - started
 
-    print(f"[{SCENARIO}] all posts submitted in {post_submit:.2f}s, draining...",
-          flush=True)
-    drain_s, hits = drain_loop(expected_hits=expected_hits, started_at=started)
+    # post 失敗があった場合、実 fan-out が減るので drain time を
+    # underestimate しないよう expected_hits を実成功 post 数で計算し直す。
+    successful_posts = OUTBOUND_NOTES - len(post_failures)
+    effective_expected = successful_posts * FOLLOWERS
+    print(f"[{SCENARIO}] all posts submitted in {post_submit:.2f}s "
+          f"(failures={len(post_failures)}), draining...", flush=True)
+    drain_s, hits = drain_loop(expected_hits=effective_expected, started_at=started)
     busy_clients = redis_client_count()
 
     result = {
         "scenario": SCENARIO,
         "outbound_notes": OUTBOUND_NOTES,
         "followers_per_note": FOLLOWERS,
-        "expected_deliver_jobs": expected_hits,
+        "expected_deliver_jobs": effective_expected,
+        "post_failures": len(post_failures),
         "post_submit_s": round(post_submit, 3),
         "drain_time_s": round(drain_s, 3) if drain_s >= 0 else None,
         "drain_timed_out": drain_s < 0,

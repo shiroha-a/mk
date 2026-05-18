@@ -24,6 +24,19 @@ DRAIN_TIMEOUT_S="${DRAIN_TIMEOUT_S:-240}"
 
 mkdir -p results
 
+# trap で失敗 / 中断時も override yml / stack を必ず cleanup する。
+# leak したまま次回 run すると古い config (fixed16 期待で auto.yml mount 等)
+# で bench が走る silent corruption 事故を防ぐ。
+cleanup() {
+    local exit_code=$?
+    rm -f docker-compose.override.yml
+    if [ "$exit_code" -ne 0 ]; then
+        echo "[run.sh] aborted (exit=$exit_code); tearing down stack..." >&2
+        docker compose down -v --remove-orphans 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
 run_scenario() {
     local scenario="$1"
     echo "============================================================"
@@ -73,9 +86,8 @@ for s in "${SCENARIOS[@]}"; do
     run_scenario "$s"
 done
 
-# cleanup + report
+# 正常終了 cleanup (trap でも cleanup されるが、明示で stack も止める)
 docker compose down -v --remove-orphans
-rm -f docker-compose.override.yml
 
 echo "============================================================"
 echo "[run.sh] generating report"
