@@ -244,6 +244,13 @@ func (d *Driver) Scheduler() driver.Scheduler {
 // Auto-scale (#1120 tracker) will mutate the underlying pool size at
 // runtime via a future Resize API (#1124); until then this returns the
 // static config value.
+//
+// 注 (#1124 配線時の synchronization 課題): 現状 d.dServer.perQueueConcurrent /
+// d.dServer.concurrency は起動後 immutable で、Driver の d.mu だけで安全に読める。
+// Resize 配線後はこれらの field を runtime に変更するため、(a) Server 側に独自
+// mutex を入れて WorkerCount が必ず Server 経由で読む形に変更する、もしくは
+// (b) Server.workerCount(qname) メソッドを生やして本関数からは delegate する、
+// のどちらかが必要。現状のままだと torn read / stale read リスクあり。
 func (d *Driver) WorkerCount(qname string) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()

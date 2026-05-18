@@ -25,10 +25,10 @@ type fakeDriver struct {
 	inspector *fakeInspector
 }
 
-func (f *fakeDriver) Client() driver.Client       { panic("not used") }
-func (f *fakeDriver) Server() driver.Server       { panic("not used") }
+func (f *fakeDriver) Client() driver.Client       { panic("fakeDriver: Client() not implemented") }
+func (f *fakeDriver) Server() driver.Server       { panic("fakeDriver: Server() not implemented") }
 func (f *fakeDriver) Inspector() driver.Inspector { return f.inspector }
-func (f *fakeDriver) Scheduler() driver.Scheduler { panic("not used") }
+func (f *fakeDriver) Scheduler() driver.Scheduler { panic("fakeDriver: Scheduler() not implemented") }
 func (f *fakeDriver) Close() error                { return nil }
 func (f *fakeDriver) WorkerCount(qname string) int {
 	if v, ok := f.workers[qname]; ok {
@@ -141,8 +141,9 @@ func TestBindDriver_NilIsNoOp(t *testing.T) {
 }
 
 // TestBindDriver_InspectorErrorReturnsZero verifies that scrape time errors
-// from Inspector.GetQueueInfo are swallowed and reported as 0, so a transient
-// Redis hiccup does not break the entire /metrics response.
+// from Inspector.GetQueueInfo are swallowed at the gauge layer (reported as
+// 0 to keep /metrics responsive) AND that mk_job_scrape_errors_total counts
+// each failure so operators can alert on the rate.
 func TestBindDriver_InspectorErrorReturnsZero(t *testing.T) {
 	d := &fakeDriver{
 		workers: map[string]int{"deliver": 8},
@@ -155,9 +156,18 @@ func TestBindDriver_InspectorErrorReturnsZero(t *testing.T) {
 	r := prometheus.NewRegistry()
 	require.NoError(t, m.Register(r))
 
+	// First scrape: gauge degrades to 0, scrape_errors increments to 1.
 	body := scrape(t, r)
 	assert.Contains(t, body, `mk_job_workers_active{queue="deliver"} 8`)
 	assert.Contains(t, body, `mk_job_queue_pending{queue="deliver"} 0`)
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("deliver", "queue_pending")))
+
+	// Second scrape: counter increments again.
+	scrape(t, r)
+	assert.Equal(t, 2.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("deliver", "queue_pending")))
+
+	// Successful queues do not increment scrape_errors.
+	assert.Equal(t, 0.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("inbox", "queue_pending")))
 }
 
 // TestBindDriver_ReplacesPreviousBinding verifies that calling BindDriver

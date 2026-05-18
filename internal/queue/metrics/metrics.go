@@ -48,6 +48,13 @@ type Metrics struct {
 	DispatchWaitSeconds *prometheus.HistogramVec
 	ProcessingSeconds   *prometheus.HistogramVec
 	ScaleEventsTotal    *prometheus.CounterVec
+
+	// ScrapeErrorsTotal counts /metrics scrape failures by queue + kind
+	// (= which pull source failed, e.g. "queue_pending"). Exposed so
+	// operators can alert on Redis / Inspector failures that would
+	// otherwise be hidden behind silent zero values. See pullCollector
+	// (Collect path) for the only emit site in this PR.
+	ScrapeErrorsTotal *prometheus.CounterVec
 }
 
 // New constructs the Metrics bundle (no registration, no driver binding).
@@ -77,15 +84,25 @@ func New() *Metrics {
 			Name:      "scale_events_total",
 			Help:      "Total auto-scale events triggered, by queue and direction (up/down).",
 		}, []string{"queue", "direction"}),
+		ScrapeErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "mk",
+			Subsystem: "job",
+			Name:      "scrape_errors_total",
+			Help:      "Total Prometheus scrape errors per queue, by source kind (e.g. queue_pending = Inspector.GetQueueInfo failed). A non-zero rate here means the corresponding gauge is reporting stale/zero values; alert on this rather than only on the gauge values themselves.",
+		}, []string{"queue", "kind"}),
 	}
-	// Pre-init zero-valued series for every (queue, [status|direction]) pair
-	// so Prometheus dashboards show a continuous line instead of "no data".
+	// Pre-init zero-valued series for push-mode metrics so Prometheus
+	// dashboards show a continuous line instead of "no data". Pull-mode
+	// metrics (workers_active / queue_pending) don't need pre-init because
+	// driverCollector.Collect always emits a value for every standardQueues
+	// entry on each scrape.
 	for _, q := range standardQueues {
 		m.DispatchWaitSeconds.WithLabelValues(q)
 		m.ProcessingSeconds.WithLabelValues(q, "success")
 		m.ProcessingSeconds.WithLabelValues(q, "failure")
 		m.ScaleEventsTotal.WithLabelValues(q, "up")
 		m.ScaleEventsTotal.WithLabelValues(q, "down")
+		m.ScrapeErrorsTotal.WithLabelValues(q, "queue_pending")
 	}
 	return m
 }
@@ -114,8 +131,10 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 		m.DispatchWaitSeconds,
 		m.ProcessingSeconds,
 		m.ScaleEventsTotal,
+		m.ScrapeErrorsTotal,
 	}
 	if m.pullCollector != nil {
+		m.pullCollector.scrapeErrors = m.ScrapeErrorsTotal
 		collectors = append(collectors, m.pullCollector)
 	}
 	for _, c := range collectors {
@@ -132,17 +151,25 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 // rather than registering 2 × N GaugeFunc collectors.
 //
 // At scrape time, Collect calls driver.WorkerCount and Inspector.GetQueueInfo
-// for every standardQueues entry. Errors from Inspector are swallowed and
-// reported as 0 to keep the /metrics response robust against transient Redis
-// failures (operator should monitor Redis separately).
+// for every standardQueues entry. Errors from Inspector are swallowed at the
+// gauge layer (reported as 0 to keep /metrics responsive under transient
+// Redis failures) BUT the failure is also counted via
+// `mk_job_scrape_errors_total{kind="queue_pending"}` so operators can alert
+// on the failure rate without having to watch the gauge for "suspicious zeros".
 type driverCollector struct {
-	driver driver.Driver
+	driver       driver.Driver
+	scrapeErrors *prometheus.CounterVec // wired by Metrics.Register
 }
 
 var (
+	// workersActiveDesc help text notes the asynq quirk: asynq shares a
+	// single worker pool across queues, so for asynq backend every queue
+	// label reports the same pool-wide value (per-queue priority is handled
+	// internally via asynq priority weights). The mkq backend reports the
+	// true per-queue pool size.
 	workersActiveDesc = prometheus.NewDesc(
 		"mk_job_workers_active",
-		"Number of currently active worker goroutines per queue.",
+		"Number of currently active worker goroutines per queue. NOTE: when using the asynq backend this is pool-wide and identical for all queue labels (asynq shares one pool); the mkq backend reports the true per-queue value.",
 		[]string{"queue"}, nil,
 	)
 	queuePendingDesc = prometheus.NewDesc(
@@ -165,7 +192,13 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 			float64(c.driver.WorkerCount(q)), q,
 		)
 		var pending int
-		if info, err := inspector.GetQueueInfo(q); err == nil && info != nil {
+		info, err := inspector.GetQueueInfo(q)
+		switch {
+		case err != nil:
+			if c.scrapeErrors != nil {
+				c.scrapeErrors.WithLabelValues(q, "queue_pending").Inc()
+			}
+		case info != nil:
 			pending = info.Pending
 		}
 		ch <- prometheus.MustNewConstMetric(
