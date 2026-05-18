@@ -318,6 +318,22 @@ queue-bench-down:
 queue-bench-logs:
 	docker compose -f $(QUEUE_BENCH_COMPOSE) logs -f
 
+# Auto-scale comparison bench (#1126 / #1120 tracker).
+# 3 scenario (fixed16 / fixed64 / auto) を同一 mkq stack で逐次実行し、
+# drain time / Redis client count を比較する。queue-bench との同居・
+# 並列実行は想定しない (port は publish していないが volume / network 名は
+# 別)。詳細: tests/queue-bench-autoscale/README.md (or docs/queue-bench.md)
+AUTOSCALE_BENCH_DIR=tests/queue-bench-autoscale
+
+queue-bench-autoscale-run:
+	cd $(AUTOSCALE_BENCH_DIR) && ./run.sh
+
+queue-bench-autoscale-down:
+	cd $(AUTOSCALE_BENCH_DIR) && docker compose down -v --remove-orphans
+
+queue-bench-autoscale-logs:
+	cd $(AUTOSCALE_BENCH_DIR) && docker compose logs -f
+
 # Playwright e2e (#744 Phase 1)
 #
 # upstream Misskey TS 互換挙動を期待値に書いた spec を mk-go backend に

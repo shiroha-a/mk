@@ -1,0 +1,13 @@
+{
+  "scenario": "fixed64",
+  "outbound_notes": 3,
+  "followers_per_note": 10,
+  "expected_deliver_jobs": 30,
+  "post_submit_s": 0.037,
+  "drain_time_s": 3.923,
+  "drain_timed_out": false,
+  "blackhole_hits": 30,
+  "throughput_jobs_per_s": 7.6,
+  "idle_redis_clients": 85,
+  "busy_redis_clients": 86
+}

@@ -1,0 +1,13 @@
+{
+  "scenario": "auto",
+  "outbound_notes": 3,
+  "followers_per_note": 10,
+  "expected_deliver_jobs": 30,
+  "post_submit_s": 0.057,
+  "drain_time_s": 0.188,
+  "drain_timed_out": false,
+  "blackhole_hits": 30,
+  "throughput_jobs_per_s": 160.0,
+  "idle_redis_clients": 34,
+  "busy_redis_clients": 35
+}

@@ -1,0 +1,27 @@
+url: https://mk-autoscale/
+port: 3000
+
+db:
+  host: postgres
+  port: 5432
+  db: misskey
+  user: misskey
+  pass: testpass
+
+redis:
+  host: redis
+  port: 6379
+
+id: aidx
+
+allowedPrivateNetworks:
+  - 127.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 10.0.0.0/8
+
+jobQueueDriver: mkq
+
+# Scenario B: 固定 N=64 (ADR §3 で「I/O bound 経験則」が示す target、8-core 想定)
+deliverJobConcurrency: 64
+inboxJobConcurrency:   32

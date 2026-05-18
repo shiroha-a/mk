@@ -1,0 +1,4 @@
+# Future bench runs overwrite these files; keep the initial smoke results
+# (committed below) as a reference for operators, but ignore subsequent
+# runs to avoid noisy diffs.
+all.json
