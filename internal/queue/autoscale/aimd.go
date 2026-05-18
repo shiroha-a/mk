@@ -10,6 +10,7 @@
 package autoscale
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -30,15 +31,23 @@ type AIMDConfig struct {
 
 	// UpThresholdMultiplier triggers scale-up when QueueDepth >
 	// CurrentWorkers × UpThresholdMultiplier. ADR §3.1 fixes this at 4.0.
+	//
+	// 注: 本フィールドは operator-facing YAML config には expose しない
+	// 想定 (queue_factory #1125 で固定値 4.0 を inject する)。test と
+	// 将来の experimental tuning のためだけに configurable にしてある。
 	UpThresholdMultiplier float64
 
 	// SustainedIdleCycles is the number of consecutive Observe calls
 	// with QueueDepth == 0 required before scale-down is triggered.
 	// ADR §3.1 fixes this at 5.
+	//
+	// 注: UpThresholdMultiplier と同じく operator-facing config 化しない。
 	SustainedIdleCycles int
 
 	// CooldownDuration is the minimum time between scale events
 	// (scale-up or scale-down). ADR §3.4 fixes this at 1 second.
+	//
+	// 注: 上記 2 field と同じく operator-facing config 化しない。
 	CooldownDuration time.Duration
 
 	// Clock is the time source (nil = systemClock). Tests inject a fake
@@ -137,13 +146,17 @@ func (c *AIMDController) Observe(metric ObservedMetric) ControlAction {
 	// sustained-idle scale-down: QueueDepth == 0 が SustainedIdleCycles 連続。
 	// 非ゼロ観測 1 回でカウンタリセット (transient な処理追いつきで scale-down
 	// しないよう、ADR §3.1 で明示的に hysteresis 設計を採用)。
+	//
+	// at-min での早期 return: 既に MinWorkers なら counter 自体を進めない。
+	// counter を進めた末に「threshold 到達 → reset → NoOp」の意味のないサイクル
+	// を回さない最適化。動作は前者と equivalent (どちらも結局 NoOp)。
 	if metric.QueueDepth == 0 {
+		if metric.CurrentWorkers <= c.cfg.MinWorkers {
+			return ControlAction{Kind: ActionNoOp}
+		}
 		c.idleCycleCount++
 		if c.idleCycleCount >= c.cfg.SustainedIdleCycles {
 			c.idleCycleCount = 0
-			if metric.CurrentWorkers <= c.cfg.MinWorkers {
-				return ControlAction{Kind: ActionNoOp}
-			}
 			target := max(metric.CurrentWorkers/2, c.cfg.MinWorkers)
 			c.lastScaleAt = now
 			return ControlAction{Kind: ActionScaleDown, TargetWorkers: target}
@@ -156,16 +169,6 @@ func (c *AIMDController) Observe(metric ObservedMetric) ControlAction {
 	return ControlAction{Kind: ActionNoOp}
 }
 
-// IdleCycleCount returns the current sustained-idle counter. Exposed for
-// tests so we can assert reset semantics without depending on Observe
-// return values for indirect signals.
-func (c *AIMDController) IdleCycleCount() int {
-	return c.idleCycleCount
-}
-
-// errInvalidConfig is a tiny package-local error helper.
-type configError struct{ msg string }
-
-func (e *configError) Error() string { return "autoscale: " + e.msg }
-
-func errInvalidConfig(msg string) error { return &configError{msg: msg} }
+// errInvalidConfig wraps a startup config error with the package prefix
+// so operators can grep "autoscale:" in startup logs.
+func errInvalidConfig(msg string) error { return fmt.Errorf("autoscale: %s", msg) }

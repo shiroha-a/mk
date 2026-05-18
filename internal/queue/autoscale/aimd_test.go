@@ -85,14 +85,14 @@ func TestObserve_ScaleUpTrigger(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: 16})
 	}
-	require.Equal(t, 3, ctrl.IdleCycleCount(), "idle counter should accumulate")
+	require.Equal(t, 3, ctrl.idleCycleCount, "idle counter should accumulate")
 	clock.Advance(2 * time.Second) // exit cool-down (none active here)
 
 	// depth = 65, current = 16, threshold = 16×4=64 → trigger
 	action := ctrl.Observe(ObservedMetric{QueueDepth: 65, CurrentWorkers: 16})
 	assert.Equal(t, ActionScaleUp, action.Kind)
 	assert.Equal(t, 20, action.TargetWorkers, "16 + max(1, 16/4=4) = 20")
-	assert.Equal(t, 0, ctrl.IdleCycleCount(), "idle counter should reset on scale-up")
+	assert.Equal(t, 0, ctrl.idleCycleCount, "idle counter should reset on scale-up")
 }
 
 // TestObserve_ScaleUpStep_SmallCurrent verifies the max(1, N/4) floor
@@ -157,13 +157,13 @@ func TestObserve_SustainedIdle(t *testing.T) {
 		assert.Equal(t, ActionNoOp, action.Kind, "cycle %d should not trigger yet", i+1)
 		clock.Advance(time.Second + time.Millisecond) // exit cool-down between observations
 	}
-	assert.Equal(t, 4, ctrl.IdleCycleCount())
+	assert.Equal(t, 4, ctrl.idleCycleCount)
 
 	// 5 cycle 目で発火。
 	action := ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: current})
 	assert.Equal(t, ActionScaleDown, action.Kind)
 	assert.Equal(t, 8, action.TargetWorkers, "16/2 = 8")
-	assert.Equal(t, 0, ctrl.IdleCycleCount(), "counter resets after scale-down")
+	assert.Equal(t, 0, ctrl.idleCycleCount, "counter resets after scale-down")
 }
 
 // TestObserve_SustainedIdle_ResetByNonZero verifies that a single
@@ -180,12 +180,12 @@ func TestObserve_SustainedIdle_ResetByNonZero(t *testing.T) {
 		ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: current})
 		clock.Advance(time.Second + time.Millisecond)
 	}
-	require.Equal(t, 4, ctrl.IdleCycleCount())
+	require.Equal(t, 4, ctrl.idleCycleCount)
 
 	// 1 non-zero observation (= queue caught up momentarily) resets.
 	action := ctrl.Observe(ObservedMetric{QueueDepth: 3, CurrentWorkers: current})
 	assert.Equal(t, ActionNoOp, action.Kind, "below up-threshold and non-zero = NoOp")
-	assert.Equal(t, 0, ctrl.IdleCycleCount(), "idle counter resets on non-zero observation")
+	assert.Equal(t, 0, ctrl.idleCycleCount, "idle counter resets on non-zero observation")
 
 	// Resuming idle observations: counter starts fresh from 0, so 5 more
 	// idle cycles are needed before the next scale-down.
@@ -216,21 +216,26 @@ func TestObserve_ScaleDownFlooredAtMin(t *testing.T) {
 }
 
 // TestObserve_ScaleDownNoopAtMin verifies that an at-min controller
-// returns NoOp on sustained idle (no redundant Resize call).
+// returns NoOp on sustained idle (no redundant Resize call) AND that
+// the early-return optimisation keeps the idle counter at 0 (= we
+// avoid the wasteful "accumulate to threshold → reset → NoOp" loop).
 func TestObserve_ScaleDownNoopAtMin(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	cfg := validConfig(clock)
 	cfg.MinWorkers = 4
-	cfg.SustainedIdleCycles = 1
+	cfg.SustainedIdleCycles = 5 // ADR デフォルト値で挙動確認
 	ctrl, err := NewAIMDController(cfg)
 	require.NoError(t, err)
 
-	// current == MinWorkers → NoOp, idle counter still resets.
-	for i := 0; i < 3; i++ {
+	// 10 sustained-idle observations at MinWorkers — counter should
+	// never advance because the at-min early return skips increment.
+	for i := 0; i < 10; i++ {
 		action := ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: 4})
-		assert.Equal(t, ActionNoOp, action.Kind)
+		assert.Equal(t, ActionNoOp, action.Kind, "tick %d should be NoOp", i+1)
 		clock.Advance(time.Second + time.Millisecond)
 	}
+	assert.Equal(t, 0, ctrl.idleCycleCount,
+		"at-min idle path must not advance the idle counter (early-return optimisation)")
 }
 
 // TestObserve_CooldownGate verifies that a scale-up event followed by
@@ -269,14 +274,14 @@ func TestObserve_CooldownDoesNotAdvanceIdleCounter(t *testing.T) {
 
 	// Trigger a scale-up to start cool-down.
 	ctrl.Observe(ObservedMetric{QueueDepth: 100, CurrentWorkers: 16})
-	require.NotZero(t, ctrl.cfg.Clock.Now().Sub(ctrl.lastScaleAt) == 0)
+	require.False(t, ctrl.lastScaleAt.IsZero(), "scale-up must have set lastScaleAt")
 
 	// 10 idle observations during cool-down → no counter advance.
 	for i := 0; i < 10; i++ {
 		clock.Advance(50 * time.Millisecond) // stays under 1s cool-down
 		ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: 20})
 	}
-	assert.Equal(t, 0, ctrl.IdleCycleCount(),
+	assert.Equal(t, 0, ctrl.idleCycleCount,
 		"idle counter should not advance during cool-down")
 }
 
@@ -306,7 +311,7 @@ func TestObserve_BelowUpThreshold(t *testing.T) {
 	// current=16, threshold = 16×4 = 64, depth=50 (below).
 	action := ctrl.Observe(ObservedMetric{QueueDepth: 50, CurrentWorkers: 16})
 	assert.Equal(t, ActionNoOp, action.Kind)
-	assert.Equal(t, 0, ctrl.IdleCycleCount(), "non-idle observation keeps counter at 0")
+	assert.Equal(t, 0, ctrl.idleCycleCount, "non-idle observation keeps counter at 0")
 }
 
 // TestObserve_ImplementsControllerInterface guards against accidental
@@ -336,4 +341,22 @@ func TestConfigError_Message(t *testing.T) {
 	err := errInvalidConfig("MinWorkers must be >= 0")
 	require.Error(t, err)
 	assert.Equal(t, "autoscale: MinWorkers must be >= 0", err.Error())
+}
+
+// BenchmarkObserve provides a baseline for AIMDController.Observe latency
+// so a future PI / PID controller swap (per ADR §3.1) can be measured
+// against this. Observe is called once per controller per cool-down (~1s
+// in production), so absolute speed is not a hot path concern — but the
+// benchmark catches accidental allocations and serves as a comparison
+// anchor.
+func BenchmarkObserve(b *testing.B) {
+	ctrl, err := NewAIMDController(validConfig(newFakeClock(time.Unix(0, 0))))
+	if err != nil {
+		b.Fatal(err)
+	}
+	metric := ObservedMetric{QueueDepth: 50, CurrentWorkers: 16}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ctrl.Observe(metric)
+	}
 }
