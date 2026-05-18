@@ -61,9 +61,12 @@ EOF
 
     # federation='all' を UPDATE してから app を restart して meta cache を
     # 再 load させる (mk-go fresh instance default 'none' は outbound deliver
-    # を suppress するため、bench の信頼性のため必須)。
+    # を suppress するため、bench の信頼性のため必須)。DB credentials は
+    # driver と同じ env 経由で扱い、compose の POSTGRES_* との drift を
+    # 1 箇所 (compose) に集約する。
     docker compose exec -T postgres \
-        psql -U misskey -d misskey -c "UPDATE meta SET federation='all'" >/dev/null
+        psql -U "${DB_USER:-misskey}" -d "${DB_NAME:-misskey}" \
+        -c "UPDATE meta SET federation='all'" >/dev/null
     docker compose restart app
     docker compose up -d --wait app
 

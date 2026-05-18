@@ -169,7 +169,13 @@ def redis_client_count() -> int:
 
 def queue_depth_total() -> int:
     """Sum of pending BullMQ lists across all mkq queues. drain == 0
-    confirms no in-flight jobs left in any queue."""
+    confirms no in-flight jobs left in any queue.
+
+    queue 名は internal/queue/queue.go の {QueueName, InboxQueueName,
+    ExportQueueName, PushQueueName, WebhookQueueName} と 同期する必要が
+    ある (Python から Go 定数を import 不可能なため hardcode 必要)。
+    queue 追加 / rename 時は本 list も同時に更新すること。
+    """
     rc = redis.Redis.from_url(f"redis://{REDIS_HOST}")
     try:
         total = 0
