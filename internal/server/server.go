@@ -370,8 +370,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.chartMgmt.Stop(ctx)
 	}
 	// queueServer.Shutdown 前に controller を停止 (Resize 呼びの停止 = pool に
-	// 余計な変更が走らない状態で queueServer の pool を畳める)。
-	s.autoscale.Stop()
+	// 余計な変更が走らない状態で queueServer の pool を畳める)。Shutdown ctx を
+	// 伝播することで autoscale の goroutine drain にも graceful deadline が効く。
+	s.autoscale.Stop(ctx)
 	if s.queueScheduler != nil {
 		s.queueScheduler.Shutdown()
 	}

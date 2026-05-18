@@ -124,19 +124,19 @@ func TestStartAutoScale_DisabledReturnsNil(t *testing.T) {
 	assert.Equal(t, int32(0), d.resizes.Load(), "no Resize call when auto-scale is off")
 }
 
-// TestStartAutoScale_AllQueuesHaveExplicitKnobsReturnsNil verifies that
-// when every queue has an explicit JobConcurrency knob set, no
-// controllers start (per ADR §3.6 priority: individual knob > controller).
-func TestStartAutoScale_AllQueuesHaveExplicitKnobsReturnsNil(t *testing.T) {
+// TestStartAutoScale_DeliverInboxKnobsOnly_OthersStillManaged verifies
+// that when deliver / inbox have explicit JobConcurrency knobs set,
+// they are excluded from controller management (per ADR §3.6 priority)
+// while export / push / webhook continue to be managed (those queues
+// have no per-queue knob in the current config schema, so they are
+// always managed when jobQueueAutoScale=true).
+//
+// 注: 現状の config schema では「全 queue を knob で覆う」は不可能なため、
+// "all knobs → nil runner" の経路は存在しない。将来 export/push/webhook
+// に per-queue knob を生やしたら本テストを延長 / 別 test 化する。
+func TestStartAutoScale_DeliverInboxKnobsOnly_OthersStillManaged(t *testing.T) {
 	dc := 16
 	ic := 8
-	// 個別 knob で deliver / inbox を覆って残 queue (export/push/webhook)
-	// が controller 管理対象になるが、それらに対しては個別 knob 無しで
-	// 自動的に管理される設計。本テストでは「個別 knob で全 queue を
-	// 覆う」が autoScaledQueues() 上は不可能 (5 queue で 2 個 knob のみ
-	// → 残 3 queue が controller 対象) なので、別観点で挙動を確認:
-	// "deliver と inbox の knob を立てると当該 2 queue は管理対象外、
-	// 残 3 queue は管理対象" を確認する。
 	cfg := &config.Config{
 		JobQueueAutoScale:     true,
 		DeliverJobConcurrency: &dc,
@@ -148,8 +148,8 @@ func TestStartAutoScale_AllQueuesHaveExplicitKnobsReturnsNil(t *testing.T) {
 
 	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
 	require.NoError(t, err)
-	require.NotNil(t, runner, "runner should start for unmanaged queues")
-	t.Cleanup(runner.Stop)
+	require.NotNil(t, runner, "runner should start for unmanaged queues (export/push/webhook)")
+	t.Cleanup(func() { runner.Stop(context.Background()) })
 
 	// export / push / webhook の 3 queue が controller 管理対象 → 初期
 	// Resize で minWorkers=4 にされる。deliver / inbox は touch されない。
@@ -217,7 +217,7 @@ func TestStartAutoScale_TickerScalesUpOnBacklog(t *testing.T) {
 	runner, err := startAutoScale(context.Background(), cfg, d, m)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
-	t.Cleanup(runner.Stop)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
 
 	// Initial Resize で全 queue が min=2 になっている。
 	deadline := time.After(2 * time.Second)
@@ -268,7 +268,7 @@ func TestStartAutoScale_GlobalCapBlocksScaleUp(t *testing.T) {
 	runner, err := startAutoScale(context.Background(), cfg, d, m)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
-	t.Cleanup(runner.Stop)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
 
 	// すべての queue を高 depth に → ticker が全 queue でスケールしたがる
 	for _, q := range []string{"deliver", "inbox", "export", "push", "webhook"} {
@@ -296,7 +296,7 @@ func TestAutoscaleRunner_Stop(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runner.Stop()
+		runner.Stop(context.Background())
 		close(done)
 	}()
 	select {
@@ -306,7 +306,32 @@ func TestAutoscaleRunner_Stop(t *testing.T) {
 	}
 
 	// 二度 Stop しても panic / hang しない
-	assert.NotPanics(t, runner.Stop)
+	assert.NotPanics(t, func() { runner.Stop(context.Background()) })
+}
+
+// TestAutoscaleRunner_Stop_RespectsDeadline verifies that Stop returns
+// when the supplied ctx expires, even if internal goroutines are slow
+// to exit. Uses a 1ns-deadline ctx to force the timeout path.
+func TestAutoscaleRunner_Stop_RespectsDeadline(t *testing.T) {
+	cfg := &config.Config{JobQueueAutoScale: true}
+	d := newScriptableDriver(nil)
+
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	start := time.Now()
+	runner.Stop(ctx)
+	elapsed := time.Since(start)
+	// 即座に return (= ctx.Done 経路) すること。goroutine join 待ち
+	// (= 1Hz ticker) を待たないので 100ms 以下。
+	assert.Less(t, elapsed, 100*time.Millisecond,
+		"Stop should return immediately on ctx deadline (elapsed=%v)", elapsed)
+
+	// Clean up the leaked goroutines so the test process exits cleanly.
+	runner.Stop(context.Background())
 }
 
 // TestStartAutoScale_NilRunnerStopIsNoop ensures (*autoscaleRunner)(nil).Stop()
@@ -314,7 +339,7 @@ func TestAutoscaleRunner_Stop(t *testing.T) {
 // JobQueueAutoScale=false (returned runner is nil).
 func TestStartAutoScale_NilRunnerStopIsNoop(t *testing.T) {
 	var r *autoscaleRunner
-	assert.NotPanics(t, r.Stop)
+	assert.NotPanics(t, func() { r.Stop(context.Background()) })
 }
 
 // TestStartAutoScale_InitialResizeFailureDoesNotPreventStart verifies
@@ -335,5 +360,5 @@ func TestStartAutoScale_InitialResizeFailureDoesNotPreventStart(t *testing.T) {
 	// and tolerated); only ErrResizeNotSupported triggers startup rejection.
 	require.NoError(t, err)
 	require.NotNil(t, runner)
-	t.Cleanup(runner.Stop)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
 }

@@ -10,10 +10,15 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/autoscale"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
 )
+
+// defaultMinWorkers is the per-queue worker lower bound when MinWorkers
+// is unset. Matches ADR §2 default.
+const defaultMinWorkers = 4
 
 // autoscaleRunner owns the per-queue AIMD controllers + ticker
 // goroutines wired by startAutoScale. Shutdown signals every ticker
@@ -63,9 +68,10 @@ func startAutoScale(
 		return nil, nil
 	}
 
-	queues := autoScaledQueues(cfg)
+	queues, skipped := autoScaledQueues(cfg)
 	if len(queues) == 0 {
-		slog.Info("server: autoscale enabled but every queue has an explicit concurrency knob, no controllers started")
+		slog.Info("server: autoscale enabled but every queue has an explicit concurrency knob, no controllers started",
+			"skipped", skipped)
 		return nil, nil
 	}
 
@@ -135,21 +141,41 @@ func startAutoScale(
 	}
 
 	slog.Info("server: autoscale started",
-		"queues", queues, "min", min, "max", maxW,
+		"managed", queues, "skipped", skipped,
+		"min", min, "max", maxW,
 		"cooldownSec", int(cooldown/time.Second),
 		"globalCap", maxWorkersGlobalDescription(cfg.MaxWorkersGlobal))
 	return runner, nil
 }
 
 // Stop cancels all ticker goroutines and waits for them to finish.
-// Safe to call multiple times. After Stop returns, no further Resize
-// calls originate from this runner.
-func (r *autoscaleRunner) Stop() {
+// Safe to call multiple times. After Stop returns (or ctx expires), no
+// further Resize calls originate from this runner.
+//
+// ctx serves as the graceful shutdown deadline propagated from
+// Server.Shutdown (#764). Ticker goroutines exit at most 1 ticker
+// interval after cancel + their current Resize completes (cancel +
+// goroutine join). Typical drain < 1 second; ctx allows the caller to
+// cap pathological cases without blocking Server.Shutdown indefinitely.
+//
+// When ctx expires before goroutines exit, leaked goroutines log Warn
+// but the function returns; the runtime cleanup is best-effort.
+func (r *autoscaleRunner) Stop(ctx context.Context) {
 	if r == nil {
 		return
 	}
 	r.cancel()
-	r.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("server: autoscale shutdown deadline exceeded; goroutines may still be running",
+			"err", ctx.Err())
+	}
 }
 
 // tick is the per-queue ticker loop. Each cycle:
@@ -231,6 +257,14 @@ func (r *autoscaleRunner) setWorkerCount(qname string, n int) {
 
 // globalSumWouldExceed returns true when committing `target` workers for
 // `qname` would push the sum across all auto-scaled queues over cap.
+//
+// 注 (best-effort TOCTOU): check と subsequent Resize の間に他 ticker
+// goroutine が独自 Resize を commit すると、実 cluster 合計は cap を
+// 一時的に超え得る。worst case overshoot = O(N_queues × per-queue
+// scale-up step) = 典型 5 queue × N/4 step。operator は cap を slack
+// 込みで設定すること (ADR §3.5 multi-pod アドバイスと同様)。real
+// "strict cap" を要求する場合は cluster-wide coordinator (将来 issue)
+// が必要。
 func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, cap int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -249,31 +283,26 @@ func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, cap int) bo
 // Per ADR §3.6 individual knobs take priority and exclude the queue
 // from controller management.
 //
-// 5 queue names match internal/queue/queue.go constants. Hard-coding
-// avoids an import cycle (server depends on queue/metrics already; we
-// could import queue too, but the constant set is small and ADR fixes
-// it).
-func autoScaledQueues(cfg *config.Config) []string {
-	const (
-		deliver = "deliver"
-		inbox   = "inbox"
-		export  = "export"
-		push    = "push"
-		webhook = "webhook"
-	)
-	out := []string{}
+// Queue names are sourced from internal/queue constants so any rename /
+// addition in queue.go propagates here without silent drift. Skipped
+// queues (currently: any queue with an explicit per-queue knob) are
+// returned via the second slice for log visibility.
+func autoScaledQueues(cfg *config.Config) (managed, skipped []string) {
 	if cfg.DeliverJobConcurrency == nil || *cfg.DeliverJobConcurrency == 0 {
-		out = append(out, deliver)
+		managed = append(managed, queue.QueueName)
+	} else {
+		skipped = append(skipped, queue.QueueName)
 	}
 	if cfg.InboxJobConcurrency == nil || *cfg.InboxJobConcurrency == 0 {
-		out = append(out, inbox)
+		managed = append(managed, queue.InboxQueueName)
+	} else {
+		skipped = append(skipped, queue.InboxQueueName)
 	}
 	// export / push / webhook には個別 knob が無いため常に管理対象。
-	out = append(out, export, push, webhook)
-	return out
+	// 将来 per-queue knob を生やすときはここに分岐を追加する。
+	managed = append(managed, queue.ExportQueueName, queue.PushQueueName, queue.WebhookQueueName)
+	return managed, skipped
 }
-
-const defaultMinWorkers = 4
 
 // readQueueDepth returns the Inspector-reported Pending count for the
 // queue, or 0 on error (= treat unobservable depth as idle so the
