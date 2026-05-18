@@ -93,6 +93,11 @@ cp .config/docker.yml.example .config/docker.yml
 | `relationshipJobPerSec` | int | - | mk-go では**現状 no-op** (上記同様) |
 | `deliverJobMaxAttempts` | int | driver 既定 | AP配信の**総試行回数** (初回 + retry) のdefault。BullMQ `attempts` と同じ意味で、TS Misskey YAML 互換。EnqueueDeliver で `WithMaxRetry` 未指定時にだけ適用される (#495)。例: `deliverJobMaxAttempts: 8` で 1 回失敗するごとに retry されて最大 8 回試行 |
 | `inboxJobMaxAttempts` | int | driver 既定 | Inbox処理の**総試行回数** (#534)。BullMQ `attempts` と同じ意味で、TS Misskey YAML 互換。EnqueueInbox で `WithMaxRetry` 未指定時にだけ適用される |
+| `jobQueueAutoScale` | bool | `false` | AIMD auto-scale controller (#1120) を opt-in 有効化。`true` で個別 `<queue>JobConcurrency` 未設定の queue が `[minWorkers, maxWorkers]` 範囲で動的に伸縮する。詳細は `docs/design/auto-scale-job-workers.md`。`mkq` driver のみ対応 (asynq では startup error)。 |
+| `maxWorkers` | int | `runtime.NumCPU() × 16` | auto-scale の **per-queue 上限**。`jobQueueAutoScale: true` のときだけ意味を持つ。例: 8-core で default 128 per queue。 |
+| `minWorkers` | int | `4` | auto-scale の **per-queue 下限**。idle 状態でも各 queue で常時起動する worker 数。 |
+| `maxWorkersGlobal` | int | (unset) | 全 auto-scale 対象 queue 合計の worker 数 hard cap。**未設定は無制限** (= 各 queue が独立に maxWorkers まで膨張)。multi-pod 運用で DB pool / Redis pool を共有する場合のみ明示設定 (例: 3 pod、DB pool=240 → per-pod `maxWorkersGlobal: 64`)。 |
+| `autoScaleCooldownSeconds` | int | `1` | scale event 発火後の連続発火抑止間隔。通常は default 1 秒で OK。 |
 
 > **driver 間の差分**:
 > - `asynq` driver は worker pool が共有なので `deliverJobConcurrency` は **総 concurrency** として扱われる。queue 間の priority weight は全 queue 静的 1 で固定 (deliver / inbox / push / export / webhook / maintenance すべて equal-weight)。

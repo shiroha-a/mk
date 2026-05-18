@@ -843,6 +843,39 @@ func TestLoad_EnableMetrics_DefaultFalse(t *testing.T) {
 	assert.False(t, cfg.EnableMetrics)
 }
 
+func TestLoad_JobQueueAutoScale(t *testing.T) {
+	yaml := testYAML + `
+jobQueueAutoScale: true
+maxWorkers: 256
+minWorkers: 8
+maxWorkersGlobal: 512
+autoScaleCooldownSeconds: 2
+`
+	path := writeTestConfig(t, yaml)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.JobQueueAutoScale)
+	require.NotNil(t, cfg.MaxWorkers)
+	assert.Equal(t, 256, *cfg.MaxWorkers)
+	require.NotNil(t, cfg.MinWorkers)
+	assert.Equal(t, 8, *cfg.MinWorkers)
+	require.NotNil(t, cfg.MaxWorkersGlobal)
+	assert.Equal(t, 512, *cfg.MaxWorkersGlobal)
+	require.NotNil(t, cfg.AutoScaleCooldownSeconds)
+	assert.Equal(t, 2, *cfg.AutoScaleCooldownSeconds)
+}
+
+func TestLoad_JobQueueAutoScale_DefaultsAreNil(t *testing.T) {
+	path := writeTestConfig(t, testYAML)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, cfg.JobQueueAutoScale)
+	assert.Nil(t, cfg.MaxWorkers)
+	assert.Nil(t, cfg.MinWorkers)
+	assert.Nil(t, cfg.MaxWorkersGlobal)
+	assert.Nil(t, cfg.AutoScaleCooldownSeconds)
+}
+
 // TestRedisOptions_KeyPrefix は #362 drop-in 互換の回帰テスト。
 // TS 本家の ioredis keyPrefix (`<host>:`) と同じ形式の prefix を返すことを確認する。
 func TestRedisOptions_KeyPrefix(t *testing.T) {

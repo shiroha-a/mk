@@ -158,6 +158,29 @@ type Source struct {
 	DeliverJobMaxAttempts      *int `mapstructure:"deliverJobMaxAttempts"`
 	InboxJobMaxAttempts        *int `mapstructure:"inboxJobMaxAttempts"`
 
+	// JobQueueAutoScale toggles the AIMD auto-scale controller (#1120).
+	// Default false. When true, queues without an explicit
+	// `<queue>JobConcurrency` are managed by the controller within
+	// [MinWorkers, MaxWorkers]. See docs/design/auto-scale-job-workers.md.
+	JobQueueAutoScale bool `mapstructure:"jobQueueAutoScale"`
+
+	// MaxWorkers is the per-queue worker upper bound used by the
+	// auto-scale controller. Default: runtime.NumCPU() * 16.
+	MaxWorkers *int `mapstructure:"maxWorkers"`
+
+	// MinWorkers is the per-queue worker lower bound. Default: 4.
+	MinWorkers *int `mapstructure:"minWorkers"`
+
+	// MaxWorkersGlobal, when set, caps the sum of workers across all
+	// auto-scaled queues for this process. Default: unset (no cap; each
+	// queue scales up to MaxWorkers independently). Use only in
+	// multi-pod deployments where per-process budget matters.
+	MaxWorkersGlobal *int `mapstructure:"maxWorkersGlobal"`
+
+	// AutoScaleCooldownSeconds is the minimum interval between scale
+	// events per queue. Default: 1 second (per ADR §3.4).
+	AutoScaleCooldownSeconds *int `mapstructure:"autoScaleCooldownSeconds"`
+
 	// JobQueueDriver selects the worker / inspector implementation
 	// behind internal/queue. "asynq" (default) uses
 	// hibiken/asynq; "mkq" uses the BullMQ-compatible
@@ -295,6 +318,13 @@ type Config struct {
 	DeliverJobMaxAttempts      *int
 	InboxJobMaxAttempts        *int
 
+	// Auto-scale knobs (#1120 tracker). See docs/design/auto-scale-job-workers.md.
+	JobQueueAutoScale        bool
+	MaxWorkers               *int
+	MinWorkers               *int
+	MaxWorkersGlobal         *int
+	AutoScaleCooldownSeconds *int
+
 	// JobQueueDriver is one of "asynq" (default) or "mkq".
 	JobQueueDriver string
 
@@ -407,6 +437,11 @@ func bindEnvKeys(v *viper.Viper) {
 		"sentryForBackend.options.dsn",
 		"sentryForBackend.options.environment",
 		"jobQueueDriver",
+		"jobQueueAutoScale",
+		"maxWorkers",
+		"minWorkers",
+		"maxWorkersGlobal",
+		"autoScaleCooldownSeconds",
 	}
 	for _, k := range keys {
 		_ = v.BindEnv(k)
@@ -524,6 +559,11 @@ func resolve(src *Source) (*Config, error) {
 		RelationshipJobPerSec:      src.RelationshipJobPerSec,
 		DeliverJobMaxAttempts:      src.DeliverJobMaxAttempts,
 		InboxJobMaxAttempts:        src.InboxJobMaxAttempts,
+		JobQueueAutoScale:          src.JobQueueAutoScale,
+		MaxWorkers:                 src.MaxWorkers,
+		MinWorkers:                 src.MinWorkers,
+		MaxWorkersGlobal:           src.MaxWorkersGlobal,
+		AutoScaleCooldownSeconds:   src.AutoScaleCooldownSeconds,
 		JobQueueDriver:             jobQueueDriver,
 
 		MediaProxy:                   mediaProxy,

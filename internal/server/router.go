@@ -776,7 +776,7 @@ func (s *Server) setupRoutes() {
 	// 認証は付かない (Prometheus 慣例) ので、operator は nginx / LB ACL で
 	// access 制限する想定。詳細は docs/design/auto-scale-job-workers.md §6.1。
 	if s.config.EnableMetrics {
-		if err := wireMetricsEndpoint(s.echo, s.queueDriver); err != nil {
+		if err := wireMetricsEndpoint(s.echo, s.queueMetrics); err != nil {
 			slog.Error("server: failed to register queue metrics", "err", err)
 		}
 	}

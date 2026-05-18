@@ -107,7 +107,7 @@ func TestWireMetricsEndpoint_RegistersPullAndPushSeries(t *testing.T) {
 	)
 
 	e := echo.New()
-	require.NoError(t, wireMetricsEndpoint(e, d))
+	require.NoError(t, wireMetricsEndpoint(e, newQueueMetrics(d)))
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -145,7 +145,7 @@ func TestWireMetricsEndpoint_OpenMetricsFormat(t *testing.T) {
 	d := newFakeMetricsDriver(map[string]int{}, map[string]int{})
 
 	e := echo.New()
-	require.NoError(t, wireMetricsEndpoint(e, d))
+	require.NoError(t, wireMetricsEndpoint(e, newQueueMetrics(d)))
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("Accept", "application/openmetrics-text; version=1.0.0; charset=utf-8")
@@ -171,7 +171,7 @@ func TestBuildMetricsHandler_ReportsScrapeErrorOnInspectorFailure(t *testing.T) 
 	d := newFakeMetricsDriver(map[string]int{"deliver": 8}, map[string]int{})
 	d.pendErr = map[string]error{"deliver": errors.New("redis timeout")}
 
-	handler, err := buildMetricsHandler(d)
+	handler, err := buildMetricsHandler(newQueueMetrics(d))
 	require.NoError(t, err)
 
 	// First scrape: gauge degrades to 0, counter increments to 1.

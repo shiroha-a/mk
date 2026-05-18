@@ -18,6 +18,7 @@ import (
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
+	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
 	"github.com/shiroha-a/mk/internal/repository"
 	mksentry "github.com/shiroha-a/mk/internal/sentry"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -40,7 +41,14 @@ type Server struct {
 	queueServer    *queue.Server
 	queueScheduler *queue.Scheduler
 	queueInspector *queue.Inspector
-	chartMgmt      *chart.ManagementService
+	// queueMetrics は /metrics endpoint と auto-scale controller の双方が
+	// 共有する Prometheus metric bundle (#1122 で declare、#1125 で
+	// controller が ScaleEventsTotal を increment)。EnableMetrics=false でも
+	// auto-scale が活きていれば counter は内部 increment するが、register
+	// されないので外部公開はされない。
+	queueMetrics *queuemetrics.Metrics
+	autoscale    *autoscaleRunner
+	chartMgmt    *chart.ManagementService
 	// deliverSvc は federation deliver service への参照。本番では asynq
 	// 経由で deliver を enqueue するが、test (#780) で queue を bypass する
 	// ための SetSyncDeliverHookForTest を呼べるよう参照を保持する。
@@ -224,6 +232,7 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		queueServer:    queueServer,
 		queueScheduler: queueScheduler,
 		queueInspector: queueInspector,
+		queueMetrics:   newQueueMetrics(queueDriver),
 	}
 
 	s.setupRoutes()
@@ -250,6 +259,14 @@ func (s *Server) StartBackgroundForTest() error {
 	if err := s.queueServer.Start(); err != nil {
 		return fmt.Errorf("start queue worker: %w", err)
 	}
+	// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
+	// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
+	// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
+	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics)
+	if err != nil {
+		return fmt.Errorf("start autoscale: %w", err)
+	}
+	s.autoscale = runner
 	if s.queueScheduler != nil {
 		// Server.Start と同じく Register エラーは観測可能にする (test 出力の
 		// noise にはならない、Register 失敗は scheduler driver 不具合の signal)。
@@ -291,6 +308,14 @@ func (s *Server) Start() error {
 	if err := s.queueServer.Start(); err != nil {
 		return fmt.Errorf("start queue worker: %w", err)
 	}
+	// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
+	// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
+	// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
+	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics)
+	if err != nil {
+		return fmt.Errorf("start autoscale: %w", err)
+	}
+	s.autoscale = runner
 	if s.queueScheduler != nil {
 		if err := s.queueScheduler.RegisterChartJobs(); err != nil {
 			slog.Warn("chart scheduler register failed", "err", err)
@@ -344,6 +369,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.chartMgmt != nil {
 		s.chartMgmt.Stop(ctx)
 	}
+	// queueServer.Shutdown 前に controller を停止 (Resize 呼びの停止 = pool に
+	// 余計な変更が走らない状態で queueServer の pool を畳める)。
+	s.autoscale.Stop()
 	if s.queueScheduler != nil {
 		s.queueScheduler.Shutdown()
 	}
