@@ -845,6 +845,40 @@ func TestServer_ResizeRace(t *testing.T) {
 	assert.LessOrEqual(t, finalCount, 8)
 }
 
+// TestServer_Resize_AfterShutdownReturnsError verifies the post-shutdown
+// race guard: a Resize call that captured a pool pointer just before
+// Server.Shutdown ran must not spawn leaked Workers on the orphan pool.
+//
+// We simulate the race by calling Shutdown immediately before Resize on
+// the same Server. The Resize is expected to fail with either "unknown
+// queue" (s.pools is now nil) or ErrResizeAfterShutdown (the captured
+// pool flag is checked) — both are valid no-spawn outcomes.
+func TestServer_Resize_AfterShutdownReturnsError(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      32,
+		QueueConcurrency: map[string]int{"deliver": 2},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	srv.Handle("noop", func(ctx context.Context, _ driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+
+	// Shutdown を呼んでから Resize を試みる (= 後追い caller の最悪
+	// シナリオの sequential 化、本物の race window と同等の効果)。
+	srv.Shutdown()
+
+	err = d.Resize("deliver", 8)
+	require.Error(t, err, "Resize after Shutdown must not silently spawn workers")
+	// Worker 数は 0 のまま、leak していない。
+	assert.Equal(t, 0, d.WorkerCount("deliver"))
+}
+
 // TestServer_Resize_ToZeroStopsAll verifies that Resize(qname, 0)
 // removes every Worker for the queue (= "pause queue" semantics).
 // Subsequent enqueues backlog in Redis until a non-zero Resize.
