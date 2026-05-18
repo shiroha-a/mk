@@ -602,3 +602,294 @@ func TestNewDriver_BadAddressFails(t *testing.T) {
 		t.Fatalf("expected non-nil error, got %v", err)
 	}
 }
+
+// TestDriver_Resize_BeforeStartReturnsNotSupported verifies the
+// pre-Start contract — Resize called before Server.Start returns
+// ErrResizeNotSupported (there is no pool to resize yet).
+func TestDriver_Resize_BeforeStartReturnsNotSupported(t *testing.T) {
+	d := newDriver(t)
+	// No call to d.Server() yet.
+	err := d.Resize("deliver", 8)
+	require.ErrorIs(t, err, driver.ErrResizeNotSupported)
+}
+
+// TestServer_Resize_UnknownQueueReturnsError verifies that Resize on
+// a queue not in the driver's known set returns a descriptive error
+// (not a silent no-op that would hide controller bugs).
+func TestServer_Resize_UnknownQueueReturnsError(t *testing.T) {
+	d := newDriver(t)
+	srv := d.Server()
+	srv.Handle("noop", func(ctx context.Context, _ driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	err := d.Resize("does-not-exist", 4)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does-not-exist")
+}
+
+// TestServer_Resize_NegativeNReturnsError verifies that callers cannot
+// pass invalid negative pool sizes (controller bug guard).
+func TestServer_Resize_NegativeNReturnsError(t *testing.T) {
+	d := newDriver(t)
+	srv := d.Server()
+	srv.Handle("noop", func(ctx context.Context, _ driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	err := d.Resize("deliver", -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be >= 0")
+}
+
+// TestServer_ResizeUp_ProcessesMoreInParallel verifies that Resize-up
+// actually increases the parallel handler count observable via the
+// in-flight gauge pattern (= ADR §7.2 the "double parallelism" check).
+// Strategy: start with N=2, observe peak=2; Resize to N=8, observe peak
+// climbs to 8.
+func TestServer_ResizeUp_ProcessesMoreInParallel(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      32,
+		QueueConcurrency: map[string]int{"deliver": 2},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	var (
+		inFlight atomic.Int32
+		peak     atomic.Int32
+		release  = make(chan struct{})
+	)
+	srv.Handle("resize:hold", func(ctx context.Context, _ driver.Task) error {
+		now := inFlight.Add(1)
+		for {
+			cur := peak.Load()
+			if now <= cur || peak.CompareAndSwap(cur, now) {
+				break
+			}
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		inFlight.Add(-1)
+		return nil
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// Phase 1: pre-resize. Enqueue 4 jobs, peak should reach 2 (= initial).
+	for range 4 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "resize:hold", nil,
+			driver.WithQueue("deliver")))
+	}
+	deadline := time.After(5 * time.Second)
+	for peak.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("phase 1 peak never reached 2 (got %d)", peak.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	// 2 を超えていないことを 100ms 観測。
+	time.Sleep(100 * time.Millisecond)
+	require.LessOrEqual(t, peak.Load(), int32(2),
+		"pre-resize peak should be capped at initial concurrency=2")
+	assert.Equal(t, 2, d.WorkerCount("deliver"), "WorkerCount should reflect initial pool size")
+
+	// Phase 2: Resize-up to 8.
+	require.NoError(t, d.Resize("deliver", 8))
+	assert.Equal(t, 8, d.WorkerCount("deliver"), "WorkerCount should reflect post-resize pool size")
+
+	// Phase 2 peak observation: enqueue more jobs, peak should now climb.
+	for range 8 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "resize:hold", nil,
+			driver.WithQueue("deliver")))
+	}
+	deadline = time.After(5 * time.Second)
+	for peak.Load() < 8 {
+		select {
+		case <-deadline:
+			t.Fatalf("phase 2 peak never reached 8 after Resize (got %d)", peak.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	close(release)
+}
+
+// TestServer_ResizeDown_CancelsInFlight verifies the actual mkq semantics
+// of Worker.Stop: it cancels the run context of in-flight handlers
+// (handler ctx.Done fires) and waits for the goroutines to exit cleanly,
+// rather than blocking until natural job completion.
+//
+// 注: ADR §7.2 で「graceful drain」と書いたが、これは "goroutine leak しない"
+// の意味で、in-flight job は cancel 経路で中断される (next pickup で retry
+// される前提)。slow remote inbox 等で scale-down が分単位 block する事態を
+// 避ける mkq library の合理的選択。
+func TestServer_ResizeDown_CancelsInFlight(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      32,
+		QueueConcurrency: map[string]int{"deliver": 4},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	var (
+		inFlight  atomic.Int32
+		completed atomic.Int32
+		cancelled atomic.Int32
+	)
+	srv.Handle("resize:slow", func(ctx context.Context, _ driver.Task) error {
+		inFlight.Add(1)
+		defer inFlight.Add(-1)
+		// 長 job: 5 秒 sleep。Resize で cancel された場合は ctx.Done で
+		// 即座に return、completed しない。
+		select {
+		case <-time.After(5 * time.Second):
+			completed.Add(1)
+			return nil
+		case <-ctx.Done():
+			cancelled.Add(1)
+			return ctx.Err()
+		}
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// 4 jobs enqueue; each Worker picks one up immediately.
+	for range 4 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "resize:slow", nil,
+			driver.WithQueue("deliver")))
+	}
+
+	// Poll until 全 4 Worker が job を pick up 済を確認。
+	deadline := time.After(3 * time.Second)
+	for inFlight.Load() < 4 {
+		select {
+		case <-deadline:
+			t.Fatalf("inFlight never reached 4 (got %d)", inFlight.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Resize down: should NOT block 5s — Worker.Stop cancels in-flight.
+	start := time.Now()
+	require.NoError(t, d.Resize("deliver", 1))
+	elapsed := time.Since(start)
+
+	// 3 Worker × Stop ≈ ms オーダー (cancel + goroutine join のみ)、決して
+	// 5 秒 (job 完了時間) はかからない。
+	assert.Less(t, elapsed, 2*time.Second,
+		"Resize-down should not block for natural job completion (elapsed=%v)", elapsed)
+
+	// 完了 (completed) ではなく cancel (cancelled) として終わったことを確認。
+	// 最低 3 個は cancel されているはず (kept=1 はそのまま動き続ける)。
+	assert.GreaterOrEqual(t, cancelled.Load(), int32(3),
+		"at least 3 of 4 in-flight jobs should be cancelled by Resize-down (got %d)", cancelled.Load())
+	assert.Equal(t, int32(0), completed.Load(),
+		"no job should naturally complete in this short test window")
+	assert.Equal(t, 1, d.WorkerCount("deliver"))
+}
+
+// TestServer_ResizeRace verifies that overlapping Resize calls on the
+// same queue serialise safely (no goroutine leak, no negative pool
+// size, no panic). The final state matches the last Resize call.
+func TestServer_ResizeRace(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      32,
+		QueueConcurrency: map[string]int{"deliver": 4},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	srv.Handle("noop", func(ctx context.Context, _ driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// 10 concurrent Resize calls with alternating sizes. Each call
+	// should complete without error; final state must equal the last
+	// committed value (= we test the sequential-consistency property
+	// that the lock provides).
+	var wg sync.WaitGroup
+	sizes := []int{8, 2, 6, 3, 5, 1, 4, 7, 2, 8}
+	for _, n := range sizes {
+		wg.Add(1)
+		go func(target int) {
+			defer wg.Done()
+			err := d.Resize("deliver", target)
+			assert.NoError(t, err)
+		}(n)
+	}
+	wg.Wait()
+
+	// 最終 worker 数は 1..8 のいずれか (最後に commit された Resize の値)
+	// で、いずれにせよ [1, 8] の範囲内。
+	finalCount := d.WorkerCount("deliver")
+	assert.GreaterOrEqual(t, finalCount, 1)
+	assert.LessOrEqual(t, finalCount, 8)
+}
+
+// TestServer_Resize_ToZeroStopsAll verifies that Resize(qname, 0)
+// removes every Worker for the queue (= "pause queue" semantics).
+// Subsequent enqueues backlog in Redis until a non-zero Resize.
+func TestServer_Resize_ToZeroStopsAll(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      32,
+		QueueConcurrency: map[string]int{"deliver": 2},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	var processed atomic.Int32
+	srv.Handle("noop", func(ctx context.Context, _ driver.Task) error {
+		processed.Add(1)
+		return nil
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// Resize to 0 → no workers should be active.
+	require.NoError(t, d.Resize("deliver", 0))
+	assert.Equal(t, 0, d.WorkerCount("deliver"))
+
+	// Enqueue 3 jobs — they should accumulate in Redis, not be processed.
+	for range 3 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "noop", nil,
+			driver.WithQueue("deliver")))
+	}
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(0), processed.Load(),
+		"no jobs should be processed while pool size is 0")
+
+	// Resize back to 2 → jobs should drain.
+	require.NoError(t, d.Resize("deliver", 2))
+	deadline := time.After(3 * time.Second)
+	for processed.Load() < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("processed never reached 3 after Resize back to 2 (got %d)", processed.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

@@ -36,6 +36,13 @@ func (f *fakeDriver) WorkerCount(qname string) int {
 	}
 	return 0
 }
+func (f *fakeDriver) Resize(qname string, n int) error {
+	if f.workers == nil {
+		f.workers = map[string]int{}
+	}
+	f.workers[qname] = n
+	return nil
+}
 
 type fakeInspector struct {
 	pendingByQueue map[string]int

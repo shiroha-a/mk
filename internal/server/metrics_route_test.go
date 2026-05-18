@@ -46,6 +46,13 @@ func (f *fakeMetricsDriver) WorkerCount(qname string) int {
 	}
 	return 0
 }
+func (f *fakeMetricsDriver) Resize(qname string, n int) error {
+	if f.workers == nil {
+		f.workers = map[string]int{}
+	}
+	f.workers[qname] = n
+	return nil
+}
 
 type fakeMetricsInspector struct {
 	parent *fakeMetricsDriver

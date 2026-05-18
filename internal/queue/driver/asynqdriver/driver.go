@@ -75,6 +75,16 @@ func (d *Driver) Scheduler() driver.Scheduler {
 	return d.scheduler
 }
 
+// Resize is unimplemented for asynq backend: asynq's Concurrency is
+// fixed at Server construction time and the library exposes no API to
+// change it at runtime. Per ADR §5.2 the auto-scale controller treats
+// asynq as out-of-scope; this stub returns driver.ErrResizeNotSupported
+// so callers can detect and degrade gracefully (= keep observing
+// metrics, but skip the resize call).
+func (d *Driver) Resize(qname string, n int) error {
+	return driver.ErrResizeNotSupported
+}
+
 // WorkerCount returns the configured Concurrency for the asynq pool.
 // asynq shares a single worker pool across all queues, so the same value
 // is reported for every qname (the per-queue priority is handled by

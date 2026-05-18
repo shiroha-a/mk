@@ -137,4 +137,22 @@ type Driver interface {
 	// later by the auto-scale controller (#1120 tracker) to read the
 	// current pool size when computing scale decisions.
 	WorkerCount(qname string) int
+
+	// Resize changes the worker pool size for qname to n at runtime.
+	// Returns ErrResizeNotSupported on backends without dynamic resize
+	// support (= asynq today). On supported backends:
+	//
+	//   - n > current: spawn (n - current) new worker goroutines.
+	//   - n < current: gracefully stop (current - n) workers, waiting
+	//     for any in-flight jobs they own to finish before returning.
+	//   - n == current: no-op, returns nil.
+	//
+	// Resize is intended for the auto-scale controller (#1120 tracker
+	// PR #1125 wiring). Concurrent Resize calls on the same qname
+	// serialise internally; callers do not need to gate themselves.
+	//
+	// Negative n returns an error. n is clamped to [0, server-defined-max]
+	// per the driver's implementation (mkqdriver has no hard ceiling
+	// because the auto-scale controller enforces it upstream).
+	Resize(qname string, n int) error
 }

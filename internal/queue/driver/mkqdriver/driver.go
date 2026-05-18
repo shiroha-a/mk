@@ -235,32 +235,40 @@ func (d *Driver) Scheduler() driver.Scheduler {
 	return d.dSched
 }
 
-// WorkerCount returns the per-queue worker pool size. Before Server() is
-// called the Server has not been constructed and we return 0 (matches the
-// driver.Driver contract for unstarted drivers). After construction,
-// per-queue overrides (`QueueConcurrency`) take precedence over the
-// default `concurrency` derived from `cfg.Concurrency / len(queues)`.
+// Resize delegates to the Server's WorkerPool layer to grow / shrink
+// the worker count for qname at runtime. Before Server() has been
+// called (= no pool yet) it returns ErrResizeNotSupported because
+// there is nothing to resize; callers should wait for Server.Start.
 //
-// Auto-scale (#1120 tracker) will mutate the underlying pool size at
-// runtime via a future Resize API (#1124); until then this returns the
-// static config value.
+// Concrete implementation lives in server.go alongside the pool itself
+// (server.go's locking model is the source of truth for pool state).
+func (d *Driver) Resize(qname string, n int) error {
+	d.mu.Lock()
+	srv := d.dServer
+	d.mu.Unlock()
+	if srv == nil {
+		return driver.ErrResizeNotSupported
+	}
+	return srv.Resize(qname, n)
+}
+
+// WorkerCount returns the current per-queue worker pool size. Reads
+// the live pool state via Server.workerCount so it correctly reflects
+// runtime Resize operations (#1124). Before Server() has been called
+// or before Server.Start completes, the underlying pool map is nil
+// and we return 0.
 //
-// 注 (#1124 配線時の synchronization 課題): 現状 d.dServer.perQueueConcurrent /
-// d.dServer.concurrency は起動後 immutable で、Driver の d.mu だけで安全に読める。
-// Resize 配線後はこれらの field を runtime に変更するため、(a) Server 側に独自
-// mutex を入れて WorkerCount が必ず Server 経由で読む形に変更する、もしくは
-// (b) Server.workerCount(qname) メソッドを生やして本関数からは delegate する、
-// のどちらかが必要。現状のままだと torn read / stale read リスクあり。
+// Lock ordering: d.mu (this function) → s.mu (workerCount) → pool.mu
+// (workerCount inner). All acquisitions are short and the nested order
+// is consistent across Resize / WorkerCount, so no deadlock risk.
 func (d *Driver) WorkerCount(qname string) int {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.dServer == nil {
+	srv := d.dServer
+	d.mu.Unlock()
+	if srv == nil {
 		return 0
 	}
-	if v, ok := d.dServer.perQueueConcurrent[qname]; ok && v > 0 {
-		return v
-	}
-	return d.dServer.concurrency
+	return srv.workerCount(qname)
 }
 
 // Close stops the worker (if started) and releases the underlying
