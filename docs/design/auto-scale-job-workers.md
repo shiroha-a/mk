@@ -115,7 +115,7 @@ global controller (driver 1 つで全 queue 統合) ではなく、**queue ご�
 
 各 queue の controller は `maxWorkers` (per-queue 上限、§2 で定義) までスケールする。`maxWorkersGlobal` (optional) が設定されている場合、全 queue worker 合計がこの値を超えるスケール要求は controller 側で reject する (= maxWorkersGlobal 達した時点でそれ以上スケールできない)。
 
-`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= deliver-heavy ワークロードで deliver が単独で 128 worker まで使える、他は idle で min=4)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
+`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= 5 queue × `maxWorkers=128` = 640 worker まで膨張可能。実際は spike が deliver に集中するため deliver 単独で 128 まで scale up、他 queue は概ね `minWorkers=4` 付近の floor で待機)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
 
 ### 3.3 scale unit: AI `+max(1, N×0.25)` / MD `N×0.5`
 
@@ -148,7 +148,11 @@ scale event 発火後の **連続発火抑止 interval は 1 秒** (scale-up / s
 
 multi-pod 運用への現実的アドバイス:
 - 「pod 数 × per-pod `maxWorkersGlobal` ≦ DB pool size × 0.8」を operator が確認
-- 例: 3 pod、DB pool=100 → per-pod `maxWorkersGlobal=24` を推奨 (各 queue は更に `maxWorkers` で分割される)
+- `maxWorkersGlobal` 設定時は **minWorkers floor を引いた残りが scaling headroom** になる点に注意:
+  - 1 pod あたり常時 `minWorkers × len(autoScaled queues)` worker が起動 (e.g., 5 queue × min=4 = **20 worker は idle 時でも常時占有**)
+  - `maxWorkersGlobal = 24` だと headroom = `24 - 20 = 4` worker しか scaling に使えない → deliver spike 時にほぼスケールできない
+- **現実的な例**: 3 pod、DB pool=240 → per-pod `maxWorkersGlobal=64` (合計 192 ≦ 192 = DB pool × 0.8、各 pod の scaling headroom = `64 - 20 = 44` worker)
+- DB pool が小さい (< 100) 環境では auto-scale の恩恵が薄いため、固定 `deliverJobConcurrency` の運用が現実的
 
 ### 3.6 既存 knob との優先順位
 
@@ -164,6 +168,12 @@ multi-pod 運用への現実的アドバイス:
 - `maxWorkersGlobal: G` (optional) → 全 queue worker 合計の hard cap (§3.2)
 
 config struct での「未設定」表現は **`*int` ポインタ型 + `nil` = 未設定** で判定する (mk-go 既存 pattern `internal/config/config.go` の `DeliverJobConcurrency *int` 等と同じ)。`0` を「無制限」or「禁止」の sentinel に再利用しない (operator が `maxWorkersGlobal: 0` を書いた意図が判別可能になるよう)。
+
+**startup validation** (#1125 で実装、operator の誤設定を起動時に検出):
+
+- `maxWorkersGlobal` 設定時、`minWorkers × len(autoScaledQueues) ≤ maxWorkersGlobal` を満たさない場合は起動失敗 (= floor だけで cap を超える設定は無意味)
+- `maxWorkers < minWorkers` の場合は起動失敗
+- 違反時のエラーメッセージで `maxWorkers` / `minWorkers` / `maxWorkersGlobal` / auto-scaled queue 数を明示
 
 `len(controllers) == 0` (全 queue に個別 knob 指定された) のケースでは controller goroutine を一切起動しない (= 完全に従来挙動と同じ)。
 
@@ -295,7 +305,10 @@ mkqdriver.Server
 - **Pro**: mkq library 変更不要、upstream とすぐ整合
 - **Pro**: scale-down の granularity が 1 worker 単位、stop も Worker 単位で graceful
 - **Con**: N=128 のとき mkq.Worker が 128 個動く = WithConcurrency(128) の 1 Worker より overhead 微増 (内部 dispatch loop が 128 本動く)
-- **Con**: overhead 評価は #1124 の integration test で測定、許容できない場合は mkq library に Resize API を追加する PR を別途検討
+- **Con (定量見積もり)**: 1 Worker あたり ~2 goroutine (dispatch + heartbeat) + 1 Redis 接続。N=128 で:
+  - Memory: ~256 goroutine × 8KB initial stack ≒ **2MB 追加** (WithConcurrency(128) 1 Worker 比、~1MB 増)
+  - Redis 接続: 128 本 (どちらの方式でも同じ、go-redis pool 上限要調整)
+  - 詳細 overhead は #1124 の integration test で測定、許容できない場合は mkq library に Resize API を追加する PR を別途検討
 
 ### 5.2 asynqdriver
 
