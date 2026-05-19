@@ -182,6 +182,10 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 // Pages handles POST /api/users/pages.
 //
 // frontend Paginator (cursor mode) は untilId / sinceId を forward する (#493)。
+// upstream PageEntityService.pack 同様 `user` (UserLite) を含む full Page entity
+// shape で返す (#1134)。旧 inline map 6 field では frontend MkPagePreview の
+// `page.user.username` template が落ちて list が空になる drop-in regression
+// を起こしていた。
 func (h *Handler) Pages(c echo.Context) error {
 	var req struct {
 		UserID  string `json:"userId"`
@@ -209,16 +213,19 @@ func (h *Handler) Pages(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// owner は req.UserID で全 row 同一なので 1 度だけ fetch して全 row に attach。
+	// ShowByID 失敗時は empty list を返す (= upstream は user lookup 失敗時に
+	// 該当 row を skip するため、最終結果は同等)。
+	owner, oerr := h.userService.ShowByID(req.UserID)
+	if oerr != nil || owner == nil || owner.User == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, map[string]any{
-			"id":        p.ID,
-			"updatedAt": p.UpdatedAt,
-			"userId":    p.UserID,
-			"title":     p.Title,
-			"name":      p.Name,
-			"summary":   p.Summary,
-		})
+		out = append(out, entity.PackPageWithContext(p, entity.PackPageContext{
+			IDGen: h.idGen,
+			Owner: owner.User,
+		}))
 	}
 	return c.JSON(http.StatusOK, out)
 }

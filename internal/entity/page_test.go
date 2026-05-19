@@ -7,6 +7,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPackPage_Basic(t *testing.T) {
@@ -77,4 +78,42 @@ func TestRawJSONBytes(t *testing.T) {
 	assert.Nil(t, rawJSONBytes(nil))
 	assert.Nil(t, rawJSONBytes([]byte{}))
 	assert.Equal(t, json.RawMessage(`[1]`), rawJSONBytes([]byte(`[1]`)))
+}
+
+// TestPackPageWithContext_AttachesOwnerAndOptionalFields guards #1134:
+// owner と option field が正しく entity に乗ること、optional は nil で omit
+// されることを確認する。
+func TestPackPageWithContext_AttachesOwnerAndOptionalFields(t *testing.T) {
+	idGen := newTestIDGen(t)
+	p := &model.Page{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.PageVisibilityPublic}
+	liked := true
+	out := PackPageWithContext(p, PackPageContext{
+		IDGen:            idGen,
+		Owner:            &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"},
+		EyeCatchingImage: map[string]any{"id": "f1"},
+		IsLiked:          &liked,
+	})
+	user, ok := out["user"].(UserLite)
+	require.True(t, ok)
+	assert.Equal(t, "alice", user.Username)
+	assert.Equal(t, map[string]any{"id": "f1"}, out["eyeCatchingImage"])
+	assert.Equal(t, true, out["isLiked"])
+}
+
+func TestPackPageWithContext_OmitsAbsentOptionals(t *testing.T) {
+	idGen := newTestIDGen(t)
+	p := &model.Page{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.PageVisibilityPublic}
+	out := PackPageWithContext(p, PackPageContext{IDGen: idGen})
+	// Owner=nil → user field 自体を omit (null 出しすると frontend が
+	// page.user.username で再 throw するため)。
+	_, hasUser := out["user"]
+	assert.False(t, hasUser)
+	_, hasEye := out["eyeCatchingImage"]
+	assert.False(t, hasEye)
+	_, hasLiked := out["isLiked"]
+	assert.False(t, hasLiked)
+}
+
+func TestPackPageWithContext_NilPage(t *testing.T) {
+	assert.Nil(t, PackPageWithContext(nil, PackPageContext{}))
 }

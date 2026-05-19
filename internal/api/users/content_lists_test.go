@@ -136,14 +136,18 @@ func TestGalleryPosts_ReturnsAll(t *testing.T) {
 // --- Pages ---
 
 func TestPages(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, userRepo := newTestHandler(t)
+	// owner lookup を満たすためテストユーザーを登録 (#1134 で users/pages が
+	// owner 必須 entity shape を返すため)。
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "u1", UsernameLower: "u1"}
 	rec := postStub(h.Pages, `{}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, http.StatusOK, postStub(h.Pages, `{"userId":"u1"}`, nil).Code)
 }
 
 func TestPages_HidesNonPublic(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, userRepo := newTestHandler(t)
+	userRepo.Users["owner"] = &model.User{ID: "owner", Username: "owner", UsernameLower: "owner"}
 	repo := testutil.NewMockPageRepository()
 	require.NoError(t, repo.Create(&model.Page{ID: "p1", UserID: "owner", Visibility: model.PageVisibilityPublic}))
 	require.NoError(t, repo.Create(&model.Page{ID: "p2", UserID: "owner", Visibility: model.PageVisibilityFollowers}))
@@ -153,4 +157,9 @@ func TestPages_HidesNonPublic(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	require.Len(t, rows, 1)
 	assert.Equal(t, "p1", rows[0]["id"])
+	// #1134: frontend MkPagePreview が `page.user.username` を unconditional に
+	// 参照するため、user (UserLite) が必ず含まれていることを guard する。
+	user, ok := rows[0]["user"].(map[string]any)
+	require.True(t, ok, "page entity must include user field")
+	assert.Equal(t, "owner", user["username"])
 }

@@ -321,6 +321,18 @@ func TestFeatured(t *testing.T) {
 
 // --- Like ------------------------------------------------------------------
 
+// TestHasLiked covers the lookup helper added for /api/pages/show
+// (#1134). Empty / missing input は false で fail-soft (panic 無し)。
+func TestHasLiked(t *testing.T) {
+	svc, repo, likeRepo := newSvc(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Visibility: model.PageVisibilityPublic}
+	assert.False(t, svc.HasLiked("u2", "p1"))
+	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "u2", PageID: "p1"}))
+	assert.True(t, svc.HasLiked("u2", "p1"))
+	assert.False(t, svc.HasLiked("", "p1"))
+	assert.False(t, svc.HasLiked("u2", ""))
+}
+
 func TestLike_HappyPath(t *testing.T) {
 	svc, repo, likeRepo := newSvc(t)
 	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Visibility: model.PageVisibilityPublic}

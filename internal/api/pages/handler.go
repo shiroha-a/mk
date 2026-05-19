@@ -26,13 +26,15 @@ type MainStreamPublisher interface {
 }
 
 // UserBundleSource fetches a user + profile bundle. ShowByID is used to pack
-// the caller for the `pageEvent` body emitted from /api/page-push, and
-// ShowByUsername is used to resolve the upstream-compatible
-// {username, name} shape on /api/pages/show (#955). Satisfied by
-// *core/user.Service.
+// the caller for the `pageEvent` body emitted from /api/page-push and the
+// page owner on /api/pages/show (#1134). ShowByUsername is used to resolve
+// the upstream-compatible {username, name} shape on /api/pages/show (#955).
+// FindManyByIDs is used by /api/pages/featured to batch-resolve multiple
+// owners in one round-trip (#1134). Satisfied by *core/user.Service.
 type UserBundleSource interface {
 	ShowByID(id string) (*coreuser.UserWithProfile, error)
 	ShowByUsername(username string, host *string) (*coreuser.UserWithProfile, error)
+	FindManyByIDs(ids []string) ([]*model.User, error)
 }
 
 // Handler handles page-related API endpoints.
@@ -160,7 +162,22 @@ func (h *Handler) Show(c echo.Context) error {
 		}
 		return notFound(c)
 	}
-	return c.JSON(http.StatusOK, h.pageToMap(p))
+	// owner / isLiked を attach (#1134)。owner lookup miss は frontend page.vue
+	// の `v-if="page.user"` で吸収されるため fail-soft で nil 維持。
+	// isLiked は logged-in viewer のときだけ pointer で渡し、guest 経路では
+	// upstream 同様 field を omit する。
+	var owner *model.User
+	if h.userSource != nil {
+		if bundle, oerr := h.userSource.ShowByID(p.UserID); oerr == nil && bundle != nil {
+			owner = bundle.User
+		}
+	}
+	var isLikedPtr *bool
+	if user != nil {
+		liked := h.svc.HasLiked(user.ID, p.ID)
+		isLikedPtr = &liked
+	}
+	return c.JSON(http.StatusOK, h.pageToMapWithOwner(p, owner, nil, isLikedPtr))
 }
 
 // UpdateRequest is the request body for pages/update.
@@ -262,6 +279,8 @@ type MyRequest struct {
 // My handles POST /api/i/pages.
 //
 // frontend Paginator (cursor mode) は untilId / sinceId を forward する (#493)。
+// 全 row が同一 owner なので middleware.GetUser を直接 owner として attach し、
+// 追加 round-trip 無しで `page.user` を埋める (#1134)。
 func (h *Handler) My(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req MyRequest
@@ -272,7 +291,7 @@ func (h *Handler) My(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.pagesToList(rows))
+	return c.JSON(http.StatusOK, h.pagesToList(rows, func(string) *model.User { return user }))
 }
 
 // FeaturedRequest is the request body for pages/featured.
@@ -284,6 +303,10 @@ type FeaturedRequest struct {
 }
 
 // Featured handles POST /api/pages/featured.
+//
+// 複数 owner なので FindManyByIDs で 1 round-trip batch 取得し、行毎の owner を
+// pagesToList に owner closure で渡す (#1134)。userSource が未配線の test 経路
+// では owner 取得不能なので空 list を返す (= silent fail-soft、501 にしない)。
 func (h *Handler) Featured(c echo.Context) error {
 	var req FeaturedRequest
 	if err := c.Bind(&req); err != nil {
@@ -293,7 +316,39 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.pagesToList(rows))
+	ownerLookup := h.batchOwnerLookup(rows)
+	return c.JSON(http.StatusOK, h.pagesToList(rows, ownerLookup))
+}
+
+// batchOwnerLookup returns a closure that resolves page.userId → *model.User
+// in O(1) per call by pre-loading all unique owner IDs in one query. Caller
+// guarantees `rows` may contain duplicates; the lookup map dedupes via the
+// userId key. When userSource is unset or the batch fetch errors, the
+// closure returns nil for every ID and the caller (pagesToList) drops the
+// row — same fail-soft behavior as upstream PageEntityService.packMany
+// which skips unpackable rows rather than failing the whole list.
+func (h *Handler) batchOwnerLookup(rows []*model.Page) func(string) *model.User {
+	if h.userSource == nil || len(rows) == 0 {
+		return func(string) *model.User { return nil }
+	}
+	seen := make(map[string]struct{}, len(rows))
+	ids := make([]string, 0, len(rows))
+	for _, p := range rows {
+		if _, ok := seen[p.UserID]; ok {
+			continue
+		}
+		seen[p.UserID] = struct{}{}
+		ids = append(ids, p.UserID)
+	}
+	users, err := h.userSource.FindManyByIDs(ids)
+	if err != nil {
+		return func(string) *model.User { return nil }
+	}
+	byID := make(map[string]*model.User, len(users))
+	for _, u := range users {
+		byID[u.ID] = u
+	}
+	return func(uid string) *model.User { return byID[uid] }
 }
 
 // LikeRequest is the request body for pages/like and pages/unlike.
@@ -398,11 +453,18 @@ func (h *Handler) Unlike(c echo.Context) error {
 }
 
 // pagesToList packs a slice of pages using h.idGen so every element gets a
-// consistent createdAt alongside the other fields.
-func (h *Handler) pagesToList(rows []*model.Page) []map[string]any {
+// consistent createdAt alongside the other fields. ownerLookup resolves the
+// page owner per row; when it returns nil for a row the row is dropped
+// (otherwise the frontend MkPagePreview template throws on
+// `page.user.username` and the entire list disappears, #1134).
+func (h *Handler) pagesToList(rows []*model.Page, ownerLookup func(userID string) *model.User) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, h.pageToMap(p))
+		owner := ownerLookup(p.UserID)
+		if owner == nil {
+			continue
+		}
+		out = append(out, h.pageToMapWithOwner(p, owner, nil, nil))
 	}
 	return out
 }
@@ -410,8 +472,26 @@ func (h *Handler) pagesToList(rows []*model.Page) []map[string]any {
 // pageToMap delegates to entity.PackPage so the JSON shape (timestamp
 // format, field set) stays in sync between /api/pages/* and other places
 // that embed a page (e.g. pinnedPage on /api/i and /api/users/show).
+//
+// Use pageToMapWithOwner for list endpoints / detail views — they need
+// `page.user` populated or the frontend templates fail to render (#1134).
+// This bare variant remains for pinned-page embeds where the user context
+// is implicit (the embedding endpoint already returns the user separately).
 func (h *Handler) pageToMap(p *model.Page) map[string]any {
 	return entity.PackPage(p, h.idGen)
+}
+
+// pageToMapWithOwner enriches the page entity with `user` (UserLite) and
+// optional `eyeCatchingImage` / `isLiked`. Upstream PageEntityService.pack
+// always emits `user`; mk-go previously omitted it which silently broke the
+// frontend list views (#1134).
+func (h *Handler) pageToMapWithOwner(p *model.Page, owner *model.User, eyeCatchingImage map[string]any, isLiked *bool) map[string]any {
+	return entity.PackPageWithContext(p, entity.PackPageContext{
+		IDGen:            h.idGen,
+		Owner:            owner,
+		EyeCatchingImage: eyeCatchingImage,
+		IsLiked:          isLiked,
+	})
 }
 
 func notFound(c echo.Context) error {

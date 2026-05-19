@@ -165,6 +165,17 @@ type UserWithProfile struct {
 	Profile *model.UserProfile
 }
 
+// FindManyByIDs returns the bare User rows for the given ID set in a single
+// query, without profile fetch. Intended for embed-context callers that just
+// need UserLite shape (= username / displayName / host / avatar) — currently
+// /api/pages/featured (#1134) batch-resolves owners this way.
+func (s *Service) FindManyByIDs(ids []string) ([]*model.User, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.userRepo.FindManyByIDs(ids)
+}
+
 // ShowByID returns the user (and profile) for the given ID.
 func (s *Service) ShowByID(id string) (*UserWithProfile, error) {
 	u, err := s.userRepo.FindByID(id)

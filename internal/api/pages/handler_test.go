@@ -1,6 +1,7 @@
 package pages
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -125,6 +126,29 @@ func TestShow_ByName(t *testing.T) {
 	c, rec := newReq(t, `{"userId":"alice","name":"alpha"}`)
 	require.NoError(t, h.Show(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestShow_IncludesUserAndIsLiked guards #1134 for the single-page path:
+// owner が attach され、viewer logged-in 時は isLiked field も含まれる。
+func TestShow_IncludesUserAndIsLiked(t *testing.T) {
+	h, repo, likeRepo := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "bob", PageID: "p1"}))
+	h.SetUserSource(&stubUserSource{
+		bundle: &coreuser.UserWithProfile{
+			User: &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"},
+		},
+	})
+	c, rec := newReq(t, `{"pageId":"p1"}`)
+	setUser(c, "bob")
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var row map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
+	user, ok := row["user"].(map[string]any)
+	require.True(t, ok, "show response must include user field (#1134)")
+	assert.Equal(t, "alice", user["username"])
+	assert.Equal(t, true, row["isLiked"], "isLiked must reflect viewer's like state (#1134)")
 }
 
 func TestShow_ByUsername(t *testing.T) {
@@ -338,6 +362,25 @@ func TestMy_Success(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "alpha")
 }
 
+// TestMy_IncludesUserField guards #1134: frontend MkPagePreview の
+// `page.user.username` template が unconditional 参照なので、`user` field が
+// 必ず entity に含まれていることを検証する。
+func TestMy_IncludesUserField(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	username := "alice"
+	c, rec := newReq(t, `{}`)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "alice", Username: username, UsernameLower: username})
+	require.NoError(t, h.My(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	user, ok := rows[0]["user"].(map[string]any)
+	require.True(t, ok, "page entity must include user field (#1134)")
+	assert.Equal(t, "alice", user["username"])
+}
+
 func TestMy_BadJSON(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{not`)
@@ -374,6 +417,46 @@ func TestFeatured_Success(t *testing.T) {
 	c, rec := newReq(t, `{}`)
 	require.NoError(t, h.Featured(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestFeatured_IncludesUserField guards #1134 for the batch-owner path:
+// userSource を wire したとき FindManyByIDs で owner が解決され、各 row に
+// `user.username` が attach されることを確認。
+func TestFeatured_IncludesUserField(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	repo.Pages["p2"] = &model.Page{ID: "p2", UserID: "bob", Name: "beta", Visibility: model.PageVisibilityPublic}
+	h.SetUserSource(&stubUserSource{
+		manyUsers: []*model.User{
+			{ID: "alice", Username: "alice", UsernameLower: "alice"},
+			{ID: "bob", Username: "bob", UsernameLower: "bob"},
+		},
+	})
+	c, rec := newReq(t, `{}`)
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	for _, row := range rows {
+		user, ok := row["user"].(map[string]any)
+		require.True(t, ok, "featured row must include user field (#1134)")
+		assert.NotEmpty(t, user["username"])
+	}
+}
+
+// TestFeatured_DropsRowsWithoutOwner guards the fail-soft path: when
+// userSource 未配線 (or batch fetch error) で owner が解決できない行は
+// pagesToList で drop される (= frontend が crash する代わりに silent skip)。
+func TestFeatured_DropsRowsWithoutOwner(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "ghost", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	c, rec := newReq(t, `{}`)
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	assert.Empty(t, rows, "rows without owner must be dropped, not emitted with missing user field")
 }
 
 func TestFeatured_BadJSON(t *testing.T) {
@@ -556,6 +639,8 @@ type stubUserSource struct {
 	err              error
 	byUsernameBundle *coreuser.UserWithProfile
 	byUsernameErr    error
+	manyUsers        []*model.User
+	manyErr          error
 }
 
 func (s *stubUserSource) ShowByID(_ string) (*coreuser.UserWithProfile, error) {
@@ -570,6 +655,10 @@ func (s *stubUserSource) ShowByUsername(_ string, _ *string) (*coreuser.UserWith
 		return s.byUsernameBundle, s.byUsernameErr
 	}
 	return s.bundle, s.err
+}
+
+func (s *stubUserSource) FindManyByIDs(_ []string) ([]*model.User, error) {
+	return s.manyUsers, s.manyErr
 }
 
 func TestPagePush_PublishesPageEvent(t *testing.T) {

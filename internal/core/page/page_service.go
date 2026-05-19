@@ -320,3 +320,18 @@ func (s *Service) Unlike(userID, pageID string) error {
 	_ = s.repo.IncrementCount(pageID, "likedCount", -1)
 	return nil
 }
+
+// HasLiked reports whether `userID` has already liked `pageID`. Used by
+// /api/pages/show to populate the upstream-compatible `isLiked` field
+// (#1134). Returns false on lookup error so the response stays renderable
+// even when the page_like store is transiently unavailable.
+func (s *Service) HasLiked(userID, pageID string) bool {
+	if userID == "" || pageID == "" {
+		return false
+	}
+	exists, err := s.likeRepo.Exists(userID, pageID)
+	if err != nil {
+		return false
+	}
+	return exists
+}
