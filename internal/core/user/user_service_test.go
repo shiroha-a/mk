@@ -98,6 +98,26 @@ func TestService_ShowManyByIDs_AllMissing(t *testing.T) {
 	assert.Nil(t, out)
 }
 
+// TestService_FindManyByIDs covers the bare-user batch helper added for
+// /api/pages/featured owner resolution (#1134). 空入力は短絡で nil 返却、
+// 通常入力は repo に委譲して User row のみ取れる (profile fetch 無し)。
+func TestService_FindManyByIDs(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	repo.Users["u2"] = &model.User{ID: "u2", Username: "bob"}
+	svc := user.NewService(repo, nil, nil, nil)
+
+	// 空入力は repo を叩かずに nil 返却。
+	out, err := svc.FindManyByIDs(nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	// 通常入力は User row 2 件取得。
+	out, err = svc.FindManyByIDs([]string{"u1", "u2"})
+	require.NoError(t, err)
+	assert.Len(t, out, 2)
+}
+
 func TestService_GetProfilesByUserIDs_BatchOK(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	d1, d2 := "p1", "p2"
