@@ -51,16 +51,18 @@ func PackPage(p *model.Page, idGens ...id.Generator) map[string]any {
 }
 
 // PackPageContext carries per-call enrichment data for PackPageWithContext.
-// All fields are optional; nil / zero leaves the corresponding field absent
-// (User) or null (IsLiked omitted entirely).
+// All fields are optional; nil leaves the corresponding output field
+// **omitted entirely** (never null) so the frontend cannot crash on
+// `page.user.username` etc.
 type PackPageContext struct {
 	// IDGen drives the aidx → createdAt derivation just like the variadic
 	// arg on PackPage.
 	IDGen id.Generator
 	// Owner is the page.user owner. Required by frontend MkPagePreview
-	// (`page.user.username` is read unconditionally); when nil the field is
-	// emitted as null so the consumer can detect the lookup miss without
-	// throwing a TypeError in the Vue template.
+	// (`page.user.username` is read unconditionally); when nil the `user`
+	// field is omitted entirely. List callers MUST therefore drop the row
+	// when their lookup misses (= upstream packMany semantics), otherwise
+	// MkPagePreview crashes on the next `page.user.username` access.
 	Owner *model.User
 	// EyeCatchingImage is the pre-packed Drive file when Page.EyeCatchingImageID
 	// is set. nil means "either no image or the file lookup missed"; both
