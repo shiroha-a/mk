@@ -249,8 +249,8 @@ id: 'aidx'
 #jobQueueAutoScale: false
 #maxWorkers: 128                # per-queue upper bound (default: runtime.NumCPU() * 16)
 #minWorkers: 4                  # per-queue lower bound (kept warm even at idle)
-#maxWorkersGlobal: 256          # optional cluster-wide cap across queues (multi-pod use)
-#autoScaleCooldownSeconds: 1    # minimum interval between scale events
+#maxWorkersGlobal: 256          # cluster-wide cap across queues for multi-pod use (default: unset = no cap)
+#autoScaleCooldownSeconds: 1    # minimum interval between scale events (5-10 recommended in production to avoid oscillation)
 
 #   ┌─────────────────────┐
 #───┘ Other configuration └─────────────────────────────────────
