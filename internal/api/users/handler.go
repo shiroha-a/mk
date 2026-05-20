@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -810,6 +811,15 @@ func (h *Handler) batchPendingRequestRelations(viewer *model.User, bundleByID ma
 	return fromMap, toMap
 }
 
+// remoteStatsBatchTimeout caps the wall-clock time the list response will
+// wait for remote `/api/users/show` Fetches. fetcher が独自の HTTP timeout
+// (= safehttp 経由で 10-30s) を持つが、複数 remote host のうち 1 host が
+// 遅い場合に list 全体の tail latency が悪化する。本 timeout でその上限を
+// 5s に縮め、slow host があれば silent fallback (local count) を維持する
+// (#1146 #1)。値は典型 list (limit=20) の cold cache 想定で「20 host の
+// HTTPS RTT が並列で 5s 以内に揃う」前提。
+const remoteStatsBatchTimeout = 5 * time.Second
+
 // batchRemoteStatsOverride fans out RemoteStatsFetcher.Fetch goroutines for
 // every remote user in bundleByID and returns the resulting stats keyed by
 // user ID. Local users (host == nil) are skipped. fetcher が未配線 / list
@@ -819,8 +829,12 @@ func (h *Handler) batchPendingRequestRelations(viewer *model.User, bundleByID ma
 // 並列化の妥当性: 各 Fetch は HTTP I/O bound (~500ms RTT) で CPU は遊んで
 // いるので、20-100 件並列でも runtime コストは無視可能。同じ (host, username)
 // に対する concurrent call は fetcher 内部の singleflight.Group で 1 HTTP に
-// dedup される。ctx は request context を伝播するので client abort で全
-// goroutine が cancel される。
+// dedup される。
+//
+// ctx propagation: 上位 request ctx に `remoteStatsBatchTimeout` の deadline
+// を被せた派生 ctx を全 goroutine に渡し、deadline 超過 / client abort
+// どちらでも fetcher 内部の HTTP client が ctx cancel を受けて即時 return
+// する (= 取りこぼした user は silent fallback で local count 維持)。
 func (h *Handler) batchRemoteStatsOverride(ctx context.Context, bundleByID map[string]*user.UserWithProfile) map[string]*RemoteUserStatsView {
 	if h.remoteStatsFetcher == nil || len(bundleByID) == 0 {
 		return nil
@@ -838,6 +852,8 @@ func (h *Handler) batchRemoteStatsOverride(ctx context.Context, bundleByID map[s
 	if len(jobs) == 0 {
 		return nil
 	}
+	fetchCtx, cancel := context.WithTimeout(ctx, remoteStatsBatchTimeout)
+	defer cancel()
 	out := make(map[string]*RemoteUserStatsView, len(jobs))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -845,7 +861,7 @@ func (h *Handler) batchRemoteStatsOverride(ctx context.Context, bundleByID map[s
 	for _, j := range jobs {
 		go func(j job) {
 			defer wg.Done()
-			stats := h.remoteStatsFetcher.Fetch(ctx, j.host, j.username)
+			stats := h.remoteStatsFetcher.Fetch(fetchCtx, j.host, j.username)
 			if stats == nil {
 				return
 			}

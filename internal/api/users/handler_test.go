@@ -1058,6 +1058,83 @@ func TestFollowers_AppliesRemoteStatsOverride(t *testing.T) {
 	assert.Equal(t, float64(250), follower["followingCount"])
 }
 
+// TestFollowing_AppliesRemoteStatsOverride covers the symmetric path for
+// /api/users/following — same helper is used so symmetry is expected, but
+// explicit regression guard against prefix routing or pack-side regressions.
+func TestFollowing_AppliesRemoteStatsOverride(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = local target profile
+	remoteHost := "remote.example"
+	repo.Users["remote-charlie"] = &model.User{
+		ID:                "remote-charlie",
+		Username:          "charlie",
+		UsernameLower:     "charlie",
+		Host:              &remoteHost,
+		NotesCount:        1,
+		FollowersCount:    2,
+		FollowingCount:    3,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	fSvc := h.followingService
+	// user1 follows charlie → charlie が followee として list される。
+	_, err := fSvc.Follow("user1", "remote-charlie", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	h.SetRemoteStatsFetcher(&fakeRemoteStatsFetcher{
+		stats: map[string]*RemoteUserStatsView{
+			"remote.example|charlie": {NotesCount: 9000, FollowersCount: 8000, FollowingCount: 7000},
+		},
+	})
+
+	rec := post(h.Following, `{"userId":"user1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	followee, ok := out[0]["followee"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, float64(9000), followee["notesCount"])
+	assert.Equal(t, float64(8000), followee["followersCount"])
+	assert.Equal(t, float64(7000), followee["followingCount"])
+}
+
+// TestFollowers_RemoteStatsOverride_FallsBackOnFetchError: fetcher が nil
+// (= 取得失敗 / 未登録) を返した remote user は local 観測値を維持して
+// silent fallback する (= upstream Show 経路と同 pattern)。
+func TestFollowers_RemoteStatsOverride_FallsBackOnFetchError(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	remoteHost := "remote.example"
+	repo.Users["remote-dora"] = &model.User{
+		ID:                "remote-dora",
+		Username:          "dora",
+		UsernameLower:     "dora",
+		Host:              &remoteHost,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	fSvc := h.followingService
+	_, err := fSvc.Follow("remote-dora", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// fSvc.Follow が user.FollowingCount を auto-increment するので、
+	// test の baseline は Follow 後に固定 (= override しない事実だけ確認)。
+	repo.Users["remote-dora"].NotesCount = 77
+	repo.Users["remote-dora"].FollowersCount = 99
+	repo.Users["remote-dora"].FollowingCount = 11
+	// fetcher は dora 用の stats を登録しない → Fetch が nil 返却 → fallback。
+	h.SetRemoteStatsFetcher(&fakeRemoteStatsFetcher{stats: map[string]*RemoteUserStatsView{}})
+
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	follower, ok := out[0]["follower"].(map[string]any)
+	require.True(t, ok)
+	// fetch 失敗時は local 観測値そのまま (override しない)。
+	assert.Equal(t, float64(77), follower["notesCount"], "fetcher nil → local count fallback")
+	assert.Equal(t, float64(99), follower["followersCount"])
+	assert.Equal(t, float64(11), follower["followingCount"])
+}
+
 // TestFollowers_RemoteStatsOverride_SkipsLocalUser: local user (Host==nil) は
 // fetcher 経路を skip し、ローカル観測値をそのまま使う。HTTP request 削減。
 func TestFollowers_RemoteStatsOverride_SkipsLocalUser(t *testing.T) {
