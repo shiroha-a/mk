@@ -65,6 +65,71 @@ func TestFollowRequestRepository_Exists(t *testing.T) {
 	assert.True(t, exists)
 }
 
+// TestFollowRequestRepository_FilterPendingFromAnchor + ToAnchor cover the
+// batch lookup added for users/{followers,following} pending request flag
+// population (#1144 #2、MkFollowButton の `hasPendingFollowRequestFromYou`
+// 表示分岐に必要)。
+func TestFollowRequestRepository_FilterPendingFromAnchor(t *testing.T) {
+	repo := NewFollowRequestRepository(testDB)
+	anchor := insertTestUser(t, "u_pf_a", "anchorpf")
+	defer cleanupUser(t, anchor.ID)
+	t1 := insertTestUser(t, "u_pf_t1", "targetpf1")
+	defer cleanupUser(t, t1.ID)
+	t2 := insertTestUser(t, "u_pf_t2", "targetpf2")
+	defer cleanupUser(t, t2.ID)
+
+	insertFollowRequest(t, "pf_1", anchor.ID, t1.ID)
+	defer testDB.Exec(`DELETE FROM "follow_request" WHERE id = ?`, "pf_1")
+
+	out, err := repo.FilterPendingFromAnchor("", []string{t1.ID})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+	out, err = repo.FilterPendingFromAnchor(anchor.ID, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	out, err = repo.FilterPendingFromAnchor(anchor.ID, []string{t1.ID, t2.ID, "ghost"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{t1.ID}, out)
+}
+
+func TestFollowRequestRepository_FilterPendingToAnchor(t *testing.T) {
+	repo := NewFollowRequestRepository(testDB)
+	anchor := insertTestUser(t, "u_pt_a", "anchorpt")
+	defer cleanupUser(t, anchor.ID)
+	c1 := insertTestUser(t, "u_pt_c1", "candpt1")
+	defer cleanupUser(t, c1.ID)
+	c2 := insertTestUser(t, "u_pt_c2", "candpt2")
+	defer cleanupUser(t, c2.ID)
+
+	insertFollowRequest(t, "pt_1", c1.ID, anchor.ID)
+	defer testDB.Exec(`DELETE FROM "follow_request" WHERE id = ?`, "pt_1")
+
+	out, err := repo.FilterPendingToAnchor("", []string{c1.ID})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+	out, err = repo.FilterPendingToAnchor(anchor.ID, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	out, err = repo.FilterPendingToAnchor(anchor.ID, []string{c1.ID, c2.ID, "ghost"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{c1.ID}, out)
+}
+
+// TestFollowRequestRepository_FilterPending_QueryError covers the DB error
+// branch of both Filter helpers (cancelled ctx).
+func TestFollowRequestRepository_FilterPending_QueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	db := testDB.WithContext(ctx)
+	repo := NewFollowRequestRepository(db)
+	_, err := repo.FilterPendingFromAnchor("u", []string{"v"})
+	assert.Error(t, err)
+	_, err = repo.FilterPendingToAnchor("u", []string{"v"})
+	assert.Error(t, err)
+}
+
 func TestFollowRequestRepository_Delete(t *testing.T) {
 	repo := NewFollowRequestRepository(testDB)
 	follower := insertTestUser(t, "u_fr_5", "frfollower5")

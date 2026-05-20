@@ -66,6 +66,74 @@ func TestFollowingRepository_Exists(t *testing.T) {
 	assert.True(t, exists)
 }
 
+// TestFollowingRepository_FilterFollowingsFromAnchor + ToAnchor cover the
+// batch lookup added for users/{followers,following} relation flag
+// population (#1144). 空 input は短絡で nil 返却、通常 input は anchor が
+// follow している (or anchor を follow している) candidate のみ返る。
+// cancelled ctx の error path も別 test で cover。
+func TestFollowingRepository_FilterFollowingsFromAnchor(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	anchor := insertTestUser(t, "u_ff_a", "anchorff")
+	defer cleanupUser(t, anchor.ID)
+	t1 := insertTestUser(t, "u_ff_t1", "targetff1")
+	defer cleanupUser(t, t1.ID)
+	t2 := insertTestUser(t, "u_ff_t2", "targetff2")
+	defer cleanupUser(t, t2.ID)
+
+	insertFollowing(t, "ff_1", anchor.ID, t1.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "ff_1")
+
+	// 空入力は repo を叩かずに nil 返却。
+	out, err := repo.FilterFollowingsFromAnchor("", []string{t1.ID})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+	out, err = repo.FilterFollowingsFromAnchor(anchor.ID, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	// 通常入力: anchor は t1 のみ follow → t1 だけ返る (t2 は除外、ghost も miss)。
+	out, err = repo.FilterFollowingsFromAnchor(anchor.ID, []string{t1.ID, t2.ID, "ghost"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{t1.ID}, out)
+}
+
+func TestFollowingRepository_FilterFollowingsToAnchor(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	anchor := insertTestUser(t, "u_ft_a", "anchorft")
+	defer cleanupUser(t, anchor.ID)
+	c1 := insertTestUser(t, "u_ft_c1", "candft1")
+	defer cleanupUser(t, c1.ID)
+	c2 := insertTestUser(t, "u_ft_c2", "candft2")
+	defer cleanupUser(t, c2.ID)
+
+	insertFollowing(t, "ft_1", c1.ID, anchor.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "ft_1")
+
+	out, err := repo.FilterFollowingsToAnchor("", []string{c1.ID})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+	out, err = repo.FilterFollowingsToAnchor(anchor.ID, nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	out, err = repo.FilterFollowingsToAnchor(anchor.ID, []string{c1.ID, c2.ID, "ghost"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{c1.ID}, out)
+}
+
+// TestFollowingRepository_FilterFollowings_QueryError covers the DB error
+// branch of both Filter helpers (cancelled ctx → driver error → bubble up).
+func TestFollowingRepository_FilterFollowings_QueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	db := testDB.WithContext(ctx)
+	repo := NewFollowingRepository(db)
+	_, err := repo.FilterFollowingsFromAnchor("u", []string{"v"})
+	assert.Error(t, err)
+	_, err = repo.FilterFollowingsToAnchor("u", []string{"v"})
+	assert.Error(t, err)
+}
+
 func TestFollowingRepository_Delete(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
 	follower := insertTestUser(t, "u_fl_5", "follower5")
