@@ -1231,6 +1231,7 @@ type stubPageRepoForPin struct {
 
 func (s *stubPageRepoForPin) Create(*model.Page) error                              { return nil }
 func (s *stubPageRepoForPin) FindByID(string) (*model.Page, error)                  { return s.page, nil }
+func (s *stubPageRepoForPin) FindManyByIDs([]string) ([]*model.Page, error)         { return nil, nil }
 func (s *stubPageRepoForPin) FindByUserAndName(string, string) (*model.Page, error) { return nil, nil }
 func (s *stubPageRepoForPin) UpdateFields(string, map[string]any) error             { return nil }
 func (s *stubPageRepoForPin) Delete(*model.Page) error                              { return nil }

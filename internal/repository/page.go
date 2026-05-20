@@ -9,6 +9,10 @@ import (
 type PageRepository interface {
 	Create(p *model.Page) error
 	FindByID(id string) (*model.Page, error)
+	// FindManyByIDs returns pages for the given ID set in a single query.
+	// Used by /api/i/page-likes to batch-resolve `like.pageId → page` and
+	// avoid an N+1 lookup over the like list (#1136).
+	FindManyByIDs(ids []string) ([]*model.Page, error)
 	FindByUserAndName(userID, name string) (*model.Page, error)
 	UpdateFields(pageID string, fields map[string]any) error
 	Delete(p *model.Page) error
@@ -43,6 +47,17 @@ func (r *pageRepository) FindByID(id string) (*model.Page, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (r *pageRepository) FindManyByIDs(ids []string) ([]*model.Page, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var pages []*model.Page
+	if err := r.db.Where("id IN ?", ids).Find(&pages).Error; err != nil {
+		return nil, err
+	}
+	return pages, nil
 }
 
 // FindByUserAndName looks up a page by the (userId, name) pair which is the

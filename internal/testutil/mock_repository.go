@@ -2919,6 +2919,19 @@ func (m *MockPageRepository) FindByID(id string) (*model.Page, error) {
 	return p, nil
 }
 
+func (m *MockPageRepository) FindManyByIDs(ids []string) ([]*model.Page, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	out := make([]*model.Page, 0, len(ids))
+	for _, id := range ids {
+		if p, ok := m.Pages[id]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
 func (m *MockPageRepository) FindByUserAndName(userID, name string) (*model.Page, error) {
 	for _, p := range m.Pages {
 		if p.UserID == userID && p.Name == name {

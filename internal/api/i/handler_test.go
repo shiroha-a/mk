@@ -2175,6 +2175,7 @@ type stubPageRepo struct {
 
 func (s *stubPageRepo) Create(*model.Page) error                              { return nil }
 func (s *stubPageRepo) FindByID(id string) (*model.Page, error)               { return s.page, s.err }
+func (s *stubPageRepo) FindManyByIDs([]string) ([]*model.Page, error)         { return nil, nil }
 func (s *stubPageRepo) FindByUserAndName(string, string) (*model.Page, error) { return nil, nil }
 func (s *stubPageRepo) UpdateFields(string, map[string]any) error             { return nil }
 func (s *stubPageRepo) Delete(*model.Page) error                              { return nil }
