@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/http"
 	urlpkg "net/url"
 	"path/filepath"
 
@@ -29,7 +30,10 @@ func serveStaticAssetDir(e *echo.Echo, prefix, root string) {
 	e.GET(prefix+"/*", func(c echo.Context) error {
 		p, err := urlpkg.PathUnescape(c.Param("*"))
 		if err != nil {
-			return err
+			// malformed URL escape は client 起因なので 400 にする。echo.Static
+			// は raw error を返して 500 になるが、本 helper では proper HTTP
+			// semantics を優先する。
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid path escape")
 		}
 		c.Response().Header().Set("Cache-Control", staticAssetCacheControl)
 		return c.File(filepath.Join(root, filepath.Clean("/"+p)))
