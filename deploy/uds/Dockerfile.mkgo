@@ -38,6 +38,13 @@ RUN test -f third_party/misskey/packages/backend/node_modules/@discordapp/twemoj
     (echo "ERROR: twemoji assets not found (pnpm install not run?)." && \
      echo "Run: make uds-frontend-build (installs third_party/misskey node_modules)" && exit 1)
 
+# fluent-emoji は実績バッジ / notification icon が /fluent-emoji/<hex>.png で
+# 参照する PNG set (1764 files)。submodule `third_party/misskey/fluent-emojis/
+# dist` に同梱されているので submodule init で取得済の前提 (#1138)。
+RUN test -f third_party/misskey/fluent-emojis/dist/1f4dd.png || \
+    (echo "ERROR: fluent-emoji assets not found (submodule fluent-emojis not initialized?)." && \
+     echo "Run: git submodule update --init --recursive" && exit 1)
+
 # Go の build cache + module cache を BuildKit cache mount として永続化 (#432)。
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -81,6 +88,13 @@ ENV MISSKEY_REPO_ASSETS_DIR=/app/repo-assets
 # (約18MB / 3846 files、imageが重くなるが必要コスト、issue #359)。
 COPY --from=builder --chown=65532:65532 /app/third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg /app/twemoji
 ENV MISSKEY_TWEMOJI_DIR=/app/twemoji
+
+# fluent-emoji PNG set。frontendが /fluent-emoji/<hex>.png で参照する
+# (実績バッジ / notification icon)。submodule fluent-emojis/dist は
+# 約 70MB / 1764 files、image 増になるが TS upstream image と equivalent
+# (#1138)。bind-mount 無しで serve できるよう image へ焼き込む。
+COPY --from=builder --chown=65532:65532 /app/third_party/misskey/fluent-emojis/dist /app/fluent-emoji
+ENV MISSKEY_FLUENT_EMOJI_DIR=/app/fluent-emoji
 
 COPY --chown=65532:65532 deploy/uds/mkgo-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
