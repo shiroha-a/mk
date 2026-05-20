@@ -39,6 +39,72 @@ func TestRemoteStatsFetcher_Fetch_Success(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
 }
 
+// TestRemoteStatsFetcher_Fetch_MastodonFallback guards #1154: Mastodon 系
+// instance (= Misskey 互換 endpoint を持たない) でも Mastodon API
+// (`/api/v1/accounts/lookup`) 経由で stats を取得できる fallback chain。
+// /api/users/show は 404 を返し、/api/v1/accounts/lookup が成功する
+// scenario をシミュレートする。
+func TestRemoteStatsFetcher_Fetch_MastodonFallback(t *testing.T) {
+	var misskeyHits, mastodonHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/users/show":
+			atomic.AddInt32(&misskeyHits, 1)
+			http.Error(w, "not found", http.StatusNotFound)
+		case "/api/v1/accounts/lookup":
+			atomic.AddInt32(&mastodonHits, 1)
+			// query string で username が来ているはず。
+			if r.URL.Query().Get("acct") != "alice" {
+				http.Error(w, "missing acct", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"1","username":"alice","statuses_count":123,"followers_count":45,"following_count":6}`))
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
+
+	stats := f.Fetch(context.Background(), "mastodon.example", "alice")
+	require.NotNil(t, stats, "Mastodon fallback で stats が取得できる")
+	assert.Equal(t, 123, stats.NotesCount, "statuses_count → NotesCount")
+	assert.Equal(t, 45, stats.FollowersCount, "followers_count → FollowersCount")
+	assert.Equal(t, 6, stats.FollowingCount, "following_count → FollowingCount")
+
+	// fallback chain が両 endpoint を順に叩いていることを確認。
+	assert.Equal(t, int32(1), atomic.LoadInt32(&misskeyHits), "Misskey endpoint を先に試した")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&mastodonHits), "Misskey 404 → Mastodon fallback 実行")
+}
+
+// TestRemoteStatsFetcher_Fetch_MisskeyPathSkipsMastodon: Misskey endpoint
+// が success を返したら Mastodon fallback は呼ばれない (= 余分な HTTP
+// request を出さない)。
+func TestRemoteStatsFetcher_Fetch_MisskeyPathSkipsMastodon(t *testing.T) {
+	var misskeyHits, mastodonHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/users/show":
+			atomic.AddInt32(&misskeyHits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"notesCount":10,"followersCount":20,"followingCount":30}`))
+		case "/api/v1/accounts/lookup":
+			atomic.AddInt32(&mastodonHits, 1)
+			http.Error(w, "should not be called", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
+	stats := f.Fetch(context.Background(), "misskey.example", "bob")
+	require.NotNil(t, stats)
+	assert.Equal(t, 10, stats.NotesCount)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&misskeyHits))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&mastodonHits), "Misskey success の場合 Mastodon fallback は呼ばない")
+}
+
 func TestRemoteStatsFetcher_Fetch_NilOrEmpty(t *testing.T) {
 	var f *RemoteStatsFetcher
 	assert.Nil(t, f.Fetch(context.Background(), "h", "u"))
@@ -203,7 +269,13 @@ type redirectTransport struct {
 
 func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	rewritten := req.Clone(req.Context())
-	parsed, err := http.NewRequest(req.Method, rt.target+req.URL.Path, rewritten.Body)
+	// RawQuery も保持して rewrite する (= Mastodon API の ?acct= 等の
+	// query string を維持、#1154 で発覚)。
+	target := rt.target + req.URL.Path
+	if req.URL.RawQuery != "" {
+		target += "?" + req.URL.RawQuery
+	}
+	parsed, err := http.NewRequest(req.Method, target, rewritten.Body)
 	if err != nil {
 		return nil, err
 	}
