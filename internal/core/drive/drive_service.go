@@ -191,6 +191,13 @@ type UploadInput struct {
 	FolderID    *string
 	IsSensitive bool
 	Force       bool // if true, do not deduplicate by md5 hash
+	// RequestIP / RequestHeaders はモデレーション目的で drive_file 行に
+	// 記録される (upstream DriveService と同じく admin/drive/show-file の
+	// IP タブから参照される、#1148)。handler 層が c.RealIP() / c.Request().
+	// Header から構築して渡す。system file (User==nil) や upload-from-url
+	// の経路では空のままで OK (= row column は nil / "{}" のまま)。
+	RequestIP      *string
+	RequestHeaders datatypes.JSON
 }
 
 // Upload writes a file to storage and creates a drive_file row. もし同じmd5の
@@ -356,6 +363,8 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		WebpublicAccessKey: webpublicAccessKey,
 		FolderID:           in.FolderID,
 		IsSensitive:        in.IsSensitive,
+		RequestIP:          in.RequestIP,
+		RequestHeaders:     in.RequestHeaders,
 	}
 
 	// Sensitive media detection フック (system file は user 紐付きが無いので skip)

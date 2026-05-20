@@ -103,6 +103,40 @@ func TestFilesCreate_AllFormFields(t *testing.T) {
 	assert.Nil(t, resp["user"])
 }
 
+// TestFilesCreate_RecordsRequestIPAndHeaders guards #1148 root cause:
+// upload 時点で `requestIp` / `requestHeaders` が drive_file row に記録
+// されないと、後段の admin/drive/show-file がいくら field を返しても
+// 中身が常に null になり IP タブが空表示になる。本 test では multipart
+// upload 後に repo 内の row を直接覗いて両 column が populate されている
+// ことを assert。
+func TestFilesCreate_RecordsRequestIPAndHeaders(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	c, rec := newMultipartReq(t, "ip.txt", "hello", nil)
+	// echo.Context の RealIP() は X-Forwarded-For / X-Real-IP / RemoteAddr
+	// の順で resolve される。test では RemoteAddr が "192.0.2.1:1234" 形式
+	// だが、明示的に X-Forwarded-For をセットして確実性を上げる。
+	c.Request().Header.Set("X-Forwarded-For", "203.0.113.7")
+	c.Request().Header.Set("X-Custom-Test", "marker-value")
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// upload 結果の row を repo から拾って IP / Headers を確認。
+	var got *model.DriveFile
+	for _, f := range fileRepo.Files {
+		got = f
+		break
+	}
+	require.NotNil(t, got)
+	require.NotNil(t, got.RequestIP, "requestIp が記録されていること")
+	assert.Equal(t, "203.0.113.7", *got.RequestIP)
+	require.NotEmpty(t, got.RequestHeaders, "requestHeaders が記録されていること")
+	// jsonb を unmarshal して特定 header が含まれることを確認。
+	var headers map[string]string
+	require.NoError(t, json.Unmarshal(got.RequestHeaders, &headers))
+	assert.Equal(t, "marker-value", headers["X-Custom-Test"])
+}
+
 func TestFilesCreate_NoFile(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newMultipartReq(t, "", "", nil)

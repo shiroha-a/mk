@@ -2,6 +2,7 @@
 package drive
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"gorm.io/datatypes"
 )
 
 // Handler handles drive-related API endpoints.
@@ -194,9 +196,11 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	}
 
 	in := coredrive.UploadInput{
-		User: user,
-		Body: body,
-		Name: filename,
+		User:           user,
+		Body:           body,
+		Name:           filename,
+		RequestIP:      requestIPFromContext(c),
+		RequestHeaders: requestHeadersForDrive(c),
 	}
 	if v := c.FormValue("name"); v != "" {
 		in.Name = v
@@ -770,4 +774,43 @@ func (h *Handler) FoldersFind(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// requestIPFromContext extracts the client IP for drive upload provenance
+// tracking (admin/drive/show-file の IP タブで参照、#1148)。echo の RealIP
+// は X-Forwarded-For / X-Real-IP を考慮した resolved IP を返すので、nginx
+// 等の reverse proxy 配下でも本物の client IP を取得できる。空文字なら
+// nil を返して `requestIp` column を NULL のままにする。
+func requestIPFromContext(c echo.Context) *string {
+	ip := c.RealIP()
+	if ip == "" {
+		return nil
+	}
+	return &ip
+}
+
+// requestHeadersForDrive snapshots the inbound HTTP request headers into a
+// jsonb blob stored on drive_file.requestHeaders (#1148)。upstream は全
+// header を保存するが、本実装も同様に全保存する (frontend admin-file の
+// IP タブが iterate 表示するので filtering は admin UI 側の責務)。
+// 空 header set なら nil を返して列を NULL のままにする。
+func requestHeadersForDrive(c echo.Context) datatypes.JSON {
+	req := c.Request()
+	if req == nil || len(req.Header) == 0 {
+		return nil
+	}
+	// http.Header は []string 値だが、慣習として 1 要素のものが大半。
+	// upstream は単一 string で記録するため、最初の要素を採用する
+	// (= 複数値 header はほぼ存在しない、Cookie 等の特殊例も最初を採用)。
+	out := make(map[string]string, len(req.Header))
+	for k, vs := range req.Header {
+		if len(vs) > 0 {
+			out[k] = vs[0]
+		}
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return datatypes.JSON(raw)
 }
