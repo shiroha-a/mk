@@ -1,12 +1,16 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
+	"gorm.io/datatypes"
 )
 
 // DriveCleanRemoteFiles handles POST /api/admin/drive/clean-remote-files.
@@ -106,6 +110,9 @@ func (h *Handler) packDriveFileAdmin(f *model.DriveFile) entity.DriveFileEntity 
 
 // DriveShowFile handles POST /api/admin/drive/show-file.
 // Accepts either a fileId or a url as identifier (Misskey 本家互換)。
+// レスポンス shape は upstream admin/drive/show-file.ts の custom 28-field
+// 形に揃え、`requestIp` / `requestHeaders` を含む (frontend admin-file の
+// IP タブで参照、それ以外は PackDriveFile + admin only field の合成、#1148)。
 func (h *Handler) DriveShowFile(c echo.Context) error {
 	var req struct {
 		FileID string `json:"fileId"`
@@ -117,12 +124,13 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 	if h.driveFileRepo == nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
 	}
+	viewer := middleware.GetUser(c)
 	if req.FileID != "" {
 		file, err := h.driveFileRepo.FindByID(req.FileID)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
 		}
-		return c.JSON(http.StatusOK, h.packDriveFileAdmin(file))
+		return c.JSON(http.StatusOK, h.packAdminDriveShowFile(file, viewer))
 	}
 	// url 指定時は adminDB を使って url / thumbnailUrl / webpublicUrl いずれか
 	// に一致する 1 件を引く。 driveFileRepo には該当 API が無いため raw query で。
@@ -136,5 +144,101 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 	).First(&file).Error; err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
 	}
-	return c.JSON(http.StatusOK, h.packDriveFileAdmin(&file))
+	return c.JSON(http.StatusOK, h.packAdminDriveShowFile(&file, viewer))
+}
+
+// packAdminDriveShowFile builds the upstream-compatible admin/drive/show-file
+// response shape. `requestIp` は viewer が moderator のときのみ含め (= 通常
+// admin endpoint は moderator gate されているので常に true 経路だが、防御的
+// に check)、`requestHeaders` は viewer が moderator AND owner が
+// moderator でない場合のみ含める (upstream: モデレーターの個人情報を他の
+// モデレーターから守る制限)。両 field とも `nil` で omit せず明示 null を
+// emit する (upstream の `optional: false, nullable: true` schema 通り)。
+func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User) map[string]any {
+	resp := map[string]any{
+		"id":                 f.ID,
+		"userId":             f.UserID,
+		"userHost":           f.UserHost,
+		"isLink":             f.IsLink,
+		"maybePorn":          f.MaybePorn,
+		"maybeSensitive":     f.MaybeSensitive,
+		"isSensitive":        f.IsSensitive,
+		"folderId":           f.FolderID,
+		"src":                f.Src,
+		"uri":                f.URI,
+		"webpublicAccessKey": f.WebpublicAccessKey,
+		"thumbnailAccessKey": f.ThumbnailAccessKey,
+		"accessKey":          f.AccessKey,
+		"webpublicType":      f.WebpublicType,
+		"webpublicUrl":       f.WebpublicURL,
+		"thumbnailUrl":       f.ThumbnailURL,
+		"url":                f.URL,
+		"storedInternal":     f.StoredInternal,
+		"properties":         driveFileProperties(f.Properties),
+		"blurhash":           f.Blurhash,
+		"comment":            f.Comment,
+		"size":               f.Size,
+		"type":               f.Type,
+		"name":               f.Name,
+		"md5":                f.MD5,
+		"createdAt":          driveFileCreatedAtOrNil(h.idGen, f.ID),
+		"requestIp":          nil,
+		"requestHeaders":     nil,
+	}
+	// gating: 通常 admin route は moderator/admin gate 済だが、防御的 check。
+	viewerIsModerator := viewer != nil && h.roleService != nil && h.roleService.IsModerator(viewer.ID)
+	if viewerIsModerator {
+		resp["requestIp"] = f.RequestIP
+		// owner が moderator のときは headers を隠す (upstream 仕様、
+		// モデレーター同士の互いの個人情報保護)。
+		ownerIsModerator := false
+		if f.UserID != nil && *f.UserID != "" && h.roleService != nil {
+			ownerIsModerator = h.roleService.IsModerator(*f.UserID)
+		}
+		if !ownerIsModerator {
+			resp["requestHeaders"] = driveFileRequestHeaders(f.RequestHeaders)
+		}
+	}
+	return resp
+}
+
+// driveFileCreatedAtOrNil renders the aidx-derived createdAt ISO string,
+// returning nil on parse failure (= shape becomes `"createdAt": null` rather
+// than emitting a malformed string).
+func driveFileCreatedAtOrNil(idGen id.Generator, aidx string) any {
+	if s, err := aidxCreatedAtString(idGen, aidx); err == nil {
+		return s
+	}
+	return nil
+}
+
+// driveFileProperties unmarshals the jsonb properties column to map for the
+// admin endpoint response. Falls back to empty map on parse error.
+func driveFileProperties(raw datatypes.JSON) map[string]any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+// driveFileRequestHeaders unmarshals the jsonb requestHeaders column to a
+// map<string,string> shape that frontend admin-file.root.vue iterates with
+// v-for="(v, k) in info.requestHeaders". Falls back to nil if column is
+// empty / unparseable so frontend's `v-if` guard hides the section.
+func driveFileRequestHeaders(raw datatypes.JSON) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

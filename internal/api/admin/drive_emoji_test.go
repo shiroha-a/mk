@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // setupEmojiHandler returns a handler with EmojiRepo wired and optional
@@ -180,6 +181,81 @@ func TestDriveShowFile_ByFileID(t *testing.T) {
 
 	rec := doPost(h.DriveShowFile, `{"fileId":"d1"}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestDriveShowFile_IncludesRequestIPAndHeaders guards #1148: frontend
+// admin-file.root.vue の IP タブは `info.requestIp` / `info.requestHeaders`
+// を参照するが、旧 mk-go は PackDriveFileWithRelations 直返しで両 field を
+// 含めていなかった (= IP タブが空表示)。upstream admin/drive/show-file.ts
+// と同 custom shape で出すよう修正、moderator viewer に対して上 2 field が
+// 含まれることを確認。
+func TestDriveShowFile_IncludesRequestIPAndHeaders(t *testing.T) {
+	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	// adminUser に moderator role を assign する。
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	assignRepo.Assignments["admin1:r_mod"] = &model.RoleAssignment{
+		ID: "ra_mod", UserID: "admin1", RoleID: "r_mod",
+	}
+
+	repo := testutil.NewMockDriveFileRepository()
+	owner := "u_owner"
+	ip := "203.0.113.42"
+	headers := datatypes.JSON([]byte(`{"x-test":"hello","user-agent":"curl/8.0"}`))
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID:             "d_with_ip",
+		UserID:         &owner,
+		Name:           "secret.png",
+		Type:           "image/png",
+		RequestIP:      &ip,
+		RequestHeaders: headers,
+	}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveShowFile, `{"fileId":"d_with_ip"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "203.0.113.42", resp["requestIp"], "moderator viewer は requestIp 取得可能")
+	hdr, ok := resp["requestHeaders"].(map[string]any)
+	require.True(t, ok, "requestHeaders は object として emit される")
+	assert.Equal(t, "hello", hdr["x-test"])
+	assert.Equal(t, "curl/8.0", hdr["user-agent"])
+}
+
+// TestDriveShowFile_HidesRequestHeadersFromModeratorOwner: file owner も
+// moderator のときは requestHeaders を hide (upstream 仕様、モデレーター
+// 同士の互いの個人情報保護)。requestIp は引き続き public。
+func TestDriveShowFile_HidesRequestHeadersFromModeratorOwner(t *testing.T) {
+	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	// admin1 viewer + admin2 owner、両方 moderator role を持つ。
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	assignRepo.Assignments["admin1:r_mod"] = &model.RoleAssignment{
+		ID: "ra1", UserID: "admin1", RoleID: "r_mod",
+	}
+	assignRepo.Assignments["admin2:r_mod"] = &model.RoleAssignment{
+		ID: "ra2", UserID: "admin2", RoleID: "r_mod",
+	}
+
+	repo := testutil.NewMockDriveFileRepository()
+	owner := "admin2"
+	ip := "203.0.113.99"
+	headers := datatypes.JSON([]byte(`{"secret":"shh"}`))
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID:             "d_mod_owner",
+		UserID:         &owner,
+		Name:           "mod-file.png",
+		Type:           "image/png",
+		RequestIP:      &ip,
+		RequestHeaders: headers,
+	}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveShowFile, `{"fileId":"d_mod_owner"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "203.0.113.99", resp["requestIp"], "requestIp は moderator viewer に常に出す")
+	assert.Nil(t, resp["requestHeaders"], "owner が moderator のときは requestHeaders を null で hide")
 }
 
 func TestDriveCleanup_InvokesDeleteOrphans(t *testing.T) {

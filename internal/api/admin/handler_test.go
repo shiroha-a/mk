@@ -25,6 +25,17 @@ import (
 
 func newTestHandler(t *testing.T) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository, *testutil.MockRoleRepository) {
 	t.Helper()
+	h, userRepo, metaRepo, roleRepo, _ := newTestHandlerWithAssign(t)
+	return h, userRepo, metaRepo, roleRepo
+}
+
+// newTestHandlerWithAssign exposes the role-assignment mock alongside the
+// standard handler dependencies. Used by tests that need to attach
+// moderator / admin roles to the viewer (#1148 で moderator gate を伴う
+// admin/drive/show-file 等で必要)。新規 test は本 helper を使い、既存
+// test は (assign を必要としない場合) newTestHandler 互換 wrapper を継続。
+func newTestHandlerWithAssign(t *testing.T) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository, *testutil.MockRoleRepository, *testutil.MockRoleAssignmentRepository) {
+	t.Helper()
 	userRepo := testutil.NewMockUserRepository()
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
@@ -34,7 +45,7 @@ func newTestHandler(t *testing.T) (*apiadmin.Handler, *testutil.MockUserReposito
 	signupSvc := signup.NewService(userRepo, metaRepo, idGen)
 	roleSvc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
 	h := apiadmin.NewHandler(signupSvc, roleSvc, metaRepo, userRepo, idGen)
-	return h, userRepo, metaRepo, roleRepo
+	return h, userRepo, metaRepo, roleRepo, assignRepo
 }
 
 func doPost(h func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
