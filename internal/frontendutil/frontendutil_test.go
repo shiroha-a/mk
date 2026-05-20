@@ -65,6 +65,16 @@ func TestTwemojiDir_EnvOverride(t *testing.T) {
 	assert.Equal(t, "/custom/twemoji", TwemojiDir())
 }
 
+func TestFluentEmojiDir_Default(t *testing.T) {
+	t.Setenv("MISSKEY_FLUENT_EMOJI_DIR", "")
+	assert.Equal(t, filepath.Join("third_party/misskey", "fluent-emojis", "dist"), FluentEmojiDir())
+}
+
+func TestFluentEmojiDir_EnvOverride(t *testing.T) {
+	t.Setenv("MISSKEY_FLUENT_EMOJI_DIR", "/custom/fluent")
+	assert.Equal(t, "/custom/fluent", FluentEmojiDir())
+}
+
 func TestStaticDir_Default(t *testing.T) {
 	t.Setenv("MISSKEY_STATIC_DIR", "")
 	assert.Equal(t, filepath.Join("third_party/misskey", "packages", "backend", "assets"), StaticDir())

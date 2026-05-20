@@ -58,6 +58,19 @@ func TwemojiDir() string {
 	return filepath.Join(frontendBase, "packages", "backend", "node_modules", "@discordapp", "twemoji", "dist", "svg")
 }
 
+// FluentEmojiDir returns the path to fluent-emoji PNG files. upstream Misskey
+// TS では `node_modules/@misskey-dev/emoji-assets/built/fluent-emoji` から
+// 配信されるが、本リポジトリでは submodule `third_party/misskey/fluent-emojis/
+// dist` に同一の asset 集合が同梱されているのでこちらを参照する。frontend
+// `ACHIEVEMENT_BADGES` (= 実績バッジ) や notification icon が `/fluent-emoji/
+// <hex>.png` の URL で参照する。環境変数 `MISSKEY_FLUENT_EMOJI_DIR` で上書き可能。
+func FluentEmojiDir() string {
+	if v := os.Getenv("MISSKEY_FLUENT_EMOJI_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(frontendBase, "fluent-emojis", "dist")
+}
+
 // StaticDir returns the path to static assets (icons, splash, favicon etc.).
 // 環境変数 MISSKEY_STATIC_DIR で上書き可能。本家 TS では packages/backend/assets
 // が /static-assets として配信される。

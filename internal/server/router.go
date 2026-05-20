@@ -2410,6 +2410,13 @@ func (s *Server) setupRoutes() {
 		s.echo.Static("/twemoji", twemojiDir)
 	}
 
+	// fluent-emoji PNG配信 (実績バッジ等で参照される)。upstream Misskey TS の
+	// /fluent-emoji/:hex.png 経路 (ClientServerService.ts) と互換。
+	fluentEmojiDir := frontendutil.FluentEmojiDir()
+	if _, err := os.Stat(fluentEmojiDir); err == nil {
+		s.echo.Static("/fluent-emoji", fluentEmojiDir)
+	}
+
 	// client-assets配信 (バブルゲーム、フラッシュ等のフロントエンドアセット)
 	clientAssetsDir := frontendutil.ClientAssetsDir()
 	if _, err := os.Stat(clientAssetsDir); err == nil {
