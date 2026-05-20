@@ -1001,6 +1001,86 @@ func TestFollowers_PopulatesPendingFollowRequest(t *testing.T) {
 	assert.Equal(t, false, follower["hasPendingFollowRequestToYou"])
 }
 
+// fakeRemoteStatsFetcher is a stub for users.RemoteStatsFetcher returning
+// canned stats per (host, username) pair. Used by remote stats override
+// regression tests (#1146).
+type fakeRemoteStatsFetcher struct {
+	stats map[string]*RemoteUserStatsView // key = host + "|" + username
+	calls int
+}
+
+func (f *fakeRemoteStatsFetcher) Fetch(_ context.Context, host, username string) *RemoteUserStatsView {
+	f.calls++
+	return f.stats[host+"|"+username]
+}
+
+// TestFollowers_AppliesRemoteStatsOverride guards #1146: remote user の
+// notesCount / followersCount / followingCount は origin instance の
+// /api/users/show から取得した値で上書きされる (RemoteStatsFetcher 経由)。
+// 旧来は Show 経路だけで適用されていて、list 経路 (followers/following) では
+// ローカル観測値のままだった。
+func TestFollowers_AppliesRemoteStatsOverride(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = local target profile
+	remoteHost := "remote.example"
+	repo.Users["remote-alice"] = &model.User{
+		ID:                "remote-alice",
+		Username:          "alice",
+		UsernameLower:     "alice",
+		Host:              &remoteHost,
+		NotesCount:        5,  // ローカル観測値 (= 古い)
+		FollowersCount:    10, // ローカル観測値
+		FollowingCount:    3,  // ローカル観測値
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	// remote-alice が user1 を follow → list に出る。
+	fSvc := h.followingService
+	_, err := fSvc.Follow("remote-alice", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// fetcher は remote-alice に対して大きい本物の値を返す。
+	h.SetRemoteStatsFetcher(&fakeRemoteStatsFetcher{
+		stats: map[string]*RemoteUserStatsView{
+			"remote.example|alice": {NotesCount: 500, FollowersCount: 1000, FollowingCount: 250},
+		},
+	})
+
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	follower, ok := out[0]["follower"].(map[string]any)
+	require.True(t, ok)
+	// 上書き後の remote 実値が反映されていることを assert (= 旧 5/10/3 では
+	// なく 500/1000/250)。
+	assert.Equal(t, float64(500), follower["notesCount"])
+	assert.Equal(t, float64(1000), follower["followersCount"])
+	assert.Equal(t, float64(250), follower["followingCount"])
+}
+
+// TestFollowers_RemoteStatsOverride_SkipsLocalUser: local user (Host==nil) は
+// fetcher 経路を skip し、ローカル観測値をそのまま使う。HTTP request 削減。
+func TestFollowers_RemoteStatsOverride_SkipsLocalUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = local target
+	repo.Users["local-bob"] = &model.User{
+		ID:                "local-bob",
+		Username:          "bob",
+		UsernameLower:     "bob",
+		NotesCount:        42,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	fSvc := h.followingService
+	_, err := fSvc.Follow("local-bob", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	fetcher := &fakeRemoteStatsFetcher{stats: map[string]*RemoteUserStatsView{}}
+	h.SetRemoteStatsFetcher(fetcher)
+
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 0, fetcher.calls, "local user (Host==nil) は fetcher を呼ばない")
+}
+
 // TestFollowing_PopulatesIsFollowedFromViewer covers the symmetric case
 // for /api/users/following — each `followee` UserDetailed gets viewer's
 // relation flags.

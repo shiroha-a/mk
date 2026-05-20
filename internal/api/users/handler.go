@@ -600,9 +600,9 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		err  error
 	)
 	if followers {
-		rows, err = h.collectFollowers(req, viewer)
+		rows, err = h.collectFollowers(c.Request().Context(), req, viewer)
 	} else {
-		rows, err = h.collectFollowing(req, viewer)
+		rows, err = h.collectFollowing(c.Request().Context(), req, viewer)
 	}
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -620,20 +620,20 @@ type relationItem struct {
 	Followee   *entity.UserDetailed `json:"followee,omitempty"`
 }
 
-func (h *Handler) collectFollowers(req FollowersRequest, viewer *model.User) ([]relationItem, error) {
+func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
 	rows, err := h.followingService.ListReceivedFollowing(req.UserID, req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}
-	return h.packRelationItems(rows, req, true, viewer), nil
+	return h.packRelationItems(ctx, rows, req, true, viewer), nil
 }
 
-func (h *Handler) collectFollowing(req FollowersRequest, viewer *model.User) ([]relationItem, error) {
+func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
 	rows, err := h.followingService.ListSentFollowing(req.UserID, req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}
-	return h.packRelationItems(rows, req, false, viewer), nil
+	return h.packRelationItems(ctx, rows, req, false, viewer), nil
 }
 
 // packRelationItems builds the response slice for users/followers and
@@ -650,6 +650,7 @@ func (h *Handler) collectFollowing(req FollowersRequest, viewer *model.User) ([]
 // と list 内 user の id 一致時は relation lookup を skip する (= self-flag
 // は意味なし)。
 func (h *Handler) packRelationItems(
+	ctx context.Context,
 	rows []*model.Following,
 	req FollowersRequest,
 	followers bool,
@@ -706,6 +707,12 @@ func (h *Handler) packRelationItems(
 	// になる。upstream UserDetailedNotMe schema と整合させる。
 	pendingFromMap, pendingToMap := h.batchPendingRequestRelations(viewer, bundleByID)
 
+	// remote user の notes/followers/following count を origin instance の
+	// /api/users/show から fetch して上書き (#1146)。Show 経路 (handler.go:329)
+	// と同 logic だが、本 list 経路では N 件並列 fetch で N round-trip を回避
+	// する (singleflight が同 key dedup、cache 1h で次 scroll は HTTP 0)。
+	remoteStatsMap := h.batchRemoteStatsOverride(ctx, bundleByID)
+
 	out := make([]relationItem, 0, len(filtered))
 	for _, f := range filtered {
 		item := relationItem{ID: f.ID, FollowerID: f.FollowerID, FolloweeID: f.FolloweeID}
@@ -728,6 +735,11 @@ func (h *Handler) packRelationItems(
 				pendingTo := pendingToMap[b.User.ID]
 				d.HasPendingFollowRequestFromYou = &pendingFrom
 				d.HasPendingFollowRequestToYou = &pendingTo
+			}
+			if stats := remoteStatsMap[b.User.ID]; stats != nil {
+				d.NotesCount = stats.NotesCount
+				d.FollowersCount = stats.FollowersCount
+				d.FollowingCount = stats.FollowingCount
 			}
 			if followers {
 				item.Follower = &d
@@ -796,6 +808,54 @@ func (h *Handler) batchPendingRequestRelations(viewer *model.User, bundleByID ma
 		}
 	}
 	return fromMap, toMap
+}
+
+// batchRemoteStatsOverride fans out RemoteStatsFetcher.Fetch goroutines for
+// every remote user in bundleByID and returns the resulting stats keyed by
+// user ID. Local users (host == nil) are skipped. fetcher が未配線 / list
+// に remote user 0 件なら nil を返して caller が override loop を skip できる
+// (#1146)。
+//
+// 並列化の妥当性: 各 Fetch は HTTP I/O bound (~500ms RTT) で CPU は遊んで
+// いるので、20-100 件並列でも runtime コストは無視可能。同じ (host, username)
+// に対する concurrent call は fetcher 内部の singleflight.Group で 1 HTTP に
+// dedup される。ctx は request context を伝播するので client abort で全
+// goroutine が cancel される。
+func (h *Handler) batchRemoteStatsOverride(ctx context.Context, bundleByID map[string]*user.UserWithProfile) map[string]*RemoteUserStatsView {
+	if h.remoteStatsFetcher == nil || len(bundleByID) == 0 {
+		return nil
+	}
+	type job struct {
+		userID, host, username string
+	}
+	jobs := make([]job, 0, len(bundleByID))
+	for id, b := range bundleByID {
+		if b.User.Host == nil || *b.User.Host == "" {
+			continue
+		}
+		jobs = append(jobs, job{userID: id, host: *b.User.Host, username: b.User.Username})
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	out := make(map[string]*RemoteUserStatsView, len(jobs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(len(jobs))
+	for _, j := range jobs {
+		go func(j job) {
+			defer wg.Done()
+			stats := h.remoteStatsFetcher.Fetch(ctx, j.host, j.username)
+			if stats == nil {
+				return
+			}
+			mu.Lock()
+			out[j.userID] = stats
+			mu.Unlock()
+		}(j)
+	}
+	wg.Wait()
+	return out
 }
 
 // buildRelationCandidates returns the candidate user IDs for viewer-relative
