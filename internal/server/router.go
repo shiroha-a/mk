@@ -2404,17 +2404,18 @@ func (s *Server) setupRoutes() {
 	repoAssetsDir := frontendutil.RepoAssetsDir()
 	s.echo.GET("/assets/*", frontendutil.AssetsHandler(frontendDistDir, repoAssetsDir))
 
-	// twemoji SVG配信
+	// twemoji SVG配信 + 30 day Cache-Control (upstream `ms('30 days')` 同等)。
 	twemojiDir := frontendutil.TwemojiDir()
 	if _, err := os.Stat(twemojiDir); err == nil {
-		s.echo.Static("/twemoji", twemojiDir)
+		serveStaticAssetDir(s.echo, "/twemoji", twemojiDir)
 	}
 
 	// fluent-emoji PNG配信 (実績バッジ等で参照される)。upstream Misskey TS の
-	// /fluent-emoji/:hex.png 経路 (ClientServerService.ts) と互換。
+	// /fluent-emoji/:hex.png 経路 (ClientServerService.ts) と互換、+ 30 day
+	// Cache-Control (上記 twemoji と同 helper)。
 	fluentEmojiDir := frontendutil.FluentEmojiDir()
 	if _, err := os.Stat(fluentEmojiDir); err == nil {
-		s.echo.Static("/fluent-emoji", fluentEmojiDir)
+		serveStaticAssetDir(s.echo, "/fluent-emoji", fluentEmojiDir)
 	}
 
 	// client-assets配信 (バブルゲーム、フラッシュ等のフロントエンドアセット)
