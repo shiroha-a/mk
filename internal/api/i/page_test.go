@@ -68,6 +68,9 @@ func TestPageLikes_FullShape(t *testing.T) {
 // 起きうる)。pair test の TestPageLikes_DropsLikeWithoutOwner は "owner row
 // missing" branch を cover し、両者で `PackPageWithContext` が emit する
 // `user` field を null/欠落させない invariant を 2 方向から guard する。
+// 規約自体は entity.PackPageContext の Owner field docstring (= "List
+// callers MUST drop the row when their lookup misses") に明文化されており、
+// 本 test 群はその規約の handler-level な実装担保。
 func TestPageLikes_DropsDanglingLike(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	pageRepo := testutil.NewMockPageRepository()

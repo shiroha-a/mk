@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -195,6 +196,76 @@ func TestBindDriver_ReplacesPreviousBinding(t *testing.T) {
 	require.NoError(t, m.Register(r))
 	body := scrape(t, r)
 	assert.Contains(t, body, `mk_job_workers_active{queue="deliver"} 99`)
+}
+
+// TestBindDriver_PreservesScrapeErrorsAcrossRebind verifies that the
+// accumulated scrape_errors_total counter survives a BindDriver re-bind
+// (driver swap mid-life), because scrapeErrs lives on Metrics not the
+// per-bind driverCollector. Without this, an operator hot-swapping
+// drivers (e.g. asynq → mkq via config reload) would silently lose
+// alerting history reachable via Metrics.ScrapeErrorCount (#1136
+// follow-up).
+//
+// Note: prometheus.Registry doesn't unregister the old Collector on
+// re-bind — callers needing the new driver visible via /metrics scrape
+// body must also re-Register. This test only guards the persistence of
+// `ScrapeErrorCount` accessor, which is the in-process API used for
+// programmatic monitoring (e.g. an internal admin endpoint or
+// integration test).
+func TestBindDriver_PreservesScrapeErrorsAcrossRebind(t *testing.T) {
+	m := New()
+	failing := &fakeDriver{
+		workers: map[string]int{"deliver": 1},
+		inspector: &fakeInspector{
+			errByQueue: map[string]error{"deliver": errors.New("redis timeout")},
+		},
+	}
+	m.BindDriver(failing)
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+	scrape(t, r) // increments count to 1
+	require.Equal(t, uint64(1), m.ScrapeErrorCount("deliver", "queue_pending"))
+
+	// Re-bind to a different driver — accumulated count must be preserved
+	// because the new driverCollector points to the SAME m.scrapeErrs map.
+	healthy := &fakeDriver{workers: map[string]int{"deliver": 5}, inspector: &fakeInspector{}}
+	m.BindDriver(healthy)
+	assert.Equal(t, uint64(1), m.ScrapeErrorCount("deliver", "queue_pending"),
+		"scrape error count must persist across BindDriver re-bind")
+}
+
+// TestPullCollector_ConcurrentScrapesIncrementAtomically verifies that
+// simultaneous Prometheus scrapers (= multi-pod monitoring / replicated
+// Prometheus servers) increment scrape_errors_total without lost updates.
+// The sync.Map + *atomic.Uint64 pattern relies on standard-library
+// contracts; this is a wiring smoke test (#1136 follow-up review #4).
+func TestPullCollector_ConcurrentScrapesIncrementAtomically(t *testing.T) {
+	d := &fakeDriver{
+		workers: map[string]int{"deliver": 1},
+		inspector: &fakeInspector{
+			errByQueue: map[string]error{"deliver": errors.New("redis timeout")},
+		},
+	}
+	m := New()
+	m.BindDriver(d)
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	const goroutines = 8
+	const scrapesPerGoroutine = 25
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < scrapesPerGoroutine; j++ {
+				scrape(t, r)
+			}
+		}()
+	}
+	wg.Wait()
+	// 各 scrape で deliver の Inspector が 1 回 fail → 8 * 25 = 200 回 increment。
+	assert.Equal(t, uint64(goroutines*scrapesPerGoroutine), m.ScrapeErrorCount("deliver", "queue_pending"))
 }
 
 // TestObserveHistograms verifies that DispatchWaitSeconds and ProcessingSeconds

@@ -51,18 +51,21 @@ type Metrics struct {
 	DispatchWaitSeconds *prometheus.HistogramVec
 	ProcessingSeconds   *prometheus.HistogramVec
 	ScaleEventsTotal    *prometheus.CounterVec
+
+	// scrapeErrs is the (queue, kind) → cumulative count map. Lives on
+	// Metrics (not driverCollector) so accumulated counts persist across
+	// BindDriver re-bind (= driver swap mid-life, e.g. asynq → mkq config
+	// change). driverCollector holds a pointer to this map so Inc + emit
+	// both touch the same series.
+	scrapeErrs sync.Map // map[scrapeErrKey]*atomic.Uint64
 }
 
 // ScrapeErrorCount returns the cumulative count of /metrics scrape failures
-// for the (queue, kind) pair, or 0 if no errors have been observed (or no
-// driver is bound). Intended for tests that need to assert the same-scrape
-// observability invariant — see TestBuildMetricsHandler in internal/server
-// for the corresponding scrape-body-level assertion path.
+// for the (queue, kind) pair, or 0 if no errors have been observed.
+// Persisted on Metrics so re-binding the driver via BindDriver does not
+// reset the count.
 func (m *Metrics) ScrapeErrorCount(queue, kind string) uint64 {
-	if m.pullCollector == nil {
-		return 0
-	}
-	return m.pullCollector.getScrapeError(queue, kind)
+	return loadScrapeError(&m.scrapeErrs, scrapeErrKey{queue: queue, kind: kind})
 }
 
 // New constructs the Metrics bundle (no registration, no driver binding).
@@ -123,7 +126,7 @@ func (m *Metrics) BindDriver(d driver.Driver) {
 		m.pullCollector = nil
 		return
 	}
-	m.pullCollector = &driverCollector{driver: d}
+	m.pullCollector = &driverCollector{driver: d, scrapeErrs: &m.scrapeErrs}
 }
 
 // Register attaches all owned collectors to r. Returns the first error to
@@ -167,10 +170,11 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 type driverCollector struct {
 	driver driver.Driver
 
-	// scrapeErrs is the (queue, kind) → cumulative count map. sync.Map +
+	// scrapeErrs is a pointer to the Metrics-owned map so accumulated
+	// counts persist across BindDriver re-bind (driver swap). sync.Map +
 	// *atomic.Uint64 lets concurrent scrapes (= simultaneous Prometheus
 	// scrapers) increment safely without blocking each other.
-	scrapeErrs sync.Map // map[scrapeErrKey]*atomic.Uint64
+	scrapeErrs *sync.Map // map[scrapeErrKey]*atomic.Uint64
 }
 
 // scrapeErrKey identifies a single scrape-error counter series. kind is the
@@ -180,19 +184,17 @@ type scrapeErrKey struct {
 	queue, kind string
 }
 
-// incScrapeError increments the cumulative count for (queue, kind). Safe
-// for concurrent invocation.
-func (c *driverCollector) incScrapeError(queue, kind string) {
-	k := scrapeErrKey{queue: queue, kind: kind}
-	v, _ := c.scrapeErrs.LoadOrStore(k, new(atomic.Uint64))
+// incScrapeError increments the cumulative count for (queue, kind) on the
+// given sync.Map. Safe for concurrent invocation.
+func incScrapeError(m *sync.Map, key scrapeErrKey) {
+	v, _ := m.LoadOrStore(key, new(atomic.Uint64))
 	v.(*atomic.Uint64).Add(1)
 }
 
-// getScrapeError returns the cumulative count for (queue, kind), 0 if the
+// loadScrapeError returns the cumulative count for (queue, kind), 0 if the
 // counter has never been incremented.
-func (c *driverCollector) getScrapeError(queue, kind string) uint64 {
-	k := scrapeErrKey{queue: queue, kind: kind}
-	v, ok := c.scrapeErrs.Load(k)
+func loadScrapeError(m *sync.Map, key scrapeErrKey) uint64 {
+	v, ok := m.Load(key)
 	if !ok {
 		return 0
 	}
@@ -238,7 +240,7 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 		info, err := inspector.GetQueueInfo(q)
 		switch {
 		case err != nil:
-			c.incScrapeError(q, "queue_pending")
+			incScrapeError(c.scrapeErrs, scrapeErrKey{queue: q, kind: "queue_pending"})
 		case info != nil:
 			pending = info.Pending
 		}
@@ -255,7 +257,8 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, q := range standardQueues {
 		ch <- prometheus.MustNewConstMetric(
 			scrapeErrorsDesc, prometheus.CounterValue,
-			float64(c.getScrapeError(q, "queue_pending")), q, "queue_pending",
+			float64(loadScrapeError(c.scrapeErrs, scrapeErrKey{queue: q, kind: "queue_pending"})),
+			q, "queue_pending",
 		)
 	}
 }
