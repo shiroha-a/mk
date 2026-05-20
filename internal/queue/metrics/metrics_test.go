@@ -167,14 +167,18 @@ func TestBindDriver_InspectorErrorReturnsZero(t *testing.T) {
 	body := scrape(t, r)
 	assert.Contains(t, body, `mk_job_workers_active{queue="deliver"} 8`)
 	assert.Contains(t, body, `mk_job_queue_pending{queue="deliver"} 0`)
-	assert.Equal(t, 1.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("deliver", "queue_pending")))
+	// 同 scrape の body 内にも error counter が反映されていることを assert
+	// (MustNewConstMetric 経路なので scrape goroutine 内で値を capture)。
+	assert.Contains(t, body, `mk_job_scrape_errors_total{kind="queue_pending",queue="deliver"} 1`)
+	assert.Equal(t, uint64(1), m.ScrapeErrorCount("deliver", "queue_pending"))
 
-	// Second scrape: counter increments again.
-	scrape(t, r)
-	assert.Equal(t, 2.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("deliver", "queue_pending")))
+	// Second scrape: counter increments again, body reflects the new value.
+	body = scrape(t, r)
+	assert.Contains(t, body, `mk_job_scrape_errors_total{kind="queue_pending",queue="deliver"} 2`)
+	assert.Equal(t, uint64(2), m.ScrapeErrorCount("deliver", "queue_pending"))
 
 	// Successful queues do not increment scrape_errors.
-	assert.Equal(t, 0.0, testutil.ToFloat64(m.ScrapeErrorsTotal.WithLabelValues("inbox", "queue_pending")))
+	assert.Equal(t, uint64(0), m.ScrapeErrorCount("inbox", "queue_pending"))
 }
 
 // TestBindDriver_ReplacesPreviousBinding verifies that calling BindDriver

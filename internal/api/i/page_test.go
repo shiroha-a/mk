@@ -63,8 +63,11 @@ func TestPageLikes_FullShape(t *testing.T) {
 	assert.Equal(t, "author", user["username"])
 }
 
-// TestPageLikes_DropsDanglingLike: page が削除された後の dangling like 行は
-// drop される (frontend crash を防ぐ fail-soft)。
+// TestPageLikes_DropsDanglingLike covers the "page row missing" fail-soft
+// branch (= FK CASCADE で原理上発生しないが transient race / data drift で
+// 起きうる)。pair test の TestPageLikes_DropsLikeWithoutOwner は "owner row
+// missing" branch を cover し、両者で `PackPageWithContext` が emit する
+// `user` field を null/欠落させない invariant を 2 方向から guard する。
 func TestPageLikes_DropsDanglingLike(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	pageRepo := testutil.NewMockPageRepository()
@@ -106,6 +109,12 @@ func TestPageLikes_DropsLikeWithoutOwner(t *testing.T) {
 // TestPageLikes_CursorPagination: untilID 指定で id < untilID の row のみ
 // 返ることを確認 (#1136 follow-up、frontend Paginator の fetchOlder が
 // untilId を投げてくるが、cursor 未対応だと同 page を無限ループする)。
+//
+// `pl_001` / `pl_002` は aidx 形式ではないが、cursor filter は実 repo
+// (postgres varchar 比較) も mock (Go string 比較) も lex 順で動くので
+// この test の意図 (= cursor が機能すること) を guard するのに十分。
+// 実 aidx (`idGen.Generate(time.Now())`) を使うと test 出力に長い
+// random-like ID が出て読みづらくなるため、可読性を取った。
 func TestPageLikes_CursorPagination(t *testing.T) {
 	h, userRepo := newExtraHandler(t)
 	userRepo.Users["author"] = &model.User{ID: "author", Username: "author", UsernameLower: "author"}

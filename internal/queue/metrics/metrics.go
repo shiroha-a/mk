@@ -20,6 +20,9 @@
 package metrics
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -48,13 +51,18 @@ type Metrics struct {
 	DispatchWaitSeconds *prometheus.HistogramVec
 	ProcessingSeconds   *prometheus.HistogramVec
 	ScaleEventsTotal    *prometheus.CounterVec
+}
 
-	// ScrapeErrorsTotal counts /metrics scrape failures by queue + kind
-	// (= which pull source failed, e.g. "queue_pending"). Exposed so
-	// operators can alert on Redis / Inspector failures that would
-	// otherwise be hidden behind silent zero values. See pullCollector
-	// (Collect path) for the only emit site in this PR.
-	ScrapeErrorsTotal *prometheus.CounterVec
+// ScrapeErrorCount returns the cumulative count of /metrics scrape failures
+// for the (queue, kind) pair, or 0 if no errors have been observed (or no
+// driver is bound). Intended for tests that need to assert the same-scrape
+// observability invariant — see TestBuildMetricsHandler in internal/server
+// for the corresponding scrape-body-level assertion path.
+func (m *Metrics) ScrapeErrorCount(queue, kind string) uint64 {
+	if m.pullCollector == nil {
+		return 0
+	}
+	return m.pullCollector.getScrapeError(queue, kind)
 }
 
 // New constructs the Metrics bundle (no registration, no driver binding).
@@ -84,25 +92,18 @@ func New() *Metrics {
 			Name:      "scale_events_total",
 			Help:      "Total auto-scale events triggered, by queue and direction (up/down).",
 		}, []string{"queue", "direction"}),
-		ScrapeErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "mk",
-			Subsystem: "job",
-			Name:      "scrape_errors_total",
-			Help:      "Total Prometheus scrape errors per queue, by source kind (e.g. queue_pending = Inspector.GetQueueInfo failed). A non-zero rate here means the corresponding gauge is reporting stale/zero values; alert on this rather than only on the gauge values themselves.",
-		}, []string{"queue", "kind"}),
 	}
 	// Pre-init zero-valued series for push-mode metrics so Prometheus
 	// dashboards show a continuous line instead of "no data". Pull-mode
-	// metrics (workers_active / queue_pending) don't need pre-init because
-	// driverCollector.Collect always emits a value for every standardQueues
-	// entry on each scrape.
+	// metrics (workers_active / queue_pending / scrape_errors_total) don't
+	// need pre-init because driverCollector.Collect always emits a value for
+	// every standardQueues entry on each scrape.
 	for _, q := range standardQueues {
 		m.DispatchWaitSeconds.WithLabelValues(q)
 		m.ProcessingSeconds.WithLabelValues(q, "success")
 		m.ProcessingSeconds.WithLabelValues(q, "failure")
 		m.ScaleEventsTotal.WithLabelValues(q, "up")
 		m.ScaleEventsTotal.WithLabelValues(q, "down")
-		m.ScrapeErrorsTotal.WithLabelValues(q, "queue_pending")
 	}
 	return m
 }
@@ -110,7 +111,9 @@ func New() *Metrics {
 // BindDriver wires the pull-based gauges (workers_active / queue_pending) to
 // the given driver.Driver. Calling BindDriver multiple times replaces the
 // previous binding (= last caller wins). Call order vs Register is free —
-// scrapeErrors is wired here directly so BindDriver-after-Register also works.
+// the new driverCollector owns its own scrape error state internally so
+// scrape errors are emitted from within the same Collect goroutine as the
+// gauges (= no race vs a separately-registered CounterVec; #1136 follow-up).
 //
 // Gauges are evaluated lazily on each scrape, so a non-running driver
 // (Server not yet Start()ed) shows zero without erroring (driver.WorkerCount
@@ -120,10 +123,7 @@ func (m *Metrics) BindDriver(d driver.Driver) {
 		m.pullCollector = nil
 		return
 	}
-	m.pullCollector = &driverCollector{
-		driver:       d,
-		scrapeErrors: m.ScrapeErrorsTotal,
-	}
+	m.pullCollector = &driverCollector{driver: d}
 }
 
 // Register attaches all owned collectors to r. Returns the first error to
@@ -135,7 +135,6 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 		m.DispatchWaitSeconds,
 		m.ProcessingSeconds,
 		m.ScaleEventsTotal,
-		m.ScrapeErrorsTotal,
 	}
 	if m.pullCollector != nil {
 		collectors = append(collectors, m.pullCollector)
@@ -148,10 +147,16 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 	return nil
 }
 
-// driverCollector implements prometheus.Collector for the pull-based gauges
-// (workers_active / queue_pending). Both metrics share a single Collector
-// so the Describe / Collect calls execute one pass over the queue list,
-// rather than registering 2 × N GaugeFunc collectors.
+// driverCollector implements prometheus.Collector for the pull-based metrics
+// (workers_active / queue_pending / scrape_errors_total). All 3 metrics
+// share a single Collector so Describe / Collect execute one pass over the
+// queue list, AND scrape errors are accumulated + emitted from within the
+// same Collect goroutine — emitting via MustNewConstMetric captures the
+// counter value synchronously, avoiding the race that existed when
+// scrape_errors_total was a separate CounterVec (its Counter.Write was
+// called LATER by prometheus.Registry.Gather's main goroutine, after a
+// peer Collector's Inc had already mutated the counter — off-by-one
+// observation in the same scrape; #1136 follow-up).
 //
 // At scrape time, Collect calls driver.WorkerCount and Inspector.GetQueueInfo
 // for every standardQueues entry. Errors from Inspector are swallowed at the
@@ -160,8 +165,38 @@ func (m *Metrics) Register(r prometheus.Registerer) error {
 // `mk_job_scrape_errors_total{kind="queue_pending"}` so operators can alert
 // on the failure rate without having to watch the gauge for "suspicious zeros".
 type driverCollector struct {
-	driver       driver.Driver
-	scrapeErrors *prometheus.CounterVec // wired by Metrics.Register
+	driver driver.Driver
+
+	// scrapeErrs is the (queue, kind) → cumulative count map. sync.Map +
+	// *atomic.Uint64 lets concurrent scrapes (= simultaneous Prometheus
+	// scrapers) increment safely without blocking each other.
+	scrapeErrs sync.Map // map[scrapeErrKey]*atomic.Uint64
+}
+
+// scrapeErrKey identifies a single scrape-error counter series. kind is the
+// upstream label ("queue_pending" for inspector failures; future kinds may
+// cover other pull sources).
+type scrapeErrKey struct {
+	queue, kind string
+}
+
+// incScrapeError increments the cumulative count for (queue, kind). Safe
+// for concurrent invocation.
+func (c *driverCollector) incScrapeError(queue, kind string) {
+	k := scrapeErrKey{queue: queue, kind: kind}
+	v, _ := c.scrapeErrs.LoadOrStore(k, new(atomic.Uint64))
+	v.(*atomic.Uint64).Add(1)
+}
+
+// getScrapeError returns the cumulative count for (queue, kind), 0 if the
+// counter has never been incremented.
+func (c *driverCollector) getScrapeError(queue, kind string) uint64 {
+	k := scrapeErrKey{queue: queue, kind: kind}
+	v, ok := c.scrapeErrs.Load(k)
+	if !ok {
+		return 0
+	}
+	return v.(*atomic.Uint64).Load()
 }
 
 var (
@@ -179,11 +214,17 @@ var (
 		"Number of pending jobs per queue (Redis ZCARD).",
 		[]string{"queue"}, nil,
 	)
+	scrapeErrorsDesc = prometheus.NewDesc(
+		"mk_job_scrape_errors_total",
+		"Total Prometheus scrape errors per queue, by source kind (e.g. queue_pending = Inspector.GetQueueInfo failed). A non-zero rate here means the corresponding gauge is reporting stale/zero values; alert on this rather than only on the gauge values themselves.",
+		[]string{"queue", "kind"}, nil,
+	)
 )
 
 func (c *driverCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- workersActiveDesc
 	ch <- queuePendingDesc
+	ch <- scrapeErrorsDesc
 }
 
 func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
@@ -197,15 +238,24 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 		info, err := inspector.GetQueueInfo(q)
 		switch {
 		case err != nil:
-			if c.scrapeErrors != nil {
-				c.scrapeErrors.WithLabelValues(q, "queue_pending").Inc()
-			}
+			c.incScrapeError(q, "queue_pending")
 		case info != nil:
 			pending = info.Pending
 		}
 		ch <- prometheus.MustNewConstMetric(
 			queuePendingDesc, prometheus.GaugeValue,
 			float64(pending), q,
+		)
+	}
+	// Emit scrape error counters AFTER all Inc calls above so the value
+	// reflects this scrape's failures. MustNewConstMetric captures the
+	// count synchronously within this goroutine — no race with the main
+	// Gather goroutine reading via Counter.Write later. Zero series are
+	// emitted for every standard queue so dashboards see a continuous line.
+	for _, q := range standardQueues {
+		ch <- prometheus.MustNewConstMetric(
+			scrapeErrorsDesc, prometheus.CounterValue,
+			float64(c.getScrapeError(q, "queue_pending")), q, "queue_pending",
 		)
 	}
 }

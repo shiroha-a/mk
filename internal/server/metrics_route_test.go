@@ -166,7 +166,14 @@ func TestWireMetricsEndpoint_OpenMetricsFormat(t *testing.T) {
 // TestBuildMetricsHandler_ReportsScrapeErrorOnInspectorFailure verifies that
 // a failing Inspector triggers mk_job_scrape_errors_total{kind="queue_pending"}
 // on the same /metrics response (= scrape error is observable in the very
-// scrape that experienced the error, no extra round-trip needed).
+// scrape that experienced the error, no extra round-trip needed). The
+// "observable in the same scrape" invariant only holds because driverCollector
+// emits scrape_errors_total via MustNewConstMetric from within its own
+// Collect goroutine; a previous design with a separately-registered
+// CounterVec lost the synchronization (Prometheus Registry.Gather runs
+// Collect calls concurrently and reads Counter.Write later in the main
+// goroutine, so a peer Collector's Inc could land after serialization).
+// #1136 follow-up commit "Eliminate metrics scrape race".
 func TestBuildMetricsHandler_ReportsScrapeErrorOnInspectorFailure(t *testing.T) {
 	d := newFakeMetricsDriver(map[string]int{"deliver": 8}, map[string]int{})
 	d.pendErr = map[string]error{"deliver": errors.New("redis timeout")}
