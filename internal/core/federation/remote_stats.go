@@ -64,9 +64,10 @@ const remoteStatsCacheSize = 10000
 // TTL は per-entry で持ち、read 時に判定する (LRU library 自体は size
 // eviction のみで TTL を扱わない)。
 type RemoteStatsFetcher struct {
-	client *http.Client
-	cache  *lru.Cache[string, cachedRemoteStats]
-	group  singleflight.Group
+	client    *http.Client
+	cache     *lru.Cache[string, cachedRemoteStats]
+	group     singleflight.Group
+	userAgent string
 }
 
 type cachedRemoteStats struct {
@@ -79,14 +80,20 @@ type cachedRemoteStats struct {
 // built from allowedPrivateNetworks (= config.AllowedPrivateNetworks 互換) と
 // optional safehttp.Option (e.g. WithProxy)。
 //
+// userAgent は outbound request に set する User-Agent header 値で、通常は
+// `cfg.UserAgent` (= `mk-go/<ver> (<url>)` 形式) を渡す。空欄なら header は
+// 設定しない (= Go default の `Go-http-client/1.1` が送られる、test path)。
+//
 // urlpreview / mediaproxy と同じく safehttp 経由で組み立てる pattern (#943
 // review SSRF guard)。
-func NewRemoteStatsFetcher(allowedPrivateNetworks []string, opts ...safehttp.Option) *RemoteStatsFetcher {
+func NewRemoteStatsFetcher(allowedPrivateNetworks []string, userAgent string, opts ...safehttp.Option) *RemoteStatsFetcher {
 	transport := safehttp.NewSSRFSafeTransport(allowedPrivateNetworks, opts...)
-	return newFetcherWithClient(&http.Client{
+	f := newFetcherWithClient(&http.Client{
 		Transport: transport,
 		Timeout:   remoteStatsTimeout,
 	}, remoteStatsCacheSize)
+	f.userAgent = userAgent
+	return f
 }
 
 // newRemoteStatsFetcherWithTransport はテスト専用 constructor。redirectTransport
@@ -211,6 +218,9 @@ func (f *RemoteStatsFetcher) fetchMisskey(ctx context.Context, host, username st
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if f.userAgent != "" {
+		req.Header.Set("User-Agent", f.userAgent)
+	}
 	resp, err := f.client.Do(req)
 	if err != nil {
 		slog.Debug("remoteStats: misskey fetch failed", "host", host, "username", username, "err", err)
@@ -261,6 +271,9 @@ func (f *RemoteStatsFetcher) fetchMastodon(ctx context.Context, host, username s
 		return nil
 	}
 	req.Header.Set("Accept", "application/json")
+	if f.userAgent != "" {
+		req.Header.Set("User-Agent", f.userAgent)
+	}
 	resp, err := f.client.Do(req)
 	if err != nil {
 		slog.Debug("remoteStats: mastodon fetch failed", "host", host, "username", username, "err", err)

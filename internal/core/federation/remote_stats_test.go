@@ -105,11 +105,43 @@ func TestRemoteStatsFetcher_Fetch_MisskeyPathSkipsMastodon(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&mastodonHits), "Misskey success の場合 Mastodon fallback は呼ばない")
 }
 
+// TestRemoteStatsFetcher_Fetch_UserAgentSent guards #1154 review follow-up:
+// 設定された User-Agent が Misskey path / Mastodon path 両方の outbound
+// request に乗ること (= remote operator から fetch 元を識別できる礼儀 +
+// rate-limit policy の判断材料を提供)。
+func TestRemoteStatsFetcher_Fetch_UserAgentSent(t *testing.T) {
+	const expectedUA = "mk-go/test (https://example.com)"
+	var misskeyUA, mastodonUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/users/show":
+			misskeyUA = r.Header.Get("User-Agent")
+			http.Error(w, "not found", http.StatusNotFound)
+		case "/api/v1/accounts/lookup":
+			mastodonUA = r.Header.Get("User-Agent")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"1","username":"alice","statuses_count":1}`))
+		}
+	}))
+	defer srv.Close()
+
+	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
+	// userAgent は constructor で渡す pattern (production) と test helper の
+	// 両立のため、test では直接 field に代入する。NewRemoteStatsFetcher 経由
+	// だと httptest server に向け直すための custom transport が使えない。
+	f.userAgent = expectedUA
+
+	stats := f.Fetch(context.Background(), "fediverse.example", "alice")
+	require.NotNil(t, stats)
+	assert.Equal(t, expectedUA, misskeyUA, "Misskey path に UA が乗る")
+	assert.Equal(t, expectedUA, mastodonUA, "Mastodon path に UA が乗る")
+}
+
 func TestRemoteStatsFetcher_Fetch_NilOrEmpty(t *testing.T) {
 	var f *RemoteStatsFetcher
 	assert.Nil(t, f.Fetch(context.Background(), "h", "u"))
 
-	f = NewRemoteStatsFetcher(nil)
+	f = NewRemoteStatsFetcher(nil, "")
 	assert.Nil(t, f.Fetch(context.Background(), "", "u"))
 	assert.Nil(t, f.Fetch(context.Background(), "h", ""))
 }
