@@ -109,6 +109,10 @@ func TestFilesCreate_AllFormFields(t *testing.T) {
 // 中身が常に null になり IP タブが空表示になる。本 test では multipart
 // upload 後に repo 内の row を直接覗いて両 column が populate されている
 // ことを assert。
+//
+// 加えて: mk-go 独自 hardening (#1148) として `Authorization` / `Cookie`
+// 等 credential 系 header は保存時に deny-list で除外される。これらが
+// 含まれていないことも assert (DB dump 流出時の token 漏洩防止)。
 func TestFilesCreate_RecordsRequestIPAndHeaders(t *testing.T) {
 	h, fileRepo, _ := newHandler(t)
 	c, rec := newMultipartReq(t, "ip.txt", "hello", nil)
@@ -117,6 +121,10 @@ func TestFilesCreate_RecordsRequestIPAndHeaders(t *testing.T) {
 	// だが、明示的に X-Forwarded-For をセットして確実性を上げる。
 	c.Request().Header.Set("X-Forwarded-For", "203.0.113.7")
 	c.Request().Header.Set("X-Custom-Test", "marker-value")
+	// credential 系 header (= deny-list で除外されるべき)。
+	c.Request().Header.Set("Authorization", "Bearer secret-token-XYZ")
+	c.Request().Header.Set("Cookie", "session=secret-session-id")
+	c.Request().Header.Set("X-Api-Key", "secret-api-key")
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -135,6 +143,20 @@ func TestFilesCreate_RecordsRequestIPAndHeaders(t *testing.T) {
 	var headers map[string]string
 	require.NoError(t, json.Unmarshal(got.RequestHeaders, &headers))
 	assert.Equal(t, "marker-value", headers["X-Custom-Test"])
+	// 通常 header (X-Forwarded-For 等) は保存される。
+	assert.NotEmpty(t, headers["X-Forwarded-For"])
+
+	// credential 系は deny-list で除外され保存されない (mk-go 独自 hardening)。
+	// Go の http.Header は MIME canonical で保存するので key は "Authorization"
+	// (Title-Case)、deny-list は ToLower で比較するので一致する。
+	assert.NotContains(t, headers, "Authorization", "Authorization は保存しない")
+	assert.NotContains(t, headers, "Cookie", "Cookie は保存しない")
+	assert.NotContains(t, headers, "X-Api-Key", "X-Api-Key は保存しない")
+	// 念のため body 全体に secret token 文字列が残っていないことも確認
+	// (= JSON marshal 経路で何らかの漏出を防ぐ defense-in-depth)。
+	assert.NotContains(t, string(got.RequestHeaders), "secret-token-XYZ")
+	assert.NotContains(t, string(got.RequestHeaders), "secret-session-id")
+	assert.NotContains(t, string(got.RequestHeaders), "secret-api-key")
 }
 
 func TestFilesCreate_NoFile(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -789,24 +790,50 @@ func requestIPFromContext(c echo.Context) *string {
 	return &ip
 }
 
+// sensitiveRequestHeaders は drive_file.requestHeaders に保存しない header
+// 名 (小文字 canonical) の deny-list。mk-go 独自 hardening として、upstream
+// Misskey TS が全 header を生のまま保存する設計から divergence する (#1148)。
+//
+// 根拠: drive_file.requestHeaders は admin の moderation 用途で参照される
+// (admin/drive/show-file の IP タブ) が、`Authorization` 等の credential
+// header を保存すると DB dump 流出時に user の Bearer token / session
+// cookie が芋づる式に漏れる。moderation 価値より credential 流出 risk が
+// 上回るので保存時点で除外する。upstream で同 hardening を入れる PR は
+// shiroha-a/misskey-ts fork 経由で中長期検討。
+var sensitiveRequestHeaders = map[string]struct{}{
+	"authorization":       {},
+	"cookie":              {},
+	"set-cookie":          {},
+	"x-api-key":           {},
+	"api-key":             {},
+	"proxy-authorization": {},
+}
+
 // requestHeadersForDrive snapshots the inbound HTTP request headers into a
-// jsonb blob stored on drive_file.requestHeaders (#1148)。upstream は全
-// header を保存するが、本実装も同様に全保存する (frontend admin-file の
-// IP タブが iterate 表示するので filtering は admin UI 側の責務)。
-// 空 header set なら nil を返して列を NULL のままにする。
+// jsonb blob stored on drive_file.requestHeaders (#1148)。`sensitiveRequest
+// Headers` deny-list で credential 系を除外。`map[string]string` で保存する
+// (慣習として 1 要素 header が大半、複数値の場合は最初を採用)。空 header
+// set なら nil を返して列を NULL のままにする。
 func requestHeadersForDrive(c echo.Context) datatypes.JSON {
 	req := c.Request()
 	if req == nil || len(req.Header) == 0 {
 		return nil
 	}
-	// http.Header は []string 値だが、慣習として 1 要素のものが大半。
-	// upstream は単一 string で記録するため、最初の要素を採用する
-	// (= 複数値 header はほぼ存在しない、Cookie 等の特殊例も最初を採用)。
 	out := make(map[string]string, len(req.Header))
 	for k, vs := range req.Header {
+		// HTTP header 名は case-insensitive なので canonical な小文字で
+		// deny-list と比較する。Go の http.Header は MIME canonical
+		// (= "Authorization" 等の Title-Case) で正規化済なので、こちらは
+		// 単純に ToLower で揃える。
+		if _, deny := sensitiveRequestHeaders[strings.ToLower(k)]; deny {
+			continue
+		}
 		if len(vs) > 0 {
 			out[k] = vs[0]
 		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
