@@ -3441,22 +3441,33 @@ func (m *MockPageLikeRepository) Exists(userID, pageID string) (bool, error) {
 	return err == nil, nil
 }
 
-func (m *MockPageLikeRepository) ListByUser(userID string, limit, offset int) ([]*model.PageLike, error) {
+func (m *MockPageLikeRepository) ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.PageLike, error) {
 	out := make([]*model.PageLike, 0)
 	for _, l := range m.Likes {
-		if l.UserID == userID {
-			out = append(out, l)
+		if l.UserID != userID {
+			continue
 		}
+		// cursor filter: real repo は id > sinceID / id < untilID で絞り込む。
+		// mock も string 比較で同 semantics (aidx は lex-sortable なので OK)。
+		if sinceID != "" && l.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && l.ID >= untilID {
+			continue
+		}
+		out = append(out, l)
 	}
 	// tiny in-memory paging; sort not necessary for unit tests
-	if offset >= len(out) {
-		return nil, nil
+	if sinceID == "" && untilID == "" && offset > 0 {
+		if offset >= len(out) {
+			return nil, nil
+		}
+		out = out[offset:]
 	}
-	end := offset + limit
-	if limit <= 0 || end > len(out) {
-		end = len(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
-	return out[offset:end], nil
+	return out, nil
 }
 
 // MockAntennaRepository is a test double for repository.AntennaRepository.

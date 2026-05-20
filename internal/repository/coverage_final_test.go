@@ -94,9 +94,9 @@ func TestPageRepository_ListPublicByUser_Clamp(t *testing.T) {
 
 func TestPageLikeRepository_ListByUser_Clamp(t *testing.T) {
 	r := NewPageLikeRepository(testDB)
-	_, err := r.ListByUser("x", 0, 0)
+	_, err := r.ListByUser("x", "", "", 0, 0)
 	require.NoError(t, err)
-	_, err = r.ListByUser("x", 999, 0)
+	_, err = r.ListByUser("x", "", "", 999, 0)
 	require.NoError(t, err)
 }
 
@@ -367,7 +367,20 @@ func TestNoteRepository_DeleteByUserBatch_EarlyReturns(t *testing.T) {
 // page_like.ListByUser: offset >0 の分岐
 func TestPageLikeRepository_ListByUser_Offset(t *testing.T) {
 	r := NewPageLikeRepository(testDB)
-	_, err := r.ListByUser("x", 10, 5)
+	_, err := r.ListByUser("x", "", "", 10, 5)
+	require.NoError(t, err)
+}
+
+// TestPageLikeRepository_ListByUser_Cursor covers the cursor branches added
+// for /api/i/page-likes fetchOlder (#1136 follow-up). sinceID 単独で ASC、
+// untilID 単独で DESC、両方指定で AND-DESC をそれぞれ exercise する。
+func TestPageLikeRepository_ListByUser_Cursor(t *testing.T) {
+	r := NewPageLikeRepository(testDB)
+	_, err := r.ListByUser("x", "since_x", "", 10, 0)
+	require.NoError(t, err)
+	_, err = r.ListByUser("x", "", "until_x", 10, 0)
+	require.NoError(t, err)
+	_, err = r.ListByUser("x", "since_x", "until_x", 10, 0)
 	require.NoError(t, err)
 }
 

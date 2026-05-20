@@ -79,3 +79,55 @@ func TestPageLikes_DropsDanglingLike(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Empty(t, got, "dangling like (page missing) must be dropped, not emitted with null page")
 }
+
+// TestPageLikes_DropsLikeWithoutOwner: page は存在するが owner が userRepo
+// から解決できない (= user 削除後の dangling case) ときも drop される。
+// owner 無しで pack すると frontend MkPagePreview の page.user.username で
+// 再 throw するため、明示的に drop する責務を持つ (#1136)。
+func TestPageLikes_DropsLikeWithoutOwner(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	// userRepo にも owner を登録しない → userService.FindManyByIDs で hit 0。
+	pageRepo := testutil.NewMockPageRepository()
+	require.NoError(t, pageRepo.Create(&model.Page{
+		ID: "pg1", UserID: "ghost-owner", Title: "T", Name: "n",
+		Visibility: model.PageVisibilityPublic,
+	}))
+	h.SetPageRepo(pageRepo)
+	pageLike := testutil.NewMockPageLikeRepository()
+	require.NoError(t, pageLike.Create(&model.PageLike{ID: "pl1", UserID: stubUser.ID, PageID: "pg1"}))
+	h.SetPageLikeRepo(pageLike)
+	rec := postExtra(h.PageLikes, `{}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Empty(t, got, "like with unresolved owner must be dropped, not emitted with missing user")
+}
+
+// TestPageLikes_CursorPagination: untilID 指定で id < untilID の row のみ
+// 返ることを確認 (#1136 follow-up、frontend Paginator の fetchOlder が
+// untilId を投げてくるが、cursor 未対応だと同 page を無限ループする)。
+func TestPageLikes_CursorPagination(t *testing.T) {
+	h, userRepo := newExtraHandler(t)
+	userRepo.Users["author"] = &model.User{ID: "author", Username: "author", UsernameLower: "author"}
+	pageRepo := testutil.NewMockPageRepository()
+	require.NoError(t, pageRepo.Create(&model.Page{
+		ID: "pg_a", UserID: "author", Title: "T", Name: "a",
+		Visibility: model.PageVisibilityPublic,
+	}))
+	require.NoError(t, pageRepo.Create(&model.Page{
+		ID: "pg_b", UserID: "author", Title: "T", Name: "b",
+		Visibility: model.PageVisibilityPublic,
+	}))
+	h.SetPageRepo(pageRepo)
+	pageLike := testutil.NewMockPageLikeRepository()
+	require.NoError(t, pageLike.Create(&model.PageLike{ID: "pl_001", UserID: stubUser.ID, PageID: "pg_a"}))
+	require.NoError(t, pageLike.Create(&model.PageLike{ID: "pl_002", UserID: stubUser.ID, PageID: "pg_b"}))
+	h.SetPageLikeRepo(pageLike)
+	// untilId=pl_002 → id < pl_002 の row のみ (= pl_001)。
+	rec := postExtra(h.PageLikes, `{"untilId":"pl_002"}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "pl_001", got[0]["id"])
+}

@@ -11,7 +11,11 @@ type PageLikeRepository interface {
 	Delete(l *model.PageLike) error
 	FindByPair(userID, pageID string) (*model.PageLike, error)
 	Exists(userID, pageID string) (bool, error)
-	ListByUser(userID string, limit, offset int) ([]*model.PageLike, error)
+	// ListByUser returns page_like rows owned by userID with cursor
+	// (sinceID/untilID) or offset pagination. cursor 指定時は offset 無視
+	// (upstream `makePaginationQuery` 同 semantics、ASC/DESC は
+	// paginationOrder helper で sinceID-only 時のみ ASC に flip)。
+	ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.PageLike, error)
 }
 
 type pageLikeRepository struct {
@@ -49,12 +53,23 @@ func (r *pageLikeRepository) Exists(userID, pageID string) (bool, error) {
 	return count > 0, nil
 }
 
-// ListByUser returns page_like rows owned by userID, newest first.
-// i/page-likes で利用。
-func (r *pageLikeRepository) ListByUser(userID string, limit, offset int) ([]*model.PageLike, error) {
+// ListByUser returns page_like rows owned by userID with cursor (sinceID/
+// untilID) or offset pagination. cursor 経路は upstream `makePaginationQuery`
+// と同じく、sinceID 単独は ASC・それ以外は DESC で order する
+// (paginationOrder helper)。i/page-likes で frontend Paginator が fetchOlder
+// で untilID を投げてくるため、cursor 未対応だと同 page を無限ループする
+// (#1136 follow-up)。
+func (r *pageLikeRepository) ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.PageLike, error) {
 	limit = clampLimit(limit)
-	q := r.db.Where(`"userId" = ?`, userID).Order(`"id" DESC`).Limit(limit)
-	if offset > 0 {
+	q := r.db.Where(`"userId" = ?`, userID)
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+	if sinceID == "" && untilID == "" && offset > 0 {
 		q = q.Offset(offset)
 	}
 	var likes []*model.PageLike

@@ -232,7 +232,7 @@ func TestErrorPaths_CancelledContext(t *testing.T) {
 	assert.Error(t, err)
 
 	// page_like
-	_, err = NewPageLikeRepository(db).ListByUser("x", 10, 0)
+	_, err = NewPageLikeRepository(db).ListByUser("x", "", "", 10, 0)
 	assert.Error(t, err)
 
 	// relay

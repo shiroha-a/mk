@@ -256,7 +256,7 @@ func TestPageLikeRepository_ListByUser(t *testing.T) {
 	).Error)
 	defer testDB.Exec(`DELETE FROM "page_like" WHERE id = ?`, "pl_lb_1")
 
-	likes, err := repo.ListByUser(u.ID, 10, 0)
+	likes, err := repo.ListByUser(u.ID, "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, likes, 1)
 }

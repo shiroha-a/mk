@@ -51,6 +51,36 @@ func TestPageRepository_FindByID_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestPageRepository_FindManyByIDs covers the batch helper added for
+// /api/i/page-likes (#1136). 空 input は短絡で nil 返却、通常 input は
+// 指定 ID set に該当する page だけ返り、欠落 ID は silent skip される。
+func TestPageRepository_FindManyByIDs(t *testing.T) {
+	repo := NewPageRepository(testDB)
+	user := insertTestUser(t, "u_pr_fm", "pageuserfm")
+	defer cleanupUser(t, user.ID)
+
+	p1 := newTestPage("pg_fm_1", user.ID, "fm1")
+	p2 := newTestPage("pg_fm_2", user.ID, "fm2")
+	require.NoError(t, repo.Create(p1))
+	defer cleanupPage(t, p1.ID)
+	require.NoError(t, repo.Create(p2))
+	defer cleanupPage(t, p2.ID)
+
+	// 空 input は repo を叩かずに nil 返却。
+	out, err := repo.FindManyByIDs(nil)
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	// 通常 input: 2 件 hit + 1 件 miss → 2 件のみ返る (順序は SQL 任せなので
+	// length と ID set だけ確認)。
+	out, err = repo.FindManyByIDs([]string{p1.ID, p2.ID, "ghost"})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	ids := map[string]bool{out[0].ID: true, out[1].ID: true}
+	assert.True(t, ids[p1.ID])
+	assert.True(t, ids[p2.ID])
+}
+
 func TestPageRepository_FindByUserAndName(t *testing.T) {
 	repo := NewPageRepository(testDB)
 	user := insertTestUser(t, "u_pr_2", "pageuser2")
@@ -158,6 +188,19 @@ func TestPageRepository_ListByUser_QueryError(t *testing.T) {
 	db := testDB.WithContext(ctx)
 	repo := NewPageRepository(db)
 	_, err := repo.ListByUser("nobody", "", "", 10, 0)
+	assert.Error(t, err)
+}
+
+// TestPageRepository_FindManyByIDs_QueryError covers the DB error branch
+// of FindManyByIDs (#1136). cancelled ctx を渡して driver level で
+// query error を発生させ、handler 側の fail-soft が依存する error path
+// が想定通り bubble up することを確認する。
+func TestPageRepository_FindManyByIDs_QueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	db := testDB.WithContext(ctx)
+	repo := NewPageRepository(db)
+	_, err := repo.FindManyByIDs([]string{"pg_x"})
 	assert.Error(t, err)
 }
 
