@@ -11,15 +11,17 @@ type FollowingRepository interface {
 	Delete(f *model.Following) error
 	FindByPair(followerID, followeeID string) (*model.Following, error)
 	Exists(followerID, followeeID string) (bool, error)
-	// FilterFollowing returns the subset of candidateIDs that anchorID
-	// follows (= rows where followerId=anchorID AND followeeId IN candidates).
-	// Used to batch-compute `isFollowing` across a user list (e.g.
-	// users/following / users/followers) without N+1 Exists round-trips (#1144).
-	FilterFollowing(anchorID string, candidateIDs []string) ([]string, error)
-	// FilterFollowedBy returns the subset of candidateIDs that follow
-	// anchorID (= rows where followerId IN candidates AND followeeId=anchorID).
-	// Used to batch-compute `isFollowed` across a user list (#1144).
-	FilterFollowedBy(anchorID string, candidateIDs []string) ([]string, error)
+	// FilterFollowingsFromAnchor returns the subset of candidateIDs that
+	// anchorID follows (anchor → candidate direction, = rows where
+	// followerId=anchorID AND followeeId IN candidates). Used to batch-
+	// compute `isFollowing` across a user list (e.g. users/following /
+	// users/followers) without N+1 Exists round-trips (#1144).
+	FilterFollowingsFromAnchor(anchorID string, candidateIDs []string) ([]string, error)
+	// FilterFollowingsToAnchor returns the subset of candidateIDs that
+	// follow anchorID (candidate → anchor direction, = rows where
+	// followerId IN candidates AND followeeId=anchorID). Used to batch-
+	// compute `isFollowed` across a user list (#1144).
+	FilterFollowingsToAnchor(anchorID string, candidateIDs []string) ([]string, error)
 	ListFollowers(userID string, limit, offset int) ([]*model.Following, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
 	// ListFollowersByHost returns Following rows whose followerHost matches
@@ -86,7 +88,7 @@ func (r *followingRepository) Exists(followerID, followeeID string) (bool, error
 	return count > 0, nil
 }
 
-func (r *followingRepository) FilterFollowing(anchorID string, candidateIDs []string) ([]string, error) {
+func (r *followingRepository) FilterFollowingsFromAnchor(anchorID string, candidateIDs []string) ([]string, error) {
 	if anchorID == "" || len(candidateIDs) == 0 {
 		return nil, nil
 	}
@@ -99,7 +101,7 @@ func (r *followingRepository) FilterFollowing(anchorID string, candidateIDs []st
 	return ids, nil
 }
 
-func (r *followingRepository) FilterFollowedBy(anchorID string, candidateIDs []string) ([]string, error) {
+func (r *followingRepository) FilterFollowingsToAnchor(anchorID string, candidateIDs []string) ([]string, error) {
 	if anchorID == "" || len(candidateIDs) == 0 {
 		return nil, nil
 	}

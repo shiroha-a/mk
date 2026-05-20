@@ -33,11 +33,12 @@ func newTestHandler(t *testing.T) (*Handler, *testutil.MockUserRepository) {
 	svc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
 	fSvc := corefollowing.NewService(userRepo, fRepo, frRepo, idGen)
 	h := NewHandler(svc, fSvc, noteRepo, idGen)
-	// followingRepo を service と共有する形で wire しておく (#1144 で
-	// users/{followers,following} の relation flag batch lookup が
-	// h.followingRepo 経由になったため)。explicit setup が要る test では
-	// SetFollowingRepo で上書きする。
+	// followingRepo + followRequestRepo を service と共有する形で wire
+	// しておく (#1144 で users/{followers,following} の relation flag +
+	// pending request flag の batch lookup が handler 直配線の repo 経由に
+	// なったため)。explicit setup が要る test では Set*Repo で上書きする。
 	h.SetFollowingRepo(fRepo)
+	h.SetFollowRequestRepo(frRepo)
 	return h, userRepo
 }
 
@@ -964,6 +965,40 @@ func TestFollowers_PopulatesIsFollowedFromViewer(t *testing.T) {
 	assert.Equal(t, true, follower["isFollowed"], "alice follows viewer(bob) → isFollowed=true")
 	// bob は alice を follow していない → isFollowing=false。
 	assert.Equal(t, false, follower["isFollowing"])
+}
+
+// TestFollowers_PopulatesPendingFollowRequest guards #1144 #2: locked
+// account からの pending follow request 状態でも MkFollowButton が正しく
+// "follow request pending" 表示にできるよう、
+// `hasPendingFollowRequestFromYou` / `hasPendingFollowRequestToYou` を
+// embed UserDetailed に埋める。
+func TestFollowers_PopulatesPendingFollowRequest(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = target profile
+	locked := true
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob",
+		IsLocked: locked, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["alice"] = &model.User{ID: "alice", Username: "alice", UsernameLower: "alice",
+		IsLocked: locked, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	fSvc := h.followingService
+	// alice follows user1 → alice が表示される follower。
+	_, err := fSvc.Follow("alice", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// viewer(bob) が alice (locked) に follow request 送信中 →
+	// alice.hasPendingFollowRequestFromYou=true 期待。
+	_, err = fSvc.Follow("bob", "alice", corefollowing.FollowOptions{})
+	require.NoError(t, err) // locked なので pending request になる
+
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["bob"])
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	follower, ok := out[0]["follower"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, follower["hasPendingFollowRequestFromYou"],
+		"viewer(bob) → alice (locked) に pending request → fromYou=true")
+	assert.Equal(t, false, follower["hasPendingFollowRequestToYou"])
 }
 
 // TestFollowing_PopulatesIsFollowedFromViewer covers the symmetric case

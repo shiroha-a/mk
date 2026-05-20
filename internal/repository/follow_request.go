@@ -11,6 +11,16 @@ type FollowRequestRepository interface {
 	Delete(r *model.FollowRequest) error
 	FindByPair(followerID, followeeID string) (*model.FollowRequest, error)
 	Exists(followerID, followeeID string) (bool, error)
+	// FilterPendingFromAnchor returns the subset of candidateIDs that have
+	// a pending follow request initiated by anchorID (anchor → candidate
+	// direction). Used to batch-compute `hasPendingFollowRequestFromYou`
+	// across a user list (#1144).
+	FilterPendingFromAnchor(anchorID string, candidateIDs []string) ([]string, error)
+	// FilterPendingToAnchor returns the subset of candidateIDs that have
+	// a pending follow request targeting anchorID (candidate → anchor
+	// direction). Used to batch-compute `hasPendingFollowRequestToYou`
+	// across a user list (#1144).
+	FilterPendingToAnchor(anchorID string, candidateIDs []string) ([]string, error)
 	// ListReceived returns follow requests where userID is the followee.
 	// sinceID / untilID はMisskey本家の pagination cursor。空文字で無指定扱い。
 	ListReceived(userID string, limit int, sinceID, untilID string) ([]*model.FollowRequest, error)
@@ -54,6 +64,32 @@ func (r *followRequestRepository) Exists(followerID, followeeID string) (bool, e
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (r *followRequestRepository) FilterPendingFromAnchor(anchorID string, candidateIDs []string) ([]string, error) {
+	if anchorID == "" || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.FollowRequest{}).
+		Where(`"followerId" = ? AND "followeeId" IN ?`, anchorID, candidateIDs).
+		Pluck(`"followeeId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (r *followRequestRepository) FilterPendingToAnchor(anchorID string, candidateIDs []string) ([]string, error) {
+	if anchorID == "" || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.FollowRequest{}).
+		Where(`"followerId" IN ? AND "followeeId" = ?`, candidateIDs, anchorID).
+		Pluck(`"followerId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (r *followRequestRepository) ListReceived(userID string, limit int, sinceID, untilID string) ([]*model.FollowRequest, error) {
