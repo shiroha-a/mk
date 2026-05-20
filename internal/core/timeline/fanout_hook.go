@@ -235,13 +235,20 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 		//   - self-thread (= replyUserId = userId) → 全 follower に push (= TL
 		//     filter で `replyUserId = note.userId` 経路で残るので fanout でも
 		//     全 push する semantics)
+		//   - reply-to-follower (= replyUserId = follower.id、自分への reply) →
+		//     全 push (upstream `replyToMe` escape hatch、#1150)。stream filter
+		//     `replyShouldEmit` も同 escape hatch を持つので fanout / stream の
+		//     挙動を symmetric に保つ。
 		//   - その他 reply (= 他人宛 reply) → withReplies=true の follower のみ push
 		// これにより「他人 A → 他人 B reply」が default で他 follower の TL に
-		// 流れず、Misskey TS の `following.withReplies` setting と完全互換に。
+		// 流れず、かつ「他人 A → follower 本人」reply は default で push される
+		// (= Misskey TS の `following.withReplies` setting + replyToMe 仕様と
+		// 完全互換)。
 		isReply := n.ReplyID != nil
 		isSelfThread := isReply && n.ReplyUserID != nil && *n.ReplyUserID == n.UserID
 		for _, f := range rows {
-			if isReply && !isSelfThread && !f.WithReplies {
+			isReplyToFollower := isReply && n.ReplyUserID != nil && *n.ReplyUserID == f.FollowerID
+			if isReply && !isSelfThread && !isReplyToFollower && !f.WithReplies {
 				continue
 			}
 			h.pushWithLimit(ctx, HomeTimelineName(f.FollowerID), n.ID, homeCap)

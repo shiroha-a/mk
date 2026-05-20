@@ -188,6 +188,45 @@ func TestFanoutHook_SelfThreadReplyFanoutsToAllFollowers(t *testing.T) {
 	}
 }
 
+// TestFanoutHook_ReplyToFollowerIsPushedRegardlessOfWithReplies guards
+// #1150: 「他人が follower 本人宛にした reply」は WithReplies 設定に関わら
+// ず follower 本人の home TL に push される。stream filter `replyShouldEmit`
+// が `replyToMe` escape hatch を持つので fanout 側も symmetric に揃える
+// (= reload で消える非対称挙動を解消)。
+//
+// scenario: author が follower1 / follower2 を持ち、follower1 が
+// withReplies=false。author が follower1 宛 reply を作ると、follower1 の
+// home TL に push される (= self への reply は default で受け取りたい)。
+// follower2 (= 無関係) も withReplies=true なので受け取る。
+func TestFanoutHook_ReplyToFollowerIsPushedRegardlessOfWithReplies(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: false}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "follower2", FolloweeID: "author", WithReplies: false}
+
+	noteID := idGen.Generate(time.Now())
+	replyID := "reply-target"
+	follower1ID := "follower1"
+	n := &model.Note{
+		ID:          noteID,
+		UserID:      "author",
+		Visibility:  model.NoteVisibilityPublic,
+		ReplyID:     &replyID,
+		ReplyUserID: &follower1ID, // follower1 宛 reply
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// follower1 は自分宛 reply なので受け取る (replyToMe escape hatch)
+	out, err := fanout.Get(ctx, HomeTimelineName("follower1"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "follower1 (= reply target) should receive reply regardless of WithReplies")
+
+	// follower2 は無関係な reply なので withReplies=false の通常 gate で skip
+	out, err = fanout.Get(ctx, HomeTimelineName("follower2"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "follower2 (= unrelated) should not receive reply when WithReplies=false")
+}
+
 // 通常 note (reply 無し) は WithReplies 設定に関わらず全 follower に push される。
 func TestFanoutHook_NonReplyFanoutsToAllFollowers(t *testing.T) {
 	h, fanout, following := newTestHook(t)
