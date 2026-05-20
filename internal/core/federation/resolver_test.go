@@ -174,6 +174,9 @@ func TestResolveActor_NewUserWithoutIconBanner(t *testing.T) {
 
 // AP `summary` (= リモートユーザの bio) を UserProfile.description に取り込む。
 // profile 行も同時に作成される (= 旧実装は user 行のみ作成していた regression)。
+// Mastodon 系の `<p>...</p>` ラップは mfm.FromHTML で MFM に変換される
+// (生 HTML を保存すると frontend MFM render が escape してリテラル表示する
+// drop-in regression を起こす、#1140)。
 func TestResolveActor_NewUserIngestsDescription(t *testing.T) {
 	body := `{
 		"id": "https://remote.example/users/alice",
@@ -189,7 +192,39 @@ func TestResolveActor_NewUserIngestsDescription(t *testing.T) {
 	profile, err := repo.FindProfileByUserID(user.ID)
 	require.NoError(t, err, "profile 行が作成される (back-fill 経路の前提)")
 	require.NotNil(t, profile.Description)
-	assert.Equal(t, "<p>Hello from remote!</p>", *profile.Description)
+	assert.Equal(t, "Hello from remote!", *profile.Description,
+		"<p> wrap は mfm.FromHTML で MFM 段落区切りに変換され TrimSpace で消える")
+}
+
+// TestResolveActor_MastodonStyleSummaryConvertedToMFM guards #1140:
+// Mastodon / Pleroma 系の actor.summary は典型的に `<p>...</p>` で wrap
+// され、`<a href>` mention や `<br>` を含む。これらが mfm.FromHTML 経由で
+// MFM に変換され、profile.description に純 MFM として保存されることを
+// 確認 (生 HTML が残ると frontend MFM render が escape して `<p>` 等が
+// リテラル表示される drop-in regression)。
+func TestResolveActor_MastodonStyleSummaryConvertedToMFM(t *testing.T) {
+	body := `{
+		"id": "https://mstdn.example/users/bob",
+		"type": "Person",
+		"preferredUsername": "bob",
+		"inbox": "https://mstdn.example/users/bob/inbox",
+		"summary": "<p>Hello!<br/>I&#39;m bob.</p><p>Follow me at <a href=\"https://example.com\">my site</a></p>",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://mstdn.example/users/bob")
+	require.NoError(t, err)
+	profile, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, profile.Description)
+	// `<p>` → 段落区切り (\n\n) / `<br>` → \n / `<a>` → [text](url) MFM。
+	desc := *profile.Description
+	assert.NotContains(t, desc, "<p>", "<p> tag must be converted out, not stored raw")
+	assert.NotContains(t, desc, "</p>", "</p> tag must be converted out")
+	assert.NotContains(t, desc, "<a ", "<a> tag must be converted to MFM link syntax")
+	assert.Contains(t, desc, "Hello!")
+	assert.Contains(t, desc, "I'm bob.")
+	assert.Contains(t, desc, "[my site](https://example.com)")
 }
 
 // `_misskey_summary` がある場合は AP `summary` より優先される (upstream
