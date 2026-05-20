@@ -33,6 +33,11 @@ func newTestHandler(t *testing.T) (*Handler, *testutil.MockUserRepository) {
 	svc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
 	fSvc := corefollowing.NewService(userRepo, fRepo, frRepo, idGen)
 	h := NewHandler(svc, fSvc, noteRepo, idGen)
+	// followingRepo を service と共有する形で wire しておく (#1144 で
+	// users/{followers,following} の relation flag batch lookup が
+	// h.followingRepo 経由になったため)。explicit setup が要る test では
+	// SetFollowingRepo で上書きする。
+	h.SetFollowingRepo(fRepo)
 	return h, userRepo
 }
 
@@ -926,6 +931,69 @@ func TestFollowers_Success(t *testing.T) {
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Len(t, out, 1)
+}
+
+// TestFollowers_PopulatesIsFollowedFromViewer guards #1144: when a viewer
+// (auth user) requests users/followers of a profile, each follower row's
+// embedded `follower` UserDetailed must carry `isFollowed` from the
+// viewer's perspective (= "does this follower follow me?"). frontend
+// MkUserInfo renders the "follows you" label based on this flag.
+func TestFollowers_PopulatesIsFollowedFromViewer(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = target profile
+	// viewer = bob, follower = alice
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob",
+		AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["alice"] = &model.User{ID: "alice", Username: "alice", UsernameLower: "alice",
+		AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	// alice follows user1 (= alice 表示される follower)、
+	// 加えて alice follows bob (viewer) → isFollowed = true 期待。
+	fSvc := h.followingService
+	_, err := fSvc.Follow("alice", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	_, err = fSvc.Follow("alice", "bob", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["bob"])
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	follower, ok := out[0]["follower"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, follower["isFollowed"], "alice follows viewer(bob) → isFollowed=true")
+	// bob は alice を follow していない → isFollowing=false。
+	assert.Equal(t, false, follower["isFollowing"])
+}
+
+// TestFollowing_PopulatesIsFollowedFromViewer covers the symmetric case
+// for /api/users/following — each `followee` UserDetailed gets viewer's
+// relation flags.
+func TestFollowing_PopulatesIsFollowedFromViewer(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = target profile
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob",
+		AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["charlie"] = &model.User{ID: "charlie", Username: "charlie", UsernameLower: "charlie",
+		AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	fSvc := h.followingService
+	// user1 follows charlie → charlie が followee として list される。
+	_, err := fSvc.Follow("user1", "charlie", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// viewer(bob) follows charlie → isFollowing=true、charlie は bob を
+	// follow していない → isFollowed=false。
+	_, err = fSvc.Follow("bob", "charlie", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+
+	rec := postStub(h.Following, `{"userId":"user1"}`, repo.Users["bob"])
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	followee, ok := out[0]["followee"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, followee["isFollowing"], "viewer(bob) follows charlie → isFollowing=true")
+	assert.Equal(t, false, followee["isFollowed"])
 }
 
 // users/followers が follower user の取得を per-row ShowByID で叩いて

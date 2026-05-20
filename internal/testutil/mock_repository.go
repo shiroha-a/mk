@@ -4212,6 +4212,46 @@ func (m *MockFollowingRepository) Exists(followerID, followeeID string) (bool, e
 	return true, nil
 }
 
+func (m *MockFollowingRepository) FilterFollowing(anchorID string, candidateIDs []string) ([]string, error) {
+	if anchorID == "" || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	candidates := make(map[string]struct{}, len(candidateIDs))
+	for _, id := range candidateIDs {
+		candidates[id] = struct{}{}
+	}
+	var ids []string
+	for _, f := range m.Followings {
+		if f.FollowerID != anchorID {
+			continue
+		}
+		if _, ok := candidates[f.FolloweeID]; ok {
+			ids = append(ids, f.FolloweeID)
+		}
+	}
+	return ids, nil
+}
+
+func (m *MockFollowingRepository) FilterFollowedBy(anchorID string, candidateIDs []string) ([]string, error) {
+	if anchorID == "" || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	candidates := make(map[string]struct{}, len(candidateIDs))
+	for _, id := range candidateIDs {
+		candidates[id] = struct{}{}
+	}
+	var ids []string
+	for _, f := range m.Followings {
+		if f.FolloweeID != anchorID {
+			continue
+		}
+		if _, ok := candidates[f.FollowerID]; ok {
+			ids = append(ids, f.FollowerID)
+		}
+	}
+	return ids, nil
+}
+
 func (m *MockFollowingRepository) ListFollowers(userID string, limit, offset int) ([]*model.Following, error) {
 	var rows []*model.Following
 	for _, f := range m.Followings {
