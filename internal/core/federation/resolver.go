@@ -441,6 +441,11 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 // で MFM 変換してから保存する。生 HTML を保存すると frontend MFM render が
 // `<p>` を escape してリテラル表示する drop-in regression を起こすため
 // (#1140 で発覚)。varchar(2048) 制約を rune 単位で respect し、空は nil で表す。
+//
+// 注: truncation 順序は upstream と意図的に差をつけている。upstream は
+// HTML 段階で truncate (mid-tag 切断の risk) してから htmlToMfm、本実装は
+// FromHTML で MFM に縮約してから truncate する。後者の方が content 効率
+// が良く、mid-tag 切断による壊れ HTML を parser に渡す経路が無い。
 func extractRemoteDescription(actor *activitypub.Person) *string {
 	var raw string
 	if actor.MisskeySummary != "" {

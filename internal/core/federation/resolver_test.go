@@ -1347,6 +1347,49 @@ func TestResolveActor_TTLRefreshUpdatesDescription(t *testing.T) {
 	assert.Equal(t, "new bio", *repo.Profiles["existing"].Description)
 }
 
+// TestResolveActor_TTLRefreshConvertsHTMLDescription guards #1140 on the
+// refresh path: 既存 remote actor が 旧 mk-go (生 HTML 保存) で取り込まれて
+// いた場合、次の TTL refresh で MFM 化されて natural healing する。本 PR で
+// fix した extractRemoteDescription は initial insert + refresh 両方から
+// 呼ばれるので、symmetry で動作するが、明示的な regression guard としても
+// refresh path を直接 cover する。
+func TestResolveActor_TTLRefreshConvertsHTMLDescription(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/bob"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing-bob"] = &model.User{
+		ID:            "existing-bob",
+		Username:      "bob",
+		URI:           &uri,
+		LastFetchedAt: &old,
+	}
+	// 既存 row には旧 mk-go 由来の生 HTML が入っている state を再現。
+	staleDesc := "<p>old html bio</p>"
+	repo.Profiles["existing-bob"] = &model.UserProfile{
+		UserID:      "existing-bob",
+		Description: &staleDesc,
+	}
+	updated := `{
+		"id": "https://mstdn.example/users/bob",
+		"type": "Person",
+		"preferredUsername": "bob",
+		"inbox": "https://mstdn.example/users/bob/inbox",
+		"summary": "<p>fresh html bio from Mastodon</p>",
+		"publicKey": {"publicKeyPem": "REFRESHED"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(updated)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	got := repo.Profiles["existing-bob"].Description
+	require.NotNil(t, got)
+	assert.Equal(t, "fresh html bio from Mastodon", *got,
+		"refresh path は extractRemoteDescription 経由なので MFM 変換が効く")
+	assert.NotContains(t, *got, "<p>", "natural healing で生 HTML が残らない")
+}
+
 // 既存 user で profile 行が無い (= 本 fix 以前に取り込まれた remote user) は
 // refresh 経路で back-fill される (#1022)。production の漸進的な救済経路。
 func TestResolveActor_TTLRefreshBackfillsProfile(t *testing.T) {
