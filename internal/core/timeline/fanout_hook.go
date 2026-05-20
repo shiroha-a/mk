@@ -219,6 +219,32 @@ func shouldFanoutToFollowers(n *model.Note) bool {
 // homeCap は OnNoteCreated 側で meta から取得済みのものを再利用する。
 func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID string, n *model.Note, author *model.User, homeCap int) {
 	const pageSize = 200
+	// reply note は follower の `following.withReplies` 設定で push 制御
+	// する (#1047 / upstream 互換)。
+	//   - 通常 note (= replyId nil) → 全 follower に push
+	//   - self-thread (= replyUserId = userId) → 全 follower に push (= TL
+	//     filter で `replyUserId = note.userId` 経路で残るので fanout でも
+	//     全 push する semantics)
+	//   - reply-to-follower (= replyUserId = follower.id、自分への reply) →
+	//     全 push (upstream `replyToMe` escape hatch、#1150)。stream filter
+	//     `replyShouldEmit` も同 escape hatch を持つので fanout / stream の
+	//     挙動を symmetric に保つ。
+	//   - その他 reply (= 他人宛 reply) → withReplies=true の follower のみ push
+	// これにより「他人 A → 他人 B reply」が default で他 follower の TL に
+	// 流れず、かつ「他人 A → follower 本人」reply は default で push される
+	// (= Misskey TS の `following.withReplies` setting + replyToMe 仕様と
+	// 完全互換)。
+	//
+	// 加えて #1152: reply 対象 note の `visibility=followers` の場合、reply
+	// target を follow していない follower は drop する (= stream filter
+	// `replyShouldEmit` の followers-visibility gate と symmetric)。「context
+	// が見えない reply 本文だけが流れる」privacy 漏洩を防ぐ。`n.Reply` が
+	// nil (= FindByIDWithRelations の preload 失敗) の case は visibility 不明
+	// なので保守的に gate を skip (= 既存挙動 = push)。stream filter は drop
+	// に倒すが fanout は全 follower への影響が大きいので over-restrict を避ける。
+	isReply := n.ReplyID != nil
+	isSelfThread := isReply && n.ReplyUserID != nil && *n.ReplyUserID == n.UserID
+	isFollowersOnlyReply := isReply && n.Reply != nil && n.Reply.Visibility == model.NoteVisibilityFollowers
 	offset := 0
 	for {
 		rows, err := h.followingRepo.ListFollowers(authorID, pageSize, offset)
@@ -229,27 +255,36 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 		if len(rows) == 0 {
 			return
 		}
-		// reply note は follower の `following.withReplies` 設定で push 制御
-		// する (#1047 / upstream 互換)。
-		//   - 通常 note (= replyId nil) → 全 follower に push
-		//   - self-thread (= replyUserId = userId) → 全 follower に push (= TL
-		//     filter で `replyUserId = note.userId` 経路で残るので fanout でも
-		//     全 push する semantics)
-		//   - reply-to-follower (= replyUserId = follower.id、自分への reply) →
-		//     全 push (upstream `replyToMe` escape hatch、#1150)。stream filter
-		//     `replyShouldEmit` も同 escape hatch を持つので fanout / stream の
-		//     挙動を symmetric に保つ。
-		//   - その他 reply (= 他人宛 reply) → withReplies=true の follower のみ push
-		// これにより「他人 A → 他人 B reply」が default で他 follower の TL に
-		// 流れず、かつ「他人 A → follower 本人」reply は default で push される
-		// (= Misskey TS の `following.withReplies` setting + replyToMe 仕様と
-		// 完全互換)。
-		isReply := n.ReplyID != nil
-		isSelfThread := isReply && n.ReplyUserID != nil && *n.ReplyUserID == n.UserID
+		// followers-only reply の per-page follow check (batch lookup)。
+		// `FilterFollowingsToAnchor(replyUserID, followerIDs)` で「reply target
+		// を follow している follower の subset」を 1 query で取得する。
+		// query 失敗時は保守的に gate を skip (= 既存挙動 = push)。
+		var followsReplyTarget map[string]bool
+		if isFollowersOnlyReply && n.ReplyUserID != nil {
+			followerIDs := make([]string, 0, len(rows))
+			for _, f := range rows {
+				followerIDs = append(followerIDs, f.FollowerID)
+			}
+			if ids, err := h.followingRepo.FilterFollowingsToAnchor(*n.ReplyUserID, followerIDs); err == nil {
+				followsReplyTarget = make(map[string]bool, len(ids))
+				for _, id := range ids {
+					followsReplyTarget[id] = true
+				}
+			}
+		}
 		for _, f := range rows {
 			isReplyToFollower := isReply && n.ReplyUserID != nil && *n.ReplyUserID == f.FollowerID
 			if isReply && !isSelfThread && !isReplyToFollower && !f.WithReplies {
 				continue
+			}
+			// followers-only reply: reply target を follow していない follower
+			// は drop (isReplyToFollower の場合は follower 自身が target なので
+			// escape)。followsReplyTarget が nil (= query 失敗 / 該当無し) の
+			// 場合は保守的に skip gate せず push 継続。
+			if isFollowersOnlyReply && !isReplyToFollower && followsReplyTarget != nil {
+				if !followsReplyTarget[f.FollowerID] {
+					continue
+				}
 			}
 			h.pushWithLimit(ctx, HomeTimelineName(f.FollowerID), n.ID, homeCap)
 			if h.publisher != nil {
