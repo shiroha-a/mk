@@ -127,9 +127,9 @@ func (h *Handler) Show(c echo.Context) error {
 // router で必ず repo wire 済)。transient error は運用で観測したいので
 // slog.Warn で記録する (= blocking handler の fetchBlockeeMap と同 pattern)。
 //
-// NOTE (#876): users/lists/list は N list 持つ user に対し本 helper を N 回
-// 呼んでおり N+1 query になる。perf 改善は ListMembersByListIDs batch fetch
-// で別 issue (#876) として追跡。
+// 本 helper は `Show` (`/api/users/lists/show`) からのみ呼ばれる単発 1 query
+// 経路。list endpoint (= `/api/users/lists/list`) は line 57 で
+// `ListMembersByListIDs` 経由の 1 batch query を使うので N+1 にならない。
 func (h *Handler) memberIDs(listID string) []string {
 	members, err := h.repo.ListMembers(listID)
 	if err != nil {

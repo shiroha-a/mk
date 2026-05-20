@@ -200,9 +200,10 @@ func (h *Handler) packRoomDetailed(r *model.ChatRoom, meID string) map[string]an
 // `invitationExists` を viewer 視点で計算する (#860 PR-D)。空文字列を渡した
 // 場合は packRoomDetailed が lookup を skip して両 false 固定。
 //
-// 注: upstream の packMessageDetailed は `isRead` を返さない (json-schema
-// 上 optional)。mk-go も同様に含めない。`isRead` は packMessageLite 系で
-// 返される設計と推定されるが、追加は別 issue (#860 残 scope) で扱う。
+// 注: upstream の packMessageDetailed は `isRead` field を返さない (json-schema
+// 上 `optional: true` だが実装側で emit していない、PR #861 で再調査済)。
+// mk-go 側で先に追加すると upstream と逆方向の shape drift を生むため
+// **意図的に未対応** とする。upstream が isRead を実装した場合に追従する。
 func (h *Handler) packMessageDetailed(m *model.ChatMessage, meID string) map[string]any {
 	result := h.packMessageWithCreatedAt(m)
 	if m.ToUser != nil {
