@@ -36,6 +36,11 @@ func (h *Handler) Invalidate(c echo.Context) error {
 //
 // notify ("normal" / "none") / withReplies を呼び出しユーザーの指定 followee
 // に対して更新する。
+//
+// upstream Misskey TS は `ps.notify === 'none' ? null : ps.notify` の三項で
+// "none" を SQL NULL に変換する仕様 (#17385)。これがないと `following/list`
+// の `notification=true` filter (= `notify IS NOT NULL`) が機能不全になる
+// (mk-go では旧来 "none" 文字列がそのまま入って null 扱いされなかった)。
 func (h *Handler) UpdateFollow(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
@@ -48,7 +53,7 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 	}
 	fields := map[string]any{}
 	if req.Notify != nil {
-		fields["notify"] = *req.Notify
+		fields["notify"] = normalizeNotify(*req.Notify)
 	}
 	if req.WithReplies != nil {
 		fields["withReplies"] = *req.WithReplies
@@ -57,6 +62,18 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// normalizeNotify converts the upstream `notify` enum ("normal" / "none") to
+// the value stored in the DB column. "none" → nil (SQL NULL) so the
+// `following/list` notification=true filter (= `notify IS NOT NULL`) correctly
+// excludes users with notifications turned off (upstream Misskey TS 2026.5.2
+// #17385 互換)。"normal" / other → そのまま文字列として保存。
+func normalizeNotify(v string) any {
+	if v == "none" {
+		return nil
+	}
+	return v
 }
 
 // UpdateFollowAll handles POST /api/following/update-all.
@@ -74,7 +91,8 @@ func (h *Handler) UpdateFollowAll(c echo.Context) error {
 	}
 	fields := map[string]any{}
 	if req.Notify != nil {
-		fields["notify"] = *req.Notify
+		// upstream #17385 互換: notify="none" は SQL NULL に正規化する。
+		fields["notify"] = normalizeNotify(*req.Notify)
 	}
 	if req.WithReplies != nil {
 		fields["withReplies"] = *req.WithReplies

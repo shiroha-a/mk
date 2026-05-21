@@ -7,6 +7,7 @@ import (
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInvalidate_MissingUserIDRejected(t *testing.T) {
@@ -58,4 +59,43 @@ func TestUpdateFollowAll_WithFields(t *testing.T) {
 	h, _ := newTestHandler(t)
 	assert.Equal(t, http.StatusNoContent,
 		postJSON(h.UpdateFollowAll, `{"notify":"none"}`, &model.User{ID: "u1"}).Code)
+}
+
+// upstream Misskey TS 2026.5.2 #17385 互換: notify="none" は SQL NULL に
+// 変換されて DB に書かれる。これがないと /api/following/list の
+// notification=true filter (= notify IS NOT NULL) が機能しない。
+func TestUpdateFollow_NotifyNone_NormalizedToNull(t *testing.T) {
+	h, repo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+	// 既存 follow + notify=normal 状態を pre-seed
+	notify := "normal"
+	fRepo.Followings["f1"] = &model.Following{
+		ID:         "f1",
+		FollowerID: alice.ID,
+		FolloweeID: bob.ID,
+		Notify:     &notify,
+	}
+
+	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"none"}`, alice)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// notify="none" → DB の Notify 列が nil (= SQL NULL) になる
+	assert.Nil(t, fRepo.Followings["f1"].Notify, "notify=none must normalize to nil for following/list notification=true filter")
+}
+
+// notify="normal" は文字列のまま保存される (= notify ON 状態を表す)。
+func TestUpdateFollow_NotifyNormal_StoredAsString(t *testing.T) {
+	h, repo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+	fRepo.Followings["f1"] = &model.Following{
+		ID:         "f1",
+		FollowerID: alice.ID,
+		FolloweeID: bob.ID,
+	}
+
+	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"normal"}`, alice)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, fRepo.Followings["f1"].Notify)
+	assert.Equal(t, "normal", *fRepo.Followings["f1"].Notify)
 }

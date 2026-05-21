@@ -4396,6 +4396,13 @@ func applyFollowingFields(f *model.Following, fields map[string]any) {
 	for k, v := range fields {
 		switch k {
 		case "notify":
+			// upstream Misskey TS 2026.5.2 #17385: notify="none" は SQL NULL
+			// に変換されて DB に書かれる。caller (handler) で nil 化済みの
+			// 値が降ってくるので、ここでも nil を notify=nil として尊重する。
+			if v == nil {
+				f.Notify = nil
+				break
+			}
 			if s, ok := v.(string); ok {
 				f.Notify = &s
 			}
