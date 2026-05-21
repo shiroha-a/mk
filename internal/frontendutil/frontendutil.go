@@ -63,17 +63,28 @@ func TwemojiDir() string {
 	return filepath.Join(frontendBase, "packages", "backend", "node_modules", "@misskey-dev", "emoji-assets", "built", "twemoji")
 }
 
-// FluentEmojiDir returns the path to fluent-emoji PNG files. upstream Misskey
-// TS では `node_modules/@misskey-dev/emoji-assets/built/fluent-emoji` から
-// 配信されるが、本リポジトリでは submodule `third_party/misskey/fluent-emojis/
-// dist` に同一の asset 集合が同梱されているのでこちらを参照する。frontend
+// FluentEmojiDir returns the path to fluent-emoji PNG files. frontend の
 // `ACHIEVEMENT_BADGES` (= 実績バッジ) や notification icon が `/fluent-emoji/
-// <hex>.png` の URL で参照する。環境変数 `MISSKEY_FLUENT_EMOJI_DIR` で上書き可能。
+// <hex>.png` の URL で参照する。環境変数 `MISSKEY_FLUENT_EMOJI_DIR` で上書き
+// 可能。
+//
+// upstream 2026.5.2 #17381 (twemoji と同 commit) で fluent-emoji の serve path
+// が `fluent-emojis/dist` (submodule) から
+// `node_modules/@misskey-dev/emoji-assets/built/fluent-emoji` (= 自前 npm
+// パッケージ) に移行した。drop-in 互換のため mk-go も同 path を参照する
+// (旧 submodule path は将来 upstream で削除予定)。
+//
+// 既知の broken: 新 path には keycap 系 (`0031-20e3.png` = 1️⃣ 等) が含まれない
+// ため `passedSinceAccountCreated1/2/3` achievement の bronze/silver/gold バッジ
+// icon が 404 になる。これは upstream Misskey TS 2026.5.4 でも同じ状態で、
+// upstream achievements.ts 側の bug。本家 fix を待つか、shiroha-a/misskey-ts
+// fork で代替 emoji に rename する patch を入れる follow-up (#1167) を別途
+// 計画する。
 func FluentEmojiDir() string {
 	if v := os.Getenv("MISSKEY_FLUENT_EMOJI_DIR"); v != "" {
 		return v
 	}
-	return filepath.Join(frontendBase, "fluent-emojis", "dist")
+	return filepath.Join(frontendBase, "packages", "backend", "node_modules", "@misskey-dev", "emoji-assets", "built", "fluent-emoji")
 }
 
 // StaticDir returns the path to static assets (icons, splash, favicon etc.).

@@ -115,6 +115,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #943: リモートユーザー counts (notesCount / followersCount / followingCount) を origin から fetch する mk-go 独自拡張
 - #945: RemoteStatsFetcher cache を `sync.Map` → LRU (size cap 10000) で memory bound 化
 - #1156: リモートユーザーのプロフィール「アクティビティ」タブが Heatmap 空 / Notes 折れ線がマイナス方面にのみ動く drop-in regression を fix。federation `handleCreate` / `handleAnnounce` で `OnNoteCreated` chart hook が発火しておらず PerUserNotesChart の +1 が記録されない一方、`handleDelete` 経路 (`NoteDeleteService.Delete`) は -1 を記録していたため日次集計が常に負方向に推移していた。`Resolver.IngestNoteWithCreated` (sibling) を追加して dedup-hit と新規 INSERT を区別し、`Processor.SetNoteChartHook` で chart hook を `safeGoFedHook` 経由で fire-and-forget 発火 (重複配送では fire しない)
+- #1167: fluent-emoji 参照 path を `@misskey-dev/emoji-assets/built/fluent-emoji` に追従 (upstream 2026.5.2 #17381 残作業、Phase 18 #1164 commit 3 の twemoji 追従と同時にやるべきだった漏れ補完)。修正前は旧 path (submodule `fluent-emojis/dist`) が残っていたため mk-go だけ achievement 1/2/3 icon が表示できていた drop-in 違反状態。修正後は upstream Misskey TS 2026.5.4 と同じ broken state (= `passedSinceAccountCreated1/2/3` の bronze/silver/gold バッジ icon が 404) に揃え、frontend `achievements.ts` 側で keycap 系を新 path 存在 emoji に rename する upstream / fork fix を待つ運用に
 
 ### Phase 15 — Federation performance (#562, #565, #569)
 

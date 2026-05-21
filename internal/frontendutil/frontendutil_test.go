@@ -70,7 +70,10 @@ func TestTwemojiDir_EnvOverride(t *testing.T) {
 
 func TestFluentEmojiDir_Default(t *testing.T) {
 	t.Setenv("MISSKEY_FLUENT_EMOJI_DIR", "")
-	assert.Equal(t, filepath.Join("third_party/misskey", "fluent-emojis", "dist"), FluentEmojiDir())
+	// upstream 2026.5.2 #17381 で fluent-emoji の serve path が
+	// fluent-emojis/dist (submodule) → @misskey-dev/emoji-assets/built/fluent-emoji
+	// に移行した (twemoji と同 commit、#1167)。
+	assert.Equal(t, filepath.Join("third_party/misskey", "packages", "backend", "node_modules", "@misskey-dev", "emoji-assets", "built", "fluent-emoji"), FluentEmojiDir())
 }
 
 func TestFluentEmojiDir_EnvOverride(t *testing.T) {
