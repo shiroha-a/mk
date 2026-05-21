@@ -450,3 +450,76 @@ func TestMarkRead_AppendsToReads(t *testing.T) {
 	require.NotNil(t, stored)
 	assert.Equal(t, pq.StringArray{"bob"}, stored.Reads)
 }
+
+// --- HasPermissionToViewRoomInfo (upstream 2026.5.4 / #1164 Phase C) ---
+
+// stubModeratorChecker satisfies corechat.ModeratorChecker for tests where we
+// need to flip the "is moderator" answer per case without dragging in the full
+// role service.
+type stubModeratorChecker struct {
+	moderators map[string]bool
+}
+
+func (s *stubModeratorChecker) IsModerator(userID string) bool {
+	return s.moderators[userID]
+}
+
+func TestHasPermissionToViewRoomInfo_NilRoom(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	ok, err := svc.HasPermissionToViewRoomInfo("alice", nil)
+	require.NoError(t, err)
+	assert.False(t, ok, "nil room must return false (defensive)")
+}
+
+func TestHasPermissionToViewRoomInfo_OwnerTrue(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	ok, err := svc.HasPermissionToViewRoomInfo("alice", room)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestHasPermissionToViewRoomInfo_MemberTrue(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Memberships["bob:r1"] = &model.ChatRoomMembership{UserID: "bob", RoomID: "r1"}
+	ok, err := svc.HasPermissionToViewRoomInfo("bob", room)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestHasPermissionToViewRoomInfo_InvitationTrue(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Invitations["inv1"] = &model.ChatRoomInvitation{ID: "inv1", UserID: "carol", RoomID: "r1"}
+	ok, err := svc.HasPermissionToViewRoomInfo("carol", room)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestHasPermissionToViewRoomInfo_NonMemberFalse(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	ok, err := svc.HasPermissionToViewRoomInfo("dave", room)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestHasPermissionToViewRoomInfo_ModeratorBypass(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetModeratorChecker(&stubModeratorChecker{moderators: map[string]bool{"moderator1": true}})
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	ok, err := svc.HasPermissionToViewRoomInfo("moderator1", room)
+	require.NoError(t, err)
+	assert.True(t, ok, "moderator が non-owner non-member でも閲覧できる")
+}
+
+func TestHasPermissionToViewRoomInfo_ModeratorCheckerNotConsulted(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	// moderator checker 未配線 (= nil) のとき、moderator bypass 経路は skip
+	// される。non-owner / non-member は常に false。
+	room := &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	ok, err := svc.HasPermissionToViewRoomInfo("someone", room)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}

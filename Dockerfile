@@ -31,7 +31,9 @@ RUN test -f third_party/misskey/packages/backend/assets/favicon.ico || \
 
 # twemojiは本家frontendがUnicode絵文字描画に使うSVG set。pnpm installで
 # node_modulesに hoistされる前提 (make e2e-frontend-build等で install済み)。
-RUN test -f third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg/1f004.svg || \
+# upstream 2026.5.2 #17381 で `@discordapp/twemoji/dist/svg` から
+# `@misskey-dev/emoji-assets/built/twemoji` に asset path が移行。
+RUN test -f third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji/1f004.svg || \
     (echo "ERROR: twemoji assets not found (pnpm install not run?)." && \
      echo "Run: make e2e-frontend-build (installs third_party/misskey node_modules)" && exit 1)
 
@@ -85,8 +87,9 @@ COPY --from=builder /app/third_party/misskey/assets /app/repo-assets
 ENV MISSKEY_REPO_ASSETS_DIR=/app/repo-assets
 
 # twemoji SVG set (Unicode絵文字描画)。frontendが /twemoji/<codepoint>.svg
-# で参照する。約18MB (issue #359)。
-COPY --from=builder /app/third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg /app/twemoji
+# で参照する。約18MB (issue #359)。upstream 2026.5.2 #17381 で
+# `@misskey-dev/emoji-assets/built/twemoji` に asset path が移行した。
+COPY --from=builder /app/third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji /app/twemoji
 ENV MISSKEY_TWEMOJI_DIR=/app/twemoji
 
 # デフォルト設定ファイルをコピー (docker-compose でマウント上書き可能)。

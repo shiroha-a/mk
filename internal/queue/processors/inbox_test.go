@@ -377,6 +377,64 @@ func TestInboxProcessor_LegacyPayloadSkipsVerify(t *testing.T) {
 	require.Len(t, stub.calls, 1, "legacy payload still reaches Process")
 }
 
+// --- LD-Signature gate (#1164 Phase D) ---
+
+// stubLDVerifier captures VerifyIfPresent calls and lets tests force the
+// outcome.
+type stubLDVerifier struct {
+	err       error
+	callCount int
+}
+
+func (s *stubLDVerifier) VerifyIfPresent(_ []byte) error {
+	s.callCount++
+	return s.err
+}
+
+// SetLDSignatureVerifier 未配線 (= ldVerifier nil) なら gate は skip され
+// federation.Processor.Process が呼ばれる。
+func TestInboxProcessor_LDVerify_NoVerifierBypassesGate(t *testing.T) {
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, queue.InboxPayload{Body: []byte(`{"type":"Note"}`)}),
+	}))
+	require.Len(t, stub.calls, 1)
+}
+
+// LD-Sig verify pass (= VerifyIfPresent nil error) なら Process が呼ばれる。
+func TestInboxProcessor_LDVerify_PassDelegates(t *testing.T) {
+	stub := &stubFedProcessor{}
+	verifier := &stubLDVerifier{err: nil}
+	p := processors.NewInboxProcessor(stub)
+	p.SetLDSignatureVerifier(verifier)
+
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, queue.InboxPayload{Body: []byte(`{"type":"Note"}`)}),
+	}))
+	assert.Equal(t, 1, verifier.callCount, "VerifyIfPresent is called exactly once")
+	require.Len(t, stub.calls, 1, "verify pass → Process is called")
+}
+
+// LD-Sig verify fail (= VerifyIfPresent returns error) なら Process は呼ばれず
+// activity が drop される (= queue ack するが Process bypass)。
+func TestInboxProcessor_LDVerify_FailDropsActivity(t *testing.T) {
+	stub := &stubFedProcessor{}
+	verifier := &stubLDVerifier{err: errors.New("bad signature")}
+	p := processors.NewInboxProcessor(stub)
+	p.SetLDSignatureVerifier(verifier)
+
+	err := p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, queue.InboxPayload{Body: []byte(`{"type":"Note"}`)}),
+	})
+	require.NoError(t, err, "verify fail でも error は返さず ack (= 同 activity を retry に乗せない)")
+	assert.Equal(t, 1, verifier.callCount)
+	require.Len(t, stub.calls, 0, "verify fail → Process is NOT called (activity dropped)")
+}
+
 // 任意 error は driver の retry policy (inboxJobMaxAttempts) に任せるため
 // そのまま返す (SkipRetry を付けない)。
 func TestInboxProcessor_GenericErrorPropagatesForRetry(t *testing.T) {

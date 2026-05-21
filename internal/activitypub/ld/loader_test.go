@@ -59,3 +59,62 @@ func TestProcessor_NormalizeActivityStreamsNote(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, nq, "n-quads output should be non-empty for a Note")
 }
+
+// Compact は upstream の @context shape (= raw context object) を引数に取り、
+// AS 2.0 context に対して shape を正規化する経路を最低限カバーする。
+func TestProcessor_CompactWithActivityStreamsContext(t *testing.T) {
+	p := ld.NewProcessor()
+	doc := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"type":     "Note",
+		"id":       "https://example.com/notes/n1",
+		"content":  "hello",
+	}
+	out, err := p.Compact(doc, "https://www.w3.org/ns/activitystreams")
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.Equal(t, "Note", out["type"], "compact 後も type=Note を保持")
+}
+
+// Normalize に不正 doc を渡したときに error path を通ることを確認。
+func TestProcessor_NormalizeMalformedReturnsError(t *testing.T) {
+	p := ld.NewProcessor()
+	// json-gold は invalid @context (= 数値) で error を返す。
+	_, err := p.Normalize(map[string]any{
+		"@context": 12345,
+		"type":     "Note",
+	})
+	require.Error(t, err)
+}
+
+// loadDocument の cache hit 経路 (= 同 URL を 2 度 fetch) を test。
+func TestProcessor_LoadDocumentCacheHit(t *testing.T) {
+	p := ld.NewProcessor()
+	doc1, err := p.LoadDocument("https://www.w3.org/ns/activitystreams")
+	require.NoError(t, err)
+	doc2, err := p.LoadDocument("https://www.w3.org/ns/activitystreams")
+	require.NoError(t, err)
+	// 同 instance を返す (= cache hit)
+	assert.Same(t, doc1, doc2)
+}
+
+// Compact に不正 doc を渡したときに error path を通ることを確認。
+func TestProcessor_CompactReturnsError(t *testing.T) {
+	p := ld.NewProcessor()
+	// json-gold は invalid @context (= 数値) で error を返す。
+	_, err := p.Compact(map[string]any{
+		"@context": 12345,
+		"type":     "Note",
+	}, "https://www.w3.org/ns/activitystreams")
+	require.Error(t, err)
+}
+
+// freeze 後に preload set 外 URL を要求すると ErrCacheFrozen を返す
+// (= loadDocument が cache miss + frozen の経路)。
+func TestProcessor_LoadDocumentFreezeBlocksUnknownURL(t *testing.T) {
+	p := ld.NewProcessor()
+	p.Freeze()
+	_, err := p.LoadDocument("https://evil.example/unknown")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ld.ErrCacheFrozen)
+}
