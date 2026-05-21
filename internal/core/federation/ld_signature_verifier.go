@@ -73,6 +73,20 @@ func (v *LDSignatureVerifier) VerifyIfPresent(rawBody []byte) error {
 	// verifyRsaSignature2017` を踏襲する。forbidden directive を pubkey
 	// resolve より先に check して、不正 activity は DB lookup のコストを
 	// 払う前に reject する。
+	//
+	// **mk-go の前提**: upstream は compact 後の document に対して forbidden
+	// check を実行するが、mk-go は raw activity に直接適用する (= compact を
+	// 呼ばない)。これは `ld.PreloadedLoader` が HTTP fetch を一切行わない
+	// 設計 (= 3 つの embed context のみ resolve、それ以外は ErrContextNotPreloaded)
+	// のため、remote context injection で directive を後付けする攻撃ベクタが
+	// 構造的に存在しないことを前提にしている。raw activity 段階の check で
+	// 十分かつ upstream より strict (= 攻撃者が compact 内で `@reverse` を意
+	// 味変換しようとしても入口で reject される)。
+	//
+	// 将来 mk-go に HTTP fetch fallback を追加する場合は、compact 後 check
+	// に切り替える必要がある (= remote context が後付け directive を inject
+	// する経路が成立してしまうため)。その場合は本コメントを更新し、
+	// `proc.Compact(act, ...)` を挟んでから check するフローに変更する。
 	proc := ld.NewProcessor()
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {
 		return err
