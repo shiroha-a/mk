@@ -2,28 +2,93 @@ package ld
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/piprate/json-gold/ld"
 )
 
-// Processor は piprate/json-gold の JsonLdProcessor + PreloadedLoader を
-// 内包した薄い wrapper。compact / normalize / signature helper の上層から
-// 呼び出して LD-Signature verify を組み立てる。
+// Processor は piprate/json-gold の JsonLdProcessor + per-verify state を
+// 内包した薄い wrapper。compact / normalize / verify を 1 つの processor
+// instance 経由で行い、cache cap / freeze (= 2026.5.4 hardening) を per-verify
+// で適用する。
 //
-// upstream Misskey TS `JsonLdService` 互換の挙動を提供することが目的:
-//   - context fetch は PreloadedLoader 経由 (HTTP fetch 禁止)
-//   - normalize algorithm は URDNA2015 (RFC8785 ベース、JSON-LD 1.1 spec)
+// upstream Misskey TS `JsonLdService` 互換:
+//   - 1 verify あたり 1 Processor instance を作る (cache は activity 単位で reset)
+//   - context fetch は PreloadedLoader 経由 (= HTTP fetch なし、現状)
+//   - cache 256 entry 上限で overflow → ErrCacheOverflow
+//   - Freeze() 以降は ErrCacheFrozen
+//   - normalize は URDNA2015 (JSON-LD 1.1 spec)
+//
+// caller が外から DocumentLoader を inject する経路は今は持たない (= preload
+// only 設計、将来 HTTP fetch fallback を入れるなら本 struct に追加)。
 type Processor struct {
-	jp     *ld.JsonLdProcessor
-	loader *PreloadedLoader
+	jp      *ld.JsonLdProcessor
+	preload *PreloadedLoader
+
+	// per-verify state (= upstream JsonLd class instance state を Go 翻訳)。
+	mu       sync.Mutex
+	cache    map[string]*ld.RemoteDocument
+	frozen   bool
+	cacheCap int
 }
 
-// NewProcessor returns a Processor wired to the preload-only DocumentLoader.
+// NewProcessor returns a fresh Processor with default 256 cache cap.
+// Inbox 側で 1 activity verify ごとに新規 instance を作るのが推奨運用 (=
+// upstream class instance と等価)。
 func NewProcessor() *Processor {
 	return &Processor{
-		jp:     ld.NewJsonLdProcessor(),
-		loader: NewPreloadedLoader(),
+		jp:       ld.NewJsonLdProcessor(),
+		preload:  NewPreloadedLoader(),
+		cache:    make(map[string]*ld.RemoteDocument),
+		cacheCap: defaultCacheCap,
 	}
+}
+
+// LoadDocument implements ld.DocumentLoader so Processor itself can be passed
+// to JsonLdProcessor.Compact / Normalize. 内部実装は loadDocument に委譲。
+func (p *Processor) LoadDocument(u string) (*ld.RemoteDocument, error) {
+	return p.loadDocument(u)
+}
+
+// loadDocument is the DocumentLoader callback the Processor uses internally.
+// Implements:
+//   - cache hit → 即返す (HTTP 経路無し)
+//   - cache miss + frozen → ErrCacheFrozen
+//   - cache miss → PreloadedLoader に委譲、結果を cache に格納
+//   - cache size > cacheCap → ErrCacheOverflow
+//
+// 戻り値 RemoteDocument の DocumentURL / Document は piprate/json-gold が
+// JsonLdProcessor の compact / normalize で参照する。
+func (p *Processor) loadDocument(u string) (*ld.RemoteDocument, error) {
+	p.mu.Lock()
+	if d, ok := p.cache[u]; ok {
+		p.mu.Unlock()
+		return d, nil
+	}
+	if p.frozen {
+		p.mu.Unlock()
+		return nil, ErrCacheFrozen
+	}
+	p.mu.Unlock()
+
+	doc, err := p.preload.LoadDocument(u)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// 同時に同じ URL を fetch して 1 つ目が cache 登録した後 race するケースも
+	// 想定し、再 check で先勝ち優先 (= upstream Map.set + size check と等価
+	// な挙動を deterministic に揃える)。
+	if existing, ok := p.cache[u]; ok {
+		return existing, nil
+	}
+	p.cache[u] = doc
+	if len(p.cache) > p.cacheCap {
+		return nil, fmt.Errorf("%w: size=%d", ErrCacheOverflow, len(p.cache))
+	}
+	return doc, nil
 }
 
 // Compact applies JSON-LD `compact` algorithm against the supplied context.
@@ -32,7 +97,7 @@ func NewProcessor() *Processor {
 // 異なる context shape を canonical 化する。
 func (p *Processor) Compact(doc any, context any) (map[string]any, error) {
 	opts := ld.NewJsonLdOptions("")
-	opts.DocumentLoader = p.loader
+	opts.DocumentLoader = p
 	out, err := p.jp.Compact(doc, context, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonld compact: %w", err)
@@ -48,7 +113,7 @@ func (p *Processor) Compact(doc any, context any) (map[string]any, error) {
 // algorithm は normalizationAlgorithm = URDNA2015 のみ accept)。
 func (p *Processor) Normalize(doc any) (string, error) {
 	opts := ld.NewJsonLdOptions("")
-	opts.DocumentLoader = p.loader
+	opts.DocumentLoader = p
 	opts.Algorithm = ld.AlgorithmURDNA2015
 	opts.Format = "application/n-quads"
 	out, err := p.jp.Normalize(doc, opts)
