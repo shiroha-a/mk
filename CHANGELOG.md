@@ -92,6 +92,7 @@ Playwright spec を両 backend で走らせる中で観測した drop-in 互換 
 - #942: URL summary 文字化け解消 (Shift_JIS / EUC-JP / ISO-2022-JP の自動正規化)
 - #943: リモートユーザー counts (notesCount / followersCount / followingCount) を origin から fetch する mk-go 独自拡張
 - #945: RemoteStatsFetcher cache を `sync.Map` → LRU (size cap 10000) で memory bound 化
+- #1156: リモートユーザーのプロフィール「アクティビティ」タブが Heatmap 空 / Notes 折れ線がマイナス方面にのみ動く drop-in regression を fix。federation `handleCreate` / `handleAnnounce` で `OnNoteCreated` chart hook が発火しておらず PerUserNotesChart の +1 が記録されない一方、`handleDelete` 経路 (`NoteDeleteService.Delete`) は -1 を記録していたため日次集計が常に負方向に推移していた。`Resolver.IngestNoteWithCreated` (sibling) を追加して dedup-hit と新規 INSERT を区別し、`Processor.SetNoteChartHook` で chart hook を `safeGoFedHook` 経由で fire-and-forget 発火 (重複配送では fire しない)
 
 ### Phase 15 — Federation performance (#562, #565, #569)
 

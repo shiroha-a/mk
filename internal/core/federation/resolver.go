@@ -793,23 +793,41 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 // IngestNote parses an ActivityStreams Note JSON and persists it as a local
 // row authored by the (resolved) attributedTo actor. 既に同じ URI の note を
 // 取り込み済みなら既存レコードを返す。
+//
+// `created` フラグが必要な caller (e.g. processor.handleCreate の chart hook 発火
+// 判定) は IngestNoteWithCreated を直接呼ぶこと。
 func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
+	note, _, err := r.IngestNoteWithCreated(body)
+	return note, err
+}
+
+// IngestNoteWithCreated is the same as IngestNote but also returns whether
+// the note was freshly persisted (`created == true`) or returned from the
+// dedup cache (`created == false`). Caller can gate chart hooks on `created`
+// so non-idempotent counters such as PerUserNotesChart are not double-applied
+// when the same Create activity is delivered twice (#1156).
+//
+// `created == false` cases:
+//   - existing note matched by URI (dedup hit)
+//   - AP poll vote (note=nil; processed as a Vote, no note row created)
+//   - any error path
+func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
-		return nil, ErrInvalidNote
+		return nil, false, ErrInvalidNote
 	}
 	var apNote activitypub.Note
 	if err := json.Unmarshal(body, &apNote); err != nil {
-		return nil, ErrInvalidNote
+		return nil, false, ErrInvalidNote
 	}
 	if apNote.ID == "" || apNote.AttributedTo == "" {
-		return nil, ErrInvalidNote
+		return nil, false, ErrInvalidNote
 	}
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
-		return existing, nil
+		return existing, false, nil
 	}
 	actor, err := r.ResolveActor(apNote.AttributedTo)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// 遅延配送 / origin downtime 後の bulk push などで note が遅れて届くケース
 	// では AP の `published` を採用しないと timeline 上の並びが受信時刻順に
@@ -887,7 +905,7 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 				}
 				// vote として処理した場合、reply note は作成せず終了
 				// (note=nil で caller の fanout / notification も skip される)。
-				return nil, nil
+				return nil, false, nil
 			}
 			slog.Warn("federation: AP poll vote choice not found",
 				"actor", actor.ID, "noteId", replyTarget.ID, "choice", apNote.Name)
@@ -911,7 +929,7 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	// path (NoteCreateService.checkMentionLimit) と同じ policy を federation
 	// 受信側にも適用する。
 	if corenote.DefaultMentionLimit > 0 && len(note.Mentions) > corenote.DefaultMentionLimit {
-		return nil, corenote.ErrContainsTooManyMentions
+		return nil, false, corenote.ErrContainsTooManyMentions
 	}
 	// specified visibility では AP `to` 配列が宛先 actor URI 列。CanView の
 	// VisibleUserIDs チェック (core/note/visibility.go) で受信者が note を
@@ -949,7 +967,7 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 		note.HasPoll = true
 	}
 	if err := r.noteRepo.Create(note); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// ローカルノートへの返信の場合、repliesCount を増やす。
 	// これにより timeline や API 上の「返信数」表示が federated reply も
@@ -968,7 +986,7 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	if r.hashtagHook != nil && len(note.Tags) > 0 {
 		r.hashtagHook.OnNoteCreated(note, actor)
 	}
-	return note, nil
+	return note, true, nil
 }
 
 // createPollFromQuestion creates a Poll record from an AP Question's oneOf/anyOf choices.

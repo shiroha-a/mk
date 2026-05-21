@@ -97,6 +97,18 @@ type Processor struct {
 	// 配線されていなければ no-op。
 	notificationHook NotificationHook
 
+	// Note chart hook for inbound Create / Announce (#1156). ローカル作成は
+	// note_create_service.go から chartHook.OnNoteCreated を発火させているが、
+	// federation 経由のリモートノートは handleCreate / handleAnnounce で直接
+	// note を作るため、本フィールド経由で同じ chart hook を発火させないと
+	// PerUserNotesChart 等の inc 列が +1 されない (= プロフィールの
+	// アクティビティタブの heatmap がリモートユーザーだけ空になる)。
+	// noteChartHook は idempotent ではないので、dedup hit (= 既存ノートを返した
+	// ケース) では発火させない (IngestNoteWithCreated の created==false 時は
+	// skip)。resolver の ChartHook (= OnRemoteUserCreated) とは責務が異なるので
+	// 別 interface として分離する。
+	noteChartHook NoteChartHook
+
 	// localBaseURL はローカルユーザーのcanonical URI prefix
 	// (例: "https://go.k7a.org") を保持する。inboxで受信したactivityの
 	// object が "{localBaseURL}/users/{id}" 形式のとき、ローカルユーザーを
@@ -171,6 +183,21 @@ type TimelineFanoutHook interface {
 // 常に fire-and-forget で呼び出せばよい。
 type NotificationHook interface {
 	OnNoteCreated(note *model.Note, author *model.User, replyTarget, renoteTarget *model.Note)
+}
+
+// NoteChartHook is invoked after a freshly persisted inbound Create / Announce
+// so that PerUserNotesChart 等の counters が +1 される (#1156)。ローカル作成では
+// note_create_service.go の ChartHook が同じ役目を担う。
+//
+// dedup ヒット (同 URI の重複配送) では発火させないこと: chart hook は
+// idempotent ではなく、二重呼び出しで日次集計が +2 されてしまう。
+// 実装契約: 呼び出し側は呼び出しを goroutine で非同期化すること推奨 (= local
+// 側と同じく safeGo パターン)。
+//
+// 名称が NoteChartHook なのは、resolver の ChartHook (OnRemoteUserCreated 用)
+// と衝突するのを避けつつ責務 (note chart 系) を明示するため。
+type NoteChartHook interface {
+	OnNoteCreated(note *model.Note)
 }
 
 // NewProcessor constructs a Processor. reactionService / noteDeleteSvc は省略
@@ -364,6 +391,19 @@ func (p *Processor) SetFanoutHook(h TimelineFanoutHook) {
 // 経由で通知を作る状態になる)。
 func (p *Processor) SetNotificationHook(h NotificationHook) {
 	p.notificationHook = h
+}
+
+// SetNoteChartHook wires a NoteChartHook so that inbound Create / Announce
+// activities update PerUserNotesChart 等のリモートユーザー向け chart 集計
+// (#1156)。Without it, リモートユーザーのプロフィールの「アクティビティ」
+// タブが空になる (delete だけ note_delete_service 経由で -1 されるため
+// heatmap がマイナスにしか動かない drop-in regression が再発する)。
+//
+// 名称が SetNoteChartHook なのは resolver.SetChartHook (= 新規 remote user
+// 集計用) と衝突するのを避けるため。配線対象は同じ chart hooks 集約だが、
+// 注入経路を別 method に分けて誤配線を防ぐ。
+func (p *Processor) SetNoteChartHook(h NoteChartHook) {
+	p.noteChartHook = h
 }
 
 // followRelayIDPattern extracts the relay id embedded in
@@ -660,7 +700,7 @@ func (p *Processor) handleCreate(act genericActivity) error {
 			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
 		}
 	}
-	note, err := p.resolver.IngestNote(act.Object)
+	note, created, err := p.resolver.IngestNoteWithCreated(act.Object)
 	if errors.Is(err, corenote.ErrContainsTooManyMentions) {
 		// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): role policy
 		// 由来の "note contains too many mentions" は永続的に解決しない error な
@@ -709,6 +749,12 @@ func (p *Processor) handleCreate(act genericActivity) error {
 				// (#415)。
 				p.notificationHook.OnNoteCreated(hydrated, actor, hydrated.Reply, hydrated.Renote)
 			})
+		}
+		// chart hook は dedup hit では発火させない (#1156)。同 URI の
+		// Create activity が重複配送されたとき (= リトライ / S2S 二重投げ)
+		// に PerUserNotesChart の inc 列が +2 されないようにする。
+		if p.noteChartHook != nil && created {
+			safeGoFedHook(func() { p.noteChartHook.OnNoteCreated(hydrated) })
 		}
 	}
 	return nil
@@ -876,6 +922,12 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		// (#415)。target が renoteTarget。reply 通知は Announce では発生
 		// しないので nil を渡す。
 		p.notificationHook.OnNoteCreated(hydrated, announcer, nil, target)
+	}
+	// chart hook 発火 (#1156)。dedup チェック (act.ID != "" の FindByURI) を
+	// 通り抜けて noteRepo.Create(renote) も成功した時点で新規作成と確定する
+	// ので、created flag は不要 (= 重複 Announce はここに辿り着かない)。
+	if p.noteChartHook != nil {
+		safeGoFedHook(func() { p.noteChartHook.OnNoteCreated(hydrated) })
 	}
 	return nil
 }

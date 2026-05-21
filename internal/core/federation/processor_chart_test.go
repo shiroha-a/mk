@@ -1,0 +1,120 @@
+package federation_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// recordingNoteChartHook captures NoteChartHook.OnNoteCreated calls. Calls go
+// through safeGoFedHook so the test must await delivery via channel rather
+// than relying on call-count immediately after Process returns (#1156).
+type recordingNoteChartHook struct {
+	calls chan string
+}
+
+func newRecordingNoteChartHook() *recordingNoteChartHook {
+	return &recordingNoteChartHook{calls: make(chan string, 16)}
+}
+
+func (h *recordingNoteChartHook) OnNoteCreated(note *model.Note) {
+	id := ""
+	if note != nil {
+		id = note.ID
+	}
+	h.calls <- id
+}
+
+// waitForOne waits for exactly one OnNoteCreated and returns the captured
+// note ID. Fails the test if no call arrives within the timeout.
+func (h *recordingNoteChartHook) waitForOne(t *testing.T) string {
+	t.Helper()
+	select {
+	case id := <-h.calls:
+		return id
+	case <-time.After(2 * time.Second):
+		t.Fatal("noteChartHook.OnNoteCreated was not invoked within timeout")
+		return ""
+	}
+}
+
+// expectNoMoreCalls asserts that no further OnNoteCreated arrives in a short
+// settle window. Used to guard against double-fire on dedup paths.
+func (h *recordingNoteChartHook) expectNoMoreCalls(t *testing.T, settle time.Duration) {
+	t.Helper()
+	select {
+	case got := <-h.calls:
+		t.Fatalf("noteChartHook.OnNoteCreated fired unexpectedly (note=%s)", got)
+	case <-time.After(settle):
+	}
+}
+
+// federation handleCreate must fire NoteChartHook.OnNoteCreated exactly once
+// for a fresh inbound Create(Note), and must NOT fire it for a redelivered
+// (= dedup-hit) Create with the same URI (#1156). 旧実装は chart hook が一切
+// 呼ばれず、PerUserNotesChart の inc 列がリモートユーザーで +1 されない
+// regression を引き起こしていた。
+func TestProcess_CreateNote_FiresChartHook_FreshOnly(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	hook := newRecordingNoteChartHook()
+	env.processor.SetNoteChartHook(hook)
+
+	require.NoError(t, env.processor.Process([]byte(noteCreateBody)))
+	noteID := hook.waitForOne(t)
+	assert.NotEmpty(t, noteID, "chart hook must receive a note with non-empty ID")
+
+	// 同 URI の Create を二度目に流す → IngestNoteWithCreated は dedup hit で
+	// created=false を返すので chart hook は再発火してはいけない。
+	require.NoError(t, env.processor.Process([]byte(noteCreateBody)))
+	hook.expectNoMoreCalls(t, 200*time.Millisecond)
+}
+
+// handleAnnounce (= 純粋な Boost) で chart hook が renote 作成時に発火する
+// ことを確認 (#1156)。dedup チェックは handleCreate より前の段階で URI 一致
+// により切られるので、handleAnnounce 本体に到達 = 新規作成と確定する。
+func TestProcess_Announce_FiresChartHook(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	hook := newRecordingNoteChartHook()
+	env.processor.SetNoteChartHook(hook)
+
+	// target note (= 原投稿) と原投稿者 bob をローカル DB に
+	env.noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+
+	body := []byte(`{
+		"type": "Announce",
+		"id": "https://remote.example/announces/chart-1",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1"
+	}`)
+	require.NoError(t, env.processor.Process(body))
+
+	noteID := hook.waitForOne(t)
+	assert.NotEmpty(t, noteID, "chart hook must receive renote ID")
+	// 受け取った note は新規作成した renote であり、target ID とは別
+	assert.NotEqual(t, "n1", noteID, "chart hook must receive the newly-created renote, not the announce target")
+}
+
+// chart hook が未配線 (= nil) のままでも Process が panic / error を出さない
+// ことを guard (#1156)。SetNoteChartHook はオプショナル wire なので、test や
+// 軽量 deployment で chart subsystem を立ち上げないケースでも壊れないこと。
+func TestProcess_NoteChartHook_NilSafe(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	// SetNoteChartHook を呼ばない (= field は nil)
+	require.NoError(t, env.processor.Process([]byte(noteCreateBody)))
+
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	announce := []byte(`{
+		"type": "Announce",
+		"id": "https://remote.example/announces/nil-safe",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1"
+	}`)
+	require.NoError(t, env.processor.Process(announce))
+}

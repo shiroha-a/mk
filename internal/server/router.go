@@ -697,6 +697,12 @@ func (s *Server) setupRoutes() {
 	federationResolver.SetChartHook(chartHooks)
 	deliverProcessor.SetChartHook(chartHooks)
 	inboxProcessor.SetChartHook(chartHooks)
+	// federation 経由のリモートノート (Create / Announce) も PerUserNotesChart
+	// 等の note 系 chart に +1 を記録するために配線する (#1156)。これが無いと
+	// リモートユーザーのプロフィール「アクティビティ」タブの heatmap が空に
+	// なり、削除 (-1) だけが note_delete_service 経由で記録されてマイナス側に
+	// しか動かなくなる drop-in regression が発生する。
+	federationProcessor.SetNoteChartHook(chartHooks)
 
 	// Hashtag service: ノート作成 (local / federation 両経路) で hashtag table の
 	// mentionedUsersCount / mentionedUserIds を更新する (#680)。/api/hashtags/list

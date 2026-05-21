@@ -521,6 +521,36 @@ func TestIngestNote_DedupOnExisting(t *testing.T) {
 	assert.Equal(t, "existing", got.ID)
 }
 
+// IngestNoteWithCreated は新規 INSERT 経路で created=true、dedup hit で
+// created=false を返す (#1156)。Processor 側で chart hook を created flag
+// で gate するために使う。
+func TestIngestNoteWithCreated_FreshIngest(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, created, "fresh ingest must report created=true so caller can fire chart hooks")
+}
+
+func TestIngestNoteWithCreated_DedupReturnsFalse(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	noteRepo.Notes["existing"] = &model.Note{ID: "existing", URI: &uri}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "existing", got.ID)
+	assert.False(t, created, "dedup hit must report created=false so caller can skip non-idempotent chart hooks")
+}
+
 func TestIngestNote_ResolveActorError(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()
