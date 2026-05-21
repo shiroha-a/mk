@@ -914,14 +914,22 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	}
 	_ = p.noteRepo.IncrementCount(target.ID, "renoteCount", 1)
 	hydrated := hydrateNoteForFanout(p.noteRepo, renote)
+	// hook はベストエフォートで safeGoFedHook 経由で非同期発火する (#1158)。
+	// handleCreate (#569) と同じく Redis LPUSH / publish 待ちで inbox worker
+	// drain を block しないことが目的。順序保証は handleCreate と同様に各 hook
+	// 側の冪等性で吸収する。closure capture する `hydrated` / `announcer` /
+	// `target` は handleAnnounce 内 local 変数で関数 return 後も生存するため
+	// goroutine 上の参照は安全 (race なし)。
 	if p.fanoutHook != nil {
-		p.fanoutHook.OnNoteCreated(hydrated, announcer)
+		safeGoFedHook(func() { p.fanoutHook.OnNoteCreated(hydrated, announcer) })
 	}
 	if p.notificationHook != nil {
 		// remote user が local note を renote した時に元投稿者へ通知を出す
 		// (#415)。target が renoteTarget。reply 通知は Announce では発生
 		// しないので nil を渡す。
-		p.notificationHook.OnNoteCreated(hydrated, announcer, nil, target)
+		safeGoFedHook(func() {
+			p.notificationHook.OnNoteCreated(hydrated, announcer, nil, target)
+		})
 	}
 	// chart hook 発火 (#1156)。dedup チェック (上部の `act.ID != ""` ゲート付き
 	// FindByURI) を通り抜けて noteRepo.Create(renote) も成功した時点で「この

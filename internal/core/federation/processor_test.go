@@ -1506,15 +1506,18 @@ func TestProcess_AnnounceCallsFanoutHook(t *testing.T) {
 		"object": "https://example.com/notes/local1"
 	}`)
 	require.NoError(t, p.Process(body))
-	// fanoutHookが呼ばれたこと
-	require.Len(t, hook.calls, 1)
+	// fanoutHookが呼ばれたこと (#1158 で async になったので Eventually で待つ)
+	require.Eventually(t, func() bool {
+		return len(hook.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+	calls := hook.snapshot()
 	// Announce で作成された renote の ID が渡される
-	assert.NotEqual(t, "local1", hook.calls[0].noteID)
+	assert.NotEqual(t, "local1", calls[0].noteID)
 	// hydrateNoteForFanout により Renote relation が preload された状態で
 	// 渡される (#416: streaming payload で renote が null にならない保証)。
-	require.NotNil(t, hook.calls[0].note)
-	require.NotNil(t, hook.calls[0].note.Renote, "Renote relation must be hydrated before fanout")
-	assert.Equal(t, "local1", hook.calls[0].note.Renote.ID)
+	require.NotNil(t, calls[0].note)
+	require.NotNil(t, calls[0].note.Renote, "Renote relation must be hydrated before fanout")
+	assert.Equal(t, "local1", calls[0].note.Renote.ID)
 }
 
 func TestProcess_CreateWithoutFanoutHook(t *testing.T) {
@@ -1618,13 +1621,17 @@ func TestProcess_AnnounceCallsNotificationHook(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(body))
 
-	require.Len(t, hook.calls, 1)
+	// notificationHook が呼ばれたこと (#1158 で async になったので Eventually で待つ)
+	require.Eventually(t, func() bool {
+		return len(hook.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+	calls := hook.snapshot()
 	// renoteTarget に local note が渡る。hook 内部の notifyLocalUser が
 	// renoteTarget.UserID == "bob" を見て bob へ通知を送る。
-	require.NotNil(t, hook.calls[0].renoteTarget)
-	assert.Equal(t, "local1", hook.calls[0].renoteTarget.ID)
-	assert.Equal(t, "bob", hook.calls[0].renoteTarget.UserID)
-	assert.Nil(t, hook.calls[0].replyTarget, "Announce は reply ではない")
+	require.NotNil(t, calls[0].renoteTarget)
+	assert.Equal(t, "local1", calls[0].renoteTarget.ID)
+	assert.Equal(t, "bob", calls[0].renoteTarget.UserID)
+	assert.Nil(t, calls[0].replyTarget, "Announce は reply ではない")
 }
 
 func TestProcess_CreateCallsNotificationHook(t *testing.T) {
