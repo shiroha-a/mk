@@ -15,12 +15,12 @@ import (
 // MkGoVersion is the mk-go version. Override at build time via:
 //
 //	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoVersion=1.0.0"
-var MkGoVersion = "0.9.0"
+var MkGoVersion = "0.9.1"
 
 // MisskeyVersion is the compatible Misskey version. Override at build time via:
 //
-//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MisskeyVersion=2026.5.1"
-var MisskeyVersion = "2026.5.1"
+//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MisskeyVersion=2026.5.4"
+var MisskeyVersion = "2026.5.4"
 
 // RedisOptions represents Redis connection configuration.
 type RedisOptions struct {

@@ -416,7 +416,7 @@ func TestMeta_NoteSearchableScope_DefaultGlobal(t *testing.T) {
 // meilisearch.scope="local" が誤って反映されないこと (= upstream #17341 bug 本体)。
 func TestMeta_NoteSearchableScope_SqlLikeIgnoresMeilisearchScope(t *testing.T) {
 	cfg := &config.Config{
-		Version:        "2026.5.1",
+		Version:        "2026.5.4",
 		URL:            "https://misskey.example.com",
 		FulltextSearch: &config.FulltextSearchOptions{Provider: "sqlLike"},
 		Meilisearch:    &config.MeilisearchOptions{Host: "ms", Port: "7700", Scope: "local"},
@@ -441,7 +441,7 @@ func TestMeta_NoteSearchableScope_SqlLikeIgnoresMeilisearchScope(t *testing.T) {
 // 唯一の "local" 返却ケース。
 func TestMeta_NoteSearchableScope_MeilisearchLocal(t *testing.T) {
 	cfg := &config.Config{
-		Version:        "2026.5.1",
+		Version:        "2026.5.4",
 		URL:            "https://misskey.example.com",
 		FulltextSearch: &config.FulltextSearchOptions{Provider: "meilisearch"},
 		Meilisearch:    &config.MeilisearchOptions{Host: "ms", Port: "7700", Scope: "local"},
@@ -465,7 +465,7 @@ func TestMeta_NoteSearchableScope_MeilisearchLocal(t *testing.T) {
 // meilisearch でも明示的に global scope を選んでいるケース。
 func TestMeta_NoteSearchableScope_MeilisearchGlobal(t *testing.T) {
 	cfg := &config.Config{
-		Version:        "2026.5.1",
+		Version:        "2026.5.4",
 		URL:            "https://misskey.example.com",
 		FulltextSearch: &config.FulltextSearchOptions{Provider: "meilisearch"},
 		Meilisearch:    &config.MeilisearchOptions{Host: "ms", Port: "7700", Scope: "global"},

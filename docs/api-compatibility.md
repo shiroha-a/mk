@@ -9,7 +9,7 @@
 
 - **Phase 1-4 完了**: Playwright e2e で **96 spec / 35 directory / 242 endpoint cover (54.3%)** を両 backend (mk-go / Misskey TS) で daily nightly に検証
 - **drift backlog**: spec 整備中に発見した 40+ 件の drop-in 互換 drift を fix 済 (= mk-go 単体で TS frontend / TS API client が壊れずに動く水準)
-- **upstream catch-up**: 2026.4.0 / 2026.5.0 / 2026.5.1 への追従は #947 で個別 sub-task として消化中、2026.3.2 → 2026.5.1 の backend 差分は [`docs/update/20260500diff.md`](update/20260500diff.md) / [`docs/update/20260501diff.md`](update/20260501diff.md) を参照
+- **upstream catch-up**: **2026.5.4 まで追従完了**。#947 (2026.3.2 → 2026.5.1) と #1164 (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) で 1 PR / 複数 commit 集約方式に移行。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
 
 ## エンドポイントカバー率
 
@@ -272,8 +272,7 @@ drop-in テスト (#367) で発見した補完カラム:
 - **Identicon の外見** — TS版と生成アルゴリズムが異なるため、アイコン未設定ユーザーの表示が異なる
 - **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go は独自設計)
 - **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= PostgreSQL `ILIKE` fallback、Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
-- **2026.4.0 / 2026.5.0 / 2026.5.1 由来の追従未対応** — `#947` tracker 配下、`docs/update/2026050{0,1}diff.md` 参照
-  - 連合互換性に直接関わるもの (alsoKnownAs / actor 正規化 / リレー Announce / etc.) は高優先 sub-task として個別 PR 化中
+- **upstream 2026.5.4 まで追従済** — `#947` (2026.3.2 → 2026.5.1) と `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) で完了。各 release 差分は `docs/update/2026050*diff.md` (= `yyyymmdd*` 命名) を参照
 
 詳細は[TS版からの移行ガイド](migration-from-ts.md)の「既知の制限」セクションも参照。
 
@@ -282,5 +281,6 @@ drop-in テスト (#367) で発見した補完カラム:
 - #107 — 第1次互換性調査 (API/DB/挙動の3軸)
 - #124 — 第2次互換性調査 (6軸: +WebSocket, エラー, 設定)
 - #744 — Playwright e2e Phase 1-4 tracker (54.3% endpoint coverage 達成)
-- #947 — Misskey TS 2026.3.2 → 2026.5.1 への upstream 追従 tracker
+- #947 — Misskey TS 2026.3.2 → 2026.5.1 への upstream 追従 tracker (closed)
+- #1164 — Misskey TS 2026.5.1 → 2026.5.4 への upstream 追従 tracker (LD-Signature 初期実装含む、1 PR 集約)
 - #949 — ドキュメント更新親 issue (本 doc を含む)

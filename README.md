@@ -2,7 +2,7 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.5.1**
+互換バージョン: **Misskey 2026.5.4** (mk-go `0.9.1`)
 
 ## 特徴
 
@@ -85,7 +85,7 @@ go test -race -count=1 -timeout 10m \
 | [Drop-in frontend e2e (cypress)](docs/dropin-frontend-e2e.md) | 3 TS instance + cypress で frontend 視点の互換 |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
 | [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
-| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.5.0 → 2026.5.1 の backend 差分 (`yyyymmdd*` 命名) |
+| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.5.0 → 2026.5.1 → 2026.5.2 → 2026.5.4 の backend 差分 (`yyyymmdd*` 命名) |
 
 ## ライセンス
 

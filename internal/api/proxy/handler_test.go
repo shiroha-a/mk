@@ -103,7 +103,7 @@ func setupHandler(t *testing.T, allowedURLs map[string]bool) (*Handler, *echo.Ec
 		MediaProxy:                "https://example.com/proxy",
 		ExternalMediaProxyEnabled: false,
 		MediaProxySecret:          []byte("test-secret"),
-		UserAgent:                 "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:                 "Misskey/2026.5.4 (https://example.com)",
 	}
 
 	svc := mediaproxy.NewService(
@@ -170,7 +170,7 @@ func TestHandle_AllowlistedURL(t *testing.T) {
 		MediaProxy:                "https://example.com/proxy",
 		ExternalMediaProxyEnabled: false,
 		MediaProxySecret:          []byte("test-secret"),
-		UserAgent:                 "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:                 "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -233,7 +233,7 @@ func TestHandle_RecursiveProxy(t *testing.T) {
 
 	rec := doRequest(e, h, http.MethodGet,
 		"/proxy/image.webp?url="+imgServer.URL+"/avatar.png",
-		map[string]string{"User-Agent": "Misskey/2026.5.1 (https://other.example)"})
+		map[string]string{"User-Agent": "Misskey/2026.5.4 (https://other.example)"})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
@@ -274,7 +274,7 @@ func TestHandle_EmojiMode(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -301,7 +301,7 @@ func TestHandle_ExternalProxyRedirect(t *testing.T) {
 		MediaProxy:                "https://proxy.example.com",
 		ExternalMediaProxyEnabled: true,
 		MediaProxySecret:          []byte("test-secret"),
-		UserAgent:                 "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:                 "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -336,7 +336,7 @@ func TestHandle_ExternalProxyRedirect_SkippedWithOrigin(t *testing.T) {
 		MediaProxy:                "https://proxy.example.com",
 		ExternalMediaProxyEnabled: true,
 		MediaProxySecret:          []byte("test-secret"),
-		UserAgent:                 "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:                 "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -408,7 +408,7 @@ func TestHandle_PathBasedURL(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -453,7 +453,7 @@ func TestHandle_NotFound_NoFallback(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -484,7 +484,7 @@ func TestHandle_InternalError_WithFallback(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -519,7 +519,7 @@ func TestHandle_InternalError_NoFallback(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,
@@ -549,7 +549,7 @@ func TestHandle_CacheHeaders(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 
 	t.Run("success has immutable cache", func(t *testing.T) {
@@ -609,7 +609,7 @@ func TestHandle_TooLarge(t *testing.T) {
 		URL:              "https://example.com",
 		MediaProxy:       "https://example.com/proxy",
 		MediaProxySecret: []byte("test-secret"),
-		UserAgent:        "Misskey/2026.5.1 (https://example.com)",
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
 	}
 	svc := mediaproxy.NewService(
 		cfg.URL, cfg.UserAgent,

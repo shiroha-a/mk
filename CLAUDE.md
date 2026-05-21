@@ -250,7 +250,7 @@ func (s *Service) CreateNote(ctx context.Context, input CreateInput) (*model.Not
 ### Misskey互換性
 
 - **API互換性が最優先**。レスポンスのフィールド名・型・エラーコードはオリジナルMisskeyと一致させる。
-- バージョン文字列は`internal/config/config.go`の`Version`定数で管理し、対応するMisskeyバージョンに合わせる（現在: `2026.3.2`）。
+- バージョン文字列は`internal/config/config.go`の`MisskeyVersion` / `MkGoVersion`定数で管理し、対応するMisskeyバージョンに合わせる（現在: `MisskeyVersion=2026.5.4` / `MkGoVersion=0.9.1`）。
 - User-Agentは`mk-go/<version> (<url>)`形式 (#774 で `Misskey-Go/<ver>` から rename)。
 
 ### ID生成
