@@ -51,11 +51,16 @@ func ClientAssetsDir() string {
 // TwemojiDir returns the path to twemoji SVG files.
 // 環境変数 MISSKEY_TWEMOJI_DIR で上書き可能。pnpm の hoisted node_modules は
 // packages/backend 配下に配置されるため、そちらを参照する。
+//
+// upstream 2026.5.2 #17381 で `@discordapp/twemoji/dist/svg` から
+// `@misskey-dev/emoji-assets/built/twemoji` に asset 配信元が移行した。
+// drop-in 互換のため mk-go も同 path を参照する (旧 path は submodule bump 後
+// に node_modules から消えるため falls back しない)。
 func TwemojiDir() string {
 	if v := os.Getenv("MISSKEY_TWEMOJI_DIR"); v != "" {
 		return v
 	}
-	return filepath.Join(frontendBase, "packages", "backend", "node_modules", "@discordapp", "twemoji", "dist", "svg")
+	return filepath.Join(frontendBase, "packages", "backend", "node_modules", "@misskey-dev", "emoji-assets", "built", "twemoji")
 }
 
 // FluentEmojiDir returns the path to fluent-emoji PNG files. upstream Misskey

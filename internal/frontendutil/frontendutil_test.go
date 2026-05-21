@@ -57,7 +57,10 @@ func TestClientAssetsDir_EnvOverride(t *testing.T) {
 
 func TestTwemojiDir_Default(t *testing.T) {
 	t.Setenv("MISSKEY_TWEMOJI_DIR", "")
-	assert.Equal(t, filepath.Join("third_party/misskey", "packages", "backend", "node_modules", "@discordapp", "twemoji", "dist", "svg"), TwemojiDir())
+	// upstream 2026.5.2 #17381 で twemoji の serve path が
+	// @discordapp/twemoji/dist/svg → @misskey-dev/emoji-assets/built/twemoji に
+	// 移行した (#1164 Phase A)。
+	assert.Equal(t, filepath.Join("third_party/misskey", "packages", "backend", "node_modules", "@misskey-dev", "emoji-assets", "built", "twemoji"), TwemojiDir())
 }
 
 func TestTwemojiDir_EnvOverride(t *testing.T) {
