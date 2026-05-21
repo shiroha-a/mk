@@ -1,6 +1,28 @@
 # Changelog
 
-## 互換バージョン: Misskey 2026.3.2 (base) + drift backlog 適用済 (実質 2026.5.x 相当の挙動)
+## 互換バージョン: Misskey 2026.5.4 (#1164 で submodule bump、2026.5.1-mk.0 → 2026.5.4-mk.0)
+
+### Phase 18 — 2026.5.4 upstream 追従 + LD-Signature 初期実装 (#1164 完了)
+
+submodule を 2026.5.1-mk.0 → 2026.5.4-mk.0 に bump、その間に発生した drift を移植 + 長年の drop-in gap だった LD-Signature 検証の初期実装を 1 PR に集約 (旧 #1118 統合):
+
+- **Phase A** (2026.5.2 由来):
+  - `/api/following/list` を新設 (upstream #17385 + #17416)。kind read:following、notification=true で notify IS NOT NULL filter、cursor sinceId/untilId + limit 1-100 default 10。FollowingEntityService.pack 互換の Following entity を `internal/entity/following.go` に追加
+  - `/api/following/update` の notify="none" を SQL NULL に正規化 (#17385 完全対応)。これがないと following/list の notification=true filter が機能不全だった drop-in regression を解消
+  - twemoji 参照 path を `node_modules/@misskey-dev/emoji-assets/built/twemoji` に追従 (upstream #17381)
+- **Phase B**: submodule bump 2026.5.1-mk.0 → 2026.5.4-mk.0
+- **Phase C** (2026.5.4 由来):
+  - `chat/rooms/show` に HasPermissionToViewRoomInfo gate を追加。owner / member / 招待受信者 / moderator のみ閲覧可、それ以外は noSuchRoom 404。旧 mk-go の RoomsShow は権限 check 完全欠如で room id を知る任意 user が room メタを取得できる drop-in regression / privacy hole だった
+  - `/api/announcements/show` の userId-targeted gate を実装。非ログイン user / 他人宛 announcement へのアクセスを 404 で塞ぐ (upstream 2026.5.4 fix + mk-go 単体の旧穴 2 重対応)
+- **Phase D** (LD-Signature 初期実装 + 2026.5.4 hardening):
+  - `internal/activitypub/ld/` を新設。`piprate/json-gold` v0.8.0 + URDNA2015 canonicalize の土台
+  - Misskey TS `PRELOADED_CONTEXTS` 互換の 3 context document (AS 2.0 / Security v1 / Identity v1) を JSON file として embed、PreloadedLoader が HTTP fetch なしで context resolve
+  - RsaSignature2017 verify を実装 (= upstream JsonLdService.verifyRsaSignature2017 byte-for-byte 互換、createVerifyData → SHA-256 hex concat → RSA-PKCS1v15 SHA-256 verify)
+  - 2026.5.4 hardening を初期実装に組み込む: forbidden directives (`@included` / `@graph` / `@reverse` を含む activity を弾く) / per-call cache 上限 256 entry / Freeze() で SSRF + TOCTOU race 遮断
+  - InboxProcessor 経路で全 inbound activity に対する LD-Sig optional verify を追加。signature 無し → skip / verify pass → 通常処理 / verify fail → drop。relay 由来 Announce 挙動 (#1002) は upstream 互換維持 (= LD-Sig pass しても renote 生成せず stream publish のみ)
+- 全 11 commit、`make fmt && make lint && make test` 全 pass、federation カバレッジ 90% 以上維持
+
+旧 #1118 (2026.5.1 → 2026.5.3 追従 tracker) は本 PR に統合して close。`docs/update/20260502diff.md` / `docs/update/20260504diff.md` の「mk-go 対応」サマリを「移植完了」に update した。
 
 ### Phase 17 — Ed25519 サポート (FEP-521a Multikey, #1067 完了)
 
