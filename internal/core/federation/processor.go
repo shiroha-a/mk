@@ -169,9 +169,29 @@ type ChatMessageReceiver interface {
 	CreateMessageViaAP(ctx context.Context, uri string, fromUser *model.User, toUserID, text string) (*model.ChatMessage, error)
 }
 
+// Hook mutation contract (TimelineFanoutHook / NotificationHook / NoteChartHook):
+//
+// 以下 3 interface の OnNoteCreated は handleCreate / handleAnnounce 経路で
+// safeGoFedHook 経由の **並行 goroutine** から発火される (#569 / #1156 / #1158)。
+// 3 hook は同じ `*model.Note` ポインタを共有して並行実行されるため、
+// 実装側は渡された note (および各種 relation: Reply / Renote / User 等) を
+// **read-only として扱うこと**。
+//
+//   - 渡された note や relation を mutate しない (例: `note.User = ...` 禁止)
+//   - field 値の保持が必要なら呼び出し側でコピーを作る (`localUser := *note.User`
+//     等)
+//   - 集計値の Inc など hook 内 DB 書き込みは note 自体の値変更を伴わない限り OK
+//
+// 同期発火だった頃 (#569 / #1158 以前) は read-only 契約が暗黙だったが、
+// 並行発火後は契約違反が data race として顕在化するため明示する。違反疑いがある
+// ときは `-race` test で検出可能 (= queue-bench / processor_test のいずれかが
+// CONCURRENT MAP READ AND WRITE 等で落ちる)。
+
 // TimelineFanoutHook is invoked after a remote note has been persisted so
 // that timeline/streaming subscribers receive the note. パッケージ間の循環
 // 依存を避けるためinterfaceで受け取る (実装は core/timeline.FanoutHook)。
+//
+// note / author は read-only。詳細は本ファイル上部の "Hook mutation contract"。
 type TimelineFanoutHook interface {
 	OnNoteCreated(note *model.Note, author *model.User)
 }
@@ -181,6 +201,9 @@ type TimelineFanoutHook interface {
 // ローカル作成と同じ interface を使う (実装は core/notification.Hook)。
 // notifyLocalUser 側で notifiee が local かどうかを判定するため、ここでは
 // 常に fire-and-forget で呼び出せばよい。
+//
+// note / author / replyTarget / renoteTarget は read-only。詳細は本ファイル
+// 上部の "Hook mutation contract"。
 type NotificationHook interface {
 	OnNoteCreated(note *model.Note, author *model.User, replyTarget, renoteTarget *model.Note)
 }
@@ -196,6 +219,8 @@ type NotificationHook interface {
 //
 // 名称が NoteChartHook なのは、resolver の ChartHook (OnRemoteUserCreated 用)
 // と衝突するのを避けつつ責務 (note chart 系) を明示するため。
+//
+// note は read-only。詳細は本ファイル上部の "Hook mutation contract"。
 type NoteChartHook interface {
 	OnNoteCreated(note *model.Note)
 }
