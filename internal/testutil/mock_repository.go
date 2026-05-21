@@ -5740,6 +5740,24 @@ func (m *MockUserPublickeyRepository) FindByUserID(userID string) (*model.UserPu
 	return nil, ErrNotFound
 }
 
+// FindByKeyID mirrors repository.userPublickeyRepository.FindByKeyID。
+// LD-Signature verify は signature.creator (= keyId) で lookup するため、
+// userID baseの map を線形 search する (= mock なのでコスト OK)。
+func (m *MockUserPublickeyRepository) FindByKeyID(keyID string) (*model.UserPublickey, error) {
+	for _, pk := range m.Keys {
+		if pk.KeyID == keyID {
+			return pk, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// Delete removes the public key for userID. interface 互換のため実装。
+func (m *MockUserPublickeyRepository) Delete(userID string) error {
+	delete(m.Keys, userID)
+	return nil
+}
+
 // MockChannelFavoriteRepository is a test double for repository.ChannelFavoriteRepository.
 type MockChannelFavoriteRepository struct {
 	Favorites map[string]*model.ChannelFavorite // keyed by "userId:channelId"

@@ -71,9 +71,19 @@ type InboxChartHook interface {
 //
 // 各 activity handler は冪等であることを前提とする (Misskey TS と同じ
 // 戦略)。順序保証や per-actor lock は持たない。
+// LDSignatureVerifier is the per-activity LD-Signature gate (#1164 Phase D)。
+// signature field がある activity に対して RsaSignature2017 + 2026.5.4
+// hardening (forbidden directives / cache cap / freeze) を実行する。nil なら
+// LD-Sig 経路を skip (= HTTP Signature だけで認証完了とする後方互換)。
+// 実装は core/federation.LDSignatureVerifier。
+type LDSignatureVerifier interface {
+	VerifyIfPresent(rawBody []byte) error
+}
+
 type InboxProcessor struct {
 	processor       FederationProcessor
 	verifier        SignatureVerifier
+	ldVerifier      LDSignatureVerifier
 	hostBlocker     HostBlockChecker
 	instanceTracker InstanceTracker
 	chartHook       InboxChartHook
@@ -84,6 +94,14 @@ type InboxProcessor struct {
 // 各 dep を別途配線する。未配線の dep は no-op として扱われる。
 func NewInboxProcessor(p FederationProcessor) *InboxProcessor {
 	return &InboxProcessor{processor: p}
+}
+
+// SetLDSignatureVerifier wires an optional LD-Signature verifier that runs
+// after HTTP Signature verify but before activity dispatch. signature 無し
+// activity は skip され、verify fail なら activity を drop (return nil で
+// queue を ack するが Process は呼ばない)。
+func (p *InboxProcessor) SetLDSignatureVerifier(v LDSignatureVerifier) {
+	p.ldVerifier = v
 }
 
 // SetSignatureVerifier wires a verifier used to re-verify the inbound
@@ -154,6 +172,20 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		p.commitChart(actor)
 	}
 	_ = host // reserved for future per-host stats; currently unused
+
+	// LD-Signature verify (#1164 Phase D)。HTTP Signature 検証通過後の追加
+	// gate で、activity body に signature field があれば RsaSignature2017 +
+	// 2026.5.4 hardening を実行する。fail なら activity を drop (= queue ack
+	// するが Process は呼ばない、upstream UnrecoverableError 互換挙動)。
+	// signature 無し / verifier 未配線では skip (= HTTP Signature のみ
+	// で従来通り処理)。
+	if p.ldVerifier != nil {
+		if err := p.ldVerifier.VerifyIfPresent(payload.Body); err != nil {
+			slog.Warn("inbox: LD-Signature verification failed, dropping activity",
+				"host", payload.Host, "err", err)
+			return nil
+		}
+	}
 
 	if err := p.processor.Process(payload.Body); err != nil {
 		if errors.Is(err, federation.ErrUnsupportedActivity) {

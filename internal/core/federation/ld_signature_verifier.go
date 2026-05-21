@@ -1,0 +1,86 @@
+package federation
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/shiroha-a/mk/internal/activitypub/ld"
+	"github.com/shiroha-a/mk/internal/repository"
+)
+
+// LDSignatureVerifier verifies the optional LD-Signature on an inbound
+// activity. mk-go では従来 HTTP Signature のみで認証していたが、relay 経由
+// 配送等で original creator を確認する経路で LD-Signature (RsaSignature2017)
+// が必要になる。
+//
+// 本 verifier は activity body の `signature` field を gate に動作する:
+//   - signature 無し → skip (nil 返却、HTTP Signature だけで処理続行)
+//   - signature 有り + verify pass → nil
+//   - signature 有り + verify fail → error (caller は activity を drop する)
+//
+// upstream Misskey TS 2026.5.4 の InboxProcessorService.process が
+// `compact → checkForForbiddenDirectives → freeze → verifyRsaSignature2017`
+// の sequence を全 inbound activity に適用するのと同 semantics を提供する。
+// canonicalize 中の SSRF / cache amplification / spoofing 攻撃は ld.Processor
+// 側の hardening (forbidden directives / cache cap / freeze) で遮断する。
+type LDSignatureVerifier struct {
+	pubkeyRepo repository.UserPublickeyRepository
+}
+
+// NewLDSignatureVerifier returns a verifier wired to the supplied
+// user_publickey repository. signature.creator (key URI) から keyId 一致する
+// row を引いて PEM を取り出す。
+func NewLDSignatureVerifier(pubkeyRepo repository.UserPublickeyRepository) *LDSignatureVerifier {
+	return &LDSignatureVerifier{pubkeyRepo: pubkeyRepo}
+}
+
+// VerifyIfPresent inspects the activity body and, if it carries a non-empty
+// `signature` field, verifies it. Returns nil when:
+//   - body has no `signature` field
+//   - signature verifies successfully
+//
+// Returns error when:
+//   - body has `signature` but creator / signatureValue missing or malformed
+//   - public key cannot be resolved
+//   - forbidden directive detected in the activity
+//   - RsaSignature2017 verify fails (signature mismatch / key mismatch /
+//     unsupported algorithm)
+func (v *LDSignatureVerifier) VerifyIfPresent(rawBody []byte) error {
+	if v == nil || v.pubkeyRepo == nil {
+		return nil
+	}
+	var act map[string]any
+	if err := json.Unmarshal(rawBody, &act); err != nil {
+		return fmt.Errorf("ld-sig: body unmarshal: %w", err)
+	}
+	sigRaw, hasSig := act["signature"]
+	if !hasSig || sigRaw == nil {
+		return nil
+	}
+	sig, ok := sigRaw.(map[string]any)
+	if !ok {
+		return errors.New("ld-sig: signature field is not an object")
+	}
+	creator, _ := sig["creator"].(string)
+	if creator == "" {
+		return errors.New("ld-sig: signature.creator missing")
+	}
+	// per-verify fresh processor (upstream JsonLd class instance と等価)。
+	// cache cap / freeze は新規 instance ごとに reset される。
+	//
+	// 順序は upstream `compact → checkForForbiddenDirectives → freeze →
+	// verifyRsaSignature2017` を踏襲する。forbidden directive を pubkey
+	// resolve より先に check して、不正 activity は DB lookup のコストを
+	// 払う前に reject する。
+	proc := ld.NewProcessor()
+	if err := proc.CheckForForbiddenDirectives(act); err != nil {
+		return err
+	}
+	proc.Freeze()
+	pubkey, err := v.pubkeyRepo.FindByKeyID(creator)
+	if err != nil {
+		return fmt.Errorf("ld-sig: public key not found for keyId=%s: %w", creator, err)
+	}
+	return proc.VerifyRsaSignature2017(act, pubkey.KeyPEM)
+}

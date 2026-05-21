@@ -599,6 +599,10 @@ func (s *Server) setupRoutes() {
 	inboxProcessor.SetSignatureVerifier(federationResolver)
 	inboxProcessor.SetHostBlockChecker(instanceService)
 	inboxProcessor.SetInstanceTracker(instanceTouchBuffer)
+	// LD-Signature verifier (#1164 Phase D)。inbound activity body に signature
+	// field があれば RsaSignature2017 + 2026.5.4 hardening を実行する。signature
+	// 無し / verify pass の activity は素通し、verify fail は drop。
+	inboxProcessor.SetLDSignatureVerifier(corefederation.NewLDSignatureVerifier(publickeyRepo))
 	// chartHook は後段で SetChartHook 注入する (deliverProcessor と同じ pattern)。
 	s.queueServer.Handle(queue.TaskTypeInbox, inboxProcessor.Handle)
 
