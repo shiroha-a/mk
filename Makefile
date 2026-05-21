@@ -192,9 +192,14 @@ e2e-submodule-init:
 
 # 本家フロントエンドを Docker 内でビルドする。数分〜10 分程度かかる。
 # 成果物は third_party/misskey/packages/frontend/... 配下に出力される。
-# パッチは submodule (shiroha-a/misskey-ts、tag 2026.5.1-mk.0) に直接コミット済み。
+# パッチは submodule (shiroha-a/misskey-ts、tag 2026.5.4-mk.0) に直接コミット済み。
+#
+# CI=true を渡す理由: upstream 2026.5.2 で pnpm 10 → 11 に移行 (#17400 dep bump
+# 系)、pnpm 11 は previous install (node_modules) を消す前に prompt を出す挙動が
+# default。docker run は TTY 無し起動なので prompt が出せず ERR_PNPM_ABORTED_
+# REMOVE_MODULES_DIR_NO_TTY で abort する。CI=true で skip させる。
 e2e-frontend-build:
-	docker run --rm -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
+	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
 		$(E2E_NODE_IMAGE) \
 		bash -lc "corepack enable && corepack prepare pnpm@latest --activate && pnpm install --frozen-lockfile && pnpm build"
 
