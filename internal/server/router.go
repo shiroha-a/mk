@@ -1791,6 +1791,9 @@ func (s *Server) setupRoutes() {
 	chatService.SetAPDelivery(userRepo, apRenderer, apURLs, deliverService)
 	// chatScope=followers/following/mutual 判定用に following repo を渡す (#692)。
 	chatService.SetFollowingRepo(followingRepo)
+	// chat/rooms/show の権限 gate で moderator bypass を効かせる
+	// (upstream 2026.5.4 hasPermissionToViewRoomInfo 互換、#1164 Phase C)。
+	chatService.SetModeratorChecker(roleService)
 	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
 	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。

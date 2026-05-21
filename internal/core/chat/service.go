@@ -68,6 +68,12 @@ const (
 	EventRead    = "read"
 )
 
+// ModeratorChecker reports whether a given user has moderator privileges.
+// パッケージ間の循環依存を避けるため interface で受け取る (実装は core/role.Service)。
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Service implements chat message CRUD + streaming fan-out.
 type Service struct {
 	repo                repository.ChatRepository
@@ -79,6 +85,9 @@ type Service struct {
 	urls                *activitypub.URLBuilder
 	deliverer           APDeliverer
 	mainStreamPublisher MainStreamPublisher
+	// moderatorChecker: chat/rooms/show 等の権限 gate で「moderator は閲覧可」
+	// を判定するために使う (upstream 2026.5.4 互換)。nil 安全。
+	moderatorChecker ModeratorChecker
 }
 
 // NewService constructs a chat Service.
@@ -107,6 +116,43 @@ func (s *Service) SetAPDelivery(userRepo repository.UserRepository, renderer *ac
 	s.renderer = renderer
 	s.urls = urls
 	s.deliverer = deliverer
+}
+
+// SetModeratorChecker wires a ModeratorChecker so chat/rooms/show 等の権限
+// gate で moderator role を持つ user が閲覧できることを判定できる。
+// nil なら moderator bypass は無効化 (= owner / member / 招待のみ true)。
+func (s *Service) SetModeratorChecker(m ModeratorChecker) {
+	s.moderatorChecker = m
+}
+
+// HasPermissionToViewRoomInfo は room のメタ情報を閲覧できる権限を持つか判定する
+// (upstream Misskey TS 2026.5.4 `ChatService.hasPermissionToViewRoomInfo` 互換)。
+// 返り値 true の条件:
+//   - room の owner である
+//   - room の member である
+//   - room への招待を受け取っている (chat_room_invitation 行が存在する)
+//   - 自身が moderator (ModeratorChecker 設定時のみ)
+//
+// 旧 mk-go の chat/rooms/show は権限 check 無しで誰でも room メタ情報を取得できる
+// drop-in regression 状態だったため、本 helper を新設して /api/chat/rooms/show
+// 等で gate する (#1164 Phase C)。
+func (s *Service) HasPermissionToViewRoomInfo(meID string, room *model.ChatRoom) (bool, error) {
+	if room == nil {
+		return false, nil
+	}
+	if room.OwnerID == meID {
+		return true, nil
+	}
+	if _, err := s.repo.FindMembership(meID, room.ID); err == nil {
+		return true, nil
+	}
+	if _, err := s.repo.FindInvitation(meID, room.ID); err == nil {
+		return true, nil
+	}
+	if s.moderatorChecker != nil && s.moderatorChecker.IsModerator(meID) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // SetFollowingRepo wires the following repository so chatScope=followers /

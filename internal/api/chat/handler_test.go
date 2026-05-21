@@ -28,6 +28,18 @@ func newTestHandler() (*Handler, *testutil.MockChatRepository) {
 	return NewHandler(repo, idGen), repo
 }
 
+// newTestHandlerWithService は chat Service を inject 済みの Handler を返す。
+// /api/chat/rooms/show 等 service 経由の権限 gate (upstream 2026.5.4) を
+// 走らせる test で利用する。
+func newTestHandlerWithService() (*Handler, *testutil.MockChatRepository) {
+	repo := testutil.NewMockChatRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(repo, idGen)
+	svc := corechat.NewService(repo, idGen)
+	h.SetService(svc)
+	return h, repo
+}
+
 func post(handler func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -77,6 +89,36 @@ func TestRoomsShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.RoomsShow, `{"roomId":"ghost"}`, u1)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// upstream 2026.5.4 hasPermissionToViewRoomInfo gate: 他人の room に対する
+// show は 404 NO_SUCH_ROOM を返す (= owner / member / 招待 / moderator 以外)。
+// 旧 mk-go は権限 check 無しで誰でも room メタを取れる drop-in regression
+// 状態だったので、本テストで gate を guard する (#1164 Phase C)。
+func TestRoomsShow_NonOwnerNonMember(t *testing.T) {
+	h, repo := newTestHandlerWithService()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", Name: "owners-only", OwnerID: "u1", Owner: u1}
+	// u2 は room の owner でも member でも 招待 でもない → 404
+	rec := post(h.RoomsShow, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// 招待受信者は閲覧できる (owner でも member でもない user が room を見る経路)。
+func TestRoomsShow_InvitationAllowed(t *testing.T) {
+	h, repo := newTestHandlerWithService()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", Name: "invited", OwnerID: "u1", Owner: u1}
+	repo.Invitations["u2:r1"] = &model.ChatRoomInvitation{ID: "inv1", RoomID: "r1", UserID: "u2"}
+	rec := post(h.RoomsShow, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// member は閲覧できる。
+func TestRoomsShow_MemberAllowed(t *testing.T) {
+	h, repo := newTestHandlerWithService()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", Name: "with-member", OwnerID: "u1", Owner: u1}
+	repo.Memberships["u2:r1"] = &model.ChatRoomMembership{UserID: "u2", RoomID: "r1"}
+	rec := post(h.RoomsShow, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestRoomsShow_InvalidParam(t *testing.T) {

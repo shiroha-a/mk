@@ -259,6 +259,11 @@ func (h *Handler) RoomsCreate(c echo.Context) error {
 }
 
 // RoomsShow handles POST /api/chat/rooms/show.
+//
+// upstream Misskey TS 2026.5.4 (`hasPermissionToViewRoomInfo`) と互換するため、
+// owner / member / 招待受信者 / moderator 以外は noSuchRoom (404) を返す
+// (#1164 Phase C)。旧 mk-go は room id を知っていれば誰でも room メタ情報を
+// 取得できる drop-in regression 状態だったため本 gate で塞ぐ。
 func (h *Handler) RoomsShow(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
@@ -270,6 +275,12 @@ func (h *Handler) RoomsShow(c echo.Context) error {
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+	}
+	if h.svc != nil {
+		ok, err := h.svc.HasPermissionToViewRoomInfo(user.ID, room)
+		if err != nil || !ok {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		}
 	}
 	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
 }
