@@ -571,6 +571,12 @@ func (s *Service) ListSentFollowing(userID string, limit, offset int) ([]*model.
 	return s.followingRepo.ListFollowing(userID, limit, offset)
 }
 
+// ListFollowingForList wraps repository.ListFollowingForList for /api/following/list
+// (upstream 2026.5.2 #17385 + #17416)。cursor + notify-only filter 版。
+func (s *Service) ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error) {
+	return s.followingRepo.ListFollowingForList(followerID, sinceID, untilID, notification, limit)
+}
+
 // UpdateRelation applies partial updates to a single follower/followee pair.
 // Used by following/update to toggle per-relation flags (notify, withReplies).
 // Returns nil if the relation does not exist (no-op).

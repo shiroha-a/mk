@@ -4272,6 +4272,43 @@ func (m *MockFollowingRepository) ListFollowing(userID string, limit, offset int
 	return paginate(rows, limit, offset), nil
 }
 
+// ListFollowingForList mirrors repository.followingRepository.ListFollowingForList
+// (cursor + notification filter for /api/following/list)。
+func (m *MockFollowingRepository) ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var rows []*model.Following
+	for _, f := range m.Followings {
+		if f.FollowerID != followerID {
+			continue
+		}
+		if notification && f.Notify == nil {
+			continue
+		}
+		if sinceID != "" && f.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && f.ID >= untilID {
+			continue
+		}
+		rows = append(rows, f)
+	}
+	// upstream paginationOrder と同じ: sinceID-only は ASC、それ以外は DESC
+	if sinceID != "" && untilID == "" {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	} else {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 func (m *MockFollowingRepository) ListFollowersByHost(host string, limit, offset int) ([]*model.Following, error) {
 	var rows []*model.Following
 	for _, f := range m.Followings {

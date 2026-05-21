@@ -10,6 +10,8 @@ import (
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -17,11 +19,20 @@ import (
 type Handler struct {
 	followingService *corefollowing.Service
 	userService      *coreuser.Service
+	// idGen は /api/following/list の Following.createdAt 生成で使う。nil
+	// なら createdAt は空文字列で返す (= 互換性は維持しつつ degrade)。
+	idGen id.Generator
 }
 
 // NewHandler creates a new following Handler.
 func NewHandler(followingService *corefollowing.Service, userService *coreuser.Service) *Handler {
 	return &Handler{followingService: followingService, userService: userService}
+}
+
+// SetIDGen wires an id.Generator so /api/following/list can derive Following.createdAt
+// from aidx-encoded row IDs. router.go から noteCreateService 等と同じく注入する。
+func (h *Handler) SetIDGen(g id.Generator) {
+	h.idGen = g
 }
 
 // CreateRequest is the request body for following/create.
@@ -168,6 +179,66 @@ type ListRequestsResponseItem struct {
 	ID       string              `json:"id"`
 	Follower entity.UserDetailed `json:"follower"`
 	Followee entity.UserDetailed `json:"followee"`
+}
+
+// ListRequest is the request body for /api/following/list (upstream 2026.5.2
+// #17385 + #17416)。`sinceDate` / `untilDate` は upstream paramDef にあるが
+// mk-go の他 endpoint と同じく現状未対応で、bind は受けるが silent ignore
+// (= 上流仕様の subset、別 issue で全 endpoint 横断対応)。
+type ListRequest struct {
+	Notification bool   `json:"notification"`
+	SinceID      string `json:"sinceId"`
+	UntilID      string `json:"untilId"`
+	SinceDate    *int64 `json:"sinceDate"`
+	UntilDate    *int64 `json:"untilDate"`
+	Limit        int    `json:"limit"`
+}
+
+// List handles POST /api/following/list (upstream 2026.5.2 #17385 + #17416)。
+// 自分が follow している人の一覧を Following[] で返す (populateFollowee=true 相当)。
+// notification=true で `notify IS NOT NULL` 絞り込み。kind は read:following。
+func (h *Handler) List(c echo.Context) error {
+	me := middleware.GetUser(c)
+	var req ListRequest
+	if err := c.Bind(&req); err != nil {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	if req.Limit > 100 {
+		req.Limit = 100
+	}
+
+	rows, err := h.followingService.ListFollowingForList(me.ID, req.SinceID, req.UntilID, req.Notification, req.Limit)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+
+	// followee を batch 取得して N+1 を避ける (upstream packMany と同 pattern)。
+	followeeIDs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		followeeIDs = append(followeeIDs, r.FolloweeID)
+	}
+	bundles, _ := h.userService.ShowManyByIDs(followeeIDs)
+	userIdx := make(map[string]*coreuser.UserWithProfile, len(bundles))
+	for _, b := range bundles {
+		if b != nil && b.User != nil {
+			userIdx[b.User.ID] = b
+		}
+	}
+	lookup := func(uid string) (*model.User, *model.UserProfile) {
+		if b, ok := userIdx[uid]; ok {
+			return b.User, b.Profile
+		}
+		return nil, nil
+	}
+
+	out := make([]entity.Following, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, entity.PackFollowing(r, true, false, lookup, h.idGen))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // ListRequests handles POST /api/following/requests/list.

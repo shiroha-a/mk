@@ -1834,8 +1834,10 @@ func (s *Server) setupRoutes() {
 
 	// Following endpoints
 	followingHandler := following.NewHandler(followingService, userService)
+	followingHandler.SetIDGen(idGen)
 	api.POST("/following/create", followingHandler.Create, middleware.RequireAuth())
 	api.POST("/following/delete", followingHandler.Delete, middleware.RequireAuth())
+	api.POST("/following/list", followingHandler.List, middleware.RequireAuth())
 	api.POST("/following/requests/list", followingHandler.ListRequests, middleware.RequireAuth())
 	api.POST("/following/requests/accept", followingHandler.AcceptRequest, middleware.RequireAuth())
 	api.POST("/following/requests/reject", followingHandler.RejectRequest, middleware.RequireAuth())

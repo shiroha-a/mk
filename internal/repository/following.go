@@ -24,6 +24,11 @@ type FollowingRepository interface {
 	FilterFollowingsToAnchor(anchorID string, candidateIDs []string) ([]string, error)
 	ListFollowers(userID string, limit, offset int) ([]*model.Following, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
+	// ListFollowingForList returns Following rows where followerID matches,
+	// optionally filtered by `notify IS NOT NULL` (= notification=true) and
+	// cursor-paginated by sinceID / untilID. Used by /api/following/list
+	// (upstream 2026.5.2 #17385 + #17416).
+	ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error)
 	// ListFollowersByHost returns Following rows whose followerHost matches
 	// host. Used by federation/followers (remote users who follow a local
 	// user on this instance are listed under the remote instance's name).
@@ -132,6 +137,38 @@ func (r *followingRepository) ListFollowing(userID string, limit, offset int) ([
 		Order("id DESC").
 		Limit(limit).
 		Offset(offset).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListFollowingForList implements the cursor + notification-filter variant
+// used by /api/following/list (upstream 2026.5.2 #17385 + #17416)。
+//
+// notification=true で `notify IS NOT NULL` 絞り込み。`notify` field 自体は
+// 投稿通知の音声 / バイブ等の preference を保持する varchar(32) で、null
+// なら通知 OFF / 非 null なら ON という Misskey 互換の semantics。
+func (r *followingRepository) ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := r.db.Where(`"followerId" = ?`, followerID)
+	if notification {
+		q = q.Where(`notify IS NOT NULL`)
+	}
+	if sinceID != "" {
+		q = q.Where(`id > ?`, sinceID)
+	}
+	if untilID != "" {
+		q = q.Where(`id < ?`, untilID)
+	}
+	var rows []*model.Following
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).
+		Limit(limit).
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}

@@ -500,3 +500,122 @@ func TestListRequests_InternalError(t *testing.T) {
 	rec := postJSON(h.ListRequests, `{}`, bob)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// --- /api/following/list (upstream 2026.5.2 #17385 + #17416) ---
+
+// newTestHandlerWithFollowings は List テスト向けに followee user を seed して
+// MockFollowingRepository に Following 行を入れた状態の Handler を返す。
+func newTestHandlerWithFollowings(t *testing.T) (*Handler, *testutil.MockUserRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	fRepo := testutil.NewMockFollowingRepository()
+	frRepo := testutil.NewMockFollowRequestRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	fSvc := corefollowing.NewService(userRepo, fRepo, frRepo, idGen)
+	uSvc := coreuser.NewService(userRepo, nil, nil, nil)
+	h := NewHandler(fSvc, uSvc)
+	h.SetIDGen(idGen)
+	return h, userRepo, fRepo
+}
+
+func TestList_ReturnsFollowingsWithFollowee(t *testing.T) {
+	h, repo, fRepo := newTestHandlerWithFollowings(t)
+	alice := addUser(repo, "alice", false)
+	addUser(repo, "bob", false)
+	addUser(repo, "carol", false)
+	fRepo.Followings["f1"] = &model.Following{
+		ID:         "f1",
+		FollowerID: alice.ID,
+		FolloweeID: "bob",
+	}
+	fRepo.Followings["f2"] = &model.Following{
+		ID:         "f2",
+		FollowerID: alice.ID,
+		FolloweeID: "carol",
+	}
+
+	rec := postJSON(h.List, `{}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2)
+	// followee が embed されること、id / followeeId / followerId が一致
+	for _, item := range out {
+		assert.Equal(t, alice.ID, item["followerId"])
+		assert.NotNil(t, item["followee"])
+		_, hasFollower := item["follower"]
+		assert.False(t, hasFollower, "populateFollower=false なので follower は省略")
+	}
+}
+
+func TestList_NotificationFilter(t *testing.T) {
+	h, repo, fRepo := newTestHandlerWithFollowings(t)
+	alice := addUser(repo, "alice", false)
+	addUser(repo, "bob", false)
+	addUser(repo, "carol", false)
+	notify := "play"
+	fRepo.Followings["f1"] = &model.Following{
+		ID:         "f1",
+		FollowerID: alice.ID,
+		FolloweeID: "bob",
+		Notify:     &notify,
+	}
+	fRepo.Followings["f2"] = &model.Following{
+		ID:         "f2",
+		FollowerID: alice.ID,
+		FolloweeID: "carol",
+		// Notify == nil → notification=true で除外される
+	}
+
+	rec := postJSON(h.List, `{"notification": true}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "bob", out[0]["followeeId"])
+}
+
+func TestList_LimitClamp(t *testing.T) {
+	h, repo, fRepo := newTestHandlerWithFollowings(t)
+	alice := addUser(repo, "alice", false)
+	// 200 件積んで limit=100 にクランプされること
+	for i := 0; i < 200; i++ {
+		fid := "fu" + string(rune('a'+i%26))
+		addUser(repo, fid, false)
+		// id は 200 件 unique にしたいので i を含める (= mock では順序に
+		// 影響するが、limit クランプ確認には十分)
+		fRepo.Followings[fid] = &model.Following{
+			ID:         fid,
+			FollowerID: alice.ID,
+			FolloweeID: fid,
+		}
+	}
+
+	rec := postJSON(h.List, `{"limit": 9999}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.LessOrEqual(t, len(out), 100, "上限 100 にクランプされる")
+}
+
+func TestList_DefaultLimit(t *testing.T) {
+	h, repo, fRepo := newTestHandlerWithFollowings(t)
+	alice := addUser(repo, "alice", false)
+	for i := 0; i < 30; i++ {
+		fid := "fu" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		addUser(repo, fid, false)
+		fRepo.Followings[fid] = &model.Following{
+			ID:         fid,
+			FollowerID: alice.ID,
+			FolloweeID: fid,
+		}
+	}
+
+	rec := postJSON(h.List, `{}`, alice)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, 10, len(out), "limit 未指定 → default 10")
+}
