@@ -923,9 +923,16 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		// しないので nil を渡す。
 		p.notificationHook.OnNoteCreated(hydrated, announcer, nil, target)
 	}
-	// chart hook 発火 (#1156)。dedup チェック (act.ID != "" の FindByURI) を
-	// 通り抜けて noteRepo.Create(renote) も成功した時点で新規作成と確定する
-	// ので、created flag は不要 (= 重複 Announce はここに辿り着かない)。
+	// chart hook 発火 (#1156)。dedup チェック (上部の `act.ID != ""` ゲート付き
+	// FindByURI) を通り抜けて noteRepo.Create(renote) も成功した時点で「この
+	// 経路では」新規作成と確定するので、created flag は持たない。
+	//
+	// 例外として `act.ID` が空 (= activity id を持たない Announce) の場合は
+	// 上の dedup 自体が skip されるため、同じ Boost が複数回届くと renote 行も
+	// 毎回新規に生成され chart も毎回 fire する。これは本 PR で導入した挙動
+	// ではなく既存の handleAnnounce 設計に従ったもの。activity id 無しの
+	// Announce を出す実装は実運用ではほぼ無いので影響軽微だが、`act.ID` の
+	// dedup 強化は別 issue でフォロー (= renote 重複そのものの解消が主題)。
 	if p.noteChartHook != nil {
 		safeGoFedHook(func() { p.noteChartHook.OnNoteCreated(hydrated) })
 	}

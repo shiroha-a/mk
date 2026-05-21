@@ -807,10 +807,17 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 // so non-idempotent counters such as PerUserNotesChart are not double-applied
 // when the same Create activity is delivered twice (#1156).
 //
-// `created == false` cases:
-//   - existing note matched by URI (dedup hit)
-//   - AP poll vote (note=nil; processed as a Vote, no note row created)
-//   - any error path
+// Return value matrix:
+//
+//   - fresh INSERT (Create succeeded)           → (note,     true,  nil)
+//   - dedup hit (existing row matched by URI)   → (existing, false, nil)
+//   - AP poll vote (processed as a Vote)        → (nil,      false, nil)
+//   - validation / ingest / actor resolve error → (nil,      false, err)
+//
+// Note that the dedup-hit case is the only path that returns a non-nil note
+// with `created == false`; callers MUST check `created` before firing any
+// non-idempotent hook (chart counters, notification, etc.) since the dedup
+// path otherwise looks indistinguishable from a fresh ingest at the call site.
 func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
 		return nil, false, ErrInvalidNote

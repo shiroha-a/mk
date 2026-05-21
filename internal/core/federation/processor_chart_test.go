@@ -1,6 +1,7 @@
 package federation_test
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -98,6 +99,43 @@ func TestProcess_Announce_FiresChartHook(t *testing.T) {
 	assert.NotEmpty(t, noteID, "chart hook must receive renote ID")
 	// 受け取った note は新規作成した renote であり、target ID とは別
 	assert.NotEqual(t, "n1", noteID, "chart hook must receive the newly-created renote, not the announce target")
+}
+
+// mentionLimit を超える inbound Create は ErrContainsTooManyMentions で
+// reject される (#1004 / upstream #17167)。reject 時には note が DB に入らない
+// ので chart hook も fire してはいけない (= IngestNoteWithCreated は
+// (nil, false, err) を返し、handleCreate は err catch して early return する)。
+// これが守れないと、mentionLimit overflow を投げてくる malformed actor が
+// 連発するだけで PerUserNotesChart の inc 列が膨れる攻撃面になる。
+func TestProcess_CreateNote_MentionLimitReject_NoChartHook(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	hook := newRecordingNoteChartHook()
+	env.processor.SetNoteChartHook(hook)
+
+	var tagJSON string
+	for i := 1; i <= 21; i++ { // 21 = DefaultMentionLimit (20) + 1
+		if i > 1 {
+			tagJSON += ","
+		}
+		tagJSON += `{"type": "Mention", "href": "https://example.com/users/u` + strconv.Itoa(i) + `"}`
+	}
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/notes/over-` + strconv.Itoa(int(time.Now().UnixNano())) + `",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "x",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"],
+			"tag": [` + tagJSON + `]
+		}
+	}`)
+	// reject されるが ack 扱いで err は nil
+	require.NoError(t, env.processor.Process(body))
+	// chart hook が fire しないこと (= mentionLimit overflow で counters が
+	// 膨らまされない)
+	hook.expectNoMoreCalls(t, 200*time.Millisecond)
 }
 
 // chart hook が未配線 (= nil) のままでも Process が panic / error を出さない

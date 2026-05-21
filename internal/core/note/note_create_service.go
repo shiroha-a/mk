@@ -139,6 +139,14 @@ type IndexHook interface {
 // subsystem can fan the event into NotesChart, PerUserNotesChart,
 // InstanceChart and ActiveUsersChart. パッケージ間の循環依存を避ける
 // ため interface で受け取る (実装は core/chart/charthook)。
+//
+// federation 経由のリモートノートに対しては同 shape の interface
+// `core/federation.NoteChartHook` が processor.handleCreate /
+// handleAnnounce 側で同じ役目を果たす (#1156)。命名が分かれているのは
+// federation パッケージ内に既存の `ChartHook` (= 新規 remote user 用、
+// OnRemoteUserCreated) があるため。配線対象は同じ `charthook.Hooks` 集約で、
+// router.go から両 setter (note.SetChartHook / federation.SetNoteChartHook)
+// に渡される。
 type ChartHook interface {
 	OnNoteCreated(note *model.Note)
 }
