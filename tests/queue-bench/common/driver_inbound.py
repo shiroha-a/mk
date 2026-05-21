@@ -109,20 +109,27 @@ def main() -> int:
     targets = [INBOX_URLS[stack] for stack in seed["stacks"].keys()]
 
     # announce mode: target inbox URL → 受信側 local note URI へのマップを
-    # seed.json から作る。target_note_uri が空の stack は announce 対象から
-    # 除外する (= seed 失敗 fallback)。
+    # seed.json から作る。target_note_uri が欠けている stack があると
+    # faker 側で「announce mode requires Objects[...]」error になり bench が
+    # 中途半端に進むため、driver 側で先に abort して原因 (= seed 失敗) を
+    # 明示する。
     objects: dict[str, str] = {}
     if INBOUND_ACTIVITY_TYPE == "announce":
+        missing: list[str] = []
         for stack, info in seed["stacks"].items():
             uri = info.get("target_note_uri", "")
             if uri:
                 objects[INBOX_URLS[stack]] = uri
-        if len(objects) != len(targets):
+            else:
+                missing.append(stack)
+        if missing:
             print(
-                "warning: some stacks miss target_note_uri, "
-                f"announce mode skips {len(targets) - len(objects)} targets",
+                f"error: announce mode but {len(missing)} stacks miss "
+                f"target_note_uri: {missing}. seed が失敗している可能性、"
+                "make queue-bench-seed のログを確認してください。",
                 flush=True,
             )
+            return 2
 
     print(
         f"firing faker: {len(targets)} targets x {INBOUND_COUNT} count "

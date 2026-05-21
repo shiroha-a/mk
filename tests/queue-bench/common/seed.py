@@ -260,15 +260,19 @@ def main() -> int:
         followers = insert_blackhole_followers(stack, info["db_host"], user_id, OUTBOUND_FOLLOWERS)
         faker_remote_id = insert_faker_actor(stack, info["db_host"], faker_actor)
 
-        state["stacks"][stack] = {
+        stack_state: dict[str, Any] = {
             "url": url,
             "kind": info["kind"],
             "token": token,
             "user_id": user_id,
             "follower_count": len(followers),
             "faker_remote_user_id": faker_remote_id,
-            "target_note_uri": target_note_uri,
         }
+        # 空文字列ではなく key 自体を omit する。consumer 側は
+        # info.get("target_note_uri", "") で取り出すので互換は維持される。
+        if target_note_uri:
+            stack_state["target_note_uri"] = target_note_uri
+        state["stacks"][stack] = stack_state
 
     out_path = "/state/seed.json"
     with open(out_path, "w") as f:
