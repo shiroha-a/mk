@@ -270,6 +270,9 @@ services:
       FAKER_URL: http://faker:8081
       INBOUND_COUNT: "10000"
       INBOUND_CONCURRENCY: "128"
+      # create (default) または announce。announce は seed が生成した
+      # target_note_uri を faker に渡して Announce 経路の bench を回す。
+      INBOUND_ACTIVITY_TYPE: "${INBOUND_ACTIVITY_TYPE:-create}"
       REDIS_ASYNQ_HOST: redis-asynq
       REDIS_MKQ_HOST: redis-mkq
       REDIS_TS_HOST: redis-ts

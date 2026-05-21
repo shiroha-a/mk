@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -214,6 +215,17 @@ type sendRequest struct {
 	Targets     []string `json:"targets"`     // inbox URLs
 	Count       int      `json:"count"`       // requests per target (total = count*len(targets))
 	Concurrency int      `json:"concurrency"` // parallel workers per target
+
+	// ActivityType selects payload shape:
+	//   "" / "create"  → Create(Note) (default、後方互換)
+	//   "announce"     → Announce(object=Objects[target])
+	ActivityType string `json:"activityType,omitempty"`
+	// Objects maps inbox URL → AS object URI used by Announce mode.
+	// e.g. `{"https://mk-asynq/inbox": "https://mk-asynq/notes/<id>"}`
+	// announce mode で全 target に同じ note URI を Announce すると receiver 側で
+	// (act.ID dedup 経由でない場合) 重複 renote が大量に作られて bench にならない
+	// ため、receiver-local の note URI を target ごとに分けて渡す。
+	Objects map[string]string `json:"objects,omitempty"`
 }
 
 type sendStats struct {
@@ -338,7 +350,7 @@ func (f *faker) preSign(req sendRequest) (map[string][]signedReq, error) {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				sr, err := f.buildSigned(j.target, j.index)
+				sr, err := f.buildSigned(req, j.target, j.index)
 				if err != nil {
 					firstErr.CompareAndSwap(nil, err)
 					stop()
@@ -369,26 +381,57 @@ func (f *faker) preSign(req sendRequest) (map[string][]signedReq, error) {
 	return out, nil
 }
 
-func (f *faker) buildSigned(target string, index int) (signedReq, error) {
-	noteID := fmt.Sprintf("%s/notes/bench-%d-%d", f.actorURI, time.Now().UnixNano(), index)
-	activityID := noteID + "/activity"
+func (f *faker) buildSigned(req sendRequest, target string, index int) (signedReq, error) {
 	now := time.Now().UTC()
 	pub := []string{"https://www.w3.org/ns/activitystreams#Public"}
 
-	activity := map[string]any{
-		"@context": []any{"https://www.w3.org/ns/activitystreams"},
-		"id":       activityID,
-		"type":     "Create",
-		"actor":    f.actorURI,
-		"to":       pub,
-		"object": map[string]any{
-			"id":           noteID,
-			"type":         "Note",
-			"attributedTo": f.actorURI,
-			"to":           pub,
-			"content":      fmt.Sprintf("queue-bench note %d", index),
-			"published":    now.Format(time.RFC3339),
-		},
+	// Activity type を req.ActivityType で分岐。default は Create。
+	// announce mode は req.Objects[target] が宛先の note URI を保持する前提。
+	// 受信側 mk の handleAnnounce は act.ID != "" の場合に FindByURI で dedup
+	// するため、bench では activity.ID を per-(target, index) でユニーク化する。
+	var activity map[string]any
+	switch req.ActivityType {
+	case "announce":
+		objectURI := req.Objects[target]
+		if objectURI == "" {
+			return signedReq{}, fmt.Errorf("announce mode requires Objects[%q] target object URI", target)
+		}
+		// activity.id は per-(target, index) で完全ユニーク化する。target の
+		// hash を含めないと「同じ index で別 target」が同じ ID を生成して
+		// しまい、receiver 側 (handleAnnounce の act.ID ベース dedup) で
+		// 1 件目以降が誤って drop される可能性がある。
+		tHash := sha256.Sum256([]byte(target))
+		announceID := fmt.Sprintf("%s/activities/announce-%d-%s-%d",
+			f.actorURI, time.Now().UnixNano(), hex.EncodeToString(tHash[:4]), index)
+		activity = map[string]any{
+			"@context":  []any{"https://www.w3.org/ns/activitystreams"},
+			"id":        announceID,
+			"type":      "Announce",
+			"actor":     f.actorURI,
+			"object":    objectURI,
+			"to":        pub,
+			"published": now.Format(time.RFC3339),
+		}
+	case "", "create":
+		noteID := fmt.Sprintf("%s/notes/bench-%d-%d", f.actorURI, time.Now().UnixNano(), index)
+		activityID := noteID + "/activity"
+		activity = map[string]any{
+			"@context": []any{"https://www.w3.org/ns/activitystreams"},
+			"id":       activityID,
+			"type":     "Create",
+			"actor":    f.actorURI,
+			"to":       pub,
+			"object": map[string]any{
+				"id":           noteID,
+				"type":         "Note",
+				"attributedTo": f.actorURI,
+				"to":           pub,
+				"content":      fmt.Sprintf("queue-bench note %d", index),
+				"published":    now.Format(time.RFC3339),
+			},
+		}
+	default:
+		return signedReq{}, fmt.Errorf("unknown activityType %q (want create | announce)", req.ActivityType)
 	}
 	body, err := json.Marshal(activity)
 	if err != nil {

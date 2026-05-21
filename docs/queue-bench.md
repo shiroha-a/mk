@@ -15,11 +15,20 @@
 
 ### Inbound (inbox job throughput)
 
-`faker` (Go HTTPS, AP HTTP signature 直接) → 3 receiver inbox に signed Create を blast。
+`faker` (Go HTTPS, AP HTTP signature 直接) → 3 receiver inbox に signed activity を blast。
 
 - 各 receiver に faker actor を pubkey 込みで pre-seed (外部 fetch 排除)
 - `faker` は **pre-sign 並列化** で sender 側を律速から外し、receiver の verify+enqueue が bottleneck になるよう設計
 - 計測: faker → receiver の RPS (= 受信→200 までの rate) と post-send drain time
+
+#### Activity type (`INBOUND_ACTIVITY_TYPE`)
+
+faker payload は 2 種類から選択 (env で driver_inbound に渡す):
+
+- `create` (default): `Create(Note)` — handleCreate 経路を計測 (#569)
+- `announce`: `Announce(object=<receiver-local note URI>)` — handleAnnounce 経路を計測 (#1158)
+  - `seed` が各 stack に benchsender 経由で 1 件 target note を作成し、URI を `seed.json` に書き出す
+  - faker は per-(target, index) で activity.id を完全ユニーク化 (target hash 含む) して dedup 干渉を回避
 
 ## 実行
 
@@ -34,8 +43,11 @@ make queue-bench-seed
 # 3) outbound 計測
 make queue-bench-outbound
 
-# 4) inbound 計測
+# 4a) inbound 計測 (default: Create 経路)
 make queue-bench-inbound
+
+# 4b) inbound 計測 (Announce 経路、#1158 等で利用)
+INBOUND_ACTIVITY_TYPE=announce make queue-bench-inbound
 
 # 5) report 生成 (tests/queue-bench/results/queue-report.md)
 make queue-bench-report
@@ -52,8 +64,27 @@ make queue-bench-down
 `tests/queue-bench/results/`:
 
 - `outbound.json` — 生データ (per-stack drain time / hits / depth time series)
-- `inbound.json` — faker.send 統計 + per-receiver drain
+- `inbound.json` — faker.send 統計 + per-receiver drain (最後に走った activity type の値で上書き)
+- `inbound-announce-after.json` — Announce 経路の参考値 (PR #1158 適用後、2026-05-21)
 - `queue-report.md` — markdown 比較表
+
+### Announce 経路 reference 値 (PR #1158 マージ後、2026-05-21)
+
+10000 req × 3 target、concurrency 128 で計測。app コンテナは develop @ `9adc836` (PR #1161 マージ後)。
+
+| Stack | Send Duration | Effective rps | Drain time | Peak queue depth | Notes |
+|---|---|---|---|---|---|
+| mk-go (asynq) | 3.66s | 2729.9 | 47.15s | 9827 | 受信→202 まで 3 秒台 |
+| mk-go (mkq) | 3.46s | 2891.3 | 63.43s | 9912 | 同上 |
+| Misskey TS | 10.46s | 956.4 | 18.08s | 0 | worker が send と同期処理 |
+
+観測:
+
+- mk-go (async/mkq) は **TS の 2.9x** の send-side throughput (Create 経路の 3.0x と同水準)
+- Announce 経路は Create 経路と比べて -4〜-12% (HTTP signature verify + target note resolve + renote create の overhead)
+- mk-go は peak depth 9800+ まで queue を積んで worker が drain (47-63s)、TS は send と同期で peak=0
+
+PR #1158 の effect (handleAnnounce hook async 化) を before/after で数字化する作業は、bench tool の startup 安定性 (3 stack 並列起動で random に 1 stack が ok=0 になる) が解消できていないため follow-up で別途実施予定。
 
 ## 設計メモ
 

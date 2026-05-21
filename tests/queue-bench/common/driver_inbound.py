@@ -20,6 +20,10 @@ from queue_probe import DriverKind, make_probe
 
 INBOUND_COUNT = int(os.environ.get("INBOUND_COUNT", "10000"))
 INBOUND_CONCURRENCY = int(os.environ.get("INBOUND_CONCURRENCY", "128"))
+# Activity type を切替: create (default) / announce。announce の場合は
+# seed.json から各 stack の target_note_uri を読んで faker に objects map を
+# 渡す。#1158 の handleAnnounce async 化の効果を計測するときに announce 指定。
+INBOUND_ACTIVITY_TYPE = os.environ.get("INBOUND_ACTIVITY_TYPE", "create")
 POLL_INTERVAL_S = 0.1
 DRAIN_TIMEOUT_S = 600.0
 FAKER_URL = os.environ["FAKER_URL"]
@@ -39,8 +43,16 @@ INBOX_URLS = {
 }
 
 
-def faker_send(targets: list[str], count: int, concurrency: int) -> dict[str, Any]:
-    payload = {"targets": targets, "count": count, "concurrency": concurrency}
+def faker_send(targets: list[str], count: int, concurrency: int,
+               activity_type: str, objects: dict[str, str]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "targets": targets,
+        "count": count,
+        "concurrency": concurrency,
+        "activityType": activity_type,
+    }
+    if activity_type == "announce":
+        payload["objects"] = objects
     # send は count*len(targets) 件を blasting するので timeout は十分長く。
     r = httpx.post(f"{FAKER_URL}/send", json=payload, timeout=DRAIN_TIMEOUT_S)
     r.raise_for_status()
@@ -96,9 +108,26 @@ def main() -> int:
 
     targets = [INBOX_URLS[stack] for stack in seed["stacks"].keys()]
 
+    # announce mode: target inbox URL → 受信側 local note URI へのマップを
+    # seed.json から作る。target_note_uri が空の stack は announce 対象から
+    # 除外する (= seed 失敗 fallback)。
+    objects: dict[str, str] = {}
+    if INBOUND_ACTIVITY_TYPE == "announce":
+        for stack, info in seed["stacks"].items():
+            uri = info.get("target_note_uri", "")
+            if uri:
+                objects[INBOX_URLS[stack]] = uri
+        if len(objects) != len(targets):
+            print(
+                "warning: some stacks miss target_note_uri, "
+                f"announce mode skips {len(targets) - len(objects)} targets",
+                flush=True,
+            )
+
     print(
         f"firing faker: {len(targets)} targets x {INBOUND_COUNT} count "
-        f"({INBOUND_COUNT*len(targets)} total) @ concurrency={INBOUND_CONCURRENCY}",
+        f"({INBOUND_COUNT*len(targets)} total) @ concurrency={INBOUND_CONCURRENCY} "
+        f"activityType={INBOUND_ACTIVITY_TYPE}",
         flush=True,
     )
 
@@ -122,7 +151,8 @@ def main() -> int:
 
     # send 開始
     send_start = time.monotonic()
-    send_resp = faker_send(targets, INBOUND_COUNT, INBOUND_CONCURRENCY)
+    send_resp = faker_send(targets, INBOUND_COUNT, INBOUND_CONCURRENCY,
+                           INBOUND_ACTIVITY_TYPE, objects)
     send_elapsed = time.monotonic() - send_start
     send_done.set()
     print(

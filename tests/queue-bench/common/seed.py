@@ -237,10 +237,24 @@ def main() -> int:
     for stack, info in STACKS.items():
         url = info["url"]
         print(f"[{stack}] {url}", flush=True)
+        target_note_uri = ""
         with httpx.Client(base_url=url, timeout=20, verify=False) as http:
             password = "bench-pass-1234"
             token = create_admin(http, "benchsender", password)
             user_id = fetch_local_user_id(http, token)
+            # Announce 経路 bench 用に target note を 1 件作る。faker が
+            # この URI を object として Announce を投げ、handleAnnounce が
+            # renote を生成する path を計測する。local note の `uri` は mk /
+            # TS どちらでも null なので、AS URI を base_url + /notes/<id> で
+            # 組み立てる (Misskey 互換)。
+            r = http.post(
+                "/api/notes/create",
+                json={"i": token, "text": "queue-bench announce target", "visibility": "public"},
+            )
+            r.raise_for_status()
+            note_id = r.json().get("createdNote", {}).get("id", "")
+            if note_id:
+                target_note_uri = f"{url}/notes/{note_id}"
 
         enable_federation(stack, info["db_host"])
         followers = insert_blackhole_followers(stack, info["db_host"], user_id, OUTBOUND_FOLLOWERS)
@@ -253,6 +267,7 @@ def main() -> int:
             "user_id": user_id,
             "follower_count": len(followers),
             "faker_remote_user_id": faker_remote_id,
+            "target_note_uri": target_note_uri,
         }
 
     out_path = "/state/seed.json"
