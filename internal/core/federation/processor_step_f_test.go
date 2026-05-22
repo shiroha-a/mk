@@ -13,6 +13,7 @@ import (
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -125,6 +126,26 @@ func TestProcess_LikeAlreadyReacted(t *testing.T) {
 	}`)
 	require.NoError(t, env.processor.Process(body))
 	// 2 回目: ErrAlreadyReacted は飲み込まれる
+	require.NoError(t, env.processor.Process(body))
+}
+
+// TestProcess_LikeDuplicateRaceSwallowed: reaction_service の Create が
+// repository.ErrDuplicateReaction (= DB unique violation by race) を
+// 受けても、service が ErrAlreadyReacted に変換し handleLike が swallow
+// するので activity が ack される。AP idempotent semantic を保つ (#1186)。
+func TestProcess_LikeDuplicateRaceSwallowed(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	// reactionRepo.Create を強制的に ErrDuplicateReaction で失敗させる
+	// (= FindByPair 後に並行 process が同 user×note に Create を入れた
+	//   race を simulate)。
+	env.reactionRepo.CreateErr = repository.ErrDuplicateReaction
+	body := []byte(`{
+		"type": "Like",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1",
+		"content": "👍"
+	}`)
 	require.NoError(t, env.processor.Process(body))
 }
 

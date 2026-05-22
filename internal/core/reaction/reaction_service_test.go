@@ -8,6 +8,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,23 @@ func TestService_Create_AlreadyReactedSame(t *testing.T) {
 	require.NoError(t, err)
 	_, err = svc.Create(&model.User{ID: "viewer"}, "n1", "👍")
 	require.ErrorIs(t, err, reaction.ErrAlreadyReacted)
+}
+
+// TestService_Create_DuplicateConvertedToAlreadyReacted: race condition で
+// reactionRepo.Create が `repository.ErrDuplicateReaction` を返したとき、
+// service は `ErrAlreadyReacted` に変換して caller に返す。`FindByPair`
+// 後の窓で並行 Create が入った AP idempotent semantic を保つため (#1186)。
+func TestService_Create_DuplicateConvertedToAlreadyReacted(t *testing.T) {
+	svc, repo, reactRepo, _, _ := newService(t)
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	// FindByPair は何も返さず (= 既存 reaction 無いように見える) →
+	// service は新規 Create に進む → ここで race 想定の
+	// ErrDuplicateReaction を返す。
+	reactRepo.CreateErr = repository.ErrDuplicateReaction
+
+	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", "👍")
+	require.ErrorIs(t, err, reaction.ErrAlreadyReacted,
+		"repository ErrDuplicateReaction must be converted to service ErrAlreadyReacted")
 }
 
 func TestService_Create_ReplaceExisting(t *testing.T) {
