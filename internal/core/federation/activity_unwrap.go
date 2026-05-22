@@ -37,5 +37,8 @@ func tryUnwrapSingletonArray(body []byte) ([]byte, bool) {
 	if len(arr) != 1 {
 		return nil, false
 	}
+	// `json.RawMessage` は `[]byte` の type alias なので、ここの型変換は
+	// no-copy。返り値 slice は元 body の sub-slice を参照する。caller
+	// (= Processor.Process) は body を以降変更しないので安全。
 	return []byte(arr[0]), true
 }

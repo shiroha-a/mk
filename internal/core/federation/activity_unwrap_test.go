@@ -59,14 +59,16 @@ func TestTryUnwrapSingletonArray(t *testing.T) {
 			body:   `"hi"`,
 			wantOK: false,
 		},
-		// nested singleton array (= 入れ子) は剥がさない。inbox direct POST
-		// で来る現実的なケースは 1 段だけと割り切る。
+		// 入れ子 `[[...]]` は 1 段だけ unwrap して `[...]` (= array of 1)
+		// を返す。downstream は array を object として parse できず
+		// missing-actor で fail するので、入れ子は abnormal payload として
+		// 素通しされる挙動になる。helper は単純に 1 段 unwrap、判定は
+		// downstream に任せる。
 		{
 			name:   "nested singleton array (only one level unwrapped)",
 			body:   `[[{"type":"X"}]]`,
 			wantOK: true,
-			// unwrap 結果は `[{"type":"X"}]` (= array of 1) で、object としては parse できない。
-			wantTy: "",
+			wantTy: "", // unwrap 結果は array なので object として parse 不可
 		},
 	}
 

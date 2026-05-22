@@ -298,8 +298,14 @@ func (p *Processor) Process(body []byte) error {
 	// array で wrap して送信してくるケースがある (#1185)。AS 仕様上
 	// inbox direct POST は object 前提なので、array が来た時は剥がして
 	// 中身を処理する。2+ 要素は AS spec 外として no-op で素通し。
+	//
+	// Normalize の前で剥がす: Normalize は内部で json.Unmarshal → 再
+	// encode するが top-level の array → object 変換はしないので、
+	// object 化はここで済ませる必要がある。
 	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
-		slog.Info("federation: unwrapping singleton JSON array activity (Foundkey-style)",
+		// 観測性のため発火を記録 (log message は中立的に表現、Foundkey 由来は
+		// helper / 本コメント側の doc に残す)。
+		slog.Info("federation: unwrapping singleton JSON array activity",
 			"originalSize", len(body), "unwrappedSize", len(unwrapped))
 		body = unwrapped
 	}
