@@ -386,26 +386,25 @@ playwright-ts-down:
 # - APICOMPAT_CONFIG: --dump-routes 時に読み込む mk-go config。DB/Redis 接続
 #   は必須なので、docker compose up された stack を持っていることが前提。
 # - APICOMPAT_ROUTES: dump-routes が書き出す中間ファイルの path。
+#   `$(BUILD_DIR)` 配下にして hermetic に保つ ( /tmp 共有事故を避ける)。
 APICOMPAT_TS_DIR    ?= third_party/misskey/packages/backend/src/server/api/endpoints
 APICOMPAT_CONFIG    ?= .config/default.yml
-APICOMPAT_ROUTES    ?= /tmp/mk-routes.json
+APICOMPAT_ROUTES    ?= $(BUILD_DIR)/apicompat-routes.json
 APICOMPAT_OUT       ?= docs/api-compat.md
 
 # mk-go binary を build → --dump-routes で route 一覧を JSON dump。
 # DB / Redis 接続を必要とするので make docker-up 等で stack を立てた状態で
 # 実行すること。
 apicompat-routes: build
+	mkdir -p $(dir $(APICOMPAT_ROUTES))
 	$(BUILD_DIR)/$(BINARY) -config $(APICOMPAT_CONFIG) -dump-routes -dump-routes-out $(APICOMPAT_ROUTES)
 
 # routes JSON + TS endpoints ディレクトリを comparator で突き合わせて matrix
-# を生成する。APICOMPAT_ROUTES がまだ無ければ `apicompat-routes` を先に実行する。
-apicompat: $(APICOMPAT_ROUTES)
+# を生成する。`apicompat-routes` を都度先に走らせて、stale な中間 JSON で
+# matrix を作らないようにする (`.PHONY` 効果で常に build + dump し直す)。
+apicompat: apicompat-routes
 	go run ./tools/apicompat \
 		-ts-endpoints-dir $(APICOMPAT_TS_DIR) \
 		-mk-routes $(APICOMPAT_ROUTES) \
 		-out $(APICOMPAT_OUT)
 	@echo "wrote $(APICOMPAT_OUT)"
-
-# Make rule: APICOMPAT_ROUTES が無ければ apicompat-routes を経由して作成する。
-$(APICOMPAT_ROUTES):
-	$(MAKE) apicompat-routes

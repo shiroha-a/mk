@@ -59,6 +59,12 @@ func collectTSEndpoints(dir string) ([]string, error) {
 	return dedupSorted(paths), nil
 }
 
+// dedupSorted returns the input slice with consecutive duplicates removed.
+// 入力は事前に sort 済みであることが前提。
+//
+// 注意: 返り値は入力の backing array を共有するため、呼び出し側で `in` を
+// 別途参照する場合は破壊される可能性がある。本パッケージ内では
+// collectTSEndpoints から呼ばれて即返却されるだけなので影響なし。
 func dedupSorted(in []string) []string {
 	if len(in) == 0 {
 		return in
@@ -112,6 +118,13 @@ type MkOnlyRoute struct {
 // 存在しない。mk-go は互換性のため `/api/signin` も登録しているが、これは
 // 真の "mk-go only" として扱う (= ここに含めない)。
 //
+// TODO: third_party/misskey 1 submodule bump 時はこの list が古くなって
+// いないか必ず確認する。`grep -nE "fastify\.post\(.*['\"]\/.+['\"]"`
+// `third_party/misskey/packages/backend/src/server/api/ApiServerService.ts`
+// で TS が直登録している現行 path を出して、ここの list と diff を取る。
+// Phase 2 (api.json ベース比較) に移行すれば自動追従するので、この
+// hardcode は消える予定。
+//
 // source: third_party/misskey/packages/backend/src/server/api/
 //
 //	ApiServerService.ts
@@ -150,7 +163,7 @@ func compare(tsEndpoints []string, mk *DumpedRoutes) Report {
 	type pendingRoute struct{ method, path string }
 	var pending []pendingRoute
 	for _, r := range mk.Routes {
-		p := stripQueryDocs(r.Path)
+		p := stripQueryString(r.Path)
 		// 対象は /api/* の POST のみ。/api/* 以外 (e.g. /.well-known/*,
 		// /healthz, /nodeinfo/*) は Misskey 連合 endpoint や internal なので
 		// Misskey API 互換性 matrix の対象外。

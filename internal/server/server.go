@@ -265,8 +265,12 @@ type DumpedRoutes struct {
 
 // DumpRoutes writes all registered Echo routes as JSON to w.
 // `cmd/misskey -dump-routes` から呼ばれ、tools/apicompat が Misskey TS の
-// api.json と突き合わせる ための入力になる。echo 内部の "/*" catch-all 等は
-// 除外しない (caller 側で正規化する想定)。出力 path は string sort で安定化。
+// endpoint 集合 (filename-derived + ApiServerService 直登録) と突き合わせる
+// ための入力になる。echo 内部の "/*" catch-all 等は除外しない (caller 側で
+// 正規化する想定)。出力 path は string sort で安定化。
+//
+// Phase 2 で TS の api.json ベースに切り替える際もこの method の出力形式は
+// そのまま使える想定 (input source 側だけ差し替え)。
 func (s *Server) DumpRoutes(w io.Writer) error {
 	routes := s.echo.Routes()
 	dumped := make([]DumpedRoute, 0, len(routes))

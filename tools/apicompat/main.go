@@ -1,5 +1,5 @@
-// Command apicompat compares mk-go's HTTP route surface against
-// Misskey TS endpoint set and emits a markdown compatibility matrix.
+// Command apicompat compares mk-go's HTTP route surface against the Misskey
+// TS endpoint set and emits a markdown compatibility matrix.
 //
 // Usage:
 //
@@ -9,9 +9,12 @@
 //	  -out docs/api-compat.md
 //
 // Misskey TS の endpoint は file path = API path 規約 (`admin/foo.ts` →
-// `/api/admin/foo`) で、method は全て POST と仮定する (Misskey の API convention)。
-// mk-go 側は cmd/misskey -dump-routes が出す JSON を入力に取り、`/api/*`
-// prefix のものだけを対象に POST のみ抽出して比較する。
+// `/api/admin/foo`) で扱う。`ApiServerService.ts` が fastify 直登録する
+// auth 系 path は filename-derived の集合に乗らないので、comparator 側で
+// `tsRouterDirectPOSTPaths` を hardcode で補っている。
+// mk-go 側は `cmd/misskey -dump-routes` が出す JSON を入力に取り、`/api/*`
+// prefix の route のみを対象にする。POST は両側比較、それ以外の method は
+// "GET variant" 等の mk-go only 拡張として分類する。
 package main
 
 import (
@@ -24,44 +27,58 @@ import (
 )
 
 func main() {
-	tsDir := flag.String("ts-endpoints-dir", "third_party/misskey/packages/backend/src/server/api/endpoints", "path to Misskey TS endpoint .ts files")
-	mkRoutesPath := flag.String("mk-routes", "", "path to JSON output of `misskey -dump-routes` (default: stdin)")
-	outPath := flag.String("out", "", "output markdown path (default: stdout)")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "apicompat: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// run is the testable entry point. It parses args off a fresh FlagSet so
+// repeated invocations from tests don't interfere with the global flag.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("apicompat", flag.ContinueOnError)
+	// flag.Parse はエラー時 usage を fs.Output() に書く。test 中の noisy
+	// 出力を避けるため stderr に向ける (本番では os.Stderr が渡る)。
+	fs.SetOutput(stderr)
+	tsDir := fs.String("ts-endpoints-dir", "third_party/misskey/packages/backend/src/server/api/endpoints", "path to Misskey TS endpoint .ts files")
+	mkRoutesPath := fs.String("mk-routes", "", "path to JSON output of `misskey -dump-routes` (default: stdin)")
+	outPath := fs.String("out", "", "output markdown path (default: stdout)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse args: %w", err)
+	}
 
 	tsEndpoints, err := collectTSEndpoints(*tsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "apicompat: collect TS endpoints: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("collect TS endpoints: %w", err)
 	}
 
-	mkRoutes, err := readMkRoutes(*mkRoutesPath)
+	mkRoutes, err := readMkRoutes(*mkRoutesPath, stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "apicompat: read mk-go routes: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("read mk-go routes: %w", err)
 	}
 
 	report := compare(tsEndpoints, mkRoutes)
 	md := renderMarkdown(report, mkRoutes.MisskeyVersion, mkRoutes.MkGoVersion)
 
-	out := os.Stdout
+	out := stdout
 	if *outPath != "" {
 		f, err := os.Create(*outPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "apicompat: open out: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("open out: %w", err)
 		}
 		defer f.Close()
 		out = f
 	}
 	if _, err := io.WriteString(out, md); err != nil {
-		fmt.Fprintf(os.Stderr, "apicompat: write out: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("write out: %w", err)
 	}
+	return nil
 }
 
-func readMkRoutes(path string) (*DumpedRoutes, error) {
-	var r io.Reader = os.Stdin
+// readMkRoutes decodes a DumpedRoutes JSON from the file at path. If path is
+// empty, stdin is used instead.
+func readMkRoutes(path string, stdin io.Reader) (*DumpedRoutes, error) {
+	r := stdin
 	if path != "" {
 		f, err := os.Open(path)
 		if err != nil {
@@ -79,7 +96,10 @@ func readMkRoutes(path string) (*DumpedRoutes, error) {
 
 // DumpedRoute mirrors internal/server.DumpedRoute. Duplicated here so the
 // tool stays a single-binary CLI without importing the server package
-// (which would pull in DB / queue / echo dependencies).
+// (which would pull in DB / queue / echo dependencies as transitive deps).
+//
+// 注意: schema が server.DumpedRoute と drift するとツール側が silent に
+// default value 化する。両 type は同じ field を保つこと。
 type DumpedRoute struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
@@ -92,12 +112,11 @@ type DumpedRoutes struct {
 	Routes         []DumpedRoute `json:"routes"`
 }
 
-// stripQueryDocs strips trailing path params (`/:id`) and Echo wildcards (`*`)
-// to keep matching stable across mk-go / TS path styles. mk-go では Echo の
-// `:param` 形式、TS では openapi で `{param}` 形式になることがあるが、
-// Phase 1 では path string そのまま compare するため、param を持つ endpoint は
-// param 名差分で別物扱いになる。これは Phase 2 で正規化したい。
-func stripQueryDocs(p string) string {
+// stripQueryString strips a trailing query string fragment (`?a=1`) from a
+// path. Echo の Routes() 出力には通常 query は含まれないが、外部 source の
+// JSON を食わせる用途で扱えると堅い。なお path param normalize (`:id` ↔
+// `{id}`) は Phase 1 のスコープ外で、Phase 2 (api.json ベース比較) で扱う。
+func stripQueryString(p string) string {
 	if i := strings.IndexByte(p, '?'); i >= 0 {
 		return p[:i]
 	}

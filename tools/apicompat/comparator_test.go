@@ -176,12 +176,18 @@ func TestDedupSorted(t *testing.T) {
 	}
 }
 
-func TestStripQueryDocs(t *testing.T) {
-	if got := stripQueryDocs("/api/foo?a=1"); got != "/api/foo" {
-		t.Errorf("stripQueryDocs strips query: got %q", got)
+func TestStripQueryString(t *testing.T) {
+	tests := map[string]string{
+		"/api/foo?a=1":     "/api/foo",
+		"/api/foo":         "/api/foo",
+		"/api/foo?a=1&b=2": "/api/foo",
+		"":                 "",
+		"?":                "",
 	}
-	if got := stripQueryDocs("/api/foo"); got != "/api/foo" {
-		t.Errorf("stripQueryDocs passthrough: got %q", got)
+	for in, want := range tests {
+		if got := stripQueryString(in); got != want {
+			t.Errorf("stripQueryString(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
