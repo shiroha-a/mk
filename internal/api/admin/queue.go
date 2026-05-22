@@ -3,10 +3,13 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/queue"
 )
@@ -30,61 +33,142 @@ func (h *Handler) QueueClear(c echo.Context) error {
 }
 
 // QueueDeliverDelayed handles POST /api/admin/queue/deliver-delayed.
-// Returns scheduled/retry tasks on the `deliver` queue.
+//
+// Response shape: `[[host, count], ...]` の tuple 配列 (count desc で sort)。
+// host は recipient inbox URL (`DeliverPayload.Inbox`) から抽出する。
+// upstream Misskey TS spec (`admin/queue/deliver-delayed.ts`) と互換。
+//
+// admin/control panel の "Errored Instances" panel は b[1] で count に
+// アクセスするので、object 配列 (旧 mk-go shape) では NaN 表示になる (#1179)。
 func (h *Handler) QueueDeliverDelayed(c echo.Context) error {
-	return h.listDelayedTasks(c, "deliver")
+	tasks := h.fetchAllDelayedTasks("deliver")
+	return c.JSON(http.StatusOK, aggregateByHost(tasks, deliverHostFromPayload))
 }
 
 // QueueInboxDelayed handles POST /api/admin/queue/inbox-delayed.
-// Returns scheduled/retry tasks on the `inbox` queue.
+//
+// Response shape: `[[host, count], ...]` の tuple 配列 (count desc で sort)。
+// host は HTTP Signature header の `keyId` (絶対 URL) から抽出する。
+// upstream Misskey TS は `new URL(job.data.signature.keyId).host` と
+// 同等の処理。mk-go の `InboxPayload.Host` は enqueue 時に未設定なので
+// signature header 経由でしか引けない (#1179)。
 func (h *Handler) QueueInboxDelayed(c echo.Context) error {
-	return h.listDelayedTasks(c, "inbox")
+	tasks := h.fetchAllDelayedTasks("inbox")
+	return c.JSON(http.StatusOK, aggregateByHost(tasks, inboxHostFromPayload))
 }
 
-// delayedTasksMaxFetch is the upper bound on how many of each of scheduled /
-// retry we pull from asynq to build the virtual delayed list. asynq pages
-// scheduled and retry independently so we cannot naively forward the user's
-// page number to both (retry items before the scheduled boundary would
-// disappear). We instead fetch the first asynq page (up to 100 items) of each,
-// merge scheduled-first, then slice by the user's (page, limit).
+// delayedTasksFetchPageSize は scheduled / retry を page 走査する際の 1 page
+// 当たり件数。100 は asynq inspector の page size 制限 (1〜) 内で妥当な大きさ。
+// 上限はないが、page が空になるまで繰り返すので件数に依らず正しく動く。
+const delayedTasksFetchPageSize = 100
+
+// fetchAllDelayedTasks fetches every scheduled+retry task for the queue by
+// iterating pages of size delayedTasksFetchPageSize until each list is
+// exhausted. The result is the union for downstream host aggregation.
 //
-// 想定: admin/queue/*-delayed は通常 "stuck な配送" を目視で確認する用途で、
-// 合計 200 件を超えるケースは運用上ほぼ存在しない。深いページングが必要なら
-// /admin/queue/jobs を state=scheduled / state=retry で使う。
-const delayedTasksMaxFetch = 100
-
-func (h *Handler) listDelayedTasks(c echo.Context, queueName string) error {
+// Misskey TS の BullMQ getJobs(['delayed']) は全件取得が前提なので、上限を
+// 設けずに走査する。asynq に pagination 上限は無いため、運用上の最悪値
+// (数千件) も問題にならない (= memory 一過性)。
+func (h *Handler) fetchAllDelayedTasks(queueName string) []*QueueTaskSummary {
 	if h.queueInspector == nil {
-		return c.JSON(http.StatusOK, []any{})
+		return nil
 	}
-	var req struct {
-		Limit int `json:"limit"`
-		Page  int `json:"page"`
+	var all []*QueueTaskSummary
+	for _, fetch := range []func(string, int, int) ([]*QueueTaskSummary, error){
+		h.queueInspector.ListScheduledTasks,
+		h.queueInspector.ListRetryTasks,
+	} {
+		for page := 1; ; page++ {
+			rows, err := fetch(queueName, page, delayedTasksFetchPageSize)
+			if err != nil || len(rows) == 0 {
+				break
+			}
+			all = append(all, rows...)
+			if len(rows) < delayedTasksFetchPageSize {
+				break
+			}
+		}
 	}
-	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
-	if req.Page < 1 {
-		req.Page = 1
-	}
+	return all
+}
 
-	scheduled, _ := h.queueInspector.ListScheduledTasks(queueName, 1, delayedTasksMaxFetch)
-	retry, _ := h.queueInspector.ListRetryTasks(queueName, 1, delayedTasksMaxFetch)
-	combined := make([]*QueueTaskSummary, 0, len(scheduled)+len(retry))
-	combined = append(combined, scheduled...)
-	combined = append(combined, retry...)
+// aggregateByHost reduces tasks to (host, count) tuples sorted by count
+// descending, then host ascending for stable output. hostFn は task 1 件から
+// host 文字列を抽出する関数で、空文字列を返した task は skip される
+// (= 不正 payload / 集計対象外を弾く)。
+//
+// 戻り値は []any でなく [][]any なので、frontend が `b[1]` でアクセスする
+// JSON tuple 表現 (`[["a", 1], ...]`) になる。
+func aggregateByHost(tasks []*QueueTaskSummary, hostFn func(*QueueTaskSummary) string) [][]any {
+	counts := make(map[string]int)
+	for _, t := range tasks {
+		host := hostFn(t)
+		if host == "" {
+			continue
+		}
+		counts[host]++
+	}
+	hosts := make([]string, 0, len(counts))
+	for h := range counts {
+		hosts = append(hosts, h)
+	}
+	sort.Slice(hosts, func(i, j int) bool {
+		if counts[hosts[i]] != counts[hosts[j]] {
+			return counts[hosts[i]] > counts[hosts[j]]
+		}
+		return hosts[i] < hosts[j]
+	})
+	out := make([][]any, 0, len(hosts))
+	for _, h := range hosts {
+		out = append(out, []any{h, counts[h]})
+	}
+	return out
+}
 
-	offset := (req.Page - 1) * req.Limit
-	if offset >= len(combined) {
-		return c.JSON(http.StatusOK, []map[string]any{})
+// deliverHostFromPayload extracts the recipient host from a deliver queue
+// task. DeliverPayload.Inbox は recipient の AP inbox URL なので、その host
+// が即 federation 先 host になる。
+func deliverHostFromPayload(t *QueueTaskSummary) string {
+	if t == nil || len(t.Payload) == 0 {
+		return ""
 	}
-	end := min(offset+req.Limit, len(combined))
-	out := make([]map[string]any, 0, end-offset)
-	for _, t := range combined[offset:end] {
-		out = append(out, packTaskSummary(t))
+	var p queue.DeliverPayload
+	if err := json.Unmarshal(t.Payload, &p); err != nil {
+		return ""
 	}
-	return c.JSON(http.StatusOK, out)
+	u, err := url.Parse(p.Inbox)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// inboxHostFromPayload extracts the sender host from an inbox queue task.
+// InboxPayload.Host は enqueue 時に未設定 (api/inbox/handler.go) なので、
+// `Headers["Signature"]` から HTTP Signature の keyId URL を取って host を
+// 抽出する。これは upstream Misskey TS の
+// `new URL(job.data.signature.keyId).host` と一致する。
+func inboxHostFromPayload(t *QueueTaskSummary) string {
+	if t == nil || len(t.Payload) == 0 {
+		return ""
+	}
+	var p queue.InboxPayload
+	if err := json.Unmarshal(t.Payload, &p); err != nil {
+		return ""
+	}
+	sig := p.Headers["Signature"]
+	if sig == "" {
+		return ""
+	}
+	parsed, err := activitypub.ParseSignatureHeader(sig)
+	if err != nil || parsed == nil {
+		return ""
+	}
+	u, err := url.Parse(parsed.KeyID)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // QueueJobs handles POST /api/admin/queue/jobs.
