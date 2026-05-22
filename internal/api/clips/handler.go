@@ -202,10 +202,12 @@ func (h *Handler) Delete(c echo.Context) error {
 
 // ListRequest is the request body for clips/list.
 type ListRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // List handles POST /api/clips/list.
@@ -218,7 +220,9 @@ func (h *Handler) List(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.ListByUser(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.ListByUser(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -289,10 +293,12 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 
 // NotesRequest is the request body for clips/notes.
 type NotesRequest struct {
-	ClipID  string `json:"clipId"`
-	UntilID string `json:"untilId"`
-	SinceID string `json:"sinceId"`
-	Limit   int    `json:"limit"`
+	ClipID    string `json:"clipId"`
+	UntilID   string `json:"untilId"`
+	SinceID   string `json:"sinceId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
+	Limit     int    `json:"limit"`
 }
 
 // Notes handles POST /api/clips/notes.
@@ -306,7 +312,9 @@ func (h *Handler) Notes(c echo.Context) error {
 	if user != nil {
 		requesterID = user.ID
 	}
-	notes, err := h.svc.Notes(requesterID, req.ClipID, req.UntilID, req.SinceID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, req.Limit)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):

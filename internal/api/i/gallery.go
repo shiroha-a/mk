@@ -17,10 +17,12 @@ import (
 // / sinceId を投げてくる経路 (#493)。
 func paginationFromRequest(c echo.Context) (limit, offset int, sinceID, untilID string) {
 	var req struct {
-		Limit   *int   `json:"limit"`
-		Offset  *int   `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		Limit     *int   `json:"limit"`
+		Offset    *int   `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	_ = c.Bind(&req)
 	limit = 10
@@ -36,7 +38,9 @@ func paginationFromRequest(c echo.Context) (limit, offset int, sinceID, untilID 
 	if req.Offset != nil && *req.Offset > 0 {
 		offset = *req.Offset
 	}
-	return limit, offset, req.SinceID, req.UntilID
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	return limit, offset, sinceID, untilID
 }
 
 // GalleryLikes handles POST /api/i/gallery/likes.

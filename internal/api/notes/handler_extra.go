@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -79,6 +80,7 @@ func (h *Handler) Featured(c echo.Context) error {
 		Offset    int    `json:"offset"`
 		ChannelID string `json:"channelId"`
 		UntilID   string `json:"untilId"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -86,7 +88,9 @@ func (h *Handler) Featured(c echo.Context) error {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
-	notes, err := h.noteRepo.ListFeatured(req.ChannelID, req.UntilID, req.Limit, req.Offset)
+	// untilDate を aidx prefix に正規化 (#1166)。
+	_, untilID := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
+	notes, err := h.noteRepo.ListFeatured(req.ChannelID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -120,6 +124,8 @@ func (h *Handler) Mentions(c echo.Context) error {
 		Limit      int    `json:"limit"`
 		SinceID    string `json:"sinceId"`
 		UntilID    string `json:"untilId"`
+		SinceDate  *int64 `json:"sinceDate"`
+		UntilDate  *int64 `json:"untilDate"`
 		Visibility string `json:"visibility"`
 	}
 	if err := c.Bind(&req); err != nil {
@@ -128,7 +134,9 @@ func (h *Handler) Mentions(c echo.Context) error {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
-	notes, err := h.noteRepo.ListMentions(user.ID, req.Limit, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.noteRepo.ListMentions(user.ID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -153,10 +161,12 @@ func (h *Handler) Mentions(c echo.Context) error {
 func (h *Handler) UserListTimeline(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
-		ListID  string `json:"listId"`
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		ListID    string `json:"listId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -177,7 +187,9 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-d8571571e198"))
 		}
 	}
-	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -189,11 +201,13 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 // query の完全なAND/OR交差はサポートせず、最初に見つかったタグで検索する。
 func (h *Handler) SearchByTag(c echo.Context) error {
 	var req struct {
-		Tag     string     `json:"tag"`
-		Query   [][]string `json:"query"`
-		Limit   int        `json:"limit"`
-		SinceID string     `json:"sinceId"`
-		UntilID string     `json:"untilId"`
+		Tag       string     `json:"tag"`
+		Query     [][]string `json:"query"`
+		Limit     int        `json:"limit"`
+		SinceID   string     `json:"sinceId"`
+		UntilID   string     `json:"untilId"`
+		SinceDate *int64     `json:"sinceDate"`
+		UntilDate *int64     `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -213,8 +227,10 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// tagsカラムにtagを含むノートを検索
-	notes, err := h.noteRepo.SearchByTag(req.Tag, req.Limit, req.SinceID, req.UntilID)
+	notes, err := h.noteRepo.SearchByTag(req.Tag, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}

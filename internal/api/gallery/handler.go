@@ -44,10 +44,12 @@ func (h *Handler) Popular(c echo.Context) error {
 // id 範囲フィルタ + paginationOrder 同等の ASC/DESC を直接組み立てる。
 func (h *Handler) Posts(c echo.Context) error {
 	var req struct {
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -58,20 +60,22 @@ func (h *Handler) Posts(c echo.Context) error {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	q := h.db.Preload("User")
-	if req.SinceID != "" {
-		q = q.Where("id > ?", req.SinceID)
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
 	}
-	if req.UntilID != "" {
-		q = q.Where("id < ?", req.UntilID)
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
 	}
-	if req.SinceID != "" && req.UntilID == "" {
+	if sinceID != "" && untilID == "" {
 		q = q.Order("id ASC")
 	} else {
 		q = q.Order("id DESC")
 	}
 	q = q.Limit(req.Limit)
-	if req.SinceID == "" && req.UntilID == "" && req.Offset > 0 {
+	if sinceID == "" && untilID == "" && req.Offset > 0 {
 		q = q.Offset(req.Offset)
 	}
 	var posts []*model.GalleryPost

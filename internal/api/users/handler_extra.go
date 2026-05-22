@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -162,14 +163,18 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 func (h *Handler) Reactions(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
-		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		UserID    string `json:"userId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}

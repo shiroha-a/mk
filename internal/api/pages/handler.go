@@ -270,10 +270,12 @@ func (h *Handler) Delete(c echo.Context) error {
 
 // MyRequest is the request body for i/pages (own pages list).
 type MyRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // My handles POST /api/i/pages.
@@ -287,7 +289,9 @@ func (h *Handler) My(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.ListByUser(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.ListByUser(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -296,10 +300,12 @@ func (h *Handler) My(c echo.Context) error {
 
 // FeaturedRequest is the request body for pages/featured.
 type FeaturedRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // Featured handles POST /api/pages/featured.
@@ -312,7 +318,9 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.Featured(req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.Featured(sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

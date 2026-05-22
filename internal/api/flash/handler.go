@@ -157,19 +157,23 @@ func (h *Handler) Delete(c echo.Context) error {
 
 // PaginationRequest is the shared body for list-style endpoints.
 type PaginationRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // SearchRequest is the request body for flash/search.
 type SearchRequest struct {
-	Query   string `json:"query"`
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // My handles POST /api/i/flashs and POST /api/flash/my (own list).
@@ -181,7 +185,9 @@ func (h *Handler) My(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.My(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.My(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -194,7 +200,9 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.Featured(req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.Featured(sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -207,7 +215,9 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Query == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.Search(req.Query, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.Search(req.Query, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -268,7 +278,9 @@ func (h *Handler) MyLikes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	pairs, err := h.svc.MyLikes(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	pairs, err := h.svc.MyLikes(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -15,9 +16,11 @@ func (h *Handler) SigninHistory(c echo.Context) error {
 	}
 	u := middleware.GetUser(c)
 	var req struct {
-		Limit   *int    `json:"limit"`
-		SinceID *string `json:"sinceId"`
-		UntilID *string `json:"untilId"`
+		Limit     *int    `json:"limit"`
+		SinceID   *string `json:"sinceId"`
+		UntilID   *string `json:"untilId"`
+		SinceDate *int64  `json:"sinceDate"`
+		UntilDate *int64  `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid param.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -41,6 +44,8 @@ func (h *Handler) SigninHistory(c echo.Context) error {
 	if req.UntilID != nil {
 		untilID = *req.UntilID
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID = id.NormalizeCursor(sinceID, untilID, req.SinceDate, req.UntilDate)
 
 	rows, err := h.signinRepo.ListByUserID(u.ID, limit, untilID, sinceID)
 	if err != nil {

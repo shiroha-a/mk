@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -21,11 +22,13 @@ import (
 // ようにする (#487 兄弟ケース)。
 func (h *Handler) Clips(c echo.Context) error {
 	var req struct {
-		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		UserID    string `json:"userId"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -34,6 +37,8 @@ func (h *Handler) Clips(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	clampListLimit(&req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
 	isSelf := viewer != nil && viewer.ID == req.UserID
 	var rows []*model.Clip
@@ -66,11 +71,13 @@ func (h *Handler) Clips(c echo.Context) error {
 // frontend Paginator (cursor mode) は untilId / sinceId を forward する (#493)。
 func (h *Handler) Flashs(c echo.Context) error {
 	var req struct {
-		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		UserID    string `json:"userId"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -79,6 +86,8 @@ func (h *Handler) Flashs(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	clampListLimit(&req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
 	isSelf := viewer != nil && viewer.ID == req.UserID
 	var rows []*model.Flash
@@ -130,11 +139,13 @@ func (h *Handler) Flashs(c echo.Context) error {
 // frontend Paginator (cursor mode) は untilId / sinceId を forward する (#493)。
 func (h *Handler) GalleryPosts(c echo.Context) error {
 	var req struct {
-		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		UserID    string `json:"userId"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -143,6 +154,8 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	clampListLimit(&req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	rows, err := h.galleryRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -188,11 +201,13 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 // を起こしていた。
 func (h *Handler) Pages(c echo.Context) error {
 	var req struct {
-		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		UserID    string `json:"userId"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -201,6 +216,8 @@ func (h *Handler) Pages(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	clampListLimit(&req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
 	isSelf := viewer != nil && viewer.ID == req.UserID
 	var rows []*model.Page

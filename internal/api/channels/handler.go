@@ -258,10 +258,12 @@ func (h *Handler) Unfollow(c echo.Context) error {
 // timeline endpoints. frontend Paginator は cursor mode で sinceId / untilId
 // を投げてくる (#493)。
 type PaginatedListRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // Followed handles POST /api/channels/followed.
@@ -276,7 +278,9 @@ func (h *Handler) Followed(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.ListFollowed(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.ListFollowed(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -290,7 +294,9 @@ func (h *Handler) Owned(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.ListOwned(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.ListOwned(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -303,7 +309,9 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.ListFeatured(req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.ListFeatured(sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -312,11 +320,13 @@ func (h *Handler) Featured(c echo.Context) error {
 
 // SearchRequest carries the query string for channels/search.
 type SearchRequest struct {
-	Query   string `json:"query"`
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // Search handles POST /api/channels/search.
@@ -325,7 +335,9 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	rows, err := h.svc.Search(req.Query, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.Search(req.Query, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -337,6 +349,8 @@ type TimelineRequest struct {
 	ChannelID string `json:"channelId"`
 	UntilID   string `json:"untilId"`
 	SinceID   string `json:"sinceId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 	Limit     int    `json:"limit"`
 }
 
@@ -353,7 +367,9 @@ func (h *Handler) Timeline(c echo.Context) error {
 	if limit > 100 {
 		limit = 100
 	}
-	notes, err := h.svc.Timeline(req.ChannelID, req.UntilID, req.SinceID, limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.svc.Timeline(req.ChannelID, untilID, sinceID, limit)
 	if err != nil {
 		if errors.Is(err, corechannel.ErrChannelNotFound) {
 			return notFound(c)

@@ -506,6 +506,8 @@ type NotesRequest struct {
 	Limit            int    `json:"limit"`
 	SinceID          string `json:"sinceId"`
 	UntilID          string `json:"untilId"`
+	SinceDate        *int64 `json:"sinceDate"`
+	UntilDate        *int64 `json:"untilDate"`
 	WithFiles        *bool  `json:"withFiles"`
 	WithReplies      *bool  `json:"withReplies"`
 	WithRenotes      *bool  `json:"withRenotes"`
@@ -548,7 +550,9 @@ func (h *Handler) Notes(c echo.Context) error {
 		withChannelNotes = *req.WithChannelNotes
 	}
 
-	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, req.UntilID, req.SinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, untilID, sinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -562,11 +566,13 @@ func (h *Handler) Notes(c echo.Context) error {
 
 // FollowersRequest is the request body for users/followers and users/following.
 type FollowersRequest struct {
-	UserID  string `json:"userId"`
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	UserID    string `json:"userId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // Followers handles POST /api/users/followers.
@@ -594,6 +600,8 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
 		return apierr.JSONNoSuchUser(c)
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	viewer := middleware.GetUser(c)
 	var (

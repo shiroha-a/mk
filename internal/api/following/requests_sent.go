@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -16,12 +17,16 @@ import (
 func (h *Handler) RequestsSent(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	_ = c.Bind(&req)
-	rows, err := h.followingService.ListSentRequests(me.ID, req.Limit, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.followingService.ListSentRequests(me.ID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

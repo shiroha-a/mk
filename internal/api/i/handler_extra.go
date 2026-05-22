@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
@@ -125,9 +126,11 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 func (h *Handler) Favorites(c echo.Context) error {
 	u := middleware.GetUser(c)
 	var req struct {
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -135,7 +138,9 @@ func (h *Handler) Favorites(c echo.Context) error {
 	if h.favoriteRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	favs, err := h.favoriteRepo.ListByUser(u.ID, req.UntilID, req.SinceID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	favs, err := h.favoriteRepo.ListByUser(u.ID, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

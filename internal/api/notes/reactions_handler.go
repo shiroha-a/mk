@@ -8,6 +8,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -74,11 +75,13 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 
 // ReactionsListRequest is the request body for notes/reactions.
 type ReactionsListRequest struct {
-	NoteID  string `json:"noteId" query:"noteId"`
-	Type    string `json:"type" query:"type"`
-	Limit   int    `json:"limit" query:"limit"`
-	SinceID string `json:"sinceId" query:"sinceId"`
-	UntilID string `json:"untilId" query:"untilId"`
+	NoteID    string `json:"noteId" query:"noteId"`
+	Type      string `json:"type" query:"type"`
+	Limit     int    `json:"limit" query:"limit"`
+	SinceID   string `json:"sinceId" query:"sinceId"`
+	UntilID   string `json:"untilId" query:"untilId"`
+	SinceDate *int64 `json:"sinceDate" query:"sinceDate"`
+	UntilDate *int64 `json:"untilDate" query:"untilDate"`
 }
 
 // Reactions handles POST /api/notes/reactions.
@@ -94,8 +97,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 		req.Limit = 100
 	}
 
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
-	rows, err := h.reactionService.List(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit, req.Type)
+	rows, err := h.reactionService.List(viewer, req.NoteID, untilID, sinceID, req.Limit, req.Type)
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound), errors.Is(err, reaction.ErrNoteNotVisible):

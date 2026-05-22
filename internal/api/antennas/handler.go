@@ -259,6 +259,8 @@ type NotesRequest struct {
 	Limit     int    `json:"limit"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // Notes handles POST /api/antennas/notes.
@@ -268,7 +270,9 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.AntennaID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit, sinceID, untilID)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):

@@ -498,14 +498,8 @@ func (h *Handler) Search(c echo.Context) error {
 		req.Limit = 100
 	}
 
-	untilID := req.UntilID
-	if untilID == "" && req.UntilDate != nil && h.idGen != nil {
-		untilID = h.idGen.Generate(time.UnixMilli(*req.UntilDate))
-	}
-	sinceID := req.SinceID
-	if sinceID == "" && req.SinceDate != nil && h.idGen != nil {
-		sinceID = h.idGen.Generate(time.UnixMilli(*req.SinceDate))
-	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	viewer := middleware.GetUser(c)
 	notes, err := h.searchService.SearchNote(

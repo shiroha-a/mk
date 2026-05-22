@@ -3,11 +3,11 @@ package notes
 import (
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/timeline"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -222,13 +222,12 @@ func (h *Handler) serveTimeline(
 	}
 	req.normalize()
 
-	// sinceDate/untilDate → sinceID/untilID 変換 (TS互換)
-	if req.SinceDate != nil && req.SinceID == "" {
-		req.SinceID = h.idGen.Generate(time.UnixMilli(*req.SinceDate))
-	}
-	if req.UntilDate != nil && req.UntilID == "" {
-		req.UntilID = h.idGen.Generate(time.UnixMilli(*req.UntilDate))
-	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。旧実装は
+	// idGen.Generate(time) で完全 ID (= time prefix + random nodeID + counter)
+	// を生成していたが、SQL `id > Generate(time)` 比較では同 msec の早期 ID
+	// を取りこぼすバグがあった。AidxCutoffPrefix (= time prefix + "00000000")
+	// で deterministic + 同 msec 内全 ID を含む正しい cutoff に修正。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	viewer := middleware.GetUser(c)
 	if requireAuth && viewer == nil {
