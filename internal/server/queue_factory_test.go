@@ -95,7 +95,10 @@ func TestBuildPolicy(t *testing.T) {
 		{"only keepFailed explicit 0 (operator opt-out)", nil, intp(0), queue.Policy{KeepFailed: 0}},
 		{"both explicit", intp(4), intp(2000), queue.Policy{MaxAttempts: 4, KeepFailed: 2000}},
 		// maxAttempts<=0 は driver default に倒す既存挙動を維持。
-		{"maxAttempts zero ignored", intp(0), intp(500), queue.Policy{MaxAttempts: 0, KeepFailed: 500}},
+		// `MaxAttempts: 0` は「Policy で上書きしない (= driver の default
+		// retry を使う)」を意味する zero-value。明示 0 を受け取っても
+		// Policy には流さないので 0 のまま残る。
+		{"maxAttempts zero leaves driver default", intp(0), intp(500), queue.Policy{MaxAttempts: 0, KeepFailed: 500}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

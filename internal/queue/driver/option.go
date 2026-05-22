@@ -19,8 +19,14 @@ type EnqueueOptions struct {
 
 	// KeepFailed bounds the size of the failed ZSET for this task's
 	// queue. mkq translates this to `mkq.WithKeepFailed(n)`. asynq has
-	// no per-job equivalent (= silent no-op). 0 と "default" の区別は
-	// KeepFailedSet で表現する (= MaxRetry / MaxRetrySet と同じ pattern)。
+	// no per-job equivalent (= silent no-op).
+	//
+	// KeepFailedSet は MaxRetry / MaxRetrySet と同じ「明示 0 vs default」
+	// 区別 pattern を踏襲して提供するが、driver translation 上は両者とも
+	// 「unlimited 蓄積 (= driver default)」になり挙動は同じ
+	// (mkqdriver/option.go の `> 0` guard 参照)。operator が `<queue>JobKeepFailed:
+	// 0` と明示的に opt-out したこと自体は Set=true として記録される
+	// (= documented intent としての semantic を保つ)。
 	KeepFailed    int
 	KeepFailedSet bool
 
