@@ -10,11 +10,19 @@ import "time"
 //   - MaxRetry 0         : driver default retry count
 //   - UniqueTTL 0        : no unique-key dedup
 //   - ProcessIn 0        : process immediately
+//   - KeepFailed 0       : driver default (= no automatic retention)
 type EnqueueOptions struct {
 	Queue     string
 	MaxRetry  int
 	UniqueTTL time.Duration
 	ProcessIn time.Duration
+
+	// KeepFailed bounds the size of the failed ZSET for this task's
+	// queue. mkq translates this to `mkq.WithKeepFailed(n)`. asynq has
+	// no per-job equivalent (= silent no-op). 0 と "default" の区別は
+	// KeepFailedSet で表現する (= MaxRetry / MaxRetrySet と同じ pattern)。
+	KeepFailed    int
+	KeepFailedSet bool
 
 	// MaxRetrySet distinguishes "MaxRetry left at default" from
 	// "MaxRetry explicitly set to 0". asynq treats MaxRetry=0 as
@@ -51,6 +59,25 @@ func WithUnique(ttl time.Duration) EnqueueOption {
 // WithProcessIn delays processing of the task by the given duration.
 func WithProcessIn(d time.Duration) EnqueueOption {
 	return func(o *EnqueueOptions) { o.ProcessIn = d }
+}
+
+// WithKeepFailed bounds the size of the failed bucket / ZSET for this
+// task's queue: when the failed bucket exceeds n entries, the oldest
+// ones are pruned automatically. n==0 explicitly disables retention
+// (= unlimited accumulation, matches the historical behaviour).
+//
+// 主な使い道: inbox / deliver 等の連合 queue で transient failure が
+// 永続蓄積するのを防ぐ。BullMQ の `removeOnFail: N` と意味同等。
+//
+// driver 別:
+//   - mkqdriver: `mkq.WithKeepFailed(n)` を AddJob に渡す
+//   - asynqdriver: silent no-op (asynq は per-job 相当 API を持たない、
+//     archived bucket の age-based prune に依拠)
+func WithKeepFailed(n int) EnqueueOption {
+	return func(o *EnqueueOptions) {
+		o.KeepFailed = n
+		o.KeepFailedSet = true
+	}
 }
 
 // ApplyEnqueueOptions folds the variadic options into a single

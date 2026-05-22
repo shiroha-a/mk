@@ -55,6 +55,13 @@ func toMkqAddOptions(o driver.EnqueueOptions, taskType string, payload []byte) [
 	if o.ProcessIn > 0 {
 		out = append(out, mkq.WithDelay(o.ProcessIn))
 	}
+	if o.KeepFailedSet {
+		// asynq には per-job 相当が無いので driver-neutral name は
+		// KeepFailed としているが、mkq library 側 API も同名
+		// (`mkq.WithKeepFailed`) で一対一に対応する。BullMQ の
+		// `removeOnFail: N` 互換。
+		out = append(out, mkq.WithKeepFailed(o.KeepFailed))
+	}
 	return out
 }
 

@@ -571,6 +571,48 @@ func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
 		"Retry should reflect failed bucket size (was hardcoded to 0)")
 }
 
+// TestClient_Enqueue_WithKeepFailed_BoundsFailedBucket verifies the
+// `driver.WithKeepFailed(n)` option translates to `mkq.WithKeepFailed(n)`
+// so the failed bucket size is bounded at n entries even when N+M
+// permanent-fail jobs are enqueued. Without this the bucket would grow
+// unbounded and admin observability degrades (#1184).
+func TestClient_Enqueue_WithKeepFailed_BoundsFailedBucket(t *testing.T) {
+	d := newDriver(t)
+	srv := d.Server()
+	var wg sync.WaitGroup
+	const cap = 3
+	const total = 7 // cap=3, つまり最後 3 件だけ残るはず
+	wg.Add(total)
+	srv.Handle("keepfailed:burst", func(_ context.Context, _ driver.Task) error {
+		defer wg.Done()
+		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	for i := 0; i < total; i++ {
+		require.NoError(t, d.Client().Enqueue(context.Background(),
+			"keepfailed:burst", []byte(fmt.Sprintf(`{"i":%d}`, i)),
+			driver.WithQueue("deliver"),
+			driver.WithKeepFailed(cap),
+		))
+	}
+	if !waitGroupTimeout(&wg, 10*time.Second) {
+		t.Fatal("not all handlers invoked")
+	}
+
+	ins := d.Inspector()
+	// mkq の retention 削除は finalise の同期 path で動く (= worker が
+	// 失敗 ack を返した瞬間に古い entry を ZREMRANGEBYRANK で prune)。
+	// 全 7 件 handle 完了後、ある程度待って failed bucket が cap 件以下
+	// に絞られていることを確認する (= 上限 retention 動作)。
+	require.Eventually(t, func() bool {
+		info, err := ins.GetQueueInfo("deliver")
+		return err == nil && info.Failed <= cap && info.Failed >= 1
+	}, 5*time.Second, 50*time.Millisecond,
+		"failed bucket should be bounded at WithKeepFailed(%d) (=%d max)", cap, cap)
+}
+
 // TestInspector_RunTask_FallsBackToRetryJobForFailedBucket verifies that
 // RunTask succeeds against a job in the failed bucket, by falling back
 // from PromoteJob (delayed-only) to RetryJob. asynq's Inspector.RunTask

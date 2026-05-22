@@ -157,6 +157,12 @@ type Source struct {
 	RelationshipJobPerSec      *int `mapstructure:"relationshipJobPerSec"`
 	DeliverJobMaxAttempts      *int `mapstructure:"deliverJobMaxAttempts"`
 	InboxJobMaxAttempts        *int `mapstructure:"inboxJobMaxAttempts"`
+	// `<queue>JobKeepFailed` は failed bucket retention の最大件数。
+	// 0 = retention 無し (= 蓄積し続ける) なので、operator が明示的に
+	// 「全部残す」運用にしたい場合のみ 0 を設定する。未指定なら mk-go
+	// の internal default (defaultKeepFailed) が適用される。
+	DeliverJobKeepFailed *int `mapstructure:"deliverJobKeepFailed"`
+	InboxJobKeepFailed   *int `mapstructure:"inboxJobKeepFailed"`
 
 	// JobQueueAutoScale toggles the AIMD auto-scale controller (#1120).
 	// Default false. When true, queues without an explicit
@@ -317,6 +323,8 @@ type Config struct {
 	RelationshipJobPerSec      *int
 	DeliverJobMaxAttempts      *int
 	InboxJobMaxAttempts        *int
+	DeliverJobKeepFailed       *int
+	InboxJobKeepFailed         *int
 
 	// Auto-scale knobs (#1120 tracker). See docs/design/auto-scale-job-workers.md.
 	JobQueueAutoScale        bool
@@ -559,6 +567,8 @@ func resolve(src *Source) (*Config, error) {
 		RelationshipJobPerSec:      src.RelationshipJobPerSec,
 		DeliverJobMaxAttempts:      src.DeliverJobMaxAttempts,
 		InboxJobMaxAttempts:        src.InboxJobMaxAttempts,
+		DeliverJobKeepFailed:       src.DeliverJobKeepFailed,
+		InboxJobKeepFailed:         src.InboxJobKeepFailed,
 		JobQueueAutoScale:          src.JobQueueAutoScale,
 		MaxWorkers:                 src.MaxWorkers,
 		MinWorkers:                 src.MinWorkers,

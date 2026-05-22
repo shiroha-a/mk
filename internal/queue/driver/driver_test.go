@@ -31,13 +31,16 @@ func TestApplyEnqueueOptions(t *testing.T) {
 		WithMaxRetry(3),
 		WithUnique(time.Hour),
 		WithProcessIn(5 * time.Second),
+		WithKeepFailed(500),
 	})
 	want := EnqueueOptions{
-		Queue:       "deliver",
-		MaxRetry:    3,
-		MaxRetrySet: true,
-		UniqueTTL:   time.Hour,
-		ProcessIn:   5 * time.Second,
+		Queue:         "deliver",
+		MaxRetry:      3,
+		MaxRetrySet:   true,
+		UniqueTTL:     time.Hour,
+		ProcessIn:     5 * time.Second,
+		KeepFailed:    500,
+		KeepFailedSet: true,
 	}
 	if got != want {
 		t.Fatalf("got %#v want %#v", got, want)
@@ -55,5 +58,20 @@ func TestApplyEnqueueOptionsZeroSentinel(t *testing.T) {
 	def := ApplyEnqueueOptions(nil)
 	if def.MaxRetrySet {
 		t.Fatalf("default options must not record MaxRetrySet")
+	}
+}
+
+// TestApplyEnqueueOptions_KeepFailedZeroSentinel: WithKeepFailed(0) は
+// 「operator が明示的に retention 解除 (= unlimited 蓄積)」を表す。
+// 未指定 (= default) と区別するため KeepFailedSet を使う (#1184)。
+func TestApplyEnqueueOptions_KeepFailedZeroSentinel(t *testing.T) {
+	got := ApplyEnqueueOptions([]EnqueueOption{WithKeepFailed(0)})
+	if got.KeepFailed != 0 || !got.KeepFailedSet {
+		t.Fatalf("explicit zero not recorded: %#v", got)
+	}
+
+	def := ApplyEnqueueOptions(nil)
+	if def.KeepFailedSet {
+		t.Fatalf("default options must not record KeepFailedSet")
 	}
 }

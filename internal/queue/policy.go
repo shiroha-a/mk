@@ -30,6 +30,15 @@ type Policy struct {
 	// 変換するため EnqueueDeliver で N-1 を渡す。drop-in 互換維持の
 	// ために TS の YAML 値そのままで一致させる必要がある (#531 review)。
 	MaxAttempts int
+
+	// KeepFailed bounds the size of the failed bucket / ZSET for this
+	// queue. mkq では per-job `WithKeepFailed(n)` に翻訳されて failed
+	// ZSET の超過分が古い順に prune される (BullMQ `removeOnFail: N`
+	// 互換)。0 = retention 無し (= 蓄積し続ける、従来挙動)。
+	//
+	// `MaxAttempts` と同じく EnqueueDeliver / EnqueueInbox が caller
+	// opts の前に prepend する形で渡る (#1184)。
+	KeepFailed int
 }
 
 // PolicyMap maps queue name → Policy. Lookups for missing queues return

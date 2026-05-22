@@ -96,6 +96,16 @@ func TestToAsynqOptions_MaxRetryRequiresExplicit(t *testing.T) {
 	}
 }
 
+// TestToAsynqOptions_KeepFailedIsSilentNoOp: asynq には per-job 相当
+// API が無いので driver-neutral `WithKeepFailed` は silent no-op で
+// なければならない (#1184 の driver semantics)。
+func TestToAsynqOptions_KeepFailedIsSilentNoOp(t *testing.T) {
+	got := toAsynqOptions(driver.EnqueueOptions{KeepFailed: 100, KeepFailedSet: true})
+	if len(got) != 0 {
+		t.Fatalf("KeepFailed must be silently ignored by asynqdriver, got %d options", len(got))
+	}
+}
+
 // fakeRedis returns a non-routable RedisClientOpt; we never Start the
 // server in these tests so the address is fine. asynq client/inspector
 // constructors do not Dial until the first request.

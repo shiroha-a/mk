@@ -161,8 +161,14 @@ func (c *Client) policyFor(queueName string) Policy {
 func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOption) error {
 	body := mustMarshal(payload)
 	base := []driver.EnqueueOption{driver.WithQueue(QueueName)}
-	if attempts := c.policyFor(QueueName).MaxAttempts; attempts > 0 {
-		base = append(base, driver.WithMaxRetry(attempts-1))
+	p := c.policyFor(QueueName)
+	if p.MaxAttempts > 0 {
+		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
+	}
+	if p.KeepFailed > 0 {
+		// mkqdriver 経路でのみ効く。asynqdriver は silent no-op。
+		// failed bucket retention で永続蓄積を防ぐ (#1184)。
+		base = append(base, driver.WithKeepFailed(p.KeepFailed))
 	}
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypeDeliver, body, merged...)
@@ -269,8 +275,12 @@ func (c *Client) EnqueueImportCustomEmojis(payload ImportCustomEmojisPayload) er
 func (c *Client) EnqueueInbox(ctx context.Context, payload InboxPayload) error {
 	body := mustMarshal(payload)
 	base := []driver.EnqueueOption{driver.WithQueue(InboxQueueName)}
-	if attempts := c.policyFor(InboxQueueName).MaxAttempts; attempts > 0 {
-		base = append(base, driver.WithMaxRetry(attempts-1))
+	p := c.policyFor(InboxQueueName)
+	if p.MaxAttempts > 0 {
+		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
+	}
+	if p.KeepFailed > 0 {
+		base = append(base, driver.WithKeepFailed(p.KeepFailed))
 	}
 	return c.inner.Enqueue(ctx, TaskTypeInbox, body, base...)
 }

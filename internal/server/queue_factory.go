@@ -95,15 +95,35 @@ func perQueueRatesFromConfig(cfg *config.Config) map[string]int {
 	return out
 }
 
+// defaultKeepFailed bounds the failed bucket retention applied to inbox /
+// deliver enqueue when operator が config で明示しない場合の安全側 default。
+// 1000 件あれば admin UI の Errored Instances panel (host aggregation で
+// top-N 表示) は確実に賄え、redis memory pressure (1 job ≈ 1KB × 2 queue
+// = 2MB) も問題にならない。`<queue>JobKeepFailed: 0` で operator が明示
+// 解除可能 (= 蓄積無制限の従来挙動)。
+const defaultKeepFailed = 1000
+
 // applyClientPolicies copies enqueue-side defaults (deliverJobMaxAttempts /
-// inboxJobMaxAttempts) onto the queue.Client. Called once at server
-// construction so EnqueueDeliver / EnqueueInbox can pre-pend WithMaxRetry
-// when callers don't override.
+// inboxJobMaxAttempts / deliverJobKeepFailed / inboxJobKeepFailed) onto the
+// queue.Client. Called once at server construction so EnqueueDeliver /
+// EnqueueInbox can pre-pend driver options when callers don't override.
 func applyClientPolicies(c *queue.Client, cfg *config.Config) {
-	if cfg.DeliverJobMaxAttempts != nil && *cfg.DeliverJobMaxAttempts > 0 {
-		c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: *cfg.DeliverJobMaxAttempts})
+	c.SetPolicy(queue.QueueName, buildPolicy(cfg.DeliverJobMaxAttempts, cfg.DeliverJobKeepFailed))
+	c.SetPolicy(queue.InboxQueueName, buildPolicy(cfg.InboxJobMaxAttempts, cfg.InboxJobKeepFailed))
+}
+
+// buildPolicy assembles a queue.Policy from optional config pointers,
+// applying defaultKeepFailed when the operator hasn't specified a value.
+// MaxAttempts は未指定なら 0 = "driver default" のまま (= 既存挙動)。
+func buildPolicy(maxAttempts *int, keepFailed *int) queue.Policy {
+	p := queue.Policy{}
+	if maxAttempts != nil && *maxAttempts > 0 {
+		p.MaxAttempts = *maxAttempts
 	}
-	if cfg.InboxJobMaxAttempts != nil && *cfg.InboxJobMaxAttempts > 0 {
-		c.SetPolicy(queue.InboxQueueName, queue.Policy{MaxAttempts: *cfg.InboxJobMaxAttempts})
+	if keepFailed != nil {
+		p.KeepFailed = *keepFailed
+	} else {
+		p.KeepFailed = defaultKeepFailed
 	}
+	return p
 }
