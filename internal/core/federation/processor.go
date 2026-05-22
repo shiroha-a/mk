@@ -582,8 +582,8 @@ func (p *Processor) handleUndoLike(act genericActivity, inner genericActivity) e
 	reactor, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
 		// permanent な actor resolve 失敗は ack して skip (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Undo(Like) actor resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Undo(Like) actor resolve permanent fail, skip",
 				"actor", act.Actor, "err", err)
 			return nil
 		}
@@ -608,8 +608,8 @@ func (p *Processor) handleUndoLike(act genericActivity, inner genericActivity) e
 		// が存在しないだけでも idempotent (= 削除済みは ErrReactionNotFound で
 		// nil 返却) なので、resolve できない先の reaction は元から無い扱いで
 		// 整合する (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Undo(Like) target resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Undo(Like) target resolve permanent fail, skip",
 				"object", targetURI, "actor", act.Actor, "err", err)
 			return nil
 		}
@@ -633,8 +633,8 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 		// permanent な actor resolve 失敗は ack (#1183)。announcer が居な
 		// ければ Announce record も作っていないはずなので削除対象も無く
 		// idempotent と整合する。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Undo(Announce) actor resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Undo(Announce) actor resolve permanent fail, skip",
 				"actor", act.Actor, "err", err)
 			return nil
 		}
@@ -649,8 +649,8 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 		// permanent な target resolve 失敗は ack。target が解決できなければ
 		// renote record も無いはずなので、削除対象が無いまま activity を ack
 		// する形で整合する (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Undo(Announce) target resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Undo(Announce) target resolve permanent fail, skip",
 				"object", targetURI, "actor", act.Actor, "err", err)
 			return nil
 		}
@@ -866,8 +866,8 @@ func (p *Processor) handleLike(act genericActivity) error {
 		// failed bucket 行きを避ける (#1183)。reactor が居なければ reaction
 		// 自体作れないので skip = noop。transient (5xx / network) は従来通り
 		// retry サイクルに乗せる。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Like actor resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Like actor resolve permanent fail, skip",
 				"actor", act.Actor, "err", err)
 			return nil
 		}
@@ -908,8 +908,8 @@ func (p *Processor) handleLike(act genericActivity) error {
 	if err != nil {
 		// permanent な target resolve 失敗 (followers-only / 削除済 等) は
 		// reaction record を作らず ack。retry しても永久に解消しない (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Like target resolve permanent fail, skip reaction record",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Like target resolve permanent fail, skip reaction record",
 				"object", like.Object, "actor", act.Actor, "err", err)
 			return nil
 		}
@@ -929,8 +929,8 @@ func (p *Processor) handleLike(act genericActivity) error {
 		}
 		// reaction service が visibility 違反 (`ErrNoteNotVisible`) 等を
 		// 返すケースも permanent 扱いで skip (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Like reaction create permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Like reaction create permanent fail, skip",
 				"object", like.Object, "actor", act.Actor, "err", err)
 			return nil
 		}
@@ -945,8 +945,8 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	if err != nil {
 		// permanent な actor resolve 失敗は ack して skip (#1183、handleLike
 		// と同じ理由)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Announce actor resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Announce actor resolve permanent fail, skip",
 				"actor", act.Actor, "err", err)
 			return nil
 		}
@@ -960,8 +960,8 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	if err != nil {
 		// permanent な target resolve 失敗 (削除済 note / followers-only) は
 		// Announce 記録を skip して ack (#1183)。
-		if isPermanentResolveError(err) {
-			slog.Warn("federation: Announce target resolve permanent fail, skip",
+		if isPermanentSkipError(err) {
+			slog.Info("federation: Announce target resolve permanent fail, skip",
 				"object", targetURI, "actor", act.Actor, "err", err)
 			return nil
 		}

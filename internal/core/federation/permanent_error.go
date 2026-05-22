@@ -7,11 +7,16 @@ import (
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
 )
 
-// isPermanentResolveError reports whether err represents a permanent failure
-// during remote ActivityPub object / actor resolution. callers in this
-// package use it to decide between "best-effort skip" (= log warn and return
-// nil, swallowing the activity) and "transient failure" (= return err to put
+// isPermanentSkipError reports whether err represents a permanent failure
+// that the inbox processor should silently ack rather than feed back into
+// the retry queue. callers (= Like / Undo / Announce handler 群) use this
+// to choose between "best-effort skip" (= log info and return nil,
+// swallowing the activity) and "transient failure" (= return err to put
 // the activity back on the retry queue).
+//
+// 「resolve 経路の失敗」と「activity 処理の policy 違反」の両方を含むため
+// 命名は resolve 限定にしていない (= reactionService.Create が返す
+// `ErrNoteNotVisible` も同 helper で吸収する想定)。
 //
 // permanent と分類する error:
 //
@@ -27,7 +32,7 @@ import (
 // transient と分類する (false 返す) error: 5xx / network error / timeout
 // 等、対側の一過性障害。retry サイクルに乗せる。`nil` も false を返す
 // (= 「成功」を「permanent fail」と誤判定しないため。
-func isPermanentResolveError(err error) bool {
+func isPermanentSkipError(err error) bool {
 	if err == nil {
 		return false
 	}

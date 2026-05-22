@@ -39,7 +39,7 @@ func TestIsPermanentResolveError(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isPermanentResolveError(tt.err)
+			got := isPermanentSkipError(tt.err)
 			assert.Equal(t, tt.want, got, "err=%v", tt.err)
 		})
 	}
