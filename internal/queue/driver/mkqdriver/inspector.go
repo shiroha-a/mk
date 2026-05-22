@@ -30,9 +30,19 @@ func (i *Inspector) Queues() ([]string, error) {
 
 // GetQueueInfo returns the wait / active / delayed / completed /
 // failed counters for the named queue. Pending maps to mkq's wait
-// bucket (asynq's pending semantics); Retry has no direct mkq bucket
-// and stays at zero (BullMQ keeps retries inside the failed bucket
-// until the next dispatch attempt).
+// bucket (asynq's pending semantics).
+//
+// Retry semantics: mkq には asynq の Retry bucket に直接対応する独立 bucket
+// が存在せず、retry-backoff 待ちの job は failed bucket に居続け、次の
+// retry 時刻になって delayed bucket に移動する設計 (= `ListRetryTasks` も
+// failed bucket を読む)。よって driver level では Retry = failed bucket
+// size として asynq semantic に揃える。
+//
+// 副作用として Retry と Failed が同値になるが、これは mkq library が
+// 「retry-pending」と「permanent failure」を区別する bucket を持たない
+// limitation 由来。frontend (admin/job-queue.vue) は両方とも current size
+// を見れば十分なので影響は無い。BullMQ や asynq の semantic と完全一致
+// させるには mkq 自体に retry bucket を追加する別 PR が必要 (#1181)。
 func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	q := i.driver.queueFor(qname)
 	if q == nil {
@@ -73,10 +83,12 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 		Completed: int(counts.Completed),
 		Failed:    int(counts.Failed),
 		Scheduled: scheduled,
-		// Retry: mkq keeps retries inside the failed bucket until they
-		// move back into delayed; surface 0 to keep the field
-		// well-defined.
-		Retry: 0,
+		// Retry = failed bucket current size。mkq では retry-backoff 待ち
+		// が failed bucket に居る ため、stream/queue_stats_publisher の
+		// `Delayed = Scheduled + Retry` 計算で正しく retry 待ち分が graph
+		// に乗るようになる。Failed と同値になる semantic limitation は
+		// 関数 doc 冒頭で説明済 (#1181)。
+		Retry: int(counts.Failed),
 	}, nil
 }
 
@@ -140,15 +152,31 @@ func (i *Inspector) DeleteAllPendingTasks(qname string) (int, error) {
 	return 0, nil
 }
 
-// RunTask promotes a delayed task to wait, equivalent to asynq's
-// "Run scheduled". For non-delayed jobs mkq.PromoteJob returns an
-// error which the caller should surface to the admin operator.
+// RunTask re-enqueues a task back into wait state, equivalent to asynq's
+// `Inspector.RunTask`. asynq の RunTask は delayed (= scheduled) と retry
+// 両方を受け入れるが、mkq では bucket 別に API が分かれている:
+//
+//   - PromoteJob: delayed → wait 専用 (失敗時 `ErrJobNotInDelayed`)
+//   - RetryJob:   failed → wait 専用 (asynq RunTask の後半相当)
+//
+// よって PromoteJob を先に試し、delayed 状態でなければ RetryJob に
+// fallback する。これで「Retry all queues now」(admin/queue/promote-jobs)
+// が failed bucket に居る retry-backoff 待ち job も含めて promote できる
+// ようになる (#1181)。
+//
+// 両 path で job が見つからなかった場合は最初の (PromoteJob の) error を
+// そのまま返す。job が wait や active など別 bucket に既に居る場合も
+// 同様に PromoteJob の error が caller に届く。
 func (i *Inspector) RunTask(qname, taskID string) error {
 	q := i.driver.queueFor(qname)
 	if q == nil {
 		return fmt.Errorf("mkqdriver: unknown queue %q", qname)
 	}
-	return q.PromoteJob(inspectorCtx(), taskID)
+	err := q.PromoteJob(inspectorCtx(), taskID)
+	if errors.Is(err, mkq.ErrJobNotInDelayed) {
+		return q.RetryJob(inspectorCtx(), taskID)
+	}
+	return err
 }
 
 // Close is a no-op — the underlying client is owned by the parent

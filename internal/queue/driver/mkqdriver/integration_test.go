@@ -527,6 +527,110 @@ func TestInspector_RunTaskPromotesDelayed(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
+// TestInspector_GetQueueInfo_RetryReflectsFailedBucket verifies that the
+// Retry field surfaces the current failed bucket size (= retry-pending +
+// permanent failures). Without this the queueStats publisher's
+// Delayed = Scheduled + Retry calculation undercounts and admin/job-queue
+// graph stays stuck at 0 even when Errored Instances panel shows entries
+// (#1181).
+func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
+	d := newDriver(t)
+	srv := d.Server()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	srv.Handle("ins:fail-then-check", func(_ context.Context, _ driver.Task) error {
+		defer wg.Done()
+		// SkipRetry sentinel = immediate failure into the failed bucket
+		// (mkq's ErrUnrecoverable). No backoff retry path involved, but
+		// the resulting bucket position is the same one retry-pending
+		// jobs occupy in mkq.
+		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	require.NoError(t, d.Client().Enqueue(context.Background(),
+		"ins:fail-then-check", nil,
+		driver.WithQueue("deliver")))
+	if !waitGroupTimeout(&wg, 5*time.Second) {
+		t.Fatal("handler not invoked")
+	}
+
+	ins := d.Inspector()
+	require.Eventually(t, func() bool {
+		info, err := ins.GetQueueInfo("deliver")
+		return err == nil && info.Retry >= 1 && info.Failed >= 1
+	}, 5*time.Second, 50*time.Millisecond,
+		"Retry should reflect failed bucket size (was hardcoded to 0)")
+}
+
+// TestInspector_RunTask_FallsBackToRetryJobForFailedBucket verifies that
+// RunTask succeeds against a job in the failed bucket, by falling back
+// from PromoteJob (delayed-only) to RetryJob. asynq's Inspector.RunTask
+// transparently handles both buckets; this test pins the equivalent
+// behaviour for the mkq driver (#1181).
+//
+// Without this fallback the admin panel's "Retry all queues now" button
+// is a no-op on retry-pending jobs and operators cannot recover stuck
+// delivery from the UI.
+func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
+	d := newDriver(t)
+	srv := d.Server()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	srv.Handle("ins:fail-then-retry", func(_ context.Context, _ driver.Task) error {
+		defer wg.Done()
+		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	require.NoError(t, d.Client().Enqueue(context.Background(),
+		"ins:fail-then-retry", nil,
+		driver.WithQueue("deliver")))
+	if !waitGroupTimeout(&wg, 5*time.Second) {
+		t.Fatal("handler not invoked")
+	}
+
+	ins := d.Inspector()
+	// Wait until the job has landed in the failed bucket (= ListRetryTasks
+	// sees it through mkq's failed bucket).
+	var failedTaskID string
+	require.Eventually(t, func() bool {
+		rows, err := ins.ListRetryTasks("deliver", 1, 30)
+		if err != nil || len(rows) == 0 {
+			return false
+		}
+		failedTaskID = rows[0].ID
+		return true
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// RunTask must succeed via RetryJob fallback even though the job is
+	// not in mkq's delayed bucket. asynq's parity contract: callers only
+	// pass a task ID and the driver routes to the right move primitive.
+	require.NoError(t, ins.RunTask("deliver", failedTaskID),
+		"RunTask should fall back to RetryJob for failed bucket jobs")
+
+	// After the fallback the failed bucket count drops by one. We assert
+	// the count rather than chasing the job through wait→active→failed
+	// again (the handler is still registered and will refail it), since
+	// the contract under test is just "RunTask did not error and the job
+	// left the failed bucket".
+	require.Eventually(t, func() bool {
+		rows, err := ins.ListRetryTasks("deliver", 1, 30)
+		if err != nil {
+			return false
+		}
+		for _, r := range rows {
+			if r.ID == failedTaskID {
+				return false // still in failed bucket
+			}
+		}
+		return true
+	}, 5*time.Second, 50*time.Millisecond,
+		"job should have left the failed bucket after RetryJob fallback")
+}
+
 // TestScheduler_RegisterRoundtrip exercises the cron Register API and
 // the validator branches Scheduler exposes.
 func TestScheduler_RegisterRoundtrip(t *testing.T) {
