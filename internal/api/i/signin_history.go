@@ -15,6 +15,10 @@ func (h *Handler) SigninHistory(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	u := middleware.GetUser(c)
+	// この handler だけ SinceID / UntilID が `*string` で、他の cursor
+	// endpoint (= 多くが string) と shape が異なる。歴史的経緯で「未指定」と
+	// 「空文字明示」を区別する必要があった経路。`*string` を unwrap して
+	// 空文字 string に揃えてから id.NormalizeCursor に渡す 2-step。
 	var req struct {
 		Limit     *int    `json:"limit"`
 		SinceID   *string `json:"sinceId"`
@@ -44,7 +48,8 @@ func (h *Handler) SigninHistory(c echo.Context) error {
 	if req.UntilID != nil {
 		untilID = *req.UntilID
 	}
-	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
+	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。unwrap 後の
+	// string 値を渡す。
 	sinceID, untilID = id.NormalizeCursor(sinceID, untilID, req.SinceDate, req.UntilDate)
 
 	rows, err := h.signinRepo.ListByUserID(u.ID, limit, untilID, sinceID)
