@@ -3,7 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
+	"errors"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -53,6 +53,10 @@ func TestDumpRoutes(t *testing.T) {
 	}
 	// echo 内部で OPTIONS / HEAD / catch-all を自動登録するので、got から
 	// want に含まれない entry を除外して厳密一致させる。
+	//
+	// duplicate を見逃さないように dedupe はしない: もし将来 DumpRoutes が
+	// 同 entry を 2 回出すような bug を踏んだ場合、filtered の len が want
+	// より大きくなって assert.Equal が失敗する形で捕まる。
 	filtered := gotPairs[:0]
 	wantSet := make(map[string]bool, len(want))
 	for _, w := range want {
@@ -73,23 +77,33 @@ func TestDumpRoutesEmpty(t *testing.T) {
 
 	var got DumpedRoutes
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
-	// echo は何も登録していなくても catch-all を内部で持つ可能性がある
-	// (実装依存) ので、Routes が non-nil なら OK とする。Version field
-	// だけは確実に埋まることを担保。
 	assert.Equal(t, config.MisskeyVersion, got.MisskeyVersion)
 	assert.Equal(t, config.MkGoVersion, got.MkGoVersion)
+	// 空 echo でも DumpRoutes は []DumpedRoute{} (non-nil) を返す契約。
+	// echo 内部で catch-all を持つ実装依存はあるが、Routes field 自体は
+	// 必ず JSON 上 array として encode される (= unmarshal 後も nil で
+	// ない) ことを保証する。
+	assert.NotNil(t, got.Routes)
 }
 
-// stubFailingWriter 書き込み毎に必ず失敗する Writer。
-// DumpRoutes が JSON エンコード失敗時にエラーを propagate するかの検証用。
+// errStubFailingWrite is the sentinel used by stubFailingWriter — any unique
+// error works, this just makes intent explicit at the call site.
+var errStubFailingWrite = errors.New("stub writer always fails")
+
+// stubFailingWriter は書き込み毎に必ず失敗する Writer。DumpRoutes が
+// JSON エンコード失敗時にエラーを propagate するかの検証用。
 type stubFailingWriter struct{}
 
 func (stubFailingWriter) Write([]byte) (int, error) {
-	return 0, http.ErrBodyNotAllowed
+	return 0, errStubFailingWrite
 }
 
 func TestDumpRoutesWriterError(t *testing.T) {
 	s := &Server{echo: echo.New()}
 	err := s.DumpRoutes(stubFailingWriter{})
 	require.Error(t, err)
+	// json.Encoder は writer error を %w で wrap せず error string に
+	// 取り込む形で伝搬する。errors.Is で素直に届かないため、err message
+	// に sentinel の内容が含まれることだけ確認する。
+	assert.Contains(t, err.Error(), errStubFailingWrite.Error())
 }

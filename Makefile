@@ -8,7 +8,7 @@
 	e2e-submodule-init e2e-frontend-build e2e-deps e2e-run e2e-open \
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
-	apicompat apicompat-routes
+	apicompat apicompat-routes apicompat-render
 
 # Binary output
 BINARY=misskey
@@ -399,12 +399,19 @@ apicompat-routes: build
 	mkdir -p $(dir $(APICOMPAT_ROUTES))
 	$(BUILD_DIR)/$(BINARY) -config $(APICOMPAT_CONFIG) -dump-routes -dump-routes-out $(APICOMPAT_ROUTES)
 
-# routes JSON + TS endpoints ディレクトリを comparator で突き合わせて matrix
-# を生成する。`apicompat-routes` を都度先に走らせて、stale な中間 JSON で
-# matrix を作らないようにする (`.PHONY` 効果で常に build + dump し直す)。
-apicompat: apicompat-routes
+# 既存 APICOMPAT_ROUTES JSON だけ comparator にかけて matrix を再生成する
+# (DB / Redis 接続不要)。matrix の format / category 表示を iterate する時に
+# 毎回 build + dump し直さなくて済むよう用意した escape hatch。前提として
+# `apicompat-routes` を最低一度走らせていること。
+apicompat-render:
 	go run ./tools/apicompat \
 		-ts-endpoints-dir $(APICOMPAT_TS_DIR) \
 		-mk-routes $(APICOMPAT_ROUTES) \
 		-out $(APICOMPAT_OUT)
 	@echo "wrote $(APICOMPAT_OUT)"
+
+# routes JSON + TS endpoints ディレクトリを comparator で突き合わせて matrix
+# を生成する。`apicompat-routes` を都度先に走らせて、stale な中間 JSON で
+# matrix を作らないようにする (`.PHONY` 効果で常に build + dump し直す)。
+# 反復 iterate で DB 接続を毎回避けたい場合は `apicompat-render` を使う。
+apicompat: apicompat-routes apicompat-render
