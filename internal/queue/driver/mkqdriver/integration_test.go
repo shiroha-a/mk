@@ -527,37 +527,32 @@ func TestInspector_RunTaskPromotesDelayed(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
-// TestInspector_GetQueueInfo_RetryReflectsFailedBucket verifies that the
-// Retry field surfaces the current failed bucket size (= retry-pending +
-// permanent failures). Without this the queueStats publisher's
-// Delayed = Scheduled + Retry calculation undercounts and admin/job-queue
-// graph stays stuck at 0 even when Errored Instances panel shows entries
-// (#1181).
+// TestInspector_GetQueueInfo_FailedReportedAsFailedNotRetry verifies the
+// post-#1187 semantic: SkipRetry / permanent failures land in the failed
+// bucket and are reported via `Failed`. They no longer leak into `Retry`
+// — Retry is reserved for delayed bucket entries with `atm > 0`.
 //
-// この test は SkipRetry sentinel で permanent fail のみ trigger する。
-// retry-backoff 待ち job も mkq では同じ failed bucket に集まる設計なので、
-// この path で「failed bucket size が Retry に流れる」ことが pin できれば
-// 両ケース (permanent / backoff) を同等に cover している。retry-backoff
-// で実 cycle を回す test は wait/active 遷移込みで flaky になりやすいので
-// 採用しない (= 設計上の前提を pin することで足りる)。長期的には mkq
-// 側に proper retry bucket が入る予定 (shiroha-a/mkq#64)。
-func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
+// 旧 #1181 fix では mkq の bucket 構造を「retry-backoff も failed bucket
+// に居る」と誤解して `Retry = counts.Failed` にしていたが、mkq#64 close
+// 時の upstream comment で訂正された (delayed bucket が両者を混在させて
+// いるのが正しい)。本 test は新 semantic を pin する (#1187)。
+func TestInspector_GetQueueInfo_FailedReportedAsFailedNotRetry(t *testing.T) {
 	d := newDriver(t)
 	srv := d.Server()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	srv.Handle("ins:fail-then-check", func(_ context.Context, _ driver.Task) error {
+	srv.Handle("ins:permanent-fail", func(_ context.Context, _ driver.Task) error {
 		defer wg.Done()
 		// SkipRetry sentinel = immediate failure into the failed bucket
-		// (mkq's ErrUnrecoverable). retry-backoff 経路を回さない fast path
-		// だが、行き着く bucket は両ケース共通。
+		// (mkq's ErrUnrecoverable). retry-backoff 経路を回さない fast
+		// path だが、行き着くのは failed bucket (= permanent failure)。
 		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
 	})
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Shutdown)
 
 	require.NoError(t, d.Client().Enqueue(context.Background(),
-		"ins:fail-then-check", nil,
+		"ins:permanent-fail", nil,
 		driver.WithQueue("deliver")))
 	if !waitGroupTimeout(&wg, 5*time.Second) {
 		t.Fatal("handler not invoked")
@@ -566,9 +561,104 @@ func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
 	ins := d.Inspector()
 	require.Eventually(t, func() bool {
 		info, err := ins.GetQueueInfo("deliver")
-		return err == nil && info.Retry >= 1 && info.Failed >= 1
+		return err == nil && info.Failed >= 1 && info.Retry == 0
 	}, 5*time.Second, 50*time.Millisecond,
-		"Retry should reflect failed bucket size (was hardcoded to 0)")
+		"permanent failure should land in Failed, not Retry (#1187)")
+}
+
+// TestInspector_GetQueueInfo_RetryReflectsDelayedAtmPositive verifies the
+// new semantic for the retry-backoff path: a delayed bucket entry with
+// `atm > 0` (= 過去に attempt 失敗して backoff 待ち) is surfaced as
+// `Retry` (= NOT `Scheduled`, NOT `Failed`) (#1187, mkq#64 close).
+//
+// driver level に backoff option が無いので、natural な retry cycle を
+// 回す代わりに WithProcessIn で初回 delayed に積んだ後 HSET で `atm` を
+// 直接 1 に書き換えて simulate する (white-box; mkq の HASH key 構造を
+// 既存 `TestEnqueue_MaxRetryAppliedToBullMQHash` と同じ手法で利用)。
+func TestInspector_GetQueueInfo_RetryReflectsDelayedAtmPositive(t *testing.T) {
+	d := newDriver(t)
+	ctx := context.Background()
+
+	require.NoError(t, d.Client().Enqueue(ctx,
+		"ins:retry-pending", nil,
+		driver.WithQueue("deliver"),
+		driver.WithProcessIn(time.Hour),
+	))
+
+	// 最新 job ID を `bull:<queue>:id` カウンタから取り、HASH の atm を
+	// 1 に上書きする (= mkq が retry-backoff で 1 度 attempt 済の状態を
+	// simulate)。
+	idStr, err := testRedis.Client.Get(ctx, "bull:deliver:id").Result()
+	require.NoError(t, err)
+	require.NoError(t, testRedis.Client.HSet(ctx, "bull:deliver:"+idStr, "atm", 1).Err())
+
+	ins := d.Inspector()
+	info, err := ins.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	assert.Equal(t, 1, info.Retry, "atm>0 delayed entry should be classified as Retry (#1187)")
+	assert.Equal(t, 0, info.Scheduled, "scheduled should not include atm>0 entries")
+	assert.Equal(t, 0, info.Failed, "failed bucket must remain untouched by retry-backoff entries")
+}
+
+// TestInspector_ListRetryTasks_FiltersDelayedAtmPositive verifies that
+// ListRetryTasks returns only delayed bucket entries with `atm > 0`
+// (= retry-backoff waiters), not the entire failed bucket. (#1187)
+func TestInspector_ListRetryTasks_FiltersDelayedAtmPositive(t *testing.T) {
+	d := newDriver(t)
+	ctx := context.Background()
+
+	// 2 件 enqueue (= 同じ atm=0 delayed)、片方だけ atm=1 に書き換え。
+	require.NoError(t, d.Client().Enqueue(ctx,
+		"ins:retry-A", nil,
+		driver.WithQueue("deliver"),
+		driver.WithProcessIn(time.Hour),
+	))
+	require.NoError(t, d.Client().Enqueue(ctx,
+		"ins:retry-B", nil,
+		driver.WithQueue("deliver"),
+		driver.WithProcessIn(time.Hour),
+	))
+
+	// `bull:deliver:id` は最新 ID を返すので、これが atm>0 にする方
+	// (= retry-B 想定)、もう片方 (= retry-A) は atm=0 のままで scheduled
+	// 扱い。
+	idB, err := testRedis.Client.Get(ctx, "bull:deliver:id").Result()
+	require.NoError(t, err)
+	require.NoError(t, testRedis.Client.HSet(ctx, "bull:deliver:"+idB, "atm", 1).Err())
+
+	ins := d.Inspector()
+	retry, err := ins.ListRetryTasks("deliver", 1, 30)
+	require.NoError(t, err)
+	require.Len(t, retry, 1, "only atm>0 entries should appear in ListRetryTasks")
+
+	scheduled, err := ins.ListScheduledTasks("deliver", 1, 30)
+	require.NoError(t, err)
+	require.Len(t, scheduled, 1, "atm=0 entry should be in ListScheduledTasks")
+}
+
+// TestInspector_ListScheduledTasks_FiltersDelayedAtmZero verifies that
+// ListScheduledTasks returns only delayed bucket entries with `atm == 0`
+// (= first-time scheduled, cron / WithProcessIn 等)、retry-backoff
+// (atm > 0) は ListRetryTasks 側に出る (#1187)。
+func TestInspector_ListScheduledTasks_FiltersDelayedAtmZero(t *testing.T) {
+	d := newDriver(t)
+
+	// WithProcessIn で delayed bucket に直接 enqueue (= 初回処理待ち、atm=0)。
+	require.NoError(t, d.Client().Enqueue(context.Background(),
+		"ins:list-scheduled", nil,
+		driver.WithQueue("deliver"),
+		driver.WithProcessIn(time.Hour),
+	))
+
+	ins := d.Inspector()
+	scheduled, err := ins.ListScheduledTasks("deliver", 1, 30)
+	require.NoError(t, err)
+	require.Len(t, scheduled, 1, "first-time scheduled (atm=0) entry should appear")
+
+	// 同時に retry path には居ないこと。
+	retry, err := ins.ListRetryTasks("deliver", 1, 30)
+	require.NoError(t, err)
+	assert.Empty(t, retry, "retry list must not contain atm=0 entries")
 }
 
 // TestClient_Enqueue_WithKeepFailed_BoundsFailedBucket verifies the
@@ -642,17 +732,20 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 	}
 
 	ins := d.Inspector()
-	// Wait until the job has landed in the failed bucket (= ListRetryTasks
-	// sees it through mkq's failed bucket).
+	ctx := context.Background()
+	// Wait until the job has landed in the failed bucket. failed bucket は
+	// 公開 list API には出ないので (#1187 で ListRetryTasks が delayed 専用
+	// に変わった)、raw Redis ZRANGE で task ID を取り出す。
 	var failedTaskID string
 	require.Eventually(t, func() bool {
-		rows, err := ins.ListRetryTasks("deliver", 1, 30)
-		if err != nil || len(rows) == 0 {
+		ids, err := testRedis.Client.ZRange(ctx, "bull:deliver:failed", 0, -1).Result()
+		if err != nil || len(ids) == 0 {
 			return false
 		}
-		failedTaskID = rows[0].ID
+		failedTaskID = ids[0]
 		return true
-	}, 5*time.Second, 50*time.Millisecond)
+	}, 5*time.Second, 50*time.Millisecond,
+		"job should have landed in the failed bucket")
 
 	// RunTask must succeed via RetryJob fallback even though the job is
 	// not in mkq's delayed bucket. asynq's parity contract: callers only
@@ -660,18 +753,17 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 	require.NoError(t, ins.RunTask("deliver", failedTaskID),
 		"RunTask should fall back to RetryJob for failed bucket jobs")
 
-	// After the fallback the failed bucket count drops by one. We assert
-	// the count rather than chasing the job through wait→active→failed
-	// again (the handler is still registered and will refail it), since
-	// the contract under test is just "RunTask did not error and the job
-	// left the failed bucket".
+	// After the fallback the failed bucket loses this job (= ZRANGE no
+	// longer contains it). We assert at the bucket level rather than
+	// chasing the job through wait→active→failed again (the handler is
+	// still registered and will refail it).
 	require.Eventually(t, func() bool {
-		rows, err := ins.ListRetryTasks("deliver", 1, 30)
+		ids, err := testRedis.Client.ZRange(ctx, "bull:deliver:failed", 0, -1).Result()
 		if err != nil {
 			return false
 		}
-		for _, r := range rows {
-			if r.ID == failedTaskID {
+		for _, id := range ids {
+			if id == failedTaskID {
 				return false // still in failed bucket
 			}
 		}

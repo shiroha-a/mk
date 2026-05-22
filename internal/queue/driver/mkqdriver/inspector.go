@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/shiroha-a/mkq"
 
@@ -32,19 +33,27 @@ func (i *Inspector) Queues() ([]string, error) {
 // failed counters for the named queue. Pending maps to mkq's wait
 // bucket (asynq's pending semantics).
 //
-// Retry semantics: mkq には asynq の Retry bucket に直接対応する独立 bucket
-// が存在せず、retry-backoff 待ちの job は failed bucket に居続け、次の
-// retry 時刻になって delayed bucket に移動する設計 (= `ListRetryTasks` も
-// failed bucket を読む)。よって driver level では Retry = failed bucket
-// size として asynq semantic に揃える。
+// Retry / Scheduled semantics: mkq の delayed bucket は scheduled
+// (cron / 初回 delayed enqueue) と retry-backoff 待ち (= 失敗して次の
+// 試行待ち) が **混在** している (BullMQ 同等。mkq#64 close 時の
+// upstream comment で確認)。両者を区別するため driver 側で delayed
+// bucket を `atm` (= attemptsMade、BullMQ HASH field) で filter し、
+// `atm == 0` を Scheduled / `atm > 0` を Retry にマッピングする。
+// `failed` bucket は permanent failure (= dead letter) のみで Retry には
+// 含めない。これにより asynq semantic と完全一致する (#1187):
 //
-// 副作用として Retry と Failed が同値になるが、これは mkq library が
-// 「retry-pending」と「permanent failure」を区別する bucket を持たない
-// limitation 由来。frontend (admin/job-queue.vue) は両方とも current size
-// を見れば十分なので影響は無い。BullMQ や asynq の semantic と完全一致
-// させるには mkq 自体に retry bucket を追加する必要があり、upstream に
-// 提案済 (shiroha-a/mkq#64)。それが land すれば本 driver も両 counter を
-// 区別して報告できるようになる。
+//	asynq.Scheduled = delayed[atm==0] + repeat ZSET
+//	asynq.Retry     = delayed[atm>0]
+//	asynq.Failed    = failed bucket size
+//
+// cost: delayed bucket 全件 ListJobs (ZRANGE + N×HGETALL pipeline) が
+// publisher の 3 秒間隔で走る。通常 < 100 件で問題なし、federation 障害
+// 時の数千件でも admin polling として許容。将来必要なら Lua count-only
+// API を mkq に proposal する余地あり。
+//
+// fallback: delayed split が失敗したら保守的に旧挙動 (delayed 全体を
+// Scheduled、Retry=0) に倒す。panel 表示は救う方が優先 (= 全部 error 返し
+// にすると graph が真っ白になる)。
 func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	q := i.driver.queueFor(qname)
 	if q == nil {
@@ -62,21 +71,22 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	// ZCARD 失敗は致命ではないので 0 として扱い、queue 全体を error
 	// 返却にしない (Counts が成功した時点で UI 表示は救う方を優先)。
 	repeatCount, _ := i.driver.rdb.ZCard(inspectorCtx(), i.driver.repeatKey(qname)).Result()
+
+	// delayed bucket を atm で split (#1187、mkq#64 close 時の手法)。
+	scheduledCount, retryCount, err := i.countDelayedByAttempts(q)
+	if err != nil {
+		slog.Warn("mkqdriver: failed to split delayed bucket by atm, falling back",
+			"queue", qname, "err", err)
+		scheduledCount = int(counts.Delayed)
+		retryCount = 0
+	}
+
 	// Size mirrors asynq.QueueInfo.Size:
 	//   "sum of Pending, Active, Scheduled, Retry, Aggregating and Archived"
 	// — explicitly excluding Completed (asynq treats stored completed
-	// tasks as retention storage, not queue residents).
-	//
-	// mkq → asynq bucket map:
-	//   wait        ↔ pending
-	//   active      ↔ active
-	//   delayed     ↔ scheduled (+ repeat ZSET, mk-go addition)
-	//   prioritized ↔ pending (asynq has no prioritized bucket)
-	//   failed      ↔ archived (stored failed jobs)
-	//
-	// completed / paused は asynq Size に含まれないので除外する。
-	// 含めると admin UI の queue size が driver 切替で大きく変動する。
-	scheduled := int(counts.Delayed) + int(repeatCount)
+	// tasks as retention storage, not queue residents). 旧実装と同様、
+	// delayed 全体 + failed bucket + repeat を入れる (= 内訳が変わっても
+	// 合計値は不変)。
 	return &driver.InspectorInfo{
 		Queue:     qname,
 		Size:      int(counts.Wait+counts.Active+counts.Delayed+counts.Prioritized+counts.Failed) + int(repeatCount),
@@ -84,14 +94,31 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 		Pending:   int(counts.Wait),
 		Completed: int(counts.Completed),
 		Failed:    int(counts.Failed),
-		Scheduled: scheduled,
-		// Retry = failed bucket current size。mkq では retry-backoff 待ち
-		// が failed bucket に居る ため、stream/queue_stats_publisher の
-		// `Delayed = Scheduled + Retry` 計算で正しく retry 待ち分が graph
-		// に乗るようになる。Failed と同値になる semantic limitation は
-		// 関数 doc 冒頭で説明済 (#1181)。
-		Retry: int(counts.Failed),
+		Scheduled: scheduledCount + int(repeatCount),
+		Retry:     retryCount,
 	}, nil
+}
+
+// countDelayedByAttempts inspects mkq's delayed bucket and partitions
+// entries by `atm` (= attemptsMade): atm == 0 → scheduled, atm > 0 →
+// retry-backoff. 戻り値は (scheduled, retry, err) のカウント (#1187)。
+//
+// delayed bucket は ZSET-backed なので 全件取り直しでも score 順に並ぶ。
+// fetch cost は ZRANGE 1 + HGETALL N pipeline で、publisher 3 秒間隔の
+// admin polling として許容範囲。
+func (i *Inspector) countDelayedByAttempts(q *mkq.Queue[framedPayload]) (scheduled int, retry int, err error) {
+	listed, err := q.ListJobs(inspectorCtx(), mkq.JobBucketDelayed, 0, -1, true)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, lj := range listed {
+		if lj.Job != nil && lj.Job.AttemptsMade > 0 {
+			retry++
+		} else {
+			scheduled++
+		}
+	}
+	return scheduled, retry, nil
 }
 
 // QueueMetrics returns BullMQ-compatible per-minute completed /
@@ -163,8 +190,13 @@ func (i *Inspector) DeleteAllPendingTasks(qname string) (int, error) {
 //
 // よって PromoteJob を先に試し、delayed 状態でなければ RetryJob に
 // fallback する。これで「Retry all queues now」(admin/queue/promote-jobs)
-// が failed bucket に居る retry-backoff 待ち job も含めて promote できる
-// ようになる (#1181)。
+// が **delayed bucket (= scheduled + retry-backoff 待ち) と failed bucket
+// (= permanent failure)** どちらの job も含めて promote できる (#1181)。
+//
+// 注意: #1187 以前は「retry-backoff は failed bucket に居る」と説明して
+// いたが事実誤認。mkq の delayed bucket が両者を混在させている (#1187 で
+// 訂正)。fallback ロジック自体は不変で、両 API を試すので両 bucket を
+// 覆える。
 //
 // 両 path で job が見つからなかった場合は最初の (PromoteJob の) error を
 // そのまま返す。job が wait や active など別 bucket に既に居る場合も
@@ -204,16 +236,66 @@ func (i *Inspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver
 	return i.list(qname, mkq.JobBucketActive, page, pageSize)
 }
 
-// ListScheduledTasks returns up to pageSize delayed (scheduled) tasks.
+// ListScheduledTasks returns up to pageSize tasks scheduled for first-time
+// processing (= delayed bucket entries with `atm == 0`). cron / 初回
+// delayed enqueue 等が含まれる。retry-backoff 待ち (= `atm > 0`) は
+// `ListRetryTasks` 側に出る (#1187)。
 func (i *Inspector) ListScheduledTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
-	return i.list(qname, mkq.JobBucketDelayed, page, pageSize)
+	return i.listDelayedFiltered(qname, false /* want atm == 0 */, page, pageSize)
 }
 
-// ListRetryTasks returns up to pageSize tasks waiting to be retried.
-// mkq keeps retries inside the failed bucket; expose those here so
-// admin UIs can show "retry" as a separate tab rather than empty.
+// ListRetryTasks returns up to pageSize tasks waiting for a retry attempt
+// (= delayed bucket entries with `atm > 0`). mkq の delayed bucket は
+// scheduled (cron 等) と retry-backoff 待ちが混在しており、後者だけを
+// 抽出して admin UI の Retry tab に出す (#1187、mkq#64 close 時の手法)。
+// permanent failure (= dead letter) は failed bucket に居て本 list には
+// 含まれない。
 func (i *Inspector) ListRetryTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
-	return i.list(qname, mkq.JobBucketFailed, page, pageSize)
+	return i.listDelayedFiltered(qname, true /* want atm > 0 */, page, pageSize)
+}
+
+// listDelayedFiltered fetches the delayed bucket in full, filters by
+// `atm` (= attemptsMade) according to retry, and applies page/pageSize
+// in Go. Pagination is post-filter so callers see consistent counts.
+func (i *Inspector) listDelayedFiltered(qname string, retry bool, page, pageSize int) ([]*driver.TaskSummary, error) {
+	q := i.driver.queueFor(qname)
+	if q == nil {
+		return nil, fmt.Errorf("mkqdriver: unknown queue %q", qname)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 30
+	}
+	listed, err := q.ListJobs(inspectorCtx(), mkq.JobBucketDelayed, 0, -1, true)
+	if err != nil {
+		return nil, fmt.Errorf("mkqdriver: list delayed %s: %w", qname, err)
+	}
+	// filter で集めた後 page/pageSize で slice する。post-filter pagination
+	// なので「Retry に 5 件出ているはずだが page 1 が空」のような不整合が
+	// 起きない。
+	filtered := make([]*driver.TaskSummary, 0, len(listed))
+	for _, lj := range listed {
+		hasAttempts := lj.Job != nil && lj.Job.AttemptsMade > 0
+		if hasAttempts != retry {
+			continue
+		}
+		summary := jobToSummary(qname, string(mkq.JobBucketDelayed), lj.Job, lj.State)
+		if summary == nil {
+			continue
+		}
+		filtered = append(filtered, summary)
+	}
+	start := (page - 1) * pageSize
+	if start >= len(filtered) {
+		return []*driver.TaskSummary{}, nil
+	}
+	end := start + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[start:end], nil
 }
 
 // GetTaskInfo returns the full snapshot for a single task. The
