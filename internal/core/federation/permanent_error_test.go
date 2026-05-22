@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIsPermanentResolveError(t *testing.T) {
+func TestIsPermanentSkipError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
