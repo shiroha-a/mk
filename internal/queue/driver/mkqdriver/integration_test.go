@@ -533,6 +533,14 @@ func TestInspector_RunTaskPromotesDelayed(t *testing.T) {
 // Delayed = Scheduled + Retry calculation undercounts and admin/job-queue
 // graph stays stuck at 0 even when Errored Instances panel shows entries
 // (#1181).
+//
+// この test は SkipRetry sentinel で permanent fail のみ trigger する。
+// retry-backoff 待ち job も mkq では同じ failed bucket に集まる設計なので、
+// この path で「failed bucket size が Retry に流れる」ことが pin できれば
+// 両ケース (permanent / backoff) を同等に cover している。retry-backoff
+// で実 cycle を回す test は wait/active 遷移込みで flaky になりやすいので
+// 採用しない (= 設計上の前提を pin することで足りる)。長期的には mkq
+// 側に proper retry bucket が入る予定 (shiroha-a/mkq#64)。
 func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
 	d := newDriver(t)
 	srv := d.Server()
@@ -541,9 +549,8 @@ func TestInspector_GetQueueInfo_RetryReflectsFailedBucket(t *testing.T) {
 	srv.Handle("ins:fail-then-check", func(_ context.Context, _ driver.Task) error {
 		defer wg.Done()
 		// SkipRetry sentinel = immediate failure into the failed bucket
-		// (mkq's ErrUnrecoverable). No backoff retry path involved, but
-		// the resulting bucket position is the same one retry-pending
-		// jobs occupy in mkq.
+		// (mkq's ErrUnrecoverable). retry-backoff 経路を回さない fast path
+		// だが、行き着く bucket は両ケース共通。
 		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
 	})
 	require.NoError(t, srv.Start())

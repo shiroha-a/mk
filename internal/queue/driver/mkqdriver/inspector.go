@@ -42,7 +42,9 @@ func (i *Inspector) Queues() ([]string, error) {
 // 「retry-pending」と「permanent failure」を区別する bucket を持たない
 // limitation 由来。frontend (admin/job-queue.vue) は両方とも current size
 // を見れば十分なので影響は無い。BullMQ や asynq の semantic と完全一致
-// させるには mkq 自体に retry bucket を追加する別 PR が必要 (#1181)。
+// させるには mkq 自体に retry bucket を追加する必要があり、upstream に
+// 提案済 (shiroha-a/mkq#64)。それが land すれば本 driver も両 counter を
+// 区別して報告できるようになる。
 func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	q := i.driver.queueFor(qname)
 	if q == nil {
@@ -167,6 +169,14 @@ func (i *Inspector) DeleteAllPendingTasks(qname string) (int, error) {
 // 両 path で job が見つからなかった場合は最初の (PromoteJob の) error を
 // そのまま返す。job が wait や active など別 bucket に既に居る場合も
 // 同様に PromoteJob の error が caller に届く。
+//
+// semantic 差の注記: mkq の `RetryJob` は default で attempt 数 (`atm` /
+// `ats` BullMQ HASH counter) を 0 リセットする (`WithResetAttempts(true)`
+// 相当)。asynq の `Inspector.RunTask` は attempt 数を保持するので、
+// failed bucket path では mkq 側が「fresh start」semantic で、asynq 側が
+// 「resume with same attempts」semantic、という違いがある。admin の
+// 「Retry all queues now」の運用としては、operator が手動で promote した
+// 時点で fresh start が直感的なので、この semantic 差は意図通り。
 func (i *Inspector) RunTask(qname, taskID string) error {
 	q := i.driver.queueFor(qname)
 	if q == nil {
