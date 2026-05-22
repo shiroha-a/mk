@@ -562,11 +562,13 @@ func (h *Handler) Usage(c echo.Context) error {
 func (h *Handler) FilesList(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit    int     `json:"limit"`
-		SinceID  string  `json:"sinceId"`
-		UntilID  string  `json:"untilId"`
-		FolderID *string `json:"folderId"`
-		Type     string  `json:"type"`
+		Limit     int     `json:"limit"`
+		SinceID   string  `json:"sinceId"`
+		UntilID   string  `json:"untilId"`
+		SinceDate *int64  `json:"sinceDate"`
+		UntilDate *int64  `json:"untilDate"`
+		FolderID  *string `json:"folderId"`
+		Type      string  `json:"type"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
@@ -577,7 +579,9 @@ func (h *Handler) FilesList(c echo.Context) error {
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	files, err := h.fileRepo.ListByUser(user.ID, req.FolderID, req.UntilID, req.SinceID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	files, err := h.fileRepo.ListByUser(user.ID, req.FolderID, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -637,10 +641,12 @@ func (h *Handler) FilesCheckExistence(c echo.Context) error {
 // 出ていた (#488)。
 func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	var req struct {
-		FileID  string `json:"fileId"`
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		FileID    string `json:"fileId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.FileID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -649,7 +655,9 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	if h.noteRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	notes, err := h.noteRepo.ListByFileID(req.FileID, req.SinceID, req.UntilID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.noteRepo.ListByFileID(req.FileID, sinceID, untilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -691,10 +699,12 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 func (h *Handler) Stream(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
-		Type    string `json:"type"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		Type      string `json:"type"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
@@ -705,7 +715,9 @@ func (h *Handler) Stream(c echo.Context) error {
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	files, err := h.fileRepo.ListByUser(user.ID, nil, req.UntilID, req.SinceID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	files, err := h.fileRepo.ListByUser(user.ID, nil, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -720,10 +732,12 @@ func (h *Handler) Stream(c echo.Context) error {
 func (h *Handler) FoldersList(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit    int     `json:"limit"`
-		SinceID  string  `json:"sinceId"`
-		UntilID  string  `json:"untilId"`
-		FolderID *string `json:"folderId"`
+		Limit     int     `json:"limit"`
+		SinceID   string  `json:"sinceId"`
+		UntilID   string  `json:"untilId"`
+		SinceDate *int64  `json:"sinceDate"`
+		UntilDate *int64  `json:"untilDate"`
+		FolderID  *string `json:"folderId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
@@ -734,7 +748,9 @@ func (h *Handler) FoldersList(c echo.Context) error {
 	if h.folderRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	folders, err := h.folderRepo.ListByUser(user.ID, req.FolderID, req.UntilID, req.SinceID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	folders, err := h.folderRepo.ListByUser(user.ID, req.FolderID, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -236,18 +237,22 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	var req struct {
-		Query   string `json:"query"`
-		Host    string `json:"host"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
+		Query     string `json:"query"`
+		Host      string `json:"host"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
 	}
 	_ = c.Bind(&req)
 	if req.Limit <= 0 || req.Limit > 100 {
 		req.Limit = 30
 	}
-	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, req.Host, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, req.Host, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

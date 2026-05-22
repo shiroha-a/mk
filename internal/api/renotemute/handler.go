@@ -77,10 +77,12 @@ func (h *Handler) Delete(c echo.Context) error {
 
 // ListRequest is the body for renote-mute/list.
 type ListRequest struct {
-	Limit   int    `json:"limit"`
-	Offset  int    `json:"offset"`
-	SinceID string `json:"sinceId"`
-	UntilID string `json:"untilId"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
 }
 
 // List handles POST /api/renote-mute/list.
@@ -99,7 +101,9 @@ func (h *Handler) List(c echo.Context) error {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
-	rows, err := h.svc.List(user.ID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	rows, err := h.svc.List(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

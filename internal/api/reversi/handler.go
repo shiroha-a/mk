@@ -211,10 +211,12 @@ func (h *Handler) resolveAcct(acct string) (string, error) {
 // ページを繰り返しロードするので必須 (#417 P1 UDS 検証で発覚)。
 func (h *Handler) Games(c echo.Context) error {
 	var req struct {
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
-		My      bool   `json:"my"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		My        bool   `json:"my"`
 	}
 	_ = c.Bind(&req)
 	if req.Limit <= 0 {
@@ -223,12 +225,14 @@ func (h *Handler) Games(c echo.Context) error {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
 	var games []*model.ReversiGame
 	if req.My && viewer != nil {
-		games, _ = h.repo.ListByUserCursor(viewer.ID, req.SinceID, req.UntilID, req.Limit)
+		games, _ = h.repo.ListByUserCursor(viewer.ID, sinceID, untilID, req.Limit)
 	} else {
-		games, _ = h.repo.ListStartedCursor(req.SinceID, req.UntilID, req.Limit)
+		games, _ = h.repo.ListStartedCursor(sinceID, untilID, req.Limit)
 	}
 	out := make([]map[string]any, len(games))
 	for i, g := range games {

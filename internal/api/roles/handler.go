@@ -141,10 +141,12 @@ func (h *Handler) Users(c echo.Context) error {
 // Notes handles POST /api/roles/notes.
 func (h *Handler) Notes(c echo.Context) error {
 	var req struct {
-		RoleID  string `json:"roleId"`
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		RoleID    string `json:"roleId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -170,7 +172,9 @@ func (h *Handler) Notes(c echo.Context) error {
 		limit = 100
 	}
 
-	notes, err := h.notesQuery.ListByRole(req.RoleID, limit, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.notesQuery.ListByRole(req.RoleID, limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

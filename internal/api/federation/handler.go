@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -61,6 +62,8 @@ type InstancesRequest struct {
 	Offset        int    `json:"offset"`
 	SinceID       string `json:"sinceId"`
 	UntilID       string `json:"untilId"`
+	SinceDate     *int64 `json:"sinceDate"`
+	UntilDate     *int64 `json:"untilDate"`
 }
 
 // Instances handles POST /api/federation/instances.
@@ -71,6 +74,8 @@ func (h *Handler) Instances(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	filter := model.InstanceListFilter{
 		Host:          req.Host,
 		Suspended:     req.Suspended,
@@ -81,8 +86,8 @@ func (h *Handler) Instances(c echo.Context) error {
 		SortBy:        req.Sort,
 		Limit:         req.Limit,
 		Offset:        req.Offset,
-		SinceID:       req.SinceID,
-		UntilID:       req.UntilID,
+		SinceID:       sinceID,
+		UntilID:       untilID,
 	}
 	rows, err := h.svc.List(filter)
 	if err != nil {

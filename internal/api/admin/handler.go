@@ -1560,10 +1560,12 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 // RolesUsers handles POST /api/admin/roles/users.
 func (h *Handler) RolesUsers(c echo.Context) error {
 	var req struct {
-		RoleID  string `json:"roleId"`
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		RoleID    string `json:"roleId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1575,8 +1577,10 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 	if limit > 100 {
 		limit = 100
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
-	assignments, err := h.roleService.ListByRole(req.RoleID, req.UntilID, req.SinceID, limit)
+	assignments, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
 		if err == role.ErrRoleNotFound {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
@@ -1822,12 +1826,14 @@ func (h *Handler) EmojiDelete(c echo.Context) error {
 // EmojiList handles POST /api/admin/emoji/list.
 func (h *Handler) EmojiList(c echo.Context) error {
 	var req struct {
-		Query    string `json:"query"`
-		Category string `json:"category"`
-		SinceID  string `json:"sinceId"`
-		UntilID  string `json:"untilId"`
-		Limit    int    `json:"limit"`
-		Offset   int    `json:"offset"`
+		Query     string `json:"query"`
+		Category  string `json:"category"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1835,7 +1841,9 @@ func (h *Handler) EmojiList(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	emojis, err := h.emojiRepo.ListWithFilter(req.Query, req.Category, true, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	emojis, err := h.emojiRepo.ListWithFilter(req.Query, req.Category, true, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -1846,12 +1854,14 @@ func (h *Handler) EmojiList(c echo.Context) error {
 // Returns an object with pagination info (allCount, allPages) instead of a plain array.
 func (h *Handler) EmojiListV2(c echo.Context) error {
 	var req struct {
-		Query    *emojiV2QueryReq `json:"query"`
-		SinceID  string           `json:"sinceId"`
-		UntilID  string           `json:"untilId"`
-		Limit    int              `json:"limit"`
-		Page     int              `json:"page"`
-		SortKeys []string         `json:"sortKeys"`
+		Query     *emojiV2QueryReq `json:"query"`
+		SinceID   string           `json:"sinceId"`
+		UntilID   string           `json:"untilId"`
+		SinceDate *int64           `json:"sinceDate"`
+		UntilDate *int64           `json:"untilDate"`
+		Limit     int              `json:"limit"`
+		Page      int              `json:"page"`
+		SortKeys  []string         `json:"sortKeys"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1873,9 +1883,11 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		limit = 100
 	}
 
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	filter := model.EmojiV2Filter{
-		SinceID:  req.SinceID,
-		UntilID:  req.UntilID,
+		SinceID:  sinceID,
+		UntilID:  untilID,
 		Limit:    limit,
 		Page:     req.Page,
 		SortKeys: req.SortKeys,

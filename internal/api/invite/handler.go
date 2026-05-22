@@ -107,13 +107,17 @@ func (h *Handler) Create(c echo.Context) error {
 func (h *Handler) List(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit   int    `json:"limit"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	_ = c.Bind(&req)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
-	tickets, err := h.repo.ListByCreator(user.ID, req.SinceID, req.UntilID, req.Limit)
+	tickets, err := h.repo.ListByCreator(user.ID, sinceID, untilID, req.Limit)
 	if err != nil {
 		// upstream は handler 内で DB error を listing 404 相当ではなく empty
 		// array で返している。caller (frontend invite 管理画面) は array length

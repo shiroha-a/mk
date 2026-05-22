@@ -98,11 +98,13 @@ func (h *Handler) logAnnouncementAction(c echo.Context, globalType, userType mod
 // List handles POST /api/announcements.
 func (h *Handler) List(c echo.Context) error {
 	var req struct {
-		Limit    int    `json:"limit"`
-		Offset   int    `json:"offset"`
-		SinceID  string `json:"sinceId"`
-		UntilID  string `json:"untilId"`
-		IsActive *bool  `json:"isActive"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		IsActive  *bool  `json:"isActive"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -111,6 +113,8 @@ func (h *Handler) List(c echo.Context) error {
 	if req.IsActive != nil {
 		activeOnly = *req.IsActive
 	}
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// 認証ユーザーがいればper-user announcementの対象を自分に限定した
 	// ListForUserを使い、他ユーザー宛のannouncementを除外する。未認証は
 	// ListGlobal(userId IS NULLのみ)を使い、targetedなannouncementを
@@ -119,9 +123,9 @@ func (h *Handler) List(c echo.Context) error {
 	var items []*model.Announcement
 	var err error
 	if user != nil {
-		items, err = h.repo.ListForUser(user.ID, activeOnly, req.Limit, req.Offset, req.SinceID, req.UntilID)
+		items, err = h.repo.ListForUser(user.ID, activeOnly, req.Limit, req.Offset, sinceID, untilID)
 	} else {
-		items, err = h.repo.ListGlobal(activeOnly, req.Limit, req.Offset, req.SinceID, req.UntilID)
+		items, err = h.repo.ListGlobal(activeOnly, req.Limit, req.Offset, sinceID, untilID)
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -393,17 +397,21 @@ func (h *Handler) AdminDelete(c echo.Context) error {
 //   - Each row carries a reads count (announcement_read row count).
 func (h *Handler) AdminList(c echo.Context) error {
 	var req struct {
-		Limit   int    `json:"limit"`
-		Offset  int    `json:"offset"`
-		SinceID string `json:"sinceId"`
-		UntilID string `json:"untilId"`
-		UserID  string `json:"userId"`
-		Status  string `json:"status"`
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		UserID    string `json:"userId"`
+		Status    string `json:"status"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	items, err := h.repo.ListForAdmin(req.UserID, req.Status, req.Limit, req.Offset, req.SinceID, req.UntilID)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	items, err := h.repo.ListForAdmin(req.UserID, req.Status, req.Limit, req.Offset, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
