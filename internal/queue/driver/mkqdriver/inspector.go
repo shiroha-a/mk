@@ -73,7 +73,7 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	repeatCount, _ := i.driver.rdb.ZCard(inspectorCtx(), i.driver.repeatKey(qname)).Result()
 
 	// delayed bucket を atm で split (#1187、mkq#64 close 時の手法)。
-	scheduledCount, retryCount, err := i.countDelayedByAttempts(q)
+	scheduledCount, retryCount, err := i.partitionDelayedByAttempts(q)
 	if err != nil {
 		slog.Warn("mkqdriver: failed to split delayed bucket by atm, falling back",
 			"queue", qname, "err", err)
@@ -85,8 +85,11 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	//   "sum of Pending, Active, Scheduled, Retry, Aggregating and Archived"
 	// — explicitly excluding Completed (asynq treats stored completed
 	// tasks as retention storage, not queue residents). 旧実装と同様、
-	// delayed 全体 + failed bucket + repeat を入れる (= 内訳が変わっても
-	// 合計値は不変)。
+	// delayed 全体 + failed bucket + repeat を入れる。
+	//
+	// #1187 で内訳が変わったが合計値は不変: scheduledCount + retryCount ==
+	// counts.Delayed (= 同じ delayed bucket を partition しただけ) なので、
+	// Size 計算では partition 前の counts.Delayed をそのまま使える。
 	return &driver.InspectorInfo{
 		Queue:     qname,
 		Size:      int(counts.Wait+counts.Active+counts.Delayed+counts.Prioritized+counts.Failed) + int(repeatCount),
@@ -99,14 +102,18 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	}, nil
 }
 
-// countDelayedByAttempts inspects mkq's delayed bucket and partitions
-// entries by `atm` (= attemptsMade): atm == 0 → scheduled, atm > 0 →
-// retry-backoff. 戻り値は (scheduled, retry, err) のカウント (#1187)。
+// partitionDelayedByAttempts inspects mkq's delayed bucket and partitions
+// entries into two counts by `atm` (= attemptsMade):
+//
+//   - atm == 0 → scheduled (cron / 初回 delayed enqueue)
+//   - atm > 0  → retry-backoff (= 失敗して次の試行待ち)
+//
+// 戻り値は (scheduled, retry, err) (#1187)。
 //
 // delayed bucket は ZSET-backed なので 全件取り直しでも score 順に並ぶ。
 // fetch cost は ZRANGE 1 + HGETALL N pipeline で、publisher 3 秒間隔の
 // admin polling として許容範囲。
-func (i *Inspector) countDelayedByAttempts(q *mkq.Queue[framedPayload]) (scheduled int, retry int, err error) {
+func (i *Inspector) partitionDelayedByAttempts(q *mkq.Queue[framedPayload]) (scheduled int, retry int, err error) {
 	listed, err := q.ListJobs(inspectorCtx(), mkq.JobBucketDelayed, 0, -1, true)
 	if err != nil {
 		return 0, 0, err
