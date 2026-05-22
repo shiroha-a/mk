@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,6 +26,8 @@ const healthcheckTimeout = 3 * time.Second
 func main() {
 	configPath := flag.String("config", ".config/default.yml", "path to configuration file")
 	healthcheckMode := flag.Bool("healthcheck", false, "perform a healthcheck (GET /healthz against the configured port) and exit 0/1")
+	dumpRoutes := flag.Bool("dump-routes", false, "construct the server, dump registered HTTP routes as JSON, and exit (no listener started)")
+	dumpRoutesOut := flag.String("dump-routes-out", "", "path to write -dump-routes JSON to; defaults to stdout. recommended to use a file so gorm/slog noise on stdout/stderr doesn't pollute the JSON consumer")
 	flag.Parse()
 
 	if *healthcheckMode {
@@ -32,7 +35,13 @@ func main() {
 	}
 
 	// ロガーの初期化
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	// --dump-routes 時は stdout に JSON だけを出したいので、log は stderr に
+	// 向ける (通常起動時は既存挙動に揃えて stdout)。
+	logOut := io.Writer(os.Stdout)
+	if *dumpRoutes {
+		logOut = os.Stderr
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
@@ -45,23 +54,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// pidFile が設定されていれば PID を書き込み、終了時に削除する。
-	// 既存ファイルが生存中の他プロセスを指す場合は ErrAlreadyRunning で
-	// 起動を拒否して二重起動を防ぐ (#497)。
-	cleanupPid, err := server.WritePidFile(cfg.PidFile)
-	if err != nil {
-		slog.Error("failed to write pid file", "error", err)
-		os.Exit(1)
-	}
-	defer cleanupPid()
+	// --dump-routes は同じ config を共有する running instance と pid file /
+	// Sentry init が衝突するので、これらを skip する。dump 後 exit するので
+	// graceful shutdown 系の wiring も不要。
+	if !*dumpRoutes {
+		// pidFile が設定されていれば PID を書き込み、終了時に削除する。
+		// 既存ファイルが生存中の他プロセスを指す場合は ErrAlreadyRunning で
+		// 起動を拒否して二重起動を防ぐ (#497)。
+		cleanupPid, err := server.WritePidFile(cfg.PidFile)
+		if err != nil {
+			slog.Error("failed to write pid file", "error", err)
+			os.Exit(1)
+		}
+		defer cleanupPid()
 
-	// Sentry init は他のサービスより前に走らせ、以降の起動エラーも捕捉対象にする。
-	flushSentry, err := mksentry.Init(cfg)
-	if err != nil {
-		slog.Error("failed to init sentry", "error", err)
-		os.Exit(1)
+		// Sentry init は他のサービスより前に走らせ、以降の起動エラーも捕捉対象にする。
+		flushSentry, err := mksentry.Init(cfg)
+		if err != nil {
+			slog.Error("failed to init sentry", "error", err)
+			os.Exit(1)
+		}
+		defer flushSentry()
 	}
-	defer flushSentry()
 
 	// DB接続
 	db, err := model.NewDatabase(cfg)
@@ -83,6 +97,28 @@ func main() {
 	if err != nil {
 		slog.Error("failed to construct server", "error", err)
 		os.Exit(1)
+	}
+
+	// --dump-routes: listener bind 前に echo の登録済 route 一覧を JSON で
+	// stdout に流して exit する。tools/apicompat が Misskey TS api.json と
+	// 突き合わせるための入力。DB/Redis 接続は handler 構築 (auth middleware の
+	// repo wiring 等) で必須なので、ここまで実行してから dump する。
+	if *dumpRoutes {
+		out := io.Writer(os.Stdout)
+		if *dumpRoutesOut != "" {
+			f, err := os.Create(*dumpRoutesOut)
+			if err != nil {
+				slog.Error("failed to open dump-routes output", "path", *dumpRoutesOut, "error", err)
+				os.Exit(1)
+			}
+			defer f.Close()
+			out = f
+		}
+		if err := srv.DumpRoutes(out); err != nil {
+			slog.Error("failed to dump routes", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Graceful shutdown

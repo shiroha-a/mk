@@ -3,11 +3,14 @@ package server
 import (
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -244,6 +247,46 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 // E2Eテスト等でサーバーを外部から起動する場合に使う���
 func (s *Server) Handler() http.Handler {
 	return s.echo
+}
+
+// DumpedRoute represents a single registered Echo route, used by DumpRoutes
+// to expose mk-go's HTTP surface for tooling (api-compat matrix etc).
+type DumpedRoute struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// DumpedRoutes is the JSON payload emitted by DumpRoutes.
+type DumpedRoutes struct {
+	MisskeyVersion string        `json:"misskeyVersion"`
+	MkGoVersion    string        `json:"mkGoVersion"`
+	Routes         []DumpedRoute `json:"routes"`
+}
+
+// DumpRoutes writes all registered Echo routes as JSON to w.
+// `cmd/misskey -dump-routes` から呼ばれ、tools/apicompat が Misskey TS の
+// api.json と突き合わせる ための入力になる。echo 内部の "/*" catch-all 等は
+// 除外しない (caller 側で正規化する想定)。出力 path は string sort で安定化。
+func (s *Server) DumpRoutes(w io.Writer) error {
+	routes := s.echo.Routes()
+	dumped := make([]DumpedRoute, 0, len(routes))
+	for _, r := range routes {
+		dumped = append(dumped, DumpedRoute{Method: r.Method, Path: r.Path})
+	}
+	sort.Slice(dumped, func(i, j int) bool {
+		if dumped[i].Path != dumped[j].Path {
+			return dumped[i].Path < dumped[j].Path
+		}
+		return dumped[i].Method < dumped[j].Method
+	})
+	payload := DumpedRoutes{
+		MisskeyVersion: config.MisskeyVersion,
+		MkGoVersion:    config.MkGoVersion,
+		Routes:         dumped,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
 }
 
 // StartBackgroundForTest starts the asynq queue worker (and optional
