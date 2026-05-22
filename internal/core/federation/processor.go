@@ -294,6 +294,16 @@ type genericActivity struct {
 // retried inbox jobs will produce duplicate side effects (notifications
 // fired twice, counters double-incremented, etc).
 func (p *Processor) Process(body []byte) error {
+	// Foundkey 系 fork instance は valid な AS Activity を 1 要素 JSON
+	// array で wrap して送信してくるケースがある (#1185)。AS 仕様上
+	// inbox direct POST は object 前提なので、array が来た時は剥がして
+	// 中身を処理する。2+ 要素は AS spec 外として no-op で素通し。
+	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
+		slog.Info("federation: unwrapping singleton JSON array activity (Foundkey-style)",
+			"originalSize", len(body), "unwrappedSize", len(unwrapped))
+		body = unwrapped
+	}
+
 	normalized, err := activitypub.Normalize(body)
 	if err != nil {
 		return fmt.Errorf("invalid activity json: %w", err)

@@ -458,6 +458,49 @@ func TestProcess_AnnounceIncrementsRenoteCount(t *testing.T) {
 
 // --- Delete ------------------------------------------------------------------
 
+// TestProcess_SingletonArrayActivity_Foundkey verifies that a valid AP
+// Delete activity wrapped in a single-element JSON array (= Foundkey-style
+// send format) is unwrapped and processed normally instead of failing
+// with "activity missing actor" (#1185).
+//
+// 実機データ (UDS 本番) で 26 件の missing-actor failure がすべて 1 つの
+// Foundkey instance 由来だったケースの regression guard。
+func TestProcess_SingletonArrayActivity_Foundkey(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	uri := "https://remote.example/notes/n1"
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice-id", URI: &uri}
+	aliceURI := "https://remote.example/users/alice"
+	env.userRepo.Users["alice-id"] = &model.User{ID: "alice-id", Username: "alice", URI: &aliceURI}
+
+	// 1 要素 JSON array で wrap した payload (Foundkey-style)。
+	body := []byte(`[
+		{
+			"type": "Delete",
+			"actor": "https://remote.example/users/alice",
+			"object": {"id": "https://remote.example/notes/n1", "type": "Tombstone"}
+		}
+	]`)
+	require.NoError(t, env.processor.Process(body))
+
+	// 中身が unwrap されて handleDelete が走った結果、n1 が削除される。
+	_, err := env.noteRepo.FindByID("n1")
+	assert.Error(t, err, "wrapped Delete activity should still remove the target note")
+}
+
+// TestProcess_MultiElementArray_NotUnwrapped: 2 要素 array は AS spec 外
+// として現状は no-op で素通し → 既存挙動の missing-actor で fail する。
+// 将来 batch 対応する余地を残すための保守的な挙動を pin する (#1185)。
+func TestProcess_MultiElementArray_NotUnwrapped(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	body := []byte(`[
+		{"type":"Delete","actor":"https://remote.example/users/alice","object":{"id":"x"}},
+		{"type":"Delete","actor":"https://remote.example/users/alice","object":{"id":"y"}}
+	]`)
+	err := env.processor.Process(body)
+	assert.ErrorContains(t, err, "missing actor",
+		"multi-element array should not be unwrapped; downstream still fails with missing actor")
+}
+
 func TestProcess_DeleteRemoteNote(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
 	// alice 自身が著者であるリモートnoteを事前に登録
