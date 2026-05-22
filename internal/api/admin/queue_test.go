@@ -495,6 +495,10 @@ func TestQueueInboxDelayed_AggregatesByHostFromSignature(t *testing.T) {
 // emulating an asynq inspector that has so many tasks the cursor never
 // reaches the end (or, worse, a misbehaving inspector that ignores empty
 // state). Used to verify the page cap defense in fetchAllDelayedTasks.
+//
+// 他の QueueInspector method は embedded stubQueueInspector の zero-value に
+// fall through する (空 map / 空 slice 返却)。cap test では fetchAllDelayedTasks
+// 経由の Scheduled/Retry list call しか走らないので問題なし。
 type pagedInspector struct {
 	stubQueueInspector
 	payload []byte
@@ -522,8 +526,9 @@ func (p *pagedInspector) ListRetryTasks(_ string, _, _ int) ([]*apiadmin.QueueTa
 func TestQueueDeliverDelayed_PageCapBoundsRunaway(t *testing.T) {
 	// 本物の cap (1000 pages) で test すると 100K item 走査で 1 unit test に
 	// しては重い。test 中だけ cap を小さくして cap の挙動だけを検証する。
-	const cap = 3
-	prev := apiadmin.SetDelayedTasksMaxPages(cap)
+	// `pageCap` という名前で builtin `cap()` の shadow を避ける。
+	const pageCap = 3
+	prev := apiadmin.SetDelayedTasksMaxPages(pageCap)
 	t.Cleanup(func() { apiadmin.SetDelayedTasksMaxPages(prev) })
 
 	h, _, _, _ := newTestHandler(t)
@@ -535,12 +540,12 @@ func TestQueueDeliverDelayed_PageCapBoundsRunaway(t *testing.T) {
 
 	var got [][]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	// 1 host × cap (3) × pageSize = 3 × DelayedTasksFetchPageSize 件で
+	// 1 host × pageCap (3) × pageSize = 3 × DelayedTasksFetchPageSize 件で
 	// 打ち切られる。
 	require.Len(t, got, 1)
-	assertHostCount(t, got, 0, "always.example", cap*apiadmin.DelayedTasksFetchPageSize)
+	assertHostCount(t, got, 0, "always.example", pageCap*apiadmin.DelayedTasksFetchPageSize)
 	// inspector への ListScheduledTasks 呼び出しは cap 回数で打ち切られる。
-	assert.Equal(t, cap, insp.calls,
+	assert.Equal(t, pageCap, insp.calls,
 		"page iteration must stop at delayedTasksMaxPages")
 }
 

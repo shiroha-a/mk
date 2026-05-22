@@ -103,6 +103,9 @@ func (h *Handler) fetchAllDelayedTasks(queueName string) []*QueueTaskSummary {
 				break
 			}
 			all = append(all, rows...)
+			// partial page を取った時点で正常にデータ尽きと判断、warn せず
+			// 抜ける。full page が続いたまま cap に到達した時だけ warn する
+			// (= データがまだ残っている可能性が高い異常状態)。
 			if len(rows) < delayedTasksFetchPageSize {
 				break
 			}
