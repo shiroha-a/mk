@@ -566,6 +566,57 @@ func TestInspector_GetQueueInfo_FailedReportedAsFailedNotRetry(t *testing.T) {
 		"permanent failure should land in Failed, not Retry (#1187)")
 }
 
+// TestInspector_GetQueueInfo_UnknownQueue: queueFor が nil を返す未知 queue
+// で `mkqdriver: unknown queue` error を返す (= error path / fallback の
+// 入口を pin)。
+func TestInspector_GetQueueInfo_UnknownQueue(t *testing.T) {
+	d := newDriver(t)
+	_, err := d.Inspector().GetQueueInfo("does-not-exist")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown queue")
+}
+
+// TestInspector_ListRetryTasks_UnknownQueue: listDelayedFiltered 経路の
+// queueFor==nil error path を pin (= ListScheduledTasks も同 helper を
+// 通るので 1 test で両方 cover)。
+func TestInspector_ListRetryTasks_UnknownQueue(t *testing.T) {
+	d := newDriver(t)
+	_, err := d.Inspector().ListRetryTasks("does-not-exist", 1, 30)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown queue")
+}
+
+// TestInspector_ListScheduledTasks_BoundaryPaging verifies the
+// listDelayedFiltered pagination guards: page < 1 / pageSize <= 0 /
+// pageSize > 100 はすべて default に倒れる、start >= len(filtered) は
+// 空 slice を返す (= ある page 番号より先には何も無い)。
+func TestInspector_ListScheduledTasks_BoundaryPaging(t *testing.T) {
+	d := newDriver(t)
+	ctx := context.Background()
+
+	require.NoError(t, d.Client().Enqueue(ctx,
+		"ins:paging", nil,
+		driver.WithQueue("deliver"),
+		driver.WithProcessIn(time.Hour),
+	))
+
+	ins := d.Inspector()
+	// page=0 / pageSize=0 → default (page=1, pageSize=30) で 1 件返る。
+	rows, err := ins.ListScheduledTasks("deliver", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	// pageSize > 100 → default pageSize 30 に倒れる。同 fixture で 1 件。
+	rows, err = ins.ListScheduledTasks("deliver", 1, 200)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	// page=2 (= start=30) は 1 件しかない fixture で空 slice。
+	rows, err = ins.ListScheduledTasks("deliver", 2, 30)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
 // TestInspector_GetQueueInfo_RetryReflectsDelayedAtmPositive verifies the
 // new semantic for the retry-backoff path: a delayed bucket entry with
 // `atm > 0` (= 過去に attempt 失敗して backoff 待ち) is surfaced as
