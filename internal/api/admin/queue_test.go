@@ -45,6 +45,15 @@ func inboxPayloadNoSigJSON(t *testing.T) []byte {
 	return b
 }
 
+// assertHostCount asserts that got[i] == [host, count]. JSON decode yields
+// numbers as float64, so this hides the conversion noise at call sites.
+func assertHostCount(t *testing.T, got [][]any, i int, host string, count int) {
+	t.Helper()
+	require.Greater(t, len(got), i, "got len=%d, want index %d", len(got), i)
+	assert.Equal(t, []any{host, float64(count)}, got[i],
+		"got[%d] should be [%q, %d]", i, host, count)
+}
+
 // stubQueueInspector is a test double for admin.QueueInspector that returns
 // configurable canned responses without touching Redis.
 type stubQueueInspector struct {
@@ -423,9 +432,9 @@ func TestQueueDeliverDelayed_AggregatesByHost(t *testing.T) {
 	// a.example: 3 (s1+s3+r3), b.example: 2 (s2+r1), c.example: 1 (r2)
 	// count desc, tie 無し
 	require.Len(t, got, 3)
-	assert.Equal(t, []any{"a.example", float64(3)}, got[0])
-	assert.Equal(t, []any{"b.example", float64(2)}, got[1])
-	assert.Equal(t, []any{"c.example", float64(1)}, got[2])
+	assertHostCount(t, got, 0, "a.example", 3)
+	assertHostCount(t, got, 1, "b.example", 2)
+	assertHostCount(t, got, 2, "c.example", 1)
 }
 
 // TestQueueDeliverDelayed_EmptyReturnsEmptyArray ensures the response is
@@ -478,8 +487,61 @@ func TestQueueInboxDelayed_AggregatesByHostFromSignature(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	// a.example: 2, b.example: 1
 	require.Len(t, got, 2)
-	assert.Equal(t, []any{"a.example", float64(2)}, got[0])
-	assert.Equal(t, []any{"b.example", float64(1)}, got[1])
+	assertHostCount(t, got, 0, "a.example", 2)
+	assertHostCount(t, got, 1, "b.example", 1)
+}
+
+// pagedInspector is a QueueInspector stub that always returns full pages,
+// emulating an asynq inspector that has so many tasks the cursor never
+// reaches the end (or, worse, a misbehaving inspector that ignores empty
+// state). Used to verify the page cap defense in fetchAllDelayedTasks.
+type pagedInspector struct {
+	stubQueueInspector
+	payload []byte
+	calls   int
+}
+
+func (p *pagedInspector) ListScheduledTasks(_ string, _, pageSize int) ([]*apiadmin.QueueTaskSummary, error) {
+	p.calls++
+	rows := make([]*apiadmin.QueueTaskSummary, 0, pageSize)
+	for i := 0; i < pageSize; i++ {
+		rows = append(rows, &apiadmin.QueueTaskSummary{Payload: p.payload})
+	}
+	return rows, nil
+}
+
+func (p *pagedInspector) ListRetryTasks(_ string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
+	// retry list は常に空 = scheduled の cap だけを test 対象にする。
+	return nil, nil
+}
+
+// TestQueueDeliverDelayed_PageCapBoundsRunaway: inspector が常に full page を
+// 返してくる misbehavior / pathological case で、handler が無限ループせず
+// `delayedTasksMaxPages` で打ち切ることを担保する。defense-in-depth の
+// 動作 test (#1179 review #1 + #2)。
+func TestQueueDeliverDelayed_PageCapBoundsRunaway(t *testing.T) {
+	// 本物の cap (1000 pages) で test すると 100K item 走査で 1 unit test に
+	// しては重い。test 中だけ cap を小さくして cap の挙動だけを検証する。
+	const cap = 3
+	prev := apiadmin.SetDelayedTasksMaxPages(cap)
+	t.Cleanup(func() { apiadmin.SetDelayedTasksMaxPages(prev) })
+
+	h, _, _, _ := newTestHandler(t)
+	insp := &pagedInspector{payload: deliverPayloadJSON(t, "https://always.example/inbox")}
+	h.SetQueueInspector(insp)
+
+	rec := doPost(h.QueueDeliverDelayed, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got [][]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	// 1 host × cap (3) × pageSize = 3 × DelayedTasksFetchPageSize 件で
+	// 打ち切られる。
+	require.Len(t, got, 1)
+	assertHostCount(t, got, 0, "always.example", cap*apiadmin.DelayedTasksFetchPageSize)
+	// inspector への ListScheduledTasks 呼び出しは cap 回数で打ち切られる。
+	assert.Equal(t, cap, insp.calls,
+		"page iteration must stop at delayedTasksMaxPages")
 }
 
 // TestQueueDeliverDelayed_StableSortOnTie: 同 count の host は host 名 asc で

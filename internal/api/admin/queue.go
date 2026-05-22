@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -59,33 +60,58 @@ func (h *Handler) QueueInboxDelayed(c echo.Context) error {
 
 // delayedTasksFetchPageSize は scheduled / retry を page 走査する際の 1 page
 // 当たり件数。100 は asynq inspector の page size 制限 (1〜) 内で妥当な大きさ。
-// 上限はないが、page が空になるまで繰り返すので件数に依らず正しく動く。
 const delayedTasksFetchPageSize = 100
+
+// delayedTasksMaxPages は scheduled / retry それぞれの page 走査の上限。
+// = 100K tasks per state, 200K total。これは defense-in-depth の二重目的:
+//
+//   - inspector が常に full page を返すような misbehavior 時の無限ループ防御
+//   - 連合先長期 down 等の pathological case で、admin panel が backend
+//     memory を食い潰さない soft cap
+//
+// 通常の運用では数千件で頭打ちになるはずなので、この上限を踏むのは異常状態。
+// 到達時は slog.Warn で diag を残し、収集できた分だけで集計を進める
+// (= panel に top hosts は出るので、admin はその情報を元に対処できる)。
+//
+// var にしているのは test seam: cap 防御の挙動を確認する test が小さい
+// cap を一時設定するため。production code から書き換えてはならない。
+var delayedTasksMaxPages = 1000
 
 // fetchAllDelayedTasks fetches every scheduled+retry task for the queue by
 // iterating pages of size delayedTasksFetchPageSize until each list is
-// exhausted. The result is the union for downstream host aggregation.
+// exhausted or delayedTasksMaxPages の上限に達するまで。結果は downstream の
+// host aggregation の union として返す。
 //
-// Misskey TS の BullMQ getJobs(['delayed']) は全件取得が前提なので、上限を
-// 設けずに走査する。asynq に pagination 上限は無いため、運用上の最悪値
-// (数千件) も問題にならない (= memory 一過性)。
+// Misskey TS の BullMQ getJobs(['delayed']) は全件取得が前提なので、通常
+// page が空になるまで走査するが、defense-in-depth として上限を設けている
+// (`delayedTasksMaxPages` のコメント参照)。
 func (h *Handler) fetchAllDelayedTasks(queueName string) []*QueueTaskSummary {
 	if h.queueInspector == nil {
 		return nil
 	}
 	var all []*QueueTaskSummary
-	for _, fetch := range []func(string, int, int) ([]*QueueTaskSummary, error){
-		h.queueInspector.ListScheduledTasks,
-		h.queueInspector.ListRetryTasks,
+	for _, spec := range []struct {
+		state string
+		fetch func(string, int, int) ([]*QueueTaskSummary, error)
+	}{
+		{"scheduled", h.queueInspector.ListScheduledTasks},
+		{"retry", h.queueInspector.ListRetryTasks},
 	} {
-		for page := 1; ; page++ {
-			rows, err := fetch(queueName, page, delayedTasksFetchPageSize)
+		for page := 1; page <= delayedTasksMaxPages; page++ {
+			rows, err := spec.fetch(queueName, page, delayedTasksFetchPageSize)
 			if err != nil || len(rows) == 0 {
 				break
 			}
 			all = append(all, rows...)
 			if len(rows) < delayedTasksFetchPageSize {
 				break
+			}
+			if page == delayedTasksMaxPages {
+				slog.Warn("admin/queue/delayed: page cap reached, truncating aggregation",
+					"queue", queueName, "state", spec.state,
+					"maxPages", delayedTasksMaxPages,
+					"pageSize", delayedTasksFetchPageSize,
+					"collected", len(all))
 			}
 		}
 	}
@@ -128,6 +154,12 @@ func aggregateByHost(tasks []*QueueTaskSummary, hostFn func(*QueueTaskSummary) s
 // deliverHostFromPayload extracts the recipient host from a deliver queue
 // task. DeliverPayload.Inbox は recipient の AP inbox URL なので、その host
 // が即 federation 先 host になる。
+//
+// 注意: Go の `url.Parse` は JS の `new URL()` より permissive で、ほとんどの
+// malformed input に対して err=nil + Host="" の `*url.URL` を返す (err は
+// `::scheme::` 形式の壊れた scheme prefix 等、限定的な case でのみ返る)。
+// caller (`aggregateByHost`) は host == "" を skip するので、err 分岐と
+// 空 Host のどちらも同じ「集計から外す」挙動になり、両方 cover している。
 func deliverHostFromPayload(t *QueueTaskSummary) string {
 	if t == nil || len(t.Payload) == 0 {
 		return ""
