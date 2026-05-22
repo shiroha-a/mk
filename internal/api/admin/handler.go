@@ -1995,6 +1995,8 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 		TargetUserOrigin string `json:"targetUserOrigin"`
 		SinceID          string `json:"sinceId"`
 		UntilID          string `json:"untilId"`
+		SinceDate        *int64 `json:"sinceDate"`
+		UntilDate        *int64 `json:"untilDate"`
 		Limit            int    `json:"limit"`
 	}
 	if err := c.Bind(&req); err != nil {
@@ -2027,7 +2029,9 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	if !isValidOrigin(req.TargetUserOrigin) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "targetUserOrigin must be 'combined', 'local', or 'remote'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, req.SinceID, req.UntilID, req.Limit)
+	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, sinceID, untilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
