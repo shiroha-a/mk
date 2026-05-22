@@ -129,14 +129,18 @@ func TestProcess_LikeAlreadyReacted(t *testing.T) {
 }
 
 func TestProcess_LikeUnknownTarget(t *testing.T) {
+	// best-effort ack semantic (#1183): target note の resolve 失敗
+	// (= stubFetcher が actor JSON を返すので Note として parse できず
+	// `ErrInvalidNote` で permanent fail) は activity を ack して reaction
+	// record を作らない。retry サイクルに乗せない。
 	env := newFullProcessor(t, aliceActor)
 	body := []byte(`{
 		"type": "Like",
 		"actor": "https://remote.example/users/alice",
 		"object": "https://example.com/notes/missing"
 	}`)
-	err := env.processor.Process(body)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, env.reactionRepo.Reactions, "permanent target resolve fail は reaction を作らない")
 }
 
 func TestProcess_LikeNoReactionService(t *testing.T) {
@@ -162,14 +166,17 @@ func TestProcess_LikeBadObject(t *testing.T) {
 }
 
 func TestProcess_LikeActorError(t *testing.T) {
+	// best-effort ack (#1183): actor JSON parse 失敗 (ErrInvalidActor) は
+	// permanent fail として ack。reactor が居なければ reaction も作れない
+	// ので skip = noop。
 	env := newFullProcessor(t, "{not json")
 	body := []byte(`{
 		"type": "Like",
 		"actor": "https://remote.example/users/alice",
 		"object": "https://example.com/notes/n1"
 	}`)
-	err := env.processor.Process(body)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, env.reactionRepo.Reactions, "permanent actor resolve fail は reaction を作らない")
 }
 
 // --- Like content / _misskey_reaction (ported from nekonoverse handler_like) --
@@ -295,25 +302,26 @@ func TestProcess_AnnounceDuplicate(t *testing.T) {
 }
 
 func TestProcess_AnnounceUnknownTarget(t *testing.T) {
+	// best-effort ack (#1183): target resolve 失敗は permanent として skip。
 	env := newFullProcessor(t, aliceActor)
 	body := []byte(`{
 		"type": "Announce",
 		"actor": "https://remote.example/users/alice",
 		"object": "https://example.com/notes/missing"
 	}`)
-	err := env.processor.Process(body)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(body))
 }
 
 func TestProcess_AnnounceActorError(t *testing.T) {
+	// best-effort ack (#1183): actor resolve 失敗 (ErrInvalidActor) は
+	// permanent として skip。
 	env := newFullProcessor(t, "{not json")
 	body := []byte(`{
 		"type": "Announce",
 		"actor": "https://remote.example/users/alice",
 		"object": "https://example.com/notes/n1"
 	}`)
-	err := env.processor.Process(body)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(body))
 }
 
 func TestProcess_AnnounceBadObject(t *testing.T) {
@@ -704,25 +712,26 @@ func TestProcess_UndoLikeNoReactionService(t *testing.T) {
 }
 
 func TestProcess_UndoLikeUnknownTarget(t *testing.T) {
+	// best-effort ack (#1183): Undo(Like) の target resolve 失敗は ack。
+	// 元 reaction record も無いはずなので idempotent と整合する。
 	env := newFullProcessor(t, aliceActor)
 	undo := []byte(`{
 		"type": "Undo",
 		"actor": "https://remote.example/users/alice",
 		"object": {"type":"Like","object":"https://example.com/notes/missing"}
 	}`)
-	err := env.processor.Process(undo)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(undo))
 }
 
 func TestProcess_UndoLikeActorError(t *testing.T) {
+	// best-effort ack (#1183): Undo(Like) の actor resolve 失敗は ack。
 	env := newFullProcessor(t, "{not json")
 	undo := []byte(`{
 		"type": "Undo",
 		"actor": "https://remote.example/users/alice",
 		"object": {"type":"Like","object":"https://example.com/notes/n1"}
 	}`)
-	err := env.processor.Process(undo)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(undo))
 }
 
 func TestProcess_UndoLikeBadObject(t *testing.T) {
@@ -784,25 +793,25 @@ func TestProcess_UndoAnnounceNoMatch(t *testing.T) {
 }
 
 func TestProcess_UndoAnnounceActorError(t *testing.T) {
+	// best-effort ack (#1183): Undo(Announce) の actor resolve 失敗は ack。
 	env := newFullProcessor(t, "{not json")
 	undo := []byte(`{
 		"type": "Undo",
 		"actor": "https://remote.example/users/alice",
 		"object": {"type":"Announce","object":"https://example.com/notes/n1"}
 	}`)
-	err := env.processor.Process(undo)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(undo))
 }
 
 func TestProcess_UndoAnnounceUnknownTarget(t *testing.T) {
+	// best-effort ack (#1183): Undo(Announce) の target resolve 失敗は ack。
 	env := newFullProcessor(t, aliceActor)
 	undo := []byte(`{
 		"type": "Undo",
 		"actor": "https://remote.example/users/alice",
 		"object": {"type":"Announce","object":"https://example.com/notes/missing"}
 	}`)
-	err := env.processor.Process(undo)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(undo))
 }
 
 func TestProcess_UndoAnnounceBadObject(t *testing.T) {
@@ -1333,8 +1342,41 @@ func TestProcess_UndoAnnounceNoMatchSkips(t *testing.T) {
 	require.NoError(t, env.processor.Process(undo))
 }
 
-// handleLike: reactionService.Create returns a non-AlreadyReacted error
-// (use a followers-only target so it returns ErrNoteNotVisible).
+// TestProcess_LikeTransientFetchError: 5xx 等の transient な fetcher error は
+// 従来通り err 返却で activity を retry サイクルに乗せる (#1183 の best-effort
+// 化は permanent error 限定であって、transient はそのまま retry させる)。
+func TestProcess_LikeTransientFetchError(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	reactionRepo := testutil.NewMockNoteReactionRepository()
+	emojiRepo := testutil.NewMockEmojiRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// 502 Bad Gateway = transient 障害想定。permanent error の whitelist
+	// (401/403/404/410 / ErrInvalidActor / ErrInvalidNote / ErrNoteNotVisible)
+	// に該当しないため、handler は err を caller に伝搬 = failed bucket → retry。
+	fetcher := &stubFetcher{err: &activitypub.StatusError{StatusCode: 502, Status: "502 Bad Gateway"}}
+	resolver := federation.NewResolver(userRepo, noteRepo, urls, fetcher, idGen)
+	resolver.SetEmojiRepo(emojiRepo)
+	followingSvc := corefollowing.NewService(userRepo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen)
+	reactionSvc := corereaction.NewService(noteRepo, reactionRepo, emojiRepo, followingRepo, idGen)
+	deleteSvc := corenote.NewDeleteService(noteRepo)
+	p := federation.NewProcessor(resolver, followingSvc, reactionSvc, deleteSvc, userRepo, noteRepo)
+
+	body := []byte(`{
+		"type": "Like",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1"
+	}`)
+	err := p.Process(body)
+	require.Error(t, err, "transient (5xx) は retry されるべき")
+	assert.Empty(t, reactionRepo.Reactions)
+}
+
+// handleLike: reactionService.Create returns ErrNoteNotVisible (followers-only
+// target).best-effort ack (#1183): visibility 違反は permanent fail として
+// ack し、reaction record を作らない。
 func TestProcess_LikeNotVisible(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
 	env.noteRepo.Notes["n1"] = &model.Note{
@@ -1348,8 +1390,8 @@ func TestProcess_LikeNotVisible(t *testing.T) {
 		"object": "https://example.com/notes/n1",
 		"content": "👍"
 	}`)
-	err := env.processor.Process(body)
-	assert.Error(t, err)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, env.reactionRepo.Reactions, "visibility 違反は reaction を作らない")
 }
 
 // handleReject: Unfollow returns a non-NotFollowing error.
