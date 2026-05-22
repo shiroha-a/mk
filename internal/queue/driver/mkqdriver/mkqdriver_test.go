@@ -106,6 +106,30 @@ func TestUniqueKey_NilPayload(t *testing.T) {
 	}
 }
 
+// TestToMkqAddOptions_KeepFailedZeroSkipped: driver-neutral semantic で
+// `WithKeepFailed(0)` は「retention 無し = unlimited 蓄積」だが、mkq
+// native の `WithKeepFailed(0)` は「即時削除」で意味が真逆。translation
+// 層で 0 を skip して semantic を揃えていることを pin する (#1184 review)。
+func TestToMkqAddOptions_KeepFailedZeroSkipped(t *testing.T) {
+	o := driver.EnqueueOptions{KeepFailed: 0, KeepFailedSet: true}
+	got := toMkqAddOptions(o, "task", nil)
+	// WithJobName 1 個のみ (= KeepFailed=0 は mkq に渡されない)。
+	if len(got) != 1 {
+		t.Fatalf("KeepFailed=0 must not emit mkq.WithKeepFailed, got %d options", len(got))
+	}
+}
+
+// TestToMkqAddOptions_KeepFailedPositive: value>0 のときは
+// mkq.WithKeepFailed として直訳される。
+func TestToMkqAddOptions_KeepFailedPositive(t *testing.T) {
+	o := driver.EnqueueOptions{KeepFailed: 500, KeepFailedSet: true}
+	got := toMkqAddOptions(o, "task", nil)
+	// WithJobName + WithKeepFailed の 2 個。
+	if len(got) != 2 {
+		t.Fatalf("KeepFailed>0 should emit mkq.WithKeepFailed, got %d options", len(got))
+	}
+}
+
 func TestToMkqAddOptions_MaxRetryRequiresExplicit(t *testing.T) {
 	// MaxRetrySet=false → default attempts; no option emitted.
 	got := toMkqAddOptions(driver.EnqueueOptions{MaxRetry: 3}, "task", nil)

@@ -70,7 +70,10 @@ func WithProcessIn(d time.Duration) EnqueueOption {
 // 永続蓄積するのを防ぐ。BullMQ の `removeOnFail: N` と意味同等。
 //
 // driver 別:
-//   - mkqdriver: `mkq.WithKeepFailed(n)` を AddJob に渡す
+//   - mkqdriver: `n > 0` のときだけ `mkq.WithKeepFailed(n)` を AddJob に
+//     渡す。注意: mkq native の `WithKeepFailed(0)` は **「即時削除」**
+//     (BullMQ `removeOnFail: true` 相当) で driver-neutral semantic と
+//     真逆なので、driver translation 側で 0 は skip する。
 //   - asynqdriver: silent no-op (asynq は per-job 相当 API を持たない、
 //     archived bucket の age-based prune に依拠)
 func WithKeepFailed(n int) EnqueueOption {

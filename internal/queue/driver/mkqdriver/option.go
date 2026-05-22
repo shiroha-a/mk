@@ -55,11 +55,15 @@ func toMkqAddOptions(o driver.EnqueueOptions, taskType string, payload []byte) [
 	if o.ProcessIn > 0 {
 		out = append(out, mkq.WithDelay(o.ProcessIn))
 	}
-	if o.KeepFailedSet {
-		// asynq には per-job 相当が無いので driver-neutral name は
-		// KeepFailed としているが、mkq library 側 API も同名
-		// (`mkq.WithKeepFailed`) で一対一に対応する。BullMQ の
-		// `removeOnFail: N` 互換。
+	if o.KeepFailedSet && o.KeepFailed > 0 {
+		// driver-neutral semantic では `WithKeepFailed(0)` = 「retention
+		// 無し (= unlimited 蓄積、従来挙動)」だが、mkq native の
+		// `WithKeepFailed(0)` は **逆に「failed bucket 即時削除」**
+		// (`removeOnFail: true` 相当) で意味が真逆。両 semantic を揃える
+		// ため、value=0 のときは mkq に渡さない (= mkq が WithKeepFailed
+		// 未呼び出し時の default = unlimited を踏ませる)。
+		// value>0 のときだけ N 件 retention として直訳する。BullMQ の
+		// `removeOnFail: N` 互換 (#1184)。
 		out = append(out, mkq.WithKeepFailed(o.KeepFailed))
 	}
 	return out
