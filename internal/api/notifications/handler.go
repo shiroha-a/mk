@@ -83,6 +83,8 @@ type ListRequest struct {
 	ExcludeTypes []string `json:"excludeTypes"`
 	SinceID      string   `json:"sinceId"`
 	UntilID      string   `json:"untilId"`
+	SinceDate    *int64   `json:"sinceDate"`
+	UntilDate    *int64   `json:"untilDate"`
 	// MarkAsRead controls whether fetching the notification list implicitly
 	// marks all notifications as read. nil / true means "mark as read"
 	// (default), explicit false leaves the read state untouched.
@@ -100,6 +102,14 @@ func (h *Handler) Show(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+
+	// sinceDate / untilDate を aidx prefix に正規化 (#1174)。Notification.ID
+	// は notification_service.go で `idGen.Generate(now)` で aidx 形式で発番
+	// されるため、aidx 比較 (= 後段の post-fetch filter `n.ID <= sinceID` /
+	// `n.ID >= untilID`) で sinceDate / untilDate も正しく効く。Redis Stream
+	// native ID と aidx ID は別物だが、本 endpoint の cursor は notification.ID
+	// (= aidx) で判定する設計なので adapter pattern で完結する。
+	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.Limit)
 	if err != nil {

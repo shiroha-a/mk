@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"time"
+
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -99,6 +101,72 @@ func TestShow_WithEntries(t *testing.T) {
 	assert.Equal(t, "n1", resp[0]["noteId"])
 	assert.Equal(t, "👍", resp[0]["reaction"])
 	assert.Equal(t, "bob", resp[0]["userId"])
+}
+
+// sinceDate=0 (= 1970 epoch) を渡したら全 notification が post-fetch filter
+// を通過する。adapter pattern (= sinceDate → aidx prefix) が effectively に
+// 動くことの positive case (#1174)。
+func TestShow_SinceDate_EpochIncludesAll(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{"limit":50,"sinceDate":0}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "sinceDate=0 (= 1970) で全件含まれること")
+}
+
+// untilDate を未来に設定したら全 notification が post-fetch filter を通過する
+// (= untilID は exclusive upper bound、未来 ms に対する aidx prefix は全 ID
+// より大きいので全件含まれる)。
+func TestShow_UntilDate_FutureIncludesAll(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	futureMs := time.Now().Add(time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"limit":50,"untilDate":%d}`, futureMs)
+	c, rec := newJSONRequest(t, "/api/i/notifications", body)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "untilDate=future で全件含まれること")
+}
+
+// sinceDate を未来に設定したら post-fetch filter で全件除外される。
+// adapter pattern の negative case (#1174)。
+func TestShow_SinceDate_FutureFiltersOut(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	futureMs := time.Now().Add(time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"limit":50,"sinceDate":%d}`, futureMs)
+	c, rec := newJSONRequest(t, "/api/i/notifications", body)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "sinceDate=future で全件 filter out されること")
 }
 
 func TestShow_InvalidJSON(t *testing.T) {
