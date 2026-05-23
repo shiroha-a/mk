@@ -291,7 +291,14 @@ queue-bench-up:
 	docker compose -f $(QUEUE_BENCH_COMPOSE) up -d --build
 
 queue-bench-seed:
-	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile bench up --abort-on-container-exit seed
+	# `--force-recreate` で seed container を毎回 fresh に作る (#1163)。
+	# down → up を繰り返すと network が再作成されて新 ID になるが、profile
+	# container は queue-bench-down (= `down -v`) の対象外で残る。古い container
+	# は attach 先の network ID が変わったまま固定されて、次回 start 時に
+	# `network <hash> not found` で失敗する非決定性を引き起こすため、毎回
+	# 強制的に再作成する。同じ理由を queue-bench-outbound / -inbound / -report
+	# にも適用している。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile bench up --abort-on-container-exit --force-recreate seed
 	# meta cache (5min TTL) が古い federation='none' を握っているので、seed
 	# 後に app コンテナを再起動して新しい meta.federation='all' を読ませる。
 	docker compose -f $(QUEUE_BENCH_COMPOSE) restart app-asynq app-mkq app-ts
@@ -308,18 +315,22 @@ queue-bench-seed:
 	echo "warning: not all apps became healthy in time" >&2; exit 1
 
 queue-bench-outbound:
-	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile outbound up --abort-on-container-exit driver-outbound
+	# queue-bench-seed と同じ理由で `--force-recreate` (#1163)。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile outbound up --abort-on-container-exit --force-recreate driver-outbound
 
 queue-bench-inbound:
-	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile inbound up --abort-on-container-exit driver-inbound
+	# queue-bench-seed と同じ理由で `--force-recreate` (#1163)。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile inbound up --abort-on-container-exit --force-recreate driver-inbound
 
 queue-bench-report:
-	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile report up --abort-on-container-exit report
+	# queue-bench-seed と同じ理由で `--force-recreate` (#1163)。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile report up --abort-on-container-exit --force-recreate report
 
 queue-bench-all: queue-bench-seed queue-bench-outbound queue-bench-inbound queue-bench-report
 
 queue-bench-down:
-	docker compose -f $(QUEUE_BENCH_COMPOSE) down -v
+	# `--remove-orphans` で profile container も含めて確実に cleanup する (#1163)。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) down -v --remove-orphans
 
 queue-bench-logs:
 	docker compose -f $(QUEUE_BENCH_COMPOSE) logs -f

@@ -65,6 +65,7 @@ make queue-bench-down
 
 - `outbound.json` — 生データ (per-stack drain time / hits / depth time series)
 - `inbound.json` — faker.send 統計 + per-receiver drain (最後に走った activity type の値で上書き)
+- `inbound-announce-before.json` — Announce 経路の参考値 (PR #1158 適用前、2026-05-24 / #1163)
 - `inbound-announce-after.json` — Announce 経路の参考値 (PR #1158 適用後、2026-05-21)
 - `queue-report.md` — markdown 比較表
 
@@ -84,7 +85,32 @@ make queue-bench-down
 - Announce 経路は Create 経路と比べて -4〜-12% (HTTP signature verify + target note resolve + renote create の overhead)
 - mk-go は peak depth 9800+ まで queue を積んで worker が drain (47-63s)、TS は send と同期で peak=0
 
-PR #1158 の effect (handleAnnounce hook async 化) を before/after で数字化する作業は、bench tool の startup 安定性 (3 stack 並列起動で random に 1 stack が ok=0 になる) が解消できていないため follow-up で別途実施予定。
+### PR #1158 before/after 比較 (#1163 で実施、2026-05-24)
+
+queue-bench orchestration の startup 非決定性 (3 stack 並列起動で random に 1 stack が ok=0) が #1163 で解消されたので、handleAnnounce hook async 化 (#1158) の effect を before/after で計測。
+
+**測定条件**:
+- 同一ホスト・同一 docker compose stack。before は `git revert 9adc836` 適用後 rebuild、after は develop HEAD (= #1158 適用)
+- single-run (= 5-10% の run-to-run variance が乗る前提、平均化は未実施)
+- 10000 req × 3 target、concurrency 128、Announce 経路
+
+| Stack | 状態 | Send Duration | rps | Drain | Peak | Δ rps | Δ drain |
+|---|---|---|---|---|---|---|---|
+| mk-go (asynq) | before #1158 | 3.42s | 2926.0 | 40.76s | 9881 | — | — |
+| mk-go (asynq) | after #1158 | 3.67s | 2727.0 | 47.52s | 9829 | **-6.8%** | +16.6% |
+| mk-go (mkq) | before #1158 | 3.11s | 3216.7 | 74.33s | 9969 | — | — |
+| mk-go (mkq) | after #1158 | 3.46s | 2889.3 | 64.14s | 9933 | **-10.2%** | -13.7% |
+| Misskey TS | before #1158 | 9.72s | 1029.0 | 17.34s | 0 | — | — |
+| Misskey TS | after #1158 | 10.73s | 932.1 | 18.26s | 0 | -9.4% | +5.3% |
+
+**観測**:
+
+- single-run の variance を考えると **before/after に有意な throughput 差は出ていない**。TS は #1158 の影響を一切受けないはず (#1158 は mk-go 側の federation processor 修正) なのに -9.4% 動いている事実が、run-to-run noise が ±10% オーダーであることを示唆する。
+- drain time は asynq で悪化 (+16.6%)、mkq で改善 (-13.7%) と非対称。これも noise レンジ内と判断するのが妥当。
+- **#1158 の正味効果は、Announce burst 受信のような bench setup では本 single-run 計測で検出できない** ことが分かった。hook 内 work load が send-side latency の支配的要因ではない (= HTTP handler は enqueue で 202 を返すのみで、hook 実行は worker 側で行うため send-side rps には直接影響しない) ので、当然の結果ともいえる。
+- より深い計測には: (a) 5-10 回平均、(b) worker per-job latency を直接測る、(c) hook 内 work が重い scenario (例: cascade fanout を伴う Announce) を組む、のいずれかが必要。本 issue ではここまでで打ち止めとし、後日 perf 専用 issue で扱う。
+
+**結論**: PR #1158 は code-level に handleCreate / handleAnnounce 間の async 対称性を回復した hygiene fix として価値があり、その実効性能 effect は本 bench の precision では計測できなかった。
 
 ## 設計メモ
 

@@ -103,6 +103,17 @@ def drain_one(stack: str, info: dict[str, Any], expected: int,
 
 
 def main() -> int:
+    """Run the inbound bench against all 3 stacks declared in seed.json.
+
+    Return codes (#1163 documented contract for CI integration):
+      0 — bench completed successfully (results written to /results/inbound.json)
+      2 — announce mode requested but seed.json is missing target_note_uri
+          for one or more stacks (= caller must re-run `make queue-bench-seed`)
+
+    Other non-zero exit codes propagate from sys.exit / uncaught exceptions
+    (httpx errors / JSON decode failures / I/O errors) without explicit
+    handling here.
+    """
     with open("/state/seed.json") as f:
         seed = json.load(f)
 
@@ -123,10 +134,12 @@ def main() -> int:
             else:
                 missing.append(stack)
         if missing:
+            # console 出力を 80 char 程度で改行して読みやすく (#1163)。
             print(
                 f"error: announce mode but {len(missing)} stacks miss "
-                f"target_note_uri: {missing}. seed が失敗している可能性、"
-                "make queue-bench-seed のログを確認してください。",
+                f"target_note_uri: {missing}.\n"
+                "seed が失敗している可能性、make queue-bench-seed のログを"
+                "確認してください。",
                 flush=True,
             )
             return 2
