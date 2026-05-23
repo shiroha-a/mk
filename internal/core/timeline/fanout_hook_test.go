@@ -227,6 +227,47 @@ func TestFanoutHook_ReplyToFollowerIsPushedRegardlessOfWithReplies(t *testing.T)
 	assert.Empty(t, out, "follower2 (= unrelated) should not receive reply when WithReplies=false")
 }
 
+// TestFanoutHook_MentionedFollowerEscapesReplyFilter guards #1195: 他人 A
+// → 他人 B reply で本文に follower C への mention が含まれているとき、
+// C は withReplies=false でも home TL に push される (= mk-go 独自 escape
+// hatch、upstream Misskey TS は持たない意図的 deviation)。
+//
+// scenario: author が follower1 / follower2 を持ち、follower1 / follower2
+// 共に withReplies=false。author が `replyTargetUser` 宛 reply を作り、
+// note.Mentions に follower1 を含める。
+//   - follower1 は mentioned → push (mention escape hatch)
+//   - follower2 は mentioned でも replyToMe でも selfThread でもない →
+//     既存 reply gate で drop
+func TestFanoutHook_MentionedFollowerEscapesReplyFilter(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: false}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "follower2", FolloweeID: "author", WithReplies: false}
+
+	noteID := idGen.Generate(time.Now())
+	replyID := "reply-target"
+	otherUser := "other-user"
+	n := &model.Note{
+		ID:          noteID,
+		UserID:      "author",
+		Visibility:  model.NoteVisibilityPublic,
+		ReplyID:     &replyID,
+		ReplyUserID: &otherUser, // 他人宛 reply
+		Mentions:    []string{"follower1"},
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// follower1 は mention されているので withReplies=false でも push される
+	out, err := fanout.Get(ctx, HomeTimelineName("follower1"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "mentioned follower1 should receive reply regardless of WithReplies")
+
+	// follower2 は mention されていないので default reply gate で drop
+	out, err = fanout.Get(ctx, HomeTimelineName("follower2"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "non-mentioned follower2 should NOT receive reply when WithReplies=false")
+}
+
 // TestFanoutHook_FollowersOnlyReply_DropsFollowersNotFollowingReplyTarget
 // guards #1152: reply 対象 note の `visibility=followers` の場合、reply
 // target を follow していない follower は drop される (= stream filter

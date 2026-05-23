@@ -274,7 +274,14 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 		}
 		for _, f := range rows {
 			isReplyToFollower := isReply && n.ReplyUserID != nil && *n.ReplyUserID == f.FollowerID
-			if isReply && !isSelfThread && !isReplyToFollower && !f.WithReplies {
+			// follower が note.mentions に含まれているなら withReplies=false の
+			// reply filter を escape する (mk-go 独自仕様 / 上流 TS は持たない
+			// escape hatch、#1195)。「他人 A → 他人 B reply」で本文に viewer
+			// (= follower) への mention が含まれているとき、author の意図とし
+			// て viewer に届けたいはずなので follower の withReplies 設定で隠
+			// さない。
+			isMentioned := isReply && containsMention(n.Mentions, f.FollowerID)
+			if isReply && !isSelfThread && !isReplyToFollower && !isMentioned && !f.WithReplies {
 				continue
 			}
 			// followers-only reply: reply target を follow していない follower
@@ -396,4 +403,19 @@ func (h *FanoutHook) removeFromUserLists(ctx context.Context, authorID, noteID s
 	for _, listID := range listIDs {
 		h.removeBestEffort(ctx, UserListTimelineName(listID), noteID)
 	}
+}
+
+// containsMention reports whether `mentions` (= model.Note.Mentions, a list of
+// user IDs) includes `userID`. typical mention 数は < 10 なので map 化せず
+// 線形探索で十分。fanout reply gate の mention escape hatch (#1195) で使う。
+func containsMention(mentions []string, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	for _, m := range mentions {
+		if m == userID {
+			return true
+		}
+	}
+	return false
 }

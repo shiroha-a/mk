@@ -2,6 +2,7 @@ package channels
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/shiroha-a/mk/internal/core/wordmute"
 	"github.com/shiroha-a/mk/internal/model"
@@ -64,6 +65,10 @@ type replyMeta struct {
 // notePayload is the minimal structure needed for filtering decisions.
 // hardMutedWords (#787) も同 struct で見るので user / cw を含める。
 // #1063 で reply 関連を replyMeta 経由で取り込み、reply gate で参照する。
+// Mentions は #1195 で追加。reply gate の mention escape hatch で「viewer
+// が note.mentions に含まれていれば withReplies 設定に関係なく pass」を
+// 判定するのに使う。NoteEntityService.pack は packed note に `mentions:
+// string[]` を出力するので JSON tag で拾える。
 type notePayload struct {
 	UserID   string     `json:"userId"`
 	Text     *string    `json:"text"`
@@ -71,6 +76,7 @@ type notePayload struct {
 	RenoteID *string    `json:"renoteId"`
 	ReplyID  *string    `json:"replyId"`
 	FileIDs  []string   `json:"fileIds"`
+	Mentions []string   `json:"mentions"`
 	Reply    *replyMeta `json:"reply,omitempty"`
 }
 
@@ -208,6 +214,11 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 
 	replyToMe := viewerID != "" && note.Reply.UserID == viewerID
 	selfThread := note.Reply.UserID == note.UserID
+	// mk-go 独自 escape hatch (#1195): viewer が note.mentions に含まれて
+	// いれば、withReplies / followee.withReplies の設定に関係なく reply gate を
+	// pass する。upstream Misskey TS は home/hybrid/local channel いずれもこの
+	// escape を持たないので意図的 deviation。
+	isMentioned := viewerID != "" && slices.Contains(note.Mentions, viewerID)
 
 	var followeeWithReplies bool
 	if snap != nil {
@@ -232,15 +243,16 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 			}
 			return true
 		}
-		// 残り 2 escape hatch (replyToMe / selfThread)。isMe は上で抜けている。
-		return replyToMe || selfThread
+		// 残り 3 escape hatch (replyToMe / selfThread / isMentioned)。
+		// isMe は上で抜けている。isMentioned は mk-go 独自 (#1195)。
+		return replyToMe || selfThread || isMentioned
 
 	case replyGateLocal:
 		// local-timeline は anonymous で reply gate 不要、authenticated 時のみ
 		// `!this.withReplies && !following[note.userId].withReplies` → 3 escape
-		// hatch のみで pass。
+		// hatch + isMentioned で pass。isMentioned は mk-go 独自 (#1195)。
 		if !followeeWithReplies && !paramWithReplies {
-			return replyToMe || selfThread
+			return replyToMe || selfThread || isMentioned
 		}
 		return true
 	}
