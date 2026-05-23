@@ -1,0 +1,113 @@
+name: Queue-bench smoke (nightly)
+
+# Issue #1163 で queue-bench の orchestration 非決定性 (3 stack 並列起動で
+# random に 1 stack が ok=0 になる) を `--force-recreate` で解消した。同種の
+# regression が再発した場合に nightly で検知するための smoke workflow。
+#
+# - `make queue-bench-up → seed → down` を 1 サイクル走らせる。実際の
+#   inbound / outbound bench は走らせない (= 計測自体は手動 / 別タスク)。
+#   seed が完走することと down が clean に終わることだけ確認する。
+# - schedule: 毎日 1 回 (UTC 17:30 ≒ JST 02:30)。dropin-e2e (18:00) と
+#   playwright (17:00) の間にずらして runner 競合を避ける。
+# - workflow_dispatch: 任意の ref で手動発火可。
+# - PR の required check には**入れない**。8-10 min かかる上に
+#   docker-in-docker / 3 stack 並列という flaky 要素を含むため merge ブロッカー
+#   に向かない。failure は Actions 上で確認、別 PR で対処する運用
+#   (dropin-e2e / playwright と同じ方針)。
+
+on:
+  schedule:
+    # 17:30 UTC (= JST 02:30)。dropin-e2e (18:00) / playwright (17:00) と
+    # 30 分ずらして runner queue 競合を避ける。
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch / tag / SHA to test"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # schedule 起動時 inputs は空 → develop fallback。
+          ref: ${{ inputs.ref || 'develop' }}
+          # tests/federation/common/Dockerfile.mkgo が
+          # third_party/misskey/built/ + node_modules/ を COPY するので
+          # submodule を先に展開しないと docker build が "failed to compute
+          # cache key" で死ぬ (dropin-e2e.yml と同じ理由、#1163)。
+          submodules: recursive
+
+      # Misskey TS の pnpm install + frontend build を node_modules / built/
+      # ごと cache する。dropin-e2e.yml / playwright.yml と同 strategy で
+      # cache hit すれば 5-10 min → 数秒に短縮できる。
+      - name: Cache misskey workspace (built + node_modules)
+        id: cache-misskey
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/misskey/node_modules
+            third_party/misskey/packages/*/node_modules
+            third_party/misskey/built
+          key: misskey-workspace-${{ runner.os }}-${{ hashFiles('third_party/misskey/pnpm-lock.yaml') }}
+
+      - name: Set up Node.js
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build third_party/misskey frontend bundle
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
+        working-directory: third_party/misskey
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      # smoke 本体: up → seed → down を 1 サイクル。
+      # seed まで成功 = network ID 不整合等の orchestration regression は
+      # 起きていない。inbound / outbound bench 実行はここでは行わず、計測は
+      # 引き続き手動運用 (= bench は load test であり regression test では
+      # ない、という分業)。
+      - name: queue-bench smoke (up → seed → down)
+        run: |
+          make queue-bench-up
+          make queue-bench-seed
+          make queue-bench-down
+
+      # 失敗時のみ docker compose logs を artifact 化して原因調査できるよう
+      # にする。`if: failure()` で正常時はアップロードしない。
+      - name: Capture docker compose logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/queue-bench-logs
+          docker compose -f tests/queue-bench/docker-compose.queue-bench.yml logs \
+            > /tmp/queue-bench-logs/compose.log 2>&1 || true
+          docker compose -f tests/queue-bench/docker-compose.queue-bench.yml ps \
+            > /tmp/queue-bench-logs/ps.log 2>&1 || true
+
+      - name: Upload logs artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: queue-bench-logs
+          path: /tmp/queue-bench-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # 念のため明示 teardown (前 step が timeout 等で down に到達しない
+      # ケースに備える)。
+      - name: Final teardown
+        if: always()
+        run: |
+          make queue-bench-down >/dev/null 2>&1 || true

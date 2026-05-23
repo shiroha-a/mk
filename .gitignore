@@ -55,6 +55,12 @@ tests/bench/results/profiles/
 tests/queue-bench/results/*.json
 tests/queue-bench/results/*.md
 !tests/bench/results/.gitkeep
+# #1158 effect の before/after reference data (#1163 で計測)。reader が
+# bench を再走らせなくても docs/queue-bench.md の表と数値を突き合わせて
+# verify できるよう、この 2 ファイルだけ track する。他の *.json は
+# bench 走るたびに上書きされる ephemeral data なので gitignore のまま。
+!tests/queue-bench/results/inbound-announce-before.json
+!tests/queue-bench/results/inbound-announce-after.json
 
 # Claude Code local state
 .claude/

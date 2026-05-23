@@ -134,12 +134,12 @@ def main() -> int:
             else:
                 missing.append(stack)
         if missing:
-            # console 出力を 80 char 程度で改行して読みやすく (#1163)。
+            # CJK double-width を踏まえて 1 行 80 col 相当に分割 (#1163)。
             print(
                 f"error: announce mode but {len(missing)} stacks miss "
                 f"target_note_uri: {missing}.\n"
-                "seed が失敗している可能性、make queue-bench-seed のログを"
-                "確認してください。",
+                "seed が失敗している可能性があります。\n"
+                "make queue-bench-seed のログを確認してください。",
                 flush=True,
             )
             return 2
