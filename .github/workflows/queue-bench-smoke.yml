@@ -4,9 +4,16 @@ name: Queue-bench smoke (nightly)
 # random に 1 stack が ok=0 になる) を `--force-recreate` で解消した。同種の
 # regression が再発した場合に nightly で検知するための smoke workflow。
 #
-# - `make queue-bench-up → seed → down` を 1 サイクル走らせる。実際の
-#   inbound / outbound bench は走らせない (= 計測自体は手動 / 別タスク)。
-#   seed が完走することと down が clean に終わることだけ確認する。
+# - `make queue-bench-up → seed → inbound (small N) → down` を 1 サイクル
+#   走らせる。inbound を **count=100 / concurrency=16** に絞ることで、
+#   seed-time の `network not found` 失敗 mode と bench-time の `ok=0`
+#   失敗 mode の両方を catch する (= issue #1163 history table の Run 2/3
+#   で観測された後者の manifestation もカバー)。実際の load 計測は
+#   手動 / 別タスクで継続。
+# - inbound 結果 (`tests/queue-bench/results/inbound.json`) を assert step
+#   でパースして「全 3 stack が ok==sent」を verify。partial ok=0 だと
+#   driver_inbound 自体は exit 0 で抜けるので、assertion なしでは regression
+#   を検知できない。
 # - schedule: 毎日 1 回 (UTC 17:30 ≒ JST 02:30)。dropin-e2e (18:00) と
 #   playwright (17:00) の間にずらして runner 競合を避ける。
 # - workflow_dispatch: 任意の ref で手動発火可。
@@ -33,7 +40,10 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25 min: cache miss 時の pnpm install + frontend build (~5-10 min) +
+    # image build + up + seed + small-N inbound + down で 18-20 min 程度を
+    # 想定し、5 min バッファ。dropin-e2e と timeout を揃える。
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -74,16 +84,59 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      # smoke 本体: up → seed → down を 1 サイクル。
-      # seed まで成功 = network ID 不整合等の orchestration regression は
-      # 起きていない。inbound / outbound bench 実行はここでは行わず、計測は
-      # 引き続き手動運用 (= bench は load test であり regression test では
-      # ない、という分業)。
-      - name: queue-bench smoke (up → seed → down)
+      # smoke 本体: up → seed → small-N inbound → down を 1 サイクル。
+      #
+      # seed 完走で seed-time の orchestration regression (= `network <hash>
+      # not found` 系) を catch、 small-N inbound (count=100 / concurrency=16)
+      # で bench-time の `ok=0` 失敗 manifestation を catch する。N を 100 に
+      # 絞ることで実行時間を ~10 sec に抑えつつ、stack が完全に broken state で
+      # 起動した場合 (= ok=0) を確実に検知できる。実際の load 計測は手動 /
+      # 別タスクで継続 (= bench は load test であり regression test ではない、
+      # という分業を維持)。
+      - name: queue-bench smoke (up + seed)
         run: |
           make queue-bench-up
           make queue-bench-seed
-          make queue-bench-down
+
+      - name: queue-bench smoke (small-N inbound)
+        env:
+          INBOUND_COUNT: "100"
+          INBOUND_CONCURRENCY: "16"
+        run: make queue-bench-inbound
+
+      - name: Assert all stacks reached ok=sent
+        # driver_inbound.py は partial ok=0 でも exit 0 で抜けるので、
+        # ここで inbound.json をパースして「全 3 stack で ok == sent」を
+        # verify する。1 stack でも `ok < sent` なら CI fail にして
+        # orchestration regression を early surface する。
+        # quoted heredoc (`'PYEOF'`) で shell interpolation を止めつつ、
+        # Python f-string 内では `'target'` のように single quote subscript
+        # を使って `\"` escape (Python 3.11 以下では f-string で禁止) を避ける。
+        run: |
+          python3 << 'PYEOF'
+          import json, sys
+          with open("tests/queue-bench/results/inbound.json") as f:
+              d = json.load(f)
+          bad = []
+          for s in d["send"]["stats"]:
+              if s["ok"] != s["sent"]:
+                  bad.append(
+                      f"{s['target']}: ok={s['ok']}/{s['sent']} failed={s['failed']}"
+                  )
+          if bad:
+              print("FAIL: inbound smoke detected partial failure:", file=sys.stderr)
+              for b in bad:
+                  print(f"  {b}", file=sys.stderr)
+              sys.exit(1)
+          print(f"PASS: all {len(d['send']['stats'])} stacks ok=sent")
+          PYEOF
+
+      - name: queue-bench smoke (down)
+        # assertion fail でもここまで来たいので step を分ける。実際は
+        # if: always() の Final teardown でも掃除されるが、明示的に
+        # successful path を残しておく方が log が読みやすい。
+        if: success()
+        run: make queue-bench-down
 
       # 失敗時のみ docker compose logs を artifact 化して原因調査できるよう
       # にする。`if: failure()` で正常時はアップロードしない。

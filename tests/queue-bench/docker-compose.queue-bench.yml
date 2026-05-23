@@ -268,8 +268,12 @@ services:
       MKGO_MKQ_URL: https://mk-mkq
       TS_URL: https://ts
       FAKER_URL: http://faker:8081
-      INBOUND_COUNT: "10000"
-      INBOUND_CONCURRENCY: "128"
+      # 既定値は load test 用 (10000 req × concurrency 128)。CI smoke の
+      # ように regression test 目的で軽く回したい場合は host env で
+      # `INBOUND_COUNT=100 INBOUND_CONCURRENCY=16 make queue-bench-inbound`
+      # 等と override する (#1163)。
+      INBOUND_COUNT: "${INBOUND_COUNT:-10000}"
+      INBOUND_CONCURRENCY: "${INBOUND_CONCURRENCY:-128}"
       # create (default) または announce。announce は seed が生成した
       # target_note_uri を faker に渡して Announce 経路の bench を回す。
       INBOUND_ACTIVITY_TYPE: "${INBOUND_ACTIVITY_TYPE:-create}"
