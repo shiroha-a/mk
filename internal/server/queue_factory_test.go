@@ -126,10 +126,8 @@ func TestApplyClientPolicies_AllFiveQueues(t *testing.T) {
 	applyClientPolicies(c, &config.Config{})
 
 	cases := []struct {
-		name   string
-		enq    func() error
-		queue  string
-		fields string
+		name string
+		enq  func() error
 	}{
 		{
 			name: "deliver",
