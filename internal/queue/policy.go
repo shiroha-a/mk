@@ -7,10 +7,16 @@ import "time"
 // by the driver Server constructors (worker concurrency / rate limit). All
 // zero values mean "use the driver default" — silent no-op when unset.
 //
-// MaxAttempts only affects enqueue paths that pre-pend the default before
-// caller opts (currently EnqueueDeliver only — webhook / cleanRemoteNotes
-// / reactionFlush keep their hard-coded retry policies because they encode
-// task-specific semantics rather than queue-wide tuning).
+// 各 field の適用範囲:
+//
+//   - MaxAttempts: EnqueueDeliver / EnqueueInbox のみ pre-pend する
+//     (webhook / cleanRemoteNotes / reactionFlush 等は task-specific semantics
+//     を encode する hard-coded retry を保持)。
+//   - KeepFailed / KeepCompleted / KeepCompletedAge / KeepFailedAge:
+//     **全 enqueue helper** で pre-pend される (#1184 / #1193)。retention 系は
+//     queue-wide hygiene として一律に効かせる方針 (Misskey TS が QueueService.ts
+//     全 helper で `removeOnComplete`/`removeOnFail` を一律 set している規範に
+//     合わせる)。
 type Policy struct {
 	// Concurrency overrides the worker pool size for this queue. 0 means
 	// "fall back to driver default" — for asynq this is the global pool

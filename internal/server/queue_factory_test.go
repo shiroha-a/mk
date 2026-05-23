@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/queue/driver/asynqdriver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,6 +80,124 @@ func TestApplyClientPolicies_NoOpForZero(t *testing.T) {
 		applyClientPolicies(c, &config.Config{})
 		applyClientPolicies(c, &config.Config{DeliverJobMaxAttempts: intp(0)})
 	})
+}
+
+// recordingDriverClient is a minimal driver.Client implementation that
+// captures the last Enqueue call's options. server _test 内に持つ用途は
+// applyClientPolicies が 5 queue 全てに Policy を伝搬するのを enqueue
+// 経由で観測すること (queue.Client.policyFor が unexported のため)。
+type recordingDriverClient struct {
+	lastTaskType string
+	lastOpts     driver.EnqueueOptions
+}
+
+func (r *recordingDriverClient) Enqueue(_ context.Context, taskType string, _ []byte, opts ...driver.EnqueueOption) error {
+	r.lastTaskType = taskType
+	r.lastOpts = driver.ApplyEnqueueOptions(opts)
+	return nil
+}
+
+func (r *recordingDriverClient) Close() error { return nil }
+
+// stubDriver wraps just enough of driver.Driver to satisfy queue.NewClient.
+type stubDriver struct {
+	client driver.Client
+}
+
+func (s *stubDriver) Client() driver.Client        { return s.client }
+func (s *stubDriver) Inspector() driver.Inspector  { return nil }
+func (s *stubDriver) Server() driver.Server        { return nil }
+func (s *stubDriver) Scheduler() driver.Scheduler  { return nil }
+func (s *stubDriver) Close() error                 { return nil }
+func (s *stubDriver) WorkerCount(_ string) int     { return 0 }
+func (s *stubDriver) Resize(_ string, _ int) error { return driver.ErrResizeNotSupported }
+
+// TestApplyClientPolicies_AllFiveQueues verifies that applyClientPolicies
+// propagates retention defaults onto all five application queues (deliver /
+// inbox / export / push / webhook) — not just deliver / inbox like before
+// #1193。各 queue で enqueue 後に recordingDriverClient が見る driver
+// options が default の `{age: 7d, count: 30}` / `{age: 7d, count: 1000}`
+// を含むことを assert する。
+func TestApplyClientPolicies_AllFiveQueues(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	applyClientPolicies(c, &config.Config{})
+
+	cases := []struct {
+		name   string
+		enq    func() error
+		queue  string
+		fields string
+	}{
+		{
+			name: "deliver",
+			enq: func() error {
+				return c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)})
+			},
+		},
+		{
+			name: "inbox",
+			enq: func() error {
+				return c.EnqueueInbox(context.Background(), queue.InboxPayload{Body: []byte(`{}`)})
+			},
+		},
+		{
+			name: "export",
+			enq: func() error {
+				return c.EnqueueExport(queue.ExportPayload{UserID: "u", Type: "notes"})
+			},
+		},
+		{
+			name: "push",
+			enq: func() error {
+				return c.EnqueueWebPush(context.Background(), queue.WebPushPayload{})
+			},
+		},
+		{
+			name: "webhook",
+			enq: func() error {
+				return c.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{})
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.enq())
+			assert.Equal(t, defaultKeepCompleted, rec.lastOpts.KeepCompleted, "KeepCompleted default propagated")
+			assert.True(t, rec.lastOpts.KeepCompletedSet, "KeepCompletedSet must be propagated")
+			assert.Equal(t, defaultKeepFailed, rec.lastOpts.KeepFailed)
+			assert.True(t, rec.lastOpts.KeepFailedSet)
+			assert.Equal(t, defaultKeepCompletedAge, rec.lastOpts.KeepCompletedAge)
+			assert.Equal(t, defaultKeepFailedAge, rec.lastOpts.KeepFailedAge)
+		})
+	}
+}
+
+// TestApplyClientPolicies_OperatorOptOut: deliverJobKeepCompleted=0 を
+// operator が明示すると completed retention が 0 (= unlimited 蓄積に
+// opt-out) として伝わり、driver opt 側で WithKeepCompleted が emit
+// されなくなることを pin (#1193 review feedback)。
+func TestApplyClientPolicies_OperatorOptOut(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	applyClientPolicies(c, &config.Config{DeliverJobKeepCompleted: intp(0)})
+
+	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)}))
+
+	assert.False(t, rec.lastOpts.KeepCompletedSet, "operator opt-out must NOT set KeepCompletedSet")
+	assert.Equal(t, 0, rec.lastOpts.KeepCompleted)
+	// failed 側は default が残るはず。
+	assert.Equal(t, defaultKeepFailed, rec.lastOpts.KeepFailed)
+}
+
+// TestDefaultPolicy: defaultPolicy() helper が buildPolicy(nil, nil, nil)
+// と同値であることを assert (refactoring 後の equivalence pin)。
+func TestDefaultPolicy(t *testing.T) {
+	assert.Equal(t, buildPolicy(nil, nil, nil), defaultPolicy())
 }
 
 // TestBuildPolicy validates the (maxAttempts, keepFailed, keepCompleted)

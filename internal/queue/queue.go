@@ -150,13 +150,20 @@ func (c *Client) policyFor(queueName string) Policy {
 // BullMQ-compatible removeOnComplete / removeOnFail are wired uniformly
 // across deliver / inbox / export / push / webhook (#1193)。
 //
-// 各 field は 0 (= unset) のとき option を emit しない (driver default
-// = unlimited retention) ように `> 0` で guard。これは driver-neutral
-// layer の `WithKeepFailed` / `WithKeepCompleted` の 0-skip semantic と
-// 同じ規約 (mkqdriver/option.go の対応 guard 参照)。
+// 自前で Policy を引いていない caller 向けの薄い wrapper。MaxAttempts も
+// 見たい caller は policyFor を呼んでから retentionOptsFromPolicy を直接
+// 使うことで RLock を 1 回に抑えられる (EnqueueDeliver / EnqueueInbox 経路)。
 func (c *Client) retentionOpts(queueName string) []driver.EnqueueOption {
-	p := c.policyFor(queueName)
-	var out []driver.EnqueueOption
+	return retentionOptsFromPolicy(c.policyFor(queueName))
+}
+
+// retentionOptsFromPolicy is the lock-free core of retentionOpts. 各 field は
+// 0 (= unset) のとき option を emit しない (driver default = unlimited retention)
+// ように `> 0` で guard。これは driver-neutral layer の `WithKeepFailed` /
+// `WithKeepCompleted` の 0-skip semantic と同じ規約 (mkqdriver/option.go の
+// 対応 guard 参照)。
+func retentionOptsFromPolicy(p Policy) []driver.EnqueueOption {
+	out := make([]driver.EnqueueOption, 0, 4)
 	if p.KeepCompleted > 0 {
 		out = append(out, driver.WithKeepCompleted(p.KeepCompleted))
 	}
@@ -188,14 +195,16 @@ func (c *Client) retentionOpts(queueName string) []driver.EnqueueOption {
 // (#531 review)。
 func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOption) error {
 	body := mustMarshal(payload)
-	base := []driver.EnqueueOption{driver.WithQueue(QueueName)}
+	// 1 回の policyFor で MaxAttempts と retention の両方を済ませる
+	// (RLock 1 回 / map lookup 1 回に集約)。
 	p := c.policyFor(QueueName)
+	base := []driver.EnqueueOption{driver.WithQueue(QueueName)}
 	if p.MaxAttempts > 0 {
 		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
 	}
 	// completed / failed bucket retention を Policy から組み立てる (#1184 / #1193)。
 	// mkqdriver 経路でのみ効き、asynqdriver では silent no-op。
-	base = append(base, c.retentionOpts(QueueName)...)
+	base = append(base, retentionOptsFromPolicy(p)...)
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypeDeliver, body, merged...)
 }
@@ -302,12 +311,13 @@ func (c *Client) EnqueueImportCustomEmojis(payload ImportCustomEmojisPayload) er
 // variadic pattern に揃える。
 func (c *Client) EnqueueInbox(ctx context.Context, payload InboxPayload) error {
 	body := mustMarshal(payload)
-	base := []driver.EnqueueOption{driver.WithQueue(InboxQueueName)}
+	// EnqueueDeliver と同じ理由で 1-shot lookup (#1184 / #1193)。
 	p := c.policyFor(InboxQueueName)
+	base := []driver.EnqueueOption{driver.WithQueue(InboxQueueName)}
 	if p.MaxAttempts > 0 {
 		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
 	}
-	base = append(base, c.retentionOpts(InboxQueueName)...)
+	base = append(base, retentionOptsFromPolicy(p)...)
 	return c.inner.Enqueue(ctx, TaskTypeInbox, body, base...)
 }
 

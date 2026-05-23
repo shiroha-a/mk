@@ -130,17 +130,24 @@ const (
 // 経由で mkq native の per-fire option を上流仕様で drop するため本 PR では
 // 対象外 (mkq upstream 拡張後に follow-up)。
 func applyClientPolicies(c *queue.Client, cfg *config.Config) {
-	deliverPolicy := buildPolicy(cfg.DeliverJobMaxAttempts, cfg.DeliverJobKeepFailed, cfg.DeliverJobKeepCompleted)
-	inboxPolicy := buildPolicy(cfg.InboxJobMaxAttempts, cfg.InboxJobKeepFailed, cfg.InboxJobKeepCompleted)
-	c.SetPolicy(queue.QueueName, deliverPolicy)
-	c.SetPolicy(queue.InboxQueueName, inboxPolicy)
+	c.SetPolicy(queue.QueueName, buildPolicy(cfg.DeliverJobMaxAttempts, cfg.DeliverJobKeepFailed, cfg.DeliverJobKeepCompleted))
+	c.SetPolicy(queue.InboxQueueName, buildPolicy(cfg.InboxJobMaxAttempts, cfg.InboxJobKeepFailed, cfg.InboxJobKeepCompleted))
 	// export / push / webhook 用の YAML key は意図的に増やさない (TS と
 	// 同じく一律の default を踏ませれば十分)。tuning 用 hook が必要に
 	// なったら deliver/inbox と同じ pattern で *KeepCompleted / *KeepFailed
 	// を追加すれば対応可能。
-	c.SetPolicy(queue.ExportQueueName, buildPolicy(nil, nil, nil))
-	c.SetPolicy(queue.PushQueueName, buildPolicy(nil, nil, nil))
-	c.SetPolicy(queue.WebhookQueueName, buildPolicy(nil, nil, nil))
+	c.SetPolicy(queue.ExportQueueName, defaultPolicy())
+	c.SetPolicy(queue.PushQueueName, defaultPolicy())
+	c.SetPolicy(queue.WebhookQueueName, defaultPolicy())
+}
+
+// defaultPolicy returns the queue.Policy applied when no operator config
+// override exists for the queue. すべての retention default (KeepFailed /
+// KeepCompleted / KeepCompletedAge / KeepFailedAge) を含む。tuning hook
+// が無い queue (export / push / webhook) で applyClientPolicies が一律
+// 適用するために存在する。
+func defaultPolicy() queue.Policy {
+	return buildPolicy(nil, nil, nil)
 }
 
 // buildPolicy assembles a queue.Policy from optional config pointers,
