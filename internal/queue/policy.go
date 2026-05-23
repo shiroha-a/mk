@@ -1,5 +1,7 @@
 package queue
 
+import "time"
+
 // Policy captures runtime tuning knobs for a single logical queue. The
 // fields are applied lazily by NewClient (default MaxRetry on enqueue) and
 // by the driver Server constructors (worker concurrency / rate limit). All
@@ -39,6 +41,24 @@ type Policy struct {
 	// `MaxAttempts` と同じく EnqueueDeliver / EnqueueInbox が caller
 	// opts の前に prepend する形で渡る (#1184)。
 	KeepFailed int
+
+	// KeepCompleted bounds the size of the completed bucket / ZSET for
+	// this queue, mirroring KeepFailed's semantics for the completed
+	// side (BullMQ `removeOnComplete: N` 互換、#1193)。0 = retention
+	// 無し (= BullMQ default の無制限蓄積、UDS 観測で実害があった
+	// 旧挙動)。
+	KeepCompleted int
+
+	// KeepCompletedAge bounds completed job retention by age, mirroring
+	// BullMQ TS の `removeOnComplete: {age: <seconds>}`。KeepCompleted
+	// と併用すると count / age の両条件で prune される (TS upstream
+	// は両方指定する規約)。
+	KeepCompletedAge time.Duration
+
+	// KeepFailedAge は failed bucket の age-based retention。
+	// KeepFailed と併用して BullMQ TS の `removeOnFail: {age: <sec>,
+	// count: N}` を再現する。
+	KeepFailedAge time.Duration
 }
 
 // PolicyMap maps queue name → Policy. Lookups for missing queues return

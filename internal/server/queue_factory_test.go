@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -79,30 +80,116 @@ func TestApplyClientPolicies_NoOpForZero(t *testing.T) {
 	})
 }
 
-// TestBuildPolicy validates the (maxAttempts, keepFailed) → Policy
-// transform end-to-end: unset → defaultKeepFailed (= 1000)、明示 0 →
-// 0 (= operator opt-out, unlimited 蓄積)、明示 N → N (#1184)。
+// TestBuildPolicy validates the (maxAttempts, keepFailed, keepCompleted)
+// → Policy transform end-to-end: unset → defaults (= 1000 / 30 / 7d / 7d)、
+// 明示 0 → 0 (= operator opt-out, unlimited 蓄積)、明示 N → N。Age 値は
+// YAML key を持たないので常に固定 7d (#1184 / #1193)。
 func TestBuildPolicy(t *testing.T) {
-	tests := []struct {
-		name        string
-		maxAttempts *int
-		keepFailed  *int
-		want        queue.Policy
+	defaultAges := struct {
+		completed time.Duration
+		failed    time.Duration
 	}{
-		{"both unset", nil, nil, queue.Policy{KeepFailed: defaultKeepFailed}},
-		{"only maxAttempts", intp(8), nil, queue.Policy{MaxAttempts: 8, KeepFailed: defaultKeepFailed}},
-		{"only keepFailed explicit 500", nil, intp(500), queue.Policy{KeepFailed: 500}},
-		{"only keepFailed explicit 0 (operator opt-out)", nil, intp(0), queue.Policy{KeepFailed: 0}},
-		{"both explicit", intp(4), intp(2000), queue.Policy{MaxAttempts: 4, KeepFailed: 2000}},
+		completed: defaultKeepCompletedAge,
+		failed:    defaultKeepFailedAge,
+	}
+	tests := []struct {
+		name          string
+		maxAttempts   *int
+		keepFailed    *int
+		keepCompleted *int
+		want          queue.Policy
+	}{
+		{
+			"all unset",
+			nil, nil, nil,
+			queue.Policy{
+				KeepFailed:       defaultKeepFailed,
+				KeepCompleted:    defaultKeepCompleted,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"only maxAttempts",
+			intp(8), nil, nil,
+			queue.Policy{
+				MaxAttempts:      8,
+				KeepFailed:       defaultKeepFailed,
+				KeepCompleted:    defaultKeepCompleted,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"only keepFailed explicit 500",
+			nil, intp(500), nil,
+			queue.Policy{
+				KeepFailed:       500,
+				KeepCompleted:    defaultKeepCompleted,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"only keepFailed explicit 0 (operator opt-out)",
+			nil, intp(0), nil,
+			queue.Policy{
+				KeepFailed:       0,
+				KeepCompleted:    defaultKeepCompleted,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"only keepCompleted explicit 100",
+			nil, nil, intp(100),
+			queue.Policy{
+				KeepFailed:       defaultKeepFailed,
+				KeepCompleted:    100,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"only keepCompleted explicit 0 (operator opt-out)",
+			nil, nil, intp(0),
+			queue.Policy{
+				KeepFailed:       defaultKeepFailed,
+				KeepCompleted:    0,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
+		{
+			"all explicit",
+			intp(4), intp(2000), intp(50),
+			queue.Policy{
+				MaxAttempts:      4,
+				KeepFailed:       2000,
+				KeepCompleted:    50,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
 		// maxAttempts<=0 は driver default に倒す既存挙動を維持。
 		// `MaxAttempts: 0` は「Policy で上書きしない (= driver の default
 		// retry を使う)」を意味する zero-value。明示 0 を受け取っても
 		// Policy には流さないので 0 のまま残る。
-		{"maxAttempts zero leaves driver default", intp(0), intp(500), queue.Policy{MaxAttempts: 0, KeepFailed: 500}},
+		{
+			"maxAttempts zero leaves driver default",
+			intp(0), intp(500), intp(15),
+			queue.Policy{
+				MaxAttempts:      0,
+				KeepFailed:       500,
+				KeepCompleted:    15,
+				KeepCompletedAge: defaultAges.completed,
+				KeepFailedAge:    defaultAges.failed,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildPolicy(tt.maxAttempts, tt.keepFailed)
+			got := buildPolicy(tt.maxAttempts, tt.keepFailed, tt.keepCompleted)
 			assert.Equal(t, tt.want, got)
 		})
 	}

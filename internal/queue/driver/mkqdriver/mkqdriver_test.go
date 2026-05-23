@@ -130,6 +130,71 @@ func TestToMkqAddOptions_KeepFailedPositive(t *testing.T) {
 	}
 }
 
+// TestToMkqAddOptions_KeepCompletedZeroSkipped: KeepFailed と同じ 0-skip
+// semantic を KeepCompleted 側でも維持する (mkq native の WithKeepCompleted(0)
+// は「即時削除」で driver-neutral semantic と真逆、#1193 review)。
+func TestToMkqAddOptions_KeepCompletedZeroSkipped(t *testing.T) {
+	o := driver.EnqueueOptions{KeepCompleted: 0, KeepCompletedSet: true}
+	got := toMkqAddOptions(o, "task", nil)
+	if len(got) != 1 {
+		t.Fatalf("KeepCompleted=0 must not emit mkq.WithKeepCompleted, got %d options", len(got))
+	}
+}
+
+// TestToMkqAddOptions_KeepCompletedPositive: value>0 のときは
+// mkq.WithKeepCompleted として直訳される。
+func TestToMkqAddOptions_KeepCompletedPositive(t *testing.T) {
+	o := driver.EnqueueOptions{KeepCompleted: 30, KeepCompletedSet: true}
+	got := toMkqAddOptions(o, "task", nil)
+	// WithJobName + WithKeepCompleted の 2 個。
+	if len(got) != 2 {
+		t.Fatalf("KeepCompleted>0 should emit mkq.WithKeepCompleted, got %d options", len(got))
+	}
+}
+
+// TestToMkqAddOptions_AgePositive: KeepCompletedAge / KeepFailedAge の
+// 両方が正値なら 2 個追加で計 3 個。0 は emit しない。
+func TestToMkqAddOptions_AgePositive(t *testing.T) {
+	o := driver.EnqueueOptions{
+		KeepCompletedAge: 7 * 24 * time.Hour,
+		KeepFailedAge:    7 * 24 * time.Hour,
+	}
+	got := toMkqAddOptions(o, "task", nil)
+	// WithJobName + WithKeepCompletedAge + WithKeepFailedAge の 3 個。
+	if len(got) != 3 {
+		t.Fatalf("both ages should emit 2 options + WithJobName = 3 total, got %d", len(got))
+	}
+}
+
+// TestToMkqAddOptions_AgeZeroSkipped: age=0 は「未指定」扱いで emit しない
+// (BullMQ 仕様で age=0 を意味的に使う場面が無く、Set sentinel 不要)。
+func TestToMkqAddOptions_AgeZeroSkipped(t *testing.T) {
+	o := driver.EnqueueOptions{KeepCompletedAge: 0, KeepFailedAge: 0}
+	got := toMkqAddOptions(o, "task", nil)
+	if len(got) != 1 {
+		t.Fatalf("age=0 must not emit options, got %d", len(got))
+	}
+}
+
+// TestToMkqAddOptions_FullRetention: TS upstream の `{age: 7d, count: 30}`
+// /  `{age: 7d, count: 100}` 互換を 1 ジョブで両側設定したケース。
+// WithJobName + WithKeepFailed + WithKeepCompleted + WithKeepCompletedAge +
+// WithKeepFailedAge の 5 options が emit される。
+func TestToMkqAddOptions_FullRetention(t *testing.T) {
+	o := driver.EnqueueOptions{
+		KeepFailed:       100,
+		KeepFailedSet:    true,
+		KeepCompleted:    30,
+		KeepCompletedSet: true,
+		KeepCompletedAge: 7 * 24 * time.Hour,
+		KeepFailedAge:    7 * 24 * time.Hour,
+	}
+	got := toMkqAddOptions(o, "task", nil)
+	if len(got) != 5 {
+		t.Fatalf("full retention should emit 4 retention options + WithJobName = 5 total, got %d", len(got))
+	}
+}
+
 func TestToMkqAddOptions_MaxRetryRequiresExplicit(t *testing.T) {
 	// MaxRetrySet=false → default attempts; no option emitted.
 	got := toMkqAddOptions(driver.EnqueueOptions{MaxRetry: 3}, "task", nil)

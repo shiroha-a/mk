@@ -3,6 +3,7 @@ package queue_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -86,4 +87,97 @@ func TestClient_EnqueueDeliver_PolicyZeroKeepFailedSkipped(t *testing.T) {
 
 	assert.False(t, rec.lastOpts.KeepFailedSet, "KeepFailedSet must NOT be set when policy KeepFailed=0")
 	assert.Equal(t, 0, rec.lastOpts.KeepFailed)
+}
+
+// TestClient_EnqueueDeliver_PolicyKeepCompletedApplied verifies that
+// Policy.KeepCompleted reaches the driver as driver.WithKeepCompleted(n)
+// (#1193, KeepFailed と対称)。
+func TestClient_EnqueueDeliver_PolicyKeepCompletedApplied(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.QueueName, queue.Policy{
+		KeepCompleted:    30,
+		KeepCompletedAge: 7 * 24 * time.Hour,
+		KeepFailedAge:    7 * 24 * time.Hour,
+	})
+
+	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)}))
+
+	assert.True(t, rec.lastOpts.KeepCompletedSet, "KeepCompletedSet must be propagated")
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+	assert.Equal(t, 7*24*time.Hour, rec.lastOpts.KeepCompletedAge)
+	assert.Equal(t, 7*24*time.Hour, rec.lastOpts.KeepFailedAge)
+}
+
+// TestClient_EnqueueInbox_PolicyKeepCompletedApplied: 同様 inbox 経路。
+func TestClient_EnqueueInbox_PolicyKeepCompletedApplied(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.InboxQueueName, queue.Policy{KeepCompleted: 30})
+
+	require.NoError(t, c.EnqueueInbox(context.Background(), queue.InboxPayload{Body: []byte(`{}`)}))
+
+	assert.True(t, rec.lastOpts.KeepCompletedSet)
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+}
+
+// TestClient_EnqueueDeliver_PolicyZeroKeepCompletedSkipped: KeepCompleted=0
+// は emit しない (KeepFailed と同じ semantic、driver 側で unlimited 蓄積)。
+func TestClient_EnqueueDeliver_PolicyZeroKeepCompletedSkipped(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.QueueName, queue.Policy{KeepCompleted: 0})
+
+	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)}))
+
+	assert.False(t, rec.lastOpts.KeepCompletedSet, "KeepCompletedSet must NOT be set when policy KeepCompleted=0")
+}
+
+// TestClient_EnqueueExport_PolicyApplied: export queue (= TS の dbQueue
+// 相当) でも Policy が適用される (#1193 で applyClientPolicies が 5 queue
+// 全てに広がった)。
+func TestClient_EnqueueExport_PolicyApplied(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.ExportQueueName, queue.Policy{
+		KeepCompleted:    30,
+		KeepCompletedAge: 7 * 24 * time.Hour,
+	})
+
+	require.NoError(t, c.EnqueueExport(queue.ExportPayload{UserID: "u", Type: "notes"}))
+
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+	assert.Equal(t, 7*24*time.Hour, rec.lastOpts.KeepCompletedAge)
+}
+
+// TestClient_EnqueueWebPush_PolicyApplied: push queue でも適用される。
+func TestClient_EnqueueWebPush_PolicyApplied(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.PushQueueName, queue.Policy{KeepCompleted: 30})
+
+	require.NoError(t, c.EnqueueWebPush(context.Background(), queue.WebPushPayload{}))
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+}
+
+// TestClient_EnqueueUserWebhook_PolicyApplied: webhook queue でも適用。
+func TestClient_EnqueueUserWebhook_PolicyApplied(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.WebhookQueueName, queue.Policy{KeepCompleted: 30})
+
+	require.NoError(t, c.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{}))
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
 }

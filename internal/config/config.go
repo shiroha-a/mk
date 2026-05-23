@@ -164,6 +164,14 @@ type Source struct {
 	DeliverJobKeepFailed *int `mapstructure:"deliverJobKeepFailed"`
 	InboxJobKeepFailed   *int `mapstructure:"inboxJobKeepFailed"`
 
+	// `<queue>JobKeepCompleted` は completed bucket retention の最大
+	// 件数。意味的には KeepFailed と同じ「件数で上限を切る」。0 で
+	// 蓄積無制限 (= UDS 観測で実害があった BullMQ default 挙動) に
+	// opt-out 可能。未指定なら mk-go internal default (TS と同じ 30)
+	// が適用される (#1193)。
+	DeliverJobKeepCompleted *int `mapstructure:"deliverJobKeepCompleted"`
+	InboxJobKeepCompleted   *int `mapstructure:"inboxJobKeepCompleted"`
+
 	// JobQueueAutoScale toggles the AIMD auto-scale controller (#1120).
 	// Default false. When true, queues without an explicit
 	// `<queue>JobConcurrency` are managed by the controller within
@@ -325,6 +333,8 @@ type Config struct {
 	InboxJobMaxAttempts        *int
 	DeliverJobKeepFailed       *int
 	InboxJobKeepFailed         *int
+	DeliverJobKeepCompleted    *int
+	InboxJobKeepCompleted      *int
 
 	// Auto-scale knobs (#1120 tracker). See docs/design/auto-scale-job-workers.md.
 	JobQueueAutoScale        bool
@@ -569,6 +579,8 @@ func resolve(src *Source) (*Config, error) {
 		InboxJobMaxAttempts:        src.InboxJobMaxAttempts,
 		DeliverJobKeepFailed:       src.DeliverJobKeepFailed,
 		InboxJobKeepFailed:         src.InboxJobKeepFailed,
+		DeliverJobKeepCompleted:    src.DeliverJobKeepCompleted,
+		InboxJobKeepCompleted:      src.InboxJobKeepCompleted,
 		JobQueueAutoScale:          src.JobQueueAutoScale,
 		MaxWorkers:                 src.MaxWorkers,
 		MinWorkers:                 src.MinWorkers,

@@ -144,6 +144,34 @@ func (c *Client) policyFor(queueName string) Policy {
 	return c.policies.PolicyFor(queueName)
 }
 
+// retentionOpts returns the driver-neutral options derived from the
+// queue's Policy (KeepCompleted / KeepCompletedAge / KeepFailed /
+// KeepFailedAge). All Enqueue* helpers pre-pend this output so the
+// BullMQ-compatible removeOnComplete / removeOnFail are wired uniformly
+// across deliver / inbox / export / push / webhook (#1193)。
+//
+// 各 field は 0 (= unset) のとき option を emit しない (driver default
+// = unlimited retention) ように `> 0` で guard。これは driver-neutral
+// layer の `WithKeepFailed` / `WithKeepCompleted` の 0-skip semantic と
+// 同じ規約 (mkqdriver/option.go の対応 guard 参照)。
+func (c *Client) retentionOpts(queueName string) []driver.EnqueueOption {
+	p := c.policyFor(queueName)
+	var out []driver.EnqueueOption
+	if p.KeepCompleted > 0 {
+		out = append(out, driver.WithKeepCompleted(p.KeepCompleted))
+	}
+	if p.KeepCompletedAge > 0 {
+		out = append(out, driver.WithKeepCompletedAge(p.KeepCompletedAge))
+	}
+	if p.KeepFailed > 0 {
+		out = append(out, driver.WithKeepFailed(p.KeepFailed))
+	}
+	if p.KeepFailedAge > 0 {
+		out = append(out, driver.WithKeepFailedAge(p.KeepFailedAge))
+	}
+	return out
+}
+
 // EnqueueDeliver puts a deliver task on the queue. opts override the
 // default queue selection if they include WithQueue, but normal
 // callers should pass payload-only and let the queue routing stay
@@ -165,11 +193,9 @@ func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOp
 	if p.MaxAttempts > 0 {
 		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
 	}
-	if p.KeepFailed > 0 {
-		// mkqdriver 経路でのみ効く。asynqdriver は silent no-op。
-		// failed bucket retention で永続蓄積を防ぐ (#1184)。
-		base = append(base, driver.WithKeepFailed(p.KeepFailed))
-	}
+	// completed / failed bucket retention を Policy から組み立てる (#1184 / #1193)。
+	// mkqdriver 経路でのみ効き、asynqdriver では silent no-op。
+	base = append(base, c.retentionOpts(QueueName)...)
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypeDeliver, body, merged...)
 }
@@ -179,7 +205,9 @@ func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOp
 // で `scheduledAt - now` を指定する想定 (#1040)。
 func (c *Client) EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts ...driver.EnqueueOption) error {
 	body := mustMarshal(payload)
-	merged := append([]driver.EnqueueOption{driver.WithQueue(QueueName)}, opts...)
+	base := []driver.EnqueueOption{driver.WithQueue(QueueName)}
+	base = append(base, c.retentionOpts(QueueName)...)
+	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypePostScheduledNote, body, merged...)
 }
 
@@ -241,26 +269,26 @@ func (c *Client) ClearScheduledNote(draftID string) error {
 // EnqueueExport puts an export task on the queue.
 func (c *Client) EnqueueExport(payload ExportPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(context.Background(), TaskTypeExport, body,
-		driver.WithQueue(ExportQueueName),
-	)
+	base := []driver.EnqueueOption{driver.WithQueue(ExportQueueName)}
+	base = append(base, c.retentionOpts(ExportQueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeExport, body, base...)
 }
 
 // EnqueueImport puts an import task on the queue.
 func (c *Client) EnqueueImport(payload ImportPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(context.Background(), TaskTypeImport, body,
-		driver.WithQueue(ExportQueueName),
-	)
+	base := []driver.EnqueueOption{driver.WithQueue(ExportQueueName)}
+	base = append(base, c.retentionOpts(ExportQueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeImport, body, base...)
 }
 
 // EnqueueImportCustomEmojis puts an admin emoji-zip import task on the
 // export queue. Misskey 本家も同じ "dbQueue" (低優先) に積んでいる。
 func (c *Client) EnqueueImportCustomEmojis(payload ImportCustomEmojisPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(context.Background(), TaskTypeImportCustomEmojis, body,
-		driver.WithQueue(ExportQueueName),
-	)
+	base := []driver.EnqueueOption{driver.WithQueue(ExportQueueName)}
+	base = append(base, c.retentionOpts(ExportQueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeImportCustomEmojis, body, base...)
 }
 
 // EnqueueInbox puts an inbound ActivityPub activity onto the inbox queue
@@ -279,18 +307,16 @@ func (c *Client) EnqueueInbox(ctx context.Context, payload InboxPayload) error {
 	if p.MaxAttempts > 0 {
 		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
 	}
-	if p.KeepFailed > 0 {
-		base = append(base, driver.WithKeepFailed(p.KeepFailed))
-	}
+	base = append(base, c.retentionOpts(InboxQueueName)...)
 	return c.inner.Enqueue(ctx, TaskTypeInbox, body, base...)
 }
 
 // EnqueueWebPush puts a Web Push delivery task on the push queue.
 func (c *Client) EnqueueWebPush(ctx context.Context, payload WebPushPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(ctx, TaskTypeWebPush, body,
-		driver.WithQueue(PushQueueName),
-	)
+	base := []driver.EnqueueOption{driver.WithQueue(PushQueueName)}
+	base = append(base, c.retentionOpts(PushQueueName)...)
+	return c.inner.Enqueue(ctx, TaskTypeWebPush, body, base...)
 }
 
 // EnqueueUserWebhook puts a user webhook delivery task on the webhook
@@ -298,38 +324,46 @@ func (c *Client) EnqueueWebPush(ctx context.Context, payload WebPushPayload) err
 // して扱うため実際のリトライ対象は 5xx とネットワークエラーに限られる)。
 func (c *Client) EnqueueUserWebhook(ctx context.Context, payload WebhookPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(ctx, TaskTypeUserWebhook, body,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(WebhookQueueName),
 		driver.WithMaxRetry(4),
-	)
+	}
+	base = append(base, c.retentionOpts(WebhookQueueName)...)
+	return c.inner.Enqueue(ctx, TaskTypeUserWebhook, body, base...)
 }
 
 // EnqueueSystemWebhook puts a system webhook delivery task on the webhook queue.
 func (c *Client) EnqueueSystemWebhook(ctx context.Context, payload WebhookPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(ctx, TaskTypeSystemWebhook, body,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(WebhookQueueName),
 		driver.WithMaxRetry(4),
-	)
+	}
+	base = append(base, c.retentionOpts(WebhookQueueName)...)
+	return c.inner.Enqueue(ctx, TaskTypeSystemWebhook, body, base...)
 }
 
 // EnqueueCleanRemoteNotes puts a remote notes cleaning task on the queue.
 // 重複排除のため UniqueFor を設定。
 func (c *Client) EnqueueCleanRemoteNotes() error {
-	return c.inner.Enqueue(context.Background(), TaskTypeCleanRemoteNotes, nil,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(QueueName),
 		driver.WithMaxRetry(0),
-		driver.WithUnique(6*time.Hour),
-	)
+		driver.WithUnique(6 * time.Hour),
+	}
+	base = append(base, c.retentionOpts(QueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeCleanRemoteNotes, nil, base...)
 }
 
 // EnqueueReactionFlush puts a reaction flush task on the queue.
 func (c *Client) EnqueueReactionFlush() error {
-	return c.inner.Enqueue(context.Background(), TaskTypeReactionFlush, nil,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(QueueName),
 		driver.WithMaxRetry(0),
-		driver.WithUnique(25*time.Second),
-	)
+		driver.WithUnique(25 * time.Second),
+	}
+	base = append(base, c.retentionOpts(QueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeReactionFlush, nil, base...)
 }
 
 // EnqueueDeleteAccount schedules a cascade deletion of the user's
@@ -338,11 +372,13 @@ func (c *Client) EnqueueReactionFlush() error {
 // still processing.
 func (c *Client) EnqueueDeleteAccount(payload DeleteAccountPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(context.Background(), TaskTypeDeleteAccount, body,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(QueueName),
 		driver.WithMaxRetry(2),
-		driver.WithUnique(24*time.Hour),
-	)
+		driver.WithUnique(24 * time.Hour),
+	}
+	base = append(base, c.retentionOpts(QueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeDeleteAccount, body, base...)
 }
 
 // EnqueueUnfollow schedules a single Unfollow job for the given pair.
@@ -352,10 +388,12 @@ func (c *Client) EnqueueDeleteAccount(payload DeleteAccountPayload) error {
 // AP delivery 失敗を吸収できる程度に設定。
 func (c *Client) EnqueueUnfollow(payload UnfollowPayload) error {
 	body := mustMarshal(payload)
-	return c.inner.Enqueue(context.Background(), TaskTypeUnfollow, body,
+	base := []driver.EnqueueOption{
 		driver.WithQueue(QueueName),
 		driver.WithMaxRetry(3),
-	)
+	}
+	base = append(base, c.retentionOpts(QueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeUnfollow, body, base...)
 }
 
 // Close releases the underlying client connection.

@@ -11,6 +11,9 @@ import "time"
 //   - UniqueTTL 0        : no unique-key dedup
 //   - ProcessIn 0        : process immediately
 //   - KeepFailed 0       : driver default (= no automatic retention)
+//   - KeepCompleted 0    : driver default (= no automatic retention)
+//   - KeepCompletedAge 0 : driver default (= no age-based prune)
+//   - KeepFailedAge 0    : driver default (= no age-based prune)
 type EnqueueOptions struct {
 	Queue     string
 	MaxRetry  int
@@ -29,6 +32,32 @@ type EnqueueOptions struct {
 	// (= documented intent としての semantic を保つ)。
 	KeepFailed    int
 	KeepFailedSet bool
+
+	// KeepCompleted bounds the size of the completed ZSET, mirroring
+	// KeepFailed's semantics for the completed bucket. mkq translates
+	// this to `mkq.WithKeepCompleted(n)`. asynq has no per-job
+	// equivalent (= silent no-op). BullMQ の `removeOnComplete: N`
+	// 互換 (#1193)。
+	//
+	// KeepCompletedSet も KeepFailedSet と同じ「明示 0 vs default」
+	// 区別 pattern。
+	KeepCompleted    int
+	KeepCompletedSet bool
+
+	// KeepCompletedAge drops completed jobs older than this duration
+	// (BullMQ `removeOnComplete: {age: <seconds>}` 互換)。mkq
+	// translates to `mkq.WithKeepCompletedAge(age)`。0 = age-based
+	// prune 無し (driver default を踏ませる)。asynq では silent no-op。
+	//
+	// Combine with KeepCompleted to cap by both count and age in
+	// the same way BullMQ TS's `{age, count}` object form works
+	// (BullMQ TS の `removeOnComplete: {age: 7d, count: 30}` 互換)。
+	KeepCompletedAge time.Duration
+
+	// KeepFailedAge is the failed-side analogue of KeepCompletedAge
+	// (BullMQ `removeOnFail: {age: <seconds>}` 互換)。0 = age-based
+	// prune 無し。
+	KeepFailedAge time.Duration
 
 	// MaxRetrySet distinguishes "MaxRetry left at default" from
 	// "MaxRetry explicitly set to 0". asynq treats MaxRetry=0 as
@@ -87,6 +116,49 @@ func WithKeepFailed(n int) EnqueueOption {
 		o.KeepFailed = n
 		o.KeepFailedSet = true
 	}
+}
+
+// WithKeepCompleted bounds the size of the completed bucket / ZSET for
+// this task's queue, mirroring WithKeepFailed's semantics for completed
+// jobs. n==0 explicitly disables retention (= unlimited accumulation).
+//
+// 主な使い道: BullMQ default の「completed job 無制限保持」を防ぐ。
+// inbox / deliver / db / push / webhook queue の completed bookkeeping
+// が時間と共に redis memory を蝕む実害があるため (#1193 で UDS 観測)。
+// BullMQ の `removeOnComplete: N` と意味同等。
+//
+// driver 別:
+//   - mkqdriver: `n > 0` のときだけ `mkq.WithKeepCompleted(n)` を AddJob
+//     に渡す。注意: mkq native の `WithKeepCompleted(0)` は **「即時削除」**
+//     (BullMQ `removeOnComplete: true` 相当) で driver-neutral semantic と
+//     真逆なので、driver translation 側で 0 は skip する。
+//   - asynqdriver: silent no-op (asynq は完了履歴の per-job retention 制御
+//     を持たず、archived bucket とは別系統で管理される)
+func WithKeepCompleted(n int) EnqueueOption {
+	return func(o *EnqueueOptions) {
+		o.KeepCompleted = n
+		o.KeepCompletedSet = true
+	}
+}
+
+// WithKeepCompletedAge drops completed jobs older than age, mirroring
+// mkq's `WithKeepCompletedAge` (BullMQ `removeOnComplete: {age: <sec>}`
+// 互換)。WithKeepCompleted と併用すると count / age の両条件で prune
+// される (BullMQ TS の `removeOnComplete: {age: 7d, count: 30}` 互換)。
+//
+// driver 別:
+//   - mkqdriver: `age > 0` のときだけ `mkq.WithKeepCompletedAge(age)` を
+//     AddJob に渡す。
+//   - asynqdriver: silent no-op (asynq に対応 API なし)
+func WithKeepCompletedAge(age time.Duration) EnqueueOption {
+	return func(o *EnqueueOptions) { o.KeepCompletedAge = age }
+}
+
+// WithKeepFailedAge is the failed-side analogue of WithKeepCompletedAge
+// (BullMQ `removeOnFail: {age: <sec>}` 互換)。WithKeepFailed と併用
+// すると count / age の両条件で prune される。
+func WithKeepFailedAge(age time.Duration) EnqueueOption {
+	return func(o *EnqueueOptions) { o.KeepFailedAge = age }
 }
 
 // ApplyEnqueueOptions folds the variadic options into a single

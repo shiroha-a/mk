@@ -106,6 +106,27 @@ func TestToAsynqOptions_KeepFailedIsSilentNoOp(t *testing.T) {
 	}
 }
 
+// TestToAsynqOptions_KeepCompletedIsSilentNoOp / AgeIsSilentNoOp:
+// completed bucket 系も含めて KeepFailed と同じく silent no-op (#1193)。
+// asynq は完了履歴管理が BullMQ と異なる系統なので driver-neutral hint を
+// 反映できない。
+func TestToAsynqOptions_KeepCompletedIsSilentNoOp(t *testing.T) {
+	got := toAsynqOptions(driver.EnqueueOptions{KeepCompleted: 30, KeepCompletedSet: true})
+	if len(got) != 0 {
+		t.Fatalf("KeepCompleted must be silently ignored by asynqdriver, got %d options", len(got))
+	}
+}
+
+func TestToAsynqOptions_AgeIsSilentNoOp(t *testing.T) {
+	got := toAsynqOptions(driver.EnqueueOptions{
+		KeepCompletedAge: 7 * 24 * time.Hour,
+		KeepFailedAge:    7 * 24 * time.Hour,
+	})
+	if len(got) != 0 {
+		t.Fatalf("age options must be silently ignored by asynqdriver, got %d options", len(got))
+	}
+}
+
 // fakeRedis returns a non-routable RedisClientOpt; we never Start the
 // server in these tests so the address is fine. asynq client/inspector
 // constructors do not Dial until the first request.

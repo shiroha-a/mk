@@ -32,15 +32,22 @@ func TestApplyEnqueueOptions(t *testing.T) {
 		WithUnique(time.Hour),
 		WithProcessIn(5 * time.Second),
 		WithKeepFailed(500),
+		WithKeepCompleted(30),
+		WithKeepCompletedAge(7 * 24 * time.Hour),
+		WithKeepFailedAge(7 * 24 * time.Hour),
 	})
 	want := EnqueueOptions{
-		Queue:         "deliver",
-		MaxRetry:      3,
-		MaxRetrySet:   true,
-		UniqueTTL:     time.Hour,
-		ProcessIn:     5 * time.Second,
-		KeepFailed:    500,
-		KeepFailedSet: true,
+		Queue:            "deliver",
+		MaxRetry:         3,
+		MaxRetrySet:      true,
+		UniqueTTL:        time.Hour,
+		ProcessIn:        5 * time.Second,
+		KeepFailed:       500,
+		KeepFailedSet:    true,
+		KeepCompleted:    30,
+		KeepCompletedSet: true,
+		KeepCompletedAge: 7 * 24 * time.Hour,
+		KeepFailedAge:    7 * 24 * time.Hour,
 	}
 	if got != want {
 		t.Fatalf("got %#v want %#v", got, want)
@@ -73,5 +80,36 @@ func TestApplyEnqueueOptions_KeepFailedZeroSentinel(t *testing.T) {
 	def := ApplyEnqueueOptions(nil)
 	if def.KeepFailedSet {
 		t.Fatalf("default options must not record KeepFailedSet")
+	}
+}
+
+// TestApplyEnqueueOptions_KeepCompletedZeroSentinel: WithKeepCompleted(0)
+// も同じく「明示的 opt-out」を表し、KeepCompletedSet で default と区別
+// できる必要がある (#1193、KeepFailed と対称)。
+func TestApplyEnqueueOptions_KeepCompletedZeroSentinel(t *testing.T) {
+	got := ApplyEnqueueOptions([]EnqueueOption{WithKeepCompleted(0)})
+	if got.KeepCompleted != 0 || !got.KeepCompletedSet {
+		t.Fatalf("explicit zero not recorded: %#v", got)
+	}
+
+	def := ApplyEnqueueOptions(nil)
+	if def.KeepCompletedSet {
+		t.Fatalf("default options must not record KeepCompletedSet")
+	}
+}
+
+// TestApplyEnqueueOptions_AgeOptions: age-based retention は Set sentinel
+// を持たない (age=0 は「設定なし」と同義扱い、BullMQ 仕様で age を 0 に
+// する意味のあるケースが無いため)。
+func TestApplyEnqueueOptions_AgeOptions(t *testing.T) {
+	got := ApplyEnqueueOptions([]EnqueueOption{
+		WithKeepCompletedAge(7 * 24 * time.Hour),
+		WithKeepFailedAge(3 * 24 * time.Hour),
+	})
+	if got.KeepCompletedAge != 7*24*time.Hour {
+		t.Fatalf("KeepCompletedAge: got %v", got.KeepCompletedAge)
+	}
+	if got.KeepFailedAge != 3*24*time.Hour {
+		t.Fatalf("KeepFailedAge: got %v", got.KeepFailedAge)
 	}
 }

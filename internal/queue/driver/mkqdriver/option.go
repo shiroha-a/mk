@@ -66,6 +66,22 @@ func toMkqAddOptions(o driver.EnqueueOptions, taskType string, payload []byte) [
 		// `removeOnFail: N` 互換 (#1184)。
 		out = append(out, mkq.WithKeepFailed(o.KeepFailed))
 	}
+	if o.KeepCompletedSet && o.KeepCompleted > 0 {
+		// `WithKeepFailed` と同じ 0-skip semantic (上のコメント参照)。
+		// mkq native の `WithKeepCompleted(0)` は「即時削除」で
+		// driver-neutral の「unlimited 蓄積」と真逆なので skip する。
+		// BullMQ の `removeOnComplete: N` 互換 (#1193)。
+		out = append(out, mkq.WithKeepCompleted(o.KeepCompleted))
+	}
+	if o.KeepCompletedAge > 0 {
+		// age-based retention は count と独立に効く。両方指定すれば
+		// BullMQ TS の `removeOnComplete: {age: 7d, count: 30}` 互換に
+		// なる (どちらの条件に引っ掛かっても prune される)。
+		out = append(out, mkq.WithKeepCompletedAge(o.KeepCompletedAge))
+	}
+	if o.KeepFailedAge > 0 {
+		out = append(out, mkq.WithKeepFailedAge(o.KeepFailedAge))
+	}
 	return out
 }
 
