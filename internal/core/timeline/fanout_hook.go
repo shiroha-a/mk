@@ -3,6 +3,7 @@ package timeline
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -280,7 +281,7 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 			// (= follower) への mention が含まれているとき、author の意図とし
 			// て viewer に届けたいはずなので follower の withReplies 設定で隠
 			// さない。
-			isMentioned := isReply && containsMention(n.Mentions, f.FollowerID)
+			isMentioned := isReply && slices.Contains(n.Mentions, f.FollowerID)
 			if isReply && !isSelfThread && !isReplyToFollower && !isMentioned && !f.WithReplies {
 				continue
 			}
@@ -403,19 +404,4 @@ func (h *FanoutHook) removeFromUserLists(ctx context.Context, authorID, noteID s
 	for _, listID := range listIDs {
 		h.removeBestEffort(ctx, UserListTimelineName(listID), noteID)
 	}
-}
-
-// containsMention reports whether `mentions` (= model.Note.Mentions, a list of
-// user IDs) includes `userID`. typical mention 数は < 10 なので map 化せず
-// 線形探索で十分。fanout reply gate の mention escape hatch (#1195) で使う。
-func containsMention(mentions []string, userID string) bool {
-	if userID == "" {
-		return false
-	}
-	for _, m := range mentions {
-		if m == userID {
-			return true
-		}
-	}
-	return false
 }

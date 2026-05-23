@@ -351,6 +351,50 @@ func TestFanoutHook_FollowersOnlyReply_ReplyToFollowerEscapeHatch(t *testing.T) 
 	assert.Equal(t, []string{noteID}, out, "follower1 (= reply target 本人) は followers-only gate を escape")
 }
 
+// TestFanoutHook_MentionEscapeDoesNotBypassFollowersVisibilityGate guards
+// #1195 の scope boundary: mention escape hatch は basic withReplies gate のみ
+// を pass させ、followers-visibility privacy gate (= reply target を follow
+// していない follower への reply 本文露出防止) は引き続き drop する。stream
+// 側で同 scenario を `TestReplyShouldEmit_MentionEscapeDoesNotOverrideFollowersVisibility`
+// で pin 済み、fanout 側もここで同 symmetry を pin して privacy boundary が
+// 将来 escape に飲み込まれないようにする。
+//
+// scenario: A が `replyTargetUser` (visibility=followers) に reply、本文に
+// follower1 を mention。follower1 は author を withReplies=true で follow し
+// ているが replyTargetUser は follow していない。
+//   - mention されていても followers-visibility gate は通らないので drop。
+func TestFanoutHook_MentionEscapeDoesNotBypassFollowersVisibilityGate(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author", WithReplies: true}
+	// follower1 は replyTargetUser を follow していない (= followers-only gate
+	// が effective)。
+
+	noteID := idGen.Generate(time.Now())
+	replyTargetID := "reply-target-note"
+	replyTargetUser := "replyTargetUser"
+	n := &model.Note{
+		ID:          noteID,
+		UserID:      "author",
+		Visibility:  model.NoteVisibilityPublic,
+		ReplyID:     &replyTargetID,
+		ReplyUserID: &replyTargetUser,
+		Mentions:    []string{"follower1"}, // mention されていても escape は basic gate のみ
+		Reply: &model.Note{
+			ID:         replyTargetID,
+			UserID:     replyTargetUser,
+			Visibility: model.NoteVisibilityFollowers,
+		},
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// follower1 は mention されているが replyTargetUser を follow していない
+	// ので followers-visibility gate で drop される (privacy boundary 維持)。
+	out, err := fanout.Get(ctx, HomeTimelineName("follower1"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "mentioned follower should still be dropped by followers-visibility gate (#1195 scope boundary)")
+}
+
 // 通常 note (reply 無し) は WithReplies 設定に関わらず全 follower に push される。
 func TestFanoutHook_NonReplyFanoutsToAllFollowers(t *testing.T) {
 	h, fanout, following := newTestHook(t)
