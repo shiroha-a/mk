@@ -155,11 +155,12 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 //   - target user が remote なら 400 IS_REMOTE_USER (mk-go では現状 local
 //     のみ対応、upstream と同じ制限)。
 //   - それ以外 (public か self view) なら reactor の reaction list を
-//     id / createdAt / type / user / note の minimal shape で返す。
+//     id / createdAt / type / user / note shape で返す。
 //
-// note pack は upstream の packManyWithNote (= 完全 note shape) ではなく
-// 最小 shape (id / userId / text) で start。drop-in 互換性は両 backend で
-// 同 endpoint が動くことを spec で担保する (#821 PR-D)。
+// note は upstream の packManyWithNote 相当の完全 shape (PackNotes) で返す。
+// 最小 shape (id / userId / text) だと createdAt / visibility / user 等が
+// 欠落し、misskey_dart の Note.fromJson が非null cast に失敗して落ちる
+// (#1227、当初は #821 PR-D で最小 shape start としていた)。
 func (h *Handler) Reactions(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
@@ -220,6 +221,22 @@ func (h *Handler) Reactions(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// note は upstream の packManyWithNote と同じく完全 shape で返す。最小 shape
+	// (id/userId/text) だと createdAt / visibility / user 等が欠落し、misskey_dart
+	// の Note.fromJson が非null フィールドの cast に失敗して落ちる (#1227)。
+	// PackNotes で batch pack して instance / emoji / buffered reaction も解決する。
+	notes := make([]*model.Note, 0, len(rows))
+	for _, r := range rows {
+		if r.Note != nil {
+			notes = append(notes, r.Note)
+		}
+	}
+	packed := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
+	noteByID := make(map[string]entity.NoteEntity, len(packed))
+	for _, ne := range packed {
+		noteByID[ne.ID] = ne
+	}
+
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		entry := map[string]any{
@@ -233,14 +250,9 @@ func (h *Handler) Reactions(c echo.Context) error {
 			entry["user"] = entity.PackUserLite(r.User)
 		}
 		if r.Note != nil {
-			noteEntry := map[string]any{
-				"id":     r.Note.ID,
-				"userId": r.Note.UserID,
+			if ne, ok := noteByID[r.Note.ID]; ok {
+				entry["note"] = ne
 			}
-			if r.Note.Text != nil {
-				noteEntry["text"] = *r.Note.Text
-			}
-			entry["note"] = noteEntry
 		}
 		out = append(out, entry)
 	}

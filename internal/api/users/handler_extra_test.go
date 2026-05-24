@@ -269,14 +269,20 @@ func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 	// createdAt の format check のため real aidx を使う (= ParseTime が成功)。
 	idGen, _ := id.NewGenerator("aidx")
 	rxID := idGen.Generate(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	noteID := idGen.Generate(time.Date(2026, 5, 7, 11, 0, 0, 0, time.UTC))
 	noteText := "hi"
 	rxRepo.Reactions[rxID] = &model.NoteReaction{
 		ID:       rxID,
 		UserID:   "u_self",
-		NoteID:   "n1",
+		NoteID:   noteID,
 		Reaction: "👍",
 		User:     &model.User{ID: "u_self", Username: "self"},
-		Note:     &model.Note{ID: "n1", UserID: "u_other", Text: &noteText},
+		// Note.User を preload 済みにする (production の Preload("Note.User") 相当)。
+		Note: &model.Note{
+			ID: noteID, UserID: "u_other", Text: &noteText,
+			Visibility: "public",
+			User:       &model.User{ID: "u_other", Username: "other"},
+		},
 	}
 	rec := postExtra(h.Reactions, `{"userId":"u_self","limit":150}`, &model.User{ID: "u_self"})
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -290,9 +296,18 @@ func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 	require.NotNil(t, entry["user"])
 	require.NotNil(t, entry["note"])
 	note, _ := entry["note"].(map[string]any)
-	assert.Equal(t, "n1", note["id"])
+	assert.Equal(t, noteID, note["id"])
 	assert.Equal(t, "u_other", note["userId"])
 	assert.Equal(t, "hi", note["text"])
+	// note は完全 shape で返ること。misskey_dart の Note.fromJson が非null必須と
+	// する createdAt / visibility / user が欠落していると落ちる (#1227 回帰防止)。
+	noteCreatedAt, ok := note["createdAt"].(string)
+	assert.True(t, ok, "note.createdAt must be a non-null string")
+	assert.NotEmpty(t, noteCreatedAt)
+	assert.Equal(t, "public", note["visibility"])
+	noteUser, ok := note["user"].(map[string]any)
+	require.True(t, ok, "note.user must be a non-null object")
+	assert.Equal(t, "u_other", noteUser["id"])
 	// createdAt は ISO8601 ms 精度で出る (= 2026-05-07T12:00:00.000Z)。
 	createdAt, ok := entry["createdAt"].(string)
 	require.True(t, ok, "createdAt should be a string")
