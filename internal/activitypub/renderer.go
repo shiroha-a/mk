@@ -778,6 +778,25 @@ func (r *Renderer) RenderInvite(ownerID string, inner any, targetURI string) *In
 	return inv
 }
 
+// RenderChatRoomInviteRef reconstructs a room owner's original Invite as a
+// nested object, used as the `object` of an invitee's Accept / Reject when the
+// room (and its owner) are remote. All URIs are passed explicitly because they
+// are the remote canonical URIs, not local ones; no id/@context is set since
+// the result is nested inside an Accept/Reject that carries its own context.
+func (r *Renderer) RenderChatRoomInviteRef(ownerURI, roomURI, roomName, targetURI string) *Invite {
+	return &Invite{
+		Activity: Activity{
+			Object: Object{Type: "Invite"},
+			Actor:  ownerURI,
+		},
+		Object: &ChatRoomGroup{
+			Object:       Object{ID: roomURI, Type: "Group", Name: roomName},
+			AttributedTo: ownerURI,
+		},
+		Target: targetURI,
+	}
+}
+
 // RenderLike returns a Like activity for the given reaction.
 // targetURI は対象ノートの canonical URI (リモートなら note.URI、ローカルなら
 // urls.NoteURI(note.ID))。

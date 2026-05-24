@@ -83,6 +83,26 @@ func TestRenderer_RenderInvite(t *testing.T) {
 	assert.Equal(t, "https://example.com/chat/rooms/room1", g.ID)
 }
 
+func TestRenderer_RenderChatRoomInviteRef(t *testing.T) {
+	r := newRenderer()
+	ref := r.RenderChatRoomInviteRef(
+		"https://remote.example/users/owner",
+		"https://remote.example/chat/rooms/room1",
+		"General",
+		"https://example.com/users/bob",
+	)
+	assert.Equal(t, "Invite", ref.Type)
+	assert.Equal(t, "https://remote.example/users/owner", ref.Actor)
+	assert.Equal(t, "https://example.com/users/bob", ref.Target)
+	// nested object なので id/@context は付けない。
+	assert.Empty(t, ref.ID)
+	assert.Nil(t, ref.Context)
+	g, ok := ref.Object.(*ChatRoomGroup)
+	require.True(t, ok)
+	assert.Equal(t, "https://remote.example/chat/rooms/room1", g.ID)
+	assert.Equal(t, "https://remote.example/users/owner", g.AttributedTo)
+}
+
 func TestRenderer_RenderPerson(t *testing.T) {
 	r := newRenderer()
 	avatar := "https://example.com/avatar.png"

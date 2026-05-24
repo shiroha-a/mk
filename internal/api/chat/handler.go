@@ -734,6 +734,11 @@ func (h *Handler) InvitationsAccept(c echo.Context) error {
 	if inv, err := h.repo.FindInvitation(user.ID, req.RoomID); err == nil {
 		_ = h.repo.DeleteInvitation(inv.ID)
 	}
+	// remote room の招待なら Accept を owner へ配送する (#1205)。local room は
+	// service 側で no-op。
+	if h.svc != nil {
+		h.svc.FederateInvitationResponse(req.RoomID, user.ID, true)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -748,6 +753,10 @@ func (h *Handler) InvitationsReject(c echo.Context) error {
 	}
 	if inv, err := h.repo.FindInvitation(user.ID, req.RoomID); err == nil {
 		_ = h.repo.DeleteInvitation(inv.ID)
+	}
+	// remote room の招待なら Reject を owner へ配送する (#1205)。
+	if h.svc != nil {
+		h.svc.FederateInvitationResponse(req.RoomID, user.ID, false)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

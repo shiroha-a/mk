@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -457,6 +458,66 @@ func (s *Service) RemoveInvitationViaAP(roomID, userID string) error {
 		return s.repo.DeleteInvitation(inv.ID)
 	}
 	return nil
+}
+
+// FederateInvitationResponse delivers an Accept / Reject activity to the owner
+// of a remote chat room when a local user responds to that room's invitation
+// (accept=true → Accept, accept=false → Reject). This lets the remote instance
+// record (or drop) the local user's membership. Best-effort: no-op when AP
+// delivery is unwired, the room is unknown, or the room is locally owned (own
+// room → no federation needed). Delivery failures are logged and swallowed.
+// The activity is signed by the responding local user.
+func (s *Service) FederateInvitationResponse(roomID, localUserID string, accept bool) {
+	if s.deliverer == nil || s.userRepo == nil || s.renderer == nil || s.urls == nil {
+		return
+	}
+	room, err := s.repo.FindRoomByID(roomID)
+	if err != nil || room == nil {
+		return
+	}
+	owner, err := s.userRepo.FindByID(room.OwnerID)
+	if err != nil || owner == nil || owner.IsLocal() {
+		// 自前の room (local owner) は federation 不要。
+		return
+	}
+	if owner.URI == nil || *owner.URI == "" {
+		return
+	}
+	// room copy には origin URI を保存していないため、owner URI の scheme+host
+	// から remote room URI (`https://{ownerHost}/chat/rooms/{id}`) を復元する。
+	// 受信側は path の room id だけを正規表現で抽出するので host が要点。
+	roomURI := remoteChatRoomURI(*owner.URI, room.ID)
+	if roomURI == "" {
+		return
+	}
+	inviteeURI := s.urls.UserURI(localUserID)
+	inviteRef := s.renderer.RenderChatRoomInviteRef(*owner.URI, roomURI, room.Name, inviteeURI)
+
+	var activity any
+	if accept {
+		activity = s.renderer.RenderAccept(localUserID, inviteRef)
+	} else {
+		activity = s.renderer.RenderReject(localUserID, inviteRef)
+	}
+	body, err := json.Marshal(activity)
+	if err != nil {
+		slog.Warn("chat: invitation response federation: marshal failed", "roomID", roomID, "err", err)
+		return
+	}
+	if err := s.deliverer.DeliverToUser(localUserID, owner, body); err != nil {
+		slog.Warn("chat: invitation response federation: deliver failed", "roomID", roomID, "accept", accept, "err", err)
+	}
+}
+
+// remoteChatRoomURI reconstructs a remote chat room URI from the room owner's
+// actor URI (taking its scheme+host) and the room ID. Returns "" when ownerURI
+// cannot be parsed.
+func remoteChatRoomURI(ownerURI, roomID string) string {
+	u, err := url.Parse(ownerURI)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/chat/rooms/" + roomID
 }
 
 // CreateMessageViaAP persists a chat message received via ActivityPub from a
