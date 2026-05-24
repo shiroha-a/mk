@@ -363,6 +363,12 @@ func (s *Service) FederateInvitation(roomID, inviteeID string) {
 		slog.Warn("chat: invitation federation: room not found", "roomID", roomID, "err", err)
 		return
 	}
+	// owner が remote の room は本インスタンスから Invite を署名配送できない
+	// (秘密鍵が無い)。federation するのは local owner の room のみ。
+	owner, err := s.userRepo.FindByID(room.OwnerID)
+	if err != nil || owner == nil || !owner.IsLocal() {
+		return
+	}
 	group := s.renderer.RenderChatRoom(room)
 	invite := s.renderer.RenderInvite(room.OwnerID, group, inviteeURI)
 	body, err := json.Marshal(invite)

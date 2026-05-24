@@ -674,12 +674,20 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 
 // InvitationsCreate handles POST /api/chat/rooms/invitations/create.
 func (h *Handler) InvitationsCreate(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
 		UserID string `json:"userId"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId and userId are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// owner だけが招待を作成・連合できる。これが無いと任意の認証ユーザーが
+	// owner の鍵で署名された Invite を remote へなりすまし送信できてしまう
+	// (#1201 review)。room owner 以外は NO_SUCH_ROOM で弾く (RoomsUpdate と同方針)。
+	room, err := h.repo.FindRoomByID(req.RoomID)
+	if err != nil || room.OwnerID != user.ID {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
 	}
 	inv := &model.ChatRoomInvitation{
 		ID: h.idGen.Generate(time.Now()), UserID: req.UserID, RoomID: req.RoomID,

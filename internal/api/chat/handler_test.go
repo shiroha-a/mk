@@ -603,7 +603,8 @@ func TestReactionsDelete(t *testing.T) {
 // --- Invitations ---
 
 func TestInvitationsCreate_Success(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID}))
 	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -614,8 +615,17 @@ func TestInvitationsCreate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestInvitationsCreate_NotOwnerRejected(t *testing.T) {
+	h, repo := newTestHandler()
+	// room owner は u2。u1 は owner でないので招待を作成・連合できない。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: "u2"}))
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u3"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestInvitationsCreate_Error(t *testing.T) {
 	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID}))
 	repo.CreateErr = errMock
 	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

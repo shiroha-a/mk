@@ -323,6 +323,20 @@ func TestFederateInvitation_SkipsLocalInvitee(t *testing.T) {
 	assert.Equal(t, 0, deliverer.called)
 }
 
+func TestFederateInvitation_SkipsRemoteOwnedRoom(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	ownerURI := "https://remote.example/users/owner"
+	inviteeURI := "https://remote.example/users/bob"
+	// owner が remote の room は本インスタンスから署名配送できないため no-op。
+	userRepo.Users["remoteOwner"] = &model.User{ID: "remoteOwner", Username: "owner", Host: &remoteHost, URI: &ownerURI}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &inviteeURI}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "remoteOwner"}))
+
+	svc.FederateInvitation("room1", "bob")
+	assert.Equal(t, 0, deliverer.called)
+}
+
 func TestFederateInvitation_NoOpWhenRoomMissing(t *testing.T) {
 	svc, _, userRepo, deliverer := newInvitationService(t)
 	remoteHost := "remote.example"
