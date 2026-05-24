@@ -220,6 +220,22 @@ func (h *Handler) Reactions(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// note は upstream の packManyWithNote と同じく完全 shape で返す。最小 shape
+	// (id/userId/text) だと createdAt / visibility / user 等が欠落し、misskey_dart
+	// の Note.fromJson が非null フィールドの cast に失敗して落ちる (#1227)。
+	// PackNotes で batch pack して instance / emoji / buffered reaction も解決する。
+	notes := make([]*model.Note, 0, len(rows))
+	for _, r := range rows {
+		if r.Note != nil {
+			notes = append(notes, r.Note)
+		}
+	}
+	packed := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
+	noteByID := make(map[string]entity.NoteEntity, len(packed))
+	for _, ne := range packed {
+		noteByID[ne.ID] = ne
+	}
+
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		entry := map[string]any{
@@ -233,14 +249,9 @@ func (h *Handler) Reactions(c echo.Context) error {
 			entry["user"] = entity.PackUserLite(r.User)
 		}
 		if r.Note != nil {
-			noteEntry := map[string]any{
-				"id":     r.Note.ID,
-				"userId": r.Note.UserID,
+			if ne, ok := noteByID[r.Note.ID]; ok {
+				entry["note"] = ne
 			}
-			if r.Note.Text != nil {
-				noteEntry["text"] = *r.Note.Text
-			}
-			entry["note"] = noteEntry
 		}
 		out = append(out, entry)
 	}

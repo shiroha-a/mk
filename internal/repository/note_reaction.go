@@ -104,7 +104,10 @@ func (r *noteReactionRepository) ListByNoteID(noteID string, untilID, sinceID st
 // ListByNoteID と同じ keyset 方式 (paginationOrder で DESC 既定)。
 func (r *noteReactionRepository) ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
 	var rows []*model.NoteReaction
-	q := r.db.Preload("User").Preload("Note").Where("\"userId\" = ?", userID)
+	// Note.User も preload する。users/reactions は note を完全 shape (PackNotes)
+	// で返すため、note author が無いと misskey_dart の Note.user (UserLite) 解析が
+	// null で落ちる (#1227)。
+	q := r.db.Preload("User").Preload("Note").Preload("Note.User").Where("\"userId\" = ?", userID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
