@@ -182,11 +182,16 @@ func chatRoomIDFromContext(raw json.RawMessage) string {
 // be a member (enforced by the chat service): unknown room or non-member is a
 // permanent condition, so it is reported as ErrUnsupportedActivity (no retry).
 func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, roomID string) error {
+	// note id 欠落 / sender が local (loopback) は retry しても解決しない恒久的
+	// 条件なので、同関数内の room 不在・非メンバーと同じく ErrUnsupportedActivity
+	// (non-retry) に揃える。
 	if noteURI == "" {
-		return fmt.Errorf("chat room message: missing note id")
+		slog.Warn("chat room message: missing note id", "sender", sender.ID)
+		return ErrUnsupportedActivity
 	}
 	if sender.IsLocal() {
-		return fmt.Errorf("chat room message: sender %s is local (loopback?)", sender.ID)
+		slog.Warn("chat room message: sender is local (loopback?)", "sender", sender.ID)
+		return ErrUnsupportedActivity
 	}
 	if p.chatRoomReceiver == nil {
 		return ErrUnsupportedActivity

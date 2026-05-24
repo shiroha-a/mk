@@ -458,7 +458,8 @@ func TestProcess_ChatRoomMessage_MissingNoteID(t *testing.T) {
 			"@context": "https://remote.example/chat/rooms/room1"
 		}
 	}`)
-	require.Error(t, p.Process(body))
+	// note id 欠落は恒久的失敗なので ErrUnsupportedActivity (retry させない)。
+	assert.ErrorIs(t, p.Process(body), federation.ErrUnsupportedActivity)
 	assert.Empty(t, recv.msgCalls)
 }
 
