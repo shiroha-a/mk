@@ -103,6 +103,27 @@ func TestRenderer_RenderChatRoomInviteRef(t *testing.T) {
 	assert.Equal(t, "https://remote.example/users/owner", g.AttributedTo)
 }
 
+func TestRenderer_RenderChatRoomMessage(t *testing.T) {
+	r := newRenderer()
+	txt := "hello room"
+	msg := &model.ChatMessage{ID: "m1", Text: &txt}
+	members := []string{"https://example.com/users/alice", "https://remote.example/users/bob"}
+	c := r.RenderChatRoomMessage(msg, "https://example.com/users/alice", members,
+		"https://example.com/chat/rooms/room1", "2026-05-24T00:00:00Z")
+	assert.Equal(t, "Create", c.Type)
+	assert.Equal(t, members, c.To)
+	note, ok := c.Object.(*Note)
+	require.True(t, ok)
+	assert.True(t, note.MisskeyTalk)
+	assert.Equal(t, members, note.To)
+	assert.Equal(t, "hello room", note.Content)
+	// note 階層の @context が room URI (CherryPick の room 識別子)。
+	assert.Equal(t, "https://example.com/chat/rooms/room1", note.Context)
+	// top-level の @context は addContext で標準 context が入る (room URI ではない)。
+	assert.NotNil(t, c.Context)
+	assert.NotEqual(t, "https://example.com/chat/rooms/room1", c.Context)
+}
+
 func TestRenderer_RenderPerson(t *testing.T) {
 	r := newRenderer()
 	avatar := "https://example.com/avatar.png"

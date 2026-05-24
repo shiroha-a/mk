@@ -610,7 +610,73 @@ func (s *Service) CreateMessageToRoom(ctx context.Context, fromUserID, roomID, t
 	// newChatMessage を emit する。Misskey 本家 ChatService
 	// .createMessageToRoom と同じ fan-out 方針。
 	s.emitRoomNewChatMessage(room, fromUserID, msg)
+	// remote member が居れば group Create を AP 配送する (best-effort)。
+	s.tryDeliverRoomMessage(msg, room, fromUserID)
 	return msg, nil
+}
+
+// tryDeliverRoomMessage federates a room message as a CherryPick group chat
+// Create to every remote member of the room. The note lists all members in
+// `to` and carries the room URI as its `@context`. Best-effort: no-op when AP
+// delivery is unwired, the sender is remote, or the room has no remote members.
+// Per-recipient failures are logged and swallowed.
+func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.ChatRoom, fromUserID string) {
+	if s.deliverer == nil || s.userRepo == nil || s.renderer == nil || s.urls == nil || room == nil {
+		return
+	}
+	sender, err := s.userRepo.FindByID(fromUserID)
+	if err != nil || sender == nil || !sender.IsLocal() {
+		// remote sender が起点のメッセージは本インスタンスからは配送しない。
+		return
+	}
+	// member 集合 = owner (暗黙メンバー) + membership 行。重複は set で除外する。
+	memberIDs := map[string]struct{}{room.OwnerID: {}}
+	if members, merr := s.repo.ListMembersByRoom(room.ID); merr == nil {
+		for _, m := range members {
+			memberIDs[m.UserID] = struct{}{}
+		}
+	}
+	memberURIs := make([]string, 0, len(memberIDs))
+	remoteRecipients := make([]*model.User, 0)
+	for uid := range memberIDs {
+		u, uerr := s.userRepo.FindByID(uid)
+		if uerr != nil || u == nil {
+			continue
+		}
+		if u.IsLocal() {
+			memberURIs = append(memberURIs, s.urls.UserURI(u.ID))
+		} else if u.URI != nil && *u.URI != "" {
+			memberURIs = append(memberURIs, *u.URI)
+			remoteRecipients = append(remoteRecipients, u)
+		}
+	}
+	if len(remoteRecipients) == 0 {
+		return
+	}
+
+	// room URI: local 所有なら local の正規 URI、remote 所有 copy なら owner の
+	// host から復元する (受信側は path の room id のみ抽出する)。
+	roomURI := s.urls.ChatRoomURI(room.ID)
+	if owner, oerr := s.userRepo.FindByID(room.OwnerID); oerr == nil && owner != nil && !owner.IsLocal() && owner.URI != nil {
+		if ru := remoteChatRoomURI(*owner.URI, room.ID); ru != "" {
+			roomURI = ru
+		}
+	}
+
+	published := time.Now().UTC().Format(time.RFC3339)
+	if t, terr := s.idGen.ParseTime(msg.ID); terr == nil {
+		published = t.UTC().Format(time.RFC3339)
+	}
+	body, err := json.Marshal(s.renderer.RenderChatRoomMessage(msg, s.urls.UserURI(sender.ID), memberURIs, roomURI, published))
+	if err != nil {
+		slog.Warn("chat: room message federation: marshal failed", "msgID", msg.ID, "err", err)
+		return
+	}
+	for _, recipient := range remoteRecipients {
+		if derr := s.deliverer.DeliverToUser(sender.ID, recipient, body); derr != nil {
+			slog.Warn("chat: room message federation: deliver failed", "msgID", msg.ID, "recipient", recipient.ID, "err", derr)
+		}
+	}
 }
 
 // isRoomMemberWith reports whether userID is a member of the given room,

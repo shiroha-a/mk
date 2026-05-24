@@ -1017,6 +1017,43 @@ func (r *Renderer) RenderChatMessage(msg *model.ChatMessage, senderURI, recipien
 	return c
 }
 
+// RenderChatRoomMessage renders a group chat (room) message as a Create
+// wrapping a Note flagged with _misskey_talk, addressed to every room member.
+// The note's `@context` is set to the room URI: CherryPick receivers extract
+// the room id from it to route the message into the room. AddContext only sets
+// the top-level Create context, so the note-level room `@context` survives.
+func (r *Renderer) RenderChatRoomMessage(msg *model.ChatMessage, senderURI string, memberURIs []string, roomURI, published string) *Create {
+	noteURI := r.urls.ChatMessageURI(msg.ID)
+	note := &Note{
+		Object: Object{
+			ID:      noteURI,
+			Type:    "Note",
+			Context: roomURI,
+		},
+		AttributedTo: senderURI,
+		Published:    published,
+		To:           memberURIs,
+		MisskeyTalk:  true,
+	}
+	if msg.Text != nil {
+		note.Content = *msg.Text
+	}
+	c := &Create{
+		Activity: Activity{
+			Object: Object{
+				ID:   noteURI + "/activity",
+				Type: "Create",
+			},
+			Actor:     senderURI,
+			Published: published,
+			To:        memberURIs,
+		},
+		Object: note,
+	}
+	AddContext(c)
+	return c
+}
+
 // addressing computes to/cc lists for a note based on visibility.
 func (r *Renderer) addressing(n *model.Note) (to []string, cc []string) {
 	switch n.Visibility {

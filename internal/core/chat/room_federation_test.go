@@ -1,6 +1,7 @@
 package chat_test
 
 import (
+	"context"
 	"testing"
 
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
@@ -178,4 +179,88 @@ func TestFederateInvitationResponse_UnwiredIsNoOp(t *testing.T) {
 	svc, repo := newRoomFedService(t)
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "remoteOwner"}))
 	svc.FederateInvitationResponse("room1", "bob", true)
+}
+
+func TestCreateMessageToRoom_DeliversToRemoteMembers(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	// alice (local owner) の room に remote member bob。
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "bob", RoomID: "room1"}))
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "alice", "room1", "hi room", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, deliverer.called)
+	body := string(deliverer.lastBody)
+	assert.Contains(t, body, `"_misskey_talk":true`)
+	assert.Contains(t, body, "https://local.example/chat/rooms/room1")
+	assert.Contains(t, body, "https://remote.example/users/bob")
+	assert.Contains(t, body, "hi room")
+}
+
+func TestCreateMessageToRoom_LocalOnlyRoomNoFederation(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "carol", RoomID: "room1"}))
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "alice", "room1", "hi", "")
+	require.NoError(t, err)
+	// remote member が居ないので配送しない。
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestCreateMessageToRoom_RemoteRoomUsesOwnerHostURI(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	ownerURI := "https://remote.example/users/owner"
+	userRepo.Users["owner"] = &model.User{ID: "owner", Username: "owner", Host: &remoteHost, URI: &ownerURI}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	// remote owner の room copy に local member alice が投稿する。
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "alice", RoomID: "room1"}))
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "alice", "room1", "hi", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, deliverer.called)
+	// room URI は owner の host から復元した remote URI になる。
+	assert.Contains(t, string(deliverer.lastBody), "https://remote.example/chat/rooms/room1")
+}
+
+func TestCreateMessageToRoom_DeliveryFailureSwallowed(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	deliverer.returnErr = assert.AnError
+	remoteHost := "remote.example"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "bob", RoomID: "room1"}))
+
+	// 配送失敗してもメッセージ作成は成功する。
+	msg, err := svc.CreateMessageToRoom(context.Background(), "alice", "room1", "hi", "")
+	require.NoError(t, err)
+	require.NotNil(t, msg)
+	assert.Equal(t, 1, deliverer.called)
+}
+
+func TestCreateMessageToRoom_RemoteSenderDoesNotFederate(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	senderURI := "https://remote.example/users/rmt"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["rmt"] = &model.User{ID: "rmt", Username: "rmt", Host: &remoteHost, URI: &senderURI}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	// remote owner の room copy。sender 自身も remote member。
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "bob", RoomID: "room1"}))
+
+	// remote sender が起点のメッセージは本インスタンスからは federation しない。
+	_, err := svc.CreateMessageToRoom(context.Background(), "rmt", "room1", "hi", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, deliverer.called)
 }
