@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -888,8 +889,25 @@ func packMessage(msg *model.ChatMessage) map[string]any {
 	if msg.Reads != nil {
 		out["reads"] = []string(msg.Reads)
 	}
-	if msg.Reactions != nil {
-		out["reactions"] = []string(msg.Reactions)
+	// misskey_dart の ChatMessage.fromJson は reactions を ChatMessageReaction
+	// (Map) の非null配列として cast するため、"<userId>/<reaction>" 文字列配列を
+	// {reaction} object 配列に変換し、空でも [] を出す (#1246 streaming 版)。
+	out["reactions"] = packStreamReactions(msg.Reactions)
+	return out
+}
+
+// packStreamReactions converts stored "<userId>/<reaction>" reaction strings
+// into the misskey_dart ChatMessageReaction object shape (`[{reaction}]`).
+// api/chat.packChatReactions の streaming 版 (layering 上 api を import できない
+// ため重複)。
+func packStreamReactions(reactions []string) []map[string]any {
+	out := make([]map[string]any, 0, len(reactions))
+	for _, r := range reactions {
+		reaction := r
+		if i := strings.Index(r, "/"); i >= 0 {
+			reaction = r[i+1:]
+		}
+		out = append(out, map[string]any{"reaction": reaction})
 	}
 	return out
 }

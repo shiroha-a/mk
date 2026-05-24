@@ -26,7 +26,8 @@ func TestPackMessage_AllFieldsFilled(t *testing.T) {
 		FileID:     &fileID,
 		URI:        &uri,
 		Reads:      pq.StringArray{"bob"},
-		Reactions:  pq.StringArray{"bob:+1"},
+		// 保存形式は "<userId>/<reaction>" (handler.go の ReactionsCreate)。
+		Reactions: pq.StringArray{"bob/👍"},
 	}
 	out := packMessage(msg)
 
@@ -38,5 +39,6 @@ func TestPackMessage_AllFieldsFilled(t *testing.T) {
 	assert.Equal(t, "file1", out["fileId"])
 	assert.Equal(t, "https://example.com/messages/m1", out["uri"])
 	assert.Equal(t, []string{"bob"}, out["reads"])
-	assert.Equal(t, []string{"bob:+1"}, out["reactions"])
+	// reactions は misskey_dart 互換の {reaction} object 配列 + userId prefix 除去 (#1246)。
+	assert.Equal(t, []map[string]any{{"reaction": "👍"}}, out["reactions"])
 }
