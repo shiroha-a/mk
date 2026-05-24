@@ -52,7 +52,7 @@ func (h *Handler) Fetch(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url and hash are required.", "e1c2a7b4-9f3d-4a61-8b2e-7c5d0f1a2b33"))
 	}
 	if u, err := url.Parse(req.URL); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url must be http(s).", "e1c2a7b4-9f3d-4a61-8b2e-7c5d0f1a2b33"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url must be http(s).", "f2d3b8c5-0a4e-4c72-9d1f-8b6e1a3c2d44"))
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request().Context(), FetchTimeout)

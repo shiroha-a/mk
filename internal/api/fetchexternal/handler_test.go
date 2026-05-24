@@ -81,6 +81,17 @@ func TestFetch_Non2xxIsInvalidSchema(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "EXT_RESOURCE_RETURNED_INVALID_SCHEMA")
 }
 
+func TestFetch_ConnectionFailureIsInvalidSchema(t *testing.T) {
+	// 到達不能なサーバ (close 済) への fetch 失敗も invalidSchema に落ちる。
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	h := New(http.DefaultClient, "mk-test")
+	rec := do(t, h, `{"url":"`+url+`","hash":"x"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "EXT_RESOURCE_RETURNED_INVALID_SCHEMA")
+}
+
 func TestFetch_MissingParams(t *testing.T) {
 	h := New(http.DefaultClient, "mk-test")
 	for _, body := range []string{`{}`, `{"url":"https://e.com"}`, `{"hash":"x"}`} {
