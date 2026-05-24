@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -117,7 +118,7 @@ func packMessage(m *model.ChatMessage) map[string]any {
 	result := map[string]any{
 		"id":         m.ID,
 		"fromUserId": m.FromUserID,
-		"reactions":  m.Reactions,
+		"reactions":  packChatReactions(m.Reactions),
 	}
 	if m.ToUserID != nil {
 		result["toUserId"] = *m.ToUserID
@@ -135,6 +136,24 @@ func packMessage(m *model.ChatMessage) map[string]any {
 		result["fromUser"] = packUser(m.FromUser)
 	}
 	return result
+}
+
+// packChatReactions converts the stored `"<userId>/<reaction>"` reaction
+// strings (CherryPick chat reaction 形式) into the object array shape that
+// misskey_dart の ChatMessage.fromJson expects (`reactions: [{reaction}]`)。
+// raw 文字列配列のまま返すと `String is not Map<String, dynamic>` で落ちる
+// (#1246)。user は upstream の packMessageLite と同じく省略 (schema 上 nullable)。
+func packChatReactions(reactions []string) []map[string]any {
+	out := make([]map[string]any, 0, len(reactions))
+	for _, r := range reactions {
+		reaction := r
+		// 保存形式は "<userId>/<reaction>"。最初の "/" 以降を reaction とする。
+		if i := strings.Index(r, "/"); i >= 0 {
+			reaction = r[i+1:]
+		}
+		out = append(out, map[string]any{"reaction": reaction})
+	}
+	return out
 }
 
 // packMessageWithCreatedAt augments packMessage with createdAt parsed from the

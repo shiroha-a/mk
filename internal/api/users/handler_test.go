@@ -966,6 +966,13 @@ func TestFollowers_Success(t *testing.T) {
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Len(t, out, 1)
+	// misskey_dart の Following.fromJson は createdAt / followerId / followeeId を
+	// 非null必須とする (#1243)。
+	createdAt, ok := out[0]["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
+	assert.Equal(t, "follower1", out[0]["followerId"])
+	assert.Equal(t, "user1", out[0]["followeeId"])
 }
 
 // TestFollowers_PopulatesIsFollowedFromViewer guards #1144: when a viewer

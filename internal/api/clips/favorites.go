@@ -88,7 +88,7 @@ func (h *Handler) MyFavorites(c echo.Context) error {
 		if err != nil {
 			continue
 		}
-		out = append(out, clipToMap(cl))
+		out = append(out, h.clipToMap(cl))
 	}
 	return c.JSON(http.StatusOK, out)
 }

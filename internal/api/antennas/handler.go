@@ -132,7 +132,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, antennaToMap(a))
+	return c.JSON(http.StatusOK, h.antennaToMap(a))
 }
 
 // ShowRequest is the request body for antennas/show.
@@ -155,7 +155,7 @@ func (h *Handler) Show(c echo.Context) error {
 		// Show は ErrAntennaNotFound 以外を返さない (未マップ含む)
 		return notFound(c)
 	}
-	return c.JSON(http.StatusOK, antennaToMap(a))
+	return c.JSON(http.StatusOK, h.antennaToMap(a))
 }
 
 // UpdateRequest is the request body for antennas/update.
@@ -208,7 +208,7 @@ func (h *Handler) Update(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, antennaToMap(a))
+	return c.JSON(http.StatusOK, h.antennaToMap(a))
 }
 
 // DeleteRequest is the request body for antennas/delete.
@@ -244,7 +244,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, a := range rows {
-		out = append(out, antennaToMap(a))
+		out = append(out, h.antennaToMap(a))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -296,13 +296,25 @@ func (h *Handler) Notes(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-func antennaToMap(a *model.Antenna) map[string]any {
+func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 	// upstream Misskey TS の packAntenna は userId field を embed しない
 	// (= antenna は user-scoped で frontend が呼出 user の id を別経路で持つ
 	// 設計、#904)。drop-in 互換維持のため mk-go も同 shape に揃える。
+	//
+	// createdAt は antenna ID (aidx) から復元する。以前は lastUsedAt を流用して
+	// いたが createdAt は作成時刻であるべき + misskey_dart の Antenna.fromJson が
+	// 非null String として cast するため ISO ms 形式で出す (#1244)。
+	// hasUnreadNote は misskey_dart が非null bool として cast する (#1244)。
+	// mk-go は antenna 未読 note を追跡しないため false 固定。
+	createdAt := ""
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(a.ID); err == nil {
+			createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
 	return map[string]any{
 		"id":              a.ID,
-		"createdAt":       a.LastUsedAt,
+		"createdAt":       createdAt,
 		"name":            a.Name,
 		"src":             a.Src,
 		"userListId":      a.UserListID,
@@ -315,6 +327,7 @@ func antennaToMap(a *model.Antenna) map[string]any {
 		"withFile":        a.WithFile,
 		"localOnly":       a.LocalOnly,
 		"isActive":        a.IsActive,
+		"hasUnreadNote":   false,
 	}
 }
 

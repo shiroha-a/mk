@@ -307,11 +307,21 @@ func TestMessagesShow_WithFromUser(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Messages["m1"] = &model.ChatMessage{
 		ID: "m1", FromUserID: "u1", FromUser: u1,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+		Reads: pq.StringArray{}, Reactions: pq.StringArray{"u2/👍"},
 	}
 	rec := post(h.MessagesShow, `{"messageId":"m1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alice")
+	// misskey_dart の ChatMessage.fromJson は reactions を {reaction} object の
+	// 配列として cast する。"<userId>/<reaction>" 文字列のまま返すと落ちる (#1246)。
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	reactions, ok := body["reactions"].([]any)
+	require.True(t, ok, "reactions must be an array")
+	require.Len(t, reactions, 1)
+	r0, ok := reactions[0].(map[string]any)
+	require.True(t, ok, "each reaction must be an object")
+	assert.Equal(t, "👍", r0["reaction"], "userId prefix must be stripped")
 }
 
 func TestRoomsUpdate_WithDescription(t *testing.T) {

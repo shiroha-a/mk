@@ -109,7 +109,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl))
 }
 
 // ShowRequest is the request body for clips/show.
@@ -135,7 +135,7 @@ func (h *Handler) Show(c echo.Context) error {
 		}
 		return notFound(c)
 	}
-	return c.JSON(http.StatusOK, clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl))
 }
 
 // UpdateRequest is the request body for clips/update.
@@ -173,7 +173,7 @@ func (h *Handler) Update(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl))
 }
 
 // DeleteRequest is the request body for clips/delete.
@@ -228,7 +228,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, cl := range rows {
-		out = append(out, clipToMap(cl))
+		out = append(out, h.clipToMap(cl))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -334,16 +334,16 @@ func (h *Handler) Notes(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-func clipToMap(cl *model.Clip) map[string]any {
-	return map[string]any{
-		"id":            cl.ID,
-		"userId":        cl.UserID,
-		"name":          cl.Name,
-		"description":   cl.Description,
-		"isPublic":      cl.IsPublic,
-		"notesCount":    cl.NotesCount,
-		"lastClippedAt": cl.LastClippedAt,
+// clipToMap packs a clip into the misskey_dart-compatible shape via
+// entity.PackClip. owner (clip の所有ユーザー) を userRepo から解決して user
+// field を埋める。misskey_dart の Clip.fromJson は createdAt / user /
+// favoritedCount を非null必須とするため、旧 ad-hoc map では落ちていた (#1245)。
+func (h *Handler) clipToMap(cl *model.Clip) map[string]any {
+	var owner *model.User
+	if h.userRepo != nil {
+		owner, _ = h.userRepo.FindByID(cl.UserID)
 	}
+	return entity.PackClip(cl, h.idGen, owner)
 }
 
 func notFound(c echo.Context) error {

@@ -1,11 +1,13 @@
 package clips
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
@@ -267,6 +269,35 @@ func TestList_Success(t *testing.T) {
 	require.NoError(t, h.List(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alpha")
+}
+
+// #1245: clips/list が misskey_dart の Clip.fromJson 互換 shape を返すこと。
+// createdAt / user / favoritedCount が非null で含まれること (旧 clipToMap は
+// これらを欠いて `Null is not String` で落ちていた)。
+func TestList_FullShape(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	h.SetUserRepo(userRepo)
+	idGen, _ := id.NewGenerator("aidx")
+	clipID := idGen.Generate(time.Now())
+	repo.Clips[clipID] = &model.Clip{ID: clipID, UserID: "alice", Name: "alpha", IsPublic: true}
+
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	cl := rows[0]
+	createdAt, ok := cl["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
+	assert.Equal(t, float64(0), cl["favoritedCount"])
+	user, ok := cl["user"].(map[string]any)
+	require.True(t, ok, "user must be a non-null object")
+	assert.Equal(t, "alice", user["id"])
 }
 
 func TestList_BadJSON(t *testing.T) {

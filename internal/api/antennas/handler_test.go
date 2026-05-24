@@ -90,6 +90,14 @@ func TestCreate_NoUserIdInResponse(t *testing.T) {
 	// 必須 field の existence は念のため touch しておく (drift で吸い込ま
 	// れないように reverse の guard)。
 	assert.Equal(t, "alpha", body["name"])
+	// misskey_dart の Antenna.fromJson は createdAt (非null String) /
+	// hasUnreadNote (非null bool) を要求する (#1244)。
+	createdAt, ok := body["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
+	hasUnread, ok := body["hasUnreadNote"].(bool)
+	assert.True(t, ok, "hasUnreadNote must be a non-null bool")
+	assert.False(t, hasUnread)
 }
 
 func TestCreate_BadJSON(t *testing.T) {

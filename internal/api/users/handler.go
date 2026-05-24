@@ -629,7 +629,10 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 
 // relationItem represents a single entry in followers/following lists.
 type relationItem struct {
-	ID         string               `json:"id"`
+	ID string `json:"id"`
+	// CreatedAt は misskey_dart の Following.fromJson が非null String として
+	// cast するため必須 (#1243)。following row の ID (aidx) から復元する。
+	CreatedAt  string               `json:"createdAt"`
 	FollowerID string               `json:"followerId"`
 	FolloweeID string               `json:"followeeId"`
 	Follower   *entity.UserDetailed `json:"follower,omitempty"`
@@ -732,6 +735,9 @@ func (h *Handler) packRelationItems(
 	out := make([]relationItem, 0, len(filtered))
 	for _, f := range filtered {
 		item := relationItem{ID: f.ID, FollowerID: f.FollowerID, FolloweeID: f.FolloweeID}
+		if t, err := h.idGen.ParseTime(f.ID); err == nil {
+			item.CreatedAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
 		var target string
 		if followers {
 			target = f.FollowerID
