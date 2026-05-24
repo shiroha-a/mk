@@ -26,6 +26,10 @@ const (
 	TypeRenote   Type = "renote"
 	TypeQuote    Type = "quote"
 	TypeReaction Type = "reaction"
+	// TypeApp: アプリ (access token) が notifications/create で自分自身に作る
+	// 任意通知 (#1217)。notifier を持たず、body / header / icon を Extra に
+	// 格納して entity の Extra spread で surface する。
+	TypeApp Type = "app"
 	// TypePollVote: per-vote 通知。Misskey TS には対応 type が無いため
 	// frontend が空 body で render してしまい運用上 noise だけが残る (#690)。
 	// service 側からは発火しない (poll_service が呼ばないように disable

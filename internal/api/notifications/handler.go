@@ -227,9 +227,47 @@ func (h *Handler) MarkAllAsRead(c echo.Context) error {
 }
 
 // Create handles POST /api/notifications/create.
-// アプリ通知の作成 (簡易版)。
+//
+// upstream Misskey TS notifications/create と同 semantics: 認証中の app
+// (access token) が自分自身に type 'app' の任意通知を作る。body は必須、
+// header / icon は任意。body / header / icon は Extra に格納し、entity の
+// Extra spread で notification 出力に surface される (#1217)。
+//
+// 注: upstream は header/icon が無い場合 token.name / token.iconUrl に
+// フォールバックし appAccessTokenId も記録するが、mk-go の request context は
+// raw token 文字列のみで AccessToken オブジェクトを持たないため、ここでは
+// 渡された body / header / icon のみを使う (token 由来の fallback は省略)。
 func (h *Handler) Create(c echo.Context) error {
-	_ = middleware.GetUser(c)
+	user := middleware.GetUser(c)
+	var req struct {
+		Body   string  `json:"body"`
+		Header *string `json:"header"`
+		Icon   *string `json:"icon"`
+	}
+	if err := c.Bind(&req); err != nil || req.Body == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	if h.svc == nil || user == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+
+	extra := map[string]any{"body": req.Body}
+	if req.Header != nil {
+		extra["header"] = *req.Header
+	}
+	if req.Icon != nil {
+		extra["icon"] = *req.Icon
+	}
+	// app 通知は notifier を持たない。NotifierID を空にすることで
+	// service.Create の self-notification ガード (NotifierID == NotifieeID) も
+	// 回避する。upstream 同様 fire-and-forget なので結果は 204 固定。
+	if _, err := h.svc.Create(c.Request().Context(), notification.CreateInput{
+		NotifieeID: user.ID,
+		Type:       notification.TypeApp,
+		Extra:      extra,
+	}); err != nil {
+		slog.Warn("notifications/create failed", "user", user.ID, "err", err)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
