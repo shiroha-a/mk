@@ -5703,11 +5703,12 @@ func (m *MockAuthSessionRepository) FindAccessTokenBySession(session string) (*m
 	return nil, ErrNotFound
 }
 
-func (m *MockAuthSessionRepository) MarkAccessTokenFetched(id string) error {
-	if t, ok := m.AccessTokens[id]; ok {
+func (m *MockAuthSessionRepository) MarkAccessTokenFetched(id string) (bool, error) {
+	if t, ok := m.AccessTokens[id]; ok && !t.Fetched {
 		t.Fetched = true
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func (m *MockAuthSessionRepository) FindAppByID(id string) (*model.App, error) {

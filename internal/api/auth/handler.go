@@ -223,8 +223,13 @@ func (h *Handler) MiAuthCheck(c echo.Context) error {
 		// session 不在 / 既に取得済 (one-time) は ok:false。
 		return c.JSON(http.StatusOK, map[string]any{"ok": false})
 	}
-	// one-time 取得: 再 polling で二重取得されないよう fetched を立てる。
-	_ = h.repo.MarkAccessTokenFetched(tok.ID)
+	// one-time 取得: fetched=false→true の遷移をアトミックに行い、勝った
+	// リクエストだけが token を払い出す。並行 polling で同じ token が二重に
+	// 渡ることを防ぐ (上の Fetched チェックは fast path で、ここが真の関門)。
+	won, err := h.repo.MarkAccessTokenFetched(tok.ID)
+	if err != nil || !won {
+		return c.JSON(http.StatusOK, map[string]any{"ok": false})
+	}
 
 	resp := map[string]any{"ok": true, "token": tok.Token}
 	if h.userRepo != nil {

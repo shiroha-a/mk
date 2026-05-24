@@ -108,10 +108,17 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 	assert.Equal(t, "mirawtoken", miFound.Token)
 	assert.False(t, miFound.Fetched)
 
-	require.NoError(t, repo.MarkAccessTokenFetched(miToken.ID))
+	won, err := repo.MarkAccessTokenFetched(miToken.ID)
+	require.NoError(t, err)
+	assert.True(t, won, "first MarkAccessTokenFetched must win the false->true transition")
 	refetched, err := repo.FindAccessTokenBySession(miSession)
 	require.NoError(t, err)
 	assert.True(t, refetched.Fetched, "MarkAccessTokenFetched must persist the one-time flag")
+
+	// 2 度目はもう fetched=true なので遷移に負ける (won=false)。
+	wonAgain, err := repo.MarkAccessTokenFetched(miToken.ID)
+	require.NoError(t, err)
+	assert.False(t, wonAgain, "second MarkAccessTokenFetched must lose: already fetched")
 
 	// FindAccessTokenBySession - not found
 	_, err = repo.FindAccessTokenBySession("ghost-session")

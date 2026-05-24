@@ -133,13 +133,14 @@ func (m *mockAuthSessionRepo) FindAccessTokenBySession(session string) (*model.A
 	return nil, errNotFound
 }
 
-func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) error {
+func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) (bool, error) {
 	for _, t := range m.accessTokens {
-		if t.ID == id {
+		if t.ID == id && !t.Fetched {
 			t.Fetched = true
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 func (m *mockAuthSessionRepo) FindAppByID(appID string) (*model.App, error) {
@@ -547,6 +548,31 @@ func TestMiAuthCheck_EmptySession(t *testing.T) {
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Equal(t, false, out["ok"])
+}
+
+// failMarkRepo は MarkAccessTokenFetched が遷移に負ける (race の敗者 / DB
+// エラー) ケースを再現するためのスタブ。
+type failMarkRepo struct {
+	*mockAuthSessionRepo
+}
+
+func (f *failMarkRepo) MarkAccessTokenFetched(string) (bool, error) { return false, errNotFound }
+
+func TestMiAuthCheck_LosesFetchRace(t *testing.T) {
+	base := newMockRepo()
+	sess := "sess-race"
+	base.accessTokens["k"] = &model.AccessToken{ID: "at1", Token: "t", UserID: "u1", Session: &sess}
+	cfg := &config.Config{URL: "http://localhost:3000"}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(&failMarkRepo{base}, cfg, idGen)
+
+	rec := postMiAuthCheck(h, sess, nil)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	// 遷移に負けた (または DB エラー) リクエストは token を払い出さない。
+	assert.Equal(t, false, out["ok"])
+	_, hasToken := out["token"]
+	assert.False(t, hasToken)
 }
 
 func TestMiAuthCheck_NoUserRepoOmitsUser(t *testing.T) {

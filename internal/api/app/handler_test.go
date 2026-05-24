@@ -76,11 +76,12 @@ func (m *mockAuthSessionRepo) FindAccessTokenBySession(session string) (*model.A
 	return nil, assert.AnError
 }
 
-func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) error {
-	if t, ok := m.accessTokens[id]; ok {
+func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) (bool, error) {
+	if t, ok := m.accessTokens[id]; ok && !t.Fetched {
 		t.Fetched = true
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func (m *mockAuthSessionRepo) FindAppByID(id string) (*model.App, error) {
