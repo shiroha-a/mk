@@ -108,6 +108,23 @@ func TestShow_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1249: role ID が aidx でなく ParseTime が失敗しても createdAt は空文字に
+// ならず updatedAt にフォールバックすること (misskey_dart の DateTimeConverter
+// は空文字を FormatException にするため)。
+func TestList_CreatedAtFallsBackToUpdatedAt(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["non-aidx-id"] = &model.Role{
+		ID: "non-aidx-id", Name: "Seeded", IsPublic: true,
+		UpdatedAt: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+	}
+	rec := doPost(h.List, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "2026-05-01T00:00:00.000Z", resp[0]["createdAt"], "non-aidx ID は updatedAt にフォールバック")
+}
+
 func TestShow_NotPublic(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Priv", IsPublic: false}

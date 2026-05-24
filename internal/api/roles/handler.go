@@ -197,7 +197,11 @@ func (h *Handler) Notes(c echo.Context) error {
 // ため 0 固定 (best-effort、非crashing)。
 func (h *Handler) packRole(r *model.Role) map[string]any {
 	const tsFormat = "2006-01-02T15:04:05.000Z"
-	createdAt := ""
+	// createdAt は role ID (aidx) から復元する。misskey_dart は createdAt を
+	// DateTimeConverter で parse するため、空文字だと FormatException で落ちる。
+	// ID が aidx でない等で ParseTime に失敗した場合は updatedAt (非null) へ
+	// フォールバックし、常に有効な日付文字列を返す (#1249)。
+	createdAt := r.UpdatedAt.UTC().Format(tsFormat)
 	if h.idGen != nil {
 		if t, err := h.idGen.ParseTime(r.ID); err == nil {
 			createdAt = t.UTC().Format(tsFormat)
