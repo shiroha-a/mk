@@ -245,6 +245,28 @@ func TestFilesUploadFromURL_CommentTooLong(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// 多バイト文字 512 字以内 (byte 数では 512 超) のコメントは受理されること。
+// byte 長判定だと過剰に弾いていた (rune 数判定への修正の回帰防止)。
+func TestFilesUploadFromURL_MultibyteCommentWithinLimit(t *testing.T) {
+	h, _, _ := newHandler(t)
+	rp := &recordingProcessor{calls: make(chan URLUploadInput, 1)}
+	h.SetURLUploader(rp)
+
+	comment := strings.Repeat("あ", 512) // 512 runes = 1536 bytes
+	c, rec := newJSONReq(t, `{"url":"https://example.com/x","comment":"`+comment+`"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesUploadFromURL(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	select {
+	case in := <-rp.calls:
+		require.NotNil(t, in.Comment)
+		assert.Equal(t, comment, *in.Comment)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Process was not invoked")
+	}
+}
+
 func TestFilesUploadFromURL_NotWired(t *testing.T) {
 	h, _, _ := newHandler(t) // urlUploader 未配線
 	c, rec := newJSONReq(t, `{"url":"https://example.com/x"}`)

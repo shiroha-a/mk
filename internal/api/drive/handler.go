@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -696,8 +697,10 @@ func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.URL == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	// upstream paramDef は comment maxLength=512。超過は INVALID_PARAM。
-	if req.Comment != nil && len(*req.Comment) > 512 {
+	// upstream paramDef は comment maxLength=512。ajv の maxLength は文字数
+	// (code unit) 基準なので byte 長ではなく rune 数で判定する (多バイト文字を
+	// 過剰に弾かないため)。超過は INVALID_PARAM。
+	if req.Comment != nil && utf8.RuneCountInString(*req.Comment) > 512 {
 		return apierr.JSONInvalidParam(c)
 	}
 	// uploader 未配線 (= 単体テスト等) は upstream と同じ空レスポンスで返す。
