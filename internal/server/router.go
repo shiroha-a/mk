@@ -1819,6 +1819,9 @@ func (s *Server) setupRoutes() {
 	// group chat (room) federation の inbound 招待処理 (#1203)。chatService が
 	// ChatRoomReceiver も実装している。
 	federationProcessor.SetChatRoomReceiver(chatService)
+	// inbound actor self-delete 時に remote user の notes/drive/following を
+	// cascade purge する job を enqueue する (#1220)。
+	federationProcessor.SetAccountDeleteEnqueuer(s.queueClient)
 	federationProcessor.SetFanoutHook(timelineFanoutHook)
 	federationProcessor.SetNotificationHook(notificationHook)
 

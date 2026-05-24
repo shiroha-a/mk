@@ -13,6 +13,7 @@ import (
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -590,14 +591,70 @@ func TestProcess_DeleteFromNonAuthor(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// fakeAccountDeleteEnqueuer records cascade-purge enqueue calls.
+type fakeAccountDeleteEnqueuer struct{ ids []string }
+
+func (f *fakeAccountDeleteEnqueuer) EnqueueDeleteAccount(p queue.DeleteAccountPayload) error {
+	f.ids = append(f.ids, p.UserID)
+	return nil
+}
+
+// seedRemoteAlice registers a known remote user (we only delete actors we
+// already mirror; isActorDelete short-circuits unknown actors).
+func seedRemoteAlice(env *fullProcessorEnv) string {
+	host := "remote.example"
+	uri := "https://remote.example/users/alice"
+	env.userRepo.Users["alice_remote"] = &model.User{ID: "alice_remote", Username: "alice", Host: &host, URI: &uri}
+	return "alice_remote"
+}
+
 func TestProcess_DeleteActorSelfDelete(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
+	id := seedRemoteAlice(env)
+	enq := &fakeAccountDeleteEnqueuer{}
+	env.processor.SetAccountDeleteEnqueuer(enq)
 	body := []byte(`{
 		"type": "Delete",
 		"actor": "https://remote.example/users/alice",
 		"object": "https://remote.example/users/alice"
 	}`)
 	require.NoError(t, env.processor.Process(body))
+
+	// remote actor が tombstone され、cascade purge が 1 回 enqueue される。
+	assert.True(t, env.userRepo.Users[id].IsDeleted, "actor must be marked deleted")
+	require.Len(t, enq.ids, 1)
+	assert.Equal(t, id, enq.ids[0])
+
+	// AP retry: 2 回目は既に isDeleted なので二重 enqueue しない (idempotent)。
+	require.NoError(t, env.processor.Process(body))
+	assert.Len(t, enq.ids, 1)
+}
+
+func TestProcess_DeleteActorSelfDelete_NoEnqueuerStillTombstones(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	id := seedRemoteAlice(env)
+	// enqueuer 未配線でも tombstone は行う (purge は degrade)。
+	body := []byte(`{
+		"type": "Delete",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://remote.example/users/alice"
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	assert.True(t, env.userRepo.Users[id].IsDeleted)
+}
+
+func TestProcess_DeleteActorSelfDelete_UnknownActorIgnored(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	enq := &fakeAccountDeleteEnqueuer{}
+	env.processor.SetAccountDeleteEnqueuer(enq)
+	// 一度も mirror していない actor の self-delete は何もせず ack (既存 guard)。
+	body := []byte(`{
+		"type": "Delete",
+		"actor": "https://remote.example/users/ghost",
+		"object": "https://remote.example/users/ghost"
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, enq.ids)
 }
 
 func TestProcess_DeleteActorError(t *testing.T) {

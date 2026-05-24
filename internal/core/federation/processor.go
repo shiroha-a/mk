@@ -18,6 +18,7 @@ import (
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
@@ -89,6 +90,10 @@ type Processor struct {
 	// chatRoomReceiver は group chat (room) federation の inbound 操作
 	// (room copy / invitation / membership) を担う (#1203)。
 	chatRoomReceiver ChatRoomReceiver
+	// accountDeleteEnqueuer は inbound actor self-delete 時に remote user の
+	// notes / drive / following を cascade purge する job を enqueue する
+	// (#1220)。nil の場合は tombstone (isDeleted=true) のみで purge は行わない。
+	accountDeleteEnqueuer AccountDeleteEnqueuer
 
 	// Timeline fanout hook for remote notes (#330). ローカルノートは
 	// noteCreateService経由でfanoutされるが、リモートノートはIngestNote/
@@ -418,6 +423,19 @@ func (p *Processor) SetRelayMarker(m RelayStatusMarker) {
 // triage #1002).
 func (p *Processor) SetRelayActorChecker(c RelayActorChecker) {
 	p.relayActorChecker = c
+}
+
+// AccountDeleteEnqueuer schedules the background cascade deletion of a user's
+// notes / drive files / following rows. Implemented by queue.Client. Used by
+// inbound actor self-delete to purge a deleted remote user's mirror data.
+type AccountDeleteEnqueuer interface {
+	EnqueueDeleteAccount(payload queue.DeleteAccountPayload) error
+}
+
+// SetAccountDeleteEnqueuer wires the enqueuer used to cascade-purge a remote
+// user's data when an inbound actor self-delete is received (#1220).
+func (p *Processor) SetAccountDeleteEnqueuer(e AccountDeleteEnqueuer) {
+	p.accountDeleteEnqueuer = e
 }
 
 // SetChatService wires a ChatMessageReceiver for inbound Misskey:ChatMessage
@@ -1137,9 +1155,10 @@ func (p *Processor) handleDelete(act genericActivity) error {
 	if err != nil {
 		return err
 	}
-	// Actor 自身の Delete (アカウント削除) は現在未対応 — 受信は許容して no-op。
+	// Actor 自身の Delete (アカウント削除) は tombstone + cascade purge する
+	// (#1220, upstream ApInboxService.deleteActor 相当)。
 	if author.URI != nil && *author.URI == targetURI {
-		return nil
+		return p.handleActorDelete(author)
 	}
 	note, err := p.noteRepo.FindByURI(targetURI)
 	if err != nil {
@@ -1153,6 +1172,34 @@ func (p *Processor) handleDelete(act genericActivity) error {
 		return p.noteDeleteSvc.Delete(author, note.ID)
 	}
 	return p.noteRepo.Delete(note)
+}
+
+// handleActorDelete processes a remote actor's self-delete (account deletion):
+// the user is tombstoned (isDeleted=true) and a cascade purge of their notes /
+// drive files / following is enqueued. Mirrors upstream
+// ApInboxService.deleteActor.
+//
+// Local users are never deleted via inbound AP (loopback / spoof guard), and
+// an already-deleted user is a no-op so AP retries stay idempotent. Marking
+// runs before enqueue (upstream order); a purge-enqueue failure is logged but
+// not retried (the tombstone is already committed, and re-running would skip on
+// the idempotency guard anyway).
+func (p *Processor) handleActorDelete(actor *model.User) error {
+	if actor.IsLocal() {
+		return nil
+	}
+	if actor.IsDeleted {
+		return nil
+	}
+	if err := p.userRepo.UpdateUser(actor.ID, map[string]any{"isDeleted": true}); err != nil {
+		return fmt.Errorf("actor delete: mark deleted: %w", err)
+	}
+	if p.accountDeleteEnqueuer != nil {
+		if err := p.accountDeleteEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: actor.ID}); err != nil {
+			slog.Warn("actor delete: enqueue cascade purge failed", "userId", actor.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 // isActorDelete reports whether the given Delete activity targets an actor.
