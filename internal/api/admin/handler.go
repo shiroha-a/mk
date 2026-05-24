@@ -212,11 +212,14 @@ func (h *Handler) SetSystemAccountFetcher(f SystemAccountFetcher) {
 // SetInstanceRepo wires an InstanceRepository for admin/federation handlers
 // to use when reading/updating instance rows. Without it,
 // FederationUpdateInstance early-returns 204 (#676)。
-func (h *Handler) SetSigninRepo(r repository.SigninRepository) { h.signinRepo = r }
-
 func (h *Handler) SetInstanceRepo(r repository.InstanceRepository) {
 	h.instanceRepo = r
 }
+
+// SetSigninRepo wires a SigninRepository so admin/show-user can populate the
+// target user's signin history. Without it the `signins` field falls back to
+// an empty array (#1198).
+func (h *Handler) SetSigninRepo(r repository.SigninRepository) { h.signinRepo = r }
 
 // SetFollowingRepo attaches a FollowingRepository for admin endpoints that
 // need to enumerate Following rows by host (e.g.
@@ -776,9 +779,11 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 
 // packUserSignins returns the user's signin history in the admin/show-user
 // `signins` shape. Upstream returns every row (signinsRepository.findBy);
-// we pass limit=-1 so GORM omits the LIMIT clause and matches that. Returns
-// an empty slice (never nil) so the JSON field is always `[]` for callers
-// without a wired signin repository or on lookup failure.
+// we pass limit=-1 so GORM omits the LIMIT clause and matches that. Rows come
+// back newest-first (ListByUserID's default order); upstream leaves the order
+// unspecified so this is a benign deviation. Returns an empty slice (never
+// nil) so the JSON field is always `[]` for callers without a wired signin
+// repository or on lookup failure.
 func (h *Handler) packUserSignins(userID string) []map[string]any {
 	out := []map[string]any{}
 	if h.signinRepo == nil {
