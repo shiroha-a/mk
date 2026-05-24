@@ -1815,6 +1815,9 @@ func (s *Server) setupRoutes() {
 	federationProcessor.SetRelayMarker(relaySvc)
 	federationProcessor.SetRelayActorChecker(relaySvc)
 	federationProcessor.SetChatService(chatService)
+	// group chat (room) federation の inbound 招待処理 (#1203)。chatService が
+	// ChatRoomReceiver も実装している。
+	federationProcessor.SetChatRoomReceiver(chatService)
 	federationProcessor.SetFanoutHook(timelineFanoutHook)
 	federationProcessor.SetNotificationHook(notificationHook)
 

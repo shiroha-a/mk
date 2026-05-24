@@ -86,6 +86,9 @@ type Processor struct {
 
 	// Chat federation (CherryPick互換)
 	chatService ChatMessageReceiver
+	// chatRoomReceiver は group chat (room) federation の inbound 操作
+	// (room copy / invitation / membership) を担う (#1203)。
+	chatRoomReceiver ChatRoomReceiver
 
 	// Timeline fanout hook for remote notes (#330). ローカルノートは
 	// noteCreateService経由でfanoutされるが、リモートノートはIngestNote/
@@ -360,6 +363,11 @@ func (p *Processor) Process(body []byte) error {
 	case "emojireaction", "emojireact":
 		return p.handleLike(act)
 	case "invite":
+		// object が chat room の Group なら group chat federation の招待。
+		// reversi Game object とは object.type で区別する (#1203)。
+		if p.isChatRoomInvite(act) {
+			return p.handleChatRoomInvite(act)
+		}
 		// 非 reversi (Group Invite 等) は未対応扱いで 202 を返させる。
 		// reversi Game object 以外の Invite をここで 400 にすると relay
 		// 以外の peer との互換性が崩れる (#417 P4 Devin review)。
@@ -706,6 +714,11 @@ func (p *Processor) handleAccept(act genericActivity) error {
 	}
 	// inner.actor が embedded object のケースも救済する (#999 / upstream #17340)。
 	inner.normalizeActor(act.Object)
+	// chat room invitation の Accept (remote が我々の room 招待を承認) は
+	// membership 化する (#1203)。
+	if strings.EqualFold(inner.Type, "invite") {
+		return p.handleChatRoomAccept(act, inner)
+	}
 	if !strings.EqualFold(inner.Type, "follow") {
 		return nil
 	}
@@ -1241,6 +1254,11 @@ func (p *Processor) handleReject(act genericActivity) error {
 	}
 	// inner.actor が embedded object のケースも救済する (#999 / upstream #17340)。
 	inner.normalizeActor(act.Object)
+	// chat room invitation の Reject (remote が我々の room 招待を辞退) は
+	// pending invitation を削除する (#1203)。
+	if strings.EqualFold(inner.Type, "invite") {
+		return p.handleChatRoomReject(act, inner)
+	}
 	if !strings.EqualFold(inner.Type, "follow") {
 		return ErrUnsupportedActivity
 	}
