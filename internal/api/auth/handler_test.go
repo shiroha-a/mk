@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +121,24 @@ func (m *mockAuthSessionRepo) CreateAccessToken(token *model.AccessToken) error 
 		key = *token.AppID + ":" + token.UserID
 	}
 	m.accessTokens[key] = token
+	return nil
+}
+
+func (m *mockAuthSessionRepo) FindAccessTokenBySession(session string) (*model.AccessToken, error) {
+	for _, t := range m.accessTokens {
+		if t.Session != nil && *t.Session == session {
+			return t, nil
+		}
+	}
+	return nil, errNotFound
+}
+
+func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) error {
+	for _, t := range m.accessTokens {
+		if t.ID == id {
+			t.Fetched = true
+		}
+	}
 	return nil
 }
 
@@ -463,4 +482,83 @@ func TestGenToken_CreateError(t *testing.T) {
 
 	rec := post(h.GenToken, `{"permission":["read:account"]}`, user)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- MiAuthCheck (#1224) ---
+
+func postMiAuthCheck(h *Handler, session string, userRepo *testutil.MockUserRepository) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("session")
+	c.SetParamValues(session)
+	if userRepo != nil {
+		h.SetUserRepo(userRepo)
+	}
+	_ = h.MiAuthCheck(c)
+	return rec
+}
+
+func TestMiAuthCheck_ReturnsTokenAndUser(t *testing.T) {
+	h, repo := newTestHandler()
+	sess := "sess-abc"
+	repo.accessTokens["k"] = &model.AccessToken{ID: "at1", Token: "secret-token", UserID: "u1", Session: &sess}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+	rec := postMiAuthCheck(h, sess, userRepo)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, true, out["ok"])
+	assert.Equal(t, "secret-token", out["token"])
+	user, ok := out["user"].(map[string]any)
+	require.True(t, ok, "user must be present and non-null")
+	assert.Equal(t, "u1", user["id"])
+	// one-time: token は fetched 済になる。
+	assert.True(t, repo.accessTokens["k"].Fetched)
+}
+
+func TestMiAuthCheck_UnknownSession(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := postMiAuthCheck(h, "ghost", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, false, out["ok"])
+	_, hasToken := out["token"]
+	assert.False(t, hasToken)
+}
+
+func TestMiAuthCheck_AlreadyFetched(t *testing.T) {
+	h, repo := newTestHandler()
+	sess := "sess-used"
+	repo.accessTokens["k"] = &model.AccessToken{ID: "at1", Token: "t", UserID: "u1", Session: &sess, Fetched: true}
+	rec := postMiAuthCheck(h, sess, nil)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, false, out["ok"], "already-fetched token must not be returned again")
+}
+
+func TestMiAuthCheck_EmptySession(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := postMiAuthCheck(h, "", nil)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, false, out["ok"])
+}
+
+func TestMiAuthCheck_NoUserRepoOmitsUser(t *testing.T) {
+	h, repo := newTestHandler()
+	sess := "sess-nouser"
+	repo.accessTokens["k"] = &model.AccessToken{ID: "at1", Token: "t", UserID: "u1", Session: &sess}
+	// userRepo 未配線 → token は返るが user は省略 (null ではなく欠落)。
+	rec := postMiAuthCheck(h, sess, nil)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, true, out["ok"])
+	assert.Equal(t, "t", out["token"])
+	_, hasUser := out["user"]
+	assert.False(t, hasUser)
 }

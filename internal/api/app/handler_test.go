@@ -67,6 +67,22 @@ func (m *mockAuthSessionRepo) CreateAccessToken(t *model.AccessToken) error {
 	return nil
 }
 
+func (m *mockAuthSessionRepo) FindAccessTokenBySession(session string) (*model.AccessToken, error) {
+	for _, t := range m.accessTokens {
+		if t.Session != nil && *t.Session == session {
+			return t, nil
+		}
+	}
+	return nil, assert.AnError
+}
+
+func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) error {
+	if t, ok := m.accessTokens[id]; ok {
+		t.Fetched = true
+	}
+	return nil
+}
+
 func (m *mockAuthSessionRepo) FindAppByID(id string) (*model.App, error) {
 	a, ok := m.apps[id]
 	if !ok {

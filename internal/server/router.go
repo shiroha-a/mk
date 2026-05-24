@@ -2099,6 +2099,10 @@ func (s *Server) setupRoutes() {
 
 	// miauth/gen-token — アクセストークン直接生成
 	api.POST("/miauth/gen-token", authHandler.GenToken, middleware.RequireAuth())
+	// miauth/:session/check — 3rd-party client が session 紐付き token を取得する
+	// (#1224)。token をまだ持たない client が叩くため RequireAuth は付けない。
+	authHandler.SetUserRepo(userRepo)
+	api.POST("/miauth/:session/check", authHandler.MiAuthCheck)
 
 	// app/* — アプリ管理API
 	appHandler := apiapp.NewHandler(authSessionRepo, idGen)

@@ -21,6 +21,13 @@ type AuthSessionRepository interface {
 	// AccessToken operations for MiAuth
 	FindAccessTokenByAppAndUser(appID, userID string) (*model.AccessToken, error)
 	CreateAccessToken(token *model.AccessToken) error
+	// FindAccessTokenBySession looks up the access token created for a MiAuth
+	// session id (used by /miauth/:session/check to hand the token back to the
+	// 3rd-party client).
+	FindAccessTokenBySession(session string) (*model.AccessToken, error)
+	// MarkAccessTokenFetched flips the one-time `fetched` flag so a session
+	// token can only be retrieved once.
+	MarkAccessTokenFetched(id string) error
 
 	// App lookup
 	FindAppByID(id string) (*model.App, error)
@@ -82,6 +89,18 @@ func (r *authSessionRepository) FindAccessTokenByAppAndUser(appID, userID string
 		return nil, err
 	}
 	return &token, nil
+}
+
+func (r *authSessionRepository) FindAccessTokenBySession(session string) (*model.AccessToken, error) {
+	var token model.AccessToken
+	if err := r.db.Where(`"session" = ?`, session).First(&token).Error; err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
+func (r *authSessionRepository) MarkAccessTokenFetched(id string) error {
+	return r.db.Model(&model.AccessToken{}).Where(`"id" = ?`, id).Update("fetched", true).Error
 }
 
 func (r *authSessionRepository) CreateAccessToken(token *model.AccessToken) error {

@@ -93,6 +93,30 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 	_, err = repo.FindAccessTokenByAppAndUser("ghost", user.ID)
 	assert.Error(t, err)
 
+	// MiAuth session token (#1224): session 紐付き token を作成して
+	// FindAccessTokenBySession / MarkAccessTokenFetched を検証する。
+	miSession := "misess_as_1"
+	miToken := &model.AccessToken{
+		ID: "at_as_mi", Token: "mirawtoken", Hash: "mihash", UserID: user.ID,
+		Session: &miSession, Permission: pq.StringArray{"read:account"},
+	}
+	require.NoError(t, repo.CreateAccessToken(miToken))
+	defer testDB.Exec(`DELETE FROM "access_token" WHERE id = ?`, miToken.ID)
+
+	miFound, err := repo.FindAccessTokenBySession(miSession)
+	require.NoError(t, err)
+	assert.Equal(t, "mirawtoken", miFound.Token)
+	assert.False(t, miFound.Fetched)
+
+	require.NoError(t, repo.MarkAccessTokenFetched(miToken.ID))
+	refetched, err := repo.FindAccessTokenBySession(miSession)
+	require.NoError(t, err)
+	assert.True(t, refetched.Fetched, "MarkAccessTokenFetched must persist the one-time flag")
+
+	// FindAccessTokenBySession - not found
+	_, err = repo.FindAccessTokenBySession("ghost-session")
+	assert.Error(t, err)
+
 	// DeleteSession
 	require.NoError(t, repo.DeleteSession("sess_as_1"))
 	_, err = repo.FindSessionByToken("token_as_1")

@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -23,12 +24,19 @@ type Handler struct {
 	repo  repository.AuthSessionRepository
 	cfg   *config.Config
 	idGen id.Generator
+	// userRepo は miauth/:session/check で承認ユーザーを UserDetailedNotMe で
+	// pack するために使う (#1224)。未配線時は user フィールドを省く。
+	userRepo repository.UserRepository
 }
 
 // NewHandler creates a new auth handler.
 func NewHandler(repo repository.AuthSessionRepository, cfg *config.Config, idGen id.Generator) *Handler {
 	return &Handler{repo: repo, cfg: cfg, idGen: idGen}
 }
+
+// SetUserRepo wires the user repository used by MiAuthCheck to pack the
+// approving user.
+func (h *Handler) SetUserRepo(r repository.UserRepository) { h.userRepo = r }
 
 // SessionGenerate handles POST /api/auth/session/generate.
 func (h *Handler) SessionGenerate(c echo.Context) error {
@@ -196,6 +204,36 @@ func (h *Handler) GenToken(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"token": tokenStr})
+}
+
+// MiAuthCheck handles POST /api/miauth/:session/check.
+//
+// 3rd-party クライアントは MiAuth 承認 (= GenToken で session 紐付き access
+// token 作成) 後、本 endpoint を polling して token を取得する。upstream
+// ApiServerService の /miauth/:session/check 相当: session に対応する未取得の
+// token があれば fetched=true にして {ok, token, user} を返し、無ければ
+// {ok:false} を返す。認証不要 (token をまだ持たない client が叩くため)。
+func (h *Handler) MiAuthCheck(c echo.Context) error {
+	session := c.Param("session")
+	if session == "" {
+		return c.JSON(http.StatusOK, map[string]any{"ok": false})
+	}
+	tok, err := h.repo.FindAccessTokenBySession(session)
+	if err != nil || tok == nil || tok.Session == nil || tok.Fetched {
+		// session 不在 / 既に取得済 (one-time) は ok:false。
+		return c.JSON(http.StatusOK, map[string]any{"ok": false})
+	}
+	// one-time 取得: 再 polling で二重取得されないよう fetched を立てる。
+	_ = h.repo.MarkAccessTokenFetched(tok.ID)
+
+	resp := map[string]any{"ok": true, "token": tok.Token}
+	if h.userRepo != nil {
+		if u, uerr := h.userRepo.FindByID(tok.UserID); uerr == nil && u != nil {
+			profile, _ := h.userRepo.FindProfileByUserID(u.ID)
+			resp["user"] = entity.PackUserDetailed(u, profile, h.idGen)
+		}
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func packSession(s *model.AuthSession) map[string]any {
