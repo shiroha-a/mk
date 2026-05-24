@@ -31,6 +31,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/drive"
 	apiemojis "github.com/shiroha-a/mk/internal/api/emojis"
 	apifederation "github.com/shiroha-a/mk/internal/api/federation"
+	apifetchexternal "github.com/shiroha-a/mk/internal/api/fetchexternal"
 	apifetchrss "github.com/shiroha-a/mk/internal/api/fetchrss"
 	apiflash "github.com/shiroha-a/mk/internal/api/flash"
 	"github.com/shiroha-a/mk/internal/api/following"
@@ -2388,10 +2389,11 @@ func (s *Server) setupRoutes() {
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth())
 
-	// fetch-external-resources — URL proxy (stub)
-	api.POST("/fetch-external-resources", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]any{"type": "unknown", "data": map[string]any{}})
-	})
+	// fetch-external-resources — external JSON resource を hash 検証付きで取得
+	// (#1222)。外部 theme/plugin 等を integrity-check して返す。SSRF-safe client
+	// 経由、upstream requireCredential 相当で RequireAuth を要求する。
+	fetchExternalHandler := apifetchexternal.New(s.outboundClient(apifetchexternal.FetchTimeout), s.config.UserAgent)
+	api.POST("/fetch-external-resources", fetchExternalHandler.Fetch, middleware.RequireAuth())
 
 	// fetch-rss — RSS / Atom feed プロキシ。frontend RSS / RSSTicker ウィジェット
 	// が GET で叩く実装になっているため Misskey TS と同じく allowGet 相当で
