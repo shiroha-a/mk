@@ -13,7 +13,8 @@ func TestPackClip_Basic(t *testing.T) {
 	clipID := idGen.Generate(time.Now())
 	desc := "my clip"
 	owner := &model.User{ID: "u1", Username: "alice"}
-	cl := &model.Clip{ID: clipID, UserID: "u1", Name: "favs", Description: &desc, IsPublic: true, NotesCount: 5}
+	lastClipped := time.Date(2026, 4, 10, 1, 2, 3, 0, time.UTC)
+	cl := &model.Clip{ID: clipID, UserID: "u1", Name: "favs", Description: &desc, IsPublic: true, NotesCount: 5, LastClippedAt: &lastClipped}
 
 	out := PackClip(cl, idGen, owner)
 	assert.Equal(t, clipID, out["id"])
@@ -22,6 +23,8 @@ func TestPackClip_Basic(t *testing.T) {
 	assert.Equal(t, &desc, out["description"])
 	assert.Equal(t, true, out["isPublic"])
 	assert.Equal(t, 5, out["notesCount"])
+	// lastClippedAt は ISO ms 形式 (createdAt と統一)。
+	assert.Equal(t, "2026-04-10T01:02:03.000Z", out["lastClippedAt"])
 	// misskey_dart の Clip.fromJson が非null必須とする field (#1237)。
 	createdAt, ok := out["createdAt"].(string)
 	assert.True(t, ok, "createdAt must be a non-null string")

@@ -20,6 +20,13 @@ func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User) map[string]
 	if cl == nil {
 		return nil
 	}
+	const tsFormat = "2006-01-02T15:04:05.000Z"
+	// lastClippedAt は createdAt や codebase 内の他 timestamp と同じ ISO ms
+	// 形式に揃える (nil なら null)。misskey_dart は nullable で受けるが形式は統一。
+	var lastClippedAt any
+	if cl.LastClippedAt != nil {
+		lastClippedAt = cl.LastClippedAt.UTC().Format(tsFormat)
+	}
 	out := map[string]any{
 		"id":             cl.ID,
 		"userId":         cl.UserID,
@@ -27,12 +34,12 @@ func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User) map[string]
 		"description":    cl.Description,
 		"isPublic":       cl.IsPublic,
 		"notesCount":     cl.NotesCount,
-		"lastClippedAt":  cl.LastClippedAt,
+		"lastClippedAt":  lastClippedAt,
 		"favoritedCount": 0,
 	}
 	if idGen != nil {
 		if t, err := idGen.ParseTime(cl.ID); err == nil {
-			out["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+			out["createdAt"] = t.UTC().Format(tsFormat)
 		}
 	}
 	if owner != nil {
