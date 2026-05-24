@@ -657,6 +657,14 @@ func TestInvitationsAccept_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestInvitationsAccept_NoInvitationRejected(t *testing.T) {
+	h, repo := newTestHandler()
+	// 招待が無ければ membership を作らず NO_SUCH_INVITATION。
+	rec := post(h.InvitationsAccept, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, repo.Memberships)
+}
+
 func TestInvitationsReject(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u1", RoomID: "r1"}
@@ -669,6 +677,12 @@ func TestInvitationsReject_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.InvitationsReject, `{}`, u1)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestInvitationsReject_NoInvitationRejected(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.InvitationsReject, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestMembersBan(t *testing.T) {

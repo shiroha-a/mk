@@ -725,15 +725,19 @@ func (h *Handler) InvitationsAccept(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	// メンバーシップを作成
+	// pending invitation がある場合のみ accept できる。これが無いと招待無しに
+	// membership が作られ、任意 room owner へ未承諾 Accept が飛ぶ (#1206 review)。
+	// 招待なしの参加は別途 rooms/join を使う。
+	inv, err := h.repo.FindInvitation(user.ID, req.RoomID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_INVITATION", "No such invitation.", "8c8f38f0-3b7e-4f5e-9c6d-2e3f4a5b6c7d"))
+	}
+	// メンバーシップを作成して招待を消費する。
 	m := &model.ChatRoomMembership{
 		ID: h.idGen.Generate(time.Now()), UserID: user.ID, RoomID: req.RoomID,
 	}
 	_ = h.repo.CreateMembership(m)
-	// 招待を削除
-	if inv, err := h.repo.FindInvitation(user.ID, req.RoomID); err == nil {
-		_ = h.repo.DeleteInvitation(inv.ID)
-	}
+	_ = h.repo.DeleteInvitation(inv.ID)
 	// remote room の招待なら Accept を owner へ配送する (#1205)。local room は
 	// service 側で no-op。
 	if h.svc != nil {
@@ -751,9 +755,13 @@ func (h *Handler) InvitationsReject(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	if inv, err := h.repo.FindInvitation(user.ID, req.RoomID); err == nil {
-		_ = h.repo.DeleteInvitation(inv.ID)
+	// pending invitation がある場合のみ reject できる (任意 room owner への
+	// 未承諾 Reject 送信を防ぐ、#1206 review)。
+	inv, err := h.repo.FindInvitation(user.ID, req.RoomID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_INVITATION", "No such invitation.", "8c8f38f0-3b7e-4f5e-9c6d-2e3f4a5b6c7d"))
 	}
+	_ = h.repo.DeleteInvitation(inv.ID)
 	// remote room の招待なら Reject を owner へ配送する (#1205)。
 	if h.svc != nil {
 		h.svc.FederateInvitationResponse(req.RoomID, user.ID, false)
