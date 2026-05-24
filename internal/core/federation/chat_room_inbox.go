@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+
+	corechat "github.com/shiroha-a/mk/internal/core/chat"
 )
 
 // ChatRoomReceiver wires the chat service's room-federation operations into the
@@ -91,15 +94,27 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 		Target string `json:"target"`
 	}
 	_ = json.Unmarshal(act.raw, &env)
+	// target 欠落 / invitee が local でないケースは恒久的に解決しないため、
+	// retryable error ではなく ErrUnsupportedActivity を返して inbox worker の
+	// 無駄な再試行 (retry storm) を防ぐ (#1204 review)。
 	if env.Target == "" {
-		return errors.New("chat room invite: missing target")
+		slog.Warn("chat room invite: missing target", "actor", act.Actor)
+		return ErrUnsupportedActivity
 	}
 	invitee, err := p.resolveTargetUser(env.Target)
 	if err != nil || invitee == nil || !invitee.IsLocal() {
-		return fmt.Errorf("chat room invite: invitee %s not local", env.Target)
+		slog.Warn("chat room invite: invitee is not a local user", "target", env.Target)
+		return ErrUnsupportedActivity
 	}
 
 	if err := p.chatRoomReceiver.EnsureRoomViaAP(roomID, group.Name, group.Summary, owner.ID); err != nil {
+		// owner mismatch (= roomId が無関係なローカル room と衝突) は永久に
+		// 解決しないので retry させない。それ以外 (DB 一過性エラー等) は
+		// retryable のまま伝播させる。
+		if errors.Is(err, corechat.ErrRoomOwnerMismatch) {
+			slog.Warn("chat room invite: room id collides with an unrelated local room", "roomID", roomID)
+			return ErrUnsupportedActivity
+		}
 		return fmt.Errorf("chat room invite: ensure room: %w", err)
 	}
 	if err := p.chatRoomReceiver.CreateInvitationViaAP(roomID, invitee.ID); err != nil {

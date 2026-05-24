@@ -33,6 +33,12 @@ var (
 	// ErrInvalidTarget is returned when neither toUserId nor toRoomId is
 	// provided to CreateMessage helpers.
 	ErrInvalidTarget = errors.New("chat target is required")
+	// ErrRoomOwnerMismatch is returned by EnsureRoomViaAP when a room with the
+	// requested ID already exists locally but is owned by a different user. It
+	// signals a permanent (non-retryable) condition: the federated room ID
+	// collides with an unrelated local room, so the inbound activity can never
+	// be applied. Callers should not retry.
+	ErrRoomOwnerMismatch = errors.New("chat room federation: room owner mismatch")
 )
 
 // StreamingPublisher is the Redis pub/sub dispatch interface the service uses
@@ -393,7 +399,7 @@ func (s *Service) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) err
 	}
 	if existing, err := s.repo.FindRoomByID(roomID); err == nil && existing != nil {
 		if existing.OwnerID != ownerUserID {
-			return fmt.Errorf("chat room federation: room %s owner mismatch", roomID)
+			return fmt.Errorf("%w: room %s", ErrRoomOwnerMismatch, roomID)
 		}
 		return nil
 	}

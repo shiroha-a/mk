@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -130,8 +132,10 @@ func TestProcess_ChatRoomInvite_MissingTarget(t *testing.T) {
 		"actor": "https://remote.example/users/alice",
 		"object": {"type": "Group", "id": "https://remote.example/chat/rooms/room1", "name": "G"}
 	}`)
-	// target が無い Invite はエラーで、room/invitation は作られない。
-	require.Error(t, p.Process(body))
+	// target が無い Invite は恒久的失敗なので ErrUnsupportedActivity
+	// (retry させない)。room/invitation は作られない。
+	err := p.Process(body)
+	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
 	assert.Empty(t, recv.ensureCalls)
 }
 
@@ -145,8 +149,9 @@ func TestProcess_ChatRoomInvite_InviteeNotLocal(t *testing.T) {
 		"target": "https://remote.example/users/charlie",
 		"object": {"type": "Group", "id": "https://remote.example/chat/rooms/room1", "name": "G"}
 	}`)
-	// invitee が local user でなければ招待を受け付けない。
-	require.Error(t, p.Process(body))
+	// invitee が local user でなければ恒久的失敗 → ErrUnsupportedActivity。
+	err := p.Process(body)
+	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
 	assert.Empty(t, recv.inviteCalls)
 }
 
@@ -205,8 +210,28 @@ func TestProcess_ChatRoomInvite_EnsureRoomError(t *testing.T) {
 		"target": "https://example.com/users/bob",
 		"object": {"type": "Group", "id": "https://remote.example/chat/rooms/room1", "name": "G"}
 	}`)
-	// EnsureRoomViaAP が失敗したら invitation 作成まで進まずエラー。
-	require.Error(t, p.Process(body))
+	// EnsureRoomViaAP が一過性エラー (DB 等) なら retryable error を伝播。
+	err := p.Process(body)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity, "transient error must stay retryable")
+	assert.Empty(t, recv.inviteCalls)
+}
+
+func TestProcess_ChatRoomInvite_OwnerMismatchNotRetried(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{ensureErr: corechat.ErrRoomOwnerMismatch}
+	p.SetChatRoomReceiver(recv)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+	body := []byte(`{
+		"type": "Invite",
+		"actor": "https://remote.example/users/alice",
+		"target": "https://example.com/users/bob",
+		"object": {"type": "Group", "id": "https://remote.example/chat/rooms/room1", "name": "G"}
+	}`)
+	// roomId が無関係なローカル room と衝突する恒久的失敗は retry させない。
+	err := p.Process(body)
+	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
 	assert.Empty(t, recv.inviteCalls)
 }
 
