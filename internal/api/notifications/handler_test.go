@@ -339,6 +339,25 @@ func TestCreate_MissingBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// upstream の ajv required は presence チェックなので body="" は受理される。
+// mk-go も不在 (nil) のみ 400 とし、空文字は通すこと (drop-in 互換)。
+func TestCreate_EmptyBodyAccepted(t *testing.T) {
+	h, _ := newTestHandler(t)
+	c, rec := newJSONRequest(t, "/api/notifications/create", `{"body":""}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	c2, rec2 := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+	setAuth(c2, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c2))
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "app", resp[0]["type"])
+	assert.Equal(t, "", resp[0]["body"])
+}
+
 func TestCreate_NilService(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	h := NewHandler(nil, idGen)

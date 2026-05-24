@@ -240,18 +240,21 @@ func (h *Handler) MarkAllAsRead(c echo.Context) error {
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Body   string  `json:"body"`
+		Body   *string `json:"body"`
 		Header *string `json:"header"`
 		Icon   *string `json:"icon"`
 	}
-	if err := c.Bind(&req); err != nil || req.Body == "" {
+	// upstream paramDef は body を required にするのみ (ajv の required は
+	// presence チェックなので空文字 "" も受理される)。よって不在 (nil) のみを
+	// INVALID_PARAM とし、空文字は upstream 同様に通す。
+	if err := c.Bind(&req); err != nil || req.Body == nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	if h.svc == nil || user == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 
-	extra := map[string]any{"body": req.Body}
+	extra := map[string]any{"body": *req.Body}
 	if req.Header != nil {
 		extra["header"] = *req.Header
 	}
