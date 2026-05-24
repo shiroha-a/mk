@@ -126,8 +126,10 @@ func (e *Exporter) exportCustomEmojis(ctx context.Context) ([]byte, error) {
 	meta := emojiMetaDoc{
 		MetaVersion: emojiExportMetaVersion,
 		Host:        nil,
-		ExportedAt:  time.Now().UTC().Format(time.RFC3339),
-		Emojis:      records,
+		// upstream は new Date().toISOString() (ms 付き `...000Z`) を出す。
+		// codebase 内の他 ISO timestamp とも形式を揃える。
+		ExportedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Emojis:     records,
 	}
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {

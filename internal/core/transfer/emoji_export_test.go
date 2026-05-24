@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -89,7 +90,8 @@ func TestExport_CustomEmojis(t *testing.T) {
 
 	require.Contains(t, entries, "meta.json")
 	var meta struct {
-		MetaVersion int `json:"metaVersion"`
+		MetaVersion int    `json:"metaVersion"`
+		ExportedAt  string `json:"exportedAt"`
 		Emojis      []struct {
 			FileName   string `json:"fileName"`
 			Downloaded bool   `json:"downloaded"`
@@ -104,6 +106,9 @@ func TestExport_CustomEmojis(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(entries["meta.json"], &meta))
 	assert.Equal(t, 2, meta.MetaVersion)
+	// exportedAt は ISO8601 ms 精度 (upstream toISOString 互換)。
+	_, perr := time.Parse("2006-01-02T15:04:05.000Z", meta.ExportedAt)
+	assert.NoError(t, perr, "exportedAt=%q should be ISO8601 ms", meta.ExportedAt)
 	require.Len(t, meta.Emojis, 2)
 
 	assert.Equal(t, "smile.png", meta.Emojis[0].FileName)
