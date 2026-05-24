@@ -104,7 +104,7 @@ jobs:
           INBOUND_CONCURRENCY: "16"
         run: make queue-bench-inbound
 
-      - name: Assert all stacks reached ok=sent
+      - name: queue-bench smoke (assert ok=sent)
         # driver_inbound.py は partial ok=0 でも exit 0 で抜けるので、
         # ここで inbound.json をパースして「全 3 stack で ok == sent」を
         # verify する。1 stack でも `ok < sent` なら CI fail にして
