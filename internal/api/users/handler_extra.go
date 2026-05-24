@@ -155,11 +155,12 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 //   - target user が remote なら 400 IS_REMOTE_USER (mk-go では現状 local
 //     のみ対応、upstream と同じ制限)。
 //   - それ以外 (public か self view) なら reactor の reaction list を
-//     id / createdAt / type / user / note の minimal shape で返す。
+//     id / createdAt / type / user / note shape で返す。
 //
-// note pack は upstream の packManyWithNote (= 完全 note shape) ではなく
-// 最小 shape (id / userId / text) で start。drop-in 互換性は両 backend で
-// 同 endpoint が動くことを spec で担保する (#821 PR-D)。
+// note は upstream の packManyWithNote 相当の完全 shape (PackNotes) で返す。
+// 最小 shape (id / userId / text) だと createdAt / visibility / user 等が
+// 欠落し、misskey_dart の Note.fromJson が非null cast に失敗して落ちる
+// (#1227、当初は #821 PR-D で最小 shape start としていた)。
 func (h *Handler) Reactions(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
