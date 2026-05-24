@@ -449,6 +449,38 @@ func TestPackMeDetailed_NilProfile(t *testing.T) {
 	assert.False(t, me.ReceiveAnnouncementEmail)
 }
 
+// #1249: EnsureRelationFlags は IsFollowing がセット済みのとき、未計算の
+// relation bool を false で埋める (misskey_dart の WithRelations variant 互換)。
+func TestEnsureRelationFlags(t *testing.T) {
+	t.Run("fills nil flags when isFollowing set", func(t *testing.T) {
+		tr := true
+		d := UserDetailed{IsFollowing: &tr}
+		d.EnsureRelationFlags()
+		for name, p := range map[string]*bool{
+			"isFollowed": d.IsFollowed, "isBlocking": d.IsBlocking,
+			"isBlocked": d.IsBlocked, "isMuted": d.IsMuted, "isRenoteMuted": d.IsRenoteMuted,
+			"hasPendingFollowRequestFromYou": d.HasPendingFollowRequestFromYou,
+			"hasPendingFollowRequestToYou":   d.HasPendingFollowRequestToYou,
+		} {
+			require.NotNil(t, p, "%s must be filled", name)
+			assert.False(t, *p)
+		}
+	})
+	t.Run("no-op when isFollowing nil", func(t *testing.T) {
+		d := UserDetailed{}
+		d.EnsureRelationFlags()
+		assert.Nil(t, d.IsBlocking)
+		assert.Nil(t, d.IsFollowed)
+	})
+	t.Run("does not overwrite already-set flags", func(t *testing.T) {
+		tr, fa := true, false
+		d := UserDetailed{IsFollowing: &tr, IsBlocking: &tr, IsMuted: &fa}
+		d.EnsureRelationFlags()
+		assert.True(t, *d.IsBlocking, "existing true must be preserved")
+		assert.False(t, *d.IsMuted)
+	})
+}
+
 // #1240: misskey_dart の MeDetailed.fromJson が非null List/num として cast する
 // mutedWords / mutedInstances / achievements / loggedInDays が profile から
 // 正しく埋まること。

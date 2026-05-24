@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/roles"
@@ -72,6 +73,32 @@ func TestList_Empty(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.List, `{}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1249: misskey_dart の RolesListResponse.fromJson が非null必須とする
+// createdAt (String) / updatedAt (String) / canEditMembersByModerator (bool) /
+// usersCount (num) が含まれること。欠落で roles 一覧が cast crash していた。
+func TestList_FullShape(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	roleID := idGen.Generate(time.Now())
+	roleRepo.Roles[roleID] = &model.Role{
+		ID: roleID, Name: "Public", IsPublic: true,
+		UpdatedAt:                 time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+		CanEditMembersByModerator: true,
+	}
+	rec := doPost(h.List, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	r := resp[0]
+	createdAt, ok := r["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
+	assert.Equal(t, "2026-05-01T00:00:00.000Z", r["updatedAt"])
+	assert.Equal(t, true, r["canEditMembersByModerator"])
+	assert.Equal(t, float64(0), r["usersCount"])
 }
 
 func TestShow_Success(t *testing.T) {

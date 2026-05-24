@@ -1006,6 +1006,15 @@ func TestFollowers_PopulatesIsFollowedFromViewer(t *testing.T) {
 	assert.Equal(t, true, follower["isFollowed"], "alice follows viewer(bob) → isFollowed=true")
 	// bob は alice を follow していない → isFollowing=false。
 	assert.Equal(t, false, follower["isFollowing"])
+	// #1249: isFollowing が present のため misskey_dart は WithRelations variant を
+	// 選び、isBlocking/isBlocked/isMuted/isRenoteMuted も非null bool として cast
+	// する。EnsureRelationFlags で false 埋めされ全て present であること。
+	for _, key := range []string{"isBlocking", "isBlocked", "isMuted", "isRenoteMuted", "hasPendingFollowRequestFromYou", "hasPendingFollowRequestToYou"} {
+		v, present := follower[key]
+		assert.True(t, present, "%s must be present (WithRelations variant)", key)
+		_, isBool := v.(bool)
+		assert.True(t, isBool, "%s must be a non-null bool, got %T", key, v)
+	}
 }
 
 // TestFollowers_PopulatesPendingFollowRequest guards #1144 #2: locked

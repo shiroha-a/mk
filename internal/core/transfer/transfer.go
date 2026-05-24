@@ -177,10 +177,40 @@ func (e *Exporter) Export(ctx context.Context, userID, exportType string) (*mode
 			NotifieeID: user.ID,
 			Type:       notification.TypeExportCompleted,
 			Extra: map[string]any{
-				"exportedEntity": exportType,
+				"exportedEntity": misskeyExportedEntity(exportType),
 				"fileId":         file.ID,
 			},
 		})
 	}
 	return file, nil
+}
+
+// misskeyExportedEntity maps mk-go's internal export type to the value the
+// exportCompleted notification's `exportedEntity` field must carry. misskey_dart
+// (および upstream Misskey TS) は enum: note / antenna / blocking / clip /
+// customEmoji / favorite / following / muting / userList で受けるため、mk-go の
+// 複数形 / kebab-case の内部値 (notes / favorites / user-lists 等) を単数形 /
+// camelCase へ変換しないと notifications 一覧が enum decode で落ちる (#1249)。
+func misskeyExportedEntity(exportType string) string {
+	switch exportType {
+	case ExportNotes:
+		return "note"
+	case ExportFavorites:
+		return "favorite"
+	case ExportUserLists:
+		return "userList"
+	case ExportAntennas:
+		return "antenna"
+	case ExportClips:
+		return "clip"
+	case ExportMuting:
+		return "muting"
+	case ExportCustomEmojis:
+		return "customEmoji"
+	case ExportFollowing, ExportBlocking:
+		// following / blocking は既に misskey enum と一致。
+		return exportType
+	default:
+		return exportType
+	}
 }

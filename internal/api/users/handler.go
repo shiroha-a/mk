@@ -757,6 +757,13 @@ func (h *Handler) packRelationItems(
 				pendingTo := pendingToMap[b.User.ID]
 				d.HasPendingFollowRequestFromYou = &pendingFrom
 				d.HasPendingFollowRequestToYou = &pendingTo
+				// misskey_dart の UserDetailed union は isFollowing が present だと
+				// UserDetailedNotMeWithRelations を選び、isBlocking/isBlocked/
+				// isMuted/isRenoteMuted も非null bool として cast する (#1249)。
+				// follow/follower list は block/mute の権威ソースではない (#1144 の
+				// batch を壊さないため per-user lookup は避ける) ので best-effort
+				// false で埋める。正確な値は users/show 単体で取得される。
+				d.EnsureRelationFlags()
 			}
 			if stats := remoteStatsMap[b.User.ID]; stats != nil {
 				d.NotesCount = stats.NotesCount

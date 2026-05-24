@@ -176,6 +176,42 @@ type MeDetailed struct {
 	NotificationRecieveConfig map[string]any `json:"notificationRecieveConfig"`
 }
 
+// EnsureRelationFlags fills any nil viewer-relation bool with false **only when
+// IsFollowing is already set**. misskey_dart の UserDetailed union dispatch は
+// `isFollowing` の存在で UserDetailedNotMeWithRelations を選び、その variant は
+// isFollowed / hasPendingFollowRequestFromYou / hasPendingFollowRequestToYou /
+// isBlocking / isBlocked / isMuted / isRenoteMuted も非null bool として cast
+// するため、一部しかセットしないと `Null is not bool` で落ちる (#1249)。
+// relation を部分的にしか計算しない経路 (follow/follower list 等) で本 helper を
+// 呼び、未計算 flag を false に倒して shape を完備する。
+func (d *UserDetailed) EnsureRelationFlags() {
+	if d.IsFollowing == nil {
+		return
+	}
+	f := false
+	if d.IsFollowed == nil {
+		d.IsFollowed = &f
+	}
+	if d.HasPendingFollowRequestFromYou == nil {
+		d.HasPendingFollowRequestFromYou = &f
+	}
+	if d.HasPendingFollowRequestToYou == nil {
+		d.HasPendingFollowRequestToYou = &f
+	}
+	if d.IsBlocking == nil {
+		d.IsBlocking = &f
+	}
+	if d.IsBlocked == nil {
+		d.IsBlocked = &f
+	}
+	if d.IsMuted == nil {
+		d.IsMuted = &f
+	}
+	if d.IsRenoteMuted == nil {
+		d.IsRenoteMuted = &f
+	}
+}
+
 // PackMeDetailed packs a self-view user payload, extending PackUserDetailed
 // with MeDetailed fields. Self-mutation handlers (i/update, i/2fa/*)
 // should use this instead of PackUserDetailed so frontend's

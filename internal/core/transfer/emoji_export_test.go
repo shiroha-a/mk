@@ -125,7 +125,8 @@ func TestExport_CustomEmojis(t *testing.T) {
 	// exportCompleted 通知が custom-emojis entity で発火すること。
 	require.Len(t, notifier.calls, 1)
 	assert.Equal(t, notification.TypeExportCompleted, notifier.calls[0].Type)
-	assert.Equal(t, "custom-emojis", notifier.calls[0].Extra["exportedEntity"])
+	// exportedEntity は misskey enum 値 (custom-emojis → customEmoji) に変換 (#1249)。
+	assert.Equal(t, "customEmoji", notifier.calls[0].Extra["exportedEntity"])
 	assert.Equal(t, file.ID, notifier.calls[0].Extra["fileId"])
 }
 

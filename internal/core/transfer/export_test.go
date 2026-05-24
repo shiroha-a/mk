@@ -81,6 +81,35 @@ func newExportDeps(t *testing.T) (*fakeDriveSaver, *fakeNotifier, transfer.Expor
 
 // --- Tests ---
 
+// #1249: exportCompleted 通知の exportedEntity は misskey enum 値に変換される。
+// mk-go の複数形 / kebab-case をそのまま出すと misskey_dart の enum decode で
+// 落ちるため、各 export type が正しい単数形 / camelCase になることを確認する。
+func TestExport_ExportedEntityMapsToMisskeyEnum(t *testing.T) {
+	cases := map[string]string{
+		transfer.ExportNotes:        "note",
+		transfer.ExportFavorites:    "favorite",
+		transfer.ExportUserLists:    "userList",
+		transfer.ExportAntennas:     "antenna",
+		transfer.ExportClips:        "clip",
+		transfer.ExportMuting:       "muting",
+		transfer.ExportCustomEmojis: "customEmoji",
+		transfer.ExportFollowing:    "following",
+		transfer.ExportBlocking:     "blocking",
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			saver, notifier, deps, user := newExportDeps(t)
+			deps.EmojiRepo = &fakeEmojiSource{}
+			exporter := transfer.NewExporter(deps)
+			_, err := exporter.Export(context.Background(), user.ID, in)
+			require.NoError(t, err)
+			require.NotEmpty(t, saver.uploads)
+			require.Len(t, notifier.calls, 1)
+			assert.Equal(t, want, notifier.calls[0].Extra["exportedEntity"])
+		})
+	}
+}
+
 func TestExport_UnsupportedType(t *testing.T) {
 	_, _, deps, user := newExportDeps(t)
 	exporter := transfer.NewExporter(deps)
@@ -109,7 +138,8 @@ func TestExport_Notes_EmptyReturnsJSONArray(t *testing.T) {
 	assert.Equal(t, []byte("[]"), saver.uploads[0].Body)
 	require.Len(t, notifier.calls, 1)
 	assert.Equal(t, notification.TypeExportCompleted, notifier.calls[0].Type)
-	assert.Equal(t, transfer.ExportNotes, notifier.calls[0].Extra["exportedEntity"])
+	// exportedEntity は misskey enum 値 (notes → note) に変換される (#1249)。
+	assert.Equal(t, "note", notifier.calls[0].Extra["exportedEntity"])
 }
 
 func TestExport_Notes_WithPoll(t *testing.T) {
