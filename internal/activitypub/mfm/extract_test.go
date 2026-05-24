@@ -49,3 +49,44 @@ func TestCollectEmojiCodes_IgnoresMalformed(t *testing.T) {
 	// 英数字 + _ + - 以外は emoji name として parse されない (parser.go::tryEmojiCode)
 	assert.Nil(t, CollectEmojiCodes(":foo bar:"))
 }
+
+func TestCollectHashtags_Empty(t *testing.T) {
+	assert.Nil(t, CollectHashtags())
+	assert.Nil(t, CollectHashtags(""))
+	assert.Nil(t, CollectHashtags("hello world"))
+}
+
+func TestCollectHashtags_Basic(t *testing.T) {
+	assert.Equal(t, []string{"golang"}, CollectHashtags("hello #golang"))
+	assert.Equal(t, []string{"go", "rust"}, CollectHashtags("learn #go and #rust"))
+}
+
+func TestCollectHashtags_DedupExactAndOrder(t *testing.T) {
+	// exact dedup + first-occurrence 順 (case-insensitive dedup は呼び出し側 hashtag.Extract)
+	assert.Equal(t, []string{"go", "GO"}, CollectHashtags("#go #go #GO"))
+}
+
+func TestCollectHashtags_NestedInsideMarkup(t *testing.T) {
+	// fn ($[...]) など inline 子を持つノードの中の hashtag も AST walk で拾える
+	assert.Equal(t, []string{"bar"}, CollectHashtags("$[x2 #bar]"))
+	assert.ElementsMatch(t, []string{"foo", "bar"}, CollectHashtags("#foo $[spin #bar]"))
+}
+
+func TestCollectHashtags_ExcludesCodeURLMention(t *testing.T) {
+	// code block / inline code / URL fragment / の中の # は hashtag にならない
+	assert.Empty(t, CollectHashtags("```\n#secret\n```"))
+	assert.Empty(t, CollectHashtags("inline `#var`"))
+	assert.Empty(t, CollectHashtags("https://example.com/path#anchor"))
+	// mention は hashtag ではない
+	assert.Equal(t, []string{"real"}, CollectHashtags("@alice #real"))
+}
+
+func TestCollectHashtags_WordBoundary(t *testing.T) {
+	// 直前が英数字なら hashtag にならない (foo#bar / #one#two の #two)
+	assert.Nil(t, CollectHashtags("foo#bar"))
+	assert.Equal(t, []string{"one"}, CollectHashtags("#one#two"))
+}
+
+func TestCollectHashtags_AcrossMultipleTexts(t *testing.T) {
+	assert.Equal(t, []string{"foo", "bar"}, CollectHashtags("body #foo", "cw #bar"))
+}
