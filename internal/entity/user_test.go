@@ -479,6 +479,19 @@ func TestPackMeDetailed_ListFieldsEmptyAreNonNull(t *testing.T) {
 	assert.Equal(t, 0, me.LoggedInDays)
 }
 
+// #1240: PackMeDetailed 単体 (policies override 無し) は policies を **出さない**
+// こと。i/update / meUpdated はこれを直接 frontend の updateCurrentAccountPartial
+// に流すため、`policies:null` を出すと `$i.policies` を null 上書きして policy
+// 判定が壊れる。omitempty で省略されることを保証する。
+func TestPackMeDetailed_OmitsPoliciesWhenUnset(t *testing.T) {
+	u := &model.User{ID: "me6", Username: "nopol", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	me := PackMeDetailed(u, &model.UserProfile{UserID: "me6", Fields: datatypes.JSON([]byte("[]"))})
+	assert.Nil(t, me.Policies)
+	b, err := json.Marshal(me)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), `"policies"`, "PackMeDetailed must omit policies (not emit null) so i/update merge does not null out $i.policies")
+}
+
 // #968: serialized JSON が drop-in 互換 key 名 (isExplorable / noCrawle 等)
 // を出すこと。フロントの updateCurrentAccountPartial が key 名で merge
 // するので、key drift があると session には反映されない。

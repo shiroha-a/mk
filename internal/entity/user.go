@@ -152,11 +152,17 @@ type MeDetailed struct {
 	// MutedInstances / Achievements / LoggedInDays は profile 由来で正確に、
 	// Policies は role 依存のため handler 層で best-effort default を入れる
 	// (権威値は /api/i 経由)。
-	MutedWords     []any          `json:"mutedWords"`
-	MutedInstances []string       `json:"mutedInstances"`
-	Achievements   []any          `json:"achievements"`
-	LoggedInDays   int            `json:"loggedInDays"`
-	Policies       map[string]any `json:"policies"`
+	MutedWords     []any    `json:"mutedWords"`
+	MutedInstances []string `json:"mutedInstances"`
+	Achievements   []any    `json:"achievements"`
+	LoggedInDays   int      `json:"loggedInDays"`
+	// Policies は role 依存で AsMeDetailed (entity 層) では nil のまま。omitempty で
+	// 「未設定なら省略」にするのが重要 (#1240): PackMeDetailed を override 無しで
+	// 直接返す i/update / meUpdated 経路で nil を `null` として出すと frontend の
+	// updateCurrentAccountPartial が `$i.policies` を null 上書きして policy 判定が
+	// 壊れる。users/show self-view は handler が DefaultPolicies() を明示セットする
+	// ので含まれ、/api/i は handler が実 policies で override する。
+	Policies map[string]any `json:"policies,omitempty"`
 	// EmailNotificationTypes is the list of email-notification categories the
 	// user opted in for. Defaults to ["follow", "receiveFollowRequest"] when
 	// the profile column is absent (#985).
