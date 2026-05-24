@@ -97,6 +97,10 @@ type ExporterDeps struct {
 	UserListRepo     repository.UserListRepository
 	Drive            DriveSaver
 	Notifier         NotificationDispatcher
+	// EmojiRepo / EmojiImageFetcher は custom-emojis export 用 (任意)。未配線
+	// なら ExportCustomEmojis は "emoji source not configured" で失敗する。
+	EmojiRepo         EmojiSource
+	EmojiImageFetcher EmojiImageFetcher
 }
 
 // Exporter produces Misskey-compatible export files and saves them as
@@ -148,6 +152,9 @@ func (e *Exporter) Export(ctx context.Context, userID, exportType string) (*mode
 	case ExportClips:
 		body, err = e.exportClips(user.ID)
 		name = timestampedName("clips", "json")
+	case ExportCustomEmojis:
+		body, err = e.exportCustomEmojis(ctx)
+		name = timestampedName("custom-emojis", "zip")
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, exportType)
 	}

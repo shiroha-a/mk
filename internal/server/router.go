@@ -422,6 +422,11 @@ func (s *Server) setupRoutes() {
 		UserListRepo:     userListRepo,
 		Drive:            driveService,
 		Notifier:         notificationService,
+		// custom-emojis export: 全 local emoji を ListLocal で列挙し、各画像を
+		// SSRF-safe client で download して zip 化する (#1217)。画像取得は最大
+		// 60s/個、cap 8 MiB。
+		EmojiRepo:         emojiRepo,
+		EmojiImageFetcher: coretransfer.NewHTTPEmojiImageFetcher(s.outboundClient(60*time.Second), s.config.UserAgent, 0),
 	})
 	driveReader := coretransfer.NewRepoBackedDriveReader(driveFileRepo, driveStorage)
 	importer := coretransfer.NewImporter(coretransfer.ImporterDeps{
@@ -2395,8 +2400,20 @@ func (s *Server) setupRoutes() {
 	// notes (plain) — bulk note lookup by noteIds
 	api.POST("/notes", notesHandler.BulkShow)
 
-	// export-custom-emojis — zip export (complex, stub)
+	// export-custom-emojis — 全 local custom emoji を zip (画像 + meta.json) に
+	// export する非同期ジョブを enqueue する (#1217)。upstream 同様 endpoint は
+	// 即 204 を返し、生成完了後に exportCompleted 通知 + drive file で受け取る。
 	api.POST("/export-custom-emojis", func(c echo.Context) error {
+		user := middleware.GetUser(c)
+		if user == nil {
+			return c.NoContent(http.StatusNoContent)
+		}
+		if err := s.queueClient.EnqueueExport(queue.ExportPayload{
+			UserID: user.ID,
+			Type:   coretransfer.ExportCustomEmojis,
+		}); err != nil {
+			slog.Warn("export-custom-emojis: enqueue failed", "user", user.ID, "err", err)
+		}
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth())
 
