@@ -662,9 +662,11 @@ func (h *Handler) Me(c echo.Context) error {
 	resp["isAdmin"] = isAdmin
 	resp["isModerator"] = isMod
 	// isDeleted / isExplorable は PackMeDetailed 由来で base 展開済 (#971)。
-	// 未読系フィールドを依存する repo / service から実際に引く。
-	// 未wireのものは false/0/[] にフォールバックする (テスト互換)。
-	// antenna / channel / specifiedNotes は別issueで追跡中のためここでは false 固定。
+	// 未読系フィールドを依存する repo / service から実際に引く
+	// (hasUnreadAntenna / hasUnreadChannel は antennaUnreadRepo /
+	// channelUnreadRepo、hasUnreadSpecifiedNotes は notificationSvc.UnreadSummary
+	// 経由で fillUnreadFields が populate する)。未wireのものは false/0/[] に
+	// フォールバックする (テスト互換)。
 	h.fillUnreadFields(c.Request().Context(), u, resp)
 	h.fillPinnedFields(c.Request().Context(), u, profile, resp)
 	resp["policies"] = userPolicies

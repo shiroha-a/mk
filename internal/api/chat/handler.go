@@ -25,7 +25,25 @@ type Handler struct {
 	repo  repository.ChatRepository
 	idGen id.Generator
 	svc   *corechat.Service
+	// fileRepo / moderatorChecker は drive/files/attached-chat-messages 用
+	// (#1218)。fileId の owner 検証 (moderator は任意 file 可) に使う。未配線
+	// 時は当該 endpoint が空配列を返す。
+	fileRepo         repository.DriveFileRepository
+	moderatorChecker ModeratorChecker
 }
+
+// ModeratorChecker reports whether a user has moderator privileges. Implemented
+// by core/role.Service. Used to widen attached-chat-messages from owner-only to
+// any file for moderators (upstream `userId: isModerator ? undefined : me.id`).
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
+// SetDriveFileRepo wires the drive file repository for attached-chat-messages.
+func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) { h.fileRepo = r }
+
+// SetModeratorChecker wires a moderator checker for attached-chat-messages.
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) { h.moderatorChecker = m }
 
 // NewHandler creates a new chat handler.
 func NewHandler(repo repository.ChatRepository, idGen id.Generator) *Handler {
@@ -234,6 +252,51 @@ func packUser(u *model.User) map[string]any {
 		"isBot":          u.IsBot,
 		"isCat":          u.IsCat,
 	}
+}
+
+// AttachedChatMessages handles POST /api/drive/files/attached-chat-messages.
+// 指定 drive file を添付した chat message を newest-first で返す。upstream
+// (read:drive) と同じく file は owner-scope で引く (moderator は任意 file 可)。
+// 連合互換: res は ChatMessage の配列 (packMessageDetailed)。
+func (h *Handler) AttachedChatMessages(c echo.Context) error {
+	user := middleware.GetUser(c)
+	var req struct {
+		FileID    string `json:"fileId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+	}
+	if err := c.Bind(&req); err != nil || req.FileID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "fileId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 10
+	}
+	if h.fileRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
+	file, err := h.fileRepo.FindByID(req.FileID)
+	if err != nil || file == nil {
+		return apierr.JSONNoSuchFile(c)
+	}
+	// owner-scope: moderator 以外は自分の file のみ参照可 (他人の private chat
+	// の添付を覗けないようにする)。
+	isMod := h.moderatorChecker != nil && h.moderatorChecker.IsModerator(user.ID)
+	if !isMod && (file.UserID == nil || *file.UserID != user.ID) {
+		return apierr.JSONNoSuchFile(c)
+	}
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	msgs, err := h.repo.ListMessagesByFileID(req.FileID, untilID, sinceID, req.Limit)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, h.packMessageDetailed(m, user.ID))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // --- Rooms ---

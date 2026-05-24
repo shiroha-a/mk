@@ -942,3 +942,80 @@ func TestMembersUpdateMembership_Auth(t *testing.T) {
 	// not a member → 404
 	assert.Equal(t, http.StatusNotFound, post(h.MembersUpdateMembership, `{"roomId":"r1","userId":"ghost"}`, u1).Code)
 }
+
+// --- AttachedChatMessages (#1218) ---
+
+type fakeModeratorChecker struct{ mods map[string]bool }
+
+func (f fakeModeratorChecker) IsModerator(userID string) bool { return f.mods[userID] }
+
+func attachedHandler(t *testing.T) (*Handler, *testutil.MockChatRepository, *testutil.MockDriveFileRepository) {
+	t.Helper()
+	h, repo := newTestHandler()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	h.SetDriveFileRepo(fileRepo)
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{"mod1": true}})
+	return h, repo, fileRepo
+}
+
+func seedFileMsg(repo *testutil.MockChatRepository, id, fileID string) {
+	fid := fileID
+	to := "u9"
+	repo.Messages[id] = &model.ChatMessage{ID: id, FromUserID: "sender", ToUserID: &to, FileID: &fid}
+}
+
+func TestAttachedChatMessages_OwnerSeesMessages(t *testing.T) {
+	h, repo, fileRepo := attachedHandler(t)
+	owner := u1.ID
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
+	seedFileMsg(repo, "m1", "f1")
+	seedFileMsg(repo, "m2", "f1")
+	seedFileMsg(repo, "m3", "other") // 別 file は除外
+
+	rec := post(h.AttachedChatMessages, `{"fileId":"f1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Len(t, out, 2)
+}
+
+func TestAttachedChatMessages_NonOwnerRejected(t *testing.T) {
+	h, repo, fileRepo := attachedHandler(t)
+	owner := u1.ID
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
+	seedFileMsg(repo, "m1", "f1")
+	// u2 は owner でも moderator でもない → NoSuchFile。
+	rec := post(h.AttachedChatMessages, `{"fileId":"f1"}`, u2)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAttachedChatMessages_ModeratorSeesOthersFile(t *testing.T) {
+	h, repo, fileRepo := attachedHandler(t)
+	owner := u1.ID
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
+	seedFileMsg(repo, "m1", "f1")
+	rec := post(h.AttachedChatMessages, `{"fileId":"f1"}`, &model.User{ID: "mod1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Len(t, out, 1)
+}
+
+func TestAttachedChatMessages_MissingFileID(t *testing.T) {
+	h, _, _ := attachedHandler(t)
+	rec := post(h.AttachedChatMessages, `{}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAttachedChatMessages_NoSuchFile(t *testing.T) {
+	h, _, _ := attachedHandler(t)
+	rec := post(h.AttachedChatMessages, `{"fileId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAttachedChatMessages_NoFileRepoReturnsEmpty(t *testing.T) {
+	h, _ := newTestHandler() // fileRepo 未配線
+	rec := post(h.AttachedChatMessages, `{"fileId":"f1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
+}

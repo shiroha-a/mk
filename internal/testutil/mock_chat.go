@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -177,6 +178,32 @@ func (m *MockChatRepository) ListMessagesByRoom(_ string, _ int) ([]*model.ChatM
 
 func (m *MockChatRepository) ListMessagesByUser(_, _ string, _ int) ([]*model.ChatMessage, error) {
 	return nil, nil
+}
+
+func (m *MockChatRepository) ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	var out []*model.ChatMessage
+	for _, msg := range m.Messages {
+		if msg.FileID == nil || *msg.FileID != fileID {
+			continue
+		}
+		if untilID != "" && msg.ID >= untilID {
+			continue
+		}
+		if sinceID != "" && msg.ID <= sinceID {
+			continue
+		}
+		out = append(out, msg)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (m *MockChatRepository) SearchMessages(_, _ string, _ int) ([]*model.ChatMessage, error) {

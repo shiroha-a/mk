@@ -180,12 +180,6 @@ func (h *Handler) Favorites(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-// NotificationsGrouped handles POST /api/i/notifications-grouped.
-// フロントエンドがブート直後に呼ぶ。簡易版として空配列を返す。
-func (h *Handler) NotificationsGrouped(c echo.Context) error {
-	return c.JSON(http.StatusOK, []any{})
-}
-
 // RegenerateToken handles POST /api/i/regenerate-token.
 func (h *Handler) RegenerateToken(c echo.Context) error {
 	u := middleware.GetUser(c)

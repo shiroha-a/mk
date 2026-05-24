@@ -937,13 +937,6 @@ func TestFilesAttachedNotes_ForwardsCursorParams(t *testing.T) {
 	assert.Equal(t, 7, spy.gotLimit)
 }
 
-func TestFilesAttachedChatMessages(t *testing.T) {
-	h, _, _ := newHandler(t)
-	c, rec := newJSONReq(t, `{"fileId":"f1"}`)
-	require.NoError(t, h.FilesAttachedChatMessages(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
 func TestFilesUploadFromURL(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newJSONReq(t, `{"url":"https://example.com/img.png"}`)

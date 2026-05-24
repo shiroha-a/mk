@@ -1457,7 +1457,8 @@ func (s *Server) setupRoutes() {
 	api.POST("/drive/files/find", driveHandler.FilesFind, middleware.RequireAuth())
 	api.POST("/drive/files/check-existence", driveHandler.FilesCheckExistence, middleware.RequireAuth())
 	api.POST("/drive/files/attached-notes", driveHandler.FilesAttachedNotes, middleware.RequireAuth())
-	api.POST("/drive/files/attached-chat-messages", driveHandler.FilesAttachedChatMessages, middleware.RequireAuth())
+	// drive/files/attached-chat-messages は chat message を pack するため chat
+	// handler 側で処理する (route 登録は chatHandler 構築後、#1218)。
 	api.POST("/drive/files/upload-from-url", driveHandler.FilesUploadFromURL, middleware.RequireAuth())
 	api.POST("/drive/files/move-bulk", driveHandler.FilesMoveBulk, middleware.RequireAuth())
 	api.POST("/drive/stream", driveHandler.Stream, middleware.RequireAuth())
@@ -2159,6 +2160,11 @@ func (s *Server) setupRoutes() {
 	// chat/* — Misskey v2026 チャット機能 (実データ)
 	chatHandler := apichat.NewHandler(chatRepo, idGen)
 	chatHandler.SetService(chatService)
+	// drive/files/attached-chat-messages: chat message を pack するため chat
+	// handler が処理する。file の owner-scope (moderator は任意 file 可) (#1218)。
+	chatHandler.SetDriveFileRepo(driveFileRepo)
+	chatHandler.SetModeratorChecker(roleService)
+	api.POST("/drive/files/attached-chat-messages", chatHandler.AttachedChatMessages, middleware.RequireAuth())
 	api.POST("/chat/rooms/create", chatHandler.RoomsCreate, middleware.RequireAuth())
 	api.POST("/chat/rooms/show", chatHandler.RoomsShow, middleware.RequireAuth())
 	api.POST("/chat/rooms/update", chatHandler.RoomsUpdate, middleware.RequireAuth())

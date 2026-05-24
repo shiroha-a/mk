@@ -23,6 +23,10 @@ type ChatRepository interface {
 	DeleteMessage(id string) error
 	ListMessagesByRoom(roomID string, limit int) ([]*model.ChatMessage, error)
 	ListMessagesByUser(userID, otherUserID string, limit int) ([]*model.ChatMessage, error)
+	// ListMessagesByFileID returns chat messages that attached the given drive
+	// file, newest-first, with id-cursor pagination. Used by
+	// drive/files/attached-chat-messages.
+	ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error)
 	SearchMessages(userID, query string, limit int) ([]*model.ChatMessage, error)
 
 	// Membership operations
@@ -165,6 +169,25 @@ func (r *chatRepository) ListMessagesByRoom(roomID string, limit int) ([]*model.
 	var msgs []*model.ChatMessage
 	if err := r.db.Preload("FromUser").Preload("File").Where(`"toRoomId" = ?`, roomID).
 		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+func (r *chatRepository) ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	q := r.db.Preload("FromUser").Preload("ToUser").Preload("ToRoom").Preload("File").
+		Where(`"fileId" = ?`, fileID)
+	if untilID != "" {
+		q = q.Where(`"id" < ?`, untilID)
+	}
+	if sinceID != "" {
+		q = q.Where(`"id" > ?`, sinceID)
+	}
+	var msgs []*model.ChatMessage
+	if err := q.Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil

@@ -284,14 +284,6 @@ func TestFavorites_UntilIDPaginates(t *testing.T) {
 	}
 }
 
-// --- NotificationsGrouped ---
-
-func TestNotificationsGrouped(t *testing.T) {
-	h, _ := newExtraHandler(t)
-	rec := postExtra(h.NotificationsGrouped, `{}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
 // --- RegenerateToken ---
 
 func TestRegenerateToken_Success(t *testing.T) {

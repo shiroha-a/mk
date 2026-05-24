@@ -668,12 +668,6 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// FilesAttachedChatMessages handles POST /api/drive/files/attached-chat-messages.
-func (h *Handler) FilesAttachedChatMessages(c echo.Context) error {
-	// チャットメッセージの添付ファイル検索（簡易版: 空配列）
-	return c.JSON(http.StatusOK, []any{})
-}
-
 // FilesUploadFromURL handles POST /api/drive/files/upload-from-url.
 func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 	// URL経由のファイルアップロード（非同期処理: 204返却）

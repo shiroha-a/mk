@@ -567,3 +567,48 @@ func TestChatRepository_Invitation(t *testing.T) {
 	// DeleteInvitation
 	require.NoError(t, repo.DeleteInvitation("inv_1"))
 }
+
+func TestChatRepository_ListMessagesByFileID(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	user := insertTestUser(t, "u_chat_file", "chatfileuser")
+	defer cleanupUser(t, user.ID)
+
+	fileX := "file_x"
+	other := "file_y"
+	mk := func(id, fileID string) *model.ChatMessage {
+		f := fileID
+		to := user.ID
+		return &model.ChatMessage{
+			ID: id, FromUserID: user.ID, ToUserID: &to, FileID: &f,
+			Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+		}
+	}
+	for _, m := range []*model.ChatMessage{mk("cmf_1", fileX), mk("cmf_2", fileX), mk("cmf_3", other)} {
+		require.NoError(t, repo.CreateMessage(m))
+		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, m.ID)
+	}
+
+	// fileX の message だけが newest-first で返る。
+	msgs, err := repo.ListMessagesByFileID(fileX, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "cmf_2", msgs[0].ID)
+	assert.Equal(t, "cmf_1", msgs[1].ID)
+
+	// untilID cursor: cmf_2 より前 (= cmf_1) のみ。
+	older, err := repo.ListMessagesByFileID(fileX, "cmf_2", "", 10)
+	require.NoError(t, err)
+	require.Len(t, older, 1)
+	assert.Equal(t, "cmf_1", older[0].ID)
+
+	// sinceID cursor: cmf_1 より後 (= cmf_2) のみ。
+	newer, err := repo.ListMessagesByFileID(fileX, "", "cmf_1", 10)
+	require.NoError(t, err)
+	require.Len(t, newer, 1)
+	assert.Equal(t, "cmf_2", newer[0].ID)
+
+	// default limit (0 → 10)。
+	def, err := repo.ListMessagesByFileID(fileX, "", "", 0)
+	require.NoError(t, err)
+	assert.Len(t, def, 2)
+}
