@@ -130,6 +130,9 @@ type Handler struct {
 	// router で必ず wire する (未配線時は 30s cache TTL 待ちで stale 旧 user
 	// が auth 通過する security regression が残る)。
 	userTokenInvalidator UserTokenInvalidator
+	// signinRepo は admin/show-user の `signins` field を実データで埋める
+	// ために使う (#1198)。未配線時は `[]` fallback で shape compat を保つ。
+	signinRepo repository.SigninRepository
 }
 
 // UserTokenInvalidator drops every cached auth entry for the given userID
@@ -209,6 +212,8 @@ func (h *Handler) SetSystemAccountFetcher(f SystemAccountFetcher) {
 // SetInstanceRepo wires an InstanceRepository for admin/federation handlers
 // to use when reading/updating instance rows. Without it,
 // FederationUpdateInstance early-returns 204 (#676)。
+func (h *Handler) SetSigninRepo(r repository.SigninRepository) { h.signinRepo = r }
+
 func (h *Handler) SetInstanceRepo(r repository.InstanceRepository) {
 	h.instanceRepo = r
 }
@@ -753,12 +758,13 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		// user の役割に基づいて差し替わる。
 		resp["policies"] = h.roleService.GetUserPolicies(u.ID)
 	}
-	// signins / roleAssigns / isHibernated / lastActiveDate は upstream
-	// admin/show-user shape の必須 field (#888)。mk-go では signin 履歴と
-	// role assignment 詳細を別 endpoint で取得する設計なので空配列 / null
-	// で填めて shape compat を保つ (full integration は別 issue scope)。
-	resp["signins"] = []any{}
-	resp["roleAssigns"] = []any{}
+	// signins / roleAssigns は upstream admin/show-user shape の必須 field
+	// (#888)。frontend admin moderation view が user の signin 履歴と role
+	// 割当履歴を直接参照するので実データで埋める (#1198)。repo / service
+	// 未配線や lookup 失敗時は frontend の `.map(...)` が例外を吐かないよう
+	// 空配列に fallback し slog.Warn で観測する (roles の扱いと揃え)。
+	resp["signins"] = h.packUserSignins(u.ID)
+	resp["roleAssigns"] = h.packUserRoleAssigns(u.ID)
 	resp["isHibernated"] = false
 	if u.LastActiveDate != nil {
 		resp["lastActiveDate"] = u.LastActiveDate.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -766,6 +772,60 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		resp["lastActiveDate"] = nil
 	}
 	return resp
+}
+
+// packUserSignins returns the user's signin history in the admin/show-user
+// `signins` shape. Upstream returns every row (signinsRepository.findBy);
+// we pass limit=-1 so GORM omits the LIMIT clause and matches that. Returns
+// an empty slice (never nil) so the JSON field is always `[]` for callers
+// without a wired signin repository or on lookup failure.
+func (h *Handler) packUserSignins(userID string) []map[string]any {
+	out := []map[string]any{}
+	if h.signinRepo == nil {
+		return out
+	}
+	signins, err := h.signinRepo.ListByUserID(userID, -1, "", "")
+	if err != nil {
+		slog.Warn("admin/show-user: failed to load signins", "userId", userID, "err", err)
+		return out
+	}
+	for _, s := range signins {
+		if packed := entity.PackSignin(s, h.idGen); packed != nil {
+			out = append(out, packed)
+		}
+	}
+	return out
+}
+
+// packUserRoleAssigns returns the user's active role assignments in the
+// admin/show-user `roleAssigns` shape ({createdAt, expiresAt, roleId}).
+// createdAt is derived from the aidx-encoded assignment ID. Mirrors upstream
+// which maps roleService.getUserAssigns (expired assignments excluded).
+func (h *Handler) packUserRoleAssigns(userID string) []map[string]any {
+	out := []map[string]any{}
+	if h.roleService == nil {
+		return out
+	}
+	assigns, err := h.roleService.GetUserAssigns(userID)
+	if err != nil {
+		slog.Warn("admin/show-user: failed to load role assignments", "userId", userID, "err", err)
+		return out
+	}
+	const tsFormat = "2006-01-02T15:04:05.000Z"
+	for _, a := range assigns {
+		entry := map[string]any{
+			"roleId":    a.RoleID,
+			"expiresAt": nil,
+		}
+		if t, perr := h.idGen.ParseTime(a.ID); perr == nil {
+			entry["createdAt"] = t.UTC().Format(tsFormat)
+		}
+		if a.ExpiresAt != nil {
+			entry["expiresAt"] = a.ExpiresAt.UTC().Format(tsFormat)
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // SuspendUser handles POST /api/admin/suspend-user.

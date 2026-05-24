@@ -155,10 +155,13 @@ func (s *Server) setupRoutes() {
 	keypairRepo := repository.NewUserKeypairRepository(s.db)
 	keypairExtraRepo := repository.NewUserKeypairExtraRepository(s.db)
 	instanceRepo := repository.NewInstanceRepository(s.db)
-	// instance.{followersCount,followingCount} はリアルタイム incremental
-	// 維持の hook が未実装で常に 0 → admin/overview の federation pie chart
-	// が空になる。起動時に `following` テーブルから一回 backfill する
-	// (#421)。失敗は警告だけで起動継続。
+	// instance.{followersCount,followingCount} は following service の
+	// adjustInstanceCountsForFollowing (Follow/Unfollow/AcceptRequest) と
+	// blocking service の auto-unfollow で incremental に維持される
+	// (admin/overview の federation pie chart の data source)。起動時の
+	// backfill は、再起動時点での following テーブルとの整合性回復 +
+	// direct DB 改変や過去の counter drift への安全網として残す (#421)。
+	// 失敗は警告だけで起動継続。
 	if err := instanceRepo.RecomputeFollowCounts(); err != nil {
 		slog.Warn("instance follow-counts recompute failed", "err", err)
 	}
@@ -1913,6 +1916,9 @@ func (s *Server) setupRoutes() {
 	// 満たしている。
 	adminHandler.SetUserTokenInvalidator(s.auth)
 	adminHandler.SetInstanceRepo(instanceRepo)
+	// admin/show-user の signins field を実データで埋める (#1198)。signinRepo
+	// は signin handler 配線時に既に構築済 (line ~1030)。
+	adminHandler.SetSigninRepo(signinRepo)
 	adminHandler.SetAbuseRepo(abuseReportRepo)
 	adminHandler.SetAbuseForwarder(coreabuse.NewForwarder(abuseReportRepo, sysAcctSvc, apRenderer, deliverService))
 	adminHandler.SetDeleteAccountEnqueuer(s.queueClient)

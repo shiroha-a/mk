@@ -5598,7 +5598,9 @@ func (m *MockSigninRepository) ListByUserID(userID string, limit int, untilID, s
 		}
 		return rows[i].ID > rows[j].ID
 	})
-	if len(rows) > limit {
+	// limit < 0 は GORM の Limit(-1) と同じく「無制限」を意味する
+	// (admin/show-user が全 signin を取得するために -1 を渡す)。
+	if limit >= 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}
 	return rows, nil

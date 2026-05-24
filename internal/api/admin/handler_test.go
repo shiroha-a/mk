@@ -218,6 +218,98 @@ func TestShowUser_Success(t *testing.T) {
 	assert.NotNil(t, resp["securityKeysList"])
 	assert.NotNil(t, resp["achievements"])
 	assert.Equal(t, false, resp["isAdmin"])
+	// signins / roleAssigns は repo / assignment 未配線でも nil ではなく
+	// 空配列で返る (frontend の `.map(...)` が落ちない shape compat)。
+	assert.Equal(t, []any{}, resp["signins"])
+	assert.Equal(t, []any{}, resp["roleAssigns"])
+}
+
+// failingSigninRepo は signin lookup が error を返すケースを再現する
+// repository.SigninRepository 実装。admin/show-user の fallback 経路を突く。
+type failingSigninRepo struct{}
+
+func (failingSigninRepo) Create(*model.Signin) error { return assertError{} }
+func (failingSigninRepo) ListByUserID(string, int, string, string) ([]*model.Signin, error) {
+	return nil, assertError{}
+}
+
+func TestShowUser_WithSignins(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	uid := idGen.Generate(time.Now())
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+
+	signinRepo := testutil.NewMockSigninRepository()
+	sid := idGen.Generate(time.Now())
+	signinRepo.Signins = []*model.Signin{
+		{ID: sid, UserID: uid, IP: "203.0.113.5", Success: true},
+	}
+	h.SetSigninRepo(signinRepo)
+
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	signins, ok := resp["signins"].([]any)
+	require.True(t, ok)
+	require.Len(t, signins, 1)
+	entry := signins[0].(map[string]any)
+	assert.Equal(t, sid, entry["id"])
+	assert.Equal(t, "203.0.113.5", entry["ip"])
+	assert.Equal(t, true, entry["success"])
+	assert.NotNil(t, entry["createdAt"])
+}
+
+func TestShowUser_SigninsErrorFallback(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	uid := idGen.Generate(time.Now())
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+	h.SetSigninRepo(failingSigninRepo{})
+
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// lookup 失敗時は空配列に fallback する。
+	assert.Equal(t, []any{}, resp["signins"])
+}
+
+func TestShowUser_WithRoleAssigns(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	idGen, _ := id.NewGenerator("aidx")
+	uid := idGen.Generate(time.Now())
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Active"}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2", Name: "Expired"}
+	future := time.Now().Add(time.Hour)
+	expired := time.Now().Add(-time.Hour)
+	aid := idGen.Generate(time.Now())
+	assignRepo.Assignments[uid+":r1"] = &model.RoleAssignment{ID: aid, UserID: uid, RoleID: "r1", ExpiresAt: &future}
+	assignRepo.Assignments[uid+":r2"] = &model.RoleAssignment{ID: "a2", UserID: uid, RoleID: "r2", ExpiresAt: &expired}
+
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assigns, ok := resp["roleAssigns"].([]any)
+	require.True(t, ok)
+	// 期限切れ (r2) は upstream getUserAssigns と同じく除外される。
+	require.Len(t, assigns, 1)
+	entry := assigns[0].(map[string]any)
+	assert.Equal(t, "r1", entry["roleId"])
+	assert.NotNil(t, entry["createdAt"])
+	assert.NotNil(t, entry["expiresAt"])
 }
 
 func TestShowUser_NotFound(t *testing.T) {

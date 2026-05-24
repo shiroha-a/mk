@@ -273,6 +273,19 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	return roles, nil
 }
 
+// GetUserAssigns returns the user's currently active role assignments.
+// Mirrors upstream RoleService.getUserAssigns: expired assignments are
+// filtered out (assignmentRepo.ListByUser already excludes rows whose
+// expiresAt has passed). Used by admin/show-user to expose assignment
+// metadata (createdAt / expiresAt / roleId) separately from the resolved
+// role list returned by GetUserRoles.
+func (s *Service) GetUserAssigns(userID string) ([]*model.RoleAssignment, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	return s.assignmentRepo.ListByUser(userID)
+}
+
 // evaluateConditionalRoles returns the subset of `target=conditional`
 // roles whose `condFormula` evaluates to true for the user. Best-effort:
 // when prerequisites are missing (no userRepo wired, role list fetch

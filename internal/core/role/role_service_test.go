@@ -58,6 +58,33 @@ func TestGetUserRoles_ExpiredRoleExcluded(t *testing.T) {
 	assert.Empty(t, roles)
 }
 
+func TestGetUserAssigns_EmptyUserID(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	assigns, err := svc.GetUserAssigns("")
+	require.NoError(t, err)
+	assert.Empty(t, assigns)
+}
+
+func TestGetUserAssigns_ActiveOnly(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Active"}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2", Name: "Expired"}
+	future := time.Now().Add(1 * time.Hour)
+	expired := time.Now().Add(-1 * time.Hour)
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{
+		ID: "a1", UserID: "user1", RoleID: "r1", ExpiresAt: &future,
+	}
+	assignRepo.Assignments["user1:r2"] = &model.RoleAssignment{
+		ID: "a2", UserID: "user1", RoleID: "r2", ExpiresAt: &expired,
+	}
+
+	// upstream getUserAssigns と同じく期限切れ assignment は除外される。
+	assigns, err := svc.GetUserAssigns("user1")
+	require.NoError(t, err)
+	require.Len(t, assigns, 1)
+	assert.Equal(t, "r1", assigns[0].RoleID)
+}
+
 func TestIsAdministrator_RootUser(t *testing.T) {
 	svc, _, _, metaRepo := newTestService(t)
 	rootID := "root1"
