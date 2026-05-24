@@ -2062,8 +2062,13 @@ func TestMe_PendingFollowRequest(t *testing.T) {
 
 func TestMe_UnreadAnnouncement(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
+	// 実 aidx ID を使うことで PackAnnouncement の createdAt が ParseTime で
+	// 復元され、非null の timestamp 文字列になることを保証する。
+	gen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	annID := gen.Generate(time.Now())
 	h.SetAnnouncementRepo(&stubAnnouncementRepo{
-		rows: []*model.Announcement{{ID: "a1", Title: "hello", Text: "world"}},
+		rows: []*model.Announcement{{ID: annID, Title: "hello", Text: "world"}},
 	})
 
 	resp := runMe(t, h, userRepo, "u1")
@@ -2071,8 +2076,14 @@ func TestMe_UnreadAnnouncement(t *testing.T) {
 	arr := resp["unreadAnnouncements"].([]any)
 	assert.Len(t, arr, 1)
 	first := arr[0].(map[string]any)
-	assert.Equal(t, "a1", first["id"])
+	assert.Equal(t, annID, first["id"])
 	assert.Equal(t, "hello", first["title"])
+	assert.Equal(t, "world", first["text"])
+	// createdAt は misskey_dart の AnnouncementsResponse が非null String として
+	// cast するため、キーが存在し空でないことを必須とする (#1224 回帰防止)。
+	createdAt, ok := first["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
 }
 
 func TestMe_UnreadAnnouncement_Empty(t *testing.T) {

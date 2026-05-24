@@ -1328,12 +1328,11 @@ func (h *Handler) fillUnreadFields(ctx context.Context, u *model.User, resp map[
 			resp["hasUnreadAnnouncement"] = len(ann) > 0
 			out := make([]map[string]any, 0, len(ann))
 			for _, a := range ann {
-				out = append(out, map[string]any{
-					"id":       a.ID,
-					"title":    a.Title,
-					"text":     a.Text,
-					"imageUrl": a.ImageURL,
-				})
+				// PackAnnouncement で createdAt / updatedAt / icon / display 等を
+				// 含む upstream 互換の shape に揃える。独自 map だと createdAt が
+				// 欠落し、misskey_dart の AnnouncementsResponse.fromJson が
+				// createdAt を非null String として cast して落ちる (#1224)。
+				out = append(out, entity.PackAnnouncement(a, h.idGen, false))
 			}
 			resp["unreadAnnouncements"] = out
 		}
