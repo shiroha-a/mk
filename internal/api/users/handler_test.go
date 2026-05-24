@@ -416,6 +416,13 @@ func TestShow_SelfViewReturnsMeDetailed(t *testing.T) {
 	// 通常 UserDetailed field も残る
 	assert.Equal(t, "self1", resp["id"])
 	assert.Equal(t, "selfuser", resp["username"])
+	// self-view では relation を計算しないため isFollowing / isFollowed は
+	// null ではなく省略されること。null だと misskey_dart の
+	// UserDetailedNotMeWithRelations が bool cast で落ちる (#1228)。
+	_, hasIsFollowing := resp["isFollowing"]
+	assert.False(t, hasIsFollowing, "isFollowing must be omitted (not null) for self-view")
+	_, hasIsFollowed := resp["isFollowed"]
+	assert.False(t, hasIsFollowed, "isFollowed must be omitted (not null) for self-view")
 }
 
 // TestShow_NonSelfViewExcludesMeDetailed: viewer != target なら MeDetailed

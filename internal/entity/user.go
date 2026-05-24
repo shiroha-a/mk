@@ -87,9 +87,14 @@ type UserDetailed struct {
 	PinnedPageID *string `json:"pinnedPageId"`
 	PinnedPage   any     `json:"pinnedPage"`
 	Roles        []any   `json:"roles"`
-	// viewer依存フィールド (ハンドラ側でセット)
-	IsFollowing                    *bool   `json:"isFollowing"`
-	IsFollowed                     *bool   `json:"isFollowed"`
+	// viewer依存フィールド (ハンドラ側でセット)。viewer===target の self-view や
+	// 未認証では relation を計算せず nil のままになる。upstream Misskey は self/
+	// no-me のとき relation フィールド一式を省略する (`detail && meId !== userId`)
+	// ため、ここも omitempty で揃える。omitempty が無いと nil が `null` として
+	// 出力され、misskey_dart の UserDetailedNotMeWithRelations が
+	// `isFollowing as bool` で null cast に失敗する (#1228)。
+	IsFollowing                    *bool   `json:"isFollowing,omitempty"`
+	IsFollowed                     *bool   `json:"isFollowed,omitempty"`
 	IsBlocking                     *bool   `json:"isBlocking,omitempty"`
 	IsBlocked                      *bool   `json:"isBlocked,omitempty"`
 	IsMuted                        *bool   `json:"isMuted,omitempty"`
