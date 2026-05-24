@@ -337,6 +337,44 @@ func (s *Service) tryDeliverToRemoteUser(msg *model.ChatMessage, fromUserID, toU
 	_ = s.repo.UpdateDeliveryStatus(msg.ID, false, false)
 }
 
+// FederateInvitation delivers an Invite activity to a remote invitee so the
+// remote instance can surface the chat room invitation (CherryPick group chat
+// federation). Best-effort: no-op when AP delivery is unwired or the invitee
+// is local; delivery failures are logged and swallowed (the local invitation
+// row has already been committed, matching the 1-on-1 delivery policy). The
+// activity is signed by the room owner (the inviter).
+func (s *Service) FederateInvitation(roomID, inviteeID string) {
+	if s.deliverer == nil || s.userRepo == nil || s.renderer == nil || s.urls == nil {
+		return
+	}
+	invitee, err := s.userRepo.FindByID(inviteeID)
+	if err != nil || invitee == nil || invitee.IsLocal() {
+		return
+	}
+	inviteeURI := ""
+	if invitee.URI != nil {
+		inviteeURI = *invitee.URI
+	}
+	if inviteeURI == "" {
+		return
+	}
+	room, err := s.repo.FindRoomByID(roomID)
+	if err != nil || room == nil {
+		slog.Warn("chat: invitation federation: room not found", "roomID", roomID, "err", err)
+		return
+	}
+	group := s.renderer.RenderChatRoom(room)
+	invite := s.renderer.RenderInvite(room.OwnerID, group, inviteeURI)
+	body, err := json.Marshal(invite)
+	if err != nil {
+		slog.Warn("chat: invitation federation: marshal failed", "roomID", roomID, "err", err)
+		return
+	}
+	if err := s.deliverer.DeliverToUser(room.OwnerID, invitee, body); err != nil {
+		slog.Warn("chat: invitation federation: deliver failed", "roomID", roomID, "inviteeID", inviteeID, "err", err)
+	}
+}
+
 // CreateMessageViaAP persists a chat message received via ActivityPub from a
 // remote user. The uri parameter is the activity's canonical ID. AP retries
 // are common so URI-based dedup is performed (IngestNote と同じパターン).

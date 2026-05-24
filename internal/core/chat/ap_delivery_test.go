@@ -280,3 +280,70 @@ func TestCreateMessageToUser_NonGranularScope_NoFollowingRepoOK(t *testing.T) {
 	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
 	require.NoError(t, err)
 }
+
+// newInvitationService builds a chat service with AP delivery wired and keeps
+// the chat repo reference so room rows can be seeded for invitation tests.
+func newInvitationService(t *testing.T) (*corechat.Service, *testutil.MockChatRepository, *testutil.MockUserRepository, *fakeAPDeliverer) {
+	t.Helper()
+	chatRepo := newFakeRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corechat.NewService(chatRepo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://local.example")
+	renderer := activitypub.NewRenderer(urls)
+	deliverer := &fakeAPDeliverer{}
+	svc.SetAPDelivery(userRepo, renderer, urls, deliverer)
+	return svc, chatRepo, userRepo, deliverer
+}
+
+func TestFederateInvitation_DeliversInviteToRemoteInvitee(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["owner1"] = &model.User{ID: "owner1", Username: "owner1"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &remoteURI}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"}))
+
+	svc.FederateInvitation("room1", "bob")
+	assert.Equal(t, 1, deliverer.called)
+	body := string(deliverer.lastBody)
+	assert.Contains(t, body, `"type":"Invite"`)
+	assert.Contains(t, body, `"type":"Group"`)
+	assert.Contains(t, body, "https://local.example/chat/rooms/room1")
+	assert.Contains(t, body, `"target":"https://remote.example/users/bob"`)
+}
+
+func TestFederateInvitation_SkipsLocalInvitee(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	userRepo.Users["owner1"] = &model.User{ID: "owner1", Username: "owner1"}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"}))
+
+	svc.FederateInvitation("room1", "carol")
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestFederateInvitation_NoOpWhenRoomMissing(t *testing.T) {
+	svc, _, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &remoteURI}
+
+	// room が存在しなければ deliver しない (warn log のみ)。
+	svc.FederateInvitation("ghost", "bob")
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestFederateInvitation_DeliveryFailureIsSwallowed(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	deliverer.returnErr = assert.AnError
+	remoteHost := "remote.example"
+	remoteURI := "https://remote.example/users/bob"
+	userRepo.Users["owner1"] = &model.User{ID: "owner1", Username: "owner1"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &remoteURI}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"}))
+
+	// 配送失敗は panic/propagate せず swallow される。
+	svc.FederateInvitation("room1", "bob")
+	assert.Equal(t, 1, deliverer.called)
+}

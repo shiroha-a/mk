@@ -115,6 +115,15 @@ func (b *URLBuilder) ChatMessageURI(messageID string) string {
 	return b.baseURL + "/chat-messages/" + messageID
 }
 
+// ChatRoomURI returns the canonical AP URI for a chat room. CherryPick group
+// chat federation embeds this in the Group object id, in Add/Remove targets,
+// and in the group chat message note's `@context`. The path shape
+// (`/chat/rooms/{id}`) is load-bearing: receivers extract the room id with
+// `/\/chat\/rooms\/([a-zA-Z0-9]+)$/`.
+func (b *URLBuilder) ChatRoomURI(roomID string) string {
+	return b.baseURL + "/chat/rooms/" + roomID
+}
+
 // ErrMentionUserNotFound is returned by MentionResolver implementations
 // when the user does not exist (typically deleted or the ID is stale).
 // Caller (renderer) は本 sentinel を skip 扱いにし、その他 error は DB
@@ -728,6 +737,45 @@ func (r *Renderer) RenderReject(actorID string, inner any) *Reject {
 	}
 	AddContext(a)
 	return a
+}
+
+// RenderChatRoom returns the ActivityStreams `Group` object representing a
+// chat room, used as the object of Invite / Accept / Reject activities in
+// CherryPick group chat federation. Mirrors ApRendererService.renderChatRoom.
+func (r *Renderer) RenderChatRoom(room *model.ChatRoom) *ChatRoomGroup {
+	g := &ChatRoomGroup{
+		Object: Object{
+			ID:   r.urls.ChatRoomURI(room.ID),
+			Type: "Group",
+			Name: room.Name,
+		},
+		AttributedTo: r.urls.UserURI(room.OwnerID),
+	}
+	if room.Description != "" {
+		g.Summary = room.Description
+	}
+	return g
+}
+
+// RenderInvite wraps a chat room Group object in an Invite activity targeted
+// at the invitee's actor URI. Mirrors ApRendererService.renderInvite.
+//
+// id は RenderAccept と同じく addContext 互換で `{baseURL}/{UUID}` を必ず入れる
+// (id 無し activity は受信側 InboxProcessor で弾かれる)。actor は room owner。
+func (r *Renderer) RenderInvite(ownerID string, inner any, targetURI string) *Invite {
+	inv := &Invite{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.baseURL + "/" + uuid.NewString(),
+				Type: "Invite",
+			},
+			Actor: r.urls.UserURI(ownerID),
+		},
+		Object: inner,
+		Target: targetURI,
+	}
+	AddContext(inv)
+	return inv
 }
 
 // RenderLike returns a Like activity for the given reaction.

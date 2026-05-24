@@ -394,6 +394,25 @@ type Reject struct {
 	Object any `json:"object"`
 }
 
+// ChatRoomGroup is the ActivityStreams `Group` object representing a chat
+// room in CherryPick group chat federation. It is used as the object of
+// Invite / Accept / Reject activities and mirrors CherryPick
+// ApRendererService.renderChatRoom (type=Group, id=room URI, attributedTo=owner).
+type ChatRoomGroup struct {
+	Object
+	Summary      string `json:"summary,omitempty"`
+	AttributedTo string `json:"attributedTo,omitempty"`
+}
+
+// Invite represents an Invite activity used to invite a (typically remote)
+// user into a chat room (CherryPick group chat federation). object is the
+// ChatRoomGroup, target is the invitee's actor URI.
+type Invite struct {
+	Activity
+	Object any    `json:"object"`
+	Target string `json:"target,omitempty"`
+}
+
 // Undo represents an Undo activity.
 type Undo struct {
 	Activity
@@ -539,6 +558,8 @@ func AddContext(o any) {
 	case *Accept:
 		v.Context = ctx
 	case *Reject:
+		v.Context = ctx
+	case *Invite:
 		v.Context = ctx
 	case *Undo:
 		v.Context = ctx

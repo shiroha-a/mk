@@ -687,6 +687,11 @@ func (h *Handler) InvitationsCreate(c echo.Context) error {
 	if err := h.repo.CreateInvitation(inv); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// invitee が remote user なら Invite activity を配送する (CherryPick group
+	// chat federation, #1201)。local invitee なら service 側で no-op。
+	if h.svc != nil {
+		h.svc.FederateInvitation(req.RoomID, req.UserID)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 

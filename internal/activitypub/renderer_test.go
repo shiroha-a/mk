@@ -45,6 +45,44 @@ func TestURLBuilder_FollowURI_FullURI(t *testing.T) {
 	assert.Equal(t, uri, b.FollowURI("alice", "https://remote.example/users/bob"))
 }
 
+func TestURLBuilder_ChatRoomURI(t *testing.T) {
+	b := NewURLBuilder("https://example.com")
+	// path shape は CherryPick の room id 抽出正規表現 (/chat/rooms/{id}) に揃える。
+	assert.Equal(t, "https://example.com/chat/rooms/room1", b.ChatRoomURI("room1"))
+}
+
+func TestRenderer_RenderChatRoom(t *testing.T) {
+	r := newRenderer()
+	g := r.RenderChatRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1", Description: "hello"})
+	assert.Equal(t, "Group", g.Type)
+	assert.Equal(t, "https://example.com/chat/rooms/room1", g.ID)
+	assert.Equal(t, "General", g.Name)
+	assert.Equal(t, "hello", g.Summary)
+	assert.Equal(t, "https://example.com/users/owner1", g.AttributedTo)
+}
+
+func TestRenderer_RenderChatRoom_NoDescription(t *testing.T) {
+	r := newRenderer()
+	g := r.RenderChatRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"})
+	// description 空のときは summary を省略する (omitempty)。
+	assert.Empty(t, g.Summary)
+}
+
+func TestRenderer_RenderInvite(t *testing.T) {
+	r := newRenderer()
+	group := r.RenderChatRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"})
+	inv := r.RenderInvite("owner1", group, "https://remote.example/users/bob")
+	assert.Equal(t, "Invite", inv.Type)
+	assert.Equal(t, "https://example.com/users/owner1", inv.Actor)
+	assert.Equal(t, "https://remote.example/users/bob", inv.Target)
+	// id は addContext 互換で必ず入る (id 無し activity は受信側で弾かれる)。
+	assert.True(t, strings.HasPrefix(inv.ID, "https://example.com/"))
+	assert.NotEmpty(t, inv.Context, "@context が addContext で入ること")
+	g, ok := inv.Object.(*ChatRoomGroup)
+	require.True(t, ok)
+	assert.Equal(t, "https://example.com/chat/rooms/room1", g.ID)
+}
+
 func TestRenderer_RenderPerson(t *testing.T) {
 	r := newRenderer()
 	avatar := "https://example.com/avatar.png"
