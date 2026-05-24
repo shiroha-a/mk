@@ -248,6 +248,49 @@ func TestCreateMessageToRoom_DeliveryFailureSwallowed(t *testing.T) {
 	assert.Equal(t, 1, deliverer.called)
 }
 
+func TestCreateRoomMessageViaAP_PersistsForMember(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "localOwner"}))
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "mem1", UserID: "rmt", RoomID: "room1"}))
+	sender := &model.User{ID: "rmt", Username: "rmt"}
+
+	uri := "https://remote.example/chat/messages/m1"
+	err := svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi room")
+	require.NoError(t, err)
+	stored, ferr := repo.FindMessageByURI(uri)
+	require.NoError(t, ferr)
+	assert.Equal(t, "rmt", stored.FromUserID)
+	require.NotNil(t, stored.ToRoomID)
+	assert.Equal(t, "room1", *stored.ToRoomID)
+}
+
+func TestCreateRoomMessageViaAP_DedupByURI(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
+	sender := &model.User{ID: "rmt", Username: "rmt"}
+	uri := "https://remote.example/chat/messages/m1"
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi"))
+	// 同一 URI の再送は重複作成しない (AP retry 対策)。
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi"))
+	assert.Len(t, repo.Messages, 1)
+}
+
+func TestCreateRoomMessageViaAP_UnknownRoom(t *testing.T) {
+	svc, _ := newRoomFedService(t)
+	sender := &model.User{ID: "rmt", Username: "rmt"}
+	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "ghost", "hi")
+	assert.ErrorIs(t, err, corechat.ErrNotFound)
+}
+
+func TestCreateRoomMessageViaAP_NonMemberForbidden(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	// owner = localOwner、sender rmt は member でない。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "localOwner"}))
+	sender := &model.User{ID: "rmt", Username: "rmt"}
+	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "room1", "hi")
+	assert.ErrorIs(t, err, corechat.ErrForbidden)
+}
+
 func TestCreateMessageToRoom_RemoteSenderDoesNotFederate(t *testing.T) {
 	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
 	remoteHost := "remote.example"

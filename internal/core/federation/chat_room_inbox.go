@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // ChatRoomReceiver wires the chat service's room-federation operations into the
@@ -19,6 +20,7 @@ type ChatRoomReceiver interface {
 	CreateInvitationViaAP(roomID, inviteeUserID string) error
 	AddMemberViaAP(roomID, userID string) error
 	RemoveInvitationViaAP(roomID, userID string) error
+	CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error
 }
 
 // SetChatRoomReceiver wires the chat room federation receiver for inbound
@@ -157,4 +159,46 @@ func (p *Processor) handleChatRoomReject(act, inner genericActivity) error {
 		return err
 	}
 	return p.chatRoomReceiver.RemoveInvitationViaAP(extractChatRoomID(group.ID), rejecter.ID)
+}
+
+// chatRoomIDFromContext extracts the room id from a group chat message note's
+// `@context`. CherryPick group messages set the note-level `@context` to the
+// room URI (a JSON string); a normal note carries the standard JSON-LD context
+// (an array) which yields "". Returns "" for non-room messages.
+func chatRoomIDFromContext(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var ctx string
+	if json.Unmarshal(raw, &ctx) != nil {
+		// 配列形式 (標準 JSON-LD context) は room ではない。
+		return ""
+	}
+	return extractChatRoomID(ctx)
+}
+
+// handleChatRoomMessageCreate persists an inbound group chat message into a
+// locally-known room. The room must exist locally and the remote sender must
+// be a member (enforced by the chat service): unknown room or non-member is a
+// permanent condition, so it is reported as ErrUnsupportedActivity (no retry).
+func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, roomID string) error {
+	if noteURI == "" {
+		return fmt.Errorf("chat room message: missing note id")
+	}
+	if sender.IsLocal() {
+		return fmt.Errorf("chat room message: sender %s is local (loopback?)", sender.ID)
+	}
+	if p.chatRoomReceiver == nil {
+		return ErrUnsupportedActivity
+	}
+	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomID, content); err != nil {
+		// 未関与の room / 非メンバー送信は retry しても解決しないので drop。
+		if errors.Is(err, corechat.ErrNotFound) ||
+			errors.Is(err, corechat.ErrForbidden) ||
+			errors.Is(err, corechat.ErrInvalidTarget) {
+			return ErrUnsupportedActivity
+		}
+		return err
+	}
+	return nil
 }

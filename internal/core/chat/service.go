@@ -684,6 +684,55 @@ func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.Chat
 	}
 }
 
+// CreateRoomMessageViaAP persists a group chat (room) message received via
+// ActivityPub and streams it to local members. The sender must be a member of
+// the room (owner or membership) — this rejects messages injected by a remote
+// actor that is not part of the room. URI-based dedup handles AP retries.
+// Returns ErrNotFound when the room is unknown locally and ErrForbidden when
+// the sender is not a member, both of which the caller treats as permanent.
+func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error {
+	if sender == nil || roomID == "" {
+		return ErrInvalidTarget
+	}
+	if uri != "" {
+		if existing, err := s.repo.FindMessageByURI(uri); err == nil && existing != nil {
+			return nil
+		}
+	}
+	room, err := s.repo.FindRoomByID(roomID)
+	if err != nil || room == nil {
+		return ErrNotFound
+	}
+	isMember, err := s.isRoomMemberWith(room, sender.ID, roomID)
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return ErrForbidden
+	}
+	msg := &model.ChatMessage{
+		ID:         s.idGen.Generate(time.Now()),
+		FromUserID: sender.ID,
+		ToRoomID:   &roomID,
+	}
+	if text != "" {
+		msg.Text = &text
+	}
+	if uri != "" {
+		msg.URI = &uri
+	}
+	if err := s.repo.CreateMessage(msg); err != nil {
+		return fmt.Errorf("create AP room message: %w", err)
+	}
+	if s.publisher != nil {
+		s.publisher.PublishRoomMessage(context.Background(), roomID, EventMessage, s.packMessageStream(msg))
+	}
+	// sender は remote なので emitRoomNewChatMessage で local member の main に
+	// newChatMessage を流す (sender 自身は対象外、未読インジケータ更新)。
+	s.emitRoomNewChatMessage(room, sender.ID, msg)
+	return nil
+}
+
 // isRoomMemberWith reports whether userID is a member of the given room,
 // reusing an already-fetched room object to avoid a second FindRoomByID.
 // The owner is treated as an implicit member even without a membership row.

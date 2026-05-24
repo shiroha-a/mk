@@ -205,6 +205,20 @@ func TestNormalize_DropsContext(t *testing.T) {
 	assert.Equal(t, "Note", m["type"])
 }
 
+func TestNormalize_PreservesChatRoomContext(t *testing.T) {
+	// CherryPick group chat は note の @context に room URI を string で載せる。
+	// dispatcher が room を識別できるよう、この場合のみ @context を保持する (#1209)。
+	in := []byte(`{
+		"type": "Note",
+		"_misskey_talk": true,
+		"@context": "https://remote.example/chat/rooms/room1"
+	}`)
+	out, err := Normalize(in)
+	require.NoError(t, err)
+	m := asMap(t, out)
+	assert.Equal(t, "https://remote.example/chat/rooms/room1", m["@context"])
+}
+
 func TestNormalize_UnknownKeyPassthrough(t *testing.T) {
 	in := []byte(`{
 		"_misskey_quote": "https://example.com/notes/q1"

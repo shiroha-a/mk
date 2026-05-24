@@ -772,16 +772,23 @@ func (p *Processor) handleCreate(act genericActivity) error {
 	}
 	// Note の `_misskey_talk` を覗き見て chat か通常 note かを分岐する。
 	// IngestNote が走る前に短絡しないと chat message が notes テーブルに
-	// 流れ込んでタイムラインを汚す。
-	if p.chatService != nil {
+	// 流れ込んでタイムラインを汚す。1-on-1 は chatService、group (room) は
+	// chatRoomReceiver が処理するのでどちらか配線済みなら probe する。
+	if p.chatService != nil || p.chatRoomReceiver != nil {
 		var probe struct {
 			Type        string          `json:"type"`
 			ID          string          `json:"id"`
 			Content     string          `json:"content"`
 			MisskeyTalk bool            `json:"_misskey_talk"`
 			To          json.RawMessage `json:"to"`
+			Context     json.RawMessage `json:"@context"`
 		}
 		if err := json.Unmarshal(act.Object, &probe); err == nil && probe.MisskeyTalk && probe.Type == "Note" {
+			// note の @context が room URI なら group chat message (#1209)。
+			// それ以外は従来の 1-on-1 DM。
+			if roomID := chatRoomIDFromContext(probe.Context); roomID != "" {
+				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, roomID)
+			}
 			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
 		}
 	}
@@ -1577,6 +1584,9 @@ func readActorString(act genericActivity) (string, error) {
 // として扱う (1-on-1 DM 前提なので残りは無視)。複数 recipient (group chat)
 // は別 issue で対応。
 func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string, toRaw json.RawMessage) error {
+	if p.chatService == nil {
+		return ErrUnsupportedActivity
+	}
 	if noteURI == "" {
 		return fmt.Errorf("chat create: missing note id")
 	}

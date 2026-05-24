@@ -1,6 +1,7 @@
 package federation_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -11,14 +12,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fakeChatMessageReceiver is a stub for the 1-on-1 chat path so tests can
+// distinguish 1-on-1 routing from group (room) routing.
+type fakeChatMessageReceiver struct{ calls int }
+
+func (f *fakeChatMessageReceiver) CreateMessageViaAP(_ context.Context, _ string, _ *model.User, _, _ string) (*model.ChatMessage, error) {
+	f.calls++
+	return &model.ChatMessage{}, nil
+}
+
 // fakeChatRoomReceiver records inbound chat room federation calls.
 type fakeChatRoomReceiver struct {
 	ensureCalls [][4]string // roomID, name, summary, ownerUserID
 	inviteCalls [][2]string // roomID, inviteeUserID
 	memberCalls [][2]string // roomID, userID
 	removeCalls [][2]string // roomID, userID
+	msgCalls    [][3]string // roomID, senderID, text
 	ensureErr   error
 	inviteErr   error
+	msgErr      error
+}
+
+func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error {
+	sid := ""
+	if sender != nil {
+		sid = sender.ID
+	}
+	f.msgCalls = append(f.msgCalls, [3]string{roomID, sid, text})
+	return f.msgErr
 }
 
 func (f *fakeChatRoomReceiver) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) error {
@@ -289,6 +310,156 @@ func TestProcess_ChatRoomReject_NonGroupAndNoReceiver(t *testing.T) {
 	}`)
 	require.NoError(t, p2.Process(body2))
 	assert.Empty(t, recv.removeCalls)
+}
+
+func TestProcess_ChatRoomMessage_PersistedToRoom(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{}
+	p.SetChatRoomReceiver(recv)
+	// note の @context が room URI の group chat message。
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "hello room",
+			"to": ["https://example.com/users/bob", "https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/room1"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Len(t, recv.msgCalls, 1)
+	assert.Equal(t, "room1", recv.msgCalls[0][0])
+	assert.NotEmpty(t, recv.msgCalls[0][1], "sender (resolved remote actor) must be set")
+	assert.Equal(t, "hello room", recv.msgCalls[0][2])
+}
+
+func TestProcess_OneOnOneChat_NotRoutedToRoom(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{}
+	p.SetChatRoomReceiver(recv)
+	chatMsg := &fakeChatMessageReceiver{}
+	p.SetChatService(chatMsg)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI, ChatScope: "everyone"}
+	// @context が無い (room URI でない) ので 1-on-1 経路を通り room には行かない。
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note",
+			"content": "hi bob",
+			"to": ["https://example.com/users/bob"],
+			"_misskey_talk": true
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, recv.msgCalls, "1-on-1 message must not hit room federation")
+	assert.Equal(t, 1, chatMsg.calls, "1-on-1 message must route to the 1-on-1 chat receiver")
+}
+
+func TestProcess_ChatRoomMessage_UnknownRoomDropped(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{msgErr: corechat.ErrNotFound}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note",
+			"content": "x",
+			"to": ["https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/ghost"
+		}
+	}`)
+	// 未関与の room は ErrUnsupportedActivity で drop (retry させない)。
+	err := p.Process(body)
+	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
+}
+
+func TestProcess_ChatRoomMessage_NonMemberDropped(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{msgErr: corechat.ErrForbidden}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note", "content": "x",
+			"to": ["https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/room1"
+		}
+	}`)
+	// 非メンバー送信は ErrUnsupportedActivity で drop。
+	assert.ErrorIs(t, p.Process(body), federation.ErrUnsupportedActivity)
+}
+
+func TestProcess_ChatRoomMessage_TransientErrorRetryable(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{msgErr: errors.New("db blip")}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note", "content": "x",
+			"to": ["https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/room1"
+		}
+	}`)
+	// 一過性エラー (DB 等) は retryable error のまま伝播させる。
+	err := p.Process(body)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity)
+}
+
+func TestProcess_ChatRoomMessage_NoReceiverIsUnsupported(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	// chatService のみ配線 (chatRoomReceiver 未配線)。group message は probe され
+	// るが room receiver が無いので未対応扱いになり、panic しない。
+	p.SetChatService(&fakeChatMessageReceiver{})
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "https://remote.example/chat/messages/m1",
+			"type": "Note", "content": "x",
+			"to": ["https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/room1"
+		}
+	}`)
+	assert.ErrorIs(t, p.Process(body), federation.ErrUnsupportedActivity)
+}
+
+func TestProcess_ChatRoomMessage_MissingNoteID(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{}
+	p.SetChatRoomReceiver(recv)
+	// note id が空の group message は永続化に進めない。
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"id": "",
+			"type": "Note", "content": "x",
+			"to": ["https://remote.example/users/alice"],
+			"_misskey_talk": true,
+			"@context": "https://remote.example/chat/rooms/room1"
+		}
+	}`)
+	require.Error(t, p.Process(body))
+	assert.Empty(t, recv.msgCalls)
 }
 
 func TestProcess_NonGroupInvite_NotRoutedToChatRoom(t *testing.T) {

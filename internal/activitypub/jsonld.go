@@ -141,7 +141,17 @@ func normalizeValue(v any) any {
 				case "@type":
 					// type 配列の処理は下の flattenType に任せる。
 					canonical = "type"
-				case "@context", "@value", "@language", "@graph", "@list":
+				case "@context":
+					// 標準 JSON-LD context (array / object / AS context URL) は後段
+					// dispatcher が使わないので破棄する。ただし CherryPick group chat
+					// は note の @context に chat room URI を string で載せる規約なので、
+					// room URI の場合のみ保持して下流 (handleChatRoomMessageCreate) が
+					// room を識別できるようにする (#1209)。
+					if s, ok := child.(string); ok && strings.Contains(s, "/chat/rooms/") {
+						out["@context"] = s
+					}
+					continue
+				case "@value", "@language", "@graph", "@list":
 					// 後段 dispatcher が使わない reserved keyword は破棄する。
 					continue
 				default:
