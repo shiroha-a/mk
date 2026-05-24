@@ -638,10 +638,14 @@ func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.Chat
 	}
 	memberURIs := make([]string, 0, len(memberIDs))
 	remoteRecipients := make([]*model.User, 0)
+	var owner *model.User
 	for uid := range memberIDs {
 		u, uerr := s.userRepo.FindByID(uid)
 		if uerr != nil || u == nil {
 			continue
+		}
+		if uid == room.OwnerID {
+			owner = u
 		}
 		if u.IsLocal() {
 			memberURIs = append(memberURIs, s.urls.UserURI(u.ID))
@@ -655,9 +659,10 @@ func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.Chat
 	}
 
 	// room URI: local 所有なら local の正規 URI、remote 所有 copy なら owner の
-	// host から復元する (受信側は path の room id のみ抽出する)。
+	// host から復元する (受信側は path の room id のみ抽出する)。owner は member
+	// ループで既に解決済みなので使い回す。
 	roomURI := s.urls.ChatRoomURI(room.ID)
-	if owner, oerr := s.userRepo.FindByID(room.OwnerID); oerr == nil && owner != nil && !owner.IsLocal() && owner.URI != nil {
+	if owner != nil && !owner.IsLocal() && owner.URI != nil {
 		if ru := remoteChatRoomURI(*owner.URI, room.ID); ru != "" {
 			roomURI = ru
 		}
