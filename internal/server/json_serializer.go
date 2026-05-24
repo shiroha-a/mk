@@ -9,11 +9,17 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// fastJSONSerializer was previously backed by goccy/go-json (#507) but
-// goccy v0.10.6 panics with `ptrToString` nil-deref on certain hot path
-// payloads (timeline notes containing remote users). 一旦 stdlib
-// `encoding/json` に戻して安定運用、performance 改善は別 issue で
-// goccy 上げ or 別 encoder 検討。
+// fastJSONSerializer is the echo JSONSerializer used for all c.JSON / c.Bind
+// paths. It is intentionally backed by the stdlib `encoding/json`.
+//
+// 経緯 (#1142 で調査確定): #507 で goccy/go-json に差し替えたが、v0.10.6 が
+// remote Renote-with-Files を含む timeline payload で `ptrToString` nil-deref
+// panic を起こすため revert した (#542)。v0.10.6 は goccy の最新版であり
+// bump で回避する道は無い (dead end)。bytedance/sonic も評価したが、重量級の
+// JIT 依存 + arch 制約 + 独自 panic surface があり、JSON encode の限定的な
+// perf gain に対して drop-in 互換性最優先の server には blast radius が大き
+// すぎるため見送った。したがって stdlib を意図的な恒久選択とする。vetted な
+// 高速 encoder が現れたら再検討する。
 type fastJSONSerializer struct{}
 
 // Serialize writes i as JSON to the response. indent が空でなければ

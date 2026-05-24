@@ -169,8 +169,9 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
-	// echo の c.JSON / c.Bind 経路を goccy/go-json に差し替える (#507)。
-	// reflection cost が下がって全 endpoint が広く高速化する。
+	// 全 endpoint の c.JSON / c.Bind を共通 serializer に通す。実体は stdlib
+	// encoding/json (fastJSONSerializer の doc 参照: goccy は #542 の panic で
+	// revert、高速 encoder 化は #1142 で見送り)。
 	e.JSONSerializer = fastJSONSerializer{}
 
 	// trustProxyからIPExtractorを構成。詳細は buildIPExtractor のコメント。
