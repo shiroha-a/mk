@@ -2086,6 +2086,24 @@ func TestMe_UnreadAnnouncement(t *testing.T) {
 	assert.NotEmpty(t, createdAt)
 }
 
+func TestMe_UnreadAnnouncement_SkipsNil(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	gen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	annID := gen.Generate(time.Now())
+	// nil entry が混じっても [null] を出力せず除外されることを保証する。
+	h.SetAnnouncementRepo(&stubAnnouncementRepo{
+		rows: []*model.Announcement{nil, {ID: annID, Title: "hello", Text: "world"}},
+	})
+
+	resp := runMe(t, h, userRepo, "u1")
+	arr := resp["unreadAnnouncements"].([]any)
+	assert.Len(t, arr, 1)
+	assert.NotNil(t, arr[0])
+	first := arr[0].(map[string]any)
+	assert.Equal(t, annID, first["id"])
+}
+
 func TestMe_UnreadAnnouncement_Empty(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	h.SetAnnouncementRepo(&stubAnnouncementRepo{rows: nil})
