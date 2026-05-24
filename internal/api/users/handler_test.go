@@ -423,6 +423,20 @@ func TestShow_SelfViewReturnsMeDetailed(t *testing.T) {
 	assert.False(t, hasIsFollowing, "isFollowing must be omitted (not null) for self-view")
 	_, hasIsFollowed := resp["isFollowed"]
 	assert.False(t, hasIsFollowed, "isFollowed must be omitted (not null) for self-view")
+	// misskey_dart の MeDetailed.fromJson が非null bool として cast する field は
+	// self-view でも必ず bool 値で出ること (#1237)。欠落 (null) だと落ちる。
+	for _, key := range []string{
+		"twoFactorEnabled", "usePasswordLessLogin", "securityKeys",
+		"isModerator", "isAdmin",
+		"hasUnreadNotification", "hasUnreadMentions", "hasUnreadAnnouncement",
+		"hasUnreadAntenna", "hasUnreadChannel", "hasUnreadSpecifiedNotes",
+		"hasPendingReceivedFollowRequest",
+	} {
+		v, ok := resp[key]
+		assert.True(t, ok, "%s must be present for self-view MeDetailed", key)
+		_, isBool := v.(bool)
+		assert.True(t, isBool, "%s must be a non-null bool, got %T", key, v)
+	}
 }
 
 // TestShow_NonSelfViewExcludesMeDetailed: viewer != target なら MeDetailed

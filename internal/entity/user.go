@@ -127,6 +127,26 @@ type MeDetailed struct {
 	AlwaysMarkNsfw           bool `json:"alwaysMarkNsfw"`
 	ReceiveAnnouncementEmail bool `json:"receiveAnnouncementEmail"`
 	InjectFeaturedNote       bool `json:"injectFeaturedNote"`
+	// 以下は misskey_dart の MeDetailed.fromJson が非null bool として cast する
+	// ため、self-view (users/show me) でも必ず値を出す必要がある (#1237)。
+	// /api/i は handler 層でこれらを正確な値に上書きするが、users/show の
+	// self-view は AsMeDetailed をそのまま返すので struct 側で埋める。
+	// TwoFactorEnabled / UsePasswordLessLogin / SecurityKeys は profile 由来で
+	// 正確に埋まる。IsModerator / IsAdmin / HasUnread* /
+	// HasPendingReceivedFollowRequest は users/show では権威ソースでないため
+	// best-effort で zero (false) に倒す (権威値は /api/i 経由)。
+	TwoFactorEnabled                bool `json:"twoFactorEnabled"`
+	UsePasswordLessLogin            bool `json:"usePasswordLessLogin"`
+	SecurityKeys                    bool `json:"securityKeys"`
+	IsModerator                     bool `json:"isModerator"`
+	IsAdmin                         bool `json:"isAdmin"`
+	HasUnreadNotification           bool `json:"hasUnreadNotification"`
+	HasUnreadMentions               bool `json:"hasUnreadMentions"`
+	HasUnreadAnnouncement           bool `json:"hasUnreadAnnouncement"`
+	HasUnreadAntenna                bool `json:"hasUnreadAntenna"`
+	HasUnreadChannel                bool `json:"hasUnreadChannel"`
+	HasUnreadSpecifiedNotes         bool `json:"hasUnreadSpecifiedNotes"`
+	HasPendingReceivedFollowRequest bool `json:"hasPendingReceivedFollowRequest"`
 	// EmailNotificationTypes is the list of email-notification categories the
 	// user opted in for. Defaults to ["follow", "receiveFollowRequest"] when
 	// the profile column is absent (#985).
@@ -181,6 +201,10 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		out.AlwaysMarkNsfw = profile.AlwaysMarkNsfw
 		out.ReceiveAnnouncementEmail = profile.ReceiveAnnouncementEmail
 		out.InjectFeaturedNote = profile.InjectFeaturedNote
+		// security 系は profile から正確に埋める (#1237)。
+		out.TwoFactorEnabled = profile.TwoFactorEnabled
+		out.UsePasswordLessLogin = profile.UsePasswordLessLogin
+		out.SecurityKeys = profile.SecurityKeysAvailable
 		// EmailNotificationTypes / NotificationRecieveConfig は jsonb カラム
 		// なので JSON unmarshal してから out にコピーする。parse error は
 		// default に倒す (silent — frontend は default で動作可能)。

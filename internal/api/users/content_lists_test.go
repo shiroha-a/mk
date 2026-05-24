@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // stubGalleryRepo は users 向けに ListByUser のみ返す最小スタブ。
@@ -88,6 +91,36 @@ func TestClips_OwnerSeesPrivate(t *testing.T) {
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Len(t, rows, 2)
+}
+
+// misskey_dart の Clip.fromJson が非null必須とする createdAt / user /
+// favoritedCount が users/clips のレスポンスに含まれること (#1237)。
+func TestClips_FullShape(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+	h.SetUserRepo(userRepo)
+	userRepo.Users["owner"] = &model.User{
+		ID: "owner", Username: "owner", UsernameLower: "owner",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	idGen, _ := id.NewGenerator("aidx")
+	clipID := idGen.Generate(time.Now())
+	repo := testutil.NewMockClipRepository()
+	require.NoError(t, repo.Create(&model.Clip{ID: clipID, UserID: "owner", Name: "favs", IsPublic: true}))
+	h.SetClipRepo(repo)
+
+	rec := postStub(h.Clips, `{"userId":"owner"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	cl := rows[0]
+	createdAt, ok := cl["createdAt"].(string)
+	assert.True(t, ok, "createdAt must be a non-null string")
+	assert.NotEmpty(t, createdAt)
+	assert.Equal(t, float64(0), cl["favoritedCount"])
+	user, ok := cl["user"].(map[string]any)
+	require.True(t, ok, "user must be a non-null object")
+	assert.Equal(t, "owner", user["id"])
 }
 
 // --- Flashs ---

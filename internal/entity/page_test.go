@@ -50,9 +50,21 @@ func TestPackPage_Basic(t *testing.T) {
 	assert.Equal(t, "public", out["visibility"])
 	assert.Equal(t, 3, out["likedCount"])
 	assert.Equal(t, "2026-04-10T01:02:03.000Z", out["updatedAt"])
+	// attachedFiles は misskey_dart の Page.fromJson が非null List 必須なので
+	// 常に出ること (#1237)。
+	assert.Equal(t, []any{}, out["attachedFiles"])
 	// createdAtはaidx-IDから復元されるためkey自体が存在することだけ確認。
 	_, ok := out["createdAt"]
 	assert.True(t, ok)
+}
+
+// 空 / nil の variables カラムでも null ではなく [] を返すこと (#1237)。
+// misskey_dart の Page.fromJson は variables を非null List として cast する。
+func TestPackPage_EmptyVariablesIsArray(t *testing.T) {
+	p := &model.Page{ID: "bogus", Visibility: model.PageVisibilityPublic, Variables: nil}
+	out := PackPage(p)
+	assert.Equal(t, []any{}, out["variables"])
+	assert.Equal(t, []any{}, out["attachedFiles"])
 }
 
 func TestPackPage_NilInput(t *testing.T) {

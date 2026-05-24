@@ -51,17 +51,16 @@ func (h *Handler) Clips(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// clip の owner は全行で同一 (req.UserID) なので 1 回だけ lookup して
+	// PackClip の user フィールドに使う。misskey_dart の Clip.fromJson は
+	// user を非null Map として要求するため owner なしでは落ちる (#1237)。
+	var owner *model.User
+	if h.userRepo != nil {
+		owner, _ = h.userRepo.FindByID(req.UserID)
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, cl := range rows {
-		out = append(out, map[string]any{
-			"id":            cl.ID,
-			"userId":        cl.UserID,
-			"name":          cl.Name,
-			"description":   cl.Description,
-			"isPublic":      cl.IsPublic,
-			"notesCount":    cl.NotesCount,
-			"lastClippedAt": cl.LastClippedAt,
-		})
+		out = append(out, entity.PackClip(cl, h.idGen, owner))
 	}
 	return c.JSON(http.StatusOK, out)
 }

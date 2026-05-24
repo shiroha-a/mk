@@ -37,10 +37,13 @@ func PackPage(p *model.Page, idGens ...id.Generator) map[string]any {
 		"userId":              p.UserID,
 		"eyeCatchingImageId":  p.EyeCatchingImageID,
 		"content":             rawJSONBytes(p.Content),
-		"variables":           rawJSONBytes(p.Variables),
-		"script":              p.Script,
-		"visibility":          string(p.Visibility),
-		"likedCount":          p.LikedCount,
+		// variables / attachedFiles は misskey_dart の Page.fromJson が非null
+		// List として cast するため、空でも null ではなく [] を返す (#1237)。
+		"variables":     jsonArrayOrEmpty(p.Variables),
+		"attachedFiles": []any{},
+		"script":        p.Script,
+		"visibility":    string(p.Visibility),
+		"likedCount":    p.LikedCount,
 	}
 	if len(idGens) > 0 && idGens[0] != nil {
 		if t, err := idGens[0].ParseTime(p.ID); err == nil {
@@ -105,6 +108,16 @@ func PackPageWithContext(p *model.Page, ctx PackPageContext) map[string]any {
 func rawJSONBytes(b []byte) any {
 	if len(b) == 0 {
 		return nil
+	}
+	return json.RawMessage(b)
+}
+
+// jsonArrayOrEmpty returns the raw jsonb array bytes verbatim, or an empty
+// array `[]` when the column is empty/null. Used for fields the client casts
+// to a non-nullable List (e.g. page.variables) so they never serialize to null.
+func jsonArrayOrEmpty(b []byte) any {
+	if len(b) == 0 {
+		return []any{}
 	}
 	return json.RawMessage(b)
 }
