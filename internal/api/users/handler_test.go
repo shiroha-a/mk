@@ -437,6 +437,19 @@ func TestShow_SelfViewReturnsMeDetailed(t *testing.T) {
 		_, isBool := v.(bool)
 		assert.True(t, isBool, "%s must be a non-null bool, got %T", key, v)
 	}
+	// misskey_dart が非null List として cast する field (#1240)。null だと落ちる。
+	for _, key := range []string{"mutedWords", "mutedInstances", "achievements"} {
+		v, ok := resp[key]
+		assert.True(t, ok, "%s must be present for self-view MeDetailed", key)
+		_, isArr := v.([]any)
+		assert.True(t, isArr, "%s must be a non-null array, got %T", key, v)
+	}
+	// loggedInDays は非null num、policies は非null Map (#1240)。
+	_, isNum := resp["loggedInDays"].(float64)
+	assert.True(t, isNum, "loggedInDays must be a non-null number, got %T", resp["loggedInDays"])
+	policies, isMap := resp["policies"].(map[string]any)
+	assert.True(t, isMap, "policies must be a non-null object, got %T", resp["policies"])
+	assert.NotEmpty(t, policies, "policies must carry default role policy keys")
 }
 
 // TestShow_NonSelfViewExcludesMeDetailed: viewer != target なら MeDetailed

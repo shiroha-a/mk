@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -435,7 +436,13 @@ func (h *Handler) Show(c echo.Context) error {
 	// frontend が `/api/users/show?username=me` 経由で自分のプロフィールを
 	// 開いたとき、`/api/i` 経由の $i と field set を一致させられる。
 	if viewer != nil && viewer.ID == bundle.User.ID {
-		return c.JSON(http.StatusOK, entity.AsMeDetailed(detailed, bundle.User, bundle.Profile))
+		me := entity.AsMeDetailed(detailed, bundle.User, bundle.Profile)
+		// policies は role 依存で entity 層では計算できないため handler で埋める。
+		// users/show では権威ソースでないので default policies を best-effort で
+		// 入れる (misskey_dart の MeDetailed.fromJson は policies を非null Map と
+		// して要求する、#1240)。権威値は /api/i 経由で取得される。
+		me.Policies = corerole.DefaultPolicies()
+		return c.JSON(http.StatusOK, me)
 	}
 	return c.JSON(http.StatusOK, detailed)
 }

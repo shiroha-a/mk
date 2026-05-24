@@ -147,6 +147,16 @@ type MeDetailed struct {
 	HasUnreadChannel                bool `json:"hasUnreadChannel"`
 	HasUnreadSpecifiedNotes         bool `json:"hasUnreadSpecifiedNotes"`
 	HasPendingReceivedFollowRequest bool `json:"hasPendingReceivedFollowRequest"`
+	// 以下も misskey_dart の MeDetailed.fromJson が非null List / num / Map と
+	// して cast するため self-view でも必ず値を出す (#1240)。MutedWords /
+	// MutedInstances / Achievements / LoggedInDays は profile 由来で正確に、
+	// Policies は role 依存のため handler 層で best-effort default を入れる
+	// (権威値は /api/i 経由)。
+	MutedWords     []any          `json:"mutedWords"`
+	MutedInstances []string       `json:"mutedInstances"`
+	Achievements   []any          `json:"achievements"`
+	LoggedInDays   int            `json:"loggedInDays"`
+	Policies       map[string]any `json:"policies"`
 	// EmailNotificationTypes is the list of email-notification categories the
 	// user opted in for. Defaults to ["follow", "receiveFollowRequest"] when
 	// the profile column is absent (#985).
@@ -191,6 +201,10 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		EmailNotificationTypes:    []string{"follow", "receiveFollowRequest"},
 		MutingNotificationTypes:   []string{},
 		NotificationRecieveConfig: map[string]any{},
+		// 非null List 必須 (#1240)。profile があれば下で jsonb から上書き。
+		MutedWords:     []any{},
+		MutedInstances: []string{},
+		Achievements:   []any{},
 	}
 	if profile != nil {
 		out.NoCrawle = profile.NoCrawle
@@ -220,8 +234,36 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 				out.NotificationRecieveConfig = m
 			}
 		}
+		// mutedWords / mutedInstances / achievements は jsonb 配列。空でも
+		// null ではなく [] を保つ (#1240)。parse error も default の [] のまま。
+		if arr := unmarshalJSONAnySlice(profile.MutedWords); arr != nil {
+			out.MutedWords = arr
+		}
+		if raw := []byte(profile.MutedInstances); len(raw) > 0 {
+			var arr []string
+			if err := json.Unmarshal(raw, &arr); err == nil && arr != nil {
+				out.MutedInstances = arr
+			}
+		}
+		if arr := unmarshalJSONAnySlice(profile.Achievements); arr != nil {
+			out.Achievements = arr
+		}
+		out.LoggedInDays = len(profile.LoggedInDates)
 	}
 	return out
+}
+
+// unmarshalJSONAnySlice decodes a jsonb array column into []any, returning nil
+// on empty input or parse error so the caller keeps its non-null default.
+func unmarshalJSONAnySlice(raw []byte) []any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arr []any
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil
+	}
+	return arr
 }
 
 // InstanceLite is the minimal instance info embedded in UserLite for remote

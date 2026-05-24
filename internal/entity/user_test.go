@@ -449,6 +449,36 @@ func TestPackMeDetailed_NilProfile(t *testing.T) {
 	assert.False(t, me.ReceiveAnnouncementEmail)
 }
 
+// #1240: misskey_dart の MeDetailed.fromJson が非null List/num として cast する
+// mutedWords / mutedInstances / achievements / loggedInDays が profile から
+// 正しく埋まること。
+func TestPackMeDetailed_ListFields(t *testing.T) {
+	u := &model.User{ID: "me4", Username: "lists", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	profile := &model.UserProfile{
+		UserID:         "me4",
+		Fields:         datatypes.JSON([]byte("[]")),
+		MutedWords:     datatypes.JSON([]byte(`[["foo","bar"],"baz"]`)),
+		MutedInstances: datatypes.JSON([]byte(`["evil.example"]`)),
+		Achievements:   datatypes.JSON([]byte(`[{"name":"a","unlockedAt":1}]`)),
+		LoggedInDates:  pq.StringArray{"2026-05-01", "2026-05-02"},
+	}
+	me := PackMeDetailed(u, profile)
+	assert.Len(t, me.MutedWords, 2)
+	assert.Equal(t, []string{"evil.example"}, me.MutedInstances)
+	assert.Len(t, me.Achievements, 1)
+	assert.Equal(t, 2, me.LoggedInDays)
+}
+
+// 空 / nil profile でも非null 空配列を保つこと (#1240)。
+func TestPackMeDetailed_ListFieldsEmptyAreNonNull(t *testing.T) {
+	u := &model.User{ID: "me5", Username: "empty", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	me := PackMeDetailed(u, nil)
+	assert.Equal(t, []any{}, me.MutedWords)
+	assert.Equal(t, []string{}, me.MutedInstances)
+	assert.Equal(t, []any{}, me.Achievements)
+	assert.Equal(t, 0, me.LoggedInDays)
+}
+
 // #968: serialized JSON が drop-in 互換 key 名 (isExplorable / noCrawle 等)
 // を出すこと。フロントの updateCurrentAccountPartial が key 名で merge
 // するので、key drift があると session には反映されない。
