@@ -269,10 +269,14 @@ func (h *Handler) AttachedChatMessages(c echo.Context) error {
 		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.FileID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "fileId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "fileId is required.", "6b7f9d2c-1e4a-4b8c-9d3e-7a5f0c2b1e88"))
 	}
-	if req.Limit <= 0 || req.Limit > 100 {
+	// upstream paramDef は limit を minimum:1 / maximum:100 / default:10 で
+	// clamp する。> 100 は default に落とさず max へ clamp して挙動を揃える。
+	if req.Limit <= 0 {
 		req.Limit = 10
+	} else if req.Limit > 100 {
+		req.Limit = 100
 	}
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
