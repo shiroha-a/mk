@@ -2,6 +2,7 @@
 package drive
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,14 @@ type Handler struct {
 	emojiRepo    repository.EmojiRepository
 	bufReader    entity.BufferedReactionsReader
 	fieldRes     *entity.NoteFieldResolver
+	urlUploader  URLUploadProcessor
+}
+
+// SetURLUploader wires the processor used by /drive/files/upload-from-url to
+// download a remote file in the background and notify the user via the main
+// stream. Without it the endpoint degrades to a 204 no-op.
+func (h *Handler) SetURLUploader(p URLUploadProcessor) {
+	h.urlUploader = p
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
@@ -669,8 +678,45 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 }
 
 // FilesUploadFromURL handles POST /api/drive/files/upload-from-url.
+//
+// upstream Misskey TS drive/files/upload-from-url と同 semantics: URL を指定して
+// サーバーに非同期でファイルを download させる。endpoint は即 204 を返し、
+// download / 保存はバックグラウンドで実行され、完了後に user の main stream へ
+// `urlUploadFinished` ({marker, file}) を publish する (#1217)。
 func (h *Handler) FilesUploadFromURL(c echo.Context) error {
-	// URL経由のファイルアップロード（非同期処理: 204返却）
+	user := middleware.GetUser(c)
+	var req struct {
+		URL         string  `json:"url"`
+		FolderID    *string `json:"folderId"`
+		IsSensitive bool    `json:"isSensitive"`
+		Comment     *string `json:"comment"`
+		Marker      *string `json:"marker"`
+		Force       bool    `json:"force"`
+	}
+	if err := c.Bind(&req); err != nil || req.URL == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream paramDef は comment maxLength=512。超過は INVALID_PARAM。
+	if req.Comment != nil && len(*req.Comment) > 512 {
+		return apierr.JSONInvalidParam(c)
+	}
+	// uploader 未配線 (= 単体テスト等) は upstream と同じ空レスポンスで返す。
+	if h.urlUploader == nil || user == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	// upstream は fire-and-forget。request context は応答後に cancel されるため
+	// download はバックグラウンド context で継続する。
+	in := URLUploadInput{
+		User:        user,
+		URL:         req.URL,
+		FolderID:    req.FolderID,
+		Comment:     req.Comment,
+		Marker:      req.Marker,
+		IsSensitive: req.IsSensitive,
+		Force:       req.Force,
+		RequestIP:   c.RealIP(),
+	}
+	go h.urlUploader.Process(context.Background(), in)
 	return c.NoContent(http.StatusNoContent)
 }
 

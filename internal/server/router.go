@@ -1778,6 +1778,13 @@ func (s *Server) setupRoutes() {
 	notificationService.SetPacker(notificationPublisher)
 	driveService.SetStreamingPublisher(drivePublisher)
 	driveService.SetMainStreamPublisher(mainStreamPublisher)
+	// /drive/files/upload-from-url: SSRF-safe client で URL を download し、
+	// drive へ保存後 urlUploadFinished を main stream に流す (#1217)。download は
+	// 大きめになりうるので 60s timeout、cap は cfg.MaxFileSize に揃える。
+	driveHandler.SetURLUploader(drive.NewURLUploader(
+		s.outboundClient(60*time.Second), driveService, mainStreamPublisher,
+		idGen, s.config.UserAgent, s.config.MaxFileSize,
+	))
 	followingService.SetMainStreamPublisher(mainStreamPublisher)
 	userService.SetMainStreamPublisher(mainStreamPublisher)
 	noteCreateService.SetMainStreamPublisher(mainStreamPublisher)
