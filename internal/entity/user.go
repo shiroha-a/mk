@@ -47,10 +47,14 @@ type UserLite struct {
 }
 
 // UserDetailed includes additional fields for detailed user views.
+//
+// 注: avatarId / bannerId は **MeDetailed 専用** (self view のみ) で、MeDetailed
+// struct 側に持つ。misskey_dart の UserDetailed union dispatch は `avatarId` key
+// の存在で MeDetailed を判別する (`containsKey("avatarId") → MeDetailed`) ため、
+// 非self の UserDetailed に avatarId を出すと MeDetailed と誤判定されて crash する
+// (#1251)。よって base UserDetailed には含めない。
 type UserDetailed struct {
 	UserLite
-	AvatarID            *string        `json:"avatarId"`
-	BannerID            *string        `json:"bannerId"`
 	BannerURL           *string        `json:"bannerUrl"`
 	BannerBlurhash      *string        `json:"bannerBlurhash"`
 	IsLocked            bool           `json:"isLocked"`
@@ -116,17 +120,21 @@ type UserDetailed struct {
 // scoped to self-view (#968 / sibling of #693 ChatScope drift).
 type MeDetailed struct {
 	UserDetailed
-	IsExplorable             bool `json:"isExplorable"`
-	IsDeleted                bool `json:"isDeleted"`
-	HideOnlineStatus         bool `json:"hideOnlineStatus"`
-	NoCrawle                 bool `json:"noCrawle"`
-	PreventAiLearning        bool `json:"preventAiLearning"`
-	AutoSensitive            bool `json:"autoSensitive"`
-	CarefulBot               bool `json:"carefulBot"`
-	AutoAcceptFollowed       bool `json:"autoAcceptFollowed"`
-	AlwaysMarkNsfw           bool `json:"alwaysMarkNsfw"`
-	ReceiveAnnouncementEmail bool `json:"receiveAnnouncementEmail"`
-	InjectFeaturedNote       bool `json:"injectFeaturedNote"`
+	// avatarId / bannerId は self view 専用 (#1251)。misskey_dart の dispatch が
+	// `avatarId` key の存在で MeDetailed を判別するため、MeDetailed のみが出す。
+	AvatarID                 *string `json:"avatarId"`
+	BannerID                 *string `json:"bannerId"`
+	IsExplorable             bool    `json:"isExplorable"`
+	IsDeleted                bool    `json:"isDeleted"`
+	HideOnlineStatus         bool    `json:"hideOnlineStatus"`
+	NoCrawle                 bool    `json:"noCrawle"`
+	PreventAiLearning        bool    `json:"preventAiLearning"`
+	AutoSensitive            bool    `json:"autoSensitive"`
+	CarefulBot               bool    `json:"carefulBot"`
+	AutoAcceptFollowed       bool    `json:"autoAcceptFollowed"`
+	AlwaysMarkNsfw           bool    `json:"alwaysMarkNsfw"`
+	ReceiveAnnouncementEmail bool    `json:"receiveAnnouncementEmail"`
+	InjectFeaturedNote       bool    `json:"injectFeaturedNote"`
 	// 以下は misskey_dart の MeDetailed.fromJson が非null bool として cast する
 	// ため、self-view (users/show me) でも必ず値を出す必要がある (#1237)。
 	// /api/i は handler 層でこれらを正確な値に上書きするが、users/show の
@@ -234,7 +242,11 @@ func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Gene
 // work, so we promote the existing UserDetailed in-place.
 func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeDetailed {
 	out := MeDetailed{
-		UserDetailed:     d,
+		UserDetailed: d,
+		// avatarId / bannerId は self view 専用 (#1251)。base UserDetailed には
+		// 出さず MeDetailed (= /api/i / users/show self) でのみ u から set する。
+		AvatarID:         u.AvatarID,
+		BannerID:         u.BannerID,
 		IsExplorable:     u.IsExplorable,
 		IsDeleted:        u.IsDeleted,
 		HideOnlineStatus: u.HideOnlineStatus,
@@ -387,8 +399,6 @@ func PackUserLite(u *model.User) UserLite {
 func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) UserDetailed {
 	d := UserDetailed{
 		UserLite:            PackUserLite(u),
-		AvatarID:            u.AvatarID,
-		BannerID:            u.BannerID,
 		BannerURL:           u.BannerURL,
 		BannerBlurhash:      u.BannerBlurhash,
 		IsLocked:            u.IsLocked,
@@ -438,13 +448,17 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 // the main channel's "follow" and "unfollow" stream events. Upstream Misskey
 // packs these events with the UserDetailedNotMe schema, and
 // MkFollowButton.onFollowChange reads isFollowing and
-// hasPendingFollowRequestFromYou directly to toggle the button — so both
-// fields must be populated from the viewer's perspective. Other viewer-
-// dependent fields (isBlocking, isMuted, etc.) are left at their zero values
-// because the follow button does not consume them.
-func PackUserForFollowStreamEvent(u *model.User, isFollowing, hasPendingFollowRequestFromYou bool) UserDetailed {
-	d := PackUserDetailed(u, nil)
+// hasPendingFollowRequestFromYou directly to toggle the button.
+//
+// isFollowing をセットするため misskey_dart は UserDetailedNotMeWithRelations
+// variant を選び、残りの relation bool + createdAt も非null必須になる (#1251)。
+// idGen で createdAt を有効にし、EnsureRelationFlags で未設定 relation bool を
+// false 補完して shape を完備する。idGen が nil の場合 createdAt は空になるため
+// caller は必ず idGen を渡すこと。
+func PackUserForFollowStreamEvent(u *model.User, isFollowing, hasPendingFollowRequestFromYou bool, idGen id.Generator) UserDetailed {
+	d := PackUserDetailed(u, nil, idGen)
 	d.IsFollowing = &isFollowing
 	d.HasPendingFollowRequestFromYou = &hasPendingFollowRequestFromYou
+	d.EnsureRelationFlags()
 	return d
 }

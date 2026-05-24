@@ -954,7 +954,9 @@ func (s *Server) setupRoutes() {
 		result := make([]entity.UserDetailed, 0, len(users))
 		for _, u := range users {
 			profile, _ := userRepo.FindProfileByUserID(u.ID)
-			result = append(result, entity.PackUserDetailed(u, profile))
+			// idGen を渡して createdAt を有効にする。未配線だと createdAt="" で
+			// misskey_dart の DateTimeConverter が FormatException で落ちる (#1251)。
+			result = append(result, entity.PackUserDetailed(u, profile, idGen))
 		}
 		return c.JSON(http.StatusOK, result)
 	})

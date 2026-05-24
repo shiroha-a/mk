@@ -79,7 +79,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile))
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
 }
 
 // DeleteRequest is the request body for following/delete.
@@ -112,7 +112,7 @@ func (h *Handler) Delete(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile))
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
 }
 
 // RequestActionRequest is the shared request body for following/requests/{accept,reject,cancel}.
@@ -268,10 +268,10 @@ func (h *Handler) ListRequests(c echo.Context) error {
 	for _, r := range requests {
 		item := ListRequestsResponseItem{ID: r.ID}
 		if b, err := h.userService.ShowByID(r.FollowerID); err == nil {
-			item.Follower = entity.PackUserDetailed(b.User, b.Profile)
+			item.Follower = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 		}
 		if b, err := h.userService.ShowByID(r.FolloweeID); err == nil {
-			item.Followee = entity.PackUserDetailed(b.User, b.Profile)
+			item.Followee = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 		}
 		out = append(out, item)
 	}

@@ -336,7 +336,7 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 	// body.isFollowing / body.hasPendingFollowRequestFromYouを読むため、
 	// UserDetailed shapeでpackしてviewer依存フィールドも埋めておく。
 	if s.mainStreamPublisher != nil {
-		s.mainStreamPublisher.PublishMainEvent(followerID, "follow", entity.PackUserForFollowStreamEvent(followee, true, false))
+		s.mainStreamPublisher.PublishMainEvent(followerID, "follow", entity.PackUserForFollowStreamEvent(followee, true, false, s.idGen))
 		s.mainStreamPublisher.PublishMainEvent(followeeID, "followed", entity.PackUserLite(follower))
 	}
 
@@ -384,7 +384,7 @@ func (s *Service) Unfollow(followerID, followeeID string) error {
 			// shapeでisFollowing=false / hasPendingFollowRequestFromYou=falseを
 			// 明示的に埋める (frontendはこれらを直接代入するのでundefined不可)。
 			if s.mainStreamPublisher != nil {
-				s.mainStreamPublisher.PublishMainEvent(followerID, "unfollow", entity.PackUserForFollowStreamEvent(followee, false, false))
+				s.mainStreamPublisher.PublishMainEvent(followerID, "unfollow", entity.PackUserForFollowStreamEvent(followee, false, false, s.idGen))
 			}
 		}
 	}
@@ -448,7 +448,7 @@ func (s *Service) AcceptRequest(followeeID, followerID string) error {
 			// を publish する (TS本家 UserFollowingService.acceptFollow
 			// と同等)。follow event body は UserDetailed + isFollowing=true。
 			if s.mainStreamPublisher != nil {
-				s.mainStreamPublisher.PublishMainEvent(req.FollowerID, "follow", entity.PackUserForFollowStreamEvent(followee, true, false))
+				s.mainStreamPublisher.PublishMainEvent(req.FollowerID, "follow", entity.PackUserForFollowStreamEvent(followee, true, false, s.idGen))
 				s.mainStreamPublisher.PublishMainEvent(req.FolloweeID, "followed", entity.PackUserLite(follower))
 			}
 		}
@@ -545,7 +545,7 @@ func (s *Service) publishFollowRequestResolved(followerID string, followee *mode
 	if err != nil || !follower.IsLocal() {
 		return
 	}
-	s.mainStreamPublisher.PublishMainEvent(followerID, "unfollow", entity.PackUserForFollowStreamEvent(followee, false, false))
+	s.mainStreamPublisher.PublishMainEvent(followerID, "unfollow", entity.PackUserForFollowStreamEvent(followee, false, false, s.idGen))
 }
 
 // ListReceivedRequests returns follow requests received by userID. sinceID /

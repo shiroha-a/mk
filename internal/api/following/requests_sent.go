@@ -34,10 +34,10 @@ func (h *Handler) RequestsSent(c echo.Context) error {
 	for _, r := range rows {
 		item := ListRequestsResponseItem{ID: r.ID}
 		if b, err := h.userService.ShowByID(r.FollowerID); err == nil {
-			item.Follower = entity.PackUserDetailed(b.User, b.Profile)
+			item.Follower = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 		}
 		if b, err := h.userService.ShowByID(r.FolloweeID); err == nil {
-			item.Followee = entity.PackUserDetailed(b.User, b.Profile)
+			item.Followee = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 		}
 		out = append(out, item)
 	}

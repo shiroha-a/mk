@@ -3,6 +3,7 @@ package entity
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -341,20 +342,32 @@ func TestPackUserDetailed_FieldsDefaultWhenProfileNil(t *testing.T) {
 }
 
 func TestPackUserForFollowStreamEvent(t *testing.T) {
-	u := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	idGen := newTestIDGen(t)
+	uid := idGen.Generate(time.Now())
+	u := &model.User{ID: uid, Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
 
 	t.Run("follow event sets isFollowing=true and hasPending=false", func(t *testing.T) {
-		out := PackUserForFollowStreamEvent(u, true, false)
+		out := PackUserForFollowStreamEvent(u, true, false, idGen)
 		require.NotNil(t, out.IsFollowing)
 		assert.True(t, *out.IsFollowing)
 		require.NotNil(t, out.HasPendingFollowRequestFromYou)
 		assert.False(t, *out.HasPendingFollowRequestFromYou)
-		assert.Equal(t, "u1", out.ID)
+		assert.Equal(t, uid, out.ID)
 		assert.Equal(t, "alice", out.Username)
+		// idGen から復元した createdAt が空でないこと (misskey_dart の
+		// DateTimeConverter が FormatException で落ちないため)。
+		assert.NotEmpty(t, out.CreatedAt)
+		// EnsureRelationFlags が WithRelations parse 用の関係 bool を埋めること。
+		require.NotNil(t, out.IsFollowed)
+		assert.False(t, *out.IsFollowed)
+		require.NotNil(t, out.IsBlocking)
+		assert.False(t, *out.IsBlocking)
+		require.NotNil(t, out.IsMuted)
+		assert.False(t, *out.IsMuted)
 	})
 
 	t.Run("unfollow event sets isFollowing=false and hasPending=false", func(t *testing.T) {
-		out := PackUserForFollowStreamEvent(u, false, false)
+		out := PackUserForFollowStreamEvent(u, false, false, idGen)
 		require.NotNil(t, out.IsFollowing)
 		assert.False(t, *out.IsFollowing)
 		require.NotNil(t, out.HasPendingFollowRequestFromYou)
@@ -362,7 +375,7 @@ func TestPackUserForFollowStreamEvent(t *testing.T) {
 	})
 
 	t.Run("pending request sets isFollowing=false and hasPending=true", func(t *testing.T) {
-		out := PackUserForFollowStreamEvent(u, false, true)
+		out := PackUserForFollowStreamEvent(u, false, true, idGen)
 		require.NotNil(t, out.IsFollowing)
 		assert.False(t, *out.IsFollowing)
 		require.NotNil(t, out.HasPendingFollowRequestFromYou)
@@ -370,11 +383,79 @@ func TestPackUserForFollowStreamEvent(t *testing.T) {
 	})
 
 	t.Run("serialized JSON exposes the viewer fields", func(t *testing.T) {
-		out := PackUserForFollowStreamEvent(u, true, false)
+		out := PackUserForFollowStreamEvent(u, true, false, idGen)
 		b, err := json.Marshal(out)
 		require.NoError(t, err)
 		assert.Contains(t, string(b), `"isFollowing":true`)
 		assert.Contains(t, string(b), `"hasPendingFollowRequestFromYou":false`)
+	})
+}
+
+// TestUserDetailed_OmitsAvatarIDKey は #1251 の core 修正を検証する。misskey_dart の
+// UserDetailed union dispatch は `avatarId` key の存在で MeDetailed を選ぶため、
+// 他人ビュー (UserDetailed / users explore) では avatarId / bannerId key を一切
+// 出してはならない。出すと NotMe ユーザーが MeDetailed として誤 parse され、
+// createdAt="" 等で fromJson が落ちる。
+func TestUserDetailed_OmitsAvatarIDKey(t *testing.T) {
+	idGen := newTestIDGen(t)
+	uid := idGen.Generate(time.Now())
+	avatarID := "avatar-id-1"
+	bannerID := "banner-id-1"
+	u := &model.User{
+		ID:                uid,
+		Username:          "other",
+		AvatarID:          &avatarID,
+		BannerID:          &bannerID,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+
+	detailed := PackUserDetailed(u, nil, idGen)
+	b, err := json.Marshal(detailed)
+	require.NoError(t, err)
+
+	// avatarId / bannerId key 自体が出てはいけない (MeDetailed discriminator のため)。
+	assert.NotContains(t, string(b), `"avatarId"`)
+	assert.NotContains(t, string(b), `"bannerId"`)
+	// idGen から復元した createdAt が非空であること (NotMe parse が落ちない)。
+	assert.NotEmpty(t, detailed.CreatedAt)
+}
+
+// TestMeDetailed_EmitsAvatarIDKey は self-view では avatarId / bannerId key が
+// 出ることを検証する。これが MeDetailed dispatch の discriminator であり、
+// avatar 未設定でも `"avatarId":null` の key が存在する必要がある (#1251)。
+func TestMeDetailed_EmitsAvatarIDKey(t *testing.T) {
+	idGen := newTestIDGen(t)
+	uid := idGen.Generate(time.Now())
+
+	t.Run("with avatar set", func(t *testing.T) {
+		avatarID := "avatar-id-1"
+		u := &model.User{
+			ID:                uid,
+			Username:          "me",
+			AvatarID:          &avatarID,
+			AvatarDecorations: datatypes.JSON([]byte("[]")),
+		}
+		me := PackMeDetailed(u, nil, idGen)
+		b, err := json.Marshal(me)
+		require.NoError(t, err)
+		assert.Contains(t, string(b), `"avatarId":"avatar-id-1"`)
+		assert.Contains(t, string(b), `"bannerId"`)
+		require.NotNil(t, me.AvatarID)
+		assert.Equal(t, "avatar-id-1", *me.AvatarID)
+	})
+
+	t.Run("without avatar still emits null key for dispatch", func(t *testing.T) {
+		u := &model.User{
+			ID:                uid,
+			Username:          "me",
+			AvatarDecorations: datatypes.JSON([]byte("[]")),
+		}
+		me := PackMeDetailed(u, nil, idGen)
+		b, err := json.Marshal(me)
+		require.NoError(t, err)
+		// avatar 未設定でも key 自体は出ること (dispatch discriminator)。
+		assert.Contains(t, string(b), `"avatarId":null`)
+		assert.Contains(t, string(b), `"bannerId":null`)
 	})
 }
 
