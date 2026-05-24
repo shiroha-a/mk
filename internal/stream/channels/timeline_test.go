@@ -23,6 +23,13 @@ type stubContext struct {
 	sendError     error
 	hardMuteRules []byte
 	followingSnap map[string]bool
+	followingUpd  []followingUpdate
+}
+
+// followingUpdate records a call to UpdateFollowingSnapshot for assertions.
+type followingUpdate struct {
+	id        string
+	following bool
 }
 
 func (s *stubContext) ID() string { return s.id }
@@ -46,6 +53,11 @@ func (s *stubContext) Unsubscribe(topic string) {
 }
 func (s *stubContext) HardMuteRules() []byte              { return s.hardMuteRules }
 func (s *stubContext) FollowingSnapshot() map[string]bool { return s.followingSnap }
+func (s *stubContext) UpdateFollowingSnapshot(followeeID string, following bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.followingUpd = append(s.followingUpd, followingUpdate{followeeID, following})
+}
 
 func newCtx(user any) *stubContext {
 	return &stubContext{id: "ch1", user: user}

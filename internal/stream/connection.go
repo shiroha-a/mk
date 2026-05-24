@@ -171,6 +171,38 @@ func (c *Connection) FollowingSnapshot() map[string]bool {
 	return c.followingSnapshot
 }
 
+// UpdateFollowingSnapshot mutates the live followee snapshot after a
+// follow/unfollow so reply gating stays fresh without a reconnect (#1211).
+// It is copy-on-write: a new map is built and swapped under the lock, leaving
+// any map already handed out via FollowingSnapshot() immutable for concurrent
+// readers (timeline channels iterate it outside the lock). A nil snapshot
+// (anonymous / lookup unwired) is left untouched — those connections gate on
+// the escape hatches only and never consult the snapshot.
+func (c *Connection) UpdateFollowingSnapshot(followeeID string, following bool) {
+	if followeeID == "" {
+		return
+	}
+	c.followingMu.Lock()
+	defer c.followingMu.Unlock()
+	if c.followingSnapshot == nil {
+		return
+	}
+	next := make(map[string]bool, len(c.followingSnapshot)+1)
+	for k, v := range c.followingSnapshot {
+		next[k] = v
+	}
+	if following {
+		// 新規 follow は withReplies=false (reply 表示は後から opt-in)。再 follow で
+		// 既存エントリがある場合は withReplies 設定を維持する。
+		if _, exists := next[followeeID]; !exists {
+			next[followeeID] = false
+		}
+	} else {
+		delete(next, followeeID)
+	}
+	c.followingSnapshot = next
+}
+
 // SetPermissions attaches OAuth2 permission scopes for this connection.
 // トークン経由で接続された場合に、AccessToken の permission 配列を渡す想定。
 // cookie/session 認証の場合は呼び出さない（空の permissions は権限ありとも無しとも区別できないため、

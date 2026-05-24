@@ -413,6 +413,15 @@ func (c *channelContext) FollowingSnapshot() map[string]bool {
 	return c.dispatcher.conn.FollowingSnapshot()
 }
 
+// UpdateFollowingSnapshot forwards a live follow/unfollow snapshot update to the
+// connection so reply gating stays fresh without a reconnect (#1211).
+func (c *channelContext) UpdateFollowingSnapshot(followeeID string, following bool) {
+	if c.dispatcher.conn == nil {
+		return
+	}
+	c.dispatcher.conn.UpdateFollowingSnapshot(followeeID, following)
+}
+
 // --- readNotification / subNote / unsubNote ---
 
 // handleReadNotification marks all notifications as read for the connected user.

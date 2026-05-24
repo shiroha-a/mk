@@ -317,3 +317,50 @@ func TestConnection_FollowingSnapshot(t *testing.T) {
 		t.Fatalf("FollowingSnapshot = %v, want %v", got, snap)
 	}
 }
+
+func TestConnection_UpdateFollowingSnapshot_AddRemove(t *testing.T) {
+	c := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	c.SetFollowingSnapshot(map[string]bool{"u1": true})
+
+	// 新規 follow は withReplies=false で追加される。
+	c.UpdateFollowingSnapshot("u2", true)
+	got := c.FollowingSnapshot()
+	require.Len(t, got, 2)
+	assert.True(t, got["u1"], "既存エントリの withReplies は維持される")
+	assert.False(t, got["u2"], "新規 follow は withReplies=false")
+
+	// 再 follow は既存 withReplies を保持する (上書きしない)。
+	c.UpdateFollowingSnapshot("u1", true)
+	assert.True(t, c.FollowingSnapshot()["u1"])
+
+	// unfollow は削除する。
+	c.UpdateFollowingSnapshot("u1", false)
+	got = c.FollowingSnapshot()
+	require.Len(t, got, 1)
+	_, ok := got["u1"]
+	assert.False(t, ok)
+}
+
+func TestConnection_UpdateFollowingSnapshot_NilSnapshotNoOp(t *testing.T) {
+	c := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	// snapshot 未設定 (anonymous/未配線) では map を作らず no-op。
+	c.UpdateFollowingSnapshot("u1", true)
+	assert.Nil(t, c.FollowingSnapshot())
+}
+
+func TestConnection_UpdateFollowingSnapshot_CopyOnWrite(t *testing.T) {
+	c := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	c.SetFollowingSnapshot(map[string]bool{"u1": true})
+	// FollowingSnapshot() で得た map は更新後も不変 (copy-on-write)。
+	before := c.FollowingSnapshot()
+	c.UpdateFollowingSnapshot("u2", true)
+	_, leaked := before["u2"]
+	assert.False(t, leaked, "既に handed out した map は mutate されない")
+}
+
+func TestConnection_UpdateFollowingSnapshot_EmptyIDNoOp(t *testing.T) {
+	c := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	c.SetFollowingSnapshot(map[string]bool{"u1": true})
+	c.UpdateFollowingSnapshot("", true)
+	assert.Len(t, c.FollowingSnapshot(), 1)
+}

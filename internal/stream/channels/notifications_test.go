@@ -95,3 +95,45 @@ func TestMain_BadJSONEnvelopeFallsBack(t *testing.T) {
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "notification", ctx.sentType[0])
 }
+
+func TestMain_FollowEventRefreshesSnapshot(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewMain(ctx)
+	ch.Init(nil)
+	ch.OnRedisEvent([]byte(`{"type":"follow","body":{"id":"followee1"}}`))
+	// snapshot が follow で更新される (followee1 を following=true で追加)。
+	require.Len(t, ctx.followingUpd, 1)
+	assert.Equal(t, followingUpdate{"followee1", true}, ctx.followingUpd[0])
+	// client へも従来どおり転送される。
+	assert.Equal(t, []string{"follow"}, ctx.sentType)
+}
+
+func TestMain_UnfollowEventRefreshesSnapshot(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewMain(ctx)
+	ch.Init(nil)
+	ch.OnRedisEvent([]byte(`{"type":"unfollow","body":{"id":"followee1"}}`))
+	require.Len(t, ctx.followingUpd, 1)
+	assert.Equal(t, followingUpdate{"followee1", false}, ctx.followingUpd[0])
+}
+
+func TestMain_FollowedEventDoesNotRefreshSnapshot(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewMain(ctx)
+	ch.Init(nil)
+	// `followed` (誰かが自分を follow) は自分の follow 一覧を変えないので
+	// snapshot を触らない。client へは転送される。
+	ch.OnRedisEvent([]byte(`{"type":"followed","body":{"id":"follower1"}}`))
+	assert.Empty(t, ctx.followingUpd)
+	assert.Equal(t, []string{"followed"}, ctx.sentType)
+}
+
+func TestMain_FollowEventMissingIDIgnored(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewMain(ctx)
+	ch.Init(nil)
+	// id が無い follow body は snapshot 更新できないので no-op (転送は継続)。
+	ch.OnRedisEvent([]byte(`{"type":"follow","body":{"username":"x"}}`))
+	assert.Empty(t, ctx.followingUpd)
+	assert.Equal(t, []string{"follow"}, ctx.sentType)
+}

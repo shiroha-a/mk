@@ -101,10 +101,41 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 		Body json.RawMessage `json:"body"`
 	}
 	if err := json.Unmarshal(payload, &env); err == nil && env.Type != "" && len(env.Body) > 0 {
+		c.maybeRefreshFollowing(env.Type, env.Body)
 		_ = c.ctx.Send(env.Type, env.Body)
 		return
 	}
 	_ = c.ctx.Send("notification", json.RawMessage(payload))
+}
+
+// followingSnapshotUpdater is the optional capability a ChannelContext may
+// expose to mutate the connection's followee snapshot live. The main channel
+// uses it to keep timeline reply gating fresh after the viewer follows or
+// unfollows someone, without waiting for a reconnect (#1211).
+type followingSnapshotUpdater interface {
+	UpdateFollowingSnapshot(followeeID string, following bool)
+}
+
+// maybeRefreshFollowing updates the connection's followee snapshot when the
+// viewer's own follow list changes. The `follow` / `unfollow` events are
+// emitted to the actor's own `main` stream by the following service, so the
+// body is the followee user object; only its id is needed. `followed` (someone
+// followed me) does not change my follow list and is intentionally ignored.
+func (c *MainChannel) maybeRefreshFollowing(eventType string, body json.RawMessage) {
+	if eventType != "follow" && eventType != "unfollow" {
+		return
+	}
+	updater, ok := c.ctx.(followingSnapshotUpdater)
+	if !ok {
+		return
+	}
+	var u struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(body, &u) != nil || u.ID == "" {
+		return
+	}
+	updater.UpdateFollowingSnapshot(u.ID, eventType == "follow")
 }
 
 func (c *MainChannel) OnClientMessage(string, json.RawMessage) {}
