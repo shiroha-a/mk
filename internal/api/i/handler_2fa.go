@@ -12,7 +12,6 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
@@ -377,7 +376,10 @@ func (h *Handler) publishMeUpdated(userID string) {
 		slog.Warn("2fa: meUpdated: load user failed", "userId", userID, "err", err)
 		return
 	}
-	packed := entity.PackMeDetailed(bundle.User, bundle.Profile, h.idGen)
+	// 生 PackMeDetailed だと unread 系が default (0/[]/false) で出て、frontend の
+	// updateCurrentAccountPartial が `$i` の実 unread 状態を clobber する。
+	// meDetailedWithUnread で fillUnreadFields を通して実値を送る (#1258 fu)。
+	packed := h.meDetailedWithUnread(context.Background(), bundle.User, bundle.Profile)
 	h.mainStreamPublisher.PublishMainEvent(userID, "meUpdated", packed)
 }
 

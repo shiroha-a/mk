@@ -645,14 +645,13 @@ func (h *Handler) Me(c echo.Context) error {
 		resp["twoFactorEnabled"] = profile.TwoFactorEnabled
 		resp["usePasswordLessLogin"] = profile.UsePasswordLessLogin
 		resp["mutedWords"] = profile.MutedWords
-		resp["hardMutedWords"] = profile.HardMutedWords
 		resp["mutedInstances"] = profile.MutedInstances
 		resp["publicReactions"] = profile.PublicReactions
 		resp["loggedInDays"] = len(profile.LoggedInDates)
 		resp["achievements"] = jsonbArray(profile.Achievements)
 		resp["securityKeys"] = profile.SecurityKeysAvailable
-		// twoFactorBackupCodesStock: full/partial/none
-		resp["twoFactorBackupCodesStock"] = backupCodesStock(profile)
+		// hardMutedWords / twoFactorBackupCodesStock は PackMeDetailed (AsMeDetailed)
+		// が profile から正しい shape で乗せるので override 不要 (#1258 follow-up)。
 		// clientData / room は jsonb を生のまま返すと frontend (本家) が
 		// オブジェクトとして parse するため、空/不正時は空オブジェクトに
 		// 正規化する。user が手動でキーを書き換えるだけなので scheme は持たない。
@@ -831,16 +830,20 @@ func jsonbArray(raw []byte) any {
 	return out
 }
 
-// backupCodesStock returns "full", "partial", or "none" based on the number of
-// remaining 2FA backup codes. Misskey uses 5 codes as the full set.
-func backupCodesStock(profile *model.UserProfile) string {
-	if !profile.TwoFactorEnabled || len(profile.TwoFactorBackupSecret) == 0 {
-		return "none"
-	}
-	if len(profile.TwoFactorBackupSecret) >= 5 {
-		return "full"
-	}
-	return "partial"
+// meDetailedWithUnread packs a MeDetailed for self-view stream/return paths
+// (i/update, meUpdated) and enriches it with authoritative unread values via
+// fillUnreadFields. Raw PackMeDetailed would emit the struct defaults
+// (unreadNotificationsCount:0 / unreadAnnouncements:[] / hasUnread*:false),
+// which the frontend's updateCurrentAccountPartial would merge into `$i`,
+// clobbering the real badge/unread state. Going through fillUnreadFields keeps
+// those fields correct on every path (the same shape /api/i returns).
+func (h *Handler) meDetailedWithUnread(ctx context.Context, u *model.User, profile *model.UserProfile) map[string]any {
+	me := entity.PackMeDetailed(u, profile, h.idGen)
+	b, _ := json.Marshal(me)
+	resp := map[string]any{}
+	_ = json.Unmarshal(b, &resp)
+	h.fillUnreadFields(ctx, u, resp)
+	return resp
 }
 
 // countMuteWords returns the total number of entries in a muted-words
@@ -1128,7 +1131,9 @@ func (h *Handler) Update(c echo.Context) error {
 	// updateCurrentAccountPartial にそのまま流し込まれるため、isExplorable /
 	// noCrawle / preventAiLearning など self-view-only field が UserDetailed
 	// 側に無いと session の `$i` が更新されず stale なまま残る (#968)。
-	return c.JSON(http.StatusOK, entity.PackMeDetailed(bundle.User, bundle.Profile, h.idGen))
+	// unread 系は meDetailedWithUnread で実値を埋める。生 PackMeDetailed だと
+	// unreadNotificationsCount:0 等の default が `$i` を clobber する (#1258 fu)。
+	return c.JSON(http.StatusOK, h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile))
 }
 
 // avatarDecorationAPIError carries a (status, body) pair from

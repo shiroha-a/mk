@@ -172,6 +172,14 @@ type MeDetailed struct {
 	HasUnreadChannel                bool `json:"hasUnreadChannel"`
 	HasUnreadSpecifiedNotes         bool `json:"hasUnreadSpecifiedNotes"`
 	HasPendingReceivedFollowRequest bool `json:"hasPendingReceivedFollowRequest"`
+	HasUnreadChatMessages           bool `json:"hasUnreadChatMessages"`
+	// UnreadNotificationsCount は未読通知件数。bool フラグ同様 users/show では
+	// best-effort 0 で、権威値は /api/i / i/update / meUpdated 経由 (fillUnreadFields
+	// が実値で埋める)。
+	UnreadNotificationsCount int `json:"unreadNotificationsCount"`
+	// TwoFactorBackupCodesStock は 2FA バックアップコード残量 (full/partial/none)。
+	// profile 由来なので AsMeDetailed が計算し全 view で正しい値になる (clobber 無し)。
+	TwoFactorBackupCodesStock string `json:"twoFactorBackupCodesStock"`
 	// 以下も misskey_dart の MeDetailed.fromJson が非null List / num / Map と
 	// して cast するため self-view でも必ず値を出す (#1240)。MutedWords /
 	// MutedInstances / Achievements / LoggedInDays は profile 由来で正確に、
@@ -181,6 +189,11 @@ type MeDetailed struct {
 	MutedInstances []string `json:"mutedInstances"`
 	Achievements   []any    `json:"achievements"`
 	LoggedInDays   int      `json:"loggedInDays"`
+	// HardMutedWords は profile 由来 (string[][])。MutedWords と同様 jsonb から
+	// 展開する (毎 pack 正しい値)。UnreadAnnouncements は未読アナウンス配列で、
+	// users/show では best-effort [] / 権威値は fillUnreadFields。
+	HardMutedWords      []any `json:"hardMutedWords"`
+	UnreadAnnouncements []any `json:"unreadAnnouncements"`
 	// Policies は role 依存で AsMeDetailed (entity 層) では nil のまま。omitempty で
 	// 「未設定なら省略」にするのが重要 (#1240): PackMeDetailed を override 無しで
 	// 直接返す i/update / meUpdated 経路で nil を `null` として出すと frontend の
@@ -276,6 +289,12 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		MutedWords:     []any{},
 		MutedInstances: []string{},
 		Achievements:   []any{},
+		// HardMutedWords / TwoFactorBackupCodesStock は profile 由来なので下で
+		// 正確に埋める。UnreadAnnouncements は runtime 値で handler が上書きする
+		// (users/show は best-effort [])。いずれも非null 必須 (#1258 follow-up)。
+		HardMutedWords:            []any{},
+		UnreadAnnouncements:       []any{},
+		TwoFactorBackupCodesStock: "none",
 	}
 	if profile != nil {
 		out.NoCrawle = profile.NoCrawle
@@ -290,6 +309,9 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		out.TwoFactorEnabled = profile.TwoFactorEnabled
 		out.UsePasswordLessLogin = profile.UsePasswordLessLogin
 		out.SecurityKeys = profile.SecurityKeysAvailable
+		// twoFactorBackupCodesStock は profile 由来なので全 view で正しい値にする
+		// (handler override 不要 = meUpdated / i-update でも clobber しない)。
+		out.TwoFactorBackupCodesStock = backupCodesStock(profile)
 		// EmailNotificationTypes / NotificationRecieveConfig は jsonb カラム
 		// なので JSON unmarshal してから out にコピーする。parse error は
 		// default に倒す (silent — frontend は default で動作可能)。
@@ -307,6 +329,9 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		}
 		// mutedWords / mutedInstances / achievements は jsonb 配列。空でも
 		// null ではなく [] を保つ (#1240)。parse error も default の [] のまま。
+		if arr := unmarshalJSONAnySlice(profile.HardMutedWords); arr != nil {
+			out.HardMutedWords = arr
+		}
 		if arr := unmarshalJSONAnySlice(profile.MutedWords); arr != nil {
 			out.MutedWords = arr
 		}
@@ -466,6 +491,20 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 	}
 
 	return d
+}
+
+// backupCodesStock returns the 2FA backup-codes stock level. Mirrors upstream
+// UserEntityService: "none" when 2FA is off or no codes remain, "full" at >=5,
+// otherwise "partial". This is the single source of truth for the
+// twoFactorBackupCodesStock field across all self-view paths.
+func backupCodesStock(profile *model.UserProfile) string {
+	if !profile.TwoFactorEnabled || len(profile.TwoFactorBackupSecret) == 0 {
+		return "none"
+	}
+	if len(profile.TwoFactorBackupSecret) >= 5 {
+		return "full"
+	}
+	return "partial"
 }
 
 // MoveTargetResolver resolves an ActivityPub actor URI to a local user ID.

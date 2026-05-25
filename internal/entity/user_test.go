@@ -699,6 +699,48 @@ func TestPackMeDetailed_ListFieldsEmptyAreNonNull(t *testing.T) {
 	assert.Equal(t, 0, me.LoggedInDays)
 }
 
+// #1258 fu: MeDetailedOnly の HIGH 5 field が struct から非null で出ること。
+func TestPackMeDetailed_MeDetailedOnlyHighFields(t *testing.T) {
+	u := &model.User{ID: "me_high", Username: "high", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	// nil profile -> 非null default (users/show self の best-effort と同じ)。
+	me := PackMeDetailed(u, nil)
+	assert.Equal(t, []any{}, me.UnreadAnnouncements)
+	assert.Equal(t, []any{}, me.HardMutedWords)
+	assert.False(t, me.HasUnreadChatMessages)
+	assert.Equal(t, 0, me.UnreadNotificationsCount)
+	assert.Equal(t, "none", me.TwoFactorBackupCodesStock)
+
+	// JSON 上 5 field とも present (golden MeDetailedOnly は全て required)。
+	b, err := json.Marshal(me)
+	require.NoError(t, err)
+	for _, k := range []string{"unreadAnnouncements", "hardMutedWords", "hasUnreadChatMessages", "unreadNotificationsCount", "twoFactorBackupCodesStock"} {
+		assert.Containsf(t, string(b), `"`+k+`"`, "%s must be present", k)
+	}
+}
+
+// #1258 fu: profile 由来の hardMutedWords / twoFactorBackupCodesStock は
+// AsMeDetailed が正しく計算する (= meUpdated/i-update でも clobber しない)。
+func TestPackMeDetailed_ProfileDerivedHighFields(t *testing.T) {
+	u := &model.User{ID: "me_pd", Username: "pd", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	profile := &model.UserProfile{
+		UserID:                "me_pd",
+		Fields:                datatypes.JSON([]byte("[]")),
+		HardMutedWords:        datatypes.JSON([]byte(`[["foo","bar"],["baz"]]`)),
+		TwoFactorEnabled:      true,
+		TwoFactorBackupSecret: pq.StringArray{"a", "b"}, // 2 codes -> partial
+	}
+	me := PackMeDetailed(u, profile)
+	assert.Len(t, me.HardMutedWords, 2, "hardMutedWords は jsonb から展開")
+	assert.Equal(t, "partial", me.TwoFactorBackupCodesStock)
+
+	profile.TwoFactorBackupSecret = pq.StringArray{"a", "b", "c", "d", "e"} // >=5 -> full
+	assert.Equal(t, "full", PackMeDetailed(u, profile).TwoFactorBackupCodesStock)
+
+	profile.TwoFactorEnabled = false // 2FA off -> none
+	assert.Equal(t, "none", PackMeDetailed(u, profile).TwoFactorBackupCodesStock)
+}
+
 // #1240: PackMeDetailed 単体 (policies override 無し) は policies を **出さない**
 // こと。i/update / meUpdated はこれを直接 frontend の updateCurrentAccountPartial
 // に流すため、`policies:null` を出すと `$i.policies` を null 上書きして policy

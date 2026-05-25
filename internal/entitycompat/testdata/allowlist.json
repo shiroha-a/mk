@@ -1,36 +1,6 @@
 [
   {
     "layer": "MeDetailed",
-    "field": "hardMutedWords",
-    "kind": "missing",
-    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct, so struct-based self-view paths (users/show) drift. Backlog: move into the struct."
-  },
-  {
-    "layer": "MeDetailed",
-    "field": "hasUnreadChatMessages",
-    "kind": "missing",
-    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
-  },
-  {
-    "layer": "MeDetailed",
-    "field": "twoFactorBackupCodesStock",
-    "kind": "missing",
-    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
-  },
-  {
-    "layer": "MeDetailed",
-    "field": "unreadAnnouncements",
-    "kind": "missing",
-    "reason": "baseline: populated ad-hoc in /api/i handler map (#1226) but absent from entity.MeDetailed struct. Backlog: move into the struct."
-  },
-  {
-    "layer": "MeDetailed",
-    "field": "unreadNotificationsCount",
-    "kind": "missing",
-    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
-  },
-  {
-    "layer": "MeDetailed",
     "field": "policies",
     "kind": "omit",
     "reason": "intentional: omitempty は load-bearing。PackMeDetailed を override 無しで返す i/update / meUpdated 経路で nil を null として出すと frontend の updateCurrentAccountPartial が $i.policies を null/空で上書きして policy 判定が壊れる (#1240)。実 read path (/api/i, users/show self) は handler が DefaultPolicies() で必ず埋める。"

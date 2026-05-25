@@ -11,7 +11,6 @@ import (
 	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -510,10 +509,10 @@ func TestPublishMeUpdatedPartial_EmptyFieldsIsNoop(t *testing.T) {
 // publishMeUpdated (full MeDetailed): publisher が wire されていれば
 // userService.ShowByID 経由で User+Profile を packed publish する。
 // payload は upstream Misskey TS と同じ MeDetailed shape (#968)。
-// UserDetailed shape に戻る regression を catch するため、body の型が
-// entity.MeDetailed であることと UserLite 由来 field が embed 経由で
-// live であることを assert する。MeDetailed 拡張 field 11 個自体の
-// transfer は entity 側の TestPackMeDetailed_* でカバー済み。
+// UserDetailed shape に戻る regression を catch するため、enriched map が
+// MeDetailed 専用 key (avatarId) と unread field を持つことを assert する。
+// MeDetailed 拡張 field 自体の transfer は entity 側の TestPackMeDetailed_*
+// でカバー済み。
 func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	setupUserWithPassword(repo, "u1", "pass")
@@ -526,10 +525,17 @@ func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	assert.Equal(t, "meUpdated", pub.calls[0].eventType)
 	require.NotNil(t, pub.calls[0].body)
 
-	me, ok := pub.calls[0].body.(entity.MeDetailed)
-	require.True(t, ok, "publishMeUpdated body は MeDetailed であるべき (UserDetailed shape に戻る regression)")
+	// #1258 fu: meUpdated は meDetailedWithUnread 経由で enrich した map を送る
+	// (raw struct だと unread が default で出て $i を clobber する)。
+	body, ok := pub.calls[0].body.(map[string]any)
+	require.True(t, ok, "publishMeUpdated body は enriched MeDetailed map であるべき")
 	// embed が壊れていないことの sanity check (UserLite 由来 field)。
-	assert.Equal(t, "u1", me.ID)
+	assert.Equal(t, "u1", body["id"])
+	// MeDetailed shape である確認 (UserDetailed shape に戻る regression catch):
+	// avatarId は MeDetailed 専用 key。
+	assert.Contains(t, body, "avatarId")
+	// unread enrich 経路を通っていること (clobber 回避の要)。
+	assert.Contains(t, body, "unreadNotificationsCount")
 }
 
 // publishMeUpdated: 存在しない userID は ShowByID で err → publish せず
