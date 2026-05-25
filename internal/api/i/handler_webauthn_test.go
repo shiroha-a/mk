@@ -536,6 +536,11 @@ func TestPublishMeUpdated_FullPublishWhenWired(t *testing.T) {
 	assert.Contains(t, body, "avatarId")
 	// unread enrich 経路を通っていること (clobber 回避の要)。
 	assert.Contains(t, body, "unreadNotificationsCount")
+	// #1240 不変条件: meUpdated は policies を **含めない** (含めると frontend の
+	// updateCurrentAccountPartial が $i.policies を null/空で clobber する)。
+	// meDetailedWithUnread は PackMeDetailed の omitempty を round-trip で維持する
+	// が、これは繊細なので回帰ガードとして固定する。
+	assert.NotContains(t, body, "policies", "meUpdated は policies を含めてはいけない (#1240)")
 }
 
 // publishMeUpdated: 存在しない userID は ShowByID で err → publish せず
