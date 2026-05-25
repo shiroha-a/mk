@@ -117,7 +117,13 @@ type UserDetailed struct {
 	HasPendingFollowRequestToYou   *bool   `json:"hasPendingFollowRequestToYou,omitempty"`
 	Notify                         *string `json:"notify,omitempty"`
 	WithReplies                    *bool   `json:"withReplies,omitempty"`
-	Memo                           *string `json:"memo,omitempty"`
+	// Memo は viewer 自身が target に付けたメモ。golden UserDetailedNotMeOnly は
+	// `memo: string | null` (必須・null 許容) なので、上の relation bool 群と違い
+	// omitempty を付けず未設定時は null を出す。#1228 の null-cast crash は非 null
+	// bool (`isFollowing as bool`) の話で、nullable string の memo には当てはまらない。
+	// self-view (MeDetailed) では golden に memo が無いが、extra な memo:null は
+	// クライアントが無視するので無害。
+	Memo *string `json:"memo"`
 }
 
 // MeDetailed extends UserDetailed with fields that upstream Misskey TS

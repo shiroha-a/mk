@@ -217,6 +217,27 @@ func TestResolveMoveTargets_NilAndUnresolvable(t *testing.T) {
 	assert.Nil(t, d2.AlsoKnownAs, "all-unresolvable alsoKnownAs stays null, not []")
 }
 
+func TestPackUserDetailed_MemoNullNotOmitted(t *testing.T) {
+	u := &model.User{ID: "u_memo", Username: "memo"}
+	d := PackUserDetailed(u, nil)
+	b, err := json.Marshal(d)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+
+	// memo は golden で required(string|null)なので、未設定でも present かつ null。
+	v, present := m["memo"]
+	assert.True(t, present, "memo must be present (golden: string|null required)")
+	assert.Nil(t, v, "memo is null when the viewer has no memo")
+
+	// 一方 relation bool 群は golden optional なので未設定なら omit のまま
+	// (null を出すと misskey_dart が `as bool` で crash する #1228)。
+	for _, k := range []string{"isFollowing", "isFollowed", "isMuted", "withReplies"} {
+		_, p := m[k]
+		assert.Falsef(t, p, "%q must stay omitempty (golden optional)", k)
+	}
+}
+
 func TestPackUserDetailed_ProfileVisibility(t *testing.T) {
 	u := &model.User{
 		ID:                "user5",
