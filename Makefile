@@ -445,5 +445,6 @@ shapecheck-report:
 	go run ./tools/shapediff -report
 
 # drift gate (L0 静的 + L2 実行時) をローカルで実行する (CI と同じ判定)。
+# L0: TestEntityShapeDrift / L2: Test*ShapeL2 (Notification / Announcement / ...)。
 shapecheck:
-	go test ./internal/entitycompat/... -run 'TestEntityShapeDrift|TestNotificationShapeL2' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestEntityShapeDrift|ShapeL2' -count=1 -v

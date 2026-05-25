@@ -38,7 +38,9 @@ func main() {
 	}
 	lines := strings.Split(string(data), "\n")
 
-	names := entitycompat.GoldenSchemaNames()
+	// L0 family の golden schema に加え、L2 で map-based packer の出力検証に使う
+	// flat schema (Announcement 等) も同じ snapshot に抽出する。
+	names := append(entitycompat.GoldenSchemaNames(), entitycompat.L2FlatSchemaNames()...)
 	golden := entitycompat.ParseTypesFile(lines, names)
 
 	// すべての referenced schema が見つかり、かつ 0 フィールドでないか確認する。

@@ -19,6 +19,15 @@ func UnionSchemaNames() []string {
 	return []string{"Notification"}
 }
 
+// L2FlatSchemaNames lists flat (non-union) golden schemas that are validated at
+// Layer 2 against a map-based packer's runtime output. These entities are
+// packed as map[string]any (not reflectable structs), so Layer 0 cannot reach
+// them; the generator still extracts their flat golden schema into the snapshot
+// for ValidateValue to use.
+func L2FlatSchemaNames() []string {
+	return []string{"Announcement"}
+}
+
 // ParseUnion parses a discriminated-union schema (variants joined by `} | {`)
 // into a map keyed by each variant's `type` string literal. Variants without a
 // `type` discriminator are skipped.

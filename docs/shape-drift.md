@@ -88,9 +88,18 @@ L2は**packerが実際に出力したJSON値**を契約に突き合わせてこ�
 | ファイル | 役割 |
 |---|---|
 | `internal/entitycompat/runtime.go` | union parser(`ParseUnion`)+ 実行時validator(`ValidateValue` / `ValidateUnionValue`) |
-| `internal/entitycompat/runtime_test.go` | `TestNotificationShapeL2`(実packer出力を検証)+ 単体テスト |
+| `internal/entitycompat/runtime_test.go` | `Test*ShapeL2`(実packer出力を検証)+ 単体テスト |
 | `testdata/golden_unions.json` | union契約のスナップショット(type literal別variant、commit対象) |
 | `testdata/allowlist_l2.json` | L2 baseline backlog |
+
+### 対象packer
+
+L2は2種の検証関数を持つ:
+
+- **`ValidateUnionValue`**: discriminated union(`Notification`)を`type`でvariant dispatchして検証。`UnionSchemaNames()`が対象。
+- **`ValidateValue`**: flatなmap-based packer(`Announcement`等)を golden flat schema に対して検証。`L2FlatSchemaNames()`が対象。golden schemaは`golden_schemas.json`に同居(L0と同じflat形式)。
+
+map-based packer(`map[string]any`を手組みするもの)はL0のreflectionが届かないため、L2で実出力を検証する。新しいmap-based packerを守りたいときは`L2FlatSchemaNames()`にgolden schema名を足し、fixtureで`Test*ShapeL2`を書く。
 
 ### ValidateUnionValue の判定
 

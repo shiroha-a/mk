@@ -180,6 +180,37 @@ func notifFixture(typ notification.Type, withUser, withNote bool, extra map[stri
 	return entity.PackNotification(n, user, note, idGen, nil, nil)
 }
 
+// TestAnnouncementShapeL2 validates the actual PackAnnouncement map output
+// against the golden Announcement schema. Announcement is packed as
+// map[string]any (not a reflectable struct), so this is the L2 runtime check
+// for that map-based packer (#1224 history: createdAt non-null cast crash).
+func TestAnnouncementShapeL2(t *testing.T) {
+	golden, err := LoadGoldenSnapshot(filepath.Join("testdata", "golden_schemas.json"))
+	if err != nil {
+		t.Fatalf("load golden: %v", err)
+	}
+	schema, ok := golden["Announcement"]
+	if !ok || len(schema) == 0 {
+		t.Fatal("Announcement schema missing/empty in golden snapshot; run `go run ./tools/shapediff`")
+	}
+
+	idGen, _ := id.NewGenerator("aidx")
+	a := &model.Announcement{
+		ID:      idGen.Generate(time.Now()),
+		Title:   "maintenance",
+		Text:    "we will be down",
+		Icon:    "info",
+		Display: "normal",
+	}
+	out := entity.PackAnnouncement(a, idGen, false)
+
+	for _, f := range ValidateValue("Announcement", "Announcement", "Announcement", out, schema) {
+		if f.Sev == SevHigh || f.Sev == SevMed {
+			t.Errorf("Announcement shape drift: %s [%s]: %s", f.Field, f.Kind, f.Detail)
+		}
+	}
+}
+
 // TestNotificationShapeL2 validates actual PackNotification map output against
 // the golden Notification union — the map-based, discriminated-union surface
 // that the Layer 0 reflection gate cannot reach.

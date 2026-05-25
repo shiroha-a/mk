@@ -1,4 +1,66 @@
 {
+  "Announcement": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "display": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "forYou": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "icon": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "imageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "isRead": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "needConfirmationToRead": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "silence": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "text": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "title": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "DriveFile": {
     "blurhash": {
       "nullable": true,
