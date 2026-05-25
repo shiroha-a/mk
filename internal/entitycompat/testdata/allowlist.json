@@ -1,24 +1,6 @@
 [
   {
     "layer": "UserDetailed",
-    "field": "movedTo",
-    "kind": "missing",
-    "reason": "baseline: account-migration field absent from entity.UserDetailed struct (only model has the column). Backlog: add movedTo to the packed UserDetailed shape."
-  },
-  {
-    "layer": "UserDetailed",
-    "field": "alsoKnownAs",
-    "kind": "missing",
-    "reason": "baseline: account-migration field absent from entity.UserDetailed struct. Backlog: add alsoKnownAs to the packed shape."
-  },
-  {
-    "layer": "UserDetailed",
-    "field": "lastFetchedAt",
-    "kind": "missing",
-    "reason": "baseline: remote-fetch timestamp absent from entity.UserDetailed struct. Backlog: add lastFetchedAt to the packed shape."
-  },
-  {
-    "layer": "UserDetailed",
     "field": "memo",
     "kind": "omit",
     "reason": "baseline: golden declares memo as required (string | null); mk-go uses omitempty. Backlog: emit null instead of omitting."

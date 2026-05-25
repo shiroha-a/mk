@@ -131,6 +131,50 @@ func TestPackUserDetailed(t *testing.T) {
 	assert.Equal(t, &lang, detailed.Lang)
 }
 
+func TestPackUserDetailed_MoveFields(t *testing.T) {
+	fetched := time.Date(2026, 5, 25, 1, 2, 3, 0, time.UTC)
+	movedURI := "https://remote.example/users/moved"
+	aka := "https://a.example/users/x,https://b.example/users/y"
+	u := &model.User{
+		ID:            "user_move",
+		Username:      "mover",
+		LastFetchedAt: &fetched,
+		MovedToURI:    &movedURI,
+		AlsoKnownAs:   &aka,
+	}
+
+	d := PackUserDetailed(u, nil)
+
+	// lastFetchedAt は ISO8601(ms) で埋まる。
+	require.NotNil(t, d.LastFetchedAt)
+	assert.Equal(t, "2026-05-25T01:02:03.000Z", *d.LastFetchedAt)
+
+	// movedTo / alsoKnownAs は URI→ID 解決を要するため pure packer では null。
+	// (upstream の解決不能時 fallback と同じ。完全解決は follow-up)
+	assert.Nil(t, d.MovedTo)
+	assert.Nil(t, d.AlsoKnownAs)
+
+	// JSON 上は 3 field とも present で、movedTo / alsoKnownAs / (未取得時の)
+	// lastFetchedAt は null になる (golden: string|null / string[]|null)。
+	b, err := json.Marshal(d)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	for _, k := range []string{"movedTo", "alsoKnownAs", "lastFetchedAt"} {
+		_, present := m[k]
+		assert.Truef(t, present, "%q must be present in JSON", k)
+	}
+	assert.Nil(t, m["movedTo"])
+	assert.Nil(t, m["alsoKnownAs"])
+	assert.Equal(t, "2026-05-25T01:02:03.000Z", m["lastFetchedAt"])
+}
+
+func TestPackUserDetailed_LastFetchedAtNil(t *testing.T) {
+	u := &model.User{ID: "u_local", Username: "local"}
+	d := PackUserDetailed(u, nil)
+	assert.Nil(t, d.LastFetchedAt, "local user without lastFetchedAt -> null")
+}
+
 func TestPackUserDetailed_ProfileVisibility(t *testing.T) {
 	u := &model.User{
 		ID:                "user5",

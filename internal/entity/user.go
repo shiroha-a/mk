@@ -77,9 +77,19 @@ type UserDetailed struct {
 	// /settings/privacy が `i/update` レスポンスから直接 `$i.chatScope` に
 	// 反映するため、この field を expose しないと UI が保存後に古い値で
 	// 再描画される (DB は更新されているのに UI が "保存されない" と見える)。
-	ChatScope     string   `json:"chatScope"`
-	CreatedAt     string   `json:"createdAt"`
-	UpdatedAt     *string  `json:"updatedAt"`
+	ChatScope     string  `json:"chatScope"`
+	CreatedAt     string  `json:"createdAt"`
+	UpdatedAt     *string `json:"updatedAt"`
+	LastFetchedAt *string `json:"lastFetchedAt"`
+	// MovedTo / AlsoKnownAs はアカウント移行 (Mastodon 互換 Move) のフィールド。
+	// upstream UserEntityService は movedToUri / alsoKnownAs (URI 群) をローカル
+	// ユーザー ID に解決した上で返す (resolvePerson(...).then(u => u.id))。
+	// その URI→ID 解決は repository アクセスを要し pure packer では行えないため、
+	// ここでは解決不能時の upstream fallback と同じ null を出す。完全な解決は
+	// follow-up で handler enrich する (golden: movedTo string|null /
+	// alsoKnownAs string[]|null)。
+	MovedTo       *string  `json:"movedTo"`
+	AlsoKnownAs   []string `json:"alsoKnownAs"`
 	URI           *string  `json:"uri"`
 	URL           *string  `json:"url"`
 	PinnedNoteIDs []string `json:"pinnedNoteIds"`
@@ -424,6 +434,13 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		if t, err := idGens[0].ParseTime(u.ID); err == nil {
 			d.CreatedAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
+	}
+
+	// lastFetchedAt は upstream と同じく ISO8601 (ms) で出す。未取得 (ローカル
+	// ユーザー等) は null。
+	if u.LastFetchedAt != nil {
+		s := u.LastFetchedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		d.LastFetchedAt = &s
 	}
 
 	if profile != nil {

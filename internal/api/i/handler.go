@@ -594,9 +594,10 @@ func (h *Handler) Me(c echo.Context) error {
 	// MeDetailed packer に乗っていない /api/i 固有 field を上書き / 追加。
 	// avatarId / bannerId / chatScope は PackUserDetailed 経由で同 value が
 	// 既に乗っているので override 不要 (#987 review で重複削除)。
-	resp["movedTo"] = u.MovedToURI
-	resp["alsoKnownAs"] = u.AlsoKnownAs
-	resp["lastFetchedAt"] = nil
+	// movedTo / alsoKnownAs / lastFetchedAt も PackUserDetailed が golden 互換
+	// shape (movedTo: string|null / alsoKnownAs: string[]|null /
+	// lastFetchedAt: string|null) で乗せるので override しない。旧 override は
+	// alsoKnownAs を comma-joined string のまま出していて golden 非互換だった。
 	// canChat は PackMeDetailed → UserLite 経由で role policy
 	// chatAvailability === 'available' を見るようになった (#988)。
 	// 旧 self-view 用 hardcode `resp["canChat"] = true` を撤去し、
