@@ -1439,7 +1439,9 @@ func (h *Handler) fillPinnedFields(ctx context.Context, u *model.User, profile *
 		resp["pinnedPageId"] = profile.PinnedPageID
 		if h.pageRepo != nil {
 			if p, err := h.pageRepo.FindByID(*profile.PinnedPageID); err == nil {
-				resp["pinnedPage"] = entity.PackPage(p, h.idGen)
+				// golden Page は user 必須。pinnedPage は自分の page なので
+				// owner=u を渡して user (UserLite) を埋める (#1266 follow-up)。
+				resp["pinnedPage"] = entity.PackPageWithContext(p, entity.PackPageContext{IDGen: h.idGen, Owner: u})
 			}
 		}
 	}

@@ -1615,6 +1615,11 @@ func TestShow_PinnedPage_Populated(t *testing.T) {
 	page, ok := resp["pinnedPage"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "my page", page["title"])
+	// golden Page は user 必須。pinnedPage に owner を渡すよう修正 (#1266 fu) した
+	// ので user (UserLite) が present で、UserDetailed shape に戻る regression を防ぐ。
+	pageUser, ok := page["user"].(map[string]any)
+	require.True(t, ok, "pinnedPage.user must be present (golden Page requires user)")
+	assert.Equal(t, "user1", pageUser["id"])
 }
 
 func TestShow_PinnedFields_Defaults(t *testing.T) {
