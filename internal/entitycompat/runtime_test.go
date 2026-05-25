@@ -180,20 +180,38 @@ func notifFixture(typ notification.Type, withUser, withNote bool, extra map[stri
 	return entity.PackNotification(n, user, note, idGen, nil, nil)
 }
 
+// requireL2Schema loads a flat golden schema for an L2 map-based packer test,
+// failing if the snapshot is missing/empty (regenerate-miss guard).
+func requireL2Schema(t *testing.T, name string) Schema {
+	t.Helper()
+	golden, err := LoadGoldenSnapshot(filepath.Join("testdata", "golden_schemas.json"))
+	if err != nil {
+		t.Fatalf("load golden: %v", err)
+	}
+	schema, ok := golden[name]
+	if !ok || len(schema) == 0 {
+		t.Fatalf("%s schema missing/empty in golden snapshot; run `go run ./tools/shapediff`", name)
+	}
+	return schema
+}
+
+// assertNoGatedDrift fails on any HIGH/MED finding from validating a packer's
+// runtime map output against its golden schema.
+func assertNoGatedDrift(t *testing.T, name string, actual map[string]any, schema Schema) {
+	t.Helper()
+	for _, f := range ValidateValue(name, name, name, actual, schema) {
+		if f.Sev == SevHigh || f.Sev == SevMed {
+			t.Errorf("%s shape drift: %s [%s]: %s", name, f.Field, f.Kind, f.Detail)
+		}
+	}
+}
+
 // TestAnnouncementShapeL2 validates the actual PackAnnouncement map output
 // against the golden Announcement schema. Announcement is packed as
 // map[string]any (not a reflectable struct), so this is the L2 runtime check
 // for that map-based packer (#1224 history: createdAt non-null cast crash).
 func TestAnnouncementShapeL2(t *testing.T) {
-	golden, err := LoadGoldenSnapshot(filepath.Join("testdata", "golden_schemas.json"))
-	if err != nil {
-		t.Fatalf("load golden: %v", err)
-	}
-	schema, ok := golden["Announcement"]
-	if !ok || len(schema) == 0 {
-		t.Fatal("Announcement schema missing/empty in golden snapshot; run `go run ./tools/shapediff`")
-	}
-
+	schema := requireL2Schema(t, "Announcement")
 	idGen, _ := id.NewGenerator("aidx")
 	img := "https://example.com/a.png"
 	updated := time.Date(2026, 5, 26, 1, 0, 0, 0, time.UTC)
@@ -212,15 +230,31 @@ func TestAnnouncementShapeL2(t *testing.T) {
 			NeedConfirmationToRead: true, Silence: true,
 		},
 	}
-
 	for name, a := range cases {
-		out := entity.PackAnnouncement(a, idGen, true)
-		for _, f := range ValidateValue("Announcement", "Announcement", "Announcement", out, schema) {
-			if f.Sev == SevHigh || f.Sev == SevMed {
-				t.Errorf("[%s] Announcement shape drift: %s [%s]: %s", name, f.Field, f.Kind, f.Detail)
-			}
-		}
+		assertNoGatedDrift(t, "Announcement["+name+"]", entity.PackAnnouncement(a, idGen, true), schema)
 	}
+}
+
+// TestClipShapeL2 validates PackClip's map output against golden Clip. Clip is
+// map-based; with idGen + owner it must emit all required golden fields
+// (createdAt / user 含む)。
+func TestClipShapeL2(t *testing.T) {
+	schema := requireL2Schema(t, "Clip")
+	idGen, _ := id.NewGenerator("aidx")
+	owner := &model.User{ID: "u_owner", Username: "owner"}
+	desc := "my clip"
+	cl := &model.Clip{ID: idGen.Generate(time.Now()), UserID: "u_owner", Name: "clip", Description: &desc, IsPublic: true}
+	out := entity.PackClip(cl, idGen, owner)
+	assertNoGatedDrift(t, "Clip", out, schema)
+}
+
+// TestSigninShapeL2 validates PackSignin's map output against golden Signin.
+func TestSigninShapeL2(t *testing.T) {
+	schema := requireL2Schema(t, "Signin")
+	idGen, _ := id.NewGenerator("aidx")
+	s := &model.Signin{ID: idGen.Generate(time.Now()), IP: "203.0.113.7", Success: true}
+	out := entity.PackSignin(s, idGen)
+	assertNoGatedDrift(t, "Signin", out, schema)
 }
 
 // TestNotificationShapeL2 validates actual PackNotification map output against

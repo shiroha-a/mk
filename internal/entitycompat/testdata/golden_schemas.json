@@ -61,6 +61,63 @@
       "type": "string"
     }
   },
+  "Clip": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "favoritedCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isFavorited": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isPublic": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "lastClippedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "notesCount": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "DriveFile": {
     "blurhash": {
       "nullable": true,
@@ -646,6 +703,33 @@
       "nullable": false,
       "optional": true,
       "type": "array"
+    }
+  },
+  "Signin": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "headers": {
+      "nullable": false,
+      "optional": false,
+      "type": "other"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "ip": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "success": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
     }
   },
   "UserDetailedNotMeOnly": {

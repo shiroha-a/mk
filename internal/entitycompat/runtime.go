@@ -25,7 +25,7 @@ func UnionSchemaNames() []string {
 // them; the generator still extracts their flat golden schema into the snapshot
 // for ValidateValue to use.
 func L2FlatSchemaNames() []string {
-	return []string{"Announcement"}
+	return []string{"Announcement", "Clip", "Signin"}
 }
 
 // ParseUnion parses a discriminated-union schema (variants joined by `} | {`)
