@@ -2245,6 +2245,11 @@ func TestMe_PinnedPage_Populated(t *testing.T) {
 	pg, ok := resp["pinnedPage"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "pinned", pg["title"])
+	// golden Page は user 必須。pinnedPage に owner=u を渡す修正 (#1266 fu) を
+	// /api/i 側でも回帰 guard する (user が present で id が self と一致)。
+	pgUser, ok := pg["user"].(map[string]any)
+	require.True(t, ok, "pinnedPage.user must be present (golden Page requires user)")
+	assert.Equal(t, "u1", pgUser["id"])
 }
 
 func TestMe_PinnedPage_NoPinnedPageID(t *testing.T) {
