@@ -51,30 +51,32 @@ type AccountMover interface {
 
 // Handler handles account-related API endpoints.
 type Handler struct {
-	userService          *user.Service
-	idGen                id.Generator
-	roleProvider         RoleProvider
-	registryRepo         repository.RegistryRepository
-	favoriteRepo         repository.NoteFavoriteRepository
-	transferEnqueuer     TransferEnqueuer
-	webauthnSvc          *twofactor.WebAuthnService
-	securityKeyRepo      repository.UserSecurityKeyRepository
-	metaRepo             repository.MetaRepository
-	emailSender          EmailSender
-	serverURL            string
-	signinRepo           repository.SigninRepository
-	accessTokenRepo      repository.AccessTokenRepository
-	galleryRepo          GalleryRepository
-	pageLikeRepo         repository.PageLikeRepository
-	mover                AccountMover
-	notificationSvc      UnreadNotificationSource
-	followRequestRepo    repository.FollowRequestRepository
-	announcementRepo     AnnouncementUnreadSource
-	chatRepo             ChatUnreadSource
-	antennaUnreadRepo    AntennaUnreadSource
-	channelUnreadRepo    ChannelUnreadSource
-	piningRepo           repository.UserNotePiningRepository
-	noteRepo             repository.NoteRepository
+	userService       *user.Service
+	idGen             id.Generator
+	roleProvider      RoleProvider
+	registryRepo      repository.RegistryRepository
+	favoriteRepo      repository.NoteFavoriteRepository
+	transferEnqueuer  TransferEnqueuer
+	webauthnSvc       *twofactor.WebAuthnService
+	securityKeyRepo   repository.UserSecurityKeyRepository
+	metaRepo          repository.MetaRepository
+	emailSender       EmailSender
+	serverURL         string
+	signinRepo        repository.SigninRepository
+	accessTokenRepo   repository.AccessTokenRepository
+	galleryRepo       GalleryRepository
+	pageLikeRepo      repository.PageLikeRepository
+	mover             AccountMover
+	notificationSvc   UnreadNotificationSource
+	followRequestRepo repository.FollowRequestRepository
+	announcementRepo  AnnouncementUnreadSource
+	chatRepo          ChatUnreadSource
+	antennaUnreadRepo AntennaUnreadSource
+	channelUnreadRepo ChannelUnreadSource
+	piningRepo        repository.UserNotePiningRepository
+	noteRepo          repository.NoteRepository
+	// userRepo は movedTo / alsoKnownAs の URI→ローカルID 解決 (#1255) に使う。
+	userRepo             repository.UserRepository
 	pageRepo             repository.PageRepository
 	instanceRepo         repository.InstanceRepository
 	emojiRepo            repository.EmojiRepository
@@ -140,6 +142,26 @@ func (h *Handler) SetEmailValidationClient(c *http.Client) {
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
 // MyReaction / Channel on packed pinned notes (#426)。
+// SetUserRepo wires a UserRepository used to resolve movedTo / alsoKnownAs
+// actor URIs to local user IDs (#1255). Unwired (test) leaves those null.
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
+}
+
+// resolveUserIDByURI resolves an ActivityPub actor URI to a local user ID via
+// a local DB lookup only (no remote fetch). Returns ("", false) when unwired
+// or the URI is not known locally.
+func (h *Handler) resolveUserIDByURI(uri string) (string, bool) {
+	if h.userRepo == nil {
+		return "", false
+	}
+	u, err := h.userRepo.FindByURI(uri)
+	if err != nil || u == nil {
+		return "", false
+	}
+	return u.ID, true
+}
+
 func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
 	h.fieldRes = r
 }
@@ -587,6 +609,9 @@ func (h *Handler) Me(c echo.Context) error {
 	// CI の TestMe_PreservesMeDetailedFields で即検出される (= empty resp
 	// で field 不在 assertion が落ちる)。silent leak には繋がらない。
 	me := entity.PackMeDetailed(u, profile, h.idGen)
+	// movedTo / alsoKnownAs を URI→ローカルID 解決して埋める (#1255)。self
+	// view も他 path と同じ shape にするため marshal 前に enrich する。
+	me.ResolveMoveTargets(u, h.resolveUserIDByURI)
 	b, _ := json.Marshal(me)
 	resp := map[string]any{}
 	_ = json.Unmarshal(b, &resp)
@@ -594,10 +619,11 @@ func (h *Handler) Me(c echo.Context) error {
 	// MeDetailed packer に乗っていない /api/i 固有 field を上書き / 追加。
 	// avatarId / bannerId / chatScope は PackUserDetailed 経由で同 value が
 	// 既に乗っているので override 不要 (#987 review で重複削除)。
-	// movedTo / alsoKnownAs / lastFetchedAt も PackUserDetailed が golden 互換
-	// shape (movedTo: string|null / alsoKnownAs: string[]|null /
-	// lastFetchedAt: string|null) で乗せるので override しない。旧 override は
-	// alsoKnownAs を comma-joined string のまま出していて golden 非互換だった。
+	// movedTo / alsoKnownAs / lastFetchedAt は PackUserDetailed +
+	// ResolveMoveTargets (上で実施) が golden 互換 shape (movedTo: string|null /
+	// alsoKnownAs: string[]|null / lastFetchedAt: string|null) で乗せるので
+	// override しない。旧 override は alsoKnownAs を comma-joined string のまま
+	// 出していて golden 非互換だった。
 	// canChat は PackMeDetailed → UserLite 経由で role policy
 	// chatAvailability === 'available' を見るようになった (#988)。
 	// 旧 self-view 用 hardcode `resp["canChat"] = true` を撤去し、

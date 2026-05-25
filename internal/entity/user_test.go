@@ -175,6 +175,48 @@ func TestPackUserDetailed_LastFetchedAtNil(t *testing.T) {
 	assert.Nil(t, d.LastFetchedAt, "local user without lastFetchedAt -> null")
 }
 
+func TestResolveMoveTargets(t *testing.T) {
+	movedURI := "https://remote.example/users/dest"
+	aka := "https://a.example/users/x, https://unknown.example/users/z ,https://b.example/users/y"
+	u := &model.User{
+		ID:          "u1",
+		MovedToURI:  &movedURI,
+		AlsoKnownAs: &aka,
+	}
+	// known URIs -> local IDs; unknown -> dropped.
+	known := map[string]string{
+		movedURI:                    "dest_id",
+		"https://a.example/users/x": "x_id",
+		"https://b.example/users/y": "y_id",
+	}
+	resolve := func(uri string) (string, bool) { id, ok := known[uri]; return id, ok }
+
+	d := PackUserDetailed(u, nil)
+	d.ResolveMoveTargets(u, resolve)
+
+	require.NotNil(t, d.MovedTo)
+	assert.Equal(t, "dest_id", *d.MovedTo)
+	// unknown.example は解決できず除外され、空白も trim される。
+	assert.Equal(t, []string{"x_id", "y_id"}, d.AlsoKnownAs)
+}
+
+func TestResolveMoveTargets_NilAndUnresolvable(t *testing.T) {
+	// nil resolve / nil user は no-op。
+	d := UserDetailed{}
+	d.ResolveMoveTargets(&model.User{}, nil)
+	assert.Nil(t, d.MovedTo)
+	assert.Nil(t, d.AlsoKnownAs)
+
+	// すべて解決不能なら null のまま (空配列にしない)。
+	movedURI := "https://x/u"
+	aka := "https://y/u"
+	u := &model.User{MovedToURI: &movedURI, AlsoKnownAs: &aka}
+	d2 := UserDetailed{}
+	d2.ResolveMoveTargets(u, func(string) (string, bool) { return "", false })
+	assert.Nil(t, d2.MovedTo)
+	assert.Nil(t, d2.AlsoKnownAs, "all-unresolvable alsoKnownAs stays null, not []")
+}
+
 func TestPackUserDetailed_ProfileVisibility(t *testing.T) {
 	u := &model.User{
 		ID:                "user5",

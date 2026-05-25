@@ -2,6 +2,7 @@ package entity
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -84,10 +85,9 @@ type UserDetailed struct {
 	// MovedTo / AlsoKnownAs はアカウント移行 (Mastodon 互換 Move) のフィールド。
 	// upstream UserEntityService は movedToUri / alsoKnownAs (URI 群) をローカル
 	// ユーザー ID に解決した上で返す (resolvePerson(...).then(u => u.id))。
-	// その URI→ID 解決は repository アクセスを要し pure packer では行えないため、
-	// ここでは解決不能時の upstream fallback と同じ null を出す。完全な解決は
-	// follow-up で handler enrich する (golden: movedTo string|null /
-	// alsoKnownAs string[]|null)。
+	// pure packer は repository アクセスを持たないので null のまま残し、repo を
+	// 持つ handler が ResolveMoveTargets で URI→ID 解決して埋める。解決不能な
+	// URI は null になる (golden: movedTo string|null / alsoKnownAs string[]|null)。
 	MovedTo       *string  `json:"movedTo"`
 	AlsoKnownAs   []string `json:"alsoKnownAs"`
 	URI           *string  `json:"uri"`
@@ -459,6 +459,46 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 	}
 
 	return d
+}
+
+// MoveTargetResolver resolves an ActivityPub actor URI to a local user ID.
+// It must perform a local lookup only (no remote fetch); an unknown URI
+// returns ("", false), mirroring upstream's resolve-or-null behavior.
+type MoveTargetResolver func(uri string) (id string, ok bool)
+
+// ResolveMoveTargets fills MovedTo / AlsoKnownAs from the account-migration
+// URIs stored on u, resolving each to a local user ID via resolve. Upstream
+// UserEntityService maps movedToUri / alsoKnownAs (URIs) to local user IDs and
+// emits null for the unresolvable ones; this mirrors that. It is a no-op when
+// u or resolve is nil, leaving the fields null.
+//
+// 注: mk-go は alsoKnownAs を comma-joined string で 1 カラムに格納している
+// (renderer.go の AP 出力と対称)。ここで split して各 URI を解決する。
+func (d *UserDetailed) ResolveMoveTargets(u *model.User, resolve MoveTargetResolver) {
+	if u == nil || resolve == nil {
+		return
+	}
+	if u.MovedToURI != nil && *u.MovedToURI != "" {
+		if id, ok := resolve(*u.MovedToURI); ok {
+			d.MovedTo = &id
+		}
+	}
+	if u.AlsoKnownAs != nil && *u.AlsoKnownAs != "" {
+		var ids []string
+		for _, uri := range strings.Split(*u.AlsoKnownAs, ",") {
+			uri = strings.TrimSpace(uri)
+			if uri == "" {
+				continue
+			}
+			if id, ok := resolve(uri); ok {
+				ids = append(ids, id)
+			}
+		}
+		// upstream は解決後 0 件なら null (空配列にしない)。
+		if len(ids) > 0 {
+			d.AlsoKnownAs = ids
+		}
+	}
 }
 
 // PackUserForFollowStreamEvent returns a UserDetailed envelope suitable for

@@ -95,6 +95,20 @@ func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
 }
 
+// resolveUserIDByURI resolves an ActivityPub actor URI to a local user ID via
+// a local DB lookup only (no remote fetch). Used by UserDetailed.ResolveMoveTargets
+// to fill movedTo / alsoKnownAs. Returns ("", false) when unwired or unknown.
+func (h *Handler) resolveUserIDByURI(uri string) (string, bool) {
+	if h.userRepo == nil {
+		return "", false
+	}
+	u, err := h.userRepo.FindByURI(uri)
+	if err != nil || u == nil {
+		return "", false
+	}
+	return u.ID, true
+}
+
 // SetNoteReactionRepo wires the NoteReactionRepository for users/reactions
 // (= reactor 視点の reaction list、#821 PR-D)。
 func (h *Handler) SetNoteReactionRepo(r repository.NoteReactionRepository) {
@@ -322,6 +336,11 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	detailed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+
+	// movedTo / alsoKnownAs を URI→ローカルID 解決して埋める (#1255)。単一
+	// ユーザー path なので FindByURI は数回で済む。list path (followers 等) は
+	// N+1 を避けるため解決せず null のまま (move banner は profile でのみ表示)。
+	detailed.ResolveMoveTargets(bundle.User, h.resolveUserIDByURI)
 
 	// remote user の場合は origin instance の /api/users/show から実際の counts
 	// を取得して上書きする (#943)。Misskey TS は自インスタンス観測値のみ集計する

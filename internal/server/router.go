@@ -1240,6 +1240,7 @@ func (s *Server) setupRoutes() {
 	// Account endpoints
 	registryRepo := repository.NewRegistryRepository(s.db)
 	iHandler := i.NewHandler(userService, idGen)
+	iHandler.SetUserRepo(userRepo)
 	iHandler.SetRoleProvider(roleService)
 	iHandler.SetTOTPReplayGuard(totpReplayGuard)
 	iHandler.SetRegistryRepo(registryRepo)
