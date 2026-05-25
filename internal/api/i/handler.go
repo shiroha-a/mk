@@ -51,32 +51,30 @@ type AccountMover interface {
 
 // Handler handles account-related API endpoints.
 type Handler struct {
-	userService       *user.Service
-	idGen             id.Generator
-	roleProvider      RoleProvider
-	registryRepo      repository.RegistryRepository
-	favoriteRepo      repository.NoteFavoriteRepository
-	transferEnqueuer  TransferEnqueuer
-	webauthnSvc       *twofactor.WebAuthnService
-	securityKeyRepo   repository.UserSecurityKeyRepository
-	metaRepo          repository.MetaRepository
-	emailSender       EmailSender
-	serverURL         string
-	signinRepo        repository.SigninRepository
-	accessTokenRepo   repository.AccessTokenRepository
-	galleryRepo       GalleryRepository
-	pageLikeRepo      repository.PageLikeRepository
-	mover             AccountMover
-	notificationSvc   UnreadNotificationSource
-	followRequestRepo repository.FollowRequestRepository
-	announcementRepo  AnnouncementUnreadSource
-	chatRepo          ChatUnreadSource
-	antennaUnreadRepo AntennaUnreadSource
-	channelUnreadRepo ChannelUnreadSource
-	piningRepo        repository.UserNotePiningRepository
-	noteRepo          repository.NoteRepository
-	// userRepo は movedTo / alsoKnownAs の URI→ローカルID 解決 (#1255) に使う。
-	userRepo             repository.UserRepository
+	userService          *user.Service
+	idGen                id.Generator
+	roleProvider         RoleProvider
+	registryRepo         repository.RegistryRepository
+	favoriteRepo         repository.NoteFavoriteRepository
+	transferEnqueuer     TransferEnqueuer
+	webauthnSvc          *twofactor.WebAuthnService
+	securityKeyRepo      repository.UserSecurityKeyRepository
+	metaRepo             repository.MetaRepository
+	emailSender          EmailSender
+	serverURL            string
+	signinRepo           repository.SigninRepository
+	accessTokenRepo      repository.AccessTokenRepository
+	galleryRepo          GalleryRepository
+	pageLikeRepo         repository.PageLikeRepository
+	mover                AccountMover
+	notificationSvc      UnreadNotificationSource
+	followRequestRepo    repository.FollowRequestRepository
+	announcementRepo     AnnouncementUnreadSource
+	chatRepo             ChatUnreadSource
+	antennaUnreadRepo    AntennaUnreadSource
+	channelUnreadRepo    ChannelUnreadSource
+	piningRepo           repository.UserNotePiningRepository
+	noteRepo             repository.NoteRepository
 	pageRepo             repository.PageRepository
 	instanceRepo         repository.InstanceRepository
 	emojiRepo            repository.EmojiRepository
@@ -101,6 +99,9 @@ type Handler struct {
 	// Misskey TS は持たない)。nil なら無保護 (= unit test / dev fallback)。
 	// production では必ず wire する。
 	totpReplayGuard twofactor.ReplayGuard
+	// userRepo は movedTo / alsoKnownAs の URI→ローカルID 解決 (#1255) に使う。
+	// FindByURI による local lookup のみで remote fetch しない。
+	userRepo repository.UserRepository
 }
 
 // TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive
@@ -142,6 +143,10 @@ func (h *Handler) SetEmailValidationClient(c *http.Client) {
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
 // MyReaction / Channel on packed pinned notes (#426)。
+func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
+	h.fieldRes = r
+}
+
 // SetUserRepo wires a UserRepository used to resolve movedTo / alsoKnownAs
 // actor URIs to local user IDs (#1255). Unwired (test) leaves those null.
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
@@ -160,10 +165,6 @@ func (h *Handler) resolveUserIDByURI(uri string) (string, bool) {
 		return "", false
 	}
 	return u.ID, true
-}
-
-func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
-	h.fieldRes = r
 }
 
 // MainStreamPublisher emits events to a single user's `main` WebSocket
