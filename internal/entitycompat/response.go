@@ -3,6 +3,7 @@ package entitycompat
 import (
 	_ "embed"
 	"encoding/json"
+	"sync"
 )
 
 // embeddedGoldenJSON is the committed golden flat-schema snapshot, embedded at
@@ -12,11 +13,19 @@ import (
 //go:embed testdata/golden_schemas.json
 var embeddedGoldenJSON []byte
 
-// EmbeddedGolden returns the embedded golden flat-schema snapshot.
+var (
+	embeddedGoldenOnce sync.Once
+	embeddedGolden     GoldenSet
+)
+
+// EmbeddedGolden returns the embedded golden flat-schema snapshot. The parse is
+// memoized: L3 response checks across many handler tests call this repeatedly,
+// so the JSON is unmarshaled once. Callers must treat the result as read-only.
 func EmbeddedGolden() GoldenSet {
-	var g GoldenSet
-	_ = json.Unmarshal(embeddedGoldenJSON, &g)
-	return g
+	embeddedGoldenOnce.Do(func() {
+		_ = json.Unmarshal(embeddedGoldenJSON, &embeddedGolden)
+	})
+	return embeddedGolden
 }
 
 // ValidateResponse is the "Layer 3" runtime response check: it validates an
