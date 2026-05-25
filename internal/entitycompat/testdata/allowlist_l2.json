@@ -3,12 +3,12 @@
     "layer": "Notification",
     "field": "type=pollVote",
     "kind": "missing",
-    "reason": "baseline: mk-go emits notification type 'pollVote' but the golden Notification union only has 'pollEnded'. A strict client cannot dispatch it. Backlog: rename to pollEnded, or confirm pollVote is never delivered to API clients."
+    "reason": "intentional: mk-go 独自の通知 type 'pollVote' (per-vote 通知)。Misskey TS に対応 type が無く golden union にも無い (notification_service.go の TypePollVote コメント参照)。upstream の 'pollEnded' とは意味が異なる別物。strict クライアントは未知 type を無視する想定の拡張。"
   },
   {
     "layer": "Notification",
     "field": "type=importCompleted",
     "kind": "missing",
-    "reason": "baseline: mk-go emits notification type 'importCompleted' which is absent from the golden Notification union. Backlog: confirm upstream type name / delivery path."
+    "reason": "intentional: mk-go 独自の通知 type 'importCompleted' (transfer import 完了)。golden union は 'exportCompleted' のみで importCompleted は無い。upstream に対応 type が無い拡張。"
   }
 ]

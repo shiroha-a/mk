@@ -120,33 +120,36 @@ func literalOf(rhs string) string {
 // struct round-tripped to a map) against a golden schema and returns findings.
 // Unlike the Layer 0 reflection diff this inspects concrete runtime values, so
 // it catches a required field that is present-but-null or simply not populated.
-func ValidateValue(layer, golden string, actual map[string]any, schema Schema) []Finding {
+func ValidateValue(family, layer, golden string, actual map[string]any, schema Schema) []Finding {
+	mk := func(field, kind string, sev Severity, detail string) Finding {
+		return Finding{Family: family, Layer: layer, Golden: golden, Field: field, Kind: kind, Sev: sev, Detail: detail}
+	}
 	var findings []Finding
 	for name, g := range schema {
 		v, present := actual[name]
 		if !present {
 			if !g.Optional {
-				findings = append(findings, Finding{layer, layer, golden, name, KindMissing, SevHigh,
-					"required by golden but not emitted at runtime"})
+				findings = append(findings, mk(name, KindMissing, SevHigh,
+					"required by golden but not emitted at runtime"))
 			}
 			continue
 		}
 		if v == nil {
 			if !g.Nullable {
-				findings = append(findings, Finding{layer, layer, golden, name, KindNullable, SevHigh,
-					"golden non-null but runtime value is null"})
+				findings = append(findings, mk(name, KindNullable, SevHigh,
+					"golden non-null but runtime value is null"))
 			}
 			continue
 		}
 		if at := jsonType(v); scalarMismatch(g.Type, at) {
-			findings = append(findings, Finding{layer, layer, golden, name, "type", SevMed,
-				"golden type " + g.Type + " but runtime value is " + at})
+			findings = append(findings, mk(name, "type", SevMed,
+				"golden type "+g.Type+" but runtime value is "+at))
 		}
 	}
 	for name := range actual {
 		if _, ok := schema[name]; !ok {
-			findings = append(findings, Finding{layer, layer, golden, name, KindExtra, SevInfo,
-				"emitted at runtime but not in golden"})
+			findings = append(findings, mk(name, KindExtra, SevInfo,
+				"emitted at runtime but not in golden"))
 		}
 	}
 	return findings
@@ -159,10 +162,13 @@ func ValidateUnionValue(unionName string, actual map[string]any, variants map[st
 	t, _ := actual["type"].(string)
 	schema, ok := variants[t]
 	if !ok {
-		return []Finding{{unionName, unionName, unionName, "type=" + t, KindMissing, SevHigh,
-			"runtime type literal has no matching variant in the golden union"}}
+		return []Finding{{
+			Family: unionName, Layer: unionName, Golden: unionName,
+			Field: "type=" + t, Kind: KindMissing, Sev: SevHigh,
+			Detail: "runtime type literal has no matching variant in the golden union",
+		}}
 	}
-	return ValidateValue(unionName+"["+t+"]", unionName, actual, schema)
+	return ValidateValue(unionName, unionName+"["+t+"]", unionName, actual, schema)
 }
 
 // jsonType returns the JSON type bucket of a Go value as it serializes.

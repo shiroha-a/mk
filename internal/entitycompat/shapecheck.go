@@ -268,6 +268,21 @@ func coarseTS(rhs string) string {
 
 // ---- diff -------------------------------------------------------------------
 
+// newFinding builds a Finding for a family/layer diff result. Centralizing the
+// (otherwise 7-field positional) construction keeps call sites readable and
+// resilient to future field additions.
+func newFinding(fam Family, l Layer, field, kind string, sev Severity, detail string) Finding {
+	return Finding{
+		Family: fam.Name,
+		Layer:  l.Label,
+		Golden: l.Golden,
+		Field:  field,
+		Kind:   kind,
+		Sev:    sev,
+		Detail: detail,
+	}
+}
+
 // DiffFamily compares every layer of fam against the golden snapshot and
 // returns findings sorted by severity. famPresent is the union of all fields
 // emitted anywhere in the family, used to downgrade a layer-local "missing" to
@@ -293,8 +308,8 @@ func DiffFamily(fam Family, golden GoldenSet) []Finding {
 				continue
 			}
 			if famPresent[name] {
-				findings = append(findings, Finding{fam.Name, l.Label, l.Golden, name, KindLayer, SevInfo,
-					"present in another layer of the same family"})
+				findings = append(findings, newFinding(fam, l, name, KindLayer, SevInfo,
+					"present in another layer of the same family"))
 				continue
 			}
 			sev := SevHigh
@@ -303,7 +318,7 @@ func DiffFamily(fam Family, golden GoldenSet) []Finding {
 				sev = SevLow
 				detail = "declared in golden (optional), absent in mk-go"
 			}
-			findings = append(findings, Finding{fam.Name, l.Label, l.Golden, name, KindMissing, sev, detail})
+			findings = append(findings, newFinding(fam, l, name, KindMissing, sev, detail))
 		}
 
 		for name, g := range gold {
@@ -312,19 +327,19 @@ func DiffFamily(fam Family, golden GoldenSet) []Finding {
 				continue
 			}
 			if !g.Nullable && m.Nullable {
-				findings = append(findings, Finding{fam.Name, l.Label, l.Golden, name, KindNullable, SevHigh,
-					"golden=non-null, mk-go=nullable: may emit null where client casts non-null"})
+				findings = append(findings, newFinding(fam, l, name, KindNullable, SevHigh,
+					"golden=non-null, mk-go=nullable: may emit null where client casts non-null"))
 			}
 			if !g.Optional && m.Optional {
-				findings = append(findings, Finding{fam.Name, l.Label, l.Golden, name, KindOmit, SevMed,
-					"golden=required, mk-go=omitempty: may omit a field the client requires"})
+				findings = append(findings, newFinding(fam, l, name, KindOmit, SevMed,
+					"golden=required, mk-go=omitempty: may omit a field the client requires"))
 			}
 		}
 
 		for name := range mk {
 			if _, ok := gold[name]; !ok {
-				findings = append(findings, Finding{fam.Name, l.Label, l.Golden, name, KindExtra, SevInfo,
-					"in mk-go but not in golden (extension/alias?)"})
+				findings = append(findings, newFinding(fam, l, name, KindExtra, SevInfo,
+					"in mk-go but not in golden (extension/alias?)"))
 			}
 		}
 	}

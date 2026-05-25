@@ -41,11 +41,24 @@ func main() {
 	names := entitycompat.GoldenSchemaNames()
 	golden := entitycompat.ParseTypesFile(lines, names)
 
-	// すべての referenced schema が見つかったか確認 (typo / upstream rename の検出)。
+	// すべての referenced schema が見つかり、かつ 0 フィールドでないか確認する。
+	// 0 フィールドは types.ts の書式変更でパーサが空振りした兆候なので、壊れた
+	// snapshot を commit する前にここで落とす (silent failure 防止)。
+	bad := false
 	for _, n := range names {
-		if _, ok := golden[n]; !ok {
-			fmt.Fprintf(os.Stderr, "shapediff: WARNING golden schema %q not found in types.ts\n", n)
+		s, ok := golden[n]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "shapediff: ERROR golden schema %q not found in types.ts (upstream rename?)\n", n)
+			bad = true
+			continue
 		}
+		if len(s) == 0 {
+			fmt.Fprintf(os.Stderr, "shapediff: ERROR golden schema %q parsed to 0 fields (types.ts format change?)\n", n)
+			bad = true
+		}
+	}
+	if bad {
+		os.Exit(1)
 	}
 
 	buf, err := json.MarshalIndent(golden, "", "  ")

@@ -68,7 +68,7 @@ func TestValidateValue(t *testing.T) {
 		// "opt" absent -> allowed
 	}
 	got := map[string]Severity{}
-	for _, f := range ValidateValue("L", "G", actual, schema) {
+	for _, f := range ValidateValue("F", "L", "G", actual, schema) {
 		got[f.Field+"/"+f.Kind] = f.Sev
 	}
 	if got["nonnull/nullable"] != SevHigh {
@@ -89,7 +89,7 @@ func TestValidateValue(t *testing.T) {
 
 	// missing required
 	got2 := map[string]Severity{}
-	for _, f := range ValidateValue("L", "G", map[string]any{"nullable": "x", "nonnull": "x", "num": 1}, schema) {
+	for _, f := range ValidateValue("F", "L", "G", map[string]any{"nullable": "x", "nonnull": "x", "num": 1}, schema) {
 		got2[f.Field+"/"+f.Kind] = f.Sev
 	}
 	if got2["req/missing"] != SevHigh {
@@ -188,6 +188,12 @@ func TestNotificationShapeL2(t *testing.T) {
 	notif := unions["Notification"]
 	if len(notif) == 0 {
 		t.Fatal("no Notification union variants in snapshot")
+	}
+	// 各 variant が非空か (書式変更でパーサが空振りした兆候の検出)。
+	for typ, v := range notif {
+		if len(v) == 0 {
+			t.Errorf("Notification variant %q parsed to 0 fields; snapshot likely broken", typ)
+		}
 	}
 
 	cases := []struct {

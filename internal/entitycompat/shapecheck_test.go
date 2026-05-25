@@ -24,10 +24,17 @@ func TestEntityShapeDrift(t *testing.T) {
 		t.Fatalf("load allowlist: %v", err)
 	}
 
-	// すべての referenced golden schema が snapshot に存在するか (regenerate 漏れ検出)。
+	// すべての referenced golden schema が snapshot に存在し、かつ非空か確認する。
+	// 0 フィールドは types.ts 書式変更でパーサが空振りした兆候で、放置すると
+	// ゲートが vacuously pass してしまう (silent failure)。
 	for _, name := range GoldenSchemaNames() {
-		if _, ok := golden[name]; !ok {
+		s, ok := golden[name]
+		if !ok {
 			t.Errorf("golden snapshot missing schema %q; run `go run ./tools/shapediff` to regenerate", name)
+			continue
+		}
+		if len(s) == 0 {
+			t.Errorf("golden schema %q has 0 fields; snapshot likely broken (types.ts format change)", name)
 		}
 	}
 
