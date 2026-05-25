@@ -150,6 +150,20 @@ git add third_party/misskey
 
 `<tag>-mk.N` の `N` は revision 番号。同 release base で追加 patch が増えたら `.1` `.2` と上げる。
 
+### submodule bump 後に必須: shape drift snapshot の再生成
+
+`third_party/misskey` を bump したら、entity shape drift gate の golden snapshot を
+再生成して commit すること。新バージョンで追加 / 変更された契約フィールドが次回の
+`TestEntityShapeDrift` に反映される。
+
+```bash
+make shapecheck-gen   # internal/entitycompat/testdata/golden_schemas.json を再生成
+make shapecheck       # gate がまだ通るか確認 (新規 drift が出たら allowlist or 修正)
+git add internal/entitycompat/testdata/golden_schemas.json
+```
+
+詳細は [shape-drift.md](./shape-drift.md)。
+
 ---
 
 ## 3. 参考リンク

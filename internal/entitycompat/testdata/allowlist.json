@@ -1,0 +1,62 @@
+[
+  {
+    "layer": "UserDetailed",
+    "field": "movedTo",
+    "kind": "missing",
+    "reason": "baseline: account-migration field absent from entity.UserDetailed struct (only model has the column). Backlog: add movedTo to the packed UserDetailed shape."
+  },
+  {
+    "layer": "UserDetailed",
+    "field": "alsoKnownAs",
+    "kind": "missing",
+    "reason": "baseline: account-migration field absent from entity.UserDetailed struct. Backlog: add alsoKnownAs to the packed shape."
+  },
+  {
+    "layer": "UserDetailed",
+    "field": "lastFetchedAt",
+    "kind": "missing",
+    "reason": "baseline: remote-fetch timestamp absent from entity.UserDetailed struct. Backlog: add lastFetchedAt to the packed shape."
+  },
+  {
+    "layer": "UserDetailed",
+    "field": "memo",
+    "kind": "omit",
+    "reason": "baseline: golden declares memo as required (string | null); mk-go uses omitempty. Backlog: emit null instead of omitting."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "hardMutedWords",
+    "kind": "missing",
+    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct, so struct-based self-view paths (users/show) drift. Backlog: move into the struct."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "hasUnreadChatMessages",
+    "kind": "missing",
+    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "twoFactorBackupCodesStock",
+    "kind": "missing",
+    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "unreadAnnouncements",
+    "kind": "missing",
+    "reason": "baseline: populated ad-hoc in /api/i handler map (#1226) but absent from entity.MeDetailed struct. Backlog: move into the struct."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "unreadNotificationsCount",
+    "kind": "missing",
+    "reason": "baseline: populated ad-hoc in /api/i handler map but absent from entity.MeDetailed struct. Backlog: move into the struct."
+  },
+  {
+    "layer": "MeDetailed",
+    "field": "policies",
+    "kind": "omit",
+    "reason": "baseline: golden requires policies; mk-go emits with omitempty (#1242 fixed users/show path at handler level). Backlog: make the struct field non-omitempty."
+  }
+]

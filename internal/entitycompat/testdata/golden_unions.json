@@ -1,0 +1,593 @@
+{
+  "Notification": {
+    "achievementEarned": {
+      "achievement": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "app": {
+      "body": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "header": {
+        "nullable": true,
+        "optional": false,
+        "type": "string"
+      },
+      "icon": {
+        "nullable": true,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "chatRoomInvitationReceived": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "invitation": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "createToken": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "exportCompleted": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "exportedEntity": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "fileId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "follow": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "followRequestAccepted": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "message": {
+        "nullable": true,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "login": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "mention": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "note": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "pollEnded": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "quote": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "reaction": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "reaction": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "reaction:grouped": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "reactions": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "receiveFollowRequest": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "renote": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "renote:grouped": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "users": {
+        "nullable": false,
+        "optional": false,
+        "type": "array"
+      }
+    },
+    "reply": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "user": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "userId": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "roleAssigned": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "role": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "scheduledNotePostFailed": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "noteDraft": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "scheduledNotePosted": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "note": {
+        "nullable": false,
+        "optional": false,
+        "type": "object"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    },
+    "test": {
+      "createdAt": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "id": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      },
+      "type": {
+        "nullable": false,
+        "optional": false,
+        "type": "string"
+      }
+    }
+  }
+}

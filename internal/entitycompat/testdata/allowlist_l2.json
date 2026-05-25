@@ -1,0 +1,14 @@
+[
+  {
+    "layer": "Notification",
+    "field": "type=pollVote",
+    "kind": "missing",
+    "reason": "baseline: mk-go emits notification type 'pollVote' but the golden Notification union only has 'pollEnded'. A strict client cannot dispatch it. Backlog: rename to pollEnded, or confirm pollVote is never delivered to API clients."
+  },
+  {
+    "layer": "Notification",
+    "field": "type=importCompleted",
+    "kind": "missing",
+    "reason": "baseline: mk-go emits notification type 'importCompleted' which is absent from the golden Notification union. Backlog: confirm upstream type name / delivery path."
+  }
+]

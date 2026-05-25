@@ -1,0 +1,935 @@
+{
+  "DriveFile": {
+    "blurhash": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "comment": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "folder": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "folderId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "md5": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "properties": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "size": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "thumbnailUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "type": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "DriveFolder": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "filesCount": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "foldersCount": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "parent": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "parentId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "EmojiDetailed": {
+    "aliases": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "category": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "host": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "license": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "localOnly": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "roleIdsThatCanBeUsedThisEmojiAsReaction": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "Following": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "followee": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "followeeId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "follower": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "followerId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "MeDetailedOnly": {
+    "achievements": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "alwaysMarkNsfw": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "autoAcceptFollowed": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "autoSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "avatarId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "bannerId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "carefulBot": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "email": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "emailNotificationTypes": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "emailVerified": {
+      "nullable": true,
+      "optional": true,
+      "type": "boolean"
+    },
+    "followedMessage": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "hardMutedWords": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "hasPendingReceivedFollowRequest": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadAnnouncement": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadAntenna": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadChannel": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadChatMessages": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadMentions": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadNotification": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadSpecifiedNotes": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hideOnlineStatus": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "injectFeaturedNote": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isAdmin": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isDeleted": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isExplorable": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isModerator": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "loggedInDays": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "mutedInstances": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "mutedWords": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "noCrawle": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "notificationRecieveConfig": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "policies": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "preventAiLearning": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "receiveAnnouncementEmail": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "securityKeys": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "securityKeysList": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "twoFactorBackupCodesStock": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "twoFactorEnabled": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "unreadAnnouncements": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "unreadNotificationsCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "usePasswordLessLogin": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    }
+  },
+  "Note": {
+    "channel": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "channelId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "clippedCount": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "cw": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "deletedAt": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "emojis": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "fileIds": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "files": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "hasPoll": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isHidden": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "localOnly": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "mentions": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "myReaction": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "poll": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "reactionAcceptance": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "reactionAndUserPairCache": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "reactionCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "reactionEmojis": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "reactions": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "renote": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "renoteCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "renoteId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "repliesCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "reply": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "replyId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "tags": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "text": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "uri": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "url": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "visibility": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "visibleUserIds": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    }
+  },
+  "UserDetailedNotMeOnly": {
+    "alsoKnownAs": {
+      "nullable": true,
+      "optional": false,
+      "type": "array"
+    },
+    "bannerBlurhash": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "bannerUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "birthday": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "canChat": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "chatScope": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "fields": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "followedMessage": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "followersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "followersVisibility": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "followingCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "followingVisibility": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "hasPendingFollowRequestFromYou": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "hasPendingFollowRequestToYou": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isBlocked": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isBlocking": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isFollowed": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isFollowing": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isLocked": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isMuted": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isRenoteMuted": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isSilenced": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isSuspended": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "lang": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "lastFetchedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "location": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "memo": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "moderationNote": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "movedTo": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "notesCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "notify": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "pinnedNoteIds": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "pinnedNotes": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "pinnedPage": {
+      "nullable": true,
+      "optional": false,
+      "type": "object"
+    },
+    "pinnedPageId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "publicReactions": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "roles": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "securityKeys": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "twoFactorEnabled": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "updatedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "uri": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "url": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "usePasswordLessLogin": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "verifiedLinks": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "withReplies": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    }
+  },
+  "UserList": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isPublic": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "userIds": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    }
+  },
+  "UserLite": {
+    "avatarBlurhash": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "avatarDecorations": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "avatarUrl": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "badgeRoles": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "emojis": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "host": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "instance": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "isBot": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isCat": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "makeNotesFollowersOnlyBefore": {
+      "nullable": true,
+      "optional": true,
+      "type": "number"
+    },
+    "makeNotesHiddenBefore": {
+      "nullable": true,
+      "optional": true,
+      "type": "number"
+    },
+    "name": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "onlineStatus": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "requireSigninToViewContents": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "username": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  }
+}

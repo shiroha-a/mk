@@ -8,7 +8,8 @@
 	e2e-submodule-init e2e-frontend-build e2e-deps e2e-run e2e-open \
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
-	apicompat apicompat-routes apicompat-render
+	apicompat apicompat-routes apicompat-render \
+	shapecheck shapecheck-gen shapecheck-report
 
 # Binary output
 BINARY=misskey
@@ -426,3 +427,23 @@ apicompat-render:
 # matrix を作らないようにする (`.PHONY` 効果で常に build + dump し直す)。
 # 反復 iterate で DB 接続を毎回避けたい場合は `apicompat-render` を使う。
 apicompat: apicompat-routes apicompat-render
+
+# --- entity shape drift (Layer 0 static API compatibility) ------------------
+# mk-go の entity DTO struct を Misskey contract (misskey-js types.ts) と
+# フィールド単位で突き合わせ、shape drift (欠落 / null性 / optional性) を検出する。
+# サーバー / ブラウザ / Docker 不要で、CI では `go test ./...` 内の
+# TestEntityShapeDrift gate として自動実行される。詳細は docs/shape-drift.md。
+
+# golden snapshot (testdata/golden_schemas.json) を submodule の types.ts から
+# 再生成する。third_party/misskey を upstream catch-up で bump したら必ず実行し、
+# 生成された snapshot を commit すること。
+shapecheck-gen:
+	go run ./tools/shapediff
+
+# 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
+shapecheck-report:
+	go run ./tools/shapediff -report
+
+# drift gate (L0 静的 + L2 実行時) をローカルで実行する (CI と同じ判定)。
+shapecheck:
+	go test ./internal/entitycompat/... -run 'TestEntityShapeDrift|TestNotificationShapeL2' -count=1 -v
