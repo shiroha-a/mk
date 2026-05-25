@@ -630,11 +630,11 @@ func (h *Handler) Me(c echo.Context) error {
 	// 旧 self-view 用 hardcode `resp["canChat"] = true` を撤去し、
 	// upstream と同じ role policy ベースの判定に揃える。
 	// memo / moderationNote は UserDetailed.Memo (omitempty) / MeDetailed
-	// 構造体に無いため、JSON unmarshal 後の resp map に key が出ない。
-	// /api/i の response shape を後方互換に保つため key 自体は出す
-	// (= "memo": null)。
-	resp["memo"] = nil
-	resp["moderationNote"] = nil
+	// memo は PackMeDetailed (UserDetailed.Memo, #1259) が null で乗せるので
+	// override 不要。moderationNote は golden で `moderationNote?: string`
+	// (optional・null 不可、moderator が他者を見るとき専用) なので self-view
+	// (/api/i) では出さない。旧実装は `resp["moderationNote"]=nil` で null を出し
+	// golden 非互換だった (#1270 L3 で検出)。
 	// isSilenced は role policy 由来で /api/i 固有 (MeDetailed には無い)。
 	resp["isSilenced"] = h.isSilenced(u.ID)
 
@@ -644,8 +644,9 @@ func (h *Handler) Me(c echo.Context) error {
 		resp["emailVerified"] = profile.EmailVerified
 		resp["twoFactorEnabled"] = profile.TwoFactorEnabled
 		resp["usePasswordLessLogin"] = profile.UsePasswordLessLogin
-		resp["mutedWords"] = profile.MutedWords
-		resp["mutedInstances"] = profile.MutedInstances
+		// mutedWords / mutedInstances は PackMeDetailed (AsMeDetailed) が profile
+		// から非null array で乗せる。raw profile 値で override すると空カラム時に
+		// null になり golden (string[][] / string[]、非null) 非互換 (#1270 L3 検出)。
 		resp["publicReactions"] = profile.PublicReactions
 		resp["loggedInDays"] = len(profile.LoggedInDates)
 		resp["achievements"] = jsonbArray(profile.Achievements)

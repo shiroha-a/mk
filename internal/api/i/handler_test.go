@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/notification"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
@@ -2250,6 +2251,13 @@ func TestMe_PinnedPage_Populated(t *testing.T) {
 	pgUser, ok := pg["user"].(map[string]any)
 	require.True(t, ok, "pinnedPage.user must be present (golden Page requires user)")
 	assert.Equal(t, "u1", pgUser["id"])
+
+	// L3 (#1270): 実 /api/i レスポンス map を golden User-family schema に突合する。
+	// struct ではなく handler が PackMeDetailed + fillUnreadFields + override で
+	// 実際に組み立てた map を検証するので、populate 漏れも検出できる。
+	shapetest.Assert(t, "UserLite", resp)
+	shapetest.Assert(t, "UserDetailedNotMeOnly", resp)
+	shapetest.Assert(t, "MeDetailedOnly", resp)
 }
 
 func TestMe_PinnedPage_NoPinnedPageID(t *testing.T) {

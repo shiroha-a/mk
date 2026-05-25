@@ -181,6 +181,34 @@ func notifFixture(typ notification.Type, withUser, withNote bool, extra map[stri
 	return entity.PackNotification(n, user, note, idGen, nil, nil)
 }
 
+func TestEmbeddedGolden(t *testing.T) {
+	g := EmbeddedGolden()
+	if len(g) == 0 {
+		t.Fatal("embedded golden snapshot is empty")
+	}
+	if _, ok := g["UserLite"]; !ok {
+		t.Error("embedded golden missing UserLite")
+	}
+}
+
+func TestValidateResponse(t *testing.T) {
+	// 未知 schema は誤用を可視化するため単一 HIGH finding を返す。
+	f := ValidateResponse("NoSuchSchema", map[string]any{})
+	if len(f) != 1 || f[0].Sev != SevHigh {
+		t.Errorf("unknown schema: want 1 HIGH finding, got %v", f)
+	}
+	// 既知 schema (UserLite) に必須欄を欠く response -> gated drift。
+	if got := ValidateResponse("UserLite", map[string]any{"username": "x"}); len(got) == 0 {
+		t.Error("expected gated drift for incomplete UserLite response")
+	}
+	// gated は HIGH/MED のみ (INFO の extra は含まない)。
+	for _, x := range ValidateResponse("UserLite", map[string]any{"username": "x", "extraKey": 1}) {
+		if x.Sev != SevHigh && x.Sev != SevMed {
+			t.Errorf("ValidateResponse returned non-gated severity %s", x.Sev)
+		}
+	}
+}
+
 // requireL2Schema loads a flat golden schema for an L2 map-based packer test,
 // failing if the snapshot is missing/empty (regenerate-miss guard).
 func requireL2Schema(t *testing.T, name string) Schema {
