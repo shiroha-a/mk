@@ -117,13 +117,17 @@ func TestPackPageWithContext_OmitsAbsentOptionals(t *testing.T) {
 	p := &model.Page{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.PageVisibilityPublic}
 	out := PackPageWithContext(p, PackPageContext{IDGen: idGen})
 	// Owner=nil → user field 自体を omit (null 出しすると frontend が
-	// page.user.username で再 throw するため)。
+	// page.user.username で再 throw するため)。isLiked も viewer 無し時は omit
+	// (golden isLiked? は optional)。
 	_, hasUser := out["user"]
 	assert.False(t, hasUser)
-	_, hasEye := out["eyeCatchingImage"]
-	assert.False(t, hasEye)
 	_, hasLiked := out["isLiked"]
 	assert.False(t, hasLiked)
+	// 一方 eyeCatchingImage は golden で present 必須 (DriveFile | null) なので、
+	// 画像が無くても null で present にする (omit しない) (#1264 follow-up)。
+	eye, hasEye := out["eyeCatchingImage"]
+	assert.True(t, hasEye, "eyeCatchingImage must be present (golden: DriveFile|null)")
+	assert.Nil(t, eye, "eyeCatchingImage is null when no image")
 }
 
 func TestPackPageWithContext_NilPage(t *testing.T) {

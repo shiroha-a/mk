@@ -705,6 +705,103 @@
       "type": "array"
     }
   },
+  "Page": {
+    "alignCenter": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "attachedFiles": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "content": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "eyeCatchingImage": {
+      "nullable": true,
+      "optional": false,
+      "type": "object"
+    },
+    "eyeCatchingImageId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "font": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "hideTitleWhenPinned": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isLiked": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "likedCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "script": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "summary": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "title": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "variables": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    }
+  },
   "Signin": {
     "createdAt": {
       "nullable": false,

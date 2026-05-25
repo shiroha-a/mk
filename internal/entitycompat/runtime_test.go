@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"gorm.io/datatypes"
 )
 
 // --- unit tests: union parser + runtime validator ---------------------------
@@ -255,6 +256,29 @@ func TestSigninShapeL2(t *testing.T) {
 	s := &model.Signin{ID: idGen.Generate(time.Now()), IP: "203.0.113.7", Success: true}
 	out := entity.PackSignin(s, idGen)
 	assertNoGatedDrift(t, "Signin", out, schema)
+}
+
+// TestPageShapeL2 validates PackPageWithContext's map output against golden
+// Page. Tested with the common "no eye-catching image" case: golden requires
+// `eyeCatchingImage` present (DriveFile | null), so it must be emitted as null
+// rather than omitted.
+func TestPageShapeL2(t *testing.T) {
+	schema := requireL2Schema(t, "Page")
+	idGen, _ := id.NewGenerator("aidx")
+	owner := &model.User{ID: "u_owner", Username: "owner"}
+	liked := false
+	p := &model.Page{
+		ID:        idGen.Generate(time.Now()),
+		UserID:    "u_owner",
+		UpdatedAt: time.Now(),
+		Title:     "title",
+		Name:      "name",
+		Font:      "sans-serif",
+		Content:   datatypes.JSON([]byte("[]")),
+		Variables: datatypes.JSON([]byte("[]")),
+	}
+	out := entity.PackPageWithContext(p, entity.PackPageContext{IDGen: idGen, Owner: owner, IsLiked: &liked})
+	assertNoGatedDrift(t, "Page", out, schema)
 }
 
 // TestNotificationShapeL2 validates actual PackNotification map output against

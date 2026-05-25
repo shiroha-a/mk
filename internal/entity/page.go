@@ -36,7 +36,11 @@ func PackPage(p *model.Page, idGens ...id.Generator) map[string]any {
 		"font":                p.Font,
 		"userId":              p.UserID,
 		"eyeCatchingImageId":  p.EyeCatchingImageID,
-		"content":             rawJSONBytes(p.Content),
+		// golden Page は eyeCatchingImage を present 必須 (DriveFile | null) とする。
+		// 画像が無い / lookup miss でも null を出す (omit しない)。実画像は
+		// PackPageWithContext が ctx.EyeCatchingImage で上書きする。
+		"eyeCatchingImage": nil,
+		"content":          rawJSONBytes(p.Content),
 		// variables / attachedFiles は misskey_dart の Page.fromJson が非null
 		// List として cast するため、空でも null ではなく [] を返す (#1237)。
 		"variables":     jsonArrayOrEmpty(p.Variables),
