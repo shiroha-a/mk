@@ -118,11 +118,12 @@ type UserDetailed struct {
 	Notify                         *string `json:"notify,omitempty"`
 	WithReplies                    *bool   `json:"withReplies,omitempty"`
 	// Memo は viewer 自身が target に付けたメモ。golden UserDetailedNotMeOnly は
-	// `memo: string | null` (必須・null 許容) なので、上の relation bool 群と違い
-	// omitempty を付けず未設定時は null を出す。#1228 の null-cast crash は非 null
-	// bool (`isFollowing as bool`) の話で、nullable string の memo には当てはまらない。
-	// self-view (MeDetailed) では golden に memo が無いが、extra な memo:null は
-	// クライアントが無視するので無害。
+	// `memo: string | null` (必須・null 許容)。MeDetailed も合成型
+	// `UserLite & UserDetailedNotMeOnly & MeDetailedOnly` で memo を含むため、
+	// not-me / self どちらの view でも memo は present 必須。よって上の relation
+	// bool 群 (golden optional) と違い omitempty を付けず、未設定時は null を出す。
+	// #1228 の null-cast crash は非 null bool (`isFollowing as bool`) の話で、
+	// nullable string の memo には当てはまらない。
 	Memo *string `json:"memo"`
 }
 
