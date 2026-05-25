@@ -195,18 +195,30 @@ func TestAnnouncementShapeL2(t *testing.T) {
 	}
 
 	idGen, _ := id.NewGenerator("aidx")
-	a := &model.Announcement{
-		ID:      idGen.Generate(time.Now()),
-		Title:   "maintenance",
-		Text:    "we will be down",
-		Icon:    "info",
-		Display: "normal",
+	img := "https://example.com/a.png"
+	updated := time.Date(2026, 5, 26, 1, 0, 0, 0, time.UTC)
+	uid := "u_author"
+	cases := map[string]*model.Announcement{
+		// nullable 欄 (imageUrl/updatedAt) 未設定 -> null path。
+		"minimal": {
+			ID: idGen.Generate(time.Now()), Title: "maintenance", Text: "down",
+			Icon: "info", Display: "normal",
+		},
+		// nullable 欄に値あり -> 非null string pass-through path (scalarMismatch を
+		// 実際に効かせる) + forYou=true (UserID 設定)。
+		"populated": {
+			ID: idGen.Generate(time.Now()), Title: "t", Text: "x", Icon: "info",
+			Display: "banner", ImageURL: &img, UpdatedAt: &updated, UserID: &uid,
+			NeedConfirmationToRead: true, Silence: true,
+		},
 	}
-	out := entity.PackAnnouncement(a, idGen, false)
 
-	for _, f := range ValidateValue("Announcement", "Announcement", "Announcement", out, schema) {
-		if f.Sev == SevHigh || f.Sev == SevMed {
-			t.Errorf("Announcement shape drift: %s [%s]: %s", f.Field, f.Kind, f.Detail)
+	for name, a := range cases {
+		out := entity.PackAnnouncement(a, idGen, true)
+		for _, f := range ValidateValue("Announcement", "Announcement", "Announcement", out, schema) {
+			if f.Sev == SevHigh || f.Sev == SevMed {
+				t.Errorf("[%s] Announcement shape drift: %s [%s]: %s", name, f.Field, f.Kind, f.Detail)
+			}
 		}
 	}
 }
