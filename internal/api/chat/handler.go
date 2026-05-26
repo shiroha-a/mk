@@ -558,7 +558,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	if err != nil {
 		return h.mapChatErr(c, err)
 	}
-	return c.JSON(http.StatusOK, h.packMessageDetailed(h.reloadIfFilePending(msg), user.ID))
+	return c.JSON(http.StatusOK, h.packMessageDetailed(withSender(h.reloadIfFilePending(msg), user), user.ID))
 }
 
 // messagesCreateLegacy preserves pre-Phase-9.8 behaviour for callers that
@@ -573,7 +573,19 @@ func (h *Handler) messagesCreateLegacy(c echo.Context, user *model.User, text, t
 	if err := h.repo.CreateMessage(msg); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, h.packMessageDetailed(h.reloadIfFilePending(msg), user.ID))
+	return c.JSON(http.StatusOK, h.packMessageDetailed(withSender(h.reloadIfFilePending(msg), user), user.ID))
+}
+
+// withSender attaches the authenticated sender as FromUser when the row has
+// no eager-loaded relation, so create responses include the golden-required
+// `fromUser` (UserLite). 作成直後の message は CreateMessage が FromUser を
+// Preload しないため fromUser が欠落していた (#1288。ChatRoom owner #1285 と
+// 同種の embed 漏れ)。reload で DB から FromUser が載った場合は上書きしない。
+func withSender(m *model.ChatMessage, sender *model.User) *model.ChatMessage {
+	if m != nil && m.FromUser == nil {
+		m.FromUser = sender
+	}
+	return m
 }
 
 // reloadIfFilePending re-fetches the message via FindMessageByID (which

@@ -299,6 +299,73 @@
       "type": "number"
     }
   },
+  "ChatMessage": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "file": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "fileId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "fromUser": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "fromUserId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isRead": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "reactions": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "text": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "toRoom": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "toRoomId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "toUser": {
+      "nullable": true,
+      "optional": true,
+      "type": "object"
+    },
+    "toUserId": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    }
+  },
   "ChatRoom": {
     "createdAt": {
       "nullable": false,

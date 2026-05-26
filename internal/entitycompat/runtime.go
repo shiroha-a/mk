@@ -34,7 +34,7 @@ func L2FlatSchemaNames() []string {
 		"Flash", "InviteCode", "UserWebhook", "Channel",
 		"FederationInstance", "NoteReaction", "ChatRoom",
 		"Muting", "RenoteMuting", "Blocking", "RoleLite",
-		"EmojiSimple", "NoteFavorite",
+		"EmojiSimple", "NoteFavorite", "ChatMessage",
 	}
 }
 

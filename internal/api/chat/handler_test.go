@@ -281,6 +281,10 @@ func TestMessagesCreate_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, repo.Messages, 1)
 	_ = text
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "ChatMessage", resp) // L3 (#1288)
 }
 
 func TestMessagesCreate_Error(t *testing.T) {
