@@ -52,6 +52,7 @@ func (h *Handler) AbuseReportNotificationRecipientCreate(c echo.Context) error {
 		UserID:          req.UserID,
 		SystemWebhookID: req.SystemWebhookID,
 		IsActive:        *req.IsActive,
+		UpdatedAt:       time.Now(),
 	}
 	if err := h.recipientRepo.Create(r); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
@@ -191,6 +192,8 @@ func (h *Handler) AbuseReportNotificationRecipientUpdate(c echo.Context) error {
 	if req.SystemWebhookID != nil {
 		fields["systemWebhookId"] = *req.SystemWebhookID
 	}
+	// upstream は更新のたびに updatedAt を bump する (golden は updatedAt 必須)。
+	fields["updatedAt"] = time.Now()
 	// GORM Updates(map) は対象なしでも nil を返すため、ここでのエラーは DB 障害
 	// 等の真の失敗。NotFound は続く FindByID で検出する。
 	if err := h.recipientRepo.Update(req.ID, fields); err != nil {

@@ -77,12 +77,17 @@ func (SystemWebhook) TableName() string { return "system_webhook" }
 
 // AbuseReportNotificationRecipient represents a notification recipient for abuse reports.
 type AbuseReportNotificationRecipient struct {
-	ID              string  `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	IsActive        bool    `gorm:"column:isActive;default:true" json:"isActive"`
-	Name            string  `gorm:"column:name;type:varchar(255);not null" json:"name"`
-	Method          string  `gorm:"column:method;type:varchar(64);not null;default:'email'" json:"method"`
-	UserID          *string `gorm:"column:userId;type:varchar(32)" json:"userId"`
-	SystemWebhookID *string `gorm:"column:systemWebhookId;type:varchar(32)" json:"systemWebhookId"`
+	ID        string    `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	IsActive  bool      `gorm:"column:isActive;default:true" json:"isActive"`
+	UpdatedAt time.Time `gorm:"column:updatedAt;type:timestamp with time zone;default:now()" json:"updatedAt"`
+	Name      string    `gorm:"column:name;type:varchar(255);not null" json:"name"`
+	Method    string    `gorm:"column:method;type:varchar(64);not null;default:'email'" json:"method"`
+	// golden の userId? / systemWebhookId? は optional (非 null)。upstream packer は
+	// method に対応しない側を omit するため、nil ポインタは null ではなく省略する
+	// (omitempty)。method=email では userId のみ、webhook では systemWebhookId のみ
+	// が出る (#1294)。
+	UserID          *string `gorm:"column:userId;type:varchar(32)" json:"userId,omitempty"`
+	SystemWebhookID *string `gorm:"column:systemWebhookId;type:varchar(32)" json:"systemWebhookId,omitempty"`
 }
 
 func (AbuseReportNotificationRecipient) TableName() string {

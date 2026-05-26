@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,13 @@ func TestRecipientCreate_Success(t *testing.T) {
 	assert.Equal(t, "ops", got.Name)
 	assert.Equal(t, "email", got.Method)
 	assert.True(t, got.IsActive)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	shapetest.Assert(t, "AbuseReportNotificationRecipient", raw) // L3 (#1294)
+	// method=email では systemWebhookId は省略される (omitempty)。
+	_, hasSysWH := raw["systemWebhookId"]
+	assert.False(t, hasSysWH, "systemWebhookId must be omitted when method=email")
 }
 
 func TestRecipientCreate_MissingRequired(t *testing.T) {

@@ -1,4 +1,51 @@
 {
+  "AbuseReportNotificationRecipient": {
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isActive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "method": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "systemWebhook": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "systemWebhookId": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    }
+  },
   "Achievement": {
     "name": {
       "nullable": false,
