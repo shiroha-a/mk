@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -329,6 +330,7 @@ func TestQueueQueueStats_WithInspector(t *testing.T) {
 	assert.EqualValues(t, 3, counts["waiting"])
 	// scheduled(0) + retry(1) がdelayedに集約される。
 	assert.EqualValues(t, 1, counts["delayed"])
+	shapetest.Assert(t, "QueueCount", counts) // L3 (#1302)
 
 	// metrics shape: data 配列と count が driver から伝播。
 	metrics, ok := got["metrics"].(map[string]any)

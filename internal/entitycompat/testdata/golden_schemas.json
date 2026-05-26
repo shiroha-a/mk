@@ -1812,6 +1812,33 @@
       "elem": "other"
     }
   },
+  "QueueCount": {
+    "active": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "completed": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "delayed": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "failed": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "waiting": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    }
+  },
   "RenoteMuting": {
     "createdAt": {
       "nullable": false,
