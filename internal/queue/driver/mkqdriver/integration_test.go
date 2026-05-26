@@ -768,9 +768,18 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 	srv := d.Server()
 	var wg sync.WaitGroup
 	wg.Add(1)
+	// fail-once-then-succeed: 初回は SkipRetry で failed bucket に落とし、RunTask
+	// 後の再処理では成功させる。常に再失敗する handler だと RunTask が failed から
+	// 出した job が wait→active→再失敗で failed に戻り、「failed を出た瞬間」を
+	// 観測する後段の Eventually が CI 負荷下で毎 poll「まだ failed」と見えて flaky
+	// に timeout していた (#1290)。
+	var calls atomic.Int32
 	srv.Handle("ins:fail-then-retry", func(_ context.Context, _ driver.Task) error {
-		defer wg.Done()
-		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+		if calls.Add(1) == 1 {
+			wg.Done()
+			return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+		}
+		return nil
 	})
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Shutdown)
