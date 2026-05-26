@@ -1839,6 +1839,84 @@
       "type": "number"
     }
   },
+  "QueueJob": {
+    "attempts": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "data": {
+      "nullable": false,
+      "optional": false,
+      "type": "other"
+    },
+    "delay": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "failedReason": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "finishedOn": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isFailed": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "opts": {
+      "nullable": false,
+      "optional": false,
+      "type": "other"
+    },
+    "processedBy": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    },
+    "processedOn": {
+      "nullable": false,
+      "optional": true,
+      "type": "number"
+    },
+    "progress": {
+      "nullable": false,
+      "optional": false,
+      "type": "other"
+    },
+    "returnValue": {
+      "nullable": false,
+      "optional": false,
+      "type": "other"
+    },
+    "stacktrace": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "string"
+    },
+    "timestamp": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    }
+  },
   "RenoteMuting": {
     "createdAt": {
       "nullable": false,

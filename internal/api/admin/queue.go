@@ -570,24 +570,36 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		return nil
 	}
 	isFailed := t.LastErr != ""
+	// golden QueueJob.data は Record (object) 必須。空 payload を null で返すと
+	// frontend の job detail が型エラーになるため {} に coalesce する (#1304)。
+	data := rawJSONOrString(t.Payload)
+	if data == nil {
+		data = map[string]any{}
+	}
 	// asynqはBullと違いEnqueuedAtを保持しない (TaskInfoに該当field無し)。
 	// frontend の MkTl / MkTime は 0 を「たった今」として扱うので害はない。
 	pack := map[string]any{
 		// Bull 互換 field (frontend 必須)
-		"id":           t.ID,
-		"name":         t.Type,
-		"timestamp":    formatUnixMillisOrZero(t.NextProcessAt),
-		"processedAt":  formatUnixMillisOrZero(t.LastFailedAt),
-		"processedOn":  formatUnixMillisOrZero(t.LastFailedAt),
-		"finishedOn":   formatUnixMillisOrZero(t.CompletedAt),
-		"progress":     0,
+		"id":          t.ID,
+		"name":        t.Type,
+		"timestamp":   formatUnixMillisOrZero(t.NextProcessAt),
+		"processedAt": formatUnixMillisOrZero(t.LastFailedAt),
+		"processedOn": formatUnixMillisOrZero(t.LastFailedAt),
+		"finishedOn":  formatUnixMillisOrZero(t.CompletedAt),
+		// golden QueueJob は progress / returnValue を Record (object) 必須、
+		// failedReason を string 必須とする。Bull の job は failure 時のみ理由を
+		// 持つが、schema 上は常に present (無 failure 時は空文字) なので常に出す。
+		// progress / returnValue は asynq に相当概念が無いため空 object で埋める
+		// (旧実装は number 0 / null で golden と乖離していた、#1304)。
+		"progress":     map[string]any{},
 		"attempts":     t.Retried,
 		"attemptsMade": t.Retried,
 		"isFailed":     isFailed,
 		"delay":        0,
-		"returnValue":  nil,
+		"returnValue":  map[string]any{},
+		"failedReason": t.LastErr,
 		"stacktrace":   stacktraceFrom(t.LastErr),
-		"data":         rawJSONOrString(t.Payload),
+		"data":         data,
 		"opts": map[string]any{
 			"attempts": t.MaxRetry,
 			"delay":    0,
@@ -603,7 +615,6 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 	}
 	if t.LastErr != "" {
 		pack["lastErr"] = t.LastErr
-		pack["failedReason"] = t.LastErr
 	}
 	if !t.LastFailedAt.IsZero() {
 		pack["lastFailedAt"] = t.LastFailedAt.UTC().Format(time.RFC3339Nano)

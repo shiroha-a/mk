@@ -193,6 +193,13 @@ func TestQueueShowJob_Found(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "tid1", got["id"])
+	// golden QueueJob: progress/returnValue は object、failedReason は string で
+	// 常に present (#1304)。
+	shapetest.Assert(t, "QueueJob", got) // L3 (#1304)
+	assert.IsType(t, map[string]any{}, got["progress"])
+	assert.IsType(t, map[string]any{}, got["returnValue"])
+	_, hasFailedReason := got["failedReason"]
+	assert.True(t, hasFailedReason, "failedReason must always be present (golden required)")
 }
 
 func TestQueueShowJob_NotFoundWithInspector(t *testing.T) {
