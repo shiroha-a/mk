@@ -761,6 +761,80 @@
       "type": "string"
     }
   },
+  "EmojiDetailedAdmin": {
+    "aliases": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "string"
+    },
+    "category": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "host": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "license": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "localOnly": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "originalUrl": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "publicUrl": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "roleIdsThatCanBeUsedThisEmojiAsReaction": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "object"
+    },
+    "type": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "uri": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "EmojiSimple": {
     "aliases": {
       "nullable": false,

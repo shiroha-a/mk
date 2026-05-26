@@ -1933,7 +1933,7 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 	}
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusOK, emojiListV2Response{
-			Emojis:   []*model.Emoji{},
+			Emojis:   []map[string]any{},
 			Count:    0,
 			AllCount: 0,
 			AllPages: 0,
@@ -1993,9 +1993,15 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		allPages = int((allCount + int64(limit) - 1) / int64(limit))
 	}
 
+	roleNames := h.emojiRoleNameMap()
+	packed := make([]map[string]any, 0, len(emojis))
+	for _, e := range emojis {
+		packed = append(packed, packEmojiDetailedAdmin(e, roleNames))
+	}
+
 	return c.JSON(http.StatusOK, emojiListV2Response{
-		Emojis:   emojis,
-		Count:    len(emojis),
+		Emojis:   packed,
+		Count:    len(packed),
 		AllCount: allCount,
 		AllPages: allPages,
 	})
@@ -2024,10 +2030,64 @@ type emojiV2QueryReq struct {
 }
 
 type emojiListV2Response struct {
-	Emojis   []*model.Emoji `json:"emojis"`
-	Count    int            `json:"count"`
-	AllCount int64          `json:"allCount"`
-	AllPages int            `json:"allPages"`
+	Emojis   []map[string]any `json:"emojis"`
+	Count    int              `json:"count"`
+	AllCount int64            `json:"allCount"`
+	AllPages int              `json:"allPages"`
+}
+
+// emojiRoleNameMap resolves all role ids to their names once, so the v2 emoji
+// packer can embed {id, name} for roleIdsThatCanBeUsedThisEmojiAsReaction
+// without an N+1 lookup per emoji (#1300)。roleService 未配線 / 取得失敗時は
+// 空 map を返し、未知 role 同様 roleIds から省かれる。
+func (h *Handler) emojiRoleNameMap() map[string]string {
+	out := map[string]string{}
+	if h.roleService == nil {
+		return out
+	}
+	roles, err := h.roleService.List()
+	if err != nil {
+		return out
+	}
+	for _, r := range roles {
+		out[r.ID] = r.Name
+	}
+	return out
+}
+
+// packEmojiDetailedAdmin builds the golden EmojiDetailedAdmin shape for the v2
+// admin emoji list. upstream packDetailedAdmin と同じく roleIds を {id, name}
+// に解決する (golden は object array、生の string[] ではない)。未知 role は
+// 省く (#1300)。scalar field は model.Emoji の json tag と一致する。
+func packEmojiDetailedAdmin(e *model.Emoji, roleNames map[string]string) map[string]any {
+	roles := make([]map[string]any, 0, len(e.RoleIDsThatCanBeUsedThisEmojiAsReaction))
+	for _, rid := range e.RoleIDsThatCanBeUsedThisEmojiAsReaction {
+		if name, ok := roleNames[rid]; ok {
+			roles = append(roles, map[string]any{"id": rid, "name": name})
+		}
+	}
+	// golden aliases は string[] 必須 (non-null)。nil pq.StringArray は null に
+	// なるため [] へ coalesce する。
+	aliases := []string(e.Aliases)
+	if aliases == nil {
+		aliases = []string{}
+	}
+	return map[string]any{
+		"id":          e.ID,
+		"updatedAt":   e.UpdatedAt,
+		"name":        e.Name,
+		"host":        e.Host,
+		"publicUrl":   e.PublicURL,
+		"originalUrl": e.OriginalURL,
+		"uri":         e.URI,
+		"type":        e.Type,
+		"aliases":     aliases,
+		"category":    e.Category,
+		"license":     e.License,
+		"localOnly":   e.LocalOnly,
+		"isSensitive": e.IsSensitive,
+		"roleIdsThatCanBeUsedThisEmojiAsReaction": roles,
+	}
 }
 
 // --- Abuse Report endpoints ---

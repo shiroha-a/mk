@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -664,6 +666,40 @@ func TestEmojiListV2_Basic(t *testing.T) {
 		_, hasPublicURL := em["publicUrl"]
 		assert.True(t, hasPublicURL, "v2 emoji should have publicUrl field")
 	}
+}
+
+// TestEmojiListV2_RoleObjectsAndShape は v2/admin/emoji/list の
+// roleIdsThatCanBeUsedThisEmojiAsReaction が golden EmojiDetailedAdmin と同じ
+// {id, name} object 配列で返ること、未知 role が省かれることを検証する。
+// #1300 (gate の array element shape 検出 #1298 に依存)。
+func TestEmojiListV2_RoleObjectsAndShape(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	require.NoError(t, roleRepo.Create(&model.Role{ID: "role1", Name: "Cool"}))
+	repo := testutil.NewMockEmojiRepository()
+	require.NoError(t, repo.Create(&model.Emoji{
+		ID: "e1", Name: "smile",
+		PublicURL: "https://example.com/s.png", OriginalURL: "https://example.com/s-orig.png",
+		Aliases:                                 pq.StringArray{"happy"},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"role1", "ghost"},
+	}))
+	h.SetEmojiRepo(repo)
+
+	rec := doPost(h.EmojiListV2, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	emojis := resp["emojis"].([]any)
+	require.Len(t, emojis, 1)
+	em := emojis[0].(map[string]any)
+
+	// roleIds は {id, name} の object 配列。未知 role "ghost" は省かれる。
+	roles := em["roleIdsThatCanBeUsedThisEmojiAsReaction"].([]any)
+	require.Len(t, roles, 1)
+	r0 := roles[0].(map[string]any)
+	assert.Equal(t, "role1", r0["id"])
+	assert.Equal(t, "Cool", r0["name"])
+
+	shapetest.Assert(t, "EmojiDetailedAdmin", em) // L3 (#1300)
 }
 
 func TestEmojiListV2_NilRepo(t *testing.T) {
