@@ -155,6 +155,10 @@ func TestShow_Success(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "Antenna", resp) // L3 (#1318)
 }
 
 func TestShow_BadJSON(t *testing.T) {
@@ -322,6 +326,11 @@ func TestList_Success(t *testing.T) {
 	require.NoError(t, h.List(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alpha")
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	shapetest.Assert(t, "Antenna", resp[0]) // L3 (#1318)
 }
 
 // listFailRepo causes ListByUser to fail.

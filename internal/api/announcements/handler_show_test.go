@@ -1,11 +1,14 @@
 package announcements_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Show エンドポイントの 3 経路 (bad param / not found / ok) をカバーする。
@@ -27,6 +30,10 @@ func TestShow_Success(t *testing.T) {
 	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "hi", Text: "hello", IsActive: true}
 	rec := doPost(h.Show, `{"announcementId":"a1"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "Announcement", resp) // L3 (#1318)
 }
 
 // upstream Misskey TS 2026.5.4 fix: userId-targeted announcement に対して

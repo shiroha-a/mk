@@ -2,6 +2,7 @@
 package antennas
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -319,14 +320,17 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 		users = []string{}
 	}
 	return map[string]any{
-		"id":              a.ID,
-		"createdAt":       createdAt,
-		"name":            a.Name,
-		"src":             a.Src,
-		"userListId":      a.UserListID,
-		"users":           users,
-		"keywords":        a.Keywords,
-		"excludeKeywords": a.ExcludeKeywords,
+		"id":         a.ID,
+		"createdAt":  createdAt,
+		"name":       a.Name,
+		"src":        a.Src,
+		"userListId": a.UserListID,
+		"users":      users,
+		// keywords / excludeKeywords は jsonb (datatypes.JSON)。未設定 antenna は
+		// nil で JSON null になるが golden Antenna は string[][] 必須なので [] へ
+		// coalesce する (#1318。users #1270 と同種の null-array drift)。
+		"keywords":        jsonArrayOrEmpty(a.Keywords),
+		"excludeKeywords": jsonArrayOrEmpty(a.ExcludeKeywords),
 		"caseSensitive":   a.CaseSensitive,
 		"excludeBots":     a.ExcludeBots,
 		"withReplies":     a.WithReplies,
@@ -340,6 +344,16 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 		"excludeNotesInSensitiveChannel": a.ExcludeNotesInSensitiveChannel,
 		"notify":                         false,
 	}
+}
+
+// jsonArrayOrEmpty coalesces a nil/empty jsonb column to a non-null empty
+// array so the JSON encoder emits `[]` instead of `null`。非空なら格納済みの
+// 生 JSON をそのまま返す (#1318)。
+func jsonArrayOrEmpty(b []byte) any {
+	if len(b) == 0 {
+		return []any{}
+	}
+	return json.RawMessage(b)
 }
 
 func notFound(c echo.Context) error {
