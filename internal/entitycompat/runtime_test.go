@@ -98,6 +98,50 @@ func TestValidateValue(t *testing.T) {
 	}
 }
 
+// TestValidateValue_ArrayElem covers the Layer 2 array element-type check
+// (#1298): string[] vs object[] etc. that the coarse "array" Type alone cannot
+// distinguish.
+func TestValidateValue_ArrayElem(t *testing.T) {
+	schema := Schema{
+		"roles":   {Type: "array", Elem: "object"}, // golden {id,name}[]
+		"tags":    {Type: "array", Elem: "string"}, // golden string[]
+		"raw":     {Type: "array", Elem: "object"}, // raw JSON column (json.RawMessage)
+		"refs":    {Type: "array", Elem: "other"},  // unclassifiable element -> skipped
+		"emptied": {Type: "array", Elem: "object"}, // empty -> cannot determine -> skipped
+	}
+	actual := map[string]any{
+		// VIOLATION: golden wants object elements but runtime is string[].
+		"roles": []any{"role1", "role2"},
+		// OK: string elements match.
+		"tags": []any{"a", "b"},
+		// OK: raw JSON decoded to object elements.
+		"raw": json.RawMessage(`[{"id":"r1","name":"n1"}]`),
+		// skipped: golden elem "other".
+		"refs": []any{"whatever"},
+		// skipped: empty array.
+		"emptied": []any{},
+	}
+	got := map[string]Severity{}
+	for _, f := range ValidateValue("F", "L", "G", actual, schema) {
+		got[f.Field+"/"+f.Kind] = f.Sev
+	}
+	if got["roles/elem"] != SevMed {
+		t.Error("expected roles element mismatch (string vs object) MED")
+	}
+	if _, ok := got["tags/elem"]; ok {
+		t.Error("matching string[] must not be flagged")
+	}
+	if _, ok := got["raw/elem"]; ok {
+		t.Error("raw JSON object[] must decode and match (no finding)")
+	}
+	if _, ok := got["refs/elem"]; ok {
+		t.Error("golden elem 'other' must be skipped")
+	}
+	if _, ok := got["emptied/elem"]; ok {
+		t.Error("empty array must be skipped (element type undeterminable)")
+	}
+}
+
 func TestValidateUnionValue(t *testing.T) {
 	variants := map[string]Schema{
 		"a": {"id": {Type: "string"}, "type": {Type: "string"}},

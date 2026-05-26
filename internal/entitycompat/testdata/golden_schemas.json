@@ -196,7 +196,8 @@
     "excludeKeywords": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "array"
     },
     "excludeNotesInSensitiveChannel": {
       "nullable": false,
@@ -221,7 +222,8 @@
     "keywords": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "array"
     },
     "localOnly": {
       "nullable": false,
@@ -251,7 +253,8 @@
     "users": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "withFile": {
       "nullable": false,
@@ -288,7 +291,8 @@
     "permission": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "secret": {
       "nullable": false,
@@ -397,12 +401,14 @@
     "pinnedNoteIds": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "pinnedNotes": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "userId": {
       "nullable": true,
@@ -454,7 +460,8 @@
     "reactions": {
       "nullable": false,
       "optional": false,
-      "type": "object"
+      "type": "array",
+      "elem": "object"
     },
     "text": {
       "nullable": true,
@@ -704,7 +711,8 @@
     "aliases": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "category": {
       "nullable": true,
@@ -744,7 +752,8 @@
     "roleIdsThatCanBeUsedThisEmojiAsReaction": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "url": {
       "nullable": false,
@@ -756,7 +765,8 @@
     "aliases": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "category": {
       "nullable": true,
@@ -781,7 +791,8 @@
     "roleIdsThatCanBeUsedThisEmojiAsReaction": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "url": {
       "nullable": false,
@@ -1024,12 +1035,14 @@
     "fileIds": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "files": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "id": {
       "nullable": false,
@@ -1054,7 +1067,8 @@
     "tags": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "title": {
       "nullable": false,
@@ -1160,7 +1174,8 @@
     "achievements": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "alwaysMarkNsfw": {
       "nullable": false,
@@ -1200,7 +1215,8 @@
     "emailNotificationTypes": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "emailVerified": {
       "nullable": true,
@@ -1215,7 +1231,8 @@
     "hardMutedWords": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "array"
     },
     "hasPendingReceivedFollowRequest": {
       "nullable": false,
@@ -1295,12 +1312,14 @@
     "mutedInstances": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "mutedWords": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "array"
     },
     "noCrawle": {
       "nullable": false,
@@ -1335,7 +1354,8 @@
     "securityKeysList": {
       "nullable": false,
       "optional": true,
-      "type": "object"
+      "type": "array",
+      "elem": "object"
     },
     "twoFactorBackupCodesStock": {
       "nullable": false,
@@ -1350,7 +1370,8 @@
     "unreadAnnouncements": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "unreadNotificationsCount": {
       "nullable": false,
@@ -1429,12 +1450,14 @@
     "fileIds": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "files": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "hasPoll": {
       "nullable": false,
@@ -1459,7 +1482,8 @@
     "mentions": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "myReaction": {
       "nullable": true,
@@ -1479,7 +1503,8 @@
     "reactionAndUserPairCache": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "reactionCount": {
       "nullable": false,
@@ -1529,7 +1554,8 @@
     "tags": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "text": {
       "nullable": true,
@@ -1564,7 +1590,8 @@
     "visibleUserIds": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     }
   },
   "NoteFavorite": {
@@ -1620,12 +1647,14 @@
     "attachedFiles": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "content": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "createdAt": {
       "nullable": false,
@@ -1705,7 +1734,8 @@
     "variables": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "other"
     }
   },
   "RenoteMuting": {
@@ -1828,7 +1858,8 @@
     "on": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "secret": {
       "nullable": false,
@@ -1850,7 +1881,8 @@
     "alsoKnownAs": {
       "nullable": true,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "bannerBlurhash": {
       "nullable": true,
@@ -1890,7 +1922,8 @@
     "fields": {
       "nullable": false,
       "optional": false,
-      "type": "object"
+      "type": "array",
+      "elem": "object"
     },
     "followedMessage": {
       "nullable": true,
@@ -2015,12 +2048,14 @@
     "pinnedNoteIds": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "pinnedNotes": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "pinnedPage": {
       "nullable": true,
@@ -2040,7 +2075,8 @@
     "roles": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "object"
     },
     "securityKeys": {
       "nullable": false,
@@ -2075,7 +2111,8 @@
     "verifiedLinks": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "withReplies": {
       "nullable": false,
@@ -2107,7 +2144,8 @@
     "userIds": {
       "nullable": false,
       "optional": true,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     }
   },
   "UserLite": {
@@ -2119,7 +2157,8 @@
     "avatarDecorations": {
       "nullable": false,
       "optional": false,
-      "type": "object"
+      "type": "array",
+      "elem": "object"
     },
     "avatarUrl": {
       "nullable": false,
@@ -2129,7 +2168,8 @@
     "badgeRoles": {
       "nullable": true,
       "optional": true,
-      "type": "object"
+      "type": "array",
+      "elem": "object"
     },
     "emojis": {
       "nullable": false,
@@ -2221,7 +2261,8 @@
     "on": {
       "nullable": false,
       "optional": false,
-      "type": "array"
+      "type": "array",
+      "elem": "string"
     },
     "secret": {
       "nullable": false,

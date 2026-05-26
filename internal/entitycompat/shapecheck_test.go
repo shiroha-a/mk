@@ -62,6 +62,10 @@ func TestParseSchema(t *testing.T) {
 		"                inner: string;", // must NOT be captured as top-level
 		"            };",
 		"            kind: 'a' | 'b';",
+		"            roles: {", // multi-line object array -> Type=array, Elem=object
+		"                id: string;",
+		"                name: string;",
+		"            }[];",
 		"        };",
 		"        Other: {",
 		"            x: number;",
@@ -75,9 +79,10 @@ func TestParseSchema(t *testing.T) {
 		"id":     {Nullable: false, Optional: false, Type: "string"},
 		"name":   {Nullable: true, Optional: false, Type: "string"},
 		"count":  {Nullable: false, Optional: true, Type: "number"},
-		"tags":   {Nullable: false, Optional: false, Type: "array"},
+		"tags":   {Nullable: false, Optional: false, Type: "array", Elem: "string"},
 		"nested": {Nullable: false, Optional: false, Type: "object"},
 		"kind":   {Nullable: false, Optional: false, Type: "string"},
+		"roles":  {Nullable: false, Optional: false, Type: "array", Elem: "object"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseSchema mismatch:\n got=%+v\nwant=%+v", got, want)

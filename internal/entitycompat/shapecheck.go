@@ -26,6 +26,11 @@ type FieldShape struct {
 	Nullable bool   `json:"nullable"`
 	Optional bool   `json:"optional"`
 	Type     string `json:"type"`
+	// Elem is the element type of an array field ("string"/"number"/"boolean"/
+	// "object"/"array"/"other"). Empty for non-array fields. Lets the Layer 2
+	// validator distinguish e.g. string[] from {id,name}[] which the coarse
+	// "array" Type alone cannot (#1298)。
+	Elem string `json:"elem,omitempty"`
 }
 
 // Schema maps a JSON field name to its shape.
@@ -202,10 +207,18 @@ func parseSchema(lines []string, schemaName string) (Schema, bool) {
 		if !have {
 			return
 		}
+		// prop 行の coarseTS では多行 `{...}[]` を取りこぼす (m[3] が `{` で
+		// "object" 判定) ため、蓄積した field 全文 (buf) から array 判定と
+		// 要素型を再計算する。array でなければ既存の typ を維持する (#1298)。
+		fieldType, elem := typ, ""
+		if at, ae, ok := classifyArray(curName, buf.String()); ok {
+			fieldType, elem = at, ae
+		}
 		out[curName] = FieldShape{
 			Nullable: strings.Contains(buf.String(), "| null"),
 			Optional: optional,
-			Type:     typ,
+			Type:     fieldType,
+			Elem:     elem,
 		}
 		have = false
 		buf.Reset()
@@ -226,11 +239,15 @@ func parseSchema(lines []string, schemaName string) (Schema, bool) {
 				have = true
 			}
 		}
-		if have {
+		delta := strings.Count(ln, "{") - strings.Count(ln, "}")
+		// schema を閉じる行 (depth が 0 に戻る `};`) は最後の field の buf に
+		// 混入させない。混入すると多行 array の末尾 `[]` 判定が後続の `}` で
+		// 崩れて object と誤型付けされる (#1298)。
+		if have && depth+delta > 0 {
 			buf.WriteString(ln)
 			buf.WriteString("\n")
 		}
-		depth += strings.Count(ln, "{") - strings.Count(ln, "}")
+		depth += delta
 		if depth == 0 {
 			finalize()
 			return out, true
@@ -260,6 +277,52 @@ func coarseTS(rhs string) string {
 	case rhs == "number":
 		return "number"
 	case strings.Contains(rhs, "components['schemas']"):
+		return "object"
+	default:
+		return "other"
+	}
+}
+
+// classifyArray inspects a field's full (possibly multi-line) text and, when
+// the type is an array, returns ("array", <element type>, true). For non-array
+// fields it returns ("", "", false) so the caller keeps the prop-line coarseTS
+// result. Handles single-line `T[]` and multi-line `{ ... }[]` alike (#1298)。
+func classifyArray(name, raw string) (typ, elem string, ok bool) {
+	s := raw
+	// strip the leading `<name>?:` prefix.
+	if i := strings.Index(s, ":"); i >= 0 {
+		s = s[i+1:]
+	}
+	// 多行を 1 行に潰して末尾判定を安定させる。
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), ";"))
+	// 末尾の `| null` を剥がす (nullable は別途 buf で判定済)。
+	if strings.HasSuffix(s, "| null") {
+		s = strings.TrimSpace(strings.TrimSuffix(s, "| null"))
+	}
+	if !strings.HasSuffix(s, "[]") {
+		return "", "", false
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(s, "[]"))
+	return "array", elemKind(inner), true
+}
+
+// elemKind maps an array element type expression to a coarse element kind.
+func elemKind(inner string) string {
+	switch {
+	case inner == "string":
+		return "string"
+	case inner == "number":
+		return "number"
+	case inner == "boolean":
+		return "boolean"
+	case strings.HasSuffix(inner, "[]"):
+		return "array"
+	case strings.HasPrefix(inner, "{"):
+		return "object"
+	case strings.HasPrefix(inner, "'") || strings.Contains(inner, "' | '"):
+		return "string"
+	case strings.Contains(inner, "components['schemas']"):
 		return "object"
 	default:
 		return "other"

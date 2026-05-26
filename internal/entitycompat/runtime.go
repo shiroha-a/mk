@@ -1,6 +1,7 @@
 package entitycompat
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 )
@@ -164,6 +165,11 @@ func ValidateValue(family, layer, golden string, actual map[string]any, schema S
 		if at := jsonType(v); scalarMismatch(g.Type, at) {
 			findings = append(findings, mk(name, "type", SevMed,
 				"golden type "+g.Type+" but runtime value is "+at))
+		} else if g.Type == "array" && g.Elem != "" {
+			if et, ok := arrayElemType(v); ok && elemMismatch(g.Elem, et) {
+				findings = append(findings, mk(name, "elem", SevMed,
+					"golden array element "+g.Elem+" but runtime element is "+et))
+			}
 		}
 	}
 	for name := range actual {
@@ -219,6 +225,64 @@ func jsonType(v any) string {
 	default:
 		return "other"
 	}
+}
+
+// arrayElemType returns the JSON type bucket of the first element of a slice
+// value, so the validator can compare it against the golden array element
+// type. ok is false for non-slices or empty slices (= cannot determine the
+// element type, so the caller skips the check). #1298
+func arrayElemType(v any) (string, bool) {
+	// json.RawMessage / []byte は生 JSON。byte slice として走査すると先頭の
+	// '[' (= 91) を number 要素と誤読するため、一度 decode してから要素型を
+	// 見る (L2 fixture が packer map を直接渡す経路向け。L3 は json.Unmarshal
+	// 済なので []any として届く)。#1298
+	if raw, ok := asRawJSONArray(v); ok {
+		var arr []any
+		if json.Unmarshal(raw, &arr) != nil || len(arr) == 0 {
+			return "", false
+		}
+		return jsonType(arr[0]), true
+	}
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return "", false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return "", false
+	}
+	if rv.Len() == 0 {
+		return "", false
+	}
+	return jsonType(rv.Index(0).Interface()), true
+}
+
+// asRawJSONArray returns the underlying bytes when v is raw JSON (json.RawMessage
+// or []byte). The []byte case must exclude actual byte-slice payloads, but in
+// entity packers raw-JSON columns surface as json.RawMessage/datatypes.JSON
+// (both []byte) and represent serialized JSON, so treating them as raw JSON is
+// correct here.
+func asRawJSONArray(v any) ([]byte, bool) {
+	switch b := v.(type) {
+	case json.RawMessage:
+		return []byte(b), true
+	case []byte:
+		return b, true
+	}
+	return nil, false
+}
+
+// elemMismatch reports a clear array-element conflict. Only the concrete
+// buckets (string/number/boolean/object/array) are compared; "other" golden
+// elements (refs we cannot classify) are skipped to avoid false positives.
+func elemMismatch(goldenElem, actualElem string) bool {
+	switch goldenElem {
+	case "string", "number", "boolean", "object", "array":
+		return goldenElem != actualElem
+	}
+	return false
 }
 
 // scalarMismatch reports a clear scalar type conflict. Coarse buckets
