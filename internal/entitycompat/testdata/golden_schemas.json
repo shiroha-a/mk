@@ -1458,6 +1458,286 @@
       "type": "boolean"
     }
   },
+  "MetaLite": {
+    "ads": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "object"
+    },
+    "backgroundImageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "bannerUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "clientOptions": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "defaultDarkTheme": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "defaultLightTheme": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "disableRegistration": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "emailRequiredForSignup": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableEmail": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableHcaptcha": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableMcaptcha": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableRecaptcha": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableServiceWorker": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableTestcaptcha": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableTurnstile": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "enableUrlPreview": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "federation": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "feedbackUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "googleAnalyticsMeasurementId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "hcaptchaSiteKey": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "iconUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "impressumUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "infoImageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "inquiryUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "langs": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "string"
+    },
+    "logoImageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "maintainerEmail": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "maintainerName": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "mascotImageUrl": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "maxFileSize": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "maxNoteTextLength": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "mcaptchaInstanceUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "mcaptchaSiteKey": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "mediaProxy": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "notFoundImageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "noteSearchableScope": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "notesPerOneAd": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "policies": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "privacyPolicyUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "providesTarball": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "recaptchaSiteKey": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "repositoryUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "sentryForFrontend": {
+      "nullable": true,
+      "optional": false,
+      "type": "object"
+    },
+    "serverErrorImageUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "serverRules": {
+      "nullable": false,
+      "optional": false,
+      "type": "array",
+      "elem": "string"
+    },
+    "shortName": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "swPublickey": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "themeColor": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "tosUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "translatorAvailable": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "turnstileSiteKey": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "uri": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "version": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Muting": {
     "createdAt": {
       "nullable": false,

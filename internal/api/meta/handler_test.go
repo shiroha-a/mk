@@ -10,6 +10,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -62,6 +63,38 @@ func TestMeta(t *testing.T) {
 	features, ok := resp["features"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, features["miauth"])
+}
+
+// TestMeta_LiteShape は detail=false の応答が golden MetaLite 準拠であることを
+// 検証する。旧 omit は MetaLite 必須 field (policies/clientOptions/
+// sentryForFrontend/noteSearchableScope/providesTarball) を誤って lite から
+// 落とし、逆に MetaDetailedOnly (cacheRemoteFiles 等) を leak していた (#1306)。
+func TestMeta_LiteShape(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	name := "Test Instance"
+	metaRepo.Meta = &model.Meta{ID: "x", Name: &name}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/meta", strings.NewReader(`{"detail":false}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(req, rec)))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// MetaLite 必須 field が lite に含まれること。
+	for _, f := range []string{"policies", "clientOptions", "sentryForFrontend", "noteSearchableScope", "providesTarball"} {
+		_, ok := resp[f]
+		assert.Truef(t, ok, "lite must include MetaLite field %q", f)
+	}
+	// MetaDetailedOnly field が lite に leak しないこと。
+	for _, f := range []string{"features", "cacheRemoteFiles", "cacheRemoteSensitiveFiles", "requireSetup", "proxyAccountName"} {
+		_, ok := resp[f]
+		assert.Falsef(t, ok, "lite must omit MetaDetailedOnly field %q", f)
+	}
+	shapetest.Assert(t, "MetaLite", resp) // L3 (#1306)
 }
 
 func TestMeta_NoMeta(t *testing.T) {
@@ -361,11 +394,15 @@ func TestMeta_DetailFalse(t *testing.T) {
 	assert.Equal(t, "Instance", resp["name"])
 	assert.Equal(t, true, resp["enableHcaptcha"])
 	assert.Equal(t, config.MisskeyVersion, resp["version"])
-	// 省かれるフィールド
+	// MetaLite に属する field は lite でも含まれる (#1306 で修正: 旧 omit は
+	// これらを誤って省いていた)。
+	assert.NotNil(t, resp["policies"])
+	assert.NotNil(t, resp["clientOptions"])
+	assert.Equal(t, "global", resp["noteSearchableScope"])
+	// MetaDetailedOnly は lite から省かれる。
 	assert.Nil(t, resp["features"])
-	assert.Nil(t, resp["policies"])
-	assert.Nil(t, resp["clientOptions"])
-	assert.Nil(t, resp["noteSearchableScope"])
+	assert.Nil(t, resp["cacheRemoteFiles"])
+	assert.Nil(t, resp["requireSetup"])
 }
 
 // TestMeta_FeaturesTimelineFlags verifies that features.localTimeline and

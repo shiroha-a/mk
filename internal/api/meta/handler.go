@@ -69,7 +69,7 @@ func (h *Handler) Meta(c echo.Context) error {
 		"shortName":              m.ShortName,
 		"uri":                    h.config.URL,
 		"description":            m.Description,
-		"langs":                  m.Langs,
+		"langs":                  strArrayOrEmpty(m.Langs),
 		"disableRegistration":    m.DisableRegistration,
 		"emailRequiredForSignup": m.EmailRequiredForSignup,
 		"enableHcaptcha":         m.EnableHcaptcha,
@@ -86,7 +86,7 @@ func (h *Handler) Meta(c echo.Context) error {
 		"cacheRemoteFiles":       m.CacheRemoteFiles,
 		"enableServiceWorker":    m.EnableServiceWorker,
 		"swPublickey":            m.SwPublicKey,
-		"serverRules":            m.ServerRules,
+		"serverRules":            strArrayOrEmpty(m.ServerRules),
 		"maxNoteTextLength":      3000,
 
 		// フロントエンド互換性フィールド (Phase 4.5c)
@@ -150,19 +150,24 @@ func (h *Handler) Meta(c echo.Context) error {
 	// NoteSearchableScope 関数の doc 参照。
 	resp["noteSearchableScope"] = NoteSearchableScope(h.config.FulltextSearch, h.config.Meilisearch)
 
-	// detail=false: TS MetaLite互換。管理者/内部向けフィールド (features, policies,
-	// clientOptions, proxyAccountName, sentryForFrontend, noteSearchableScope,
-	// providesTarball, singleUserMode) を省く。登録/captcha/ads等は含める。
+	// detail=false: TS MetaLite 互換。omit には golden MetaLite に**無い** field
+	// (= MetaDetailedOnly / mk-go 内部 field) のみを入れる。golden MetaLite は
+	// policies / clientOptions / sentryForFrontend / noteSearchableScope /
+	// providesTarball を必須とし、Misskey の MetaEntityService.pack() (lite) も
+	// 返すため、lite から落とすと client が非 null cast で落ちる (#1306 で
+	// 旧 omit がこれらを誤って除外していたのを修正)。features / cacheRemoteFiles /
+	// cacheRemoteSensitiveFiles / requireSetup / proxyAccountName は
+	// MetaDetailedOnly なので lite から除外する。
 	if !detail {
 		omit := map[string]struct{}{
-			"features":            {},
-			"policies":            {},
-			"clientOptions":       {},
-			"proxyAccountName":    {},
-			"sentryForFrontend":   {},
-			"noteSearchableScope": {},
-			"providesTarball":     {},
-			"singleUserMode":      {},
+			"features":                  {},
+			"cacheRemoteFiles":          {},
+			"cacheRemoteSensitiveFiles": {},
+			"requireSetup":              {},
+			"proxyAccountName":          {},
+			// singleUserMode は golden の MetaLite/MetaDetailedOnly どちらにも無い
+			// mk-go 内部 field。lite では従来どおり省く。
+			"singleUserMode": {},
 		}
 		lite := make(map[string]any, len(resp))
 		for k, v := range resp {
@@ -182,6 +187,17 @@ func (h *Handler) Ping(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{
 		"pong": true,
 	})
+}
+
+// strArrayOrEmpty coalesces a nil string slice to a non-nil empty slice so the
+// JSON encoder emits `[]` instead of `null`. golden MetaLite の langs /
+// serverRules は string[] 必須 (non-null) で、空でも null だと client が
+// 非 null cast で落ちる (#1306。channels pinnedNoteIds #1283 と同種)。
+func strArrayOrEmpty(a []string) []string {
+	if a == nil {
+		return []string{}
+	}
+	return a
 }
 
 // mascotURL applies the legacy fallback for the mascot. Misskey フロントエンドは
