@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/search"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -77,6 +78,7 @@ func TestRenotes_OK(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
 	assert.Equal(t, "r1", resp[0]["id"])
+	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
 func TestRenotes_NotFound(t *testing.T) {
@@ -113,6 +115,7 @@ func TestReplies_OK(t *testing.T) {
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
 func TestReplies_NotFound(t *testing.T) {
@@ -137,6 +140,7 @@ func TestChildren_OK(t *testing.T) {
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 2)
+	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
 func TestChildren_LimitClamping(t *testing.T) {
@@ -159,6 +163,7 @@ func TestSearch_OK(t *testing.T) {
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
 func TestSearch_LimitClamping(t *testing.T) {
@@ -287,6 +292,7 @@ func TestConversation_OK(t *testing.T) {
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 	assert.Equal(t, "root", resp[0]["id"])
 }
 
