@@ -237,19 +237,26 @@ func (r *autoscaleRunner) tick(
 			continue
 		}
 
-		// maxWorkersGlobal の enforcement: scale-up なら現他 queue の合計
-		// と合わせて cap を超えないか check。super 過ぎるなら NoOp に降格。
+		// maxWorkersGlobal の enforcement: scale-up は「check + 予約 (workerCounts
+		// への反映)」を同一ロック区間で atomic に行い、Resize 前に slot を確保する。
+		// これで並行 ticker 間の TOCTOU race (check 通過後・Resize 前に他 queue が
+		// commit して合計が cap 超過) を防ぎ、in-process では cap を厳格に守る
+		// (#1290)。scale-down / cap 無しは超過し得ないので従来どおり反映のみ。
 		if action.Kind == autoscale.ActionScaleUp && globalCap != nil && *globalCap > 0 {
-			if r.globalSumWouldExceed(qname, action.TargetWorkers, *globalCap) {
+			if !r.reserveIfWithinCap(qname, action.TargetWorkers, *globalCap) {
 				continue
 			}
+		} else {
+			r.setWorkerCount(qname, action.TargetWorkers)
 		}
 
 		if err := drv.Resize(qname, action.TargetWorkers); err != nil {
 			slog.Warn("server: autoscale Resize failed", "queue", qname, "target", action.TargetWorkers, "err", err)
+			// 予約を rollback。以後の cap 計算が過大予約で scale-up を詰まらせ
+			// ないよう、Resize 前の値 (= driver の実 worker 数) に戻す。
+			r.setWorkerCount(qname, current)
 			continue
 		}
-		r.setWorkerCount(qname, action.TargetWorkers)
 
 		direction := "down"
 		if action.Kind == autoscale.ActionScaleUp {
@@ -271,20 +278,20 @@ func (r *autoscaleRunner) setWorkerCount(qname string, n int) {
 	r.mu.Unlock()
 }
 
-// globalSumWouldExceed returns true when committing `target` workers for
-// `qname` would push the sum across all auto-scaled queues over
-// `globalCap`.
+// reserveIfWithinCap atomically checks whether committing `target` workers
+// for `qname` keeps the sum across all auto-scaled queues within `globalCap`,
+// and — when it does — records the reservation in `workerCounts` before
+// returning true. The check and the reservation happen under a single lock
+// acquisition so two concurrent tickers cannot both pass the cap check on a
+// stale snapshot and then each commit a Resize (the prior TOCTOU race, #1290).
+// Returns false (caller skips the scale-up) when the cap would be exceeded.
 //
-// 注 (best-effort TOCTOU): check と subsequent Resize の間に他 ticker
-// goroutine が独自 Resize を commit すると、実 cluster 合計は cap を
-// 一時的に超え得る。worst case overshoot = O(N_queues × per-queue
-// scale-up step) = 典型 5 queue × N/4 step。operator は cap を slack
-// 込みで設定すること (ADR §3.5 multi-pod アドバイスと同様)。real
-// "strict cap" を要求する場合は cluster-wide coordinator (将来 issue)
-// が必要。
+// 注 (multi-pod): この reservation は単一プロセス内の ledger なので、複数 pod が
+// 同一 Redis に対して独立に autoscale する構成では合計が cap を超え得る。
+// strict な cluster-wide cap が必要なら別途 coordinator が要る (将来 issue)。
 //
 // 引数名は Go builtin `cap` を shadow しないよう globalCap を使う。
-func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, globalCap int) bool {
+func (r *autoscaleRunner) reserveIfWithinCap(qname string, target, globalCap int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sum := target
@@ -294,7 +301,11 @@ func (r *autoscaleRunner) globalSumWouldExceed(qname string, target, globalCap i
 		}
 		sum += c
 	}
-	return sum > globalCap
+	if sum > globalCap {
+		return false
+	}
+	r.workerCounts[qname] = target
+	return true
 }
 
 // autoScaledQueues returns the queue names that should be controller-
