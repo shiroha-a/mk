@@ -700,6 +700,9 @@ func TestSearch_Success(t *testing.T) {
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Len(t, out, 1)
+	// users/search は PackUserDetailed (UserLite & UserDetailedNotMeOnly) の配列。
+	shapetest.Assert(t, "UserLite", out[0])              // L3 (#1314)
+	shapetest.Assert(t, "UserDetailedNotMeOnly", out[0]) // L3 (#1314)
 }
 
 // users/search bulk path is now batch (#517). Per-row FindProfileByUserID

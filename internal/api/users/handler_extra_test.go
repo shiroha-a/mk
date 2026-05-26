@@ -14,6 +14,7 @@ import (
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -394,6 +395,11 @@ func TestSearchByUsernameAndHost_Success(t *testing.T) {
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
 	rec := postExtra(h.SearchByUsernameAndHost, `{"username":"alice"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	shapetest.Assert(t, "UserLite", out[0]) // L3 (#1314)
 }
 
 func TestSearchByUsernameAndHost_InvalidParam(t *testing.T) {

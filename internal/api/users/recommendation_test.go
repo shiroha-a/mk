@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,11 @@ func TestUsersBulk_Success(t *testing.T) {
 	rec := postStub(h.UsersBulk, `{"userIds":["u1"]}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alice")
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	shapetest.Assert(t, "UserLite", out[0]) // L3 (#1314)
 }
 
 func TestUsersBulk_Empty(t *testing.T) {
