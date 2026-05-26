@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -92,6 +93,9 @@ func TestShow_ByUserID(t *testing.T) {
 	assert.Equal(t, "user1", resp["id"])
 	assert.Equal(t, "testuser", resp["username"])
 	assert.Equal(t, "Test User", resp["name"])
+	// L3 (#1270): users/show の実レスポンスを golden User-family schema に突合する。
+	shapetest.Assert(t, "UserLite", resp)
+	shapetest.Assert(t, "UserDetailedNotMeOnly", resp)
 }
 
 // stubChartHook captures users handler chart fires.

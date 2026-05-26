@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -179,6 +180,8 @@ func TestShow_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "note1", resp["id"])
 	assert.Equal(t, "existing note", resp["text"])
+	// L3 (#1270): notes/show の実レスポンスを golden Note に突合する。
+	shapetest.Assert(t, "Note", resp)
 }
 
 func TestShow_AttachmentEmbedsFolderAndUser(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -101,6 +102,8 @@ func TestFilesCreate_AllFormFields(t *testing.T) {
 	// userId / user は null を返す (#812)。
 	assert.Nil(t, resp["userId"])
 	assert.Nil(t, resp["user"])
+	// L3 (#1270): drive/files/create の実レスポンスを golden DriveFile に突合する。
+	shapetest.Assert(t, "DriveFile", resp)
 }
 
 // TestFilesCreate_RecordsRequestIPAndHeaders guards #1148 root cause:
