@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -113,6 +114,10 @@ func TestAdList_Paginated(t *testing.T) {
 	assert.Len(t, rows, 3)
 	// id DESC
 	assert.Equal(t, "a04", rows[0].ID)
+
+	var rawRows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawRows))
+	shapetest.Assert(t, "Ad", rawRows[0]) // L3 (#1292)
 }
 
 func TestAdUpdate_PartialFields(t *testing.T) {

@@ -1,4 +1,61 @@
 {
+  "Ad": {
+    "dayOfWeek": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "expiresAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "imageUrl": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "memo": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "place": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "priority": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "ratio": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "startsAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Announcement": {
     "createdAt": {
       "nullable": false,
