@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -31,6 +32,10 @@ func TestSystemWebhookCreate_Success(t *testing.T) {
 	assert.Equal(t, "https://example.com/hook", got.URL)
 	assert.True(t, got.IsActive)
 	assert.Contains(t, repo.Webhooks, got.ID)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	shapetest.Assert(t, "SystemWebhook", raw) // L3 (#1294)
 }
 
 func TestSystemWebhookCreate_MissingFields(t *testing.T) {

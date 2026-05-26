@@ -1,11 +1,14 @@
 package users
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
 
@@ -19,6 +22,11 @@ func TestAchievements_Success(t *testing.T) {
 	rec := postStub(h.Achievements, `{"userId":"u1"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "notes1")
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	shapetest.Assert(t, "Achievement", resp[0]) // L3 (#1294)
 }
 
 func TestAchievements_NoProfile(t *testing.T) {

@@ -1,4 +1,16 @@
 {
+  "Achievement": {
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "unlockedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    }
+  },
   "Ad": {
     "dayOfWeek": {
       "nullable": false,
@@ -1738,6 +1750,53 @@
       "nullable": false,
       "optional": false,
       "type": "boolean"
+    }
+  },
+  "SystemWebhook": {
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isActive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "latestSentAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "latestStatus": {
+      "nullable": true,
+      "optional": false,
+      "type": "number"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "on": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "secret": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
     }
   },
   "UserDetailedNotMeOnly": {
