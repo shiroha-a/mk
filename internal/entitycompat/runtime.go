@@ -38,6 +38,7 @@ func L2FlatSchemaNames() []string {
 		"EmojiSimple", "NoteFavorite", "ChatMessage", "Ad",
 		"SystemWebhook", "Achievement", "AbuseReportNotificationRecipient",
 		"EmojiDetailedAdmin", "QueueCount", "QueueJob", "MetaLite",
+		"MetaDetailedOnly",
 	}
 }
 

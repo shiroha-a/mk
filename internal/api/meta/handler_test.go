@@ -63,6 +63,11 @@ func TestMeta(t *testing.T) {
 	features, ok := resp["features"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, features["miauth"])
+
+	// detail 応答は MetaLite ∪ MetaDetailedOnly (= MetaDetailed) の superset。
+	// 両 schema で検証して detail 契約全体を gate する (#1308)。
+	shapetest.Assert(t, "MetaLite", resp)         // L3 (#1306)
+	shapetest.Assert(t, "MetaDetailedOnly", resp) // L3 (#1308)
 }
 
 // TestMeta_LiteShape は detail=false の応答が golden MetaLite 準拠であることを

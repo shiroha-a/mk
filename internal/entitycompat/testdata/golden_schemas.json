@@ -1458,6 +1458,33 @@
       "type": "boolean"
     }
   },
+  "MetaDetailedOnly": {
+    "cacheRemoteFiles": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "cacheRemoteSensitiveFiles": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "features": {
+      "nullable": false,
+      "optional": true,
+      "type": "object"
+    },
+    "proxyAccountName": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "requireSetup": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    }
+  },
   "MetaLite": {
     "ads": {
       "nullable": false,
