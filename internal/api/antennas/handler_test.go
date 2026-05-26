@@ -16,6 +16,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -98,6 +99,9 @@ func TestCreate_NoUserIdInResponse(t *testing.T) {
 	hasUnread, ok := body["hasUnreadNote"].(bool)
 	assert.True(t, ok, "hasUnreadNote must be a non-null bool")
 	assert.False(t, hasUnread)
+	// L3 (#1270): antennas/create の実レスポンスを golden Antenna に突合する
+	// (上の #1244 手動チェックを gate 化して全 field をカバー)。
+	shapetest.Assert(t, "Antenna", body)
 }
 
 func TestCreate_BadJSON(t *testing.T) {

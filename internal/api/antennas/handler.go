@@ -312,13 +312,19 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 			createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
 	}
+	// users は pq.StringArray (nil なら null になる) を golden の非null array に
+	// 合わせて [] へ coalesce する (#1270 L3 検出)。
+	users := []string(a.Users)
+	if users == nil {
+		users = []string{}
+	}
 	return map[string]any{
 		"id":              a.ID,
 		"createdAt":       createdAt,
 		"name":            a.Name,
 		"src":             a.Src,
 		"userListId":      a.UserListID,
-		"users":           a.Users,
+		"users":           users,
 		"keywords":        a.Keywords,
 		"excludeKeywords": a.ExcludeKeywords,
 		"caseSensitive":   a.CaseSensitive,
@@ -328,6 +334,11 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 		"localOnly":       a.LocalOnly,
 		"isActive":        a.IsActive,
 		"hasUnreadNote":   false,
+		// excludeNotesInSensitiveChannel は model にあるので反映。notify は
+		// golden で必須 (boolean) だが mk-go は antenna notify を未実装なので
+		// false 固定で shape だけ満たす (#1270 L3 検出)。
+		"excludeNotesInSensitiveChannel": a.ExcludeNotesInSensitiveChannel,
+		"notify":                         false,
 	}
 }
 

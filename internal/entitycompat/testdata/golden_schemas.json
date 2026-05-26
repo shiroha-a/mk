@@ -61,6 +61,93 @@
       "type": "string"
     }
   },
+  "Antenna": {
+    "caseSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "excludeBots": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "excludeKeywords": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "excludeNotesInSensitiveChannel": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "hasUnreadNote": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isActive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "keywords": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "localOnly": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "notify": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "src": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "userListId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "users": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "withFile": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "withReplies": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    }
+  },
   "Clip": {
     "createdAt": {
       "nullable": false,
