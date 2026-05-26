@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -61,6 +62,7 @@ func TestCreate_NoPolicyProviderSucceeds(t *testing.T) {
 	assert.Nil(t, resp["expiresAt"])
 	assert.Equal(t, false, resp["used"])
 	assert.NotEmpty(t, resp["createdAt"])
+	shapetest.Assert(t, "InviteCode", resp) // L3 (#1270)
 }
 
 func TestCreate_LimitExceeded(t *testing.T) {

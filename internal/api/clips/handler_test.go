@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -298,6 +299,7 @@ func TestList_FullShape(t *testing.T) {
 	user, ok := cl["user"].(map[string]any)
 	require.True(t, ok, "user must be a non-null object")
 	assert.Equal(t, "alice", user["id"])
+	shapetest.Assert(t, "Clip", cl) // L3 (#1270)
 }
 
 func TestList_BadJSON(t *testing.T) {

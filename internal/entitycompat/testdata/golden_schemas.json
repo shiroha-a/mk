@@ -408,6 +408,63 @@
       "type": "string"
     }
   },
+  "Flash": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isLiked": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "likedCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "script": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "summary": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "title": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "visibility": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Following": {
     "createdAt": {
       "nullable": false,
@@ -542,6 +599,48 @@
       "nullable": false,
       "optional": false,
       "type": "string"
+    }
+  },
+  "InviteCode": {
+    "code": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "createdBy": {
+      "nullable": true,
+      "optional": false,
+      "type": "object"
+    },
+    "expiresAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "used": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "usedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "usedBy": {
+      "nullable": true,
+      "optional": false,
+      "type": "object"
     }
   },
   "MeDetailedOnly": {
@@ -1393,6 +1492,53 @@
       "type": "boolean"
     },
     "username": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "UserWebhook": {
+    "active": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "latestSentAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "latestStatus": {
+      "nullable": true,
+      "optional": false,
+      "type": "number"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "on": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "secret": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "userId": {
       "nullable": false,
       "optional": false,
       "type": "string"

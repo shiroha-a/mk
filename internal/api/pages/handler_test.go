@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	corepage "github.com/shiroha-a/mk/internal/core/page"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -132,14 +133,18 @@ func TestShow_ByName(t *testing.T) {
 // owner が attach され、viewer logged-in 時は isLiked field も含まれる。
 func TestShow_IncludesUserAndIsLiked(t *testing.T) {
 	h, repo, likeRepo := newHandler(t)
-	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
-	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "bob", PageID: "p1"}))
+	// L3 (#1270): golden Page は createdAt を必須とするため、実ハンドラと同じく
+	// aidx 由来の ID を使って ParseTime 経由の createdAt 付与を成立させる。
+	idGen, _ := id.NewGenerator("aidx")
+	pageID := idGen.Generate(time.Now())
+	repo.Pages[pageID] = &model.Page{ID: pageID, UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "bob", PageID: pageID}))
 	h.SetUserSource(&stubUserSource{
 		bundle: &coreuser.UserWithProfile{
 			User: &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"},
 		},
 	})
-	c, rec := newReq(t, `{"pageId":"p1"}`)
+	c, rec := newReq(t, `{"pageId":"`+pageID+`"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Show(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -149,6 +154,7 @@ func TestShow_IncludesUserAndIsLiked(t *testing.T) {
 	require.True(t, ok, "show response must include user field (#1134)")
 	assert.Equal(t, "alice", user["username"])
 	assert.Equal(t, true, row["isLiked"], "isLiked must reflect viewer's like state (#1134)")
+	shapetest.Assert(t, "Page", row) // L3 (#1270)
 }
 
 func TestShow_ByUsername(t *testing.T) {

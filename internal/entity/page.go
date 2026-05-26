@@ -40,9 +40,11 @@ func PackPage(p *model.Page, idGens ...id.Generator) map[string]any {
 		// 画像が無い / lookup miss でも null を出す (omit しない)。実画像は
 		// PackPageWithContext が ctx.EyeCatchingImage で上書きする。
 		"eyeCatchingImage": nil,
-		"content":          rawJSONBytes(p.Content),
-		// variables / attachedFiles は misskey_dart の Page.fromJson が非null
-		// List として cast するため、空でも null ではなく [] を返す (#1237)。
+		// content / variables / attachedFiles は misskey_dart の Page.fromJson が
+		// 非null List として cast するため、空でも null ではなく [] を返す
+		// (#1237)。content は golden Page でも PageBlock[] 必須 (non-null) だが、
+		// 当初 #1237 では content だけ rawJSONBytes のまま取りこぼしていた。
+		"content":       jsonArrayOrEmpty(p.Content),
 		"variables":     jsonArrayOrEmpty(p.Variables),
 		"attachedFiles": []any{},
 		"script":        p.Script,

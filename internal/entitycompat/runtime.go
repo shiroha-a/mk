@@ -31,6 +31,7 @@ func L2FlatSchemaNames() []string {
 	return []string{
 		"Announcement", "Clip", "Signin", "Page", "Antenna",
 		"GalleryPost", "Hashtag", "App",
+		"Flash", "InviteCode", "UserWebhook",
 	}
 }
 
