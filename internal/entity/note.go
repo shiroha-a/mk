@@ -402,7 +402,11 @@ func NormalizeReactionKey(key string) string {
 // TS時代のレコードとmk時代のレコードが同一キーに集約される。
 func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
 	if len(raw) == 0 {
-		return raw
+		// golden Note.reactions は Record (object) 必須。reactions 未設定の note
+		// (create 直後の in-memory note 等、DB default '{}' を経ていないもの) は
+		// nil datatypes.JSON が JSON null になり drift するため {} に coalesce する
+		// (#1312。channels pinnedNoteIds #1283 と同種の null-object drift)。
+		return datatypes.JSON("{}")
 	}
 	var m map[string]float64
 	if err := json.Unmarshal(raw, &m); err != nil {

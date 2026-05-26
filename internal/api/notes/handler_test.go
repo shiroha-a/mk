@@ -66,6 +66,7 @@ func TestCreate_Success(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Hello, world!", createdNote["text"])
 	assert.Equal(t, "public", createdNote["visibility"])
+	shapetest.Assert(t, "Note", createdNote) // L3 (#1312)
 
 	// リポジトリにノートが保存されていることを確認
 	assert.Len(t, noteRepo.Notes, 1)

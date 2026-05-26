@@ -275,6 +275,10 @@ func TestFilesShow_Success(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesShow(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "DriveFile", resp) // L3 (#1312)
 }
 
 func TestFilesShow_InvalidParam(t *testing.T) {
@@ -347,6 +351,7 @@ func TestFilesUpdate_Success(t *testing.T) {
 	assert.Nil(t, resp["folder"])
 	assert.Nil(t, resp["userId"])
 	assert.Nil(t, resp["user"])
+	shapetest.Assert(t, "DriveFile", resp) // L3 (#1312)
 }
 
 func TestFilesUpdate_InvalidParam(t *testing.T) {
@@ -493,6 +498,10 @@ func TestFoldersCreate_Success(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersCreate(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "DriveFolder", resp) // L3 (#1312)
 }
 
 func TestFoldersCreate_DefaultName(t *testing.T) {
@@ -576,6 +585,7 @@ func TestFoldersShow_Success(t *testing.T) {
 	assert.EqualValues(t, 0, resp["foldersCount"])
 	assert.EqualValues(t, 0, resp["filesCount"])
 	assert.Nil(t, resp["parent"])
+	shapetest.Assert(t, "DriveFolder", resp) // L3 (#1312)
 }
 
 // detail mode: 親 folder + 子 folder + 子内の file を持つ shape の確認 (#845)。
