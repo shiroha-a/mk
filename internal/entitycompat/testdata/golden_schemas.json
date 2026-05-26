@@ -277,6 +277,48 @@
       "type": "number"
     }
   },
+  "ChatRoom": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "invitationExists": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isMuted": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "owner": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "ownerId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Clip": {
     "createdAt": {
       "nullable": false,
@@ -503,6 +545,138 @@
       "nullable": false,
       "optional": false,
       "type": "string"
+    }
+  },
+  "FederationInstance": {
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "faviconUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "firstRetrievedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "followersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "followingCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "host": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "iconUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "infoUpdatedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "isBlocked": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isMediaSilenced": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isNotResponding": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isSilenced": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isSuspended": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "latestRequestReceivedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "maintainerEmail": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "maintainerName": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "moderationNote": {
+      "nullable": true,
+      "optional": true,
+      "type": "string"
+    },
+    "name": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "notesCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "openRegistrations": {
+      "nullable": true,
+      "optional": false,
+      "type": "boolean"
+    },
+    "softwareName": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "softwareVersion": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "suspensionState": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "themeColor": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "usersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
     }
   },
   "Flash": {
@@ -1122,6 +1296,28 @@
       "nullable": false,
       "optional": true,
       "type": "array"
+    }
+  },
+  "NoteReaction": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "type": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
     }
   },
   "Page": {

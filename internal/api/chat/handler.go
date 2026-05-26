@@ -341,6 +341,10 @@ func (h *Handler) RoomsCreate(c echo.Context) error {
 	if err := h.repo.CreateRoom(room); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// golden ChatRoom は owner (UserLite) を必須とする。upstream は ownerId から
+	// owner を解決して必ず含めるため、作成者 (= 認証 user) を attach してから
+	// pack する (#1284)。未 attach だと packRoom が owner を omit していた。
+	room.Owner = user
 	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
 }
 

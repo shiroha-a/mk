@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -219,6 +220,10 @@ func TestShowInstance_Success(t *testing.T) {
 	require.NoError(t, h.ShowInstance(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alpha.example")
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "FederationInstance", resp) // L3 (#1284)
 }
 
 func TestShowInstance_BadJSON(t *testing.T) {

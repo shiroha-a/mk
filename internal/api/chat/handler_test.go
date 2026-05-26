@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -63,6 +64,10 @@ func TestRoomsCreate_Success(t *testing.T) {
 	rec := post(h.RoomsCreate, `{"name":"test room"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, repo.Rooms, 1)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "ChatRoom", resp) // L3 (#1284)
 }
 
 func TestRoomsCreate_InvalidParam(t *testing.T) {

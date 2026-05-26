@@ -9,6 +9,7 @@ import (
 
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -292,6 +293,7 @@ func TestReactions_List_PackUserLite(t *testing.T) {
 	// PackUserLiteが返す追加フィールドの存在を確認
 	_, hasAvatar := user["avatarUrl"]
 	assert.True(t, hasAvatar, "PackUserLite should include avatarUrl")
+	shapetest.Assert(t, "NoteReaction", resp[0]) // L3 (#1284)
 }
 
 func TestReactions_List_UserNil_Fallback(t *testing.T) {
