@@ -1,8 +1,18 @@
-# Entity shape drift gate (Layer 0)
+# Entity shape drift gate (Layer 0 / 2 / 3)
 
-mk-goのentity DTO構造体を、Misskey API契約(misskey-jsの`types.ts`=OpenAPI `components.schemas`のミラー)とフィールド単位で突き合わせ、**3rd-partyクライアントのshape crashを引き起こすドリフト**を静的に検出するゲート。
+mk-goのentity DTO構造体・packer出力・実HTTPレスポンスを、Misskey API契約(misskey-jsの`types.ts`=OpenAPI `components.schemas`のミラー)とフィールド単位で突き合わせ、**3rd-partyクライアントのshape crashを引き起こすドリフト**を検出するゲート。
 
-サーバー/ブラウザ/Docker不要で、決定的・ミリ秒で動く。CIでは`go test ./...`内の`TestEntityShapeDrift`として自動実行される。
+サーバー/ブラウザ/Docker不要で、決定的・ミリ秒で動く。CIでは`go test ./...`の一部として自動実行される(`TestEntityShapeDrift` + `Test*ShapeL2` + 各handler testの`shapetest.Assert`)。
+
+検出は3レイヤに分かれる。下に行くほど「実際に出る値」に近づき、上ほど網羅的:
+
+| Layer | 何を見るか | どこで | 射程 |
+|---|---|---|---|
+| **L0** | 構造体の**宣言**(reflection) | `internal/entitycompat`の`TestEntityShapeDrift` | 全family網羅。ただし宣言しか見ない |
+| **L2** | **packer出力**(fixtureでmap生成) | `Test*ShapeL2` | map-based packer / union / populate漏れ |
+| **L3** | **実HTTPレスポンス**(handler test) | 各api packageの`shapetest.Assert` | handlerがアドホックに組む応答・実際の値 |
+
+L0は宣言を全網羅、L2/L3は「実際に出た値」を見るので**宣言は正しいが実行時にnull/欠落するバグ**を捕まえる。L3が最も実態に近く、このセッションで30経路超へ拡大した(下記)。
 
 ## なぜ必要か
 
@@ -14,11 +24,14 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 
 | ファイル | 役割 |
 |---|---|
-| `internal/entitycompat/shapecheck.go` | reflection / types.tsパーサ / diffロジック |
+| `internal/entitycompat/shapecheck.go` | reflection / types.tsパーサ(`FieldShape`/`Elem`)/ diffロジック |
 | `internal/entitycompat/mapping.go` | entity構造体 ↔ golden schemaのマッピング表 |
 | `internal/entitycompat/gate.go` | snapshot/allowlistのロード、ゲート判定 |
+| `internal/entitycompat/runtime.go` | L2/L3 validator(`ValidateValue`/`ValidateUnionValue`)、`L2FlatSchemaNames()` |
+| `internal/entitycompat/response.go` | embedded golden(`//go:embed`)+ `ValidateResponse`(L3入口) |
+| `internal/entitycompat/shapetest/` | handler testから呼ぶ`shapetest.Assert`(L3)。`testing`importを持つためprod非依存 |
 | `internal/entitycompat/testdata/golden_schemas.json` | golden契約のスナップショット(commit対象) |
-| `internal/entitycompat/testdata/allowlist.json` | 既知/意図的ドリフトのallowlist(baseline backlog) |
+| `internal/entitycompat/testdata/allowlist.json` / `allowlist_l2.json` | 既知/意図的ドリフトのallowlist(baseline backlog) |
 | `tools/shapediff/` | snapshot再生成 + 全family drift report |
 
 golden側は**commit済みスナップショット**を読むため、テスト時にsubmoduleを必要としない(hermetic)。
@@ -119,4 +132,79 @@ L2導入時点で検出された実ドリフト:
 
 ### まだ残る射程外
 
-- `/api/i`等がhandler層で`map[string]any`にアドホック追加する欄(再利用可能なpackerを介さないため、fixtureで再現できない)。L0 baseline allowlistの`MeDetailed`系(`unreadAnnouncements`等)がこれ。最終的には二backend差分HTTP、または該当handlerの統合テストで確定する。
+- `/api/i`等がhandler層で`map[string]any`にアドホック追加する欄(再利用可能なpackerを介さないため、fixtureで再現できない)。これは下記**L3**で実レスポンスを直接検証して埋める。
+
+## Layer 3: 実HTTPレスポンス検証(handler test)
+
+L2のfixtureは「packerが正しく呼ばれれば」を見るが、handlerがpackerを介さず`map[string]any`を直接組む経路(`admin/*`の多く、`/api/meta`、chat/reversi等)や、handlerがrelationをattachし忘れる実行時バグはfixtureで再現しづらい。
+
+L3は**handler unit testが実際に返したJSON**を golden に突き合わせる。各api packageの既存テストに1行足すだけ:
+
+```go
+import "github.com/shiroha-a/mk/internal/entitycompat/shapetest"
+
+func TestCreate_Success(t *testing.T) {
+    // ... handlerを叩いて rec.Body を得る ...
+    var resp map[string]any
+    require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+    shapetest.Assert(t, "Clip", resp) // golden "Clip" に対し HIGH/MED drift があれば t.Error
+}
+```
+
+`shapetest.Assert(t, schemaName, actual)`は embedded golden(`//go:embed`)に対し`ValidateResponse`を回し、HIGH/MEDのfindingがあればテストを落とす。**packerは要らない**(`internal/entitycompat/shapetest`は`testing`importを持つがプロダクションには含まれない)。
+
+### L3を足す手順
+
+1. golden schema名を`L2FlatSchemaNames()`に追加(L2と共通の抽出リスト。L0 family済みの`UserLite`等は不要)。
+2. `make shapecheck-gen`でsnapshot再生成。
+3. 対象handlerのsuccess testで応答を`map[string]any`にdecodeし、`shapetest.Assert(t, "<Schema>", resp)`を足す。配列応答なら`resp[0]`を渡す。
+4. テスト実行。drift が出たら**修正の前に現Misskey実装を確認**(下記lineage / verify-before-fix)。
+
+### 配列応答・ネスト
+
+- 配列を返すendpoint(`mute/list`等)は`rows[0]`をassert。
+- ネストした子objectを検証したいとき(`/api/meta`の`counts`等)はその子だけ渡す: `shapetest.Assert(t, "QueueCount", resp["counts"].(map[string]any))`。
+- 合成型(`MetaDetailed = MetaLite & MetaDetailedOnly`)はparserがflat抽出できないので、**構成要素を個別にassert**する(同じ応答に`MetaLite`と`MetaDetailedOnly`の2回)。
+
+## array要素型の検出(`Elem`)
+
+`string[]`と`{id,name}[]`はどちらもcoarseには`"array"`で、要素型を見ないと取り違えを見逃す(例: `EmojiDetailedAdmin.roleIdsThatCanBeUsedThisEmojiAsReaction`)。
+
+parserは`FieldShape.Elem`に要素型(`string`/`number`/`boolean`/`object`/`array`/`other`)を記録し、`ValidateValue`は**非空配列の先頭要素**型をElemと突き合わせる(空配列は判定不能でskip、`json.RawMessage`はdecodeしてから判定)。多行`{...}[]`も正しく`array`+`elem:object`として抽出する。
+
+## lineage判定: vanilla か cherrypick 派生か
+
+goldenは**vanilla Misskey**のmisskey-jsから生成される。一方mk-goの一部endpointは**yojo-art/cherrypick**由来で、vanillaと契約が異なる:
+
+- **`/api/chat/*`**: cherrypick federated chat由来。ただし`ChatRoom`/`ChatMessage`はvanillaとshapeが一致したのでgate済み。
+- **`/api/reversi/*`**: yojo-art/cherrypick + **連合対戦拡張**。`crc32`等のvanilla goldenに無い独自field・federation関連で乖離が大きく、**vanilla golden gateの対象外**。
+
+**新しいendpointをgateする前に、それがvanilla由来か派生由来かを確認する。** 派生由来でvanilla goldenと乖離するものは、無理にgateすると「lineage差」を「drift」と誤認する。
+
+### verify-before-fix(driftを見つけたら直す前に確認)
+
+L0/L2/L3がdriftを出しても、**修正の前に現misskey-ts実装を確認する**。golden(契約)とMisskeyの実packer出力がズレているケースがあるため:
+
+- **vestigial field**: 契約には残るが機能削除済みのfield(例: `antenna.notify`はカラム削除済でpackerが定数`false`を返す)。goldenにあってもmk-goで実装し直すのは誤り。
+- **endpoint取り違え**: goldenの同名schemaが別endpointの契約のことがある(例: `EmojiDetailed`は`admin/emoji/list`、`EmojiDetailedAdmin`は`v2/admin/emoji/list`)。
+- 確認先: `third_party/misskey/.../core/entities/*EntityService.ts`(packer)、endpoint定義の`res`スキーマ、migration。
+
+## gateの盲点と補い方
+
+- **`Record<string, never>`等は`"other"`型**になり、`ValidateValue`の型検査をskipする(`QueueJob.progress`/`data`等)。ただし**required欄の欠落**と**non-null欄のnull**は型に関係なく検出されるので、`failedReason`欠落・`returnValue` null は捕まえられる。`progress`がnumberかobjectかのような「otherの中身」はtest側で明示assertして補う。
+- **lite/detail等のfield partition**は集合演算で体系的に差分を取る: goldenの該当schema(`MetaLite`/`MetaDetailedOnly`)のtop-level fieldをparserで抽出し、handlerの応答キーと突き合わせて「必須なのに欠落」「detail専用なのにleak」を算出する(`/api/meta`の`#1306`で使用)。
+
+## 既知の修正済みドリフト(本ゲートで検出)
+
+L3拡大の過程で検出・修正した実ドリフトの代表例(いずれも現misskey-ts確認の上で対応):
+
+| 対象 | ドリフト | 種別 |
+|---|---|---|
+| `pages` (PackPage) | `content`が空時null(golden `PageBlock[]`非null) | null-array |
+| `channels` | `createdAt`/`bannerUrl`欠落、`pinnedNoteIds`がnull | 欠落 + null-array |
+| `chat/rooms/create` | `owner`(UserLite)未attach | embed漏れ |
+| `chat/messages/create` | `fromUser`未attach | embed漏れ |
+| `admin/abuse-report/notification-recipient` | `updatedAt`列欠落、`userId`/`systemWebhookId`がnull | schema gap + null |
+| `v2/admin/emoji/list` | `roleIds`が`string[]`(golden `{id,name}[]`) | array要素型 |
+| `admin/queue/show-job` | `progress`/`returnValue`/`failedReason`/`data` | 型 + null + 欠落 |
+| `/api/meta` (lite) | MetaLite必須5欄をomit、MetaDetailedOnly 3欄をleak | partition |
