@@ -193,6 +193,57 @@ func TestInstanceRepository_List_Filters(t *testing.T) {
 	assert.Len(t, rows, 2) // b と c
 }
 
+// TestInstanceRepository_List_BlockedSilenced exercises the exact host
+// IN/NOT IN matching used by the blocked / silenced filters, including the
+// empty-list edge cases (true+empty -> 0 rows, false+empty -> all rows).
+func TestInstanceRepository_List_BlockedSilenced(t *testing.T) {
+	repo := NewInstanceRepository(testDB)
+	blocked := newTestInstance("i_ir_bs_a", "bs-blocked.example")
+	silenced := newTestInstance("i_ir_bs_b", "bs-silenced.example")
+	normal := newTestInstance("i_ir_bs_c", "bs-normal.example")
+	for _, inst := range []*model.Instance{blocked, silenced, normal} {
+		require.NoError(t, repo.Create(inst))
+		defer cleanupInstance(t, inst.ID)
+	}
+
+	blockedHosts := []string{"bs-blocked.example"}
+	silencedHosts := []string{"bs-silenced.example"}
+	tt := true
+	ff := false
+
+	rows, err := repo.List(model.InstanceListFilter{Host: "bs-", Blocked: &tt, BlockedHosts: blockedHosts})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "bs-blocked.example", rows[0].Host)
+
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Blocked: &ff, BlockedHosts: blockedHosts})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2) // silenced と normal
+
+	// blocked:true かつ blockedHosts が空 -> 0 件 (本家 1=0 相当)。
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Blocked: &tt})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+
+	// blocked:false かつ blockedHosts が空 -> 条件なしで全件。
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Blocked: &ff})
+	require.NoError(t, err)
+	assert.Len(t, rows, 3)
+
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Silenced: &tt, SilencedHosts: silencedHosts})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "bs-silenced.example", rows[0].Host)
+
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Silenced: &ff, SilencedHosts: silencedHosts})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2) // blocked と normal
+
+	rows, err = repo.List(model.InstanceListFilter{Host: "bs-", Silenced: &tt})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
 func TestInstanceRepository_List_Sort(t *testing.T) {
 	repo := NewInstanceRepository(testDB)
 	a := newTestInstance("i_ir_5a", "sort-a.example")
@@ -208,12 +259,78 @@ func TestInstanceRepository_List_Sort(t *testing.T) {
 
 	for _, sortBy := range []string{
 		"+host", "-host", "+notes", "-notes", "+users", "-users",
-		"+firstRetrievedAt", "",
+		"+following", "-following", "+followers", "-followers",
+		"+pubSub", "-pubSub", "+firstRetrievedAt", "-firstRetrievedAt",
+		"+latestRequestReceivedAt", "-latestRequestReceivedAt", "",
 	} {
 		rows, err := repo.List(model.InstanceListFilter{Host: "sort-", SortBy: sortBy, Limit: 10})
 		require.NoError(t, err)
-		assert.Len(t, rows, 2)
+		assert.Len(t, rows, 2, "sort=%s", sortBy)
 	}
+}
+
+// TestInstanceRepository_List_SortDirection は sort key の向きが本家 TS と
+// 一致すること (= "+" が DESC、"-" が ASC) を実順序で検証する regression
+// guard。以前は向きが逆 (frontend の "降順" ラベルと食い違い) だった。
+func TestInstanceRepository_List_SortDirection(t *testing.T) {
+	repo := NewInstanceRepository(testDB)
+	now := time.Now()
+	low := newTestInstance("i_ir_6a", "sortdir-low.example")
+	low.NotesCount = 1
+	low.FollowersCount = 1
+	low.FollowingCount = 1
+	lowReq := now.Add(-2 * time.Hour)
+	low.LatestRequestReceivedAt = &lowReq
+	high := newTestInstance("i_ir_6b", "sortdir-high.example")
+	high.NotesCount = 100
+	high.FollowersCount = 50
+	high.FollowingCount = 80
+	highReq := now.Add(-1 * time.Hour)
+	high.LatestRequestReceivedAt = &highReq
+	for _, inst := range []*model.Instance{low, high} {
+		require.NoError(t, repo.Create(inst))
+		defer cleanupInstance(t, inst.ID)
+	}
+
+	// "+" は DESC: 値の大きい high が先頭。
+	for _, sortBy := range []string{"+notes", "+followers", "+following", "+pubSub", "+latestRequestReceivedAt"} {
+		rows, err := repo.List(model.InstanceListFilter{Host: "sortdir-", SortBy: sortBy, Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 2, "sort=%s", sortBy)
+		assert.Equal(t, "sortdir-high.example", rows[0].Host, "sort=%s should put larger value first", sortBy)
+	}
+	// "-" は ASC: 値の小さい low が先頭。
+	for _, sortBy := range []string{"-notes", "-followers", "-following", "-pubSub", "-latestRequestReceivedAt"} {
+		rows, err := repo.List(model.InstanceListFilter{Host: "sortdir-", SortBy: sortBy, Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 2, "sort=%s", sortBy)
+		assert.Equal(t, "sortdir-low.example", rows[0].Host, "sort=%s should put smaller value first", sortBy)
+	}
+}
+
+// TestInstanceRepository_List_LatestRequestNullsOrder verifies the NULLS LAST /
+// NULLS FIRST handling for latestRequestReceivedAt: +(DESC) keeps NULLs last,
+// -(ASC) puts NULLs first.
+func TestInstanceRepository_List_LatestRequestNullsOrder(t *testing.T) {
+	repo := NewInstanceRepository(testDB)
+	withTime := newTestInstance("i_ir_7a", "nulls-has.example")
+	ts := time.Now().Add(-1 * time.Hour)
+	withTime.LatestRequestReceivedAt = &ts
+	noTime := newTestInstance("i_ir_7b", "nulls-none.example") // latestRequestReceivedAt = NULL
+	for _, inst := range []*model.Instance{withTime, noTime} {
+		require.NoError(t, repo.Create(inst))
+		defer cleanupInstance(t, inst.ID)
+	}
+
+	rows, err := repo.List(model.InstanceListFilter{Host: "nulls-", SortBy: "+latestRequestReceivedAt", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "nulls-none.example", rows[1].Host, "NULL sorts last on +(DESC)")
+
+	rows, err = repo.List(model.InstanceListFilter{Host: "nulls-", SortBy: "-latestRequestReceivedAt", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "nulls-none.example", rows[0].Host, "NULL sorts first on -(ASC)")
 }
 
 func TestInstanceRepository_List_LimitClamp(t *testing.T) {

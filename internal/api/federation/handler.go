@@ -54,6 +54,8 @@ type InstancesRequest struct {
 	Host          string `json:"host"`
 	Suspended     *bool  `json:"suspended"`
 	NotResponding *bool  `json:"notResponding"`
+	Blocked       *bool  `json:"blocked"`
+	Silenced      *bool  `json:"silenced"`
 	Federating    *bool  `json:"federating"`
 	Subscribing   *bool  `json:"subscribing"`
 	Publishing    *bool  `json:"publishing"`
@@ -76,10 +78,18 @@ func (h *Handler) Instances(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	// blocked / silenced は instance 列ではなく meta.blockedHosts /
+	// silencedHosts との突合で判定する。meta は 1 回だけ取得し、フィルタ突合と
+	// レスポンスの isBlocked / isSilenced / isMediaSilenced 算出の双方で使う。
+	blockedHosts, silencedHosts, mediaSilencedHosts := h.svc.FederationHostLists()
 	filter := model.InstanceListFilter{
 		Host:          req.Host,
 		Suspended:     req.Suspended,
 		NotResponding: req.NotResponding,
+		Blocked:       req.Blocked,
+		Silenced:      req.Silenced,
+		BlockedHosts:  blockedHosts,
+		SilencedHosts: silencedHosts,
 		Federating:    req.Federating,
 		Subscribing:   req.Subscribing,
 		Publishing:    req.Publishing,
@@ -95,7 +105,7 @@ func (h *Handler) Instances(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, inst := range rows {
-		out = append(out, instanceToMap(inst))
+		out = append(out, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -123,7 +133,8 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		slog.Error("federation/show-instance: FindByHost failed", "host", req.Host, "err", err)
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, instanceToMap(inst))
+	blockedHosts, silencedHosts, mediaSilencedHosts := h.svc.FederationHostLists()
+	return c.JSON(http.StatusOK, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
 }
 
 // instanceToMap shapes an Instance row into the JSON response object expected
@@ -132,7 +143,12 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 //
 // federating / subscribing / publishingは本家Misskeyと同様に
 // followingCount / followersCountから動的に計算する (DBには列を持たない)。
-func instanceToMap(inst *model.Instance) map[string]any {
+//
+// isBlocked / isSilenced / isMediaSilenced は instance 列ではなく
+// meta.blockedHosts / silencedHosts / mediaSilencedHosts との suffix-match で
+// 判定する (本家 InstanceEntityService と同じ)。突合対象の host 一覧は呼び出し
+// 元が meta から 1 度だけ取得して渡す。
+func instanceToMap(inst *model.Instance, blockedHosts, silencedHosts, mediaSilencedHosts []string) map[string]any {
 	return map[string]any{
 		"id":                      inst.ID,
 		"firstRetrievedAt":        inst.FirstRetrievedAt,
@@ -149,6 +165,9 @@ func instanceToMap(inst *model.Instance) map[string]any {
 		"notRespondingSince":      inst.NotRespondingSince,
 		"isSuspended":             inst.SuspensionState != model.SuspensionStateNone,
 		"suspensionState":         inst.SuspensionState,
+		"isBlocked":               coreinstance.HostMatchesAny(blockedHosts, inst.Host),
+		"isSilenced":              coreinstance.HostMatchesAny(silencedHosts, inst.Host),
+		"isMediaSilenced":         coreinstance.HostMatchesAny(mediaSilencedHosts, inst.Host),
 		"softwareName":            inst.SoftwareName,
 		"softwareVersion":         inst.SoftwareVersion,
 		"openRegistrations":       inst.OpenRegistrations,

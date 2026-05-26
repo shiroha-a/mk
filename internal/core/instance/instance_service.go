@@ -161,7 +161,7 @@ func (s *Service) IsBlocked(host string) bool {
 	if err != nil {
 		return false
 	}
-	return hostMatchesAny(meta.BlockedHosts, host)
+	return HostMatchesAny(meta.BlockedHosts, host)
 }
 
 // IsSilenced reports whether the host matches an entry in meta.silencedHosts.
@@ -173,7 +173,20 @@ func (s *Service) IsSilenced(host string) bool {
 	if err != nil {
 		return false
 	}
-	return hostMatchesAny(meta.SilencedHosts, host)
+	return HostMatchesAny(meta.SilencedHosts, host)
+}
+
+// FederationHostLists returns the blocked / silenced / media-silenced host
+// lists from meta. federation/instances ハンドラがフィルタ突合と、レスポンスの
+// isBlocked / isSilenced / isMediaSilenced 算出の双方で使うため、meta を 1 回
+// だけ読んで使い回す入口。meta が読めない場合は nil を返す (ベストエフォート;
+// admin federation 一覧が transient error で完全に落ちるのを避ける)。
+func (s *Service) FederationHostLists() (blocked, silenced, mediaSilenced []string) {
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		return nil, nil, nil
+	}
+	return meta.BlockedHosts, meta.SilencedHosts, meta.MediaSilencedHosts
 }
 
 // IsAllowed reports whether the local instance is willing to federate with
@@ -207,14 +220,14 @@ func (s *Service) IsAllowed(host string) bool {
 	case "none":
 		return false
 	case "specified":
-		if !hostMatchesAny(meta.FederationHosts, host) {
+		if !HostMatchesAny(meta.FederationHosts, host) {
 			return false
 		}
 	}
-	return !hostMatchesAny(meta.BlockedHosts, host)
+	return !HostMatchesAny(meta.BlockedHosts, host)
 }
 
-// hostMatchesAny reports whether host (case-insensitive, Unicode-aware)
+// HostMatchesAny reports whether host (case-insensitive, Unicode-aware)
 // matches any of the given patterns under Misskey TS's suffix-match rule.
 // A pattern matches if host equals it, or host ends with `.<pattern>`
 // (i.e. host is a subdomain).
@@ -228,7 +241,7 @@ func (s *Service) IsAllowed(host string) bool {
 // ガードが既に効くので "." 単独が任意 host に誤マッチすることは無いが、
 // admin が誤って空エントリを混入させた場合に "全 host を allow / block" に
 // 化けない defensive guard を残す)。
-func hostMatchesAny(patterns []string, host string) bool {
+func HostMatchesAny(patterns []string, host string) bool {
 	if host == "" {
 		return false
 	}

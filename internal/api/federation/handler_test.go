@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -19,13 +20,20 @@ import (
 )
 
 func newHandler(t *testing.T) (*Handler, *testutil.MockInstanceRepository) {
+	h, repo, _ := newHandlerWithMeta(t)
+	return h, repo
+}
+
+// newHandlerWithMeta is like newHandler but also exposes the MockMetaRepository
+// so tests can configure blockedHosts / silencedHosts / mediaSilencedHosts.
+func newHandlerWithMeta(t *testing.T) (*Handler, *testutil.MockInstanceRepository, *testutil.MockMetaRepository) {
 	t.Helper()
 	repo := testutil.NewMockInstanceRepository()
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := coreinstance.NewService(repo, metaRepo, idGen)
-	return NewHandler(svc), repo
+	return NewHandler(svc), repo, metaRepo
 }
 
 func newReq(t *testing.T, body string) (echo.Context, *httptest.ResponseRecorder) {
@@ -83,6 +91,85 @@ func TestInstances_Filtered(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alpha.example")
 	assert.NotContains(t, rec.Body.String(), "beta.example")
+}
+
+// TestInstances_BlockedFilter は federation 画面の「ブロック」タブのバグ
+// (blocked/silenced フィルタが無視され全件返っていた) の regression guard。
+// blocked:true は meta.blockedHosts に exact 一致する host だけ、blocked:false
+// はそれ以外を返すこと。
+func TestInstances_BlockedFilter(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	seedInstance(t, repo, "blocked.example")
+	seedInstance(t, repo, "normal.example")
+	metaRepo.Meta = &model.Meta{BlockedHosts: pq.StringArray{"blocked.example"}}
+
+	c, rec := newReq(t, `{"blocked":true}`)
+	require.NoError(t, h.Instances(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "blocked.example")
+	assert.NotContains(t, rec.Body.String(), "normal.example")
+
+	c, rec = newReq(t, `{"blocked":false}`)
+	require.NoError(t, h.Instances(c))
+	assert.NotContains(t, rec.Body.String(), "blocked.example")
+	assert.Contains(t, rec.Body.String(), "normal.example")
+}
+
+// TestInstances_BlockedEmptyList: blockedHosts が空のとき blocked:true は 0 件
+// (本家の 1=0 相当)、blocked:false は全件返ること。
+func TestInstances_BlockedEmptyList(t *testing.T) {
+	h, repo, _ := newHandlerWithMeta(t)
+	seedInstance(t, repo, "normal.example")
+
+	c, rec := newReq(t, `{"blocked":true}`)
+	require.NoError(t, h.Instances(c))
+	assert.NotContains(t, rec.Body.String(), "normal.example")
+
+	c, rec = newReq(t, `{"blocked":false}`)
+	require.NoError(t, h.Instances(c))
+	assert.Contains(t, rec.Body.String(), "normal.example")
+}
+
+// TestInstances_SilencedFilter は silenced タブの同等 regression guard。
+func TestInstances_SilencedFilter(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	seedInstance(t, repo, "silenced.example")
+	seedInstance(t, repo, "normal.example")
+	metaRepo.Meta = &model.Meta{SilencedHosts: pq.StringArray{"silenced.example"}}
+
+	c, rec := newReq(t, `{"silenced":true}`)
+	require.NoError(t, h.Instances(c))
+	assert.Contains(t, rec.Body.String(), "silenced.example")
+	assert.NotContains(t, rec.Body.String(), "normal.example")
+
+	c, rec = newReq(t, `{"silenced":false}`)
+	require.NoError(t, h.Instances(c))
+	assert.NotContains(t, rec.Body.String(), "silenced.example")
+	assert.Contains(t, rec.Body.String(), "normal.example")
+}
+
+// TestInstances_StatusFields verifies isBlocked / isSilenced / isMediaSilenced
+// が meta との suffix-match で算出されレスポンスに載ること。サブドメインも
+// suffix-match で拾う (本家 InstanceEntityService と同じ)。
+func TestInstances_StatusFields(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	seedInstance(t, repo, "sub.blocked.example")
+	metaRepo.Meta = &model.Meta{
+		BlockedHosts:       pq.StringArray{"blocked.example"},
+		SilencedHosts:      pq.StringArray{"sub.blocked.example"},
+		MediaSilencedHosts: pq.StringArray{"other.example"},
+	}
+
+	c, rec := newReq(t, `{"host":"sub.blocked.example"}`)
+	require.NoError(t, h.Instances(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, true, got[0]["isBlocked"], "subdomain of blockedHosts entry is blocked")
+	assert.Equal(t, true, got[0]["isSilenced"])
+	assert.Equal(t, false, got[0]["isMediaSilenced"])
 }
 
 func TestInstances_BadJSON(t *testing.T) {

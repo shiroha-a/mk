@@ -154,6 +154,34 @@ func (r *instanceRepository) List(filter model.InstanceListFilter) ([]*model.Ins
 			q = q.Where("\"followingCount\" = 0")
 		}
 	}
+	// blocked / silenced は service が meta から解決した host 一覧との exact
+	// IN / NOT IN で突合する (本家 federation/instances と同じ semantics):
+	//   - X == true  かつ list 空 → 0 件 (1 = 0)
+	//   - X == true  かつ list あり → host IN (list)
+	//   - X == false かつ list 空 → 全件 (条件なし)
+	//   - X == false かつ list あり → host NOT IN (list)
+	if filter.Blocked != nil {
+		if *filter.Blocked {
+			if len(filter.BlockedHosts) == 0 {
+				q = q.Where("1 = 0")
+			} else {
+				q = q.Where("host IN ?", filter.BlockedHosts)
+			}
+		} else if len(filter.BlockedHosts) > 0 {
+			q = q.Where("host NOT IN ?", filter.BlockedHosts)
+		}
+	}
+	if filter.Silenced != nil {
+		if *filter.Silenced {
+			if len(filter.SilencedHosts) == 0 {
+				q = q.Where("1 = 0")
+			} else {
+				q = q.Where("host IN ?", filter.SilencedHosts)
+			}
+		} else if len(filter.SilencedHosts) > 0 {
+			q = q.Where("host NOT IN ?", filter.SilencedHosts)
+		}
+	}
 	cursor := filter.SinceID != "" || filter.UntilID != ""
 	if filter.SinceID != "" {
 		q = q.Where("id > ?", filter.SinceID)
@@ -164,32 +192,46 @@ func (r *instanceRepository) List(filter model.InstanceListFilter) ([]*model.Ins
 	if cursor {
 		q = q.Order(paginationOrder(filter.SinceID, filter.UntilID, "id"))
 	} else {
+		// sort key の向きは本家 federation/instances に合わせる: 接頭辞 "+" が
+		// DESC、"-" が ASC (frontend のラベルも "+notes" = 降順)。pubSub は
+		// followingCount → followersCount の複合ソート。+host / -host は本家に
+		// 無い mk-go 拡張なので従来どおり host の昇順 / 降順を維持する。
 		switch filter.SortBy {
+		case "+pubSub":
+			q = q.Order("\"followingCount\" DESC").Order("\"followersCount\" DESC")
+		case "-pubSub":
+			q = q.Order("\"followingCount\" ASC").Order("\"followersCount\" ASC")
+		case "+notes":
+			q = q.Order("\"notesCount\" DESC")
+		case "-notes":
+			q = q.Order("\"notesCount\" ASC")
+		case "+users":
+			q = q.Order("\"usersCount\" DESC")
+		case "-users":
+			q = q.Order("\"usersCount\" ASC")
+		case "+following":
+			q = q.Order("\"followingCount\" DESC")
+		case "-following":
+			q = q.Order("\"followingCount\" ASC")
+		case "+followers":
+			q = q.Order("\"followersCount\" DESC")
+		case "-followers":
+			q = q.Order("\"followersCount\" ASC")
+		case "+firstRetrievedAt":
+			q = q.Order("\"firstRetrievedAt\" DESC")
+		case "-firstRetrievedAt":
+			q = q.Order("\"firstRetrievedAt\" ASC")
+		case "+latestRequestReceivedAt":
+			q = q.Order("\"latestRequestReceivedAt\" DESC NULLS LAST")
+		case "-latestRequestReceivedAt":
+			q = q.Order("\"latestRequestReceivedAt\" ASC NULLS FIRST")
 		case "+host":
 			q = q.Order("host ASC")
 		case "-host":
 			q = q.Order("host DESC")
-		case "+notes":
-			q = q.Order("\"notesCount\" ASC")
-		case "-notes":
-			q = q.Order("\"notesCount\" DESC")
-		case "+users":
-			q = q.Order("\"usersCount\" ASC")
-		case "-users":
-			q = q.Order("\"usersCount\" DESC")
-		case "+following":
-			q = q.Order("\"followingCount\" ASC")
-		case "-following":
-			q = q.Order("\"followingCount\" DESC")
-		case "+followers":
-			q = q.Order("\"followersCount\" ASC")
-		case "-followers":
-			q = q.Order("\"followersCount\" DESC")
-		case "+firstRetrievedAt":
-			q = q.Order("\"firstRetrievedAt\" ASC")
 		default:
-			// デフォルトは新しい順
-			q = q.Order("\"firstRetrievedAt\" DESC")
+			// 本家 TS は sort 未指定時 instance.id DESC (= aidx なので新しい順)。
+			q = q.Order("id DESC")
 		}
 	}
 	limit := filter.Limit

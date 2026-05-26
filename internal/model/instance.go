@@ -51,6 +51,16 @@ type InstanceListFilter struct {
 	Federating    *bool // followingCount > 0 OR followersCount > 0
 	Subscribing   *bool // followersCount > 0 (向こうがフォローしてくる)
 	Publishing    *bool // followingCount > 0 (こちらからフォローしている)
+	// Blocked / Silenced は instance 列ではなく meta.blockedHosts /
+	// silencedHosts との突合で判定する。突合対象の host 一覧は service 層が
+	// meta から解決して BlockedHosts / SilencedHosts に詰める。本家 TS の
+	// federation/instances と同じく exact host IN/NOT IN matching を使う
+	// (suffix match の IsBlocked / IsSilenced とは別物)。BlockedHosts /
+	// SilencedHosts は対応する *bool が non-nil のときだけ参照される。
+	Blocked       *bool
+	Silenced      *bool
+	BlockedHosts  []string
+	SilencedHosts []string
 	SortBy        string
 	Limit         int
 	Offset        int

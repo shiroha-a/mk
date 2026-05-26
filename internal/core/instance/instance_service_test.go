@@ -150,6 +150,27 @@ func TestService_IsSilenced_MetaError(t *testing.T) {
 	assert.False(t, svc.IsSilenced("any.example"))
 }
 
+func TestService_FederationHostLists(t *testing.T) {
+	svc, _, metaRepo := newService(t)
+	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
+	metaRepo.Meta.SilencedHosts = pq.StringArray{"quiet.example"}
+	metaRepo.Meta.MediaSilencedHosts = pq.StringArray{"media.example"}
+	blocked, silenced, mediaSilenced := svc.FederationHostLists()
+	assert.Equal(t, []string{"bad.example"}, []string(blocked))
+	assert.Equal(t, []string{"quiet.example"}, []string(silenced))
+	assert.Equal(t, []string{"media.example"}, []string(mediaSilenced))
+}
+
+// meta が読めない場合は 3 つとも nil を返す (ベストエフォート)。
+func TestService_FederationHostLists_MetaError(t *testing.T) {
+	svc, _, metaRepo := newService(t)
+	metaRepo.Meta = nil
+	blocked, silenced, mediaSilenced := svc.FederationHostLists()
+	assert.Nil(t, blocked)
+	assert.Nil(t, silenced)
+	assert.Nil(t, mediaSilenced)
+}
+
 // federation == "all" (default) は blockedHosts 以外の全 host を allow する。
 func TestService_IsAllowed_AllMode(t *testing.T) {
 	svc, _, metaRepo := newService(t)
@@ -228,7 +249,7 @@ func TestService_HostMatching(t *testing.T) {
 		// defensive guard)。
 		{name: "empty pattern never matches", pattern: "", host: "example.com", want: false},
 		// IDN raw 表記 (Punycode 化前) でも case-insensitive で一致すること。
-		// strings.ToLower は ASCII 専用だが hostMatchesAny は Unicode-aware
+		// strings.ToLower は ASCII 専用だが HostMatchesAny は Unicode-aware
 		// な x/text/cases.Caser を通しているので、TS の String.toLowerCase()
 		// と同じ挙動を保てる (#590 review #5)。
 		{name: "unicode case-insensitive (German)", pattern: "müNSTer.example", host: "MÜNSTER.example", want: true},

@@ -2566,6 +2566,20 @@ func (m *MockInstanceRepository) List(filter model.InstanceListFilter) ([]*model
 				continue
 			}
 		}
+		// blocked / silenced は real repository と同じ exact host IN/NOT IN
+		// semantics を再現する。membership と *bool が食い違う行を除外すると、
+		// 空リスト + true → 全除外、空リスト + false → 全件、という TS 互換の
+		// 挙動になる。
+		if filter.Blocked != nil {
+			if hostInList(inst.Host, filter.BlockedHosts) != *filter.Blocked {
+				continue
+			}
+		}
+		if filter.Silenced != nil {
+			if hostInList(inst.Host, filter.SilencedHosts) != *filter.Silenced {
+				continue
+			}
+		}
 		rows = append(rows, inst)
 	}
 	for i := 0; i < len(rows); i++ {
@@ -2587,6 +2601,18 @@ func (m *MockInstanceRepository) List(filter model.InstanceListFilter) ([]*model
 		end = len(rows)
 	}
 	return rows[filter.Offset:end], nil
+}
+
+// hostInList reports exact (case-sensitive) membership of host in list.
+// Mirrors the repository's `host IN (...)` matching used for the blocked /
+// silenced filters.
+func hostInList(host string, list []string) bool {
+	for _, h := range list {
+		if h == host {
+			return true
+		}
+	}
+	return false
 }
 
 func applyInstanceFields(i *model.Instance, fields map[string]any) {
