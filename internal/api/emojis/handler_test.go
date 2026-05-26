@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/emojis"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -66,6 +67,7 @@ func TestEmojis_WithLocalEmojis(t *testing.T) {
 	assert.Equal(t, "smile", emoji["name"])
 	assert.Equal(t, "faces", emoji["category"])
 	assert.Equal(t, "https://example.com/emoji/smile.png", emoji["url"])
+	shapetest.Assert(t, "EmojiSimple", emoji) // L3 (#1286)
 }
 
 // failingEmojiRepo always fails on ListLocal.

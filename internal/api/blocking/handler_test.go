@@ -1,6 +1,7 @@
 package blocking
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -203,6 +205,11 @@ func TestList_OK(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.List(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	shapetest.Assert(t, "Blocking", resp[0]) // L3 (#1286)
 }
 
 func TestList_LimitClamping(t *testing.T) {

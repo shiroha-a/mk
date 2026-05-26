@@ -180,6 +180,28 @@
       "type": "string"
     }
   },
+  "Blocking": {
+    "blockee": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "blockeeId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Channel": {
     "allowRenoteToExternal": {
       "nullable": false,
@@ -539,6 +561,43 @@
     "roleIdsThatCanBeUsedThisEmojiAsReaction": {
       "nullable": false,
       "optional": false,
+      "type": "array"
+    },
+    "url": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "EmojiSimple": {
+    "aliases": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "category": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "localOnly": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "roleIdsThatCanBeUsedThisEmojiAsReaction": {
+      "nullable": false,
+      "optional": true,
       "type": "array"
     },
     "url": {
@@ -1121,6 +1180,33 @@
       "type": "boolean"
     }
   },
+  "Muting": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "expiresAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "mutee": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "muteeId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "Note": {
     "channel": {
       "nullable": true,
@@ -1298,6 +1384,28 @@
       "type": "array"
     }
   },
+  "NoteFavorite": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "note": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "noteId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
   "NoteReaction": {
     "createdAt": {
       "nullable": false,
@@ -1415,6 +1523,70 @@
       "nullable": false,
       "optional": false,
       "type": "array"
+    }
+  },
+  "RenoteMuting": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "mutee": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "muteeId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "RoleLite": {
+    "color": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "displayOrder": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "iconUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isAdministrator": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isModerator": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
     }
   },
   "Signin": {

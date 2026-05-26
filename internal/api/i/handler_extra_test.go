@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -256,6 +257,11 @@ func TestFavorites_WithNote(t *testing.T) {
 	h.SetFavoriteRepo(favRepo)
 	rec := postExtra(h.Favorites, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	shapetest.Assert(t, "NoteFavorite", resp[0]) // L3 (#1286)
 }
 
 // untilId 経由の cursor pagination が repo に正しく伝わり、cursor 以下の

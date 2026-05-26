@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/roles"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -99,6 +100,7 @@ func TestList_FullShape(t *testing.T) {
 	assert.Equal(t, "2026-05-01T00:00:00.000Z", r["updatedAt"])
 	assert.Equal(t, true, r["canEditMembersByModerator"])
 	assert.Equal(t, float64(0), r["usersCount"])
+	shapetest.Assert(t, "RoleLite", r) // L3 (#1286)
 }
 
 func TestShow_Success(t *testing.T) {
