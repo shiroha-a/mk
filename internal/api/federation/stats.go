@@ -51,19 +51,22 @@ func (h *Handler) Stats(c echo.Context) error {
 
 	// isBlocked / isSilenced / isMediaSilenced 用に meta の host 一覧を 1 度
 	// だけ取得し、両リストの pack で使い回す。
-	blockedHosts, silencedHosts, mediaSilencedHosts := h.svc.FederationHostLists()
+	hosts, err := h.svc.FederationHostLists()
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 
 	topSubFollowers := 0
 	topSub := make([]map[string]any, 0, len(subs))
 	for _, inst := range subs {
 		topSubFollowers += inst.FollowersCount
-		topSub = append(topSub, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
+		topSub = append(topSub, instanceToMap(inst, hosts))
 	}
 	topPubFollowing := 0
 	topPub := make([]map[string]any, 0, len(pubs))
 	for _, inst := range pubs {
 		topPubFollowing += inst.FollowingCount
-		topPub = append(topPub, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
+		topPub = append(topPub, instanceToMap(inst, hosts))
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

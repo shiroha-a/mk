@@ -155,20 +155,19 @@ func TestService_FederationHostLists(t *testing.T) {
 	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
 	metaRepo.Meta.SilencedHosts = pq.StringArray{"quiet.example"}
 	metaRepo.Meta.MediaSilencedHosts = pq.StringArray{"media.example"}
-	blocked, silenced, mediaSilenced := svc.FederationHostLists()
-	assert.Equal(t, []string{"bad.example"}, []string(blocked))
-	assert.Equal(t, []string{"quiet.example"}, []string(silenced))
-	assert.Equal(t, []string{"media.example"}, []string(mediaSilenced))
+	hosts, err := svc.FederationHostLists()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bad.example"}, []string(hosts.Blocked))
+	assert.Equal(t, []string{"quiet.example"}, []string(hosts.Silenced))
+	assert.Equal(t, []string{"media.example"}, []string(hosts.MediaSilenced))
 }
 
-// meta が読めない場合は 3 つとも nil を返す (ベストエフォート)。
+// meta が読めない場合は error を返す (admin endpoint なので握り潰さない)。
 func TestService_FederationHostLists_MetaError(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta = nil
-	blocked, silenced, mediaSilenced := svc.FederationHostLists()
-	assert.Nil(t, blocked)
-	assert.Nil(t, silenced)
-	assert.Nil(t, mediaSilenced)
+	_, err := svc.FederationHostLists()
+	assert.Error(t, err)
 }
 
 // federation == "all" (default) は blockedHosts 以外の全 host を allow する。

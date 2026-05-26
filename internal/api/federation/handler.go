@@ -81,15 +81,18 @@ func (h *Handler) Instances(c echo.Context) error {
 	// blocked / silenced は instance 列ではなく meta.blockedHosts /
 	// silencedHosts との突合で判定する。meta は 1 回だけ取得し、フィルタ突合と
 	// レスポンスの isBlocked / isSilenced / isMediaSilenced 算出の双方で使う。
-	blockedHosts, silencedHosts, mediaSilencedHosts := h.svc.FederationHostLists()
+	hosts, err := h.svc.FederationHostLists()
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	filter := model.InstanceListFilter{
 		Host:          req.Host,
 		Suspended:     req.Suspended,
 		NotResponding: req.NotResponding,
 		Blocked:       req.Blocked,
 		Silenced:      req.Silenced,
-		BlockedHosts:  blockedHosts,
-		SilencedHosts: silencedHosts,
+		BlockedHosts:  hosts.Blocked,
+		SilencedHosts: hosts.Silenced,
 		Federating:    req.Federating,
 		Subscribing:   req.Subscribing,
 		Publishing:    req.Publishing,
@@ -105,7 +108,7 @@ func (h *Handler) Instances(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, inst := range rows {
-		out = append(out, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
+		out = append(out, instanceToMap(inst, hosts))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -133,8 +136,12 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		slog.Error("federation/show-instance: FindByHost failed", "host", req.Host, "err", err)
 		return apierr.JSONInternalError(c)
 	}
-	blockedHosts, silencedHosts, mediaSilencedHosts := h.svc.FederationHostLists()
-	return c.JSON(http.StatusOK, instanceToMap(inst, blockedHosts, silencedHosts, mediaSilencedHosts))
+	hosts, err := h.svc.FederationHostLists()
+	if err != nil {
+		slog.Error("federation/show-instance: FederationHostLists failed", "host", req.Host, "err", err)
+		return apierr.JSONInternalError(c)
+	}
+	return c.JSON(http.StatusOK, instanceToMap(inst, hosts))
 }
 
 // instanceToMap shapes an Instance row into the JSON response object expected
@@ -148,7 +155,7 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 // meta.blockedHosts / silencedHosts / mediaSilencedHosts との suffix-match で
 // 判定する (本家 InstanceEntityService と同じ)。突合対象の host 一覧は呼び出し
 // 元が meta から 1 度だけ取得して渡す。
-func instanceToMap(inst *model.Instance, blockedHosts, silencedHosts, mediaSilencedHosts []string) map[string]any {
+func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets) map[string]any {
 	return map[string]any{
 		"id":                      inst.ID,
 		"firstRetrievedAt":        inst.FirstRetrievedAt,
@@ -165,9 +172,9 @@ func instanceToMap(inst *model.Instance, blockedHosts, silencedHosts, mediaSilen
 		"notRespondingSince":      inst.NotRespondingSince,
 		"isSuspended":             inst.SuspensionState != model.SuspensionStateNone,
 		"suspensionState":         inst.SuspensionState,
-		"isBlocked":               coreinstance.HostMatchesAny(blockedHosts, inst.Host),
-		"isSilenced":              coreinstance.HostMatchesAny(silencedHosts, inst.Host),
-		"isMediaSilenced":         coreinstance.HostMatchesAny(mediaSilencedHosts, inst.Host),
+		"isBlocked":               coreinstance.HostMatchesAny(hosts.Blocked, inst.Host),
+		"isSilenced":              coreinstance.HostMatchesAny(hosts.Silenced, inst.Host),
+		"isMediaSilenced":         coreinstance.HostMatchesAny(hosts.MediaSilenced, inst.Host),
 		"softwareName":            inst.SoftwareName,
 		"softwareVersion":         inst.SoftwareVersion,
 		"openRegistrations":       inst.OpenRegistrations,

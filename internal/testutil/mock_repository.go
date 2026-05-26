@@ -2582,13 +2582,7 @@ func (m *MockInstanceRepository) List(filter model.InstanceListFilter) ([]*model
 		}
 		rows = append(rows, inst)
 	}
-	for i := 0; i < len(rows); i++ {
-		for j := i + 1; j < len(rows); j++ {
-			if rows[i].Host > rows[j].Host {
-				rows[i], rows[j] = rows[j], rows[i]
-			}
-		}
-	}
+	sortMockInstances(rows, filter.SortBy)
 	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 30
@@ -2601,6 +2595,83 @@ func (m *MockInstanceRepository) List(filter model.InstanceListFilter) ([]*model
 		end = len(rows)
 	}
 	return rows[filter.Offset:end], nil
+}
+
+// sortMockInstances orders rows in place to mirror the real
+// instanceRepository.List sort semantics: "+" prefix is DESC, "-" is ASC,
+// +pubSub is a (followingCount, followersCount) composite, latestRequestReceivedAt
+// honours NULLS LAST/FIRST, and the empty/default key falls back to id DESC.
+// Keeping this faithful lets handler-level tests (e.g. federation/stats top-N
+// selection) actually exercise the chosen sort key.
+func sortMockInstances(rows []*model.Instance, sortBy string) {
+	reqTime := func(t *time.Time) (int64, bool) {
+		if t == nil {
+			return 0, false
+		}
+		return t.UnixNano(), true
+	}
+	var less func(a, b *model.Instance) bool
+	switch sortBy {
+	case "+pubSub":
+		less = func(a, b *model.Instance) bool {
+			if a.FollowingCount != b.FollowingCount {
+				return a.FollowingCount > b.FollowingCount
+			}
+			return a.FollowersCount > b.FollowersCount
+		}
+	case "-pubSub":
+		less = func(a, b *model.Instance) bool {
+			if a.FollowingCount != b.FollowingCount {
+				return a.FollowingCount < b.FollowingCount
+			}
+			return a.FollowersCount < b.FollowersCount
+		}
+	case "+notes":
+		less = func(a, b *model.Instance) bool { return a.NotesCount > b.NotesCount }
+	case "-notes":
+		less = func(a, b *model.Instance) bool { return a.NotesCount < b.NotesCount }
+	case "+users":
+		less = func(a, b *model.Instance) bool { return a.UsersCount > b.UsersCount }
+	case "-users":
+		less = func(a, b *model.Instance) bool { return a.UsersCount < b.UsersCount }
+	case "+following":
+		less = func(a, b *model.Instance) bool { return a.FollowingCount > b.FollowingCount }
+	case "-following":
+		less = func(a, b *model.Instance) bool { return a.FollowingCount < b.FollowingCount }
+	case "+followers":
+		less = func(a, b *model.Instance) bool { return a.FollowersCount > b.FollowersCount }
+	case "-followers":
+		less = func(a, b *model.Instance) bool { return a.FollowersCount < b.FollowersCount }
+	case "+firstRetrievedAt":
+		less = func(a, b *model.Instance) bool { return a.FirstRetrievedAt.After(b.FirstRetrievedAt) }
+	case "-firstRetrievedAt":
+		less = func(a, b *model.Instance) bool { return a.FirstRetrievedAt.Before(b.FirstRetrievedAt) }
+	case "+latestRequestReceivedAt": // DESC NULLS LAST
+		less = func(a, b *model.Instance) bool {
+			av, aok := reqTime(a.LatestRequestReceivedAt)
+			bv, bok := reqTime(b.LatestRequestReceivedAt)
+			if aok != bok {
+				return aok // non-NULL sorts before NULL
+			}
+			return av > bv
+		}
+	case "-latestRequestReceivedAt": // ASC NULLS FIRST
+		less = func(a, b *model.Instance) bool {
+			av, aok := reqTime(a.LatestRequestReceivedAt)
+			bv, bok := reqTime(b.LatestRequestReceivedAt)
+			if aok != bok {
+				return !aok // NULL sorts before non-NULL
+			}
+			return av < bv
+		}
+	case "+host":
+		less = func(a, b *model.Instance) bool { return a.Host < b.Host }
+	case "-host":
+		less = func(a, b *model.Instance) bool { return a.Host > b.Host }
+	default:
+		less = func(a, b *model.Instance) bool { return a.ID > b.ID }
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return less(rows[i], rows[j]) })
 }
 
 // hostInList reports exact (case-sensitive) membership of host in list.

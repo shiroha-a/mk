@@ -176,17 +176,34 @@ func (s *Service) IsSilenced(host string) bool {
 	return HostMatchesAny(meta.SilencedHosts, host)
 }
 
+// FederationHostSets bundles the host lists that drive the federation panel's
+// blocked / silenced / media-silenced state. 3 つとも同じ []string なので、
+// 位置引数で取り違えないよう named field の struct にまとめる。
+type FederationHostSets struct {
+	Blocked       []string
+	Silenced      []string
+	MediaSilenced []string
+}
+
 // FederationHostLists returns the blocked / silenced / media-silenced host
 // lists from meta. federation/instances ハンドラがフィルタ突合と、レスポンスの
 // isBlocked / isSilenced / isMediaSilenced 算出の双方で使うため、meta を 1 回
-// だけ読んで使い回す入口。meta が読めない場合は nil を返す (ベストエフォート;
-// admin federation 一覧が transient error で完全に落ちるのを避ける)。
-func (s *Service) FederationHostLists() (blocked, silenced, mediaSilenced []string) {
+// だけ読んで使い回す入口。
+//
+// IsBlocked / IsSilenced (inbox hot path) はベストエフォートで meta error を
+// 握り潰すが、こちらは admin endpoint 専用なので error をそのまま返す: meta が
+// 読めない状況は本家 TS でも 500 になり (metaService.fetch が throw)、空一覧を
+// 200 で返して「ブロックなし」と誤表示するより安全。
+func (s *Service) FederationHostLists() (FederationHostSets, error) {
 	meta, err := s.metaRepo.Fetch()
 	if err != nil {
-		return nil, nil, nil
+		return FederationHostSets{}, err
 	}
-	return meta.BlockedHosts, meta.SilencedHosts, meta.MediaSilencedHosts
+	return FederationHostSets{
+		Blocked:       meta.BlockedHosts,
+		Silenced:      meta.SilencedHosts,
+		MediaSilenced: meta.MediaSilencedHosts,
+	}, nil
 }
 
 // IsAllowed reports whether the local instance is willing to federate with

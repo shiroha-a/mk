@@ -172,6 +172,17 @@ func TestInstances_StatusFields(t *testing.T) {
 	assert.Equal(t, false, got[0]["isMediaSilenced"])
 }
 
+// TestInstances_MetaError: meta が読めないとき blocked/silenced 判定が
+// できないので 500 を返す (本家 TS も metaService.fetch throw で 500)。
+func TestInstances_MetaError(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	seedInstance(t, repo, "normal.example")
+	metaRepo.Meta = nil
+	c, rec := newReq(t, `{}`)
+	require.NoError(t, h.Instances(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestInstances_BadJSON(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, `{not json`)
@@ -241,6 +252,17 @@ func TestShowInstance_NotFound(t *testing.T) {
 func TestShowInstance_DBError(t *testing.T) {
 	h, repo := newHandler(t)
 	repo.FindByHostErr = errors.New("connection reset by peer")
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// TestShowInstance_MetaError: instance 行は見つかっても meta が読めなければ
+// isBlocked 等を埋められないので 500。
+func TestShowInstance_MetaError(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	seedInstance(t, repo, "alpha.example")
+	metaRepo.Meta = nil
 	c, rec := newReq(t, `{"host":"alpha.example"}`)
 	require.NoError(t, h.ShowInstance(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
