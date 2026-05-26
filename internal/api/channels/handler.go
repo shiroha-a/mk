@@ -29,6 +29,24 @@ type Handler struct {
 	fieldRes      *entity.NoteFieldResolver
 	// userRepo は channels/timeline の hardMutedWords filter (#787)。
 	userRepo repository.UserRepository
+	// bannerResolver は channel の bannerId を drive file に解決して bannerUrl
+	// を埋める (#1280)。未配線なら bannerUrl は null で出す。
+	bannerResolver ChannelBannerResolver
+}
+
+// ChannelBannerResolver covers the drive-file lookups the channels handler
+// needs to resolve `bannerUrl` from a channel's bannerId (#1280). FindByID
+// drives the single-channel paths; FindByIDs batches the list endpoints to
+// avoid an N+1 banner lookup.
+type ChannelBannerResolver interface {
+	FindByID(id string) (*model.DriveFile, error)
+	FindByIDs(ids []string) ([]*model.DriveFile, error)
+}
+
+// SetDriveFileRepo wires a ChannelBannerResolver so packed channels expose
+// `bannerUrl` (#1280). nil leaves bannerUrl as null.
+func (h *Handler) SetDriveFileRepo(r ChannelBannerResolver) {
+	h.bannerResolver = r
 }
 
 // SetUserRepo wires a UserRepository so channels/timeline filters out notes
@@ -387,14 +405,25 @@ func (h *Handler) Timeline(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-func channelToMap(ch *model.Channel) map[string]any {
-	return map[string]any{
+// channelToMap packs a channel into the misskey-compatible shape. bannerURL
+// is the caller-resolved `bannerUrl` value (nil = no banner / unresolved);
+// list callers batch-resolve it once to avoid an N+1 drive lookup (#1280).
+func (h *Handler) channelToMap(ch *model.Channel, bannerURL any) map[string]any {
+	// golden Channel の pinnedNoteIds は string[] 必須 (non-null)。pq.StringArray
+	// は nil のとき JSON null に marshal されるため、空でも [] を返すよう coalesce
+	// する (#1280。Page content #1237 と同種の null-array drift)。
+	pinnedNoteIDs := []string(ch.PinnedNoteIDs)
+	if pinnedNoteIDs == nil {
+		pinnedNoteIDs = []string{}
+	}
+	out := map[string]any{
 		"id":                    ch.ID,
 		"name":                  ch.Name,
 		"description":           ch.Description,
 		"userId":                ch.UserID,
 		"bannerId":              ch.BannerID,
-		"pinnedNoteIds":         ch.PinnedNoteIDs,
+		"bannerUrl":             bannerURL,
+		"pinnedNoteIds":         pinnedNoteIDs,
 		"color":                 ch.Color,
 		"isArchived":            ch.IsArchived,
 		"notesCount":            ch.NotesCount,
@@ -403,6 +432,71 @@ func channelToMap(ch *model.Channel) map[string]any {
 		"allowRenoteToExternal": ch.AllowRenoteToExternal,
 		"lastNotedAt":           ch.LastNotedAt,
 	}
+	// Misskey TS は createdAt を channel.id (aidx) から導出する。golden Channel
+	// でも createdAt は必須なので他 entity と同じ ISO ms 形式で埋める (#1280)。
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(ch.ID); err == nil {
+			out["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
+	return out
+}
+
+// channelBannerPublicURL mirrors upstream DriveFileEntityService.getPublicUrl
+// for the non-proxy path (webpublicUrl ?? url), matching how mk-go already
+// exposes DriveFile.url without pack-time media-proxy rewriting (#1280).
+func channelBannerPublicURL(f *model.DriveFile) string {
+	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
+		return *f.WebpublicURL
+	}
+	return f.URL
+}
+
+// resolveBannerURL resolves a single channel's bannerId to its public URL.
+// Returns nil (= JSON null) when there is no banner or no resolver wired.
+func (h *Handler) resolveBannerURL(bannerID *string) any {
+	if bannerID == nil || *bannerID == "" || h.bannerResolver == nil {
+		return nil
+	}
+	f, err := h.bannerResolver.FindByID(*bannerID)
+	if err != nil || f == nil {
+		return nil
+	}
+	return channelBannerPublicURL(f)
+}
+
+// resolveBannerURLs batch-resolves bannerUrl for a slice of channels in a
+// single FindByIDs call, returning a channelID -> url map (#1280).
+func (h *Handler) resolveBannerURLs(rows []*model.Channel) map[string]any {
+	res := make(map[string]any, len(rows))
+	if h.bannerResolver == nil {
+		return res
+	}
+	ids := make([]string, 0, len(rows))
+	for _, ch := range rows {
+		if ch.BannerID != nil && *ch.BannerID != "" {
+			ids = append(ids, *ch.BannerID)
+		}
+	}
+	if len(ids) == 0 {
+		return res
+	}
+	files, err := h.bannerResolver.FindByIDs(ids)
+	if err != nil {
+		return res
+	}
+	byID := make(map[string]*model.DriveFile, len(files))
+	for _, f := range files {
+		byID[f.ID] = f
+	}
+	for _, ch := range rows {
+		if ch.BannerID != nil {
+			if f := byID[*ch.BannerID]; f != nil {
+				res[ch.ID] = channelBannerPublicURL(f)
+			}
+		}
+	}
+	return res
 }
 
 // channelToMapForViewer wraps channelToMap and embeds viewer-dependent
@@ -413,7 +507,7 @@ func (h *Handler) channelToMapForViewer(ch *model.Channel, viewer *model.User) m
 	// channelFavorites を join して埋めており、frontend (`channel.vue`) は
 	// このフィールドを直接参照してフォローボタン状態を切り替える。欠落
 	// すると常に未フォロー UI になる。
-	out := channelToMap(ch)
+	out := h.channelToMap(ch, h.resolveBannerURL(ch.BannerID))
 	if viewer == nil {
 		return out
 	}
@@ -435,9 +529,10 @@ func (h *Handler) channelToMapForViewer(ch *model.Channel, viewer *model.User) m
 // not N+1). viewer が nil なら viewer-dependent フィールドは省略する。
 func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
+	banners := h.resolveBannerURLs(rows)
 	if viewer == nil || (h.followingRepo == nil && h.favoriteRepo == nil) {
 		for _, ch := range rows {
-			out = append(out, channelToMap(ch))
+			out = append(out, h.channelToMap(ch, banners[ch.ID]))
 		}
 		return out
 	}
@@ -453,7 +548,7 @@ func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []ma
 		favorited, _ = h.favoriteRepo.ExistsMany(viewer.ID, ids)
 	}
 	for _, ch := range rows {
-		m := channelToMap(ch)
+		m := h.channelToMap(ch, banners[ch.ID])
 		if followed != nil {
 			m["isFollowing"] = followed[ch.ID]
 		}

@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	corechannel "github.com/shiroha-a/mk/internal/core/channel"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -55,6 +57,10 @@ func TestCreate_Success(t *testing.T) {
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "alpha")
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "Channel", resp) // L3 (#1280)
 }
 
 func TestCreate_BadJSON(t *testing.T) {
@@ -627,4 +633,104 @@ func TestFeatured_BatchEmbedsFollowState(t *testing.T) {
 		"alice's followed channel must report isFollowing=true")
 	assert.Contains(t, body, `"isFollowing":false`,
 		"unfollowed channels must still report the field for the frontend")
+}
+
+// --- bannerUrl / createdAt resolution (#1280) -----------------------------
+
+// stubBannerResolver is a ChannelBannerResolver double for banner lookups.
+type stubBannerResolver struct {
+	files    map[string]*model.DriveFile
+	batchErr error
+}
+
+func (s *stubBannerResolver) FindByID(id string) (*model.DriveFile, error) {
+	if f, ok := s.files[id]; ok {
+		return f, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *stubBannerResolver) FindByIDs(ids []string) ([]*model.DriveFile, error) {
+	if s.batchErr != nil {
+		return nil, s.batchErr
+	}
+	out := make([]*model.DriveFile, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := s.files[id]; ok {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func aidxID(t *testing.T) string {
+	t.Helper()
+	gen, _ := id.NewGenerator("aidx")
+	return gen.Generate(time.Now())
+}
+
+func TestChannelToMap_BannerURL(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	web := "https://media.example/web.png"
+	h.SetDriveFileRepo(&stubBannerResolver{files: map[string]*model.DriveFile{
+		"b1": {ID: "b1", URL: "https://media.example/orig.png", WebpublicURL: &web},
+		"b2": {ID: "b2", URL: "https://media.example/orig2.png"},
+	}})
+	chID := aidxID(t)
+
+	bid := "b1"
+	out := h.channelToMapForViewer(&model.Channel{ID: chID, BannerID: &bid}, nil)
+	assert.Equal(t, web, out["bannerUrl"], "webpublicUrl is preferred over url")
+	assert.NotEmpty(t, out["createdAt"], "createdAt is derived from the aidx id")
+
+	// webpublicUrl が無ければ url にフォールバック。
+	bid2 := "b2"
+	out = h.channelToMapForViewer(&model.Channel{ID: chID, BannerID: &bid2}, nil)
+	assert.Equal(t, "https://media.example/orig2.png", out["bannerUrl"])
+}
+
+func TestChannelToMap_BannerURL_NullCases(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	chID := aidxID(t)
+
+	// resolver 未配線 -> null。
+	out := h.channelToMapForViewer(&model.Channel{ID: chID}, nil)
+	assert.Contains(t, out, "bannerUrl")
+	assert.Nil(t, out["bannerUrl"])
+
+	h.SetDriveFileRepo(&stubBannerResolver{files: map[string]*model.DriveFile{}})
+	// bannerId nil -> null。
+	out = h.channelToMapForViewer(&model.Channel{ID: chID}, nil)
+	assert.Nil(t, out["bannerUrl"])
+	// bannerId set でも lookup miss -> null。
+	bid := "missing"
+	out = h.channelToMapForViewer(&model.Channel{ID: chID, BannerID: &bid}, nil)
+	assert.Nil(t, out["bannerUrl"])
+}
+
+func TestResolveBannerURLs_Batch(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	web := "https://media.example/web.png"
+	h.SetDriveFileRepo(&stubBannerResolver{files: map[string]*model.DriveFile{
+		"b1": {ID: "b1", URL: "u1", WebpublicURL: &web},
+	}})
+	b1 := "b1"
+	rows := []*model.Channel{
+		{ID: "c1", BannerID: &b1},
+		{ID: "c2"},
+	}
+	res := h.resolveBannerURLs(rows)
+	assert.Equal(t, web, res["c1"])
+	_, ok := res["c2"]
+	assert.False(t, ok, "channel without banner has no map entry")
+
+	// FindByIDs error -> empty map (best-effort)。
+	h.SetDriveFileRepo(&stubBannerResolver{batchErr: errors.New("boom")})
+	assert.Empty(t, h.resolveBannerURLs(rows))
+
+	// resolver 未配線 -> empty map。
+	h2, _, _, _ := newHandler(t)
+	assert.Empty(t, h2.resolveBannerURLs(rows))
+	// 全 channel banner なし -> FindByIDs を呼ばず empty。
+	assert.Empty(t, h.resolveBannerURLs([]*model.Channel{{ID: "c3"}}))
 }

@@ -1618,6 +1618,7 @@ func (s *Server) setupRoutes() {
 	channelsHandler.SetFavoriteRepo(channelFavoriteRepo)
 	channelsHandler.SetMutingRepo(channelMutingRepo)
 	channelsHandler.SetFollowingRepo(channelFollowingRepo)
+	channelsHandler.SetDriveFileRepo(driveFileRepo)
 	// channels/create の canCreateChannel gate は #1020 で middleware に
 	// 昇格 (handler 内 RolePolicyChecker → middleware.RequireRolePolicy)。
 	api.POST("/channels/create", channelsHandler.Create,

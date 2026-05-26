@@ -180,6 +180,103 @@
       "type": "string"
     }
   },
+  "Channel": {
+    "allowRenoteToExternal": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "bannerId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "bannerUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "color": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isArchived": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "isFavorited": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isFollowing": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isMuting": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "lastNotedAt": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "notesCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "pinnedNoteIds": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "pinnedNotes": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "userId": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "usersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    }
+  },
   "Clip": {
     "createdAt": {
       "nullable": false,
