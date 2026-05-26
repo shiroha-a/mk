@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/hashtags"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -123,6 +124,10 @@ func TestShow_Found(t *testing.T) {
 	rec := doPost(newHandler().Show, `{"tag":"rustlang"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "rustlang")
+	// L3 (#1270): hashtags/show の実レスポンスを golden Hashtag に突合する。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "Hashtag", resp)
 }
 
 // TestShow_BadRequestForUnknownTag: upstream Misskey TS は ApiError 既定動作

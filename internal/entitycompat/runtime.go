@@ -25,7 +25,13 @@ func UnionSchemaNames() []string {
 // them; the generator still extracts their flat golden schema into the snapshot
 // for ValidateValue to use.
 func L2FlatSchemaNames() []string {
-	return []string{"Announcement", "Clip", "Signin", "Page", "Antenna"}
+	// L2 packer fixture / L3 handler-response 検証で実際に使う flat schema のみ
+	// 列挙する (未使用 schema を snapshot に入れない)。UserList / Following /
+	// EmojiDetailed は L0 family 側 (GoldenSchemaNames) で抽出済。
+	return []string{
+		"Announcement", "Clip", "Signin", "Page", "Antenna",
+		"GalleryPost", "Hashtag", "App",
+	}
 }
 
 // ParseUnion parses a discriminated-union schema (variants joined by `} | {`)

@@ -148,6 +148,38 @@
       "type": "boolean"
     }
   },
+  "App": {
+    "callbackUrl": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isAuthorized": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "name": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "permission": {
+      "nullable": false,
+      "optional": false,
+      "type": "array"
+    },
+    "secret": {
+      "nullable": false,
+      "optional": true,
+      "type": "string"
+    }
+  },
   "Clip": {
     "createdAt": {
       "nullable": false,
@@ -403,6 +435,110 @@
       "type": "string"
     },
     "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "GalleryPost": {
+    "createdAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "description": {
+      "nullable": true,
+      "optional": false,
+      "type": "string"
+    },
+    "fileIds": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "files": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "id": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "isLiked": {
+      "nullable": false,
+      "optional": true,
+      "type": "boolean"
+    },
+    "isSensitive": {
+      "nullable": false,
+      "optional": false,
+      "type": "boolean"
+    },
+    "likedCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "tags": {
+      "nullable": false,
+      "optional": true,
+      "type": "array"
+    },
+    "title": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "updatedAt": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    },
+    "user": {
+      "nullable": false,
+      "optional": false,
+      "type": "object"
+    },
+    "userId": {
+      "nullable": false,
+      "optional": false,
+      "type": "string"
+    }
+  },
+  "Hashtag": {
+    "attachedLocalUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "attachedRemoteUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "attachedUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "mentionedLocalUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "mentionedRemoteUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "mentionedUsersCount": {
+      "nullable": false,
+      "optional": false,
+      "type": "number"
+    },
+    "tag": {
       "nullable": false,
       "optional": false,
       "type": "string"

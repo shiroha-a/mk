@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -145,6 +146,7 @@ func TestCreate_Success(t *testing.T) {
 	assert.NotEmpty(t, resp["secret"])
 	assert.NotEmpty(t, resp["id"])
 	assert.Len(t, repo.apps, 1)
+	shapetest.Assert(t, "App", resp) // L3 (#1270)
 }
 
 func TestCreate_WithUser(t *testing.T) {
