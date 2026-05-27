@@ -3,8 +3,10 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,7 +183,8 @@ func TestNoteReactionRepository_ListByUserID(t *testing.T) {
 
 	// user2 視点で 2 件、Preload("User") / Preload("Note") が効いていることも
 	// 確認する。
-	out, err := repo.ListByUserID(user2.ID, "", "", 10)
+	// note は全て public なので匿名 viewer (viewerID="") でも全件見える。
+	out, err := repo.ListByUserID(user2.ID, "", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	for _, rec := range out {
@@ -192,22 +195,101 @@ func TestNoteReactionRepository_ListByUserID(t *testing.T) {
 	}
 
 	// user1 視点で 1 件 (= note2 のみ)。
-	out, err = repo.ListByUserID(user1.ID, "", "", 10)
+	out, err = repo.ListByUserID(user1.ID, "", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, "rx_u3", out[0].ID)
 
 	// untilID で絞り込み (rx_u2 より前 → rx_u1 の 1 件)。
-	out, err = repo.ListByUserID(user2.ID, "rx_u2", "", 10)
+	out, err = repo.ListByUserID(user2.ID, "", "rx_u2", "", 10)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, "rx_u1", out[0].ID)
 
 	// sinceID で絞り込み (rx_u1 より後 → rx_u2 の 1 件)。
-	out, err = repo.ListByUserID(user2.ID, "", "rx_u1", 10)
+	out, err = repo.ListByUserID(user2.ID, "", "", "rx_u1", 10)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, "rx_u2", out[0].ID)
+}
+
+// TestNoteReactionRepository_ListByUserID_VisibilityPushDown は
+// generateVisibilityQuery 相当の SQL push down を検証する。reactor が
+// public / followers-only / specified の 3 note に reaction し、viewer ごとに
+// 見える reaction が変わることを確認する (LIMIT 前に SQL で絞られるため
+// ページネーションが途切れない)。
+func TestNoteReactionRepository_ListByUserID_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteReactionRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+	noteRepo := NewNoteRepository(testDB)
+
+	reactor := insertTestUser(t, "u_nrv_r", "nrvreact")
+	author := insertTestUser(t, "u_nrv_a", "nrvauthor")
+	follower := insertTestUser(t, "u_nrv_f", "nrvfollower")
+	allowed := insertTestUser(t, "u_nrv_al", "nrvallowed")
+	stranger := insertTestUser(t, "u_nrv_s", "nrvstranger")
+	for _, id := range []string{reactor.ID, author.ID, follower.ID, allowed.ID, stranger.ID} {
+		defer cleanupUser(t, id)
+	}
+
+	notes := []*model.Note{
+		{ID: "n_nrv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_nrv_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_nrv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, noteRepo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	for _, r := range []struct{ id, nid, rx string }{
+		{"rxv_pub", "n_nrv_pub", "👍"},
+		{"rxv_fol", "n_nrv_fol", "❤"},
+		{"rxv_spec", "n_nrv_spec", "👀"},
+	} {
+		rec := &model.NoteReaction{ID: r.id, UserID: reactor.ID, NoteID: r.nid, Reaction: r.rx}
+		require.NoError(t, repo.Create(rec))
+		defer cleanupReaction(t, rec.ID)
+	}
+
+	// follower が author を follow している。
+	f := &model.Following{ID: "fl_nrv_1", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+
+	idsOf := func(rows []*model.NoteReaction) []string {
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	// 匿名 viewer は public のみ。
+	out, err := repo.ListByUserID(reactor.ID, "", "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rxv_pub"}, idsOf(out))
+
+	// stranger (follow なし / specified 対象外) も public のみ。
+	out, err = repo.ListByUserID(reactor.ID, stranger.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rxv_pub"}, idsOf(out))
+
+	// follower は public + followers。
+	out, err = repo.ListByUserID(reactor.ID, follower.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rxv_fol", "rxv_pub"}, idsOf(out))
+
+	// specified の visibleUserIds に含まれる viewer は public + specified。
+	out, err = repo.ListByUserID(reactor.ID, allowed.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rxv_pub", "rxv_spec"}, idsOf(out))
+
+	// author 本人は自分の followers / specified note を全て見られる。
+	out, err = repo.ListByUserID(reactor.ID, author.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rxv_fol", "rxv_pub", "rxv_spec"}, idsOf(out))
 }
 
 func TestNoteReactionRepository_QueryErrors(t *testing.T) {

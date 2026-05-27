@@ -23,8 +23,10 @@ type NoteReactionRepository interface {
 	ListByNoteID(noteID string, untilID, sinceID string, limit int, reactions []string) ([]*model.NoteReaction, error)
 	// ListByUserID returns reactions made by the given user, with User and Note
 	// preloaded for packing. upstream Misskey TS の users/reactions endpoint
-	// 用 (reactor 視点の reaction list)。
-	ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error)
+	// 用 (reactor 視点の reaction list)。viewerID は閲覧者 (空文字列で匿名) で、
+	// upstream の generateVisibilityQuery と同じく viewer が見られない note
+	// (followers/specified) の reaction を SQL 段階で除外する。
+	ListByUserID(userID, viewerID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error)
 }
 
 type noteReactionRepository struct {
@@ -102,12 +104,29 @@ func (r *noteReactionRepository) ListByNoteID(noteID string, untilID, sinceID st
 // の users/reactions endpoint で使う reactor 視点の list。User / Note を
 // preload して pack 時に追加 query が走らないようにする。pagination は
 // ListByNoteID と同じ keyset 方式 (paginationOrder で DESC 既定)。
-func (r *noteReactionRepository) ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
+func (r *noteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
 	var rows []*model.NoteReaction
 	// Note.User も preload する。users/reactions は note を完全 shape (PackNotes)
 	// で返すため、note author が無いと misskey_dart の Note.user (UserLite) 解析が
 	// null で落ちる (#1227)。
 	q := r.db.Preload("User").Preload("Note").Preload("Note.User").Where("\"userId\" = ?", userID)
+	// upstream の generateVisibilityQuery 相当を相関 EXISTS で SQL に push down
+	// する。post-fetch filter だと viewer が見られない note が除外された分
+	// 1 ページが limit 未満になりページネーションが途切れるため、LIMIT 前に
+	// 絞る。条件は core/note.CanSeeNote と一致させる (= timeline の FilterVisible
+	// と同じ可視性定義。upstream の mentions / replyUserId は CanSeeNote 側に
+	// 無いので合わせて含めない)。
+	if viewerID == "" {
+		// 匿名は public / home のみ。
+		q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "note_reaction"."noteId" AND v."visibility" IN ('public','home'))`)
+	} else {
+		q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "note_reaction"."noteId" AND (`+
+			`v."visibility" IN ('public','home') `+
+			`OR v."userId" = ? `+
+			`OR (v."visibility" = 'followers' AND v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+			`OR (v."visibility" = 'specified' AND ? = ANY(v."visibleUserIds"))))`,
+			viewerID, viewerID, viewerID)
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}

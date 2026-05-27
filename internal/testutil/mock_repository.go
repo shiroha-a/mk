@@ -1268,6 +1268,12 @@ func (m *MockNoteFavoriteRepository) ListByUser(userID, untilID, sinceID string,
 type MockNoteReactionRepository struct {
 	Reactions map[string]*model.NoteReaction // keyed by id
 	CreateErr error                          // optional error to return on Create
+	// Following は ListByUserID の visibility filter (followers note の follow
+	// 判定) に使う followerID -> followeeIDs map。未設定なら follow なし扱い
+	// (= 非 follower viewer)。testutil は repository を import すると repository
+	// 内部テストとの循環になるため、core/note.CanSeeNote は使わず inline で
+	// 可視性を再現する (条件は CanSeeNote と一致させる)。
+	Following map[string][]string
 }
 
 func NewMockNoteReactionRepository() *MockNoteReactionRepository {
@@ -1360,10 +1366,15 @@ func (m *MockNoteReactionRepository) ListByNoteID(noteID, untilID, sinceID strin
 
 // ListByUserID returns reactions made by a user. paginationOrder と同じく
 // sinceID 単独指定時のみ ASC、それ以外 DESC (ListByNoteID と同 logic)。
-func (m *MockNoteReactionRepository) ListByUserID(userID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
+func (m *MockNoteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
 	var rows []*model.NoteReaction
 	for _, r := range m.Reactions {
 		if r.UserID != userID {
+			continue
+		}
+		// real repo の EXISTS visibility subquery を inline 再現する (LIMIT 前に
+		// 絞ることで viewer が見られない note の reaction を除外)。
+		if !m.canViewerSeeNote(viewerID, r.Note) {
 			continue
 		}
 		if untilID != "" && r.ID >= untilID {
@@ -1392,6 +1403,46 @@ func (m *MockNoteReactionRepository) ListByUserID(userID, untilID, sinceID strin
 		rows = rows[:limit]
 	}
 	return rows, nil
+}
+
+// canViewerSeeNote replicates the real repo's visibility EXISTS subquery
+// inline. 条件は core/note.CanSeeNote と一致させる (public/home は全員、followers
+// は author 本人または follow 済み、specified は author 本人または visibleUserIds
+// に含まれる)。n == nil は mock が visibility を評価できないため visible 扱いに
+// する (= 最小構成の reaction を使う既存 handler test 互換。実 repo は FK +
+// Preload で note が必ず存在するためこの分岐は production では起きない)。
+func (m *MockNoteReactionRepository) canViewerSeeNote(viewerID string, n *model.Note) bool {
+	if n == nil {
+		return true
+	}
+	switch n.Visibility {
+	case model.NoteVisibilityPublic, model.NoteVisibilityHome:
+		return true
+	}
+	if viewerID == "" {
+		return false
+	}
+	// author 本人は followers/specified を問わず閲覧可。
+	if viewerID == n.UserID {
+		return true
+	}
+	switch n.Visibility {
+	case model.NoteVisibilityFollowers:
+		for _, followee := range m.Following[viewerID] {
+			if followee == n.UserID {
+				return true
+			}
+		}
+		return false
+	case model.NoteVisibilitySpecified:
+		for _, id := range n.VisibleUserIDs {
+			if id == viewerID {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // MockEmojiRepository is a test double for repository.EmojiRepository.

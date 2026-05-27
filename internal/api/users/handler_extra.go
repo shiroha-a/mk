@@ -9,7 +9,6 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
-	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -219,23 +218,19 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if h.noteReactionRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.noteReactionRepo.ListByUserID(req.UserID, req.UntilID, req.SinceID, req.Limit)
+	// upstream の generateVisibilityQuery(query, me) 相当を repo の SQL に push
+	// down する (moderator も含む全 viewer に適用)。viewer が閲覧できない note
+	// (followers/specified) の reaction を LIMIT 前に除外することで、post-filter
+	// 時に起きる「ページが limit 未満になりページネーションが途切れる」問題を
+	// 避ける。
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	rows, err := h.noteReactionRepo.ListByUserID(req.UserID, viewerID, req.UntilID, req.SinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-
-	// upstream は generateVisibilityQuery(query, me) で viewer が閲覧できない
-	// note (followers/specified) の reaction を moderator も含む全 viewer から
-	// 除外する。mk-go は post-fetch で CanSeeNote で filter する (timeline の
-	// FilterVisible と同 pattern)。これが無いと reaction 経由で非公開 note が
-	// 露出する。
-	visible := rows[:0]
-	for _, r := range rows {
-		if r.Note == nil || note.CanSeeNote(viewer, r.Note, h.followingRepo) {
-			visible = append(visible, r)
-		}
-	}
-	rows = visible
 
 	// note は upstream の packManyWithNote と同じく完全 shape で返す。最小 shape
 	// (id/userId/text) だと createdAt / visibility / user 等が欠落し、misskey_dart
