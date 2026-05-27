@@ -28,7 +28,7 @@ func (h *Handler) MuteCreate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "7174361e-d58f-31d6-2e7c-6fb830786a3f"))
 	}
 	already, _ := h.mutingRepo.Exists(user.ID, req.ChannelID)
 	if already {

@@ -37,7 +37,7 @@ func (h *Handler) Favorite(c echo.Context) error {
 	}
 	// クリップの存在確認
 	if _, err := h.svc.Show(user.ID, req.ClipID); err != nil {
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "4c2aaeae-80d8-4250-9606-26cb1fdb77a5"))
 	}
 	already, _ := h.favoriteRepo.Exists(user.ID, req.ClipID)
 	if already {

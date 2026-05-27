@@ -28,7 +28,7 @@ func (h *Handler) Favorite(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "4938f5f3-6167-4c04-9149-6607b7542861"))
 	}
 	already, _ := h.favoriteRepo.Exists(user.ID, req.ChannelID)
 	if already {

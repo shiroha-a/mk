@@ -154,7 +154,7 @@ func (h *Handler) Show(c echo.Context) error {
 			return apierr.JSONAccessDenied(c)
 		}
 		// Show は ErrAntennaNotFound 以外を返さない (未マップ含む)
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "c06569fb-b025-4f23-b22d-1fcd20d2816b"))
 	}
 	return c.JSON(http.StatusOK, h.antennaToMap(a))
 }
@@ -200,7 +200,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "10c673ac-8852-48eb-aa1f-f5b67f069290"))
 		case errors.Is(err, coreantenna.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreantenna.ErrAntennaNameRequired),
@@ -227,7 +227,7 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Delete(user.ID, req.AntennaID); err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "b34dcf9d-348f-44bb-99d0-6c9314cfe2df"))
 		case errors.Is(err, coreantenna.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		}
@@ -277,7 +277,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "850926e0-fd3b-49b6-b69a-b28a5dbd82fe"))
 		case errors.Is(err, coreantenna.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		}
@@ -354,8 +354,4 @@ func jsonArrayOrEmpty(b []byte) any {
 		return []any{}
 	}
 	return json.RawMessage(b)
-}
-
-func notFound(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "3a1fb010-b54c-4f28-9a06-a5c7c7c1c33a"))
 }

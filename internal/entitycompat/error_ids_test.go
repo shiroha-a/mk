@@ -139,11 +139,18 @@ type emission struct {
 }
 
 var (
-	// funcDeclRe matches a method declaration `func (recv T) Name(`.
-	funcDeclRe = regexp.MustCompile(`func \(\w+ \*?\w+\) (\w+)\(`)
-	// inlineErrRe matches apierr.Error("CODE", <msg>, <id>) where msg is a
-	// string literal or identifier and id is a literal or UUID constant.
-	inlineErrRe = regexp.MustCompile(`apierr\.Error\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|(?:apierr\.)?UUID\w+)\s*\)`)
+	// funcDeclRe matches a function declaration — both methods `func (recv T) Name(`
+	// and package-level free functions `func Name(`. Recognizing free functions is
+	// essential: handlers delegate error responses to package-level helpers (e.g.
+	// `func notFound(c echo.Context) error`), and without matching their boundary
+	// their emissions would be mis-attributed to the preceding method.
+	funcDeclRe = regexp.MustCompile(`func (?:\(\w+ \*?\w+\) )?(\w+)\(`)
+	// inlineErrRe matches apierr.Error("CODE", <msg>, <id>). msg may be a string
+	// literal, a parenless function call (err.Error(), fmt.Sprintf("...")), or an
+	// identifier; id may be a literal UUID or a UUID constant. A trailing comma
+	// (gofmt adds one to multi-line calls) is tolerated. `(?s)` lets the pattern
+	// span the multi-line calls gofmt produces.
+	inlineErrRe = regexp.MustCompile(`(?s)apierr\.Error\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+\([^)]*\)|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|(?:apierr\.)?UUID\w+)\s*,?\s*\)`)
 	// helperCallRe matches apierr.Helper( — any apierr.X( call; non-helpers
 	// (e.g. Error) are filtered against the parsed helper table.
 	helperCallRe = regexp.MustCompile(`apierr\.(\w+)\(`)

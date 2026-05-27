@@ -185,7 +185,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	ch, err := h.svc.Show(req.ChannelID)
 	if err != nil {
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "6f6c314b-7486-4897-8966-c04a66a02923"))
 	}
 	return c.JSON(http.StatusOK, h.channelToMapForViewer(ch, middleware.GetUser(c)))
 }
@@ -221,7 +221,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, corechannel.ErrChannelNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "f9c5467f-d492-4c3c-9a8d-a70dacc86512"))
 		case errors.Is(err, corechannel.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fdf-b8df-057788cce513"))
 		case errors.Is(err, corechannel.ErrChannelNameRequired):
@@ -247,7 +247,7 @@ func (h *Handler) Follow(c echo.Context) error {
 	if err := h.svc.Follow(user.ID, req.ChannelID); err != nil {
 		switch {
 		case errors.Is(err, corechannel.ErrChannelNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "c0031718-d573-4e85-928e-10039f1fbb68"))
 		case errors.Is(err, corechannel.ErrAlreadyFollowing):
 			return alreadyFollowing(c)
 		}
@@ -390,7 +390,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 	notes, err := h.svc.Timeline(req.ChannelID, untilID, sinceID, limit)
 	if err != nil {
 		if errors.Is(err, corechannel.ErrChannelNotFound) {
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "4d0eeeba-a02c-4c3c-9966-ef60d38d2e7f"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -558,10 +558,6 @@ func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []ma
 		out = append(out, m)
 	}
 	return out
-}
-
-func notFound(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "8ee5d9d4-9cb0-4f40-bba4-aaa31a3b48b9"))
 }
 
 func alreadyFollowing(c echo.Context) error {

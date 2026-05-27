@@ -133,7 +133,7 @@ func (h *Handler) Show(c echo.Context) error {
 		if errors.Is(err, coreclip.ErrAccessDenied) {
 			return apierr.JSONAccessDenied(c)
 		}
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "c3c5fe33-d62c-44d2-9ea5-d997703f5c20"))
 	}
 	return c.JSON(http.StatusOK, h.clipToMap(cl))
 }
@@ -165,7 +165,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b4d92d70-b216-46fa-9a3f-a8c811699257"))
 		case errors.Is(err, coreclip.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrClipNameRequired):
@@ -191,7 +191,7 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Delete(user.ID, req.ClipID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "70ca08ba-6865-4630-b6fb-8494759aa754"))
 		case errors.Is(err, coreclip.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		}
@@ -249,13 +249,13 @@ func (h *Handler) AddNote(c echo.Context) error {
 	if err := h.svc.AddNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "d6e76cc0-a1b5-4c7c-a287-73fa9c716dcf"))
 		case errors.Is(err, coreclip.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrNoteNotFound):
-			return notFoundNote(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 		case errors.Is(err, coreclip.ErrAlreadyClipped):
-			return alreadyClipped(c)
+			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_CLIPPED", "The note has already been clipped.", "734806c4-542c-463a-9311-15c512803965"))
 		case errors.Is(err, coreclip.ErrTooManyClipNotes):
 			return apierr.JSONTooManyClipNotes(c)
 		}
@@ -280,7 +280,7 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 	if err := h.svc.RemoveNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b80525c6-97f7-49d7-a42d-ebccd49cfd52"))
 		case errors.Is(err, coreclip.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrNotClipped):
@@ -318,7 +318,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00"))
 		case errors.Is(err, coreclip.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
 		}
@@ -344,18 +344,6 @@ func (h *Handler) clipToMap(cl *model.Clip) map[string]any {
 		owner, _ = h.userRepo.FindByID(cl.UserID)
 	}
 	return entity.PackClip(cl, h.idGen, owner)
-}
-
-func notFound(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "f4a9c0c6-a6c3-4a07-8e6b-0a4f2b1a27e9"))
-}
-
-func notFoundNote(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.NoSuchNote())
-}
-
-func alreadyClipped(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_CLIPPED", "The note has already been clipped.", "734806c4-542c-463a-9311-15c512803965"))
 }
 
 func notClipped(c echo.Context) error {

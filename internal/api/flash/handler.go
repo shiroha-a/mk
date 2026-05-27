@@ -81,7 +81,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	f, err := h.svc.Show(requesterID, req.FlashID)
 	if err != nil {
-		return notFound(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "f0d34a1a-d29a-401d-90ba-1982122b5630"))
 	}
 	resp := h.flashesToListWithUser([]*model.Flash{f})[0]
 	if user != nil {
@@ -120,7 +120,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "611e13d2-309e-419a-a5e4-e0422da39b02"))
 		case errors.Is(err, coreflash.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "08e60c88-5948-478e-a132-02ec701d67b2"))
 		case errors.Is(err, coreflash.ErrFlashTitleRequired):
@@ -146,7 +146,7 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Delete(user.ID, req.FlashID); err != nil {
 		switch {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "de1623ef-bbb3-4289-a71e-14cfa83d9740"))
 		case errors.Is(err, coreflash.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1036ad7b-9f92-4fff-89c3-0e50dc941704"))
 		}
@@ -239,9 +239,9 @@ func (h *Handler) Like(c echo.Context) error {
 	if err := h.svc.Like(user.ID, req.FlashID); err != nil {
 		switch {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "c07c1491-9161-4c5c-9d75-01906f911f73"))
 		case errors.Is(err, coreflash.ErrAlreadyLiked):
-			return alreadyLiked(c)
+			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that flash.", "010065cf-ad43-40df-8067-abff9f4686e3"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -258,9 +258,9 @@ func (h *Handler) Unlike(c echo.Context) error {
 	if err := h.svc.Unlike(user.ID, req.FlashID); err != nil {
 		switch {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
-			return notFound(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "afe8424a-a69e-432d-a5f2-2f0740c62410"))
 		case errors.Is(err, coreflash.ErrNotLiked):
-			return notLiked(c)
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_LIKED", "You have not liked that flash.", "755f25a7-9871-4f65-9f34-51eaad9ae0ac"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -377,16 +377,4 @@ func (h *Handler) flashesToListWithUser(rows []*model.Flash) []map[string]any {
 		out = append(out, entry)
 	}
 	return out
-}
-
-func notFound(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "f0d34a1a-d29a-401d-90ba-1982122b5630"))
-}
-
-func alreadyLiked(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that flash.", "33106d32-22c2-4cdb-9c2e-29ddf92fd14c"))
-}
-
-func notLiked(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("NOT_LIKED", "You have not liked that flash.", "f5eb37a7-72e4-4c2a-89e1-d56fbafe8b25"))
 }
