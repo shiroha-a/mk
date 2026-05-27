@@ -9,7 +9,7 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check
+	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check
 
 # Binary output
 BINARY=misskey
@@ -441,6 +441,7 @@ shapecheck-gen:
 	go run ./tools/shapediff
 	go run ./tools/erroriddiff
 	go run ./tools/limitspec
+	go run ./tools/permspec
 
 # 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
 shapecheck-report:
@@ -463,3 +464,8 @@ errorid-check:
 # 経由で endpoint に解決し、Misskey paramDef の default/maximum と突合する。
 limitspec-check:
 	go test ./internal/entitycompat/... -run TestLimitSpecDrift -count=1 -v
+
+# permission drift gate をローカルで実行する。mk-go の router middleware が
+# Misskey の requireAdmin/requireModerator/requireCredential より緩くないか検証。
+perm-check:
+	go test ./internal/entitycompat/... -run TestPermissionDrift -count=1 -v

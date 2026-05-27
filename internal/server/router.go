@@ -1178,7 +1178,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/drafts/count", notesHandler.DraftsCount, middleware.RequireAuth())
 	api.POST("/notes/thread-muting/create", notesHandler.ThreadMutingCreate, middleware.RequireAuth())
 	api.POST("/notes/thread-muting/delete", notesHandler.ThreadMutingDelete, middleware.RequireAuth())
-	api.POST("/notes/polls/recommendation", notesHandler.PollsRecommendation)
+	api.POST("/notes/polls/recommendation", notesHandler.PollsRecommendation, middleware.RequireAuth())
 
 	// Users endpoints
 	usersHandler := users.NewHandler(userService, followingService, noteRepo, idGen)
@@ -1902,10 +1902,10 @@ func (s *Server) setupRoutes() {
 	rolesHandler.SetReactionReader(reactionCountWriter)
 	rolesHandler.SetNoteFieldResolver(noteFieldResolver)
 	rolesHandler.SetUserRepo(userRepo)
-	api.POST("/roles/list", rolesHandler.List)
+	api.POST("/roles/list", rolesHandler.List, middleware.RequireAuth())
 	api.POST("/roles/show", rolesHandler.Show)
 	api.POST("/roles/users", rolesHandler.Users)
-	api.POST("/roles/notes", rolesHandler.Notes)
+	api.POST("/roles/notes", rolesHandler.Notes, middleware.RequireAuth())
 
 	// User lists (Phase 6)
 	userListHandler := apiuserlists.NewHandler(userListRepo, idGen)
@@ -2010,7 +2010,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/roles/update-default-policies", adminHandler.RolesUpdateDefaultPolicies, middleware.RequireAdmin(roleService))
 	api.POST("/admin/abuse-user-reports", adminHandler.AbuseReports, middleware.RequireModerator(roleService))
 	api.POST("/admin/resolve-abuse-user-report", adminHandler.ResolveAbuseReport, middleware.RequireModerator(roleService))
-	api.POST("/admin/show-moderation-logs", adminHandler.ShowModerationLogs, middleware.RequireModerator(roleService))
+	api.POST("/admin/show-moderation-logs", adminHandler.ShowModerationLogs, middleware.RequireAdmin(roleService))
 	// admin/emoji/* と admin/avatar-decorations/* は upstream Misskey TS の
 	// ApiCallService.ts が requiredRolePolicy (canManageCustomEmojis /
 	// canManageAvatarDecorations) のみで gate する (requireModerator/Admin
@@ -2027,8 +2027,8 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/announcements/list", announcementHandler.AdminList, middleware.RequireAdmin(roleService))
 
 	// Phase 7.5: admin/* 残りエンドポイント (ハンドラメソッド化)
-	api.POST("/admin/delete-account", adminHandler.DeleteAccount, middleware.RequireModerator(roleService))
-	api.POST("/admin/delete-all-files-of-a-user", adminHandler.DeleteAllFilesOfUser, middleware.RequireModerator(roleService))
+	api.POST("/admin/delete-account", adminHandler.DeleteAccount, middleware.RequireAdmin(roleService))
+	api.POST("/admin/delete-all-files-of-a-user", adminHandler.DeleteAllFilesOfUser, middleware.RequireAdmin(roleService))
 	api.POST("/admin/reset-password", adminHandler.ResetPassword, middleware.RequireModerator(roleService))
 	api.POST("/admin/send-email", adminHandler.SendEmail, middleware.RequireModerator(roleService))
 	api.POST("/admin/unset-user-avatar", adminHandler.UnsetUserAvatar, middleware.RequireModerator(roleService))
@@ -2037,14 +2037,14 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/update-proxy-account", adminHandler.UpdateProxyAccount, middleware.RequireModerator(roleService))
 	api.POST("/admin/forward-abuse-user-report", adminHandler.ForwardAbuseUserReport, middleware.RequireModerator(roleService))
 	api.POST("/admin/update-abuse-user-report", adminHandler.UpdateAbuseUserReport, middleware.RequireModerator(roleService))
-	api.POST("/admin/accounts/delete", adminHandler.AccountsDelete, middleware.RequireModerator(roleService))
-	api.POST("/admin/accounts/find-by-email", adminHandler.AccountsFindByEmail, middleware.RequireModerator(roleService))
-	api.POST("/admin/get-user-ips", adminHandler.GetUserIPs, middleware.RequireModerator(roleService))
+	api.POST("/admin/accounts/delete", adminHandler.AccountsDelete, middleware.RequireAdmin(roleService))
+	api.POST("/admin/accounts/find-by-email", adminHandler.AccountsFindByEmail, middleware.RequireAdmin(roleService))
+	api.POST("/admin/get-user-ips", adminHandler.GetUserIPs, middleware.RequireAdmin(roleService))
 	api.POST("/admin/get-index-stats", adminHandler.GetIndexStats, middleware.RequireAdmin(roleService))
 	api.POST("/admin/get-table-stats", adminHandler.GetTableStats, middleware.RequireAdmin(roleService))
 	api.POST("/admin/server-info", adminHandler.ServerInfo, middleware.RequireAdmin(roleService))
 	api.POST("/admin/captcha/current", adminHandler.CaptchaCurrent, middleware.RequireAdmin(roleService))
-	api.POST("/admin/captcha/save", adminHandler.CaptchaSave, middleware.RequireModerator(roleService))
+	api.POST("/admin/captcha/save", adminHandler.CaptchaSave, middleware.RequireAdmin(roleService))
 	api.POST("/admin/ad/create", adminHandler.AdCreate, middleware.RequireModerator(roleService))
 	api.POST("/admin/ad/delete", adminHandler.AdDelete, middleware.RequireModerator(roleService))
 	api.POST("/admin/ad/list", adminHandler.AdList, middleware.RequireModerator(roleService))
