@@ -265,7 +265,7 @@ func TestJSONContainsTooManyMentions(t *testing.T) {
 
 func TestJSONFailedToResolveRemoteUser(t *testing.T) {
 	code, body := invoke(t, JSONFailedToResolveRemoteUser)
-	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, http.StatusInternalServerError, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "FAILED_TO_RESOLVE_REMOTE_USER", errObj["code"])
 }

@@ -242,7 +242,7 @@ func TestFilesCreate_MaxFileSizeExceeded(t *testing.T) {
 	c, rec := newMultipartReq(t, "x.bin", body, nil)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 	assert.Contains(t, rec.Body.String(), "MAX_FILE_SIZE_EXCEEDED")
 	assert.Contains(t, rec.Body.String(), "b9d8c348-33f0-4673-b9a9-5d4da058977a")
 }

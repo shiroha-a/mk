@@ -417,7 +417,8 @@ func ContainsTooManyMentions() map[string]any {
 	return Error("CONTAINS_TOO_MANY_MENTIONS", "Cannot post because it exceeds the allowed number of mentions.", UUIDContainsTooManyMentions)
 }
 
-// FailedToResolveRemoteUser returns a 404 FAILED_TO_RESOLVE_REMOTE_USER response.
+// FailedToResolveRemoteUser returns a FAILED_TO_RESOLVE_REMOTE_USER error body.
+// upstream users/show は kind:'server' (= HTTP 500) で返す (JSON wrapper 側で付与)。
 func FailedToResolveRemoteUser() map[string]any {
 	return Error("FAILED_TO_RESOLVE_REMOTE_USER", "Failed to resolve remote user.", UUIDFailedToResolveRemoteUser)
 }

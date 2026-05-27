@@ -1,0 +1,49 @@
+{
+  "admin/abuse-report/notification-recipient/create": {
+    "CORRELATION_CHECK_EMAIL": 400,
+    "CORRELATION_CHECK_WEBHOOK": 400,
+    "EMAIL_ADDRESS_NOT_SET": 400
+  },
+  "admin/abuse-report/notification-recipient/show": {
+    "NO_SUCH_RECIPIENT": 404
+  },
+  "admin/abuse-report/notification-recipient/update": {
+    "CORRELATION_CHECK_EMAIL": 400,
+    "CORRELATION_CHECK_WEBHOOK": 400,
+    "EMAIL_ADDRESS_NOT_SET": 400
+  },
+  "admin/captcha/save": {
+    "INVALID_PARAMETERS": 400,
+    "INVALID_PROVIDER": 400,
+    "NO_RESPONSE_PROVIDED": 400,
+    "REQUEST_FAILED": 500,
+    "UNKNOWN": 500,
+    "VERIFICATION_FAILED": 400
+  },
+  "admin/forward-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": 404
+  },
+  "admin/resolve-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": 404
+  },
+  "admin/system-webhook/show": {
+    "NO_SUCH_SYSTEM_WEBHOOK": 404
+  },
+  "admin/update-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": 404
+  },
+  "drive/files/create": {
+    "MAX_FILE_SIZE_EXCEEDED": 413
+  },
+  "i": {
+    "USER_IS_DELETED": 403
+  },
+  "i/update": {
+    "YOUR_ACCOUNT_MOVED": 403,
+    "YOUR_NAME_CONTAINS_PROHIBITED_WORDS": 422
+  },
+  "users/show": {
+    "FAILED_TO_RESOLVE_REMOTE_USER": 500,
+    "NO_SUCH_USER": 404
+  }
+}

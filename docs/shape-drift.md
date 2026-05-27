@@ -249,8 +249,23 @@ echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrou
 ### 運用
 
 ```bash
-make errorid-check    # gate をローカル実行 (TestErrorIDDrift)
-make shapecheck-gen   # shape golden と合わせて golden_error_ids.json も再生成
+make errorid-check    # id gate + HTTP status gate をローカル実行
+make shapecheck-gen   # shape golden と合わせて error id / status golden も再生成
 ```
 
-upstream bump時は`make shapecheck-gen`で両goldenを再生成してcommit。新しいerror idを返すendpointを足すときは、verify-before-fixに従い対応するMisskey endpointの`meta.errors`のidを確認してから実装する。
+upstream bump時は`make shapecheck-gen`で全goldenを再生成してcommit。新しいerror idを返すendpointを足すときは、verify-before-fixに従い対応するMisskey endpointの`meta.errors`のidを確認してから実装する。
+
+## Error HTTP status drift gate（明示ステータスのみ）
+
+`TestErrorHTTPStatusDrift`は、エラーレスポンスの**HTTPステータス**をgateする。ただし**Misskeyが明示的にステータスを固定しているエラーだけ**を対象にする。
+
+Misskeyの`ApiCallService`は`httpStatusCode` → 無ければ`kind`既定(`client`→400 / `permission`→403 / `server`→500)でステータスを決め、`kind`既定値は`client`。実態として**448エラー中425件(95%)が未指定=400**で、mk-goは`NO_SUCH_*`に404、`ACCESS_DENIED`に403というセマンティックなステータスを返す。misskey-jsは`status===200`以外を一律errorとしてbodyを読むため400/404を区別せず、**全部400に倒すのは設計上の損失**(REST的セマンティクスを失う)。
+
+そこで本gateは「Misskeyが`httpStatusCode`または非デフォルト`kind`を明示している」契約(23件)だけを golden 化(`tools/erroriddiff`が`golden_error_status.json`に出力、暗黙400は記録しない)。mk-goが各endpointで返すステータス(inline `c.JSON(http.StatusX, ...)` / `JSONXxx` wrapper)を解決して突合する。
+
+検出・整合した実例(本gate新設時):
+
+| endpoint | code | mk旧 | Misskey明示 |
+|---|---|---|---|
+| `drive/files/create` | `MAX_FILE_SIZE_EXCEEDED` | 400 | 413 (`httpStatusCode`) |
+| `users/show` | `FAILED_TO_RESOLVE_REMOTE_USER` | 404 | 500 (`kind:'server'`) |

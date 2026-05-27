@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -29,12 +30,30 @@ import (
 // `id` directly after `code`, so the adjacent pattern captures every pair.
 var codeIDRe = regexp.MustCompile(`code:\s*'([^']+)'\s*,\s*id:\s*'([^']+)'`)
 
+// errBlockRe captures a whole meta.errors entry object so per-error attributes
+// (httpStatusCode / kind) can be read alongside the code. Misskey error objects
+// are flat (no nested braces), so the brace-free body match is sufficient.
+var (
+	errBlockRe   = regexp.MustCompile(`\{[^{}]*?code:\s*'([A-Z_]+)'[^{}]*?\}`)
+	httpStatusRe = regexp.MustCompile(`httpStatusCode:\s*(\d+)`)
+	kindRe       = regexp.MustCompile(`kind:\s*'(\w+)'`)
+)
+
+// kindStatus maps Misskey's ApiError `kind` to the default HTTP status applied
+// by ApiCallService when httpStatusCode is absent (client->400, permission->403,
+// server->500). The default kind is 'client', so entries with neither attribute
+// are 400 and are intentionally NOT recorded: aligning mk-go's semantic statuses
+// to a blanket 400 is out of scope (only explicit upstream statuses are gated).
+var kindStatus = map[string]int{"client": 400, "permission": 403, "server": 500}
+
 func main() {
 	epDir := flag.String("endpoints", "third_party/misskey/packages/backend/src/server/api/endpoints", "path to Misskey backend endpoints dir")
-	out := flag.String("out", "internal/entitycompat/testdata/golden_error_ids.json", "golden snapshot output path")
+	out := flag.String("out", "internal/entitycompat/testdata/golden_error_ids.json", "golden id snapshot output path")
+	statusOut := flag.String("status-out", "internal/entitycompat/testdata/golden_error_status.json", "golden explicit-status snapshot output path")
 	flag.Parse()
 
 	golden := map[string]map[string]string{}
+	status := map[string]map[string]int{}
 	err := filepath.WalkDir(*epDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -51,11 +70,30 @@ func main() {
 		if err != nil {
 			return err
 		}
-		for _, m := range codeIDRe.FindAllStringSubmatch(string(data), -1) {
+		s := string(data)
+		for _, m := range codeIDRe.FindAllStringSubmatch(s, -1) {
 			if golden[ep] == nil {
 				golden[ep] = map[string]string{}
 			}
 			golden[ep][m[1]] = m[2]
+		}
+		// Record only explicit statuses: httpStatusCode wins; otherwise an
+		// explicit kind maps to its default. Entries with neither are the
+		// implicit-400 majority and are skipped (see kindStatus comment).
+		for _, m := range errBlockRe.FindAllStringSubmatch(s, -1) {
+			code, blk := m[1], m[0]
+			var st int
+			if hs := httpStatusRe.FindStringSubmatch(blk); hs != nil {
+				st, _ = strconv.Atoi(hs[1])
+			} else if kd := kindRe.FindStringSubmatch(blk); kd != nil {
+				st = kindStatus[kd[1]]
+			}
+			if st != 0 {
+				if status[ep] == nil {
+					status[ep] = map[string]int{}
+				}
+				status[ep][code] = st
+			}
 		}
 		return nil
 	})
@@ -68,19 +106,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	buf, err := json.MarshalIndent(golden, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "erroriddiff: marshal: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(*out, append(buf, '\n'), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "erroriddiff: write: %v\n", err)
-		os.Exit(1)
-	}
+	writeJSON(*out, golden)
+	writeJSON(*statusOut, status)
 
 	ids := 0
 	for _, m := range golden {
 		ids += len(m)
 	}
+	sts := 0
+	for _, m := range status {
+		sts += len(m)
+	}
 	fmt.Printf("erroriddiff: wrote %d endpoints / %d error ids -> %s\n", len(golden), ids, *out)
+	fmt.Printf("erroriddiff: wrote %d explicit statuses -> %s\n", sts, *statusOut)
+}
+
+func writeJSON(path string, v any) {
+	buf, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "erroriddiff: marshal %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(path, append(buf, '\n'), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "erroriddiff: write %s: %v\n", path, err)
+		os.Exit(1)
+	}
 }

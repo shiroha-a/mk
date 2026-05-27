@@ -130,11 +130,12 @@ func TestErrorIDDrift(t *testing.T) {
 }
 
 // emission is one error response a handler emits: the enclosing method name,
-// the error code, and the resolved UUID.
+// the error code, the resolved UUID, and (for the status gate) the HTTP status.
 type emission struct {
-	fn   string
-	code string
-	uuid string
+	fn     string
+	code   string
+	uuid   string
+	status int
 }
 
 var (

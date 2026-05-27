@@ -212,9 +212,10 @@ func JSONContainsTooManyMentions(c echo.Context) error {
 	return c.JSON(http.StatusBadRequest, ContainsTooManyMentions())
 }
 
-// JSONFailedToResolveRemoteUser writes a 404 response.
+// JSONFailedToResolveRemoteUser writes a 500 response. upstream users/show は
+// この error に kind:'server' を指定するため HTTP 500 で返す。
 func JSONFailedToResolveRemoteUser(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, FailedToResolveRemoteUser())
+	return c.JSON(http.StatusInternalServerError, FailedToResolveRemoteUser())
 }
 
 // JSONRateLimitExceeded writes a 429 RATE_LIMIT_EXCEEDED response to the client.

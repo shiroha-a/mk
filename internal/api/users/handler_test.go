@@ -280,7 +280,9 @@ func TestShow_ByUsernameWithHost_RemoteResolveFails(t *testing.T) {
 	c := e.NewContext(req, rec)
 
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// upstream users/show は FAILED_TO_RESOLVE_REMOTE_USER に kind:'server' を
+	// 指定するため HTTP 500
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, ok := resp["error"].(map[string]any)
