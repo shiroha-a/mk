@@ -327,6 +327,9 @@ func TestReactions_PublicReactions(t *testing.T) {
 		UserID:   "u_pub",
 		NoteID:   "n2",
 		Reaction: "❤",
+		// real repo は FK + Preload で note が必ず存在するので public note を seed
+		// する (visibility filter で除外されないことの確認も兼ねる)。
+		Note: &model.Note{ID: "n2", UserID: "u_author", Visibility: "public"},
 	}
 	rec := postExtra(h.Reactions, `{"userId":"u_pub"}`, &model.User{ID: "u_viewer"})
 	require.Equal(t, http.StatusOK, rec.Code)

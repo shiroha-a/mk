@@ -223,14 +223,19 @@ func TestNoteReactionRepository_ListByUserID_VisibilityPushDown(t *testing.T) {
 	followingRepo := NewFollowingRepository(testDB)
 	noteRepo := NewNoteRepository(testDB)
 
-	reactor := insertTestUser(t, "u_nrv_r", "nrvreact")
-	author := insertTestUser(t, "u_nrv_a", "nrvauthor")
-	follower := insertTestUser(t, "u_nrv_f", "nrvfollower")
-	allowed := insertTestUser(t, "u_nrv_al", "nrvallowed")
-	stranger := insertTestUser(t, "u_nrv_s", "nrvstranger")
-	for _, id := range []string{reactor.ID, author.ID, follower.ID, allowed.ID, stranger.ID} {
-		defer cleanupUser(t, id)
+	// 各 insert 直後に cleanup を登録する。途中の insert が失敗しても先行分が
+	// leak しないようにする (defer をまとめて後段で登録すると、途中失敗時に
+	// 先行ユーザーが共有 testDB に残る)。
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
 	}
+	reactor := mkUser("u_nrv_r", "nrvreact")
+	author := mkUser("u_nrv_a", "nrvauthor")
+	follower := mkUser("u_nrv_f", "nrvfollower")
+	allowed := mkUser("u_nrv_al", "nrvallowed")
+	stranger := mkUser("u_nrv_s", "nrvstranger")
 
 	notes := []*model.Note{
 		{ID: "n_nrv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},

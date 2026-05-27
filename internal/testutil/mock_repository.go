@@ -1406,14 +1406,14 @@ func (m *MockNoteReactionRepository) ListByUserID(userID, viewerID, untilID, sin
 }
 
 // canViewerSeeNote replicates the real repo's visibility EXISTS subquery
-// inline. 条件は core/note.CanSeeNote と一致させる (public/home は全員、followers
-// は author 本人または follow 済み、specified は author 本人または visibleUserIds
-// に含まれる)。n == nil は mock が visibility を評価できないため visible 扱いに
-// する (= 最小構成の reaction を使う既存 handler test 互換。実 repo は FK +
-// Preload で note が必ず存在するためこの分岐は production では起きない)。
+// inline. 条件は core/note.CanSeeNote / real repo の SQL と一致させる
+// (public/home は全員、followers は author 本人または follow 済み、specified は
+// author 本人または visibleUserIds に含まれる)。n == nil は real repo の EXISTS
+// が note 行を要求して false になるのと揃えて除外する (production は FK + Preload
+// で note が必ず存在するためこの分岐は起きない。test は note を必ず seed する)。
 func (m *MockNoteReactionRepository) canViewerSeeNote(viewerID string, n *model.Note) bool {
 	if n == nil {
-		return true
+		return false
 	}
 	switch n.Visibility {
 	case model.NoteVisibilityPublic, model.NoteVisibilityHome:
