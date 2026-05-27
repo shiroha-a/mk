@@ -9,7 +9,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -263,12 +265,28 @@ var validUsersSorts = map[string]struct{}{
 	"+updatedAt": {}, "-updatedAt": {},
 }
 
+// validUsersStates / validUsersOrigins は upstream hashtags/users paramDef の
+// state / origin enum と一致。default は upstream に合わせ state=all / origin=local。
+var validUsersStates = map[string]struct{}{"all": {}, "alive": {}}
+var validUsersOrigins = map[string]struct{}{"combined": {}, "local": {}, "remote": {}}
+
+// usersAliveWindow は state=alive の "生存" 判定窓 (upstream の now-5日)。
+const usersAliveWindow = 5 * 24 * time.Hour
+
 // Users handles POST /api/hashtags/users.
+//
+// 指定 hashtag を user.tags に持つユーザーを UserDetailed[] で返す
+// (upstream hashtags/users)。tag は searchnorm.Normalize (NFKC + lowercase) で
+// 正規化して array containment (`tags @> {normTag}`) する。user.tags 側も同じ
+// 正規化で populate される前提 (Part 2)。
 func (h *Handler) Users(c echo.Context) error {
 	var req struct {
-		Tag   string `json:"tag"`
-		Sort  string `json:"sort"`
-		Limit int    `json:"limit"`
+		Tag    string `json:"tag"`
+		Sort   string `json:"sort"`
+		State  string `json:"state"`
+		Origin string `json:"origin"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil || req.Tag == "" || req.Sort == "" {
 		// upstream Misskey TS は paramDef で tag + sort を required にしている (#925)。
@@ -277,8 +295,84 @@ func (h *Handler) Users(c echo.Context) error {
 	if _, ok := validUsersSorts[req.Sort]; !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "sort must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	// ハッシュタグを使ったユーザー一覧 (簡易版: 空配列)
-	return c.JSON(http.StatusOK, []any{})
+	if req.State == "" {
+		req.State = "all"
+	}
+	if _, ok := validUsersStates[req.State]; !ok {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "state must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if req.Origin == "" {
+		req.Origin = "local"
+	}
+	if _, ok := validUsersOrigins[req.Origin]; !ok {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "origin must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
+
+	// containment query。upstream は `:tag <@ user.tags` (= tag 配列が user.tags の
+	// 部分集合)。単一要素なので `tags @> {normTag}` と等価。
+	normTag := searchnorm.Normalize(req.Tag)
+	q := h.db.Model(&model.User{}).
+		Where("tags @> ?", pq.StringArray{normTag}).
+		Where("\"isSuspended\" = FALSE")
+	if req.State == "alive" {
+		q = q.Where("\"updatedAt\" > ?", time.Now().Add(-usersAliveWindow))
+	}
+	switch req.Origin {
+	case "local":
+		q = q.Where("host IS NULL")
+	case "remote":
+		q = q.Where("host IS NOT NULL")
+	}
+	switch req.Sort {
+	case "+follower":
+		q = q.Order("\"followersCount\" DESC")
+	case "-follower":
+		q = q.Order("\"followersCount\" ASC")
+	case "+createdAt":
+		q = q.Order("id DESC")
+	case "-createdAt":
+		q = q.Order("id ASC")
+	case "+updatedAt":
+		q = q.Order("\"updatedAt\" DESC")
+	case "-updatedAt":
+		q = q.Order("\"updatedAt\" ASC")
+	}
+
+	var users []*model.User
+	if err := q.Limit(req.Limit).Offset(req.Offset).Find(&users).Error; err != nil {
+		return apierr.JSONInternalError(c)
+	}
+
+	// UserDetailed pack 用に profile を batch fetch (per-user N+1 回避)。
+	profByID := make(map[string]*model.UserProfile, len(users))
+	if len(users) > 0 {
+		ids := make([]string, len(users))
+		for i, u := range users {
+			ids[i] = u.ID
+		}
+		var profiles []*model.UserProfile
+		if err := h.db.Where("\"userId\" IN ?", ids).Find(&profiles).Error; err != nil {
+			return apierr.JSONInternalError(c)
+		}
+		for _, p := range profiles {
+			profByID[p.UserID] = p
+		}
+	}
+
+	// createdAt 抽出用の idGen は Trend と同じく aidx を使う。
+	gen, err := id.NewGenerator("aidx")
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	out := make([]entity.UserDetailed, 0, len(users))
+	for _, u := range users {
+		out = append(out, entity.PackUserDetailed(u, profByID[u.ID], gen))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 func packTag(t *model.Hashtag) map[string]any {

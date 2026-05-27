@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -268,8 +269,118 @@ func TestTrend_VisibilityFilterExcludesPrivate(t *testing.T) {
 
 // --- Users ---
 
-func TestUsers_Success(t *testing.T) {
-	assert.Equal(t, http.StatusOK, doPost(newHandler().Users, `{"tag":"test","sort":"+follower"}`).Code)
+// seedTagUser inserts a local/remote user with the given normalized tags for
+// the hashtags/users query tests. user.tags は正規化済み (lowercase) で渡す
+// 前提 (= Part 2 の populate と同じ。query 側もここで正規化一致を検証する)。
+func seedTagUser(t *testing.T, id, username string, tags []string, host *string, suspended bool, followers int, updatedAt time.Time) {
+	t.Helper()
+	u := &model.User{
+		ID:                id,
+		Username:          username,
+		UsernameLower:     strings.ToLower(username),
+		Tags:              pq.StringArray(tags),
+		Host:              host,
+		IsSuspended:       suspended,
+		FollowersCount:    followers,
+		UpdatedAt:         &updatedAt,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(u).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user" WHERE id = ?`, id) })
+}
+
+func decodeUserIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code)
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	ids := make([]string, 0, len(list))
+	for _, u := range list {
+		id, _ := u["id"].(string)
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// tag containment は正規化一致で効く: "tokyo" を持つ user は "Tokyo" query で
+// ヒットし、別タグの user はヒットしない。あわせて UserDetailed shape も確認。
+func TestUsers_ContainmentAndShape(t *testing.T) {
+	now := time.Now()
+	seedTagUser(t, "u_htu_a", "htua", []string{"tokyo"}, nil, false, 1, now)
+	seedTagUser(t, "u_htu_b", "htub", []string{"osaka"}, nil, false, 1, now)
+
+	rec := doPost(newHandler().Users, `{"tag":"Tokyo","sort":"+follower"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+	assert.Equal(t, "u_htu_a", list[0]["id"])
+	// UserDetailed shape (UserLite + detailed fields) で返ること。
+	assert.Equal(t, "htua", list[0]["username"])
+	assert.Contains(t, list[0], "followersCount")
+	assert.Contains(t, list[0], "notesCount")
+}
+
+// suspended user は除外される (isSuspended = FALSE)。
+func TestUsers_SuspendedExcluded(t *testing.T) {
+	now := time.Now()
+	seedTagUser(t, "u_htu_sus", "htususp", []string{"golangx"}, nil, true, 1, now)
+	ids := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"golangx","sort":"+follower"}`))
+	assert.NotContains(t, ids, "u_htu_sus")
+}
+
+// +follower DESC / -follower ASC の sort 順を確認。
+func TestUsers_SortFollower(t *testing.T) {
+	now := time.Now()
+	seedTagUser(t, "u_htu_lo", "htulo", []string{"sortt"}, nil, false, 1, now)
+	seedTagUser(t, "u_htu_hi", "htuhi", []string{"sortt"}, nil, false, 100, now)
+
+	desc := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"sortt","sort":"+follower"}`))
+	require.Equal(t, []string{"u_htu_hi", "u_htu_lo"}, desc)
+	asc := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"sortt","sort":"-follower"}`))
+	require.Equal(t, []string{"u_htu_lo", "u_htu_hi"}, asc)
+}
+
+// state=alive は updatedAt が 5日以内の user のみ返す。
+func TestUsers_StateAlive(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-10 * 24 * time.Hour)
+	seedTagUser(t, "u_htu_new", "htunew", []string{"alivet"}, nil, false, 1, now)
+	seedTagUser(t, "u_htu_old", "htuold", []string{"alivet"}, nil, false, 1, old)
+
+	all := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"alivet","sort":"+follower"}`))
+	assert.ElementsMatch(t, []string{"u_htu_new", "u_htu_old"}, all)
+	alive := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"alivet","sort":"+follower","state":"alive"}`))
+	assert.Equal(t, []string{"u_htu_new"}, alive)
+}
+
+// origin=local は host IS NULL のみ、remote は host IS NOT NULL のみ、
+// combined は両方返す。
+func TestUsers_Origin(t *testing.T) {
+	now := time.Now()
+	host := "remote.example"
+	seedTagUser(t, "u_htu_loc", "htuloc", []string{"origint"}, nil, false, 1, now)
+	seedTagUser(t, "u_htu_rem", "hturem", []string{"origint"}, &host, false, 1, now)
+
+	local := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"origint","sort":"+follower","origin":"local"}`))
+	assert.Equal(t, []string{"u_htu_loc"}, local)
+	remote := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"origint","sort":"+follower","origin":"remote"}`))
+	assert.Equal(t, []string{"u_htu_rem"}, remote)
+	combined := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"origint","sort":"+follower","origin":"combined"}`))
+	assert.ElementsMatch(t, []string{"u_htu_loc", "u_htu_rem"}, combined)
+}
+
+// limit + offset が効く (offset で 2 ページ目を取得)。
+func TestUsers_LimitOffset(t *testing.T) {
+	now := time.Now()
+	seedTagUser(t, "u_htu_p1", "htup1", []string{"paget"}, nil, false, 3, now)
+	seedTagUser(t, "u_htu_p2", "htup2", []string{"paget"}, nil, false, 2, now)
+	seedTagUser(t, "u_htu_p3", "htup3", []string{"paget"}, nil, false, 1, now)
+
+	page1 := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"paget","sort":"+follower","limit":2}`))
+	require.Equal(t, []string{"u_htu_p1", "u_htu_p2"}, page1)
+	page2 := decodeUserIDs(t, doPost(newHandler().Users, `{"tag":"paget","sort":"+follower","limit":2,"offset":2}`))
+	require.Equal(t, []string{"u_htu_p3"}, page2)
 }
 
 func TestUsers_InvalidParam(t *testing.T) {
@@ -286,4 +397,15 @@ func TestUsers_SortRequired(t *testing.T) {
 // 未定義 sort で 400 を返すこと (#925 review nit)。
 func TestUsers_SortEnum(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test","sort":"bogus"}`).Code)
+}
+
+// state / origin も upstream paramDef enum 限定。未定義値で 400。
+func TestUsers_StateEnum(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test","sort":"+follower","state":"bogus"}`).Code)
+}
+func TestUsers_OriginEnum(t *testing.T) {
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Users, `{"tag":"test","sort":"+follower","origin":"bogus"}`).Code)
+}
+func TestUsers_DBError(t *testing.T) {
+	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().Users, `{"tag":"test","sort":"+follower"}`).Code)
 }
