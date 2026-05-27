@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
@@ -48,12 +49,7 @@ func (h *Handler) List(c echo.Context) error {
 	if _, ok := validListSorts[req.Sort]; !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "sort must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
-	if req.Limit > 100 {
-		req.Limit = 100
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	q := h.db.Model(&model.Hashtag{}).Order("\"mentionedUsersCount\" DESC").Limit(req.Limit)
 	if req.Offset > 0 {
 		q = q.Offset(req.Offset)

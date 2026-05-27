@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -19,9 +20,7 @@ func (h *Handler) Stats(c echo.Context) error {
 		Limit int `json:"limit" query:"limit"`
 	}
 	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 
 	empty := map[string]any{
 		"topSubInstances":     []any{},

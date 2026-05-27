@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -65,13 +66,7 @@ func (h *Handler) Users(c echo.Context) error {
 	if h.userRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 30
-	}
-	if limit > 100 {
-		limit = 100
-	}
+	limit := pagination.ClampLimit(req.Limit, 10, 100)
 	users, err := h.userRepo.ListUsers(model.UserListFilter{
 		Origin:   "remote",
 		Hostname: req.Host,
@@ -102,12 +97,7 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 	if err := c.Bind(&req); err != nil || req.Host == "" {
 		return req, false
 	}
-	if req.Limit <= 0 {
-		req.Limit = 30
-	}
-	if req.Limit > 100 {
-		req.Limit = 100
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	return req, true
 }
 
