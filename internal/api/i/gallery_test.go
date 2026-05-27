@@ -67,8 +67,10 @@ func TestGalleryLikes_WithRepo(t *testing.T) {
 		likes: []*model.GalleryLike{
 			{ID: "l1", PostID: "p1", UserID: stubUser.ID},
 		},
+		// 実 repo の FindPostsByIDs は Preload("User") するため、stub でも post に
+		// User を持たせて golden GalleryPost の user 必須を満たす。
 		posts: []*model.GalleryPost{
-			{ID: "p1", Title: "t", UserID: stubUser.ID},
+			{ID: "p1", Title: "t", UserID: stubUser.ID, User: stubUser},
 		},
 	})
 	rec := postExtra(h.GalleryLikes, `{}`, stubUser)
@@ -79,4 +81,5 @@ func TestGalleryLikes_WithRepo(t *testing.T) {
 	post, ok := got[0]["post"].(map[string]any)
 	require.True(t, ok, "expected post object embedded")
 	assert.Equal(t, "p1", post["id"])
+	shapetest.Assert(t, "GalleryPost", post) // L3 (#1324)
 }
