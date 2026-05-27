@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -43,6 +44,7 @@ func TestSigninHistory_WithData(t *testing.T) {
 	assert.Equal(t, "192.168.1.1", resp[0]["ip"])
 	assert.Equal(t, true, resp[0]["success"])
 	assert.NotEmpty(t, resp[0]["createdAt"])
+	shapetest.Assert(t, "Signin", resp[0]) // L3 (#1322)
 }
 
 func TestSigninHistory_Empty(t *testing.T) {

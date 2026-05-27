@@ -105,6 +105,16 @@ func packGalleryPost(p *model.GalleryPost, idGen id.Generator) map[string]any {
 			createdAt = t.UTC().Format(tsFormat)
 		}
 	}
+	// fileIds / tags は golden GalleryPost で string[] (non-null)。nil の
+	// pq.StringArray は JSON null になるため [] へ coalesce する (#1322)。
+	fileIDs := []string(p.FileIDs)
+	if fileIDs == nil {
+		fileIDs = []string{}
+	}
+	tags := []string(p.Tags)
+	if tags == nil {
+		tags = []string{}
+	}
 	resp := map[string]any{
 		"id":          p.ID,
 		"createdAt":   createdAt,
@@ -112,11 +122,11 @@ func packGalleryPost(p *model.GalleryPost, idGen id.Generator) map[string]any {
 		"title":       p.Title,
 		"description": p.Description,
 		"userId":      p.UserID,
-		"fileIds":     []string(p.FileIDs),
+		"fileIds":     fileIDs,
 		"files":       []any{},
 		"isSensitive": p.IsSensitive,
 		"likedCount":  p.LikedCount,
-		"tags":        []string(p.Tags),
+		"tags":        tags,
 	}
 	if p.User != nil {
 		resp["user"] = entity.PackUserLite(p.User)
@@ -138,6 +148,12 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(posts))
 	for _, p := range posts {
+		// golden GalleryPost は user (UserLite) を必須とする。i/gallery/posts は
+		// 認証 user 自身の投稿一覧なので、relation 未 preload の場合は作成者
+		// (= 認証 user) を attach してから pack する (#1322)。
+		if p.User == nil {
+			p.User = u
+		}
 		out = append(out, packGalleryPost(p, h.idGen))
 	}
 	return c.JSON(http.StatusOK, out)

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -54,6 +55,7 @@ func TestGalleryPosts_WithRepo(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got, 1)
 	assert.Equal(t, postID, got[0]["id"])
+	shapetest.Assert(t, "GalleryPost", got[0]) // L3 (#1322)
 }
 
 func TestGalleryLikes_WithRepo(t *testing.T) {
