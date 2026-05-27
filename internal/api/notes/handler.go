@@ -398,7 +398,8 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.deleteService.Delete(user, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, note.ErrNoteNotFound):
-			return c.JSON(http.StatusNotFound, apierr.NoSuchNote())
+			// notes/delete は汎用 UUIDNoSuchNote ではなく endpoint 固有 id を使う
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "490be23f-8c1f-4796-819f-94cb4f9d1630"))
 		case errors.Is(err, note.ErrNoteAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You are not the author of this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		default:

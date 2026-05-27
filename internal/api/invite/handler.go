@@ -160,7 +160,8 @@ func (h *Handler) Delete(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if ticket.CreatedByID == nil || *ticket.CreatedByID != user.ID {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", apierr.UUIDAccessDenied))
+		// invite/delete は汎用 ACCESS_DENIED ではなく endpoint 固有 id を使う
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "5eb8d909-2540-4970-90b8-dd6f86088121"))
 	}
 	if err := h.repo.Delete(req.InviteID); err != nil {
 		return apierr.JSONInternalError(c)

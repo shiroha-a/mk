@@ -214,3 +214,40 @@ L3拡大の過程で検出・修正した実ドリフトの代表例(いずれ�
 | `v2/admin/emoji/list` | `roleIds`が`string[]`(golden `{id,name}[]`) | array要素型 |
 | `admin/queue/show-job` | `progress`/`returnValue`/`failedReason`/`data` | 型 + null + 欠落 |
 | `/api/meta` (lite) | MetaLite必須5欄をomit、MetaDetailedOnly 3欄をleak | partition |
+
+## Error-id drift gate（error.id の per-endpoint 整合）
+
+shape gateがレスポンス**ボディ**の契約を守るのに対し、これは**エラーレスポンスのid**を守る別ゲート(`TestErrorIDDrift`)。
+
+Misskeyのエラーは`{code, message, id}`形式で、クライアントは`code`だけでなく**endpoint固有のUUID `id`**でエラーを識別する。mk-goは「1 code = 1 UUID使い回し」になりがちだが、Misskeyは**endpointごとに別id**を割り当てる(例: `NO_SUCH_WEBHOOK`はshow/update/delete/testで4つ別id)。idがズレると`code`が正しくてもdrop-inクライアントがエラーを誤分類する。
+
+### 仕組み
+
+完全に静的(サーバ起動不要)。`internal/api/**/*.go`を走査し、各handler **method**が返すエラーの`(code, id)`を3経路で抽出する:
+
+- **inline literal**: `apierr.Error("CODE", msg, "uuid")`
+- **UUID定数参照**: `apierr.Error("CODE", msg, apierr.UUIDxxx)`(`errors.go`の定数表で解決)
+- **helper呼び出し**: `apierr.NoSuchUser()`等(`errors.go`のhelper表で`(code, uuid)`に解決)
+
+`router.go`の`path→handler`登録(import alias→pkg、`xxx := pkg.NewHandler()`のvar→pkg、ルート登録)を解決して各methodをendpointへ対応づけ、`(endpoint, code)`をgoldenの値と突合する。
+
+### golden
+
+`tools/erroriddiff`がMisskeyの`endpoints/*.ts`の`meta.errors`から`endpoint → {code: id}`を抽出し、`internal/entitycompat/testdata/golden_error_ids.json`へ生成・embedする(third_party非依存でCI実行可)。
+
+### 除外（lineage / upstream typo）
+
+- **reversi/* ・ chat/***: cherrypick派生。idもvanillaへ寄せない(`errorIDExcludedPrefixes`)。
+- **不正UUIDのgolden値はskip**: upstreamのtypoでidが壊れている箇所(`sw/update-registration`は先頭スペース、`i/2fa/update-key`等は非hex文字を含む)は揃える対象が無いため、`validUUID`で弾く(自己文書化された除外)。
+- **mk-go独自code・route未解決**: 対応するMisskey契約が無いので対象外(driftではない)。
+
+確実に解決できたケースのみgateする方針なので、誤検出より見落としに倒している。
+
+### 運用
+
+```bash
+make errorid-check    # gate をローカル実行 (TestErrorIDDrift)
+make shapecheck-gen   # shape golden と合わせて golden_error_ids.json も再生成
+```
+
+upstream bump時は`make shapecheck-gen`で両goldenを再生成してcommit。新しいerror idを返すendpointを足すときは、verify-before-fixに従い対応するMisskey endpointの`meta.errors`のidを確認してから実装する。

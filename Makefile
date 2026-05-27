@@ -9,7 +9,7 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report
+	shapecheck shapecheck-gen shapecheck-report errorid-check
 
 # Binary output
 BINARY=misskey
@@ -434,11 +434,12 @@ apicompat: apicompat-routes apicompat-render
 # サーバー / ブラウザ / Docker 不要で、CI では `go test ./...` 内の
 # TestEntityShapeDrift gate として自動実行される。詳細は docs/shape-drift.md。
 
-# golden snapshot (testdata/golden_schemas.json) を submodule の types.ts から
-# 再生成する。third_party/misskey を upstream catch-up で bump したら必ず実行し、
-# 生成された snapshot を commit すること。
+# golden snapshot (testdata/golden_schemas.json + golden_error_ids.json) を
+# submodule から再生成する。third_party/misskey を upstream catch-up で bump
+# したら必ず実行し、生成された snapshot を commit すること。
 shapecheck-gen:
 	go run ./tools/shapediff
+	go run ./tools/erroriddiff
 
 # 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
 shapecheck-report:
@@ -448,3 +449,9 @@ shapecheck-report:
 # L0: TestEntityShapeDrift / L2: Test*ShapeL2 (Notification / Announcement / ...)。
 shapecheck:
 	go test ./internal/entitycompat/... -run 'TestEntityShapeDrift|ShapeL2' -count=1 -v
+
+# error-id drift gate をローカルで実行する。handler が emit する error id
+# (inline / UUID 定数 / apierr helper) を router 経由で endpoint に解決し、
+# Misskey の per-endpoint id と突合する静的 gate。詳細は docs/shape-drift.md。
+errorid-check:
+	go test ./internal/entitycompat/... -run TestErrorIDDrift -count=1 -v

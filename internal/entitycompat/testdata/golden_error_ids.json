@@ -1,0 +1,855 @@
+{
+  "admin/abuse-report/notification-recipient/create": {
+    "CORRELATION_CHECK_EMAIL": "348bb8ae-575a-6fe9-4327-5811999def8f",
+    "CORRELATION_CHECK_WEBHOOK": "b0c15051-de2d-29ef-260c-9585cddd701a",
+    "EMAIL_ADDRESS_NOT_SET": "7cc1d85e-2f58-fc31-b644-3de8d0d3421f"
+  },
+  "admin/abuse-report/notification-recipient/show": {
+    "NO_SUCH_RECIPIENT": "013de6a8-f757-04cb-4d73-cc2a7e3368e4"
+  },
+  "admin/abuse-report/notification-recipient/update": {
+    "CORRELATION_CHECK_EMAIL": "348bb8ae-575a-6fe9-4327-5811999def8f",
+    "CORRELATION_CHECK_WEBHOOK": "b0c15051-de2d-29ef-260c-9585cddd701a",
+    "EMAIL_ADDRESS_NOT_SET": "7cc1d85e-2f58-fc31-b644-3de8d0d3421f"
+  },
+  "admin/accounts/create": {
+    "ACCESS_DENIED": "1fb7cb09-d46a-4fff-b8df-057708cce513",
+    "INCORRECT_INITIAL_PASSWORD": "97147c55-1ae1-4f6f-91d6-e1c3e0e76d62"
+  },
+  "admin/accounts/find-by-email": {
+    "USER_NOT_FOUND": "cb865949-8af5-4062-a88c-ef55e8786d1d"
+  },
+  "admin/ad/delete": {
+    "NO_SUCH_AD": "ccac9863-3a03-416e-b899-8a64041118b1"
+  },
+  "admin/ad/update": {
+    "NO_SUCH_AD": "b7aa1727-1354-47bc-a182-3a9c3973d300"
+  },
+  "admin/announcements/delete": {
+    "NO_SUCH_ANNOUNCEMENT": "ecad8040-a276-4e85-bda9-015a708d291e"
+  },
+  "admin/announcements/update": {
+    "NO_SUCH_ANNOUNCEMENT": "d3aae5a7-6372-4cb4-b61c-f511ffc2d7cc"
+  },
+  "admin/captcha/save": {
+    "INVALID_PARAMETERS": "26654194-410e-44e2-b42e-460ff6f92476",
+    "INVALID_PROVIDER": "14bf7ae1-80cc-4363-acb2-4fd61d086af0",
+    "NO_RESPONSE_PROVIDED": "40acbba8-0937-41fb-bb3f-474514d40afe",
+    "REQUEST_FAILED": "0f4fe2f1-2c15-4d6e-b714-efbfcde231cd",
+    "UNKNOWN": "f868d509-e257-42a9-99c1-42614b031a97",
+    "VERIFICATION_FAILED": "c41c067f-24f3-4150-84b2-b5a3ae8c2214"
+  },
+  "admin/drive/show-file": {
+    "NO_SUCH_FILE": "caf3ca38-c6e5-472e-a30c-b05377dcc240"
+  },
+  "admin/emoji/add": {
+    "DUPLICATE_NAME": "f7a3462c-4e6e-4069-8421-b9bd4f4c3975",
+    "NO_SUCH_FILE": "fc46b5a4-6b92-4c33-ac66-b806659bb5cf",
+    "UNSUPPORTED_FILE_TYPE": "f7599d96-8750-af68-1633-9575d625c1a7"
+  },
+  "admin/emoji/copy": {
+    "DUPLICATE_NAME": "f7a3462c-4e6e-4069-8421-b9bd4f4c3975",
+    "NO_SUCH_EMOJI": "e2785b66-dca3-4087-9cac-b93c541cc425"
+  },
+  "admin/emoji/delete": {
+    "NO_SUCH_EMOJI": "be83669b-773a-44b7-b1f8-e5e5170ac3c2"
+  },
+  "admin/emoji/update": {
+    "NO_SUCH_EMOJI": "684dec9d-a8c2-4364-9aa8-456c49cb1dc8",
+    "NO_SUCH_FILE": "14fb9fd9-0731-4e2f-aeb9-f09e4740333d",
+    "SAME_NAME_EMOJI_EXISTS": "7180fe9d-1ee3-bff9-647d-fe9896d2ffb8"
+  },
+  "admin/forward-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "8763e21b-d9bc-40be-acf6-54c1a6986493"
+  },
+  "admin/invite/create": {
+    "INVALID_DATE_TIME": "f1380b15-3760-4c6c-a1db-5c3aaf1cbd49"
+  },
+  "admin/promo/create": {
+    "ALREADY_PROMOTED": "ae427aa2-7a41-484f-a18c-2c1104051604",
+    "NO_SUCH_NOTE": "ee449fbe-af2a-453b-9cae-cf2fe7c895fc"
+  },
+  "admin/relays/add": {
+    "INVALID_URL": "fb8c92d3-d4e5-44e7-b3d4-800d5cef8b2c"
+  },
+  "admin/resolve-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "ac3794dd-2ce4-d878-e546-73c60c06b398"
+  },
+  "admin/roles/assign": {
+    "ACCESS_DENIED": "25b5bc31-dc79-4ebd-9bd2-c84978fd052c",
+    "NO_SUCH_ROLE": "6503c040-6af4-4ed9-bf07-f2dd16678eab",
+    "NO_SUCH_USER": "558ea170-f653-4700-94d0-5a818371d0df"
+  },
+  "admin/roles/delete": {
+    "NO_SUCH_ROLE": "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"
+  },
+  "admin/roles/show": {
+    "NO_SUCH_ROLE": "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"
+  },
+  "admin/roles/unassign": {
+    "ACCESS_DENIED": "24636eee-e8c1-493e-94b2-e16ad401e262",
+    "NOT_ASSIGNED": "b9060ac7-5c94-4da4-9f55-2047c953df44",
+    "NO_SUCH_ROLE": "6e519036-a70d-4c76-b679-bc8fb18194e2",
+    "NO_SUCH_USER": "2b730f78-1179-461b-88ad-d24c9af1a5ce"
+  },
+  "admin/roles/update": {
+    "NO_SUCH_ROLE": "cd23ef55-09ad-428a-ac61-95a45e124b32"
+  },
+  "admin/roles/users": {
+    "NO_SUCH_ROLE": "224eff5e-2488-4b18-b3e7-f50d94421648"
+  },
+  "admin/system-webhook/show": {
+    "NO_SUCH_SYSTEM_WEBHOOK": "38dd1ffe-04b4-6ff5-d8ba-4e6a6ae22c9d"
+  },
+  "admin/system-webhook/test": {
+    "NO_SUCH_WEBHOOK": "0c52149c-e913-18f8-5dc7-74870bfe0cf9"
+  },
+  "admin/update-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "15f51cf5-46d1-4b1d-a618-b35bcbed0662"
+  },
+  "announcements/show": {
+    "NO_SUCH_ANNOUNCEMENT": "b57b5e1d-4f49-404a-9edb-46b00268f121"
+  },
+  "antennas/create": {
+    "EMPTY_KEYWORD": "53ee222e-1ddd-4f9a-92e5-9fb82ddb463a",
+    "NO_SUCH_USER_LIST": "95063e93-a283-4b8b-9aa5-bcdb8df69a7f",
+    "TOO_MANY_ANTENNAS": "faf47050-e8b5-438c-913c-db2b1576fde4"
+  },
+  "antennas/delete": {
+    "NO_SUCH_ANTENNA": "b34dcf9d-348f-44bb-99d0-6c9314cfe2df"
+  },
+  "antennas/notes": {
+    "NO_SUCH_ANTENNA": "850926e0-fd3b-49b6-b69a-b28a5dbd82fe"
+  },
+  "antennas/show": {
+    "NO_SUCH_ANTENNA": "c06569fb-b025-4f23-b22d-1fcd20d2816b"
+  },
+  "antennas/update": {
+    "EMPTY_KEYWORD": "721aaff6-4e1b-4d88-8de6-877fae9f68c4",
+    "NO_SUCH_ANTENNA": "10c673ac-8852-48eb-aa1f-f5b67f069290",
+    "NO_SUCH_USER_LIST": "1c6b35c9-943e-48c2-81e4-2844989407f7"
+  },
+  "ap/show": {
+    "FEDERATION_NOT_ALLOWED": "974b799e-1a29-4889-b706-18d4dd93e266",
+    "NO_SUCH_OBJECT": "dc94d745-1262-4e63-a17d-fecaa57efc82",
+    "REQUEST_FAILED": "81b539cf-4f57-4b29-bc98-032c33c0792e",
+    "RESPONSE_INVALID": "70193c39-54f3-4813-82f0-70a680f7495b",
+    "URI_INVALID": "1a5eab56-e47b-48c2-8d5e-217b897d70db"
+  },
+  "app/show": {
+    "NO_SUCH_APP": "dce83913-2dc6-4093-8a7b-71dbb11718a3"
+  },
+  "auth/accept": {
+    "NO_SUCH_SESSION": "9c72d8de-391a-43c1-9d06-08d29efde8df"
+  },
+  "auth/session/generate": {
+    "NO_SUCH_APP": "92f93e63-428e-4f2f-a5a4-39e1407fe998"
+  },
+  "auth/session/show": {
+    "NO_SUCH_SESSION": "bd72c97d-eba7-4adb-a467-f171b8847250"
+  },
+  "auth/session/userkey": {
+    "NO_SUCH_APP": "fcab192a-2c5a-43b7-8ad8-9b7054d8d40d",
+    "NO_SUCH_SESSION": "5b5a1503-8bc8-4bd0-8054-dc189e8cdcb3",
+    "PENDING_SESSION": "8c8a4145-02cc-4cca-8e66-29ba60445a8e"
+  },
+  "blocking/create": {
+    "ALREADY_BLOCKING": "787fed64-acb9-464a-82eb-afbd745b9614",
+    "BLOCKEE_IS_YOURSELF": "88b19138-f28d-42c0-8499-6a31bbd0fdc6",
+    "NO_SUCH_USER": "7cc4f851-e2f1-4621-9633-ec9e1d00c01e"
+  },
+  "blocking/delete": {
+    "BLOCKEE_IS_YOURSELF": "06f6fac6-524b-473c-a354-e97a40ae6eac",
+    "NOT_BLOCKING": "291b2efa-60c6-45c0-9f6a-045c8f9b02cd",
+    "NO_SUCH_USER": "8621d8bf-c358-4303-a066-5ea78610eb3f"
+  },
+  "bubble-game/register": {
+    "INVALID_SEED": "eb627bc7-574b-4a52-a860-3c3eae772b88"
+  },
+  "channels/create": {
+    "NO_SUCH_FILE": "cd1e9f3e-5a12-4ab4-96f6-5d0a2cc32050"
+  },
+  "channels/favorite": {
+    "NO_SUCH_CHANNEL": "4938f5f3-6167-4c04-9149-6607b7542861"
+  },
+  "channels/follow": {
+    "NO_SUCH_CHANNEL": "c0031718-d573-4e85-928e-10039f1fbb68"
+  },
+  "channels/mute/create": {
+    "ALREADY_MUTING_CHANNEL": "5a251978-769a-da44-3e89-3931e43bb592",
+    "EXPIRES_AT_IS_PAST": "42b32236-df2c-a45f-fdbf-def67268f749",
+    "NO_SUCH_CHANNEL": "7174361e-d58f-31d6-2e7c-6fb830786a3f"
+  },
+  "channels/mute/delete": {
+    "NOT_MUTING_CHANNEL": "14d55962-6ea8-d990-1333-d6bef78dc2ab",
+    "NO_SUCH_CHANNEL": "e7998769-6e94-d9c2-6b8f-94a527314aba"
+  },
+  "channels/show": {
+    "NO_SUCH_CHANNEL": "6f6c314b-7486-4897-8966-c04a66a02923"
+  },
+  "channels/timeline": {
+    "NO_SUCH_CHANNEL": "4d0eeeba-a02c-4c3c-9966-ef60d38d2e7f"
+  },
+  "channels/unfavorite": {
+    "NO_SUCH_CHANNEL": "353c68dd-131a-476c-aa99-88a345e83668"
+  },
+  "channels/unfollow": {
+    "NO_SUCH_CHANNEL": "19959ee9-0153-4c51-bbd9-a98c49dc59d6"
+  },
+  "channels/update": {
+    "ACCESS_DENIED": "1fb7cb09-d46a-4fdf-b8df-057788cce513",
+    "NO_SUCH_CHANNEL": "f9c5467f-d492-4c3c-9a8d-a70dacc86512",
+    "NO_SUCH_FILE": "e86c14a4-0da2-4032-8df3-e737a04c7f3b"
+  },
+  "chat/messages/create-to-room": {
+    "CONTENT_REQUIRED": "340517b7-6d04-42c0-bac1-37ee804e3594",
+    "NO_SUCH_FILE": "b6accbd3-1d7b-4d9f-bdb7-eb185bac06db",
+    "NO_SUCH_ROOM": "8098520d-2da5-4e8f-8ee1-df78b55a4ec6"
+  },
+  "chat/messages/create-to-user": {
+    "CONTENT_REQUIRED": "25587321-b0e6-449c-9239-f8925092942c",
+    "NO_SUCH_FILE": "4372b8e2-185d-4146-8749-2f68864a3e5f",
+    "NO_SUCH_USER": "11795c64-40ea-4198-b06e-3c873ed9039d",
+    "RECIPIENT_IS_YOURSELF": "17e2ba79-e22a-4cbc-bf91-d327643f4a7e",
+    "YOU_HAVE_BEEN_BLOCKED": "c15a5199-7422-4968-941a-2a462c478f7d"
+  },
+  "chat/messages/delete": {
+    "NO_SUCH_MESSAGE": "36b67f0e-66a6-414b-83df-992a55294f17"
+  },
+  "chat/messages/react": {
+    "NO_SUCH_MESSAGE": "9b5839b9-0ba0-4351-8c35-37082093d200"
+  },
+  "chat/messages/room-timeline": {
+    "NO_SUCH_ROOM": "c4d9f88c-9270-4632-b032-6ed8cee36f7f"
+  },
+  "chat/messages/search": {
+    "NO_SUCH_ROOM": "460b3669-81b0-4dc9-a997-44442141bf83"
+  },
+  "chat/messages/show": {
+    "NO_SUCH_MESSAGE": "3710865b-1848-4da9-8d61-cfed15510b93"
+  },
+  "chat/messages/unreact": {
+    "NO_SUCH_MESSAGE": "c39ea42f-e3ca-428a-ad57-390e0a711595"
+  },
+  "chat/messages/user-timeline": {
+    "NO_SUCH_USER": "11795c64-40ea-4198-b06e-3c873ed9039d"
+  },
+  "chat/rooms/delete": {
+    "NO_SUCH_ROOM": "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"
+  },
+  "chat/rooms/invitations/create": {
+    "NO_SUCH_ROOM": "916f9507-49ba-4e90-b57f-1fd4deaa47a5"
+  },
+  "chat/rooms/invitations/ignore": {
+    "NO_SUCH_ROOM": "5130557e-5a11-4cfb-9cc5-fe60cda5de0d"
+  },
+  "chat/rooms/invitations/outbox": {
+    "NO_SUCH_ROOM": "a3c6b309-9717-4316-ae94-a69b53437237"
+  },
+  "chat/rooms/join": {
+    "NO_SUCH_ROOM": "84416476-5ce8-4a2c-b568-9569f1b10733"
+  },
+  "chat/rooms/leave": {
+    "NO_SUCH_ROOM": "cb7f3179-50e8-4389-8c30-dbe2650a67c9"
+  },
+  "chat/rooms/members": {
+    "NO_SUCH_ROOM": "7b9fe84c-eafc-4d21-bf89-485458ed2c18"
+  },
+  "chat/rooms/mute": {
+    "NO_SUCH_ROOM": "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df"
+  },
+  "chat/rooms/show": {
+    "NO_SUCH_ROOM": "857ae02f-8759-4d20-9adb-6e95fffe4fd7"
+  },
+  "chat/rooms/update": {
+    "NO_SUCH_ROOM": "fcdb0f92-bda6-47f9-bd05-343e0e020932"
+  },
+  "clips/add-note": {
+    "ALREADY_CLIPPED": "734806c4-542c-463a-9311-15c512803965",
+    "NO_SUCH_CLIP": "d6e76cc0-a1b5-4c7c-a287-73fa9c716dcf",
+    "NO_SUCH_NOTE": "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b",
+    "TOO_MANY_CLIP_NOTES": "f0dba960-ff73-4615-8df4-d6ac5d9dc118"
+  },
+  "clips/create": {
+    "TOO_MANY_CLIPS": "920f7c2d-6208-4b76-8082-e632020f5883"
+  },
+  "clips/delete": {
+    "NO_SUCH_CLIP": "70ca08ba-6865-4630-b6fb-8494759aa754"
+  },
+  "clips/favorite": {
+    "ALREADY_FAVORITED": "92658936-c625-4273-8326-2d790129256e",
+    "NO_SUCH_CLIP": "4c2aaeae-80d8-4250-9606-26cb1fdb77a5"
+  },
+  "clips/notes": {
+    "NO_SUCH_CLIP": "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00"
+  },
+  "clips/remove-note": {
+    "NO_SUCH_CLIP": "b80525c6-97f7-49d7-a42d-ebccd49cfd52",
+    "NO_SUCH_NOTE": "aff017de-190e-434b-893e-33a9ff5049d8"
+  },
+  "clips/show": {
+    "NO_SUCH_CLIP": "c3c5fe33-d62c-44d2-9ea5-d997703f5c20"
+  },
+  "clips/unfavorite": {
+    "NOT_FAVORITED": "90c3a9e8-b321-4dae-bf57-2bf79bbcc187",
+    "NO_SUCH_CLIP": "2603966e-b865-426c-94a7-af4a01241dc1"
+  },
+  "clips/update": {
+    "NO_SUCH_CLIP": "b4d92d70-b216-46fa-9a3f-a8c811699257"
+  },
+  "drive/files/attached-chat-messages": {
+    "NO_SUCH_FILE": "485ce26d-f5d2-4313-9783-e689d131eafb"
+  },
+  "drive/files/attached-notes": {
+    "NO_SUCH_FILE": "c118ece3-2e4b-4296-99d1-51756e32d232"
+  },
+  "drive/files/create": {
+    "INAPPROPRIATE": "bec5bd69-fba3-43c9-b4fb-2894b66ad5d2",
+    "INVALID_FILE_NAME": "f449b209-0c60-4e51-84d5-29486263bfd4",
+    "MAX_FILE_SIZE_EXCEEDED": "b9d8c348-33f0-4673-b9a9-5d4da058977a",
+    "NO_FREE_SPACE": "d08dbc37-a6a9-463a-8c47-96c32ab5f064",
+    "UNALLOWED_FILE_TYPE": "4becd248-7f2c-48c4-a9f0-75edc4f9a1ea"
+  },
+  "drive/files/delete": {
+    "ACCESS_DENIED": "5eb8d909-2540-4970-90b8-dd6f86088121",
+    "NO_SUCH_FILE": "908939ec-e52b-4458-b395-1025195cea58"
+  },
+  "drive/files/show": {
+    "ACCESS_DENIED": "25b73c73-68b1-41d0-bad1-381cfdf6579f",
+    "NO_SUCH_FILE": "067bc436-2718-4795-b0fb-ecbe43949e31"
+  },
+  "drive/files/update": {
+    "ACCESS_DENIED": "01a53b27-82fc-445b-a0c1-b558465a8ed2",
+    "INVALID_FILE_NAME": "395e7156-f9f0-475e-af89-53c3c23080c2",
+    "NO_SUCH_FILE": "e7778c7e-3af9-49cd-9690-6dbc3e6c972d",
+    "NO_SUCH_FOLDER": "ea8fb7a5-af77-4a08-b608-c0218176cd73",
+    "RESTRICTED_BY_ROLE": "7f59dccb-f465-75ab-5cf4-3ce44e3282f7"
+  },
+  "drive/folders/create": {
+    "NO_SUCH_FOLDER": "53326628-a00d-40a6-a3cd-8975105c0f95"
+  },
+  "drive/folders/delete": {
+    "HAS_CHILD_FILES_OR_FOLDERS": "b0fc8a17-963c-405d-bfbc-859a487295e1",
+    "NO_SUCH_FOLDER": "1069098f-c281-440f-b085-f9932edbe091"
+  },
+  "drive/folders/show": {
+    "NO_SUCH_FOLDER": "d74ab9eb-bb09-4bba-bf24-fb58f761e1e9"
+  },
+  "drive/folders/update": {
+    "NO_SUCH_FOLDER": "f7974dac-2c0d-4a27-926e-23583b28e98e",
+    "NO_SUCH_PARENT_FOLDER": "ce104e3a-faaf-49d5-b459-10ff0cbbcaa1",
+    "RECURSIVE_NESTING": "dbeb024837894013aed44279f9199740"
+  },
+  "fetch-external-resources": {
+    "EXT_RESOURCE_HASH_DIDNT_MATCH": "693ba8ba-b486-40df-a174-72f8279b56a4",
+    "EXT_RESOURCE_RETURNED_INVALID_SCHEMA": "bb774091-7a15-4a70-9dc5-6ac8cf125856"
+  },
+  "flash/delete": {
+    "ACCESS_DENIED": "1036ad7b-9f92-4fff-89c3-0e50dc941704",
+    "NO_SUCH_FLASH": "de1623ef-bbb3-4289-a71e-14cfa83d9740"
+  },
+  "flash/like": {
+    "ALREADY_LIKED": "010065cf-ad43-40df-8067-abff9f4686e3",
+    "NO_SUCH_FLASH": "c07c1491-9161-4c5c-9d75-01906f911f73",
+    "YOUR_FLASH": "3fd8a0e7-5955-4ba9-85bb-bf3e0c30e13b"
+  },
+  "flash/show": {
+    "NO_SUCH_FLASH": "f0d34a1a-d29a-401d-90ba-1982122b5630"
+  },
+  "flash/unlike": {
+    "NOT_LIKED": "755f25a7-9871-4f65-9f34-51eaad9ae0ac",
+    "NO_SUCH_FLASH": "afe8424a-a69e-432d-a5f2-2f0740c62410"
+  },
+  "flash/update": {
+    "ACCESS_DENIED": "08e60c88-5948-478e-a132-02ec701d67b2",
+    "NO_SUCH_FLASH": "611e13d2-309e-419a-a5e4-e0422da39b02"
+  },
+  "following/create": {
+    "ALREADY_FOLLOWING": "35387507-38c7-4cb9-9197-300b93783fa0",
+    "BLOCKED": "c4ab57cc-4e41-45e9-bfd9-584f61e35ce0",
+    "BLOCKING": "4e2206ec-aa4f-4960-b865-6c23ac38e2d9",
+    "FOLLOWEE_IS_YOURSELF": "26fbe7bb-a331-4857-af17-205b426669a9",
+    "NO_SUCH_USER": "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"
+  },
+  "following/delete": {
+    "FOLLOWEE_IS_YOURSELF": "d9e400b9-36b0-4808-b1d8-79e707f1296c",
+    "NOT_FOLLOWING": "5dbf82f5-c92b-40b1-87d1-6c8c0741fd09",
+    "NO_SUCH_USER": "5b12c78d-2b28-4dca-99d2-f56139b42ff8"
+  },
+  "following/invalidate": {
+    "FOLLOWER_IS_YOURSELF": "07dc03b9-03da-422d-885b-438313707662",
+    "NOT_FOLLOWING": "918faac3-074f-41ae-9c43-ed5d2946770d",
+    "NO_SUCH_USER": "b77e6ae6-a3e5-40da-9cc8-c240115479cc"
+  },
+  "following/requests/accept": {
+    "NO_FOLLOW_REQUEST": "bcde4f8b-0913-4614-8881-614e522fb041",
+    "NO_SUCH_USER": "66ce1645-d66c-46bb-8b79-96739af885bd"
+  },
+  "following/requests/cancel": {
+    "FOLLOW_REQUEST_NOT_FOUND": "089b125b-d338-482a-9a09-e2622ac9f8d4",
+    "NO_SUCH_USER": "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab"
+  },
+  "following/requests/reject": {
+    "NO_SUCH_USER": "abc2ffa6-25b2-4380-ba99-321ff3a94555"
+  },
+  "following/update": {
+    "FOLLOWEE_IS_YOURSELF": "4c4cbaf9-962a-463b-8418-a5e365dbf2eb",
+    "NOT_FOLLOWING": "b8dc75cf-1cb5-46c9-b14b-5f1ffbd782c9",
+    "NO_SUCH_USER": "14318698-f67e-492a-99da-5353a5ac52be"
+  },
+  "gallery/posts/delete": {
+    "ACCESS_DENIED": "c86e09de-1c48-43ac-a435-1c7e42ed4496",
+    "NO_SUCH_POST": "ae52f367-4bd7-4ecd-afc6-5672fff427f5"
+  },
+  "gallery/posts/like": {
+    "ALREADY_LIKED": "40e9ed56-a59c-473a-bf3f-f289c54fb5a7",
+    "NO_SUCH_POST": "56c06af3-1287-442f-9701-c93f7c4a62ff",
+    "YOUR_POST": "f78f1511-5ebc-4478-a888-1198d752da68"
+  },
+  "gallery/posts/show": {
+    "NO_SUCH_POST": "1137bf14-c5b0-4604-85bb-5b5371b1cd45"
+  },
+  "gallery/posts/unlike": {
+    "NOT_LIKED": "e3e8e06e-be37-41f7-a5b4-87a8250288f0",
+    "NO_SUCH_POST": "c32e6dd0-b555-4413-925e-b3757d19ed84"
+  },
+  "hashtags/show": {
+    "NO_SUCH_HASHTAG": "110ee688-193e-4a3a-9ecf-c167b2e6981e"
+  },
+  "i": {
+    "USER_IS_DELETED": "e5b3b9f0-2b8f-4b9f-9c1f-8c5c1b2e1b1a"
+  },
+  "i/2fa/key-done": {
+    "INCORRECT_PASSWORD": "0d7ec6d2-e652-443e-a7bf-9ee9a0cd77b0",
+    "TWO_FACTOR_NOT_ENABLED": "798d6847-b1ed-4f9c-b1f9-163c42655995"
+  },
+  "i/2fa/password-less": {
+    "NO_SECURITY_KEY": "f9c54d7f-d4c2-4d3c-9a8g-a70daac86512"
+  },
+  "i/2fa/register": {
+    "INCORRECT_PASSWORD": "78d6c839-20c9-4c66-b90a-fc0542168b48"
+  },
+  "i/2fa/register-key": {
+    "INCORRECT_PASSWORD": "38769596-efe2-4faf-9bec-abbb3f2cd9ba",
+    "TWO_FACTOR_NOT_ENABLED": "bf32b864-449b-47b8-974e-f9a5468546f1",
+    "USER_NOT_FOUND": "652f899f-66d4-490e-993e-6606c8ec04c3"
+  },
+  "i/2fa/remove-key": {
+    "INCORRECT_PASSWORD": "141c598d-a825-44c8-9173-cfb9d92be493"
+  },
+  "i/2fa/unregister": {
+    "INCORRECT_PASSWORD": "7add0395-9901-4098-82f9-4f67af65f775"
+  },
+  "i/2fa/update-key": {
+    "ACCESS_DENIED": "1fb7cb09-d46a-4fff-b8df-057708cce513",
+    "NO_SUCH_KEY": "f9c5467f-d492-4d3c-9a8g-a70dacc86512"
+  },
+  "i/import-antennas": {
+    "EMPTY_FILE": "7f60115d-8d93-4b0f-bd0e-3815dcbb389f",
+    "NO_SUCH_FILE": "3b71d086-c3fa-431c-b01d-ded65a777172",
+    "NO_SUCH_USER": "e842c379-8ac7-4cf7-b07a-4d4de7e4671c",
+    "TOO_MANY_ANTENNAS": "600917d4-a4cb-4cc5-8ba8-7ac8ea3c7779"
+  },
+  "i/import-blocking": {
+    "EMPTY_FILE": "6f3a4dcc-f060-a707-4950-806fbdbe60d6",
+    "NO_SUCH_FILE": "ebb53e5f-6574-9c0c-0b92-7ca6def56d7e",
+    "TOO_BIG_FILE": "b7fbf0b1-aeef-3b21-29ef-fadd4cb72ccf",
+    "UNEXPECTED_FILE_TYPE": "b6fab7d6-d945-d67c-dfdb-32da1cd12cfe"
+  },
+  "i/import-following": {
+    "EMPTY_FILE": "31a1b42c-06f7-42ae-8a38-a661c5c9f691",
+    "NO_SUCH_FILE": "b98644cf-a5ac-4277-a502-0b8054a709a3",
+    "TOO_BIG_FILE": "dee9d4ed-ad07-43ed-8b34-b2856398bc60",
+    "UNEXPECTED_FILE_TYPE": "660f3599-bce0-4f95-9dde-311fd841c183"
+  },
+  "i/import-muting": {
+    "EMPTY_FILE": "d2f12af1-e7b4-feac-86a3-519548f2728e",
+    "NO_SUCH_FILE": "e674141e-bd2a-ba85-e616-aefb187c9c2a",
+    "TOO_BIG_FILE": "9b4ada6d-d7f7-0472-0713-4f558bd1ec9c",
+    "UNEXPECTED_FILE_TYPE": "568c6e42-c86c-ba09-c004-517f83f9f1a8"
+  },
+  "i/import-user-lists": {
+    "EMPTY_FILE": "99efe367-ce6e-4d44-93f8-5fae7b040356",
+    "NO_SUCH_FILE": "ea9cc34f-c415-4bc6-a6fe-28ac40357049",
+    "TOO_BIG_FILE": "ae6e7a22-971b-4b52-b2be-fc0b9b121fe9",
+    "UNEXPECTED_FILE_TYPE": "a3c9edda-dd9b-4596-be6a-150ef813745c"
+  },
+  "i/move": {
+    "ALREADY_MOVED": "b234a14e-9ebe-4581-8000-074b3c215962",
+    "DESTINATION_ACCOUNT_FORBIDS": "b5c90186-4ab0-49c8-9bba-a1f766282ba4",
+    "NOT_ROOT_FORBIDDEN": "4362e8dc-731f-4ad8-a694-be2a88922a24",
+    "NO_SUCH_USER": "fcd2eef9-a9b2-4c4f-8624-038099e90aa5",
+    "URI_NULL": "95ba11b9-90e8-43a5-ba16-7acc1ab32e71"
+  },
+  "i/pin": {
+    "ALREADY_PINNED": "8b18c2b7-68fe-4edb-9892-c0cbaeb6c913",
+    "NO_SUCH_NOTE": "56734f8b-3928-431e-bf80-6ff87df40cb3",
+    "PIN_LIMIT_EXCEEDED": "72dab508-c64d-498f-8740-a8eec1ba385a"
+  },
+  "i/registry/get": {
+    "NO_SUCH_KEY": "ac3ed68a-62f0-422b-a7bc-d5e09e8f6a6a"
+  },
+  "i/registry/get-detail": {
+    "NO_SUCH_KEY": "97a1e8e7-c0f7-47d2-957a-92e61256e01a"
+  },
+  "i/registry/remove": {
+    "NO_SUCH_KEY": "1fac4e8a-a6cd-4e39-a4a5-3a7e11f1b019"
+  },
+  "i/unpin": {
+    "NO_SUCH_NOTE": "454170ce-9d63-4a43-9da1-ea10afe81e21"
+  },
+  "i/update": {
+    "AVATAR_NOT_AN_IMAGE": "f419f9f8-2f4d-46b1-9fb4-49d3a2fd7191",
+    "BANNER_NOT_AN_IMAGE": "75aedb19-2afd-4e6d-87fc-67941256fa60",
+    "FORBIDDEN_TO_SET_YOURSELF": "25c90186-4ab0-49c8-9bba-a1fa6c202ba4",
+    "INVALID_REGEXP": "0d786918-10df-41cd-8f33-8dec7d9a89a5",
+    "NO_SUCH_AVATAR": "539f3a45-f215-4f81-a9a8-31293640207f",
+    "NO_SUCH_BANNER": "0d8f5629-f210-41c2-9433-735831a58595",
+    "NO_SUCH_PAGE": "8e01b590-7eb9-431b-a239-860e086c408e",
+    "NO_SUCH_USER": "fcd2eef9-a9b2-4c4f-8624-038099e90aa5",
+    "RESTRICTED_BY_ROLE": "8feff0ba-5ab5-585b-31f4-4df816663fad",
+    "TOO_MANY_MUTED_WORDS": "010665b1-a211-42d2-bc64-8f6609d79785",
+    "URI_NULL": "bf326f31-d430-4f97-9933-5d61e4d48a23",
+    "YOUR_ACCOUNT_MOVED": "56f20ec9-fd06-4fa5-841b-edd6d7d4fa31",
+    "YOUR_NAME_CONTAINS_PROHIBITED_WORDS": "0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191"
+  },
+  "i/update-email": {
+    "EMAIL_REQUIRED": "324c7a88-59f2-492f-903f-89134f93e47e",
+    "INCORRECT_PASSWORD": "e54c1d7e-e7d6-4103-86b6-0a95069b4ad3",
+    "UNAVAILABLE": "a2defefb-f220-8849-0af6-17f816099323"
+  },
+  "i/webhooks/create": {
+    "TOO_MANY_WEBHOOKS": "87a9bb19-111e-4e37-81d3-a3e7426453b0"
+  },
+  "i/webhooks/delete": {
+    "NO_SUCH_WEBHOOK": "bae73e5a-5522-4965-ae19-3a8688e71d82"
+  },
+  "i/webhooks/show": {
+    "NO_SUCH_WEBHOOK": "50f614d9-3047-4f7e-90d8-ad6b2d5fb098"
+  },
+  "i/webhooks/test": {
+    "NO_SUCH_WEBHOOK": "0c52149c-e913-18f8-5dc7-74870bfe0cf9"
+  },
+  "i/webhooks/update": {
+    "NO_SUCH_WEBHOOK": "fb0fea69-da18-45b1-828d-bd4fd1612518"
+  },
+  "invite/create": {
+    "EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE": "8b165dd3-6f37-4557-8db1-73175d63c641"
+  },
+  "invite/delete": {
+    "ACCESS_DENIED": "5eb8d909-2540-4970-90b8-dd6f86088121",
+    "CAN_NOT_DELETE_INVITE_CODE": "ff17af39-000c-4d4e-abdf-848fa30fc1ce",
+    "NO_SUCH_INVITE_CODE": "cd4f9ae4-7854-4e3e-8df9-c296f051e634"
+  },
+  "mute/create": {
+    "ALREADY_MUTING": "7e7359cb-160c-4956-b08f-4d1c653cd007",
+    "MUTEE_IS_YOURSELF": "a4619cb2-5f23-484b-9301-94c903074e10",
+    "NO_SUCH_USER": "6fef56f3-e765-4957-88e5-c6f65329b8a5"
+  },
+  "mute/delete": {
+    "MUTEE_IS_YOURSELF": "f428b029-6b39-4d48-a1d2-cc1ae6dd5cf9",
+    "NOT_MUTING": "5467d020-daa9-4553-81e1-135c0c35a96d",
+    "NO_SUCH_USER": "b851d00b-8ab1-4a56-8b1b-e24187cb48ef"
+  },
+  "notes/clips": {
+    "NO_SUCH_NOTE": "47db1a1c-b0af-458d-8fb4-986e4efafe1e"
+  },
+  "notes/conversation": {
+    "NO_SUCH_NOTE": "e1035875-9551-45ec-afa8-1ded1fcb53c8"
+  },
+  "notes/create": {
+    "CANNOT_CREATE_ALREADY_EXPIRED_POLL": "04da457d-b083-4055-9082-955525eda5a5",
+    "CANNOT_RENOTE_DUE_TO_VISIBILITY": "be9529e9-fe72-4de0-ae43-0b363c4938af",
+    "CANNOT_RENOTE_OUTSIDE_OF_CHANNEL": "33510210-8452-094c-6227-4a6c05d99f00",
+    "CANNOT_RENOTE_TO_A_PURE_RENOTE": "fd4cc33e-2a37-48dd-99cc-9b806eb2031a",
+    "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE": "b98980fa-3780-406c-a935-b6d0eeee10d1",
+    "CANNOT_REPLY_TO_A_PURE_RENOTE": "3ac74a84-8fd5-4bb0-870f-01804f82ce15",
+    "CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY": "ed940410-535c-4d5e-bfa3-af798671e93c",
+    "CONTAINS_PROHIBITED_WORDS": "aa6e01d3-a85c-669d-758a-76aab43af334",
+    "CONTAINS_TOO_MANY_MENTIONS": "4de0363a-3046-481b-9b0f-feff3e211025",
+    "NO_SUCH_CHANNEL": "b1653923-5453-4edc-b786-7c4f39bb0bbb",
+    "NO_SUCH_FILE": "b6992544-63e7-67f0-fa7f-32444b1b5306",
+    "NO_SUCH_RENOTE_TARGET": "b5c90186-4ab0-49c8-9bba-a1f76c282ba4",
+    "NO_SUCH_REPLY_TARGET": "749ee0f6-d3da-459a-bf02-282e2da4292c",
+    "YOU_HAVE_BEEN_BLOCKED": "b390d7e1-8a5e-46ed-b625-06271cafd3d3"
+  },
+  "notes/delete": {
+    "ACCESS_DENIED": "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9",
+    "NO_SUCH_NOTE": "490be23f-8c1f-4796-819f-94cb4f9d1630"
+  },
+  "notes/drafts/create": {
+    "CANNOT_CREATE_ALREADY_EXPIRED_POLL": "04da457d-b083-4055-9082-955525eda5a5",
+    "CANNOT_RENOTE_DUE_TO_VISIBILITY": "be9529e9-fe72-4de0-ae43-0b363c4938af",
+    "CANNOT_RENOTE_OUTSIDE_OF_CHANNEL": "33510210-8452-094c-6227-4a6c05d99f00",
+    "CANNOT_RENOTE_TO_A_PURE_RENOTE": "fd4cc33e-2a37-48dd-99cc-9b806eb2031a",
+    "CANNOT_RENOTE_TO_EXTERNAL": "ed1952ac-2d26-4957-8b30-2deda76bedf7",
+    "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE": "b98980fa-3780-406c-a935-b6d0eeee10d1",
+    "CANNOT_REPLY_TO_A_PURE_RENOTE": "3ac74a84-8fd5-4bb0-870f-01804f82ce15",
+    "CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY": "ed940410-535c-4d5e-bfa3-af798671e93c",
+    "CONTAINS_PROHIBITED_WORDS": "aa6e01d3-a85c-669d-758a-76aab43af334",
+    "CONTAINS_TOO_MANY_MENTIONS": "4de0363a-3046-481b-9b0f-feff3e211025",
+    "NO_SUCH_CHANNEL": "b1653923-5453-4edc-b786-7c4f39bb0bbb",
+    "NO_SUCH_FILE": "b6992544-63e7-67f0-fa7f-32444b1b5306",
+    "NO_SUCH_RENOTE_TARGET": "b5c90186-4ab0-49c8-9bba-a1f76c282ba4",
+    "NO_SUCH_REPLY_TARGET": "749ee0f6-d3da-459a-bf02-282e2da4292c",
+    "SCHEDULED_AT_MUST_BE_IN_FUTURE": "e4bed6c9-017e-4934-aed0-01c22cc60ec1",
+    "SCHEDULED_AT_REQUIRED": "15e28a55-e74c-4d65-89b7-8880cdaaa87d",
+    "TOO_MANY_DRAFTS": "9ee33bbe-fde3-4c71-9b51-e50492c6b9c8",
+    "TOO_MANY_SCHEDULED_NOTES": "22ae69eb-09e3-4541-a850-773cfa45e693",
+    "YOU_HAVE_BEEN_BLOCKED": "b390d7e1-8a5e-46ed-b625-06271cafd3d3"
+  },
+  "notes/drafts/delete": {
+    "ACCESS_DENIED": "56f35758-7dd5-468b-8439-5d6fb8ec9b8e",
+    "NO_SUCH_NOTE_DRAFT": "49cd6b9d-848e-41ee-b0b9-adaca711a6b1"
+  },
+  "notes/drafts/update": {
+    "ACCESS_DENIED": "56f35758-7dd5-468b-8439-5d6fb8ec9b8e",
+    "CANNOT_CREATE_ALREADY_EXPIRED_POLL": "04da457d-b083-4055-9082-955525eda5a5",
+    "CANNOT_RENOTE": "76cc5583-5a14-4ad3-8717-0298507e32db",
+    "CANNOT_RENOTE_DUE_TO_VISIBILITY": "be9529e9-fe72-4de0-ae43-0b363c4938af",
+    "CANNOT_RENOTE_OUTSIDE_OF_CHANNEL": "33510210-8452-094c-6227-4a6c05d99f00",
+    "CANNOT_RENOTE_TO_A_PURE_RENOTE": "fd4cc33e-2a37-48dd-99cc-9b806eb2031a",
+    "CANNOT_RENOTE_TO_EXTERNAL": "ed1952ac-2d26-4957-8b30-2deda76bedf7",
+    "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE": "b98980fa-3780-406c-a935-b6d0eeee10d1",
+    "CANNOT_REPLY_TO_A_PURE_RENOTE": "3ac74a84-8fd5-4bb0-870f-01804f82ce15",
+    "CANNOT_REPLY_TO_SPECIFIED_NOTE_WITH_EXTENDED_VISIBILITY": "ed940410-535c-4d5e-bfa3-af798671e93c",
+    "CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY": "215dbc76-336c-4d2a-9605-95766ba7dab0",
+    "CONTAINS_PROHIBITED_WORDS": "aa6e01d3-a85c-669d-758a-76aab43af334",
+    "CONTAINS_TOO_MANY_MENTIONS": "4de0363a-3046-481b-9b0f-feff3e211025",
+    "NO_SUCH_CHANNEL": "b1653923-5453-4edc-b786-7c4f39bb0bbb",
+    "NO_SUCH_FILE": "b6992544-63e7-67f0-fa7f-32444b1b5306",
+    "NO_SUCH_NOTE_DRAFT": "49cd6b9d-848e-41ee-b0b9-adaca711a6b1",
+    "NO_SUCH_RENOTE": "64929870-2540-4d11-af41-3b484d78c956",
+    "NO_SUCH_RENOTE_TARGET": "b5c90186-4ab0-49c8-9bba-a1f76c282ba4",
+    "NO_SUCH_REPLY": "c4721841-22fc-4bb7-ad3d-897ef1d375b5",
+    "NO_SUCH_REPLY_TARGET": "749ee0f6-d3da-459a-bf02-282e2da4292c",
+    "SCHEDULED_AT_MUST_BE_IN_FUTURE": "ed1a6673-d0d1-4364-aaae-9bf3f139cbc5",
+    "SCHEDULED_AT_REQUIRED": "fe9737d5-cc41-498c-af9d-149207307530",
+    "TOO_MANY_SCHEDULED_NOTES": "02f5df79-08ae-4a33-8524-f1503c8f6212",
+    "YOU_HAVE_BEEN_BLOCKED": "b390d7e1-8a5e-46ed-b625-06271cafd3d3"
+  },
+  "notes/favorites/create": {
+    "ALREADY_FAVORITED": "a402c12b-34dd-41d2-97d8-4d2ffd96a1a6",
+    "NO_SUCH_NOTE": "6dd26674-e060-4816-909a-45ba3f4da458"
+  },
+  "notes/favorites/delete": {
+    "NOT_FAVORITED": "b625fc69-635e-45e9-86f4-dbefbef35af5",
+    "NO_SUCH_NOTE": "80848a2c-398f-4343-baa9-df1d57696c56"
+  },
+  "notes/global-timeline": {
+    "GTL_DISABLED": "0332fc13-6ab2-4427-ae80-a9fadffd1a6b"
+  },
+  "notes/hybrid-timeline": {
+    "BOTH_WITH_REPLIES_AND_WITH_FILES": "dfaa3eb7-8002-4cb7-bcc4-1095df46656f",
+    "STL_DISABLED": "620763f4-f621-4533-ab33-0577a1a3c342"
+  },
+  "notes/local-timeline": {
+    "BOTH_WITH_REPLIES_AND_WITH_FILES": "dd9c8400-1cb5-4eef-8a31-200c5f933793",
+    "LTL_DISABLED": "45a6eb02-7695-4393-b023-dd3be9aaaefd"
+  },
+  "notes/polls/vote": {
+    "ALREADY_EXPIRED": "1022a357-b085-4054-9083-8f8de358337e",
+    "ALREADY_VOTED": "0963fc77-efac-419b-9424-b391608dc6d8",
+    "INVALID_CHOICE": "e0cc9a04-f2e8-41e4-a5f1-4127293260cc",
+    "NO_POLL": "5f979967-52d9-4314-a911-1c673727f92f",
+    "NO_SUCH_NOTE": "ecafbd2e-c283-4d6d-aecb-1a0a33b75396",
+    "YOU_HAVE_BEEN_BLOCKED": "85a5377e-b1e9-4617-b0b9-5bea73331e49"
+  },
+  "notes/reactions": {
+    "NO_SUCH_NOTE": "263fff3d-d0e1-4af4-bea7-8408059b451a"
+  },
+  "notes/reactions/create": {
+    "ALREADY_REACTED": "71efcf98-86d6-4e2b-b2ad-9d032369366b",
+    "CANNOT_REACT_TO_RENOTE": "eaccdc08-ddef-43fe-908f-d108faad57f5",
+    "NO_SUCH_NOTE": "033d0620-5bfe-4027-965d-980b0c85a3ea",
+    "YOU_HAVE_BEEN_BLOCKED": "20ef5475-9f38-4e4c-bd33-de6d979498ec"
+  },
+  "notes/reactions/delete": {
+    "NOT_REACTED": "92f4426d-4196-4125-aa5b-02943e2ec8fc",
+    "NO_SUCH_NOTE": "764d9fce-f9f2-4a0e-92b1-6ceac9a7ad37"
+  },
+  "notes/renotes": {
+    "NO_SUCH_NOTE": "12908022-2e21-46cd-ba6a-3edaf6093f46"
+  },
+  "notes/search": {
+    "UNAVAILABLE": "0b44998d-77aa-4427-80d0-d2c9b8523011"
+  },
+  "notes/show": {
+    "CONTENT_RESTRICTED_BY_SERVER": "145f88d2-b03d-4087-8143-a78928883c4b",
+    "CONTENT_RESTRICTED_BY_USER": "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab",
+    "NO_SUCH_NOTE": "24fcbfc6-2e37-42b6-8388-c29b3861a08d"
+  },
+  "notes/thread-muting/create": {
+    "NO_SUCH_NOTE": "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"
+  },
+  "notes/thread-muting/delete": {
+    "NO_SUCH_NOTE": "bddd57ac-ceb3-b29d-4334-86ea5fae481a"
+  },
+  "notes/translate": {
+    "CANNOT_TRANSLATE_INVISIBLE_NOTE": "ea29f2ca-c368-43b3-aaf1-5ac3e74bbe5d",
+    "NO_SUCH_NOTE": "bea9b03f-36e0-49c5-a4db-627a029f8971",
+    "UNAVAILABLE": "50a70314-2d8a-431b-b433-efa5cc56444c"
+  },
+  "notes/unrenote": {
+    "NO_SUCH_NOTE": "efd4a259-2442-496b-8dd7-b255aa1a160f"
+  },
+  "notes/user-list-timeline": {
+    "NO_SUCH_LIST": "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"
+  },
+  "page-push": {
+    "NO_SUCH_PAGE": "4a13ad31-6729-46b4-b9af-e86b265c2e74"
+  },
+  "pages/create": {
+    "NAME_ALREADY_EXISTS": "4650348e-301c-499a-83c9-6aa988c66bc1",
+    "NO_SUCH_FILE": "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c"
+  },
+  "pages/delete": {
+    "ACCESS_DENIED": "8b741b3e-2c22-44b3-a15f-29949aa1601e",
+    "NO_SUCH_PAGE": "eb0c6e1d-d519-4764-9486-52a7e1c6392a"
+  },
+  "pages/like": {
+    "ALREADY_LIKED": "d4c1edbe-7da2-4eae-8714-1acfd2d63941",
+    "NO_SUCH_PAGE": "cc98a8a2-0dc3-4123-b198-62c71df18ed3",
+    "YOUR_PAGE": "28800466-e6db-40f2-8fae-bf9e82aa92b8"
+  },
+  "pages/show": {
+    "NO_SUCH_PAGE": "222120c0-3ead-4528-811b-b96f233388d7"
+  },
+  "pages/unlike": {
+    "NOT_LIKED": "f5e586b0-ce93-4050-b0e3-7f31af5259ee",
+    "NO_SUCH_PAGE": "a0d41e20-1993-40bd-890e-f6e560ae648e"
+  },
+  "pages/update": {
+    "ACCESS_DENIED": "3c15cd52-3b4b-4274-967d-6456fc4f792b",
+    "NAME_ALREADY_EXISTS": "2298a392-d4a1-44c5-9ebb-ac1aeaa5a9ab",
+    "NO_SUCH_FILE": "cfc23c7c-3887-490e-af30-0ed576703c82",
+    "NO_SUCH_PAGE": "21149b9e-3616-4778-9592-c4ce89f5a864"
+  },
+  "promo/read": {
+    "NO_SUCH_NOTE": "d785b897-fcd3-4fe9-8fc3-b85c26e6c932"
+  },
+  "renote-mute/create": {
+    "ALREADY_MUTING": "ccfecbe4-1f1c-4fc2-8a3d-c3ffee61cb7b",
+    "MUTEE_IS_YOURSELF": "37285718-52f7-4aef-b7de-c38b8e8a8420",
+    "NO_SUCH_USER": "5e0a5dff-1e94-4202-87ae-4d9c89eb2271"
+  },
+  "renote-mute/delete": {
+    "MUTEE_IS_YOURSELF": "619b1314-0850-4597-a242-e245f3da42af",
+    "NOT_MUTING": "2e4ef874-8bf0-4b4b-b069-4598f6d05817",
+    "NO_SUCH_USER": "9b6728cf-638c-4aa1-bedb-e07d8101474d"
+  },
+  "reversi/match": {
+    "NO_SUCH_USER": "0b4f0559-b484-4e31-9581-3f73cee89b28",
+    "TARGET_IS_YOURSELF": "96fd7bd6-d2bc-426c-a865-d055dcd2828e"
+  },
+  "reversi/show-game": {
+    "NO_SUCH_GAME": "f13a03db-fae1-46c9-87f3-43c8165419e1"
+  },
+  "reversi/surrender": {
+    "ACCESS_DENIED": "6e04164b-a992-4c93-8489-2123069973e1",
+    "ALREADY_ENDED": "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d",
+    "NO_SUCH_GAME": "ace0b11f-e0a6-4076-a30d-e8284c81b2df"
+  },
+  "reversi/verify": {
+    "NO_SUCH_GAME": "8fb05624-b525-43dd-90f7-511852bdfeee"
+  },
+  "roles/notes": {
+    "NO_SUCH_ROLE": "eb70323a-df61-4dd4-ad90-89c83c7cf26e"
+  },
+  "roles/show": {
+    "NO_SUCH_ROLE": "de5502bf-009a-4639-86c1-fec349e46dcb"
+  },
+  "roles/users": {
+    "NO_SUCH_ROLE": "30aaaee3-4792-48dc-ab0d-cf501a575ac5"
+  },
+  "sw/update-registration": {
+    "NO_SUCH_REGISTRATION": " b09d8066-8064-5613-efb6-0e963b21d012"
+  },
+  "users/followers": {
+    "FORBIDDEN": "3c6a84db-d619-26af-ca14-06232a21df8a",
+    "NO_SUCH_USER": "27fa5435-88ab-43de-9360-387de88727cd"
+  },
+  "users/following": {
+    "BIRTHDAY_DATE_FORMAT_INVALID": "a2b007b9-4782-4eba-abd3-93b05ed4130d",
+    "FORBIDDEN": "f6cdb0df-c19f-ec5c-7dbb-0ba84a1f92ba",
+    "NO_SUCH_USER": "63e4aba4-4156-4e53-be25-c9559e42d71b"
+  },
+  "users/get-frequently-replied-users": {
+    "NO_SUCH_USER": "e6965129-7b2a-40a4-bae2-cd84cd434822"
+  },
+  "users/lists/create": {
+    "TOO_MANY_USERLISTS": "0cf21a28-7715-4f39-a20d-777bfdb8d138"
+  },
+  "users/lists/create-from-public": {
+    "ALREADY_ADDED": "c3ad6fdb-692b-47ee-a455-7bd12c7af615",
+    "NO_SUCH_LIST": "9292f798-6175-4f7d-93f4-b6742279667d",
+    "NO_SUCH_USER": "13c457db-a8cb-4d88-b70a-211ceeeabb5f",
+    "TOO_MANY_USERLISTS": "e9c105b2-c595-47de-97fb-7f7c2c33e92f",
+    "TOO_MANY_USERS": "1845ea77-38d1-426e-8e4e-8b83b24f5bd7",
+    "YOU_HAVE_BEEN_BLOCKED": "a2497f2a-2389-439c-8626-5298540530f4"
+  },
+  "users/lists/delete": {
+    "NO_SUCH_LIST": "78436795-db79-42f5-b1e2-55ea2cf19166"
+  },
+  "users/lists/favorite": {
+    "ALREADY_FAVORITED": "6425bba0-985b-461e-af1b-518070e72081",
+    "NO_SUCH_USER_LIST": "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"
+  },
+  "users/lists/get-memberships": {
+    "NO_SUCH_LIST": "7bc05c21-1d7a-41ae-88f1-66820f4dc686"
+  },
+  "users/lists/list": {
+    "INVALID_PARAM": "ab36de0e-29e9-48cb-9732-d82f1281620d",
+    "NO_SUCH_USER": "a8af4a82-0980-4cc4-a6af-8b0ffd54465e",
+    "REMOTE_USER_NOT_ALLOWED": "53858f1b-3315-4a01-81b7-db9b48d4b79a"
+  },
+  "users/lists/pull": {
+    "NO_SUCH_LIST": "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02",
+    "NO_SUCH_USER": "588e7f72-c744-4a61-b180-d354e912bda2"
+  },
+  "users/lists/push": {
+    "ALREADY_ADDED": "1de7c884-1595-49e9-857e-61f12f4d4fc5",
+    "NO_SUCH_LIST": "2214501d-ac96-4049-b717-91e42272a711",
+    "NO_SUCH_USER": "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a",
+    "TOO_MANY_USERS": "2dd9752e-a338-413d-8eec-41814430989b",
+    "YOU_HAVE_BEEN_BLOCKED": "990232c5-3f9d-4d83-9f3f-ef27b6332a4b"
+  },
+  "users/lists/show": {
+    "NO_SUCH_LIST": "7bc05c21-1d7a-41ae-88f1-66820f4dc686"
+  },
+  "users/lists/unfavorite": {
+    "ALREADY_FAVORITED": "835c4b27-463d-4cfa-969b-a9058678d465",
+    "NO_SUCH_USER_LIST": "baedb33e-76b8-4b0c-86a8-9375c0a7b94b"
+  },
+  "users/lists/update": {
+    "NO_SUCH_LIST": "796666fe-3dff-4d39-becb-8a5932c1d5b7"
+  },
+  "users/lists/update-membership": {
+    "NO_SUCH_LIST": "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02",
+    "NO_SUCH_USER": "588e7f72-c744-4a61-b180-d354e912bda2"
+  },
+  "users/notes": {
+    "BOTH_WITH_REPLIES_AND_WITH_FILES": "91c8cb9f-36ed-46e7-9ca2-7df96ed6e222",
+    "NO_SUCH_USER": "27e494ba-2ac2-48e8-893b-10d4d8c2387b",
+    "SIGNIN_REQUIRED": "d1588a9e-4b4d-4c07-807f-16f1486577a2"
+  },
+  "users/reactions": {
+    "IS_REMOTE_USER": "6b95fa98-8cf9-2350-e284-f0ffdb54a805",
+    "REACTIONS_NOT_PUBLIC": "673a7dd2-6924-1093-e0c0-e68456ceae5c"
+  },
+  "users/report-abuse": {
+    "CANNOT_REPORT_THE_ADMIN": "35e166f5-05fb-4f87-a2d5-adb42676d48f",
+    "CANNOT_REPORT_YOURSELF": "1e13149e-b1e8-43cf-902e-c01dbfcb202f",
+    "NO_SUCH_USER": "1acefcb5-0959-43fd-9685-b48305736cb5"
+  },
+  "users/show": {
+    "FAILED_TO_RESOLVE_REMOTE_USER": "ef7b9be4-9cba-4e6f-ab41-90ed171c7d3c",
+    "NO_SUCH_USER": "4362f8dc-731f-4ad8-a694-be5a88922a24"
+  },
+  "users/update-memo": {
+    "NO_SUCH_USER": "6fef56f3-e765-4957-88e5-c6f65329b8a5"
+  },
+  "verify-email": {
+    "NO_SUCH_CODE": "97c1f576-e4b8-4b8a-a6dc-9cb65e7f6f85"
+  }
+}
