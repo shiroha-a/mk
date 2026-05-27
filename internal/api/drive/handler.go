@@ -502,12 +502,16 @@ const (
 func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 	switch {
 	case errors.Is(err, coredrive.ErrFileNotFound):
-		id := "067bc436-2718-4795-b0fb-ecbe43949e31" // show / find-by-hash
+		var id string
 		switch ep {
+		case fileEndpointShow, fileEndpointFindByHash:
+			id = "067bc436-2718-4795-b0fb-ecbe43949e31"
 		case fileEndpointUpdate:
 			id = "e7778c7e-3af9-49cd-9690-6dbc3e6c972d"
 		case fileEndpointDelete:
 			id = "908939ec-e52b-4458-b395-1025195cea58"
+		default:
+			panic(fmt.Sprintf("mapFileError: unknown fileEndpoint %d", ep))
 		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", id))
 	case errors.Is(err, coredrive.ErrFolderNotFound):
@@ -518,7 +522,7 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
 	case errors.Is(err, coredrive.ErrAccessDenied):
-		id := "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"
+		var id string
 		switch ep {
 		case fileEndpointShow:
 			id = "25b73c73-68b1-41d0-bad1-381cfdf6579f"
@@ -526,6 +530,11 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 			id = "01a53b27-82fc-445b-a0c1-b558465a8ed2"
 		case fileEndpointDelete:
 			id = "5eb8d909-2540-4970-90b8-dd6f86088121"
+		case fileEndpointFindByHash:
+			// find-by-hash は ACCESS_DENIED を golden 未定義。汎用 id を使う。
+			id = "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"
+		default:
+			panic(fmt.Sprintf("mapFileError: unknown fileEndpoint %d", ep))
 		}
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", id))
 	case errors.Is(err, coredrive.ErrCannotUnmarkSensitive):
