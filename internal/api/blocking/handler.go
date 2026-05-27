@@ -53,7 +53,7 @@ func (h *Handler) Create(c echo.Context) error {
 		case errors.Is(err, coreblocking.ErrSelfBlock):
 			return c.JSON(http.StatusBadRequest, apierr.Error("BLOCKEE_IS_YOURSELF", "You cannot block yourself.", "88b19138-f28d-42c0-8499-6a31bbd0fdc6"))
 		case errors.Is(err, coreblocking.ErrBlockeeNotFound):
-			return apierr.JSONNoSuchUser(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "7cc4f851-e2f1-4621-9633-ec9e1d00c01e"))
 		case errors.Is(err, coreblocking.ErrAlreadyBlocking):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_BLOCKING", "You are already blocking that user.", "787fed64-acb9-464a-82eb-afbd745b9614"))
 		}

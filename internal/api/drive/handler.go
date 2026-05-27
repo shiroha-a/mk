@@ -243,9 +243,9 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 				"Cannot upload the file because it is an unallowed file type.",
 				"4becd248-7f2c-48c4-a9f0-75edc4f9a1ea"))
 		case errors.Is(err, coredrive.ErrMaxFileSizeExceeded):
-			return apierr.JSONMaxFileSizeExceeded(c)
+			return c.JSON(http.StatusBadRequest, apierr.Error("MAX_FILE_SIZE_EXCEEDED", "Max file size exceeded.", "b9d8c348-33f0-4673-b9a9-5d4da058977a"))
 		case errors.Is(err, coredrive.ErrNoFreeSpace):
-			return apierr.JSONNoFreeSpace(c)
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_FREE_SPACE", "No free space.", "d08dbc37-a6a9-463a-8c47-96c32ab5f064"))
 		}
 		return apierr.JSONInternalError(c)
 	}

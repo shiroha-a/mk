@@ -554,7 +554,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return apierr.JSONNoSuchUser(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
 	}
 
 	// upstream paramDef のデフォルトに合わせる (= withFiles=false /

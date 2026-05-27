@@ -244,7 +244,7 @@ func TestFilesCreate_MaxFileSizeExceeded(t *testing.T) {
 	require.NoError(t, h.FilesCreate(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "MAX_FILE_SIZE_EXCEEDED")
-	assert.Contains(t, rec.Body.String(), "f9e4e5f3-4df4-40b5-b400-f236945f7073")
+	assert.Contains(t, rec.Body.String(), "b9d8c348-33f0-4673-b9a9-5d4da058977a")
 }
 
 // driveCapacityMb 超過 (= 既存 usage + 新 file > capacity) は 400 NO_FREE_SPACE。
@@ -262,7 +262,7 @@ func TestFilesCreate_NoFreeSpace(t *testing.T) {
 	require.NoError(t, h.FilesCreate(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_FREE_SPACE")
-	assert.Contains(t, rec.Body.String(), "c6244ed2-a39a-4e1c-bf93-f0fbd7764fa6")
+	assert.Contains(t, rec.Body.String(), "d08dbc37-a6a9-463a-8c47-96c32ab5f064")
 }
 
 // --- FilesShow ---

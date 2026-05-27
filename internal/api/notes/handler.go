@@ -576,7 +576,7 @@ func (h *Handler) Conversation(c echo.Context) error {
 	notes, err := h.queryService.Conversation(viewer, req.NoteID, req.Limit)
 	if err != nil {
 		// 現状QueryService.ConversationはErrNoteNotFound以外を返さない
-		return apierr.JSONNoSuchNote(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }

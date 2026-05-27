@@ -55,9 +55,17 @@ func TestErrorIDDrift(t *testing.T) {
 
 	routes := parseRoutes(t, filepath.Join(root, "internal/server/router.go"))
 	helpers, consts := parseApierr(t, filepath.Join(root, "internal/api/apierr/errors.go"))
+	// echo.go の JSONXxx(c) ラッパーも emission として解決する。これらは
+	// handler の最頻送出経路 (例: apierr.JSONNoSuchNote(c)) なので、外すと
+	// gate が大半の error を素通しする。helperCallRe は apierr.JSONXxx( にも
+	// マッチするため、helper 表に併合すれば scanEmissions がそのまま解決する。
+	for name, em := range parseJSONWrappers(t, filepath.Join(root, "internal/api/apierr/echo.go"), helpers) {
+		helpers[name] = em
+	}
 
 	type drift struct{ endpoint, code, got, want string }
 	var drifts []drift
+	resolved := 0
 
 	apiDir := filepath.Join(root, "internal/api")
 	err := filepath.WalkDir(apiDir, func(path string, d fs.DirEntry, err error) error {
@@ -74,6 +82,7 @@ func TestErrorIDDrift(t *testing.T) {
 		}
 		for _, em := range scanEmissions(string(src), helpers, consts) {
 			for _, route := range routes[pkg+"\x00"+em.fn] {
+				resolved++
 				ep := strings.TrimPrefix(route, "/")
 				if excludedEndpoint(ep) {
 					continue
@@ -91,6 +100,16 @@ func TestErrorIDDrift(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk api dir: %v", err)
+	}
+
+	// silent-zero guard: regex ベースの抽出/解決が upstream フォーマット変更や
+	// リファクタで空振りすると、emission が 0 件になり gate が無意味に PASS して
+	// しまう。実際の解決数は数百件あるので、大きく下回ったら parser 破損とみなす。
+	if resolved < 400 {
+		t.Fatalf("error-id gate resolved only %d emissions (expected >=400); the source/router parser likely broke", resolved)
+	}
+	if len(golden) < 100 {
+		t.Fatalf("golden has only %d endpoints (expected >=100); regenerate with `make shapecheck-gen`", len(golden))
 	}
 
 	if len(drifts) > 0 {
@@ -198,6 +217,38 @@ func parseApierr(t *testing.T, path string) (helpers map[string]emission, consts
 		}
 	}
 	return helpers, consts
+}
+
+var jsonWrapperRe = regexp.MustCompile(`func (JSON\w+)\(c echo\.Context\) error \{`)
+
+// jsonWrapperBodyRe matches the inner helper call of a JSON wrapper, e.g.
+// `c.JSON(http.StatusNotFound, NoSuchNote())` -> inner helper "NoSuchNote".
+var jsonWrapperBodyRe = regexp.MustCompile(`c\.JSON\([^,]+,\s*(\w+)\(`)
+
+// parseJSONWrappers reads internal/api/apierr/echo.go and returns the echo
+// wrapper table (JSONXxx -> {code, uuid}) by resolving each wrapper's inner
+// helper call against the helper table. Handlers most often emit errors via
+// these wrappers, so without this the gate would miss the majority of routes.
+func parseJSONWrappers(t *testing.T, path string, helpers map[string]emission) map[string]emission {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read echo wrappers: %v", err)
+	}
+	out := map[string]emission{}
+	locs := jsonWrapperRe.FindAllStringSubmatchIndex(string(src), -1)
+	for i, loc := range locs {
+		name := string(src[loc[2]:loc[3]])
+		end := len(src)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		if m := jsonWrapperBodyRe.FindStringSubmatch(string(src[loc[0]:end])); m != nil {
+			if h, ok := helpers[m[1]]; ok {
+				out[name] = h
+			}
+		}
+	}
+	return out
 }
 
 var routeRe = regexp.MustCompile(`\.(?:GET|POST|PUT|DELETE)\("(/[^"]*)",\s*(\w+)\.(\w+)`)

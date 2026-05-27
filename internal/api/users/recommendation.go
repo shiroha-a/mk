@@ -24,7 +24,7 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 	}
 	clampListLimit(&req.Limit)
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return apierr.JSONNoSuchUser(c)
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "e6965129-7b2a-40a4-bae2-cd84cd434822"))
 	}
 	rows, err := h.noteRepo.CountReplyTargets(req.UserID, req.Limit)
 	if err != nil {

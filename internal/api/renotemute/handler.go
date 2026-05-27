@@ -47,7 +47,7 @@ func (h *Handler) Create(c echo.Context) error {
 		case errors.Is(err, coremuting.ErrSelfMute):
 			return c.JSON(http.StatusBadRequest, apierr.Error("MUTEE_IS_YOURSELF", "You cannot mute yourself.", "37285718-52f7-4aef-b7de-c38b8e8a8420"))
 		case errors.Is(err, coremuting.ErrMuteeNotFound):
-			return apierr.JSONNoSuchUser(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "5e0a5dff-1e94-4202-87ae-4d9c89eb2271"))
 		case errors.Is(err, coremuting.ErrAlreadyMuting):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_MUTING", "You are already muting that user.", "ccfecbe4-1f1c-4fc2-8a3d-c3ffee61cb7b"))
 		}

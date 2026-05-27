@@ -27,7 +27,7 @@ func (h *Handler) PollsVote(c echo.Context) error {
 	if err := h.pollService.Vote(user, req.NoteID, *req.Choice); err != nil {
 		switch {
 		case errors.Is(err, poll.ErrNoteNotFound), errors.Is(err, poll.ErrNoPoll):
-			return apierr.JSONNoSuchNote(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "ecafbd2e-c283-4d6d-aecb-1a0a33b75396"))
 		case errors.Is(err, poll.ErrNoteNotVisible):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, poll.ErrInvalidChoice):

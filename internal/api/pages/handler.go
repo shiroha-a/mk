@@ -232,7 +232,7 @@ func (h *Handler) Update(c echo.Context) error {
 		case errors.Is(err, corepage.ErrPageNotFound):
 			return notFound(c)
 		case errors.Is(err, corepage.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "3c15cd52-3b4b-4274-967d-6456fc4f792b"))
 		case errors.Is(err, corepage.ErrPageNameRequired),
 			errors.Is(err, corepage.ErrPageTitleRequired):
 			return apierr.JSONInvalidParam(c)
@@ -261,7 +261,7 @@ func (h *Handler) Delete(c echo.Context) error {
 		case errors.Is(err, corepage.ErrPageNotFound):
 			return notFound(c)
 		case errors.Is(err, corepage.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "8b741b3e-2c22-44b3-a15f-29949aa1601e"))
 		}
 		return apierr.JSONInternalError(c)
 	}

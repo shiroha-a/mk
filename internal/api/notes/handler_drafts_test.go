@@ -408,7 +408,7 @@ func TestDraftsCreate_ScheduledNoteLimitExceeded(t *testing.T) {
 	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
-	assert.Contains(t, rec.Body.String(), "c3275f19-4558-4c59-83e1-4f684b5fab66")
+	assert.Contains(t, rec.Body.String(), "22ae69eb-09e3-4541-a850-773cfa45e693")
 }
 
 // isActuallyScheduled=false で scheduledAt が指定されても enqueue は走らない

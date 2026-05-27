@@ -302,13 +302,13 @@ func (h *Handler) AttachedChatMessages(c echo.Context) error {
 	}
 	file, err := h.fileRepo.FindByID(req.FileID)
 	if err != nil || file == nil {
-		return apierr.JSONNoSuchFile(c)
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "485ce26d-f5d2-4313-9783-e689d131eafb"))
 	}
 	// owner-scope: moderator 以外は自分の file のみ参照可 (他人の private chat
 	// の添付を覗けないようにする)。
 	isMod := h.moderatorChecker != nil && h.moderatorChecker.IsModerator(user.ID)
 	if !isMod && (file.UserID == nil || *file.UserID != user.ID) {
-		return apierr.JSONNoSuchFile(c)
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "485ce26d-f5d2-4313-9783-e689d131eafb"))
 	}
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	msgs, err := h.repo.ListMessagesByFileID(req.FileID, untilID, sinceID, req.Limit)

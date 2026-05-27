@@ -122,7 +122,7 @@ func (h *Handler) Update(c echo.Context) error {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
 			return notFound(c)
 		case errors.Is(err, coreflash.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "08e60c88-5948-478e-a132-02ec701d67b2"))
 		case errors.Is(err, coreflash.ErrFlashTitleRequired):
 			return apierr.JSONInvalidParam(c)
 		}
@@ -148,7 +148,7 @@ func (h *Handler) Delete(c echo.Context) error {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
 			return notFound(c)
 		case errors.Is(err, coreflash.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1036ad7b-9f92-4fff-89c3-0e50dc941704"))
 		}
 		return apierr.JSONInternalError(c)
 	}

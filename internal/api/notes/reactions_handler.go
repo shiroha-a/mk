@@ -32,7 +32,7 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound):
-			return apierr.JSONNoSuchNote(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "033d0620-5bfe-4027-965d-980b0c85a3ea"))
 		case errors.Is(err, reaction.ErrNoteNotVisible):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, reaction.ErrAlreadyReacted):
@@ -64,7 +64,7 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 	if err := h.reactionService.Delete(user, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound):
-			return apierr.JSONNoSuchNote(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "764d9fce-f9f2-4a0e-92b1-6ceac9a7ad37"))
 		case errors.Is(err, reaction.ErrReactionNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NOT_REACTED", "You are not reacting to that note.", "92f4426d-4196-4125-aa5b-02943e2ec8fc"))
 		}
@@ -104,7 +104,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound), errors.Is(err, reaction.ErrNoteNotVisible):
-			return apierr.JSONNoSuchNote(c)
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "263fff3d-d0e1-4af4-bea7-8408059b451a"))
 		}
 		return apierr.JSONInternalError(c)
 	}

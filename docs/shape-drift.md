@@ -223,13 +223,16 @@ Misskeyのエラーは`{code, message, id}`形式で、クライアントは`cod
 
 ### 仕組み
 
-完全に静的(サーバ起動不要)。`internal/api/**/*.go`を走査し、各handler **method**が返すエラーの`(code, id)`を3経路で抽出する:
+完全に静的(サーバ起動不要)。`internal/api/**/*.go`を走査し、各handler **method**が返すエラーの`(code, id)`を4経路で抽出する:
 
 - **inline literal**: `apierr.Error("CODE", msg, "uuid")`
 - **UUID定数参照**: `apierr.Error("CODE", msg, apierr.UUIDxxx)`(`errors.go`の定数表で解決)
 - **helper呼び出し**: `apierr.NoSuchUser()`等(`errors.go`のhelper表で`(code, uuid)`に解決)
+- **echo wrapper**: `apierr.JSONNoSuchNote(c)`等(`echo.go`の`JSONXxx`→内部helper→`(code, uuid)`に解決)
 
-`router.go`の`path→handler`登録(import alias→pkg、`xxx := pkg.NewHandler()`のvar→pkg、ルート登録)を解決して各methodをendpointへ対応づけ、`(endpoint, code)`をgoldenの値と突合する。
+echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrouteを素通しする(実例: これを足すと解決数が577→652に増え、未検出だったdrift 25件が露出した)。
+
+`router.go`の`path→handler`登録(import alias→pkg、`xxx := pkg.NewHandler()`のvar→pkg、ルート登録)を解決して各methodをendpointへ対応づけ、`(endpoint, code)`をgoldenの値と突合する。regexベースの抽出が空振りした場合の **silent-zero** を防ぐため、解決できたemissionが下限(400)を下回ったらgateを失敗させる。
 
 ### golden
 

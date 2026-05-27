@@ -223,7 +223,7 @@ func (h *Handler) Update(c echo.Context) error {
 		case errors.Is(err, corechannel.ErrChannelNotFound):
 			return notFound(c)
 		case errors.Is(err, corechannel.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fdf-b8df-057788cce513"))
 		case errors.Is(err, corechannel.ErrChannelNameRequired):
 			return apierr.JSONInvalidParam(c)
 		}
