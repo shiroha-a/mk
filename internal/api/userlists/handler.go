@@ -118,6 +118,13 @@ func (h *Handler) Show(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
+	// upstream users/lists/show: 非公開リストは所有者のみ閲覧可。public リスト
+	// は誰でも閲覧可。所有者でも public でもない場合は存在を隠す (NO_SUCH_LIST)。
+	// これが無いと任意の認証ユーザーが他人の私的リスト (とメンバー) を読めてしまう。
+	viewer := middleware.GetUser(c)
+	if !list.IsPublic && (viewer == nil || list.UserID != viewer.ID) {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+	}
 	return c.JSON(http.StatusOK, entity.PackUserList(list, h.memberIDs(list.ID), h.idGen))
 }
 

@@ -338,3 +338,21 @@ func TestDelete_Error(t *testing.T) {
 	rec := doPost(h.Delete, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// 非所有者は他人の私的リストを閲覧できない (privacy: 任意の認証ユーザーが
+// 他人の private list を読めていた drift の回帰防止)。
+func TestShow_PrivateListNonOwnerHidden(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Private", IsPublic: false}
+	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+}
+
+// public リストは非所有者でも閲覧可 (upstream: isPublic なら誰でも閲覧)。
+func TestShow_PublicListNonOwnerVisible(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Public", IsPublic: true}
+	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
