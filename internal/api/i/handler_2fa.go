@@ -179,7 +179,9 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 // 第 3 戻り値は「呼び出し側が処理を続行してよいか」のフラグ。false のとき
 // レスポンスは既にこの helper 内で書き込まれているので、caller はそのまま
 // nil を return する。
-func (h *Handler) requireWebAuthn(c echo.Context, password string) (*model.User, *model.UserProfile, bool) {
+// incorrectPwID は INCORRECT_PASSWORD の endpoint 固有 id。upstream は
+// register-key / key-done 等で別 id を割り当てるため、caller が渡す。
+func (h *Handler) requireWebAuthn(c echo.Context, password, incorrectPwID string) (*model.User, *model.UserProfile, bool) {
 	if h.webauthnSvc == nil || h.securityKeyRepo == nil {
 		_ = c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "WebAuthn is not configured.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		return nil, nil, false
@@ -195,7 +197,7 @@ func (h *Handler) requireWebAuthn(c echo.Context, password string) (*model.User,
 		return nil, nil, false
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(password)); err != nil {
-		_ = c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		_ = c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", incorrectPwID))
 		return nil, nil, false
 	}
 	return user, profile, true
@@ -257,7 +259,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, profile, ok := h.requireWebAuthn(c, req.Password)
+	user, profile, ok := h.requireWebAuthn(c, req.Password, "38769596-efe2-4faf-9bec-abbb3f2cd9ba")
 	if !ok {
 		return nil
 	}
@@ -305,7 +307,7 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	if len(req.Name) > twoFAKeyNameMaxLen {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, profile, ok := h.requireWebAuthn(c, req.Password)
+	user, profile, ok := h.requireWebAuthn(c, req.Password, "0d7ec6d2-e652-443e-a7bf-9ee9a0cd77b0")
 	if !ok {
 		return nil
 	}
@@ -458,7 +460,7 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Password == "" || req.CredentialID == "" || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password / credentialId / name are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password)
+	user, _, ok := h.requireWebAuthn(c, req.Password, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	if !ok {
 		return nil
 	}

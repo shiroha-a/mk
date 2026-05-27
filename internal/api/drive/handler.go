@@ -271,7 +271,7 @@ func (h *Handler) FilesShow(c echo.Context) error {
 	}
 	f, err := h.svc.Show(user, req.FileID)
 	if err != nil {
-		return mapFileError(c, err)
+		return mapFileError(c, err, fileEndpointShow)
 	}
 	return c.JSON(http.StatusOK, h.packDriveFileFull(f))
 }
@@ -312,7 +312,7 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 
 	f, err := h.svc.Update(user, req.FileID, in)
 	if err != nil {
-		return mapFileError(c, err)
+		return mapFileError(c, err, fileEndpointUpdate)
 	}
 	// upstream は updateFile 後 `pack(file.id, { self: true })` を返す
 	// (= self single shape、DriveService.ts)。本実装も #812 の create と
@@ -328,7 +328,7 @@ func (h *Handler) FilesDelete(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	if err := h.svc.Delete(user, req.FileID); err != nil {
-		return mapFileError(c, err)
+		return mapFileError(c, err, fileEndpointDelete)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -347,7 +347,7 @@ func (h *Handler) FilesFindByHash(c echo.Context) error {
 	}
 	f, err := h.svc.FindByHash(user, req.MD5)
 	if err != nil {
-		return mapFileError(c, err)
+		return mapFileError(c, err, fileEndpointFindByHash)
 	}
 	// upstream `packMany(files, { self: true })` 経路 (#818)。
 	return c.JSON(http.StatusOK, []entity.DriveFileEntity{h.packDriveFileSelfList(f)})
@@ -487,14 +487,47 @@ func (h *Handler) FoldersDelete(c echo.Context) error {
 
 // helpers
 
-func mapFileError(c echo.Context, err error) error {
+// fileEndpoint identifies which drive/files endpoint produced a file error, so
+// mapFileError can return the upstream-canonical per-endpoint UUID. Misskey TS
+// uses a distinct UUID per endpoint for NO_SUCH_FILE / ACCESS_DENIED (#1336)。
+type fileEndpoint int
+
+const (
+	fileEndpointShow fileEndpoint = iota
+	fileEndpointUpdate
+	fileEndpointDelete
+	fileEndpointFindByHash
+)
+
+func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 	switch {
 	case errors.Is(err, coredrive.ErrFileNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "067bc436-2718-4795-b0fb-ecbe43949e31"))
+		id := "067bc436-2718-4795-b0fb-ecbe43949e31" // show / find-by-hash
+		switch ep {
+		case fileEndpointUpdate:
+			id = "e7778c7e-3af9-49cd-9690-6dbc3e6c972d"
+		case fileEndpointDelete:
+			id = "908939ec-e52b-4458-b395-1025195cea58"
+		}
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", id))
 	case errors.Is(err, coredrive.ErrFolderNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "1069098f-c281-440f-b085-f9932edbe091"))
+		// folder 不在は drive/files/update の parent 指定経路でのみ発生する。
+		id := "1069098f-c281-440f-b085-f9932edbe091"
+		if ep == fileEndpointUpdate {
+			id = "ea8fb7a5-af77-4a08-b608-c0218176cd73"
+		}
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
 	case errors.Is(err, coredrive.ErrAccessDenied):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+		id := "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"
+		switch ep {
+		case fileEndpointShow:
+			id = "25b73c73-68b1-41d0-bad1-381cfdf6579f"
+		case fileEndpointUpdate:
+			id = "01a53b27-82fc-445b-a0c1-b558465a8ed2"
+		case fileEndpointDelete:
+			id = "5eb8d909-2540-4970-90b8-dd6f86088121"
+		}
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", id))
 	case errors.Is(err, coredrive.ErrCannotUnmarkSensitive):
 		// upstream drive/files/update の restrictedByRole は i/update と別 UUID
 		// (7f59dccb-...)。endpoint 単位で frontend が i18n 引きするので、

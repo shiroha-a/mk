@@ -246,6 +246,10 @@ echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrou
 
 確実に解決できたケースのみgateする方針なので、誤検出より見落としに倒している。
 
+### ep-aware helper(gate射程外だが構築により整合)
+
+同じcodeをendpointごとに別idで返す必要がある一方、複数endpointが**共有helper**を呼ぶケース(`drive`の`mapFileError`/`mapFolderError`、`users`の`listRelations`、`notes`の`serveList`、`i/2fa`の`requireWebAuthn`等)は、helperに**endpoint識別の引数**(enum/bool/id literal)を渡して各endpoint固有idを選択する。これらのidはhelper内で動的選択されるためstatic gateはdataflowを追えず**検証対象外**だが、`switch ep { ... default: panic }`等で網羅を強制し**構築により**driftを防ぐ(#977 `mapFolderError`が初出、#1336で他helperへ展開)。新規endpointを共有helperに足すときはこの分岐を必ず更新する。
+
 ### 運用
 
 ```bash

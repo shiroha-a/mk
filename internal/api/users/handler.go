@@ -624,7 +624,12 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	}
 
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return apierr.JSONNoSuchUser(c)
+		// upstream は users/followers と users/following で NO_SUCH_USER に別 id を割り当てる
+		nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
+		if followers {
+			nsuID = "27fa5435-88ab-43de-9360-387de88727cd" // users/followers
+		}
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", nsuID))
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)

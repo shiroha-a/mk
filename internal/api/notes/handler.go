@@ -434,26 +434,26 @@ func (r *listRequest) normalize() {
 
 // Renotes handles POST /api/notes/renotes.
 func (h *Handler) Renotes(c echo.Context) error {
-	return h.serveList(c, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+	return h.serveList(c, "12908022-2e21-46cd-ba6a-3edaf6093f46", func(viewer *model.User, req listRequest) ([]*model.Note, error) {
 		return h.queryService.ListRenotes(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }
 
 // Replies handles POST /api/notes/replies.
 func (h *Handler) Replies(c echo.Context) error {
-	return h.serveList(c, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+	return h.serveList(c, apierr.UUIDNoSuchNote, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
 		return h.queryService.ListReplies(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }
 
 // Children handles POST /api/notes/children.
 func (h *Handler) Children(c echo.Context) error {
-	return h.serveList(c, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+	return h.serveList(c, apierr.UUIDNoSuchNote, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
 		return h.queryService.ListChildren(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }
 
-func (h *Handler) serveList(c echo.Context, fn func(*model.User, listRequest) ([]*model.Note, error)) error {
+func (h *Handler) serveList(c echo.Context, noSuchNoteID string, fn func(*model.User, listRequest) ([]*model.Note, error)) error {
 	var req listRequest
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -464,7 +464,8 @@ func (h *Handler) serveList(c echo.Context, fn func(*model.User, listRequest) ([
 	notes, err := fn(viewer, req)
 	if err != nil {
 		if errors.Is(err, note.ErrNoteNotFound) {
-			return apierr.JSONNoSuchNote(c)
+			// upstream は notes/renotes 等で NO_SUCH_NOTE に endpoint 固有 id を割り当てる
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", noSuchNoteID))
 		}
 		return apierr.JSONInternalError(c)
 	}
