@@ -273,3 +273,22 @@ Misskeyの`ApiCallService`は`httpStatusCode` → 無ければ`kind`既定(`clie
 |---|---|---|---|
 | `drive/files/create` | `MAX_FILE_SIZE_EXCEEDED` | 400 | 413 (`httpStatusCode`) |
 | `users/show` | `FAILED_TO_RESOLVE_REMOTE_USER` | 404 | 500 (`kind:'server'`) |
+
+## Pagination limit-spec drift gate
+
+`TestLimitSpecDrift`は、list endpointの`limit`の**default / maximum**をMisskeyの`paramDef`と整合させるgate。
+
+Misskeyは`limit: { type:'integer', minimum, maximum, default }`を宣言し、ajvが**default補完 + 範囲外reject**する。mk-goはhandlerでimperativeにclampしていたため、default/max値がupstreamとずれると「limit省略時の件数」や「上限」が変わる(`limit`省略時に10件返すべきが30件返る等)。
+
+### 仕組み
+
+handlerは`pagination.ClampLimit(limit, def, max)`でlimitを正規化する。gateは各call siteの`def`/`max`**リテラル**を読み、`router.go`で囲むmethodをendpointに解決し、Misskey paramDefから生成したgolden(`golden_limit_specs.json`、`tools/limitspec`が生成)と突合する。L3と同様**段階的**で、`ClampLimit`へ移行済みのcall siteだけがgate対象(未移行は素通し)。
+
+clampロジック自体(mk=clamp / Misskey=範囲外reject)は揃えない — mk側のclampの方が寛容で、揃えると既存クライアントを壊しうる。**default/max値のみ**が契約として gate される。
+
+### 運用
+
+```bash
+make limitspec-check  # gate をローカル実行
+make shapecheck-gen   # golden_limit_specs.json も再生成
+```

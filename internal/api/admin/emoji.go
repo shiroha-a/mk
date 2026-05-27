@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -247,9 +248,7 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 		Offset    int    `json:"offset"`
 	}
 	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, req.Host, sinceID, untilID, req.Limit, req.Offset)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -95,9 +96,7 @@ func (h *Handler) AdList(c echo.Context) error {
 		Offset int `json:"offset"`
 	}
 	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	rows, err := h.adRepo.List(req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())

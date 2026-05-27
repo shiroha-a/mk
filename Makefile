@@ -9,7 +9,7 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report errorid-check
+	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check
 
 # Binary output
 BINARY=misskey
@@ -440,6 +440,7 @@ apicompat: apicompat-routes apicompat-render
 shapecheck-gen:
 	go run ./tools/shapediff
 	go run ./tools/erroriddiff
+	go run ./tools/limitspec
 
 # 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
 shapecheck-report:
@@ -456,3 +457,9 @@ shapecheck:
 # 詳細は docs/shape-drift.md。
 errorid-check:
 	go test ./internal/entitycompat/... -run 'TestErrorIDDrift|TestErrorHTTPStatusDrift' -count=1 -v
+
+# pagination limit-spec drift gate をローカルで実行する。handler が
+# pagination.ClampLimit(limit, def, max) で渡す default/max literal を router
+# 経由で endpoint に解決し、Misskey paramDef の default/maximum と突合する。
+limitspec-check:
+	go test ./internal/entitycompat/... -run TestLimitSpecDrift -count=1 -v

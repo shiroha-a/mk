@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
@@ -167,9 +168,7 @@ func (h *Handler) InviteList(c echo.Context) error {
 		Type   string `json:"type"`
 	}
 	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
 	filter := req.Type
 	switch filter {
 	case "unused", "used", "expired", "all":

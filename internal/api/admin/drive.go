@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -56,9 +57,7 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 		Type      string `json:"type"`
 	}
 	_ = c.Bind(&req)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// userId に @system が指定されたら system file 専用 listing を返す。
