@@ -63,8 +63,10 @@ func TestErrorHTTPStatusDrift(t *testing.T) {
 
 	// mkStatus collects mk-go's emitted status per (endpoint, code).
 	mkStatus := map[string]map[string]int{}
+	resolved := 0
 	record := func(pkg, fn, code string, status int) {
 		for _, route := range routes[pkg+"\x00"+fn] {
+			resolved++
 			ep := strings.TrimPrefix(route, "/")
 			if mkStatus[ep] == nil {
 				mkStatus[ep] = map[string]int{}
@@ -93,6 +95,13 @@ func TestErrorHTTPStatusDrift(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk api dir: %v", err)
+	}
+
+	// silent-zero guard: scanStatusEmissions / route 解決が空振りすると mkStatus
+	// が空になり、golden の各 entry が「未 emit」で skip され gate が vacuous PASS
+	// する。実際の解決数は数百あるので、大きく下回ったら parser 破損とみなす。
+	if resolved < 300 {
+		t.Fatalf("status gate resolved only %d emissions (expected >=300); the source/router parser likely broke", resolved)
 	}
 
 	type drift struct {
