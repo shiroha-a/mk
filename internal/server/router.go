@@ -1221,6 +1221,9 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetMemoRepo(repository.NewUserMemoRepository(s.db))
 	usersHandler.SetUserListFavoriteRepo(userListFavoriteRepo)
 	usersHandler.SetUserListRepo(userListRepo)
+	// users/reactions で moderator/admin が remote / 非 public reactions を
+	// 閲覧できるようにする (upstream の iAmModerator bypass)。
+	usersHandler.SetModeratorChecker(roleService)
 	// Phase 7.3: users/* 完全化 (実データハンドラ)
 	api.POST("/users/achievements", usersHandler.Achievements)
 	api.POST("/users/clips", usersHandler.Clips)

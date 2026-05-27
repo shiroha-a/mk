@@ -64,6 +64,10 @@ type Handler struct {
 	// followersCount / followingCount を origin instance から取得して上書き
 	// 表示するための fetcher (#943)。nil なら local 観測値を fallback。
 	remoteStatsFetcher RemoteStatsFetcher
+	// moderatorChecker は users/reactions で viewer が moderator/admin かを
+	// 判定し、remote user / 非 public reactions の閲覧制限を bypass するため
+	// に使う (upstream の iAmModerator 経路)。
+	moderatorChecker ModeratorChecker
 }
 
 // RemoteStatsFetcher abstracts the federation.RemoteStatsFetcher so wiring is
@@ -83,6 +87,21 @@ type RemoteUserStatsView struct {
 // SetRemoteStatsFetcher wires the remote stats fetcher (#943).
 func (h *Handler) SetRemoteStatsFetcher(f RemoteStatsFetcher) {
 	h.remoteStatsFetcher = f
+}
+
+// ModeratorChecker reports whether a user holds moderator (or admin) privileges.
+// core/role.Service implements it. Narrowing to this interface avoids importing
+// core/role into the handler.
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
+// SetModeratorChecker wires the moderator check used by users/reactions so a
+// moderator/admin viewer can see any user's reactions (incl. remote), matching
+// upstream's `if (!iAmModerator) { ...isRemoteUser/publicReactions checks }`.
+// nil keeps the gate strict (= test fixture / unwired)。
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
+	h.moderatorChecker = m
 }
 
 // SetUserRepo wires a UserRepository so users/notes filters out notes that

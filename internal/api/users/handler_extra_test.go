@@ -528,3 +528,41 @@ func TestSearchByUsernameAndHost_Error(t *testing.T) {
 	rec := postExtra(h.SearchByUsernameAndHost, `{"username":"x"}`, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// stubModeratorChecker は指定 userID を moderator とみなす test stub。
+type stubModeratorChecker struct{ modID string }
+
+func (s stubModeratorChecker) IsModerator(userID string) bool { return userID == s.modID }
+
+// moderator viewer は remote user の reaction も閲覧できる (upstream:
+// "Moderators can see reactions of all users")。IS_REMOTE_USER を返さず
+// reaction list (空でも 200) を返す。リモートユーザーのリアクションが
+// moderator で見られない回帰の防止。
+func TestReactions_ModeratorSeesRemoteUser(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{modID: "u_mod"})
+	host := "remote.example"
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Host: &host}
+	rec := postExtra(h.Reactions, `{"userId":"u_remote"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code) // IS_REMOTE_USER ではなく list (空) を返す
+}
+
+// moderator viewer は publicReactions=false の user の reaction も閲覧できる。
+func TestReactions_ModeratorSeesNonPublic(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{modID: "u_mod"})
+	userRepo.Users["u_target"] = &model.User{ID: "u_target"}
+	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: false}
+	rec := postExtra(h.Reactions, `{"userId":"u_target"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// 非 moderator viewer では remote user は従来どおり IS_REMOTE_USER のまま。
+func TestReactions_NonModeratorRemoteStillBlocked(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{modID: "u_mod"})
+	host := "remote.example"
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Host: &host}
+	rec := postExtra(h.Reactions, `{"userId":"u_remote"}`, &model.User{ID: "u_other"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

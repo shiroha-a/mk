@@ -179,11 +179,17 @@ func (h *Handler) Reactions(c echo.Context) error {
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 
-	// target user lookup + remote / publicReactions check.
+	// upstream: moderator / admin は全ユーザー (remote / 非 public reactions
+	// 含む) の reaction を閲覧できる ("Moderators can see reactions of all
+	// users")。viewer が moderator なら remote / publicReactions check を
+	// 丸ごと bypass して reaction list を返す。
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
+
+	// target user lookup + remote / publicReactions check (non-moderator のみ)。
 	// production では userRepo が必ず wire されるが、既存の handler test
 	// (TestReactions_Success 等) は userRepo を wire しないので nil guard で
 	// fall-through する (= test compat、production 影響なし)。
-	if h.userRepo != nil {
+	if !iAmModerator && h.userRepo != nil {
 		target, err := h.userRepo.FindByID(req.UserID)
 		if err != nil || target == nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
