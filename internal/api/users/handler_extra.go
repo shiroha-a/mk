@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -222,6 +223,19 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+
+	// upstream は generateVisibilityQuery(query, me) で viewer が閲覧できない
+	// note (followers/specified) の reaction を moderator も含む全 viewer から
+	// 除外する。mk-go は post-fetch で CanSeeNote で filter する (timeline の
+	// FilterVisible と同 pattern)。これが無いと reaction 経由で非公開 note が
+	// 露出する。
+	visible := rows[:0]
+	for _, r := range rows {
+		if r.Note == nil || note.CanSeeNote(viewer, r.Note, h.followingRepo) {
+			visible = append(visible, r)
+		}
+	}
+	rows = visible
 
 	// note は upstream の packManyWithNote と同じく完全 shape で返す。最小 shape
 	// (id/userId/text) だと createdAt / visibility / user 等が欠落し、misskey_dart
