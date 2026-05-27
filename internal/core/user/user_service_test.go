@@ -1064,3 +1064,41 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 		assert.Len(t, out, 10)
 	})
 }
+
+// UpdateProfile で description 内の #tag が正規化 (lowercase) されて user.tags に
+// 入る。hashtags/users の containment query 用 (#1360, Part 2)。
+func TestService_UpdateProfile_PopulatesTags(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+	bundle, err := svc.UpdateProfile("u1", user.UpdateInput{
+		Description: ptr(ptr("I love #Golang and #ActivityPub")),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, bundle)
+	assert.ElementsMatch(t, []string{"golang", "activitypub"}, []string(repo.Users["u1"].Tags))
+}
+
+// description をクリア (空文字) すると user.tags も空になる。
+func TestService_UpdateProfile_ClearsTagsOnEmptyDescription(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Tags: []string{"golang"}}
+
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		Description: ptr(ptr("")),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, []string(repo.Users["u1"].Tags))
+}
+
+// description を更新しない場合は user.tags を触らない。
+func TestService_UpdateProfile_LeavesTagsWhenDescriptionOmitted(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Tags: []string{"golang"}}
+
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		Name: ptr(ptr("Alice")),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"golang"}, []string(repo.Users["u1"].Tags))
+}

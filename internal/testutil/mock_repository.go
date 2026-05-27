@@ -556,6 +556,11 @@ func applyUserFields(u *model.User, fields map[string]any) {
 			case []byte:
 				u.AvatarDecorations = append([]byte(nil), s...)
 			}
+		case "tags":
+			// core/user.UpdateProfile / federation.resolver は pq.StringArray で渡す。
+			if a, ok := v.(pq.StringArray); ok {
+				u.Tags = a
+			}
 		}
 	}
 }

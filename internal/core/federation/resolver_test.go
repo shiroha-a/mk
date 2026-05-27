@@ -4176,3 +4176,27 @@ func TestIngestNote_MentionLimitBoundaryAccepted(t *testing.T) {
 	require.NotNil(t, note)
 	assert.Len(t, note.Mentions, corenote.DefaultMentionLimit)
 }
+
+// TestResolveActor_NewUserIngestsHashtags は remote actor の person.tag の
+// Hashtag entry が正規化されて user.tags に取り込まれることを確認する
+// (#1360, Part 2)。hashtags/users が remote user を引けるための前提。
+func TestResolveActor_NewUserIngestsHashtags(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/tagger",
+		"type": "Person",
+		"preferredUsername": "tagger",
+		"inbox": "https://remote.example/users/tagger/inbox",
+		"summary": "<p>bio</p>",
+		"tag": [
+			{"type": "Hashtag", "name": "#Golang", "href": "https://remote.example/tags/golang"},
+			{"type": "Hashtag", "name": "#ActivityPub"},
+			{"type": "Emoji", "name": ":party:"}
+		],
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, _ := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://remote.example/users/tagger")
+	require.NoError(t, err)
+	// Hashtag のみ正規化して取り込む (Emoji は除外)。
+	assert.ElementsMatch(t, []string{"golang", "activitypub"}, []string(user.Tags))
+}

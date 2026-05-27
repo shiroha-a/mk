@@ -111,3 +111,52 @@ func TestExtract(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractUserTags(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "normalizes to lowercase",
+			in:   []string{"I love #Golang and #GoLang"},
+			want: []string{"golang"}, // case-insensitive dedup after normalize
+		},
+		{
+			name: "NFKC folds full-width",
+			in:   []string{"#Ｔｏｋｙｏ"},
+			want: []string{"tokyo"},
+		},
+		{
+			name: "AP person.tag style #-prefixed names",
+			in:   []string{"#art", "#Music"},
+			want: []string{"art", "music"},
+		},
+		{
+			name: "no hashtags returns nil",
+			in:   []string{"plain text without tags"},
+			want: nil,
+		},
+		{
+			name: "empty input returns nil",
+			in:   []string{""},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ExtractUserTags(tc.in...))
+		})
+	}
+}
+
+// caps at MaxUserTags (32) entries.
+func TestExtractUserTags_Cap(t *testing.T) {
+	parts := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		parts = append(parts, "#tag"+string(rune('a'+i%26))+string(rune('0'+i/26)))
+	}
+	got := ExtractUserTags(strings.Join(parts, " "))
+	assert.Len(t, got, MaxUserTags)
+}

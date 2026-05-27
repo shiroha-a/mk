@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -451,6 +453,15 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 	}
 	if in.Description != nil {
 		profileFields["description"] = *in.Description
+		// upstream i/update と同じく description から hashtag を抽出し、正規化して
+		// user.tags に格納する (hashtags/users の containment query 用)。description が
+		// null/空なら空配列になり tags がクリアされる (upstream の `updates.tags = tags`
+		// と同挙動)。Description は **string なので inner nil (= 明示的 null) もケアする。
+		desc := ""
+		if *in.Description != nil {
+			desc = **in.Description
+		}
+		userFields["tags"] = pq.StringArray(hashtag.ExtractUserTags(desc))
 	}
 	if in.Location != nil {
 		profileFields["location"] = *in.Location

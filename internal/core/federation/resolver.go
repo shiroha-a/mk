@@ -406,6 +406,9 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	}
 	// AP Person Tag配列からカスタム絵文字を抽出してDBにupsert
 	user.Emojis = r.upsertEmojis(extractEmojiTags(actor.Tag), host)
+	// upstream ApPersonService と同じく person.tag の Hashtag entry を user.tags に
+	// 取り込む (hashtags/users の containment query 用)。summary text からは抽出しない。
+	user.Tags = pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
 	}
@@ -576,6 +579,11 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		fields["emojis"] = emojis
 		existing.Emojis = emojis
 	}
+	// person.tag の Hashtag entry を user.tags に追従させる (actor 更新時に
+	// 自己紹介の hashtag が変わったら反映する。新規取り込みと同じ正規化)。
+	tags := pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
+	fields["tags"] = tags
+	existing.Tags = tags
 	existing.LastFetchedAt = &now
 	// UpdateUserエラーはベストエフォートで無視 (次回再試行される)
 	_ = r.userRepo.UpdateUser(existing.ID, fields)
