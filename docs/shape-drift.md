@@ -55,7 +55,7 @@ goldenはユーザー shapeを合成可能な部品(`UserLite` / `UserDetailedNo
 
 ### 対象外
 
-- **Notification**: golden側がtype別のdiscriminated union、mk-go側も`PackNotification`が`map[string]any`を手組みするため、reflectionが届かない。map-based packerとunion型は静的検出の射程外で、差分HTTP(L2)で見る。
+- **Notification**: golden側がtype別のdiscriminated union、mk-go側も`PackNotification`が`map[string]any`を手組みするため、reflection(L0)は届かない。**L2**(fixtureでpacker出力を検証)と**L3**(`/api/i/notifications`の実HTTP応答を`ValidateResponse`のunion dispatchで検証)でカバーする。
 
 ## 運用
 
@@ -165,6 +165,12 @@ func TestCreate_Success(t *testing.T) {
 - 配列を返すendpoint(`mute/list`等)は`rows[0]`をassert。
 - ネストした子objectを検証したいとき(`/api/meta`の`counts`等)はその子だけ渡す: `shapetest.Assert(t, "QueueCount", resp["counts"].(map[string]any))`。
 - 合成型(`MetaDetailed = MetaLite & MetaDetailedOnly`)はparserがflat抽出できないので、**構成要素を個別にassert**する(同じ応答に`MetaLite`と`MetaDetailedOnly`の2回)。
+
+### discriminated union(`Notification`)
+
+`shapetest.Assert(t, "Notification", resp[0])`は**flatでもunionでも同じ呼び方**で通る。`ValidateResponse`が **flat golden → union(`golden_unions.json`)→ not-found** の順でdispatchし、unionなら値の`type` discriminatorでvariantを引いて`ValidateUnionValue`に回す(未知typeはHIGH、variant必須欄の欠落/nullもHIGH)。
+
+L2のfixtureは「packerが正しく呼ばれれば」を見るのに対し、L3は`/api/i/notifications`の**実HTTP応答**を直接unionに突合する。`type=follow`等のvariantはhandlerが`user`(reaction系は`note`も)を解決して埋める必要があるので、`SetRepos`をwireして対象userを seed したtestで配線する。
 
 ## array要素型の検出(`Elem`)
 
