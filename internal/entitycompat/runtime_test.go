@@ -253,6 +253,33 @@ func TestValidateResponse(t *testing.T) {
 	}
 }
 
+// TestValidateResponse_Union covers the discriminated-union dispatch path
+// (#1326): a union schema name (Notification) routes to ValidateUnionValue via
+// the value's `type` discriminator.
+func TestValidateResponse_Union(t *testing.T) {
+	if _, ok := EmbeddedUnions()["Notification"]; !ok {
+		t.Fatal("embedded unions missing Notification")
+	}
+	// follow variant の必須欄 (createdAt/id/type/user/userId) を満たす -> clean。
+	ok := map[string]any{
+		"id": "n1", "createdAt": "2026-05-27T00:00:00.000Z", "type": "follow",
+		"userId": "u1", "user": map[string]any{"id": "u1"},
+	}
+	if f := ValidateResponse("Notification", ok); len(f) != 0 {
+		t.Errorf("complete follow notification should pass, got %v", f)
+	}
+	// 未知 type literal -> union dispatch 不能で HIGH。
+	if f := ValidateResponse("Notification", map[string]any{"type": "zzz"}); len(f) != 1 || f[0].Sev != SevHigh {
+		t.Errorf("unknown notification type: want 1 HIGH, got %v", f)
+	}
+	// 必須 user 欠落 -> gated drift。
+	if f := ValidateResponse("Notification", map[string]any{
+		"id": "n1", "createdAt": "x", "type": "follow", "userId": "u1",
+	}); len(f) == 0 {
+		t.Error("expected gated drift for follow notification missing user")
+	}
+}
+
 // requireL2Schema loads a flat golden schema for an L2 map-based packer test,
 // failing if the snapshot is missing/empty (regenerate-miss guard).
 func requireL2Schema(t *testing.T, name string) Schema {

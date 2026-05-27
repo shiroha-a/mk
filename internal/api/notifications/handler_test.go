@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -481,6 +482,9 @@ func TestShow_WithInstanceAndEmojiResolution(t *testing.T) {
 	inst, ok := user["instance"].(map[string]any)
 	require.True(t, ok, "user.instance must be set on remote notifier")
 	assert.Equal(t, themeColor, inst["themeColor"])
+	// L3 (#1326): 実 HTTP 応答を golden Notification union に突合 (type=follow で
+	// variant dispatch)。gate の union 対応 (ValidateResponse) を実経路で検証。
+	shapetest.Assert(t, "Notification", resp[0])
 }
 
 func TestShow_IncludeTypesFilter(t *testing.T) {
