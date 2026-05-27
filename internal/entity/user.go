@@ -490,6 +490,14 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		d.FollowingVisibility = string(profile.FollowingVisibility)
 	}
 
+	// upstream UserEntityService: publicReactions は
+	// `isLocalUser(user) ? profile.publicReactions : false` (issue 12964)。
+	// remote user は users/reactions が IS_REMOTE_USER を返すため、ここで false
+	// にしておかないと frontend が reactions タブを表示して error になる。
+	if u.Host != nil {
+		d.PublicReactions = false
+	}
+
 	return d
 }
 

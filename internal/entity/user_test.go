@@ -896,3 +896,32 @@ func TestPackMeDetailed_NotificationMalformed(t *testing.T) {
 	assert.Equal(t, []string{"follow", "receiveFollowRequest"}, me.EmailNotificationTypes)
 	assert.Equal(t, map[string]any{}, me.NotificationRecieveConfig)
 }
+
+// remote user (host != nil) は upstream UserEntityService と同じく
+// publicReactions を常に false にする (issue 12964)。これが true だと
+// frontend が reactions タブを表示し、users/reactions が IS_REMOTE_USER で
+// error になる (リモートユーザーをローカルと誤認するバグの回帰防止)。
+func TestPackUserDetailed_RemoteUserPublicReactionsFalse(t *testing.T) {
+	host := "remote.example.com"
+	u := &model.User{
+		ID:                "ruser",
+		Username:          "alice",
+		Host:              &host,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	// profile が publicReactions=true でも remote なら false に上書きされる。
+	profile := &model.UserProfile{UserID: "ruser", PublicReactions: true, Fields: datatypes.JSON([]byte("[]"))}
+
+	detailed := PackUserDetailed(u, profile)
+	assert.False(t, detailed.PublicReactions, "remote user must report publicReactions=false")
+}
+
+// local user は profile の publicReactions をそのまま反映する (remote 上書きが
+// local を巻き込まない回帰防止)。
+func TestPackUserDetailed_LocalUserPublicReactionsPreserved(t *testing.T) {
+	u := &model.User{ID: "luser", Username: "bob", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	profile := &model.UserProfile{UserID: "luser", PublicReactions: true, Fields: datatypes.JSON([]byte("[]"))}
+
+	detailed := PackUserDetailed(u, profile)
+	assert.True(t, detailed.PublicReactions, "local user with publicReactions=true must stay true")
+}
