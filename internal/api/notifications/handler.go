@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -111,6 +112,7 @@ func (h *Handler) Show(c echo.Context) error {
 	// (= aidx) で判定する設計なので adapter pattern で完結する。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)

@@ -436,6 +436,7 @@ func (r *listRequest) normalize() {
 // Renotes handles POST /api/notes/renotes.
 func (h *Handler) Renotes(c echo.Context) error {
 	return h.serveList(c, "12908022-2e21-46cd-ba6a-3edaf6093f46", func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.queryService.ListRenotes(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }
@@ -443,6 +444,7 @@ func (h *Handler) Renotes(c echo.Context) error {
 // Replies handles POST /api/notes/replies.
 func (h *Handler) Replies(c echo.Context) error {
 	return h.serveList(c, apierr.UUIDNoSuchNote, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.queryService.ListReplies(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }
@@ -450,6 +452,7 @@ func (h *Handler) Replies(c echo.Context) error {
 // Children handles POST /api/notes/children.
 func (h *Handler) Children(c echo.Context) error {
 	return h.serveList(c, apierr.UUIDNoSuchNote, func(viewer *model.User, req listRequest) ([]*model.Note, error) {
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.queryService.ListChildren(viewer, req.NoteID, req.UntilID, req.SinceID, req.Limit)
 	})
 }

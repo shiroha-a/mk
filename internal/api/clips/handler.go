@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -222,6 +223,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	rows, err := h.svc.ListByUser(user.ID, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -314,6 +316,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, req.Limit)
 	if err != nil {
 		switch {

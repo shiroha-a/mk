@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -633,6 +634,7 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	users, err := h.userRepo.ListUsers(model.UserListFilter{
 		State:    req.State,
 		Origin:   req.Origin,
@@ -1908,6 +1910,7 @@ func (h *Handler) EmojiList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	emojis, err := h.emojiRepo.ListWithFilter(req.Query, req.Category, true, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -2156,6 +2159,7 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, sinceID, untilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -2269,6 +2273,7 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	logs, err := h.modLogService.List(req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

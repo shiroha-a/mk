@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -123,6 +124,7 @@ func (h *Handler) List(c echo.Context) error {
 	var items []*model.Announcement
 	var err error
 	if user != nil {
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		items, err = h.repo.ListForUser(user.ID, activeOnly, req.Limit, req.Offset, sinceID, untilID)
 	} else {
 		items, err = h.repo.ListGlobal(activeOnly, req.Limit, req.Offset, sinceID, untilID)
@@ -411,6 +413,7 @@ func (h *Handler) AdminList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	items, err := h.repo.ListForAdmin(req.UserID, req.Status, req.Limit, req.Offset, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

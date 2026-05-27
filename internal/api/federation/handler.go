@@ -8,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -85,6 +86,7 @@ func (h *Handler) Instances(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
 	filter := model.InstanceListFilter{
 		Host:          req.Host,
 		Suspended:     req.Suspended,

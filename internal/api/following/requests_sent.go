@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -26,6 +27,7 @@ func (h *Handler) RequestsSent(c echo.Context) error {
 	_ = c.Bind(&req)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	rows, err := h.followingService.ListSentRequests(me.ID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)

@@ -255,6 +255,7 @@ func (h *Handler) ListRequests(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	requests, err := h.followingService.ListReceivedRequests(me.ID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)

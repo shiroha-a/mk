@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -117,6 +118,7 @@ func (h *Handler) List(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
+	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
 	tickets, err := h.repo.ListByCreator(user.ID, sinceID, untilID, req.Limit)
 	if err != nil {
 		// upstream は handler 内で DB error を listing 404 相当ではなく empty

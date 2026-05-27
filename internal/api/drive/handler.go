@@ -709,6 +709,7 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	notes, err := h.noteRepo.ListByFileID(req.FileID, sinceID, untilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})

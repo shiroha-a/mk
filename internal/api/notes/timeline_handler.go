@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/timeline"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -89,6 +90,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
 		}
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, true)
 }
@@ -108,6 +110,7 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 			MutedUserIDs:       h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs: h.loadRenoteMutedUserIDs(viewer),
 		}
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.LocalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, false)
 }
@@ -126,6 +129,7 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 			MutedUserIDs:       h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs: h.loadRenoteMutedUserIDs(viewer),
 		}
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.GlobalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, false)
 }
@@ -150,6 +154,7 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
 		}
+		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
 	}, true)
 }
