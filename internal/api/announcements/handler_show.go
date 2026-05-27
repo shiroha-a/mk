@@ -32,12 +32,12 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	a, err := h.repo.FindByID(req.AnnouncementID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "e0ef2076-ee94-4ebc-a2c8-63bec9e7ab72"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 	}
 	if a.UserID != nil {
 		me := middleware.GetUser(c)
 		if me == nil || *a.UserID != me.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "e0ef2076-ee94-4ebc-a2c8-63bec9e7ab72"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 		}
 	}
 	return c.JSON(http.StatusOK, packAnnouncement(a, h.idGen))

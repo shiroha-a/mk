@@ -25,7 +25,7 @@ func (h *Handler) Invalidate(c echo.Context) error {
 	}
 	if err := h.followingService.Unfollow(req.UserID, me.ID); err != nil {
 		if errors.Is(err, corefollowing.ErrNotFollowing) {
-			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FOLLOWING", "You are not followed by that user.", "5dbf82f5-c92b-40b1-87d1-6c8c0741fd09"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FOLLOWING", "You are not followed by that user.", "918faac3-074f-41ae-9c43-ed5d2946770d"))
 		}
 		return apierr.JSONInternalError(c)
 	}

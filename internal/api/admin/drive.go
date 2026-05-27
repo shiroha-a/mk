@@ -126,27 +126,27 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "fileId or url is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.driveFileRepo == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "caf3ca38-c6e5-472e-a30c-b05377dcc240"))
 	}
 	viewer := middleware.GetUser(c)
 	if req.FileID != "" {
 		file, err := h.driveFileRepo.FindByID(req.FileID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "caf3ca38-c6e5-472e-a30c-b05377dcc240"))
 		}
 		return c.JSON(http.StatusOK, h.packAdminDriveShowFile(file, viewer))
 	}
 	// url 指定時は adminDB を使って url / thumbnailUrl / webpublicUrl いずれか
 	// に一致する 1 件を引く。 driveFileRepo には該当 API が無いため raw query で。
 	if h.adminDB == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "caf3ca38-c6e5-472e-a30c-b05377dcc240"))
 	}
 	var file model.DriveFile
 	if err := h.adminDB.Where(
 		`"url" = ? OR "thumbnailUrl" = ? OR "webpublicUrl" = ?`,
 		req.URL, req.URL, req.URL,
 	).First(&file).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "caf3ca38-c6e5-472e-a30c-b05377dcc240"))
 	}
 	return c.JSON(http.StatusOK, h.packAdminDriveShowFile(&file, viewer))
 }

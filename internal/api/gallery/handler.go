@@ -128,7 +128,7 @@ func (h *Handler) PostsShow(c echo.Context) error {
 	}
 	var post model.GalleryPost
 	if err := h.db.Preload("User").Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c5b0-4604-85bb-5b5371b1cd45"))
 	}
 	return c.JSON(http.StatusOK, h.packOne(&post))
 }
@@ -144,7 +144,7 @@ func (h *Handler) PostsDelete(c echo.Context) error {
 	}
 	result := h.db.Where("id = ? AND \"userId\" = ?", req.PostID, user.ID).Delete(&model.GalleryPost{})
 	if result.RowsAffected == 0 {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "ae52f367-4bd7-4ecd-afc6-5672fff427f5"))
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -189,7 +189,7 @@ func (h *Handler) PostsLike(c echo.Context) error {
 		PostID: req.PostID,
 	}
 	if err := h.db.Create(like).Error; err != nil {
-		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_LIKED", "Already liked.", "40e8fb37-7a93-4e2c-87fc-c1c25e4a68a1"))
+		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_LIKED", "Already liked.", "40e9ed56-a59c-473a-bf3f-f289c54fb5a7"))
 	}
 	h.db.Model(&model.GalleryPost{}).Where("id = ?", req.PostID).UpdateColumn("\"likedCount\"", gorm.Expr("\"likedCount\" + 1"))
 	return c.NoContent(http.StatusNoContent)

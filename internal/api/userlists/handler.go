@@ -157,7 +157,7 @@ func (h *Handler) Push(c echo.Context) error {
 	}
 	list, err := h.repo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
 	}
 	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
 	// で評価する (upstream は owner = me 経路、mk-go も owner.UserID と me 一致

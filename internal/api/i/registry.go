@@ -45,7 +45,7 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 	req.Scope = normalizeRegistryScope(req.Scope)
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, req.Domain)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "7f5e1e4a-1e2a-41b9-80e3-8a0d6e8aa8b1"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"updatedAt": item.UpdatedAt,

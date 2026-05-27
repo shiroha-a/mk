@@ -1402,7 +1402,7 @@ func (h *Handler) RolesShow(c echo.Context) error {
 	}
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
 	}
 	return c.JSON(http.StatusOK, r)
 }
@@ -1450,7 +1450,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	}
 	before, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
@@ -1542,7 +1542,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	after, err := h.roleService.UpdateFields(req.RoleID, fields)
 	if err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -1565,7 +1565,7 @@ func (h *Handler) RolesDelete(c echo.Context) error {
 	// 削除直後だと role 情報を取れないので事前に snapshot を取って log info に含める
 	snapshot, _ := h.roleService.Show(req.RoleID)
 	if err := h.roleService.Delete(req.RoleID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"))
 	}
 	h.logModeration(c, moderationlog.LogDeleteRole, map[string]any{
 		"roleId": req.RoleID,
@@ -1592,7 +1592,7 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	}
 	if err := h.roleService.Assign(req.UserID, req.RoleID, expiresAt); err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "6503c040-6af4-4ed9-bf07-f2dd16678eab"))
 		}
 		if err == role.ErrAlreadyAssigned {
 			return c.JSON(http.StatusConflict, apierr.Error("ALREADY_ASSIGNED", "Role already assigned.", "67d8689c-25c6-435f-8eed-6ea68e5e53e9"))
@@ -1614,7 +1614,7 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {
 		if err == role.ErrNotAssigned {
-			return c.JSON(http.StatusNotFound, apierr.Error("NOT_ASSIGNED", "Role not assigned.", "b9060ac7-5c94-4da4-9f55-2047140f5a68"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NOT_ASSIGNED", "Role not assigned.", "b9060ac7-5c94-4da4-9f55-2047c953df44"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -1648,7 +1648,7 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 	assignments, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-458b-9c04-4b18399b1f46"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "224eff5e-2488-4b18-b3e7-f50d94421648"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -1876,10 +1876,10 @@ func (h *Handler) EmojiDelete(c echo.Context) error {
 	// log info に snapshot を含めるため削除前に取得。取得失敗は NO_SUCH_EMOJI。
 	snapshot, err := h.emojiRepo.FindByID(req.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "684b7e7e-7e91-4e4c-a5cc-8050e4b8e0d8"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
 	}
 	if err := h.emojiRepo.Delete(req.ID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "684b7e7e-7e91-4e4c-a5cc-8050e4b8e0d8"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
 	}
 	h.logModeration(c, moderationlog.LogDeleteCustomEmoji, map[string]any{
 		"emojiId": req.ID,

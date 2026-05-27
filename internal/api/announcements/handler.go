@@ -304,7 +304,7 @@ func (h *Handler) AdminUpdate(c echo.Context) error {
 	// before snapshot for moderation log + global/user 分岐判定
 	before, err := h.repo.FindByID(req.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-0158-4f8d-bd54-1ab374089a15"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "d3aae5a7-6372-4cb4-b61c-f511ffc2d7cc"))
 	}
 	fields := map[string]any{}
 	if req.Title != nil {
@@ -350,7 +350,7 @@ func (h *Handler) AdminUpdate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if err := h.repo.UpdateFields(req.ID, fields); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-0158-4f8d-bd54-1ab374089a15"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "d3aae5a7-6372-4cb4-b61c-f511ffc2d7cc"))
 	}
 	after, err := h.repo.FindByID(req.ID)
 	if err != nil {
@@ -375,7 +375,7 @@ func (h *Handler) AdminDelete(c echo.Context) error {
 	// snapshot before delete (log info に含める + global/user 分岐判定)
 	snapshot, _ := h.repo.FindByID(req.ID)
 	if err := h.repo.Delete(req.ID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-0158-4f8d-bd54-1ab374089a15"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "ecad8040-a276-4e85-bda9-015a708d291e"))
 	}
 	if snapshot != nil {
 		h.logAnnouncementAction(c, moderationlog.LogDeleteGlobalAnnouncement, moderationlog.LogDeleteUserAnnouncement, snapshot, map[string]any{

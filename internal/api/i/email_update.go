@@ -66,7 +66,7 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	// を framework が 400 (= client error) に変換する (#885)。mk-go も
 	// drop-in 互換のため 400 に揃える (旧 mk-go は 403)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "e86c14a4-0da8-4571-8f36-8a2e9f9b3a00"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "e54c1d7e-e7d6-4103-86b6-0a95069b4ad3"))
 	}
 
 	fields := map[string]any{
@@ -136,7 +136,7 @@ func (h *Handler) VerifyEmail(c echo.Context) error {
 
 	profile, err := h.userService.FindProfileByVerifyCode(req.Code)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CODE", "No such code.", "1e53842e-b7f4-4e1c-8f1e-8d0a2d9b0c7e"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CODE", "No such code.", "97c1f576-e4b8-4b8a-a6dc-9cb65e7f6f85"))
 	}
 
 	if verr := h.userService.UpdateProfileFields(profile.UserID, map[string]any{

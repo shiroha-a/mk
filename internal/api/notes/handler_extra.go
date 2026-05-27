@@ -35,7 +35,7 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	}
 	exists, _ := h.favoriteRepo.Exists(user.ID, req.NoteID)
 	if exists {
-		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_FAVORITED", "Already favorited.", "a402c12b-34dd-41d2-97d8-4d2c5b7e4645"))
+		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_FAVORITED", "Already favorited.", "a402c12b-34dd-41d2-97d8-4d2ffd96a1a6"))
 	}
 	now := time.Now()
 	fav := &model.NoteFavorite{
@@ -181,10 +181,10 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-d8571571e198"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
 		}
 		if list.UserID != me.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-d8571571e198"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
 		}
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
@@ -253,7 +253,7 @@ func (h *Handler) Translate(c echo.Context) error {
 	}
 
 	if h.translator == nil {
-		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "Translator is not configured.", "bef6e895-c05f-4572-96ab-58f5ae1e2e28"))
+		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "Translator is not configured.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
 	}
 
 	n, err := h.noteRepo.FindByID(req.NoteID)

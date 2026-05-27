@@ -49,7 +49,7 @@ func (h *Handler) SessionGenerate(c echo.Context) error {
 
 	app, err := h.repo.FindAppBySecret(req.AppSecret)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "c5628b5a-3c9e-4e3f-b765-44952b2bfb0e"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "92f93e63-428e-4f2f-a5a4-39e1407fe998"))
 	}
 
 	token := uuid.New().String()
@@ -81,7 +81,7 @@ func (h *Handler) SessionShow(c echo.Context) error {
 
 	session, err := h.repo.FindSessionByToken(req.Token)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eca4-4403-8269-7b9cc0b9a2c0"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eba7-4adb-a467-f171b8847250"))
 	}
 
 	return c.JSON(http.StatusOK, packSession(session))
@@ -99,7 +99,7 @@ func (h *Handler) Accept(c echo.Context) error {
 
 	session, err := h.repo.FindSessionByToken(req.Token)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eca4-4403-8269-7b9cc0b9a2c0"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "9c72d8de-391a-43c1-9d06-08d29efde8df"))
 	}
 
 	// アクセストークンが既に存在するか確認
@@ -143,12 +143,12 @@ func (h *Handler) SessionUserkey(c echo.Context) error {
 
 	app, err := h.repo.FindAppBySecret(req.AppSecret)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "c5628b5a-3c9e-4e3f-b765-44952b2bfb0e"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "fcab192a-2c5a-43b7-8ad8-9b7054d8d40d"))
 	}
 
 	session, err := h.repo.FindSessionByTokenAndAppID(req.Token, app.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eca4-4403-8269-7b9cc0b9a2c0"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "5b5a1503-8bc8-4bd0-8054-dc189e8cdcb3"))
 	}
 
 	if session.UserID == nil {

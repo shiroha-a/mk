@@ -58,7 +58,7 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "78d6c839-20c9-4c66-b90a-fc0542168b48"))
 	}
 
 	secret, uri, err := twofactor.GenerateSecret("Misskey", user.Username)
@@ -158,7 +158,7 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "7add0395-9901-4098-82f9-4f67af65f775"))
 	}
 
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
@@ -429,7 +429,7 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "141c598d-a825-44c8-9173-cfb9d92be493"))
 	}
 
 	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil {

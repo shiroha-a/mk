@@ -49,7 +49,7 @@ func (h *Handler) Create(c echo.Context) error {
 		case errors.Is(err, coremuting.ErrMuteeNotFound):
 			return apierr.JSONNoSuchUser(c)
 		case errors.Is(err, coremuting.ErrAlreadyMuting):
-			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_MUTING", "You are already muting that user.", "ccfecbe4-1f1c-4fc2-8bdb-9f3672ab7191"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_MUTING", "You are already muting that user.", "ccfecbe4-1f1c-4fc2-8a3d-c3ffee61cb7b"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -66,9 +66,9 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Unmute(user.ID, req.UserID); err != nil {
 		switch {
 		case errors.Is(err, coremuting.ErrSelfMute):
-			return c.JSON(http.StatusBadRequest, apierr.Error("MUTEE_IS_YOURSELF", "You cannot unmute yourself.", "afa929cc-95f0-4e30-92c1-b4b5e5e0f38e"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("MUTEE_IS_YOURSELF", "You cannot unmute yourself.", "619b1314-0850-4597-a242-e245f3da42af"))
 		case errors.Is(err, coremuting.ErrNotMuting):
-			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_MUTING", "You are not muting that user.", "5467d020-daa9-4553-81e1-135c0c35a96d"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_MUTING", "You are not muting that user.", "2e4ef874-8bf0-4b4b-b069-4598f6d05817"))
 		}
 		return apierr.JSONInternalError(c)
 	}
