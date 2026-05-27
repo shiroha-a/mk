@@ -980,6 +980,7 @@ func TestFollowers_Success(t *testing.T) {
 	assert.NotEmpty(t, createdAt)
 	assert.Equal(t, "follower1", out[0]["followerId"])
 	assert.Equal(t, "user1", out[0]["followeeId"])
+	shapetest.Assert(t, "Following", out[0]) // L3 (#1330)
 }
 
 // TestFollowers_PopulatesIsFollowedFromViewer guards #1144: when a viewer
@@ -1372,6 +1373,7 @@ func TestFollowing_Success(t *testing.T) {
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Len(t, out, 1)
+	shapetest.Assert(t, "Following", out[0]) // L3 (#1330)
 }
 
 func TestFollowing_InvalidParam(t *testing.T) {
