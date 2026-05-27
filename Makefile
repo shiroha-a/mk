@@ -442,6 +442,7 @@ shapecheck-gen:
 	go run ./tools/erroriddiff
 	go run ./tools/limitspec
 	go run ./tools/permspec
+	go run ./tools/securespec
 
 # 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
 shapecheck-report:
@@ -468,4 +469,4 @@ limitspec-check:
 # permission drift gate をローカルで実行する。mk-go の router middleware が
 # Misskey の requireAdmin/requireModerator/requireCredential より緩くないか検証。
 perm-check:
-	go test ./internal/entitycompat/... -run TestPermissionDrift -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestPermissionDrift|TestSecureDrift' -count=1 -v

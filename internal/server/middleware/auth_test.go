@@ -698,3 +698,37 @@ func TestGetUser_NoUser(t *testing.T) {
 	user := GetUser(c)
 	assert.Nil(t, user)
 }
+
+func TestRequireSecure_NativeTokenAllowed(t *testing.T) {
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), httptest.NewRecorder())
+	nat := "nativetoken1234"
+	c.Set(string(UserContextKey), &model.User{ID: "u1", Token: &nat})
+	c.Set(string(TokenContextKey), nat)
+	err := RequireSecure()(func(c echo.Context) error { return c.String(http.StatusOK, "ok") })(c)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, c.Response().Status)
+}
+
+func TestRequireSecure_AppTokenDenied(t *testing.T) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+	nat := "nativetoken1234"
+	// access token (app/MiAuth): user.Token (native) と request token が異なる
+	c.Set(string(UserContextKey), &model.User{ID: "u1", Token: &nat})
+	c.Set(string(TokenContextKey), "apptoken_different")
+	err := RequireSecure()(func(c echo.Context) error { return c.String(http.StatusOK, "ok") })(c)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+}
+
+func TestRequireSecure_Anonymous(t *testing.T) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+	err := RequireSecure()(func(c echo.Context) error { return c.String(http.StatusOK, "ok") })(c)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}

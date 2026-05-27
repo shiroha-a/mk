@@ -321,3 +321,18 @@ mk-goが**Misskeyより緩い**(= 権限昇格 / 認証欠落)ケースのみを
 make perm-check       # gate をローカル実行
 make shapecheck-gen   # golden_permissions.json も再生成
 ```
+
+## Secure drift gate（app token 制限）
+
+`TestSecureDrift`は、Misskeyの`secure: true` endpoint(password変更 / 2FA / data export-import / authorized-apps 等のaccount-security系、52件)が、mk-goで`middleware.RequireSecure`を適用していることを検証する。
+
+Misskeyの`secure`は「native session token のみ許可、第三者app/OAuth/MiAuth access token 不可」(ApiCallServiceの`isSecure = user != null && token == null`)。これが無いと、有効なaccess tokenを持つ第三者appがpassword変更や2FA解除を駆動できてしまう。
+
+mk-goは全認証がtoken経由(session無し)で、native token = `users.token`、app/MiAuthは別の`access_tokens`行。`RequireSecure`は`*user.Token == GetToken(c)`でnative判定し、一致しなければ403 ACCESS_DENIED(Misskey id `56f35758-...`)。`tools/securespec`が`secure: true` endpointのgolden(`golden_secure_endpoints.json`)を生成し、gateがrouter登録(複数行inline含む括弧バランスparse)に`RequireSecure`があるか突合する。
+
+### 運用
+
+```bash
+make perm-check       # permission + secure gate をローカル実行
+make shapecheck-gen   # golden_secure_endpoints.json も再生成
+```

@@ -193,6 +193,43 @@ func RequireAuth() echo.MiddlewareFunc {
 	}
 }
 
+// RequireSecure requires the request to be authenticated via the user's native
+// session token (users.token), not a third-party app / MiAuth access token.
+// It mirrors Misskey's `secure: true` meta (isSecure = user != null && token ==
+// null): account-security endpoints (password change / 2FA / data export &
+// import / authorized-apps) must not be drivable by an OAuth app even when the
+// app holds a valid access token.
+//
+// The native token is the only credential that equals users.token; app / MiAuth
+// access tokens resolve the same user but via a separate access_tokens row, so
+// their raw token never matches user.Token.
+func RequireSecure() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			user := GetUser(c)
+			if user == nil {
+				return c.JSON(http.StatusUnauthorized, map[string]any{
+					"error": map[string]any{
+						"message": "Authentication is required.",
+						"code":    "CREDENTIAL_REQUIRED",
+						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+					},
+				})
+			}
+			if user.Token == nil || *user.Token != GetToken(c) {
+				return c.JSON(http.StatusForbidden, map[string]any{
+					"error": map[string]any{
+						"message": "Access denied.",
+						"code":    "ACCESS_DENIED",
+						"id":      "56f35758-7dd5-468b-8439-5d6fb8ec9b8e",
+					},
+				})
+			}
+			return next(c)
+		}
+	}
+}
+
 // GetUser returns the authenticated user from the context.
 func GetUser(c echo.Context) *model.User {
 	u, ok := c.Get(string(UserContextKey)).(*model.User)

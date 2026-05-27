@@ -1277,10 +1277,10 @@ func (s *Server) setupRoutes() {
 	api.POST("/i/registry/get-all", iHandler.RegistryGetAll, middleware.RequireAuth())
 	api.POST("/i/registry/keys-with-type", iHandler.RegistryKeysWithType, middleware.RequireAuth())
 	api.POST("/i/registry/remove", iHandler.RegistryRemove, middleware.RequireAuth())
-	api.POST("/i/change-password", iHandler.ChangePassword, middleware.RequireAuth())
-	api.POST("/i/delete-account", iHandler.DeleteAccount, middleware.RequireAuth())
+	api.POST("/i/change-password", iHandler.ChangePassword, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/delete-account", iHandler.DeleteAccount, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/favorites", iHandler.Favorites, middleware.RequireAuth())
-	api.POST("/i/regenerate-token", iHandler.RegenerateToken, middleware.RequireAuth())
+	api.POST("/i/regenerate-token", iHandler.RegenerateToken, middleware.RequireAuth(), middleware.RequireSecure())
 	iHandler.SetFavoriteRepo(noteFavoriteRepo)
 	// Phase 7-2 (#244): /api/i の未読系フィールドを実クエリ化。
 	iHandler.SetNotificationService(notificationService)
@@ -1318,31 +1318,31 @@ func (s *Server) setupRoutes() {
 
 	// i/export-* and i/import-* (Phase 9.4)
 	iHandler.SetTransferEnqueuer(s.queueClient)
-	api.POST("/i/export-notes", iHandler.ExportNotes, middleware.RequireAuth())
-	api.POST("/i/export-following", iHandler.ExportFollowing, middleware.RequireAuth())
-	api.POST("/i/export-blocking", iHandler.ExportBlocking, middleware.RequireAuth())
-	api.POST("/i/export-mute", iHandler.ExportMute, middleware.RequireAuth())
-	api.POST("/i/export-favorites", iHandler.ExportFavorites, middleware.RequireAuth())
-	api.POST("/i/export-user-lists", iHandler.ExportUserLists, middleware.RequireAuth())
-	api.POST("/i/export-antennas", iHandler.ExportAntennas, middleware.RequireAuth())
-	api.POST("/i/export-clips", iHandler.ExportClips, middleware.RequireAuth())
+	api.POST("/i/export-notes", iHandler.ExportNotes, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-following", iHandler.ExportFollowing, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-blocking", iHandler.ExportBlocking, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-mute", iHandler.ExportMute, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-favorites", iHandler.ExportFavorites, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-user-lists", iHandler.ExportUserLists, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-antennas", iHandler.ExportAntennas, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/export-clips", iHandler.ExportClips, middleware.RequireAuth(), middleware.RequireSecure())
 	// i/import-* の canImport* role policy gate は #1020 で追加。policy=false
 	// の user (default 全 false) は 403 ROLE_PERMISSION_DENIED を返す。
 	api.POST("/i/import-following", iHandler.ImportFollowing,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportFollowing))
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportFollowing), middleware.RequireSecure())
 	api.POST("/i/import-blocking", iHandler.ImportBlocking,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportBlocking))
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportBlocking), middleware.RequireSecure())
 	api.POST("/i/import-muting", iHandler.ImportMuting,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportMuting))
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportMuting), middleware.RequireSecure())
 	api.POST("/i/import-user-lists", iHandler.ImportUserLists,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportUserLists))
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportUserLists), middleware.RequireSecure())
 	api.POST("/i/import-antennas", iHandler.ImportAntennas,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportAntennas))
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportAntennas), middleware.RequireSecure())
 
 	// i/webhooks/* — Webhook管理 (実データ)
 	webhookHandler := apiwebhooks.NewHandler(webhookRepo, idGen)
@@ -1353,7 +1353,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/i/webhooks/show", webhookHandler.Show, middleware.RequireAuth())
 	api.POST("/i/webhooks/update", webhookHandler.Update, middleware.RequireAuth())
 	api.POST("/i/webhooks/delete", webhookHandler.Delete, middleware.RequireAuth())
-	api.POST("/i/webhooks/test", webhookHandler.Test, middleware.RequireAuth())
+	api.POST("/i/webhooks/test", webhookHandler.Test, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// Notifications endpoints
 	notificationsHandler := notifications.NewHandler(notificationService, idGen)
@@ -1370,27 +1370,27 @@ func (s *Server) setupRoutes() {
 
 	// i/* ハンドラ
 	api.POST("/i/claim-achievement", iHandler.ClaimAchievement, middleware.RequireAuth())
-	api.POST("/i/apps", iHandler.Apps, middleware.RequireAuth())
-	api.POST("/i/authorized-apps", iHandler.AuthorizedApps, middleware.RequireAuth())
-	api.POST("/i/signin-history", iHandler.SigninHistory, middleware.RequireAuth())
-	api.POST("/i/revoke-token", iHandler.RevokeToken, middleware.RequireAuth())
-	api.POST("/i/update-email", iHandler.UpdateEmail, middleware.RequireAuth())
+	api.POST("/i/apps", iHandler.Apps, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/authorized-apps", iHandler.AuthorizedApps, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/signin-history", iHandler.SigninHistory, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/revoke-token", iHandler.RevokeToken, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/update-email", iHandler.UpdateEmail, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/verify-email", iHandler.VerifyEmail)
-	api.POST("/i/move", iHandler.Move, middleware.RequireAuth())
-	api.POST("/i/2fa/register", iHandler.TwoFARegister, middleware.RequireAuth())
-	api.POST("/i/2fa/done", iHandler.TwoFADone, middleware.RequireAuth())
-	api.POST("/i/2fa/unregister", iHandler.TwoFAUnregister, middleware.RequireAuth())
-	api.POST("/i/2fa/register-key", iHandler.TwoFARegisterKey, middleware.RequireAuth())
-	api.POST("/i/2fa/key-done", iHandler.TwoFAKeyDone, middleware.RequireAuth())
-	api.POST("/i/2fa/remove-key", iHandler.TwoFARemoveKey, middleware.RequireAuth())
-	api.POST("/i/2fa/update-key", iHandler.TwoFAUpdateKey, middleware.RequireAuth())
-	api.POST("/i/2fa/password-less", iHandler.TwoFAPasswordLess, middleware.RequireAuth())
+	api.POST("/i/move", iHandler.Move, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/register", iHandler.TwoFARegister, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/done", iHandler.TwoFADone, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/unregister", iHandler.TwoFAUnregister, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/register-key", iHandler.TwoFARegisterKey, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/key-done", iHandler.TwoFAKeyDone, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/remove-key", iHandler.TwoFARemoveKey, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/update-key", iHandler.TwoFAUpdateKey, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/i/2fa/password-less", iHandler.TwoFAPasswordLess, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/gallery/likes", iHandler.GalleryLikes, middleware.RequireAuth())
 	api.POST("/i/gallery/posts", iHandler.GalleryPosts, middleware.RequireAuth())
 	api.POST("/i/page-likes", iHandler.PageLikes, middleware.RequireAuth())
 	api.POST("/i/registry/get-detail", iHandler.RegistryGetDetail, middleware.RequireAuth())
 	api.POST("/i/registry/keys", iHandler.RegistryKeys, middleware.RequireAuth())
-	api.POST("/i/registry/scopes-with-domain", iHandler.RegistryScopesWithDomain, middleware.RequireAuth())
+	api.POST("/i/registry/scopes-with-domain", iHandler.RegistryScopesWithDomain, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// i/export-* / i/import-* は上方 (line ~1245-1265) の explicit registration
 	// が active (iHandler.Export* / Import* via transfer_handler.go) で、proper
@@ -2060,7 +2060,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/emoji/add-aliases-bulk", adminHandler.EmojiAddAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/emoji/copy", adminHandler.EmojiCopy, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/emoji/delete-bulk", adminHandler.EmojiDeleteBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
-	api.POST("/admin/emoji/import-zip", adminHandler.EmojiImportZip, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
+	api.POST("/admin/emoji/import-zip", adminHandler.EmojiImportZip, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireSecure())
 	api.POST("/admin/emoji/list-remote", adminHandler.EmojiListRemote, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
 	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
@@ -2076,17 +2076,17 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/relays/add", adminHandler.RelaysAdd, middleware.RequireModerator(roleService))
 	api.POST("/admin/relays/list", adminHandler.RelaysList, middleware.RequireModerator(roleService))
 	api.POST("/admin/relays/remove", adminHandler.RelaysRemove, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/create", adminHandler.SystemWebhookCreate, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/delete", adminHandler.SystemWebhookDelete, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/list", adminHandler.SystemWebhookList, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/show", adminHandler.SystemWebhookShow, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/test", adminHandler.SystemWebhookTest, middleware.RequireModerator(roleService))
-	api.POST("/admin/system-webhook/update", adminHandler.SystemWebhookUpdate, middleware.RequireModerator(roleService))
-	api.POST("/admin/abuse-report/notification-recipient/create", adminHandler.AbuseReportNotificationRecipientCreate, middleware.RequireModerator(roleService))
-	api.POST("/admin/abuse-report/notification-recipient/delete", adminHandler.AbuseReportNotificationRecipientDelete, middleware.RequireModerator(roleService))
-	api.POST("/admin/abuse-report/notification-recipient/list", adminHandler.AbuseReportNotificationRecipientList, middleware.RequireModerator(roleService))
-	api.POST("/admin/abuse-report/notification-recipient/show", adminHandler.AbuseReportNotificationRecipientShow, middleware.RequireModerator(roleService))
-	api.POST("/admin/abuse-report/notification-recipient/update", adminHandler.AbuseReportNotificationRecipientUpdate, middleware.RequireModerator(roleService))
+	api.POST("/admin/system-webhook/create", adminHandler.SystemWebhookCreate, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/system-webhook/delete", adminHandler.SystemWebhookDelete, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/system-webhook/list", adminHandler.SystemWebhookList, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/system-webhook/show", adminHandler.SystemWebhookShow, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/system-webhook/test", adminHandler.SystemWebhookTest, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/system-webhook/update", adminHandler.SystemWebhookUpdate, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/abuse-report/notification-recipient/create", adminHandler.AbuseReportNotificationRecipientCreate, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/abuse-report/notification-recipient/delete", adminHandler.AbuseReportNotificationRecipientDelete, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/abuse-report/notification-recipient/list", adminHandler.AbuseReportNotificationRecipientList, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/abuse-report/notification-recipient/show", adminHandler.AbuseReportNotificationRecipientShow, middleware.RequireModerator(roleService), middleware.RequireSecure())
+	api.POST("/admin/abuse-report/notification-recipient/update", adminHandler.AbuseReportNotificationRecipientUpdate, middleware.RequireModerator(roleService), middleware.RequireSecure())
 	api.POST("/admin/queue/clear", adminHandler.QueueClear, middleware.RequireAdmin(roleService))
 	api.POST("/admin/queue/deliver-delayed", adminHandler.QueueDeliverDelayed, middleware.RequireModerator(roleService))
 	api.POST("/admin/queue/inbox-delayed", adminHandler.QueueInboxDelayed, middleware.RequireModerator(roleService))
@@ -2111,10 +2111,10 @@ func (s *Server) setupRoutes() {
 	api.POST("/auth/session/generate", authHandler.SessionGenerate)
 	api.POST("/auth/session/show", authHandler.SessionShow)
 	api.POST("/auth/session/userkey", authHandler.SessionUserkey)
-	api.POST("/auth/accept", authHandler.Accept, middleware.RequireAuth())
+	api.POST("/auth/accept", authHandler.Accept, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// miauth/gen-token — アクセストークン直接生成
-	api.POST("/miauth/gen-token", authHandler.GenToken, middleware.RequireAuth())
+	api.POST("/miauth/gen-token", authHandler.GenToken, middleware.RequireAuth(), middleware.RequireSecure())
 	// miauth/:session/check — 3rd-party client が session 紐付き token を取得する
 	// (#1224)。token をまだ持たない client が叩くため RequireAuth は付けない。
 	authHandler.SetUserRepo(userRepo)
@@ -2134,9 +2134,9 @@ func (s *Server) setupRoutes() {
 
 	// sw/* — Service Worker push notifications (実データ)
 	swHandler := apisw.NewHandler(swSubRepo, metaRepo, idGen)
-	api.POST("/sw/register", swHandler.Register, middleware.RequireAuth())
-	api.POST("/sw/show-registration", swHandler.ShowRegistration, middleware.RequireAuth())
-	api.POST("/sw/update-registration", swHandler.UpdateRegistration, middleware.RequireAuth())
+	api.POST("/sw/register", swHandler.Register, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/sw/show-registration", swHandler.ShowRegistration, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/sw/update-registration", swHandler.UpdateRegistration, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/sw/unregister", swHandler.Unregister)
 
 	// reversi/* — オセロゲーム (実データ)
@@ -2419,13 +2419,13 @@ func (s *Server) setupRoutes() {
 			slog.Warn("export-custom-emojis: enqueue failed", "user", user.ID, "err", err)
 		}
 		return c.NoContent(http.StatusNoContent)
-	}, middleware.RequireAuth())
+	}, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// fetch-external-resources — external JSON resource を hash 検証付きで取得
 	// (#1222)。外部 theme/plugin 等を integrity-check して返す。SSRF-safe client
 	// 経由、upstream requireCredential 相当で RequireAuth を要求する。
 	fetchExternalHandler := apifetchexternal.New(s.outboundClient(apifetchexternal.FetchTimeout), s.config.UserAgent)
-	api.POST("/fetch-external-resources", fetchExternalHandler.Fetch, middleware.RequireAuth())
+	api.POST("/fetch-external-resources", fetchExternalHandler.Fetch, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// fetch-rss — RSS / Atom feed プロキシ。frontend RSS / RSSTicker ウィジェット
 	// が GET で叩く実装になっているため Misskey TS と同じく allowGet 相当で
@@ -2435,7 +2435,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/fetch-rss", fetchRSSHandler.Fetch)
 
 	// page-push — page scriptが任意のeventをpage所有者のmainに emit する。
-	api.POST("/page-push", pagesHandler.PagePush, middleware.RequireAuth())
+	api.POST("/page-push", pagesHandler.PagePush, middleware.RequireAuth(), middleware.RequireSecure())
 
 	// v2/admin/emoji/list — v2はページネーション情報付きオブジェクトを返す専用ハンドラ
 	api.POST("/v2/admin/emoji/list", adminHandler.EmojiListV2, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis))
