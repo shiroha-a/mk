@@ -69,6 +69,10 @@ func TestShow_Success(t *testing.T) {
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Test"}
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "UserList", resp) // L3 (#1320)
 }
 
 func TestShow_NotFound(t *testing.T) {

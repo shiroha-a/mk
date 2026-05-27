@@ -129,7 +129,11 @@ func TestPostsShow_Found(t *testing.T) {
 	cleanup()
 	testDB.Create(&model.GalleryPost{ID: "gp_s1", UpdatedAt: time.Now(), Title: "Show", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
-	assert.Equal(t, http.StatusOK, doPost(newHandler().PostsShow, `{"postId":"gp_s1"}`, nil).Code)
+	rec := doPost(newHandler().PostsShow, `{"postId":"gp_s1"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "GalleryPost", resp) // L3 (#1320)
 }
 
 func TestPostsShow_NotFound(t *testing.T) {

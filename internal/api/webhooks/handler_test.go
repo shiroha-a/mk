@@ -263,6 +263,10 @@ func TestShow_Success(t *testing.T) {
 	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: pq.StringArray{}}
 	rec := post(h.Show, `{"webhookId":"w1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "UserWebhook", resp) // L3 (#1320)
 }
 
 func TestShow_NotFound(t *testing.T) {

@@ -97,11 +97,20 @@ func TestCreate_RepoError(t *testing.T) {
 
 func TestShow_Success(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
-	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", Name: "alpha"}
-	c, rec := newReq(t, `{"clipId":"c1"}`)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	h.SetUserRepo(userRepo)
+	idGen, _ := id.NewGenerator("aidx")
+	clipID := idGen.Generate(time.Now())
+	repo.Clips[clipID] = &model.Clip{ID: clipID, UserID: "alice", Name: "alpha"}
+	c, rec := newReq(t, `{"clipId":"`+clipID+`"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	shapetest.Assert(t, "Clip", resp) // L3 (#1320)
 }
 
 func TestShow_BadJSON(t *testing.T) {
