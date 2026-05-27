@@ -74,9 +74,7 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Query == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "query is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	var tags []*model.Hashtag
 	if err := h.db.Where("name ILIKE ?", "%"+req.Query+"%").Limit(req.Limit).Find(&tags).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

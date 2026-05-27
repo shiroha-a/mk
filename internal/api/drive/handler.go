@@ -14,6 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -626,9 +627,7 @@ func (h *Handler) FilesList(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -795,9 +794,7 @@ func (h *Handler) Stream(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -828,9 +825,7 @@ func (h *Handler) FoldersList(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	if h.folderRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

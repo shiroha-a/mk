@@ -86,9 +86,7 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// untilDate を aidx prefix に正規化 (#1166)。
 	_, untilID := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
 	notes, err := h.noteRepo.ListFeatured(req.ChannelID, untilID, req.Limit, req.Offset)
@@ -132,9 +130,7 @@ func (h *Handler) Mentions(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	notes, err := h.noteRepo.ListMentions(user.ID, req.Limit, sinceID, untilID)
@@ -220,9 +216,7 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	if req.Tag == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// tagsカラムにtagを含むノートを検索

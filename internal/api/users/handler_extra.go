@@ -264,9 +264,7 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	notes, err := h.noteRepo.ListByUserID(req.UserID, "", "", req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -288,9 +286,7 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Username == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "username is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// host=nil → local user、host=*string → 当該 host のみで絞り込む
 	// (#766 fix、upstream Misskey TS の同 endpoint と同じ semantics)。
 	users, err := h.userService.SearchByUsernameAndHost(req.Username, req.Host, req.Limit)

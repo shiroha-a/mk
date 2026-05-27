@@ -483,9 +483,7 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
+	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// origin の enum 検証 (#763)。upstream Misskey TS は paramDef の
 	// JSON schema で 不正値を 400 reject する。mk-go も同等にする。
 	// 空文字列は default (combined) として許容。
