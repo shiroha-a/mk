@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -463,7 +464,9 @@ type rolePolicyOverride struct {
 // userID が "" の場合は base policies のみを返す (= upstream の userId==null
 // と同等)。
 func (s *Service) GetUserPolicies(userID string) map[string]any {
-	basePolicies := DefaultPolicies()
+	// applyMetaBasePolicies が basePolicies を mutate するため、共有 cache では
+	// なく clone を使う (DefaultPolicies の共有 map を壊さない、#1377)。
+	basePolicies := DefaultPoliciesClone()
 	s.applyMetaBasePolicies(basePolicies)
 
 	if userID == "" {
@@ -1009,8 +1012,34 @@ func (s *Service) Delete(id string) error {
 	return nil
 }
 
-// DefaultPolicies returns the Misskey default policies.
+// defaultPoliciesCache holds the immutable default policy map, built once at
+// package init. DefaultPolicies hands this shared instance to read-only
+// callers so high-traffic endpoints (meta calls it 3x/req, users/show, i)
+// avoid a per-request 39-entry map allocation — previously the single largest
+// allocation source (#1377, ~19% of all allocs in the HTTP bench), driving GC
+// pressure / tail latency.
+var defaultPoliciesCache = buildDefaultPolicies()
+
+// DefaultPolicies returns the shared, immutable Misskey default policies map.
+//
+// The returned map is shared across all callers and MUST NOT be mutated. Use
+// DefaultPoliciesClone when you need to overlay meta / role overrides.
 func DefaultPolicies() map[string]any {
+	return defaultPoliciesCache
+}
+
+// DefaultPoliciesClone returns a fresh mutable copy of the default policies for
+// callers that overlay values (e.g. GetUserPolicies merging meta / role
+// overrides). The clone is shallow, which is safe because all overlay paths
+// replace map entries by key rather than mutating the contained slice in place.
+func DefaultPoliciesClone() map[string]any {
+	return maps.Clone(defaultPoliciesCache)
+}
+
+// buildDefaultPolicies constructs the default policy map. Called once to seed
+// defaultPoliciesCache; do not call per-request (use DefaultPolicies /
+// DefaultPoliciesClone).
+func buildDefaultPolicies() map[string]any {
 	return map[string]any{
 		"gtlAvailable":               true,
 		"ltlAvailable":               true,
