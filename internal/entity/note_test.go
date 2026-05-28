@@ -434,6 +434,45 @@ func TestPackNotes_MergesBufferedReactions(t *testing.T) {
 	assert.Equal(t, "https://remote.example/emoji/yikes.png", out[0].ReactionEmojis["yikes@"+remoteHost])
 }
 
+// 2 件の note が同一 *Note の renote を共有する場合 (repository の batch hydration
+// で起こりうる)、buffered delta が二重加算されないこと。mergeBufferedReactions は
+// 加算的なので、flat list に同一ポインタが 2 回現れても適用は 1 回に限定する。
+func TestPackNotes_SharedRenote_NoDoubleMerge(t *testing.T) {
+	idGen := newTestIDGen(t)
+	renoteID := idGen.Generate(time.Now().Add(-time.Hour))
+	// 共有される renote 先 (base reaction 1)。
+	shared := &model.Note{
+		ID:         renoteID,
+		UserID:     "ru",
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte(`{":base@.:": 1}`)),
+		User:       &model.User{ID: "ru", Username: "renoter", AvatarDecorations: datatypes.JSON([]byte("[]"))},
+	}
+	mkRenoter := func(i int) *model.Note {
+		return &model.Note{
+			ID: idGen.Generate(time.Now().Add(time.Duration(i) * time.Second)), UserID: "u",
+			Visibility: model.NoteVisibilityPublic, RenoteID: &renoteID,
+			User:   &model.User{ID: "u", Username: "u", AvatarDecorations: datatypes.JSON([]byte("[]"))},
+			Renote: shared, // 両者が同一ポインタを共有
+		}
+	}
+	n1, n2 := mkRenoter(0), mkRenoter(1)
+	// shared renote に buffered delta +2。
+	reader := &stubBufferedReader{data: map[string]map[string]int64{
+		renoteID: {":base@.:": 2},
+	}}
+
+	out := PackNotes(context.Background(), []*model.Note{n1, n2}, idGen, nil, nil, reader)
+	require.Len(t, out, 2)
+	// 二重加算なら 1+2+2=5 になる。正しくは 1+2=3 (1 回のみ適用)。
+	for _, e := range out {
+		require.NotNil(t, e.Renote)
+		var got map[string]int
+		require.NoError(t, json.Unmarshal(e.Renote.Reactions, &got))
+		assert.Equal(t, 3, got[":base@.:"], "shared renote の buffered delta は二重加算されない")
+	}
+}
+
 // 0 以下になった merged value は出力から除外される。
 func TestPackNotes_BufferedNegativeDelta_RemovesKey(t *testing.T) {
 	idGen := newTestIDGen(t)

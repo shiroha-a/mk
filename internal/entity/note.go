@@ -284,10 +284,21 @@ func mergeBufferedReactions(ctx context.Context, notes []*model.Note, reader Buf
 		// reader 失敗時は stale な DB 値を返す (旧挙動と同等)。
 		return
 	}
+	// 同一 *Note ポインタが flat に複数回現れうる (例: 2 件の note が同じ renote
+	// 先を持つと、repository の batch hydration では両者の .Renote が同一ポインタを
+	// 指す)。mergeReactionsJSON は加算的なので、同じオブジェクトに 2 回適用すると
+	// delta が二重加算される。ポインタ単位で dedup して各オブジェクトへの適用を
+	// 1 回に限定する (id 単位ではなく: preload 経由の別オブジェクト同 id はそれぞれ
+	// base から 1 回ずつ merge されるべきで、正しい)。
+	applied := make(map[*model.Note]struct{}, len(notes))
 	for _, n := range notes {
 		if n == nil {
 			continue
 		}
+		if _, done := applied[n]; done {
+			continue
+		}
+		applied[n] = struct{}{}
 		if d, ok := deltas[n.ID]; ok && len(d) > 0 {
 			n.Reactions = mergeReactionsJSON(n.Reactions, d)
 		}
