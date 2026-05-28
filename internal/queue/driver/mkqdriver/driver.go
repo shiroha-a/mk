@@ -228,30 +228,36 @@ const unknownQueueConcurrency = 2
 // shared pool.
 const poolHeadroom = 8
 
-// workerPoolSize sizes the worker Redis connection pool to the sum of the
-// resolved per-queue concurrency plus poolHeadroom. mkq holds one blocking
-// BZPopMin connection per worker, so the pool must cover every worker
-// simultaneously or dispatch stalls on connection acquisition.
-//
-// The result is floored at go-redis' own default (10 × GOMAXPROCS) so this
-// auto-sizing never shrinks the pool below what an unset PoolSize would have
-// produced. That preserves enqueue-burst headroom on multi-core hosts and
-// leaves room for jobQueueAutoScale to grow workers past the static defaults
-// (auto-scale resizes workers but not the connection pool). Heavy auto-scale
-// deployments should still set redisForJobQueue.poolSize explicitly to cover
-// maxWorkers. Connections are created lazily (MinIdleConns=0) so a higher
-// ceiling costs nothing until load demands it.
+// workerPoolSize sizes the worker Redis connection pool for the resolved
+// per-queue concurrency. mkq holds one blocking BZPopMin connection per
+// worker, so the pool must cover every worker simultaneously or dispatch
+// stalls on connection acquisition. The headroom / floor policy lives in
+// poolSizeForWorkers; the floor is go-redis' own default (10 × GOMAXPROCS).
 func workerPoolSize(queues []string, override map[string]int) int {
 	conc := resolveQueueConcurrency(queues, override)
 	sum := 0
 	for _, c := range conc {
 		sum += c
 	}
-	need := sum + poolHeadroom
-	if goDefault := 10 * runtime.GOMAXPROCS(0); need < goDefault {
-		need = goDefault
-	}
-	return need
+	return poolSizeForWorkers(sum, 10*runtime.GOMAXPROCS(0))
+}
+
+// poolSizeForWorkers returns the Redis pool size for workerSum BZPopMin
+// workers: workerSum + poolHeadroom, floored at floor.
+//
+// floor is go-redis' own default (10 × GOMAXPROCS) so auto-sizing never
+// shrinks the pool below what an unset PoolSize would have produced. That
+// preserves enqueue-burst headroom on multi-core hosts and leaves room for
+// jobQueueAutoScale to grow workers past the static defaults (auto-scale
+// resizes workers but not the connection pool). Heavy auto-scale deployments
+// should still set redisForJobQueue.poolSize explicitly to cover maxWorkers.
+// Connections are created lazily (MinIdleConns=0) so a higher ceiling costs
+// nothing until load demands it.
+//
+// floor is passed in (rather than read from runtime here) so the headroom +
+// floor policy is unit-testable independently of the host core count.
+func poolSizeForWorkers(workerSum, floor int) int {
+	return max(workerSum+poolHeadroom, floor)
 }
 
 // queueDefaultConcurrency returns the hot-tuned default pool size for a queue.

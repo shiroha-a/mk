@@ -526,3 +526,26 @@ func TestWorkerPoolSize(t *testing.T) {
 		t.Errorf("workerPoolSize = %d, must be >= go-redis default %d", got, goDefault)
 	}
 }
+
+// TestPoolSizeForWorkers は floor / headroom ロジックを GOMAXPROCS 非依存で
+// 検証する。workerPoolSize は floor に 10×GOMAXPROCS を渡すためマシンの core
+// 数で floor-taken 分岐が実行されたりされなかったりするが、floor を引数化した
+// 本ヘルパーなら両分岐を決定的に covered にできる。
+func TestPoolSizeForWorkers(t *testing.T) {
+	cases := []struct {
+		name             string
+		workerSum, floor int
+		want             int
+	}{
+		{"floor applies when workers below floor", 44, 80, 80}, // max(44+8, 80)
+		{"workers+headroom above floor", 160, 80, 168},         // max(160+8, 80)
+		{"small floor ignored", 44, 20, 52},                    // max(44+8, 20)
+		{"equal to floor", 72, 80, 80},                         // max(72+8, 80)
+	}
+	for _, tc := range cases {
+		if got := poolSizeForWorkers(tc.workerSum, tc.floor); got != tc.want {
+			t.Errorf("%s: poolSizeForWorkers(%d, %d) = %d, want %d",
+				tc.name, tc.workerSum, tc.floor, got, tc.want)
+		}
+	}
+}
