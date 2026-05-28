@@ -1290,6 +1290,7 @@ func (s *Server) setupRoutes() {
 	iHandler.SetFavoriteRepo(noteFavoriteRepo)
 	// Phase 7-2 (#244): /api/i の未読系フィールドを実クエリ化。
 	iHandler.SetNotificationService(notificationService)
+	iHandler.SetAchievementNotifier(notificationService)
 	iHandler.SetFollowRequestRepo(followRequestRepo)
 	iHandler.SetChatRepo(chatRepo)
 	// Phase 7-2 follow-up (#271)

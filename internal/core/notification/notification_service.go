@@ -49,6 +49,11 @@ const (
 	// 持ち、postFailed は \`noteDraftId\` を Extra に持つ。
 	TypeScheduledNotePosted     Type = "scheduledNotePosted"
 	TypeScheduledNotePostFailed Type = "scheduledNotePostFailed"
+	// TypeAchievementEarned: 実績解除時の通知 (upstream AchievementService.create
+	// が createNotification(userId, 'achievementEarned', {achievement: type}) で
+	// 発火)。notifier を持たず、解除した実績名を Extra["achievement"] に格納して
+	// entity の Extra spread で surface する。
+	TypeAchievementEarned Type = "achievementEarned"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.

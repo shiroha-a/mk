@@ -1,6 +1,7 @@
 package i
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/core/notification"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -531,4 +533,47 @@ func TestClaimAchievement_UpdateError(t *testing.T) {
 
 	rec := postExtra(h.ClaimAchievement, `{"name":"notes1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+type stubAchievementNotifier struct {
+	calls []notification.CreateInput
+}
+
+func (s *stubAchievementNotifier) Create(_ context.Context, in notification.CreateInput) (*notification.Notification, error) {
+	s.calls = append(s.calls, in)
+	return &notification.Notification{}, nil
+}
+
+// 新規解除では achievementEarned 通知を 1 件作る (notifier 無し / 実績名を
+// Extra["achievement"] に格納)。サイレント獲得バグの回帰防止。
+func TestClaimAchievement_New_EmitsNotification(t *testing.T) {
+	h, userRepo := newExtraHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+	notifier := &stubAchievementNotifier{}
+	h.SetAchievementNotifier(notifier)
+
+	rec := postExtra(h.ClaimAchievement, `{"name":"notes1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, notifier.calls, 1)
+	assert.Equal(t, "u1", notifier.calls[0].NotifieeID)
+	assert.Equal(t, notification.TypeAchievementEarned, notifier.calls[0].Type)
+	assert.Equal(t, "notes1", notifier.calls[0].Extra["achievement"])
+	assert.Empty(t, notifier.calls[0].NotifierID, "achievementEarned は notifier を持たない")
+}
+
+// 既獲得の再 claim では実績も増えず通知も作らない。
+func TestClaimAchievement_Duplicate_NoNotification(t *testing.T) {
+	h, userRepo := newExtraHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
+	userRepo.Profiles["u1"] = &model.UserProfile{
+		UserID:       "u1",
+		Achievements: datatypes.JSON(`[{"name":"notes1","unlockedAt":1000}]`),
+	}
+	notifier := &stubAchievementNotifier{}
+	h.SetAchievementNotifier(notifier)
+
+	rec := postExtra(h.ClaimAchievement, `{"name":"notes1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, notifier.calls)
 }

@@ -68,6 +68,7 @@ type Handler struct {
 	pageLikeRepo         repository.PageLikeRepository
 	mover                AccountMover
 	notificationSvc      UnreadNotificationSource
+	achievementNotifier  AchievementNotifier
 	followRequestRepo    repository.FollowRequestRepository
 	announcementRepo     AnnouncementUnreadSource
 	chatRepo             ChatUnreadSource
@@ -285,6 +286,13 @@ type UnreadNotificationSource interface {
 	UnreadSummary(ctx context.Context, userID string, mentionTypes []notification.Type) (notification.UnreadSummary, error)
 }
 
+// AchievementNotifier creates the achievementEarned notification when a user
+// unlocks a new achievement (claim-achievement)。未配線なら通知は作らず実績の
+// 記録だけ行う (degrade)。実装は *notification.Service。
+type AchievementNotifier interface {
+	Create(ctx context.Context, in notification.CreateInput) (*notification.Notification, error)
+}
+
 // AntennaUnreadSource reports whether a user has any unread antenna notes.
 // Satisfied by repository.AntennaNoteUnreadRepository.
 type AntennaUnreadSource interface {
@@ -388,6 +396,12 @@ func (h *Handler) SetAccountMover(m AccountMover) {
 // /api/i. When unset those fields fall back to default (false/0).
 func (h *Handler) SetNotificationService(s UnreadNotificationSource) {
 	h.notificationSvc = s
+}
+
+// SetAchievementNotifier wires the notification service used to emit the
+// achievementEarned notification on claim-achievement.
+func (h *Handler) SetAchievementNotifier(s AchievementNotifier) {
+	h.achievementNotifier = s
 }
 
 // SetFollowRequestRepo wires the follow_request repository used to compute
