@@ -1164,6 +1164,35 @@ func TestUpdateRemoteNote_RecalculatesHashtags(t *testing.T) {
 	assert.ElementsMatch(t, []string{"federation", "news"}, []string(got.Tags), "古い tags は捨て、tag 配列 + 本文 fallback で再構築")
 }
 
+// #1372: hashtag が消えて tags が非空→空に変わる場合、note.tags は非nilの空配列
+// ('{}') でなければならない。nil の pq.StringArray は Updates() 経由で SQL NULL に
+// なり note.tags (NOT NULL) 制約に違反する。
+func TestUpdateRemoteNote_ClearsTagsToEmptyNotNull(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	host := "remote.example"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host,
+		Tags: []string{"old"},
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/n1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "edited, no more hashtags"
+	}`
+	got, err := r.UpdateRemoteNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.Tags, "tags は非nilの空配列でなければ SQL NULL で NOT NULL 違反 (#1372)")
+	assert.Empty(t, []string(got.Tags))
+}
+
 func TestUpdateRemoteNote_NoNoteRepo(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
 	urls := activitypub.NewURLBuilder("https://example.com")
@@ -1861,6 +1890,34 @@ func TestResolveActor_UsertagHookFiresOnRefresh(t *testing.T) {
 	assert.False(t, hook.usertagCalls[0].isLocal)
 	assert.Equal(t, []string{"old"}, hook.usertagCalls[0].oldTags)
 	assert.Equal(t, []string{"new"}, hook.usertagCalls[0].newTags)
+}
+
+// #1372: refreshActor で remote actor が hashtag を持たない場合、user.tags は
+// 非nilの空配列 ('{}') に更新されなければならない。nil の pq.StringArray は
+// Updates() 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反し、actor 更新
+// (emojis / name / lastFetchedAt 等を含む atomic UPDATE) 全体が失敗する。
+func TestResolveActor_RefreshClearsTagsToEmptyNotNull(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	uri := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["existing"] = &model.User{
+		ID:       "existing",
+		Username: "alice",
+		URI:      &uri,
+		Host:     &host,
+		Tags:     []string{"old"},
+	}
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	require.NotNil(t, repo.Users["existing"].Tags, "tags は非nilの空配列でなければ SQL NULL で NOT NULL 違反 (#1372)")
+	assert.Empty(t, []string(repo.Users["existing"].Tags))
 }
 
 func TestIngestNote_HashtagHookFiresOnRemoteIngest(t *testing.T) {

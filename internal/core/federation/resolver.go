@@ -591,7 +591,14 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	// person.tag の Hashtag entry を user.tags に追従させる (actor 更新時に
 	// 自己紹介の hashtag が変わったら反映する。新規取り込みと同じ正規化)。
 	oldTags := []string(existing.Tags)
+	// ExtractUserTags は hashtag が無いと nil を返すが、nil の pq.StringArray は
+	// Updates() map 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反する。
+	// その場合 actor 更新 (emojis / name / lastFetchedAt 等を含む atomic UPDATE)
+	// 全体が失敗するため空配列に倒して '{}' を書く。
 	tags := pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
+	if tags == nil {
+		tags = pq.StringArray{}
+	}
 	fields["tags"] = tags
 	existing.Tags = tags
 	existing.LastFetchedAt = &now
@@ -1157,8 +1164,15 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 	newTags := hashtag.Extract(hashtagSources...)
 	tagsChanged := !slices.Equal([]string(existing.Tags), newTags)
 	if tagsChanged {
-		fields["tags"] = pq.StringArray(newTags)
-		existing.Tags = pq.StringArray(newTags)
+		// Extract は hashtag が無いと nil を返すが、nil の pq.StringArray は
+		// Updates() map 経由で SQL NULL になり note.tags (NOT NULL) 制約に違反する。
+		// tags が非空→空に変わるケースで踏むため空配列に倒して '{}' を書く。
+		noteTags := pq.StringArray(newTags)
+		if noteTags == nil {
+			noteTags = pq.StringArray{}
+		}
+		fields["tags"] = noteTags
+		existing.Tags = noteTags
 	}
 	// AP `attachment` 配列の差分を反映する (#378)。driveFileRepo 未設定時は
 	// upsertAttachments が空 slice を返すので何もしない (= 既存 fileIDs を

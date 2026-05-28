@@ -1088,6 +1088,10 @@ func TestService_UpdateProfile_ClearsTagsOnEmptyDescription(t *testing.T) {
 		Description: ptr(ptr("")),
 	})
 	require.NoError(t, err)
+	// tags は非nilの空配列 ('{}') でなければならない。nil の pq.StringArray を
+	// Updates() に渡すと SQL NULL になり user.tags (NOT NULL) 制約に違反して
+	// profile 更新全体が atomic に失敗する (#1372)。
+	require.NotNil(t, repo.Users["u1"].Tags)
 	assert.Empty(t, []string(repo.Users["u1"].Tags))
 }
 

@@ -483,6 +483,12 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 			desc = **in.Description
 		}
 		newTags = hashtag.ExtractUserTags(desc)
+		// ExtractUserTags は hashtag が無いと nil を返すが、nil の pq.StringArray は
+		// Updates() map 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反する。
+		// その場合 profile 更新全体が atomic に失敗するため空配列に倒して '{}' を書く。
+		if newTags == nil {
+			newTags = []string{}
+		}
 		userFields["tags"] = pq.StringArray(newTags)
 		oldTags = []string(existing.Tags)
 		tagsChanged = true
