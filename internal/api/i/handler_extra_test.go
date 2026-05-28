@@ -562,6 +562,21 @@ func TestClaimAchievement_New_EmitsNotification(t *testing.T) {
 	assert.Empty(t, notifier.calls[0].NotifierID, "achievementEarned は notifier を持たない")
 }
 
+// 未知の実績名は upstream paramDef enum と同じく 400 で弾き、profile も通知も
+// 触らない。
+func TestClaimAchievement_UnknownName(t *testing.T) {
+	h, userRepo := newExtraHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+	notifier := &stubAchievementNotifier{}
+	h.SetAchievementNotifier(notifier)
+
+	rec := postExtra(h.ClaimAchievement, `{"name":"bogusAchievement"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, notifier.calls)
+	assert.Nil(t, userRepo.Profiles["u1"].Achievements, "未知の実績は記録しない")
+}
+
 // 既獲得の再 claim では実績も増えず通知も作らない。
 func TestClaimAchievement_Duplicate_NoNotification(t *testing.T) {
 	h, userRepo := newExtraHandler(t)

@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/achievement"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -246,6 +247,11 @@ func (h *Handler) ClaimAchievement(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// upstream の paramDef `name: { enum: ACHIEVEMENT_TYPES }` と同じく未知の
+	// 実績名は弾く (bogus 実績の記録 / 通知汚染を防ぐ)。
+	if !achievement.IsValidType(req.Name) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "unknown achievement.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
 	profile := h.userService.GetProfile(u.ID)
