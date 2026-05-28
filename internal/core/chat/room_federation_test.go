@@ -291,6 +291,135 @@ func TestCreateRoomMessageViaAP_NonMemberForbidden(t *testing.T) {
 	assert.ErrorIs(t, err, corechat.ErrForbidden)
 }
 
+func TestLeaveRoom_DeliversRemoveToRemoteMembers(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"} // local owner
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"} // local, leaving
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "bob", RoomID: "room1"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m2", UserID: "carol", RoomID: "room1"}))
+
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "room1"))
+	// membership は削除される。
+	_, err := chatRepo.FindMembership("carol", "room1")
+	assert.Error(t, err)
+	// Remove が remote member bob へ配送される。
+	assert.Equal(t, 1, deliverer.called)
+	body := string(deliverer.lastBody)
+	assert.Contains(t, body, `"type":"Remove"`)
+	assert.Contains(t, body, "https://local.example/chat/rooms/room1")
+	assert.Contains(t, body, "https://local.example/users/carol")
+}
+
+func TestLeaveRoom_LocalOnlyNoFederation(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "carol", RoomID: "room1"}))
+
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "room1"))
+	_, err := chatRepo.FindMembership("carol", "room1")
+	assert.Error(t, err)
+	// remote member が居ないので配送しない。
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestLeaveRoom_RemoteLeaverDoesNotFederate(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	rmtURI := "https://remote.example/users/rmt"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["rmt"] = &model.User{ID: "rmt", Username: "rmt", Host: &remoteHost, URI: &rmtURI}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "rmt", RoomID: "room1"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m2", UserID: "bob", RoomID: "room1"}))
+
+	// remote user の leave は当人の instance が配送する (我々は受信側)。membership
+	// は削除するが本インスタンスからは Remove を送らない。
+	require.NoError(t, svc.LeaveRoom(context.Background(), "rmt", "room1"))
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestLeaveRoom_InvalidArgs(t *testing.T) {
+	svc, _ := newRoomFedService(t)
+	assert.ErrorIs(t, svc.LeaveRoom(context.Background(), "", "room1"), corechat.ErrInvalidTarget)
+	assert.ErrorIs(t, svc.LeaveRoom(context.Background(), "u1", ""), corechat.ErrInvalidTarget)
+}
+
+func TestLeaveRoom_RoomMissingStillDeletesMembership(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	// room を作らない (FindRoomByID 失敗) → membership 削除のみ、federation skip。
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "carol", RoomID: "ghost"}))
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "ghost"))
+	_, err := chatRepo.FindMembership("carol", "ghost")
+	assert.Error(t, err)
+	assert.Equal(t, 0, deliverer.called)
+}
+
+func TestLeaveRoom_RemoteOwnerRoomURIRestored(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	ownerURI := "https://remote.example/users/owner"
+	userRepo.Users["owner"] = &model.User{ID: "owner", Username: "owner", Host: &remoteHost, URI: &ownerURI}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"} // local, leaving
+	// remote owner の room copy。carol(local) が leave → remote owner へ Remove。
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "owner"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "carol", RoomID: "room1"}))
+
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "room1"))
+	assert.Equal(t, 1, deliverer.called)
+	// room URI は owner host から復元した remote URI。
+	assert.Contains(t, string(deliverer.lastBody), "https://remote.example/chat/rooms/room1")
+}
+
+func TestLeaveRoom_DeliveryFailureSwallowed(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	deliverer.returnErr = assert.AnError
+	remoteHost := "remote.example"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "bob", RoomID: "room1"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m2", UserID: "carol", RoomID: "room1"}))
+
+	// 配送失敗しても LeaveRoom は成功し membership は削除される。
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "room1"))
+	assert.Equal(t, 1, deliverer.called)
+}
+
+func TestLeaveRoom_UnwiredNoFederation(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "carol", RoomID: "room1"}))
+	// AP delivery 未配線でも panic せず membership 削除のみ。
+	require.NoError(t, svc.LeaveRoom(context.Background(), "carol", "room1"))
+	_, err := repo.FindMembership("carol", "room1")
+	assert.Error(t, err)
+}
+
+func TestRemoveMemberViaAP_DeletesMembershipIdempotent(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "localOwner"}))
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "rmt", RoomID: "room1"}))
+
+	require.NoError(t, svc.RemoveMemberViaAP("room1", "rmt"))
+	_, err := repo.FindMembership("rmt", "room1")
+	assert.Error(t, err)
+	// 存在しない membership の削除は no-op。
+	require.NoError(t, svc.RemoveMemberViaAP("room1", "rmt"))
+	// 引数欠落は ErrInvalidTarget。
+	assert.ErrorIs(t, svc.RemoveMemberViaAP("", "rmt"), corechat.ErrInvalidTarget)
+}
+
 func TestCreateMessageToRoom_RemoteSenderDoesNotFederate(t *testing.T) {
 	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
 	remoteHost := "remote.example"

@@ -23,14 +23,16 @@ func (f *fakeChatMessageReceiver) CreateMessageViaAP(_ context.Context, _ string
 
 // fakeChatRoomReceiver records inbound chat room federation calls.
 type fakeChatRoomReceiver struct {
-	ensureCalls [][4]string // roomID, name, summary, ownerUserID
-	inviteCalls [][2]string // roomID, inviteeUserID
-	memberCalls [][2]string // roomID, userID
-	removeCalls [][2]string // roomID, userID
-	msgCalls    [][3]string // roomID, senderID, text
-	ensureErr   error
-	inviteErr   error
-	msgErr      error
+	ensureCalls   [][4]string // roomID, name, summary, ownerUserID
+	inviteCalls   [][2]string // roomID, inviteeUserID
+	memberCalls   [][2]string // roomID, userID
+	removeCalls   [][2]string // roomID, userID (RemoveInvitationViaAP)
+	rmMemberCalls [][2]string // roomID, userID (RemoveMemberViaAP)
+	msgCalls      [][3]string // roomID, senderID, text
+	ensureErr     error
+	inviteErr     error
+	msgErr        error
+	rmMemberErr   error
 }
 
 func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error {
@@ -60,6 +62,11 @@ func (f *fakeChatRoomReceiver) AddMemberViaAP(roomID, userID string) error {
 func (f *fakeChatRoomReceiver) RemoveInvitationViaAP(roomID, userID string) error {
 	f.removeCalls = append(f.removeCalls, [2]string{roomID, userID})
 	return nil
+}
+
+func (f *fakeChatRoomReceiver) RemoveMemberViaAP(roomID, userID string) error {
+	f.rmMemberCalls = append(f.rmMemberCalls, [2]string{roomID, userID})
+	return f.rmMemberErr
 }
 
 func TestProcess_ChatRoomInvite_CreatesRoomCopyAndInvitation(t *testing.T) {
@@ -118,6 +125,56 @@ func TestProcess_ChatRoomAccept_AddsMembership(t *testing.T) {
 	require.Len(t, recv.memberCalls, 1)
 	assert.Equal(t, "room1", recv.memberCalls[0][0])
 	assert.NotEmpty(t, recv.memberCalls[0][1])
+}
+
+// remote member の leave を伝える Remove(target=chat room) で actor の
+// membership が削除される (#1364)。
+func TestProcess_ChatRoomRemove_DeletesMembership(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Remove",
+		"actor": "https://remote.example/users/alice",
+		"target": "https://example.com/chat/rooms/room1",
+		"object": "https://remote.example/users/alice"
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Len(t, recv.rmMemberCalls, 1)
+	assert.Equal(t, "room1", recv.rmMemberCalls[0][0])
+	assert.NotEmpty(t, recv.rmMemberCalls[0][1], "actor (resolved remote user) membership is removed")
+}
+
+// RemoveMemberViaAP が ErrNotFound を返す (room/membership 不在) と恒久的失敗
+// として ErrUnsupportedActivity に畳む (retry させない)。
+func TestProcess_ChatRoomRemove_NotFoundIsPermanent(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{rmMemberErr: corechat.ErrNotFound}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Remove",
+		"actor": "https://remote.example/users/alice",
+		"target": "https://example.com/chat/rooms/room1",
+		"object": "https://remote.example/users/alice"
+	}`)
+	assert.ErrorIs(t, p.Process(body), federation.ErrUnsupportedActivity)
+}
+
+// RemoveMemberViaAP の generic error (ErrNotFound/ErrInvalidTarget 以外) は
+// retryable として propagate される (ErrUnsupportedActivity に畳まない)。
+func TestProcess_ChatRoomRemove_GenericErrorPropagates(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	recv := &fakeChatRoomReceiver{rmMemberErr: errors.New("db down")}
+	p.SetChatRoomReceiver(recv)
+	body := []byte(`{
+		"type": "Remove",
+		"actor": "https://remote.example/users/alice",
+		"target": "https://example.com/chat/rooms/room1",
+		"object": "https://remote.example/users/alice"
+	}`)
+	err := p.Process(body)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity)
 }
 
 func TestProcess_ChatRoomReject_RemovesInvitation(t *testing.T) {

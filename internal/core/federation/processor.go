@@ -12,6 +12,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
+	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
@@ -1537,6 +1538,26 @@ func (p *Processor) handleAdd(act genericActivity) error {
 // handleRemove processes an inbound Remove activity. actorのfeaturedコレクションから
 // ノートのピン留めを解除する。
 func (p *Processor) handleRemove(act genericActivity) error {
+	var target struct {
+		Target string `json:"target"`
+	}
+	_ = json.Unmarshal(act.raw, &target)
+	// chat room target の Remove は group chat の leave (#1364)。featured pin
+	// より先に判定する (pinningRepo 未配線でも chat leave は処理する)。actor の
+	// membership を削除する (cherrypick ApInboxService.remove と同じく actor 基準)。
+	if roomID := extractChatRoomID(target.Target); roomID != "" && p.chatRoomReceiver != nil {
+		actor, err := p.resolver.ResolveActor(act.Actor)
+		if err != nil {
+			return err
+		}
+		if err := p.chatRoomReceiver.RemoveMemberViaAP(roomID, actor.ID); err != nil {
+			if errors.Is(err, corechat.ErrNotFound) || errors.Is(err, corechat.ErrInvalidTarget) {
+				return ErrUnsupportedActivity
+			}
+			return err
+		}
+		return nil
+	}
 	if p.pinningRepo == nil {
 		return ErrUnsupportedActivity
 	}
@@ -1544,10 +1565,6 @@ func (p *Processor) handleRemove(act genericActivity) error {
 	if err != nil {
 		return err
 	}
-	var target struct {
-		Target string `json:"target"`
-	}
-	_ = json.Unmarshal(act.raw, &target)
 	if actor.Featured == nil || target.Target != *actor.Featured {
 		return nil
 	}

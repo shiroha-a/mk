@@ -778,6 +778,27 @@ func (r *Renderer) RenderInvite(ownerID string, inner any, targetURI string) *In
 	return inv
 }
 
+// RenderChatRoomRemove builds a Remove activity announcing that the user at
+// leavingUserURI left the chat room at roomURI. Mirrors cherrypick
+// ChatService.leaveRoom's renderRemove: actor = object = the leaving user,
+// target = the room. id は addContext 互換で `{baseURL}/{UUID}` を必ず入れる
+// (id 無し activity は受信側 InboxProcessor で弾かれる)。
+func (r *Renderer) RenderChatRoomRemove(leavingUserURI, roomURI string) *Remove {
+	rm := &Remove{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.baseURL + "/" + uuid.NewString(),
+				Type: "Remove",
+			},
+			Actor: leavingUserURI,
+		},
+		Object: leavingUserURI,
+		Target: roomURI,
+	}
+	AddContext(rm)
+	return rm
+}
+
 // RenderChatRoomInviteRef reconstructs a room owner's original Invite as a
 // nested object, used as the `object` of an invitee's Accept / Reject when the
 // room (and its owner) are remote. All URIs are passed explicitly because they

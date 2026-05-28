@@ -457,7 +457,14 @@ func (h *Handler) RoomsLeave(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	_ = h.repo.DeleteMembership(user.ID, req.RoomID)
+	// service 経由で membership 削除 + remote member/owner への Remove 連合配信
+	// (#1364)。service 未配線時 (federation disabled の旧構成) は repo 直叩きで
+	// membership 削除のみ。
+	if h.svc != nil {
+		_ = h.svc.LeaveRoom(c.Request().Context(), user.ID, req.RoomID)
+	} else {
+		_ = h.repo.DeleteMembership(user.ID, req.RoomID)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 

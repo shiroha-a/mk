@@ -20,6 +20,7 @@ type ChatRoomReceiver interface {
 	CreateInvitationViaAP(roomID, inviteeUserID string) error
 	AddMemberViaAP(roomID, userID string) error
 	RemoveInvitationViaAP(roomID, userID string) error
+	RemoveMemberViaAP(roomID, userID string) error
 	CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error
 }
 

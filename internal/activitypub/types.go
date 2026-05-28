@@ -413,6 +413,16 @@ type Invite struct {
 	Target string `json:"target,omitempty"`
 }
 
+// Remove represents a Remove activity. CherryPick group chat federation uses
+// it to announce a member leaving a chat room: actor and object are the
+// leaving member's actor URI, target is the room URI. Mirrors
+// ApRendererService.renderRemove.
+type Remove struct {
+	Activity
+	Object any    `json:"object"`
+	Target string `json:"target,omitempty"`
+}
+
 // Undo represents an Undo activity.
 type Undo struct {
 	Activity
@@ -560,6 +570,8 @@ func AddContext(o any) {
 	case *Reject:
 		v.Context = ctx
 	case *Invite:
+		v.Context = ctx
+	case *Remove:
 		v.Context = ctx
 	case *Undo:
 		v.Context = ctx

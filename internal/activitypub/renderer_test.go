@@ -103,6 +103,22 @@ func TestRenderer_RenderChatRoomInviteRef(t *testing.T) {
 	assert.Equal(t, "https://remote.example/users/owner", g.AttributedTo)
 }
 
+func TestRenderer_RenderChatRoomRemove(t *testing.T) {
+	r := newRenderer()
+	rm := r.RenderChatRoomRemove(
+		"https://example.com/users/carol",
+		"https://example.com/chat/rooms/room1",
+	)
+	assert.Equal(t, "Remove", rm.Type)
+	// actor = object = 退室者、target = room。
+	assert.Equal(t, "https://example.com/users/carol", rm.Actor)
+	assert.Equal(t, "https://example.com/users/carol", rm.Object)
+	assert.Equal(t, "https://example.com/chat/rooms/room1", rm.Target)
+	// 受信側 InboxProcessor が弾かないよう id / @context を必ず入れる。
+	assert.NotEmpty(t, rm.ID)
+	assert.NotNil(t, rm.Context)
+}
+
 func TestRenderer_RenderChatRoomMessage(t *testing.T) {
 	r := newRenderer()
 	txt := "hello room"

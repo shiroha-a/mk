@@ -685,6 +685,95 @@ func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.Chat
 	}
 }
 
+// LeaveRoom removes the user's membership and, when the leaving user is local,
+// federates a Remove activity to the room's remote members (and remote owner)
+// so their membership lists stay in sync. Mirrors cherrypick
+// ChatService.leaveRoom. Membership deletion is best-effort-independent of
+// federation: the row is always removed.
+func (s *Service) LeaveRoom(_ context.Context, userID, roomID string) error {
+	if userID == "" || roomID == "" {
+		return ErrInvalidTarget
+	}
+	// room を先に引いて federation の recipient/roomURI 構築に使う。room が無くても
+	// membership 削除は冪等に試みる (drift cleanup)。
+	room, _ := s.repo.FindRoomByID(roomID)
+	if err := s.repo.DeleteMembership(userID, roomID); err != nil {
+		return err
+	}
+	if room != nil {
+		s.tryDeliverRoomLeave(room, userID)
+	}
+	return nil
+}
+
+// tryDeliverRoomLeave federates a chat room leave as a Remove activity to the
+// room's remote members and remote owner. Best-effort: no-op when AP delivery
+// is unwired, the leaving user is remote, or there are no remote recipients.
+// Per-recipient failures are logged and swallowed.
+func (s *Service) tryDeliverRoomLeave(room *model.ChatRoom, leavingUserID string) {
+	if s.deliverer == nil || s.userRepo == nil || s.renderer == nil || s.urls == nil || room == nil {
+		return
+	}
+	leaver, err := s.userRepo.FindByID(leavingUserID)
+	if err != nil || leaver == nil || !leaver.IsLocal() {
+		// remote user の leave は当人の instance から配送される (我々は受信側)。
+		return
+	}
+	// recipient = owner + 残り membership のうち remote な者 (leaving user は除外)。
+	memberIDs := map[string]struct{}{room.OwnerID: {}}
+	if members, merr := s.repo.ListMembersByRoom(room.ID); merr == nil {
+		for _, m := range members {
+			memberIDs[m.UserID] = struct{}{}
+		}
+	}
+	delete(memberIDs, leavingUserID)
+	remoteRecipients := make([]*model.User, 0)
+	var owner *model.User
+	for uid := range memberIDs {
+		u, uerr := s.userRepo.FindByID(uid)
+		if uerr != nil || u == nil {
+			continue
+		}
+		if uid == room.OwnerID {
+			owner = u
+		}
+		if !u.IsLocal() && u.URI != nil && *u.URI != "" {
+			remoteRecipients = append(remoteRecipients, u)
+		}
+	}
+	if len(remoteRecipients) == 0 {
+		return
+	}
+	// room URI: local 所有なら local 正規 URI、remote 所有 copy なら owner host から復元。
+	roomURI := s.urls.ChatRoomURI(room.ID)
+	if owner != nil && !owner.IsLocal() && owner.URI != nil {
+		if ru := remoteChatRoomURI(*owner.URI, room.ID); ru != "" {
+			roomURI = ru
+		}
+	}
+	body, err := json.Marshal(s.renderer.RenderChatRoomRemove(s.urls.UserURI(leaver.ID), roomURI))
+	if err != nil {
+		slog.Warn("chat: room leave federation: marshal failed", "roomID", room.ID, "err", err)
+		return
+	}
+	for _, recipient := range remoteRecipients {
+		if derr := s.deliverer.DeliverToUser(leaver.ID, recipient, body); derr != nil {
+			slog.Warn("chat: room leave federation: deliver failed", "roomID", room.ID, "recipient", recipient.ID, "err", derr)
+		}
+	}
+}
+
+// RemoveMemberViaAP removes a (typically remote) user's membership in response
+// to an inbound Remove activity targeting the chat room. Idempotent: a no-op
+// when the membership does not exist. Mirrors cherrypick ApInboxService.remove
+// (deletes the membership of the activity actor).
+func (s *Service) RemoveMemberViaAP(roomID, userID string) error {
+	if roomID == "" || userID == "" {
+		return ErrInvalidTarget
+	}
+	return s.repo.DeleteMembership(userID, roomID)
+}
+
 // CreateRoomMessageViaAP persists a group chat (room) message received via
 // ActivityPub and streams it to local members. The sender must be a member of
 // the room (owner or membership) — this rejects messages injected by a remote
