@@ -494,3 +494,28 @@ func TestResolveQueueConcurrency_HotQueuesNotStarved(t *testing.T) {
 		t.Errorf("deliver default concurrency = %d, want > 2 (旧均等割りの starve 回帰)", got["deliver"])
 	}
 }
+
+func TestWorkerPoolSize(t *testing.T) {
+	queues := []string{"inbox", "deliver", "push", "export", "webhook", "maintenance"}
+
+	// default: 16+16+4+4+2+2 = 44, + poolHeadroom.
+	if got, want := workerPoolSize(queues, nil), 44+poolHeadroom; got != want {
+		t.Errorf("workerPoolSize(default) = %d, want %d", got, want)
+	}
+
+	// override は合計に反映され、pool もそれに追従する。
+	override := map[string]int{"deliver": 128}
+	if got, want := workerPoolSize(queues, override), (16+128+4+4+2+2)+poolHeadroom; got != want {
+		t.Errorf("workerPoolSize(deliver=128) = %d, want %d", got, want)
+	}
+
+	// pool は全 worker を同時に賄える (= 合計 worker 数以上) ことを保証する。
+	conc := resolveQueueConcurrency(queues, nil)
+	sum := 0
+	for _, c := range conc {
+		sum += c
+	}
+	if got := workerPoolSize(queues, nil); got < sum {
+		t.Errorf("workerPoolSize = %d, must be >= total workers %d", got, sum)
+	}
+}

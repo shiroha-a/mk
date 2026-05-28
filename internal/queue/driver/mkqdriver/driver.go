@@ -119,7 +119,23 @@ type Driver struct {
 // New returns, the connection is shared by the driver's sub-services
 // for the rest of their lifetime.
 func New(ctx context.Context, cfg Config) (*Driver, error) {
-	mkqCfg := mkq.Config{Redis: cfg.Redis, KeyPrefix: cfg.KeyPrefix}
+	names := cfg.QueueNames
+	if len(names) == 0 {
+		names = QueueNames
+	}
+
+	// worker client の Redis pool を per-queue concurrency 合計で自動サイジング
+	// する。mkq は worker 毎に BZPopMin で blocking 接続を 1 つ保持するため、
+	// operator が poolSize を明示していない (= 0) ままだと go-redis default
+	// (10×GOMAXPROCS) が小コア機で worker 総数を下回り、接続待ちで dispatch が
+	// 詰まる (worker.go が "pool < concurrency+8" を warn する)。明示設定があれば
+	// 尊重する。side-channel rdb は低頻度なので default pool のままにする。
+	workerRedis := cfg.Redis
+	if workerRedis.PoolSize == 0 {
+		workerRedis.PoolSize = workerPoolSize(names, cfg.QueueConcurrency)
+	}
+
+	mkqCfg := mkq.Config{Redis: workerRedis, KeyPrefix: cfg.KeyPrefix}
 	client, err := mkq.NewClient(ctx, mkqCfg)
 	if err != nil {
 		return nil, fmt.Errorf("mkqdriver: connect: %w", err)
@@ -133,11 +149,6 @@ func New(ctx context.Context, cfg Config) (*Driver, error) {
 	keyPrefix := cfg.KeyPrefix
 	if keyPrefix == "" {
 		keyPrefix = defaultKeyPrefix
-	}
-
-	names := cfg.QueueNames
-	if len(names) == 0 {
-		names = QueueNames
 	}
 	queues := make(map[string]*mkq.Queue[framedPayload], len(names))
 	for _, n := range names {
@@ -193,8 +204,9 @@ func (d *Driver) Client() driver.Client {
 // 保持し、worker.go が "recommended pool = concurrency + 8" を warn する) なので、
 // 接続数を抑えるため deliver は upstream の 128 ではなく 16 に留める (outbound
 // bench で 2 worker でも BullMQ の 6.6x スループットがあり Go 側は余力十分)。
-// 合計 16+16+4+4+2+2 = 44 worker (推奨 Redis pool ≈ 52)。operator は
-// <queue>JobConcurrency でいつでも上書きできる。
+// 合計 16+16+4+4+2+2 = 44 worker。worker Redis pool は New() が
+// workerPoolSize() で自動的にこの合計 + poolHeadroom に合わせる。operator は
+// <queue>JobConcurrency でいつでも上書きできる (pool も追従する)。
 var defaultQueueConcurrency = map[string]int{
 	"inbox":       16, // = Misskey inboxJobConcurrency ?? 16
 	"deliver":     16, // upstream は 128 だが Go の per-worker 効率を踏まえ抑制
@@ -207,6 +219,26 @@ var defaultQueueConcurrency = map[string]int{
 // unknownQueueConcurrency is applied to any queue absent from
 // defaultQueueConcurrency (e.g. operator-defined custom queues).
 const unknownQueueConcurrency = 2
+
+// poolHeadroom is the spare Redis connection budget added on top of the
+// per-queue worker total so enqueue / Inspector-via-Client ops are not
+// starved while every BZPopMin worker holds a connection. Matches mkq's
+// own per-worker "concurrency + 8" recommendation applied once to the
+// shared pool.
+const poolHeadroom = 8
+
+// workerPoolSize sizes the worker Redis connection pool to the sum of the
+// resolved per-queue concurrency plus poolHeadroom. mkq holds one blocking
+// BZPopMin connection per worker, so the pool must cover every worker
+// simultaneously or dispatch stalls on connection acquisition.
+func workerPoolSize(queues []string, override map[string]int) int {
+	conc := resolveQueueConcurrency(queues, override)
+	sum := 0
+	for _, c := range conc {
+		sum += c
+	}
+	return sum + poolHeadroom
+}
 
 // queueDefaultConcurrency returns the hot-tuned default pool size for a queue.
 func queueDefaultConcurrency(name string) int {
