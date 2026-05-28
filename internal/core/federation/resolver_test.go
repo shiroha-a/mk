@@ -4177,6 +4177,34 @@ func TestIngestNote_MentionLimitBoundaryAccepted(t *testing.T) {
 	assert.Len(t, note.Mentions, corenote.DefaultMentionLimit)
 }
 
+// TestResolveActor_ExistingUserRefreshesHashtags は actor 再取得 (refreshActor)
+// で person.tag の変化が user.tags に追従することを確認する (#1360, Part 2)。
+// 自己紹介の hashtag を編集した remote user が hashtags/users に反映されるための前提。
+func TestResolveActor_ExistingUserRefreshesHashtags(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"tag": [{"type": "Hashtag", "name": "#Refreshed"}],
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	uri := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["existing"] = &model.User{
+		ID:       "existing",
+		Username: "alice",
+		URI:      &uri,
+		Host:     &host,
+		Tags:     []string{"stale"},
+	}
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	// refresh で旧 tags ("stale") が person.tag 由来の正規化済み tag に置き換わる。
+	assert.Equal(t, []string{"refreshed"}, []string(repo.Users["existing"].Tags))
+}
+
 // TestResolveActor_NewUserIngestsHashtags は remote actor の person.tag の
 // Hashtag entry が正規化されて user.tags に取り込まれることを確認する
 // (#1360, Part 2)。hashtags/users が remote user を引けるための前提。
