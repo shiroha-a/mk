@@ -23,6 +23,15 @@ func BenchmarkFindManyByIDsWithUser(b *testing.B) {
 	const notes = 200
 	const pageSize = 40
 
+	// 前回 run が seed 途中で中断して b.Cleanup を逃した場合の残骸を消してから
+	// seed する (= bu_%/bn_% の PK 衝突で再実行不能になるのを防ぐ、idempotent start)。
+	cleanup := func() {
+		testDB.Exec(`DELETE FROM "note" WHERE id LIKE 'bn_%'`)
+		testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'bu_%'`)
+	}
+	cleanup()
+	b.Cleanup(cleanup)
+
 	userIDs := make([]string, users)
 	for i := 0; i < users; i++ {
 		uid := fmt.Sprintf("bu_%d", i)
@@ -32,10 +41,6 @@ func BenchmarkFindManyByIDsWithUser(b *testing.B) {
 			b.Fatalf("seed user: %v", err)
 		}
 	}
-	b.Cleanup(func() {
-		testDB.Exec(`DELETE FROM "note" WHERE id LIKE 'bn_%'`)
-		testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'bu_%'`)
-	})
 
 	noteIDs := make([]string, notes)
 	text := "benchmark note body with some text content"
