@@ -251,6 +251,42 @@ func TestServer_PerQueueConcurrency_CapsParallelHandlers(t *testing.T) {
 	}
 }
 
+// TestServer_DefaultPerQueueConcurrency_AppliesHotTunedPools locks the
+// end-to-end wiring (New -> Server -> Start -> per-queue worker pool) for the
+// hot-tuned defaults. The pure-function unit tests cover resolveQueueConcurrency
+// in isolation, but only this asserts that a driver built with no per-queue
+// override actually spawns the hot-tuned pool sizes — catching a regression if
+// Server() ever stops feeding resolveQueueConcurrency into the pools (#1374).
+func TestServer_DefaultPerQueueConcurrency_AppliesHotTunedPools(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	// QueueConcurrency / Concurrency を指定しない = コード default を使う。
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	srv.Handle("noop", func(context.Context, driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// 旧均等割り (16/6 = 2) ではなく hot-tuned default が実 pool に反映される。
+	want := map[string]int{
+		"inbox":       16,
+		"deliver":     16,
+		"webhook":     4,
+		"push":        4,
+		"export":      2,
+		"maintenance": 2,
+	}
+	for q, n := range want {
+		assert.Equal(t, n, d.WorkerCount(q), "queue %q default pool size", q)
+	}
+}
+
 // TestEnqueue_UnknownQueueRejects ensures the driver refuses to fall
 // back to a default queue for callers that forget WithQueue.
 func TestEnqueue_UnknownQueueRejects(t *testing.T) {
