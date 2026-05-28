@@ -85,6 +85,11 @@ def seed_following(http: httpx.Client, tokens: list[str], user_ids: list[str]) -
     timelines. With the default (complete graph) each user has NUM_USERS-1
     followers. Returns the number of follow edges created.
     """
+    # seed.py は mk-go 用 / TS 用に別プロセスで実行されるため、固定 seed で
+    # follow 先を決定的に選ぶ。未シードだと capped 時 (FOLLOWERS_PER_USER <
+    # NUM_USERS-1) に両スタックで異なる graph になり比較が unfair になる。固定
+    # seed なら user 数が同じ限り edge 構造が一致し、run 間でも再現性を持つ。
+    random.seed(1379)
     edges = 0
     for i, token in enumerate(tokens):
         if not token:
