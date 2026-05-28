@@ -86,7 +86,7 @@ cp .config/docker.yml.example .config/docker.yml
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `deliverJobConcurrency` | int | `16` | AP配信worker数。mkq driver では deliver queue 専用、asynq driver では**総 worker pool 上限**として扱う (asynq は per-queue concurrency を持たないため、この値は queue 共通の上限) |
-| `inboxJobConcurrency` | int | - | Inbox処理 worker 数 (#534 で非同期化済)。mkq driver では inbox queue 専用 worker。asynq driver では**現状 no-op** (asynq の queue priority weight も静的 1 固定で wire していないため、共有 worker pool 内の inbox tasks は他 queue と equal-weight で競合する) |
+| `inboxJobConcurrency` | int | `16` | Inbox処理 worker 数 (#534 で非同期化済)。mkq driver では inbox queue 専用 worker (未指定時の default は 16)。asynq driver では**現状 no-op** (asynq の queue priority weight も静的 1 固定で wire していないため、共有 worker pool 内の inbox tasks は他 queue と equal-weight で競合する) |
 | `relationshipJobConcurrency` | int | - | フォロー処理 worker 数 (mk-go は relationship queue を持たないため**現状 no-op**) |
 | `deliverJobPerSec` | int | - | AP配信レート上限 (tasks/sec)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
 | `inboxJobPerSec` | int | - | Inbox処理レート上限 (tasks/sec) (#534)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
@@ -101,7 +101,7 @@ cp .config/docker.yml.example .config/docker.yml
 
 > **driver 間の差分**:
 > - `asynq` driver は worker pool が共有なので `deliverJobConcurrency` は **総 concurrency** として扱われる。queue 間の priority weight は全 queue 静的 1 で固定 (deliver / inbox / push / export / webhook / maintenance すべて equal-weight)。
-> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は `Concurrency / len(queues)` の既定値を使う。
+> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は hot queue 優先の per-queue 既定値 (inbox=16 / deliver=16 / webhook=4 / push=4 / export=2 / maintenance=2) を使う。旧来の `総budget / len(queues)` 均等割りだと inbox が starve していた (#1374) ため hot-tuned default に変更。worker 数 ≒ Redis 接続数 (worker 毎に BZPopMin で接続を保持) なので、大幅に増やす場合は `redisForJobQueue.poolSize` も合わせて見直すこと。
 > - **per-queue concurrency tuning は `mkq` driver でしか効かない**。asynq で inbox / deliver を独立に絞りたい場合は `mkq` 推奨。
 >
 > **rate limit (`*JobPerSec`) の挙動差**:

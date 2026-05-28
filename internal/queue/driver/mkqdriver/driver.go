@@ -37,11 +37,16 @@ type Config struct {
 	// multiple BullMQ deployments.
 	KeyPrefix string
 
-	// Concurrency is the **total** worker budget across all queues,
-	// matching asynq.Config.Concurrency semantics. Driver.Server
-	// divides this by len(QueueNames) (clamped to a minimum of 1)
-	// before passing to mkq.WithConcurrency on a per-queue basis.
-	// Zero falls back to 16, matching the historical asynq default.
+	// Concurrency is a fallback worker budget used only for queues that
+	// have neither an entry in defaultQueueConcurrency nor an explicit
+	// QueueConcurrency override (e.g. operator-defined custom queues).
+	// Known queues use the per-queue hot-tuned defaults instead (see
+	// defaultQueueConcurrency), so this rarely takes effect. Zero falls
+	// back to 16.
+	//
+	// 旧挙動: total / len(queues) の均等割りだったが、それだと federation の
+	// hot queue (inbox / deliver) が starve するため per-queue default に
+	// 置き換えた。Concurrency は未知 queue 用の保険に降格。
 	Concurrency int
 
 	// QueueNames overrides the set of queues to pre-define. Nil/empty
@@ -58,11 +63,11 @@ type Config struct {
 	// behaviour pre-v1.0.1).
 	MaxMetricsDataPoints int
 
-	// QueueConcurrency overrides the per-queue worker pool size for
-	// the named queue. Zero / missing entries fall back to the default
-	// `total / len(queues)` distribution computed from Concurrency.
-	// Used by config keys like `deliverJobConcurrency` to tune the
-	// hot deliver queue independently from the rest (#495).
+	// QueueConcurrency overrides the per-queue worker pool size for the
+	// named queue. Zero / missing entries fall back to the per-queue
+	// hot-tuned defaults (defaultQueueConcurrency). Used by config keys
+	// like `deliverJobConcurrency` / `inboxJobConcurrency` to tune the
+	// hot queues independently from the rest (#495).
 	QueueConcurrency map[string]int
 
 	// QueueRateLimits caps each named queue at N tasks/sec via
@@ -174,15 +179,66 @@ func (d *Driver) Client() driver.Client {
 	return d.dClient
 }
 
+// defaultQueueConcurrency maps each logical queue to its default worker pool
+// size when the operator hasn't set an explicit <queue>JobConcurrency.
+//
+// mkq は asynq と違い per-queue 専用 worker pool を持つ (BullMQ と同じ構造)。
+// total budget を queue 数で均等割りすると federation の hot queue (inbox /
+// deliver) が starve する (例: total 16 / 6 queue = 2 worker)。queue-bench で
+// inbox=2 は inbound drain が asynq (共有プール 16) に明確に劣ることを確認した
+// ため、Misskey TS QueueProcessorService の per-queue default を基準に hot queue
+// を厚く、低頻度 queue を薄く配分する。
+//
+// worker 数 ≒ Redis 接続数 (mkq は worker 毎に BZPopMin で blocking 接続を 1 つ
+// 保持し、worker.go が "recommended pool = concurrency + 8" を warn する) なので、
+// 接続数を抑えるため deliver は upstream の 128 ではなく 16 に留める (outbound
+// bench で 2 worker でも BullMQ の 6.6x スループットがあり Go 側は余力十分)。
+// 合計 16+16+4+4+2+2 = 44 worker (推奨 Redis pool ≈ 52)。operator は
+// <queue>JobConcurrency でいつでも上書きできる。
+var defaultQueueConcurrency = map[string]int{
+	"inbox":       16, // = Misskey inboxJobConcurrency ?? 16
+	"deliver":     16, // upstream は 128 だが Go の per-worker 効率を踏まえ抑制
+	"webhook":     4,
+	"push":        4,
+	"export":      2,
+	"maintenance": 2,
+}
+
+// unknownQueueConcurrency is applied to any queue absent from
+// defaultQueueConcurrency (e.g. operator-defined custom queues).
+const unknownQueueConcurrency = 2
+
+// queueDefaultConcurrency returns the hot-tuned default pool size for a queue.
+func queueDefaultConcurrency(name string) int {
+	if c, ok := defaultQueueConcurrency[name]; ok {
+		return c
+	}
+	return unknownQueueConcurrency
+}
+
+// resolveQueueConcurrency builds the per-queue worker pool sizes from the
+// hot-tuned defaults, overlaid with explicit <queue>JobConcurrency overrides
+// (override > 0 wins). The result covers every registered queue so the Server
+// never falls back to Concurrency for a known queue.
+func resolveQueueConcurrency(queues []string, override map[string]int) map[string]int {
+	out := make(map[string]int, len(queues))
+	for _, name := range queues {
+		out[name] = queueDefaultConcurrency(name)
+	}
+	for name, v := range override {
+		if v > 0 {
+			out[name] = v
+		}
+	}
+	return out
+}
+
 // Server returns the lazily-constructed driver.Server.
 //
-// cfg.Concurrency is interpreted as a **total** worker budget across
-// all queues (matching asynq.Config.Concurrency semantics). mkq
-// applies WithConcurrency per queue, so the per-queue value is
-// `total / len(queues)` clamped to a minimum of 1 — without this
-// scaling an operator setting `deliverJobConcurrency: 16` would get
-// 80 goroutines (5 queues × 16) on the mkq driver, vs 16 on the
-// asynq driver, surprising operators migrating between the two.
+// Per-queue worker pool sizes come from defaultQueueConcurrency (hot-tuned
+// toward inbox / deliver) overlaid with explicit <queue>JobConcurrency
+// overrides. cfg.Concurrency only seeds the fallback used for queues without
+// a per-queue value (rare; all registered queues have a default).
 func (d *Driver) Server() driver.Server {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -195,9 +251,14 @@ func (d *Driver) Server() driver.Server {
 		if queues < 1 {
 			queues = 1
 		}
+		// fallback (未知 queue 用): 旧来の均等割りを保険として残す。
 		perQueue := total / queues
 		if perQueue < 1 {
 			perQueue = 1
+		}
+		queueNames := make([]string, 0, len(d.queues))
+		for name := range d.queues {
+			queueNames = append(queueNames, name)
 		}
 		metricsPoints := d.cfg.MaxMetricsDataPoints
 		if metricsPoints == 0 {
@@ -207,7 +268,7 @@ func (d *Driver) Server() driver.Server {
 			driver:             d,
 			concurrency:        perQueue,
 			maxMetricsPoints:   metricsPoints,
-			perQueueConcurrent: d.cfg.QueueConcurrency,
+			perQueueConcurrent: resolveQueueConcurrency(queueNames, d.cfg.QueueConcurrency),
 			perQueueRate:       d.cfg.QueueRateLimits,
 			handlers:           make(map[string]driver.HandlerFunc),
 		}

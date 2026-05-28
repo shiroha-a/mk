@@ -439,3 +439,58 @@ func TestNewDispatchHandler_NormalReturn(t *testing.T) {
 
 // errIs aliases errors.Is so the dispatch tests read consistently.
 func errIs(err, target error) bool { return errors.Is(err, target) }
+
+func TestQueueDefaultConcurrency(t *testing.T) {
+	cases := map[string]int{
+		"inbox":       16,
+		"deliver":     16,
+		"webhook":     4,
+		"push":        4,
+		"export":      2,
+		"maintenance": 2,
+		"custom":      unknownQueueConcurrency, // unknown queue falls back to the modest default
+	}
+	for name, want := range cases {
+		if got := queueDefaultConcurrency(name); got != want {
+			t.Errorf("queueDefaultConcurrency(%q) = %d, want %d", name, got, want)
+		}
+	}
+}
+
+func TestResolveQueueConcurrency_DefaultsAndOverrides(t *testing.T) {
+	queues := []string{"inbox", "deliver", "push", "export", "webhook", "maintenance"}
+	override := map[string]int{
+		"inbox":   32, // override wins over the default 16
+		"deliver": 0,  // <=0 is ignored, leaving the default 16
+	}
+	got := resolveQueueConcurrency(queues, override)
+	want := map[string]int{
+		"inbox":       32,
+		"deliver":     16,
+		"push":        4,
+		"export":      2,
+		"webhook":     4,
+		"maintenance": 2,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("resolveQueueConcurrency len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("queue %q concurrency = %d, want %d", name, got[name], w)
+		}
+	}
+}
+
+// #1374: 旧均等割り (total 16 / 6 queue = 2) では inbox / deliver が starve して
+// いた。default 状態で hot queue が 2 より十分大きいことを保証する回帰テスト。
+func TestResolveQueueConcurrency_HotQueuesNotStarved(t *testing.T) {
+	queues := []string{"inbox", "deliver", "push", "export", "webhook", "maintenance"}
+	got := resolveQueueConcurrency(queues, nil)
+	if got["inbox"] <= 2 {
+		t.Errorf("inbox default concurrency = %d, want > 2 (旧均等割りの starve 回帰)", got["inbox"])
+	}
+	if got["deliver"] <= 2 {
+		t.Errorf("deliver default concurrency = %d, want > 2 (旧均等割りの starve 回帰)", got["deliver"])
+	}
+}
