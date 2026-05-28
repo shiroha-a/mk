@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 import time
 
@@ -18,11 +19,14 @@ TARGET_NAME = os.environ.get("TARGET_NAME", "target")
 NUM_USERS = int(os.environ.get("SEED_USERS", "50"))
 NUM_NOTES_PER_USER = int(os.environ.get("SEED_NOTES", "50"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/seed")
-# Number of followers each user gets. The default (NUM_USERS-1) builds a
-# complete follow graph so every note-create fans out to all other users'
-# home timelines — without this the bench measures notes-create with zero
-# followers (fanout no-op), which is not representative of real load (#1379).
-FOLLOWERS_PER_USER = int(os.environ.get("SEED_FOLLOWERS", str(NUM_USERS - 1)))
+# Number of followers each user gets. Default = a complete follow graph
+# (NUM_USERS-1) so every note-create fans out to all other users' home
+# timelines — without this the bench measures notes-create with zero followers
+# (fanout no-op), which is not representative of real load (#1379). Capped at
+# 100 so bumping SEED_USERS doesn't blow up seed time on the O(N²) follow loop
+# (100 followers/user is already a representative active-instance fan-out); an
+# explicit SEED_FOLLOWERS overrides the cap.
+FOLLOWERS_PER_USER = int(os.environ.get("SEED_FOLLOWERS", str(min(NUM_USERS - 1, 100))))
 
 
 def wait_for_health(url: str, timeout: int = 180) -> None:
@@ -86,8 +90,12 @@ def seed_following(http: httpx.Client, tokens: list[str], user_ids: list[str]) -
         if not token:
             continue
         # i 番目の user が他 user を follow する。complete graph では全員。
-        targets = [user_ids[j] for j in range(len(user_ids)) if j != i and user_ids[j]]
-        for target_id in targets[:FOLLOWERS_PER_USER]:
+        # FOLLOWERS_PER_USER で絞る場合は random.sample で分散し、特定 user に
+        # follower が偏らない (= 先頭 K 固定だと低 index user に集中する) ように
+        # する。
+        candidates = [user_ids[j] for j in range(len(user_ids)) if j != i and user_ids[j]]
+        targets = random.sample(candidates, min(FOLLOWERS_PER_USER, len(candidates)))
+        for target_id in targets:
             try:
                 api(http, "following/create", {"userId": target_id}, token)
                 edges += 1
