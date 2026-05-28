@@ -89,6 +89,16 @@ type Service struct {
 	// (search 側 per-call の ToLower を省くためと、whitespace のみ入力で
 	// remap が無意味に有効化される edge case の防御)。
 	selfHostname string
+	// usertagHook は profile description 由来の user.tags が変わった時に
+	// hashtag 集計 (attachedUsersCount) を更新する hook。未配線なら集計を
+	// skip (= populate のみ、旧挙動)。実装は core/hashtag.Service。
+	usertagHook UsertagHook
+}
+
+// UsertagHook reconciles the hashtag attach aggregate when a user's tags
+// change. 実装は core/hashtag.Service.UpdateUsertags。
+type UsertagHook interface {
+	UpdateUsertags(userID string, isLocal bool, oldTags, newTags []string)
 }
 
 // RolePolicyProvider abstracts role-policy lookup used to override default
@@ -157,6 +167,12 @@ func (s *Service) SetRemoteUserResolver(r RemoteUserResolver) {
 // 防ぐ防御。実 caller は `s.config.Hostname` (= `url.Hostname()` 由来) で
 // whitespace が入る経路は通常 無いが、Setter contract として境界条件を
 // 確実にする。
+// SetUsertagHook wires a hook that updates the hashtag attach aggregate when
+// a user's profile-derived tags change (#1362).
+func (s *Service) SetUsertagHook(h UsertagHook) {
+	s.usertagHook = h
+}
+
 func (s *Service) SetSelfHostname(hostname string) {
 	s.selfHostname = strings.ToLower(strings.TrimSpace(hostname))
 }
@@ -426,12 +442,17 @@ type FieldItem struct {
 
 // UpdateProfile applies the non-nil fields to the user and user_profile rows.
 func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile, error) {
-	if _, err := s.userRepo.FindByID(userID); err != nil {
+	existing, err := s.userRepo.FindByID(userID)
+	if err != nil {
 		return nil, ErrUserNotFound
 	}
 
 	userFields := map[string]any{}
 	profileFields := map[string]any{}
+	// description 由来の user.tags が変わった場合に hashtag 集計 hook へ渡す
+	// old/new。tagsChanged=false の間は hook を呼ばない。
+	var oldTags, newTags []string
+	tagsChanged := false
 
 	if in.Name != nil {
 		userFields["name"] = *in.Name
@@ -461,7 +482,10 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 		if *in.Description != nil {
 			desc = **in.Description
 		}
-		userFields["tags"] = pq.StringArray(hashtag.ExtractUserTags(desc))
+		newTags = hashtag.ExtractUserTags(desc)
+		userFields["tags"] = pq.StringArray(newTags)
+		oldTags = []string(existing.Tags)
+		tagsChanged = true
 	}
 	if in.Location != nil {
 		profileFields["location"] = *in.Location
@@ -560,6 +584,11 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 	}
 	if err := s.userRepo.UpdateProfile(userID, profileFields); err != nil {
 		return nil, err
+	}
+	// description 由来 tags が変わったら hashtag 集計 (attachedUsersCount) を
+	// 追従させる。i/update は常に local user なので isLocal=true。fire-and-forget。
+	if tagsChanged && s.usertagHook != nil {
+		s.usertagHook.UpdateUsertags(userID, existing.IsLocal(), oldTags, newTags)
 	}
 
 	bundle, err := s.ShowByID(userID)

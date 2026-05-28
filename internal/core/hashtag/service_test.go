@@ -20,10 +20,13 @@ import (
 // goroutine から同時 RecordMention されても race にならないよう
 // sync.Mutex で calls / attaches を guard する。
 type fakeRepo struct {
-	mu       sync.Mutex
-	calls    []recordCall
-	errOn    string // RecordMention で error を返したい name (空なら全成功)
-	attaches []recordCall
+	mu        sync.Mutex
+	calls     []recordCall
+	errOn     string // RecordMention で error を返したい name (空なら全成功)
+	attaches  []recordCall
+	detaches  []recordCall
+	attachErr error // 非 nil なら RecordAttach がこれを返す
+	detachErr error // 非 nil なら RecordDetach がこれを返す
 }
 
 type recordCall struct {
@@ -54,7 +57,27 @@ func (f *fakeRepo) RecordAttach(idVal, name, userID string, isLocal bool) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attaches = append(f.attaches, recordCall{id: idVal, name: name, userID: userID, isLocal: isLocal})
-	return nil
+	return f.attachErr
+}
+func (f *fakeRepo) RecordDetach(name, userID string, isLocal bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detaches = append(f.detaches, recordCall{name: name, userID: userID, isLocal: isLocal})
+	return f.detachErr
+}
+func (f *fakeRepo) snapshotAttaches() []recordCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]recordCall, len(f.attaches))
+	copy(out, f.attaches)
+	return out
+}
+func (f *fakeRepo) snapshotDetaches() []recordCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]recordCall, len(f.detaches))
+	copy(out, f.detaches)
+	return out
 }
 
 func newTestService(t *testing.T) (*Service, *fakeRepo) {
@@ -260,6 +283,7 @@ type slowRepo struct {
 func (r *slowRepo) FindByName(string) (*model.Hashtag, error)  { return nil, nil }
 func (r *slowRepo) RecordMention(_, _, _ string, _ bool) error { <-r.block; return nil }
 func (r *slowRepo) RecordAttach(_, _, _ string, _ bool) error  { return nil }
+func (r *slowRepo) RecordDetach(_, _ string, _ bool) error     { return nil }
 
 func TestService_WaitForPendingWrites_NilReceiver(t *testing.T) {
 	// nil *Service でも panic せず即 return すること。production code は
@@ -329,5 +353,98 @@ func TestService_Shutdown_NilReceiver(t *testing.T) {
 	var s *Service
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Fatalf("nil Shutdown should be no-op: %v", err)
+	}
+}
+
+// UpdateUsertags は old/new 差分で追加 tag を attach、消えた tag を detach する。
+func TestService_UpdateUsertags_Diff(t *testing.T) {
+	s, repo := newTestService(t)
+	// old=[a,b] new=[b,c] → add=[c], remove=[a] (b は不変)。
+	s.UpdateUsertags("u1", true, []string{"a", "b"}, []string{"b", "c"})
+	s.WaitForPendingWrites()
+
+	attaches := repo.snapshotAttaches()
+	detaches := repo.snapshotDetaches()
+	if len(attaches) != 1 || attaches[0].name != "c" || !attaches[0].isLocal {
+		t.Fatalf("expected attach [c, local], got %+v", attaches)
+	}
+	if len(detaches) != 1 || detaches[0].name != "a" {
+		t.Fatalf("expected detach [a], got %+v", detaches)
+	}
+}
+
+// 差分が無ければ hook は何もしない (goroutine も起こさない)。
+func TestService_UpdateUsertags_NoChange(t *testing.T) {
+	s, repo := newTestService(t)
+	s.UpdateUsertags("u1", true, []string{"a", "b"}, []string{"b", "a"})
+	s.WaitForPendingWrites()
+	if got := len(repo.snapshotAttaches()) + len(repo.snapshotDetaches()); got != 0 {
+		t.Errorf("expected no attach/detach when tags unchanged, got %d", got)
+	}
+}
+
+// 新規 (old=nil) は全 new tag を attach。
+func TestService_UpdateUsertags_FreshAttachesAll(t *testing.T) {
+	s, repo := newTestService(t)
+	s.UpdateUsertags("u_remote", false, nil, []string{"x", "y"})
+	s.WaitForPendingWrites()
+	attaches := repo.snapshotAttaches()
+	if len(attaches) != 2 {
+		t.Fatalf("expected 2 attaches, got %d", len(attaches))
+	}
+	for _, a := range attaches {
+		if a.isLocal {
+			t.Errorf("remote user attach should be isLocal=false, got %+v", a)
+		}
+	}
+	if got := len(repo.snapshotDetaches()); got != 0 {
+		t.Errorf("expected no detaches, got %d", got)
+	}
+}
+
+// attach 対象 tag に対して hiddenTags / sensitiveWords filter が効く
+// (OnNoteCreated と同 semantics)。detach は filter 対象外。
+func TestService_UpdateUsertags_FiltersSensitiveOnAttach(t *testing.T) {
+	s, repo := newTestService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: pq.StringArray{"nsfw"}, HiddenTags: pq.StringArray{"hide"}}
+	s.SetMetaRepo(metaRepo)
+
+	// added=[nsfw(sensitive), hide(hidden), safe]、removed なし → safe のみ attach。
+	s.UpdateUsertags("u1", true, nil, []string{"nsfw", "hide", "safe"})
+	s.WaitForPendingWrites()
+
+	attaches := repo.snapshotAttaches()
+	if len(attaches) != 1 || attaches[0].name != "safe" {
+		t.Fatalf("expected only 'safe' attached (sensitive/hidden filtered), got %+v", attaches)
+	}
+}
+
+// RecordAttach / RecordDetach が error を返しても best-effort で panic せず
+// 完了する (slog.Warn ログのみ)。
+func TestService_UpdateUsertags_RepoErrorBestEffort(t *testing.T) {
+	s, repo := newTestService(t)
+	repo.attachErr = errors.New("attach boom")
+	repo.detachErr = errors.New("detach boom")
+	// add=[b], remove=[a] の両方でエラー経路を通す。
+	s.UpdateUsertags("u1", true, []string{"a"}, []string{"b"})
+	s.WaitForPendingWrites()
+	// エラーでも attach/detach は試行される (best-effort)。
+	if len(repo.snapshotAttaches()) != 1 || len(repo.snapshotDetaches()) != 1 {
+		t.Fatalf("expected 1 attach + 1 detach attempt, got %d/%d",
+			len(repo.snapshotAttaches()), len(repo.snapshotDetaches()))
+	}
+}
+
+// nil receiver / 空 userID は no-op (defensive)。
+func TestService_UpdateUsertags_Guards(t *testing.T) {
+	var s *Service
+	s.UpdateUsertags("u", true, nil, []string{"x"}) // nil receiver で panic しない
+
+	s2, repo := newTestService(t)
+	s2.UpdateUsertags("", true, nil, []string{"x"}) // 空 userID
+	s2.WaitForPendingWrites()
+	if got := len(repo.snapshotAttaches()); got != 0 {
+		t.Errorf("expected no attach for empty userID, got %d", got)
 	}
 }

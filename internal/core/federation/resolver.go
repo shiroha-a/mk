@@ -61,6 +61,10 @@ type ChartHook interface {
 // も実装側の責務。
 type HashtagHook interface {
 	OnNoteCreated(note *model.Note, author *model.User)
+	// UpdateUsertags reconciles the hashtag attach aggregate when a remote
+	// user's person.tag derived tags change (#1362)。OnNoteCreated と同じく
+	// non-blocking であること。
+	UpdateUsertags(userID string, isLocal bool, oldTags, newTags []string)
 }
 
 // Errors returned by Resolver.
@@ -412,6 +416,11 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
 	}
+	// hashtag 集計 (attachedUsersCount) を新規 remote user の tags で更新する
+	// (old=nil)。remote なので isLocal=false。non-blocking hook (#1362)。
+	if r.hashtagHook != nil && len(user.Tags) > 0 {
+		r.hashtagHook.UpdateUsertags(user.ID, false, nil, []string(user.Tags))
+	}
 	// remote actor の bio (= AP `summary` または `_misskey_summary`) を
 	// `user_profile.description` に取り込む (#1022)。profile 行を作成しないと
 	// 既存の Description 取得経路が常に NULL を返してしまい、frontend で
@@ -581,12 +590,18 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	}
 	// person.tag の Hashtag entry を user.tags に追従させる (actor 更新時に
 	// 自己紹介の hashtag が変わったら反映する。新規取り込みと同じ正規化)。
+	oldTags := []string(existing.Tags)
 	tags := pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
 	fields["tags"] = tags
 	existing.Tags = tags
 	existing.LastFetchedAt = &now
 	// UpdateUserエラーはベストエフォートで無視 (次回再試行される)
 	_ = r.userRepo.UpdateUser(existing.ID, fields)
+	// hashtag 集計を tags 差分で追従させる。remote なので isLocal=false。
+	// non-blocking hook (#1362)。
+	if r.hashtagHook != nil {
+		r.hashtagHook.UpdateUsertags(existing.ID, false, oldTags, []string(tags))
+	}
 	// UserProfile.Description (#1022)。actor.Summary が変わった場合に追従する。
 	// profile 行が無いケース (= 本 fix 以前に取り込まれた remote user) は
 	// back-fill する。Update / Create のいずれも best-effort で fail しても

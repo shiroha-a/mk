@@ -728,6 +728,9 @@ func (s *Server) setupRoutes() {
 	hashtagService.SetMetaRepo(metaRepo)
 	noteCreateService.SetHashtagHook(hashtagService)
 	federationResolver.SetHashtagHook(hashtagService)
+	// i/update の profile description 由来 user.tags 変更で hashtag attach 集計
+	// (attachedUsersCount) を追従させる (#1362)。
+	userService.SetUsertagHook(hashtagService)
 	// graceful shutdown 経路で in-flight worker (#719 fire-and-forget) を ctx
 	// 期限内に drain する (#727)。typical case では即返り、長時間動く worker は
 	// ctx timeout で諦める (idempotent な RecordMention なので次回再カウント)。

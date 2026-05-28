@@ -133,6 +133,47 @@ func TestHashtagRepository_RecordAttach_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, got.AttachedUsersCount)
 }
 
+// RecordDetach は attached* から user を除去し count を減算する。
+func TestHashtagRepository_RecordDetach(t *testing.T) {
+	repo := NewHashtagRepository(testDB)
+	u1 := insertTestUser(t, "u_ht_d1", "ht_d1")
+	u2 := insertTestUser(t, "u_ht_d2", "ht_d2")
+	defer cleanupUser(t, u1.ID)
+	defer cleanupUser(t, u2.ID)
+	cleanupHashtag(t, "#htdetach")
+
+	require.NoError(t, repo.RecordAttach("h_ht_d1", "#htdetach", u1.ID, true))
+	require.NoError(t, repo.RecordAttach("h_ht_d2", "#htdetach", u2.ID, true))
+
+	// u1 を detach → count 2->1、u1 だけ配列から消える。
+	require.NoError(t, repo.RecordDetach("#htdetach", u1.ID, true))
+	got, err := repo.FindByName("#htdetach")
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.AttachedUsersCount)
+	assert.Equal(t, 1, got.AttachedLocalUsersCount)
+	assert.Equal(t, pq.StringArray{u2.ID}, got.AttachedLocalUserIds)
+}
+
+// 存在しない user / hashtag の detach は no-op (冪等、count を負にしない)。
+func TestHashtagRepository_RecordDetach_Idempotent(t *testing.T) {
+	repo := NewHashtagRepository(testDB)
+	u := insertTestUser(t, "u_ht_di", "ht_di")
+	defer cleanupUser(t, u.ID)
+	cleanupHashtag(t, "#htdetachidem")
+
+	require.NoError(t, repo.RecordAttach("h_ht_di1", "#htdetachidem", u.ID, true))
+	// 二重 detach: 1 回目で 0、2 回目は list に居ないので no-op。
+	require.NoError(t, repo.RecordDetach("#htdetachidem", u.ID, true))
+	require.NoError(t, repo.RecordDetach("#htdetachidem", u.ID, true))
+	got, err := repo.FindByName("#htdetachidem")
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.AttachedUsersCount)
+	assert.Empty(t, []string(got.AttachedLocalUserIds))
+
+	// 存在しない hashtag への detach も error にならない。
+	require.NoError(t, repo.RecordDetach("#htnope", u.ID, true))
+}
+
 func TestHashtagRepository_RecordMention_ConcurrentInsert(t *testing.T) {
 	// 段階 1 INSERT が ON CONFLICT DO NOTHING で skip された経路でも段階 2 で
 	// 正しく count が 1 になることを確認 (既存 row 上書きシナリオ)。

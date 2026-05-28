@@ -117,6 +117,77 @@ func (s *Service) OnNoteCreated(note *model.Note, author *model.User) {
 	})
 }
 
+// UpdateUsertags reconciles the hashtag attach aggregate when a user's tags
+// change (profile edit / remote actor refresh). Tags newly added (in newTags
+// but not oldTags) are attached, tags removed (in oldTags but not newTags) are
+// detached, mirroring Misskey's HashtagService.updateUsertags. Like
+// OnNoteCreated it is fire-and-forget: the diff and DB writes run in a worker
+// goroutine so callers (i/update, federation resolver) never block.
+//
+// 追加 tag は hiddenTags / sensitiveWords filter を OnNoteCreated と同様に適用する
+// (featured / trends に出さない drop-in compat)。detach は filter 対象外
+// (既に集計済みの user を外すだけなので hidden でも整合のため除去する)。
+func (s *Service) UpdateUsertags(userID string, isLocal bool, oldTags, newTags []string) {
+	if s == nil || s.repo == nil || userID == "" {
+		return
+	}
+	oldSet := make(map[string]struct{}, len(oldTags))
+	for _, t := range oldTags {
+		oldSet[t] = struct{}{}
+	}
+	newSet := make(map[string]struct{}, len(newTags))
+	for _, t := range newTags {
+		newSet[t] = struct{}{}
+	}
+	var added, removed []string
+	for _, t := range newTags {
+		if t == "" {
+			continue
+		}
+		if _, ok := oldSet[t]; !ok {
+			added = append(added, t)
+		}
+	}
+	for _, t := range oldTags {
+		if t == "" {
+			continue
+		}
+		if _, ok := newSet[t]; !ok {
+			removed = append(removed, t)
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		return
+	}
+	now := time.Now()
+
+	s.pending.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("hashtag: panic in UpdateUsertags worker", "panic", r)
+			}
+		}()
+		hidden, sensitive := s.fetchHiddenAndSensitive()
+		for _, name := range added {
+			if isHiddenTag(name, hidden) {
+				continue
+			}
+			if keyword.IsKeyWordIncluded(name, sensitive) {
+				continue
+			}
+			hid := s.idGen.Generate(now)
+			if err := s.repo.RecordAttach(hid, name, userID, isLocal); err != nil {
+				slog.Warn("hashtag: RecordAttach failed", "name", name, "userID", userID, "err", err)
+			}
+		}
+		for _, name := range removed {
+			if err := s.repo.RecordDetach(name, userID, isLocal); err != nil {
+				slog.Warn("hashtag: RecordDetach failed", "name", name, "userID", userID, "err", err)
+			}
+		}
+	})
+}
+
 // WaitForPendingWrites blocks until all in-flight OnNoteCreated goroutines
 // finish. Production code does not call this — it exists so unit tests can
 // observe the post-write repo state deterministically without polling.

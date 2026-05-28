@@ -1773,7 +1773,8 @@ func TestResolveActor_ChartHookFiresOnNewUser(t *testing.T) {
 // stubHashtagHook captures hashtag hook fires from the federation resolver.
 // #680: IngestNote / UpdateRemoteNote が note.Tags 非空時に呼ぶことを保証する。
 type stubHashtagHook struct {
-	calls []hashtagHookCall
+	calls        []hashtagHookCall
+	usertagCalls []usertagHookCall
 }
 
 type hashtagHookCall struct {
@@ -1790,6 +1791,76 @@ func (s *stubHashtagHook) OnNoteCreated(n *model.Note, a *model.User) {
 		tags:     []string(n.Tags),
 		isLocal:  a.IsLocal(),
 	})
+}
+
+type usertagHookCall struct {
+	userID  string
+	isLocal bool
+	oldTags []string
+	newTags []string
+}
+
+func (s *stubHashtagHook) UpdateUsertags(userID string, isLocal bool, oldTags, newTags []string) {
+	s.usertagCalls = append(s.usertagCalls, usertagHookCall{
+		userID:  userID,
+		isLocal: isLocal,
+		oldTags: oldTags,
+		newTags: newTags,
+	})
+}
+
+// remote actor の新規取り込みで usertag 集計 hook が発火する (#1362)。
+// old=nil / new=正規化済み tags / isLocal=false。
+func TestResolveActor_UsertagHookFiresOnNewUser(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/htagger",
+		"type": "Person",
+		"preferredUsername": "htagger",
+		"inbox": "https://remote.example/users/htagger/inbox",
+		"tag": [{"type": "Hashtag", "name": "#Golang"}],
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, _ := newResolver(t, body, nil)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+
+	_, err := r.ResolveActor("https://remote.example/users/htagger")
+	require.NoError(t, err)
+	require.Len(t, hook.usertagCalls, 1)
+	assert.False(t, hook.usertagCalls[0].isLocal, "remote → isLocal=false")
+	assert.Nil(t, hook.usertagCalls[0].oldTags, "新規取り込みは old=nil")
+	assert.Equal(t, []string{"golang"}, hook.usertagCalls[0].newTags)
+}
+
+// actor 再取得 (refreshActor) でも usertag 集計 hook が発火し、old/new tags が
+// 渡る (#1362)。
+func TestResolveActor_UsertagHookFiresOnRefresh(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"tag": [{"type": "Hashtag", "name": "#New"}],
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	r, repo := newResolver(t, body, nil)
+	hook := &stubHashtagHook{}
+	r.SetHashtagHook(hook)
+	uri := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["existing"] = &model.User{
+		ID:       "existing",
+		Username: "alice",
+		URI:      &uri,
+		Host:     &host,
+		Tags:     []string{"old"},
+	}
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	require.Len(t, hook.usertagCalls, 1)
+	assert.False(t, hook.usertagCalls[0].isLocal)
+	assert.Equal(t, []string{"old"}, hook.usertagCalls[0].oldTags)
+	assert.Equal(t, []string{"new"}, hook.usertagCalls[0].newTags)
 }
 
 func TestIngestNote_HashtagHookFiresOnRemoteIngest(t *testing.T) {

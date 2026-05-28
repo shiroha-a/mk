@@ -26,9 +26,13 @@ type HashtagRepository interface {
 
 	// RecordAttach は user の profile に hashtag を attached した記録を残す。
 	// semantics は RecordMention と同じだが対象列が attached* 系。
-	// (現状 mk-go では user profile への hashtag 添付 UI が無いため呼出側
-	// 未配線だが、API 互換性のため提供する。)
 	RecordAttach(id, name, userID string, isLocal bool) error
+
+	// RecordDetach は RecordAttach の逆。user `userID` が hashtag `name` を
+	// profile から外した際に attachedUserIds から除去し count を減算する。
+	// 該当 user が list に居ない場合は no-op (冪等)。upstream の
+	// updateHashtag(inc=false) 相当。
+	RecordDetach(name, userID string, isLocal bool) error
 }
 
 type hashtagRepository struct {
@@ -77,6 +81,26 @@ func (r *hashtagRepository) RecordAttach(id, name, userID string, isLocal bool) 
 		"attachedLocalUserIds", "attachedLocalUsersCount",
 		"attachedRemoteUserIds", "attachedRemoteUsersCount",
 	)
+}
+
+// RecordDetach removes userID from a hashtag's attached* arrays and decrements
+// the counts. It is the inverse of RecordAttach and is idempotent: if the user
+// is not present (or the row does not exist), it is a no-op.
+func (r *hashtagRepository) RecordDetach(name, userID string, isLocal bool) error {
+	subIDsCol, subCountCol := "attachedRemoteUserIds", "attachedRemoteUsersCount"
+	if isLocal {
+		subIDsCol, subCountCol = "attachedLocalUserIds", "attachedLocalUsersCount"
+	}
+	// total / sub を 1 UPDATE で減算する。WHERE ガードで「list に居る時だけ」
+	// 実行するので多重 detach は冪等。column 名は固定 const のみで injection 安全。
+	query := `
+UPDATE "hashtag" SET
+  "attachedUserIds"   = array_remove("attachedUserIds", ?),
+  "attachedUsersCount" = "attachedUsersCount" - 1,
+  "` + subIDsCol + `"   = array_remove("` + subIDsCol + `", ?),
+  "` + subCountCol + `" = "` + subCountCol + `" - 1
+WHERE name = ? AND (? = ANY("attachedUserIds"))`
+	return r.db.Exec(query, userID, userID, name, userID).Error
 }
 
 // recordImpl は RecordMention / RecordAttach 共通実装。column 名だけ差し替え。

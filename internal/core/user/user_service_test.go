@@ -1102,3 +1102,51 @@ func TestService_UpdateProfile_LeavesTagsWhenDescriptionOmitted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"golang"}, []string(repo.Users["u1"].Tags))
 }
+
+// stubUsertagHook records UpdateUsertags invocations for the local populate
+// hook test (#1362).
+type stubUsertagHook struct {
+	called  bool
+	userID  string
+	isLocal bool
+	oldTags []string
+	newTags []string
+}
+
+func (h *stubUsertagHook) UpdateUsertags(userID string, isLocal bool, oldTags, newTags []string) {
+	h.called = true
+	h.userID = userID
+	h.isLocal = isLocal
+	h.oldTags = oldTags
+	h.newTags = newTags
+}
+
+// description 変更時、usertagHook へ old/new tags が渡る (local=isLocal true)。
+func TestService_UpdateProfile_CallsUsertagHook(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Tags: []string{"old"}}
+	hook := &stubUsertagHook{}
+	svc.SetUsertagHook(hook)
+
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		Description: ptr(ptr("now #Golang")),
+	})
+	require.NoError(t, err)
+	require.True(t, hook.called)
+	assert.Equal(t, "u1", hook.userID)
+	assert.True(t, hook.isLocal)
+	assert.Equal(t, []string{"old"}, hook.oldTags)
+	assert.Equal(t, []string{"golang"}, hook.newTags)
+}
+
+// description を更新しない場合は hook を呼ばない。
+func TestService_UpdateProfile_SkipsUsertagHookWhenDescriptionOmitted(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Tags: []string{"old"}}
+	hook := &stubUsertagHook{}
+	svc.SetUsertagHook(hook)
+
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{Name: ptr(ptr("Alice"))})
+	require.NoError(t, err)
+	assert.False(t, hook.called)
+}
