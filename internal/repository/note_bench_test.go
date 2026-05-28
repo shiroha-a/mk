@@ -70,7 +70,8 @@ func BenchmarkFindManyByIDsWithUser(b *testing.B) {
 
 	page := noteIDs[:pageSize]
 
-	b.Run("WithPreloads", func(b *testing.B) {
+	// Batched: 現行 FindManyByIDsWithUser (#1368 で batch-IN 4 query 化)。
+	b.Run("Batched", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -84,8 +85,23 @@ func BenchmarkFindManyByIDsWithUser(b *testing.B) {
 		}
 	})
 
-	// 比較用: preload 無しの素の `id IN (...)` 1 query。8 preload の round-trip
-	// コストを切り分ける (差分が preload のオーバーヘッド)。
+	// Preloads: 旧経路 (preloadNoteRelations の 8 preload = ~9 query)。batch との
+	// 比較で往復削減の効果を測る。
+	b.Run("Preloads", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var notes []*model.Note
+			if err := preloadNoteRelations(testDB).Where("id IN ?", page).Find(&notes).Error; err != nil {
+				b.Fatalf("preload find: %v", err)
+			}
+			if len(notes) != pageSize {
+				b.Fatalf("got %d notes, want %d", len(notes), pageSize)
+			}
+		}
+	})
+
+	// NoPreload: 素の `id IN (...)` 1 query (relation 無し)。理論下限。
 	b.Run("NoPreload", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()

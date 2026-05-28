@@ -519,6 +519,76 @@ func TestNoteRepository_FindManyByIDsWithUser(t *testing.T) {
 	assert.Empty(t, out)
 }
 
+// TestNoteRepository_FindManyByIDsWithUser_HydratesRelations は hydrated shape
+// (User / Renote{.User,.Poll} / Reply{.User,.Poll} / Poll) を全て検証する強い
+// oracle。hydration の実装を入れ替える (preload → batch 等) 際の wiring 回帰を
+// 捕まえるためのもの。
+func TestNoteRepository_FindManyByIDsWithUser_HydratesRelations(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	pollRepo := NewPollRepository(testDB)
+
+	ua := insertTestUser(t, "u_hy_a", "hy_author")
+	ur := insertTestUser(t, "u_hy_r", "hy_renoter")
+	up := insertTestUser(t, "u_hy_p", "hy_replier")
+	defer cleanupUser(t, ua.ID)
+	defer cleanupUser(t, ur.ID)
+	defer cleanupUser(t, up.ID)
+
+	mkNote := func(id, uid string, hasPoll bool) *model.Note {
+		n := &model.Note{ID: id, UserID: uid, Visibility: model.NoteVisibilityPublic, HasPoll: hasPoll, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+		return n
+	}
+	mkPoll := func(noteID, uid string) {
+		require.NoError(t, pollRepo.Create(&model.Poll{
+			NoteID: noteID, Choices: pq.StringArray{"A", "B"}, Votes: pq.Int64Array{0, 0},
+			NoteVisibility: model.NoteVisibilityPublic, UserID: uid,
+		}))
+	}
+
+	// renote 先 / reply 先はそれぞれ別 user + poll を持つ。
+	nr := mkNote("n_hy_r", ur.ID, true)
+	mkPoll(nr.ID, ur.ID)
+	np := mkNote("n_hy_p", up.ID, true)
+	mkPoll(np.ID, up.ID)
+	// main note: author=ua, renote=nr, reply=np, 自身も poll を持つ。
+	main := &model.Note{
+		ID: "n_hy_m", UserID: ua.ID, Visibility: model.NoteVisibilityPublic,
+		HasPoll: true, RenoteID: &nr.ID, ReplyID: &np.ID, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(main))
+	t.Cleanup(func() { cleanupNote(t, main.ID) })
+	mkPoll(main.ID, ua.ID)
+
+	out, err := repo.FindManyByIDsWithUser([]string{main.ID})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	got := out[0]
+
+	// author + 自 poll
+	require.NotNil(t, got.User, "author user must be hydrated")
+	assert.Equal(t, ua.ID, got.User.ID)
+	require.NotNil(t, got.Poll, "own poll must be hydrated")
+	assert.Equal(t, main.ID, got.Poll.NoteID)
+
+	// renote + その user + poll
+	require.NotNil(t, got.Renote, "renote must be hydrated")
+	assert.Equal(t, nr.ID, got.Renote.ID)
+	require.NotNil(t, got.Renote.User, "renote.user must be hydrated")
+	assert.Equal(t, ur.ID, got.Renote.User.ID)
+	require.NotNil(t, got.Renote.Poll, "renote.poll must be hydrated")
+	assert.Equal(t, nr.ID, got.Renote.Poll.NoteID)
+
+	// reply + その user + poll
+	require.NotNil(t, got.Reply, "reply must be hydrated")
+	assert.Equal(t, np.ID, got.Reply.ID)
+	require.NotNil(t, got.Reply.User, "reply.user must be hydrated")
+	assert.Equal(t, up.ID, got.Reply.User.ID)
+	require.NotNil(t, got.Reply.Poll, "reply.poll must be hydrated")
+	assert.Equal(t, np.ID, got.Reply.Poll.NoteID)
+}
+
 func TestNoteRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

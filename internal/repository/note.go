@@ -429,11 +429,101 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	// timeline read hot path。GORM の Preload は relation ごとに別クエリを発行する
+	// ため preloadNoteRelations (8 relation) は 1 ページ ~9 往復になる (#1368 計測)。
+	// ここでは relation を種類ごとに batch IN で引いて Go 側で配線し、往復を 4 query
+	// (notes / sub-notes / users / polls) に畳む。出力 shape は preload 版と同一
+	// (TestNoteRepository_FindManyByIDsWithUser_HydratesRelations が回帰を捕捉)。
+	// preload は Renote/Reply を 1 段しか展開しない (maxNoteEmbedDepth=1) ので
+	// sub-note の renote/reply は辿らない。
 	var notes []*model.Note
-	if err := preloadNoteRelations(r.db).Where("id IN ?", ids).Find(&notes).Error; err != nil {
+	if err := r.db.Where("id IN ?", ids).Find(&notes).Error; err != nil {
 		return nil, err
 	}
-	// idsの順序を保つため、idでマップ化してから並び替える
+	if len(notes) == 0 {
+		return nil, nil
+	}
+
+	// (2) renote / reply 先 (sub-note) を 1 query で取得し配線する。
+	subIDSet := make(map[string]struct{})
+	for _, n := range notes {
+		if n.RenoteID != nil && *n.RenoteID != "" {
+			subIDSet[*n.RenoteID] = struct{}{}
+		}
+		if n.ReplyID != nil && *n.ReplyID != "" {
+			subIDSet[*n.ReplyID] = struct{}{}
+		}
+	}
+	subByID := make(map[string]*model.Note, len(subIDSet))
+	if len(subIDSet) > 0 {
+		var subs []*model.Note
+		if err := r.db.Where("id IN ?", mapKeys(subIDSet)).Find(&subs).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range subs {
+			subByID[s.ID] = s
+		}
+		for _, n := range notes {
+			if n.RenoteID != nil {
+				n.Renote = subByID[*n.RenoteID]
+			}
+			if n.ReplyID != nil {
+				n.Reply = subByID[*n.ReplyID]
+			}
+		}
+	}
+
+	// notes + sub-notes をまとめて user / poll の配線対象にする。
+	hydrate := make([]*model.Note, 0, len(notes)+len(subByID))
+	hydrate = append(hydrate, notes...)
+	for _, s := range subByID {
+		hydrate = append(hydrate, s)
+	}
+
+	// (3) author user を 1 query で取得し配線する。
+	userIDSet := make(map[string]struct{}, len(hydrate))
+	for _, n := range hydrate {
+		if n.UserID != "" {
+			userIDSet[n.UserID] = struct{}{}
+		}
+	}
+	if len(userIDSet) > 0 {
+		var users []*model.User
+		if err := r.db.Where("id IN ?", mapKeys(userIDSet)).Find(&users).Error; err != nil {
+			return nil, err
+		}
+		userByID := make(map[string]*model.User, len(users))
+		for _, u := range users {
+			userByID[u.ID] = u
+		}
+		for _, n := range hydrate {
+			n.User = userByID[n.UserID]
+		}
+	}
+
+	// (4) poll を 1 query で取得し配線する。preload 版と同じく全 note を対象にして
+	// HasPoll の正確性に依存しない (poll 行が在れば attach、無ければ nil)。
+	noteIDs := make([]string, 0, len(hydrate))
+	for _, n := range hydrate {
+		noteIDs = append(noteIDs, n.ID)
+	}
+	var polls []*model.Poll
+	if err := r.db.Where(`"noteId" IN ?`, noteIDs).Find(&polls).Error; err != nil {
+		return nil, err
+	}
+	if len(polls) > 0 {
+		pollByNote := make(map[string]*model.Poll, len(polls))
+		for _, p := range polls {
+			pollByNote[p.NoteID] = p
+		}
+		for _, n := range hydrate {
+			if p, ok := pollByNote[n.ID]; ok {
+				n.Poll = p
+			}
+		}
+	}
+
+	// (5) ids の順序を保って返す。
 	byID := make(map[string]*model.Note, len(notes))
 	for _, n := range notes {
 		byID[n.ID] = n
@@ -445,6 +535,15 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 		}
 	}
 	return ordered, nil
+}
+
+// mapKeys returns the keys of a string-set as a slice (順序不定)。
+func mapKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func (r *noteRepository) ListFeatured(channelID, untilID string, limit, offset int) ([]*model.Note, error) {
