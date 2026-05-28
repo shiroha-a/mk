@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/redis/go-redis/v9"
@@ -231,13 +232,26 @@ const poolHeadroom = 8
 // resolved per-queue concurrency plus poolHeadroom. mkq holds one blocking
 // BZPopMin connection per worker, so the pool must cover every worker
 // simultaneously or dispatch stalls on connection acquisition.
+//
+// The result is floored at go-redis' own default (10 × GOMAXPROCS) so this
+// auto-sizing never shrinks the pool below what an unset PoolSize would have
+// produced. That preserves enqueue-burst headroom on multi-core hosts and
+// leaves room for jobQueueAutoScale to grow workers past the static defaults
+// (auto-scale resizes workers but not the connection pool). Heavy auto-scale
+// deployments should still set redisForJobQueue.poolSize explicitly to cover
+// maxWorkers. Connections are created lazily (MinIdleConns=0) so a higher
+// ceiling costs nothing until load demands it.
 func workerPoolSize(queues []string, override map[string]int) int {
 	conc := resolveQueueConcurrency(queues, override)
 	sum := 0
 	for _, c := range conc {
 		sum += c
 	}
-	return sum + poolHeadroom
+	need := sum + poolHeadroom
+	if goDefault := 10 * runtime.GOMAXPROCS(0); need < goDefault {
+		need = goDefault
+	}
+	return need
 }
 
 // queueDefaultConcurrency returns the hot-tuned default pool size for a queue.

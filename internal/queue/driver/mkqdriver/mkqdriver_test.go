@@ -3,6 +3,7 @@ package mkqdriver
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -497,15 +498,16 @@ func TestResolveQueueConcurrency_HotQueuesNotStarved(t *testing.T) {
 
 func TestWorkerPoolSize(t *testing.T) {
 	queues := []string{"inbox", "deliver", "push", "export", "webhook", "maintenance"}
+	goDefault := 10 * runtime.GOMAXPROCS(0)
 
-	// default: 16+16+4+4+2+2 = 44, + poolHeadroom.
-	if got, want := workerPoolSize(queues, nil), 44+poolHeadroom; got != want {
+	// default: 16+16+4+4+2+2 = 44, + poolHeadroom, floored at go-redis default.
+	if got, want := workerPoolSize(queues, nil), max(44+poolHeadroom, goDefault); got != want {
 		t.Errorf("workerPoolSize(default) = %d, want %d", got, want)
 	}
 
 	// override は合計に反映され、pool もそれに追従する。
 	override := map[string]int{"deliver": 128}
-	if got, want := workerPoolSize(queues, override), (16+128+4+4+2+2)+poolHeadroom; got != want {
+	if got, want := workerPoolSize(queues, override), max((16+128+4+4+2+2)+poolHeadroom, goDefault); got != want {
 		t.Errorf("workerPoolSize(deliver=128) = %d, want %d", got, want)
 	}
 
@@ -517,5 +519,10 @@ func TestWorkerPoolSize(t *testing.T) {
 	}
 	if got := workerPoolSize(queues, nil); got < sum {
 		t.Errorf("workerPoolSize = %d, must be >= total workers %d", got, sum)
+	}
+
+	// go-redis default を下回らない (multi-core での pool 縮小退行を防ぐ)。
+	if got := workerPoolSize(queues, nil); got < goDefault {
+		t.Errorf("workerPoolSize = %d, must be >= go-redis default %d", got, goDefault)
 	}
 }
