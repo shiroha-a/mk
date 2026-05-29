@@ -213,9 +213,6 @@ func (r *NoteFieldResolver) packNoteFiles(fileIDs []string, fileMap map[string]*
 	return packed
 }
 
-// resolveFileOwners は folder / owner を best-effort で 1 件ずつ引く。
-// attachment 数は実用上少ないため batch クエリは省略 (folder/owner の
-// 専用 batch インターフェースを増やさない trade-off)。
 // batchDriveFolderLookup / batchFileOwnerLookup are optional capabilities. When
 // the wired lookup implements them, resolveFileOwners fetches all distinct
 // folder / owner IDs in a single query each instead of one FindByID per distinct
