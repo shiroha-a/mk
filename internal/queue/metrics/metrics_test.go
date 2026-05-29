@@ -70,6 +70,12 @@ func (i *fakeInspector) ListPendingTasks(qname string, page, pageSize int) ([]*d
 func (i *fakeInspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *fakeInspector) ListCompletedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
+func (i *fakeInspector) ListFailedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
 func (i *fakeInspector) ListScheduledTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }

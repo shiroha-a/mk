@@ -250,6 +250,17 @@ func (i *Inspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver
 	return i.list(qname, mkq.JobBucketActive, page, pageSize)
 }
 
+// ListCompletedTasks returns up to pageSize jobs retained in the completed
+// bucket (mkq keeps finished jobs per WithKeepCompleted retention).
+func (i *Inspector) ListCompletedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return i.list(qname, mkq.JobBucketCompleted, page, pageSize)
+}
+
+// ListFailedTasks returns up to pageSize jobs retained in the failed bucket.
+func (i *Inspector) ListFailedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return i.list(qname, mkq.JobBucketFailed, page, pageSize)
+}
+
 // ListScheduledTasks returns up to pageSize tasks scheduled for first-time
 // processing (= delayed bucket entries with `atm == 0`). cron / 初回
 // delayed enqueue 等が含まれる。retry-backoff 待ち (= `atm > 0`) は

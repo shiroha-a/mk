@@ -89,6 +89,17 @@ func (i *Inspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver
 	return i.listTasks(qname, "active", page, pageSize)
 }
 
+// ListCompletedTasks / ListFailedTasks return nil: asynq does not retain
+// finished-job history without per-task retention, and asynq support is being
+// dropped in favour of mkq. Provided to satisfy driver.Inspector.
+func (i *Inspector) ListCompletedTasks(_ string, _, _ int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
+
+func (i *Inspector) ListFailedTasks(_ string, _, _ int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
+
 // ListScheduledTasks returns up to pageSize scheduled tasks.
 func (i *Inspector) ListScheduledTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return i.listTasks(qname, "scheduled", page, pageSize)

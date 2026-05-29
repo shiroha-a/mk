@@ -344,6 +344,8 @@ type QueueInspector interface {
 	ListActiveTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListScheduledTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListRetryTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
+	ListCompletedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
+	ListFailedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	GetTaskInfo(qname, taskID string) (*QueueTaskSummary, error)
 	QueueMetrics(qname, kind string) (*QueueMetricsResult, error)
 }

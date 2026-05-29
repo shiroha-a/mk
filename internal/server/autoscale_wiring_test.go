@@ -98,6 +98,12 @@ func (i *scriptableInspector) ListPendingTasks(qname string, page, pageSize int)
 func (i *scriptableInspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *scriptableInspector) ListCompletedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
+func (i *scriptableInspector) ListFailedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
 func (i *scriptableInspector) ListScheduledTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }

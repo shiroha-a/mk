@@ -95,6 +95,16 @@ func (a *queueInspectorAdapter) ListScheduledTasks(qname string, page, pageSize 
 	return taskSummariesToAdmin(rows), err
 }
 
+func (a *queueInspectorAdapter) ListCompletedTasks(qname string, page, pageSize int) ([]*apiadmin.QueueTaskSummary, error) {
+	rows, err := a.inner.ListCompletedTasks(qname, page, pageSize)
+	return taskSummariesToAdmin(rows), err
+}
+
+func (a *queueInspectorAdapter) ListFailedTasks(qname string, page, pageSize int) ([]*apiadmin.QueueTaskSummary, error) {
+	rows, err := a.inner.ListFailedTasks(qname, page, pageSize)
+	return taskSummariesToAdmin(rows), err
+}
+
 func (a *queueInspectorAdapter) ListRetryTasks(qname string, page, pageSize int) ([]*apiadmin.QueueTaskSummary, error) {
 	rows, err := a.inner.ListRetryTasks(qname, page, pageSize)
 	return taskSummariesToAdmin(rows), err

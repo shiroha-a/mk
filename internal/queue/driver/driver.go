@@ -92,6 +92,11 @@ type Inspector interface {
 	ListActiveTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	ListScheduledTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	ListRetryTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
+	// ListCompletedTasks / ListFailedTasks return finished jobs retained in
+	// the completed / failed buckets. Drivers without finished-job retention
+	// return an empty slice.
+	ListCompletedTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
+	ListFailedTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 
 	GetTaskInfo(qname, taskID string) (*TaskSummary, error)
 

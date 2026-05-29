@@ -68,6 +68,16 @@ func (i *Inspector) ListActiveTasks(qname string, page, pageSize int) ([]*TaskSu
 	return i.inner.ListActiveTasks(qname, page, pageSize)
 }
 
+// ListCompletedTasks returns up to pageSize completed (finished) tasks.
+func (i *Inspector) ListCompletedTasks(qname string, page, pageSize int) ([]*TaskSummary, error) {
+	return i.inner.ListCompletedTasks(qname, page, pageSize)
+}
+
+// ListFailedTasks returns up to pageSize failed (finished) tasks.
+func (i *Inspector) ListFailedTasks(qname string, page, pageSize int) ([]*TaskSummary, error) {
+	return i.inner.ListFailedTasks(qname, page, pageSize)
+}
+
 // ListScheduledTasks returns up to pageSize scheduled tasks.
 func (i *Inspector) ListScheduledTasks(qname string, page, pageSize int) ([]*TaskSummary, error) {
 	return i.inner.ListScheduledTasks(qname, page, pageSize)

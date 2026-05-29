@@ -79,6 +79,12 @@ func (i *fakeMetricsInspector) ListPendingTasks(qname string, page, pageSize int
 func (i *fakeMetricsInspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *fakeMetricsInspector) ListCompletedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
+func (i *fakeMetricsInspector) ListFailedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
 func (i *fakeMetricsInspector) ListScheduledTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }

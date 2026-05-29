@@ -280,9 +280,9 @@ func parseStateField(raw json.RawMessage) []string {
 	return []string{"wait"}
 }
 
-// listTasksForState maps a Bull/asynq state name to the matching asynq list
-// call. Returns an empty slice for states asynq does not support (completed /
-// failed / paused) so the admin tab renders an empty list instead of 500.
+// listTasksForState maps a Bull state name to the matching inspector list call.
+// completed / failed は mkq の finished-job 保持から引く。"paused" は queue 状態
+// であってジョブ一覧ではないため空で返す (admin tab は空表示)。
 func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*QueueTaskSummary, error) {
 	switch state {
 	case "active":
@@ -299,9 +299,15 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 		sched, _ := h.queueInspector.ListScheduledTasks(queue, page, limit)
 		retry, _ := h.queueInspector.ListRetryTasks(queue, page, limit)
 		return append(sched, retry...), nil
-	case "completed", "failed", "paused":
-		// asynq は retention 未設定だと completed/failed 履歴を保持しない。
-		// 履歴APIが無いので空配列でフロントを通す (tab 表示自体は出す)。
+	case "completed":
+		// mkq は WithKeepCompleted retention で完了ジョブを保持する。frontend
+		// の All / Latest / Completed タブはこれを引く (#1396)。
+		return h.queueInspector.ListCompletedTasks(queue, page, limit)
+	case "failed":
+		return h.queueInspector.ListFailedTasks(queue, page, limit)
+	case "paused":
+		// "paused" は queue 状態であってジョブ一覧ではない。mk-go は queue を
+		// pause しないため空で返す。
 		return nil, nil
 	default:
 		return h.queueInspector.ListPendingTasks(queue, page, limit)

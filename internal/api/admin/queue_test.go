@@ -64,6 +64,8 @@ type stubQueueInspector struct {
 	active        map[string][]*apiadmin.QueueTaskSummary
 	scheduled     map[string][]*apiadmin.QueueTaskSummary
 	retry         map[string][]*apiadmin.QueueTaskSummary
+	completed     map[string][]*apiadmin.QueueTaskSummary
+	failed        map[string][]*apiadmin.QueueTaskSummary
 	task          map[string]*apiadmin.QueueTaskSummary
 	metrics       map[string]map[string]*apiadmin.QueueMetricsResult // [queue][kind]
 	deleted       []string
@@ -110,6 +112,12 @@ func (s *stubQueueInspector) ListScheduledTasks(q string, _, _ int) ([]*apiadmin
 }
 func (s *stubQueueInspector) ListRetryTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
 	return s.retry[q], nil
+}
+func (s *stubQueueInspector) ListCompletedTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
+	return s.completed[q], nil
+}
+func (s *stubQueueInspector) ListFailedTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
+	return s.failed[q], nil
 }
 func (s *stubQueueInspector) GetTaskInfo(_, id string) (*apiadmin.QueueTaskSummary, error) {
 	if t, ok := s.task[id]; ok {
@@ -707,4 +715,40 @@ func TestQueueStats_DelayedIncludesScheduledAndRetry(t *testing.T) {
 
 	// inbox: Scheduled 5 + Retry 6 = 11
 	assert.EqualValues(t, 11, resp["inbox"]["delayed"], "delayed must be Scheduled+Retry")
+}
+
+// QueueJobs は mkq の finished-job 保持から completed / failed を一覧する (#1396)。
+// 旧実装は asynq 前提で completed/failed を nil 固定にしており、busy queue でも
+// All / Completed タブが空になっていた。
+func TestQueueJobs_ListsCompletedAndFailed(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		completed: map[string][]*apiadmin.QueueTaskSummary{
+			"inbox": {{ID: "c1", Queue: "inbox", Type: "inbox:process", State: "completed"}},
+		},
+		failed: map[string][]*apiadmin.QueueTaskSummary{
+			"inbox": {{ID: "f1", Queue: "inbox", Type: "inbox:process", State: "failed"}},
+		},
+	}
+	h.SetQueueInspector(insp)
+
+	// state=completed → 完了ジョブが返る。
+	rec := doPost(h.QueueJobs, `{"queue":"inbox","state":["completed"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, "c1", got[0]["id"])
+
+	// state=all (frontend の All タブ) → completed + failed が両方含まれる。
+	rec2 := doPost(h.QueueJobs, `{"queue":"inbox","state":["completed","failed","active","delayed","wait"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got2 []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got2))
+	ids := map[string]bool{}
+	for _, j := range got2 {
+		ids[j["id"].(string)] = true
+	}
+	assert.True(t, ids["c1"], "completed job present in all-tab")
+	assert.True(t, ids["f1"], "failed job present in all-tab")
 }
