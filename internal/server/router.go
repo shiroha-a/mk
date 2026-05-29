@@ -2001,6 +2001,11 @@ func (s *Server) setupRoutes() {
 	if s.queueInspector != nil {
 		adminHandler.SetQueueInspector(&queueInspectorAdapter{inner: s.queueInspector})
 	}
+	// per-queue db (Redis INFO: memory / clients / uptime) を admin queue 画面に
+	// 出すため job-queue Redis を配線 (#1393)。
+	if s.redis != nil && s.redis.JobQueue != nil {
+		adminHandler.SetQueueRedis(jobQueueRedisInfo{rdb: s.redis.JobQueue})
+	}
 	adminHandler.SetInstanceMetadataFetcher(metadataFetcher)
 	adminHandler.SetSystemAccountFetcher(sysAcctSvc)
 	// admin/federation/remove-all-following が host 単位で全 follower を

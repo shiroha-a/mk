@@ -1,10 +1,24 @@
 package server
 
 import (
+	"context"
+
+	"github.com/redis/go-redis/v9"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/stream"
 )
+
+// jobQueueRedisInfo adapts the job-queue go-redis client to the admin handler's
+// QueueRedisInfoProvider, exposing the raw `INFO` payload for the per-queue db
+// block (memory / clients / uptime)。go-redis 依存を admin package から隔離する。
+type jobQueueRedisInfo struct {
+	rdb *redis.Client
+}
+
+func (j jobQueueRedisInfo) QueueRedisInfo(ctx context.Context) (string, error) {
+	return j.rdb.Info(ctx).Result()
+}
 
 // queueStatsInspectorAdapter adapts queue.Inspector to the minimal
 // stream.QueueInspector interface needed by QueueStatsPublisher. Keeping this

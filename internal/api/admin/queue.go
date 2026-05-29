@@ -356,7 +356,7 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 // BullMQ と完全互換のまま Go ネイティブ性能を活かすのは別レイヤ (独立
 // OSS ライブラリ化) で取り組む方針 (#377 参照)。それまでの中継措置として
 // 見た目が壊れないよう未対応 field を 0 固定で stub する。
-func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetricsResult) map[string]any {
+func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetricsResult, db map[string]any) map[string]any {
 	// delayed は Misskey 用語で scheduled + retry の合計に相当する
 	// (どちらも「すぐには実行されない」状態)。
 	delayed := info.Scheduled + info.Retry
@@ -384,16 +384,10 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 			"completed": map[string]any{"data": completedData, "count": completedCount},
 			"failed":    map[string]any{"data": failedData, "count": failedCount},
 		},
-		// asynq にはBull相当のper-queue redis DB statsがないため、frontend
-		// が参照するフィールドを0固定でstubする。
-		"db": map[string]any{
-			"processId": 0,
-			"port":      0,
-			"runId":     "",
-			"clients":   map[string]any{"connected": 0, "blocked": 0},
-			"memory":    map[string]any{"peak": 0, "total": 0, "used": 0},
-			"uptime":    0,
-		},
+		// db は job-queue Redis の INFO 由来 (memory / clients / uptime 等)。
+		// caller が queueDBStats() で一度引いて全 queue に渡す (INFO は接続単位
+		// で全 queue 同値)。provider 未配線時は defaultQueueDB() の 0 埋め。
+		"db": db,
 	}
 }
 
@@ -442,13 +436,14 @@ func (h *Handler) QueueQueueStats(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.JSON(http.StatusOK, map[string]any{})
 	}
+	db := h.queueDBStats(c.Request().Context())
 	info, err := h.queueInspector.GetQueueInfo(req.Queue)
 	if err != nil || info == nil {
 		completed, failed := h.fetchQueueMetrics(req.Queue)
-		return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed))
+		return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed, db))
 	}
 	completed, failed := h.fetchQueueMetrics(req.Queue)
-	return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed))
+	return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed, db))
 }
 
 // fetchQueueMetrics queries the inspector for completed / failed
@@ -474,6 +469,8 @@ func (h *Handler) QueueQueues(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	// db (Redis INFO) は全 queue で同値なので一度だけ引いて使い回す。
+	db := h.queueDBStats(c.Request().Context())
 	result := make([]map[string]any, 0, len(queues))
 	for _, q := range queues {
 		info, err := h.queueInspector.GetQueueInfo(q)
@@ -481,7 +478,7 @@ func (h *Handler) QueueQueues(c echo.Context) error {
 			continue
 		}
 		completed, failed := h.fetchQueueMetrics(q)
-		result = append(result, shapeQueueForFrontend(info, completed, failed))
+		result = append(result, shapeQueueForFrontend(info, completed, failed, db))
 	}
 	return c.JSON(http.StatusOK, result)
 }

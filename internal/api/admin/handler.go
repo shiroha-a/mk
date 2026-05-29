@@ -91,6 +91,7 @@ type Handler struct {
 	adminDB                 *gorm.DB
 	userIPRepo              repository.UserIPRepository
 	queueInspector          QueueInspector
+	queueRedis              QueueRedisInfoProvider
 	emojiEnqueuer           EmojiImportEnqueuer
 	emojiImageFetcher       EmojiImageFetcher
 	relayService            RelayService
