@@ -343,19 +343,14 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 // shapeQueueForFrontend adapts a QueueInfoResult to the Misskey Bull-shaped
 // JSON expected by the admin/job-queue.vue page.
 //
-// BullMQ (Misskey本家のjob queue) と asynq は設計思想が根本的に異なり、
-// 完全互換は不可能：
-//   - asynq に存在しない queue 名 (inbox / db / relationship / system 等):
-//     frontend は Misskey.queueTypes で hardcode しており mk-go の queue 名
-//     (deliver / push / webhook / export / maintenance) と一致しない。
-//   - db.{memory,uptime,clients} は BullMQ が per-queue で持つ Redis 統計。
-//     asynq には相当機能が無い。
-//   - metrics.{completed,failed}.data は BullMQ の per-queue time-series。
-//     asynq は retention 設定なしでは履歴を持たない。
+// counts / db は mkq driver から取得した実値で埋まる (db は job-queue Redis の
+// INFO 由来。queueDBStats 参照)。metrics.{completed,failed}.data は mkq の
+// per-queue time-series で、job-metrics retention が有効な queue でのみ履歴を
+// 持つ (無効なら data 空 + cumulative count にフォールバック)。
 //
-// BullMQ と完全互換のまま Go ネイティブ性能を活かすのは別レイヤ (独立
-// OSS ライブラリ化) で取り組む方針 (#377 参照)。それまでの中継措置として
-// 見た目が壊れないよう未対応 field を 0 固定で stub する。
+// 残る非互換: frontend は Misskey の queue 名 (system / endedPollNotification /
+// postScheduledNote 等) を列挙しうるが、mk-go が実行しない queue は GetQueueInfo
+// が空を返すため 0 表示になる (#1393 で別途整理予定)。
 func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetricsResult, db map[string]any) map[string]any {
 	// delayed は Misskey 用語で scheduled + retry の合計に相当する
 	// (どちらも「すぐには実行されない」状態)。
