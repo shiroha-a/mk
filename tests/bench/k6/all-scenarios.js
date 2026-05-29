@@ -77,6 +77,14 @@ export const options = {
       tags: { endpoint: "notes-create" },
       startTime: `${SCENARIO_DURATION * 5}s`,
     },
+    homeTimeline: {
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: readStages,
+      exec: "homeTimelineScenario",
+      tags: { endpoint: "home-timeline" },
+      startTime: `${SCENARIO_DURATION * 6}s`,
+    },
   },
   thresholds: {
     "http_req_duration{endpoint:ping}": ["p(95)<200"],
@@ -85,6 +93,11 @@ export const options = {
     "http_req_duration{endpoint:users-show}": ["p(95)<500"],
     "http_req_duration{endpoint:i}": ["p(95)<500"],
     "http_req_duration{endpoint:notes-create}": ["p(95)<2000"],
+    // home-timeline は計測専用 (gate しない)。ただし k6 は threshold を持つ tagged
+    // sub-metric のみ summary-export に出すため、percentile を report に残すには
+    // threshold 定義が必須。authed home timeline は TS 側で 1s を超えうるので、
+    // 常に pass する tautology (p95>=0) を置いて「abort せず計測だけする」。
+    "http_req_duration{endpoint:home-timeline}": ["p(95)>=0"],
   },
 };
 
@@ -121,4 +134,11 @@ export function notesCreateScenario() {
   const text = `bench ${Date.now()}-${__VU}-${__ITER}`;
   const res = client.createNote(text, token);
   check(res, { "notes-create 200": (r) => r.status === 200 });
+}
+
+export function homeTimelineScenario() {
+  const token = getToken();
+  if (!token) return;
+  const res = client.homeTimeline(token, 20);
+  check(res, { "home-timeline 200": (r) => r.status === 200 });
 }

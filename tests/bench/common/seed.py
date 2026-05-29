@@ -6,6 +6,7 @@ tokens and note IDs to /seed/seed-data.json for k6 to consume.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
@@ -27,6 +28,23 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/seed")
 # (100 followers/user is already a representative active-instance fan-out); an
 # explicit SEED_FOLLOWERS overrides the cap.
 FOLLOWERS_PER_USER = int(os.environ.get("SEED_FOLLOWERS", str(min(NUM_USERS - 1, 100))))
+# Number of drive files each user uploads (opt-in, default 0). When > 0, a
+# fraction of each user's notes attach 1-2 of their files so timeline packing
+# exercises the drive-file resolution path (resolveFileOwners / files batch),
+# which the text-only default seed never hits. Kept small because each file is
+# a real multipart upload.
+FILES_PER_USER = int(os.environ.get("SEED_FILES_PER_USER", "0"))
+# Number of other users each user mutes (opt-in, default 0). When > 0 the muted
+# set is non-empty so authed timelines (home-timeline scenario) exercise the
+# mute filter / loadMutedUserIDs path.
+MUTES_PER_USER = int(os.environ.get("SEED_MUTES_PER_USER", "0"))
+
+# A minimal valid 1x1 PNG, used for drive uploads when FILES_PER_USER > 0.
+# Embedding the bytes keeps the seeder self-contained (no asset file mount).
+_PNG_1X1_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HBgTAAAAC0lEQVR42mNk+M8AAAMCAQDJ"
+    "Q2ozAAAAAElFTkSuQmCC"
+)
 
 
 def wait_for_health(url: str, timeout: int = 180) -> None:
@@ -110,6 +128,54 @@ def seed_following(http: httpx.Client, tokens: list[str], user_ids: list[str]) -
     return edges
 
 
+def upload_files(http: httpx.Client, token: str, count: int) -> list[str]:
+    """Upload `count` tiny PNGs to the target's drive via multipart, returning
+    the created file IDs. Best-effort: failures are logged and skipped so a
+    drive-disabled instance does not abort the whole seed.
+    """
+    png = base64.b64decode(_PNG_1X1_B64)
+    ids: list[str] = []
+    for k in range(count):
+        try:
+            resp = http.post(
+                "/api/drive/files/create",
+                data={"i": token},
+                files={"file": (f"bench-{k}.png", png, "image/png")},
+            )
+            if resp.status_code >= 400:
+                print(f"WARN: drive upload failed ({resp.status_code}): {resp.text[:200]}", file=sys.stderr)
+                continue
+            fid = resp.json().get("id")
+            if fid:
+                ids.append(fid)
+        except Exception as exc:
+            print(f"WARN: drive upload failed: {exc}", file=sys.stderr)
+    return ids
+
+
+def seed_mutes(http: httpx.Client, tokens: list[str], user_ids: list[str]) -> int:
+    """Each user mutes up to MUTES_PER_USER of the *other* users so authed
+    timelines exercise the mute filter. Deterministic via the shared seed.
+    Returns the number of mute edges created.
+    """
+    if MUTES_PER_USER <= 0:
+        return 0
+    random.seed(13790)
+    edges = 0
+    for i, token in enumerate(tokens):
+        if not token:
+            continue
+        candidates = [user_ids[j] for j in range(len(user_ids)) if j != i and user_ids[j]]
+        targets = random.sample(candidates, min(MUTES_PER_USER, len(candidates)))
+        for target_id in targets:
+            try:
+                api(http, "mute/create", {"userId": target_id}, token)
+                edges += 1
+            except Exception as exc:
+                print(f"WARN: mute {i}->{target_id} failed: {exc}", file=sys.stderr)
+    return edges
+
+
 def main() -> None:
     wait_for_health(TARGET_URL)
 
@@ -158,15 +224,40 @@ def main() -> None:
     print(f"Created {edges} follow edges on {TARGET_NAME} "
           f"(~{FOLLOWERS_PER_USER} followers/user)")
 
-    # ノート投入
+    # mute graph (opt-in)。authed timeline で mute filter を踏ませる。
+    mute_edges = seed_mutes(http, tokens, user_ids)
+    if MUTES_PER_USER > 0:
+        print(f"Created {mute_edges} mute edges on {TARGET_NAME} "
+              f"(~{MUTES_PER_USER} mutes/user)")
+
+    # drive files (opt-in)。各 user 分を先にまとめて上げて token idx で引けるように。
+    user_files: list[list[str]] = [[] for _ in tokens]
+    total_files = 0
+    if FILES_PER_USER > 0:
+        for idx, token in enumerate(tokens):
+            if not token:
+                continue
+            user_files[idx] = upload_files(http, token, FILES_PER_USER)
+            total_files += len(user_files[idx])
+        print(f"Uploaded {total_files} drive files on {TARGET_NAME} "
+              f"(~{FILES_PER_USER}/user)")
+
+    # ノート投入。FILES_PER_USER > 0 のとき一部の note に自分の file を添付して
+    # timeline packing の drive-file 解決経路を踏ませる (決定的: 3 note に 1 回)。
     note_ids: list[str] = []
     for idx, token in enumerate(tokens):
+        files = user_files[idx]
         for j in range(NUM_NOTES_PER_USER):
+            body: dict = {
+                "text": f"Benchmark seed note {idx}-{j} on {TARGET_NAME}",
+                "visibility": "public",
+            }
+            if files and j % 3 == 0:
+                # 1-2 個添付 (file 数に応じて)。決定的に選ぶ。
+                pick = files[: 2] if len(files) >= 2 else files[:1]
+                body["fileIds"] = pick
             try:
-                result = api(http, "notes/create", {
-                    "text": f"Benchmark seed note {idx}-{j} on {TARGET_NAME}",
-                    "visibility": "public",
-                }, token)
+                result = api(http, "notes/create", body, token)
                 nid = result.get("createdNote", {}).get("id")
                 if nid:
                     note_ids.append(nid)
@@ -185,6 +276,8 @@ def main() -> None:
         "usernames": usernames,
         "userIds": user_ids,
         "followEdges": edges,
+        "muteEdges": mute_edges,
+        "fileCount": total_files,
     }
     path = os.path.join(OUTPUT_DIR, "seed-data.json")
     with open(path, "w") as f:

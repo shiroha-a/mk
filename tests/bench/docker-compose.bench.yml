@@ -168,6 +168,10 @@ services:
       TARGET_NAME: mkgo
       SEED_USERS: "10"
       SEED_NOTES: "50"
+      # enrich (opt-in, host env で両 stack 同値): media/mute を入れて packing /
+      # file / mute 経路を計測可能にする。default 0 = 従来の text-only seed。
+      SEED_FILES_PER_USER: "${SEED_FILES_PER_USER:-0}"
+      SEED_MUTES_PER_USER: "${SEED_MUTES_PER_USER:-0}"
       OUTPUT_DIR: /seed
     volumes:
       - seed-mkgo:/seed
@@ -187,6 +191,8 @@ services:
       TARGET_NAME: misskey
       SEED_USERS: "10"
       SEED_NOTES: "50"
+      SEED_FILES_PER_USER: "${SEED_FILES_PER_USER:-0}"
+      SEED_MUTES_PER_USER: "${SEED_MUTES_PER_USER:-0}"
       OUTPUT_DIR: /seed
     volumes:
       - seed-misskey:/seed
@@ -249,7 +255,7 @@ services:
       # k6/all-scenarios.js のシナリオ列と一致させる。
       # script 側で SCENARIO_COUNT は dynamic に算出するので、ここを変えれば
       # 何個でも対応できる (Devin #501 INFO-3)。
-      SCENARIOS: "ping meta local-timeline users-show i notes-create"
+      SCENARIOS: "ping meta local-timeline users-show i notes-create home-timeline"
     volumes:
       - ./common/profile-collector.sh:/profile-collector.sh:ro
       - ./results:/output

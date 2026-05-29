@@ -18,6 +18,7 @@ ENDPOINTS = [
     "users-show",
     "i",
     "notes-create",
+    "home-timeline",
 ]
 
 

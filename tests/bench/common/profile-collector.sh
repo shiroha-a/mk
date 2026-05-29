@@ -21,7 +21,7 @@ HOST=${HOST:-app-mkgo:3000}
 OUT=${OUT:-/output/profiles}
 SCENARIO_DURATION=${SCENARIO_DURATION:-31}
 PROFILE_SECONDS=${PROFILE_SECONDS:-25}
-SCENARIOS=${SCENARIOS:-"ping meta local-timeline users-show i notes-create"}
+SCENARIOS=${SCENARIOS:-"ping meta local-timeline users-show i notes-create home-timeline"}
 
 # シナリオ数を $SCENARIOS から動的に算出する。
 # SCENARIOS を上書きしても sleep / log のロジックがそのまま動くようにする

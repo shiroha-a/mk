@@ -34,6 +34,12 @@ export class MisskeyClient {
     return this.api("notes/local-timeline", { limit: limit || 20 });
   }
 
+  // homeTimeline is authenticated (token required) so it exercises the
+  // viewer-dependent path: mute filter / myReaction / poll-vote resolution.
+  homeTimeline(token, limit) {
+    return this.api("notes/timeline", { limit: limit || 20 }, token);
+  }
+
   createNote(text, token) {
     return this.api(
       "notes/create",
