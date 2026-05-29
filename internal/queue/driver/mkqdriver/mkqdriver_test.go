@@ -3,6 +3,7 @@ package mkqdriver
 import (
 	"context"
 	"errors"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -547,5 +548,33 @@ func TestPoolSizeForWorkers(t *testing.T) {
 			t.Errorf("%s: poolSizeForWorkers(%d, %d) = %d, want %d",
 				tc.name, tc.workerSum, tc.floor, got, tc.want)
 		}
+	}
+}
+
+// Inspector.Queues は mk-go が管理する (Define 済みの) queue 名だけを順序通りに
+// 返し、mkq の共有 Redis registry (drop-in 時に旧 Misskey TS の foreign queue を
+// 含みうる) は参照しない (#1393)。driver に client/rdb を持たせず構築できることが、
+// registry を引かない (= nil client で panic しない) ことの証左でもある。
+func TestInspector_Queues_ReturnsManagedNamesOnly(t *testing.T) {
+	d := &Driver{queueNames: []string{"deliver", "inbox", "export"}}
+	ins := &Inspector{driver: d}
+
+	got, err := ins.Queues()
+	if err != nil {
+		t.Fatalf("Queues: %v", err)
+	}
+	want := []string{"deliver", "inbox", "export"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Queues = %v, want %v", got, want)
+	}
+
+	// 返り値は copy で、mutate しても driver の内部状態に影響しない。
+	got[0] = "mutated"
+	got2, err := ins.Queues()
+	if err != nil {
+		t.Fatalf("Queues (2): %v", err)
+	}
+	if got2[0] != "deliver" {
+		t.Fatalf("driver state mutated via returned slice: got2[0]=%q", got2[0])
 	}
 }

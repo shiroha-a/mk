@@ -23,10 +23,17 @@ type Inspector struct {
 	driver *Driver
 }
 
-// Queues returns the set of queues mkq has Define'd against the
-// underlying client.
+// Queues returns the queues mk-go manages (Define'd at driver construction),
+// in configured order. We intentionally do NOT return mkq's shared Redis queue
+// registry (SMEMBERS {prefix}:queues): on a drop-in over an existing Misskey TS
+// instance that registry also carries the upstream BullMQ queue names
+// (system / endedPollNotification / postScheduledNote / db / relationship 等)
+// which mk-go never processes, so listing them would only fill the admin
+// dashboard with permanently-zero dead queues (#1393)。
 func (i *Inspector) Queues() ([]string, error) {
-	return i.driver.client.Queues(inspectorCtx())
+	out := make([]string, len(i.driver.queueNames))
+	copy(out, i.driver.queueNames)
+	return out, nil
 }
 
 // GetQueueInfo returns the wait / active / delayed / completed /

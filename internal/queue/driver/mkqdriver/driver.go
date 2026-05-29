@@ -91,6 +91,11 @@ type Driver struct {
 	client *mkq.Client
 	cfg    Config
 	queues map[string]*mkq.Queue[framedPayload]
+	// queueNames holds the Define'd queue names in configured order. Used by
+	// Inspector.Queues() so the admin dashboard lists exactly the queues
+	// mk-go manages (drop-in 時に旧 Misskey TS が共有 registry に残した foreign
+	// queue 名を含めない、#1393)。
+	queueNames []string
 
 	// rdb is a side-channel redis client used by the Inspector for
 	// ad-hoc reads that mkq's public API does not expose (currently
@@ -157,11 +162,12 @@ func New(ctx context.Context, cfg Config) (*Driver, error) {
 	}
 
 	return &Driver{
-		client:    client,
-		cfg:       cfg,
-		queues:    queues,
-		rdb:       rdb,
-		keyPrefix: keyPrefix,
+		client:     client,
+		cfg:        cfg,
+		queues:     queues,
+		queueNames: names,
+		rdb:        rdb,
+		keyPrefix:  keyPrefix,
 	}, nil
 }
 
