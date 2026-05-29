@@ -369,3 +369,135 @@ func TestTimeline_HappyPathHybrid(t *testing.T) {
 	require.NoError(t, h.HybridTimeline(c))
 	require.Equal(t, http.StatusOK, rec.Code)
 }
+
+// timeline JSON cache (enableTimelineCache) の handler-level 統合テスト。
+// cache primitive の unit test (timeline_cache_test.go) とは別に、serveTimeline
+// への組み込み (first-page gate / key 構築 / cursor bypass / per-viewer 分離 /
+// c.JSON との byte 一致) を検証する。
+
+// first-page は cache され、TTL 内の 2nd request は 1st と byte 一致で stale を
+// 返す (= cache hit が効いている証拠)。
+func TestTimeline_Cache_ServesStaleWithinTTL(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	note1 := seedTimelineNote(noteRepo)
+	tl, fanout := newRealTimelineService(t, noteRepo)
+	ctx := context.Background()
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note1, 100))
+
+	h := newTimelineHandler(t, noteRepo, tl)
+	h.EnableTimelineJSONCache(3 * time.Second)
+
+	c1, rec1 := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c1))
+	require.Equal(t, http.StatusOK, rec1.Code)
+	body1 := rec1.Body.String()
+	var resp1 []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(body1), &resp1))
+	require.Len(t, resp1, 1)
+
+	// データを変える。cache が効いていれば 2nd には反映されない。
+	note2 := seedTimelineNote(noteRepo)
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note2, 100))
+
+	c2, rec2 := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c2))
+	require.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, body1, rec2.Body.String(), "cache hit は 1st と byte 一致 (stale)")
+	var resp2 []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Len(t, resp2, 1, "cache hit なので note2 は反映されない")
+}
+
+// cursor (untilId) 付き request は cache を bypass し fresh データを返す。
+func TestTimeline_Cache_CursorBypasses(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	note1 := seedTimelineNote(noteRepo)
+	tl, fanout := newRealTimelineService(t, noteRepo)
+	ctx := context.Background()
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note1, 100))
+
+	h := newTimelineHandler(t, noteRepo, tl)
+	h.EnableTimelineJSONCache(3 * time.Second)
+
+	// first-page を 1 回引いて cache を温める。
+	c0, rec0 := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, h.LocalTimeline(c0))
+	require.Equal(t, http.StatusOK, rec0.Code)
+
+	note2 := seedTimelineNote(noteRepo)
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note2, 100))
+
+	// untilId 付き → cache を bypass して fresh (note1 + note2)。
+	c1, rec1 := newJSONRequest(t, "/api/notes/local-timeline", `{"untilId":"zzzzzzzzzzzzzzzz"}`)
+	require.NoError(t, h.LocalTimeline(c1))
+	require.Equal(t, http.StatusOK, rec1.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2, "cursor 付きは cache を bypass し fresh データ (2 件) を返す")
+}
+
+// per-viewer key: viewer A の cache が viewer B へ漏れない。local-timeline は
+// fanout list を共有するが cache key は viewerID で分かれる。A が cache を温めた
+// 後にデータを増やすと、別 viewer B は fresh (= A の stale cache を受けない)、
+// 一方 A 自身は stale cache を引く、という非対称で isolation を示す。
+func TestTimeline_Cache_PerViewerIsolation(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	note1 := seedTimelineNote(noteRepo)
+	tl, fanout := newRealTimelineService(t, noteRepo)
+	ctx := context.Background()
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note1, 100))
+
+	h := newTimelineHandler(t, noteRepo, tl)
+	h.EnableTimelineJSONCache(3 * time.Second)
+
+	// viewer A が cache を温める (note1 のみ)。
+	cA, recA := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	setAuthUser(cA, &model.User{ID: "A"})
+	require.NoError(t, h.LocalTimeline(cA))
+	require.Equal(t, http.StatusOK, recA.Code)
+	var rA []map[string]any
+	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &rA))
+	require.Len(t, rA, 1)
+
+	// データを増やす。
+	note2 := seedTimelineNote(noteRepo)
+	require.NoError(t, fanout.Push(ctx, coretimeline.LocalTimeline, note2, 100))
+
+	// viewer B は別 key なので miss → fresh (2 件)。A の 1 件 cache を受けない。
+	cB, recB := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	setAuthUser(cB, &model.User{ID: "B"})
+	require.NoError(t, h.LocalTimeline(cB))
+	require.Equal(t, http.StatusOK, recB.Code)
+	var rB []map[string]any
+	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &rB))
+	assert.Len(t, rB, 2, "別 viewer B は fresh (2 件) を受け取る (A の stale cache を受けない)")
+
+	// viewer A は自分の key で hit → stale (1 件) のまま。
+	cA2, recA2 := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	setAuthUser(cA2, &model.User{ID: "A"})
+	require.NoError(t, h.LocalTimeline(cA2))
+	var rA2 []map[string]any
+	require.NoError(t, json.Unmarshal(recA2.Body.Bytes(), &rA2))
+	assert.Len(t, rA2, 1, "viewer A は自分の cache で stale (1 件)")
+}
+
+// cache miss 経路 (marshal + 改行) の応答が cache 無効時の c.JSON 経路と byte 一致
+// すること (= 改行整合の回帰 guard)。
+func TestTimeline_Cache_ByteIdenticalToNonCached(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	note1 := seedTimelineNote(noteRepo)
+	tl, fanout := newRealTimelineService(t, noteRepo)
+	require.NoError(t, fanout.Push(context.Background(), coretimeline.LocalTimeline, note1, 100))
+
+	hNo := newTimelineHandler(t, noteRepo, tl)
+	cNo, recNo := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, hNo.LocalTimeline(cNo))
+
+	hYes := newTimelineHandler(t, noteRepo, tl)
+	hYes.EnableTimelineJSONCache(3 * time.Second)
+	cYes, recYes := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
+	require.NoError(t, hYes.LocalTimeline(cYes))
+
+	assert.Equal(t, recNo.Body.String(), recYes.Body.String(),
+		"cache miss 経路 (marshal+改行) は c.JSON 経路と byte 一致")
+}

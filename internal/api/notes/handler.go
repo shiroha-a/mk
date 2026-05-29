@@ -63,13 +63,14 @@ type Handler struct {
 	// の draft を delayed queue に enqueue するための narrow interface (#1040)。
 	// nil 時は enqueue を skip する (= test fixture / queue 未配線パス互換)。
 	scheduledNoteEnqueuer ScheduledNoteEnqueuer
-	// timelineCache は experiment (MK_TIMELINE_JSON_CACHE) 有効時のみ non-nil。
-	// first-page timeline 応答を per-viewer で短期キャッシュする。
+	// timelineCache は config flag enableTimelineCache (MK_ENABLETIMELINECACHE)
+	// 有効時のみ non-nil。first-page timeline 応答を per-viewer で短期キャッシュする。
 	timelineCache *timelineJSONCache
 }
 
 // EnableTimelineJSONCache turns on the first-page timeline response cache with
-// the given TTL. 実験フラグ MK_TIMELINE_JSON_CACHE 経由で server 配線から呼ぶ。
+// the given TTL. config flag enableTimelineCache (MK_ENABLETIMELINECACHE) 経由で
+// server 配線から呼ぶ。
 func (h *Handler) EnableTimelineJSONCache(ttl time.Duration) {
 	h.timelineCache = newTimelineJSONCache(ttl)
 }

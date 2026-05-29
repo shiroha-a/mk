@@ -8,13 +8,13 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// timeline JSON cache (experiment, flag-gated via MK_TIMELINE_JSON_CACHE).
+// timeline JSON cache (flag-gated via enableTimelineCache / MK_ENABLETIMELINECACHE).
 //
 // timeline read hot path の driver 層最適化 (Joins / raw scan / pgx native) は
-// 全滅した (memory perf-findmanybyids-gorm)。本 cache は driver ではなく上位で、
-// first-page (cursor 無し) の最終 JSON レスポンスを per-viewer + per-param で短期
-// (TTL 3s) キャッシュし、hit 時に DB hydration + entity packing + JSON encode を
-// 丸ごとスキップする。
+// 全滅した。本 cache は driver ではなく上位で、first-page (cursor 無し) の最終
+// JSON レスポンスを per-viewer + per-param で短 TTL (default 3s、config 可変)
+// キャッシュし、hit 時に DB hydration + entity packing + JSON encode を丸ごと
+// スキップする。
 //
 // 設計上の割り切り:
 //   - first-page のみ (cursor 付き無限スクロールは hit 率低く対象外、メモリ有界化)。
