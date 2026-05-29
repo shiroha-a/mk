@@ -60,6 +60,8 @@ services:
       MK_DISABLEENDPOINTRATELIMITS: "true"
       # bench で profile-collector が /debug/pprof/* に到達できるようにする (#500 / #413 #7)
       MK_ENABLEPPROF: "true"
+      # first-page timeline 応答の per-viewer JSON cache (host env で A/B トグル)。
+      MK_ENABLETIMELINECACHE: "${MK_ENABLETIMELINECACHE:-false}"
     depends_on:
       postgres-mkgo: { condition: service_healthy }
       redis-mkgo: { condition: service_healthy }

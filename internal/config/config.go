@@ -247,6 +247,16 @@ type Source struct {
 	// For local profiling only; must not be enabled in production.
 	EnablePprof bool `mapstructure:"enablePprof"`
 
+	// EnableTimelineCache caches first-page timeline responses per-viewer for
+	// a short TTL, skipping DB hydration + packing + encode on hit. Opt-in
+	// (default false) because it introduces up to TimelineCacheTTLSeconds of
+	// staleness (a freshly posted note may not appear in the REST response
+	// for a few seconds; the WebSocket stream prepends it in the meantime).
+	EnableTimelineCache bool `mapstructure:"enableTimelineCache"`
+	// TimelineCacheTTLSeconds is the TTL for EnableTimelineCache. Defaults to
+	// 3 when unset (<= 0).
+	TimelineCacheTTLSeconds int `mapstructure:"timelineCacheTtlSeconds"`
+
 	// EnableMetrics registers a Prometheus /metrics endpoint exposing the
 	// job-queue metrics defined in internal/queue/metrics (worker count /
 	// queue depth / scale events). Defaults to false. Operators that
@@ -371,6 +381,13 @@ type Config struct {
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	EnablePprof bool
 
+	// EnableTimelineCache caches first-page timeline responses per-viewer for
+	// TimelineCacheTTLSeconds. Opt-in; see the source struct doc for the
+	// staleness trade-off.
+	EnableTimelineCache bool
+	// TimelineCacheTTLSeconds is the TTL for EnableTimelineCache (default 3).
+	TimelineCacheTTLSeconds int
+
 	// EnableMetrics registers the Prometheus /metrics endpoint. See
 	// internal/queue/metrics for the exposed metric catalog.
 	EnableMetrics bool
@@ -451,6 +468,8 @@ func bindEnvKeys(v *viper.Viper) {
 		"logging.sql.disableQueryTruncation",
 		"logging.sql.enableQueryParamLogging",
 		"enablePprof",
+		"enableTimelineCache",
+		"timelineCacheTtlSeconds",
 		"enableMetrics",
 		"sentryForBackend.options.dsn",
 		"sentryForBackend.options.environment",
@@ -605,9 +624,11 @@ func resolve(src *Source) (*Config, error) {
 
 		TrustProxy: resolveTrustProxy(src.TrustProxy),
 
-		TestMode:      src.TestMode,
-		EnablePprof:   src.EnablePprof,
-		EnableMetrics: src.EnableMetrics,
+		TestMode:                src.TestMode,
+		EnablePprof:             src.EnablePprof,
+		EnableTimelineCache:     src.EnableTimelineCache,
+		TimelineCacheTTLSeconds: src.TimelineCacheTTLSeconds,
+		EnableMetrics:           src.EnableMetrics,
 
 		SentryForBackend:  src.SentryForBackend,
 		SentryForFrontend: src.SentryForFrontend,

@@ -1,8 +1,10 @@
 package notes
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -78,7 +80,7 @@ func (h *Handler) timelineAvailable(c echo.Context, policyKey string) bool {
 
 // Timeline handles POST /api/notes/timeline (home timeline).
 func (h *Handler) Timeline(c echo.Context) error {
-	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
+	return h.serveTimeline(c, "home", func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:             req.WithFiles,
 			WithRenotes:           req.WithRenotes,
@@ -100,7 +102,7 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 	if !h.timelineAvailable(c, policyKeyLtlAvailable) {
 		return apierr.JSONLtlDisabled(c)
 	}
-	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
+	return h.serveTimeline(c, "local", func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:          req.WithFiles,
 			WithRenotes:        req.WithRenotes,
@@ -120,7 +122,7 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 	if !h.timelineAvailable(c, policyKeyGtlAvailable) {
 		return apierr.JSONGtlDisabled(c)
 	}
-	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
+	return h.serveTimeline(c, "global", func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:          req.WithFiles,
 			WithRenotes:        req.WithRenotes,
@@ -141,7 +143,7 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 	if !h.timelineAvailable(c, policyKeyLtlAvailable) {
 		return apierr.JSONLtlDisabled(c)
 	}
-	return h.serveTimeline(c, func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
+	return h.serveTimeline(c, "hybrid", func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
 			WithFiles:             req.WithFiles,
 			WithRenotes:           req.WithRenotes,
@@ -218,6 +220,7 @@ func (h *Handler) loadRenoteMutedUserIDs(viewer *model.User) []string {
 // timeline endpoints. requireAuthがtrueのときviewer==nilで401相当を返す。
 func (h *Handler) serveTimeline(
 	c echo.Context,
+	kind string,
 	fn func(*model.User, TimelineRequest) ([]*model.Note, error),
 	requireAuth bool,
 ) error {
@@ -245,11 +248,37 @@ func (h *Handler) serveTimeline(
 		return c.JSON(http.StatusOK, []any{})
 	}
 
+	// experiment: first-page (cursor 無し) のみ JSON cache を引く。hit 時は DB +
+	// pack + encode を丸ごとスキップ。cache 無効時 / cursor 付きは cacheKey="" で
+	// 従来通り c.JSON 経路を通る (= default 挙動は byte 一致のまま)。
+	var cacheKey string
+	if h.timelineCache != nil && req.SinceID == "" && req.UntilID == "" {
+		vid := "anon"
+		if viewer != nil {
+			vid = viewer.ID
+		}
+		cacheKey = timelineCacheKey(kind, vid, req)
+		if body, ok := h.timelineCache.get(cacheKey, time.Now()); ok {
+			return c.JSONBlob(http.StatusOK, body)
+		}
+	}
+
 	notes, err := fn(viewer, req)
 	if err != nil {
 		// requireAuthでviewer nilチェックは事前に行っているので、Service層からの
 		// ErrUnauthenticatedはここには到達しない。残りはRedis等の障害のみ。
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
+	packed := h.packMany(c.Request().Context(), notes, viewer)
+	if cacheKey != "" {
+		if body, mErr := json.Marshal(packed); mErr == nil {
+			// echo の c.JSON は json.Encoder 経由で末尾に改行を付ける。cache 経路も
+			// 同じ byte 列にして default (c.JSON) 経路と応答を一致させる。
+			body = append(body, '\n')
+			h.timelineCache.set(cacheKey, body, time.Now())
+			return c.JSONBlob(http.StatusOK, body)
+		}
+		// marshal 失敗時は通常の c.JSON 経路へ fallthrough。
+	}
+	return c.JSON(http.StatusOK, packed)
 }

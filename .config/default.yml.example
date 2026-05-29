@@ -364,6 +364,14 @@ proxyBypassHosts:
 # profiling. **DO NOT enable in production**.
 #enablePprof: false
 
+# Cache first-page timeline responses per-viewer for a short TTL, skipping
+# DB + packing + encode on hit. Opt-in: introduces up to
+# timelineCacheTtlSeconds of staleness (a freshly posted note may not appear
+# in the REST response for a few seconds; the WebSocket stream prepends it in
+# the meantime). Most effective for frequently-polled first pages.
+#enableTimelineCache: false
+#timelineCacheTtlSeconds: 3
+
 # Expose the Prometheus /metrics endpoint with job-queue metrics.
 # Unauthenticated; restrict access via nginx / LB ACL if exposed outside
 # the cluster. See docs/design/auto-scale-job-workers.md §6.1.

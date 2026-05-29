@@ -826,6 +826,26 @@ func TestLoad_EnablePprof_DefaultFalse(t *testing.T) {
 	assert.False(t, cfg.EnablePprof)
 }
 
+func TestLoad_EnableTimelineCache(t *testing.T) {
+	yaml := testYAML + `
+enableTimelineCache: true
+timelineCacheTtlSeconds: 5
+`
+	path := writeTestConfig(t, yaml)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.EnableTimelineCache)
+	assert.Equal(t, 5, cfg.TimelineCacheTTLSeconds)
+}
+
+func TestLoad_EnableTimelineCache_DefaultFalse(t *testing.T) {
+	path := writeTestConfig(t, testYAML)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, cfg.EnableTimelineCache)
+	assert.Equal(t, 0, cfg.TimelineCacheTTLSeconds)
+}
+
 func TestLoad_EnableMetrics(t *testing.T) {
 	yaml := testYAML + `
 enableMetrics: true

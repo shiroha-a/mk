@@ -1093,6 +1093,17 @@ func (s *Server) setupRoutes() {
 
 	// Notes endpoints
 	notesHandler := notes.NewHandler(noteRepo, noteCreateService, noteDeleteService, noteQueryService, timelineService, reactionService, pollService, searchService, idGen)
+	// first-page timeline 応答を per-viewer 短期キャッシュ (hit 時に DB + pack +
+	// encode を skip)。opt-in (enableTimelineCache / MK_ENABLETIMELINECACHE)。
+	// staleness trade-off があるため default off。
+	if s.config.EnableTimelineCache {
+		ttl := time.Duration(s.config.TimelineCacheTTLSeconds) * time.Second
+		if ttl <= 0 {
+			ttl = 3 * time.Second
+		}
+		notesHandler.EnableTimelineJSONCache(ttl)
+		slog.Info("timeline JSON cache enabled", "ttlSeconds", int(ttl.Seconds()))
+	}
 	notesHandler.SetDriveFileRepo(driveFileRepo)
 	notesHandler.SetNoteReactionRepo(reactionRepo)
 	notesHandler.SetChannelRepo(channelRepo)
