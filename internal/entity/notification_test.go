@@ -119,6 +119,38 @@ func TestPackNotification_ExtraFields_Merged(t *testing.T) {
 	assert.Equal(t, "df_1", out["fileId"])
 }
 
+// #1249 以前に永続化された exportCompleted 通知は exportedEntity に mk-go 内部値
+// (plural / kebab) を持つ。misskey_dart の enum decode を落とさないよう read 時に
+// singular / camelCase へ正規化する (#1391)。
+func TestPackNotification_NormalizesExportedEntity(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	cases := map[string]string{
+		"notes":         "note",
+		"favorites":     "favorite",
+		"user-lists":    "userList",
+		"antennas":      "antenna",
+		"clips":         "clip",
+		"mute":          "muting",
+		"custom-emojis": "customEmoji",
+		// already-canonical / unknown はそのまま。
+		"note":      "note",
+		"following": "following",
+		"blocking":  "blocking",
+		"weird":     "weird",
+	}
+	for stored, want := range cases {
+		n := &notification.Notification{
+			ID:        "x",
+			CreatedAt: time.Now(),
+			Type:      notification.TypeExportCompleted,
+			Extra:     map[string]any{"exportedEntity": stored, "fileId": "df_1"},
+		}
+		out := PackNotification(n, nil, nil, idGen, nil, nil)
+		assert.Equal(t, want, out["exportedEntity"], "stored=%q", stored)
+		assert.Equal(t, "df_1", out["fileId"], "stored=%q: other extra fields preserved", stored)
+	}
+}
+
 func ptrStr(s string) *string { return &s }
 
 // PackNotifications は N 件の通知を pack しても InstanceLookup を 1 回 /

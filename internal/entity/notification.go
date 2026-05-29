@@ -155,7 +155,42 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		if _, collides := out[k]; collides {
 			continue
 		}
+		// exportCompleted 通知の exportedEntity は misskey_dart / Misskey TS が
+		// singular / camelCase の enum で受ける。作成時に core/transfer 側で正規化
+		// 済み (#1249) だが、それ以前に永続化された通知は内部値 ("notes" 等) を
+		// 保持しており、misskey_dart の enum decode を全件巻き込んで落とす (#1391)。
+		// read 時にも正規化して既存データでクライアントが crash しないようにする。
+		if k == "exportedEntity" {
+			if s, ok := v.(string); ok {
+				out[k] = normalizeExportedEntity(s)
+				continue
+			}
+		}
 		out[k] = v
 	}
 	return out
+}
+
+// exportedEntityAliases maps mk-go 内部の export type 名 (plural / kebab-case) を
+// exportCompleted 通知の exportedEntity が取るべき Misskey enum 値 (singular /
+// camelCase) へ変換する。core/transfer.misskeyExportedEntity (create 時) と同じ
+// 対応で、read 時の defense-in-depth として持つ。
+var exportedEntityAliases = map[string]string{
+	"notes":         "note",
+	"favorites":     "favorite",
+	"user-lists":    "userList",
+	"antennas":      "antenna",
+	"clips":         "clip",
+	"mute":          "muting",
+	"custom-emojis": "customEmoji",
+}
+
+// normalizeExportedEntity returns the Misskey enum value for an exportedEntity,
+// translating mk-go internal aliases. Already-canonical / unknown values pass
+// through unchanged (= following / blocking は元から一致、未知値は壊さない)。
+func normalizeExportedEntity(v string) string {
+	if canon, ok := exportedEntityAliases[v]; ok {
+		return canon
+	}
+	return v
 }
