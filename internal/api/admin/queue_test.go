@@ -772,6 +772,13 @@ func TestQueueJobs_TimestampsFromJobState(t *testing.T) {
 		pending: map[string][]*apiadmin.QueueTaskSummary{
 			"deliver": {{ID: "p1", Queue: "deliver", Type: "x", State: "pending", EnqueuedAt: created}},
 		},
+		failed: map[string][]*apiadmin.QueueTaskSummary{
+			// 失敗ジョブは CompletedAt 無し。finishedOn は LastFailedAt から出す。
+			"deliver": {{
+				ID: "x1", Queue: "deliver", Type: "x", State: "failed",
+				EnqueuedAt: created, ProcessedAt: processed, LastFailedAt: finished, LastErr: "boom",
+			}},
+		},
 	}
 	h.SetQueueInspector(insp)
 
@@ -796,4 +803,13 @@ func TestQueueJobs_TimestampsFromJobState(t *testing.T) {
 	assert.False(t, hasProcessed, "未処理ジョブは processedOn を省略する")
 	_, hasFinished := got2[0]["finishedOn"]
 	assert.False(t, hasFinished, "未完了ジョブは finishedOn を省略する")
+
+	// failed: CompletedAt 無しでも finishedOn は LastFailedAt から出る。
+	rec3 := doPost(h.QueueJobs, `{"queue":"deliver","state":["failed"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec3.Code)
+	var got3 []map[string]any
+	require.NoError(t, json.Unmarshal(rec3.Body.Bytes(), &got3))
+	require.Len(t, got3, 1)
+	assert.EqualValues(t, processed.UnixMilli(), got3[0]["processedOn"])
+	assert.EqualValues(t, finished.UnixMilli(), got3[0]["finishedOn"])
 }

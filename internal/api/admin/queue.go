@@ -574,8 +574,6 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 	if data == nil {
 		data = map[string]any{}
 	}
-	// asynqはBullと違いEnqueuedAtを保持しない (TaskInfoに該当field無し)。
-	// frontend の MkTl / MkTime は 0 を「たった今」として扱うので害はない。
 	pack := map[string]any{
 		// Bull 互換 field (frontend 必須)
 		"id":   t.ID,
