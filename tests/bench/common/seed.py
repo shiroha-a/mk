@@ -229,6 +229,10 @@ def main() -> None:
     if MUTES_PER_USER > 0:
         print(f"Created {mute_edges} mute edges on {TARGET_NAME} "
               f"(~{MUTES_PER_USER} mutes/user)")
+        if mute_edges == 0:
+            print(f"WARN: SEED_MUTES_PER_USER={MUTES_PER_USER} requested but 0 mute "
+                  f"edges created on {TARGET_NAME} — mute path will not be exercised.",
+                  file=sys.stderr)
 
     # drive files (opt-in)。各 user 分を先にまとめて上げて token idx で引けるように。
     user_files: list[list[str]] = [[] for _ in tokens]
@@ -241,6 +245,20 @@ def main() -> None:
             total_files += len(user_files[idx])
         print(f"Uploaded {total_files} drive files on {TARGET_NAME} "
               f"(~{FILES_PER_USER}/user)")
+        # silent failure を検知可能にする: drive 未設定等で 0 件だと、片 backend
+        # だけ file 無しになり cross-backend 比較が非対称になる。要求したのに 0 /
+        # 期待数未満なら loud に警告して operator が両 stack の fileCount を突き合
+        # わせられるようにする (= 黙って skew した比較を出さない)。
+        expected = FILES_PER_USER * sum(1 for t in tokens if t)
+        if total_files == 0:
+            print(f"WARN: SEED_FILES_PER_USER={FILES_PER_USER} requested but 0 files "
+                  f"uploaded on {TARGET_NAME} (drive disabled?). Cross-backend "
+                  f"comparison will be ASYMMETRIC — compare both stacks' fileCount.",
+                  file=sys.stderr)
+        elif total_files < expected:
+            print(f"WARN: only {total_files}/{expected} files uploaded on "
+                  f"{TARGET_NAME} (some uploads failed) — verify both stacks match.",
+                  file=sys.stderr)
 
     # ノート投入。FILES_PER_USER > 0 のとき一部の note に自分の file を添付して
     # timeline packing の drive-file 解決経路を踏ませる (決定的: 3 note に 1 回)。
