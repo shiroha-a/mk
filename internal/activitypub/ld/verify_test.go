@@ -194,14 +194,18 @@ func TestVerifyRsaSignature2017_BadBase64SignatureValue(t *testing.T) {
 	assert.ErrorIs(t, err, ld.ErrInvalidSignature)
 }
 
-// random RSA key で sign しても mk-go の verify が detect することを確認 (= 鍵
-// 不一致経路の sanity)。byte-for-byte TS 互換 verify は drop-in e2e で検証する。
+// signatureValue が短い不正値 (= RSA signature として復号できないサイズ) でも
+// verify が ErrSignatureMismatch で弾く negative case。
+//
+// 「有効な署名 × 別鍵 → ErrSignatureMismatch」という本来の鍵不一致シナリオは
+// verify_roundtrip_internal_test.go の ValidSignatureWrongKeyRejected で実署名を
+// 構築して検証している (内部テストから createVerifyData を呼べるため)。本 test は
+// 外部 package から到達可能な「短い signatureValue で verify が失敗する」経路を
+// 担保する。
 func TestVerifyRsaSignature2017_WrongKeyRejected(t *testing.T) {
 	p := ld.NewProcessor()
-	// 2 つの異なる鍵を生成し、片方で sign しているテスト用 fixture の verify に
-	// もう片方の公開鍵を渡すと ErrSignatureMismatch になる、という意図。
-	// ただし本 PR では mk-go 側に sign 経路がまだ無いので「empty signature
-	// payload で random pubkey に verify を回す」shape の test に縮退させる。
+	// random pubkey に対し短い不正 signatureValue ("AAAA") を verify に回すと
+	// rsa.VerifyPKCS1v15 が失敗して ErrSignatureMismatch になる。
 	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	pubDER, err := x509.MarshalPKIXPublicKey(&otherKey.PublicKey)

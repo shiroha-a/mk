@@ -102,4 +102,13 @@ func TestPreview_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "Hello", body["title"])
 	assert.Equal(t, "World", body["description"])
+
+	// success 経路でも shape を固定する: og:url 無しなので url は要求 URL を
+	// echo、sensitive は false、player は object (plain HTML なので埋め込み
+	// player URL は無し)。degrade 経路との shape 一貫性を保証する。
+	assert.Equal(t, srv.URL, body["url"])
+	assert.Equal(t, false, body["sensitive"])
+	player, ok := body["player"].(map[string]any)
+	require.True(t, ok, "player は object であること")
+	assert.Nil(t, player["url"], "plain HTML では player.url は null")
 }
