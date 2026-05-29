@@ -384,6 +384,8 @@ type QueueTaskSummary struct {
 	LastErr       string
 	LastFailedAt  time.Time
 	NextProcessAt time.Time
+	EnqueuedAt    time.Time
+	ProcessedAt   time.Time
 	CompletedAt   time.Time
 }
 

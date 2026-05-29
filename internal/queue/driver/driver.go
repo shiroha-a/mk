@@ -75,7 +75,10 @@ type TaskSummary struct {
 	NextProcessAt time.Time
 	EnqueuedAt    time.Time
 	ScheduledAt   time.Time
-	CompletedAt   time.Time
+	// ProcessedAt is when the job was last dispatched to a worker (Bull
+	// job.processedOn). Populated for finished jobs; zero for never-run jobs.
+	ProcessedAt time.Time
+	CompletedAt time.Time
 }
 
 // Inspector exposes admin-level queue introspection used by the

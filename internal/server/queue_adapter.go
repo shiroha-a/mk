@@ -152,6 +152,8 @@ func taskSummaryToAdmin(t *queue.TaskSummary) *apiadmin.QueueTaskSummary {
 		LastErr:       t.LastErr,
 		LastFailedAt:  t.LastFailedAt,
 		NextProcessAt: t.NextProcessAt,
+		EnqueuedAt:    t.EnqueuedAt,
+		ProcessedAt:   t.ProcessedAt,
 		CompletedAt:   t.CompletedAt,
 	}
 }

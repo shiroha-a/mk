@@ -437,13 +437,12 @@ func jobToSummary(queue, state string, job *mkq.Job[framedPayload], st *mkq.JobS
 			s.LastErr = st.FailedReason
 			s.LastFailedAt = st.FinishedOn
 		}
-		// NextProcessAt は本来「次に処理される時刻」(将来) を意味する
-		// asynq.TaskInfo.NextProcessAt のミラー。mkq の JobState は
-		// ProcessedOn (過去: 直近のディスパッチ時刻) しか持たないため
-		// ここに ProcessedOn を入れると意味的に逆。retry までの
-		// 待ち時刻も mkq からは取得できないので zero のまま残す方が
-		// admin UI の混乱が少ない。delayed bucket の予定時刻が必要
-		// になった場合は別途 ZSET score を読みに行く実装を検討。
+		// ProcessedAt = Bull job.processedOn (過去: 直近のディスパッチ時刻)。
+		// admin job 詳細の "Processed at" 表示に使う (#1398)。
+		s.ProcessedAt = st.ProcessedOn
+		// NextProcessAt は本来「次に処理される時刻」(将来) を意味するミラー。
+		// mkq の JobState は未来の retry 予定時刻を持たないので zero のまま残す。
+		// delayed bucket の予定時刻が必要になった場合は別途 ZSET score を読む。
 	}
 	return s
 }

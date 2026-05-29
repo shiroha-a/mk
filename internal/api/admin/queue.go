@@ -578,12 +578,10 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 	// frontend の MkTl / MkTime は 0 を「たった今」として扱うので害はない。
 	pack := map[string]any{
 		// Bull 互換 field (frontend 必須)
-		"id":          t.ID,
-		"name":        t.Type,
-		"timestamp":   formatUnixMillisOrZero(t.NextProcessAt),
-		"processedAt": formatUnixMillisOrZero(t.LastFailedAt),
-		"processedOn": formatUnixMillisOrZero(t.LastFailedAt),
-		"finishedOn":  formatUnixMillisOrZero(t.CompletedAt),
+		"id":   t.ID,
+		"name": t.Type,
+		// timestamp = job 作成時刻 (Bull job.timestamp)。常に present。
+		"timestamp": formatUnixMillisOrZero(t.EnqueuedAt),
 		// golden QueueJob は progress / returnValue を Record (object) 必須、
 		// failedReason を string 必須とする。Bull の job は failure 時のみ理由を
 		// 持つが、schema 上は常に present (無 failure 時は空文字) なので常に出す。
@@ -610,6 +608,20 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		"payload":  string(t.Payload),
 		"retried":  t.Retried,
 		"maxRetry": t.MaxRetry,
+	}
+	// processedOn / finishedOn は golden で optional:true (number)。値があるときだけ
+	// number で出す。未処理 / 未完了は key 省略 → frontend の `job.processedOn !=
+	// null` で "Processed at"/"Finished at" 行が非表示になる (Bull 互換、#1398)。
+	if !t.ProcessedAt.IsZero() {
+		ms := t.ProcessedAt.UnixMilli()
+		pack["processedOn"] = ms
+		pack["processedAt"] = ms
+	}
+	// 完了時刻は成功 (CompletedAt) / 失敗 (LastFailedAt) いずれかの finish 時刻。
+	if finished := t.CompletedAt; !finished.IsZero() {
+		pack["finishedOn"] = finished.UnixMilli()
+	} else if !t.LastFailedAt.IsZero() {
+		pack["finishedOn"] = t.LastFailedAt.UnixMilli()
 	}
 	if t.LastErr != "" {
 		pack["lastErr"] = t.LastErr

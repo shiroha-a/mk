@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -751,4 +752,48 @@ func TestQueueJobs_ListsCompletedAndFailed(t *testing.T) {
 	}
 	assert.True(t, ids["c1"], "completed job present in all-tab")
 	assert.True(t, ids["f1"], "failed job present in all-tab")
+}
+
+// ジョブ詳細の timestamp は job 作成/処理/完了の実時刻から出す (#1398)。
+// 旧実装は timestamp に NextProcessAt、processedOn に LastFailedAt を使い、
+// completed/failed ジョブで 0 (= 1970/1/1) になっていた。
+func TestQueueJobs_TimestampsFromJobState(t *testing.T) {
+	created := time.UnixMilli(1_700_000_000_000)
+	processed := time.UnixMilli(1_700_000_001_000)
+	finished := time.UnixMilli(1_700_000_002_000)
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		completed: map[string][]*apiadmin.QueueTaskSummary{
+			"deliver": {{
+				ID: "c1", Queue: "deliver", Type: "x", State: "completed",
+				EnqueuedAt: created, ProcessedAt: processed, CompletedAt: finished,
+			}},
+		},
+		pending: map[string][]*apiadmin.QueueTaskSummary{
+			"deliver": {{ID: "p1", Queue: "deliver", Type: "x", State: "pending", EnqueuedAt: created}},
+		},
+	}
+	h.SetQueueInspector(insp)
+
+	// completed: 3 つの時刻が実 ms で出る。
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":["completed"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.EqualValues(t, created.UnixMilli(), got[0]["timestamp"])
+	assert.EqualValues(t, processed.UnixMilli(), got[0]["processedOn"])
+	assert.EqualValues(t, finished.UnixMilli(), got[0]["finishedOn"])
+
+	// pending: processedOn / finishedOn は省略され 1970 にならない。timestamp は present。
+	rec2 := doPost(h.QueueJobs, `{"queue":"deliver","state":["wait"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got2 []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got2))
+	require.Len(t, got2, 1)
+	assert.EqualValues(t, created.UnixMilli(), got2[0]["timestamp"])
+	_, hasProcessed := got2[0]["processedOn"]
+	assert.False(t, hasProcessed, "未処理ジョブは processedOn を省略する")
+	_, hasFinished := got2[0]["finishedOn"]
+	assert.False(t, hasFinished, "未完了ジョブは finishedOn を省略する")
 }
