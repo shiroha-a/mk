@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.2
+
+- Feat: グループチャットの連合に対応 (招待の送受信と Accept / Reject、ルームメッセージの送受信、退出の同期)
+- Feat: リモートアカウントの自己削除 (Delete) を処理し、tombstone 化とカスケード削除を行うように
+- Feat: `/api/fetch-external-resources`・`/api/drive/files/upload-from-url`・`/api/notifications/create`・カスタム絵文字の zip エクスポート・`/api/hashtags/users` を実装
+- Feat: `/miauth/:session/check` に対応し、サードパーティクライアントからのログインを可能に
+- Feat: 管理画面のジョブキューダッシュボードを整備 (キューごとのメモリ / 接続数 / 稼働時間、completed / failed ジョブの一覧と作成・処理時刻、mk-go が扱わないキューの非表示、ユーザー詳細のサインイン履歴 / ロール割り当て表示)
+- Feat: Misskey 本家と mk-go の API 互換性マトリクスを自動生成するツールを追加
+- Enhance: API 応答の shape drift を CI で検出するゲートを導入し、各 API のレスポンス形状を Misskey 本家に整合
+- Enhance: エラー ID・HTTP ステータス・ページネーション上限・権限 / secure の扱いを Misskey 本家に合わせて整合
+- Enhance: ハッシュタグの抽出を MFM パーサベースに変更
+- Enhance: タイムライン取得を高速化 (note hydration の batch 化、添付ファイルの folder / owner 解決の batch 化、デフォルトロールポリシーの共有キャッシュ化)
+- Enhance: 1 ページ目のタイムライン応答を viewer ごとに短時間キャッシュするオプションを追加 (既定で無効)
+- Enhance: ジョブキューの挙動を改善 (completed / failed の保持設定、Retry / Scheduled の分離、重複 Like の冪等化、配列でラップされた inbound activity の許容、キューごとの既定並列度の調整)
+- Fix: サードパーティクライアント (Miria など) で、プロフィール・リアクション・リスト等のタブがレスポンス形状の不一致でクラッシュする問題を修正
+- Fix: データエクスポート完了通知の `exportedEntity` が不正な値になり、通知一覧の取得が失敗する問題を修正
+- Fix: 投稿通知を設定したユーザーへの返信がタイムラインから除外される問題を修正
+- Fix: 実績の獲得 (achievementEarned) 通知が発火しない問題を修正
+- Fix: プロフィール更新時にタグが空だと更新全体が失敗する問題を修正
+- Fix: 連合インスタンス一覧の blocked / silenced フィルタと並び順を Misskey 本家に合わせて修正
+- Fix: フォロー / アンフォローがストリームのフォロー関係に即時反映されない問題を修正
+- Fix: `/api/users/reactions` の公開範囲フィルタと、リモートユーザーでのエラーを修正
+- Fix: `/api/users/lists/show` で非公開のリストが他者に露出する問題を修正
+
 ## 互換バージョン: Misskey 2026.5.4 (#1164 で submodule bump、2026.5.1-mk.0 → 2026.5.4-mk.0)
 
 ### Phase 18 — 2026.5.4 upstream 追従 + LD-Signature 初期実装 (#1164 完了)
