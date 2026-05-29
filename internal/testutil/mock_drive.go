@@ -233,6 +233,18 @@ func (m *MockDriveFolderRepository) FindByID(id string) (*model.DriveFolder, err
 	return f, nil
 }
 
+// FindByIDs returns the folders present in the mock for the given ID set
+// (missing IDs are skipped, mirroring an IN query).
+func (m *MockDriveFolderRepository) FindByIDs(ids []string) ([]*model.DriveFolder, error) {
+	out := make([]*model.DriveFolder, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := m.Folders[id]; ok {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
 func (m *MockDriveFolderRepository) Update(id string, fields map[string]any) error {
 	f, ok := m.Folders[id]
 	if !ok {

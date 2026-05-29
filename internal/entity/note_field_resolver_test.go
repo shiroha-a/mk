@@ -192,6 +192,86 @@ func TestNoteFieldResolver_ResolveFiles_EmbedsFolderAndOwner(t *testing.T) {
 	require.Len(t, notes[0].Files, 2)
 }
 
+// batchFolderStub / batchOwnerStub は optional batch interface
+// (FindByIDs / FindManyByIDs) を実装し、呼び出し回数と渡された ID を記録する。
+type batchFolderStub struct {
+	folders map[string]*model.DriveFolder
+	calls   int
+	lastIDs []string
+}
+
+func (s *batchFolderStub) FindByID(id string) (*model.DriveFolder, error) {
+	if f, ok := s.folders[id]; ok {
+		return f, nil
+	}
+	return nil, assertError("not found")
+}
+
+func (s *batchFolderStub) FindByIDs(ids []string) ([]*model.DriveFolder, error) {
+	s.calls++
+	s.lastIDs = ids
+	out := make([]*model.DriveFolder, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := s.folders[id]; ok {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+type batchOwnerStub struct {
+	users map[string]*model.User
+	calls int
+}
+
+func (s *batchOwnerStub) FindByID(id string) (*model.User, error) {
+	if u, ok := s.users[id]; ok {
+		return u, nil
+	}
+	return nil, assertError("not found")
+}
+
+func (s *batchOwnerStub) FindManyByIDs(ids []string) ([]*model.User, error) {
+	s.calls++
+	out := make([]*model.User, 0, len(ids))
+	for _, id := range ids {
+		if u, ok := s.users[id]; ok {
+			out = append(out, u)
+		}
+	}
+	return out, nil
+}
+
+// lookup が batch interface を実装する場合、distinct folder / owner を 1 query
+// ずつで引く (= per-distinct-ID の FindByID を畳む N+1 解消、#1389)。
+func TestNoteFieldResolver_ResolveFiles_BatchesFolderAndOwner(t *testing.T) {
+	fA, fB := "folder-a", "folder-b"
+	uA, uB := "user-a", "user-b"
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", FolderID: &fA, UserID: &uA, Name: "1.png", Type: "image/png", URL: "https://e/1"},
+		"f2": {ID: "f2", FolderID: &fB, UserID: &uB, Name: "2.png", Type: "image/png", URL: "https://e/2"},
+		// f3 は f1 と同じ folder / owner → dedup されて batch ID には重複しない。
+		"f3": {ID: "f3", FolderID: &fA, UserID: &uA, Name: "3.png", Type: "image/png", URL: "https://e/3"},
+	}}
+	folders := &batchFolderStub{folders: map[string]*model.DriveFolder{
+		fA: {ID: fA, Name: "A"}, fB: {ID: fB, Name: "B"},
+	}}
+	owners := &batchOwnerStub{users: map[string]*model.User{
+		uA: {ID: uA, Username: "a"}, uB: {ID: uB, Username: "b"},
+	}}
+	r := NewNoteFieldResolver(files, folders, owners, nil, nil, makeIDGen(t))
+
+	notes := []NoteEntity{{ID: "n1", FileIDs: pq.StringArray{"f1", "f2", "f3"}}}
+	r.ResolveFiles(notes)
+
+	require.Len(t, notes[0].Files, 3)
+	// distinct folder / owner が 2 件あっても batch なら 1 query ずつ。
+	assert.Equal(t, 1, folders.calls, "FindByIDs は 1 回 (per-distinct-ID でない)")
+	assert.Equal(t, 1, owners.calls, "FindManyByIDs は 1 回")
+	// dedup 済み distinct ID が渡る (f1/f3 が共有する fA は 1 度だけ)。
+	assert.ElementsMatch(t, []string{fA, fB}, folders.lastIDs)
+}
+
 // folder / owner lookup が err を返してもパニックせず folder/user nil で
 // pack される。
 func TestNoteFieldResolver_ResolveFiles_LookupErrorsTolerated(t *testing.T) {

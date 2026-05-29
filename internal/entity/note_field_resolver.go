@@ -216,30 +216,87 @@ func (r *NoteFieldResolver) packNoteFiles(fileIDs []string, fileMap map[string]*
 // resolveFileOwners は folder / owner を best-effort で 1 件ずつ引く。
 // attachment 数は実用上少ないため batch クエリは省略 (folder/owner の
 // 専用 batch インターフェースを増やさない trade-off)。
+// batchDriveFolderLookup / batchFileOwnerLookup are optional capabilities. When
+// the wired lookup implements them, resolveFileOwners fetches all distinct
+// folder / owner IDs in a single query each instead of one FindByID per distinct
+// ID. これは media が多い timeline での distinct(folder)+distinct(owner) 個別
+// round-trip を畳む (#1389)。未実装なら従来の per-ID fetch に fall back する。
+type batchDriveFolderLookup interface {
+	FindByIDs(ids []string) ([]*model.DriveFolder, error)
+}
+
+type batchFileOwnerLookup interface {
+	FindManyByIDs(ids []string) ([]*model.User, error)
+}
+
 func (r *NoteFieldResolver) resolveFileOwners(files []*model.DriveFile) (map[string]*model.DriveFolder, map[string]*model.User) {
 	folderCache := map[string]*model.DriveFolder{}
 	userCache := map[string]*model.User{}
+
+	// distinct な folderID / userID を収集する。cache に nil を seed して「収集
+	// 済み」を兼ねる (fill 側で実体に上書き、見つからなければ nil のまま = 従来の
+	// 「FindByID 失敗時 nil」と同じ挙動)。
+	var folderIDs, userIDs []string
 	for _, f := range files {
 		if r.driveFolder != nil && f.FolderID != nil {
 			if _, seen := folderCache[*f.FolderID]; !seen {
-				if folder, err := r.driveFolder.FindByID(*f.FolderID); err == nil {
-					folderCache[*f.FolderID] = folder
-				} else {
-					folderCache[*f.FolderID] = nil
-				}
+				folderCache[*f.FolderID] = nil
+				folderIDs = append(folderIDs, *f.FolderID)
 			}
 		}
 		if r.fileOwner != nil && f.UserID != nil {
 			if _, seen := userCache[*f.UserID]; !seen {
-				if u, err := r.fileOwner.FindByID(*f.UserID); err == nil {
-					userCache[*f.UserID] = u
-				} else {
-					userCache[*f.UserID] = nil
-				}
+				userCache[*f.UserID] = nil
+				userIDs = append(userIDs, *f.UserID)
 			}
 		}
 	}
+
+	r.fillFolderCache(folderIDs, folderCache)
+	r.fillUserCache(userIDs, userCache)
 	return folderCache, userCache
+}
+
+// fillFolderCache populates cache for the given distinct folder IDs, batching
+// via FindByIDs when the lookup supports it, else per-ID FindByID.
+func (r *NoteFieldResolver) fillFolderCache(ids []string, cache map[string]*model.DriveFolder) {
+	if r.driveFolder == nil || len(ids) == 0 {
+		return
+	}
+	if b, ok := r.driveFolder.(batchDriveFolderLookup); ok {
+		if rows, err := b.FindByIDs(ids); err == nil {
+			for _, f := range rows {
+				cache[f.ID] = f
+			}
+		}
+		return
+	}
+	for _, id := range ids {
+		if f, err := r.driveFolder.FindByID(id); err == nil {
+			cache[id] = f
+		}
+	}
+}
+
+// fillUserCache populates cache for the given distinct owner IDs, batching via
+// FindManyByIDs when the lookup supports it, else per-ID FindByID.
+func (r *NoteFieldResolver) fillUserCache(ids []string, cache map[string]*model.User) {
+	if r.fileOwner == nil || len(ids) == 0 {
+		return
+	}
+	if b, ok := r.fileOwner.(batchFileOwnerLookup); ok {
+		if rows, err := b.FindManyByIDs(ids); err == nil {
+			for _, u := range rows {
+				cache[u.ID] = u
+			}
+		}
+		return
+	}
+	for _, id := range ids {
+		if u, err := r.fileOwner.FindByID(id); err == nil {
+			cache[id] = u
+		}
+	}
 }
 
 // appendNoteFileIDs / appendNoteIDs / appendNoteChannelIDs / applyMyReaction /

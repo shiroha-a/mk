@@ -9,6 +9,9 @@ import (
 type DriveFolderRepository interface {
 	Create(f *model.DriveFolder) error
 	FindByID(id string) (*model.DriveFolder, error)
+	// FindByIDs returns folders for the given ID set in a single query.
+	// entity packing が folder embed を batch するために使う (timeline N+1 解消)。
+	FindByIDs(ids []string) ([]*model.DriveFolder, error)
 	Update(id string, fields map[string]any) error
 	Delete(f *model.DriveFolder) error
 	ListByUser(userID string, parentID *string, untilID, sinceID string, limit int) ([]*model.DriveFolder, error)
@@ -39,6 +42,17 @@ func (r *driveFolderRepository) FindByID(id string) (*model.DriveFolder, error) 
 		return nil, err
 	}
 	return &f, nil
+}
+
+func (r *driveFolderRepository) FindByIDs(ids []string) ([]*model.DriveFolder, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var folders []*model.DriveFolder
+	if err := r.db.Where("id IN ?", ids).Find(&folders).Error; err != nil {
+		return nil, err
+	}
+	return folders, nil
 }
 
 func (r *driveFolderRepository) Update(id string, fields map[string]any) error {
