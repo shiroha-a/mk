@@ -866,6 +866,42 @@ func TestDefaultPolicies(t *testing.T) {
 	assert.Equal(t, 5, p["pinLimit"])
 }
 
+// #1377: DefaultPolicies は共有 cache を返すため、DefaultPoliciesClone は
+// 独立した copy でなければならない。clone を mutate しても共有 default が
+// 壊れないことを保証する (壊れると全リクエストの policy が汚染される)。
+func TestDefaultPoliciesClone_Isolation(t *testing.T) {
+	origDrive := role.DefaultPolicies()["driveCapacityMb"]
+
+	clone := role.DefaultPoliciesClone()
+	assert.Equal(t, origDrive, clone["driveCapacityMb"], "clone は同値で始まる")
+
+	clone["driveCapacityMb"] = 999999
+	clone["injected"] = true
+
+	assert.Equal(t, origDrive, role.DefaultPolicies()["driveCapacityMb"],
+		"clone の mutation が共有 default を破壊している")
+	_, leaked := role.DefaultPolicies()["injected"]
+	assert.False(t, leaked, "clone への key 追加が共有 default に漏れている")
+}
+
+// #1377: GetUserPolicies は applyMetaBasePolicies で base を mutate するため
+// clone を使う。meta override が共有 DefaultPolicies cache を汚染しないことを
+// 保証する (= 本最適化の安全性の要)。clone を使わないと本テストは fail する。
+func TestGetUserPolicies_MetaOverrideDoesNotCorruptSharedDefault(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{
+		ID:       "x",
+		Policies: datatypes.JSON([]byte(`{"driveCapacityMb": 5000}`)),
+	}
+	origDrive := role.DefaultPolicies()["driveCapacityMb"] // = 100
+
+	got := svc.GetUserPolicies("") // userID="" → base + meta override のみ
+	assert.Equal(t, 5000, got["driveCapacityMb"], "meta override が反映される")
+
+	assert.Equal(t, origDrive, role.DefaultPolicies()["driveCapacityMb"],
+		"GetUserPolicies の meta override が共有 default を破壊している (#1377)")
+}
+
 func TestIsSilenced_DefaultIsFalse(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	// 誰もロールを持っていない → DefaultPolicies は canPublicNote=true
