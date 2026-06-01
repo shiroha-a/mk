@@ -751,6 +751,7 @@ func NewMockNoteRepository() *MockNoteRepository {
 	return &MockNoteRepository{
 		Notes:          make(map[string]*model.Note),
 		ReactionCounts: make(map[string]map[string]int),
+		Following:      make(map[string][]string),
 	}
 }
 
@@ -993,6 +994,17 @@ func (m *MockNoteRepository) listFiltered(filter func(*model.Note) bool, untilID
 func (m *MockNoteRepository) ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
 		return n.ChannelID != nil && *n.ChannelID == channelID
+	}, untilID, sinceID, limit), nil
+}
+
+// ListByChannelIDVisible mirrors the real repo's visibility push-down for
+// channels/timeline (#1440).
+func (m *MockNoteRepository) ListByChannelIDVisible(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
+	return m.listFiltered(func(n *model.Note) bool {
+		if n.ChannelID == nil || *n.ChannelID != channelID {
+			return false
+		}
+		return m.canViewerSeeNote(viewerID, n)
 	}, untilID, sinceID, limit), nil
 }
 

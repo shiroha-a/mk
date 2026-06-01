@@ -340,6 +340,85 @@ func TestNoteRepository_ListByChannelID(t *testing.T) {
 	assert.Len(t, rows, 3)
 }
 
+// TestNoteRepository_ListByChannelIDVisible は channels/timeline の visibility
+// push-down (#1440 IDOR) を SQL 段階で検証する。public channel に
+// followers / specified visibility の note を混在させ、viewer ごとに見える
+// note が変わること、および ListByChannelID (filter なし) は全件返すことを
+// 確認する。
+func TestNoteRepository_ListByChannelIDVisible(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	chRepo := NewChannelRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_cv_a", "cvauthor")
+	follower := mkUser("u_cv_f", "cvfollower")
+	allowed := mkUser("u_cv_al", "cvallowed")
+
+	uid := author.ID
+	ch := newTestChannel("ch_cv_1", "channel-vis", &uid)
+	require.NoError(t, chRepo.Create(ch))
+	defer cleanupChannel(t, ch.ID)
+
+	cid := ch.ID
+	notes := []*model.Note{
+		{ID: "n_cv_pub", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_cv_fol", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_cv_spec", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	f := &model.Following{ID: "fl_cv_1", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+
+	idsOf := func(rows []*model.Note) []string {
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	// ListByChannelID (filter なし) は全件返す。
+	rows, err := repo.ListByChannelID(ch.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub", "n_cv_spec"}, idsOf(rows))
+
+	// 匿名 viewer: public のみ。followers / specified が漏れない (#1440)。
+	rows, err = repo.ListByChannelIDVisible(ch.ID, "", "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_pub"}, idsOf(rows))
+
+	// 非 follower viewer に followers note は見えない。
+	rows, err = repo.ListByChannelIDVisible(ch.ID, "u_cv_stranger", "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_pub"}, idsOf(rows))
+
+	// follower viewer は public + followers。
+	rows, err = repo.ListByChannelIDVisible(ch.ID, follower.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub"}, idsOf(rows))
+
+	// specified 対象 viewer は public + specified。
+	rows, err = repo.ListByChannelIDVisible(ch.ID, allowed.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_pub", "n_cv_spec"}, idsOf(rows))
+
+	// author 本人は全 visibility を閲覧可。
+	rows, err = repo.ListByChannelIDVisible(ch.ID, author.ID, "", "", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub", "n_cv_spec"}, idsOf(rows))
+}
+
 func TestNoteRepository_FindByURI(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "u_nuri_1", "noteuser_uri")
@@ -667,6 +746,12 @@ func TestNoteRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 
 	_, err = repo.ListByChannelID("a", "", "", 10)
+	assert.Error(t, err)
+
+	_, err = repo.ListByChannelIDVisible("a", "", "", "", 10)
+	assert.Error(t, err)
+
+	_, err = repo.ListByChannelIDVisible("a", "viewer", "", "", 10)
 	assert.Error(t, err)
 
 	_, err = repo.FindManyByIDsWithUser([]string{"a"})

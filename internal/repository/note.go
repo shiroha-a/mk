@@ -72,6 +72,13 @@ type NoteRepository interface {
 	// 判定の N+1 を避ける (#1418 review)。
 	ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error)
 	ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListByChannelIDVisible は ListByChannelID に visibility push-down を加えた版。
+	// channels/timeline は public channel 自体が誰でも閲覧可能だが、そこに投稿
+	// された note 個々の visibility (followers / specified) は viewer 単位で
+	// 絞らないと非フォロワーに followers note が流出する (IDOR, #1440)。
+	// viewerID 空文字は匿名 (public/home のみ)。条件は core/note.CanSeeNote と
+	// 一致 (clip_note.ListByClipVisible と同じ式)。
+	ListByChannelIDVisible(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
 	ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
 	ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
@@ -325,8 +332,32 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 
 // ListByChannelID returns notes posted to the channel.
 func (r *noteRepository) ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+	return r.listByChannelID(channelID, "", false, untilID, sinceID, limit)
+}
+
+// ListByChannelIDVisible is ListByChannelID with the visibility push-down enabled.
+func (r *noteRepository) ListByChannelIDVisible(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
+	return r.listByChannelID(channelID, viewerID, true, untilID, sinceID, limit)
+}
+
+func (r *noteRepository) listByChannelID(channelID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where("\"channelId\" = ?", channelID)
+	if filterVisibility {
+		// core/note.CanSeeNote と同じ可視性条件を LIMIT 前に SQL で絞る。
+		// post-fetch filter だとページが過少充填されるのと followers 判定が
+		// note ごとの N+1 になるため LIMIT 前に push down する (#1440)。
+		if viewerID == "" {
+			q = q.Where(`"visibility" IN ('public','home')`)
+		} else {
+			q = q.Where(
+				`("visibility" IN ('public','home') `+
+					`OR "userId" = ? `+
+					`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+					`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+				viewerID, viewerID, viewerID)
+		}
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
