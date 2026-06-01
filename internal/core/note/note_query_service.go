@@ -66,6 +66,17 @@ func (s *QueryService) ShowForAPI(noteID string) (*model.Note, error) {
 	return n, nil
 }
 
+// RequireVisible は viewer から見て対象 note が可視であることを要求する
+// 公開 wrapper。非存在・非可視のいずれも ErrNoteNotFound に集約して返す
+// ことで「note が存在するが見えない」と「note 自体が無い」を区別させない
+// (= 存在 enumeration 防止)。clips/add-note (#1456) や favorites/create
+// (#1443) 等、ID 既知の viewer が note を別 channel (clip / favorite) に
+// 永続化する mutation 経路で、author が visibility を絞った後も content
+// が漏れ続ける/存在が漏れる security risk を防ぐためのチェック。
+func (s *QueryService) RequireVisible(viewer *model.User, noteID string) (*model.Note, error) {
+	return s.requireVisible(viewer, noteID)
+}
+
 // requireVisible は visibility check 用の軽量ロード。返り値の note は
 // 呼び出し元で pack せず捨てるか top-level フィールドだけを参照する想定 (#425)。
 // Show は handler に返す note を full preload するため別経路。

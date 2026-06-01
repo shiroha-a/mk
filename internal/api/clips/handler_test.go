@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -27,12 +28,30 @@ func newHandler(t *testing.T) (
 	*testutil.MockNoteRepository,
 ) {
 	t.Helper()
+	h, repo, noteRepo, notes, _ := newHandlerWithFollowing(t)
+	return h, repo, noteRepo, notes
+}
+
+// newHandlerWithFollowing は followers/specified visibility テスト用に
+// MockFollowingRepository も返す helper。followers note を seed して
+// follow 関係を Followings に登録できる (#1456 AddNote visibility テスト)。
+func newHandlerWithFollowing(t *testing.T) (
+	*Handler,
+	*testutil.MockClipRepository,
+	*testutil.MockClipNoteRepository,
+	*testutil.MockNoteRepository,
+	*testutil.MockFollowingRepository,
+) {
+	t.Helper()
 	repo := testutil.NewMockClipRepository()
 	noteRepo := testutil.NewMockClipNoteRepository()
 	notes := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	svc := coreclip.NewService(repo, noteRepo, notes, idGen)
-	return NewHandler(svc, idGen), repo, noteRepo, notes
+	h := NewHandler(svc, idGen)
+	h.SetQueryService(corenote.NewQueryService(notes, followingRepo))
+	return h, repo, noteRepo, notes, followingRepo
 }
 
 func newReq(t *testing.T, body string) (echo.Context, *httptest.ResponseRecorder) {
@@ -372,7 +391,7 @@ func TestList_RepoError(t *testing.T) {
 func TestAddNote_Success(t *testing.T) {
 	h, repo, _, notes := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
@@ -388,16 +407,23 @@ func TestAddNote_BadJSON(t *testing.T) {
 }
 
 func TestAddNote_ClipNotFound(t *testing.T) {
-	h, _, _, _ := newHandler(t)
+	h, _, _, notes := newHandler(t)
+	// visibility gate (#1456) を通過させた上で、後続の clip 検索で
+	// NO_SUCH_CLIP に到達することを担保する seed。
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"missing","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 func TestAddNote_AccessDenied(t *testing.T) {
-	h, repo, _, _ := newHandler(t)
+	h, repo, _, notes := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
+	// visibility gate (#1456) を通過させた上で、owner 不一致で ACCESS_DENIED
+	// に到達することを担保する seed。
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
@@ -411,12 +437,13 @@ func TestAddNote_NoteNotFound(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 }
 
 func TestAddNote_AlreadyClipped(t *testing.T) {
 	h, repo, _, notes := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
@@ -438,15 +465,119 @@ func TestAddNote_RepoError(t *testing.T) {
 	repo := testutil.NewMockClipRepository()
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
 	notes := testutil.NewMockNoteRepository()
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	noteRepo := &failingClipNoteCreateRepo{MockClipNoteRepository: testutil.NewMockClipNoteRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := coreclip.NewService(repo, noteRepo, notes, idGen)
 	h := NewHandler(svc, idGen)
+	// AddNote の visibility gate (#1456) を通過させるため queryService を wire。
+	h.SetQueryService(corenote.NewQueryService(notes, nil))
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- AddNote visibility gate (#1456) --------------------------------------
+
+// 非フォロワーが followers visibility note を clip に追加しようとしても
+// 不存在 note と同じ NO_SUCH_NOTE 404 で隠蔽され、永続化されないこと。
+// content leak 自体は #1418 (ListByClipVisible) で塞がれているが、
+// 204 vs 404 の差で存在 enumeration が成立する favorite-class IDOR の
+// 弱変種を、可視性チェックで存在 oracle ごと潰す。
+func TestAddNote_FollowersNote_NonFollower_Hidden(t *testing.T) {
+	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Empty(t, clipNoteRepo.Entries, "visibility 違反 note は永続化されない")
+}
+
+// フォロワーは followers visibility note を自分の clip に追加できる。
+func TestAddNote_FollowersNote_Follower_OK(t *testing.T) {
+	h, repo, clipNoteRepo, notes, followingRepo := newHandlerWithFollowing(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "alice", FolloweeID: "author"}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, clipNoteRepo.Entries, 1)
+}
+
+// 自分の followers visibility note は自分の clip に追加できる
+// (author は visibility に関わらず自分の note を見られる)。
+func TestAddNote_FollowersNote_Author_OK(t *testing.T) {
+	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityFollowers}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, clipNoteRepo.Entries, 1)
+}
+
+// specified visibility で VisibleUserIDs に入っていない viewer は
+// 不存在と同じ 404 で隠蔽され、永続化されない。
+func TestAddNote_SpecifiedNote_NotInList_Hidden(t *testing.T) {
+	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{
+		ID:             "n1",
+		UserID:         "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"other"},
+	}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Empty(t, clipNoteRepo.Entries)
+}
+
+// specified visibility で VisibleUserIDs に入っている viewer は追加可。
+func TestAddNote_SpecifiedNote_InList_OK(t *testing.T) {
+	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{
+		ID:             "n1",
+		UserID:         "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"alice"},
+	}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, clipNoteRepo.Entries, 1)
+}
+
+// queryService が未配線の Handler は fail-closed で 404 NO_SUCH_NOTE を
+// 返し、unchecked note を絶対に永続化しない (router 配線漏れ等の
+// 設定ミスでも visibility filter を bypass させない安全弁)。
+func TestAddNote_NoQueryServiceRejects(t *testing.T) {
+	repo := testutil.NewMockClipRepository()
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	clipNoteRepo := testutil.NewMockClipNoteRepository()
+	notes := testutil.NewMockNoteRepository()
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coreclip.NewService(repo, clipNoteRepo, notes, idGen)
+	h := NewHandler(svc, idGen) // SetQueryService を意図的に呼ばない
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.AddNote(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Empty(t, clipNoteRepo.Entries,
+		"queryService 未配線時に visibility 未検証 note を永続化してはならない")
 }
 
 // --- RemoveNote ------------------------------------------------------------
@@ -454,7 +585,7 @@ func TestAddNote_RepoError(t *testing.T) {
 func TestRemoveNote_Success(t *testing.T) {
 	h, repo, _, notes := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))

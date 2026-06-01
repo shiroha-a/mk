@@ -1682,6 +1682,7 @@ func (s *Server) setupRoutes() {
 	clipsHandler.SetReactionReader(reactionCountWriter)
 	clipsHandler.SetNoteFieldResolver(noteFieldResolver)
 	clipsHandler.SetUserRepo(userRepo)
+	clipsHandler.SetQueryService(noteQueryService) // #1456: AddNote の visibility gate
 	api.POST("/clips/create", clipsHandler.Create, middleware.RequireAuth())
 	api.POST("/clips/show", clipsHandler.Show)
 	api.POST("/clips/update", clipsHandler.Update, middleware.RequireAuth())

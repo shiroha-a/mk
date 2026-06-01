@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -29,6 +30,11 @@ type Handler struct {
 	// userRepo は clips/notes 経由で他人の clip を閲覧する際の hardMutedWords
 	// filter (#787) のために viewer profile を引く。未配線時は filter skip。
 	userRepo repository.UserRepository
+	// queryService は clips/add-note の visibility gate (#1456) で
+	// RequireVisible を呼ぶための note.QueryService。未配線時は fail-closed
+	// で 404 NO_SUCH_NOTE を返し、visibility 未検証の note を絶対に clip に
+	// 永続化しない (#1455 favorites/create と同形)。
+	queryService *corenote.QueryService
 }
 
 // SetUserRepo wires a UserRepository so clips/notes filters out notes that
@@ -77,6 +83,14 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 		return nil
 	}
 	return h.emojiRepo
+}
+
+// SetQueryService wires a note.QueryService used by AddNote to enforce
+// note visibility (#1456). When unwired, AddNote fails closed with 404
+// NO_SUCH_NOTE so that a clip never ends up referencing a note whose
+// visibility the viewer is not entitled to.
+func (h *Handler) SetQueryService(qs *corenote.QueryService) {
+	h.queryService = qs
 }
 
 // NewHandler creates a new clips Handler.
@@ -247,6 +261,17 @@ func (h *Handler) AddNote(c echo.Context) error {
 	var req AddNoteRequest
 	if err := c.Bind(&req); err != nil || req.ClipID == "" || req.NoteID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// Visibility gate (#1456): clip は read 側 #1418 で push-down 済みでも、
+	// 非可視 note を追加できる/不可で 204 vs 404 が分岐すると存在 enumeration
+	// が成立する (favorite-class IDOR の弱変種)。RequireVisible で存在不可と
+	// 同じ NO_SUCH_NOTE 404 に集約して oracle を塞ぐ。queryService 未配線時は
+	// fail-closed で同じ 404 を返し、unchecked note を絶対に永続化しない。
+	if h.queryService == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
+	}
+	if _, err := h.queryService.RequireVisible(user, req.NoteID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 	}
 	if err := h.svc.AddNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {
