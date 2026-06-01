@@ -787,6 +787,15 @@ func (p *Processor) handleAccept(act genericActivity) error {
 func (p *Processor) handleCreate(act genericActivity) error {
 	actor, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
+		if errors.Is(err, ErrHostNotAllowed) {
+			// federation policy で許可されない host の actor からの Create は
+			// retry で解消しないため ack して drop する (#1419 review)。署名検証
+			// 経路では verifyPayload が先に弾くが、署名なし inbound 経路でも
+			// retry ループにならないようここでも吸収する。
+			slog.Info("federation: dropping Create from non-federated host actor",
+				"actor", act.Actor)
+			return nil
+		}
 		return err
 	}
 	// Note の `_misskey_talk` を覗き見て chat か通常 note かを分岐する。
@@ -820,6 +829,15 @@ func (p *Processor) handleCreate(act genericActivity) error {
 		// sentinel error の errors.Is で同等の non-retry 化を行う。
 		slog.Info("federation: dropping inbound note exceeding mentionLimit",
 			"actor", act.Actor, "limit", corenote.DefaultMentionLimit)
+		return nil
+	}
+	if errors.Is(err, ErrHostNotAllowed) {
+		// federation policy (none / specified / blockedHosts) で許可されない
+		// host の Create(Note) は retry で解消しないため ack して drop する
+		// (#1419 review)。handleAnnounce 等は isPermanentSkipError で吸収する
+		// が、handleCreate は他の error を retry に乗せる方針なので明示分岐。
+		slog.Info("federation: dropping inbound Create(Note) from non-federated host",
+			"actor", act.Actor)
 		return nil
 	}
 	if err != nil {

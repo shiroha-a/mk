@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -22,6 +23,7 @@ type Handler struct {
 	idGen         id.Generator
 	userRepo      repository.UserRepository
 	noteRepo      repository.NoteRepository
+	queryService  *corenote.QueryService
 	followReqRepo repository.FollowRequestRepository
 	instanceRepo  repository.InstanceRepository
 	emojiRepo     repository.EmojiRepository
@@ -67,6 +69,15 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 		return nil
 	}
 	return h.emojiRepo
+}
+
+// SetQueryService attaches a note QueryService used to gate embedded notes by
+// viewer visibility. #1444 で「i/notifications の note embed が CanSeeNote
+// check 無しで followers / specified note を漏らす」IDOR を塞ぐ。未配線の
+// 場合は fail-closed として note embed 自体を丸ごと skip する (production の
+// router.go は必ず wire する)。
+func (h *Handler) SetQueryService(qs *corenote.QueryService) {
+	h.queryService = qs
 }
 
 // SetFollowRequestRepo attaches a FollowRequestRepository. 受信済み
@@ -182,14 +193,24 @@ func (h *Handler) Show(c echo.Context) error {
 			}
 		}
 	}
+	// noteByID 構築には CanSeeNote ゲートを挟む。followers / specified note は
+	// 通知 recipient が author の follower でない / visibleUserIds に含まれない
+	// 場合に embed を nil 化する。これが無いと B の followers note への reply
+	// 通知経由で「A が B を follow していなくても」B の full note + author が
+	// 漏れる (#1444 IDOR)。通知行自体は残し、note field だけ落とすことで本家
+	// NotificationEntityService と同じ shape (noteId は残るが detail は無い) を
+	// 維持する。queryService 未配線時は fail-closed で note embed を完全 skip
+	// する (= production router は必ず wire、test の partial setup を漏れに
+	// 繋げない)。
 	noteByID := make(map[string]*model.Note, len(noteIDSet))
-	if h.noteRepo != nil && len(noteIDSet) > 0 {
+	if h.noteRepo != nil && h.queryService != nil && len(noteIDSet) > 0 {
 		ids := make([]string, 0, len(noteIDSet))
 		for id := range noteIDSet {
 			ids = append(ids, id)
 		}
 		if notes, err := h.noteRepo.FindManyByIDsWithUser(ids); err == nil {
-			for _, nn := range notes {
+			visible := h.queryService.FilterVisible(user, notes)
+			for _, nn := range visible {
 				noteByID[nn.ID] = nn
 			}
 		}

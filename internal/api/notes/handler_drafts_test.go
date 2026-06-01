@@ -240,6 +240,26 @@ func TestDraftsUpdate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1421: 他人 draftID を投げると NO_SUCH_NOTE_DRAFT 404 で reject される
+// (IDOR regression guard)。現行 handler は repo.FindByIDAndUser に owner filter
+// を SQL push-down しているので構造的に他人 draft を書き換えられないが、
+// refactor で FindByID に入れ替わると owner check が抜ける。その回帰を
+// handler 層 negative test で固定する。
+func TestDraftsUpdate_OtherUserDraft(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	text := "owner-only"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Text: &text, Visibility: "public"}
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","text":"pwned"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_NOTE_DRAFT", errObj["code"])
+	assert.Equal(t, apierr.UUIDNoSuchNoteDraft, errObj["id"])
+	// 他人 draft の text は変更されない
+	assert.Equal(t, "owner-only", *repo.drafts["d1"].Text)
+}
+
 // --- DraftsDelete ---
 
 func TestDraftsDelete_NilRepo(t *testing.T) {

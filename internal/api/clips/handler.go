@@ -352,6 +352,8 @@ func (h *Handler) Notes(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
+	// visibility は clip service の ListByClipVisible で push down 済み (#1418
+	// review)。ここでは hardMutedWords filter のみ適用する。
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -424,6 +425,7 @@ func TestShow_WithUserAndNoteResolution(t *testing.T) {
 	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: "public", User: &model.User{ID: "bob", Username: "bobuser"}}
 	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
 
 	ctx := context.Background()
 	_, err := svc.Create(ctx, notification.CreateInput{
@@ -600,6 +602,7 @@ func TestShow_BatchFetchesNotifierAndNote(t *testing.T) {
 			User: &model.User{ID: uid, Username: uid}}
 	}
 	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
 
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
@@ -638,4 +641,151 @@ func TestShow_BatchFetchesNotifierAndNote(t *testing.T) {
 		assert.NotNilf(t, item["user"], "item[%d].user must be present", i)
 		assert.NotNilf(t, item["note"], "item[%d].note must be present", i)
 	}
+}
+
+// #1444 IDOR: B が followers note で A に reply した時、A (= B を follow して
+// いない recipient) の通知一覧で note embed が CanSeeNote で gate され、
+// 通知行は残るが `note` field が落ちることを確認する (本家
+// NotificationEntityService と同じ shape)。`noteId` は echo されるので
+// frontend が note id だけ拾って後段 API で 404 を貰うことは可能だが、
+// 全文 / author / visibleUserIds などの leak は止まる。
+func TestShow_FollowersReply_NonFollower_NoteHidden(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityFollowers,
+		User: &model.User{ID: "bob", Username: "bobuser"},
+	}
+	// alice → bob の follow 関係は設定しない (= 非フォロワー視点)
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
+
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeReply, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "通知行自体は残ること (= IDOR 修正で通知を消すのではなく embed のみ落とす)")
+	assert.Equal(t, "reply", resp[0]["type"])
+	assert.Equal(t, "n1", resp[0]["noteId"], "noteId は echo される (本家 shape 互換)")
+	_, hasNote := resp[0]["note"]
+	assert.False(t, hasNote, "followers note の full body が非フォロワーに漏れないこと (#1444)")
+}
+
+// 上記の positive counterpart: A が B を follow していれば followers reply
+// 通知でも note が full で取れる (= 正当 viewer は regression しない)。
+func TestShow_FollowersReply_Follower_NoteVisible(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityFollowers,
+		User: &model.User{ID: "bob", Username: "bobuser"},
+	}
+	// alice → bob の follow 関係を張る (CanSeeNote の followers branch が
+	// followingRepo.Exists(alice, bob) で true を返す状況)。
+	followingRepo.Followings["alice-bob"] = &model.Following{
+		ID: "alice-bob", FollowerID: "alice", FolloweeID: "bob",
+	}
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
+
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeReply, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "reply", resp[0]["type"])
+	assert.NotNil(t, resp[0]["note"], "follower 視点では followers note が full で見えること")
+}
+
+// regression guard: 自分の note への reaction 通知では引き続き note が full で
+// 取れる (= viewer = author の typical case が #1444 修正で壊れていないこと)。
+func TestShow_OwnNoteReaction_NoteVisible(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	// alice 自身の followers note。reaction は bob から来る。
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityFollowers,
+		User: &model.User{ID: "alice", Username: "alice"},
+	}
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
+
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeReaction,
+		NoteID: "n1", Reaction: "👍",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "reaction", resp[0]["type"])
+	assert.NotNil(t, resp[0]["note"], "viewer = author の reaction 通知では note が full で取れること")
+}
+
+// fail-closed: queryService 未配線 + noteRepo 配線という partial setup でも
+// note embed が漏れないこと。production の router.go では必ず queryService が
+// wire されるが、テスト / future refactor で wire 漏れが起きても #1444 IDOR
+// が再発しない安全網。
+func TestShow_QueryServiceNil_NoteEmbedDropped(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+		User: &model.User{ID: "bob", Username: "bobuser"},
+	}
+	h.SetRepos(userRepo, noteRepo)
+	// あえて SetQueryService を呼ばない。
+
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	_, hasNote := resp[0]["note"]
+	assert.False(t, hasNote, "queryService 未配線時は fail-closed で note embed を skip すること")
+	assert.Equal(t, "n1", resp[0]["noteId"], "noteId 自体は echo される")
 }

@@ -112,6 +112,35 @@ func TestDriveFileRepository_ListByUser(t *testing.T) {
 	assert.Len(t, rows, 1)
 }
 
+func TestDriveFileRepository_FindByAnyAccessKey(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_df_ak", "dfak")
+	defer cleanupUser(t, user.ID)
+
+	primary := "pk-" + user.ID
+	thumb := "tk-" + user.ID
+	web := "wk-" + user.ID
+	f := newTestDriveFile("f_ak", user.ID, "akmd5", nil)
+	f.AccessKey = &primary
+	f.ThumbnailAccessKey = &thumb
+	f.WebpublicAccessKey = &web
+	require.NoError(t, repo.Create(f))
+	defer cleanupDriveFile(t, f.ID)
+
+	// primary / thumbnail / webpublic いずれの key でも同じ行に解決する
+	for _, k := range []string{primary, thumb, web} {
+		got, err := repo.FindByAnyAccessKey(k)
+		require.NoError(t, err, "lookup %s", k)
+		assert.Equal(t, f.ID, got.ID)
+	}
+
+	// 空文字 / 未マッチは ErrRecordNotFound
+	_, err := repo.FindByAnyAccessKey("")
+	assert.Error(t, err)
+	_, err = repo.FindByAnyAccessKey("does-not-exist")
+	assert.Error(t, err)
+}
+
 func TestDriveFileRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

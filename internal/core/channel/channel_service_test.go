@@ -361,16 +361,68 @@ func TestTimeline_HappyPath(t *testing.T) {
 	svc, repo, _, noteRepo := newSvc(t)
 	repo.Channels["c1"] = &model.Channel{ID: "c1"}
 	cid := "c1"
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", ChannelID: &cid}
-	rows, err := svc.Timeline("c1", "", "", 10)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", ChannelID: &cid, Visibility: model.NoteVisibilityPublic}
+	rows, err := svc.Timeline("c1", "", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 }
 
 func TestTimeline_ChannelNotFound(t *testing.T) {
 	svc, _, _, _ := newSvc(t)
-	_, err := svc.Timeline("missing", "", "", 10)
+	_, err := svc.Timeline("missing", "", "", "", 10)
 	assert.ErrorIs(t, err, channel.ErrChannelNotFound)
+}
+
+// TestTimeline_VisibilityFilter は public channel に投稿された followers /
+// specified note が viewer 単位で適切に除外されることを固定する (#1440)。
+// 匿名 / 非フォロワー / specified 対象外の各 viewer ごとに、見えるはずの
+// note しか返ってこないことを確認する。
+func TestTimeline_VisibilityFilter(t *testing.T) {
+	svc, repo, _, noteRepo := newSvc(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1"}
+	cid := "c1"
+	author := "author"
+	follower := "follower"
+	allowed := "allowed"
+	stranger := "stranger"
+	// author を follow しているのは follower のみ。Mock の Following は
+	// followerID -> []followeeIDs (testutil/mock_repository.go の
+	// noteVisibleToViewer 経路で使われる)。
+	noteRepo.Following[follower] = []string{author}
+	noteRepo.Notes["n_pub"] = &model.Note{
+		ID: "n_pub", ChannelID: &cid, UserID: author, Visibility: model.NoteVisibilityPublic,
+	}
+	noteRepo.Notes["n_fol"] = &model.Note{
+		ID: "n_fol", ChannelID: &cid, UserID: author, Visibility: model.NoteVisibilityFollowers,
+	}
+	noteRepo.Notes["n_spec"] = &model.Note{
+		ID: "n_spec", ChannelID: &cid, UserID: author,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{allowed},
+	}
+
+	cases := []struct {
+		name    string
+		viewer  string
+		visible []string
+	}{
+		{"anonymous", "", []string{"n_pub"}},
+		{"stranger", stranger, []string{"n_pub"}},
+		{"follower", follower, []string{"n_pub", "n_fol"}},
+		{"specified target", allowed, []string{"n_pub", "n_spec"}},
+		{"author", author, []string{"n_pub", "n_fol", "n_spec"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := svc.Timeline("c1", tc.viewer, "", "", 50)
+			require.NoError(t, err)
+			got := make([]string, 0, len(rows))
+			for _, n := range rows {
+				got = append(got, n.ID)
+			}
+			assert.ElementsMatch(t, tc.visible, got)
+		})
+	}
 }
 
 // --- OnNotePosted ----------------------------------------------------------

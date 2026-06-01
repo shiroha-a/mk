@@ -11,6 +11,12 @@ type ClipNoteRepository interface {
 	Delete(cn *model.ClipNote) error
 	FindByPair(clipID, noteID string) (*model.ClipNote, error)
 	ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error)
+	// ListByClipVisible is ListByClip with a visibility push-down: clip entries
+	// whose referenced note the viewer cannot see (per core/note.CanSeeNote) are
+	// excluded before LIMIT. viewerID 空文字は匿名 (public/home のみ)。clips/notes
+	// で post-fetch filter によるページ過少充填と per-note の follow 判定 N+1 を
+	// 避けるため (#1418 review)。export 経路は全件必要なので ListByClip を使う。
+	ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error)
 	// CountByClip returns the number of notes in the given clip. Used by
 	// noteEachClipsLimit policy gate (#1029 PR-1 follow-up).
 	CountByClip(clipID string) (int64, error)
@@ -56,6 +62,15 @@ func (r *clipNoteRepository) CountByClip(clipID string) (int64, error) {
 // the clip_note id. Order flips to ASC when only sinceID is supplied,
 // matching paginationOrder (upstream QueryService.makePaginationQuery parity).
 func (r *clipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+	return r.listByClip(clipID, "", false, untilID, sinceID, limit)
+}
+
+// ListByClipVisible is ListByClip with the visibility push-down enabled.
+func (r *clipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+	return r.listByClip(clipID, viewerID, true, untilID, sinceID, limit)
+}
+
+func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
 	if limit <= 0 {
 		limit = 30
 	}
@@ -63,6 +78,21 @@ func (r *clipNoteRepository) ListByClip(clipID string, untilID, sinceID string, 
 		limit = 100
 	}
 	q := r.db.Where("\"clipId\" = ?", clipID)
+	if filterVisibility {
+		// clip_note は author 混在のため、note を相関 EXISTS で join して
+		// visibility を LIMIT 前に絞る。条件は core/note.CanSeeNote と一致。
+		if viewerID == "" {
+			q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "clip_note"."noteId" AND v."visibility" IN ('public','home'))`)
+		} else {
+			q = q.Where(
+				`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "clip_note"."noteId" AND (`+
+					`v."visibility" IN ('public','home') `+
+					`OR v."userId" = ? `+
+					`OR (v."visibility" = 'followers' AND v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+					`OR (v."visibility" = 'specified' AND ? = ANY(v."visibleUserIds"))))`,
+				viewerID, viewerID, viewerID)
+		}
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}

@@ -739,12 +739,19 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 type MockNoteRepository struct {
 	Notes          map[string]*model.Note
 	ReactionCounts map[string]map[string]int // noteID -> reaction -> count
+	// Following は ListByUserIDFiltered の visibility push-down (followers note
+	// の follow 判定) に使う followerID -> followeeIDs map。未設定なら follow
+	// なし扱い (= 非 follower viewer)。testutil は core/note を import すると
+	// repository 内部テストとの循環になるため CanSeeNote は使わず inline で
+	// 可視性を再現する (条件は CanSeeNote / real repo SQL と一致させる)。
+	Following map[string][]string
 }
 
 func NewMockNoteRepository() *MockNoteRepository {
 	return &MockNoteRepository{
 		Notes:          make(map[string]*model.Note),
 		ReactionCounts: make(map[string]map[string]int),
+		Following:      make(map[string][]string),
 	}
 }
 
@@ -982,11 +989,14 @@ func (m *MockNoteRepository) listFiltered(filter func(*model.Note) bool, untilID
 	return out
 }
 
-// ListByChannelID returns notes posted to the given channel using the
-// shared listFiltered helper (paginationOrder: ASC when sinceID-only, DESC otherwise).
-func (m *MockNoteRepository) ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+// ListByChannelID mirrors the real repo's visibility push-down for
+// channels/timeline (#1440). viewerID="" は匿名 (public/home のみ)。
+func (m *MockNoteRepository) ListByChannelID(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
-		return n.ChannelID != nil && *n.ChannelID == channelID
+		if n.ChannelID == nil || *n.ChannelID != channelID {
+			return false
+		}
+		return m.canViewerSeeNote(viewerID, n)
 	}, untilID, sinceID, limit), nil
 }
 
@@ -1003,9 +1013,13 @@ func (m *MockNoteRepository) ListByUserID(userID string, untilID, sinceID string
 // 詰めて listFiltered に委譲する (#1021)。bool 4 引数は repository interface
 // の signature に整合 (= struct を介さない理由は testutil ↔ repository の
 // import cycle 回避)。
-func (m *MockNoteRepository) ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
 		if n.UserID != userID {
+			return false
+		}
+		// visibility push-down を real repo SQL と揃えて inline 再現する。
+		if !m.canViewerSeeNote(viewerID, n) {
 			return false
 		}
 		if withFiles && len(n.FileIDs) == 0 {
@@ -1029,6 +1043,12 @@ func (m *MockNoteRepository) ListByUserIDFiltered(userID, untilID, sinceID strin
 		}
 		return true
 	}, untilID, sinceID, limit), nil
+}
+
+// canViewerSeeNote replicates the real repo's visibility push-down inline via
+// the shared noteVisibleToViewer helper.
+func (m *MockNoteRepository) canViewerSeeNote(viewerID string, n *model.Note) bool {
+	return noteVisibleToViewer(viewerID, n, m.Following)
 }
 
 func (m *MockNoteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, error) {
@@ -1087,6 +1107,10 @@ func (m *MockNoteRepository) ListMentions(userID string, limit int, sinceID, unt
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
+		// viewer (= mention 対象 = userID) が見られる note のみ (#1441)。
+		if !m.canViewerSeeNote(userID, n) {
+			return false
+		}
 		for _, mention := range n.Mentions {
 			if mention == userID {
 				return true
@@ -1096,11 +1120,14 @@ func (m *MockNoteRepository) ListMentions(userID string, limit int, sinceID, unt
 	}, untilID, sinceID, limit), nil
 }
 
-func (m *MockNoteRepository) SearchByTag(tag string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		for _, t := range n.Tags {
 			if t == tag {
 				return true
@@ -1417,6 +1444,14 @@ func (m *MockNoteReactionRepository) ListByUserID(userID, viewerID, untilID, sin
 // が note 行を要求して false になるのと揃えて除外する (production は FK + Preload
 // で note が必ず存在するためこの分岐は起きない。test は note を必ず seed する)。
 func (m *MockNoteReactionRepository) canViewerSeeNote(viewerID string, n *model.Note) bool {
+	return noteVisibleToViewer(viewerID, n, m.Following)
+}
+
+// noteVisibleToViewer replicates core/note.CanSeeNote / the real repo の
+// visibility SQL を inline で再現する共通ヘルパー。testutil は core/note を
+// import すると repository 内部テストとの循環になるためロジックを複製する
+// (条件は CanSeeNote と一致させる)。following は followerID -> followeeIDs。
+func noteVisibleToViewer(viewerID string, n *model.Note, following map[string][]string) bool {
 	if n == nil {
 		return false
 	}
@@ -1433,7 +1468,7 @@ func (m *MockNoteReactionRepository) canViewerSeeNote(viewerID string, n *model.
 	}
 	switch n.Visibility {
 	case model.NoteVisibilityFollowers:
-		for _, followee := range m.Following[viewerID] {
+		for _, followee := range following[viewerID] {
 			if followee == n.UserID {
 				return true
 			}
@@ -2975,6 +3010,11 @@ func applyClipFields(c *model.Clip, fields map[string]any) {
 // MockClipNoteRepository is a test double for repository.ClipNoteRepository.
 type MockClipNoteRepository struct {
 	Entries map[string]*model.ClipNote
+	// Notes / Following は ListByClipVisible の visibility push-down 再現に
+	// 使う。Notes は noteID -> note (visibility 判定用)、Following は
+	// followerID -> followeeIDs。未設定なら note 不在扱い (= 非可視)。
+	Notes     map[string]*model.Note
+	Following map[string][]string
 }
 
 // NewMockClipNoteRepository creates an empty MockClipNoteRepository.
@@ -3012,9 +3052,22 @@ func (m *MockClipNoteRepository) CountByClip(clipID string) (int64, error) {
 }
 
 func (m *MockClipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+	return m.listByClip(clipID, "", false, untilID, sinceID, limit)
+}
+
+// ListByClipVisible mirrors the real repo's visibility push-down: clip entries
+// whose note the viewer cannot see are dropped before the limit slice.
+func (m *MockClipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+	return m.listByClip(clipID, viewerID, true, untilID, sinceID, limit)
+}
+
+func (m *MockClipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
 	var rows []*model.ClipNote
 	for _, cn := range m.Entries {
 		if cn.ClipID != clipID {
+			continue
+		}
+		if filterVisibility && !noteVisibleToViewer(viewerID, m.Notes[cn.NoteID], m.Following) {
 			continue
 		}
 		if untilID != "" && cn.ID >= untilID {

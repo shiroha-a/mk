@@ -89,6 +89,10 @@ func (m *MockDriveFileRepository) FindByAccessKey(accessKey string) (*model.Driv
 	return nil, ErrNotFound
 }
 
+func (m *MockDriveFileRepository) FindByAnyAccessKey(accessKey string) (*model.DriveFile, error) {
+	return m.FindByAccessKey(accessKey)
+}
+
 func (m *MockDriveFileRepository) Update(id string, fields map[string]any) error {
 	f, ok := m.Files[id]
 	if !ok {

@@ -66,13 +66,16 @@ func (s *QueryService) ShowForAPI(noteID string) (*model.Note, error) {
 	return n, nil
 }
 
-// RequireVisible は viewer から見て対象 note が可視であることを要求する
-// 公開 wrapper。非存在・非可視のいずれも ErrNoteNotFound に集約して返す
-// ことで「note が存在するが見えない」と「note 自体が無い」を区別させない
-// (= 存在 enumeration 防止)。clips/add-note (#1456) や favorites/create
-// (#1443) 等、ID 既知の viewer が note を別 channel (clip / favorite) に
-// 永続化する mutation 経路で、author が visibility を絞った後も content
-// が漏れ続ける/存在が漏れる security risk を防ぐためのチェック。
+// RequireVisible loads a single note and verifies the viewer can see it.
+// Returns ErrNoteNotFound when the note does not exist OR the viewer cannot
+// see it (followers / specified visibility). Used by mutation endpoints that
+// must reject non-viewer actions while hiding existence — favorites/create
+// (#1443) や clips/add-note (#1456) 等の「ID 既知 viewer が favorite / clip
+// など別 channel に note を永続化する」経路で、author が visibility を絞った
+// 後も content が漏れ続ける / 存在が漏れる security risk を防ぐためのチェック。
+//
+// 戻り値の note は handler 側で pack せず捨てるか top-level フィールド
+// だけを参照する想定 (#425)。pack 用 full preload が必要なら Show を使う。
 func (s *QueryService) RequireVisible(viewer *model.User, noteID string) (*model.Note, error) {
 	return s.requireVisible(viewer, noteID)
 }

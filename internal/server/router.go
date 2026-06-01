@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/http/pprof"
 	urlpkg "net/url"
@@ -361,11 +359,15 @@ func (s *Server) setupRoutes() {
 	// ようにする (#690)。streamPubSub は下方で生成されるため遅延配線。
 
 	// Drive storage (Phase 4.9: Meta に基づいて Local / S3 を切り替え)
+	// localDriveStorage は driveStorage が S3 に切り替わっても、
+	// storedInternal=true な drive_file を `/files/:accessKey` で提供する
+	// fallback として常に保持する (#1414)。
+	localDriveStorage := coredrive.NewLocalStorage("./drive-files", s.config.DriveURL)
 	var driveStorage coredrive.Storage
 	if serverMeta, err := metaRepo.Fetch(); err == nil {
 		driveStorage = coredrive.NewStorageFromMeta(serverMeta, "./drive-files", s.config.DriveURL)
 	} else {
-		driveStorage = coredrive.NewLocalStorage("./drive-files", s.config.DriveURL)
+		driveStorage = localDriveStorage
 	}
 	driveService := coredrive.NewService(driveFileRepo, driveFolderRepo, driveStorage, idGen)
 	// drive/files/show は moderator なら他人 / リモートユーザー所有の file
@@ -527,6 +529,10 @@ func (s *Server) setupRoutes() {
 	// Instance management (Phase 3 Step H)
 	instanceService := coreinstance.NewService(instanceRepo, metaRepo, idGen)
 	federationResolver.SetInstanceTracker(instanceService)
+	// ホワイトリスト連合 (federation: specified) / blockedHosts に対する gate を
+	// resolver の入口 (fetchActor / resolveNoteOnce / IngestNoteWithCreated) に
+	// 適用する。deliver_service / inboxProcessor と同じ instanceService を共有。
+	federationResolver.SetHostBlockChecker(instanceService)
 	// 新規 instance row 発見時に nodeinfo を取得して metadata を更新する。
 	// admin/federation/refresh-remote-instance-metadata でも同じ fetcher を
 	// 再利用して on-demand で再取得する (#351 フォロー)。
@@ -1379,6 +1385,7 @@ func (s *Server) setupRoutes() {
 	// Notifications endpoints
 	notificationsHandler := notifications.NewHandler(notificationService, idGen)
 	notificationsHandler.SetRepos(userRepo, noteRepo)
+	notificationsHandler.SetQueryService(noteQueryService)
 	notificationsHandler.SetFollowRequestRepo(followRequestRepo)
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
@@ -1494,66 +1501,18 @@ func (s *Server) setupRoutes() {
 	api.POST("/drive/stream", driveHandler.Stream, middleware.RequireAuth())
 	// Phase 7.4: drive/* — 全て実データハンドラに移行済み
 
-	// Static file serving for LocalStorage
-	// MIME type はファイル内容の先頭から自動判定し、`http.ServeContent` で
-	// Range / If-Modified-Since / Content-Length 対応の正しい応答を返す。
+	// Static file serving for LocalStorage / S3 backend. `storedInternal=true`
+	// な行は driveStorage が S3 でも localDriveStorage に倒して提供する (#1414)。
 	//
-	// 旧実装は echo の `c.Stream` + `io.MultiReader` で chunked transfer に
-	// 倒していたが、Cloudflare Tunnel 経由のデプロイで bigger-than-buffer
-	// (33KB 程度) なファイルが truncate される問題があった (#730)。明示
-	// Content-Length + Cache-Control: no-transform でこれを回避する。
-	s.echo.GET("/files/:accessKey", func(c echo.Context) error {
-		key := c.Param("accessKey")
-		body, err := driveStorage.Get(key)
-		if err != nil {
-			return c.NoContent(http.StatusNotFound)
-		}
-		defer body.Close()
-
-		// LocalStorage は *os.File を返すので io.ReadSeeker として扱える。
-		// 互換性のため type assertion で seekable かを確認し、非対応 (将来
-		// S3 等の non-seekable storage を増やした場合) なら全 body を memory
-		// に読み込む fallback にフォールバックする。
-		// modtime も *os.File なら Stat() から取得して If-Modified-Since の
-		// 304 経路を有効にする。それ以外は零値で http.ServeContent が
-		// Last-Modified を出さない (Cache-Control: immutable で代替)。
-		var modtime time.Time
-		seeker, ok := body.(io.ReadSeeker)
-		if ok {
-			if f, isFile := body.(*os.File); isFile {
-				if st, err := f.Stat(); err == nil {
-					modtime = st.ModTime()
-				}
-			}
-		} else {
-			data, rerr := io.ReadAll(body)
-			if rerr != nil {
-				return c.NoContent(http.StatusInternalServerError)
-			}
-			seeker = bytes.NewReader(data)
-		}
-
-		// 先頭 512 バイト読んで MIME type を判定 → 元位置に戻す
-		buf := make([]byte, 512)
-		n, _ := seeker.Read(buf)
-		contentType := http.DetectContentType(buf[:n])
-		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-			return c.NoContent(http.StatusInternalServerError)
-		}
-
-		// `Cache-Control: no-transform` で Cloudflare Polish 等 CDN 中間層
-		// による画像再エンコードを抑止する (#730)。Polish は animated WebP
-		// を別 size で出力するため UDS デプロイ環境で「絵文字がチカチカ
-		// する + サイズが切れる」現象を起こす。`immutable` で長期 cache 化、
-		// `no-transform` で binary 1:1 配信を契約する。
-		c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable, no-transform")
-		c.Response().Header().Set(echo.HeaderContentType, contentType)
-		// http.ServeContent が Content-Length / Range / If-Modified-Since を
-		// 適切に処理する。modtime 取得できれば Last-Modified を発行して
-		// 304 経路も活きる。
-		http.ServeContent(c.Response(), c.Request(), key, modtime, seeker)
-		return nil
-	})
+	// driveStorage がローカル (= object storage 非活性) の場合は primary と
+	// local が同じローカル FS を指すため storedInternal 判定が無意味。この
+	// 経路では lookup を nil 配線し、ホットパスである `/files/:accessKey` の
+	// 毎リクエスト DB クエリを省く (filesHandler の nil-lookup 分岐に倒す)。
+	var filesLookup filesDriveLookup
+	if _, isLocal := driveStorage.(*coredrive.LocalStorage); !isLocal {
+		filesLookup = driveFileRepo
+	}
+	s.echo.GET("/files/:accessKey", filesHandler(filesLookup, driveStorage, localDriveStorage))
 
 	// Media proxy endpoint
 	proxyAllowlist := coremediaproxy.NewDBAllowlistChecker(s.db)

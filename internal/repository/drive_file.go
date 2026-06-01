@@ -12,6 +12,11 @@ type DriveFileRepository interface {
 	FindByIDs(ids []string) ([]*model.DriveFile, error)
 	FindByMD5(userID, md5 string) (*model.DriveFile, error)
 	FindByAccessKey(accessKey string) (*model.DriveFile, error)
+	// FindByAnyAccessKey looks up a DriveFile whose primary / thumbnail /
+	// webpublic access key matches. Used by `/files/:accessKey` to resolve
+	// storedInternal=true rows that the configured storage backend (S3)
+	// does not hold (#1414).
+	FindByAnyAccessKey(accessKey string) (*model.DriveFile, error)
 	// FindByURI looks up a drive_file by its AP `uri` field. Used for
 	// deduping remote attachments on inbound Note ingest (#378).
 	FindByURI(uri string) (*model.DriveFile, error)
@@ -122,6 +127,25 @@ func (r *driveFileRepository) FindByAccessKey(accessKey string) (*model.DriveFil
 	}
 	var f model.DriveFile
 	if err := r.db.Where("\"accessKey\" = ?", accessKey).First(&f).Error; err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// FindByAnyAccessKey resolves an access key by matching the primary,
+// thumbnail, or webpublic column. `/files/:accessKey` 経由でアクセスされる
+// access key は元データ・thumbnail・webpublic のいずれかなので、3 列を OR で
+// 引く必要がある (#1414)。3 列とも unique index 付きで planner は bitmap-or
+// に落とせる。primary のみで充足する mediaproxy.swapToVariant とは別経路。
+func (r *driveFileRepository) FindByAnyAccessKey(accessKey string) (*model.DriveFile, error) {
+	if accessKey == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var f model.DriveFile
+	if err := r.db.Where(
+		`"accessKey" = ? OR "thumbnailAccessKey" = ? OR "webpublicAccessKey" = ?`,
+		accessKey, accessKey, accessKey,
+	).First(&f).Error; err != nil {
 		return nil, err
 	}
 	return &f, nil
