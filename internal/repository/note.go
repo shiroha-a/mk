@@ -85,7 +85,11 @@ type NoteRepository interface {
 	ListFeatured(channelID, untilID string, limit, offset int) ([]*model.Note, error)
 	FindRenoteByUser(userID, renoteID string) (*model.Note, error)
 	ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error)
-	SearchByTag(tag string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
+	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
+	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
+	// 同じ可視性条件を LIMIT 前に SQL で絞る (#1439)。
+	SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// ListByFileID returns notes whose fileIds array contains fileID, with
 	// cursor (sinceID/untilID) pagination matching upstream Misskey's
 	// makePaginationQuery. limit <= 0 defaults to 10.
@@ -622,13 +626,25 @@ func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID
 	return notes, nil
 }
 
-func (r *noteRepository) SearchByTag(tag string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	q := preloadNoteRelations(r.db).
-		Where("tags @> ARRAY[?]::varchar[]", tag).
-		Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+		Where("tags @> ARRAY[?]::varchar[]", tag)
+	// visibility push-down: core/note.CanSeeNote と同じ条件を LIMIT 前に絞る。
+	// ListByUserIDFiltered / clip の ListByClipVisible と同じ可視性定義 (#1439)。
+	if viewerID == "" {
+		q = q.Where(`"visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("visibility" IN ('public','home') `+
+				`OR "userId" = ? `+
+				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+			viewerID, viewerID, viewerID)
+	}
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}

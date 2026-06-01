@@ -1112,11 +1112,14 @@ func (m *MockNoteRepository) ListMentions(userID string, limit int, sinceID, unt
 	}, untilID, sinceID, limit), nil
 }
 
-func (m *MockNoteRepository) SearchByTag(tag string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		for _, t := range n.Tags {
 			if t == tag {
 				return true

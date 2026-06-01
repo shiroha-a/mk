@@ -274,9 +274,72 @@ func TestSearchByTag_QueryArrayEmpty(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, postExtra(h.SearchByTag, `{"query":[[]]}`, nil).Code)
 }
 
+// search-by-tag の visibility push-down (#1439)。discovery 系なので匿名/非
+// follower には followers / specified note を返さず、author 本人 / follower /
+// visibleUserIds 対象には返すことを固定する。
+func seedSearchVisibilityNotes(noteRepo *testutil.MockNoteRepository) {
+	noteRepo.Notes["t_pub"] = &model.Note{ID: "t_pub", UserID: "author", Tags: []string{"tag"}, Visibility: "public", User: &model.User{ID: "author"}}
+	noteRepo.Notes["t_fol"] = &model.Note{ID: "t_fol", UserID: "author", Tags: []string{"tag"}, Visibility: "followers", User: &model.User{ID: "author"}}
+	noteRepo.Notes["t_spec"] = &model.Note{ID: "t_spec", UserID: "author", Tags: []string{"tag"}, Visibility: "specified", VisibleUserIDs: []string{"allowed"}, User: &model.User{ID: "author"}}
+}
+
+func searchTagIDs(t *testing.T, rec *httptest.ResponseRecorder) map[string]bool {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	ids := map[string]bool{}
+	for _, n := range out {
+		ids[n["id"].(string)] = true
+	}
+	return ids
+}
+
+func TestSearchByTag_AnonymousExcludesNonPublic(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	seedSearchVisibilityNotes(noteRepo)
+	ids := searchTagIDs(t, postExtra(h.SearchByTag, `{"tag":"tag"}`, nil))
+	assert.True(t, ids["t_pub"], "public は匿名に見える")
+	assert.False(t, ids["t_fol"], "followers は匿名に漏らさない")
+	assert.False(t, ids["t_spec"], "specified は対象外に漏らさない")
+}
+
+func TestSearchByTag_NonFollowerExcludesFollowers(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	seedSearchVisibilityNotes(noteRepo)
+	// stranger は follow なし / specified 対象外 -> public のみ。
+	ids := searchTagIDs(t, postExtra(h.SearchByTag, `{"tag":"tag"}`, &model.User{ID: "stranger"}))
+	assert.True(t, ids["t_pub"])
+	assert.False(t, ids["t_fol"])
+	assert.False(t, ids["t_spec"])
+}
+
+func TestSearchByTag_FollowerSeesFollowers(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	seedSearchVisibilityNotes(noteRepo)
+	noteRepo.Following = map[string][]string{"follower": {"author"}}
+	ids := searchTagIDs(t, postExtra(h.SearchByTag, `{"tag":"tag"}`, &model.User{ID: "follower"}))
+	assert.True(t, ids["t_pub"])
+	assert.True(t, ids["t_fol"], "follower は followers note を見られる")
+	assert.False(t, ids["t_spec"])
+}
+
+func TestSearchByTag_SpecifiedTargetAndAuthorSee(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	seedSearchVisibilityNotes(noteRepo)
+	// visibleUserIds 対象は public + specified。
+	allowedIDs := searchTagIDs(t, postExtra(h.SearchByTag, `{"tag":"tag"}`, &model.User{ID: "allowed"}))
+	assert.True(t, allowedIDs["t_pub"])
+	assert.True(t, allowedIDs["t_spec"], "visibleUserIds 対象は specified を見られる")
+	assert.False(t, allowedIDs["t_fol"])
+	// author 本人は全 visibility を見られる。
+	authorIDs := searchTagIDs(t, postExtra(h.SearchByTag, `{"tag":"tag"}`, &model.User{ID: "author"}))
+	assert.True(t, authorIDs["t_pub"] && authorIDs["t_fol"] && authorIDs["t_spec"], "author 本人は全て見られる")
+}
+
 type failingSearchByTagRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingSearchByTagRepo) SearchByTag(_ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingSearchByTagRepo) SearchByTag(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

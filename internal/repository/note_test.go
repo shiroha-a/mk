@@ -1086,21 +1086,21 @@ func TestNoteRepository_SearchByTag(t *testing.T) {
 	require.NoError(t, testDB.Create(n).Error)
 	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 
-	notes, err := repo.SearchByTag("golang", 10, "", "")
+	notes, err := repo.SearchByTag("golang", "", 10, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
-	notes, err = repo.SearchByTag("nonexistent", 10, "", "")
+	notes, err = repo.SearchByTag("nonexistent", "", 10, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, notes)
 
 	// default limit
-	notes, err = repo.SearchByTag("golang", 0, "", "")
+	notes, err = repo.SearchByTag("golang", "", 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
 	// with cursors
-	notes, err = repo.SearchByTag("golang", 10, "000", "zzz")
+	notes, err = repo.SearchByTag("golang", "", 10, "000", "zzz")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 }
@@ -1109,8 +1109,73 @@ func TestNoteRepository_SearchByTag_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewNoteRepository(testDB.WithContext(ctx))
-	_, err := repo.SearchByTag("x", 10, "", "")
+	_, err := repo.SearchByTag("x", "", 10, "", "")
 	assert.Error(t, err)
+}
+
+// TestNoteRepository_SearchByTag_VisibilityPushDown は #1439 の visibility
+// push-down を検証する。同一 tag に public / followers / specified を付け、
+// viewer ごとに SQL 段で見える note が変わることを確認する。
+func TestNoteRepository_SearchByTag_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_sbt_a", "sbtauthor")
+	follower := mkUser("u_sbt_f", "sbtfollower")
+	allowed := mkUser("u_sbt_al", "sbtallowed")
+	stranger := mkUser("u_sbt_s", "sbtstranger")
+
+	notes := []*model.Note{
+		{ID: "n_sbt_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sbt_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sbt_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	f := &model.Following{ID: "fl_sbt_1", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+
+	idsOf := func(rows []*model.Note) []string {
+		out := make([]string, 0, len(rows))
+		for _, n := range rows {
+			out = append(out, n.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	// 匿名 / stranger は public のみ。
+	out, err := repo.SearchByTag("sbttag", "", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_sbt_pub"}, idsOf(out))
+
+	out, err = repo.SearchByTag("sbttag", stranger.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_sbt_pub"}, idsOf(out))
+
+	// follower は public + followers。
+	out, err = repo.SearchByTag("sbttag", follower.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_sbt_fol", "n_sbt_pub"}, idsOf(out))
+
+	// visibleUserIds 対象は public + specified。
+	out, err = repo.SearchByTag("sbttag", allowed.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_sbt_pub", "n_sbt_spec"}, idsOf(out))
+
+	// author 本人は全 visibility。
+	out, err = repo.SearchByTag("sbttag", author.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_sbt_fol", "n_sbt_pub", "n_sbt_spec"}, idsOf(out))
 }
 
 // TestNoteRepository_DeleteByUserBatch verifies that one call deletes up to
@@ -1706,14 +1771,14 @@ func TestNoteRepository_SinceIDFlipsOrderASC(t *testing.T) {
 	}
 
 	// sinceID単独指定: ASC順 (古い→新しい)。asc_n_a より大なので b, c が返る想定。
-	notes, err := repo.SearchByTag("ascflip", 10, "asc_n_a", "")
+	notes, err := repo.SearchByTag("ascflip", "", 10, "asc_n_a", "")
 	require.NoError(t, err)
 	require.Len(t, notes, 2)
 	assert.Equal(t, "asc_n_b", notes[0].ID)
 	assert.Equal(t, "asc_n_c", notes[1].ID)
 
 	// untilID単独指定: DESC順 (既存挙動)。asc_n_c より小なので b, a が返る。
-	notes, err = repo.SearchByTag("ascflip", 10, "", "asc_n_c")
+	notes, err = repo.SearchByTag("ascflip", "", 10, "", "asc_n_c")
 	require.NoError(t, err)
 	require.Len(t, notes, 2)
 	assert.Equal(t, "asc_n_b", notes[0].ID)
