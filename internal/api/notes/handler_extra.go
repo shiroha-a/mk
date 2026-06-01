@@ -185,6 +185,14 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// list owner gate だけでは note の visibility を守れない。list メンバーは
+	// 自由に編集できるため、未フォローのアカウントを list に詰めれば followers
+	// visibility note を読めてしまう。BulkShow / ShowPartialBulk と同じく
+	// queryService 未配線なら fail-closed、配線済みなら CanSeeNote で絞る (#1442)。
+	if h.queryService == nil {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	notes = h.queryService.FilterVisible(me, notes)
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, me))
 }
 
