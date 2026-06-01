@@ -149,6 +149,18 @@ func TestShow_AnonymousOnPublic(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// IDOR audit follow-up (#1422): 通常 RequireAuth で弾かれるが、URL 設計次第で
+// middleware bypass や guest viewer 路を追加した時に regression するため、
+// 未認証 viewer (= viewer == nil) が private clip を叩いた時の 403 reject を
+// handler 層 negative test で固定する。
+func TestShow_AnonymousAccessDenied(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: false}
+	c, rec := newReq(t, `{"clipId":"c1"}`)
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 // --- Update ----------------------------------------------------------------
 
 func TestUpdate_Success(t *testing.T) {
