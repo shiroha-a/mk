@@ -5,6 +5,8 @@ package processors
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +15,16 @@ import (
 	"net/url"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
+
+// deliverKeyCacheSize bounds the parsed-signing-key LRU. 署名者は実質ローカル
+// ユーザー数なので 1024 で大半の instance を賄える。超過分は LRU が evict する。
+const deliverKeyCacheSize = 1024
 
 // HTTPSigner abstracts the signed POST capability of activitypub.Client so
 // that DeliverProcessor can be unit-tested without an actual HTTP client.
@@ -67,11 +74,43 @@ type DeliverProcessor struct {
 	// 未配線時は capability gate なしの楽観動作 (= payload に Ed25519 鍵が
 	// あれば必ず Ed25519 sign を試す) になるが、production では必須。
 	redis *redis.Client
+	// keyCache は (kind, keyID, PEM) -> パース済み *PrivateKey の LRU。
+	// ap:deliver は inbox ごとに 1 job なので、同一署名者へ fan-out する際に
+	// 毎 job で PEM->x509 を再パースしていた。worker 間共有の単一 processor
+	// にここを持たせて job 横断でメモ化する (#1425)。nil の場合は都度パース。
+	keyCache *lru.Cache[string, *activitypub.PrivateKey]
 }
 
 // NewDeliverProcessor constructs a DeliverProcessor.
 func NewDeliverProcessor(signer HTTPSigner) *DeliverProcessor {
-	return &DeliverProcessor{signer: signer}
+	p := &DeliverProcessor{signer: signer}
+	// lru.New は size>0 で error を返さない実装だが、防御的に握って nil
+	// fallback (= 都度パース) に倒す。
+	if c, err := lru.New[string, *activitypub.PrivateKey](deliverKeyCacheSize); err == nil {
+		p.keyCache = c
+	}
+	return p
+}
+
+// signingKey returns a parsed PrivateKey for (keyID, pem), memoizing the parse
+// across deliver jobs. kind は "rsa" / "ed" で、RSA と Ed25519 の cache entry を
+// 区別する。PEM が変わる (= 鍵 rotation) と cache key も変わるため stale な鍵を
+// 返さない。keyCache 未配線時は parse をそのまま呼ぶ。
+func (p *DeliverProcessor) signingKey(kind, keyID, pem string, parse func(string, string) (*activitypub.PrivateKey, error)) (*activitypub.PrivateKey, error) {
+	if p.keyCache == nil {
+		return parse(keyID, pem)
+	}
+	sum := sha256.Sum256([]byte(keyID + "\x00" + pem))
+	ck := kind + "\x00" + hex.EncodeToString(sum[:])
+	if k, ok := p.keyCache.Get(ck); ok {
+		return k, nil
+	}
+	k, err := parse(keyID, pem)
+	if err != nil {
+		return nil, err
+	}
+	p.keyCache.Add(ck, k)
+	return k, nil
 }
 
 // SetRedis attaches a Redis client used to persist per-host Ed25519 degrade
@@ -319,7 +358,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 // 場合は driver.SkipRetry で投函を中止。
 func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 bool) (*http.Response, error) {
 	if useEd25519 {
-		key, err := activitypub.NewEd25519PrivateKey(payload.Ed25519KeyID, payload.Ed25519PrivPEM)
+		key, err := p.signingKey("ed", payload.Ed25519KeyID, payload.Ed25519PrivPEM, activitypub.NewEd25519PrivateKey)
 		if err == nil {
 			resp, perr := p.signer.PostSigned(payload.Inbox, payload.Body, key)
 			if perr != nil {
@@ -333,7 +372,7 @@ func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 boo
 			"inbox", payload.Inbox, "err", err)
 		// fallthrough: RSA で sign
 	}
-	key, err := activitypub.NewPrivateKey(payload.KeyID, payload.KeyPEM)
+	key, err := p.signingKey("rsa", payload.KeyID, payload.KeyPEM, activitypub.NewPrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
 	}
