@@ -71,7 +71,15 @@ type NoteRepository interface {
 	// SQL で絞ることで、post-fetch filter によるページ過少充填と followers
 	// 判定の N+1 を避ける (#1418 review)。
 	ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error)
-	ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListByChannelID は channel の note を viewer の可視性で絞って返す。
+	// channels/timeline は public channel 自体が誰でも閲覧可能だが、そこに投稿
+	// された note 個々の visibility (followers / specified) は viewer 単位で
+	// 絞らないと非フォロワーに followers note が流出する (IDOR, #1440)。
+	// viewerID 空文字は匿名 (public/home のみ)。条件は core/note.CanSeeNote と
+	// 一致 (clip_note.ListByClipVisible と同じ式)。#1449 review で
+	// ListByChannelIDVisible を別メソッドに切り出さず本 signature に viewerID を
+	// 取り込む形に統合した (#1439 / #1441 と同じパターン)。
+	ListByChannelID(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
 	ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
 	ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
@@ -327,10 +335,27 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 	return notes, nil
 }
 
-// ListByChannelID returns notes posted to the channel.
-func (r *noteRepository) ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+// ListByChannelID returns notes posted to the channel that viewerID can see.
+// viewerID="" means anonymous (public/home only). Visibility conditions are
+// pushed down before LIMIT to mirror core/note.CanSeeNote and avoid the
+// underfilled-page / N+1 follower-check problems of post-fetch filtering
+// (#1440).
+func (r *noteRepository) ListByChannelID(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where("\"channelId\" = ?", channelID)
+	// core/note.CanSeeNote と同じ可視性条件を LIMIT 前に SQL で絞る。
+	// post-fetch filter だとページが過少充填されるのと followers 判定が
+	// note ごとの N+1 になるため LIMIT 前に push down する (#1440)。
+	if viewerID == "" {
+		q = q.Where(`"visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("visibility" IN ('public','home') `+
+				`OR "userId" = ? `+
+				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+			viewerID, viewerID, viewerID)
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -611,8 +636,19 @@ func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID
 		limit = 10
 	}
 	q := preloadNoteRelations(r.db).
-		Where("mentions @> ARRAY[?]::varchar[]", userID).
-		Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+		Where("mentions @> ARRAY[?]::varchar[]", userID)
+	// visibility push-down: mention 対象 (= viewer = userID) が CanSeeNote で
+	// 見られる note のみ返す。mentions 配列は本文の @user パース結果で specified
+	// の visibleUserIds とは独立なので、これが無いと followers/specified note を
+	// mention されただけの非対象 viewer が本文と author を取得できてしまう (#1441)。
+	// viewer は notes/mentions の認証ユーザー = userID 固定。
+	q = q.Where(
+		`("visibility" IN ('public','home') `+
+			`OR "userId" = ? `+
+			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+		userID, userID, userID)
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}

@@ -265,12 +265,15 @@ func (s *Service) Search(query, sinceID, untilID string, limit, offset int) ([]*
 	})
 }
 
-// Timeline returns notes posted to the channel, newest first.
-func (s *Service) Timeline(channelID, untilID, sinceID string, limit int) ([]*model.Note, error) {
+// Timeline returns notes posted to the channel, newest first. viewerID は
+// 閲覧者 ID (匿名は空文字)。public channel は誰でも見られるが、そこに投稿
+// された followers / specified note は viewer に応じて SQL で除外しないと
+// 非フォロワーへ流出する (#1440)。
+func (s *Service) Timeline(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	if _, err := s.repo.FindByID(channelID); err != nil {
 		return nil, ErrChannelNotFound
 	}
-	return s.noteRepo.ListByChannelID(channelID, untilID, sinceID, limit)
+	return s.noteRepo.ListByChannelID(channelID, viewerID, untilID, sinceID, limit)
 }
 
 // OnNotePosted updates lastNotedAt / notesCount and, when unreadRepo is

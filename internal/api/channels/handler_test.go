@@ -493,13 +493,63 @@ func TestTimeline_LimitClamping(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// failingNoteRepo: ListByChannelID returns an error so Timeline hits the
-// internal-error branch.
+// TestTimeline_HidesNonPublicFromOutsiders は public channel に投稿された
+// followers / specified note が非フォロワー / non-target viewer / 匿名に
+// 露出しないことを handler 層で固定する (#1440 IDOR)。
+func TestTimeline_HidesNonPublicFromOutsiders(t *testing.T) {
+	h, repo, _, noteRepo := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1"}
+	cid := "c1"
+	noteRepo.Notes["n_pub"] = &model.Note{
+		ID: "n_pub", ChannelID: &cid, UserID: "author", Visibility: model.NoteVisibilityPublic,
+	}
+	noteRepo.Notes["n_fol"] = &model.Note{
+		ID: "n_fol", ChannelID: &cid, UserID: "author", Visibility: model.NoteVisibilityFollowers,
+	}
+	noteRepo.Notes["n_spec"] = &model.Note{
+		ID: "n_spec", ChannelID: &cid, UserID: "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"allowed"},
+	}
+	noteRepo.Following["follower"] = []string{"author"}
+
+	cases := []struct {
+		name    string
+		viewer  string // 空文字 = 匿名
+		visible map[string]bool
+	}{
+		{"anonymous", "", map[string]bool{"n_pub": true}},
+		{"non-follower", "stranger", map[string]bool{"n_pub": true}},
+		{"non-target specified viewer", "stranger", map[string]bool{"n_pub": true}},
+		{"follower", "follower", map[string]bool{"n_pub": true, "n_fol": true}},
+		{"specified target", "allowed", map[string]bool{"n_pub": true, "n_spec": true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newReq(t, `{"channelId":"c1","limit":50}`)
+			if tc.viewer != "" {
+				setUser(c, tc.viewer)
+			}
+			require.NoError(t, h.Timeline(c))
+			require.Equal(t, http.StatusOK, rec.Code)
+			var rows []map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+			got := make(map[string]bool, len(rows))
+			for _, r := range rows {
+				got[r["id"].(string)] = true
+			}
+			assert.Equal(t, tc.visible, got)
+		})
+	}
+}
+
+// failingChannelNoteRepo: ListByChannelID returns an error so Timeline hits the
+// internal-error branch (#1440 で service が visibility push-down 版に切替)。
 type failingChannelNoteRepo struct {
 	*testutil.MockNoteRepository
 }
 
-func (r *failingChannelNoteRepo) ListByChannelID(_ string, _, _ string, _ int) ([]*model.Note, error) {
+func (r *failingChannelNoteRepo) ListByChannelID(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, errors.New("boom")
 }
 

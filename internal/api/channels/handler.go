@@ -391,14 +391,21 @@ func (h *Handler) Timeline(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	notes, err := h.svc.Timeline(req.ChannelID, untilID, sinceID, limit)
+	viewer := middleware.GetUser(c)
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	// public channel に投稿された followers / specified note を非フォロワーに
+	// 返さないよう、visibility filter は service / repo 層で LIMIT 前に SQL
+	// push-down する (#1440)。
+	notes, err := h.svc.Timeline(req.ChannelID, viewerID, untilID, sinceID, limit)
 	if err != nil {
 		if errors.Is(err, corechannel.ErrChannelNotFound) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "4d0eeeba-a02c-4c3c-9966-ef60d38d2e7f"))
 		}
 		return apierr.JSONInternalError(c)
 	}
-	viewer := middleware.GetUser(c)
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
