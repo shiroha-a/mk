@@ -29,7 +29,18 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+	// 旧実装は noteRepo.FindByID で存在確認のみ行い visibility check が抜けて
+	// いた (#1443)。note ID を既に知っている viewer が followers / specified
+	// visibility の note を favorite 化でき、その後 /api/i/favorites 経由で
+	// content / author を pull 可能 (favorite 一覧側は upstream 互換のため
+	// 素の PackNotes で返す設計 — handler.go:633-636)。author が visibility
+	// を絞った後も古い favorite 行が残るため #799「ID 既知公開」doctrine は
+	// 適用不可。queryService.RequireVisible で見えない note は存在隠蔽する。
+	// queryService 未配線時は fail-closed (ShowPartialBulk と同じ pattern)。
+	if h.queryService == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
+	}
+	if _, err := h.queryService.RequireVisible(user, req.NoteID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	if h.favoriteRepo == nil {

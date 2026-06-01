@@ -65,6 +65,38 @@ func TestQueryService_ShowForAPI_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, note.ErrNoteNotFound)
 }
 
+// RequireVisible は #1443 で追加した public wrapper。favorites/create 等の
+// mutation endpoint が「存在 + 閲覧可」を 1 ステップで確認するために使う。
+func TestQueryService_RequireVisible_NotFound(t *testing.T) {
+	svc, _, _ := newQueryService(t)
+	_, err := svc.RequireVisible(&model.User{ID: "viewer"}, "missing")
+	require.ErrorIs(t, err, note.ErrNoteNotFound)
+}
+
+func TestQueryService_RequireVisible_HiddenFromStranger(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	_, err := svc.RequireVisible(&model.User{ID: "viewer"}, "n1")
+	require.ErrorIs(t, err, note.ErrNoteNotFound)
+}
+
+func TestQueryService_RequireVisible_VisibleToFollower(t *testing.T) {
+	svc, noteRepo, followingRepo := newQueryService(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "viewer", FolloweeID: "author"}
+	got, err := svc.RequireVisible(&model.User{ID: "viewer"}, "n1")
+	require.NoError(t, err)
+	assert.Equal(t, "n1", got.ID)
+}
+
+func TestQueryService_RequireVisible_PublicVisibleToAnonymous(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityPublic}
+	got, err := svc.RequireVisible(nil, "n1")
+	require.NoError(t, err)
+	assert.Equal(t, "n1", got.ID)
+}
+
 func TestQueryService_ListRenotes(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
