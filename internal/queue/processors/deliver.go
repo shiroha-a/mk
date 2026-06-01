@@ -103,6 +103,11 @@ func NewDeliverProcessor(signer HTTPSigner) *DeliverProcessor {
 // across deliver jobs. kind は "rsa" / "ed" で、RSA と Ed25519 の cache entry を
 // 区別する。PEM が変わる (= 鍵 rotation) と cache key も変わるため stale な鍵を
 // 返さない。keyCache 未配線時は parse をそのまま呼ぶ。
+//
+// cache key は PEM 本体ではなく sha256(keyID+PEM) の hex を使う。map key を
+// ~1.5KB から 64B 程度に縮めて memory footprint を抑え、cache key 経由で PEM
+// 本体がログ等に混入するリスクも下げる。null-byte separator で keyID/PEM 境界
+// の曖昧さを避ける。
 func (p *DeliverProcessor) signingKey(kind, keyID, pem string, parse func(string, string) (*activitypub.PrivateKey, error)) (*activitypub.PrivateKey, error) {
 	if p.keyCache == nil {
 		return parse(keyID, pem)
