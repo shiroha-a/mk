@@ -273,6 +273,17 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "bea9b03f-36e0-49c5-a4db-627a029f8971"))
 	}
 
+	// 旧実装は存在確認のみで visibility check が無く、note ID 既知の viewer が
+	// followers / specified note を翻訳 = 本文の content leak + DeepL quota 消費
+	// ができた (#1445)。upstream TS `notes/translate` は非可視 note を専用の
+	// CANNOT_TRANSLATE_INVISIBLE_NOTE で弾く (NO_SUCH_NOTE で隠さない) ため
+	// それに合わせる。queryService 未配線時は fail-closed で同エラー。
+	// この gate は translator.Translate より前なので DeepL を消費しない。
+	viewer := middleware.GetUser(c)
+	if h.queryService == nil || !h.queryService.CanSee(viewer, n) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_TRANSLATE_INVISIBLE_NOTE", "Cannot translate invisible note.", "ea29f2ca-c368-43b3-aaf1-5ac3e74bbe5d"))
+	}
+
 	if n.Text == nil || *n.Text == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_TRANSLATE", "Nothing to translate.", "bef6e895-c05f-4572-96ab-58f5ae1e2e28"))
 	}

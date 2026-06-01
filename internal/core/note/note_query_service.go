@@ -80,6 +80,16 @@ func (s *QueryService) requireVisible(viewer *model.User, noteID string) (*model
 	return n, nil
 }
 
+// CanSee reports whether viewer may see the already-loaded note n, using the
+// service's followingRepo for follower checks. requireVisible が「不存在も
+// 非閲覧も ErrNoteNotFound に集約して存在隠蔽する」のに対し、caller が
+// 「存在は確認済みで可視性だけ別エラーにしたい」場合に使う。例: notes/translate
+// は upstream TS に合わせ、非可視を NO_SUCH_NOTE ではなく専用の
+// CANNOT_TRANSLATE_INVISIBLE_NOTE で返す (#1445)。
+func (s *QueryService) CanSee(viewer *model.User, n *model.Note) bool {
+	return CanSeeNote(viewer, n, s.followingRepo)
+}
+
 // ListRenotes returns the renotes of the given noteID after filtering for visibility.
 // 元のノートが閲覧できない場合はErrNoteNotFoundを返す。
 func (s *QueryService) ListRenotes(viewer *model.User, noteID, untilID, sinceID string, limit int) ([]*model.Note, error) {

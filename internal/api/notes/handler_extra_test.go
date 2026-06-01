@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/translate"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -490,6 +491,104 @@ func TestTranslate_InvalidParam(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	rec := postExtra(h.Translate, `{}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// newTranslateHandler は translator (non-nil dummy DeepL) + queryService +
+// followingRepo を wire した handler。dummy DeepL の Translate は呼ばれた
+// 場合のみ network に出るので、visibility gate が translator.Translate より
+// 前で弾くこと (= DeepL quota を消費しないこと) を、ネットワークなしの
+// テストで検証できる (#1445)。
+func newTranslateHandler(t *testing.T) (*Handler, *testutil.MockNoteRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	querySvc := corenote.NewQueryService(noteRepo, followingRepo)
+	h := NewHandler(noteRepo, nil, nil, querySvc, nil, nil, nil, nil, idGen)
+	h.SetTranslator(translate.NewDeepL("dummy", false, nil))
+	return h, noteRepo, followingRepo
+}
+
+func translateBody(t *testing.T, rec *httptest.ResponseRecorder) (string, string) {
+	t.Helper()
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	code, _ := errObj["code"].(string)
+	idStr, _ := errObj["id"].(string)
+	return code, idStr
+}
+
+// followers note を非 follower / 匿名 viewer が翻訳しようとすると、本文が
+// あっても translator に渡さず 400 CANNOT_TRANSLATE_INVISIBLE_NOTE で弾く。
+func TestTranslate_FollowersNote_NonFollower_Invisible(t *testing.T) {
+	secret := "secret body"
+	for _, viewer := range []*model.User{nil, {ID: "u2"}} {
+		h, noteRepo, _ := newTranslateHandler(t)
+		noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &secret}
+		rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, viewer)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		code, idStr := translateBody(t, rec)
+		assert.Equal(t, "CANNOT_TRANSLATE_INVISIBLE_NOTE", code)
+		assert.Equal(t, "ea29f2ca-c368-43b3-aaf1-5ac3e74bbe5d", idStr)
+	}
+}
+
+// specified note を visibleUserIds 外の viewer が翻訳しようとすると 400 で弾く。
+func TestTranslate_SpecifiedNote_NotInList_Invisible(t *testing.T) {
+	secret := "secret body"
+	h, noteRepo, _ := newTranslateHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"u3"}, Text: &secret}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	code, _ := translateBody(t, rec)
+	assert.Equal(t, "CANNOT_TRANSLATE_INVISIBLE_NOTE", code)
+}
+
+// follower / visibleUserIds 対象 / author は visibility gate を通過する。
+// Text を空にして text-empty 経路 (CANNOT_TRANSLATE) で止め、DeepL を呼ばずに
+// 「gate を通った」ことを検証する (invisible エラーでないことを確認)。
+func TestTranslate_VisibleViewers_PassVisibilityGate(t *testing.T) {
+	empty := ""
+	cases := []struct {
+		name   string
+		note   *model.Note
+		viewer *model.User
+		follow bool
+	}{
+		{"follower", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &empty}, &model.User{ID: "u2"}, true},
+		{"author", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &empty}, &model.User{ID: "u1"}, false},
+		{"specified target", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"u2"}, Text: &empty}, &model.User{ID: "u2"}, false},
+		{"public anonymous", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &empty}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, noteRepo, fRepo := newTranslateHandler(t)
+			noteRepo.Notes["n1"] = tc.note
+			if tc.follow {
+				fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: tc.viewer.ID, FolloweeID: "u1"}
+			}
+			rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, tc.viewer)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			code, _ := translateBody(t, rec)
+			assert.Equal(t, "CANNOT_TRANSLATE", code, "visibility gate を通過し text-empty 経路に到達する")
+		})
+	}
+}
+
+// queryService 未配線時は visibility を確認できないため fail-closed で
+// CANNOT_TRANSLATE_INVISIBLE_NOTE を返す (public note でも translate しない)。
+func TestTranslate_NoQueryServiceRejects(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	secret := "secret body"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &secret}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen) // queryService=nil
+	h.SetTranslator(translate.NewDeepL("dummy", false, nil))
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	code, _ := translateBody(t, rec)
+	assert.Equal(t, "CANNOT_TRANSLATE_INVISIBLE_NOTE", code)
 }
 
 // --- ShowPartialBulk ---
