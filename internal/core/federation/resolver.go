@@ -73,6 +73,10 @@ var (
 	ErrInvalidActor = errors.New("invalid actor document")
 	// ErrInvalidNote is returned when a fetched Note cannot be parsed.
 	ErrInvalidNote = errors.New("invalid note document")
+	// ErrHostNotAllowed is returned when the resolver is asked to fetch /
+	// ingest content from a host that the local instance's federation policy
+	// (federation: none / specified, blockedHosts) does not allow.
+	ErrHostNotAllowed = errors.New("host not allowed by federation policy")
 )
 
 // DefaultActorTTL is the default duration after which a cached actor (and its
@@ -145,6 +149,12 @@ type Resolver struct {
 	// 未設定なら probe 自体をスキップする (安全側に倒す: SSRF リスクを
 	// 起こすくらいなら properties 空のまま運用)。
 	imageProbeClient *http.Client
+	// hostBlocker は federation 設定 (none / specified / blockedHosts) を
+	// 評価する gate。fetchActor / resolveNoteOnce / IngestNoteWithCreated
+	// の入口で URI の host / attributedTo の host を判定して、ホワイト
+	// リスト外 host からの取り込みを拒否する。未配線時は legacy 挙動
+	// (全 host 許可) にフォールバック。
+	hostBlocker HostBlockChecker
 
 	// resolveActorGroup / resolveNoteGroup は同一 URI への並行 ResolveActor /
 	// ResolveNote 呼び出しを 1 度の DB lookup + HTTP fetch に collapse する
@@ -267,6 +277,36 @@ func (r *Resolver) SetImageProbeClient(client *http.Client) {
 // は無視される (旧挙動)。
 func (r *Resolver) SetDriveFileRepo(repo repository.DriveFileRepository) {
 	r.driveFileRepo = repo
+}
+
+// SetHostBlockChecker attaches a federation-policy checker used to reject
+// new fetches / ingests from hosts that the running instance does not
+// federate with (federation: none / specified、blockedHosts)。未配線時は
+// gate が無効化されて legacy 挙動 (全 host 許可) に倒れる。
+func (r *Resolver) SetHostBlockChecker(c HostBlockChecker) {
+	r.hostBlocker = c
+}
+
+// hostAllowed reports whether the resolver may talk to / persist content
+// authored on host. host == "" (= local) は常に true。未配線時も true。
+func (r *Resolver) hostAllowed(host string) bool {
+	if r.hostBlocker == nil || host == "" {
+		return true
+	}
+	if r.hostBlocker.IsBlocked(host) {
+		return false
+	}
+	return r.hostBlocker.IsAllowed(host)
+}
+
+// hostAllowedForURI parses uri and applies hostAllowed. URI 解析不可は別
+// 経路で reject される前提で許容 (= true) する。
+func (r *Resolver) hostAllowedForURI(uri string) bool {
+	host, err := hostFromURI(uri)
+	if err != nil {
+		return true
+	}
+	return r.hostAllowed(host)
 }
 
 // PublicKeyForActor returns the cached public key PEM for an actor ID.
@@ -634,6 +674,13 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 // document whose `type` is not in activitypub.ValidActorTypes — this guards
 // against a non-Actor object (e.g. a Note) being interpreted as a Person.
 func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
+	// federation policy gate: ホワイトリスト連合 (federation: specified) や
+	// blockedHosts 設定下では、対象 URI の host が許可されていなければ HTTP
+	// fetch 自体を抑止する。refreshActor / refreshPublicKey / resolveActorOnce
+	// すべてここを経由するため、actor 側はこの 1 箇所で塞げる。
+	if !r.hostAllowedForURI(uri) {
+		return nil, ErrHostNotAllowed
+	}
 	body, err := r.fetcher.FetchObject(uri)
 	if err != nil {
 		return nil, err
@@ -813,6 +860,13 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 	if existing, err := r.noteRepo.FindByURI(uri); err == nil {
 		return existing, nil
 	}
+	// federation policy gate: ホワイトリスト外 / blocked な host の note は
+	// HTTP fetch も DB 永続化もしない。Announce 経由で第三者 host の note を
+	// 渡されるケースを塞ぐ (handleAnnounce → ResolveNote)。既存行 (上の
+	// FindByURI hit) は素通しで legacy 互換。
+	if !r.hostAllowedForURI(uri) {
+		return nil, ErrHostNotAllowed
+	}
 	body, err := r.fetcher.FetchObject(uri)
 	if err != nil {
 		return nil, err
@@ -861,6 +915,13 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	}
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
 		return existing, false, nil
+	}
+	// federation policy gate: 直接 handleCreate から受け取った body や、
+	// 中継経由で attributedTo が allowlist 外の host を指している payload を
+	// DB 永続化させない。既存 row hit (上の FindByURI) は素通しで legacy
+	// 互換を維持する。
+	if !r.hostAllowedForURI(apNote.AttributedTo) {
+		return nil, false, ErrHostNotAllowed
 	}
 	actor, err := r.ResolveActor(apNote.AttributedTo)
 	if err != nil {

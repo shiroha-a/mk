@@ -213,13 +213,46 @@ func TestShow_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// 非 public page を非所有者が show すると、存在ごと隠して 404 NO_SUCH_PAGE を
+// 返すこと (#1432)。upstream TS pages/show は可視性ゲートを持たず noSuchPage
+// のみ返すため shape が一致し、private page の存在を 403 で露呈しない。
 func TestShow_AccessDenied(t *testing.T) {
 	h, repo, _ := newHandler(t)
 	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "owner", Visibility: model.PageVisibilityFollowers}
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_PAGE", errObj["code"])
+}
+
+// 存在隠蔽は経路非依存であることを固定する (#1432 review)。{userId, name} 経路
+// (ShowByName) でも非public・非所有者には 404 NO_SUCH_PAGE を返す。
+func TestShow_AccessDenied_ByName(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "owner", Name: "alpha", Visibility: model.PageVisibilityFollowers}
+	c, rec := newReq(t, `{"userId":"owner","name":"alpha"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
+}
+
+// {username, name} 経路 (#955) でも非public・非所有者には 404 NO_SUCH_PAGE。
+func TestShow_AccessDenied_ByUsername(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityFollowers}
+	h.SetUserSource(&stubUserSource{
+		byUsernameBundle: &coreuser.UserWithProfile{User: &model.User{ID: "alice", Username: "alice"}},
+	})
+	c, rec := newReq(t, `{"username":"alice","name":"alpha"}`)
+	setUser(c, "bob")
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
 }
 
 // --- Update ----------------------------------------------------------------

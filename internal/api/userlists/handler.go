@@ -166,9 +166,14 @@ func (h *Handler) Push(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
 	}
+	// 認証ユーザーが list 所有者でない場合は存在ごと隠す (NO_SUCH_LIST)。これが
+	// 無いと任意の認証ユーザーが他人の list に勝手に member を push できる。
+	viewer := middleware.GetUser(c)
+	if viewer == nil || list.UserID != viewer.ID {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
+	}
 	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
-	// で評価する (upstream は owner = me 経路、mk-go も owner.UserID と me 一致
-	// を確認する access gate は別途必要だが本 PR scope 外、limit 単独で gate)。
+	// で評価する (= owner == viewer は直上で確定済)。
 	if h.rolePolicyProvider != nil {
 		if limit, ok := h.rolePolicyProvider.GetUserPolicies(list.UserID)["userEachUserListsLimit"].(int); ok && limit >= 0 {
 			count, err := h.repo.CountMembers(list.ID)
@@ -205,6 +210,17 @@ func (h *Handler) Pull(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ListID == "" || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId and userId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// 所有者以外は存在ごと隠す。upstream Misskey TS users/lists/pull と同 UUID
+	// (= update-membership と共有)。これにより「未存在」と「他人」を error UUID
+	// で識別できないようにする副次効果も得られる。
+	list, err := h.repo.FindByID(req.ListID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+	}
+	viewer := middleware.GetUser(c)
+	if viewer == nil || list.UserID != viewer.ID {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+	}
 	if err := h.repo.RemoveMember(req.ListID, req.UserID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -218,6 +234,17 @@ func (h *Handler) Delete(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// 所有者以外は存在ごと隠す。これが無いと任意の認証ユーザーが他人の list
+	// を delete できる (data loss、ulid のため復元不能)。UUID は upstream
+	// Misskey TS users/lists/delete と一致させる。
+	list, err := h.repo.FindByID(req.ListID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
+	}
+	viewer := middleware.GetUser(c)
+	if viewer == nil || list.UserID != viewer.ID {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
 	}
 	if err := h.repo.Delete(req.ListID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

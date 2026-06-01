@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -470,15 +471,82 @@ func TestNoteRepository_ListByUserIDFiltered(t *testing.T) {
 
 	// withFiles=false の defaults (= withReplies=true / withRenotes=true /
 	// withChannelNotes=false)。channel=false の filter は本ケースで影響なし。
-	out, err := repo.ListByUserIDFiltered(user.ID, "", "", 10, false, true, true, false)
+	out, err := repo.ListByUserIDFiltered(user.ID, "", "", "", 10, false, true, true, false)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 
 	// withFiles=true で file 添付のみ
-	out, err = repo.ListByUserIDFiltered(user.ID, "", "", 10, true, true, true, false)
+	out, err = repo.ListByUserIDFiltered(user.ID, "", "", "", 10, true, true, true, false)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, "n_lf_file", out[0].ID)
+}
+
+// TestNoteRepository_ListByUserIDFiltered_VisibilityPushDown は users/notes の
+// visibility push-down (#1418 review) を検証する。author が public / followers /
+// specified の 3 note を持ち、viewer ごとに SQL 段階で見える note が変わること
+// を確認する (LIMIT 前に絞られるためページネーションが途切れない)。
+func TestNoteRepository_ListByUserIDFiltered_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_lfv_a", "lfvauthor")
+	follower := mkUser("u_lfv_f", "lfvfollower")
+	allowed := mkUser("u_lfv_al", "lfvallowed")
+	stranger := mkUser("u_lfv_s", "lfvstranger")
+
+	notes := []*model.Note{
+		{ID: "n_lfv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
+		{ID: "n_lfv_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
+		{ID: "n_lfv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	f := &model.Following{ID: "fl_lfv_1", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+
+	idsOf := func(rows []*model.Note) []string {
+		out := make([]string, 0, len(rows))
+		for _, n := range rows {
+			out = append(out, n.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	// 匿名 viewer は public のみ。
+	out, err := repo.ListByUserIDFiltered(author.ID, "", "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lfv_pub"}, idsOf(out))
+
+	// stranger (follow なし / specified 対象外) も public のみ。
+	out, err = repo.ListByUserIDFiltered(author.ID, stranger.ID, "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lfv_pub"}, idsOf(out))
+
+	// follower は public + followers。
+	out, err = repo.ListByUserIDFiltered(author.ID, follower.ID, "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lfv_fol", "n_lfv_pub"}, idsOf(out))
+
+	// specified の visibleUserIds に含まれる viewer は public + specified。
+	out, err = repo.ListByUserIDFiltered(author.ID, allowed.ID, "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lfv_pub", "n_lfv_spec"}, idsOf(out))
+
+	// author 本人は全 visibility を閲覧可。
+	out, err = repo.ListByUserIDFiltered(author.ID, author.ID, "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lfv_fol", "n_lfv_pub", "n_lfv_spec"}, idsOf(out))
 }
 
 func TestNoteRepository_ListByUserIDFiltered_QueryError(t *testing.T) {
@@ -486,7 +554,7 @@ func TestNoteRepository_ListByUserIDFiltered_QueryError(t *testing.T) {
 	cancel()
 	db := testDB.WithContext(ctx)
 	repo := NewNoteRepository(db)
-	_, err := repo.ListByUserIDFiltered("a", "", "", 10, true, true, true, false)
+	_, err := repo.ListByUserIDFiltered("a", "", "", "", 10, true, true, true, false)
 	assert.Error(t, err)
 }
 

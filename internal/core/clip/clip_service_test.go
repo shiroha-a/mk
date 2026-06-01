@@ -18,6 +18,9 @@ func newSvc(t *testing.T) (*clip.Service, *testutil.MockClipRepository, *testuti
 	repo := testutil.NewMockClipRepository()
 	noteRepo := testutil.NewMockClipNoteRepository()
 	notes := testutil.NewMockNoteRepository()
+	// ListByClipVisible の visibility push-down 再現のため、clip mock に note の
+	// visibility lookup 用 map を共有させる (#1418 review)。
+	noteRepo.Notes = notes.Notes
 	idGen, _ := id.NewGenerator("aidx")
 	return clip.NewService(repo, noteRepo, notes, idGen), repo, noteRepo, notes
 }
@@ -318,8 +321,8 @@ func TestRemoveNote_RepoError(t *testing.T) {
 func TestNotes_HappyPath(t *testing.T) {
 	svc, repo, _, notes := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
-	notes.Notes["n2"] = &model.Note{ID: "n2"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
+	notes.Notes["n2"] = &model.Note{ID: "n2", Visibility: model.NoteVisibilityPublic}
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
 	require.NoError(t, svc.AddNote("u1", "c1", "n2"))
 
@@ -344,7 +347,7 @@ func TestNotes_PrivateAccessDenied(t *testing.T) {
 func TestNotes_PublicReadableByAnyone(t *testing.T) {
 	svc, repo, _, notes := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", IsPublic: true}
-	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
 	rows, err := svc.Notes("u2", "c1", "", "", 10)
 	require.NoError(t, err)
@@ -359,12 +362,13 @@ func TestNotes_EmptyClipReturnsNil(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
-// listFailRepo causes ListByClip to fail.
+// listFailRepo causes the clip note listing to fail. Service.Notes は
+// ListByClipVisible を呼ぶためそちらを override する。
 type listFailRepo struct {
 	*testutil.MockClipNoteRepository
 }
 
-func (r *listFailRepo) ListByClip(_ string, _, _ string, _ int) ([]*model.ClipNote, error) {
+func (r *listFailRepo) ListByClipVisible(_, _, _, _ string, _ int) ([]*model.ClipNote, error) {
 	return nil, errors.New("boom")
 }
 

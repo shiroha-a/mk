@@ -935,6 +935,63 @@ func TestNotes_WithChannelNotes(t *testing.T) {
 	assert.True(t, hasChannel, "withChannelNotes=true で channel 投稿が含まれる")
 }
 
+// followers / specified visibility のノートは閲覧権限のない viewer に対して
+// 除外されることを guard する。
+func TestNotes_AnonymousExcludesNonPublicVisibility(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	text := "secret"
+	noteRepo.Notes["nv_pub"] = &model.Note{
+		ID: "nv_pub", UserID: "user1", Text: &text,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	noteRepo.Notes["nv_fol"] = &model.Note{
+		ID: "nv_fol", UserID: "user1", Text: &text,
+		Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	noteRepo.Notes["nv_spec"] = &model.Note{
+		ID: "nv_spec", UserID: "user1", Text: &text,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"other"},
+		Reactions:      datatypes.JSON([]byte("{}")),
+	}
+
+	rec := post(h.Notes, `{"userId":"user1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	ids := map[string]bool{}
+	for _, n := range out {
+		ids[n["id"].(string)] = true
+	}
+	assert.True(t, ids["nv_pub"], "public は anonymous で見える")
+	assert.False(t, ids["nv_fol"], "followers は anonymous に漏らさない")
+	assert.False(t, ids["nv_spec"], "specified は対象外 viewer に漏らさない")
+}
+
+// follower 関係にある viewer は followers visibility のノートを閲覧可能。
+func TestNotes_FollowerSeesFollowersVisibility(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	text := "for-followers"
+	noteRepo.Notes["nv_fol2"] = &model.Note{
+		ID: "nv_fol2", UserID: "user1", Text: &text,
+		Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	// visibility は repository 側で push down されるため、mock note repo の
+	// Following map に follow 関係を持たせる (handler は viewerID を渡すだけ)。
+	noteRepo.Following = map[string][]string{"viewer": {"user1"}}
+
+	rec := postStub(h.Notes, `{"userId":"user1"}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "nv_fol2", out[0]["id"])
+}
+
 func TestNotes_LimitClamp(t *testing.T) {
 	h, repo := newTestHandler(t)
 	addTestUser(repo)
@@ -1447,7 +1504,7 @@ func (f *failingNoteRepo) ListByUserID(_ string, _, _ string, _ int) ([]*model.N
 	return nil, assertErr
 }
 
-func (f *failingNoteRepo) ListByUserIDFiltered(_, _, _ string, _ int, _, _, _, _ bool) ([]*model.Note, error) {
+func (f *failingNoteRepo) ListByUserIDFiltered(_, _, _, _ string, _ int, _, _, _, _ bool) ([]*model.Note, error) {
 	return nil, assertErr
 }
 
@@ -1598,6 +1655,42 @@ func TestShow_PinnedNotes_Populated(t *testing.T) {
 	notes, ok := resp["pinnedNotes"].([]any)
 	require.True(t, ok)
 	assert.Len(t, notes, 1)
+}
+
+// pinnedNotes に followers / specified visibility の note が含まれる場合、
+// 閲覧権限のない viewer (anonymous) には pinnedNotes 本体から除外されること
+// を guard する。pinnedNoteIds は visibility に関係なく出る upstream 挙動を
+// 維持しつつ、pack 済み note 本体だけ落とす (#1418 review)。
+func TestShow_PinnedNotes_ExcludesNonVisibleFromBody(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+	addTestUser(userRepo)
+
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	require.NoError(t, piningRepo.Create(&model.UserNotePining{ID: "pp_pub", UserID: "user1", NoteID: "pn_pub"}))
+	require.NoError(t, piningRepo.Create(&model.UserNotePining{ID: "pp_fol", UserID: "user1", NoteID: "pn_fol"}))
+	h.SetPiningRepo(piningRepo)
+
+	nr, _ := h.noteRepo.(*testutil.MockNoteRepository)
+	require.NotNil(t, nr)
+	txt := "pinned"
+	nr.Notes["pn_pub"] = &model.Note{ID: "pn_pub", UserID: "user1", Text: &txt, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	nr.Notes["pn_fol"] = &model.Note{ID: "pn_fol", UserID: "user1", Text: &txt, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}"))}
+
+	body := `{"userId": "user1"}`
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/show", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, h.Show(c))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	notes, ok := resp["pinnedNotes"].([]any)
+	require.True(t, ok)
+	require.Len(t, notes, 1, "followers の pinned note は anonymous の pinnedNotes から除外される")
+	first := notes[0].(map[string]any)
+	assert.Equal(t, "pn_pub", first["id"])
 }
 
 func TestShow_PinnedPage_Populated(t *testing.T) {

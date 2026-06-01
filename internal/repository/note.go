@@ -65,7 +65,12 @@ type NoteRepository interface {
 	//
 	// caller (handler) は JSON pointer field から bool 値を必ず upstream の
 	// デフォルトに合わせて詰めること (#1021)。
-	ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error)
+	//
+	// viewerID は visibility push-down のための閲覧者 ID。空文字は匿名
+	// (public/home のみ)。core/note.CanSeeNote と同じ可視性条件を LIMIT 前に
+	// SQL で絞ることで、post-fetch filter によるページ過少充填と followers
+	// 判定の N+1 を避ける (#1418 review)。
+	ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error)
 	ListByChannelID(channelID string, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
 	ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
@@ -272,9 +277,24 @@ func (r *noteRepository) ListByUserID(userID string, untilID, sinceID string, li
 // handler 側で必ず詰めること (例: handler は withReplies=true / withRenotes=true
 // / withChannelNotes=false で渡す)。filter struct ではなく bool 引数で受ける
 // のは testutil ↔ repository の import cycle を避けるため (#1021)。
-func (r *noteRepository) ListByUserIDFiltered(userID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
+func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where(`"userId" = ?`, userID)
+	// upstream の generateVisibilityQuery 相当を LIMIT 前に push down する。
+	// post-fetch filter だと viewer が見られない note を除外した分 1 ページが
+	// limit 未満になりページネーションが途切れる + followers 判定が note ごとの
+	// N+1 になるため、LIMIT 前に SQL で絞る。条件は core/note.CanSeeNote と
+	// 一致させる (note_reaction.ListByUserID と同じ可視性定義)。
+	if viewerID == "" {
+		q = q.Where(`"visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("visibility" IN ('public','home') `+
+				`OR "userId" = ? `+
+				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+			viewerID, viewerID, viewerID)
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
