@@ -1385,6 +1385,7 @@ func (s *Server) setupRoutes() {
 	// Notifications endpoints
 	notificationsHandler := notifications.NewHandler(notificationService, idGen)
 	notificationsHandler.SetRepos(userRepo, noteRepo)
+	notificationsHandler.SetQueryService(noteQueryService)
 	notificationsHandler.SetFollowRequestRepo(followRequestRepo)
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
