@@ -607,8 +607,19 @@ func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID
 		limit = 10
 	}
 	q := preloadNoteRelations(r.db).
-		Where("mentions @> ARRAY[?]::varchar[]", userID).
-		Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+		Where("mentions @> ARRAY[?]::varchar[]", userID)
+	// visibility push-down: mention 対象 (= viewer = userID) が CanSeeNote で
+	// 見られる note のみ返す。mentions 配列は本文の @user パース結果で specified
+	// の visibleUserIds とは独立なので、これが無いと followers/specified note を
+	// mention されただけの非対象 viewer が本文と author を取得できてしまう (#1441)。
+	// viewer は notes/mentions の認証ユーザー = userID 固定。
+	q = q.Where(
+		`("visibility" IN ('public','home') `+
+			`OR "userId" = ? `+
+			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+		userID, userID, userID)
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
