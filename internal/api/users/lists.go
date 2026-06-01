@@ -90,6 +90,21 @@ func (h *Handler) ListsFavorite(c echo.Context) error {
 	if h.userListFavoriteRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// 非公開 list は所有者以外には存在ごと隠す (#1423)。`users/lists/show`
+	// (`internal/api/userlists/handler.go` の Show) と同じ semantics で gate
+	// しないと、listId を知っている任意の認証ユーザーが fav row を作って
+	// `i/favorites` 経由で他人の private list の存在を fingerprint できる。
+	// UUID は show と揃え probing 耐性を上げる。userListRepo が未配線の test
+	// 経路ではこの gate を skip する (production は router が必ず wire)。
+	if h.userListRepo != nil {
+		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+		}
+		if !list.IsPublic && list.UserID != user.ID {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+		}
+	}
 	already, _ := h.userListFavoriteRepo.Exists(user.ID, req.ListID)
 	if already {
 		return c.NoContent(http.StatusNoContent)
