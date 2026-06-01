@@ -273,7 +273,7 @@ func (s *Service) Timeline(channelID, viewerID, untilID, sinceID string, limit i
 	if _, err := s.repo.FindByID(channelID); err != nil {
 		return nil, ErrChannelNotFound
 	}
-	return s.noteRepo.ListByChannelIDVisible(channelID, viewerID, untilID, sinceID, limit)
+	return s.noteRepo.ListByChannelID(channelID, viewerID, untilID, sinceID, limit)
 }
 
 // OnNotePosted updates lastNotedAt / notesCount and, when unreadRepo is

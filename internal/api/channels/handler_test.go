@@ -543,13 +543,13 @@ func TestTimeline_HidesNonPublicFromOutsiders(t *testing.T) {
 	}
 }
 
-// failingNoteRepo: ListByChannelIDVisible returns an error so Timeline hits the
-// internal-error branch (#1440 で service が ListByChannelIDVisible に切替)。
+// failingChannelNoteRepo: ListByChannelID returns an error so Timeline hits the
+// internal-error branch (#1440 で service が visibility push-down 版に切替)。
 type failingChannelNoteRepo struct {
 	*testutil.MockNoteRepository
 }
 
-func (r *failingChannelNoteRepo) ListByChannelIDVisible(_, _, _, _ string, _ int) ([]*model.Note, error) {
+func (r *failingChannelNoteRepo) ListByChannelID(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, errors.New("boom")
 }
 

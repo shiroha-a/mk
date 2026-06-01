@@ -839,10 +839,7 @@ func (f *failingNoteRepo) ListByUserID(_ string, _, _ string, _ int) ([]*model.N
 func (f *failingNoteRepo) ListByUserIDFiltered(_, _, _, _ string, _ int, _, _, _, _ bool) ([]*model.Note, error) {
 	return nil, nil
 }
-func (f *failingNoteRepo) ListByChannelID(_ string, _, _ string, _ int) ([]*model.Note, error) {
-	return nil, nil
-}
-func (f *failingNoteRepo) ListByChannelIDVisible(_, _, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingNoteRepo) ListByChannelID(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, nil
 }
 func (f *failingNoteRepo) FindManyByIDsWithUser(_ []string) ([]*model.Note, error) {

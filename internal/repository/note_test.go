@@ -323,29 +323,30 @@ func TestNoteRepository_ListByChannelID(t *testing.T) {
 		defer cleanupNote(t, note.ID)
 	}
 
-	rows, err := repo.ListByChannelID(ch.ID, "", "", 10)
+	// すべて public note なので匿名 viewer (viewerID="") でも全件見える。
+	// visibility push-down (#1440 / #1449) の matrix は別 test で確認する。
+	rows, err := repo.ListByChannelID(ch.ID, "", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 3)
 
-	rows, err = repo.ListByChannelID(ch.ID, "n_lc_3", "", 10)
+	rows, err = repo.ListByChannelID(ch.ID, "", "n_lc_3", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 
-	rows, err = repo.ListByChannelID(ch.ID, "", "n_lc_1", 10)
+	rows, err = repo.ListByChannelID(ch.ID, "", "", "n_lc_1", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 
-	rows, err = repo.ListByChannelID(ch.ID, "", "", 0) // 0 → default 30
+	rows, err = repo.ListByChannelID(ch.ID, "", "", "", 0) // 0 → default 30
 	require.NoError(t, err)
 	assert.Len(t, rows, 3)
 }
 
-// TestNoteRepository_ListByChannelIDVisible は channels/timeline の visibility
+// TestNoteRepository_ListByChannelID_Visibility は channels/timeline の visibility
 // push-down (#1440 IDOR) を SQL 段階で検証する。public channel に
 // followers / specified visibility の note を混在させ、viewer ごとに見える
-// note が変わること、および ListByChannelID (filter なし) は全件返すことを
-// 確認する。
-func TestNoteRepository_ListByChannelIDVisible(t *testing.T) {
+// note が変わることを matrix で確認する (#1449 review で signature 統合)。
+func TestNoteRepository_ListByChannelID_Visibility(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	chRepo := NewChannelRepository(testDB)
 	followingRepo := NewFollowingRepository(testDB)
@@ -388,33 +389,28 @@ func TestNoteRepository_ListByChannelIDVisible(t *testing.T) {
 		return out
 	}
 
-	// ListByChannelID (filter なし) は全件返す。
-	rows, err := repo.ListByChannelID(ch.ID, "", "", 50)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub", "n_cv_spec"}, idsOf(rows))
-
 	// 匿名 viewer: public のみ。followers / specified が漏れない (#1440)。
-	rows, err = repo.ListByChannelIDVisible(ch.ID, "", "", "", 50)
+	rows, err := repo.ListByChannelID(ch.ID, "", "", "", 50)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cv_pub"}, idsOf(rows))
 
 	// 非 follower viewer に followers note は見えない。
-	rows, err = repo.ListByChannelIDVisible(ch.ID, "u_cv_stranger", "", "", 50)
+	rows, err = repo.ListByChannelID(ch.ID, "u_cv_stranger", "", "", 50)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cv_pub"}, idsOf(rows))
 
 	// follower viewer は public + followers。
-	rows, err = repo.ListByChannelIDVisible(ch.ID, follower.ID, "", "", 50)
+	rows, err = repo.ListByChannelID(ch.ID, follower.ID, "", "", 50)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub"}, idsOf(rows))
 
 	// specified 対象 viewer は public + specified。
-	rows, err = repo.ListByChannelIDVisible(ch.ID, allowed.ID, "", "", 50)
+	rows, err = repo.ListByChannelID(ch.ID, allowed.ID, "", "", 50)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cv_pub", "n_cv_spec"}, idsOf(rows))
 
 	// author 本人は全 visibility を閲覧可。
-	rows, err = repo.ListByChannelIDVisible(ch.ID, author.ID, "", "", 50)
+	rows, err = repo.ListByChannelID(ch.ID, author.ID, "", "", 50)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cv_fol", "n_cv_pub", "n_cv_spec"}, idsOf(rows))
 }
@@ -745,13 +741,12 @@ func TestNoteRepository_QueryErrors(t *testing.T) {
 	_, err := repo.ListByUserID("a", "", "", 10)
 	assert.Error(t, err)
 
-	_, err = repo.ListByChannelID("a", "", "", 10)
+	// 匿名 viewer (public/home only) と認証 viewer (full visibility 句) の
+	// 双方で DB error が propagate することを確認 (#1449)。
+	_, err = repo.ListByChannelID("a", "", "", "", 10)
 	assert.Error(t, err)
 
-	_, err = repo.ListByChannelIDVisible("a", "", "", "", 10)
-	assert.Error(t, err)
-
-	_, err = repo.ListByChannelIDVisible("a", "viewer", "", "", 10)
+	_, err = repo.ListByChannelID("a", "viewer", "", "", 10)
 	assert.Error(t, err)
 
 	_, err = repo.FindManyByIDsWithUser([]string{"a"})
