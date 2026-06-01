@@ -40,6 +40,7 @@ type Manager struct {
 	notifReader     NotificationReader
 	hardMute        HardMuteRulesLookup
 	followingLookup FollowingSnapshotLookup
+	noteVisibility  NoteVisibilityChecker
 }
 
 // NewManager constructs a Manager with no live connections. registry / bus が
@@ -74,6 +75,14 @@ func (m *Manager) SetFollowingSnapshotLookup(l FollowingSnapshotLookup) {
 	m.followingLookup = l
 }
 
+// SetNoteVisibilityChecker wires a NoteVisibilityChecker so per-connection
+// Dispatcher can refuse subNote subscriptions to non-visible notes
+// (#1460 IDOR fix)。未配線時は fail-closed で全 subNote が subscribe しない
+// (= production の router.go は必ず wire する、notifications #1444 と同 doctrine)。
+func (m *Manager) SetNoteVisibilityChecker(c NoteVisibilityChecker) {
+	m.noteVisibility = c
+}
+
 // Accept implements api/streaming.ConnectionAcceptor. *websocket.Conn から
 // Connection を組み立て、Dispatcher 経由で channel framework に橋渡しする。
 func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
@@ -93,6 +102,9 @@ func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 	dispatcher := NewDispatcher(c, m.registry, m.bus)
 	if m.notifReader != nil {
 		dispatcher.SetNotificationReader(m.notifReader)
+	}
+	if m.noteVisibility != nil {
+		dispatcher.SetNoteVisibilityChecker(m.noteVisibility)
 	}
 	c.SetMessageHandler(dispatcher.HandleClientMessage)
 	c.SetCloseHandler(func() {

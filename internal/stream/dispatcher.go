@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sync"
+
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // PubSubBus is the minimal pubsub interface that Dispatcher needs. core/event.
@@ -28,6 +30,20 @@ type NotificationReader interface {
 	ReadAll(userID string) error
 }
 
+// NoteVisibilityChecker gates subNote subscriptions by checking whether the
+// connection's viewer is allowed to see the target note (#1460 IDOR fix)。
+// 旧実装は noteID を持っていれば誰でも noteStream:<noteID> を subscribe
+// でき、followers / specified note の reacted / unreacted / pollVoted /
+// deleted event が漏れていた (i/notifications の #1444 IDOR の WS 版)。
+//
+// *core/note.QueryService が既存 RequireVisible(viewer, noteID) method で
+// 本 interface を自動 satisfy する (戻り値の (*model.Note, error) と
+// ErrNoteNotFound セマンティクスは存在隠蔽用)。dispatcher は note 本体は
+// 使わず err 有無だけで gate するので、interface に追加メソッドは不要。
+type NoteVisibilityChecker interface {
+	RequireVisible(viewer *model.User, noteID string) (*model.Note, error)
+}
+
 // Dispatcher is the per-Connection state holding registered channels and the
 // reverse map "topic → channel id" used to route inbound pubsub events.
 //
@@ -45,9 +61,10 @@ type Dispatcher struct {
 	topics   map[string]map[string]bool // topic → set of channel ids
 
 	// subNote の refcount 管理 (noteID → count)
-	noteSubMu   sync.Mutex
-	noteSubs    map[string]int
-	notifReader NotificationReader
+	noteSubMu      sync.Mutex
+	noteSubs       map[string]int
+	notifReader    NotificationReader
+	noteVisibility NoteVisibilityChecker
 }
 
 // NewDispatcher constructs a Dispatcher for the given connection. registry /
@@ -66,6 +83,15 @@ func NewDispatcher(conn *Connection, registry *Registry, bus PubSubBus) *Dispatc
 // SetNotificationReader wires a NotificationReader for readNotification.
 func (d *Dispatcher) SetNotificationReader(nr NotificationReader) {
 	d.notifReader = nr
+}
+
+// SetNoteVisibilityChecker wires a NoteVisibilityChecker so handleSubNote
+// can refuse subscribing to non-visible notes (#1460 IDOR fix)。未配線時
+// は fail-closed で全 subNote が subscribe しない (= production の
+// router.go は必ず wire する、test の partial setup を漏れに繋げない、
+// notifications #1444 と同 doctrine)。
+func (d *Dispatcher) SetNoteVisibilityChecker(c NoteVisibilityChecker) {
+	d.noteVisibility = c
 }
 
 // HandleClientMessage parses a Misskey-style envelope and forwards it to the
@@ -441,6 +467,25 @@ func (d *Dispatcher) handleSubNote(body json.RawMessage) {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.ID == "" {
+		return
+	}
+	// Visibility gate (#1460 IDOR fix): 任意の noteID で subscribe させると
+	// followers / specified note の reacted / unreacted / pollVoted / deleted
+	// event を非対象 viewer に漏らす。HTTP 側 #1444 と同じ shape で、
+	// RequireVisible が ErrNoteNotFound (= 不存在 / 非可視を hide) を返したら
+	// subscribe を silently skip する。refcount inc の前で gate するので、
+	// 拒否されたあとに unsubNote で state を leak する経路も発生しない。
+	// 匿名 conn (User()==nil) は CanSeeNote の nil-viewer 判定で followers /
+	// specified が自動的に弾かれる。checker 未配線時は fail-closed (= 同じく
+	// silently skip)。
+	if d.noteVisibility == nil {
+		return
+	}
+	var viewer *model.User
+	if d.conn != nil {
+		viewer = d.conn.User()
+	}
+	if _, err := d.noteVisibility.RequireVisible(viewer, req.ID); err != nil {
 		return
 	}
 	topic := "noteStream:" + req.ID

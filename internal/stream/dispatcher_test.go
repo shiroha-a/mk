@@ -2,6 +2,7 @@ package stream
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -735,6 +736,32 @@ func (s *stubNotifReader) ReadAll(userID string) error {
 	return nil
 }
 
+// stubNoteVisibility implements NoteVisibilityChecker for subNote tests
+// (#1460)。allowed[noteID] = true なら visible、defaultAllow=true なら
+// allowed 未登録 noteID も visible 扱い (permissive)。lastViewer / calls
+// で checker が dispatch から正しい引数で呼ばれたか sanity check できる。
+type stubNoteVisibility struct {
+	allowed      map[string]bool
+	defaultAllow bool
+	lastViewer   *model.User
+	calls        int
+}
+
+func (s *stubNoteVisibility) RequireVisible(viewer *model.User, noteID string) (*model.Note, error) {
+	s.lastViewer = viewer
+	s.calls++
+	if v, ok := s.allowed[noteID]; ok {
+		if v {
+			return &model.Note{ID: noteID}, nil
+		}
+		return nil, errors.New("not visible")
+	}
+	if s.defaultAllow {
+		return &model.Note{ID: noteID}, nil
+	}
+	return nil, errors.New("not visible")
+}
+
 func TestDispatcher_ReadNotification(t *testing.T) {
 	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
 	bus := newStubBus()
@@ -758,6 +785,10 @@ func TestDispatcher_SubNote_UnsubNote(t *testing.T) {
 	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
 	bus := newStubBus()
 	d := NewDispatcher(conn, nil, bus)
+	// #1460: subNote は noteVisibility 必須 (未配線時は fail-closed で
+	// subscribe しない)。本 test の主旨は refcount semantics なので permissive
+	// stub を wire して旧挙動を維持する。
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
 
 	// subscribe
 	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
@@ -790,6 +821,10 @@ func TestDispatcher_SubNote_UnsubNote(t *testing.T) {
 func TestDispatcher_SubNote_InvalidBody(t *testing.T) {
 	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
 	d := NewDispatcher(conn, nil, newStubBus())
+	// #1460: 空 body は parse 直後に return するので visibility check 自体
+	// 到達しないが、interface gate 配線後でも panic しないことを確認するため
+	// permissive stub を wire しておく。
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
 	// empty body → no panic
 	d.HandleClientMessage("s", json.RawMessage(`{}`))
 	d.HandleClientMessage("un", json.RawMessage(`{}`))
@@ -819,6 +854,8 @@ func TestDispatcher_ForwardNoteEvent_TSEnvelope(t *testing.T) {
 			defer conn.Close()
 			bus := newStubBus()
 			d := NewDispatcher(conn, nil, bus)
+			// #1460: subNote の visibility gate を permissive stub で素通り。
+			d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
 			d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
 
 			bus.deliver("noteStream:n1", []byte(tc.inner))
@@ -855,6 +892,8 @@ func TestDispatcher_ForwardNoteEvent_InvalidPayload(t *testing.T) {
 	defer conn.Close()
 	bus := newStubBus()
 	d := NewDispatcher(conn, nil, bus)
+	// #1460: subNote の visibility gate を permissive stub で素通り。
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
 	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
 
 	// invalid JSON / 空 type のどちらも Send しない (早期 return)。
@@ -867,6 +906,149 @@ func TestDispatcher_ForwardNoteEvent_InvalidPayload(t *testing.T) {
 	n := len(fc.writes)
 	fc.mu.Unlock()
 	assert.Zero(t, n)
+}
+
+// --- #1460 subNote visibility gate tests ---
+
+// TestDispatcher_SubNote_HiddenNote_NoSubscribe は非可視 note への subNote
+// を checker が拒否した場合、bus.Subscribe / refcount どちらにも痕跡が
+// 残らないことを確認する。refcount 加算前で gate しないと、後から
+// unsubNote で d.noteSubs map state を leak する経路が残るため。
+func TestDispatcher_SubNote_HiddenNote_NoSubscribe(t *testing.T) {
+	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	stub := &stubNoteVisibility{allowed: map[string]bool{"n1": false}}
+	d.SetNoteVisibilityChecker(stub)
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
+
+	// checker が呼ばれ、viewer が conn.User() で渡っている。
+	assert.Equal(t, 1, stub.calls)
+	require.NotNil(t, stub.lastViewer)
+	assert.Equal(t, "alice", stub.lastViewer.ID)
+
+	bus.mu.Lock()
+	_, subbed := bus.subs["noteStream:n1"]
+	subbedSlice := append([]string(nil), bus.subscribed...)
+	bus.mu.Unlock()
+	assert.False(t, subbed, "should not subscribe to hidden note")
+	assert.NotContains(t, subbedSlice, "noteStream:n1")
+
+	// refcount も加算されていない。後続の unsubNote が noise として
+	// d.noteSubs map state を leak しないため必須。
+	d.noteSubMu.Lock()
+	cnt := d.noteSubs["n1"]
+	d.noteSubMu.Unlock()
+	assert.Equal(t, 0, cnt)
+}
+
+// TestDispatcher_SubNote_HiddenNote_NoEventForwarded は subNote 拒否後に
+// note の publisher が event を流しても、subscribe 自体が存在しないため
+// client 側 write が 1 件も発生しないことを end-to-end で確認する
+// (issue #1460 完了条件の「event を受け取らない」を担保)。
+func TestDispatcher_SubNote_HiddenNote_NoEventForwarded(t *testing.T) {
+	fc := newFakeConn()
+	conn := NewConnection("test", &model.User{ID: "alice"}, fc)
+	go conn.Start()
+	defer conn.Close()
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{allowed: map[string]bool{"n1": false}})
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
+	// publisher が event を流しても deliver 先 handler が登録されていない
+	// ので no-op になる。
+	bus.deliver("noteStream:n1", []byte(`{"type":"reacted","body":{"reaction":":smile:","userId":"u1"}}`))
+
+	time.Sleep(50 * time.Millisecond)
+	fc.mu.Lock()
+	n := len(fc.writes)
+	fc.mu.Unlock()
+	assert.Zero(t, n, "no event should reach client for denied subscribe")
+}
+
+// TestDispatcher_SubNote_PublicNote_Subscribes は permissive checker (=
+// public/home/visible note) の場合、既存の subscribe + event forward が
+// regress していないことを確認する。
+func TestDispatcher_SubNote_PublicNote_Subscribes(t *testing.T) {
+	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
+
+	bus.mu.Lock()
+	_, subbed := bus.subs["noteStream:n1"]
+	bus.mu.Unlock()
+	assert.True(t, subbed)
+	d.noteSubMu.Lock()
+	cnt := d.noteSubs["n1"]
+	d.noteSubMu.Unlock()
+	assert.Equal(t, 1, cnt)
+}
+
+// TestDispatcher_SubNote_Author_Subscribes は author 自身が自分の
+// followers note を sub する経路。stubNoteVisibility は viewer.ID を見て
+// allow するわけではなく allowed[noteID] map を見るので、本 test では
+// 「allow されている noteID なら viewer が誰であっても通る」ことを確認する
+// (実本番では QueryService.RequireVisible が CanSeeNote 経由で viewer.ID
+// == note.UserID を見て author を素通しする)。
+func TestDispatcher_SubNote_Author_Subscribes(t *testing.T) {
+	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	stub := &stubNoteVisibility{allowed: map[string]bool{"my-note": true}}
+	d.SetNoteVisibilityChecker(stub)
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"my-note"}`))
+
+	require.NotNil(t, stub.lastViewer)
+	assert.Equal(t, "alice", stub.lastViewer.ID)
+	bus.mu.Lock()
+	_, subbed := bus.subs["noteStream:my-note"]
+	bus.mu.Unlock()
+	assert.True(t, subbed)
+}
+
+// TestDispatcher_SubNote_Anonymous_HiddenNote_NoSubscribe は匿名 conn
+// (User()==nil) からの非可視 sub が、checker に nil viewer を渡した上で
+// 拒否されることを確認する。CanSeeNote は nil viewer + followers/specified
+// を必ず false にするので、本経路は production でも自動的に塞がる。
+func TestDispatcher_SubNote_Anonymous_HiddenNote_NoSubscribe(t *testing.T) {
+	conn := NewConnection("test", nil, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	stub := &stubNoteVisibility{allowed: map[string]bool{"n1": false}}
+	d.SetNoteVisibilityChecker(stub)
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
+
+	assert.Equal(t, 1, stub.calls)
+	assert.Nil(t, stub.lastViewer, "anonymous viewer should be passed as nil to checker")
+	bus.mu.Lock()
+	_, subbed := bus.subs["noteStream:n1"]
+	bus.mu.Unlock()
+	assert.False(t, subbed)
+}
+
+// TestDispatcher_SubNote_QueryServiceNil_FailClosed は checker が wire
+// されていないとき (production wiring drift / test の partial setup)
+// subscribe を一切させない fail-closed 挙動を確認する。notifications
+// #1444 と同 doctrine。
+func TestDispatcher_SubNote_QueryServiceNil_FailClosed(t *testing.T) {
+	conn := NewConnection("test", &model.User{ID: "alice"}, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	// 意図的に SetNoteVisibilityChecker を呼ばない。
+
+	d.HandleClientMessage("s", json.RawMessage(`{"id":"n1"}`))
+
+	bus.mu.Lock()
+	_, subbed := bus.subs["noteStream:n1"]
+	bus.mu.Unlock()
+	assert.False(t, subbed, "fail-closed: no checker should block all subscribes")
 }
 
 func countOccurrences(slice []string, target string) int {

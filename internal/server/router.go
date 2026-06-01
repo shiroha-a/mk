@@ -1723,6 +1723,12 @@ func (s *Server) setupRoutes() {
 	// 失敗 / anonymous は nil 返却で degrade — channel は 3 escape hatch のみで
 	// 動く (= 旧来の "全 reply drop" よりは upstream 互換に近い)。
 	streamManager.SetFollowingSnapshotLookup(&followingSnapshotAdapter{repo: followingRepo})
+	// subNote visibility gate (#1460 IDOR fix): handleSubNote が任意の noteID
+	// で noteStream を subscribe させると、followers / specified note の
+	// reacted / unreacted / pollVoted / deleted event が非対象 viewer に
+	// 漏れる (HTTP 側 #1444 i/notifications IDOR の WS 版)。noteQueryService
+	// の RequireVisible が NoteVisibilityChecker interface を自動 satisfy する。
+	streamManager.SetNoteVisibilityChecker(noteQueryService)
 	// hardMutedWords 変更時に reload event を受け取って該当 connection の
 	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
