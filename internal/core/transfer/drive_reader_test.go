@@ -98,6 +98,9 @@ func (f *fakeDriveFileRepo) DeleteByHost(_ string) (int64, error) {
 func (f *fakeDriveFileRepo) FindByAccessKey(_ string) (*model.DriveFile, error) {
 	return nil, errors.New("not implemented")
 }
+func (f *fakeDriveFileRepo) FindByAnyAccessKey(_ string) (*model.DriveFile, error) {
+	return nil, errors.New("not implemented")
+}
 
 // Ensure fakeDriveFileRepo implements the real repository interface so the
 // reader accepts it.

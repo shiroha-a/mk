@@ -28,6 +28,9 @@ import (
 //   - `corereaction.ErrNoteNotVisible` — note 解決後の visibility 違反。
 //     mk-go の policy 上 reaction を作れないので、activity 全体は ack
 //     して終わる方が筋。
+//   - `ErrHostNotAllowed` — federation policy (none / specified /
+//     blockedHosts) で許可されない host からの fetch / ingest。policy は
+//     retry では解消しないので ack して drop する (#1419 review)。
 //
 // transient と分類する (false 返す) error: 5xx / network error / timeout
 // 等、対側の一過性障害。retry サイクルに乗せる。`nil` も false を返す
@@ -48,6 +51,9 @@ func isPermanentSkipError(err error) bool {
 		return true
 	}
 	if errors.Is(err, corereaction.ErrNoteNotVisible) {
+		return true
+	}
+	if errors.Is(err, ErrHostNotAllowed) {
 		return true
 	}
 	return false

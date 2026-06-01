@@ -264,7 +264,10 @@ func (s *Service) Notes(requesterID, clipID, untilID, sinceID string, limit int)
 	if !c.IsPublic && c.UserID != requesterID {
 		return nil, ErrAccessDenied
 	}
-	rows, err := s.noteRepo.ListByClip(clipID, untilID, sinceID, limit)
+	// visibility は repository 側で LIMIT 前に push down する (#1418 review)。
+	// clip は author 混在のため post-fetch filter だと per-note の follow 判定
+	// N+1 + ページ過少充填になる。
+	rows, err := s.noteRepo.ListByClipVisible(clipID, requesterID, untilID, sinceID, limit)
 	if err != nil {
 		return nil, err
 	}

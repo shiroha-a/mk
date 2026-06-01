@@ -107,7 +107,8 @@ func TestPush_InvalidParam(t *testing.T) {
 }
 
 func TestPull_Success(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -120,7 +121,7 @@ func TestPull_InvalidParam(t *testing.T) {
 
 func TestDelete_Success(t *testing.T) {
 	h, repo := newTestHandler(t)
-	repo.Lists["l1"] = &model.UserList{ID: "l1"}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	rec := doPost(h.Delete, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -235,7 +236,7 @@ func (f *failingAddMemberRepo) AddMember(_ *model.UserListMembership) error { re
 
 func TestPush_Error(t *testing.T) {
 	repo := &failingAddMemberRepo{testutil.NewMockUserListRepository()}
-	repo.Lists["l1"] = &model.UserList{ID: "l1"}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
 	h := userlists.NewHandler(repo, idGen)
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
@@ -302,7 +303,7 @@ func TestPush_UserEachUserListsLimitExceeded(t *testing.T) {
 
 func TestPush_AlreadyAdded(t *testing.T) {
 	repo := &duplicateAddMemberRepo{testutil.NewMockUserListRepository()}
-	repo.Lists["l1"] = &model.UserList{ID: "l1"}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
 	h := userlists.NewHandler(repo, idGen)
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
@@ -320,8 +321,10 @@ type failingRemoveMemberRepo struct {
 func (f *failingRemoveMemberRepo) RemoveMember(_, _ string) error { return assert.AnError }
 
 func TestPull_Error(t *testing.T) {
+	repo := &failingRemoveMemberRepo{testutil.NewMockUserListRepository()}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
-	h := userlists.NewHandler(&failingRemoveMemberRepo{testutil.NewMockUserListRepository()}, idGen)
+	h := userlists.NewHandler(repo, idGen)
 	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
@@ -333,8 +336,10 @@ type failingDeleteRepo struct {
 func (f *failingDeleteRepo) Delete(_ string) error { return assert.AnError }
 
 func TestDelete_Error(t *testing.T) {
+	repo := &failingDeleteRepo{testutil.NewMockUserListRepository()}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
-	h := userlists.NewHandler(&failingDeleteRepo{testutil.NewMockUserListRepository()}, idGen)
+	h := userlists.NewHandler(repo, idGen)
 	rec := doPost(h.Delete, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
@@ -355,4 +360,56 @@ func TestShow_PublicListNonOwnerVisible(t *testing.T) {
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Public", IsPublic: true}
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// 他人 list への push が「存在しない」扱いで弾かれること。viewer が list owner
+// 以外なら NO_SUCH_LIST を返し、AddMember が呼ばれてはならない (= owner gate
+// 抜けの IDOR 回帰防止)。
+func TestPush_NotOwner(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "intruder"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+	assert.Empty(t, repo.Members, "owner 以外の push は member を追加しないこと")
+}
+
+// 他人 list からの pull が「存在しない」扱いで弾かれること。
+func TestPull_NotOwner(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	repo.Members = []*model.UserListMembership{
+		{ID: "m1", UserListID: "l1", UserID: "u2"},
+	}
+	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "intruder"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+	assert.Len(t, repo.Members, 1, "owner 以外の pull は member を削除しないこと")
+}
+
+// Pull が存在しない listId に対し 404 を返すこと (= 修正前は list を引かず
+// 204 を返していた箇所の挙動変更を test で固定)。
+func TestPull_ListNotFound(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.Pull, `{"listId":"ghost","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+}
+
+// 他人 list の delete が「存在しない」扱いで弾かれること。
+func TestDelete_NotOwner(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	rec := doPost(h.Delete, `{"listId":"l1"}`, &model.User{ID: "intruder"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+	assert.Contains(t, repo.Lists, "l1", "owner 以外の delete は list を削除しないこと")
+}
+
+// Delete が存在しない listId に対し 404 を返すこと。
+func TestDelete_ListNotFound(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.Delete, `{"listId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }

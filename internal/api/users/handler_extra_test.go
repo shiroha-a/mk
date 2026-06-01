@@ -391,6 +391,28 @@ func TestFeaturedNotes_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// anonymous viewer に対して followers / specified visibility の
+// ノートが除外されることを guard する。
+func TestFeaturedNotes_AnonymousExcludesNonPublicVisibility(t *testing.T) {
+	h, _, noteRepo := newExtraHandler(t)
+	h.SetFollowingRepo(testutil.NewMockFollowingRepository())
+	noteRepo.Notes["fn_pub"] = &model.Note{ID: "fn_pub", UserID: "u1", Visibility: "public", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_fol"] = &model.Note{ID: "fn_fol", UserID: "u1", Visibility: "followers", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_spec"] = &model.Note{ID: "fn_spec", UserID: "u1", Visibility: "specified", VisibleUserIDs: []string{"other"}, User: &model.User{ID: "u1"}}
+
+	rec := postExtra(h.FeaturedNotes, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	ids := map[string]bool{}
+	for _, n := range out {
+		ids[n["id"].(string)] = true
+	}
+	assert.True(t, ids["fn_pub"])
+	assert.False(t, ids["fn_fol"], "followers は anonymous に漏らさない")
+	assert.False(t, ids["fn_spec"], "specified は対象外 viewer に漏らさない")
+}
+
 // --- SearchByUsernameAndHost ---
 
 func TestSearchByUsernameAndHost_Success(t *testing.T) {

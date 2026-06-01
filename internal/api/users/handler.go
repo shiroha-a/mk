@@ -591,12 +591,18 @@ func (h *Handler) Notes(c echo.Context) error {
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, untilID, sinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
+	viewer := middleware.GetUser(c)
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	// visibility は repository 側で LIMIT 前に push down する (#1418 review)。
+	// post-fetch filter だとページ過少充填 + followers 判定の N+1 になるため。
+	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, viewerID, untilID, sinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 
-	viewer := middleware.GetUser(c)
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)
@@ -969,6 +975,7 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 			detailed.PinnedNoteIDs = ids
 			if h.noteRepo != nil {
 				if notes, err := h.noteRepo.FindManyByIDsWithUser(ids); err == nil {
+					notes = notesfilter.FilterVisible(viewer, notes, h.followingRepo)
 					entities := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 					h.fieldRes.Apply(entities, viewer)
 					packed := make([]any, 0, len(entities))

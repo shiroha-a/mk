@@ -115,6 +115,69 @@ func TestPollRepository_ListExpiredUnnotified_LimitCap(t *testing.T) {
 	assert.GreaterOrEqual(t, len(rows), 3)
 }
 
+// TestPollRepository_BackfillNotifiedAt は migration 053 が含む backfill SQL
+// (#1415) の挙動を guard する。Misskey TS から mk-go へ移行した際、000044 が
+// notifiedAt = NULL でカラムを追加するため、既に expiresAt 経過後の poll は
+// 軒並み「未通知」となり ExpiryWorker 初回 tick で一斉発火する不具合の修正。
+//
+// 053 は startup 時点で既に testDB に適用済みなので、ここでは SQL 自体を
+// 再実行する形で「期限切れ未通知 → 通知済みに backfill される / 未満了は
+// 触らない / 既に通知済みは触らない」契約を確認する。
+func TestPollRepository_BackfillNotifiedAt(t *testing.T) {
+	repo := NewPollRepository(testDB)
+	user := insertTestUser(t, "u_bf_1", "bfuser")
+	defer cleanupUser(t, user.ID)
+
+	now := time.Now()
+	past := now.Add(-2 * time.Hour)
+	future := now.Add(time.Hour)
+	already := past.Add(time.Minute)
+
+	mk := func(id string, expires *time.Time, notified *time.Time) {
+		note := &model.Note{ID: id, UserID: user.ID, Visibility: model.NoteVisibilityPublic, HasPoll: true, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, testDB.Create(note).Error)
+		t.Cleanup(func() { cleanupNote(t, note.ID) })
+		require.NoError(t, repo.Create(&model.Poll{
+			NoteID: id, Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+			NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID,
+			ExpiresAt:  expires,
+			NotifiedAt: notified,
+		}))
+	}
+	// 1) 期限切れ未通知 → backfill 対象
+	mk("p_bf_target", &past, nil)
+	// 2) 未満了 → 触らない
+	mk("p_bf_future", &future, nil)
+	// 3) 既に通知済み → 触らない
+	mk("p_bf_already", &past, &already)
+	// 4) expiresAt なし → 触らない
+	mk("p_bf_noexpire", nil, nil)
+
+	// 053 と同じ SQL を再実行する。冪等なので既に適用済みの DB でも結果は変わらない。
+	require.NoError(t, testDB.Exec(
+		`UPDATE "poll" SET "notifiedAt" = "expiresAt"
+		  WHERE "expiresAt" IS NOT NULL AND "expiresAt" < NOW() AND "notifiedAt" IS NULL`,
+	).Error)
+
+	target, err := repo.FindByNoteID("p_bf_target")
+	require.NoError(t, err)
+	require.NotNil(t, target.NotifiedAt, "backfill 対象は notifiedAt が埋まる")
+	assert.WithinDuration(t, past, *target.NotifiedAt, time.Second, "notifiedAt = expiresAt にコピーされる")
+
+	future2, err := repo.FindByNoteID("p_bf_future")
+	require.NoError(t, err)
+	assert.Nil(t, future2.NotifiedAt, "未満了は触らない")
+
+	already2, err := repo.FindByNoteID("p_bf_already")
+	require.NoError(t, err)
+	require.NotNil(t, already2.NotifiedAt)
+	assert.WithinDuration(t, already, *already2.NotifiedAt, time.Second, "既に通知済みの timestamp は維持される")
+
+	noexp, err := repo.FindByNoteID("p_bf_noexpire")
+	require.NoError(t, err)
+	assert.Nil(t, noexp.NotifiedAt, "expiresAt=NULL は触らない")
+}
+
 func TestPollRepository_MarkNotified(t *testing.T) {
 	repo := NewPollRepository(testDB)
 	user := insertTestUser(t, "u_mn_1", "mnuser")

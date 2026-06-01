@@ -32,6 +32,8 @@ func TestIsPermanentSkipError(t *testing.T) {
 		{"ErrInvalidNote wrapped", fmt.Errorf("ingest: %w", ErrInvalidNote), true},
 		{"ErrNoteNotVisible", corereaction.ErrNoteNotVisible, true},
 		{"ErrNoteNotVisible wrapped", fmt.Errorf("create: %w", corereaction.ErrNoteNotVisible), true},
+		{"ErrHostNotAllowed", ErrHostNotAllowed, true},
+		{"ErrHostNotAllowed wrapped", fmt.Errorf("resolve: %w", ErrHostNotAllowed), true},
 		{"status 404 wrapped", fmt.Errorf("fetch %s: %w", "url", &activitypub.StatusError{StatusCode: 404, Status: "404"}), true},
 		{"status 500 wrapped", fmt.Errorf("fetch: %w", &activitypub.StatusError{StatusCode: 500, Status: "500"}), false},
 		{"generic error", errors.New("dial failed"), false},

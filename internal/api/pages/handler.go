@@ -158,9 +158,10 @@ func (h *Handler) Show(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	if err != nil {
-		if errors.Is(err, corepage.ErrAccessDenied) {
-			return apierr.JSONAccessDenied(c)
-		}
+		// 非 public page を非許可 viewer が引いた場合 (ErrAccessDenied) も存在ごと
+		// 隠して NO_SUCH_PAGE (404) を返す。upstream TS pages/show は可視性ゲートを
+		// 持たず noSuchPage のみ返すため shape が一致し、private page の存在を 403 で
+		// 露呈しない (#1432)。update/delete は TS に accessDenied があるため 403 のまま。
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "222120c0-3ead-4528-811b-b96f233388d7"))
 	}
 	// owner / isLiked を attach (#1134)。owner lookup miss は frontend page.vue
@@ -232,6 +233,8 @@ func (h *Handler) Update(c echo.Context) error {
 		switch {
 		case errors.Is(err, corepage.ErrPageNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "21149b9e-3616-4778-9592-c4ce89f5a864"))
+		// upstream TS pages/update は accessDenied (UUID 3c15cd52) を持つため、
+		// show (存在隠蔽 404) とは異なり 403 を維持する (#1432)。
 		case errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "3c15cd52-3b4b-4274-967d-6456fc4f792b"))
 		case errors.Is(err, corepage.ErrPageNameRequired),
@@ -261,6 +264,8 @@ func (h *Handler) Delete(c echo.Context) error {
 		switch {
 		case errors.Is(err, corepage.ErrPageNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "eb0c6e1d-d519-4764-9486-52a7e1c6392a"))
+		// upstream TS pages/delete は accessDenied (UUID 8b741b3e) を持つため、
+		// show (存在隠蔽 404) とは異なり 403 を維持する (#1432)。
 		case errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "8b741b3e-2c22-44b3-a15f-29949aa1601e"))
 		}
@@ -375,10 +380,14 @@ func (h *Handler) Like(c echo.Context) error {
 	}
 	if err := h.svc.Like(user.ID, req.PageID); err != nil {
 		switch {
-		case errors.Is(err, corepage.ErrPageNotFound):
+		// upstream TS pages/like は accessDenied を宣言しておらず可視性ゲート
+		// 自体を持たない (noSuchPage / yourPage / alreadyLiked のみ)。mk-go は
+		// Page.visibility (drop-in #367) を持つため core service にゲートを残す
+		// が、ErrAccessDenied は show (#1434) と同じく 404 NO_SUCH_PAGE で隠して
+		// private page の存在を 403 で露呈しないようにする (#1435)。
+		case errors.Is(err, corepage.ErrPageNotFound),
+			errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "cc98a8a2-0dc3-4123-b198-62c71df18ed3"))
-		case errors.Is(err, corepage.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, corepage.ErrAlreadyLiked):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that page.", "d4c1edbe-7da2-4eae-8714-1acfd2d63941"))
 		}
