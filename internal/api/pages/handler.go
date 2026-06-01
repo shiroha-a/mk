@@ -380,10 +380,14 @@ func (h *Handler) Like(c echo.Context) error {
 	}
 	if err := h.svc.Like(user.ID, req.PageID); err != nil {
 		switch {
-		case errors.Is(err, corepage.ErrPageNotFound):
+		// upstream TS pages/like は accessDenied を宣言しておらず可視性ゲート
+		// 自体を持たない (noSuchPage / yourPage / alreadyLiked のみ)。mk-go は
+		// Page.visibility (drop-in #367) を持つため core service にゲートを残す
+		// が、ErrAccessDenied は show (#1434) と同じく 404 NO_SUCH_PAGE で隠して
+		// private page の存在を 403 で露呈しないようにする (#1435)。
+		case errors.Is(err, corepage.ErrPageNotFound),
+			errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "cc98a8a2-0dc3-4123-b198-62c71df18ed3"))
-		case errors.Is(err, corepage.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, corepage.ErrAlreadyLiked):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that page.", "d4c1edbe-7da2-4eae-8714-1acfd2d63941"))
 		}
