@@ -1107,6 +1107,10 @@ func (m *MockNoteRepository) ListMentions(userID string, limit int, sinceID, unt
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
+		// viewer (= mention 対象 = userID) が見られる note のみ (#1441)。
+		if !m.canViewerSeeNote(userID, n) {
+			return false
+		}
 		for _, mention := range n.Mentions {
 			if mention == userID {
 				return true

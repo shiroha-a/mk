@@ -1142,6 +1142,62 @@ func TestNoteRepository_ListMentions(t *testing.T) {
 	assert.NotEmpty(t, notes)
 }
 
+// TestNoteRepository_ListMentions_VisibilityPushDown は #1441 を検証する。
+// mention 対象 (= viewer) が CanSeeNote で見られない followers / specified note を
+// mention されただけでは取得できないこと、follow / visibleUserIds 対象なら
+// 取得できることを確認する。
+func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_lm_a", "lmauthor")
+	victim := mkUser("u_lm_v", "lmvictim")
+
+	notes := []*model.Note{
+		{ID: "n_lm_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_lm_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		// specified だが visibleUserIds に victim を含まない (mentions のみ)。
+		{ID: "n_lm_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{"someone-else"}, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	idsOf := func(rows []*model.Note) []string {
+		out := make([]string, 0, len(rows))
+		for _, n := range rows {
+			out = append(out, n.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	// follow なし / visibleUserIds 非対象 -> public のみ (followers/specified は隠れる)。
+	out, err := repo.ListMentions(victim.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lm_pub"}, idsOf(out))
+
+	// victim が author を follow すると followers note も見える。
+	f := &model.Following{ID: "fl_lm_1", FollowerID: victim.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+	out, err = repo.ListMentions(victim.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub"}, idsOf(out))
+
+	// specified の visibleUserIds に victim を含めると specified も見える。
+	require.NoError(t, repo.UpdateFields("n_lm_spec", map[string]any{"visibleUserIds": pq.StringArray{victim.ID}}))
+	out, err = repo.ListMentions(victim.ID, 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub", "n_lm_spec"}, idsOf(out))
+}
+
 func TestNoteRepository_ListMentions_DefaultLimit(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	notes, err := repo.ListMentions("nobody", 0, "", "")
