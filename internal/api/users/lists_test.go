@@ -78,6 +78,79 @@ func TestListsFavorite_MissingListID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// 非公開 list を非所有者が favorite しようとしたら 404 NO_SUCH_USER_LIST で
+// 弾き、fav row も作らない (#1423)。これが無いと `i/favorites` 経由で
+// 他人の private list の existence fingerprint が成立する。
+func TestListsFavorite_PrivateNonOwner(t *testing.T) {
+	h, _ := newTestHandler(t)
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	listRepo := testutil.NewMockUserListRepository()
+	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "other", Name: "secret", IsPublic: false}
+	h.SetUserListFavoriteRepo(favRepo)
+	h.SetUserListRepo(listRepo)
+
+	rec := postStub(h.ListsFavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
+	// Misskey TS `users/lists/favorite` 固有の UUID (show の NO_SUCH_LIST とは別)。
+	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
+	exists, _ := favRepo.Exists("u1", "l1")
+	assert.False(t, exists, "fav row should not be created for private non-owner list")
+}
+
+// TS favorite は `exists({ id, isPublic: true })` ゲートのため、所有者
+// 本人でも private list は favorite 不可 (#1423)。owner 分岐を入れると
+// TS と挙動が乖離するためここで 404 を期待値として固定する。
+func TestListsFavorite_PrivateOwner(t *testing.T) {
+	h, _ := newTestHandler(t)
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	listRepo := testutil.NewMockUserListRepository()
+	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "my-secret", IsPublic: false}
+	h.SetUserListFavoriteRepo(favRepo)
+	h.SetUserListRepo(listRepo)
+
+	rec := postStub(h.ListsFavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
+	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
+	exists, _ := favRepo.Exists("u1", "l1")
+	assert.False(t, exists, "fav row should not be created for private list even when caller is owner")
+}
+
+// 公開 list は所有者でなくても favorite 可 (= 既存の正常系を IsPublic
+// gate 導入後も維持する)。
+func TestListsFavorite_PublicNonOwner(t *testing.T) {
+	h, _ := newTestHandler(t)
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	listRepo := testutil.NewMockUserListRepository()
+	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "other", Name: "public-list", IsPublic: true}
+	h.SetUserListFavoriteRepo(favRepo)
+	h.SetUserListRepo(listRepo)
+
+	rec := postStub(h.ListsFavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	exists, _ := favRepo.Exists("u1", "l1")
+	assert.True(t, exists)
+}
+
+// list が存在しない場合は 404 NO_SUCH_USER_LIST (#1423)。存在しない listId
+// に対する favorite 試行を probing 経路にしない。private/不存在を同じ
+// UUID で返すことで両者の区別ができないようにする。
+func TestListsFavorite_NoSuchList(t *testing.T) {
+	h, _ := newTestHandler(t)
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	listRepo := testutil.NewMockUserListRepository()
+	h.SetUserListFavoriteRepo(favRepo)
+	h.SetUserListRepo(listRepo)
+
+	rec := postStub(h.ListsFavorite, `{"listId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
+	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
+	exists, _ := favRepo.Exists("u1", "ghost")
+	assert.False(t, exists)
+}
+
 // --- ListsUnfavorite ---
 
 func TestListsUnfavorite(t *testing.T) {
