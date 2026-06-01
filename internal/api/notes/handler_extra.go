@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -230,6 +231,10 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	}
 	notes, err := h.noteRepo.SearchByTag(req.Tag, viewerID, req.Limit, sinceID, untilID)
 	if err != nil {
+		// tag 検索失敗は従来どおり空配列で返す (TS 互換) が、visibility
+		// push-down 追加で SQL エラーも黙殺されうるため debug 用に 1 行残す
+		// (#1439 review)。
+		slog.Warn("notes/search-by-tag: SearchByTag failed", "tag", req.Tag, "err", err)
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
