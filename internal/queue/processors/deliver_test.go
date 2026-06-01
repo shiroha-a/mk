@@ -484,3 +484,50 @@ func TestDeliverProcessor_ChartHook_UnparseableInbox(t *testing.T) {
 	require.Len(t, hook.delivered, 1)
 	assert.Equal(t, "", hook.delivered[0].host)
 }
+
+// keyCapturingSigner records the *PrivateKey passed to each PostSigned so a
+// test can assert pointer identity (= parsed-key cache hit).
+type keyCapturingSigner struct {
+	resp *http.Response
+	keys []*activitypub.PrivateKey
+}
+
+func (s *keyCapturingSigner) PostSigned(_ string, _ []byte, key *activitypub.PrivateKey) (*http.Response, error) {
+	s.keys = append(s.keys, key)
+	return s.resp, nil
+}
+
+// #1425: 同一署名者へ fan-out する deliver job は、PEM のパース結果が job 横断で
+// メモ化され同じ *PrivateKey を再利用すること。PEM が変われば (鍵 rotation 相当)
+// 別 entry で再パースされること。
+func TestDeliverProcessor_RSAKeyCacheReuse(t *testing.T) {
+	signer := &keyCapturingSigner{resp: okResponse(http.StatusOK)}
+	p := processors.NewDeliverProcessor(signer)
+
+	payload := makePayload(t) // KeyID + KeyPEM 固定
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.keys, 2)
+	assert.Same(t, signer.keys[0], signer.keys[1], "同一 PEM は cache hit で同じ *PrivateKey を再利用する")
+
+	// 同じ KeyID でも PEM が変われば (= rotation) 別 entry で再パースし、別 instance。
+	rotated := makePayload(t) // generateTestKey は毎回新規 RSA 鍵
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, rotated)))
+	require.Len(t, signer.keys, 3)
+	assert.NotSame(t, signer.keys[1], signer.keys[2], "別 PEM は別 entry でパースし直す")
+}
+
+// Ed25519 経路も同様に parsed-key がメモ化されること (#1425)。
+func TestDeliverProcessor_Ed25519KeyCacheReuse(t *testing.T) {
+	signer := &keyCapturingSigner{resp: okResponse(http.StatusOK)}
+	p := processors.NewDeliverProcessor(signer)
+
+	payload := makePayload(t)
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.Ed25519PrivPEM = generateTestEd25519Key(t)
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.keys, 2)
+	assert.Same(t, signer.keys[0], signer.keys[1], "同一 Ed25519 PEM は cache hit で再利用する")
+}

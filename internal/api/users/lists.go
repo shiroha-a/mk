@@ -90,6 +90,20 @@ func (h *Handler) ListsFavorite(c echo.Context) error {
 	if h.userListFavoriteRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// Misskey TS の `users/lists/favorite` は `exists({ id, isPublic: true })`
+	// を満たさない list を一律 `NO_SUCH_USER_LIST` で弾く (favorite 固有の
+	// エラー: push/pull/delete/show の `NO_SUCH_LIST` とは別 UUID)。所有者
+	// 本人であっても private list は favorite 不可。これにより listId を
+	// 知っている任意の認証ユーザーが fav row を作って `i/favorites` 経由で
+	// 他人の private list の存在を fingerprint することを防ぐ (#1423)。
+	// userListRepo が未配線の test 経路ではこの gate を skip する
+	// (production は router が必ず wire)。
+	if h.userListRepo != nil {
+		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil || !list.IsPublic {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"))
+		}
+	}
 	already, _ := h.userListFavoriteRepo.Exists(user.ID, req.ListID)
 	if already {
 		return c.NoContent(http.StatusNoContent)
