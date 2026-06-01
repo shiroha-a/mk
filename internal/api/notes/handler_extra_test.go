@@ -19,15 +19,26 @@ import (
 
 func newExtraHandler(t *testing.T) (*Handler, *testutil.MockNoteRepository, *testutil.MockNoteFavoriteRepository) {
 	t.Helper()
+	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
+	return h, noteRepo, favRepo
+}
+
+// newExtraHandlerWithFollowing は visibility check が必要なテスト用に
+// followingRepo を含めて wire した helper。followers visibility の note を
+// favorite 化するテスト等で follow 関係を mock に登録するために使う (#1443)。
+func newExtraHandlerWithFollowing(t *testing.T) (*Handler, *testutil.MockNoteRepository, *testutil.MockNoteFavoriteRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
 	noteRepo := testutil.NewMockNoteRepository()
 	favRepo := testutil.NewMockNoteFavoriteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
 	pollRepo := testutil.NewMockPollRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	createSvc := corenote.NewCreateService(noteRepo, pollRepo, idGen, nil)
 	deleteSvc := corenote.NewDeleteService(noteRepo)
-	h := NewHandler(noteRepo, createSvc, deleteSvc, nil, nil, nil, nil, nil, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, followingRepo)
+	h := NewHandler(noteRepo, createSvc, deleteSvc, querySvc, nil, nil, nil, nil, idGen)
 	h.SetFavoriteRepo(favRepo)
-	return h, noteRepo, favRepo
+	return h, noteRepo, favRepo, followingRepo
 }
 
 func postExtra(h func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
@@ -47,7 +58,7 @@ func postExtra(h func(echo.Context) error, body string, user *model.User) *httpt
 
 func TestFavoritesCreate_Success(t *testing.T) {
 	h, noteRepo, favRepo := newExtraHandler(t)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Len(t, favRepo.Favorites, 1)
@@ -55,7 +66,7 @@ func TestFavoritesCreate_Success(t *testing.T) {
 
 func TestFavoritesCreate_AlreadyFavorited(t *testing.T) {
 	h, noteRepo, favRepo := newExtraHandler(t)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
 	favRepo.Favorites["u1:n1"] = &model.NoteFavorite{ID: "f1", UserID: "u1", NoteID: "n1"}
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusConflict, rec.Code)
@@ -73,13 +84,92 @@ func TestFavoritesCreate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// favoriteRepo 未配線時の guard。queryService が wire 済みで visibility は
+// 通る public note でも、favoriteRepo nil で 500 を返す挙動を維持する。
 func TestFavoritesCreate_NilRepo(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
 	idGen, _ := id.NewGenerator("aidx")
-	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	h := NewHandler(noteRepo, nil, nil, querySvc, nil, nil, nil, nil, idGen)
+	// SetFavoriteRepo を呼ばない → favoriteRepo は nil のまま
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// queryService が wire されていない場合は visibility check 抜けで favorite
+// 化されないよう fail-closed で NO_SUCH_NOTE を返す (#1443、ShowPartialBulk
+// と同じ defensive pattern)。
+func TestFavoritesCreate_NoQueryServiceRejects(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	favRepo := testutil.NewMockNoteFavoriteRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen) // queryService=nil
+	h.SetFavoriteRepo(favRepo)
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, favRepo.Favorites,
+		"FavoritesCreate must not persist when queryService is unwired so unchecked notes never bypass visibility filtering")
+}
+
+// --- Favorites visibility regression (#1443) ---
+
+// followers visibility note を非 follower viewer が favorite 化しようとすると
+// 404 (NO_SUCH_NOTE) で存在隠蔽する。
+func TestFavoritesCreate_FollowersNote_NonFollower_Hidden(t *testing.T) {
+	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Empty(t, favRepo.Favorites)
+}
+
+// followers visibility note でも、follower viewer は favorite 化できる。
+func TestFavoritesCreate_FollowersNote_Follower_OK(t *testing.T) {
+	h, noteRepo, favRepo, followingRepo := newExtraHandlerWithFollowing(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "u2", FolloweeID: "u1"}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, favRepo.Favorites, 1)
+}
+
+// followers visibility note を author 本人が favorite 化するのは常に可。
+func TestFavoritesCreate_FollowersNote_Author_OK(t *testing.T) {
+	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, favRepo.Favorites, 1)
+}
+
+// specified visibility note を visibleUserIds 外の viewer が favorite 化
+// しようとすると 404 で存在隠蔽。
+func TestFavoritesCreate_SpecifiedNote_NotInList_Hidden(t *testing.T) {
+	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"u3"},
+	}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Empty(t, favRepo.Favorites)
+}
+
+// specified visibility note を visibleUserIds 対象の viewer は favorite
+// 化できる。
+func TestFavoritesCreate_SpecifiedNote_InList_OK(t *testing.T) {
+	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"u2"},
+	}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, favRepo.Favorites, 1)
 }
 
 func TestFavoritesDelete_Success(t *testing.T) {
@@ -363,7 +453,12 @@ func TestShowPartialBulk_InvalidParam(t *testing.T) {
 // followers / specified visibility のノートを匿名閲覧者に漏らさないため
 // に重要。
 func TestShowPartialBulk_NoQueryServiceRejects(t *testing.T) {
-	h, noteRepo, _ := newExtraHandler(t) // newExtraHandler は queryService=nil
+	// #1443 で newExtraHandler が queryService を wire するようになったため、
+	// この test では queryService=nil な handler を明示的に組み直して
+	// fail-closed 挙動を担保する。
+	noteRepo := testutil.NewMockNoteRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen)
 	noteRepo.Notes["n1"] = &model.Note{
 		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
 		User: &model.User{ID: "u1"},
@@ -384,9 +479,10 @@ func (f *failingFavCreateRepo) Create(_ *model.NoteFavorite) error { return test
 
 func TestFavoritesCreate_CreateError(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
 	idGen, _ := id.NewGenerator("aidx")
-	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	h := NewHandler(noteRepo, nil, nil, querySvc, nil, nil, nil, nil, idGen)
 	h.SetFavoriteRepo(&failingFavCreateRepo{testutil.NewMockNoteFavoriteRepository()})
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
