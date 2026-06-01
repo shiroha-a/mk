@@ -176,6 +176,50 @@ func TestMentions_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func mentionIDs(t *testing.T, rec *httptest.ResponseRecorder) map[string]bool {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	ids := map[string]bool{}
+	for _, n := range out {
+		ids[n["id"].(string)] = true
+	}
+	return ids
+}
+
+// #1441 攻撃 a: 非 follower を mention した followers note は、mention された
+// だけの非 follower viewer には返らない。follower になれば返る。
+func TestMentions_FollowersNonFollowerExcluded(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["m_fol"] = &model.Note{ID: "m_fol", UserID: "author", Mentions: []string{"victim"}, Visibility: "followers", User: &model.User{ID: "author"}}
+
+	// victim は author を follow していない -> followers note は出ない。
+	ids := mentionIDs(t, postExtra(h.Mentions, `{}`, &model.User{ID: "victim"}))
+	assert.False(t, ids["m_fol"], "非 follower を mention した followers note は漏らさない")
+
+	// follower になれば出る。
+	noteRepo.Following = map[string][]string{"victim": {"author"}}
+	ids = mentionIDs(t, postExtra(h.Mentions, `{}`, &model.User{ID: "victim"}))
+	assert.True(t, ids["m_fol"], "follower には mention された followers note が出る")
+}
+
+// #1441 攻撃 b: visibleUserIds に含まれない viewer を mention した specified
+// note は、その viewer には返らない。visibleUserIds 対象なら返る。
+func TestMentions_SpecifiedNonTargetExcluded(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	// mentions に victim を含むが visibleUserIds は other のみ。
+	noteRepo.Notes["m_spec"] = &model.Note{ID: "m_spec", UserID: "author", Mentions: []string{"victim"}, Visibility: "specified", VisibleUserIDs: []string{"other"}, User: &model.User{ID: "author"}}
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "victim"}))
+	assert.False(t, ids["m_spec"], "visibleUserIds 非対象を mention した specified note は漏らさない")
+
+	// victim が visibleUserIds 対象なら出る。
+	noteRepo.Notes["m_spec"].VisibleUserIDs = []string{"victim"}
+	ids = mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "victim"}))
+	assert.True(t, ids["m_spec"], "visibleUserIds 対象には specified mention が出る")
+}
+
 // --- UserListTimeline ---
 
 func TestUserListTimeline_Success(t *testing.T) {
