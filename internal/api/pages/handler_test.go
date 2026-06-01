@@ -255,6 +255,21 @@ func TestShow_AccessDenied_ByUsername(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
 }
 
+// guest (未認証) viewer が非 public page を引いた場合も 404 NO_SUCH_PAGE で
+// 存在隠蔽されること (#1435)。handler は user==nil 時に requesterID="" を
+// service へ渡すので、authenticated non-owner と同じ ErrAccessDenied 経路に
+// 落ち、404 化フォールスルーで存在を隠す。guest probe は最も悪用されやすい
+// 経路なので明示的に固定する。
+func TestShow_AccessDenied_Guest(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "owner", Visibility: model.PageVisibilityFollowers}
+	c, rec := newReq(t, `{"pageId":"p1"}`)
+	// setUser is intentionally NOT called — middleware.GetUser returns nil.
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
+}
+
 // --- Update ----------------------------------------------------------------
 
 func TestUpdate_Success(t *testing.T) {
@@ -551,13 +566,22 @@ func TestLike_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// 非 public page を非所有者が like しようとすると、存在ごと隠して 404
+// NO_SUCH_PAGE を返すこと (#1435)。upstream TS pages/like は accessDenied を
+// 宣言しておらず、mk-go の可視性ゲート (drop-in 都合で残置) も外部からは
+// noSuchPage に集約して 403 で存在露呈しない。
 func TestLike_AccessDenied(t *testing.T) {
 	h, repo, _ := newHandler(t)
 	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Visibility: model.PageVisibilityFollowers}
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Like(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_PAGE", errObj["code"])
+	assert.Equal(t, "cc98a8a2-0dc3-4123-b198-62c71df18ed3", errObj["id"])
 }
 
 func TestLike_AlreadyLiked(t *testing.T) {

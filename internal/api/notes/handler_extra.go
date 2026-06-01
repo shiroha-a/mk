@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -28,7 +29,18 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+	// 旧実装は noteRepo.FindByID で存在確認のみ行い visibility check が抜けて
+	// いた (#1443)。note ID を既に知っている viewer が followers / specified
+	// visibility の note を favorite 化でき、その後 /api/i/favorites 経由で
+	// content / author を pull 可能 (favorite 一覧側は upstream 互換のため
+	// 素の PackNotes で返す設計 — handler.go:633-636)。author が visibility
+	// を絞った後も古い favorite 行が残るため #799「ID 既知公開」doctrine は
+	// 適用不可。queryService.RequireVisible で見えない note は存在隠蔽する。
+	// queryService 未配線時は fail-closed (ShowPartialBulk と同じ pattern)。
+	if h.queryService == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
+	}
+	if _, err := h.queryService.RequireVisible(user, req.NoteID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	if h.favoriteRepo == nil {
@@ -185,6 +197,14 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// list owner gate だけでは note の visibility を守れない。list メンバーは
+	// 自由に編集できるため、未フォローのアカウントを list に詰めれば followers
+	// visibility note を読めてしまう。BulkShow / ShowPartialBulk と同じく
+	// queryService 未配線なら fail-closed、配線済みなら CanSeeNote で絞る (#1442)。
+	if h.queryService == nil {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	notes = h.queryService.FilterVisible(me, notes)
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, me))
 }
 
@@ -219,12 +239,25 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	// tagsカラムにtagを含むノートを検索
-	notes, err := h.noteRepo.SearchByTag(req.Tag, req.Limit, sinceID, untilID)
+	// tagsカラムにtagを含むノートを検索。visibility は repository 側で
+	// push-down する (#1439)。discovery 系の tag 検索は notes/show の
+	// 「ID 既知公開」doctrine 対象外なので、匿名/非follower には followers/
+	// specified note を返さない。
+	viewer := middleware.GetUser(c)
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	notes, err := h.noteRepo.SearchByTag(req.Tag, viewerID, req.Limit, sinceID, untilID)
 	if err != nil {
+		// tag 検索失敗は従来どおり空配列で返す (TS 互換) が、visibility
+		// push-down 追加で SQL エラーも黙殺されうるため診断用に 1 行残す。
+		// ユーザー挙動 (200 + 空配列) は不変で operator-actionable でもないため
+		// Warn ではなく Debug に留める (#1446 review)。
+		slog.Debug("notes/search-by-tag: SearchByTag failed", "tag", req.Tag, "err", err)
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, middleware.GetUser(c)))
+	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 
 // Clips handles POST /api/notes/clips.
