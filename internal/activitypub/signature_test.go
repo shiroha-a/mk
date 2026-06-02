@@ -450,3 +450,73 @@ func TestVerifyRequest_FromHTTPServer(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+// --- VerifyRequestWithKey (#1426): the parse-free core used by PublicKeyCache ---
+
+func TestVerifyRequestWithKey_RSASuccess(t *testing.T) {
+	key, pubPEM := newTestKey(t)
+	body := []byte(`{"type":"Create"}`)
+	req, _ := http.NewRequest(http.MethodPost, "https://remote.example/inbox", bytes.NewReader(body))
+	require.NoError(t, SignRequest(req, key, SHA256Digest(body), []string{"(request-target)", "date", "host", "digest"}))
+	req.Header.Set("Host", "remote.example")
+
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	require.NoError(t, VerifyRequestWithKey(req, pub, kt))
+}
+
+func TestVerifyRequestWithKey_Ed25519Success(t *testing.T) {
+	key, pubPEM := newTestEd25519Key(t)
+	req, _ := http.NewRequest(http.MethodGet, "https://remote.example/users/bob", nil)
+	require.NoError(t, SignRequest(req, key, "", []string{"(request-target)", "date", "host"}))
+	req.Header.Set("Host", "remote.example")
+
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	require.NoError(t, VerifyRequestWithKey(req, pub, kt))
+}
+
+func TestVerifyRequestWithKey_BadSignatureHeader(t *testing.T) {
+	_, pubPEM := newTestKey(t)
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	req, _ := http.NewRequest(http.MethodGet, "https://x.example/", nil)
+	// Signature ヘッダ無し -> ParseSignatureHeader で弾かれる。
+	assert.Error(t, VerifyRequestWithKey(req, pub, kt))
+}
+
+func TestVerifyRequestWithKey_UnsupportedAlgorithm(t *testing.T) {
+	_, pubPEM := newTestKey(t)
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	req, _ := http.NewRequest(http.MethodGet, "https://x.example/", nil)
+	req.Header.Set("Signature", `keyId="x",algorithm="hmac-sha256",signature="y"`)
+	err = VerifyRequestWithKey(req, pub, kt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported")
+}
+
+func TestVerifyRequestWithKey_KeyTypeMismatch(t *testing.T) {
+	// RSA 鍵に対し algorithm=ed25519 -> verifyAlgorithm が拒否する。
+	_, pubPEM := newTestKey(t)
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	req, _ := http.NewRequest(http.MethodGet, "https://remote.example/", nil)
+	req.Header.Set("Date", "Mon, 01 Jan 2024 00:00:00 GMT")
+	dummySig := base64.StdEncoding.EncodeToString(make([]byte, 64))
+	req.Header.Set("Signature", `keyId="x",algorithm="ed25519",headers="date",signature="`+dummySig+`"`)
+	err = VerifyRequestWithKey(req, pub, kt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ed25519")
+}
+
+func TestVerifyRequestWithKey_BadSignatureBase64(t *testing.T) {
+	key, pubPEM := newTestKey(t)
+	pub, kt, err := ParsePublicKey(pubPEM)
+	require.NoError(t, err)
+	req, _ := http.NewRequest(http.MethodGet, "https://x.example/users/bob", nil)
+	require.NoError(t, SignRequest(req, key, "", []string{"(request-target)", "date", "host"}))
+	req.Header.Set("Host", "x.example")
+	req.Header.Set("Signature", `keyId="x",algorithm="rsa-sha256",headers="(request-target) date host",signature="!!notbase64!!"`)
+	assert.Error(t, VerifyRequestWithKey(req, pub, kt))
+}

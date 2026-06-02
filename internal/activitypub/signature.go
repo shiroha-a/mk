@@ -201,18 +201,44 @@ func ParseSignatureHeader(header string) (*ParsedSignature, error) {
 // supplied PEM public key. RSA / Ed25519 public keys are both supported,
 // dispatched on the parsed Signature `algorithm` parameter and the public
 // key type.
+//
+// 公開鍵 PEM を毎回パースする経路。inbound hot path で同一鍵を繰り返し検証する
+// 場合は PublicKeyCache.VerifyRequestCached で x509 パースをメモ化すること
+// (#1426)。
 func VerifyRequest(req *http.Request, publicKeyPEM string) error {
 	parsed, err := ParseSignatureHeader(req.Header.Get("Signature"))
 	if err != nil {
 		return err
 	}
 	// 早期にalgorithm名を弾く (公開鍵PEMパースより前に判定したい)。
+	// VerifyRequestWithKey も同じ guard を持つが、ここで先に弾くことで未対応
+	// algorithm のリクエストに対し無駄な x509 パースを走らせない (空 PEM で
+	// algorithm error を期待する既存テスト互換も維持)。
 	if !isKnownAlgorithm(parsed.Algorithm) {
 		return fmt.Errorf("unsupported algorithm %q", parsed.Algorithm)
 	}
 	pub, kt, err := ParsePublicKey(publicKeyPEM)
 	if err != nil {
 		return err
+	}
+	return VerifyRequestWithKey(req, pub, kt)
+}
+
+// VerifyRequestWithKey verifies an incoming HTTP request signature against an
+// already-parsed public key. This is the parse-free core of VerifyRequest: the
+// inbound hot path (#1426) supplies a memoized (pub, kt) so the per-request
+// pem.Decode + x509.ParsePKIXPublicKey cost is paid once per (keyId, PEM)
+// instead of on every verify.
+//
+// pub / kt は ParsePublicKey 由来であること (RSA は *rsa.PublicKey、Ed25519 は
+// ed25519.PublicKey)。algorithm と鍵種別の不一致は verifyAlgorithm が拒否する。
+func VerifyRequestWithKey(req *http.Request, pub crypto.PublicKey, kt KeyType) error {
+	parsed, err := ParseSignatureHeader(req.Header.Get("Signature"))
+	if err != nil {
+		return err
+	}
+	if !isKnownAlgorithm(parsed.Algorithm) {
+		return fmt.Errorf("unsupported algorithm %q", parsed.Algorithm)
 	}
 	signingString, err := buildSigningString(req, parsed.Headers)
 	if err != nil {
