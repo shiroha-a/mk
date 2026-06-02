@@ -306,8 +306,10 @@ func (h *Handler) Notes(c echo.Context) error {
 	// visibility filter (defense-in-depth, #1464): push 段 (core/antenna
 	// matchNote) で followers/specified note は antenna owner 視点で gate されて
 	// いるが、過去に stream に滞留した entry や設定ミスに対するフォールバック
-	// として handler でも 1 段 filter する (`channels/timeline` / `user-list-timeline`
-	// と同じパターン)。queryService 未配線時は filter skip (旧挙動)。
+	// として handler でも 1 段 filter する (`notes/user-list-timeline`
+	// (`internal/api/notes/handler_extra.go:UserListTimeline`) と同じパターン。
+	// なお `channels/timeline` は service/repo 層で SQL push-down する別パターン
+	// で filter している (#1440))。queryService 未配線時は filter skip (旧挙動)。
 	if h.queryService != nil {
 		notes = h.queryService.FilterVisible(user, notes)
 	}
