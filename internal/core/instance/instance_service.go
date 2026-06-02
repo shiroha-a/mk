@@ -62,6 +62,14 @@ type Service struct {
 	// CollapsedQueue (本番 5 分窓) 相当 (#1429)。
 	requestReceivedCache  map[string]time.Time
 	requestReceivedWindow time.Duration
+	// responseHealthyCache は host -> "isNotResponding==false と判定した窓" の失効
+	// 時刻。RecordResponseSuccess の per-deliver FindByHost SELECT を窓内省く
+	// (#1429 review)。TS DeliverProcessorService は instance を RedisKVCache から
+	// 取り healthy deliver で DB を引かないのに合わせ、健全 host への連続配送で
+	// SELECT/UPDATE とも 0 にする。isNotResponding==true への遷移は
+	// RecordResponseError だけ (確認済み) なので、そこで invalidate すれば整合する。
+	responseHealthyCache map[string]time.Time
+	responseHealthyTTL   time.Duration
 	// lastMetaWarn / metaWarnEvery は meta.Fetch 失敗 warn のレート制限用。
 	// 継続障害時に配送ごとに warn を吐かないよう間引く (#1410)。
 	lastMetaWarn  time.Time
@@ -85,6 +93,8 @@ func NewService(repo repository.InstanceRepository, metaRepo repository.MetaRepo
 		cacheTTL:              5 * time.Minute,
 		requestReceivedCache:  make(map[string]time.Time),
 		requestReceivedWindow: 5 * time.Minute,
+		responseHealthyCache:  make(map[string]time.Time),
+		responseHealthyTTL:    5 * time.Minute,
 		metaWarnEvery:         time.Minute,
 	}
 }
@@ -119,6 +129,15 @@ func (s *Service) SetRequestReceivedWindow(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requestReceivedWindow = d
+}
+
+// SetResponseHealthyTTL overrides the RecordResponseSuccess healthy-state cache
+// TTL. Intended for tests that exercise the SELECT-skip boundary
+// deterministically (#1429 review).
+func (s *Service) SetResponseHealthyTTL(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.responseHealthyTTL = d
 }
 
 // SetMetadataFetcher attaches a MetadataFetcher invoked best-effort after a
@@ -214,28 +233,62 @@ func (s *Service) evictExpiredRequestReceivedLocked(now time.Time) {
 //
 // Misskey TS DeliverProcessorService は isNotResponding === true の状態遷移時
 // のみ update し、正常応答が続く間は DB 書込をしない (#1429)。mk-go も
-// FindByHost 結果が既に isNotResponding == false なら UPDATE をスキップして、
-// deliver 最頻ジョブ (健全 host への連続配送) の per-job 書込を無くす。
+// FindByHost 結果が既に isNotResponding == false なら UPDATE をスキップする。
+//
+// さらに deliver 成功 hot path の per-job FindByHost SELECT も responseHealthyCache
+// で responseHealthyTTL 窓内省く (#1429 review)。健全 host への連続配送では窓内
+// 2 回目以降は SELECT も UPDATE も走らない (TS が RedisKVCache 経由で DB を引かない
+// のと同等)。not-responding への遷移は RecordResponseError が cache を invalidate
+// するため、回復 UPDATE を stale healthy で取りこぼさない。
 func (s *Service) RecordResponseSuccess(host string) error {
 	if host == "" {
 		return nil
 	}
+	now := s.clock()
+	// 窓内に healthy と判定済みなら SELECT/UPDATE とも省く。
+	s.mu.Lock()
+	if exp, ok := s.responseHealthyCache[host]; ok && now.Before(exp) {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
 	inst, err := s.repo.FindByHost(host)
 	if err != nil {
+		// 未登録 host はキャッシュしない (次回も確認)。
 		return nil
 	}
-	// 既に応答中なら何もしない (TS の状態遷移ガードに合わせる)。
-	if !inst.IsNotResponding {
-		return nil
+	// not-responding からの回復遷移時のみ UPDATE する (TS の状態遷移ガード)。
+	if inst.IsNotResponding {
+		if err := s.repo.UpdateFields(host, map[string]any{
+			"isNotResponding":    false,
+			"notRespondingSince": (*time.Time)(nil),
+		}); err != nil {
+			return err
+		}
 	}
-	return s.repo.UpdateFields(host, map[string]any{
-		"isNotResponding":    false,
-		"notRespondingSince": (*time.Time)(nil),
-	})
+	// healthy と確定したので窓キャッシュに載せ、以降の SELECT を省く。
+	s.mu.Lock()
+	s.evictExpiredResponseHealthyLocked(now)
+	s.responseHealthyCache[host] = now.Add(s.responseHealthyTTL)
+	s.mu.Unlock()
+	return nil
+}
+
+// evictExpiredResponseHealthyLocked drops healthy-state cache entries whose
+// window has elapsed. Must be called with s.mu held (#1429 review)。
+func (s *Service) evictExpiredResponseHealthyLocked(now time.Time) {
+	for h, exp := range s.responseHealthyCache {
+		if !now.Before(exp) {
+			delete(s.responseHealthyCache, h)
+		}
+	}
 }
 
 // RecordResponseError marks the instance as not responding. 既に not responding
-// 状態であれば notRespondingSince を更新せず維持する。
+// 状態であれば notRespondingSince を更新せず維持する (TS 準拠、状態遷移時のみ
+// 書込)。状態遷移時は RecordResponseSuccess の responseHealthyCache を invalidate
+// して、回復記録が stale healthy で取りこぼされないようにする (#1429 review)。
 func (s *Service) RecordResponseError(host string) error {
 	if host == "" {
 		return nil
@@ -248,10 +301,20 @@ func (s *Service) RecordResponseError(host string) error {
 		return nil
 	}
 	now := s.clock()
-	return s.repo.UpdateFields(host, map[string]any{
+	if err := s.repo.UpdateFields(host, map[string]any{
 		"isNotResponding":    true,
 		"notRespondingSince": &now,
-	})
+	}); err != nil {
+		return err
+	}
+	// healthy-cache を無効化する。これが無いと、直後の RecordResponseSuccess が
+	// stale な healthy 判定で回復 UPDATE を取りこぼし、TTL が切れるまで
+	// isNotResponding が解除されない。isNotResponding==true への遷移は本メソッド
+	// だけなので、ここで消せば healthy-cache の整合が保てる (#1429 review)。
+	s.mu.Lock()
+	delete(s.responseHealthyCache, host)
+	s.mu.Unlock()
+	return nil
 }
 
 // IsBlocked reports whether the host matches an entry in meta.blockedHosts.

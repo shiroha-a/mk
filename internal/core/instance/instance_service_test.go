@@ -206,6 +206,74 @@ func TestService_MarkRequestReceived_UpdateError_NotCached(t *testing.T) {
 	assert.NotNil(t, repo.Instances["alpha.example"].LatestRequestReceivedAt)
 }
 
+// #1429 review: 健全 host への連続成功記録は 1 回目だけ SELECT し、TTL 窓内の
+// 以降は SELECT/UPDATE とも省く (deliver 成功 hot path の per-job SELECT を削る)。
+func TestService_RecordResponseSuccess_HealthyCachedSkipsSelect(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cur := base
+	svc.SetClock(func() time.Time { return cur })
+	svc.SetResponseHealthyTTL(5 * time.Minute)
+
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls)
+	assert.Equal(t, 0, repo.UpdateCalls)
+
+	// 窓内 (4 分後): SELECT も省く。
+	cur = base.Add(4 * time.Minute)
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls, "within TTL should skip FindByHost")
+	assert.Equal(t, 0, repo.UpdateCalls)
+
+	// 窓越え (6 分後): 再び SELECT する。
+	cur = base.Add(6 * time.Minute)
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 2, repo.FindCalls, "after TTL re-checks")
+}
+
+// #1429 review: not-responding への遷移は healthy-cache を invalidate し、直後の
+// 成功記録が cache を信用せず回復 UPDATE を実行する (stale healthy で recovery を
+// 取りこぼさない)。この delete が無いと最後の assert が落ちる。
+func TestService_RecordResponseError_InvalidatesHealthyCache(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	svc.SetResponseHealthyTTL(time.Hour)
+
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example")) // healthy をキャッシュ
+	require.NoError(t, svc.RecordResponseError("alpha.example"))   // 遷移 -> invalidate
+	assert.True(t, repo.Instances["alpha.example"].IsNotResponding)
+
+	// 直後の成功は cache を信用せず SELECT して回復 UPDATE する。
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.False(t, repo.Instances["alpha.example"].IsNotResponding)
+}
+
+// #1429 review: RecordResponseError は遷移 UPDATE のエラーを呼び出し側へ伝播する。
+func TestService_RecordResponseError_UpdateError(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	repo.UpdateErr = errors.New("update failed")
+	require.Error(t, svc.RecordResponseError("alpha.example"))
+}
+
+// #1429 review: RecordResponseSuccess は回復遷移 UPDATE のエラーを伝播し、
+// healthy-cache に載せない (次回再試行できる)。
+func TestService_RecordResponseSuccess_UpdateError(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true,
+	}
+	repo.UpdateErr = errors.New("update failed")
+	require.Error(t, svc.RecordResponseSuccess("alpha.example"))
+}
+
 func TestService_IsBlocked(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
