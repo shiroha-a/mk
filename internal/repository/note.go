@@ -92,7 +92,12 @@ type NoteRepository interface {
 	// is given.
 	ListFeatured(channelID, untilID string, limit, offset int) ([]*model.Note, error)
 	FindRenoteByUser(userID, renoteID string) (*model.Note, error)
-	ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	// ListMentions returns notes mentioning userID that userID can see.
+	// visibility が空でなければ note.visibility = visibility の exact-match で
+	// 絞る (upstream TS notes/mentions と同じ; 空は全種別)。振り分けを LIMIT 前に
+	// SQL で行うことで handler の post-fetch 振り分けによる under-fill を解消する
+	// (#1451)。
+	ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
 	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
 	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
@@ -631,7 +636,7 @@ func (r *noteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note,
 	return &note, nil
 }
 
-func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -648,6 +653,14 @@ func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID
 			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
 			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
 		userID, userID, userID)
+	// visibility kind filter: upstream TS notes/mentions と同じく visibility 指定
+	// 時のみ note.visibility = <値> の exact-match で絞る (空は全種別)。これを
+	// LIMIT 前に SQL で行うことで、handler 側 post-fetch 振り分けで起きていた
+	// ページ under-fill を解消する (#1451)。値は parameterized で injection-safe、
+	// 未知の値は単に 0 件になる (TS と同じ挙動)。
+	if visibility != "" {
+		q = q.Where(`"visibility" = ?`, visibility)
+	}
 	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)

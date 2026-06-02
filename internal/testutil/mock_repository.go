@@ -1102,13 +1102,19 @@ func (m *MockNoteRepository) FindRenoteByUser(userID, renoteID string) (*model.N
 	return nil, ErrNotFound
 }
 
-func (m *MockNoteRepository) ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
 		// viewer (= mention 対象 = userID) が見られる note のみ (#1441)。
 		if !m.canViewerSeeNote(userID, n) {
+			return false
+		}
+		// visibility 指定時は exact-match で絞る (#1451)。listFiltered は
+		// filter -> sort -> limit 順なので、ここで弾けば SQL push-down 同様に
+		// LIMIT 前で絞られ under-fill しない。
+		if visibility != "" && string(n.Visibility) != visibility {
 			return false
 		}
 		for _, mention := range n.Mentions {
