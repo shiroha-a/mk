@@ -16,6 +16,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -471,4 +472,61 @@ func TestNotes_NoteRepoError(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// #1464: queryService 配線時、stream に残留した followers note は handler の
+// FilterVisible で落ちる (defense-in-depth)。push 段で gate 済の前提だが、
+// 過去 entry 用フォールバックが動くことを confirm する。
+func TestNotes_FollowersNote_FilteredByQueryService(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-vis"] = &model.Antenna{ID: "a-vis", UserID: "alice"}
+
+	// followingRepo は空 = alice は author を follow していない。
+	followingRepo := testutil.NewMockFollowingRepository()
+	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
+
+	// stream には残留した「alice にとって不可視な followers note」が積まれている。
+	noteRepo.Notes["n-leak"] = &model.Note{
+		ID: "n-leak", UserID: "author", Visibility: model.NoteVisibilityFollowers,
+	}
+	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
+		Stream: "antennaTimeline:a-vis",
+		ID:     "1-0",
+		Values: map[string]any{"noteId": "n-leak"},
+	}).Err())
+
+	c, rec := newReq(t, `{"antennaId":"a-vis"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "n-leak",
+		"defense-in-depth filter should drop a residual followers note from a non-follower")
+}
+
+// #1464: queryService 配線時、follow 関係があれば followers note は引き続き
+// 表示される (gate が過剰に絞っていないことの guard)。
+func TestNotes_FollowersNote_VisibleToFollower(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-ok"] = &model.Antenna{ID: "a-ok", UserID: "alice"}
+
+	followingRepo := testutil.NewMockFollowingRepository()
+	require.NoError(t, followingRepo.Create(&model.Following{
+		ID: "f1", FollowerID: "alice", FolloweeID: "author",
+	}))
+	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
+
+	noteRepo.Notes["n-ok"] = &model.Note{
+		ID: "n-ok", UserID: "author", Visibility: model.NoteVisibilityFollowers,
+	}
+	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
+		Stream: "antennaTimeline:a-ok",
+		ID:     "1-0",
+		Values: map[string]any{"noteId": "n-ok"},
+	}).Err())
+
+	c, rec := newReq(t, `{"antennaId":"a-ok"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "n-ok")
 }

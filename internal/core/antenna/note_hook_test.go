@@ -17,7 +17,7 @@ func TestNoteCreateHook_OnNoteCreatedForwards(t *testing.T) {
 	hook := NewNoteCreateHook(svc)
 	text := "hi there"
 	hook.OnNoteCreated(
-		&model.Note{ID: "n1", UserID: "u2", Text: &text},
+		&model.Note{ID: "n1", UserID: "u2", Text: &text, Visibility: model.NoteVisibilityPublic},
 		&model.User{ID: "u2", Username: "alice"},
 	)
 

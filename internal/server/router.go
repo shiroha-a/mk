@@ -1626,6 +1626,7 @@ func (s *Server) setupRoutes() {
 	antennasHandler.SetReactionReader(reactionCountWriter)
 	antennasHandler.SetNoteFieldResolver(noteFieldResolver)
 	antennasHandler.SetUserRepo(userRepo)
+	antennasHandler.SetQueryService(noteQueryService) // #1464: Notes の visibility filter (defense-in-depth)
 	api.POST("/antennas/create", antennasHandler.Create, middleware.RequireAuth())
 	api.POST("/antennas/show", antennasHandler.Show, middleware.RequireAuth())
 	api.POST("/antennas/update", antennasHandler.Update, middleware.RequireAuth())

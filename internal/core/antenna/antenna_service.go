@@ -14,6 +14,7 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -407,14 +408,29 @@ func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, now ti
 
 // matchNote evaluates whether the note satisfies the antenna's filter set.
 // 評価順 (短絡):
-//  1. localOnly でリモート著者なら false
-//  2. excludeBots で bot 著者なら false
-//  3. withFile が真でファイル添付がなければ false
-//  4. withReplies が偽で reply なら false
-//  5. source 別に user フィルタを適用
-//  6. keywords (DNF) のいずれかにマッチしなければ false
-//  7. excludeKeywords (DNF) のいずれかにマッチすれば false
+//  1. visibility が antenna owner から見える (= CanSeeNote 相当) かを check
+//  2. localOnly でリモート著者なら false
+//  3. excludeBots で bot 著者なら false
+//  4. withFile が真でファイル添付がなければ false
+//  5. withReplies が偽で reply なら false
+//  6. source 別に user フィルタを適用
+//  7. keywords (DNF) のいずれかにマッチしなければ false
+//  8. excludeKeywords (DNF) のいずれかにマッチすれば false
+//
+// 旧実装は visibility を一切見ずに matched 判定で antenna stream へ push して
+// いたため、`src=all` / `src=users` 等の broad source antenna が「antenna owner が
+// follow していない author の followers / specified note」を pickup して
+// content leak する IDOR があった (#1464)。CanSeeNote 相当を push 段で
+// 1 回 gate することで REST `antennas/notes` と WS `antenna` channel の両方で
+// 漏洩を断つ。
 func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User) bool {
+	// visibility gate: antenna owner を viewer とみなして CanSeeNote 判定する。
+	// followingRepo 未配線時は CanSeeNote の semantics 通り `followers` を
+	// 投稿者本人以外には見せない fail-closed (= matchSource `home` と同じ方針)。
+	owner := &model.User{ID: a.UserID}
+	if !corenote.CanSeeNote(owner, n, s.followingRepo) {
+		return false
+	}
 	if a.LocalOnly && author.Host != nil && *author.Host != "" {
 		return false
 	}

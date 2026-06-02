@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -30,12 +31,25 @@ type Handler struct {
 	// userRepo は antennas/notes の hardMutedWords filter (#787) のために
 	// viewer profile を引く。未配線時は filter skip。
 	userRepo repository.UserRepository
+	// queryService は antennas/notes の visibility filter (#1464) で
+	// FilterVisible を呼ぶための note.QueryService。本来 push 段
+	// (core/antenna matchNote) で visibility gate しているが、過去に stream へ
+	// 滞留した entry や設定ミスに対する defense-in-depth として handler でも
+	// 1 段 filter する。未配線時は filter skip (旧挙動)。
+	queryService *corenote.QueryService
 }
 
 // SetUserRepo wires a UserRepository so antennas/notes filters out notes that
 // match the viewer's hardMutedWords (#787).
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetQueryService wires a note.QueryService used by Notes as defense-in-depth
+// for visibility filtering (#1464). 通常 push 段 (matchNote) で gate されるが、
+// stream に残留した entry を捌くために handler 側でも 1 段 filter する。
+func (h *Handler) SetQueryService(qs *corenote.QueryService) {
+	h.queryService = qs
 }
 
 // SetNoteFieldResolver attaches the shared resolver that fills Files /
@@ -288,6 +302,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	notes, err := h.noteRepo.FindManyByIDsWithUser(ids)
 	if err != nil {
 		return apierr.JSONInternalError(c)
+	}
+	// visibility filter (defense-in-depth, #1464): push 段 (core/antenna
+	// matchNote) で followers/specified note は antenna owner 視点で gate されて
+	// いるが、過去に stream に滞留した entry や設定ミスに対するフォールバック
+	// として handler でも 1 段 filter する (`channels/timeline` / `user-list-timeline`
+	// と同じパターン)。queryService 未配線時は filter skip (旧挙動)。
+	if h.queryService != nil {
+		notes = h.queryService.FilterVisible(user, notes)
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
