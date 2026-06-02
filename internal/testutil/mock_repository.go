@@ -2483,6 +2483,10 @@ type MockInstanceRepository struct {
 	// behaviour in callers (e.g. instance.ShouldSkipDelivery, #1407). Not
 	// goroutine-safe; tests asserting on it must drive the service serially.
 	FindCalls int
+	// UpdateCalls counts UpdateFields invocations so tests can assert that
+	// instance health bookkeeping skips redundant writes (#1429: TS-aligned
+	// state-transition guard / CollapsedQueue throttling). Not goroutine-safe.
+	UpdateCalls int
 }
 
 // NewMockInstanceRepository creates an empty MockInstanceRepository.
@@ -2524,6 +2528,7 @@ func (m *MockInstanceRepository) FindManyByHosts(hosts []string) ([]*model.Insta
 }
 
 func (m *MockInstanceRepository) UpdateFields(host string, fields map[string]any) error {
+	m.UpdateCalls++
 	if m.UpdateErr != nil {
 		return m.UpdateErr
 	}

@@ -48,13 +48,20 @@ type Service struct {
 	clock           func() time.Time
 	metadataFetcher MetadataFetcher
 
-	// mu は suspendCache と lastMetaWarn を保護する。ShouldSkipDelivery は
-	// deliver hot path から並行に呼ばれるため軽量な Mutex で囲う (#1407 / #1410)。
+	// mu は suspendCache / requestReceivedCache / lastMetaWarn を保護する。
+	// ShouldSkipDelivery / MarkRequestReceived は deliver / inbox hot path から
+	// 並行に呼ばれるため軽量な Mutex で囲う (#1407 / #1410 / #1429)。
 	mu sync.Mutex
 	// suspendCache は host -> suspend 判定 (bool) の短期キャッシュ。deliver hot
 	// path の FindByHost DB 往復を cacheTTL の間だけ省く (#1407)。
 	suspendCache map[string]suspendEntry
 	cacheTTL     time.Duration
+	// requestReceivedCache は host -> 窓失効時刻 (= 最終書込 + requestReceivedWindow)。
+	// MarkRequestReceived の latestRequestReceivedAt 書込を host あたり窓内 1 回に
+	// 間引く。窓内は SELECT も UPDATE も省く。Misskey TS InboxProcessorService の
+	// CollapsedQueue (本番 5 分窓) 相当 (#1429)。
+	requestReceivedCache  map[string]time.Time
+	requestReceivedWindow time.Duration
 	// lastMetaWarn / metaWarnEvery は meta.Fetch 失敗 warn のレート制限用。
 	// 継続障害時に配送ごとに warn を吐かないよう間引く (#1410)。
 	lastMetaWarn  time.Time
@@ -70,13 +77,15 @@ type suspendEntry struct {
 // NewService constructs an instance Service.
 func NewService(repo repository.InstanceRepository, metaRepo repository.MetaRepository, idGen id.Generator) *Service {
 	return &Service{
-		repo:          repo,
-		metaRepo:      metaRepo,
-		idGen:         idGen,
-		clock:         time.Now,
-		suspendCache:  make(map[string]suspendEntry),
-		cacheTTL:      5 * time.Minute,
-		metaWarnEvery: time.Minute,
+		repo:                  repo,
+		metaRepo:              metaRepo,
+		idGen:                 idGen,
+		clock:                 time.Now,
+		suspendCache:          make(map[string]suspendEntry),
+		cacheTTL:              5 * time.Minute,
+		requestReceivedCache:  make(map[string]time.Time),
+		requestReceivedWindow: 5 * time.Minute,
+		metaWarnEvery:         time.Minute,
 	}
 }
 
@@ -101,6 +110,15 @@ func (s *Service) SetMetaWarnEvery(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metaWarnEvery = d
+}
+
+// SetRequestReceivedWindow overrides the MarkRequestReceived collapse window.
+// Intended for tests that exercise the throttle boundary deterministically
+// (#1429).
+func (s *Service) SetRequestReceivedWindow(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requestReceivedWindow = d
 }
 
 // SetMetadataFetcher attaches a MetadataFetcher invoked best-effort after a
@@ -142,26 +160,72 @@ func (s *Service) RegisterFromHost(host string) (*model.Instance, error) {
 
 // MarkRequestReceived bumps the latestRequestReceivedAt timestamp on the
 // instance row. ホストが未登録の場合は黙って no-op。Inbox handler から呼ぶ。
+//
+// Misskey TS の InboxProcessorService は受信を CollapsedQueue (本番 5 分窓) で
+// 集約し、host あたり最大 5 分に 1 回だけ UPDATE する (#1429)。mk-go も同様に
+// requestReceivedWindow 窓で間引く: 窓内の再呼び出しは FindByHost (SELECT) と
+// UpdateFields (UPDATE) を両方スキップして、inbox 最頻ジョブの per-job 2 往復を
+// 削る。窓越え (または初回) のみ書き込み、その時刻 + window を窓失効時刻として
+// 記録する。
 func (s *Service) MarkRequestReceived(host string) error {
 	if host == "" {
 		return nil
 	}
-	if _, err := s.repo.FindByHost(host); err != nil {
+	now := s.clock()
+	// 窓内に既に書込済みなら SELECT/UPDATE とも省く (TS CollapsedQueue 相当)。
+	s.mu.Lock()
+	if exp, ok := s.requestReceivedCache[host]; ok && now.Before(exp) {
+		s.mu.Unlock()
 		return nil
 	}
-	now := s.clock()
-	return s.repo.UpdateFields(host, map[string]any{
+	s.mu.Unlock()
+
+	if _, err := s.repo.FindByHost(host); err != nil {
+		// 未登録 host はキャッシュせず次回も SELECT で確認する (登録後に窓集約が
+		// 効き始める)。
+		return nil
+	}
+	if err := s.repo.UpdateFields(host, map[string]any{
 		"latestRequestReceivedAt": &now,
-	})
+	}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	// 書き込みついでに期限切れ entry を amortized に掃除する (suspendCache と同方針)。
+	s.evictExpiredRequestReceivedLocked(now)
+	s.requestReceivedCache[host] = now.Add(s.requestReceivedWindow)
+	s.mu.Unlock()
+	return nil
+}
+
+// evictExpiredRequestReceivedLocked drops collapse-window entries whose window
+// has elapsed. Must be called with s.mu held. host cardinality は連合先数で有界
+// なので全走査で十分 (suspendCache の evictExpiredLocked と同方針, #1429)。
+func (s *Service) evictExpiredRequestReceivedLocked(now time.Time) {
+	for h, exp := range s.requestReceivedCache {
+		if !now.Before(exp) {
+			delete(s.requestReceivedCache, h)
+		}
+	}
 }
 
 // RecordResponseSuccess marks the instance as responsive again, clearing
-// notRespondingSince. Outbox の配信成功時 (Phase 4 で wire 予定) に呼ばれる。
+// notRespondingSince. deliver の配信成功時に呼ばれる。
+//
+// Misskey TS DeliverProcessorService は isNotResponding === true の状態遷移時
+// のみ update し、正常応答が続く間は DB 書込をしない (#1429)。mk-go も
+// FindByHost 結果が既に isNotResponding == false なら UPDATE をスキップして、
+// deliver 最頻ジョブ (健全 host への連続配送) の per-job 書込を無くす。
 func (s *Service) RecordResponseSuccess(host string) error {
 	if host == "" {
 		return nil
 	}
-	if _, err := s.repo.FindByHost(host); err != nil {
+	inst, err := s.repo.FindByHost(host)
+	if err != nil {
+		return nil
+	}
+	// 既に応答中なら何もしない (TS の状態遷移ガードに合わせる)。
+	if !inst.IsNotResponding {
 		return nil
 	}
 	return s.repo.UpdateFields(host, map[string]any{
