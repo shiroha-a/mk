@@ -96,14 +96,22 @@ func (c *PublicKeyCache) parsedKey(keyID, pemStr string) (crypto.PublicKey, KeyT
 }
 
 // VerifyRequestCached verifies req's HTTP Signature using a memoized parse of
-// (keyID, pem). 挙動は activitypub.VerifyRequest と等価だが、(keyId, PEM) 単位で
+// (keyID, pem). 挙動は activitypub.VerifyRequest と等価で、(keyId, PEM) 単位で
 // x509 パースを 1 回に集約する inbound hot path 用 drop-in (#1426)。pem は呼び
 // 出し側 (resolver) が返す「永続層の最新値」前提で、stale PEM は cache key 不一致
 // で自動的に再パースされる。
+//
+// VerifyRequest と同じく signature header parse + algorithm guard を公開鍵パース
+// (ここでは cache 参照) より前に行うため、未対応 algorithm のリクエストでは鍵を
+// パース / cache 参照せず短絡し、エラー優先順位も一致する (#1426 review)。
 func (c *PublicKeyCache) VerifyRequestCached(req *http.Request, keyID, pemStr string) error {
+	parsed, err := parseSignatureForVerify(req)
+	if err != nil {
+		return err
+	}
 	pub, kt, err := c.parsedKey(keyID, pemStr)
 	if err != nil {
 		return err
 	}
-	return VerifyRequestWithKey(req, pub, kt)
+	return verifyParsed(req, parsed, pub, kt)
 }

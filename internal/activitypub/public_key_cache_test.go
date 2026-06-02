@@ -175,6 +175,22 @@ func TestPublicKeyCache_VerifyRequestCached_Success(t *testing.T) {
 	assert.Equal(t, 1, parses, "VerifyRequestCached must reuse the memoized key")
 }
 
+func TestPublicKeyCache_VerifyRequestCached_AlgCheckedBeforeParse(t *testing.T) {
+	// 未対応 algorithm のリクエストは公開鍵をパース / cache 参照する前に弾く
+	// (= VerifyRequest と同じエラー優先順位)。bad PEM を渡しても "unsupported
+	// algorithm" が返り、parse seam は一度も呼ばれない。
+	req, _ := http.NewRequest(http.MethodGet, "https://x.example/", nil)
+	req.Header.Set("Signature", `keyId="x",algorithm="hmac-sha256",signature="y"`)
+	c := NewPublicKeyCache(8)
+	var parses int
+	c.parse = countingParse(&parses)
+
+	err := c.VerifyRequestCached(req, "x", "not a pem")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported")
+	assert.Equal(t, 0, parses, "unsupported algorithm must short-circuit before parsing the key")
+}
+
 func TestPublicKeyCache_VerifyRequestCached_ParseError(t *testing.T) {
 	key, _ := newTestKey(t)
 	req, _ := http.NewRequest(http.MethodGet, "https://remote.example/users/bob", nil)

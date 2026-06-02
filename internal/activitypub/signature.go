@@ -206,26 +206,22 @@ func ParseSignatureHeader(header string) (*ParsedSignature, error) {
 // 場合は PublicKeyCache.VerifyRequestCached で x509 パースをメモ化すること
 // (#1426)。
 func VerifyRequest(req *http.Request, publicKeyPEM string) error {
-	parsed, err := ParseSignatureHeader(req.Header.Get("Signature"))
+	// signature header の parse と algorithm guard は PEM パースより前に行う。
+	// 未対応 algorithm のリクエストに無駄な x509 パースを走らせず、空 PEM でも
+	// algorithm error を返す既存挙動を維持する。
+	parsed, err := parseSignatureForVerify(req)
 	if err != nil {
 		return err
-	}
-	// 早期にalgorithm名を弾く (公開鍵PEMパースより前に判定したい)。
-	// VerifyRequestWithKey も同じ guard を持つが、ここで先に弾くことで未対応
-	// algorithm のリクエストに対し無駄な x509 パースを走らせない (空 PEM で
-	// algorithm error を期待する既存テスト互換も維持)。
-	if !isKnownAlgorithm(parsed.Algorithm) {
-		return fmt.Errorf("unsupported algorithm %q", parsed.Algorithm)
 	}
 	pub, kt, err := ParsePublicKey(publicKeyPEM)
 	if err != nil {
 		return err
 	}
-	return VerifyRequestWithKey(req, pub, kt)
+	return verifyParsed(req, parsed, pub, kt)
 }
 
 // VerifyRequestWithKey verifies an incoming HTTP request signature against an
-// already-parsed public key. This is the parse-free core of VerifyRequest: the
+// already-parsed public key. This is the parse-free entry of VerifyRequest: the
 // inbound hot path (#1426) supplies a memoized (pub, kt) so the per-request
 // pem.Decode + x509.ParsePKIXPublicKey cost is paid once per (keyId, PEM)
 // instead of on every verify.
@@ -233,13 +229,33 @@ func VerifyRequest(req *http.Request, publicKeyPEM string) error {
 // pub / kt は ParsePublicKey 由来であること (RSA は *rsa.PublicKey、Ed25519 は
 // ed25519.PublicKey)。algorithm と鍵種別の不一致は verifyAlgorithm が拒否する。
 func VerifyRequestWithKey(req *http.Request, pub crypto.PublicKey, kt KeyType) error {
-	parsed, err := ParseSignatureHeader(req.Header.Get("Signature"))
+	parsed, err := parseSignatureForVerify(req)
 	if err != nil {
 		return err
 	}
-	if !isKnownAlgorithm(parsed.Algorithm) {
-		return fmt.Errorf("unsupported algorithm %q", parsed.Algorithm)
+	return verifyParsed(req, parsed, pub, kt)
+}
+
+// parseSignatureForVerify parses the Signature header and rejects unsupported
+// algorithm names. これを verify 経路 (VerifyRequest / VerifyRequestWithKey /
+// PublicKeyCache.VerifyRequestCached) で共有することで、header parse を 1 経路
+// につき 1 回に統一し、algorithm guard を必ず公開鍵パースより前に効かせる
+// (= 3 経路でエラー優先順位を揃える、#1426 review)。
+func parseSignatureForVerify(req *http.Request) (*ParsedSignature, error) {
+	parsed, err := ParseSignatureHeader(req.Header.Get("Signature"))
+	if err != nil {
+		return nil, err
 	}
+	if !isKnownAlgorithm(parsed.Algorithm) {
+		return nil, fmt.Errorf("unsupported algorithm %q", parsed.Algorithm)
+	}
+	return parsed, nil
+}
+
+// verifyParsed is the shared verification core invoked once the signature
+// header is parsed and the public key is available. signing string の再構築 →
+// 署名 base64 decode → 鍵種別ごとの verify → Digest フォーマットチェックを行う。
+func verifyParsed(req *http.Request, parsed *ParsedSignature, pub crypto.PublicKey, kt KeyType) error {
 	signingString, err := buildSigningString(req, parsed.Headers)
 	if err != nil {
 		return err
