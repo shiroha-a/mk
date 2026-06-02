@@ -10,4 +10,14 @@
 -- 外で ExecContext するため CONCURRENTLY を直接書ける。CONCURRENTLY は単一文で
 -- しか実行できない (複数文だと postgres の暗黙 transaction で失敗する) ため、
 -- mentions / fileIds をそれぞれ別 migration (000054 / 000055) に分割している。
+--
+-- 失敗時の回復: CONCURRENTLY build が途中で失敗 (kill / deadlock / server 側
+-- statement_timeout 等) すると INVALID な index が残り、再実行時の
+-- IF NOT EXISTS は名前一致で skip するため恒久的に再構築されない。さらに
+-- golang-migrate は当該 version を dirty のまま残す。回復は以下:
+--   1. 無効 index を特定して DROP:
+--      SELECT i.relname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+--        WHERE i.relname = 'IDX_note_mentions' AND NOT x.indisvalid;
+--      DROP INDEX CONCURRENTLY IF EXISTS "IDX_note_mentions";
+--   2. migrate の dirty を解除 (migrate force <直前 version>) してから再適用。
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_note_mentions" ON "note" USING gin ("mentions");
