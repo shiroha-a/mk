@@ -311,9 +311,11 @@ func TestNotificationPublisher_WithRepos_PacksUserAndNote(t *testing.T) {
 	pub := &stubPublisher{}
 	np := NewNotificationPublisher(pub)
 	idGen, _ := id.NewGenerator("aidx")
+	// #1471: visibility gate が入ったので test data も visibility を明示。
+	// public は誰でも見られるので note embed が残ることを確認する path。
 	np.SetRepos(
 		&stubNotifUserRepo{user: &model.User{ID: "u2", Username: "bob"}},
-		&stubNotifNoteRepo{note: &model.Note{ID: "note1", UserID: "u2"}},
+		&stubNotifNoteRepo{note: &model.Note{ID: "note1", UserID: "u2", Visibility: model.NoteVisibilityPublic}},
 		idGen,
 	)
 	n := &corenotification.Notification{
@@ -338,14 +340,14 @@ func TestNotificationPublisher_WithRepos_PacksUserAndNote(t *testing.T) {
 
 func TestNotificationPublisher_Pack_NilNotification(t *testing.T) {
 	np := NewNotificationPublisher(nil)
-	assert.Nil(t, np.Pack(nil))
+	assert.Nil(t, np.Pack("alice", nil))
 }
 
 func TestNotificationPublisher_Pack_WithoutRepos_ReturnsRawNotification(t *testing.T) {
 	np := NewNotificationPublisher(nil)
 	n := &corenotification.Notification{ID: "x"}
 	// SetReposを呼ばなければ raw *Notificationがそのまま返る。
-	assert.Equal(t, n, np.Pack(n))
+	assert.Equal(t, n, np.Pack("alice", n))
 }
 
 func TestNotificationPublisher_Pack_WithRepos_ReturnsPackedMap(t *testing.T) {
@@ -361,7 +363,7 @@ func TestNotificationPublisher_Pack_WithRepos_ReturnsPackedMap(t *testing.T) {
 		Type:       corenotification.TypeFollow,
 		NotifierID: "u_b",
 	}
-	out := np.Pack(n)
+	out := np.Pack("alice", n)
 	body, ok := out.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "u_b", body["userId"])
@@ -369,6 +371,204 @@ func TestNotificationPublisher_Pack_WithRepos_ReturnsPackedMap(t *testing.T) {
 	_, hasNote := body["note"]
 	assert.False(t, hasNote)
 }
+
+// stubNotifFollowingChecker は CanSeeNote の followers branch を test 用に
+// stub する。`followers` map に (follower, followee) を入れておくと
+// Exists が true を返す。
+type stubNotifFollowingChecker struct {
+	followers map[string]map[string]bool
+}
+
+func (s *stubNotifFollowingChecker) Exists(followerID, followeeID string) (bool, error) {
+	if s == nil || s.followers == nil {
+		return false, nil
+	}
+	return s.followers[followerID][followeeID], nil
+}
+
+// #1471 IDOR fix: followers visibility note への mention/reply 通知が
+// non-follower notifiee の stream に流れた際、note embed を nil 化して
+// 本文を漏らさないこと。
+func TestNotificationPublisher_Pack_FollowersNote_NonFollowerNotifiee_DropsNote(t *testing.T) {
+	np := NewNotificationPublisher(nil)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:         "note1",
+			UserID:     "bob",
+			Visibility: model.NoteVisibilityFollowers,
+			Text:       strPtr("secret followers content"),
+		}},
+		idGen,
+	)
+	np.SetFollowingChecker(&stubNotifFollowingChecker{followers: map[string]map[string]bool{
+		// alice は bob を follow していない
+	}})
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeMention,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	out := np.Pack("alice", n)
+	body, ok := out.(map[string]any)
+	require.True(t, ok)
+	// notifierID は残る (= 通知行は出す) が note は落とす
+	assert.Equal(t, "bob", body["userId"])
+	assert.Nil(t, body["note"], "non-follower notifiee には followers note の embed を返さない")
+}
+
+// follower 関係がある notifiee には従来通り note を embed する (regress
+// guard: visibility gate が overshoot して全 follower まで落としていないか)。
+func TestNotificationPublisher_Pack_FollowersNote_FollowerNotifiee_KeepsNote(t *testing.T) {
+	np := NewNotificationPublisher(nil)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:         "note1",
+			UserID:     "bob",
+			Visibility: model.NoteVisibilityFollowers,
+		}},
+		idGen,
+	)
+	np.SetFollowingChecker(&stubNotifFollowingChecker{followers: map[string]map[string]bool{
+		"alice": {"bob": true}, // alice → bob follow
+	}})
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeReply,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	out := np.Pack("alice", n)
+	body, ok := out.(map[string]any)
+	require.True(t, ok)
+	assert.NotNil(t, body["note"])
+}
+
+// specified note は visibleUserIDs に含まれない notifiee には note を
+// 落とす (mention 経路で visibleUserIDs 外の user に通知が走る ill-formed
+// state での leak 防止)。
+func TestNotificationPublisher_Pack_SpecifiedNote_NonRecipient_DropsNote(t *testing.T) {
+	np := NewNotificationPublisher(nil)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:             "note1",
+			UserID:         "bob",
+			Visibility:     model.NoteVisibilitySpecified,
+			VisibleUserIDs: []string{"charlie"}, // alice は含まれない
+		}},
+		idGen,
+	)
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeMention,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	out := np.Pack("alice", n)
+	body, ok := out.(map[string]any)
+	require.True(t, ok)
+	assert.Nil(t, body["note"], "visibleUserIDs 外の notifiee には specified note embed を返さない")
+}
+
+// specified note でも author 本人 / visibleUserIDs 内の notifiee には
+// 従来通り note を embed する。
+func TestNotificationPublisher_Pack_SpecifiedNote_Recipient_KeepsNote(t *testing.T) {
+	np := NewNotificationPublisher(nil)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:             "note1",
+			UserID:         "bob",
+			Visibility:     model.NoteVisibilitySpecified,
+			VisibleUserIDs: []string{"alice"},
+		}},
+		idGen,
+	)
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeMention,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	out := np.Pack("alice", n)
+	body, ok := out.(map[string]any)
+	require.True(t, ok)
+	assert.NotNil(t, body["note"])
+}
+
+// followingRepo 未配線時は CanSeeNote の semantics (followers branch で
+// 本人外不可) に倣って fail-closed。production の router は必ず
+// SetFollowingChecker するが、test の partial setup で followers note の
+// embed が抜けないことを固定する。
+func TestNotificationPublisher_Pack_FollowersNote_NilFollowingChecker_DropsForNonAuthor(t *testing.T) {
+	np := NewNotificationPublisher(nil)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:         "note1",
+			UserID:     "bob",
+			Visibility: model.NoteVisibilityFollowers,
+		}},
+		idGen,
+	)
+	// SetFollowingChecker は呼ばない
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeReply,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	out := np.Pack("alice", n)
+	body, _ := out.(map[string]any)
+	require.NotNil(t, body)
+	assert.Nil(t, body["note"], "followingRepo 未配線時は followers note を非著者に embed しない")
+}
+
+// PublishNotification は内部で Pack(notifieeID, n) を呼んでいるので、
+// followers note への non-follower mention で stream payload にも note が
+// 漏れないことを end-to-end で固定。
+func TestNotificationPublisher_PublishNotification_GatesNoteByVisibility(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID:         "note1",
+			UserID:     "bob",
+			Visibility: model.NoteVisibilityFollowers,
+			Text:       strPtr("secret"),
+		}},
+		idGen,
+	)
+	np.SetFollowingChecker(&stubNotifFollowingChecker{})
+	n := &corenotification.Notification{
+		ID:         "x",
+		Type:       corenotification.TypeMention,
+		NotifierID: "bob",
+		NoteID:     "note1",
+	}
+	np.PublishNotification("alice", n)
+	require.Len(t, pub.payloads, 1)
+	raw, ok := pub.payloads[0].(json.RawMessage)
+	require.True(t, ok)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	assert.Nil(t, body["note"], "stream payload にも本文を流さない")
+	// 本文 string が JSON 内に出現しないこと (defensive: 別 field 経由の
+	// leak も塞ぐ)。
+	assert.NotContains(t, string(raw), "secret")
+}
+
+func strPtr(s string) *string { return &s }
 
 func TestNotificationPublisher_NilPubIsNoOp(t *testing.T) {
 	np := NewNotificationPublisher(nil)

@@ -227,12 +227,14 @@ func TestService_Create_PublishesUnreadNotification(t *testing.T) {
 
 // stubPacker returns a predefined map as the packed form.
 type stubPacker struct {
-	calls int
-	out   map[string]any
+	calls          int
+	lastNotifieeID string
+	out            map[string]any
 }
 
-func (s *stubPacker) Pack(_ *Notification) any {
+func (s *stubPacker) Pack(notifieeID string, _ *Notification) any {
 	s.calls++
+	s.lastNotifieeID = notifieeID
 	return s.out
 }
 
@@ -248,6 +250,11 @@ func TestService_Create_UsesPackerForUnreadNotification(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, packer.calls)
+	// #1471: Service.Create は Pack に notifieeID を渡すことで Packer 側で
+	// note embed の visibility gate を効かせる契約。stub に届く notifieeID
+	// を確認しておくと、将来 Pack signature を変えたときに silent failure
+	// (= visibility check の入力がずれて leak) を起こさない。
+	assert.Equal(t, "alice", packer.lastNotifieeID)
 	require.Len(t, pub.calls, 1)
 	// body はpackerの出力 map に置き換わる (TS互換shape)
 	body, ok := pub.calls[0].body.(map[string]any)
