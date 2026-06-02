@@ -72,14 +72,22 @@ func (c *PublicKeyCache) parsedKey(keyID, pemStr string) (crypto.PublicKey, KeyT
 	if c == nil {
 		return ParsePublicKey(pemStr)
 	}
+	// parse seam が未設定 (= NewPublicKeyCache を経由せずゼロ値の PublicKeyCache を
+	// 直接生成した場合) でも panic させず ParsePublicKey にフォールバックする。
+	// PublicKeyCache は exported 型なので、他パッケージが `&PublicKeyCache{}` を
+	// 作って呼ぶ誤用に備える (本番経路は必ず NewPublicKeyCache で parse 配線済み)。
+	parse := c.parse
+	if parse == nil {
+		parse = ParsePublicKey
+	}
 	if c.lru == nil {
-		return c.parse(pemStr)
+		return parse(pemStr)
 	}
 	ck := publicKeyCacheKey(keyID, pemStr)
 	if v, ok := c.lru.Get(ck); ok {
 		return v.pub, v.kt, nil
 	}
-	pub, kt, err := c.parse(pemStr)
+	pub, kt, err := parse(pemStr)
 	if err != nil {
 		return nil, 0, err
 	}

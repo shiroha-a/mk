@@ -143,6 +143,20 @@ func TestPublicKeyCache_NilLRUFallsBackToParse(t *testing.T) {
 	assert.Equal(t, 2, parses)
 }
 
+func TestPublicKeyCache_ZeroValueDoesNotPanic(t *testing.T) {
+	_, pub := newTestKey(t)
+	// NewPublicKeyCache を経由しないゼロ値 (lru / parse とも nil) でも panic せず
+	// 都度パースで動く (exported 型の誤用に対する防御)。
+	c := &PublicKeyCache{}
+	got, kt, err := c.parsedKey("kid", pub)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, KeyTypeRSA, kt)
+
+	_, _, err = c.parsedKey("kid", "not pem")
+	assert.Error(t, err)
+}
+
 func TestPublicKeyCache_VerifyRequestCached_Success(t *testing.T) {
 	key, pub := newTestKey(t)
 	body := []byte(`{"type":"Create"}`)
