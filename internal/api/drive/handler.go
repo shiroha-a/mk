@@ -691,7 +691,20 @@ func (h *Handler) FilesCheckExistence(c echo.Context) error {
 // くる。upstream Misskey TS と同じく cursor で keyset pagination する。
 // 過去はページング非対応で同じ note を返し続ける無限スクロール bug が
 // 出ていた (#488)。
+//
+// 旧実装は fileId を viewer 所有か検証せず直に `noteRepo.ListByFileID` を
+// 叩いていたため、認証 viewer が他人 owner の fileID を投げて当該 file を
+// attach した followers / specified note を本文ごと列挙できる IDOR が
+// 成立していた (#1470)。upstream TS と同じく viewer 所有 file のみ許可し、
+// 不存在 / owner mismatch / system file (userId IS NULL) はいずれも
+// NO_SUCH_FILE で隠蔽する。`fileRepo` 未配線も同じく fail-closed。
+//
+// owner check 通過後の note は upstream `notes/create` の `checkFileIDs`
+// が「file は author 所有」を強制するため必然的に viewer 自身の note で
+// あり、CanSeeNote は本人 short-circuit で常に true (= 追加の
+// FilterVisible が無くても leak しない)。
 func (h *Handler) FilesAttachedNotes(c echo.Context) error {
+	viewer := middleware.GetUser(c)
 	var req struct {
 		FileID    string `json:"fileId"`
 		Limit     int    `json:"limit"`
@@ -702,6 +715,17 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.FileID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// upstream Misskey TS の attached-notes.ts と同じ semantics: viewer 所有
+	// file のみ許可 (#1470 IDOR fix)。upstream 専用 UUID
+	// `c118ece3-2e4b-4296-99d1-51756e32d232` を使い、汎用 NoSuchFile
+	// (UUIDNoSuchFile) と区別する。
+	if h.fileRepo == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "c118ece3-2e4b-4296-99d1-51756e32d232"))
+	}
+	f, err := h.fileRepo.FindByID(req.FileID)
+	if err != nil || f.UserID == nil || *f.UserID != viewer.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "c118ece3-2e4b-4296-99d1-51756e32d232"))
 	}
 	// fileIds配列にfileIDを含むノートを検索 (PostgreSQL配列演算子)
 	if h.noteRepo == nil {
@@ -714,7 +738,6 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	viewer := middleware.GetUser(c)
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)

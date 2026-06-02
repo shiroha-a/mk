@@ -158,6 +158,14 @@ type NotificationNoteRepo interface {
 	FindByIDWithRelations(id string) (*model.Note, error)
 }
 
+// NotificationFollowingChecker abstracts the FollowingRepository.Exists call
+// needed by Pack's visibility gate (#1471). Narrow interface so we don't pull
+// the whole repository package into the stream layer (mirrors the
+// NotificationUserRepo / NotificationNoteRepo pattern).
+type NotificationFollowingChecker interface {
+	Exists(followerID, followeeID string) (bool, error)
+}
+
 // NotificationPublisher serializes a notification.Notification and publishes
 // it to the per-user `notifications:<id>` topic. Implements
 // core/notification.StreamingPublisher. When userRepo / noteRepo are set
@@ -167,6 +175,7 @@ type NotificationPublisher struct {
 	pub            PubSubPublisher
 	userRepo       NotificationUserRepo
 	noteRepo       NotificationNoteRepo
+	followingRepo  NotificationFollowingChecker
 	idGen          id.Generator
 	instanceLookup entity.InstanceLookup
 	emojiLookup    entity.EmojiLookup
@@ -199,10 +208,27 @@ func (p *NotificationPublisher) SetEmojiLookup(lookup entity.EmojiLookup) {
 	p.emojiLookup = lookup
 }
 
+// SetFollowingChecker attaches the follow relation checker used by Pack to
+// gate note embeds against notifiee visibility (#1471). When unset, Pack
+// falls back to a fail-closed branch for `followers` visibility (= note
+// embed is dropped for non-author notifiees), mirroring core/note.CanSeeNote
+// の `followingChecker == nil` semantics。
+func (p *NotificationPublisher) SetFollowingChecker(c NotificationFollowingChecker) {
+	p.followingRepo = c
+}
+
 // Pack implements core/notification.Packer. Returns the packed map shape
 // when repos are wired, otherwise the raw Notification so callers can
 // fall back to prior behaviour.
-func (p *NotificationPublisher) Pack(n *corenotification.Notification) any {
+//
+// notifieeID は packed body を受け取る viewer。followers / specified
+// visibility の note は notifiee が CanSeeNote 相当の判定を満たさない
+// 場合 note field を nil にして本文 leak を防ぐ (#1471 IDOR fix)。
+// REST `i/notifications` の #1444 fix と対称: notification 行自体は残す
+// が note detail を落とすことで非可視 viewer に「通知は来た / 本文は隠す」
+// shape を実現する。notifieeID が空 (= Pack の呼び出し元が context を
+// 渡し損ねた) ときも fail-closed で followers / specified note を落とす。
+func (p *NotificationPublisher) Pack(notifieeID string, n *corenotification.Notification) any {
 	if n == nil {
 		return nil
 	}
@@ -218,10 +244,61 @@ func (p *NotificationPublisher) Pack(n *corenotification.Notification) any {
 	var note *model.Note
 	if n.NoteID != "" && p.noteRepo != nil {
 		if n2, err := p.noteRepo.FindByIDWithRelations(n.NoteID); err == nil {
-			note = n2
+			// visibility gate (#1471): note embed を pack に通す前に
+			// notifiee が見られるかを判定。core/note.CanSeeNote と同じ
+			// 条件を、stream → repository への直接依存を避けるため inline
+			// で再現する (NotificationUserRepo / NotificationNoteRepo と
+			// 同じ design pattern)。
+			if noteVisibleToNotifiee(notifieeID, n2, p.followingRepo) {
+				note = n2
+			}
 		}
 	}
 	return entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup)
+}
+
+// noteVisibleToNotifiee mirrors core/note.CanSeeNote: returns true when
+// notifieeID is allowed to see n per its visibility level. Inlined here so
+// the stream package does not need to import core/note + repository (matches
+// the narrow-interface pattern used by NotificationUserRepo). 条件は
+// CanSeeNote と一致させること。
+func noteVisibleToNotifiee(notifieeID string, n *model.Note, follow NotificationFollowingChecker) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Visibility {
+	case model.NoteVisibilityPublic, model.NoteVisibilityHome:
+		return true
+	case model.NoteVisibilityFollowers:
+		if notifieeID == "" {
+			return false
+		}
+		if notifieeID == n.UserID {
+			return true
+		}
+		if follow == nil {
+			return false
+		}
+		ok, err := follow.Exists(notifieeID, n.UserID)
+		if err != nil {
+			return false
+		}
+		return ok
+	case model.NoteVisibilitySpecified:
+		if notifieeID == "" {
+			return false
+		}
+		if notifieeID == n.UserID {
+			return true
+		}
+		for _, id := range n.VisibleUserIDs {
+			if id == notifieeID {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // PublishNotification serializes the notification and publishes to
@@ -232,7 +309,7 @@ func (p *NotificationPublisher) PublishNotification(notifieeID string, n *coreno
 	if p.pub == nil || notifieeID == "" || n == nil {
 		return
 	}
-	p.publishPacked(notifieeID, p.Pack(n))
+	p.publishPacked(notifieeID, p.Pack(notifieeID, n))
 }
 
 // PublishPackedNotification publishes an already-packed body to
