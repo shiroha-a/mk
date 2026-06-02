@@ -19,5 +19,10 @@
 --      SELECT i.relname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
 --        WHERE i.relname = 'IDX_note_mentions' AND NOT x.indisvalid;
 --      DROP INDEX CONCURRENTLY IF EXISTS "IDX_note_mentions";
---   2. migrate の dirty を解除 (migrate force <直前 version>) してから再適用。
+--   2. golang-migrate の dirty フラグを解除する。本 repo の cmd/migrate は
+--      -direction up/down のみで force を持たないため、schema_migrations
+--      (単一行) を直前に成功した version へ直接戻す:
+--        UPDATE "schema_migrations" SET version = <直前 version>, dirty = false;
+--      その後 make migrate-up で再適用される (standalone golang-migrate CLI が
+--      あれば migrate force <直前 version> でも可)。
 CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_note_mentions" ON "note" USING gin ("mentions");
