@@ -1810,6 +1810,45 @@ func TestNoteRepository_ListByFileID_Cursor(t *testing.T) {
 	assert.Equal(t, "n_lbfi_d", rows[1].ID)
 }
 
+// TestNoteRepository_MentionsFileIdsGINIndexes verifies that the #1427 GIN
+// indexes (migration 000054 / 000055) are created and actually usable for the
+// array-containment (@>) queries behind ListMentions / ListByFileID. これらが
+// 落ちると seq scan に戻り、note テーブル肥大に比例して静かに性能退行するため
+// regression guard として固定する。
+func TestNoteRepository_MentionsFileIdsGINIndexes(t *testing.T) {
+	// 1. index が存在し GIN 型であること (CONCURRENTLY migration が適用された
+	//    ことの確認も兼ねる)。
+	for _, idx := range []string{"IDX_note_mentions", "IDX_note_fileIds"} {
+		var indexdef string
+		err := testDB.Raw(
+			`SELECT indexdef FROM pg_indexes WHERE tablename = 'note' AND indexname = ?`, idx,
+		).Scan(&indexdef).Error
+		require.NoError(t, err)
+		require.NotEmpty(t, indexdef, "GIN index %s must exist (migration applied)", idx)
+		assert.Contains(t, indexdef, "USING gin", "%s must be a GIN index", idx)
+	}
+
+	// 2. planner が @> containment に GIN index を選べること。小さな test
+	//    テーブルでは planner が seq scan を選ぶため、同一接続上で
+	//    enable_seqscan=off を効かせて index 経路を強制し、plan に index 名が
+	//    現れることを確認する (index が無ければ強制しても seq scan のまま)。
+	//    SET LOCAL は transaction スコープなので Begin/Rollback で閉じる。
+	checkPlanUsesIndex := func(query, arg, indexName string) {
+		tx := testDB.Begin()
+		defer tx.Rollback()
+		require.NoError(t, tx.Exec(`SET LOCAL enable_seqscan = off`).Error)
+		var lines []string
+		require.NoError(t, tx.Raw(`EXPLAIN `+query, arg).Scan(&lines).Error)
+		plan := strings.Join(lines, "\n")
+		assert.Contains(t, plan, indexName,
+			"@> query should use %s under enable_seqscan=off; plan was:\n%s", indexName, plan)
+	}
+	checkPlanUsesIndex(
+		`SELECT * FROM "note" WHERE "mentions" @> ARRAY[?]::varchar[]`, "u1", "IDX_note_mentions")
+	checkPlanUsesIndex(
+		`SELECT * FROM "note" WHERE "fileIds" @> ARRAY[?]::varchar[]`, "f1", "IDX_note_fileIds")
+}
+
 func TestNoteRepository_IncrementUserNotesCount(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "u_n_inc_2", "incuser2")
