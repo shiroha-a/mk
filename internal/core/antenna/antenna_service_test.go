@@ -1073,3 +1073,62 @@ func TestOnNoteCreated_PublicNote_PushedRegardlessOfFollow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n-public"}, rows)
 }
+
+// countingFollowingRepo は Exists の呼び出し回数を記録する MockFollowingRepository
+// の薄い wrap。#1467 review nit (home source の Exists 二重呼び出し回避) の回帰テスト
+// 専用。Following struct を直接操作するため map にも直接 push する。
+type countingFollowingRepo struct {
+	*testutil.MockFollowingRepository
+	existsCalls int
+}
+
+func newCountingFollowingRepo() *countingFollowingRepo {
+	return &countingFollowingRepo{MockFollowingRepository: testutil.NewMockFollowingRepository()}
+}
+
+func (c *countingFollowingRepo) Exists(followerID, followeeID string) (bool, error) {
+	c.existsCalls++
+	return c.MockFollowingRepository.Exists(followerID, followeeID)
+}
+
+// #1467 review nit: home source antenna が followers visibility note を pickup する
+// ケースで、CanSeeNote 内 (`Exists(owner, author)`) と matchSource 内
+// (`Exists(a.UserID, author.ID)`) の同一 pair に対する Exists を 1 回に畳めている
+// ことを assert する。
+func TestMatchNote_HomeSource_FollowersNote_NoDuplicateExists(t *testing.T) {
+	svc, _ := newSvc(t)
+	counting := newCountingFollowingRepo()
+	// owner → author を follow
+	require.NoError(t, counting.Create(&model.Following{ID: "f1", FollowerID: "owner", FolloweeID: "author"}))
+	svc.SetFollowingRepo(counting)
+	a, err := svc.Create(CreateInput{OwnerID: "owner", Name: "home-followers", Src: model.AntennaSourceHome})
+	require.NoError(t, err)
+
+	text := "hi"
+	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
+	author := &model.User{ID: "author", Username: "author"}
+
+	require.True(t, svc.matchNote(a, n, author))
+	assert.Equal(t, 1, counting.existsCalls,
+		"Exists should be called exactly once for home source + followers visibility (no duplicate after #1467 review)")
+}
+
+// home source + public note では visibility gate (CanSeeNote) が Exists を呼ばないため、
+// matchSource 側の Exists が 1 回だけ走る。NoDuplicateExists test の対照 (公開範囲が
+// followers でないと最適化の前提も失われていないことを示す)。
+func TestMatchNote_HomeSource_PublicNote_SingleExists(t *testing.T) {
+	svc, _ := newSvc(t)
+	counting := newCountingFollowingRepo()
+	require.NoError(t, counting.Create(&model.Following{ID: "f1", FollowerID: "owner", FolloweeID: "author"}))
+	svc.SetFollowingRepo(counting)
+	a, err := svc.Create(CreateInput{OwnerID: "owner", Name: "home-public", Src: model.AntennaSourceHome})
+	require.NoError(t, err)
+
+	text := "hi"
+	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic}
+	author := &model.User{ID: "author", Username: "author"}
+
+	require.True(t, svc.matchNote(a, n, author))
+	assert.Equal(t, 1, counting.existsCalls,
+		"public visibility skips CanSeeNote Exists; matchSource home performs the single call")
+}

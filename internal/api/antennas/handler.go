@@ -289,7 +289,16 @@ func (h *Handler) Notes(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit, sinceID, untilID)
+	// over-fetch: stream に滞留した followers/specified entry や hardMute hit が
+	// handler 側 filter で削られると、返却件数が req.Limit を下回り得る。安全側に
+	// limit の 2 倍 (上限 MaxNotesPerAntenna) で stream から拾い、filter 後に
+	// req.Limit へトリミングする (#1467 review)。FE は最後の note id を untilId
+	// に渡してくるため、トリミングしてもページング境界は保たれる。
+	overFetch := req.Limit * 2
+	if overFetch > coreantenna.MaxNotesPerAntenna {
+		overFetch = coreantenna.MaxNotesPerAntenna
+	}
+	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, overFetch, sinceID, untilID)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):
@@ -314,6 +323,11 @@ func (h *Handler) Notes(c echo.Context) error {
 		notes = h.queryService.FilterVisible(user, notes)
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
+	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
+	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
+	if len(notes) > req.Limit {
+		notes = notes[:req.Limit]
+	}
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)
 	out := make([]any, 0, len(entities))

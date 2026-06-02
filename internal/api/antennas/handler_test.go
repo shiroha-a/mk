@@ -503,6 +503,97 @@ func TestNotes_FollowersNote_FilteredByQueryService(t *testing.T) {
 		"defense-in-depth filter should drop a residual followers note from a non-follower")
 }
 
+// #1467 review: stream の最新側に大量の followers/specified residual entry が
+// 残っていても、handler が over-fetch して filter 後に req.Limit 件を返せること
+// を assert する (ページ欠け対策)。
+//
+// 仕込み: stream に 15 件 push。最新 5 件は alice にとって不可視な followers note、
+// 続く 10 件は public note。req.Limit (デフォルト 10) で叩くと、over-fetch せず
+// に fetch 10 すると最新 5 件が filter で落ちて 5 件しか返らないが、over-fetch
+// (limit*2=20) なら 15 件全部拾って followers 5 件を落として残り 10 件を返せる。
+func TestNotes_OverFetchTrim_PreservesLimitAfterFilterVisible(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-trim"] = &model.Antenna{ID: "a-trim", UserID: "alice"}
+
+	// alice は author を follow していない (= followers note は不可視)
+	followingRepo := testutil.NewMockFollowingRepository()
+	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
+
+	ctx := context.Background()
+	// 古い側: public note 10 件 (ms = 100..109)
+	publicIDs := make([]string, 10)
+	for i := 0; i < 10; i++ {
+		nid := fmt.Sprintf("n-pub-%02d", i)
+		publicIDs[i] = nid
+		noteRepo.Notes[nid] = &model.Note{
+			ID: nid, UserID: "author", Visibility: model.NoteVisibilityPublic,
+		}
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: "antennaTimeline:a-trim",
+			ID:     fmt.Sprintf("%d-0", 100+i),
+			Values: map[string]any{"noteId": nid},
+		}).Err())
+	}
+	// 新しい側: followers note 5 件 (ms = 200..204) — filter で全て落ちる
+	for i := 0; i < 5; i++ {
+		nid := fmt.Sprintf("n-fol-%02d", i)
+		noteRepo.Notes[nid] = &model.Note{
+			ID: nid, UserID: "author", Visibility: model.NoteVisibilityFollowers,
+		}
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: "antennaTimeline:a-trim",
+			ID:     fmt.Sprintf("%d-0", 200+i),
+			Values: map[string]any{"noteId": nid},
+		}).Err())
+	}
+
+	c, rec := newReq(t, `{"antennaId":"a-trim","limit":10}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// over-fetch trim 後、newest-first で public 10 件が返るはず。
+	assert.Len(t, resp, 10, "handler should return req.Limit notes by over-fetching past the residual followers entries")
+	// followers note は 1 件も含まれない (defense-in-depth filter)
+	body := rec.Body.String()
+	for i := 0; i < 5; i++ {
+		assert.NotContains(t, body, fmt.Sprintf("n-fol-%02d", i),
+			"residual followers note should be filtered out")
+	}
+}
+
+// #1467 review: queryService 未配線時は filter skip = 旧挙動互換 で req.Limit を
+// そのまま渡す (over-fetch しても trim 後の件数は req.Limit に揃う)。
+func TestNotes_OverFetchTrim_QueryServiceUnwired_DefaultLimit(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-default"] = &model.Antenna{ID: "a-default", UserID: "alice"}
+
+	ctx := context.Background()
+	// 30 件 push して default limit (10) で叩く → trim 後 10 件
+	for i := 0; i < 30; i++ {
+		nid := fmt.Sprintf("n-%02d", i)
+		noteRepo.Notes[nid] = &model.Note{
+			ID: nid, UserID: "alice", Visibility: model.NoteVisibilityPublic,
+		}
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: "antennaTimeline:a-default",
+			ID:     fmt.Sprintf("%d-0", 100+i),
+			Values: map[string]any{"noteId": nid},
+		}).Err())
+	}
+
+	c, rec := newReq(t, `{"antennaId":"a-default"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 10, "over-fetch should trim back to default limit (10) when no filter drops apply")
+}
+
 // #1464: queryService 配線時、follow 関係があれば followers note は引き続き
 // 表示される (gate が過剰に絞っていないことの guard)。
 func TestNotes_FollowersNote_VisibleToFollower(t *testing.T) {

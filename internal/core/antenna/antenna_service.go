@@ -431,6 +431,11 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 	if !corenote.CanSeeNote(owner, n, s.followingRepo) {
 		return false
 	}
+	// followers visibility かつ owner != author で CanSeeNote を通った場合、
+	// 内部で `followingRepo.Exists(owner.ID, author.ID) == true` が確定している。
+	// `home` source は同じ pair の follow を再 query するため、ヒントとして
+	// matchSource に渡し重複呼び出しを避ける (#1467 review nit)。
+	ownerFollowsAuthor := n.Visibility == model.NoteVisibilityFollowers && a.UserID != author.ID
 	if a.LocalOnly && author.Host != nil && *author.Host != "" {
 		return false
 	}
@@ -443,7 +448,7 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 	if !a.WithReplies && n.ReplyID != nil {
 		return false
 	}
-	if !s.matchSource(a, author) {
+	if !s.matchSource(a, author, ownerFollowsAuthor) {
 		return false
 	}
 	text := noteText(n)
@@ -466,13 +471,20 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 //
 // followingRepo / userListRepo が未注入のときは対応ソースを match 不成立
 // とみなす (all へのフォールバックではなく、設定ミスが検出しやすい側)。
-func (s *Service) matchSource(a *model.Antenna, author *model.User) bool {
+//
+// ownerFollowsAuthor は matchNote 内 visibility gate (CanSeeNote) で既に
+// `Exists(owner, author) == true` が確定している場合 true。`home` source の
+// 重複 Exists 呼び出しをスキップするヒント (#1467 review nit)。
+func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollowsAuthor bool) bool {
 	switch a.Src {
 	case model.AntennaSourceUsers:
 		return slices.Contains(a.Users, author.Username)
 	case model.AntennaSourceUsersBlacklist:
 		return !slices.Contains(a.Users, author.Username)
 	case model.AntennaSourceHome:
+		if ownerFollowsAuthor {
+			return true
+		}
 		if s.followingRepo == nil {
 			return false
 		}
