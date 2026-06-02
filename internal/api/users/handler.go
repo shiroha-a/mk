@@ -654,6 +654,17 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	viewer := middleware.GetUser(c)
+
+	// followersVisibility / followingVisibility gate (#1461)。upstream
+	// `users/followers.ts` / `users/following.ts` と同等に、target profile の
+	// 設定で viewer を gate する。moderator は users/reactions 側と同じく
+	// bypass 経路に乗せる (upstream: `!await roleService.isModerator(me)`)。
+	// profile 行が無い (= 古いデータ / remote 未同期) 場合は upstream の
+	// default 値 'public' を採用して素通りさせる。
+	if denied, err := h.gateRelationVisibility(c, req.UserID, viewer, followers); denied {
+		return err
+	}
+
 	var (
 		rows []relationItem
 		err  error
@@ -668,6 +679,63 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	}
 
 	return c.JSON(http.StatusOK, rows)
+}
+
+// gateRelationVisibility enforces the target user's followersVisibility /
+// followingVisibility setting on users/followers and users/following (#1461).
+// Returns (denied=true, response error) when the viewer must be blocked, or
+// (denied=false, nil) when the request should proceed. followers=true gates
+// the "followers" list (uses FollowersVisibility), followers=false gates the
+// "following" list (uses FollowingVisibility).
+func (h *Handler) gateRelationVisibility(c echo.Context, targetID string, viewer *model.User, followers bool) (bool, error) {
+	// upstream forbidden error UUID は endpoint ごとに別 (drop-in 互換維持)。
+	forbiddenID := "f6cdb0df-c19f-ec5c-7dbb-0ba84a1f92ba" // users/following
+	if followers {
+		forbiddenID = "3c6a84db-d619-26af-ca14-06232a21df8a" // users/followers
+	}
+	deny := func() (bool, error) {
+		return true, c.JSON(http.StatusForbidden, apierr.Error("FORBIDDEN", "Forbidden.", forbiddenID))
+	}
+
+	vis := model.FollowingVisibilityPublic
+	if profile := h.userService.GetProfile(targetID); profile != nil {
+		if followers {
+			vis = profile.FollowersVisibility
+		} else {
+			vis = profile.FollowingVisibility
+		}
+		if vis == "" {
+			vis = model.FollowingVisibilityPublic
+		}
+	}
+	if vis == model.FollowingVisibilityPublic {
+		return false, nil
+	}
+
+	// self / moderator は常に bypass。upstream の
+	// `me.id === user.id` / `roleService.isModerator(me)` 経路に対応。
+	isSelf := viewer != nil && viewer.ID == targetID
+	isMod := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
+	if isSelf || isMod {
+		return false, nil
+	}
+
+	switch vis {
+	case model.FollowingVisibilityPrivate:
+		return deny()
+	case model.FollowingVisibilityFollowers:
+		if viewer == nil || h.followingRepo == nil {
+			return deny()
+		}
+		ok, err := h.followingRepo.Exists(viewer.ID, targetID)
+		if err != nil {
+			return true, apierr.JSONInternalError(c)
+		}
+		if !ok {
+			return deny()
+		}
+	}
+	return false, nil
 }
 
 // relationItem represents a single entry in followers/following lists.

@@ -1381,13 +1381,15 @@ func TestFollowers_BatchFetchesUsers(t *testing.T) {
 	require.Len(t, resp, 5)
 
 	// listRelations の冒頭で ShowByID(req.UserID) を呼んで target 存在確認
-	// するため、FindByID と FindProfileByUserID が 1 回ずつ走るのは
-	// 想定どおり。重要なのは follower 5 件の解決で per-row 経路に落ちて
+	// するため、FindByID が 1 回走る。FindProfileByUserID は (1) target 存在
+	// 確認 + (2) #1461 の followersVisibility / followingVisibility gate で
+	// 2 回走るが、いずれも target single 行の O(1) lookup なので follower
+	// 件数とは独立。重要なのは follower 5 件の解決で per-row 経路に落ちて
 	// いないこと = listRelations の N+1 が解消されていること。
 	assert.Equal(t, 1, repo.findByIDCalls,
 		"only target existence check should call FindByID; per-row must use batch")
-	assert.Equal(t, 1, repo.findProfileByUserIDCalls,
-		"only target existence check should call FindProfileByUserID; per-row must use batch")
+	assert.Equal(t, 2, repo.findProfileByUserIDCalls,
+		"target existence check + visibility gate (#1461) should call FindProfileByUserID twice; per-row must use batch")
 	assert.Equal(t, 1, repo.findManyByIDsCalls,
 		"FindManyByIDs should be called exactly once per request for the 5 followers")
 	assert.Equal(t, 5, repo.findManyByIDsCallSize,
@@ -1439,6 +1441,207 @@ func TestFollowing_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := post(h.Following, `{}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// --- followersVisibility / followingVisibility gate (#1461) ---
+//
+// upstream Misskey TS の users/followers.ts (line 115-135) /
+// users/following.ts (line 123-143) と挙動を揃え、profile の
+// followersVisibility / followingVisibility 設定で viewer を gate する。
+// public はそのまま 200、private は self 以外を 403、followers は viewer
+// が target を follow しているときだけ通す。moderator は bypass。
+// drop-in 互換のため 403 body の error.id は endpoint 別 UUID を assert する。
+
+const (
+	uuidUsersFollowersForbidden = "3c6a84db-d619-26af-ca14-06232a21df8a"
+	uuidUsersFollowingForbidden = "f6cdb0df-c19f-ec5c-7dbb-0ba84a1f92ba"
+)
+
+// visibilityModStub は #1461 visibility gate test 用の ModeratorChecker 実装。
+// handler_extra_test.go の stubModeratorChecker と同等 (あちらは users_test
+// package のため白箱 test 側からは参照できないので、内側 package 用に別途
+// 定義する)。
+type visibilityModStub struct{ modID string }
+
+func (s visibilityModStub) IsModerator(userID string) bool { return userID == s.modID }
+
+// setupRelationVisibilityFixture wires target user (user1) with the given
+// followers/following visibility and adds a stand-in follower (alice) so the
+// follower-list returns a non-empty payload when the gate is open.
+func setupRelationVisibilityFixture(t *testing.T, followersVis, followingVis model.FollowingVisibility) (*Handler, *testutil.MockUserRepository) {
+	t.Helper()
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = target
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:              "user1",
+		FollowersVisibility: followersVis,
+		FollowingVisibility: followingVis,
+	}
+	repo.Users["alice"] = &model.User{
+		ID: "alice", Username: "alice", UsernameLower: "alice",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	_, err := h.followingService.Follow("alice", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// followee 方向もそろえて users/following でも非空 payload になるようにする
+	repo.Users["carol"] = &model.User{
+		ID: "carol", Username: "carol", UsernameLower: "carol",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	_, err = h.followingService.Follow("user1", "carol", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	return h, repo
+}
+
+func assertForbiddenWithUUID(t *testing.T, rec *httptest.ResponseRecorder, wantUUID string) {
+	t.Helper()
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok, "error field must be a map")
+	assert.Equal(t, "FORBIDDEN", errObj["code"])
+	assert.Equal(t, wantUUID, errObj["id"])
+}
+
+// public は anonymous viewer でも従来どおり 200 を返す (regression guard)。
+func TestFollowers_VisibilityPublic_Anonymous(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPublic)
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowing_VisibilityPublic_Anonymous(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPublic)
+	rec := post(h.Following, `{"userId":"user1"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// private は self だけ通す。他 viewer / anonymous は 403。
+func TestFollowers_VisibilityPrivate_Self(t *testing.T) {
+	h, repo := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPrivate, model.FollowingVisibilityPublic)
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["user1"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowers_VisibilityPrivate_OtherViewer_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPrivate, model.FollowingVisibilityPublic)
+	rec := postStub(h.Followers, `{"userId":"user1"}`, &model.User{ID: "bob"})
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowersForbidden)
+}
+
+func TestFollowers_VisibilityPrivate_Anonymous_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPrivate, model.FollowingVisibilityPublic)
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowersForbidden)
+}
+
+func TestFollowing_VisibilityPrivate_Self(t *testing.T) {
+	h, repo := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPrivate)
+	rec := postStub(h.Following, `{"userId":"user1"}`, repo.Users["user1"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowing_VisibilityPrivate_OtherViewer_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPrivate)
+	rec := postStub(h.Following, `{"userId":"user1"}`, &model.User{ID: "bob"})
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowingForbidden)
+}
+
+func TestFollowing_VisibilityPrivate_Anonymous_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPrivate)
+	rec := post(h.Following, `{"userId":"user1"}`)
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowingForbidden)
+}
+
+// followers は follower viewer / self だけ通し、それ以外 (非 follower /
+// anonymous) は 403。
+func TestFollowers_VisibilityFollowers_FollowerViewer(t *testing.T) {
+	h, repo := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityFollowers, model.FollowingVisibilityPublic)
+	// bob が target (user1) を follow している → 通る。
+	repo.Users["bob"] = &model.User{
+		ID: "bob", Username: "bob", UsernameLower: "bob",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	_, err := h.followingService.Follow("bob", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["bob"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowers_VisibilityFollowers_NonFollower_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityFollowers, model.FollowingVisibilityPublic)
+	rec := postStub(h.Followers, `{"userId":"user1"}`, &model.User{ID: "bob"})
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowersForbidden)
+}
+
+func TestFollowers_VisibilityFollowers_Anonymous_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityFollowers, model.FollowingVisibilityPublic)
+	rec := post(h.Followers, `{"userId":"user1"}`)
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowersForbidden)
+}
+
+func TestFollowers_VisibilityFollowers_Self(t *testing.T) {
+	h, repo := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityFollowers, model.FollowingVisibilityPublic)
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["user1"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowing_VisibilityFollowers_FollowerViewer(t *testing.T) {
+	h, repo := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityFollowers)
+	repo.Users["bob"] = &model.User{
+		ID: "bob", Username: "bob", UsernameLower: "bob",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	_, err := h.followingService.Follow("bob", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	rec := postStub(h.Following, `{"userId":"user1"}`, repo.Users["bob"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowing_VisibilityFollowers_NonFollower_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityFollowers)
+	rec := postStub(h.Following, `{"userId":"user1"}`, &model.User{ID: "bob"})
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowingForbidden)
+}
+
+func TestFollowing_VisibilityFollowers_Anonymous_Forbidden(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityFollowers)
+	rec := post(h.Following, `{"userId":"user1"}`)
+	assertForbiddenWithUUID(t, rec, uuidUsersFollowingForbidden)
+}
+
+// moderator は private/followers のいずれも bypass する (upstream
+// roleService.isModerator(me) 経路)。
+func TestFollowers_VisibilityPrivate_ModeratorBypass(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPrivate, model.FollowingVisibilityPublic)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Followers, `{"userId":"user1"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestFollowing_VisibilityPrivate_ModeratorBypass(t *testing.T) {
+	h, _ := setupRelationVisibilityFixture(t,
+		model.FollowingVisibilityPublic, model.FollowingVisibilityPrivate)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Following, `{"userId":"user1"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestShow_BulkUserIDs(t *testing.T) {
