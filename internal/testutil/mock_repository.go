@@ -1093,6 +1093,44 @@ func (m *MockNoteRepository) ListFeatured(channelID, untilID string, limit, offs
 	return result[:limit], nil
 }
 
+// ListFeaturedByUser returns userID's notes ranked by engagement
+// (renoteCount + repliesCount DESC, id DESC) restricted to viewer's
+// visibility. channel 投稿は除外する。real repo の SQL push-down と一致 (#1487)。
+func (m *MockNoteRepository) ListFeaturedByUser(userID, viewerID, untilID string, limit int) ([]*model.Note, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var result []*model.Note
+	for _, n := range m.Notes {
+		if n.UserID != userID {
+			continue
+		}
+		if n.ChannelID != nil {
+			continue
+		}
+		if untilID != "" && n.ID >= untilID {
+			continue
+		}
+		if !noteVisibleToViewer(viewerID, n, m.Following) {
+			continue
+		}
+		result = append(result, n)
+	}
+	// engagement DESC, id DESC.
+	sort.Slice(result, func(i, j int) bool {
+		ei := result[i].RenoteCount + result[i].RepliesCount
+		ej := result[j].RenoteCount + result[j].RepliesCount
+		if ei != ej {
+			return ei > ej
+		}
+		return result[i].ID > result[j].ID
+	})
+	if limit > len(result) {
+		limit = len(result)
+	}
+	return result[:limit], nil
+}
+
 func (m *MockNoteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note, error) {
 	for _, n := range m.Notes {
 		if n.UserID == userID && n.RenoteID != nil && *n.RenoteID == renoteID && n.Text == nil {

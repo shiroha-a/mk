@@ -271,21 +271,37 @@ func (h *Handler) Reactions(c echo.Context) error {
 }
 
 // FeaturedNotes handles POST /api/users/featured-notes.
+//
+// upstream は Redis sorted set (FeaturedService.getPerUserNotesRanking) を引いた
+// engagement ranking を返すが、mk-go は ListFeatured / channels timeline と同じ
+// SQL ranking + visibility push-down で揃える (#1487 Option B):
+//
+//   - ListByUserID → ListByUserIDFiltered 相当の後継 `ListFeaturedByUser` を使い、
+//     viewer 視点の visibility 句を LIMIT 前に push-down する (post-fetch
+//     FilterVisible のページ過少充填と followers 判定 N+1 を回避)。
+//   - 順序は `("renoteCount" + "repliesCount") DESC, id DESC` で人気順に。
+//   - channel 投稿は除外 (upstream featured-notes と一致)。
+//   - hard mute は packing 前に post-fetch で適用 (visibility と独立な viewer 個別
+//     filter なので SQL push-down 対象外)。
 func (h *Handler) FeaturedNotes(c echo.Context) error {
 	var req struct {
-		UserID string `json:"userId"`
-		Limit  int    `json:"limit"`
+		UserID  string `json:"userId"`
+		Limit   int    `json:"limit"`
+		UntilID string `json:"untilId"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	notes, err := h.noteRepo.ListByUserID(req.UserID, "", "", req.Limit)
+	viewer := middleware.GetUser(c)
+	var viewerID string
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	notes, err := h.noteRepo.ListFeaturedByUser(req.UserID, viewerID, req.UntilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	viewer := middleware.GetUser(c)
-	notes = notesfilter.FilterVisible(viewer, notes, h.followingRepo)
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	result := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(result, viewer)

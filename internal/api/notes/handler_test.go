@@ -860,6 +860,9 @@ func (f *failingNoteRepo) SearchByFilter(_ model.NoteSearchFilter) ([]*model.Not
 func (f *failingNoteRepo) ListFeatured(_, _ string, _, _ int) ([]*model.Note, error) {
 	return nil, nil
 }
+func (f *failingNoteRepo) ListFeaturedByUser(_, _, _ string, _ int) ([]*model.Note, error) {
+	return nil, nil
+}
 func (f *failingNoteRepo) FindRenoteByUser(_, _ string) (*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }

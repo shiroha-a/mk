@@ -1092,6 +1092,106 @@ func TestNoteRepository_ListFeatured_Error(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// #1487 Option B: users/featured-notes 用の per-user engagement ranking +
+// visibility push-down を覆う。
+func TestNoteRepository_ListFeaturedByUser(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "feat_by_u", "featbyu")
+	defer cleanupUser(t, author.ID)
+	follower := insertTestUser(t, "feat_by_f", "featbyf")
+	defer cleanupUser(t, follower.ID)
+	stranger := insertTestUser(t, "feat_by_s", "featbys")
+	defer cleanupUser(t, stranger.ID)
+	specified := insertTestUser(t, "feat_by_sp", "featbysp")
+	defer cleanupUser(t, specified.ID)
+
+	// follower → author の follow を seed。
+	require.NoError(t, testDB.Create(&model.Following{
+		ID: "f_feat_by_1", FollowerID: follower.ID, FolloweeID: author.ID,
+	}).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "f_feat_by_1")
+
+	// channel 投稿はランキング対象外。
+	chID := "feat_by_ch"
+	require.NoError(t, testDB.Exec(`INSERT INTO channel (id, name, "userId") VALUES (?, ?, ?)`, chID, "feat-by-ch", author.ID).Error)
+	defer testDB.Exec(`DELETE FROM channel WHERE id = ?`, chID)
+
+	chPtr := chID
+	// 順序確認用の public 3 件と、可視性確認用の followers / specified、
+	// 除外確認用の channel note。
+	notes := []*model.Note{
+		{ID: "feat_by_top", UserID: author.ID, Visibility: "public", RenoteCount: 10},
+		{ID: "feat_by_mid", UserID: author.ID, Visibility: "public", RenoteCount: 3, RepliesCount: 2},
+		{ID: "feat_by_low", UserID: author.ID, Visibility: "public", RenoteCount: 1},
+		{ID: "feat_by_fol", UserID: author.ID, Visibility: "followers", RenoteCount: 100},
+		{ID: "feat_by_sp", UserID: author.ID, Visibility: "specified", VisibleUserIDs: pq.StringArray{specified.ID}, RenoteCount: 50},
+		{ID: "feat_by_ch", UserID: author.ID, Visibility: "public", RenoteCount: 999, ChannelID: &chPtr},
+	}
+	for _, n := range notes {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	// stranger は public 3 件、engagement DESC で top / mid / low の順。
+	got, err := repo.ListFeaturedByUser(author.ID, stranger.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, "feat_by_top", got[0].ID)
+	assert.Equal(t, "feat_by_mid", got[1].ID)
+	assert.Equal(t, "feat_by_low", got[2].ID)
+
+	// anonymous も同じ shape (channel 除外を含む)。
+	got, err = repo.ListFeaturedByUser(author.ID, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+
+	// follower は public 3 + followers 1 = 4 件。followers が engagement top。
+	got, err = repo.ListFeaturedByUser(author.ID, follower.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	assert.Equal(t, "feat_by_fol", got[0].ID)
+
+	// specified target は public 3 + specified 1 = 4 件。
+	got, err = repo.ListFeaturedByUser(author.ID, specified.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["feat_by_sp"], "specified target に specified note が見える")
+	assert.False(t, ids["feat_by_fol"], "specified target は follower ではないので followers note は出ない")
+
+	// author 自身は channel 以外の全 visibility = 5 件。
+	got, err = repo.ListFeaturedByUser(author.ID, author.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 5)
+	for _, n := range got {
+		assert.NotEqual(t, "feat_by_ch", n.ID, "channel 投稿は除外")
+	}
+
+	// limit <= 0 は 10 にデフォルト。
+	got, err = repo.ListFeaturedByUser(author.ID, author.ID, "", 0)
+	require.NoError(t, err)
+	assert.Len(t, got, 5)
+
+	// untilID cursor で id < untilID を返す。top は除外される (id 比較)。
+	got, err = repo.ListFeaturedByUser(author.ID, stranger.ID, "feat_by_top", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, n := range got {
+		assert.Less(t, n.ID, "feat_by_top")
+	}
+}
+
+func TestNoteRepository_ListFeaturedByUser_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	repo := NewNoteRepository(testDB.WithContext(ctx))
+	_, err := repo.ListFeaturedByUser("u", "", "", 10)
+	assert.Error(t, err)
+}
+
 func TestNoteRepository_FindRenoteByUser(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "unrn_u", "unrnuser")

@@ -91,6 +91,17 @@ type NoteRepository interface {
 	// pagination (id < untilID). offset is honoured only when no cursor
 	// is given.
 	ListFeatured(channelID, untilID string, limit, offset int) ([]*model.Note, error)
+	// ListFeaturedByUser returns userID's notes ranked by engagement
+	// ((renoteCount + repliesCount) DESC, id DESC) for users/featured-notes.
+	// upstream は Redis sorted set (FeaturedService.getPerUserNotesRanking) を
+	// 引いているが、mk-go は ListFeatured / channels timeline と同じく SQL ranking
+	// + visibility push-down で揃える (#1487 Option B)。
+	//
+	// viewerID は viewer 視点の visibility push-down 用。空文字は匿名
+	// (public/home のみ)。post-fetch FilterVisible だとページ過少充填 +
+	// followers 判定 N+1 を起こすため LIMIT 前に SQL で絞る (#1418 / #1440 と
+	// 同 doctrine)。channel 投稿は除外する (upstream featured-notes と一致)。
+	ListFeaturedByUser(userID, viewerID, untilID string, limit int) ([]*model.Note, error)
 	FindRenoteByUser(userID, renoteID string) (*model.Note, error)
 	ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
@@ -615,6 +626,40 @@ func (r *noteRepository) ListFeatured(channelID, untilID string, limit, offset i
 	if untilID == "" && offset > 0 {
 		q = q.Offset(offset)
 	}
+	var notes []*model.Note
+	if err := q.Find(&notes).Error; err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
+func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, limit int) ([]*model.Note, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	q := preloadNoteRelations(r.db).
+		Where(`"userId" = ?`, userID).
+		Where(`"channelId" IS NULL`)
+	// visibility push-down: core/note.CanSeeNote と同条件を LIMIT 前に絞る
+	// (#1487, ListByUserIDFiltered / ListByChannelID と同 pattern)。post-fetch
+	// FilterVisible だと limit が削られページ過少充填、followers 判定が N+1。
+	if viewerID == "" {
+		q = q.Where(`"visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("visibility" IN ('public','home') `+
+				`OR "userId" = ? `+
+				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+			viewerID, viewerID, viewerID)
+	}
+	if untilID != "" {
+		q = q.Where(`id < ?`, untilID)
+	}
+	// upstream FeaturedService.getPerUserNotesRanking は Redis sorted set の
+	// score 降順だが、mk-go は engagement = renoteCount + repliesCount を
+	// SQL ranking で代替する (ListFeatured と一致)。tie-break は id DESC。
+	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(limit)
 	var notes []*model.Note
 	if err := q.Find(&notes).Error; err != nil {
 		return nil, err
