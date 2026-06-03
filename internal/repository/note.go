@@ -1051,6 +1051,9 @@ func (r *noteRepository) ListByUserList(listID, viewerID string, limit int, sinc
 	// 返信 / viewer 宛ての返信 / メンバーが withReplies=ON のときだけ返信を含め、
 	// それ以外 (第三者宛ての返信) は既定で除外する。withReplies 列は JOIN した
 	// membership 由来なので m. で参照する。
+	// upstream は各 OR 分岐に `replyId IS NOT NULL AND` ガードを付けるが、非返信は
+	// 先頭の `replyId IS NULL` 分岐が必ず拾うため、後続分岐のガードは冗長で省ける
+	// (replyId NOT NULL の reply にのみ replyUserId / withReplies 条件が効く)。
 	q = q.Where(
 		`("note"."replyId" IS NULL `+
 			`OR "note"."replyUserId" = "note"."userId" `+
