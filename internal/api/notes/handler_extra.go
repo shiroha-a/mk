@@ -190,11 +190,8 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	// ListByUserList の SQL push-down に移し、LIMIT 前に絞ることで under-fill と
 	// followers 判定 N+1 を解消した。viewer の見える note だけが返るため handler
 	// 側の post-fetch FilterVisible / fail-closed ガードは不要。
-	var viewerID string
-	if me != nil {
-		viewerID = me.ID
-	}
-	notes, err := h.noteRepo.ListByUserList(req.ListID, viewerID, req.Limit, sinceID, untilID)
+	// RequireAuth() 配下なので me は非nil (所有権チェックでも me.ID を直接参照)。
+	notes, err := h.noteRepo.ListByUserList(req.ListID, me.ID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
