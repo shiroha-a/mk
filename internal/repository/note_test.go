@@ -1249,6 +1249,142 @@ func TestNoteRepository_ListFeaturedByUser_Error(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// #1452: notes/user-list-timeline の visibility SQL push-down を覆う。
+// public/home は常時、followers は viewer が author 本人か follow 済みのときだけ、
+// specified は list timeline では除外 (DM 非表示)、channel 投稿は除外、匿名は
+// public/home のみ、を実 SQL に対して検証する。
+func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "ult_v", "ultV")
+	defer cleanupUser(t, viewer.ID)
+	m1 := insertTestUser(t, "ult_m1", "ultM1")
+	defer cleanupUser(t, m1.ID)
+	m2 := insertTestUser(t, "ult_m2", "ultM2")
+	defer cleanupUser(t, m2.ID)
+
+	listID := "ult_list_1"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	// m1 / m2 / viewer 自身を list メンバーに (自分の followers note の確認用)。
+	for i, mem := range []string{m1.ID, m2.ID, viewer.ID} {
+		mid := fmt.Sprintf("ult_mem_%d", i)
+		require.NoError(t, testDB.Create(&model.UserListMembership{ID: mid, UserListID: listID, UserID: mem}).Error)
+		defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, mid)
+	}
+
+	// channel for exclusion test.
+	chID := "ult_ch"
+	require.NoError(t, testDB.Exec(`INSERT INTO channel (id, name, "userId") VALUES (?, ?, ?)`, chID, "ult-ch", m1.ID).Error)
+	defer testDB.Exec(`DELETE FROM channel WHERE id = ?`, chID)
+	chPtr := chID
+
+	// id 昇順 (a < b < ... < g)。結果は id DESC で並ぶ。
+	notes := []*model.Note{
+		{ID: "ult_n_a_pub", UserID: m1.ID, Visibility: "public"},
+		{ID: "ult_n_b_home", UserID: m1.ID, Visibility: "home"},
+		{ID: "ult_n_c_fol", UserID: m1.ID, Visibility: "followers"},
+		{ID: "ult_n_d_spec", UserID: m1.ID, Visibility: "specified", VisibleUserIDs: pq.StringArray{viewer.ID}},
+		{ID: "ult_n_e_pub2", UserID: m2.ID, Visibility: "public"},
+		{ID: "ult_n_f_self_fol", UserID: viewer.ID, Visibility: "followers"},
+		{ID: "ult_n_g_ch", UserID: m1.ID, Visibility: "public", ChannelID: &chPtr},
+	}
+	for _, n := range notes {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	collect := func(viewerID string) map[string]bool {
+		got, err := repo.ListByUserList(listID, viewerID, 50, "", "")
+		require.NoError(t, err)
+		ids := map[string]bool{}
+		for _, n := range got {
+			ids[n.ID] = true
+		}
+		return ids
+	}
+
+	// viewer が m1 を follow していない状態。
+	ids := collect(viewer.ID)
+	assert.True(t, ids["ult_n_a_pub"], "public は見える")
+	assert.True(t, ids["ult_n_b_home"], "home は見える")
+	assert.False(t, ids["ult_n_c_fol"], "未フォローの followers は見えない")
+	assert.False(t, ids["ult_n_d_spec"], "specified は list timeline では出ない (visibleUserIds 対象でも)")
+	assert.True(t, ids["ult_n_e_pub2"], "別メンバーの public も見える")
+	assert.True(t, ids["ult_n_f_self_fol"], "自分の followers note は見える")
+	assert.False(t, ids["ult_n_g_ch"], "channel 投稿は除外")
+
+	// viewer が m1 を follow すると followers が見える。specified は依然出ない。
+	require.NoError(t, testDB.Create(&model.Following{ID: "ult_f1", FollowerID: viewer.ID, FolloweeID: m1.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "ult_f1")
+	ids = collect(viewer.ID)
+	assert.True(t, ids["ult_n_c_fol"], "follow 済みなら followers が見える")
+	assert.False(t, ids["ult_n_d_spec"], "specified は follow + visibleUserIds 対象でも list timeline では出ない")
+
+	// 匿名 (viewerID="") は public/home のみ。
+	ids = collect("")
+	assert.True(t, ids["ult_n_a_pub"] && ids["ult_n_b_home"], "匿名は public/home が見える")
+	assert.False(t, ids["ult_n_c_fol"], "匿名は followers 不可")
+	assert.False(t, ids["ult_n_f_self_fol"], "匿名は誰の followers も不可")
+
+	// 並び順は id DESC (no cursor)。
+	got, err := repo.ListByUserList(listID, viewer.ID, 50, "", "")
+	require.NoError(t, err)
+	for i := 1; i < len(got); i++ {
+		assert.Greater(t, got[i-1].ID, got[i].ID, "id DESC order")
+	}
+
+	// untilID cursor: id < untilID のみ返る。
+	got, err = repo.ListByUserList(listID, viewer.ID, 50, "", "ult_n_c_fol")
+	require.NoError(t, err)
+	for _, n := range got {
+		assert.Less(t, n.ID, "ult_n_c_fol", "untilID 未満のみ")
+	}
+}
+
+// #1452: push-down で visibility を LIMIT 前に絞ることで under-fill しないこと
+// (旧 post-fetch FilterVisible は limit を非表示 note で食い potential 過少充填) を
+// 固定する回帰テスト。
+func TestNoteRepository_ListByUserList_NoUnderfill(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "ulu_v", "uluV")
+	defer cleanupUser(t, viewer.ID)
+	member := insertTestUser(t, "ulu_m", "uluM")
+	defer cleanupUser(t, member.ID)
+
+	listID := "ulu_list"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	require.NoError(t, testDB.Create(&model.UserListMembership{ID: "ulu_mem", UserListID: listID, UserID: member.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, "ulu_mem")
+
+	// public 5 件 + followers 5 件 (viewer は member を follow していない)。
+	for i := 0; i < 5; i++ {
+		pid := fmt.Sprintf("ulu_pub_%02d", i)
+		require.NoError(t, testDB.Create(&model.Note{ID: pid, UserID: member.ID, Visibility: "public"}).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, pid)
+		fid := fmt.Sprintf("ulu_fol_%02d", i)
+		require.NoError(t, testDB.Create(&model.Note{ID: fid, UserID: member.ID, Visibility: "followers"}).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, fid)
+	}
+
+	// limit=5: push-down で public のみが対象 → 5 件埋まる。followers が混ざって
+	// 後段 filter で削られ under-fill する旧挙動の回帰防止。
+	got, err := repo.ListByUserList(listID, viewer.ID, 5, "", "")
+	require.NoError(t, err)
+	require.Len(t, got, 5, "push-down で limit ぶん public で埋まる")
+	for _, n := range got {
+		assert.True(t, strings.HasPrefix(n.ID, "ulu_pub_"), "followers は混ざらない")
+	}
+}
+
+func TestNoteRepository_ListByUserList_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	repo := NewNoteRepository(testDB.WithContext(ctx))
+	_, err := repo.ListByUserList("l", "v", 10, "", "")
+	assert.Error(t, err)
+}
+
 func TestNoteRepository_FindRenoteByUser(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "unrn_u", "unrnuser")

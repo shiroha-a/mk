@@ -184,18 +184,20 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, sinceID, untilID)
+	// list owner gate だけでは note の visibility を守れない。list メンバーは
+	// 自由に編集できるため、未フォローのアカウントを list に詰めれば followers
+	// visibility note を読めてしまう (#1442)。#1452 で visibility を
+	// ListByUserList の SQL push-down に移し、LIMIT 前に絞ることで under-fill と
+	// followers 判定 N+1 を解消した。viewer の見える note だけが返るため handler
+	// 側の post-fetch FilterVisible / fail-closed ガードは不要。
+	var viewerID string
+	if me != nil {
+		viewerID = me.ID
+	}
+	notes, err := h.noteRepo.ListByUserList(req.ListID, viewerID, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// list owner gate だけでは note の visibility を守れない。list メンバーは
-	// 自由に編集できるため、未フォローのアカウントを list に詰めれば followers
-	// visibility note を読めてしまう。BulkShow / ShowPartialBulk と同じく
-	// queryService 未配線なら fail-closed、配線済みなら CanSeeNote で絞る (#1442)。
-	if h.queryService == nil {
-		return c.JSON(http.StatusOK, []entity.NoteEntity{})
-	}
-	notes = h.queryService.FilterVisible(me, notes)
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, me))
 }
 

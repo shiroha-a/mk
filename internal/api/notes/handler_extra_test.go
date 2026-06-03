@@ -385,25 +385,30 @@ func TestUserListTimeline_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// userListNotesRepo は ListByUserList で固定の note を返す fake。mock の
-// ListByUserList は nil を返すため、FilterVisible の効果検証用に差し替える。
+// userListNotesRepo は ListByUserList で固定の note を返しつつ、handler から
+// 渡された listID / viewerID を記録する fake。#1452 で可視性が repo の SQL
+// push-down に移ったため、handler は repo の返り値をそのまま返す。可視性絞り
+// 込み自体の検証は repository.TestNoteRepository_ListByUserList_VisibilityPushdown
+// で実 SQL に対して行う。
 type userListNotesRepo struct {
 	*testutil.MockNoteRepository
-	rows []*model.Note
+	rows        []*model.Note
+	gotListID   string
+	gotViewerID string
 }
 
-func (r *userListNotesRepo) ListByUserList(_ string, _ int, _, _ string) ([]*model.Note, error) {
+func (r *userListNotesRepo) ListByUserList(listID, viewerID string, _ int, _, _ string) ([]*model.Note, error) {
+	r.gotListID = listID
+	r.gotViewerID = viewerID
 	return r.rows, nil
 }
 
-// #1442: list owner gate だけでは note の visibility を守れない。list owner A が
-// 未フォローの B を list に詰めても、B の followers / specified note は A に返らない。
-// A が B の follower なら followers note は返る。
-func TestUserListTimeline_FiltersNonVisible(t *testing.T) {
+// #1452: handler は viewer (= me.ID) を viewerID として repo に渡し、可視性絞り
+// 込みは ListByUserList の SQL push-down に委ねる。post-fetch FilterVisible は
+// 撤去済みなので、handler は repo の返り値をそのまま pack する。
+func TestUserListTimeline_PassesViewerIDToRepo(t *testing.T) {
 	pub := &model.Note{ID: "ul_pub", UserID: "B", Visibility: "public", User: &model.User{ID: "B"}}
-	fol := &model.Note{ID: "ul_fol", UserID: "B", Visibility: "followers", User: &model.User{ID: "B"}}
-	spec := &model.Note{ID: "ul_spec", UserID: "B", Visibility: "specified", VisibleUserIDs: []string{"other"}, User: &model.User{ID: "B"}}
-	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: []*model.Note{pub, fol, spec}}
+	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: []*model.Note{pub}}
 	fRepo := testutil.NewMockFollowingRepository()
 	listRepo := testutil.NewMockUserListRepository()
 	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "A"}
@@ -413,52 +418,16 @@ func TestUserListTimeline_FiltersNonVisible(t *testing.T) {
 	h := NewHandler(noteRepo, corenote.NewCreateService(noteRepo, pollRepo, idGen, nil), corenote.NewDeleteService(noteRepo), querySvc, nil, nil, nil, nil, idGen)
 	h.SetUserListRepo(listRepo)
 
-	listTimelineIDs := func() map[string]bool {
-		rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "A"})
-		require.Equal(t, http.StatusOK, rec.Code)
-		var out []map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-		ids := map[string]bool{}
-		for _, n := range out {
-			ids[n["id"].(string)] = true
-		}
-		return ids
-	}
-
-	// A は B を follow していない / specified 対象外 -> public のみ。
-	ids := listTimelineIDs()
-	assert.True(t, ids["ul_pub"], "public は list 経由で見える")
-	assert.False(t, ids["ul_fol"], "未フォローの followers note は list 経由でも漏らさない")
-	assert.False(t, ids["ul_spec"], "specified 対象外は list 経由でも漏らさない")
-
-	// A が B を follow すると followers note は見える (specified は依然対象外)。
-	fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "A", FolloweeID: "B"}
-	ids = listTimelineIDs()
-	assert.True(t, ids["ul_pub"] && ids["ul_fol"], "follower には followers note が出る")
-	assert.False(t, ids["ul_spec"], "specified は follow しても visibleUserIds 対象外なら出ない")
-
-	// visibleUserIds に A を含めると specified も見える。
-	spec.VisibleUserIDs = []string{"A"}
-	ids = listTimelineIDs()
-	assert.True(t, ids["ul_spec"], "visibleUserIds 対象には specified が出る")
-}
-
-// queryService 未配線時は fail-closed で空配列 (visibility filter を経ずに
-// 全 note を返さない)。
-func TestUserListTimeline_NilQueryServiceFailsClosed(t *testing.T) {
-	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: []*model.Note{
-		{ID: "ul_fol", UserID: "B", Visibility: "followers", User: &model.User{ID: "B"}},
-	}}
-	listRepo := testutil.NewMockUserListRepository()
-	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "A"}
-	idGen, _ := id.NewGenerator("aidx")
-	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen) // queryService=nil
-	h.SetUserListRepo(listRepo)
 	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "A"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	assert.Empty(t, out, "queryService 未配線なら fail-closed で空")
+	// viewer (me.ID) と listId が repo に渡ることを確認 (可視性 push-down の入力)。
+	assert.Equal(t, "l1", noteRepo.gotListID, "listId が repo に渡る")
+	assert.Equal(t, "A", noteRepo.gotViewerID, "viewer (me.ID) が viewerID として repo に渡る")
+	// post-fetch filter は無いので repo の返り値がそのまま返る。
+	require.Len(t, out, 1)
+	assert.Equal(t, "ul_pub", out[0]["id"])
 }
 
 func TestUserListTimeline_WithoutUserListRepo(t *testing.T) {
@@ -470,7 +439,7 @@ func TestUserListTimeline_WithoutUserListRepo(t *testing.T) {
 
 type failingListByUserListRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingListByUserListRepo) ListByUserList(_ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingListByUserListRepo) ListByUserList(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

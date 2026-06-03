@@ -150,7 +150,13 @@ type NoteRepository interface {
 	// ListByUserList returns notes authored by members of the given user list
 	// with keyset pagination via paginationOrder (DESC by default; ASC when
 	// only sinceID is supplied). Channel notes are excluded.
-	ListByUserList(listID string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	//
+	// viewerID は viewer 視点の visibility push-down 用。followers は viewer が
+	// author 本人か follow 済みのときだけ、specified は list timeline では除外
+	// (DM 非表示 / upstream 準拠)。空文字は匿名 (public/home のみ)。これを LIMIT
+	// 前に SQL で絞ることで、handler post-fetch FilterVisible のページ過少充填と
+	// followers 判定 N+1 を解消する (#1452, #1418 / #1486 と同 doctrine)。
+	ListByUserList(listID, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// CountReplyTargets returns the users that userID most frequently replies
 	// to, ordered by reply count descending. Used by
 	// users/get-frequently-replied-users.
@@ -1013,14 +1019,29 @@ func (r *noteRepository) DeleteByUserBatch(userID string, batchSize int) (int64,
 // ListByUserList returns notes authored by members of the given user list
 // with keyset pagination via paginationOrder. user_list_membership テーブルと
 // INNER JOIN してメンバーのノートだけを返す。channel ノートは除外する (TS互換)。
-func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) ListByUserList(listID, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	q := preloadNoteRelations(r.db).
 		Joins(`INNER JOIN "user_list_membership" m ON m."userId" = "note"."userId" AND m."userListId" = ?`, listID).
-		Where(`"note"."channelId" IS NULL`).
-		Where(`"note"."visibility" IN ('public','home','followers')`)
+		Where(`"note"."channelId" IS NULL`)
+	// visibility push-down: handler の post-fetch FilterVisible を SQL へ移し、
+	// LIMIT 前に絞ることで under-fill と followers 判定 N+1 を解消する (#1452)。
+	// 条件は FilterVisible (= CanSeeNote) と等価: public/home は常時、followers は
+	// viewer が author 本人か follow 済みのときだけ。specified は list timeline には
+	// 含めない既存挙動を維持する (DM 非表示 / upstream 準拠)。
+	// JOIN した user_list_membership m も "userId" 列を持つため、note 側の列は
+	// "note". で修飾して曖昧性を回避する。
+	if viewerID == "" {
+		q = q.Where(`"note"."visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("note"."visibility" IN ('public','home') `+
+				`OR ("note"."visibility" = 'followers' AND ("note"."userId" = ? `+
+				`OR "note"."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?))))`,
+			viewerID, viewerID)
+	}
 	if sinceID != "" {
 		q = q.Where(`"note"."id" > ?`, sinceID)
 	}
