@@ -1626,6 +1626,7 @@ func (s *Server) setupRoutes() {
 	antennasHandler.SetReactionReader(reactionCountWriter)
 	antennasHandler.SetNoteFieldResolver(noteFieldResolver)
 	antennasHandler.SetUserRepo(userRepo)
+	antennasHandler.SetQueryService(noteQueryService) // #1464: Notes の visibility filter (defense-in-depth)
 	api.POST("/antennas/create", antennasHandler.Create, middleware.RequireAuth())
 	api.POST("/antennas/show", antennasHandler.Show, middleware.RequireAuth())
 	api.POST("/antennas/update", antennasHandler.Update, middleware.RequireAuth())
@@ -1743,6 +1744,10 @@ func (s *Server) setupRoutes() {
 	notificationPublisher.SetRepos(userRepo, noteRepo, idGen)
 	notificationPublisher.SetInstanceLookup(instanceRepo)
 	notificationPublisher.SetEmojiLookup(emojiRepo)
+	// followingRepo: Pack 内 noteVisibleToNotifiee の followers visibility
+	// gate (#1471) に必要。未配線時は CanSeeNote semantics に合わせて
+	// followers note を本人以外に embed しない (= fail-closed)。
+	notificationPublisher.SetFollowingChecker(followingRepo)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
 	reversiPublisher := stream.NewReversiGamePublisher(streamPubSub)
 	mainStreamPublisher := stream.NewMainStreamPublisher(streamPubSub)

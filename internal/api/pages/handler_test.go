@@ -598,6 +598,22 @@ func TestLike_AlreadyLiked(t *testing.T) {
 	_ = rec
 }
 
+// #1438: owner が自分の page を like しようとすると 400 YOUR_PAGE
+// (28800466-...) を返す (upstream TS pages/like 準拠)。
+func TestLike_YourPage(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Visibility: model.PageVisibilityPublic}
+	c, rec := newReq(t, `{"pageId":"p1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Like(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "YOUR_PAGE", errObj["code"])
+	assert.Equal(t, "28800466-e6db-40f2-8fae-bf9e82aa92b8", errObj["id"])
+}
+
 // failingCreateLikeRepo causes Create to fail.
 type failingCreateLikeRepo struct {
 	*testutil.MockPageLikeRepository

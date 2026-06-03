@@ -59,11 +59,15 @@ type Handler struct {
 	instanceTracker InstanceTracker
 	chartHook       ChartHook
 	enqueuer        InboxEnqueuer
+	// keyCache は同期 fallback 経路 (SetEnqueuer 未配線時) の HTTP Signature
+	// verify で公開鍵パースをメモ化する (#1426)。worker 側 InboxProcessor と
+	// 同じ最適化を、enqueue せず inline verify する構成にも適用する。
+	keyCache *activitypub.PublicKeyCache
 }
 
 // NewHandler constructs a Handler.
 func NewHandler(resolver *federation.Resolver, processor *federation.Processor) *Handler {
-	return &Handler{resolver: resolver, processor: processor}
+	return &Handler{resolver: resolver, processor: processor, keyCache: activitypub.NewPublicKeyCache(0)}
 }
 
 // SetEnqueuer wires the queue.Enqueuer used to dispatch verified activities
@@ -227,7 +231,9 @@ func (h *Handler) verifySignature(req *http.Request) (*model.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := activitypub.VerifyRequest(req, pem); err != nil {
+	// keyCache 経由で verify し、同一 (keyId, PEM) の x509 パースをメモ化する
+	// (#1426)。挙動は VerifyRequest と等価。
+	if err := h.keyCache.VerifyRequestCached(req, parsed.KeyID, pem); err != nil {
 		return nil, err
 	}
 	return actor, nil

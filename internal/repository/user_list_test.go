@@ -167,3 +167,68 @@ func TestUserListRepository_AddMember_Duplicate(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrUserListDuplicateMember),
 		"既 member の AddMember は ErrUserListDuplicateMember を返すこと, got: %v", err)
 }
+
+// ListIDsAndOwnersByMember は fanoutToUserLists が followers visibility note
+// の per-list owner follow gate を 1 query で済ませるために導入 (#1465)。
+// 同じ member が複数 owner の list に属するケース、member の居ない list が
+// 出てこないケース、空 result のケースを check する。
+func TestUserListRepository_ListIDsAndOwnersByMember(t *testing.T) {
+	repo := NewUserListRepository(testDB)
+	createTestUser(t, "ul_lo_o1")
+	createTestUser(t, "ul_lo_o2")
+	createTestUser(t, "ul_lo_m1")
+	createTestUser(t, "ul_lo_m2")
+
+	// member 不在 → 空 map
+	out, err := repo.ListIDsAndOwnersByMember("nonexistent")
+	require.NoError(t, err)
+	assert.Empty(t, out)
+
+	// o1 が list A1 (m1, m2) と list A2 (m1) を所有、o2 が list B1 (m1) を所有
+	listA1 := &model.UserList{ID: "ul_lo_a1", UserID: "ul_lo_o1", Name: "A1"}
+	require.NoError(t, repo.Create(listA1))
+	defer cleanupUserList(t, listA1.ID)
+	listA2 := &model.UserList{ID: "ul_lo_a2", UserID: "ul_lo_o1", Name: "A2"}
+	require.NoError(t, repo.Create(listA2))
+	defer cleanupUserList(t, listA2.ID)
+	listB1 := &model.UserList{ID: "ul_lo_b1", UserID: "ul_lo_o2", Name: "B1"}
+	require.NoError(t, repo.Create(listB1))
+	defer cleanupUserList(t, listB1.ID)
+	// m1 が含まれない list (regression guard: 含まれない list は出てこない)
+	listC := &model.UserList{ID: "ul_lo_c", UserID: "ul_lo_o2", Name: "C"}
+	require.NoError(t, repo.Create(listC))
+	defer cleanupUserList(t, listC.ID)
+
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_lo_1", UserListID: listA1.ID, UserID: "ul_lo_m1"}))
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_lo_2", UserListID: listA1.ID, UserID: "ul_lo_m2"}))
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_lo_3", UserListID: listA2.ID, UserID: "ul_lo_m1"}))
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_lo_4", UserListID: listB1.ID, UserID: "ul_lo_m1"}))
+	// listC は member 無し
+
+	// m1 視点: A1 (o1) + A2 (o1) + B1 (o2) の 3 件、C は出ない
+	out, err = repo.ListIDsAndOwnersByMember("ul_lo_m1")
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	assert.Equal(t, "ul_lo_o1", out[listA1.ID])
+	assert.Equal(t, "ul_lo_o1", out[listA2.ID])
+	assert.Equal(t, "ul_lo_o2", out[listB1.ID])
+	_, hasC := out[listC.ID]
+	assert.False(t, hasC, "member が居ない list は map に含まれない")
+
+	// m2 視点: A1 のみ
+	out, err = repo.ListIDsAndOwnersByMember("ul_lo_m2")
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "ul_lo_o1", out[listA1.ID])
+}
+
+// 不正な query (= 壊れた DB session) で error が返ることを confirm。
+// MustOpenTestDB で取った session を意図的に close して reuse する形で
+// session 失敗を再現する。
+func TestUserListRepository_ListIDsAndOwnersByMember_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // ctx を canceled state にして session 経由の query を fail させる
+	repo := NewUserListRepository(testDB.WithContext(ctx))
+	_, err := repo.ListIDsAndOwnersByMember("anyone")
+	assert.Error(t, err)
+}

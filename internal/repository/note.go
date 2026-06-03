@@ -92,7 +92,12 @@ type NoteRepository interface {
 	// is given.
 	ListFeatured(channelID, untilID string, limit, offset int) ([]*model.Note, error)
 	FindRenoteByUser(userID, renoteID string) (*model.Note, error)
-	ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	// ListMentions returns notes mentioning userID that userID can see.
+	// visibility が空でなければ note.visibility = visibility の exact-match で
+	// 絞る (upstream TS notes/mentions と同じ; 空は全種別)。振り分けを LIMIT 前に
+	// SQL で行うことで handler の post-fetch 振り分けによる under-fill を解消する
+	// (#1451)。
+	ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
 	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
 	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
@@ -124,7 +129,12 @@ type NoteRepository interface {
 	// CountReplyTargets returns the users that userID most frequently replies
 	// to, ordered by reply count descending. Used by
 	// users/get-frequently-replied-users.
-	CountReplyTargets(userID string, limit int) ([]model.ReplyTargetCount, error)
+	//
+	// viewerID は viewer 視点での visibility push-down に使う。userID の reply note
+	// のうち viewer が core/note.CanSeeNote で見られるものだけを集計する。空文字は
+	// 匿名 (public/home のみ)。これが無いと userID の followers/specified reply の
+	// 対人関係が第三者に leak する (#1486)。
+	CountReplyTargets(userID, viewerID string, limit int) ([]model.ReplyTargetCount, error)
 	// CountLocalNotes returns the number of notes authored by local users
 	// (userHost IS NULL). nodeinfo `usage.localPosts` 相当 (#403)。
 	CountLocalNotes() (int64, error)
@@ -631,7 +641,7 @@ func (r *noteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note,
 	return &note, nil
 }
 
-func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -648,6 +658,14 @@ func (r *noteRepository) ListMentions(userID string, limit int, sinceID, untilID
 			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
 			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
 		userID, userID, userID)
+	// visibility kind filter: upstream TS notes/mentions と同じく visibility 指定
+	// 時のみ note.visibility = <値> の exact-match で絞る (空は全種別)。これを
+	// LIMIT 前に SQL で行うことで、handler 側 post-fetch 振り分けで起きていた
+	// ページ under-fill を解消する (#1451)。値は parameterized で injection-safe、
+	// 未知の値は単に 0 件になる (TS と同じ挙動)。
+	if visibility != "" {
+		q = q.Where(`"visibility" = ?`, visibility)
+	}
 	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
@@ -940,16 +958,30 @@ func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, until
 	return notes, nil
 }
 
-func (r *noteRepository) CountReplyTargets(userID string, limit int) ([]model.ReplyTargetCount, error) {
+func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) ([]model.ReplyTargetCount, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	var rows []model.ReplyTargetCount
 	// replyUserIdがNULLのもの (通常起こり得ないが防御)と自己返信は集計から除外する。
-	err := r.db.Model(&model.Note{}).
+	q := r.db.Model(&model.Note{}).
 		Select(`"replyUserId", COUNT(*) AS count`).
-		Where(`"userId" = ? AND "replyId" IS NOT NULL AND "replyUserId" IS NOT NULL AND "replyUserId" <> ?`, userID, userID).
-		Group(`"replyUserId"`).
+		Where(`"userId" = ? AND "replyId" IS NOT NULL AND "replyUserId" IS NOT NULL AND "replyUserId" <> ?`, userID, userID)
+	// visibility push-down: 集計対象 reply note のうち viewer が CanSeeNote で
+	// 見られるものだけを残す。これが無いと第三者 viewer が author の
+	// followers/specified reply の対人関係を集計値経由で観測できる (#1486)。
+	// 条件は ListByUserIDFiltered / ListMentions / SearchByTag と同一。
+	if viewerID == "" {
+		q = q.Where(`"visibility" IN ('public','home')`)
+	} else {
+		q = q.Where(
+			`("visibility" IN ('public','home') `+
+				`OR "userId" = ? `+
+				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
+				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
+			viewerID, viewerID, viewerID)
+	}
+	err := q.Group(`"replyUserId"`).
 		Order(`count DESC`).
 		Limit(limit).
 		Scan(&rows).Error

@@ -388,6 +388,9 @@ func (h *Handler) Like(c echo.Context) error {
 		case errors.Is(err, corepage.ErrPageNotFound),
 			errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "cc98a8a2-0dc3-4123-b198-62c71df18ed3"))
+		case errors.Is(err, corepage.ErrYourPage):
+			// 自分の page への like は upstream TS と同じく YOUR_PAGE で弾く (#1438)。
+			return c.JSON(http.StatusBadRequest, apierr.Error("YOUR_PAGE", "You cannot like your own page.", "28800466-e6db-40f2-8fae-bf9e82aa92b8"))
 		case errors.Is(err, corepage.ErrAlreadyLiked):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that page.", "d4c1edbe-7da2-4eae-8714-1acfd2d63941"))
 		}

@@ -77,6 +77,9 @@ func TestGetFrequentlyRepliedUsers_AggregatesAndWeights(t *testing.T) {
 			UserID:      "me",
 			ReplyID:     &ridDummy,
 			ReplyUserID: &uid,
+			// visibility push-down (#1486) によって viewer 不一致時は集計から
+			// 落ちるため、本テストは public reply での集計挙動を確認する。
+			Visibility: model.NoteVisibilityPublic,
 		}
 	}
 	rec := postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"me","limit":10}`, nil)
@@ -100,6 +103,57 @@ func TestGetFrequentlyRepliedUsers_UserNotFound(t *testing.T) {
 	k := newP189Kit(t)
 	rec := postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// 第三者 viewer に author の followers/specified reply 対人関係が leak しないこと
+// を確認する (#1486)。mock の noteVisibleToViewer が CanSeeNote と同じ条件で
+// 絞るため、anonymous は public のみ集計される。
+func TestGetFrequentlyRepliedUsers_VisibilityIDOR(t *testing.T) {
+	k := newP189Kit(t)
+	author := &model.User{ID: "auth", Username: "auth"}
+	target1 := &model.User{ID: "tg1", Username: "tg1"}
+	target2 := &model.User{ID: "tg2", Username: "tg2"}
+	stranger := &model.User{ID: "stg", Username: "stg"}
+	follower := &model.User{ID: "flw", Username: "flw"}
+	k.userRepo.Users[author.ID] = author
+	k.userRepo.Users[target1.ID] = target1
+	k.userRepo.Users[target2.ID] = target2
+	k.userRepo.Users[stranger.ID] = stranger
+	k.userRepo.Users[follower.ID] = follower
+	// follower → author (Mock の noteVisibleToViewer は followerID -> followeeIDs map を参照)
+	k.noteRepo.Following[follower.ID] = []string{author.ID}
+
+	replyDummy := "src"
+	tg1ID, tg2ID := target1.ID, target2.ID
+	// author → target1 (public + followers + specified target2)
+	k.noteRepo.Notes["np"] = &model.Note{ID: "np", UserID: author.ID, ReplyID: &replyDummy, ReplyUserID: &tg1ID, Visibility: model.NoteVisibilityPublic}
+	k.noteRepo.Notes["nf"] = &model.Note{ID: "nf", UserID: author.ID, ReplyID: &replyDummy, ReplyUserID: &tg1ID, Visibility: model.NoteVisibilityFollowers}
+	k.noteRepo.Notes["ns"] = &model.Note{ID: "ns", UserID: author.ID, ReplyID: &replyDummy, ReplyUserID: &tg2ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"some-other"}}
+
+	// stranger (匿名相当 = follower でも specified 対象でもない) は public のみ。
+	rec := postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"auth","limit":10}`, stranger)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	u := out[0]["user"].(map[string]any)
+	assert.Equal(t, target1.ID, u["id"])
+
+	// anonymous も同じ shape。
+	rec = postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"auth","limit":10}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	out = out[:0]
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+
+	// follower は public + followers で target1 が count=2、specified は対象外。
+	rec = postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"auth","limit":10}`, follower)
+	require.Equal(t, http.StatusOK, rec.Code)
+	out = out[:0]
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	u = out[0]["user"].(map[string]any)
+	assert.Equal(t, target1.ID, u["id"])
 }
 
 // --- GetFollowingUsersByBirthday ---

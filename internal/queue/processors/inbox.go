@@ -87,13 +87,18 @@ type InboxProcessor struct {
 	hostBlocker     HostBlockChecker
 	instanceTracker InstanceTracker
 	chartHook       InboxChartHook
+	// keyCache は受信 HTTP Signature verify の公開鍵パースをメモ化する (#1426)。
+	// InboxProcessor は worker 間共有の単一インスタンス (router.go:616) なので、
+	// 同一 remote actor からの連続 activity で x509 パースを 1 回に集約できる
+	// (#1436 の DeliverProcessor.keyCache と対になる inbound 側最適化)。
+	keyCache *activitypub.PublicKeyCache
 }
 
 // NewInboxProcessor constructs an InboxProcessor wrapping the supplied
 // federation.Processor. Set* メソッドで verify / block / track / chart の
 // 各 dep を別途配線する。未配線の dep は no-op として扱われる。
 func NewInboxProcessor(p FederationProcessor) *InboxProcessor {
-	return &InboxProcessor{processor: p}
+	return &InboxProcessor{processor: p, keyCache: activitypub.NewPublicKeyCache(0)}
 }
 
 // SetLDSignatureVerifier wires an optional LD-Signature verifier that runs
@@ -223,7 +228,9 @@ func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User,
 	if err != nil {
 		return nil, err
 	}
-	if err := activitypub.VerifyRequest(req, pem); err != nil {
+	// keyCache 経由で verify することで、同一 (keyId, PEM) の x509 パースを
+	// worker 横断で 1 回に集約する (#1426)。挙動は VerifyRequest と等価。
+	if err := p.keyCache.VerifyRequestCached(req, parsed.KeyID, pem); err != nil {
 		return nil, err
 	}
 	return actor, nil

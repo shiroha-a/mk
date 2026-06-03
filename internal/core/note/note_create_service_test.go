@@ -58,6 +58,19 @@ func newCreateService(t *testing.T) (*note.CreateService, *testutil.MockNoteRepo
 	return svc, noteRepo, pollRepo
 }
 
+// newCreateServiceWithFollowing wires a MockFollowingRepository so tests can
+// exercise the followers-visibility main-stream gate (#1472). Returns the
+// service plus both repos so tests can plant rows directly.
+func newCreateServiceWithFollowing(t *testing.T) (*note.CreateService, *testutil.MockNoteRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
+	noteRepo := testutil.NewMockNoteRepository()
+	pollRepo := testutil.NewMockPollRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := note.NewCreateService(noteRepo, pollRepo, idGen, followingRepo)
+	return svc, noteRepo, followingRepo
+}
+
 func TestCreateService_Success(t *testing.T) {
 	svc, noteRepo, _ := newCreateService(t)
 
@@ -1591,6 +1604,171 @@ func TestCreateService_NoMainStreamPublisher_NoEmit(t *testing.T) {
 		User: &model.User{ID: "alice"}, Text: &text, ReplyID: &replyID,
 	})
 	require.NoError(t, err)
+}
+
+// --- #1472 visibility gate (publishNoteMainEvents) ---
+
+// followers visibility note を non-follower reply target に publish しない
+// (本文 / CW / Files が main stream で leak するのを塞ぐ)。
+func TestCreateService_SkipsReplyMainEvent_FollowersToNonFollower(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	// reply target bob は alice (author) を follow していない
+	noteRepo.Notes["r1"] = &model.Note{
+		ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	replyID := "r1"
+	text := "secret followers reply"
+	_, err := svc.Create(note.CreateInput{
+		User:       &model.User{ID: "alice"},
+		Text:       &text,
+		ReplyID:    &replyID,
+		Visibility: model.NoteVisibilityFollowers,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("reply"), "non-follower reply target には followers note の main event を流さない")
+}
+
+// follower 関係がある reply target には従来通り publish する (regress
+// guard: visibility gate が overshoot して legitimate notification を抑え
+// ていないか)。
+func TestCreateService_PublishesReplyMainEvent_FollowersToFollower(t *testing.T) {
+	svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	noteRepo.Notes["r1"] = &model.Note{
+		ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	// bob → alice の follow を planting (= bob は alice を follow している)
+	followingRepo.Followings["f1"] = &model.Following{
+		ID: "f1", FollowerID: "bob", FolloweeID: "alice",
+	}
+	replyID := "r1"
+	text := "hi follower"
+	_, err := svc.Create(note.CreateInput{
+		User:       &model.User{ID: "alice"},
+		Text:       &text,
+		ReplyID:    &replyID,
+		Visibility: model.NoteVisibilityFollowers,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bob"}, pub.userIDsOf("reply"))
+}
+
+// specified visibility note を visibleUserIDs 外の reply target に publish
+// しない (DM 用 visibility 経路で reply target が ill-formed に含まれて
+// しまった場合の defense-in-depth)。
+func TestCreateService_SkipsReplyMainEvent_SpecifiedExcludesNonRecipient(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	noteRepo.Notes["r1"] = &model.Note{
+		ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	replyID := "r1"
+	text := "specified secret"
+	_, err := svc.Create(note.CreateInput{
+		User:           &model.User{ID: "alice"},
+		Text:           &text,
+		ReplyID:        &replyID,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"charlie"}, // bob は含まれない
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("reply"))
+}
+
+// specified visibility で reply target が visibleUserIDs に含まれていれば
+// publish する。slices.Contains 経路の regress guard。
+func TestCreateService_PublishesReplyMainEvent_SpecifiedIncludesRecipient(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	noteRepo.Notes["r1"] = &model.Note{
+		ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	replyID := "r1"
+	text := "dm"
+	_, err := svc.Create(note.CreateInput{
+		User:           &model.User{ID: "alice"},
+		Text:           &text,
+		ReplyID:        &replyID,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"bob"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bob"}, pub.userIDsOf("reply"))
+}
+
+// mention: followers note を non-follower mentioned user に publish しない。
+// #1472 でいちばん見落としていた経路 — `notifyVisibleToTarget` は notification
+// 経路で gate するが main stream は独立 publish なので、ここで止めないと
+// 本文 / CW が realtime に漏れる。
+func TestCreateService_SkipsMentionMainEvent_FollowersToNonFollower(t *testing.T) {
+	svc, _, _ := newCreateServiceWithFollowing(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["uA"] = &model.User{ID: "uA", Username: "alice", UsernameLower: "alice"}
+	svc.SetUserRepo(userRepo)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	// followingRepo は空 = uA は author を follow していない
+	text := "secret @alice"
+	_, err := svc.Create(note.CreateInput{
+		User:       &model.User{ID: "author1"},
+		Text:       &text,
+		Visibility: model.NoteVisibilityFollowers,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("mention"), "non-follower mention に followers note の main event を流さない")
+}
+
+// specified visibility で mentioned user が visibleUserIDs に含まれない場合
+// (mention 経路で resolve された user が visible 指定外) も skip する。
+// upstream #17363 / mk-go #1444 の specified note 通知ルールを main event 側
+// にも適用する。
+func TestCreateService_SkipsMentionMainEvent_SpecifiedExcludesNonRecipient(t *testing.T) {
+	svc, _, _ := newCreateServiceWithFollowing(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["uA"] = &model.User{ID: "uA", Username: "alice", UsernameLower: "alice"}
+	userRepo.Users["uC"] = &model.User{ID: "uC", Username: "charlie", UsernameLower: "charlie"}
+	svc.SetUserRepo(userRepo)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	text := "specified @alice @charlie"
+	_, err := svc.Create(note.CreateInput{
+		User:           &model.User{ID: "author1"},
+		Text:           &text,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"uA"}, // charlie は含まれない
+	})
+	require.NoError(t, err)
+	// alice (uA) のみ通知、charlie (uC) は visibleUserIds 外なので skip
+	assert.Equal(t, []string{"uA"}, pub.userIDsOf("mention"))
+}
+
+// renote target の visibility gate: quote renote (= Text / CW を伴う) を
+// followers 設定で投げて renote target が non-follower の場合、本文ごと
+// main stream で leak するのを塞ぐ。
+func TestCreateService_SkipsRenoteMainEvent_FollowersToNonFollower(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	noteRepo.Notes["r1"] = &model.Note{
+		ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	renoteID := "r1"
+	text := "quote secret"
+	_, err := svc.Create(note.CreateInput{
+		User:       &model.User{ID: "alice"},
+		Text:       &text,
+		RenoteID:   &renoteID,
+		Visibility: model.NoteVisibilityFollowers,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("renote"))
 }
 
 func TestSafeGo_RecoversPanic(t *testing.T) {

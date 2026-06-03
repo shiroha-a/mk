@@ -39,6 +39,11 @@ type UserListRepository interface {
 	// ListIDsByMember returns all list IDs that contain userID as a member.
 	// Used by timeline fanout to push notes to user list timelines.
 	ListIDsByMember(userID string) ([]string, error)
+	// ListIDsAndOwnersByMember returns a map of listID → ownerID for lists that
+	// contain memberID. fanoutToUserLists が followers visibility note を per-list
+	// owner の follow 関係で gate するために使う (#1465)。1 query で join
+	// する。空 map の場合 memberID はどの list にも属していない。
+	ListIDsAndOwnersByMember(memberID string) (map[string]string, error)
 }
 
 type userListRepository struct {
@@ -147,6 +152,30 @@ func (r *userListRepository) ListIDsByMember(userID string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// ListIDsAndOwnersByMember returns {listID: ownerID} for every list that
+// contains memberID. fanoutToUserLists が followers visibility note の per-list
+// owner follow gate を 1 query で済ませるために導入 (#1465)。
+func (r *userListRepository) ListIDsAndOwnersByMember(memberID string) (map[string]string, error) {
+	out := make(map[string]string)
+	type row struct {
+		UserListID string `gorm:"column:userListId"`
+		UserID     string `gorm:"column:userId"`
+	}
+	var rows []row
+	err := r.db.Table(`"user_list_membership"`).
+		Select(`"user_list_membership"."userListId" AS "userListId", "user_list"."userId" AS "userId"`).
+		Joins(`JOIN "user_list" ON "user_list"."id" = "user_list_membership"."userListId"`).
+		Where(`"user_list_membership"."userId" = ?`, memberID).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.UserListID] = r.UserID
+	}
+	return out, nil
 }
 
 // ListMembersByListIDs returns userIDs grouped by listID in a single SELECT.

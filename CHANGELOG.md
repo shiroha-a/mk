@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: 管理画面のプロモーション登録 (`/api/admin/promo/create`) で、公開範囲が public 以外のノート (フォロワー限定 / ホーム / specified) も登録できていた問題を修正 (将来 promo 表示エンドポイントが実装された際に非公開ノートが全閲覧者に漏れる潜在的問題を作成段階で防止)
+- Fix: ユーザーリストのタイムライン (`/api/notes/user-list-timeline` の REST 経路は #1442 で修正済) について、WebSocket `userList` チャネルと fanout 配信が他ユーザーのフォロワー限定ノートをリスト所有者のフォロー関係に関係なくプッシュしていた問題を修正 (任意のユーザーをリストに追加しただけで、フォローしていない相手のフォロワー限定ノートをリアルタイムに受信できていた)
+- Fix: アンテナが他ユーザーのフォロワー限定 / specified ノートを公開範囲チェックを経ずに pickup し、`/api/antennas/notes` と WebSocket `antenna` チャネルの両方からそれらが取得できる問題を修正 (アンテナ作成だけで `src=all` / `src=users` 経由のキーワード検索で非公開投稿が漏れていた)
 - Fix: `useObjectStorage = true` のインスタンスで、`storedInternal = true` なドライブファイルへの `/files/:accessKey` アクセスが常に 404 になる問題を修正 (Misskey TS からの S3 移行前に保存されたローカルファイルが、移行後もアクセス可能に)
 - Fix: Misskey TS から mk-go に移行した直後、既に期限切れだったアンケートに対してアンケート終了 (pollEnded) 通知が一斉発火する問題を修正 (移行時 backfill migration を追加)
 - Fix: 配送先が一時的にダウンしている場合に、deliver/inbox ジョブが設定省略時にリトライされない問題を修正 (既定の試行回数を Misskey 本家と同じ deliver=12 / inbox=8 に。従来の no-retry 挙動が必要な場合は `deliverJobMaxAttempts` / `inboxJobMaxAttempts` に 1 を指定)
