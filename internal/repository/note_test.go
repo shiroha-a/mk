@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -1192,6 +1193,52 @@ func TestNoteRepository_ListFeaturedByUser(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "feat_by_aaa", got[0].ID)
+}
+
+// #1491 re-review 指摘A: selection 段が「engagement DESC top-50 で絞る」核心
+// 挙動の回帰検出。fixture を 51 件にして pool cap を踏ませ、low engagement の
+// 1 件 (最大 id) が pool 外に出て display に現れないこと、選抜される 50 件が
+// engagement=10 の note (id prefix `feat_cap_pool_`) であることを断定する。
+//
+// 6 件以下の小規模 fixture では pool = 全件となり、選抜順序が engagement 順
+// でも id 順でも結果が変わらないため、`featuredNotesPerUserPoolSize` を 51 に
+// すれば落ちる test がここまで存在しなかった。本 test は cap を取り除くと
+// 必ず落ちる強い regression gate になる。
+func TestNoteRepository_ListFeaturedByUser_EngagementPoolCap(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "feat_cap_u", "featcapu")
+	defer cleanupUser(t, author.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id LIKE 'feat_cap_%'`)
+
+	// engagement=10 の note を 50 件 (id: feat_cap_pool_01 .. feat_cap_pool_50)。
+	// すべて pool に入る想定。
+	for i := 1; i <= 50; i++ {
+		id := fmt.Sprintf("feat_cap_pool_%02d", i)
+		require.NoError(t, testDB.Create(&model.Note{
+			ID: id, UserID: author.ID, Visibility: "public", RenoteCount: 10,
+		}).Error)
+	}
+	// engagement=0 の note を 1 件、最大 id (feat_cap_zzz_low) で。pool は
+	// engagement DESC top-50 で絞られるので、これは pool 外になる想定。
+	// id 順で並べたら一番上に来てしまうが、selection が engagement 順なので
+	// 出てこないことが重要。
+	const lowID = "feat_cap_zzz_low"
+	require.NoError(t, testDB.Create(&model.Note{
+		ID: lowID, UserID: author.ID, Visibility: "public", RenoteCount: 0,
+	}).Error)
+
+	got, err := repo.ListFeaturedByUser(author.ID, "", "", 100)
+	require.NoError(t, err)
+	// pool cap=50 で 50 件返る。limit=100 でも cap が優先。
+	require.Len(t, got, 50, "engagement pool cap=50 で 50 件に絞られる")
+	for _, n := range got {
+		assert.NotEqual(t, lowID, n.ID, "engagement 最下位の note は pool 外に落ちる")
+		assert.True(t, strings.HasPrefix(n.ID, "feat_cap_pool_"),
+			"engagement DESC 上位 50 件 (feat_cap_pool_*) のみが選抜される")
+	}
+	// display は id DESC: feat_cap_pool_50, _49, ..., _01。
+	assert.Equal(t, "feat_cap_pool_50", got[0].ID)
+	assert.Equal(t, "feat_cap_pool_01", got[49].ID)
 }
 
 func TestNoteRepository_ListFeaturedByUser_Error(t *testing.T) {
