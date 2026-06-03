@@ -1468,15 +1468,18 @@ func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
 	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, target)
 
 	emptyFiles := pq.StringArray{}
-	// plain (通常投稿), pure renote (member), quote renote (member, text あり),
-	// file 付き plain, viewer の pure renote。
+	remoteHost := "remote.example"
+	// plain (通常投稿), pure renote (member, ローカル), quote renote (member, text
+	// あり), file 付き plain, viewer の pure renote, remote pure renote
+	// (renoteUserHost あり)。ulr_pure は renoteUserHost NULL = ローカル renote。
 	plain := &model.Note{ID: "ulr_plain", UserID: member.ID, Visibility: "public", FileIDs: emptyFiles}
 	pureRenote := &model.Note{ID: "ulr_pure", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
 	quoteText := "quote"
 	quoteRenote := &model.Note{ID: "ulr_quote", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, Text: &quoteText, FileIDs: emptyFiles}
 	withFile := &model.Note{ID: "ulr_file", UserID: member.ID, Visibility: "public", FileIDs: pq.StringArray{"f1"}}
 	myPureRenote := &model.Note{ID: "ulr_my_pure", UserID: viewer.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
-	for _, n := range []*model.Note{plain, pureRenote, quoteRenote, withFile, myPureRenote} {
+	remotePureRenote := &model.Note{ID: "ulr_remote", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, RenoteUserHost: &remoteHost, FileIDs: emptyFiles}
+	for _, n := range []*model.Note{plain, pureRenote, quoteRenote, withFile, myPureRenote, remotePureRenote} {
 		require.NoError(t, testDB.Create(n).Error)
 		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 	}
@@ -1524,6 +1527,13 @@ func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
 	ids = collect(model.TimelineDBFilter{IncludeRenotedMyNotes: no()})
 	assert.False(t, ids["ulr_renote_mine"], "自分の note の pure renote は除外")
 	assert.True(t, ids["ulr_pure"], "他人の note の pure renote は残る")
+
+	// includeLocalRenotes=false: renoteUserHost NULL (ローカル) の pure renote を
+	// 除外し、remote (renoteUserHost あり) の pure renote は残す。
+	ids = collect(model.TimelineDBFilter{IncludeLocalRenotes: no()})
+	assert.False(t, ids["ulr_pure"], "ローカル投稿の pure renote は除外")
+	assert.True(t, ids["ulr_remote"], "remote 投稿の pure renote は残る")
+	assert.True(t, ids["ulr_quote"], "quote renote は残る")
 
 	// withFiles=true: ファイル付き note のみ。
 	ids = collect(model.TimelineDBFilter{WithFiles: true})
