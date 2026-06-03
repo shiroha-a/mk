@@ -272,15 +272,17 @@ func (h *Handler) Reactions(c echo.Context) error {
 
 // FeaturedNotes handles POST /api/users/featured-notes.
 //
-// upstream は Redis sorted set (FeaturedService.getPerUserNotesRanking) を引いた
-// engagement ranking を返すが、mk-go は ListFeatured / channels timeline と同じ
-// SQL ranking + visibility push-down で揃える (#1487 Option B):
+// upstream featured-notes.ts は Redis sorted set (getPerUserNotesRanking) で
+// engagement 上位 50 を選抜したあと、Go 側で id DESC に並べ替えて untilId で
+// ページングする 2 段構成。mk-go は SQL ranking + visibility push-down に
+// 置き換えて同じ 2 段で揃える (#1487 Option B / #1491 review):
 //
-//   - ListByUserID → ListByUserIDFiltered 相当の後継 `ListFeaturedByUser` を使い、
-//     viewer 視点の visibility 句を LIMIT 前に push-down する (post-fetch
-//     FilterVisible のページ過少充填と followers 判定 N+1 を回避)。
-//   - 順序は `("renoteCount" + "repliesCount") DESC, id DESC` で人気順に。
-//   - channel 投稿は除外 (upstream featured-notes と一致)。
+//   - selection: `ListFeaturedByUser` が `("renoteCount" + "repliesCount") DESC,
+//     id DESC` + visibility push-down + channel 除外 + LIMIT 50 で SQL から
+//     プールを取る (post-fetch FilterVisible のページ過少充填と followers 判定
+//     N+1 を回避)。
+//   - display: 同 repo 内で id DESC sort → untilId filter → 先頭 limit 件。
+//     id cursor とソート順が一致するので untilId ページングで重複/欠落しない。
 //   - hard mute は packing 前に post-fetch で適用 (visibility と独立な viewer 個別
 //     filter なので SQL push-down 対象外)。
 func (h *Handler) FeaturedNotes(c echo.Context) error {

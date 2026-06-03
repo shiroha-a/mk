@@ -413,24 +413,47 @@ func TestFeaturedNotes_AnonymousExcludesNonPublicVisibility(t *testing.T) {
 	assert.False(t, ids["fn_spec"], "specified は対象外 viewer に漏らさない")
 }
 
-// #1487 Option B: upstream は Redis sorted set engagement ranking。mk-go は
-// 同等の SQL ranking で揃え、`renoteCount + repliesCount` 降順 → id 降順で
-// 返ることを覆う。
-func TestFeaturedNotes_OrderedByEngagement(t *testing.T) {
+// #1487 Option B / #1491 review: upstream featured-notes.ts は engagement で
+// 上位を選抜したあと id DESC で表示する。mk-go も同じ 2 段で揃えるため、
+// engagement の高低と id の大小が一致しない fixture で表示順が id DESC に
+// なることを覆う (engagement DESC のままだと untilId cursor とソート順が
+// ずれてページングで重複/欠落するため逆の挙動を見せたい)。
+func TestFeaturedNotes_OrderedByIDDescAfterEngagementSelection(t *testing.T) {
 	h, _, noteRepo := newExtraHandler(t)
 	h.SetFollowingRepo(testutil.NewMockFollowingRepository())
-	noteRepo.Notes["fn_low"] = &model.Note{ID: "fn_low", UserID: "u1", Visibility: "public", RenoteCount: 1, RepliesCount: 0, User: &model.User{ID: "u1"}}
-	noteRepo.Notes["fn_mid"] = &model.Note{ID: "fn_mid", UserID: "u1", Visibility: "public", RenoteCount: 2, RepliesCount: 3, User: &model.User{ID: "u1"}}
-	noteRepo.Notes["fn_top"] = &model.Note{ID: "fn_top", UserID: "u1", Visibility: "public", RenoteCount: 10, RepliesCount: 0, User: &model.User{ID: "u1"}}
+	// engagement と id の並びが逆になる fixture:
+	//   id DESC:        fn_x3, fn_x2, fn_x1
+	//   engagement DESC: fn_x1 (10), fn_x2 (5), fn_x3 (1)
+	noteRepo.Notes["fn_x1"] = &model.Note{ID: "fn_x1", UserID: "u1", Visibility: "public", RenoteCount: 10, User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_x2"] = &model.Note{ID: "fn_x2", UserID: "u1", Visibility: "public", RenoteCount: 5, User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_x3"] = &model.Note{ID: "fn_x3", UserID: "u1", Visibility: "public", RenoteCount: 1, User: &model.User{ID: "u1"}}
 
 	rec := postExtra(h.FeaturedNotes, `{"userId":"u1","limit":10}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	require.Len(t, out, 3)
-	assert.Equal(t, "fn_top", out[0]["id"])
-	assert.Equal(t, "fn_mid", out[1]["id"])
-	assert.Equal(t, "fn_low", out[2]["id"])
+	assert.Equal(t, "fn_x3", out[0]["id"], "display は id DESC")
+	assert.Equal(t, "fn_x2", out[1]["id"])
+	assert.Equal(t, "fn_x1", out[2]["id"])
+}
+
+// #1491 review: untilId は display 段 (id DESC + id < untilId) で適用され、
+// engagement DESC で発生する重複/欠落なしにページングできることを覆う。
+func TestFeaturedNotes_UntilIDPaginatesByIDDesc(t *testing.T) {
+	h, _, noteRepo := newExtraHandler(t)
+	h.SetFollowingRepo(testutil.NewMockFollowingRepository())
+	noteRepo.Notes["fn_x1"] = &model.Note{ID: "fn_x1", UserID: "u1", Visibility: "public", RenoteCount: 10, User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_x2"] = &model.Note{ID: "fn_x2", UserID: "u1", Visibility: "public", RenoteCount: 5, User: &model.User{ID: "u1"}}
+	noteRepo.Notes["fn_x3"] = &model.Note{ID: "fn_x3", UserID: "u1", Visibility: "public", RenoteCount: 1, User: &model.User{ID: "u1"}}
+
+	// untilId="fn_x2" → id < fn_x2 = fn_x1 のみ。fn_x3 は除外され、fn_x2 自身も除外。
+	rec := postExtra(h.FeaturedNotes, `{"userId":"u1","limit":10,"untilId":"fn_x2"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "fn_x1", out[0]["id"])
 }
 
 // #1487: post-fetch FilterVisible → SQL push-down に変更されたことで、limit に

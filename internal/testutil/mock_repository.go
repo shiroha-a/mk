@@ -1093,14 +1093,22 @@ func (m *MockNoteRepository) ListFeatured(channelID, untilID string, limit, offs
 	return result[:limit], nil
 }
 
-// ListFeaturedByUser returns userID's notes ranked by engagement
-// (renoteCount + repliesCount DESC, id DESC) restricted to viewer's
-// visibility. channel 投稿は除外する。real repo の SQL push-down と一致 (#1487)。
+// mockFeaturedNotesPerUserPoolSize は repository.featuredNotesPerUserPoolSize
+// と揃える pool size (#1487 / #1491)。selection 段で engagement DESC top-N を
+// 取り、display 段で id DESC + untilID + limit を適用する 2 段構成を mock も
+// 同じ semantics で再現する。
+const mockFeaturedNotesPerUserPoolSize = 50
+
+// ListFeaturedByUser mirrors the real repository's 2-stage selection:
+// engagement DESC で top-50 を選抜したあと、id DESC でページングする。
+// channel 投稿は除外する。real repo の SQL push-down と一致 (#1487 / #1491)。
 func (m *MockNoteRepository) ListFeaturedByUser(userID, viewerID, untilID string, limit int) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	var result []*model.Note
+	// === selection: viewer 視点で見える non-channel note を engagement DESC で
+	//     top-N 選抜 ===
+	var pool []*model.Note
 	for _, n := range m.Notes {
 		if n.UserID != userID {
 			continue
@@ -1108,27 +1116,39 @@ func (m *MockNoteRepository) ListFeaturedByUser(userID, viewerID, untilID string
 		if n.ChannelID != nil {
 			continue
 		}
-		if untilID != "" && n.ID >= untilID {
-			continue
-		}
 		if !noteVisibleToViewer(viewerID, n, m.Following) {
 			continue
 		}
-		result = append(result, n)
+		pool = append(pool, n)
 	}
-	// engagement DESC, id DESC.
-	sort.Slice(result, func(i, j int) bool {
-		ei := result[i].RenoteCount + result[i].RepliesCount
-		ej := result[j].RenoteCount + result[j].RepliesCount
+	sort.Slice(pool, func(i, j int) bool {
+		ei := pool[i].RenoteCount + pool[i].RepliesCount
+		ej := pool[j].RenoteCount + pool[j].RepliesCount
 		if ei != ej {
 			return ei > ej
 		}
-		return result[i].ID > result[j].ID
+		return pool[i].ID > pool[j].ID
 	})
-	if limit > len(result) {
-		limit = len(result)
+	if len(pool) > mockFeaturedNotesPerUserPoolSize {
+		pool = pool[:mockFeaturedNotesPerUserPoolSize]
 	}
-	return result[:limit], nil
+	// === display: id DESC sort → untilID filter → 先頭 limit 件 ===
+	sort.Slice(pool, func(i, j int) bool {
+		return pool[i].ID > pool[j].ID
+	})
+	if untilID != "" {
+		filtered := pool[:0]
+		for _, n := range pool {
+			if n.ID < untilID {
+				filtered = append(filtered, n)
+			}
+		}
+		pool = filtered
+	}
+	if len(pool) > limit {
+		pool = pool[:limit]
+	}
+	return pool, nil
 }
 
 func (m *MockNoteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note, error) {
