@@ -1033,6 +1033,23 @@ func buildRelationCandidates(viewer *model.User, bundleByID map[string]*user.Use
 //
 // viewer は users/show を叩いている認証ユーザー (匿名なら nil)。pinned note
 // の myReaction を埋めるために fieldRes.Apply に流す (#426)。
+//
+// 設計メモ — PinnedNoteIDs を visibility filter 前の生 ID 配列で返す理由 (#1489):
+//
+//   - pin = author の意図的な self-disclosure 行為。「followers にだけ見せる
+//     note を profile に固定する」と author が選んだ時点で、pinnedNoteIds が
+//     viewer に露出することは upstream Misskey TS でも同 shape (drop-in 互換)。
+//   - notes/show ShowForAPI doctrine の境界線上だが、author 自身が pin を選んで
+//     いる以上、ID-known な viewer に content が返るのは「意図された情報開示」
+//     の範疇とする (#1489 で議論)。
+//   - PinnedNotes 本体 (= 中身の埋め込み) は FilterVisible で絞るため、profile
+//     表示上は viewer から見えない pin はカード化されない。
+//   - pinning は per-user 上限が厳しい (= 数件) ので mass enumeration リスクは
+//     低い。
+//
+// この設計は Option A (現状維持 = upstream-aligned) を採用した結果 (#1489
+// wontfix)。Option B (IDs も filter) は frontend drop-in 互換と「author 意図」
+// に逆行するため不採用。
 func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.User, profile *model.UserProfile, detailed *entity.UserDetailed) {
 	if h.piningRepo != nil {
 		if pinings, err := h.piningRepo.ListByUser(u.ID); err == nil && len(pinings) > 0 {
@@ -1040,6 +1057,7 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 			for _, p := range pinings {
 				ids = append(ids, p.NoteID)
 			}
+			// PinnedNoteIDs は意図的に filter 前の生 IDs (上記設計メモ参照)。
 			detailed.PinnedNoteIDs = ids
 			if h.noteRepo != nil {
 				if notes, err := h.noteRepo.FindManyByIDsWithUser(ids); err == nil {
