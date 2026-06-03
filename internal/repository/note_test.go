@@ -1385,6 +1385,63 @@ func TestNoteRepository_ListByUserList_Error(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// #1496: user_list_membership.withReplies を尊重した返信フィルタを実 SQL で覆う。
+// 返信でない / 自己への返信 / viewer 宛ての返信は常に出る。第三者宛ての返信は
+// メンバーが withReplies=ON のときだけ出る (upstream user-list-timeline getFromDb
+// と一致)。可視性条件と切り分けるため全 note を public にしている。
+func TestNoteRepository_ListByUserList_WithReplies(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "ulw_v", "ulwV")
+	defer cleanupUser(t, viewer.ID)
+	m := insertTestUser(t, "ulw_m", "ulwM") // withReplies=false
+	defer cleanupUser(t, m.ID)
+	m2 := insertTestUser(t, "ulw_m2", "ulwM2") // withReplies=true
+	defer cleanupUser(t, m2.ID)
+	third := insertTestUser(t, "ulw_x", "ulwX") // 第三者 (reply 先、list 非メンバー)
+	defer cleanupUser(t, third.ID)
+
+	listID := "ulw_list"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	require.NoError(t, testDB.Create(&model.UserListMembership{ID: "ulw_mem_m", UserListID: listID, UserID: m.ID, WithReplies: false}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, "ulw_mem_m")
+	require.NoError(t, testDB.Create(&model.UserListMembership{ID: "ulw_mem_m2", UserListID: listID, UserID: m2.ID, WithReplies: true}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, "ulw_mem_m2")
+
+	// reply 先の source note (FK 充足用、list 非メンバー third 投稿なので結果には出ない)。
+	srcID := "ulw_src"
+	require.NoError(t, testDB.Create(&model.Note{ID: srcID, UserID: third.ID, Visibility: "public"}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, srcID)
+
+	mkReply := func(id, author, replyUser string) *model.Note {
+		ruid := replyUser
+		return &model.Note{ID: id, UserID: author, Visibility: "public", ReplyID: &srcID, ReplyUserID: &ruid}
+	}
+	notes := []*model.Note{
+		{ID: "ulw_n_plain", UserID: m.ID, Visibility: "public"}, // 返信でない
+		mkReply("ulw_n_self", m.ID, m.ID),                       // 自己への返信
+		mkReply("ulw_n_toviewer", m.ID, viewer.ID),              // viewer 宛て返信
+		mkReply("ulw_n_tothird", m.ID, third.ID),                // 第三者宛て (withReplies=false)
+		mkReply("ulw_n2_tothird", m2.ID, third.ID),              // 第三者宛て (withReplies=true)
+	}
+	for _, n := range notes {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	got, err := repo.ListByUserList(listID, viewer.ID, 50, "", "")
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["ulw_n_plain"], "返信でない note は出る")
+	assert.True(t, ids["ulw_n_self"], "自己への返信は出る")
+	assert.True(t, ids["ulw_n_toviewer"], "viewer 宛ての返信は出る")
+	assert.False(t, ids["ulw_n_tothird"], "withReplies=false メンバーの第三者宛て返信は出ない")
+	assert.True(t, ids["ulw_n2_tothird"], "withReplies=true メンバーの第三者宛て返信は出る")
+}
+
 func TestNoteRepository_FindRenoteByUser(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "unrn_u", "unrnuser")

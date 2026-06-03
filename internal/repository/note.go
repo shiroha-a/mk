@@ -156,6 +156,10 @@ type NoteRepository interface {
 	// (DM 非表示 / upstream 準拠)。空文字は匿名 (public/home のみ)。これを LIMIT
 	// 前に SQL で絞ることで、handler post-fetch FilterVisible のページ過少充填と
 	// followers 判定 N+1 を解消する (#1452, #1418 / #1486 と同 doctrine)。
+	//
+	// 返信は user_list_membership.withReplies を尊重して出し分ける (#1496, upstream
+	// と一致): 返信でない / 自己への返信 / viewer 宛ての返信 / メンバーが
+	// withReplies=ON のときだけ含め、第三者宛ての返信は既定で除外する。
 	ListByUserList(listID, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// CountReplyTargets returns the users that userID most frequently replies
 	// to, ordered by reply count descending. Used by
@@ -1042,6 +1046,17 @@ func (r *noteRepository) ListByUserList(listID, viewerID string, limit int, sinc
 				`OR "note"."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?))))`,
 			viewerID, viewerID)
 	}
+	// reply 内包: user_list_membership.withReplies を尊重して返信を出し分ける
+	// (#1496, upstream user-list-timeline getFromDb と一致)。返信でない / 自己への
+	// 返信 / viewer 宛ての返信 / メンバーが withReplies=ON のときだけ返信を含め、
+	// それ以外 (第三者宛ての返信) は既定で除外する。withReplies 列は JOIN した
+	// membership 由来なので m. で参照する。
+	q = q.Where(
+		`("note"."replyId" IS NULL `+
+			`OR "note"."replyUserId" = "note"."userId" `+
+			`OR "note"."replyUserId" = ? `+
+			`OR m."withReplies" = true)`,
+		viewerID)
 	if sinceID != "" {
 		q = q.Where(`"note"."id" > ?`, sinceID)
 	}
