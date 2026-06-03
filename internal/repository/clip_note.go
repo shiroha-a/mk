@@ -80,18 +80,8 @@ func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibilit
 	q := r.db.Where("\"clipId\" = ?", clipID)
 	if filterVisibility {
 		// clip_note は author 混在のため、note を相関 EXISTS で join して
-		// visibility を LIMIT 前に絞る。条件は core/note.CanSeeNote と一致。
-		if viewerID == "" {
-			q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "clip_note"."noteId" AND v."visibility" IN ('public','home'))`)
-		} else {
-			q = q.Where(
-				`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "clip_note"."noteId" AND (`+
-					`v."visibility" IN ('public','home') `+
-					`OR v."userId" = ? `+
-					`OR (v."visibility" = 'followers' AND v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-					`OR (v."visibility" = 'specified' AND ? = ANY(v."visibleUserIds"))))`,
-				viewerID, viewerID, viewerID)
-		}
+		// visibility を LIMIT 前に絞る。条件は core/note.CanSeeNote と一致 (#1454)。
+		q = applyViewerVisibilityExists(q, `"clip_note"."noteId"`, viewerID)
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)

@@ -347,16 +347,7 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 	// limit 未満になりページネーションが途切れる + followers 判定が note ごとの
 	// N+1 になるため、LIMIT 前に SQL で絞る。条件は core/note.CanSeeNote と
 	// 一致させる (note_reaction.ListByUserID と同じ可視性定義)。
-	if viewerID == "" {
-		q = q.Where(`"visibility" IN ('public','home')`)
-	} else {
-		q = q.Where(
-			`("visibility" IN ('public','home') `+
-				`OR "userId" = ? `+
-				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-			viewerID, viewerID, viewerID)
-	}
+	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -396,16 +387,7 @@ func (r *noteRepository) ListByChannelID(channelID, viewerID, untilID, sinceID s
 	// core/note.CanSeeNote と同じ可視性条件を LIMIT 前に SQL で絞る。
 	// post-fetch filter だとページが過少充填されるのと followers 判定が
 	// note ごとの N+1 になるため LIMIT 前に push down する (#1440)。
-	if viewerID == "" {
-		q = q.Where(`"visibility" IN ('public','home')`)
-	} else {
-		q = q.Where(
-			`("visibility" IN ('public','home') `+
-				`OR "userId" = ? `+
-				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-			viewerID, viewerID, viewerID)
-	}
+	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -686,16 +668,7 @@ func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, li
 	q := preloadNoteRelations(r.db).
 		Where(`"userId" = ?`, userID).
 		Where(`"channelId" IS NULL`)
-	if viewerID == "" {
-		q = q.Where(`"visibility" IN ('public','home')`)
-	} else {
-		q = q.Where(
-			`("visibility" IN ('public','home') `+
-				`OR "userId" = ? `+
-				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-			viewerID, viewerID, viewerID)
-	}
+	q = applyViewerVisibility(q, viewerID)
 	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(featuredNotesPerUserPoolSize)
 	var pool []*model.Note
 	if err := q.Find(&pool).Error; err != nil {
@@ -743,12 +716,9 @@ func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinc
 	// の visibleUserIds とは独立なので、これが無いと followers/specified note を
 	// mention されただけの非対象 viewer が本文と author を取得できてしまう (#1441)。
 	// viewer は notes/mentions の認証ユーザー = userID 固定。
-	q = q.Where(
-		`("visibility" IN ('public','home') `+
-			`OR "userId" = ? `+
-			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-		userID, userID, userID)
+	// notes/mentions は RequireAuth 配下で userID 非空のため、helper の認証分岐
+	// (= 4 分岐 CanSeeNote) がそのまま適用される。
+	q = applyViewerVisibility(q, userID)
 	// visibility kind filter: upstream TS notes/mentions と同じく visibility 指定
 	// 時のみ note.visibility = <値> の exact-match で絞る (空は全種別)。これを
 	// LIMIT 前に SQL で行うことで、handler 側 post-fetch 振り分けで起きていた
@@ -779,16 +749,7 @@ func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, u
 		Where("tags @> ARRAY[?]::varchar[]", tag)
 	// visibility push-down: core/note.CanSeeNote と同じ条件を LIMIT 前に絞る。
 	// ListByUserIDFiltered / clip の ListByClipVisible と同じ可視性定義 (#1439)。
-	if viewerID == "" {
-		q = q.Where(`"visibility" IN ('public','home')`)
-	} else {
-		q = q.Where(
-			`("visibility" IN ('public','home') `+
-				`OR "userId" = ? `+
-				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-			viewerID, viewerID, viewerID)
-	}
+	q = applyViewerVisibility(q, viewerID)
 	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
@@ -1103,16 +1064,7 @@ func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) (
 	// 見られるものだけを残す。これが無いと第三者 viewer が author の
 	// followers/specified reply の対人関係を集計値経由で観測できる (#1486)。
 	// 条件は ListByUserIDFiltered / ListMentions / SearchByTag と同一。
-	if viewerID == "" {
-		q = q.Where(`"visibility" IN ('public','home')`)
-	} else {
-		q = q.Where(
-			`("visibility" IN ('public','home') `+
-				`OR "userId" = ? `+
-				`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-				`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-			viewerID, viewerID, viewerID)
-	}
+	q = applyViewerVisibility(q, viewerID)
 	err := q.Group(`"replyUserId"`).
 		Order(`count DESC`).
 		Limit(limit).

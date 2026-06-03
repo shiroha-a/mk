@@ -116,17 +116,8 @@ func (r *noteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID
 	// 絞る。条件は core/note.CanSeeNote と一致させる (= timeline の FilterVisible
 	// と同じ可視性定義。upstream の mentions / replyUserId は CanSeeNote 側に
 	// 無いので合わせて含めない)。
-	if viewerID == "" {
-		// 匿名は public / home のみ。
-		q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "note_reaction"."noteId" AND v."visibility" IN ('public','home'))`)
-	} else {
-		q = q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = "note_reaction"."noteId" AND (`+
-			`v."visibility" IN ('public','home') `+
-			`OR v."userId" = ? `+
-			`OR (v."visibility" = 'followers' AND v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-			`OR (v."visibility" = 'specified' AND ? = ANY(v."visibleUserIds"))))`,
-			viewerID, viewerID, viewerID)
-	}
+	// 条件は core/note.CanSeeNote と一致 (#1454 で共通 helper に集約)。
+	q = applyViewerVisibilityExists(q, `"note_reaction"."noteId"`, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
