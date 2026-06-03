@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -30,12 +31,25 @@ type Handler struct {
 	// userRepo は antennas/notes の hardMutedWords filter (#787) のために
 	// viewer profile を引く。未配線時は filter skip。
 	userRepo repository.UserRepository
+	// queryService は antennas/notes の visibility filter (#1464) で
+	// FilterVisible を呼ぶための note.QueryService。本来 push 段
+	// (core/antenna matchNote) で visibility gate しているが、過去に stream へ
+	// 滞留した entry や設定ミスに対する defense-in-depth として handler でも
+	// 1 段 filter する。未配線時は filter skip (旧挙動)。
+	queryService *corenote.QueryService
 }
 
 // SetUserRepo wires a UserRepository so antennas/notes filters out notes that
 // match the viewer's hardMutedWords (#787).
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetQueryService wires a note.QueryService used by Notes as defense-in-depth
+// for visibility filtering (#1464). 通常 push 段 (matchNote) で gate されるが、
+// stream に残留した entry を捌くために handler 側でも 1 段 filter する。
+func (h *Handler) SetQueryService(qs *corenote.QueryService) {
+	h.queryService = qs
 }
 
 // SetNoteFieldResolver attaches the shared resolver that fills Files /
@@ -275,7 +289,16 @@ func (h *Handler) Notes(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, req.Limit, sinceID, untilID)
+	// over-fetch: stream に滞留した followers/specified entry や hardMute hit が
+	// handler 側 filter で削られると、返却件数が req.Limit を下回り得る。安全側に
+	// limit の 2 倍 (上限 MaxNotesPerAntenna) で stream から拾い、filter 後に
+	// req.Limit へトリミングする (#1467 review)。FE は最後の note id を untilId
+	// に渡してくるため、トリミングしてもページング境界は保たれる。
+	overFetch := req.Limit * 2
+	if overFetch > coreantenna.MaxNotesPerAntenna {
+		overFetch = coreantenna.MaxNotesPerAntenna
+	}
+	ids, err := h.svc.Notes(c.Request().Context(), user.ID, req.AntennaID, overFetch, sinceID, untilID)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreantenna.ErrAntennaNotFound):
@@ -289,7 +312,22 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// visibility filter (defense-in-depth, #1464): push 段 (core/antenna
+	// matchNote) で followers/specified note は antenna owner 視点で gate されて
+	// いるが、過去に stream に滞留した entry や設定ミスに対するフォールバック
+	// として handler でも 1 段 filter する (`notes/user-list-timeline`
+	// (`internal/api/notes/handler_extra.go:UserListTimeline`) と同じパターン。
+	// なお `channels/timeline` は service/repo 層で SQL push-down する別パターン
+	// で filter している (#1440))。queryService 未配線時は filter skip (旧挙動)。
+	if h.queryService != nil {
+		notes = h.queryService.FilterVisible(user, notes)
+	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
+	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
+	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
+	if len(notes) > req.Limit {
+		notes = notes[:req.Limit]
+	}
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)
 	out := make([]any, 0, len(entities))

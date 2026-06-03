@@ -14,6 +14,9 @@ import (
 //
 // 指定 userId が最近返信している相手上位 limit 件を weight = count / peak
 // (最大件数で正規化) 付きで返す。Misskey 本家と同じレスポンス shape。
+//
+// reply 集計は visibility push-down で viewer が CanSeeNote で見られる reply
+// のみに絞る (#1486)。匿名 viewer は public/home のみ集計する。
 func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`
@@ -26,7 +29,11 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "e6965129-7b2a-40a4-bae2-cd84cd434822"))
 	}
-	rows, err := h.noteRepo.CountReplyTargets(req.UserID, req.Limit)
+	var viewerID string
+	if viewer := middleware.GetUser(c); viewer != nil {
+		viewerID = viewer.ID
+	}
+	rows, err := h.noteRepo.CountReplyTargets(req.UserID, viewerID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

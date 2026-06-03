@@ -311,6 +311,32 @@ func TestMentions_SpecifiedNonTargetExcluded(t *testing.T) {
 	assert.True(t, ids["m_spec"], "visibleUserIds 対象には specified mention が出る")
 }
 
+// #1451: 未指定 (default) は upstream TS と同じく全種別を返す。public mention に
+// 加えて specified(DM、me が visibleUserIds 対象) mention も含まれる (旧実装は
+// default で specified を除外していたが TS に揃えて含める)。
+func TestMentions_DefaultIncludesAllVisibilities(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["m_pub"] = &model.Note{ID: "m_pub", UserID: "author", Mentions: []string{"me"}, Visibility: "public", User: &model.User{ID: "author"}}
+	noteRepo.Notes["m_dm"] = &model.Note{ID: "m_dm", UserID: "author", Mentions: []string{"me"}, Visibility: "specified", VisibleUserIDs: []string{"me"}, User: &model.User{ID: "author"}}
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{}`, &model.User{ID: "me"}))
+	assert.True(t, ids["m_pub"], "default は public mention を含む")
+	assert.True(t, ids["m_dm"], "default は specified(DM) mention も含む (TS 一致)")
+}
+
+// #1451: visibility 指定は exact-match。public 指定では public のみ返り、
+// specified は出ない (旧 binary split では非specified に specified 以外が全部
+// 入っていたが、TS の note.visibility = <値> に合わせる)。
+func TestMentions_VisibilityExactMatch(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["m_pub"] = &model.Note{ID: "m_pub", UserID: "author", Mentions: []string{"me"}, Visibility: "public", User: &model.User{ID: "author"}}
+	noteRepo.Notes["m_dm"] = &model.Note{ID: "m_dm", UserID: "author", Mentions: []string{"me"}, Visibility: "specified", VisibleUserIDs: []string{"me"}, User: &model.User{ID: "author"}}
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{"visibility":"public"}`, &model.User{ID: "me"}))
+	assert.True(t, ids["m_pub"], "public 指定で public mention は出る")
+	assert.False(t, ids["m_dm"], "public 指定で specified は出ない (exact-match)")
+}
+
 // --- UserListTimeline ---
 
 func TestUserListTimeline_Success(t *testing.T) {
@@ -815,7 +841,7 @@ func TestUnrenote_DeleteError(t *testing.T) {
 
 type failingMentionsRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingMentionsRepo) ListMentions(_ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingMentionsRepo) ListMentions(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 
