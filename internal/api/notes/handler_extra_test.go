@@ -386,27 +386,28 @@ func TestUserListTimeline_InvalidParam(t *testing.T) {
 }
 
 // userListNotesRepo は ListByUserList で固定の note を返しつつ、handler から
-// 渡された listID / viewerID を記録する fake。#1452 で可視性が repo の SQL
+// 渡された listID / filter を記録する fake。#1452 で可視性が repo の SQL
 // push-down に移ったため、handler は repo の返り値をそのまま返す。可視性絞り
 // 込み自体の検証は repository.TestNoteRepository_ListByUserList_VisibilityPushdown
 // で実 SQL に対して行う。
 type userListNotesRepo struct {
 	*testutil.MockNoteRepository
-	rows        []*model.Note
-	gotListID   string
-	gotViewerID string
+	rows      []*model.Note
+	gotListID string
+	gotFilter model.TimelineDBFilter
 }
 
-func (r *userListNotesRepo) ListByUserList(listID, viewerID string, _ int, _, _ string) ([]*model.Note, error) {
+func (r *userListNotesRepo) ListByUserList(listID string, _ int, _, _ string, filter model.TimelineDBFilter) ([]*model.Note, error) {
 	r.gotListID = listID
-	r.gotViewerID = viewerID
+	r.gotFilter = filter
 	return r.rows, nil
 }
 
-// #1452: handler は viewer (= me.ID) を viewerID として repo に渡し、可視性絞り
-// 込みは ListByUserList の SQL push-down に委ねる。post-fetch FilterVisible は
-// 撤去済みなので、handler は repo の返り値をそのまま pack する。
-func TestUserListTimeline_PassesViewerIDToRepo(t *testing.T) {
+// #1452 / #1498: handler は viewer (= me.ID) と renote/file 系 param を
+// TimelineDBFilter に詰めて repo に渡し、可視性 / renote 絞り込みは repo の SQL
+// push-down に委ねる。post-fetch FilterVisible は撤去済みなので handler は repo の
+// 返り値をそのまま pack する。
+func TestUserListTimeline_PassesFilterToRepo(t *testing.T) {
 	pub := &model.Note{ID: "ul_pub", UserID: "B", Visibility: "public", User: &model.User{ID: "B"}}
 	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: []*model.Note{pub}}
 	fRepo := testutil.NewMockFollowingRepository()
@@ -418,13 +419,16 @@ func TestUserListTimeline_PassesViewerIDToRepo(t *testing.T) {
 	h := NewHandler(noteRepo, corenote.NewCreateService(noteRepo, pollRepo, idGen, nil), corenote.NewDeleteService(noteRepo), querySvc, nil, nil, nil, nil, idGen)
 	h.SetUserListRepo(listRepo)
 
-	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "A"})
+	rec := postExtra(h.UserListTimeline, `{"listId":"l1","withRenotes":false,"withFiles":true}`, &model.User{ID: "A"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	// viewer (me.ID) と listId が repo に渡ることを確認 (可視性 push-down の入力)。
+	// viewer (me.ID) / listId / renote・file 系 param が filter 経由で repo に渡る。
 	assert.Equal(t, "l1", noteRepo.gotListID, "listId が repo に渡る")
-	assert.Equal(t, "A", noteRepo.gotViewerID, "viewer (me.ID) が viewerID として repo に渡る")
+	assert.Equal(t, "A", noteRepo.gotFilter.ViewerID, "viewer (me.ID) が filter.ViewerID として渡る")
+	require.NotNil(t, noteRepo.gotFilter.WithRenotes)
+	assert.False(t, *noteRepo.gotFilter.WithRenotes, "withRenotes=false が filter に渡る")
+	assert.True(t, noteRepo.gotFilter.WithFiles, "withFiles=true が filter に渡る")
 	// post-fetch filter は無いので repo の返り値がそのまま返る。
 	require.Len(t, out, 1)
 	assert.Equal(t, "ul_pub", out[0]["id"])
@@ -439,7 +443,7 @@ func TestUserListTimeline_WithoutUserListRepo(t *testing.T) {
 
 type failingListByUserListRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingListByUserListRepo) ListByUserList(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingListByUserListRepo) ListByUserList(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

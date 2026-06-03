@@ -1250,7 +1250,7 @@ func (m *MockNoteRepository) DeleteByUserBatch(userID string, batchSize int) (in
 	return n, nil
 }
 
-func (m *MockNoteRepository) ListByUserList(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListByUserList(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
 	return nil, nil
 }
 

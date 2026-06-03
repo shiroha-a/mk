@@ -890,7 +890,7 @@ func (f *failingNoteRepo) DeleteByUserBatch(_ string, _ int) (int64, error) { re
 func (f *failingNoteRepo) CountReplyTargets(_, _ string, _ int) ([]model.ReplyTargetCount, error) {
 	return nil, nil
 }
-func (f *failingNoteRepo) ListByUserList(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingNoteRepo) ListByUserList(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
 	return nil, nil
 }
 func (f *failingNoteRepo) CountLocalNotes() (int64, error)    { return 0, nil }

@@ -1294,7 +1294,7 @@ func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 	}
 
 	collect := func(viewerID string) map[string]bool {
-		got, err := repo.ListByUserList(listID, viewerID, 50, "", "")
+		got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{ViewerID: viewerID})
 		require.NoError(t, err)
 		ids := map[string]bool{}
 		for _, n := range got {
@@ -1327,14 +1327,14 @@ func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 	assert.False(t, ids["ult_n_f_self_fol"], "匿名は誰の followers も不可")
 
 	// 並び順は id DESC (no cursor)。
-	got, err := repo.ListByUserList(listID, viewer.ID, 50, "", "")
+	got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
 	require.NoError(t, err)
 	for i := 1; i < len(got); i++ {
 		assert.Greater(t, got[i-1].ID, got[i].ID, "id DESC order")
 	}
 
 	// untilID cursor: id < untilID のみ返る。
-	got, err = repo.ListByUserList(listID, viewer.ID, 50, "", "ult_n_c_fol")
+	got, err = repo.ListByUserList(listID, 50, "", "ult_n_c_fol", model.TimelineDBFilter{ViewerID: viewer.ID})
 	require.NoError(t, err)
 	for _, n := range got {
 		assert.Less(t, n.ID, "ult_n_c_fol", "untilID 未満のみ")
@@ -1369,7 +1369,7 @@ func TestNoteRepository_ListByUserList_NoUnderfill(t *testing.T) {
 
 	// limit=5: push-down で public のみが対象 → 5 件埋まる。followers が混ざって
 	// 後段 filter で削られ under-fill する旧挙動の回帰防止。
-	got, err := repo.ListByUserList(listID, viewer.ID, 5, "", "")
+	got, err := repo.ListByUserList(listID, 5, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
 	require.NoError(t, err)
 	require.Len(t, got, 5, "push-down で limit ぶん public で埋まる")
 	for _, n := range got {
@@ -1381,7 +1381,7 @@ func TestNoteRepository_ListByUserList_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewNoteRepository(testDB.WithContext(ctx))
-	_, err := repo.ListByUserList("l", "v", 10, "", "")
+	_, err := repo.ListByUserList("l", 10, "", "", model.TimelineDBFilter{ViewerID: "v"})
 	assert.Error(t, err)
 }
 
@@ -1429,7 +1429,7 @@ func TestNoteRepository_ListByUserList_WithReplies(t *testing.T) {
 		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 	}
 
-	got, err := repo.ListByUserList(listID, viewer.ID, 50, "", "")
+	got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
 	require.NoError(t, err)
 	ids := map[string]bool{}
 	for _, n := range got {
@@ -1440,6 +1440,96 @@ func TestNoteRepository_ListByUserList_WithReplies(t *testing.T) {
 	assert.True(t, ids["ulw_n_toviewer"], "viewer 宛ての返信は出る")
 	assert.False(t, ids["ulw_n_tothird"], "withReplies=false メンバーの第三者宛て返信は出ない")
 	assert.True(t, ids["ulw_n2_tothird"], "withReplies=true メンバーの第三者宛て返信は出る")
+}
+
+// #1498: TimelineDBFilter 経由の renote/file 系 param (withRenotes /
+// includeMyRenotes / includeRenotedMyNotes / includeLocalRenotes / withFiles) が
+// applyTimelineFilter で適用されることを実 SQL で覆う。pure renote と quote renote
+// (text あり) を区別し、quote は常に残ることも確認する。
+func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "ulr_v", "ulrV") // list owner かつ member
+	defer cleanupUser(t, viewer.ID)
+	member := insertTestUser(t, "ulr_m", "ulrM")
+	defer cleanupUser(t, member.ID)
+
+	listID := "ulr_list"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	for i, mem := range []string{viewer.ID, member.ID} {
+		mid := fmt.Sprintf("ulr_mem_%d", i)
+		require.NoError(t, testDB.Create(&model.UserListMembership{ID: mid, UserListID: listID, UserID: mem}).Error)
+		defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, mid)
+	}
+
+	// renote 先 note (FK 充足用)。
+	target := "ulr_target"
+	require.NoError(t, testDB.Create(&model.Note{ID: target, UserID: member.ID, Visibility: "public"}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, target)
+
+	emptyFiles := pq.StringArray{}
+	// plain (通常投稿), pure renote (member), quote renote (member, text あり),
+	// file 付き plain, viewer の pure renote。
+	plain := &model.Note{ID: "ulr_plain", UserID: member.ID, Visibility: "public", FileIDs: emptyFiles}
+	pureRenote := &model.Note{ID: "ulr_pure", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
+	quoteText := "quote"
+	quoteRenote := &model.Note{ID: "ulr_quote", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, Text: &quoteText, FileIDs: emptyFiles}
+	withFile := &model.Note{ID: "ulr_file", UserID: member.ID, Visibility: "public", FileIDs: pq.StringArray{"f1"}}
+	myPureRenote := &model.Note{ID: "ulr_my_pure", UserID: viewer.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
+	for _, n := range []*model.Note{plain, pureRenote, quoteRenote, withFile, myPureRenote} {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	collect := func(f model.TimelineDBFilter) map[string]bool {
+		f.ViewerID = viewer.ID
+		got, err := repo.ListByUserList(listID, 50, "", "", f)
+		require.NoError(t, err)
+		ids := map[string]bool{}
+		for _, n := range got {
+			ids[n.ID] = true
+		}
+		return ids
+	}
+
+	no := func() *bool { b := false; return &b }
+
+	// 既定 (filter 空, renote 系 nil = true) は全件 (target は member 投稿だが
+	// renote 先として list member なので出る点に注意 → target も含む)。
+	ids := collect(model.TimelineDBFilter{})
+	assert.True(t, ids["ulr_plain"] && ids["ulr_pure"] && ids["ulr_quote"] && ids["ulr_file"] && ids["ulr_my_pure"], "既定は renote も全部出る")
+
+	// withRenotes=false: pure renote を除外、quote renote は残す。
+	ids = collect(model.TimelineDBFilter{WithRenotes: no()})
+	assert.False(t, ids["ulr_pure"], "withRenotes=false で pure renote は除外")
+	assert.False(t, ids["ulr_my_pure"], "withRenotes=false で他の pure renote も除外")
+	assert.True(t, ids["ulr_quote"], "quote renote (text あり) は残る")
+	assert.True(t, ids["ulr_plain"], "通常投稿は残る")
+
+	// includeMyRenotes=false: viewer 自身の pure renote のみ除外。member の pure
+	// renote は残る。
+	ids = collect(model.TimelineDBFilter{IncludeMyRenotes: no()})
+	assert.False(t, ids["ulr_my_pure"], "自分の pure renote は除外")
+	assert.True(t, ids["ulr_pure"], "他人の pure renote は残る")
+
+	// includeRenotedMyNotes=false: 自分の note を renote した pure renote を除外。
+	// fixture では renote 先 target は member 投稿なので除外されない (= 全 renote
+	// 残る)。viewer 自身の note を renote した fixture を別途用意する。
+	myTarget := "ulr_mytarget"
+	require.NoError(t, testDB.Create(&model.Note{ID: myTarget, UserID: viewer.ID, Visibility: "public", FileIDs: emptyFiles}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, myTarget)
+	renoteOfMine := &model.Note{ID: "ulr_renote_mine", UserID: member.ID, Visibility: "public", RenoteID: &myTarget, RenoteUserID: &viewer.ID, FileIDs: emptyFiles}
+	require.NoError(t, testDB.Create(renoteOfMine).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, renoteOfMine.ID)
+	ids = collect(model.TimelineDBFilter{IncludeRenotedMyNotes: no()})
+	assert.False(t, ids["ulr_renote_mine"], "自分の note の pure renote は除外")
+	assert.True(t, ids["ulr_pure"], "他人の note の pure renote は残る")
+
+	// withFiles=true: ファイル付き note のみ。
+	ids = collect(model.TimelineDBFilter{WithFiles: true})
+	assert.True(t, ids["ulr_file"], "ファイル付きは残る")
+	assert.False(t, ids["ulr_plain"], "ファイル無しは除外")
+	assert.False(t, ids["ulr_pure"], "ファイル無し renote も除外")
 }
 
 func TestNoteRepository_FindRenoteByUser(t *testing.T) {

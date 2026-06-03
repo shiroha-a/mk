@@ -161,12 +161,17 @@ func (h *Handler) Mentions(c echo.Context) error {
 func (h *Handler) UserListTimeline(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
-		ListID    string `json:"listId"`
-		Limit     int    `json:"limit"`
-		SinceID   string `json:"sinceId"`
-		UntilID   string `json:"untilId"`
-		SinceDate *int64 `json:"sinceDate"`
-		UntilDate *int64 `json:"untilDate"`
+		ListID                string `json:"listId"`
+		Limit                 int    `json:"limit"`
+		SinceID               string `json:"sinceId"`
+		UntilID               string `json:"untilId"`
+		SinceDate             *int64 `json:"sinceDate"`
+		UntilDate             *int64 `json:"untilDate"`
+		WithFiles             bool   `json:"withFiles"`
+		WithRenotes           *bool  `json:"withRenotes"`
+		IncludeMyRenotes      *bool  `json:"includeMyRenotes"`
+		IncludeRenotedMyNotes *bool  `json:"includeRenotedMyNotes"`
+		IncludeLocalRenotes   *bool  `json:"includeLocalRenotes"`
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -191,7 +196,19 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	// followers 判定 N+1 を解消した。viewer の見える note だけが返るため handler
 	// 側の post-fetch FilterVisible / fail-closed ガードは不要。
 	// RequireAuth() 配下なので me は非nil (所有権チェックでも me.ID を直接参照)。
-	notes, err := h.noteRepo.ListByUserList(req.ListID, me.ID, req.Limit, sinceID, untilID)
+	//
+	// renote/file 系 param は他 timeline と同じ filter で SQL push-down する
+	// (#1498)。WithReplies は per-member (membership.withReplies, #1496) で別途
+	// 処理されるため filter には積まない。
+	filter := model.TimelineDBFilter{
+		ViewerID:              me.ID,
+		WithFiles:             req.WithFiles,
+		WithRenotes:           req.WithRenotes,
+		IncludeMyRenotes:      req.IncludeMyRenotes,
+		IncludeRenotedMyNotes: req.IncludeRenotedMyNotes,
+		IncludeLocalRenotes:   req.IncludeLocalRenotes,
+	}
+	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, sinceID, untilID, filter)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

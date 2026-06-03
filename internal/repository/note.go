@@ -151,8 +151,8 @@ type NoteRepository interface {
 	// with keyset pagination via paginationOrder (DESC by default; ASC when
 	// only sinceID is supplied). Channel notes are excluded.
 	//
-	// viewerID は viewer 視点の visibility push-down 用。followers は viewer が
-	// author 本人か follow 済みのときだけ、specified は list timeline では除外
+	// filter.ViewerID は viewer 視点の visibility push-down 用。followers は viewer
+	// が author 本人か follow 済みのときだけ、specified は list timeline では除外
 	// (DM 非表示 / upstream 準拠)。空文字は匿名 (public/home のみ)。これを LIMIT
 	// 前に SQL で絞ることで、handler post-fetch FilterVisible のページ過少充填と
 	// followers 判定 N+1 を解消する (#1452, #1418 / #1486 と同 doctrine)。
@@ -160,7 +160,12 @@ type NoteRepository interface {
 	// 返信は user_list_membership.withReplies を尊重して出し分ける (#1496, upstream
 	// と一致): 返信でない / 自己への返信 / viewer 宛ての返信 / メンバーが
 	// withReplies=ON のときだけ含め、第三者宛ての返信は既定で除外する。
-	ListByUserList(listID, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	//
+	// filter の withRenotes / includeMyRenotes / includeRenotedMyNotes /
+	// includeLocalRenotes / withFiles は applyTimelineFilter で他 timeline と同じ
+	// SQL を適用する (#1498, upstream getFromDb と一致)。muting / WithReplies は
+	// user-list-timeline では使わない (返信は上記 per-member 経路、muting は対象外)。
+	ListByUserList(listID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error)
 	// CountReplyTargets returns the users that userID most frequently replies
 	// to, ordered by reply count descending. Used by
 	// users/get-frequently-replied-users.
@@ -849,7 +854,9 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		q = q.Where(`("replyId" IS NULL OR "replyUserId" = "note"."userId")`)
 	}
 	if f.IncludeMyRenotes != nil && !*f.IncludeMyRenotes && f.ViewerID != "" {
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "userId" = ?)`, f.ViewerID)
+		// "userId" は JOIN を持つ呼び出し元 (ListByUserList の user_list_membership)
+		// で membership.userId と衝突するため "note". で修飾する (#1498)。
+		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "note"."userId" = ?)`, f.ViewerID)
 	}
 	if f.IncludeRenotedMyNotes != nil && !*f.IncludeRenotedMyNotes && f.ViewerID != "" {
 		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "renoteUserId" = ?)`, f.ViewerID)
@@ -894,7 +901,8 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 			f.ViewerID, f.ViewerID,
 		)
 	} else if len(f.MutedUserIDs) > 0 {
-		q = q.Where(`"userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
+		// "userId" は JOIN 併用時の曖昧性回避のため "note". で修飾 (#1498)。
+		q = q.Where(`"note"."userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
 	}
 	// renote-mute filter (#903): 投稿者が renote-muted で **かつ** pure
 	// renote の note のみ除外する。投稿者の plain note / quote renote は
@@ -1023,10 +1031,13 @@ func (r *noteRepository) DeleteByUserBatch(userID string, batchSize int) (int64,
 // ListByUserList returns notes authored by members of the given user list
 // with keyset pagination via paginationOrder. user_list_membership テーブルと
 // INNER JOIN してメンバーのノートだけを返す。channel ノートは除外する (TS互換)。
-func (r *noteRepository) ListByUserList(listID, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	// #1452 (visibility) / #1496 (reply) push-down は viewer ID を使う。旧 viewerID
+	// 引数を filter.ViewerID に畳み込んだ (#1498)。
+	viewerID := filter.ViewerID
 	q := preloadNoteRelations(r.db).
 		Joins(`INNER JOIN "user_list_membership" m ON m."userId" = "note"."userId" AND m."userListId" = ?`, listID).
 		Where(`"note"."channelId" IS NULL`)
@@ -1066,6 +1077,12 @@ func (r *noteRepository) ListByUserList(listID, viewerID string, limit int, sinc
 	if untilID != "" {
 		q = q.Where(`"note"."id" < ?`, untilID)
 	}
+	// withRenotes / includeMyRenotes / includeRenotedMyNotes / includeLocalRenotes
+	// / withFiles を他 timeline と同じ SQL で適用する (#1498, upstream getFromDb と
+	// 一致)。WithReplies は上の per-member 経路 (#1496) で処理済みなので filter には
+	// 積まない (nil = applyTimelineFilter は skip)。muting は user-list-timeline では
+	// 対象外なので filter に積まない。
+	q = applyTimelineFilter(q, filter)
 	var notes []*model.Note
 	if err := q.Order(paginationOrder(sinceID, untilID, `"note"."id"`)).Limit(limit).Find(&notes).Error; err != nil {
 		return nil, err
