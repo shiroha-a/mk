@@ -1,0 +1,28 @@
+-- #1427 (perf audit finding 4): notes/mentions (ListMentions, note.go:610) は
+-- note.mentions に対する array containment ("mentions" @> ARRAY[?]::varchar[])
+-- で検索するが、note.tags (IDX_note_tags, 000043) と違い GIN index が無く note
+-- 全行 seq scan になっていた。テーブル肥大に比例して線形悪化するため GIN index
+-- を追加して index scan 化する。
+--
+-- note は最大テーブルなので CONCURRENTLY で書き込みを block せずに構築する
+-- (000045 の "次回 large table への index 追加では CONCURRENTLY を採用する"
+-- 方針に準拠)。golang-migrate v4 の postgres driver は migration を transaction
+-- 外で ExecContext するため CONCURRENTLY を直接書ける。CONCURRENTLY は単一文で
+-- しか実行できない (複数文だと postgres の暗黙 transaction で失敗する) ため、
+-- mentions / fileIds をそれぞれ別 migration (000054 / 000055) に分割している。
+--
+-- 失敗時の回復: CONCURRENTLY build が途中で失敗 (kill / deadlock / server 側
+-- statement_timeout 等) すると INVALID な index が残り、再実行時の
+-- IF NOT EXISTS は名前一致で skip するため恒久的に再構築されない。さらに
+-- golang-migrate は当該 version を dirty のまま残す。回復は以下:
+--   1. 無効 index を特定して DROP:
+--      SELECT i.relname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+--        WHERE i.relname = 'IDX_note_mentions' AND NOT x.indisvalid;
+--      DROP INDEX CONCURRENTLY IF EXISTS "IDX_note_mentions";
+--   2. golang-migrate の dirty フラグを解除する。本 repo の cmd/migrate は
+--      -direction up/down のみで force を持たないため、schema_migrations
+--      (単一行) を直前に成功した version へ直接戻す:
+--        UPDATE "schema_migrations" SET version = <直前 version>, dirty = false;
+--      その後 make migrate-up で再適用される (standalone golang-migrate CLI が
+--      あれば migrate force <直前 version> でも可)。
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_note_mentions" ON "note" USING gin ("mentions");

@@ -46,8 +46,13 @@ type StreamingPublisher interface {
 // UserListMemberLookup abstracts the query "which user lists contain this
 // user?" for user list timeline fanout. 循環依存を避けるため interface で
 // 受け取る (実装は repository.UserListRepository)。
+//
+// ListIDsAndOwnersByMember は followers visibility note の per-list owner
+// follow gate (#1465) で使う。owner ごとに author を follow しているかを
+// 確認するため list owner 情報が必要なので、専用の 1-query lookup を分けている。
 type UserListMemberLookup interface {
 	ListIDsByMember(userID string) ([]string, error)
+	ListIDsAndOwnersByMember(memberID string) (map[string]string, error)
 }
 
 // FanoutHook implements note.TimelineFanoutHook by pushing newly-created notes
@@ -307,13 +312,102 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 }
 
 // fanoutToUserLists pushes the note to all user lists that contain the author.
+//
+// followers visibility note の場合は per-list owner が author を follow している
+// 場合のみ push する (#1465)。user-list は owner が任意のユーザーを member に
+// 追加できる (フォロー関係不要) ので、何も gate しないと「list owner が author
+// を follow していない」状態でも followers note を REST `notes/user-list-timeline`
+// (#1442 で REST 側は SQL/handler で塞いだ) と WS `userList` channel の両方から
+// 取得できてしまう。REST handler の visibility filter は post-fetch で済むが、
+// WS channel は pubsub 受信時点でフィルタを持たないため push 段で gate しないと
+// realtime に漏れる。本人 (`ownerID == author.ID`) は CanSeeNote の short-circuit
+// と同じく無条件 pass。public / home は従来どおり全 list に push する。
 func (h *FanoutHook) fanoutToUserLists(ctx context.Context, n *model.Note, author *model.User, listCap int) {
-	listIDs, err := h.userListRepo.ListIDsByMember(author.ID)
-	if err != nil {
-		slog.Warn("fanoutToUserLists: list lookup failed", "err", err, "author", author.ID)
+	// followers 以外 (public / home) は per-list owner の follow check 不要なので
+	// 旧経路 (ListIDsByMember + 全 list へ push) のままで済ます。これにより
+	// 通常 note の hot path に lookup を増やさない。
+	if n.Visibility != model.NoteVisibilityFollowers {
+		listIDs, err := h.userListRepo.ListIDsByMember(author.ID)
+		if err != nil {
+			slog.Warn("fanoutToUserLists: list lookup failed", "err", err, "author", author.ID)
+			return
+		}
+		for _, listID := range listIDs {
+			h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
+			h.publishNote("userListTimeline:"+listID, n, author)
+		}
 		return
 	}
-	for _, listID := range listIDs {
+
+	// followers visibility: list owner ごとに author を follow しているかを check。
+	// 自分自身 (owner == author) も pass する (CanSeeNote と同じ短絡)。
+	owners, err := h.userListRepo.ListIDsAndOwnersByMember(author.ID)
+	if err != nil {
+		slog.Warn("fanoutToUserLists: list+owner lookup failed", "err", err, "author", author.ID)
+		return
+	}
+	if len(owners) == 0 {
+		return
+	}
+	// followingRepo 未配線時は fail-closed に倒す (= followers visibility note は
+	// 本人 list へのみ push し、他 owner の list には push しない)。
+	// CanSeeNote の semantics と一致させる。
+	if h.followingRepo == nil {
+		for listID, ownerID := range owners {
+			if ownerID != author.ID {
+				continue
+			}
+			h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
+			h.publishNote("userListTimeline:"+listID, n, author)
+		}
+		return
+	}
+	// distinct な non-self owner を 1 query で「author を follow しているか」
+	// 判定する (#1144 batch method の前例に揃える)。owner ごとに `Exists` を
+	// ループすると、author が多数の異なる owner 所有 list の member の場合に
+	// N+1 になり、同一 owner が複数 list を持つ場合は重複呼び出しになる
+	// (#1468 review)。
+	distinctOwners := make(map[string]struct{}, len(owners))
+	for _, ownerID := range owners {
+		if ownerID == author.ID {
+			continue
+		}
+		distinctOwners[ownerID] = struct{}{}
+	}
+	followingOwners := make(map[string]struct{}, len(distinctOwners))
+	if len(distinctOwners) > 0 {
+		candidates := make([]string, 0, len(distinctOwners))
+		for ownerID := range distinctOwners {
+			candidates = append(candidates, ownerID)
+		}
+		// rows where followerID IN owners AND followeeID = author → returns the
+		// subset of owners that follow author. err 時は fail-closed: 本人 list
+		// 以外は push しない (= 旧 per-owner Exists 失敗時より厳しめだが、
+		// "誰が author を follow しているか" 全く分からない状況で部分 push する
+		// より安全寄り)。
+		filtered, ferr := h.followingRepo.FilterFollowingsToAnchor(author.ID, candidates)
+		if ferr != nil {
+			slog.Warn("fanoutToUserLists: batch follow check failed",
+				"err", ferr, "author", author.ID, "owners", len(candidates))
+			for listID, ownerID := range owners {
+				if ownerID != author.ID {
+					continue
+				}
+				h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
+				h.publishNote("userListTimeline:"+listID, n, author)
+			}
+			return
+		}
+		for _, ownerID := range filtered {
+			followingOwners[ownerID] = struct{}{}
+		}
+	}
+	for listID, ownerID := range owners {
+		if ownerID != author.ID {
+			if _, ok := followingOwners[ownerID]; !ok {
+				continue
+			}
+		}
 		h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
 		h.publishNote("userListTimeline:"+listID, n, author)
 	}

@@ -145,25 +145,16 @@ func (h *Handler) Mentions(c echo.Context) error {
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	notes, err := h.noteRepo.ListMentions(user.ID, req.Limit, sinceID, untilID)
+	// visibility kind の絞り込みは ListMentions の SQL push-down に委譲する
+	// (#1451)。upstream TS notes/mentions と同じく、visibility 指定時のみ
+	// note.visibility = <値> で exact-match し、未指定は全種別を返す。旧実装は
+	// post-fetch で specified / 非specified に振り分けていたため、ページ内が片方の
+	// 種別で埋まると limit 未満になる under-fill が起きていた。
+	notes, err := h.noteRepo.ListMentions(user.ID, req.Visibility, req.Limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// visibilityフィルタ
-	// "specified" → DMのみ、未指定 → DM以外
-	var filtered []*model.Note
-	for _, n := range notes {
-		if req.Visibility == "specified" {
-			if n.Visibility == model.NoteVisibilitySpecified {
-				filtered = append(filtered, n)
-			}
-		} else {
-			if n.Visibility != model.NoteVisibilitySpecified {
-				filtered = append(filtered, n)
-			}
-		}
-	}
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), filtered, user))
+	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, user))
 }
 
 // UserListTimeline handles POST /api/notes/user-list-timeline.

@@ -179,6 +179,92 @@ func TestUserList_WithRepliesFalse_ReplyPassthrough(t *testing.T) {
 	assert.Equal(t, "note", ctx.sentType[0])
 }
 
+// #1465: followers visibility note は viewer が author を follow している
+// 場合のみ emit される (defense-in-depth)。fanout 段で list owner の follow
+// を check してから push する設計だが、stream 残留 entry に対するフォール
+// バックとして channel 側でも 1 段 gate する。
+func TestUserList_FollowersVisibility_NonFollowerDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.followingSnap = map[string]bool{} // alice は author を follow していない
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
+	assert.Empty(t, ctx.sentType, "non-follower viewer must not receive followers note")
+}
+
+func TestUserList_FollowersVisibility_FollowerAccepted(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.followingSnap = map[string]bool{"author": false} // value (withReplies) は関係ない
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
+}
+
+func TestUserList_FollowersVisibility_SelfAuthored(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	// snap は nil でも本人 short-circuit で通る
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"alice","visibility":"followers"}`))
+	require.Len(t, ctx.sentType, 1)
+}
+
+func TestUserList_FollowersVisibility_NilSnapshotFailClosed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	// followingSnap=nil (= snapshot lookup 未配線 / 取得失敗) で他人の followers
+	// note は drop される。本人は別 case (上) で通すことを確認済。
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
+	assert.Empty(t, ctx.sentType, "nil snapshot must fail-closed for followers note from non-self author")
+}
+
+func TestUserList_PublicVisibility_NoFollowCheck(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	// public は snap 無くても、follow 関係に関係なく通る
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1)
+}
+
+func TestUserList_HomeVisibility_NoFollowCheck(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"home"}`))
+	require.Len(t, ctx.sentType, 1)
+}
+
+// visibility 欠如 payload は parse 自体は通るが visibility != "followers" の
+// branch で素通りする (regression guard / 後方互換)。
+func TestUserList_NoVisibilityField_Passthrough(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	require.Len(t, ctx.sentType, 1)
+}
+
+// 不正 payload はパース失敗で conservative drop される (IDOR fail-closed)。
+func TestUserList_BrokenPayload_Dropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{not json`))
+	assert.Empty(t, ctx.sentType)
+}
+
 // --- RoleTimeline ---
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {

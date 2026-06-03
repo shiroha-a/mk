@@ -717,19 +717,39 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 // the relevant local users' main channels. TS本家と同じくdedupはせず、
 // 同一userに対して複数イベント(例: 相手へのリプライかつメンション)が
 // 並列で届きうる(frontendはイベント種別ごとに意味付けるため)。
+//
+// 旧実装は target が note を見られるか検証せずに `entity.PackNote` の full
+// payload (Text / CW / Files / Renote / Reply embed) を main stream に流して
+// いた (#1472)。followers visibility note を非フォロワー reply/renote/mention
+// target に届けたり、specified visibility note を visibleUserIDs 外の
+// mentioned user に届けて本文が漏れる IDOR が成立していた。各 publish の前に
+// CanSeeNote 同等の判定で gate する: REST `i/notifications` (#1444) / stream
+// `notifications:` (#1471) と doctrine を揃える。
 func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.User, replyTarget, renoteTarget *model.Note) {
 	if s.mainStreamPublisher == nil {
 		return
 	}
 	packed := entity.PackNote(note, s.idGen)
 	// reply: reply先がlocal (UserHost == nil) かつ自分自身へのリプライで
-	// ない場合にemit。
+	// ない場合にemit。visibility gate (#1472): reply target が note を見ら
+	// れないとき (= 非 follower や visibleUserIds 外) は本文 leak になるので
+	// publish skip。CanSeeNote は viewer.ID == note.UserID で短絡するため
+	// 著者自身への self-reply は元から exclude されている `UserID != author.ID`
+	// と重ねて防御。
 	if replyTarget != nil && replyTarget.UserHost == nil && replyTarget.UserID != author.ID {
-		s.mainStreamPublisher.PublishMainEvent(replyTarget.UserID, "reply", packed)
+		viewer := &model.User{ID: replyTarget.UserID}
+		if CanSeeNote(viewer, note, s.followingRepo) {
+			s.mainStreamPublisher.PublishMainEvent(replyTarget.UserID, "reply", packed)
+		}
 	}
-	// renote: 同上 (TS: caller ≠ target author条件あり)。
+	// renote: 同上 (TS: caller ≠ target author条件あり)。visibility gate も
+	// reply と同じ理由で必要。renote target が non-follower の場合、quote
+	// renote (= Text/CW 持ち) は本文ごと leak する。
 	if renoteTarget != nil && renoteTarget.UserHost == nil && renoteTarget.UserID != author.ID {
-		s.mainStreamPublisher.PublishMainEvent(renoteTarget.UserID, "renote", packed)
+		viewer := &model.User{ID: renoteTarget.UserID}
+		if CanSeeNote(viewer, note, s.followingRepo) {
+			s.mainStreamPublisher.PublishMainEvent(renoteTarget.UserID, "renote", packed)
+		}
 	}
 	// mention: note.Mentionsは(userRepo設定時)user ID配列なので、
 	// 各userをfetchしてlocalかつauthor自身でなければemitする。
@@ -747,6 +767,14 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 		}
 		if u.Host != nil {
 			continue // remote user — AP配送(別レイヤ)が担当
+		}
+		// visibility gate (#1472): specified visibility 経路では note.Mentions
+		// と note.VisibleUserIDs が乖離しうる (本文に @x が含まれるが visible
+		// 指定は別) ため、CanSeeNote の slices.Contains で visibleUserIDs 外の
+		// mention target を弾く。followers visibility 経路でも non-follower
+		// mention をここで止める。
+		if !CanSeeNote(u, note, s.followingRepo) {
+			continue
 		}
 		s.mainStreamPublisher.PublishMainEvent(uid, "mention", packed)
 	}

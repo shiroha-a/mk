@@ -59,7 +59,20 @@ func (c *UserListChannel) Init(params json.RawMessage) error {
 }
 
 func (c *UserListChannel) OnRedisEvent(payload []byte) {
-	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+	viewerID := viewerIDFromCtx(c.ctx)
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	// followers visibility note の defense-in-depth filter (#1465)。fanout 段
+	// で list owner の follow 関係を check してから push する設計だが、過去に
+	// stream へ滞留した entry や fanout の設定ミスに対して WS 側でも 1 段
+	// gate する。本人 (`viewerID == note.userId`) は CanSeeNote の semantics
+	// と同じく無条件 pass、それ以外は FollowingSnapshot で `note.userId` を
+	// follow しているか確認する。snapshot が nil (= anonymous は Init で
+	// 弾く設計なので来ない / lookup 未配線) の場合は fail-closed で drop する。
+	// public / home / specified は fanout 段で適切に gate 済 (specified は
+	// shouldFanoutToFollowers が除外) のためここでは何もしない。
+	if !userListVisibilityShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
 		return
 	}
 	_ = c.ctx.Send("note", json.RawMessage(payload))
@@ -71,4 +84,43 @@ func (c *UserListChannel) Dispose() {
 	if c.topic != "" {
 		c.ctx.Unsubscribe(c.topic)
 	}
+}
+
+// userListVisibilityPayload は userList channel の visibility gate が
+// 参照する最小 fields。`visibility` と `userId` (author) があれば判定できる。
+type userListVisibilityPayload struct {
+	UserID     string `json:"userId"`
+	Visibility string `json:"visibility"`
+}
+
+// userListVisibilityShouldEmit returns false when a `followers` visibility note
+// is being delivered to a viewer who does not follow the author (and is not the
+// author themselves). For `public` / `home` / `specified` payloads it returns
+// true unconditionally — fanout already filters those (specified is excluded by
+// shouldFanoutToFollowers, public / home reach every list member by design).
+//
+// Defensive behaviour:
+//   - payload parse 失敗 → conservative に drop (= 既存 reply gate と逆の方針
+//     だが、visibility 不明 note は IDOR fail-closed が安全)。
+//   - snapshot=nil + viewer ≠ author → drop (anonymous は Init で弾くが、
+//     followingSnapshot lookup が未配線 / 取得失敗で nil 返却の場合に備える)。
+func userListVisibilityShouldEmit(payload []byte, viewerID string, snap map[string]bool) bool {
+	var note userListVisibilityPayload
+	if err := json.Unmarshal(payload, &note); err != nil {
+		return false
+	}
+	if note.Visibility != "followers" {
+		return true
+	}
+	if viewerID == "" {
+		return false
+	}
+	if note.UserID == viewerID {
+		return true
+	}
+	if snap == nil {
+		return false
+	}
+	_, follows := snap[note.UserID]
+	return follows
 }

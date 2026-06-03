@@ -122,6 +122,158 @@ func TestService_RecordResponseSuccess_EmptyHost(t *testing.T) {
 	require.NoError(t, svc.RecordResponseSuccess(""))
 }
 
+// #1429: 既に応答中 (isNotResponding==false) の host への成功記録は UPDATE を
+// スキップする (TS DeliverProcessorService の状態遷移ガードに合わせる)。健全 host
+// への連続配送で deliver job ごとに DB 書込が走らないことを固定する。
+func TestService_RecordResponseSuccess_AlreadyHealthy_NoUpdate(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 0, repo.UpdateCalls, "healthy host should not trigger an UPDATE")
+}
+
+// #1429: not responding からの回復 (状態遷移) 時だけ UPDATE が走り、
+// isNotResponding / notRespondingSince がクリアされる。
+func TestService_RecordResponseSuccess_Transition_Updates(t *testing.T) {
+	svc, repo, _ := newService(t)
+	since := time.Now().Add(-time.Hour)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true, NotRespondingSince: &since,
+	}
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 1, repo.UpdateCalls)
+	assert.False(t, repo.Instances["alpha.example"].IsNotResponding)
+	assert.Nil(t, repo.Instances["alpha.example"].NotRespondingSince)
+}
+
+// #1429: MarkRequestReceived は窓内の再呼び出しで SELECT/UPDATE を両方スキップ
+// する (TS InboxProcessorService CollapsedQueue 相当)。窓を越えると再び書き込む。
+func TestService_MarkRequestReceived_CollapsesWithinWindow(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{ID: "i1", Host: "alpha.example"}
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cur := base
+	svc.SetClock(func() time.Time { return cur })
+	svc.SetRequestReceivedWindow(5 * time.Minute)
+
+	// 1 回目: 書き込む。
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls)
+	assert.Equal(t, 1, repo.UpdateCalls)
+
+	// 窓内 (4 分後): SELECT/UPDATE とも省く。
+	cur = base.Add(4 * time.Minute)
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls, "within window should skip FindByHost")
+	assert.Equal(t, 1, repo.UpdateCalls, "within window should skip UpdateFields")
+
+	// 窓越え (6 分後): 再び書き込む。
+	cur = base.Add(6 * time.Minute)
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.Equal(t, 2, repo.FindCalls)
+	assert.Equal(t, 2, repo.UpdateCalls)
+}
+
+// #1429: 未登録 host はキャッシュせず毎回 FindByHost で確認し、UPDATE は走らない
+// (登録後に窓集約が効き始める)。
+func TestService_MarkRequestReceived_UnknownHost_NotCached(t *testing.T) {
+	svc, repo, _ := newService(t)
+	svc.SetRequestReceivedWindow(5 * time.Minute)
+
+	require.NoError(t, svc.MarkRequestReceived("missing.example"))
+	require.NoError(t, svc.MarkRequestReceived("missing.example"))
+	assert.Equal(t, 2, repo.FindCalls, "unknown host is re-checked each call")
+	assert.Equal(t, 0, repo.UpdateCalls)
+}
+
+// #1429: UpdateFields のエラーは呼び出し側へ伝播し、その host は窓キャッシュに
+// 載せない (次回再試行できる)。
+func TestService_MarkRequestReceived_UpdateError_NotCached(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{ID: "i1", Host: "alpha.example"}
+	svc.SetRequestReceivedWindow(5 * time.Minute)
+
+	repo.UpdateErr = errors.New("update failed")
+	require.Error(t, svc.MarkRequestReceived("alpha.example"))
+
+	// 失敗時はキャッシュされないので、窓内であっても次回また書込を試みる。
+	repo.UpdateErr = nil
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.Equal(t, 2, repo.FindCalls, "failed write must not be cached; next call retries")
+	assert.NotNil(t, repo.Instances["alpha.example"].LatestRequestReceivedAt)
+}
+
+// #1429 review: 健全 host への連続成功記録は 1 回目だけ SELECT し、TTL 窓内の
+// 以降は SELECT/UPDATE とも省く (deliver 成功 hot path の per-job SELECT を削る)。
+func TestService_RecordResponseSuccess_HealthyCachedSkipsSelect(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cur := base
+	svc.SetClock(func() time.Time { return cur })
+	svc.SetResponseHealthyTTL(5 * time.Minute)
+
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls)
+	assert.Equal(t, 0, repo.UpdateCalls)
+
+	// 窓内 (4 分後): SELECT も省く。
+	cur = base.Add(4 * time.Minute)
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 1, repo.FindCalls, "within TTL should skip FindByHost")
+	assert.Equal(t, 0, repo.UpdateCalls)
+
+	// 窓越え (6 分後): 再び SELECT する。
+	cur = base.Add(6 * time.Minute)
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.Equal(t, 2, repo.FindCalls, "after TTL re-checks")
+}
+
+// #1429 review: not-responding への遷移は healthy-cache を invalidate し、直後の
+// 成功記録が cache を信用せず回復 UPDATE を実行する (stale healthy で recovery を
+// 取りこぼさない)。この delete が無いと最後の assert が落ちる。
+func TestService_RecordResponseError_InvalidatesHealthyCache(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	svc.SetResponseHealthyTTL(time.Hour)
+
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example")) // healthy をキャッシュ
+	require.NoError(t, svc.RecordResponseError("alpha.example"))   // 遷移 -> invalidate
+	assert.True(t, repo.Instances["alpha.example"].IsNotResponding)
+
+	// 直後の成功は cache を信用せず SELECT して回復 UPDATE する。
+	require.NoError(t, svc.RecordResponseSuccess("alpha.example"))
+	assert.False(t, repo.Instances["alpha.example"].IsNotResponding)
+}
+
+// #1429 review: RecordResponseError は遷移 UPDATE のエラーを呼び出し側へ伝播する。
+func TestService_RecordResponseError_UpdateError(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: false,
+	}
+	repo.UpdateErr = errors.New("update failed")
+	require.Error(t, svc.RecordResponseError("alpha.example"))
+}
+
+// #1429 review: RecordResponseSuccess は回復遷移 UPDATE のエラーを伝播し、
+// healthy-cache に載せない (次回再試行できる)。
+func TestService_RecordResponseSuccess_UpdateError(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true,
+	}
+	repo.UpdateErr = errors.New("update failed")
+	require.Error(t, svc.RecordResponseSuccess("alpha.example"))
+}
+
 func TestService_IsBlocked(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}

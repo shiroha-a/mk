@@ -360,10 +360,25 @@ func TestLike_PrivateAccessDenied(t *testing.T) {
 	assert.ErrorIs(t, err, page.ErrAccessDenied)
 }
 
-func TestLike_OwnPrivateOK(t *testing.T) {
+// #1438: owner は自分の page を like できない (upstream TS の yourPage)。可視性に
+// 依らず YOUR_PAGE で弾く。owner は可視性ゲートを素通りするため、private page でも
+// ErrYourPage が返る (ErrAccessDenied ではない)。
+func TestLike_OwnPrivate_YourPage(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Visibility: model.PageVisibilityFollowers}
-	require.NoError(t, svc.Like("u1", "p1"))
+	err := svc.Like("u1", "p1")
+	assert.ErrorIs(t, err, page.ErrYourPage)
+}
+
+// #1438: public page でも owner 自身の like は YOUR_PAGE で弾き、like 行も
+// likedCount も増やさない。
+func TestLike_OwnPublic_YourPage(t *testing.T) {
+	svc, repo, likeRepo := newSvc(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Visibility: model.PageVisibilityPublic}
+	err := svc.Like("u1", "p1")
+	assert.ErrorIs(t, err, page.ErrYourPage)
+	assert.Empty(t, likeRepo.Likes)
+	assert.Equal(t, 0, repo.Pages["p1"].LikedCount)
 }
 
 func TestLike_AlreadyLiked(t *testing.T) {

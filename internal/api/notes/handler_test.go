@@ -866,7 +866,7 @@ func (f *failingNoteRepo) ListFeaturedByUser(_, _, _ string, _ int) ([]*model.No
 func (f *failingNoteRepo) FindRenoteByUser(_, _ string) (*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
-func (f *failingNoteRepo) ListMentions(_ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingNoteRepo) ListMentions(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, nil
 }
 func (f *failingNoteRepo) SearchByTag(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
@@ -887,7 +887,7 @@ func (f *failingNoteRepo) ListGlobalTimeline(_ int, _, _ string, _ model.Timelin
 }
 func (f *failingNoteRepo) DeleteExpiredRemoteNotes(_, _ int) (int64, error) { return 0, nil }
 func (f *failingNoteRepo) DeleteByUserBatch(_ string, _ int) (int64, error) { return 0, nil }
-func (f *failingNoteRepo) CountReplyTargets(_ string, _ int) ([]model.ReplyTargetCount, error) {
+func (f *failingNoteRepo) CountReplyTargets(_, _ string, _ int) ([]model.ReplyTargetCount, error) {
 	return nil, nil
 }
 func (f *failingNoteRepo) ListByUserList(_ string, _ int, _, _ string) ([]*model.Note, error) {

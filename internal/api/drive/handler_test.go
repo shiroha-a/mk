@@ -893,7 +893,9 @@ func TestFilesCheckExistence_NilRepo(t *testing.T) {
 }
 
 func TestFilesAttachedNotes_Success(t *testing.T) {
-	h, _, _ := newHandlerWithRepos(t)
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	uid := "u1"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid}
 	c, rec := newJSONReq(t, `{"fileId":"f1"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesAttachedNotes(c))
@@ -908,12 +910,67 @@ func TestFilesAttachedNotes_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// fileRepo 未配線時は fail-closed (= NO_SUCH_FILE 400)。旧実装は ListByFileID
+// を直に叩いて 200 を返していたが、IDOR (#1470) 防止のため file ownership 検証
+// 経路を必ず通すこと自体を要求に格上げした。
 func TestFilesAttachedNotes_NilRepo(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newJSONReq(t, `{"fileId":"f1"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesAttachedNotes(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	// upstream Misskey TS attached-notes.ts と同じ UUID。汎用 NoSuchFile
+	// (UUIDNoSuchFile) と区別するために値比較しておく。
+	assert.Contains(t, rec.Body.String(), "c118ece3-2e4b-4296-99d1-51756e32d232")
+}
+
+// 他人 owner の fileID を投げると NO_SUCH_FILE で隠蔽する (#1470)。旧実装は
+// file ownership 検証なしに ListByFileID を叩いていたため、認証 viewer が
+// 他人 owner の fileID を投げて該当 file を attach した followers / specified
+// note の本文を列挙できる IDOR が成立していた。
+func TestFilesAttachedNotes_OtherOwnerDenied(t *testing.T) {
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	other := "u2"
+	fileRepo.Files["f-other"] = &model.DriveFile{ID: "f-other", UserID: &other}
+	c, rec := newJSONReq(t, `{"fileId":"f-other"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesAttachedNotes(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	// upstream Misskey TS attached-notes.ts と同じ UUID。汎用 NoSuchFile
+	// (UUIDNoSuchFile) と区別するために値比較しておく。
+	assert.Contains(t, rec.Body.String(), "c118ece3-2e4b-4296-99d1-51756e32d232")
+}
+
+// system file (userId IS NULL — emoji copy / import zip 用、#670) も viewer の
+// 所有では無いので NO_SUCH_FILE。owner check に NULL handling を残さないと
+// `*f.UserID` で nil pointer panic を起こすので noregress test も兼ねる。
+func TestFilesAttachedNotes_SystemFileDenied(t *testing.T) {
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	fileRepo.Files["f-sys"] = &model.DriveFile{ID: "f-sys", UserID: nil}
+	c, rec := newJSONReq(t, `{"fileId":"f-sys"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesAttachedNotes(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	// upstream Misskey TS attached-notes.ts と同じ UUID。汎用 NoSuchFile
+	// (UUIDNoSuchFile) と区別するために値比較しておく。
+	assert.Contains(t, rec.Body.String(), "c118ece3-2e4b-4296-99d1-51756e32d232")
+}
+
+// 不存在 fileID も NO_SUCH_FILE で同じ shape に集約 (file 存在判定 oracle を
+// 塞ぐ; 他人 owner 判定との timing oracle にもならないように同経路に揃える)。
+func TestFilesAttachedNotes_NotFound(t *testing.T) {
+	h, _, _ := newHandlerWithRepos(t)
+	c, rec := newJSONReq(t, `{"fileId":"nonexistent"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesAttachedNotes(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	// upstream Misskey TS attached-notes.ts と同じ UUID。汎用 NoSuchFile
+	// (UUIDNoSuchFile) と区別するために値比較しておく。
+	assert.Contains(t, rec.Body.String(), "c118ece3-2e4b-4296-99d1-51756e32d232")
 }
 
 // frontend Paginator から渡される sinceId / untilId / limit が
@@ -939,6 +996,11 @@ func TestFilesAttachedNotes_ForwardsCursorParams(t *testing.T) {
 	h, fileRepo, folderRepo := newHandler(t)
 	spy := &spyNoteRepo{MockNoteRepository: testutil.NewMockNoteRepository()}
 	h.SetRepos(fileRepo, folderRepo, spy)
+	// #1470 IDOR fix: handler が ListByFileID を呼ぶ前に viewer 所有 file の
+	// 存在を要求するようになったので、cursor forward test も該当 file を
+	// 用意してから経路を通す。
+	uid := "u1"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid}
 
 	c, rec := newJSONReq(t, `{"fileId":"f1","untilId":"u_xxx","limit":7}`)
 	setUser(c, "u1")

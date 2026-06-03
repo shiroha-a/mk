@@ -27,6 +27,10 @@ var (
 	// ErrAlreadyLiked is returned when a user attempts to Like a page they
 	// have already liked.
 	ErrAlreadyLiked = errors.New("page is already liked")
+	// ErrYourPage is returned when a user attempts to Like their own page.
+	// upstream Misskey TS pages/like の yourPage (28800466-...) に対応する
+	// (#1438)。自分の page への like を禁止する。
+	ErrYourPage = errors.New("cannot like your own page")
 	// ErrNotLiked is returned when a user attempts to Unlike a page they
 	// have not liked.
 	ErrNotLiked = errors.New("page is not liked")
@@ -283,6 +287,13 @@ func (s *Service) Like(userID, pageID string) error {
 	}
 	if p.Visibility != model.PageVisibilityPublic && p.UserID != userID {
 		return ErrAccessDenied
+	}
+	// 自分の page は like できない (upstream TS pages/like の yourPage, #1438)。
+	// TS の順序 (noSuchPage -> 可視性 -> yourPage -> alreadyLiked) に合わせて
+	// 可視性ゲートの後・already-liked チェックの前に置く。owner は可視性ゲートを
+	// 常に素通りするため、ここでの判定が owner への唯一の gate になる。
+	if p.UserID == userID {
+		return ErrYourPage
 	}
 	if exists, err := s.likeRepo.Exists(userID, pageID); err != nil {
 		return err

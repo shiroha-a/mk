@@ -122,8 +122,13 @@ type MainStreamPublisher interface {
 // (map with userId / user / note / reaction / etc.). Injected as an
 // interface so core/notification stays independent of entity / repository
 // layers. 実装は internal/stream で提供される。
+//
+// notifieeID は packed body を受け取る viewer の ID (= 通知を受け取る
+// ローカルユーザー)。実装側で note embed の visibility check (#1471) に
+// 使う: followers / specified note は notifiee が CanSeeNote を満たさない
+// ときに note field を落として本文 leak を防ぐ。
 type Packer interface {
-	Pack(n *Notification) any
+	Pack(notifieeID string, n *Notification) any
 }
 
 // unreadPublishDelay は Notification 永続化から `unreadNotification` を main
@@ -247,9 +252,12 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, er
 	}
 	// Packer配線済みなら user/note を fetch する Pack() は1回だけ実行し、
 	// publisher / main の両方で packed body を共有する(Devin #314 #1)。
+	// notifieeID を渡して Pack 側で note embed の visibility check (#1471)
+	// を効かせる; followers / specified note を非閲覧 notifiee の stream に
+	// 流さない (REST i/notifications #1444 と対称な doctrine)。
 	var packed any = n
 	if s.packer != nil {
-		packed = s.packer.Pack(n)
+		packed = s.packer.Pack(in.NotifieeID, n)
 	}
 	if s.publisher != nil {
 		// Publisher が packed bodyを受け取れる場合は渡して double-pack
