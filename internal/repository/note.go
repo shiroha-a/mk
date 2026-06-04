@@ -715,8 +715,14 @@ func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinc
 	// visibleUserIds にしか入らないため (= 宛先指定だけの DM)、mentions 単独 match
 	// だと受信者の notes/mentions / Direct タブで取りこぼす (#1484)。OR は単一 note
 	// 行の boolean なので重複行は出ない。
+	//
+	// 両枝とも containment 演算子 `@>` で書く: `scalar = ANY(array)` は GIN を使えず、
+	// `array @> ARRAY[scalar]` だけが GIN index 対象になる。viewer は単一要素なので
+	// 論理的に等価で、将来 visibleUserIds に GIN index を足せば mentions 枝
+	// (IDX_note_mentions, #1427) と揃って planner が BitmapOr で両枝 index 利用できる
+	// (#1484 review)。
 	q := preloadNoteRelations(r.db).
-		Where(`(mentions @> ARRAY[?]::varchar[] OR ? = ANY("visibleUserIds"))`, userID, userID)
+		Where(`(mentions @> ARRAY[?]::varchar[] OR "visibleUserIds" @> ARRAY[?]::varchar[])`, userID, userID)
 	// visibility push-down: mention 対象 (= viewer = userID) が CanSeeNote で
 	// 見られる note のみ返す。mentions 配列は本文の @user パース結果で specified
 	// の visibleUserIds とは独立なので、これが無いと followers/specified note を
