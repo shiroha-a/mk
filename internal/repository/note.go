@@ -451,9 +451,10 @@ func (r *noteRepository) ListRepliesOf(noteID, viewerID, untilID, sinceID string
 // notes/childrenでスレッドツリーの直下を取得するために使用する。
 func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
-	// base 条件の OR は明示的に括弧で囲む。visibility 述語が後続の AND で結合される
-	// とき、括弧が無いと `replyId=? OR (renoteId=? AND visibility...)` と解釈されて
-	// reply 側が visibility 無視で漏れるため (#1500)。
+	// base 条件の OR は明示的に括弧で囲む。GORM は複数 Where の生 OR 文字列を暗黙に
+	// グルーピングするが、その挙動に依存せず「後続 AND の visibility 述語が
+	// replyId/renoteId の OR 全体に係る」意図を明示するための defensive clarity
+	// (#1500)。実際のリーク防止は ListChildrenOf_VisibilityPushDown の回帰テストで担保。
 	q := preloadNoteRelations(r.db).
 		Where("(\"replyId\" = ? OR \"renoteId\" = ?)", noteID, noteID)
 	// visibility push-down (#1500): viewer が見られる child のみ LIMIT 前に絞る。
