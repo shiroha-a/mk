@@ -884,22 +884,32 @@ func (m *MockNoteRepository) IncrementReaction(noteID, reaction string, delta in
 }
 
 // ListRenotesOf returns notes whose renoteId equals noteID.
-func (m *MockNoteRepository) ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListRenotesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		// viewer 視点の可視性を LIMIT 前に絞る (#1500、real repo の SQL push-down 相当)。
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		return n.RenoteID != nil && *n.RenoteID == noteID
 	}, untilID, sinceID, limit), nil
 }
 
 // ListRepliesOf returns notes whose replyId equals noteID.
-func (m *MockNoteRepository) ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListRepliesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		return n.ReplyID != nil && *n.ReplyID == noteID
 	}, untilID, sinceID, limit), nil
 }
 
 // ListChildrenOf returns notes that reply to or quote the given noteID.
-func (m *MockNoteRepository) ListChildrenOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		if n.ReplyID != nil && *n.ReplyID == noteID {
 			return true
 		}

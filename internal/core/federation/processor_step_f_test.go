@@ -1292,7 +1292,7 @@ type listRenotesFailRepo struct {
 	*testutil.MockNoteRepository
 }
 
-func (r *listRenotesFailRepo) ListRenotesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (r *listRenotesFailRepo) ListRenotesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, errors.New("list failed")
 }
 

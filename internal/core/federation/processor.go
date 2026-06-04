@@ -701,7 +701,10 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 	}
 	// announcer が pure renote を 1 件でも持っていれば削除する。複数あった場合
 	// は最新の 1 件のみで十分 (本家 misskey の挙動と同じ)。
-	renotes, err := p.noteRepo.ListRenotesOf(target.ID, "", "", 50)
+	// viewerID には announcer.ID を渡す: push-down 後 (#1500) も self-branch で
+	// announcer 自身の renote は visibility を問わず全件見えるため、下の
+	// `n.UserID != announcer.ID` で残す対象行は従来どおり取得できる。
+	renotes, err := p.noteRepo.ListRenotesOf(target.ID, announcer.ID, "", "", 50)
 	if err != nil {
 		return err
 	}

@@ -323,13 +323,13 @@ type failingQueryRepo struct {
 	*testutil.MockNoteRepository
 }
 
-func (f *failingQueryRepo) ListRenotesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListRenotesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
-func (f *failingQueryRepo) ListRepliesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListRepliesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
-func (f *failingQueryRepo) ListChildrenOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListChildrenOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 func (f *failingQueryRepo) SearchByFilter(_ model.NoteSearchFilter) ([]*model.Note, error) {
