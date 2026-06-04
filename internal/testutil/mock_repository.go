@@ -1175,8 +1175,16 @@ func (m *MockNoteRepository) ListMentions(userID, visibility string, limit int, 
 		if visibility != "" && string(n.Visibility) != visibility {
 			return false
 		}
+		// TS notes/mentions parity: mentions または visibleUserIds の
+		// どちらかに viewer が含まれれば対象 (#1484)。本文 @mention の無い
+		// specified DM も visibleUserIds 経由で拾う。
 		for _, mention := range n.Mentions {
 			if mention == userID {
+				return true
+			}
+		}
+		for _, vu := range n.VisibleUserIDs {
+			if vu == userID {
 				return true
 			}
 		}

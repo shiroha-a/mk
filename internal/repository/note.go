@@ -709,8 +709,14 @@ func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinc
 	if limit <= 0 {
 		limit = 10
 	}
+	// match 条件: TS notes/mentions と同じく mentions または visibleUserIds の
+	// どちらかに viewer が含まれれば対象とする (TS: `:meId <@ note.mentions OR
+	// :meId <@ note.visibleUserIds`)。本文に @mention の無い specified DM は
+	// visibleUserIds にしか入らないため (= 宛先指定だけの DM)、mentions 単独 match
+	// だと受信者の notes/mentions / Direct タブで取りこぼす (#1484)。OR は単一 note
+	// 行の boolean なので重複行は出ない。
 	q := preloadNoteRelations(r.db).
-		Where("mentions @> ARRAY[?]::varchar[]", userID)
+		Where(`(mentions @> ARRAY[?]::varchar[] OR ? = ANY("visibleUserIds"))`, userID, userID)
 	// visibility push-down: mention 対象 (= viewer = userID) が CanSeeNote で
 	// 見られる note のみ返す。mentions 配列は本文の @user パース結果で specified
 	// の visibleUserIds とは独立なので、これが無いと followers/specified note を

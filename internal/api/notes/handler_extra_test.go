@@ -337,6 +337,22 @@ func TestMentions_VisibilityExactMatch(t *testing.T) {
 	assert.False(t, ids["m_dm"], "public 指定で specified は出ない (exact-match)")
 }
 
+// #1484: 本文 @mention の無い specified DM (viewer ∈ visibleUserIds のみ) も
+// Direct タブ (visibility=specified) に出る。UI で宛先を選んだだけの DM を
+// 受信者が取りこぼさないことを固定する。
+func TestMentions_SpecifiedVisibleUserIDsOnly(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	// mentions は空、visibleUserIds にだけ recipient を含む specified DM。
+	noteRepo.Notes["m_dm_vu"] = &model.Note{ID: "m_dm_vu", UserID: "author", Visibility: "specified", VisibleUserIDs: []string{"recipient"}, User: &model.User{ID: "author"}}
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "recipient"}))
+	assert.True(t, ids["m_dm_vu"], "本文 @mention の無い specified DM も visibleUserIds 経由で Direct タブに出る")
+
+	// 宛先でない viewer には出ない (#1441 gate との整合)。
+	ids = mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "stranger"}))
+	assert.False(t, ids["m_dm_vu"], "宛先でない viewer には specified DM が出ない")
+}
+
 // --- UserListTimeline ---
 
 func TestUserListTimeline_Success(t *testing.T) {

@@ -1715,6 +1715,64 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	assert.Len(t, all, 10, "default は全種別を返す")
 }
 
+// TestNoteRepository_ListMentions_VisibleUserIDsOnly は #1484 を検証する。
+// 本文 @mention の無い specified DM (viewer ∈ visibleUserIds のみ) が
+// notes/mentions に出ること、mentions と visibleUserIds の両方に入っても重複行が
+// 出ないこと、宛先でも mention 対象でもない viewer には依然出ないこと (#1441 gate
+// 整合) を固定する。
+func TestNoteRepository_ListMentions_VisibleUserIDsOnly(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_vu_a", "vuauthor")
+	recipient := mkUser("u_vu_r", "vurecipient")
+	stranger := mkUser("u_vu_s", "vustranger")
+
+	notes := []*model.Note{
+		// 本文 @mention 無し / visibleUserIds に recipient のみ (= 宛先指定だけの DM)。
+		{ID: "n_vu_dm", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		// mentions と visibleUserIds の両方に recipient (重複行が出ないことの確認用)。
+		{ID: "n_vu_both", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, Mentions: pq.StringArray{recipient.ID}, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	countOf := func(rows []*model.Note, id string) int {
+		c := 0
+		for _, n := range rows {
+			if n.ID == id {
+				c++
+			}
+		}
+		return c
+	}
+
+	// recipient (default = 全種別): visibleUserIds 由来 / mentions+visibleUserIds
+	// 両方とも 1 行ずつ。OR は単一行 boolean なので重複しない。
+	out, err := repo.ListMentions(recipient.ID, "", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "@mention の無い specified DM が visibleUserIds 経由で出る")
+	assert.Equal(t, 1, countOf(out, "n_vu_both"), "mentions と visibleUserIds 両方に入っても重複行は出ない")
+
+	// recipient (Direct タブ = visibility=specified): 同じく両方出る。
+	out, err = repo.ListMentions(recipient.ID, "specified", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "Direct タブでも visibleUserIds-only DM が出る")
+	assert.Equal(t, 1, countOf(out, "n_vu_both"))
+
+	// stranger: 宛先でも mention 対象でもないので何も出ない (#1441 gate 整合)。
+	out, err = repo.ListMentions(stranger.ID, "", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, countOf(out, "n_vu_dm"))
+	assert.Equal(t, 0, countOf(out, "n_vu_both"))
+}
+
 func TestNoteRepository_SearchByTag(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	user := insertTestUser(t, "tag_u", "taguser")
