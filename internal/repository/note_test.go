@@ -753,13 +753,13 @@ func TestNoteRepository_QueryErrors(t *testing.T) {
 	_, err = repo.FindManyByIDsWithUser([]string{"a"})
 	assert.Error(t, err)
 
-	_, err = repo.ListRenotesOf("a", "", "", 10)
+	_, err = repo.ListRenotesOf("a", "", "", "", 10)
 	assert.Error(t, err)
 
-	_, err = repo.ListRepliesOf("a", "", "", 10)
+	_, err = repo.ListRepliesOf("a", "", "", "", 10)
 	assert.Error(t, err)
 
-	_, err = repo.ListChildrenOf("a", "", "", 10)
+	_, err = repo.ListChildrenOf("a", "", "", "", 10)
 	assert.Error(t, err)
 
 	_, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "a", Limit: 10})
@@ -849,16 +849,16 @@ func TestNoteRepository_ListRenotesOf(t *testing.T) {
 		defer cleanupNote(t, id)
 	}
 
-	out, err := repo.ListRenotesOf(parent.ID, "", "", 10)
+	out, err := repo.ListRenotesOf(parent.ID, "", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 3)
 	assert.Equal(t, "n_lr_r3", out[0].ID)
 
-	out, err = repo.ListRenotesOf(parent.ID, "n_lr_r3", "", 10)
+	out, err = repo.ListRenotesOf(parent.ID, "", "n_lr_r3", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 
-	out, err = repo.ListRenotesOf(parent.ID, "", "n_lr_r1", 10)
+	out, err = repo.ListRenotesOf(parent.ID, "", "", "n_lr_r1", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 }
@@ -886,15 +886,15 @@ func TestNoteRepository_ListRepliesOf(t *testing.T) {
 		defer cleanupNote(t, id)
 	}
 
-	out, err := repo.ListRepliesOf(parent.ID, "", "", 10)
+	out, err := repo.ListRepliesOf(parent.ID, "", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 
-	out, err = repo.ListRepliesOf(parent.ID, "n_lp_r2", "", 10)
+	out, err = repo.ListRepliesOf(parent.ID, "", "n_lp_r2", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 
-	out, err = repo.ListRepliesOf(parent.ID, "", "n_lp_r1", 10)
+	out, err = repo.ListRepliesOf(parent.ID, "", "", "n_lp_r1", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
@@ -929,19 +929,201 @@ func TestNoteRepository_ListChildrenOf(t *testing.T) {
 	require.NoError(t, repo.Create(quote))
 	defer cleanupNote(t, quote.ID)
 
-	out, err := repo.ListChildrenOf(parent.ID, "", "", 10)
+	out, err := repo.ListChildrenOf(parent.ID, "", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 
-	out, err = repo.ListChildrenOf(parent.ID, "n_lc_c2", "", 10)
+	out, err = repo.ListChildrenOf(parent.ID, "", "n_lc_c2", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 	assert.Equal(t, "n_lc_c1", out[0].ID)
 
-	out, err = repo.ListChildrenOf(parent.ID, "", "n_lc_c1", 10)
+	out, err = repo.ListChildrenOf(parent.ID, "", "", "n_lc_c1", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 	assert.Equal(t, "n_lc_c2", out[0].ID)
+}
+
+// --- #1500 visibility push-down (renotes / replies / children) ---
+//
+// スレッド系 3 メソッドが viewer の可視性を LIMIT 前に SQL push-down し、
+// (1) anonymous / 非フォロワー / フォロワー / specified-target / author で正しく
+// 絞り込むこと、(2) 非表示 note が LIMIT 枠を食わず under-fill しないこと、
+// (3) specified note が宛先 viewer には見えること (timeline 型の specified 除外を
+// 流用していないこと) を実 SQL で固定する。
+
+// threadVizFixture は author A による mixed-visibility の子 note 群と、
+// follower F / 非フォロワー viewer V を用意するヘルパ。childKind は "reply" /
+// "renote" を選び、ListRepliesOf / ListRenotesOf に流用する。
+func threadVizFixture(t *testing.T, repo NoteRepository, prefix, childKind string) (author, follower, viewer *model.User, parentID string, ids map[string]string) {
+	t.Helper()
+	followingRepo := NewFollowingRepository(testDB)
+	mkUser := func(suffix, username string) *model.User {
+		u := insertTestUser(t, prefix+"_"+suffix, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author = mkUser("a", prefix+"author")
+	follower = mkUser("f", prefix+"follower")
+	viewer = mkUser("v", prefix+"viewer")
+
+	f := &model.Following{ID: prefix + "_fl", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID) })
+
+	parent := &model.Note{ID: prefix + "_parent", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	require.NoError(t, repo.Create(parent))
+	t.Cleanup(func() { cleanupNote(t, parent.ID) })
+	parentID = parent.ID
+
+	// ID は昇順 (1..5) で、非表示になりがちな specified/followers を「新しい側」に
+	// 寄せることで、旧 fetch-then-filter 実装なら limit 枠を食って under-fill した
+	// ケースを再現する。
+	ids = map[string]string{
+		"pub":    prefix + "_c1_pub",
+		"home":   prefix + "_c2_home",
+		"fol":    prefix + "_c3_fol",
+		"spec_v": prefix + "_c4_specv",
+		"spec_x": prefix + "_c5_specx",
+	}
+	mk := func(id string, vis model.NoteVisibility, visible []string) {
+		n := &model.Note{ID: id, UserID: author.ID, Visibility: vis, Reactions: datatypes.JSON([]byte("{}"))}
+		if len(visible) > 0 {
+			n.VisibleUserIDs = pq.StringArray(visible)
+		}
+		switch childKind {
+		case "renote":
+			n.RenoteID = &parentID
+			// quote 扱いにして pure renote 除外ロジックと干渉しないよう text を持たせる
+			txt := "q"
+			n.Text = &txt
+		default:
+			n.ReplyID = &parentID
+		}
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+	mk(ids["pub"], model.NoteVisibilityPublic, nil)
+	mk(ids["home"], model.NoteVisibilityHome, nil)
+	mk(ids["fol"], model.NoteVisibilityFollowers, nil)
+	mk(ids["spec_v"], model.NoteVisibilitySpecified, []string{viewer.ID})
+	mk(ids["spec_x"], model.NoteVisibilitySpecified, []string{"someone-else"})
+	return author, follower, viewer, parentID, ids
+}
+
+func idSet(rows []*model.Note) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range rows {
+		out[n.ID] = true
+	}
+	return out
+}
+
+func TestNoteRepository_ListRepliesOf_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author, follower, viewer, parentID, ids := threadVizFixture(t, repo, "rvp", "reply")
+
+	// anonymous: public/home のみ。
+	got, err := repo.ListRepliesOf(parentID, "", "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true}, idSet(got))
+
+	// 非フォロワー viewer: public/home + 自分が宛先の specified。followers は見えない。
+	got, err = repo.ListRepliesOf(parentID, viewer.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true, ids["spec_v"]: true}, idSet(got))
+
+	// follower: public/home + followers。宛先でない specified は見えない。
+	got, err = repo.ListRepliesOf(parentID, follower.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true, ids["fol"]: true}, idSet(got))
+
+	// author: 自分の note は全 visibility 見える。
+	got, err = repo.ListRepliesOf(parentID, author.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, got, 5)
+
+	// under-fill しない: 非表示 (fol/spec_v/spec_x) が新しい側に 3 件あるが、
+	// anonymous で limit=2 を要求すると visible 2 件 (pub/home) がきっちり返る。
+	// 旧 fetch-then-filter なら新しい 2 行 (spec_x/spec_v) を取って filter で 0 件に
+	// なっていた。
+	got, err = repo.ListRepliesOf(parentID, "", "", "", 2)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true}, idSet(got))
+}
+
+func TestNoteRepository_ListRenotesOf_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author, follower, viewer, parentID, ids := threadVizFixture(t, repo, "rnvp", "renote")
+
+	got, err := repo.ListRenotesOf(parentID, "", "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true}, idSet(got))
+
+	got, err = repo.ListRenotesOf(parentID, viewer.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true, ids["spec_v"]: true}, idSet(got))
+
+	got, err = repo.ListRenotesOf(parentID, follower.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{ids["pub"]: true, ids["home"]: true, ids["fol"]: true}, idSet(got))
+
+	got, err = repo.ListRenotesOf(parentID, author.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, got, 5)
+}
+
+func TestNoteRepository_ListChildrenOf_VisibilityPushDown(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	followingRepo := NewFollowingRepository(testDB)
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("cvp_a", "cvpauthor")
+	viewer := mkUser("cvp_v", "cvpviewer")
+	follower := mkUser("cvp_f", "cvpfollower")
+	f := &model.Following{ID: "cvp_fl", FollowerID: follower.ID, FolloweeID: author.ID}
+	require.NoError(t, followingRepo.Create(f))
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID) })
+
+	parent := &model.Note{ID: "cvp_parent", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	require.NoError(t, repo.Create(parent))
+	t.Cleanup(func() { cleanupNote(t, parent.ID) })
+	pid := parent.ID
+
+	// children = reply + quote-renote の混在。followers を「reply 側」に置くことで、
+	// もし base の OR が括弧で囲われず `replyId=? OR (renoteId=? AND visibility)` と
+	// 解釈されていたら followers reply が漏れる。そのリーク回帰を固定する。
+	txt := "q"
+	rows := []*model.Note{
+		{ID: "cvp_c1_pubreply", UserID: author.ID, Visibility: model.NoteVisibilityPublic, ReplyID: &pid, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "cvp_c2_folreply", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, ReplyID: &pid, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "cvp_c3_pubquote", UserID: author.ID, Visibility: model.NoteVisibilityPublic, RenoteID: &pid, Text: &txt, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "cvp_c4_folquote", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, RenoteID: &pid, Text: &txt, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range rows {
+		require.NoError(t, repo.Create(n))
+		id := n.ID
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+
+	// 非フォロワー viewer: followers の reply / quote は両方とも見えない (= 括弧で
+	// OR 全体に visibility が AND されている証拠)。public の reply / quote のみ。
+	got, err := repo.ListChildrenOf(pid, viewer.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"cvp_c1_pubreply": true, "cvp_c3_pubquote": true}, idSet(got))
+
+	// follower: followers の reply / quote も見える。
+	got, err = repo.ListChildrenOf(pid, follower.ID, "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, got, 4)
+
+	// anonymous: public のみ。
+	got, err = repo.ListChildrenOf(pid, "", "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"cvp_c1_pubreply": true, "cvp_c3_pubquote": true}, idSet(got))
 }
 
 func TestNoteRepository_SearchByFilter(t *testing.T) {
@@ -1201,7 +1383,7 @@ func TestNoteRepository_ListFeaturedByUser(t *testing.T) {
 // engagement=10 の note (id prefix `feat_cap_pool_`) であることを断定する。
 //
 // 6 件以下の小規模 fixture では pool = 全件となり、選抜順序が engagement 順
-// でも id 順でも結果が変わらないため、`featuredNotesPerUserPoolSize` を 51 に
+// でも id 順でも結果が変わらないため、`FeaturedNotesPerUserPoolSize` を 51 に
 // すれば落ちる test がここまで存在しなかった。本 test は cap を取り除くと
 // 必ず落ちる強い regression gate になる。
 func TestNoteRepository_ListFeaturedByUser_EngagementPoolCap(t *testing.T) {
@@ -1713,6 +1895,64 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	all, err := repo.ListMentions(me.ID, "", 100, "", "")
 	require.NoError(t, err)
 	assert.Len(t, all, 10, "default は全種別を返す")
+}
+
+// TestNoteRepository_ListMentions_VisibleUserIDsOnly は #1484 を検証する。
+// 本文 @mention の無い specified DM (viewer ∈ visibleUserIds のみ) が
+// notes/mentions に出ること、mentions と visibleUserIds の両方に入っても重複行が
+// 出ないこと、宛先でも mention 対象でもない viewer には依然出ないこと (#1441 gate
+// 整合) を固定する。
+func TestNoteRepository_ListMentions_VisibleUserIDsOnly(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+
+	mkUser := func(id, username string) *model.User {
+		u := insertTestUser(t, id, username)
+		t.Cleanup(func() { cleanupUser(t, u.ID) })
+		return u
+	}
+	author := mkUser("u_vu_a", "vuauthor")
+	recipient := mkUser("u_vu_r", "vurecipient")
+	stranger := mkUser("u_vu_s", "vustranger")
+
+	notes := []*model.Note{
+		// 本文 @mention 無し / visibleUserIds に recipient のみ (= 宛先指定だけの DM)。
+		{ID: "n_vu_dm", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		// mentions と visibleUserIds の両方に recipient (重複行が出ないことの確認用)。
+		{ID: "n_vu_both", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, Mentions: pq.StringArray{recipient.ID}, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	countOf := func(rows []*model.Note, id string) int {
+		c := 0
+		for _, n := range rows {
+			if n.ID == id {
+				c++
+			}
+		}
+		return c
+	}
+
+	// recipient (default = 全種別): visibleUserIds 由来 / mentions+visibleUserIds
+	// 両方とも 1 行ずつ。OR は単一行 boolean なので重複しない。
+	out, err := repo.ListMentions(recipient.ID, "", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "@mention の無い specified DM が visibleUserIds 経由で出る")
+	assert.Equal(t, 1, countOf(out, "n_vu_both"), "mentions と visibleUserIds 両方に入っても重複行は出ない")
+
+	// recipient (Direct タブ = visibility=specified): 同じく両方出る。
+	out, err = repo.ListMentions(recipient.ID, "specified", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "Direct タブでも visibleUserIds-only DM が出る")
+	assert.Equal(t, 1, countOf(out, "n_vu_both"))
+
+	// stranger: 宛先でも mention 対象でもないので何も出ない (#1441 gate 整合)。
+	out, err = repo.ListMentions(stranger.ID, "", 50, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, countOf(out, "n_vu_dm"))
+	assert.Equal(t, 0, countOf(out, "n_vu_both"))
 }
 
 func TestNoteRepository_SearchByTag(t *testing.T) {

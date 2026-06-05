@@ -151,6 +151,158 @@ func TestChildren_LimitClamping(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1500 audit follow-up: notes/renotes・replies・children の visibility は repo
+// (mock) の push-down delegation に委ねており、handler 自体は viewerID を渡す
+// だけ。followers child が「非フォロワーには見えず、follower には見える」ことを
+// handler 経由で fix することで、handler が viewerIDOf(viewer) を落とした
+// 場合に検出できる (#1491 audit 指摘 4)。
+//
+// ヘルパー: followers visibility の child note を seed (User も付ける)。
+func seedFollowersChild(repo *testutil.MockNoteRepository, id, parentID string, isReply bool) *model.Note {
+	pid := parentID
+	n := &model.Note{
+		ID:         id,
+		UserID:     "fol_author",
+		Visibility: model.NoteVisibilityFollowers,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	if isReply {
+		n.ReplyID = &pid
+	} else {
+		n.RenoteID = &pid
+	}
+	n.User = &model.User{
+		ID:                "fol_author",
+		Username:          "folauthor",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	repo.Notes[id] = n
+	return n
+}
+
+func TestRenotes_FollowersChildHiddenFromNonFollower(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "parent")
+	pub := seedPublicNote(repo, "pub_r")
+	pid := "parent"
+	pub.RenoteID = &pid
+	seedFollowersChild(repo, "fol_r", "parent", false)
+
+	// 非フォロワー viewer は public renote のみ。
+	c, rec := newJSONRequest(t, "/api/notes/renotes", `{"noteId":"parent"}`)
+	setAuthUser(c, &model.User{ID: "viewer"})
+	require.NoError(t, h.Renotes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "pub_r", resp[0]["id"], "非フォロワーには followers renote が見えない")
+}
+
+func TestRenotes_FollowersChildVisibleToFollower(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "parent")
+	pub := seedPublicNote(repo, "pub_r")
+	pid := "parent"
+	pub.RenoteID = &pid
+	seedFollowersChild(repo, "fol_r", "parent", false)
+	repo.Following = map[string][]string{"viewer": {"fol_author"}}
+
+	c, rec := newJSONRequest(t, "/api/notes/renotes", `{"noteId":"parent"}`)
+	setAuthUser(c, &model.User{ID: "viewer"})
+	require.NoError(t, h.Renotes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2, "follow すると followers renote も見える")
+}
+
+func TestReplies_FollowersChildHiddenFromAnonymous(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "p")
+	pub := seedPublicNote(repo, "pub_re")
+	pid := "p"
+	pub.ReplyID = &pid
+	seedFollowersChild(repo, "fol_re", "p", true)
+
+	// auth user 未 set = anonymous → handler は viewerID=""
+	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"p"}`)
+	require.NoError(t, h.Replies(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "pub_re", resp[0]["id"], "anonymous には followers reply が見えない")
+}
+
+func TestReplies_FollowersChildVisibleToFollower(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "p")
+	pub := seedPublicNote(repo, "pub_re")
+	pid := "p"
+	pub.ReplyID = &pid
+	seedFollowersChild(repo, "fol_re", "p", true)
+	repo.Following = map[string][]string{"viewer": {"fol_author"}}
+
+	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"p"}`)
+	setAuthUser(c, &model.User{ID: "viewer"})
+	require.NoError(t, h.Replies(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2)
+}
+
+func TestChildren_FollowersChildHiddenFromNonFollower(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "p")
+	// 1 件は public reply、1 件は public quote renote、1 件は followers reply、1 件は followers quote renote。
+	pub_re := seedPublicNote(repo, "pub_re")
+	pid := "p"
+	pub_re.ReplyID = &pid
+	pub_q := seedPublicNote(repo, "pub_q")
+	pub_q.RenoteID = &pid
+	seedFollowersChild(repo, "fol_re", "p", true)
+	seedFollowersChild(repo, "fol_q", "p", false)
+
+	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
+	setAuthUser(c, &model.User{ID: "viewer"})
+	require.NoError(t, h.Children(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 2, "非フォロワーは public 2 件のみ")
+	idsSet := map[string]bool{}
+	for _, r := range resp {
+		idsSet[r["id"].(string)] = true
+	}
+	assert.True(t, idsSet["pub_re"])
+	assert.True(t, idsSet["pub_q"])
+	assert.False(t, idsSet["fol_re"], "followers reply は非フォロワーに漏れない")
+	assert.False(t, idsSet["fol_q"], "followers quote renote も非フォロワーに漏れない")
+}
+
+func TestChildren_FollowersChildVisibleToFollower(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "p")
+	pub_re := seedPublicNote(repo, "pub_re")
+	pid := "p"
+	pub_re.ReplyID = &pid
+	pub_q := seedPublicNote(repo, "pub_q")
+	pub_q.RenoteID = &pid
+	seedFollowersChild(repo, "fol_re", "p", true)
+	seedFollowersChild(repo, "fol_q", "p", false)
+	repo.Following = map[string][]string{"viewer": {"fol_author"}}
+
+	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
+	setAuthUser(c, &model.User{ID: "viewer"})
+	require.NoError(t, h.Children(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 4, "follow すると followers reply + followers quote renote も見える")
+}
+
 func TestSearch_OK(t *testing.T) {
 	h, repo := newQueryHandler(t)
 	hello := "Hello world"
@@ -323,13 +475,13 @@ type failingQueryRepo struct {
 	*testutil.MockNoteRepository
 }
 
-func (f *failingQueryRepo) ListRenotesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListRenotesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
-func (f *failingQueryRepo) ListRepliesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListRepliesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
-func (f *failingQueryRepo) ListChildrenOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingQueryRepo) ListChildrenOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 func (f *failingQueryRepo) SearchByFilter(_ model.NoteSearchFilter) ([]*model.Note, error) {

@@ -110,11 +110,10 @@ func (s *QueryService) ListRenotes(viewer *model.User, noteID, untilID, sinceID 
 	if _, err := s.requireVisible(viewer, noteID); err != nil {
 		return nil, err
 	}
-	rows, err := s.noteRepo.ListRenotesOf(noteID, untilID, sinceID, limit)
-	if err != nil {
-		return nil, err
-	}
-	return s.filterVisible(viewer, rows), nil
+	// visibility は repository が LIMIT 前に SQL push-down する (#1500)。post-fetch
+	// filterVisible だとページ過少充填 + followers 判定 N+1 になるため撤去。親 note の
+	// requireVisible ゲートは維持。viewer==nil は匿名 (public/home のみ)。
+	return s.noteRepo.ListRenotesOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }
 
 // ListReplies returns replies to the given noteID after filtering for visibility.
@@ -122,11 +121,8 @@ func (s *QueryService) ListReplies(viewer *model.User, noteID, untilID, sinceID 
 	if _, err := s.requireVisible(viewer, noteID); err != nil {
 		return nil, err
 	}
-	rows, err := s.noteRepo.ListRepliesOf(noteID, untilID, sinceID, limit)
-	if err != nil {
-		return nil, err
-	}
-	return s.filterVisible(viewer, rows), nil
+	// visibility は repository が LIMIT 前に SQL push-down する (#1500)。
+	return s.noteRepo.ListRepliesOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }
 
 // ListChildren returns notes that reply to or quote the given noteID.
@@ -134,11 +130,8 @@ func (s *QueryService) ListChildren(viewer *model.User, noteID, untilID, sinceID
 	if _, err := s.requireVisible(viewer, noteID); err != nil {
 		return nil, err
 	}
-	rows, err := s.noteRepo.ListChildrenOf(noteID, untilID, sinceID, limit)
-	if err != nil {
-		return nil, err
-	}
-	return s.filterVisible(viewer, rows), nil
+	// visibility は repository が LIMIT 前に SQL push-down する (#1500)。
+	return s.noteRepo.ListChildrenOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }
 
 // Conversation walks up the reply chain from the given noteID and returns
@@ -225,6 +218,16 @@ type NoteState struct {
 // handlers that perform bulk lookups outside of QueryService (e.g. BulkShow).
 func (s *QueryService) FilterVisible(viewer *model.User, rows []*model.Note) []*model.Note {
 	return s.filterVisible(viewer, rows)
+}
+
+// viewerIDOf returns the viewer's ID, or "" for an anonymous (nil) viewer.
+// repository の visibility push-down (applyViewerVisibility) は viewerID="" を
+// 匿名 (public/home のみ) として扱う (#1500)。
+func viewerIDOf(viewer *model.User) string {
+	if viewer == nil {
+		return ""
+	}
+	return viewer.ID
 }
 
 // filterVisible drops notes the viewer cannot see.

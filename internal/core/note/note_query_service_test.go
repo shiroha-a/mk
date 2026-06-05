@@ -149,6 +149,80 @@ func TestQueryService_ListChildren_ParentMissing(t *testing.T) {
 	require.ErrorIs(t, err, note.ErrNoteNotFound)
 }
 
+// #1500: visibility は repository の SQL push-down に委譲される。QueryService は
+// viewer の ID を repo に正しく渡すだけ (post-fetch filterVisible は撤去)。
+// public parent への followers reply は、author を follow していない viewer には
+// 返らず、follow すると返ることで viewerID 伝播 + push-down の委譲を固定する。
+func TestQueryService_ListReplies_VisibilityDelegatedToRepo(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
+	parentID := "parent"
+	noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "a", Visibility: model.NoteVisibilityPublic, ReplyID: &parentID}
+	noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "a", Visibility: model.NoteVisibilityFollowers, ReplyID: &parentID}
+
+	viewer := &model.User{ID: "v"}
+	// 非フォロワー: followers reply は見えない (push-down が効いている)。
+	out, err := svc.ListReplies(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "pub", out[0].ID)
+
+	// follow すると followers reply も返る。
+	noteRepo.Following = map[string][]string{"v": {"a"}}
+	out, err = svc.ListReplies(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, out, 2)
+}
+
+// #1500 audit follow-up: ListRenotes も同じ doctrine (push-down delegation +
+// viewerID 伝播) なので symmetric な regression test を置く (#1491 audit 指摘 3)。
+//
+// 注意: 本 test が直接捕捉できるのは「QueryService が viewerID を repo に
+// 渡し忘れて空文字で叩いた」regression のみ。「post-fetch FilterVisible が
+// 復活した」regression は、mock がすでに同じ条件で pre-filter している関係上
+// 同じ結果セットになって検出できない (#1504 adversarial review 指摘)。
+// それでも viewerID 伝播の固定として意味があるので残す。
+func TestQueryService_ListRenotes_VisibilityDelegatedToRepo(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
+	parentID := "parent"
+	noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "a", Visibility: model.NoteVisibilityPublic, RenoteID: &parentID}
+	noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "a", Visibility: model.NoteVisibilityFollowers, RenoteID: &parentID}
+
+	viewer := &model.User{ID: "v"}
+	out, err := svc.ListRenotes(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "pub", out[0].ID, "非フォロワーには followers renote が見えない (push-down 委譲)")
+
+	noteRepo.Following = map[string][]string{"v": {"a"}}
+	out, err = svc.ListRenotes(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, out, 2, "follow すると followers renote も返る (viewerID 伝播)")
+}
+
+// ListChildren も同じ doctrine。children は reply + quote renote の合算なので
+// followers reply / followers renote 両方の visibility delegation を覆う。
+func TestQueryService_ListChildren_VisibilityDelegatedToRepo(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
+	parentID := "parent"
+	noteRepo.Notes["pub_reply"] = &model.Note{ID: "pub_reply", UserID: "a", Visibility: model.NoteVisibilityPublic, ReplyID: &parentID}
+	noteRepo.Notes["fol_reply"] = &model.Note{ID: "fol_reply", UserID: "a", Visibility: model.NoteVisibilityFollowers, ReplyID: &parentID}
+	noteRepo.Notes["fol_quote"] = &model.Note{ID: "fol_quote", UserID: "a", Visibility: model.NoteVisibilityFollowers, RenoteID: &parentID}
+
+	viewer := &model.User{ID: "v"}
+	out, err := svc.ListChildren(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "非フォロワーには followers reply/quote が見えない")
+	assert.Equal(t, "pub_reply", out[0].ID)
+
+	noteRepo.Following = map[string][]string{"v": {"a"}}
+	out, err = svc.ListChildren(viewer, "parent", "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, out, 3, "follow すると followers reply + followers quote も返る")
+}
+
 func TestQueryService_Conversation_Empty(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["root"] = &model.Note{ID: "root", UserID: "a", Visibility: model.NoteVisibilityPublic}
@@ -267,25 +341,25 @@ type failingRepoForList struct {
 	mode string
 }
 
-func (f *failingRepoForList) ListRenotesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingRepoForList) ListRenotesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	if f.mode == "renotes" {
 		return nil, errors.New("boom")
 	}
-	return f.MockNoteRepository.ListRenotesOf("", "", "", 0)
+	return f.MockNoteRepository.ListRenotesOf("", "", "", "", 0)
 }
 
-func (f *failingRepoForList) ListRepliesOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingRepoForList) ListRepliesOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	if f.mode == "replies" {
 		return nil, errors.New("boom")
 	}
-	return f.MockNoteRepository.ListRepliesOf("", "", "", 0)
+	return f.MockNoteRepository.ListRepliesOf("", "", "", "", 0)
 }
 
-func (f *failingRepoForList) ListChildrenOf(_, _, _ string, _ int) ([]*model.Note, error) {
+func (f *failingRepoForList) ListChildrenOf(_, _, _, _ string, _ int) ([]*model.Note, error) {
 	if f.mode == "children" {
 		return nil, errors.New("boom")
 	}
-	return f.MockNoteRepository.ListChildrenOf("", "", "", 0)
+	return f.MockNoteRepository.ListChildrenOf("", "", "", "", 0)
 }
 
 func TestQueryService_ListRenotes_RepoError(t *testing.T) {

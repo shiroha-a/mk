@@ -201,9 +201,12 @@ func TestFeatured_Success(t *testing.T) {
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: "public", User: &model.User{ID: "u1"}}
 	rec := postExtra(h.Featured, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp []any
+	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotEmpty(t, resp)
+	// #1491 audit 指摘 6: NotEmpty だけだと body が `null` / 空配列 / shape
+	// 違いの fail-open regression を取り逃す。seeded id がそのまま返ることを fix。
+	require.Len(t, resp, 1)
+	assert.Equal(t, "n1", resp[0]["id"])
 }
 
 func TestFeatured_InvalidJSON(t *testing.T) {
@@ -256,9 +259,16 @@ func TestUnrenote_InvalidParam(t *testing.T) {
 
 func TestMentions_Success(t *testing.T) {
 	h, noteRepo, _ := newExtraHandler(t)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u2", Mentions: []string{"u1"}, User: &model.User{ID: "u2"}}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u2", Visibility: "public", Mentions: []string{"u1"}, User: &model.User{ID: "u2"}}
 	rec := postExtra(h.Mentions, `{}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	// #1491 audit 指摘 6: 旧 test は status のみで body 未検証。seeded id が
+	// 返ることを fix し、push-down 経路 (#1441 / #1484) の under-fill / 空 body
+	// regression を取れるようにする。
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "n1", resp[0]["id"])
 }
 
 func TestMentions_InvalidJSON(t *testing.T) {
@@ -337,6 +347,22 @@ func TestMentions_VisibilityExactMatch(t *testing.T) {
 	assert.False(t, ids["m_dm"], "public 指定で specified は出ない (exact-match)")
 }
 
+// #1484: 本文 @mention の無い specified DM (viewer ∈ visibleUserIds のみ) も
+// Direct タブ (visibility=specified) に出る。UI で宛先を選んだだけの DM を
+// 受信者が取りこぼさないことを固定する。
+func TestMentions_SpecifiedVisibleUserIDsOnly(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	// mentions は空、visibleUserIds にだけ recipient を含む specified DM。
+	noteRepo.Notes["m_dm_vu"] = &model.Note{ID: "m_dm_vu", UserID: "author", Visibility: "specified", VisibleUserIDs: []string{"recipient"}, User: &model.User{ID: "author"}}
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "recipient"}))
+	assert.True(t, ids["m_dm_vu"], "本文 @mention の無い specified DM も visibleUserIds 経由で Direct タブに出る")
+
+	// 宛先でない viewer には出ない (#1441 gate との整合)。
+	ids = mentionIDs(t, postExtra(h.Mentions, `{"visibility":"specified"}`, &model.User{ID: "stranger"}))
+	assert.False(t, ids["m_dm_vu"], "宛先でない viewer には specified DM が出ない")
+}
+
 // --- UserListTimeline ---
 
 func TestUserListTimeline_Success(t *testing.T) {
@@ -344,12 +370,21 @@ func TestUserListTimeline_Success(t *testing.T) {
 	listRepo := testutil.NewMockUserListRepository()
 	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "my list"}
 	h.SetUserListRepo(listRepo)
-	// リストメンバーのノートを用意
+	// リストメンバーのノートを用意 + mock ListByUserList の membership map を seed
+	// (#1491 audit 指摘 1 で mock parity を持たせたので、membership 経由で
+	// filter される。これが無いと mock は空を返し、本 test の body assert が
+	// 落ちる)。
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "member1", Visibility: "public", User: &model.User{ID: "member1"}}
+	noteRepo.UserListMembers["l1"] = []*model.UserListMembership{{UserListID: "l1", UserID: "member1"}}
+
 	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp []any
+	require.Equal(t, http.StatusOK, rec.Code)
+	// #1491 audit 指摘 6: body shape / id を明示 fix。push-down で空 / 別 id を
+	// 返すような regression を取り漏らさないようにする。
+	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "n1", resp[0]["id"])
 }
 
 func TestUserListTimeline_NotOwner(t *testing.T) {
@@ -419,7 +454,10 @@ func TestUserListTimeline_PassesFilterToRepo(t *testing.T) {
 	h := NewHandler(noteRepo, corenote.NewCreateService(noteRepo, pollRepo, idGen, nil), corenote.NewDeleteService(noteRepo), querySvc, nil, nil, nil, nil, idGen)
 	h.SetUserListRepo(listRepo)
 
-	rec := postExtra(h.UserListTimeline, `{"listId":"l1","withRenotes":false,"withFiles":true}`, &model.User{ID: "A"})
+	rec := postExtra(h.UserListTimeline,
+		`{"listId":"l1","withRenotes":false,"withFiles":true,`+
+			`"includeMyRenotes":false,"includeRenotedMyNotes":false,"includeLocalRenotes":false}`,
+		&model.User{ID: "A"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
@@ -429,6 +467,16 @@ func TestUserListTimeline_PassesFilterToRepo(t *testing.T) {
 	require.NotNil(t, noteRepo.gotFilter.WithRenotes)
 	assert.False(t, *noteRepo.gotFilter.WithRenotes, "withRenotes=false が filter に渡る")
 	assert.True(t, noteRepo.gotFilter.WithFiles, "withFiles=true が filter に渡る")
+	// #1504 audit follow-up: Include*Renotes も applyTimelineFilter 経路で
+	// 効くため、handler が forward しているかを fix。1 つでも落ちると
+	// user-list-timeline で pure-renote 関連の filter が silently 効かなく
+	// なる回帰になる。
+	require.NotNil(t, noteRepo.gotFilter.IncludeMyRenotes)
+	assert.False(t, *noteRepo.gotFilter.IncludeMyRenotes, "includeMyRenotes=false が filter に渡る")
+	require.NotNil(t, noteRepo.gotFilter.IncludeRenotedMyNotes)
+	assert.False(t, *noteRepo.gotFilter.IncludeRenotedMyNotes, "includeRenotedMyNotes=false が filter に渡る")
+	require.NotNil(t, noteRepo.gotFilter.IncludeLocalRenotes)
+	assert.False(t, *noteRepo.gotFilter.IncludeLocalRenotes, "includeLocalRenotes=false が filter に渡る")
 	// post-fetch filter は無いので repo の返り値がそのまま返る。
 	require.Len(t, out, 1)
 	assert.Equal(t, "ul_pub", out[0]["id"])
@@ -460,7 +508,12 @@ func TestSearchByTag_Success(t *testing.T) {
 	h, noteRepo, _ := newExtraHandler(t)
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Tags: []string{"golang"}, Visibility: "public", User: &model.User{ID: "u1"}}
 	rec := postExtra(h.SearchByTag, `{"tag":"golang"}`, nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	// #1491 audit 指摘 6: status 200 だけでは body=null / 別 id を取り損ねる。
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "n1", resp[0]["id"])
 }
 
 func TestSearchByTag_InvalidParam(t *testing.T) {
@@ -474,7 +527,14 @@ func TestSearchByTag_QueryArray(t *testing.T) {
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Tags: []string{"go"}, Visibility: "public", User: &model.User{ID: "u1"}}
 	// query の最初の要素がタグとして使われる
 	rec := postExtra(h.SearchByTag, `{"query":[["go","rust"],["web"]]}`, nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	// #1491 audit 指摘 6: query 配列 parse の正しさを id 識別で fix。
+	// 旧 test は status のみ確認していて、tag が "rust"/"web" 等にズレても通って
+	// しまっていた。
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "n1", resp[0]["id"])
 }
 
 func TestSearchByTag_QueryArrayEmpty(t *testing.T) {

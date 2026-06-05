@@ -265,6 +265,33 @@ func TestUserList_BrokenPayload_Dropped(t *testing.T) {
 	assert.Empty(t, ctx.sentType)
 }
 
+// #1491 audit 指摘 5: userListVisibilityShouldEmit は visibility == "followers"
+// 以外の payload を素通りする (user_list.go:112)。コメントには「specified は
+// fanout (shouldFanoutToFollowers) で除外されるからここに来ない」と書いてある
+// が、その assumption は untested。fanout 側の refactor がうっかり specified
+// payload を user_list stream へ送り始めた瞬間に WS gate も passthrough して
+// しまうので、その日の defense-in-depth がどう動くかを test で確定させておく。
+//
+// 現実装は specified payload を非宛先 viewer にも emit する (passthrough)。
+// この test が落ちる条件 = ゲートが visibility 別 path を追加して specified を
+// 個別に判定するようになったとき、そのときは併せて fanout 側のテスト
+// (TestFanoutHook_FanoutToUserLists_SpecifiedVisibilitySkipped) を見直すべき。
+func TestUserList_SpecifiedVisibility_AssumesFanoutSkips(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	// alice 宛ではない specified payload。fanout 側で normally この shape は
+	// user_list stream に流れない (= shouldFanoutToFollowers で specified が
+	// 除外される) が、もし流れた場合 WS gate は passthrough する現状動作。
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"specified","visibleUserIds":["other"]}`))
+	require.Len(t, ctx.sentType, 1,
+		"現状の userListVisibilityShouldEmit は specified payload を passthrough する "+
+			"(fanout 側 shouldFanoutToFollowers が specified を弾く前提)。fanout の "+
+			"assumption が崩れた瞬間に WS leak になるので、本 test を grep して "+
+			"両層をセットで見直すこと。")
+}
+
 // --- RoleTimeline ---
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {

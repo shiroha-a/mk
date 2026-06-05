@@ -16,11 +16,15 @@ import (
 // 変換に使うため独自に定義する。
 const aidxTime2000Ms int64 = 946684800000
 
-// featuredNotesPerUserPoolSize は users/featured-notes の selection 段で
+// FeaturedNotesPerUserPoolSize は users/featured-notes の selection 段で
 // engagement DESC top-N を SQL から取得する際の上限。upstream
 // FeaturedService.getPerUserNotesRanking の threshold (50) と揃える (#1487 / #1491)。
 // 選抜後は id DESC + untilID cursor + limit でページングする。
-const featuredNotesPerUserPoolSize = 50
+//
+// テスト用 mock (internal/testutil/mock_repository.go の ListFeaturedByUser) も
+// この定数を直接参照することで mock と real repo の pool cap が drift しない
+// ことを保証する (#1491 review B 指摘の二重定義解消)。
+const FeaturedNotesPerUserPoolSize = 50
 
 // aidxCutoffID は与えられた time に対応する最小のaidx ID文字列を返す。
 // aidxは「時刻base36(8) + nodeID(4) + counter(4)」の 16 文字で、先頭 8 文字が
@@ -88,9 +92,15 @@ type NoteRepository interface {
 	// 取り込む形に統合した (#1439 / #1441 と同じパターン)。
 	ListByChannelID(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
-	ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
-	ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
-	ListChildrenOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListRenotesOf / ListRepliesOf / ListChildrenOf は viewerID 視点の可視性を
+	// LIMIT 前に SQL push-down する (#1500)。viewerID="" は匿名 (public/home のみ)。
+	// 条件は core/note.CanSeeNote 完全版 (specified 込み): スレッドの reply/renote は
+	// viewer が visibleUserIds 対象なら specified note も見えるため、timeline 系の
+	// specified 除外版を流用しないこと。post-fetch filter だとページ過少充填 +
+	// followers 判定 N+1 になるため (#1418 / #1452 と同 doctrine)。
+	ListRenotesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
+	ListRepliesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
+	ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	SearchByFilter(filter model.NoteSearchFilter) ([]*model.Note, error)
 	// ListFeatured returns ranked public notes (renote+reply count). When
 	// channelID is non-empty restricts to that channel, mirroring upstream
@@ -104,7 +114,7 @@ type NoteRepository interface {
 	// する 2 段構成。mk-go も同じ 2 段で揃える (#1487 Option B):
 	//
 	//  1. selection: engagement = (renoteCount + repliesCount) DESC, id DESC で
-	//     featuredNotesPerUserPoolSize (=50, upstream 同値) 件を SQL push-down で
+	//     FeaturedNotesPerUserPoolSize (=50, upstream 同値) 件を SQL push-down で
 	//     選抜。visibility 条件と channel 除外もここで同時に絞る (LIMIT 前)。
 	//     post-fetch FilterVisible だとページ過少充填 + followers 判定 N+1 を
 	//     起こすため (#1418 / #1440 と同 doctrine)。
@@ -405,9 +415,11 @@ func (r *noteRepository) ListByChannelID(channelID, viewerID, untilID, sinceID s
 
 // ListRenotesOf returns notes whose renoteId equals noteID.
 // テキストやファイルを伴わない pure renote だけでなく quote renote も含む。
-func (r *noteRepository) ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (r *noteRepository) ListRenotesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where("\"renoteId\" = ?", noteID)
+	// visibility push-down (#1500): viewer が見られる renote のみ LIMIT 前に絞る。
+	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -422,9 +434,11 @@ func (r *noteRepository) ListRenotesOf(noteID string, untilID, sinceID string, l
 
 // ListRepliesOf returns notes whose replyId equals noteID.
 // すべてのユーザーからの返信を返す(ミュート判定はServiceで行う)。
-func (r *noteRepository) ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (r *noteRepository) ListRepliesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where("\"replyId\" = ?", noteID)
+	// visibility push-down (#1500): viewer が見られる reply のみ LIMIT 前に絞る。
+	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -439,10 +453,16 @@ func (r *noteRepository) ListRepliesOf(noteID string, untilID, sinceID string, l
 
 // ListChildrenOf returns notes that are either replies or quote-renotes of the given noteID.
 // notes/childrenでスレッドツリーの直下を取得するために使用する。
-func (r *noteRepository) ListChildrenOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
+	// base 条件の OR は明示的に括弧で囲む。GORM は複数 Where の生 OR 文字列を暗黙に
+	// グルーピングするが、その挙動に依存せず「後続 AND の visibility 述語が
+	// replyId/renoteId の OR 全体に係る」意図を明示するための defensive clarity
+	// (#1500)。実際のリーク防止は ListChildrenOf_VisibilityPushDown の回帰テストで担保。
 	q := preloadNoteRelations(r.db).
-		Where("\"replyId\" = ? OR \"renoteId\" = ?", noteID, noteID)
+		Where("(\"replyId\" = ? OR \"renoteId\" = ?)", noteID, noteID)
+	// visibility push-down (#1500): viewer が見られる child のみ LIMIT 前に絞る。
+	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -669,7 +689,7 @@ func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, li
 		Where(`"userId" = ?`, userID).
 		Where(`"channelId" IS NULL`)
 	q = applyViewerVisibility(q, viewerID)
-	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(featuredNotesPerUserPoolSize)
+	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(FeaturedNotesPerUserPoolSize)
 	var pool []*model.Note
 	if err := q.Find(&pool).Error; err != nil {
 		return nil, err
@@ -709,8 +729,20 @@ func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinc
 	if limit <= 0 {
 		limit = 10
 	}
+	// match 条件: TS notes/mentions と同じく mentions または visibleUserIds の
+	// どちらかに viewer が含まれれば対象とする (TS: `:meId <@ note.mentions OR
+	// :meId <@ note.visibleUserIds`)。本文に @mention の無い specified DM は
+	// visibleUserIds にしか入らないため (= 宛先指定だけの DM)、mentions 単独 match
+	// だと受信者の notes/mentions / Direct タブで取りこぼす (#1484)。OR は単一 note
+	// 行の boolean なので重複行は出ない。
+	//
+	// 両枝とも containment 演算子 `@>` で書く: `scalar = ANY(array)` は GIN を使えず、
+	// `array @> ARRAY[scalar]` だけが GIN index 対象になる。viewer は単一要素なので
+	// 論理的に等価で、将来 visibleUserIds に GIN index を足せば mentions 枝
+	// (IDX_note_mentions, #1427) と揃って planner が BitmapOr で両枝 index 利用できる
+	// (#1484 review)。
 	q := preloadNoteRelations(r.db).
-		Where("mentions @> ARRAY[?]::varchar[]", userID)
+		Where(`(mentions @> ARRAY[?]::varchar[] OR "visibleUserIds" @> ARRAY[?]::varchar[])`, userID, userID)
 	// visibility push-down: mention 対象 (= viewer = userID) が CanSeeNote で
 	// 見られる note のみ返す。mentions 配列は本文の @user パース結果で specified
 	// の visibleUserIds とは独立なので、これが無いと followers/specified note を

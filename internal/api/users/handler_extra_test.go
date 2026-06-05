@@ -3,6 +3,7 @@ package users_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -454,6 +455,45 @@ func TestFeaturedNotes_UntilIDPaginatesByIDDesc(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	require.Len(t, out, 1)
 	assert.Equal(t, "fn_x1", out[0]["id"])
+}
+
+// #1491 audit 指摘: TestFeaturedNotes_* は 3-10 件の fixture しか使っておらず、
+// mock 側の pool cap (mockFeaturedNotesPerUserPoolSize=50) を踏まない。51 件
+// fixture で「engagement=0 最大id の note は pool 外に落ちて display に現れず、
+// engagement=10 の 50 件のみ id DESC で返る」ことを mock 経由でも fix する。
+// repo 側の TestNoteRepository_ListFeaturedByUser_EngagementPoolCap の handler
+// レイヤー版で、mock の pool cap が silently 別値になった瞬間に落ちる。
+func TestFeaturedNotes_EngagementPoolCap_DropsLowEngagementBelow50(t *testing.T) {
+	h, _, noteRepo := newExtraHandler(t)
+	h.SetFollowingRepo(testutil.NewMockFollowingRepository())
+
+	// engagement=10 を 50 件 (id: fn_cap_pool_01 .. fn_cap_pool_50)。
+	for i := 1; i <= 50; i++ {
+		id := fmt.Sprintf("fn_cap_pool_%02d", i)
+		noteRepo.Notes[id] = &model.Note{
+			ID: id, UserID: "u1", Visibility: "public", RenoteCount: 10, User: &model.User{ID: "u1"},
+		}
+	}
+	// engagement=0 + 最大 id (lex order で全 pool note より後ろ)。
+	const lowID = "fn_cap_zzz_low"
+	noteRepo.Notes[lowID] = &model.Note{
+		ID: lowID, UserID: "u1", Visibility: "public", RenoteCount: 0, User: &model.User{ID: "u1"},
+	}
+
+	rec := postExtra(h.FeaturedNotes, `{"userId":"u1","limit":100}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 50, "mock pool cap=50 が踏まれて 50 件に絞られる")
+	for _, n := range out {
+		gotID := n["id"].(string)
+		assert.NotEqual(t, lowID, gotID, "engagement 最下位 (=0) は pool 外に落ちる")
+		assert.True(t, strings.HasPrefix(gotID, "fn_cap_pool_"),
+			"engagement DESC 上位 50 件 (fn_cap_pool_*) のみが選抜される")
+	}
+	// display は id DESC: fn_cap_pool_50 が先頭、fn_cap_pool_01 が末尾。
+	assert.Equal(t, "fn_cap_pool_50", out[0]["id"])
+	assert.Equal(t, "fn_cap_pool_01", out[49]["id"])
 }
 
 // #1487: post-fetch FilterVisible → SQL push-down に変更されたことで、limit に

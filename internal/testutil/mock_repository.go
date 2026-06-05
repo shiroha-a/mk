@@ -745,13 +745,19 @@ type MockNoteRepository struct {
 	// repository 内部テストとの循環になるため CanSeeNote は使わず inline で
 	// 可視性を再現する (条件は CanSeeNote / real repo SQL と一致させる)。
 	Following map[string][]string
+	// UserListMembers は ListByUserList の member-filter + reply gate (#1495 /
+	// #1496) を mock 側で再現するための listID -> memberships。テストは
+	// noteRepo.UserListMembers[listID] = []*model.UserListMembership{...} の
+	// shape で直接 seed する。空 / nil の listID は member 不在として空結果。
+	UserListMembers map[string][]*model.UserListMembership
 }
 
 func NewMockNoteRepository() *MockNoteRepository {
 	return &MockNoteRepository{
-		Notes:          make(map[string]*model.Note),
-		ReactionCounts: make(map[string]map[string]int),
-		Following:      make(map[string][]string),
+		Notes:           make(map[string]*model.Note),
+		ReactionCounts:  make(map[string]map[string]int),
+		Following:       make(map[string][]string),
+		UserListMembers: make(map[string][]*model.UserListMembership),
 	}
 }
 
@@ -884,22 +890,32 @@ func (m *MockNoteRepository) IncrementReaction(noteID, reaction string, delta in
 }
 
 // ListRenotesOf returns notes whose renoteId equals noteID.
-func (m *MockNoteRepository) ListRenotesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListRenotesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		// viewer 視点の可視性を LIMIT 前に絞る (#1500、real repo の SQL push-down 相当)。
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		return n.RenoteID != nil && *n.RenoteID == noteID
 	}, untilID, sinceID, limit), nil
 }
 
 // ListRepliesOf returns notes whose replyId equals noteID.
-func (m *MockNoteRepository) ListRepliesOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListRepliesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		return n.ReplyID != nil && *n.ReplyID == noteID
 	}, untilID, sinceID, limit), nil
 }
 
 // ListChildrenOf returns notes that reply to or quote the given noteID.
-func (m *MockNoteRepository) ListChildrenOf(noteID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
+		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
 		if n.ReplyID != nil && *n.ReplyID == noteID {
 			return true
 		}
@@ -1093,10 +1109,17 @@ func (m *MockNoteRepository) ListFeatured(channelID, untilID string, limit, offs
 	return result[:limit], nil
 }
 
-// mockFeaturedNotesPerUserPoolSize は repository.featuredNotesPerUserPoolSize
+// mockFeaturedNotesPerUserPoolSize は repository.FeaturedNotesPerUserPoolSize
 // と揃える pool size (#1487 / #1491)。selection 段で engagement DESC top-N を
 // 取り、display 段で id DESC + untilID + limit を適用する 2 段構成を mock も
 // 同じ semantics で再現する。
+//
+// production code ファイルから repository を import すると repository の test
+// build 経由で import cycle になる (mock_chat_test.go のコメント参照)。よって
+// 定数は二重定義のままにし、testutil パッケージの _test.go で repository から
+// import した本物と一致しているかを runtime check する
+// (featured_pool_size_test.go の TestFeaturedPoolSizeMatchesRepo)。
+// drift があれば testutil パッケージ自身のテストが落ちて即座に検出される。
 const mockFeaturedNotesPerUserPoolSize = 50
 
 // ListFeaturedByUser mirrors the real repository's 2-stage selection:
@@ -1175,8 +1198,16 @@ func (m *MockNoteRepository) ListMentions(userID, visibility string, limit int, 
 		if visibility != "" && string(n.Visibility) != visibility {
 			return false
 		}
+		// TS notes/mentions parity: mentions または visibleUserIds の
+		// どちらかに viewer が含まれれば対象 (#1484)。本文 @mention の無い
+		// specified DM も visibleUserIds 経由で拾う。
 		for _, mention := range n.Mentions {
 			if mention == userID {
+				return true
+			}
+		}
+		for _, vu := range n.VisibleUserIDs {
+			if vu == userID {
 				return true
 			}
 		}
@@ -1250,8 +1281,160 @@ func (m *MockNoteRepository) DeleteByUserBatch(userID string, batchSize int) (in
 	return n, nil
 }
 
-func (m *MockNoteRepository) ListByUserList(_ string, _ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
-	return nil, nil
+// ListByUserList mirrors the real repository's SQL push-down for user-list
+// timeline (#1452 visibility / #1496 withReplies / #1498 renote / WithFiles).
+// Caller seeds UserListMembers[listID] = []*model.UserListMembership{...}.
+//
+// 旧 stub は (nil, nil) を返していて real SQL との parity drift があり、
+// handler-layer 以外で visibility / withReplies / withRenotes / withFiles の
+// regression を mock 経由で検出できなかった (#1491 audit 指摘 1)。本実装で
+// real repo と同 semantics を再現する。
+//
+// 適用順:
+//  1. listID member でない author の note は除外
+//  2. channel note は除外
+//  3. visibility push-down: public/home は常時、followers は author 本人か
+//     viewer が follow 済みのときのみ、specified は list timeline に出さない
+//     (DM 非表示, ListByUserList の real SQL も同じ)
+//  4. reply gate (#1496): replyId IS NULL || replyUserId==note.userId
+//     (self-thread) || replyUserId==viewerID || membership.WithReplies
+//  5. sinceID / untilID cursor
+//  6. WithFiles (= ファイル添付必須) / WithRenotes nil=true (false なら pure
+//     renote 除外) / IncludeMyRenotes・IncludeRenotedMyNotes・IncludeLocalRenotes
+//     (いずれも nil=true、false で対応する pure renote 分岐を除外) を
+//     applyTimelineFilter と同じ条件で適用
+//  7. paginationOrder: sinceID only → ASC, otherwise DESC
+//
+// 未実装 (= parity 対象外): MutedChannelIDs / muting subquery (UseMutingSubquery /
+// MutedUserIDs)。user-list-timeline では real repo もこれらを積まない方針
+// なので mock も省略する。これらを使う test は専用 fake (userListNotesRepo 系)
+// で受けること。
+//
+// muting subquery 系 filter が渡された場合は panic で loud-fail させる (#1506)。
+// docstring の案内だけでは将来の test 著者が読まずに mock 経由で書く可能性が
+// あり、その場合 real SQL では mute されるはずの note が mock で素通りする
+// silent regression を引き起こす。stacktrace から専用 fake への escalation を
+// 即座に促すために panic を選択している。
+func (m *MockNoteRepository) ListByUserList(listID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error) {
+	if filter.UseMutingSubquery || len(filter.MutedUserIDs) > 0 || len(filter.MutedChannelIDs) > 0 {
+		panic("testutil.MockNoteRepository.ListByUserList: muting subquery filter " +
+			"(UseMutingSubquery / MutedUserIDs / MutedChannelIDs) is not implemented in this mock. " +
+			"Escalate to a dedicated fake such as userListNotesRepo in internal/api/notes/handler_extra_test.go, " +
+			"or exercise the real SQL push-down in internal/repository/note.go applyTimelineFilter via a DB-backed test (#1506).")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	members := m.UserListMembers[listID]
+	if len(members) == 0 {
+		return nil, nil
+	}
+	memberOf := make(map[string]*model.UserListMembership, len(members))
+	for _, mem := range members {
+		memberOf[mem.UserID] = mem
+	}
+	viewerID := filter.ViewerID
+	withRenotes := true
+	if filter.WithRenotes != nil {
+		withRenotes = *filter.WithRenotes
+	}
+	var result []*model.Note
+	for _, n := range m.Notes {
+		mem, ok := memberOf[n.UserID]
+		if !ok {
+			continue
+		}
+		if n.ChannelID != nil {
+			continue
+		}
+		// visibility: list timeline は specified を出さない (real SQL も同じ)。
+		switch n.Visibility {
+		case model.NoteVisibilityPublic, model.NoteVisibilityHome:
+			// always visible
+		case model.NoteVisibilityFollowers:
+			if viewerID == "" {
+				continue
+			}
+			if viewerID != n.UserID {
+				followed := false
+				for _, fid := range m.Following[viewerID] {
+					if fid == n.UserID {
+						followed = true
+						break
+					}
+				}
+				if !followed {
+					continue
+				}
+			}
+		default:
+			// specified / その他 (= 未知) は drop。
+			continue
+		}
+		// reply gate (#1496)
+		if n.ReplyID != nil {
+			allowed := false
+			if n.ReplyUserID != nil {
+				if *n.ReplyUserID == n.UserID {
+					allowed = true
+				} else if viewerID != "" && *n.ReplyUserID == viewerID {
+					allowed = true
+				}
+			}
+			if !allowed && mem.WithReplies {
+				allowed = true
+			}
+			if !allowed {
+				continue
+			}
+		}
+		if sinceID != "" && n.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && n.ID >= untilID {
+			continue
+		}
+		if filter.WithFiles && len(n.FileIDs) == 0 {
+			continue
+		}
+		// pure renote 判定: applyTimelineFilter と同じく
+		// `RenoteID != nil && Text == nil && len(FileIDs) == 0` で一致させる
+		// (real SQL: renoteId IS NOT NULL AND text IS NULL AND fileIds = '{}')。
+		isPureRenote := n.RenoteID != nil && n.Text == nil && len(n.FileIDs) == 0
+		if !withRenotes && isPureRenote {
+			// pure renote (= boost) excluded; quote renote (text or files あり) は通る。
+			continue
+		}
+		// IncludeMyRenotes nil=true。false かつ pure renote かつ author == viewer
+		// (= 自分の renote) を除外 (real SQL: note.userId = viewerID, #1498)。
+		if filter.IncludeMyRenotes != nil && !*filter.IncludeMyRenotes && viewerID != "" &&
+			isPureRenote && n.UserID == viewerID {
+			continue
+		}
+		// IncludeRenotedMyNotes nil=true。false かつ pure renote かつ
+		// renoteUserId == viewer (= 自分の note が renote された) を除外。
+		if filter.IncludeRenotedMyNotes != nil && !*filter.IncludeRenotedMyNotes && viewerID != "" &&
+			isPureRenote && n.RenoteUserID != nil && *n.RenoteUserID == viewerID {
+			continue
+		}
+		// IncludeLocalRenotes nil=true。false かつ pure renote かつ
+		// renoteUserHost == nil (= local user の renote) を除外。
+		if filter.IncludeLocalRenotes != nil && !*filter.IncludeLocalRenotes &&
+			isPureRenote && n.RenoteUserHost == nil {
+			continue
+		}
+		result = append(result, n)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if sinceID != "" && untilID == "" {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].ID > result[j].ID
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 func (m *MockNoteRepository) CountReplyTargets(userID, viewerID string, limit int) ([]model.ReplyTargetCount, error) {
