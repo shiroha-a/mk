@@ -1309,7 +1309,19 @@ func (m *MockNoteRepository) DeleteByUserBatch(userID string, batchSize int) (in
 // MutedUserIDs)。user-list-timeline では real repo もこれらを積まない方針
 // なので mock も省略する。これらを使う test は専用 fake (userListNotesRepo 系)
 // で受けること。
+//
+// muting subquery 系 filter が渡された場合は panic で loud-fail させる (#1506)。
+// docstring の案内だけでは将来の test 著者が読まずに mock 経由で書く可能性が
+// あり、その場合 real SQL では mute されるはずの note が mock で素通りする
+// silent regression を引き起こす。stacktrace から専用 fake への escalation を
+// 即座に促すために panic を選択している。
 func (m *MockNoteRepository) ListByUserList(listID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error) {
+	if filter.UseMutingSubquery || len(filter.MutedUserIDs) > 0 || len(filter.MutedChannelIDs) > 0 {
+		panic("testutil.MockNoteRepository.ListByUserList: muting subquery filter " +
+			"(UseMutingSubquery / MutedUserIDs / MutedChannelIDs) is not implemented in this mock. " +
+			"Escalate to a dedicated fake such as userListNotesRepo in internal/api/notes/handler_extra_test.go, " +
+			"or exercise the real SQL push-down in internal/repository/note.go applyTimelineFilter via a DB-backed test (#1506).")
+	}
 	if limit <= 0 {
 		limit = 10
 	}
