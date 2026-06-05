@@ -791,6 +791,7 @@ func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 
 // FilesMoveBulk handles POST /api/drive/files/move-bulk.
 func (h *Handler) FilesMoveBulk(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		FileIDs  []string `json:"fileIds"`
 		FolderID *string  `json:"folderId"`
@@ -798,8 +799,17 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || len(req.FileIDs) == 0 {
 		return apierr.JSONInvalidParam(c)
 	}
+	// 宛先 folder が指定されている場合は呼出ユーザー所有であることを検証する
+	// (他人の folder へ移動できる経路を塞ぐ)。root (folderId=null) は検証不要。
+	if req.FolderID != nil && *req.FolderID != "" && h.folderRepo != nil {
+		folder, err := h.folderRepo.FindByID(*req.FolderID)
+		if err != nil || folder.UserID == nil || *folder.UserID != user.ID {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+		}
+	}
 	if h.fileRepo != nil {
-		_ = h.fileRepo.UpdateBulkFolder(req.FileIDs, req.FolderID)
+		// userId scope で IDOR を防ぐ (他人の DriveFile は移動されない)。
+		_ = h.fileRepo.UpdateBulkFolder(user.ID, req.FileIDs, req.FolderID)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

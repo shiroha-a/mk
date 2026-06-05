@@ -1582,6 +1582,8 @@ func (s *Server) setupRoutes() {
 	federationHandler.SetFollowingRepo(followingRepo)
 	federationHandler.SetUserRepo(userRepo)
 	federationHandler.SetResolver(federationResolver)
+	// moderationNote は公開エンドポイントで moderator にのみ返す (情報漏洩対策)。
+	federationHandler.SetModeratorChecker(roleService)
 	api.POST("/federation/instances", federationHandler.Instances)
 	api.GET("/federation/instances", federationHandler.Instances)
 	api.POST("/federation/show-instance", federationHandler.ShowInstance)
@@ -1811,6 +1813,9 @@ func (s *Server) setupRoutes() {
 	// chat/rooms/show の権限 gate で moderator bypass を効かせる
 	// (upstream 2026.5.4 hasPermissionToViewRoomInfo 互換、#1164 Phase C)。
 	chatService.SetModeratorChecker(roleService)
+	// 1-on-1 DM で recipient が sender を block している場合に弾く
+	// (upstream YOU_HAVE_BEEN_BLOCKED 互換)。
+	chatService.SetBlockingRepo(blockingRepo)
 	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
 	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。

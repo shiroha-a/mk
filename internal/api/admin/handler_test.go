@@ -448,6 +448,28 @@ func TestSuspendUser_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// upstream suspend-user.ts: モデレーター role を持つ対象は凍結できない。
+func TestSuspendUser_RejectsModerator(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["mod1"] = &model.User{ID: "mod1", Username: "mod"}
+	roleRepo.Roles["modrole"] = &model.Role{ID: "modrole", Name: "Mod", IsModerator: true}
+	assignRepo.Assignments["mod1:modrole"] = &model.RoleAssignment{ID: "a1", UserID: "mod1", RoleID: "modrole"}
+
+	rec := doPost(h.SuspendUser, `{"userId":"mod1"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, userRepo.Users["mod1"].IsSuspended, "moderator must not be suspended")
+}
+
+// root アカウントは凍結できない。
+func TestSuspendUser_RejectsRoot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["root"] = &model.User{ID: "root", IsRoot: true}
+
+	rec := doPost(h.SuspendUser, `{"userId":"root"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, userRepo.Users["root"].IsSuspended)
+}
+
 func TestUnsuspendUser_Success(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", IsSuspended: true}

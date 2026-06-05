@@ -127,6 +127,31 @@ func TestCreateMessageToUser_RepoError(t *testing.T) {
 	assert.Empty(t, pub.userCalls)
 }
 
+// recipient (bob) が sender (alice) を block していると DM は ErrChatBlocked。
+func TestCreateMessageToUser_BlockedByRecipient(t *testing.T) {
+	svc, _, pub := newSvc(t)
+	blocks := testutil.NewMockBlockingRepository()
+	// blocker=bob, blockee=alice。
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "bob", BlockeeID: "alice"}))
+	svc.SetBlockingRepo(blocks)
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	assert.ErrorIs(t, err, corechat.ErrChatBlocked)
+	assert.Empty(t, pub.userCalls, "blocked DM must not be persisted/published")
+}
+
+// block 関係が無ければ通常どおり送信できる (block check は逆方向を見ない)。
+func TestCreateMessageToUser_NotBlockedPasses(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	blocks := testutil.NewMockBlockingRepository()
+	// alice が bob を block していても、bob→alice は送れる(逆方向 block は無関係)。
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "alice", BlockeeID: "bob"}))
+	svc.SetBlockingRepo(blocks)
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	require.NoError(t, err)
+}
+
 // --- CreateMessageToRoom ---
 
 func seedRoom(t *testing.T, repo *testutil.MockChatRepository, id string, owner string, members ...string) {

@@ -523,12 +523,21 @@ func TestDriveFileRepository_UpdateBulkFolder(t *testing.T) {
 	})
 
 	target := "df_bulk_folder"
-	require.NoError(t, repo.UpdateBulkFolder([]string{f.ID}, &target))
+	require.NoError(t, repo.UpdateBulkFolder("df_bulk_u1", []string{f.ID}, &target))
 
 	got, err := repo.FindByID(f.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.FolderID)
 	assert.Equal(t, "df_bulk_folder", *got.FolderID)
+
+	// IDOR guard: 別ユーザーIDで同じ fileId を移動しても、所有者が違うため
+	// 行は更新されない (folderId が維持される)。
+	other := "df_bulk_other_folder"
+	require.NoError(t, repo.UpdateBulkFolder("someone_else", []string{f.ID}, &other))
+	got, err = repo.FindByID(f.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FolderID)
+	assert.Equal(t, "df_bulk_folder", *got.FolderID, "other user must not move the file (IDOR)")
 }
 
 func TestDriveFileRepository_DeleteByUser(t *testing.T) {

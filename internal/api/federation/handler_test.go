@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,6 +82,57 @@ func TestInstances_Empty(t *testing.T) {
 	c, rec := newReq(t, `{}`)
 	require.NoError(t, h.Instances(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// fakeModerator implements ModeratorChecker for the moderationNote gate tests.
+type fakeModerator struct{ ids map[string]bool }
+
+func (f fakeModerator) IsModerator(userID string) bool { return f.ids[userID] }
+
+// moderationNote は公開エンドポイントなので未認証 (non-moderator) には null。
+func TestShowInstance_ModerationNoteHiddenFromPublic(t *testing.T) {
+	h, repo := newHandler(t)
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.ModerationNote = "secret moderator memo"
+
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["moderationNote"], "moderationNote must be null for non-moderator")
+	assert.NotContains(t, rec.Body.String(), "secret moderator memo")
+}
+
+// moderator として認証されていれば moderationNote の実値が返る。
+func TestShowInstance_ModerationNoteVisibleToModerator(t *testing.T) {
+	h, repo := newHandler(t)
+	h.SetModeratorChecker(fakeModerator{ids: map[string]bool{"mod1": true}})
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.ModerationNote = "secret moderator memo"
+
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "mod1"})
+	require.NoError(t, h.ShowInstance(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "secret moderator memo", resp["moderationNote"])
+}
+
+// 認証済みでも moderator でなければ moderationNote は隠す。
+func TestInstances_ModerationNoteHiddenFromNonModerator(t *testing.T) {
+	h, repo := newHandler(t)
+	h.SetModeratorChecker(fakeModerator{ids: map[string]bool{"mod1": true}})
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.ModerationNote = "secret memo"
+
+	c, rec := newReq(t, `{"host":"alpha"}`)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "regular"})
+	require.NoError(t, h.Instances(c))
+	assert.NotContains(t, rec.Body.String(), "secret memo")
 }
 
 func TestInstances_Filtered(t *testing.T) {

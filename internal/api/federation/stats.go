@@ -55,17 +55,18 @@ func (h *Handler) Stats(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	// federation/stats は公開エンドポイントなので moderationNote は出さない。
 	topSubFollowers := 0
 	topSub := make([]map[string]any, 0, len(subs))
 	for _, inst := range subs {
 		topSubFollowers += inst.FollowersCount
-		topSub = append(topSub, instanceToMap(inst, hosts))
+		topSub = append(topSub, instanceToMap(inst, hosts, false))
 	}
 	topPubFollowing := 0
 	topPub := make([]map[string]any, 0, len(pubs))
 	for _, inst := range pubs {
 		topPubFollowing += inst.FollowingCount
-		topPub = append(topPub, instanceToMap(inst, hosts))
+		topPub = append(topPub, instanceToMap(inst, hosts, false))
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

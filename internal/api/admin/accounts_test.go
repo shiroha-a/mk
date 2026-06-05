@@ -120,6 +120,26 @@ func TestAccountsDelete_EnqueueFailureIsLogged(t *testing.T) {
 		doPost(h.AccountsDelete, `{"userId":"u1"}`, adminUser).Code)
 }
 
+// root アカウントは削除できない (誤操作 / 権限昇格対策)。
+func TestAccountsDelete_RejectsRoot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["root"] = &model.User{ID: "root", IsRoot: true}
+	stub := &stubDeleteAccountEnqueuer{}
+	h.SetDeleteAccountEnqueuer(stub)
+	rec := doPost(h.AccountsDelete, `{"userId":"root"}`, adminUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, stub.called, "root deletion must not enqueue cascade")
+	assert.False(t, userRepo.Users["root"].IsDeleted)
+}
+
+func TestDeleteAccount_RejectsRoot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["root"] = &model.User{ID: "root", IsRoot: true}
+	rec := doPost(h.DeleteAccount, `{"userId":"root"}`, adminUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, userRepo.Users["root"].IsDeleted)
+}
+
 // #965: 論理削除直後の auth bypass 防止のため、AccountsDelete / DeleteAccount
 // 成功時に target user の全 token cache を即時 invalidate することを担保。
 func TestAccountsDelete_InvalidatesTargetTokenCache(t *testing.T) {

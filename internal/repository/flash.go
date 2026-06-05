@@ -122,6 +122,9 @@ func (r *flashRepository) ListFeatured(sinceID, untilID string, limit, offset in
 		limit = 100
 	}
 	q := r.db.Session(&gorm.Session{})
+	// upstream FlashService.featured: 公開かつ likedCount>0 のみ。非公開 flash
+	// が featured に漏れるのを防ぐ。
+	q = q.Where("visibility = ?", "public").Where(`"likedCount" > 0`)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
@@ -154,6 +157,8 @@ func (r *flashRepository) Search(query, sinceID, untilID string, limit, offset i
 		limit = 100
 	}
 	q := r.db.Where("title ILIKE ? OR summary ILIKE ?", "%"+query+"%", "%"+query+"%")
+	// upstream FlashService.search: 公開 flash のみを検索対象にする。
+	q = q.Where("visibility = ?", "public")
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}

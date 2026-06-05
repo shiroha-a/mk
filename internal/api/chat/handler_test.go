@@ -812,6 +812,28 @@ func TestMessagesCreateToUser(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// recipient が sender を block している場合は YOU_HAVE_BEEN_BLOCKED (403)。
+func TestMessagesCreateToUser_Blocked(t *testing.T) {
+	repo := testutil.NewMockChatRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(repo, idGen)
+	svc := corechat.NewService(repo, idGen)
+	blocks := testutil.NewMockBlockingRepository()
+	// blocker=u2 (recipient), blockee=u1 (sender)。
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "u2", BlockeeID: "u1"}))
+	svc.SetBlockingRepo(blocks)
+	h.SetService(svc)
+
+	rec := post(h.MessagesCreateToUser, `{"text":"hi","toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "YOU_HAVE_BEEN_BLOCKED", errObj["code"])
+}
+
 func TestMessagesCreateToRoom(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}

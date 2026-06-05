@@ -15,6 +15,11 @@ type MockDriveFileRepository struct {
 	// で判定する経路を test 用に模倣する (#722)。空なら guard 無効 (= 旧来の
 	// userId NULL 全削除) で既存テスト互換。
 	EmojiReferencedURLs map[string]bool
+
+	// BulkFolderUserID / BulkFolderFileIDs record the last UpdateBulkFolder
+	// call so handler tests can assert the owning user is scoped (IDOR guard).
+	BulkFolderUserID  string
+	BulkFolderFileIDs []string
 }
 
 func NewMockDriveFileRepository() *MockDriveFileRepository {
@@ -145,7 +150,9 @@ func (m *MockDriveFileRepository) UsageByUser(userID string) (int64, error) {
 	return total, nil
 }
 
-func (m *MockDriveFileRepository) UpdateBulkFolder(_ []string, _ *string) error {
+func (m *MockDriveFileRepository) UpdateBulkFolder(userID string, fileIDs []string, _ *string) error {
+	m.BulkFolderUserID = userID
+	m.BulkFolderFileIDs = fileIDs
 	return nil
 }
 

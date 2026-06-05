@@ -9,6 +9,12 @@
 - Fix: Misskey TS から mk-go に移行した直後、既に期限切れだったアンケートに対してアンケート終了 (pollEnded) 通知が一斉発火する問題を修正 (移行時 backfill migration を追加)
 - Fix: 配送先が一時的にダウンしている場合に、deliver/inbox ジョブが設定省略時にリトライされない問題を修正 (既定の試行回数を Misskey 本家と同じ deliver=12 / inbox=8 に。従来の no-retry 挙動が必要な場合は `deliverJobMaxAttempts` / `inboxJobMaxAttempts` に 1 を指定)
 - Fix: `/api/i/notifications` の通知 payload に埋め込まれるノート本体が公開範囲チェックを経ずに返り、フォロワー限定ノートがリプライ通知などを介して非フォロワーに漏れる問題を修正
+- Fix: `/api/drive/files/move-bulk` が呼び出しユーザーの所有権を検証せず、任意の `fileIds` を指定することで他人のドライブファイルをフォルダ移動できた問題 (IDOR) を修正 (更新を `userId` で絞り込み、宛先フォルダの所有権も検証)
+- Fix: ActivityPub inbox で HTTP 署名者と activity の `actor` の一致を検証しておらず、有効な鍵で署名しつつ body の `actor` に他人を詐称した活動 (Delete / Create 等) を受理してしまう問題 (なりすまし) を修正 (署名者と actor が一致しない場合は、LD-Signature が actor を認証している転送活動のみ許可し、それ以外は破棄)
+- Fix: `/api/chat/messages/create-to-user` で受信者が送信者をブロックしていても DM が届く問題を修正 (`YOU_HAVE_BEEN_BLOCKED` で拒否)
+- Fix: 公開エンドポイントである `/api/federation/instances`・`/api/federation/show-instance`・`/api/federation/stats` がモデレーター専用フィールド `moderationNote` を誰にでも返していた問題を修正 (モデレーターに対してのみ実値を返し、それ以外は null)
+- Fix: `/api/flash/featured`・`/api/flash/search` が公開範囲フィルタを欠き、非公開 (visibility != public) の Play が含まれていた問題を修正 (公開 Play のみを対象に。featured は likedCount > 0 条件も付与)
+- Fix: `/api/admin/suspend-user` がモデレーター / 管理者 / root アカウントを凍結できてしまう問題を修正 (本家同様に拒否)。あわせて `/api/admin/delete-account`・`/api/admin/accounts/delete` で root アカウントの削除を防止
 
 ## 0.9.2
 

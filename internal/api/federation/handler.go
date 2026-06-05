@@ -13,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // ActorResolver is the narrow subset of core/federation.Resolver that
@@ -22,12 +23,21 @@ type ActorResolver interface {
 	ForceResolveActor(uri string) (*model.User, error)
 }
 
+// ModeratorChecker reports whether a user has moderator privileges. Used to
+// gate moderator-only fields (moderationNote) on the otherwise-public
+// federation/instances and federation/show-instance responses. nil disables
+// the gate (moderationNote is never exposed).
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Handler handles federation-related API endpoints.
 type Handler struct {
 	svc           *coreinstance.Service
 	followingRepo repository.FollowingRepository
 	userRepo      repository.UserRepository
 	resolver      ActorResolver
+	moderator     ModeratorChecker
 }
 
 // NewHandler creates a new federation Handler.
@@ -48,6 +58,26 @@ func (h *Handler) SetUserRepo(r repository.UserRepository) {
 // SetResolver attaches an ActorResolver for update-remote-user.
 func (h *Handler) SetResolver(r ActorResolver) {
 	h.resolver = r
+}
+
+// SetModeratorChecker attaches a ModeratorChecker so moderationNote is only
+// surfaced to moderators on the public instance-listing endpoints.
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
+	h.moderator = m
+}
+
+// requesterIsModerator reports whether the (optionally authenticated) caller
+// is a moderator. The global Authenticate middleware populates the user when a
+// valid token is presented; unauthenticated callers return false.
+func (h *Handler) requesterIsModerator(c echo.Context) bool {
+	if h.moderator == nil {
+		return false
+	}
+	user := middleware.GetUser(c)
+	if user == nil {
+		return false
+	}
+	return h.moderator.IsModerator(user.ID)
 }
 
 // InstancesRequest is the request body for federation/instances.
@@ -108,9 +138,10 @@ func (h *Handler) Instances(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	showModNote := h.requesterIsModerator(c)
 	out := make([]map[string]any, 0, len(rows))
 	for _, inst := range rows {
-		out = append(out, instanceToMap(inst, hosts))
+		out = append(out, instanceToMap(inst, hosts, showModNote))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -143,7 +174,7 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		slog.Error("federation/show-instance: FederationHostLists failed", "host", req.Host, "err", err)
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, instanceToMap(inst, hosts))
+	return c.JSON(http.StatusOK, instanceToMap(inst, hosts, h.requesterIsModerator(c)))
 }
 
 // instanceToMap shapes an Instance row into the JSON response object expected
@@ -157,7 +188,14 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 // meta.blockedHosts / silencedHosts / mediaSilencedHosts との suffix-match で
 // 判定する (本家 InstanceEntityService と同じ)。突合対象の host 一覧は呼び出し
 // 元が meta から 1 度だけ取得して渡す。
-func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets) map[string]any {
+func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, showModerationNote bool) map[string]any {
+	// moderationNote はモデレーター専用フィールド。公開エンドポイントなので
+	// 非モデレーターには null を返す (upstream InstanceEntityService の
+	// `moderationNote: iAmModerator ? note : null` 互換)。
+	var moderationNote any
+	if showModerationNote {
+		moderationNote = inst.ModerationNote
+	}
 	return map[string]any{
 		"id":                      inst.ID,
 		"firstRetrievedAt":        inst.FirstRetrievedAt,
@@ -188,6 +226,6 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets) 
 		"faviconUrl":              inst.FaviconURL,
 		"themeColor":              inst.ThemeColor,
 		"infoUpdatedAt":           inst.InfoUpdatedAt,
-		"moderationNote":          inst.ModerationNote,
+		"moderationNote":          moderationNote,
 	}
 }

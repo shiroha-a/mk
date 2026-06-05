@@ -18,6 +18,10 @@ func (h *Handler) AccountsDelete(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// root アカウントの削除は壊滅的なので防御的に拒否する (誤操作 / 権限昇格)。
+	if h.isRootUser(req.UserID) {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete the root account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true, "isDeleted": true}); err == nil {
 		// 論理削除直後の auth bypass 防止 (#965)。target の全 token cache
 		// entry を即時 invalidate して 30s stale window を消す。DB 更新が
@@ -64,6 +68,10 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// root アカウントの削除は壊滅的なので防御的に拒否する (誤操作 / 権限昇格)。
+	if h.isRootUser(req.UserID) {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete the root account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true, "isDeleted": true}); err == nil {
 		// AccountsDelete と同じ。target の全 token cache entry を即時
 		// invalidate (#965)。
@@ -72,6 +80,20 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	}
 	h.scheduleAccountCascade(req.UserID)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// isRootUser reports whether the given user ID is the instance root account.
+// Used to guard destructive admin actions (delete-account) against removing
+// the root account. Returns false when the user cannot be resolved.
+func (h *Handler) isRootUser(userID string) bool {
+	if h.userRepo == nil || userID == "" {
+		return false
+	}
+	u, err := h.userRepo.FindByID(userID)
+	if err != nil || u == nil {
+		return false
+	}
+	return u.IsRoot
 }
 
 // scheduleAccountCascade queues the background cascade deletion. Errors

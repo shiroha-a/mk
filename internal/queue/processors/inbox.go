@@ -3,6 +3,7 @@ package processors
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,6 +79,11 @@ type InboxChartHook interface {
 // 実装は core/federation.LDSignatureVerifier。
 type LDSignatureVerifier interface {
 	VerifyIfPresent(rawBody []byte) error
+	// VerifyAndCreator additionally reports whether the activity carried an
+	// LD-Signature and, on success, the verified signature.creator key URI.
+	// Used to authenticate forwarded activities whose HTTP signer differs
+	// from the activity actor.
+	VerifyAndCreator(rawBody []byte) (creator string, present bool, err error)
 }
 
 type InboxProcessor struct {
@@ -170,27 +176,31 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 			// よって upstream の追加 case 分岐は mk-go では不要 (= triage #1003 close)。
 			return nil
 		}
+		// HTTP 署名者 (actor) が activity body の actor と一致することを保証する
+		// (actor spoofing 対策)。一致しない場合は転送活動とみなし LD-Signature が
+		// body actor を認証している場合のみ許可する。LD-Signature の hardening
+		// (forbidden directive 等) も本 gate に集約する。
+		if err := p.authorizeActor(payload.Body, actor); err != nil {
+			slog.Warn("inbox: actor authorization failed, dropping activity",
+				"host", payload.Host, "err", err)
+			return nil
+		}
 		if actor != nil && actor.Host != nil {
 			host = *actor.Host
 		}
 		p.touchInstance(actor)
 		p.commitChart(actor)
-	}
-	_ = host // reserved for future per-host stats; currently unused
-
-	// LD-Signature verify (#1164 Phase D)。HTTP Signature 検証通過後の追加
-	// gate で、activity body に signature field があれば RsaSignature2017 +
-	// 2026.5.4 hardening を実行する。fail なら activity を drop (= queue ack
-	// するが Process は呼ばない、upstream UnrecoverableError 互換挙動)。
-	// signature 無し / verifier 未配線では skip (= HTTP Signature のみ
-	// で従来通り処理)。
-	if p.ldVerifier != nil {
+	} else if p.ldVerifier != nil {
+		// legacy / direct-enqueue 経路 (Headers 無し = HTTP 署名者を特定できない)。
+		// 署名者照合はできないが、body に LD-Signature があれば従来どおり検証して
+		// hardening を効かせる (#1164 Phase D)。fail なら drop。
 		if err := p.ldVerifier.VerifyIfPresent(payload.Body); err != nil {
 			slog.Warn("inbox: LD-Signature verification failed, dropping activity",
 				"host", payload.Host, "err", err)
 			return nil
 		}
 	}
+	_ = host // reserved for future per-host stats; currently unused
 
 	if err := p.processor.Process(payload.Body); err != nil {
 		if errors.Is(err, federation.ErrUnsupportedActivity) {
@@ -234,6 +244,88 @@ func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User,
 		return nil, err
 	}
 	return actor, nil
+}
+
+// authorizeActor enforces that the HTTP-signature signer is authorized to
+// post the given activity, mirroring upstream InboxProcessorService's
+// `authUser.user.uri !== getApId(activity.actor)` gate.
+//
+//   - signer URI == activity.actor  -> accept (the common case). LD-Signature,
+//     if present, is still verified for hardening (forbidden directives etc.).
+//   - signer URI != activity.actor  -> the activity was forwarded (e.g.
+//     Mastodon-style relay). Accept ONLY when a valid LD-Signature
+//     authenticates the activity actor: the LD-Signature must be present, must
+//     verify, and its creator key must belong to a user whose URI equals
+//     activity.actor. Otherwise drop (return error) to block actor spoofing.
+func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
+	bodyActor := extractActorIRI(body)
+	if bodyActor == "" {
+		// actor 欠落は Process 側 ("activity missing actor") が弾く。ここでは
+		// 判定不能なので素通しし、なりすまし対象が無い状態にする。
+		return nil
+	}
+	signerURI := ""
+	if signer != nil && signer.URI != nil {
+		signerURI = *signer.URI
+	}
+
+	if signerURI != "" && signerURI == bodyActor {
+		// 署名者 == actor。LD-Signature があれば hardening のため検証する。
+		if p.ldVerifier != nil {
+			return p.ldVerifier.VerifyIfPresent(body)
+		}
+		return nil
+	}
+
+	// 署名者 != actor: 転送活動の可能性。LD-Signature による actor 認証が必須。
+	if p.ldVerifier == nil {
+		return fmt.Errorf("actor mismatch and no LD verifier: signer=%q actor=%q", signerURI, bodyActor)
+	}
+	creator, present, err := p.ldVerifier.VerifyAndCreator(body)
+	if err != nil {
+		return fmt.Errorf("ld-signature verify failed: %w", err)
+	}
+	if !present {
+		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
+	}
+	// LD-Signature の creator (鍵) の owner URI が activity.actor と一致するか
+	// 確認する。一致しなければ「自分の鍵で署名したが他人を actor に詐称」した
+	// 活動なので drop する。
+	ldUser, err := p.verifier.ResolveActor(activitypub.ResolveKeyURL(creator))
+	if err != nil {
+		return fmt.Errorf("resolve ld-signature creator %q: %w", creator, err)
+	}
+	ldURI := ""
+	if ldUser != nil && ldUser.URI != nil {
+		ldURI = *ldUser.URI
+	}
+	if ldURI == "" || ldURI != bodyActor {
+		return fmt.Errorf("ld-signature signer %q != activity.actor %q", ldURI, bodyActor)
+	}
+	return nil
+}
+
+// extractActorIRI reads the `actor` IRI from an activity body. The actor may
+// be a bare string IRI or an embedded object carrying an `id` (upstream
+// Misskey #17340), so both shapes are handled.
+func extractActorIRI(body []byte) string {
+	var probe struct {
+		Actor json.RawMessage `json:"actor"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || len(probe.Actor) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(probe.Actor, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(probe.Actor, &obj); err == nil {
+		return obj.ID
+	}
+	return ""
 }
 
 // buildSignedRequest reconstructs an *http.Request that activitypub.

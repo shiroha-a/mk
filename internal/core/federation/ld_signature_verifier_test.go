@@ -66,6 +66,19 @@ func TestLDSignatureVerifier_MissingCreator_Rejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "creator missing")
 }
 
+// signature field がオブジェクトでない (例: 文字列) 場合は reject。present=true
+// を報告しつつ error を返す (VerifyAndCreator 経路)。
+func TestLDSignatureVerifier_SignatureNotObject_Rejected(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	v := corefederation.NewLDSignatureVerifier(repo)
+
+	creator, present, err := v.VerifyAndCreator([]byte(`{"type":"Note","signature":"not-an-object"}`))
+	require.Error(t, err)
+	assert.True(t, present, "signature field exists, so present must be true")
+	assert.Empty(t, creator)
+	assert.Contains(t, err.Error(), "not an object")
+}
+
 func TestLDSignatureVerifier_UnknownCreator_Rejected(t *testing.T) {
 	repo := testutil.NewMockUserPublickeyRepository()
 	v := corefederation.NewLDSignatureVerifier(repo)

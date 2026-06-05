@@ -67,6 +67,9 @@ func (h *Handler) mapChatErr(c echo.Context, err error) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	case errors.Is(err, corechat.ErrInvalidTarget):
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	case errors.Is(err, corechat.ErrChatBlocked):
+		// recipient が sender を block している (upstream YOU_HAVE_BEEN_BLOCKED)。
+		return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot send a message because you have been blocked by this user.", "c15a5199-7422-4968-941a-2a462c478f7d"))
 	case errors.Is(err, corechat.ErrChatScopeViolation):
 		// CherryPick の `recipient is cannot chat (...)` 相当 (#692)。
 		// upstream は ApiError を持たず単なる Error を投げるので mk-go 固有

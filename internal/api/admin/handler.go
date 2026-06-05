@@ -885,6 +885,12 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 	}
 
+	// upstream suspend-user.ts: モデレーター/管理者 (root を含む) アカウントは
+	// 凍結できない。moderator が他の moderator/admin を凍結する権限昇格を防ぐ。
+	if user.IsRoot || (h.roleService != nil && h.roleService.IsModerator(user.ID)) {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

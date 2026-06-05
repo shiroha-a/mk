@@ -41,6 +41,10 @@ var (
 	// collides with an unrelated local room, so the inbound activity can never
 	// be applied. Callers should not retry.
 	ErrRoomOwnerMismatch = errors.New("chat room federation: room owner mismatch")
+	// ErrChatBlocked is returned by CreateMessageToUser when the recipient has
+	// blocked the sender. Mirrors upstream ChatService's 'blocked' error
+	// (YOU_HAVE_BEEN_BLOCKED).
+	ErrChatBlocked = errors.New("you have been blocked by the recipient")
 )
 
 // StreamingPublisher is the Redis pub/sub dispatch interface the service uses
@@ -96,6 +100,10 @@ type Service struct {
 	// moderatorChecker: chat/rooms/show 等の権限 gate で「moderator は閲覧可」
 	// を判定するために使う (upstream 2026.5.4 互換)。nil 安全。
 	moderatorChecker ModeratorChecker
+	// blockingRepo: 1-on-1 DM 送信時に recipient が sender を block して
+	// いないか判定する (upstream ChatService の YOU_HAVE_BEEN_BLOCKED gate)。
+	// nil なら block check は skip。
+	blockingRepo repository.BlockingRepository
 }
 
 // NewService constructs a chat Service.
@@ -131,6 +139,12 @@ func (s *Service) SetAPDelivery(userRepo repository.UserRepository, renderer *ac
 // nil なら moderator bypass は無効化 (= owner / member / 招待のみ true)。
 func (s *Service) SetModeratorChecker(m ModeratorChecker) {
 	s.moderatorChecker = m
+}
+
+// SetBlockingRepo wires a BlockingRepository so CreateMessageToUser can reject
+// DMs to a recipient who has blocked the sender. nil disables the block check.
+func (s *Service) SetBlockingRepo(r repository.BlockingRepository) {
+	s.blockingRepo = r
 }
 
 // HasPermissionToViewRoomInfo は room のメタ情報を閲覧できる権限を持つか判定する
@@ -269,6 +283,14 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 					return nil, err
 				}
 			}
+		}
+	}
+	// recipient が sender を block している場合は DM を拒否する (upstream
+	// ChatService.createMessageToUser の checkBlocked(toUser, fromUser) 相当)。
+	if s.blockingRepo != nil {
+		blocked, err := s.blockingRepo.Exists(toUserID, fromUserID)
+		if err == nil && blocked {
+			return nil, ErrChatBlocked
 		}
 	}
 	msg := &model.ChatMessage{

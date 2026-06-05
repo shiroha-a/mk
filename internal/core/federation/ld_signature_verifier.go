@@ -47,24 +47,39 @@ func NewLDSignatureVerifier(pubkeyRepo repository.UserPublickeyRepository) *LDSi
 //   - RsaSignature2017 verify fails (signature mismatch / key mismatch /
 //     unsupported algorithm)
 func (v *LDSignatureVerifier) VerifyIfPresent(rawBody []byte) error {
+	_, _, err := v.VerifyAndCreator(rawBody)
+	return err
+}
+
+// VerifyAndCreator behaves like VerifyIfPresent but additionally reports
+// whether the activity carried an LD-Signature (`present`) and, on success,
+// the verified `signature.creator` key URI. Callers use the creator to
+// confirm the LD-Signature actually authenticates the activity's `actor`
+// (forwarded-activity authentication, upstream
+// `authUser.user.uri !== getApId(activity.actor)` gate).
+//
+//   - no `signature` field        -> ("", false, nil)
+//   - signature present + verify  -> (creator, true, nil)
+//   - signature present + invalid -> ("", true, err)
+func (v *LDSignatureVerifier) VerifyAndCreator(rawBody []byte) (string, bool, error) {
 	if v == nil || v.pubkeyRepo == nil {
-		return nil
+		return "", false, nil
 	}
 	var act map[string]any
 	if err := json.Unmarshal(rawBody, &act); err != nil {
-		return fmt.Errorf("ld-sig: body unmarshal: %w", err)
+		return "", false, fmt.Errorf("ld-sig: body unmarshal: %w", err)
 	}
 	sigRaw, hasSig := act["signature"]
 	if !hasSig || sigRaw == nil {
-		return nil
+		return "", false, nil
 	}
 	sig, ok := sigRaw.(map[string]any)
 	if !ok {
-		return errors.New("ld-sig: signature field is not an object")
+		return "", true, errors.New("ld-sig: signature field is not an object")
 	}
 	creator, _ := sig["creator"].(string)
 	if creator == "" {
-		return errors.New("ld-sig: signature.creator missing")
+		return "", true, errors.New("ld-sig: signature.creator missing")
 	}
 	// per-verify fresh processor (upstream JsonLd class instance と等価)。
 	// cache cap / freeze は新規 instance ごとに reset される。
@@ -89,12 +104,15 @@ func (v *LDSignatureVerifier) VerifyIfPresent(rawBody []byte) error {
 	// `proc.Compact(act, ...)` を挟んでから check するフローに変更する。
 	proc := ld.NewProcessor()
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {
-		return err
+		return "", true, err
 	}
 	proc.Freeze()
 	pubkey, err := v.pubkeyRepo.FindByKeyID(creator)
 	if err != nil {
-		return fmt.Errorf("ld-sig: public key not found for keyId=%s: %w", creator, err)
+		return "", true, fmt.Errorf("ld-sig: public key not found for keyId=%s: %w", creator, err)
 	}
-	return proc.VerifyRsaSignature2017(act, pubkey.KeyPEM)
+	if err := proc.VerifyRsaSignature2017(act, pubkey.KeyPEM); err != nil {
+		return "", true, err
+	}
+	return creator, true, nil
 }

@@ -42,7 +42,11 @@ type DriveFileRepository interface {
 	ExistsByMD5(userID, md5 string) (bool, error)
 	ListByFileIDs(fileIDs []string) ([]*model.DriveFile, error)
 	UsageByUser(userID string) (int64, error)
-	UpdateBulkFolder(fileIDs []string, folderID *string) error
+	// UpdateBulkFolder moves the given files into folderID, scoped to the
+	// owning user. The userID predicate prevents a caller from moving drive
+	// files they do not own (IDOR): upstream drive/files/move-bulk only ever
+	// touches the caller's own rows.
+	UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error
 	// DeleteOrphans removes rows whose userId is NULL. Returns affected count.
 	DeleteOrphans() (int64, error)
 	// DeleteRemoteCache removes remote cache rows (isLink=true with host set).
@@ -234,8 +238,12 @@ func (r *driveFileRepository) UsageByUser(userID string) (int64, error) {
 	return total, nil
 }
 
-func (r *driveFileRepository) UpdateBulkFolder(fileIDs []string, folderID *string) error {
-	return r.db.Model(&model.DriveFile{}).Where("id IN ?", fileIDs).Update("folderId", folderID).Error
+func (r *driveFileRepository) UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error {
+	// userId で絞ることで他人の DriveFile を移動できる IDOR を防ぐ (#parity)。
+	return r.db.Model(&model.DriveFile{}).
+		Where("id IN ?", fileIDs).
+		Where(`"userId" = ?`, userID).
+		Update("folderId", folderID).Error
 }
 
 func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {

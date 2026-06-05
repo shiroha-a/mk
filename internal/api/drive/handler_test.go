@@ -1021,11 +1021,37 @@ func TestFilesUploadFromURL(t *testing.T) {
 }
 
 func TestFilesMoveBulk_Success(t *testing.T) {
-	h, _, _ := newHandlerWithRepos(t)
+	h, fileRepo, _ := newHandlerWithRepos(t)
 	c, rec := newJSONReq(t, `{"fileIds":["f1","f2"]}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesMoveBulk(c))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// IDOR guard: handler は必ず呼出ユーザーの ID を repo に渡す。
+	assert.Equal(t, "u1", fileRepo.BulkFolderUserID)
+	assert.Equal(t, []string{"f1", "f2"}, fileRepo.BulkFolderFileIDs)
+}
+
+func TestFilesMoveBulk_RejectsForeignFolder(t *testing.T) {
+	h, fileRepo, folderRepo := newHandlerWithRepos(t)
+	owner := "someoneElse"
+	folderRepo.Folders["folderX"] = &model.DriveFolder{ID: "folderX", UserID: &owner}
+	c, rec := newJSONReq(t, `{"fileIds":["f1"],"folderId":"folderX"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	// 他人所有の宛先 folder は NO_SUCH_FOLDER で拒否し、移動は実行しない。
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, fileRepo.BulkFolderUserID, "must not move files into a foreign folder")
+}
+
+func TestFilesMoveBulk_AcceptsOwnFolder(t *testing.T) {
+	h, fileRepo, folderRepo := newHandlerWithRepos(t)
+	owner := "u1"
+	folderRepo.Folders["folderOwn"] = &model.DriveFolder{ID: "folderOwn", UserID: &owner}
+	c, rec := newJSONReq(t, `{"fileIds":["f1"],"folderId":"folderOwn"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "u1", fileRepo.BulkFolderUserID)
 }
 
 func TestFilesMoveBulk_InvalidParam(t *testing.T) {
