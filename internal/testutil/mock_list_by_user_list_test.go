@@ -342,3 +342,54 @@ func TestMockListByUserList_IncludeLocalRenotesFalse_DropsLocalUserRenote(t *tes
 	assert.NotContains(t, gotIDs, "n_local", "IncludeLocalRenotes=false で local user の pure renote が除外")
 	assert.Contains(t, gotIDs, "n_remote")
 }
+
+// #1506: muting subquery 系 filter は mock 未実装。docstring の案内だけだと
+// silent regression を招くため、これら 3 fields のいずれかが set されたら panic
+// で loud-fail させる。下記 3 件で各 entry point の panic 経路を担保する。
+// member seeding は最低限 (panic は filter check で前段に出るので member 構成
+// は実質関係しないが、real path に近い形で 1 件だけ seed しておく)。
+
+func TestMockListByUserList_PanicsOnUseMutingSubquery(t *testing.T) {
+	m := NewMockNoteRepository()
+	m.UserListMembers["l1"] = []*model.UserListMembership{{UserListID: "l1", UserID: "alice"}}
+	m.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+
+	require.PanicsWithValue(t,
+		"testutil.MockNoteRepository.ListByUserList: muting subquery filter "+
+			"(UseMutingSubquery / MutedUserIDs / MutedChannelIDs) is not implemented in this mock. "+
+			"Escalate to a dedicated fake such as userListNotesRepo in internal/api/notes/handler_extra_test.go, "+
+			"or exercise the real SQL push-down in internal/repository/note.go applyTimelineFilter via a DB-backed test (#1506).",
+		func() {
+			_, _ = m.ListByUserList("l1", 10, "", "", model.TimelineDBFilter{
+				ViewerID:          "viewer",
+				UseMutingSubquery: true,
+			})
+		},
+	)
+}
+
+func TestMockListByUserList_PanicsOnMutedUserIDs(t *testing.T) {
+	m := NewMockNoteRepository()
+	m.UserListMembers["l1"] = []*model.UserListMembership{{UserListID: "l1", UserID: "alice"}}
+	m.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+
+	require.Panics(t, func() {
+		_, _ = m.ListByUserList("l1", 10, "", "", model.TimelineDBFilter{
+			ViewerID:     "viewer",
+			MutedUserIDs: []string{"muted-author"},
+		})
+	})
+}
+
+func TestMockListByUserList_PanicsOnMutedChannelIDs(t *testing.T) {
+	m := NewMockNoteRepository()
+	m.UserListMembers["l1"] = []*model.UserListMembership{{UserListID: "l1", UserID: "alice"}}
+	m.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+
+	require.Panics(t, func() {
+		_, _ = m.ListByUserList("l1", 10, "", "", model.TimelineDBFilter{
+			ViewerID:        "viewer",
+			MutedChannelIDs: []string{"ch-muted"},
+		})
+	})
+}
