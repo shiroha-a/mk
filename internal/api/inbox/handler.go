@@ -181,7 +181,12 @@ func (h *Handler) Inbox(c echo.Context) error {
 	}
 
 	// Legacy synchronous fallback (enqueuer 未配線時)。テストや旧来配線を
-	// 維持するために残してある。
+	// 維持するために残してある。production では router.go が必ず SetEnqueuer を
+	// 呼ぶため到達しない。なお本経路は worker 側 InboxProcessor が持つ
+	// actor-authorization gate (署名者 != activity.actor のなりすまし検出,
+	// #parity review AUTH-1/AUTH-4) を通らない。production が async 一択である
+	// 前提のため許容しているが、将来この fallback を残すなら同 gate の適用
+	// (または fallback 自体の撤去) が必要。
 	actor, err := h.verifySignature(c.Request())
 	if err != nil {
 		slog.Warn("inbox signature verification failed", "err", err)

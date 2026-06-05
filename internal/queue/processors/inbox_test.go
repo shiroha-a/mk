@@ -480,7 +480,7 @@ func TestInboxProcessor_ForwardedWithValidLDSig(t *testing.T) {
 	// LD-Signature が origin/alice の鍵で署名済 (creator が alice を指す)。
 	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, creator: "https://origin.example/users/alice#main-key"})
 
-	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017"}}`)
+	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://origin.example/users/alice#main-key"}}`)
 	payload := signedInboxPayload(t, key, body)
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
 		TypeName: queue.TaskTypeInbox,
@@ -563,9 +563,9 @@ func TestInboxProcessor_ForwardedLDCreatorUnresolvableDropped(t *testing.T) {
 	stub := &stubFedProcessor{}
 	p := processors.NewInboxProcessor(stub)
 	p.SetSignatureVerifier(verifier)
-	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, creator: "https://unknown.example/users/x#main-key"})
+	p.SetLDSignatureVerifier(&stubLDVerifier{present: true})
 
-	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017"}}`)
+	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://unknown.example/users/x#main-key"}}`)
 	payload := signedInboxPayload(t, key, body)
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
 		TypeName: queue.TaskTypeInbox,
@@ -595,15 +595,59 @@ func TestInboxProcessor_ForwardedLDSigWrongActorDropped(t *testing.T) {
 	p := processors.NewInboxProcessor(stub)
 	p.SetSignatureVerifier(verifier)
 	// LD creator = mal だが body actor は alice を詐称。
-	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, creator: "https://evil.example/users/mal#main-key"})
+	p.SetLDSignatureVerifier(&stubLDVerifier{present: true})
 
-	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017"}}`)
+	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://evil.example/users/mal#main-key"}}`)
 	payload := signedInboxPayload(t, key, body)
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
 		TypeName: queue.TaskTypeInbox,
 		Body:     mustEncode(t, payload),
 	}))
 	assert.Empty(t, stub.calls, "LD-Signature creator != activity.actor must be dropped")
+}
+
+// AUTH-1 regression guard: gate は Process と同じ正規化 (unwrap + JSON-LD
+// Normalize) を経た actor で判定するため、`as:actor` / `actor:{"@id":...}` /
+// singleton-array wrap のいずれの形状でも署名者と異なる actor を詐称した
+// 活動は drop される (raw body を直 parse していた頃はこれらで gate を
+// すり抜けられた)。
+func TestInboxProcessor_SpoofShapesDropped(t *testing.T) {
+	bobHost := "evil.example"
+	newP := func(t *testing.T) (*processors.InboxProcessor, *stubFedProcessor, *activitypub.PrivateKey) {
+		t.Helper()
+		priv, pub, err := activitypub.GenerateRSAKeypair()
+		require.NoError(t, err)
+		key, err := activitypub.NewPrivateKey("https://evil.example/users/bob#main-key", priv)
+		require.NoError(t, err)
+		verifier := &multiActorVerifier{
+			pubKey: pub,
+			byURI: map[string]*model.User{
+				"https://evil.example/users/bob": {ID: "bob", Host: &bobHost, URI: uptr("https://evil.example/users/bob")},
+			},
+		}
+		stub := &stubFedProcessor{}
+		p := processors.NewInboxProcessor(stub)
+		p.SetSignatureVerifier(verifier)
+		p.SetLDSignatureVerifier(&stubLDVerifier{present: false})
+		return p, stub, key
+	}
+
+	cases := map[string]string{
+		"as:actor prefix": `{"type":"Delete","as:actor":"https://victim.example/users/alice","object":"https://victim.example/notes/1"}`,
+		"@id object form": `{"type":"Delete","actor":{"@id":"https://victim.example/users/alice"},"object":"https://victim.example/notes/1"}`,
+		"singleton array": `[{"type":"Delete","actor":"https://victim.example/users/alice","object":"https://victim.example/notes/1"}]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, stub, key := newP(t)
+			payload := signedInboxPayload(t, key, []byte(body))
+			require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+				TypeName: queue.TaskTypeInbox,
+				Body:     mustEncode(t, payload),
+			}))
+			assert.Empty(t, stub.calls, "spoofed actor via %s must be dropped", name)
+		})
+	}
 }
 
 // SetLDSignatureVerifier 未配線 (= ldVerifier nil) なら gate は skip され

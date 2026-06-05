@@ -394,6 +394,31 @@ func (p *Processor) Process(body []byte) error {
 	return ErrUnsupportedActivity
 }
 
+// ExtractActorIRI returns the authoritative actor IRI of an inbound activity,
+// applying the SAME singleton-array unwrap + JSON-LD normalization that Process
+// performs before dispatch. The InboxProcessor's actor-authorization gate must
+// use this (not a raw-body parse) so that the actor it authorizes is exactly
+// the actor Process will act on. Otherwise `as:actor`, `actor:{"@id":...}` or a
+// singleton-array-wrapped activity would let an attacker present an empty/benign
+// actor to the gate while Process resolves the real (spoofed) actor.
+//
+// Returns "" when no actor can be derived (Process will then reject the body).
+func ExtractActorIRI(body []byte) string {
+	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
+		body = unwrapped
+	}
+	normalized, err := activitypub.Normalize(body)
+	if err != nil {
+		return ""
+	}
+	var act genericActivity
+	if err := json.Unmarshal(normalized, &act); err != nil {
+		return ""
+	}
+	act.normalizeActor(normalized)
+	return act.Actor
+}
+
 // SetBlockingService wires the blocking service for Block/Undo Block activities.
 func (p *Processor) SetBlockingService(svc *coreblocking.Service) {
 	p.blockingService = svc

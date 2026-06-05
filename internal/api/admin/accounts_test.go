@@ -140,6 +140,31 @@ func TestDeleteAccount_RejectsRoot(t *testing.T) {
 	assert.False(t, userRepo.Users["root"].IsDeleted)
 }
 
+// ローカル system account (host=nil, username に '.' を含む, IsRoot=false) も
+// 削除拒否される (upstream の system-account ガード相当)。
+func TestAccountsDelete_RejectsSystemAccount(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["sys"] = &model.User{ID: "sys", Username: "relay.actor", Host: nil, IsRoot: false}
+	stub := &stubDeleteAccountEnqueuer{}
+	h.SetDeleteAccountEnqueuer(stub)
+	rec := doPost(h.AccountsDelete, `{"userId":"sys"}`, adminUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, stub.called, "system account deletion must not enqueue cascade")
+	assert.False(t, userRepo.Users["sys"].IsDeleted)
+}
+
+// root user id が meta.rootUserId で示されるケース (IsRoot 列が無い drop-in) も
+// 削除拒否される。
+func TestDeleteAccount_RejectsMetaRootUser(t *testing.T) {
+	h, userRepo, metaRepo, _ := newTestHandler(t)
+	rootID := "metaRoot"
+	metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &rootID}
+	userRepo.Users["metaRoot"] = &model.User{ID: "metaRoot", Username: "alice", IsRoot: false}
+	rec := doPost(h.DeleteAccount, `{"userId":"metaRoot"}`, adminUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, userRepo.Users["metaRoot"].IsDeleted)
+}
+
 // #965: 論理削除直後の auth bypass 防止のため、AccountsDelete / DeleteAccount
 // 成功時に target user の全 token cache を即時 invalidate することを担保。
 func TestAccountsDelete_InvalidatesTargetTokenCache(t *testing.T) {

@@ -470,6 +470,19 @@ func TestSuspendUser_RejectsRoot(t *testing.T) {
 	assert.False(t, userRepo.Users["root"].IsSuspended)
 }
 
+// IsAdministrator role (IsModerator=false / IsAdministrator=true) を持つ対象も
+// 凍結できない (IsModerator が admin role を含むため)。
+func TestSuspendUser_RejectsAdministrator(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["adm1"] = &model.User{ID: "adm1", Username: "adm"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+
+	rec := doPost(h.SuspendUser, `{"userId":"adm1"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, userRepo.Users["adm1"].IsSuspended, "administrator must not be suspended")
+}
+
 func TestUnsuspendUser_Success(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", IsSuspended: true}

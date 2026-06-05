@@ -135,6 +135,36 @@ func TestInstances_ModerationNoteHiddenFromNonModerator(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "secret memo")
 }
 
+// Instances (複数行) でも moderator には moderationNote が実値で返る。
+func TestInstances_ModerationNoteVisibleToModerator(t *testing.T) {
+	h, repo := newHandler(t)
+	h.SetModeratorChecker(fakeModerator{ids: map[string]bool{"mod1": true}})
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.ModerationNote = "visible memo"
+
+	c, rec := newReq(t, `{"host":"alpha"}`)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "mod1"})
+	require.NoError(t, h.Instances(c))
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp)
+	assert.Equal(t, "visible memo", resp[0]["moderationNote"])
+}
+
+// SetModeratorChecker 未配線 (moderator==nil) なら認証済みでも fail-closed で hidden。
+func TestShowInstance_ModerationNoteHiddenWhenCheckerUnwired(t *testing.T) {
+	h, repo := newHandler(t) // SetModeratorChecker を呼ばない
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.ModerationNote = "secret memo"
+
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "whoever"})
+	require.NoError(t, h.ShowInstance(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["moderationNote"])
+}
+
 func TestInstances_Filtered(t *testing.T) {
 	h, repo := newHandler(t)
 	seedInstance(t, repo, "alpha.example")

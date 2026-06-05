@@ -1054,6 +1054,25 @@ func TestFilesMoveBulk_AcceptsOwnFolder(t *testing.T) {
 	assert.Equal(t, "u1", fileRepo.BulkFolderUserID)
 }
 
+func TestFilesMoveBulk_NonexistentFolder(t *testing.T) {
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	c, rec := newJSONReq(t, `{"fileIds":["f1"],"folderId":"ghost"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, fileRepo.BulkFolderUserID, "must not move into a nonexistent folder")
+}
+
+// folderId 未指定 (root への移動) は folder 検証をスキップして移動する。
+func TestFilesMoveBulk_RootMoveSkipsFolderCheck(t *testing.T) {
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	c, rec := newJSONReq(t, `{"fileIds":["f1"]}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "u1", fileRepo.BulkFolderUserID)
+}
+
 func TestFilesMoveBulk_InvalidParam(t *testing.T) {
 	h, _, _ := newHandlerWithRepos(t)
 	c, rec := newJSONReq(t, `{}`)

@@ -9,6 +9,8 @@ import (
 // MockBlockingRepository is a test double for repository.BlockingRepository.
 type MockBlockingRepository struct {
 	Blockings map[string]*model.Blocking // keyed by ID
+	// ExistsErr, when set, is returned by Exists to exercise fail-closed paths.
+	ExistsErr error
 }
 
 func NewMockBlockingRepository() *MockBlockingRepository {
@@ -35,6 +37,9 @@ func (m *MockBlockingRepository) FindByPair(blockerID, blockeeID string) (*model
 }
 
 func (m *MockBlockingRepository) Exists(blockerID, blockeeID string) (bool, error) {
+	if m.ExistsErr != nil {
+		return false, m.ExistsErr
+	}
 	_, err := m.FindByPair(blockerID, blockeeID)
 	return err == nil, nil
 }

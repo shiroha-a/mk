@@ -152,6 +152,33 @@ func TestCreateMessageToUser_NotBlockedPasses(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// block check の DB error は fail-closed (送信せず error を返す)。
+func TestCreateMessageToUser_BlockCheckFailClosed(t *testing.T) {
+	svc, _, pub := newSvc(t)
+	blocks := testutil.NewMockBlockingRepository()
+	blocks.ExistsErr = errors.New("db down")
+	svc.SetBlockingRepo(blocks)
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	require.Error(t, err)
+	assert.Empty(t, pub.userCalls, "fail-closed: message must not be sent on block-check error")
+}
+
+// 連合 inbound DM (CreateMessageViaAP) でも recipient が sender を block して
+// いれば拒否される (#parity review chat-block-1)。
+func TestCreateMessageViaAP_BlockedByRecipient(t *testing.T) {
+	svc, _, pub := newSvc(t)
+	blocks := testutil.NewMockBlockingRepository()
+	// blocker=bob (local recipient), blockee=alice (remote sender)。
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "bob", BlockeeID: "alice"}))
+	svc.SetBlockingRepo(blocks)
+
+	remoteSender := &model.User{ID: "alice"}
+	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote/notes/1", remoteSender, "bob", "hi")
+	assert.ErrorIs(t, err, corechat.ErrChatBlocked)
+	assert.Empty(t, pub.userCalls, "blocked inbound DM must not be persisted/published")
+}
+
 // --- CreateMessageToRoom ---
 
 func seedRoom(t *testing.T, repo *testutil.MockChatRepository, id string, owner string, members ...string) {
@@ -173,6 +200,21 @@ func TestCreateMessageToRoom_Success(t *testing.T) {
 	require.Len(t, pub.roomCalls, 1)
 	assert.Equal(t, "r1", pub.roomCalls[0].roomID)
 	assert.Equal(t, corechat.EventMessage, pub.roomCalls[0].eventType)
+}
+
+// block は 1-on-1 DM のみに効き、room メッセージには影響しない (upstream の
+// createMessageToRoom も checkBlocked を呼ばない、#parity review chat-block-3)。
+func TestCreateMessageToRoom_BlockDoesNotAffectRoom(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "bob")
+	blocks := testutil.NewMockBlockingRepository()
+	// alice と bob が相互 block していても room メッセージは通る。
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "alice", BlockeeID: "bob"}))
+	require.NoError(t, blocks.Create(&model.Blocking{ID: "b2", BlockerID: "bob", BlockeeID: "alice"}))
+	svc.SetBlockingRepo(blocks)
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "bob", "r1", "hi room", "")
+	require.NoError(t, err, "room message must not be blocked by 1-on-1 block")
 }
 
 func TestCreateMessageToRoom_OwnerIsImplicitMember(t *testing.T) {

@@ -799,9 +799,18 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || len(req.FileIDs) == 0 {
 		return apierr.JSONInvalidParam(c)
 	}
+	// 空文字 folderId は root(null) と同義に正規化する (upstream の
+	// `folderId ?? null` 相当、#parity review DRV-2)。
+	if req.FolderID != nil && *req.FolderID == "" {
+		req.FolderID = nil
+	}
 	// 宛先 folder が指定されている場合は呼出ユーザー所有であることを検証する
 	// (他人の folder へ移動できる経路を塞ぐ)。root (folderId=null) は検証不要。
-	if req.FolderID != nil && *req.FolderID != "" && h.folderRepo != nil {
+	// folderRepo 未配線時は検証不能なので fail-closed で弾く (#parity review DRV-1)。
+	if req.FolderID != nil {
+		if h.folderRepo == nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+		}
 		folder, err := h.folderRepo.FindByID(*req.FolderID)
 		if err != nil || folder.UserID == nil || *folder.UserID != user.ID {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))

@@ -56,6 +56,9 @@ func (h *Handler) Stats(c echo.Context) error {
 	}
 
 	// federation/stats は公開エンドポイントなので moderationNote は出さない。
+	// upstream は me を packMany に渡し moderator には見せるが、frontend の stats
+	// consumer は host/count しか使わないため、mk-go は安全側に倒して常に隠す
+	// (緩い→厳しい方向の意図的な divergence、#parity review F1-fed)。
 	topSubFollowers := 0
 	topSub := make([]map[string]any, 0, len(subs))
 	for _, inst := range subs {

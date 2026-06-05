@@ -258,7 +258,11 @@ func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User,
 //     verify, and its creator key must belong to a user whose URI equals
 //     activity.actor. Otherwise drop (return error) to block actor spoofing.
 func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
-	bodyActor := extractActorIRI(body)
+	// gate は Process と同じ unwrap+Normalize を経た actor を見る必要がある。
+	// raw body を直接 parse すると `as:actor` / `{"@id":...}` / 配列 wrap で
+	// gate を空 actor にすり抜けさせ、Process だけが本当の actor で動く
+	// なりすまし経路が残る (#parity review AUTH-1)。
+	bodyActor := federation.ExtractActorIRI(body)
 	if bodyActor == "" {
 		// actor 欠落は Process 側 ("activity missing actor") が弾く。ここでは
 		// 判定不能なので素通しし、なりすまし対象が無い状態にする。
@@ -281,20 +285,28 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	if p.ldVerifier == nil {
 		return fmt.Errorf("actor mismatch and no LD verifier: signer=%q actor=%q", signerURI, bodyActor)
 	}
-	creator, present, err := p.ldVerifier.VerifyAndCreator(body)
-	if err != nil {
-		return fmt.Errorf("ld-signature verify failed: %w", err)
+	// LD-Signature の creator (鍵 URI) を body から読む。
+	creatorKeyID := extractLDCreator(body)
+	if creatorKeyID == "" {
+		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
 	}
-	if !present {
+	// 検証より先に creator actor を解決して鍵を取得/永続化する。VerifyAndCreator
+	// は FindByKeyID の純粋 DB read で、先に解決しておかないと未知 origin actor
+	// からの最初の転送活動が常に drop される (#parity review AUTH-2、upstream
+	// getAuthUserFromKeyId は未知 actor を fetch する挙動と整合)。
+	ldUser, err := p.verifier.ResolveActor(activitypub.ResolveKeyURL(creatorKeyID))
+	if err != nil {
+		return fmt.Errorf("resolve ld-signature creator %q: %w", creatorKeyID, err)
+	}
+	// 鍵が DB に載った状態で LD-Signature 本体を検証する。
+	if _, present, err := p.ldVerifier.VerifyAndCreator(body); err != nil {
+		return fmt.Errorf("ld-signature verify failed: %w", err)
+	} else if !present {
 		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
 	}
 	// LD-Signature の creator (鍵) の owner URI が activity.actor と一致するか
 	// 確認する。一致しなければ「自分の鍵で署名したが他人を actor に詐称」した
 	// 活動なので drop する。
-	ldUser, err := p.verifier.ResolveActor(activitypub.ResolveKeyURL(creator))
-	if err != nil {
-		return fmt.Errorf("resolve ld-signature creator %q: %w", creator, err)
-	}
 	ldURI := ""
 	if ldUser != nil && ldUser.URI != nil {
 		ldURI = *ldUser.URI
@@ -305,27 +317,18 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	return nil
 }
 
-// extractActorIRI reads the `actor` IRI from an activity body. The actor may
-// be a bare string IRI or an embedded object carrying an `id` (upstream
-// Misskey #17340), so both shapes are handled.
-func extractActorIRI(body []byte) string {
+// extractLDCreator reads `signature.creator` (the LD-Signature key URI) from a
+// raw activity body. Returns "" when there is no LD-Signature or no creator.
+func extractLDCreator(body []byte) string {
 	var probe struct {
-		Actor json.RawMessage `json:"actor"`
+		Signature struct {
+			Creator string `json:"creator"`
+		} `json:"signature"`
 	}
-	if err := json.Unmarshal(body, &probe); err != nil || len(probe.Actor) == 0 {
+	if err := json.Unmarshal(body, &probe); err != nil {
 		return ""
 	}
-	var s string
-	if err := json.Unmarshal(probe.Actor, &s); err == nil {
-		return s
-	}
-	var obj struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(probe.Actor, &obj); err == nil {
-		return obj.ID
-	}
-	return ""
+	return probe.Signature.Creator
 }
 
 // buildSignedRequest reconstructs an *http.Request that activitypub.

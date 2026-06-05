@@ -287,9 +287,13 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 	}
 	// recipient が sender を block している場合は DM を拒否する (upstream
 	// ChatService.createMessageToUser の checkBlocked(toUser, fromUser) 相当)。
+	// DB error は fail-closed で扱う (canChat の granular check と同方針)。
 	if s.blockingRepo != nil {
 		blocked, err := s.blockingRepo.Exists(toUserID, fromUserID)
-		if err == nil && blocked {
+		if err != nil {
+			return nil, fmt.Errorf("chat block check: %w", err)
+		}
+		if blocked {
 			return nil, ErrChatBlocked
 		}
 	}
@@ -565,6 +569,18 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 			if err := s.canChat(fromUser, recipient); err != nil {
 				return nil, err
 			}
+		}
+	}
+	// inbound (連合) DM でも、recipient が sender を block していれば拒否する。
+	// CreateMessageToUser と同じ checkBlocked(toUser, fromUser) gate を AP 経路
+	// にも適用する (#parity review chat-block-1)。
+	if s.blockingRepo != nil {
+		blocked, err := s.blockingRepo.Exists(toUserID, fromUser.ID)
+		if err != nil {
+			return nil, fmt.Errorf("chat block check: %w", err)
+		}
+		if blocked {
+			return nil, ErrChatBlocked
 		}
 	}
 	msg := &model.ChatMessage{

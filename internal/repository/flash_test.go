@@ -203,6 +203,29 @@ func TestFlashRepository_ListFeatured(t *testing.T) {
 	assert.Equal(t, "fl_ft_1", found[1].ID)
 }
 
+// cursor (untilID) モードでも visibility / likedCount フィルタが効くこと。
+func TestFlashRepository_ListFeatured_CursorExcludesPrivate(t *testing.T) {
+	repo := NewFlashRepository(testDB)
+	user := insertTestUser(t, "u_fla_cur", "flashusercur")
+	defer cleanupUser(t, user.ID)
+
+	pub := newTestFlash("fl_cur_pub", user.ID, "pub")
+	pub.LikedCount = 3
+	priv := newTestFlash("fl_cur_priv", user.ID, "priv")
+	priv.LikedCount = 99
+	priv.Visibility = "private"
+	for _, f := range []*model.Flash{pub, priv} {
+		require.NoError(t, repo.Create(f))
+		defer cleanupFlash(t, f.ID)
+	}
+	// untilID をテスト対象 ID より大きい値にして両方を candidate に含める。
+	rows, err := repo.ListFeatured("", "fl_cur_zzzz", 10, 0)
+	require.NoError(t, err)
+	for _, f := range rows {
+		assert.NotEqual(t, "fl_cur_priv", f.ID, "cursor モードでも非公開は除外される")
+	}
+}
+
 func TestFlashRepository_ListFeatured_LimitClamp(t *testing.T) {
 	repo := NewFlashRepository(testDB)
 	_, err := repo.ListFeatured("", "", 9999, 0)
