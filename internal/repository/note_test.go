@@ -1383,7 +1383,7 @@ func TestNoteRepository_ListFeaturedByUser(t *testing.T) {
 // engagement=10 の note (id prefix `feat_cap_pool_`) であることを断定する。
 //
 // 6 件以下の小規模 fixture では pool = 全件となり、選抜順序が engagement 順
-// でも id 順でも結果が変わらないため、`featuredNotesPerUserPoolSize` を 51 に
+// でも id 順でも結果が変わらないため、`FeaturedNotesPerUserPoolSize` を 51 に
 // すれば落ちる test がここまで存在しなかった。本 test は cap を取り除くと
 // 必ず落ちる強い regression gate になる。
 func TestNoteRepository_ListFeaturedByUser_EngagementPoolCap(t *testing.T) {

@@ -344,6 +344,20 @@ func TestNewSSRFSafeTransport_AddressFamilyIPv6FiltersOutIPv4(t *testing.T) {
 }
 
 func TestNewSSRFSafeTransport_IPv6ProxyDefaultPort(t *testing.T) {
+	// #486 regression は「`http://[::1]` (= port 80 default) を proxy URL に
+	// 指定したとき SSRF guard が `[[::1]]:80` と二重 bracket せず正しく
+	// `[::1]:80` で比較できる」ことを「dial が SSRF block 以外のエラーで
+	// 失敗する」観測経由で覆う。原作者コメント (fef6210e) のとおり「dial 自体は
+	// ループバック上の閉じた port なので connection refused 系のエラーになる」
+	// 前提に依存しているため、開発機で [::]:80 に nginx 等が listen していると
+	// dial が成功して err=nil になり require.Error が trip する。
+	// CI runner は port 80 に何も listen していないので無条件に通る。
+	// 開発機向けの fail-safe として probe を入れ、listener 検出時は skip する。
+	if conn, perr := net.DialTimeout("tcp6", "[::1]:80", 200*time.Millisecond); perr == nil {
+		_ = conn.Close()
+		t.Skip("something is listening on [::1]:80 (e.g. local nginx); cannot observe #486 regression via dial-fail branch")
+	}
+
 	tr := NewSSRFSafeTransport(nil, WithProxy("http://[::1]", nil))
 	require.NotNil(t, tr)
 	require.NotNil(t, tr.Proxy)

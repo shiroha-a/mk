@@ -16,11 +16,15 @@ import (
 // 変換に使うため独自に定義する。
 const aidxTime2000Ms int64 = 946684800000
 
-// featuredNotesPerUserPoolSize は users/featured-notes の selection 段で
+// FeaturedNotesPerUserPoolSize は users/featured-notes の selection 段で
 // engagement DESC top-N を SQL から取得する際の上限。upstream
 // FeaturedService.getPerUserNotesRanking の threshold (50) と揃える (#1487 / #1491)。
 // 選抜後は id DESC + untilID cursor + limit でページングする。
-const featuredNotesPerUserPoolSize = 50
+//
+// テスト用 mock (internal/testutil/mock_repository.go の ListFeaturedByUser) も
+// この定数を直接参照することで mock と real repo の pool cap が drift しない
+// ことを保証する (#1491 review B 指摘の二重定義解消)。
+const FeaturedNotesPerUserPoolSize = 50
 
 // aidxCutoffID は与えられた time に対応する最小のaidx ID文字列を返す。
 // aidxは「時刻base36(8) + nodeID(4) + counter(4)」の 16 文字で、先頭 8 文字が
@@ -110,7 +114,7 @@ type NoteRepository interface {
 	// する 2 段構成。mk-go も同じ 2 段で揃える (#1487 Option B):
 	//
 	//  1. selection: engagement = (renoteCount + repliesCount) DESC, id DESC で
-	//     featuredNotesPerUserPoolSize (=50, upstream 同値) 件を SQL push-down で
+	//     FeaturedNotesPerUserPoolSize (=50, upstream 同値) 件を SQL push-down で
 	//     選抜。visibility 条件と channel 除外もここで同時に絞る (LIMIT 前)。
 	//     post-fetch FilterVisible だとページ過少充填 + followers 判定 N+1 を
 	//     起こすため (#1418 / #1440 と同 doctrine)。
@@ -685,7 +689,7 @@ func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, li
 		Where(`"userId" = ?`, userID).
 		Where(`"channelId" IS NULL`)
 	q = applyViewerVisibility(q, viewerID)
-	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(featuredNotesPerUserPoolSize)
+	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(FeaturedNotesPerUserPoolSize)
 	var pool []*model.Note
 	if err := q.Find(&pool).Error; err != nil {
 		return nil, err
