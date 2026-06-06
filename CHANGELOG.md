@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/queue/stats` のレスポンスが `{deliver, inbox}` の2キーのみで本家の `db`/`objectStorage` キーを欠き、各値も `completed`/`failed` を含んでいなかった問題を修正 (本家同様 4キー + QueueCount `{waiting,active,completed,failed,delayed}`)。`/api/admin/queue/{remove-job,retry-job,show-job,show-job-logs}` が本家の `jobId` パラメータを受け付けず `id` しか読まなかった問題 (`jobId` を優先、`id` も後方互換) と、`/api/admin/queue/clear` が `state` パラメータを無視して常に pending のみ削除していた問題 (本家同様 state 別に削除、`*` で全 state) も修正。あわせて `queues`/`queue-stats` の `metrics.completed`/`failed` に必須の `meta` オブジェクトが欠けていた問題と、`/api/admin/queue/jobs` の `search` パラメータが無視されていた問題 (本家同様 JSON 表現への全 term マッチで最大100件) を修正
+
 - Fix: `/api/admin/server-info` の `machine` がオブジェクト (`{name}`) で本家の文字列 (ホスト名) と型が異なり、`os`/`node`/`psql`/`redis`/`net.interface` が欠落していた問題を修正 (本家同様 machine は文字列、`os`(プラットフォーム)/`node`(ランタイム版)/`psql`(PostgreSQL版)/`redis`(Redis版)/`net.interface` を返す)。あわせて本家には無い `enableServerMachineStats` ゲートを admin から外し常に実値を返すように。公開 `/api/server-info` は本家同様 `machine`/`cpu`/`mem`/`fs` のみに限定し、`os`/`node`/`net.interface` 等が未認証クライアントに露出していた問題 (機械統計有効時) を修正
 
 - Fix: `/api/admin/captcha/current` のレスポンスが flat な `{provider, siteKey}` で、本家の `{provider, hcaptcha:{...}, mcaptcha:{...}, recaptcha:{...}, turnstile:{...}}` という provider 別 nested 構造を欠いていた問題を修正 (フロントエンドが `res.hcaptcha.siteKey` 等を読めず undefined になっていた)。`/api/admin/captcha/save` が本家の generic パラメータ (`provider`/`captchaResult`/`sitekey`/`secret`/`instanceUrl`) を受け取らず保存値が DB に書かれていなかった問題、mCaptcha/testCaptcha provider 非対応、`captchaResult` の検証ステップと各エラーコード (`INVALID_PROVIDER`/`INVALID_PARAMETERS`/`VERIFICATION_FAILED` 等) の欠落も修正 (本家同様 captchaResult を検証し pass 時のみ設定を保存)。あわせて mCaptcha インスタンスの非200応答が `VERIFICATION_FAILED` になっていた問題を `REQUEST_FAILED` に修正 (本家 verifyMcaptcha と一致)

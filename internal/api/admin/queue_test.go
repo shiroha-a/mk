@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -84,12 +85,35 @@ func (s *stubQueueInspector) GetQueueInfo(q string) (*apiadmin.QueueInfoResult, 
 	}
 	return nil, errors.New("not found")
 }
-func (s *stubQueueInspector) DeleteTask(_, id string) error {
+func (s *stubQueueInspector) DeleteTask(q, id string) error {
 	if s.deleteErr != nil {
 		return s.deleteErr
 	}
 	s.deleted = append(s.deleted, id)
+	// 実 inspector 同様、削除した task を各 state list から除く (clearQueueState
+	// の list→delete ループが list の縮小で終了することを担保する)。
+	for _, m := range []map[string][]*apiadmin.QueueTaskSummary{
+		s.pending, s.active, s.scheduled, s.retry, s.completed, s.failed,
+	} {
+		removeStubTask(m, q, id)
+	}
+	delete(s.task, id)
 	return nil
+}
+
+// removeStubTask drops the task with id from m[q] (test helper).
+func removeStubTask(m map[string][]*apiadmin.QueueTaskSummary, q, id string) {
+	if m == nil {
+		return
+	}
+	rows := m[q]
+	out := rows[:0:0]
+	for _, t := range rows {
+		if t.ID != id {
+			out = append(out, t)
+		}
+	}
+	m[q] = out
 }
 func (s *stubQueueInspector) DeleteAllPendingTasks(q string) (int, error) {
 	s.deleteAllHits = append(s.deleteAllHits, q)
@@ -678,7 +702,12 @@ func TestQueueShowJob(t *testing.T) {
 
 func TestQueueShowJobLogs(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusOK, doPost(h.QueueShowJobLogs, `{}`, adminUser).Code)
+	// queue/jobId 欠落は 400 (upstream required)。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueShowJobLogs, `{}`, adminUser).Code)
+	// 正規 bind では常に空配列を返す (mkq は per-task ログ非保持)。
+	rec := doPost(h.QueueShowJobLogs, `{"queue":"deliver","jobId":"x"}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
 }
 
 func TestQueueStatsAdmin(t *testing.T) {
@@ -812,4 +841,238 @@ func TestQueueJobs_TimestampsFromJobState(t *testing.T) {
 	require.Len(t, got3, 1)
 	assert.EqualValues(t, processed.UnixMilli(), got3[0]["processedOn"])
 	assert.EqualValues(t, finished.UnixMilli(), got3[0]["finishedOn"])
+}
+
+// --- #H-PR8e: queue parity additions ---
+
+// remove/retry/show-job は upstream の jobId キーを受け付ける (旧 id も互換)。
+func TestQueueJobHandlers_AcceptJobId(t *testing.T) {
+	mkHandler := func() (*apiadmin.Handler, *stubQueueInspector) {
+		h, _, _, _ := newTestHandler(t)
+		insp := &stubQueueInspector{task: map[string]*apiadmin.QueueTaskSummary{
+			"j1": {ID: "j1", Queue: "deliver", Type: "x"},
+		}}
+		h.SetQueueInspector(insp)
+		return h, insp
+	}
+
+	h, insp := mkHandler()
+	rec := doPost(h.QueueRemoveJob, `{"queue":"deliver","jobId":"j1"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Contains(t, insp.deleted, "j1")
+
+	h, insp = mkHandler()
+	rec = doPost(h.QueueRetryJob, `{"queue":"deliver","jobId":"j1"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Contains(t, insp.runCalls, "j1")
+
+	h, _ = mkHandler()
+	rec = doPost(h.QueueShowJob, `{"queue":"deliver","jobId":"j1"}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// jobId 欠落 (queue だけ) は 400。
+	h, _ = mkHandler()
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueRemoveJob, `{"queue":"deliver"}`, adminUser).Code)
+}
+
+// queue/stats は deliver/inbox/db/objectStorage の 4 キーで、各値が
+// waiting/active/completed/failed/delayed を持つ (upstream QueueCount)。
+func TestQueueStats_FullShape(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{info: map[string]*apiadmin.QueueInfoResult{
+		"deliver": {Queue: "deliver", Active: 1, Pending: 2, Completed: 3, Failed: 4, Scheduled: 5, Retry: 6},
+		"inbox":   {Queue: "inbox", Active: 7, Pending: 8, Completed: 9, Failed: 10, Scheduled: 1, Retry: 1},
+	}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueStats, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	for _, k := range []string{"deliver", "inbox", "db", "objectStorage"} {
+		require.Contains(t, got, k)
+		for _, f := range []string{"waiting", "active", "completed", "failed", "delayed"} {
+			_, ok := got[k][f]
+			assert.True(t, ok, k+"."+f+" present")
+		}
+	}
+	assert.Equal(t, float64(3), got["deliver"]["completed"])
+	assert.Equal(t, float64(4), got["deliver"]["failed"])
+	assert.Equal(t, float64(11), got["deliver"]["delayed"]) // scheduled(5)+retry(6)
+	// db/objectStorage はゼロ埋め。
+	assert.Equal(t, float64(0), got["db"]["completed"])
+}
+
+// queue/clear は state を尊重する。failed 指定は pending を drain せず failed
+// task を DeleteTask で消す。
+func TestQueueClear_ByFailedState(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{failed: map[string][]*apiadmin.QueueTaskSummary{
+		"deliver": {{ID: "f1"}, {ID: "f2"}},
+	}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"failed"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.ElementsMatch(t, []string{"f1", "f2"}, insp.deleted)
+	assert.Empty(t, insp.deleteAllHits, "failed 指定では pending を drain しない")
+}
+
+// state='*' は pending drain + 各 state を消す。
+func TestQueueClear_AllStates(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		failed:    map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "f1"}}},
+		completed: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "c1"}}},
+		scheduled: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "s1"}}},
+	}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"*"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"deliver"}, insp.deleteAllHits)
+	assert.ElementsMatch(t, []string{"f1", "c1", "s1"}, insp.deleted)
+}
+
+// queue-stats の metrics.completed/failed は meta オブジェクトを持つ。
+func TestQueueQueueStats_MetricsHaveMeta(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{info: map[string]*apiadmin.QueueInfoResult{
+		"deliver": {Queue: "deliver", Completed: 5, Failed: 2},
+	}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueQueueStats, `{"queue":"deliver"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	metrics := got["metrics"].(map[string]any)
+	completed := metrics["completed"].(map[string]any)
+	meta, ok := completed["meta"].(map[string]any)
+	require.True(t, ok, "metrics.completed.meta が存在する")
+	for _, f := range []string{"count", "prevTS", "prevCount"} {
+		_, ok := meta[f]
+		assert.True(t, ok, "meta."+f)
+	}
+}
+
+// queue/jobs は search で job を絞り込む (JSON 表現に全 term を含むもの)。
+func TestQueueJobs_SearchFilter(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{pending: map[string][]*apiadmin.QueueTaskSummary{
+		"deliver": {
+			{ID: "p1", Queue: "deliver", Type: "deliverNote", Payload: []byte(`{"host":"alpha.example"}`)},
+			{ID: "p2", Queue: "deliver", Type: "deliverNote", Payload: []byte(`{"host":"beta.example"}`)},
+		},
+	}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":"wait","search":"alpha"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "p1", rows[0]["id"])
+}
+
+// jobId と id を両方送ると jobId が優先される (後方互換の優先順位)。
+func TestQueueRemoveJob_JobIdWinsOverId(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{task: map[string]*apiadmin.QueueTaskSummary{
+		"j1": {ID: "j1", Queue: "deliver"},
+	}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueRemoveJob, `{"queue":"deliver","jobId":"j1","id":"OTHER"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Contains(t, insp.deleted, "j1")
+	assert.NotContains(t, insp.deleted, "OTHER")
+}
+
+// clear state=delayed は scheduled + retry の両方を消す。
+func TestQueueClear_ByDelayedState(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		scheduled: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "s1"}}},
+		retry:     map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "r1"}}},
+	}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"delayed"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.ElementsMatch(t, []string{"s1", "r1"}, insp.deleted)
+	assert.Empty(t, insp.deleteAllHits)
+}
+
+// clear state=active 等は no-op (pending drain も DeleteTask もしない)。
+func TestQueueClear_NoOpStates(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		failed: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "f1"}}},
+	}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"active"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, insp.deleted, "active は何も消さない")
+	assert.Empty(t, insp.deleteAllHits)
+}
+
+// clearQueueState の deleteAll は DeleteTask が失敗 (list 縮小しない) しても
+// progressed=false で 1 反復で抜け、無限ループしない。
+func TestQueueClear_StopsWhenDeleteFails(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		failed:    map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "f1"}}},
+		deleteErr: errors.New("locked"),
+	}
+	h.SetQueueInspector(insp)
+	done := make(chan struct{})
+	go func() {
+		doPost(h.QueueClear, `{"queue":"deliver","state":"failed"}`, adminUser)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("clearQueueState did not terminate (infinite loop)")
+	}
+}
+
+// search は複数 term の AND マッチで、どれも含まない job は落とす。
+func TestQueueJobs_SearchMultiTermAndZeroMatch(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{pending: map[string][]*apiadmin.QueueTaskSummary{
+		"deliver": {
+			{ID: "p1", Queue: "deliver", Type: "x", Payload: []byte(`{"host":"alpha.example","kind":"urgent"}`)},
+			{ID: "p2", Queue: "deliver", Type: "x", Payload: []byte(`{"host":"alpha.example","kind":"calm"}`)},
+		},
+	}}
+	h.SetQueueInspector(insp)
+
+	// "alpha urgent" は両 term を含む p1 のみ (p2 は urgent を含まない)。
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":"wait","search":"alpha urgent"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "p1", rows[0]["id"])
+
+	// マッチ無しは空配列。
+	rec = doPost(h.QueueJobs, `{"queue":"deliver","state":"wait","search":"zzznomatch"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	assert.Empty(t, rows)
+}
+
+// search は最大 100 件返す (upstream RETURN_LIMIT、非 search の既定 limit 30 で
+// 頭打ちにならない)。
+func TestQueueJobs_SearchReturnsUpTo100(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	tasks := make([]*apiadmin.QueueTaskSummary, 0, 150)
+	for i := 0; i < 150; i++ {
+		tasks = append(tasks, &apiadmin.QueueTaskSummary{
+			ID: "p" + strconv.Itoa(i), Queue: "deliver", Type: "deliverNote",
+			Payload: []byte(`{"host":"match.example"}`),
+		})
+	}
+	insp := &stubQueueInspector{pending: map[string][]*apiadmin.QueueTaskSummary{"deliver": tasks}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":"wait","search":"match"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	assert.Len(t, rows, 100, "search は最大 100 件 (RETURN_LIMIT)")
 }

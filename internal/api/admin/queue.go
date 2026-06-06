@@ -29,8 +29,63 @@ func (h *Handler) QueueClear(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	_, _ = h.queueInspector.DeleteAllPendingTasks(req.Queue)
+	h.clearQueueState(req.Queue, req.State)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// clearQueueState removes jobs of the given Bull state from queue, mirroring
+// upstream queue.clean(0,0,state). state '*' clears all clearable states.
+// mkq には state 単位の bulk-delete API が無いため、pending は DrainPending、
+// それ以外は state 別の list → DeleteTask で消す (best-effort)。
+//
+// 注意点 (mkq 制約 / upstream との差): (1) "wait" は DrainPending を呼ぶが mkq の
+// DrainPending は wait に加え paused / prioritized バケットも drain する。mk-go は
+// queue を pause せず deliver/inbox で per-job priority も使わないため両バケットは
+// 実運用で常に空であり observable な差は無い。(2) active / paused / prioritized を
+// 単独 state で指定した場合は対応する bulk-clear 経路が無いため no-op。(3) cron
+// (repeat) 由来の delayed job は RemoveJob が拒否するため clear('delayed') で消えない。
+// (4) clearable job が約 100k を超える queue では 1 リクエストで消し切らない (再実行で継続)。
+func (h *Handler) clearQueueState(queue, state string) {
+	// deleteAll はリストが空になるまで先頭ページを引いて消す。削除で件数が
+	// 減るため page=1 を繰り返す。delete が 1 件も進まなければ無限ループを
+	// 避けて打ち切る。上限 1000 反復 (= 約 100k tasks) の安全弁付き。
+	deleteAll := func(lister func(string, int, int) ([]*QueueTaskSummary, error)) {
+		for i := 0; i < 1000; i++ {
+			rows, err := lister(queue, 1, 100)
+			if err != nil || len(rows) == 0 {
+				return
+			}
+			progressed := false
+			for _, t := range rows {
+				if h.queueInspector.DeleteTask(queue, t.ID) == nil {
+					progressed = true
+				}
+			}
+			if !progressed {
+				return
+			}
+		}
+	}
+	switch state {
+	case "*":
+		_, _ = h.queueInspector.DeleteAllPendingTasks(queue)
+		deleteAll(h.queueInspector.ListScheduledTasks)
+		deleteAll(h.queueInspector.ListRetryTasks)
+		deleteAll(h.queueInspector.ListFailedTasks)
+		deleteAll(h.queueInspector.ListCompletedTasks)
+	case "wait", "waiting", "pending":
+		_, _ = h.queueInspector.DeleteAllPendingTasks(queue)
+	case "delayed":
+		deleteAll(h.queueInspector.ListScheduledTasks)
+		deleteAll(h.queueInspector.ListRetryTasks)
+	case "failed":
+		deleteAll(h.queueInspector.ListFailedTasks)
+	case "completed":
+		deleteAll(h.queueInspector.ListCompletedTasks)
+	default:
+		// active / paused / prioritized は単独 state での bulk-clear 経路が
+		// 無いため no-op (paused/prioritized は wait 経由の DrainPending で消える)。
+	}
 }
 
 // QueueDeliverDelayed handles POST /api/admin/queue/deliver-delayed.
@@ -236,6 +291,13 @@ func (h *Handler) QueueJobs(c echo.Context) error {
 		req.Page = 1
 	}
 	states := parseStateField(req.State)
+	terms := searchTerms(req.Search)
+	if len(terms) > 0 {
+		// upstream queueGetJobs の search 経路は paramDef に limit/page を持たず、
+		// 1000 件取得→filter→最大 100 件返す。専用ページング経路に委譲する。
+		return c.JSON(http.StatusOK, h.searchQueueJobs(req.Queue, states, terms))
+	}
+
 	seen := make(map[string]struct{}, req.Limit)
 	out := make([]map[string]any, 0, req.Limit)
 outer:
@@ -258,6 +320,67 @@ outer:
 		}
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// searchQueueJobs reproduces upstream queueGetJobs の search 経路。各 state を
+// 100 件 (driver の page size 上限) ずつ最大 searchMaxPages ページ取得して候補
+// プールを ~1000 件まで広げ、JSON 表現に全 term を含む job だけを最大
+// searchReturnLimit (=100) 件返す。driver の pageSize>100 clamp を跨ぐため
+// 単一呼び出しでなくページングで候補を集める。
+func (h *Handler) searchQueueJobs(queue string, states, terms []string) []map[string]any {
+	const searchReturnLimit = 100 // upstream RETURN_LIMIT
+	const searchPageSize = 100    // driver の page size 上限
+	const searchMaxPages = 10     // upstream getJobs(0, 1000) 相当の候補プール
+	seen := make(map[string]struct{}, searchReturnLimit)
+	out := make([]map[string]any, 0, searchReturnLimit)
+	for _, state := range states {
+		for page := 1; page <= searchMaxPages; page++ {
+			rows, err := h.listTasksForState(queue, state, page, searchPageSize)
+			if err != nil || len(rows) == 0 {
+				break
+			}
+			for _, t := range rows {
+				if len(out) >= searchReturnLimit {
+					return out
+				}
+				if _, dup := seen[t.ID]; dup {
+					continue
+				}
+				packed := packTaskSummary(t)
+				if !jobMatchesSearch(packed, terms) {
+					continue
+				}
+				seen[t.ID] = struct{}{}
+				out = append(out, packed)
+			}
+			if len(rows) < searchPageSize {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// searchTerms lowercases and splits a search query into whitespace-separated
+// terms (upstream splits on space and requires every term to match).
+func searchTerms(search string) []string {
+	return strings.Fields(strings.ToLower(search))
+}
+
+// jobMatchesSearch reports whether the packed job's JSON representation contains
+// every search term (upstream matches against JSON.stringify(job).toLowerCase()).
+func jobMatchesSearch(packed map[string]any, terms []string) bool {
+	b, err := json.Marshal(packed)
+	if err != nil {
+		return false
+	}
+	hay := strings.ToLower(string(b))
+	for _, t := range terms {
+		if !strings.Contains(hay, t) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseStateField normalizes the `state` request field which can be a single
@@ -381,14 +504,28 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 			"completed": info.Completed,
 			"failed":    info.Failed,
 		},
+		// metrics は upstream packedQueueMetricsSchema 互換: {meta, data, count}。
+		// meta は required object {count, prevTS, prevCount}。mk-go は前回 sample の
+		// prevTS/prevCount を保持しないため 0 埋め (data 末尾が現在値)。
 		"metrics": map[string]any{
-			"completed": map[string]any{"data": completedData, "count": completedCount},
-			"failed":    map[string]any{"data": failedData, "count": failedCount},
+			"completed": queueMetricObject(completedData, completedCount),
+			"failed":    queueMetricObject(failedData, failedCount),
 		},
 		// db は job-queue Redis の INFO 由来 (memory / clients / uptime 等)。
 		// caller が queueDBStats() で一度引いて全 queue に渡す (INFO は接続単位
 		// で全 queue 同値)。provider 未配線時は defaultQueueDB() の 0 埋め。
 		"db": db,
+	}
+}
+
+// queueMetricObject builds the upstream QueueMetrics shape ({meta, data, count}).
+// meta.count mirrors the headline count; prevTS / prevCount are 0 because mkq
+// does not retain the previous sample window.
+func queueMetricObject(data []int64, count int64) map[string]any {
+	return map[string]any{
+		"meta":  map[string]any{"count": count, "prevTS": 0, "prevCount": 0},
+		"data":  data,
+		"count": count,
 	}
 }
 
@@ -486,12 +623,9 @@ func (h *Handler) QueueQueues(c echo.Context) error {
 
 // QueueRemoveJob handles POST /api/admin/queue/remove-job.
 func (h *Handler) QueueRemoveJob(c echo.Context) error {
-	var req struct {
-		Queue string `json:"queue"`
-		ID    string `json:"id"`
-	}
-	if err := c.Bind(&req); err != nil || req.Queue == "" || req.ID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and id are required."))
+	queue, id, ok := bindQueueJobReq(c)
+	if !ok {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and jobId are required."))
 	}
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
@@ -499,33 +633,53 @@ func (h *Handler) QueueRemoveJob(c echo.Context) error {
 	// asynq DeleteTask は不明 task id でも nil error を返す (= idempotent)
 	// が、upstream Misskey TS は 4xx を返す。drop-in 互換のため事前に
 	// GetTaskInfo で存在確認して、無ければ 404 を返す (#929)。
-	if _, err := h.queueInspector.GetTaskInfo(req.Queue, req.ID); err != nil {
+	if _, err := h.queueInspector.GetTaskInfo(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
-	if err := h.queueInspector.DeleteTask(req.Queue, req.ID); err != nil {
+	if err := h.queueInspector.DeleteTask(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// QueueRetryJob handles POST /api/admin/queue/retry-job.
-func (h *Handler) QueueRetryJob(c echo.Context) error {
+// bindQueueJobReq binds the shared {queue, jobId} param of remove-job /
+// retry-job / show-job / show-job-logs. upstream の required は (queue, jobId)。
+// 旧 mk-go の `id` キーも後方互換で受ける (jobId 優先)。queue と job id が
+// 揃わなければ ok=false。
+func bindQueueJobReq(c echo.Context) (queue, id string, ok bool) {
 	var req struct {
 		Queue string `json:"queue"`
+		JobID string `json:"jobId"`
 		ID    string `json:"id"`
 	}
-	if err := c.Bind(&req); err != nil || req.Queue == "" || req.ID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and id are required."))
+	if err := c.Bind(&req); err != nil {
+		return "", "", false
+	}
+	id = req.JobID
+	if id == "" {
+		id = req.ID
+	}
+	if req.Queue == "" || id == "" {
+		return "", "", false
+	}
+	return req.Queue, id, true
+}
+
+// QueueRetryJob handles POST /api/admin/queue/retry-job.
+func (h *Handler) QueueRetryJob(c echo.Context) error {
+	queue, id, ok := bindQueueJobReq(c)
+	if !ok {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and jobId are required."))
 	}
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 	// asynq RunTask も不明 id で nil を返す idempotent 挙動。drop-in 互換の
 	// ため事前に GetTaskInfo で存在確認 (#929)。
-	if _, err := h.queueInspector.GetTaskInfo(req.Queue, req.ID); err != nil {
+	if _, err := h.queueInspector.GetTaskInfo(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
-	if err := h.queueInspector.RunTask(req.Queue, req.ID); err != nil {
+	if err := h.queueInspector.RunTask(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -533,17 +687,14 @@ func (h *Handler) QueueRetryJob(c echo.Context) error {
 
 // QueueShowJob handles POST /api/admin/queue/show-job.
 func (h *Handler) QueueShowJob(c echo.Context) error {
-	var req struct {
-		Queue string `json:"queue"`
-		ID    string `json:"id"`
-	}
-	if err := c.Bind(&req); err != nil || req.Queue == "" || req.ID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and id are required."))
+	queue, id, ok := bindQueueJobReq(c)
+	if !ok {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and jobId are required."))
 	}
 	if h.queueInspector == nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
-	t, err := h.queueInspector.GetTaskInfo(req.Queue, req.ID)
+	t, err := h.queueInspector.GetTaskInfo(queue, id)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -551,9 +702,15 @@ func (h *Handler) QueueShowJob(c echo.Context) error {
 }
 
 // QueueShowJobLogs handles POST /api/admin/queue/show-job-logs.
-// asynq does not persist per-task log output. Returns an empty array to keep
-// the admin UI usable without extra infra.
-func (h *Handler) QueueShowJobLogs(c echo.Context) error { return c.JSON(http.StatusOK, []any{}) }
+// mkq / asynq does not persist per-task log output, so this always returns an
+// empty array (upstream returns queue.getJobLogs(jobId).logs). queue + jobId
+// は upstream 同様 required として検証する。
+func (h *Handler) QueueShowJobLogs(c echo.Context) error {
+	if _, _, ok := bindQueueJobReq(c); !ok {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and jobId are required."))
+	}
+	return c.JSON(http.StatusOK, []any{})
+}
 
 // packTaskSummary normalizes a QueueTaskSummary into the Misskey Bull-shaped
 // JSON expected by admin/job-queue.vue and job-queue.job.vue. frontend は
@@ -670,25 +827,37 @@ func rawJSONOrString(payload []byte) any {
 }
 
 // QueueStats handles POST /api/admin/queue/stats.
+//
+// upstream res は {deliver, inbox, db, objectStorage} の 4 キーで、各値は
+// QueueCount = {waiting, active, completed, failed, delayed} (全 required)。
+// mk-go は db / objectStorage を独立 queue として運用しないため、その 2 つは
+// ゼロ埋め QueueCount を返して shape parity を満たす。deliver / inbox は実値。
 func (h *Handler) QueueStats(c echo.Context) error {
-	if h.queueInspector == nil {
-		return c.JSON(http.StatusOK, map[string]any{
-			"deliver": map[string]any{"activeSince": nil, "active": 0, "waiting": 0, "delayed": 0},
-			"inbox":   map[string]any{"activeSince": nil, "active": 0, "waiting": 0, "delayed": 0},
-		})
+	zero := func() map[string]any {
+		return map[string]any{"waiting": 0, "active": 0, "completed": 0, "failed": 0, "delayed": 0}
 	}
-	result := map[string]any{}
+	result := map[string]any{
+		"deliver":       zero(),
+		"inbox":         zero(),
+		"db":            zero(),
+		"objectStorage": zero(),
+	}
+	if h.queueInspector == nil {
+		return c.JSON(http.StatusOK, result)
+	}
 	for _, qname := range []string{"deliver", "inbox"} {
 		info, err := h.queueInspector.GetQueueInfo(qname)
 		if err != nil {
-			result[qname] = map[string]any{"activeSince": nil, "active": 0, "waiting": 0, "delayed": 0}
 			continue
 		}
 		result[qname] = map[string]any{
-			// Bull の delayed は asynq の Scheduled (未来実行予定) と
-			// Retry (失敗後再試行待ち) の両方を含む。stream/queue_stats_publisher.go
-			// の WebSocket publisher と semantics を揃える (#654)。
-			"activeSince": nil, "active": info.Active, "waiting": info.Pending, "delayed": info.Scheduled + info.Retry,
+			"waiting":   info.Pending,
+			"active":    info.Active,
+			"completed": info.Completed,
+			"failed":    info.Failed,
+			// Bull の delayed は asynq の Scheduled (未来実行予定) と Retry
+			// (失敗後再試行待ち) の両方を含む (#654)。
+			"delayed": info.Scheduled + info.Retry,
 		}
 	}
 	return c.JSON(http.StatusOK, result)
