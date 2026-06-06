@@ -88,6 +88,31 @@ func TestFederationRefreshRemoteInstanceMetadata_FetchError_Still204(t *testing.
 	assert.Equal(t, []string{"remote.example"}, fetcher.calls)
 }
 
+// instanceRepo 配線時、未登録 host への refresh は upstream 同様 500 で、
+// fetcher は叩かれない (instance not found)。
+func TestFederationRefreshRemoteInstanceMetadata_HostNotFound(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	fetcher := &stubInstanceMetadataFetcher{}
+	h.SetInstanceMetadataFetcher(fetcher)
+	h.SetInstanceRepo(testutil.NewMockInstanceRepository())
+	rec := doPost(h.FederationRefreshRemoteInstanceMetadata, `{"host":"ghost.example"}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, fetcher.calls, "未登録 host では fetcher を叩かない")
+}
+
+// instance 存在時は toPuny 正規化した host で fetcher を叩き 204。
+func TestFederationRefreshRemoteInstanceMetadata_TopunyExists(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	fetcher := &stubInstanceMetadataFetcher{}
+	h.SetInstanceMetadataFetcher(fetcher)
+	instRepo := testutil.NewMockInstanceRepository()
+	require.NoError(t, instRepo.Create(&model.Instance{ID: "i1", Host: "remote.example"}))
+	h.SetInstanceRepo(instRepo)
+	rec := doPost(h.FederationRefreshRemoteInstanceMetadata, `{"host":"Remote.EXAMPLE"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"remote.example"}, fetcher.calls, "正規化 host で fetcher を叩く")
+}
+
 func TestFederationRemoveAllFollowing(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	assert.Equal(t, http.StatusNoContent, doPost(h.FederationRemoveAllFollowing, `{}`, adminUser).Code)
@@ -193,12 +218,60 @@ func TestFederationUpdateInstance_NoOpWithoutInstanceRepo(t *testing.T) {
 	assertNoLogWritten(t, repo)
 }
 
-// #676: instance 行が存在しない host への update は no-op (FindByHost が err)。
+// instance 行が存在しない host への update は upstream 同様 500 (instance not found)。
+// 旧実装は silent 204 だったが本家 (throw new Error('instance not found')) に揃える。
 func TestFederationUpdateInstance_HostNotFound(t *testing.T) {
 	h, repo := setupFederationUpdateInstance(t, nil)
 	rec := doPost(h.FederationUpdateInstance, `{"host":"ghost.example","isSuspended":true}`, adminUser)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assertNoLogWritten(t, repo)
+}
+
+// 大文字混じり host でも toPuny (ToLower) 正規化して instance を引ける。
+func TestFederationUpdateInstance_TopunyHostLookup(t *testing.T) {
+	h, repo := setupFederationUpdateInstance(t, &model.Instance{
+		ID:              "inst-puny",
+		Host:            "remote.example",
+		SuspensionState: model.SuspensionStateNone,
+	})
+	rec := doPost(h.FederationUpdateInstance, `{"host":"Remote.EXAMPLE","isSuspended":true}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// lookup が成功して suspend log が 1 件出ることで正規化を確認する。
+	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
+}
+
+// 実 IDN: instance は punycode 小文字 (canonical AP authority / TS drop-in 形式) で
+// 保存され、admin が Unicode IDN 形式で送っても toPuny で punycode 化して引ける。
+// あわせて UpdateFields が正規化 host で効くこと (suspensionState 遷移) を確認する。
+func TestFederationUpdateInstance_IDNHostLookup(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	instRepo := testutil.NewMockInstanceRepository()
+	require.NoError(t, instRepo.Create(&model.Instance{
+		ID: "inst-idn", Host: "xn--caf-dma.example", SuspensionState: model.SuspensionStateNone,
+	}))
+	h.SetInstanceRepo(instRepo)
+	modlog := attachModLog(t, h)
+
+	rec := doPost(h.FederationUpdateInstance, `{"host":"Café.example","isSuspended":true}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// idna.ToASCII が実変換して punycode row を引き、UpdateFields も正規化 host で効く (T5)。
+	require.NotNil(t, instRepo.Instances["xn--caf-dma.example"])
+	assert.Equal(t, model.SuspensionStateManuallySuspended, instRepo.Instances["xn--caf-dma.example"].SuspensionState)
+	require.Eventually(t, func() bool { return len(modlog.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
+}
+
+// 実 IDN の refresh: punycode 保存 instance を Unicode IDN 入力で引き、fetcher が
+// punycode host で叩かれる。
+func TestFederationRefreshRemoteInstanceMetadata_IDNHostLookup(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	fetcher := &stubInstanceMetadataFetcher{}
+	h.SetInstanceMetadataFetcher(fetcher)
+	instRepo := testutil.NewMockInstanceRepository()
+	require.NoError(t, instRepo.Create(&model.Instance{ID: "i-idn", Host: "xn--caf-dma.example"}))
+	h.SetInstanceRepo(instRepo)
+	rec := doPost(h.FederationRefreshRemoteInstanceMetadata, `{"host":"Café.example"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"xn--caf-dma.example"}, fetcher.calls, "fetcher は punycode 化 host で叩かれる")
 }
 
 // #676: isSuspended=true への遷移で suspendRemoteInstance 1 件だけ書く。

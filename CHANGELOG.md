@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/relays/add` が inbox URL のプロトコルを検証せず、`http://` や非 URL でもそのまま relay 行を作成しようとしていた問題を修正 (本家同様 https 以外 / parse 失敗を `INVALID_URL` で弾く)。あわせて `/api/admin/federation/update-instance`・`/api/admin/federation/refresh-remote-instance-metadata` が指定ホストの instance 行が存在しない場合に無言で 204 を返していた問題を修正 (本家同様 instance not found を 500 で伝播)。両エンドポイントで lookup 前にホストを toPuny 正規化 (punycode + 小文字化) するようにし、大文字混じり / IDN ホストでも instance を引けるように (本家 `utilityService.toPuny` 相当)。注: 取り込み側 (ActivityPub actor 解決) のホスト正規化は別スコープのため、生 Unicode で保存された IDN ホストとの整合は今後の課題
+
 - Fix: `/api/admin/drive/clean-remote-files` の削除対象条件が逆 (`isLink=true` のリンク専用プロキシを消し、本来消すべき `isLink=false` のキャッシュ実体を残していた) で、かつオブジェクトストレージの物理ファイルを消していなかった問題を修正 (本家同様 `userHost IS NOT NULL AND isLink=false` を対象に、access/thumbnail/webpublic オブジェクトを削除してから DB 行を削除)。`/api/admin/delete-all-files-of-a-user` も DB 行のみ削除で物理ファイルが orphan 化していた問題を修正 (storage バックエンド配線時はオブジェクトも削除)
 
 - Fix: `/api/admin/queue/stats` のレスポンスが `{deliver, inbox}` の2キーのみで本家の `db`/`objectStorage` キーを欠き、各値も `completed`/`failed` を含んでいなかった問題を修正 (本家同様 4キー + QueueCount `{waiting,active,completed,failed,delayed}`)。`/api/admin/queue/{remove-job,retry-job,show-job,show-job-logs}` が本家の `jobId` パラメータを受け付けず `id` しか読まなかった問題 (`jobId` を優先、`id` も後方互換) と、`/api/admin/queue/clear` が `state` パラメータを無視して常に pending のみ削除していた問題 (本家同様 state 別に削除、`*` で全 state) も修正。あわせて `queues`/`queue-stats` の `metrics.completed`/`failed` に必須の `meta` オブジェクトが欠けていた問題と、`/api/admin/queue/jobs` の `search` パラメータが無視されていた問題 (本家同様 JSON 表現への全 term マッチで最大100件) を修正

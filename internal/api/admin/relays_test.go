@@ -36,9 +36,16 @@ func (f *fakeRelaySvc) List(_ context.Context) ([]*model.Relay, error) {
 	return f.retList, f.err
 }
 
-func TestRelaysAdd(t *testing.T) {
+func TestRelaysAdd_InvalidUrl(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.RelaysAdd, `{}`, adminUser).Code)
+	// upstream add.ts は inbox 未指定 / 空 / https 以外 / 非 URL を INVALID_URL で弾く。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.RelaysAdd, `{}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.RelaysAdd, `{"inbox":""}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.RelaysAdd, `{"inbox":"http://r.example/inbox"}`, adminUser).Code)
+	rec := doPost(h.RelaysAdd, `{"inbox":"notaurl"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_URL")
+	assert.Contains(t, rec.Body.String(), "fb8c92d3-d4e5-44e7-b3d4-800d5cef8b2c")
 }
 
 func TestRelaysAdd_WithService(t *testing.T) {

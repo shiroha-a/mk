@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -18,8 +19,12 @@ func (h *Handler) RelaysAdd(c echo.Context) error {
 		Inbox string `json:"inbox"`
 	}
 	_ = c.Bind(&req)
-	if req.Inbox == "" {
-		return c.NoContent(http.StatusNoContent)
+	// upstream add.ts は `new URL(inbox).protocol !== 'https:'` または URL parse
+	// 失敗で INVALID_URL を投げる。https 以外 (http:// / 非 URL / 空) を relay 行
+	// 作成前に弾く。Go の url.Parse は相対 URL でも err にならないので、scheme と
+	// host の存在も明示的に検証する。
+	if u, err := url.Parse(req.Inbox); err != nil || u.Scheme != "https" || u.Host == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "Invalid URL", "fb8c92d3-d4e5-44e7-b3d4-800d5cef8b2c"))
 	}
 	if h.relayService != nil {
 		rel, err := h.relayService.Add(c.Request().Context(), req.Inbox)

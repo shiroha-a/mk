@@ -3,13 +3,34 @@ package admin
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
+	"golang.org/x/net/idna"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 )
+
+// toPunyHost normalizes a host the same way upstream UtilityService.toPuny does
+// (domainToASCII(host.toLowerCase()), node:url / UTS#46)。Go では idna.ToASCII の
+// default (非 transitional) profile がこれに最も近い。idna.ToASCII が失敗する不正
+// host は小文字化のみで返し、後段の FindByHost に「見つからない」と判定させる。
+//
+// 注意: mk-go の取り込み側 (resolver.hostFromURI / RegisterFromHost) は host を
+// 生のまま保存し punycode 正規化していない。canonical な AP actor URI は authority
+// を punycode 小文字で持つため大半のリモート instance は本 lookup と一致するが、
+// 生 Unicode の IDN host で保存された行は形式が食い違い得る。保存側の正規化統一は
+// 別スコープ (federation 層) の課題として残す。
+func toPunyHost(host string) string {
+	lower := strings.ToLower(host)
+	if ascii, err := idna.ToASCII(lower); err == nil {
+		return ascii
+	}
+	return lower
+}
 
 // FederationDeleteAllFiles handles POST /api/admin/federation/delete-all-files.
 //
@@ -46,10 +67,20 @@ func (h *Handler) FederationRefreshRemoteInstanceMetadata(c echo.Context) error 
 	if h.instanceMetadataFetcher == nil || req.Host == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// fetch 失敗はユーザーへ明示的にエラー返す必要はない (frontendは成功前提
-	// でUI更新するだけ)。ログに残してリトライ可能な状態にしておく。
-	if err := h.instanceMetadataFetcher.Fetch(req.Host); err != nil {
-		slog.Warn("federation refresh metadata failed", "host", req.Host, "err", err)
+	host := toPunyHost(req.Host)
+	// upstream は findOneBy({host: toPuny(host)}) == null で
+	// `throw new Error('instance not found')` (= 500 INTERNAL_ERROR) する。
+	// instanceRepo 配線時は事前に存在確認し、未登録 host へのエラーを伝播する。
+	if h.instanceRepo != nil {
+		if _, err := h.instanceRepo.FindByHost(host); err != nil {
+			return apierr.JSONInternalError(c)
+		}
+	}
+	// fetch 失敗はユーザーへ明示的にエラー返す必要はない (upstream も
+	// fetchInstanceMetadata を await せず fire-and-forget する)。ログに残して
+	// リトライ可能な状態にしておく。
+	if err := h.instanceMetadataFetcher.Fetch(host); err != nil {
+		slog.Warn("federation refresh metadata failed", "host", host, "err", err)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -182,13 +213,17 @@ func (h *Handler) FederationUpdateInstance(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Host == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// upstream は lookup 前に toPuny(host) で punycode / 小文字化する。IDN / 大文字
+	// host でも instance を引けるよう正規化してから FindByHost / UpdateFields に渡す。
+	host := toPunyHost(req.Host)
 	// before snapshot for moderation log diff (`isSuspended` の変化判定 +
-	// `moderationNote` の before/after)。lookup 失敗は instance 不在として
-	// no-op で 204 を返す (元の挙動は単純 Updates 1 回だけだったので失敗時
-	// silent と一貫)。
-	beforePtr, err := h.instanceRepo.FindByHost(req.Host)
+	// `moderationNote` の before/after)。
+	beforePtr, err := h.instanceRepo.FindByHost(host)
 	if err != nil {
-		return c.NoContent(http.StatusNoContent)
+		// upstream は instance==null で `throw new Error('instance not found')`
+		// (= 500 INTERNAL_ERROR) する。旧実装は silent 204 だったが本家に合わせて
+		// エラーを伝播する。
+		return apierr.JSONInternalError(c)
 	}
 	// 値コピーで snapshot を凍結する: UpdateFields の実装によっては同じ struct
 	// を mutate することがあり (例: in-memory mock)、後段の moderation log diff
@@ -200,15 +235,15 @@ func (h *Handler) FederationUpdateInstance(c echo.Context) error {
 	// 時は deep copy への昇格を検討。
 	before := *beforePtr
 	if updates := req.updates(); len(updates) > 0 {
-		if err := h.instanceRepo.UpdateFields(req.Host, updates); err != nil {
+		if err := h.instanceRepo.UpdateFields(host, updates); err != nil {
 			// silently 握り潰すと #724 のように DB 列ミスマッチで NO-OP に
 			// なって moderation log だけ書き込まれる症状が再発する。warn
 			// で残すことで運用者が気付ける。
-			slog.Warn("admin: instance UpdateFields failed", "host", req.Host, "err", err)
+			slog.Warn("admin: instance UpdateFields failed", "host", host, "err", err)
 		} else if req.IsSuspended != nil {
 			// suspensionState を更新したら deliver hot path の suspend 判定
 			// cache を即時失効し、TTL を待たず配送可否へ反映する (#1407 review)。
-			h.invalidateInstanceSuspendCache(req.Host)
+			h.invalidateInstanceSuspendCache(host)
 		}
 	}
 	// suspend / unsuspend と moderationNote 変更で個別 log を出す。
