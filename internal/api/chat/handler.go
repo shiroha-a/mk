@@ -31,7 +31,15 @@ type Handler struct {
 	// 時は当該 endpoint が空配列を返す。
 	fileRepo         repository.DriveFileRepository
 	moderatorChecker ModeratorChecker
+	// userRepo は invitations/create のレスポンス (ChatRoomInvitation.user =
+	// UserLite) で invitee user を解決するために使う (#... H-PR9a)。未配線時は
+	// user field を省略する。
+	userRepo repository.UserRepository
 }
+
+// maxRoomMembers mirrors upstream ChatService.MAX_ROOM_MEMBERS。join /
+// invitations/create で room の membership 数がこの上限に達したら拒否する。
+const maxRoomMembers = 50
 
 // ModeratorChecker reports whether a user has moderator privileges. Implemented
 // by core/role.Service. Used to widen attached-chat-messages from owner-only to
@@ -45,6 +53,10 @@ func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) { h.fileRep
 
 // SetModeratorChecker wires a moderator checker for attached-chat-messages.
 func (h *Handler) SetModeratorChecker(m ModeratorChecker) { h.moderatorChecker = m }
+
+// SetUserRepo wires the user repository for resolving invitee UserLite in the
+// invitations/create response.
+func (h *Handler) SetUserRepo(r repository.UserRepository) { h.userRepo = r }
 
 // NewHandler creates a new chat handler.
 func NewHandler(repo repository.ChatRepository, idGen id.Generator) *Handler {
@@ -224,6 +236,48 @@ func (h *Handler) packRoomDetailed(r *model.ChatRoom, meID string) map[string]an
 	}
 	result["isMuted"] = isMuted
 	result["invitationExists"] = invitationExists
+	return result
+}
+
+// packInvitationDetailed builds the upstream ChatRoomInvitation response shape
+// {id, createdAt, userId, user(UserLite), roomId, room(ChatRoom)} used by
+// invitations/create (upstream ChatEntityService.packRoomInvitation)。
+// inv.User / inv.Room が eager load 済みならそれを pack する (caller が事前に
+// 解決して詰める)。meID は room pack の viewer (= inviter)。
+func (h *Handler) packInvitationDetailed(inv *model.ChatRoomInvitation, meID string) map[string]any {
+	result := map[string]any{
+		"id": inv.ID, "userId": inv.UserID, "roomId": inv.RoomID,
+	}
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(inv.ID); err == nil {
+			result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
+	if inv.User != nil {
+		result["user"] = packUser(inv.User)
+	}
+	if inv.Room != nil {
+		result["room"] = h.packRoomDetailed(inv.Room, meID)
+	}
+	return result
+}
+
+// packMembershipDetailed builds the upstream ChatRoomMembership response shape
+// {id, createdAt, userId, roomId, room(ChatRoom)} used by rooms/joining
+// (upstream ChatEntityService.packRoomMembership with populateRoom:true,
+// populateUser:false)。m.Room が eager load 済みなら room を pack する。
+func (h *Handler) packMembershipDetailed(m *model.ChatRoomMembership, meID string) map[string]any {
+	result := map[string]any{
+		"id": m.ID, "userId": m.UserID, "roomId": m.RoomID,
+	}
+	if h.idGen != nil {
+		if t, err := h.idGen.ParseTime(m.ID); err == nil {
+			result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+	}
+	if m.Room != nil {
+		result["room"] = h.packRoomDetailed(m.Room, meID)
+	}
 	return result
 }
 
@@ -796,23 +850,66 @@ func (h *Handler) InvitationsCreate(c echo.Context) error {
 	}
 	// owner だけが招待を作成・連合できる。これが無いと任意の認証ユーザーが
 	// owner の鍵で署名された Invite を remote へなりすまし送信できてしまう
-	// (#1201 review)。room owner 以外は NO_SUCH_ROOM で弾く (RoomsUpdate と同方針)。
+	// (#1201 review)。upstream create.ts は findMyRoomById==null で先に noSuchRoom
+	// (404) を投げるため、yourself より前に owner-check を行う (error 種別を揃える)。
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "916f9507-49ba-4e90-b57f-1fd4deaa47a5"))
+	}
+	// upstream createRoomInvitation は room 確認後に各 soft-reject を plain Error
+	// (= generic 500) で投げる: yourself / already-member / already-invited /
+	// room-full。owner が inviter のため invitee==owner のケースは yourself に
+	// 収束する (upstream isRoomMember(ownerId===inviteeId) 相当は到達不能)。
+	if user.ID == req.UserID {
+		return apierr.JSONInternalError(c) // 'yourself'
+	}
+	if _, err := h.repo.FindMembership(req.UserID, req.RoomID); err == nil {
+		return apierr.JSONInternalError(c) // 'already member'
+	}
+	if _, err := h.repo.FindInvitation(req.UserID, req.RoomID); err == nil {
+		return apierr.JSONInternalError(c) // 'already invited'
+	}
+	// room-full 判定。count 取得失敗は fail-closed で 500 にする (upstream countBy
+	// 失敗は request を abort する)。owner は membership 行を持たないため count は
+	// 非 owner member 数 = TS countBy({roomId}) と一致 (上限 owner + 50)。
+	members, err := h.repo.ListMembersByRoom(req.RoomID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if len(members) >= maxRoomMembers {
+		return apierr.JSONInternalError(c) // 'room is full'
+	}
+	// upstream packRoomInvitation は invitee を必須 UserLite として pack し、解決
+	// 失敗時は throw (= 500)。invitee を永続化前に解決し、存在しない user への
+	// invitation 行を作らない。userRepo 未配線 (test / early boot) は degraded path
+	// として user field 省略で続行する (production は router で配線済み)。
+	var inviteeUser *model.User
+	if h.userRepo != nil {
+		u, uerr := h.userRepo.FindByID(req.UserID)
+		if uerr != nil {
+			return apierr.JSONInternalError(c)
+		}
+		inviteeUser = u
 	}
 	inv := &model.ChatRoomInvitation{
 		ID: h.idGen.Generate(time.Now()), UserID: req.UserID, RoomID: req.RoomID,
 	}
 	if err := h.repo.CreateInvitation(inv); err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		return apierr.JSONInternalError(c)
 	}
+	// upstream は chatRoomInvitationReceived 通知も作成するが、mk-go の通知基盤
+	// (notification type + entity packer + handler 配線) が未対応のため本 PR では
+	// 未実装。通知対応は H-PR9 follow-up で別途扱う。
+	//
 	// invitee が remote user なら Invite activity を配送する (CherryPick group
 	// chat federation, #1201)。local invitee なら service 側で no-op。
 	if h.svc != nil {
 		h.svc.FederateInvitation(req.RoomID, req.UserID)
 	}
-	return c.NoContent(http.StatusNoContent)
+	// upstream res は packed ChatRoomInvitation を返す (旧 mk-go は 204)。
+	inv.Room = room
+	inv.User = inviteeUser
+	return c.JSON(http.StatusOK, h.packInvitationDetailed(inv, user.ID))
 }
 
 // InvitationsDelete handles POST /api/chat/rooms/invitations/delete.
@@ -1086,25 +1183,52 @@ func (h *Handler) RoomsJoin(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if _, err := h.repo.FindRoomByID(req.RoomID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "b3926861-29ef-4df6-98b5-a7c640ad2b5a"))
-	}
-	// UNIQUE制約違反を避けるため既存メンバーは冪等に204を返す
-	if _, err := h.repo.FindMembership(user.ID, req.RoomID); err == nil {
-		return c.NoContent(http.StatusNoContent)
-	}
-	mem := &model.ChatRoomMembership{
-		ID: h.idGen.Generate(time.Now()), UserID: user.ID, RoomID: req.RoomID,
-	}
-	if err := h.repo.CreateMembership(mem); err != nil {
+	// upstream joinToRoom は pending invitation を必須とする (findOneByOrFail)。
+	// これが無いと任意の認証ユーザーが任意の room に勝手に join できる (security)。
+	// invitation 不在は upstream の findOneByOrFail と同じく generic 500。
+	inv, err := h.repo.FindInvitation(user.ID, req.RoomID)
+	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// UNIQUE 制約違反を避けるため既存メンバーは冪等に扱う。新規 join 時のみ
+	// MAX_ROOM_MEMBERS=50 を超える room を拒否する (upstream 'room is full')。
+	if _, merr := h.repo.FindMembership(user.ID, req.RoomID); merr != nil {
+		// count 取得失敗は fail-closed で 500 (upstream countBy 失敗は abort)。
+		members, lerr := h.repo.ListMembersByRoom(req.RoomID)
+		if lerr != nil {
+			return apierr.JSONInternalError(c)
+		}
+		if len(members) >= maxRoomMembers {
+			return apierr.JSONInternalError(c)
+		}
+		mem := &model.ChatRoomMembership{
+			ID: h.idGen.Generate(time.Now()), UserID: user.ID, RoomID: req.RoomID,
+		}
+		if cerr := h.repo.CreateMembership(mem); cerr != nil {
+			return apierr.JSONInternalError(c)
+		}
+	}
+	// upstream は join 成功時に invitation を消費する。
+	_ = h.repo.DeleteInvitation(inv.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 
-// RoomsJoining handles POST /api/chat/rooms/joining (TS-compatible alias for /joined).
+// RoomsJoining handles POST /api/chat/rooms/joining.
+//
+// upstream joining.ts は ChatRoomMembership[] (populateRoom:true,
+// populateUser:false) を返す。旧 mk-go は RoomsJoined (= ChatRoom[]) の alias
+// だったが、shape が異なるため membership を返すよう独立実装する。
 func (h *Handler) RoomsJoining(c echo.Context) error {
-	return h.RoomsJoined(c)
+	user := middleware.GetUser(c)
+	rows, err := h.repo.ListMembershipsByUser(user.ID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, h.packMembershipDetailed(m, user.ID))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // RoomsMembers handles POST /api/chat/rooms/members.

@@ -169,6 +169,30 @@ func TestChatRepository_Membership(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, joined, 1)
 
+	// ListMembershipsByUser returns the membership rows with Room (+ Owner) populated.
+	memberships, err := repo.ListMembershipsByUser(user.ID)
+	require.NoError(t, err)
+	require.Len(t, memberships, 1)
+	assert.Equal(t, mem.ID, memberships[0].ID)
+	assert.Equal(t, room.ID, memberships[0].RoomID)
+	require.NotNil(t, memberships[0].Room, "Room must be eager-loaded")
+	assert.Equal(t, room.ID, memberships[0].Room.ID)
+	require.NotNil(t, memberships[0].Room.Owner, "Room.Owner must be eager-loaded (required UserLite)")
+	assert.Equal(t, user.ID, memberships[0].Room.Owner.ID)
+
+	// 2 件目を別 room に追加し、id 降順 (新しい順) で返ることを確認する。
+	room2 := &model.ChatRoom{ID: "cr_3b", Name: "Room2", OwnerID: user.ID}
+	require.NoError(t, repo.CreateRoom(room2))
+	defer testDB.Exec(`DELETE FROM "chat_room" WHERE id = ?`, room2.ID)
+	mem2 := &model.ChatRoomMembership{ID: "mem_2", UserID: user.ID, RoomID: room2.ID}
+	require.NoError(t, repo.CreateMembership(mem2))
+	defer testDB.Exec(`DELETE FROM "chat_room_membership" WHERE id = ?`, mem2.ID)
+	ordered, err := repo.ListMembershipsByUser(user.ID)
+	require.NoError(t, err)
+	require.Len(t, ordered, 2)
+	assert.Equal(t, "mem_2", ordered[0].ID, "id 降順で新しい membership が先頭")
+	assert.Equal(t, "mem_1", ordered[1].ID)
+
 	// DeleteMembership
 	require.NoError(t, repo.DeleteMembership(user.ID, room.ID))
 }

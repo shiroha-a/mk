@@ -623,9 +623,89 @@ func TestReactionsDelete(t *testing.T) {
 
 func TestInvitationsCreate_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID}))
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	// owner を populate して nested room.owner (required UserLite) も検証する。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID, Owner: u1}))
 	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	// upstream res は packed ChatRoomInvitation {id, createdAt, userId, user, roomId, room}。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp["id"])
+	assert.NotEmpty(t, resp["createdAt"])
+	assert.Equal(t, "u2", resp["userId"])
+	assert.Equal(t, "r1", resp["roomId"])
+	user, ok := resp["user"].(map[string]any)
+	require.True(t, ok, "user (UserLite) must be resolved")
+	assert.Equal(t, "u2", user["id"])
+	room, ok := resp["room"].(map[string]any)
+	require.True(t, ok, "room (ChatRoom) must be present")
+	assert.Equal(t, "r1", room["id"])
+	owner, ok := room["owner"].(map[string]any)
+	require.True(t, ok, "room.owner (UserLite) must be present")
+	assert.Equal(t, "u1", owner["id"])
+	// invitation 行が永続化されている。
+	assert.Len(t, repo.Invitations, 1)
+}
+
+// userRepo 配線時に invitee user が存在しない (FindByID err) なら、upstream
+// packRoomInvitation の throw と同じく 500 を返し、invitation 行も作らない。
+func TestInvitationsCreate_InviteeNotFound(t *testing.T) {
+	h, repo := newTestHandler()
+	h.SetUserRepo(testutil.NewMockUserRepository()) // invitee 未登録
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, repo.Invitations, "解決不能な invitee には invitation 行を作らない")
+}
+
+// userRepo 未配線 (degraded path) では invitation を作成しつつ user field を省略する。
+func TestInvitationsCreate_NoUserRepoOmitsUser(t *testing.T) {
+	h, repo := newTestHandler() // SetUserRepo しない
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasUser := resp["user"]
+	assert.False(t, hasUser, "userRepo 未配線では user field を省略する")
+	assert.Len(t, repo.Invitations, 1)
+}
+
+// upstream: inviter==invitee は 'yourself' で拒否 (generic 500)。
+func TestInvitationsCreate_Yourself(t *testing.T) {
+	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u1"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, repo.Invitations)
+}
+
+// upstream: 既に member / 既に招待済みは拒否 (generic 500)。
+func TestInvitationsCreate_AlreadyMemberOrInvited(t *testing.T) {
+	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
+	// already member
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "u2", RoomID: "r1"}))
+	assert.Equal(t, http.StatusInternalServerError, post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1).Code)
+	// already invited
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "i1", UserID: "u3", RoomID: "r1"}))
+	assert.Equal(t, http.StatusInternalServerError, post(h.InvitationsCreate, `{"roomId":"r1","userId":"u3"}`, u1).Code)
+}
+
+// upstream: membership 数が MAX_ROOM_MEMBERS(50) 以上なら 'room is full'。
+func TestInvitationsCreate_RoomFull(t *testing.T) {
+	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
+	for i := 0; i < maxRoomMembers; i++ {
+		uid := "filler" + string(rune('a'+i))
+		require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: uid, UserID: uid, RoomID: "r1"}))
+	}
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, repo.Invitations)
 }
 
 func TestInvitationsCreate_InvalidParam(t *testing.T) {
@@ -949,17 +1029,95 @@ func TestInvitationsOutbox(t *testing.T) {
 
 func TestRoomsJoin(t *testing.T) {
 	h, repo := newTestHandler()
+	// invalid param
 	assert.Equal(t, http.StatusBadRequest, post(h.RoomsJoin, `{}`, u1).Code)
-	assert.Equal(t, http.StatusNotFound, post(h.RoomsJoin, `{"roomId":"ghost"}`, u1).Code)
+	// upstream: pending invitation が無いと join できない (generic 500)。
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	assert.Equal(t, http.StatusInternalServerError, post(h.RoomsJoin, `{"roomId":"r1"}`, u1).Code)
+	assert.Empty(t, repo.Memberships, "invitation 無しでは membership を作らない")
+	// invitation があれば join 成功し、membership 作成 + invitation 消費。
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "i1", UserID: u1.ID, RoomID: "r1"}))
 	rec := post(h.RoomsJoin, `{"roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	_, mErr := repo.FindMembership(u1.ID, "r1")
+	assert.NoError(t, mErr, "membership が作成される")
+	assert.Empty(t, repo.Invitations, "join 成功で invitation は消費される")
 }
 
+// 既存 member が invitation 付きで再 join しても冪等に 204 (membership 重複なし)
+// + invitation 消費。room-full でも既存 member なら拒否しない (TS との意図的差異)。
+func TestRoomsJoin_Idempotent(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "i1", UserID: u1.ID, RoomID: "r1"}))
+	// 念のため room を満杯にしても既存 member は通る。
+	for i := 0; i < maxRoomMembers; i++ {
+		uid := "filler" + string(rune('a'+i))
+		require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: uid, UserID: uid, RoomID: "r1"}))
+	}
+	rec := post(h.RoomsJoin, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	mems, _ := repo.ListMembersByRoom("r1")
+	assert.Len(t, mems, maxRoomMembers+1, "membership は重複作成されない (既存 m1 + filler 50)")
+	assert.Empty(t, repo.Invitations, "再 join でも invitation は消費される")
+}
+
+// upstream: membership 数が MAX_ROOM_MEMBERS(50) 以上の room へは新規 join 不可。
+func TestRoomsJoin_RoomFull(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "i1", UserID: u1.ID, RoomID: "r1"}))
+	for i := 0; i < maxRoomMembers; i++ {
+		uid := "filler" + string(rune('a'+i))
+		require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: uid, UserID: uid, RoomID: "r1"}))
+	}
+	rec := post(h.RoomsJoin, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	// room-full 失敗時は invitation を消費せず membership も作らない (再試行可能)。
+	assert.NotEmpty(t, repo.Invitations, "room-full では invitation を消費しない")
+	_, mErr := repo.FindMembership(u1.ID, "r1")
+	assert.Error(t, mErr, "room-full では membership を作らない")
+}
+
+// upstream joining.ts は ChatRoomMembership[] (room 付き, id 降順) を返す。
 func TestRoomsJoining(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
+	idGen, _ := id.NewGenerator("aidx")
+	mid1 := idGen.Generate(time.Now())
+	mid2 := idGen.Generate(time.Now().Add(time.Second)) // newer
+	// owner を populate して nested room.owner (required UserLite) も検証する。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u2.ID, Owner: u2}))
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r2", Name: "Other", OwnerID: u2.ID, Owner: u2}))
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: mid1, UserID: u1.ID, RoomID: "r1"}))
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: mid2, UserID: u1.ID, RoomID: "r2"}))
 	rec := post(h.RoomsJoining, `{}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	// id 降順 (新しい mid2 が先頭)。
+	assert.Equal(t, mid2, rows[0]["id"])
+	assert.Equal(t, mid1, rows[1]["id"])
+	assert.Equal(t, u1.ID, rows[0]["userId"])
+	assert.NotEmpty(t, rows[0]["createdAt"])
+	room, ok := rows[0]["room"].(map[string]any)
+	require.True(t, ok, "membership は room (ChatRoom) を populate する")
+	assert.Equal(t, "r2", room["id"])
+	owner, ok := room["owner"].(map[string]any)
+	require.True(t, ok, "room.owner (UserLite) must be present")
+	assert.Equal(t, "u2", owner["id"])
+	// joining は populateUser:false なので user は含めない。
+	_, hasUser := rows[0]["user"]
+	assert.False(t, hasUser)
+}
+
+// repo error 時は 500 を返す。
+func TestRoomsJoining_RepoError(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.ListMembershipsErr = errMock
+	rec := post(h.RoomsJoining, `{}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestRoomsMembers(t *testing.T) {

@@ -35,6 +35,7 @@ type ChatRepository interface {
 	UpdateMembership(m *model.ChatRoomMembership) error
 	DeleteMembership(userID, roomID string) error
 	ListMembersByRoom(roomID string) ([]*model.ChatRoomMembership, error)
+	ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error)
 
 	// Invitation operations
 	CreateInvitation(inv *model.ChatRoomInvitation) error
@@ -246,6 +247,15 @@ func (r *chatRepository) ListMembersByRoom(roomID string) ([]*model.ChatRoomMemb
 		return nil, err
 	}
 	return members, nil
+}
+
+func (r *chatRepository) ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error) {
+	var rows []*model.ChatRoomMembership
+	if err := r.db.Preload("Room").Preload("Room.Owner").Where(`"userId" = ?`, userID).
+		Order(`"id" DESC`).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (r *chatRepository) CreateInvitation(inv *model.ChatRoomInvitation) error {

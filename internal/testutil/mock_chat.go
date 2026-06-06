@@ -41,6 +41,8 @@ type MockChatRepository struct {
 	UpdateErr error
 	// DeleteErr forces DeleteMessage to return this error without removing.
 	DeleteErr error
+	// ListMembershipsErr forces ListMembershipsByUser to return this error.
+	ListMembershipsErr error
 }
 
 // NewMockChatRepository constructs an empty MockChatRepository ready for use.
@@ -251,6 +253,27 @@ func (m *MockChatRepository) ListMembersByRoom(roomID string) ([]*model.ChatRoom
 			out = append(out, mem)
 		}
 	}
+	return out, nil
+}
+
+func (m *MockChatRepository) ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ListMembershipsErr != nil {
+		return nil, m.ListMembershipsErr
+	}
+	out := make([]*model.ChatRoomMembership, 0)
+	for _, mem := range m.Memberships {
+		if mem.UserID == userID {
+			cp := *mem
+			if r, ok := m.Rooms[mem.RoomID]; ok {
+				cp.Room = r
+			}
+			out = append(out, &cp)
+		}
+	}
+	// upstream getMyMemberships は membership id 降順で返す。
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out, nil
 }
 

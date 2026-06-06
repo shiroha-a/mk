@@ -2202,6 +2202,7 @@ func (s *Server) setupRoutes() {
 	// handler が処理する。file の owner-scope (moderator は任意 file 可) (#1218)。
 	chatHandler.SetDriveFileRepo(driveFileRepo)
 	chatHandler.SetModeratorChecker(roleService)
+	chatHandler.SetUserRepo(userRepo)
 	api.POST("/drive/files/attached-chat-messages", chatHandler.AttachedChatMessages, middleware.RequireAuth())
 	api.POST("/chat/rooms/create", chatHandler.RoomsCreate, middleware.RequireAuth())
 	api.POST("/chat/rooms/show", chatHandler.RoomsShow, middleware.RequireAuth())
