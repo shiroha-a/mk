@@ -1339,41 +1339,29 @@ func (s *Server) setupRoutes() {
 	// に表示されなかった。roleService.GetUserRoles も in-memory cache 経由
 	// (#761) で hot path コスト無し。
 	entity.SetUserRolesLookup(corerole.NewUserRolesLookup(roleService))
+	// PackDriveFile / IdenticonURL が remote origin の media URL (note 添付・
+	// avatar・banner 等) を pack 時に media proxy 経由へ書き換えられるよう
+	// context を登録する (#1529)。これが無いと remote の url/thumbnailUrl/
+	// avatarUrl が raw のまま <img src> に乗り、閲覧者の IP が remote server
+	// に漏れる。proxyRemoteFiles は meta 由来 (既定 true) で boot 時に snapshot
+	// する。
+	proxyRemoteFiles := true
+	if m, err := metaRepo.Fetch(); err == nil {
+		proxyRemoteFiles = m.ProxyRemoteFiles
+	}
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		s.config.URL,
+		s.config.MediaProxy,
+		s.config.MediaProxySecret,
+		s.config.ExternalMediaProxyEnabled,
+		proxyRemoteFiles,
+	))
 	// PackUserDetailed の isSilenced を role policy 由来に揃える (旧実装は
 	// /api/i 以外で常に false 固定だった)。roleService.IsSilenced が
 	// entity.SilencedLookup を構造的に満たすので直接 wire する。GetUserRoles は
 	// in-memory cache (#761) だが IsSilenced 内の policy merge 自体は per-call
 	// なので、UserDetailed pack は単一 user の detail 取得が主用途であり許容範囲。
 	entity.SetSilencedLookup(roleService)
-	// リモート(連合先)メディアの URL をメディアプロキシ経由に書き換えて、閲覧者の
-	// IP が外部サーバーへ漏洩するのを防ぐ (issue #1529)。生成 URL は
-	// `${mediaProxy}/{image|static|avatar}.webp?url=&(mode=1)&sig=` で、mk-go の
-	// プロキシは HMAC 署名 (mediaProxySecret) を要求するため sig を付与する。
-	// proxyRemoteFiles は meta(DB, 既定 true)を都度参照する。
-	{
-		mpBase := s.config.MediaProxy
-		mpSecret := s.config.MediaProxySecret
-		entity.SetMediaProxy(
-			func(rawURL, mode string) string {
-				name := "image"
-				if mode != "" {
-					name = mode
-				}
-				q := urlpkg.Values{}
-				q.Set("url", rawURL)
-				if mode != "" {
-					q.Set(mode, "1")
-				}
-				q.Set("sig", coremediaproxy.SignURL(mpSecret, rawURL))
-				return mpBase + "/" + name + ".webp?" + q.Encode()
-			},
-			func() bool {
-				m, err := metaRepo.Fetch()
-				return err == nil && m.ProxyRemoteFiles
-			},
-			s.config.ExternalMediaProxyEnabled,
-		)
-	}
 	iHandler.SetNoteFieldResolver(noteFieldResolver)
 	// announcementRepoは後続で構築されるため SetupAdditional() 相当の順序依存があるが、
 	// 現状 announcementRepo := ... の行がここより後にあるため下で wire する。

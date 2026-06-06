@@ -61,6 +61,11 @@ func PackDriveFile(f *model.DriveFile, idGen id.Generator) DriveFileEntity {
 	if len(f.Properties) > 0 {
 		_ = json.Unmarshal(f.Properties, &props)
 	}
+	// remote (link 形式) file の url/thumbnailUrl/webpublicUrl は remote origin
+	// をそのまま指すため、pack 時に media proxy 経由 URL へ書き換えて閲覧者の
+	// IP 漏洩を防ぐ (#1529)。context 未配線 (= nil) の場合は raw を返し従来
+	// 挙動を維持する (メソッドは nil-safe)。
+	ctx := currentMediaURLContext()
 	return DriveFileEntity{
 		ID:           f.ID,
 		CreatedAt:    createdAt,
@@ -72,52 +77,12 @@ func PackDriveFile(f *model.DriveFile, idGen id.Generator) DriveFileEntity {
 		Blurhash:     f.Blurhash,
 		Properties:   props,
 		Comment:      f.Comment,
-		URL:          driveFilePublicURL(f),
-		ThumbnailURL: resolveThumbnailURL(f),
-		WebpublicURL: driveFileWebpublicURL(f),
+		URL:          ctx.GetPublicURL(f, modeDefault),
+		ThumbnailURL: ctx.GetThumbnailURL(f),
+		WebpublicURL: ctx.GetWebpublicURL(f),
 		FolderID:     f.FolderID,
 		UserID:       f.UserID,
 	}
-}
-
-// isRemoteFile reports whether the drive file belongs to a remote user
-// (userHost set). Remote files are stored link-format with an external `url`,
-// so their URLs must be routed through the media proxy (issue #1529).
-func isRemoteFile(f *model.DriveFile) bool {
-	return f.UserHost != nil && *f.UserHost != ""
-}
-
-// driveFileTarget returns the upstream URL to proxy: the canonical `uri` when
-// present, else the stored `url` (both are the external original for remote
-// link-format files).
-func driveFileTarget(f *model.DriveFile) string {
-	if f.URI != nil && *f.URI != "" {
-		return *f.URI
-	}
-	return f.URL
-}
-
-// driveFilePublicURL mirrors upstream getPublicUrl: remote files are proxied
-// (when proxying is enabled), local files keep their (local) url. Local URLs are
-// served by this instance so they never leak the client IP.
-func driveFilePublicURL(f *model.DriveFile) string {
-	if isRemoteFile(f) && shouldProxyRemoteFile() {
-		return proxyMediaURL(driveFileTarget(f), "")
-	}
-	return f.URL
-}
-
-// driveFileWebpublicURL proxies a remote file's webpublicUrl (rare for
-// link-format remotes, but guard against leaking it when present).
-func driveFileWebpublicURL(f *model.DriveFile) *string {
-	if f.WebpublicURL == nil || *f.WebpublicURL == "" {
-		return f.WebpublicURL
-	}
-	if isRemoteFile(f) && shouldProxyRemoteFile() {
-		u := proxyMediaURL(*f.WebpublicURL, "")
-		return &u
-	}
-	return f.WebpublicURL
 }
 
 // resolveThumbnailURL emulates upstream Misskey's
@@ -131,13 +96,6 @@ func driveFileWebpublicURL(f *model.DriveFile) *string {
 // (#460). For non-image types we keep null — frontend skips the
 // thumbnail render path for those.
 func resolveThumbnailURL(f *model.DriveFile) *string {
-	// リモートファイルは thumbnailUrl(外部 doc.Icon 由来)も含め生 URL が漏洩源に
-	// なるため、proxy 有効時は常にメディアプロキシ(static mode)経由にする
-	// (本家 getThumbnailUrl の userHost!=null / isLink&&proxyRemoteFiles 分岐相当)。
-	if isRemoteFile(f) && shouldProxyRemoteFile() {
-		u := proxyMediaURL(driveFileTarget(f), "static")
-		return &u
-	}
 	if f.ThumbnailURL != nil && *f.ThumbnailURL != "" {
 		return f.ThumbnailURL
 	}

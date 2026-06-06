@@ -240,17 +240,11 @@ func (h *Handler) populateUserEmojis(u *model.User, lite *entity.UserLite) {
 	if err != nil || len(emojis) == 0 {
 		return
 	}
-	// リモートユーザーの絵文字 URL は外部サーバーを指すため、生で返すと閲覧者の
-	// IP が漏洩する (issue #1529)。proxy 有効時はメディアプロキシ経由にする。
-	remote := u.Host != nil && *u.Host != ""
 	m := make(map[string]string, len(emojis))
 	for _, e := range emojis {
 		url := e.PublicURL
 		if url == "" {
 			url = e.OriginalURL
-		}
-		if remote {
-			url = entity.ProxyRemoteMediaURL(url, "")
 		}
 		m[e.Name] = url
 	}
@@ -389,10 +383,9 @@ func (h *Handler) Show(c echo.Context) error {
 				Name:            inst.Name,
 				SoftwareName:    inst.SoftwareName,
 				SoftwareVersion: inst.SoftwareVersion,
-				// リモートインスタンスの icon/favicon を proxy 経由にする (issue #1529)。
-				IconURL:    entity.ProxyRemoteMediaURLPtr(inst.IconURL, ""),
-				FaviconURL: entity.ProxyRemoteMediaURLPtr(inst.FaviconURL, ""),
-				ThemeColor: inst.ThemeColor,
+				IconURL:         inst.IconURL,
+				FaviconURL:      inst.FaviconURL,
+				ThemeColor:      inst.ThemeColor,
 			}
 		}
 	}

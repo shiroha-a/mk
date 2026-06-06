@@ -47,7 +47,7 @@ func (h *Handler) Preview(c echo.Context) error {
 	// (MkUrlPreview) がこれらを直接描画するため、proxy 経由に書き換えて閲覧者の
 	// IP が外部サイトへ漏洩するのを防ぐ (issue #1529)。player.url は iframe embed
 	// なので対象外。
-	result.Thumbnail = entity.ProxyRemoteMediaURLPtr(result.Thumbnail, "")
-	result.Icon = entity.ProxyRemoteMediaURLPtr(result.Icon, "")
+	result.Thumbnail = entity.ProxyMediaURLPtr(result.Thumbnail)
+	result.Icon = entity.ProxyMediaURLPtr(result.Icon)
 	return c.JSON(http.StatusOK, result)
 }

@@ -236,20 +236,13 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User) map[string]any {
 	// リモートファイルの url/thumbnailUrl/webpublicUrl は外部 URL なので、admin が
 	// drive 一覧を開いただけで moderator の IP が連合先へ漏洩する (issue #1529)。
-	// browser が img src として取得するこれら 3 つを proxy 経由にする (uri/accessKey
-	// 等は moderation 用の raw メタなのでそのまま)。
-	fileURL := f.URL
-	thumbURL := f.ThumbnailURL
-	webpublicURL := f.WebpublicURL
-	if f.UserHost != nil && *f.UserHost != "" {
-		target := f.URL
-		if f.URI != nil && *f.URI != "" {
-			target = *f.URI
-		}
-		fileURL = entity.ProxyRemoteMediaURL(target, "")
-		thumbURL = entity.ProxyRemoteMediaURLPtr(&target, "static")
-		webpublicURL = entity.ProxyRemoteMediaURLPtr(f.WebpublicURL, "")
-	}
+	// browser が img src として取得するこれら 3 つは、通常の drive pack と同じ
+	// media proxy 書き換え (image 限定・thumbnail は static mode・remote のみ) を
+	// 通すことで一貫させる。uri/accessKey 等は moderation 用の raw メタなのでそのまま。
+	packed := entity.PackDriveFile(f, h.idGen)
+	fileURL := packed.URL
+	thumbURL := packed.ThumbnailURL
+	webpublicURL := packed.WebpublicURL
 	resp := map[string]any{
 		"id":                 f.ID,
 		"userId":             f.UserID,

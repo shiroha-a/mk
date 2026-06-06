@@ -10,7 +10,6 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -223,11 +222,10 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		"description":             inst.Description,
 		"maintainerName":          inst.MaintainerName,
 		"maintainerEmail":         inst.MaintainerEmail,
-		// リモートインスタンスの icon/favicon を proxy 経由にする (issue #1529)。
-		"iconUrl":        entity.ProxyRemoteMediaURLPtr(inst.IconURL, ""),
-		"faviconUrl":     entity.ProxyRemoteMediaURLPtr(inst.FaviconURL, ""),
-		"themeColor":     inst.ThemeColor,
-		"infoUpdatedAt":  inst.InfoUpdatedAt,
-		"moderationNote": moderationNote,
+		"iconUrl":                 inst.IconURL,
+		"faviconUrl":              inst.FaviconURL,
+		"themeColor":              inst.ThemeColor,
+		"infoUpdatedAt":           inst.InfoUpdatedAt,
+		"moderationNote":          moderationNote,
 	}
 }

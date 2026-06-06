@@ -93,8 +93,11 @@ func packBadgeRoles(u *model.User) []any {
 			continue
 		}
 		out = append(out, map[string]any{
-			"name":         r.Name,
-			"iconUrl":      r.IconURL,
+			"name": r.Name,
+			// role icon は admin 設定だが remote URL を指せるため、frontend が
+			// <img src> へ直接載せる前に proxy 経由へ書き換えて IP 漏洩を防ぐ
+			// (#1529)。local は no-op。
+			"iconUrl":      ProxyMediaURLPtr(r.IconURL),
 			"displayOrder": r.DisplayOrder,
 		})
 	}
@@ -121,7 +124,7 @@ func packPublicRoles(u *model.User) []any {
 			"id":              r.ID,
 			"name":            r.Name,
 			"color":           r.Color,
-			"iconUrl":         r.IconURL,
+			"iconUrl":         ProxyMediaURLPtr(r.IconURL),
 			"description":     r.Description,
 			"isModerator":     r.IsModerator,
 			"isAdministrator": r.IsAdministrator,

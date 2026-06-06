@@ -118,10 +118,9 @@ func TestPreview_Success(t *testing.T) {
 // リモートの og:image (thumbnail) / favicon (icon) は proxy 経由に書き換えられ、
 // 閲覧者 IP が外部サイトへ漏洩しない (issue #1529)。
 func TestPreview_RemoteThumbnailProxied(t *testing.T) {
-	entity.SetMediaProxy(func(rawURL, mode string) string {
-		return "https://mk.test/proxy/image.webp?url=" + rawURL + "&sig=SIG"
-	}, func() bool { return true }, false)
-	defer entity.SetMediaProxy(nil, nil, false)
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.test", "https://mk.test/proxy", []byte("url-preview-secret"), false, true))
+	defer entity.SetMediaURLContext(nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -143,7 +142,13 @@ func TestPreview_RemoteThumbnailProxied(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	thumb, _ := body["thumbnail"].(string)
-	if !strings.HasPrefix(thumb, "https://mk.test/proxy/image.webp?url=") {
+	// q.Encode() がキーをソートするため ?sig=...&url=... の順になる。直接の
+	// 外部ホストではなく内部 proxy 経由であること + 元 URL が url= に埋め込まれて
+	// いることを確認する。
+	if !strings.HasPrefix(thumb, "https://mk.test/proxy/image.webp?") {
 		t.Fatalf("url-preview thumbnail not proxied: %q", thumb)
+	}
+	if strings.HasPrefix(thumb, "https://cdn.example.test") || !strings.Contains(thumb, "cdn.example.test") {
+		t.Fatalf("proxied thumbnail must embed remote target in url= param, not expose it directly: %q", thumb)
 	}
 }
