@@ -350,7 +350,7 @@ func TestSearch(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha"}
 	repo.Channels["c2"] = &model.Channel{ID: "c2", Name: "beta"}
-	rows, err := svc.Search("alp", "", "", 10, 0)
+	rows, err := svc.Search("alp", "nameAndDescription", "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 }

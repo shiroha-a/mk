@@ -73,7 +73,13 @@ func (r *channelRepository) List(filter model.ChannelListFilter) ([]*model.Chann
 		q = q.Where("\"userId\" = ?", filter.OwnerID)
 	}
 	if filter.Query != "" {
-		q = q.Where("name ILIKE ?", "%"+filter.Query+"%")
+		like := "%" + filter.Query + "%"
+		if filter.SearchDescription {
+			// upstream type=nameAndDescription: name OR description。
+			q = q.Where("name ILIKE ? OR description ILIKE ?", like, like)
+		} else {
+			q = q.Where("name ILIKE ?", like)
+		}
 	}
 	if filter.IsArchived != nil {
 		q = q.Where("\"isArchived\" = ?", *filter.IsArchived)

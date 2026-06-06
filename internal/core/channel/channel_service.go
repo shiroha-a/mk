@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -74,6 +75,7 @@ type CreateInput struct {
 	Description *string
 	Color       string
 	IsSensitive bool
+	BannerID    *string
 }
 
 // Create persists a new channel and returns it. Color が空文字なら Misskey
@@ -98,6 +100,7 @@ func (s *Service) Create(in CreateInput) (*model.Channel, error) {
 		Color:                 color,
 		UserID:                &owner,
 		IsSensitive:           in.IsSensitive,
+		BannerID:              in.BannerID,
 		AllowRenoteToExternal: true,
 	}
 	if err := s.repo.Create(c); err != nil {
@@ -122,6 +125,10 @@ type UpdateInput struct {
 	Color       *string
 	IsArchived  *bool
 	IsSensitive *bool
+	// BannerID: nil = 変更なし、非 nil で "" = banner 解除(null)、値 = 設定。
+	BannerID *string
+	// PinnedNoteIDs: nil = 変更なし、非 nil = その配列で置換。
+	PinnedNoteIDs *[]string
 }
 
 // Update applies the non-nil fields to a channel owned by ownerID.
@@ -151,6 +158,23 @@ func (s *Service) Update(ownerID, channelID string, in UpdateInput) (*model.Chan
 	}
 	if in.IsSensitive != nil {
 		fields["isSensitive"] = *in.IsSensitive
+	}
+	if in.BannerID != nil {
+		// "" は banner 解除 (null)、それ以外は設定。なお upstream の TS
+		// update.ts は bannerId:null を送っても解除しない (banner は外せない既知
+		// 制約) ので、"" 解除は mk-go 独自の利便機能。stock frontend は解除時
+		// bannerId:null を送るが、Go の *string は null/absent を区別できず
+		// 「変更なし」に落ちるため、この "" 解除分岐は API 直叩き専用。
+		if *in.BannerID == "" {
+			fields["bannerId"] = nil
+		} else {
+			fields["bannerId"] = *in.BannerID
+		}
+	}
+	if in.PinnedNoteIDs != nil {
+		// pq.StringArray でラップしないと空 slice が NULL 化して NOT NULL 制約
+		// 違反になる (aliases #729 と同型)。
+		fields["pinnedNoteIds"] = pq.StringArray(*in.PinnedNoteIDs)
 	}
 	if err := s.repo.UpdateFields(channelID, fields); err != nil {
 		return nil, err
@@ -255,13 +279,19 @@ func (s *Service) ListFeatured(sinceID, untilID string, limit, offset int) ([]*m
 }
 
 // Search returns channels whose name matches the query.
-func (s *Service) Search(query, sinceID, untilID string, limit, offset int) ([]*model.Channel, error) {
+// Search finds channels by name (and description when searchType is
+// "nameAndDescription", the upstream default). "nameOnly" matches name only.
+func (s *Service) Search(query, searchType, sinceID, untilID string, limit, offset int) ([]*model.Channel, error) {
+	// upstream channels/search は常に isArchived=FALSE を AND する。
+	notArchived := false
 	return s.repo.List(model.ChannelListFilter{
-		Query:   query,
-		Limit:   limit,
-		Offset:  offset,
-		SinceID: sinceID,
-		UntilID: untilID,
+		Query:             query,
+		SearchDescription: searchType != "nameOnly",
+		IsArchived:        &notArchived,
+		Limit:             limit,
+		Offset:            offset,
+		SinceID:           sinceID,
+		UntilID:           untilID,
 	})
 }
 

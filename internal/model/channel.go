@@ -39,12 +39,15 @@ func (ChannelFollowing) TableName() string { return "channel_following" }
 // 0 値は無効化を意味する (フィルタしない)。Repository と service の双方から
 // 参照されるため model パッケージに置く (循環依存の回避)。
 type ChannelListFilter struct {
-	OwnerID    string // 所有者で絞る
-	Query      string // name 部分一致
-	IsArchived *bool  // archived 状態で絞る
-	SortBy     string // "+lastNotedAt" / "-lastNotedAt" / "+name" / "-notesCount" 等
-	Limit      int
-	Offset     int
+	OwnerID string // 所有者で絞る
+	Query   string // name (SearchDescription 時は description も) 部分一致
+	// SearchDescription: true で Query を name OR description にマッチさせる
+	// (upstream channels/search type=nameAndDescription, 既定)。false は name のみ。
+	SearchDescription bool
+	IsArchived        *bool  // archived 状態で絞る
+	SortBy            string // "+lastNotedAt" / "-lastNotedAt" / "+name" / "-notesCount" 等
+	Limit             int
+	Offset            int
 	// Cursor pagination (frontend Paginator). 指定時は SortBy を id 順に
 	// 上書きして cursor 一貫性を保つ。Offset は無視する。
 	SinceID string

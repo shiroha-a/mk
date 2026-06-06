@@ -49,6 +49,38 @@ func TestChannelRepository_FindByID_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// SearchDescription=true は name OR description にマッチ、false は name のみ。
+func TestChannelRepository_List_SearchDescription(t *testing.T) {
+	repo := NewChannelRepository(testDB)
+	user := insertTestUser(t, "u_chr_sd", "channelusersd")
+	defer cleanupUser(t, user.ID)
+	uid := user.ID
+
+	desc := "about gophers and go"
+	c := newTestChannel("ch_sd_1", "sd-plainname", &uid)
+	c.Description = &desc
+	require.NoError(t, repo.Create(c))
+	defer cleanupChannel(t, c.ID)
+
+	// nameAndDescription (SearchDescription=true): description 一致で hit。
+	rows, err := repo.List(model.ChannelListFilter{Query: "gophers", SearchDescription: true})
+	require.NoError(t, err)
+	found := false
+	for _, r := range rows {
+		if r.ID == "ch_sd_1" {
+			found = true
+		}
+	}
+	assert.True(t, found, "SearchDescription=true は description 一致を返す")
+
+	// nameOnly (SearchDescription=false): description 一致は除外。
+	rows, err = repo.List(model.ChannelListFilter{Query: "gophers", SearchDescription: false})
+	require.NoError(t, err)
+	for _, r := range rows {
+		assert.NotEqual(t, "ch_sd_1", r.ID, "nameOnly は description を見ない")
+	}
+}
+
 func TestChannelRepository_UpdateFields(t *testing.T) {
 	repo := NewChannelRepository(testDB)
 	user := insertTestUser(t, "u_chr_2", "channeluser2")

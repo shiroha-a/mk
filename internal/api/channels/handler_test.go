@@ -71,6 +71,41 @@ func TestCreate_BadJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestCreate_BannerIDPersisted(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "alice"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "b1", UserID: &owner, Type: "image/png", URL: "https://x/b.png"}))
+	h.SetDriveFileRepo(dr)
+
+	c, rec := newReq(t, `{"name":"ch","color":"#abcdef","bannerId":"b1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	// 永続化された channel に bannerId が入る。
+	var found *model.Channel
+	for _, ch := range repo.Channels {
+		found = ch
+	}
+	require.NotNil(t, found)
+	require.NotNil(t, found.BannerID)
+	assert.Equal(t, "b1", *found.BannerID)
+}
+
+func TestCreate_ForeignBannerRejected(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	other := "bob"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "b1", UserID: &other, Type: "image/png", URL: "https://x/b.png"}))
+	h.SetDriveFileRepo(dr)
+
+	c, rec := newReq(t, `{"name":"ch","color":"#abcdef","bannerId":"b1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+}
+
 func TestCreate_NameRequired(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	c, rec := newReq(t, `{}`)
@@ -446,6 +481,169 @@ func TestSearch_BadJSON(t *testing.T) {
 	c, rec := newReq(t, `{not`)
 	require.NoError(t, h.Search(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// type 省略時 (= nameAndDescription) は description 一致でもヒットする。
+func TestSearch_DefaultMatchesDescription(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	desc := "a channel about gophers"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", Description: &desc}
+	c, rec := newReq(t, `{"query":"gophers"}`)
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "alpha", "description 一致で hit")
+}
+
+// type=nameOnly は description 一致を除外する。
+func TestSearch_NameOnlyExcludesDescription(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	desc := "a channel about gophers"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", Description: &desc}
+	c, rec := newReq(t, `{"query":"gophers","type":"nameOnly"}`)
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "alpha", "nameOnly は description を見ない")
+}
+
+// enum 外の type は 400 (upstream は ajv enum validation で弾く)。
+func TestSearch_InvalidTypeRejected(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"query":"x","type":"bogus"}`)
+	require.NoError(t, h.Search(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// search は archived channel を除外する (upstream は常に isArchived=FALSE)。
+func TestSearch_ExcludesArchived(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha-live"}
+	repo.Channels["c2"] = &model.Channel{ID: "c2", Name: "alpha-archived", IsArchived: true}
+	c, rec := newReq(t, `{"query":"alpha"}`)
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "alpha-live")
+	assert.NotContains(t, rec.Body.String(), "alpha-archived")
+}
+
+// isMuting は list 経路 (search/featured/owned) にも乗る。
+func TestSearch_ListIncludesIsMuting(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "muted-ch"}
+	muting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, muting.Create(&model.ChannelMuting{ID: "m1", UserID: "alice", ChannelID: "c1"}))
+	h.SetMutingRepo(muting)
+
+	c, rec := newReq(t, `{"query":"muted"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, true, resp[0]["isMuting"])
+}
+
+// 解除: bannerId:"" で既存 banner が null 化される。
+func TestUpdate_BannerClear(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	existing := "b0"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch", UserID: &owner, BannerID: &existing}
+	c, rec := newReq(t, `{"channelId":"c1","bannerId":""}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Nil(t, repo.Channels["c1"].BannerID, `bannerId:"" は banner を解除する`)
+}
+
+// Update で他人所有 banner は NO_SUCH_FILE (update 固有 error id)。
+func TestUpdate_ForeignBannerRejected(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch", UserID: &owner}
+	dr := testutil.NewMockDriveFileRepository()
+	other := "bob"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "b1", UserID: &other, Type: "image/png", URL: "https://x/b.png"}))
+	h.SetDriveFileRepo(dr)
+	c, rec := newReq(t, `{"channelId":"c1","bannerId":"b1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "e86c14a4-0da2-4032-8df3-e737a04c7f3b")
+}
+
+// bannerResolver 未配線 + bannerId 指定は fail-closed (NO_SUCH_FILE)。
+func TestCreate_BannerNoResolverFailsClosed(t *testing.T) {
+	h, _, _, _ := newHandler(t) // SetDriveFileRepo を呼ばない
+	c, rec := newReq(t, `{"name":"ch","color":"#abcdef","bannerId":"b1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+}
+
+// pinnedNoteIds:[] は空配列として永続化 (nil でない)。
+func TestUpdate_PinnedNotesEmpty(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch", UserID: &owner, PinnedNoteIDs: []string{"n1"}}
+	c, rec := newReq(t, `{"channelId":"c1","pinnedNoteIds":[]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := repo.Channels["c1"]
+	assert.NotNil(t, got.PinnedNoteIDs, "[] は nil でなく空配列")
+	assert.Len(t, []string(got.PinnedNoteIDs), 0)
+}
+
+// isMuting=false ケース (muting 配線済だが対象を mute していない)。
+func TestShow_IsMutingFalse(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch"}
+	h.SetMutingRepo(testutil.NewMockChannelMutingRepository())
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isMuting"])
+}
+
+// channels/update が bannerId / pinnedNoteIds を反映する。
+func TestUpdate_BannerAndPinnedNotes(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch", UserID: &owner}
+	dr := testutil.NewMockDriveFileRepository()
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "b1", UserID: &owner, Type: "image/png", URL: "https://x/b.png"}))
+	h.SetDriveFileRepo(dr)
+
+	c, rec := newReq(t, `{"channelId":"c1","bannerId":"b1","pinnedNoteIds":["n1","n2"]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := repo.Channels["c1"]
+	require.NotNil(t, got.BannerID)
+	assert.Equal(t, "b1", *got.BannerID)
+	assert.Equal(t, []string{"n1", "n2"}, []string(got.PinnedNoteIDs))
+}
+
+// viewer 視点の isMuting が pack に含まれる。
+func TestShow_IncludesIsMuting(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "ch"}
+	muting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, muting.Create(&model.ChannelMuting{ID: "m1", UserID: "alice", ChannelID: "c1"}))
+	h.SetMutingRepo(muting)
+
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isMuting"])
 }
 
 func TestSearch_RepoError(t *testing.T) {

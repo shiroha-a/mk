@@ -145,6 +145,7 @@ type CreateRequest struct {
 	Description *string `json:"description"`
 	Color       string  `json:"color"`
 	IsSensitive bool    `json:"isSensitive"`
+	BannerID    *string `json:"bannerId"`
 }
 
 // Create handles POST /api/channels/create.
@@ -157,12 +158,25 @@ func (h *Handler) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// bannerId="" は「banner 無し」に正規化する (TS は misskey:id format で空文字を
+	// 400 にするため空文字が DB に入ることはない。mk-go では空文字 column を作らない)。
+	if req.BannerID != nil && *req.BannerID == "" {
+		req.BannerID = nil
+	}
+	// bannerId 指定時は呼出ユーザー所有の drive file であることを検証する
+	// (upstream channels/create: findOneBy({id, userId: me.id}) → NO_SUCH_FILE)。
+	if req.BannerID != nil {
+		if !h.bannerOwnedBy(*req.BannerID, user.ID) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "cd1e9f3e-5a12-4ab4-96f6-5d0a2cc32050"))
+		}
+	}
 	ch, err := h.svc.Create(corechannel.CreateInput{
 		OwnerID:     user.ID,
 		Name:        req.Name,
 		Description: req.Description,
 		Color:       req.Color,
 		IsSensitive: req.IsSensitive,
+		BannerID:    req.BannerID,
 	})
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -193,12 +207,14 @@ func (h *Handler) Show(c echo.Context) error {
 
 // UpdateRequest is the request body for channels/update.
 type UpdateRequest struct {
-	ChannelID   string  `json:"channelId"`
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
-	Color       *string `json:"color"`
-	IsArchived  *bool   `json:"isArchived"`
-	IsSensitive *bool   `json:"isSensitive"`
+	ChannelID     string    `json:"channelId"`
+	Name          *string   `json:"name"`
+	Description   *string   `json:"description"`
+	Color         *string   `json:"color"`
+	IsArchived    *bool     `json:"isArchived"`
+	IsSensitive   *bool     `json:"isSensitive"`
+	BannerID      *string   `json:"bannerId"`
+	PinnedNoteIDs *[]string `json:"pinnedNoteIds"`
 }
 
 // Update handles POST /api/channels/update.
@@ -209,14 +225,23 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	in := corechannel.UpdateInput{
-		Name:        req.Name,
-		Color:       req.Color,
-		IsArchived:  req.IsArchived,
-		IsSensitive: req.IsSensitive,
+		Name:          req.Name,
+		Color:         req.Color,
+		IsArchived:    req.IsArchived,
+		IsSensitive:   req.IsSensitive,
+		BannerID:      req.BannerID,
+		PinnedNoteIDs: req.PinnedNoteIDs,
 	}
 	if req.Description != nil {
 		desc := req.Description
 		in.Description = &desc
+	}
+	// bannerId 設定時 (空文字 = 解除は検証不要) は所有権を検証する
+	// (upstream channels/update: bannerId != null → findOneBy({id, userId}) → NO_SUCH_FILE)。
+	if req.BannerID != nil && *req.BannerID != "" {
+		if !h.bannerOwnedBy(*req.BannerID, user.ID) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "e86c14a4-0da2-4032-8df3-e737a04c7f3b"))
+		}
 	}
 	ch, err := h.svc.Update(user.ID, req.ChannelID, in)
 	if err != nil {
@@ -342,6 +367,7 @@ func (h *Handler) Featured(c echo.Context) error {
 // SearchRequest carries the query string for channels/search.
 type SearchRequest struct {
 	Query     string `json:"query"`
+	Type      string `json:"type"`
 	Limit     int    `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
@@ -356,14 +382,34 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// type は enum ['nameAndDescription','nameOnly'] (空は default)。upstream は
+	// enum 外を 400 で弾くので silent fallback せず合わせる。
+	if req.Type != "" && req.Type != "nameAndDescription" && req.Type != "nameOnly" {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 5, 100)
-	rows, err := h.svc.Search(req.Query, sinceID, untilID, req.Limit, req.Offset)
+	rows, err := h.svc.Search(req.Query, req.Type, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, h.channelsToList(rows, middleware.GetUser(c)))
+}
+
+// bannerOwnedBy reports whether bannerID resolves to a drive file owned by
+// userID. Used to validate channels/create・update の bannerId
+// (upstream は findOneBy({id, userId: me.id}) で所有を確認する)。bannerResolver
+// 未配線時は検証不能なので true を返さず false (fail-closed) にする。
+func (h *Handler) bannerOwnedBy(bannerID, userID string) bool {
+	if h.bannerResolver == nil {
+		return false
+	}
+	f, err := h.bannerResolver.FindByID(bannerID)
+	if err != nil || f == nil || f.UserID == nil || *f.UserID != userID {
+		return false
+	}
+	return true
 }
 
 // TimelineRequest is the request body for channels/timeline.
@@ -532,6 +578,12 @@ func (h *Handler) channelToMapForViewer(ch *model.Channel, viewer *model.User) m
 			out["isFavorited"] = ok
 		}
 	}
+	// upstream Channel schema は viewer 視点の isMuting を含む。
+	if h.mutingRepo != nil {
+		if ok, err := h.mutingRepo.Exists(viewer.ID, ch.ID); err == nil {
+			out["isMuting"] = ok
+		}
+	}
 	return out
 }
 
@@ -541,7 +593,7 @@ func (h *Handler) channelToMapForViewer(ch *model.Channel, viewer *model.User) m
 func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	banners := h.resolveBannerURLs(rows)
-	if viewer == nil || (h.followingRepo == nil && h.favoriteRepo == nil) {
+	if viewer == nil || (h.followingRepo == nil && h.favoriteRepo == nil && h.mutingRepo == nil) {
 		for _, ch := range rows {
 			out = append(out, h.channelToMap(ch, banners[ch.ID]))
 		}
@@ -558,6 +610,18 @@ func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []ma
 	if h.favoriteRepo != nil {
 		favorited, _ = h.favoriteRepo.ExistsMany(viewer.ID, ids)
 	}
+	// isMuting も list pack に乗せる (単一 show だけでなく search/featured/owned/
+	// favorites でも upstream Channel schema の isMuting が出る)。muting repo に
+	// ExistsMany が無いため ListByUser で viewer の muted set を一括取得する。
+	var mutedSet map[string]bool
+	if h.mutingRepo != nil {
+		if mutings, err := h.mutingRepo.ListByUser(viewer.ID); err == nil {
+			mutedSet = make(map[string]bool, len(mutings))
+			for _, m := range mutings {
+				mutedSet[m.ChannelID] = true
+			}
+		}
+	}
 	for _, ch := range rows {
 		m := h.channelToMap(ch, banners[ch.ID])
 		if followed != nil {
@@ -565,6 +629,9 @@ func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []ma
 		}
 		if favorited != nil {
 			m["isFavorited"] = favorited[ch.ID]
+		}
+		if mutedSet != nil {
+			m["isMuting"] = mutedSet[ch.ID]
 		}
 		out = append(out, m)
 	}

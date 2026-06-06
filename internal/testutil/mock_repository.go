@@ -4184,8 +4184,15 @@ func (m *MockChannelRepository) List(filter model.ChannelListFilter) ([]*model.C
 				continue
 			}
 		}
-		if filter.Query != "" && !strings.Contains(c.Name, filter.Query) {
-			continue
+		if filter.Query != "" {
+			match := strings.Contains(c.Name, filter.Query)
+			// SearchDescription 時は description も対象 (production の ILIKE と整合)。
+			if !match && filter.SearchDescription && c.Description != nil {
+				match = strings.Contains(*c.Description, filter.Query)
+			}
+			if !match {
+				continue
+			}
 		}
 		if filter.IsArchived != nil && c.IsArchived != *filter.IsArchived {
 			continue
@@ -4239,6 +4246,22 @@ func applyChannelFields(c *model.Channel, fields map[string]any) {
 		case "lastNotedAt":
 			if t, ok := v.(*time.Time); ok {
 				c.LastNotedAt = t
+			}
+		case "bannerId":
+			switch s := v.(type) {
+			case string:
+				c.BannerID = &s
+			case *string:
+				c.BannerID = s
+			case nil:
+				c.BannerID = nil
+			}
+		case "pinnedNoteIds":
+			switch arr := v.(type) {
+			case pq.StringArray:
+				c.PinnedNoteIDs = arr
+			case []string:
+				c.PinnedNoteIDs = arr
 			}
 		}
 	}
