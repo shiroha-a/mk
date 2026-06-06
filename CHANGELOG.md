@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: チャットの `/api/chat/messages/room-timeline`・`/api/chat/messages`・`/api/chat/rooms/members` が、リクエスト元がルームのメンバーかどうかを検証せず、認証済みなら誰でも任意のルームの発言やメンバー一覧を読めた問題を修正 (本家同様 room-timeline/messages はメンバーまたはモデレーター、members はメンバーのみに限定し、それ以外およびルーム不在は `NO_SUCH_ROOM` を返す)
+
 - Fix: チャットの `/api/chat/rooms/join` が招待なしで誰でも任意のルームに参加できた問題を修正 (本家同様 pending invitation を必須とし、参加成功時に招待を消費する)。`/api/chat/rooms/invitations/create` が自分自身/既存メンバー/招待済み/満室 (50人) のチェックを行わず、レスポンスも 204 で本家の `ChatRoomInvitation` オブジェクト (`id`/`createdAt`/`userId`/`user`/`roomId`/`room`) を返していなかった問題を修正。`/api/chat/rooms/joining` が `ChatRoom[]` を返していたのを本家同様 `ChatRoomMembership[]` (room 付き) に修正。あわせて join/invitation で `MAX_ROOM_MEMBERS=50` の満室ガードを追加。注: 招待時の `chatRoomInvitationReceived` 通知は mk-go の通知基盤が未対応のため後続対応
 
 - Fix: `/api/admin/relays/add` が inbox URL のプロトコルを検証せず、`http://` や非 URL でもそのまま relay 行を作成しようとしていた問題を修正 (本家同様 https 以外 / parse 失敗を `INVALID_URL` で弾く)。あわせて `/api/admin/federation/update-instance`・`/api/admin/federation/refresh-remote-instance-metadata` が指定ホストの instance 行が存在しない場合に無言で 204 を返していた問題を修正 (本家同様 instance not found を 500 で伝播)。両エンドポイントで lookup 前にホストを toPuny 正規化 (punycode + 小文字化) するようにし、大文字混じり / IDN ホストでも instance を引けるように (本家 `utilityService.toPuny` 相当)。注: 取り込み側 (ActivityPub actor 解決) のホスト正規化は別スコープのため、生 Unicode で保存された IDN ホストとの整合は今後の課題

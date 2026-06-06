@@ -57,6 +57,18 @@ func post(handler func(echo.Context) error, body string, user *model.User) *http
 var u1 = &model.User{ID: "u1", Username: "alice"}
 var u2 = &model.User{ID: "u2", Username: "bob"}
 
+// assertErrorCode unmarshals an error response and asserts the Misskey error
+// code + id (body shape is {"error": {code, id, message}}).
+func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, code, id string) {
+	t.Helper()
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok, "response must have error object")
+	assert.Equal(t, code, errObj["code"])
+	assert.Equal(t, id, errObj["id"])
+}
+
 // --- Rooms ---
 
 func TestRoomsCreate_Success(t *testing.T) {
@@ -371,11 +383,29 @@ func TestMessages_WithData(t *testing.T) {
 	base := testutil.NewMockChatRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	h := NewHandler(&mockMsgRepo{base}, idGen)
+	// room 発言の閲覧には member であることが必要 (u1 を owner にする)。
+	base.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	rec := post(h.Messages, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp []any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+}
+
+// /chat/messages の room 経路も room-timeline と同じ permission gate を持つ
+// (非 member は NO_SUCH_ROOM、room-timeline を塞いでも本経路から漏れない)。
+func TestMessages_RoomPermission(t *testing.T) {
+	h, repo := newTestHandler()
+	// 存在しない room → NO_SUCH_ROOM。
+	rec := post(h.Messages, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
+	// 非 member → NO_SUCH_ROOM。
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	assert.Equal(t, http.StatusNotFound, post(h.Messages, `{"roomId":"r1"}`, u1).Code)
+	// member なら閲覧可。
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
+	assert.Equal(t, http.StatusOK, post(h.Messages, `{"roomId":"r1"}`, u1).Code)
 }
 
 func TestMessagesSearch_WithData(t *testing.T) {
@@ -461,7 +491,8 @@ func TestMessagesRead_InvalidParam(t *testing.T) {
 }
 
 func TestMessages_List(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	rec := post(h.Messages, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
@@ -852,6 +883,8 @@ func TestRoomTimeline_MarksReadOnOpen(t *testing.T) {
 	spy := &readMarkSpyRepo{MockChatRepository: testutil.NewMockChatRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	h := NewHandler(spy, idGen)
+	// u1 を owner にして閲覧権限を満たす。
+	spy.Rooms["r_x"] = &model.ChatRoom{ID: "r_x", OwnerID: u1.ID}
 	rec := post(h.RoomTimeline, `{"roomId":"r_x"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "u1", spy.markInRoomCalled.reader)
@@ -870,6 +903,7 @@ func TestTimeline_BestEffortReadMark(t *testing.T) {
 	r := &readMarkErrRepo{MockChatRepository: testutil.NewMockChatRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	h := NewHandler(r, idGen)
+	r.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	assert.Equal(t, http.StatusOK, post(h.UserTimeline, `{"userId":"u2"}`, u1).Code)
 	assert.Equal(t, http.StatusOK, post(h.RoomTimeline, `{"roomId":"r1"}`, u1).Code)
 }
@@ -931,12 +965,32 @@ func TestUserTimeline(t *testing.T) {
 }
 
 func TestRoomTimeline(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
 	assert.Equal(t, http.StatusBadRequest, post(h.RoomTimeline, `{}`, u1).Code)
+	// 存在しない room は NO_SUCH_ROOM (endpoint 固有 id)。
+	rec0 := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNotFound, rec0.Code)
+	assertErrorCode(t, rec0, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	// member でも moderator でもない第三者は NO_SUCH_ROOM。
+	rec1 := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNotFound, rec1.Code)
+	assertErrorCode(t, rec1, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
+	// member なら閲覧可。
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
 	rec := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	rec2 := post(h.RoomTimeline, `{"roomId":"r1","limit":5}`, u1)
 	assert.Equal(t, http.StatusOK, rec2.Code)
+}
+
+// room-timeline は moderator にも閲覧を許可する (member でなくても)。
+func TestRoomTimeline_ModeratorAllowed(t *testing.T) {
+	h, repo := newTestHandler()
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{u1.ID: true}})
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	rec := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestReadAll(t *testing.T) {
@@ -1121,8 +1175,26 @@ func TestRoomsJoining_RepoError(t *testing.T) {
 }
 
 func TestRoomsMembers(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
 	assert.Equal(t, http.StatusBadRequest, post(h.RoomsMembers, `{}`, u1).Code)
+	// 存在しない room は NO_SUCH_ROOM (endpoint 固有 id)。
+	rec0 := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNotFound, rec0.Code)
+	assertErrorCode(t, rec0, "NO_SUCH_ROOM", "7b9fe84c-eafc-4d21-bf89-485458ed2c18")
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	// 非 member は NO_SUCH_ROOM (members は moderator も許可しない)。
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{u1.ID: true}})
+	assert.Equal(t, http.StatusNotFound, post(h.RoomsMembers, `{"roomId":"r1"}`, u1).Code)
+	// member なら閲覧可。
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
+	rec := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// owner は member 扱いで自室の member 一覧を閲覧できる (isRoomMember の owner 分岐)。
+func TestRoomsMembers_OwnerAllowed(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	rec := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }

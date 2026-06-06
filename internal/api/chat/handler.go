@@ -262,6 +262,21 @@ func (h *Handler) packInvitationDetailed(inv *model.ChatRoomInvitation, meID str
 	return result
 }
 
+// isRoomMember reports whether userID is the owner of, or a member of, the room
+// (upstream ChatService.isRoomMember: room.ownerId===userId || membership exists)。
+func (h *Handler) isRoomMember(room *model.ChatRoom, userID string) bool {
+	if room.OwnerID == userID {
+		return true
+	}
+	_, err := h.repo.FindMembership(userID, room.ID)
+	return err == nil
+}
+
+// isModerator reports whether userID has moderator privileges (nil-safe).
+func (h *Handler) isModerator(userID string) bool {
+	return h.moderatorChecker != nil && h.moderatorChecker.IsModerator(userID)
+}
+
 // packMembershipDetailed builds the upstream ChatRoomMembership response shape
 // {id, createdAt, userId, roomId, room(ChatRoom)} used by rooms/joining
 // (upstream ChatEntityService.packRoomMembership with populateRoom:true,
@@ -771,6 +786,16 @@ func (h *Handler) Messages(c echo.Context) error {
 	}
 	var msgs []*model.ChatMessage
 	if req.RoomID != "" {
+		// room 発言の閲覧は room-timeline と同じ permission gate を適用する
+		// (member OR moderator)。これが無いと room-timeline を塞いでも本経路から
+		// 任意 room の発言を読めてしまう。
+		room, err := h.repo.FindRoomByID(req.RoomID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+		}
+		if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+		}
 		msgs, _ = h.repo.ListMessagesByRoom(req.RoomID, req.Limit)
 	} else if req.UserID != "" {
 		msgs, _ = h.repo.ListMessagesByUser(user.ID, req.UserID, req.Limit)
@@ -1086,6 +1111,16 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
+	// upstream room-timeline.ts: room 不在 / 閲覧権限なし (member でも moderator でも
+	// ない) は NO_SUCH_ROOM。これが無いと任意の認証ユーザーが任意 room の発言を
+	// 読めてしまう (security)。owner は isRoomMember で member 扱い。
+	room, err := h.repo.FindRoomByID(req.RoomID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+	}
+	if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+	}
 	msgs, err := h.repo.ListMessagesByRoom(req.RoomID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1233,12 +1268,23 @@ func (h *Handler) RoomsJoining(c echo.Context) error {
 
 // RoomsMembers handles POST /api/chat/rooms/members.
 func (h *Handler) RoomsMembers(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
 		Limit  int    `json:"limit"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// upstream members.ts: room 不在 / 非 member は NO_SUCH_ROOM (member-only、
+	// room-timeline と違い moderator は許可しない)。member でない第三者に member
+	// 一覧を晒さない。
+	room, err := h.repo.FindRoomByID(req.RoomID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
+	}
+	if !h.isRoomMember(room, user.ID) {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
 	}
 	members, err := h.repo.ListMembersByRoom(req.RoomID)
 	if err != nil {
