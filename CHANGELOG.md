@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/captcha/current` のレスポンスが flat な `{provider, siteKey}` で、本家の `{provider, hcaptcha:{...}, mcaptcha:{...}, recaptcha:{...}, turnstile:{...}}` という provider 別 nested 構造を欠いていた問題を修正 (フロントエンドが `res.hcaptcha.siteKey` 等を読めず undefined になっていた)。`/api/admin/captcha/save` が本家の generic パラメータ (`provider`/`captchaResult`/`sitekey`/`secret`/`instanceUrl`) を受け取らず保存値が DB に書かれていなかった問題、mCaptcha/testCaptcha provider 非対応、`captchaResult` の検証ステップと各エラーコード (`INVALID_PROVIDER`/`INVALID_PARAMETERS`/`VERIFICATION_FAILED` 等) の欠落も修正 (本家同様 captchaResult を検証し pass 時のみ設定を保存)。あわせて mCaptcha インスタンスの非200応答が `VERIFICATION_FAILED` になっていた問題を `REQUEST_FAILED` に修正 (本家 verifyMcaptcha と一致)
+
 - Fix: `/api/admin/abuse-user-reports` の `reporter`/`targetUser`/`assignee` が生のユーザーモデルで返り、`usernameLower` 等の内部フィールドが漏れ UserDetailedNotMe 固有フィールドを欠いていた問題を修正 (本家同様 UserDetailed で pack、`assignee` は未割当でも `null` でキー常在)。あわせて `targetUserHost`/`reporterHost` の余剰フィールド露出も除去
 - Fix: `/api/admin/update-abuse-user-report` が `moderationNote` を無視し代わりに `resolved=true` を立てていた問題 (resolve-abuse-user-report との取り違え) を修正 (本家同様 `moderationNote` のみ更新し、変化時に `updateAbuseReportNote` を記録)。`/api/admin/resolve-abuse-user-report` が `assigneeId` を記録していなかった問題も修正
 - Fix: `/api/admin/forward-abuse-user-report` がローカル対象 (targetUserHost が null) や既に転送済みの通報をガードせず転送扱いにしていた問題と、存在しない通報で 404 `NO_SUCH_ABUSE_REPORT` を返していなかった問題を修正。あわせて abuse-report 系エンドポイントのエラーコードを本家の `NO_SUCH_ABUSE_REPORT` (エンドポイント別 UUID) に統一

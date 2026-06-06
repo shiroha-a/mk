@@ -110,7 +110,8 @@ func TestMcaptcha_ServerError(t *testing.T) {
 
 	v := captcha.NewMcaptchaWithClient(srv.URL, "site", "sec", srv.Client())
 	err := v.Verify(context.Background(), "token")
-	assert.ErrorIs(t, err, captcha.ErrVerificationFail)
+	// 非200は instance への到達失敗扱い (upstream verifyMcaptcha と同じ requestFailed)。
+	assert.ErrorIs(t, err, captcha.ErrRequestFailed)
 }
 
 // --- testcaptcha ---

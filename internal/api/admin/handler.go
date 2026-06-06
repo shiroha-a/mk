@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/core/captcha"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
@@ -116,6 +117,10 @@ type Handler struct {
 	systemAccountFetcher    SystemAccountFetcher
 	followingRepo           repository.FollowingRepository
 	unfollowEnqueuer        UnfollowEnqueuer
+	// captchaVerifierFactory builds a one-off captcha.Verifier for
+	// admin/captcha/save verification. nil uses the real providers; tests
+	// inject a stub to avoid external HTTP calls.
+	captchaVerifierFactory CaptchaVerifierFactory
 	// instanceRepo は admin/federation/* の instance lookup / update を
 	// inject 可能にするための DI 口 (#676)。FederationUpdateInstance の
 	// log type 分岐をテストするため、`adminDB` 直叩きから repository 経由
@@ -326,6 +331,17 @@ func (h *Handler) SetRelayService(s RelayService) {
 // (pre-P4-5 behaviour).
 func (h *Handler) SetAbuseForwarder(f AbuseForwarder) {
 	h.abuseForwarder = f
+}
+
+// CaptchaVerifierFactory builds a captcha.Verifier for the given provider and
+// the request-supplied secret / sitekey / instanceUrl. Used by
+// admin/captcha/save to verify the captchaResult before persisting settings.
+type CaptchaVerifierFactory func(provider, secret, sitekey, instanceURL string) captcha.Verifier
+
+// SetCaptchaVerifierFactory overrides the captcha verifier construction used by
+// admin/captcha/save (tests inject a stub to avoid external HTTP).
+func (h *Handler) SetCaptchaVerifierFactory(f CaptchaVerifierFactory) {
+	h.captchaVerifierFactory = f
 }
 
 // SetDeleteAccountEnqueuer wires the enqueuer that schedules cascade

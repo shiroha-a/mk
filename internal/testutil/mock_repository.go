@@ -2372,8 +2372,20 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			if s, ok := v.(string); ok {
 				m.Meta.UgcVisibilityForVisitor = s
 			}
+		case "enableMcaptcha":
+			if b, ok := v.(bool); ok {
+				m.Meta.EnableMcaptcha = b
+			}
+		case "enableTestcaptcha":
+			if b, ok := v.(bool); ok {
+				m.Meta.EnableTestcaptcha = b
+			}
 		case "mcaptchaSitekey":
 			setNullableStr(&m.Meta.McaptchaSiteKey, v)
+		case "mcaptchaSecretKey":
+			setNullableStr(&m.Meta.McaptchaSecretKey, v)
+		case "mcaptchaInstanceUrl":
+			setNullableStr(&m.Meta.McaptchaInstanceURL, v)
 		case "repositoryUrl":
 			setNullableStr(&m.Meta.RepositoryURL, v)
 		case "deeplAuthKey":

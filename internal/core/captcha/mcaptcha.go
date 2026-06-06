@@ -76,7 +76,9 @@ func (v *mcaptchaVerifier) Verify(ctx context.Context, token string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: status %d", ErrVerificationFail, resp.StatusCode)
+		// upstream verifyMcaptcha は非200を requestFailed として扱う
+		// (verification の不成立ではなく instance への到達失敗扱い)。
+		return fmt.Errorf("%w: status %d", ErrRequestFailed, resp.StatusCode)
 	}
 
 	data, err := safehttp.ReadAllLimit(resp.Body, safehttp.DefaultThirdPartyAPILimit)
