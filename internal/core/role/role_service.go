@@ -968,6 +968,21 @@ func (s *Service) ListByRole(roleID, untilID, sinceID string, limit int) ([]*mod
 	return s.assignmentRepo.ListByRole(roleID, untilID, sinceID, limit)
 }
 
+// CountAssignedUsers returns the number of users currently assigned to a role
+// (non-expired assignments). Used by the Role packer's usersCount field. On
+// repository error it returns 0 so packing never fails the whole response.
+func (s *Service) CountAssignedUsers(roleID string) int {
+	n, err := s.assignmentRepo.CountActiveByRole(roleID)
+	if err != nil {
+		// fail-soft: pack 全体を失敗させない (upstream は 500 だが mk-go は
+		// best-effort で 0 を返す)。ただし silent に 0 を返すと corrupt/transient
+		// DB error が usersCount:0 として隠れるため warn で観測可能にする。
+		slog.Warn("role: CountActiveByRole failed; usersCount falls back to 0", "roleId", roleID, "err", err)
+		return 0
+	}
+	return n
+}
+
 // UpdateFields updates the named columns of an existing role and
 // returns the role state after the update for audit logging. Returns
 // ErrRoleNotFound if the role does not exist before the update.

@@ -60,6 +60,9 @@ type RoleAssignmentRepository interface {
 	ListByUser(userID string) ([]*model.RoleAssignment, error)
 	ListByRole(roleID string, untilID, sinceID string, limit int) ([]*model.RoleAssignment, error)
 	Exists(userID, roleID string) (bool, error)
+	// CountActiveByRole returns the number of non-expired assignments for a
+	// role (expiresAt IS NULL OR > now). Used for the Role packer's usersCount.
+	CountActiveByRole(roleID string) (int, error)
 }
 
 type roleAssignmentRepository struct {
@@ -115,6 +118,15 @@ func (r *roleAssignmentRepository) ListByRole(roleID string, untilID, sinceID st
 		return nil, err
 	}
 	return assignments, nil
+}
+
+func (r *roleAssignmentRepository) CountActiveByRole(roleID string) (int, error) {
+	var count int64
+	now := time.Now()
+	err := r.db.Model(&model.RoleAssignment{}).
+		Where("\"roleId\" = ? AND (\"expiresAt\" IS NULL OR \"expiresAt\" > ?)", roleID, now).
+		Count(&count).Error
+	return int(count), err
 }
 
 func (r *roleAssignmentRepository) Exists(userID, roleID string) (bool, error) {

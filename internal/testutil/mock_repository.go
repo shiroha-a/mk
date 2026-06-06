@@ -5968,6 +5968,23 @@ func (m *MockRoleAssignmentRepository) Exists(userID, roleID string) (bool, erro
 	return true, nil
 }
 
+func (m *MockRoleAssignmentRepository) CountActiveByRole(roleID string) (int, error) {
+	now := time.Now()
+	count := 0
+	for _, a := range m.Assignments {
+		if a.RoleID != roleID {
+			continue
+		}
+		// production SQL は `expiresAt IS NULL OR expiresAt > now` (厳密 >) なので
+		// expiresAt <= now (== now 含む) は非 active。!After(now) で境界を揃える。
+		if a.ExpiresAt != nil && !a.ExpiresAt.After(now) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 // MockUserPendingRepository is a test double for repository.UserPendingRepository.
 type MockUserPendingRepository struct {
 	Rows map[string]*model.UserPending // keyed by ID

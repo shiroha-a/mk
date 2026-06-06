@@ -776,6 +776,29 @@ func (f *failingAssignRepo) Exists(_ string, _ string) (bool, error) {
 	return false, assert.AnError
 }
 
+func (f *failingAssignRepo) CountActiveByRole(_ string) (int, error) {
+	return 0, assert.AnError
+}
+
+// CountAssignedUsers は active assignment 数を返す。
+func TestCountAssignedUsers_Counts(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "R"}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignRepo.Assignments["u2:r1"] = &model.RoleAssignment{ID: "a2", UserID: "u2", RoleID: "r1"}
+	assert.Equal(t, 2, svc.CountAssignedUsers("r1"))
+}
+
+// repo error 時は fail-open で 0 を返す (pack 全体を失敗させない)。
+func TestCountAssignedUsers_FailOpen(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := &failingAssignRepo{testutil.NewMockRoleAssignmentRepository(roleRepo)}
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	assert.Equal(t, 0, svc.CountAssignedUsers("r1"))
+}
+
 type failingRoleRepo struct {
 	*testutil.MockRoleRepository
 }

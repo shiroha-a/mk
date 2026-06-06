@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/roles/create`・`/show`・`/list` と公開 `/api/roles/list`・`/show` の Role レスポンスが raw な内部モデルで `usersCount`・`createdAt`・`target`・`condFormula`・`policies`(デフォルト値マージ)・`preserveAssignmentOnMoveAccount` を欠いていた問題を修正 (Misskey 本家 RoleEntityService.pack 相当の共通 packer に統一)。公開 `/api/roles/list` の `isExplorable` フィルタ欠落も合わせて修正 (本家同様 isPublic かつ isExplorable のみ列挙)
+
 - Fix: `/api/admin/emoji/add` が `category`/`aliases`/`license`/`isSensitive`/`localOnly`/`roleIdsThatCanBeUsedThisEmojiAsReaction` パラメータを無視し、さらに raw な内部モデルを返して `url` 欠落 + `originalUrl`/`publicUrl`/`uri`/`type` 等の内部フィールドが漏れていた問題を修正 (Misskey 本家同様に全パラメータを永続化し EmojiDetailed を返す)。あわせて重複名 (DUPLICATE_NAME) / emoji 名パターン (`^[a-zA-Z0-9_]+$`) の検証を追加し、`fileId` 経路では本家 `FILE_TYPE_IMAGE` 許可リストで MIME を検証 (XSS 対策で `image/svg+xml` は除外) して `originalUrl`/`publicUrl`/`type` を webpublic variant 優先で永続化する。なお legacy な `url` 直接指定経路では MIME 検証は行わない (管理者専用)
 - Fix: `/api/admin/emoji/update` が `fileId` による画像差し替え (webpublic variant 優先 + MIME 許可リスト検証) と `roleIdsThatCanBeUsedThisEmojiAsReaction` の更新を受け付けていなかった問題を修正 (リネーム時の SAME_NAME_EMOJI_EXISTS チェックも追加)
 - Fix: `/api/emoji` (EmojiDetailed) のレスポンスに `license` と `roleIdsThatCanBeUsedThisEmojiAsReaction` が欠落し、`url` が `publicUrl` 固定で `originalUrl` フォールバックが無かった問題を修正

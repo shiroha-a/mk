@@ -61,13 +61,15 @@ func doPost(h func(echo.Context) error, body string) *httptest.ResponseRecorder 
 
 func TestList_PublicOnly(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	// upstream は isPublic AND isExplorable。public+explorable のみ list に出る。
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	roleRepo.Roles["r2"] = &model.Role{ID: "r2", Name: "Private", IsPublic: false}
+	roleRepo.Roles["r3"] = &model.Role{ID: "r3", Name: "PublicNonExplorable", IsPublic: true, IsExplorable: false}
 	rec := doPost(h.List, `{}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp []any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Len(t, resp, 1)
+	assert.Len(t, resp, 1, "isPublic かつ isExplorable のみ (r1)")
 }
 
 func TestList_Empty(t *testing.T) {
@@ -84,7 +86,7 @@ func TestList_FullShape(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	roleID := idGen.Generate(time.Now())
 	roleRepo.Roles[roleID] = &model.Role{
-		ID: roleID, Name: "Public", IsPublic: true,
+		ID: roleID, Name: "Public", IsPublic: true, IsExplorable: true,
 		UpdatedAt:                 time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 		CanEditMembersByModerator: true,
 	}
@@ -110,13 +112,45 @@ func TestShow_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// 公開 role の pack に target / condFormula / policies(default-fill) /
+// preserveAssignmentOnMoveAccount / 実 usersCount が含まれること (旧実装は
+// これらを欠き usersCount=0 固定だった)。
+func TestShow_IncludesPoliciesTargetAndUsersCount(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corerole.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	h := roles.NewHandler(svc, idGen)
+
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Pub", IsPublic: true, Target: model.RoleTargetManual}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}))
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "a2", UserID: "u2", RoleID: "r1"}))
+
+	rec := doPost(h.Show, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, float64(2), resp["usersCount"], "usersCount は active assignment 数")
+	assert.Equal(t, "manual", resp["target"])
+	assert.Contains(t, resp, "condFormula")
+	assert.Contains(t, resp, "preserveAssignmentOnMoveAccount")
+	policies, ok := resp["policies"].(map[string]any)
+	require.True(t, ok, "policies が含まれること")
+	// default-fill された任意の policy key が {useDefault:true,...} 形式。
+	if cp, ok := policies["canPublicNote"].(map[string]any); ok {
+		assert.Equal(t, true, cp["useDefault"])
+	}
+}
+
 // #1249: role ID が aidx でなく ParseTime が失敗しても createdAt は空文字に
 // ならず updatedAt にフォールバックすること (misskey_dart の DateTimeConverter
 // は空文字を FormatException にするため)。
 func TestList_CreatedAtFallsBackToUpdatedAt(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["non-aidx-id"] = &model.Role{
-		ID: "non-aidx-id", Name: "Seeded", IsPublic: true,
+		ID: "non-aidx-id", Name: "Seeded", IsPublic: true, IsExplorable: true,
 		UpdatedAt: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 	}
 	rec := doPost(h.List, `{}`)

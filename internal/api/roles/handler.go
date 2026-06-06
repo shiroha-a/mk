@@ -99,7 +99,8 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	var result []any
 	for _, r := range roles {
-		if r.IsPublic {
+		// upstream roles/list は isPublic AND isExplorable の 2 条件で絞る。
+		if r.IsPublic && r.IsExplorable {
 			result = append(result, h.packRole(r))
 		}
 	}
@@ -195,33 +196,11 @@ func (h *Handler) Notes(c echo.Context) error {
 // usersCount (非null num) を含めないと misskey_dart の RolesListResponse.fromJson
 // が cast で落ちる (#1249)。usersCount は mk-go が role member 数を集計していない
 // ため 0 固定 (best-effort、非crashing)。
+// packRole renders a public role in the upstream-compatible shape. upstream の
+// roles/show・list は admin と同じ RoleEntityService.pack を使うため共通 packer
+// (entity.PackRole) に統一する。旧実装は target / condFormula / policies /
+// preserveAssignmentOnMoveAccount を欠き usersCount を 0 固定していた。
+// usersCount は active assignment 数 (role は少数なので per-role count)。
 func (h *Handler) packRole(r *model.Role) map[string]any {
-	const tsFormat = "2006-01-02T15:04:05.000Z"
-	// createdAt は role ID (aidx) から復元する。misskey_dart は createdAt を
-	// DateTimeConverter で parse するため、空文字だと FormatException で落ちる。
-	// ID が aidx でない等で ParseTime に失敗した場合は updatedAt (非null) へ
-	// フォールバックし、常に有効な日付文字列を返す (#1249)。
-	createdAt := r.UpdatedAt.UTC().Format(tsFormat)
-	if h.idGen != nil {
-		if t, err := h.idGen.ParseTime(r.ID); err == nil {
-			createdAt = t.UTC().Format(tsFormat)
-		}
-	}
-	return map[string]any{
-		"id":                        r.ID,
-		"createdAt":                 createdAt,
-		"updatedAt":                 r.UpdatedAt.UTC().Format(tsFormat),
-		"name":                      r.Name,
-		"color":                     r.Color,
-		"iconUrl":                   r.IconURL,
-		"description":               r.Description,
-		"isModerator":               r.IsModerator,
-		"isAdministrator":           r.IsAdministrator,
-		"isPublic":                  r.IsPublic,
-		"isExplorable":              r.IsExplorable,
-		"asBadge":                   r.AsBadge,
-		"canEditMembersByModerator": r.CanEditMembersByModerator,
-		"displayOrder":              r.DisplayOrder,
-		"usersCount":                0,
-	}
+	return entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
 }

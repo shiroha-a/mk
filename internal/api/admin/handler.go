@@ -1434,7 +1434,15 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 		"roleId": r.ID,
 		"role":   r,
 	})
-	return c.JSON(http.StatusOK, r)
+	return c.JSON(http.StatusOK, h.packRole(r))
+}
+
+// packRole renders a role in the upstream-compatible shape (usersCount /
+// createdAt / default-filled policies 等)。raw model.Role を返すとこれらが欠落
+// する。usersCount は active assignment 数 (per-role count、role は少数なので
+// N+1 でも許容、upstream pack も per-role count する)。
+func (h *Handler) packRole(r *model.Role) map[string]any {
+	return entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
 }
 
 // RolesShow handles POST /api/admin/roles/show.
@@ -1449,7 +1457,7 @@ func (h *Handler) RolesShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
 	}
-	return c.JSON(http.StatusOK, r)
+	return c.JSON(http.StatusOK, h.packRole(r))
 }
 
 // RolesList handles POST /api/admin/roles/list.
@@ -1458,7 +1466,11 @@ func (h *Handler) RolesList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, roles)
+	out := make([]map[string]any, 0, len(roles))
+	for _, r := range roles {
+		out = append(out, h.packRole(r))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // RolesUpdate handles POST /api/admin/roles/update.

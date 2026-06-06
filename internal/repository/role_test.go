@@ -176,6 +176,49 @@ func TestRoleAssignmentRepository_ListByRole_WithPagination(t *testing.T) {
 	assert.Equal(t, "pag_a2", result[0].ID)
 }
 
+func TestRoleAssignmentRepository_CountActiveByRole(t *testing.T) {
+	roleRepo := NewRoleRepository(testDB)
+	assignRepo := NewRoleAssignmentRepository(testDB)
+
+	now := time.Now()
+	role := &model.Role{
+		ID: "role_cnt_test", UpdatedAt: now, LastUsedAt: now, Name: "Cnt",
+		Target: model.RoleTargetManual, Policies: datatypes.JSON([]byte("{}")),
+		CondFormula: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, roleRepo.Create(role))
+	defer cleanupRole(t, role.ID)
+
+	createTestUser(t, "cnt_u1")
+	createTestUser(t, "cnt_u2")
+	createTestUser(t, "cnt_u3")
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "cnt_a1", UserID: "cnt_u1", RoleID: role.ID}))
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "cnt_a2", UserID: "cnt_u2", RoleID: role.ID, ExpiresAt: &future}))
+	// 期限切れは active count に含めない。
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "cnt_a3", UserID: "cnt_u3", RoleID: role.ID, ExpiresAt: &past}))
+
+	// 別 role の assignment は count に混ざらない (cross-role isolation)。
+	otherRole := &model.Role{
+		ID: "role_cnt_other", UpdatedAt: now, LastUsedAt: now, Name: "Other",
+		Target: model.RoleTargetManual, Policies: datatypes.JSON([]byte("{}")),
+		CondFormula: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, roleRepo.Create(otherRole))
+	defer cleanupRole(t, otherRole.ID)
+	createTestUser(t, "cnt_u4")
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "cnt_a4", UserID: "cnt_u4", RoleID: otherRole.ID}))
+
+	n, err := assignRepo.CountActiveByRole(role.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "active (nil + future) のみ数え、expired と別 role は除外")
+
+	n, err = assignRepo.CountActiveByRole(otherRole.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+}
+
 func TestRoleAssignmentRepository_ListByRole_Error(t *testing.T) {
 	db := cancelledDB(t)
 	repo := NewRoleAssignmentRepository(db)

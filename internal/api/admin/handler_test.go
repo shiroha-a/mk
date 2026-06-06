@@ -1074,6 +1074,27 @@ func TestRolesShow_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// admin の Role response に usersCount / createdAt / policies(default-fill) /
+// target / preserveAssignmentOnMoveAccount が含まれること (旧実装は raw model で
+// 欠落していた)。
+func TestRolesShow_IncludesPackedFields(t *testing.T) {
+	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Test", Target: model.RoleTargetManual}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}))
+
+	rec := doPost(h.RolesShow, `{"roleId":"r1"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, float64(1), resp["usersCount"])
+	assert.Contains(t, resp, "createdAt")
+	assert.Contains(t, resp, "preserveAssignmentOnMoveAccount")
+	assert.Equal(t, "manual", resp["target"])
+	policies, ok := resp["policies"].(map[string]any)
+	require.True(t, ok)
+	assert.NotEmpty(t, policies, "policies は default-fill されて非空")
+}
+
 func TestRolesShow_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesShow, `{"roleId":"ghost"}`, nil)
