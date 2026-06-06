@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // ForwardAbuseUserReport handles POST /api/admin/forward-abuse-user-report.
@@ -21,11 +22,27 @@ func (h *Handler) ForwardAbuseUserReport(c echo.Context) error {
 	if req.ReportID == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// snapshot for moderation log info (forwarded フラグが立つ前の状態)
-	var snapshot any
+	// snapshot for moderation log info (forwarded フラグが立つ前の状態)。
+	// abuseRepo が wired で report が存在しなければ NO_SUCH_ABUSE_REPORT
+	// (upstream forward-abuse-user-report.ts:47-50)。未配線時は従来どおり通す。
+	var snapshot *model.AbuseUserReport
 	if h.abuseRepo != nil {
-		if r, _ := h.abuseRepo.FindByID(req.ReportID); r != nil {
-			snapshot = r
+		s, err := h.abuseRepo.FindByID(req.ReportID)
+		if err != nil || s == nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "8763e21b-d9bc-40be-acf6-54c1a6986493"))
+		}
+		snapshot = s
+	}
+	// upstream AbuseReportService.forward の事前 guard: 対象がローカル
+	// (targetUserHost == null) か、既に forwarded の場合は forward 不可。順序は
+	// upstream に合わせ host==null を先に評価する。旧 mk-go はこれらを無視し
+	// ローカル通報でも forwarded=true を立てていた。
+	if snapshot != nil {
+		if snapshot.TargetUserHost == nil {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam("The target user host is null."))
+		}
+		if snapshot.Forwarded {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam("The report has already been forwarded."))
 		}
 	}
 	if h.abuseForwarder != nil {

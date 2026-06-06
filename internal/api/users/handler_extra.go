@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -130,17 +131,40 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 		UserID  string `json:"userId"`
 		Comment string `json:"comment"`
 	}
-	if err := c.Bind(&req); err != nil || req.UserID == "" || req.Comment == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and comment are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	// comment は upstream paramDef で minLength:1 / maxLength:2048 (report-abuse.ts:46)。
+	// ajv の maxLength は文字数 (code unit) 基準なので byte 長でなく rune 数で判定する
+	// (drive/handler.go の comment 検証と同方針)。
+	if err := c.Bind(&req); err != nil || req.UserID == "" || req.Comment == "" || utf8.RuneCountInString(req.Comment) > 2048 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and comment (1-2048 chars) are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.abuseRepo == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// target 存在 / 自己通報 / 管理者通報の検証 (upstream report-abuse.ts:58-71)。
+	var target *model.User
+	if h.userRepo != nil {
+		t, err := h.userRepo.FindByID(req.UserID)
+		if err != nil || t == nil {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "1acefcb5-0959-43fd-9685-b48305736cb5"))
+		}
+		target = t
+	}
+	if me != nil && req.UserID == me.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_REPORT_YOURSELF", "Cannot report yourself.", "1e13149e-b1e8-43cf-902e-c01dbfcb202f"))
+	}
+	if h.moderatorChecker != nil && h.moderatorChecker.IsAdministrator(req.UserID) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_REPORT_THE_ADMIN", "Cannot report the admin.", "35e166f5-05fb-4f87-a2d5-adb42676d48f"))
 	}
 	report := &model.AbuseUserReport{
 		ID:           h.idGen.Generate(time.Now()),
 		TargetUserID: req.UserID,
 		ReporterID:   me.ID,
 		Comment:      req.Comment,
+	}
+	// targetUserHost を保存 (upstream report-abuse.ts:75)。reporterHost は
+	// reporter が local viewer なので常に null。
+	if target != nil {
+		report.TargetUserHost = target.Host
 	}
 	if err := h.abuseRepo.Create(report); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

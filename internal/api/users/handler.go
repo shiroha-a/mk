@@ -89,11 +89,12 @@ func (h *Handler) SetRemoteStatsFetcher(f RemoteStatsFetcher) {
 	h.remoteStatsFetcher = f
 }
 
-// ModeratorChecker reports whether a user holds moderator (or admin) privileges.
-// core/role.Service implements it. Narrowing to this interface avoids importing
-// core/role into the handler.
+// ModeratorChecker reports whether a user holds moderator / administrator
+// privileges. core/role.Service implements it. Narrowing to this interface
+// avoids importing core/role into the handler.
 type ModeratorChecker interface {
 	IsModerator(userID string) bool
+	IsAdministrator(userID string) bool
 }
 
 // SetModeratorChecker wires the moderator check used by users/reactions so a

@@ -1461,9 +1461,13 @@ const (
 // handler_extra_test.go の stubModeratorChecker と同等 (あちらは users_test
 // package のため白箱 test 側からは参照できないので、内側 package 用に別途
 // 定義する)。
-type visibilityModStub struct{ modID string }
+type visibilityModStub struct {
+	modID   string
+	adminID string
+}
 
-func (s visibilityModStub) IsModerator(userID string) bool { return userID == s.modID }
+func (s visibilityModStub) IsModerator(userID string) bool     { return userID == s.modID }
+func (s visibilityModStub) IsAdministrator(userID string) bool { return userID == s.adminID }
 
 // setupRelationVisibilityFixture wires target user (user1) with the given
 // followers/following visibility and adds a stand-in follower (alice) so the

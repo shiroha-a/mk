@@ -116,7 +116,43 @@ func TestDeleteAllFilesOfUser_DeletesOnlyTargetUserFiles(t *testing.T) {
 // 妥当。
 func TestUpdateAbuseUserReport(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.UpdateAbuseUserReport, `{}`, adminUser).Code)
+	// reportId 欠落は 400 (upstream paramDef required)。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateAbuseUserReport, `{}`, adminUser).Code)
+}
+
+// moderationNote のみを更新し、resolved は触らない (upstream AbuseReportService.update)。
+func TestUpdateAbuseUserReport_UpdatesModerationNoteOnly(t *testing.T) {
+	h, repo := setupAbuseReportHandler(t,
+		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"},
+	)
+	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1","moderationNote":"checked"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "checked", repo.Reports["r1"].ModerationNote)
+	assert.False(t, repo.Reports["r1"].Resolved, "resolved は触らない")
+}
+
+// 存在しない reportId は NO_SUCH_ABUSE_REPORT (404, upstream id 15f51cf5)。
+func TestUpdateAbuseUserReport_NotFound(t *testing.T) {
+	h, _ := setupAbuseReportHandler(t)
+	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"ghost","moderationNote":"x"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_ABUSE_REPORT")
+	assert.Contains(t, rec.Body.String(), "15f51cf5-46d1-4b1d-a618-b35bcbed0662")
+}
+
+// updateAbuseReportNote の log info に before/after が記録される。
+func TestUpdateAbuseUserReport_LogPayload(t *testing.T) {
+	h, _ := setupAbuseReportHandler(t,
+		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2", ModerationNote: "old"},
+	)
+	repo := attachModLog(t, h)
+	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1","moderationNote":"new"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(repo.Snapshot()[0].Info, &info))
+	assert.Equal(t, "old", info["before"])
+	assert.Equal(t, "new", info["after"])
 }
 
 // --- moderation log assertions ---
@@ -146,16 +182,30 @@ func TestUnsetUserBanner_WritesModerationLog(t *testing.T) {
 }
 
 func TestUpdateAbuseUserReport_WritesModerationLog(t *testing.T) {
-	// #664: resolveAbuseReport log を出すことを確認。
+	// moderationNote が変化したとき updateAbuseReportNote log を出す。
 	h, _ := setupAbuseReportHandler(t,
 		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2"},
 	)
 	repo := attachModLog(t, h)
 
-	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1"}`, adminUser)
+	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1","moderationNote":"note added"}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
-	assert.Equal(t, "resolveAbuseReport", repo.Snapshot()[0].Type)
+	assert.Equal(t, "updateAbuseReportNote", repo.Snapshot()[0].Type)
+}
+
+// moderationNote が変化しないとき log は出さない (upstream の changed guard)。
+func TestUpdateAbuseUserReport_NoLogWhenUnchanged(t *testing.T) {
+	h, _ := setupAbuseReportHandler(t,
+		&model.AbuseUserReport{ID: "r1", TargetUserID: "u1", ReporterID: "u2", ModerationNote: "same"},
+	)
+	repo := attachModLog(t, h)
+
+	rec := doPost(h.UpdateAbuseUserReport, `{"reportId":"r1","moderationNote":"same"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// 変化なしなので log は書かれない。少し待っても 0 件のまま。
+	time.Sleep(50 * time.Millisecond)
+	assert.Empty(t, repo.Snapshot())
 }
 
 func TestUpdateUserNote_WritesModerationLog(t *testing.T) {

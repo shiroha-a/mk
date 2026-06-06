@@ -673,9 +673,14 @@ func TestSearchByUsernameAndHost_Error(t *testing.T) {
 }
 
 // stubModeratorChecker は指定 userID を moderator とみなす test stub。
-type stubModeratorChecker struct{ modID string }
+// adminID を指定すると IsAdministrator が true を返す。
+type stubModeratorChecker struct {
+	modID   string
+	adminID string
+}
 
-func (s stubModeratorChecker) IsModerator(userID string) bool { return userID == s.modID }
+func (s stubModeratorChecker) IsModerator(userID string) bool     { return userID == s.modID }
+func (s stubModeratorChecker) IsAdministrator(userID string) bool { return userID == s.adminID }
 
 // moderator viewer は remote user の reaction も閲覧できる (upstream:
 // "Moderators can see reactions of all users")。IS_REMOTE_USER を返さず
@@ -837,4 +842,73 @@ func TestReactions_ModeratorStillFiltersInvisibleNotes(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
 	require.Len(t, list, 1, "moderator must not see followers-only note reaction")
 	assert.Equal(t, publicRxID, list[0]["id"])
+}
+
+// --- #H-PR8b: report-abuse validation ---
+
+func TestReportAbuse_NoSuchUser(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	h.SetUserRepo(userRepo) // target u2 は存在しない
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"spam"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "1acefcb5-0959-43fd-9685-b48305736cb5")
+}
+
+func TestReportAbuse_CannotReportYourself(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "self"}
+	h.SetUserRepo(userRepo)
+	rec := postExtra(h.ReportAbuse, `{"userId":"u1","comment":"spam"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CANNOT_REPORT_YOURSELF")
+}
+
+func TestReportAbuse_CannotReportAdmin(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	userRepo.Users["u2"] = &model.User{ID: "u2", Username: "boss"}
+	h.SetUserRepo(userRepo)
+	h.SetModeratorChecker(stubModeratorChecker{adminID: "u2"})
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"spam"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CANNOT_REPORT_THE_ADMIN")
+}
+
+func TestReportAbuse_CommentTooLong(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	long := strings.Repeat("a", 2049)
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"`+long+`"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// maxLength は rune 数で判定する。多バイト文字 2048 個 (byte では超過) は通り、
+// 2049 個は弾く (ajv の文字数基準と一致)。
+func TestReportAbuse_CommentRuneLength(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	userRepo.Users["u2"] = &model.User{ID: "u2", Username: "x"}
+	h.SetUserRepo(userRepo)
+
+	ok := strings.Repeat("あ", 2048) // 6144 byte だが 2048 文字なので通る
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"`+ok+`"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	tooLong := strings.Repeat("あ", 2049)
+	rec = postExtra(h.ReportAbuse, `{"userId":"u2","comment":"`+tooLong+`"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestReportAbuse_SavesTargetUserHost(t *testing.T) {
+	h, userRepo, _ := newExtraHandler(t)
+	host := "remote.example"
+	userRepo.Users["u2"] = &model.User{ID: "u2", Username: "remoteuser", Host: &host}
+	h.SetUserRepo(userRepo)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	h.SetAbuseRepo(abuseRepo)
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"spam"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, abuseRepo.Reports, 1)
+	for _, r := range abuseRepo.Reports {
+		require.NotNil(t, r.TargetUserHost)
+		assert.Equal(t, "remote.example", *r.TargetUserHost)
+	}
 }

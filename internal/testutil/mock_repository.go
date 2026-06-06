@@ -5723,6 +5723,19 @@ func (m *MockAbuseReportRepository) UpdateFields(id string, fields map[string]an
 			r.ResolvedAs = &s
 		}
 	}
+	if v, ok := fields["moderationNote"]; ok {
+		if s, ok := v.(string); ok {
+			r.ModerationNote = s
+		}
+	}
+	if v, ok := fields["assigneeId"]; ok {
+		switch s := v.(type) {
+		case nil:
+			r.AssigneeID = nil
+		case string:
+			r.AssigneeID = &s
+		}
+	}
 	return nil
 }
 

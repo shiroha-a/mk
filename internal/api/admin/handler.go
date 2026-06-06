@@ -2569,9 +2569,28 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	// した createdAt 文字列を response に注入する。ShowModerationLogs と
 	// 同パターン (#1116)。embedded struct で既存 field を JSON inline、
 	// CreatedAt だけ上乗せする。
+	// reporter / targetUser / assignee に紐づく profile を 1 batch で解決して
+	// UserDetailed を pack する (N+1 回避)。
+	profByID := h.abuseUserProfiles(reports)
 	out := make([]packedAbuseReport, 0, len(reports))
 	for _, r := range reports {
-		p := packedAbuseReport{AbuseUserReport: r}
+		p := packedAbuseReport{
+			ID:             r.ID,
+			Comment:        r.Comment,
+			Resolved:       r.Resolved,
+			ReporterID:     r.ReporterID,
+			TargetUserID:   r.TargetUserID,
+			AssigneeID:     r.AssigneeID,
+			Forwarded:      r.Forwarded,
+			ResolvedAs:     r.ResolvedAs,
+			ModerationNote: r.ModerationNote,
+			// 生 model.User を inline すると usernameLower / inbox 等の内部
+			// field が漏れ、UserDetailedNotMe 固有 field も欠ける。UserDetailed
+			// で pack する。
+			Reporter:   h.packAbuseUser(r.Reporter, profByID),
+			TargetUser: h.packAbuseUser(r.TargetUser, profByID),
+			Assignee:   h.packAbuseUser(r.Assignee, profByID),
+		}
 		if s, err := aidxCreatedAtString(h.idGen, r.ID); err == nil {
 			p.CreatedAt = s
 		} else if !errors.Is(err, ErrIDGenMissing) {
@@ -2587,13 +2606,73 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// packedAbuseReport wraps model.AbuseUserReport and adds the derived
-// `createdAt` field (= aidx ID から派生した ISO 8601 timestamp) that the
-// frontend `MkAbuseReport.vue` expects. embedded struct を使って既存の
-// `id` / `targetUser` / `reporter` 等の field を JSON inline で温存する。
+// abuseUserProfiles batch-fetches the profiles of every reporter / targetUser /
+// assignee referenced by the reports, keyed by user ID (N+1 回避)。
+func (h *Handler) abuseUserProfiles(reports []*model.AbuseUserReport) map[string]*model.UserProfile {
+	if h.userRepo == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	ids := make([]string, 0, len(reports)*3)
+	add := func(u *model.User) {
+		if u == nil {
+			return
+		}
+		if _, ok := seen[u.ID]; ok {
+			return
+		}
+		seen[u.ID] = struct{}{}
+		ids = append(ids, u.ID)
+	}
+	for _, r := range reports {
+		add(r.Reporter)
+		add(r.TargetUser)
+		add(r.Assignee)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	profiles, err := h.userRepo.FindProfilesByUserIDs(ids)
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]*model.UserProfile, len(profiles))
+	for _, p := range profiles {
+		byID[p.UserID] = p
+	}
+	return byID
+}
+
+// packAbuseUser packs a related user as UserDetailed (= UserDetailedNotMe shape).
+// Returns nil (-> JSON null) when u is nil so the assignee key stays present.
+func (h *Handler) packAbuseUser(u *model.User, profByID map[string]*model.UserProfile) *entity.UserDetailed {
+	if u == nil {
+		return nil
+	}
+	d := entity.PackUserDetailed(u, profByID[u.ID], h.idGen)
+	return &d
+}
+
+// packedAbuseReport mirrors the upstream abuse-user-reports res schema
+// (abuse-user-reports.ts:26-89) field-for-field. 旧実装は model.AbuseUserReport
+// を embed して生 model.User の relation や targetUserHost/reporterHost 等の
+// 内部 field を漏らしていた。明示 struct にして TS res と 1:1 に揃える。
+// assignee/assigneeId/resolvedAs は nullable+optional:false なので key 常在
+// (null when unset)。createdAt は aidx 由来で legacy 非 aidx ID では omit。
 type packedAbuseReport struct {
-	*model.AbuseUserReport
-	CreatedAt string `json:"createdAt,omitempty"`
+	ID             string               `json:"id"`
+	CreatedAt      string               `json:"createdAt,omitempty"`
+	Comment        string               `json:"comment"`
+	Resolved       bool                 `json:"resolved"`
+	ReporterID     string               `json:"reporterId"`
+	TargetUserID   string               `json:"targetUserId"`
+	AssigneeID     *string              `json:"assigneeId"`
+	Reporter       *entity.UserDetailed `json:"reporter"`
+	TargetUser     *entity.UserDetailed `json:"targetUser"`
+	Assignee       *entity.UserDetailed `json:"assignee"`
+	Forwarded      bool                 `json:"forwarded"`
+	ResolvedAs     *string              `json:"resolvedAs"`
+	ModerationNote string               `json:"moderationNote"`
 }
 
 // isValidOrigin returns true if s is one of the valid origin filter values
@@ -2629,14 +2708,20 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "reportId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.abuseRepo == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REPORT", "No such report.", "ac2cf84c-3c73-44f0-8e8f-0e76f2cb5eb3"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398"))
 	}
 	// upstream enum: ['accept', 'reject', null]。null は「未送出」+ JSON null
 	// 両方を「resolve したが判定保留」として扱う (= column も null)。
 	// 不正値は silent fallback せず 400 で reject (PR #1102 の RolesUpdate.target
 	// fix と同方針: 既存 row の resolvedAs が意図せず書き換わる silent
 	// corruption を防ぐ)。
+	// upstream は resolve 時に assigneeId=moderator.id を記録する。
+	// (notifySystemWebhook('abuseReportResolved') は notification-recipient
+	// service 配線が要るため後続スライスで対応)。
 	fields := map[string]any{"resolved": true}
+	if me := middleware.GetUser(c); me != nil {
+		fields["assigneeId"] = me.ID
+	}
 	switch {
 	case req.ResolvedAs == nil:
 		fields["resolvedAs"] = nil
@@ -2652,7 +2737,7 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "resolvedAs must be 'accept', 'reject', or null.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if err := h.abuseRepo.UpdateFields(req.ReportID, fields); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REPORT", "No such report.", "ac2cf84c-3c73-44f0-8e8f-0e76f2cb5eb3"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398"))
 	}
 	return c.NoContent(http.StatusNoContent)
 }

@@ -1690,6 +1690,20 @@ func TestResolveAbuseReport_WithRepo(t *testing.T) {
 	assert.Nil(t, abuseRepo.Reports["r1"].ResolvedAs)
 }
 
+// resolve は assigneeId を moderator (= 呼出ユーザー) の ID に設定する
+// (upstream AbuseReportService.resolve)。
+func TestResolveAbuseReport_SetsAssignee(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, abuseRepo.Reports["r1"].AssigneeID)
+	assert.Equal(t, adminUser.ID, *abuseRepo.Reports["r1"].AssigneeID)
+}
+
 // PR #1108 regression guard: resolvedAs='reject' を受け付ける (旧版は
 // `"accept"` を hard-code していて reject 判定が記録されなかった)。
 func TestResolveAbuseReport_AcceptsReject(t *testing.T) {
@@ -2000,20 +2014,69 @@ func TestAbuseReports_EmbeddedFieldsPreserved_NestedUsers(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
 
-	// targetUser / reporter が nested object として inline されること
+	// targetUser / reporter が UserDetailed nested object として返ること
 	tu, ok := resp[0]["targetUser"].(map[string]any)
 	require.True(t, ok, "targetUser must be a nested object, got %T", resp[0]["targetUser"])
 	assert.Equal(t, "u_t", tu["id"])
 	assert.Equal(t, "victim", tu["username"])
+	// UserDetailed shape なので生 model.User の内部 field (usernameLower 等) は漏れない。
+	_, leaksUsernameLower := tu["usernameLower"]
+	assert.False(t, leaksUsernameLower, "raw model.User の内部 field を漏らさない")
 
 	rep, ok := resp[0]["reporter"].(map[string]any)
 	require.True(t, ok, "reporter must be a nested object, got %T", resp[0]["reporter"])
 	assert.Equal(t, "u_r", rep["id"])
 	assert.Equal(t, "accuser", rep["username"])
 
-	// Assignee は未設定 (= nil) なので omitempty で消える
-	_, hasAssignee := resp[0]["assignee"]
-	assert.False(t, hasAssignee, "nil Assignee should be omitted by omitempty")
+	// Assignee は未設定でも key は常に存在し null (upstream optional:false nullable:true)。
+	assignee, hasAssignee := resp[0]["assignee"]
+	assert.True(t, hasAssignee, "assignee key は常に存在する")
+	assert.Nil(t, assignee, "未割当時は null")
+}
+
+// reporter/targetUser/assignee が UserDetailed として pack され、profile も
+// 反映され、内部 host field (targetUserHost/reporterHost) を漏らさないこと。
+func TestAbuseReports_PacksUsersAsUserDetailed(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	host := "remote.example"
+	assignID := "u_a"
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{
+		ID: "r1", TargetUserID: "u_t", ReporterID: "u_r", AssigneeID: &assignID,
+		TargetUser:     &model.User{ID: "u_t", Username: "victim", AvatarDecorations: []byte("[]")},
+		Reporter:       &model.User{ID: "u_r", Username: "accuser", AvatarDecorations: []byte("[]")},
+		Assignee:       &model.User{ID: "u_a", Username: "mod", AvatarDecorations: []byte("[]")},
+		TargetUserHost: &host,
+		ReporterHost:   &host,
+	}
+	// targetUser の profile を seed して batch 解決 + 反映を検証。
+	userRepo.Profiles["u_t"] = &model.UserProfile{
+		UserID: "u_t", Description: metaStrPtr("victim bio"),
+		MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.AbuseReports, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+
+	// assignee 設定済 → UserDetailed nested object。
+	assignee, ok := resp[0]["assignee"].(map[string]any)
+	require.True(t, ok, "assignee must be a nested object, got %T", resp[0]["assignee"])
+	assert.Equal(t, "u_a", assignee["id"])
+	assert.Equal(t, "mod", assignee["username"])
+
+	// profile (description) が targetUser に反映される (batch 解決経路)。
+	tu := resp[0]["targetUser"].(map[string]any)
+	assert.Equal(t, "victim bio", tu["description"])
+
+	// 内部 host field は漏れない。
+	_, hasTH := resp[0]["targetUserHost"]
+	assert.False(t, hasTH, "targetUserHost は露出しない")
+	_, hasRH := resp[0]["reporterHost"]
+	assert.False(t, hasRH, "reporterHost は露出しない")
 }
 
 // PR for #1116: existing fields (id / resolved / targetUser 等) が
