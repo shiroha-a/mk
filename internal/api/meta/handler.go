@@ -61,6 +61,11 @@ func (h *Handler) Meta(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 
+	// upstream MetaEntityService と同じく policies は { ...DEFAULT_POLICIES,
+	// ...instance.policies } でマージする。admin が update-meta で driveCapacityMb
+	// 等を変更しても以前は DefaultPolicies のみ返して反映されなかった。
+	mergedPolicies := role.MergeMetaPolicies(m.Policies)
+
 	resp := map[string]any{
 		"maintainerName":         m.MaintainerName,
 		"maintainerEmail":        m.MaintainerEmail,
@@ -129,13 +134,13 @@ func (h *Handler) Meta(c echo.Context) error {
 		// デフォルト値を使う前提。
 		"clientOptions": clientOptionsJSON(m.ClientOptions),
 
-		"policies": role.DefaultPolicies(),
+		"policies": mergedPolicies,
 
 		"features": map[string]any{
 			"registration":           !m.DisableRegistration,
 			"emailRequiredForSignup": m.EmailRequiredForSignup,
-			"localTimeline":          PolicyBool(role.DefaultPolicies(), "ltlAvailable"),
-			"globalTimeline":         PolicyBool(role.DefaultPolicies(), "gtlAvailable"),
+			"localTimeline":          PolicyBool(mergedPolicies, "ltlAvailable"),
+			"globalTimeline":         PolicyBool(mergedPolicies, "gtlAvailable"),
 			"hcaptcha":               m.EnableHcaptcha,
 			"recaptcha":              m.EnableRecaptcha,
 			"turnstile":              m.EnableTurnstile,

@@ -2510,3 +2510,223 @@ func TestRolesUnassign_WritesModerationLog(t *testing.T) {
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
 	assert.Equal(t, "unassignRole", repo.Snapshot()[0].Type)
 }
+
+// --- #1174 H-PR7: admin/meta が model.Meta の値を返す + update-meta 正規化 ---
+
+func metaStrPtr(s string) *string { return &s }
+
+// AdminMeta が以前リテラル固定していた field を model.Meta から読むこと。
+func TestAdminMeta_ReadsModelFields(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	h.SetServerURL("https://meta.example")
+	metaRepo.Meta = &model.Meta{
+		ID:                               "x",
+		SingleUserMode:                   true,
+		AllowExternalApRedirect:          false,
+		UgcVisibilityForVisitor:          "all",
+		App192IconURL:                    metaStrPtr("https://meta.example/192.png"),
+		MascotImageURL:                   metaStrPtr("https://meta.example/ai.png"),
+		InquiryURL:                       metaStrPtr("https://meta.example/inquiry"),
+		DeeplAuthKey:                     metaStrPtr("dk"),
+		DeeplIsPro:                       true,
+		NotesPerOneAd:                    5,
+		ManifestJSONOverride:             `{"k":1}`,
+		URLPreviewEnabled:                false,
+		URLPreviewTimeout:                12345,
+		URLPreviewSummaryProxyURL:        metaStrPtr("https://proxy.example"),
+		PerLocalUserUserTimelineCacheMax: 111,
+		RemoteNotesCleaningExpiryDaysForEachNotes: 42,
+		GoogleAnalyticsMeasurementID:              metaStrPtr("G-XYZ"),
+	}
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, "https://meta.example", resp["uri"])
+	assert.Equal(t, true, resp["singleUserMode"])
+	assert.Equal(t, false, resp["allowExternalApRedirect"])
+	assert.Equal(t, "all", resp["ugcVisibilityForVisitor"])
+	assert.Equal(t, "https://meta.example/192.png", resp["app192IconUrl"])
+	assert.Equal(t, "https://meta.example/ai.png", resp["mascotImageUrl"])
+	assert.Equal(t, "https://meta.example/inquiry", resp["inquiryUrl"])
+	assert.Equal(t, "dk", resp["deeplAuthKey"])
+	assert.Equal(t, true, resp["deeplIsPro"])
+	assert.Equal(t, true, resp["translatorAvailable"], "deeplAuthKey != null で true")
+	assert.Equal(t, float64(5), resp["notesPerOneAd"])
+	assert.Equal(t, `{"k":1}`, resp["manifestJsonOverride"])
+	assert.Equal(t, false, resp["urlPreviewEnabled"])
+	assert.Equal(t, float64(12345), resp["urlPreviewTimeout"])
+	assert.Equal(t, float64(111), resp["perLocalUserUserTimelineCacheMax"])
+	assert.Equal(t, float64(42), resp["remoteNotesCleaningExpiryDaysForEachNotes"])
+	assert.Equal(t, "G-XYZ", resp["googleAnalyticsMeasurementId"])
+	// summalyProxy は urlPreviewSummaryProxyUrl の別名で同値。
+	assert.Equal(t, "https://proxy.example", resp["urlPreviewSummaryProxyUrl"])
+	assert.Equal(t, "https://proxy.example", resp["summalyProxy"])
+}
+
+// translatorAvailable は deeplAuthKey が nil なら false。
+func TestAdminMeta_TranslatorAvailableFalseWhenNoKey(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["translatorAvailable"])
+	assert.Nil(t, resp["deeplAuthKey"])
+}
+
+// policies は DEFAULT_POLICIES と instance.policies のマージで返る。
+func TestAdminMeta_PoliciesMergedWithDefaults(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x", Policies: []byte(`{"canInvite":true,"mentionLimit":7}`)}
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	policies, ok := resp["policies"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, policies["canInvite"], "override 反映")
+	assert.Equal(t, true, policies["ltlAvailable"], "未設定 key は default")
+	// 数値 policy は coerce 後 JSON 化され float64(7) として返る。
+	assert.Equal(t, float64(7), policies["mentionLimit"])
+}
+
+// clientOptions / deliverSuspendedSoftware は jsonb をパースして返す。
+func TestAdminMeta_JSONColumnsParsed(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{
+		ID:                       "x",
+		ClientOptions:            datatypes.JSON([]byte(`{"foo":"bar"}`)),
+		DeliverSuspendedSoftware: datatypes.JSON([]byte(`[{"software":"x","versionRange":">=1"}]`)),
+	}
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	co := resp["clientOptions"].(map[string]any)
+	assert.Equal(t, "bar", co["foo"])
+	dss := resp["deliverSuspendedSoftware"].([]any)
+	require.Len(t, dss, 1)
+	assert.Equal(t, "x", dss[0].(map[string]any)["software"])
+}
+
+// update-meta: mcaptchaSiteKey (capital K) は DB 列 mcaptchaSitekey に alias される。
+func TestUpdateMeta_McaptchaSiteKeyAlias(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"mcaptchaSiteKey":"SITEKEY"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, metaRepo.Meta.McaptchaSiteKey)
+	assert.Equal(t, "SITEKEY", *metaRepo.Meta.McaptchaSiteKey)
+}
+
+// blockedHosts / federationHosts は filter(Boolean) + lowercase される。
+func TestUpdateMeta_HostsLowercasedAndFiltered(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta,
+		`{"blockedHosts":["BAD.Example","",  "Dup.Example"],"federation":"specified","federationHosts":["Allowed.Example"]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"bad.example", "dup.example"}, []string(metaRepo.Meta.BlockedHosts))
+	assert.Equal(t, []string{"allowed.example"}, []string(metaRepo.Meta.FederationHosts))
+}
+
+// silencedHosts は sort + dedup + 空除外 + 同一リクエストの blockedHosts 除外。
+func TestUpdateMeta_SilencedHostsSortDedupExcludeBlocked(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta,
+		`{"blockedHosts":["b.example"],"silencedHosts":["z.example","a.example","a.example","b.example",""]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// sort→[a,a,b,z(+空)]; dedup→[a,b,z]; b は blocked 除外→[a,z]。
+	assert.Equal(t, []string{"a.example", "z.example"}, []string(metaRepo.Meta.SilencedHosts))
+}
+
+// 空文字列の string field は null に変換して保存される。
+func TestUpdateMeta_EmptyStringBecomesNull(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.DeeplAuthKey = metaStrPtr("existing")
+	rec := doPost(h.UpdateMeta, `{"deeplAuthKey":""}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, metaRepo.Meta.DeeplAuthKey)
+}
+
+// repositoryUrl は妥当な URL でなければ null。
+func TestUpdateMeta_RepositoryUrlValidation(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"repositoryUrl":"not a url"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, metaRepo.Meta.RepositoryURL)
+
+	rec = doPost(h.UpdateMeta, `{"repositoryUrl":"https://github.com/x/y"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, metaRepo.Meta.RepositoryURL)
+	assert.Equal(t, "https://github.com/x/y", *metaRepo.Meta.RepositoryURL)
+}
+
+// urlPreviewUserAgent は trim して空なら null。
+func TestUpdateMeta_UrlPreviewUserAgentTrimEmptyToNull(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.URLPreviewUserAgent = metaStrPtr("old")
+	rec := doPost(h.UpdateMeta, `{"urlPreviewUserAgent":"   "}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, metaRepo.Meta.URLPreviewUserAgent)
+}
+
+// summalyProxy は urlPreviewSummaryProxyUrl の別名で、trim して保存される。
+func TestUpdateMeta_SummalyProxyAliasTrimmed(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"summalyProxy":"  https://p.example  "}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, metaRepo.Meta.URLPreviewSummaryProxyURL)
+	assert.Equal(t, "https://p.example", *metaRepo.Meta.URLPreviewSummaryProxyURL)
+}
+
+// langs も filter(Boolean) で空文字要素を除去する (upstream update-meta.ts:447)。
+func TestUpdateMeta_LangsFilteredOfEmpties(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"langs":["en","","ja"]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"en", "ja"}, []string(metaRepo.Meta.Langs))
+}
+
+// mediaSilencedHosts も silencedHosts と同じ sort/dedup/blocked 除外を受ける。
+func TestUpdateMeta_MediaSilencedHostsSortDedupExcludeBlocked(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta,
+		`{"blockedHosts":["b.example"],"mediaSilencedHosts":["z.example","a.example","a.example","b.example",""]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"a.example", "z.example"}, []string(metaRepo.Meta.MediaSilencedHosts))
+}
+
+// urlPreviewUserAgent は非空のとき trim せず原文を保存する (upstream は trim 結果で
+// null 判定しつつ ps.urlPreviewUserAgent をそのまま格納)。summalyProxy の trim 保存
+// との挙動差を固定する。
+func TestUpdateMeta_UrlPreviewUserAgentKeepsNonEmptyUntrimmed(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"urlPreviewUserAgent":"  MyAgent  "}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, metaRepo.Meta.URLPreviewUserAgent)
+	assert.Equal(t, "  MyAgent  ", *metaRepo.Meta.URLPreviewUserAgent, "非空は untrimmed 原文保存")
+}
+
+// 混合型 array (string 以外混入) は normalize でスキップされ、coerce/real repo の
+// 型エラー経路で 500 になる (silent に握り潰さない)。
+func TestUpdateMeta_MixedTypeArrayRejected(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"pinnedUsers":["a",1]}`, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// admin/meta は nil の画像/テーマ field を null で返し、public meta の
+// /assets/ai.png フォールバックを誤って適用しない (parity 監査の警戒点)。
+func TestAdminMeta_NilImageFieldsAreNullNotFallback(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"} // 全 *string nil
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	for _, key := range []string{"mascotImageUrl", "serverErrorImageUrl", "notFoundImageUrl", "infoImageUrl", "inquiryUrl", "app192IconUrl", "app512IconUrl", "defaultLightTheme", "defaultDarkTheme"} {
+		assert.Nil(t, resp[key], key+" は nil (fallback しない)")
+	}
+}

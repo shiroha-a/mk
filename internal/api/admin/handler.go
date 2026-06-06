@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -947,6 +948,22 @@ func (h *Handler) fetchProxyAccountID() any {
 	return user.ID
 }
 
+// metaJSONValue decodes a jsonb meta column (clientOptions /
+// deliverSuspendedSoftware) into a generic value for the admin/meta response.
+// Empty or invalid JSON falls back to the provided default so the frontend
+// always sees the expected object/array shape (upstream returns the raw column
+// which defaults to '{}' / '[]').
+func metaJSONValue(raw []byte, fallback any) any {
+	if len(raw) == 0 {
+		return fallback
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return fallback
+	}
+	return out
+}
+
 // AdminMeta handles POST /api/admin/meta.
 func (h *Handler) AdminMeta(c echo.Context) error {
 	m, err := h.metaRepo.Fetch()
@@ -956,7 +973,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 	resp := map[string]any{
 		// Basic
 		"maintainerName": m.MaintainerName, "maintainerEmail": m.MaintainerEmail,
-		"version": config.MisskeyVersion, "uri": "http://localhost:3000",
+		"version": config.MisskeyVersion, "uri": h.serverURL,
 		"name": m.Name, "shortName": m.ShortName, "description": m.Description,
 		"langs": m.Langs, "pinnedUsers": m.PinnedUsers,
 		"hiddenTags": m.HiddenTags, "blockedHosts": m.BlockedHosts,
@@ -965,8 +982,8 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"themeColor":      m.ThemeColor, "bannerUrl": m.BannerURL,
 		"backgroundImageUrl": m.BackgroundImageURL, "logoImageUrl": m.LogoImageURL,
 		"iconUrl":       m.IconURL,
-		"app192IconUrl": nil, "app512IconUrl": nil,
-		"defaultLightTheme": nil, "defaultDarkTheme": nil,
+		"app192IconUrl": m.App192IconURL, "app512IconUrl": m.App512IconURL,
+		"defaultLightTheme": m.DefaultLightTheme, "defaultDarkTheme": m.DefaultDarkTheme,
 		"disableRegistration":    m.DisableRegistration,
 		"emailRequiredForSignup": m.EmailRequiredForSignup,
 		// Cache
@@ -1002,15 +1019,15 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		// URLs
 		"tosUrl": m.TermsOfServiceURL, "repositoryUrl": m.RepositoryURL,
 		"feedbackUrl": m.FeedbackURL, "impressumUrl": m.ImpressumURL,
-		"privacyPolicyUrl": m.PrivacyPolicyURL, "inquiryUrl": nil,
+		"privacyPolicyUrl": m.PrivacyPolicyURL, "inquiryUrl": m.InquiryURL,
 		// Federation
 		"federation": m.Federation, "federationHosts": m.FederationHosts,
 		"enableFanoutTimeline":           m.EnableFanoutTimeline,
 		"enableFanoutTimelineDbFallback": m.EnableFanoutTimelineDbFallback,
 		"proxyRemoteFiles":               m.ProxyRemoteFiles,
 		"signToActivityPubGet":           m.SignToActivityPubGet,
-		// Policies
-		"policies": m.Policies,
+		// Policies (upstream は { ...DEFAULT_POLICIES, ...instance.policies })
+		"policies": role.MergeMetaPolicies(m.Policies),
 		// Moderation
 		"sensitiveMediaDetection":                m.SensitiveMediaDetection,
 		"sensitiveMediaDetectionSensitivity":     m.SensitiveMediaDetectionSensitivity,
@@ -1029,23 +1046,23 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"enableVerifymailApi":               m.EnableVerifymailAPI,
 		"enableTruemailApi":                 m.EnableTruemailAPI,
 		"showRoleBadgesOfRemoteUsers":       m.ShowRoleBadgesOfRemoteUsers,
-		"singleUserMode":                    false,
-		"allowExternalApRedirect":           true,
+		"singleUserMode":                    m.SingleUserMode,
+		"allowExternalApRedirect":           m.AllowExternalApRedirect,
 		// Images
-		"serverErrorImageUrl": nil, "notFoundImageUrl": nil,
-		"infoImageUrl": nil, "mascotImageUrl": nil,
+		"serverErrorImageUrl": m.ServerErrorImageURL, "notFoundImageUrl": m.NotFoundImageURL,
+		"infoImageUrl": m.InfoImageURL, "mascotImageUrl": m.MascotImageURL,
 		// Misc
-		"translatorAvailable": false,
-		"notesPerOneAd":       0,
-		"clientOptions":       map[string]any{},
-		"deeplAuthKey":        nil, "deeplIsPro": false,
-		"googleAnalyticsMeasurementId": nil,
-		"manifestJsonOverride":         "{}",
+		"translatorAvailable": m.DeeplAuthKey != nil,
+		"notesPerOneAd":       m.NotesPerOneAd,
+		"clientOptions":       metaJSONValue(m.ClientOptions, map[string]any{}),
+		"deeplAuthKey":        m.DeeplAuthKey, "deeplIsPro": m.DeeplIsPro,
+		"googleAnalyticsMeasurementId": m.GoogleAnalyticsMeasurementID,
+		"manifestJsonOverride":         m.ManifestJSONOverride,
 		"bannedEmailDomains":           m.BannedEmailDomains,
 		"mediaSilencedHosts":           m.MediaSilencedHosts,
 		"preservedUsernames":           m.PreservedUsernames,
 		"prohibitedWordsForNameOfUser": m.ProhibitedWordsForNameOfUser,
-		"deliverSuspendedSoftware":     []string{},
+		"deliverSuspendedSoftware":     metaJSONValue(m.DeliverSuspendedSoftware, []any{}),
 		"verifymailAuthKey":            m.VerifymailAuthKey, "truemailAuthKey": m.TruemailAuthKey, "truemailInstance": m.TruemailInstance,
 		// proxyAccountId は frontend admin/settings 画面が読み込み時に
 		// users/show でこの ID を引くため、必ず非空でなければ画面が
@@ -1053,24 +1070,25 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		// と同じく lazy 作成して埋める。
 		"proxyAccountId": h.fetchProxyAccountID(),
 		// URL Preview
-		"urlPreviewEnabled":              true,
-		"urlPreviewTimeout":              10000,
-		"urlPreviewMaximumContentLength": 10485760,
-		"urlPreviewRequireContentLength": false,
-		"urlPreviewUserAgent":            nil,
-		"urlPreviewSummaryProxyUrl":      nil,
-		"urlPreviewAllowRedirect":        true,
-		"summalyProxy":                   nil,
+		"urlPreviewEnabled":              m.URLPreviewEnabled,
+		"urlPreviewTimeout":              m.URLPreviewTimeout,
+		"urlPreviewMaximumContentLength": m.URLPreviewMaximumContentLength,
+		"urlPreviewRequireContentLength": m.URLPreviewRequireContentLength,
+		"urlPreviewUserAgent":            m.URLPreviewUserAgent,
+		"urlPreviewSummaryProxyUrl":      m.URLPreviewSummaryProxyURL,
+		"urlPreviewAllowRedirect":        m.URLPreviewAllowRedirect,
+		// upstream: summalyProxy は urlPreviewSummaryProxyUrl の別名で同値を返す
+		"summalyProxy": m.URLPreviewSummaryProxyURL,
 		// Timeline cache
-		"perLocalUserUserTimelineCacheMax":  300,
-		"perRemoteUserUserTimelineCacheMax": 100,
-		"perUserHomeTimelineCacheMax":       300,
-		"perUserListTimelineCacheMax":       300,
+		"perLocalUserUserTimelineCacheMax":  m.PerLocalUserUserTimelineCacheMax,
+		"perRemoteUserUserTimelineCacheMax": m.PerRemoteUserUserTimelineCacheMax,
+		"perUserHomeTimelineCacheMax":       m.PerUserHomeTimelineCacheMax,
+		"perUserListTimelineCacheMax":       m.PerUserListTimelineCacheMax,
 		// Remote notes cleaning
-		"remoteNotesCleaningExpiryDaysForEachNotes":         90,
-		"remoteNotesCleaningMaxProcessingDurationInMinutes": 60,
+		"remoteNotesCleaningExpiryDaysForEachNotes":         m.RemoteNotesCleaningExpiryDaysForEachNotes,
+		"remoteNotesCleaningMaxProcessingDurationInMinutes": m.RemoteNotesCleaningMaxProcessingDurationInMinutes,
 		// Visitor
-		"ugcVisibilityForVisitor": "local",
+		"ugcVisibilityForVisitor": m.UgcVisibilityForVisitor,
 	}
 	return c.JSON(http.StatusOK, resp)
 }
@@ -1098,6 +1116,11 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// packages/backend/src/models/Meta.ts と同じ正規名で保持している。
 	// alias が frontend から来たら DB カラム名に translate して渡す。
 	renameUpdateMetaFields(fields)
+
+	// upstream update-meta.ts の値正規化 (host lowercase/sort/dedup、空文字→null、
+	// URL 検証、trim) を再現する。coerceMetaArrayFields より前に走らせ、host 系は
+	// ここで pq.StringArray 化まで済ませる (coerce 側は pass-through になる)。
+	normalizeUpdateMetaFields(fields)
 
 	// JSON Bind 後の []any{...} (中身は string) を pq.StringArray に揃える
 	// (#590)。GORM は map[string]any を Updates() に渡すと値の型をそのまま
@@ -1209,6 +1232,9 @@ func strDeref(p *string) string {
 var updateMetaFieldAliases = map[string]string{
 	"tosUrl":      "termsOfServiceUrl", // 本家: update-meta.ts の termsOfServiceUrl が admin/meta では tosUrl で出る
 	"swPublickey": "swPublicKey",
+	// API param は mcaptchaSiteKey (capital K) だが DB 列は mcaptchaSitekey
+	// (lower k)。alias しないと存在しない列への UPDATE で保存できない (#1174)。
+	"mcaptchaSiteKey": "mcaptchaSitekey",
 }
 
 func renameUpdateMetaFields(fields map[string]any) {
@@ -1335,6 +1361,171 @@ func coerceMetaArrayFields(fields map[string]any) {
 		// pq.StringArray / []string が来ているケースは driver.Valuer 互換
 		// なのでそのまま real repo に流す。
 	}
+}
+
+// normalizeUpdateMetaFields reproduces upstream update-meta.ts の値正規化:
+// host リストの filter(Boolean)/lowercase/sort/dedup/blocked 除外、空文字→null、
+// repositoryUrl の URL 検証、urlPreviewUserAgent/summalyProxy の trim。fields は
+// rename 済 (canonical column name) を前提とする。array 系は pq.StringArray に
+// 変換するので、後続の coerceMetaArrayFields は pass-through となる。
+func normalizeUpdateMetaFields(fields map[string]any) {
+	// filter(Boolean): 空文字列要素を除去する array columns。
+	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser"} {
+		if arr, ok := metaStringSlice(fields[key]); ok {
+			fields[key] = pq.StringArray(filterNonEmptyHosts(arr, false))
+		}
+	}
+	// blockedHosts / federationHosts: filter(Boolean) + lowercase。
+	var blocked []string
+	for _, key := range []string{"blockedHosts", "federationHosts"} {
+		if arr, ok := metaStringSlice(fields[key]); ok {
+			norm := filterNonEmptyHosts(arr, true)
+			fields[key] = pq.StringArray(norm)
+			if key == "blockedHosts" {
+				blocked = norm
+			}
+		}
+	}
+	// silencedHosts / mediaSilencedHosts: sort + dedup + 空除外 + blockedHosts 除外。
+	// blocked は同一リクエストで送られた (正規化済) blockedHosts のみを参照する
+	// (upstream は set.blockedHosts?.includes、= リクエストに無ければ除外しない)。
+	for _, key := range []string{"silencedHosts", "mediaSilencedHosts"} {
+		if arr, ok := metaStringSlice(fields[key]); ok {
+			fields[key] = pq.StringArray(sortDedupExcludeHosts(arr, blocked))
+		}
+	}
+	// 空文字→null の string columns (deeplAuthKey 等)。
+	for _, key := range []string{"deeplAuthKey", "verifymailAuthKey", "truemailInstance", "truemailAuthKey", "googleAnalyticsMeasurementId"} {
+		if v, ok := fields[key]; ok {
+			if s, ok := v.(string); ok && s == "" {
+				fields[key] = nil
+			}
+		}
+	}
+	// repositoryUrl: 妥当な絶対 URL でなければ null (upstream URL.canParse)。
+	if v, ok := fields["repositoryUrl"]; ok {
+		if s, ok := v.(string); ok && !isParsableURL(s) {
+			fields["repositoryUrl"] = nil
+		}
+	}
+	// urlPreviewUserAgent: trim して空なら null、非空なら原文 (untrimmed) を保存
+	// (upstream は trim 結果で null 判定しつつ ps.urlPreviewUserAgent を格納)。
+	if v, ok := fields["urlPreviewUserAgent"]; ok {
+		if s, ok := v.(string); ok {
+			if strings.TrimSpace(s) == "" {
+				fields["urlPreviewUserAgent"] = nil
+			}
+		}
+	}
+	// summalyProxy は urlPreviewSummaryProxyUrl の別名。両者のうち
+	// urlPreviewSummaryProxyUrl を優先し、trim して空なら null、非空なら trim 済を
+	// 保存する (upstream)。
+	//
+	// upstream は `(urlPreviewSummaryProxyUrl ?? summalyProxy)` の null 合体だが、
+	// ここでは key 存在で分岐する。urlPreviewSummaryProxyUrl が明示的 JSON null で
+	// 送られた場合は summalyProxy へフォールバックせず null になる差分があるが、
+	// frontend が両者を同時送出するケースは無いため許容する。
+	if _, hasA := fields["urlPreviewSummaryProxyUrl"]; hasA {
+		fields["urlPreviewSummaryProxyUrl"] = trimToNil(fields["urlPreviewSummaryProxyUrl"])
+		delete(fields, "summalyProxy")
+	} else if v, hasB := fields["summalyProxy"]; hasB {
+		fields["urlPreviewSummaryProxyUrl"] = trimToNil(v)
+		delete(fields, "summalyProxy")
+	}
+}
+
+// metaStringSlice extracts a []string from a JSON-bound array value. Returns
+// ok=false when v is not an array of all-strings (nil / non-array / mixed types
+// are left untouched so coerceMetaArrayFields / the real repo handle them).
+func metaStringSlice(v any) ([]string, bool) {
+	switch arr := v.(type) {
+	case []string:
+		return arr, true
+	case pq.StringArray:
+		return []string(arr), true
+	case []any:
+		out := make([]string, 0, len(arr))
+		for _, e := range arr {
+			s, ok := e.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// filterNonEmptyHosts drops empty-string entries and, when lower is true,
+// lowercases each entry (upstream blockedHosts/federationHosts handling).
+func filterNonEmptyHosts(in []string, lower bool) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if lower {
+			s = strings.ToLower(s)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// sortDedupExcludeHosts sorts, removes empties + duplicates, and excludes any
+// host present in blocked (upstream silencedHosts/mediaSilencedHosts handling).
+func sortDedupExcludeHosts(in, blocked []string) []string {
+	sorted := append([]string(nil), in...)
+	sort.Strings(sorted)
+	blockedSet := make(map[string]struct{}, len(blocked))
+	for _, b := range blocked {
+		blockedSet[b] = struct{}{}
+	}
+	out := make([]string, 0, len(sorted))
+	last := ""
+	first := true
+	for _, h := range sorted {
+		if h == "" {
+			continue
+		}
+		if !first && h == last {
+			continue
+		}
+		first = false
+		last = h
+		if _, blockedHost := blockedSet[h]; blockedHost {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// isParsableURL reports whether s is a parseable absolute URL (scheme + host),
+// approximating upstream `URL.canParse(ps.repositoryUrl)`.
+//
+// 厳密には URL.canParse より厳格で、host を要求する。これにより
+// `mailto:a@b.com` / `javascript:...` のような hostless scheme を弾く
+// (canParse は true)。repositoryUrl の現実的入力は http(s) のみで、
+// scheme だけの危険 URL を排除できる安全側の差分なので許容する。
+func isParsableURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme != "" && u.Host != ""
+}
+
+// trimToNil trims a string value and returns nil when the result is empty,
+// otherwise the trimmed string. Non-string values pass through unchanged.
+func trimToNil(v any) any {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return nil
+	}
+	return t
 }
 
 // --- Role endpoints ---

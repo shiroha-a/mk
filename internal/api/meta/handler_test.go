@@ -292,6 +292,37 @@ func TestMeta_ClientOptionsMalformed(t *testing.T) {
 	assert.Empty(t, co)
 }
 
+// policies は { ...DEFAULT_POLICIES, ...instance.policies } でマージされ、
+// admin が update-meta で設定した override が /api/meta に反映される。
+func TestMeta_PoliciesMergedWithInstanceOverride(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Meta = &model.Meta{ID: "x", Policies: []byte(`{"gtlAvailable":false,"mentionLimit":3}`)}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, h.Meta(c))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	policies, ok := resp["policies"].(map[string]any)
+	require.True(t, ok)
+	// override が効く。
+	assert.Equal(t, false, policies["gtlAvailable"])
+	assert.Equal(t, float64(3), policies["mentionLimit"])
+	// 未設定 key は default。
+	assert.Equal(t, true, policies["ltlAvailable"])
+	// features.globalTimeline も merged policies 由来 (override 反映)。
+	// なお upstream MetaEntityService は features.localTimeline を raw な
+	// instance.policies.ltlAvailable から読むため未 override 時は undefined を
+	// 返すが、mk-go は frontend 安全のため merged (= default true) を返す意図的
+	// divergence。autogen misskey-js の boolean 型にも整合する。
+	features := resp["features"].(map[string]any)
+	assert.Equal(t, false, features["globalTimeline"])
+	assert.Equal(t, true, features["localTimeline"])
+}
+
 // --- Ads / notesPerOneAd (issue #52) ---
 
 // stubAdRepo implements repository.AdRepository for tests without a real DB.

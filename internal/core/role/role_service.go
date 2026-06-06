@@ -1051,6 +1051,27 @@ func DefaultPoliciesClone() map[string]any {
 	return maps.Clone(defaultPoliciesCache)
 }
 
+// MergeMetaPolicies returns the default policies overlaid with the instance's
+// `meta.policies` JSON override — the upstream `{ ...DEFAULT_POLICIES,
+// ...instance.policies }` shape used by both MetaEntityService.pack and
+// admin/meta. Numeric overrides are coerced to the default's Go type so
+// downstream consumers can type-assert safely (JSON decodes numbers as
+// float64). Empty / invalid JSON yields the defaults unchanged (fail-soft).
+func MergeMetaPolicies(rawPolicies []byte) map[string]any {
+	base := DefaultPoliciesClone()
+	if len(rawPolicies) == 0 {
+		return base
+	}
+	var override map[string]any
+	if err := json.Unmarshal(rawPolicies, &override); err != nil {
+		return base
+	}
+	for k, v := range override {
+		base[k] = coerceToBaseType(base[k], v)
+	}
+	return base
+}
+
 // buildDefaultPolicies constructs the default policy map. Called once to seed
 // defaultPoliciesCache; do not call per-request (use DefaultPolicies /
 // DefaultPoliciesClone).

@@ -1438,3 +1438,57 @@ func TestHasRolePolicy(t *testing.T) {
 		assert.False(t, svc.HasRolePolicy("alice", "thisDoesNotExist"))
 	})
 }
+
+// MergeMetaPolicies overlays the instance's meta.policies JSON override onto the
+// default policies (upstream { ...DEFAULT_POLICIES, ...instance.policies }) and
+// coerces numeric overrides to the default's Go type.
+func TestMergeMetaPolicies(t *testing.T) {
+	t.Run("nil override returns defaults", func(t *testing.T) {
+		merged := role.MergeMetaPolicies(nil)
+		assert.Equal(t, role.DefaultPolicies()["gtlAvailable"], merged["gtlAvailable"])
+		assert.Equal(t, role.DefaultPolicies()["mentionLimit"], merged["mentionLimit"])
+	})
+
+	t.Run("override replaces defaults and coerces numeric type", func(t *testing.T) {
+		// JSON は数値を float64 に decode するが、default で int の key は
+		// int へ coerce される必要がある (consumer の type assert 保護)。
+		merged := role.MergeMetaPolicies([]byte(`{"gtlAvailable":false,"mentionLimit":99}`))
+		assert.Equal(t, false, merged["gtlAvailable"])
+		assert.Equal(t, 99, merged["mentionLimit"], "int policy は int で coerce される")
+		// 未指定 key は default のまま。
+		assert.Equal(t, true, merged["ltlAvailable"])
+	})
+
+	t.Run("invalid JSON falls back to defaults", func(t *testing.T) {
+		merged := role.MergeMetaPolicies([]byte(`{not json`))
+		assert.Equal(t, role.DefaultPolicies()["ltlAvailable"], merged["ltlAvailable"])
+	})
+
+	t.Run("does not mutate the shared default map", func(t *testing.T) {
+		_ = role.MergeMetaPolicies([]byte(`{"gtlAvailable":false}`))
+		assert.Equal(t, true, role.DefaultPolicies()["gtlAvailable"], "default cache は不変")
+	})
+
+	t.Run("slice policy override is coerced to []string", func(t *testing.T) {
+		merged := role.MergeMetaPolicies([]byte(`{"uploadableFileTypes":["text/*","image/*"]}`))
+		assert.Equal(t, []string{"text/*", "image/*"}, merged["uploadableFileTypes"])
+	})
+
+	t.Run("empty slice override falls back to default", func(t *testing.T) {
+		// coerceToBaseType の slice 経路は normalize 後 0 件で default に巻き戻す
+		// (aggregation helper 由来の意味論)。空配列にする運用は degenerate なので
+		// この挙動を仕様として固定する。
+		merged := role.MergeMetaPolicies([]byte(`{"uploadableFileTypes":[]}`))
+		assert.Equal(t, role.DefaultPolicies()["uploadableFileTypes"], merged["uploadableFileTypes"])
+	})
+
+	t.Run("explicit JSON null override returns defaults", func(t *testing.T) {
+		merged := role.MergeMetaPolicies([]byte(`null`))
+		assert.Equal(t, role.DefaultPolicies()["ltlAvailable"], merged["ltlAvailable"])
+	})
+
+	t.Run("unknown key passes through", func(t *testing.T) {
+		merged := role.MergeMetaPolicies([]byte(`{"someUnknownPolicy":42}`))
+		assert.Equal(t, float64(42), merged["someUnknownPolicy"], "未知 key は coerce 対象外で素通し")
+	})
+}

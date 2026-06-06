@@ -2363,6 +2363,24 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			if s, ok := v.(string); ok {
 				m.Meta.UgcVisibilityForVisitor = s
 			}
+		case "mcaptchaSitekey":
+			setNullableStr(&m.Meta.McaptchaSiteKey, v)
+		case "repositoryUrl":
+			setNullableStr(&m.Meta.RepositoryURL, v)
+		case "deeplAuthKey":
+			setNullableStr(&m.Meta.DeeplAuthKey, v)
+		case "googleAnalyticsMeasurementId":
+			setNullableStr(&m.Meta.GoogleAnalyticsMeasurementID, v)
+		case "verifymailAuthKey":
+			setNullableStr(&m.Meta.VerifymailAuthKey, v)
+		case "truemailInstance":
+			setNullableStr(&m.Meta.TruemailInstance, v)
+		case "truemailAuthKey":
+			setNullableStr(&m.Meta.TruemailAuthKey, v)
+		case "urlPreviewUserAgent":
+			setNullableStr(&m.Meta.URLPreviewUserAgent, v)
+		case "urlPreviewSummaryProxyUrl":
+			setNullableStr(&m.Meta.URLPreviewSummaryProxyURL, v)
 		case "federationHosts":
 			setStrArr(&m.Meta.FederationHosts, k, v)
 		case "blockedHosts":
@@ -2392,6 +2410,17 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 		}
 	}
 	return firstErr
+}
+
+// setNullableStr applies an update-meta value to a *string column: a string
+// sets the pointer, a JSON null (nil) clears it. Other types are ignored.
+func setNullableStr(target **string, v any) {
+	switch vv := v.(type) {
+	case string:
+		*target = &vv
+	case nil:
+		*target = nil
+	}
 }
 
 // mockMetaCoerceStringArray normalises any array-shaped value handed to
