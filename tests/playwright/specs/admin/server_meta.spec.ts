@@ -38,11 +38,16 @@ test.describe('admin server / meta read shape', () => {
     const resp = await callApi(request, 'admin/server-info', { i: root.token });
     expect(resp.status()).toBe(200);
     const body = (await resp.json()) as Record<string, unknown>;
-    // meta は public /api/server-info と同 shape (= machine / cpu / mem / fs)
+    // admin/server-info は public /api/server-info の machine/cpu/mem/fs に加え
+    // os/node/psql/redis/net を返す (公開版は machine/cpu/mem/fs のみ)。
     expect(body.machine).toBeDefined();
     expect(body.cpu).toBeDefined();
     expect(body.mem).toBeDefined();
     expect(body.fs).toBeDefined();
+    // admin 専用の拡張 field。
+    expect(body.os).toBeDefined();
+    expect(body.node).toBeDefined();
+    expect(body.net).toBeDefined();
   });
 
   test('admin/emoji/list-remote returns array shape', async ({ request }) => {

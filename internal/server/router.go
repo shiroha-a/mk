@@ -2258,10 +2258,12 @@ func (s *Server) setupRoutes() {
 	// frontend の server-metric widget は `misskeyApiGet` で GET 呼び出し、
 	// それ以外の MkVisitorDashboard 等は POST で呼ぶため両メソッドを登録。
 	serverInfoHandler := func(c echo.Context) error {
+		// 公開エンドポイントは machine/cpu/mem/fs のみを返す (upstream public
+		// server-info.ts)。os/node/psql/redis/net は admin 専用で未認証には出さない。
 		if m, err := metaRepo.Fetch(); err == nil && m.EnableServerMachineStats {
-			return c.JSON(http.StatusOK, serverstats.Collect())
+			return c.JSON(http.StatusOK, serverstats.CollectPublic())
 		}
-		return c.JSON(http.StatusOK, serverstats.Empty())
+		return c.JSON(http.StatusOK, serverstats.EmptyPublic())
 	}
 	api.POST("/server-info", serverInfoHandler)
 	api.GET("/server-info", serverInfoHandler)

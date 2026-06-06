@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -98,10 +99,40 @@ func (h *Handler) GetUserIPs(c echo.Context) error {
 }
 
 // ServerInfo handles POST /api/admin/server-info.
-// meta.enableServerMachineStats が false ならゼロ値を返す。
+//
+// upstream admin/server-info.ts は enableServerMachineStats gate を持たず、
+// moderator には常に live な machine 情報を返す (gate は公開 server-info.ts 側
+// のみ)。psql / redis のバージョンは system info に含まれないため DB / Redis
+// から best-effort で埋める (upstream は SHOW server_version / redis INFO を引く)。
 func (h *Handler) ServerInfo(c echo.Context) error {
-	if m, err := h.metaRepo.Fetch(); err == nil && m.EnableServerMachineStats {
-		return c.JSON(http.StatusOK, serverstats.Collect())
+	stats := serverstats.Collect()
+	stats.Psql = h.postgresVersion()
+	stats.Redis = h.redisVersion(c.Request().Context())
+	return c.JSON(http.StatusOK, stats)
+}
+
+// postgresVersion returns the PostgreSQL `server_version` string, or "" when the
+// DB is unwired or the query fails (best-effort, upstream `SHOW server_version`).
+func (h *Handler) postgresVersion() string {
+	if h.adminDB == nil {
+		return ""
 	}
-	return c.JSON(http.StatusOK, serverstats.Empty())
+	var version string
+	if err := h.adminDB.Raw("SHOW server_version").Scan(&version).Error; err != nil {
+		return ""
+	}
+	return version
+}
+
+// redisVersion returns the Redis `redis_version` from INFO, or "" when the Redis
+// info provider is unwired or the call fails (best-effort).
+func (h *Handler) redisVersion(ctx context.Context) string {
+	if h.queueRedis == nil {
+		return ""
+	}
+	raw, err := h.queueRedis.QueueRedisInfo(ctx)
+	if err != nil {
+		return ""
+	}
+	return parseRedisInfo(raw)["redis_version"]
 }
