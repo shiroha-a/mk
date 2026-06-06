@@ -162,6 +162,28 @@ func TestEmoji_GET_MissingName(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// /api/emoji は EmojiDetailed を返し、license と
+// roleIdsThatCanBeUsedThisEmojiAsReaction を含む (以前は欠落していた)。
+func TestEmoji_GET_IncludesLicenseAndRoleIds(t *testing.T) {
+	h, repo := setup()
+	lic := "CC-BY-4.0"
+	repo.Emojis["smile@"] = &model.Emoji{
+		ID:                                      "e3",
+		Name:                                    "smile",
+		OriginalURL:                             "https://example.com/emoji/smile.png",
+		License:                                 &lic,
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: []string{"r1"},
+	}
+	rec := doGetEmoji(h, "smile")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "CC-BY-4.0", body["license"])
+	assert.Equal(t, []any{"r1"}, body["roleIdsThatCanBeUsedThisEmojiAsReaction"])
+	// url は publicUrl 空時 originalUrl にフォールバックする。
+	assert.Equal(t, "https://example.com/emoji/smile.png", body["url"])
+}
+
 func doPostEmoji(h *emojis.Handler, body string) *httptest.ResponseRecorder {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/emoji", strings.NewReader(body))

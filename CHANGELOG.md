@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/emoji/add` が `category`/`aliases`/`license`/`isSensitive`/`localOnly`/`roleIdsThatCanBeUsedThisEmojiAsReaction` パラメータを無視し、さらに raw な内部モデルを返して `url` 欠落 + `originalUrl`/`publicUrl`/`uri`/`type` 等の内部フィールドが漏れていた問題を修正 (Misskey 本家同様に全パラメータを永続化し EmojiDetailed を返す)。あわせて重複名 (DUPLICATE_NAME) / 非画像ファイル (UNSUPPORTED_FILE_TYPE) / emoji 名パターン (`^[a-zA-Z0-9_]+$`) の検証を追加
+- Fix: `/api/admin/emoji/update` が `fileId` による画像差し替えと `roleIdsThatCanBeUsedThisEmojiAsReaction` の更新を受け付けていなかった問題を修正 (リネーム時の SAME_NAME_EMOJI_EXISTS チェックも追加)
+- Fix: `/api/emoji` (EmojiDetailed) のレスポンスに `license` と `roleIdsThatCanBeUsedThisEmojiAsReaction` が欠落し、`url` が `publicUrl` 固定で `originalUrl` フォールバックが無かった問題を修正
+- Fix: `/api/admin/avatar-decorations/create`・`/list` のレスポンスに `createdAt` (aidx ID 由来) が含まれていなかった問題を修正
+
 - Fix: 管理画面のプロモーション登録 (`/api/admin/promo/create`) で、公開範囲が public 以外のノート (フォロワー限定 / ホーム / specified) も登録できていた問題を修正 (将来 promo 表示エンドポイントが実装された際に非公開ノートが全閲覧者に漏れる潜在的問題を作成段階で防止)
 - Fix: ユーザーリストのタイムライン (`/api/notes/user-list-timeline` の REST 経路は #1442 で修正済) について、WebSocket `userList` チャネルと fanout 配信が他ユーザーのフォロワー限定ノートをリスト所有者のフォロー関係に関係なくプッシュしていた問題を修正 (任意のユーザーをリストに追加しただけで、フォローしていない相手のフォロワー限定ノートをリアルタイムに受信できていた)
 - Fix: アンテナが他ユーザーのフォロワー限定 / specified ノートを公開範囲チェックを経ずに pickup し、`/api/antennas/notes` と WebSocket `antenna` チャネルの両方からそれらが取得できる問題を修正 (アンテナ作成だけで `src=all` / `src=users` 経由のキーワード検索で非公開投稿が漏れていた)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
@@ -56,14 +57,8 @@ func (h *Handler) Emoji(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "14141e4b-dea8-41f0-9ba1-1721a6b5b92c"))
 	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"id":          e.ID,
-		"name":        e.Name,
-		"category":    e.Category,
-		"aliases":     e.Aliases,
-		"url":         e.PublicURL,
-		"localOnly":   e.LocalOnly,
-		"isSensitive": e.IsSensitive,
-		"host":        e.Host,
-	})
+	// upstream は EmojiDetailed を返す。ad-hoc map では license /
+	// roleIdsThatCanBeUsedThisEmojiAsReaction が欠落し、url も publicUrl 固定で
+	// originalUrl fallback が無かった。共通 packer に揃える。
+	return c.JSON(http.StatusOK, entity.PackEmojiDetailed(e))
 }

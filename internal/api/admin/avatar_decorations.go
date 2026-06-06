@@ -43,7 +43,28 @@ func (h *Handler) AvatarDecorationsCreate(c echo.Context) error {
 		"avatarDecorationId": d.ID,
 		"avatarDecoration":   d,
 	})
-	return c.JSON(http.StatusOK, d)
+	return c.JSON(http.StatusOK, h.packAvatarDecoration(d))
+}
+
+// packAvatarDecoration shapes an AvatarDecoration into the upstream response.
+// model.AvatarDecoration は createdAt 列を持たず aidx ID に時刻を埋め込むため、
+// raw model を返すと createdAt が欠落する。ID から導出して付与する。
+func (h *Handler) packAvatarDecoration(d *model.AvatarDecoration) map[string]any {
+	m := map[string]any{
+		"id":                                 d.ID,
+		"updatedAt":                          d.UpdatedAt,
+		"name":                               d.Name,
+		"description":                        d.Description,
+		"url":                                d.URL,
+		"roleIdsThatCanBeUsedThisDecoration": []string(d.RoleIDs),
+		"category":                           d.Category,
+	}
+	if s, err := aidxCreatedAtString(h.idGen, d.ID); err == nil {
+		m["createdAt"] = s
+	} else {
+		m["createdAt"] = nil
+	}
+	return m
 }
 
 // AvatarDecorationsDelete handles POST /api/admin/avatar-decorations/delete.
@@ -77,10 +98,11 @@ func (h *Handler) AvatarDecorationsList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
-	if rows == nil {
-		return c.JSON(http.StatusOK, []any{})
+	out := make([]map[string]any, 0, len(rows))
+	for _, d := range rows {
+		out = append(out, h.packAvatarDecoration(d))
 	}
-	return c.JSON(http.StatusOK, rows)
+	return c.JSON(http.StatusOK, out)
 }
 
 // AvatarDecorationsUpdate handles POST /api/admin/avatar-decorations/update.

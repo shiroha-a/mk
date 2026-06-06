@@ -186,6 +186,28 @@ func TestAvatarDecorationsCreate_Success(t *testing.T) {
 	assert.Equal(t, []string(got.RoleIDs), []string{"r1", "r2"})
 }
 
+// create / list レスポンスに createdAt (aidx ID 由来) が含まれること。
+func TestAvatarDecorationsCreate_IncludesCreatedAt(t *testing.T) {
+	h, _ := setupAvatarDecorationHandler(t)
+	rec := doPost(h.AvatarDecorationsCreate,
+		`{"name":"deco","description":"d","url":"https://i"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotNil(t, resp["createdAt"], "create response must include createdAt")
+	assert.Contains(t, resp, "roleIdsThatCanBeUsedThisDecoration")
+}
+
+func TestAvatarDecorationsList_IncludesCreatedAt(t *testing.T) {
+	h, _ := setupAvatarDecorationHandler(t, &model.AvatarDecoration{ID: "ad1", Name: "deco", URL: "https://i"})
+	rec := doPost(h.AvatarDecorationsList, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0], "createdAt")
+}
+
 func TestAvatarDecorationsCreate_MissingName(t *testing.T) {
 	h, _ := setupAvatarDecorationHandler(t)
 	assert.Equal(t, http.StatusBadRequest,

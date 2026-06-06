@@ -1831,6 +1831,20 @@ func (m *MockEmojiRepository) UpdateFields(id string, fields map[string]any) err
 					if sp, ok := v.(*string); ok {
 						e.URI = sp
 					}
+				case "type":
+					switch s := v.(type) {
+					case string:
+						e.Type = &s
+					case *string:
+						e.Type = s
+					}
+				case "roleIdsThatCanBeUsedThisEmojiAsReaction":
+					switch arr := v.(type) {
+					case pq.StringArray:
+						e.RoleIDsThatCanBeUsedThisEmojiAsReaction = arr
+					case []string:
+						e.RoleIDsThatCanBeUsedThisEmojiAsReaction = arr
+					}
 				}
 			}
 			return nil

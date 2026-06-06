@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1769,12 +1770,22 @@ func (h *Handler) SetEmojiRepo(r repository.EmojiRepository) { h.emojiRepo = r }
 //   - 両方なし: 400 INVALID_PARAM
 func (h *Handler) EmojiAdd(c echo.Context) error {
 	var req struct {
-		Name   string `json:"name"`
-		URL    string `json:"url"`
-		FileID string `json:"fileId"`
+		Name        string   `json:"name"`
+		URL         string   `json:"url"`
+		FileID      string   `json:"fileId"`
+		Category    *string  `json:"category"`
+		Aliases     []string `json:"aliases"`
+		License     *string  `json:"license"`
+		IsSensitive bool     `json:"isSensitive"`
+		LocalOnly   bool     `json:"localOnly"`
+		RoleIDs     []string `json:"roleIdsThatCanBeUsedThisEmojiAsReaction"`
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// upstream paramDef は name に `^[a-zA-Z0-9_]+$` を強制する。
+	if !emojiNamePattern.MatchString(req.Name) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -1785,16 +1796,32 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
 		}
+		// upstream は画像 MIME 以外を弾く (UNSUPPORTED_FILE_TYPE)。
+		if f.Type != "" && !strings.HasPrefix(f.Type, "image/") {
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+		}
 		url = f.URL
 	}
 	if url == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url or fileId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// 同名のローカル emoji が既に存在する場合は DUPLICATE_NAME (upstream 互換)。
+	if existing, err := h.emojiRepo.FindByNameAndHost(req.Name, nil); err == nil && existing != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))
+	}
+	now := time.Now()
 	e := &model.Emoji{
-		ID:          h.idGen.Generate(time.Now()),
-		Name:        req.Name,
-		OriginalURL: url,
-		PublicURL:   url,
+		ID:                                      h.idGen.Generate(now),
+		UpdatedAt:                               &now,
+		Name:                                    req.Name,
+		OriginalURL:                             url,
+		PublicURL:                               url,
+		Category:                                req.Category,
+		Aliases:                                 pq.StringArray(req.Aliases),
+		License:                                 req.License,
+		IsSensitive:                             req.IsSensitive,
+		LocalOnly:                               req.LocalOnly,
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray(req.RoleIDs),
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -1803,8 +1830,13 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		"emojiId": e.ID,
 		"emoji":   e,
 	})
-	return c.JSON(http.StatusOK, e)
+	// upstream は EmojiDetailed (packDetailed) を返す。raw model.Emoji を返すと
+	// `url` が欠落し originalUrl/publicUrl/uri/type 等の内部 field が漏れる。
+	return c.JSON(http.StatusOK, entity.PackEmojiDetailed(e))
 }
+
+// emojiNamePattern mirrors upstream admin/emoji/add の paramDef name pattern。
+var emojiNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 // EmojiUpdate handles POST /api/admin/emoji/update.
 //
@@ -1821,11 +1853,13 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	var req struct {
 		ID          string   `json:"id"`
 		Name        *string  `json:"name"`
+		FileID      *string  `json:"fileId"`
 		Category    *string  `json:"category"`
 		Aliases     []string `json:"aliases"`
 		License     *string  `json:"license"`
 		IsSensitive *bool    `json:"isSensitive"`
 		LocalOnly   *bool    `json:"localOnly"`
+		RoleIDs     []string `json:"roleIdsThatCanBeUsedThisEmojiAsReaction"`
 	}
 	if err := c.Bind(&req); err != nil || req.ID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "id is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -1847,7 +1881,28 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
+		// リネーム時は同名 local emoji の重複を弾く (SAME_NAME_EMOJI_EXISTS)。
+		if *req.Name != before.Name {
+			if dup, derr := h.emojiRepo.FindByNameAndHost(*req.Name, nil); derr == nil && dup != nil && dup.ID != req.ID {
+				return c.JSON(http.StatusBadRequest, apierr.Error("SAME_NAME_EMOJI_EXISTS", "Emoji with the same name already exists.", "7180fe9d-1ee3-bff9-647d-fe9896d2ffb8"))
+			}
+		}
 		fields["name"] = *req.Name
+	}
+	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。
+	if req.FileID != nil && *req.FileID != "" && h.driveFileRepo != nil {
+		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
+		if ferr != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
+		}
+		if f.Type != "" && !strings.HasPrefix(f.Type, "image/") {
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+		}
+		fields["originalUrl"] = f.URL
+		fields["publicUrl"] = f.URL
+		if f.Type != "" {
+			fields["type"] = f.Type
+		}
 	}
 	if req.Category != nil {
 		fields["category"] = *req.Category
@@ -1868,6 +1923,10 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	if req.LocalOnly != nil {
 		fields["localOnly"] = *req.LocalOnly
+	}
+	// リアクション利用可能ロールの更新 (upstream の roleIdsThatCanBeUsedThisEmojiAsReaction)。
+	if req.RoleIDs != nil {
+		fields["roleIdsThatCanBeUsedThisEmojiAsReaction"] = pq.StringArray(req.RoleIDs)
 	}
 	if len(fields) == 0 {
 		// 何も変更しないリクエストは log を書かずに 204 で返す。
