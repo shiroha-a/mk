@@ -1080,6 +1080,59 @@ func TestEmojiAdd_UnsupportedFileType(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "UNSUPPORTED_FILE_TYPE")
 }
 
+// SVG は image/ prefix だが allowlist 外 (XSS 理由) なので拒否される。
+func TestEmojiAdd_RejectsSvg(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "u1"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "f_svg", UserID: &owner, Type: "image/svg+xml", URL: "https://example/x.svg"}))
+	h.SetDriveFileRepo(dr)
+	rec := doPost(h.EmojiAdd, `{"name":"x","fileId":"f_svg"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "UNSUPPORTED_FILE_TYPE")
+}
+
+// fileId 経路の正常系: originalUrl=f.URL、publicUrl/type は webpublic variant を優先。
+func TestEmojiAdd_FileIdImagePersistsWebpublic(t *testing.T) {
+	h, repo := setupEmojiHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "u1"
+	wpURL := "https://example/wp.webp"
+	wpType := "image/webp"
+	require.NoError(t, dr.Create(&model.DriveFile{
+		ID: "f_img", UserID: &owner, Type: "image/png", URL: "https://example/orig.png",
+		WebpublicURL: &wpURL, WebpublicType: &wpType,
+	}))
+	h.SetDriveFileRepo(dr)
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got, err := repo.FindByNameAndHost("happy", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example/orig.png", got.OriginalURL)
+	assert.Equal(t, wpURL, got.PublicURL, "publicUrl は webpublicUrl を優先")
+	require.NotNil(t, got.Type)
+	assert.Equal(t, wpType, *got.Type, "type は webpublicType を優先")
+}
+
+// url + 非画像 fileId 併用時は url が勝ち、filetype 検証は走らない (legacy 挙動)。
+func TestEmojiAdd_UrlWinsOverFileId(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "u1"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "f_txt", UserID: &owner, Type: "text/plain", URL: "https://example/x.txt"}))
+	h.SetDriveFileRepo(dr)
+	rec := doPost(h.EmojiAdd, `{"name":"x","url":"https://example/y.png","fileId":"f_txt"}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code, "url 指定時は fileId 経路を通らず filetype 検証もしない")
+}
+
+// DUPLICATE_NAME は local (host=nil) のみ対象。remote 同名は衝突扱いしない。
+func TestEmojiAdd_RemoteSameNameAllowed(t *testing.T) {
+	remote := "remote.example"
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "er", Name: "dup", Host: &remote})
+	rec := doPost(h.EmojiAdd, `{"name":"dup","url":"https://example/x.png"}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code, "remote 同名 emoji があっても local add は通る")
+}
+
 func TestEmojiUpdate_FileIdReplacesImage(t *testing.T) {
 	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile", OriginalURL: "old", PublicURL: "old"})
 	dr := testutil.NewMockDriveFileRepository()
@@ -1122,6 +1175,54 @@ func TestEmojiUpdate_NoSuchFile(t *testing.T) {
 	rec := doPost(h.EmojiUpdate, `{"id":"e1","fileId":"ghost"}`, adminUser)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+}
+
+// 同名への self-rename は重複扱いせず 204 で通る。
+func TestEmojiUpdate_SelfRenameOk(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	rec := doPost(h.EmojiUpdate, `{"id":"e1","name":"smile"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestEmojiUpdate_UnsupportedFileType(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "u1"
+	require.NoError(t, dr.Create(&model.DriveFile{ID: "f_svg", UserID: &owner, Type: "image/svg+xml", URL: "https://example/x.svg"}))
+	h.SetDriveFileRepo(dr)
+	rec := doPost(h.EmojiUpdate, `{"id":"e1","fileId":"f_svg"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "UNSUPPORTED_FILE_TYPE")
+}
+
+// fileId 差替も webpublic variant を優先する (add と同ロジック、F1)。
+func TestEmojiUpdate_FileIdWebpublic(t *testing.T) {
+	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile", OriginalURL: "old", PublicURL: "old"})
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "u1"
+	wpURL := "https://example/wp.webp"
+	wpType := "image/webp"
+	require.NoError(t, dr.Create(&model.DriveFile{
+		ID: "f_img", UserID: &owner, Type: "image/png", URL: "https://example/orig.png",
+		WebpublicURL: &wpURL, WebpublicType: &wpType,
+	}))
+	h.SetDriveFileRepo(dr)
+	rec := doPost(h.EmojiUpdate, `{"id":"e1","fileId":"f_img"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got, err := emojiRepo.FindByID("e1")
+	require.NoError(t, err)
+	assert.Equal(t, "https://example/orig.png", got.OriginalURL)
+	assert.Equal(t, wpURL, got.PublicURL)
+	require.NotNil(t, got.Type)
+	assert.Equal(t, wpType, *got.Type)
+}
+
+// driveFileRepo 未配線 + fileId 指定は silent 204 でなく 500 にする (F3)。
+func TestEmojiUpdate_FileIdNoDriveRepo(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	// SetDriveFileRepo を呼ばない (driveFileRepo == nil)。
+	rec := doPost(h.EmojiUpdate, `{"id":"e1","fileId":"f_img"}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestEmojiUpdate_WritesModerationLog_WithExtendedFields(t *testing.T) {

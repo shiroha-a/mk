@@ -32,6 +32,36 @@ func TestEmojiRepository_FindByNameAndHost_Local(t *testing.T) {
 	assert.Equal(t, "smile", found.Name)
 }
 
+// UpdateFields は roleIdsThatCanBeUsedThisEmojiAsReaction (varchar[]) と type を
+// 実 DB に正しく書き込む。pq.StringArray でラップした array / 空 array / *string
+// type が round-trip することを実 PostgreSQL で検証する (aliases #729 と同型の
+// NULL 化罠を回帰防止)。
+func TestEmojiRepository_UpdateFields_RoleIdsAndType(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e := &model.Emoji{ID: "e_upd_roles", Name: "rolesx", OriginalURL: "https://example.com/x.png"}
+	require.NoError(t, testDB.Create(e).Error)
+	defer cleanupEmoji(t, e.ID)
+
+	// roleIds (非空) + type を書き込む。
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{
+		"roleIdsThatCanBeUsedThisEmojiAsReaction": pq.StringArray{"r1", "r2"},
+		"type": "image/webp",
+	}))
+	got, err := repo.FindByID(e.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"r1", "r2"}, []string(got.RoleIDsThatCanBeUsedThisEmojiAsReaction))
+	require.NotNil(t, got.Type)
+	assert.Equal(t, "image/webp", *got.Type)
+
+	// 空 array へのリセットも NOT NULL 制約に違反せず '{}' になる。
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{
+		"roleIdsThatCanBeUsedThisEmojiAsReaction": pq.StringArray{},
+	}))
+	got, err = repo.FindByID(e.ID)
+	require.NoError(t, err)
+	assert.Empty(t, []string(got.RoleIDsThatCanBeUsedThisEmojiAsReaction))
+}
+
 func TestEmojiRepository_FindByNameAndHost_Remote(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 

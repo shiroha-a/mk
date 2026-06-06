@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Fix: `/api/admin/emoji/add` が `category`/`aliases`/`license`/`isSensitive`/`localOnly`/`roleIdsThatCanBeUsedThisEmojiAsReaction` パラメータを無視し、さらに raw な内部モデルを返して `url` 欠落 + `originalUrl`/`publicUrl`/`uri`/`type` 等の内部フィールドが漏れていた問題を修正 (Misskey 本家同様に全パラメータを永続化し EmojiDetailed を返す)。あわせて重複名 (DUPLICATE_NAME) / 非画像ファイル (UNSUPPORTED_FILE_TYPE) / emoji 名パターン (`^[a-zA-Z0-9_]+$`) の検証を追加
-- Fix: `/api/admin/emoji/update` が `fileId` による画像差し替えと `roleIdsThatCanBeUsedThisEmojiAsReaction` の更新を受け付けていなかった問題を修正 (リネーム時の SAME_NAME_EMOJI_EXISTS チェックも追加)
+- Fix: `/api/admin/emoji/add` が `category`/`aliases`/`license`/`isSensitive`/`localOnly`/`roleIdsThatCanBeUsedThisEmojiAsReaction` パラメータを無視し、さらに raw な内部モデルを返して `url` 欠落 + `originalUrl`/`publicUrl`/`uri`/`type` 等の内部フィールドが漏れていた問題を修正 (Misskey 本家同様に全パラメータを永続化し EmojiDetailed を返す)。あわせて重複名 (DUPLICATE_NAME) / emoji 名パターン (`^[a-zA-Z0-9_]+$`) の検証を追加し、`fileId` 経路では本家 `FILE_TYPE_IMAGE` 許可リストで MIME を検証 (XSS 対策で `image/svg+xml` は除外) して `originalUrl`/`publicUrl`/`type` を webpublic variant 優先で永続化する。なお legacy な `url` 直接指定経路では MIME 検証は行わない (管理者専用)
+- Fix: `/api/admin/emoji/update` が `fileId` による画像差し替え (webpublic variant 優先 + MIME 許可リスト検証) と `roleIdsThatCanBeUsedThisEmojiAsReaction` の更新を受け付けていなかった問題を修正 (リネーム時の SAME_NAME_EMOJI_EXISTS チェックも追加)
 - Fix: `/api/emoji` (EmojiDetailed) のレスポンスに `license` と `roleIdsThatCanBeUsedThisEmojiAsReaction` が欠落し、`url` が `publicUrl` 固定で `originalUrl` フォールバックが無かった問題を修正
 - Fix: `/api/admin/avatar-decorations/create`・`/list` のレスポンスに `createdAt` (aidx ID 由来) が含まれていなかった問題を修正
 

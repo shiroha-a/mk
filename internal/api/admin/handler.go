@@ -1790,24 +1790,36 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// fileId 経路は drive_file を resolve する (NO_SUCH_FILE)。filetype 検証は
+	// upstream の error 順序 (noSuchFile → duplicate → unsupportedFileType) に
+	// 合わせ、duplicate チェックの後で行う。
+	var driveFile *model.DriveFile
 	url := req.URL
 	if url == "" && req.FileID != "" && h.driveFileRepo != nil {
 		f, err := h.driveFileRepo.FindByID(req.FileID)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
 		}
-		// upstream は画像 MIME 以外を弾く (UNSUPPORTED_FILE_TYPE)。
-		if f.Type != "" && !strings.HasPrefix(f.Type, "image/") {
-			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
-		}
-		url = f.URL
+		driveFile = f
 	}
-	if url == "" {
+	if url == "" && driveFile == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url or fileId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// 同名のローカル emoji が既に存在する場合は DUPLICATE_NAME (upstream 互換)。
 	if existing, err := h.emojiRepo.FindByNameAndHost(req.Name, nil); err == nil && existing != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))
+	}
+	// drive 画像なら MIME を allowlist で検証し、webpublic variant を優先して
+	// originalUrl/publicUrl/type を導出する (upstream CustomEmojiService.add)。
+	publicURL := url
+	var fileType *string
+	if driveFile != nil {
+		if !isAllowedEmojiImageType(driveFile.Type) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+		}
+		url = driveFile.URL
+		publicURL = preferWebpublicURL(driveFile)
+		fileType = preferWebpublicType(driveFile)
 	}
 	now := time.Now()
 	e := &model.Emoji{
@@ -1815,7 +1827,8 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		UpdatedAt:                               &now,
 		Name:                                    req.Name,
 		OriginalURL:                             url,
-		PublicURL:                               url,
+		PublicURL:                               publicURL,
+		Type:                                    fileType,
 		Category:                                req.Category,
 		Aliases:                                 pq.StringArray(req.Aliases),
 		License:                                 req.License,
@@ -1837,6 +1850,51 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 
 // emojiNamePattern mirrors upstream admin/emoji/add の paramDef name pattern。
 var emojiNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+// allowedEmojiImageTypes mirrors upstream FILE_TYPE_IMAGE (const.ts)。
+// image/svg+xml は XSS 理由で意図的に除外する。prefix 判定 ("image/") では
+// svg や任意 subtype を通してしまうため、明示 allowlist で完全一致判定する。
+var allowedEmojiImageTypes = map[string]bool{
+	"image/png":    true,
+	"image/gif":    true,
+	"image/jpeg":   true,
+	"image/webp":   true,
+	"image/avif":   true,
+	"image/apng":   true,
+	"image/bmp":    true,
+	"image/tiff":   true,
+	"image/x-icon": true,
+}
+
+// isAllowedEmojiImageType reports whether a drive file MIME may back a custom
+// emoji. Empty type is rejected (upstream FILE_TYPE_IMAGE.includes("")===false)。
+func isAllowedEmojiImageType(mime string) bool {
+	return allowedEmojiImageTypes[mime]
+}
+
+// preferWebpublicURL returns the drive file's webpublic URL when present,
+// else its canonical URL (upstream `webpublicUrl ?? url`).
+func preferWebpublicURL(f *model.DriveFile) string {
+	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
+		return *f.WebpublicURL
+	}
+	return f.URL
+}
+
+// preferWebpublicType returns the drive file's webpublic MIME when present,
+// else its canonical type (upstream `webpublicType ?? type`). Returned as a
+// pointer so a non-empty value lands in emoji.type (NULL when both empty).
+func preferWebpublicType(f *model.DriveFile) *string {
+	if f.WebpublicType != nil && *f.WebpublicType != "" {
+		t := *f.WebpublicType
+		return &t
+	}
+	if f.Type != "" {
+		t := f.Type
+		return &t
+	}
+	return nil
+}
 
 // EmojiUpdate handles POST /api/admin/emoji/update.
 //
@@ -1890,18 +1948,25 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		fields["name"] = *req.Name
 	}
 	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。
-	if req.FileID != nil && *req.FileID != "" && h.driveFileRepo != nil {
+	if req.FileID != nil && *req.FileID != "" {
+		if h.driveFileRepo == nil {
+			// fileId が来たのに drive を引けない構成は処理できない。silent 204
+			// (no-op 成功) を避けて 500 にする。
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
 		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
 		if ferr != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
 		}
-		if f.Type != "" && !strings.HasPrefix(f.Type, "image/") {
+		if !isAllowedEmojiImageType(f.Type) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
 		}
+		// upstream update.ts: originalUrl=url, publicUrl=webpublicUrl??url,
+		// fileType=webpublicType??type。EmojiAdd / EmojiCopy と同ロジック。
 		fields["originalUrl"] = f.URL
-		fields["publicUrl"] = f.URL
-		if f.Type != "" {
-			fields["type"] = f.Type
+		fields["publicUrl"] = preferWebpublicURL(f)
+		if t := preferWebpublicType(f); t != nil {
+			fields["type"] = *t
 		}
 	}
 	if req.Category != nil {
