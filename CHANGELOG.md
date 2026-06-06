@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: ユーザーの `onlineStatus` が常に `unknown` 固定だった問題を修正 (`lastActiveDate` と `hideOnlineStatus` から online/active/offline を算出。本家同様 10分=online / 3日=active のしきい値)。タイムライン・通知など全 UserLite 応答に反映される
+- Fix: `isSilenced` (サイレンス状態) が `/api/i` 以外のユーザー応答 (users/show・admin/show-user 等) で常に `false` 固定だった問題を修正 (role policy の `canPublicNote` を否定する role を持つかで算出。本家 UserEntityService 互換)
+
 - Fix: `/api/channels/create`・`/update` が `bannerId` を無視し、`/update` が `pinnedNoteIds` を反映できなかった問題を修正 (bannerId は所有権検証付き、`""` で banner 解除)。`/api/channels/search` が `type` (`nameAndDescription` 既定 / `nameOnly`) を無視して description を検索対象にしていなかった問題と、archived チャンネルを検索結果から除外していなかった問題も修正。チャンネルの packed レスポンス (show / search / featured / owned 等) に閲覧者視点の `isMuting` が欠落していた問題を修正
 
 - Fix: `/api/admin/roles/create`・`/show`・`/list` と公開 `/api/roles/list`・`/show` の Role レスポンスが raw な内部モデルで `usersCount`・`createdAt`・`target`・`condFormula`・`policies`(デフォルト値マージ)・`preserveAssignmentOnMoveAccount` を欠いていた問題を修正 (Misskey 本家 RoleEntityService.pack 相当の共通 packer に統一)。公開 `/api/roles/list` の `isExplorable` フィルタ欠落も合わせて修正 (本家同様 isPublic かつ isExplorable のみ列挙)

@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func newTestHandler(t *testing.T) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository, *testutil.MockRoleRepository) {
@@ -310,6 +311,26 @@ func TestShowUser_WithRoleAssigns(t *testing.T) {
 	assert.Equal(t, "r1", entry["roleId"])
 	assert.NotNil(t, entry["createdAt"])
 	assert.NotNil(t, entry["expiresAt"])
+}
+
+// admin/show-user は role policy 由来の isSilenced を返す (canPublicNote を
+// 否定する role を持つ user は true)。旧実装は false 固定だった。
+func TestShowUser_IsSilencedFromRolePolicy(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	uid := "silenced1"
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "muted", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+	// canPublicNote=false の role を割り当てる → isSilenced=true。
+	roleRepo.Roles["silrole"] = &model.Role{ID: "silrole", Name: "Silenced", Policies: datatypes.JSON([]byte(`{"canPublicNote":{"useDefault":false,"priority":1,"value":false}}`))}
+	assignRepo.Assignments[uid+":silrole"] = &model.RoleAssignment{ID: "as1", UserID: uid, RoleID: "silrole"}
+
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isSilenced"])
 }
 
 func TestShowUser_NotFound(t *testing.T) {

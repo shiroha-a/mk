@@ -3,11 +3,36 @@ package entity
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 )
+
+// upstream const.ts: USER_ONLINE_THRESHOLD=10min, USER_ACTIVE_THRESHOLD=3days。
+const (
+	userOnlineThreshold = 10 * time.Minute
+	userActiveThreshold = 3 * 24 * time.Hour
+)
+
+// computeOnlineStatus mirrors upstream UserEntityService.getOnlineStatus:
+// hideOnlineStatus or no lastActiveDate → "unknown"; otherwise online/active/
+// offline by elapsed time since lastActiveDate.
+func computeOnlineStatus(u *model.User) string {
+	if u.HideOnlineStatus || u.LastActiveDate == nil {
+		return "unknown"
+	}
+	elapsed := time.Since(*u.LastActiveDate)
+	switch {
+	case elapsed < userOnlineThreshold:
+		return "online"
+	case elapsed < userActiveThreshold:
+		return "active"
+	default:
+		return "offline"
+	}
+}
 
 // UserLite is the minimal user representation returned by most API endpoints.
 // Phase 7-5a (#247) added requireSigninToViewContents, makeNotes*Before and
@@ -413,7 +438,7 @@ func PackUserLite(u *model.User) UserLite {
 		IsBot:             u.IsBot,
 		IsCat:             u.IsCat,
 		Emojis:            make(map[string]string),
-		OnlineStatus:      "unknown",
+		OnlineStatus:      computeOnlineStatus(u),
 		BadgeRoles:        packBadgeRoles(u),
 		// upstream `chatAvailability === 'available'` 互換 (#988)。
 		// 旧実装は `u.ChatScope != "none"` で user 自身の受信設定を返して
@@ -457,6 +482,9 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		PinnedNoteIDs:       []string{},
 		PinnedNotes:         []any{},
 		Roles:               packPublicRoles(u),
+		// isSilenced は role policy 由来 (canPublicNote を否定する role を持つか)。
+		// router で wire される lookup から解決する。unwired なら false。
+		IsSilenced: resolveSilenced(u.ID),
 		// DBデフォルト値 (user_profileのpublicReactions DEFAULT true)
 		PublicReactions: true,
 	}

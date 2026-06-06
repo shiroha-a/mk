@@ -649,7 +649,10 @@ func (h *Handler) Me(c echo.Context) error {
 	// (optional・null 不可、moderator が他者を見るとき専用) なので self-view
 	// (/api/i) では出さない。旧実装は `resp["moderationNote"]=nil` で null を出し
 	// golden 非互換だった (#1270 L3 で検出)。
-	// isSilenced は role policy 由来で /api/i 固有 (MeDetailed には無い)。
+	// isSilenced は role policy 由来 (MeDetailed/UserDetailedNotMe 共通 field)。
+	// PackUserDetailed も entity.SetSilencedLookup 経由で同値を埋めるが、/api/i は
+	// handler 層の roleProvider を権威ソースとして明示的に上書きする (両者とも
+	// 同一 roleService なので値は一致)。
 	resp["isSilenced"] = h.isSilenced(u.ID)
 
 	// Private fields from profile (MeDetailed scope 外)

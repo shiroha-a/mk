@@ -12,6 +12,55 @@ import (
 	"gorm.io/datatypes"
 )
 
+func TestComputeOnlineStatus(t *testing.T) {
+	now := time.Now()
+	mk := func(hide bool, last *time.Time) *model.User {
+		return &model.User{ID: "u", HideOnlineStatus: hide, LastActiveDate: last}
+	}
+	online := now.Add(-1 * time.Minute)
+	active := now.Add(-1 * time.Hour)
+	offline := now.Add(-10 * 24 * time.Hour)
+
+	assert.Equal(t, "unknown", computeOnlineStatus(mk(false, nil)), "lastActiveDate nil → unknown")
+	assert.Equal(t, "unknown", computeOnlineStatus(mk(true, &online)), "hideOnlineStatus → unknown")
+	assert.Equal(t, "online", computeOnlineStatus(mk(false, &online)))
+	assert.Equal(t, "active", computeOnlineStatus(mk(false, &active)))
+	assert.Equal(t, "offline", computeOnlineStatus(mk(false, &offline)))
+
+	// 境界: threshold 直前/直後 (< が online、>= が次段階)。
+	justOnline := now.Add(-userOnlineThreshold + time.Second)
+	justActive := now.Add(-userOnlineThreshold - time.Second)
+	justOffline := now.Add(-userActiveThreshold - time.Second)
+	assert.Equal(t, "online", computeOnlineStatus(mk(false, &justOnline)))
+	assert.Equal(t, "active", computeOnlineStatus(mk(false, &justActive)))
+	assert.Equal(t, "offline", computeOnlineStatus(mk(false, &justOffline)))
+
+	// PackUserLite が computeOnlineStatus を使う。
+	lite := PackUserLite(mk(false, &online))
+	assert.Equal(t, "online", lite.OnlineStatus)
+	// HideOnlineStatus は packer 経由でも尊重される。
+	assert.Equal(t, "unknown", PackUserLite(mk(true, &online)).OnlineStatus)
+}
+
+func TestPackUserDetailed_IsSilenced(t *testing.T) {
+	t.Cleanup(func() { SetSilencedLookup(nil) })
+	u := &model.User{ID: "silenced-user"}
+
+	// lookup 未配線なら false。
+	SetSilencedLookup(nil)
+	assert.False(t, PackUserDetailed(u, nil).IsSilenced)
+
+	// lookup が true を返せば反映される。
+	SetSilencedLookup(stubSilenced{ids: map[string]bool{"silenced-user": true}})
+	assert.True(t, PackUserDetailed(u, nil).IsSilenced)
+	// 別ユーザーは false。
+	assert.False(t, PackUserDetailed(&model.User{ID: "other"}, nil).IsSilenced)
+}
+
+type stubSilenced struct{ ids map[string]bool }
+
+func (s stubSilenced) IsSilenced(userID string) bool { return s.ids[userID] }
+
 func TestPackUserLite(t *testing.T) {
 	name := "Test User"
 	avatarURL := "https://example.com/avatar.png"

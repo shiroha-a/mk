@@ -785,6 +785,10 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 	if h.roleService != nil {
 		resp["isAdmin"] = h.roleService.IsAdministrator(u.ID)
 		resp["isModerator"] = h.roleService.IsModerator(u.ID)
+		// isSilenced は role policy 由来 (canPublicNote を否定する role を持つか)。
+		// upstream admin/show-user も roleService から算出する。map literal の
+		// false 固定をここで上書きする。
+		resp["isSilenced"] = h.roleService.IsSilenced(u.ID)
 		// roles: GetUserRoles は assigned + expired 除外済 list を返す
 		// (= 即時 active な role の minimal shape)。err 時は frontend が
 		// `user.roles.map(...)` で例外を吐かないよう空配列に fallback し

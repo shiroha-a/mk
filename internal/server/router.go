@@ -1339,6 +1339,12 @@ func (s *Server) setupRoutes() {
 	// に表示されなかった。roleService.GetUserRoles も in-memory cache 経由
 	// (#761) で hot path コスト無し。
 	entity.SetUserRolesLookup(corerole.NewUserRolesLookup(roleService))
+	// PackUserDetailed の isSilenced を role policy 由来に揃える (旧実装は
+	// /api/i 以外で常に false 固定だった)。roleService.IsSilenced が
+	// entity.SilencedLookup を構造的に満たすので直接 wire する。GetUserRoles は
+	// in-memory cache (#761) だが IsSilenced 内の policy merge 自体は per-call
+	// なので、UserDetailed pack は単一 user の detail 取得が主用途であり許容範囲。
+	entity.SetSilencedLookup(roleService)
 	iHandler.SetNoteFieldResolver(noteFieldResolver)
 	// announcementRepoは後続で構築されるため SetupAdditional() 相当の順序依存があるが、
 	// 現状 announcementRepo := ... の行がここより後にあるため下で wire する。
