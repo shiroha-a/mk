@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: ギャラリー投稿 (`/api/gallery/posts/*` と featured/popular/posts) のレスポンスで `files` が常に空配列で、閲覧者視点の `isLiked` も欠落していた問題を修正 (`fileIds` から DriveFile を解決。一覧では 1 クエリにまとめて N+1 を回避)。`/api/gallery/posts/create` が `fileIds` 必須・所有ファイル検証 (1-32 件 / 重複除去) を行わず、`/api/gallery/posts/update` が `fileIds`/`isSensitive` を無視して 204 を返していた問題も修正 (本家同様、所有ファイルのみ採用し更新後の GalleryPost を返す)
+
 - Fix: ユーザーの `onlineStatus` が常に `unknown` 固定だった問題を修正 (`lastActiveDate` と `hideOnlineStatus` から online/active/offline を算出。本家同様 10分=online / 3日=active のしきい値)。タイムライン・通知など全 UserLite 応答に反映される
 - Fix: `isSilenced` (サイレンス状態) が `/api/i` 以外のユーザー応答 (users/show・admin/show-user 等) で常に `false` 固定だった問題を修正 (role policy の `canPublicNote` を否定する role を持つかで算出。本家 UserEntityService 互換)
 
