@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -295,15 +296,19 @@ func TestDriveCleanup_PreservesEmojiReferencedSystemFiles(t *testing.T) {
 func TestDriveCleanRemoteFiles_InvokesDeleteRemoteCache(t *testing.T) {
 	host := "remote.example"
 	u := "u1"
+	// 削除対象は「キャッシュ済みリモートファイル」= isLink=false かつ host あり。
+	// isLink=true (link-only proxy) とローカルファイルは保持する (条件修正の回帰 guard)。
 	h, repo := setupDriveFileHandler(t,
-		&model.DriveFile{ID: "remote1", IsLink: true, UserHost: &host},
+		&model.DriveFile{ID: "cached_remote", IsLink: false, UserHost: &host},
+		&model.DriveFile{ID: "link_only", IsLink: true, UserHost: &host},
 		&model.DriveFile{ID: "local1", UserID: &u},
 	)
 
 	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.NotContains(t, repo.Files, "remote1")
-	assert.Contains(t, repo.Files, "local1")
+	assert.NotContains(t, repo.Files, "cached_remote", "キャッシュ実体は削除される")
+	assert.Contains(t, repo.Files, "link_only", "link-only proxy は保持される")
+	assert.Contains(t, repo.Files, "local1", "ローカルファイルは保持される")
 }
 
 // --- Emoji ------------------------------------------------------------------
@@ -1350,4 +1355,153 @@ func TestEmojiDeleteBulk_BatchedSingleInsert(t *testing.T) {
 	create, createMany := repo.CallCounts()
 	assert.Equal(t, 0, create, "Create must not be called per-item (would defeat #671 batching)")
 	assert.Equal(t, 1, createMany, "CreateMany must be called exactly once for the whole batch")
+}
+
+// stubStorageDeleter records the access keys passed to Delete. failKeys 内の
+// key には error を返す (best-effort 続行の検証用)。
+type stubStorageDeleter struct {
+	deleted  []string
+	failKeys map[string]bool
+}
+
+func (s *stubStorageDeleter) Delete(key string) error {
+	s.deleted = append(s.deleted, key)
+	if s.failKeys[key] {
+		return assertError{}
+	}
+	return nil
+}
+
+// clean-remote-files: storage backend 配線時は cached remote file の
+// access/thumbnail/webpublic object を削除してから DB 行を消す。
+func TestDriveCleanRemoteFiles_DeletesStorageObjects(t *testing.T) {
+	host := "remote.example"
+	ak1, tk1, ak2, akl := "ak1", "tk1", "ak2", "akl"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "c1", IsLink: false, UserHost: &host, AccessKey: &ak1, ThumbnailAccessKey: &tk1},
+		&model.DriveFile{ID: "c2", IsLink: false, UserHost: &host, AccessKey: &ak2},
+		&model.DriveFile{ID: "link", IsLink: true, UserHost: &host, AccessKey: &akl},
+	)
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotContains(t, repo.Files, "c1")
+	assert.NotContains(t, repo.Files, "c2")
+	assert.Contains(t, repo.Files, "link", "link-only proxy は削除しない")
+	// cached file の object key のみ削除 (link-only の akl は対象外)。
+	assert.ElementsMatch(t, []string{"ak1", "tk1", "ak2"}, sd.deleted)
+}
+
+// delete-all-files-of-a-user: storage 配線時は対象ユーザーの file object も削除。
+func TestDeleteAllFilesOfUser_DeletesStorageObjects(t *testing.T) {
+	u, other := "u1", "u2"
+	ak := "aku1"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "f1", UserID: &u, AccessKey: &ak},
+		&model.DriveFile{ID: "f2", UserID: &other},
+	)
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DeleteAllFilesOfUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotContains(t, repo.Files, "f1")
+	assert.Contains(t, repo.Files, "f2", "他ユーザーの file は残す")
+	assert.Contains(t, sd.deleted, "aku1")
+}
+
+// clean-remote-files が driveCleanupBatchSize(100) を超える件数を複数バッチで
+// 全削除する (batching の終了性 + 継続)。
+func TestDriveCleanRemoteFiles_MultiBatch(t *testing.T) {
+	host := "remote.example"
+	h, repo := setupDriveFileHandler(t)
+	for i := 0; i < 150; i++ {
+		ak := "ak" + strconv.Itoa(i)
+		require.NoError(t, repo.Create(&model.DriveFile{
+			ID: "c" + strconv.Itoa(i), IsLink: false, UserHost: &host, AccessKey: &ak,
+		}))
+	}
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, repo.Files, "150 件すべて削除される (複数バッチ)")
+	assert.Len(t, sd.deleted, 150, "全 access key が storage 削除される")
+}
+
+// storage Delete が失敗しても他 key の削除を続行し DB 行は消す (best-effort)。
+func TestDriveCleanRemoteFiles_StorageDeleteFailureBestEffort(t *testing.T) {
+	host := "remote.example"
+	ak1, tk1, ak2 := "ak1", "tk1", "ak2"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "c1", IsLink: false, UserHost: &host, AccessKey: &ak1, ThumbnailAccessKey: &tk1},
+		&model.DriveFile{ID: "c2", IsLink: false, UserHost: &host, AccessKey: &ak2},
+	)
+	sd := &stubStorageDeleter{failKeys: map[string]bool{"ak1": true}}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// ak1 が失敗しても tk1 / ak2 の削除は続行され、DB 行は全て消える。
+	assert.ElementsMatch(t, []string{"ak1", "tk1", "ak2"}, sd.deleted)
+	assert.Empty(t, repo.Files)
+}
+
+// list (DB) 失敗は 500 (DB-only 経路の 500 と整合)。
+func TestDriveCleanRemoteFiles_ListErrorReturns500(t *testing.T) {
+	h, repo := setupDriveFileHandler(t)
+	repo.ListRemoteCacheErr = assertError{}
+	h.SetStorageDeleter(&stubStorageDeleter{})
+	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// DeleteByIDs (DB) 失敗も 500。
+func TestDeleteAllFilesOfUser_DeleteErrorReturns500(t *testing.T) {
+	u := "u1"
+	ak := "aku"
+	h, repo := setupDriveFileHandler(t, &model.DriveFile{ID: "f1", UserID: &u, AccessKey: &ak})
+	repo.DeleteByIDsErr = assertError{}
+	h.SetStorageDeleter(&stubStorageDeleter{})
+	rec := doPost(h.DeleteAllFilesOfUser, `{"userId":"u1"}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// DeleteByIDs が行を消さない degenerate ケースでも maxBatches 安全弁で有限終了する。
+func TestDriveCleanRemoteFiles_TerminatesWhenNoProgress(t *testing.T) {
+	host := "remote.example"
+	ak := "ak1"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "c1", IsLink: false, UserHost: &host, AccessKey: &ak},
+	)
+	repo.DeleteByIDsNoOp = true // 行が縮小しない
+	h.SetStorageDeleter(&stubStorageDeleter{})
+	done := make(chan struct{})
+	go func() {
+		doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deleteFilesBatched did not terminate (safety valve failed)")
+	}
+}
+
+// webpublic access key も storage 削除対象に含まれ、空文字 key は skip される。
+func TestDriveCleanRemoteFiles_WebpublicKeyAndEmptySkip(t *testing.T) {
+	host := "remote.example"
+	ak, wk, empty := "ak1", "wk1", ""
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "c1", IsLink: false, UserHost: &host, AccessKey: &ak, WebpublicAccessKey: &wk, ThumbnailAccessKey: &empty},
+	)
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+	rec := doPost(h.DriveCleanRemoteFiles, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	// access + webpublic は削除、空文字 thumbnail key は skip。
+	assert.ElementsMatch(t, []string{"ak1", "wk1"}, sd.deleted)
 }

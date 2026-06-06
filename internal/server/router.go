@@ -1968,6 +1968,9 @@ func (s *Server) setupRoutes() {
 	announcementHandler.SetUserRepo(userRepo)
 	adminHandler.SetEmojiRepo(emojiRepo)
 	adminHandler.SetDriveFileRepo(driveFileRepo)
+	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で
+	// object storage の物理オブジェクトも消すため storage backend を渡す。
+	adminHandler.SetStorageDeleter(driveStorage)
 	adminHandler.SetAdminDB(s.db)
 	adminHandler.SetUserIPRepo(userIPRepo)
 	adminHandler.SetEmojiImportEnqueuer(s.queueClient)

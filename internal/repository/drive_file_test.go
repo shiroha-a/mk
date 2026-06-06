@@ -324,18 +324,24 @@ func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	orphan.UserID = nil
 	kept := newTestDriveFile("kept1", user.ID, "md5k", nil)
 
-	// remote cache (isLink=true, userHost set) と local link
+	// cached remote file (isLink=false, userHost set) は DeleteRemoteCache の
+	// 対象。link-only proxy (isLink=true) は対象外で保持される (upstream 互換)。
 	host := "cache.example"
 	remoteCache := newTestDriveFile("rc1", user.ID, "md5rc", nil)
-	remoteCache.IsLink = true
+	remoteCache.IsLink = false
 	remoteCache.UserHost = &host
+	linkOnly := newTestDriveFile("lo1", user.ID, "md5lo", nil)
+	linkOnly.IsLink = true
+	linkOnly.UserHost = &host
 
 	require.NoError(t, repo.Create(orphan))
 	require.NoError(t, repo.Create(kept))
 	require.NoError(t, repo.Create(remoteCache))
+	require.NoError(t, repo.Create(linkOnly))
 	defer cleanupDriveFile(t, orphan.ID)
 	defer cleanupDriveFile(t, kept.ID)
 	defer cleanupDriveFile(t, remoteCache.ID)
+	defer cleanupDriveFile(t, linkOnly.ID)
 
 	n, err := repo.DeleteOrphans()
 	require.NoError(t, err)
@@ -349,7 +355,9 @@ func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, n, int64(1))
 	_, err = repo.FindByID(remoteCache.ID)
-	assert.Error(t, err)
+	assert.Error(t, err, "isLink=false のキャッシュ実体は削除される")
+	_, err = repo.FindByID(linkOnly.ID)
+	assert.NoError(t, err, "isLink=true の link-only は保持される")
 }
 
 // TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced は #722
@@ -561,3 +569,54 @@ func TestDriveFileRepository_DeleteByUser(t *testing.T) {
 }
 
 var _ = context.Background // import guard
+
+// ListRemoteCache / ListByUserAll / DeleteByIDs の動作 (#H-PR8f)。
+func TestDriveFileRepository_CleanupHelpers(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_clh", "clh")
+	defer cleanupUser(t, user.ID)
+	host := "clh.example"
+
+	cached := newTestDriveFile("clh_c", user.ID, "md5c", nil)
+	cached.IsLink = false
+	cached.UserHost = &host
+	link := newTestDriveFile("clh_l", user.ID, "md5l", nil)
+	link.IsLink = true
+	link.UserHost = &host
+	local := newTestDriveFile("clh_loc", user.ID, "md5loc", nil)
+	for _, f := range []*model.DriveFile{cached, link, local} {
+		require.NoError(t, repo.Create(f))
+		defer cleanupDriveFile(t, f.ID)
+	}
+
+	idset := func(fs []*model.DriveFile) map[string]bool {
+		m := map[string]bool{}
+		for _, f := range fs {
+			m[f.ID] = true
+		}
+		return m
+	}
+
+	// ListRemoteCache は isLink=false かつ host あり (= キャッシュ実体) のみ。
+	rc, err := repo.ListRemoteCache(100)
+	require.NoError(t, err)
+	rcIDs := idset(rc)
+	assert.True(t, rcIDs[cached.ID], "cached を含む")
+	assert.False(t, rcIDs[link.ID], "link-only は含まない")
+	assert.False(t, rcIDs[local.ID], "local は含まない")
+
+	// ListByUserAll は user 所有の全 file (folder 問わず)。
+	ua, err := repo.ListByUserAll(user.ID, 100)
+	require.NoError(t, err)
+	uaIDs := idset(ua)
+	assert.True(t, uaIDs[cached.ID] && uaIDs[link.ID] && uaIDs[local.ID])
+
+	// DeleteByIDs は指定 ID のみ削除。
+	n, err := repo.DeleteByIDs([]string{cached.ID, link.ID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+	_, err = repo.FindByID(cached.ID)
+	assert.Error(t, err)
+	_, err = repo.FindByID(local.ID)
+	assert.NoError(t, err, "指定外の local は残る")
+}

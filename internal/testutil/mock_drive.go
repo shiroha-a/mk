@@ -20,6 +20,15 @@ type MockDriveFileRepository struct {
 	// call so handler tests can assert the owning user is scoped (IDOR guard).
 	BulkFolderUserID  string
 	BulkFolderFileIDs []string
+
+	// 以下は bulk cleanup (clean-remote-files / delete-all-files) のエラー経路を
+	// テストするための注入フィールド。nil なら通常動作。
+	ListRemoteCacheErr error
+	ListByUserAllErr   error
+	DeleteByIDsErr     error
+	// DeleteByIDsNoOp を true にすると DeleteByIDs が err=nil で 0 件削除する
+	// (= 行が縮小しない degenerate ケース。maxBatches 安全弁の終了性検証用)。
+	DeleteByIDsNoOp bool
 }
 
 func NewMockDriveFileRepository() *MockDriveFileRepository {
@@ -461,7 +470,67 @@ func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 func (m *MockDriveFileRepository) DeleteRemoteCache() (int64, error) {
 	n := int64(0)
 	for id, f := range m.Files {
-		if f.IsLink && f.UserHost != nil {
+		// upstream は isLink=false (キャッシュ実体) を消す。
+		if !f.IsLink && f.UserHost != nil {
+			delete(m.Files, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *MockDriveFileRepository) ListRemoteCache(limit int) ([]*model.DriveFile, error) {
+	if m.ListRemoteCacheErr != nil {
+		return nil, m.ListRemoteCacheErr
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]*model.DriveFile, 0, limit)
+	for _, f := range m.Files {
+		if !f.IsLink && f.UserHost != nil {
+			out = append(out, f)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *MockDriveFileRepository) ListByUserAll(userID string, limit int) ([]*model.DriveFile, error) {
+	if m.ListByUserAllErr != nil {
+		return nil, m.ListByUserAllErr
+	}
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]*model.DriveFile, 0, limit)
+	for _, f := range m.Files {
+		if f.UserID != nil && *f.UserID == userID {
+			out = append(out, f)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *MockDriveFileRepository) DeleteByIDs(ids []string) (int64, error) {
+	if m.DeleteByIDsErr != nil {
+		return 0, m.DeleteByIDsErr
+	}
+	if m.DeleteByIDsNoOp {
+		// 行を消さず成功扱い (= list が縮小しない degenerate ケース)。
+		return 0, nil
+	}
+	n := int64(0)
+	for _, id := range ids {
+		if _, ok := m.Files[id]; ok {
 			delete(m.Files, id)
 			n++
 		}

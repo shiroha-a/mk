@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -14,14 +15,89 @@ import (
 	"gorm.io/datatypes"
 )
 
+// driveCleanupBatchSize はバルク削除の 1 バッチ件数。upstream の cursor 巡回
+// (8 件) より大きめにして round-trip を減らす。
+const driveCleanupBatchSize = 100
+
+// driveCleanupMaxBatches は無限ループ防止の安全弁 (= 約 100 万件)。
+const driveCleanupMaxBatches = 10000
+
 // DriveCleanRemoteFiles handles POST /api/admin/drive/clean-remote-files.
+//
+// upstream CleanRemoteFilesProcessorService はキャッシュ済みリモートファイル
+// (userHost IS NOT NULL AND isLink=false) を物理オブジェクトごと削除する。
+// storage backend が配線されていれば list→object storage 削除→DB 行削除を
+// バッチで回す。未配線時は DB 行のみ削除 (条件は修正済 = isLink=false)。
 func (h *Handler) DriveCleanRemoteFiles(c echo.Context) error {
-	// 単一 DELETE 文なので同期実行で十分。将来バッチ化が必要ならここを
-	// queue ジョブに差し替える。
-	if h.driveFileRepo != nil {
+	if h.driveFileRepo == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	if h.storageDeleter == nil {
+		// storage 未配線: DB 行のみ削除 (condition は isLink=false に修正済)。
 		_, _ = h.driveFileRepo.DeleteRemoteCache()
+		return c.NoContent(http.StatusNoContent)
+	}
+	if err := h.deleteFilesBatched(c, h.driveFileRepo.ListRemoteCache); err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// deleteFilesBatched lists files via list() in batches, deletes each file's
+// object-storage objects, then deletes the DB rows, until none remain. Because
+// the rows are deleted each round, list() naturally returns the next batch
+// (driveCleanupMaxBatches caps the loop against a non-shrinking repo).
+//
+// storage object 削除は best-effort (失敗しても DB 行は消す)。同期ループで
+// upstream のような job 再試行ができないため、storage 失敗で DB 削除を止めると
+// 同じ行を re-list し続けてしまう。失敗は slog で観測可能にし orphan を検知できる
+// ようにする。list / DeleteByIDs (= DB) の失敗は hard error として返し、handler が
+// 500 を返す (DB-only 経路の 500 と整合)。
+func (h *Handler) deleteFilesBatched(c echo.Context, list func(limit int) ([]*model.DriveFile, error)) error {
+	for i := 0; i < driveCleanupMaxBatches; i++ {
+		files, err := list(driveCleanupBatchSize)
+		if err != nil {
+			slog.ErrorContext(c.Request().Context(), "drive cleanup: list failed", "err", err)
+			return err
+		}
+		if len(files) == 0 {
+			return nil
+		}
+		ids := make([]string, 0, len(files))
+		for _, f := range files {
+			h.deleteFileStorageObjects(c, f)
+			ids = append(ids, f.ID)
+		}
+		if _, err := h.driveFileRepo.DeleteByIDs(ids); err != nil {
+			slog.ErrorContext(c.Request().Context(), "drive cleanup: DeleteByIDs failed", "err", err)
+			return err
+		}
+		if len(files) < driveCleanupBatchSize {
+			return nil
+		}
+	}
+	return nil
+}
+
+// deleteFileStorageObjects removes a file's primary / thumbnail / webpublic
+// objects from object storage. best-effort: 欠損 object はエラーにならない
+// (Storage.Delete の契約) が、それ以外の失敗は slog.Warn で残す (DB 行は消すので
+// orphan を後追いできるように)。upstream は thumbnailUrl/webpublicUrl の有無で
+// gate するが、mk-go は access key の有無で判定する (best-effort なので余分な key
+// への Delete は no-op)。storedInternal=true でローカル disk にある object を S3
+// backend で消そうとするケース (#1414 の二系統 storage) は本経路では消えない。
+func (h *Handler) deleteFileStorageObjects(c echo.Context, f *model.DriveFile) {
+	if h.storageDeleter == nil || f == nil {
+		return
+	}
+	for _, key := range []*string{f.AccessKey, f.ThumbnailAccessKey, f.WebpublicAccessKey} {
+		if key != nil && *key != "" {
+			if err := h.storageDeleter.Delete(*key); err != nil {
+				slog.WarnContext(c.Request().Context(), "drive cleanup: storage delete failed (object may be orphaned)",
+					"fileId", f.ID, "err", err)
+			}
+		}
+	}
 }
 
 // DriveCleanup handles POST /api/admin/drive/cleanup.

@@ -49,9 +49,20 @@ type DriveFileRepository interface {
 	UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error
 	// DeleteOrphans removes rows whose userId is NULL. Returns affected count.
 	DeleteOrphans() (int64, error)
-	// DeleteRemoteCache removes remote cache rows (isLink=true with host set).
-	// Returns affected count.
+	// DeleteRemoteCache removes cached remote files (isLink=false with host set)
+	// — the rows whose actual bytes are cached locally / in object storage.
+	// Returns affected count. Used as the DB-only fallback for
+	// admin/drive/clean-remote-files when no storage backend is wired.
 	DeleteRemoteCache() (int64, error)
+	// ListRemoteCache returns up to limit cached remote files (isLink=false with
+	// host set) so the caller can delete their object-storage objects before the
+	// DB rows. Order is unspecified.
+	ListRemoteCache(limit int) ([]*model.DriveFile, error)
+	// ListByUserAll returns up to limit files owned by userID across all folders
+	// (admin/delete-all-files-of-a-user storage cleanup).
+	ListByUserAll(userID string, limit int) ([]*model.DriveFile, error)
+	// DeleteByIDs removes the given rows in one statement. Returns affected count.
+	DeleteByIDs(ids []string) (int64, error)
 	// DeleteByUser removes every drive_file owned by userID. Returns affected
 	// count. Used by admin/delete-all-files-of-a-user.
 	DeleteByUser(userID string) (int64, error)
@@ -335,7 +346,41 @@ func (r *driveFileRepository) DeleteOrphans() (int64, error) {
 }
 
 func (r *driveFileRepository) DeleteRemoteCache() (int64, error) {
-	tx := r.db.Where(`"isLink" = true AND "userHost" IS NOT NULL`).Delete(&model.DriveFile{})
+	// upstream CleanRemoteFilesProcessorService は userHost IS NOT NULL AND
+	// isLink=false (= 実体をキャッシュしているリモートファイル) を消す。旧実装は
+	// isLink=true (= 実体を持たない link-only proxy) を消しており条件が逆だった。
+	tx := r.db.Where(`"isLink" = false AND "userHost" IS NOT NULL`).Delete(&model.DriveFile{})
+	return tx.RowsAffected, tx.Error
+}
+
+func (r *driveFileRepository) ListRemoteCache(limit int) ([]*model.DriveFile, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var files []*model.DriveFile
+	err := r.db.Where(`"isLink" = false AND "userHost" IS NOT NULL`).
+		Order("id DESC").Limit(limit).Find(&files).Error
+	return files, err
+}
+
+func (r *driveFileRepository) ListByUserAll(userID string, limit int) ([]*model.DriveFile, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	var files []*model.DriveFile
+	err := r.db.Where(`"userId" = ?`, userID).
+		Order("id DESC").Limit(limit).Find(&files).Error
+	return files, err
+}
+
+func (r *driveFileRepository) DeleteByIDs(ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx := r.db.Where("id IN ?", ids).Delete(&model.DriveFile{})
 	return tx.RowsAffected, tx.Error
 }
 

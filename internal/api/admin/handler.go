@@ -117,6 +117,9 @@ type Handler struct {
 	systemAccountFetcher    SystemAccountFetcher
 	followingRepo           repository.FollowingRepository
 	unfollowEnqueuer        UnfollowEnqueuer
+	// storageDeleter は admin の bulk drive cleanup で物理オブジェクトを消す
+	// object storage backend (nil なら DB 行のみ削除)。
+	storageDeleter StorageDeleter
 	// captchaVerifierFactory builds a one-off captcha.Verifier for
 	// admin/captcha/save verification. nil uses the real providers; tests
 	// inject a stub to avoid external HTTP calls.
@@ -441,6 +444,19 @@ type QueueTaskSummary struct {
 // SetDriveFileRepo attaches a DriveFileRepository for admin drive operations.
 func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
 	h.driveFileRepo = r
+}
+
+// StorageDeleter removes a stored object by its access key (drive.Storage の
+// Delete に対応)。admin/drive/clean-remote-files と delete-all-files-of-a-user で
+// DB 行削除前に object storage の物理オブジェクトを消すために使う。
+type StorageDeleter interface {
+	Delete(accessKey string) error
+}
+
+// SetStorageDeleter wires the object-storage backend so bulk drive cleanups can
+// remove physical objects (not just DB rows). nil keeps the DB-only behaviour.
+func (h *Handler) SetStorageDeleter(s StorageDeleter) {
+	h.storageDeleter = s
 }
 
 // SetAdminDB attaches a DB connection for ad/invite/relay operations.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/admin/drive/clean-remote-files` の削除対象条件が逆 (`isLink=true` のリンク専用プロキシを消し、本来消すべき `isLink=false` のキャッシュ実体を残していた) で、かつオブジェクトストレージの物理ファイルを消していなかった問題を修正 (本家同様 `userHost IS NOT NULL AND isLink=false` を対象に、access/thumbnail/webpublic オブジェクトを削除してから DB 行を削除)。`/api/admin/delete-all-files-of-a-user` も DB 行のみ削除で物理ファイルが orphan 化していた問題を修正 (storage バックエンド配線時はオブジェクトも削除)
+
 - Fix: `/api/admin/queue/stats` のレスポンスが `{deliver, inbox}` の2キーのみで本家の `db`/`objectStorage` キーを欠き、各値も `completed`/`failed` を含んでいなかった問題を修正 (本家同様 4キー + QueueCount `{waiting,active,completed,failed,delayed}`)。`/api/admin/queue/{remove-job,retry-job,show-job,show-job-logs}` が本家の `jobId` パラメータを受け付けず `id` しか読まなかった問題 (`jobId` を優先、`id` も後方互換) と、`/api/admin/queue/clear` が `state` パラメータを無視して常に pending のみ削除していた問題 (本家同様 state 別に削除、`*` で全 state) も修正。あわせて `queues`/`queue-stats` の `metrics.completed`/`failed` に必須の `meta` オブジェクトが欠けていた問題と、`/api/admin/queue/jobs` の `search` パラメータが無視されていた問題 (本家同様 JSON 表現への全 term マッチで最大100件) を修正
 
 - Fix: `/api/admin/server-info` の `machine` がオブジェクト (`{name}`) で本家の文字列 (ホスト名) と型が異なり、`os`/`node`/`psql`/`redis`/`net.interface` が欠落していた問題を修正 (本家同様 machine は文字列、`os`(プラットフォーム)/`node`(ランタイム版)/`psql`(PostgreSQL版)/`redis`(Redis版)/`net.interface` を返す)。あわせて本家には無い `enableServerMachineStats` ゲートを admin から外し常に実値を返すように。公開 `/api/server-info` は本家同様 `machine`/`cpu`/`mem`/`fs` のみに限定し、`os`/`node`/`net.interface` 等が未認証クライアントに露出していた問題 (機械統計有効時) を修正

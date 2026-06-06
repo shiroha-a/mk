@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // UnsetUserAvatar handles POST /api/admin/unset-user-avatar.
@@ -119,8 +120,12 @@ func (h *Handler) UpdateAbuseUserReport(c echo.Context) error {
 }
 
 // DeleteAllFilesOfUser handles POST /api/admin/delete-all-files-of-a-user.
-// driveFile レコードを user 単位で一括 DELETE する。S3 等 object storage の
-// 物理 file 削除は drive_file の deletion hook (別経路) で扱う想定。
+//
+// upstream delete-all-files-of-a-user.ts は対象ユーザーの全 drive file を
+// findBy({userId}) で回し driveService.deleteFile で物理ストレージごと削除する
+// (dbQueue 'deleteDriveFiles' processor は upstream でも未使用の vestigial)。
+// storage backend が配線されていれば list→object storage 削除→DB 行削除を
+// バッチで回し orphan を残さない。未配線時は DB 行のみ一括削除。
 func (h *Handler) DeleteAllFilesOfUser(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`
@@ -131,9 +136,16 @@ func (h *Handler) DeleteAllFilesOfUser(c echo.Context) error {
 	if h.driveFileRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// 単一の DELETE 文で完結するため同期実行。大量ファイル (数万) の場合も
-	// PostgreSQL で 1 秒未満に収まる想定。将来バッチが必要なら queue へ。
-	if _, err := h.driveFileRepo.DeleteByUser(req.UserID); err != nil {
+	if h.storageDeleter == nil {
+		// storage 未配線: DB 行のみ一括削除。
+		if _, err := h.driveFileRepo.DeleteByUser(req.UserID); err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+	if err := h.deleteFilesBatched(c, func(limit int) ([]*model.DriveFile, error) {
+		return h.driveFileRepo.ListByUserAll(req.UserID, limit)
+	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	return c.NoContent(http.StatusNoContent)
