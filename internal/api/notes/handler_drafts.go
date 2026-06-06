@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -28,9 +30,17 @@ func (h *Handler) DraftsList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// 全 draft の fileIds をまとめて 1 query で解決し N+1 を回避する。
+	allFileIDs := []string{}
+	for _, d := range drafts {
+		allFileIDs = append(allFileIDs, []string(d.FileIDs)...)
+	}
+	fileByID := h.resolveDraftFileMap(allFileIDs)
 	out := make([]map[string]any, len(drafts))
 	for i, d := range drafts {
-		out[i] = packDraft(d, h.idGen)
+		// drafts は viewer 自身のものなので user を埋める (repo は Preload しない)。
+		d.User = user
+		out[i] = h.packDraft(d, fileByID)
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -45,12 +55,20 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		Text                *string  `json:"text"`
-		CW                  *string  `json:"cw"`
-		Visibility          string   `json:"visibility"`
-		FileIDs             []string `json:"fileIds"`
-		ScheduledAt         *int64   `json:"scheduledAt"`
-		IsActuallyScheduled bool     `json:"isActuallyScheduled"`
+		Text                *string    `json:"text"`
+		CW                  *string    `json:"cw"`
+		Visibility          string     `json:"visibility"`
+		VisibleUserIDs      []string   `json:"visibleUserIds"`
+		LocalOnly           bool       `json:"localOnly"`
+		ReactionAcceptance  *string    `json:"reactionAcceptance"`
+		FileIDs             []string   `json:"fileIds"`
+		ReplyID             *string    `json:"replyId"`
+		RenoteID            *string    `json:"renoteId"`
+		ChannelID           *string    `json:"channelId"`
+		Hashtag             *string    `json:"hashtag"`
+		Poll                *draftPoll `json:"poll"`
+		ScheduledAt         *int64     `json:"scheduledAt"`
+		IsActuallyScheduled bool       `json:"isActuallyScheduled"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
@@ -111,16 +129,32 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 			}
 		}
 	}
+	// fileIds は全て呼出ユーザー所有でなければ NO_SUCH_FILE (upstream NoteDraftService)。
+	if !h.allDraftFilesOwned(req.FileIDs, user.ID) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "b6992544-63e7-67f0-fa7f-32444b1b5306"))
+	}
+	// 既に期限切れの poll は作成不可 (CANNOT_CREATE_ALREADY_EXPIRED_POLL)。
+	if pollAlreadyExpired(req.Poll, now) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_CREATE_ALREADY_EXPIRED_POLL", "Cannot create an already expired poll.", "04da457d-b083-4055-9082-955525eda5a5"))
+	}
 	draft := &model.NoteDraft{
 		ID:                  h.idGen.Generate(now),
 		UserID:              user.ID,
 		Text:                req.Text,
 		CW:                  req.CW,
 		Visibility:          req.Visibility,
-		FileIDs:             req.FileIDs,
+		VisibleUserIDs:      pq.StringArray(req.VisibleUserIDs),
+		LocalOnly:           req.LocalOnly,
+		ReactionAcceptance:  req.ReactionAcceptance,
+		FileIDs:             pq.StringArray(req.FileIDs),
+		ReplyID:             req.ReplyID,
+		RenoteID:            req.RenoteID,
+		ChannelID:           req.ChannelID,
+		Hashtag:             req.Hashtag,
 		ScheduledAt:         scheduledAt,
 		IsActuallyScheduled: req.IsActuallyScheduled,
 	}
+	applyDraftPoll(draft, req.Poll)
 	if err := h.draftRepo.Create(draft); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
@@ -137,7 +171,9 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 			return apierr.JSONInternalError(c)
 		}
 	}
-	return c.JSON(http.StatusOK, packDraft(draft, h.idGen))
+	draft.User = user
+	// upstream res は { createdDraft: NoteDraft } で包む。
+	return c.JSON(http.StatusOK, map[string]any{"createdDraft": h.packDraft(draft, nil)})
 }
 
 // DraftsUpdate handles POST /api/notes/drafts/update.
@@ -150,13 +186,21 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		DraftID             string   `json:"draftId"`
-		Text                *string  `json:"text"`
-		CW                  *string  `json:"cw"`
-		Visibility          string   `json:"visibility"`
-		FileIDs             []string `json:"fileIds"`
-		ScheduledAt         *int64   `json:"scheduledAt"`
-		IsActuallyScheduled *bool    `json:"isActuallyScheduled"`
+		DraftID             string     `json:"draftId"`
+		Text                *string    `json:"text"`
+		CW                  *string    `json:"cw"`
+		Visibility          string     `json:"visibility"`
+		VisibleUserIDs      *[]string  `json:"visibleUserIds"`
+		LocalOnly           *bool      `json:"localOnly"`
+		ReactionAcceptance  *string    `json:"reactionAcceptance"`
+		FileIDs             []string   `json:"fileIds"`
+		ReplyID             *string    `json:"replyId"`
+		RenoteID            *string    `json:"renoteId"`
+		ChannelID           *string    `json:"channelId"`
+		Hashtag             *string    `json:"hashtag"`
+		Poll                *draftPoll `json:"poll"`
+		ScheduledAt         *int64     `json:"scheduledAt"`
+		IsActuallyScheduled *bool      `json:"isActuallyScheduled"`
 	}
 	if err := c.Bind(&req); err != nil || req.DraftID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("draftId is required."))
@@ -174,14 +218,45 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	if req.Visibility != "" {
 		draft.Visibility = req.Visibility
 	}
+	if req.VisibleUserIDs != nil {
+		draft.VisibleUserIDs = pq.StringArray(*req.VisibleUserIDs)
+	}
+	if req.LocalOnly != nil {
+		draft.LocalOnly = *req.LocalOnly
+	}
+	if req.ReactionAcceptance != nil {
+		draft.ReactionAcceptance = req.ReactionAcceptance
+	}
 	if req.FileIDs != nil {
-		draft.FileIDs = req.FileIDs
+		// fileIds 指定時は全て所有 file でなければ NO_SUCH_FILE。
+		if !h.allDraftFilesOwned(req.FileIDs, user.ID) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "b6992544-63e7-67f0-fa7f-32444b1b5306"))
+		}
+		draft.FileIDs = pq.StringArray(req.FileIDs)
+	}
+	if req.ReplyID != nil {
+		draft.ReplyID = req.ReplyID
+	}
+	if req.RenoteID != nil {
+		draft.RenoteID = req.RenoteID
+	}
+	if req.ChannelID != nil {
+		draft.ChannelID = req.ChannelID
+	}
+	if req.Hashtag != nil {
+		draft.Hashtag = req.Hashtag
 	}
 	// scheduled 関連 field の変更検出 (#1045 Phase 2-C)。リクエストに
 	// scheduledAt / isActuallyScheduled が含まれている場合のみ削除 + 再
 	// enqueue する。それ以外は既存 draft 状態を維持。
 	scheduleChanged := false
 	now := time.Now()
+	if req.Poll != nil {
+		if pollAlreadyExpired(req.Poll, now) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_CREATE_ALREADY_EXPIRED_POLL", "Cannot create an already expired poll.", "04da457d-b083-4055-9082-955525eda5a5"))
+		}
+		applyDraftPoll(draft, req.Poll)
+	}
 	if req.ScheduledAt != nil {
 		t := time.UnixMilli(*req.ScheduledAt)
 		draft.ScheduledAt = &t
@@ -222,7 +297,70 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 			}
 		}
 	}
-	return c.JSON(http.StatusOK, packDraft(draft, h.idGen))
+	draft.User = user
+	// upstream res は { updatedDraft: NoteDraft } で包む。
+	return c.JSON(http.StatusOK, map[string]any{"updatedDraft": h.packDraft(draft, nil)})
+}
+
+// draftPoll mirrors the upstream notes/drafts poll param object.
+type draftPoll struct {
+	Choices      []string `json:"choices"`
+	Multiple     bool     `json:"multiple"`
+	ExpiresAt    *int64   `json:"expiresAt"`
+	ExpiredAfter *int64   `json:"expiredAfter"`
+}
+
+// allDraftFilesOwned reports whether every fileID exists and is owned by
+// userID (upstream NoteDraftService requires files.length === fileIds.length).
+// Unwired driveFileRepo (tests) skips the check.
+func (h *Handler) allDraftFilesOwned(fileIDs []string, userID string) bool {
+	if len(fileIDs) == 0 || h.driveFileRepo == nil {
+		return true
+	}
+	rows, err := h.driveFileRepo.FindByIDs(fileIDs)
+	if err != nil {
+		return false
+	}
+	owned := make(map[string]bool, len(rows))
+	for _, f := range rows {
+		if f.UserID != nil && *f.UserID == userID {
+			owned[f.ID] = true
+		}
+	}
+	for _, fid := range fileIDs {
+		if !owned[fid] {
+			return false
+		}
+	}
+	return true
+}
+
+// pollAlreadyExpired reports whether the poll's expiresAt is in the past.
+func pollAlreadyExpired(p *draftPoll, now time.Time) bool {
+	return p != nil && p.ExpiresAt != nil && time.UnixMilli(*p.ExpiresAt).Before(now)
+}
+
+// applyDraftPoll writes poll fields into the draft. nil clears the poll
+// (hasPoll=false); non-nil sets hasPoll=true + the choices/multiple/expiry.
+func applyDraftPoll(d *model.NoteDraft, p *draftPoll) {
+	if p == nil {
+		d.HasPoll = false
+		d.PollChoices = pq.StringArray{}
+		d.PollMultiple = false
+		d.PollExpiresAt = nil
+		d.PollExpiredAfter = nil
+		return
+	}
+	d.HasPoll = true
+	d.PollChoices = pq.StringArray(p.Choices)
+	d.PollMultiple = p.Multiple
+	d.PollExpiredAfter = p.ExpiredAfter
+	if p.ExpiresAt != nil {
+		t := time.UnixMilli(*p.ExpiresAt)
+		d.PollExpiresAt = &t
+	} else {
+		d.PollExpiresAt = nil
+	}
 }
 
 // DraftsDelete handles POST /api/notes/drafts/delete.
@@ -297,20 +435,114 @@ func (h *Handler) PollsRecommendation(c echo.Context) error {
 	return c.JSON(http.StatusOK, []any{})
 }
 
-func packDraft(d *model.NoteDraft, idGen interface {
-	ParseTime(string) (time.Time, error)
-}) map[string]any {
-	result := map[string]any{
-		"id":         d.ID,
-		"userId":     d.UserID,
-		"text":       d.Text,
-		"cw":         d.CW,
-		"visibility": d.Visibility,
-		"localOnly":  d.LocalOnly,
-		"fileIds":    d.FileIDs,
+// packDraft renders a NoteDraft into the upstream-compatible shape. 旧実装は
+// text/cw/visibility/localOnly/fileIds しか出さず、reactionAcceptance /
+// visibleUserIds / replyId / renoteId / channelId / hashtag / poll /
+// scheduledAt / isActuallyScheduled / user / files を欠いていた。
+//
+// reply / renote / channel の解決済みオブジェクトは現状 null で返す (ID は
+// 出すので frontend は再取得可能)。files は driveFileRepo から解決する。
+// packDraft packs a draft. fileByID, when non-nil, is a pre-resolved DriveFile
+// map (List uses it to batch all drafts' files in one query, avoiding N+1).
+// When nil, files are resolved per-draft (single create/update/show path).
+func (h *Handler) packDraft(d *model.NoteDraft, fileByID map[string]entity.DriveFileEntity) map[string]any {
+	const tsFmt = "2006-01-02T15:04:05.000Z"
+	visibleUserIDs := []string(d.VisibleUserIDs)
+	if visibleUserIDs == nil {
+		visibleUserIDs = []string{}
 	}
-	if t, err := idGen.ParseTime(d.ID); err == nil {
-		result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+	fileIDs := []string(d.FileIDs)
+	if fileIDs == nil {
+		fileIDs = []string{}
+	}
+	result := map[string]any{
+		"id":                  d.ID,
+		"userId":              d.UserID,
+		"text":                d.Text,
+		"cw":                  d.CW,
+		"visibility":          d.Visibility,
+		"localOnly":           d.LocalOnly,
+		"reactionAcceptance":  d.ReactionAcceptance,
+		"visibleUserIds":      visibleUserIDs,
+		"fileIds":             fileIDs,
+		"replyId":             d.ReplyID,
+		"renoteId":            d.RenoteID,
+		"channelId":           d.ChannelID,
+		"hashtag":             d.Hashtag,
+		"isActuallyScheduled": d.IsActuallyScheduled,
+		// 解決済みオブジェクトは未対応 (ID は上で返す)。
+		"reply":   nil,
+		"renote":  nil,
+		"channel": nil,
+		"files":   h.draftFiles(fileIDs, fileByID),
+	}
+	if t, err := h.idGen.ParseTime(d.ID); err == nil {
+		result["createdAt"] = t.UTC().Format(tsFmt)
+	}
+	// upstream schema: scheduledAt は number (ms epoch)。createdAt は ISO 文字列
+	// だが scheduledAt は getTime() なので number で返す。
+	if d.ScheduledAt != nil {
+		result["scheduledAt"] = d.ScheduledAt.UnixMilli()
+	} else {
+		result["scheduledAt"] = nil
+	}
+	// poll: hasPoll のときだけ object、それ以外は null (upstream schema)。
+	if d.HasPoll {
+		choices := []string(d.PollChoices)
+		if choices == nil {
+			choices = []string{}
+		}
+		poll := map[string]any{
+			"choices":      choices,
+			"multiple":     d.PollMultiple,
+			"expiredAfter": d.PollExpiredAfter,
+		}
+		if d.PollExpiresAt != nil {
+			poll["expiresAt"] = d.PollExpiresAt.UTC().Format(tsFmt)
+		} else {
+			poll["expiresAt"] = nil
+		}
+		result["poll"] = poll
+	} else {
+		result["poll"] = nil
+	}
+	if d.User != nil {
+		result["user"] = entity.PackUserLite(d.User)
 	}
 	return result
+}
+
+// draftFiles resolves a draft's fileIds to packed DriveFiles in order. When
+// fileByID is provided (List batch path) it is used directly; otherwise a
+// per-draft FindByIDs query runs. Returns a non-nil slice ([] when empty).
+func (h *Handler) draftFiles(fileIDs []string, fileByID map[string]entity.DriveFileEntity) []entity.DriveFileEntity {
+	out := make([]entity.DriveFileEntity, 0, len(fileIDs))
+	if len(fileIDs) == 0 {
+		return out
+	}
+	if fileByID == nil {
+		fileByID = h.resolveDraftFileMap(fileIDs)
+	}
+	for _, fid := range fileIDs {
+		if f, ok := fileByID[fid]; ok {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// resolveDraftFileMap fetches+packs DriveFiles for the given ids into a map.
+func (h *Handler) resolveDraftFileMap(fileIDs []string) map[string]entity.DriveFileEntity {
+	m := map[string]entity.DriveFileEntity{}
+	if len(fileIDs) == 0 || h.driveFileRepo == nil {
+		return m
+	}
+	rows, err := h.driveFileRepo.FindByIDs(fileIDs)
+	if err != nil {
+		return m
+	}
+	for _, f := range rows {
+		m[f.ID] = entity.PackDriveFile(f, h.idGen)
+	}
+	return m
 }

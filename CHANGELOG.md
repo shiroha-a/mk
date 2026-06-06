@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix: 下書き (`/api/notes/drafts/*`) のレスポンスが `text`/`cw`/`visibility`/`localOnly`/`fileIds` しか持たず、本家 NoteDraft schema の `userId`/`reactionAcceptance`/`visibleUserIds`/`replyId`/`renoteId`/`channelId`/`hashtag`/`poll`/`scheduledAt`/`isActuallyScheduled`/`user`/`files` を欠いていた問題を修正 (一覧では全下書きの `files` を 1 クエリにまとめて N+1 を回避)。あわせて `/api/notes/drafts/create`・`/update` が `visibleUserIds`/`reactionAcceptance`/`replyId`/`renoteId`/`channelId`/`hashtag`/`poll` を受け付けず、レスポンスを本家同様の `{createdDraft}`/`{updatedDraft}` で包んでいなかった問題と、`fileIds` の所有検証 (`NO_SUCH_FILE`) と期限切れ poll の拒否 (`CANNOT_CREATE_ALREADY_EXPIRED_POLL`) が無かった問題も修正
 - Fix: ギャラリー投稿 (`/api/gallery/posts/*` と featured/popular/posts) のレスポンスで `files` が常に空配列で、閲覧者視点の `isLiked` も欠落していた問題を修正 (`fileIds` から DriveFile を解決。一覧では 1 クエリにまとめて N+1 を回避)。`/api/gallery/posts/create` が `fileIds` 必須・所有ファイル検証 (1-32 件 / 重複除去) を行わず、`/api/gallery/posts/update` が `fileIds`/`isSensitive` を無視して 204 を返していた問題も修正 (本家同様、所有ファイルのみ採用し更新後の GalleryPost を返す)
 
 - Fix: ユーザーの `onlineStatus` が常に `unknown` 固定だった問題を修正 (`lastActiveDate` と `hideOnlineStatus` から online/active/offline を算出。本家同様 10分=online / 3日=active のしきい値)。タイムライン・通知など全 UserLite 応答に反映される

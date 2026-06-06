@@ -18,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -161,6 +162,56 @@ func TestDraftsCreate_DefaultVisibility(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// create が replyId/renoteId/channelId/visibleUserIds/reactionAcceptance/
+// localOnly/hashtag/poll を永続化し、{createdDraft} で full shape を返す。
+func TestDraftsCreate_PersistsAllFieldsAndWraps(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	body := `{"text":"t","visibility":"specified","visibleUserIds":["v1"],"localOnly":true,` +
+		`"reactionAcceptance":"likeOnly","replyId":"r1","renoteId":"rn1","channelId":"ch1",` +
+		`"hashtag":"tag","poll":{"choices":["a","b"],"multiple":true,"expiredAfter":3600000}}`
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// 永続化検証。
+	require.Len(t, repo.drafts, 1)
+	var d *model.NoteDraft
+	for _, v := range repo.drafts {
+		d = v
+	}
+	require.NotNil(t, d.ReplyID)
+	assert.Equal(t, "r1", *d.ReplyID)
+	require.NotNil(t, d.RenoteID)
+	assert.Equal(t, "rn1", *d.RenoteID)
+	require.NotNil(t, d.ChannelID)
+	assert.Equal(t, "ch1", *d.ChannelID)
+	assert.Equal(t, []string{"v1"}, []string(d.VisibleUserIDs))
+	assert.True(t, d.LocalOnly)
+	require.NotNil(t, d.ReactionAcceptance)
+	assert.Equal(t, "likeOnly", *d.ReactionAcceptance)
+	require.NotNil(t, d.Hashtag)
+	assert.Equal(t, "tag", *d.Hashtag)
+	assert.True(t, d.HasPoll)
+	assert.Equal(t, []string{"a", "b"}, []string(d.PollChoices))
+	assert.True(t, d.PollMultiple)
+
+	// レスポンスは {createdDraft: NoteDraft} で full shape。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	cd, ok := resp["createdDraft"].(map[string]any)
+	require.True(t, ok, "createdDraft で包む")
+	assert.Equal(t, "r1", cd["replyId"])
+	assert.Equal(t, "ch1", cd["channelId"])
+	assert.Equal(t, []any{"v1"}, cd["visibleUserIds"])
+	assert.Equal(t, "likeOnly", cd["reactionAcceptance"])
+	poll, ok := cd["poll"].(map[string]any)
+	require.True(t, ok, "poll object が出る")
+	assert.Equal(t, []any{"a", "b"}, poll["choices"])
+	assert.Equal(t, true, poll["multiple"])
+	// user (UserLite) が埋まる。
+	_, hasUser := cd["user"]
+	assert.True(t, hasUser)
+}
+
 func TestDraftsCreate_InvalidJSON(t *testing.T) {
 	h, _ := newDraftHandlerWithRepo()
 	rec := postDraft(h.DraftsCreate, `invalid`, &model.User{ID: "u1"})
@@ -219,6 +270,157 @@ func TestDraftsUpdate_Success(t *testing.T) {
 	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","text":"new","visibility":"home"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "new", *repo.drafts["d1"].Text)
+}
+
+// update が新 param を反映し {updatedDraft} で包んで返す。
+func TestDraftsUpdate_PersistsParamsAndWraps(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	text := "old"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Text: &text, Visibility: "public"}
+	body := `{"draftId":"d1","visibleUserIds":["v2"],"reactionAcceptance":"likeOnly","replyId":"rp","poll":{"choices":["x"],"multiple":false}}`
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	d := repo.drafts["d1"]
+	assert.Equal(t, []string{"v2"}, []string(d.VisibleUserIDs))
+	require.NotNil(t, d.ReplyID)
+	assert.Equal(t, "rp", *d.ReplyID)
+	assert.True(t, d.HasPoll)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ud, ok := resp["updatedDraft"].(map[string]any)
+	require.True(t, ok, "updatedDraft で包む")
+	assert.Equal(t, "rp", ud["replyId"])
+	assert.Equal(t, []any{"v2"}, ud["visibleUserIds"])
+}
+
+// seedDraftFile registers a drive file owned by ownerID in the mock repo.
+func seedDraftFile(repo *testutil.MockDriveFileRepository, fid, ownerID string) {
+	uid := ownerID
+	repo.Files[fid] = &model.DriveFile{ID: fid, UserID: &uid, Name: fid + ".png", Type: "image/png"}
+}
+
+// scheduledAt はレスポンス上 number (ms epoch) でなければならない (ISO 文字列で
+// 返すと misskey-js の Date 変換が壊れる)。F1 回帰固定。
+func TestDraftsCreate_ScheduledAtIsNumber(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	enq := &scheduledEnqueueStub{}
+	h.SetScheduledNoteEnqueuer(enq)
+	at := futureMs(time.Hour)
+	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d,"isActuallyScheduled":true}`, at)
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	cd := resp["createdDraft"].(map[string]any)
+	// JSON number は encoding/json で float64 に decode される。
+	v, ok := cd["scheduledAt"].(float64)
+	require.True(t, ok, "scheduledAt は number で返る")
+	assert.Equal(t, at, int64(v))
+}
+
+// poll.expiresAt が過去の場合は create を CANNOT_CREATE_ALREADY_EXPIRED_POLL で
+// 弾く (upstream NoteDraftService と同 validation)。F4。
+func TestDraftsCreate_ExpiredPollRejected(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"text":"t","poll":{"choices":["a","b"],"expiresAt":%d}}`, past)
+	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CANNOT_CREATE_ALREADY_EXPIRED_POLL")
+	assert.Contains(t, rec.Body.String(), "04da457d-b083-4055-9082-955525eda5a5")
+	assert.Empty(t, repo.drafts, "期限切れ poll では永続化しない")
+}
+
+// update でも過去 expiresAt の poll は弾く。F4。
+func TestDraftsUpdate_ExpiredPollRejected(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Visibility: "public"}
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"draftId":"d1","poll":{"choices":["a"],"expiresAt":%d}}`, past)
+	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CANNOT_CREATE_ALREADY_EXPIRED_POLL")
+	assert.False(t, repo.drafts["d1"].HasPoll, "期限切れ poll は適用しない")
+}
+
+// 所有していない fileId を含む create は NO_SUCH_FILE で弾く。F5。
+func TestDraftsCreate_UnownedFileRejected(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	seedDraftFile(fileRepo, "f1", "u1")
+	h.SetDriveFileRepo(fileRepo)
+	// f2 は存在しない (= 所有検証で落ちる)。
+	rec := postDraft(h.DraftsCreate, `{"text":"t","fileIds":["f1","f2"]}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	assert.Contains(t, rec.Body.String(), "b6992544-63e7-67f0-fa7f-32444b1b5306")
+	assert.Empty(t, repo.drafts)
+}
+
+// 他人所有の fileId も NO_SUCH_FILE。F5 (所有権)。
+func TestDraftsCreate_OtherUserFileRejected(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	seedDraftFile(fileRepo, "f1", "someone-else")
+	h.SetDriveFileRepo(fileRepo)
+	rec := postDraft(h.DraftsCreate, `{"text":"t","fileIds":["f1"]}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+}
+
+// update で所有していない fileId を渡すと NO_SUCH_FILE。F5。
+func TestDraftsUpdate_UnownedFileRejected(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Visibility: "public"}
+	fileRepo := testutil.NewMockDriveFileRepository()
+	h.SetDriveFileRepo(fileRepo)
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","fileIds":["ghost"]}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+}
+
+// 所有 file は packDraft で fileIds の順序どおり files に解決される
+// (resolveDraftFileMap が map でも順序は fileIds に従う)。
+func TestDraftsCreate_OwnedFilesResolvedInOrder(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	seedDraftFile(fileRepo, "f1", "u1")
+	seedDraftFile(fileRepo, "f2", "u1")
+	h.SetDriveFileRepo(fileRepo)
+	// fileIds を逆順 [f2,f1] で渡し、その順で files が並ぶことを確認。
+	rec := postDraft(h.DraftsCreate, `{"text":"t","fileIds":["f2","f1"]}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	cd := resp["createdDraft"].(map[string]any)
+	files := cd["files"].([]any)
+	require.Len(t, files, 2)
+	assert.Equal(t, "f2", files[0].(map[string]any)["id"])
+	assert.Equal(t, "f1", files[1].(map[string]any)["id"])
+	assert.Equal(t, []any{"f2", "f1"}, cd["fileIds"])
+}
+
+// 省略した field は update で維持される (partial update)。
+func TestDraftsUpdate_PartialUpdateMaintained(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	oldText := "old"
+	cw := "warn"
+	repo.drafts["d1"] = &model.NoteDraft{
+		ID: "d1", UserID: "u1", Text: &oldText, CW: &cw, Visibility: "home",
+		LocalOnly: true, VisibleUserIDs: []string{"v1"},
+	}
+	// text だけ更新。他 field は維持される。
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","text":"new"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	d := repo.drafts["d1"]
+	assert.Equal(t, "new", *d.Text)
+	require.NotNil(t, d.CW)
+	assert.Equal(t, "warn", *d.CW, "cw は維持")
+	assert.Equal(t, "home", d.Visibility, "visibility は維持")
+	assert.True(t, d.LocalOnly, "localOnly は維持")
+	assert.Equal(t, []string{"v1"}, []string(d.VisibleUserIDs), "visibleUserIds は維持")
 }
 
 func TestDraftsUpdate_NotFound(t *testing.T) {
