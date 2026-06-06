@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -79,11 +80,13 @@ func (h *Handler) Users(c echo.Context) error {
 	out := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		out = append(out, map[string]any{
-			"id":        u.ID,
-			"username":  u.Username,
-			"host":      u.Host,
-			"name":      u.Name,
-			"avatarUrl": u.AvatarURL,
+			"id":       u.ID,
+			"username": u.Username,
+			"host":     u.Host,
+			"name":     u.Name,
+			// リモートユーザーのアバターは proxy 経由にする (issue #1529)。
+			// IdenticonURL が avatar mode proxy 化と identicon fallback を担う。
+			"avatarUrl": entity.IdenticonURL(u),
 		})
 	}
 	return c.JSON(http.StatusOK, out)

@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/urlpreview"
+	"github.com/shiroha-a/mk/internal/entity"
 )
 
 // Handler handles the URL preview endpoint.
@@ -42,5 +43,11 @@ func (h *Handler) Preview(c echo.Context) error {
 		})
 	}
 
+	// thumbnail (OGP og:image) / icon (favicon) は外部サイトの画像。frontend
+	// (MkUrlPreview) がこれらを直接描画するため、proxy 経由に書き換えて閲覧者の
+	// IP が外部サイトへ漏洩するのを防ぐ (issue #1529)。player.url は iframe embed
+	// なので対象外。
+	result.Thumbnail = entity.ProxyRemoteMediaURLPtr(result.Thumbnail, "")
+	result.Icon = entity.ProxyRemoteMediaURLPtr(result.Icon, "")
 	return c.JSON(http.StatusOK, result)
 }

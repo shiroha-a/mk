@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: リモート(連合先)のメディア URL が API レスポンスに生のまま含まれ、フロントエンドがそれらを直接取得することで閲覧者の IP アドレスが外部サーバーへ漏洩していた問題を修正 (issue #1529)。リモートのドライブファイル(ノート添付の `url`/`thumbnailUrl`/`webpublicUrl`)・ユーザーのアバター/バナー・カスタム絵文字(ノート/ユーザーの `emojis`・絵文字詳細)・連合先インスタンスのアイコン/ファビコン・URL プレビューのサムネイル/アイコンを、すべてメディアプロキシ経由の URL に書き換えるようにした (本家 `DriveFileEntityService` の `getPublicUrl`/`getThumbnailUrl`/`getProxiedUrl` 相当)。`proxyRemoteFiles` 設定を尊重し(アバターは本家同様常時プロキシ)、内部メディアプロキシ利用時は HMAC 署名付き URL を生成する。`/api/admin/drive/show` 等の管理画面や `/api/federation/*` でも同様にリモートメディアをプロキシ化。注: RSS ウィジェット (`/api/fetch-rss`) の画像/エンクロージャは別途対応予定
+
 - Fix: チャットの `/api/chat/messages/room-timeline`・`/api/chat/messages`・`/api/chat/rooms/members` が、リクエスト元がルームのメンバーかどうかを検証せず、認証済みなら誰でも任意のルームの発言やメンバー一覧を読めた問題を修正 (本家同様 room-timeline/messages はメンバーまたはモデレーター、members はメンバーのみに限定し、それ以外およびルーム不在は `NO_SUCH_ROOM` を返す)
 
 - Fix: チャットの `/api/chat/rooms/join` が招待なしで誰でも任意のルームに参加できた問題を修正 (本家同様 pending invitation を必須とし、参加成功時に招待を消費する)。`/api/chat/rooms/invitations/create` が自分自身/既存メンバー/招待済み/満室 (50人) のチェックを行わず、レスポンスも 204 で本家の `ChatRoomInvitation` オブジェクト (`id`/`createdAt`/`userId`/`user`/`roomId`/`room`) を返していなかった問題を修正。`/api/chat/rooms/joining` が `ChatRoom[]` を返していたのを本家同様 `ChatRoomMembership[]` (room 付き) に修正。あわせて join/invitation で `MAX_ROOM_MEMBERS=50` の満室ガードを追加。注: 招待時の `chatRoomInvitationReceived` 通知は mk-go の通知基盤が未対応のため後続対応

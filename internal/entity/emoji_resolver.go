@@ -132,6 +132,12 @@ func NewEmojiResolver(lookup EmojiLookup, notes []*model.Note) *EmojiResolver {
 			if url == "" {
 				url = e.OriginalURL
 			}
+			// リモート絵文字 (host 付き) の URL は外部サーバーを指すため、生で
+			// note.emojis / user.emojis に載せると閲覧者の IP が漏洩する
+			// (issue #1529)。proxy 有効時はメディアプロキシ経由に書き換える。
+			if host != "" {
+				url = ProxyRemoteMediaURL(url, "")
+			}
 			r.cache[e.Name+"@"+host] = url
 		}
 	}

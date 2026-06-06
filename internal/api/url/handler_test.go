@@ -10,8 +10,10 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	apiurl "github.com/shiroha-a/mk/internal/api/url"
 	"github.com/shiroha-a/mk/internal/core/urlpreview"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"strings"
 )
 
 // doPreview builds an echo context for GET /api/url?url=<raw> and invokes the
@@ -111,4 +113,37 @@ func TestPreview_Success(t *testing.T) {
 	player, ok := body["player"].(map[string]any)
 	require.True(t, ok, "player は object であること")
 	assert.Nil(t, player["url"], "plain HTML では player.url は null")
+}
+
+// リモートの og:image (thumbnail) / favicon (icon) は proxy 経由に書き換えられ、
+// 閲覧者 IP が外部サイトへ漏洩しない (issue #1529)。
+func TestPreview_RemoteThumbnailProxied(t *testing.T) {
+	entity.SetMediaProxy(func(rawURL, mode string) string {
+		return "https://mk.test/proxy/image.webp?url=" + rawURL + "&sig=SIG"
+	}, func() bool { return true }, false)
+	defer entity.SetMediaProxy(nil, nil, false)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head>
+			<meta property="og:title" content="Hello">
+			<meta property="og:image" content="https://cdn.example.test/img.png">
+		</head><body></body></html>`))
+	}))
+	defer srv.Close()
+
+	f := urlpreview.NewFetcher(urlpreview.Config{
+		Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20,
+	}, nil, "", nil)
+	f.SetHTTPClient(&http.Client{})
+	h := apiurl.NewHandler(f)
+
+	rec := doPreview(h, srv.URL)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	thumb, _ := body["thumbnail"].(string)
+	if !strings.HasPrefix(thumb, "https://mk.test/proxy/image.webp?url=") {
+		t.Fatalf("url-preview thumbnail not proxied: %q", thumb)
+	}
 }

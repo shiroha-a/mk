@@ -234,6 +234,22 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 // モデレーターから守る制限)。両 field とも `nil` で omit せず明示 null を
 // emit する (upstream の `optional: false, nullable: true` schema 通り)。
 func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User) map[string]any {
+	// リモートファイルの url/thumbnailUrl/webpublicUrl は外部 URL なので、admin が
+	// drive 一覧を開いただけで moderator の IP が連合先へ漏洩する (issue #1529)。
+	// browser が img src として取得するこれら 3 つを proxy 経由にする (uri/accessKey
+	// 等は moderation 用の raw メタなのでそのまま)。
+	fileURL := f.URL
+	thumbURL := f.ThumbnailURL
+	webpublicURL := f.WebpublicURL
+	if f.UserHost != nil && *f.UserHost != "" {
+		target := f.URL
+		if f.URI != nil && *f.URI != "" {
+			target = *f.URI
+		}
+		fileURL = entity.ProxyRemoteMediaURL(target, "")
+		thumbURL = entity.ProxyRemoteMediaURLPtr(&target, "static")
+		webpublicURL = entity.ProxyRemoteMediaURLPtr(f.WebpublicURL, "")
+	}
 	resp := map[string]any{
 		"id":                 f.ID,
 		"userId":             f.UserID,
@@ -249,9 +265,9 @@ func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User)
 		"thumbnailAccessKey": f.ThumbnailAccessKey,
 		"accessKey":          f.AccessKey,
 		"webpublicType":      f.WebpublicType,
-		"webpublicUrl":       f.WebpublicURL,
-		"thumbnailUrl":       f.ThumbnailURL,
-		"url":                f.URL,
+		"webpublicUrl":       webpublicURL,
+		"thumbnailUrl":       thumbURL,
+		"url":                fileURL,
 		"storedInternal":     f.StoredInternal,
 		"properties":         driveFileProperties(f.Properties),
 		"blurhash":           f.Blurhash,

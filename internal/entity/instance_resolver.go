@@ -94,8 +94,10 @@ func instanceLiteFromModel(inst *model.Instance) *InstanceLite {
 		Name:            inst.Name,
 		SoftwareName:    inst.SoftwareName,
 		SoftwareVersion: inst.SoftwareVersion,
-		IconURL:         inst.IconURL,
-		FaviconURL:      inst.FaviconURL,
-		ThemeColor:      inst.ThemeColor,
+		// リモートインスタンスの icon/favicon は外部 URL なので、リモートユーザーの
+		// nested instance としてそのまま返すと閲覧者の IP が漏洩する (issue #1529)。
+		IconURL:    ProxyRemoteMediaURLPtr(inst.IconURL, ""),
+		FaviconURL: ProxyRemoteMediaURLPtr(inst.FaviconURL, ""),
+		ThemeColor: inst.ThemeColor,
 	}
 }

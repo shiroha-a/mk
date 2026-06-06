@@ -24,6 +24,10 @@ func PackEmojiDetailed(e *model.Emoji) EmojiDetailed {
 	if url == "" {
 		url = e.OriginalURL
 	}
+	// リモート絵文字 (host 付き) の URL は外部を指すため proxy 経由にする (issue #1529)。
+	if e.Host != nil && *e.Host != "" {
+		url = ProxyRemoteMediaURL(url, "")
+	}
 	aliases := make([]string, len(e.Aliases))
 	copy(aliases, e.Aliases)
 	roleIDs := make([]string, len(e.RoleIDsThatCanBeUsedThisEmojiAsReaction))

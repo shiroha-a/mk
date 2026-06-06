@@ -408,6 +408,13 @@ type InstanceLite struct {
 // も同じ規則を使える (#692 / #708 review)。
 func IdenticonURL(u *model.User) string {
 	if u.AvatarURL != nil && *u.AvatarURL != "" {
+		// リモートユーザーのアバターは外部 URL なので、生で返すと閲覧者の IP が
+		// 連合先へ漏洩する (issue #1529)。本家 getPublicUrl の avatar mode と同じく
+		// メディアプロキシ(avatar mode)経由にする。ローカルアバターは local URL の
+		// ため素通し。
+		if u.Host != nil && *u.Host != "" {
+			return proxyMediaURL(*u.AvatarURL, "avatar")
+		}
 		return *u.AvatarURL
 	}
 	host := ""
@@ -415,6 +422,21 @@ func IdenticonURL(u *model.User) string {
 		host = "@" + *u.Host
 	}
 	return "/identicon/" + u.Username + host
+}
+
+// proxyRemoteBannerURL routes a remote user's banner through the media proxy so
+// it does not leak the viewer's IP (issue #1529). Banner follows the normal
+// proxyRemoteFiles gating (unlike avatar, which upstream always proxies). Local
+// banners are served by this instance and left untouched.
+func proxyRemoteBannerURL(u *model.User) *string {
+	if u.BannerURL == nil || *u.BannerURL == "" {
+		return u.BannerURL
+	}
+	if u.Host != nil && *u.Host != "" && shouldProxyRemoteFile() {
+		v := proxyMediaURL(*u.BannerURL, "")
+		return &v
+	}
+	return u.BannerURL
 }
 
 // PackUserLite converts a model.User to a UserLite DTO.
@@ -466,7 +488,7 @@ func PackUserLite(u *model.User) UserLite {
 func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) UserDetailed {
 	d := UserDetailed{
 		UserLite:            PackUserLite(u),
-		BannerURL:           u.BannerURL,
+		BannerURL:           proxyRemoteBannerURL(u),
 		BannerBlurhash:      u.BannerBlurhash,
 		IsLocked:            u.IsLocked,
 		IsSuspended:         u.IsSuspended,
