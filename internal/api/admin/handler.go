@@ -653,6 +653,15 @@ func (h *Handler) ShowUser(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 	}
 
+	// 非 administrator (= moderator) は他 administrator の情報を閲覧できない
+	// (upstream show-user.ts:223-226 の 'cannot show info of admin' guard)。
+	if h.roleService != nil {
+		me := middleware.GetUser(c)
+		if me != nil && !h.roleService.IsAdministrator(me.ID) && h.roleService.IsAdministrator(user.ID) {
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
+		}
+	}
+
 	profile, _ := h.userRepo.FindProfileByUserID(user.ID)
 
 	return c.JSON(http.StatusOK, h.packAdminUser(user, profile))
@@ -664,6 +673,7 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 		State    string `json:"state"`
 		Origin   string `json:"origin"`
 		Hostname string `json:"hostname"`
+		Username string `json:"username"`
 		Sort     string `json:"sort"`
 		Limit    int    `json:"limit"`
 		Offset   int    `json:"offset"`
@@ -677,6 +687,7 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 		State:    req.State,
 		Origin:   req.Origin,
 		Hostname: req.Hostname,
+		Username: req.Username,
 		Sort:     req.Sort,
 		Limit:    req.Limit,
 		Offset:   req.Offset,
@@ -702,9 +713,15 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 		profileByUser[p.UserID] = p
 	}
 
-	result := make([]map[string]any, 0, len(users))
+	// upstream show-users.ts:117 は packMany(users, me, {schema:'UserDetailed'})
+	// で UserDetailed を返す。admin detail packer (packAdminUser) を使うと
+	// email / signins / roleAssigns / notificationRecieveConfig といった admin
+	// 専用 field が一覧経由で漏れ、show-user の admin guard を迂回できてしまう
+	// (moderator が admin の連絡先や signin IP を取得可能)。一覧は UserDetailed
+	// に揃えて過剰露出を防ぐ。
+	result := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
-		result = append(result, h.packAdminUser(u, profileByUser[u.ID]))
+		result = append(result, entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen))
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -773,6 +790,15 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		resp["hardMutedWords"] = profile.HardMutedWords
 		resp["mutedInstances"] = profile.MutedInstances
 		resp["publicReactions"] = profile.PublicReactions
+		// moderation 関連の実データ (upstream show-user.ts:234-253)。旧実装は
+		// map literal の固定値 ("" / nil / {}) のままだった。
+		resp["followedMessage"] = profile.FollowedMessage
+		if profile.ModerationNote != nil {
+			resp["moderationNote"] = *profile.ModerationNote
+		} else {
+			resp["moderationNote"] = ""
+		}
+		resp["notificationRecieveConfig"] = metaJSONValue(profile.NotificationRecieveConfig, map[string]any{})
 	}
 	// createdAt
 	if t, err := h.idGen.ParseTime(u.ID); err == nil {
@@ -812,7 +838,7 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 	// 空配列に fallback し slog.Warn で観測する (roles の扱いと揃え)。
 	resp["signins"] = h.packUserSignins(u.ID)
 	resp["roleAssigns"] = h.packUserRoleAssigns(u.ID)
-	resp["isHibernated"] = false
+	resp["isHibernated"] = u.IsHibernated
 	if u.LastActiveDate != nil {
 		resp["lastActiveDate"] = u.LastActiveDate.UTC().Format("2006-01-02T15:04:05.000Z")
 	} else {

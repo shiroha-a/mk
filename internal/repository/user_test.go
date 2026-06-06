@@ -853,12 +853,12 @@ func TestUserRepository_ListUsers_SortAndPagination(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, users)
 
-	// Sort by followersCount
-	users, err = repo.ListUsers(model.UserListFilter{Sort: "+followersCount", Limit: 100})
+	// Sort by follower (upstream key は +follower/-follower、+ が DESC)。
+	users, err = repo.ListUsers(model.UserListFilter{Sort: "+follower", Limit: 100})
 	require.NoError(t, err)
 	assert.NotEmpty(t, users)
 
-	users, err = repo.ListUsers(model.UserListFilter{Sort: "-followersCount", Limit: 100})
+	users, err = repo.ListUsers(model.UserListFilter{Sort: "-follower", Limit: 100})
 	require.NoError(t, err)
 	assert.NotEmpty(t, users)
 
@@ -866,6 +866,98 @@ func TestUserRepository_ListUsers_SortAndPagination(t *testing.T) {
 	users, err = repo.ListUsers(model.UserListFilter{Limit: 100, Offset: 1})
 	require.NoError(t, err)
 	assert.NotEmpty(t, users)
+}
+
+// sort 方向が upstream admin/show-users.ts:99-110 と一致する。+ が降順、
+// - が昇順 (createdAt は id、follower は followersCount、updatedAt 含む)。
+func TestUserRepository_ListUsers_SortDirectionMatchesUpstream(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	// id は insertTestUser の literal 引数。文字列比較で lu_dir_b > lu_dir_a。
+	older := insertTestUser(t, "lu_dir_a", "sortdira")
+	newer := insertTestUser(t, "lu_dir_b", "sortdirb")
+	defer cleanupUser(t, older.ID)
+	defer cleanupUser(t, newer.ID)
+	// follower 数: older=5 / newer=1。updatedAt: older=古い / newer=新しい。
+	old := time.Now().Add(-48 * time.Hour)
+	recent := time.Now()
+	require.NoError(t, testDB.Model(&model.User{}).Where("id = ?", older.ID).
+		Updates(map[string]any{"followersCount": 5, "updatedAt": &old}).Error)
+	require.NoError(t, testDB.Model(&model.User{}).Where("id = ?", newer.ID).
+		Updates(map[string]any{"followersCount": 1, "updatedAt": &recent}).Error)
+
+	get := func(sort string) []string {
+		users, err := repo.ListUsers(model.UserListFilter{
+			Origin: "combined", State: "all", Sort: sort, Limit: 100,
+		})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(users))
+		for _, u := range users {
+			ids = append(ids, u.ID)
+		}
+		return ids
+	}
+	// pos は未発見を明示 fail させる (window clip 等で test user が溢れた場合の
+	// silent 誤判定を防ぐ, review F5)。
+	pos := func(ids []string, id string) int {
+		for i, v := range ids {
+			if v == id {
+				return i
+			}
+		}
+		require.Failf(t, "id not found in result window", "id=%s", id)
+		return -1
+	}
+	assertOrder := func(sort, first, second, msg string) {
+		ids := get(sort)
+		assert.Less(t, pos(ids, first), pos(ids, second), msg)
+	}
+
+	assertOrder("-createdAt", older.ID, newer.ID, "-createdAt は id ASC")
+	assertOrder("+createdAt", newer.ID, older.ID, "+createdAt は id DESC")
+	assertOrder("", older.ID, newer.ID, "default は id ASC")
+	assertOrder("+follower", older.ID, newer.ID, "+follower は followersCount DESC")
+	assertOrder("-follower", newer.ID, older.ID, "-follower は followersCount ASC")
+	assertOrder("+updatedAt", newer.ID, older.ID, "+updatedAt は DESC")
+	assertOrder("-updatedAt", older.ID, newer.ID, "-updatedAt は ASC")
+}
+
+// username prefix フィルタ (usernameLower LIKE escape(lower)+'%')。
+func TestUserRepository_ListUsers_UsernameFilter(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	alice := insertTestUser(t, "lu_un_a", "alicewonder")
+	bob := insertTestUser(t, "lu_un_b", "bobbuilder")
+	defer cleanupUser(t, alice.ID)
+	defer cleanupUser(t, bob.ID)
+
+	// 大文字で渡しても lowercase 化されて prefix match する。
+	users, err := repo.ListUsers(model.UserListFilter{Origin: "combined", State: "all", Username: "Alice", Limit: 100})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, u := range users {
+		ids[u.ID] = true
+	}
+	assert.True(t, ids[alice.ID], "alice が prefix match")
+	assert.False(t, ids[bob.ID], "bob は対象外")
+}
+
+// username filter は LIKE メタ文字 (_ / %) を literal 化する (#1061 と同パターン)。
+func TestUserRepository_ListUsers_UsernameFilterEscapesWildcards(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	lit := insertTestUser(t, "lu_wc_a", "wild_user")
+	other := insertTestUser(t, "lu_wc_b", "wild1user")
+	defer cleanupUser(t, lit.ID)
+	defer cleanupUser(t, other.ID)
+
+	// "wild_" は literal underscore prefix。escape されないと '_' が任意 1 文字
+	// wildcard 扱いになり wild1user も hit してしまう。
+	users, err := repo.ListUsers(model.UserListFilter{Origin: "combined", State: "all", Username: "wild_", Limit: 100})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, u := range users {
+		ids[u.ID] = true
+	}
+	assert.True(t, ids[lit.ID], "literal underscore の wild_user は hit")
+	assert.False(t, ids[other.ID], "wild1user は literal '_' では hit しない")
 }
 
 func TestUserRepository_ListUsers_Error(t *testing.T) {

@@ -2730,3 +2730,153 @@ func TestAdminMeta_NilImageFieldsAreNullNotFallback(t *testing.T) {
 		assert.Nil(t, resp[key], key+" は nil (fallback しない)")
 	}
 }
+
+// --- #H-PR8a: show-user moderation fields + admin guard / show-users username ---
+
+func adminStrPtr(s string) *string { return &s }
+
+// show-user は profile の followedMessage / moderationNote /
+// notificationRecieveConfig と user の isHibernated を実データで返す。
+func TestShowUser_ModerationFieldsFromProfile(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	uid := "moduser"
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "mod", AvatarDecorations: []byte("[]"), IsHibernated: true}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+		FollowedMessage:           adminStrPtr("welcome"),
+		ModerationNote:            adminStrPtr("watch this user"),
+		NotificationRecieveConfig: []byte(`{"mention":{"type":"following"}}`),
+	}
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "welcome", resp["followedMessage"])
+	assert.Equal(t, "watch this user", resp["moderationNote"])
+	assert.Equal(t, true, resp["isHibernated"])
+	nrc, ok := resp["notificationRecieveConfig"].(map[string]any)
+	require.True(t, ok)
+	mention := nrc["mention"].(map[string]any)
+	assert.Equal(t, "following", mention["type"])
+}
+
+// moderationNote は profile が nil/未設定でも "" を返す (TS の ?? ”)。
+func TestShowUser_ModerationNoteEmptyWhenNilProfile(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	uid := "noprof"
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "np", AvatarDecorations: []byte("[]")}
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "", resp["moderationNote"])
+	assert.Nil(t, resp["followedMessage"])
+}
+
+// 非 administrator (moderator) が administrator の情報を取得しようとすると 403。
+func TestShowUser_AdminGuardBlocksNonAdmin(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	target := "adminuser"
+	userRepo.Users[target] = &model.User{ID: target, Username: "admin", AvatarDecorations: []byte("[]")}
+	roleRepo.Roles["adminrole"] = &model.Role{ID: "adminrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments[target+":adminrole"] = &model.RoleAssignment{ID: "aa1", UserID: target, RoleID: "adminrole"}
+
+	// 呼び出し元 (me) は非 admin。
+	me := &model.User{ID: "modviewer", Username: "modviewer"}
+	rec := doPost(h.ShowUser, `{"userId":"`+target+`"}`, me)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+}
+
+// administrator 同士なら閲覧できる。
+func TestShowUser_AdminCanViewAdmin(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	target := "adminuser2"
+	userRepo.Users[target] = &model.User{ID: target, Username: "admin2", AvatarDecorations: []byte("[]")}
+	roleRepo.Roles["adminrole"] = &model.Role{ID: "adminrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments[target+":adminrole"] = &model.RoleAssignment{ID: "aa2", UserID: target, RoleID: "adminrole"}
+	// me も admin。
+	me := &model.User{ID: "adminviewer", Username: "adminviewer"}
+	userRepo.Users[me.ID] = me
+	assignRepo.Assignments[me.ID+":adminrole"] = &model.RoleAssignment{ID: "aa3", UserID: me.ID, RoleID: "adminrole"}
+
+	rec := doPost(h.ShowUser, `{"userId":"`+target+`"}`, me)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// show-users の username param が usernameLower prefix フィルタとして渡る。
+func TestShowUsers_UsernameFilter(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["ua"] = &model.User{ID: "ua", Username: "alice", UsernameLower: "alice"}
+	userRepo.Users["ub"] = &model.User{ID: "ub", Username: "bob", UsernameLower: "bob"}
+	rec := doPost(h.ShowUsers, `{"limit":100,"username":"al"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "ua", resp[0].(map[string]any)["id"])
+}
+
+// negative-control: 非admin viewer が非admin target を見るのは 200。guard の
+// target 側 clause (isAdmin(target)) が live であることを固定する (F1)。
+func TestShowUser_NonAdminCanViewNonAdmin(t *testing.T) {
+	h, userRepo, _, _, _ := newTestHandlerWithAssign(t)
+	target := "plainuser"
+	userRepo.Users[target] = &model.User{ID: target, Username: "plain", AvatarDecorations: []byte("[]")}
+	me := &model.User{ID: "modviewer2", Username: "modviewer2"}
+	rec := doPost(h.ShowUser, `{"userId":"`+target+`"}`, me)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// root user は administrator 扱いなので非admin は閲覧不可 (meta.RootUserID 経由)。
+func TestShowUser_AdminGuardBlocksViewingRoot(t *testing.T) {
+	h, userRepo, metaRepo, _, _ := newTestHandlerWithAssign(t)
+	root := "rootuser"
+	userRepo.Users[root] = &model.User{ID: root, Username: "root", AvatarDecorations: []byte("[]")}
+	metaRepo.Meta.RootUserID = &root
+	me := &model.User{ID: "modviewer3", Username: "modviewer3"}
+	rec := doPost(h.ShowUser, `{"userId":"`+root+`"}`, me)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// notificationRecieveConfig は profile があっても jsonb が空/未設定なら {} に fallback。
+func TestShowUser_NotificationRecieveConfigEmptyFallback(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	uid := "nrcuser"
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "nrc", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+		// NotificationRecieveConfig は未設定 (nil bytes)。
+	}
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	nrc, ok := resp["notificationRecieveConfig"].(map[string]any)
+	require.True(t, ok)
+	assert.Empty(t, nrc)
+}
+
+// show-users は UserDetailed shape を返し、email/signins/roleAssigns/
+// notificationRecieveConfig といった admin 専用 field を漏らさない (GUARD-1)。
+func TestShowUsers_DoesNotLeakAdminOnlyFields(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	uid := "leaky"
+	email := "secret@example.test"
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "leaky", UsernameLower: "leaky", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, Email: &email, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+		NotificationRecieveConfig: []byte(`{"mention":{"type":"all"}}`),
+	}
+	rec := doPost(h.ShowUsers, `{"limit":10}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	for _, k := range []string{"email", "signins", "roleAssigns", "notificationRecieveConfig"} {
+		_, present := resp[0][k]
+		assert.False(t, present, k+" は show-users で露出しない")
+	}
+	// UserDetailed の基本 field は出る。
+	assert.Equal(t, "leaky", resp[0]["username"])
+}

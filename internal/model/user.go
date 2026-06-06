@@ -76,6 +76,7 @@ type UserListFilter struct {
 	State    string // "all", "admin", "moderator", "suspended", "alive"
 	Origin   string // "local", "remote", "combined"
 	Hostname string // if non-empty, restricts to a specific remote host
+	Username string // if non-empty, usernameLower prefix LIKE filter
 	Sort     string // "+createdAt", "-createdAt", "+updatedAt", "-updatedAt", etc.
 	Limit    int
 	Offset   int

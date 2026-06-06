@@ -283,6 +283,15 @@ func (m *MockUserRepository) ListUsers(filter model.UserListFilter) ([]*model.Us
 				continue
 			}
 		}
+		if filter.Username != "" {
+			lower := u.UsernameLower
+			if lower == "" {
+				lower = strings.ToLower(u.Username)
+			}
+			if !strings.HasPrefix(lower, strings.ToLower(filter.Username)) {
+				continue
+			}
+		}
 		result = append(result, u)
 	}
 	limit := filter.Limit

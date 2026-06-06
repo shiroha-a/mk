@@ -381,7 +381,15 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 		q = q.Where("host IS NOT NULL")
 	}
 	if filter.Hostname != "" {
-		q = q.Where("host = ?", filter.Hostname)
+		// upstream show-users.ts:97 / users.ts は hostname を lowercase 化して
+		// 突合する。host は lowercase 保存なので大文字混在でも match させる。
+		q = q.Where("host = ?", strings.ToLower(filter.Hostname))
+	}
+	// username prefix フィルタ (upstream show-users.ts:92-94 の
+	// usernameLower LIKE sqlLikeEscape(lower)+'%')。LIKE メタ文字を escape し
+	// ESCAPE '\' を明示して prefix match させる (sibling query と統一)。
+	if filter.Username != "" {
+		q = q.Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(strings.ToLower(filter.Username))+"%")
 	}
 
 	switch filter.State {
@@ -434,30 +442,28 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 		q = q.Where("host IS NULL").Where(idCond)
 	}
 
+	// sort 方向は upstream admin/show-users.ts:99-110 に一致させる。'+' は
+	// 降順 (新しい/多い順)、'-' は昇順という Misskey の慣習で、key 名も
+	// follower 系は +follower/-follower (followersCount 列) を使う。
 	switch filter.Sort {
 	case "+createdAt":
-		q = q.Order("id ASC")
+		q = q.Order("id DESC")
 	case "-createdAt":
-		q = q.Order("id DESC")
+		q = q.Order("id ASC")
 	case "+updatedAt":
-		q = q.Order("\"updatedAt\" ASC NULLS LAST")
+		q = q.Order(`"updatedAt" DESC NULLS LAST`)
 	case "-updatedAt":
-		q = q.Order("\"updatedAt\" DESC NULLS LAST")
-	case "+lastActiveDate", "-lastActiveDate":
-		// 本家 admin/show-users が moderator 一覧に使う sort key (#421)。
-		// NULLS は最後に固定して accidental ASC で空アクティビティ user が
-		// 先頭に来ないようにする。
-		dir := "DESC"
-		if filter.Sort == "+lastActiveDate" {
-			dir = "ASC"
-		}
-		q = q.Order(`"lastActiveDate" ` + dir + ` NULLS LAST`)
-	case "+followersCount":
-		q = q.Order("\"followersCount\" ASC")
-	case "-followersCount":
-		q = q.Order("\"followersCount\" DESC")
+		q = q.Order(`"updatedAt" ASC NULLS FIRST`)
+	case "+lastActiveDate":
+		q = q.Order(`"lastActiveDate" DESC NULLS LAST`)
+	case "-lastActiveDate":
+		q = q.Order(`"lastActiveDate" ASC NULLS FIRST`)
+	case "+follower":
+		q = q.Order(`"followersCount" DESC`)
+	case "-follower":
+		q = q.Order(`"followersCount" ASC`)
 	default:
-		q = q.Order("id DESC")
+		q = q.Order("id ASC")
 	}
 
 	limit := filter.Limit
