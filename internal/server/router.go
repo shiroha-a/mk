@@ -306,7 +306,7 @@ func (s *Server) setupRoutes() {
 	notificationHook.SetWebPushPublisher(webPushService)
 	notificationHook.SetPackers(
 		corewebpush.NewUserRepoPacker(userRepo),
-		corewebpush.NewNoteRepoPacker(noteRepo, idGen),
+		corewebpush.NewNoteRepoPacker(noteRepo, idGen, followingRepo),
 	)
 	webPushCache := corewebpush.NewSubscriptionCache(swSubRepo, s.redis.Default)
 	// Web Push delivery: webpush-go の HTTPClient field に SSRF-safe client
