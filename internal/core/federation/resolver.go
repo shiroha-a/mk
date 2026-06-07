@@ -1046,16 +1046,6 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 			note.ReplyUserHost = replyTarget.UserHost
 		}
 	}
-	// 引用 renote: upstream ApNoteService と同じく `_misskey_quote` / `quoteUrl` が
-	// 指す note を解決して renoteId に紐付ける (#1527)。これが無いと remote quote が
-	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
-	// renoteCount の増分は Create 後 (下方) に本家準拠で行う。
-	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL)
-	if quoted != nil && quoted.ID != note.ID {
-		note.RenoteID = &quoted.ID
-		note.RenoteUserID = &quoted.UserID
-		note.RenoteUserHost = quoted.UserHost
-	}
 	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が
 	// 入っていれば「投票」として処理し、note は作らずに早期 return する
 	// (#690)。Misskey TS の ApNoteService.create と同等の wire format。
@@ -1137,6 +1127,17 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	// Question（投票）の場合はhasPollフラグをCreate前に設定
 	if len(apNote.OneOf) > 0 || len(apNote.AnyOf) > 0 {
 		note.HasPoll = true
+	}
+	// 引用 renote: upstream ApNoteService と同じく `_misskey_quote` / `quoteUrl` が
+	// 指す note を解決して renoteId に紐付ける (#1527)。これが無いと remote quote が
+	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
+	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
+	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL)
+	if quoted != nil && quoted.ID != note.ID {
+		note.RenoteID = &quoted.ID
+		note.RenoteUserID = &quoted.UserID
+		note.RenoteUserHost = quoted.UserHost
 	}
 	if err := r.noteRepo.Create(note); err != nil {
 		return nil, false, err
