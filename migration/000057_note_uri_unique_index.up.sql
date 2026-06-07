@@ -1,0 +1,32 @@
+-- #1527 review #2 (後半): note.uri に部分 UNIQUE index を張る。
+--
+-- 本家 Misskey の MiNote.uri は `@Index({ unique: true })` (varchar, nullable) で、
+-- 同一リモート note (uri = AP id) の二重取り込みを DB で防ぐ。これにより
+-- resolver.IngestNote の Create が並行 race で UNIQUE 違反になり、handler 側で
+-- 既存行を引いて dedup hit 扱いにできる (重複 INSERT / renoteCount 二重増分の防止)。
+-- 重複行は 000056 で除去済み。
+--
+-- uri はローカル note では NULL (Misskey 同様)。実 query は WHERE uri = $1 のみで
+-- NULL を引かないため、部分 index (WHERE uri IS NOT NULL) でローカル note を除外し
+-- index を小さく保つ (000040 drive_file と同方針)。
+--
+-- note は最大テーブルなので CONCURRENTLY で書き込みを block せずに構築する
+-- (000045/000054/000055 の "large table への index は CONCURRENTLY" 方針に準拠)。
+-- golang-migrate v4 postgres driver は migration を transaction 外で Exec するため
+-- CONCURRENTLY を直接書ける。CONCURRENTLY は単一文でしか実行できない (複数文だと
+-- 暗黙 transaction で失敗する) ため、dedup (000056) と index 構築を別 migration に
+-- 分割している。
+--
+-- 失敗時の回復: build 中に新たな重複 uri が INSERT される / kill / statement_timeout
+-- 等で CONCURRENTLY build が失敗すると INVALID な index が残り、再実行時の
+-- IF NOT EXISTS は名前一致で skip するため恒久的に再構築されない。さらに
+-- golang-migrate は当該 version を dirty のまま残す。回復は以下:
+--   1. 無効 index を特定して DROP:
+--      SELECT i.relname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+--        WHERE i.relname = 'IDX_note_uri' AND NOT x.indisvalid;
+--      DROP INDEX CONCURRENTLY IF EXISTS "IDX_note_uri";
+--   2. 残存重複があれば 000056 の DELETE を再実行してから、
+--   3. schema_migrations を直前 version (56) へ戻す:
+--        UPDATE "schema_migrations" SET version = 56, dirty = false;
+--      その後 make migrate-up で再適用 (standalone CLI があれば migrate force 56 でも可)。
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "IDX_note_uri" ON "note" ("uri") WHERE "uri" IS NOT NULL;

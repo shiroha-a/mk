@@ -1153,6 +1153,14 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 		note.RenoteUserHost = quoted.UserHost
 	}
 	if err := r.noteRepo.Create(note); err != nil {
+		// dedup race: FindByURI (上) と Create の間に別の ingest が同 URI を先に
+		// 作ると note.uri の UNIQUE 制約違反になる (#1527 review #2)。その場合は
+		// 既存行を引いて dedup hit (created=false) として返し、重複 INSERT と
+		// renoteCount / 各 hook の二重発火を防ぐ。FindByURI が引けない (= UNIQUE
+		// 違反以外の真の失敗) なら元の err を返す。
+		if existing, ferr := r.noteRepo.FindByURI(apNote.ID); ferr == nil && existing != nil {
+			return existing, false, nil
+		}
 		return nil, false, err
 	}
 	// ローカルノートへの返信の場合、repliesCount を増やす。

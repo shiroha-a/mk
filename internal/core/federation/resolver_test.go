@@ -4755,3 +4755,89 @@ func TestIngestNote_QuoteHomeTargetLinks(t *testing.T) {
 	require.NotNil(t, got.RenoteID, "home note は引用可能なので紐付ける")
 	assert.Equal(t, "quoted1", *got.RenoteID)
 }
+
+// raceConflictNoteRepo simulates the dedup race: the top-of-IngestNote FindByURI
+// misses, Create then fails with a UNIQUE violation (another ingest won the
+// race), and a subsequent FindByURI returns the winner's row.
+type raceConflictNoteRepo struct {
+	*testutil.MockNoteRepository
+	existing        *model.Note
+	createAttempted bool
+}
+
+func (r *raceConflictNoteRepo) FindByURI(uri string) (*model.Note, error) {
+	if r.createAttempted && r.existing != nil && r.existing.URI != nil && *r.existing.URI == uri {
+		return r.existing, nil
+	}
+	return nil, testutil.ErrNotFound
+}
+
+func (r *raceConflictNoteRepo) Create(_ *model.Note) error {
+	r.createAttempted = true
+	// resolver は err 文字列を解釈せず「Create 失敗 + 直後 FindByURI で行が引ける」を
+	// dedup race と判定するため、この SQLSTATE 文言は cosmetic (どんな err でも同経路)。
+	return errors.New(`ERROR: duplicate key value violates unique constraint "IDX_note_uri" (SQLSTATE 23505)`)
+}
+
+// note.uri UNIQUE 制約違反 (dedup race) は重複 INSERT エラーにせず、既存行を引いて
+// dedup hit (created=false) として返す (#1527 review #2)。created=false により
+// caller (chart hook 等) と renoteCount 増分が二重発火しない。
+func TestIngestNote_DedupRaceOnUniqueViolation(t *testing.T) {
+	base := testutil.NewMockNoteRepository()
+	existingURI := "https://remote.example/notes/n1"
+	winner := &model.Note{ID: "winner", URI: &existingURI, UserID: "ualice"}
+	raceRepo := &raceConflictNoteRepo{MockNoteRepository: base, existing: winner}
+	repo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	require.NoError(t, err, "unique violation should be treated as dedup hit, not an error")
+	assert.False(t, created, "race loser must be created=false so hooks/renoteCount don't double-fire")
+	require.NotNil(t, got)
+	assert.Equal(t, "winner", got.ID, "should return the row the winning ingest created")
+}
+
+// Create が UNIQUE 違反以外で失敗し、FindByURI でも引けない場合は元の err を返す。
+func TestIngestNote_CreateErrorNonDedupPropagates(t *testing.T) {
+	base := testutil.NewMockNoteRepository()
+	// existing なし → 競合後の FindByURI も miss → 元の err を伝播。
+	raceRepo := &raceConflictNoteRepo{MockNoteRepository: base, existing: nil}
+	repo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	assert.Error(t, err, "non-dedup create error must propagate")
+}
+
+// dedup race が quote note で起きても、引用元の renoteCount は二重増分されない
+// (Create 失敗 → dedup hit で increment 経路に到達しない, #1527 review #2)。
+func TestIngestNote_DedupRaceOnQuoteNoDoubleRenoteCount(t *testing.T) {
+	base := testutil.NewMockNoteRepository()
+	// 引用先 (local note)。renoteCount 初期値 0。
+	base.Notes["q1"] = &model.Note{ID: "q1", UserID: "qu", RenoteCount: 0}
+	existingURI := "https://remote.example/notes/n1"
+	winner := &model.Note{ID: "winner", URI: &existingURI, UserID: "ualice"}
+	raceRepo := &raceConflictNoteRepo{MockNoteRepository: base, existing: winner}
+	repo := testutil.NewMockUserRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/n1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quote that loses the race",
+		"_misskey_quote": "https://example.com/notes/q1",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, created, err := r.IngestNoteWithCreated([]byte(body))
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, "winner", got.ID)
+	assert.Equal(t, int16(0), base.Notes["q1"].RenoteCount, "dedup race must NOT increment the quote target's renoteCount")
+}
