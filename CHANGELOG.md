@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: 連合先からの引用ノート (quote renote) の引用元がノートカードに表示されず本文のみになっていた問題を修正 (issue #1527)。inbound の ActivityPub Note 取り込み (`IngestNote`) が `_misskey_quote` / `quoteUrl` を読まず `renoteId` を立てていなかったため、リモートの引用が「引用元なし」で保存されていた。本家 `ApNoteService` 同様に両 URI を順に解決して引用元 note を紐付け (local / 取り込み済みは fetch 無し、未知は fetch、quote サイクルは in-flight guard で遮断)、引用元の `renoteCount` も本家 `NoteCreateService` 準拠で increment する (自己引用・bot は除外)。
+
 - Fix: リモート(連合先)のメディア URL が API レスポンスに生のまま含まれ、フロントエンドがそれらを直接 `<img src>` で取得することで閲覧者の IP アドレスが外部サーバーへ漏洩していた問題を修正 (issue #1529)。pack 時に remote origin を判定して media proxy 経由 URL へ書き換える server 側書き換え層 (`entity.MediaURLContext`) を追加し、本家 `DriveFileEntityService` の `getPublicUrl`/`getThumbnailUrl` 相当を server 側で行う。対象はフロントエンドが verbatim 描画する surface: ドライブファイル(ノート添付の `url`/`thumbnailUrl`/`webpublicUrl`)・ユーザーのアバター/バナー・チャンネルバナー・ロールの `iconUrl`・アナウンスの `imageUrl`・URL プレビューのサムネイル/アイコン・`/api/federation/users` のアバター・`/api/admin/drive/show` (モデレーターの IP 保護)。`url` フィールドは image MIME に限定して書き換え (proxy の passThrough が非 browsersafe MIME を拒否するため、PDF/zip 等のダウンロードを壊さない)、サムネイルは static mode。`proxyRemoteFiles` 設定を尊重し(アバターは本家同様常時プロキシ)、内部メディアプロキシ利用時は HMAC 署名付き URL を生成 (`mediaproxy.SignURL` と byte 一致を parity test で担保)。なおカスタム絵文字と連合先インスタンスのアイコン/ファビコンは、本家フロント (`MkCustomEmoji`/`MkInstanceTicker`) が `meta.mediaProxy` で client 側プロキシ済のため、二重プロキシと本家 API shape からの乖離を避けて raw のまま返す。注: RSS ウィジェット (`/api/fetch-rss`) の画像/エンクロージャは別途対応予定
 
 - Fix: チャットの `/api/chat/messages/room-timeline`・`/api/chat/messages`・`/api/chat/rooms/members` が、リクエスト元がルームのメンバーかどうかを検証せず、認証済みなら誰でも任意のルームの発言やメンバー一覧を読めた問題を修正 (本家同様 room-timeline/messages はメンバーまたはモデレーター、members はメンバーのみに限定し、それ以外およびルーム不在は `NO_SUCH_ROOM` を返す)

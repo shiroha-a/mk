@@ -162,6 +162,10 @@ type Resolver struct {
 	// が連続して届く現実的なケースで thundering herd を抑える。
 	resolveActorGroup singleflight.Group
 	resolveNoteGroup  singleflight.Group
+	// ingesting tracks note URIs currently being ingested (key: AP id) so quote
+	// resolution can break cycles (A が B を quote し B が A を quote する等)。
+	// quote target が in-flight なら fetch を skip する (#1527)。
+	ingesting sync.Map
 }
 
 // NewResolver constructs a Resolver.
@@ -874,6 +878,61 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 	return r.IngestNote(body)
 }
 
+// resolveQuoteTarget resolves the quote target of an inbound note from its
+// `_misskey_quote` / `quoteUrl` URIs (misskeyQuote takes precedence, matching
+// upstream ApNoteService `note._misskey_quote ?? note.quoteUrl`). Returns nil
+// when no quote URI is present or the target cannot be resolved (best-effort:
+// an unresolvable quote degrades to a plain note rather than failing ingest).
+//
+// 既知 note (local ID / 取り込み済み URI) を fetch 無しで優先的に引く。未知 URI は
+// ResolveNote で fetch するが、その URI が現在 ingest 中 (quote cycle) の場合は
+// fetch を skip して無限再帰を防ぐ (#1527)。
+func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string) *model.Note {
+	if r.noteRepo == nil {
+		return nil
+	}
+	// upstream ApNoteService は `[_misskey_quote, quoteUrl]` を順に解決し、最初に
+	// 成功した note を採用する (`.at(0)`)。通常は両者同値だが、片方しか解決できない
+	// ケースで取りこぼさないよう順に試す。
+	if n := r.resolveQuoteURI(misskeyQuote); n != nil {
+		return n
+	}
+	if quoteURL != misskeyQuote {
+		if n := r.resolveQuoteURI(quoteURL); n != nil {
+			return n
+		}
+	}
+	return nil
+}
+
+// resolveQuoteURI resolves a single quote URI to a local note row. 既知 note
+// (local ID / 取り込み済み URI) は fetch 無しで引き、未知 URI は cycle でなければ
+// ResolveNote で fetch する。空 URI / 解決不能は nil。
+func (r *Resolver) resolveQuoteURI(uri string) *model.Note {
+	if uri == "" {
+		return nil
+	}
+	// 1. ローカル note URI なら ID 抽出して DB から (fetch 不要)。
+	if id := r.extractLocalNoteID(uri); id != "" {
+		if n, err := r.noteRepo.FindByID(id); err == nil {
+			return n
+		}
+		return nil
+	}
+	// 2. 取り込み済みのリモート note なら DB から (fetch 不要)。
+	if n, err := r.noteRepo.FindByURI(uri); err == nil {
+		return n
+	}
+	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。
+	if _, inflight := r.ingesting.Load(uri); inflight {
+		return nil
+	}
+	if n, err := r.ResolveNote(uri); err == nil {
+		return n
+	}
+	return nil
+}
+
 // IngestNote parses an ActivityStreams Note JSON and persists it as a local
 // row authored by the (resolved) attributedTo actor. 既に同じ URI の note を
 // 取り込み済みなら既存レコードを返す。
@@ -916,6 +975,11 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
 		return existing, false, nil
 	}
+	// quote cycle 遮断用に、この note URI を ingest 中として mark する (#1527)。
+	// quote 解決が fetch するネストした ingest から、この URI への再 fetch を
+	// 検出できる。
+	r.ingesting.Store(apNote.ID, struct{}{})
+	defer r.ingesting.Delete(apNote.ID)
 	// federation policy gate: 直接 handleCreate から受け取った body や、
 	// 中継経由で attributedTo が allowlist 外の host を指している payload を
 	// DB 永続化させない。既存 row hit (上の FindByURI) は素通しで legacy
@@ -981,6 +1045,16 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 			note.ReplyUserID = &replyTarget.UserID
 			note.ReplyUserHost = replyTarget.UserHost
 		}
+	}
+	// 引用 renote: upstream ApNoteService と同じく `_misskey_quote` / `quoteUrl` が
+	// 指す note を解決して renoteId に紐付ける (#1527)。これが無いと remote quote が
+	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
+	// renoteCount の増分は Create 後 (下方) に本家準拠で行う。
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL)
+	if quoted != nil && quoted.ID != note.ID {
+		note.RenoteID = &quoted.ID
+		note.RenoteUserID = &quoted.UserID
+		note.RenoteUserHost = quoted.UserHost
 	}
 	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が
 	// 入っていれば「投票」として処理し、note は作らずに早期 return する
@@ -1072,6 +1146,13 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	// 含むようになる。失敗はベストエフォートで無視。
 	if note.ReplyID != nil {
 		_ = r.noteRepo.IncrementCount(*note.ReplyID, "repliesCount", 1)
+	}
+	// 引用 renote は本家 NoteCreateService と同様、対象 note の renoteCount を増分する
+	// (line 786: `data.renote && data.renote.userId !== user.id && !user.isBot`)。
+	// 自分の note の自己引用と bot 投稿は除外する (#1527)。pure renote (Announce) は
+	// handleAnnounce 側で別途 increment 済み。
+	if note.RenoteID != nil && quoted != nil && quoted.UserID != actor.ID && !actor.IsBot {
+		_ = r.noteRepo.IncrementCount(*note.RenoteID, "renoteCount", 1)
 	}
 	// Question (投票) の処理: oneOf/anyOf から Poll レコードを作成
 	if r.pollRepo != nil && note.HasPoll {

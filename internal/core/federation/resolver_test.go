@@ -4356,3 +4356,327 @@ func TestResolveActor_NewUserIngestsHashtags(t *testing.T) {
 	// Hashtag のみ正規化して取り込む (Emoji は除外)。
 	assert.ElementsMatch(t, []string{"golang", "activitypub"}, []string(user.Tags))
 }
+
+// --- #1527: inbound quote (引用) renote resolution ---
+
+// _misskey_quote が既存 note を指す inbound note は、その note を renote として
+// 紐付ける (fetch 不要 = DB hit)。
+func TestIngestNote_QuoteMisskeyQuote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu", UserHost: strPtr("remote.example")}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// attributedTo の actor 解決のみ fetch (quote は DB hit)。
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "見て",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID)
+	assert.Equal(t, "quoted1", *got.RenoteID)
+	require.NotNil(t, got.RenoteUserID)
+	assert.Equal(t, "qu", *got.RenoteUserID)
+	require.NotNil(t, got.Text)
+	assert.Equal(t, "見て", *got.Text)
+}
+
+// quoteUrl は _misskey_quote が無いときの fallback。
+func TestIngestNote_QuoteUrlFallback(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu"}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quote via quoteUrl",
+		"quoteUrl": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID)
+	assert.Equal(t, "quoted1", *got.RenoteID)
+}
+
+// quote URI が未知 (DB 未取り込み) なら fetch して取り込み、renote 紐付けする。
+func TestIngestNote_QuoteFetchesUnknownTarget(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// 1: outer note の actor 解決 / 2: quote 先 note / 3: quote 先 note の actor 解決。
+	quotedNote := `{
+		"id": "https://remote.example/notes/quoted",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "original",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor), []byte(quotedNote), []byte(sampleActor)}}
+	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
+
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quote of unknown",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID, "unknown quote target should be fetched and linked")
+}
+
+// quote field が無いノートは RenoteID nil (通常の投稿)。
+func TestIngestNote_NoQuote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	got, err := r.IngestNote([]byte(sampleRemoteNote))
+	require.NoError(t, err)
+	assert.Nil(t, got.RenoteID)
+}
+
+// 解決不能な quote (fetch 失敗) は best-effort で quote 無し扱い (ingest は成功)。
+func TestIngestNote_QuoteUnresolvableDegrades(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// actor は解決できるが quote fetch は失敗する。
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor)}}
+	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quote of gone",
+		"_misskey_quote": "https://remote.example/notes/gone",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Nil(t, got.RenoteID, "unresolvable quote degrades to plain note")
+	require.NotNil(t, got.Text)
+}
+
+// quote cycle (A が B を quote し B が A を quote) でも無限再帰せず両者を ingest する。
+// 後から辿る側 (cycle 検出) は quote 未解決で degrade する (#1527 在庫 guard)。
+func TestIngestNote_QuoteCycleNoInfiniteRecursion(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// A.ingest: actor(alice) fetch → quote B fetch → B.ingest: actor は DB hit、
+	// quote A は in-flight で skip。よって body は [actor, B-note] で足りる。
+	bNote := `{
+		"id": "https://remote.example/notes/B",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "B quotes A",
+		"_misskey_quote": "https://remote.example/notes/A",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor), []byte(bNote)}}
+	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
+	aBody := `{
+		"id": "https://remote.example/notes/A",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "A quotes B",
+		"_misskey_quote": "https://remote.example/notes/B",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	done := make(chan struct{})
+	var got *model.Note
+	var err error
+	go func() {
+		got, err = r.IngestNote([]byte(aBody))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("IngestNote did not terminate (quote cycle caused infinite recursion)")
+	}
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID, "A should link its quote B")
+	// 両 note が永続化されている。
+	assert.GreaterOrEqual(t, len(noteRepo.Notes), 2)
+	// cycle を辿った側 (B) は quote 未解決で degrade している (in-flight guard が
+	// A への再 fetch を遮断したため)。
+	var bNoteRow *model.Note
+	for _, n := range noteRepo.Notes {
+		if n.URI != nil && *n.URI == "https://remote.example/notes/B" {
+			bNoteRow = n
+		}
+	}
+	require.NotNil(t, bNoteRow, "B should be persisted")
+	assert.Nil(t, bNoteRow.RenoteID, "B's quote (back to A) is broken by the cycle guard")
+}
+
+// remote note が LOCAL note を quote する場合、URI から local ID を抽出して
+// fetch 無しで紐付ける (resolveQuoteTarget の extractLocalNoteID 経路)。
+func TestIngestNote_QuoteLocalNote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["localq1"] = &model.Note{ID: "localq1", UserID: "localuser"}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quoting a local note",
+		"_misskey_quote": "https://example.com/notes/localq1",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID)
+	assert.Equal(t, "localq1", *got.RenoteID)
+}
+
+// local quote URI だが DB に存在しないなら quote 無し扱い (fetch しない)。
+func TestIngestNote_QuoteLocalNoteMissing(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quoting a missing local note",
+		"_misskey_quote": "https://example.com/notes/ghost",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Nil(t, got.RenoteID)
+}
+
+// 引用は対象 note の renoteCount を increment する (本家 NoteCreateService:786 準拠)。
+// あわせて RenoteUserHost が denormalize される。
+func TestIngestNote_QuoteIncrementsRenoteCountAndSetsHost(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu", UserHost: strPtr("other.example")}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quote",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteUserHost)
+	assert.Equal(t, "other.example", *got.RenoteUserHost)
+	assert.Equal(t, int16(1), noteRepo.Notes["quoted1"].RenoteCount, "quote は対象の renoteCount を増分する")
+}
+
+// 自分の note を自己引用した場合は renoteCount を増やさない (本家 userId !== user.id)。
+func TestIngestNote_SelfQuoteNoIncrement(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	// quote 先の作者 = 引用する actor (alice) と同一。
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "ualice", UserHost: strPtr("remote.example")}
+	repo.Users["ualice"] = &model.User{ID: "ualice", Username: "alice", Host: strPtr("remote.example"), URI: strPtr("https://remote.example/users/alice")}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "self quote",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID, "自己引用でも quote 紐付け自体はする")
+	assert.Equal(t, int16(0), noteRepo.Notes["quoted1"].RenoteCount, "自己引用は renoteCount を増やさない")
+}
+
+// reply と quote を併せ持つ note は ReplyID / RenoteID の両方が立つ。
+func TestIngestNote_ReplyAndQuote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	replyURI := "https://remote.example/notes/reply-target"
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["rt"] = &model.Note{ID: "rt", URI: &replyURI, UserID: "ru"}
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu"}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "reply + quote",
+		"inReplyTo": "https://remote.example/notes/reply-target",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.ReplyID)
+	assert.Equal(t, "rt", *got.ReplyID)
+	require.NotNil(t, got.RenoteID)
+	assert.Equal(t, "quoted1", *got.RenoteID)
+}
+
+// _misskey_quote が解決できなくても quoteUrl で解決できれば quote を採用する
+// (本家は両 URI を試して最初に成功したものを使う)。
+func TestIngestNote_QuotePrefersResolvableUrl(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://example.com/notes/localq" // quoteUrl 側 (local, 解決可)
+	_ = quotedURI
+	noteRepo.Notes["localq"] = &model.Note{ID: "localq", UserID: "lu"}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// _misskey_quote は未知 remote (fetch 失敗); quoteUrl は local 解決可。
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "two quote uris",
+		"_misskey_quote": "https://remote.example/notes/gone",
+		"quoteUrl": "https://example.com/notes/localq",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID, "_misskey_quote 失敗時は quoteUrl にフォールバックする")
+	assert.Equal(t, "localq", *got.RenoteID)
+}
