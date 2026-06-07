@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"slices"
 
+	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -172,6 +173,26 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 			for _, r := range roles {
 				h.publishNote("roleTimeline:"+r.ID, n, author)
 			}
+		}
+	}
+
+	// 8. ハッシュタグ stream (#1549): note.Tags の各タグを正規化 (NFKC+lower) して
+	//    hashtag:<normalized> へ publish。consumer (hashtag.go) が OR-of-ANDs を
+	//    payload tags に対して再評価 + dedupe + 可視性 gate する。正規化は publish/
+	//    subscribe 両側で searchnorm.Normalize に揃える (揃えないと topic 文字列が
+	//    一致せず配信されない)。可視性は consumer 側 gate (TS notesStream と同じ)。
+	if len(n.Tags) > 0 {
+		seenTags := make(map[string]struct{}, len(n.Tags))
+		for _, tag := range n.Tags {
+			key := searchnorm.Normalize(tag)
+			if key == "" {
+				continue
+			}
+			if _, ok := seenTags[key]; ok {
+				continue
+			}
+			seenTags[key] = struct{}{}
+			h.publishNote("hashtag:"+key, n, author)
 		}
 	}
 }

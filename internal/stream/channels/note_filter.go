@@ -117,6 +117,19 @@ func noteVisibility(payload []byte) string {
 	return p.Visibility
 }
 
+// streamNoteID decodes the note id from a streamed note payload ("" when
+// absent / unparseable). Used by the hashtag channel to dedupe a note that
+// arrives via multiple subscribed tag topics (#1549).
+func streamNoteID(payload []byte) string {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.ID
+}
+
 // embedProbe is the minimal embed metadata needed to decide whether an embedded
 // renote/reply must be hidden, WITHOUT decoding the whole NoteEntity. Author
 // preference fields ride the embed's UserLite (populated only when the embed

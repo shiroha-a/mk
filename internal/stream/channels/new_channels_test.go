@@ -60,7 +60,7 @@ func TestHashtag_Lifecycle(t *testing.T) {
 	ch.Init(json.RawMessage(`{"q":[["golang"]]}`))
 	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["golang"],"visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
 
@@ -75,6 +75,65 @@ func TestHashtag_EmptyQ(t *testing.T) {
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
 	ch.Dispose()
+}
+
+// #1549: hashtag now receives live notes (publisher added) and re-evaluates the
+// OR-of-ANDs query + normalizes + dedupes per subscriber.
+func TestHashtag_MultiTagSubscribeUnion(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	// q = (a AND b) OR (c): subscribe distinct tags a,b,c.
+	ch.Init(json.RawMessage(`{"q":[["a","b"],["c"]]}`))
+	assert.ElementsMatch(t, []string{"hashtag:a", "hashtag:b", "hashtag:c"}, ctx.subs)
+}
+
+func TestHashtag_OrOfAndsMatch(t *testing.T) {
+	t.Run("AND group requires all tags", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a","b"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public"}`)) // only a
+		assert.Empty(t, ctx.sentType, "AND group needs both a and b")
+		ch.OnRedisEvent([]byte(`{"id":"n2","tags":["a","b","x"],"visibility":"public"}`))
+		require.Len(t, ctx.sentType, 1, "superset of {a,b} matches")
+	})
+	t.Run("OR group matches either", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["b"],"visibility":"public"}`))
+		require.Len(t, ctx.sentType, 1)
+	})
+}
+
+func TestHashtag_NormalizationParity(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["GoLang"]]}`)) // subscribes hashtag:golang
+	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
+	// payload tag in different case/width still matches after NFKC+lower.
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["ＧＯＬＡＮＧ"],"visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1, "full-width upper tag must match normalized subscription")
+}
+
+func TestHashtag_DedupeAcrossTopics(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+	// same note arrives via both hashtag:a and hashtag:b (fanout fires per topic).
+	payload := []byte(`{"id":"dup1","tags":["a","b"],"visibility":"public"}`)
+	ch.OnRedisEvent(payload)
+	ch.OnRedisEvent(payload)
+	require.Len(t, ctx.sentType, 1, "a note matching two subscribed tags must deliver once")
+}
+
+func TestHashtag_FollowersVisibilityGate(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.followingSnap = map[string]bool{} // not a follower
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"userId":"author","visibility":"followers"}`))
+	assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
 }
 
 // --- Antenna ---

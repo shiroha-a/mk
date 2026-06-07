@@ -564,6 +564,27 @@ func TestFanoutHook_NoRoleTimelineForNonPublic(t *testing.T) {
 	}
 }
 
+func TestFanoutHook_PublishesHashtagTopics(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, Tags: []string{"GoLang", "ＡＢＣ", "golang"}}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// normalized (NFKC+lower) + deduped: golang (x2 -> 1), abc.
+	assert.Contains(t, pub.topics, "hashtag:golang")
+	assert.Contains(t, pub.topics, "hashtag:abc")
+	count := 0
+	for _, tp := range pub.topics {
+		if tp == "hashtag:golang" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "duplicate normalized tag must publish once")
+}
+
 func TestFanoutHook_StreamingHomeOnlyForFollowersVisibility(t *testing.T) {
 	h, _, _ := newTestHook(t)
 	pub := &stubStreamingPublisher{}
