@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix: 連合 note 取り込みの dedup race で同一リモート note が重複保存され、引用元の `renoteCount` が二重増分されうる問題を修正 (#1527 follow-up)。本家同様 `note.uri` に部分 UNIQUE index (`uri IS NOT NULL`) を追加 (migration 000056、既存重複行は最小 id を残して除去) し、`IngestNote` の `Create` が UNIQUE 制約違反になった場合は既存行を引いて dedup hit 扱い (created=false) にして重複 INSERT と hook / `renoteCount` の二重発火を防ぐ。
+- Fix: 連合 note 取り込みの dedup race で同一リモート note が重複保存され、引用元の `renoteCount` が二重増分されうる問題を修正 (#1527 follow-up)。本家同様 `note.uri` に部分 UNIQUE index (`uri IS NOT NULL`) を追加 (migration 000056 で既存重複行を最小 id を残して除去 → 000057 で最大テーブル方針に従い `CREATE UNIQUE INDEX CONCURRENTLY`) し、`IngestNote` の `Create` が UNIQUE 制約違反になった場合は既存行を引いて dedup hit 扱い (created=false) にして重複 INSERT と hook / `renoteCount` の二重発火を防ぐ。
 
 - Fix: 連合先からの引用ノート (quote renote) の引用元がノートカードに表示されず本文のみになっていた問題を修正 (issue #1527)。inbound の ActivityPub Note 取り込み (`IngestNote`) が `_misskey_quote` / `quoteUrl` を読まず `renoteId` を立てていなかったため、リモートの引用が「引用元なし」で保存されていた。本家 `ApNoteService` 同様に両 URI を順に解決して引用元 note を紐付け (local / 取り込み済みは fetch 無し、未知は fetch、quote サイクルは in-flight guard で遮断)、引用元の `renoteCount` も本家 `NoteCreateService` 準拠で increment する (自己引用・bot は除外)。
 

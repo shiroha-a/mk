@@ -4699,6 +4699,8 @@ func (r *raceConflictNoteRepo) FindByURI(uri string) (*model.Note, error) {
 
 func (r *raceConflictNoteRepo) Create(_ *model.Note) error {
 	r.createAttempted = true
+	// resolver は err 文字列を解釈せず「Create 失敗 + 直後 FindByURI で行が引ける」を
+	// dedup race と判定するため、この SQLSTATE 文言は cosmetic (どんな err でも同経路)。
 	return errors.New(`ERROR: duplicate key value violates unique constraint "IDX_note_uri" (SQLSTATE 23505)`)
 }
 
