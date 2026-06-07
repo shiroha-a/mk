@@ -117,16 +117,16 @@ func embedRawHideable(raw json.RawMessage, viewer *model.User, snap map[string]b
 		_, ok := snap[id]
 		return ok
 	}
-	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p, nowMs), follows, nowMs)
+	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p), follows, nowMs)
 }
 
-func embedFactsFromProbe(p embedProbe, fallbackMs int64) corenote.EmbedFacts {
+func embedFactsFromProbe(p embedProbe) corenote.EmbedFacts {
 	f := corenote.EmbedFacts{
 		AuthorID:       p.UserID,
 		Visibility:     p.Visibility,
 		VisibleUserIDs: p.VisibleUserIDs,
 		Mentions:       p.Mentions,
-		CreatedAtMs:    parseCreatedAtMsStream(p.CreatedAt, fallbackMs),
+		CreatedAtMs:    parseCreatedAtMsStream(p.CreatedAt),
 	}
 	if p.User.ID != "" {
 		f.AuthorPrefsKnown = true
@@ -139,13 +139,14 @@ func embedFactsFromProbe(p embedProbe, fallbackMs int64) corenote.EmbedFacts {
 	return f
 }
 
-func parseCreatedAtMsStream(s string, fallbackMs int64) int64 {
-	if s == "" {
-		return fallbackMs
-	}
+// parseCreatedAtMsStream mirrors api/notehide.parseCreatedAtMs: on any failure
+// (empty / unparseable) it returns 0 so shouldHideNoteByTime fails CLOSED on the
+// makeNotes*Before time gates (treats the embed as epoch 0 → hidden) instead of
+// fail-OPEN when now is substituted (#1567 review).
+func parseCreatedAtMsStream(s string) int64 {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return fallbackMs
+		return 0
 	}
 	return t.UnixMilli()
 }

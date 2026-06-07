@@ -143,3 +143,22 @@ func TestHideEmbedsForViewer_InputBytesUnchanged(t *testing.T) {
 		t.Error("hideEmbedsForViewer must never mutate the shared input buffer")
 	}
 }
+
+// TestHideEmbedsForViewer_UnparseableCreatedAtFailsClosed mirrors the REST-side
+// guard (#1567 review): an embed whose createdAt cannot be parsed must FAIL
+// CLOSED on the absolute makeNotesHiddenBefore gate, even for a follower.
+func TestHideEmbedsForViewer_UnparseableCreatedAtFailsClosed(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	hb := 1_600_000_000 // absolute epoch seconds, before hideNowMs
+	e := entity.NoteEntity{
+		ID: "embed", UserID: "author", CreatedAt: "not-a-timestamp",
+		User: entity.UserLite{ID: "author", MakeNotesHiddenBefore: &hb}, Visibility: "public",
+		Text: sptr("old secret"), FileIDs: []string{}, Files: []any{}, VisibleUserIDs: []string{}, Mentions: []string{},
+	}
+	payload := parentJSON(t, e)
+	// snapshot says viewer follows author, isolating the time gate (public anyway).
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{"author": true}, hideNowMs)
+	if r := renoteOf(t, out); r == nil || !r.IsHidden {
+		t.Error("unparseable createdAt must fail CLOSED on absolute makeNotesHiddenBefore")
+	}
+}

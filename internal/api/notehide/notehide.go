@@ -54,7 +54,7 @@ func hideEmbedIfNeeded(viewer *model.User, embed *entity.NoteEntity, follows fun
 	if embed == nil {
 		return
 	}
-	if corenote.HideEmbedDecision(viewer, embedFactsFromEntity(embed, nowMs), follows, nowMs) {
+	if corenote.HideEmbedDecision(viewer, embedFactsFromEntity(embed), follows, nowMs) {
 		entity.HideNoteEntity(embed)
 	}
 }
@@ -121,13 +121,13 @@ func collectEmbedAuthor(embed *entity.NoteEntity, viewerID string, seen map[stri
 // reflects that). ReplyTargetAuthorID は depth-1 embed では取得できない
 // (embed 自身の reply target = depth 2 は pack されない) ため常に空のままで、
 // core 側の reply-target escape hatch は embed では発火しない (= conservative)。
-func embedFactsFromEntity(embed *entity.NoteEntity, fallbackMs int64) corenote.EmbedFacts {
+func embedFactsFromEntity(embed *entity.NoteEntity) corenote.EmbedFacts {
 	f := corenote.EmbedFacts{
 		AuthorID:       embed.UserID,
 		Visibility:     embed.Visibility,
 		VisibleUserIDs: embed.VisibleUserIDs,
 		Mentions:       embed.Mentions,
-		CreatedAtMs:    parseCreatedAtMs(embed.CreatedAt, fallbackMs),
+		CreatedAtMs:    parseCreatedAtMs(embed.CreatedAt),
 	}
 	if embed.User.ID != "" {
 		f.AuthorPrefsKnown = true
@@ -140,16 +140,17 @@ func embedFactsFromEntity(embed *entity.NoteEntity, fallbackMs int64) corenote.E
 	return f
 }
 
-// parseCreatedAtMs parses the packed RFC3339-ms createdAt back to unix-ms; any
-// failure returns fallbackMs (= now), which fails OPEN on the time-window gates
-// only (never spuriously hides a parse-failed timestamp).
-func parseCreatedAtMs(s string, fallbackMs int64) int64 {
-	if s == "" {
-		return fallbackMs
-	}
+// parseCreatedAtMs parses the packed RFC3339-ms createdAt back to unix-ms. On
+// any failure (empty / unparseable) it returns 0, which fails CLOSED on the
+// time-window gates: shouldHideNoteByTime then treats the embed as "created at
+// epoch 0", so both the absolute (createdAt <= threshold) and relative (elapsed
+// >= window) makeNotes*Before gates HIDE it rather than leak a note whose age
+// cannot be verified. createdAt は自前 packer 生成なので実運用では失敗しないが、
+// 失敗時に now を返すと絶対 epoch ゲートが fail-OPEN になる (#1567 review)。
+func parseCreatedAtMs(s string) int64 {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return fallbackMs
+		return 0
 	}
 	return t.UnixMilli()
 }

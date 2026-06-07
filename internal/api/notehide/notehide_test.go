@@ -137,13 +137,15 @@ func TestHideEmbedsAt_SpecifiedMembership(t *testing.T) {
 }
 
 func TestParseCreatedAtMs(t *testing.T) {
-	if got := parseCreatedAtMs("", 42); got != 42 {
-		t.Errorf("empty -> fallback, got %d", got)
+	// 失敗時は fail-closed のため 0 を返す (#1567 review): 絶対 epoch ゲートで
+	// 0 <= threshold となり隠す側に倒れる。
+	if got := parseCreatedAtMs(""); got != 0 {
+		t.Errorf("empty -> 0 (fail-closed), got %d", got)
 	}
-	if got := parseCreatedAtMs("not-a-time", 42); got != 42 {
-		t.Errorf("invalid -> fallback, got %d", got)
+	if got := parseCreatedAtMs("not-a-time"); got != 0 {
+		t.Errorf("invalid -> 0 (fail-closed), got %d", got)
 	}
-	if got := parseCreatedAtMs("2023-11-14T22:13:20.000Z", 0); got != 1_700_000_000_000 {
+	if got := parseCreatedAtMs("2023-11-14T22:13:20.000Z"); got != 1_700_000_000_000 {
 		t.Errorf("valid RFC3339-ms parse, got %d", got)
 	}
 }
@@ -157,7 +159,7 @@ func TestEmbedFactsFromEntity_AuthorPrefs(t *testing.T) {
 		Visibility: "public", VisibleUserIDs: []string{"x"}, Mentions: []string{"m"},
 		User: entity.UserLite{ID: "a", RequireSigninToViewContents: &tr, MakeNotesHiddenBefore: &hb, MakeNotesFollowersOnlyBefore: &fb},
 	}
-	f := embedFactsFromEntity(e, 0)
+	f := embedFactsFromEntity(e)
 	if !f.AuthorPrefsKnown || !f.RequireSigninToViewContents || f.MakeNotesHiddenBefore == nil || *f.MakeNotesHiddenBefore != -3600 || f.MakeNotesFollowersOnlyBefore == nil {
 		t.Errorf("author prefs not populated: %+v", f)
 	}
@@ -169,7 +171,7 @@ func TestEmbedFactsFromEntity_AuthorPrefs(t *testing.T) {
 func TestEmbedFactsFromEntity_NoAuthorPrefs(t *testing.T) {
 	// embed.User.ID == "" => prefs not known.
 	e := &entity.NoteEntity{ID: "e", UserID: "a", CreatedAt: "2023-11-14T22:13:20.000Z", Visibility: "followers"}
-	f := embedFactsFromEntity(e, 99)
+	f := embedFactsFromEntity(e)
 	if f.AuthorPrefsKnown {
 		t.Error("AuthorPrefsKnown must be false when embed.User unset")
 	}
@@ -188,6 +190,27 @@ func TestHideEmbedsAt_MakeNotesHiddenBeforeHidesEvenFollower(t *testing.T) {
 	hideEmbedsAt(viewer, packed, repo, heNowMs)
 	if !packed[0].Renote.IsHidden {
 		t.Error("makeNotesHiddenBefore must hide an old embed even for a follower")
+	}
+}
+
+// TestHideEmbedsAt_UnparseableCreatedAtFailsClosed guards the #1567 review fix:
+// an embed whose createdAt cannot be parsed must FAIL CLOSED on the absolute
+// makeNotesHiddenBefore gate. Before the fix the parser returned now, so for an
+// absolute (positive epoch, in the past) threshold `now_seconds <= threshold`
+// was false and the old note leaked. With createdAt -> 0 it now hides.
+func TestHideEmbedsAt_UnparseableCreatedAtFailsClosed(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo()
+	hb := 1_600_000_000 // absolute epoch seconds, before heNowMs
+	bad := &entity.NoteEntity{
+		ID: "bad", UserID: "author", CreatedAt: "not-a-timestamp",
+		User: entity.UserLite{ID: "author", MakeNotesHiddenBefore: &hb}, Visibility: "public",
+		Text: heStr("old"), FileIDs: []string{}, Files: []any{}, VisibleUserIDs: []string{}, Mentions: []string{},
+	}
+	packed := []entity.NoteEntity{noteWithRenote("p", bad)}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+	if !packed[0].Renote.IsHidden {
+		t.Error("unparseable createdAt must fail CLOSED on absolute makeNotesHiddenBefore")
 	}
 }
 
