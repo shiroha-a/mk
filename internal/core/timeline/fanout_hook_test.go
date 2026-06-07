@@ -504,6 +504,33 @@ func TestFanoutHook_PublishesStreamingTopics(t *testing.T) {
 	assert.Contains(t, pub.topics, "globalTimeline")
 }
 
+func TestFanoutHook_PublishesChannelTopic(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	chID := "ch1"
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &chID}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	assert.Contains(t, pub.topics, "channel:ch1")
+}
+
+func TestFanoutHook_NoChannelTopicWithoutChannel(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	for _, tp := range pub.topics {
+		assert.NotContains(t, tp, "channel:", "no channel topic expected for a channel-less note")
+	}
+}
+
 func TestFanoutHook_StreamingHomeOnlyForFollowersVisibility(t *testing.T) {
 	h, _, _ := newTestHook(t)
 	pub := &stubStreamingPublisher{}

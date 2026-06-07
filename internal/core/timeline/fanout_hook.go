@@ -139,6 +139,14 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 		listCap := resolveCap(limits, UserListTimelineKind)
 		h.fanoutToUserLists(ctx, n, author, listCap)
 	}
+
+	// 6. チャンネルタイムライン (Misskey channel): channel:<channelId> へ live
+	//    publish する (#1549)。旧実装は core/channel.OnNotePosted で counter のみ
+	//    更新し pubsub publish が無かったため channel WS が live note を1件も
+	//    受信していなかった。可視性は consumer 側 (channel_timeline.go) で gate。
+	if n.ChannelID != nil && *n.ChannelID != "" {
+		h.publishNote("channel:"+*n.ChannelID, n, author)
+	}
 }
 
 // fetchLimits returns the meta-derived cache caps, or zero values if no

@@ -105,7 +105,7 @@ func TestChannelTimeline_Lifecycle(t *testing.T) {
 	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
 	assert.Equal(t, []string{"channel:ch1"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 
 	ch.Dispose()
@@ -119,6 +119,51 @@ func TestChannelTimeline_MissingID(t *testing.T) {
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.NoError(t, err)
 	assert.Empty(t, ctx.subs)
+}
+
+// #1549: channel timeline now receives live notes (publisher added) and gates
+// per-subscriber. These cover the new OnRedisEvent gates.
+func TestChannelTimeline_WrongChannelDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch2","visibility":"public"}`))
+	assert.Empty(t, ctx.sentType, "note for a different channel must be dropped")
+}
+
+func TestChannelTimeline_MalformedDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{not json`))
+	assert.Empty(t, ctx.sentType, "malformed payload must be dropped (fail-closed)")
+}
+
+func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
+	t.Run("non-follower dropped", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{} // alice does not follow author
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
+		assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
+	})
+	t.Run("follower emitted", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{"author": false}
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+		assert.Equal(t, "note", ctx.sentType[0])
+	})
+	t.Run("self-authored emitted with nil snapshot", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"alice","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+	})
 }
 
 // --- UserList ---
@@ -492,7 +537,7 @@ func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
 	ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`))
-	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
+	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1","channelId":"ch1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
 }

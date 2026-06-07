@@ -35,6 +35,76 @@ func viewerUserFromCtx(ctx stream.ChannelContext) *model.User {
 	return u
 }
 
+// streamVisibilityProbe is the minimal note metadata for the per-subscriber
+// visibility gate, decoded without unmarshalling the whole NoteEntity.
+type streamVisibilityProbe struct {
+	UserID         string     `json:"userId"`
+	ChannelID      *string    `json:"channelId"`
+	Visibility     string     `json:"visibility"`
+	VisibleUserIDs []string   `json:"visibleUserIds"`
+	Mentions       []string   `json:"mentions"`
+	Reply          *replyMeta `json:"reply,omitempty"`
+}
+
+// streamNoteVisibleForViewer reports whether a streamed note payload is visible
+// to viewerID, mirroring core/note.CanSeeNote / TS Connection#isNoteVisibleForMe.
+// It is used by channels that go live during the visibility sweep (#1549) as a
+// per-subscriber re-filter. FAIL-CLOSED: a parse error returns false, and
+// followers/specified notes from a non-self author with a nil following
+// snapshot return false (same doctrine as userListVisibilityShouldEmit #1465).
+// public / home are always visible.
+func streamNoteVisibleForViewer(payload []byte, viewerID string, snap map[string]bool) bool {
+	var p streamVisibilityProbe
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	switch p.Visibility {
+	case string(model.NoteVisibilityPublic), string(model.NoteVisibilityHome):
+		return true
+	case string(model.NoteVisibilitySpecified):
+		if viewerID == "" {
+			return false
+		}
+		if viewerID == p.UserID {
+			return true
+		}
+		return slices.Contains(p.VisibleUserIDs, viewerID)
+	case string(model.NoteVisibilityFollowers):
+		if viewerID == "" {
+			return false
+		}
+		if viewerID == p.UserID {
+			return true
+		}
+		if p.Reply != nil && p.Reply.UserID == viewerID {
+			return true
+		}
+		if slices.Contains(p.Mentions, viewerID) {
+			return true
+		}
+		if snap == nil {
+			return false
+		}
+		_, ok := snap[p.UserID]
+		return ok
+	}
+	// 空 / 未知 visibility は安全側 (fail-closed)。packed NoteEntity は常に
+	// visibility を含むので実運用では到達しない。
+	return false
+}
+
+// noteChannelID decodes the channelId from a streamed note payload ("" when
+// absent / unparseable). Used by the channel timeline gate for defense-in-depth.
+func noteChannelID(payload []byte) string {
+	var p struct {
+		ChannelID *string `json:"channelId"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil || p.ChannelID == nil {
+		return ""
+	}
+	return *p.ChannelID
+}
+
 // embedProbe is the minimal embed metadata needed to decide whether an embedded
 // renote/reply must be hidden, WITHOUT decoding the whole NoteEntity. Author
 // preference fields ride the embed's UserLite (populated only when the embed
