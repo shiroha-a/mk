@@ -4680,3 +4680,78 @@ func TestIngestNote_QuotePrefersResolvableUrl(t *testing.T) {
 	require.NotNil(t, got.RenoteID, "_misskey_quote 失敗時は quoteUrl にフォールバックする")
 	assert.Equal(t, "localq", *got.RenoteID)
 }
+
+// 引用先が followers-only のローカル note の場合は紐付けず degrade する
+// (本家 NoteCreateService:346-352 が他人の followers note を renote 対象から
+// reject するのと同 doctrine)。非可視 note が renote embed 経由で本来見られない
+// viewer へ broadcast される IDOR を防ぐ (#1534 / #1532 regression)。
+// renoteCount も増分しない。
+func TestIngestNote_QuoteFollowersTargetDegrades(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu", Visibility: model.NoteVisibilityFollowers}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quoting a followers-only note",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Nil(t, got.RenoteID, "followers note は inbound quote から紐付けない (IDOR 防御)")
+	assert.Equal(t, int16(0), noteRepo.Notes["quoted1"].RenoteCount, "degrade 時は renoteCount を増やさない")
+}
+
+// 引用先が specified(DM) のローカル note の場合も紐付けず degrade する
+// (本家は specified を常に renote 対象から reject)。最も機微な DM 本文が embed
+// 経由で漏れるのを防ぐ (#1534)。
+func TestIngestNote_QuoteSpecifiedTargetDegrades(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/dm"
+	noteRepo.Notes["dm1"] = &model.Note{ID: "dm1", URI: &quotedURI, UserID: "qu", Visibility: model.NoteVisibilitySpecified}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quoting a DM",
+		"_misskey_quote": "https://remote.example/notes/dm",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	assert.Nil(t, got.RenoteID, "specified(DM) note は inbound quote から紐付けない (IDOR 防御)")
+	assert.Equal(t, int16(0), noteRepo.Notes["dm1"].RenoteCount)
+}
+
+// home 可視性の引用先は従来どおり紐付ける (denylist は followers / specified のみ弾く)。
+func TestIngestNote_QuoteHomeTargetLinks(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	quotedURI := "https://remote.example/notes/quoted"
+	noteRepo.Notes["quoted1"] = &model.Note{ID: "quoted1", URI: &quotedURI, UserID: "qu", Visibility: model.NoteVisibilityHome}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/q1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "quoting a home note",
+		"_misskey_quote": "https://remote.example/notes/quoted",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	got, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, got.RenoteID, "home note は引用可能なので紐付ける")
+	assert.Equal(t, "quoted1", *got.RenoteID)
+}

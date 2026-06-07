@@ -1134,6 +1134,19 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
 	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
 	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL)
+	// 引用先が followers / specified(DM) の場合は紐付けない。本家
+	// NoteCreateService.ts:346-352 は他人の followers note と全 specified note を
+	// renote 対象から reject するため、連合の正規 quote がこれらを指すことはない。
+	// inbound quote 解決はローカル note を可視性無視で引くため、これらを紐付けると
+	// 非可視のローカル note が renote embed 経由で本来見られない viewer へ broadcast
+	// される IDOR になる (#1534 / #1532 regression)。entity packing 層に hideNote
+	// 相当が無い現状 (#1536) では、ここで弾くのが embed leak への最小防御。quoted=nil に
+	// することで下の RenoteID 紐付けと renoteCount 増分の両方が skip される。
+	if quoted != nil &&
+		(quoted.Visibility == model.NoteVisibilityFollowers ||
+			quoted.Visibility == model.NoteVisibilitySpecified) {
+		quoted = nil
+	}
 	if quoted != nil && quoted.ID != note.ID {
 		note.RenoteID = &quoted.ID
 		note.RenoteUserID = &quoted.UserID
