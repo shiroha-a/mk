@@ -55,6 +55,13 @@ type UserListMemberLookup interface {
 	ListIDsAndOwnersByMember(memberID string) (map[string]string, error)
 }
 
+// UserRolesLookup abstracts "which roles does this user hold?" for role timeline
+// fanout (#1549). 循環依存回避のため interface (実装は core/role.Service)。
+// isExplorable / visibility の gate は consumer (role_timeline.go) 側で行う。
+type UserRolesLookup interface {
+	GetUserRoles(userID string) ([]*model.Role, error)
+}
+
 // FanoutHook implements note.TimelineFanoutHook by pushing newly-created notes
 // onto the appropriate Redis timelines (home/local/global/user).
 type FanoutHook struct {
@@ -63,6 +70,7 @@ type FanoutHook struct {
 	publisher     StreamingPublisher
 	limits        MetaCacheLimitsProvider
 	userListRepo  UserListMemberLookup
+	userRoles     UserRolesLookup
 }
 
 // NewFanoutHook constructs a FanoutHook.
@@ -88,6 +96,12 @@ func (h *FanoutHook) SetCacheLimitsProvider(p MetaCacheLimitsProvider) {
 // triggers push to userListTimeline:<listId> topics (#330).
 func (h *FanoutHook) SetUserListRepo(r UserListMemberLookup) {
 	h.userListRepo = r
+}
+
+// SetUserRolesLookup attaches a UserRolesLookup so that public note creation
+// publishes to roleTimeline:<roleId> topics for the author's roles (#1549).
+func (h *FanoutHook) SetUserRolesLookup(r UserRolesLookup) {
+	h.userRoles = r
 }
 
 // OnNoteCreated delivers the given note to user/home/local/global timelines.
@@ -146,6 +160,19 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	//    受信していなかった。可視性は consumer 側 (channel_timeline.go) で gate。
 	if n.ChannelID != nil && *n.ChannelID != "" {
 		h.publishNote("channel:"+*n.ChannelID, n, author)
+	}
+
+	// 7. ロールタイムライン (#1549): 著者の各ロールの roleTimeline:<roleId> へ
+	//    publish。consumer (role_timeline.go) が isExplorable role かつ
+	//    visibility==public のみ emit するので、publish 自体も public note に
+	//    絞って無駄な fanout を避ける (isExplorable は runtime 可変なので gate は
+	//    consumer 側に置く、本家 RoleService.addNoteToRoleTimeline と同じ)。
+	if h.userRoles != nil && n.Visibility == model.NoteVisibilityPublic {
+		if roles, err := h.userRoles.GetUserRoles(author.ID); err == nil {
+			for _, r := range roles {
+				h.publishNote("roleTimeline:"+r.ID, n, author)
+			}
+		}
 	}
 }
 

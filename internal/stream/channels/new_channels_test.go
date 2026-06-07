@@ -28,6 +28,17 @@ func newAdminCh(ctx stream.ChannelContext, isAdmin bool) stream.Channel {
 	return NewAdminFactory(checker).New(ctx)
 }
 
+// mockExplorable is a test double for RoleExplorableChecker.
+type mockExplorable struct{ explorable map[string]bool }
+
+func (m mockExplorable) IsExplorable(roleID string) bool { return m.explorable[roleID] }
+
+// newRoleCh builds a roleTimeline channel where role "r1" is explorable per the
+// flag, via the gated factory (#1549).
+func newRoleCh(ctx stream.ChannelContext, explorable bool) stream.Channel {
+	return NewRoleTimelineFactory(mockExplorable{explorable: map[string]bool{"r1": explorable}}).New(ctx)
+}
+
 // interface conformance checks
 var (
 	_ stream.Channel = (*HashtagChannel)(nil)
@@ -341,11 +352,11 @@ func TestUserList_SpecifiedVisibility_AssumesFanoutSkips(t *testing.T) {
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true) // r1 explorable
 	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
 	assert.Equal(t, []string{"roleTimeline:r1"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 
 	ch.Dispose()
@@ -354,11 +365,43 @@ func TestRoleTimeline_Lifecycle(t *testing.T) {
 
 func TestRoleTimeline_MissingID(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true)
 	// TS本家はroleId欠如時もinit成功とするため、errorは返さずno-op
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.NoError(t, err)
 	assert.Empty(t, ctx.subs)
+}
+
+// #1549: roleTimeline now receives live notes; only isExplorable roles +
+// public-visibility notes are emitted (本家 role-timeline.ts parity).
+func TestRoleTimeline_NonExplorableDropped(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := newRoleCh(ctx, false) // r1 NOT explorable
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
+	assert.Empty(t, ctx.sentType, "non-explorable role must not stream notes")
+}
+
+func TestRoleTimeline_NonPublicDropped(t *testing.T) {
+	ch := newRoleCh(newCtx(nil), true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	for _, vis := range []string{"home", "followers", "specified"} {
+		ctx := newCtx(nil)
+		c := newRoleCh(ctx, true)
+		c.Init(json.RawMessage(`{"roleId":"r1"}`))
+		c.OnRedisEvent([]byte(`{"id":"n1","visibility":"` + vis + `"}`))
+		assert.Empty(t, ctx.sentType, "roleTimeline emits public only, got "+vis)
+	}
+	_ = ch
+}
+
+func TestRoleTimeline_ExplorablePublicEmitted(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := newRoleCh(ctx, true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 // --- Admin ---
@@ -506,7 +549,7 @@ func TestNoOpClientMessages(t *testing.T) {
 		{"antenna", NewAntenna(newCtx(&model.User{ID: "u1"}))},
 		{"channelTimeline", NewChannelTimeline(newCtx(nil))},
 		{"userList", NewUserList(newCtx(&model.User{ID: "u1"}))},
-		{"roleTimeline", NewRoleTimeline(newCtx(nil))},
+		{"roleTimeline", newRoleCh(newCtx(nil), true)},
 		{"admin", newAdminCh(newCtx(&model.User{ID: "u1"}), true)},
 		{"serverStats", NewServerStats(newCtx(nil))},
 		{"queueStats", NewQueueStats(newCtx(nil))},
@@ -544,9 +587,10 @@ func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 
 func TestRoleTimeline_FilteredRenote(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true)
 	ch.Init(json.RawMessage(`{"roleId":"r1","withRenotes":false}`))
-	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[]}`))
+	// public + explorable で gate を通過させ、純リノート filter (shouldEmit) で drop。
+	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[],"visibility":"public"}`))
 	assert.Empty(t, ctx.sentType)
 }
 

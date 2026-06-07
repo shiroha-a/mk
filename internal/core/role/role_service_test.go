@@ -31,6 +31,15 @@ func TestGetUserRoles_NoRoles(t *testing.T) {
 	assert.Empty(t, roles)
 }
 
+func TestService_IsExplorable(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsExplorable: true}
+	roleRepo.Roles["r2"] = &model.Role{ID: "r2", Name: "Hidden", IsExplorable: false}
+	assert.True(t, svc.IsExplorable("r1"))
+	assert.False(t, svc.IsExplorable("r2"))
+	assert.False(t, svc.IsExplorable("missing"), "unknown role must be fail-closed")
+}
+
 func TestGetUserRoles_WithRoles(t *testing.T) {
 	svc, roleRepo, assignRepo, _ := newTestService(t)
 	adminRole := &model.Role{ID: "r1", Name: "Admin", IsAdministrator: true}

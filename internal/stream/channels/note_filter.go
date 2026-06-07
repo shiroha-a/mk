@@ -105,6 +105,18 @@ func noteChannelID(payload []byte) string {
 	return *p.ChannelID
 }
 
+// noteVisibility decodes the visibility from a streamed note payload ("" when
+// absent / unparseable). Used by the roleTimeline gate (public-only, #1549).
+func noteVisibility(payload []byte) string {
+	var p struct {
+		Visibility string `json:"visibility"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.Visibility
+}
+
 // embedProbe is the minimal embed metadata needed to decide whether an embedded
 // renote/reply must be hidden, WITHOUT decoding the whole NoteEntity. Author
 // preference fields ride the embed's UserLite (populated only when the embed
