@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -267,6 +268,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 		}
 	}
 	packed := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
+	notehide.HideEmbeds(viewer, packed)
 	noteByID := make(map[string]entity.NoteEntity, len(packed))
 	for _, ne := range packed {
 		noteByID[ne.ID] = ne
@@ -331,6 +333,7 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	result := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(result, viewer)
+	notehide.HideEmbeds(viewer, result)
 	return c.JSON(http.StatusOK, result)
 }
 

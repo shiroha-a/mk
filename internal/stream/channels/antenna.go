@@ -39,6 +39,7 @@ func (c *AntennaChannel) Init(params json.RawMessage) error {
 }
 
 func (c *AntennaChannel) OnRedisEvent(payload []byte) {
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

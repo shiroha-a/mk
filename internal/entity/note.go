@@ -130,6 +130,29 @@ func packPoll(p *model.Poll) *PollEntity {
 	}
 }
 
+// HideNoteEntity blanks an embedded note's content for a viewer who is not
+// allowed to see it, mirroring upstream NoteEntityService.hideNote. It clears
+// exactly the 7 fields upstream clears (text/cw/poll/files/fileIds/visibleUserIds
+// + isHidden) and keeps everything else (id/userId/user/createdAt/reactions/
+// counts/hasPoll), so the frontend still renders a "hidden post" placeholder
+// card. Used by both the REST and streaming embed-visibility gates (#1536).
+//
+// visibleUserIds / fileIds / files は non-nil 空スライスにして JSON で [] を出す。
+// upstream hideNote は visibleUserIds を undefined にして key 自体を落とすが、
+// mk-go は全 note で visibleUserIds:[] を出す既存仕様 (packNoteAtDepth) に揃える。
+func HideNoteEntity(n *NoteEntity) {
+	if n == nil {
+		return
+	}
+	n.Text = nil
+	n.CW = nil
+	n.Poll = nil
+	n.FileIDs = make([]string, 0)
+	n.Files = []any{}
+	n.VisibleUserIDs = make([]string, 0)
+	n.IsHidden = true
+}
+
 func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 	createdAt := ""
 	if t, err := idGen.ParseTime(n.ID); err == nil {

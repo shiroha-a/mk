@@ -41,6 +41,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/meta"
 	"github.com/shiroha-a/mk/internal/api/mute"
 	"github.com/shiroha-a/mk/internal/api/nodeinfo"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/notes"
 	"github.com/shiroha-a/mk/internal/api/notifications"
 	"github.com/shiroha-a/mk/internal/api/pages"
@@ -1131,6 +1132,7 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetDriveFolderRepo(driveFolderRepo)
 	notesHandler.SetUserRepo(userRepo)
 	notesHandler.SetUserListRepo(userListRepo)
+	notehide.SetFollowingRepo(followingRepo)
 	// LocalTimeline / GlobalTimeline / HybridTimeline で ltlAvailable /
 	// gtlAvailable role policy を gate するために配線 (#1026)。匿名 viewer に
 	// 対しては GetUserPolicies("") が base policies を返すので、admin が

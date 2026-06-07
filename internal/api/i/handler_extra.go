@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -179,6 +180,7 @@ func (h *Handler) Favorites(c echo.Context) error {
 	// /api/i/favorites は認証 path なので u が viewer。pinned notes と同じく
 	// 自分の myReaction / Channel / Files を埋める (#426)。
 	h.fieldRes.Apply(packed, u)
+	notehide.HideEmbeds(u, packed)
 	byID := make(map[string]*entity.NoteEntity, len(packed))
 	for i := range packed {
 		byID[packed[i].ID] = &packed[i]

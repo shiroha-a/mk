@@ -75,6 +75,7 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 	if !userListVisibilityShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

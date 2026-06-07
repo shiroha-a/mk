@@ -3,8 +3,11 @@ package channels
 import (
 	"encoding/json"
 	"slices"
+	"time"
 
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/wordmute"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
 )
@@ -19,6 +22,132 @@ func viewerIDFromCtx(ctx stream.ChannelContext) string {
 		return ""
 	}
 	return u.ID
+}
+
+// viewerUserFromCtx returns the authenticated *model.User (or nil for an
+// anonymous connection), guarding against the typed-nil that ctx.User() may
+// return (same trap viewerIDFromCtx handles).
+func viewerUserFromCtx(ctx stream.ChannelContext) *model.User {
+	u, ok := ctx.User().(*model.User)
+	if !ok || u == nil {
+		return nil
+	}
+	return u
+}
+
+// embedProbe is the minimal embed metadata needed to decide whether an embedded
+// renote/reply must be hidden, WITHOUT decoding the whole NoteEntity. Author
+// preference fields ride the embed's UserLite (populated only when the embed
+// author was preloaded at pack time).
+type embedProbe struct {
+	UserID         string   `json:"userId"`
+	Visibility     string   `json:"visibility"`
+	VisibleUserIDs []string `json:"visibleUserIds"`
+	Mentions       []string `json:"mentions"`
+	CreatedAt      string   `json:"createdAt"`
+	User           struct {
+		ID                           string `json:"id"`
+		RequireSigninToViewContents  *bool  `json:"requireSigninToViewContents"`
+		MakeNotesHiddenBefore        *int   `json:"makeNotesHiddenBefore"`
+		MakeNotesFollowersOnlyBefore *int   `json:"makeNotesFollowersOnlyBefore"`
+	} `json:"user"`
+}
+
+// hideEmbeds blanks embedded renote/reply content the connection's viewer is
+// not allowed to see, right before a channel Sends the note (#1536). It pulls
+// the viewer + per-connection following snapshot from ctx; the snapshot makes
+// the follower check O(1) in-memory (no DB query per subscriber).
+func hideEmbeds(ctx stream.ChannelContext, payload []byte) []byte {
+	return hideEmbedsForViewer(payload, viewerUserFromCtx(ctx), ctx.FollowingSnapshot(), time.Now().UnixMilli())
+}
+
+// hideEmbedsForViewer is the testable core of hideEmbeds. It returns the
+// ORIGINAL payload verbatim (zero copy) unless an embed is genuinely hideable
+// for viewer, in which case it decodes a FRESH NoteEntity, blanks the
+// hide-eligible embeds, and re-marshals — never mutating the shared input
+// buffer / publisher body cache. snap maps followeeID->withReplies (only key
+// presence is used). nil viewer / nil snap fail closed (followers/specified
+// hidden, public kept).
+func hideEmbedsForViewer(payload []byte, viewer *model.User, snap map[string]bool, nowMs int64) []byte {
+	var probe struct {
+		Renote json.RawMessage `json:"renote"`
+		Reply  json.RawMessage `json:"reply"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return payload
+	}
+	hideRenote := embedRawHideable(probe.Renote, viewer, snap, nowMs)
+	hideReply := embedRawHideable(probe.Reply, viewer, snap, nowMs)
+	if !hideRenote && !hideReply {
+		// 隠す embed が無い (= no-embed / public / own / follower) → verbatim。
+		return payload
+	}
+	var full entity.NoteEntity
+	if err := json.Unmarshal(payload, &full); err != nil {
+		return payload
+	}
+	if hideRenote && full.Renote != nil {
+		entity.HideNoteEntity(full.Renote)
+	}
+	if hideReply && full.Reply != nil {
+		entity.HideNoteEntity(full.Reply)
+	}
+	out, err := json.Marshal(&full)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// embedRawHideable decodes the embed-probe metadata from a raw embed object and
+// runs the shared decision. Absent/null embed or a probe-decode error → false
+// (nothing to hide / cannot probe).
+func embedRawHideable(raw json.RawMessage, viewer *model.User, snap map[string]bool, nowMs int64) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var p embedProbe
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false
+	}
+	follows := func(id string) bool {
+		if snap == nil {
+			return false
+		}
+		_, ok := snap[id]
+		return ok
+	}
+	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p, nowMs), follows, nowMs)
+}
+
+func embedFactsFromProbe(p embedProbe, fallbackMs int64) corenote.EmbedFacts {
+	f := corenote.EmbedFacts{
+		AuthorID:       p.UserID,
+		Visibility:     p.Visibility,
+		VisibleUserIDs: p.VisibleUserIDs,
+		Mentions:       p.Mentions,
+		CreatedAtMs:    parseCreatedAtMsStream(p.CreatedAt, fallbackMs),
+	}
+	if p.User.ID != "" {
+		f.AuthorPrefsKnown = true
+		if p.User.RequireSigninToViewContents != nil {
+			f.RequireSigninToViewContents = *p.User.RequireSigninToViewContents
+		}
+		f.MakeNotesHiddenBefore = p.User.MakeNotesHiddenBefore
+		f.MakeNotesFollowersOnlyBefore = p.User.MakeNotesFollowersOnlyBefore
+	}
+	return f
+}
+
+func parseCreatedAtMsStream(s string, fallbackMs int64) int64 {
+	if s == "" {
+		return fallbackMs
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return fallbackMs
+	}
+	return t.UnixMilli()
 }
 
 // noteFilter provides client-controlled filtering for timeline channels.

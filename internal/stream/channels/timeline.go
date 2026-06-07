@@ -41,6 +41,7 @@ func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateLocal) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
@@ -80,6 +81,7 @@ func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateGlobal) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 func (c *GlobalTimelineChannel) OnClientMessage(string, json.RawMessage) {}
@@ -127,6 +129,7 @@ func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), false, replyGateHome) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
@@ -177,6 +180,7 @@ func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateHybrid) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

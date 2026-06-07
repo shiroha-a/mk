@@ -8,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
@@ -345,6 +346,7 @@ func (h *Handler) Create(c echo.Context) error {
 	packed := entity.PackNoteWithInstance(c.Request().Context(), created, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	s := []entity.NoteEntity{packed}
 	h.fieldResolver().Apply(s, user)
+	notehide.HideEmbeds(user, s)
 	return c.JSON(http.StatusOK, map[string]any{
 		"createdNote": s[0],
 	})
@@ -371,6 +373,7 @@ func (h *Handler) Show(c echo.Context) error {
 	packed := entity.PackNoteWithInstance(c.Request().Context(), n, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	s := []entity.NoteEntity{packed}
 	h.fieldResolver().Apply(s, viewer)
+	notehide.HideEmbeds(viewer, s)
 	return c.JSON(http.StatusOK, s[0])
 }
 
@@ -638,6 +641,7 @@ func (h *Handler) packMany(ctx context.Context, notes []*model.Note, viewer *mod
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldResolver().Apply(out, viewer)
+	notehide.HideEmbeds(viewer, out)
 	return out
 }
 

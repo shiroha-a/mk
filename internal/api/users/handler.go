@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
@@ -607,6 +608,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)
+	notehide.HideEmbeds(viewer, out)
 	return c.JSON(http.StatusOK, out)
 }
 
@@ -1065,6 +1067,7 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 					notes = notesfilter.FilterVisible(viewer, notes, h.followingRepo)
 					entities := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 					h.fieldRes.Apply(entities, viewer)
+					notehide.HideEmbeds(viewer, entities)
 					packed := make([]any, 0, len(entities))
 					for _, pn := range entities {
 						packed = append(packed, pn)

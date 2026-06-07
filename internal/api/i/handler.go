@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
@@ -1442,6 +1443,7 @@ func (h *Handler) fillPinnedFields(ctx context.Context, u *model.User, profile *
 					// /api/i は認証された自身を返す path なので u 自身を viewer
 					// として渡し、pinned note の myReaction も含めて埋める (#426)。
 					h.fieldRes.Apply(entities, u)
+					notehide.HideEmbeds(u, entities)
 					packed := make([]any, 0, len(entities))
 					for _, pn := range entities {
 						packed = append(packed, pn)

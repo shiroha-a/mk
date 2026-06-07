@@ -39,6 +39,7 @@ func (c *RoleTimelineChannel) OnRedisEvent(payload []byte) {
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
+	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
