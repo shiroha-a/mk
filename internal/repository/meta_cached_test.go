@@ -1,6 +1,7 @@
 package repository_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// recordingPublisher captures MetaReloadTopic broadcasts for assertions and can
+// be configured to fail to verify best-effort publish handling.
+type recordingPublisher struct {
+	mu       sync.Mutex
+	channels []string
+	err      error
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, channel string, _ any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.channels = append(p.channels, channel)
+	return p.err
+}
+
+func (p *recordingPublisher) recorded() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.channels...)
+}
 
 // countingMetaRepo counts calls to each method for cache verification.
 type countingMetaRepo struct {
@@ -157,6 +179,67 @@ func TestCachedMetaRepository_ConcurrentFetch(t *testing.T) {
 
 	// ダブルチェックロックにより1〜数回のFetchで済む
 	assert.LessOrEqual(t, inner.fetchCount.Load(), int32(3))
+}
+
+// #1533: Update は他プロセスの cache を捨てさせるため MetaReloadTopic を
+// broadcast する。
+func TestCachedMetaRepository_UpdateBroadcastsReload(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+	pub := &recordingPublisher{}
+	cached.SetReloadPublisher(pub)
+
+	require.NoError(t, cached.Update(map[string]any{"name": "new"}))
+
+	assert.Equal(t, []string{repository.MetaReloadTopic}, pub.recorded())
+}
+
+// #1533: publish 失敗は admin update を失敗させず、local cache invalidate も
+// そのまま行われる (best-effort broadcast)。
+func TestCachedMetaRepository_UpdatePublishErrorIsNonFatal(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+	cached.SetReloadPublisher(&recordingPublisher{err: errors.New("redis down")})
+
+	_, err := cached.Fetch()
+	require.NoError(t, err)
+	require.Equal(t, int32(1), inner.fetchCount.Load())
+
+	require.NoError(t, cached.Update(map[string]any{"name": "new"}))
+
+	// publish が失敗しても cache は invalidate され、次の Fetch は再取得する。
+	_, err = cached.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), inner.fetchCount.Load())
+}
+
+// #1533: EnsureInitial は startup seed なので broadcast しない。
+func TestCachedMetaRepository_EnsureInitialDoesNotBroadcast(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+	pub := &recordingPublisher{}
+	cached.SetReloadPublisher(pub)
+
+	require.NoError(t, cached.EnsureInitial("m1"))
+
+	assert.Empty(t, pub.recorded())
+}
+
+// #1533: cross-process subscriber が呼ぶ Invalidate() は次の Fetch を強制再取得
+// させる。
+func TestCachedMetaRepository_InvalidateBustsCache(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+
+	_, err := cached.Fetch()
+	require.NoError(t, err)
+	require.Equal(t, int32(1), inner.fetchCount.Load())
+
+	cached.Invalidate()
+
+	_, err = cached.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), inner.fetchCount.Load())
 }
 
 // #739: NewCachedMetaRepository (default 5-min TTL constructor) を coverage 化。

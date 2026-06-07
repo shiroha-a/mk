@@ -1708,6 +1708,26 @@ func (s *Server) setupRoutes() {
 	streamPubSub := event.NewPubSubService(s.redis.Pubsub, "stream:")
 	streamBus := stream.NewEventPubSubBus(streamPubSub)
 
+	// meta cache の cross-process invalidation (#1533)。admin/update-meta は
+	// 1 プロセスの in-memory cache しか invalidate しないため、他プロセスは TTL
+	// 切れまで stale meta を返し続ける。特に frontend SSR boot meta
+	// (<script id="misskey_meta">) の googleAnalyticsMeasurementId が残ると、
+	// 管理画面で空にしても別プロセス経由のページ表示で GA タグが読み込まれ続ける。
+	// wordmute reload (#791) と同じく Redis pubsub で全プロセスへ reload を
+	// broadcast し、受信側は local cache を即座に捨てる (upstream MetaService の
+	// metaUpdated internal event 相当)。
+	if cmr, ok := metaRepo.(*repository.CachedMetaRepository); ok {
+		cmr.SetReloadPublisher(streamPubSub)
+		streamPubSub.Subscribe(context.Background(), repository.MetaReloadTopic, func([]byte) {
+			cmr.Invalidate()
+		})
+		// graceful shutdown 時に subscription goroutine と Redis 接続を解放する
+		// (serverStats/queueStats publisher や wordmute reload と同じ運用)。
+		s.registerShutdownHook(func(_ context.Context) {
+			_ = streamPubSub.Unsubscribe(repository.MetaReloadTopic)
+		})
+	}
+
 	// pollVoted / reacted / unreacted / deleted を noteStream:<id> に publish
 	// する共通 publisher。subNote / sn メッセージで購読しているクライアントへ
 	// リアクション・削除イベントが流れる (#690 / #700)。pollService /
