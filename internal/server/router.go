@@ -1115,6 +1115,7 @@ func (s *Server) setupRoutes() {
 		slog.Info("timeline JSON cache enabled", "ttlSeconds", int(ttl.Seconds()))
 	}
 	notesHandler.SetDriveFileRepo(driveFileRepo)
+	notesHandler.SetThreadMutingRepo(noteThreadMutingRepo) // #1538: thread-muting write
 	notesHandler.SetNoteReactionRepo(reactionRepo)
 	notesHandler.SetChannelRepo(channelRepo)
 	notesHandler.SetChannelMutingRepo(channelMutingRepo)

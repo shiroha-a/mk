@@ -40,6 +40,7 @@ type Handler struct {
 	favoriteRepo      repository.NoteFavoriteRepository
 	driveFileRepo     repository.DriveFileRepository
 	draftRepo         repository.NoteDraftRepository
+	threadMutingRepo  repository.NoteThreadMutingRepository
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
