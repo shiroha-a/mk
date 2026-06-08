@@ -142,11 +142,12 @@ func NewHandler(svc *corechannel.Service, idGen id.Generator) *Handler {
 
 // CreateRequest is the request body for channels/create.
 type CreateRequest struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description"`
-	Color       string  `json:"color"`
-	IsSensitive bool    `json:"isSensitive"`
-	BannerID    *string `json:"bannerId"`
+	Name                  string  `json:"name"`
+	Description           *string `json:"description"`
+	Color                 string  `json:"color"`
+	IsSensitive           bool    `json:"isSensitive"`
+	BannerID              *string `json:"bannerId"`
+	AllowRenoteToExternal *bool   `json:"allowRenoteToExternal"`
 }
 
 // Create handles POST /api/channels/create.
@@ -172,12 +173,13 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 	}
 	ch, err := h.svc.Create(corechannel.CreateInput{
-		OwnerID:     user.ID,
-		Name:        req.Name,
-		Description: req.Description,
-		Color:       req.Color,
-		IsSensitive: req.IsSensitive,
-		BannerID:    req.BannerID,
+		OwnerID:               user.ID,
+		Name:                  req.Name,
+		Description:           req.Description,
+		Color:                 req.Color,
+		IsSensitive:           req.IsSensitive,
+		BannerID:              req.BannerID,
+		AllowRenoteToExternal: req.AllowRenoteToExternal,
 	})
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -208,14 +210,15 @@ func (h *Handler) Show(c echo.Context) error {
 
 // UpdateRequest is the request body for channels/update.
 type UpdateRequest struct {
-	ChannelID     string    `json:"channelId"`
-	Name          *string   `json:"name"`
-	Description   *string   `json:"description"`
-	Color         *string   `json:"color"`
-	IsArchived    *bool     `json:"isArchived"`
-	IsSensitive   *bool     `json:"isSensitive"`
-	BannerID      *string   `json:"bannerId"`
-	PinnedNoteIDs *[]string `json:"pinnedNoteIds"`
+	ChannelID             string    `json:"channelId"`
+	Name                  *string   `json:"name"`
+	Description           *string   `json:"description"`
+	Color                 *string   `json:"color"`
+	IsArchived            *bool     `json:"isArchived"`
+	IsSensitive           *bool     `json:"isSensitive"`
+	BannerID              *string   `json:"bannerId"`
+	PinnedNoteIDs         *[]string `json:"pinnedNoteIds"`
+	AllowRenoteToExternal *bool     `json:"allowRenoteToExternal"`
 }
 
 // Update handles POST /api/channels/update.
@@ -226,12 +229,13 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	in := corechannel.UpdateInput{
-		Name:          req.Name,
-		Color:         req.Color,
-		IsArchived:    req.IsArchived,
-		IsSensitive:   req.IsSensitive,
-		BannerID:      req.BannerID,
-		PinnedNoteIDs: req.PinnedNoteIDs,
+		Name:                  req.Name,
+		Color:                 req.Color,
+		IsArchived:            req.IsArchived,
+		IsSensitive:           req.IsSensitive,
+		BannerID:              req.BannerID,
+		PinnedNoteIDs:         req.PinnedNoteIDs,
+		AllowRenoteToExternal: req.AllowRenoteToExternal,
 	}
 	if req.Description != nil {
 		desc := req.Description

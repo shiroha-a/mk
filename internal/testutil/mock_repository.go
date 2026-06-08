@@ -4371,6 +4371,10 @@ func applyChannelFields(c *model.Channel, fields map[string]any) {
 			if b, ok := v.(bool); ok {
 				c.IsSensitive = b
 			}
+		case "allowRenoteToExternal":
+			if b, ok := v.(bool); ok {
+				c.AllowRenoteToExternal = b
+			}
 		case "lastNotedAt":
 			if t, ok := v.(*time.Time); ok {
 				c.LastNotedAt = t

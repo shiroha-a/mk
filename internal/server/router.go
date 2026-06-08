@@ -253,6 +253,9 @@ func (s *Server) setupRoutes() {
 
 	// Channels (Phase 4.2)
 	channelService := corechannel.NewService(channelRepo, channelFollowingRepo, noteRepo, idGen)
+	// channels/update の moderator bypass (#1540): owner でなくても moderator
+	// なら他人の channel を編集できる upstream 互換のため roleService を inject。
+	channelService.SetModeratorChecker(roleService)
 	// Phase 7-2 follow-up (#271): channel note 着信時に follower ごとの
 	// unread row を作成して /api/i の hasUnreadChannel に反映する。
 	channelNoteUnreadRepo := repository.NewChannelNoteUnreadRepository(s.db)

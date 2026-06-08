@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/channels/update` でモデレーターが他人のチャンネルを編集できず、`channels/create` ・ `update` が `allowRenoteToExternal` パラメータを無視していた問題を修正 (issue #1540 HIGH)。(1) 本家 `channels/update` は owner 以外でも moderator なら編集を許可する (`!isModerator && channel.userId !== me.id` で reject)。mk-go は owner のみだったので、既存 `roleService.IsModerator` を流用した moderator bypass を `Service.Update` に追加 (checker 未配線時は owner-only に fail-closed)。(2) 本家 `create.ts:93` の `allowRenoteToExternal ?? true` 準拠で `create`/`update` が `allowRenoteToExternal` (bool) を受理し channel に保存する (未指定は true 既定)。`model.Channel.AllowRenoteToExternal` カラムは既存のため migration 不要。
+
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
 
 - Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。
