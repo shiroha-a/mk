@@ -1887,18 +1887,34 @@ func (h *Handler) RolesDelete(c echo.Context) error {
 // RolesAssign handles POST /api/admin/roles/assign.
 func (h *Handler) RolesAssign(c echo.Context) error {
 	var req struct {
-		UserID    string  `json:"userId"`
-		RoleID    string  `json:"roleId"`
-		ExpiresAt *string `json:"expiresAt"`
+		UserID string `json:"userId"`
+		RoleID string `json:"roleId"`
+		// upstream assign.ts paramDef は expiresAt: { type:'integer', nullable }
+		// = epoch ms。frontend も epoch ms (number) を送るため *int64 で受ける。
+		// 以前は *string + RFC3339 parse だったが、JSON number を *string に
+		// bind すると unmarshal error → 400 となり期限付き role 付与が常に
+		// 失敗していた (#1542)。
+		ExpiresAt *int64 `json:"expiresAt"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and roleId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// canEditMembersByModerator gate (upstream assign.ts:69-76)。role lookup →
+	// gate の順で、moderator (非 administrator) は canEditMembersByModerator が
+	// 立つ role しか付け外しできない。NO_SUCH_ROLE / ACCESS_DENIED の UUID は
+	// assign 固有のもの。
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6503c040-6af4-4ed9-bf07-f2dd16678eab", "25b5bc31-dc79-4ebd-9bd2-c84978fd052c"); handled {
+		return err
+	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil {
-		if t, err := time.Parse(time.RFC3339, *req.ExpiresAt); err == nil {
-			expiresAt = &t
+		t := time.UnixMilli(*req.ExpiresAt)
+		// upstream assign.ts:83-85: 過去 (現在以下) の expiresAt は no-op で
+		// return する (過去日時付与の無効化)。
+		if !t.After(time.Now()) {
+			return c.NoContent(http.StatusNoContent)
 		}
+		expiresAt = &t
 	}
 	if err := h.roleService.Assign(req.UserID, req.RoleID, expiresAt); err != nil {
 		if err == role.ErrRoleNotFound {
@@ -1913,6 +1929,35 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// requireCanEditRoleMembers enforces the upstream canEditMembersByModerator
+// gate shared by admin/roles/assign and /unassign. It looks up the role first
+// (responding NO_SUCH_ROLE with the per-endpoint error id when missing) and then
+// denies moderators that may not edit the role's members, while administrators
+// (and root) are always allowed.
+//
+// The returned handled flag reports whether a response was already written: when
+// true the caller must return the accompanying error immediately; when false the
+// caller may proceed. echo の c.JSON は成功時 nil を返すため bool で「応答を書い
+// たか」を伝える (err だけでは deny を short-circuit できない)。
+//
+// 認可判定 (viewer-based) なので service 層ではなく handler 層に置く。viewer が
+// 取得できない場合は administrator とみなさず ACCESS_DENIED に倒す (fail-closed)。
+// NO_SUCH_ROLE / ACCESS_DENIED の UUID は assign と unassign で異なるため呼び
+// 出し側から渡す。
+func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID, accessDeniedID string) (handled bool, err error) {
+	r, err := h.roleService.Show(roleID)
+	if err != nil {
+		return true, c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
+	}
+	if r.CanEditMembersByModerator {
+		return false, nil
+	}
+	if me := middleware.GetUser(c); me != nil && h.roleService.IsAdministrator(me.ID) {
+		return false, nil
+	}
+	return true, c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
+}
+
 // RolesUnassign handles POST /api/admin/roles/unassign.
 func (h *Handler) RolesUnassign(c echo.Context) error {
 	var req struct {
@@ -1921,6 +1966,12 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and roleId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// canEditMembersByModerator gate (upstream unassign.ts:71-78)。role 不在は
+	// assign 同様 NO_SUCH_ROLE を先に返す (TS と同順)。NO_SUCH_ROLE /
+	// ACCESS_DENIED の UUID は unassign 固有のもの。
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6e519036-a70d-4c76-b679-bc8fb18194e2", "24636eee-e8c1-493e-94b2-e16ad401e262"); handled {
+		return err
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {
 		if err == role.ErrNotAssigned {
