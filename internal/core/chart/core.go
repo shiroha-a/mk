@@ -458,11 +458,16 @@ func (c *Chart) GetChart(ctx context.Context, span Span, amount int, cursor *tim
 	if amount <= 0 {
 		amount = 1
 	}
-	end := c.clock.Now()
+	// upstream getChartRaw は window 末尾バケットを、cursor 指定時は
+	// truncate(cursor + 1span - 1ms) = ceil(cursor)、未指定 (now) 時は
+	// truncate(now) = floor(now) で求める。後者は getCurrentDate 相当。
+	// 両者で丸め方向が違うため cursor の有無で分岐する (#1565)。
+	var end time.Time
 	if cursor != nil {
-		end = *cursor
+		end = ceilToSpan(*cursor, span)
+	} else {
+		end = truncateToSpan(c.clock.Now(), span)
 	}
-	end = truncateToSpan(end, span)
 	start := stepBack(end, amount-1, span)
 
 	rows, err := c.repo.FindRange(ctx, span, group, start.Unix(), end.Unix())

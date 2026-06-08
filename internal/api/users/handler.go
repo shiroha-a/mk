@@ -291,6 +291,12 @@ func (h *Handler) Show(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream show.ts は isModerator = roleService.isModerator(me) を入口で
+	// 1 回だけ評価し、単体/バルク両モードの suspended user 露出制御に使う。
+	// moderatorChecker が未配線 (nil) / 匿名 viewer なら false = fail-closed。
+	viewer := middleware.GetUser(c)
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
+
 	// userIds が指定されている場合はバルクモード (UsersBulkと同等)。
 	// JSON "userIds":[] は空スライス (len==0) として届く。nil はフィールド未指定。
 	if req.UserIDs != nil {
@@ -306,14 +312,19 @@ func (h *Handler) Show(c echo.Context) error {
 		}
 		users := make([]*model.User, 0, len(bundles))
 		for _, b := range bundles {
+			// upstream show.ts:136-141: 非 moderator には isSuspended:false を
+			// 強制し suspended user を結果から除外する。moderator は素通し。
+			if !iAmModerator && b.User.IsSuspended {
+				continue
+			}
 			users = append(users, b.User)
 		}
 		resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
-		out := make([]entity.UserLite, 0, len(bundles))
-		for _, b := range bundles {
-			lite := entity.PackUserLite(b.User)
+		out := make([]entity.UserLite, 0, len(users))
+		for _, u := range users {
+			lite := entity.PackUserLite(u)
 			resolver.FillUserLite(&lite)
-			h.populateUserEmojis(b.User, &lite)
+			h.populateUserEmojis(u, &lite)
 			out = append(out, lite)
 		}
 		return c.JSON(http.StatusOK, out)
@@ -340,9 +351,12 @@ func (h *Handler) Show(c echo.Context) error {
 		return apierr.JSONNoSuchUser(c)
 	}
 
-	// 認証済み viewer は pinned note の myReaction (#426) と viewer 依存
-	// フィールド取得 (下方ブロック) で再利用するため一度だけ取り出す。匿名なら nil。
-	viewer := middleware.GetUser(c)
+	// upstream show.ts:173-175: 非 moderator viewer に対して suspended user は
+	// 存在しないものとして扱い NO_SUCH_USER(4362f8dc...) を返す。moderator は
+	// 従来どおり閲覧できる。匿名/未配線は iAmModerator=false で fail-closed。
+	if !iAmModerator && bundle.User.IsSuspended {
+		return apierr.JSONNoSuchUser(c)
+	}
 
 	// チャート集計はベストエフォート。匿名訪問者は visitor key として
 	// リモートホスト名を使う (簡易実装; 認証済みなら viewer id を渡す)。
@@ -573,12 +587,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	// upstream paramDef のデフォルトに合わせる (= withFiles=false /
-	// withReplies=true / withRenotes=true / withChannelNotes=false)。
+	// withReplies=false / withRenotes=true / withChannelNotes=false)。
+	// withReplies は notes.ts:59 で default:false。以前は default=true と
+	// 誤って扱っていた (#1547)。
 	withFiles := false
 	if req.WithFiles != nil {
 		withFiles = *req.WithFiles
 	}
-	withReplies := true
+	withReplies := false
 	if req.WithReplies != nil {
 		withReplies = *req.WithReplies
 	}
@@ -589,6 +605,12 @@ func (h *Handler) Notes(c echo.Context) error {
 	withChannelNotes := false
 	if req.WithChannelNotes != nil {
 		withChannelNotes = *req.WithChannelNotes
+	}
+
+	// upstream notes.ts:93 と同じく withReplies && withFiles の同時指定は
+	// 非対応として弾く (BOTH_WITH_REPLIES_AND_WITH_FILES)。
+	if withReplies && withFiles {
+		return c.JSON(http.StatusBadRequest, apierr.Error("BOTH_WITH_REPLIES_AND_WITH_FILES", "Specifying both withReplies and withFiles is not supported", "91c8cb9f-36ed-46e7-9ca2-7df96ed6e222"))
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。

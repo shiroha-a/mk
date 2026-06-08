@@ -41,6 +41,25 @@ func truncateToSpan(t time.Time, span Span) time.Time {
 	return truncateToHour(t)
 }
 
+// ceilToSpan rounds t UP to the boundary of the bucket it falls into:
+// a boundary-aligned t stays put, a mid-bucket t advances to the next
+// boundary. This matches upstream getChartRaw, which anchors the chart
+// window end at the bucket of `cursor + 1 span - 1ms` (= ceil of the
+// cursor), so a non-aligned offset cursor selects the bucket it lands in
+// rounded up rather than down. Used only for the explicit-cursor (offset)
+// path; the nil/now path keeps truncateToSpan (floor), matching upstream
+// getCurrentDate.
+func ceilToSpan(t time.Time, span Span) time.Time {
+	floored := truncateToSpan(t, span)
+	if floored.Equal(t) {
+		return floored
+	}
+	if span == SpanDay {
+		return floored.AddDate(0, 0, 1)
+	}
+	return floored.Add(time.Hour)
+}
+
 // stepBack subtracts `n` spans from t. SpanHour goes back by 1h * n,
 // SpanDay goes back by 24h * n via day arithmetic that respects DST-like
 // edge cases (we use UTC, so DST is not actually a concern).

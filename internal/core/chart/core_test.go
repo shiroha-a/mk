@@ -338,6 +338,48 @@ func TestGetChart_CursorOverridesNow(t *testing.T) {
 	assert.Equal(t, []int64{7}, out["local.inc"])
 }
 
+// TestGetChart_CursorCeilsToBucket は、非境界の cursor が落ちるバケットを
+// 切り上げ (ceil) で window 末尾に選ぶことを確認する (#1565)。upstream
+// getChartRaw は末尾を truncate(cursor + 1span - 1ms) で求めるため、12:30 の
+// ような mid-bucket cursor は 13:00 バケットを指す (floor の 12:00 ではない)。
+func TestGetChart_CursorCeilsToBucket(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 13:00 バケットに inc=5 を記録。
+	clk.set(time.Date(2026, 4, 9, 13, 0, 0, 0, time.UTC))
+	require.NoError(t, c.Commit(Diff{"local.inc": int64(5)}, ""))
+	require.NoError(t, c.Save(context.Background()))
+	clk.set(time.Date(2026, 4, 9, 23, 0, 0, 0, time.UTC))
+
+	// mid-bucket cursor 12:30 → ceil で 13:00 バケット (=5)。
+	mid := time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 1, &mid, "")
+	require.NoError(t, err)
+	assert.Equal(t, []int64{5}, out["local.inc"], "mid-bucket cursor must ceil to 13:00")
+
+	// 境界一致 cursor 12:00 は据え置きで 12:00 バケット (データ無し=0)。
+	aligned := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out2, err := c.GetChart(context.Background(), SpanHour, 1, &aligned, "")
+	require.NoError(t, err)
+	assert.Equal(t, []int64{0}, out2["local.inc"], "boundary cursor stays at 12:00")
+}
+
+// TestGetChart_CursorCeilsToDayBucket は SpanDay でも mid-day の cursor が
+// 翌日 0:00 のバケットへ ceil されることを確認する (#1565)。
+func TestGetChart_CursorCeilsToDayBucket(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 2026-04-10 のバケットに inc=9 を記録。
+	clk.set(time.Date(2026, 4, 10, 5, 0, 0, 0, time.UTC))
+	require.NoError(t, c.Commit(Diff{"local.inc": int64(9)}, ""))
+	require.NoError(t, c.Save(context.Background()))
+	clk.set(time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC))
+
+	// mid-day cursor 2026-04-09T12:00 → ceil で 2026-04-10 バケット (=9)。
+	mid := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanDay, 1, &mid, "")
+	require.NoError(t, err)
+	assert.Equal(t, []int64{9}, out["local.inc"], "mid-day cursor must ceil to 2026-04-10")
+}
+
 func TestGetChart_SpanDay(t *testing.T) {
 	c, _, clk := newTestChart(t, notesSchema)
 	for i := range 3 {

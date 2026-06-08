@@ -833,8 +833,8 @@ func TestNotes_Success(t *testing.T) {
 
 // 4 種類のノート (text のみ / file 添付あり / reply / pure renote / channel) を
 // 同 user に seed し、各 filter で期待数が返ることを確認する。upstream
-// `users/notes` paramDef のデフォルトは withFiles=false / withReplies=true /
-// withRenotes=true / withChannelNotes=false。
+// `users/notes` paramDef のデフォルトは withFiles=false / withReplies=false /
+// withRenotes=true / withChannelNotes=false (#1547)。
 func seedNotesForFilter(t *testing.T, repo *testutil.MockNoteRepository) {
 	t.Helper()
 	text := "plain text"
@@ -872,8 +872,13 @@ func TestNotes_DefaultFilters(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	// channel は除外、その他 (plain / file / reply / renote) は含む
-	assert.Len(t, out, 4, "default: withChannelNotes=false で channel のみ除外")
+	// default: withReplies=false / withChannelNotes=false なので reply と
+	// channel が除外され、plain / file / renote の 3 件が残る (#1547)。
+	assert.Len(t, out, 3, "default: withReplies=false で reply を、withChannelNotes=false で channel を除外")
+	for _, n := range out {
+		assert.NotEqual(t, "nf_reply", n["id"], "default で reply が除外される")
+		assert.NotEqual(t, "nf_channel", n["id"], "default で channel が除外される")
+	}
 }
 
 func TestNotes_WithFiles(t *testing.T) {
@@ -901,6 +906,43 @@ func TestNotes_WithoutReplies(t *testing.T) {
 	for _, n := range out {
 		assert.NotEqual(t, "nf_reply", n["id"], "reply が除外される")
 	}
+}
+
+// withReplies を明示的に true にすると default (false) を上書きして reply が
+// 含まれることを確認する (#1547)。
+func TestNotes_WithReplies(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withReplies": true}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	var hasReply bool
+	for _, n := range out {
+		if n["id"] == "nf_reply" {
+			hasReply = true
+		}
+	}
+	assert.True(t, hasReply, "withReplies=true で reply が含まれる")
+}
+
+// upstream notes.ts:93: withReplies && withFiles の同時指定は
+// BOTH_WITH_REPLIES_AND_WITH_FILES (91c8cb9f-...) を 400 で返す (#1547)。
+func TestNotes_BothWithRepliesAndWithFiles(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withReplies": true, "withFiles": true}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok, "error object present")
+	assert.Equal(t, "BOTH_WITH_REPLIES_AND_WITH_FILES", errObj["code"])
+	assert.Equal(t, "91c8cb9f-36ed-46e7-9ca2-7df96ed6e222", errObj["id"])
 }
 
 func TestNotes_WithoutRenotes(t *testing.T) {
@@ -1699,6 +1741,96 @@ func TestShow_BulkUserIDs_Truncates100(t *testing.T) {
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Len(t, out, 100, "userIds は 100 件で切り捨てられるはず")
+}
+
+// addSuspendedBulkFixture wires alice (alive), bob (suspended), carol (alive).
+func addSuspendedBulkFixture(repo *testutil.MockUserRepository) {
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u2"] = &model.User{ID: "u2", Username: "bob", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u3"] = &model.User{ID: "u3", Username: "carol", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+}
+
+// upstream show.ts:136-141: 非 moderator (匿名含む) のバルクモードでは suspended
+// user を結果から除外する。
+func TestShow_BulkUserIDs_ExcludesSuspendedForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	rec := post(h.Show, `{"userIds":["u1","u2","u3"]}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2, "suspended user は非 moderator に除外されるはず")
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u3", out[1]["id"])
+}
+
+// 認証済みだが非 moderator の viewer も suspended user は除外される。
+func TestShow_BulkUserIDs_ExcludesSuspendedForAuthedNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userIds":["u1","u2","u3"]}`, &model.User{ID: "u_plain"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2)
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u3", out[1]["id"])
+}
+
+// moderator viewer は suspended user も含めて全件返す。
+func TestShow_BulkUserIDs_ModeratorSeesSuspended(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userIds":["u1","u2","u3"]}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 3, "moderator は suspended user も閲覧できるはず")
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u2", out[1]["id"])
+	assert.Equal(t, "u3", out[2]["id"])
+}
+
+// upstream show.ts:173-175: 単体モードで suspended user は非 moderator に
+// NO_SUCH_USER(4362f8dc...) を返す。
+func TestShow_SingleSuspended_NotFoundForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Show, `{"userId":"sus"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+	assert.Equal(t, "4362f8dc-731f-4ad8-a694-be5a88922a24", errObj["id"])
+}
+
+// username 指定でも同様に suspended user は非 moderator に隠す。
+func TestShow_SingleSuspendedByUsername_NotFoundForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Show, `{"username":"sus"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+}
+
+// moderator viewer は単体モードでも suspended user を閲覧できる。
+func TestShow_SingleSuspended_ModeratorSees(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userId":"sus"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "sus", resp["id"])
 }
 
 // --- Internal error paths via failing repos ---
