@@ -12,11 +12,14 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
@@ -346,7 +349,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 		if err == nil && n.UserHost == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "Note",
-				"object": packNoteForAPI(n),
+				"object": h.packNoteForAPI(middleware.GetUser(c), n),
 			})
 		}
 	}
@@ -357,7 +360,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 		if err == nil && bundle.User.Host == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "User",
-				"object": packUserForAPI(bundle.User),
+				"object": h.packUserForAPI(bundle.User, bundle.Profile),
 			})
 		}
 	}
@@ -376,7 +379,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 						if remoteNote, err := h.remoteResolver.ResolveNote(req.URI); err == nil {
 							return c.JSON(http.StatusOK, map[string]any{
 								"type":   "Note",
-								"object": packNoteForAPI(remoteNote),
+								"object": h.packNoteForAPI(middleware.GetUser(c), remoteNote),
 							})
 						}
 					}
@@ -390,7 +393,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 						if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
 							return c.JSON(http.StatusOK, map[string]any{
 								"type":   "User",
-								"object": packUserForAPI(remoteUser),
+								"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
 							})
 						}
 					}
@@ -405,7 +408,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 		if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "User",
-				"object": packUserForAPI(remoteUser),
+				"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
 			})
 		}
 	}
@@ -464,29 +467,30 @@ func extractLocalID(uri, pathPrefix string) string {
 	return id
 }
 
-func packNoteForAPI(n *model.Note) map[string]any {
-	result := map[string]any{
-		"id":         n.ID,
-		"text":       n.Text,
-		"userId":     n.UserID,
-		"visibility": n.Visibility,
-	}
-	if n.User != nil {
-		result["user"] = packUserForAPI(n.User)
-	}
-	return result
+// packNoteForAPI packs a note with the full Note entity schema, matching
+// upstream ap/show which returns noteEntityService.pack(note, me, {detail:true})
+// for the {type:'Note', object} branch (#1557). Previously this returned an
+// ad-hoc minimal object (id/text/userId/visibility + 4-field user).
+func (h *Handler) packNoteForAPI(viewer *model.User, n *model.Note) entity.NoteEntity {
+	// embedded renote/reply を viewer 可視性で hide する (#1536 / #1557)。本家
+	// noteEntityService.pack(note, me) は me 視点で embed を hideNote する。これを
+	// 欠くと followers/specified note を引用/返信した note 経由で非可視本文が ap/show
+	// から漏れる IDOR になる。ap/show は RequireAuth なので viewer は通常非 nil だが、
+	// nil でも notehide が fail-closed (followers/specified embed を hide) する。
+	arr := []entity.NoteEntity{entity.PackNote(n, h.idGen)}
+	notehide.HideEmbeds(viewer, arr)
+	return arr[0]
 }
 
-func packUserForAPI(u *model.User) map[string]any {
+// packUserForAPI packs a user with the UserDetailedNotMe schema, matching
+// upstream ap/show which returns userEntityService.pack(user, me,
+// {schema:'UserDetailedNotMe'}) for the {type:'User', object} branch (#1557).
+// Previously this returned an ad-hoc minimal object (id/username/name/host).
+func (h *Handler) packUserForAPI(u *model.User, profile *model.UserProfile) any {
 	if u == nil {
 		return map[string]any{}
 	}
-	return map[string]any{
-		"id":       u.ID,
-		"username": u.Username,
-		"name":     u.Name,
-		"host":     u.Host,
-	}
+	return entity.PackUserDetailed(u, profile, h.idGen)
 }
 
 // Note handles GET /notes/:id with ActivityPub content negotiation.

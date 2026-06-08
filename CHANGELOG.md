@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix(security): `/api/auth/session/userkey` の `user` と `/api/ap/show` のオブジェクトが本家の full entity でなく ad-hoc 最小オブジェクトだった問題を修正し、あわせて ap/show の note embed に存在した可視性 IDOR を塞ぐ (issue #1557 HIGH)。(1) `auth/session/userkey` は本家同様 `user` を `UserDetailedNotMe` で pack。(2) `ap/show` は解決対象が user なら `UserDetailedNotMe`、note なら full `Note` で pack (本家 `noteEntityService.pack(note, me, {detail:true})` 相当)。(3) note を full pack するにあたり、embedded renote/reply が viewer 可視性で hide されないと followers/specified note を引用/返信した note 経由で非可視本文が ap/show から漏れる #1536 クラスの IDOR になるため、`packNoteForAPI` に `notehide.HideEmbeds(viewer, …)` を適用 (ap/show は RequireAuth、viewer nil でも fail-closed)。
+
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
 
 - Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。

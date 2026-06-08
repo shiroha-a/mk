@@ -165,9 +165,25 @@ func (h *Handler) SessionUserkey(c echo.Context) error {
 
 	resp := map[string]any{
 		"accessToken": accessToken.Token,
-		"user":        packUser(session.User),
+		"user":        h.packUserDetailed(session.User, *session.UserID),
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+// packUserDetailed packs the approving user with the UserDetailedNotMe schema,
+// matching upstream auth/session/userkey (res.user is ref 'UserDetailedNotMe',
+// userEntityService.pack(session.userId, null, {schema:'UserDetailedNotMe'})).
+// userRepo は router で必ず wire されるが、未配線 (unit test 等) のときは
+// プロフィール無しで pack して最低限 UserDetailed shape を維持する。
+func (h *Handler) packUserDetailed(u *model.User, userID string) any {
+	if u == nil {
+		return map[string]any{}
+	}
+	var profile *model.UserProfile
+	if h.userRepo != nil {
+		profile, _ = h.userRepo.FindProfileByUserID(userID)
+	}
+	return entity.PackUserDetailed(u, profile, h.idGen)
 }
 
 // GenToken handles POST /api/miauth/gen-token.
@@ -255,18 +271,6 @@ func packSession(s *model.AuthSession) map[string]any {
 		}
 	}
 	return result
-}
-
-func packUser(u *model.User) map[string]any {
-	if u == nil {
-		return map[string]any{}
-	}
-	return map[string]any{
-		"id":       u.ID,
-		"username": u.Username,
-		"name":     u.Name,
-		"host":     u.Host,
-	}
 }
 
 func sha256Hex(s string) string {
