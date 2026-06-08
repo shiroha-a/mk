@@ -1331,16 +1331,29 @@ func TestRolesDelete_InvalidParam(t *testing.T) {
 
 func TestRolesAssign_Success(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestRolesAssign_WithExpiry(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
-	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1","expiresAt":"2099-01-01T00:00:00Z"}`, nil)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
+	future := time.Date(4099, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	body := fmt.Sprintf(`{"userId":"u1","roleId":"r1","expiresAt":%d}`, future)
+	rec := doPost(h.RolesAssign, body, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestRolesAssign_PastExpiry_NoOp(t *testing.T) {
+	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"userId":"u1","roleId":"r1","expiresAt":%d}`, past)
+	rec := doPost(h.RolesAssign, body, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	exists, _ := assignRepo.Exists("u1", "r1")
+	assert.False(t, exists)
 }
 
 func TestRolesAssign_NotFound(t *testing.T) {
@@ -1351,7 +1364,7 @@ func TestRolesAssign_NotFound(t *testing.T) {
 
 func TestRolesAssign_AlreadyAssigned(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil) // first assign
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code)
@@ -1365,16 +1378,78 @@ func TestRolesAssign_InvalidParam(t *testing.T) {
 
 func TestRolesUnassign_Success(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestRolesUnassign_NotAssigned(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRolesUnassign_NoSuchRole(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"ghost"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "NO_SUCH_ROLE", errObj["code"])
+}
+
+func adminViewerFixture(t *testing.T) (*apiadmin.Handler, *testutil.MockRoleRepository, *model.User) {
+	t.Helper()
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["adm"] = &model.User{ID: "adm"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", IsAdministrator: true}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "aa1", UserID: "adm", RoleID: "admrole"}))
+	return h, roleRepo, &model.User{ID: "adm"}
+}
+
+func TestRolesAssign_ModeratorGate_Denied(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
+	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "ACCESS_DENIED", errObj["code"])
+	assert.Equal(t, "25b5bc31-dc79-4ebd-9bd2-c84978fd052c", errObj["id"])
+}
+
+func TestRolesUnassign_ModeratorGate_Denied(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
+	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "ACCESS_DENIED", errObj["code"])
+	assert.Equal(t, "24636eee-e8c1-493e-94b2-e16ad401e262", errObj["id"])
+}
+
+func TestRolesAssign_Administrator_BypassesGate(t *testing.T) {
+	h, roleRepo, adm := adminViewerFixture(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
+	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adm)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestRolesUnassign_Administrator_BypassesGate(t *testing.T) {
+	h, roleRepo, adm := adminViewerFixture(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
+	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adm)
+	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, adm)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestRolesUnassign_InvalidParam(t *testing.T) {
@@ -1579,7 +1654,7 @@ func (f *failingCreateRoleRepo) Create(_ *model.Role) error { return assert.AnEr
 func TestRolesAssign_InternalError(t *testing.T) {
 	// Exists がエラーになるケースをテスト
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 1回目のassignは成功
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	// 2回目はALREADY_ASSIGNED → 409 (既にテスト済みだが念のため)
@@ -1588,7 +1663,8 @@ func TestRolesAssign_InternalError(t *testing.T) {
 }
 
 func TestRolesUnassign_InternalError(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
+	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 存在しないassignmentのunassign → NOT_ASSIGNED
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -1623,7 +1699,7 @@ func (f *failingAssignExistsRepo) Exists(_ string, _ string) (bool, error) {
 
 func TestRolesAssign_ExistsError(t *testing.T) {
 	roleRepo := testutil.NewMockRoleRepository()
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	assignRepo := &failingAssignExistsRepo{testutil.NewMockRoleAssignmentRepository(roleRepo)}
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
@@ -1637,6 +1713,7 @@ func TestRolesAssign_ExistsError(t *testing.T) {
 
 func TestRolesUnassign_ExistsError(t *testing.T) {
 	roleRepo := testutil.NewMockRoleRepository()
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	assignRepo := &failingAssignExistsRepo{testutil.NewMockRoleAssignmentRepository(roleRepo)}
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
@@ -2501,7 +2578,7 @@ func TestRolesUpdate_WritesModerationLog(t *testing.T) {
 
 func TestRolesDelete_WritesModerationLog(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod", CanEditMembersByModerator: true}
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.RolesDelete, `{"roleId":"r1"}`, adminUser)
@@ -2515,7 +2592,7 @@ func TestRolesDelete_WritesModerationLog(t *testing.T) {
 func TestRolesAssign_WritesModerationLog(t *testing.T) {
 	h, userRepo, _, roleRepo := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod", CanEditMembersByModerator: true}
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adminUser)
@@ -2562,7 +2639,7 @@ func TestRolesUpdate_NoFieldsReturnsNoContentWithoutLog(t *testing.T) {
 func TestRolesUnassign_WritesModerationLog(t *testing.T) {
 	h, userRepo, _, roleRepo := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod"}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod", CanEditMembersByModerator: true}
 	// assign を先に行ってから modlog spy を取り付け、unassign 1 件だけ観測する
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adminUser)
 	repo := attachModLog(t, h)

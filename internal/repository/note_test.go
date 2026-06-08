@@ -921,9 +921,13 @@ func TestNoteRepository_ListChildrenOf(t *testing.T) {
 	require.NoError(t, repo.Create(reply))
 	defer cleanupNote(t, reply.ID)
 
+	// quote renote (text あり) は children に含める。pure renote 除外ロジック
+	// (#1554) に引っかからないよう本文を持たせる。
+	quoteText := "quote"
 	quote := &model.Note{
 		ID: "n_lc_c2", UserID: user.ID, Visibility: model.NoteVisibilityPublic,
 		RenoteID:  &parentID,
+		Text:      &quoteText,
 		Reactions: datatypes.JSON([]byte("{}")),
 	}
 	require.NoError(t, repo.Create(quote))
@@ -942,6 +946,66 @@ func TestNoteRepository_ListChildrenOf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 	assert.Equal(t, "n_lc_c2", out[0].ID)
+}
+
+// TestNoteRepository_ListChildrenOf_PureRenoteExcluded pins upstream
+// notes/children behavior (children.ts:53-67): a pure renote of the parent
+// (no text / files / poll) must NOT appear as a child, while quote renotes
+// (text or files or poll) and replies do. Regression guard for #1554.
+func TestNoteRepository_ListChildrenOf_PureRenoteExcluded(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_lcpr_1", "lcpruser")
+	defer cleanupUser(t, user.ID)
+
+	parent := &model.Note{
+		ID: "n_lcpr_parent", UserID: user.ID, Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, repo.Create(parent))
+	defer cleanupNote(t, parent.ID)
+	parentID := parent.ID
+
+	mk := func(id string, mutate func(n *model.Note)) {
+		n := &model.Note{
+			ID: id, UserID: user.ID, Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte("{}")),
+		}
+		mutate(n)
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+
+	// reply (本文なしでも child として返す)
+	mk("n_lcpr_c1_reply", func(n *model.Note) { n.ReplyID = &parentID })
+	// pure renote (text/file/poll なし) → 除外される
+	mk("n_lcpr_c2_pure", func(n *model.Note) { n.RenoteID = &parentID })
+	// quote renote (text あり) → 含める
+	mk("n_lcpr_c3_quote", func(n *model.Note) {
+		n.RenoteID = &parentID
+		txt := "quoted"
+		n.Text = &txt
+	})
+	// renote + file → 含める (text なしでも fileIds 非空なら pure ではない)
+	mk("n_lcpr_c4_file", func(n *model.Note) {
+		n.RenoteID = &parentID
+		n.FileIDs = pq.StringArray{"file-x"}
+	})
+	// renote + poll → 含める (hasPoll=true なら pure ではない)
+	mk("n_lcpr_c5_poll", func(n *model.Note) {
+		n.RenoteID = &parentID
+		n.HasPoll = true
+	})
+
+	out, err := repo.ListChildrenOf(parentID, "", "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{
+		"n_lcpr_c1_reply": true,
+		"n_lcpr_c3_quote": true,
+		"n_lcpr_c4_file":  true,
+		"n_lcpr_c5_poll":  true,
+	}, idSet(out))
+	// pure renote が含まれていないことを明示
+	assert.NotContains(t, idSet(out), "n_lcpr_c2_pure")
 }
 
 // --- #1500 visibility push-down (renotes / replies / children) ---
