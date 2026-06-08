@@ -1331,20 +1331,27 @@ func TestRolesDelete_InvalidParam(t *testing.T) {
 
 func TestRolesAssign_Success(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
+	// canEditMembersByModerator=true の role は moderator (viewer 不問) でも
+	// 付け外しできる (#1542)。happy path はこの前提で seed する。
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// upstream assign.ts paramDef は expiresAt: type:'integer' (epoch ms)。number
+// を送って 400 にならず Assign まで到達することを確認する (#1542 regression)。
 func TestRolesAssign_WithExpiry(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
+	// 4099-01-01 (= far future) を epoch ms で送る。
 	future := time.Date(4099, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
 	body := fmt.Sprintf(`{"userId":"u1","roleId":"r1","expiresAt":%d}`, future)
 	rec := doPost(h.RolesAssign, body, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// 過去 (現在以下) の expiresAt は upstream assign.ts:83-85 同様 no-op で 204 を
+// 返し、実際の assignment は作られない (#1542)。
 func TestRolesAssign_PastExpiry_NoOp(t *testing.T) {
 	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
@@ -1353,7 +1360,7 @@ func TestRolesAssign_PastExpiry_NoOp(t *testing.T) {
 	rec := doPost(h.RolesAssign, body, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	exists, _ := assignRepo.Exists("u1", "r1")
-	assert.False(t, exists)
+	assert.False(t, exists, "past expiresAt must not create an assignment")
 }
 
 func TestRolesAssign_NotFound(t *testing.T) {
@@ -1384,6 +1391,8 @@ func TestRolesUnassign_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// role が存在し canEditMembersByModerator=true だが assignment が無い場合は
+// NOT_ASSIGNED (404)。
 func TestRolesUnassign_NotAssigned(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
@@ -1391,6 +1400,7 @@ func TestRolesUnassign_NotAssigned(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// role 自体が無ければ assign 同様 NO_SUCH_ROLE (404) を先に返す (#1542)。
 func TestRolesUnassign_NoSuchRole(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"ghost"}`, nil)
@@ -1402,6 +1412,20 @@ func TestRolesUnassign_NoSuchRole(t *testing.T) {
 	assert.Equal(t, "NO_SUCH_ROLE", errObj["code"])
 }
 
+func TestRolesUnassign_InvalidParam(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.RolesUnassign, `{}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// --- canEditMembersByModerator gate (#1542) ---
+//
+// upstream assign.ts:74-76 / unassign.ts:76-78: moderator (非 administrator)
+// は canEditMembersByModerator=false の role を assign/unassign できない。
+// administrator (および root) は常に可。viewer 不明は fail-closed で拒否。
+
+// adminViewerFixture wires a handler with an administrator viewer that owns an
+// IsAdministrator role assignment.
 func adminViewerFixture(t *testing.T) (*apiadmin.Handler, *testutil.MockRoleRepository, *model.User) {
 	t.Helper()
 	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
@@ -1413,6 +1437,8 @@ func adminViewerFixture(t *testing.T) (*apiadmin.Handler, *testutil.MockRoleRepo
 
 func TestRolesAssign_ModeratorGate_Denied(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
+	// canEditMembersByModerator=false かつ viewer が administrator でない
+	// (= nil viewer) → ACCESS_DENIED。
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -1437,6 +1463,7 @@ func TestRolesUnassign_ModeratorGate_Denied(t *testing.T) {
 	assert.Equal(t, "24636eee-e8c1-493e-94b2-e16ad401e262", errObj["id"])
 }
 
+// administrator は canEditMembersByModerator=false の role でも assign できる。
 func TestRolesAssign_Administrator_BypassesGate(t *testing.T) {
 	h, roleRepo, adm := adminViewerFixture(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
@@ -1444,18 +1471,13 @@ func TestRolesAssign_Administrator_BypassesGate(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// administrator は canEditMembersByModerator=false の role でも unassign できる。
 func TestRolesUnassign_Administrator_BypassesGate(t *testing.T) {
 	h, roleRepo, adm := adminViewerFixture(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adm)
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, adm)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-}
-
-func TestRolesUnassign_InvalidParam(t *testing.T) {
-	h, _, _, _ := newTestHandler(t)
-	rec := doPost(h.RolesUnassign, `{}`, nil)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // rolesUsersFixture wires user / role / assignment 用の handler を組み立てる。
@@ -1713,6 +1735,8 @@ func TestRolesAssign_ExistsError(t *testing.T) {
 
 func TestRolesUnassign_ExistsError(t *testing.T) {
 	roleRepo := testutil.NewMockRoleRepository()
+	// gate を通すため canEditMembersByModerator=true の role を seed する
+	// (role 不在だと NO_SUCH_ROLE が先に返り Exists error 経路に到達しない)。
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	assignRepo := &failingAssignExistsRepo{testutil.NewMockRoleAssignmentRepository(roleRepo)}
 	metaRepo := testutil.NewMockMetaRepository()
@@ -2578,7 +2602,7 @@ func TestRolesUpdate_WritesModerationLog(t *testing.T) {
 
 func TestRolesDelete_WritesModerationLog(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod", CanEditMembersByModerator: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Mod"}
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.RolesDelete, `{"roleId":"r1"}`, adminUser)
