@@ -23,9 +23,11 @@ type WebPushPublisher interface {
 
 // NotePacker packs a note ID into a JSON-serializable representation matching
 // the Misskey-packed note shape. Used for composing Web Push payloads without
-// creating a cycle on the entity package.
+// creating a cycle on the entity package. viewerID is the push recipient
+// (notifiee); the packer gates the note by their visibility and returns
+// (nil, false) when the recipient cannot see it (#1572).
 type NotePacker interface {
-	PackNoteByID(noteID string) (map[string]any, bool)
+	PackNoteByID(noteID, viewerID string) (map[string]any, bool)
 }
 
 // UserPacker packs a user ID into a JSON-serializable representation matching
@@ -391,14 +393,14 @@ func (h *Hook) notifyLocalUser(ctx context.Context, notifieeID string, in Create
 	// packerが未設定でもtype/id/userIdは最低限埋まるので、sw.js側の24h
 	// 破棄チェックとユーザー判定は成立する。
 	if h.webpush != nil && n != nil {
-		h.webpush.PushNotification(notifieeID, h.buildPushBody(n))
+		h.webpush.PushNotification(notifieeID, h.buildPushBody(n, notifieeID))
 	}
 }
 
 // buildPushBody converts a persisted Notification into a map matching
 // the Misskey `Packed<'Notification'>` shape. Missing fields are omitted so
 // that sw.js gracefully falls back to defaults.
-func (h *Hook) buildPushBody(n *Notification) map[string]any {
+func (h *Hook) buildPushBody(n *Notification, notifieeID string) map[string]any {
 	body := map[string]any{
 		"id":        n.ID,
 		"createdAt": n.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -414,8 +416,11 @@ func (h *Hook) buildPushBody(n *Notification) map[string]any {
 	}
 	if n.NoteID != "" {
 		body["noteId"] = n.NoteID
+		// note embed は受信者 (notifiee) 可視性で gate する。REST i/notifications
+		// (#1444) / stream 通知 (#1471) と同じく、見えない note は detail を載せず
+		// noteId だけ残す (#1572)。packer 未配線時は note 省略。
 		if h.notePacker != nil {
-			if packed, ok := h.notePacker.PackNoteByID(n.NoteID); ok {
+			if packed, ok := h.notePacker.PackNoteByID(n.NoteID, notifieeID); ok {
 				body["note"] = packed
 			}
 		}
