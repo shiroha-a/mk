@@ -135,12 +135,36 @@ func TestQueryService_ListChildren(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
 	parentID := "parent"
+	quoteText := "quote"
 	noteRepo.Notes["c1"] = &model.Note{ID: "c1", UserID: "b", Visibility: model.NoteVisibilityPublic, ReplyID: &parentID}
-	noteRepo.Notes["c2"] = &model.Note{ID: "c2", UserID: "c", Visibility: model.NoteVisibilityPublic, RenoteID: &parentID}
+	// quote renote (text あり) は child として返る。
+	noteRepo.Notes["c2"] = &model.Note{ID: "c2", UserID: "c", Visibility: model.NoteVisibilityPublic, RenoteID: &parentID, Text: &quoteText}
 
 	out, err := svc.ListChildren(nil, "parent", "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
+}
+
+// TestQueryService_ListChildren_PureRenoteExcluded pins that a pure renote
+// (no text/file/poll) of the parent is excluded from children, matching
+// upstream notes/children (children.ts:53-67). Regression guard for #1554.
+func TestQueryService_ListChildren_PureRenoteExcluded(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
+	parentID := "parent"
+	quoteText := "quote"
+	noteRepo.Notes["reply"] = &model.Note{ID: "reply", UserID: "b", Visibility: model.NoteVisibilityPublic, ReplyID: &parentID}
+	noteRepo.Notes["pure"] = &model.Note{ID: "pure", UserID: "c", Visibility: model.NoteVisibilityPublic, RenoteID: &parentID}
+	noteRepo.Notes["quote"] = &model.Note{ID: "quote", UserID: "d", Visibility: model.NoteVisibilityPublic, RenoteID: &parentID, Text: &quoteText}
+
+	out, err := svc.ListChildren(nil, "parent", "", "", 10)
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, n := range out {
+		got[n.ID] = true
+	}
+	assert.Equal(t, map[string]bool{"reply": true, "quote": true}, got)
+	assert.NotContains(t, got, "pure")
 }
 
 func TestQueryService_ListChildren_ParentMissing(t *testing.T) {
@@ -207,9 +231,11 @@ func TestQueryService_ListChildren_VisibilityDelegatedToRepo(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["parent"] = &model.Note{ID: "parent", UserID: "a", Visibility: model.NoteVisibilityPublic}
 	parentID := "parent"
+	quoteText := "quote"
 	noteRepo.Notes["pub_reply"] = &model.Note{ID: "pub_reply", UserID: "a", Visibility: model.NoteVisibilityPublic, ReplyID: &parentID}
 	noteRepo.Notes["fol_reply"] = &model.Note{ID: "fol_reply", UserID: "a", Visibility: model.NoteVisibilityFollowers, ReplyID: &parentID}
-	noteRepo.Notes["fol_quote"] = &model.Note{ID: "fol_quote", UserID: "a", Visibility: model.NoteVisibilityFollowers, RenoteID: &parentID}
+	// quote renote (text あり) として pure renote 除外 (#1554) に引っかからないようにする。
+	noteRepo.Notes["fol_quote"] = &model.Note{ID: "fol_quote", UserID: "a", Visibility: model.NoteVisibilityFollowers, RenoteID: &parentID, Text: &quoteText}
 
 	viewer := &model.User{ID: "v"}
 	out, err := svc.ListChildren(viewer, "parent", "", "", 10)

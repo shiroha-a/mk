@@ -1887,18 +1887,23 @@ func (h *Handler) RolesDelete(c echo.Context) error {
 // RolesAssign handles POST /api/admin/roles/assign.
 func (h *Handler) RolesAssign(c echo.Context) error {
 	var req struct {
-		UserID    string  `json:"userId"`
-		RoleID    string  `json:"roleId"`
-		ExpiresAt *string `json:"expiresAt"`
+		UserID    string `json:"userId"`
+		RoleID    string `json:"roleId"`
+		ExpiresAt *int64 `json:"expiresAt"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and roleId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6503c040-6af4-4ed9-bf07-f2dd16678eab", "25b5bc31-dc79-4ebd-9bd2-c84978fd052c"); handled {
+		return err
+	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil {
-		if t, err := time.Parse(time.RFC3339, *req.ExpiresAt); err == nil {
-			expiresAt = &t
+		t := time.UnixMilli(*req.ExpiresAt)
+		if !t.After(time.Now()) {
+			return c.NoContent(http.StatusNoContent)
 		}
+		expiresAt = &t
 	}
 	if err := h.roleService.Assign(req.UserID, req.RoleID, expiresAt); err != nil {
 		if err == role.ErrRoleNotFound {
@@ -1913,6 +1918,21 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// requireCanEditRoleMembers enforces the upstream canEditMembersByModerator gate.
+func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID, accessDeniedID string) (handled bool, err error) {
+	r, err := h.roleService.Show(roleID)
+	if err != nil {
+		return true, c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
+	}
+	if r.CanEditMembersByModerator {
+		return false, nil
+	}
+	if me := middleware.GetUser(c); me != nil && h.roleService.IsAdministrator(me.ID) {
+		return false, nil
+	}
+	return true, c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
+}
+
 // RolesUnassign handles POST /api/admin/roles/unassign.
 func (h *Handler) RolesUnassign(c echo.Context) error {
 	var req struct {
@@ -1921,6 +1941,9 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and roleId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6e519036-a70d-4c76-b679-bc8fb18194e2", "24636eee-e8c1-493e-94b2-e16ad401e262"); handled {
+		return err
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {
 		if err == role.ErrNotAssigned {

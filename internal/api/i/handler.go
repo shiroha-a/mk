@@ -777,6 +777,14 @@ type UpdateRequest struct {
 	// ChatScope は 1-on-1 DM の受信許可レベル (#692)。
 	// upstream paramDef enum: everyone / followers / following / mutual / none
 	ChatScope *string `json:"chatScope"`
+	// FollowingVisibility / FollowersVisibility はフォロー/フォロワー一覧の
+	// 公開範囲 (#1546)。upstream Misskey TS i/update.ts:191-192 paramDef enum:
+	// public / followers / private。model 列 (user_profile) と entity packer
+	// (read 側) は既にあったが write 経路が抜けていて silent drop していた。
+	// users/show 等に followersVisibility gate (#1461) があるのに設定できず
+	// privacy 上の drift だったため write を追加する。
+	FollowingVisibility *string `json:"followingVisibility"`
+	FollowersVisibility *string `json:"followersVisibility"`
 	// Room は frontend の「部屋」機能用の任意スキーマ jsonb。
 	// 本家も object をそのまま受け取って上書き保存する (部分マージはしない)。
 	Room json.RawMessage `json:"room"`
@@ -935,6 +943,21 @@ func containsProhibitedWord(name string, words []string) bool {
 		}
 	}
 	return false
+}
+
+// isValidFollowVisibility reports whether v is one of the
+// followingVisibility / followersVisibility enum values accepted by upstream
+// Misskey i/update (public / followers / private). Used to fail-close on any
+// other value instead of silently persisting a bogus privacy setting.
+func isValidFollowVisibility(v string) bool {
+	switch model.FollowingVisibility(v) {
+	case model.FollowingVisibilityPublic,
+		model.FollowingVisibilityFollowers,
+		model.FollowingVisibilityPrivate:
+		return true
+	default:
+		return false
+	}
 }
 
 // Update handles POST /api/i/update.
@@ -1098,6 +1121,22 @@ func (h *Handler) Update(c echo.Context) error {
 		default:
 			return apierr.JSONInvalidParam(c)
 		}
+	}
+	// followingVisibility / followersVisibility は upstream paramDef と同じ
+	// enum (public / followers / private) のみ受け付ける (#1546)。enum 外は
+	// INVALID_PARAM で fail-close し、不正値が privacy gate を素通りしない
+	// ようにする。null / 省略は no-op。
+	if req.FollowingVisibility != nil {
+		if !isValidFollowVisibility(*req.FollowingVisibility) {
+			return apierr.JSONInvalidParam(c)
+		}
+		in.FollowingVisibility = req.FollowingVisibility
+	}
+	if req.FollowersVisibility != nil {
+		if !isValidFollowVisibility(*req.FollowersVisibility) {
+			return apierr.JSONInvalidParam(c)
+		}
+		in.FollowersVisibility = req.FollowersVisibility
 	}
 	if req.Fields != nil {
 		// upstream paramDef は maxItems 16。超過は INVALID_PARAM で弾く
