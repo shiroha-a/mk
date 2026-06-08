@@ -326,23 +326,35 @@ func (h *Handler) ShowPartialBulk(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteIds is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if len(req.NoteIDs) == 0 {
-		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+		return c.JSON(http.StatusOK, []any{})
 	}
 	notes, err := h.noteRepo.FindManyByIDsWithUser(req.NoteIDs)
 	if err != nil {
-		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+		return c.JSON(http.StatusOK, []any{})
 	}
 	viewer := middleware.GetUser(c)
-	// 旧実装は visibility filter を一切経ずに全 note を packMany にかけて
-	// 返していた。ShowPartialBulk は anonymous でも叩ける endpoint
-	// (router で RequireAuth() 無し) のため、followers / specified
-	// visibility のノートが任意の閲覧者に漏洩する security risk があった。
-	// BulkShow / Show と同じく queryService が wire されていなければ
-	// fail-closed で空配列、wire されていれば FilterVisible に通す
-	// (#509、Devin #529 FLAG-1)。
+	// ShowPartialBulk は anonymous でも叩ける endpoint (router で RequireAuth()
+	// 無し) のため、followers / specified visibility のノートが任意の閲覧者に
+	// 漏洩しないよう FilterVisible に通す (#509、Devin #529 FLAG-1)。queryService
+	// 未配線時は fail-closed で空配列。なお本家 show-partial-bulk は可視性
+	// filter を持たないが、進行中の可視性 IDOR sweep と整合させるため mk-go では
+	// filter を維持する (#1538、shape のみ本家化、意図的な divergence)。
 	if h.queryService == nil {
-		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+		return c.JSON(http.StatusOK, []any{})
 	}
 	notes = h.queryService.FilterVisible(viewer, notes)
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
+	// 本家 show-partial-bulk は fetchDiffs で {id, reactions, reactionEmojis} の
+	// 軽量 diff のみ返す (reaction polling 用途、本文/可視性詳細は返さない)。
+	// packMany が reactions (buffered merge 込み) と reactionEmojis を解決済みなので
+	// それを投影して shape を揃える (#1538)。
+	packed := h.packMany(c.Request().Context(), notes, viewer)
+	diffs := make([]map[string]any, 0, len(packed))
+	for i := range packed {
+		diffs = append(diffs, map[string]any{
+			"id":             packed[i].ID,
+			"reactions":      packed[i].Reactions,
+			"reactionEmojis": packed[i].ReactionEmojis,
+		})
+	}
+	return c.JSON(http.StatusOK, diffs)
 }

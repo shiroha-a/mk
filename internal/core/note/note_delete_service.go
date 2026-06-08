@@ -50,6 +50,7 @@ type DeleteNoteStreamHook interface {
 // DeleteService provides note deletion logic.
 type DeleteService struct {
 	noteRepo       repository.NoteRepository
+	userRepo       repository.UserRepository
 	federationHook DeleteFederationHook
 	indexHook      IndexHook
 	chartHook      DeleteChartHook
@@ -60,6 +61,14 @@ type DeleteService struct {
 // NewDeleteService creates a new DeleteService.
 func NewDeleteService(noteRepo repository.NoteRepository) *DeleteService {
 	return &DeleteService{noteRepo: noteRepo}
+}
+
+// SetUserRepo attaches a UserRepository so DeleteAs can resolve the note's
+// author when a moderator deletes someone else's note (#1538), ensuring the
+// federation Delete activity / timeline fanout removal are attributed to the
+// author rather than the moderator.
+func (s *DeleteService) SetUserRepo(r repository.UserRepository) {
+	s.userRepo = r
 }
 
 // SetFederationHook attaches a DeleteFederationHook invoked after Delete.
@@ -94,9 +103,21 @@ func (s *DeleteService) SetNoteStreamHook(h DeleteNoteStreamHook) {
 
 // Delete removes a note authored by the given user. It returns
 // ErrNoteNotFound when the note does not exist and ErrNoteAccessDenied when
-// the user is not the author.
+// the user is not the author. Thin wrapper over DeleteAs with isModerator=false
+// (the inbound federation path and existing callers keep author-only semantics).
 func (s *DeleteService) Delete(user *model.User, noteID string) error {
-	if user == nil {
+	return s.DeleteAs(user, false, noteID)
+}
+
+// DeleteAs removes a note on behalf of actor. When isModerator is false the
+// actor must be the author (ErrNoteAccessDenied otherwise); when true a
+// moderator may delete anyone's note, mirroring upstream NoteDeleteService where
+// `!isModerator && note.userId !== me.id` rejects. The note's AUTHOR (resolved
+// via userRepo when actor != author) is passed to the federation / timeline
+// hooks so the AP Delete activity and home-timeline fanout removal stay
+// attributed to the author, not the acting moderator (#1538).
+func (s *DeleteService) DeleteAs(actor *model.User, isModerator bool, noteID string) error {
+	if actor == nil {
 		return errors.New("user is required")
 	}
 
@@ -105,9 +126,11 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 		return ErrNoteNotFound
 	}
 
-	if note.UserID != user.ID {
+	if !isModerator && note.UserID != actor.ID {
 		return ErrNoteAccessDenied
 	}
+
+	author := s.resolveAuthor(actor, note)
 
 	// 上流 NoteDeleteService が Delete 冒頭で deletedAt を確定させ publish と
 	// federation の Delete activity 両方に渡しているのに合わせ、ここで一度
@@ -127,7 +150,7 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 		_ = s.noteRepo.IncrementCount(*note.ReplyID, "repliesCount", -1)
 	}
 	if s.federationHook != nil {
-		s.federationHook.OnNoteDeleted(user, note)
+		s.federationHook.OnNoteDeleted(author, note)
 	}
 	// 検索インデックスの撤去もベストエフォート。失敗してもメインのDelete操作は成功扱い。
 	if s.indexHook != nil {
@@ -139,7 +162,7 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 	}
 	// Redis fanout timeline 残留を防ぐ (#379)。ベストエフォート。
 	if s.timelineHook != nil {
-		s.timelineHook.OnNoteDeleted(note, user)
+		s.timelineHook.OnNoteDeleted(note, author)
 	}
 	// noteStream に deleted を publish して subNote 購読中の WebSocket
 	// クライアントへ即時反映する (#700)。失敗はベストエフォート。
@@ -147,4 +170,22 @@ func (s *DeleteService) Delete(user *model.User, noteID string) error {
 		s.noteStreamHook.OnNoteDeleted(note.ID, deletedAt)
 	}
 	return nil
+}
+
+// resolveAuthor returns the note's author for the delete hooks. When the actor
+// IS the author (the common, author-self-delete case) the actor is returned
+// directly; otherwise (moderator deleting someone else's note) the author is
+// looked up via userRepo so the federation Delete / timeline fanout stay
+// attributed to the author. Falls back to a minimal user carrying the author id
+// when userRepo is unwired or the row is missing.
+func (s *DeleteService) resolveAuthor(actor *model.User, note *model.Note) *model.User {
+	if note.UserID == actor.ID {
+		return actor
+	}
+	if s.userRepo != nil {
+		if u, err := s.userRepo.FindByID(note.UserID); err == nil && u != nil {
+			return u
+		}
+	}
+	return &model.User{ID: note.UserID}
 }

@@ -39,6 +39,9 @@ func (f *failingPollRepo) ListExpiredUnnotified(_ time.Time, _ int) ([]*model.Po
 	return nil, nil
 }
 func (f *failingPollRepo) MarkNotified(_ string, _ time.Time) error { return nil }
+func (f *failingPollRepo) ListRecommendation(_ string, _, _ []string, _, _ int) ([]string, error) {
+	return nil, nil
+}
 
 // findFailNoteRepo creates successfully but FindByIDWithRelations always
 // fails (CreateService uses the full-relations variant for finalNote since

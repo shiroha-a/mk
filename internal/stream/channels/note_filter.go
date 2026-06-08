@@ -35,6 +35,101 @@ func viewerUserFromCtx(ctx stream.ChannelContext) *model.User {
 	return u
 }
 
+// streamVisibilityProbe is the minimal note metadata for the per-subscriber
+// visibility gate, decoded without unmarshalling the whole NoteEntity.
+type streamVisibilityProbe struct {
+	UserID         string     `json:"userId"`
+	ChannelID      *string    `json:"channelId"`
+	Visibility     string     `json:"visibility"`
+	VisibleUserIDs []string   `json:"visibleUserIds"`
+	Mentions       []string   `json:"mentions"`
+	Reply          *replyMeta `json:"reply,omitempty"`
+}
+
+// streamNoteVisibleForViewer reports whether a streamed note payload is visible
+// to viewerID, mirroring core/note.CanSeeNote / TS Connection#isNoteVisibleForMe.
+// It is used by channels that go live during the visibility sweep (#1549) as a
+// per-subscriber re-filter. FAIL-CLOSED: a parse error returns false, and
+// followers/specified notes from a non-self author with a nil following
+// snapshot return false (same doctrine as userListVisibilityShouldEmit #1465).
+// public / home are always visible.
+func streamNoteVisibleForViewer(payload []byte, viewerID string, snap map[string]bool) bool {
+	var p streamVisibilityProbe
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	switch p.Visibility {
+	case string(model.NoteVisibilityPublic), string(model.NoteVisibilityHome):
+		return true
+	case string(model.NoteVisibilitySpecified):
+		if viewerID == "" {
+			return false
+		}
+		if viewerID == p.UserID {
+			return true
+		}
+		return slices.Contains(p.VisibleUserIDs, viewerID)
+	case string(model.NoteVisibilityFollowers):
+		if viewerID == "" {
+			return false
+		}
+		if viewerID == p.UserID {
+			return true
+		}
+		if p.Reply != nil && p.Reply.UserID == viewerID {
+			return true
+		}
+		if slices.Contains(p.Mentions, viewerID) {
+			return true
+		}
+		if snap == nil {
+			return false
+		}
+		_, ok := snap[p.UserID]
+		return ok
+	}
+	// 空 / 未知 visibility は安全側 (fail-closed)。packed NoteEntity は常に
+	// visibility を含むので実運用では到達しない。
+	return false
+}
+
+// noteChannelID decodes the channelId from a streamed note payload ("" when
+// absent / unparseable). Used by the channel timeline gate for defense-in-depth.
+func noteChannelID(payload []byte) string {
+	var p struct {
+		ChannelID *string `json:"channelId"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil || p.ChannelID == nil {
+		return ""
+	}
+	return *p.ChannelID
+}
+
+// noteVisibility decodes the visibility from a streamed note payload ("" when
+// absent / unparseable). Used by the roleTimeline gate (public-only, #1549).
+func noteVisibility(payload []byte) string {
+	var p struct {
+		Visibility string `json:"visibility"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.Visibility
+}
+
+// streamNoteID decodes the note id from a streamed note payload ("" when
+// absent / unparseable). Used by the hashtag channel to dedupe a note that
+// arrives via multiple subscribed tag topics (#1549).
+func streamNoteID(payload []byte) string {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.ID
+}
+
 // embedProbe is the minimal embed metadata needed to decide whether an embedded
 // renote/reply must be hidden, WITHOUT decoding the whole NoteEntity. Author
 // preference fields ride the embed's UserLite (populated only when the embed
@@ -62,29 +157,48 @@ func hideEmbeds(ctx stream.ChannelContext, payload []byte) []byte {
 }
 
 // hideEmbedsForViewer is the testable core of hideEmbeds. It returns the
-// ORIGINAL payload verbatim (zero copy) unless an embed is genuinely hideable
-// for viewer, in which case it decodes a FRESH NoteEntity, blanks the
-// hide-eligible embeds, and re-marshals — never mutating the shared input
-// buffer / publisher body cache. snap maps followeeID->withReplies (only key
-// presence is used). nil viewer / nil snap fail closed (followers/specified
-// hidden, public kept).
+// ORIGINAL payload verbatim (zero copy) unless the top-level note or one of its
+// embeds is genuinely hideable for viewer. See hideNoteRawForViewer for the
+// gate; this is the []byte-returning wrapper the channels call.
 func hideEmbedsForViewer(payload []byte, viewer *model.User, snap map[string]bool, nowMs int64) []byte {
+	out, _ := hideNoteRawForViewer(payload, viewer, snap, nowMs)
+	return out
+}
+
+// hideNoteRawForViewer applies the per-viewer hideNote gate to a single note's
+// raw JSON and reports whether anything changed. The TOP-LEVEL note gets the
+// author-PREFERENCE gate only (HideNoteByPrefsDecision); its intrinsic
+// followers/specified visibility is owned by the channel fan-out (LTL/GTL push
+// public-only, home/list/role per-follower), so it is not re-applied here
+// (#1568). The depth-2 renote/reply embeds get the FULL embed gate (#1536).
+//
+// It returns the ORIGINAL payload verbatim (changed=false) unless something is
+// genuinely hideable, in which case it decodes a FRESH NoteEntity, blanks the
+// hide-eligible parts, and re-marshals — never mutating the shared input buffer
+// / publisher body cache. snap maps followeeID->withReplies (only key presence
+// is used). nil viewer / nil snap fail closed.
+func hideNoteRawForViewer(payload []byte, viewer *model.User, snap map[string]bool, nowMs int64) ([]byte, bool) {
 	var probe struct {
+		embedProbe
 		Renote json.RawMessage `json:"renote"`
 		Reply  json.RawMessage `json:"reply"`
 	}
 	if err := json.Unmarshal(payload, &probe); err != nil {
-		return payload
+		return payload, false
 	}
+	hideTop := topNoteHideable(probe.embedProbe, probe.Reply, viewer, snap, nowMs)
 	hideRenote := embedRawHideable(probe.Renote, viewer, snap, nowMs)
 	hideReply := embedRawHideable(probe.Reply, viewer, snap, nowMs)
-	if !hideRenote && !hideReply {
-		// 隠す embed が無い (= no-embed / public / own / follower) → verbatim。
-		return payload
+	if !hideTop && !hideRenote && !hideReply {
+		// 隠すものが無い (= no-embed / public / own / follower) → verbatim。
+		return payload, false
 	}
 	var full entity.NoteEntity
 	if err := json.Unmarshal(payload, &full); err != nil {
-		return payload
+		return payload, false
+	}
+	if hideTop {
+		entity.HideNoteEntity(&full)
 	}
 	if hideRenote && full.Renote != nil {
 		entity.HideNoteEntity(full.Renote)
@@ -94,14 +208,41 @@ func hideEmbedsForViewer(payload []byte, viewer *model.User, snap map[string]boo
 	}
 	out, err := json.Marshal(&full)
 	if err != nil {
-		return payload
+		return payload, false
 	}
-	return out
+	return out, true
+}
+
+// topNoteHideable decides whether the top-level note (decoded as embedProbe over
+// the payload root) must be blanked for viewer using the author-preference gate
+// only. replyRaw carries the note's reply target so the
+// makeNotesFollowersOnlyBefore downgrade's reply-target escape hatch can fire.
+func topNoteHideable(p embedProbe, replyRaw json.RawMessage, viewer *model.User, snap map[string]bool, nowMs int64) bool {
+	f := embedFactsFromProbe(p)
+	if rid := replyTargetAuthorID(replyRaw); rid != "" {
+		f.ReplyTargetAuthorID = rid
+	}
+	return corenote.HideNoteByPrefsDecision(viewer, f, followsFromSnap(snap), nowMs)
+}
+
+// replyTargetAuthorID extracts the reply target's userId from a raw reply embed,
+// or "" when absent/null/undecodable.
+func replyTargetAuthorID(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var r struct {
+		UserID string `json:"userId"`
+	}
+	if json.Unmarshal(raw, &r) != nil {
+		return ""
+	}
+	return r.UserID
 }
 
 // embedRawHideable decodes the embed-probe metadata from a raw embed object and
-// runs the shared decision. Absent/null embed or a probe-decode error → false
-// (nothing to hide / cannot probe).
+// runs the FULL embed decision. Absent/null embed or a probe-decode error →
+// false (nothing to hide / cannot probe).
 func embedRawHideable(raw json.RawMessage, viewer *model.User, snap map[string]bool, nowMs int64) bool {
 	if len(raw) == 0 || string(raw) == "null" {
 		return false
@@ -110,14 +251,19 @@ func embedRawHideable(raw json.RawMessage, viewer *model.User, snap map[string]b
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return false
 	}
-	follows := func(id string) bool {
+	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p), followsFromSnap(snap), nowMs)
+}
+
+// followsFromSnap turns a per-connection following snapshot into the follows
+// predicate the core decisions expect. nil snap → never (fail-closed).
+func followsFromSnap(snap map[string]bool) func(string) bool {
+	return func(id string) bool {
 		if snap == nil {
 			return false
 		}
 		_, ok := snap[id]
 		return ok
 	}
-	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p), follows, nowMs)
 }
 
 func embedFactsFromProbe(p embedProbe) corenote.EmbedFacts {

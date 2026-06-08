@@ -3,19 +3,39 @@ package channels
 import (
 	"encoding/json"
 
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
 )
 
-// RoleTimelineChannel forwards notes from users with a specific role.
-type RoleTimelineChannel struct {
-	ctx    stream.ChannelContext
-	topic  string
-	filter noteFilter
+// RoleExplorableChecker reports whether a role's timeline is publicly
+// streamable (isExplorable). Implemented by core/role.Service.
+type RoleExplorableChecker interface {
+	IsExplorable(roleID string) bool
 }
 
-// NewRoleTimeline returns a channel factory for "roleTimeline".
-func NewRoleTimeline(ctx stream.ChannelContext) stream.Channel {
-	return &RoleTimelineChannel{ctx: ctx}
+// RoleTimelineFactory builds RoleTimelineChannels carrying an isExplorable
+// checker so OnRedisEvent can gate non-explorable roles (#1549).
+type RoleTimelineFactory struct {
+	explorable RoleExplorableChecker
+}
+
+// NewRoleTimelineFactory constructs a RoleTimelineFactory.
+func NewRoleTimelineFactory(explorable RoleExplorableChecker) *RoleTimelineFactory {
+	return &RoleTimelineFactory{explorable: explorable}
+}
+
+// New implements stream.ChannelFactory.
+func (f *RoleTimelineFactory) New(ctx stream.ChannelContext) stream.Channel {
+	return &RoleTimelineChannel{ctx: ctx, explorable: f.explorable}
+}
+
+// RoleTimelineChannel forwards notes from users with a specific role.
+type RoleTimelineChannel struct {
+	ctx        stream.ChannelContext
+	explorable RoleExplorableChecker
+	topic      string
+	roleID     string
+	filter     noteFilter
 }
 
 func (c *RoleTimelineChannel) Init(params json.RawMessage) error {
@@ -30,12 +50,22 @@ func (c *RoleTimelineChannel) Init(params json.RawMessage) error {
 		return nil
 	}
 	c.filter = parseNoteFilter(params)
+	c.roleID = p.RoleID
 	c.topic = "roleTimeline:" + p.RoleID
 	c.ctx.Subscribe(c.topic)
 	return nil
 }
 
 func (c *RoleTimelineChannel) OnRedisEvent(payload []byte) {
+	// 本家 role-timeline.ts: isExplorable role かつ visibility==public のみ emit。
+	// isExplorable は runtime 可変なので per-event で check する (publish 側では
+	// gate しない)。checker 未配線は fail-closed。
+	if c.explorable == nil || !c.explorable.IsExplorable(c.roleID) {
+		return
+	}
+	if noteVisibility(payload) != string(model.NoteVisibilityPublic) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
