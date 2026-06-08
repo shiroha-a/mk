@@ -4,6 +4,7 @@ package reaction
 import (
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 // FallbackReaction is the default reaction used when no reaction is provided.
 // 本家Misskeyは Heart "❤" を fallback にしている。
 const FallbackReaction = "\u2764"
+
+// reactionAcceptance values a note may carry (upstream Misskey).
+const (
+	reactionAcceptanceLikeOnly                          = "likeOnly"
+	reactionAcceptanceLikeOnlyForRemote                 = "likeOnlyForRemote"
+	reactionAcceptanceNonSensitiveOnly                  = "nonSensitiveOnly"
+	reactionAcceptanceNonSensitiveForLocalLikeForRemote = "nonSensitiveOnlyForLocalLikeOnlyForRemote"
+)
 
 // Errors returned by Service.
 var (
@@ -105,6 +114,20 @@ type NoteStreamHook interface {
 }
 
 // Service manages note reactions.
+// UserRolesProvider reports the roles a user holds, for role-gated custom emoji
+// reactions (#1538). *role.Service implements it. nil 注入時は role gate を
+// skip する (= pre-#1538 挙動)。
+type UserRolesProvider interface {
+	GetUserRoles(userID string) ([]*model.Role, error)
+}
+
+// MediaSilenceChecker reports whether a (remote) host is media-silenced, for
+// rejecting custom emoji reactions from such hosts (#1538). *instance.Service
+// implements it (IsMediaSilenced). nil 注入時は media-silence gate を skip する。
+type MediaSilenceChecker interface {
+	IsMediaSilenced(host string) bool
+}
+
 type Service struct {
 	noteRepo         repository.NoteRepository
 	reactionRepo     repository.NoteReactionRepository
@@ -118,6 +141,18 @@ type Service struct {
 	webhookHook      WebhookHook
 	noteStreamHook   NoteStreamHook
 	countWriter      ReactionCountWriter
+	userRoles        UserRolesProvider
+	mediaSilence     MediaSilenceChecker
+}
+
+// SetUserRolesProvider wires role lookup for role-gated emoji reaction gating (#1538).
+func (s *Service) SetUserRolesProvider(p UserRolesProvider) {
+	s.userRoles = p
+}
+
+// SetMediaSilenceChecker wires the media-silence host check for reaction gating (#1538).
+func (s *Service) SetMediaSilenceChecker(c MediaSilenceChecker) {
+	s.mediaSilence = c
 }
 
 // SetCountWriter replaces the default direct writer with a buffered one.
@@ -217,7 +252,11 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 		return "", ErrCannotReactToPureRenote
 	}
 
-	reaction := s.normalizeReaction(rawReaction, user.Host)
+	reaction, reactionEmoji := s.resolveReaction(rawReaction, user.Host)
+	// note.reactionAcceptance + role/sensitive/media-silence gate を適用し、
+	// 受理できない reaction は ❤ にフォールバックする (#1538, 本家
+	// ReactionService.create 準拠)。local / 連合 inbound 双方が本 Create を通る。
+	reaction = s.applyReactionAcceptance(user, target, reaction, reactionEmoji)
 
 	// 既存リアクションを確認
 	if existing, err := s.reactionRepo.FindByPair(user.ID, target.ID); err == nil {
@@ -349,11 +388,21 @@ func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit 
 // にフォールバックする (#459)。actorHost が nil/空なら従来通りローカル
 // として扱う。
 func (s *Service) normalizeReaction(raw string, actorHost *string) string {
+	n, _ := s.resolveReaction(raw, actorHost)
+	return n
+}
+
+// resolveReaction is the shared core of normalizeReaction. In addition to the
+// canonical reaction string it returns the resolved custom emoji (nil for
+// legacy/unicode/empty reactions or when a custom emoji is not found and falls
+// back). Create uses the emoji for reactionAcceptance gating (#1538) so it does
+// not re-query the emoji table.
+func (s *Service) resolveReaction(raw string, actorHost *string) (string, *model.Emoji) {
 	if raw == "" {
-		return FallbackReaction
+		return FallbackReaction, nil
 	}
 	if v, ok := legacyMap[raw]; ok {
-		return v
+		return v, nil
 	}
 	if m := customEmojiPattern.FindStringSubmatch(raw); m != nil {
 		name := m[1]
@@ -376,19 +425,77 @@ func (s *Service) normalizeReaction(raw string, actorHost *string) string {
 		if host != "" {
 			hostPtr = &host
 		}
-		if _, err := s.emojiRepo.FindByNameAndHost(name, hostPtr); err == nil {
+		if emoji, err := s.emojiRepo.FindByNameAndHost(name, hostPtr); err == nil {
 			if host == "" {
-				return ":" + name + "@.:"
+				return ":" + name + "@.:", emoji
 			}
-			return ":" + name + "@" + host + ":"
+			return ":" + name + "@" + host + ":", emoji
 		}
 		// 見つからなければFallbackにする
-		return FallbackReaction
+		return FallbackReaction, nil
 	}
 	// Unicode emoji は variation selector (U+FE0F) を strip して upstream
 	// Misskey TS と同じ canonical form に揃える (#864)。同じ emoji の異なる
 	// encode (例: U+2764 と U+2764 + U+FE0F) を 1 つの key として扱う。
-	return stripVariationSelector(raw)
+	return stripVariationSelector(raw), nil
+}
+
+// applyReactionAcceptance enforces note.reactionAcceptance + role-gated /
+// sensitive / media-silenced custom emoji rules, mirroring upstream
+// ReactionService.create. It returns the (possibly downgraded-to-❤) reaction.
+// reaction/emoji come from resolveReaction; emoji is nil for non-custom reactions.
+// Notes without reactionAcceptance and reactions that hit none of the gates keep
+// their resolved value, so the default reaction path is unchanged (#1538).
+func (s *Service) applyReactionAcceptance(user *model.User, target *model.Note, reaction string, emoji *model.Emoji) string {
+	acc := ""
+	if target.ReactionAcceptance != nil {
+		acc = *target.ReactionAcceptance
+	}
+	remote := !user.IsLocal()
+
+	// likeOnly は常に ❤。likeOnlyForRemote / nonSensitiveOnlyForLocalLikeOnlyForRemote
+	// は remote reactor のとき ❤ (本家 ReactionService.create)。
+	if acc == reactionAcceptanceLikeOnly ||
+		((acc == reactionAcceptanceLikeOnlyForRemote || acc == reactionAcceptanceNonSensitiveForLocalLikeForRemote) && remote) {
+		return FallbackReaction
+	}
+
+	// 以降の gate は custom emoji reaction のみ対象。
+	if emoji == nil {
+		return reaction
+	}
+	// role-gated emoji: 使用可能 role を持たなければ ❤。
+	if len(emoji.RoleIDsThatCanBeUsedThisEmojiAsReaction) > 0 && !s.reactorHasAllowedRole(user.ID, emoji.RoleIDsThatCanBeUsedThisEmojiAsReaction) {
+		return FallbackReaction
+	}
+	// media-silenced reacter host (remote のみ) は ❤。
+	if remote && user.Host != nil && s.mediaSilence != nil && s.mediaSilence.IsMediaSilenced(*user.Host) {
+		return FallbackReaction
+	}
+	// nonSensitive 系で sensitive emoji は ❤。
+	if (acc == reactionAcceptanceNonSensitiveOnly || acc == reactionAcceptanceNonSensitiveForLocalLikeForRemote) && emoji.IsSensitive {
+		return FallbackReaction
+	}
+	return reaction
+}
+
+// reactorHasAllowedRole reports whether the user holds any of the roles allowed
+// to use a role-gated emoji. When no UserRolesProvider is wired the gate is
+// skipped (returns true = pre-#1538 behavior); production always wires it.
+func (s *Service) reactorHasAllowedRole(userID string, allowed []string) bool {
+	if s.userRoles == nil {
+		return true
+	}
+	roles, err := s.userRoles.GetUserRoles(userID)
+	if err != nil {
+		return false
+	}
+	for _, r := range roles {
+		if slices.Contains(allowed, r.ID) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripVariationSelector removes Unicode emoji variation selector (U+FE0F)

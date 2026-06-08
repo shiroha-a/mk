@@ -342,6 +342,20 @@ func (s *Service) IsSilenced(host string) bool {
 	return HostMatchesAny(meta.SilencedHosts, host)
 }
 
+// IsMediaSilenced reports whether the host matches an entry in
+// meta.mediaSilencedHosts. Used by reaction gating to reject custom emoji
+// reactions from media-silenced remote hosts (#1538).
+func (s *Service) IsMediaSilenced(host string) bool {
+	if host == "" {
+		return false
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		return false
+	}
+	return HostMatchesAny(meta.MediaSilencedHosts, host)
+}
+
 // FederationHostSets bundles the host lists that drive the federation panel's
 // blocked / silenced / media-silenced state. 3 つとも同じ []string なので、
 // 位置引数で取り違えないよう named field の struct にまとめる。

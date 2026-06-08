@@ -530,6 +530,11 @@ func (s *Server) setupRoutes() {
 	// Instance management (Phase 3 Step H)
 	instanceService := coreinstance.NewService(instanceRepo, metaRepo, idGen)
 	federationResolver.SetInstanceTracker(instanceService)
+	// #1538: reactionAcceptance gate — role-gated emoji + media-silenced host。
+	// instanceService 生成後 (= 本ブロック) で配線する (reactionService は line ~281
+	// で先に作られるため、media-silence checker はここで遅延注入する)。
+	reactionService.SetUserRolesProvider(roleService)
+	reactionService.SetMediaSilenceChecker(instanceService)
 	// ホワイトリスト連合 (federation: specified) / blockedHosts に対する gate を
 	// resolver の入口 (fetchActor / resolveNoteOnce / IngestNoteWithCreated) に
 	// 適用する。deliver_service / inboxProcessor と同じ instanceService を共有。
