@@ -573,12 +573,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	// upstream paramDef のデフォルトに合わせる (= withFiles=false /
-	// withReplies=true / withRenotes=true / withChannelNotes=false)。
+	// withReplies=false / withRenotes=true / withChannelNotes=false)。
+	// withReplies は notes.ts:59 で default:false。以前は default=true と
+	// 誤って扱っていた (#1547)。
 	withFiles := false
 	if req.WithFiles != nil {
 		withFiles = *req.WithFiles
 	}
-	withReplies := true
+	withReplies := false
 	if req.WithReplies != nil {
 		withReplies = *req.WithReplies
 	}
@@ -589,6 +591,12 @@ func (h *Handler) Notes(c echo.Context) error {
 	withChannelNotes := false
 	if req.WithChannelNotes != nil {
 		withChannelNotes = *req.WithChannelNotes
+	}
+
+	// upstream notes.ts:93 と同じく withReplies && withFiles の同時指定は
+	// 非対応として弾く (BOTH_WITH_REPLIES_AND_WITH_FILES)。
+	if withReplies && withFiles {
+		return c.JSON(http.StatusBadRequest, apierr.Error("BOTH_WITH_REPLIES_AND_WITH_FILES", "Specifying both withReplies and withFiles is not supported", "91c8cb9f-36ed-46e7-9ca2-7df96ed6e222"))
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。

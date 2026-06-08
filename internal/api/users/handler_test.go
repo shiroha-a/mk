@@ -833,8 +833,8 @@ func TestNotes_Success(t *testing.T) {
 
 // 4 種類のノート (text のみ / file 添付あり / reply / pure renote / channel) を
 // 同 user に seed し、各 filter で期待数が返ることを確認する。upstream
-// `users/notes` paramDef のデフォルトは withFiles=false / withReplies=true /
-// withRenotes=true / withChannelNotes=false。
+// `users/notes` paramDef のデフォルトは withFiles=false / withReplies=false /
+// withRenotes=true / withChannelNotes=false (#1547)。
 func seedNotesForFilter(t *testing.T, repo *testutil.MockNoteRepository) {
 	t.Helper()
 	text := "plain text"
@@ -872,8 +872,13 @@ func TestNotes_DefaultFilters(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	// channel は除外、その他 (plain / file / reply / renote) は含む
-	assert.Len(t, out, 4, "default: withChannelNotes=false で channel のみ除外")
+	// default: withReplies=false / withChannelNotes=false なので reply と
+	// channel が除外され、plain / file / renote の 3 件が残る (#1547)。
+	assert.Len(t, out, 3, "default: withReplies=false で reply を、withChannelNotes=false で channel を除外")
+	for _, n := range out {
+		assert.NotEqual(t, "nf_reply", n["id"], "default で reply が除外される")
+		assert.NotEqual(t, "nf_channel", n["id"], "default で channel が除外される")
+	}
 }
 
 func TestNotes_WithFiles(t *testing.T) {
@@ -901,6 +906,43 @@ func TestNotes_WithoutReplies(t *testing.T) {
 	for _, n := range out {
 		assert.NotEqual(t, "nf_reply", n["id"], "reply が除外される")
 	}
+}
+
+// withReplies を明示的に true にすると default (false) を上書きして reply が
+// 含まれることを確認する (#1547)。
+func TestNotes_WithReplies(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withReplies": true}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	var hasReply bool
+	for _, n := range out {
+		if n["id"] == "nf_reply" {
+			hasReply = true
+		}
+	}
+	assert.True(t, hasReply, "withReplies=true で reply が含まれる")
+}
+
+// upstream notes.ts:93: withReplies && withFiles の同時指定は
+// BOTH_WITH_REPLIES_AND_WITH_FILES (91c8cb9f-...) を 400 で返す (#1547)。
+func TestNotes_BothWithRepliesAndWithFiles(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	seedNotesForFilter(t, noteRepo)
+	rec := post(h.Notes, `{"userId": "user1", "withReplies": true, "withFiles": true}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok, "error object present")
+	assert.Equal(t, "BOTH_WITH_REPLIES_AND_WITH_FILES", errObj["code"])
+	assert.Equal(t, "91c8cb9f-36ed-46e7-9ca2-7df96ed6e222", errObj["id"])
 }
 
 func TestNotes_WithoutRenotes(t *testing.T) {
