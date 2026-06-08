@@ -104,9 +104,12 @@ func (h *Handler) ListsFavorite(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"))
 		}
 	}
+	// Misskey TS `users/lists/favorite` は既 fav を ALREADY_FAVORITED
+	// (HTTP 400) で弾く (旧 mk-go は 204 を返していて shape が乖離)。UUID は
+	// favorite.ts の alreadyFavorited と一致 (unfavorite の同 code とは別 UUID)。
 	already, _ := h.userListFavoriteRepo.Exists(user.ID, req.ListID)
 	if already {
-		return c.NoContent(http.StatusNoContent)
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FAVORITED", "The list has already been favorited.", "6425bba0-985b-461e-af1b-518070e72081"))
 	}
 	fav := &model.UserListFavorite{
 		ID:         h.idGen.Generate(time.Now()),
@@ -130,6 +133,23 @@ func (h *Handler) ListsUnfavorite(c echo.Context) error {
 	}
 	if h.userListFavoriteRepo == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// Misskey TS `users/lists/unfavorite` は favorite と同じく `exists({ id,
+	// isPublic: true })` を満たさない list を NO_SUCH_USER_LIST で弾く (UUID は
+	// unfavorite.ts 固有で favorite の NO_SUCH_USER_LIST とは別)。userListRepo
+	// 未配線の test 経路ではこの gate を skip する (production は router が必ず wire)。
+	if h.userListRepo != nil {
+		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil || !list.IsPublic {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "baedb33e-76b8-4b0c-86a8-9375c0a7b94b"))
+		}
+	}
+	// fav row が無い場合は upstream の notFavorited (code は ALREADY_FAVORITED
+	// だが UUID は favorite の alreadyFavorited とは別) を返す。delete は冪等
+	// だが TS と shape を揃えるため exists を先に確認する。
+	exists, _ := h.userListFavoriteRepo.Exists(user.ID, req.ListID)
+	if !exists {
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FAVORITED", "You have not favorited the list.", "835c4b27-463d-4cfa-969b-a9058678d465"))
 	}
 	if err := h.userListFavoriteRepo.Delete(user.ID, req.ListID); err != nil {
 		return apierr.JSONInternalError(c)

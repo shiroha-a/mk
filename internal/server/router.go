@@ -1952,6 +1952,8 @@ func (s *Server) setupRoutes() {
 	// User lists (Phase 6)
 	userListHandler := apiuserlists.NewHandler(userListRepo, idGen)
 	userListHandler.SetRolePolicyProvider(roleService) // #1029: userListLimit / userEachUserListsLimit
+	userListHandler.SetUserRepo(userRepo)              // #1550: push NO_SUCH_USER check
+	userListHandler.SetBlockingRepo(blockingRepo)      // #1550: push YOU_HAVE_BEEN_BLOCKED check
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireAuth())
 	api.POST("/users/lists/create", userListHandler.Create, middleware.RequireAuth())
 	api.POST("/users/lists/show", userListHandler.Show, middleware.RequireAuth())

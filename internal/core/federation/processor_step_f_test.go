@@ -79,7 +79,10 @@ func TestProcess_CreateActorError(t *testing.T) {
 
 func TestProcess_CreateNoteIngestError(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
-	body := []byte(`{"type":"Create","actor":"https://remote.example/users/alice","object":{"id":"x"}}`)
+	// object に id が無いケースは attributedTo を actor から補って (#1560) もなお
+	// IngestNoteWithCreated の ID 空チェックで ErrInvalidNote になり Process が
+	// error を surface する。
+	body := []byte(`{"type":"Create","actor":"https://remote.example/users/alice","object":{"content":"no id"}}`)
 	err := env.processor.Process(body)
 	assert.Error(t, err)
 }
