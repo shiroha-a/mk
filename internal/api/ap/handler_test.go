@@ -1,6 +1,7 @@
 package ap
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -477,18 +479,49 @@ func TestAPIGet_NoMatch(t *testing.T) {
 
 func TestAPIShow_Note(t *testing.T) {
 	h, _, noteRepo, _ := newHandler(t)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, User: &model.User{ID: "u1", Username: "alice"}}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Text: ptr("hi"), Visibility: model.NoteVisibilityPublic, User: &model.User{ID: "u1", Username: "alice"}}
 	rec := postJSON(h.APIShow, `{"uri":"https://example.com/notes/n1"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"type":"Note"`)
+
+	// object must be packed with the full Note entity schema (#1557):
+	// the old ad-hoc object lacked createdAt / renoteCount / reactions etc.
+	var resp struct {
+		Type   string         `json:"type"`
+		Object map[string]any `json:"object"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "Note", resp.Type)
+	assert.Equal(t, "n1", resp.Object["id"])
+	assert.Contains(t, resp.Object, "createdAt")
+	assert.Contains(t, resp.Object, "renoteCount")
+	assert.Contains(t, resp.Object, "reactions")
+	// nested user must be UserLite (has onlineStatus), not 4-field stub.
+	userObj, ok := resp.Object["user"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, userObj, "onlineStatus")
 }
 
 func TestAPIShow_User(t *testing.T) {
 	h, userRepo, _, _ := newHandler(t)
+	desc := "about bob"
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "bob"}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Description: &desc}
 	rec := postJSON(h.APIShow, `{"uri":"https://example.com/users/u1"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"type":"User"`)
+
+	// object must be UserDetailedNotMe (#1557): the old stub had only
+	// id/username/name/host. createdAt / isLocked / description prove the
+	// detailed schema, and the profile description is carried through.
+	var resp struct {
+		Type   string         `json:"type"`
+		Object map[string]any `json:"object"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "User", resp.Type)
+	assert.Equal(t, "u1", resp.Object["id"])
+	assert.Contains(t, resp.Object, "createdAt")
+	assert.Contains(t, resp.Object, "isLocked")
+	assert.Equal(t, "about bob", resp.Object["description"])
 }
 
 func TestAPIShow_NotFound(t *testing.T) {
@@ -534,17 +567,48 @@ func TestExtractLocalID_Fragment(t *testing.T) {
 	assert.Equal(t, "n1", extractLocalID("https://example.com/notes/n1#fragment", "/notes/"))
 }
 
-func TestPackNoteForAPI_NilUser(t *testing.T) {
+func ptr[T any](v T) *T { return &v }
+
+func TestPackNoteForAPI_FullEntity(t *testing.T) {
+	h, _, _, _ := newHandler(t)
 	n := &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
-	result := packNoteForAPI(n)
-	assert.Equal(t, "n1", result["id"])
-	_, hasUser := result["user"]
-	assert.False(t, hasUser)
+	result := h.packNoteForAPI(&model.User{ID: "viewer"}, n)
+	// full NoteEntity, not the old ad-hoc minimal map.
+	assert.Equal(t, "n1", result.ID)
+	assert.Equal(t, "public", result.Visibility)
+}
+
+// TestPackNoteForAPI_HidesNonVisibleEmbed locks in the #1536/#1557 embed IDOR
+// gate: a followers-only renote embedded in a public note must be blanked for a
+// viewer who does not follow the embed author (notehide fail-closes on the unset
+// package-level following repo).
+func TestPackNoteForAPI_HidesNonVisibleEmbed(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	renote := &model.Note{ID: "r1", UserID: "author", Visibility: model.NoteVisibilityFollowers, Text: ptr("secret")}
+	n := &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Renote: renote}
+	result := h.packNoteForAPI(&model.User{ID: "viewer"}, n)
+	require.NotNil(t, result.Renote)
+	assert.True(t, result.Renote.IsHidden, "followers renote embed must be hidden from a non-follower viewer")
+	assert.Nil(t, result.Renote.Text)
 }
 
 func TestPackUserForAPI_Nil(t *testing.T) {
-	result := packUserForAPI(nil)
-	assert.Empty(t, result)
+	h, _, _, _ := newHandler(t)
+	result := h.packUserForAPI(nil, nil)
+	m, ok := result.(map[string]any)
+	require.True(t, ok)
+	assert.Empty(t, m)
+}
+
+func TestPackUserForAPI_FullEntity(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	desc := "bio"
+	result := h.packUserForAPI(&model.User{ID: "u1", Username: "alice"}, &model.UserProfile{UserID: "u1", Description: &desc})
+	d, ok := result.(entity.UserDetailed)
+	require.True(t, ok)
+	assert.Equal(t, "u1", d.ID)
+	require.NotNil(t, d.Description)
+	assert.Equal(t, "bio", *d.Description)
 }
 
 func TestMustMarshal_Panics(t *testing.T) {

@@ -76,7 +76,9 @@ func (m *mockAuthSessionRepo) FindSessionByTokenAndAppID(token, appID string) (*
 				s.App = app
 			}
 		}
-		if s.UserID != nil {
+		// 既に User が pre-set されていれば尊重する (テストが任意の user を
+		// 注入できるようにするため)。未設定のときだけ既定 user を合成する。
+		if s.UserID != nil && s.User == nil {
 			s.User = &model.User{ID: *s.UserID, Username: "testuser"}
 		}
 		return s, nil
@@ -339,7 +341,46 @@ func TestSessionUserkey_Success(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1"}
 	userID := "u1"
-	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1", UserID: &userID}
+	desc := "hello"
+	user := &model.User{ID: "u1", Username: "alice", Name: nil}
+	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1", UserID: &userID, User: user}
+	appID := "a1"
+	repo.accessTokens["a1:u1"] = &model.AccessToken{ID: "at1", Token: "mytoken", AppID: &appID, UserID: "u1"}
+
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = user
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Description: &desc}
+	h.SetUserRepo(userRepo)
+
+	rec := post(h.SessionUserkey, `{"appSecret":"s1","token":"tok1"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "mytoken", resp["accessToken"])
+	// user must be packed as UserDetailedNotMe, not the old 4-field stub:
+	// UserDetailed-only fields (createdAt / isLocked / description /
+	// publicReactions) prove the full schema is used (#1557).
+	userObj, ok := resp["user"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "u1", userObj["id"])
+	assert.Equal(t, "alice", userObj["username"])
+	assert.Contains(t, userObj, "createdAt")
+	assert.Contains(t, userObj, "isLocked")
+	assert.Contains(t, userObj, "publicReactions")
+	assert.Equal(t, "hello", userObj["description"])
+	// セッション削除されたか
+	assert.Empty(t, repo.sessions)
+}
+
+// TestSessionUserkey_NoUserRepo verifies the user is still packed with the
+// UserDetailed schema (sans profile fields) when userRepo is not wired,
+// degrading gracefully rather than reverting to the 4-field stub.
+func TestSessionUserkey_NoUserRepo(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1"}
+	userID := "u1"
+	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1", UserID: &userID, User: &model.User{ID: "u1", Username: "alice"}}
 	appID := "a1"
 	repo.accessTokens["a1:u1"] = &model.AccessToken{ID: "at1", Token: "mytoken", AppID: &appID, UserID: "u1"}
 
@@ -348,10 +389,10 @@ func TestSessionUserkey_Success(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "mytoken", resp["accessToken"])
-	assert.NotNil(t, resp["user"])
-	// セッション削除されたか
-	assert.Empty(t, repo.sessions)
+	userObj, ok := resp["user"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "u1", userObj["id"])
+	assert.Contains(t, userObj, "isLocked")
 }
 
 func TestSessionUserkey_NoSuchApp(t *testing.T) {
@@ -418,9 +459,12 @@ func TestPackSession_NilApp(t *testing.T) {
 	assert.False(t, hasApp)
 }
 
-func TestPackUser_Nil(t *testing.T) {
-	result := packUser(nil)
-	assert.Empty(t, result)
+func TestPackUserDetailed_NilUser(t *testing.T) {
+	h, _ := newTestHandler()
+	result := h.packUserDetailed(nil, "u1")
+	m, ok := result.(map[string]any)
+	require.True(t, ok)
+	assert.Empty(t, m)
 }
 
 // --- GenToken ---
