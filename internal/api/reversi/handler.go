@@ -111,14 +111,20 @@ func (h *Handler) SetFederation(baseURL string, deliverer FederationDeliverer, f
 
 func packGame(g *model.ReversiGame, idGen id.Generator) map[string]any {
 	result := map[string]any{
-		"id":                   g.ID,
-		"user1Id":              g.User1ID,
-		"user2Id":              g.User2ID,
-		"user1Ready":           g.User1Ready,
-		"user2Ready":           g.User2Ready,
-		"black":                g.Black,
-		"isStarted":            g.IsStarted,
-		"isEnded":              g.IsEnded,
+		"id":         g.ID,
+		"user1Id":    g.User1ID,
+		"user2Id":    g.User2ID,
+		"user1Ready": g.User1Ready,
+		"user2Ready": g.User2Ready,
+		"black":      g.Black,
+		"isStarted":  g.IsStarted,
+		"isEnded":    g.IsEnded,
+		// form1 / form2 は upstream packDetail が `optional:false, nullable:true`
+		// で常に出力する (ReversiGameEntityService.packDetail / json-schema
+		// reversi-game.ts form1/form2)。frontend のゲーム設定 UI が form を
+		// 参照するため欠落させない。空 (nil) は JSON で null になる (#1553)。
+		"form1":                jsonOrNull(g.Form1),
+		"form2":                jsonOrNull(g.Form2),
 		"winnerId":             g.WinnerID,
 		"surrenderedUserId":    g.SurrenderedUserID,
 		"timeoutUserId":        g.TimeoutUserID,
@@ -155,6 +161,19 @@ func packGame(g *model.ReversiGame, idGen id.Generator) map[string]any {
 		}
 	}
 	return result
+}
+
+// jsonOrNull normalizes a datatypes.JSON column into a value safe for
+// json.Marshal: a nil or empty byte slice becomes a nil json.RawMessage so it
+// serializes to `null`, otherwise the raw JSON bytes are emitted verbatim.
+// 非 nil だが長さ 0 の datatypes.JSON をそのまま map に入れると
+// json.Marshal がレスポンス全体を失敗させる (encoding/json は空 JSON を
+// 不正とみなす) ため、ここで null に正規化しておく。
+func jsonOrNull(j datatypes.JSON) any {
+	if len(j) == 0 {
+		return nil
+	}
+	return json.RawMessage(j)
 }
 
 // 標準8x8盤面
@@ -282,7 +301,9 @@ func (h *Handler) ShowGame(c echo.Context) error {
 	}
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "d8a95858-973b-4f3b-8592-fcf2eb4dd044"))
+		// show-game の noSuchGame は upstream で endpoint 固有 UUID
+		// (show-game.ts:19)。surrender / verify とは別値なので使い回さない。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "f13a03db-fae1-46c9-87f3-43c8165419e1"))
 	}
 	// ユーザーが invitations UI からではなく「自分の対局」一覧などから
 	// pending game に直接入った場合、/match が呼ばれないままなので相手側が
@@ -312,7 +333,8 @@ func (h *Handler) Match(c echo.Context) error {
 	if strings.HasPrefix(req.UserID, "@") && h.userRepo != nil {
 		resolved, err := h.resolveAcct(req.UserID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "6cc579cc-885d-43d8-95c2-b8c7fc963280"))
+			// match の noSuchUser は upstream match.ts:22 の endpoint 固有 UUID。
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "0b4f0559-b484-4e31-9581-3f73cee89b28"))
 		}
 		req.UserID = resolved
 	}
@@ -497,10 +519,10 @@ func (h *Handler) Surrender(c echo.Context) error {
 	// lookup は handler のタイミングで必要なので preload する。
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "d8a95858-973b-4f3b-8592-fcf2eb4dd044"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
 	}
 	if game.User1ID != user.ID && game.User2ID != user.ID {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
 	}
 
 	// service が注入されていればそちらを経由する (本来のパス)。
@@ -532,14 +554,19 @@ func (h *Handler) Surrender(c echo.Context) error {
 
 // surrenderErrorResponse maps core/reversi service errors to Misskey-
 // compatible HTTP error bodies. Unknown errors fall back to 500.
+//
+// 本 helper は Surrender ハンドラ専用なので NO_SUCH_GAME / ACCESS_DENIED /
+// ALREADY_ENDED はすべて upstream surrender.ts:20,26,32 の endpoint 固有
+// UUID を使う (#1553)。NOT_STARTED は upstream surrender に存在しない
+// cherrypick 由来 code のため独自 UUID を維持する。
 func surrenderErrorResponse(c echo.Context, err error) error {
 	switch {
 	case errors.Is(err, corereversi.ErrGameNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "d8a95858-973b-4f3b-8592-fcf2eb4dd044"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
 	case errors.Is(err, corereversi.ErrNotPlayer):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
 	case errors.Is(err, corereversi.ErrAlreadyEnded):
-		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ENDED", "Game has already ended.", "2a3a7f72-bc06-4f4e-9f7c-b7f8d4f6a09e"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ENDED", "Game has already ended.", "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d"))
 	case errors.Is(err, corereversi.ErrNotStarted):
 		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_STARTED", "Game has not started yet.", "ac4bb45f-ea81-44d3-a5b3-fe5f30be2c8d"))
 	}
@@ -560,7 +587,8 @@ func (h *Handler) Verify(c echo.Context) error {
 	}
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "d8a95858-973b-4f3b-8592-fcf2eb4dd044"))
+		// verify の noSuchGame は upstream verify.ts:17 の endpoint 固有 UUID。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "8fb05624-b525-43dd-90f7-511852bdfeee"))
 	}
 
 	// ログを再生して engine CRC を算出し、client が送ってきた crc32 と

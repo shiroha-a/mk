@@ -928,6 +928,9 @@ func (m *MockNoteRepository) ListRepliesOf(noteID, viewerID, untilID, sinceID st
 }
 
 // ListChildrenOf returns notes that reply to or quote the given noteID.
+// upstream notes/children (children.ts:53-67) に合わせ、renote 側は本文・ファイル・
+// 投票のいずれかを持つ引用 renote のみ child として返す。pure renote (Text==nil かつ
+// FileIDs 空かつ HasPoll==false) は除外する (#1554)。reply 側にはこのガードを掛けない。
 func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
 		if !m.canViewerSeeNote(viewerID, n) {
@@ -937,7 +940,10 @@ func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID s
 			return true
 		}
 		if n.RenoteID != nil && *n.RenoteID == noteID {
-			return true
+			// pure renote 判定は repository note.go の SQL (text IS NULL AND
+			// fileIds = '{}' AND hasPoll = false) と一致させる。
+			isPureRenote := n.Text == nil && len(n.FileIDs) == 0 && !n.HasPoll
+			return !isPureRenote
 		}
 		return false
 	}, untilID, sinceID, limit), nil

@@ -771,3 +771,148 @@ func TestPackGame_WinnerField(t *testing.T) {
 // pack tests — keeps id generation reproducible even though the actual
 // timestamp value is irrelevant.
 func timeRef() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+
+// errorID decodes a Misskey-shaped error body and returns the `error.id`.
+func errorID(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+			ID   string `json:"id"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body.Error.ID
+}
+
+// TestPackGame_FormFields guards that REST packGame always emits form1/form2
+// (#1553). Upstream packedReversiGameDetailedSchema declares them
+// optional:false, nullable:true and ReversiGameEntityService.packDetail returns
+// `form1: game.form1, form2: game.form2`, so the keys must always be present:
+// null when the column is empty, the stored JSON object otherwise. A nil column
+// must not break marshaling of the whole response.
+func TestPackGame_FormFields(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	gid := idGen.Generate(timeRef())
+
+	t.Run("nil form columns serialize to null but keys present", func(t *testing.T) {
+		g := &model.ReversiGame{ID: gid, User1ID: "alice", User2ID: "bob"}
+		out := packGame(g, idGen)
+
+		f1, has1 := out["form1"]
+		require.True(t, has1, "form1 key must always be present")
+		assert.Nil(t, f1)
+		f2, has2 := out["form2"]
+		require.True(t, has2, "form2 key must always be present")
+		assert.Nil(t, f2)
+
+		// レスポンス全体が json.Marshal 可能であること (空 datatypes.JSON を
+		// そのまま入れると marshal が失敗するため null 正規化を検証する)。
+		raw, err := json.Marshal(out)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		_, ok1 := decoded["form1"]
+		_, ok2 := decoded["form2"]
+		assert.True(t, ok1)
+		assert.True(t, ok2)
+		assert.Nil(t, decoded["form1"])
+		assert.Nil(t, decoded["form2"])
+	})
+
+	t.Run("populated form columns pass through verbatim", func(t *testing.T) {
+		g := &model.ReversiGame{
+			ID: gid, User1ID: "alice", User2ID: "bob",
+			Form1: datatypes.JSON(`{"autoStart":true}`),
+			Form2: datatypes.JSON(`[{"id":"x"}]`),
+		}
+		out := packGame(g, idGen)
+
+		raw, err := json.Marshal(out)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		form1, ok := decoded["form1"].(map[string]any)
+		require.True(t, ok, "form1 must round-trip as the stored object")
+		assert.Equal(t, true, form1["autoStart"])
+		form2, ok := decoded["form2"].([]any)
+		require.True(t, ok, "form2 must round-trip as the stored array")
+		require.Len(t, form2, 1)
+	})
+}
+
+// TestReversiErrorIDsMatchUpstream guards that each reversi endpoint emits the
+// exact per-endpoint error UUID defined by vanilla Misskey (#1553). The UUIDs
+// differ per endpoint (NO_SUCH_GAME is f13a03db… in show-game, 8fb05624… in
+// verify, ace0b11f… in surrender), so a single shared UUID is a drop-in
+// regression for clients that branch on error.id.
+func TestReversiErrorIDsMatchUpstream(t *testing.T) {
+	t.Run("show-game NO_SUCH_GAME", func(t *testing.T) {
+		h, _ := newTestHandler()
+		rec := post(h.ShowGame, `{"gameId":"ghost"}`, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "f13a03db-fae1-46c9-87f3-43c8165419e1", errorID(t, rec))
+	})
+
+	t.Run("verify NO_SUCH_GAME", func(t *testing.T) {
+		h, _ := newTestHandler()
+		rec := post(h.Verify, `{"gameId":"ghost"}`, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "8fb05624-b525-43dd-90f7-511852bdfeee", errorID(t, rec))
+	})
+
+	t.Run("surrender NO_SUCH_GAME (inline)", func(t *testing.T) {
+		h, _ := newTestHandler()
+		rec := post(h.Surrender, `{"gameId":"ghost"}`, u1)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "ace0b11f-e0a6-4076-a30d-e8284c81b2df", errorID(t, rec))
+	})
+
+	t.Run("surrender ACCESS_DENIED (inline)", func(t *testing.T) {
+		h, repo := newTestHandler()
+		repo.games["g1"] = sampleGame()
+		rec := post(h.Surrender, `{"gameId":"g1"}`, &model.User{ID: "u3"})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "6e04164b-a992-4c93-8489-2123069973e1", errorID(t, rec))
+	})
+
+	t.Run("surrender NO_SUCH_GAME (service path)", func(t *testing.T) {
+		rec := surrenderErrorRec(t, corereversi.ErrGameNotFound)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "ace0b11f-e0a6-4076-a30d-e8284c81b2df", errorID(t, rec))
+	})
+
+	t.Run("surrender ACCESS_DENIED (service path)", func(t *testing.T) {
+		rec := surrenderErrorRec(t, corereversi.ErrNotPlayer)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "6e04164b-a992-4c93-8489-2123069973e1", errorID(t, rec))
+	})
+
+	t.Run("surrender ALREADY_ENDED (service path)", func(t *testing.T) {
+		rec := surrenderErrorRec(t, corereversi.ErrAlreadyEnded)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d", errorID(t, rec))
+	})
+
+	t.Run("match NO_SUCH_USER", func(t *testing.T) {
+		h, _ := newTestHandler()
+		userRepo := testutil.NewMockUserRepository()
+		h.SetFederation("https://example.com", nil, nil, userRepo)
+		rec := post(h.Match, `{"userId":"@ghost"}`, u1)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "0b4f0559-b484-4e31-9581-3f73cee89b28", errorID(t, rec))
+	})
+}
+
+// surrenderErrorRec drives surrenderErrorResponse directly so the service-error
+// branch (used when the core service rejects a surrender) is covered for the
+// upstream UUID assertions above.
+func surrenderErrorRec(t *testing.T, err error) *httptest.ResponseRecorder {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, surrenderErrorResponse(c, err))
+	return rec
+}

@@ -459,8 +459,13 @@ func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID strin
 	// グルーピングするが、その挙動に依存せず「後続 AND の visibility 述語が
 	// replyId/renoteId の OR 全体に係る」意図を明示するための defensive clarity
 	// (#1500)。実際のリーク防止は ListChildrenOf_VisibilityPushDown の回帰テストで担保。
+	//
+	// renoteId 側は upstream notes/children (children.ts:53-67) に合わせ、本文・
+	// ファイル・投票のいずれかを持つ引用 renote のみ含める。pure renote (text NULL
+	// かつ fileIds = '{}' かつ hasPoll = false) は children に出さない (#1554)。
+	// reply 側にはこの content ガードを掛けない (返信は本文が空でも子として返す)。
 	q := preloadNoteRelations(r.db).
-		Where("(\"replyId\" = ? OR \"renoteId\" = ?)", noteID, noteID)
+		Where(`("replyId" = ? OR ("renoteId" = ? AND ("text" IS NOT NULL OR "fileIds" != '{}' OR "hasPoll" = TRUE)))`, noteID, noteID)
 	// visibility push-down (#1500): viewer が見られる child のみ LIMIT 前に絞る。
 	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
