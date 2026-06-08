@@ -705,3 +705,122 @@ func TestService_NoteStreamHook_OnDelete_LegacyShortForm(t *testing.T) {
 	require.Len(t, hook.unreacted, 1)
 	assert.Equal(t, ":smile@.:", hook.unreacted[0].reaction)
 }
+
+// --- #1538: reactionAcceptance + role/sensitive/media-silence gates ---
+
+type stubRoles struct{ byUser map[string][]*model.Role }
+
+func (s stubRoles) GetUserRoles(id string) ([]*model.Role, error) { return s.byUser[id], nil }
+
+type stubMediaSilence struct{ hosts map[string]bool }
+
+func (s stubMediaSilence) IsMediaSilenced(host string) bool { return s.hosts[host] }
+
+// seedLocalEmoji registers a local (host nil) custom emoji under the mock key.
+func seedLocalEmoji(repo *testutil.MockEmojiRepository, name string, sensitive bool, roleIDs []string) {
+	repo.Emojis[name+"@"] = &model.Emoji{
+		ID: "e_" + name, Name: name, IsSensitive: sensitive,
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray(roleIDs),
+	}
+}
+
+func reactionStored(reactRepo *testutil.MockNoteReactionRepository) string {
+	for _, rec := range reactRepo.Reactions {
+		return rec.Reaction
+	}
+	return ""
+}
+
+func withAcceptance(n *model.Note, acc string) *model.Note { n.ReactionAcceptance = &acc; return n }
+
+func TestService_Create_LikeOnlyForcesHeart(t *testing.T) {
+	svc, repo, reactRepo, emojiRepo, _ := newService(t)
+	seedLocalEmoji(emojiRepo, "custom", false, nil)
+	withAcceptance(seedNote(repo, "n1", "author", model.NoteVisibilityPublic), "likeOnly")
+	r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":custom:")
+	require.NoError(t, err)
+	assert.Equal(t, reaction.FallbackReaction, r, "likeOnly note must coerce custom emoji to heart")
+	assert.Equal(t, reaction.FallbackReaction, reactionStored(reactRepo))
+}
+
+func TestService_Create_LikeOnlyForRemote(t *testing.T) {
+	host := "remote.example"
+	t.Run("remote reactor -> heart", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		emojiRepo.Emojis["custom@remote.example"] = &model.Emoji{ID: "e_r", Name: "custom"}
+		withAcceptance(seedNote(repo, "n1", "author", model.NoteVisibilityPublic), "likeOnlyForRemote")
+		r, err := svc.Create(&model.User{ID: "ruser", Host: &host}, "n1", ":custom:")
+		require.NoError(t, err)
+		assert.Equal(t, reaction.FallbackReaction, r)
+	})
+	t.Run("local reactor -> emoji kept", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		seedLocalEmoji(emojiRepo, "custom", false, nil)
+		withAcceptance(seedNote(repo, "n1", "author", model.NoteVisibilityPublic), "likeOnlyForRemote")
+		r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":custom:")
+		require.NoError(t, err)
+		assert.Equal(t, ":custom@.:", r)
+	})
+}
+
+func TestService_Create_NonSensitiveOnly(t *testing.T) {
+	t.Run("sensitive emoji -> heart", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		seedLocalEmoji(emojiRepo, "sens", true, nil)
+		withAcceptance(seedNote(repo, "n1", "author", model.NoteVisibilityPublic), "nonSensitiveOnly")
+		r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":sens:")
+		require.NoError(t, err)
+		assert.Equal(t, reaction.FallbackReaction, r)
+	})
+	t.Run("non-sensitive emoji -> kept", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		seedLocalEmoji(emojiRepo, "ok", false, nil)
+		withAcceptance(seedNote(repo, "n1", "author", model.NoteVisibilityPublic), "nonSensitiveOnly")
+		r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":ok:")
+		require.NoError(t, err)
+		assert.Equal(t, ":ok@.:", r)
+	})
+}
+
+func TestService_Create_RoleGatedEmoji(t *testing.T) {
+	t.Run("reactor without role -> heart", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		seedLocalEmoji(emojiRepo, "vip", false, []string{"role-vip"})
+		svc.SetUserRolesProvider(stubRoles{byUser: map[string][]*model.Role{}})
+		seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+		r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":vip:")
+		require.NoError(t, err)
+		assert.Equal(t, reaction.FallbackReaction, r)
+	})
+	t.Run("reactor with role -> kept", func(t *testing.T) {
+		svc, repo, _, emojiRepo, _ := newService(t)
+		seedLocalEmoji(emojiRepo, "vip", false, []string{"role-vip"})
+		svc.SetUserRolesProvider(stubRoles{byUser: map[string][]*model.Role{"viewer": {{ID: "role-vip"}}}})
+		seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+		r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":vip:")
+		require.NoError(t, err)
+		assert.Equal(t, ":vip@.:", r)
+	})
+}
+
+func TestService_Create_MediaSilencedHostHeart(t *testing.T) {
+	host := "media.bad"
+	svc, repo, _, emojiRepo, _ := newService(t)
+	emojiRepo.Emojis["custom@media.bad"] = &model.Emoji{ID: "e_m", Name: "custom"}
+	svc.SetMediaSilenceChecker(stubMediaSilence{hosts: map[string]bool{"media.bad": true}})
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	r, err := svc.Create(&model.User{ID: "ruser", Host: &host}, "n1", ":custom:")
+	require.NoError(t, err)
+	assert.Equal(t, reaction.FallbackReaction, r, "custom emoji reaction from media-silenced host must be heart")
+}
+
+// regression: no reactionAcceptance + unwired deps -> custom emoji kept (the
+// default reaction path is unchanged by #1538).
+func TestService_Create_NoAcceptanceKeepsEmoji(t *testing.T) {
+	svc, repo, _, emojiRepo, _ := newService(t)
+	seedLocalEmoji(emojiRepo, "custom", true, []string{"role-x"}) // sensitive + role-gated, but no acceptance/deps
+	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
+	r, err := svc.Create(&model.User{ID: "viewer"}, "n1", ":custom:")
+	require.NoError(t, err)
+	assert.Equal(t, ":custom@.:", r)
+}

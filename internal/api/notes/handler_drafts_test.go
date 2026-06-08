@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func postDraft(handler func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
@@ -519,7 +520,8 @@ func TestDraftsCount_WithData(t *testing.T) {
 // --- ThreadMuting ---
 
 func TestThreadMutingCreate_Success(t *testing.T) {
-	h := newDraftHandler()
+	h, noteRepo, _ := newThreadMuteHandler()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
 	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -531,7 +533,8 @@ func TestThreadMutingCreate_InvalidParam(t *testing.T) {
 }
 
 func TestThreadMutingDelete_Success(t *testing.T) {
-	h := newDraftHandler()
+	h, noteRepo, _ := newThreadMuteHandler()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
 	rec := postDraft(h.ThreadMutingDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -732,4 +735,126 @@ func TestDraftsDelete_ClearsScheduledNote(t *testing.T) {
 	rec := postDraft(h.DraftsDelete, `{"draftId":"d1"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, []string{"d1"}, enq.cleared)
+}
+
+// --- #1538: polls/recommendation ---
+
+func TestPollsRecommendation_NilRepoEmpty(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	h := &Handler{idGen: idGen}
+	rec := postDraft(h.PollsRecommendation, `{}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
+}
+
+func TestPollsRecommendation_ReturnsNotes(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	pollRepo := testutil.NewMockPollRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	for _, nid := range []string{"np1", "np2"} {
+		noteRepo.Notes[nid] = &model.Note{ID: nid, UserID: "author", Reactions: datatypes.JSON([]byte("{}"))}
+		pollRepo.Polls[nid] = &model.Poll{NoteID: nid, UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	}
+	h := &Handler{idGen: idGen, pollRepo: pollRepo, noteRepo: noteRepo}
+	rec := postDraft(h.PollsRecommendation, `{"limit":10}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Len(t, out, 2)
+}
+
+func TestPollsRecommendation_ExcludesSelfAndVoted(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	pollRepo := testutil.NewMockPollRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	// good poll, self poll, voted poll.
+	noteRepo.Notes["good"] = &model.Note{ID: "good", UserID: "author", Reactions: datatypes.JSON([]byte("{}"))}
+	pollRepo.Polls["good"] = &model.Poll{NoteID: "good", UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	pollRepo.Polls["self"] = &model.Poll{NoteID: "self", UserID: "viewer", NoteVisibility: model.NoteVisibilityPublic}
+	pollRepo.Polls["voted"] = &model.Poll{NoteID: "voted", UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	testutil.MockPollVoted("viewer", "voted")
+
+	h := &Handler{idGen: idGen, pollRepo: pollRepo, noteRepo: noteRepo}
+	rec := postDraft(h.PollsRecommendation, `{}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "good", out[0]["id"])
+}
+
+// --- #1538: thread-muting write side ---
+
+func newThreadMuteHandler() (*Handler, *testutil.MockNoteRepository, *testutil.MockNoteThreadMutingRepository) {
+	idGen, _ := id.NewGenerator("aidx")
+	noteRepo := testutil.NewMockNoteRepository()
+	tmRepo := testutil.NewMockNoteThreadMutingRepository()
+	return &Handler{idGen: idGen, noteRepo: noteRepo, threadMutingRepo: tmRepo}, noteRepo, tmRepo
+}
+
+func TestThreadMutingCreate_PersistsAndIdempotent(t *testing.T) {
+	h, noteRepo, tmRepo := newThreadMuteHandler()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	user := &model.User{ID: "viewer"}
+
+	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, user)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	ex, _ := tmRepo.Exists("viewer", "n1")
+	assert.True(t, ex, "thread muting row must be persisted")
+
+	rec2 := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec2.Code)
+	assert.Len(t, tmRepo.Mutings, 1, "create must be idempotent (no duplicate row)")
+}
+
+func TestThreadMutingCreate_UsesThreadID(t *testing.T) {
+	h, noteRepo, tmRepo := newThreadMuteHandler()
+	thread := "root"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", ThreadID: &thread}
+	postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	ex, _ := tmRepo.Exists("viewer", "root")
+	assert.True(t, ex, "mute must key on threadId when the note has one")
+}
+
+func TestThreadMutingCreate_NoSuchNote(t *testing.T) {
+	h, _, _ := newThreadMuteHandler()
+	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"missing"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+}
+
+func TestThreadMutingCreate_MissingNoteID(t *testing.T) {
+	h, _, _ := newThreadMuteHandler()
+	rec := postDraft(h.ThreadMutingCreate, `{}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestThreadMutingDelete_RemovesRowIdempotently(t *testing.T) {
+	h, noteRepo, tmRepo := newThreadMuteHandler()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	_ = tmRepo.Create(&model.NoteThreadMuting{ID: "m1", UserID: "viewer", ThreadID: "n1"})
+
+	rec := postDraft(h.ThreadMutingDelete, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	ex, _ := tmRepo.Exists("viewer", "n1")
+	assert.False(t, ex)
+
+	// idempotent: deleting again is still 204.
+	rec2 := postDraft(h.ThreadMutingDelete, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusNoContent, rec2.Code)
+}
+
+func TestThreadMutingDelete_NoSuchNote(t *testing.T) {
+	h, _, _ := newThreadMuteHandler()
+	rec := postDraft(h.ThreadMutingDelete, `{"noteId":"missing"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestThreadMuting_NilRepoFailsClosed(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	h := &Handler{idGen: idGen} // repos unwired
+	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	rec = postDraft(h.ThreadMutingDelete, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

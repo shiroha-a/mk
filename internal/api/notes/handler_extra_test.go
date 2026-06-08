@@ -16,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func newExtraHandler(t *testing.T) (*Handler, *testutil.MockNoteRepository, *testutil.MockNoteFavoriteRepository) {
@@ -761,6 +762,34 @@ func TestShowPartialBulk_Success(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"id":"n1"`,
 		"public note must be returned when queryService is wired")
+}
+
+// #1538: レスポンスは本家 fetchDiffs と同じ {id, reactions, reactionEmojis} の
+// 軽量 diff で、full note フィールド (text/visibility/user 等) を含まない。
+func TestShowPartialBulk_DiffShape(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	h := NewHandler(noteRepo, nil, nil, querySvc, nil, nil, nil, nil, idGen)
+	text := "hello"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		User: &model.User{ID: "u1"}, Text: &text,
+		Reactions: datatypes.JSON([]byte(`{"👍":2}`)),
+	}
+	rec := postExtra(h.ShowPartialBulk, `{"noteIds":["n1"]}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "n1", out[0]["id"])
+	_, hasReactions := out[0]["reactions"]
+	assert.True(t, hasReactions, "diff must include reactions")
+	_, hasReactionEmojis := out[0]["reactionEmojis"]
+	assert.True(t, hasReactionEmojis, "diff must include reactionEmojis")
+	assert.NotContains(t, out[0], "text", "diff shape must not include full note text")
+	assert.NotContains(t, out[0], "visibility", "diff shape must not include visibility")
+	assert.NotContains(t, out[0], "user", "diff shape must not include user")
 }
 
 func TestShowPartialBulk_Empty(t *testing.T) {

@@ -234,3 +234,54 @@ func TestDeleteService_NoteStreamHookNotFiredOnFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, hook.called)
 }
+
+// captureTimelineHook records the author passed to OnNoteDeleted so tests can
+// assert moderator deletes attribute the note to its author, not the moderator.
+type captureTimelineHook struct {
+	author *model.User
+	note   *model.Note
+}
+
+func (c *captureTimelineHook) OnNoteDeleted(n *model.Note, author *model.User) {
+	c.author = author
+	c.note = n
+}
+
+func TestDeleteService_ModeratorDeletesOthersNote(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["author"] = &model.User{ID: "author", Username: "author"}
+	hook := &captureTimelineHook{}
+	svc := note.NewDeleteService(noteRepo)
+	svc.SetUserRepo(userRepo)
+	svc.SetTimelineHook(hook)
+
+	require.NoError(t, svc.DeleteAs(&model.User{ID: "mod"}, true, "n1"))
+	assert.Empty(t, noteRepo.Notes)
+	require.NotNil(t, hook.author)
+	assert.Equal(t, "author", hook.author.ID, "delete hooks must receive the note author, not the moderator")
+}
+
+func TestDeleteService_NonModeratorNonAuthorDenied(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	svc := note.NewDeleteService(noteRepo)
+
+	err := svc.DeleteAs(&model.User{ID: "intruder"}, false, "n1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, note.ErrNoteAccessDenied))
+	assert.Len(t, noteRepo.Notes, 1)
+}
+
+func TestDeleteService_AuthorSelfDeleteUsesActor(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	hook := &captureTimelineHook{}
+	svc := note.NewDeleteService(noteRepo)
+	svc.SetTimelineHook(hook)
+
+	require.NoError(t, svc.DeleteAs(&model.User{ID: "author"}, false, "n1"))
+	require.NotNil(t, hook.author)
+	assert.Equal(t, "author", hook.author.ID)
+}

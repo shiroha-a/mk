@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -408,31 +409,116 @@ func (h *Handler) DraftsCount(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"count": count})
 }
 
+// SetThreadMutingRepo wires the NoteThreadMutingRepository used by the
+// thread-muting create/delete endpoints (#1538). The notes/state read path is
+// wired separately on the query service.
+func (h *Handler) SetThreadMutingRepo(r repository.NoteThreadMutingRepository) {
+	h.threadMutingRepo = r
+}
+
+// threadIDForMute resolves the thread key a mute row should use: the note's
+// threadId when set, else the note id itself (mirrors upstream getNote +
+// note.threadId ?? note.id).
+func threadIDForMute(n *model.Note) string {
+	if n.ThreadID != nil && *n.ThreadID != "" {
+		return *n.ThreadID
+	}
+	return n.ID
+}
+
 // ThreadMutingCreate handles POST /api/notes/thread-muting/create.
+//
+// 旧実装は noteId 検証後 204 を返すだけで note_thread_muting に永続化しておらず
+// (notes/state の isMutedThread 読み取り経路は実装済みなのに) スレッドミュートが
+// 機能していなかった (#1538)。本家 thread-muting/create.ts 同様 note を解決し
+// (可視性 gate 無し)、threadId(無ければ id)で冪等に muting 行を作る。
 func (h *Handler) ThreadMutingCreate(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		NoteID string `json:"noteId"`
 	}
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if h.threadMutingRepo == nil || h.noteRepo == nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	note, err := h.noteRepo.FindByID(req.NoteID)
+	if err != nil || note == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"))
+	}
+	threadID := threadIDForMute(note)
+	// 冪等: 既存行があれば UNIQUE 制約違反 (500) を避けて成功扱い。
+	if exists, _ := h.threadMutingRepo.Exists(user.ID, threadID); !exists {
+		if err := h.threadMutingRepo.Create(&model.NoteThreadMuting{
+			ID:       h.idGen.Generate(time.Now()),
+			UserID:   user.ID,
+			ThreadID: threadID,
+		}); err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
 // ThreadMutingDelete handles POST /api/notes/thread-muting/delete.
 func (h *Handler) ThreadMutingDelete(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		NoteID string `json:"noteId"`
 	}
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	if h.threadMutingRepo == nil || h.noteRepo == nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	note, err := h.noteRepo.FindByID(req.NoteID)
+	if err != nil || note == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "bddd57ac-ceb3-b29d-4334-86ea5fae481a"))
+	}
+	// Delete は冪等 (該当行が無くてもエラーにしない)。
+	if err := h.threadMutingRepo.Delete(user.ID, threadIDForMute(note)); err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
 // PollsRecommendation handles POST /api/notes/polls/recommendation.
+//
+// 旧実装は常に [] を返すスタブだった (#1538)。本家 recommendation.ts 同様、
+// ローカル public で未期限切れの poll のうち、自分の投稿でない / 未投票 /
+// 投稿者を mute していないものを noteId DESC で返す (excludeChannels で
+// チャンネル poll を除外可)。可視性は public 限定なので追加 gate は不要。
 func (h *Handler) PollsRecommendation(c echo.Context) error {
-	return c.JSON(http.StatusOK, []any{})
+	user := middleware.GetUser(c)
+	var req struct {
+		Limit           int      `json:"limit"`
+		Offset          int      `json:"offset"`
+		ExcludeChannels []string `json:"excludeChannels"`
+	}
+	_ = c.Bind(&req)
+	if h.pollRepo == nil || h.noteRepo == nil {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	var muted []string
+	if h.mutingRepo != nil {
+		muted, _ = h.mutingRepo.ListMuteeIDs(user.ID)
+	}
+	noteIDs, err := h.pollRepo.ListRecommendation(user.ID, muted, req.ExcludeChannels, limit, req.Offset)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if len(noteIDs) == 0 {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	notes, err := h.noteRepo.FindManyByIDsWithUser(noteIDs)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	// FindManyByIDsWithUser は noteIDs の順序 (noteId DESC) を保持する。
+	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, user))
 }
 
 // packDraft renders a NoteDraft into the upstream-compatible shape. 旧実装は
