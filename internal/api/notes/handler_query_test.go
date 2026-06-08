@@ -133,6 +133,10 @@ func TestChildren_OK(t *testing.T) {
 	r.ReplyID = &pid
 	q := seedPublicNote(repo, "child2")
 	q.RenoteID = &pid
+	// quote renote (text あり) は child として返る。pure renote 除外 (#1554) を
+	// 避けるため本文を持たせる。
+	quoteText := "quote"
+	q.Text = &quoteText
 
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
 	require.NoError(t, h.Children(c))
@@ -141,6 +145,36 @@ func TestChildren_OK(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 2)
 	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
+}
+
+// TestChildren_PureRenoteExcluded verifies the handler path drops pure renotes
+// (no text/file/poll) from children while keeping quote renotes and replies,
+// matching upstream notes/children (children.ts:53-67). Regression for #1554.
+func TestChildren_PureRenoteExcluded(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	seedPublicNote(repo, "p")
+	pid := "p"
+	reply := seedPublicNote(repo, "reply")
+	reply.ReplyID = &pid
+	pure := seedPublicNote(repo, "pure")
+	pure.RenoteID = &pid
+	quote := seedPublicNote(repo, "quote")
+	quote.RenoteID = &pid
+	quoteText := "quote"
+	quote.Text = &quoteText
+
+	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
+	require.NoError(t, h.Children(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	idsSet := map[string]bool{}
+	for _, r := range resp {
+		idsSet[r["id"].(string)] = true
+	}
+	assert.True(t, idsSet["reply"], "reply は child として返る")
+	assert.True(t, idsSet["quote"], "quote renote は child として返る")
+	assert.False(t, idsSet["pure"], "pure renote は child に出さない")
 }
 
 func TestChildren_LimitClamping(t *testing.T) {
@@ -262,8 +296,11 @@ func TestChildren_FollowersChildHiddenFromNonFollower(t *testing.T) {
 	pub_re.ReplyID = &pid
 	pub_q := seedPublicNote(repo, "pub_q")
 	pub_q.RenoteID = &pid
+	// quote renote として扱うため text を持たせる (pure renote 除外 #1554 を回避)。
+	quoteText := "quote"
+	pub_q.Text = &quoteText
 	seedFollowersChild(repo, "fol_re", "p", true)
-	seedFollowersChild(repo, "fol_q", "p", false)
+	seedFollowersChild(repo, "fol_q", "p", false).Text = &quoteText
 
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
@@ -290,8 +327,11 @@ func TestChildren_FollowersChildVisibleToFollower(t *testing.T) {
 	pub_re.ReplyID = &pid
 	pub_q := seedPublicNote(repo, "pub_q")
 	pub_q.RenoteID = &pid
+	// quote renote として扱うため text を持たせる (pure renote 除外 #1554 を回避)。
+	quoteText := "quote"
+	pub_q.Text = &quoteText
 	seedFollowersChild(repo, "fol_re", "p", true)
-	seedFollowersChild(repo, "fol_q", "p", false)
+	seedFollowersChild(repo, "fol_q", "p", false).Text = &quoteText
 	repo.Following = map[string][]string{"viewer": {"fol_author"}}
 
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)

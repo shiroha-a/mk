@@ -21,10 +21,15 @@ import (
 var embeddedErrorIDsJSON []byte
 
 // errorIDExcludedPrefixes are endpoint families whose error ids are NOT gated
-// against vanilla Misskey: mk-go's reversi/* and chat/* are derived from
-// yojo-art/cherrypick (federated reversi / chat extensions) and legitimately
-// carry cherrypick error ids rather than vanilla ones.
-var errorIDExcludedPrefixes = []string{"reversi/", "chat/"}
+// against vanilla Misskey: mk-go's chat/* is derived from yojo-art/cherrypick
+// (federated chat extension) and legitimately carries cherrypick error ids
+// rather than vanilla ones.
+//
+// reversi/* は #1553 で show-game / match / surrender / verify の error id を
+// vanilla upstream の endpoint 固有 UUID に揃えたため gate 対象に戻す
+// (golden_error_ids.json は既に vanilla UUID を持つ)。NOT_STARTED 等の
+// cherrypick 固有 code は golden に無いので gate では skip され影響しない。
+var errorIDExcludedPrefixes = []string{"chat/"}
 
 // validUUID matches a well-formed lowercase UUID. Golden ids that fail this are
 // skipped: a few upstream meta.errors entries carry malformed ids (e.g. a
