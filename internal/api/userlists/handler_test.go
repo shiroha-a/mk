@@ -314,6 +314,104 @@ func TestPush_AlreadyAdded(t *testing.T) {
 		"TS 互換 error UUID を返すこと")
 }
 
+// #1550: push が AddMember 前に対象 user の存在 (NO_SUCH_USER) と「対象が
+// 自分を block しているか」(YOU_HAVE_BEEN_BLOCKED) を検証することを固定する。
+
+// 対象 user が存在しなければ NO_SUCH_USER で弾き、AddMember を呼ばないこと。
+func TestPush_NoSuchUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	// u2 は登録されていない (= 不在)
+	h.SetUserRepo(userRepo)
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a")
+	assert.Empty(t, repo.Members, "不在 user の push は member を追加しないこと")
+}
+
+// 対象 user が存在すれば NO_SUCH_USER gate を通過して member を追加できること。
+func TestPush_UserExistsSucceeds(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, repo.Members, 1)
+}
+
+// 対象 user が viewer を block している場合は YOU_HAVE_BEEN_BLOCKED で弾き、
+// AddMember を呼ばないこと (blockerId=target, blockeeId=me)。
+func TestPush_YouHaveBeenBlocked(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	blockRepo := testutil.NewMockBlockingRepository()
+	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "u2", BlockeeID: "u1"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(blockRepo)
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
+	assert.Contains(t, rec.Body.String(), "990232c5-3f9d-4d83-9f3f-ef27b6332a4b")
+	assert.Empty(t, repo.Members, "block されている user の push は member を追加しないこと")
+}
+
+// 逆向きの block (viewer が target を block) では push を妨げないこと。upstream
+// は「target が me を block」のみを見るので、me→target の block は無関係。
+func TestPush_ViewerBlocksTargetStillSucceeds(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	blockRepo := testutil.NewMockBlockingRepository()
+	// viewer(u1) が target(u2) を block している (向きが逆)
+	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "u1", BlockeeID: "u2"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(blockRepo)
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, repo.Members, 1)
+}
+
+// 自分自身を push する場合は block 判定を skip する (= TS の user.id !== me.id
+// ガード)。自己 block row が存在しても無視されること。
+func TestPush_SelfSkipsBlockCheck(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u1"}))
+	blockRepo := testutil.NewMockBlockingRepository()
+	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "u1", BlockeeID: "u1"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(blockRepo)
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, repo.Members, 1)
+}
+
+// blocking repo が error を返したら fail-closed で YOU_HAVE_BEEN_BLOCKED を
+// 返し、AddMember を呼ばないこと (block 判定不能時に membership を作らない)。
+func TestPush_BlockRepoErrorFailsClosed(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	blockRepo := testutil.NewMockBlockingRepository()
+	blockRepo.ExistsErr = assert.AnError
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(blockRepo)
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
+	assert.Empty(t, repo.Members, "block 判定不能時は member を追加しないこと (fail-closed)")
+}
+
 type failingRemoveMemberRepo struct {
 	*testutil.MockUserListRepository
 }

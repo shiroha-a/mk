@@ -155,5 +155,6 @@ func taskSummaryToAdmin(t *queue.TaskSummary) *apiadmin.QueueTaskSummary {
 		EnqueuedAt:    t.EnqueuedAt,
 		ProcessedAt:   t.ProcessedAt,
 		CompletedAt:   t.CompletedAt,
+		ProcessedBy:   t.ProcessedBy,
 	}
 }

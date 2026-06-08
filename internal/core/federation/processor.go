@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -267,6 +268,10 @@ type genericActivity struct {
 	// To は reversi Invite の配送先を読むために保持する。string と []string
 	// 両方を受け入れるため RawMessage で保持し、必要な時点で解釈する。
 	To json.RawMessage `json:"to"`
+	// CC は Create(Note) の audience union (#1560) で activity 側の cc を Note
+	// object へ合成するために保持する。To 同様 string / []string 両形式を
+	// 受けるため RawMessage で持つ。
+	CC json.RawMessage `json:"cc"`
 	// raw はアクテ���ビティ全体の生JSON。handleLike 等で content や
 	// _misskey_reaction な�� genericActivity に含まれないフィールドを
 	// 読むために保持する。
@@ -804,6 +809,130 @@ func (p *Processor) handleAccept(act genericActivity) error {
 	return nil
 }
 
+// mergeCreateAudience unions the Create activity's to/cc onto the carried Note
+// object's to/cc and fills the object's attributedTo from the activity actor
+// when absent, mirroring upstream ApInboxService.create
+// (third_party/misskey/.../ApInboxService.ts:403-417). The merged JSON is what
+// IngestNoteWithCreated parses, so visibility (public/home/followers/specified)
+// and visibleUserIds are derived from the combined audience rather than the
+// Note object's own to/cc only (#1560).
+//
+// 本家は activity / object 双方の to/cc を同一 union 値に揃えるが、mk-go は
+// object 側しか後段で参照しないので object の to/cc のみ書き戻す。union は
+// 順序保持 dedup で、activity 側を先・object 側を後に連結する (本家 concat 順)。
+//
+// object が JSON object でない (string IRI 等) / parse 不能なケースでは元の
+// act.Object をそのまま返し、既存挙動へ degrade する (fail-safe)。union 自体は
+// visibility を広げる方向ではなく、Create 側にしか無い followers/specified の
+// audience を拾うので、誤って public 化する事故を防ぐ fail-closed 寄りの補正。
+func mergeCreateAudience(act genericActivity) json.RawMessage {
+	if len(act.Object) == 0 {
+		return act.Object
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(act.Object, &obj); err != nil || obj == nil {
+		// object が embedded JSON object でなければ何もできない (本家も
+		// `typeof activity.object === 'object'` でガードしている)。
+		return act.Object
+	}
+
+	actTo := decodeAudience(act.To)
+	actCC := decodeAudience(act.CC)
+	objTo := decodeAudience(obj["to"])
+	objCC := decodeAudience(obj["cc"])
+
+	mergedTo := unionStrings(actTo, objTo)
+	mergedCC := unionStrings(actCC, objCC)
+
+	mutated := false
+	if encoded, ok := encodeAudienceIfChanged(obj["to"], mergedTo); ok {
+		obj["to"] = encoded
+		mutated = true
+	}
+	if encoded, ok := encodeAudienceIfChanged(obj["cc"], mergedCC); ok {
+		obj["cc"] = encoded
+		mutated = true
+	}
+
+	// object.attributedTo が無ければ activity.actor で補う。IngestNote は空の
+	// attributedTo を ErrInvalidNote で弾くので、Create actor から埋めて本家の
+	// `activity.object.attributedTo = activity.actor` に揃える。
+	if _, present := obj["attributedTo"]; !present && act.Actor != "" {
+		if encoded, err := json.Marshal(act.Actor); err == nil {
+			obj["attributedTo"] = encoded
+			mutated = true
+		}
+	}
+
+	if !mutated {
+		return act.Object
+	}
+	merged, err := json.Marshal(obj)
+	if err != nil {
+		return act.Object
+	}
+	return merged
+}
+
+// decodeAudience parses an AP audience field that may be a single string or a
+// []string into a []string. Reuses activitypub.APStringList so string / array
+// forms are handled uniformly. Empty / null input yields nil.
+func decodeAudience(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var list activitypub.APStringList
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil
+	}
+	return list
+}
+
+// unionStrings concatenates a then b, preserving first-seen order and dropping
+// duplicates, matching upstream `unique(concat([toArray(a), toArray(b)]))`.
+func unionStrings(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, v := range a {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range b {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// encodeAudienceIfChanged re-encodes merged as a JSON array and reports whether
+// it differs from the original raw value. Returns ok=false (no write) when the
+// merged audience is empty so a missing field is not materialised as `[]`, and
+// when the canonical array form already equals the original (avoids needless
+// string→array normalisation churn). 元と等価なら書き戻さないことで、純粋に
+// audience 追加が無い一般 note では act.Object をそのまま素通しする。
+func encodeAudienceIfChanged(raw json.RawMessage, merged []string) (json.RawMessage, bool) {
+	if len(merged) == 0 {
+		return nil, false
+	}
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return nil, false
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), encoded) {
+		return nil, false
+	}
+	return encoded, true
+}
+
 // handleCreate persists an inbound Note or Question carried by a Create activity.
 // Question (投票) はNote同様にIngestNoteで処理され、Pollレコードが自動作成される。
 // ノート取込み成功後、fanoutHookが配線されていればタイムライン/ストリーミングに
@@ -848,7 +977,14 @@ func (p *Processor) handleCreate(act genericActivity) error {
 			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
 		}
 	}
-	note, created, err := p.resolver.IngestNoteWithCreated(act.Object)
+	// 本家 ApInboxService.create は resolve 前に activity.to/cc を Note object の
+	// to/cc に union し、object.attributedTo が無ければ activity.actor で埋める
+	// (#1560)。これをしないと audience を Create 側だけに載せる実装 (一部 Mastodon
+	// 系) の note が followers/specified を public 等に誤判定し得る。visibility は
+	// fail-closed に倒すため union 後の object を ingest に渡す。union に失敗した
+	// 場合は元の object を使う (= 既存挙動へ degrade)。
+	object := mergeCreateAudience(act)
+	note, created, err := p.resolver.IngestNoteWithCreated(object)
 	if errors.Is(err, corenote.ErrContainsTooManyMentions) {
 		// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): role policy
 		// 由来の "note contains too many mentions" は永続的に解決しない error な

@@ -20,6 +20,8 @@ type Handler struct {
 	repo               repository.UserListRepository
 	idGen              id.Generator
 	rolePolicyProvider RolePolicyProvider
+	userRepo           repository.UserRepository
+	blockingRepo       repository.BlockingRepository
 }
 
 // RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
@@ -37,6 +39,22 @@ func NewHandler(repo repository.UserListRepository, idGen id.Generator) *Handler
 // the userListLimit / userEachUserListsLimit role policies (#1029).
 func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 	h.rolePolicyProvider = p
+}
+
+// SetUserRepo wires a UserRepository so Push can validate the target user's
+// existence (NO_SUCH_USER) before AddMember, matching upstream
+// users/lists/push GetterService.getUser semantics (#1550).
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
+}
+
+// SetBlockingRepo wires a BlockingRepository so Push can reject adding a user
+// who has blocked the caller (YOU_HAVE_BEEN_BLOCKED), matching upstream
+// users/lists/push blocking check (#1550). Fail-closed: a repo error is
+// treated as "blocked" to avoid leaking the membership against the blocker's
+// intent.
+func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
+	h.blockingRepo = r
 }
 
 // List handles POST /api/users/lists/list.
@@ -171,6 +189,25 @@ func (h *Handler) Push(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	if viewer == nil || list.UserID != viewer.ID {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
+	}
+	// upstream users/lists/push は AddMember 前に対象 user の存在を
+	// getterService.getUser で検証し、不在なら NO_SUCH_USER を返す (#1550)。
+	// userRepo 未配線の test 経路では skip する (production は router が必ず wire)。
+	if h.userRepo != nil {
+		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a"))
+		}
+	}
+	// upstream は「対象 user が自分を block しているか」(blockerId=target,
+	// blockeeId=me) を確認し、block されていれば YOU_HAVE_BEEN_BLOCKED を返す
+	// (#1550)。自分自身を push するケースは block 判定を skip する (= TS の
+	// user.id !== me.id ガードと一致)。repo error は fail-closed で blocked
+	// 扱いにし、blocker の意図に反した membership 作成を防ぐ。
+	if h.blockingRepo != nil && req.UserID != viewer.ID {
+		blocked, err := h.blockingRepo.Exists(req.UserID, viewer.ID)
+		if err != nil || blocked {
+			return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "990232c5-3f9d-4d83-9f3f-ef27b6332a4b"))
+		}
 	}
 	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
 	// で評価する (= owner == viewer は直上で確定済)。

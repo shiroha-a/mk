@@ -322,6 +322,26 @@ func TestJobToSummary_CompletedSuccess(t *testing.T) {
 	}
 }
 
+func TestJobToSummary_ProcessedBy(t *testing.T) {
+	// mkq `pb` (BullMQ job.processedBy = 処理 worker 名) を summary に通す (#1552)。
+	job := &mkq.Job[framedPayload]{
+		ID:          "1",
+		Name:        "ap:deliver",
+		Data:        framedPayload{Type: "ap:deliver"},
+		ProcessedBy: "worker-host-7",
+	}
+	got := jobToSummary("deliver", "completed", job, nil)
+	if got.ProcessedBy != "worker-host-7" {
+		t.Fatalf("ProcessedBy: got %q want %q", got.ProcessedBy, "worker-host-7")
+	}
+
+	// 未処理 job は空のまま。
+	job2 := &mkq.Job[framedPayload]{ID: "2", Data: framedPayload{Type: "x"}}
+	if got2 := jobToSummary("deliver", "wait", job2, nil); got2.ProcessedBy != "" {
+		t.Fatalf("never-run job ProcessedBy must be empty, got %q", got2.ProcessedBy)
+	}
+}
+
 func TestJobToSummary_TypeFallbackToJobName(t *testing.T) {
 	// Foreign jobs (created by BullMQ TS without our framing) have an
 	// empty Data.Type. The summary must fall back to Job.Name so admin

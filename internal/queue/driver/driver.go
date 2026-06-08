@@ -79,6 +79,11 @@ type TaskSummary struct {
 	// job.processedOn). Populated for finished jobs; zero for never-run jobs.
 	ProcessedAt time.Time
 	CompletedAt time.Time
+	// ProcessedBy is the worker name that most recently dequeued the job
+	// (BullMQ job.processedBy / mkq `pb`). Empty for never-run jobs and for
+	// drivers without the concept (asynq). Surfaced as the upstream
+	// optional QueueJob.processedBy field.
+	ProcessedBy string
 }
 
 // Inspector exposes admin-level queue introspection used by the
