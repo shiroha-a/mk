@@ -1437,7 +1437,7 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
 	api.POST("/i/notifications", notificationsHandler.Show, middleware.RequireAuth())
-	api.POST("/i/notifications-grouped", notificationsHandler.Show, middleware.RequireAuth())
+	api.POST("/i/notifications-grouped", notificationsHandler.Grouped, middleware.RequireAuth())
 	api.POST("/notifications/mark-all-as-read", notificationsHandler.MarkAllAsRead, middleware.RequireAuth())
 	api.POST("/notifications/create", notificationsHandler.Create, middleware.RequireAuth())
 	api.POST("/notifications/flush", notificationsHandler.Flush, middleware.RequireAuth())
@@ -1628,6 +1628,7 @@ func (s *Server) setupRoutes() {
 	federationHandler := apifederation.NewHandler(instanceService)
 	federationHandler.SetFollowingRepo(followingRepo)
 	federationHandler.SetUserRepo(userRepo)
+	federationHandler.SetIDGen(idGen)
 	federationHandler.SetResolver(federationResolver)
 	// moderationNote は公開エンドポイントで moderator にのみ返す (情報漏洩対策)。
 	federationHandler.SetModeratorChecker(roleService)

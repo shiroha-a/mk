@@ -372,13 +372,37 @@ func TestFollowingRepository_ListFollowingByBirthday_Error(t *testing.T) {
 
 // --- 追加テスト (#260 repository coverage: 0%関数) ---
 
+// TestFollowingRepository_ListFollowersByHost guards upstream parity: the
+// federation/followers query filters by followeeHost (= followed users belong
+// to the given remote host), matching 本家 followers.ts. A row whose
+// followerHost (but not followeeHost) matches must NOT be returned.
 func TestFollowingRepository_ListFollowersByHost(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
-	localee := insertTestUser(t, "flh_e1", "localfollowee")
-	defer cleanupUser(t, localee.ID)
+	localr := insertTestUser(t, "flh_l1", "localfollower")
+	defer cleanupUser(t, localr.ID)
 
-	// remote user (host付き) を挿入
 	host := "remote.example"
+	remoteFollowee := &model.User{
+		ID:                "flh_e1",
+		Username:          "remote_followee",
+		UsernameLower:     "remote_followee",
+		Host:              &host,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteFollowee).Error)
+	defer cleanupUser(t, remoteFollowee.ID)
+
+	// followeeHost=host のフォロー (local が remote をフォロー) が対象。
+	match := &model.Following{
+		ID:           "flh_match",
+		FollowerID:   localr.ID,
+		FolloweeID:   remoteFollowee.ID,
+		FolloweeHost: &host,
+	}
+	require.NoError(t, repo.Create(match))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, match.ID)
+
+	// followerHost=host のみのフォローは federation/followers では対象外。
 	remoteFollower := &model.User{
 		ID:                "flh_r1",
 		Username:          "remote_follower",
@@ -388,19 +412,19 @@ func TestFollowingRepository_ListFollowersByHost(t *testing.T) {
 	}
 	require.NoError(t, testDB.Create(remoteFollower).Error)
 	defer cleanupUser(t, remoteFollower.ID)
-
-	f := &model.Following{
-		ID:           "flh_1",
+	miss := &model.Following{
+		ID:           "flh_miss",
 		FollowerID:   remoteFollower.ID,
-		FolloweeID:   localee.ID,
+		FolloweeID:   localr.ID,
 		FollowerHost: &host,
 	}
-	require.NoError(t, repo.Create(f))
-	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+	require.NoError(t, repo.Create(miss))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, miss.ID)
 
 	rows, err := repo.ListFollowersByHost(host, 10, 0)
 	require.NoError(t, err)
-	assert.NotEmpty(t, rows)
+	require.Len(t, rows, 1)
+	assert.Equal(t, match.ID, rows[0].ID)
 
 	// limit のデフォルト (0 → 30) と cap (>100 → 100) の分岐を通す
 	_, err = repo.ListFollowersByHost(host, 0, 0)
@@ -409,14 +433,39 @@ func TestFollowingRepository_ListFollowersByHost(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestFollowingRepository_ListFollowingByHost guards upstream parity: the
+// federation/following query filters by followerHost (= followers belong to
+// the given remote host), matching 本家 following.ts. A row whose followeeHost
+// (but not followerHost) matches must NOT be returned.
 func TestFollowingRepository_ListFollowingByHost(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
-	localr := insertTestUser(t, "flg_l1", "localfollower")
-	defer cleanupUser(t, localr.ID)
+	localee := insertTestUser(t, "flg_l1", "localfollowee")
+	defer cleanupUser(t, localee.ID)
 
 	host := "remote.example"
-	remoteFollowee := &model.User{
+	remoteFollower := &model.User{
 		ID:                "flg_r1",
+		Username:          "remote_follower",
+		UsernameLower:     "remote_follower",
+		Host:              &host,
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteFollower).Error)
+	defer cleanupUser(t, remoteFollower.ID)
+
+	// followerHost=host のフォロー (remote が local をフォロー) が対象。
+	match := &model.Following{
+		ID:           "flg_match",
+		FollowerID:   remoteFollower.ID,
+		FolloweeID:   localee.ID,
+		FollowerHost: &host,
+	}
+	require.NoError(t, repo.Create(match))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, match.ID)
+
+	// followeeHost=host のみのフォローは federation/following では対象外。
+	remoteFollowee := &model.User{
+		ID:                "flg_e1",
 		Username:          "remote_followee",
 		UsernameLower:     "remote_followee",
 		Host:              &host,
@@ -424,19 +473,19 @@ func TestFollowingRepository_ListFollowingByHost(t *testing.T) {
 	}
 	require.NoError(t, testDB.Create(remoteFollowee).Error)
 	defer cleanupUser(t, remoteFollowee.ID)
-
-	f := &model.Following{
-		ID:           "flg_1",
-		FollowerID:   localr.ID,
+	miss := &model.Following{
+		ID:           "flg_miss",
+		FollowerID:   localee.ID,
 		FolloweeID:   remoteFollowee.ID,
 		FolloweeHost: &host,
 	}
-	require.NoError(t, repo.Create(f))
-	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
+	require.NoError(t, repo.Create(miss))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, miss.ID)
 
 	rows, err := repo.ListFollowingByHost(host, 10, 0)
 	require.NoError(t, err)
-	assert.NotEmpty(t, rows)
+	require.Len(t, rows, 1)
+	assert.Equal(t, match.ID, rows[0].ID)
 
 	_, err = repo.ListFollowingByHost(host, 0, 0)
 	require.NoError(t, err)

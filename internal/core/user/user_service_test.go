@@ -927,6 +927,32 @@ func TestUpdateProfileFields(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// #1546: UpdateInput.AlsoKnownAs は要素ありなら csv で user.alsoKnownAs に
+// 書き込み、空 slice なら NULL クリアする。
+func TestUpdateProfile_AlsoKnownAs(t *testing.T) {
+	t.Run("non-empty writes csv", func(t *testing.T) {
+		svc, userRepo, _, _ := newFullSvc(t)
+		userRepo.Users["u1"] = &model.User{ID: "u1"}
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+		aka := []string{"https://a.example/users/x", "https://b.example/users/y"}
+		_, err := svc.UpdateProfile("u1", user.UpdateInput{AlsoKnownAs: &aka})
+		require.NoError(t, err)
+		got := userRepo.Users["u1"]
+		require.NotNil(t, got.AlsoKnownAs)
+		assert.Equal(t, "https://a.example/users/x,https://b.example/users/y", *got.AlsoKnownAs)
+	})
+	t.Run("empty slice clears", func(t *testing.T) {
+		svc, userRepo, _, _ := newFullSvc(t)
+		existing := "https://a.example/users/x"
+		userRepo.Users["u1"] = &model.User{ID: "u1", AlsoKnownAs: &existing}
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+		empty := []string{}
+		_, err := svc.UpdateProfile("u1", user.UpdateInput{AlsoKnownAs: &empty})
+		require.NoError(t, err)
+		assert.Nil(t, userRepo.Users["u1"].AlsoKnownAs)
+	})
+}
+
 // #766 / #1064: SearchByUsernameAndHost の各分岐を service レイヤーで覆う。
 // upstream UserSearchService.generateUserQueryBuilder と同じく、host=falsy は
 // filter 無し (local + remote)、host="." or self-hostname は local 限定、

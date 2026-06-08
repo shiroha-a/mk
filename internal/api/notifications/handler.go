@@ -111,11 +111,42 @@ type ListRequest struct {
 // notification timeline ordered newest first.
 func (h *Handler) Show(c echo.Context) error {
 	user := middleware.GetUser(c)
-	var req ListRequest
-	if err := c.Bind(&req); err != nil {
+	req, ok := h.bindListRequest(c)
+	if !ok {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	filtered, notifierByID, noteByID, err := h.collectNotifications(c, user, req)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+
+	items := make([]entity.NotificationItem, 0, len(filtered))
+	for _, n := range filtered {
+		items = append(items, entity.NotificationItem{
+			N:    n,
+			User: notifierByID[n.NotifierID],
+			Note: noteByID[n.NoteID],
+		})
+	}
+	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup())
+	// depth-2 embed hide (#1570): collectNotifications の #1444 CanSeeNote gate は
+	// 見えない note を丸ごと落とすが embed (renote/reply) には再帰しない。通知 note の
+	// embed と著者設定ゲートを viewer 可視性で適用する。これを欠くと #1570 で塞いだ
+	// i/notifications の depth-2 embed IDOR が再オープンする。
+	notehide.HideNotificationNotes(user, out)
+	h.maybeMarkAsRead(c, user, req)
+	return c.JSON(http.StatusOK, out)
+}
+
+// bindListRequest binds the shared i/notifications(-grouped) request body and
+// normalizes the cursor / limit. Returns ok=false on a bind error so callers
+// can emit INVALID_PARAM.
+func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
+	var req ListRequest
+	if err := c.Bind(&req); err != nil {
+		return req, false
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1174)。Notification.ID
 	// は notification_service.go で `idGen.Generate(now)` で aidx 形式で発番
 	// されるため、aidx 比較 (= 後段の post-fetch filter `n.ID <= sinceID` /
@@ -123,11 +154,20 @@ func (h *Handler) Show(c echo.Context) error {
 	// native ID と aidx ID は別物だが、本 endpoint の cursor は notification.ID
 	// (= aidx) で判定する設計なので adapter pattern で完結する。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	return req, true
+}
+
+// collectNotifications runs the shared fetch + filter + batched user/note
+// resolution path used by both Show and Grouped. It returns the post-filter
+// notification slice (newest first) plus the resolved notifier-user and
+// viewer-visible note maps. The note map is gated by CanSeeNote (#1444 IDOR):
+// followers / specified notes the viewer cannot see are dropped so noteId
+// stays but the embedded detail does not leak.
+func (h *Handler) collectNotifications(c echo.Context, user *model.User, req ListRequest) ([]*notification.Notification, map[string]*model.User, map[string]*model.Note, error) {
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.Limit)
 	if err != nil {
-		return apierr.JSONInternalError(c)
+		return nil, nil, nil, err
 	}
 
 	// includeTypes / excludeTypes フィルタ
@@ -216,33 +256,24 @@ func (h *Handler) Show(c echo.Context) error {
 			}
 		}
 	}
+	return filtered, notifierByID, noteByID, nil
+}
 
-	items := make([]entity.NotificationItem, 0, len(filtered))
-	for _, n := range filtered {
-		items = append(items, entity.NotificationItem{
-			N:    n,
-			User: notifierByID[n.NotifierID],
-			Note: noteByID[n.NoteID],
-		})
+// maybeMarkAsRead honours the implicit markAsRead side effect: 本家
+// i/notifications と互換で markAsRead 未指定または true なら通知一覧取得の
+// 副作用で全通知を既読化し、main stream に readAllNotifications を publish
+// する。これが無いとフロントエンドが /my/notifications を開いてもバッジ
+// カウントが残り続ける (#420)。
+func (h *Handler) maybeMarkAsRead(c echo.Context, user *model.User, req ListRequest) {
+	if req.MarkAsRead != nil && !*req.MarkAsRead {
+		return
 	}
-	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup())
-	// FilterVisible (#1444) は見えない note を丸ごと落とすが embed (depth-2) には
-	// 再帰しないので、通知 note の renote/reply embed と著者設定ゲートを #1568 で
-	// 追加適用する。1 ページ 1 回の batch follow query。
-	notehide.HideNotificationNotes(user, out)
-	// 本家 i/notifications と互換: markAsRead 未指定または true なら通知一覧
-	// 取得の副作用で全通知を既読化し、main stream に readAllNotifications を
-	// publish する。これが無いとフロントエンドが /my/notifications を開いても
-	// バッジカウントが残り続ける (#420)。
-	if req.MarkAsRead == nil || *req.MarkAsRead {
-		if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID); err != nil {
-			// 既読化失敗は通知一覧の取得結果には影響しないので 200 のまま
-			// 返し、ログだけ残す。
-			slog.Warn("notifications: implicit mark-all-as-read failed",
-				"userId", user.ID, "err", err)
-		}
+	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID); err != nil {
+		// 既読化失敗は通知一覧の取得結果には影響しないので 200 のまま
+		// 返し、ログだけ残す。
+		slog.Warn("notifications: implicit mark-all-as-read failed",
+			"userId", user.ID, "err", err)
 	}
-	return c.JSON(http.StatusOK, out)
 }
 
 // MarkAllAsRead handles POST /api/notifications/mark-all-as-read.

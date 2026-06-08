@@ -543,6 +543,10 @@ func applyUserFields(u *model.User, fields map[string]any) {
 				u.AlsoKnownAs = s
 			case string:
 				u.AlsoKnownAs = &s
+			case nil:
+				// i/update の alsoKnownAs クリア (#1546): 空配列で NULL を書く
+				// 経路を mock でも反映する。
+				u.AlsoKnownAs = nil
 			}
 		case "avatarUrl":
 			u.AvatarURL = ptrOrNilString(v)
@@ -4956,20 +4960,24 @@ func (m *MockFollowingRepository) ListFollowingForList(followerID, sinceID, unti
 	return rows, nil
 }
 
+// ListFollowersByHost mirrors production: federation/followers filters by
+// followeeHost (本家 followers.ts と同じ列)。
 func (m *MockFollowingRepository) ListFollowersByHost(host string, limit, offset int) ([]*model.Following, error) {
 	var rows []*model.Following
 	for _, f := range m.Followings {
-		if f.FollowerHost != nil && *f.FollowerHost == host {
+		if f.FolloweeHost != nil && *f.FolloweeHost == host {
 			rows = append(rows, f)
 		}
 	}
 	return paginate(rows, limit, offset), nil
 }
 
+// ListFollowingByHost mirrors production: federation/following filters by
+// followerHost (本家 following.ts と同じ列)。
 func (m *MockFollowingRepository) ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error) {
 	var rows []*model.Following
 	for _, f := range m.Followings {
-		if f.FolloweeHost != nil && *f.FolloweeHost == host {
+		if f.FollowerHost != nil && *f.FollowerHost == host {
 			rows = append(rows, f)
 		}
 	}

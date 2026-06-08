@@ -436,6 +436,13 @@ type UpdateInput struct {
 	// maxItems 16 で、本 service は呼び出し側が cap 済の slice を渡す
 	// 前提 (api/i ハンドラ側で長さ検証する)。
 	Fields *[]FieldItem
+	// AlsoKnownAs は引越し元エイリアス (= i/move の前提となる alsoKnownAs)
+	// の URI リスト (#1546)。nil なら不変。空 slice なら NULL クリア、要素
+	// ありなら csv 文字列として user.alsoKnownAs に書き込む。各要素は handler
+	// 側で acct/URI → canonical URI に解決済みであることを前提とする。
+	// 本家 update.ts は配列で保存するが mk-go は text csv で持つ (move_service
+	// 側の alsoKnownAsIncludes / appendIfMissing と同じ表現)。
+	AlsoKnownAs *[]string
 }
 
 // FieldItem represents one row of user_profile.fields. upstream Misskey の
@@ -585,6 +592,17 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 			return nil, err
 		}
 		profileFields["fields"] = string(raw)
+	}
+	if in.AlsoKnownAs != nil {
+		// 引越し元エイリアス (#1546)。upstream update.ts は要素 0 個なら null を
+		// 書く (= クリア)。mk-go の alsoKnownAs は varchar csv なので、空なら
+		// SQL NULL、要素ありなら "uri1,uri2,..." を書く。move_service の
+		// alsoKnownAsIncludes / appendIfMissing が同じ csv 表現を読む。
+		if len(*in.AlsoKnownAs) == 0 {
+			userFields["alsoKnownAs"] = nil
+		} else {
+			userFields["alsoKnownAs"] = strings.Join(*in.AlsoKnownAs, ",")
+		}
 	}
 
 	// avatarId / bannerId 更新 (#467)。driveFileRepo 未配線時は media

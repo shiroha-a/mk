@@ -113,7 +113,12 @@ func (h *Handler) FederationRemoveAllFollowing(c echo.Context) error {
 	const pageSize = 100
 	const maxBatches = 1000 // safety cap: 100k pairs / request
 	for batch := 0; batch < maxBatches; batch++ {
-		rows, err := h.followingRepo.ListFollowersByHost(req.Host, pageSize, batch*pageSize)
+		// 本家 admin/federation/remove-all-following.ts は followingsRepository.
+		// findBy({ followerHost: host }) で「follower が指定ホストの行」を引く。
+		// followerHost で絞るのは ListFollowingByHost なのでこちらを使う
+		// (#1544 で federation/{followers,following} の host 列を本家準拠に
+		// 訂正した結果、ListFollowersByHost は followeeHost 絞りになった)。
+		rows, err := h.followingRepo.ListFollowingByHost(req.Host, pageSize, batch*pageSize)
 		if err != nil {
 			return apierr.JSONInternalError(c)
 		}
