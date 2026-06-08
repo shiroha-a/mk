@@ -62,6 +62,37 @@ func TestMutingRepository_CRUDExpiry(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestMutingRepository_DeleteExpired(t *testing.T) {
+	repo := NewMutingRepository(testDB)
+	u1 := insertTestUser(t, "u_mde_1", "mde1")
+	u2 := insertTestUser(t, "u_mde_2", "mde2")
+	u3 := insertTestUser(t, "u_mde_3", "mde3")
+	defer cleanupUser(t, u1.ID)
+	defer cleanupUser(t, u2.ID)
+	defer cleanupUser(t, u3.ID)
+
+	active := &model.Muting{ID: "mde_active", MuterID: u1.ID, MuteeID: u2.ID}
+	require.NoError(t, repo.Create(active))
+	defer cleanupMuting(t, active.ID)
+	future := time.Now().Add(time.Hour)
+	notYet := &model.Muting{ID: "mde_future", MuterID: u1.ID, MuteeID: u3.ID, ExpiresAt: &future}
+	require.NoError(t, repo.Create(notYet))
+	defer cleanupMuting(t, notYet.ID)
+	past := time.Now().Add(-time.Hour)
+	expired := &model.Muting{ID: "mde_expired", MuterID: u2.ID, MuteeID: u3.ID, ExpiresAt: &past}
+	require.NoError(t, repo.Create(expired))
+	defer cleanupMuting(t, expired.ID)
+
+	n, err := repo.DeleteExpired(time.Now())
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n, "期限切れ 1 件だけ削除される")
+	// active / future は残る、expired は消える。
+	_, err = repo.FindByPair(u1.ID, u2.ID)
+	assert.NoError(t, err)
+	_, err = repo.FindByPair(u2.ID, u3.ID)
+	assert.Error(t, err)
+}
+
 func TestMutingRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

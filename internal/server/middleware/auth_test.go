@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -108,19 +110,19 @@ func TestAuthMiddleware_InvalidateTokensForUser(t *testing.T) {
 	auth := NewAuthMiddleware(userRepo, tokenRepo)
 
 	// 直接 cache に詰めて exported method の挙動だけを isolate に test する。
-	auth.tokenCache.put("a", &model.User{ID: "u1"})
-	auth.tokenCache.put("b", &model.User{ID: "u1"})
-	auth.tokenCache.put("c", &model.User{ID: "u2"})
+	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, false)
+	auth.tokenCache.put("b", &model.User{ID: "u1"}, nil, false)
+	auth.tokenCache.put("c", &model.User{ID: "u2"}, nil, false)
 
 	auth.InvalidateTokensForUser("u1")
 
-	if _, ok := auth.tokenCache.get("a"); ok {
+	if _, _, _, ok := auth.tokenCache.get("a"); ok {
 		t.Error("u1 token a が残っている")
 	}
-	if _, ok := auth.tokenCache.get("b"); ok {
+	if _, _, _, ok := auth.tokenCache.get("b"); ok {
 		t.Error("u1 token b が残っている")
 	}
-	if _, ok := auth.tokenCache.get("c"); !ok {
+	if _, _, _, ok := auth.tokenCache.get("c"); !ok {
 		t.Error("u2 token c が誤って削除された")
 	}
 }
@@ -129,9 +131,9 @@ func TestAuthMiddleware_InvalidateTokensForUser_EmptyUserIDIsNoop(t *testing.T) 
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()
 	auth := NewAuthMiddleware(userRepo, tokenRepo)
-	auth.tokenCache.put("a", &model.User{ID: "u1"})
+	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, false)
 	auth.InvalidateTokensForUser("")
-	if _, ok := auth.tokenCache.get("a"); !ok {
+	if _, _, _, ok := auth.tokenCache.get("a"); !ok {
 		t.Error("userID 空で invalidate が走って巻き添えになった")
 	}
 }
@@ -731,4 +733,140 @@ func TestRequireSecure_Anonymous(t *testing.T) {
 	err := RequireSecure()(func(c echo.Context) error { return c.String(http.StatusOK, "ok") })(c)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// --- RequireScope (OAuth kind enforcement, #1552) ----------------------------
+
+// newScopeCtx builds an echo context with the given AuthScope pre-set (nil
+// leaves it unset = unauthenticated/anonymous).
+func newScopeCtx(scope *AuthScope) (echo.Context, *httptest.ResponseRecorder) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+	if scope != nil {
+		c.Set(string(AuthScopeContextKey), scope)
+	}
+	return c, rec
+}
+
+func TestRequireScope_NativeTokenPasses(t *testing.T) {
+	// native login token (IsApp=false) は scope 無検査で full access。
+	c, rec := newScopeCtx(&AuthScope{IsApp: false})
+	called := false
+	h := RequireScope("write:admin:queue")(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called, "native token は通過する")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireScope_AnonymousPasses(t *testing.T) {
+	// AuthScope 未設定 (anonymous) は RequireScope では通過させ、anonymous の
+	// 拒否は companion の RequireModerator/RequireAuth に委ねる。
+	c, rec := newScopeCtx(nil)
+	called := false
+	h := RequireScope("read:admin:queue")(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireScope_AppTokenWithKindPasses(t *testing.T) {
+	c, rec := newScopeCtx(&AuthScope{IsApp: true, Scopes: []string{"read:account", "write:admin:queue"}})
+	called := false
+	h := RequireScope("write:admin:queue")(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called, "kind を持つ app token は通過する")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireScope_AppTokenWithoutKindDenied(t *testing.T) {
+	// app token が endpoint の kind を持たない → 403 PERMISSION_DENIED。
+	c, rec := newScopeCtx(&AuthScope{IsApp: true, Scopes: []string{"read:account"}})
+	called := false
+	h := RequireScope("write:admin:queue")(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.False(t, called, "kind を持たない app token は handler に到達しない")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "PERMISSION_DENIED", errObj["code"])
+	assert.Equal(t, "1370e5b7-d4eb-4566-bb1d-7748ee6a1838", errObj["id"])
+	assert.Equal(t, "permission", errObj["kind"])
+}
+
+func TestRequireScope_AppTokenEmptyScopesDenied(t *testing.T) {
+	// permission 空の app token も拒否 (isApp=true なので full access ではない)。
+	c, rec := newScopeCtx(&AuthScope{IsApp: true, Scopes: nil})
+	h := RequireScope("read:admin:queue")(func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestAuthenticate_AppTokenScopesPropagated は Authenticate が app token の
+// permission を AuthScope として context に伝播することを end-to-end で確認する。
+func TestAuthenticate_AppTokenScopesPropagated(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	appUser := &model.User{ID: "u1", Username: "app"}
+	rawToken := "app-token-xyz"
+	tokenRepo.Tokens[rawToken] = &model.AccessToken{
+		Token:      rawToken,
+		Permission: pq.StringArray{"read:admin:queue"},
+		User:       appUser,
+	}
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	c := e.NewContext(req, httptest.NewRecorder())
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		sc := GetAuthScope(c)
+		require.NotNil(t, sc)
+		assert.True(t, sc.IsApp, "app token は IsApp=true")
+		assert.Equal(t, []string{"read:admin:queue"}, sc.Scopes)
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+}
+
+// TestAuthenticate_NativeTokenIsNotApp は native login token が IsApp=false /
+// scopes nil で伝播することを確認する (= full access)。
+func TestAuthenticate_NativeTokenIsNotApp(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	nativeUser := &model.User{ID: "u2", Username: "native"}
+	rawToken := "native-token-abc"
+	userRepo.Tokens[rawToken] = nativeUser
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	c := e.NewContext(req, httptest.NewRecorder())
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		sc := GetAuthScope(c)
+		require.NotNil(t, sc)
+		assert.False(t, sc.IsApp, "native token は IsApp=false")
+		assert.Nil(t, sc.Scopes)
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
 }

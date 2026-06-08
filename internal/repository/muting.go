@@ -20,6 +20,11 @@ type MutingRepository interface {
 	// for muterID. timeline endpoint で muted user の note を除外する
 	// filter 用 (#874)。
 	ListMuteeIDs(muterID string) ([]string, error)
+	// DeleteExpired physically removes muting rows whose expiresAt has
+	// passed. Read filters (ListMuteeIDs/Exists) already exclude them; this
+	// is the active prune run by the checkExpiredMutings cron (#1563).
+	// Returns the number of rows deleted.
+	DeleteExpired(now time.Time) (int64, error)
 }
 
 type mutingRepository struct {
@@ -94,6 +99,11 @@ func (r *mutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (r *mutingRepository) DeleteExpired(now time.Time) (int64, error) {
+	res := r.db.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).Delete(&model.Muting{})
+	return res.RowsAffected, res.Error
 }
 
 // RenoteMutingRepository provides data access for the `renote_muting` table.

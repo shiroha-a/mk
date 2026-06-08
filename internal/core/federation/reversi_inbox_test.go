@@ -100,6 +100,19 @@ func (r *fedFakeReversiRepo) Delete(id string) error {
 	return nil
 }
 
+func (r *fedFakeReversiRepo) DeleteOutdatedGames(thresholdID string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for id, g := range r.games {
+		if id < thresholdID && !g.IsStarted {
+			delete(r.games, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // game-by-session via Redis cache + in-memory map traversal helper.
 func (r *fedFakeReversiRepo) findGameBySession(t *testing.T, cache *corereversi.FederationIDCache, sessionID string) *model.ReversiGame {
 	t.Helper()

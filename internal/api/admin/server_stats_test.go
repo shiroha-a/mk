@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ type stubIPRepo struct{}
 
 func (s *stubIPRepo) Upsert(_, _ string) error                            { return nil }
 func (s *stubIPRepo) ListByUser(_ string, _ int) ([]*model.UserIP, error) { return nil, nil }
+func (s *stubIPRepo) DeleteOlderThan(_ time.Time) (int64, error)          { return 0, nil }
 
 func TestGetIndexStats(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)

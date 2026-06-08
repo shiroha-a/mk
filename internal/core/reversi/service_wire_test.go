@@ -95,6 +95,19 @@ func (r *fakeRepo) Delete(id string) error {
 	return nil
 }
 
+func (r *fakeRepo) DeleteOutdatedGames(thresholdID string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for id, g := range r.games {
+		if id < thresholdID && !g.IsStarted {
+			delete(r.games, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // --- capture publisher ---
 
 type capturePublisher struct {

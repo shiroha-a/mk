@@ -49,6 +49,24 @@ const TaskTypeChartResync = "chart:resync"
 // Mirrors upstream `cleanCharts` (cron `0 0 * * *`).
 const TaskTypeChartClean = "chart:clean"
 
+// TaskTypeCheckExpiredMutings is the task type for the periodic expired-mute
+// pruning job. Mirrors upstream `checkExpiredMutings` (cron `*/5 * * * *`).
+// 期限切れ user muting 行を能動削除する (read filter で既に隠れているが DB に
+// 残るため hygiene)。channel-mute erase は mk-go に expiresAt 列が無いため別 issue。
+const TaskTypeCheckExpiredMutings = "maintenance:checkExpiredMutings"
+
+// TaskTypeClean is the task type for the daily generic clean job. Mirrors
+// upstream `clean` (cron `0 0 * * *`)。user_ip の 90 日 prune / 期限切れ
+// role_assignment 削除 / reversi outdated game 削除を行う (antenna deactivate は
+// lastUsedAt refresh が無い mk-go では誤作動するため別 issue)。
+const TaskTypeClean = "maintenance:clean"
+
+// TaskTypeCheckModeratorsActivity is the task type for the hourly moderator
+// activity check. Mirrors upstream `checkModeratorsActivity` (cron `30 * * * *`)。
+// モデレーター全員が 7 日非アクティブだと登録を招待制に自動切替し、残 2 日では
+// 6h ごとに警告メール / announcement / SystemWebhook を送る。
+const TaskTypeCheckModeratorsActivity = "maintenance:checkModeratorsActivity"
+
 // TaskTypeDeleteAccount is the task type for the background cascade
 // deletion of a user account's related rows. Mirrors upstream
 // `deleteAccount` queue job.

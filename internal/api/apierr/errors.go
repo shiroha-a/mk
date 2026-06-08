@@ -42,6 +42,12 @@ const (
 	// #1012 経由で初導入)。channels/create 等の policy-gated endpoint が共通で使う。
 	UUIDRolePermissionDenied = "7f86f06f-7e15-4057-8561-f4b6d4ac755a"
 
+	// UUIDPermissionDenied は upstream `ApiCallService.ts` で app (access) token の
+	// permission 配列が endpoint の `meta.kind` を含まないときに投げられる
+	// PERMISSION_DENIED の UUID。native session (= user 自身の login token) は無検査。
+	// RequireScope middleware が OAuth scope 強制で使う (#1552)。
+	UUIDPermissionDenied = "1370e5b7-d4eb-4566-bb1d-7748ee6a1838"
+
 	// UUIDRestrictedByRole は upstream `i/update` の `restrictedByRole` UUID
 	// (third_party/misskey/.../endpoints/i/update.ts:115)。policy 制限により
 	// 個別フィールドの更新を拒否する経路で使う (#1024)。
@@ -246,6 +252,28 @@ func RolePermissionDenied() map[string]any {
 	return Error("ROLE_PERMISSION_DENIED",
 		"You are not assigned to a required role.",
 		UUIDRolePermissionDenied)
+}
+
+// PermissionDenied returns a 403 PERMISSION_DENIED error response. upstream
+// `ApiCallService.ts` の app token scope 違反時と同 shape (message: "Your app
+// does not have the necessary permissions to use this endpoint.", id:
+// 1370e5b7-..., kind: "permission")。RequireScope middleware が、app token の
+// permission 配列に endpoint の kind が無いときに返す (#1552)。
+// ROLE_PERMISSION_DENIED (role policy 違反) とは別物: 本 code は OAuth
+// access-token の scope 不足を表す。
+//
+// upstream は ApiError(kind:'permission') を送るため、plain Error helper では
+// なく InvalidParamClient と同じく kind を含む envelope を直接組む (本家
+// send() の `kind: y.kind` 相当)。
+func PermissionDenied() map[string]any {
+	return map[string]any{
+		"error": map[string]any{
+			"message": "Your app does not have the necessary permissions to use this endpoint.",
+			"code":    "PERMISSION_DENIED",
+			"id":      UUIDPermissionDenied,
+			"kind":    "permission",
+		},
+	}
 }
 
 // RestrictedByRole returns a 403 RESTRICTED_BY_ROLE error response.

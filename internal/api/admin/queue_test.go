@@ -235,6 +235,32 @@ func TestQueueShowJob_Found(t *testing.T) {
 	assert.True(t, hasFailedReason, "failedReason must always be present (golden required)")
 }
 
+// TestQueueShowJob_ProcessedBy は upstream QueueJob.processedBy (optional) を、
+// ProcessedBy が非空のときだけ出し、空のときは省略することを確認する (#1552)。
+func TestQueueShowJob_ProcessedBy(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"withpb": {ID: "withpb", Queue: "deliver", Type: "x", State: "completed", ProcessedBy: "worker-host-1"},
+			"nopb":   {ID: "nopb", Queue: "deliver", Type: "x", State: "pending"},
+		},
+	})
+
+	rec := doPost(h.QueueShowJob, `{"queue":"deliver","id":"withpb"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	shapetest.Assert(t, "QueueJob", got)
+	assert.Equal(t, "worker-host-1", got["processedBy"], "non-empty ProcessedBy must be output")
+
+	rec2 := doPost(h.QueueShowJob, `{"queue":"deliver","id":"nopb"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got2 map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got2))
+	_, has := got2["processedBy"]
+	assert.False(t, has, "empty ProcessedBy must be omitted (optional field)")
+}
+
 func TestQueueShowJob_NotFoundWithInspector(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{}
