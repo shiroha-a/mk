@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: `/api/federation/followers` ・ `/api/federation/following` の host フィルタ列が本家と逆で、Following packer に `createdAt` と populate された user が欠けていた問題を修正 (issue #1544 HIGH)。(1) 本家 `federation/followers` は指定 host を followee(被フォロー)側で、`federation/following` は follower(フォロー)側で絞るが、mk-go は逆の列で絞っていた (= 取得結果が本家と一致しない)。本家に合わせて修正。(2) 本家の Following packer は `createdAt` と populate した follower/followee user object を含むが mk-go は欠いていたので、既存 user packer を流用して追加。
+
 - Fix(security): `/api/auth/session/userkey` の `user` と `/api/ap/show` のオブジェクトが本家の full entity でなく ad-hoc 最小オブジェクトだった問題を修正し、あわせて ap/show の note embed に存在した可視性 IDOR を塞ぐ (issue #1557 HIGH)。(1) `auth/session/userkey` は本家同様 `user` を `UserDetailedNotMe` で pack。(2) `ap/show` は解決対象が user なら `UserDetailedNotMe`、note なら full `Note` で pack (本家 `noteEntityService.pack(note, me, {detail:true})` 相当)。(3) note を full pack するにあたり、embedded renote/reply が viewer 可視性で hide されないと followers/specified note を引用/返信した note 経由で非可視本文が ap/show から漏れる #1536 クラスの IDOR になるため、`packNoteForAPI` に `notehide.HideEmbeds(viewer, …)` を適用 (ap/show は RequireAuth、viewer nil でも fail-closed)。
 
 - Fix(security): `/api/i/import-following` ・ `import-blocking` ・ `import-muting` ・ `import-user-lists` ・ `import-antennas` が fileId の所有者を検証せず、任意の認証 user が他人 (や system) の drive file を import パイプラインに流し込めた cross-user file read を修正 (issue #1555 HIGH)。本家は各 import endpoint で `driveFilesRepository.findOneBy({id, userId: me.id})` で所有を検証し、非所有/不在/system file (userId NULL) は `NO_SUCH_FILE` を返す。mk-go の共通 `importHandler` は fileId 存在のみ確認して即 enqueue し、`Importer.Import` も `Drive.Fetch(fileID)` を userID スコープ無しで引いていた。enqueue 前に `DriveFileRepository` で所有を検証し fail-closed (未配線/不在/非所有は `NO_SUCH_FILE`) にする。`NO_SUCH_FILE` の UUID は本家のエンドポイント別 id に揃える。
