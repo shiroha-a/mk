@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix(security): `/api/i/import-following` ・ `import-blocking` ・ `import-muting` ・ `import-user-lists` ・ `import-antennas` が fileId の所有者を検証せず、任意の認証 user が他人 (や system) の drive file を import パイプラインに流し込めた cross-user file read を修正 (issue #1555 HIGH)。本家は各 import endpoint で `driveFilesRepository.findOneBy({id, userId: me.id})` で所有を検証し、非所有/不在/system file (userId NULL) は `NO_SUCH_FILE` を返す。mk-go の共通 `importHandler` は fileId 存在のみ確認して即 enqueue し、`Importer.Import` も `Drive.Fetch(fileID)` を userID スコープ無しで引いていた。enqueue 前に `DriveFileRepository` で所有を検証し fail-closed (未配線/不在/非所有は `NO_SUCH_FILE`) にする。`NO_SUCH_FILE` の UUID は本家のエンドポイント別 id に揃える。
+
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
 
 - Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。

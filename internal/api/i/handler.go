@@ -104,6 +104,12 @@ type Handler struct {
 	// userRepo は movedTo / alsoKnownAs の URI→ローカルID 解決 (#1255) に使う。
 	// FindByURI による local lookup のみで remote fetch しない。
 	userRepo repository.UserRepository
+	// driveFileRepo は i/import-* の fileId 所有権検証 (#1555) に使う。
+	// upstream Misskey の各 import endpoint は driveFilesRepository.findOneBy
+	// ({id, userId: me.id}) で「リクエスト元 user 所有の file」のみ許可し、
+	// 他人 / 不在 / system file (userId NULL) は NO_SUCH_FILE で弾く。未配線時は
+	// fail-closed (= 常に NO_SUCH_FILE) にして cross-user file read を防ぐ。
+	driveFileRepo repository.DriveFileRepository
 }
 
 // TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive
