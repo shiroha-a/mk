@@ -1743,6 +1743,96 @@ func TestShow_BulkUserIDs_Truncates100(t *testing.T) {
 	assert.Len(t, out, 100, "userIds は 100 件で切り捨てられるはず")
 }
 
+// addSuspendedBulkFixture wires alice (alive), bob (suspended), carol (alive).
+func addSuspendedBulkFixture(repo *testutil.MockUserRepository) {
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u2"] = &model.User{ID: "u2", Username: "bob", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u3"] = &model.User{ID: "u3", Username: "carol", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+}
+
+// upstream show.ts:136-141: 非 moderator (匿名含む) のバルクモードでは suspended
+// user を結果から除外する。
+func TestShow_BulkUserIDs_ExcludesSuspendedForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	rec := post(h.Show, `{"userIds":["u1","u2","u3"]}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2, "suspended user は非 moderator に除外されるはず")
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u3", out[1]["id"])
+}
+
+// 認証済みだが非 moderator の viewer も suspended user は除外される。
+func TestShow_BulkUserIDs_ExcludesSuspendedForAuthedNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userIds":["u1","u2","u3"]}`, &model.User{ID: "u_plain"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2)
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u3", out[1]["id"])
+}
+
+// moderator viewer は suspended user も含めて全件返す。
+func TestShow_BulkUserIDs_ModeratorSeesSuspended(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addSuspendedBulkFixture(repo)
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userIds":["u1","u2","u3"]}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 3, "moderator は suspended user も閲覧できるはず")
+	assert.Equal(t, "u1", out[0]["id"])
+	assert.Equal(t, "u2", out[1]["id"])
+	assert.Equal(t, "u3", out[2]["id"])
+}
+
+// upstream show.ts:173-175: 単体モードで suspended user は非 moderator に
+// NO_SUCH_USER(4362f8dc...) を返す。
+func TestShow_SingleSuspended_NotFoundForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Show, `{"userId":"sus"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+	assert.Equal(t, "4362f8dc-731f-4ad8-a694-be5a88922a24", errObj["id"])
+}
+
+// username 指定でも同様に suspended user は非 moderator に隠す。
+func TestShow_SingleSuspendedByUsername_NotFoundForNonModerator(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Show, `{"username":"sus"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, ok := resp["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+}
+
+// moderator viewer は単体モードでも suspended user を閲覧できる。
+func TestShow_SingleSuspended_ModeratorSees(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["sus"] = &model.User{ID: "sus", Username: "sus", UsernameLower: "sus", IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+	rec := postStub(h.Show, `{"userId":"sus"}`, &model.User{ID: "u_mod"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "sus", resp["id"])
+}
+
 // --- Internal error paths via failing repos ---
 
 type failingNoteRepo struct {
