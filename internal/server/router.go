@@ -244,6 +244,7 @@ func (s *Server) setupRoutes() {
 	// 4 つのカラム (perLocal / perRemote / perHome / perList) が反映される。
 	timelineFanoutHook.SetCacheLimitsProvider(coretimeline.NewMetaRepoCacheLimits(metaRepo))
 	timelineFanoutHook.SetUserListRepo(userListRepo)
+	timelineFanoutHook.SetUserRolesLookup(roleService) // #1549: roleTimeline fanout
 	noteCreateService.SetFanoutHook(timelineFanoutHook)
 	// #379: Delete (inbound activity / local notes/delete どちらも) で
 	// Redis fanout timelines から note ID を LREM するための hook。
@@ -306,7 +307,7 @@ func (s *Server) setupRoutes() {
 	notificationHook.SetWebPushPublisher(webPushService)
 	notificationHook.SetPackers(
 		corewebpush.NewUserRepoPacker(userRepo),
-		corewebpush.NewNoteRepoPacker(noteRepo, idGen),
+		corewebpush.NewNoteRepoPacker(noteRepo, idGen, followingRepo),
 	)
 	webPushCache := corewebpush.NewSubscriptionCache(swSubRepo, s.redis.Default)
 	// Web Push delivery: webpush-go の HTTPClient field に SSRF-safe client
@@ -1731,10 +1732,10 @@ func (s *Server) setupRoutes() {
 	streamRegistry.Register("main", channels.NewMain)
 	streamRegistry.Register("drive", channels.NewDrive)
 	streamRegistry.Register("hashtag", channels.NewHashtag)
-	streamRegistry.Register("antenna", channels.NewAntenna)
+	streamRegistry.Register("antenna", channels.NewAntennaFactory(antennaRepo).New)
 	streamRegistry.Register("channel", channels.NewChannelTimeline)
 	streamRegistry.Register("userList", channels.NewUserList)
-	streamRegistry.Register("roleTimeline", channels.NewRoleTimeline)
+	streamRegistry.Register("roleTimeline", channels.NewRoleTimelineFactory(roleService).New)
 	streamRegistry.Register("admin", channels.NewAdminFactory(roleService).New)
 	// serverStats / queueStats は publisher を後段で構築するため、ここでは
 	// 仮 register せず、publisher 生成後に登録する (1497 行付近)。

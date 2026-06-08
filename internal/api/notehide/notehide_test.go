@@ -226,3 +226,200 @@ func TestHideEmbeds_PackageLevelRepo(t *testing.T) {
 		t.Error("followers embed must be hidden via package-level HideEmbeds for a non-follower")
 	}
 }
+
+func hePtrInt(v int) *int { return &v }
+
+// tlNote builds a top-level note authored by `author` with visibility `vis`.
+// user carries the author preference fields; its ID is forced to author.
+func tlNote(id, author, vis, createdAt string, user entity.UserLite) entity.NoteEntity {
+	user.ID = author
+	return entity.NoteEntity{
+		ID: id, UserID: author, CreatedAt: createdAt, User: user, Visibility: vis,
+		Text: heStr("top " + id), FileIDs: []string{}, Files: []any{},
+		VisibleUserIDs: []string{}, Mentions: []string{},
+	}
+}
+
+// pastWindow is well before heNowMs, so any negative-relative time gate fires.
+const pastWindow = "2020-01-01T00:00:00.000Z"
+
+func TestHideTopLevelAt_FollowersOnlyBeforeDowngrade(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	t.Run("hidden from non-follower", func(t *testing.T) {
+		repo := followsRepo()
+		packed := []entity.NoteEntity{tlNote("n", "author", "public", pastWindow, entity.UserLite{MakeNotesFollowersOnlyBefore: hePtrInt(-3600)})}
+		hideEmbedsAt(viewer, packed, repo, heNowMs)
+		if repo.calls != 1 {
+			t.Fatalf("downgrade candidate must batch one follow query, got %d", repo.calls)
+		}
+		if !packed[0].IsHidden || packed[0].Text != nil {
+			t.Error("public note past makeNotesFollowersOnlyBefore must be blanked for non-follower")
+		}
+	})
+	t.Run("visible to follower", func(t *testing.T) {
+		repo := followsRepo([2]string{"viewer", "author"})
+		packed := []entity.NoteEntity{tlNote("n", "author", "public", pastWindow, entity.UserLite{MakeNotesFollowersOnlyBefore: hePtrInt(-3600)})}
+		hideEmbedsAt(viewer, packed, repo, heNowMs)
+		if packed[0].IsHidden {
+			t.Error("downgraded note must stay visible to a follower")
+		}
+	})
+}
+
+func TestHideTopLevelAt_MakeNotesHiddenBefore(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo([2]string{"viewer", "author"}) // even a follower
+	packed := []entity.NoteEntity{tlNote("n", "author", "public", pastWindow, entity.UserLite{MakeNotesHiddenBefore: hePtrInt(-1)})}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+	if !packed[0].IsHidden {
+		t.Error("makeNotesHiddenBefore must blank an old top-level note even for a follower")
+	}
+}
+
+func TestHideTopLevelAt_RequireSignin(t *testing.T) {
+	pref := entity.UserLite{RequireSigninToViewContents: heBool(true)}
+	t.Run("anonymous blanked", func(t *testing.T) {
+		repo := followsRepo()
+		packed := []entity.NoteEntity{tlNote("n", "author", "public", pastWindow, pref)}
+		hideEmbedsAt(nil, packed, repo, heNowMs)
+		if !packed[0].IsHidden {
+			t.Error("requireSigninToViewContents must blank a top-level note for anonymous")
+		}
+	})
+	t.Run("authenticated visible", func(t *testing.T) {
+		repo := followsRepo()
+		packed := []entity.NoteEntity{tlNote("n", "author", "public", pastWindow, pref)}
+		hideEmbedsAt(&model.User{ID: "viewer"}, packed, repo, heNowMs)
+		if packed[0].IsHidden {
+			t.Error("requireSignin must not blank for an authenticated viewer")
+		}
+	})
+}
+
+// TestHideTopLevelAt_IntrinsicNotBlanked locks in #799/#1488: the top-level
+// prefs gate must NOT blank a followers/specified note merely for its intrinsic
+// visibility — those are served deliberately by CanSeeNote / push-down and the
+// notes-show ID-known doctrine.
+func TestHideTopLevelAt_IntrinsicNotBlanked(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo() // viewer follows nobody
+	packed := []entity.NoteEntity{
+		tlNote("f", "a1", "followers", "2026-01-02T03:04:05.000Z", entity.UserLite{}),
+		tlNote("s", "a2", "specified", "2026-01-02T03:04:05.000Z", entity.UserLite{}),
+	}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+	if packed[0].IsHidden {
+		t.Error("intrinsic followers top-level must NOT be blanked by the prefs gate (#799)")
+	}
+	if packed[1].IsHidden {
+		t.Error("intrinsic specified top-level must NOT be blanked by the prefs gate (#799)")
+	}
+}
+
+func TestHideTopLevelAt_OwnNoteVerbatim(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo()
+	packed := []entity.NoteEntity{tlNote("n", "viewer", "public", pastWindow, entity.UserLite{MakeNotesHiddenBefore: hePtrInt(-1), RequireSigninToViewContents: heBool(true)})}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+	if packed[0].IsHidden {
+		t.Error("author must always see their own top-level note")
+	}
+}
+
+// TestHideTopLevelAt_SingleQueryTopAndEmbed verifies a page mixing a top-level
+// downgrade candidate and an embed-followers author still issues exactly one
+// batched follow query, and both are gated.
+func TestHideTopLevelAt_SingleQueryTopAndEmbed(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo()
+	top := tlNote("top", "tlauthor", "public", pastWindow, entity.UserLite{MakeNotesFollowersOnlyBefore: hePtrInt(-3600)})
+	withEmbed := noteWithRenote("p", followersEmbed("e", "embedauthor"))
+	packed := []entity.NoteEntity{top, withEmbed}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+	if repo.calls != 1 {
+		t.Fatalf("top-level + embed authors must batch into one query, got %d", repo.calls)
+	}
+	if !packed[0].IsHidden {
+		t.Error("top-level downgrade candidate must be blanked for non-follower")
+	}
+	if !packed[1].Renote.IsHidden {
+		t.Error("embed followers note must be blanked for non-follower")
+	}
+}
+
+func heBool(b bool) *bool { return &b }
+
+func notifNoteMap(note entity.NoteEntity) map[string]any {
+	return map[string]any{"id": "notif", "type": "reply", "noteId": note.ID, "note": note}
+}
+
+func TestHideNotificationNotesAt(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+
+	t.Run("depth-2 followers renote blanked for non-follower, note kept", func(t *testing.T) {
+		repo := followsRepo()
+		note := tlNote("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+		note.Renote = followersEmbed("r", "renoteauthor")
+		packed := []map[string]any{notifNoteMap(note)}
+		hideNotificationNotesAt(viewer, packed, repo, heNowMs)
+		if repo.calls != 1 {
+			t.Fatalf("one batched follow query expected, got %d", repo.calls)
+		}
+		got := packed[0]["note"].(entity.NoteEntity)
+		if got.Renote == nil || !got.Renote.IsHidden || got.Renote.Text != nil {
+			t.Error("depth-2 followers renote must be blanked for non-follower")
+		}
+		if got.IsHidden {
+			t.Error("the public notification note itself must stay visible")
+		}
+	})
+
+	t.Run("depth-2 followers renote visible to follower", func(t *testing.T) {
+		repo := followsRepo([2]string{"viewer", "renoteauthor"})
+		note := tlNote("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+		note.Renote = followersEmbed("r", "renoteauthor")
+		packed := []map[string]any{notifNoteMap(note)}
+		hideNotificationNotesAt(viewer, packed, repo, heNowMs)
+		got := packed[0]["note"].(entity.NoteEntity)
+		if got.Renote.IsHidden {
+			t.Error("follower must see the depth-2 renote")
+		}
+	})
+
+	t.Run("top-level pref refinement blanks notification note (value reassigned)", func(t *testing.T) {
+		repo := followsRepo()
+		note := tlNote("base", "noteauthor", "public", pastWindow, entity.UserLite{MakeNotesHiddenBefore: hePtrInt(-1)})
+		packed := []map[string]any{notifNoteMap(note)}
+		hideNotificationNotesAt(viewer, packed, repo, heNowMs)
+		got := packed[0]["note"].(entity.NoteEntity)
+		if !got.IsHidden || got.Text != nil {
+			t.Error("makeNotesHiddenBefore must blank the notification note and be written back into the map")
+		}
+	})
+
+	t.Run("notification without note is skipped", func(t *testing.T) {
+		repo := followsRepo()
+		packed := []map[string]any{{"id": "n", "type": "follow"}}
+		hideNotificationNotesAt(viewer, packed, repo, heNowMs) // must not panic
+		if _, ok := packed[0]["note"]; ok {
+			t.Error("follow notification must stay note-less")
+		}
+		if repo.calls != 0 {
+			t.Fatalf("no note -> zero queries, got %d", repo.calls)
+		}
+	})
+}
+
+func TestHideNotificationNotes_NilRepoFailClosed(t *testing.T) {
+	prev := followingRepo
+	defer func() { followingRepo = prev }()
+	followingRepo = nil
+	note := tlNote("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+	note.Renote = followersEmbed("r", "renoteauthor")
+	packed := []map[string]any{notifNoteMap(note)}
+	HideNotificationNotes(&model.User{ID: "viewer"}, packed)
+	got := packed[0]["note"].(entity.NoteEntity)
+	if got.Renote == nil || !got.Renote.IsHidden {
+		t.Error("nil followingRepo must fail closed (blank followers depth-2 embed)")
+	}
+}

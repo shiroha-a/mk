@@ -1,13 +1,21 @@
-// Package notehide centralizes the per-viewer embedded renote/reply hiding
-// (#1536) so EVERY REST endpoint that packs notes applies the same gate. The
-// gate blanks an embedded note's content when the requesting viewer is not
-// allowed to see it, mirroring upstream Misskey's NoteEntityService.hideNote
-// applied to embeds.
+// Package notehide centralizes the per-viewer hideNote gate (#1536 / #1568) so
+// EVERY REST endpoint that packs notes applies it uniformly, mirroring upstream
+// Misskey's NoteEntityService.hideNote applied in pack().
 //
-// Only EMBEDDED Renote/Reply are gated; the top-level note keeps its existing
-// per-surface gate (RequireVisible / FilterVisible / SQL push-down / notes-show
-// ID-known doctrine). Streaming has its own per-connection gate in
-// internal/stream/channels.
+// Two layers, both blanking content in place (entity.HideNoteEntity), never
+// filtering rows:
+//   - Embedded renote/reply: the FULL decision (corenote.HideEmbedDecision),
+//     including intrinsic followers/specified — depth-2 embeds have no upstream
+//     visibility gate of their own (#1536).
+//   - Top-level note: the author-PREFERENCE subset only
+//     (corenote.HideNoteByPrefsDecision): treatVisibility downgrade
+//     (makeNotesFollowersOnlyBefore), makeNotesHiddenBefore and
+//     requireSigninToViewContents. The intrinsic followers/specified hide stays
+//     owned by RequireVisible / FilterVisible / SQL push-down / the notes-show
+//     ID-known doctrine (#799 / #1488); re-applying it here would re-blank notes
+//     those gates deliberately served (#1568).
+//
+// Streaming has its own per-connection gate in internal/stream/channels.
 package notehide
 
 import (
@@ -39,12 +47,55 @@ func HideEmbeds(viewer *model.User, packed []entity.NoteEntity) {
 	hideEmbedsAt(viewer, packed, followingRepo, time.Now().UnixMilli())
 }
 
+// HideNotificationNotes applies the per-viewer hideNote gate to the embedded
+// `note` of each packed notification (the map shape produced by
+// entity.PackNotifications). The notification's note itself gets the top-level
+// author-preference gate; its depth-2 renote/reply embeds get the full embed
+// gate (#1568). The REST i/notifications path already runs FilterVisible (#1444)
+// which drops notes the viewer cannot see at all, so the intrinsic
+// followers/specified gate is owned there; this only refines the survivors and
+// closes the depth-2 embed leak FilterVisible does not recurse into. One batched
+// follow query for the whole page.
+func HideNotificationNotes(viewer *model.User, packed []map[string]any) {
+	hideNotificationNotesAt(viewer, packed, followingRepo, time.Now().UnixMilli())
+}
+
+func hideNotificationNotesAt(viewer *model.User, packed []map[string]any, repo repository.FollowingRepository, nowMs int64) {
+	if len(packed) == 0 {
+		return
+	}
+	// Pull the embedded NoteEntity values out so the shared batch-follow + gate
+	// machinery (hideEmbedsAt) runs over them, then write the gated value back.
+	// Renote/Reply are pointers shared with the map's note, so embed blanks are
+	// reflected directly; the top-level blank lives on the value, hence write-back.
+	notes := make([]entity.NoteEntity, 0, len(packed))
+	idx := make([]int, 0, len(packed))
+	for i := range packed {
+		n, ok := packed[i]["note"].(entity.NoteEntity)
+		if !ok {
+			continue
+		}
+		notes = append(notes, n)
+		idx = append(idx, i)
+	}
+	if len(notes) == 0 {
+		return
+	}
+	hideEmbedsAt(viewer, notes, repo, nowMs)
+	for j, i := range idx {
+		packed[i]["note"] = notes[j]
+	}
+}
+
 func hideEmbedsAt(viewer *model.User, packed []entity.NoteEntity, repo repository.FollowingRepository, nowMs int64) {
 	if len(packed) == 0 {
 		return
 	}
 	follows := buildFollowSet(viewer, packed, repo)
 	for i := range packed {
+		// 著者設定ゲートを top-level に適用 (intrinsic followers/specified は別ゲート
+		// 任せ)。HideNoteEntity が要素を mutate できるよう slice element の pointer。
+		hideTopLevelIfNeeded(viewer, &packed[i], follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Renote, follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Reply, follows, nowMs)
 	}
@@ -59,6 +110,18 @@ func hideEmbedIfNeeded(viewer *model.User, embed *entity.NoteEntity, follows fun
 	}
 }
 
+// hideTopLevelIfNeeded blanks a top-level note when the author's preference
+// gates (HideNoteByPrefsDecision) hide it from viewer. Intrinsic
+// followers/specified are intentionally NOT evaluated here (see package doc).
+func hideTopLevelIfNeeded(viewer *model.User, n *entity.NoteEntity, follows func(string) bool, nowMs int64) {
+	if n == nil {
+		return
+	}
+	if corenote.HideNoteByPrefsDecision(viewer, topLevelFactsFromEntity(n), follows, nowMs) {
+		entity.HideNoteEntity(n)
+	}
+}
+
 // buildFollowSet resolves, in ONE query, which embed authors `viewer` follows.
 // It collects the distinct authors of embeds that may require a follow check
 // (followers, plus public/home that could downgrade via the author's
@@ -70,6 +133,7 @@ func buildFollowSet(viewer *model.User, packed []entity.NoteEntity, repo reposit
 	}
 	seen := make(map[string]struct{})
 	for i := range packed {
+		collectTopLevelAuthor(&packed[i], viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Renote, viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Reply, viewer.ID, seen)
 	}
@@ -113,6 +177,38 @@ func collectEmbedAuthor(embed *entity.NoteEntity, viewerID string, seen map[stri
 		return
 	}
 	seen[embed.UserID] = struct{}{}
+}
+
+// collectTopLevelAuthor adds a top-level note's author to seen only when the
+// prefs gate actually needs a follow check: a public/home note whose author
+// opted into makeNotesFollowersOnlyBefore (the treatVisibility downgrade).
+// Intrinsic followers/specified top-level notes are not gated here, so they
+// require no follow query — keeping the page to one batched lookup.
+func collectTopLevelAuthor(n *entity.NoteEntity, viewerID string, seen map[string]struct{}) {
+	if n == nil || n.UserID == "" || n.UserID == viewerID {
+		return
+	}
+	switch n.Visibility {
+	case string(model.NoteVisibilityPublic), string(model.NoteVisibilityHome):
+		if n.User.MakeNotesFollowersOnlyBefore == nil {
+			return
+		}
+	default:
+		return
+	}
+	seen[n.UserID] = struct{}{}
+}
+
+// topLevelFactsFromEntity is embedFactsFromEntity plus the reply-target author,
+// which IS available for a top-level note (its Reply is packed at depth 1,
+// unlike a depth-2 embed). The makeNotesFollowersOnlyBefore downgrade's
+// reply-target escape hatch needs it populated.
+func topLevelFactsFromEntity(n *entity.NoteEntity) corenote.EmbedFacts {
+	f := embedFactsFromEntity(n)
+	if n.Reply != nil {
+		f.ReplyTargetAuthorID = n.Reply.UserID
+	}
+	return f
 }
 
 // embedFactsFromEntity translates a packed embed NoteEntity into core/note

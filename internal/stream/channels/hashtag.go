@@ -2,20 +2,32 @@ package channels
 
 import (
 	"encoding/json"
+	"sync"
 
+	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/stream"
 )
 
-// HashtagChannel forwards notes matching a specific hashtag.
+// hashtagSeenCap bounds the per-connection dedupe set; when exceeded it is
+// cleared wholesale (note ids are monotonic aidx, so a stale re-delivery right
+// after a clear is effectively impossible during the simultaneous multi-topic
+// burst the dedupe targets).
+const hashtagSeenCap = 1024
+
+// HashtagChannel forwards notes matching a hashtag query (OR-of-ANDs over q).
 type HashtagChannel struct {
 	ctx    stream.ChannelContext
-	topic  string
+	q      [][]string // normalized (NFKC+lower) OR-of-ANDs groups
+	topics []string   // subscribed hashtag:<tag> topics (for Dispose)
 	filter noteFilter
+
+	mu   sync.Mutex
+	seen map[string]struct{} // recently delivered note ids (cross-topic dedupe)
 }
 
 // NewHashtag returns a channel factory for "hashtag".
 func NewHashtag(ctx stream.ChannelContext) stream.Channel {
-	return &HashtagChannel{ctx: ctx}
+	return &HashtagChannel{ctx: ctx, seen: make(map[string]struct{})}
 }
 
 func (c *HashtagChannel) Init(params json.RawMessage) error {
@@ -30,13 +42,61 @@ func (c *HashtagChannel) Init(params json.RawMessage) error {
 		return stream.ErrInvalidParams
 	}
 	c.filter = parseNoteFilter(params)
-	// 最初のタグでトピック購読
-	c.topic = "hashtag:" + p.Q[0][0]
-	c.ctx.Subscribe(c.topic)
+	// q を正規化して保持し、全グループの全タグの distinct 正規化キーを購読する。
+	// 旧実装は q[0][0] (第1グループ第1タグ) のみ購読していて multi-tag / OR group を
+	// 取りこぼしていた (#1549)。正規化は fanout 側 publish と searchnorm.Normalize で
+	// 揃える (揃えないと topic 文字列が一致せず1件も届かない)。
+	subscribed := make(map[string]struct{})
+	for _, group := range p.Q {
+		ng := make([]string, 0, len(group))
+		for _, tag := range group {
+			key := searchnorm.Normalize(tag)
+			if key == "" {
+				continue
+			}
+			ng = append(ng, key)
+			if _, ok := subscribed[key]; !ok {
+				subscribed[key] = struct{}{}
+				topic := "hashtag:" + key
+				c.topics = append(c.topics, topic)
+				c.ctx.Subscribe(topic)
+			}
+		}
+		if len(ng) > 0 {
+			c.q = append(c.q, ng)
+		}
+	}
+	if len(c.topics) == 0 {
+		return stream.ErrInvalidParams
+	}
 	return nil
 }
 
 func (c *HashtagChannel) OnRedisEvent(payload []byte) {
+	// 単一 tag topic ヒットでは AND グループ成立を保証できないため、payload の tags
+	// に対して OR-of-ANDs を再評価する (#1549)。
+	if !c.matchesQuery(payload) {
+		return
+	}
+	// dedupe: 同 note が複数 subscribed tag topic 経由で重複到着するので noteId で
+	// 1 回に絞る。fanout は topic ごとに呼ばれ並行しうるため mutex で保護する。
+	if id := streamNoteID(payload); id != "" {
+		c.mu.Lock()
+		if _, dup := c.seen[id]; dup {
+			c.mu.Unlock()
+			return
+		}
+		if len(c.seen) >= hashtagSeenCap {
+			c.seen = make(map[string]struct{}, hashtagSeenCap)
+		}
+		c.seen[id] = struct{}{}
+		c.mu.Unlock()
+	}
+	// per-subscriber 可視性 gate (#1549, fail-closed)。TS notesStream は全可視性を
+	// 流して consumer 側で isNoteVisibleForMe する設計に合わせる。
+	if !streamNoteVisibleForViewer(payload, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
@@ -44,10 +104,42 @@ func (c *HashtagChannel) OnRedisEvent(payload []byte) {
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
+// matchesQuery evaluates the TS OR-of-ANDs hashtag query
+// (q.some(group => group.every(tag => noteTags.includes(tag)))) against the
+// payload's normalized tags. Returns false on parse error (fail-closed).
+func (c *HashtagChannel) matchesQuery(payload []byte) bool {
+	var p struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	noteTags := make(map[string]struct{}, len(p.Tags))
+	for _, t := range p.Tags {
+		noteTags[searchnorm.Normalize(t)] = struct{}{}
+	}
+	for _, group := range c.q {
+		if len(group) == 0 {
+			continue
+		}
+		all := true
+		for _, t := range group {
+			if _, ok := noteTags[t]; !ok {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *HashtagChannel) OnClientMessage(string, json.RawMessage) {}
 
 func (c *HashtagChannel) Dispose() {
-	if c.topic != "" {
-		c.ctx.Unsubscribe(c.topic)
+	for _, t := range c.topics {
+		c.ctx.Unsubscribe(t)
 	}
 }
