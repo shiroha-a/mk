@@ -77,12 +77,27 @@ type fakeCleanIDGen struct{ got time.Time }
 
 func (f *fakeCleanIDGen) Generate(t time.Time) string { f.got = t; return "threshold-id" }
 
+type fakeAntennaDeactivator struct {
+	gotCutoff time.Time
+	called    bool
+	err       error
+}
+
+func (f *fakeAntennaDeactivator) DeactivateUnusedSince(cutoff time.Time) (int64, error) {
+	f.called = true
+	f.gotCutoff = cutoff
+	return 7, f.err
+}
+
+const testAntennaThreshold = 7 * 24 * time.Hour
+
 func TestClean_RunsAllSubtasks(t *testing.T) {
 	ip := &fakeUserIPPruner{}
 	role := &fakeRolePruner{}
 	game := &fakeGamePruner{}
 	idGen := &fakeCleanIDGen{}
-	proc := NewCleanProcessor(ip, role, game, idGen)
+	antenna := &fakeAntennaDeactivator{}
+	proc := NewCleanProcessor(ip, role, game, idGen, antenna, testAntennaThreshold)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
 
 	// user_ip は 90 日より前を prune する。
@@ -91,10 +106,21 @@ func TestClean_RunsAllSubtasks(t *testing.T) {
 	// reversi の閾値 id は now-10min から生成される。
 	assert.Equal(t, "threshold-id", game.gotThreshold)
 	assert.WithinDuration(t, time.Now().Add(-reversiOutdatedAfter), idGen.got, time.Minute)
+	// antenna は now-threshold より古い lastUsedAt を deactivate する。
+	assert.True(t, antenna.called)
+	assert.WithinDuration(t, time.Now().Add(-testAntennaThreshold), antenna.gotCutoff, time.Minute)
 }
 
 func TestClean_NilDepsNoOp(t *testing.T) {
-	require.NoError(t, NewCleanProcessor(nil, nil, nil, nil).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	require.NoError(t, NewCleanProcessor(nil, nil, nil, nil, nil, testAntennaThreshold).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+}
+
+func TestClean_AntennaThresholdZeroSkips(t *testing.T) {
+	antenna := &fakeAntennaDeactivator{}
+	// threshold <= 0 は antenna deactivate を無効化する (本家 `> 0` ガード相当)。
+	proc := NewCleanProcessor(nil, nil, nil, nil, antenna, 0)
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	assert.False(t, antenna.called, "threshold=0 では呼ばれない")
 }
 
 func TestClean_SubtaskErrorsSwallowed(t *testing.T) {
@@ -103,6 +129,8 @@ func TestClean_SubtaskErrorsSwallowed(t *testing.T) {
 		&fakeRolePruner{err: errors.New("b")},
 		&fakeGamePruner{err: errors.New("c")},
 		&fakeCleanIDGen{},
+		&fakeAntennaDeactivator{err: errors.New("d")},
+		testAntennaThreshold,
 	)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}), "個々の失敗は swallow して success")
 }

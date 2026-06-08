@@ -123,6 +123,17 @@ func TestShow_AccessDenied(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAccessDenied)
 }
 
+func TestShow_DoesNotBumpLastUsedAt(t *testing.T) {
+	svc, repo := newSvc(t)
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1", LastUsedAt: old, IsActive: false}
+	// 本家 show.ts は lastUsedAt を bump しない (#1604)。
+	_, err := svc.Show("u1", "a1")
+	require.NoError(t, err)
+	assert.Equal(t, old, repo.Antennas["a1"].LastUsedAt, "Show は lastUsedAt を変えない")
+	assert.False(t, repo.Antennas["a1"].IsActive, "Show は再活性化しない")
+}
+
 // --- Update ----------------------------------------------------------------
 
 func TestUpdate_HappyPath(t *testing.T) {
@@ -157,6 +168,38 @@ func TestUpdate_HappyPath(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "alpha-v2", got.Name)
+}
+
+func TestUpdate_BumpsLastUsedAt(t *testing.T) {
+	svc, repo := newSvc(t)
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	svc.SetClock(func() time.Time { return fixed })
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo.Antennas["a1"] = &model.Antenna{
+		ID: "a1", UserID: "u1", Name: "alpha", Src: model.AntennaSourceAll, LastUsedAt: old,
+		Keywords: datatypes.JSON([]byte("[]")), ExcludeKeywords: datatypes.JSON([]byte("[]")),
+	}
+	name := "alpha-v2"
+	repo.Antennas["a1"].IsActive = false
+	// 本家 update.ts と同じく更新で lastUsedAt が now に bump され、isActive を明示
+	// 指定しない編集では isActive=true へ復帰する (#1604)。
+	_, err := svc.Update("u1", "a1", UpdateInput{Name: &name})
+	require.NoError(t, err)
+	assert.Equal(t, fixed, repo.Antennas["a1"].LastUsedAt)
+	assert.True(t, repo.Antennas["a1"].IsActive, "isActive 未指定の編集は再活性化")
+}
+
+func TestUpdate_RespectsExplicitIsActiveFalse(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{
+		ID: "a1", UserID: "u1", Name: "alpha", Src: model.AntennaSourceAll, IsActive: true,
+		Keywords: datatypes.JSON([]byte("[]")), ExcludeKeywords: datatypes.JSON([]byte("[]")),
+	}
+	off := false
+	// 明示的な isActive=false は尊重する (mk-go の isActive param 拡張)。
+	_, err := svc.Update("u1", "a1", UpdateInput{IsActive: &off})
+	require.NoError(t, err)
+	assert.False(t, repo.Antennas["a1"].IsActive, "明示 isActive=false は尊重")
 }
 
 func TestUpdate_NotFound(t *testing.T) {
@@ -271,6 +314,20 @@ func TestNotes_HappyPath(t *testing.T) {
 	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
+}
+
+func TestNotes_BumpsLastUsedAtAndReactivates(t *testing.T) {
+	svc, repo := newSvc(t)
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	svc.SetClock(func() time.Time { return fixed })
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	// 非アクティブ + 古い lastUsedAt の antenna を notes 取得すると、本家
+	// antennas/notes.ts と同じく isActive=true + lastUsedAt=now に bump される (#1604)。
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1", IsActive: false, LastUsedAt: old}
+	_, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+	assert.True(t, repo.Antennas["a1"].IsActive, "notes 取得で再活性化")
+	assert.Equal(t, fixed, repo.Antennas["a1"].LastUsedAt, "notes 取得で lastUsedAt が now に bump")
 }
 
 func TestNotes_LimitClamping(t *testing.T) {

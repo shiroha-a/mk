@@ -160,6 +160,51 @@ func TestAntennaRepository_ListAllActive(t *testing.T) {
 	assert.True(t, found)
 }
 
+func TestAntennaRepository_DeactivateUnusedSince(t *testing.T) {
+	repo := NewAntennaRepository(testDB)
+	user := insertTestUser(t, "u_ar_6", "antuser6")
+	defer cleanupUser(t, user.ID)
+
+	now := time.Now()
+	// recent: cutoff より新しい (残る) / stale: cutoff より古い (deactivate) /
+	// alreadyOff: 古いが既に非アクティブ (RowsAffected に数えない)。
+	recent := newTestAntenna("ant_de_recent", user.ID, "recent")
+	recent.LastUsedAt = now.Add(-time.Hour)
+	stale := newTestAntenna("ant_de_stale", user.ID, "stale")
+	stale.LastUsedAt = now.Add(-30 * 24 * time.Hour)
+	alreadyOff := newTestAntenna("ant_de_off", user.ID, "off")
+	alreadyOff.LastUsedAt = now.Add(-30 * 24 * time.Hour)
+	alreadyOff.IsActive = false
+	for _, a := range []*model.Antenna{recent, stale, alreadyOff} {
+		require.NoError(t, repo.Create(a))
+		defer cleanupAntenna(t, a.ID)
+	}
+
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	// DeactivateUnusedSince は全ユーザー横断のグローバル操作なので、共有 testDB の
+	// 他テスト残骸も拾いうる。正確な件数ではなく「stale が含まれる (>=1)」と
+	// per-antenna の状態で検証する。
+	n, err := repo.DeactivateUnusedSince(cutoff)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, int64(1), "cutoff より古い active antenna が deactivate される")
+
+	gotRecent, err := repo.FindByID(recent.ID)
+	require.NoError(t, err)
+	assert.True(t, gotRecent.IsActive, "cutoff より新しい antenna は active のまま")
+	gotStale, err := repo.FindByID(stale.ID)
+	require.NoError(t, err)
+	assert.False(t, gotStale.IsActive, "cutoff より古い antenna は deactivate")
+	gotOff, err := repo.FindByID(alreadyOff.ID)
+	require.NoError(t, err)
+	assert.False(t, gotOff.IsActive, "既に非アクティブな antenna はそのまま")
+
+	// 2回目は stale-active 行が残っていないので 0。isActive=true ガードにより
+	// 既に非アクティブな行 (alreadyOff 含む) を再カウント・再書き込みしないことの検証。
+	n2, err := repo.DeactivateUnusedSince(cutoff)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n2, "既に非アクティブな行は再カウントしない")
+}
+
 func TestAntennaRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

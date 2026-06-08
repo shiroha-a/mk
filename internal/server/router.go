@@ -660,8 +660,9 @@ func (s *Server) setupRoutes() {
 	s.queueServer.Handle(queue.TaskTypeCheckExpiredMutings, checkExpiredMutingsProcessor.Handle)
 
 	// Daily generic clean (#1563): scheduler の cron (0 0 * * *) が enqueue する。
-	// user_ip 90 日 prune / 期限切れ role_assignment 削除 / reversi outdated game 削除。
-	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen)
+	// user_ip 90 日 prune / 期限切れ role_assignment 削除 / reversi outdated game 削除 /
+	// 未使用 antenna の deactivate (#1604, deactivateAntennaThreshold ミリ秒)。
+	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen, antennaRepo, time.Duration(s.config.DeactivateAntennaThreshold)*time.Millisecond)
 	s.queueServer.Handle(queue.TaskTypeClean, cleanGenericProcessor.Handle)
 
 	// Reaction flush (issue #57): buffered writer 使用時は 30 秒ごとに flush。

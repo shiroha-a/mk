@@ -4184,6 +4184,17 @@ func (m *MockAntennaRepository) ListAllActive() ([]*model.Antenna, error) {
 	return rows, nil
 }
 
+func (m *MockAntennaRepository) DeactivateUnusedSince(cutoff time.Time) (int64, error) {
+	var n int64
+	for _, a := range m.Antennas {
+		if a.IsActive && a.LastUsedAt.Before(cutoff) {
+			a.IsActive = false
+			n++
+		}
+	}
+	return n, nil
+}
+
 func applyAntennaFields(a *model.Antenna, fields map[string]any) {
 	for k, v := range fields {
 		switch k {

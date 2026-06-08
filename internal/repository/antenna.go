@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -17,6 +19,11 @@ type AntennaRepository interface {
 	// count them (#1029 PR-1 follow-up).
 	CountByUser(userID string) (int64, error)
 	ListAllActive() ([]*model.Antenna, error)
+	// DeactivateUnusedSince sets isActive=false on every active antenna whose
+	// lastUsedAt is older than the given cutoff. Used by the `clean` cron to
+	// auto-deactivate antennas that have not been read/updated in a while
+	// (upstream CleanProcessorService, #1604). Returns rows deactivated.
+	DeactivateUnusedSince(cutoff time.Time) (int64, error)
 }
 
 type antennaRepository struct {
@@ -72,6 +79,17 @@ func (r *antennaRepository) CountByUser(userID string) (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// DeactivateUnusedSince sets isActive=false on active antennas not used since
+// the cutoff. Upstream blindly updates all rows older than the cutoff; we add
+// `isActive = true` so RowsAffected reflects only the antennas this run newly
+// deactivated and we skip rewriting already-inactive rows.
+func (r *antennaRepository) DeactivateUnusedSince(cutoff time.Time) (int64, error) {
+	res := r.db.Model(&model.Antenna{}).
+		Where(`"lastUsedAt" < ? AND "isActive" = ?`, cutoff, true).
+		Update("isActive", false)
+	return res.RowsAffected, res.Error
 }
 
 // ListAllActive returns every antenna with isActive=true. NoteCreate イベント

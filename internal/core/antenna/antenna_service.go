@@ -293,9 +293,19 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	if in.LocalOnly != nil {
 		fields["localOnly"] = *in.LocalOnly
 	}
+	// 本家 update.ts は編集のたびに isActive=true へ復帰させる (deactivate された
+	// antenna は編集で再び有効化される)。mk-go は isActive をユーザー param として
+	// 公開する拡張があるため、明示指定された場合はそれを尊重し、未指定の編集では
+	// 本家同様 isActive=true へ復帰させる (#1604)。
 	if in.IsActive != nil {
 		fields["isActive"] = *in.IsActive
+	} else {
+		fields["isActive"] = true
 	}
+	// 本家 update.ts と同じく、更新のたびに lastUsedAt を bump する (#1604)。これに
+	// より最近編集された antenna は clean cron で未使用扱いされず deactivate されな
+	// い。
+	fields["lastUsedAt"] = s.clock()
 	if err := s.repo.UpdateFields(antennaID, fields); err != nil {
 		return nil, err
 	}
@@ -339,6 +349,14 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	if _, err := s.Show(ownerID, antennaID); err != nil {
 		return nil, err
 	}
+	// 本家 antennas/notes.ts は notes 取得のたびに isActive=true + lastUsedAt=now
+	// を bump し、使用中の antenna が clean cron (#1604) で deactivate されないよう
+	// にする。非アクティブだった antenna はここで再活性化される。best-effort write
+	// で、失敗しても timeline 取得は続行する (この file の他の best-effort write と
+	// 同様)。OnNoteCreated は毎回 ListAllActive を読むため、再活性化は次の note 配信
+	// から即座に反映され、本家の antennaUpdated 内部イベントに相当する cache 無効化
+	// は不要。
+	_ = s.repo.UpdateFields(antennaID, map[string]any{"isActive": true, "lastUsedAt": s.clock()})
 	if limit <= 0 {
 		limit = 10
 	}

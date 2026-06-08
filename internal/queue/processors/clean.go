@@ -30,6 +30,11 @@ type (
 	CleanIDGenerator interface {
 		Generate(t time.Time) string
 	}
+	// AntennaDeactivator deactivates antennas unused since a cutoff
+	// (repository.AntennaRepository).
+	AntennaDeactivator interface {
+		DeactivateUnusedSince(cutoff time.Time) (int64, error)
+	}
 )
 
 const (
@@ -44,20 +49,30 @@ const (
 // CleanProcessor implements the upstream generic `clean` systemQueue cron
 // (`0 0 * * *`, #1563): (1) prune user_ip older than 90 days, (2) delete
 // expired role assignments, (3) delete not-yet-started reversi games older
-// than ~10 minutes. antenna auto-deactivate は mk-go が lastUsedAt を read 時に
-// bump しないため faithful port が全 antenna を無効化してしまう。別 feature
-// として対象外 (#1563 follow-up)。
+// than ~10 minutes, (4) deactivate antennas unused for longer than
+// antennaThreshold (#1604; relies on antenna.lastUsedAt being bumped on
+// read/update so active antennas are not wrongly deactivated).
 type CleanProcessor struct {
-	userIP     UserIPPruner
-	roleAssign RoleAssignmentPruner
-	reversi    OutdatedGamePruner
-	idGen      CleanIDGenerator
+	userIP           UserIPPruner
+	roleAssign       RoleAssignmentPruner
+	reversi          OutdatedGamePruner
+	idGen            CleanIDGenerator
+	antenna          AntennaDeactivator
+	antennaThreshold time.Duration
 }
 
 // NewCleanProcessor constructs the processor. Any nil dependency disables its
-// sub-task (no-op) rather than panicking.
-func NewCleanProcessor(userIP UserIPPruner, roleAssign RoleAssignmentPruner, reversi OutdatedGamePruner, idGen CleanIDGenerator) *CleanProcessor {
-	return &CleanProcessor{userIP: userIP, roleAssign: roleAssign, reversi: reversi, idGen: idGen}
+// sub-task (no-op) rather than panicking. antennaThreshold <= 0 also disables
+// the antenna deactivate sub-task (matching upstream's `> 0` guard).
+func NewCleanProcessor(userIP UserIPPruner, roleAssign RoleAssignmentPruner, reversi OutdatedGamePruner, idGen CleanIDGenerator, antenna AntennaDeactivator, antennaThreshold time.Duration) *CleanProcessor {
+	return &CleanProcessor{
+		userIP:           userIP,
+		roleAssign:       roleAssign,
+		reversi:          reversi,
+		idGen:            idGen,
+		antenna:          antenna,
+		antennaThreshold: antennaThreshold,
+	}
 }
 
 // Handle implements the driver handler contract. Each sub-task logs and
@@ -88,6 +103,14 @@ func (p *CleanProcessor) Handle(_ context.Context, _ driver.Task) error {
 			slog.Warn("clean: delete outdated reversi games failed", "err", err)
 		} else if n > 0 {
 			slog.Info("clean: deleted outdated reversi games", "count", n)
+		}
+	}
+
+	if p.antenna != nil && p.antennaThreshold > 0 {
+		if n, err := p.antenna.DeactivateUnusedSince(now.Add(-p.antennaThreshold)); err != nil {
+			slog.Warn("clean: deactivate unused antennas failed", "err", err)
+		} else if n > 0 {
+			slog.Info("clean: deactivated unused antennas", "count", n)
 		}
 	}
 
