@@ -1742,3 +1742,144 @@ func TestProcess_AnnounceWithoutNotificationHook(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(body))
 }
+
+// findIngestedRemoteNote returns the single non-seed note ingested by a Create
+// Process call. Seed notes set up by a test live under their own keys; the
+// freshly ingested one carries the given remote URI.
+func findIngestedRemoteNote(t *testing.T, noteRepo *testutil.MockNoteRepository, uri string) *model.Note {
+	t.Helper()
+	n, err := noteRepo.FindByURI(uri)
+	require.NoError(t, err, "ingested note %s should be persisted", uri)
+	return n
+}
+
+// TestProcess_CreateNote_AudienceOnActivityDerivesVisibility seals the #1560
+// fix: a Create whose to/cc audience lives on the activity (not on the Note
+// object) must still derive the correct visibility. Before the fix, the Note
+// object's empty to/cc yielded "specified" regardless of the activity audience.
+func TestProcess_CreateNote_AudienceOnActivityDerivesVisibility(t *testing.T) {
+	cases := []struct {
+		name       string
+		activityTo string
+		activityCC string
+		want       model.NoteVisibility
+	}{
+		{
+			name:       "public_from_activity_to",
+			activityTo: `["https://www.w3.org/ns/activitystreams#Public"]`,
+			activityCC: `["https://remote.example/users/alice/followers"]`,
+			want:       model.NoteVisibilityPublic,
+		},
+		{
+			name:       "home_from_activity_to_cc",
+			activityTo: `["https://remote.example/users/alice/followers"]`,
+			activityCC: `["https://www.w3.org/ns/activitystreams#Public"]`,
+			want:       model.NoteVisibilityHome,
+		},
+		{
+			name:       "followers_from_activity_to",
+			activityTo: `["https://remote.example/users/alice/followers"]`,
+			activityCC: `[]`,
+			want:       model.NoteVisibilityFollowers,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, _, noteRepo := newProcessor(t, aliceActor)
+			noteURI := "https://remote.example/notes/aud" + string(rune('a'+i))
+			// Note object 自身には to/cc を一切載せない。audience は activity 側のみ。
+			body := []byte(`{
+				"type": "Create",
+				"actor": "https://remote.example/users/alice",
+				"to": ` + tc.activityTo + `,
+				"cc": ` + tc.activityCC + `,
+				"object": {
+					"type": "Note",
+					"id": "` + noteURI + `",
+					"attributedTo": "https://remote.example/users/alice",
+					"content": "hi"
+				}
+			}`)
+			require.NoError(t, p.Process(body))
+			note := findIngestedRemoteNote(t, noteRepo, noteURI)
+			assert.Equal(t, tc.want, note.Visibility)
+		})
+	}
+}
+
+// TestProcess_CreateNote_SpecifiedVisibleUserIDsFromActivityTo confirms that
+// for a "specified" note whose recipient URI is carried only on the activity
+// to, the unioned audience drives visibleUserIds resolution (#1560).
+func TestProcess_CreateNote_SpecifiedVisibleUserIDsFromActivityTo(t *testing.T) {
+	p, repo, _, noteRepo := newProcessor(t, aliceActor)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+	noteURI := "https://remote.example/notes/spec1"
+	// to に local user URI のみ (Public/followers 無し) → specified。
+	// recipient URI も activity 側にしか無い。
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"to": ["https://example.com/users/bob"],
+		"object": {
+			"type": "Note",
+			"id": "` + noteURI + `",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "dm"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	note := findIngestedRemoteNote(t, noteRepo, noteURI)
+	assert.Equal(t, model.NoteVisibilitySpecified, note.Visibility)
+	assert.Equal(t, []string{"bob"}, []string(note.VisibleUserIDs))
+}
+
+// TestProcess_CreateNote_AttributedToFilledFromActor verifies that a Note object
+// lacking attributedTo is no longer rejected as invalid: the activity actor is
+// used to fill it before ingest, matching upstream create() (#1560).
+func TestProcess_CreateNote_AttributedToFilledFromActor(t *testing.T) {
+	p, repo, _, noteRepo := newProcessor(t, aliceActor)
+	noteURI := "https://remote.example/notes/noattr1"
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"object": {
+			"type": "Note",
+			"id": "` + noteURI + `",
+			"content": "no attributedTo on object"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	note := findIngestedRemoteNote(t, noteRepo, noteURI)
+	// attributedTo を activity.actor から補ったので ingest は成功し、note は
+	// 解決済み actor (alice, generated ID) に紐づく。
+	require.NotEmpty(t, note.UserID)
+	alice := repo.Users[note.UserID]
+	require.NotNil(t, alice, "ingested note should belong to the resolved actor")
+	assert.Equal(t, "alice", alice.Username)
+	assert.Equal(t, model.NoteVisibilityPublic, note.Visibility)
+}
+
+// TestProcess_CreateNote_ObjectAudienceStillHonored is a non-regression guard:
+// when the Note object already carries to/cc and the activity does not, the
+// union is a no-op and visibility is unchanged (#1560).
+func TestProcess_CreateNote_ObjectAudienceStillHonored(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	noteURI := "https://remote.example/notes/objaud1"
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "` + noteURI + `",
+			"attributedTo": "https://remote.example/users/alice",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"],
+			"content": "object carries audience"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	note := findIngestedRemoteNote(t, noteRepo, noteURI)
+	assert.Equal(t, model.NoteVisibilityPublic, note.Visibility)
+}

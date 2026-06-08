@@ -1299,6 +1299,9 @@ func (s *Server) setupRoutes() {
 		iHandler.SetWebAuthn(webauthnSvc, userSecurityKeyRepo)
 	}
 	iHandler.SetSigninRepo(signinRepo)
+	// i/import-* の fileId 所有権検証 (#1555)。未配線だと fail-closed
+	// (NO_SUCH_FILE) になるため production では必ず wire する。
+	iHandler.SetDriveFileRepo(driveFileRepo)
 	// P4-6 (#166): i/authorized-apps, i/revoke-token, i/gallery/*, i/page-likes
 	iHandler.SetAccessTokenRepo(repository.NewAccessTokenRepository(s.db))
 	iHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))
@@ -1949,6 +1952,8 @@ func (s *Server) setupRoutes() {
 	// User lists (Phase 6)
 	userListHandler := apiuserlists.NewHandler(userListRepo, idGen)
 	userListHandler.SetRolePolicyProvider(roleService) // #1029: userListLimit / userEachUserListsLimit
+	userListHandler.SetUserRepo(userRepo)              // #1550: push NO_SUCH_USER check
+	userListHandler.SetBlockingRepo(blockingRepo)      // #1550: push YOU_HAVE_BEEN_BLOCKED check
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireAuth())
 	api.POST("/users/lists/create", userListHandler.Create, middleware.RequireAuth())
 	api.POST("/users/lists/show", userListHandler.Show, middleware.RequireAuth())
