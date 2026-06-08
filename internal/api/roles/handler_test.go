@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,6 +58,24 @@ func doPost(h func(echo.Context) error, body string) *httptest.ResponseRecorder 
 	c := e.NewContext(req, rec)
 	_ = h(c)
 	return rec
+}
+
+// viewerCtx bundles an echo.Context that carries an authenticated viewer with
+// its response recorder so mute/block/channel filter tests can drive Notes and
+// inspect the result.
+type viewerCtx struct {
+	ctx echo.Context
+	rec *httptest.ResponseRecorder
+}
+
+func newCtxWithViewer(body, viewerID string) viewerCtx {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: viewerID})
+	return viewerCtx{ctx: c, rec: rec}
 }
 
 func TestList_PublicOnly(t *testing.T) {
@@ -242,7 +261,7 @@ func TestNotes_NotPublic(t *testing.T) {
 
 func TestNotes_NilQuery(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	rec := doPost(h.Notes, `{"roleId":"r1"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var arr []any
@@ -252,7 +271,7 @@ func TestNotes_NilQuery(t *testing.T) {
 
 func TestNotes_Success(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	mock := &mockRoleNotesQuery{
 		Notes: []*model.Note{
 			{ID: "n1", UserID: "u1", Text: strPtr("hello"), Visibility: "public"},
@@ -266,9 +285,86 @@ func TestNotes_Success(t *testing.T) {
 	assert.Len(t, arr, 1)
 }
 
+// #1544: role が public でも isExplorable=false なら空配列を返す (notesQuery を
+// 呼ばずに早期 return する)。upstream notes.ts のガード。
+func TestNotes_NonExplorableReturnsEmpty(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: false}
+	mock := &mockRoleNotesQuery{
+		Notes: []*model.Note{
+			{ID: "n1", UserID: "u1", Text: strPtr("hello"), Visibility: "public"},
+		},
+	}
+	h.SetNotesQuery(mock)
+	rec := doPost(h.Notes, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var arr []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &arr))
+	assert.Empty(t, arr, "isExplorable=false role must return an empty note list")
+}
+
+// #1544: viewer が mute した user / viewer を block した user の note と、
+// viewer が mute した channel の note が roles/notes から除外されること。
+func TestNotes_MuteBlockChannelFiltered(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
+
+	muting := testutil.NewMockMutingRepository()
+	require.NoError(t, muting.Create(&model.Muting{ID: "m1", MuterID: "viewer", MuteeID: "muted"}))
+	blocking := testutil.NewMockBlockingRepository()
+	require.NoError(t, blocking.Create(&model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "viewer"}))
+	channelMuting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, channelMuting.Create(&model.ChannelMuting{UserID: "viewer", ChannelID: "ch-muted"}))
+	h.SetMuteBlockRepos(muting, blocking, channelMuting)
+
+	mutedCh := "ch-muted"
+	visibleCh := "ch-ok"
+	mock := &mockRoleNotesQuery{
+		Notes: []*model.Note{
+			{ID: "keep", UserID: "author", Text: strPtr("ok"), Visibility: "public"},
+			{ID: "muted-author", UserID: "muted", Text: strPtr("x"), Visibility: "public"},
+			{ID: "blocked", UserID: "blocker", Text: strPtr("x"), Visibility: "public"},
+			{ID: "muted-channel", UserID: "author", Text: strPtr("x"), Visibility: "public", ChannelID: &mutedCh},
+			{ID: "ok-channel", UserID: "author", Text: strPtr("x"), Visibility: "public", ChannelID: &visibleCh},
+		},
+	}
+	h.SetNotesQuery(mock)
+
+	c := newCtxWithViewer(`{"roleId":"r1"}`, "viewer")
+	require.NoError(t, h.Notes(c.ctx))
+	body := c.rec.Body.String()
+	assert.Contains(t, body, "keep")
+	assert.Contains(t, body, "ok-channel")
+	assert.NotContains(t, body, "muted-author", "note authored by a muted user must be dropped")
+	assert.NotContains(t, body, "blocked", "note authored by a user who blocked the viewer must be dropped")
+	assert.NotContains(t, body, "muted-channel", "note in a muted channel must be dropped")
+}
+
+// #1544 fail-closed: mute/block/channel set のロードでリポジトリエラーが出たら
+// silently note を漏らさず 500 を返すこと。
+func TestNotes_MuteBlockLoadError(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
+
+	blocking := testutil.NewMockBlockingRepository()
+	blocking.ExistsErr = assert.AnError // ListBlockerIDs もこのエラーで失敗する
+	h.SetMuteBlockRepos(testutil.NewMockMutingRepository(), blocking, testutil.NewMockChannelMutingRepository())
+
+	mock := &mockRoleNotesQuery{
+		Notes: []*model.Note{
+			{ID: "n1", UserID: "author", Text: strPtr("hello"), Visibility: "public"},
+		},
+	}
+	h.SetNotesQuery(mock)
+
+	c := newCtxWithViewer(`{"roleId":"r1"}`, "viewer")
+	require.NoError(t, h.Notes(c.ctx))
+	assert.Equal(t, http.StatusInternalServerError, c.rec.Code)
+}
+
 func TestNotes_QueryError(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	mock := &mockRoleNotesQuery{Err: assert.AnError}
 	h.SetNotesQuery(mock)
 	rec := doPost(h.Notes, `{"roleId":"r1"}`)
@@ -277,7 +373,7 @@ func TestNotes_QueryError(t *testing.T) {
 
 func TestNotes_DefaultLimit(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	mock := &mockRoleNotesQuery{}
 	h.SetNotesQuery(mock)
 	rec := doPost(h.Notes, `{"roleId":"r1","limit":0}`)
@@ -286,7 +382,7 @@ func TestNotes_DefaultLimit(t *testing.T) {
 
 func TestNotes_LimitClamped(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 	mock := &mockRoleNotesQuery{}
 	h.SetNotesQuery(mock)
 	rec := doPost(h.Notes, `{"roleId":"r1","limit":999}`)
@@ -309,7 +405,7 @@ func (stubBufferedReactions) GetBufferedMany(_ context.Context, _ []string) (map
 // setter は他 handler でも同じ pattern なので回帰検知の意味も兼ねる (#739)。
 func TestSettersWireOptionalDeps(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true}
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Public", IsPublic: true, IsExplorable: true}
 
 	instanceRepo := testutil.NewMockInstanceRepository()
 	h.SetInstanceRepo(instanceRepo)

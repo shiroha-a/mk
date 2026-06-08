@@ -61,6 +61,26 @@ func (m *MockBlockingRepository) ListByBlocker(blockerID, sinceID, untilID strin
 	return paginateBlockings(rows, sinceID, untilID, limit, offset), nil
 }
 
+// ListBlockerIDs returns blockerIDs of every block row whose blockeeId equals
+// the given user. Mirrors the production blocking repo used by note-list
+// endpoints to drop notes from users who blocked the viewer (#1544). ExistsErr
+// is reused to exercise the fail-closed path on repository error.
+func (m *MockBlockingRepository) ListBlockerIDs(blockeeID string) ([]string, error) {
+	if blockeeID == "" {
+		return nil, nil
+	}
+	if m.ExistsErr != nil {
+		return nil, m.ExistsErr
+	}
+	var ids []string
+	for _, b := range m.Blockings {
+		if b.BlockeeID == blockeeID {
+			ids = append(ids, b.BlockerID)
+		}
+	}
+	return ids, nil
+}
+
 // MockMutingRepository is a test double for repository.MutingRepository.
 type MockMutingRepository struct {
 	Mutings map[string]*model.Muting
