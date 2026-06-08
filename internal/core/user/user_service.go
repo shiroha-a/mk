@@ -397,6 +397,11 @@ type UpdateInput struct {
 	// 受け付けるのは "everyone" / "followers" / "following" / "mutual" / "none"
 	// (CherryPick / Misskey TS と同じ enum)。検証は呼び出し側 (#692)。
 	ChatScope *string
+	// FollowingVisibility / FollowersVisibility はフォロー/フォロワー一覧の
+	// 公開範囲 (#1546)。受け付けるのは "public" / "followers" / "private"
+	// (Misskey TS と同じ enum)。enum 検証は呼び出し側 (api/i ハンドラ) で行う。
+	FollowingVisibility *string
+	FollowersVisibility *string
 	// Room は jsonb 列に書き込む生バイト列。nil の場合は更新しない。
 	// 呼び出し側で JSON として妥当であることを保証する必要がある。
 	Room *json.RawMessage
@@ -536,6 +541,14 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 	}
 	if in.ChatScope != nil {
 		userFields["chatScope"] = *in.ChatScope
+	}
+	// followingVisibility / followersVisibility は user_profile 側の enum 列
+	// (#1546)。enum 検証はハンドラ側で済んでいる前提で raw string を書く。
+	if in.FollowingVisibility != nil {
+		profileFields["followingVisibility"] = *in.FollowingVisibility
+	}
+	if in.FollowersVisibility != nil {
+		profileFields["followersVisibility"] = *in.FollowersVisibility
 	}
 	if in.Room != nil {
 		// GORM は map で渡された値を jsonb 列に直接書き込む。

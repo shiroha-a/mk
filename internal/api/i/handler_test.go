@@ -1045,6 +1045,97 @@ func TestUpdate_ChatScope_OmittedIsNoop(t *testing.T) {
 	assert.Equal(t, "followers", repo.Users["user1"].ChatScope)
 }
 
+// #1546: followingVisibility / followersVisibility を i/update で受け付け、
+// user_profile の対応列に persist して response にも反映する。
+func TestUpdate_FollowVisibility_Persisted(t *testing.T) {
+	cases := []string{"public", "followers", "private"}
+	for _, v := range cases {
+		t.Run(v, func(t *testing.T) {
+			h, repo, _, _ := newTestHandler(t)
+			user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+			repo.Users["user1"] = user
+			repo.Profiles["user1"] = &model.UserProfile{
+				UserID:              "user1",
+				Fields:              datatypes.JSON([]byte("[]")),
+				FollowingVisibility: model.FollowingVisibilityPublic,
+				FollowersVisibility: model.FollowingVisibilityPublic,
+			}
+
+			rec := post(h.Update, `{"followingVisibility":"`+v+`","followersVisibility":"`+v+`"}`, user)
+			assert.Equal(t, http.StatusOK, rec.Code)
+			p := repo.Profiles["user1"]
+			assert.Equal(t, model.FollowingVisibility(v), p.FollowingVisibility)
+			assert.Equal(t, model.FollowingVisibility(v), p.FollowersVisibility)
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, v, body["followingVisibility"])
+			assert.Equal(t, v, body["followersVisibility"])
+		})
+	}
+}
+
+// 片方だけ指定したときに、指定した側だけ更新され他方は不変であること。
+func TestUpdate_FollowVisibility_PartialUpdate(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:              "user1",
+		Fields:              datatypes.JSON([]byte("[]")),
+		FollowingVisibility: model.FollowingVisibilityPublic,
+		FollowersVisibility: model.FollowingVisibilityPublic,
+	}
+
+	rec := post(h.Update, `{"followersVisibility":"private"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	p := repo.Profiles["user1"]
+	assert.Equal(t, model.FollowingVisibilityPrivate, p.FollowersVisibility)
+	assert.Equal(t, model.FollowingVisibilityPublic, p.FollowingVisibility, "followingVisibility は不変であること")
+}
+
+// enum 外の値は fail-close で INVALID_PARAM を返し、列を更新しないこと。
+func TestUpdate_FollowVisibility_InvalidValue(t *testing.T) {
+	for _, field := range []string{"followingVisibility", "followersVisibility"} {
+		t.Run(field, func(t *testing.T) {
+			h, repo, _, _ := newTestHandler(t)
+			user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+			repo.Users["user1"] = user
+			repo.Profiles["user1"] = &model.UserProfile{
+				UserID:              "user1",
+				Fields:              datatypes.JSON([]byte("[]")),
+				FollowingVisibility: model.FollowingVisibilityFollowers,
+				FollowersVisibility: model.FollowingVisibilityFollowers,
+			}
+
+			rec := post(h.Update, `{"`+field+`":"NEVER_VALID"}`, user)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			p := repo.Profiles["user1"]
+			assert.Equal(t, model.FollowingVisibilityFollowers, p.FollowingVisibility, "不正値で update されないこと")
+			assert.Equal(t, model.FollowingVisibilityFollowers, p.FollowersVisibility, "不正値で update されないこと")
+		})
+	}
+}
+
+// JSON に含まれない update は visibility 列を変更しないこと。
+func TestUpdate_FollowVisibility_OmittedIsNoop(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:              "user1",
+		Fields:              datatypes.JSON([]byte("[]")),
+		FollowingVisibility: model.FollowingVisibilityFollowers,
+		FollowersVisibility: model.FollowingVisibilityPrivate,
+	}
+
+	rec := post(h.Update, `{"name":"new"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	p := repo.Profiles["user1"]
+	assert.Equal(t, model.FollowingVisibilityFollowers, p.FollowingVisibility)
+	assert.Equal(t, model.FollowingVisibilityPrivate, p.FollowersVisibility)
+}
+
 // #956: i/update で fields を accept して user_profile.fields に persist する。
 // trim と空 entry 排除は core/user 側で行う。本 test は handler 経由で
 // fields が core まで届くことを確認する。
