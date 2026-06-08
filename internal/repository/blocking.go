@@ -13,6 +13,11 @@ type BlockingRepository interface {
 	Exists(blockerID, blockeeID string) (bool, error)
 	// ListByBlocker supports cursor (sinceID/untilID) and offset pagination.
 	ListByBlocker(blockerID, sinceID, untilID string, limit, offset int) ([]*model.Blocking, error)
+	// ListBlockerIDs returns the blockerIDs of every block row whose blockeeId
+	// equals the given user. Used by note-list endpoints (antennas/notes,
+	// roles/notes) to drop notes authored by someone who has blocked the
+	// viewer, matching upstream generateBlockedUserQueryForNotes (#1544).
+	ListBlockerIDs(blockeeID string) ([]string, error)
 }
 
 type blockingRepository struct {
@@ -67,4 +72,17 @@ func (r *blockingRepository) ListByBlocker(blockerID, sinceID, untilID string, l
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *blockingRepository) ListBlockerIDs(blockeeID string) ([]string, error) {
+	if blockeeID == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.Blocking{}).
+		Where(`"blockeeId" = ?`, blockeeID).
+		Pluck(`"blockerId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
