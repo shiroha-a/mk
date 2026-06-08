@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: 連合受信した Create(Note) の可視性導出で activity の `to`/`cc` が Note object に union されておらず、可視性 (public/home/followers/specified) と `visibleUserIds` が本家とずれていた問題を修正 (issue #1560)。本家 `ApNoteService` は inbound Create(Note) を取り込む際、activity の `to`/`cc` を Note object の `to`/`cc` に union してから audience を導出する。mk-go は Note object 自身の `to`/`cc` のみ見て activity 側の audience を無視していたため、連合 note の可視性を誤判定しうる。本家準拠で activity audience を合成してから導出するよう修正。
+
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
 
 - Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。
