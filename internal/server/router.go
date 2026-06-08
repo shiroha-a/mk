@@ -1811,6 +1811,11 @@ func (s *Server) setupRoutes() {
 	// 4. 既存サービスへ publisher を注入する。これらはいずれも nil 安全な
 	//    setter で、未設定なら何もしない (テスト互換)。
 	timelineFanoutHook.SetStreamingPublisher(notePublisher)
+	// antenna realtime 配信 (#1573): FanoutHook と同じ NotePublisher を共有し、
+	// OnNoteCreated で match した note を antennaTimeline:<id> へ publish させる。
+	// これが無いと WS antenna channel は live note を受信しない (Stream XAdd
+	// のみで pubsub publish が欠落していた)。
+	antennaService.SetStreamingPublisher(notePublisher)
 	notificationService.SetStreamingPublisher(notificationPublisher)
 	notificationService.SetMainStreamPublisher(mainStreamPublisher)
 	notificationService.SetPacker(notificationPublisher)

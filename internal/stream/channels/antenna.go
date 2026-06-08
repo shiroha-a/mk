@@ -36,6 +36,7 @@ type AntennaChannel struct {
 	ctx    stream.ChannelContext
 	owners AntennaOwnerLookup
 	topic  string
+	filter noteFilter
 }
 
 func (c *AntennaChannel) Init(params json.RawMessage) error {
@@ -67,12 +68,29 @@ func (c *AntennaChannel) Init(params json.RawMessage) error {
 	if err != nil || a == nil || a.UserID != user.ID {
 		return stream.ErrInvalidParams
 	}
+	// 所有者ゲート通過後に他チャンネル同様 connect param の filter を読む
+	// (withRenotes / withFiles)。hardmute / 純リノート / file filter は
+	// OnRedisEvent の shouldEmit で適用する。
+	c.filter = parseNoteFilter(params)
 	c.topic = "antennaTimeline:" + p.AntennaID
 	c.ctx.Subscribe(c.topic)
 	return nil
 }
 
 func (c *AntennaChannel) OnRedisEvent(payload []byte) {
+	// per-subscriber 可視性 re-filter (#1573 課題2 / #1549)。push 時点の owner
+	// CanSeeNote (#1464) は subscriber == owner を前提に gate するが、push 後に
+	// 著者が followers 化 / owner が unfollow した stale-narrowing はカバー
+	// しない。fail-closed: 非可視 / 壊れた payload を drop する。
+	if !streamNoteVisibleForViewer(payload, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
+		return
+	}
+	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
+		return
+	}
+	// embedded renote/reply の per-viewer 可視性 gate (#1536)。絶対に消さない:
+	// 消すと non-visible な引用/返信元が top-level antenna note 経由で漏れる
+	// IDOR を再 open する。
 	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }

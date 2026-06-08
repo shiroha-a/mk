@@ -45,6 +45,15 @@ func streamKey(antennaID string) string {
 	return "antennaTimeline:" + antennaID
 }
 
+// StreamingPublisher publishes a matched antenna note to the WebSocket
+// streaming pub/sub topic so that live `antenna` channel subscribers receive a
+// push. パッケージ間の循環依存を避けるため interface で受け取る (実装は
+// internal/stream.NotePublisher)。topic は streamKey(antennaID) で生成する
+// "antennaTimeline:<id>" 論理名で、AntennaChannel が Subscribe する topic と一致する。
+type StreamingPublisher interface {
+	PublishNote(topic string, n *model.Note, author *model.User)
+}
+
 // Service provides antenna CRUD plus matchNote / OnNoteCreated push.
 type Service struct {
 	repo          repository.AntennaRepository
@@ -58,6 +67,9 @@ type Service struct {
 	// rolePolicyProvider は Create で antennaLimit gate に使う (#1029)。
 	// nil 時は gate skip (旧挙動互換)。
 	rolePolicyProvider RolePolicyProvider
+	// publisher は match した note を pubsub topic へ publish する (#1573)。
+	// nil 時は Redis Stream への XAdd のみ行い realtime 配信は skip (旧挙動)。
+	publisher StreamingPublisher
 }
 
 // RolePolicyProvider abstracts role-policy lookup for antenna count limits (#1029).
@@ -109,6 +121,16 @@ func (s *Service) SetUserListRepo(r repository.UserListRepository) {
 // unread tracking (Redis timeline is unaffected).
 func (s *Service) SetUnreadRepo(r repository.AntennaNoteUnreadRepository) {
 	s.unreadRepo = r
+}
+
+// SetStreamingPublisher attaches a StreamingPublisher invoked alongside the
+// Redis stream XAdd in OnNoteCreated so that live `antenna` channel subscribers
+// receive a push (#1573). Without it the per-antenna Redis Stream is still
+// written (so REST `antennas/notes` works) but no pub/sub publish happens and
+// realtime delivery is silently disabled. nil-safe: unset disables only the
+// pub/sub publish.
+func (s *Service) SetStreamingPublisher(p StreamingPublisher) {
+	s.publisher = p
 }
 
 // SetClock overrides the time source. Intended for tests.
@@ -374,6 +396,18 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 			continue
 		}
 		_ = s.pushNote(context.Background(), a.ID, n.ID, now)
+		// realtime 配信 (#1573): Redis Stream への XAdd (= REST `antennas/notes`
+		// 用) とは別に、pubsub topic "antennaTimeline:<id>" へ packed note を
+		// publish する。Stream と Pub/Sub は別プリミティブで、AntennaChannel は
+		// 後者を Subscribe しているため、これが無いと WS antenna channel に
+		// live note が1件も届かない。本家 AntennaService.addNoteToAntenna が
+		// redisForTimelines.xadd と globalEventService.publishAntennaStream の
+		// 両系統を呼ぶのと一致させる。可視性は push 時点で matchNote ->
+		// CanSeeNote (#1464) で owner 視点 gate 済みだが、subscriber 側でも
+		// stale-narrowing を OnRedisEvent で re-filter する (#1573 課題2)。
+		if s.publisher != nil {
+			s.publisher.PublishNote(streamKey(a.ID), n, author)
+		}
 		// unread tracking: antenna の所有者に対して未読 row を挿入する。
 		// Self-authored note は未読扱いしない (TS本家の挙動に合わせる)。
 		if s.unreadRepo != nil && a.UserID != author.ID {

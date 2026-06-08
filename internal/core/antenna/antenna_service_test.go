@@ -1135,3 +1135,106 @@ func TestMatchNote_HomeSource_PublicNote_SingleExists(t *testing.T) {
 	assert.Equal(t, 1, counting.existsCalls,
 		"public visibility skips CanSeeNote Exists; matchSource home performs the single call")
 }
+
+// --- StreamingPublisher (#1573) -------------------------------------------
+
+// stubStreamingPublisher records PublishNote calls so OnNoteCreated's pub/sub
+// publish can be asserted without a real stream layer.
+type stubStreamingPublisher struct {
+	calls []publishCall
+}
+
+type publishCall struct {
+	topic  string
+	noteID string
+	author string
+}
+
+func (p *stubStreamingPublisher) PublishNote(topic string, n *model.Note, author *model.User) {
+	pc := publishCall{topic: topic}
+	if n != nil {
+		pc.noteID = n.ID
+	}
+	if author != nil {
+		pc.author = author.ID
+	}
+	p.calls = append(p.calls, pc)
+}
+
+// TestOnNoteCreated_PublishesMatchedNote covers #1573 課題1: a matched note is
+// published to the antennaTimeline:<id> pub/sub topic (= streamKey) alongside
+// the Redis stream XAdd, so the WS antenna channel receives live notes.
+func TestOnNoteCreated_PublishesMatchedNote(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", [][]string{{"misskey"}})
+	pub := &stubStreamingPublisher{}
+	svc.SetStreamingPublisher(pub)
+
+	text := "hello misskey world"
+	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic}
+	author := &model.User{ID: "author", Username: "alice"}
+	svc.OnNoteCreated(n, author)
+
+	require.Len(t, pub.calls, 1, "matched note must be published once")
+	assert.Equal(t, "antennaTimeline:a1", pub.calls[0].topic,
+		"publish topic must equal streamKey so AntennaChannel.Subscribe matches")
+	assert.Equal(t, "n1", pub.calls[0].noteID)
+	assert.Equal(t, "author", pub.calls[0].author)
+}
+
+// TestOnNoteCreated_NoMatchDoesNotPublish guards that a non-matching note is
+// neither pushed to the stream nor published to pub/sub.
+func TestOnNoteCreated_NoMatchDoesNotPublish(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", [][]string{{"missing"}})
+	pub := &stubStreamingPublisher{}
+	svc.SetStreamingPublisher(pub)
+
+	text := "hello world"
+	svc.OnNoteCreated(
+		&model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic},
+		&model.User{ID: "author", Username: "alice"},
+	)
+	assert.Empty(t, pub.calls, "non-matching note must not be published")
+}
+
+// TestOnNoteCreated_PublishesToEachMatchedAntenna verifies one publish per
+// matched antenna, each to its own streamKey topic.
+func TestOnNoteCreated_PublishesToEachMatchedAntenna(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", [][]string{{"misskey"}})
+	repo.Antennas["a2"] = makeAntenna(t, "a2", "u2", [][]string{{"misskey"}})
+	repo.Antennas["a3"] = makeAntenna(t, "a3", "u3", [][]string{{"other"}}) // no match
+	pub := &stubStreamingPublisher{}
+	svc.SetStreamingPublisher(pub)
+
+	text := "hello misskey"
+	svc.OnNoteCreated(
+		&model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic},
+		&model.User{ID: "author", Username: "alice"},
+	)
+
+	topics := make([]string, 0, len(pub.calls))
+	for _, c := range pub.calls {
+		topics = append(topics, c.topic)
+	}
+	assert.ElementsMatch(t, []string{"antennaTimeline:a1", "antennaTimeline:a2"}, topics,
+		"each matched antenna gets a publish to its own streamKey topic; non-matching is skipped")
+}
+
+// TestOnNoteCreated_NilPublisherIsNoOp guards that an unwired publisher leaves
+// the stream XAdd path intact (REST `antennas/notes` still works).
+func TestOnNoteCreated_NilPublisherIsNoOp(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", [][]string{{"misskey"}})
+	// publisher 未配線でも panic せず stream XAdd は行われる。
+
+	text := "hello misskey world"
+	svc.OnNoteCreated(
+		&model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic},
+		&model.User{ID: "author", Username: "alice"},
+	)
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"n1"}, rows)
+}

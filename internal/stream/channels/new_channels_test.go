@@ -170,11 +170,96 @@ func TestAntenna_Lifecycle(t *testing.T) {
 	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
 	assert.Equal(t, []string{"antennaTimeline:a1"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	// #1573: OnRedisEvent now runs the canonical per-subscriber pipeline, so a
+	// public note passes the visibility + filter gates and is sent.
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 
 	ch.Dispose()
 	assert.Equal(t, []string{"antennaTimeline:a1"}, ctx.unsubs)
+}
+
+// --- Antenna per-subscriber re-filter (#1573 課題2) ---
+
+// TestAntenna_FollowersVisibilityGate is the #1573 stale-narrowing regression
+// guard: a note that was visible to the owner at push time but is followers-only
+// must be dropped per-subscriber when the viewer no longer follows the author.
+func TestAntenna_FollowersVisibilityGate(t *testing.T) {
+	t.Run("non-follower dropped", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{} // alice does not follow author
+		ch := newAntennaCh(ctx, "alice")
+		require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+		ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
+		assert.Empty(t, ctx.sentType, "followers note from a no-longer-followed author must be dropped")
+	})
+	t.Run("follower emitted", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{"author": false}
+		ch := newAntennaCh(ctx, "alice")
+		require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+		ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+		assert.Equal(t, "note", ctx.sentType[0])
+	})
+	t.Run("self-authored emitted with nil snapshot", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ch := newAntennaCh(ctx, "alice")
+		require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+		ch.OnRedisEvent([]byte(`{"id":"n1","userId":"alice","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+	})
+}
+
+// TestAntenna_MalformedDropped guards fail-closed on an unparseable payload.
+func TestAntenna_MalformedDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := newAntennaCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+	ch.OnRedisEvent([]byte(`{not json`))
+	assert.Empty(t, ctx.sentType, "malformed payload must be dropped (fail-closed)")
+}
+
+// TestAntenna_HardMuteDropped verifies the shouldEmit hardmute gate fires for
+// an antenna subscriber whose hardMutedWords match the note (#1573 課題2).
+func TestAntenna_HardMuteDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.hardMuteRules = []byte(`[["spam"]]`)
+	ch := newAntennaCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public","text":"this is spam"}`))
+	assert.Empty(t, ctx.sentType, "note matching a hardMutedWord must be dropped")
+}
+
+// TestAntenna_FilteredPureRenote verifies the shouldEmit renote filter applies
+// to the antenna channel via the connect param withRenotes=false.
+func TestAntenna_FilteredPureRenote(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := newAntennaCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1","withRenotes":false}`)))
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public","renoteId":"r1","fileIds":[]}`))
+	assert.Empty(t, ctx.sentType, "pure renote must be dropped when withRenotes=false")
+}
+
+// TestAntenna_HideEmbedsPreserved guards that the #1536 embedded-note IDOR gate
+// stays applied in the antenna pipeline: a non-visible embedded renote must be
+// blanked before Send rather than leaked through the antenna feed.
+func TestAntenna_HideEmbedsPreserved(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.followingSnap = map[string]bool{} // alice follows nobody
+	ch := newAntennaCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
+	// Top-level public note carrying a followers-only renote from an author
+	// alice does not follow. The top-level passes the visibility gate, but the
+	// embedded renote must be blanked by hideEmbeds.
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public","text":"top",` +
+		`"renote":{"id":"r1","userId":"other","visibility":"followers","text":"secret"}}`))
+	require.Len(t, ctx.sentType, 1)
+	body, ok := ctx.sentBody[0].(json.RawMessage)
+	require.True(t, ok)
+	assert.NotContains(t, string(body), "secret",
+		"non-visible embedded renote text must be blanked (hideEmbeds #1536 must stay applied)")
 }
 
 func TestAntenna_NoAuth(t *testing.T) {
