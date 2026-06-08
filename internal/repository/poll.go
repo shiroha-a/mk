@@ -22,6 +22,12 @@ type PollRepository interface {
 	// ticker scans skip it. idempotent — calling twice with the same time is
 	// harmless.
 	MarkNotified(noteID string, t time.Time) error
+	// ListRecommendation returns note ids of local public unexpired polls the
+	// viewer has not authored, not voted on, and whose author is not in
+	// mutedUserIDs, optionally excluding polls posted to excludeChannelIDs.
+	// Ordered by noteId DESC, paginated by limit/offset. Mirrors upstream
+	// notes/polls/recommendation (#1538).
+	ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error)
 }
 
 type pollRepository struct {
@@ -79,4 +85,36 @@ func (r *pollRepository) MarkNotified(noteID string, t time.Time) error {
 	return r.db.Model(&model.Poll{}).
 		Where(`"noteId" = ?`, noteID).
 		Update("notifiedAt", t).Error
+}
+
+// ListRecommendation implements the upstream notes/polls/recommendation query:
+// local (userHost IS NULL) public unexpired polls not authored by the viewer,
+// not already voted on (NOT EXISTS poll_vote), authored by a non-muted user,
+// optionally excluding given channels; ordered by noteId DESC. OR-conditions are
+// parenthesized so they bind correctly against the other ANDed clauses.
+func (r *pollRepository) ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	q := r.db.Model(&model.Poll{}).
+		Where(`"userHost" IS NULL`).
+		Where(`"userId" <> ?`, viewerID).
+		Where(`"noteVisibility" = ?`, string(model.NoteVisibilityPublic)).
+		Where(`("expiresAt" IS NULL OR "expiresAt" > ?)`, time.Now()).
+		Where(`NOT EXISTS (SELECT 1 FROM "poll_vote" pv WHERE pv."noteId" = "poll"."noteId" AND pv."userId" = ?)`, viewerID)
+	if len(mutedUserIDs) > 0 {
+		q = q.Where(`"userId" NOT IN ?`, mutedUserIDs)
+	}
+	if len(excludeChannelIDs) > 0 {
+		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, excludeChannelIDs)
+	}
+	q = q.Order(`"noteId" DESC`).Limit(limit)
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	var ids []string
+	if err := q.Pluck(`"noteId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

@@ -162,3 +162,124 @@ func TestHideEmbedsForViewer_UnparseableCreatedAtFailsClosed(t *testing.T) {
 		t.Error("unparseable createdAt must fail CLOSED on absolute makeNotesHiddenBefore")
 	}
 }
+
+func hnBool(b bool) *bool { return &b }
+func hnInt(v int) *int    { return &v }
+
+// tlStream builds a marshalable top-level note with author prefs on its UserLite.
+func tlStream(id, author, vis, createdAt string, user entity.UserLite) entity.NoteEntity {
+	user.ID = author
+	return entity.NoteEntity{
+		ID: id, UserID: author, CreatedAt: createdAt, User: user, Visibility: vis,
+		Text: sptr("top body"), FileIDs: []string{}, Files: []any{},
+		VisibleUserIDs: []string{}, Mentions: []string{},
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+const streamPastWindow = "2020-01-01T00:00:00.000Z"
+
+func TestHideTopLevelForViewer_PublicVerbatim(t *testing.T) {
+	payload := mustJSON(t, tlStream("n", "author", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{}))
+	out := hideEmbedsForViewer(payload, nil, nil, hideNowMs)
+	if !bytes.Equal(out, payload) {
+		t.Error("plain public top-level note must be forwarded verbatim")
+	}
+}
+
+// TestHideTopLevelForViewer_IntrinsicNotBlanked: intrinsic followers/specified
+// top-level are owned by the channel fan-out, NOT this prefs gate (#1568/#799).
+func TestHideTopLevelForViewer_IntrinsicNotBlanked(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	for _, vis := range []string{"followers", "specified"} {
+		payload := mustJSON(t, tlStream("n", "author", vis, "2026-01-02T03:04:05.000Z", entity.UserLite{}))
+		out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+		if !bytes.Equal(out, payload) {
+			t.Errorf("intrinsic %s top-level must NOT be blanked by the prefs gate", vis)
+		}
+	}
+}
+
+func TestHideTopLevelForViewer_FollowersOnlyBeforeDowngrade(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	note := tlStream("n", "author", "public", streamPastWindow, entity.UserLite{MakeNotesFollowersOnlyBefore: hnInt(-3600)})
+
+	t.Run("non-follower blanked", func(t *testing.T) {
+		payload := mustJSON(t, note)
+		out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+		var got entity.NoteEntity
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.IsHidden || got.Text != nil {
+			t.Error("downgraded public top-level note must be blanked for non-follower")
+		}
+	})
+	t.Run("follower verbatim", func(t *testing.T) {
+		payload := mustJSON(t, note)
+		out := hideEmbedsForViewer(payload, viewer, map[string]bool{"author": true}, hideNowMs)
+		if !bytes.Equal(out, payload) {
+			t.Error("follower must see the downgraded note -> verbatim")
+		}
+	})
+}
+
+func TestHideTopLevelForViewer_RequireSigninAnon(t *testing.T) {
+	payload := mustJSON(t, tlStream("n", "author", "public", streamPastWindow, entity.UserLite{RequireSigninToViewContents: hnBool(true)}))
+	out := hideEmbedsForViewer(payload, nil, nil, hideNowMs)
+	var got entity.NoteEntity
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsHidden {
+		t.Error("requireSignin must blank a top-level note for an anonymous viewer")
+	}
+}
+
+func TestHideTopLevelForViewer_OwnNoteVerbatim(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	payload := mustJSON(t, tlStream("n", "viewer", "public", streamPastWindow, entity.UserLite{MakeNotesHiddenBefore: hnInt(-1)}))
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+	if !bytes.Equal(out, payload) {
+		t.Error("author must always see their own top-level note -> verbatim")
+	}
+}
+
+// TestHideTopLevelForViewer_CombinedTopAndEmbed: top-level prefs + depth-2 embed
+// blanked together in one re-marshal.
+func TestHideTopLevelForViewer_CombinedTopAndEmbed(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	parent := tlStream("parent", "author", "public", streamPastWindow, entity.UserLite{MakeNotesHiddenBefore: hnInt(-1)})
+	emb := embed("followers", "embedauthor", nil)
+	parent.Renote = &emb
+	payload := mustJSON(t, parent)
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+	var got entity.NoteEntity
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsHidden {
+		t.Error("top-level note must be blanked (makeNotesHiddenBefore)")
+	}
+	if got.Renote == nil || !got.Renote.IsHidden {
+		t.Error("depth-2 followers embed must be blanked for non-follower")
+	}
+}
+
+func TestHideTopLevelForViewer_InputBytesUnchanged(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	payload := mustJSON(t, tlStream("n", "author", "public", streamPastWindow, entity.UserLite{MakeNotesHiddenBefore: hnInt(-1)}))
+	cp := append([]byte(nil), payload...)
+	_ = hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs) // hide path
+	if !bytes.Equal(payload, cp) {
+		t.Error("top-level hide path must not mutate the shared input buffer")
+	}
+}

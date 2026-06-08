@@ -555,9 +555,15 @@ func (s stubUserPacker) PackUserByID(_ string) (map[string]any, bool) {
 	return s.out, true
 }
 
-type stubNotePacker struct{ out map[string]any }
+type stubNotePacker struct {
+	out          map[string]any
+	gotViewerIDs *[]string
+}
 
-func (s stubNotePacker) PackNoteByID(_ string) (map[string]any, bool) {
+func (s stubNotePacker) PackNoteByID(_, viewerID string) (map[string]any, bool) {
+	if s.gotViewerIDs != nil {
+		*s.gotViewerIDs = append(*s.gotViewerIDs, viewerID)
+	}
 	if s.out == nil {
 		return nil, false
 	}
@@ -586,6 +592,26 @@ func TestHook_WebPushPushedAfterCreate(t *testing.T) {
 	assert.NotNil(t, body["user"])
 	assert.NotNil(t, body["note"])
 	assert.NotNil(t, body["createdAt"])
+}
+
+// TestHook_WebPushNoteGatedByRecipient verifies buildPushBody threads the
+// RECIPIENT (notifiee) id into the note packer so the embedded note is gated by
+// the push recipient's visibility (#1572), not the notifier's.
+func TestHook_WebPushNoteGatedByRecipient(t *testing.T) {
+	h, _, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+
+	pub := &stubWebPushPublisher{}
+	h.SetWebPushPublisher(pub)
+	var viewerIDs []string
+	h.SetPackers(
+		stubUserPacker{out: map[string]any{"id": "bob"}},
+		stubNotePacker{out: map[string]any{"id": "n1"}, gotViewerIDs: &viewerIDs},
+	)
+
+	h.OnReactionCreated("alice", "bob", "n1", "\U0001F44D") // alice = recipient, bob = reactor
+	require.Len(t, pub.calls, 1)
+	require.Equal(t, []string{"alice"}, viewerIDs, "note packer must be gated by the recipient (notifiee), not the notifier")
 }
 
 func TestHook_WebPushWithChoiceField(t *testing.T) {
