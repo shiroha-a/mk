@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS "IDX_6dd314e96806b7df65ddadff72";
+ALTER TABLE "channel_muting" DROP COLUMN IF EXISTS "expiresAt";

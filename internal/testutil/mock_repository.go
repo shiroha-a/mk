@@ -6548,9 +6548,10 @@ func (m *MockChannelMutingRepository) Delete(userID, channelID string) error {
 }
 
 func (m *MockChannelMutingRepository) ListByUser(userID string) ([]*model.ChannelMuting, error) {
+	now := time.Now()
 	var result []*model.ChannelMuting
 	for _, mut := range m.Mutings {
-		if mut.UserID == userID {
+		if mut.UserID == userID && (mut.ExpiresAt == nil || mut.ExpiresAt.After(now)) {
 			result = append(result, mut)
 		}
 	}
@@ -6558,8 +6559,23 @@ func (m *MockChannelMutingRepository) ListByUser(userID string) ([]*model.Channe
 }
 
 func (m *MockChannelMutingRepository) Exists(userID, channelID string) (bool, error) {
-	_, ok := m.Mutings[userID+":"+channelID]
-	return ok, nil
+	mut, ok := m.Mutings[userID+":"+channelID]
+	if !ok {
+		return false, nil
+	}
+	return mut.ExpiresAt == nil || mut.ExpiresAt.After(time.Now()), nil
+}
+
+// DeleteExpired removes channel mutes whose ExpiresAt has passed.
+func (m *MockChannelMutingRepository) DeleteExpired(now time.Time) (int64, error) {
+	var deleted int64
+	for k, mut := range m.Mutings {
+		if mut.ExpiresAt != nil && mut.ExpiresAt.Before(now) {
+			delete(m.Mutings, k)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 // MockClipFavoriteRepository is a test double for repository.ClipFavoriteRepository.

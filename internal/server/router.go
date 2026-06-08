@@ -654,8 +654,9 @@ func (s *Server) setupRoutes() {
 	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfg)
 	s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
 
-	// Expired-mute prune (#1563): scheduler の cron (*/5) が enqueue する。
-	checkExpiredMutingsProcessor := processors.NewCheckExpiredMutingsProcessor(mutingRepo)
+	// Expired-mute prune (#1563 / #1603): scheduler の cron (*/5) が enqueue する。
+	// user mute と channel mute の両方の期限切れ行を prune する。
+	checkExpiredMutingsProcessor := processors.NewCheckExpiredMutingsProcessor(mutingRepo, channelMutingRepo)
 	s.queueServer.Handle(queue.TaskTypeCheckExpiredMutings, checkExpiredMutingsProcessor.Handle)
 
 	// Daily generic clean (#1563): scheduler の cron (0 0 * * *) が enqueue する。

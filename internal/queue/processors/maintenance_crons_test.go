@@ -24,18 +24,20 @@ func (f *fakeMutePruner) DeleteExpired(_ time.Time) (int64, error) {
 }
 
 func TestCheckExpiredMutings_Prunes(t *testing.T) {
-	p := &fakeMutePruner{}
-	proc := NewCheckExpiredMutingsProcessor(p)
+	user := &fakeMutePruner{}
+	channel := &fakeMutePruner{}
+	proc := NewCheckExpiredMutingsProcessor(user, channel)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
-	assert.True(t, p.called)
+	assert.True(t, user.called, "user mute を prune")
+	assert.True(t, channel.called, "channel mute を prune")
 }
 
-func TestCheckExpiredMutings_NilRepoNoOp(t *testing.T) {
-	require.NoError(t, NewCheckExpiredMutingsProcessor(nil).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+func TestCheckExpiredMutings_NilReposNoOp(t *testing.T) {
+	require.NoError(t, NewCheckExpiredMutingsProcessor(nil, nil).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
 }
 
 func TestCheckExpiredMutings_ErrorSwallowed(t *testing.T) {
-	proc := NewCheckExpiredMutingsProcessor(&fakeMutePruner{err: errors.New("boom")})
+	proc := NewCheckExpiredMutingsProcessor(&fakeMutePruner{err: errors.New("boom")}, &fakeMutePruner{err: errors.New("boom2")})
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}), "失敗しても success 扱い")
 }
 
