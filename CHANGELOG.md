@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix(security): `/api/users/lists/push` がメンバー追加前に対象 user の存在と block 関係を検証していなかった問題と、`users/lists/favorite` ・ `unfavorite` の error/shape が本家と異なっていた問題を修正 (issue #1550 HIGH)。(1) 本家 `users/lists/push` は AddMember 前に対象 user の存在 (`NO_SUCH_USER`) と「対象が自分を block していないか」(`YOU_HAVE_BEEN_BLOCKED`) を検証する。mk-go は欠いており、block されていても任意 user をリストに追加できた。既存 `blockingRepo` を流用し fail-closed で検証。(2) `favorite` は重複時に 204 ではなく本家同様 `ALREADY_FAVORITED` (400)、`unfavorite` はリスト public 検証と `NO_SUCH_USER_LIST` / `ALREADY_FAVORITED` を返すよう本家 shape に揃える。
+
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
 
 - Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。
