@@ -80,22 +80,80 @@ func HideEmbedDecision(viewer *model.User, f EmbedFacts, follows func(authorID s
 	}
 	// followers: 投稿者のフォロワー / reply 先本人 / mention 対象以外には隠す。
 	if vis == string(model.NoteVisibilityFollowers) {
-		if viewer == nil {
-			return true
-		}
-		if f.ReplyTargetAuthorID != "" && viewerID == f.ReplyTargetAuthorID {
-			return false
-		}
-		if slices.Contains(f.Mentions, viewerID) {
-			return false
-		}
-		if follows != nil && follows(f.AuthorID) {
-			return false
-		}
-		return true
+		return !viewerIsFollowersRecipient(viewerID, f, follows)
 	}
 
 	return false
+}
+
+// HideNoteByPrefsDecision reports whether a TOP-LEVEL note described by facts
+// must be blanked from viewer due to the author's PREFERENCE gates only:
+// upstream treatVisibility (makeNotesFollowersOnlyBefore downgrade),
+// makeNotesHiddenBefore and requireSigninToViewContents, plus the own-note
+// short-circuit.
+//
+// Unlike HideEmbedDecision it deliberately does NOT hide a note merely because
+// its intrinsic visibility is followers or specified. At the top level that gate
+// is owned by CanSeeNote / FilterVisible / the SQL push-down / the notes-show
+// ID-known doctrine (#799 / #1488); re-applying it here would silently re-blank
+// notes those gates deliberately served. The downgrade branch DOES end in a
+// followers-style recipient check, but it only fires when the author opted into
+// makeNotesFollowersOnlyBefore on a public/home note (= new author-pref
+// coverage, not the intrinsic followers gate) (#1568).
+//
+// Pure, same contract as HideEmbedDecision: caller supplies `follows` and
+// `nowMs`. viewer may be nil (anonymous).
+func HideNoteByPrefsDecision(viewer *model.User, f EmbedFacts, follows func(authorID string) bool, nowMs int64) bool {
+	var viewerID string
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+
+	// 自分の投稿は常に見える (upstream: meId === userId)。
+	if viewer != nil && viewerID == f.AuthorID {
+		return false
+	}
+	// 著者 prefs が不明なら著者設定ゲートは評価しない。top-level の intrinsic
+	// followers/specified は別ゲート (CanSeeNote 等) が担うのでここでは隠さない。
+	if !f.AuthorPrefsKnown {
+		return false
+	}
+	// requireSigninToViewContents: 未ログインには隠す。
+	if f.RequireSigninToViewContents && viewer == nil {
+		return true
+	}
+	// makeNotesHiddenBefore: 期限切れの古い note を隠す。
+	if shouldHideNoteByTime(f.MakeNotesHiddenBefore, f.CreatedAtMs, nowMs) {
+		return true
+	}
+	// treatVisibility: public/home が makeNotesFollowersOnlyBefore ウィンドウを
+	// 過ぎたら followers へ降格。降格した時だけ followers-recipient 判定で hide
+	// する (元から followers/specified の note は intrinsic ゲート任せ)。
+	if f.Visibility == string(model.NoteVisibilityPublic) || f.Visibility == string(model.NoteVisibilityHome) {
+		if shouldHideNoteByTime(f.MakeNotesFollowersOnlyBefore, f.CreatedAtMs, nowMs) {
+			return !viewerIsFollowersRecipient(viewerID, f, follows)
+		}
+	}
+	return false
+}
+
+// viewerIsFollowersRecipient reports whether viewer is allowed to see a
+// followers-visibility note: the reply-target author, a mentioned user, or a
+// follower of the author. Anonymous (viewerID == "") is never a recipient.
+// Shared by HideEmbedDecision's intrinsic followers branch and
+// HideNoteByPrefsDecision's makeNotesFollowersOnlyBefore downgrade branch so the
+// escape-hatch logic cannot drift between the two entry points.
+func viewerIsFollowersRecipient(viewerID string, f EmbedFacts, follows func(authorID string) bool) bool {
+	if viewerID == "" {
+		return false
+	}
+	if f.ReplyTargetAuthorID != "" && viewerID == f.ReplyTargetAuthorID {
+		return true
+	}
+	if slices.Contains(f.Mentions, viewerID) {
+		return true
+	}
+	return follows != nil && follows(f.AuthorID)
 }
 
 // shouldHideNoteByTime ports upstream misc/should-hide-note-by-time.ts.

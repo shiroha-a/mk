@@ -2,6 +2,7 @@ package channels
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var errAntennaLookup = errors.New("antenna lookup failed")
 
 // mockRoleChecker is a test double for AdminRoleChecker.
 type mockRoleChecker struct {
@@ -26,6 +29,29 @@ func newAdminCh(ctx stream.ChannelContext, isAdmin bool) stream.Channel {
 	}
 	checker := &mockRoleChecker{admins: map[string]bool{userID: isAdmin}}
 	return NewAdminFactory(checker).New(ctx)
+}
+
+// stubAntennaOwners is a test double for AntennaOwnerLookup. A miss returns
+// (nil, nil) (Init rejects via a == nil); set err to exercise the lookup-error path.
+type stubAntennaOwners struct {
+	byID map[string]*model.Antenna
+	err  error
+}
+
+func (s *stubAntennaOwners) FindByID(id string) (*model.Antenna, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.byID[id], nil
+}
+
+// newAntennaCh builds an antenna channel whose lookup knows antenna "a1" owned
+// by ownerID, via the gated factory (#1569).
+func newAntennaCh(ctx stream.ChannelContext, ownerID string) stream.Channel {
+	owners := &stubAntennaOwners{byID: map[string]*model.Antenna{
+		"a1": {ID: "a1", UserID: ownerID},
+	}}
+	return NewAntennaFactory(owners).New(ctx)
 }
 
 // interface conformance checks
@@ -70,8 +96,8 @@ func TestHashtag_EmptyQ(t *testing.T) {
 
 func TestAntenna_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewAntenna(ctx)
-	ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	ch := newAntennaCh(ctx, "alice") // a1 owned by alice
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
 	assert.Equal(t, []string{"antennaTimeline:a1"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
@@ -83,7 +109,7 @@ func TestAntenna_Lifecycle(t *testing.T) {
 
 func TestAntenna_NoAuth(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewAntenna(ctx)
+	ch := newAntennaCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
@@ -91,8 +117,46 @@ func TestAntenna_NoAuth(t *testing.T) {
 
 func TestAntenna_MissingID(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewAntenna(ctx)
+	ch := newAntennaCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_NonOwnerRejected is the #1569 cross-user IDOR regression guard: a
+// user must not be able to subscribe to another user's antenna feed.
+func TestAntenna_NonOwnerRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "bob"})
+	ch := newAntennaCh(ctx, "alice") // a1 owned by alice, bob connects
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs, "non-owner must not subscribe to another user's antenna")
+}
+
+func TestAntenna_UnknownAntennaRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := newAntennaCh(ctx, "alice")
+	err := ch.Init(json.RawMessage(`{"antennaId":"does-not-exist"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_NilOwnersFailClosed guarantees an unwired factory rejects every
+// subscription rather than silently opening the gate.
+func TestAntenna_NilOwnersFailClosed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewAntennaFactory(nil).New(ctx)
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_LookupErrorRejected covers the FindByID error path (fail-closed).
+func TestAntenna_LookupErrorRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	owners := &stubAntennaOwners{err: errAntennaLookup}
+	ch := NewAntennaFactory(owners).New(ctx)
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
 }
@@ -503,7 +567,7 @@ func TestNoOpClientMessages(t *testing.T) {
 		ch   stream.Channel
 	}{
 		{"hashtag", NewHashtag(newCtx(nil))},
-		{"antenna", NewAntenna(newCtx(&model.User{ID: "u1"}))},
+		{"antenna", newAntennaCh(newCtx(&model.User{ID: "u1"}), "u1")},
 		{"channelTimeline", NewChannelTimeline(newCtx(nil))},
 		{"userList", NewUserList(newCtx(&model.User{ID: "u1"}))},
 		{"roleTimeline", NewRoleTimeline(newCtx(nil))},
