@@ -8,9 +8,10 @@ import (
 
 // ChannelTimelineChannel forwards notes posted to a specific channel.
 type ChannelTimelineChannel struct {
-	ctx    stream.ChannelContext
-	topic  string
-	filter noteFilter
+	ctx       stream.ChannelContext
+	topic     string
+	channelID string
+	filter    noteFilter
 }
 
 // NewChannelTimeline returns a channel factory for "channel".
@@ -30,12 +31,23 @@ func (c *ChannelTimelineChannel) Init(params json.RawMessage) error {
 		return nil
 	}
 	c.filter = parseNoteFilter(params)
+	c.channelID = p.ChannelID
 	c.topic = "channel:" + p.ChannelID
 	c.ctx.Subscribe(c.topic)
 	return nil
 }
 
 func (c *ChannelTimelineChannel) OnRedisEvent(payload []byte) {
+	// channelId 一致を確認 (defense-in-depth)。topic 購読で基本保証されるが、
+	// fanout が channel:<note.channelId> へ publish するので payload 側でも照合。
+	if noteChannelID(payload) != c.channelID {
+		return
+	}
+	// per-subscriber 可視性 gate (#1549, fail-closed)。channel note は通常
+	// public だが、共通ゲートを通して非可視/壊れた payload を drop する。
+	if !streamNoteVisibleForViewer(payload, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}

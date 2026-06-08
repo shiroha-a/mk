@@ -189,6 +189,121 @@ func TestHideEmbedDecision(t *testing.T) {
 	}
 }
 
+func TestHideNoteByPrefsDecision(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+
+	tests := []struct {
+		name    string
+		viewer  *model.User
+		facts   EmbedFacts
+		follows func(string) bool
+		want    bool
+	}{
+		{
+			name:   "plain public not hidden",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			// #799 / #1488: top-level followers note is owned by CanSeeNote, NOT this gate.
+			name:    "intrinsic followers NOT blanked by prefs gate",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "followers", AuthorPrefsKnown: true},
+			follows: followsSet(),
+			want:    false,
+		},
+		{
+			// #799: top-level specified note served to ID-known viewer must survive.
+			name:   "intrinsic specified NOT blanked by prefs gate",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "specified", VisibleUserIDs: []string{"x"}, AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			name:   "own note always visible",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "viewer", Visibility: "public", RequireSigninToViewContents: true, MakeNotesHiddenBefore: ptrInt(0), AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			name:   "requireSignin hides anonymous",
+			viewer: nil,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", RequireSigninToViewContents: true, AuthorPrefsKnown: true},
+			want:   true,
+		},
+		{
+			name:   "requireSignin does not hide authenticated",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", RequireSigninToViewContents: true, AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			name:    "makeNotesHiddenBefore hides old note even for follower",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesHiddenBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true},
+			follows: followsSet("author"),
+			want:    true,
+		},
+		{
+			name:    "followersOnlyBefore downgrade hides non-follower",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true},
+			follows: followsSet(),
+			want:    true,
+		},
+		{
+			name:    "followersOnlyBefore downgrade visible to follower",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true},
+			follows: followsSet("author"),
+			want:    false,
+		},
+		{
+			name:   "followersOnlyBefore downgrade visible to reply-target",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, ReplyTargetAuthorID: "viewer", AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			name:   "followersOnlyBefore downgrade visible to mentioned",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, Mentions: []string{"viewer"}, AuthorPrefsKnown: true},
+			want:   false,
+		},
+		{
+			name:    "followersOnlyBefore within window stays public",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 1000, AuthorPrefsKnown: true},
+			follows: followsSet(),
+			want:    false,
+		},
+		{
+			name:   "followersOnlyBefore downgrade hides anonymous",
+			viewer: nil,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true},
+			want:   true,
+		},
+		{
+			// prefs unknown -> no pref gate, intrinsic owned elsewhere -> never hide here.
+			name:    "prefs unknown never hides at top level",
+			viewer:  viewer,
+			facts:   EmbedFacts{AuthorID: "author", Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: false},
+			follows: followsSet(),
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := HideNoteByPrefsDecision(tt.viewer, tt.facts, tt.follows, hideTestNowMs)
+			if got != tt.want {
+				t.Fatalf("HideNoteByPrefsDecision = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldHideNoteByTime(t *testing.T) {
 	const now int64 = 1_700_000_000_000
 	tests := []struct {

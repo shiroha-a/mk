@@ -383,6 +383,23 @@ func (s *Service) IsAdministrator(userID string) bool {
 	return false
 }
 
+// IsExplorable reports whether the role's timeline is publicly streamable
+// (isExplorable). Used by the roleTimeline WS channel gate (#1549). Missing role
+// or lookup error returns false (fail-closed). Backed by the cached role list,
+// so no per-event DB query.
+func (s *Service) IsExplorable(roleID string) bool {
+	roles, err := s.listRolesCached()
+	if err != nil {
+		return false
+	}
+	for _, r := range roles {
+		if r.ID == roleID {
+			return r.IsExplorable
+		}
+	}
+	return false
+}
+
 // IsSilenced reports whether the user's merged role policies deny
 // `canPublicNote`. Mirrors upstream Misskey where silencing is not a
 // direct user flag but the outcome of a policy override on an assigned

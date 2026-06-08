@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -225,6 +226,10 @@ func (h *Handler) Show(c echo.Context) error {
 		})
 	}
 	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup())
+	// FilterVisible (#1444) は見えない note を丸ごと落とすが embed (depth-2) には
+	// 再帰しないので、通知 note の renote/reply embed と著者設定ゲートを #1568 で
+	// 追加適用する。1 ページ 1 回の batch follow query。
+	notehide.HideNotificationNotes(user, out)
 	// 本家 i/notifications と互換: markAsRead 未指定または true なら通知一覧
 	// 取得の副作用で全通知を既読化し、main stream に readAllNotifications を
 	// publish する。これが無いとフロントエンドが /my/notifications を開いても

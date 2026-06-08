@@ -504,6 +504,87 @@ func TestFanoutHook_PublishesStreamingTopics(t *testing.T) {
 	assert.Contains(t, pub.topics, "globalTimeline")
 }
 
+func TestFanoutHook_PublishesChannelTopic(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	chID := "ch1"
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &chID}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	assert.Contains(t, pub.topics, "channel:ch1")
+}
+
+func TestFanoutHook_NoChannelTopicWithoutChannel(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	for _, tp := range pub.topics {
+		assert.NotContains(t, tp, "channel:", "no channel topic expected for a channel-less note")
+	}
+}
+
+type stubUserRoles struct{ roles []*model.Role }
+
+func (s stubUserRoles) GetUserRoles(_ string) ([]*model.Role, error) { return s.roles, nil }
+
+func TestFanoutHook_PublishesRoleTimelines(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+	h.SetUserRolesLookup(stubUserRoles{roles: []*model.Role{{ID: "r1"}, {ID: "r2"}}})
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	assert.Contains(t, pub.topics, "roleTimeline:r1")
+	assert.Contains(t, pub.topics, "roleTimeline:r2")
+}
+
+func TestFanoutHook_NoRoleTimelineForNonPublic(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+	h.SetUserRolesLookup(stubUserRoles{roles: []*model.Role{{ID: "r1"}}})
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	for _, tp := range pub.topics {
+		assert.NotContains(t, tp, "roleTimeline:", "non-public note must not hit role timelines")
+	}
+}
+
+func TestFanoutHook_PublishesHashtagTopics(t *testing.T) {
+	h, _, _ := newTestHook(t)
+	pub := &stubStreamingPublisher{}
+	h.SetStreamingPublisher(pub)
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, Tags: []string{"GoLang", "ＡＢＣ", "golang"}}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// normalized (NFKC+lower) + deduped: golang (x2 -> 1), abc.
+	assert.Contains(t, pub.topics, "hashtag:golang")
+	assert.Contains(t, pub.topics, "hashtag:abc")
+	count := 0
+	for _, tp := range pub.topics {
+		if tp == "hashtag:golang" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "duplicate normalized tag must publish once")
+}
+
 func TestFanoutHook_StreamingHomeOnlyForFollowersVisibility(t *testing.T) {
 	h, _, _ := newTestHook(t)
 	pub := &stubStreamingPublisher{}

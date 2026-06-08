@@ -40,6 +40,8 @@ type Handler struct {
 	favoriteRepo      repository.NoteFavoriteRepository
 	driveFileRepo     repository.DriveFileRepository
 	draftRepo         repository.NoteDraftRepository
+	pollRepo          repository.PollRepository
+	threadMutingRepo  repository.NoteThreadMutingRepository
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
@@ -155,6 +157,11 @@ type ModeratorChecker interface {
 // SetModeratorChecker wires the moderator check used by notes/delete.
 func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
 	h.moderatorChecker = m
+}
+
+// SetPollRepo attaches a PollRepository used by notes/polls/recommendation (#1538).
+func (h *Handler) SetPollRepo(r repository.PollRepository) {
+	h.pollRepo = r
 }
 
 // SetNoteReactionRepo attaches a NoteReactionRepository for myReaction resolution.

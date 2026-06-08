@@ -2734,6 +2734,70 @@ func (m *MockPollRepository) MarkNotified(noteID string, t time.Time) error {
 	return nil
 }
 
+// VotedNoteIDs lets tests mark which (viewer,noteId) votes exist so
+// ListRecommendation can exclude them; keyed by "<userID>:<noteID>".
+var pollMockVoted = map[string]struct{}{}
+
+// MockPollVoted records a vote so MockPollRepository.ListRecommendation excludes
+// the note for that viewer. Test helper.
+func MockPollVoted(userID, noteID string) { pollMockVoted[userID+":"+noteID] = struct{}{} }
+
+// ListRecommendation mirrors the live query in-memory: local public unexpired
+// polls not authored by / voted by the viewer, author not muted, channel not
+// excluded; ordered by noteId DESC; limit/offset applied.
+func (m *MockPollRepository) ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	muted := make(map[string]struct{}, len(mutedUserIDs))
+	for _, id := range mutedUserIDs {
+		muted[id] = struct{}{}
+	}
+	excl := make(map[string]struct{}, len(excludeChannelIDs))
+	for _, id := range excludeChannelIDs {
+		excl[id] = struct{}{}
+	}
+	now := time.Now()
+	var ids []string
+	for _, p := range m.Polls {
+		if p.UserHost != nil {
+			continue
+		}
+		if p.UserID == viewerID {
+			continue
+		}
+		if p.NoteVisibility != model.NoteVisibilityPublic {
+			continue
+		}
+		if p.ExpiresAt != nil && !p.ExpiresAt.After(now) {
+			continue
+		}
+		if _, ok := pollMockVoted[viewerID+":"+p.NoteID]; ok {
+			continue
+		}
+		if _, ok := muted[p.UserID]; ok {
+			continue
+		}
+		if p.ChannelID != nil {
+			if _, ok := excl[*p.ChannelID]; ok {
+				continue
+			}
+		}
+		ids = append(ids, p.NoteID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] }) // noteId DESC
+	if offset > 0 {
+		if offset >= len(ids) {
+			return nil, nil
+		}
+		ids = ids[offset:]
+	}
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	return ids, nil
+}
+
 // MockPollVoteRepository is a test double for repository.PollVoteRepository.
 type MockPollVoteRepository struct {
 	Votes map[string]*model.PollVote // keyed by id
