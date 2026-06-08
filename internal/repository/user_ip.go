@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -13,6 +15,10 @@ type UserIPRepository interface {
 	Upsert(userID, ip string) error
 	// ListByUser returns IPs for the given user, newest first.
 	ListByUser(userID string, limit int) ([]*model.UserIP, error)
+	// DeleteOlderThan removes user_ip rows created before t. Run by the
+	// daily clean cron to prune IP history older than 90 days (#1563).
+	// Returns rows deleted.
+	DeleteOlderThan(t time.Time) (int64, error)
 }
 
 type userIPRepository struct {
@@ -41,4 +47,9 @@ func (r *userIPRepository) ListByUser(userID string, limit int) ([]*model.UserIP
 		return nil, err
 	}
 	return ips, nil
+}
+
+func (r *userIPRepository) DeleteOlderThan(t time.Time) (int64, error) {
+	res := r.db.Where(`"createdAt" < ?`, t).Delete(&model.UserIP{})
+	return res.RowsAffected, res.Error
 }

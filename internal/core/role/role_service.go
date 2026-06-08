@@ -430,6 +430,50 @@ func (s *Service) IsModerator(userID string) bool {
 	return false
 }
 
+// GetModerators returns the users that are moderators or administrators
+// (including the root user) with non-expired role assignments. Mirrors
+// upstream RoleService.getModerators(includeAdmins, includeRoot,
+// excludeExpire). Used by the checkModeratorsActivity cron (#1563). Returns
+// nil when userRepo is not wired (drop-in optional, #785).
+func (s *Service) GetModerators() ([]*model.User, error) {
+	if s.userRepo == nil {
+		return nil, nil
+	}
+	roles, err := s.listRolesCached()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	idSet := make(map[string]struct{})
+	for _, r := range roles {
+		if !(r.IsModerator || r.IsAdministrator) {
+			continue
+		}
+		// moderator/admin role は通常少数なので大きい limit で 1 query 全件取得。
+		assigns, err := s.assignmentRepo.ListByRole(r.ID, "", "", 100000)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range assigns {
+			if a.ExpiresAt == nil || a.ExpiresAt.After(now) {
+				idSet[a.UserID] = struct{}{}
+			}
+		}
+	}
+	// includeRoot=true: meta.rootUserId を含める。
+	if meta, err := s.metaRepo.Fetch(); err == nil && meta.RootUserID != nil && *meta.RootUserID != "" {
+		idSet[*meta.RootUserID] = struct{}{}
+	}
+	if len(idSet) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	return s.userRepo.FindManyByIDs(ids)
+}
+
 // HasRolePolicy reports whether `userID` is allowed to perform an action gated
 // by `policyKey`. upstream `ApiCallService.ts` の requiredRolePolicy check と
 // 等価な判定で、以下のいずれかなら true:

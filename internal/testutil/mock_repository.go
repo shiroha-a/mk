@@ -6061,6 +6061,19 @@ func (m *MockRoleAssignmentRepository) Delete(userID, roleID string) error {
 	return nil
 }
 
+// DeleteExpired removes assignments whose ExpiresAt has passed. Returns the
+// number removed.
+func (m *MockRoleAssignmentRepository) DeleteExpired(now time.Time) (int64, error) {
+	var deleted int64
+	for k, a := range m.Assignments {
+		if a.ExpiresAt != nil && a.ExpiresAt.Before(now) {
+			delete(m.Assignments, k)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 func (m *MockRoleAssignmentRepository) ListByUser(userID string) ([]*model.RoleAssignment, error) {
 	var result []*model.RoleAssignment
 	now := time.Now()

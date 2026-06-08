@@ -37,6 +37,16 @@ func TestScheduler_RegisterChartJobs_NoErr(t *testing.T) {
 	require.NoError(t, s.RegisterChartJobs())
 }
 
+// TestScheduler_RegisterMaintenanceJobs_NoErr verifies the #1563 cron jobs
+// register without error (cron syntax + queue options accepted).
+func TestScheduler_RegisterMaintenanceJobs_NoErr(t *testing.T) {
+	s := newSchedulerForTest(t)
+	require.NoError(t, s.RegisterCheckExpiredMutingsJob())
+	require.NoError(t, s.RegisterCleanJob())
+	require.NoError(t, s.RegisterCleanRemoteNotesJob())
+	require.NoError(t, s.RegisterCheckModeratorsActivityJob())
+}
+
 func TestMaintenanceQueueName_Const(t *testing.T) {
 	// 既存定数と被らないこと (ベタ書きの同期ミスを防ぐ smoke)
 	assert.Equal(t, "maintenance", MaintenanceQueueName)

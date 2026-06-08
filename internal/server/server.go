@@ -315,23 +315,39 @@ func (s *Server) StartBackgroundForTest() error {
 		return fmt.Errorf("start autoscale: %w", err)
 	}
 	s.autoscale = runner
-	if s.queueScheduler != nil {
-		// Server.Start と同じく Register エラーは観測可能にする (test 出力の
-		// noise にはならない、Register 失敗は scheduler driver 不具合の signal)。
-		if err := s.queueScheduler.RegisterChartJobs(); err != nil {
-			slog.Warn("chart scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.RegisterInstanceRefreshJob(); err != nil {
-			slog.Warn("instance refresh scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.RegisterRetentionJob(); err != nil {
-			slog.Warn("retention scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.Start(); err != nil {
-			slog.Warn("scheduler start failed", "err", err)
+	s.registerSchedulerJobs()
+	return nil
+}
+
+// registerSchedulerJobs registers every periodic cron job and starts the
+// scheduler. Called from both the normal and autoscale start paths so the
+// cron set lives in one place (#1563): adding a job here covers both paths.
+func (s *Server) registerSchedulerJobs() {
+	if s.queueScheduler == nil {
+		return
+	}
+	// Register エラーは観測可能にする (Register 失敗は scheduler driver 不具合
+	// の signal)。1 job の失敗で他の登録を止めない。
+	jobs := []struct {
+		name string
+		fn   func() error
+	}{
+		{"chart", s.queueScheduler.RegisterChartJobs},
+		{"instance refresh", s.queueScheduler.RegisterInstanceRefreshJob},
+		{"retention", s.queueScheduler.RegisterRetentionJob},
+		{"checkExpiredMutings", s.queueScheduler.RegisterCheckExpiredMutingsJob},
+		{"clean", s.queueScheduler.RegisterCleanJob},
+		{"cleanRemoteNotes", s.queueScheduler.RegisterCleanRemoteNotesJob},
+		{"checkModeratorsActivity", s.queueScheduler.RegisterCheckModeratorsActivityJob},
+	}
+	for _, j := range jobs {
+		if err := j.fn(); err != nil {
+			slog.Warn("scheduler register failed", "job", j.name, "err", err)
 		}
 	}
-	return nil
+	if err := s.queueScheduler.Start(); err != nil {
+		slog.Warn("scheduler start failed", "err", err)
+	}
 }
 
 // SetSyncDeliverHookForTest replaces the asynq deliver enqueue with the
@@ -364,20 +380,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("start autoscale: %w", err)
 	}
 	s.autoscale = runner
-	if s.queueScheduler != nil {
-		if err := s.queueScheduler.RegisterChartJobs(); err != nil {
-			slog.Warn("chart scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.RegisterInstanceRefreshJob(); err != nil {
-			slog.Warn("instance refresh scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.RegisterRetentionJob(); err != nil {
-			slog.Warn("retention scheduler register failed", "err", err)
-		}
-		if err := s.queueScheduler.Start(); err != nil {
-			slog.Warn("scheduler start failed", "err", err)
-		}
-	}
+	s.registerSchedulerJobs()
 	if s.chartMgmt != nil {
 		if err := s.chartMgmt.Start(context.Background()); err != nil {
 			slog.Warn("chart management service start failed", "err", err)

@@ -63,6 +63,10 @@ type RoleAssignmentRepository interface {
 	// CountActiveByRole returns the number of non-expired assignments for a
 	// role (expiresAt IS NULL OR > now). Used for the Role packer's usersCount.
 	CountActiveByRole(roleID string) (int, error)
+	// DeleteExpired physically removes assignments whose expiresAt has passed.
+	// Read paths already filter them out; this is the daily clean cron prune
+	// (#1563). Returns rows deleted.
+	DeleteExpired(now time.Time) (int64, error)
 }
 
 type roleAssignmentRepository struct {
@@ -81,6 +85,11 @@ func (r *roleAssignmentRepository) Create(a *model.RoleAssignment) error {
 func (r *roleAssignmentRepository) Delete(userID, roleID string) error {
 	return r.db.Where("\"userId\" = ? AND \"roleId\" = ?", userID, roleID).
 		Delete(&model.RoleAssignment{}).Error
+}
+
+func (r *roleAssignmentRepository) DeleteExpired(now time.Time) (int64, error) {
+	res := r.db.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).Delete(&model.RoleAssignment{})
+	return res.RowsAffected, res.Error
 }
 
 func (r *roleAssignmentRepository) ListByUser(userID string) ([]*model.RoleAssignment, error) {

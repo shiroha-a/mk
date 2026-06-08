@@ -80,6 +80,7 @@ import (
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
+	coremoderatoractivity "github.com/shiroha-a/mk/internal/core/moderatoractivity"
 	coremove "github.com/shiroha-a/mk/internal/core/move"
 	coremuting "github.com/shiroha-a/mk/internal/core/muting"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -183,6 +184,9 @@ func (s *Server) setupRoutes() {
 	webhookRepo := repository.NewWebhookRepository(s.db)
 	systemWebhookRepo := repository.NewSystemWebhookRepository(s.db)
 	reversiRepo := repository.NewReversiRepository(s.db)
+	// userIPRepo は signin handler (Phase 6) と clean cron processor (#1563)
+	// の双方で使うため、他 repo と同じ早い段階で構築する。
+	userIPRepo := repository.NewUserIPRepository(s.db)
 	chatRepo := repository.NewChatRepository(s.db)
 	channelFavoriteRepo := repository.NewChannelFavoriteRepository(s.db)
 	channelMutingRepo := repository.NewChannelMutingRepository(s.db)
@@ -635,27 +639,29 @@ func (s *Server) setupRoutes() {
 	// chartHook は後段で SetChartHook 注入する (deliverProcessor と同じ pattern)。
 	s.queueServer.Handle(queue.TaskTypeInbox, inboxProcessor.Handle)
 
-	// Remote notes cleaning (issue #46)
+	// Remote notes cleaning (issue #46): enqueue 契機は scheduler の cron
+	// (RegisterCleanRemoteNotesJob, 毎日 04:00 UTC, TS 'cleanRemoteNotes' 相当,
+	// #1563)。旧実装は 6h time.Ticker だった。Handle は常に登録し、processor が
+	// cfg.Enabled で gate する (起動時 meta から構築)。
+	cleanCfg := processors.CleanRemoteNotesConfig{}
 	if cleanMeta, err := metaRepo.Fetch(); err == nil {
-		cleanCfg := processors.CleanRemoteNotesConfig{
+		cleanCfg = processors.CleanRemoteNotesConfig{
 			Enabled:              cleanMeta.EnableRemoteNotesCleaning,
 			ExpiryDays:           cleanMeta.RemoteNotesCleaningExpiryDaysForEachNotes,
 			MaxProcessingMinutes: cleanMeta.RemoteNotesCleaningMaxProcessingDurationInMinutes,
 		}
-		cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfg)
-		s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
-		// 6時間ごとに cleaning job をエンキューする。
-		if cleanCfg.Enabled {
-			go func() {
-				ticker := time.NewTicker(6 * time.Hour)
-				defer ticker.Stop()
-				_ = s.queueClient.EnqueueCleanRemoteNotes()
-				for range ticker.C {
-					_ = s.queueClient.EnqueueCleanRemoteNotes()
-				}
-			}()
-		}
 	}
+	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfg)
+	s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
+
+	// Expired-mute prune (#1563): scheduler の cron (*/5) が enqueue する。
+	checkExpiredMutingsProcessor := processors.NewCheckExpiredMutingsProcessor(mutingRepo)
+	s.queueServer.Handle(queue.TaskTypeCheckExpiredMutings, checkExpiredMutingsProcessor.Handle)
+
+	// Daily generic clean (#1563): scheduler の cron (0 0 * * *) が enqueue する。
+	// user_ip 90 日 prune / 期限切れ role_assignment 削除 / reversi outdated game 削除。
+	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen)
+	s.queueServer.Handle(queue.TaskTypeClean, cleanGenericProcessor.Handle)
 
 	// Reaction flush (issue #57): buffered writer 使用時は 30 秒ごとに flush。
 	flushProcessor := processors.NewReactionFlushProcessor(reactionCountWriter)
@@ -1051,7 +1057,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Signin (Phase 6)
-	userIPRepo := repository.NewUserIPRepository(s.db)
 	signinHandler := apisignin.NewHandler(userRepo)
 	if captchaSvc != nil {
 		signinHandler.SetCaptcha(captchaSvc)
@@ -1966,6 +1971,23 @@ func (s *Server) setupRoutes() {
 
 	// Announcements (Phase 6)
 	announcementRepo := repository.NewAnnouncementRepository(s.db)
+
+	// Moderator-activity check (#1563): scheduler の cron (30 * * * *) が enqueue
+	// する。全 moderator が 7 日非アクティブだと登録を招待制へ自動切替し、残 2 日で
+	// 6h ごとに警告メール / announcement / SystemWebhook を送る。announcementRepo /
+	// webhookService がここで揃うため本箇所で配線する。
+	modActivitySvc := coremoderatoractivity.NewService(
+		roleService,
+		metaRepo,
+		userRepo,
+		announcementRepo,
+		webhookService,
+		idGen,
+		miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp),
+	)
+	s.queueServer.Handle(queue.TaskTypeCheckModeratorsActivity,
+		processors.NewCheckModeratorsActivityProcessor(modActivitySvc).Handle)
+
 	// Phase 7-2 (#244): /api/i の hasUnreadAnnouncement / unreadAnnouncements 配線
 	iHandler.SetAnnouncementRepo(announcementRepo)
 	announcementHandler := apiannouncements.NewHandler(announcementRepo, idGen)
