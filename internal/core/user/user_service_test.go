@@ -404,6 +404,38 @@ func TestService_UpdateProfile_MutedWords(t *testing.T) {
 	assert.JSONEq(t, `["spoiler"]`, string(got.HardMutedWords))
 }
 
+// #1546: followingVisibility / followersVisibility の persist。enum 検証は
+// ハンドラ側なので service は受け取った string をそのまま列に書く。
+func TestService_UpdateProfile_FollowVisibility(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	repo.Profiles["u1"] = &model.UserProfile{
+		UserID:              "u1",
+		FollowingVisibility: model.FollowingVisibilityPublic,
+		FollowersVisibility: model.FollowingVisibilityPublic,
+	}
+
+	following := "followers"
+	followers := "private"
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		FollowingVisibility: &following,
+		FollowersVisibility: &followers,
+	})
+	require.NoError(t, err)
+	got := repo.Profiles["u1"]
+	require.NotNil(t, got)
+	assert.Equal(t, model.FollowingVisibilityFollowers, got.FollowingVisibility)
+	assert.Equal(t, model.FollowingVisibilityPrivate, got.FollowersVisibility)
+
+	// 片方だけ omit すると他方は不変。
+	onlyFollowing := "private"
+	_, err = svc.UpdateProfile("u1", user.UpdateInput{FollowingVisibility: &onlyFollowing})
+	require.NoError(t, err)
+	got = repo.Profiles["u1"]
+	assert.Equal(t, model.FollowingVisibilityPrivate, got.FollowingVisibility)
+	assert.Equal(t, model.FollowingVisibilityPrivate, got.FollowersVisibility, "followersVisibility は omit で不変")
+}
+
 // #956: profile fields (name/value 配列) の persist + 正規化。
 // upstream Misskey TS は trim + 空 entry 排除を行うので、mk-go も同挙動に
 // 揃える (= name または value どちらかが trim 後に空なら drop)。

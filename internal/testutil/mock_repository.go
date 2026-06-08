@@ -637,6 +637,14 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			if b, ok := v.(bool); ok {
 				p.ReceiveAnnouncementEmail = b
 			}
+		case "followingVisibility":
+			if s, ok := v.(string); ok {
+				p.FollowingVisibility = model.FollowingVisibility(s)
+			}
+		case "followersVisibility":
+			if s, ok := v.(string); ok {
+				p.FollowersVisibility = model.FollowingVisibility(s)
+			}
 		case "password":
 			if s, ok := v.(string); ok {
 				p.Password = &s
