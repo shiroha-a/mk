@@ -211,3 +211,56 @@ func TestPollRepository_MarkNotified(t *testing.T) {
 	// 不在 noteID でも no-op (= no error)
 	require.NoError(t, repo.MarkNotified("nonexistent", now))
 }
+
+func TestPollRepository_ListRecommendation(t *testing.T) {
+	repo := NewPollRepository(testDB)
+	viewer := insertTestUser(t, "u_lr_viewer", "lrviewer")
+	defer cleanupUser(t, viewer.ID)
+	author := insertTestUser(t, "u_lr_author", "lrauthor")
+	defer cleanupUser(t, author.ID)
+	muted := insertTestUser(t, "u_lr_muted", "lrmuted")
+	defer cleanupUser(t, muted.ID)
+
+	now := time.Now()
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	remoteHost := "remote.example"
+	ch := "chan_lr_1"
+
+	mk := func(id, userID string, vis model.NoteVisibility, host *string, expires *time.Time, channelID *string) {
+		note := &model.Note{ID: id, UserID: userID, Visibility: vis, HasPoll: true, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, testDB.Create(note).Error)
+		t.Cleanup(func() { cleanupNote(t, id) })
+		p := &model.Poll{
+			NoteID: id, Multiple: false, Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+			NoteVisibility: vis, UserID: userID, UserHost: host, ExpiresAt: expires, ChannelID: channelID,
+		}
+		require.NoError(t, repo.Create(p))
+	}
+	mk("p_lr_good2", author.ID, model.NoteVisibilityPublic, nil, &future, nil)
+	mk("p_lr_good1", author.ID, model.NoteVisibilityPublic, nil, nil, nil) // no expiry
+	mk("p_lr_self", viewer.ID, model.NoteVisibilityPublic, nil, &future, nil)
+	mk("p_lr_followers", author.ID, model.NoteVisibilityFollowers, nil, &future, nil)
+	mk("p_lr_expired", author.ID, model.NoteVisibilityPublic, nil, &past, nil)
+	mk("p_lr_remote", author.ID, model.NoteVisibilityPublic, &remoteHost, &future, nil)
+	mk("p_lr_muted", muted.ID, model.NoteVisibilityPublic, nil, &future, nil)
+	mk("p_lr_chan", author.ID, model.NoteVisibilityPublic, nil, &future, &ch)
+	mk("p_lr_voted", author.ID, model.NoteVisibilityPublic, nil, &future, nil)
+	require.NoError(t, testDB.Create(&model.PollVote{ID: "pv_lr_1", UserID: viewer.ID, NoteID: "p_lr_voted", Choice: 0}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "poll_vote" WHERE id = ?`, "pv_lr_1") })
+
+	ids, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, []string{ch}, 10, 0)
+	require.NoError(t, err)
+	// good1/good2 のみ (self/followers/expired/remote/muted/channel/voted は除外)、noteId DESC。
+	assert.Equal(t, []string{"p_lr_good2", "p_lr_good1"}, ids)
+
+	// excludeChannels 無しなら channel poll も含まれる。
+	ids2, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, nil, 10, 0)
+	require.NoError(t, err)
+	assert.Contains(t, ids2, "p_lr_chan")
+
+	// limit/offset。
+	page, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, []string{ch}, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p_lr_good1"}, page)
+}

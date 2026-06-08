@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -431,8 +432,40 @@ func (h *Handler) ThreadMutingDelete(c echo.Context) error {
 }
 
 // PollsRecommendation handles POST /api/notes/polls/recommendation.
+//
+// 旧実装は常に [] を返すスタブだった (#1538)。本家 recommendation.ts 同様、
+// ローカル public で未期限切れの poll のうち、自分の投稿でない / 未投票 /
+// 投稿者を mute していないものを noteId DESC で返す (excludeChannels で
+// チャンネル poll を除外可)。可視性は public 限定なので追加 gate は不要。
 func (h *Handler) PollsRecommendation(c echo.Context) error {
-	return c.JSON(http.StatusOK, []any{})
+	user := middleware.GetUser(c)
+	var req struct {
+		Limit           int      `json:"limit"`
+		Offset          int      `json:"offset"`
+		ExcludeChannels []string `json:"excludeChannels"`
+	}
+	_ = c.Bind(&req)
+	if h.pollRepo == nil || h.noteRepo == nil {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	var muted []string
+	if h.mutingRepo != nil {
+		muted, _ = h.mutingRepo.ListMuteeIDs(user.ID)
+	}
+	noteIDs, err := h.pollRepo.ListRecommendation(user.ID, muted, req.ExcludeChannels, limit, req.Offset)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if len(noteIDs) == 0 {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	notes, err := h.noteRepo.FindManyByIDsWithUser(noteIDs)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	// FindManyByIDsWithUser は noteIDs の順序 (noteId DESC) を保持する。
+	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, user))
 }
 
 // packDraft renders a NoteDraft into the upstream-compatible shape. 旧実装は

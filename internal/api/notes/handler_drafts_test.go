@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func postDraft(handler func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
@@ -732,4 +733,50 @@ func TestDraftsDelete_ClearsScheduledNote(t *testing.T) {
 	rec := postDraft(h.DraftsDelete, `{"draftId":"d1"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, []string{"d1"}, enq.cleared)
+}
+
+// --- #1538: polls/recommendation ---
+
+func TestPollsRecommendation_NilRepoEmpty(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	h := &Handler{idGen: idGen}
+	rec := postDraft(h.PollsRecommendation, `{}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
+}
+
+func TestPollsRecommendation_ReturnsNotes(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	pollRepo := testutil.NewMockPollRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	for _, nid := range []string{"np1", "np2"} {
+		noteRepo.Notes[nid] = &model.Note{ID: nid, UserID: "author", Reactions: datatypes.JSON([]byte("{}"))}
+		pollRepo.Polls[nid] = &model.Poll{NoteID: nid, UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	}
+	h := &Handler{idGen: idGen, pollRepo: pollRepo, noteRepo: noteRepo}
+	rec := postDraft(h.PollsRecommendation, `{"limit":10}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Len(t, out, 2)
+}
+
+func TestPollsRecommendation_ExcludesSelfAndVoted(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	pollRepo := testutil.NewMockPollRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	// good poll, self poll, voted poll.
+	noteRepo.Notes["good"] = &model.Note{ID: "good", UserID: "author", Reactions: datatypes.JSON([]byte("{}"))}
+	pollRepo.Polls["good"] = &model.Poll{NoteID: "good", UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	pollRepo.Polls["self"] = &model.Poll{NoteID: "self", UserID: "viewer", NoteVisibility: model.NoteVisibilityPublic}
+	pollRepo.Polls["voted"] = &model.Poll{NoteID: "voted", UserID: "author", NoteVisibility: model.NoteVisibilityPublic}
+	testutil.MockPollVoted("viewer", "voted")
+
+	h := &Handler{idGen: idGen, pollRepo: pollRepo, noteRepo: noteRepo}
+	rec := postDraft(h.PollsRecommendation, `{}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, "good", out[0]["id"])
 }

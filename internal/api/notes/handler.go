@@ -40,6 +40,7 @@ type Handler struct {
 	favoriteRepo      repository.NoteFavoriteRepository
 	driveFileRepo     repository.DriveFileRepository
 	draftRepo         repository.NoteDraftRepository
+	pollRepo          repository.PollRepository
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
@@ -142,6 +143,11 @@ func (h *Handler) SetUGCVisibility(v string) {
 // SetDriveFileRepo attaches a DriveFileRepository for file resolution.
 func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
 	h.driveFileRepo = r
+}
+
+// SetPollRepo attaches a PollRepository used by notes/polls/recommendation (#1538).
+func (h *Handler) SetPollRepo(r repository.PollRepository) {
+	h.pollRepo = r
 }
 
 // SetNoteReactionRepo attaches a NoteReactionRepository for myReaction resolution.
