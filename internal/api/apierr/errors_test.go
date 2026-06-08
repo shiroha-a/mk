@@ -22,6 +22,20 @@ func TestInvalidParam(t *testing.T) {
 	assert.Equal(t, UUIDInvalidParam, errObj["id"])
 }
 
+func TestInvalidParamClient(t *testing.T) {
+	// upstream endpoint-base.ts / ApiCallService.send の schema-validation
+	// envelope (kind:"client" + info:{param,reason}) と一致させる。
+	result := InvalidParamClient("#/properties/span/enum", "must be equal to one of the allowed values")
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "Invalid param.", errObj["message"])
+	assert.Equal(t, "INVALID_PARAM", errObj["code"])
+	assert.Equal(t, UUIDInvalidParam, errObj["id"])
+	assert.Equal(t, "client", errObj["kind"])
+	info := errObj["info"].(map[string]any)
+	assert.Equal(t, "#/properties/span/enum", info["param"])
+	assert.Equal(t, "must be equal to one of the allowed values", info["reason"])
+}
+
 func TestInternalError(t *testing.T) {
 	result := InternalError()
 	errObj := result["error"].(map[string]any)
