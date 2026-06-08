@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -29,7 +30,19 @@ type contextKey string
 const (
 	UserContextKey  contextKey = "misskeyUser"
 	TokenContextKey contextKey = "misskeyToken"
+	// AuthScopeContextKey carries the *AuthScope (OAuth scope view) for the
+	// authenticated request. RequireScope reads it to enforce endpoint
+	// meta.kind against an app token's permission array (#1552).
+	AuthScopeContextKey contextKey = "misskeyAuthScope"
 )
+
+// AuthScope is the OAuth scope view of an authenticated request. IsApp is
+// true when the request used an app access_token (Scopes = its permission
+// array); false for a native login token, which has full access.
+type AuthScope struct {
+	IsApp  bool
+	Scopes []string
+}
 
 // lastActiveUpdateInterval は同一ユーザーの lastActiveDate 書き込みを抑制
 // する間隔。本家 TS は WebSocket 接続中 5 分おきに更新する (#421)。HTTP
@@ -100,7 +113,7 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			user, err := a.resolveUser(token)
+			user, scopes, isApp, err := a.resolveUser(token)
 			if err != nil {
 				return next(c)
 			}
@@ -128,6 +141,10 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 			// #960)。raw token をそのまま context に積む。app/auth 経由の
 			// access_token / native login token どちらも同じキーで取得可能。
 			c.Set(string(TokenContextKey), token)
+			// OAuth scope view を積む。RequireScope が endpoint の meta.kind を
+			// app token の permission で強制する (#1552)。native token は
+			// IsApp=false で full access 扱い。
+			c.Set(string(AuthScopeContextKey), &AuthScope{IsApp: isApp, Scopes: scopes})
 			a.touchLastActive(user.ID)
 			return next(c)
 		}
@@ -253,6 +270,42 @@ func GetToken(c echo.Context) string {
 	return t
 }
 
+// GetAuthScope returns the OAuth scope view for the current request, or nil
+// when the request was unauthenticated (no token). A non-nil result with
+// IsApp=false denotes a native login token (full access).
+func GetAuthScope(c echo.Context) *AuthScope {
+	s, ok := c.Get(string(AuthScopeContextKey)).(*AuthScope)
+	if !ok {
+		return nil
+	}
+	return s
+}
+
+// RequireScope enforces the upstream endpoint meta.kind (OAuth scope) for app
+// access tokens, mirroring ApiCallService.ts: a request authenticated with an
+// app token must carry `kind` in its permission array, otherwise 403
+// PERMISSION_DENIED. Native login tokens (and the anonymous case, which the
+// companion RequireModerator/RequireAuth rejects first) are not scope-checked
+// — they have full access. Place RequireScope after the role gate so role and
+// scope are both enforced (#1552).
+func RequireScope(kind string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			sc := GetAuthScope(c)
+			// native login token / anonymous → no scope restriction.
+			if sc == nil || !sc.IsApp {
+				return next(c)
+			}
+			for _, p := range sc.Scopes {
+				if p == kind {
+					return next(c)
+				}
+			}
+			return c.JSON(http.StatusForbidden, apierr.PermissionDenied())
+		}
+	}
+}
+
 // RoleChecker abstracts role checking to avoid circular dependency with core/role.
 type RoleChecker interface {
 	IsAdministrator(userID string) bool
@@ -357,17 +410,21 @@ func extractToken(c echo.Context) string {
 	return ""
 }
 
-func (a *AuthMiddleware) resolveUser(token string) (*model.User, error) {
-	// hot path: TTL 内なら DB を引かずに cached user を返す (#512)。
-	if u, ok := a.tokenCache.get(token); ok {
-		return u, nil
+// resolveUser resolves a raw token to its user and OAuth scope view.
+// isApp is true when the token is an app access_token (its permission array
+// is returned as scopes); false for a native login token (full access,
+// scopes nil). RequireScope (#1552) uses these to enforce endpoint meta.kind.
+func (a *AuthMiddleware) resolveUser(token string) (user *model.User, scopes []string, isApp bool, err error) {
+	// hot path: TTL 内なら DB を引かずに cached user/scope を返す (#512)。
+	if u, sc, app, ok := a.tokenCache.get(token); ok {
+		return u, sc, app, nil
 	}
 
-	// まずnative tokenで検索
-	user, err := a.userRepo.FindByToken(token)
+	// まずnative tokenで検索 (= user 自身の login token, full access)。
+	user, err = a.userRepo.FindByToken(token)
 	if err == nil {
-		a.tokenCache.put(token, user)
-		return user, nil
+		a.tokenCache.put(token, user, nil, false)
+		return user, nil, false, nil
 	}
 
 	// hash 列 (miauth: sha256(token)) と token 列 (raw, app/auth) を 1 query
@@ -379,7 +436,7 @@ func (a *AuthMiddleware) resolveUser(token string) (*model.User, error) {
 		// not-found 系は cache に積まない: 失効後 30 秒間 stale を返さない
 		// ようにするのと、未知 token 連打への DDoS を rate limiter 側に任せる
 		// 設計のため (#512 scope)。
-		return nil, err
+		return nil, nil, false, err
 	}
 
 	// orphaned access_token (User 行が削除済み) のとき GORM の Preload は
@@ -387,10 +444,13 @@ func (a *AuthMiddleware) resolveUser(token string) (*model.User, error) {
 	// user.ID dereference panic になるので、専用 error を返して anonymous
 	// request 扱いに落とす (Devin #514 FLAG-1)。cache にも積まない。
 	if accessToken.User == nil {
-		return nil, errOrphanedAccessToken
+		return nil, nil, false, errOrphanedAccessToken
 	}
-	a.tokenCache.put(token, accessToken.User)
-	return accessToken.User, nil
+	// app token は permission 配列を scope として持つ。空 ([]) でも isApp=true
+	// として扱い、RequireScope が kind 不足を弾けるようにする。
+	scopes = []string(accessToken.Permission)
+	a.tokenCache.put(token, accessToken.User, scopes, true)
+	return accessToken.User, scopes, true, nil
 }
 
 func sha256Hash(s string) string {

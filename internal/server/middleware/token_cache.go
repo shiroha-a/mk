@@ -18,9 +18,15 @@ const authCacheTTL = 30 * time.Second
 // hot path での余分な O(N) 走査を抑える妥協値。
 const authCacheSweepEvery uint64 = 64
 
-// cachedAuthEntry holds a resolved user and its cache expiry time.
+// cachedAuthEntry holds a resolved user, its OAuth scope view and cache
+// expiry time. scopes/isApp carry the access-token permission needed by
+// RequireScope (#1552): isApp is true when the token was resolved from an
+// app access_token (scoped), false for a native login token (full access);
+// scopes is the access_token.permission array (nil for native).
 type cachedAuthEntry struct {
 	user      *model.User
+	scopes    []string
+	isApp     bool
 	expiresAt time.Time
 }
 
@@ -46,27 +52,29 @@ func newTokenCache() *tokenCache {
 	}
 }
 
-// get returns the cached user if present and not expired. Expired entries
-// are deleted lazily on read.
-func (c *tokenCache) get(token string) (*model.User, bool) {
-	v, ok := c.m.Load(token)
-	if !ok {
-		return nil, false
+// get returns the cached user and its scope view if present and not expired.
+// Expired entries are deleted lazily on read.
+func (c *tokenCache) get(token string) (user *model.User, scopes []string, isApp, ok bool) {
+	v, loaded := c.m.Load(token)
+	if !loaded {
+		return nil, nil, false, false
 	}
-	entry, ok := v.(*cachedAuthEntry)
-	if !ok || c.now().After(entry.expiresAt) {
+	entry, isEntry := v.(*cachedAuthEntry)
+	if !isEntry || c.now().After(entry.expiresAt) {
 		c.m.Delete(token)
-		return nil, false
+		return nil, nil, false, false
 	}
-	return entry.user, true
+	return entry.user, entry.scopes, entry.isApp, true
 }
 
-// put stores token → user with TTL. Triggers a full sweep every sweepEvery
-// stores so the cache size stays bounded by "active tokens within the TTL
-// window" rather than "every token ever seen".
-func (c *tokenCache) put(token string, user *model.User) {
+// put stores token → (user, scope view) with TTL. Triggers a full sweep every
+// sweepEvery stores so the cache size stays bounded by "active tokens within
+// the TTL window" rather than "every token ever seen".
+func (c *tokenCache) put(token string, user *model.User, scopes []string, isApp bool) {
 	c.m.Store(token, &cachedAuthEntry{
 		user:      user,
+		scopes:    scopes,
+		isApp:     isApp,
 		expiresAt: c.now().Add(c.ttl),
 	})
 	if c.sweepEvery > 0 && c.storeCount.Add(1)%c.sweepEvery == 0 {

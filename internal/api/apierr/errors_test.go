@@ -36,6 +36,17 @@ func TestInvalidParamClient(t *testing.T) {
 	assert.Equal(t, "must be equal to one of the allowed values", info["reason"])
 }
 
+func TestPermissionDenied(t *testing.T) {
+	// upstream ApiCallService の app-token scope 違反 (kind 不足) と一致させる。
+	result := PermissionDenied()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "PERMISSION_DENIED", errObj["code"])
+	assert.Equal(t, UUIDPermissionDenied, errObj["id"])
+	assert.Equal(t, "1370e5b7-d4eb-4566-bb1d-7748ee6a1838", errObj["id"])
+	// upstream ApiError(kind:'permission') と一致させる。
+	assert.Equal(t, "permission", errObj["kind"])
+}
+
 func TestInternalError(t *testing.T) {
 	result := InternalError()
 	errObj := result["error"].(map[string]any)

@@ -424,6 +424,9 @@ func jobToSummary(queue, state string, job *mkq.Job[framedPayload], st *mkq.JobS
 		Payload:    body,
 		Retried:    job.AttemptsMade,
 		EnqueuedAt: job.Timestamp,
+		// ProcessedBy = mkq `pb` (BullMQ job.processedBy)。job マップから
+		// buildJob が常に詰めるので追加 Redis 呼び出しは無い。未処理 job は空。
+		ProcessedBy: job.ProcessedBy,
 	}
 	if st != nil {
 		// CompletedAt は asynq driver と揃えて「成功完了したジョブ」
