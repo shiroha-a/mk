@@ -31,12 +31,33 @@ type Handler struct {
 	fieldRes     *entity.NoteFieldResolver
 	// userRepo は roles/notes の hardMutedWords filter (#787)。
 	userRepo repository.UserRepository
+	// mutingRepo / blockingRepo / channelMutingRepo は roles/notes で viewer が
+	// mute/block した user の note と mute した channel の note を除外する (#1544)。
+	// upstream notes.ts の generateBaseNoteFilteringQuery + channelMuting に対応。
+	// 未配線時は該当 dimension の filter skip。
+	mutingRepo        repository.MutingRepository
+	blockingRepo      repository.BlockingRepository
+	channelMutingRepo repository.ChannelMutingRepository
 }
 
 // SetUserRepo wires a UserRepository so roles/notes filters out notes that
 // match the viewer's hardMutedWords (#787).
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetMuteBlockRepos wires the muting / blocking / channel-muting repositories so
+// roles/notes excludes notes from users the viewer muted or who blocked the
+// viewer, plus notes in channels the viewer muted (#1544). Unwired repos simply
+// disable that filter dimension.
+func (h *Handler) SetMuteBlockRepos(
+	muting repository.MutingRepository,
+	blocking repository.BlockingRepository,
+	channelMuting repository.ChannelMutingRepository,
+) {
+	h.mutingRepo = muting
+	h.blockingRepo = blocking
+	h.channelMutingRepo = channelMuting
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
@@ -161,6 +182,12 @@ func (h *Handler) Notes(c echo.Context) error {
 	if !r.IsPublic {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
 	}
+	// upstream notes.ts: role が public でも !isExplorable なら空配列を返す
+	// (role の note を explore させない policy)。このガードが無いと非 explorable
+	// role の note 一覧が漏れる (#1544)。
+	if !r.IsExplorable {
+		return c.JSON(http.StatusOK, []any{})
+	}
 
 	if h.notesQuery == nil {
 		return c.JSON(http.StatusOK, []any{})
@@ -182,6 +209,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	viewer := middleware.GetUser(c)
+	// mute/block/channel-mute filter (#1544): upstream notes.ts の
+	// generateBaseNoteFilteringQuery + channelMuting に相当。set のロードに失敗
+	// したら fail-closed で 500 を返す (security 項目なので silently leak しない)。
+	mbSets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, h.channelMutingRepo)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)

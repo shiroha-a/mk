@@ -38,6 +38,27 @@ type Handler struct {
 	// 滞留した entry や設定ミスに対する defense-in-depth として handler でも
 	// 1 段 filter する。未配線時は filter skip (旧挙動)。
 	queryService *corenote.QueryService
+	// mutingRepo / blockingRepo / channelMutingRepo は antennas/notes で
+	// viewer が mute/block した user の note と mute した channel の note を除外する
+	// (#1544)。upstream notes.ts の generateBaseNoteFilteringQuery + channelMuting
+	// に対応。未配線時は該当 dimension の filter skip。
+	mutingRepo        repository.MutingRepository
+	blockingRepo      repository.BlockingRepository
+	channelMutingRepo repository.ChannelMutingRepository
+}
+
+// SetMuteBlockRepos wires the muting / blocking / channel-muting repositories so
+// antennas/notes excludes notes from users the viewer muted or who blocked the
+// viewer, plus notes in channels the viewer muted (#1544). Unwired repos simply
+// disable that filter dimension.
+func (h *Handler) SetMuteBlockRepos(
+	muting repository.MutingRepository,
+	blocking repository.BlockingRepository,
+	channelMuting repository.ChannelMutingRepository,
+) {
+	h.mutingRepo = muting
+	h.blockingRepo = blocking
+	h.channelMutingRepo = channelMuting
 }
 
 // SetUserRepo wires a UserRepository so antennas/notes filters out notes that
@@ -323,6 +344,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	if h.queryService != nil {
 		notes = h.queryService.FilterVisible(user, notes)
 	}
+	// mute/block/channel-mute filter (#1544): upstream notes.ts の
+	// generateBaseNoteFilteringQuery + channelMuting に相当。set のロードに失敗
+	// したら fail-closed で 500 を返す (security 項目なので silently leak しない)。
+	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, h.channelMutingRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
 	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
