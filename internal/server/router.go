@@ -1730,7 +1730,7 @@ func (s *Server) setupRoutes() {
 	streamRegistry.Register("main", channels.NewMain)
 	streamRegistry.Register("drive", channels.NewDrive)
 	streamRegistry.Register("hashtag", channels.NewHashtag)
-	streamRegistry.Register("antenna", channels.NewAntenna)
+	streamRegistry.Register("antenna", channels.NewAntennaFactory(antennaRepo).New)
 	streamRegistry.Register("channel", channels.NewChannelTimeline)
 	streamRegistry.Register("userList", channels.NewUserList)
 	streamRegistry.Register("roleTimeline", channels.NewRoleTimeline)
