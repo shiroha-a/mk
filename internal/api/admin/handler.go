@@ -439,6 +439,9 @@ type QueueTaskSummary struct {
 	EnqueuedAt    time.Time
 	ProcessedAt   time.Time
 	CompletedAt   time.Time
+	// ProcessedBy is the worker name that last dequeued the job (BullMQ
+	// job.processedBy). Output as the upstream optional QueueJob.processedBy.
+	ProcessedBy string
 }
 
 // SetDriveFileRepo attaches a DriveFileRepository for admin drive operations.

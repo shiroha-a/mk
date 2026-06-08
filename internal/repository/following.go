@@ -29,12 +29,17 @@ type FollowingRepository interface {
 	// cursor-paginated by sinceID / untilID. Used by /api/following/list
 	// (upstream 2026.5.2 #17385 + #17416).
 	ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error)
-	// ListFollowersByHost returns Following rows whose followerHost matches
-	// host. Used by federation/followers (remote users who follow a local
-	// user on this instance are listed under the remote instance's name).
+	// ListFollowersByHost returns Following rows whose followeeHost matches
+	// host. Used by federation/followers. 本家 followers.ts は
+	// `following.followeeHost = :host` で絞る (= 指定リモートホストの
+	// ユーザーがフォローされている = followee 側がそのホスト) ので、列は
+	// followeeHost。
 	ListFollowersByHost(host string, limit, offset int) ([]*model.Following, error)
-	// ListFollowingByHost returns Following rows whose followeeHost matches
-	// host. Used by federation/following.
+	// ListFollowingByHost returns Following rows whose followerHost matches
+	// host. Used by federation/following. 本家 following.ts は
+	// `following.followerHost = :host` で絞る (= 指定リモートホストの
+	// ユーザーがフォローしている = follower 側がそのホスト) ので、列は
+	// followerHost。
 	ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error)
 	// UpdateRelation applies partial updates to a Following row identified
 	// by (followerID, followeeID). Used by following/update.
@@ -175,8 +180,8 @@ func (r *followingRepository) ListFollowingForList(followerID, sinceID, untilID 
 	return rows, nil
 }
 
-// ListFollowersByHost returns Following rows whose followerHost matches the
-// given remote host.
+// ListFollowersByHost returns Following rows whose followeeHost matches the
+// given remote host. 本家 federation/followers.ts と同じく followeeHost で絞る。
 func (r *followingRepository) ListFollowersByHost(host string, limit, offset int) ([]*model.Following, error) {
 	if limit <= 0 {
 		limit = 30
@@ -185,15 +190,15 @@ func (r *followingRepository) ListFollowersByHost(host string, limit, offset int
 		limit = 100
 	}
 	var rows []*model.Following
-	if err := r.db.Where(`"followerHost" = ?`, host).
+	if err := r.db.Where(`"followeeHost" = ?`, host).
 		Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
-// ListFollowingByHost returns Following rows whose followeeHost matches the
-// given remote host.
+// ListFollowingByHost returns Following rows whose followerHost matches the
+// given remote host. 本家 federation/following.ts と同じく followerHost で絞る。
 func (r *followingRepository) ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error) {
 	if limit <= 0 {
 		limit = 30
@@ -202,7 +207,7 @@ func (r *followingRepository) ListFollowingByHost(host string, limit, offset int
 		limit = 100
 	}
 	var rows []*model.Following
-	if err := r.db.Where(`"followeeHost" = ?`, host).
+	if err := r.db.Where(`"followerHost" = ?`, host).
 		Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}

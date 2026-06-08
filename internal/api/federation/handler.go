@@ -38,6 +38,10 @@ type Handler struct {
 	userRepo      repository.UserRepository
 	resolver      ActorResolver
 	moderator     ModeratorChecker
+	// idGen は federation/followers / federation/following の Following packer
+	// で createdAt を aidx ID から導出するために使う。nil の場合 createdAt は
+	// 空文字列になる (= 互換性は維持しつつ degrade)。
+	idGen id.Generator
 }
 
 // NewHandler creates a new federation Handler.
@@ -53,6 +57,12 @@ func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 // SetUserRepo attaches a UserRepository for the users-per-host listing.
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetIDGen wires an id.Generator so federation/followers / federation/following
+// can derive Following.createdAt from aidx-encoded row IDs.
+func (h *Handler) SetIDGen(g id.Generator) {
+	h.idGen = g
 }
 
 // SetResolver attaches an ActorResolver for update-remote-user.

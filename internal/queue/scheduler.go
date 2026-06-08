@@ -77,6 +77,53 @@ func (s *Scheduler) RegisterRetentionJob() error {
 	)
 }
 
+// RegisterCheckExpiredMutingsJob registers the expired-mute prune cron
+// (#1563) every 5 minutes, mirroring upstream `checkExpiredMutings`. The
+// prune is implemented by processors.CheckExpiredMutingsProcessor.
+func (s *Scheduler) RegisterCheckExpiredMutingsJob() error {
+	return s.inner.Register("*/5 * * * *", TaskTypeCheckExpiredMutings, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(5*time.Minute),
+	)
+}
+
+// RegisterCleanJob registers the daily generic clean cron (#1563) at 00:00
+// UTC, mirroring upstream `clean`. user_ip 90 日 prune / 期限切れ
+// role_assignment 削除 / reversi outdated game 削除を processors.CleanProcessor
+// が行う。
+func (s *Scheduler) RegisterCleanJob() error {
+	return s.inner.Register("0 0 * * *", TaskTypeClean, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(24*time.Hour),
+	)
+}
+
+// RegisterCleanRemoteNotesJob registers the daily remote-note cleanup cron
+// (#1563) at 04:00 UTC, mirroring upstream `cleanRemoteNotes`. 旧実装は
+// router.go の 6h time.Ticker だったが、TS の systemQueue cron に揃える。
+// enable gate は processor 側で meta を見るので cron は無条件登録する。
+func (s *Scheduler) RegisterCleanRemoteNotesJob() error {
+	return s.inner.Register("0 4 * * *", TaskTypeCleanRemoteNotes, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(24*time.Hour),
+	)
+}
+
+// RegisterCheckModeratorsActivityJob registers the hourly moderator-activity
+// cron (#1563) at minute 30, mirroring upstream `checkModeratorsActivity`.
+// processors.CheckModeratorsActivityProcessor が inactivity 判定と通知を行う。
+// remaining.hours%6 の de-dup が崩れないよう 1h cadence を保つ (ticker 不可)。
+func (s *Scheduler) RegisterCheckModeratorsActivityJob() error {
+	return s.inner.Register("30 * * * *", TaskTypeCheckModeratorsActivity, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(1*time.Hour),
+	)
+}
+
 // Start launches the scheduler in the background. Returns immediately.
 func (s *Scheduler) Start() error { return s.inner.Start() }
 

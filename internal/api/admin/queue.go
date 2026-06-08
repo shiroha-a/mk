@@ -772,6 +772,12 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		pack["processedOn"] = ms
 		pack["processedAt"] = ms
 	}
+	// processedBy は golden QueueJob で optional:true,string (Bull job.processedBy =
+	// 処理した worker 名)。upstream packJobData は値があるときだけ present になるので、
+	// 非空のときだけ key を出す (未処理 job は省略)。
+	if t.ProcessedBy != "" {
+		pack["processedBy"] = t.ProcessedBy
+	}
 	// 完了時刻は成功 (CompletedAt) / 失敗 (LastFailedAt) いずれかの finish 時刻。
 	if finished := t.CompletedAt; !finished.IsZero() {
 		pack["finishedOn"] = finished.UnixMilli()

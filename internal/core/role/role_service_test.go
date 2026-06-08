@@ -1501,3 +1501,38 @@ func TestMergeMetaPolicies(t *testing.T) {
 		assert.Equal(t, float64(42), merged["someUnknownPolicy"], "未知 key は coerce 対象外で素通し")
 	})
 }
+
+func TestService_GetModerators(t *testing.T) {
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	userRepo := testutil.NewMockUserRepository()
+	svc.SetUserRepo(userRepo)
+
+	// moderator role + 通常 role を用意。
+	roleRepo.Roles["modrole"] = &model.Role{ID: "modrole", IsModerator: true}
+	roleRepo.Roles["normalrole"] = &model.Role{ID: "normalrole"}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ga1", UserID: "mod1", RoleID: "modrole"}))
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ga2", UserID: "normal1", RoleID: "normalrole"}))
+	userRepo.Users["mod1"] = &model.User{ID: "mod1"}
+	userRepo.Users["root1"] = &model.User{ID: "root1"}
+	// root user を meta に設定 (includeRoot)。
+	rootID := "root1"
+	metaRepo.Meta = &model.Meta{RootUserID: &rootID}
+
+	mods, err := svc.GetModerators()
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, u := range mods {
+		ids[u.ID] = true
+	}
+	assert.True(t, ids["mod1"], "moderator role を持つ user が含まれる")
+	assert.True(t, ids["root1"], "root user が含まれる")
+	assert.False(t, ids["normal1"], "通常 user は含まれない")
+}
+
+func TestService_GetModerators_NilUserRepo(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	// userRepo 未配線 (drop-in optional) は nil を返す。
+	mods, err := svc.GetModerators()
+	require.NoError(t, err)
+	assert.Nil(t, mods)
+}

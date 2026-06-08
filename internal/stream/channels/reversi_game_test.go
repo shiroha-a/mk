@@ -49,6 +49,17 @@ func (r *channelFakeRepo) Delete(id string) error {
 	return nil
 }
 
+func (r *channelFakeRepo) DeleteOutdatedGames(thresholdID string) (int64, error) {
+	var n int64
+	for id, g := range r.games {
+		if id < thresholdID && !g.IsStarted {
+			delete(r.games, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 var assertError = assertErr("not found")
 
 type assertErr string

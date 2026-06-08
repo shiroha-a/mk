@@ -83,6 +83,39 @@ func TestRoleRepository_FindByID_NotFound(t *testing.T) {
 
 // --- RoleAssignmentRepository ---
 
+func TestRoleAssignmentRepository_DeleteExpired(t *testing.T) {
+	roleRepo := NewRoleRepository(testDB)
+	assignRepo := NewRoleAssignmentRepository(testDB)
+
+	now := time.Now()
+	role := &model.Role{
+		ID: "role_de_test", UpdatedAt: now, LastUsedAt: now, Name: "Mod",
+		Target: model.RoleTargetManual, Policies: datatypes.JSON([]byte("{}")),
+		CondFormula: datatypes.JSON([]byte("{}")), IsModerator: true,
+	}
+	require.NoError(t, roleRepo.Create(role))
+	defer cleanupRole(t, role.ID)
+	createTestUser(t, "de_u1")
+	createTestUser(t, "de_u2")
+	createTestUser(t, "de_u3")
+
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "de_a1", UserID: "de_u1", RoleID: role.ID}))                     // perpetual
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "de_a2", UserID: "de_u2", RoleID: role.ID, ExpiresAt: &future})) // not expired
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "de_a3", UserID: "de_u3", RoleID: role.ID, ExpiresAt: &past}))   // expired
+
+	n, err := assignRepo.DeleteExpired(now)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n, "期限切れ 1 件だけ削除")
+	ok, _ := assignRepo.Exists("de_u1", role.ID)
+	assert.True(t, ok, "perpetual は残る")
+	ok, _ = assignRepo.Exists("de_u2", role.ID)
+	assert.True(t, ok, "未期限切れは残る")
+	ok, _ = assignRepo.Exists("de_u3", role.ID)
+	assert.False(t, ok, "期限切れは削除済み")
+}
+
 func TestRoleAssignmentRepository_CRUD(t *testing.T) {
 	roleRepo := NewRoleRepository(testDB)
 	assignRepo := NewRoleAssignmentRepository(testDB)

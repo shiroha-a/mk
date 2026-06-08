@@ -27,14 +27,24 @@ var (
 	ErrNotFollowing = errors.New("not following this channel")
 )
 
+// ModeratorChecker reports whether a user holds a moderator/admin role.
+// Update consumes it so moderators can edit channels they do not own,
+// matching upstream channels/update (roleService.isModerator). Defined here
+// to avoid a hard dep on core/role (circular import). nil disables the
+// bypass (owner-only edit).
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Service provides channel CRUD / follow / timeline operations.
 type Service struct {
-	repo          repository.ChannelRepository
-	followingRepo repository.ChannelFollowingRepository
-	noteRepo      repository.NoteRepository
-	unreadRepo    repository.ChannelNoteUnreadRepository
-	idGen         id.Generator
-	clock         func() time.Time
+	repo             repository.ChannelRepository
+	followingRepo    repository.ChannelFollowingRepository
+	noteRepo         repository.NoteRepository
+	unreadRepo       repository.ChannelNoteUnreadRepository
+	moderatorChecker ModeratorChecker
+	idGen            id.Generator
+	clock            func() time.Time
 }
 
 // NewService constructs a channel Service. noteRepo は Timeline / OnNotePosted
@@ -61,6 +71,13 @@ func (s *Service) SetClock(now func() time.Time) {
 	}
 }
 
+// SetModeratorChecker wires a ModeratorChecker so Update lets moderators
+// edit channels they do not own (upstream channels/update parity). nil keeps
+// owner-only edit semantics.
+func (s *Service) SetModeratorChecker(m ModeratorChecker) {
+	s.moderatorChecker = m
+}
+
 // SetUnreadRepo attaches a ChannelNoteUnreadRepository so OnNotePosted can
 // fan out per-follower unread rows. Optional — nil disables unread
 // tracking (lastNotedAt / notesCount updates still run).
@@ -76,6 +93,9 @@ type CreateInput struct {
 	Color       string
 	IsSensitive bool
 	BannerID    *string
+	// AllowRenoteToExternal は nil で upstream の `?? true` 既定に従う。
+	// 明示的に false を渡せば外部への renote を禁止する channel になる。
+	AllowRenoteToExternal *bool
 }
 
 // Create persists a new channel and returns it. Color が空文字なら Misskey
@@ -93,6 +113,12 @@ func (s *Service) Create(in CreateInput) (*model.Channel, error) {
 	if color == "" {
 		color = "#86b300"
 	}
+	// upstream create.ts:93 は `ps.allowRenoteToExternal ?? true`。未指定 (nil)
+	// なら true、明示値があればそれを保存する。
+	allowRenoteToExternal := true
+	if in.AllowRenoteToExternal != nil {
+		allowRenoteToExternal = *in.AllowRenoteToExternal
+	}
 	c := &model.Channel{
 		ID:                    s.idGen.Generate(now),
 		Name:                  in.Name,
@@ -101,7 +127,7 @@ func (s *Service) Create(in CreateInput) (*model.Channel, error) {
 		UserID:                &owner,
 		IsSensitive:           in.IsSensitive,
 		BannerID:              in.BannerID,
-		AllowRenoteToExternal: true,
+		AllowRenoteToExternal: allowRenoteToExternal,
 	}
 	if err := s.repo.Create(c); err != nil {
 		return nil, err
@@ -129,15 +155,23 @@ type UpdateInput struct {
 	BannerID *string
 	// PinnedNoteIDs: nil = 変更なし、非 nil = その配列で置換。
 	PinnedNoteIDs *[]string
+	// AllowRenoteToExternal: nil = 変更なし、非 nil でその値に更新。
+	AllowRenoteToExternal *bool
 }
 
-// Update applies the non-nil fields to a channel owned by ownerID.
-func (s *Service) Update(ownerID, channelID string, in UpdateInput) (*model.Channel, error) {
+// Update applies the non-nil fields to a channel. The caller (userID) must own
+// the channel, or be a moderator — upstream channels/update grants moderators
+// edit privilege on channels they do not own (update.ts:91-94).
+func (s *Service) Update(userID, channelID string, in UpdateInput) (*model.Channel, error) {
 	c, err := s.repo.FindByID(channelID)
 	if err != nil {
 		return nil, ErrChannelNotFound
 	}
-	if c.UserID == nil || *c.UserID != ownerID {
+	// owner でなくても moderator なら編集を許可する (upstream parity)。
+	// moderatorChecker 未配線時は owner-only にフォールバックする。
+	isOwner := c.UserID != nil && *c.UserID == userID
+	isModerator := s.moderatorChecker != nil && s.moderatorChecker.IsModerator(userID)
+	if !isOwner && !isModerator {
 		return nil, ErrAccessDenied
 	}
 	fields := map[string]any{}
@@ -175,6 +209,11 @@ func (s *Service) Update(ownerID, channelID string, in UpdateInput) (*model.Chan
 		// pq.StringArray でラップしないと空 slice が NULL 化して NOT NULL 制約
 		// 違反になる (aliases #729 と同型)。
 		fields["pinnedNoteIds"] = pq.StringArray(*in.PinnedNoteIDs)
+	}
+	// upstream update.ts:119 は boolean のときのみ更新する (`typeof === 'boolean'`)。
+	// nil は無変更、明示値ならその値で上書きする。
+	if in.AllowRenoteToExternal != nil {
+		fields["allowRenoteToExternal"] = *in.AllowRenoteToExternal
 	}
 	if err := s.repo.UpdateFields(channelID, fields); err != nil {
 		return nil, err

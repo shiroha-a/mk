@@ -228,6 +228,93 @@ func TestUpdate_DescriptionUpdated(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestCreate_AllowRenoteToExternalFalse(t *testing.T) {
+	// channels/create で allowRenoteToExternal:false を渡すと保存され、
+	// response にも false で出る (#1540)。
+	h, repo, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"alpha","allowRenoteToExternal":false}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["allowRenoteToExternal"])
+	for _, ch := range repo.Channels {
+		assert.False(t, ch.AllowRenoteToExternal)
+	}
+}
+
+func TestCreate_AllowRenoteToExternalDefaultsTrue(t *testing.T) {
+	// 未指定なら upstream `?? true` 既定で true。
+	h, _, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"alpha"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["allowRenoteToExternal"])
+}
+
+func TestUpdate_AllowRenoteToExternal(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner, AllowRenoteToExternal: true}
+	c, rec := newReq(t, `{"channelId":"c1","allowRenoteToExternal":false}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, repo.Channels["c1"].AllowRenoteToExternal)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["allowRenoteToExternal"])
+}
+
+// stubModerator is a corechannel.ModeratorChecker test double.
+type stubModerator struct {
+	moderators map[string]bool
+}
+
+func (s stubModerator) IsModerator(userID string) bool { return s.moderators[userID] }
+
+// newModeratorHandler builds a handler whose service treats the given user IDs
+// as moderators (channels/update bypass, #1540).
+func newModeratorHandler(t *testing.T, moderators ...string) (*Handler, *testutil.MockChannelRepository) {
+	t.Helper()
+	repo := testutil.NewMockChannelRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corechannel.NewService(repo, testutil.NewMockChannelFollowingRepository(), testutil.NewMockNoteRepository(), idGen)
+	mods := make(map[string]bool, len(moderators))
+	for _, m := range moderators {
+		mods[m] = true
+	}
+	svc.SetModeratorChecker(stubModerator{moderators: mods})
+	return NewHandler(svc, idGen), repo
+}
+
+func TestUpdate_ModeratorBypass(t *testing.T) {
+	// owner でない moderator が他人の channel を編集できる (#1540)。
+	h, repo := newModeratorHandler(t, "mod")
+	owner := "bob"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner}
+	c, rec := newReq(t, `{"channelId":"c1","name":"edited"}`)
+	setUser(c, "mod")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "edited", repo.Channels["c1"].Name)
+}
+
+func TestUpdate_NonModeratorNonOwnerForbidden(t *testing.T) {
+	// fail-closed: moderator でも owner でもなければ 403。
+	h, repo := newModeratorHandler(t, "mod")
+	owner := "bob"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner}
+	c, rec := newReq(t, `{"channelId":"c1","name":"x"}`)
+	setUser(c, "intruder")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 // failingUpdateRepo causes UpdateFields to fail to exercise the internalError
 // branch.
 type failingUpdateRepo struct {

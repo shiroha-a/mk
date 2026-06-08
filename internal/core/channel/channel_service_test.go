@@ -144,6 +144,106 @@ func TestUpdate_RepoError(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// --- Create / Update: allowRenoteToExternal --------------------------------
+
+func TestCreate_AllowRenoteToExternal_DefaultTrue(t *testing.T) {
+	// nil は upstream の `?? true` 既定に従う。
+	svc, _, _, _ := newSvc(t)
+	c, err := svc.Create(channel.CreateInput{OwnerID: "u1", Name: "alpha"})
+	require.NoError(t, err)
+	assert.True(t, c.AllowRenoteToExternal)
+}
+
+func TestCreate_AllowRenoteToExternal_ExplicitFalse(t *testing.T) {
+	svc, _, _, _ := newSvc(t)
+	no := false
+	c, err := svc.Create(channel.CreateInput{OwnerID: "u1", Name: "alpha", AllowRenoteToExternal: &no})
+	require.NoError(t, err)
+	assert.False(t, c.AllowRenoteToExternal)
+}
+
+func TestCreate_AllowRenoteToExternal_ExplicitTrue(t *testing.T) {
+	svc, _, _, _ := newSvc(t)
+	yes := true
+	c, err := svc.Create(channel.CreateInput{OwnerID: "u1", Name: "alpha", AllowRenoteToExternal: &yes})
+	require.NoError(t, err)
+	assert.True(t, c.AllowRenoteToExternal)
+}
+
+func TestUpdate_AllowRenoteToExternal_Set(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner, AllowRenoteToExternal: true}
+	no := false
+	got, err := svc.Update("u1", "c1", channel.UpdateInput{AllowRenoteToExternal: &no})
+	require.NoError(t, err)
+	assert.False(t, got.AllowRenoteToExternal)
+}
+
+func TestUpdate_AllowRenoteToExternal_NilLeavesUnchanged(t *testing.T) {
+	// nil のときは無変更 (upstream は typeof boolean のときだけ更新)。
+	svc, repo, _, _ := newSvc(t)
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner, AllowRenoteToExternal: true}
+	name := "alpha-v2"
+	got, err := svc.Update("u1", "c1", channel.UpdateInput{Name: &name})
+	require.NoError(t, err)
+	assert.True(t, got.AllowRenoteToExternal)
+}
+
+// --- Update: moderator bypass ----------------------------------------------
+
+// stubModerator is a ModeratorChecker test double.
+type stubModerator struct {
+	moderators map[string]bool
+}
+
+func (s stubModerator) IsModerator(userID string) bool { return s.moderators[userID] }
+
+func TestUpdate_ModeratorCanEditOthersChannel(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	svc.SetModeratorChecker(stubModerator{moderators: map[string]bool{"mod": true}})
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner}
+	name := "edited-by-mod"
+	got, err := svc.Update("mod", "c1", channel.UpdateInput{Name: &name})
+	require.NoError(t, err)
+	assert.Equal(t, "edited-by-mod", got.Name)
+}
+
+func TestUpdate_OwnerStillEditsWithModeratorChecker(t *testing.T) {
+	// moderatorChecker 配線後も owner は引き続き編集できる。
+	svc, repo, _, _ := newSvc(t)
+	svc.SetModeratorChecker(stubModerator{moderators: map[string]bool{"mod": true}})
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner}
+	name := "edited-by-owner"
+	got, err := svc.Update("u1", "c1", channel.UpdateInput{Name: &name})
+	require.NoError(t, err)
+	assert.Equal(t, "edited-by-owner", got.Name)
+}
+
+func TestUpdate_NonModeratorNonOwnerDenied(t *testing.T) {
+	// fail-closed: moderator でも owner でもない第三者は弾く。
+	svc, repo, _, _ := newSvc(t)
+	svc.SetModeratorChecker(stubModerator{moderators: map[string]bool{"mod": true}})
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", UserID: &owner}
+	name := "x"
+	_, err := svc.Update("intruder", "c1", channel.UpdateInput{Name: &name})
+	assert.ErrorIs(t, err, channel.ErrAccessDenied)
+}
+
+func TestUpdate_NoModeratorCheckerFallsBackToOwnerOnly(t *testing.T) {
+	// moderatorChecker 未配線なら owner-only にフォールバックする。
+	svc, repo, _, _ := newSvc(t)
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", UserID: &owner}
+	name := "x"
+	_, err := svc.Update("mod", "c1", channel.UpdateInput{Name: &name})
+	assert.ErrorIs(t, err, channel.ErrAccessDenied)
+}
+
 // --- Follow / Unfollow -----------------------------------------------------
 
 func TestFollow_HappyPath(t *testing.T) {

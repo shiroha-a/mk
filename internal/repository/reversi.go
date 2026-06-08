@@ -19,6 +19,12 @@ type ReversiRepository interface {
 	// "my=false" な /reversi/games 用。
 	ListStartedCursor(sinceID, untilID string, limit int) ([]*model.ReversiGame, error)
 	Delete(id string) error
+	// DeleteOutdatedGames removes not-yet-started games whose id is older than
+	// thresholdID. Mirrors upstream reversiService.cleanOutdatedGames (id <
+	// idService.gen(now-10min) AND isStarted=false): abandoned matchmaking
+	// games never started within ~10 minutes are pruned by the clean cron
+	// (#1563). Returns rows deleted.
+	DeleteOutdatedGames(thresholdID string) (int64, error)
 }
 
 type reversiRepository struct {
@@ -32,6 +38,11 @@ func NewReversiRepository(db *gorm.DB) ReversiRepository {
 
 func (r *reversiRepository) Create(game *model.ReversiGame) error {
 	return r.db.Create(game).Error
+}
+
+func (r *reversiRepository) DeleteOutdatedGames(thresholdID string) (int64, error) {
+	res := r.db.Where(`"id" < ? AND "isStarted" = ?`, thresholdID, false).Delete(&model.ReversiGame{})
+	return res.RowsAffected, res.Error
 }
 
 func (r *reversiRepository) FindByID(id string) (*model.ReversiGame, error) {

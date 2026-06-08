@@ -119,6 +119,17 @@ func (m *mockReversiRepo) Delete(id string) error {
 	return nil
 }
 
+func (m *mockReversiRepo) DeleteOutdatedGames(thresholdID string) (int64, error) {
+	var n int64
+	for id, g := range m.games {
+		if id < thresholdID && !g.IsStarted {
+			delete(m.games, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func newTestHandler() (*Handler, *mockReversiRepo) {
 	repo := newMock()
 	idGen, _ := id.NewGenerator("aidx")
