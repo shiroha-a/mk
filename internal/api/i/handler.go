@@ -175,6 +175,121 @@ func (h *Handler) resolveUserIDByURI(uri string) (string, bool) {
 	return u.ID, true
 }
 
+// resolveAlsoKnownAs converts the i/update alsoKnownAs lines (each an acct
+// `@user@host` / `@user` or a canonical AP URI) into a deduplicated list of
+// canonical actor URIs, mirroring upstream Misskey TS i/update.ts:445-475.
+//
+// 各 line につき:
+//   - 空文字なら NO_SUCH_USER (upstream の `if (!line) throw noSuchUser`)
+//   - acct/URI をローカル DB から解決 (i/move 同様 remote fetch はしない。
+//     frontend は移行先 actor 解決後の acct/URI を渡す運用)
+//   - 解決した user が自分自身なら FORBIDDEN_TO_SET_YOURSELF
+//   - 解決した user の canonical URI が空なら URI_NULL
+//
+// 戻り値の URI は入力順を保ちつつ重複を除く (upstream の Set 相当)。空 line を
+// 1 つも含まない要求が空配列ならそのまま空 slice を返す (= core 側で NULL
+// クリア)。
+func (h *Handler) resolveAlsoKnownAs(meID string, lines []string) ([]string, *avatarDecorationAPIError) {
+	noSuchUser := &avatarDecorationAPIError{
+		status: http.StatusBadRequest,
+		body:   apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"),
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return nil, noSuchUser
+		}
+		u := h.lookupAlsoKnownAsTarget(line)
+		if u == nil {
+			return nil, noSuchUser
+		}
+		if u.ID == meID {
+			return nil, &avatarDecorationAPIError{
+				status: http.StatusBadRequest,
+				body:   apierr.Error("FORBIDDEN_TO_SET_YOURSELF", "You can't set yourself as your own alias.", "25c90186-4ab0-49c8-9bba-a1fa6c202ba4"),
+			}
+		}
+		uri := h.canonicalUserURI(u)
+		if uri == "" {
+			return nil, &avatarDecorationAPIError{
+				status: http.StatusBadRequest,
+				body:   apierr.Error("URI_NULL", "User ActivityPup URI is null.", "bf326f31-d430-4f97-9933-5d61e4d48a23"),
+			}
+		}
+		if _, dup := seen[uri]; dup {
+			continue
+		}
+		seen[uri] = struct{}{}
+		out = append(out, uri)
+	}
+	return out, nil
+}
+
+// lookupAlsoKnownAsTarget resolves a single alsoKnownAs line to a local user
+// row. http(s) URIs go through FindByURI; acct forms (`@user@host` / `@user`)
+// go through FindByUsernameLower. Returns nil on any miss or when userRepo is
+// unwired (fail-closed = NO_SUCH_USER at the caller).
+func (h *Handler) lookupAlsoKnownAsTarget(line string) *model.User {
+	if h.userRepo == nil {
+		return nil
+	}
+	if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+		u, err := h.userRepo.FindByURI(line)
+		if err != nil || u == nil {
+			return nil
+		}
+		return u
+	}
+	username, host := splitAcct(line)
+	if username == "" {
+		return nil
+	}
+	u, err := h.userRepo.FindByUsernameLower(username, host)
+	if err != nil || u == nil {
+		return nil
+	}
+	return u
+}
+
+// canonicalUserURI returns the actor URI used as the alsoKnownAs alias for u:
+// local users get the server-rooted /users/<id> form, remote users surface
+// their stored uri. Returns "" when a remote user has no uri (= URI_NULL).
+func (h *Handler) canonicalUserURI(u *model.User) string {
+	if u.IsLocal() {
+		if h.serverURL == "" {
+			return ""
+		}
+		return strings.TrimRight(h.serverURL, "/") + "/users/" + u.ID
+	}
+	if u.URI != nil {
+		return *u.URI
+	}
+	return ""
+}
+
+// splitAcct parses an acct form (`@user@host` / `user@host` / `@user`) into a
+// lowercased username and optional host pointer (nil for local). Empty / `@`
+// only input yields an empty username so the caller can reject it.
+func splitAcct(acct string) (string, *string) {
+	trimmed := strings.TrimPrefix(strings.TrimSpace(acct), "@")
+	if trimmed == "" {
+		return "", nil
+	}
+	username := trimmed
+	var host string
+	if at := strings.IndexByte(trimmed, '@'); at >= 0 {
+		username = trimmed[:at]
+		host = strings.ToLower(strings.TrimSpace(trimmed[at+1:]))
+	}
+	username = strings.ToLower(username)
+	if host == "" {
+		return username, nil
+	}
+	return username, &host
+}
+
 // MainStreamPublisher emits events to a single user's `main` WebSocket
 // channel. Used here to publish `myTokenRegenerated` so other sessions of
 // the same user learn that their API token was invalidated.
@@ -815,6 +930,13 @@ type UpdateRequest struct {
 	// `array of {name, value}` で maxItems 16。nil (= 省略) は不変、`[]` で
 	// クリア、要素ありで上書き。core/user 側で trim + 空 entry 排除を行う。
 	Fields *[]FieldInput `json:"fields"`
+	// AlsoKnownAs は引越し元エイリアス (#1546)。upstream Misskey TS
+	// i/update.ts:226-231 paramDef: array maxItems 10 uniqueItems。各要素は
+	// acct (@user@host) または canonical URI。handler が resolveAlsoKnownAs で
+	// canonical URI 列へ解決し core に渡す。nil (省略) は不変、`[]` は NULL
+	// クリア。i/move の前提となる alsoKnownAs を設定する経路 (これが無いと
+	// 移行 flow が成立しない)。
+	AlsoKnownAs *[]string `json:"alsoKnownAs"`
 }
 
 // FieldInput is the {name, value} shape accepted by i/update for profile
@@ -1156,6 +1278,29 @@ func (h *Handler) Update(c echo.Context) error {
 			items[i] = user.FieldItem{Name: f.Name, Value: f.Value}
 		}
 		in.Fields = &items
+	}
+	if req.AlsoKnownAs != nil {
+		// 引越し元エイリアス (#1546)。upstream update.ts:226-231,445-475 と同順:
+		//  1. 既に movedToUri 済なら YOUR_ACCOUNT_MOVED (403)
+		//  2. 各 line を acct/URI → canonical URI へ解決
+		//     - 解決失敗で NO_SUCH_USER、自分指定で FORBIDDEN_TO_SET_YOURSELF、
+		//       resolved user の URI が空なら URI_NULL
+		//  3. 重複排除した URI 群を core に渡す (空なら NULL クリア)
+		// upstream paramDef maxItems 10 / uniqueItems も合わせて enforce する。
+		if me.MovedToURI != nil && *me.MovedToURI != "" {
+			return c.JSON(http.StatusForbidden, apierr.Error(
+				"YOUR_ACCOUNT_MOVED", "You have moved your account.",
+				"56f20ec9-fd06-4fa5-841b-edd6d7d4fa31",
+			))
+		}
+		if len(*req.AlsoKnownAs) > 10 {
+			return apierr.JSONInvalidParam(c)
+		}
+		resolved, apiErr := h.resolveAlsoKnownAs(me.ID, *req.AlsoKnownAs)
+		if apiErr != nil {
+			return c.JSON(apiErr.status, apiErr.body)
+		}
+		in.AlsoKnownAs = &resolved
 	}
 
 	bundle, err := h.userService.UpdateProfile(me.ID, in)

@@ -543,6 +543,10 @@ func applyUserFields(u *model.User, fields map[string]any) {
 				u.AlsoKnownAs = s
 			case string:
 				u.AlsoKnownAs = &s
+			case nil:
+				// i/update の alsoKnownAs クリア (#1546): 空配列で NULL を書く
+				// 経路を mock でも反映する。
+				u.AlsoKnownAs = nil
 			}
 		case "avatarUrl":
 			u.AvatarURL = ptrOrNilString(v)

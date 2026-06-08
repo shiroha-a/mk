@@ -1428,7 +1428,7 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
 	api.POST("/i/notifications", notificationsHandler.Show, middleware.RequireAuth())
-	api.POST("/i/notifications-grouped", notificationsHandler.Show, middleware.RequireAuth())
+	api.POST("/i/notifications-grouped", notificationsHandler.Grouped, middleware.RequireAuth())
 	api.POST("/notifications/mark-all-as-read", notificationsHandler.MarkAllAsRead, middleware.RequireAuth())
 	api.POST("/notifications/create", notificationsHandler.Create, middleware.RequireAuth())
 	api.POST("/notifications/flush", notificationsHandler.Flush, middleware.RequireAuth())
