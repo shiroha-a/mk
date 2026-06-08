@@ -215,6 +215,7 @@ func (s *Server) setupRoutes() {
 	// silencing 機構 (#1024)。
 	noteCreateService.SetSilencingProvider(roleService)
 	noteDeleteService := corenote.NewDeleteService(noteRepo)
+	noteDeleteService.SetUserRepo(userRepo) // #1538: resolve author for moderator delete
 	noteQueryService := corenote.NewQueryService(noteRepo, followingRepo)
 	noteQueryService.SetFavoriteRepo(noteFavoriteRepo)
 	noteQueryService.SetThreadMutingRepo(noteThreadMutingRepo)
@@ -1131,6 +1132,7 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetReactionReader(reactionCountWriter)
 	notesHandler.SetDriveFolderRepo(driveFolderRepo)
 	notesHandler.SetUserRepo(userRepo)
+	notesHandler.SetModeratorChecker(roleService) // #1538: moderator note delete
 	notesHandler.SetUserListRepo(userListRepo)
 	notehide.SetFollowingRepo(followingRepo)
 	// LocalTimeline / GlobalTimeline / HybridTimeline で ltlAvailable /

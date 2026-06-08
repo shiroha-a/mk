@@ -50,6 +50,7 @@ type Handler struct {
 	driveFolderRepo   repository.DriveFolderRepository
 	userRepo          repository.UserRepository
 	userListRepo      repository.UserListRepository
+	moderatorChecker  ModeratorChecker
 	bufReader         entity.BufferedReactionsReader
 	// ugcVisibility controls what unauthenticated visitors can see.
 	// "all" (default), "local", "none"
@@ -142,6 +143,18 @@ func (h *Handler) SetUGCVisibility(v string) {
 // SetDriveFileRepo attaches a DriveFileRepository for file resolution.
 func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
 	h.driveFileRepo = r
+}
+
+// ModeratorChecker reports whether a user holds moderator / administrator
+// privileges. core/role.Service implements it. Used by notes/delete to let a
+// moderator delete other users' notes (#1538).
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
+// SetModeratorChecker wires the moderator check used by notes/delete.
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
+	h.moderatorChecker = m
 }
 
 // SetNoteReactionRepo attaches a NoteReactionRepository for myReaction resolution.
@@ -409,7 +422,10 @@ func (h *Handler) Delete(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
-	if err := h.deleteService.Delete(user, req.NoteID); err != nil {
+	// moderator / admin は他人の note も削除できる (本家 NoteDeleteService の
+	// isModerator bypass、#1538)。checker 未配線時は false (= 著者のみ)。
+	isMod := h.moderatorChecker != nil && h.moderatorChecker.IsModerator(user.ID)
+	if err := h.deleteService.DeleteAs(user, isMod, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, note.ErrNoteNotFound):
 			// notes/delete は汎用 UUIDNoSuchNote ではなく endpoint 固有 id を使う
