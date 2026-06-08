@@ -2,6 +2,7 @@ package channels
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var errAntennaLookup = errors.New("antenna lookup failed")
 
 // mockRoleChecker is a test double for AdminRoleChecker.
 type mockRoleChecker struct {
@@ -26,6 +29,40 @@ func newAdminCh(ctx stream.ChannelContext, isAdmin bool) stream.Channel {
 	}
 	checker := &mockRoleChecker{admins: map[string]bool{userID: isAdmin}}
 	return NewAdminFactory(checker).New(ctx)
+}
+
+// mockExplorable is a test double for RoleExplorableChecker.
+type mockExplorable struct{ explorable map[string]bool }
+
+func (m mockExplorable) IsExplorable(roleID string) bool { return m.explorable[roleID] }
+
+// newRoleCh builds a roleTimeline channel where role "r1" is explorable per the
+// flag, via the gated factory (#1549).
+func newRoleCh(ctx stream.ChannelContext, explorable bool) stream.Channel {
+	return NewRoleTimelineFactory(mockExplorable{explorable: map[string]bool{"r1": explorable}}).New(ctx)
+}
+
+// stubAntennaOwners is a test double for AntennaOwnerLookup. A miss returns
+// (nil, nil) (Init rejects via a == nil); set err to exercise the lookup-error path.
+type stubAntennaOwners struct {
+	byID map[string]*model.Antenna
+	err  error
+}
+
+func (s *stubAntennaOwners) FindByID(id string) (*model.Antenna, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.byID[id], nil
+}
+
+// newAntennaCh builds an antenna channel whose lookup knows antenna "a1" owned
+// by ownerID, via the gated factory (#1569).
+func newAntennaCh(ctx stream.ChannelContext, ownerID string) stream.Channel {
+	owners := &stubAntennaOwners{byID: map[string]*model.Antenna{
+		"a1": {ID: "a1", UserID: ownerID},
+	}}
+	return NewAntennaFactory(owners).New(ctx)
 }
 
 // interface conformance checks
@@ -49,7 +86,7 @@ func TestHashtag_Lifecycle(t *testing.T) {
 	ch.Init(json.RawMessage(`{"q":[["golang"]]}`))
 	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["golang"],"visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
 
@@ -66,12 +103,71 @@ func TestHashtag_EmptyQ(t *testing.T) {
 	ch.Dispose()
 }
 
+// #1549: hashtag now receives live notes (publisher added) and re-evaluates the
+// OR-of-ANDs query + normalizes + dedupes per subscriber.
+func TestHashtag_MultiTagSubscribeUnion(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	// q = (a AND b) OR (c): subscribe distinct tags a,b,c.
+	ch.Init(json.RawMessage(`{"q":[["a","b"],["c"]]}`))
+	assert.ElementsMatch(t, []string{"hashtag:a", "hashtag:b", "hashtag:c"}, ctx.subs)
+}
+
+func TestHashtag_OrOfAndsMatch(t *testing.T) {
+	t.Run("AND group requires all tags", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a","b"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public"}`)) // only a
+		assert.Empty(t, ctx.sentType, "AND group needs both a and b")
+		ch.OnRedisEvent([]byte(`{"id":"n2","tags":["a","b","x"],"visibility":"public"}`))
+		require.Len(t, ctx.sentType, 1, "superset of {a,b} matches")
+	})
+	t.Run("OR group matches either", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["b"],"visibility":"public"}`))
+		require.Len(t, ctx.sentType, 1)
+	})
+}
+
+func TestHashtag_NormalizationParity(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["GoLang"]]}`)) // subscribes hashtag:golang
+	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
+	// payload tag in different case/width still matches after NFKC+lower.
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["ＧＯＬＡＮＧ"],"visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1, "full-width upper tag must match normalized subscription")
+}
+
+func TestHashtag_DedupeAcrossTopics(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+	// same note arrives via both hashtag:a and hashtag:b (fanout fires per topic).
+	payload := []byte(`{"id":"dup1","tags":["a","b"],"visibility":"public"}`)
+	ch.OnRedisEvent(payload)
+	ch.OnRedisEvent(payload)
+	require.Len(t, ctx.sentType, 1, "a note matching two subscribed tags must deliver once")
+}
+
+func TestHashtag_FollowersVisibilityGate(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ctx.followingSnap = map[string]bool{} // not a follower
+	ch := NewHashtag(ctx)
+	ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"userId":"author","visibility":"followers"}`))
+	assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
+}
+
 // --- Antenna ---
 
 func TestAntenna_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewAntenna(ctx)
-	ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	ch := newAntennaCh(ctx, "alice") // a1 owned by alice
+	require.NoError(t, ch.Init(json.RawMessage(`{"antennaId":"a1"}`)))
 	assert.Equal(t, []string{"antennaTimeline:a1"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
@@ -83,7 +179,7 @@ func TestAntenna_Lifecycle(t *testing.T) {
 
 func TestAntenna_NoAuth(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewAntenna(ctx)
+	ch := newAntennaCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
@@ -91,8 +187,46 @@ func TestAntenna_NoAuth(t *testing.T) {
 
 func TestAntenna_MissingID(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewAntenna(ctx)
+	ch := newAntennaCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_NonOwnerRejected is the #1569 cross-user IDOR regression guard: a
+// user must not be able to subscribe to another user's antenna feed.
+func TestAntenna_NonOwnerRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "bob"})
+	ch := newAntennaCh(ctx, "alice") // a1 owned by alice, bob connects
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs, "non-owner must not subscribe to another user's antenna")
+}
+
+func TestAntenna_UnknownAntennaRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := newAntennaCh(ctx, "alice")
+	err := ch.Init(json.RawMessage(`{"antennaId":"does-not-exist"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_NilOwnersFailClosed guarantees an unwired factory rejects every
+// subscription rather than silently opening the gate.
+func TestAntenna_NilOwnersFailClosed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewAntennaFactory(nil).New(ctx)
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// TestAntenna_LookupErrorRejected covers the FindByID error path (fail-closed).
+func TestAntenna_LookupErrorRejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	owners := &stubAntennaOwners{err: errAntennaLookup}
+	ch := NewAntennaFactory(owners).New(ctx)
+	err := ch.Init(json.RawMessage(`{"antennaId":"a1"}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
 }
@@ -105,7 +239,7 @@ func TestChannelTimeline_Lifecycle(t *testing.T) {
 	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
 	assert.Equal(t, []string{"channel:ch1"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 
 	ch.Dispose()
@@ -119,6 +253,51 @@ func TestChannelTimeline_MissingID(t *testing.T) {
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.NoError(t, err)
 	assert.Empty(t, ctx.subs)
+}
+
+// #1549: channel timeline now receives live notes (publisher added) and gates
+// per-subscriber. These cover the new OnRedisEvent gates.
+func TestChannelTimeline_WrongChannelDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch2","visibility":"public"}`))
+	assert.Empty(t, ctx.sentType, "note for a different channel must be dropped")
+}
+
+func TestChannelTimeline_MalformedDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{not json`))
+	assert.Empty(t, ctx.sentType, "malformed payload must be dropped (fail-closed)")
+}
+
+func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
+	t.Run("non-follower dropped", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{} // alice does not follow author
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
+		assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
+	})
+	t.Run("follower emitted", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ctx.followingSnap = map[string]bool{"author": false}
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+		assert.Equal(t, "note", ctx.sentType[0])
+	})
+	t.Run("self-authored emitted with nil snapshot", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "alice"})
+		ch := NewChannelTimeline(ctx)
+		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"alice","visibility":"followers"}`))
+		require.Len(t, ctx.sentType, 1)
+	})
 }
 
 // --- UserList ---
@@ -296,11 +475,11 @@ func TestUserList_SpecifiedVisibility_AssumesFanoutSkips(t *testing.T) {
 
 func TestRoleTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true) // r1 explorable
 	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
 	assert.Equal(t, []string{"roleTimeline:r1"}, ctx.subs)
 
-	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 
 	ch.Dispose()
@@ -309,11 +488,43 @@ func TestRoleTimeline_Lifecycle(t *testing.T) {
 
 func TestRoleTimeline_MissingID(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true)
 	// TS本家はroleId欠如時もinit成功とするため、errorは返さずno-op
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.NoError(t, err)
 	assert.Empty(t, ctx.subs)
+}
+
+// #1549: roleTimeline now receives live notes; only isExplorable roles +
+// public-visibility notes are emitted (本家 role-timeline.ts parity).
+func TestRoleTimeline_NonExplorableDropped(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := newRoleCh(ctx, false) // r1 NOT explorable
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
+	assert.Empty(t, ctx.sentType, "non-explorable role must not stream notes")
+}
+
+func TestRoleTimeline_NonPublicDropped(t *testing.T) {
+	ch := newRoleCh(newCtx(nil), true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	for _, vis := range []string{"home", "followers", "specified"} {
+		ctx := newCtx(nil)
+		c := newRoleCh(ctx, true)
+		c.Init(json.RawMessage(`{"roleId":"r1"}`))
+		c.OnRedisEvent([]byte(`{"id":"n1","visibility":"` + vis + `"}`))
+		assert.Empty(t, ctx.sentType, "roleTimeline emits public only, got "+vis)
+	}
+	_ = ch
+}
+
+func TestRoleTimeline_ExplorablePublicEmitted(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := newRoleCh(ctx, true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 // --- Admin ---
@@ -458,10 +669,10 @@ func TestNoOpClientMessages(t *testing.T) {
 		ch   stream.Channel
 	}{
 		{"hashtag", NewHashtag(newCtx(nil))},
-		{"antenna", NewAntenna(newCtx(&model.User{ID: "u1"}))},
+		{"antenna", newAntennaCh(newCtx(&model.User{ID: "u1"}), "u1")},
 		{"channelTimeline", NewChannelTimeline(newCtx(nil))},
 		{"userList", NewUserList(newCtx(&model.User{ID: "u1"}))},
-		{"roleTimeline", NewRoleTimeline(newCtx(nil))},
+		{"roleTimeline", newRoleCh(newCtx(nil), true)},
 		{"admin", newAdminCh(newCtx(&model.User{ID: "u1"}), true)},
 		{"serverStats", NewServerStats(newCtx(nil))},
 		{"queueStats", NewQueueStats(newCtx(nil))},
@@ -492,16 +703,17 @@ func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
 	ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`))
-	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
+	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1","channelId":"ch1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
 }
 
 func TestRoleTimeline_FilteredRenote(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewRoleTimeline(ctx)
+	ch := newRoleCh(ctx, true)
 	ch.Init(json.RawMessage(`{"roleId":"r1","withRenotes":false}`))
-	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[]}`))
+	// public + explorable で gate を通過させ、純リノート filter (shouldEmit) で drop。
+	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[],"visibility":"public"}`))
 	assert.Empty(t, ctx.sentType)
 }
 

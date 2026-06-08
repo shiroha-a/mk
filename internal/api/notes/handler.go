@@ -41,6 +41,7 @@ type Handler struct {
 	driveFileRepo     repository.DriveFileRepository
 	draftRepo         repository.NoteDraftRepository
 	pollRepo          repository.PollRepository
+	threadMutingRepo  repository.NoteThreadMutingRepository
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
