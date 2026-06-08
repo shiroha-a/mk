@@ -154,6 +154,32 @@ func InvalidParam(msg ...string) map[string]any {
 	return Error("INVALID_PARAM", m, UUIDInvalidParam)
 }
 
+// InvalidParamClient returns the upstream schema-validation failure envelope
+// for INVALID_PARAM, including the `kind: "client"` discriminator and an
+// `info` object ({param, reason}). Misskey TS の endpoint-base.ts は ajv schema
+// validation 失敗時に ApiError(INVALID_PARAM, info:{param,reason}) を投げ、
+// ApiCallService.send() が `kind` (= ApiError default の "client") と info を
+// 含めて返す (id は 3d81ceae-...)。plain Error helper は kind/info を出さないので、
+// upstream の schema-validation envelope を厳密に再現したい endpoint はこちらを使う。
+//
+// param は upstream では ajv の schemaPath、reason は ajv の message。mk-go は
+// 手動 validation で ajv を持たないため、呼び出し側が ajv 互換の文字列を
+// best-effort で与える (frontend は info を参照しないため dev 向け説明に留まる)。
+func InvalidParamClient(param, reason string) map[string]any {
+	return map[string]any{
+		"error": map[string]any{
+			"message": "Invalid param.",
+			"code":    "INVALID_PARAM",
+			"id":      UUIDInvalidParam,
+			"kind":    "client",
+			"info": map[string]any{
+				"param":  param,
+				"reason": reason,
+			},
+		},
+	}
+}
+
 // InternalError returns a 500 INTERNAL_ERROR error response. The optional
 // msg argument overrides the default "Internal error." text; the UUID is
 // fixed regardless so frontend i18n lookups remain stable.

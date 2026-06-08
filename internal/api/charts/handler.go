@@ -15,6 +15,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/chart"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // Charts is the construction-time bundle of every chart instance the
@@ -40,34 +41,40 @@ type Charts struct {
 // equivalent JSON error so wiring bugs are visible to clients without
 // crashing the server.
 type Handler struct {
-	c     Charts
-	clock chart.Clock
+	c Charts
 }
 
-// NewHandler constructs a handler from a Charts bundle. The clock is
-// only used to compute the request `offset`; pass nil to use
-// chart.SystemClock.
-func NewHandler(c Charts, clock chart.Clock) *Handler {
-	if clock == nil {
-		clock = chart.SystemClock{}
-	}
-	return &Handler{c: c, clock: clock}
+// NewHandler constructs a handler from a Charts bundle.
+func NewHandler(c Charts) *Handler {
+	return &Handler{c: c}
 }
 
 // Request is the shared request body for every chart endpoint.
-// `Limit` defaults to 30 and is clamped to [1, 500]; `Offset` shifts
-// the window back in time by that many spans (so offset=24 with
-// span=hour returns the chart ending 24 hours ago).
+// `Limit` defaults to 30 and is clamped to [1, 500]; `Offset` is an
+// epoch-milliseconds cursor anchoring the END of the chart window
+// (matching upstream `ps.offset ? new Date(ps.offset) : null`). 0 / null
+// means "no cursor" so the engine uses its own clock.
 type Request struct {
 	// Misskey フロントは `misskeyApiGet('charts/...')` で chart を引きに来る
 	// ため、`json` タグだけだと GET 経路で query string が bind されず
 	// span="" → INVALID_PARAM になる (#421)。POST 経路の挙動を変えない
 	// よう既存 `json` タグを残しつつ `query` も付与する。
+	//
+	// Offset は epoch-ms タイムスタンプ。upstream paramDef は
+	// `{type:'integer', nullable:true, default:null}` で、新ミリ秒値が大きい
+	// (~1.7e12 で 32bit を超える) ため int64 で受ける。
 	Span   string `json:"span" query:"span"`
 	Limit  *int   `json:"limit" query:"limit"`
-	Offset *int   `json:"offset" query:"offset"`
+	Offset *int64 `json:"offset" query:"offset"`
 	UserID string `json:"userId" query:"userId"`
 	Host   string `json:"host" query:"host"`
+}
+
+// paramError carries an upstream-compatible (param, reason) pair for a
+// failed validation, used to build the INVALID_PARAM `info` object.
+type paramError struct {
+	param  string
+	reason string
 }
 
 // --- instance-wide endpoints -------------------------------------------------
@@ -145,16 +152,16 @@ func (h *Handler) serveInstance(c echo.Context, ch *chart.Chart, requireHost boo
 	}
 	var req Request
 	if err := c.Bind(&req); err != nil {
-		return invalidParam(c)
+		return invalidParam(c, &paramError{param: "#", reason: "Invalid request body."})
 	}
-	span, amount, cursor, ok := h.parseRequest(&req)
-	if !ok {
-		return invalidParam(c)
+	span, amount, cursor, perr := h.parseRequest(&req)
+	if perr != nil {
+		return invalidParam(c, perr)
 	}
 	group := ""
 	if requireHost {
 		if req.Host == "" {
-			return invalidParam(c)
+			return invalidParam(c, &paramError{param: "#/required", reason: "must have required property 'host'"})
 		}
 		group = req.Host
 	}
@@ -169,14 +176,14 @@ func (h *Handler) servePerUser(c echo.Context, ch *chart.Chart) error {
 	}
 	var req Request
 	if err := c.Bind(&req); err != nil {
-		return invalidParam(c)
+		return invalidParam(c, &paramError{param: "#", reason: "Invalid request body."})
 	}
-	span, amount, cursor, ok := h.parseRequest(&req)
-	if !ok {
-		return invalidParam(c)
+	span, amount, cursor, perr := h.parseRequest(&req)
+	if perr != nil {
+		return invalidParam(c, perr)
 	}
 	if req.UserID == "" {
-		return invalidParam(c)
+		return invalidParam(c, &paramError{param: "#/required", reason: "must have required property 'userId'"})
 	}
 	return h.respond(c, ch, span, amount, cursor, req.UserID)
 }
@@ -187,55 +194,68 @@ func (h *Handler) respond(c echo.Context, ch *chart.Chart, span chart.Span, amou
 	if err != nil {
 		return internalError(c)
 	}
+	// upstream は cacheSec を成功応答 (call().then()) でのみ set し、
+	// validation/exec 失敗 (catch) には付けない。同じく 200 経路だけで set する。
+	setCacheControl(c)
 	return c.JSON(http.StatusOK, chart.Unflatten(result))
 }
 
-// parseRequest validates the shared chart fields and computes a
-// cursor for the requested offset. The cursor is nil when offset
-// is zero so the engine simply uses its own clock.
+// parseRequest validates the shared chart fields and derives the window
+// cursor from the offset param.
 //
-// Validation rules (matching upstream):
-//   - span must be "hour" or "day"
-//   - limit defaults to 30 and is clamped to [1, 500]
-//   - offset defaults to 0 and must be >= 0
-func (h *Handler) parseRequest(req *Request) (chart.Span, int, *time.Time, bool) {
+// Validation rules (matching upstream paramDef + ajv):
+//   - span is required and must be "hour" or "day"
+//   - limit defaults to 30 and must be within [1, 500]
+//   - offset is an epoch-milliseconds cursor (nullable, default null).
+//     Following upstream `ps.offset ? new Date(ps.offset) : null`, a zero
+//     or absent offset yields a nil cursor (engine uses its own clock);
+//     any other value (including negative = pre-1970) anchors the window
+//     end at that instant. The engine rounds it up (ceil) to the span
+//     bucket the cursor falls into, matching upstream getChartRaw.
+func (h *Handler) parseRequest(req *Request) (chart.Span, int, *time.Time, *paramError) {
 	span := chart.Span(req.Span)
+	if req.Span == "" {
+		return "", 0, nil, &paramError{param: "#/required", reason: "must have required property 'span'"}
+	}
 	if span != chart.SpanHour && span != chart.SpanDay {
-		return "", 0, nil, false
+		return "", 0, nil, &paramError{param: "#/properties/span/enum", reason: "must be equal to one of the allowed values"}
 	}
 	amount := 30
 	if req.Limit != nil {
-		if *req.Limit < 1 || *req.Limit > 500 {
-			return "", 0, nil, false
+		if *req.Limit < 1 {
+			return "", 0, nil, &paramError{param: "#/properties/limit/minimum", reason: "must be >= 1"}
+		}
+		if *req.Limit > 500 {
+			return "", 0, nil, &paramError{param: "#/properties/limit/maximum", reason: "must be <= 500"}
 		}
 		amount = *req.Limit
 	}
-	offset := 0
-	if req.Offset != nil {
-		if *req.Offset < 0 {
-			return "", 0, nil, false
-		}
-		offset = *req.Offset
-	}
 	var cursor *time.Time
-	if offset > 0 {
-		// cursor は希望ウィンドウの末尾を指す。offset 分だけ過去へずらす。
-		now := h.clock.Now()
-		var shifted time.Time
-		if span == chart.SpanDay {
-			shifted = now.AddDate(0, 0, -offset)
-		} else {
-			shifted = now.Add(-time.Duration(offset) * time.Hour)
-		}
-		cursor = &shifted
+	if req.Offset != nil && *req.Offset != 0 {
+		t := time.UnixMilli(*req.Offset)
+		cursor = &t
 	}
-	return span, amount, cursor, true
+	return span, amount, cursor, nil
+}
+
+// setCacheControl mirrors upstream ApiCallService: an unauthenticated GET
+// to a cacheSec endpoint receives `Cache-Control: public, max-age=<cacheSec>`.
+// 全 chart endpoint は `allowGet:true, cacheSec:60*60` なので max-age=3600。
+// POST / 認証済みリクエストには付けない。auth は e.Use(Authenticate()) で全
+// request に optional 適用済みのため、RequireAuth 無しの chart route でも
+// GetUser/GetToken が populate される (未認証なら nil / "")。
+func setCacheControl(c echo.Context) {
+	if c.Request().Method == http.MethodGet &&
+		middleware.GetUser(c) == nil &&
+		middleware.GetToken(c) == "" {
+		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+	}
 }
 
 // --- error helpers -----------------------------------------------------------
 
-func invalidParam(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid param.", "1d6f8c9b-a9b3-4d1f-94c0-7ecb2c1c7a02"))
+func invalidParam(c echo.Context, perr *paramError) error {
+	return c.JSON(http.StatusBadRequest, apierr.InvalidParamClient(perr.param, perr.reason))
 }
 
 func internalError(c echo.Context) error {

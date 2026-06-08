@@ -1883,7 +1883,7 @@ func (s *Server) setupRoutes() {
 	// `misskeyApi` (POST) も使う場面があるので両方受ける。POST のみ登録だと
 	// GET が `api.Any("/*")` の catchall (= 200 + 空オブジェクト) に落ちて、
 	// 受信側で `chart.pubActive[0]` 等が `undefined` 例外を起こす (#421)。
-	chartsHandler := apicharts.NewHandler(chartCharts, nil)
+	chartsHandler := apicharts.NewHandler(chartCharts)
 	chartMethods := []string{http.MethodGet, http.MethodPost}
 	api.Match(chartMethods, "/charts/notes", chartsHandler.Notes)
 	api.Match(chartMethods, "/charts/users", chartsHandler.Users)

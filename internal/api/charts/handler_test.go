@@ -22,6 +22,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/chart"
 	corecharts "github.com/shiroha-a/mk/internal/core/chart/charts"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // fakeRepo mirrors the package-internal fake from
@@ -245,7 +246,7 @@ func newHandlerWithAllCharts(t *testing.T) (*Handler, Charts) {
 		PerUserPv:        puPv,
 		PerUserReaction:  puReact,
 	}
-	h := NewHandler(c, fakeClock{now: time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC)})
+	h := NewHandler(c)
 	return h, c
 }
 
@@ -258,13 +259,24 @@ func newReq(t *testing.T, body string) (echo.Context, *httptest.ResponseRecorder
 	return e.NewContext(req, rec), rec
 }
 
+// newGetReq builds a GET request with the given raw query string. The auth
+// middleware is not run here, so the request is unauthenticated unless the
+// caller seeds the user/token context keys via c.Set.
+func newGetReq(t *testing.T, rawQuery string) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?"+rawQuery, nil)
+	rec := httptest.NewRecorder()
+	return e.NewContext(req, rec), rec
+}
+
 // --- instance-wide endpoints ------------------------------------------------
 
-func TestNewHandler_NilClockUsesSystem(t *testing.T) {
-	// nil clock を渡しても panic せず offset 計算が成立する。
+func TestNewHandler_OffsetParses(t *testing.T) {
+	// offset を渡しても panic せず epoch-ms cursor として処理されることを確認。
 	notes, _ := newEngine(t, corecharts.SchemaNotes())
-	h := NewHandler(Charts{Notes: notes}, nil)
-	c, rec := newReq(t, `{"span":"hour","offset":1}`)
+	h := NewHandler(Charts{Notes: notes})
+	c, rec := newReq(t, `{"span":"hour","offset":1700000000000}`)
 	require.NoError(t, h.Notes(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
@@ -303,7 +315,7 @@ func TestInstanceEndpoint_HostRequired(t *testing.T) {
 }
 
 func TestInstanceEndpoint_NilChartUnavailable(t *testing.T) {
-	h := NewHandler(Charts{}, fakeClock{now: time.Now().UTC()})
+	h := NewHandler(Charts{})
 	c, rec := newReq(t, `{"span":"hour"}`)
 	require.NoError(t, h.Notes(c))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
@@ -319,7 +331,7 @@ func TestInstanceEndpoint_BadJSON(t *testing.T) {
 func TestInstanceEndpoint_RepoError(t *testing.T) {
 	notes, repo := newEngine(t, corecharts.SchemaNotes())
 	repo.failOn["FindRange"] = errors.New("boom")
-	h := NewHandler(Charts{Notes: notes}, fakeClock{now: time.Now().UTC()})
+	h := NewHandler(Charts{Notes: notes})
 	c, rec := newReq(t, `{"span":"hour"}`)
 	require.NoError(t, h.Notes(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -364,7 +376,7 @@ func TestPerUserEndpoint_BadJSON(t *testing.T) {
 }
 
 func TestPerUserEndpoint_NilChartUnavailable(t *testing.T) {
-	h := NewHandler(Charts{}, fakeClock{now: time.Now().UTC()})
+	h := NewHandler(Charts{})
 	c, rec := newReq(t, `{"span":"day","userId":"alice"}`)
 	require.NoError(t, h.UserNotes(c))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
@@ -380,7 +392,7 @@ func TestPerUserEndpoint_BadSpan(t *testing.T) {
 func TestPerUserEndpoint_RepoError(t *testing.T) {
 	puNotes, repo := newEngine(t, corecharts.SchemaPerUserNotes())
 	repo.failOn["FindRange"] = errors.New("boom")
-	h := NewHandler(Charts{PerUserNotes: puNotes}, fakeClock{now: time.Now().UTC()})
+	h := NewHandler(Charts{PerUserNotes: puNotes})
 	c, rec := newReq(t, `{"span":"day","userId":"alice"}`)
 	require.NoError(t, h.UserNotes(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -408,28 +420,72 @@ func TestParseRequest_LimitOutOfRange(t *testing.T) {
 	}
 }
 
-func TestParseRequest_NegativeOffset(t *testing.T) {
+// TestParseRequest_NegativeOffsetAccepted は upstream の
+// `ps.offset ? new Date(ps.offset) : null` (負値も valid な epoch-ms) に
+// 合わせ、負の offset を reject せず 200 を返すことを確認する (#1565 Fix 1)。
+func TestParseRequest_NegativeOffsetAccepted(t *testing.T) {
 	h, _ := newHandlerWithAllCharts(t)
 	c, rec := newReq(t, `{"span":"hour","offset":-3}`)
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-func TestParseRequest_OffsetCursorDay(t *testing.T) {
-	// offset > 0 のとき cursor が span 単位で過去にずれることを
-	// fakeClock とともに確認する。実際の値は handler 内部に閉じている
-	// が、リクエスト自体が 200 を返せばパスを通っている。
-	h, _ := newHandlerWithAllCharts(t)
-	c, rec := newReq(t, `{"span":"day","offset":2,"limit":5}`)
-	require.NoError(t, h.Notes(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestParseRequest_OffsetCursorHour(t *testing.T) {
-	h, _ := newHandlerWithAllCharts(t)
-	c, rec := newReq(t, `{"span":"hour","offset":1,"limit":5}`)
+// TestParseRequest_OffsetIsEpochMs は offset が span-count ではなく epoch-ms
+// の cursor (ウィンドウ末尾) として解釈されることを end-to-end で検証する
+// (#1565 Fix 1)。newEngine の fakeClock now=2026-04-09T12:30 UTC で記録すると
+// note は hour バケット 12:00 に入る。境界一致 offset=12:00(epoch-ms) はその
+// バケットを末尾に選び total=1、offset=2020 はデータ記録より前で total=0。
+// 旧 span-count 実装では offset(=巨大 epoch-ms) が「巨大な span 数だけ過去」と
+// なり両ケースとも total=0 になるため、bucket ケースの total=1 が regression を
+// 捕捉する (engine の ceil/floor 丸めは core/chart の engine test 側で検証)。
+func TestParseRequest_OffsetIsEpochMs(t *testing.T) {
+	notes, _ := newEngine(t, corecharts.SchemaNotes())
+	wrapper := corecharts.NewNotesChart(notes)
+	require.NoError(t, wrapper.Update(&model.Note{ID: "n1"}, true))
+	require.NoError(t, notes.Save(context.Background()))
+	h := NewHandler(Charts{Notes: notes})
+
+	bucketMs := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC).UnixMilli()
+	pastMs := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+
+	total := func(t *testing.T, body string) float64 {
+		t.Helper()
+		c, rec := newReq(t, body)
+		require.NoError(t, h.Notes(c))
+		require.Equal(t, http.StatusOK, rec.Code, "body=%s resp=%s", body, rec.Body.String())
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		local := out["local"].(map[string]any)
+		totals := local["total"].([]any)
+		require.NotEmpty(t, totals)
+		return totals[0].(float64)
+	}
+
+	// offset=12:00 (note を記録したバケットの境界 epoch-ms) を末尾に含む。
+	assert.EqualValues(t, 1, total(t, fmt.Sprintf(`{"span":"hour","limit":1,"offset":%d}`, bucketMs)))
+	// offset=2020 はデータ記録より前なので total=0。
+	assert.EqualValues(t, 0, total(t, fmt.Sprintf(`{"span":"hour","limit":1,"offset":%d}`, pastMs)))
+}
+
+// TestParseRequest_OffsetZeroIsNoCursor は offset=0 が upstream の falsy 分岐
+// (`0 ? ... : null`) に従い cursor 無し (engine の now()) になることを確認する。
+func TestParseRequest_OffsetZeroIsNoCursor(t *testing.T) {
+	notes, _ := newEngine(t, corecharts.SchemaNotes())
+	wrapper := corecharts.NewNotesChart(notes)
+	require.NoError(t, wrapper.Update(&model.Note{ID: "n1"}, true))
+	require.NoError(t, notes.Save(context.Background()))
+	h := NewHandler(Charts{Notes: notes})
+
+	c, rec := newReq(t, `{"span":"hour","limit":1,"offset":0}`)
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	local := out["local"].(map[string]any)
+	totals := local["total"].([]any)
+	require.Len(t, totals, 1)
+	// offset=0 → cursor 無し → engine now (= note 記録バケット) なので total=1。
+	assert.EqualValues(t, 1, totals[0])
 }
 
 func TestResponseShape_NestedObject(t *testing.T) {
@@ -440,7 +496,7 @@ func TestResponseShape_NestedObject(t *testing.T) {
 	require.NoError(t, wrapper.Update(&model.Note{ID: "n1"}, true))
 	require.NoError(t, notes.Save(context.Background()))
 
-	h := NewHandler(Charts{Notes: notes}, fakeClock{now: time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC)})
+	h := NewHandler(Charts{Notes: notes})
 	c, rec := newReq(t, `{"span":"hour","limit":1}`)
 	require.NoError(t, h.Notes(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -454,4 +510,92 @@ func TestResponseShape_NestedObject(t *testing.T) {
 	require.Len(t, totals, 1)
 	// 直近バケットに 1 件記録されているはず
 	assert.EqualValues(t, 1, totals[0])
+}
+
+// --- INVALID_PARAM envelope (#1565 Fix 2) ------------------------------------
+
+// errEnvelope decodes the {"error": {...}} body into the upstream-shaped map.
+func errEnvelope(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	e, ok := out["error"].(map[string]any)
+	require.True(t, ok, "expected error envelope: %s", rec.Body.String())
+	return e
+}
+
+func TestInvalidParam_EnvelopeShape(t *testing.T) {
+	h, _ := newHandlerWithAllCharts(t)
+	cases := []struct {
+		name       string
+		fn         echo.HandlerFunc
+		body       string
+		wantParam  string
+		wantReason string
+	}{
+		{"missing span", h.Notes, `{}`, "#/required", "must have required property 'span'"},
+		{"bad span", h.Notes, `{"span":"week"}`, "#/properties/span/enum", "must be equal to one of the allowed values"},
+		{"limit too small", h.Notes, `{"span":"hour","limit":0}`, "#/properties/limit/minimum", "must be >= 1"},
+		{"limit too large", h.Notes, `{"span":"hour","limit":501}`, "#/properties/limit/maximum", "must be <= 500"},
+		{"missing host", h.Instance, `{"span":"hour"}`, "#/required", "must have required property 'host'"},
+		{"missing userId", h.UserNotes, `{"span":"hour"}`, "#/required", "must have required property 'userId'"},
+		{"bad json", h.Notes, `{not json`, "#", "Invalid request body."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newReq(t, tc.body)
+			require.NoError(t, tc.fn(c))
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			e := errEnvelope(t, rec)
+			// upstream endpoint-base.ts / ApiCallService.ts と一致させる。
+			assert.Equal(t, "INVALID_PARAM", e["code"])
+			assert.Equal(t, "3d81ceae-475f-4600-b2a8-2bc116157532", e["id"])
+			assert.Equal(t, "client", e["kind"])
+			info, ok := e["info"].(map[string]any)
+			require.True(t, ok, "expected info object: %s", rec.Body.String())
+			assert.Equal(t, tc.wantParam, info["param"])
+			assert.Equal(t, tc.wantReason, info["reason"])
+		})
+	}
+}
+
+// --- Cache-Control (#1565 Fix 3) ---------------------------------------------
+
+func TestCacheControl_UnauthenticatedGet(t *testing.T) {
+	h, _ := newHandlerWithAllCharts(t)
+	c, rec := newGetReq(t, "span=hour")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "public, max-age=3600", rec.Header().Get("Cache-Control"))
+}
+
+func TestCacheControl_PostHasNoHeader(t *testing.T) {
+	h, _ := newHandlerWithAllCharts(t)
+	c, rec := newReq(t, `{"span":"hour"}`)
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "POST must not be cached")
+}
+
+func TestCacheControl_AuthenticatedGetHasNoHeader(t *testing.T) {
+	h, _ := newHandlerWithAllCharts(t)
+	c, rec := newGetReq(t, "span=hour")
+	// 認証済み (auth middleware が user/token を context に積んだ状態) を模す。
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "u1"})
+	c.Set(string(middleware.TokenContextKey), "tok")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "authenticated GET must not be cached")
+}
+
+// TestCacheControl_ErrorResponseHasNoHeader は、upstream が cacheSec を成功
+// 継続 (call().then()) でのみ set し、validation 失敗 (catch) には付けない
+// ことに揃え、未認証 GET でも error 応答 (bad span → 400) には Cache-Control
+// を付けないことを確認する。
+func TestCacheControl_ErrorResponseHasNoHeader(t *testing.T) {
+	h, _ := newHandlerWithAllCharts(t)
+	c, rec := newGetReq(t, "span=week")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "error responses must not be cached")
 }
