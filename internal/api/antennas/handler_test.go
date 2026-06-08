@@ -594,6 +594,71 @@ func TestNotes_OverFetchTrim_QueryServiceUnwired_DefaultLimit(t *testing.T) {
 	assert.Len(t, resp, 10, "over-fetch should trim back to default limit (10) when no filter drops apply")
 }
 
+// #1544: viewer が mute した user / viewer を block した user の note と、
+// viewer が mute した channel の note が antennas/notes から除外されること。
+func TestNotes_MuteBlockChannelFiltered(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-mb"] = &model.Antenna{ID: "a-mb", UserID: "alice"}
+
+	muting := testutil.NewMockMutingRepository()
+	require.NoError(t, muting.Create(&model.Muting{ID: "m1", MuterID: "alice", MuteeID: "muted"}))
+	blocking := testutil.NewMockBlockingRepository()
+	require.NoError(t, blocking.Create(&model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "alice"}))
+	channelMuting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, channelMuting.Create(&model.ChannelMuting{UserID: "alice", ChannelID: "ch-muted"}))
+	h.SetMuteBlockRepos(muting, blocking, channelMuting)
+
+	mutedCh := "ch-muted"
+	notes := map[string]*model.Note{
+		"keep":          {ID: "keep", UserID: "author", Visibility: model.NoteVisibilityPublic},
+		"by-muted":      {ID: "by-muted", UserID: "muted", Visibility: model.NoteVisibilityPublic},
+		"by-blocker":    {ID: "by-blocker", UserID: "blocker", Visibility: model.NoteVisibilityPublic},
+		"muted-channel": {ID: "muted-channel", UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &mutedCh},
+	}
+	ctx := context.Background()
+	order := []string{"keep", "by-muted", "by-blocker", "muted-channel"}
+	for i, nid := range order {
+		noteRepo.Notes[nid] = notes[nid]
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: "antennaTimeline:a-mb",
+			ID:     fmt.Sprintf("%d-0", 100+i),
+			Values: map[string]any{"noteId": nid},
+		}).Err())
+	}
+
+	c, rec := newReq(t, `{"antennaId":"a-mb"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "keep")
+	assert.NotContains(t, body, "by-muted", "note authored by a muted user must be dropped")
+	assert.NotContains(t, body, "by-blocker", "note authored by a user who blocked the viewer must be dropped")
+	assert.NotContains(t, body, "muted-channel", "note in a muted channel must be dropped")
+}
+
+// #1544 fail-closed: mute/block/channel set のロードでリポジトリエラーが出たら
+// silently note を漏らさず 500 を返すこと。
+func TestNotes_MuteBlockLoadError(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-err"] = &model.Antenna{ID: "a-err", UserID: "alice"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityPublic}
+	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
+		Stream: "antennaTimeline:a-err",
+		ID:     "1-0",
+		Values: map[string]any{"noteId": "n1"},
+	}).Err())
+
+	blocking := testutil.NewMockBlockingRepository()
+	blocking.ExistsErr = errors.New("block boom") // ListBlockerIDs もこのエラーで失敗する
+	h.SetMuteBlockRepos(testutil.NewMockMutingRepository(), blocking, testutil.NewMockChannelMutingRepository())
+
+	c, rec := newReq(t, `{"antennaId":"a-err"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 // #1464: queryService 配線時、follow 関係があれば followers note は引き続き
 // 表示される (gate が過剰に絞っていないことの guard)。
 func TestNotes_FollowersNote_VisibleToFollower(t *testing.T) {

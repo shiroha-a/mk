@@ -41,6 +41,19 @@ func TestBlockingRepository_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 
+	// ListBlockerIDs は blockee 視点で「自分を block している blocker」の id を返す。
+	blockerIDs, err := repo.ListBlockerIDs(u2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{u1.ID}, blockerIDs)
+	// 逆向き (u1 視点) には誰も自分を block していないので空。
+	none, err := repo.ListBlockerIDs(u1.ID)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+	// 空 blockeeID は短絡で nil を返す (DB を叩かない)。
+	empty, err := repo.ListBlockerIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, empty)
+
 	require.NoError(t, repo.Delete(b))
 	_, err = repo.FindByPair(u1.ID, u2.ID)
 	assert.Error(t, err)
@@ -58,5 +71,7 @@ func TestBlockingRepository_QueryErrors(t *testing.T) {
 	_, err = repo.Exists("a", "b")
 	assert.Error(t, err)
 	_, err = repo.ListByBlocker("a", "", "", 10, 0)
+	assert.Error(t, err)
+	_, err = repo.ListBlockerIDs("a")
 	assert.Error(t, err)
 }

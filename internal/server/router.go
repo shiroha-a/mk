@@ -1666,7 +1666,8 @@ func (s *Server) setupRoutes() {
 	antennasHandler.SetReactionReader(reactionCountWriter)
 	antennasHandler.SetNoteFieldResolver(noteFieldResolver)
 	antennasHandler.SetUserRepo(userRepo)
-	antennasHandler.SetQueryService(noteQueryService) // #1464: Notes の visibility filter (defense-in-depth)
+	antennasHandler.SetQueryService(noteQueryService)                              // #1464: Notes の visibility filter (defense-in-depth)
+	antennasHandler.SetMuteBlockRepos(mutingRepo, blockingRepo, channelMutingRepo) // #1544: Notes の mute/block/channel-mute filter
 	api.POST("/antennas/create", antennasHandler.Create, middleware.RequireAuth())
 	api.POST("/antennas/show", antennasHandler.Show, middleware.RequireAuth())
 	api.POST("/antennas/update", antennasHandler.Update, middleware.RequireAuth())
@@ -1942,6 +1943,7 @@ func (s *Server) setupRoutes() {
 	rolesHandler.SetReactionReader(reactionCountWriter)
 	rolesHandler.SetNoteFieldResolver(noteFieldResolver)
 	rolesHandler.SetUserRepo(userRepo)
+	rolesHandler.SetMuteBlockRepos(mutingRepo, blockingRepo, channelMutingRepo) // #1544: Notes の mute/block/channel-mute filter
 	api.POST("/roles/list", rolesHandler.List, middleware.RequireAuth())
 	api.POST("/roles/show", rolesHandler.Show)
 	api.POST("/roles/users", rolesHandler.Users)
