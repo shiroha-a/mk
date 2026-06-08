@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Fix: `/api/reversi/show-game` ・ `match` ・ `verify` のレスポンス欠落フィールドと error code の UUID 不一致を修正 (issue #1553 HIGH)。(1) 本家 `ReversiGameDetailed` の `form1`/`form2` 等のフィールドが pack されておらず欠落していたので本家 `ReversiGameEntityService` 準拠で追加。(2) reversi 各エンドポイントの error code 4 件が本家と異なる UUID だったため本家の UUID に揃える。parity 用途 (security 影響なし)。
+
+- Fix(security): `/api/admin/roles/assign` ・ `/unassign` でモデレーターの権限チェックと `expiresAt` の型が本家と異なっていた問題を修正 (issue #1542 HIGH)。(1) 本家はモデレーター (非 admin) が role を assign/unassign する際、対象 role の `canEditMembersByModerator` が true でなければ拒否する (admin は常に可)。mk-go はこのゲートが無く、任意のモデレーターが任意 role を付け外しできた。(2) 本家 `assign` の `expiresAt` は epoch ms (number) を受ける (assign.ts) が、mk-go は RFC3339 文字列を期待していた。本家準拠で epoch ms を受理する型に修正。権限判定は既存 roleService の admin/moderator 判定を流用し fail-closed。
+
 - Fix: `/api/i/update` が `followingVisibility` / `followersVisibility` パラメータを無視していた問題を修正 (issue #1546 HIGH)。本家 `i/update` は両 param (`public` / `followers` / `private`) を受けて user に保存する (update.ts paramDef)。mk-go は `users/show` 等に `followersVisibility` gate (#1461) があるのに値を設定できず、フォロー/フォロワー一覧の公開範囲を変更できなかった。本家準拠で両 param を受理し対応カラムへ保存、enum 値も本家と同じく検証する (不正値は弾く)。model に既存のフィールド/型を使用 (DB migration 不要)。
 
 - Fix: `/api/notes/children` が pure renote (本文/ファイル/投票を持たない単純リノート) をスレッドの子として返していた問題を修正 (issue #1554)。本家 `notes/children` は renoteId 分岐を `AND (text IS NOT NULL OR fileIds != '{}' OR hasPoll = TRUE)` で括り、pure renote をスレッド children から除外する (reply と quote renote のみ children に出る; children.ts)。mk-go の `repository.ListChildrenOf` は `("replyId" = ? OR "renoteId" = ?)` に content guard が無く pure renote を漏らしていた。renote 分岐に既存の pure-renote 述語 (`text IS NULL AND fileIds = '{}' AND hasPoll = false` 相当) を適用し本家に揃える (reply 分岐は空 reply も子なので guard 無しのまま)。`MockNoteRepository.ListChildrenOf` にも同ロジックを反映。可視性 push-down (#1500) / block / mute は不変。
