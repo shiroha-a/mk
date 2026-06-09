@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -282,8 +283,35 @@ type ShowRequest struct {
 	Host     *string  `json:"host"`
 }
 
+// isBlockedByTarget reports whether targetID has blocked the viewer (i.e. the
+// viewer is blocked BY the target). Used by users/notes・reactions・featured-notes
+// to early-return [] like upstream's userIdsWhoBlockingMe.has(ps.userId) (#1547)。
+// viewer==nil / repo 未配線なら false。
+func (h *Handler) isBlockedByTarget(viewer *model.User, targetID string) bool {
+	if viewer == nil || h.blockingRepo == nil {
+		return false
+	}
+	blocked, err := h.blockingRepo.Exists(targetID, viewer.ID)
+	return err == nil && blocked
+}
+
+// applyModerationNote sets UserDetailed.moderationNote when the viewer is a
+// moderator, mirroring upstream UserEntityService.ts:574
+// (iAmModerator ? profile.moderationNote ?? ” : undefined)。非 moderator には
+// 何もしない (= JSON で omit、#1547)。
+func (h *Handler) applyModerationNote(d *entity.UserDetailed, iAmModerator bool, profile *model.UserProfile) {
+	if !iAmModerator {
+		return
+	}
+	note := ""
+	if profile != nil && profile.ModerationNote != nil {
+		note = *profile.ModerationNote
+	}
+	d.ModerationNote = &note
+}
+
 // Show handles POST /api/users/show.
-// TS互換: userIds (配列) が渡された場合は UserLite の配列を返す。
+// TS互換: userIds (配列) が渡された場合は UserDetailed の配列を返す (#1547)。
 // userId / username が渡された場合は単体 UserDetailed を返す。
 func (h *Handler) Show(c echo.Context) error {
 	var req ShowRequest
@@ -310,22 +338,28 @@ func (h *Handler) Show(c echo.Context) error {
 		if err != nil {
 			return apierr.JSONInternalError(c)
 		}
+		// upstream show.ts:136-141 は非 moderator に isSuspended:false を強制して
+		// suspended user を除外する。moderator は素通し。
+		visible := make([]*user.UserWithProfile, 0, len(bundles))
 		users := make([]*model.User, 0, len(bundles))
 		for _, b := range bundles {
-			// upstream show.ts:136-141: 非 moderator には isSuspended:false を
-			// 強制し suspended user を結果から除外する。moderator は素通し。
 			if !iAmModerator && b.User.IsSuspended {
 				continue
 			}
+			visible = append(visible, b)
 			users = append(users, b.User)
 		}
 		resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
-		out := make([]entity.UserLite, 0, len(users))
-		for _, u := range users {
-			lite := entity.PackUserLite(u)
-			resolver.FillUserLite(&lite)
-			h.populateUserEmojis(u, &lite)
-			out = append(out, lite)
+		// upstream show.ts:151-153 は userIds バルクモードでも schema 'UserDetailed'
+		// で pack する。旧実装は UserLite を返していた (#1547)。move 解決と remote
+		// stats fetch は list path 同様 N+1 回避のため bulk では行わない。
+		out := make([]entity.UserDetailed, 0, len(visible))
+		for _, b := range visible {
+			detailed := entity.PackUserDetailed(b.User, b.Profile, h.idGen)
+			resolver.FillUserLite(&detailed.UserLite)
+			h.populateUserEmojis(b.User, &detailed.UserLite)
+			h.applyModerationNote(&detailed, iAmModerator, b.Profile)
+			out = append(out, detailed)
 		}
 		return c.JSON(http.StatusOK, out)
 	}
@@ -372,6 +406,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	detailed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+	h.applyModerationNote(&detailed, iAmModerator, bundle.Profile)
 
 	// movedTo / alsoKnownAs を URI→ローカルID 解決して埋める (#1255)。単一
 	// ユーザー path なので FindByURI は数回で済む。list path (followers 等) は
@@ -510,6 +545,9 @@ type SearchRequest struct {
 	// "combined" (default)。空 / 不明値は "combined" 扱い (#763)。
 	Origin string `json:"origin"`
 	Offset int    `json:"offset"`
+	// Detail は upstream search.ts:38 と同じく default true。false のとき
+	// UserLite を返す (#1547)。
+	Detail *bool `json:"detail"`
 }
 
 // Search handles POST /api/users/search.
@@ -536,6 +574,20 @@ func (h *Handler) Search(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
+
+	// detail は default true。false のとき UserLite を返す (upstream search.ts:56、#1547)。
+	if req.Detail != nil && !*req.Detail {
+		out := make([]entity.UserLite, 0, len(users))
+		for _, u := range users {
+			lite := entity.PackUserLite(u)
+			resolver.FillUserLite(&lite)
+			h.populateUserEmojis(u, &lite)
+			out = append(out, lite)
+		}
+		return c.JSON(http.StatusOK, out)
+	}
+
 	// users/search が検索結果 N 件ぶん per-row GetProfile を呼んでいた N+1 を
 	// 1 batch query に置換する (#517)。Profile が見つからない user は
 	// PackUserDetailed が nil profile を許容するのでそのまま渡る。
@@ -545,7 +597,6 @@ func (h *Handler) Search(c echo.Context) error {
 	}
 	profiles := h.userService.GetProfilesByUserIDs(ids)
 
-	resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
@@ -572,6 +623,10 @@ type NotesRequest struct {
 	WithReplies      *bool  `json:"withReplies"`
 	WithRenotes      *bool  `json:"withRenotes"`
 	WithChannelNotes *bool  `json:"withChannelNotes"`
+	// AllowPartial は upstream notes.ts:67 の fanout TL hint。mk-go は fanout TL
+	// を持たないため挙動には影響しないが、param を受理して 400 を出さないために
+	// 受ける (#1547)。
+	AllowPartial *bool `json:"allowPartial"`
 }
 
 // Notes handles POST /api/users/notes.
@@ -620,6 +675,11 @@ func (h *Handler) Notes(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
+	// viewer が target にブロックされている場合は空配列を返す (upstream
+	// notes.ts:96-101 の userIdsWhoBlockingMe.has(ps.userId) 早期 return、#1547)。
+	if h.isBlockedByTarget(viewer, req.UserID) {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
 	// visibility は repository 側で LIMIT 前に push down する (#1418 review)。
 	// post-fetch filter だとページ過少充填 + followers 判定の N+1 になるため。
 	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, viewerID, untilID, sinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
@@ -635,14 +695,17 @@ func (h *Handler) Notes(c echo.Context) error {
 }
 
 // FollowersRequest is the request body for users/followers and users/following.
+// upstream paramDef anyOf で {userId} または {username, host} を受ける (#1547)。
 type FollowersRequest struct {
-	UserID    string `json:"userId"`
-	Limit     int    `json:"limit"`
-	Offset    int    `json:"offset"`
-	SinceID   string `json:"sinceId"`
-	UntilID   string `json:"untilId"`
-	SinceDate *int64 `json:"sinceDate"`
-	UntilDate *int64 `json:"untilDate"`
+	UserID    string  `json:"userId"`
+	Username  string  `json:"username"`
+	Host      *string `json:"host"`
+	Limit     int     `json:"limit"`
+	Offset    int     `json:"offset"`
+	SinceID   string  `json:"sinceId"`
+	UntilID   string  `json:"untilId"`
+	SinceDate *int64  `json:"sinceDate"`
+	UntilDate *int64  `json:"untilDate"`
 }
 
 // Followers handles POST /api/users/followers.
@@ -657,8 +720,24 @@ func (h *Handler) Following(c echo.Context) error {
 
 func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	var req FollowersRequest
-	if err := c.Bind(&req); err != nil || req.UserID == "" {
+	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
+	}
+	// userId 指定が無ければ username(+host) から解決する (upstream followers.ts:60-71、
+	// #1547)。usernameLower + host で findOne。
+	if req.UserID == "" {
+		if req.Username == "" {
+			return apierr.JSONInvalidParam(c)
+		}
+		bundle, err := h.userService.ShowByUsername(strings.ToLower(req.Username), req.Host)
+		if err != nil || bundle == nil {
+			nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
+			if followers {
+				nsuID = "27fa5435-88ab-43de-9360-387de88727cd" // users/followers
+			}
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", nsuID))
+		}
+		req.UserID = bundle.User.ID
 	}
 	if req.Limit <= 0 {
 		req.Limit = 10

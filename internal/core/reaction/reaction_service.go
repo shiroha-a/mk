@@ -68,6 +68,28 @@ var legacyMap = map[string]string{
 // ":smile@example.com:".
 var customEmojiPattern = regexp.MustCompile(`^:([\w+\-]+)(?:@([\w.\-]+))?:$`)
 
+// ConvertLegacy maps a stored reaction string to the read-time representation
+// upstream's ReactionService.convertLegacyReaction returns: legacy text aliases
+// ("like" → 👍) are mapped, and a local custom emoji ":name@.:" is decoded back
+// to ":name:" (the "@." local-host suffix is stripped). Remote custom emoji and
+// plain unicode pass through unchanged. Pure (no DB); used by read paths such as
+// users/reactions where the raw DB string must not leak (#1547)。
+func ConvertLegacy(raw string) string {
+	if v, ok := legacyMap[raw]; ok {
+		return v
+	}
+	if m := customEmojiPattern.FindStringSubmatch(raw); m != nil {
+		host := ""
+		if len(m) >= 3 {
+			host = m[2]
+		}
+		if host == "" || host == "." {
+			return ":" + m[1] + ":"
+		}
+	}
+	return raw
+}
+
 // NotificationHook is invoked after a reaction is created.
 type NotificationHook interface {
 	OnReactionCreated(notifieeID, notifierID, noteID, reaction string)

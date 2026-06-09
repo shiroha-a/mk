@@ -1,6 +1,7 @@
 package users
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
+	"github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -38,15 +40,40 @@ func (h *Handler) SetAbuseRepo(r repository.AbuseReportRepository) {
 // に保つので production runtime には影響しない (router で必ず wired される)。
 func (h *Handler) Relation(c echo.Context) error {
 	viewer := middleware.GetUser(c)
+	// upstream relation.ts:113-127 は userId を oneOf [string, array] で受け、
+	// 配列なら relation 配列を、単体なら relation オブジェクトを返す (#1547)。
 	var req struct {
-		UserID string `json:"userId"`
+		UserID json.RawMessage `json:"userId"`
 	}
-	if err := c.Bind(&req); err != nil || req.UserID == "" {
+	invalidParam := func() error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	if err := c.Bind(&req); err != nil || len(req.UserID) == 0 {
+		return invalidParam()
+	}
+	var single string
+	if err := json.Unmarshal(req.UserID, &single); err == nil {
+		if single == "" {
+			return invalidParam()
+		}
+		return c.JSON(http.StatusOK, h.computeRelation(viewer, single))
+	}
+	var arr []string
+	if err := json.Unmarshal(req.UserID, &arr); err == nil {
+		out := make([]map[string]any, 0, len(arr))
+		for _, id := range arr {
+			out = append(out, h.computeRelation(viewer, id))
+		}
+		return c.JSON(http.StatusOK, out)
+	}
+	return invalidParam()
+}
 
+// computeRelation builds the relation object for a single target user, matching
+// upstream getRelation (#1547)。viewer==nil なら全 false。
+func (h *Handler) computeRelation(viewer *model.User, targetID string) map[string]any {
 	out := map[string]any{
-		"id":                             req.UserID,
+		"id":                             targetID,
 		"isFollowing":                    false,
 		"isFollowed":                     false,
 		"hasPendingFollowRequestFromYou": false,
@@ -58,7 +85,7 @@ func (h *Handler) Relation(c echo.Context) error {
 	}
 
 	if viewer == nil {
-		return c.JSON(http.StatusOK, out)
+		return out
 	}
 
 	// FindByPair は (rec, err) で返す契約 (gorm.ErrRecordNotFound は relation
@@ -67,62 +94,62 @@ func (h *Handler) Relation(c echo.Context) error {
 	// (frontend には false で fallback、次の API call で正される程度の影響)。
 	warnRelErr := func(label string, err error) {
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			slog.Warn("users/relation lookup failed", "rel", label, "viewer", viewer.ID, "target", req.UserID, "err", err)
+			slog.Warn("users/relation lookup failed", "rel", label, "viewer", viewer.ID, "target", targetID, "err", err)
 		}
 	}
 
 	if h.followingRepo != nil {
-		if rec, err := h.followingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+		if rec, err := h.followingRepo.FindByPair(viewer.ID, targetID); rec != nil {
 			out["isFollowing"] = true
 		} else {
 			warnRelErr("isFollowing", err)
 		}
-		if rec, err := h.followingRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+		if rec, err := h.followingRepo.FindByPair(targetID, viewer.ID); rec != nil {
 			out["isFollowed"] = true
 		} else {
 			warnRelErr("isFollowed", err)
 		}
 	}
 	if h.followRequestRepo != nil {
-		if rec, err := h.followRequestRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+		if rec, err := h.followRequestRepo.FindByPair(viewer.ID, targetID); rec != nil {
 			out["hasPendingFollowRequestFromYou"] = true
 		} else {
 			warnRelErr("hasPendingFollowRequestFromYou", err)
 		}
-		if rec, err := h.followRequestRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+		if rec, err := h.followRequestRepo.FindByPair(targetID, viewer.ID); rec != nil {
 			out["hasPendingFollowRequestToYou"] = true
 		} else {
 			warnRelErr("hasPendingFollowRequestToYou", err)
 		}
 	}
 	if h.blockingRepo != nil {
-		if rec, err := h.blockingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+		if rec, err := h.blockingRepo.FindByPair(viewer.ID, targetID); rec != nil {
 			out["isBlocking"] = true
 		} else {
 			warnRelErr("isBlocking", err)
 		}
-		if rec, err := h.blockingRepo.FindByPair(req.UserID, viewer.ID); rec != nil {
+		if rec, err := h.blockingRepo.FindByPair(targetID, viewer.ID); rec != nil {
 			out["isBlocked"] = true
 		} else {
 			warnRelErr("isBlocked", err)
 		}
 	}
 	if h.mutingRepo != nil {
-		if rec, err := h.mutingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+		if rec, err := h.mutingRepo.FindByPair(viewer.ID, targetID); rec != nil {
 			out["isMuted"] = true
 		} else {
 			warnRelErr("isMuted", err)
 		}
 	}
 	if h.renoteMutingRepo != nil {
-		if rec, err := h.renoteMutingRepo.FindByPair(viewer.ID, req.UserID); rec != nil {
+		if rec, err := h.renoteMutingRepo.FindByPair(viewer.ID, targetID); rec != nil {
 			out["isRenoteMuted"] = true
 		} else {
 			warnRelErr("isRenoteMuted", err)
 		}
 	}
 
-	return c.JSON(http.StatusOK, out)
+	return out
 }
 
 // ReportAbuse handles POST /api/users/report-abuse.
@@ -210,6 +237,12 @@ func (h *Handler) Reactions(c echo.Context) error {
 	// 丸ごと bypass して reaction list を返す。
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 
+	// viewer が target にブロックされていれば空配列 (upstream reactions.ts:91-94 の
+	// 非 moderator path 早期 return、#1547)。moderator は bypass。
+	if !iAmModerator && h.isBlockedByTarget(viewer, req.UserID) {
+		return c.JSON(http.StatusOK, []any{})
+	}
+
 	// target user lookup + remote / publicReactions check (non-moderator のみ)。
 	// production では userRepo が必ず wire されるが、既存の handler test
 	// (TestReactions_Success 等) は userRepo を wire しないので nil guard で
@@ -257,6 +290,36 @@ func (h *Handler) Reactions(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// reaction 先 note の author/reply/renote author を viewer が mute / 自分を
+	// block している場合は除外する (upstream reactions.ts:115-121 の isUserRelated、
+	// #1547)。ApplyMuteBlockChannel で生き残った note id のみ残す。
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	if len(sets.MutedUserIDs) > 0 || len(sets.BlockerIDs) > 0 {
+		rowNotes := make([]*model.Note, 0, len(rows))
+		for _, r := range rows {
+			if r.Note != nil {
+				rowNotes = append(rowNotes, r.Note)
+			}
+		}
+		survived := make(map[string]struct{}, len(rowNotes))
+		for _, n := range notesfilter.ApplyMuteBlockChannel(rowNotes, sets) {
+			survived[n.ID] = struct{}{}
+		}
+		filtered := rows[:0]
+		for _, r := range rows {
+			if r.Note == nil {
+				continue
+			}
+			if _, ok := survived[r.Note.ID]; ok {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+	}
+
 	// note は upstream の packManyWithNote と同じく完全 shape で返す。最小 shape
 	// (id/userId/text) だと createdAt / visibility / user 等が欠落し、misskey_dart
 	// の Note.fromJson が非null フィールドの cast に失敗して落ちる (#1227)。
@@ -277,8 +340,11 @@ func (h *Handler) Reactions(c echo.Context) error {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		entry := map[string]any{
-			"id":   r.ID,
-			"type": r.Reaction,
+			"id": r.ID,
+			// upstream NoteReactionEntityService は convertLegacyReaction を通す
+			// (legacy alias + 局所 custom emoji の @. 除去)。生 DB 文字列を
+			// leak しないよう read-time 変換する (#1547)。
+			"type": reaction.ConvertLegacy(r.Reaction),
 		}
 		if t, err := h.idGen.ParseTime(r.ID); err == nil {
 			entry["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -326,11 +392,22 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
+	// viewer が target にブロックされていれば空配列 (upstream featured-notes.ts:58-61、#1547)。
+	if h.isBlockedByTarget(viewer, req.UserID) {
+		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
 	notes, err := h.noteRepo.ListFeaturedByUser(req.UserID, viewerID, req.UntilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
+	// viewer が mute した user / viewer を block している user が note/reply/renote
+	// の author なら除外する (upstream featured-notes.ts:93-98 の isUserRelated、#1547)。
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	notes = notesfilter.ApplyMuteBlockChannel(notes, sets)
 	result := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(result, viewer)
 	notehide.HideEmbeds(viewer, result)
@@ -343,6 +420,9 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 		Username string  `json:"username"`
 		Host     *string `json:"host"`
 		Limit    int     `json:"limit"`
+		// Detail は upstream search-by-username-and-host.ts:52 と同じく default
+		// true。false のとき UserLite を返す (#1547)。
+		Detail *bool `json:"detail"`
 	}
 	if err := c.Bind(&req); err != nil || req.Username == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "username is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -355,12 +435,31 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
-	result := make([]entity.UserLite, 0, len(users))
+
+	// detail=false → UserLite。default (true) は UserDetailed (upstream は
+	// detail default true で UserDetailed pack、#1547)。旧実装は常に UserLite。
+	if req.Detail != nil && !*req.Detail {
+		result := make([]entity.UserLite, 0, len(users))
+		for _, u := range users {
+			lite := entity.PackUserLite(u)
+			resolver.FillUserLite(&lite)
+			h.populateUserEmojis(u, &lite)
+			result = append(result, lite)
+		}
+		return c.JSON(http.StatusOK, result)
+	}
+
+	ids := make([]string, 0, len(users))
 	for _, u := range users {
-		lite := entity.PackUserLite(u)
-		resolver.FillUserLite(&lite)
-		h.populateUserEmojis(u, &lite)
-		result = append(result, lite)
+		ids = append(ids, u.ID)
+	}
+	profiles := h.userService.GetProfilesByUserIDs(ids)
+	result := make([]entity.UserDetailed, 0, len(users))
+	for _, u := range users {
+		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
+		resolver.FillUserLite(&d.UserLite)
+		h.populateUserEmojis(u, &d.UserLite)
+		result = append(result, d)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -375,6 +474,12 @@ func (h *Handler) UpdateMemo(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+
+	// upstream update-memo.ts:22-27 は getUser で target 存在を確認し、無ければ
+	// NO_SUCH_USER を返す (#1547)。旧実装は存在確認せず直接 upsert していた。
+	if _, err := h.userService.ShowByID(req.UserID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "6fef56f3-e765-4957-88e5-c6f65329b8a5"))
 	}
 
 	if h.memoRepo == nil {

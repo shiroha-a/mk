@@ -499,6 +499,11 @@ func (r *userRepository) ListUserRecommendations(viewerID string, activeSince ti
 	err := r.db.Model(&model.User{}).
 		Where(`"isLocked" = FALSE AND "isExplorable" = TRUE AND host IS NULL AND "updatedAt" >= ? AND id <> ?`, activeSince, viewerID).
 		Where(`id NOT IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)`, viewerID).
+		// upstream recommendation.ts:64-67 と同じく viewer が mute / block している
+		// user、および viewer を block している user を除外する (#1547)。
+		Where(`id NOT IN (SELECT "muteeId" FROM "muting" WHERE "muterId" = ?)`, viewerID).
+		Where(`id NOT IN (SELECT "blockeeId" FROM "blocking" WHERE "blockerId" = ?)`, viewerID).
+		Where(`id NOT IN (SELECT "blockerId" FROM "blocking" WHERE "blockeeId" = ?)`, viewerID).
 		Order(`"followersCount" DESC`).
 		Limit(limit).
 		Offset(offset).

@@ -596,9 +596,19 @@ func TestSearchByUsernameAndHost_FiltersByHost(t *testing.T) {
 // --- UpdateMemo ---
 
 func TestUpdateMemo_Success(t *testing.T) {
-	h, _, _ := newExtraHandler(t)
+	h, userRepo, _ := newExtraHandler(t)
+	userRepo.Users["u2"] = &model.User{ID: "u2"}
 	rec := postExtra(h.UpdateMemo, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// TestUpdateMemo_NoSuchUser: target が存在しなければ NO_SUCH_USER (#1547)。
+func TestUpdateMemo_NoSuchUser(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	rec := postExtra(h.UpdateMemo, `{"userId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "6fef56f3-e765-4957-88e5-c6f65329b8a5")
 }
 
 func TestUpdateMemo_InvalidParam(t *testing.T) {

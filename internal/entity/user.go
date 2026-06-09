@@ -150,6 +150,10 @@ type UserDetailed struct {
 	// #1228 の null-cast crash は非 null bool (`isFollowing as bool`) の話で、
 	// nullable string の memo には当てはまらない。
 	Memo *string `json:"memo"`
+	// ModerationNote は moderator viewer のみに見える profile.moderationNote
+	// (upstream UserEntityService.ts:574: iAmModerator ? note ?? '' : undefined)。
+	// 非 moderator には omit する (#1547)。handler 側で viewer の role を見て set。
+	ModerationNote *string `json:"moderationNote,omitempty"`
 }
 
 // MeDetailed extends UserDetailed with fields that upstream Misskey TS
@@ -506,6 +510,13 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 	if u.LastFetchedAt != nil {
 		s := u.LastFetchedAt.UTC().Format("2006-01-02T15:04:05.000Z")
 		d.LastFetchedAt = &s
+	}
+
+	// updatedAt は upstream UserEntityService.ts:536 と同じく user.updatedAt を
+	// ISO8601 で出す。未更新は null (#1547)。旧実装は常に null だった。
+	if u.UpdatedAt != nil {
+		s := u.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		d.UpdatedAt = &s
 	}
 
 	if profile != nil {
