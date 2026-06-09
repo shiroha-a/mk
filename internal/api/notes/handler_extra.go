@@ -75,6 +75,17 @@ func (h *Handler) FavoritesDelete(c echo.Context) error {
 	if h.favoriteRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// upstream favorites/delete.ts は getNote で存在確認 (無ければ NO_SUCH_NOTE)
+	// → favorite 行が無ければ NOT_FAVORITED を返す (#1538)。旧実装は Delete を
+	// 直接呼び未 favorite でも 204 を返していた。delete は自分の favorite 行のみ
+	// 操作するので visibility gate は不要 (可視性を絞られた後でも un-favorite
+	// できるべき)、存在確認のみ行う。
+	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "80848a2c-398f-4343-baa9-df1d57696c56"))
+	}
+	if exists, _ := h.favoriteRepo.Exists(user.ID, req.NoteID); !exists {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FAVORITED", "You have not favorited that note.", "b625fc69-635e-45e9-86f4-dbefbef35af5"))
+	}
 	if err := h.favoriteRepo.Delete(user.ID, req.NoteID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

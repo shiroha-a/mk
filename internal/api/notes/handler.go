@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -263,17 +264,23 @@ func NewHandler(
 
 // CreateRequest is the request body for notes/create.
 type CreateRequest struct {
-	Visibility         string       `json:"visibility"`
-	VisibleUserIDs     []string     `json:"visibleUserIds"`
-	CW                 *string      `json:"cw"`
-	Text               *string      `json:"text"`
-	LocalOnly          bool         `json:"localOnly"`
-	ReactionAcceptance *string      `json:"reactionAcceptance"`
-	FileIDs            []string     `json:"fileIds"`
-	ReplyID            *string      `json:"replyId"`
-	RenoteID           *string      `json:"renoteId"`
-	ChannelID          *string      `json:"channelId"`
-	Poll               *PollRequest `json:"poll"`
+	Visibility         string   `json:"visibility"`
+	VisibleUserIDs     []string `json:"visibleUserIds"`
+	CW                 *string  `json:"cw"`
+	Text               *string  `json:"text"`
+	LocalOnly          bool     `json:"localOnly"`
+	ReactionAcceptance *string  `json:"reactionAcceptance"`
+	FileIDs            []string `json:"fileIds"`
+	// MediaIDs は fileIds の別名 (upstream は fileIds ?? mediaIds、#1538)。
+	MediaIDs  []string     `json:"mediaIds"`
+	ReplyID   *string      `json:"replyId"`
+	RenoteID  *string      `json:"renoteId"`
+	ChannelID *string      `json:"channelId"`
+	Poll      *PollRequest `json:"poll"`
+	// noExtract* は mention/hashtag/emoji の自動抽出を抑止する (#1538)。
+	NoExtractMentions bool `json:"noExtractMentions"`
+	NoExtractHashtags bool `json:"noExtractHashtags"`
+	NoExtractEmojis   bool `json:"noExtractEmojis"`
 }
 
 // PollRequest is the poll part of a create note request.
@@ -293,6 +300,18 @@ func (h *Handler) Create(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// fileIds ?? mediaIds (upstream alias、#1538)。fileIds が空のときのみ
+	// mediaIds をフォールバックで使う。
+	fileIDs := req.FileIDs
+	if len(fileIDs) == 0 && len(req.MediaIDs) > 0 {
+		fileIDs = req.MediaIDs
+	}
+
+	// 入力検証 (upstream notes/create.ts paramDef、#1538)。違反は 400 INVALID_PARAM。
+	if err := validateCreateInput(&req, fileIDs); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), apierr.UUIDInvalidParam))
+	}
+
 	in := note.CreateInput{
 		User:               user,
 		Text:               req.Text,
@@ -301,10 +320,13 @@ func (h *Handler) Create(c echo.Context) error {
 		VisibleUserIDs:     req.VisibleUserIDs,
 		LocalOnly:          req.LocalOnly,
 		ReactionAcceptance: req.ReactionAcceptance,
-		FileIDs:            req.FileIDs,
+		FileIDs:            fileIDs,
 		ReplyID:            req.ReplyID,
 		RenoteID:           req.RenoteID,
 		ChannelID:          req.ChannelID,
+		NoExtractMentions:  req.NoExtractMentions,
+		NoExtractHashtags:  req.NoExtractHashtags,
+		NoExtractEmojis:    req.NoExtractEmojis,
 	}
 
 	if req.Poll != nil {
@@ -372,6 +394,47 @@ func (h *Handler) Create(c echo.Context) error {
 	})
 }
 
+// maxNoteTextLength mirrors upstream MAX_NOTE_TEXT_LENGTH (const.ts、#1538)。
+const maxNoteTextLength = 3000
+
+// validateCreateInput enforces the upstream notes/create.ts paramDef limits
+// (text/cw length, poll choices, fileIds count) and the text-only [^\s]+ rule.
+// fileIDs is the effective attachment list after the fileIds/mediaIds merge.
+// Returns a non-nil error (its message becomes the INVALID_PARAM body) on the
+// first violation, matching upstream's 400 rejection (#1538)。
+func validateCreateInput(req *CreateRequest, fileIDs []string) error {
+	if req.Text != nil && len([]rune(*req.Text)) > maxNoteTextLength {
+		return errors.New("text is too long")
+	}
+	if req.CW != nil {
+		if n := len([]rune(*req.CW)); n < 1 || n > 100 {
+			return errors.New("cw must be between 1 and 100 characters")
+		}
+	}
+	if len(fileIDs) > 16 {
+		return errors.New("too many files (max 16)")
+	}
+	if req.Poll != nil {
+		if n := len(req.Poll.Choices); n < 2 || n > 10 {
+			return errors.New("poll must have between 2 and 10 choices")
+		}
+		for _, ch := range req.Poll.Choices {
+			if n := len([]rune(ch)); n < 1 || n > 50 {
+				return errors.New("each poll choice must be between 1 and 50 characters")
+			}
+		}
+	}
+	// text のみで成立する note (renote/file/poll 無し) は空白だけの text を弾く
+	// (upstream の pattern '[^\\s]+')。text=nil の content-less は service 側の
+	// ErrNoteContentRequired に委ねる。
+	if req.RenoteID == nil && len(fileIDs) == 0 && req.Poll == nil && req.Text != nil {
+		if strings.TrimSpace(*req.Text) == "" {
+			return errors.New("text must contain at least one non-whitespace character")
+		}
+	}
+	return nil
+}
+
 // ShowRequest is the request body for notes/show.
 type ShowRequest struct {
 	NoteID string `json:"noteId"`
@@ -388,6 +451,20 @@ func (h *Handler) Show(c echo.Context) error {
 	n, err := h.lookupForShow(req.NoteID)
 	if err != nil {
 		return apierr.JSONNoSuchNote(c)
+	}
+
+	// 未ログイン閲覧の制限 (upstream notes/show.ts:69-79, #1538)。
+	//   1. 著者が requireSigninToViewContents=true → CONTENT_RESTRICTED_BY_USER
+	//   2. server の ugcVisibilityForVisitor='none' → CONTENT_RESTRICTED_BY_SERVER
+	//   3. 'local' かつ remote note → CONTENT_RESTRICTED_BY_SERVER
+	// ログイン済み viewer には一切適用しない。
+	if viewer == nil {
+		if n.User != nil && n.User.RequireSigninToViewContents {
+			return c.JSON(http.StatusForbidden, apierr.Error("CONTENT_RESTRICTED_BY_USER", "This content is not available because the author requires sign-in to view it.", "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab"))
+		}
+		if h.ugcVisibility == "none" || (h.ugcVisibility == "local" && n.UserHost != nil) {
+			return c.JSON(http.StatusForbidden, apierr.Error("CONTENT_RESTRICTED_BY_SERVER", "This content is not available for visitors on this server.", "145f88d2-b03d-4087-8143-a78928883c4b"))
+		}
 	}
 
 	packed := entity.PackNoteWithInstance(c.Request().Context(), n, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())

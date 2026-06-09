@@ -41,7 +41,7 @@ func TestNoteDraftRepository_Full(t *testing.T) {
 	assert.Error(t, err)
 
 	// ListByUser
-	list, err := repo.ListByUser(user.ID, 10)
+	list, err := repo.ListByUser(user.ID, "", "", nil, 10)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
@@ -51,9 +51,31 @@ func TestNoteDraftRepository_Full(t *testing.T) {
 	assert.Equal(t, int64(0), scheduled)
 
 	// ListByUser - default limit
-	list2, err := repo.ListByUser(user.ID, 0)
+	list2, err := repo.ListByUser(user.ID, "", "", nil, 0)
 	require.NoError(t, err)
 	assert.Len(t, list2, 1)
+
+	// ListByUser pagination + scheduled filter (#1538). draft.ID は aidx で
+	// keyset pagination する。untilId=自身の id 未満 → 該当 0、scheduled=true
+	// フィルタ → 通常 draft (isActuallyScheduled=false) は除外。
+	only := list[0]
+	emptyByUntil, err := repo.ListByUser(user.ID, "", only.ID, nil, 10)
+	require.NoError(t, err)
+	assert.Empty(t, emptyByUntil, "untilId=自身の id では < cursor に該当無し")
+
+	emptyBySince, err := repo.ListByUser(user.ID, only.ID, "", nil, 10)
+	require.NoError(t, err)
+	assert.Empty(t, emptyBySince, "sinceId=自身の id では > cursor に該当無し")
+
+	wantScheduled := true
+	noScheduled, err := repo.ListByUser(user.ID, "", "", &wantScheduled, 10)
+	require.NoError(t, err)
+	assert.Empty(t, noScheduled, "scheduled=true フィルタで通常 draft は除外")
+
+	wantNotScheduled := false
+	stillThere, err := repo.ListByUser(user.ID, "", "", &wantNotScheduled, 10)
+	require.NoError(t, err)
+	assert.Len(t, stillThere, 1, "scheduled=false フィルタは通常 draft を含む")
 
 	// Update
 	newText := "updated text"

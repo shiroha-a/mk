@@ -75,6 +75,12 @@ type CreateInput struct {
 	RenoteID           *string
 	ChannelID          *string
 	Poll               *PollInput
+	// NoExtract* suppress automatic mention/hashtag/emoji extraction from text.
+	// upstream notes/create.ts は apMentions/apHashtags/apEmojis に [] を渡して
+	// 抽出を抑止する (= 主に AP inbox / bridge 経由の二重抽出防止、#1538)。
+	NoExtractMentions bool
+	NoExtractHashtags bool
+	NoExtractEmojis   bool
 }
 
 // PollInput represents the poll part of a create note input.
@@ -504,14 +510,17 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// hashtag 抽出: text/cw から #tag を拾い note.tags 列に格納する。
 	// hashtags/trend の動的集計や hashtag 検索が機能するためには
 	// note.tags が常に正しく埋められている必要がある (#655)。
-	var hashtagParts []string
-	if in.Text != nil {
-		hashtagParts = append(hashtagParts, *in.Text)
+	var tags []string
+	if !in.NoExtractHashtags {
+		var hashtagParts []string
+		if in.Text != nil {
+			hashtagParts = append(hashtagParts, *in.Text)
+		}
+		if in.CW != nil {
+			hashtagParts = append(hashtagParts, *in.CW)
+		}
+		tags = hashtag.Extract(hashtagParts...)
 	}
-	if in.CW != nil {
-		hashtagParts = append(hashtagParts, *in.CW)
-	}
-	tags := hashtag.Extract(hashtagParts...)
 
 	note := &model.Note{
 		ID:                 noteID,
@@ -549,7 +558,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// host 列の等価比較で lookup する。未知のユーザーは単にスキップする
 	// (remote webfinger 解決は pre-lookup されている前提)。
 	// userRepo が未設定のときは後方互換のため username 文字列をそのまま格納する。
-	if in.Text != nil {
+	if in.Text != nil && !in.NoExtractMentions {
 		if s.userRepo != nil {
 			mentions := ExtractMentionStructs(*in.Text)
 			if len(mentions) > 0 {
@@ -600,7 +609,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// (#629)。連合配信時に renderer.addEmojiTags が note.Emojis を walk して
 	// AP Note.tag に Emoji エントリを足すので、ここで埋めないと連合先で
 	// custom emoji が画像化されず文字列のまま表示される。
-	{
+	if !in.NoExtractEmojis {
 		var text, cw string
 		if in.Text != nil {
 			text = *in.Text

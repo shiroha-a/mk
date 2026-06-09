@@ -175,11 +175,33 @@ func TestFavoritesCreate_SpecifiedNote_InList_OK(t *testing.T) {
 }
 
 func TestFavoritesDelete_Success(t *testing.T) {
-	h, _, favRepo := newExtraHandler(t)
+	h, noteRepo, favRepo := newExtraHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
 	favRepo.Favorites["u1:n1"] = &model.NoteFavorite{UserID: "u1", NoteID: "n1"}
 	rec := postExtra(h.FavoritesDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, favRepo.Favorites)
+}
+
+// TestFavoritesDelete_NoSuchNote: note が存在しなければ NO_SUCH_NOTE (#1538)。
+func TestFavoritesDelete_NoSuchNote(t *testing.T) {
+	h, _, favRepo := newExtraHandler(t)
+	favRepo.Favorites["u1:n1"] = &model.NoteFavorite{UserID: "u1", NoteID: "n1"}
+	rec := postExtra(h.FavoritesDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Contains(t, rec.Body.String(), "80848a2c-398f-4343-baa9-df1d57696c56")
+}
+
+// TestFavoritesDelete_NotFavorited: note は在るが favorite 行が無ければ
+// NOT_FAVORITED (旧実装は未 favorite でも 204、#1538)。
+func TestFavoritesDelete_NotFavorited(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	rec := postExtra(h.FavoritesDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_FAVORITED")
+	assert.Contains(t, rec.Body.String(), "b625fc69-635e-45e9-86f4-dbefbef35af5")
 }
 
 func TestFavoritesDelete_InvalidParam(t *testing.T) {
@@ -866,8 +888,13 @@ func (f *failingFavDeleteRepo) Delete(_, _ string) error { return testutil.ErrNo
 
 func TestFavoritesDelete_Error(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
-	h := NewHandler(testutil.NewMockNoteRepository(), nil, nil, nil, nil, nil, nil, nil, idGen)
-	h.SetFavoriteRepo(&failingFavDeleteRepo{testutil.NewMockNoteFavoriteRepository()})
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen)
+	// note 存在 + favorite 存在の状態で Delete だけ失敗させ、500 経路を踏ませる。
+	failing := &failingFavDeleteRepo{testutil.NewMockNoteFavoriteRepository()}
+	failing.Favorites["u1:n1"] = &model.NoteFavorite{UserID: "u1", NoteID: "n1"}
+	h.SetFavoriteRepo(failing)
 	rec := postExtra(h.FavoritesDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

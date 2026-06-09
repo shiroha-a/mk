@@ -278,7 +278,7 @@ func TestErrorPaths_CancelledContext(t *testing.T) {
 	assert.Error(t, err)
 	_, err = nr.DeleteByUserBatch("x", 10)
 	assert.Error(t, err)
-	_, err = NewNoteDraftRepository(db).ListByUser("x", 10)
+	_, err = NewNoteDraftRepository(db).ListByUser("x", "", "", nil, 10)
 	assert.Error(t, err)
 	_, err = NewNoteDraftRepository(db).CountByUser("x")
 	assert.Error(t, err)

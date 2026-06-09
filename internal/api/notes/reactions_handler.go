@@ -41,7 +41,11 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 		case errors.Is(err, reaction.ErrCannotReactToPureRenote):
 			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_REACT_TO_RENOTE", "You can not react to a pure Renote.", "eaccdc08-ddef-43fe-908f-d108faad57f5"))
 		case errors.Is(err, reaction.ErrBlocked):
-			return c.JSON(http.StatusForbidden, apierr.Error("BLOCKED", "You are blocked by that user.", "e70412a4-7197-4726-8e74-f3e0deb92aa7"))
+			// upstream notes/reactions/create.ts は ReactionService の内部 id
+			// (e70412a4…) を catch し、endpoint error youHaveBeenBlocked
+			// (code=YOU_HAVE_BEEN_BLOCKED, id=20ef5475…) に変換して返す。旧実装は
+			// 内部 id と独自 code=BLOCKED をそのまま leak していた (#1538)。
+			return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot react this note because you have been blocked by this user.", "20ef5475-9f38-4e4c-bd33-de6d979498ec"))
 		}
 		return apierr.JSONInternalError(c)
 	}

@@ -68,12 +68,25 @@ func (m *mockDraftRepo) FindByIDAndUser(id, userID string) (*model.NoteDraft, er
 	}
 	return nil, errDraftMock
 }
-func (m *mockDraftRepo) ListByUser(userID string, _ int) ([]*model.NoteDraft, error) {
+func (m *mockDraftRepo) ListByUser(userID, sinceID, untilID string, scheduled *bool, limit int) ([]*model.NoteDraft, error) {
 	var result []*model.NoteDraft
 	for _, d := range m.drafts {
-		if d.UserID == userID {
-			result = append(result, d)
+		if d.UserID != userID {
+			continue
 		}
+		if sinceID != "" && d.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && d.ID >= untilID {
+			continue
+		}
+		if scheduled != nil && d.IsActuallyScheduled != *scheduled {
+			continue
+		}
+		result = append(result, d)
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
 	}
 	return result, nil
 }
@@ -506,7 +519,8 @@ func TestDraftsCount_NilRepo(t *testing.T) {
 	h := newDraftHandler()
 	rec := postDraft(h.DraftsCount, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"count":0`)
+	// upstream drafts/count は res type:'number' で裸の数値 (#1538)。
+	assert.JSONEq(t, `0`, rec.Body.String())
 }
 
 func TestDraftsCount_WithData(t *testing.T) {
@@ -514,7 +528,7 @@ func TestDraftsCount_WithData(t *testing.T) {
 	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1"}
 	rec := postDraft(h.DraftsCount, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"count":1`)
+	assert.JSONEq(t, `1`, rec.Body.String())
 }
 
 // --- ThreadMuting ---

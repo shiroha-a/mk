@@ -353,6 +353,8 @@ func (s *Server) setupRoutes() {
 	// Polls
 	pollService := corepoll.NewService(noteRepo, pollRepo, pollVoteRepo, followingRepo, idGen)
 	pollService.SetNotificationHook(notificationHook)
+	// note 著者にブロックされた user の投票を弾く (upstream youHaveBeenBlocked、#1538)。
+	pollService.SetBlockingChecker(blockingService)
 	// poll federation hook は deliverService が下で生成されるので、
 	// `pollService.SetFederationHook(...)` の呼び出しは deliverService 構築後
 	// (router.go:493 以降) に行う。下方の wire-up コメント参照。

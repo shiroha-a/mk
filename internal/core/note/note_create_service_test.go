@@ -93,6 +93,32 @@ func TestCreateService_Success(t *testing.T) {
 	assert.Len(t, noteRepo.Notes, 1)
 }
 
+// TestCreateService_NoExtract verifies the noExtract* flags suppress mention /
+// hashtag / emoji extraction (#1538). Without them the same text would populate
+// Tags / Mentions / Emojis.
+func TestCreateService_NoExtract(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	user := &model.User{ID: "user1", Username: "alice"}
+	text := "hello #tag @bob :smile:"
+
+	withExtract, err := svc.Create(note.CreateInput{User: user, Text: &text, Visibility: model.NoteVisibilityPublic})
+	require.NoError(t, err)
+	assert.NotEmpty(t, withExtract.Tags, "デフォルトでは hashtag を抽出する")
+
+	created, err := svc.Create(note.CreateInput{
+		User:              user,
+		Text:              &text,
+		Visibility:        model.NoteVisibilityPublic,
+		NoExtractMentions: true,
+		NoExtractHashtags: true,
+		NoExtractEmojis:   true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, created.Tags, "noExtractHashtags で hashtag 抽出を抑止")
+	assert.Empty(t, created.Mentions, "noExtractMentions で mention 抽出を抑止")
+	assert.Empty(t, created.Emojis, "noExtractEmojis で emoji 抽出を抑止")
+}
+
 func TestCreateService_DefaultVisibility(t *testing.T) {
 	svc, _, _ := newCreateService(t)
 

@@ -25,7 +25,16 @@ var (
 	ErrPollExpired = errors.New("poll has expired")
 	// ErrAlreadyVoted is returned when the user has already voted.
 	ErrAlreadyVoted = errors.New("already voted")
+	// ErrYouHaveBeenBlocked is returned when the note author has blocked the
+	// voter, mirroring upstream notes/polls/vote.ts youHaveBeenBlocked.
+	ErrYouHaveBeenBlocked = errors.New("blocked by note author")
 )
+
+// BlockingChecker reports whether one user has blocked another. 循環依存を避ける
+// ため interface で受け取る (実装は core/blocking)。reaction.Service と同じ契約。
+type BlockingChecker interface {
+	IsBlocked(blockerID, blockeeID string) (bool, error)
+}
 
 // NotificationHook is invoked after a vote is recorded so the notification
 // subsystem can deliver a "pollVote" notification to the note author.
@@ -63,6 +72,7 @@ type Service struct {
 	notificationHook NotificationHook
 	eventPub         NoteEventPublisher
 	federationHook   FederationDeliveryHook
+	blockingChecker  BlockingChecker
 	nowFn            func() time.Time
 }
 
@@ -97,6 +107,13 @@ func (s *Service) SetEventPublisher(p NoteEventPublisher) {
 	s.eventPub = p
 }
 
+// SetBlockingChecker attaches a BlockingChecker used by Vote to reject votes
+// from users the note author has blocked (upstream youHaveBeenBlocked)。nil
+// 配線時は block 判定を skip (local-only テスト環境向け)。
+func (s *Service) SetBlockingChecker(c BlockingChecker) {
+	s.blockingChecker = c
+}
+
 // SetFederationHook attaches a FederationDeliveryHook used after a vote is
 // recorded on a remote poll, so the choice is propagated to the remote
 // author's inbox via AP. nil 配線時は配信 skip — local-only deployments
@@ -120,6 +137,17 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 	}
 	if !target.HasPoll {
 		return ErrNoPoll
+	}
+
+	// 投票者が note 著者にブロックされている場合は弾く。upstream vote.ts は
+	// hasPoll guard の直後・poll lookup の前に checkBlocked(note.userId, me.id)
+	// を行う (#1538)。自分の poll への投票は対象外。
+	if s.blockingChecker != nil && target.UserID != user.ID {
+		if blocked, err := s.blockingChecker.IsBlocked(target.UserID, user.ID); err != nil {
+			return err
+		} else if blocked {
+			return ErrYouHaveBeenBlocked
+		}
 	}
 
 	p, err := s.pollRepo.FindByNoteID(target.ID)

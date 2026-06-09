@@ -130,6 +130,11 @@ func TestReactionsCreate_Blocked(t *testing.T) {
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsCreate(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream create.ts は endpoint error youHaveBeenBlocked に変換する。
+	// 旧実装は内部 id (e70412a4) と code=BLOCKED を leak していた (#1538)。
+	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
+	assert.Contains(t, rec.Body.String(), "20ef5475-9f38-4e4c-bd33-de6d979498ec")
+	assert.NotContains(t, rec.Body.String(), `"BLOCKED"`)
 }
 
 func TestReactionsCreate_PureRenote(t *testing.T) {

@@ -79,6 +79,48 @@ func TestVote_PollNotFoundForNote(t *testing.T) {
 	require.ErrorIs(t, err, poll.ErrNoPoll)
 }
 
+// stubBlockingChecker is a configurable BlockingChecker for the vote-blocking
+// path (#1538). blocked/err はそのまま IsBlocked から返す。
+type stubBlockingChecker struct {
+	blocked bool
+	err     error
+}
+
+func (s stubBlockingChecker) IsBlocked(_, _ string) (bool, error) { return s.blocked, s.err }
+
+func TestVote_BlockedByAuthor(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
+	svc.SetBlockingChecker(stubBlockingChecker{blocked: true})
+	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
+	require.ErrorIs(t, err, poll.ErrYouHaveBeenBlocked)
+}
+
+func TestVote_NotBlockedProceeds(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
+	svc.SetBlockingChecker(stubBlockingChecker{blocked: false})
+	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
+	require.NoError(t, err, "ブロックされていなければ通常通り投票できる")
+}
+
+func TestVote_BlockingCheckerError(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
+	svc.SetBlockingChecker(stubBlockingChecker{err: stubError})
+	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
+	require.ErrorIs(t, err, stubError)
+}
+
+func TestVote_SelfVoteSkipsBlockCheck(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
+	// blocked=true でも自分の poll への投票は block 判定を skip する。
+	svc.SetBlockingChecker(stubBlockingChecker{blocked: true})
+	err := svc.Vote(&model.User{ID: "author"}, "n1", 0)
+	require.NoError(t, err)
+}
+
 func TestVote_InvalidChoice(t *testing.T) {
 	svc, noteRepo, pollRepo, _ := newSvc(t)
 	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)

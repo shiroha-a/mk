@@ -13,7 +13,13 @@ type NoteDraftRepository interface {
 	// Used by internal worker paths (= scheduled note processor) that act on
 	// behalf of the draft owner stored in the row (#1040)。
 	FindByID(id string) (*model.NoteDraft, error)
-	ListByUser(userID string, limit int) ([]*model.NoteDraft, error)
+	// ListByUser lists a user's drafts newest-first with keyset pagination.
+	// sinceID/untilID page on the draft id (aidx, time-ordered) mirroring
+	// upstream makePaginationQuery; scheduled, when non-nil, filters on
+	// isActuallyScheduled. mk-go は他 repo と同様 id-based keyset のみで、
+	// upstream の sinceDate/untilDate (NoteDraft に createdAt 列が無い) は
+	// 非対応 (#1538)。
+	ListByUser(userID, sinceID, untilID string, scheduled *bool, limit int) ([]*model.NoteDraft, error)
 	Update(draft *model.NoteDraft) error
 	// Delete returns the number of rows affected so callers can detect
 	// "no such draft" without a separate FindByIDAndUser pre-check (single
@@ -47,12 +53,24 @@ func (r *noteDraftRepository) FindByIDAndUser(id, userID string) (*model.NoteDra
 	return &d, nil
 }
 
-func (r *noteDraftRepository) ListByUser(userID string, limit int) ([]*model.NoteDraft, error) {
+func (r *noteDraftRepository) ListByUser(userID, sinceID, untilID string, scheduled *bool, limit int) ([]*model.NoteDraft, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = 30
+	}
+	q := r.db.Where(`"userId" = ?`, userID)
+	// id は note_draft.id (aidx) で keyset pagination する。note_favorite と
+	// 同じ向き: untilId は < cursor (DESC で次ページ)、sinceId は > cursor。
+	if untilID != "" {
+		q = q.Where(`"id" < ?`, untilID)
+	}
+	if sinceID != "" {
+		q = q.Where(`"id" > ?`, sinceID)
+	}
+	if scheduled != nil {
+		q = q.Where(`"isActuallyScheduled" = ?`, *scheduled)
 	}
 	var drafts []*model.NoteDraft
-	if err := r.db.Where(`"userId" = ?`, userID).Order(`"id" DESC`).Limit(limit).Find(&drafts).Error; err != nil {
+	if err := q.Order(`"id" DESC`).Limit(limit).Find(&drafts).Error; err != nil {
 		return nil, err
 	}
 	return drafts, nil

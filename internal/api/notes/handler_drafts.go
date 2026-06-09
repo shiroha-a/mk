@@ -27,7 +27,18 @@ func (h *Handler) DraftsList(c echo.Context) error {
 	if h.draftRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	drafts, err := h.draftRepo.ListByUser(user.ID, 20)
+	// upstream drafts/list.ts は limit(default30/max100) + sinceId/untilId +
+	// scheduled(boolean) を受ける (#1538)。sinceDate/untilDate は mk-go の
+	// id-based keyset 方針 (NoteDraft に createdAt 列が無い) のため非対応。
+	var req struct {
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		Scheduled *bool  `json:"scheduled"`
+	}
+	_ = c.Bind(&req)
+	limit := pagination.ClampLimit(req.Limit, 30, 100)
+	drafts, err := h.draftRepo.ListByUser(user.ID, req.SinceID, req.UntilID, req.Scheduled, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -402,11 +413,13 @@ func (h *Handler) DraftsDelete(c echo.Context) error {
 // DraftsCount handles POST /api/notes/drafts/count.
 func (h *Handler) DraftsCount(c echo.Context) error {
 	user := middleware.GetUser(c)
+	// upstream drafts/count.ts は res type:'number' で裸の数値を返す。旧実装は
+	// {"count": N} オブジェクトを返していた (#1538)。
 	if h.draftRepo == nil {
-		return c.JSON(http.StatusOK, map[string]any{"count": 0})
+		return c.JSON(http.StatusOK, 0)
 	}
 	count, _ := h.draftRepo.CountByUser(user.ID)
-	return c.JSON(http.StatusOK, map[string]any{"count": count})
+	return c.JSON(http.StatusOK, count)
 }
 
 // SetThreadMutingRepo wires the NoteThreadMutingRepository used by the
