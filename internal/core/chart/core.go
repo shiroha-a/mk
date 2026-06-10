@@ -458,19 +458,31 @@ func (c *Chart) GetChart(ctx context.Context, span Span, amount int, cursor *tim
 	if amount <= 0 {
 		amount = 1
 	}
-	// upstream getChartRaw は window 末尾バケットを、cursor 指定時は
+	// upstream getChartRaw は window 末尾バケット (lt) を、cursor 指定時は
 	// truncate(cursor + 1span - 1ms) = ceil(cursor)、未指定 (now) 時は
 	// truncate(now) = floor(now) で求める。後者は getCurrentDate 相当。
 	// 両者で丸め方向が違うため cursor の有無で分岐する (#1565)。
 	var end time.Time
+	// gtBase は DB lower-bound (gt) を amount-1 step back する前のアンカー。
+	// upstream は cursor 指定時に floor(cursor) + 1span、未指定時は floor(now)
+	// から引く。境界一致 cursor では gtBase が end (=ceil(cursor)=floor(cursor))
+	// より 1span 新しくなり、gt が最古表示バケットより 1span 新しい位置に来る。
+	// 結果 range query が最古バケットの実ログを取りこぼし、outdated-log
+	// backfill (logs.at(-1).date == gt) も抑止されて最古バケットが 0/空に
+	// 補間される。非境界 cursor / nil now path では gtBase == end なので
+	// gt は最古表示バケットと一致し従来挙動を保つ (#1610 / #1565 follow-up)。
+	var gtBase time.Time
 	if cursor != nil {
 		end = ceilToSpan(*cursor, span)
+		gtBase = stepBack(truncateToSpan(*cursor, span), -1, span) // floor(cursor) + 1span
 	} else {
-		end = truncateToSpan(c.clock.Now(), span)
+		now := truncateToSpan(c.clock.Now(), span)
+		end = now
+		gtBase = now
 	}
-	start := stepBack(end, amount-1, span)
+	gt := stepBack(gtBase, amount-1, span)
 
-	rows, err := c.repo.FindRange(ctx, span, group, start.Unix(), end.Unix())
+	rows, err := c.repo.FindRange(ctx, span, group, gt.Unix(), end.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -483,9 +495,12 @@ func (c *Chart) GetChart(ctx context.Context, span Span, amount int, cursor *tim
 		} else if !errors.Is(err, ErrRowNotFound) {
 			return nil, err
 		}
-	} else if len(rows) > 0 && rows[len(rows)-1].Date != start.Unix() {
-		// 範囲の最古バケットより古いログを末尾に追加して補間アンカーにする
-		anchor, err := c.repo.FindBefore(ctx, span, group, start.Unix())
+	} else if rows[len(rows)-1].Date != gt.Unix() {
+		// gt バケットにログが無い (range 最古が gt と一致しない) → gt より古い
+		// 最新ログを outdated-log として末尾に追加し補間アンカーにする。
+		// 逆に gt バケットにログが在るときは backfill を抑止し、最古表示バケット
+		// (gt より 1span 古い場合) を 0/空のまま残す (upstream と同じ挙動)。
+		anchor, err := c.repo.FindBefore(ctx, span, group, gt.Unix())
 		if err == nil {
 			rows = append(rows, anchor)
 		} else if !errors.Is(err, ErrRowNotFound) {

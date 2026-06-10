@@ -430,6 +430,143 @@ func TestGetChart_FindBeforeErrorBubbles(t *testing.T) {
 	}
 }
 
+// TestGetChart_BoundaryCursorOldestBucketZeroed は #1610 の核心ケース。
+// 境界一致 cursor (12:00) + amount>1 で、最古表示バケットの実ログを
+// upstream getChartRaw が range query から取りこぼし 0/空に補間する挙動を
+// mk-go でも再現することを確認する。
+//
+// 本家の DB lower-bound gt は floor(cursor)+1span (=13:00) から amount-1
+// step back するため、amount=5 では gt=09:00 となり最古表示バケット 08:00 は
+// range 外。gt バケット (09:00) にログが在るため outdated-log backfill も
+// 抑止され、08:00 は補間アンカーを持てず 0 になる。修正前は start=08:00 を
+// lower-bound にしていたため 08:00 の実値 (inc=8 / total=10) を返していた。
+func TestGetChart_BoundaryCursorOldestBucketZeroed(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 08:00..12:00 の 5 連続バケットに書き込む。inc は hour 値、
+	// total は accumulate なので 10/20/30/40/50 と累積する。
+	for h := 8; h <= 12; h++ {
+		clk.set(time.Date(2026, 4, 9, h, 0, 0, 0, time.UTC))
+		require.NoError(t, c.Commit(Diff{"local.inc": int64(h), "local.total": int64(10)}, ""))
+		require.NoError(t, c.Save(context.Background()))
+	}
+	clk.set(time.Date(2026, 4, 9, 20, 0, 0, 0, time.UTC))
+
+	aligned := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 5, &aligned, "")
+	require.NoError(t, err)
+	// newest-first: 12:00..09:00 は実値、最古 08:00 (idx4) は 0。
+	assert.Equal(t, []int64{12, 11, 10, 9, 0}, out["local.inc"], "oldest bucket must be zeroed (upstream gt quirk)")
+	// accumulate 列も最古バケットは carry されず 0 になる。
+	assert.Equal(t, []int64{50, 40, 30, 20, 0}, out["local.total"], "oldest accumulate bucket must be zeroed")
+}
+
+// TestGetChart_BoundaryCursorGapBackfillsOldest は、境界一致 cursor + gt
+// バケット (09:00) が欠損しているとき、outdated-log backfill が gt より古い
+// 最新ログを取得し、それが最古表示バケット (08:00) に exact-match して実値で
+// 埋まることを確認する。gt バケット欠損の有無で最古バケットの値が変わるのが
+// upstream の仕様。
+func TestGetChart_BoundaryCursorGapBackfillsOldest(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 09:00 (gt バケット) を欠落させ、08:00 / 10:00 / 11:00 / 12:00 に書き込む。
+	// total は accumulate なので 10/20/30/40 と累積する。
+	for _, h := range []int{8, 10, 11, 12} {
+		clk.set(time.Date(2026, 4, 9, h, 0, 0, 0, time.UTC))
+		require.NoError(t, c.Commit(Diff{"local.inc": int64(h * 10), "local.total": int64(10)}, ""))
+		require.NoError(t, c.Save(context.Background()))
+	}
+	clk.set(time.Date(2026, 4, 9, 20, 0, 0, 0, time.UTC))
+
+	aligned := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 5, &aligned, "")
+	require.NoError(t, err)
+	// 12:00=120, 11:00=110, 10:00=100, 09:00=gap→0, 08:00=80 (outdated backfill)。
+	assert.Equal(t, []int64{120, 110, 100, 0, 80}, out["local.inc"])
+	// accumulate 列: gap の 09:00 は outdated backfill した 08:00 の値を carry。
+	assert.Equal(t, []int64{40, 30, 20, 10, 10}, out["local.total"])
+}
+
+// TestGetChart_BoundaryCursorGroupedAmountTwo は grouped chart + amount=2 の
+// 最小 quirk ケース。境界一致 cursor では gt==end の単一バケット range となり、
+// end バケットにログが在ると backfill 抑止で end-1span (最古) が 0 になる。
+func TestGetChart_BoundaryCursorGroupedAmountTwo(t *testing.T) {
+	c, _, clk := newTestChart(t, perUserNotesSchema)
+	for h := 11; h <= 12; h++ {
+		clk.set(time.Date(2026, 4, 9, h, 0, 0, 0, time.UTC))
+		require.NoError(t, c.Commit(Diff{"inc": int64(h)}, "u1"))
+		require.NoError(t, c.Save(context.Background()))
+	}
+	clk.set(time.Date(2026, 4, 9, 20, 0, 0, 0, time.UTC))
+
+	aligned := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 2, &aligned, "u1")
+	require.NoError(t, err)
+	// 12:00=12 (gt バケット=実値)、最古 11:00 は range 外 + backfill 抑止で 0。
+	assert.Equal(t, []int64{12, 0}, out["inc"])
+}
+
+// TestGetChart_NonBoundaryCursorIncludesOldest は、非境界 cursor (12:30) では
+// gt が最古表示バケットと一致し、最古バケットの実値が従来どおり含まれる
+// (#1610 の修正が境界一致ケースのみに限定されている) ことを保証する回帰テスト。
+func TestGetChart_NonBoundaryCursorIncludesOldest(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 11:00 / 12:00 / 13:00 に書き込む。
+	for h := 11; h <= 13; h++ {
+		clk.set(time.Date(2026, 4, 9, h, 0, 0, 0, time.UTC))
+		require.NoError(t, c.Commit(Diff{"local.inc": int64(h)}, ""))
+		require.NoError(t, c.Save(context.Background()))
+	}
+	clk.set(time.Date(2026, 4, 9, 20, 0, 0, 0, time.UTC))
+
+	// mid-bucket cursor 12:30 → end=ceil=13:00, gt=11:00 (=最古表示バケット)。
+	mid := time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 3, &mid, "")
+	require.NoError(t, err)
+	// 最古 11:00 も実値で含まれる。
+	assert.Equal(t, []int64{13, 12, 11}, out["local.inc"])
+}
+
+// TestGetChart_BoundaryCursorSpanDayOldestZeroed は SpanDay でも境界一致
+// cursor の最古バケットが 0 に補間されることを確認する。
+func TestGetChart_BoundaryCursorSpanDayOldestZeroed(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 2026-04-05..04-09 の 5 連続 day バケットに書き込む。
+	for d := 5; d <= 9; d++ {
+		clk.set(time.Date(2026, 4, d, 12, 0, 0, 0, time.UTC))
+		require.NoError(t, c.Commit(Diff{"local.inc": int64(d)}, ""))
+		require.NoError(t, c.Save(context.Background()))
+	}
+	clk.set(time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC))
+
+	aligned := time.Date(2026, 4, 9, 0, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanDay, 5, &aligned, "")
+	require.NoError(t, err)
+	// newest-first: 04-09..04-06 は実値、最古 04-05 (idx4) は 0。
+	assert.Equal(t, []int64{9, 8, 7, 6, 0}, out["local.inc"])
+}
+
+// TestGetChart_BoundaryCursorAmountOneOvershoots は amount=1 境界一致 cursor の
+// エッジ。gt=floor(cursor)+1span が end (=cursor バケット) より新しくなり
+// range query が空になるため FindLatest fallback が走る。fallback で得た
+// 最新ログが cursor バケットより新しい場合は exact-match せず 0 になる
+// (upstream の recentLog overshoot と同じ)。
+func TestGetChart_BoundaryCursorAmountOneOvershoots(t *testing.T) {
+	c, _, clk := newTestChart(t, notesSchema)
+	// 12:00 バケットに 42、13:00 バケットに 99 を書き込む。
+	clk.set(time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, c.Commit(Diff{"local.inc": int64(42)}, ""))
+	require.NoError(t, c.Save(context.Background()))
+	clk.set(time.Date(2026, 4, 9, 13, 0, 0, 0, time.UTC))
+	require.NoError(t, c.Commit(Diff{"local.inc": int64(99)}, ""))
+	require.NoError(t, c.Save(context.Background()))
+	clk.set(time.Date(2026, 4, 9, 20, 0, 0, 0, time.UTC))
+
+	aligned := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	out, err := c.GetChart(context.Background(), SpanHour, 1, &aligned, "")
+	require.NoError(t, err)
+	// FindLatest は最新の 13:00 を返すが cursor バケット 12:00 と一致しないため 0。
+	assert.Equal(t, []int64{0}, out["local.inc"])
+}
+
 func TestSave_SecondClaimErrorBubbles(t *testing.T) {
 	c, repo, _ := newTestChart(t, notesSchema)
 	require.NoError(t, c.Commit(Diff{"local.inc": 1}, ""))
