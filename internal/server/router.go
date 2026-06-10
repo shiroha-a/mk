@@ -854,6 +854,12 @@ func (s *Server) setupRoutes() {
 
 	api := s.echo.Group("/api")
 
+	// Fastify互換のJSON body事前パース (#1609)。本家はbody parseが
+	// endpoint handler (rate limit / 認証を含む) より先に走るため、
+	// rate limiterより前に登録して malformed JSON を FST_ERR_CTP_* envelope
+	// で先に弾く。
+	api.Use(middleware.JSONBodyParse())
+
 	// Rate limiter: Redisバックエンドのsliding window、Misskey TS互換。
 	// auth.Authenticate()がグローバルミドルウェアとして先に実行されるため、
 	// GetUser(c)で認証済みユーザーを取得できる。

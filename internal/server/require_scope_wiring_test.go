@@ -125,6 +125,8 @@ func TestRequireScopeWiring(t *testing.T) {
 		// router.go と同様 auth.Authenticate() をグローバル前段に置く。
 		e.Use(auth.Authenticate())
 		api := e.Group("/api")
+		// router.go と同様 JSONBodyParse を api group の先頭に置く (#1609)。
+		api.Use(middleware.JSONBodyParse())
 		for _, tc := range cases {
 			// /api prefix を group が付けるので relative path で登録。
 			api.POST(tc.path[len("/api"):], func(c echo.Context) error {

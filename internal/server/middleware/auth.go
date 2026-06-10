@@ -396,12 +396,15 @@ func extractToken(c echo.Context) string {
 	if req.Body != nil && req.ContentLength != 0 {
 		body, err := io.ReadAll(req.Body)
 		if err == nil && len(body) > 0 {
-			// ボディをリセット
+			// ボディをリセット (下流のJSONBodyParse/c.Bindには原文を渡す)
 			req.Body = io.NopCloser(bytes.NewReader(body))
 			var parsed struct {
 				I string `json:"i"`
 			}
-			if json.Unmarshal(body, &parsed) == nil && parsed.I != "" {
+			// 本家 (secure-json-parse) はUTF-8 BOMを除去してからparseする
+			// ため、BOM付きbodyのtoken抽出もここで除去して揃える (#1609)。
+			// encoding/json はBOMを受理しないので除去しないと匿名扱いになる。
+			if json.Unmarshal(bytes.TrimPrefix(body, utf8BOM), &parsed) == nil && parsed.I != "" {
 				return parsed.I
 			}
 		}

@@ -501,6 +501,36 @@ func TestAuthenticate_JSONBodyToken(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestAuthenticate_JSONBodyToken_BOMPrefix は UTF-8 BOM 付き JSON body の
+// token 抽出を確認する (#1609)。本家は secure-json-parse が BOM を除去して
+// から body.i を読むため認証が成功する。encoding/json は BOM を受理しない
+// ので、除去せず Unmarshal すると匿名扱いに落ちて本家とずれる。
+func TestAuthenticate_JSONBodyToken_BOMPrefix(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	user := &model.User{ID: "user5", Username: "bomuser"}
+	nativeToken := "bomtoken12345678"
+	userRepo.Tokens[nativeToken] = user
+
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	body := "\xEF\xBB\xBF" + `{"i":"` + nativeToken + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/i", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := auth.Authenticate()(func(c echo.Context) error {
+		u := GetUser(c)
+		assert.NotNil(t, u, "BOM-prefixed body token must authenticate")
+		assert.Equal(t, "user5", u.ID)
+		return c.String(http.StatusOK, "ok")
+	})
+
+	require.NoError(t, handler(c))
+}
+
 func TestAuthenticate_JSONBodyToken_EmptyI(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()
