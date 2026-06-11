@@ -39,7 +39,10 @@ type (
 	ProfileLookup interface {
 		FindProfilesByUserIDs(userIDs []string) ([]*model.UserProfile, error)
 	}
-	// AnnouncementCreator persists an announcement (repository.AnnouncementRepository).
+	// AnnouncementCreator persists an announcement. Wired to
+	// core/announcement.Creator, which also publishes the realtime
+	// `announcementCreated` main-stream event for per-user announcements
+	// (#1606、本家 AnnouncementService.create 相当)。
 	AnnouncementCreator interface {
 		Create(a *model.Announcement) error
 	}

@@ -61,6 +61,7 @@ import (
 	apiwebhooks "github.com/shiroha-a/mk/internal/api/webhooks"
 	"github.com/shiroha-a/mk/internal/api/wellknown"
 	coreabuse "github.com/shiroha-a/mk/internal/core/abuse"
+	coreannouncement "github.com/shiroha-a/mk/internal/core/announcement"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
 	"github.com/shiroha-a/mk/internal/core/avatardecoration"
 	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
@@ -1993,12 +1994,14 @@ func (s *Server) setupRoutes() {
 	// Moderator-activity check (#1563): scheduler の cron (30 * * * *) が enqueue
 	// する。全 moderator が 7 日非アクティブだと登録を招待制へ自動切替し、残 2 日で
 	// 6h ごとに警告メール / announcement / SystemWebhook を送る。announcementRepo /
-	// webhookService がここで揃うため本箇所で配線する。
+	// webhookService がここで揃うため本箇所で配線する。announcement は repo 直接
+	// ではなく create + announcementCreated publish を対で行う Creator 経由
+	// (#1606、本家 AnnouncementService.create 相当)。
 	modActivitySvc := coremoderatoractivity.NewService(
 		roleService,
 		metaRepo,
 		userRepo,
-		announcementRepo,
+		coreannouncement.NewCreator(announcementRepo, idGen, mainStreamPublisher),
 		webhookService,
 		idGen,
 		miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp),
