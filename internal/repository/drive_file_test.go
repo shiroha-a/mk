@@ -93,23 +93,138 @@ func TestDriveFileRepository_ListByUser(t *testing.T) {
 	defer cleanupDriveFile(t, root.ID)
 	defer cleanupDriveFile(t, infolder.ID)
 
-	rows, err := repo.ListByUser(user.ID, nil, "", "", 10)
+	rows, err := repo.ListByUser(user.ID, nil, false, "", "", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "f_lst_1", rows[0].ID)
 
-	rows, err = repo.ListByUser(user.ID, &folderID, "", "", 10)
+	rows, err = repo.ListByUser(user.ID, &folderID, false, "", "", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "f_lst_2", rows[0].ID)
 
 	// untilID/sinceIDの分岐を踏む (root のみ)
-	rows, err = repo.ListByUser(user.ID, nil, "z", "", 10)
+	rows, err = repo.ListByUser(user.ID, nil, false, "", "", "z", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
-	rows, err = repo.ListByUser(user.ID, nil, "", "a", 10)
+	rows, err = repo.ListByUser(user.ID, nil, false, "", "", "", "a", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
+}
+
+func TestDriveFileRepository_ListByUser_TypeSortAnyFolder(t *testing.T) {
+	// #1564: type filter (完全一致 / "/*" prefix)、sort、anyFolder の分岐。
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_df_ts", "dfts")
+	defer cleanupUser(t, user.ID)
+
+	folderRepo := NewDriveFolderRepository(testDB)
+	uid := user.ID
+	folder := &model.DriveFolder{ID: "fold_ts", Name: "F", UserID: &uid}
+	require.NoError(t, folderRepo.Create(folder))
+	defer testDB.Exec(`DELETE FROM "drive_folder" WHERE id = ?`, folder.ID)
+	folderID := folder.ID
+
+	png := newTestDriveFile("f_ts_1", user.ID, "t1", nil)
+	png.Type = "image/png"
+	png.Name = "bbb.png"
+	png.Size = 10
+	jpg := newTestDriveFile("f_ts_2", user.ID, "t2", &folderID)
+	jpg.Type = "image/jpeg"
+	jpg.Name = "aaa.jpg"
+	jpg.Size = 30
+	mp4 := newTestDriveFile("f_ts_3", user.ID, "t3", nil)
+	mp4.Type = "video/mp4"
+	mp4.Name = "ccc.mp4"
+	mp4.Size = 20
+	for _, f := range []*model.DriveFile{png, jpg, mp4} {
+		require.NoError(t, repo.Create(f))
+		defer cleanupDriveFile(t, f.ID)
+	}
+
+	// anyFolder=true は folder 条件なし (サブフォルダの jpg も入る)
+	rows, err := repo.ListByUser(user.ID, nil, true, "", "", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+
+	// type prefix ("image/*") + anyFolder
+	rows, err = repo.ListByUser(user.ID, nil, true, "image/*", "", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	// type 完全一致
+	rows, err = repo.ListByUser(user.ID, nil, true, "video/mp4", "", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, mp4.ID, rows[0].ID)
+
+	// sort 各種 (anyFolder で全件対象)
+	for _, tc := range []struct {
+		sort  string
+		first string
+	}{
+		{"+createdAt", mp4.ID}, // id DESC
+		{"-createdAt", png.ID}, // id ASC
+		{"+name", mp4.ID},      // name DESC (ccc)
+		{"-name", jpg.ID},      // name ASC (aaa)
+		{"+size", jpg.ID},      // size DESC (30)
+		{"-size", png.ID},      // size ASC (10)
+	} {
+		rows, err = repo.ListByUser(user.ID, nil, true, "", tc.sort, "", "", 10)
+		require.NoError(t, err, tc.sort)
+		require.Len(t, rows, 3, tc.sort)
+		assert.Equal(t, tc.first, rows[0].ID, tc.sort)
+	}
+}
+
+func TestDriveFileRepository_FindAllByMD5(t *testing.T) {
+	// #1564: find-by-hash の一致全件 (id ASC)。
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_df_am", "dfam")
+	defer cleanupUser(t, user.ID)
+
+	f1 := newTestDriveFile("f_am_1", user.ID, "samehash", nil)
+	f2 := newTestDriveFile("f_am_2", user.ID, "samehash", nil)
+	f3 := newTestDriveFile("f_am_3", user.ID, "otherhash", nil)
+	for _, f := range []*model.DriveFile{f1, f2, f3} {
+		require.NoError(t, repo.Create(f))
+		defer cleanupDriveFile(t, f.ID)
+	}
+
+	got, err := repo.FindAllByMD5(user.ID, "samehash")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "f_am_1", got[0].ID)
+	assert.Equal(t, "f_am_2", got[1].ID)
+
+	got, err = repo.FindAllByMD5(user.ID, "ghost")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestDriveFileRepository_FindByAnyURL(t *testing.T) {
+	// #1564: drive/files/show の url anyOf 検索 (url/webpublicUrl/thumbnailUrl)。
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_df_au", "dfau")
+	defer cleanupUser(t, user.ID)
+
+	web := "http://example.com/files/f_au_web"
+	thumb := "http://example.com/files/f_au_thumb"
+	f := newTestDriveFile("f_au", user.ID, "aumd5", nil)
+	f.WebpublicURL = &web
+	f.ThumbnailURL = &thumb
+	require.NoError(t, repo.Create(f))
+	defer cleanupDriveFile(t, f.ID)
+
+	for _, u := range []string{f.URL, web, thumb} {
+		got, err := repo.FindByAnyURL(u)
+		require.NoError(t, err, u)
+		assert.Equal(t, f.ID, got.ID)
+	}
+	_, err := repo.FindByAnyURL("")
+	assert.Error(t, err)
+	_, err = repo.FindByAnyURL("http://example.com/none")
+	assert.Error(t, err)
 }
 
 func TestDriveFileRepository_FindByAnyAccessKey(t *testing.T) {
@@ -154,7 +269,7 @@ func TestDriveFileRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	err = repo.Update("a", map[string]any{"name": "b"})
 	assert.Error(t, err)
-	_, err = repo.ListByUser("a", nil, "", "", 10)
+	_, err = repo.ListByUser("a", nil, false, "", "", "", "", 10)
 	assert.Error(t, err)
 }
 

@@ -70,8 +70,14 @@ func (f *fakeDriveFileRepo) Update(_ string, _ map[string]any) error {
 	return nil
 }
 func (f *fakeDriveFileRepo) Delete(_ *model.DriveFile) error { return nil }
-func (f *fakeDriveFileRepo) ListByUser(_ string, _ *string, _, _ string, _ int) ([]*model.DriveFile, error) {
+func (f *fakeDriveFileRepo) ListByUser(_ string, _ *string, _ bool, _, _, _, _ string, _ int) ([]*model.DriveFile, error) {
 	return nil, nil
+}
+func (f *fakeDriveFileRepo) FindAllByMD5(_, _ string) ([]*model.DriveFile, error) {
+	return nil, nil
+}
+func (f *fakeDriveFileRepo) FindByAnyURL(_ string) (*model.DriveFile, error) {
+	return nil, errors.New("not found")
 }
 func (f *fakeDriveFileRepo) FindByName(_, _ string, _ *string) ([]*model.DriveFile, error) {
 	return nil, nil

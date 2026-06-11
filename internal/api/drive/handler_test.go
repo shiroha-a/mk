@@ -483,11 +483,13 @@ func TestFilesFindByHash_InvalidParam(t *testing.T) {
 }
 
 func TestFilesFindByHash_NotFound(t *testing.T) {
+	// upstream find-by-hash は不一致でも 404 ではなく空配列 200 (#1564)。
 	h, _, _ := newHandler(t)
 	c, rec := newJSONReq(t, `{"md5":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesFindByHash(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
 }
 
 // --- FoldersCreate ---

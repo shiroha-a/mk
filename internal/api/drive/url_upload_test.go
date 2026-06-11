@@ -10,6 +10,7 @@ import (
 	"time"
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,13 @@ func TestURLUploader_Process_Success(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, &marker, body["marker"])
 	require.NotNil(t, body["file"])
+	// upstream の pack(file, {self:true}) single pack は userId も null
+	// (#1564)。folder / user は PackDriveFile が元々 nil。
+	file, ok := body["file"].(entity.DriveFileEntity)
+	require.True(t, ok)
+	assert.Nil(t, file.UserID, "urlUploadFinished payload の userId は null")
+	assert.Nil(t, file.Folder)
+	assert.Nil(t, file.User)
 }
 
 func TestURLUploader_Process_FetchErrorNoPublish(t *testing.T) {

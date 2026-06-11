@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -11,7 +13,16 @@ type DriveFileRepository interface {
 	FindByID(id string) (*model.DriveFile, error)
 	FindByIDs(ids []string) ([]*model.DriveFile, error)
 	FindByMD5(userID, md5 string) (*model.DriveFile, error)
+	// FindAllByMD5 returns every file of the user with the given md5 hash.
+	// upstream drive/files/find-by-hash は findBy({md5, userId}) で一致
+	// 全件を返すため、最新 1 件の FindByMD5 (upload dedup 用) と別に持つ
+	// (#1564)。
+	FindAllByMD5(userID, md5 string) ([]*model.DriveFile, error)
 	FindByAccessKey(accessKey string) (*model.DriveFile, error)
+	// FindByAnyURL looks up a DriveFile whose url / webpublicUrl /
+	// thumbnailUrl matches. upstream drive/files/show の url 指定検索
+	// (anyOf param) で使う (#1564)。
+	FindByAnyURL(url string) (*model.DriveFile, error)
 	// FindByAnyAccessKey looks up a DriveFile whose primary / thumbnail /
 	// webpublic access key matches. Used by `/files/:accessKey` to resolve
 	// storedInternal=true rows that the configured storage backend (S3)
@@ -22,7 +33,15 @@ type DriveFileRepository interface {
 	FindByURI(uri string) (*model.DriveFile, error)
 	Update(id string, fields map[string]any) error
 	Delete(f *model.DriveFile) error
-	ListByUser(userID string, folderID *string, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
+	// ListByUser returns the user's drive files (#1564 で filter/sort 対応):
+	//   - folderID: anyFolder=false のとき nil は root (folderId IS NULL)
+	//   - anyFolder: true で folder 条件を付けない (upstream drive/stream は
+	//     全 folder 横断で返す)
+	//   - fileType: MIME filter。"image/*" 形式は prefix match、それ以外は
+	//     完全一致 (upstream drive/files.ts と同 semantics)。空は無条件
+	//   - sort: "+createdAt"|"-createdAt"|"+name"|"-name"|"+size"|"-size"|""
+	//     (空は sinceID/untilID 由来の id 順。createdAt は id 列で代理)
+	ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
 	// ListForAdmin returns drive files across all users with optional
 	// userID / origin / host / type filters. When userID is non-empty,
 	// origin / host are ignored (upstream Misskey の semantics と一致)。
@@ -116,6 +135,36 @@ func (r *driveFileRepository) FindByMD5(userID, md5 string) (*model.DriveFile, e
 	return &f, nil
 }
 
+// FindAllByMD5 returns every file of the user with the given md5 hash,
+// oldest first (id ASC). upstream find-by-hash の findBy({md5, userId}) は
+// order 未指定だが、決定的な応答のため id 昇順に固定する。
+func (r *driveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.DriveFile, error) {
+	var files []*model.DriveFile
+	if err := r.db.
+		Where("\"userId\" = ? AND md5 = ?", userID, md5).
+		Order("id ASC").
+		Find(&files).Error; err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// FindByAnyURL resolves a file by matching url, webpublicUrl, or
+// thumbnailUrl (upstream drive/files/show の url anyOf 検索、#1564)。
+func (r *driveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error) {
+	if url == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var f model.DriveFile
+	if err := r.db.Where(
+		`"url" = ? OR "webpublicUrl" = ? OR "thumbnailUrl" = ?`,
+		url, url, url,
+	).First(&f).Error; err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
 func (r *driveFileRepository) FindByURI(uri string) (*model.DriveFile, error) {
 	if uri == "" {
 		return nil, gorm.ErrRecordNotFound
@@ -177,15 +226,26 @@ func (r *driveFileRepository) Delete(f *model.DriveFile) error {
 	return r.db.Delete(f).Error
 }
 
-// ListByUser returns the user's drive files. folderID=nil means root files
-// (folderId IS NULL); otherwise restricts to that folder.
-func (r *driveFileRepository) ListByUser(userID string, folderID *string, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
+// ListByUser returns the user's drive files filtered/sorted per the
+// interface doc (#1564).
+func (r *driveFileRepository) ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	var rows []*model.DriveFile
 	q := r.db.Where("\"userId\" = ?", userID)
-	if folderID == nil {
-		q = q.Where("\"folderId\" IS NULL")
-	} else {
-		q = q.Where("\"folderId\" = ?", *folderID)
+	if !anyFolder {
+		if folderID == nil {
+			q = q.Where("\"folderId\" IS NULL")
+		} else {
+			q = q.Where("\"folderId\" = ?", *folderID)
+		}
+	}
+	if fileType != "" {
+		// upstream files.ts: `/*` 終端は `type.replace('/*','/') + '%'` の
+		// prefix LIKE、それ以外は完全一致。
+		if strings.HasSuffix(fileType, "/*") {
+			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
+		} else {
+			q = q.Where(`"type" = ?`, fileType)
+		}
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
@@ -193,7 +253,27 @@ func (r *driveFileRepository) ListByUser(userID string, folderID *string, untilI
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
-	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+	// upstream files.ts は sort 指定時に makePaginationQuery の orderBy を
+	// 上書きする (cursor の WHERE 条件はそのまま残る)。createdAt は id 列で
+	// 代理 (= aidx は時系列順)。
+	order := ""
+	switch sort {
+	case "+createdAt":
+		order = "id DESC"
+	case "-createdAt":
+		order = "id ASC"
+	case "+name":
+		order = "name DESC"
+	case "-name":
+		order = "name ASC"
+	case "+size":
+		order = "size DESC"
+	case "-size":
+		order = "size ASC"
+	default:
+		order = paginationOrder(sinceID, untilID, "id")
+	}
+	if err := q.Order(order).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

@@ -9,7 +9,6 @@ import (
 	"path"
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/safehttp"
@@ -98,9 +97,12 @@ func (u *URLUploader) Process(ctx context.Context, in URLUploadInput) {
 	if u.publisher == nil || in.User == nil {
 		return
 	}
+	// upstream は pack(file, {self:true}) の single pack を payload に使う
+	// (= drive/files/create の応答と同 shape)。helper を共有して shape drift
+	// を防ぐ (#1564 review)。
 	u.publisher.PublishMainEvent(in.User.ID, "urlUploadFinished", map[string]any{
 		"marker": in.Marker,
-		"file":   entity.PackDriveFile(df, u.idGen),
+		"file":   packDriveFileSelfSingle(df, u.idGen),
 	})
 }
 

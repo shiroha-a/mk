@@ -38,8 +38,8 @@ type DriveFileEntity struct {
 	UserID       *string             `json:"userId"`
 	// Folder は upstream が detail packing で常に出す (= null or DriveFolder)。
 	// 旧実装は omitempty で省略していたが drop-in shape drift だったため #812
-	// で外した。caller (= packDriveFileFull) で pre-fetch してセットし、未設定
-	// なら nil → JSON `null` として出す。
+	// で外した。caller (detail 経路) で pre-fetch してセットし、未設定なら
+	// nil → JSON `null` として出す。
 	Folder *DriveFolderEntity `json:"folder"`
 	// User も upstream の detail packing で常に出す (= null or UserLite)。
 	// 同じく #812 で omitempty を外した。

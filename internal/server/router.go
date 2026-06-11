@@ -1863,6 +1863,9 @@ func (s *Server) setupRoutes() {
 	notificationService.SetMainStreamPublisher(mainStreamPublisher)
 	notificationService.SetPacker(notificationPublisher)
 	driveService.SetStreamingPublisher(drivePublisher)
+	// folder の folderCreated/folderUpdated/folderDeleted も同じ drive channel
+	// publisher で配信する (#1564)。
+	driveService.SetFolderStreamingPublisher(drivePublisher)
 	driveService.SetMainStreamPublisher(mainStreamPublisher)
 	// /drive/files/upload-from-url: SSRF-safe client で URL を download し、
 	// drive へ保存後 urlUploadFinished を main stream に流す (#1217)。download は

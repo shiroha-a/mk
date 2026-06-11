@@ -368,8 +368,34 @@ func (p *DrivePublisher) PublishDriveEvent(userID, eventType string, file *model
 	}
 }
 
-// 静的アサーション: DrivePublisher が core/drive.StreamingPublisher を満たす。
-var _ coredrive.StreamingPublisher = (*DrivePublisher)(nil)
+// PublishDriveFolderEvent wraps a folder life-cycle payload (packed folder
+// for folderCreated/folderUpdated, the folder id string for folderDeleted)
+// in the `{type, body}` envelope and publishes to drive:<userID> (#1564)。
+func (p *DrivePublisher) PublishDriveFolderEvent(userID, eventType string, body any) {
+	if p.pub == nil || userID == "" || eventType == "" || body == nil {
+		return
+	}
+	envelope := map[string]any{
+		"type": eventType,
+		"body": body,
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		slog.Warn("drive publisher: folder event marshal failed", "err", err)
+		return
+	}
+	topic := "drive:" + userID
+	if err := p.pub.Publish(context.Background(), topic, json.RawMessage(raw)); err != nil {
+		slog.Warn("drive publisher: folder event publish failed", "topic", topic, "err", err)
+	}
+}
+
+// 静的アサーション: DrivePublisher が core/drive.StreamingPublisher と
+// FolderStreamingPublisher を満たす。
+var (
+	_ coredrive.StreamingPublisher       = (*DrivePublisher)(nil)
+	_ coredrive.FolderStreamingPublisher = (*DrivePublisher)(nil)
+)
 
 // 静的アサーション: NotificationPublisher が core/notification.StreamingPublisher
 // と core/notification.Packer の両方を満たす。interface signature が

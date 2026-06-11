@@ -252,18 +252,25 @@ func TestFindByHash_NilUser(t *testing.T) {
 }
 
 func TestFindByHash_NotFound(t *testing.T) {
+	// upstream find-by-hash は不一致でもエラーにせず空配列を返す (#1564)。
 	svc, _, _ := newSvc(t)
-	_, err := svc.FindByHash(&model.User{ID: "u1"}, "ghost")
-	require.ErrorIs(t, err, drive.ErrFileNotFound)
+	got, err := svc.FindByHash(&model.User{ID: "u1"}, "ghost")
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }
 
 func TestFindByHash_Found(t *testing.T) {
+	// 同一 md5 の複数 file を全件返す (upstream findBy({md5,userId})、#1564)。
 	svc, fileRepo, _ := newSvc(t)
 	uid := "u1"
 	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, MD5: "abc"}
+	fileRepo.Files["f2"] = &model.DriveFile{ID: "f2", UserID: &uid, MD5: "abc"}
+	fileRepo.Files["f3"] = &model.DriveFile{ID: "f3", UserID: &uid, MD5: "other"}
 	got, err := svc.FindByHash(&model.User{ID: "u1"}, "abc")
 	require.NoError(t, err)
-	assert.Equal(t, "f1", got.ID)
+	require.Len(t, got, 2)
+	assert.Equal(t, "f1", got[0].ID)
+	assert.Equal(t, "f2", got[1].ID)
 }
 
 // --- Update ---

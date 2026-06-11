@@ -641,6 +641,53 @@ func TestDrivePublisher_PublishErrorIsLogged(t *testing.T) {
 // 静的アサーションは note_publisher.go に置いてある。
 func TestDrivePublisher_ImplementsServiceInterface(t *testing.T) {
 	var _ coredrive.StreamingPublisher = (*DrivePublisher)(nil)
+	var _ coredrive.FolderStreamingPublisher = (*DrivePublisher)(nil)
+}
+
+// --- DrivePublisher folder events (#1564) -----------------------------------
+
+func TestDrivePublisher_PublishesFolderEvent(t *testing.T) {
+	pub := &stubPublisher{}
+	dp := NewDrivePublisher(pub)
+	dp.PublishDriveFolderEvent("alice", "folderCreated", map[string]any{"id": "fo1", "name": "docs"})
+	require.Len(t, pub.topics, 1)
+	assert.Equal(t, "drive:alice", pub.topics[0])
+	raw := pub.payloads[0].(json.RawMessage)
+	assert.Contains(t, string(raw), `"type":"folderCreated"`)
+	assert.Contains(t, string(raw), `"docs"`)
+}
+
+func TestDrivePublisher_FolderDeletedBodyIsID(t *testing.T) {
+	// folderDeleted の body は packed folder ではなく id 文字列。
+	pub := &stubPublisher{}
+	dp := NewDrivePublisher(pub)
+	dp.PublishDriveFolderEvent("alice", "folderDeleted", "fo1")
+	require.Len(t, pub.topics, 1)
+	assert.Contains(t, string(pub.payloads[0].(json.RawMessage)), `"body":"fo1"`)
+}
+
+func TestDrivePublisher_FolderEventEmptyArgsAreNoOps(t *testing.T) {
+	pub := &stubPublisher{}
+	dp := NewDrivePublisher(pub)
+	dp.PublishDriveFolderEvent("", "folderCreated", "fo1")
+	dp.PublishDriveFolderEvent("alice", "", "fo1")
+	dp.PublishDriveFolderEvent("alice", "folderCreated", nil)
+	assert.Empty(t, pub.topics)
+	NewDrivePublisher(nil).PublishDriveFolderEvent("alice", "folderCreated", "fo1")
+}
+
+func TestDrivePublisher_FolderEventMarshalErrorIsLogged(t *testing.T) {
+	pub := &stubPublisher{}
+	dp := NewDrivePublisher(pub)
+	// chan は json.Marshal 不能なので marshal error 経路を踏む
+	dp.PublishDriveFolderEvent("alice", "folderCreated", make(chan int))
+	assert.Empty(t, pub.topics)
+}
+
+func TestDrivePublisher_FolderEventPublishErrorIsLogged(t *testing.T) {
+	pub := &stubPublisher{err: errors.New("redis down")}
+	dp := NewDrivePublisher(pub)
+	dp.PublishDriveFolderEvent("alice", "folderCreated", "fo1")
 }
 
 func TestDrivePublisher_MarshalErrorIsLogged(t *testing.T) {

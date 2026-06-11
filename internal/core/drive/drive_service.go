@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -57,7 +58,27 @@ var (
 	// mk-go では LRU 退去ロジックが未実装のため remote user は本 gate を
 	// skip して従来どおり受け入れる (cleanup logic は future work)。
 	ErrNoFreeSpace = errors.New("no free space")
+	// ErrInvalidFileName is returned when a file rename fails
+	// ValidateFileName. Handler maps this to upstream's INVALID_FILE_NAME
+	// (drive/files/update は 395e7156-..., create は f449b209-...) (#1564)。
+	ErrInvalidFileName = errors.New("invalid file name")
+	// ErrRecursiveNesting is returned when drive/folders/update would make a
+	// folder its own ancestor (self-parent or ancestor cycle)。upstream
+	// folders/update の recursiveNesting (#1564)。
+	ErrRecursiveNesting = errors.New("recursive folder nesting")
 )
+
+// ValidateFileName mirrors upstream DriveFileEntityService.validateFileName:
+// the trimmed name must be non-empty, at most 200 characters, and must not
+// contain a backslash, a slash, or "..". 長さは JS の String.length (UTF-16)
+// に対し rune 数で近似する (upload-from-url の comment 512 判定と同方針)。
+func ValidateFileName(name string) bool {
+	return strings.TrimSpace(name) != "" &&
+		utf8.RuneCountInString(name) <= 200 &&
+		!strings.Contains(name, "\\") &&
+		!strings.Contains(name, "/") &&
+		!strings.Contains(name, "..")
+}
 
 // StreamingPublisher receives drive file life-cycle events so that
 // WebSocket subscribers (the "drive" channel) can be pushed in real time.
@@ -65,6 +86,16 @@ var (
 // stream)。eventTypeは"fileCreated"/"fileUpdated"/"fileDeleted"。
 type StreamingPublisher interface {
 	PublishDriveEvent(userID, eventType string, file *model.DriveFile)
+}
+
+// FolderStreamingPublisher receives drive folder life-cycle events for the
+// "drive" WebSocket channel. upstream の publishDriveStream(userID,
+// 'folderCreated'|'folderUpdated', folderObj) / ('folderDeleted', folder.id)
+// に対応する (#1564)。body は packed folder (created/updated) または folder
+// id 文字列 (deleted)。StreamingPublisher (file 専用、*model.DriveFile 固定)
+// とは payload 型が異なるため別 interface にする。実装は internal/stream。
+type FolderStreamingPublisher interface {
+	PublishDriveFolderEvent(userID, eventType string, body any)
 }
 
 // MainStreamPublisher emits real-time events to a single target user's `main`
@@ -115,6 +146,23 @@ type Service struct {
 	// Optional moderator bypass for Show. Nil keeps the default "owner-only"
 	// guard.
 	roleChecker RoleChecker
+	// folderPublisher emits folderCreated/folderUpdated/folderDeleted to the
+	// drive channel (#1564)。nil disables folder events.
+	folderPublisher FolderStreamingPublisher
+}
+
+// SetFolderStreamingPublisher attaches the drive-channel publisher for folder
+// life-cycle events (#1564)。Optional — nil disables emit.
+func (s *Service) SetFolderStreamingPublisher(p FolderStreamingPublisher) {
+	s.folderPublisher = p
+}
+
+// publishFolderEvent is the best-effort wrapper for folder events.
+func (s *Service) publishFolderEvent(userID, eventType string, body any) {
+	if s.folderPublisher == nil || userID == "" {
+		return
+	}
+	s.folderPublisher.PublishDriveFolderEvent(userID, eventType, body)
 }
 
 // SetRoleChecker wires a moderator role lookup so Show allows moderators to
@@ -515,12 +563,42 @@ func (s *Service) Show(user *model.User, id string) (*model.DriveFile, error) {
 	if err != nil {
 		return nil, ErrFileNotFound
 	}
-	owner := f.UserID != nil && *f.UserID == user.ID
-	moderator := s.roleChecker != nil && s.roleChecker.IsModerator(user.ID)
-	if !owner && !moderator {
-		return nil, ErrAccessDenied
+	return s.authorizeFileRead(user, f)
+}
+
+// ShowByURL is the url-keyed variant of Show used by drive/files/show's
+// anyOf {url} param (#1564)。url / webpublicUrl / thumbnailUrl のいずれか一致
+// で検索し、permission は Show と同じ owner or moderator。
+func (s *Service) ShowByURL(user *model.User, url string) (*model.DriveFile, error) {
+	if user == nil {
+		return nil, errors.New("user is required")
 	}
-	return f, nil
+	f, err := s.fileRepo.FindByAnyURL(url)
+	if err != nil {
+		return nil, ErrFileNotFound
+	}
+	return s.authorizeFileRead(user, f)
+}
+
+// authorizeFileRead is the shared read guard for Show / ShowByURL: the owner
+// always may read; otherwise a moderator may (lazy 評価で owner 経路は role
+// lookup を払わない)。read 認可規則を 1 箇所に集約して fileId / url 経路の
+// drift を防ぐ (#1564 review)。
+func (s *Service) authorizeFileRead(user *model.User, f *model.DriveFile) (*model.DriveFile, error) {
+	if f.UserID != nil && *f.UserID == user.ID {
+		return f, nil
+	}
+	if s.IsModerator(user.ID) {
+		return f, nil
+	}
+	return nil, ErrAccessDenied
+}
+
+// IsModerator reports whether the user holds a moderator role via the wired
+// RoleChecker (false when none is wired). handler 層 (attached-notes の
+// moderator bypass、#1564) が参照する。
+func (s *Service) IsModerator(userID string) bool {
+	return s.roleChecker != nil && s.roleChecker.IsModerator(userID)
 }
 
 // findOwnedFile is the strict owner-only equivalent of Show, used by write
@@ -540,16 +618,14 @@ func (s *Service) findOwnedFile(user *model.User, id string) (*model.DriveFile, 
 	return f, nil
 }
 
-// FindByHash returns the user's most recent file with the given md5 hash.
-func (s *Service) FindByHash(user *model.User, md5 string) (*model.DriveFile, error) {
+// FindByHash returns every file of the user with the given md5 hash.
+// upstream drive/files/find-by-hash は findBy({md5, userId}) で一致全件を
+// 配列で返す (#1564 で最新 1 件 → 全件に修正)。一致 0 件は空 slice。
+func (s *Service) FindByHash(user *model.User, md5 string) ([]*model.DriveFile, error) {
 	if user == nil {
 		return nil, errors.New("user is required")
 	}
-	f, err := s.fileRepo.FindByMD5(user.ID, md5)
-	if err != nil {
-		return nil, ErrFileNotFound
-	}
-	return f, nil
+	return s.fileRepo.FindAllByMD5(user.ID, md5)
 }
 
 // UpdateInput holds the editable fields of a drive file.
@@ -570,6 +646,11 @@ func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.Dr
 	}
 	fields := map[string]any{}
 	if in.Name != nil {
+		// upstream DriveService.updateFile は values.name に validateFileName
+		// を実行し、失敗時 InvalidFileNameError を投げる (#1564)。
+		if !ValidateFileName(*in.Name) {
+			return nil, ErrInvalidFileName
+		}
 		fields["name"] = *in.Name
 	}
 	if in.Comment != nil {
@@ -676,6 +757,9 @@ func (s *Service) CreateFolder(user *model.User, name string, parentID *string) 
 	if err := s.folderRepo.Create(f); err != nil {
 		return nil, err
 	}
+	// upstream folders/create は publishDriveStream(me.id, 'folderCreated',
+	// folderObj) を発火する (#1564)。body は packed folder。
+	s.publishFolderEvent(user.ID, "folderCreated", entity.PackDriveFolder(f, s.idGen))
 	return f, nil
 }
 
@@ -712,6 +796,11 @@ func (s *Service) UpdateFolder(user *model.User, id string, in UpdateFolderInput
 	}
 	if in.ParentID != nil {
 		if *in.ParentID != nil {
+			// upstream folders/update: parentId === folder.id は即
+			// recursiveNesting (#1564)。
+			if **in.ParentID == f.ID {
+				return nil, ErrRecursiveNesting
+			}
 			parent, err := s.folderRepo.FindByID(**in.ParentID)
 			if err != nil {
 				// folders/update では parent が未存在のときに upstream は
@@ -722,13 +811,56 @@ func (s *Service) UpdateFolder(user *model.User, id string, in UpdateFolderInput
 			if parent.UserID == nil || *parent.UserID != user.ID {
 				return nil, ErrAccessDenied
 			}
+			// upstream checkCircle: 新 parent の祖先 chain に folder 自身が
+			// いたら循環 (#1564)。mk-go は過去に循環を作れてしまっていたため、
+			// 既存の循環 data でも無限 loop しないよう visited set で打ち切る。
+			if ok, err := s.folderAncestorContains(parent.ParentID, f.ID); err != nil {
+				return nil, err
+			} else if ok {
+				return nil, ErrRecursiveNesting
+			}
 		}
 		fields["parentId"] = *in.ParentID
 	}
 	if err := s.folderRepo.Update(f.ID, fields); err != nil {
 		return nil, err
 	}
-	return s.folderRepo.FindByID(f.ID)
+	updated, err := s.folderRepo.FindByID(f.ID)
+	if err != nil {
+		return nil, err
+	}
+	// upstream folders/update は publishDriveStream(me.id, 'folderUpdated',
+	// folderObj) を発火する (#1564)。
+	s.publishFolderEvent(user.ID, "folderUpdated", entity.PackDriveFolder(updated, s.idGen))
+	return updated, nil
+}
+
+// folderAncestorContains walks the parent chain starting at startParentID and
+// reports whether targetID appears in it (upstream folders/update の
+// checkCircle 相当)。walk 中の FindByID 失敗は「循環なし」に潰さず error と
+// して伝播する: 一時的な DB 障害で循環チェックを skip して循環 parentId を
+// commit してしまうと、read 経路の parent 再帰が壊れる (upstream の
+// findOneByOrFail も request ごと失敗させる)。なお DeleteFolder は子持ち
+// folder を消せないため dangling parentId は通常発生しない。
+func (s *Service) folderAncestorContains(startParentID *string, targetID string) (bool, error) {
+	visited := map[string]struct{}{}
+	cur := startParentID
+	for cur != nil {
+		if *cur == targetID {
+			return true, nil
+		}
+		// 既存の循環 data に当たっても無限 loop しない。
+		if _, seen := visited[*cur]; seen {
+			return false, nil
+		}
+		visited[*cur] = struct{}{}
+		anc, err := s.folderRepo.FindByID(*cur)
+		if err != nil {
+			return false, fmt.Errorf("walk folder ancestors: %w", err)
+		}
+		cur = anc.ParentID
+	}
+	return false, nil
 }
 
 // DeleteFolder removes an empty folder owned by user.
@@ -744,7 +876,13 @@ func (s *Service) DeleteFolder(user *model.User, id string) error {
 	if hasChildren {
 		return ErrFolderNotEmpty
 	}
-	return s.folderRepo.Delete(f)
+	if err := s.folderRepo.Delete(f); err != nil {
+		return err
+	}
+	// upstream folders/delete は publishDriveStream(me.id, 'folderDeleted',
+	// folder.id) を発火する (#1564)。body は packed folder ではなく id 文字列。
+	s.publishFolderEvent(user.ID, "folderDeleted", f.ID)
+	return nil
 }
 
 // randReader is the source of randomness for newAccessKey. Tests override

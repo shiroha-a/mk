@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	sortpkg "sort"
 	"strings"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -71,6 +72,30 @@ func (m *MockDriveFileRepository) FindByMD5(userID, md5 string) (*model.DriveFil
 		return nil, ErrNotFound
 	}
 	return match, nil
+}
+
+// FindAllByMD5 returns every md5-matching file of the user, id ASC
+// (production 実装と同じ決定的順序)。
+func (m *MockDriveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.DriveFile, error) {
+	var result []*model.DriveFile
+	for _, f := range m.Files {
+		if f.UserID != nil && *f.UserID == userID && f.MD5 == md5 {
+			result = append(result, f)
+		}
+	}
+	sortpkg.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
+func (m *MockDriveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error) {
+	for _, f := range m.Files {
+		if f.URL == url ||
+			(f.WebpublicURL != nil && *f.WebpublicURL == url) ||
+			(f.ThumbnailURL != nil && *f.ThumbnailURL == url) {
+			return f, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (m *MockDriveFileRepository) FindByURI(uri string) (*model.DriveFile, error) {
@@ -170,18 +195,29 @@ func (m *MockDriveFileRepository) Delete(f *model.DriveFile) error {
 	return nil
 }
 
-func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
+func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	var rows []*model.DriveFile
 	for _, f := range m.Files {
 		if f.UserID == nil || *f.UserID != userID {
 			continue
 		}
-		if folderID == nil {
-			if f.FolderID != nil {
-				continue
+		if !anyFolder {
+			if folderID == nil {
+				if f.FolderID != nil {
+					continue
+				}
+			} else {
+				if f.FolderID == nil || *f.FolderID != *folderID {
+					continue
+				}
 			}
-		} else {
-			if f.FolderID == nil || *f.FolderID != *folderID {
+		}
+		if fileType != "" {
+			if strings.HasSuffix(fileType, "/*") {
+				if !strings.HasPrefix(f.Type, strings.TrimSuffix(fileType, "*")) {
+					continue
+				}
+			} else if f.Type != fileType {
 				continue
 			}
 		}
@@ -193,13 +229,24 @@ func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, un
 		}
 		rows = append(rows, f)
 	}
-	for i := 0; i < len(rows); i++ {
-		for j := i + 1; j < len(rows); j++ {
-			if rows[i].ID < rows[j].ID {
-				rows[i], rows[j] = rows[j], rows[i]
-			}
+	sortpkg.Slice(rows, func(i, j int) bool {
+		switch sort {
+		case "-createdAt":
+			return rows[i].ID < rows[j].ID
+		case "+name":
+			return rows[i].Name > rows[j].Name
+		case "-name":
+			return rows[i].Name < rows[j].Name
+		case "+size":
+			return rows[i].Size > rows[j].Size
+		case "-size":
+			return rows[i].Size < rows[j].Size
+		default:
+			// "+createdAt" と未指定はともに id DESC (sinceID 指定時の ASC は
+			// mock では省略 — 既存テストは untilID / 無指定のみ)。
+			return rows[i].ID > rows[j].ID
 		}
-	}
+	})
 	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}

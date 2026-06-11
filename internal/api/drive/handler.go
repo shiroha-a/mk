@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -109,77 +110,56 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 	return h.emojiRepo
 }
 
-// packDriveFileFull packs a drive file and, when repositories are wired,
-// embeds the owning folder/user as nested objects. Matches Misskey's
-// packDriveFileSchema which exposes both `folder` and `user`.
-//
-// 注: 戻り値は upstream の `pack(file, { detail: true, withUser: true })`
-// 相当 (= owner ID と user 込み) で drive/files/show のような detail 経路
-// で使う。それ以外の経路は対応する helper を使うこと:
-//
-//   - `drive/files/create` (= self single, `pack(file, { self: true })`):
-//     `packDriveFileSelfSingle` (#812)
-//   - `drive/files/find` / `find-by-hash` (= self list,
-//     `packMany(files, { self: true })`):
-//     `packDriveFileSelfList` (#818)
-//
-// 本関数を上記 self 経路で直接 c.JSON に渡すと shape drift する。
-func (h *Handler) packDriveFileFull(f *model.DriveFile) entity.DriveFileEntity {
-	// list loop (FilesList / FilesFind / Stream) からも呼ばれ、1ファイル
-	// 当たり最大2 DB read (O(N) queries)が発生する。1ページ上限が10-100
-	// 程度なので実害は小さいが、大量ファイルを返す admin list 等では
-	// batch化の余地あり (follow-up issueで検討)。
-	var folder *model.DriveFolder
-	if h.folderRepo != nil && f.FolderID != nil {
-		if fo, err := h.folderRepo.FindByID(*f.FolderID); err == nil {
-			folder = fo
-		}
-	}
-	var user *model.User
-	if h.userRepo != nil && f.UserID != nil {
-		if u, err := h.userRepo.FindByID(*f.UserID); err == nil {
-			user = u
-		}
-	}
-	return entity.PackDriveFileWithRelations(f, h.idGen, folder, user)
-}
+// upstream paramDef の maxLength 定数 (#1564)。ajv の maxLength は UTF-16
+// code unit 基準だが mk-go は rune 数で近似する (多バイト文字を過剰に弾か
+// ない側。サロゲートペア絵文字は upstream より長く受理される既知の差)。
+const (
+	// maxDriveCommentLength は drive/files/{create,update,upload-from-url}
+	// の comment maxLength (= upstream DB_MAX_IMAGE_COMMENT_LENGTH)。
+	maxDriveCommentLength = 512
+	// maxDriveFolderNameLength は drive/folders/{create,update} の name
+	// maxLength。core 側 ValidateFileName の 200 (file name) とは別の値。
+	maxDriveFolderNameLength = 200
+)
+
+// driveTypePatternRe は drive/files・drive/stream の `type` param に対する
+// upstream paramDef pattern `^[a-zA-Z\/\-*]+$` の移植 (#1564 review)。
+// 数字を含む MIME (video/mp4 等) も upstream はこの pattern で reject する。
+// SQL LIKE の metacharacter (% _) もここで弾かれるため repo 層の LIKE に
+// wildcard が混入しない。
+var driveTypePatternRe = regexp.MustCompile(`^[a-zA-Z/\-*]+$`)
 
 // packDriveFileSelfSingle packs a drive file for the "self single" path used
-// by drive/files/create.
+// by drive/files/create (and the urlUploadFinished payload in url_upload.go).
 //
 // upstream Misskey TS は `pack(file, { self: true })` (= withUser=false /
 // detail=false) を呼び、`folder=null` / `user=null` / `userId=null` を
-// 返す (DriveFileEntityService.ts:191-222)。mk-go は packDriveFileFull が
-// 常に folder / user を resolve するため、helper で post-fixup して shape
-// を整合させる (#812 / #818)。
+// 返す (DriveFileEntityService.ts:191-222)。PackDriveFile は Folder / User
+// を fetch しない (= nil) ので、userId の null 化だけ足す (#812 / #1564
+// review で full pack→null 潰しの無駄 fetch を解消)。
 //
-// drive/files/find / find-by-hash の self list path とは異なり userId も
-// **null にする** 点に注意 (= pack は detail=false で userId を返さない、
-// packNullable とは別経路)。
-func (h *Handler) packDriveFileSelfSingle(f *model.DriveFile) entity.DriveFileEntity {
-	e := h.packDriveFileFull(f)
-	e.Folder = nil
+// self list path とは異なり userId も **null にする** 点に注意 (= pack は
+// detail=false で userId を返さない、packNullable とは別経路)。
+func packDriveFileSelfSingle(f *model.DriveFile, idGen id.Generator) entity.DriveFileEntity {
+	e := entity.PackDriveFile(f, idGen)
 	e.UserID = nil
-	e.User = nil
 	return e
 }
 
 // packDriveFileSelfList packs a drive file for the "self list" path used by
-// drive/files/find と drive/files/find-by-hash.
+// drive/files, drive/files/find, drive/files/find-by-hash, drive/stream.
 //
 // upstream Misskey TS は `packMany(files, { self: true })` 経由で
 // `packNullable` を呼び、`folder=null` / `user=null` / `userId=owner ID`
 // を返す (DriveFileEntityService.ts:225-261, withUser/detail デフォルト
-// false)。mk-go は packDriveFileFull が常に folder / user を resolve する
-// ため、helper で post-fixup して shape を整合させる (#818)。
+// false)。PackDriveFile がそのままこの shape (Folder/User nil, UserID 維持)
+// を返す (#818 / #1564 review で full pack→null 潰しの per-file 2 query を
+// 解消。limit=100 の list で最大 200 query 削減)。
 //
-// drive/files/create の self single path (#812) とは異なり userId は
-// **owner ID を維持** する点に注意 (= packNullable は userId を常時返す)。
+// self single path (#812) とは異なり userId は **owner ID を維持** する
+// (= packNullable は userId を常時返す)。
 func (h *Handler) packDriveFileSelfList(f *model.DriveFile) entity.DriveFileEntity {
-	e := h.packDriveFileFull(f)
-	e.Folder = nil
-	e.User = nil
-	return e
+	return entity.PackDriveFile(f, h.idGen)
 }
 
 // readMultipartFile extracts the uploaded file's bytes and original filename.
@@ -211,17 +191,38 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	in := coredrive.UploadInput{
 		User:           user,
 		Body:           body,
-		Name:           filename,
 		RequestIP:      requestIPFromContext(c),
 		RequestHeaders: requestHeadersForDrive(c),
 	}
-	if v := c.FormValue("name"); v != "" {
-		in.Name = v
+	// upstream create.ts:98-108 の name 決定: ps.name ?? file.name を trim し、
+	// 空 / 'blob' は null 化、それ以外は validateFileName 失敗で
+	// INVALID_FILE_NAME (#1564)。null 時 upstream は DriveService.addFile が
+	// `file.name || 'untitled'` + 拡張子補正で保存するが、mk-go は拡張子補正
+	// (correctFilename) 未実装のため 'untitled' 固定で fallback する。
+	// multipart form の name 欄は「明示的な空文字」と「未指定」を区別する
+	// (upstream `ps.name ?? file.name` は '' を nullish 扱いしないため、
+	// 明示 '' は trim 後 null → 'untitled' になる) (#1564 review)。
+	name := filename
+	if form, ferr := c.MultipartForm(); ferr == nil && form != nil {
+		if vs, ok := form.Value["name"]; ok && len(vs) > 0 {
+			name = vs[0]
+		}
 	}
+	name = strings.TrimSpace(name)
+	if name == "" || name == "blob" {
+		name = "untitled"
+	} else if !coredrive.ValidateFileName(name) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_FILE_NAME", "Invalid file name.", "f449b209-0c60-4e51-84d5-29486263bfd4"))
+	}
+	in.Name = name
 	if v := c.FormValue("folderId"); v != "" {
 		in.FolderID = &v
 	}
 	if v := c.FormValue("comment"); v != "" {
+		// upstream paramDef は comment maxLength=512 (#1564)。
+		if utf8.RuneCountInString(v) > maxDriveCommentLength {
+			return apierr.JSONInvalidParam(c)
+		}
 		in.Comment = &v
 	}
 	if c.FormValue("isSensitive") == "true" {
@@ -256,7 +257,7 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	// self single path 経路 (#812)。helper が folder / userId / user を
 	// 一律 null 化する (旧 inline 版は folder の nil 化を見落としていて
 	// folderId 指定 upload で drift していたが、helper 化で同時に解消)。
-	return c.JSON(http.StatusOK, h.packDriveFileSelfSingle(f))
+	return c.JSON(http.StatusOK, packDriveFileSelfSingle(f, h.idGen))
 }
 
 // FileIDRequest is the body for show/delete and similar single-file ops.
@@ -265,17 +266,57 @@ type FileIDRequest struct {
 }
 
 // FilesShow handles POST /api/drive/files/show.
+//
+// upstream paramDef は anyOf で {fileId} または {url} を受け、url 指定時は
+// url / webpublicUrl / thumbnailUrl の OR 一致で検索する (#1564)。
 func (h *Handler) FilesShow(c echo.Context) error {
 	user := middleware.GetUser(c)
-	var req FileIDRequest
-	if err := c.Bind(&req); err != nil || req.FileID == "" {
+	// fileId / url は「キー存在」で anyOf を判定する (upstream の required は
+	// presence のみで、`{"url":""}` は lookup に進んで 404 NO_SUCH_FILE になる)
+	// (#1564 review)。fileId は format misskey:id なので空文字は INVALID_PARAM。
+	var req struct {
+		FileID *string `json:"fileId"`
+		URL    *string `json:"url"`
+	}
+	if err := c.Bind(&req); err != nil || (req.FileID == nil && req.URL == nil) {
 		return apierr.JSONInvalidParam(c)
 	}
-	f, err := h.svc.Show(user, req.FileID)
+	var f *model.DriveFile
+	var err error
+	if req.FileID != nil {
+		if *req.FileID == "" {
+			return apierr.JSONInvalidParam(c)
+		}
+		f, err = h.svc.Show(user, *req.FileID)
+	} else {
+		f, err = h.svc.ShowByURL(user, *req.URL)
+	}
 	if err != nil {
 		return mapFileError(c, err, fileEndpointShow)
 	}
-	return c.JSON(http.StatusOK, h.packDriveFileFull(f))
+	return c.JSON(http.StatusOK, h.packDriveFileShow(f))
+}
+
+// packDriveFileShow is the drive/files/show pack: upstream は pack(file,
+// {detail:true, withUser:true, self:true}) で、埋め込み folder を detail mode
+// (foldersCount / filesCount / parent 付き)、user を UserLite で pack する
+// (#1564)。folder / user は各 1 回だけ fetch する (full pack 経由の二重
+// fetch を解消、#1564 review)。
+func (h *Handler) packDriveFileShow(f *model.DriveFile) entity.DriveFileEntity {
+	e := entity.PackDriveFile(f, h.idGen)
+	if h.folderRepo != nil && f.FolderID != nil {
+		if fo, err := h.folderRepo.FindByID(*f.FolderID); err == nil {
+			d := h.packDriveFolderDetail(fo)
+			e.Folder = &d
+		}
+	}
+	if h.userRepo != nil && f.UserID != nil {
+		if u, err := h.userRepo.FindByID(*f.UserID); err == nil {
+			lite := entity.PackUserLite(u)
+			e.User = &lite
+		}
+	}
+	return e
 }
 
 // FilesUpdateRequest is the body for drive/files/update.
@@ -301,6 +342,10 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 		IsSensitive: req.IsSensitive,
 	}
 	if req.Comment != nil {
+		// upstream update.ts paramDef は comment maxLength=512 (#1564)。
+		if utf8.RuneCountInString(*req.Comment) > maxDriveCommentLength {
+			return apierr.JSONInvalidParam(c)
+		}
 		c2 := req.Comment
 		in.Comment = &c2
 	}
@@ -319,7 +364,7 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 	// upstream は updateFile 後 `pack(file.id, { self: true })` を返す
 	// (= self single shape、DriveService.ts)。本実装も #812 の create と
 	// 同じ self single helper を使う (folder / userId / user 全 null)。
-	return c.JSON(http.StatusOK, h.packDriveFileSelfSingle(f))
+	return c.JSON(http.StatusOK, packDriveFileSelfSingle(f, h.idGen))
 }
 
 // FilesDelete handles POST /api/drive/files/delete.
@@ -347,12 +392,19 @@ func (h *Handler) FilesFindByHash(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.MD5 == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	f, err := h.svc.FindByHash(user, req.MD5)
+	files, err := h.svc.FindByHash(user, req.MD5)
 	if err != nil {
-		return mapFileError(c, err, fileEndpointFindByHash)
+		// FindByHash は #1564 以降 not-found を空 slice で返すため、ここに
+		// 来るのは repo error のみ (= upstream も 500 相当)。
+		return apierr.JSONInternalError(c)
 	}
-	// upstream `packMany(files, { self: true })` 経路 (#818)。
-	return c.JSON(http.StatusOK, []entity.DriveFileEntity{h.packDriveFileSelfList(f)})
+	// upstream は findBy({md5, userId}) の一致全件を `packMany(files,
+	// { self: true })` で返す (#818 / #1564 で最新 1 件 → 全件に修正)。
+	out := make([]entity.DriveFileEntity, 0, len(files))
+	for _, f := range files {
+		out = append(out, h.packDriveFileSelfList(f))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // FoldersCreateRequest is the body for drive/folders/create.
@@ -366,6 +418,10 @@ func (h *Handler) FoldersCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req FoldersCreateRequest
 	if err := c.Bind(&req); err != nil {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream folders/create paramDef は name maxLength=200 (#1564)。
+	if utf8.RuneCountInString(req.Name) > maxDriveFolderNameLength {
 		return apierr.JSONInvalidParam(c)
 	}
 	if req.Name == "" {
@@ -410,6 +466,16 @@ func (h *Handler) FoldersShow(c echo.Context) error {
 // parent は nil。これは production runtime には影響しない (= router で
 // 必ず wired される)。
 func (h *Handler) packDriveFolderDetail(f *model.DriveFolder) entity.DriveFolderEntity {
+	return h.packDriveFolderDetailGuarded(f, map[string]struct{}{})
+}
+
+// packDriveFolderDetailGuarded is the recursion body of packDriveFolderDetail.
+// visited は parent 連鎖の循環 data guard (#1564 review): 旧 mk-go は folder
+// 循環を作れてしまっていた (folders/update の RECURSIVE_NESTING 検証は #1564
+// で追加) ため、既存の循環 data で parent 再帰が無限 loop → stack overflow
+// でプロセスごと落ちるのを防ぐ。既出 folder に当たったら連鎖を打ち切る。
+func (h *Handler) packDriveFolderDetailGuarded(f *model.DriveFolder, visited map[string]struct{}) entity.DriveFolderEntity {
+	visited[f.ID] = struct{}{}
 	e := entity.PackDriveFolder(f, h.idGen)
 	foldersCount := 0
 	filesCount := 0
@@ -433,8 +499,10 @@ func (h *Handler) packDriveFolderDetail(f *model.DriveFolder) entity.DriveFolder
 	e.FoldersCount = &foldersCount
 	e.FilesCount = &filesCount
 	if f.ParentID != nil && h.folderRepo != nil {
-		if parent, err := h.folderRepo.FindByID(*f.ParentID); err == nil {
-			parentPacked := h.packDriveFolderDetail(parent)
+		if _, seen := visited[*f.ParentID]; seen {
+			slog.Warn("packDriveFolderDetail: folder parent cycle detected, truncating", "folderID", f.ID, "parentID", *f.ParentID)
+		} else if parent, err := h.folderRepo.FindByID(*f.ParentID); err == nil {
+			parentPacked := h.packDriveFolderDetailGuarded(parent, visited)
 			e.Parent = &parentPacked
 		} else {
 			// parent FindByID error は recursion 切断の原因。同上で Warn。
@@ -457,6 +525,10 @@ func (h *Handler) FoldersUpdate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req FoldersUpdateRequest
 	if err := c.Bind(&req); err != nil || req.FolderID == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream folders/update paramDef は name maxLength=200 (#1564)。
+	if req.Name != nil && utf8.RuneCountInString(*req.Name) > maxDriveFolderNameLength {
 		return apierr.JSONInvalidParam(c)
 	}
 	in := coredrive.UpdateFolderInput{Name: req.Name}
@@ -498,7 +570,6 @@ const (
 	fileEndpointShow fileEndpoint = iota
 	fileEndpointUpdate
 	fileEndpointDelete
-	fileEndpointFindByHash
 )
 
 func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
@@ -506,7 +577,7 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 	case errors.Is(err, coredrive.ErrFileNotFound):
 		var id string
 		switch ep {
-		case fileEndpointShow, fileEndpointFindByHash:
+		case fileEndpointShow:
 			id = "067bc436-2718-4795-b0fb-ecbe43949e31"
 		case fileEndpointUpdate:
 			id = "e7778c7e-3af9-49cd-9690-6dbc3e6c972d"
@@ -532,13 +603,14 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 			id = "01a53b27-82fc-445b-a0c1-b558465a8ed2"
 		case fileEndpointDelete:
 			id = "5eb8d909-2540-4970-90b8-dd6f86088121"
-		case fileEndpointFindByHash:
-			// find-by-hash は ACCESS_DENIED を golden 未定義。汎用 id を使う。
-			id = "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"
 		default:
 			panic(fmt.Sprintf("mapFileError: unknown fileEndpoint %d", ep))
 		}
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", id))
+	case errors.Is(err, coredrive.ErrInvalidFileName):
+		// upstream drive/files/update の invalidFileName (#1564)。create は
+		// handler 内で別 UUID (f449b209-...) を直接返すためここには来ない。
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_FILE_NAME", "Invalid file name.", "395e7156-f9f0-475e-af89-53c3c23080c2"))
 	case errors.Is(err, coredrive.ErrCannotUnmarkSensitive):
 		// upstream drive/files/update の restrictedByRole は i/update と別 UUID
 		// (7f59dccb-...)。endpoint 単位で frontend が i18n 引きするので、
@@ -594,6 +666,10 @@ func mapFolderError(c echo.Context, err error, ep folderEndpoint) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 	case errors.Is(err, coredrive.ErrFolderNotEmpty):
 		return c.JSON(http.StatusBadRequest, apierr.Error("HAS_CHILD_FILES_OR_FOLDERS", "Folder is not empty.", "b0fc8a17-963c-405d-bfbc-859a487295e1"))
+	case errors.Is(err, coredrive.ErrRecursiveNesting):
+		// upstream folders/update の recursiveNesting (#1564)。id はダッシュ
+		// 無しの upstream 原文 (i/2fa の typo UUID と同じく矯正しない)。
+		return c.JSON(http.StatusBadRequest, apierr.Error("RECURSIVE_NESTING", "It can not be structured like nesting folders recursively.", "dbeb024837894013aed44279f9199740"))
 	}
 	return apierr.JSONInternalError(c)
 }
@@ -624,8 +700,17 @@ func (h *Handler) FilesList(c echo.Context) error {
 		UntilDate *int64  `json:"untilDate"`
 		FolderID  *string `json:"folderId"`
 		Type      string  `json:"type"`
+		Sort      string  `json:"sort"`
 	}
 	if err := c.Bind(&req); err != nil {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream paramDef の sort は enum、type は pattern (#1564)。違反は
+	// ajv が INVALID_PARAM で弾くので同じく reject する。
+	if !isValidDriveSort(req.Sort) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Type != "" && !driveTypePatternRe.MatchString(req.Type) {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
@@ -634,15 +719,27 @@ func (h *Handler) FilesList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	files, err := h.fileRepo.ListByUser(user.ID, req.FolderID, untilID, sinceID, req.Limit)
+	files, err := h.fileRepo.ListByUser(user.ID, req.FolderID, false, req.Type, req.Sort, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// upstream files.ts は packMany(files, {detail:false, self:true}) =
+	// folder/user null, userId は owner ID (#1564)。
 	out := make([]entity.DriveFileEntity, 0, len(files))
 	for _, f := range files {
-		out = append(out, h.packDriveFileFull(f))
+		out = append(out, h.packDriveFileSelfList(f))
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// isValidDriveSort reports whether v matches upstream drive/files.ts
+// `sort: enum ['+createdAt','-createdAt','+name','-name','+size','-size', null]`.
+func isValidDriveSort(v string) bool {
+	switch v {
+	case "", "+createdAt", "-createdAt", "+name", "-name", "+size", "-size":
+		return true
+	}
+	return false
 }
 
 // FilesFind handles POST /api/drive/files/find — search by name.
@@ -718,14 +815,19 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream Misskey TS の attached-notes.ts と同じ semantics: viewer 所有
-	// file のみ許可 (#1470 IDOR fix)。upstream 専用 UUID
-	// `c118ece3-2e4b-4296-99d1-51756e32d232` を使い、汎用 NoSuchFile
+	// file のみ許可 (#1470 IDOR fix)。moderator は upstream と同じく任意
+	// user の file を照会できる (#1564、userId filter を外す)。upstream 専用
+	// UUID `c118ece3-2e4b-4296-99d1-51756e32d232` を使い、汎用 NoSuchFile
 	// (UUIDNoSuchFile) と区別する。
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "c118ece3-2e4b-4296-99d1-51756e32d232"))
 	}
+	// owner 判定を先に行い、moderator role lookup は非 owner のときだけ払う
+	// (lazy 評価、#1564 review)。moderator 判定は core 側の RoleChecker
+	// (svc.IsModerator) に一本化し、wiring を二重化しない。
 	f, err := h.fileRepo.FindByID(req.FileID)
-	if err != nil || f.UserID == nil || *f.UserID != viewer.ID {
+	viewerIsOwner := err == nil && f.UserID != nil && *f.UserID == viewer.ID
+	if err != nil || (!viewerIsOwner && !h.svc.IsModerator(viewer.ID)) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "c118ece3-2e4b-4296-99d1-51756e32d232"))
 	}
 	// fileIds配列にfileIDを含むノートを検索 (PostgreSQL配列演算子)
@@ -738,6 +840,15 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	notes, err := h.noteRepo.ListByFileID(req.FileID, sinceID, untilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
+	}
+	// moderator が他人 file を照会する経路 (#1564) では note が viewer 自身の
+	// ものとは限らないため、可視性 filter を通す (followingRepo=nil の
+	// fail-closed: followers note は author 本人以外に出さない)。TS は
+	// pack 側の hide で本文を null 化するが、mk-go は drop で安全側に倒す。
+	// owner 経路は従来どおり filter 不要 (notes/create の checkFileIDs により
+	// 必然的に viewer 自身の note のみ)。
+	if !viewerIsOwner {
+		notes = notesfilter.FilterVisible(viewer, notes, nil)
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
@@ -768,7 +879,7 @@ func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 	// upstream paramDef は comment maxLength=512。ajv の maxLength は文字数
 	// (code unit) 基準なので byte 長ではなく rune 数で判定する (多バイト文字を
 	// 過剰に弾かないため)。超過は INVALID_PARAM。
-	if req.Comment != nil && utf8.RuneCountInString(*req.Comment) > 512 {
+	if req.Comment != nil && utf8.RuneCountInString(*req.Comment) > maxDriveCommentLength {
 		return apierr.JSONInvalidParam(c)
 	}
 	// uploader 未配線 (= 単体テスト等) は upstream と同じ空レスポンスで返す。
@@ -839,19 +950,25 @@ func (h *Handler) Stream(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream stream.ts paramDef の type pattern (#1564)。
+	if req.Type != "" && !driveTypePatternRe.MatchString(req.Type) {
+		return apierr.JSONInvalidParam(c)
+	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	files, err := h.fileRepo.ListByUser(user.ID, nil, untilID, sinceID, req.Limit)
+	// upstream stream.ts は folder 条件を付けず全 folder 横断 (#1564)。
+	files, err := h.fileRepo.ListByUser(user.ID, nil, true, req.Type, "", untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// upstream stream.ts も packMany(files, {detail:false, self:true}) (#1564)。
 	out := make([]entity.DriveFileEntity, 0, len(files))
 	for _, f := range files {
-		out = append(out, h.packDriveFileFull(f))
+		out = append(out, h.packDriveFileSelfList(f))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -880,13 +997,11 @@ func (h *Handler) FoldersList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	out := make([]map[string]any, 0, len(folders))
+	// upstream folders.ts は pack(folder) を返すため createdAt を含む
+	// (#1564 で手組み 3 field map から修正)。
+	out := make([]entity.DriveFolderEntity, 0, len(folders))
 	for _, f := range folders {
-		out = append(out, map[string]any{
-			"id":       f.ID,
-			"name":     f.Name,
-			"parentId": f.ParentID,
-		})
+		out = append(out, entity.PackDriveFolder(f, h.idGen))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -908,13 +1023,11 @@ func (h *Handler) FoldersFind(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	out := make([]map[string]any, 0, len(folders))
+	// upstream folders/find.ts も pack(folder) を返すため createdAt を含む
+	// (#1564)。
+	out := make([]entity.DriveFolderEntity, 0, len(folders))
 	for _, f := range folders {
-		out = append(out, map[string]any{
-			"id":       f.ID,
-			"name":     f.Name,
-			"parentId": f.ParentID,
-		})
+		out = append(out, entity.PackDriveFolder(f, h.idGen))
 	}
 	return c.JSON(http.StatusOK, out)
 }
