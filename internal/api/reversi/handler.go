@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -152,7 +151,9 @@ func packGame(g *model.ReversiGame, idGen id.Generator) map[string]any {
 	// winner は upstream Misskey TS の ReversiGameEntityService.packDetail と
 	// 同じく winnerId から UserLite を派生させる (#649)。frontend は
 	// `v-if="game.winner"` で勝敗表示を切り替えるため、winnerId だけでは
-	// draw に倒れる。
+	// draw に倒れる。json-schema は optional:false, nullable:true なので
+	// winnerId が無い (対局中 / draw) ときもキー自体は null で常に出す (#1553)。
+	result["winner"] = nil
 	if g.WinnerID != nil {
 		if g.User1 != nil && g.User1.ID == *g.WinnerID {
 			result["winner"] = entity.PackUserLite(g.User1)
@@ -339,24 +340,40 @@ func (h *Handler) Match(c echo.Context) error {
 		req.UserID = resolved
 	}
 
+	// 自分自身を相手指定したら upstream match.ts:57 と同じ TARGET_IS_YOURSELF。
+	// acct (`@自分`) が self に解決されるケースも弾くため resolve の後で判定する。
+	if req.UserID != "" && req.UserID == user.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("TARGET_IS_YOURSELF", "Target user is yourself.", "96fd7bd6-d2bc-426c-a865-d055dcd2828e"))
+	}
+
+	// ランダムマッチ (userId 無し) は相手が確定するまで成立しない。upstream は
+	// meta.res が optional:true で、matchAnyUser がマッチ未成立時に null を返す
+	// と endpoint も空ボディ (204) になる (match.ts:33-37,68)。従来の
+	// 「user1=user2 の仮置き game 行を作って 200 で返す」実装は frontend を
+	// 即ゲーム画面 (自分 vs 自分) に遷移させてしまう上、仮置き行が invitations
+	// に自分自身として出るため、行を作らず本家と同じ空レスポンスを返す (#1553)。
+	// any-match の実ペアリング (本家は Redis queue) は未実装で、frontend の
+	// matchHeatbeat が定期的に再呼び出しする前提。
+	if req.UserID == "" {
+		return c.NoContent(http.StatusNoContent)
+	}
+
 	// 既に相手から招待を受けている pending game があれば、それを accept 扱いで
 	// 再利用する (#417 P1)。CherryPick 本家の matchSpecificUser と同じ動作:
 	// inbound Invite 経由で作成された reversi_game 行 (User1=相手, User2=自分)
 	// を流用し、相手に Join を返すだけにする。これをやらないと /match が毎回
 	// 新しいゲーム + 新しい session_id を作って二重招待になり、state 伝播が
 	// 噛み合わなくなる。
-	if req.UserID != "" {
-		if existing := h.findPendingInvitationFrom(user.ID, req.UserID); existing != nil {
-			h.sendJoinForAcceptedInvite(c, user, existing)
-			return c.JSON(http.StatusOK, packGame(existing, h.idGen))
-		}
+	if existing := h.findPendingInvitationFrom(user.ID, req.UserID); existing != nil {
+		h.sendJoinForAcceptedInvite(c, user, existing)
+		return c.JSON(http.StatusOK, packGame(existing, h.idGen))
 	}
 
 	// target user を一度だけ引いて pre-check と deliver 両方で使い回す
 	// (#417 P3 Devin review: 元実装では pre-check と delivery で 2 回
 	// FindByID していた)。
 	var targetUser *model.User
-	if req.UserID != "" && h.userRepo != nil {
+	if h.userRepo != nil {
 		if u, err := h.userRepo.FindByID(req.UserID); err == nil {
 			targetUser = u
 		}
@@ -383,10 +400,6 @@ func (h *Handler) Match(c echo.Context) error {
 		BW:                   "random",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),
-	}
-	if req.UserID == "" {
-		// ランダムマッチ — user2IDを空にしてマッチ待ち
-		game.User2ID = user.ID // 自分vs自分 (仮置き、実際はマッチング待ち)
 	}
 
 	if err := h.repo.Create(game); err != nil {
@@ -473,10 +486,21 @@ func (h *Handler) sendJoinForAcceptedInvite(c echo.Context, accepter *model.User
 // 片付く。svc 未配線な旧テスト互換のため repo.Delete フォールバックも残す。
 func (h *Handler) CancelMatch(c echo.Context) error {
 	user := middleware.GetUser(c)
+	var req struct {
+		UserID string `json:"userId"`
+	}
+	_ = c.Bind(&req)
 	ctx := c.Request().Context()
 	games, _ := h.repo.ListByUser(user.ID, 10)
 	for _, g := range games {
 		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		// userId 指定時は upstream matchSpecificUserCancel 互換 (cancel-match.ts:
+		// 33-38): 自分がその相手に送った招待 (User1=自分, User2=相手) だけを
+		// 取り消す。未指定時は従来通り自分の pending を全部片付ける (mk-go は
+		// any-match queue を持たないため、これが matchAnyUserCancel の近似)。
+		if req.UserID != "" && (g.User1ID != user.ID || g.User2ID != req.UserID) {
 			continue
 		}
 		if h.svc != nil {
@@ -574,16 +598,18 @@ func surrenderErrorResponse(c echo.Context, err error) error {
 }
 
 // Verify handles POST /api/reversi/verify — verify game integrity.
-// CherryPick 互換: クライアントが送ってくる `crc32` をサーバ側で再計算した
-// ものと比較し、不一致なら `{desynced: true, game}` を返してフロント側で
-// restoreGame を走らせる。一致なら `{desynced: false}` のみ。
+// クライアントが送ってくる `crc32` を保存済みの game.crc32 と比較し、
+// 不一致なら `{desynced: true, game}` を返してフロント側で restoreGame を
+// 走らせる。一致なら `{desynced: false}` のみ。
 func (h *Handler) Verify(c echo.Context) error {
 	var req struct {
 		GameID string `json:"gameId"`
 		CRC32  string `json:"crc32"`
 	}
-	if err := c.Bind(&req); err != nil || req.GameID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	// crc32 は upstream verify.ts:38-41 で required (gameId と同列)。欠落を
+	// 黙って desynced=false にすると client 側の desync が一生検出されない。
+	if err := c.Bind(&req); err != nil || req.GameID == "" || req.CRC32 == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameId and crc32 are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
@@ -591,17 +617,12 @@ func (h *Handler) Verify(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "8fb05624-b525-43dd-90f7-511852bdfeee"))
 	}
 
-	// ログを再生して engine CRC を算出し、client が送ってきた crc32 と
-	// 比較する。CRC が合わなければ desync 判定。client が crc32 を送って
-	// こないケースは比較不可なので常に desynced=false。ログ parse は
-	// EngineFromGame を再利用して二重実装を避ける (#417 Devin review)。
-	g, err := corereversi.EngineFromGame(game)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-
-	serverCRC := strconv.FormatUint(uint64(g.CalcCRC32()), 10)
-	desynced := req.CRC32 != "" && req.CRC32 != serverCRC
+	// upstream checkCrc は DB 保存済みの game.crc32 と直接比較する
+	// (ReversiService.ts:618)。ログ再生で都度再計算すると保存値と別ソースに
+	// なり desync 判定が本家と乖離するため、StartGame / PutStone が更新する
+	// 保存値をそのまま使う (#1553)。保存値が無い (開始前) 場合は本家同様
+	// 不一致 = desynced 扱いになり、client は game から状態を復元する。
+	desynced := game.CRC32 == nil || *game.CRC32 != req.CRC32
 	resp := map[string]any{"desynced": desynced}
 	if desynced {
 		resp["game"] = packGame(game, h.idGen)

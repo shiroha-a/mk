@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -367,6 +368,29 @@ func TestService_PutStone_Valid(t *testing.T) {
 	// log event published
 	types := pub.types()
 	assert.Contains(t, types, "log")
+}
+
+// TestService_CRC32MaintainedAcrossMoves guards that StartGame stores the
+// initial board crc32 and PutStone refreshes it on every move (#1553).
+// /reversi/verify は保存済み crc32 と比較する (upstream checkCrc 互換) ため、
+// ここの更新が無いと対局中の verify が常に desynced になる。
+func TestService_CRC32MaintainedAcrossMoves(t *testing.T) {
+	game, repo, _, svc := startedGame(t)
+
+	started, _ := repo.FindByID(game.ID)
+	require.NotNil(t, started.CRC32, "開始時に初期盤面の crc32 を保存する")
+	engine, err := EngineFromGame(started)
+	require.NoError(t, err)
+	assert.Equal(t, strconv.FormatUint(uint64(engine.CalcCRC32()), 10), *started.CRC32)
+
+	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19))
+
+	moved, _ := repo.FindByID(game.ID)
+	require.NotNil(t, moved.CRC32)
+	assert.NotEqual(t, *started.CRC32, *moved.CRC32, "一手ごとに crc32 を更新する")
+	engine2, err := EngineFromGame(moved)
+	require.NoError(t, err)
+	assert.Equal(t, strconv.FormatUint(uint64(engine2.CalcCRC32()), 10), *moved.CRC32)
 }
 
 func TestService_PutStone_NotYourTurn(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -94,11 +95,11 @@ func (h *Handler) Ranking(c echo.Context) error {
 			"id":    r.ID,
 			"score": r.Score,
 		}
+		// upstream ranking.ts は user を ref:'UserLite' で返す。ad-hoc な
+		// 4 フィールドマップだと avatarUrl 等の必須フィールドが欠けて
+		// frontend のランキング表示が壊れるため packer を経由する (#1553)。
 		if r.User != nil {
-			entry["user"] = map[string]any{
-				"id": r.User.ID, "username": r.User.Username,
-				"name": r.User.Name, "host": r.User.Host,
-			}
+			entry["user"] = entity.PackUserLite(r.User)
 		}
 		result[i] = entry
 	}

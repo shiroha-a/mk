@@ -483,6 +483,15 @@ func (s *Service) StartGame(ctx context.Context, game *model.ReversiGame) error 
 	now := time.Now()
 	game.StartedAt = &now
 
+	// 開始時点の盤面 CRC32 を保存する (#1553)。upstream startGame は fresh
+	// engine の calcCrc32 を crc32 カラムに書き、以降 /reversi/verify は
+	// この保存値とクライアント申告値を比較する (ReversiService.ts:321,618)。
+	// 開始時は logs が空なので EngineFromGame は初期盤面の engine を返す。
+	if engine, err := EngineFromGame(game); err == nil {
+		crc := strconv.FormatUint(uint64(engine.CalcCRC32()), 10)
+		game.CRC32 = &crc
+	}
+
 	if err := s.repo.Update(game); err != nil {
 		return err
 	}
@@ -561,6 +570,14 @@ func (s *Service) PutStone(ctx context.Context, gameID, userID string, pos int) 
 	logs = append(logs, []int{int(timeDelta), playerInt, 0, pos})
 	raw, _ := json.Marshal(logs)
 	game.Logs = raw
+
+	// 一手ごとに盤面 CRC32 を保存する (#1553)。upstream putStoneToGame が
+	// engine.calcCrc32() を都度 game.crc32 に書くのと同じ
+	// (ReversiService.ts:489-493)。/reversi/verify の desync 判定はこの
+	// 保存値に対して行われるため、更新を怠ると対局中の verify が常に
+	// desynced になる。
+	crc := strconv.FormatUint(uint64(engine.CalcCRC32()), 10)
+	game.CRC32 = &crc
 
 	if engine.Turn == nil {
 		// ゲーム終了
