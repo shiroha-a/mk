@@ -12,6 +12,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -435,12 +436,89 @@ func (c *Client) EnqueueDeleteAccount(payload DeleteAccountPayload) error {
 // AP delivery 失敗を吸収できる程度に設定。
 func (c *Client) EnqueueUnfollow(payload UnfollowPayload) error {
 	body := mustMarshal(payload)
+	return c.enqueueRelationship(TaskTypeUnfollow, body)
+}
+
+// EnqueueFollow schedules a single Follow job for the given pair.
+// Misskey TS の relationshipQueue 'follow' job 相当 (#1605)。retry /
+// uniqueness の方針は EnqueueUnfollow と同じ。
+func (c *Client) EnqueueFollow(payload FollowPayload) error {
+	body := mustMarshal(payload)
+	return c.enqueueRelationship(TaskTypeFollow, body)
+}
+
+// EnqueueBlock schedules a single Block job for the given pair (#1605)。
+func (c *Client) EnqueueBlock(payload BlockPayload) error {
+	body := mustMarshal(payload)
+	return c.enqueueRelationship(TaskTypeBlock, body)
+}
+
+// EnqueueUnblock schedules a single Unblock job for the given pair (#1605)。
+func (c *Client) EnqueueUnblock(payload UnblockPayload) error {
+	body := mustMarshal(payload)
+	return c.enqueueRelationship(TaskTypeUnblock, body)
+}
+
+// enqueueRelationship is the shared enqueue path for the per-pair
+// relationship jobs (follow / unfollow / block / unblock)。
+func (c *Client) enqueueRelationship(taskType string, body []byte) error {
 	base := []driver.EnqueueOption{
 		driver.WithQueue(QueueName),
 		driver.WithMaxRetry(3),
 	}
 	base = append(base, c.retentionOpts(QueueName)...)
-	return c.inner.Enqueue(context.Background(), TaskTypeUnfollow, body, base...)
+	return c.inner.Enqueue(context.Background(), taskType, body, base...)
+}
+
+// EnqueueFollowBulk schedules one Follow job per payload. 本家
+// QueueService.createFollowJob の addBulk 相当 (#1605)。driver に bulk
+// API は無いため逐次 enqueue し、失敗した payload 分のエラーを
+// errors.Join で集約して返す (成功分は enqueue 済のまま)。worker 側が
+// 冪等吸収するため、エラー時に batch 全体を再実行しても安全。
+func (c *Client) EnqueueFollowBulk(payloads []FollowPayload) error {
+	var errs []error
+	for _, p := range payloads {
+		if err := c.EnqueueFollow(p); err != nil {
+			errs = append(errs, fmt.Errorf("follow %s->%s: %w", p.FollowerID, p.FolloweeID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EnqueueUnfollowBulk schedules one Unfollow job per payload. 本家
+// QueueService.createUnfollowJob の addBulk 相当 (#1605)。
+func (c *Client) EnqueueUnfollowBulk(payloads []UnfollowPayload) error {
+	var errs []error
+	for _, p := range payloads {
+		if err := c.EnqueueUnfollow(p); err != nil {
+			errs = append(errs, fmt.Errorf("unfollow %s->%s: %w", p.FollowerID, p.FolloweeID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EnqueueBlockBulk schedules one Block job per payload. 本家
+// QueueService.createBlockJob の addBulk 相当 (#1605)。
+func (c *Client) EnqueueBlockBulk(payloads []BlockPayload) error {
+	var errs []error
+	for _, p := range payloads {
+		if err := c.EnqueueBlock(p); err != nil {
+			errs = append(errs, fmt.Errorf("block %s->%s: %w", p.BlockerID, p.BlockeeID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EnqueueUnblockBulk schedules one Unblock job per payload. 本家
+// QueueService.createUnblockJob の addBulk 相当 (#1605)。
+func (c *Client) EnqueueUnblockBulk(payloads []UnblockPayload) error {
+	var errs []error
+	for _, p := range payloads {
+		if err := c.EnqueueUnblock(p); err != nil {
+			errs = append(errs, fmt.Errorf("unblock %s->%s: %w", p.BlockerID, p.BlockeeID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Close releases the underlying client connection.

@@ -682,6 +682,18 @@ func (s *Server) setupRoutes() {
 	// 配送を行う。Misskey TS の relationshipQueue 'unfollow' job 相当。
 	unfollowProcessor := processors.NewUnfollowProcessor(followingService)
 	s.queueServer.Handle(queue.TaskTypeUnfollow, unfollowProcessor.Handle)
+
+	// Per-pair Follow / Block / Unblock job (#1605): 本家
+	// RelationshipProcessorService の processFollow / processBlock /
+	// processUnblock 相当。大量関係操作 (将来の AccountMove フォロワー移行
+	// 等) の非同期バックプレッシャ surface。import は完了通知の
+	// Applied/Skipped 集計を保つため同期適用を維持する (core/transfer)。
+	followProcessor := processors.NewFollowProcessor(followingService)
+	s.queueServer.Handle(queue.TaskTypeFollow, followProcessor.Handle)
+	blockProcessor := processors.NewBlockProcessor(blockingService)
+	s.queueServer.Handle(queue.TaskTypeBlock, blockProcessor.Handle)
+	unblockProcessor := processors.NewUnblockProcessor(blockingService)
+	s.queueServer.Handle(queue.TaskTypeUnblock, unblockProcessor.Handle)
 	if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)

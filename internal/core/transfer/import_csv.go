@@ -21,6 +21,12 @@ import (
 // 側 (ImportFollowingProcessorService.ts:75) は `parts.slice(2)` で parse する
 // バグがあり 2-fields export と整合しないが、mk-go は `parts[1:]` から parse して
 // 実 export format と一致させる。
+//
+// 設計判断 (#1605): upstream は行ごとに relationshipQueue へ follow job を
+// enqueue するが、mk-go は同期 loop を維持する。完了通知に載せる
+// Applied/Skipped 集計が per-pair 非同期化では「enqueue 数」しか数えられず
+// 不正確になるため (#1563 review)。queue surface (TaskTypeFollow /
+// EnqueueFollowBulk) は用意済みなので、集計を再設計する場合はそちらへ移行する。
 func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult, error) {
 	if i.deps.Following == nil {
 		return nil, fmt.Errorf("following service not configured")
@@ -74,6 +80,8 @@ func parseFollowingCSVLine(line string) (string, FollowOptions) {
 }
 
 // importBlocking parses `acct` lines and applies a block per entry.
+// 同期 loop を維持する理由は importFollowing の設計判断 (#1605) と同じ
+// (upstream は createBlockJob で per-pair enqueue)。
 func (i *Importer) importBlocking(user *model.User, body []byte) (*ImportResult, error) {
 	if i.deps.Blocking == nil {
 		return nil, fmt.Errorf("blocking service not configured")

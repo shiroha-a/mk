@@ -350,6 +350,89 @@ func DecodeUnfollowPayload(body []byte) (UnfollowPayload, error) {
 	return p, nil
 }
 
+// TaskTypeFollow is the task type for the per-pair Follow queue job.
+// Misskey TS の relationshipQueue の `follow` job 名と一致 (#1605)。
+// import / AccountMove のような大量関係操作を per-pair で retry 可能に
+// する非同期 surface (本家 RelationshipProcessorService.processFollow)。
+const TaskTypeFollow = "relationship:follow"
+
+// FollowPayload identifies the (follower, followee) pair to attach.
+// 本家 TS の RelationshipJobData {from, to, silent, requestId, withReplies}
+// に相当。silent / requestId は mk-go の core/following.Follow が未対応の
+// ため payload に含めない (UnfollowPayload と同方針、core 対応時に追加)。
+type FollowPayload struct {
+	FollowerID  string `json:"followerId"`
+	FolloweeID  string `json:"followeeId"`
+	WithReplies bool   `json:"withReplies,omitempty"`
+}
+
+// NewFollowTask serializes a FollowPayload into a driver.Task.
+func NewFollowTask(payload FollowPayload) driver.Task {
+	body, _ := json.Marshal(payload)
+	return driver.RawTask{TypeName: TaskTypeFollow, Body: body}
+}
+
+// DecodeFollowPayload extracts a FollowPayload from a task body.
+func DecodeFollowPayload(body []byte) (FollowPayload, error) {
+	var p FollowPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return FollowPayload{}, err
+	}
+	return p, nil
+}
+
+// TaskTypeBlock is the task type for the per-pair Block queue job.
+// Misskey TS の relationshipQueue の `block` job 名と一致 (#1605)。
+const TaskTypeBlock = "relationship:block"
+
+// BlockPayload identifies the (blocker, blockee) pair to attach.
+// 本家 TS の RelationshipJobData {from, to, silent} に相当。silent は
+// mk-go の core/blocking.Block が未対応のため含めない。
+type BlockPayload struct {
+	BlockerID string `json:"blockerId"`
+	BlockeeID string `json:"blockeeId"`
+}
+
+// NewBlockTask serializes a BlockPayload into a driver.Task.
+func NewBlockTask(payload BlockPayload) driver.Task {
+	body, _ := json.Marshal(payload)
+	return driver.RawTask{TypeName: TaskTypeBlock, Body: body}
+}
+
+// DecodeBlockPayload extracts a BlockPayload from a task body.
+func DecodeBlockPayload(body []byte) (BlockPayload, error) {
+	var p BlockPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return BlockPayload{}, err
+	}
+	return p, nil
+}
+
+// TaskTypeUnblock is the task type for the per-pair Unblock queue job.
+// Misskey TS の relationshipQueue の `unblock` job 名と一致 (#1605)。
+const TaskTypeUnblock = "relationship:unblock"
+
+// UnblockPayload identifies the (blocker, blockee) pair to detach.
+type UnblockPayload struct {
+	BlockerID string `json:"blockerId"`
+	BlockeeID string `json:"blockeeId"`
+}
+
+// NewUnblockTask serializes an UnblockPayload into a driver.Task.
+func NewUnblockTask(payload UnblockPayload) driver.Task {
+	body, _ := json.Marshal(payload)
+	return driver.RawTask{TypeName: TaskTypeUnblock, Body: body}
+}
+
+// DecodeUnblockPayload extracts an UnblockPayload from a task body.
+func DecodeUnblockPayload(body []byte) (UnblockPayload, error) {
+	var p UnblockPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return UnblockPayload{}, err
+	}
+	return p, nil
+}
+
 // PostScheduledNotePayload identifies a draft scheduled for future publish.
 // upstream `PostScheduledNoteJobData { noteDraftId }` と shape 一致 (#1040)。
 type PostScheduledNotePayload struct {
