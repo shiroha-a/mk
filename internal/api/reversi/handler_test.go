@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -290,10 +289,34 @@ func TestMatch_Success(t *testing.T) {
 	assert.Len(t, repo.games, 1)
 }
 
+// userId 無し (ランダムマッチ) は相手未確定なので upstream 同様 204 空ボディ。
+// 旧実装は user1=user2 の仮置き game 行を作って 200 を返していた (#1553)。
 func TestMatch_NoTarget(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
 	rec := post(h.Match, `{}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String(), "マッチ未成立時は空ボディ")
+	assert.Empty(t, repo.games, "仮置き game 行を作らない")
+}
+
+// 自分自身を相手指定したら upstream match.ts と同じ TARGET_IS_YOURSELF (#1553)。
+func TestMatch_SelfTarget(t *testing.T) {
+	h, repo := newTestHandler()
+	rec := post(h.Match, `{"userId":"u1"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, repo.games)
+}
+
+// acct (`@自分`) が self に解決されるケースも TARGET_IS_YOURSELF で弾く。
+func TestMatch_AcctSelfTarget(t *testing.T) {
+	h, repo := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
+	h.SetFederation("https://example.com", nil, nil, userRepo)
+
+	rec := post(h.Match, `{"userId":"@alice"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, repo.games)
 }
 
 func TestMatch_CreateError(t *testing.T) {
@@ -366,6 +389,40 @@ func TestCancelMatch_Success(t *testing.T) {
 	assert.Empty(t, repo.games)
 }
 
+// userId 指定時は upstream matchSpecificUserCancel 互換で、その相手に送った
+// 招待だけを取り消す。他の相手への pending 招待は残す (#1553)。
+func TestCancelMatch_SpecificUserOnly(t *testing.T) {
+	h, repo := newTestHandler()
+	toU2 := sampleGame() // User1=u1, User2=u2
+	repo.games["g1"] = toU2
+	toU3 := sampleGame()
+	toU3.ID = "g2"
+	toU3.User2ID = "u3"
+	repo.games["g2"] = toU3
+
+	rec := post(h.CancelMatch, `{"userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, g1Left := repo.games["g1"]
+	assert.False(t, g1Left, "u2 への招待は取り消される")
+	_, g2Left := repo.games["g2"]
+	assert.True(t, g2Left, "u3 への招待は残る")
+}
+
+// userId 指定時、相手から受けている招待 (User1=相手, User2=自分) は取り消さ
+// ない。upstream matchSpecificUserCancel も自分が送った招待のみ削除する。
+func TestCancelMatch_SpecificUserKeepsInbound(t *testing.T) {
+	h, repo := newTestHandler()
+	inbound := sampleGame()
+	inbound.User1ID = "u2"
+	inbound.User2ID = "u1"
+	repo.games["g1"] = inbound
+
+	rec := post(h.CancelMatch, `{"userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, left := repo.games["g1"]
+	assert.True(t, left, "受信側の招待は cancel-match では消えない")
+}
+
 // --- Surrender ---
 
 func TestSurrender_Success(t *testing.T) {
@@ -400,19 +457,9 @@ func TestSurrender_InvalidParam(t *testing.T) {
 
 // --- Verify ---
 
-func TestVerify_Success(t *testing.T) {
-	h, repo := newTestHandler()
-	repo.games["g1"] = sampleGame()
-	rec := post(h.Verify, `{"gameId":"g1"}`, nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, false, resp["desynced"])
-}
-
 func TestVerify_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
-	rec := post(h.Verify, `{"gameId":"ghost"}`, nil)
+	rec := post(h.Verify, `{"gameId":"ghost","crc32":"1"}`, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
@@ -422,26 +469,24 @@ func TestVerify_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestVerify_WithLogs(t *testing.T) {
-	h, repo := newTestHandler()
-	g := sampleGame()
-	g.Logs = datatypes.JSON(`[[26,1]]`) // pos=26 (2,3 on 8x8 board)
-	repo.games["g1"] = g
-	rec := post(h.Verify, `{"gameId":"g1"}`, nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
-// crc32 を送ってサーバ側計算値と比較: 一致で desynced=false
-// (#417 Devin review: Verify が従来 dead code だった)。
-func TestVerify_MatchingCRC(t *testing.T) {
+// crc32 は upstream verify.ts:38-41 で required (#1553)。欠落は 400。
+func TestVerify_MissingCRC32(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.games["g1"] = sampleGame()
-	// 空ログの初期状態 CRC を求めるため一度 empty payload で叩いて期待値を
-	// 得てから、その値を client crc32 として返し desynced=false を期待する。
-	g := corereversi.NewGame(sampleGame().Map, corereversi.Options{})
-	expectedCRC := strconv.FormatUint(uint64(g.CalcCRC32()), 10)
+	rec := post(h.Verify, `{"gameId":"g1"}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
 
-	rec := post(h.Verify, `{"gameId":"g1","crc32":"`+expectedCRC+`"}`, nil)
+// 保存済み game.crc32 と一致で desynced=false (#1553)。upstream checkCrc は
+// ログ再生での再計算ではなく DB 保存値と比較する (ReversiService.ts:618)。
+func TestVerify_MatchingCRC(t *testing.T) {
+	h, repo := newTestHandler()
+	g := sampleGame()
+	stored := "123456789"
+	g.CRC32 = &stored
+	repo.games["g1"] = g
+
+	rec := post(h.Verify, `{"gameId":"g1","crc32":"123456789"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -450,10 +495,13 @@ func TestVerify_MatchingCRC(t *testing.T) {
 	assert.False(t, hasGame, "同期時は game は返さない")
 }
 
-// crc32 が不一致で desynced=true + game が返る。
+// crc32 が保存値と不一致で desynced=true + game が返る。
 func TestVerify_DivergingCRC(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.games["g1"] = sampleGame()
+	g := sampleGame()
+	stored := "123456789"
+	g.CRC32 = &stored
+	repo.games["g1"] = g
 
 	rec := post(h.Verify, `{"gameId":"g1","crc32":"999999"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -462,6 +510,18 @@ func TestVerify_DivergingCRC(t *testing.T) {
 	assert.Equal(t, true, resp["desynced"])
 	_, hasGame := resp["game"]
 	assert.True(t, hasGame, "desync 時は game を返して restoreGame させる")
+}
+
+// 保存値が無い (開始前等) 場合は upstream 同様に不一致 = desynced 扱い。
+func TestVerify_NoStoredCRC(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.games["g1"] = sampleGame() // CRC32 nil
+
+	rec := post(h.Verify, `{"gameId":"g1","crc32":"1"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["desynced"])
 }
 
 // --- Federation ---
@@ -719,6 +779,8 @@ func TestMatch_CreateErrorWithRemote(t *testing.T) {
 	assert.Equal(t, 0, d.calls) // Create失敗時はInvite送らない
 }
 
+// userId 無しのランダムマッチは federation 配線済みでも 204 空ボディで、
+// 仮置き game 行も Invite 配信も発生しない (#1553)。
 func TestMatch_EmptyUserIDIsRandomMatch(t *testing.T) {
 	h, repo := newTestHandler()
 	d := &mockDeliverer{}
@@ -727,8 +789,8 @@ func TestMatch_EmptyUserIDIsRandomMatch(t *testing.T) {
 	h.SetFederation("https://example.com", d, fedCache, userRepo)
 
 	rec := post(h.Match, `{}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Len(t, repo.games, 1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, repo.games)
 	assert.Equal(t, 0, d.calls)
 }
 
@@ -773,8 +835,11 @@ func TestPackGame_WinnerField(t *testing.T) {
 			User1: user1, User2: user2,
 		}
 		out := packGame(g, idGen)
-		_, has := out["winner"]
-		assert.False(t, has, "winner must be omitted when WinnerID is nil")
+		// upstream json-schema は winner を optional:false, nullable:true で
+		// 宣言するためキー欠落ではなく null を出す (#1553)。
+		w, has := out["winner"]
+		require.True(t, has, "winner key must always be present")
+		assert.Nil(t, w, "winner must be null when WinnerID is nil")
 	})
 }
 
@@ -867,7 +932,7 @@ func TestReversiErrorIDsMatchUpstream(t *testing.T) {
 
 	t.Run("verify NO_SUCH_GAME", func(t *testing.T) {
 		h, _ := newTestHandler()
-		rec := post(h.Verify, `{"gameId":"ghost"}`, nil)
+		rec := post(h.Verify, `{"gameId":"ghost","crc32":"1"}`, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 		assert.Equal(t, "8fb05624-b525-43dd-90f7-511852bdfeee", errorID(t, rec))
 	})
@@ -912,6 +977,13 @@ func TestReversiErrorIDsMatchUpstream(t *testing.T) {
 		rec := post(h.Match, `{"userId":"@ghost"}`, u1)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 		assert.Equal(t, "0b4f0559-b484-4e31-9581-3f73cee89b28", errorID(t, rec))
+	})
+
+	t.Run("match TARGET_IS_YOURSELF", func(t *testing.T) {
+		h, _ := newTestHandler()
+		rec := post(h.Match, `{"userId":"u1"}`, u1)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "96fd7bd6-d2bc-426c-a865-d055dcd2828e", errorID(t, rec))
 	})
 }
 

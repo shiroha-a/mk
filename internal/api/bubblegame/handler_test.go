@@ -123,6 +123,30 @@ func TestRanking_Success(t *testing.T) {
 	assert.Len(t, resp, 2)
 }
 
+// TestRanking_UserIsUserLite guards that ranking items embed a full UserLite
+// (#1553). Upstream ranking.ts declares user as ref:'UserLite', so ad-hoc
+// 4-field maps break clients that expect avatarUrl / onlineStatus etc.
+func TestRanking_UserIsUserLite(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.records = []*model.BubbleGameRecord{
+		{ID: "r1", Score: 200, User: &model.User{ID: "u1", Username: "alice"}},
+	}
+	rec := post(h.Ranking, `{"gameMode":"normal"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	user, ok := resp[0]["user"].(map[string]any)
+	require.True(t, ok, "user must be an object")
+	// UserLite 必須フィールドが揃っていること (ad-hoc map では欠けていた組)。
+	for _, key := range []string{"id", "username", "name", "host", "avatarUrl", "isBot", "isCat", "emojis", "onlineStatus", "badgeRoles"} {
+		_, has := user[key]
+		assert.True(t, has, "UserLite field %q must be present", key)
+	}
+	assert.Equal(t, "u1", user["id"])
+}
+
 func TestRanking_Empty(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Ranking, `{"gameMode":"normal"}`, nil)
