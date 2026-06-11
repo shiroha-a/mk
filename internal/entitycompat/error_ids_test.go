@@ -135,11 +135,13 @@ func TestErrorIDDrift(t *testing.T) {
 }
 
 // emission is one error response a handler emits: the enclosing method name,
-// the error code, the resolved UUID, and (for the status gate) the HTTP status.
+// the error code, the resolved UUID, the kind discriminator (for the kind
+// gate), and (for the status gate) the HTTP status.
 type emission struct {
 	fn     string
 	code   string
 	uuid   string
+	kind   string
 	status int
 }
 
@@ -150,12 +152,15 @@ var (
 	// `func notFound(c echo.Context) error`), and without matching their boundary
 	// their emissions would be mis-attributed to the preceding method.
 	funcDeclRe = regexp.MustCompile(`func (?:\(\w+ \*?\w+\) )?(\w+)\(`)
-	// inlineErrRe matches apierr.Error("CODE", <msg>, <id>). msg may be a string
-	// literal, a parenless function call (err.Error(), fmt.Sprintf("...")), or an
-	// identifier; id may be a literal UUID or a UUID constant. A trailing comma
-	// (gofmt adds one to multi-line calls) is tolerated. `(?s)` lets the pattern
-	// span the multi-line calls gofmt produces.
-	inlineErrRe = regexp.MustCompile(`(?s)apierr\.Error\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+\([^)]*\)|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|(?:apierr\.)?UUID\w+)\s*,?\s*\)`)
+	// inlineErrRe matches apierr.Error("CODE", <msg>, <id>) and the kind-aware
+	// apierr.ErrorWithKind("CODE", <msg>, <id>, apierr.KindXxx) (#1608). msg may
+	// be a string literal, a parenless function call (err.Error(),
+	// fmt.Sprintf("...")), or an identifier; id may be a literal UUID or a UUID
+	// constant. A trailing comma (gofmt adds one to multi-line calls) is
+	// tolerated. `(?s)` lets the pattern span the multi-line calls gofmt
+	// produces. Capture group 3 holds the Kind constant suffix ("Server" etc.,
+	// empty for the 3-arg Error form = default client).
+	inlineErrRe = regexp.MustCompile(`(?s)apierr\.Error(?:WithKind)?\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+\([^)]*\)|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|(?:apierr\.)?UUID\w+)\s*(?:,\s*apierr\.Kind(\w+))?\s*,?\s*\)`)
 	// helperCallRe matches apierr.Helper( — any apierr.X( call; non-helpers
 	// (e.g. Error) are filtered against the parsed helper table.
 	helperCallRe = regexp.MustCompile(`apierr\.(\w+)\(`)
@@ -176,11 +181,11 @@ func scanEmissions(src string, helpers map[string]emission, consts map[string]st
 		body := src[loc[0]:end]
 
 		for _, m := range inlineErrRe.FindAllStringSubmatch(body, -1) {
-			out = append(out, emission{fn: fn, code: m[1], uuid: resolveUUID(m[2], consts)})
+			out = append(out, emission{fn: fn, code: m[1], uuid: resolveUUID(m[2], consts), kind: kindFromConstSuffix(m[3])})
 		}
 		for _, m := range helperCallRe.FindAllStringSubmatch(body, -1) {
 			if h, ok := helpers[m[1]]; ok {
-				out = append(out, emission{fn: fn, code: h.code, uuid: h.uuid})
+				out = append(out, emission{fn: fn, code: h.code, uuid: h.uuid, kind: h.kind})
 			}
 		}
 	}
@@ -196,10 +201,20 @@ func resolveUUID(expr string, consts map[string]string) string {
 	return consts[strings.TrimPrefix(expr, "apierr.")]
 }
 
+// kindFromConstSuffix maps a captured Kind constant suffix ("Client" /
+// "Server" / "Permission") to the envelope kind value. An empty capture means
+// the 3-arg Error form, whose kind is the upstream ApiError default "client".
+func kindFromConstSuffix(suffix string) string {
+	if suffix == "" {
+		return "client"
+	}
+	return strings.ToLower(suffix)
+}
+
 var (
 	constRe        = regexp.MustCompile(`\b(UUID\w+)\s*=\s*"([0-9a-f-]{36})"`)
 	funcDeclBareRe = regexp.MustCompile(`func (\w+)\(`)
-	helperBodyRe   = regexp.MustCompile(`Error\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|UUID\w+)`)
+	helperBodyRe   = regexp.MustCompile(`Error(?:WithKind)?\(\s*"([A-Z_]+)"\s*,\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+)\s*,\s*("[0-9a-f-]{36}"|UUID\w+)(?:\s*,\s*Kind(\w+))?`)
 )
 
 // parseApierr reads internal/api/apierr/errors.go and returns the UUID-constant
@@ -218,7 +233,7 @@ func parseApierr(t *testing.T, path string) (helpers map[string]emission, consts
 	locs := funcDeclBareRe.FindAllStringSubmatchIndex(string(src), -1)
 	for i, loc := range locs {
 		name := string(src[loc[2]:loc[3]])
-		if name == "Error" {
+		if name == "Error" || name == "ErrorWithKind" {
 			continue
 		}
 		end := len(src)
@@ -226,7 +241,7 @@ func parseApierr(t *testing.T, path string) (helpers map[string]emission, consts
 			end = locs[i+1][0]
 		}
 		if m := helperBodyRe.FindStringSubmatch(string(src[loc[0]:end])); m != nil {
-			helpers[name] = emission{code: m[1], uuid: resolveUUID(m[2], consts)}
+			helpers[name] = emission{code: m[1], uuid: resolveUUID(m[2], consts), kind: kindFromConstSuffix(m[3])}
 		}
 	}
 	return helpers, consts

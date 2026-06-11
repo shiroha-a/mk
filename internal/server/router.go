@@ -854,6 +854,13 @@ func (s *Server) setupRoutes() {
 
 	api := s.echo.Group("/api")
 
+	// 本家 ApiCallService #sendApiError 互換の WWW-Authenticate 付与 (#1608)。
+	// error envelope の kind を見て header を決めるため、応答を最初に
+	// 仲介できる位置 (= group 最初の Use) に置く。後続 middleware / handler
+	// が書く error 応答 (rate limit 429 / FST_ERR_CTP_* を含む) も全て
+	// この writer を通る。
+	api.Use(middleware.WWWAuthenticate())
+
 	// Fastify互換のJSON body事前パース (#1609)。本家はbody parseが
 	// endpoint handler (rate limit / 認証を含む) より先に走るため、
 	// rate limiterより前に登録して malformed JSON を FST_ERR_CTP_* envelope
@@ -2377,13 +2384,7 @@ func (s *Server) setupRoutes() {
 			Endpoint string `json:"endpoint"`
 		}
 		if err := c.Bind(&req); err != nil || req.Endpoint == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"error": map[string]any{
-					"message": "Invalid param.",
-					"code":    "INVALID_PARAM",
-					"id":      "3d81ceae-475f-4600-b2a8-2bc116157532",
-				},
-			})
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
 		return c.JSON(http.StatusOK, map[string]any{"params": map[string]any{}})
 	})
@@ -2433,13 +2434,7 @@ func (s *Server) setupRoutes() {
 			EmailAddress string `json:"emailAddress"`
 		}
 		if err := c.Bind(&req); err != nil || req.EmailAddress == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"error": map[string]any{
-					"message": "Invalid param.",
-					"code":    "INVALID_PARAM",
-					"id":      "3d81ceae-475f-4600-b2a8-2bc116157532",
-				},
-			})
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
 		var count int64
 		s.db.Model(&model.UserProfile{}).Where(`"email" = ?`, req.EmailAddress).Count(&count)
@@ -2462,13 +2457,7 @@ func (s *Server) setupRoutes() {
 			NoteID string `json:"noteId"`
 		}
 		if err := c.Bind(&req); err != nil || req.NoteID == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"error": map[string]any{
-					"message": "Invalid param.",
-					"code":    "INVALID_PARAM",
-					"id":      "3d81ceae-475f-4600-b2a8-2bc116157532",
-				},
-			})
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
 		if _, err := noteRepo.FindByID(req.NoteID); err != nil {
 			return apierr.JSONNoSuchNote(c)

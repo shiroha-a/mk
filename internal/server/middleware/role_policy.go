@@ -42,6 +42,7 @@ func RequireRolePolicy(checker RolePolicyChecker, policyKey string) echo.Middlew
 						"message": "Authentication is required.",
 						"code":    "CREDENTIAL_REQUIRED",
 						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}

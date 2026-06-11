@@ -1,0 +1,23 @@
+{
+  "admin/abuse-report/notification-recipient/show": {
+    "NO_SUCH_RECIPIENT": "server"
+  },
+  "admin/forward-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "server"
+  },
+  "admin/resolve-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "server"
+  },
+  "admin/system-webhook/show": {
+    "NO_SUCH_SYSTEM_WEBHOOK": "server"
+  },
+  "admin/update-abuse-user-report": {
+    "NO_SUCH_ABUSE_REPORT": "server"
+  },
+  "i": {
+    "USER_IS_DELETED": "permission"
+  },
+  "users/show": {
+    "FAILED_TO_RESOLVE_REMOTE_USER": "server"
+  }
+}

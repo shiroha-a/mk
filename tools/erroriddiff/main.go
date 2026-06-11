@@ -50,10 +50,12 @@ func main() {
 	epDir := flag.String("endpoints", "third_party/misskey/packages/backend/src/server/api/endpoints", "path to Misskey backend endpoints dir")
 	out := flag.String("out", "internal/entitycompat/testdata/golden_error_ids.json", "golden id snapshot output path")
 	statusOut := flag.String("status-out", "internal/entitycompat/testdata/golden_error_status.json", "golden explicit-status snapshot output path")
+	kindsOut := flag.String("kinds-out", "internal/entitycompat/testdata/golden_error_kinds.json", "golden explicit-kind snapshot output path")
 	flag.Parse()
 
 	golden := map[string]map[string]string{}
 	status := map[string]map[string]int{}
+	kinds := map[string]map[string]string{}
 	err := filepath.WalkDir(*epDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -80,13 +82,23 @@ func main() {
 		// Record only explicit statuses: httpStatusCode wins; otherwise an
 		// explicit kind maps to its default. Entries with neither are the
 		// implicit-400 majority and are skipped (see kindStatus comment).
+		// Explicit kinds are recorded separately for the kind drift gate
+		// (TestErrorKindDrift): entries without kind are the implicit-client
+		// majority and are intentionally absent (#1608).
 		for _, m := range errBlockRe.FindAllStringSubmatch(s, -1) {
 			code, blk := m[1], m[0]
 			var st int
 			if hs := httpStatusRe.FindStringSubmatch(blk); hs != nil {
 				st, _ = strconv.Atoi(hs[1])
-			} else if kd := kindRe.FindStringSubmatch(blk); kd != nil {
-				st = kindStatus[kd[1]]
+			}
+			if kd := kindRe.FindStringSubmatch(blk); kd != nil {
+				if st == 0 {
+					st = kindStatus[kd[1]]
+				}
+				if kinds[ep] == nil {
+					kinds[ep] = map[string]string{}
+				}
+				kinds[ep][code] = kd[1]
 			}
 			if st != 0 {
 				if status[ep] == nil {
@@ -108,6 +120,7 @@ func main() {
 
 	writeJSON(*out, golden)
 	writeJSON(*statusOut, status)
+	writeJSON(*kindsOut, kinds)
 
 	ids := 0
 	for _, m := range golden {
@@ -117,8 +130,13 @@ func main() {
 	for _, m := range status {
 		sts += len(m)
 	}
+	kds := 0
+	for _, m := range kinds {
+		kds += len(m)
+	}
 	fmt.Printf("erroriddiff: wrote %d endpoints / %d error ids -> %s\n", len(golden), ids, *out)
 	fmt.Printf("erroriddiff: wrote %d explicit statuses -> %s\n", sts, *statusOut)
+	fmt.Printf("erroriddiff: wrote %d explicit kinds -> %s\n", kds, *kindsOut)
 }
 
 func writeJSON(path string, v any) {

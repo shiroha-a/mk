@@ -202,6 +202,7 @@ func RequireAuth() echo.MiddlewareFunc {
 						"message": "Authentication is required.",
 						"code":    "CREDENTIAL_REQUIRED",
 						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}
@@ -230,6 +231,7 @@ func RequireSecure() echo.MiddlewareFunc {
 						"message": "Authentication is required.",
 						"code":    "CREDENTIAL_REQUIRED",
 						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}
@@ -239,6 +241,7 @@ func RequireSecure() echo.MiddlewareFunc {
 						"message": "Access denied.",
 						"code":    "ACCESS_DENIED",
 						"id":      "56f35758-7dd5-468b-8439-5d6fb8ec9b8e",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}
@@ -323,6 +326,7 @@ func RequireAdmin(checker RoleChecker) echo.MiddlewareFunc {
 						"message": "Authentication is required.",
 						"code":    "CREDENTIAL_REQUIRED",
 						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}
@@ -332,6 +336,7 @@ func RequireAdmin(checker RoleChecker) echo.MiddlewareFunc {
 						"message": "You are not an administrator.",
 						"code":    "ROLE_PERMISSION_DENIED",
 						"id":      "c3d38592-54c0-429d-bfe8-f1571e00eb14",
+						"kind":    apierr.KindPermission,
 					},
 				})
 			}
@@ -351,6 +356,7 @@ func RequireModerator(checker RoleChecker) echo.MiddlewareFunc {
 						"message": "Authentication is required.",
 						"code":    "CREDENTIAL_REQUIRED",
 						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
+						"kind":    apierr.KindClient,
 					},
 				})
 			}
@@ -360,6 +366,7 @@ func RequireModerator(checker RoleChecker) echo.MiddlewareFunc {
 						"message": "You are not a moderator.",
 						"code":    "ROLE_PERMISSION_DENIED",
 						"id":      "c3d38592-54c0-429d-bfe8-f1571e00eb14",
+						"kind":    apierr.KindPermission,
 					},
 				})
 			}

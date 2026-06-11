@@ -453,12 +453,12 @@ shapecheck-report:
 shapecheck:
 	go test ./internal/entitycompat/... -run 'TestEntityShapeDrift|ShapeL2' -count=1 -v
 
-# error-id / error-HTTP-status drift gate をローカルで実行する。handler が emit
-# する error id (inline / UUID 定数 / apierr helper / echo wrapper) と、Misskey が
-# 明示する HTTP status を router 経由で endpoint に解決して突合する静的 gate。
-# 詳細は docs/shape-drift.md。
+# error-id / error-HTTP-status / error-kind drift gate をローカルで実行する。
+# handler が emit する error id (inline / UUID 定数 / apierr helper / echo
+# wrapper) と、Misskey が明示する HTTP status / kind discriminator を router
+# 経由で endpoint に解決して突合する静的 gate。詳細は docs/shape-drift.md。
 errorid-check:
-	go test ./internal/entitycompat/... -run 'TestErrorIDDrift|TestErrorHTTPStatusDrift' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestErrorIDDrift|TestErrorHTTPStatusDrift|TestErrorKindDrift' -count=1 -v
 
 # pagination limit-spec drift gate をローカルで実行する。handler が
 # pagination.ClampLimit(limit, def, max) で渡す default/max literal を router

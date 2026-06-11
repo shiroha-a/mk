@@ -163,8 +163,9 @@ type statusEmission struct {
 }
 
 var (
-	// inlineStatusErrRe matches c.JSON(http.StatusX, apierr.Error("CODE", ...)).
-	inlineStatusErrRe = regexp.MustCompile(`c\.JSON\(http\.(\w+),\s*apierr\.Error\("([A-Z_]+)"`)
+	// inlineStatusErrRe matches c.JSON(http.StatusX, apierr.Error("CODE", ...))
+	// and the kind-aware ErrorWithKind form (#1608).
+	inlineStatusErrRe = regexp.MustCompile(`c\.JSON\(http\.(\w+),\s*apierr\.Error(?:WithKind)?\("([A-Z_]+)"`)
 	// inlineStatusHelperRe matches c.JSON(http.StatusX, apierr.Helper()).
 	inlineStatusHelperRe = regexp.MustCompile(`c\.JSON\(http\.(\w+),\s*apierr\.(\w+)\(\)`)
 	// wrapperCallRe matches apierr.JSONXxx(c) wrapper calls.

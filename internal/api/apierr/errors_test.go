@@ -13,6 +13,44 @@ func TestError_Structure(t *testing.T) {
 	assert.Equal(t, "Invalid.", errObj["message"])
 	assert.Equal(t, "INVALID_PARAM", errObj["code"])
 	assert.Equal(t, "abc-123", errObj["id"])
+	// upstream ApiError の default kind は 'client' (#1608)。
+	assert.Equal(t, "client", errObj["kind"])
+}
+
+func TestErrorWithKind_Structure(t *testing.T) {
+	result := ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "abc-123", KindServer)
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "No such abuse report.", errObj["message"])
+	assert.Equal(t, "NO_SUCH_ABUSE_REPORT", errObj["code"])
+	assert.Equal(t, "abc-123", errObj["id"])
+	assert.Equal(t, "server", errObj["kind"])
+}
+
+func TestHelperKinds(t *testing.T) {
+	// upstream が kind を明示するエラーと、default 'client' で送る代表例の
+	// 対応表。kind は WWW-Authenticate の付与判定 (#1608) に使われるため、
+	// helper 単位で固定する。
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+		kind string
+	}{
+		{"InternalError", InternalError(), KindServer},
+		{"FailedToResolveRemoteUser", FailedToResolveRemoteUser(), KindServer},
+		{"RolePermissionDenied", RolePermissionDenied(), KindPermission},
+		{"PermissionDenied", PermissionDenied(), KindPermission},
+		{"InvalidParam", InvalidParam(), KindClient},
+		{"InvalidParamClient", InvalidParamClient("p", "r"), KindClient},
+		{"NoSuchNote", NoSuchNote(), KindClient},
+		{"AccessDenied", AccessDenied(), KindClient},
+		{"RestrictedByRole", RestrictedByRole(), KindClient},
+		{"RateLimitExceeded", RateLimitExceeded(), KindClient},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errObj := tc.body["error"].(map[string]any)
+			assert.Equal(t, tc.kind, errObj["kind"])
+		})
+	}
 }
 
 func TestInvalidParam(t *testing.T) {
@@ -52,6 +90,8 @@ func TestInternalError(t *testing.T) {
 	errObj := result["error"].(map[string]any)
 	assert.Equal(t, "INTERNAL_ERROR", errObj["code"])
 	assert.Equal(t, UUIDInternalError, errObj["id"])
+	// upstream の引数なし new ApiError() は kind 'server'。
+	assert.Equal(t, "server", errObj["kind"])
 }
 
 func TestNoSuchNote(t *testing.T) {

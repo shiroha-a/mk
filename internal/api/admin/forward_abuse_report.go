@@ -29,7 +29,7 @@ func (h *Handler) ForwardAbuseUserReport(c echo.Context) error {
 	if h.abuseRepo != nil {
 		s, err := h.abuseRepo.FindByID(req.ReportID)
 		if err != nil || s == nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "8763e21b-d9bc-40be-acf6-54c1a6986493"))
+			return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "8763e21b-d9bc-40be-acf6-54c1a6986493", apierr.KindServer))
 		}
 		snapshot = s
 	}

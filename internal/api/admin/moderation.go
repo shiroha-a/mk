@@ -89,11 +89,11 @@ func (h *Handler) UpdateAbuseUserReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("reportId is required."))
 	}
 	if h.abuseRepo == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662"))
+		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662", apierr.KindServer))
 	}
 	before, err := h.abuseRepo.FindByID(req.ReportID)
 	if err != nil || before == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662"))
+		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662", apierr.KindServer))
 	}
 	// upstream は moderationNote が undefined のとき列を触らない (TypeORM が
 	// undefined field を skip)。mk-go も moderationNote 未送出時は no-op。
@@ -105,7 +105,7 @@ func (h *Handler) UpdateAbuseUserReport(c echo.Context) error {
 	// 実装では同一ポインタが書き換わって比較が壊れる)。
 	beforeNote := before.ModerationNote
 	if err := h.abuseRepo.UpdateFields(req.ReportID, map[string]any{"moderationNote": note}); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662"))
+		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662", apierr.KindServer))
 	}
 	// 変化があったときのみ updateAbuseReportNote を記録 (upstream と同じ)。
 	if beforeNote != note {

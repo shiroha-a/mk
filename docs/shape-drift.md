@@ -253,8 +253,8 @@ echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrou
 ### 運用
 
 ```bash
-make errorid-check    # id gate + HTTP status gate をローカル実行
-make shapecheck-gen   # shape golden と合わせて error id / status golden も再生成
+make errorid-check    # id gate + HTTP status gate + kind gate をローカル実行
+make shapecheck-gen   # shape golden と合わせて error id / status / kind golden も再生成
 ```
 
 upstream bump時は`make shapecheck-gen`で全goldenを再生成してcommit。新しいerror idを返すendpointを足すときは、verify-before-fixに従い対応するMisskey endpointの`meta.errors`のidを確認してから実装する。
@@ -273,6 +273,19 @@ Misskeyの`ApiCallService`は`httpStatusCode` → 無ければ`kind`既定(`clie
 |---|---|---|---|
 | `drive/files/create` | `MAX_FILE_SIZE_EXCEEDED` | 400 | 413 (`httpStatusCode`) |
 | `users/show` | `FAILED_TO_RESOLVE_REMOTE_USER` | 404 | 500 (`kind:'server'`) |
+
+## Error kind drift gate
+
+`TestErrorKindDrift`は、エラーenvelopeの`kind` discriminator(`client`/`server`/`permission`)をgateする(#1608)。
+
+Misskeyの`ApiCallService.send()`は全エラーenvelopeに`kind`を必ず含め(`ApiError`の既定は`client`)、`#sendApiError`が`kind`からWWW-Authenticateヘッダを導出する(`client`→`error="invalid_request"`、`permission`+`PERMISSION_DENIED`→`error="insufficient_scope"`)。mk-go側は`apierr.Error()`が`kind:"client"`を、明示が要る箇所は`apierr.ErrorWithKind()`が任意のkindを出す。ヘッダ付与は`/api` groupの`WWWAuthenticate` middlewareが横断で行う。
+
+gateは2方向:
+
+- **明示kind**: `tools/erroriddiff`がupstreamのエラー定義から`kind`明示エントリだけを`golden_error_kinds.json`へ抽出(現行7件: `NO_SUCH_ABUSE_REPORT`等が`server`、`i`の`USER_IS_DELETED`が`permission`)。解決できたemissionのkindはこれと一致しなければならない。
+- **暗黙client**: kind goldenに無くても`golden_error_ids.json`にcodeがある(=upstreamがそのendpointで定義する)エラーは、既定の`client`を要求する。mk-go独自code・route未解決はid gateと同じ方針で対象外。
+
+実行・golden再生成はid gateと同じ`make errorid-check` / `make shapecheck-gen`。
 
 ## Pagination limit-spec drift gate
 

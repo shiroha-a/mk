@@ -2794,7 +2794,7 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "reportId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.abuseRepo == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398"))
+		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398", apierr.KindServer))
 	}
 	// upstream enum: ['accept', 'reject', null]。null は「未送出」+ JSON null
 	// 両方を「resolve したが判定保留」として扱う (= column も null)。
@@ -2823,7 +2823,7 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "resolvedAs must be 'accept', 'reject', or null.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if err := h.abuseRepo.UpdateFields(req.ReportID, fields); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398"))
+		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398", apierr.KindServer))
 	}
 	return c.NoContent(http.StatusNoContent)
 }

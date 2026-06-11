@@ -3,19 +3,43 @@
 //
 // All error responses follow the format:
 //
-//	{"error": {"message": ..., "code": ..., "id": ...}}
+//	{"error": {"message": ..., "code": ..., "id": ..., "kind": ...}}
 //
 // Frequently used errors have canonical UUIDs to avoid drift between handlers.
 package apierr
 
+// Error kind discriminators. upstream `ApiError` の kind と同値で、
+// ApiCallService.send() が全エラー envelope に必ず含める (#1608)。
+// `#sendApiError` は kind=client に WWW-Authenticate: invalid_request、
+// kind=permission (code=PERMISSION_DENIED のみ) に insufficient_scope を
+// 付与する。ヘッダ付与側は internal/server/middleware の WWWAuthenticate。
+const (
+	KindClient     = "client"
+	KindServer     = "server"
+	KindPermission = "permission"
+)
+
 // Error returns a Misskey-compatible error response map.
 // The returned map is safe to pass to echo.Context.JSON.
+//
+// The envelope carries kind "client", matching the upstream ApiError
+// constructor default (`err.kind ?? 'client'`). Errors that upstream marks
+// 'server' or 'permission' must use ErrorWithKind instead.
 func Error(code, message, id string) map[string]any {
+	return ErrorWithKind(code, message, id, KindClient)
+}
+
+// ErrorWithKind returns a Misskey-compatible error response map with an
+// explicit kind discriminator. upstream の endpoint meta.errors /
+// ApiCallService が kind を明示するエラー (例: NO_SUCH_ABUSE_REPORT は
+// kind 'server') はこちらを使う。
+func ErrorWithKind(code, message, id, kind string) map[string]any {
 	return map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"code":    code,
 			"id":      id,
+			"kind":    kind,
 		},
 	}
 }
@@ -161,29 +185,23 @@ func InvalidParam(msg ...string) map[string]any {
 }
 
 // InvalidParamClient returns the upstream schema-validation failure envelope
-// for INVALID_PARAM, including the `kind: "client"` discriminator and an
-// `info` object ({param, reason}). Misskey TS の endpoint-base.ts は ajv schema
-// validation 失敗時に ApiError(INVALID_PARAM, info:{param,reason}) を投げ、
-// ApiCallService.send() が `kind` (= ApiError default の "client") と info を
-// 含めて返す (id は 3d81ceae-...)。plain Error helper は kind/info を出さないので、
+// for INVALID_PARAM, including an `info` object ({param, reason}). Misskey TS
+// の endpoint-base.ts は ajv schema validation 失敗時に
+// ApiError(INVALID_PARAM, info:{param,reason}) を投げ、ApiCallService.send()
+// が kind と info を含めて返す (id は 3d81ceae-...)。kind は #1608 以降
+// plain Error helper も出すようになったため、本 helper の差分は info のみ。
 // upstream の schema-validation envelope を厳密に再現したい endpoint はこちらを使う。
 //
 // param は upstream では ajv の schemaPath、reason は ajv の message。mk-go は
 // 手動 validation で ajv を持たないため、呼び出し側が ajv 互換の文字列を
 // best-effort で与える (frontend は info を参照しないため dev 向け説明に留まる)。
 func InvalidParamClient(param, reason string) map[string]any {
-	return map[string]any{
-		"error": map[string]any{
-			"message": "Invalid param.",
-			"code":    "INVALID_PARAM",
-			"id":      UUIDInvalidParam,
-			"kind":    "client",
-			"info": map[string]any{
-				"param":  param,
-				"reason": reason,
-			},
-		},
+	e := Error("INVALID_PARAM", "Invalid param.", UUIDInvalidParam)
+	e["error"].(map[string]any)["info"] = map[string]any{
+		"param":  param,
+		"reason": reason,
 	}
+	return e
 }
 
 // InternalError returns a 500 INTERNAL_ERROR error response. The optional
@@ -192,12 +210,15 @@ func InvalidParamClient(param, reason string) map[string]any {
 //
 // Only msg[0] is used; subsequent values are silently ignored. An empty
 // string ("") falls back to the default text.
+//
+// upstream の引数なし `new ApiError()` は kind 'server' / 500 の
+// INTERNAL_ERROR を組むため、kind は server (#1608)。
 func InternalError(msg ...string) map[string]any {
 	m := "Internal error."
 	if len(msg) > 0 && msg[0] != "" {
 		m = msg[0]
 	}
-	return Error("INTERNAL_ERROR", m, UUIDInternalError)
+	return ErrorWithKind("INTERNAL_ERROR", m, UUIDInternalError, KindServer)
 }
 
 // NotFound returns a 404 NOT_FOUND error response. mk-go 固有の汎用 404
@@ -246,12 +267,12 @@ func AccessDenied() map[string]any {
 
 // RolePermissionDenied returns a 403 ROLE_PERMISSION_DENIED error response.
 // upstream `ApiCallService.ts` の requiredRolePolicy 違反時と同 shape
-// (message: "You are not assigned to a required role.", id: 7f86f06f-...)。
-// policy-gated endpoint (channels/create 等) で共通で使う。
+// (message: "You are not assigned to a required role.", id: 7f86f06f-...,
+// kind: "permission")。policy-gated endpoint (channels/create 等) で共通で使う。
 func RolePermissionDenied() map[string]any {
-	return Error("ROLE_PERMISSION_DENIED",
+	return ErrorWithKind("ROLE_PERMISSION_DENIED",
 		"You are not assigned to a required role.",
-		UUIDRolePermissionDenied)
+		UUIDRolePermissionDenied, KindPermission)
 }
 
 // PermissionDenied returns a 403 PERMISSION_DENIED error response. upstream
@@ -262,18 +283,12 @@ func RolePermissionDenied() map[string]any {
 // ROLE_PERMISSION_DENIED (role policy 違反) とは別物: 本 code は OAuth
 // access-token の scope 不足を表す。
 //
-// upstream は ApiError(kind:'permission') を送るため、plain Error helper では
-// なく InvalidParamClient と同じく kind を含む envelope を直接組む (本家
-// send() の `kind: y.kind` 相当)。
+// upstream は ApiError(kind:'permission') を送る (本家 send() の
+// `kind: y.kind` 相当)。
 func PermissionDenied() map[string]any {
-	return map[string]any{
-		"error": map[string]any{
-			"message": "Your app does not have the necessary permissions to use this endpoint.",
-			"code":    "PERMISSION_DENIED",
-			"id":      UUIDPermissionDenied,
-			"kind":    "permission",
-		},
-	}
+	return ErrorWithKind("PERMISSION_DENIED",
+		"Your app does not have the necessary permissions to use this endpoint.",
+		UUIDPermissionDenied, KindPermission)
 }
 
 // RestrictedByRole returns a 403 RESTRICTED_BY_ROLE error response.
@@ -472,9 +487,9 @@ func ContainsTooManyMentions() map[string]any {
 }
 
 // FailedToResolveRemoteUser returns a FAILED_TO_RESOLVE_REMOTE_USER error body.
-// upstream users/show は kind:'server' (= HTTP 500) で返す (JSON wrapper 側で付与)。
+// upstream users/show は kind:'server' (= HTTP 500、status は JSON wrapper 側で付与)。
 func FailedToResolveRemoteUser() map[string]any {
-	return Error("FAILED_TO_RESOLVE_REMOTE_USER", "Failed to resolve remote user.", UUIDFailedToResolveRemoteUser)
+	return ErrorWithKind("FAILED_TO_RESOLVE_REMOTE_USER", "Failed to resolve remote user.", UUIDFailedToResolveRemoteUser, KindServer)
 }
 
 // RateLimitExceeded returns a 429 RATE_LIMIT_EXCEEDED error response.
