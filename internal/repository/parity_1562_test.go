@@ -2,6 +2,7 @@ package repository
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -100,4 +101,34 @@ func TestClipFavoriteRepository_CountByClip(t *testing.T) {
 	n, err = repo.CountByClip(c.ID)
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, n)
+}
+
+// TestClipFavoriteRepository_ClipIDIndex verifies the #1632 clipId index
+// (migration 000062) exists and is usable for the CountByClip query.
+// testutil.ApplyMigrations は migration のエラーを swallow するため、index が
+// 落ちても CI は沈黙し clip_favorite 肥大に比例して静かに性能退行する。
+// 000059-000061 の TestDriveFileRepository_URLIndexes と同じ regression guard。
+func TestClipFavoriteRepository_ClipIDIndex(t *testing.T) {
+	// 1. index が存在すること (CONCURRENTLY migration が適用されたことの確認)
+	var indexdef string
+	err := testDB.Raw(
+		`SELECT indexdef FROM pg_indexes WHERE tablename = 'clip_favorite' AND indexname = ?`,
+		"IDX_clip_favorite_clipId",
+	).Scan(&indexdef).Error
+	require.NoError(t, err)
+	require.NotEmpty(t, indexdef, "IDX_clip_favorite_clipId must exist (migration 000062 applied)")
+
+	// 2. planner が CountByClip の equality に index を選べること。小さな test
+	//    テーブルでは planner が seq scan を選ぶため enable_seqscan=off で
+	//    index 経路を強制し、plan に index 名が現れることを確認する。
+	tx := testDB.Begin()
+	defer tx.Rollback()
+	require.NoError(t, tx.Exec(`SET LOCAL enable_seqscan = off`).Error)
+	var lines []string
+	require.NoError(t, tx.Raw(
+		`EXPLAIN SELECT count(*) FROM "clip_favorite" WHERE "clipId" = ?`, "clp_idx_probe",
+	).Scan(&lines).Error)
+	plan := strings.Join(lines, "\n")
+	assert.Contains(t, plan, "IDX_clip_favorite_clipId",
+		"CountByClip query should use IDX_clip_favorite_clipId under enable_seqscan=off; plan was:\n%s", plan)
 }

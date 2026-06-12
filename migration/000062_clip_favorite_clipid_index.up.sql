@@ -1,0 +1,18 @@
+-- #1632 (#1562 follow-up): clip 応答の favoritedCount 実カウント化 (PR #1629)
+-- で追加した ClipFavoriteRepository.CountByClip は
+--   SELECT count(*) FROM "clip_favorite" WHERE "clipId" = ?
+-- で引くが、clip_favorite の index は PK / UNIQUE("userId","clipId") /
+-- IDX("userId") のみで clipId 先頭のものが無く seq scan になる (UNIQUE は
+-- userId が第 1 カラムのため clipId 単独検索に使えない)。clips/list・
+-- users/clips (匿名到達可) は 1 リクエストで最大 100 クリップ ×
+-- (CountByClip + Exists) を実行するため、行数に比例して負荷が累積する。
+--
+-- 本家 Misskey TS の MiClipFavorite (ClipFavorite.ts) にも clipId index は
+-- 存在しない (本家の ClipEntityService.pack の countBy も seq scan)。mk-go
+-- では 000059-000061 (drive_file url index) と同じく実 query 経路の保護を
+-- 優先して独自に追加する。
+--
+-- CONCURRENTLY は transaction 外・単一文でのみ実行できるため、この migration
+-- は 1 文のみで構成する。失敗時の回復手順 (INVALID index の DROP + migrate
+-- dirty 解除) は 000054 のコメントを参照 (対象 index 名は読み替える)。
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_clip_favorite_clipId" ON "clip_favorite" ("clipId");
