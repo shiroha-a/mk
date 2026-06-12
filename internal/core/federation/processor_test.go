@@ -56,10 +56,14 @@ func TestProcess_FollowHappyPath(t *testing.T) {
 	assert.Len(t, followingRepo.Followings, 1)
 }
 
-// stubInboundFollowAcceptor records SendAcceptForInboundFollow calls for
-// assertion.
+// stubInboundFollowAcceptor records SendAcceptForInboundFollow /
+// SendRejectForInboundFollow calls for assertion.
 type stubInboundFollowAcceptor struct {
 	calls []struct {
+		followerID, followeeID string
+		followRaw              string
+	}
+	rejects []struct {
 		followerID, followeeID string
 		followRaw              string
 	}
@@ -67,6 +71,14 @@ type stubInboundFollowAcceptor struct {
 
 func (s *stubInboundFollowAcceptor) SendAcceptForInboundFollow(follower, followee *model.User, raw json.RawMessage) error {
 	s.calls = append(s.calls, struct {
+		followerID, followeeID string
+		followRaw              string
+	}{follower.ID, followee.ID, string(raw)})
+	return nil
+}
+
+func (s *stubInboundFollowAcceptor) SendRejectForInboundFollow(follower, followee *model.User, raw json.RawMessage) error {
+	s.rejects = append(s.rejects, struct {
 		followerID, followeeID string
 		followRaw              string
 	}{follower.ID, followee.ID, string(raw)})

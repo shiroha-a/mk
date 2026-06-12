@@ -121,6 +121,32 @@ func (h *FollowingDeliveryHook) SendAcceptForInboundFollow(follower, followee *m
 	return h.deliver.DeliverToUser(followee.ID, follower, body)
 }
 
+// SendRejectForInboundFollow implements InboundFollowAcceptor. local followee
+// が remote follower を block している状態で inbound Follow を受けた場合に、
+// original Follow の raw JSON を Reject に包んで follower の inbox に送る
+// (#1631、upstream UserFollowingService.follow の「ブロックしていた場合は
+// エラーにするのではなく Reject を送り返しておしまい」相当)。これが無いと
+// 相手サーバーの pending follow が永遠に解消されず再送が続く。
+func (h *FollowingDeliveryHook) SendRejectForInboundFollow(follower, followee *model.User, originalFollow json.RawMessage) error {
+	if follower == nil || followee == nil {
+		return nil
+	}
+	if follower.IsLocal() || !followee.IsLocal() {
+		return nil
+	}
+	if follower.URI == nil || *follower.URI == "" {
+		return nil
+	}
+	// SendAcceptForInboundFollow と同じく raw をそのまま object に包む。
+	// 相手サーバーが自分の送った Follow の id と matching できる。
+	reject := h.renderer.RenderReject(followee.ID, originalFollow)
+	body, err := json.Marshal(reject)
+	if err != nil {
+		return err
+	}
+	return h.deliver.DeliverToUser(followee.ID, follower, body)
+}
+
 // OnLocalFollowAccepted sends an Accept activity to a remote follower.
 // 引数: follower がリモート、followee がローカル (Accept の actor)。
 func (h *FollowingDeliveryHook) OnLocalFollowAccepted(follower, followee *model.User) {

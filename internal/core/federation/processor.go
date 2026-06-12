@@ -134,11 +134,15 @@ type Processor struct {
 	inboundFollowAcceptor InboundFollowAcceptor
 }
 
-// InboundFollowAcceptor delivers an Accept activity in response to an inbound
-// Follow. The raw Follow (as received on our inbox) is wrapped as the inner
-// object so the remote server can match the Accept to the original Follow id.
+// InboundFollowAcceptor delivers an Accept or Reject activity in response to
+// an inbound Follow. The raw Follow (as received on our inbox) is wrapped as
+// the inner object so the remote server can match the response to the
+// original Follow id.
 type InboundFollowAcceptor interface {
 	SendAcceptForInboundFollow(follower, followee *model.User, originalFollow json.RawMessage) error
+	// SendRejectForInboundFollow is used when the local followee has blocked
+	// the remote follower (#1631、upstream は error でなく Reject を返す)。
+	SendRejectForInboundFollow(follower, followee *model.User, originalFollow json.RawMessage) error
 }
 
 // SetInboundFollowAcceptor wires the sender that delivers Accept activities
@@ -558,6 +562,40 @@ func (p *Processor) handleFollow(act genericActivity) error {
 	// FollowOptions{} (default false) で作成する (#1056)。remote follower の
 	// per-followee withReplies preference は AP protocol 範囲外。
 	result, err := p.followingService.Follow(follower.ID, followee.ID, corefollowing.FollowOptions{})
+	// block 起因の失敗は upstream UserFollowingService.follow と同じ AP 流儀で
+	// 処理する (#1631)。エラーのまま返すと inbox が retry → dead-letter になり
+	// 相手サーバーの pending follow が永遠に解消されない。
+	if errors.Is(err, corefollowing.ErrBlocking) && !follower.IsLocal() && followee.IsLocal() && p.blockingService != nil {
+		// ErrBlocking = remote follower が local followee を block している。
+		// upstream は相互 block なら blocked (Reject) を優先し、blocking 単独
+		// なら自動で block 解除して follow を続行する。
+		blocked, berr := p.blockingService.IsBlocked(followee.ID, follower.ID)
+		if berr != nil {
+			return berr
+		}
+		if blocked {
+			err = corefollowing.ErrBlocked
+		} else {
+			if uerr := p.blockingService.Unblock(follower.ID, followee.ID); uerr != nil {
+				return fmt.Errorf("inbound follow: auto-unblock %s->%s: %w", follower.ID, followee.ID, uerr)
+			}
+			slog.Info("inbound follow: auto-unblocked stale remote block",
+				"follower", follower.ID, "followee", followee.ID)
+			result, err = p.followingService.Follow(follower.ID, followee.ID, corefollowing.FollowOptions{})
+		}
+	}
+	if errors.Is(err, corefollowing.ErrBlocked) && !follower.IsLocal() && followee.IsLocal() {
+		// local followee が remote follower を block している場合は Reject を
+		// 送り返して正常終了する (upstream「エラーにするのではなく Reject を
+		// 送り返しておしまい」)。配送失敗は Accept 側と同じく warn のみ。
+		if p.inboundFollowAcceptor != nil {
+			if rerr := p.inboundFollowAcceptor.SendRejectForInboundFollow(follower, followee, act.raw); rerr != nil {
+				slog.Warn("inbound follow reject delivery failed",
+					"follower", follower.ID, "followee", followee.ID, "err", rerr)
+			}
+		}
+		return nil
+	}
 	alreadyFollowing := errors.Is(err, corefollowing.ErrAlreadyFollowing)
 	// ErrAlreadyRequested はlocked followeeへの再送。既に FollowRequest が
 	// 存在するので何もしなくて良い (Accept は承認時に送られる)。エラーとして

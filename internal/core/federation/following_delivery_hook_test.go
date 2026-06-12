@@ -207,3 +207,52 @@ func TestFollowingHook_DeliverErrors_DoNotPanic(t *testing.T) {
 	hook.OnLocalUnfollowed(follower, followee)
 	hook.OnLocalFollowAccepted(followee, follower) // ← follower=remote, followee=local だが key不在
 }
+
+// --- SendRejectForInboundFollow (#1631) ---
+
+func TestFollowingHook_SendRejectForInboundFollow_Remote(t *testing.T) {
+	hook, enq, userRepo, keypairRepo := newFollowingHook(t)
+	followee := makeLocal("bob")
+	userRepo.Users["bob"] = followee
+	keypairRepo.Keypairs["bob"] = &model.UserKeypair{UserID: "bob", PrivateKey: "PEM"}
+	follower := makeRemote("alice", "remote.example", "https://remote.example/users/alice", "https://remote.example/users/alice/inbox")
+
+	raw := json.RawMessage(`{"type":"Follow","id":"https://remote.example/follows/xyz","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+	require.NoError(t, hook.SendRejectForInboundFollow(follower, followee, raw))
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, "https://remote.example/users/alice/inbox", enq.calls[0].Inbox)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(enq.calls[0].Body, &got))
+	assert.Equal(t, "Reject", got["type"])
+	// Misskey/CherryPick の InboxProcessor は id 無し activity を silent drop
+	// するため、Reject 自体の id が必ず入っていること。
+	rejID, _ := got["id"].(string)
+	assert.NotEmpty(t, rejID, "Reject must carry an id")
+	// original Follow が object としてネストされ、id が保持されること。
+	obj, _ := got["object"].(map[string]any)
+	require.NotNil(t, obj, "original Follow must be nested as object")
+	assert.Equal(t, "https://remote.example/follows/xyz", obj["id"])
+	// actor は rejecting user (local followee)。
+	assert.Equal(t, "https://example.com/users/bob", got["actor"])
+}
+
+func TestFollowingHook_SendRejectForInboundFollow_Guards(t *testing.T) {
+	hook, enq, _, _ := newFollowingHook(t)
+	raw := json.RawMessage(`{"type":"Follow"}`)
+
+	// nil 引数は no-op
+	require.NoError(t, hook.SendRejectForInboundFollow(nil, makeLocal("bob"), raw))
+	require.NoError(t, hook.SendRejectForInboundFollow(makeRemote("a", "h", "u", "i"), nil, raw))
+	// local follower / remote followee 方向は AP 配信不要
+	require.NoError(t, hook.SendRejectForInboundFollow(makeLocal("alice"), makeLocal("bob"), raw))
+	require.NoError(t, hook.SendRejectForInboundFollow(
+		makeRemote("a", "remote.example", "https://remote.example/u/a", "https://remote.example/i"),
+		makeRemote("b", "remote.example", "https://remote.example/u/b", "https://remote.example/i"), raw))
+	// URI 無し remote follower は no-op
+	noURI := &model.User{ID: "c", Username: "c", Host: strPtrFed("remote.example")}
+	require.NoError(t, hook.SendRejectForInboundFollow(noURI, makeLocal("bob"), raw))
+	assert.Empty(t, enq.calls)
+}
+
+func strPtrFed(s string) *string { return &s }
