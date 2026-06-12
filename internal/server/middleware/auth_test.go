@@ -900,3 +900,71 @@ func TestAuthenticate_NativeTokenIsNotApp(t *testing.T) {
 	})
 	require.NoError(t, handler(c))
 }
+
+// --- RequireNotMoved (#1562 prohibitMoved) ---
+
+func newMovedCtx(user *model.User) (echo.Context, *httptest.ResponseRecorder) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+	if user != nil {
+		c.Set(string(UserContextKey), user)
+	}
+	return c, rec
+}
+
+func TestRequireNotMoved_NormalUserPasses(t *testing.T) {
+	c, rec := newMovedCtx(&model.User{ID: "u1"})
+	called := false
+	h := RequireNotMoved()(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireNotMoved_MovedUserRejected(t *testing.T) {
+	moved := "https://other.example/users/xyz"
+	c, rec := newMovedCtx(&model.User{ID: "u1", MovedToURI: &moved})
+	called := false
+	h := RequireNotMoved()(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.False(t, called, "moved account must not reach the handler")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "YOUR_ACCOUNT_MOVED")
+	assert.Contains(t, rec.Body.String(), "56f20ec9-fd06-4fa5-841b-edd6d7d4fa31")
+	assert.Contains(t, rec.Body.String(), `"kind":"permission"`)
+}
+
+func TestRequireNotMoved_EmptyMovedURIPasses(t *testing.T) {
+	// movedToUri が空文字の行 (NULL でなく '' で入った過去データ) は moved
+	// 扱いしない。
+	empty := ""
+	c, rec := newMovedCtx(&model.User{ID: "u1", MovedToURI: &empty})
+	called := false
+	h := RequireNotMoved()(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireNotMoved_AnonymousPasses(t *testing.T) {
+	// user 未設定 (anonymous) は素通しし、認可は RequireAuth に任せる。
+	c, rec := newMovedCtx(nil)
+	called := false
+	h := RequireNotMoved()(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.NoError(t, h(c))
+	assert.True(t, called)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}

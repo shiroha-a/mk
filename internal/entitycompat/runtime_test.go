@@ -344,7 +344,7 @@ func TestClipShapeL2(t *testing.T) {
 	owner := &model.User{ID: "u_owner", Username: "owner"}
 	desc := "my clip"
 	cl := &model.Clip{ID: idGen.Generate(time.Now()), UserID: "u_owner", Name: "clip", Description: &desc, IsPublic: true}
-	out := entity.PackClip(cl, idGen, owner)
+	out := entity.PackClip(cl, idGen, owner, entity.ClipExtras{})
 	assertNoGatedDrift(t, "Clip", out, schema)
 }
 

@@ -16,6 +16,9 @@ type ClipFavoriteRepository interface {
 	Delete(userID, clipID string) error
 	ListByUser(userID string) ([]*model.ClipFavorite, error)
 	Exists(userID, clipID string) (bool, error)
+	// CountByClip returns the favorite count used by the clip response's
+	// favoritedCount field (#1562).
+	CountByClip(clipID string) (int64, error)
 }
 
 // SetFavoriteRepo attaches a ClipFavoriteRepository for favorite endpoints.
@@ -35,13 +38,19 @@ func (h *Handler) Favorite(c echo.Context) error {
 	if h.favoriteRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// クリップの存在確認
+	// クリップの存在確認 (private clip の他人は Show が ErrClipNotFound を
+	// 返すので upstream favorite.ts と同じく NO_SUCH_CLIP に落ちる)
 	if _, err := h.svc.Show(user.ID, req.ClipID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "4c2aaeae-80d8-4250-9606-26cb1fdb77a5"))
 	}
-	already, _ := h.favoriteRepo.Exists(user.ID, req.ClipID)
+	already, err := h.favoriteRepo.Exists(user.ID, req.ClipID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	if already {
-		return c.NoContent(http.StatusNoContent)
+		// upstream favorite.ts は重複 favorite を silent 成功させず
+		// ALREADY_FAVORITED を返す (#1562)。
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FAVORITED", "The clip has already been favorited.", "92658936-c625-4273-8326-2d790129256e"))
 	}
 	fav := &model.ClipFavorite{
 		ID:     h.idGen.Generate(time.Now()),
@@ -66,6 +75,23 @@ func (h *Handler) Unfavorite(c echo.Context) error {
 	if h.favoriteRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// upstream unfavorite.ts は clip の生存在 (visibility 検査なし) と
+	// favorite row の存在を順に検査する (#1562)。visibility を見ないのは、
+	// favorite 後に非公開化された clip でも解除できる必要があるため。
+	exists, err := h.svc.Exists(req.ClipID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if !exists {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "2603966e-b865-426c-94a7-af4a01241dc1"))
+	}
+	favorited, err := h.favoriteRepo.Exists(user.ID, req.ClipID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if !favorited {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FAVORITED", "You have not favorited the clip.", "90c3a9e8-b321-4dae-bf57-2bf79bbcc187"))
+	}
 	if err := h.favoriteRepo.Delete(user.ID, req.ClipID); err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -88,7 +114,7 @@ func (h *Handler) MyFavorites(c echo.Context) error {
 		if err != nil {
 			continue
 		}
-		out = append(out, h.clipToMap(cl))
+		out = append(out, h.clipToMap(cl, user))
 	}
 	return c.JSON(http.StatusOK, out)
 }

@@ -51,6 +51,7 @@ type Handler struct {
 	userListFavoriteRepo UserListFavoriteRepository
 	userListRepo         repository.UserListRepository
 	clipRepo             repository.ClipRepository
+	clipFavoriteRepo     repository.ClipFavoriteRepository
 	flashRepo            repository.FlashRepository
 	galleryRepo          repository.GalleryRepository
 	pageRepo             repository.PageRepository
@@ -153,6 +154,10 @@ func (h *Handler) SetPiningRepo(r repository.UserNotePiningRepository) {
 
 // SetClipRepo attaches a ClipRepository for users/clips.
 func (h *Handler) SetClipRepo(r repository.ClipRepository) { h.clipRepo = r }
+
+// SetClipFavoriteRepo attaches a ClipFavoriteRepository so users/clips can
+// resolve favoritedCount / isFavorited (#1562).
+func (h *Handler) SetClipFavoriteRepo(r repository.ClipFavoriteRepository) { h.clipFavoriteRepo = r }
 
 // SetFlashRepo attaches a FlashRepository for users/flashs.
 func (h *Handler) SetFlashRepo(r repository.FlashRepository) { h.flashRepo = r }

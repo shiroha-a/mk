@@ -27,8 +27,11 @@ var (
 	ErrRequestNotFound = errors.New("follow request not found")
 	// ErrAlreadyRequested is returned when a follow request already exists.
 	ErrAlreadyRequested = errors.New("already requested")
-	// ErrBlocked is returned when either party blocks the other.
+	// ErrBlocked is returned when the followee has blocked the follower.
 	ErrBlocked = errors.New("blocking relationship prevents this operation")
+	// ErrBlocking is returned when the follower is blocking the followee.
+	// upstream following/create は方向で BLOCKING / BLOCKED を区別する (#1562)。
+	ErrBlocking = errors.New("you are blocking that user")
 )
 
 // BlockingChecker reports whether one user has blocked another. パッケージ間の
@@ -235,14 +238,18 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 		return nil, ErrAlreadyFollowing
 	}
 
-	// ブロック関係があるとフォロー不可 (双方向で確認)
+	// ブロック関係があるとフォロー不可 (双方向で確認)。upstream
+	// UserFollowingService.follow は blocking (follower→followee) を先に
+	// 検査して 'blocking'、次に blocked (followee→follower) を 'blocked' と
+	// 方向別に投げ、create.ts が BLOCKING / BLOCKED に map する (#1562)。
+	// 相互ブロック時に BLOCKING が優先される順序も upstream に合わせる。
 	if s.blockingChecker != nil {
-		if blocked, err := s.blockingChecker.IsBlocked(followeeID, followerID); err != nil {
+		if blocking, err := s.blockingChecker.IsBlocked(followerID, followeeID); err != nil {
 			return nil, err
-		} else if blocked {
-			return nil, ErrBlocked
+		} else if blocking {
+			return nil, ErrBlocking
 		}
-		if blocked, err := s.blockingChecker.IsBlocked(followerID, followeeID); err != nil {
+		if blocked, err := s.blockingChecker.IsBlocked(followeeID, followerID); err != nil {
 			return nil, err
 		} else if blocked {
 			return nil, ErrBlocked
@@ -582,6 +589,13 @@ func (s *Service) ListFollowingForList(followerID, sinceID, untilID string, noti
 // Returns nil if the relation does not exist (no-op).
 func (s *Service) UpdateRelation(followerID, followeeID string, fields map[string]any) error {
 	return s.followingRepo.UpdateRelation(followerID, followeeID, fields)
+}
+
+// IsFollowing reports whether follower currently follows followee. Used by
+// following/update to emit NOT_FOLLOWING before applying a no-op update
+// (#1562、upstream update.ts は Following row 不在で notFollowing を返す)。
+func (s *Service) IsFollowing(followerID, followeeID string) (bool, error) {
+	return s.followingRepo.Exists(followerID, followeeID)
 }
 
 // UpdateAllByFollower applies partial updates to every Following row whose

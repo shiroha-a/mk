@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -23,13 +24,23 @@ func (h *Handler) Invalidate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream invalidate.ts は self check → getUser → Following row 検査の
+	// 順で FOLLOWER_IS_YOURSELF / NO_SUCH_USER / NOT_FOLLOWING を返し、成功時
+	// は packed follower (= 外された相手) を返す (#1562)。
+	if req.UserID == me.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOWER_IS_YOURSELF", "Follower is yourself.", "07dc03b9-03da-422d-885b-438313707662"))
+	}
+	bundle, err := h.userService.ShowByID(req.UserID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "b77e6ae6-a3e5-40da-9cc8-c240115479cc"))
+	}
 	if err := h.followingService.Unfollow(req.UserID, me.ID); err != nil {
 		if errors.Is(err, corefollowing.ErrNotFollowing) {
-			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FOLLOWING", "You are not followed by that user.", "918faac3-074f-41ae-9c43-ed5d2946770d"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FOLLOWING", "The other use is not following you.", "918faac3-074f-41ae-9c43-ed5d2946770d"))
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
 }
 
 // UpdateFollow handles POST /api/following/update.
@@ -51,6 +62,20 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream update.ts は self check → getUser → Following row 検査の順で
+	// FOLLOWEE_IS_YOURSELF / NO_SUCH_USER / NOT_FOLLOWING を返し、成功時は
+	// packed follower (= 自分) を返す (#1562)。
+	if req.UserID == me.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOWEE_IS_YOURSELF", "Followee is yourself.", "4c4cbaf9-962a-463b-8418-a5e365dbf2eb"))
+	}
+	if _, err := h.userService.ShowByID(req.UserID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "14318698-f67e-492a-99da-5353a5ac52be"))
+	}
+	if following, err := h.followingService.IsFollowing(me.ID, req.UserID); err != nil {
+		return apierr.JSONInternalError(c)
+	} else if !following {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FOLLOWING", "You are not following that user.", "b8dc75cf-1cb5-46c9-b14b-5f1ffbd782c9"))
+	}
 	fields := map[string]any{}
 	if req.Notify != nil {
 		fields["notify"] = normalizeNotify(*req.Notify)
@@ -61,7 +86,11 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 	if err := h.followingService.UpdateRelation(me.ID, req.UserID, fields); err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.NoContent(http.StatusNoContent)
+	meBundle, err := h.userService.ShowByID(me.ID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(meBundle.User, meBundle.Profile, h.idGen))
 }
 
 // normalizeNotify converts the upstream `notify` enum ("normal" / "none") to

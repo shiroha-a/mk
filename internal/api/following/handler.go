@@ -70,6 +70,10 @@ func (h *Handler) Create(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOWEE_IS_YOURSELF", "Followee is yourself.", "26fbe7bb-a331-4857-af17-205b426669a9"))
 		case errors.Is(err, corefollowing.ErrAlreadyFollowing), errors.Is(err, corefollowing.ErrAlreadyRequested):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FOLLOWING", "You are already following that user.", "35387507-38c7-4cb9-9197-300b93783fa0"))
+		case errors.Is(err, corefollowing.ErrBlocking):
+			// follower が followee を block している方向は BLOCKED ではなく
+			// BLOCKING (upstream create.ts の blocking エラー、#1562)。
+			return c.JSON(http.StatusBadRequest, apierr.Error("BLOCKING", "You are blocking that user.", "4e2206ec-aa4f-4960-b865-6c23ac38e2d9"))
 		case errors.Is(err, corefollowing.ErrBlocked):
 			// upstream Misskey TS の following/create は BLOCKED を 400 で
 			// 返す (kind: 'client')。旧 mk-go は 403 で返していたが drop-in
@@ -158,6 +162,10 @@ func (h *Handler) RejectRequest(c echo.Context) error {
 }
 
 // CancelRequest handles POST /api/following/requests/cancel.
+//
+// upstream requests/cancel.ts は followee を getUser で先に解決して
+// NO_SUCH_USER を返し、request 不在は FOLLOW_REQUEST_NOT_FOUND (service 内部
+// error とは別の公開 id) に変換し、成功時は packed followee を返す (#1562)。
 func (h *Handler) CancelRequest(c echo.Context) error {
 	me := middleware.GetUser(c)
 
@@ -166,13 +174,18 @@ func (h *Handler) CancelRequest(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	bundle, err := h.userService.ShowByID(req.UserID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab"))
+	}
+
 	if err := h.followingService.CancelRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_FOLLOW_REQUEST", "No such follow request.", "17447091-ea95-43eb-a7d4-c78cb2853c20"))
+			return c.JSON(http.StatusNotFound, apierr.Error("FOLLOW_REQUEST_NOT_FOUND", "Follow request not found.", "089b125b-d338-482a-9a09-e2622ac9f8d4"))
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.NoContent(http.StatusNoContent)
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
 }
 
 // ListRequestsResponseItem represents a single received follow request.

@@ -3465,22 +3465,54 @@ func (m *MockClipNoteRepository) CountByClip(clipID string) (int64, error) {
 }
 
 func (m *MockClipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
-	return m.listByClip(clipID, "", false, untilID, sinceID, limit)
+	return m.listByClip(clipID, "", false, untilID, sinceID, limit, nil)
+}
+
+// noteMatchesSearchWords mirrors the real repo's clips/notes search predicate:
+// every word must hit note.text OR note.cw (substring, case-insensitive)。
+// 空 slice / note 不在 (search 無条件) は true。
+func noteMatchesSearchWords(n *model.Note, searchWords []string) bool {
+	if len(searchWords) == 0 {
+		return true
+	}
+	if n == nil {
+		return false
+	}
+	text := ""
+	if n.Text != nil {
+		text = strings.ToLower(*n.Text)
+	}
+	cw := ""
+	if n.CW != nil {
+		cw = strings.ToLower(*n.CW)
+	}
+	for _, w := range searchWords {
+		w = strings.ToLower(w)
+		if !strings.Contains(text, w) && !strings.Contains(cw, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // ListByClipVisible mirrors the real repo's visibility push-down: clip entries
 // whose note the viewer cannot see are dropped before the limit slice.
-func (m *MockClipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
-	return m.listByClip(clipID, viewerID, true, untilID, sinceID, limit)
+// searchWords は実 repo と同じく text / cw への部分一致 (語内 OR、語間 AND)
+// を case-insensitive で再現する (#1562)。
+func (m *MockClipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error) {
+	return m.listByClip(clipID, viewerID, true, untilID, sinceID, limit, searchWords)
 }
 
-func (m *MockClipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+func (m *MockClipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error) {
 	var rows []*model.ClipNote
 	for _, cn := range m.Entries {
 		if cn.ClipID != clipID {
 			continue
 		}
 		if filterVisibility && !noteVisibleToViewer(viewerID, m.Notes[cn.NoteID], m.Following) {
+			continue
+		}
+		if !noteMatchesSearchWords(m.Notes[cn.NoteID], searchWords) {
 			continue
 		}
 		if untilID != "" && cn.ID >= untilID {
@@ -6629,6 +6661,16 @@ func (m *MockClipFavoriteRepository) ListByUser(userID string) ([]*model.ClipFav
 func (m *MockClipFavoriteRepository) Exists(userID, clipID string) (bool, error) {
 	_, ok := m.Favorites[userID+":"+clipID]
 	return ok, nil
+}
+
+func (m *MockClipFavoriteRepository) CountByClip(clipID string) (int64, error) {
+	var count int64
+	for _, f := range m.Favorites {
+		if f.ClipID == clipID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // MockUserListFavoriteRepository is a test double for repository.UserListFavoriteRepository.

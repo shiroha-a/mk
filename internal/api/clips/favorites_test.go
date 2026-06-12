@@ -63,8 +63,11 @@ func TestClipFavorite_AlreadyFavorited(t *testing.T) {
 	h, clipRepo, favRepo := newStubHandler(t)
 	clipRepo.Clips["cl1"] = &model.Clip{ID: "cl1", UserID: "u1", Name: "test", IsPublic: true}
 	favRepo.Favorites["u1:cl1"] = &model.ClipFavorite{ID: "f1", UserID: "u1", ClipID: "cl1"}
+	// upstream favorite.ts は重複 favorite を ALREADY_FAVORITED 400 で拒否する (#1562)
 	rec := postStubWithBody(t, h.Favorite, `{"clipId":"cl1"}`, "u1")
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ALREADY_FAVORITED")
+	assert.Contains(t, rec.Body.String(), "92658936-c625-4273-8326-2d790129256e")
 }
 
 func TestClipFavorite_NilRepo(t *testing.T) {
@@ -75,12 +78,42 @@ func TestClipFavorite_NilRepo(t *testing.T) {
 }
 
 func TestClipUnfavorite_Success(t *testing.T) {
-	h, _, favRepo := newStubHandler(t)
+	h, clipRepo, favRepo := newStubHandler(t)
+	clipRepo.Clips["cl1"] = &model.Clip{ID: "cl1", UserID: "u1", Name: "test", IsPublic: true}
 	favRepo.Favorites["u1:cl1"] = &model.ClipFavorite{ID: "f1", UserID: "u1", ClipID: "cl1"}
 	rec := postStubWithBody(t, h.Unfavorite, `{"clipId":"cl1"}`, "u1")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	exists, _ := favRepo.Exists("u1", "cl1")
 	assert.False(t, exists)
+}
+
+// upstream unfavorite.ts は clip 不在を NO_SUCH_CLIP、未 favorite を
+// NOT_FAVORITED で拒否する (#1562)。
+func TestClipUnfavorite_NoSuchClip(t *testing.T) {
+	h, _, _ := newStubHandler(t)
+	rec := postStubWithBody(t, h.Unfavorite, `{"clipId":"ghost"}`, "u1")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
+	assert.Contains(t, rec.Body.String(), "2603966e-b865-426c-94a7-af4a01241dc1")
+}
+
+func TestClipUnfavorite_NotFavorited(t *testing.T) {
+	h, clipRepo, _ := newStubHandler(t)
+	clipRepo.Clips["cl1"] = &model.Clip{ID: "cl1", UserID: "u1", Name: "test", IsPublic: true}
+	rec := postStubWithBody(t, h.Unfavorite, `{"clipId":"cl1"}`, "u1")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_FAVORITED")
+	assert.Contains(t, rec.Body.String(), "90c3a9e8-b321-4dae-bf57-2bf79bbcc187")
+}
+
+// favorite 済の非公開化 clip も unfavorite できる (upstream は visibility を
+// 見ない、#1562)。
+func TestClipUnfavorite_PrivateClipStillRemovable(t *testing.T) {
+	h, clipRepo, favRepo := newStubHandler(t)
+	clipRepo.Clips["cl1"] = &model.Clip{ID: "cl1", UserID: "owner", Name: "test", IsPublic: false}
+	favRepo.Favorites["u1:cl1"] = &model.ClipFavorite{ID: "f1", UserID: "u1", ClipID: "cl1"}
+	rec := postStubWithBody(t, h.Unfavorite, `{"clipId":"cl1"}`, "u1")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestClipUnfavorite_MissingClipID(t *testing.T) {

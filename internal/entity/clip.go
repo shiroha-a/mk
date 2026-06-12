@@ -5,6 +5,21 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
+// ClipExtras carries the viewer-dependent fields of the clip shape (#1562).
+// upstream ClipEntityService.pack は favoritedCount を実カウント、isFavorited
+// を me 有時のみ、notesCount を owner 閲覧時のみ出力する
+// (ClipEntityService.ts:54-56)。
+type ClipExtras struct {
+	// FavoritedCount is the number of clip_favorite rows for this clip.
+	FavoritedCount int64
+	// IsFavorited reports whether the viewer favorited this clip. nil なら
+	// フィールド自体を省略する (匿名 viewer、upstream は undefined)。
+	IsFavorited *bool
+	// ShowNotesCount controls whether notesCount is emitted. upstream は
+	// viewer == owner のときのみ出力する。
+	ShowNotesCount bool
+}
+
 // PackClip converts a model.Clip into the Misskey-compatible clip shape.
 //
 // misskey_dart の Clip.fromJson は createdAt (String) / userId (String) /
@@ -13,10 +28,7 @@ import (
 // を埋めるために caller が渡す (nil なら user は省略するが、misskey_dart 互換の
 // ため呼び出し側は必ず owner を解決して渡すこと)。createdAt は clip ID (aidx)
 // から復元する。
-//
-// favoritedCount は mk-go が clip favorite を追跡しないため 0 固定 (upstream は
-// clip_favorite の count)。
-func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User) map[string]any {
+func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User, extras ClipExtras) map[string]any {
 	if cl == nil {
 		return nil
 	}
@@ -33,9 +45,16 @@ func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User) map[string]
 		"name":           cl.Name,
 		"description":    cl.Description,
 		"isPublic":       cl.IsPublic,
-		"notesCount":     cl.NotesCount,
 		"lastClippedAt":  lastClippedAt,
-		"favoritedCount": 0,
+		"favoritedCount": extras.FavoritedCount,
+	}
+	// notesCount は owner 閲覧時のみ (upstream は他人には undefined を返し
+	// note 件数を露出しない、#1562)。
+	if extras.ShowNotesCount {
+		out["notesCount"] = cl.NotesCount
+	}
+	if extras.IsFavorited != nil {
+		out["isFavorited"] = *extras.IsFavorited
 	}
 	if idGen != nil {
 		if t, err := idGen.ParseTime(cl.ID); err == nil {

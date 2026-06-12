@@ -969,14 +969,30 @@ func TestFollow_BlockedByFollowee(t *testing.T) {
 	require.ErrorIs(t, err, following.ErrBlocked)
 }
 
-func TestFollow_BlockedFollowee(t *testing.T) {
+// follower (bob) が followee (alice) を block している方向は ErrBlocking
+// (upstream の 'blocking' に対応、#1562)。
+func TestFollow_BlockingFollowee(t *testing.T) {
 	svc, ur, _, _ := newSvc(t)
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{"bob->alice": true}})
 
 	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
-	require.ErrorIs(t, err, following.ErrBlocked)
+	require.ErrorIs(t, err, following.ErrBlocking)
+}
+
+// 相互 block 時は upstream と同じく blocking 判定が先勝ちする (#1562)。
+func TestFollow_MutualBlockPrefersBlocking(t *testing.T) {
+	svc, ur, _, _ := newSvc(t)
+	addUser(t, ur, "alice", false)
+	addUser(t, ur, "bob", false)
+	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{
+		"bob->alice": true,
+		"alice->bob": true,
+	}})
+
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
+	require.ErrorIs(t, err, following.ErrBlocking)
 }
 
 func TestFollow_BlockingCheckerReverseError(t *testing.T) {

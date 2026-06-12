@@ -154,22 +154,22 @@ func TestClipNoteRepository_ListByClipVisible(t *testing.T) {
 	assert.Equal(t, []string{"n_cnv_fol", "n_cnv_pub", "n_cnv_spec"}, noteIDsOf(rows))
 
 	// 匿名 viewer は public のみ。
-	rows, err = repo.ListByClipVisible(c.ID, "", "", "", 50)
+	rows, err = repo.ListByClipVisible(c.ID, "", "", "", 50, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cnv_pub"}, noteIDsOf(rows))
 
 	// follower は public + followers。
-	rows, err = repo.ListByClipVisible(c.ID, follower.ID, "", "", 50)
+	rows, err = repo.ListByClipVisible(c.ID, follower.ID, "", "", 50, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cnv_fol", "n_cnv_pub"}, noteIDsOf(rows))
 
 	// specified 対象 viewer は public + specified。
-	rows, err = repo.ListByClipVisible(c.ID, allowed.ID, "", "", 50)
+	rows, err = repo.ListByClipVisible(c.ID, allowed.ID, "", "", 50, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cnv_pub", "n_cnv_spec"}, noteIDsOf(rows))
 
 	// author 本人は全 visibility を閲覧可。
-	rows, err = repo.ListByClipVisible(c.ID, author.ID, "", "", 50)
+	rows, err = repo.ListByClipVisible(c.ID, author.ID, "", "", 50, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_cnv_fol", "n_cnv_pub", "n_cnv_spec"}, noteIDsOf(rows))
 }

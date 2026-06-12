@@ -151,13 +151,16 @@ func TestShow_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestShow_AccessDenied(t *testing.T) {
+// 非公開 clip の他人閲覧は missing と同じ NO_SUCH_CLIP 404 (存在秘匿、#1562)
+func TestShow_PrivateHiddenFromOthers(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
+	assert.Contains(t, rec.Body.String(), "c3c5fe33-d62c-44d2-9ea5-d997703f5c20")
 }
 
 func TestShow_AnonymousOnPublic(t *testing.T) {
@@ -172,12 +175,13 @@ func TestShow_AnonymousOnPublic(t *testing.T) {
 // middleware bypass や guest viewer 路を追加した時に regression するため、
 // 未認証 viewer (= viewer == nil) が private clip を叩いた時の 403 reject を
 // handler 層 negative test で固定する。
-func TestShow_AnonymousAccessDenied(t *testing.T) {
+func TestShow_AnonymousPrivateHidden(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: false}
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 // --- Update ----------------------------------------------------------------
@@ -207,13 +211,16 @@ func TestUpdate_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestUpdate_AccessDenied(t *testing.T) {
+// 非 owner mutation は upstream と同じく missing と区別不能な 404 NO_SUCH_CLIP
+// を返す (#1562、存在 enumeration oracle 封じ)。
+func TestUpdate_NonOwnerHidden(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	c, rec := newReq(t, `{"clipId":"c1","name":"x"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 func TestUpdate_NameEmpty(t *testing.T) {
@@ -274,13 +281,14 @@ func TestDelete_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestDelete_AccessDenied(t *testing.T) {
+func TestDelete_NonOwnerHidden(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 // failingDeleteRepo causes Delete to fail.
@@ -433,16 +441,17 @@ func TestAddNote_ClipNotFound(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
-func TestAddNote_AccessDenied(t *testing.T) {
+func TestAddNote_NonOwnerHidden(t *testing.T) {
 	h, repo, _, notes := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
-	// visibility gate (#1456) を通過させた上で、owner 不一致で ACCESS_DENIED
-	// に到達することを担保する seed。
+	// visibility gate (#1456) を通過させた上で、owner 不一致が 404 NO_SUCH_CLIP
+	// に落ちることを担保する seed (#1562)。
 	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 func TestAddNote_NoteNotFound(t *testing.T) {
@@ -627,13 +636,14 @@ func TestRemoveNote_ClipNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestRemoveNote_AccessDenied(t *testing.T) {
+func TestRemoveNote_NonOwnerHidden(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
 func TestRemoveNote_NotClipped(t *testing.T) {
@@ -699,13 +709,15 @@ func TestNotes_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestNotes_AccessDenied(t *testing.T) {
+func TestNotes_PrivateHiddenFromOthers(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
+	assert.Contains(t, rec.Body.String(), "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00")
 }
 
 func TestNotes_AnonymousOnPublic(t *testing.T) {
@@ -756,7 +768,7 @@ type listFailNoteRepo struct {
 	*testutil.MockClipNoteRepository
 }
 
-func (r *listFailNoteRepo) ListByClipVisible(_, _, _, _ string, _ int) ([]*model.ClipNote, error) {
+func (r *listFailNoteRepo) ListByClipVisible(_, _, _, _ string, _ int, _ []string) ([]*model.ClipNote, error) {
 	return nil, errors.New("boom")
 }
 

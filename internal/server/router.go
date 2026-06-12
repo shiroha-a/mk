@@ -1266,6 +1266,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetEmojiRepo(emojiRepo)
 	usersHandler.SetReactionReader(reactionCountWriter)
 	usersHandler.SetClipRepo(clipRepo)
+	usersHandler.SetClipFavoriteRepo(clipFavoriteRepo) // #1562: users/clips の favoritedCount / isFavorited
 	usersHandler.SetFlashRepo(flashRepo)
 	usersHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))
 	usersHandler.SetPageRepo(pageRepo)
@@ -1722,14 +1723,16 @@ func (s *Server) setupRoutes() {
 	clipsHandler.SetReactionReader(reactionCountWriter)
 	clipsHandler.SetNoteFieldResolver(noteFieldResolver)
 	clipsHandler.SetUserRepo(userRepo)
-	clipsHandler.SetQueryService(noteQueryService) // #1456: AddNote の visibility gate
-	api.POST("/clips/create", clipsHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	clipsHandler.SetQueryService(noteQueryService)           // #1456: AddNote の visibility gate
+	clipsHandler.SetMuteBlockRepos(mutingRepo, blockingRepo) // #1562: Notes の muted/blocked-user filter
+	clipsHandler.SetMetaRepo(metaRepo)                       // #1562: Notes の blocked-host filter
+	api.POST("/clips/create", clipsHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/clips/show", clipsHandler.Show, middleware.RequireScope("read:account"))
-	api.POST("/clips/update", clipsHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	api.POST("/clips/update", clipsHandler.Update, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/clips/delete", clipsHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/clips/list", clipsHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:account"))
-	api.POST("/clips/add-note", clipsHandler.AddNote, middleware.RequireAuth(), middleware.RequireScope("write:account"))
-	api.POST("/clips/remove-note", clipsHandler.RemoveNote, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	api.POST("/clips/add-note", clipsHandler.AddNote, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
+	api.POST("/clips/remove-note", clipsHandler.RemoveNote, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/clips/notes", clipsHandler.Notes, middleware.RequireScope("read:account"))
 
 	// Pages endpoints (Phase 4.5)
@@ -1952,7 +1955,7 @@ func (s *Server) setupRoutes() {
 	// Following endpoints
 	followingHandler := following.NewHandler(followingService, userService)
 	followingHandler.SetIDGen(idGen)
-	api.POST("/following/create", followingHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:following"))
+	api.POST("/following/create", followingHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:following"))
 	api.POST("/following/delete", followingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:following"))
 	api.POST("/following/list", followingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:following"))
 	api.POST("/following/requests/list", followingHandler.ListRequests, middleware.RequireAuth(), middleware.RequireScope("read:following"))
@@ -1972,8 +1975,8 @@ func (s *Server) setupRoutes() {
 	api.POST("/channels/my-favorites", channelsHandler.MyFavorites, middleware.RequireAuth(), middleware.RequireScope("read:channels"))
 	api.POST("/channels/mute/list", channelsHandler.MuteList, middleware.RequireAuth(), middleware.RequireScope("read:channels"))
 	// clips 残り
-	api.POST("/clips/favorite", clipsHandler.Favorite, middleware.RequireAuth(), middleware.RequireScope("write:clip-favorite"))
-	api.POST("/clips/unfavorite", clipsHandler.Unfavorite, middleware.RequireAuth(), middleware.RequireScope("write:clip-favorite"))
+	api.POST("/clips/favorite", clipsHandler.Favorite, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:clip-favorite"))
+	api.POST("/clips/unfavorite", clipsHandler.Unfavorite, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:clip-favorite"))
 	api.POST("/clips/my-favorites", clipsHandler.MyFavorites, middleware.RequireAuth(), middleware.RequireScope("read:clip-favorite"))
 	// federation の残ルートは上で登録済 (federationHandler 初期化直後)
 

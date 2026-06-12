@@ -110,11 +110,12 @@ func TestShow_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestShow_PrivateAccessDenied(t *testing.T) {
+func TestShow_PrivateHiddenFromOthers(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", IsPublic: false}
+	// 非公開 clip の他人閲覧は missing と区別不能な ErrClipNotFound (#1562)
 	_, err := svc.Show("u2", "c1")
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 func TestShow_PublicReadableByAnyone(t *testing.T) {
@@ -149,11 +150,13 @@ func TestUpdate_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestUpdate_AccessDenied(t *testing.T) {
+func TestUpdate_NonOwnerHidden(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
+	// 非 owner mutation は upstream findOneBy({id, userId}) と同じく
+	// missing と区別不能な ErrClipNotFound (#1562)
 	_, err := svc.Update("u1", "c1", clip.UpdateInput{})
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 func TestUpdate_NameEmpty(t *testing.T) {
@@ -188,11 +191,11 @@ func TestDelete_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestDelete_AccessDenied(t *testing.T) {
+func TestDelete_NonOwnerHidden(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	err := svc.Delete("u1", "c1")
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 // --- ListByUser ------------------------------------------------------------
@@ -224,11 +227,11 @@ func TestAddNote_ClipNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestAddNote_AccessDenied(t *testing.T) {
+func TestAddNote_NonOwnerHidden(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	err := svc.AddNote("u1", "c1", "n1")
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 func TestAddNote_NoteNotFound(t *testing.T) {
@@ -283,11 +286,11 @@ func TestRemoveNote_ClipNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestRemoveNote_AccessDenied(t *testing.T) {
+func TestRemoveNote_NonOwnerHidden(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner"}
 	err := svc.RemoveNote("u1", "c1", "n1")
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 func TestRemoveNote_NotClipped(t *testing.T) {
@@ -326,22 +329,22 @@ func TestNotes_HappyPath(t *testing.T) {
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
 	require.NoError(t, svc.AddNote("u1", "c1", "n2"))
 
-	rows, err := svc.Notes("u1", "c1", "", "", 10)
+	rows, err := svc.Notes("u1", "c1", "", "", 10, "")
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }
 
 func TestNotes_NotFound(t *testing.T) {
 	svc, _, _, _ := newSvc(t)
-	_, err := svc.Notes("u1", "missing", "", "", 10)
+	_, err := svc.Notes("u1", "missing", "", "", 10, "")
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestNotes_PrivateAccessDenied(t *testing.T) {
+func TestNotes_PrivateHiddenFromOthers(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", IsPublic: false}
-	_, err := svc.Notes("u2", "c1", "", "", 10)
-	assert.ErrorIs(t, err, clip.ErrAccessDenied)
+	_, err := svc.Notes("u2", "c1", "", "", 10, "")
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
 func TestNotes_PublicReadableByAnyone(t *testing.T) {
@@ -349,7 +352,7 @@ func TestNotes_PublicReadableByAnyone(t *testing.T) {
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", IsPublic: true}
 	notes.Notes["n1"] = &model.Note{ID: "n1", Visibility: model.NoteVisibilityPublic}
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
-	rows, err := svc.Notes("u2", "c1", "", "", 10)
+	rows, err := svc.Notes("u2", "c1", "", "", 10, "")
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 }
@@ -357,7 +360,7 @@ func TestNotes_PublicReadableByAnyone(t *testing.T) {
 func TestNotes_EmptyClipReturnsNil(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
-	rows, err := svc.Notes("u1", "c1", "", "", 10)
+	rows, err := svc.Notes("u1", "c1", "", "", 10, "")
 	require.NoError(t, err)
 	assert.Empty(t, rows)
 }
@@ -368,7 +371,7 @@ type listFailRepo struct {
 	*testutil.MockClipNoteRepository
 }
 
-func (r *listFailRepo) ListByClipVisible(_, _, _, _ string, _ int) ([]*model.ClipNote, error) {
+func (r *listFailRepo) ListByClipVisible(_, _, _, _ string, _ int, _ []string) ([]*model.ClipNote, error) {
 	return nil, errors.New("boom")
 }
 
@@ -378,7 +381,7 @@ func TestNotes_RepoError(t *testing.T) {
 	noteRepo := &listFailRepo{MockClipNoteRepository: testutil.NewMockClipNoteRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := clip.NewService(repo, noteRepo, testutil.NewMockNoteRepository(), idGen)
-	_, err := svc.Notes("u1", "c1", "", "", 10)
+	_, err := svc.Notes("u1", "c1", "", "", 10, "")
 	assert.Error(t, err)
 }
 

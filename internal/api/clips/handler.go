@@ -36,6 +36,43 @@ type Handler struct {
 	// で 404 NO_SUCH_NOTE を返し、visibility 未検証の note を絶対に clip に
 	// 永続化しない (#1455 favorites/create と同形)。
 	queryService *corenote.QueryService
+	// mutingRepo / blockingRepo は clips/notes の muted-user / blocked-user
+	// filter (#1562、upstream generateMutedUserQueryForNotes 等) に使う。
+	// 未配線時は該当次元の filter を skip する。
+	mutingRepo   repository.MutingRepository
+	blockingRepo repository.BlockingRepository
+	// metaRepo は clips/notes の blocked-host filter (#1562、upstream
+	// generateBlockedHostQueryForNote) で meta.blockedHosts を引く。
+	metaRepo repository.MetaRepository
+}
+
+// SetMuteBlockRepos wires the muting / blocking repositories used by the
+// clips/notes muted-user / blocked-user filters (#1562).
+func (h *Handler) SetMuteBlockRepos(m repository.MutingRepository, b repository.BlockingRepository) {
+	h.mutingRepo = m
+	h.blockingRepo = b
+}
+
+// SetMetaRepo wires a MetaRepository used by the clips/notes blocked-host
+// filter (#1562).
+func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
+	h.metaRepo = r
+}
+
+// blockedHosts returns meta.blockedHosts, or nil when the meta repo is not
+// wired. Fetch error は fail-closed にするため caller へ返す (#1544 と同方針)。
+func (h *Handler) blockedHosts() ([]string, error) {
+	if h.metaRepo == nil {
+		return nil, nil
+	}
+	meta, err := h.metaRepo.Fetch()
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil {
+		return nil, nil
+	}
+	return meta.BlockedHosts, nil
 }
 
 // SetUserRepo wires a UserRepository so clips/notes filters out notes that
@@ -106,11 +143,42 @@ type CreateRequest struct {
 	IsPublic    bool    `json:"isPublic"`
 }
 
+// upstream paramDef の長さ制約 (clips/create.ts / update.ts)。ajv は UTF-16
+// code unit 長だが、mk-go では他 endpoint と同じく rune 数で近似する (#1624 と
+// 同方針。サロゲートペアを含む文字列は upstream より長く受理される)。
+const (
+	clipNameMaxLength        = 100
+	clipDescriptionMaxLength = 2048
+)
+
+// validateClipParams checks name (1..100) / description (≤2048) length and
+// normalizes an empty description to null (upstream `ps.description || null`)。
+// name が nil の場合 (update の未指定) は検査しない。
+func validateClipParams(name *string, description **string) bool {
+	if name != nil {
+		if n := len([]rune(*name)); n < 1 || n > clipNameMaxLength {
+			return false
+		}
+	}
+	if description != nil && *description != nil {
+		if *(*description) == "" {
+			// 空文字は null に正規化して保存する (#1562)
+			*description = nil
+		} else if len([]rune(**description)) > clipDescriptionMaxLength {
+			return false
+		}
+	}
+	return true
+}
+
 // Create handles POST /api/clips/create.
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req CreateRequest
 	if err := c.Bind(&req); err != nil || req.Name == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	if !validateClipParams(&req.Name, &req.Description) {
 		return apierr.JSONInvalidParam(c)
 	}
 	cl, err := h.svc.Create(coreclip.CreateInput{
@@ -125,7 +193,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl, user))
 }
 
 // ShowRequest is the request body for clips/show.
@@ -144,14 +212,14 @@ func (h *Handler) Show(c echo.Context) error {
 	if user != nil {
 		requesterID = user.ID
 	}
+	// 非公開 clip を他人/匿名が見た場合も service が ErrClipNotFound を返す
+	// ので、missing と同一の NO_SUCH_CLIP 404 になり存在が秘匿される (#1562、
+	// upstream show.ts と同じ enumeration oracle 封じ)。
 	cl, err := h.svc.Show(requesterID, req.ClipID)
 	if err != nil {
-		if errors.Is(err, coreclip.ErrAccessDenied) {
-			return apierr.JSONAccessDenied(c)
-		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "c3c5fe33-d62c-44d2-9ea5-d997703f5c20"))
 	}
-	return c.JSON(http.StatusOK, h.clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl, user))
 }
 
 // UpdateRequest is the request body for clips/update.
@@ -169,27 +237,30 @@ func (h *Handler) Update(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ClipID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream update.ts は `ps.description || null` を常に ClipService に渡す
+	// ため、description 未指定 (undefined) でも NULL にクリアされる。mk-go も
+	// 常に Description を更新対象にする (#1562)。
+	desc := req.Description
 	in := coreclip.UpdateInput{
-		Name:     req.Name,
-		IsPublic: req.IsPublic,
+		Name:        req.Name,
+		Description: &desc,
+		IsPublic:    req.IsPublic,
 	}
-	if req.Description != nil {
-		desc := req.Description
-		in.Description = &desc
+	// name 長 / description 長の検証と空 description の null 正規化 (#1562)
+	if !validateClipParams(req.Name, in.Description) {
+		return apierr.JSONInvalidParam(c)
 	}
 	cl, err := h.svc.Update(user.ID, req.ClipID, in)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b4d92d70-b216-46fa-9a3f-a8c811699257"))
-		case errors.Is(err, coreclip.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrClipNameRequired):
 			return apierr.JSONInvalidParam(c)
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.clipToMap(cl))
+	return c.JSON(http.StatusOK, h.clipToMap(cl, user))
 }
 
 // DeleteRequest is the request body for clips/delete.
@@ -208,8 +279,6 @@ func (h *Handler) Delete(c echo.Context) error {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "70ca08ba-6865-4630-b6fb-8494759aa754"))
-		case errors.Is(err, coreclip.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -245,7 +314,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, cl := range rows {
-		out = append(out, h.clipToMap(cl))
+		out = append(out, h.clipToMap(cl, user))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -278,8 +347,6 @@ func (h *Handler) AddNote(c echo.Context) error {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "d6e76cc0-a1b5-4c7c-a287-73fa9c716dcf"))
-		case errors.Is(err, coreclip.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrNoteNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 		case errors.Is(err, coreclip.ErrAlreadyClipped):
@@ -309,8 +376,6 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b80525c6-97f7-49d7-a42d-ebccd49cfd52"))
-		case errors.Is(err, coreclip.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		case errors.Is(err, coreclip.ErrNotClipped):
 			return notClipped(c)
 		}
@@ -321,13 +386,18 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 
 // NotesRequest is the request body for clips/notes.
 type NotesRequest struct {
-	ClipID    string `json:"clipId"`
-	UntilID   string `json:"untilId"`
-	SinceID   string `json:"sinceId"`
-	SinceDate *int64 `json:"sinceDate"`
-	UntilDate *int64 `json:"untilDate"`
-	Limit     int    `json:"limit"`
+	ClipID    string  `json:"clipId"`
+	UntilID   string  `json:"untilId"`
+	SinceID   string  `json:"sinceId"`
+	SinceDate *int64  `json:"sinceDate"`
+	UntilDate *int64  `json:"untilDate"`
+	Limit     int     `json:"limit"`
+	Search    *string `json:"search"`
 }
+
+// clipNotesSearchMaxLength は upstream clips/notes paramDef の search
+// maxLength。minLength は 1 (空文字は 400)。
+const clipNotesSearchMaxLength = 100
 
 // Notes handles POST /api/clips/notes.
 func (h *Handler) Notes(c echo.Context) error {
@@ -336,6 +406,15 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ClipID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// search は nullable (null = 未指定)。指定時は 1..100 を強制 (upstream
+	// paramDef minLength 1 / maxLength 100、#1562)。
+	search := ""
+	if req.Search != nil {
+		if n := len([]rune(*req.Search)); n < 1 || n > clipNotesSearchMaxLength {
+			return apierr.JSONInvalidParam(c)
+		}
+		search = *req.Search
+	}
 	requesterID := ""
 	if user != nil {
 		requesterID = user.ID
@@ -343,18 +422,32 @@ func (h *Handler) Notes(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, req.Limit)
+	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, req.Limit, search)
 	if err != nil {
-		switch {
-		case errors.Is(err, coreclip.ErrClipNotFound):
+		// 非公開 clip の他人/匿名閲覧は missing と同じ ErrClipNotFound →
+		// NO_SUCH_CLIP 404 (存在秘匿、#1562)。
+		if errors.Is(err, coreclip.ErrClipNotFound) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00"))
-		case errors.Is(err, coreclip.ErrAccessDenied):
-			return apierr.JSONAccessDenied(c)
 		}
 		return apierr.JSONInternalError(c)
 	}
 	// visibility は clip service の ListByClipVisible で push down 済み (#1418
-	// review)。ここでは hardMutedWords filter のみ適用する。
+	// review)。muted-user / blocked-user / blocked-host / hardMutedWords を
+	// post-fetch で適用する (#1562。antennas / roles の #1544 と同形のため
+	// LIMIT 後適用 = ページ過少充填はあり得る)。channel mute は upstream
+	// clips/notes が適用しないため渡さない。upstream が併せ持つ
+	// muted-instances と renote 入れ子変種 (renote の reply/renote author) は
+	// #1544 と同じく未対応の follow-up。
+	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, nil)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
+	blockedHosts, err := h.blockedHosts()
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)
@@ -370,12 +463,39 @@ func (h *Handler) Notes(c echo.Context) error {
 // entity.PackClip. owner (clip の所有ユーザー) を userRepo から解決して user
 // field を埋める。misskey_dart の Clip.fromJson は createdAt / user /
 // favoritedCount を非null必須とするため、旧 ad-hoc map では落ちていた (#1245)。
-func (h *Handler) clipToMap(cl *model.Clip) map[string]any {
+// viewer は favoritedCount / isFavorited / notesCount の出し分けに使う (#1562)。
+func (h *Handler) clipToMap(cl *model.Clip, viewer *model.User) map[string]any {
 	var owner *model.User
 	if h.userRepo != nil {
 		owner, _ = h.userRepo.FindByID(cl.UserID)
 	}
-	return entity.PackClip(cl, h.idGen, owner)
+	return entity.PackClip(cl, h.idGen, owner, h.clipExtras(cl, viewer))
+}
+
+// clipExtras resolves the viewer-dependent clip fields (#1562)。upstream
+// ClipEntityService.pack 同様 favoritedCount は実カウント、isFavorited は
+// 認証 viewer のみ、notesCount は owner 閲覧時のみ出す。favoriteRepo 未配線
+// や lookup 失敗時は count 0 / isFavorited false に degrade する。
+func (h *Handler) clipExtras(cl *model.Clip, viewer *model.User) entity.ClipExtras {
+	extras := entity.ClipExtras{
+		ShowNotesCount: viewer != nil && viewer.ID == cl.UserID,
+	}
+	if viewer != nil {
+		fav := false
+		extras.IsFavorited = &fav
+	}
+	if h.favoriteRepo == nil {
+		return extras
+	}
+	if n, err := h.favoriteRepo.CountByClip(cl.ID); err == nil {
+		extras.FavoritedCount = n
+	}
+	if viewer != nil {
+		if ok, err := h.favoriteRepo.Exists(viewer.ID, cl.ID); err == nil {
+			extras.IsFavorited = &ok
+		}
+	}
+	return extras
 }
 
 func notClipped(c echo.Context) error {

@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -16,7 +18,10 @@ type ClipNoteRepository interface {
 	// excluded before LIMIT. viewerID 空文字は匿名 (public/home のみ)。clips/notes
 	// で post-fetch filter によるページ過少充填と per-note の follow 判定 N+1 を
 	// 避けるため (#1418 review)。export 経路は全件必要なので ListByClip を使う。
-	ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error)
+	// searchWords は各語を note.text / note.cw への ILIKE 部分一致 (OR) として
+	// AND 結合する (#1562、upstream clips/notes の search param 相当)。空 slice
+	// は無条件。
+	ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error)
 	// CountByClip returns the number of notes in the given clip. Used by
 	// noteEachClipsLimit policy gate (#1029 PR-1 follow-up).
 	CountByClip(clipID string) (int64, error)
@@ -62,15 +67,15 @@ func (r *clipNoteRepository) CountByClip(clipID string) (int64, error) {
 // the clip_note id. Order flips to ASC when only sinceID is supplied,
 // matching paginationOrder (upstream QueryService.makePaginationQuery parity).
 func (r *clipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
-	return r.listByClip(clipID, "", false, untilID, sinceID, limit)
+	return r.listByClip(clipID, "", false, untilID, sinceID, limit, nil)
 }
 
 // ListByClipVisible is ListByClip with the visibility push-down enabled.
-func (r *clipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
-	return r.listByClip(clipID, viewerID, true, untilID, sinceID, limit)
+func (r *clipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error) {
+	return r.listByClip(clipID, viewerID, true, untilID, sinceID, limit, searchWords)
 }
 
-func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
+func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error) {
 	if limit <= 0 {
 		limit = 30
 	}
@@ -83,6 +88,23 @@ func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibilit
 		// visibility を LIMIT 前に絞る。条件は core/note.CanSeeNote と一致 (#1454)。
 		q = applyViewerVisibilityExists(q, `"clip_note"."noteId"`, viewerID)
 	}
+	// search 各語を text / cw への ILIKE 部分一致 (語内 OR、語間 AND) で絞る
+	// (#1562、upstream clips/notes.ts:103-110)。LIMIT 前に適用しないと
+	// ページ過少充填になるため visibility と同じく push down する。同一 note
+	// 行への相関なので、語ごとに EXISTS を重ねず単一 EXISTS 内で AND する
+	// (subplan が語数分走るのを避ける)。
+	if len(searchWords) > 0 {
+		var cond strings.Builder
+		args := make([]any, 0, len(searchWords)*2)
+		cond.WriteString(`EXISTS (SELECT 1 FROM "note" sn WHERE sn."id" = "clip_note"."noteId"`)
+		for _, word := range searchWords {
+			like := "%" + escapeLike(word) + "%"
+			cond.WriteString(` AND (sn."text" ILIKE ? OR sn."cw" ILIKE ?)`)
+			args = append(args, like, like)
+		}
+		cond.WriteString(`)`)
+		q = q.Where(cond.String(), args...)
+	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -94,4 +116,14 @@ func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibilit
 		return nil, err
 	}
 	return rows, nil
+}
+
+// escapeLike escapes LIKE/ILIKE metacharacters so user input matches
+// literally (upstream sqlLikeEscape 相当)。PostgreSQL の既定 escape 文字は
+// backslash なので \ 自身もエスケープする。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }

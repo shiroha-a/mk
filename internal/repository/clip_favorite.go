@@ -11,6 +11,9 @@ type ClipFavoriteRepository interface {
 	Delete(userID, clipID string) error
 	ListByUser(userID string) ([]*model.ClipFavorite, error)
 	Exists(userID, clipID string) (bool, error)
+	// CountByClip returns the number of favorites for a clip. clip 応答の
+	// favoritedCount 実カウント用 (#1562、upstream clipFavoritesRepository.countBy)。
+	CountByClip(clipID string) (int64, error)
 }
 
 type clipFavoriteRepository struct {
@@ -44,4 +47,11 @@ func (r *clipFavoriteRepository) Exists(userID, clipID string) (bool, error) {
 	err := r.db.Model(&model.ClipFavorite{}).
 		Where(`"userId" = ? AND "clipId" = ?`, userID, clipID).Count(&count).Error
 	return count > 0, err
+}
+
+func (r *clipFavoriteRepository) CountByClip(clipID string) (int64, error) {
+	var count int64
+	err := r.db.Model(&model.ClipFavorite{}).
+		Where(`"clipId" = ?`, clipID).Count(&count).Error
+	return count, err
 }

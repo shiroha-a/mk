@@ -5,11 +5,13 @@ package clip
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/gorm"
 )
 
 // Errors returned by Service.
@@ -18,9 +20,6 @@ var (
 	ErrClipNotFound = errors.New("clip not found")
 	// ErrClipNameRequired is returned when name is empty on Create / Update.
 	ErrClipNameRequired = errors.New("clip name is required")
-	// ErrAccessDenied is returned when a user attempts to mutate a clip they
-	// do not own. Public clips are still readable by anyone.
-	ErrAccessDenied = errors.New("not the owner of this clip")
 	// ErrNoteNotFound is returned when the target note for AddNote does not
 	// exist.
 	ErrNoteNotFound = errors.New("note not found")
@@ -126,16 +125,33 @@ func (s *Service) Create(in CreateInput) (*model.Clip, error) {
 }
 
 // Show returns a clip by id. requesterID は閲覧者で、空文字なら anonymous
-// 扱い。private clip は所有者だけがアクセスできる。
+// 扱い。private clip は所有者だけがアクセスでき、他人/匿名には missing と
+// 同じ ErrClipNotFound を返して存在を秘匿する (#1562、upstream show.ts は
+// !isPublic && 非所有者を noSuchClip にする。ErrAccessDenied だと 403/404 の
+// 差で非公開 clip の存在 enumeration oracle になる)。
 func (s *Service) Show(requesterID, clipID string) (*model.Clip, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return nil, ErrClipNotFound
 	}
 	if !c.IsPublic && c.UserID != requesterID {
-		return nil, ErrAccessDenied
+		return nil, ErrClipNotFound
 	}
 	return c, nil
+}
+
+// Exists reports whether a clip row exists, regardless of visibility. clips/
+// unfavorite の存在チェック用 (#1562、upstream unfavorite.ts は findOneBy({id})
+// のみで visibility を見ない — favorite 後に非公開化された clip も解除可能に
+// するため)。not-found 以外の driver error は caller へ返す (fail-closed)。
+func (s *Service) Exists(clipID string) (bool, error) {
+	if _, err := s.repo.FindByID(clipID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // UpdateInput holds the editable fields of a clip.
@@ -145,14 +161,16 @@ type UpdateInput struct {
 	IsPublic    *bool
 }
 
-// Update applies the non-nil fields to a clip owned by ownerID.
+// Update applies the non-nil fields to a clip owned by ownerID. 非 owner は
+// upstream ClipService.update の findOneBy({id, userId}) と同じく missing と
+// 区別不能な ErrClipNotFound (#1562、存在 enumeration oracle 封じ)。
 func (s *Service) Update(ownerID, clipID string, in UpdateInput) (*model.Clip, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return nil, ErrClipNotFound
 	}
 	if c.UserID != ownerID {
-		return nil, ErrAccessDenied
+		return nil, ErrClipNotFound
 	}
 	fields := map[string]any{}
 	if in.Name != nil {
@@ -174,13 +192,14 @@ func (s *Service) Update(ownerID, clipID string, in UpdateInput) (*model.Clip, e
 }
 
 // Delete removes a clip owned by ownerID. clip_note は CASCADE で削除される。
+// 非 owner は Update と同じく ErrClipNotFound (#1562)。
 func (s *Service) Delete(ownerID, clipID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
-		return ErrAccessDenied
+		return ErrClipNotFound
 	}
 	return s.repo.Delete(c)
 }
@@ -191,14 +210,15 @@ func (s *Service) ListByUser(userID, sinceID, untilID string, limit, offset int)
 	return s.repo.ListByUser(userID, sinceID, untilID, limit, offset)
 }
 
-// AddNote attaches a note to the clip. ownerID 以外は AccessDenied。
+// AddNote attaches a note to the clip. 非 owner は upstream add-note.ts の
+// findOneBy({id, userId}) と同じく ErrClipNotFound (#1562)。
 func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
-		return ErrAccessDenied
+		return ErrClipNotFound
 	}
 	if _, err := s.notes.FindByID(noteID); err != nil {
 		return ErrNoteNotFound
@@ -234,14 +254,14 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	return nil
 }
 
-// RemoveNote detaches a note from the clip. ownerID 以外は AccessDenied。
+// RemoveNote detaches a note from the clip. 非 owner は ErrClipNotFound (#1562)。
 func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
-		return ErrAccessDenied
+		return ErrClipNotFound
 	}
 	cn, err := s.noteRepo.FindByPair(clipID, noteID)
 	if err != nil {
@@ -255,19 +275,26 @@ func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 }
 
 // Notes returns the notes attached to the clip newest first. requesterID は
-// 閲覧者で、private clip は owner だけがアクセスできる (Show と同じ規則)。
-func (s *Service) Notes(requesterID, clipID, untilID, sinceID string, limit int) ([]*model.Note, error) {
+// 閲覧者で、private clip は owner 以外には missing と同じ ErrClipNotFound を
+// 返して存在を秘匿する (Show と同じ規則、#1562)。search は空白区切り各語を
+// note.text / note.cw に ILIKE AND で適用する (upstream notes.ts:103-110)。
+func (s *Service) Notes(requesterID, clipID, untilID, sinceID string, limit int, search string) ([]*model.Note, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
 		return nil, ErrClipNotFound
 	}
 	if !c.IsPublic && c.UserID != requesterID {
-		return nil, ErrAccessDenied
+		return nil, ErrClipNotFound
 	}
+	// upstream は search.trim().split(' ')。連続空白が生む空語は ILIKE '%%'
+	// となり text/cw が NULL でない note には全一致なので、空語を落とす
+	// strings.Fields でほぼ等価になる (tab 等の whitespace も区切る点と、
+	// text/cw 両方 NULL の note の扱いのみ微差、実用上の影響なし)。
+	searchWords := strings.Fields(search)
 	// visibility は repository 側で LIMIT 前に push down する (#1418 review)。
 	// clip は author 混在のため post-fetch filter だと per-note の follow 判定
 	// N+1 + ページ過少充填になる。
-	rows, err := s.noteRepo.ListByClipVisible(clipID, requesterID, untilID, sinceID, limit)
+	rows, err := s.noteRepo.ListByClipVisible(clipID, requesterID, untilID, sinceID, limit, searchWords)
 	if err != nil {
 		return nil, err
 	}

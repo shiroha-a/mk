@@ -60,7 +60,24 @@ func (h *Handler) Clips(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, cl := range rows {
-		out = append(out, entity.PackClip(cl, h.idGen, owner))
+		// favoritedCount は常時実カウント、isFavorited は認証 viewer のみ、
+		// notesCount は owner 閲覧時のみ (#1562、upstream ClipEntityService.pack)。
+		extras := entity.ClipExtras{ShowNotesCount: isSelf}
+		if viewer != nil {
+			fav := false
+			extras.IsFavorited = &fav
+		}
+		if h.clipFavoriteRepo != nil {
+			if n, err := h.clipFavoriteRepo.CountByClip(cl.ID); err == nil {
+				extras.FavoritedCount = n
+			}
+			if viewer != nil {
+				if ok, err := h.clipFavoriteRepo.Exists(viewer.ID, cl.ID); err == nil {
+					extras.IsFavorited = &ok
+				}
+			}
+		}
+		out = append(out, entity.PackClip(cl, h.idGen, owner, extras))
 	}
 	return c.JSON(http.StatusOK, out)
 }

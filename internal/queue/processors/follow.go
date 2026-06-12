@@ -55,6 +55,7 @@ func (p *FollowProcessor) Handle(_ context.Context, t driver.Task) error {
 	// block 関係 / 自己 follow / 対象不在は retry しても解消しない恒久
 	// エラーなので即終了する (本家は job fail のまま放置される)。
 	case errors.Is(err, following.ErrBlocked),
+		errors.Is(err, following.ErrBlocking),
 		errors.Is(err, following.ErrSelfFollow),
 		errors.Is(err, following.ErrFolloweeNotFound):
 		return fmt.Errorf("follow %s->%s: %w: %w",

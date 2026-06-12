@@ -309,6 +309,27 @@ func RequireScope(kind string) echo.MiddlewareFunc {
 	}
 }
 
+// RequireNotMoved rejects requests from accounts that have completed an
+// account migration (movedToUri set), mirroring upstream prohibitMoved
+// endpoints (ApiCallService.ts:368-377、#1562)。RequireAuth の後段に配線する
+// こと (GetUser が nil の場合は素通しし、認可は RequireAuth 側に任せる)。
+func RequireNotMoved() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			user := GetUser(c)
+			if user != nil && user.MovedToURI != nil && *user.MovedToURI != "" {
+				return c.JSON(http.StatusForbidden, apierr.ErrorWithKind(
+					"YOUR_ACCOUNT_MOVED",
+					"You have moved your account.",
+					"56f20ec9-fd06-4fa5-841b-edd6d7d4fa31",
+					apierr.KindPermission,
+				))
+			}
+			return next(c)
+		}
+	}
+}
+
 // RoleChecker abstracts role checking to avoid circular dependency with core/role.
 type RoleChecker interface {
 	IsAdministrator(userID string) bool

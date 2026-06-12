@@ -1,6 +1,7 @@
 package following
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -35,7 +36,11 @@ func TestInvalidate_Success(t *testing.T) {
 	_, _ = h.followingService.Follow(follower.ID, admin.ID, corefollowing.FollowOptions{})
 
 	rec := postJSON(h.Invalidate, `{"userId":"follower"}`, admin)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// upstream invalidate.ts は packed follower (UserLite) を 200 で返す (#1562)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "follower", body["id"])
 }
 
 func TestInvalidate_NotFollowing(t *testing.T) {
@@ -50,9 +55,65 @@ func TestInvalidate_NotFollowing(t *testing.T) {
 }
 
 func TestUpdateFollow_Success(t *testing.T) {
-	h, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent,
-		postJSON(h.UpdateFollow, `{"userId":"u2","notify":"normal","withReplies":true}`, &model.User{ID: "u1"}).Code)
+	h, repo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+	fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: alice.ID, FolloweeID: bob.ID}
+	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"normal","withReplies":true}`, alice)
+	// upstream update.ts は packed follower (= 自分) を 200 で返す (#1562)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, alice.ID, body["id"])
+}
+
+// upstream update.ts は self / 不在 user / 未フォローをそれぞれ
+// FOLLOWEE_IS_YOURSELF / NO_SUCH_USER / NOT_FOLLOWING で拒否する (#1562)。
+func TestUpdateFollow_SelfRejected(t *testing.T) {
+	h, repo := newTestHandler(t)
+	alice := addUser(repo, "alice", false)
+	rec := postJSON(h.UpdateFollow, `{"userId":"alice"}`, alice)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FOLLOWEE_IS_YOURSELF")
+	assert.Contains(t, rec.Body.String(), "4c4cbaf9-962a-463b-8418-a5e365dbf2eb")
+}
+
+func TestUpdateFollow_NoSuchUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	alice := addUser(repo, "alice", false)
+	rec := postJSON(h.UpdateFollow, `{"userId":"ghost"}`, alice)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "14318698-f67e-492a-99da-5353a5ac52be")
+}
+
+func TestUpdateFollow_NotFollowing(t *testing.T) {
+	h, repo := newTestHandler(t)
+	alice := addUser(repo, "alice", false)
+	addUser(repo, "bob", false)
+	rec := postJSON(h.UpdateFollow, `{"userId":"bob"}`, alice)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_FOLLOWING")
+	assert.Contains(t, rec.Body.String(), "b8dc75cf-1cb5-46c9-b14b-5f1ffbd782c9")
+}
+
+// invalidate も self / 不在 user を upstream と同じエラーで拒否する (#1562)。
+func TestInvalidate_SelfRejected(t *testing.T) {
+	h, repo := newTestHandler(t)
+	admin := addUser(repo, "admin", false)
+	rec := postJSON(h.Invalidate, `{"userId":"admin"}`, admin)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FOLLOWER_IS_YOURSELF")
+	assert.Contains(t, rec.Body.String(), "07dc03b9-03da-422d-885b-438313707662")
+}
+
+func TestInvalidate_NoSuchUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	admin := addUser(repo, "admin", false)
+	rec := postJSON(h.Invalidate, `{"userId":"ghost"}`, admin)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "b77e6ae6-a3e5-40da-9cc8-c240115479cc")
 }
 
 func TestUpdateFollowAll_WithFields(t *testing.T) {
@@ -78,7 +139,7 @@ func TestUpdateFollow_NotifyNone_NormalizedToNull(t *testing.T) {
 	}
 
 	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"none"}`, alice)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	// notify="none" → DB の Notify 列が nil (= SQL NULL) になる
 	assert.Nil(t, fRepo.Followings["f1"].Notify, "notify=none must normalize to nil for following/list notification=true filter")
 }
@@ -95,7 +156,7 @@ func TestUpdateFollow_NotifyNormal_StoredAsString(t *testing.T) {
 	}
 
 	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"normal"}`, alice)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, fRepo.Followings["f1"].Notify)
 	assert.Equal(t, "normal", *fRepo.Followings["f1"].Notify)
 }

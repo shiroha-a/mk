@@ -261,6 +261,22 @@ func TestCreate_Blocked(t *testing.T) {
 	// upstream Misskey TS と同じ 400 BLOCKED (= drop-in 互換、#872)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"code":"BLOCKED"`)
+	assert.Contains(t, rec.Body.String(), "c4ab57cc-4e41-45e9-bfd9-584f61e35ce0")
+}
+
+// follower 自身が followee を block している方向は BLOCKED ではなく BLOCKING
+// (upstream create.ts の blocking エラー、#1562)。
+func TestCreate_Blocking(t *testing.T) {
+	h, repo := newTestHandler(t)
+	alice := addUser(repo, "alice", false)
+	addUser(repo, "bob", false)
+	// alice -> bob を follow しようとして alice が bob をブロックしている状況
+	h.followingService.SetBlockingChecker(&stubBlockedChecker{blockerID: "alice", blockeeID: "bob"})
+
+	rec := postJSON(h.Create, `{"userId": "bob"}`, alice)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"BLOCKING"`)
+	assert.Contains(t, rec.Body.String(), "4e2206ec-aa4f-4960-b865-6c23ac38e2d9")
 }
 
 func TestCreate_InvalidParam(t *testing.T) {
@@ -396,15 +412,34 @@ func TestCancelRequest_Success(t *testing.T) {
 	postJSON(h.Create, `{"userId": "bob"}`, alice)
 
 	rec := postJSON(h.CancelRequest, `{"userId": "bob"}`, alice)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// upstream requests/cancel.ts は packed followee (UserLite) を 200 で返す (#1562)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "bob", body["id"])
 }
 
 func TestCancelRequest_NotFound(t *testing.T) {
 	h, repo := newTestHandler(t)
 	alice := addUser(repo, "alice", false)
+	addUser(repo, "bob", true)
 
+	// request を送っていない → upstream の公開エラー FOLLOW_REQUEST_NOT_FOUND
+	// (service 内部 id 流用の旧 NO_FOLLOW_REQUEST から変更、#1562)
 	rec := postJSON(h.CancelRequest, `{"userId": "bob"}`, alice)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FOLLOW_REQUEST_NOT_FOUND")
+	assert.Contains(t, rec.Body.String(), "089b125b-d338-482a-9a09-e2622ac9f8d4")
+}
+
+func TestCancelRequest_NoSuchUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	alice := addUser(repo, "alice", false)
+
+	rec := postJSON(h.CancelRequest, `{"userId": "ghost"}`, alice)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab")
 }
 
 func TestCancelRequest_InvalidParam(t *testing.T) {
