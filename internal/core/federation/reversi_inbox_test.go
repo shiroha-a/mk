@@ -74,6 +74,36 @@ func (r *fedFakeReversiRepo) Update(g *model.ReversiGame) error {
 	return nil
 }
 
+func (r *fedFakeReversiRepo) UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g, ok := r.games[gameID]
+	if !ok || g.IsStarted || g.IsEnded {
+		return nil, nil
+	}
+	if user1 {
+		g.User1Ready = ready
+	} else {
+		g.User2Ready = ready
+	}
+	clone := *g
+	return &clone, nil
+}
+
+func (r *fedFakeReversiRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stored, ok := r.games[g.ID]
+	if !ok || stored.IsStarted {
+		return false, nil
+	}
+	stored.Black = g.Black
+	stored.IsStarted = true
+	stored.StartedAt = g.StartedAt
+	stored.CRC32 = g.CRC32
+	return true, nil
+}
+
 func (r *fedFakeReversiRepo) ListByUser(userID string, _ int) ([]*model.ReversiGame, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

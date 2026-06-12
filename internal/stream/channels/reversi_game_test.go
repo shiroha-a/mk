@@ -34,6 +34,30 @@ func (r *channelFakeRepo) Update(g *model.ReversiGame) error {
 	r.games[g.ID] = g
 	return nil
 }
+func (r *channelFakeRepo) UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error) {
+	g, ok := r.games[gameID]
+	if !ok || g.IsStarted || g.IsEnded {
+		return nil, nil
+	}
+	if user1 {
+		g.User1Ready = ready
+	} else {
+		g.User2Ready = ready
+	}
+	clone := *g
+	return &clone, nil
+}
+func (r *channelFakeRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
+	stored, ok := r.games[g.ID]
+	if !ok || stored.IsStarted {
+		return false, nil
+	}
+	stored.Black = g.Black
+	stored.IsStarted = true
+	stored.StartedAt = g.StartedAt
+	stored.CRC32 = g.CRC32
+	return true, nil
+}
 func (r *channelFakeRepo) ListByUser(_ string, _ int) ([]*model.ReversiGame, error) {
 	return nil, nil
 }

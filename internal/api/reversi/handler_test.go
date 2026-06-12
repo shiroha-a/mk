@@ -53,6 +53,31 @@ func (m *mockReversiRepo) Update(g *model.ReversiGame) error {
 	return nil
 }
 
+func (m *mockReversiRepo) UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error) {
+	g, ok := m.games[gameID]
+	if !ok || g.IsStarted || g.IsEnded {
+		return nil, nil
+	}
+	if user1 {
+		g.User1Ready = ready
+	} else {
+		g.User2Ready = ready
+	}
+	return g, nil
+}
+
+func (m *mockReversiRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
+	stored, ok := m.games[g.ID]
+	if !ok || stored.IsStarted {
+		return false, nil
+	}
+	stored.Black = g.Black
+	stored.IsStarted = true
+	stored.StartedAt = g.StartedAt
+	stored.CRC32 = g.CRC32
+	return true, nil
+}
+
 func (m *mockReversiRepo) ListByUser(userID string, limit int) ([]*model.ReversiGame, error) {
 	var result []*model.ReversiGame
 	for _, g := range m.games {

@@ -1,7 +1,10 @@
 package repository
 
 import (
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -38,6 +41,143 @@ func TestReversiRepository_DeleteOutdatedGames(t *testing.T) {
 	assert.NoError(t, err, "開始済みは残る")
 	_, err = repo.FindByID("zzz_new_unstarted")
 	assert.NoError(t, err, "新しい game は残る")
+}
+
+// TestReversiRepository_UpdateReadyState_Guards verifies the atomic ready
+// update and its pre-start guard semantics (#1626).
+func TestReversiRepository_UpdateReadyState_Guards(t *testing.T) {
+	repo := NewReversiRepository(testDB)
+	u1 := insertTestUser(t, "u_revg_1", "reversigrd1")
+	defer cleanupUser(t, u1.ID)
+	u2 := insertTestUser(t, "u_revg_2", "reversigrd2")
+	defer cleanupUser(t, u2.ID)
+
+	game := &model.ReversiGame{
+		ID: "rev_grd_1", User1ID: u1.ID, User2ID: u2.ID,
+		Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+	}
+	require.NoError(t, repo.Create(game))
+	defer testDB.Exec(`DELETE FROM "reversi_game" WHERE id = ?`, game.ID)
+
+	// 正常系: 自分のカラムだけ更新され、最新行が返る
+	got, err := repo.UpdateReadyState(game.ID, true, true)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.User1Ready)
+	assert.False(t, got.User2Ready)
+
+	got, err = repo.UpdateReadyState(game.ID, false, true)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.User1Ready, "user2側の更新でuser1Readyが失われてはならない")
+	assert.True(t, got.User2Ready)
+
+	// started後のready変更はguardで無視され(nil, nil)が返る
+	require.NoError(t, testDB.Exec(`UPDATE "reversi_game" SET "isStarted" = true WHERE id = ?`, game.ID).Error)
+	got, err = repo.UpdateReadyState(game.ID, true, false)
+	require.NoError(t, err)
+	assert.Nil(t, got, "started後のready変更はguardで弾かれる")
+
+	// 存在しない行も(nil, nil)
+	got, err = repo.UpdateReadyState("rev_grd_ghost", true, true)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// TestReversiRepository_UpdateReadyState_ConcurrentNoLostUpdate is the
+// regression test for #1626: concurrent per-player ready updates must not
+// clobber each other. full-row Saveに退行するとここが高確率で落ちる。
+func TestReversiRepository_UpdateReadyState_ConcurrentNoLostUpdate(t *testing.T) {
+	repo := NewReversiRepository(testDB)
+	u1 := insertTestUser(t, "u_revc_1", "reversicon1")
+	defer cleanupUser(t, u1.ID)
+	u2 := insertTestUser(t, "u_revc_2", "reversicon2")
+	defer cleanupUser(t, u2.ID)
+
+	for i := 0; i < 20; i++ {
+		gameID := fmt.Sprintf("rev_con_%02d", i)
+		game := &model.ReversiGame{
+			ID: gameID, User1ID: u1.ID, User2ID: u2.ID,
+			Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+		}
+		require.NoError(t, repo.Create(game))
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		errs := make([]error, 2)
+		go func() {
+			defer wg.Done()
+			_, errs[0] = repo.UpdateReadyState(gameID, true, true)
+		}()
+		go func() {
+			defer wg.Done()
+			_, errs[1] = repo.UpdateReadyState(gameID, false, true)
+		}()
+		wg.Wait()
+		require.NoError(t, errs[0])
+		require.NoError(t, errs[1])
+
+		got, err := repo.FindByID(gameID)
+		require.NoError(t, err)
+		assert.True(t, got.User1Ready, "iteration %d: user1Ready must survive concurrent update", i)
+		assert.True(t, got.User2Ready, "iteration %d: user2Ready must survive concurrent update", i)
+		require.NoError(t, repo.Delete(gameID))
+	}
+}
+
+// TestReversiRepository_MarkStarted_SingleWinner verifies the started claim is
+// won by exactly one concurrent caller (#1626).
+func TestReversiRepository_MarkStarted_SingleWinner(t *testing.T) {
+	repo := NewReversiRepository(testDB)
+	u1 := insertTestUser(t, "u_revm_1", "reversimrk1")
+	defer cleanupUser(t, u1.ID)
+	u2 := insertTestUser(t, "u_revm_2", "reversimrk2")
+	defer cleanupUser(t, u2.ID)
+
+	for i := 0; i < 10; i++ {
+		gameID := fmt.Sprintf("rev_mrk_%02d", i)
+		game := &model.ReversiGame{
+			ID: gameID, User1ID: u1.ID, User2ID: u2.ID,
+			Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+		}
+		require.NoError(t, repo.Create(game))
+
+		black := 1
+		now := time.Now()
+		crc := "12345"
+		claim := &model.ReversiGame{ID: gameID, Black: &black, StartedAt: &now, CRC32: &crc}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		wins := make([]bool, 2)
+		errs := make([]error, 2)
+		for j := 0; j < 2; j++ {
+			go func(j int) {
+				defer wg.Done()
+				wins[j], errs[j] = repo.MarkStarted(claim)
+			}(j)
+		}
+		wg.Wait()
+		require.NoError(t, errs[0])
+		require.NoError(t, errs[1])
+		winners := 0
+		for _, w := range wins {
+			if w {
+				winners++
+			}
+		}
+		assert.Equal(t, 1, winners, "iteration %d: exactly one caller must win the start claim", i)
+
+		got, err := repo.FindByID(gameID)
+		require.NoError(t, err)
+		assert.True(t, got.IsStarted)
+		require.NotNil(t, got.Black)
+		assert.Equal(t, 1, *got.Black)
+		require.NotNil(t, got.CRC32)
+		assert.Equal(t, "12345", *got.CRC32)
+		assert.NotNil(t, got.StartedAt)
+		require.NoError(t, repo.Delete(gameID))
+	}
 }
 
 func TestReversiRepository_CRUD(t *testing.T) {

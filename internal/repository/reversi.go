@@ -10,6 +10,19 @@ type ReversiRepository interface {
 	Create(game *model.ReversiGame) error
 	FindByID(id string) (*model.ReversiGame, error)
 	Update(game *model.ReversiGame) error
+	// UpdateReadyState atomically sets one player's ready flag with a
+	// pre-start guard and returns the freshly reloaded row. Returns
+	// (nil, nil) when the guard fails (game already started/ended or the
+	// row is gone). ローカルWSと連合inboxの並行readyがfull-row Saveで互いの
+	// フラグを上書きするlost update (#1626) を防ぐため、自分のカラムだけを
+	// 単一UPDATEで書く。
+	UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error)
+	// MarkStarted atomically claims the not-started -> started transition,
+	// persisting the start fields (black / isStarted / startedAt / crc32)
+	// only when the row is not yet started. Returns whether this caller won
+	// the claim. 並行UpdateReadyの両者がboth-readyを観測してStartGameに
+	// 二重到達したとき、startedイベントを一度だけ発火させるための排他 (#1626)。
+	MarkStarted(game *model.ReversiGame) (bool, error)
 	ListByUser(userID string, limit int) ([]*model.ReversiGame, error)
 	// ListByUserCursor returns user's games (User1 or User2) with keyset
 	// pagination via sinceID / untilID。limit は上限 (0 → 10)。id DESC 順。
@@ -68,6 +81,43 @@ func (r *reversiRepository) FindByFederationID(federationID string) (*model.Reve
 
 func (r *reversiRepository) Update(game *model.ReversiGame) error {
 	return r.db.Save(game).Error
+}
+
+func (r *reversiRepository) UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error) {
+	column := "user2Ready"
+	if user1 {
+		column = "user1Ready"
+	}
+	// started/ended後のready変更は無視する (本家gameReadyと同じセマンティクス)。
+	// guardをUPDATE自体に含めることで、pre-checkとの間のTOCTOUも閉じる。
+	res := r.db.Model(&model.ReversiGame{}).
+		Where(`"id" = ? AND "isStarted" = false AND "isEnded" = false`, gameID).
+		UpdateColumn(column, ready)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, nil
+	}
+	// 書き込み後に読み直すことで、相手側の並行更新がcommit済みなら必ず観測
+	// できる。両者の更新がどう交錯しても、少なくとも後にre-readした側は
+	// both-ready=trueを見る。
+	return r.FindByID(gameID)
+}
+
+func (r *reversiRepository) MarkStarted(game *model.ReversiGame) (bool, error) {
+	res := r.db.Model(&model.ReversiGame{}).
+		Where(`"id" = ? AND "isStarted" = false`, game.ID).
+		Updates(map[string]any{
+			"black":     game.Black,
+			"isStarted": true,
+			"startedAt": game.StartedAt,
+			"crc32":     game.CRC32,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 func (r *reversiRepository) ListByUser(userID string, limit int) ([]*model.ReversiGame, error) {

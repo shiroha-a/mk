@@ -360,13 +360,24 @@ func (s *Service) UpdateReady(ctx context.Context, gameID, userID string, ready 
 	if !isPlayer(game, userID) {
 		return ErrNotPlayer
 	}
-	if game.User1ID == userID {
-		game.User1Ready = ready
-	} else {
-		game.User2Ready = ready
-	}
-	if err := s.repo.Update(game); err != nil {
+	// ローカルWS経由のreadyと連合inbox経由の相手readyが並行して走ると、
+	// Get→full-row Saveのread-modify-writeでは相手のready=trueをstale値で
+	// 上書きするlost updateが起きる (#1626)。自分のカラムだけをguard付き
+	// 単一UPDATEで書き、読み直した最新行で以降の判定を行う。
+	game, err = s.repo.UpdateReadyState(gameID, game.User1ID == userID, ready)
+	if err != nil {
 		return err
+	}
+	if game == nil {
+		// guard不成立: pre-checkとUPDATEの間にstarted/ended/削除へ遷移した
+		fresh, ferr := s.Get(ctx, gameID)
+		if ferr != nil {
+			return ferr
+		}
+		if fresh.IsEnded {
+			return ErrAlreadyEnded
+		}
+		return ErrAlreadyStarted
 	}
 	s.publish(gameID, "changeReadyStates", map[string]any{
 		"user1": game.User1Ready,
@@ -492,8 +503,15 @@ func (s *Service) StartGame(ctx context.Context, game *model.ReversiGame) error 
 		game.CRC32 = &crc
 	}
 
-	if err := s.repo.Update(game); err != nil {
+	// 並行UpdateReadyの両者がboth-readyを観測すると、StartGameに二重到達
+	// する (#1626)。isStarted=falseをguardにしたatomic claimで先勝ちを決め、
+	// 負けた側はtimer設定もstarted publishもせず静かに成功扱いにする。
+	claimed, err := s.repo.MarkStarted(game)
+	if err != nil {
 		return err
+	}
+	if !claimed {
+		return nil
 	}
 	// 初期ターンタイマー: logsCount=0 (まだ一手も置かれていない)
 	s.setTurnTimer(ctx, game.ID, 0, game.TimeLimitForEachTurn)

@@ -61,6 +61,47 @@ func (r *fakeRepo) Update(g *model.ReversiGame) error {
 	return nil
 }
 
+func (r *fakeRepo) UpdateReadyState(gameID string, user1 bool, ready bool) (*model.ReversiGame, error) {
+	r.mu.Lock()
+	if r.updateErr != nil {
+		r.mu.Unlock()
+		return nil, r.updateErr
+	}
+	g, ok := r.games[gameID]
+	if !ok || g.IsStarted || g.IsEnded {
+		r.mu.Unlock()
+		return nil, nil
+	}
+	// 実DB実装と同じく自分のカラムだけを書き換える (#1626)
+	if user1 {
+		g.User1Ready = ready
+	} else {
+		g.User2Ready = ready
+	}
+	r.mu.Unlock()
+	// 実DB実装ではUPDATEとre-readが別ステートメントなので、両goroutineが
+	// both-readyを観測してStartGameへ二重到達し得る。fakeも同じ二段構成に
+	// して、MarkStartedのclaim排他をserviceテストで踏めるようにする。
+	return r.FindByID(gameID)
+}
+
+func (r *fakeRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		return false, r.updateErr
+	}
+	stored, ok := r.games[g.ID]
+	if !ok || stored.IsStarted {
+		return false, nil
+	}
+	stored.Black = g.Black
+	stored.IsStarted = true
+	stored.StartedAt = g.StartedAt
+	stored.CRC32 = g.CRC32
+	return true, nil
+}
+
 func (r *fakeRepo) ListByUser(userID string, limit int) ([]*model.ReversiGame, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
