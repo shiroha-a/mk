@@ -1,0 +1,28 @@
+-- #1625 (#1564 follow-up): drive/files/show の url anyOf 検索
+-- (DriveFileRepository.FindByAnyURL) は
+--   "url" = ? OR "webpublicUrl" = ? OR "thumbnailUrl" = ?
+-- で引くが、3 列とも index が無く行数比例の全行走査になっていた (GORM First
+-- の ORDER BY id LIMIT 1 が付くため実 plan は pkey 順の Index Scan + Filter
+-- だが、ヒットするまで O(全行) なのは seq scan と同じ)。drive_file はローカル
+-- アップロード + リモートメディアキャッシュで数百万行に達するため、3 列
+-- それぞれに index を張り PostgreSQL の BitmapOr で結合させる。
+--
+-- 本家 Misskey TS の MiDriveFile にはこの 3 列の index は存在しない (本家の
+-- files/show url 検索も seq scan)。mk-go では 000040 (IDX_drive_file_uri) と
+-- 同じく実 query 経路の保護を優先して独自に追加する。
+--
+-- url 列は NOT NULL のため部分 index にしない (000060/000061 の nullable 列
+-- とは異なる)。大規模テーブルへの index 追加なので CONCURRENTLY で書き込みを
+-- block せずに構築する。CONCURRENTLY は単一文でしか実行できないため、3 index
+-- を 000059/000060/000061 の 3 migration に分割している。
+-- 失敗時の回復手順 (INVALID index の DROP + migrate dirty 解除) は 000054 の
+-- コメントを参照 (対象 index 名は読み替える)。
+--
+-- 注意: url は varchar(1024) のため、octet_length > 約 2688 bytes の多バイト
+-- URL 行が既存 DB にあると btree の index row 上限 (約 2704 bytes) で build が
+-- 失敗する。mk-go 生成データでは発生しない (サーバー生成 URL は短い ASCII、
+-- リモート添付は url = uri で 000040 の uri index が既に同じ制約を課している)
+-- が、drop-in で TS 時代から引き継いだ DB に適用する際は事前に
+--   SELECT count(*) FROM drive_file WHERE octet_length("url") > 2688;
+-- が 0 であることを確認すると保険になる。
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_drive_file_url" ON "drive_file" ("url");

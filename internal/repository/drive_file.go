@@ -21,7 +21,8 @@ type DriveFileRepository interface {
 	FindByAccessKey(accessKey string) (*model.DriveFile, error)
 	// FindByAnyURL looks up a DriveFile whose url / webpublicUrl /
 	// thumbnailUrl matches. upstream drive/files/show の url 指定検索
-	// (anyOf param) で使う (#1564)。
+	// (anyOf param) で使う (#1564)。3 列の index は migration
+	// 000059-000061 で追加済み (#1625、BitmapOr で結合される)。
 	FindByAnyURL(url string) (*model.DriveFile, error)
 	// FindByAnyAccessKey looks up a DriveFile whose primary / thumbnail /
 	// webpublic access key matches. Used by `/files/:accessKey` to resolve
@@ -151,6 +152,8 @@ func (r *driveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.DriveFi
 
 // FindByAnyURL resolves a file by matching url, webpublicUrl, or
 // thumbnailUrl (upstream drive/files/show の url anyOf 検索、#1564)。
+// OR 3 条件は migration 000059-000061 (#1625) の各列 index を BitmapOr で
+// 束ねて解決される (seq scan 回避)。
 func (r *driveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error) {
 	if url == "" {
 		return nil, gorm.ErrRecordNotFound

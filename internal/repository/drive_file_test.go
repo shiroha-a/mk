@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -225,6 +226,58 @@ func TestDriveFileRepository_FindByAnyURL(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.FindByAnyURL("http://example.com/none")
 	assert.Error(t, err)
+}
+
+// TestDriveFileRepository_URLIndexes verifies that the #1625 url-column
+// indexes (migration 000059-000061) are created and actually usable for the
+// FindByAnyURL OR-equality query. testutil.ApplyMigrations は migration の
+// エラーを swallow するため、これらが落ちても CI は沈黙し drive_file 肥大に
+// 比例して静かに性能退行する。000054/000055 の GIN index guard
+// (TestNoteRepository_MentionsFileIdsGINIndexes) と同じ regression guard。
+func TestDriveFileRepository_URLIndexes(t *testing.T) {
+	// 1. index が存在すること (CONCURRENTLY migration が適用されたことの確認
+	//    も兼ねる)。nullable 列の 2 本は部分 index (WHERE IS NOT NULL) で
+	//    あることも固定する。
+	for _, tc := range []struct {
+		index   string
+		partial bool
+	}{
+		{"IDX_drive_file_url", false},
+		{"IDX_drive_file_webpublicUrl", true},
+		{"IDX_drive_file_thumbnailUrl", true},
+	} {
+		var indexdef string
+		err := testDB.Raw(
+			`SELECT indexdef FROM pg_indexes WHERE tablename = 'drive_file' AND indexname = ?`, tc.index,
+		).Scan(&indexdef).Error
+		require.NoError(t, err)
+		require.NotEmpty(t, indexdef, "index %s must exist (migration applied)", tc.index)
+		if tc.partial {
+			assert.Contains(t, indexdef, "IS NOT NULL", "%s must be a partial index", tc.index)
+		}
+	}
+
+	// 2. planner が各列の equality に index を選べること。小さな test テーブル
+	//    では planner が seq scan を選ぶため、同一接続上で enable_seqscan=off
+	//    を効かせて index 経路を強制し、plan に index 名が現れることを確認する
+	//    (index が無ければ強制しても seq scan のまま)。SET LOCAL は transaction
+	//    スコープなので Begin/Rollback で閉じる。
+	checkPlanUsesIndex := func(query, arg, indexName string) {
+		tx := testDB.Begin()
+		defer tx.Rollback()
+		require.NoError(t, tx.Exec(`SET LOCAL enable_seqscan = off`).Error)
+		var lines []string
+		require.NoError(t, tx.Raw(`EXPLAIN `+query, arg).Scan(&lines).Error)
+		plan := strings.Join(lines, "\n")
+		assert.Contains(t, plan, indexName,
+			"equality query should use %s under enable_seqscan=off; plan was:\n%s", indexName, plan)
+	}
+	checkPlanUsesIndex(
+		`SELECT * FROM "drive_file" WHERE "url" = ?`, "http://example.com/x", "IDX_drive_file_url")
+	checkPlanUsesIndex(
+		`SELECT * FROM "drive_file" WHERE "webpublicUrl" = ?`, "http://example.com/x", "IDX_drive_file_webpublicUrl")
+	checkPlanUsesIndex(
+		`SELECT * FROM "drive_file" WHERE "thumbnailUrl" = ?`, "http://example.com/x", "IDX_drive_file_thumbnailUrl")
 }
 
 func TestDriveFileRepository_FindByAnyAccessKey(t *testing.T) {
