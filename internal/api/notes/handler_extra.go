@@ -149,6 +149,7 @@ func (h *Handler) Mentions(c echo.Context) error {
 		SinceDate  *int64 `json:"sinceDate"`
 		UntilDate  *int64 `json:"untilDate"`
 		Visibility string `json:"visibility"`
+		Following  bool   `json:"following"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -161,7 +162,19 @@ func (h *Handler) Mentions(c echo.Context) error {
 	// note.visibility = <値> で exact-match し、未指定は全種別を返す。旧実装は
 	// post-fetch で specified / 非specified に振り分けていたため、ページ内が片方の
 	// 種別で埋まると limit 未満になる under-fill が起きていた。
-	notes, err := h.noteRepo.ListMentions(user.ID, req.Visibility, req.Limit, sinceID, untilID)
+	// following=true のとき followee + 自分の note のみに絞る (upstream
+	// mentions.ts following param、#1554)。
+	notes, err := h.noteRepo.ListMentions(user.ID, req.Visibility, req.Following, req.Limit, sinceID, untilID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// upstream mentions は generateBaseNoteFilteringQuery + generateMutedNoteThreadQuery
+	// で被block / mute / instance-mute / thread-mute を除外する (#1554)。
+	notes, err = h.applyMuteBlock(user, notes)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	notes, err = h.applyThreadMute(user, notes)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

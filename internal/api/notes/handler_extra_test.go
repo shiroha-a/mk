@@ -363,6 +363,35 @@ func TestMentions_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1554 mentions は viewer が mute した author の note を除外する。
+func TestMentions_FiltersMutedAuthor(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["mm1"] = &model.Note{ID: "mm1", UserID: "muted", Visibility: "public", Mentions: []string{"u1"}, User: &model.User{ID: "muted"}}
+	mutingRepo := testutil.NewMockMutingRepository()
+	mutingRepo.Mutings["mx"] = &model.Muting{ID: "mx", MuterID: "u1", MuteeID: "muted"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "u1", UsernameLower: "u1"}
+	h.SetMutingRepo(mutingRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	h.SetUserRepo(userRepo)
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{}`, &model.User{ID: "u1"}))
+	assert.False(t, ids["mm1"], "mute した author の mention note は除外される")
+}
+
+// #1554 mentions は muted thread の note を除外する (generateMutedNoteThreadQuery)。
+func TestMentions_FiltersThreadMute(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	thread := "rootthread"
+	noteRepo.Notes["mt1"] = &model.Note{ID: "mt1", UserID: "author", Visibility: "public", Mentions: []string{"u1"}, ThreadID: &thread, User: &model.User{ID: "author"}}
+	tmRepo := testutil.NewMockNoteThreadMutingRepository()
+	require.NoError(t, tmRepo.Create(&model.NoteThreadMuting{UserID: "u1", ThreadID: thread}))
+	h.SetThreadMutingRepo(tmRepo)
+
+	ids := mentionIDs(t, postExtra(h.Mentions, `{}`, &model.User{ID: "u1"}))
+	assert.False(t, ids["mt1"], "muted thread の mention note は除外される")
+}
+
 func mentionIDs(t *testing.T, rec *httptest.ResponseRecorder) map[string]bool {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -993,7 +1022,7 @@ func TestUnrenote_DeleteError(t *testing.T) {
 
 type failingMentionsRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingMentionsRepo) ListMentions(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingMentionsRepo) ListMentions(_, _ string, _ bool, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

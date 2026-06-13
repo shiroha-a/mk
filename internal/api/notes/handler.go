@@ -632,6 +632,20 @@ func (h *Handler) applyMuteBlock(viewer *model.User, notes []*model.Note) ([]*mo
 	return notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
 }
 
+// applyThreadMute drops notes belonging to a thread the viewer has muted
+// (upstream generateMutedNoteThreadQuery、#1554)。threadMutingRepo 未配線 /
+// viewer nil なら no-op。fail-closed: lookup エラーは呼び出し側で 500 にする。
+func (h *Handler) applyThreadMute(viewer *model.User, notes []*model.Note) ([]*model.Note, error) {
+	if viewer == nil || h.threadMutingRepo == nil {
+		return notes, nil
+	}
+	ids, err := h.threadMutingRepo.ListMutedThreadIDs(viewer.ID)
+	if err != nil {
+		return nil, err
+	}
+	return notesfilter.ApplyThreadMute(notes, ids), nil
+}
+
 // SearchRequest is the request body for notes/search.
 //
 // Misskey 本家と互換のフィールド構成。`sinceDate` / `untilDate` (unix milli)

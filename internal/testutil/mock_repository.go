@@ -1210,7 +1210,11 @@ func (m *MockNoteRepository) FindRenoteByUser(userID, renoteID string) (*model.N
 	return nil, ErrNotFound
 }
 
-func (m *MockNoteRepository) ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+// ListMentions accepts the `following` flag for signature parity but does not
+// filter on it: the mock has no following graph, so the followee restriction
+// is exercised by the real-DB repository test instead (#1554)。
+func (m *MockNoteRepository) ListMentions(userID, visibility string, following bool, limit int, sinceID, untilID string) ([]*model.Note, error) {
+	_ = following
 	if limit <= 0 {
 		limit = 10
 	}
@@ -6840,6 +6844,16 @@ func (m *MockNoteThreadMutingRepository) Delete(userID, threadID string) error {
 func (m *MockNoteThreadMutingRepository) Exists(userID, threadID string) (bool, error) {
 	_, ok := m.Mutings[userID+":"+threadID]
 	return ok, nil
+}
+
+func (m *MockNoteThreadMutingRepository) ListMutedThreadIDs(userID string) ([]string, error) {
+	var ids []string
+	for _, mut := range m.Mutings {
+		if mut.UserID == userID {
+			ids = append(ids, mut.ThreadID)
+		}
+	}
+	return ids, nil
 }
 
 // MockUsedUsernameRepository is a test double for repository.UsedUsernameRepository.

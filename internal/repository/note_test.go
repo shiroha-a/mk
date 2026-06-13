@@ -1824,18 +1824,59 @@ func TestNoteRepository_ListMentions(t *testing.T) {
 	require.NoError(t, testDB.Create(n).Error)
 	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 
-	notes, err := repo.ListMentions(mentionee.ID, "", 10, "", "")
+	notes, err := repo.ListMentions(mentionee.ID, "", false, 10, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
 	// with cursors
-	notes, err = repo.ListMentions(mentionee.ID, "", 10, "", "zzz")
+	notes, err = repo.ListMentions(mentionee.ID, "", false, 10, "", "zzz")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
-	notes, err = repo.ListMentions(mentionee.ID, "", 10, "000", "")
+	notes, err = repo.ListMentions(mentionee.ID, "", false, 10, "000", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
+}
+
+// #1554 following=true は note.userId が viewer の followee または viewer 自身に
+// 限定する (upstream mentions.ts following param)。
+func TestNoteRepository_ListMentions_Following(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "lmf_v", "lmfviewer")
+	followed := insertTestUser(t, "lmf_f", "lmffollowed")
+	stranger := insertTestUser(t, "lmf_s", "lmfstranger")
+	defer cleanupUser(t, viewer.ID)
+	defer cleanupUser(t, followed.ID)
+	defer cleanupUser(t, stranger.ID)
+	// viewer は followed を follow する。
+	require.NoError(t, testDB.Create(&model.Following{ID: "lmf_fl1", FollowerID: viewer.ID, FolloweeID: followed.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "lmf_fl1")
+
+	// followed / stranger / viewer 自身が viewer を mention する 3 note。
+	for _, n := range []*model.Note{
+		{ID: "lmf_nf", UserID: followed.ID, Visibility: "public", Mentions: []string{viewer.ID}},
+		{ID: "lmf_ns", UserID: stranger.ID, Visibility: "public", Mentions: []string{viewer.ID}},
+		{ID: "lmf_nself", UserID: viewer.ID, Visibility: "public", Mentions: []string{viewer.ID}},
+	} {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	// following=false は全件 (3)。
+	all, err := repo.ListMentions(viewer.ID, "", false, 50, "", "")
+	require.NoError(t, err)
+	assert.Len(t, all, 3)
+
+	// following=true は followed + 自分の note のみ (stranger 除外)。
+	followingOnly, err := repo.ListMentions(viewer.ID, "", true, 50, "", "")
+	require.NoError(t, err)
+	ids := make(map[string]bool)
+	for _, n := range followingOnly {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["lmf_nf"], "followee の note は含まれる")
+	assert.True(t, ids["lmf_nself"], "自分の note は含まれる")
+	assert.False(t, ids["lmf_ns"], "非フォローの stranger の note は除外される")
 }
 
 // TestNoteRepository_ListMentions_VisibilityPushDown は #1441 を検証する。
@@ -1875,7 +1916,7 @@ func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 	}
 
 	// follow なし / visibleUserIds 非対象 -> public のみ (followers/specified は隠れる)。
-	out, err := repo.ListMentions(victim.ID, "", 50, "", "")
+	out, err := repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_lm_pub"}, idsOf(out))
 
@@ -1883,20 +1924,20 @@ func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 	f := &model.Following{ID: "fl_lm_1", FollowerID: victim.ID, FolloweeID: author.ID}
 	require.NoError(t, followingRepo.Create(f))
 	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
-	out, err = repo.ListMentions(victim.ID, "", 50, "", "")
+	out, err = repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub"}, idsOf(out))
 
 	// specified の visibleUserIds に victim を含めると specified も見える。
 	require.NoError(t, repo.UpdateFields("n_lm_spec", map[string]any{"visibleUserIds": pq.StringArray{victim.ID}}))
-	out, err = repo.ListMentions(victim.ID, "", 50, "", "")
+	out, err = repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub", "n_lm_spec"}, idsOf(out))
 }
 
 func TestNoteRepository_ListMentions_DefaultLimit(t *testing.T) {
 	repo := NewNoteRepository(testDB)
-	notes, err := repo.ListMentions("nobody", "", 0, "", "")
+	notes, err := repo.ListMentions("nobody", "", false, 0, "", "")
 	require.NoError(t, err)
 	assert.Empty(t, notes)
 }
@@ -1905,7 +1946,7 @@ func TestNoteRepository_ListMentions_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewNoteRepository(testDB.WithContext(ctx))
-	_, err := repo.ListMentions("x", "", 10, "", "")
+	_, err := repo.ListMentions("x", "", false, 10, "", "")
 	assert.Error(t, err)
 }
 
@@ -1940,7 +1981,7 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	}
 
 	// public のみ limit=5 -> public が 5 件きっちり (specified がスロットを食わない)。
-	pub, err := repo.ListMentions(me.ID, "public", 5, "", "")
+	pub, err := repo.ListMentions(me.ID, "public", false, 5, "", "")
 	require.NoError(t, err)
 	require.Len(t, pub, 5, "public 指定で under-fill しない")
 	for _, n := range pub {
@@ -1948,7 +1989,7 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	}
 
 	// specified のみ limit=5 -> specified が 5 件。
-	spec, err := repo.ListMentions(me.ID, "specified", 5, "", "")
+	spec, err := repo.ListMentions(me.ID, "specified", false, 5, "", "")
 	require.NoError(t, err)
 	require.Len(t, spec, 5, "specified 指定で under-fill しない")
 	for _, n := range spec {
@@ -1956,7 +1997,7 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	}
 
 	// 未指定 (default) -> 全種別 (TS 一致): public + specified の両方が出る。
-	all, err := repo.ListMentions(me.ID, "", 100, "", "")
+	all, err := repo.ListMentions(me.ID, "", false, 100, "", "")
 	require.NoError(t, err)
 	assert.Len(t, all, 10, "default は全種別を返す")
 }
@@ -2001,19 +2042,19 @@ func TestNoteRepository_ListMentions_VisibleUserIDsOnly(t *testing.T) {
 
 	// recipient (default = 全種別): visibleUserIds 由来 / mentions+visibleUserIds
 	// 両方とも 1 行ずつ。OR は単一行 boolean なので重複しない。
-	out, err := repo.ListMentions(recipient.ID, "", 50, "", "")
+	out, err := repo.ListMentions(recipient.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "@mention の無い specified DM が visibleUserIds 経由で出る")
 	assert.Equal(t, 1, countOf(out, "n_vu_both"), "mentions と visibleUserIds 両方に入っても重複行は出ない")
 
 	// recipient (Direct タブ = visibility=specified): 同じく両方出る。
-	out, err = repo.ListMentions(recipient.ID, "specified", 50, "", "")
+	out, err = repo.ListMentions(recipient.ID, "specified", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, countOf(out, "n_vu_dm"), "Direct タブでも visibleUserIds-only DM が出る")
 	assert.Equal(t, 1, countOf(out, "n_vu_both"))
 
 	// stranger: 宛先でも mention 対象でもないので何も出ない (#1441 gate 整合)。
-	out, err = repo.ListMentions(stranger.ID, "", 50, "", "")
+	out, err = repo.ListMentions(stranger.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, 0, countOf(out, "n_vu_dm"))
 	assert.Equal(t, 0, countOf(out, "n_vu_both"))

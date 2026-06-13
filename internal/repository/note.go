@@ -131,8 +131,9 @@ type NoteRepository interface {
 	// visibility が空でなければ note.visibility = visibility の exact-match で
 	// 絞る (upstream TS notes/mentions と同じ; 空は全種別)。振り分けを LIMIT 前に
 	// SQL で行うことで handler の post-fetch 振り分けによる under-fill を解消する
-	// (#1451)。
-	ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	// (#1451)。following=true のとき note.userId が viewer の followee または
+	// viewer 自身に限定する (upstream mentions.ts following param、#1554)。
+	ListMentions(userID, visibility string, following bool, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
 	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
 	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
@@ -730,7 +731,7 @@ func (r *noteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note,
 	return &note, nil
 }
 
-func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) ListMentions(userID, visibility string, following bool, limit int, sinceID, untilID string) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -763,6 +764,12 @@ func (r *noteRepository) ListMentions(userID, visibility string, limit int, sinc
 	// 未知の値は単に 0 件になる (TS と同じ挙動)。
 	if visibility != "" {
 		q = q.Where(`"visibility" = ?`, visibility)
+	}
+	// following=true: note.userId が viewer の followee または viewer 自身に限定
+	// (upstream mentions.ts:84-87)。subquery は ListHomeTimeline と同じ following
+	// テーブル参照。
+	if following {
+		q = q.Where(`("userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?) OR "userId" = ?)`, userID, userID)
 	}
 	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
