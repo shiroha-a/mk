@@ -1365,3 +1365,57 @@ func TestAttachedChatMessages_NoFileRepoReturnsEmpty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "[]\n", rec.Body.String())
 }
+
+// #1556 room message の reactions は {user, reaction} を含む (full/room schema)。
+// user を解決できない reaction (削除済 user 等) は drop して user 欠落を防ぐ。
+func TestPackMessageDetailed_RoomReactionsIncludeUser(t *testing.T) {
+	h, _ := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	h.SetUserRepo(userRepo)
+
+	roomID := "room1"
+	m := &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID,
+		Reactions: []string{"u1/👍", "ghost/😀"}}
+	out := h.packMessageDetailed(m, "viewer")
+
+	reactions, ok := out["reactions"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, reactions, 1, "u1 は解決され、ghost (未解決) は drop")
+	assert.Equal(t, "👍", reactions[0]["reaction"])
+	user, ok := reactions[0]["user"].(map[string]any)
+	require.True(t, ok, "room reaction は user (UserLite) を含む")
+	assert.Equal(t, "u1", user["id"])
+}
+
+// 1on1 (lite) message の reactions は user を含まない。
+func TestPackMessageDetailed_1on1ReactionsOmitUser(t *testing.T) {
+	h, _ := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	h.SetUserRepo(userRepo)
+
+	toUser := "u3"
+	m := &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &toUser,
+		Reactions: []string{"u1/👍"}}
+	out := h.packMessageDetailed(m, "viewer")
+
+	reactions, ok := out["reactions"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, reactions, 1)
+	assert.Equal(t, "👍", reactions[0]["reaction"])
+	_, hasUser := reactions[0]["user"]
+	assert.False(t, hasUser, "1on1 lite reactions は user を省略する")
+}
+
+// userRepo 未配線の room message は base の {reaction} に degrade する (crash しない)。
+func TestPackMessageDetailed_RoomReactionsNoUserRepoDegrades(t *testing.T) {
+	h, _ := newTestHandler() // SetUserRepo を呼ばない
+	roomID := "room1"
+	m := &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID,
+		Reactions: []string{"u1/👍"}}
+	out := h.packMessageDetailed(m, "viewer")
+	reactions := out["reactions"].([]map[string]any)
+	require.Len(t, reactions, 1)
+	assert.Equal(t, "👍", reactions[0]["reaction"])
+}

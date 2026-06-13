@@ -371,7 +371,67 @@ func (h *Handler) packMessageDetailed(m *model.ChatMessage, meID string) map[str
 		// 旧 chat 実装ではこの key で判定していた残存 client がある。
 		result["room"] = h.packRoomDetailed(m.ToRoom, meID)
 	}
+	// room message の reactions は full/room schema で user (UserLite) を含む
+	// (upstream packMessageForRoom、#1556)。1on1 lite は user を持たないので
+	// base の {reaction} のまま。room 判定は ToRoomID 列で行う (ToRoom の eager
+	// load 有無に依らない)。
+	//
+	// 既知の差分: upstream は messages/show・search・history で full schema
+	// (packedChatMessageSchema) を使い、1on1 message でも reactions[].user を
+	// 含める。mk-go は全 endpoint が単一の packMessageDetailed を通り、room
+	// だけ user を付けるため、これらの endpoint で 1on1 message を返すと user が
+	// 欠ける。1on1 は参加者が 2 人で reactor が自明なため実害は小さく、room
+	// (多人数) の reactor 表示を優先して本 PR では room のみ対応する。
+	if m.ToRoomID != nil {
+		result["reactions"] = h.packRoomReactions(m)
+	}
 	return result
+}
+
+// packRoomReactions builds room-message reactions as {user, reaction} by
+// resolving the stored "<userId>/<reaction>" form to a UserLite (#1556)。
+// full/room schema は reactions[].user を required non-null とするため、user を
+// 解決できた reaction だけ emit する (= 削除済 user の reaction は drop して、
+// user 欠落で client が crash しないよう保証)。userRepo 未配線 (test / early
+// boot) は base の {reaction} に degrade する。
+func (h *Handler) packRoomReactions(m *model.ChatMessage) []map[string]any {
+	if h.userRepo == nil {
+		return packChatReactions(m.Reactions)
+	}
+	type parsed struct{ userID, reaction string }
+	items := make([]parsed, 0, len(m.Reactions))
+	idSet := make(map[string]struct{}, len(m.Reactions))
+	for _, r := range m.Reactions {
+		uid, reaction := "", r
+		if i := strings.Index(r, "/"); i >= 0 {
+			uid, reaction = r[:i], r[i+1:]
+		}
+		items = append(items, parsed{uid, reaction})
+		if uid != "" {
+			idSet[uid] = struct{}{}
+		}
+	}
+	userByID := make(map[string]*model.User, len(idSet))
+	if len(idSet) > 0 {
+		ids := make([]string, 0, len(idSet))
+		for id := range idSet {
+			ids = append(ids, id)
+		}
+		if users, err := h.userRepo.FindManyByIDs(ids); err == nil {
+			for _, u := range users {
+				userByID[u.ID] = u
+			}
+		}
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		u, ok := userByID[it.userID]
+		if !ok {
+			continue // user 未解決 (削除済等) の reaction は drop
+		}
+		out = append(out, map[string]any{"user": packUser(u), "reaction": it.reaction})
+	}
+	return out
 }
 
 // packUser produces the UserLite shape consumed by FE chat components.
