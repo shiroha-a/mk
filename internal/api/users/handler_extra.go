@@ -293,19 +293,23 @@ func (h *Handler) Reactions(c echo.Context) error {
 	// reaction 先 note の author/reply/renote author を viewer が mute / 自分を
 	// block している場合は除外する (upstream reactions.ts:115-121 の isUserRelated、
 	// #1547)。ApplyMuteBlockChannel で生き残った note id のみ残す。
-	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil)
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	if len(sets.MutedUserIDs) > 0 || len(sets.BlockerIDs) > 0 {
+	if len(sets.MutedUserIDs) > 0 || len(sets.BlockerIDs) > 0 || len(sets.MutedInstances) > 0 {
 		rowNotes := make([]*model.Note, 0, len(rows))
 		for _, r := range rows {
 			if r.Note != nil {
 				rowNotes = append(rowNotes, r.Note)
 			}
 		}
-		survived := make(map[string]struct{}, len(rowNotes))
-		for _, n := range notesfilter.ApplyMuteBlockChannel(rowNotes, sets) {
+		filteredNotes, ferr := notesfilter.ApplyMuteBlockChannel(rowNotes, sets, h.noteRepo)
+		if ferr != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+		survived := make(map[string]struct{}, len(filteredNotes))
+		for _, n := range filteredNotes {
 			survived[n.ID] = struct{}{}
 		}
 		filtered := rows[:0]
@@ -403,11 +407,14 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	// viewer が mute した user / viewer を block している user が note/reply/renote
 	// の author なら除外する (upstream featured-notes.ts:93-98 の isUserRelated、#1547)。
-	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil)
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	notes = notesfilter.ApplyMuteBlockChannel(notes, sets)
+	notes, err = notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
 	result := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(result, viewer)
 	notehide.HideEmbeds(viewer, result)

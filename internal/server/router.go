@@ -1983,6 +1983,7 @@ func (s *Server) setupRoutes() {
 	// Public roles (Phase 6)
 	rolesHandler := apiroles.NewHandler(roleService, idGen)
 	rolesHandler.SetNotesQuery(repository.NewRoleNotesQuery(s.db))
+	rolesHandler.SetNoteRepo(noteRepo) // #1630: notes の renote 入れ子 mute/block 検査
 	rolesHandler.SetInstanceRepo(instanceRepo)
 	rolesHandler.SetEmojiRepo(emojiRepo)
 	rolesHandler.SetReactionReader(reactionCountWriter)

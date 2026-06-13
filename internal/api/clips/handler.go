@@ -44,6 +44,15 @@ type Handler struct {
 	// metaRepo は clips/notes の blocked-host filter (#1562、upstream
 	// generateBlockedHostQueryForNote) で meta.blockedHosts を引く。
 	metaRepo repository.MetaRepository
+	// noteRepo は clips/notes の renote 入れ子 mute/block 検査 (#1630) で
+	// renote 先行を batch fetch する。未配線時は入れ子検査 skip。
+	noteRepo repository.NoteRepository
+}
+
+// SetNoteRepo wires a NoteRepository used by the clips/notes renote-nested
+// mute/block check (#1630).
+func (h *Handler) SetNoteRepo(r repository.NoteRepository) {
+	h.noteRepo = r
 }
 
 // SetMuteBlockRepos wires the muting / blocking repositories used by the
@@ -438,11 +447,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	// clips/notes が適用しないため渡さない。upstream が併せ持つ
 	// muted-instances と renote 入れ子変種 (renote の reply/renote author) は
 	// #1544 と同じく未対応の follow-up。
-	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, nil)
+	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
+	notes, err = notesfilter.ApplyMuteBlockChannel(notes, mbSets, h.noteRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	blockedHosts, err := h.blockedHosts()
 	if err != nil {
 		return apierr.JSONInternalError(c)

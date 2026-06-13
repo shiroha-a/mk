@@ -692,6 +692,21 @@ func (h *Handler) Notes(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	// muted-user / blocked-user / muted-instances / renote 入れ子変種を適用する
+	// (#1636、upstream users/notes.ts の generateBaseNoteFilteringQuery 相当)。
+	// users/reactions・users/featured (同 handler) と同じ post-fetch 経路。
+	// ListByUserIDFiltered は visibility のみ push down するため、ミュート/
+	// ブロックした相手の renote 連鎖や mute 対象 instance の note がここを通る
+	// までフィルタされず漏れていた。set のロード/適用失敗は fail-closed で 500。
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes, err = notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)

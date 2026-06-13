@@ -24,6 +24,7 @@ type RoleNotesQuery interface {
 type Handler struct {
 	roleService  *role.Service
 	notesQuery   RoleNotesQuery
+	noteRepo     repository.NoteRepository
 	idGen        id.Generator
 	instanceRepo repository.InstanceRepository
 	emojiRepo    repository.EmojiRepository
@@ -75,6 +76,12 @@ func NewHandler(roleService *role.Service, idGen id.Generator) *Handler {
 // SetNotesQuery attaches a RoleNotesQuery for the roles/notes endpoint.
 func (h *Handler) SetNotesQuery(q RoleNotesQuery) {
 	h.notesQuery = q
+}
+
+// SetNoteRepo wires a NoteRepository used by the roles/notes renote-nested
+// mute/block check (#1630).
+func (h *Handler) SetNoteRepo(r repository.NoteRepository) {
+	h.noteRepo = r
 }
 
 // SetInstanceRepo attaches an InstanceRepository so roles/notes populates
@@ -209,14 +216,18 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	viewer := middleware.GetUser(c)
-	// mute/block/channel-mute filter (#1544): upstream notes.ts の
-	// generateBaseNoteFilteringQuery + channelMuting に相当。set のロードに失敗
-	// したら fail-closed で 500 を返す (security 項目なので silently leak しない)。
-	mbSets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, h.channelMutingRepo)
+	// mute/block/channel-mute/instance-mute filter (#1544 / #1630): upstream
+	// notes.ts の generateBaseNoteFilteringQuery + channelMuting に相当。set の
+	// ロードに失敗したら fail-closed で 500 を返す (security 項目なので
+	// silently leak しない)。
+	mbSets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, h.channelMutingRepo, h.userRepo)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
+	notes, err = notesfilter.ApplyMuteBlockChannel(notes, mbSets, h.noteRepo)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)

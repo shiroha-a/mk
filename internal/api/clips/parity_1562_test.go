@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // --- #1562: name / description 長さ検証と '' → null 正規化 ---
@@ -339,4 +340,65 @@ func TestUpdate_OmittedDescriptionClearedToNull(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Nil(t, repo.Clips["c1"].Description, "omitted description must clear to NULL (upstream `ps.description || null`)")
 	assert.Equal(t, "new", repo.Clips["c1"].Name)
+}
+
+// #1630: clips/notes が viewer の mutedInstances に属する author の note を
+// 除外する (notesfilter の muted-instances 次元の配線確認)。
+func TestNotes_MutedInstancesFiltered(t *testing.T) {
+	h, repo, noteRepo, notes := newHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Profiles["viewer"] = &model.UserProfile{
+		UserID:         "viewer",
+		MutedInstances: datatypes.JSON(`["muted.example"]`),
+	}
+	h.SetUserRepo(userRepo)
+	h.SetMuteBlockRepos(testutil.NewMockMutingRepository(), testutil.NewMockBlockingRepository())
+
+	mutedHost := "muted.example"
+	okHost := "ok.example"
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true}
+	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "remote1", UserHost: &mutedHost, Visibility: model.NoteVisibilityPublic}
+	notes.Notes["n2"] = &model.Note{ID: "n2", UserID: "remote2", UserHost: &okHost, Visibility: model.NoteVisibilityPublic}
+	noteRepo.Entries["cn1"] = &model.ClipNote{ID: "cn1", ClipID: "c1", NoteID: "n1"}
+	noteRepo.Entries["cn2"] = &model.ClipNote{ID: "cn2", ClipID: "c1", NoteID: "n2"}
+
+	c, rec := newReq(t, `{"clipId":"c1"}`)
+	setUser(c, "viewer")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, `"id":"n1"`, "note from a muted instance must be filtered")
+	assert.Contains(t, body, `"id":"n2"`)
+}
+
+// #1630: clips/notes が renote 先の入れ子 author を mute 判定で除外する
+// (renote 入れ子変種の配線確認。h.noteRepo が renote 先行を引く)。
+func TestNotes_RenoteNestedMuteFiltered(t *testing.T) {
+	h, repo, noteRepo, notes := newHandler(t)
+	h.SetUserRepo(testutil.NewMockUserRepository())
+	mutingRepo := testutil.NewMockMutingRepository()
+	h.SetMuteBlockRepos(mutingRepo, testutil.NewMockBlockingRepository())
+	// renote 先行を引く NoteRepository を配線 (#1630)
+	h.SetNoteRepo(notes)
+
+	// viewer は muted を mute。clip 内の note は muted への reply を renote した
+	// もの (note 自身の author は clean だが renote 先が muted への reply)。
+	mutingRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "viewer", MuteeID: "muted"}
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true}
+	renoteID := "rt1"
+	mutedUser := "muted"
+	notes.Notes["rt1"] = &model.Note{ID: "rt1", UserID: "author", ReplyUserID: &mutedUser, Visibility: model.NoteVisibilityPublic}
+	authorOfWrapper := "author"
+	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "wrapper", RenoteID: &renoteID, RenoteUserID: &authorOfWrapper, Visibility: model.NoteVisibilityPublic}
+	notes.Notes["n2"] = &model.Note{ID: "n2", UserID: "clean", Visibility: model.NoteVisibilityPublic}
+	noteRepo.Entries["cn1"] = &model.ClipNote{ID: "cn1", ClipID: "c1", NoteID: "n1"}
+	noteRepo.Entries["cn2"] = &model.ClipNote{ID: "cn2", ClipID: "c1", NoteID: "n2"}
+
+	c, rec := newReq(t, `{"clipId":"c1"}`)
+	setUser(c, "viewer")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, `"id":"n1"`, "renote whose target replies to a muted user must be filtered")
+	assert.Contains(t, body, `"id":"n2"`)
 }

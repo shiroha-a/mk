@@ -344,14 +344,18 @@ func (h *Handler) Notes(c echo.Context) error {
 	if h.queryService != nil {
 		notes = h.queryService.FilterVisible(user, notes)
 	}
-	// mute/block/channel-mute filter (#1544): upstream notes.ts の
-	// generateBaseNoteFilteringQuery + channelMuting に相当。set のロードに失敗
-	// したら fail-closed で 500 を返す (security 項目なので silently leak しない)。
-	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, h.channelMutingRepo)
+	// mute/block/channel-mute/instance-mute filter (#1544 / #1630): upstream
+	// notes.ts の generateBaseNoteFilteringQuery + channelMuting に相当。set の
+	// ロードに失敗したら fail-closed で 500 を返す (security 項目なので
+	// silently leak しない)。renote 先の入れ子 author 検査は h.noteRepo 経由。
+	mbSets, err := notesfilter.LoadMuteBlockSets(user, h.mutingRepo, h.blockingRepo, h.channelMutingRepo, h.userRepo)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	notes = notesfilter.ApplyMuteBlockChannel(notes, mbSets)
+	notes, err = notesfilter.ApplyMuteBlockChannel(notes, mbSets, h.noteRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
 	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
 	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
