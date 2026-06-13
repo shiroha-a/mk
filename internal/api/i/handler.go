@@ -91,6 +91,9 @@ type Handler struct {
 	// streaming connection に reload signal を流す (#791)。未配線時は
 	// publish skip = 旧挙動 (= reconnect で反映)。
 	hardMutePublisher HardMutePublisher
+	// profileUpdateHook は profile 編集時に Update(Person) を followers へ
+	// 配信する (#1560)。nil なら配信しない。
+	profileUpdateHook ProfileUpdateHook
 	// authInvalidator は i/regenerate-token で旧 token を auth middleware
 	// の cache から即時削除するために使う (#884)。未配線時は cache TTL
 	// (30 秒) 待ちで stale 旧 token が auth 通過する security regression が
@@ -134,12 +137,23 @@ type HardMutePublisher interface {
 	PublishHardMuteReload(userID string)
 }
 
+// ProfileUpdateHook delivers Update(Person) to remote followers on local
+// profile edit (#1560)。実装は core/federation。
+type ProfileUpdateHook interface {
+	OnLocalProfileUpdated(userID string)
+}
+
 // SetHardMutePublisher wires a publisher that emits wordmute reload events
 // when i/update changes hardMutedWords (#791). Optional; nil disables the
 // realtime reload path (the streaming connection still picks up the new
 // rules at the next reconnect).
 func (h *Handler) SetHardMutePublisher(p HardMutePublisher) {
 	h.hardMutePublisher = p
+}
+
+// SetProfileUpdateHook wires the AP Update(Person) delivery hook (#1560)。
+func (h *Handler) SetProfileUpdateHook(hook ProfileUpdateHook) {
+	h.profileUpdateHook = hook
 }
 
 // SetEmailValidationClient wires the outbound HTTP client used by
@@ -1327,6 +1341,11 @@ func (h *Handler) Update(c echo.Context) error {
 	// 取り直して client-side で filter するので publish 不要。
 	if in.HardMutedWords != nil && h.hardMutePublisher != nil {
 		h.hardMutePublisher.PublishHardMuteReload(me.ID)
+	}
+
+	// profile 変更を remote followers に Update(Person) で配信する (#1560)。
+	if h.profileUpdateHook != nil {
+		h.profileUpdateHook.OnLocalProfileUpdated(me.ID)
 	}
 
 	// auth middleware の tokenCache (30 秒 TTL) は name / description などの

@@ -94,6 +94,14 @@ func (b *URLBuilder) FollowURI(followerID, followeeID string) string {
 	return b.baseURL + "/follows/" + followerID + "/" + id
 }
 
+// BlockURI returns a stable URI for a Block activity from blockerID to
+// blockeeURI. block 行 id ではなく (blocker, blockee) から決定的に生成するため、
+// 後で unblock した際の Undo(Block) も同じ id を参照できる (#1560)。
+func (b *URLBuilder) BlockURI(blockerID, blockeeURI string) string {
+	h := sha256.Sum256([]byte(blockeeURI))
+	return b.baseURL + "/blocks/" + blockerID + "/" + hex.EncodeToString(h[:16])
+}
+
 // FollowRelayURI returns the URI for a Follow-Relay activity.
 // Path 形式は upstream と一致させる (`/activities/follow-relay/{relayID}`):
 // Accept / Reject inbox ハンドラがこの正規表現で relay を特定するため、
@@ -719,6 +727,67 @@ func (r *Renderer) RenderFollow(followerID, followeeURI string) *Follow {
 	}
 	AddContext(f)
 	return f
+}
+
+// RenderUpdate wraps a rendered Person in an Update activity, delivered to
+// followers when a local user edits their profile so remote instances refresh
+// the actor (#1560、upstream AccountUpdateService renderUpdate(renderPerson))。
+// inner Person の @context は outer Update に集約するため除去する。
+func (r *Renderer) RenderUpdate(person *Person) *Update {
+	actor := person.ID
+	person.Context = nil
+	u := &Update{
+		Activity: Activity{
+			Object: Object{
+				ID:   actor + "#updates/" + uuid.NewString(),
+				Type: "Update",
+			},
+			Actor:     actor,
+			To:        []string{Public},
+			Published: time.Now().UTC().Format(time.RFC3339),
+		},
+		Object: person,
+	}
+	AddContext(u)
+	return u
+}
+
+// RenderBlock returns a Block activity (actor=blocker, object=blockee URI),
+// delivered when a local user blocks a remote user (#1560、upstream
+// renderBlock + UserBlockingService.block delivery)。
+func (r *Renderer) RenderBlock(blockerID, blockeeURI string) *Block {
+	bl := &Block{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.BlockURI(blockerID, blockeeURI),
+				Type: "Block",
+			},
+			Actor: r.urls.UserURI(blockerID),
+		},
+		Object: blockeeURI,
+	}
+	AddContext(bl)
+	return bl
+}
+
+// RenderUndoBlock wraps a Block in an Undo, delivered when a local user
+// unblocks a remote user (#1560、upstream renderUndo(renderBlock(...)))。
+func (r *Renderer) RenderUndoBlock(blockerID, blockeeURI string) *Undo {
+	inner := r.RenderBlock(blockerID, blockeeURI)
+	inner.Context = nil // inner activity は @context を持たない
+	u := &Undo{
+		Activity: Activity{
+			Object: Object{
+				ID:   inner.ID + "/undo",
+				Type: "Undo",
+			},
+			Actor:     r.urls.UserURI(blockerID),
+			Published: time.Now().UTC().Format(time.RFC3339),
+		},
+		Object: inner,
+	}
+	AddContext(u)
+	return u
 }
 
 // RenderFollowRelay returns the special-purpose Follow activity used to

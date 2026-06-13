@@ -8,6 +8,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // #1560 [LOW] RenderNote: 空文字 CW は summary=ZWSP + sensitive=true。
@@ -65,4 +66,41 @@ func (s stubNoteResolver1560) FindByID(string) (*model.Note, error) {
 	remote := "remote.example"
 	u := s.uri
 	return &model.Note{ID: "rt1", URI: &u, UserHost: &remote}, nil
+}
+
+// #1560 [MEDIUM] RenderBlock / RenderUndoBlock (outbound Block delivery)。
+func TestRenderBlock_AndUndo(t *testing.T) {
+	r := newRenderer()
+	blockee := "https://remote.example/users/bob"
+	bl := r.RenderBlock("alice", blockee)
+	assert.Equal(t, "Block", bl.Type)
+	assert.Equal(t, "https://example.com/users/alice", bl.Actor)
+	assert.Equal(t, blockee, bl.Object)
+	assert.NotEmpty(t, bl.ID)
+	assert.NotNil(t, bl.Context, "standalone Block must carry @context (#1560 review)")
+
+	undo := r.RenderUndoBlock("alice", blockee)
+	assert.Equal(t, "Undo", undo.Type)
+	assert.Equal(t, "https://example.com/users/alice", undo.Actor)
+	inner, ok := undo.Object.(*Block)
+	require.True(t, ok)
+	assert.Equal(t, blockee, inner.Object)
+	assert.Nil(t, inner.Context, "inner Block must not carry @context")
+	// Block と Undo(Block) の inner id は同じ (block 行 id 非依存で決定的)
+	assert.Equal(t, bl.ID, inner.ID)
+}
+
+// #1560 [MEDIUM] RenderUpdate(Person) (outbound profile update delivery)。
+func TestRenderUpdate_Person(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "alice", Username: "alice"}
+	person := r.RenderPerson(u, nil, "PEM", nil)
+	upd := r.RenderUpdate(person)
+	assert.Equal(t, "Update", upd.Type)
+	assert.Equal(t, "https://example.com/users/alice", upd.Actor)
+	assert.Contains(t, upd.To, Public)
+	inner, ok := upd.Object.(*Person)
+	require.True(t, ok)
+	assert.Nil(t, inner.Context, "inner Person must not carry @context (集約)")
+	assert.Equal(t, "https://example.com/users/alice", inner.ID)
 }

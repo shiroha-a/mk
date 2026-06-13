@@ -386,6 +386,12 @@ type Follow struct {
 	Object string `json:"object"` // followee actor URI
 }
 
+// Block represents a Block activity. object is the blockee actor URI.
+type Block struct {
+	Activity
+	Object string `json:"object"` // blockee actor URI
+}
+
 // Accept represents an Accept activity.
 type Accept struct {
 	Activity
@@ -568,6 +574,8 @@ func AddContext(o any) {
 	case *Create:
 		v.Context = ctx
 	case *Follow:
+		v.Context = ctx
+	case *Block:
 		v.Context = ctx
 	case *Accept:
 		v.Context = ctx

@@ -30,6 +30,21 @@ type Service struct {
 	followingRepo repository.FollowingRepository
 	instanceRepo  repository.InstanceRepository // optional, for #596 incremental counters
 	idGen         id.Generator
+	// federationHook は local user が remote user を (un)block した際に
+	// Block / Undo(Block) を相手 inbox へ配信する (#1560)。nil なら配信しない。
+	federationHook FederationHook
+}
+
+// FederationHook delivers Block / Undo(Block) AP activities to a remote
+// blockee on local block / unblock (#1560)。実装は core/federation。
+type FederationHook interface {
+	OnBlocked(blockerID, blockeeID string)
+	OnUnblocked(blockerID, blockeeID string)
+}
+
+// SetFederationHook wires the AP delivery hook used by Block / Unblock (#1560)。
+func (s *Service) SetFederationHook(h FederationHook) {
+	s.federationHook = h
 }
 
 // NewService constructs a UserBlockingService.
@@ -87,6 +102,11 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 		s.removeFollowing(blockeeID, blockerID)
 	}
 
+	// remote blockee へ Block activity を配信する (#1560)。
+	if s.federationHook != nil {
+		s.federationHook.OnBlocked(blockerID, blockeeID)
+	}
+
 	return b, nil
 }
 
@@ -99,7 +119,14 @@ func (s *Service) Unblock(blockerID, blockeeID string) error {
 	if err != nil {
 		return ErrNotBlocking
 	}
-	return s.blockingRepo.Delete(b)
+	if err := s.blockingRepo.Delete(b); err != nil {
+		return err
+	}
+	// remote blockee へ Undo(Block) を配信する (#1560)。
+	if s.federationHook != nil {
+		s.federationHook.OnUnblocked(blockerID, blockeeID)
+	}
+	return nil
 }
 
 // IsBlocked reports whether blocker has blocked blockee.

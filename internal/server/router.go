@@ -604,6 +604,9 @@ func (s *Server) setupRoutes() {
 	// Follow の id を保持したまま相手に返すため、service 層を経由しない)。
 	federationProcessor.SetInboundFollowAcceptor(followingDeliveryHook)
 	reactionService.SetFederationHook(corefederation.NewReactionDeliveryHook(deliverService, apRenderer, apURLs, idGen, userRepo))
+	// local user が remote user を (un)block した際に Block / Undo(Block) を
+	// 相手 inbox へ配信する (#1560)。
+	blockingService.SetFederationHook(corefederation.NewBlockingDeliveryHook(deliverService, userRepo, apRenderer))
 	noteDeleteHook := corefederation.NewNoteDeleteDeliveryHook(deliverService, apRenderer, apURLs)
 	noteDeleteHook.SetUserRepo(userRepo)
 	noteDeleteService.SetFederationHook(noteDeleteHook)
@@ -1818,6 +1821,13 @@ func (s *Server) setupRoutes() {
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
 	streamManager.SubscribeWordMuteReload()
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
+	// profile 編集を remote followers に Update(Person) で配信する (#1560)。
+	// actor endpoint と同じ shape にするため ed25519 keypair を、follower 以外の
+	// relay subscriber にも届けるため relay broadcaster を配線する。
+	profileUpdateHook := corefederation.NewProfileUpdateDeliveryHook(deliverService, apRenderer, userRepo, keypairRepo)
+	profileUpdateHook.SetKeypairExtraRepo(keypairExtraRepo)
+	profileUpdateHook.SetRelayBroadcaster(relaySvc)
+	iHandler.SetProfileUpdateHook(profileUpdateHook)
 	notePublisher := stream.NewNotePublisher(streamPubSub, idGen)
 	notePublisher.SetEmojiLookup(emojiRepo)
 	notePublisher.SetInstanceLookup(instanceRepo)
