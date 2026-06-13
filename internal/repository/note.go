@@ -485,8 +485,9 @@ func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID strin
 // SearchByFilter returns notes matching the filter criteria.
 // 検索バックエンド (core/search.SQLLikeProvider) から呼ばれる。
 // When f.Pgroonga is true the predicate uses the PGroonga `&@~` full-text
-// operator; otherwise it falls back to ILIKE substring match. Visibility is
-// always limited to public/home.
+// operator; otherwise it falls back to ILIKE substring match. Visibility は
+// f.ViewerID 視点で push-down する (空は public/home のみ、非空なら viewer 自身の
+// followers/specified/visibleUserIds note も含む、#1554)。
 func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db)
@@ -497,10 +498,11 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 	} else {
 		q = q.Where("text ILIKE ?", "%"+f.Query+"%")
 	}
-	q = q.Where("visibility IN ?", []string{
-		string(model.NoteVisibilityPublic),
-		string(model.NoteVisibilityHome),
-	})
+	// visibility push-down: viewer 視点の可視性で絞る (upstream SearchService の
+	// generateVisibilityQuery、#1554)。ViewerID 空は匿名 (public/home のみ)、
+	// 非空なら viewer 自身の followers/specified/visibleUserIds note も含む。
+	// core/note.CanSeeNote と同条件 (mentions / search-by-tag と同じ helper)。
+	q = applyViewerVisibility(q, f.ViewerID)
 	if f.UserID != "" {
 		q = q.Where("\"userId\" = ?", f.UserID)
 	}

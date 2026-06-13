@@ -1220,11 +1220,17 @@ func TestNoteRepository_SearchByFilter(t *testing.T) {
 		defer cleanupNote(t, n.ID)
 	}
 
-	// 基本: 部分一致 + visibility フィルタ。followers (n_se_3) は除外。
+	// 基本: 部分一致 + visibility フィルタ。匿名 (ViewerID 空) は public/home のみ、
+	// followers (n_se_3) は除外。
 	out, err := repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", Limit: 10})
 	require.NoError(t, err)
 	got := idsOf(out)
 	assert.ElementsMatch(t, []string{"n_se_1", "n_se_4", "n_se_5", "n_se_6"}, got)
+
+	// #1554 ViewerID = 著者本人なら自分の followers note (n_se_3) も検索できる。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", ViewerID: localUser.ID, Limit: 10})
+	require.NoError(t, err)
+	assert.Contains(t, idsOf(out), "n_se_3", "viewer 自身の followers note は検索対象に含まれる")
 
 	// userId フィルタ
 	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", UserID: localUser.ID, Limit: 10})

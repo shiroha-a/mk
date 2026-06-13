@@ -55,6 +55,12 @@ func (p *SQLLikeProvider) SearchNote(viewer *model.User, query string, opts Sear
 	if limit <= 0 {
 		limit = 10
 	}
+	// viewer 自身の followers/specified/visibleUserIds note も検索対象に含める
+	// よう viewerID を渡す (#1554)。匿名は空文字 → public/home のみ。
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
 	rows, err := p.noteRepo.SearchByFilter(model.NoteSearchFilter{
 		Query:     query,
 		UserID:    opts.UserID,
@@ -63,6 +69,7 @@ func (p *SQLLikeProvider) SearchNote(viewer *model.User, query string, opts Sear
 		UntilID:   page.UntilID,
 		SinceID:   page.SinceID,
 		Limit:     limit,
+		ViewerID:  viewerID,
 		Pgroonga:  p.pgroonga,
 	})
 	if err != nil {

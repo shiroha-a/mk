@@ -137,7 +137,7 @@ func (s *QueryService) ListChildren(viewer *model.User, noteID, untilID, sinceID
 // Conversation walks up the reply chain from the given noteID and returns
 // up to `limit` ancestors, ordered from oldest to newest. The starting note
 // itself is NOT included. Notes the viewer cannot see terminate the walk.
-func (s *QueryService) Conversation(viewer *model.User, noteID string, limit int) ([]*model.Note, error) {
+func (s *QueryService) Conversation(viewer *model.User, noteID string, limit, offset int) ([]*model.Note, error) {
 	start, err := s.Show(viewer, noteID)
 	if err != nil {
 		return nil, err
@@ -145,11 +145,17 @@ func (s *QueryService) Conversation(viewer *model.User, noteID string, limit int
 	if limit <= 0 {
 		limit = 10
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	var ancestors []*model.Note
 	current := start
-	// 親をたどる。深さ制限はlimit回。サイクル回避のため訪問済みも記録する。
+	// 親をたどる。offset 件分の近い親を skip してから limit 件収集する
+	// (upstream conversation.ts: i を increment し i > offset のみ push、
+	// conversation.length == limit で停止)。サイクル回避のため訪問済みも記録。
 	visited := map[string]struct{}{current.ID: {}}
+	i := 0
 	for len(ancestors) < limit {
 		if current.ReplyID == nil {
 			break
@@ -166,7 +172,11 @@ func (s *QueryService) Conversation(viewer *model.User, noteID string, limit int
 			break
 		}
 		visited[parentID] = struct{}{}
-		ancestors = append(ancestors, parent)
+		i++
+		// 最初の offset 件 (note に近い親) は skip する。
+		if i > offset {
+			ancestors = append(ancestors, parent)
+		}
 		current = parent
 	}
 	// 古い順 (最深の親を先頭) に並び替える

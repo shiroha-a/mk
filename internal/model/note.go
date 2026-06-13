@@ -79,6 +79,11 @@ type NoteSearchFilter struct {
 	UntilID   string
 	SinceID   string
 	Limit     int
+	// ViewerID is the searching user's id for visibility push-down. 空文字は
+	// 匿名 (public/home のみ)。非空なら viewer 自身の followers/specified/
+	// visibleUserIds note も検索対象に含める (upstream SearchService の
+	// generateVisibilityQuery、#1554)。
+	ViewerID string
 	// Pgroonga, when true, switches the WHERE clause from ILIKE to the
 	// PGroonga `&@~` full-text match operator. Mirrors upstream Misskey TS
 	// SearchService.searchNoteByLike, which swaps the predicate when

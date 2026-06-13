@@ -727,6 +727,7 @@ func (h *Handler) State(c echo.Context) error {
 type ConversationRequest struct {
 	NoteID string `json:"noteId"`
 	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 // Conversation handles POST /api/notes/conversation.
@@ -736,9 +737,12 @@ func (h *Handler) Conversation(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
 
 	viewer := middleware.GetUser(c)
-	notes, err := h.queryService.Conversation(viewer, req.NoteID, req.Limit)
+	notes, err := h.queryService.Conversation(viewer, req.NoteID, req.Limit, req.Offset)
 	if err != nil {
 		// 現状QueryService.ConversationはErrNoteNotFound以外を返さない
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))

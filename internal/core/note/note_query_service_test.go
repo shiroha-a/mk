@@ -253,7 +253,7 @@ func TestQueryService_Conversation_Empty(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
 	noteRepo.Notes["root"] = &model.Note{ID: "root", UserID: "a", Visibility: model.NoteVisibilityPublic}
 
-	out, err := svc.Conversation(nil, "root", 10)
+	out, err := svc.Conversation(nil, "root", 10, 0)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -266,7 +266,7 @@ func TestQueryService_Conversation_Walks(t *testing.T) {
 	pID := "p"
 	noteRepo.Notes["c"] = &model.Note{ID: "c", UserID: "a", Visibility: model.NoteVisibilityPublic, ReplyID: &pID}
 
-	out, err := svc.Conversation(nil, "c", 10)
+	out, err := svc.Conversation(nil, "c", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	// 古い順 (祖先が先頭)
@@ -280,7 +280,7 @@ func TestQueryService_Conversation_DefaultLimit(t *testing.T) {
 	rootID := "root"
 	noteRepo.Notes["c"] = &model.Note{ID: "c", UserID: "a", Visibility: model.NoteVisibilityPublic, ReplyID: &rootID}
 
-	out, err := svc.Conversation(nil, "c", 0)
+	out, err := svc.Conversation(nil, "c", 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
@@ -296,12 +296,38 @@ func TestQueryService_Conversation_LimitRespected(t *testing.T) {
 	cID := "c"
 	noteRepo.Notes["d"] = &model.Note{ID: "d", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &cID}
 
-	out, err := svc.Conversation(nil, "d", 2)
+	out, err := svc.Conversation(nil, "d", 2, 0)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	// 直近の親2件: c, b. 古い順なのでb, c
 	assert.Equal(t, "b", out[0].ID)
 	assert.Equal(t, "c", out[1].ID)
+}
+
+// #1554 offset は note に近い親を skip する (upstream conversation.ts:72-74)。
+func TestQueryService_Conversation_Offset(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	// d -> c -> b -> a (d が leaf)。親チェーンは c(最近), b, a(最古)。
+	noteRepo.Notes["a"] = &model.Note{ID: "a", UserID: "u", Visibility: model.NoteVisibilityPublic}
+	aID := "a"
+	noteRepo.Notes["b"] = &model.Note{ID: "b", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &aID}
+	bID := "b"
+	noteRepo.Notes["c"] = &model.Note{ID: "c", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &bID}
+	cID := "c"
+	noteRepo.Notes["d"] = &model.Note{ID: "d", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &cID}
+
+	// offset=1: 最近の親 c を skip → b, a を収集。古い順で a, b。
+	out, err := svc.Conversation(nil, "d", 10, 1)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, "a", out[0].ID)
+	assert.Equal(t, "b", out[1].ID)
+
+	// offset=1 + limit=1: c skip → b のみ。
+	out, err = svc.Conversation(nil, "d", 1, 1)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "b", out[0].ID)
 }
 
 func TestQueryService_Conversation_HiddenAncestorTerminates(t *testing.T) {
@@ -310,7 +336,7 @@ func TestQueryService_Conversation_HiddenAncestorTerminates(t *testing.T) {
 	secretID := "secret"
 	noteRepo.Notes["leaf"] = &model.Note{ID: "leaf", UserID: "viewer", Visibility: model.NoteVisibilityPublic, ReplyID: &secretID}
 
-	out, err := svc.Conversation(&model.User{ID: "viewer"}, "leaf", 10)
+	out, err := svc.Conversation(&model.User{ID: "viewer"}, "leaf", 10, 0)
 	require.NoError(t, err)
 	// 親は閲覧不可なのでチェーンが切れる
 	assert.Empty(t, out)
@@ -318,7 +344,7 @@ func TestQueryService_Conversation_HiddenAncestorTerminates(t *testing.T) {
 
 func TestQueryService_Conversation_StartMissing(t *testing.T) {
 	svc, _, _ := newQueryService(t)
-	_, err := svc.Conversation(nil, "ghost", 10)
+	_, err := svc.Conversation(nil, "ghost", 10, 0)
 	require.ErrorIs(t, err, note.ErrNoteNotFound)
 }
 
@@ -328,7 +354,7 @@ func TestQueryService_Conversation_CycleSafe(t *testing.T) {
 	aID := "a"
 	noteRepo.Notes["a"] = &model.Note{ID: "a", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &aID}
 
-	out, err := svc.Conversation(nil, "a", 10)
+	out, err := svc.Conversation(nil, "a", 10, 0)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -339,7 +365,7 @@ func TestQueryService_Conversation_ParentMissingTerminates(t *testing.T) {
 	ghostID := "ghost"
 	noteRepo.Notes["leaf"] = &model.Note{ID: "leaf", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &ghostID}
 
-	out, err := svc.Conversation(nil, "leaf", 10)
+	out, err := svc.Conversation(nil, "leaf", 10, 0)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
