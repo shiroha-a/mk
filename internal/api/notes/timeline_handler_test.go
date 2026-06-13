@@ -537,3 +537,32 @@ func TestTimeline_Cache_ByteIdenticalToNonCached(t *testing.T) {
 	assert.Equal(t, recNo.Body.String(), recYes.Body.String(),
 		"cache miss 経路 (marshal+改行) は c.JSON 経路と byte 一致")
 }
+
+// #1681 loadBlockerIDs / loadMutedInstances loader の coverage。
+func TestLoadBlockerIDs(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, nil)
+	// nil viewer / 未配線 blockingRepo は nil。
+	assert.Nil(t, h.loadBlockerIDs(nil))
+	assert.Nil(t, h.loadBlockerIDs(&model.User{ID: "v"}))
+	blk := testutil.NewMockBlockingRepository()
+	blk.Blockings["b1"] = &model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "v"}
+	h.SetBlockingRepo(blk)
+	assert.Equal(t, []string{"blocker"}, h.loadBlockerIDs(&model.User{ID: "v"}))
+}
+
+func TestLoadMutedInstances(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, nil)
+	// nil viewer / 未配線 userRepo は nil。
+	assert.Nil(t, h.loadMutedInstances(nil))
+	assert.Nil(t, h.loadMutedInstances(&model.User{ID: "v"}))
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Profiles["v"] = &model.UserProfile{UserID: "v", MutedInstances: datatypes.JSON([]byte(`["Bad.Example","good.tld"]`))}
+	userRepo.Profiles["empty"] = &model.UserProfile{UserID: "empty"}
+	h.SetUserRepo(userRepo)
+	// 大文字 host は lowercase 化される。
+	assert.ElementsMatch(t, []string{"bad.example", "good.tld"}, h.loadMutedInstances(&model.User{ID: "v"}))
+	// 空 mutedInstances は nil。
+	assert.Nil(t, h.loadMutedInstances(&model.User{ID: "empty"}))
+}
