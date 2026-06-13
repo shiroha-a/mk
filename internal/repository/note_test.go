@@ -1757,6 +1757,49 @@ func TestNoteRepository_ListByUserList_WithReplies(t *testing.T) {
 // includeMyRenotes / includeRenotedMyNotes / includeLocalRenotes / withFiles) が
 // applyTimelineFilter で適用されることを実 SQL で覆う。pure renote と quote renote
 // (text あり) を区別し、quote は常に残ることも確認する。
+// #1681 user-list-timeline にも base-filter (被block / instance-mute) が効く。
+func TestNoteRepository_ListByUserList_BaseFilters(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "ulbf_v", "ulbfV")
+	member := insertTestUser(t, "ulbf_m", "ulbfM")
+	blocker := insertTestUser(t, "ulbf_b", "ulbfB")
+	defer cleanupUser(t, viewer.ID)
+	defer cleanupUser(t, member.ID)
+	defer cleanupUser(t, blocker.ID)
+
+	listID := "ulbf_list"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	for i, mem := range []string{member.ID, blocker.ID} {
+		mid := fmt.Sprintf("ulbf_mem_%d", i)
+		require.NoError(t, testDB.Create(&model.UserListMembership{ID: mid, UserListID: listID, UserID: mem}).Error)
+		defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, mid)
+	}
+
+	plain := &model.Note{ID: "ulbf_plain", UserID: member.ID, Visibility: "public"}
+	byBlocker := &model.Note{ID: "ulbf_blk", UserID: blocker.ID, Visibility: "public"}
+	badHost := "bad.example"
+	fromBad := &model.Note{ID: "ulbf_inst", UserID: member.ID, Visibility: "public", UserHost: &badHost}
+	for _, n := range []*model.Note{plain, byBlocker, fromBad} {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{
+		ViewerID:       viewer.ID,
+		BlockerIDs:     []string{blocker.ID},
+		MutedInstances: []string{"bad.example"},
+	})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["ulbf_plain"], "通常 member の note は含まれる")
+	assert.False(t, ids["ulbf_blk"], "被block member の note は除外")
+	assert.False(t, ids["ulbf_inst"], "muted instance の note は除外")
+}
+
 func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	viewer := insertTestUser(t, "ulr_v", "ulrV") // list owner かつ member

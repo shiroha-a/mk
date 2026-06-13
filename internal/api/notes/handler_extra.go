@@ -224,13 +224,22 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	// renote/file 系 param は他 timeline と同じ filter で SQL push-down する
 	// (#1498)。WithReplies は per-member (membership.withReplies, #1496) で別途
 	// 処理されるため filter には積まない。
+	// upstream user-list-timeline.ts:188-201 は generateBaseNoteFilteringQuery +
+	// generateMutedUserRenotesQueryForNotes + mutedChannelIds を適用するため、
+	// 他 timeline と同じ base-filter (user-mute / renote-mute / 被block /
+	// instance-mute / channel-mute) を積む (#1681)。
 	filter := model.TimelineDBFilter{
-		ViewerID:              me.ID,
-		WithFiles:             req.WithFiles,
-		WithRenotes:           req.WithRenotes,
-		IncludeMyRenotes:      req.IncludeMyRenotes,
-		IncludeRenotedMyNotes: req.IncludeRenotedMyNotes,
-		IncludeLocalRenotes:   req.IncludeLocalRenotes,
+		ViewerID:                me.ID,
+		WithFiles:               req.WithFiles,
+		WithRenotes:             req.WithRenotes,
+		IncludeMyRenotes:        req.IncludeMyRenotes,
+		IncludeRenotedMyNotes:   req.IncludeRenotedMyNotes,
+		IncludeLocalRenotes:     req.IncludeLocalRenotes,
+		UseMutingSubquery:       true,
+		UseRenoteMutingSubquery: true,
+		MutedChannelIDs:         h.loadMutedChannelIDs(me),
+		BlockerIDs:              h.loadBlockerIDs(me),
+		MutedInstances:          h.loadMutedInstances(me),
 	}
 	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, sinceID, untilID, filter)
 	if err != nil {

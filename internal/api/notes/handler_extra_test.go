@@ -481,21 +481,23 @@ func TestMentions_SpecifiedVisibleUserIDsOnly(t *testing.T) {
 // --- UserListTimeline ---
 
 func TestUserListTimeline_Success(t *testing.T) {
-	h, noteRepo, _ := newExtraHandler(t)
+	// #1681 で UserListTimeline が UseMutingSubquery を立てるようになり、bare
+	// mock の ListByUserList は muting subquery を未実装で panic する。可視性 /
+	// filter の実 SQL は repository test で覆うので、ここでは push-down を行わない
+	// userListNotesRepo fake で「handler が repo の返り値をそのまま pack する」
+	// 経路だけを検証する。
+	n1 := &model.Note{ID: "n1", UserID: "member1", Visibility: "public", User: &model.User{ID: "member1"}}
+	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: []*model.Note{n1}}
+	pollRepo := testutil.NewMockPollRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	querySvc := corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+	h := NewHandler(noteRepo, corenote.NewCreateService(noteRepo, pollRepo, idGen, nil), corenote.NewDeleteService(noteRepo), querySvc, nil, nil, nil, nil, idGen)
 	listRepo := testutil.NewMockUserListRepository()
 	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "my list"}
 	h.SetUserListRepo(listRepo)
-	// リストメンバーのノートを用意 + mock ListByUserList の membership map を seed
-	// (#1491 audit 指摘 1 で mock parity を持たせたので、membership 経由で
-	// filter される。これが無いと mock は空を返し、本 test の body assert が
-	// 落ちる)。
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "member1", Visibility: "public", User: &model.User{ID: "member1"}}
-	noteRepo.UserListMembers["l1"] = []*model.UserListMembership{{UserListID: "l1", UserID: "member1"}}
 
 	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
-	// #1491 audit 指摘 6: body shape / id を明示 fix。push-down で空 / 別 id を
-	// 返すような regression を取り漏らさないようにする。
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
@@ -592,14 +594,22 @@ func TestUserListTimeline_PassesFilterToRepo(t *testing.T) {
 	assert.False(t, *noteRepo.gotFilter.IncludeRenotedMyNotes, "includeRenotedMyNotes=false が filter に渡る")
 	require.NotNil(t, noteRepo.gotFilter.IncludeLocalRenotes)
 	assert.False(t, *noteRepo.gotFilter.IncludeLocalRenotes, "includeLocalRenotes=false が filter に渡る")
+	// #1681: base-filter (user-mute / renote-mute subquery) が user-list-timeline
+	// でも立つことを確認。
+	assert.True(t, noteRepo.gotFilter.UseMutingSubquery, "UseMutingSubquery が立つ (#1681)")
+	assert.True(t, noteRepo.gotFilter.UseRenoteMutingSubquery, "UseRenoteMutingSubquery が立つ (#1681)")
 	// post-fetch filter は無いので repo の返り値がそのまま返る。
 	require.Len(t, out, 1)
 	assert.Equal(t, "ul_pub", out[0]["id"])
 }
 
 func TestUserListTimeline_WithoutUserListRepo(t *testing.T) {
-	// userListRepoがnilの場合は所有権チェックをスキップしてDBクエリに進む
-	h, _, _ := newExtraHandler(t)
+	// userListRepo が nil の場合は所有権チェックをスキップして DB クエリに進む。
+	// #1681 で muting subquery が立つため bare mock は panic する → push-down を
+	// 行わない userListNotesRepo fake を使う。
+	noteRepo := &userListNotesRepo{MockNoteRepository: testutil.NewMockNoteRepository(), rows: nil}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen)
 	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 }

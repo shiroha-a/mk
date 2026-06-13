@@ -1138,8 +1138,10 @@ func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, until
 	// withRenotes / includeMyRenotes / includeRenotedMyNotes / includeLocalRenotes
 	// / withFiles を他 timeline と同じ SQL で適用する (#1498, upstream getFromDb と
 	// 一致)。WithReplies は上の per-member 経路 (#1496) で処理済みなので filter には
-	// 積まない (nil = applyTimelineFilter は skip)。muting は user-list-timeline では
-	// 対象外なので filter に積まない。
+	// 積まない (nil = applyTimelineFilter は skip)。
+	// base-filter (user-mute / renote-mute / 被block / instance-mute / channel-mute)
+	// は handler が filter に積むので applyTimelineFilter がここで適用する
+	// (#1681、upstream user-list-timeline の generateBaseNoteFilteringQuery 相当)。
 	q = applyTimelineFilter(q, filter)
 	var notes []*model.Note
 	if err := q.Order(paginationOrder(sinceID, untilID, `"note"."id"`)).Limit(limit).Find(&notes).Error; err != nil {
