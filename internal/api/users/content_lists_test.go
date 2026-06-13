@@ -196,3 +196,34 @@ func TestPages_HidesNonPublic(t *testing.T) {
 	require.True(t, ok, "page entity must include user field")
 	assert.Equal(t, "owner", user["username"])
 }
+
+// #1662 users/pages も page content の image block / eyeCatchingImageId から
+// drive file を解決する (i/pages / featured と同じ packer 経路)。
+func TestPages_ResolvesDriveFiles(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+	userRepo.Users["owner"] = &model.User{ID: "owner", Username: "owner", UsernameLower: "owner"}
+	repo := testutil.NewMockPageRepository()
+	eyeID := "eye1"
+	require.NoError(t, repo.Create(&model.Page{
+		ID: "p1", UserID: "owner", Visibility: model.PageVisibilityPublic,
+		Content: []byte(`[{"type":"image","fileId":"f1"}]`), EyeCatchingImageID: &eyeID,
+	}))
+	h.SetPageRepo(repo)
+	driveRepo := testutil.NewMockDriveFileRepository()
+	owner := "owner"
+	driveRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, Name: "a.png", Type: "image/png"}
+	driveRepo.Files["eye1"] = &model.DriveFile{ID: "eye1", UserID: &owner, Name: "e.png", Type: "image/png"}
+	h.SetDriveFileRepo(driveRepo)
+
+	rec := postStub(h.Pages, `{"userId":"owner"}`, nil)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	attached, ok := rows[0]["attachedFiles"].([]any)
+	require.True(t, ok)
+	require.Len(t, attached, 1)
+	assert.Equal(t, "f1", attached[0].(map[string]any)["id"])
+	eye, ok := rows[0]["eyeCatchingImage"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "eye1", eye["id"])
+}

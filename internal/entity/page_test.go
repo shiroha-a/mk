@@ -133,3 +133,63 @@ func TestPackPageWithContext_OmitsAbsentOptionals(t *testing.T) {
 func TestPackPageWithContext_NilPage(t *testing.T) {
 	assert.Nil(t, PackPageWithContext(nil, PackPageContext{}))
 }
+
+// #1662 CollectPageImageFileIDs は image block の fileId を document 順 (children
+// 再帰込み) で返す。
+func TestCollectPageImageFileIDs(t *testing.T) {
+	content := []byte(`[
+		{"type":"image","fileId":"a"},
+		{"type":"text"},
+		{"type":"section","children":[{"type":"image","fileId":"b"},{"type":"section","children":[{"type":"image","fileId":"c"}]}]},
+		{"type":"image"}
+	]`)
+	assert.Equal(t, []string{"a", "b", "c"}, CollectPageImageFileIDs(content))
+	assert.Nil(t, CollectPageImageFileIDs([]byte(`not json`)))
+	assert.Nil(t, CollectPageImageFileIDs(nil))
+}
+
+// stubPageDriveLookup is a minimal PageDriveFileLookup for ResolvePageDriveFiles.
+type stubPageDriveLookup struct{ files map[string]*model.DriveFile }
+
+func (s stubPageDriveLookup) FindByIDs(ids []string) ([]*model.DriveFile, error) {
+	out := make([]*model.DriveFile, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := s.files[id]; ok {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func (s stubPageDriveLookup) FindByID(id string) (*model.DriveFile, error) {
+	if f, ok := s.files[id]; ok {
+		return f, nil
+	}
+	return nil, assert.AnError
+}
+
+// #1662 ResolvePageDriveFiles は owner-scope の image-block file を解決し、
+// eyeCatchingImage を id から pack する。lookup nil は (nil, nil)。
+func TestResolvePageDriveFiles(t *testing.T) {
+	idGen := newTestIDGen(t)
+	alice, bob := "alice", "bob"
+	lookup := stubPageDriveLookup{files: map[string]*model.DriveFile{
+		"f1":  {ID: "f1", UserID: &alice, Name: "a.png", Type: "image/png"},
+		"f2":  {ID: "f2", UserID: &bob, Name: "b.png", Type: "image/png"}, // owner mismatch
+		"eye": {ID: "eye", UserID: &alice, Name: "e.png", Type: "image/png"},
+	}}
+	eyeID := "eye"
+	p := &model.Page{ID: "p1", UserID: "alice", EyeCatchingImageID: &eyeID,
+		Content: []byte(`[{"type":"image","fileId":"f1"},{"type":"image","fileId":"f2"}]`)}
+
+	attached, eye := ResolvePageDriveFiles(p, lookup, idGen)
+	require.Len(t, attached, 1, "owner alice の f1 のみ。bob の f2 は除外")
+	assert.Equal(t, "f1", attached[0].(DriveFileEntity).ID)
+	require.NotNil(t, eye)
+	assert.Equal(t, "eye", eye.(DriveFileEntity).ID)
+
+	// lookup nil → (nil, nil) で default 維持。
+	a2, e2 := ResolvePageDriveFiles(p, nil, idGen)
+	assert.Nil(t, a2)
+	assert.Nil(t, e2)
+}

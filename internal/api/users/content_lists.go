@@ -255,9 +255,15 @@ func (h *Handler) Pages(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, p := range rows {
+		// content の image block / eyeCatchingImageId から drive file を解決する
+		// (#1662)。driveFileRepo 未配線なら default ([] / null)。page list なので
+		// per-page lookup (N+1) だが list は小さい前提で許容する。
+		attachedFiles, eyeCatchingImage := entity.ResolvePageDriveFiles(p, h.driveFileRepo, h.idGen)
 		out = append(out, entity.PackPageWithContext(p, entity.PackPageContext{
-			IDGen: h.idGen,
-			Owner: owner.User,
+			IDGen:            h.idGen,
+			Owner:            owner.User,
+			EyeCatchingImage: eyeCatchingImage,
+			AttachedFiles:    attachedFiles,
 		}))
 	}
 	return c.JSON(http.StatusOK, out)

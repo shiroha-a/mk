@@ -811,3 +811,71 @@ func TestPagePush_UserSourceError_NoEmit(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, pub.calls)
 }
+
+// #1662 page content の image block から attachedFiles を、eyeCatchingImageId から
+// eyeCatchingImage を解決する。attachedFiles は page owner-scope。
+func TestShow_ResolvesAttachedFilesAndEyeCatchingImage(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	pageID := idGen.Generate(time.Now())
+	// content: image block (f1, owner alice) + section children に image block
+	// (f2, owner alice) + 他人 file (f3, owner bob → 除外) を含む。
+	content := `[
+		{"type":"image","fileId":"f1"},
+		{"type":"text","text":"hi"},
+		{"type":"section","children":[{"type":"image","fileId":"f2"},{"type":"image","fileId":"f3"}]}
+	]`
+	eyeID := "eye1"
+	repo.Pages[pageID] = &model.Page{
+		ID: pageID, UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic,
+		Content: []byte(content), EyeCatchingImageID: &eyeID,
+	}
+
+	driveRepo := testutil.NewMockDriveFileRepository()
+	alice, bob := "alice", "bob"
+	driveRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &alice, Name: "a.png", Type: "image/png"}
+	driveRepo.Files["f2"] = &model.DriveFile{ID: "f2", UserID: &alice, Name: "b.png", Type: "image/png"}
+	driveRepo.Files["f3"] = &model.DriveFile{ID: "f3", UserID: &bob, Name: "c.png", Type: "image/png"} // owner mismatch
+	driveRepo.Files["eye1"] = &model.DriveFile{ID: "eye1", UserID: &alice, Name: "eye.png", Type: "image/png"}
+	h.SetDriveFileRepo(driveRepo)
+	h.SetUserSource(&stubUserSource{bundle: &coreuser.UserWithProfile{User: &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}}})
+
+	c, rec := newReq(t, `{"pageId":"`+pageID+`"}`)
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var row map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
+
+	attached, ok := row["attachedFiles"].([]any)
+	require.True(t, ok)
+	// f1 + f2 (alice owned)、content 順。f3 (bob) は owner mismatch で除外。
+	require.Len(t, attached, 2)
+	assert.Equal(t, "f1", attached[0].(map[string]any)["id"])
+	assert.Equal(t, "f2", attached[1].(map[string]any)["id"])
+
+	eye, ok := row["eyeCatchingImage"].(map[string]any)
+	require.True(t, ok, "eyeCatchingImage が解決される")
+	assert.Equal(t, "eye1", eye["id"])
+}
+
+// driveFileRepo 未配線なら attachedFiles は空配列 / eyeCatchingImage は null (default 維持)。
+func TestShow_NoDriveRepoKeepsDefaults(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	pageID := idGen.Generate(time.Now())
+	eyeID := "eye1"
+	repo.Pages[pageID] = &model.Page{
+		ID: pageID, UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic,
+		Content: []byte(`[{"type":"image","fileId":"f1"}]`), EyeCatchingImageID: &eyeID,
+	}
+	h.SetUserSource(&stubUserSource{bundle: &coreuser.UserWithProfile{User: &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}}})
+
+	c, rec := newReq(t, `{"pageId":"`+pageID+`"}`)
+	require.NoError(t, h.Show(c))
+	var row map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
+	attached, ok := row["attachedFiles"].([]any)
+	require.True(t, ok)
+	assert.Empty(t, attached, "未配線なら空配列")
+	assert.Nil(t, row["eyeCatchingImage"], "未配線なら null")
+}

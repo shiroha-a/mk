@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -44,6 +45,16 @@ type Handler struct {
 	idGen               id.Generator
 	mainStreamPublisher MainStreamPublisher
 	userSource          UserBundleSource
+	// driveFileRepo は page content の image block / eyeCatchingImageId から
+	// drive file を解決して attachedFiles / eyeCatchingImage を埋めるのに使う
+	// (#1662)。未配線なら両 field は PackPage の default (空配列 / null)。
+	driveFileRepo repository.DriveFileRepository
+}
+
+// SetDriveFileRepo wires the drive file repo used to resolve a page's
+// attachedFiles (image-block files) and eyeCatchingImage (#1662)。
+func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
+	h.driveFileRepo = r
 }
 
 // NewHandler creates a new pages Handler. idGen is required so that
@@ -179,7 +190,7 @@ func (h *Handler) Show(c echo.Context) error {
 		liked := h.svc.HasLiked(user.ID, p.ID)
 		isLikedPtr = &liked
 	}
-	return c.JSON(http.StatusOK, h.pageToMapWithOwner(p, owner, nil, isLikedPtr))
+	return c.JSON(http.StatusOK, h.pageToMapWithOwner(p, owner, isLikedPtr))
 }
 
 // UpdateRequest is the request body for pages/update.
@@ -486,7 +497,7 @@ func (h *Handler) pagesToList(rows []*model.Page, ownerLookup func(userID string
 		if owner == nil {
 			continue
 		}
-		out = append(out, h.pageToMapWithOwner(p, owner, nil, nil))
+		out = append(out, h.pageToMapWithOwner(p, owner, nil))
 	}
 	return out
 }
@@ -507,11 +518,17 @@ func (h *Handler) pageToMap(p *model.Page) map[string]any {
 // optional `eyeCatchingImage` / `isLiked`. Upstream PageEntityService.pack
 // always emits `user`; mk-go previously omitted it which silently broke the
 // frontend list views (#1134).
-func (h *Handler) pageToMapWithOwner(p *model.Page, owner *model.User, eyeCatchingImage map[string]any, isLiked *bool) map[string]any {
+func (h *Handler) pageToMapWithOwner(p *model.Page, owner *model.User, isLiked *bool) map[string]any {
+	// content の image block / eyeCatchingImageId から drive file を解決する
+	// (#1662)。driveFileRepo 未配線なら entity 側が (nil,nil) を返し default 維持。
+	// list 経路 (i/pages, featured) では page ごとに drive lookup が走る (N+1)
+	// が、page list は通常小さいので許容する。
+	attachedFiles, eyeCatchingImage := entity.ResolvePageDriveFiles(p, h.driveFileRepo, h.idGen)
 	return entity.PackPageWithContext(p, entity.PackPageContext{
 		IDGen:            h.idGen,
 		Owner:            owner,
 		EyeCatchingImage: eyeCatchingImage,
+		AttachedFiles:    attachedFiles,
 		IsLiked:          isLiked,
 	})
 }

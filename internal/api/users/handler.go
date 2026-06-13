@@ -71,6 +71,15 @@ type Handler struct {
 	// 判定し、remote user / 非 public reactions の閲覧制限を bypass するため
 	// に使う (upstream の iAmModerator 経路)。
 	moderatorChecker ModeratorChecker
+	// driveFileRepo は users/pages で page の attachedFiles / eyeCatchingImage を
+	// drive file から解決するのに使う (#1662)。未配線なら両 field は default。
+	driveFileRepo repository.DriveFileRepository
+}
+
+// SetDriveFileRepo wires the drive file repo used by users/pages to resolve a
+// page's attachedFiles / eyeCatchingImage (#1662)。
+func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
+	h.driveFileRepo = r
 }
 
 // RemoteStatsFetcher abstracts the federation.RemoteStatsFetcher so wiring is

@@ -1286,6 +1286,8 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetFlashRepo(flashRepo)
 	usersHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))
 	usersHandler.SetPageRepo(pageRepo)
+	// users/pages の page も attachedFiles / eyeCatchingImage を解決する (#1662)。
+	usersHandler.SetDriveFileRepo(driveFileRepo)
 	usersHandler.SetNoteFieldResolver(noteFieldResolver)
 	usersHandler.SetUserRepo(userRepo)
 	usersHandler.SetNoteReactionRepo(reactionRepo)
@@ -1770,6 +1772,9 @@ func (s *Server) setupRoutes() {
 
 	// Pages endpoints (Phase 4.5)
 	pagesHandler := pages.NewHandler(pageService, idGen)
+	// page content の image block / eyeCatchingImageId から drive file を解決して
+	// attachedFiles / eyeCatchingImage を埋める (#1662)。
+	pagesHandler.SetDriveFileRepo(driveFileRepo)
 	api.POST("/pages/create", pagesHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:pages"))
 	api.POST("/pages/show", pagesHandler.Show)
 	api.POST("/pages/update", pagesHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:pages"))

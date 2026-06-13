@@ -73,11 +73,16 @@ type PackPageContext struct {
 	// when their lookup misses (= upstream packMany semantics), otherwise
 	// MkPagePreview crashes on the next `page.user.username` access.
 	Owner *model.User
-	// EyeCatchingImage is the pre-packed Drive file when Page.EyeCatchingImageID
-	// is set. nil means "either no image or the file lookup missed"; both
-	// render the same in MkPagePreview (the `v-if="page.eyeCatchingImage"`
-	// guard simply hides the block).
-	EyeCatchingImage map[string]any
+	// EyeCatchingImage is the packed Drive file when Page.EyeCatchingImageID
+	// is set (entity.DriveFileEntity or nil). nil means "either no image or the
+	// file lookup missed"; both render the same in MkPagePreview (the
+	// `v-if="page.eyeCatchingImage"` guard simply hides the block)。#1662 で
+	// handler が実 drive file を解決して渡せるようにした。
+	EyeCatchingImage any
+	// AttachedFiles are the packed Drive files referenced by image blocks in
+	// the page content (#1662)。nil leaves PackPage's default empty array; a
+	// non-nil slice (possibly empty) overrides it.
+	AttachedFiles []any
 	// IsLiked is the viewer's like state. nil omits the field (upstream
 	// `pages/show` returns undefined when there is no logged-in viewer).
 	IsLiked *bool
@@ -103,10 +108,101 @@ func PackPageWithContext(p *model.Page, ctx PackPageContext) map[string]any {
 	if ctx.EyeCatchingImage != nil {
 		out["eyeCatchingImage"] = ctx.EyeCatchingImage
 	}
+	// attachedFiles は content の image block から解決した drive file 群 (#1662)。
+	// nil なら PackPage の default 空配列を維持する。
+	if ctx.AttachedFiles != nil {
+		out["attachedFiles"] = ctx.AttachedFiles
+	}
 	if ctx.IsLiked != nil {
 		out["isLiked"] = *ctx.IsLiked
 	}
 	return out
+}
+
+// PageDriveFileLookup is the narrow drive-file repository view used to resolve
+// a page's attachedFiles / eyeCatchingImage (#1662)。repository.DriveFileRepository
+// が構造的に満たすので、entity は repository に依存しない。
+type PageDriveFileLookup interface {
+	FindByIDs(ids []string) ([]*model.DriveFile, error)
+	FindByID(id string) (*model.DriveFile, error)
+}
+
+// CollectPageImageFileIDs walks the page content blocks (jsonb) recursively and
+// returns the fileId of every `type==image` block in document order (upstream
+// PageEntityService の collectFile)。children を持つ block は再帰する。不正
+// JSON / 空は nil。
+func CollectPageImageFileIDs(content []byte) []string {
+	var blocks []any
+	if len(content) == 0 || json.Unmarshal(content, &blocks) != nil {
+		return nil
+	}
+	var ids []string
+	var walk func(xs []any)
+	walk = func(xs []any) {
+		for _, x := range xs {
+			m, ok := x.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := m["type"].(string); t == "image" {
+				if fid, _ := m["fileId"].(string); fid != "" {
+					ids = append(ids, fid)
+				}
+			}
+			if ch, ok := m["children"].([]any); ok {
+				walk(ch)
+			}
+		}
+	}
+	walk(blocks)
+	return ids
+}
+
+// ResolvePageDriveFiles resolves a page's attachedFiles (drive files referenced
+// by image blocks in page.content, page owner-scope) and eyeCatchingImage
+// (#1662、upstream PageEntityService.pack)。lookup nil / p nil なら (nil, nil) を
+// 返し、呼び出し元は PackPage の default (空配列 / null) を維持する。
+//
+// attachedFiles は content (block) 順を保ち image block ごとに pack する
+// (upstream は block 単位で push するため同一 file が複数 block にあれば重複)。
+// owner-scope は upstream findOneBy({id, userId: page.userId}) と一致。
+// eyeCatchingImage は owner-scope 無しで id から pack する (upstream 同様)。
+func ResolvePageDriveFiles(p *model.Page, lookup PageDriveFileLookup, idGen id.Generator) ([]any, any) {
+	if lookup == nil || p == nil {
+		return nil, nil
+	}
+	attached := []any{}
+	if ids := CollectPageImageFileIDs(p.Content); len(ids) > 0 {
+		uniq := make([]string, 0, len(ids))
+		seen := make(map[string]struct{}, len(ids))
+		for _, fid := range ids {
+			if _, dup := seen[fid]; dup {
+				continue
+			}
+			seen[fid] = struct{}{}
+			uniq = append(uniq, fid)
+		}
+		byID := make(map[string]*model.DriveFile, len(uniq))
+		if files, err := lookup.FindByIDs(uniq); err == nil {
+			for _, f := range files {
+				if f.UserID != nil && *f.UserID == p.UserID {
+					byID[f.ID] = f
+				}
+			}
+		}
+		for _, fid := range ids {
+			if f, ok := byID[fid]; ok {
+				attached = append(attached, PackDriveFile(f, idGen))
+			}
+		}
+	}
+	var eyeCatchingImage any
+	if p.EyeCatchingImageID != nil {
+		if f, err := lookup.FindByID(*p.EyeCatchingImageID); err == nil && f != nil {
+			eyeCatchingImage = PackDriveFile(f, idGen)
+		}
+	}
+	return attached, eyeCatchingImage
 }
 
 // rawJSONBytes returns the raw JSON bytes as json.RawMessage so JSON encoders
