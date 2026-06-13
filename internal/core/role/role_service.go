@@ -124,6 +124,23 @@ type Service struct {
 	rolesListMu        sync.RWMutex
 	rolesListCache     []*model.Role
 	rolesListExpiresAt time.Time
+
+	// roleAssignNotifier は local public role 割当時に被割当ユーザーへ
+	// 'roleAssigned' 通知を送る (#1559)。循環依存を避けるため interface で
+	// 受け取る (実装は core/notification.Hook)。nil なら通知しない。
+	roleAssignNotifier RoleAssignNotifier
+}
+
+// RoleAssignNotifier records a 'roleAssigned' notification on role assignment
+// (#1559)。実装は core/notification。
+type RoleAssignNotifier interface {
+	OnRoleAssigned(userID, roleID string)
+}
+
+// SetRoleAssignNotifier wires the notifier used by Assign to send a
+// 'roleAssigned' notification for public roles (upstream RoleService.assign)。
+func (s *Service) SetRoleAssignNotifier(n RoleAssignNotifier) {
+	s.roleAssignNotifier = n
 }
 
 // NewService constructs a RoleService.
@@ -901,7 +918,8 @@ func aggregateChatAvailability(values []any) any {
 
 // Assign assigns a role to a user with an optional expiration.
 func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
-	if _, err := s.roleRepo.FindByID(roleID); err != nil {
+	role, err := s.roleRepo.FindByID(roleID)
+	if err != nil {
 		return ErrRoleNotFound
 	}
 	exists, err := s.assignmentRepo.Exists(userID, roleID)
@@ -921,6 +939,12 @@ func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
 		return err
 	}
 	s.InvalidateUserRoleCache(userID)
+	// public role の割当のみ通知する (upstream RoleService.assign の
+	// `if (role.isPublic && user.host === null)`)。local 判定は notifier 側の
+	// notifyLocalUser が host==nil で担保するので、ここでは isPublic だけ見る。
+	if role != nil && role.IsPublic && s.roleAssignNotifier != nil {
+		s.roleAssignNotifier.OnRoleAssigned(userID, roleID)
+	}
 	return nil
 }
 

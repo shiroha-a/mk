@@ -310,6 +310,16 @@ func (s *Server) setupRoutes() {
 	notificationHook.SetNoteNotifyRepos(followingRepo, renoteMutingRepo)
 	noteCreateService.SetNotificationHook(notificationHook)
 	noteCreateService.SetUserRepo(userRepo)
+	// roleAssigned 通知 (#1559): local public role 割当時に発火し、entity 側で
+	// read 時に packed role へ解決する。lookup は role 削除済なら (nil,false)。
+	roleService.SetRoleAssignNotifier(notificationHook)
+	roleNotifLookup := func(roleID string) (map[string]any, bool) {
+		r, err := roleRepo.FindByID(roleID)
+		if err != nil || r == nil {
+			return nil, false
+		}
+		return entity.PackRole(r, roleService.CountAssignedUsers(roleID), idGen, corerole.DefaultPolicies()), true
+	}
 	followingService.SetNotificationHook(notificationHook)
 	reactionService.SetNotificationHook(notificationHook)
 
@@ -1473,6 +1483,7 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
+	notificationsHandler.SetRoleLookup(roleNotifLookup)
 	api.POST("/i/notifications", notificationsHandler.Show, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/i/notifications-grouped", notificationsHandler.Grouped, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/notifications/mark-all-as-read", notificationsHandler.MarkAllAsRead, middleware.RequireAuth(), middleware.RequireScope("write:notifications"))
@@ -1845,6 +1856,7 @@ func (s *Server) setupRoutes() {
 	// gate (#1471) に必要。未配線時は CanSeeNote semantics に合わせて
 	// followers note を本人以外に embed しない (= fail-closed)。
 	notificationPublisher.SetFollowingChecker(followingRepo)
+	notificationPublisher.SetRoleLookup(roleNotifLookup)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
 	reversiPublisher := stream.NewReversiGamePublisher(streamPubSub)
 	mainStreamPublisher := stream.NewMainStreamPublisher(streamPubSub)

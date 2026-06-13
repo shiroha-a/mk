@@ -627,6 +627,35 @@ func TestAssign_WithExpiry(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// recordingRoleAssignNotifier captures OnRoleAssigned calls (#1559)。
+type recordingRoleAssignNotifier struct{ calls [][2]string }
+
+func (n *recordingRoleAssignNotifier) OnRoleAssigned(userID, roleID string) {
+	n.calls = append(n.calls, [2]string{userID, roleID})
+}
+
+// #1559 [MEDIUM] public role 割当時に roleAssigned 通知が発火する。
+func TestAssign_FiresRoleAssignedForPublicRole(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "VIP", IsPublic: true}
+	notifier := &recordingRoleAssignNotifier{}
+	svc.SetRoleAssignNotifier(notifier)
+
+	require.NoError(t, svc.Assign("user1", "r1", nil))
+	require.Equal(t, [][2]string{{"user1", "r1"}}, notifier.calls)
+}
+
+// 非 public role の割当では通知しない (upstream の role.isPublic ガード)。
+func TestAssign_NoNotificationForNonPublicRole(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Hidden", IsPublic: false}
+	notifier := &recordingRoleAssignNotifier{}
+	svc.SetRoleAssignNotifier(notifier)
+
+	require.NoError(t, svc.Assign("user1", "r1", nil))
+	assert.Empty(t, notifier.calls, "non-public role は通知しない")
+}
+
 func TestUnassign_Success(t *testing.T) {
 	svc, _, assignRepo, _ := newTestService(t)
 	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/notification"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -200,7 +201,7 @@ func loadUnions(t *testing.T) map[string]map[string]Schema {
 
 // notifFixture builds a packed notification map for a given type using the
 // same construction pattern as the entity package's own packer tests.
-func notifFixture(typ notification.Type, withUser, withNote bool, extra map[string]any) map[string]any {
+func notifFixture(typ notification.Type, withUser, withNote bool, extra map[string]any, opts ...entity.NotificationOption) map[string]any {
 	idGen, _ := id.NewGenerator("aidx")
 	n := &notification.Notification{
 		ID:         "n1",
@@ -222,7 +223,12 @@ func notifFixture(typ notification.Type, withUser, withNote bool, extra map[stri
 	if typ == notification.TypeReaction {
 		n.Reaction = ":smile:"
 	}
-	return entity.PackNotification(n, user, note, idGen, nil, nil)
+	// roleAssigned は notifier を持たない (RoleService.assign は system/moderator
+	// 起点で notifier 概念が無い)。golden union の variant も userId を含まない。
+	if typ == notification.TypeRoleAssigned {
+		n.NotifierID = ""
+	}
+	return entity.PackNotification(n, user, note, idGen, nil, nil, opts...)
 }
 
 func TestEmbeddedGolden(t *testing.T) {
@@ -396,27 +402,34 @@ func TestNotificationShapeL2(t *testing.T) {
 		}
 	}
 
+	idGenRole, _ := id.NewGenerator("aidx")
+	roleLookup := entity.WithRoleLookup(func(string) (map[string]any, bool) {
+		return entity.PackRole(&model.Role{ID: "r1", Name: "VIP", IsPublic: true}, 0, idGenRole, corerole.DefaultPolicies()), true
+	})
 	cases := []struct {
 		typ      notification.Type
 		withUser bool
 		withNote bool
 		extra    map[string]any
+		opts     []entity.NotificationOption
 	}{
-		{notification.TypeFollow, true, false, nil},
-		{notification.TypeReaction, true, true, nil},
-		{notification.TypeMention, true, true, nil},
-		{notification.TypeReply, true, true, nil},
-		{notification.TypeRenote, true, true, nil},
-		{notification.TypeQuote, true, true, nil},
-		{notification.TypeReceiveFollowReq, true, false, nil},
-		{notification.TypePollVote, true, true, nil},
-		{notification.TypeImportCompleted, false, false, map[string]any{"fileId": "df_1"}},
+		{notification.TypeFollow, true, false, nil, nil},
+		{notification.TypeReaction, true, true, nil, nil},
+		{notification.TypeMention, true, true, nil, nil},
+		{notification.TypeReply, true, true, nil, nil},
+		{notification.TypeRenote, true, true, nil, nil},
+		{notification.TypeQuote, true, true, nil, nil},
+		{notification.TypeReceiveFollowReq, true, false, nil, nil},
+		{notification.TypePollVote, true, true, nil, nil},
+		{notification.TypeImportCompleted, false, false, map[string]any{"fileId": "df_1"}, nil},
 		// #1559: note は notifier(user) + note を伴う。login/createToken/test は
 		// notifier も extra も持たない bare shape (id/createdAt/type)。
-		{notification.TypeNote, true, true, nil},
-		{notification.TypeLogin, false, false, nil},
-		{notification.TypeCreateToken, false, false, nil},
-		{notification.TypeTest, false, false, nil},
+		{notification.TypeNote, true, true, nil, nil},
+		{notification.TypeLogin, false, false, nil, nil},
+		{notification.TypeCreateToken, false, false, nil, nil},
+		{notification.TypeTest, false, false, nil, nil},
+		// #1559: roleAssigned は Extra["roleId"] を read 時に packed role へ解決する。
+		{notification.TypeRoleAssigned, false, false, map[string]any{"roleId": "r1"}, []entity.NotificationOption{roleLookup}},
 	}
 
 	allow, err := LoadAllowlist(filepath.Join("testdata", "allowlist_l2.json"))
@@ -426,7 +439,7 @@ func TestNotificationShapeL2(t *testing.T) {
 
 	var gated []Finding
 	for _, c := range cases {
-		out := notifFixture(c.typ, c.withUser, c.withNote, c.extra)
+		out := notifFixture(c.typ, c.withUser, c.withNote, c.extra, c.opts...)
 		for _, f := range ValidateUnionValue("Notification", out, notif) {
 			if f.Sev == SevHigh || f.Sev == SevMed {
 				gated = append(gated, f)

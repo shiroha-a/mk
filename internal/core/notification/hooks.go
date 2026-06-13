@@ -252,6 +252,18 @@ func (h *Hook) OnTest(userID string) {
 	})
 }
 
+// OnRoleAssigned records a 'roleAssigned' notification on the assigned user's
+// stream (upstream RoleService.assign)。notifier を持たず、role ID を Extra に
+// 格納する (entity 側で read 時に packed role へ解決する)。リモートユーザー
+// 宛ては notifyLocalUser の host guard で除外される。
+func (h *Hook) OnRoleAssigned(userID, roleID string) {
+	h.notifyLocalUser(context.Background(), userID, CreateInput{
+		NotifieeID: userID,
+		Type:       TypeRoleAssigned,
+		Extra:      map[string]any{"roleId": roleID},
+	})
+}
+
 // notifyVisibleToTarget reports whether `targetID` should receive a notification
 // about note `n`, based on its visibility (upstream #17335 / triage #1006 +
 // upstream #17363 / triage #1010)。

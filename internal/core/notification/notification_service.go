@@ -69,6 +69,10 @@ const (
 	// に本人へ送るテスト通知 (upstream notifications/test-notification)。notifier
 	// を持たない。
 	TypeTest Type = "test"
+	// TypeRoleAssigned: local public role が割り当てられた時に被割当ユーザーへ
+	// 送る通知 (upstream RoleService.assign)。Extra["roleId"] に role ID を持ち、
+	// entity 側で read 時に packed role へ解決する (role 削除済なら通知を drop)。
+	TypeRoleAssigned Type = "roleAssigned"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.
@@ -273,6 +277,12 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, er
 	var packed any = n
 	if s.packer != nil {
 		packed = s.packer.Pack(in.NotifieeID, n)
+		if packed == nil {
+			// packer が通知を drop した (roleAssigned で role 削除済など)。upstream
+			// は stream へ出す前に filter するので、永続化済みの本通知は realtime
+			// publish (PublishNotification / unreadNotification) だけ skip する。
+			return n, nil
+		}
 	}
 	if s.publisher != nil {
 		// Publisher が packed bodyを受け取れる場合は渡して double-pack

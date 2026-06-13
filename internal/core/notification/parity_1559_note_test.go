@@ -167,6 +167,28 @@ func TestHook_SelfNotifications(t *testing.T) {
 	}
 }
 
+// #1559 [MEDIUM] OnRoleAssigned は roleId を Extra に格納した通知を本人へ作る。
+func TestHook_OnRoleAssigned(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	h.OnRoleAssigned("alice", "role1")
+	out, err := svc.List(context.Background(), "alice", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, TypeRoleAssigned, out[0].Type)
+	assert.Empty(t, out[0].NotifierID)
+	assert.Equal(t, "role1", out[0].Extra["roleId"])
+}
+
+// roleAssigned 通知も remote user 宛ては送られない。
+func TestHook_OnRoleAssigned_RemoteSkipped(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addRemoteUser(repo, "remote", "remote", "example.com")
+	h.OnRoleAssigned("remote", "role1")
+	out, _ := svc.List(context.Background(), "remote", 10)
+	assert.Empty(t, out)
+}
+
 // 自己通知でも remote user 宛ては送られない (notifyLocalUser の host guard)。
 func TestHook_SelfNotifications_RemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)

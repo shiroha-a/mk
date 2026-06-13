@@ -29,6 +29,16 @@ type Handler struct {
 	instanceRepo  repository.InstanceRepository
 	emojiRepo     repository.EmojiRepository
 	testNotifier  TestNotifier
+	roleLookup    entity.RoleLookup
+}
+
+// SetRoleLookup wires the lookup used to pack roleAssigned notifications'
+// embedded role (#1559)。
+func (h *Handler) SetRoleLookup(fn entity.RoleLookup) { h.roleLookup = fn }
+
+// notificationOptions returns the per-call packing options (role lookup etc.)。
+func (h *Handler) notificationOptions() []entity.NotificationOption {
+	return []entity.NotificationOption{entity.WithRoleLookup(h.roleLookup)}
 }
 
 // NewHandler creates a new notifications Handler.
@@ -141,7 +151,7 @@ func (h *Handler) Show(c echo.Context) error {
 			Note: noteByID[n.NoteID],
 		})
 	}
-	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup())
+	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), h.notificationOptions()...)
 	// depth-2 embed hide (#1570): collectNotifications の #1444 CanSeeNote gate は
 	// 見えない note を丸ごと落とすが embed (renote/reply) には再帰しない。通知 note の
 	// embed と著者設定ゲートを viewer 可視性で適用する。これを欠くと #1570 で塞いだ

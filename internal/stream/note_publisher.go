@@ -190,6 +190,7 @@ type NotificationPublisher struct {
 	idGen          id.Generator
 	instanceLookup entity.InstanceLookup
 	emojiLookup    entity.EmojiLookup
+	roleLookup     entity.RoleLookup
 }
 
 // NewNotificationPublisher constructs a NotificationPublisher.
@@ -226,6 +227,12 @@ func (p *NotificationPublisher) SetEmojiLookup(lookup entity.EmojiLookup) {
 // の `followingChecker == nil` semantics。
 func (p *NotificationPublisher) SetFollowingChecker(c NotificationFollowingChecker) {
 	p.followingRepo = c
+}
+
+// SetRoleLookup attaches the lookup used to pack roleAssigned notifications'
+// embedded role on the streaming payload (#1559)。
+func (p *NotificationPublisher) SetRoleLookup(fn entity.RoleLookup) {
+	p.roleLookup = fn
 }
 
 // Pack implements core/notification.Packer. Returns the packed map shape
@@ -265,7 +272,14 @@ func (p *NotificationPublisher) Pack(notifieeID string, n *corenotification.Noti
 			}
 		}
 	}
-	return entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup)
+	packed := entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup, entity.WithRoleLookup(p.roleLookup))
+	if packed == nil {
+		// packer が通知を drop した (例: roleAssigned で role 削除済)。nil map を
+		// any に box すると非 nil interface になり、downstream の nil guard を
+		// すり抜けて null が publish されてしまう。明示的に true nil を返す。
+		return nil
+	}
+	return packed
 }
 
 // noteVisibleToNotifiee mirrors core/note.CanSeeNote: returns true when
@@ -320,7 +334,13 @@ func (p *NotificationPublisher) PublishNotification(notifieeID string, n *coreno
 	if p.pub == nil || notifieeID == "" || n == nil {
 		return
 	}
-	p.publishPacked(notifieeID, p.Pack(notifieeID, n))
+	packed := p.Pack(notifieeID, n)
+	if packed == nil {
+		// Pack が通知を drop した (roleAssigned で role 削除済など)。null を
+		// publish しないよう PublishPackedNotification と同じく guard する。
+		return
+	}
+	p.publishPacked(notifieeID, packed)
 }
 
 // PublishPackedNotification publishes an already-packed body to

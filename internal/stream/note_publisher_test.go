@@ -338,6 +338,51 @@ func TestNotificationPublisher_WithRepos_PacksUserAndNote(t *testing.T) {
 	assert.True(t, hasNote)
 }
 
+// #1559 roleAssigned: SetRoleLookup で配線した lookup が role を packed して
+// streaming payload に embed する。
+func TestNotificationPublisher_RoleAssigned_PacksRole(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(&stubNotifUserRepo{user: &model.User{ID: "alice", Username: "alice"}}, &stubNotifNoteRepo{}, idGen)
+	np.SetRoleLookup(func(roleID string) (map[string]any, bool) {
+		return map[string]any{"id": roleID, "name": "VIP"}, true
+	})
+	n := &corenotification.Notification{
+		ID:    idGen.Generate(time.Now()),
+		Type:  corenotification.TypeRoleAssigned,
+		Extra: map[string]any{"roleId": "r1"},
+	}
+	np.PublishNotification("alice", n)
+	require.Len(t, pub.payloads, 1)
+	raw, ok := pub.payloads[0].(json.RawMessage)
+	require.True(t, ok)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	assert.Equal(t, "roleAssigned", body["type"])
+	role, ok := body["role"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "VIP", role["name"])
+}
+
+// role 削除済 (lookup が false) の roleAssigned は stream に publish しない
+// (Pack が true nil を返して downstream の nil guard で drop される、#1559)。
+func TestNotificationPublisher_RoleAssigned_DroppedWhenRoleDeleted(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(&stubNotifUserRepo{user: &model.User{ID: "alice", Username: "alice"}}, &stubNotifNoteRepo{}, idGen)
+	np.SetRoleLookup(func(string) (map[string]any, bool) { return nil, false })
+	n := &corenotification.Notification{
+		ID:    idGen.Generate(time.Now()),
+		Type:  corenotification.TypeRoleAssigned,
+		Extra: map[string]any{"roleId": "gone"},
+	}
+	assert.Nil(t, np.Pack("alice", n), "Pack は drop 時 true nil を返す")
+	np.PublishNotification("alice", n)
+	assert.Empty(t, pub.payloads, "削除済 role の roleAssigned は publish しない")
+}
+
 func TestNotificationPublisher_Pack_NilNotification(t *testing.T) {
 	np := NewNotificationPublisher(nil)
 	assert.Nil(t, np.Pack("alice", nil))

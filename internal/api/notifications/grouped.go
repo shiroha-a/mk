@@ -46,7 +46,7 @@ func (h *Handler) Grouped(c echo.Context) error {
 			Note: noteByID[n.NoteID],
 		})
 	}
-	packed := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup())
+	packed := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), h.notificationOptions()...)
 	// depth-2 embed hide (#1570): grouping の前に通知 note の renote/reply embed と
 	// 著者設定ゲートを viewer 可視性で適用する。Show と同じく #1444 CanSeeNote gate は
 	// 落とすだけで embed に再帰しないため、ここで hide しないと grouped 経由で

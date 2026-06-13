@@ -238,3 +238,51 @@ func TestPackNotifications_NoteAndUserShareInstanceFetch(t *testing.T) {
 	assert.Len(t, instLookup.calls, 1, "host 重複は uniq 化されて 1 回の fetch")
 	assert.ElementsMatch(t, []string{host}, instLookup.calls[0])
 }
+
+// #1559 roleAssigned: lookup が role を返せば packed role を embed し roleId は出さない。
+func TestPackNotification_RoleAssigned_PacksRole(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeRoleAssigned,
+		Extra:     map[string]any{"roleId": "r1"},
+	}
+	lookup := func(roleID string) (map[string]any, bool) {
+		assert.Equal(t, "r1", roleID)
+		return map[string]any{"id": "r1", "name": "VIP"}, true
+	}
+	out := PackNotification(n, nil, nil, idGen, nil, nil, WithRoleLookup(lookup))
+	require.NotNil(t, out)
+	assert.Equal(t, "roleAssigned", out["type"])
+	role, ok := out["role"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "VIP", role["name"])
+	_, hasRoleID := out["roleId"]
+	assert.False(t, hasRoleID, "roleId は packed role に解決済なので surface しない")
+}
+
+// role 削除済 (lookup が false) なら通知ごと drop する。
+func TestPackNotification_RoleAssigned_DroppedWhenRoleDeleted(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeRoleAssigned,
+		Extra:     map[string]any{"roleId": "gone"},
+	}
+	lookup := func(string) (map[string]any, bool) { return nil, false }
+	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil, WithRoleLookup(lookup)))
+}
+
+// role lookup 未配線でも安全側に倒して通知を drop する。
+func TestPackNotification_RoleAssigned_DroppedWhenLookupUnset(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeRoleAssigned,
+		Extra:     map[string]any{"roleId": "r1"},
+	}
+	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil))
+}

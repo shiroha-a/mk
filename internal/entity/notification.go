@@ -23,6 +23,38 @@ type NotificationItem struct {
 	Note *model.Note
 }
 
+// RoleLookup resolves a role ID to its packed representation, returning false
+// when the role no longer exists. Used to embed `role` on roleAssigned
+// notifications and to drop the notification when the role was deleted
+// (upstream NotificationEntityService が role==null で null を返すのと同じ)。
+type RoleLookup func(roleID string) (map[string]any, bool)
+
+// packOptions carries the optional read-time lookups required by notification
+// types that embed a related entity which must be packed fresh. Threaded via
+// functional options so existing call sites stay unchanged.
+type packOptions struct {
+	role RoleLookup
+}
+
+// NotificationOption configures optional notification packing behavior.
+type NotificationOption func(*packOptions)
+
+// WithRoleLookup supplies the RoleLookup used to pack roleAssigned
+// notifications (#1559)。
+func WithRoleLookup(fn RoleLookup) NotificationOption {
+	return func(o *packOptions) { o.role = fn }
+}
+
+func buildPackOptions(opts []NotificationOption) *packOptions {
+	o := &packOptions{}
+	for _, fn := range opts {
+		if fn != nil {
+			fn(o)
+		}
+	}
+	return o
+}
+
 // PackNotification converts a Notification record into the map shape
 // emitted over the `main` WebSocket channel and returned by
 // /api/i/notifications. Matches Misskey's NotificationEntityService.pack
@@ -38,11 +70,11 @@ type NotificationItem struct {
 // 都度作るので、ループから呼ぶと N+1 クエリになる。複数件をまとめて pack
 // する callsite (例: /api/i/notifications) は PackNotifications を使うこと
 // (#428)。
-func PackNotification(n *notification.Notification, user *model.User, note *model.Note, idGen id.Generator, instLookup InstanceLookup, emojiLookup EmojiLookup) map[string]any {
+func PackNotification(n *notification.Notification, user *model.User, note *model.Note, idGen id.Generator, instLookup InstanceLookup, emojiLookup EmojiLookup, opts ...NotificationOption) map[string]any {
 	if n == nil {
 		return nil
 	}
-	out := PackNotifications([]NotificationItem{{N: n, User: user, Note: note}}, idGen, instLookup, emojiLookup)
+	out := PackNotifications([]NotificationItem{{N: n, User: user, Note: note}}, idGen, instLookup, emojiLookup, opts...)
 	if len(out) == 0 {
 		return nil
 	}
@@ -60,7 +92,8 @@ func PackNotification(n *notification.Notification, user *model.User, note *mode
 // 約 80 クエリ → 各 1 回に削減される (host / 絵文字名は内部で uniq 化)。
 //
 // items 内で N == nil の要素は単純に skip する。残りは入力順序を保って返す。
-func PackNotifications(items []NotificationItem, idGen id.Generator, instLookup InstanceLookup, emojiLookup EmojiLookup) []map[string]any {
+func PackNotifications(items []NotificationItem, idGen id.Generator, instLookup InstanceLookup, emojiLookup EmojiLookup, opts ...NotificationOption) []map[string]any {
+	packOpts := buildPackOptions(opts)
 	// 全 item の notifier user + 埋め込み note.user / Renote/Reply author を
 	// flatten して resolver の入力にする。
 	notifierUsers := make([]*model.User, 0, len(items))
@@ -99,7 +132,7 @@ func PackNotifications(items []NotificationItem, idGen id.Generator, instLookup 
 
 	out := make([]map[string]any, 0, len(items))
 	for _, it := range items {
-		if packed := packNotificationCore(it.N, it.User, it.Note, idGen, instResolver, emojiResolver); packed != nil {
+		if packed := packNotificationCore(it.N, it.User, it.Note, idGen, instResolver, emojiResolver, packOpts); packed != nil {
 			out = append(out, packed)
 		}
 	}
@@ -109,7 +142,7 @@ func PackNotifications(items []NotificationItem, idGen id.Generator, instLookup 
 // packNotificationCore is the resolver-aware body shared by the single-item
 // PackNotification entry point and the batched PackNotifications. Resolvers
 // are passed in so the same instance can be re-used across many items.
-func packNotificationCore(n *notification.Notification, user *model.User, note *model.Note, idGen id.Generator, instResolver *InstanceResolver, emojiResolver *EmojiResolver) map[string]any {
+func packNotificationCore(n *notification.Notification, user *model.User, note *model.Note, idGen id.Generator, instResolver *InstanceResolver, emojiResolver *EmojiResolver, opts *packOptions) map[string]any {
 	if n == nil {
 		return nil
 	}
@@ -118,6 +151,20 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		"id":        n.ID,
 		"createdAt": n.CreatedAt.UTC().Format(tsFormat),
 		"type":      string(n.Type),
+	}
+	// roleAssigned は Extra["roleId"] を read 時に packed role へ解決する。
+	// role 削除済 / lookup 未配線なら通知ごと drop する (TS
+	// NotificationEntityService が role==null で null を返すのと同じ挙動)。
+	if n.Type == notification.TypeRoleAssigned {
+		roleID, _ := n.Extra["roleId"].(string)
+		if opts == nil || opts.role == nil {
+			return nil
+		}
+		packed, ok := opts.role(roleID)
+		if !ok {
+			return nil
+		}
+		out["role"] = packed
 	}
 	if n.NotifierID != "" {
 		// TS本家はnotifierIdを"userId"として返す。
@@ -153,6 +200,11 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 	// core keyと衝突する場合は extra 側をskip (packerの契約を壊さない)。
 	for k, v := range n.Extra {
 		if _, collides := out[k]; collides {
+			continue
+		}
+		// roleAssigned の roleId は packed role (out["role"]) に解決済なので
+		// raw ID を surface しない (TS は role のみ返し roleId は出さない)。
+		if k == "roleId" {
 			continue
 		}
 		// exportCompleted 通知の exportedEntity は misskey_dart / Misskey TS が
