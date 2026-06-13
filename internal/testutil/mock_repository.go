@@ -4966,6 +4966,18 @@ func (m *MockFollowingRepository) ListFollowing(userID string, limit, offset int
 	return paginate(rows, limit, offset), nil
 }
 
+// ListFollowersToNotify mirrors the production repo: followeeId match +
+// notify='normal'.
+func (m *MockFollowingRepository) ListFollowersToNotify(userID string) ([]*model.Following, error) {
+	var rows []*model.Following
+	for _, f := range m.Followings {
+		if f.FolloweeID == userID && f.Notify != nil && *f.Notify == "normal" {
+			rows = append(rows, f)
+		}
+	}
+	return rows, nil
+}
+
 // ListFollowingForList mirrors repository.followingRepository.ListFollowingForList
 // (cursor + notification filter for /api/following/list)。
 func (m *MockFollowingRepository) ListFollowingForList(followerID, sinceID, untilID string, notification bool, limit int) ([]*model.Following, error) {

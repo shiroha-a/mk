@@ -418,6 +418,23 @@ func TestTestNotification_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// recordingTestNotifier captures OnTest calls (#1559)。
+type recordingTestNotifier struct{ called []string }
+
+func (n *recordingTestNotifier) OnTest(userID string) { n.called = append(n.called, userID) }
+
+// #1559 [LOW] test-notification は notifier が配線されていれば OnTest を発火する。
+func TestTestNotification_FiresNotifier(t *testing.T) {
+	h, _ := newTestHandler(t)
+	notifier := &recordingTestNotifier{}
+	h.SetTestNotifier(notifier)
+	c, rec := newJSONRequest(t, "/api/notifications/test-notification", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.TestNotification(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"alice"}, notifier.called)
+}
+
 func TestShow_WithUserAndNoteResolution(t *testing.T) {
 	h, svc := newTestHandler(t)
 	userRepo := testutil.NewMockUserRepository()

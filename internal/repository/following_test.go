@@ -174,6 +174,31 @@ func TestFollowingRepository_ListFollowers_ListFollowing(t *testing.T) {
 	assert.Len(t, followingsOfA, 2)
 }
 
+// ListFollowersToNotify は notify='normal' の follower row だけを返す (#1559)。
+func TestFollowingRepository_ListFollowersToNotify(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	followee := insertTestUser(t, "u_ntf_fe", "ntffe")
+	defer cleanupUser(t, followee.ID)
+	notifyFollower := insertTestUser(t, "u_ntf_on", "ntfon")
+	defer cleanupUser(t, notifyFollower.ID)
+	silentFollower := insertTestUser(t, "u_ntf_off", "ntfoff")
+	defer cleanupUser(t, silentFollower.ID)
+
+	// notify='normal' の follow edge
+	normal := "normal"
+	on := &model.Following{ID: "ntf_on", FollowerID: notifyFollower.ID, FolloweeID: followee.ID, Notify: &normal}
+	require.NoError(t, testDB.Create(on).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, on.ID)
+	// notify 無し (null) の follow edge は対象外
+	insertFollowing(t, "ntf_off", silentFollower.ID, followee.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "ntf_off")
+
+	rows, err := repo.ListFollowersToNotify(followee.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, notifyFollower.ID, rows[0].FollowerID)
+}
+
 func TestFollowingRepository_QueryErrors(t *testing.T) {
 	// cancelledなcontextを使ってgorm経由でerrorを発生させる
 	ctx, cancel := context.WithCancel(context.Background())
@@ -185,6 +210,9 @@ func TestFollowingRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 
 	_, err = repo.ListFollowers("a", 10, 0)
+	assert.Error(t, err)
+
+	_, err = repo.ListFollowersToNotify("a")
 	assert.Error(t, err)
 
 	_, err = repo.ListFollowing("a", 10, 0)

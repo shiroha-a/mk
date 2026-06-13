@@ -54,6 +54,21 @@ const (
 	// 発火)。notifier を持たず、解除した実績名を Extra["achievement"] に格納して
 	// entity の Extra spread で surface する。
 	TypeAchievementEarned Type = "achievementEarned"
+	// TypeNote: notify='normal' フォロワーが、フォロイーの新規ノートを受け取る
+	// 通知 (upstream NoteCreateService の createNotification(followerId,'note',
+	// {noteId},userId))。reply 以外 + visibility != specified のノートで発火し、
+	// pure renote は renote-mute 済みフォロワーには送らない。
+	TypeNote Type = "note"
+	// TypeLogin: signin 成功時に本人へ送る通知 (upstream SigninService)。
+	// notifier を持たない。
+	TypeLogin Type = "login"
+	// TypeCreateToken: miauth gen-token で access token を生成した時に本人へ送る
+	// 通知 (upstream miauth/gen-token)。notifier を持たない。
+	TypeCreateToken Type = "createToken"
+	// TypeTest: notifications/test-notification が web push / stream の疎通確認用
+	// に本人へ送るテスト通知 (upstream notifications/test-notification)。notifier
+	// を持たない。
+	TypeTest Type = "test"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.

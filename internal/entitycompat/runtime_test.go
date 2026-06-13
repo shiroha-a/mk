@@ -411,6 +411,12 @@ func TestNotificationShapeL2(t *testing.T) {
 		{notification.TypeReceiveFollowReq, true, false, nil},
 		{notification.TypePollVote, true, true, nil},
 		{notification.TypeImportCompleted, false, false, map[string]any{"fileId": "df_1"}},
+		// #1559: note は notifier(user) + note を伴う。login/createToken/test は
+		// notifier も extra も持たない bare shape (id/createdAt/type)。
+		{notification.TypeNote, true, true, nil},
+		{notification.TypeLogin, false, false, nil},
+		{notification.TypeCreateToken, false, false, nil},
+		{notification.TypeTest, false, false, nil},
 	}
 
 	allow, err := LoadAllowlist(filepath.Join("testdata", "allowlist_l2.json"))

@@ -93,6 +93,29 @@ func TestSignin_Step2_Success(t *testing.T) {
 	assert.Equal(t, "testtoken1234567", resp["i"])
 }
 
+// chanLoginNotifier captures OnLogin asynchronously (#1559)。
+type chanLoginNotifier struct{ ch chan string }
+
+func (n *chanLoginNotifier) OnLogin(userID string) { n.ch <- userID }
+
+// #1559 [LOW] signin 成功時に login 通知が発火する。
+func TestSignin_FiresLoginNotifier(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123")
+	notifier := &chanLoginNotifier{ch: make(chan string, 1)}
+	h.SetLoginNotifier(notifier)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	select {
+	case uid := <-notifier.ch:
+		assert.Equal(t, "u1", uid)
+	case <-time.After(2 * time.Second):
+		t.Fatal("login notifier was not fired")
+	}
+}
+
 func TestSignin_WrongPassword(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUser(repo, "admin", "pass123")

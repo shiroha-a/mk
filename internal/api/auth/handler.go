@@ -27,6 +27,16 @@ type Handler struct {
 	// userRepo は miauth/:session/check で承認ユーザーを UserDetailedNotMe で
 	// pack するために使う (#1224)。未配線時は user フィールドを省く。
 	userRepo repository.UserRepository
+	// tokenNotifier は gen-token で access token を生成した時に本人へ
+	// 'createToken' 通知を送る (#1559)。未配線なら通知しない。
+	tokenNotifier TokenNotifier
+}
+
+// TokenNotifier records a 'createToken' notification when a token is generated
+// (#1559)。循環依存を避けるため interface で受け取る (実装は
+// core/notification.Hook)。
+type TokenNotifier interface {
+	OnCreateToken(userID string)
 }
 
 // NewHandler creates a new auth handler.
@@ -37,6 +47,10 @@ func NewHandler(repo repository.AuthSessionRepository, cfg *config.Config, idGen
 // SetUserRepo wires the user repository used by MiAuthCheck to pack the
 // approving user.
 func (h *Handler) SetUserRepo(r repository.UserRepository) { h.userRepo = r }
+
+// SetTokenNotifier attaches a TokenNotifier so gen-token creates a
+// 'createToken' notification (upstream miauth/gen-token)。
+func (h *Handler) SetTokenNotifier(n TokenNotifier) { h.tokenNotifier = n }
 
 // SessionGenerate handles POST /api/auth/session/generate.
 func (h *Handler) SessionGenerate(c echo.Context) error {
@@ -217,6 +231,11 @@ func (h *Handler) GenToken(c echo.Context) error {
 	}
 	if err := h.repo.CreateAccessToken(accessToken); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+
+	// createToken 通知を本人へ送る (upstream miauth/gen-token、#1559)。
+	if h.tokenNotifier != nil {
+		go h.tokenNotifier.OnCreateToken(user.ID)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{"token": tokenStr})

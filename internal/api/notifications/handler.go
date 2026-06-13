@@ -28,12 +28,24 @@ type Handler struct {
 	followReqRepo repository.FollowRequestRepository
 	instanceRepo  repository.InstanceRepository
 	emojiRepo     repository.EmojiRepository
+	testNotifier  TestNotifier
 }
 
 // NewHandler creates a new notifications Handler.
 func NewHandler(svc *notification.Service, idGen id.Generator) *Handler {
 	return &Handler{svc: svc, idGen: idGen}
 }
+
+// TestNotifier creates a 'test' notification on the caller's own stream so the
+// test-notification endpoint can verify web push / streaming delivery (#1559)。
+// 循環依存を避けるため interface で受け取る (実装は core/notification.Hook)。
+type TestNotifier interface {
+	OnTest(userID string)
+}
+
+// SetTestNotifier attaches a TestNotifier used by TestNotification so the test
+// notification also fires web push (upstream notifications/test-notification)。
+func (h *Handler) SetTestNotifier(n TestNotifier) { h.testNotifier = n }
 
 // SetRepos attaches repositories for resolving user/note objects in notifications.
 func (h *Handler) SetRepos(userRepo repository.UserRepository, noteRepo repository.NoteRepository) {
@@ -345,6 +357,12 @@ func (h *Handler) Flush(c echo.Context) error {
 }
 
 // TestNotification handles POST /api/notifications/test-notification.
+// 本人へ 'test' 通知を送り、web push / streaming の疎通を確認できるようにする
+// (upstream notifications/test-notification、#1559)。
 func (h *Handler) TestNotification(c echo.Context) error {
+	user := middleware.GetUser(c)
+	if h.testNotifier != nil && user != nil {
+		h.testNotifier.OnTest(user.ID)
+	}
 	return c.NoContent(http.StatusNoContent)
 }

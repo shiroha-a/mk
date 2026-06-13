@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -489,6 +490,29 @@ func TestGenToken_Success(t *testing.T) {
 		// SHA-256ハッシュ化の検証: HashはTokenと異なり、sha256Hexの結果と一致する
 		assert.NotEqual(t, at.Token, at.Hash, "Hash should differ from raw Token")
 		assert.Equal(t, sha256Hex(at.Token), at.Hash, "Hash should be SHA-256 of Token")
+	}
+}
+
+// chanTokenNotifier captures OnCreateToken asynchronously (#1559)。
+type chanTokenNotifier struct{ ch chan string }
+
+func (n *chanTokenNotifier) OnCreateToken(userID string) { n.ch <- userID }
+
+// #1559 [LOW] gen-token 成功時に createToken 通知が発火する。
+func TestGenToken_FiresTokenNotifier(t *testing.T) {
+	h, _ := newTestHandler()
+	user := &model.User{ID: "u1", Username: "testuser"}
+	notifier := &chanTokenNotifier{ch: make(chan string, 1)}
+	h.SetTokenNotifier(notifier)
+
+	rec := post(h.GenToken, `{"permission":["read:account"]}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	select {
+	case uid := <-notifier.ch:
+		assert.Equal(t, "u1", uid)
+	case <-time.After(2 * time.Second):
+		t.Fatal("token notifier was not fired")
 	}
 }
 

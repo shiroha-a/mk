@@ -23,6 +23,11 @@ type FollowingRepository interface {
 	// compute `isFollowed` across a user list (#1144).
 	FilterFollowingsToAnchor(anchorID string, candidateIDs []string) ([]string, error)
 	ListFollowers(userID string, limit, offset int) ([]*model.Following, error)
+	// ListFollowersToNotify returns Following rows where followeeId matches and
+	// notify='normal'. Used by note.CreateService to fan out 'note'
+	// notifications to followers who opted into post notifications (upstream
+	// NoteCreateService の findBy({followeeId, notify:'normal'}))。
+	ListFollowersToNotify(userID string) ([]*model.Following, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
 	// ListFollowingForList returns Following rows where followerID matches,
 	// optionally filtered by `notify IS NOT NULL` (= notification=true) and
@@ -130,6 +135,19 @@ func (r *followingRepository) ListFollowers(userID string, limit, offset int) ([
 		Order("id DESC").
 		Limit(limit).
 		Offset(offset).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListFollowersToNotify returns Following rows where followeeId matches and
+// notify='normal'. note 通知の fan-out 対象を絞る (#1559)。`notify` 列は
+// null=OFF / 'normal'=ON という Misskey 互換 semantics で、TS NoteCreateService は
+// findBy({followeeId, notify:'normal'}) と完全一致で絞るため値も 'normal' に揃える。
+func (r *followingRepository) ListFollowersToNotify(userID string) ([]*model.Following, error) {
+	var rows []*model.Following
+	if err := r.db.Where(`"followeeId" = ? AND notify = ?`, userID, "normal").
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}

@@ -47,6 +47,11 @@ type Hook struct {
 	notePacker     NotePacker
 	userPacker     UserPacker
 	noteUnreadRepo repository.NoteUnreadRepository
+	// followingRepo / renoteMutingRepo は note 通知 (notify='normal' フォロワー
+	// への投稿通知) の fan-out に使う optional 依存 (#1559)。未配線なら note 通知
+	// を発火しない。
+	followingRepo    repository.FollowingRepository
+	renoteMutingRepo repository.RenoteMutingRepository
 }
 
 // NewHook constructs a Hook bound to a NotificationService and userRepo.
@@ -81,6 +86,15 @@ func (h *Hook) SetPackers(u UserPacker, n NotePacker) {
 // notification-proxy implementation of HasUnreadSpecifiedNotes.
 func (h *Hook) SetNoteUnreadRepo(r repository.NoteUnreadRepository) {
 	h.noteUnreadRepo = r
+}
+
+// SetNoteNotifyRepos attaches the repositories required to fan out 'note'
+// notifications to notify='normal' followers (#1559). renoteMutingRepo may be
+// nil; pure renotes will then notify all opted-in followers. followingRepo nil
+// disables note-notification fan-out entirely.
+func (h *Hook) SetNoteNotifyRepos(following repository.FollowingRepository, renoteMuting repository.RenoteMutingRepository) {
+	h.followingRepo = following
+	h.renoteMutingRepo = renoteMuting
 }
 
 // OnNoteCreated is called by note.CreateService after persisting a new note.
@@ -164,6 +178,78 @@ func (h *Hook) OnNoteCreated(n *model.Note, author *model.User, replyTarget, ren
 			NoteVisibility: string(n.Visibility),
 		})
 	}
+
+	// note 通知: notify='normal' フォロワーへ投稿を fan-out する (#1559)。
+	h.notifyFollowersOfNote(ctx, n, author)
+}
+
+// notifyFollowersOfNote fans a 'note' notification out to followers who set
+// notify='normal' on their follow edge (upstream NoteCreateService)。
+//
+// upstream の発火条件をそのまま踏襲する:
+//   - reply には付かない (data.reply == null のときだけ)
+//   - visibility が specified のノートは対象外
+//   - pure renote は、その投稿者の renote を mute しているフォロワーには送らない
+func (h *Hook) notifyFollowersOfNote(ctx context.Context, n *model.Note, author *model.User) {
+	if h.followingRepo == nil {
+		return
+	}
+	// reply / specified は対象外。
+	if n.ReplyID != nil || n.Visibility == model.NoteVisibilitySpecified {
+		return
+	}
+	followers, err := h.followingRepo.ListFollowersToNotify(author.ID)
+	if err != nil {
+		slog.Warn("note notification: list followers failed", "noteId", n.ID, "err", err)
+		return
+	}
+	// quote でない renote (= pure renote) のみ renote-mute の対象。
+	isPureRenote := n.RenoteID != nil && !isQuote(n)
+	for _, f := range followers {
+		if f.FollowerID == author.ID {
+			continue
+		}
+		if isPureRenote && h.renoteMutingRepo != nil {
+			if muted, err := h.renoteMutingRepo.Exists(f.FollowerID, author.ID); err == nil && muted {
+				continue
+			}
+		}
+		h.notifyLocalUser(ctx, f.FollowerID, CreateInput{
+			NotifieeID:     f.FollowerID,
+			NotifierID:     author.ID,
+			Type:           TypeNote,
+			NoteID:         n.ID,
+			NoteVisibility: string(n.Visibility),
+		})
+	}
+}
+
+// OnLogin records a 'login' notification on a user's own stream after a
+// successful signin (upstream SigninService)。notifier を持たない。
+func (h *Hook) OnLogin(userID string) {
+	h.notifyLocalUser(context.Background(), userID, CreateInput{
+		NotifieeID: userID,
+		Type:       TypeLogin,
+	})
+}
+
+// OnCreateToken records a 'createToken' notification after a miauth access
+// token is generated (upstream miauth/gen-token)。notifier を持たない。
+func (h *Hook) OnCreateToken(userID string) {
+	h.notifyLocalUser(context.Background(), userID, CreateInput{
+		NotifieeID: userID,
+		Type:       TypeCreateToken,
+	})
+}
+
+// OnTest records a 'test' notification on the caller's own stream so that the
+// notifications/test-notification endpoint can verify web push / streaming
+// delivery (upstream notifications/test-notification)。notifier を持たない。
+func (h *Hook) OnTest(userID string) {
+	h.notifyLocalUser(context.Background(), userID, CreateInput{
+		NotifieeID: userID,
+		Type:       TypeTest,
+	})
 }
 
 // notifyVisibleToTarget reports whether `targetID` should receive a notification

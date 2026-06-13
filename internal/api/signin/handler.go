@@ -47,6 +47,19 @@ type Handler struct {
 	idGen               id.Generator
 	mainStreamPublisher MainStreamPublisher
 	totpReplayGuard     twofactor.ReplayGuard
+	loginNotifier       LoginNotifier
+}
+
+// LoginNotifier records a 'login' notification on signin success (#1559)。
+// 循環依存を避けるため interface で受け取る (実装は core/notification.Hook)。
+type LoginNotifier interface {
+	OnLogin(userID string)
+}
+
+// SetLoginNotifier attaches a LoginNotifier so successful signins create a
+// 'login' notification (upstream SigninService)。
+func (h *Handler) SetLoginNotifier(n LoginNotifier) {
+	h.loginNotifier = n
 }
 
 // SetIPLogger attaches an IPLogger and enables IP logging.
@@ -335,6 +348,11 @@ func (h *Handler) ok(c echo.Context, user *model.User) error {
 	if h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()
 		go h.recordSignin(user.ID, c.RealIP(), hdrs)
+	}
+	// login 通知を本人へ送る (upstream SigninService、#1559)。signin の
+	// レイテンシに乗らないよう非同期で発火する。
+	if h.loginNotifier != nil {
+		go h.loginNotifier.OnLogin(user.ID)
 	}
 	token := ""
 	if user.Token != nil {

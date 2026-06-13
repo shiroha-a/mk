@@ -306,6 +306,8 @@ func (s *Server) setupRoutes() {
 	notificationService.SetNoteUnreadRepo(noteUnreadRepo)
 	notificationHook := corenotification.NewHook(notificationService, userRepo)
 	notificationHook.SetNoteUnreadRepo(noteUnreadRepo)
+	// note 通知 (notify='normal' フォロワーへの投稿通知、#1559) の fan-out 依存。
+	notificationHook.SetNoteNotifyRepos(followingRepo, renoteMutingRepo)
 	noteCreateService.SetNotificationHook(notificationHook)
 	noteCreateService.SetUserRepo(userRepo)
 	followingService.SetNotificationHook(notificationHook)
@@ -1101,6 +1103,7 @@ func (s *Server) setupRoutes() {
 	// signin履歴レコード注入
 	signinRepo := repository.NewSigninRepository(s.db)
 	signinHandler.SetSigninRepo(signinRepo, idGen)
+	signinHandler.SetLoginNotifier(notificationHook)
 	api.POST("/signin", signinHandler.Signin)
 	api.POST("/signin-flow", signinHandler.SigninFlow)
 	api.POST("/signin-with-passkey", signinHandler.SigninWithPasskey)
@@ -1469,6 +1472,7 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetFollowRequestRepo(followRequestRepo)
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
+	notificationsHandler.SetTestNotifier(notificationHook)
 	api.POST("/i/notifications", notificationsHandler.Show, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/i/notifications-grouped", notificationsHandler.Grouped, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/notifications/mark-all-as-read", notificationsHandler.MarkAllAsRead, middleware.RequireAuth(), middleware.RequireScope("write:notifications"))
@@ -2248,6 +2252,7 @@ func (s *Server) setupRoutes() {
 	// miauth/:session/check — 3rd-party client が session 紐付き token を取得する
 	// (#1224)。token をまだ持たない client が叩くため RequireAuth は付けない。
 	authHandler.SetUserRepo(userRepo)
+	authHandler.SetTokenNotifier(notificationHook)
 	api.POST("/miauth/:session/check", authHandler.MiAuthCheck)
 
 	// app/* — アプリ管理API
