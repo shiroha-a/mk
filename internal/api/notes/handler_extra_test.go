@@ -301,6 +301,26 @@ func TestFeatured_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1682 notes/featured は viewer が mute / 被block した author の note を除外する
+// (upstream featured.ts:99-107 の isUserRelated)。
+func TestFeatured_FiltersMutedAuthor(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["fn"] = &model.Note{ID: "fn", UserID: "muted", Visibility: "public", User: &model.User{ID: "muted"}}
+	mutingRepo := testutil.NewMockMutingRepository()
+	mutingRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "viewer", MuteeID: "muted"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["viewer"] = &model.User{ID: "viewer", Username: "viewer", UsernameLower: "viewer"}
+	h.SetMutingRepo(mutingRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	h.SetUserRepo(userRepo)
+
+	rec := postExtra(h.Featured, `{}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "mute した author の featured note は除外される")
+}
+
 // channelId 指定時は当該チャンネルに属するノートだけが返ること (#489)。
 // handler が channelId を bind せずに repo に渡し忘れると、ハイライト
 // タブで他チャンネル / グローバルのノートが混入する。

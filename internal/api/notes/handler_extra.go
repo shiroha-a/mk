@@ -116,7 +116,15 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, middleware.GetUser(c)))
+	// upstream featured.ts:99-107 は me の mute / 被block を isUserRelated で除外する
+	// (#1682)。users/featured-notes (#1547) と同じく被block / mute / instance-mute を
+	// post-fetch で除外する。blocked-host / suspended は別 follow-up。
+	viewer := middleware.GetUser(c)
+	notes, err = h.applyMuteBlock(viewer, notes)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 
 // Unrenote handles POST /api/notes/unrenote.
