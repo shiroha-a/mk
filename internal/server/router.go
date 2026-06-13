@@ -1359,6 +1359,9 @@ func (s *Server) setupRoutes() {
 	// i/import-* の fileId 所有権検証 (#1555)。未配線だと fail-closed
 	// (NO_SUCH_FILE) になるため production では必ず wire する。
 	iHandler.SetDriveFileRepo(driveFileRepo)
+	// i/import-antennas の TOO_MANY_ANTENNAS 同期 enforce 用 (#1667)。
+	iHandler.SetImportDriveReader(driveReader)
+	iHandler.SetAntennaCounter(antennaRepo)
 	// P4-6 (#166): i/authorized-apps, i/revoke-token, i/gallery/*, i/page-likes
 	iHandler.SetAccessTokenRepo(repository.NewAccessTokenRepository(s.db))
 	iHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))

@@ -113,6 +113,13 @@ type Handler struct {
 	// 他人 / 不在 / system file (userId NULL) は NO_SUCH_FILE で弾く。未配線時は
 	// fail-closed (= 常に NO_SUCH_FILE) にして cross-user file read を防ぐ。
 	driveFileRepo repository.DriveFileRepository
+	// importDriveReader は i/import-antennas で file content を同期 download して
+	// antenna 件数を数え TOO_MANY_ANTENNAS を enforce するために使う (#1667)。
+	// 未配線時は limit check を skip して worker に委ねる (degrade)。
+	importDriveReader ImportFileReader
+	// antennaCounter は i/import-antennas の TOO_MANY_ANTENNAS 判定で現 antenna
+	// 件数を数えるのに使う (#1667)。未配線時は limit check を skip する。
+	antennaCounter AntennaCounter
 }
 
 // TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive

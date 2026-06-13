@@ -6,12 +6,32 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/core/transfer"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubImportFileReader returns canned drive content for i/import-antennas
+// limit enforcement tests (#1667)。
+type stubImportFileReader struct {
+	body []byte
+	err  error
+}
+
+func (s *stubImportFileReader) Fetch(_ string) (*model.DriveFile, []byte, error) {
+	return nil, s.body, s.err
+}
+
+// stubAntennaCounter returns a canned current antenna count (#1667)。
+type stubAntennaCounter struct {
+	count int64
+	err   error
+}
+
+func (s *stubAntennaCounter) CountByUser(_ string) (int64, error) { return s.count, s.err }
 
 // stubTransferEnqueuer records calls and optionally returns an error.
 type stubTransferEnqueuer struct {
@@ -324,6 +344,49 @@ func TestImport_Antennas_NoTooBigCheck(t *testing.T) {
 	rec := post(h.ImportAntennas, `{"fileId":"big"}`, &model.User{ID: ownerID})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Len(t, enq.importCalls, 1)
+}
+
+// #1667 現 antenna 件数 + import 件数 >= antennaLimit なら TOO_MANY_ANTENNAS
+// (upstream import-antennas.ts、import-antennas 固有 UUID)。
+func TestImportAntennas_TooMany(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["ant"] = &model.DriveFile{ID: "ant", UserID: &uid, Size: 100}
+	h.SetImportDriveReader(&stubImportFileReader{body: []byte(`[{"name":"a"},{"name":"b"}]`)})
+	h.SetAntennaCounter(&stubAntennaCounter{count: 4})
+	h.SetRoleProvider(&stubRoleProvider{policies: map[string]any{"antennaLimit": 5}})
+	// 現 4 + import 2 = 6 >= 5 → TOO_MANY_ANTENNAS。
+	rec := post(h.ImportAntennas, `{"fileId":"ant"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_ANTENNAS")
+	assert.Contains(t, rec.Body.String(), "600917d4-a4cb-4cc5-8ba8-7ac8ea3c7779")
+	assert.Empty(t, enq.importCalls)
+}
+
+// 上限未満なら enqueue される。
+func TestImportAntennas_UnderLimit(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["ant"] = &model.DriveFile{ID: "ant", UserID: &uid, Size: 100}
+	h.SetImportDriveReader(&stubImportFileReader{body: []byte(`[{"name":"a"}]`)})
+	h.SetAntennaCounter(&stubAntennaCounter{count: 1})
+	h.SetRoleProvider(&stubRoleProvider{policies: map[string]any{"antennaLimit": 5}})
+	// 現 1 + import 1 = 2 < 5 → enqueue。
+	rec := post(h.ImportAntennas, `{"fileId":"ant"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, enq.importCalls, 1)
+	assert.Equal(t, transfer.ImportAntennas, enq.importCalls[0].Type)
+}
+
+// 依存 (driveReader / antennaCounter / roleProvider) 未配線時は limit check を
+// skip して enqueue する (degrade、worker に委ねる)。
+func TestImportAntennas_NoDepsDegrades(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["ant"] = &model.DriveFile{ID: "ant", UserID: &uid, Size: 100}
+	rec := post(h.ImportAntennas, `{"fileId":"ant"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, enq.importCalls, 1)
 }
 
 // import-following の job-level withReplies が ImportPayload に伝わる (#1555)。
