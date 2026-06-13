@@ -284,7 +284,7 @@ func TestAvatarBannerProxying(t *testing.T) {
 		}
 	})
 	t.Run("remote banner is proxied", func(t *testing.T) {
-		u0 := &model.User{Username: "dave", Host: sp(remoteHost), BannerURL: sp("https://" + remoteHost + "/b.png")}
+		u0 := &model.User{Username: "dave", Host: sp(remoteHost), BannerID: sp("b1"), BannerURL: sp("https://" + remoteHost + "/b.png")}
 		d := PackUserDetailed(u0, nil)
 		if d.BannerURL == nil || !strings.HasPrefix(*d.BannerURL, testInternalProxy+"/image.webp?") {
 			t.Errorf("remote banner not proxied: %v", d.BannerURL)

@@ -159,6 +159,49 @@ func TestShow_CountVisibility(t *testing.T) {
 	})
 }
 
+// #1558 [LOW] notify / withReplies は authed 非self viewer なら following row が
+// 無くても default ('none' / false) を emit する。
+func TestShow_NotifyWithRepliesDefaults(t *testing.T) {
+	t.Run("non-following authed viewer gets defaults", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		newTargetWithProfile(repo, "target1", &model.UserProfile{
+			FollowersVisibility: model.FollowingVisibilityPublic,
+			FollowingVisibility: model.FollowingVisibilityPublic,
+		})
+		resp := showWithViewer(t, h, "target1", &model.User{ID: "viewer1", Username: "viewer"})
+		assert.Equal(t, "none", resp["notify"], "follow row が無くても notify='none'")
+		assert.Equal(t, false, resp["withReplies"], "follow row が無くても withReplies=false")
+	})
+
+	t.Run("following viewer gets actual values", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		newTargetWithProfile(repo, "target1", &model.UserProfile{
+			FollowersVisibility: model.FollowingVisibilityPublic,
+			FollowingVisibility: model.FollowingVisibilityPublic,
+		})
+		fRepo := testutil.NewMockFollowingRepository()
+		normal := "normal"
+		fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "viewer1", FolloweeID: "target1", Notify: &normal, WithReplies: true}
+		h.SetFollowingRepo(fRepo)
+		resp := showWithViewer(t, h, "target1", &model.User{ID: "viewer1", Username: "viewer"})
+		assert.Equal(t, "normal", resp["notify"])
+		assert.Equal(t, true, resp["withReplies"])
+	})
+
+	t.Run("anonymous omits notify/withReplies", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		newTargetWithProfile(repo, "target1", &model.UserProfile{
+			FollowersVisibility: model.FollowingVisibilityPublic,
+			FollowingVisibility: model.FollowingVisibilityPublic,
+		})
+		resp := showWithViewer(t, h, "target1", nil)
+		_, hasNotify := resp["notify"]
+		_, hasWR := resp["withReplies"]
+		assert.False(t, hasNotify, "anonymous には relation field を出さない")
+		assert.False(t, hasWR)
+	})
+}
+
 // #1558 [MEDIUM 2-gap] users/search でも moderator viewer に moderationNote を出す。
 func TestSearch_ModerationNoteForModerator(t *testing.T) {
 	h, repo := newTestHandler(t)

@@ -445,14 +445,37 @@ func IdenticonURL(u *model.User) string {
 // 30s TTL の in-memory cache (core/avatardecoration.Resolver) で hit 時は
 // DB を叩かない。cache miss / TTL 切れでのみ admin catalog の List を 1 回
 // 引く (#521 / #524 review)。
+// blurhashIfPresent returns the cached blurhash only when the backing media id
+// is set, mirroring upstream's `id == null ? null : blurhash` (#1558)。avatarId
+// / bannerId が null なのに *Url / *Blurhash 列が stale-non-null なケースで
+// upstream と同じ null を返す。
+func blurhashIfPresent(mediaID, blurhash *string) *string {
+	if mediaID == nil {
+		return nil
+	}
+	return blurhash
+}
+
+// bannerURLIfPresent returns the proxied banner URL only when bannerId is set,
+// mirroring upstream's `bannerId == null ? null : bannerUrl` (#1558)。
+func bannerURLIfPresent(bannerID, bannerURL *string) *string {
+	if bannerID == nil {
+		return nil
+	}
+	return currentMediaURLContext().ProxyBannerURL(bannerURL)
+}
+
 func PackUserLite(u *model.User) UserLite {
 	out := UserLite{
-		ID:                u.ID,
-		Name:              u.Name,
-		Username:          u.Username,
-		Host:              u.Host,
-		AvatarURL:         IdenticonURL(u),
-		AvatarBlurhash:    u.AvatarBlurhash,
+		ID:        u.ID,
+		Name:      u.Name,
+		Username:  u.Username,
+		Host:      u.Host,
+		AvatarURL: IdenticonURL(u),
+		// avatarId が null のとき avatarBlurhash も null にする (upstream
+		// `user.avatarId == null ? null : user.avatarBlurhash`、#1558)。avatarUrl
+		// 自体は IdenticonURL fallback があるので gate しない (TS も `?? identicon`)。
+		AvatarBlurhash:    blurhashIfPresent(u.AvatarID, u.AvatarBlurhash),
 		AvatarDecorations: resolveAvatarDecorations(u.AvatarDecorations),
 		IsBot:             u.IsBot,
 		IsCat:             u.IsCat,
@@ -485,10 +508,11 @@ func PackUserLite(u *model.User) UserLite {
 func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) UserDetailed {
 	d := UserDetailed{
 		UserLite: PackUserLite(u),
-		// remote user の bannerUrl も remote origin を指すため proxy 経由に
-		// 書き換える (#1529)。local は素通し。
-		BannerURL:           currentMediaURLContext().ProxyBannerURL(u.BannerURL),
-		BannerBlurhash:      u.BannerBlurhash,
+		// bannerId が null のとき bannerUrl / bannerBlurhash も null にする
+		// (upstream `user.bannerId == null ? null : ...`、#1558)。remote user の
+		// bannerUrl は remote origin を指すため proxy 経由に書き換える (#1529)。
+		BannerURL:           bannerURLIfPresent(u.BannerID, u.BannerURL),
+		BannerBlurhash:      blurhashIfPresent(u.BannerID, u.BannerBlurhash),
 		IsLocked:            u.IsLocked,
 		IsSuspended:         u.IsSuspended,
 		FollowersCount:      u.FollowersCount,

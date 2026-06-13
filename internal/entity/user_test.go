@@ -65,11 +65,13 @@ func TestPackUserLite(t *testing.T) {
 	name := "Test User"
 	avatarURL := "https://example.com/avatar.png"
 	blurhash := "LEHV6nWB2yk8"
+	avatarID := "avatar1"
 
 	u := &model.User{
 		ID:                "user1",
 		Username:          "testuser",
 		Name:              &name,
+		AvatarID:          &avatarID,
 		AvatarURL:         &avatarURL,
 		AvatarBlurhash:    &blurhash,
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
@@ -137,6 +139,7 @@ func TestPackUserLite_ExistingAvatarURL(t *testing.T) {
 func TestPackUserDetailed(t *testing.T) {
 	name := "Detailed User"
 	bannerURL := "https://example.com/banner.png"
+	bannerID := "banner1"
 	desc := "A test user"
 	location := "Tokyo"
 	birthday := "2000-01-01"
@@ -146,6 +149,7 @@ func TestPackUserDetailed(t *testing.T) {
 		ID:                "user3",
 		Username:          "detailed",
 		Name:              &name,
+		BannerID:          &bannerID,
 		BannerURL:         &bannerURL,
 		IsLocked:          true,
 		IsSuspended:       false,
@@ -305,6 +309,41 @@ func TestPackUserDetailed_ProfileVisibility(t *testing.T) {
 
 	assert.Equal(t, "followers", detailed.FollowersVisibility)
 	assert.Equal(t, "private", detailed.FollowingVisibility)
+}
+
+// #1558 avatarId / bannerId が null のとき blurhash / bannerUrl も null にする。
+func TestPackUser_BlurhashGatedByMediaID(t *testing.T) {
+	blur := "LEHV6nWB2yk8"
+	bannerURL := "https://example.com/banner.png"
+
+	t.Run("avatarId nil → avatarBlurhash nil", func(t *testing.T) {
+		u := &model.User{ID: "u", Username: "u", AvatarBlurhash: &blur, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+		lite := PackUserLite(u)
+		assert.Nil(t, lite.AvatarBlurhash, "avatarId が無ければ blurhash も出さない")
+	})
+
+	t.Run("avatarId set → avatarBlurhash kept", func(t *testing.T) {
+		aid := "a1"
+		u := &model.User{ID: "u", Username: "u", AvatarID: &aid, AvatarBlurhash: &blur, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+		lite := PackUserLite(u)
+		assert.Equal(t, &blur, lite.AvatarBlurhash)
+	})
+
+	t.Run("bannerId nil → bannerUrl / bannerBlurhash nil", func(t *testing.T) {
+		u := &model.User{ID: "u", Username: "u", BannerURL: &bannerURL, BannerBlurhash: &blur}
+		d := PackUserDetailed(u, nil)
+		assert.Nil(t, d.BannerURL, "bannerId が無ければ bannerUrl も出さない")
+		assert.Nil(t, d.BannerBlurhash, "bannerId が無ければ bannerBlurhash も出さない")
+	})
+
+	t.Run("bannerId set → banner kept", func(t *testing.T) {
+		bid := "b1"
+		u := &model.User{ID: "u", Username: "u", BannerID: &bid, BannerURL: &bannerURL, BannerBlurhash: &blur}
+		d := PackUserDetailed(u, nil)
+		require.NotNil(t, d.BannerURL)
+		assert.Equal(t, bannerURL, *d.BannerURL)
+		assert.Equal(t, &blur, d.BannerBlurhash)
+	})
 }
 
 // #1558 GateCountVisibility は visibility / viewer 関係に応じて count を 0 化する。

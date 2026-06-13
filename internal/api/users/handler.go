@@ -509,11 +509,24 @@ func (h *Handler) Show(c echo.Context) error {
 			detailed.IsFollowing = &isFollowing
 			detailed.IsFollowed = &isFollowed
 			viewerIsFollowing = isFollowing
+			// notify / withReplies は relation ブロックが存在する限り (= authed
+			// 非self viewer) 常に emit する。upstream は
+			// `notify: relation.following?.notify ?? 'none'` /
+			// `withReplies: relation.following?.withReplies ?? false` で、follow row
+			// が無い / notify 未設定でも default を出す (#1558)。
+			none := "none"
+			withReplies := false
 			if followRec != nil {
-				detailed.Notify = followRec.Notify
-				wr := followRec.WithReplies
-				detailed.WithReplies = &wr
+				if followRec.Notify != nil {
+					detailed.Notify = followRec.Notify
+				} else {
+					detailed.Notify = &none
+				}
+				withReplies = followRec.WithReplies
+			} else {
+				detailed.Notify = &none
 			}
+			detailed.WithReplies = &withReplies
 			// followedMessage は follower にだけ見せる (upstream relation ブロックの
 			// `relation.isFollowing ? profile.followedMessage : undefined`、#1558)。
 			if isFollowing && bundle.Profile != nil {
