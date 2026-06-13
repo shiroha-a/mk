@@ -98,31 +98,63 @@ func formatNullableTime(t *time.Time, layout string) any {
 }
 
 // AuthorizedApps handles POST /api/i/authorized-apps.
-// 本家 Misskey の実装に合わせて、自分に紐づく access_token を返す。
-// name / description / iconUrl / permission / lastUsedAt を含む。
+//
+// upstream authorized-apps.ts は `appId IS NOT NULL` の access_token を
+// limit/offset/sort 付きで引き、各 token を appEntityService.pack(token.appId,
+// me, {detail:true}) で **App entity** に変換して返す。旧 mk-go 実装は
+// access_token 自身の shape ({id=token.id, description, iconUrl, lastUsedAt
+// など}) を返しており、本家 res schema ({id=app.id, name, callbackUrl,
+// permission, isAuthorized}) と非互換だった (#1555)。
+//
+// isAuthorized は upstream で accessTokensRepository.countBy({appId, userId})>0。
+// ここで列挙している token 自体が該当 (appId, userId) ペアの存在を保証するので
+// 常に true。requireCredential なので me は必ず存在する。
 func (h *Handler) AuthorizedApps(c echo.Context) error {
 	if h.accessTokenRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	u := middleware.GetUser(c)
-	tokens, err := h.accessTokenRepo.ListByUserID(u.ID)
+	var req struct {
+		Limit  *int   `json:"limit"`
+		Offset int    `json:"offset"`
+		Sort   string `json:"sort"`
+	}
+	_ = c.Bind(&req)
+	// limit: default 10, clamp 1..100 (authorized-apps.ts paramDef)。
+	limit := 10
+	if req.Limit != nil {
+		limit = *req.Limit
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	// sort enum ['desc','asc'] default 'desc' (= id DESC)。'asc' のみ昇順。
+	sortAsc := req.Sort == "asc"
+	tokens, err := h.accessTokenRepo.ListAuthorizedApps(u.ID, limit, offset, sortAsc)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	out := make([]map[string]any, 0, len(tokens))
 	for _, t := range tokens {
-		entry := map[string]any{
-			"id":          t.ID,
-			"name":        t.Name,
-			"description": t.Description,
-			"iconUrl":     t.IconURL,
-			"permission":  []string(t.Permission),
-			"lastUsedAt":  t.LastUsedAt,
+		// appId NOT NULL filter 済だが、app 行が削除済なら Preload が nil を返す。
+		// upstream は findOneByOrFail で reject するが、mk-go は graceful に skip。
+		if t.App == nil {
+			continue
 		}
-		if ct, err := h.idGen.ParseTime(t.ID); err == nil {
-			entry["createdAt"] = ct.UTC().Format("2006-01-02T15:04:05.000Z")
-		}
-		out = append(out, entry)
+		out = append(out, map[string]any{
+			"id":           t.App.ID,
+			"name":         t.App.Name,
+			"callbackUrl":  t.App.CallbackURL,
+			"permission":   []string(t.App.Permission),
+			"isAuthorized": true,
+		})
 	}
 	return c.JSON(http.StatusOK, out)
 }

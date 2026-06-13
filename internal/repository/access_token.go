@@ -21,6 +21,12 @@ type AccessTokenRepository interface {
 	FindByHashOrToken(hash, rawToken string) (*model.AccessToken, error)
 	FindByID(id string) (*model.AccessToken, error)
 	ListByUserID(userID string) ([]*model.AccessToken, error)
+	// ListAuthorizedApps は /i/authorized-apps 用。upstream は
+	// accessTokensRepository.find({where:{userId, appId: Not(IsNull())}, take,
+	// skip, order:{id}}) で「app に紐づく token のみ」を limit/offset/sort 付きで
+	// 返す (authorized-apps.ts)。App を Preload して呼び出し側が App entity を
+	// 組み立てられるようにする。sortAsc=false で id DESC (= sort 'desc' / default)。
+	ListAuthorizedApps(userID string, limit, offset int, sortAsc bool) ([]*model.AccessToken, error)
 	// ListByUserIDPreloadApp は /i/apps 用に App を JOIN し、sort で
 	// 順序を制御して返す。sort 値 (Misskey TS 互換):
 	//   "+createdAt" → token.id DESC (新しい順)
@@ -73,6 +79,29 @@ func (r *accessTokenRepository) FindByID(id string) (*model.AccessToken, error) 
 func (r *accessTokenRepository) ListByUserID(userID string) ([]*model.AccessToken, error) {
 	var tokens []*model.AccessToken
 	if err := r.db.Where(`"userId" = ?`, userID).Order(`"id" DESC`).Find(&tokens).Error; err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
+// ListAuthorizedApps は /i/authorized-apps 用。appId IS NOT NULL で raw token /
+// miauth (appId NULL) を除外し、limit/offset/sort 付きで返す。Preload("App") で
+// app entity を組み立てられるようにする。
+func (r *accessTokenRepository) ListAuthorizedApps(userID string, limit, offset int, sortAsc bool) ([]*model.AccessToken, error) {
+	order := `"id" DESC`
+	if sortAsc {
+		order = `"id" ASC`
+	}
+	q := r.db.
+		Where(`"userId" = ? AND "appId" IS NOT NULL`, userID).
+		Preload("App").
+		Order(order).
+		Limit(limit)
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	var tokens []*model.AccessToken
+	if err := q.Find(&tokens).Error; err != nil {
 		return nil, err
 	}
 	return tokens, nil

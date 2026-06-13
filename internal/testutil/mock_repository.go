@@ -2575,6 +2575,38 @@ func (m *MockAccessTokenRepository) ListByUserID(userID string) ([]*model.Access
 	return out, nil
 }
 
+// ListAuthorizedApps は実 repo の appId IS NOT NULL filter + Preload("App") +
+// id sort (asc/desc) + limit/offset を再現する。
+func (m *MockAccessTokenRepository) ListAuthorizedApps(userID string, limit, offset int, sortAsc bool) ([]*model.AccessToken, error) {
+	out := make([]*model.AccessToken, 0)
+	for _, t := range m.Tokens {
+		if t.UserID != userID || t.AppID == nil {
+			continue
+		}
+		c := *t
+		if app, ok := m.Apps[*c.AppID]; ok {
+			c.App = app
+		}
+		out = append(out, &c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if sortAsc {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ID > out[j].ID
+	})
+	if offset > 0 {
+		if offset >= len(out) {
+			return []*model.AccessToken{}, nil
+		}
+		out = out[offset:]
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // ListByUserIDPreloadApp は実 repo の Preload("App") + sort 順を再現する。
 // sort 値は Misskey TS 互換 (+/-createdAt, +/-lastUsedAt, default は id ASC)。
 func (m *MockAccessTokenRepository) ListByUserIDPreloadApp(userID, sort string) ([]*model.AccessToken, error) {

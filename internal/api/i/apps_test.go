@@ -114,25 +114,89 @@ func TestRevokeToken(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, postExtra(h.RevokeToken, `{}`, stubUser).Code)
 }
 
-// --- P4-6 (#166): i/authorized-apps ---
+// --- P4-6 (#166) / #1555: i/authorized-apps は App entity shape を返す ---
 
-func TestAuthorizedApps_ReturnsOwnedTokens(t *testing.T) {
+// authorized-apps は upstream の App entity ({id=app.id, name, callbackUrl,
+// permission, isAuthorized}) を返す。appId NULL の raw/miauth token と他人の
+// token は除外される (#1555)。
+func TestAuthorizedApps_ReturnsAppEntities(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	tokens := testutil.NewMockAccessTokenRepository()
 	idGen, _ := id.NewGenerator("aidx")
+
+	appID := "app1"
+	cb := "https://app.example/callback"
+	tokens.SetApp(&model.App{
+		ID:          appID,
+		Name:        "Misskey IDE",
+		CallbackURL: &cb,
+		Permission:  []string{"read:account", "write:notes"},
+	})
 	t1ID := idGen.Generate(time.Now())
-	name1 := "app one"
-	tokens.Tokens["h1"] = &model.AccessToken{ID: t1ID, Hash: "h1", UserID: stubUser.ID, Name: &name1}
-	tokens.Tokens["h2"] = &model.AccessToken{ID: "other-user-token", Hash: "h2", UserID: "other"}
+	tokens.Tokens["h1"] = &model.AccessToken{ID: t1ID, Hash: "h1", UserID: stubUser.ID, AppID: &appID}
+	// appId NULL の raw token は除外される。
+	tokens.Tokens["h2"] = &model.AccessToken{ID: idGen.Generate(time.Now()), Hash: "h2", UserID: stubUser.ID}
+	// 別ユーザーの token も除外。
+	tokens.Tokens["h3"] = &model.AccessToken{ID: "other-token", Hash: "h3", UserID: "other", AppID: &appID}
 	h.SetAccessTokenRepo(tokens)
 
 	rec := postExtra(h.AuthorizedApps, `{}`, stubUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var got []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	// 自分のトークンだけ返る
 	require.Len(t, got, 1)
-	assert.Equal(t, t1ID, got[0]["id"])
+	entry := got[0]
+	// id は app.id (token.id ではない)。
+	assert.Equal(t, appID, entry["id"])
+	assert.Equal(t, "Misskey IDE", entry["name"])
+	assert.Equal(t, cb, entry["callbackUrl"])
+	assert.Equal(t, true, entry["isAuthorized"])
+	perm, _ := entry["permission"].([]any)
+	require.Len(t, perm, 2)
+	assert.Equal(t, "read:account", perm[0])
+	// token 専用 field (description/iconUrl/lastUsedAt) は含まない。
+	_, hasDesc := entry["description"]
+	assert.False(t, hasDesc)
+}
+
+// limit / offset / sort=asc が effect する。
+func TestAuthorizedApps_Pagination(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	a1, a2, a3 := "a1", "a2", "a3"
+	for _, a := range []string{a1, a2, a3} {
+		tokens.SetApp(&model.App{ID: a, Name: a})
+	}
+	t1 := idGen.Generate(time.Now())
+	t2 := idGen.Generate(time.Now().Add(time.Second))
+	t3 := idGen.Generate(time.Now().Add(2 * time.Second))
+	tokens.Tokens["h1"] = &model.AccessToken{ID: t1, Hash: "h1", UserID: stubUser.ID, AppID: &a1}
+	tokens.Tokens["h2"] = &model.AccessToken{ID: t2, Hash: "h2", UserID: stubUser.ID, AppID: &a2}
+	tokens.Tokens["h3"] = &model.AccessToken{ID: t3, Hash: "h3", UserID: stubUser.ID, AppID: &a3}
+	h.SetAccessTokenRepo(tokens)
+
+	// limit=2, sort=asc (id 昇順) → t1(a1), t2(a2)。
+	rec := postExtra(h.AuthorizedApps, `{"limit":2,"sort":"asc"}`, stubUser)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 2)
+	assert.Equal(t, a1, got[0]["id"])
+	assert.Equal(t, a2, got[1]["id"])
+
+	// offset=2, sort=asc → t3(a3) のみ。
+	rec = postExtra(h.AuthorizedApps, `{"sort":"asc","offset":2}`, stubUser)
+	got = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.Equal(t, a3, got[0]["id"])
+
+	// default sort=desc → id 降順 (t3 が先頭)。
+	rec = postExtra(h.AuthorizedApps, `{}`, stubUser)
+	got = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 3)
+	assert.Equal(t, a3, got[0]["id"])
 }
 
 // --- P4-6 (#166): i/revoke-token ---
