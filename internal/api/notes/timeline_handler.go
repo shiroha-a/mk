@@ -140,8 +140,10 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 func (h *Handler) HybridTimeline(c echo.Context) error {
 	// upstream: hybrid-timeline は ltlAvailable で gate する (gtl ではなく
 	// ltl 側 policy を見るのは「ローカルタイムライン + social の hybrid」だから)。
+	// ただしエラーコードは STL_DISABLED (Social TimeLine) で local の LTL_DISABLED
+	// とは別 UUID を返す (#1554、upstream hybrid-timeline.ts stlDisabled)。
 	if !h.timelineAvailable(c, policyKeyLtlAvailable) {
-		return apierr.JSONLtlDisabled(c)
+		return apierr.JSONStlDisabled(c)
 	}
 	return h.serveTimeline(c, "hybrid", func(viewer *model.User, req TimelineRequest) ([]*model.Note, error) {
 		f := timeline.TimelineFilter{
@@ -229,6 +231,18 @@ func (h *Handler) serveTimeline(
 		return apierr.JSONInvalidParam(c)
 	}
 	req.normalize()
+
+	// upstream local/hybrid-timeline は withReplies && withFiles 同時指定を
+	// BOTH_WITH_REPLIES_AND_WITH_FILES で弾く (endpoint 固有 UUID、#1554)。
+	// timeline(home)/global は upstream に該当エラーが無いので対象外。
+	if req.WithReplies != nil && *req.WithReplies && req.WithFiles {
+		switch kind {
+		case "local":
+			return c.JSON(http.StatusBadRequest, apierr.Error("BOTH_WITH_REPLIES_AND_WITH_FILES", "Specifying both withReplies and withFiles is not supported", "dd9c8400-1cb5-4eef-8a31-200c5f933793"))
+		case "hybrid":
+			return c.JSON(http.StatusBadRequest, apierr.Error("BOTH_WITH_REPLIES_AND_WITH_FILES", "Specifying both withReplies and withFiles is not supported", "dfaa3eb7-8002-4cb7-bcc4-1095df46656f"))
+		}
+	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。旧実装は
 	// idGen.Generate(time) で完全 ID (= time prefix + random nodeID + counter)

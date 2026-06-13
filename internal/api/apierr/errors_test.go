@@ -191,6 +191,14 @@ func TestLtlDisabled(t *testing.T) {
 	assert.Equal(t, "Local timeline has been disabled.", errObj["message"])
 }
 
+func TestStlDisabled(t *testing.T) {
+	result := StlDisabled()
+	errObj := result["error"].(map[string]any)
+	assert.Equal(t, "STL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDStlDisabled, errObj["id"])
+	assert.Equal(t, "Hybrid timeline has been disabled.", errObj["message"])
+}
+
 // #1026: upstream notes/global-timeline.ts の gtlDisabled と一致を seal。
 func TestGtlDisabled(t *testing.T) {
 	result := GtlDisabled()

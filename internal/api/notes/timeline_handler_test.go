@@ -262,7 +262,43 @@ func TestHybridTimeline_LtlDisabledRejects(t *testing.T) {
 	setAuthUser(c, &model.User{ID: "alice"})
 	require.NoError(t, h.HybridTimeline(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code, "hybrid は ltlAvailable で gate")
-	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
+	// gate は ltlAvailable だが error code は STL_DISABLED (#1554)。
+	assert.Contains(t, rec.Body.String(), "STL_DISABLED")
+	assert.Contains(t, rec.Body.String(), "620763f4-f621-4533-ab33-0577a1a3c342")
+}
+
+// #1554 local-timeline は withReplies && withFiles 同時指定を
+// BOTH_WITH_REPLIES_AND_WITH_FILES (local 固有 UUID) で弾く。
+func TestLocalTimeline_BothWithRepliesAndWithFiles(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{"withReplies":true,"withFiles":true}`)
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "BOTH_WITH_REPLIES_AND_WITH_FILES")
+	assert.Contains(t, rec.Body.String(), "dd9c8400-1cb5-4eef-8a31-200c5f933793")
+}
+
+// #1554 hybrid-timeline も同様 (hybrid 固有 UUID)。
+func TestHybridTimeline_BothWithRepliesAndWithFiles(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	c, rec := newJSONRequest(t, "/api/notes/hybrid-timeline", `{"withReplies":true,"withFiles":true}`)
+	setAuthUser(c, &model.User{ID: "alice"})
+	require.NoError(t, h.HybridTimeline(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "BOTH_WITH_REPLIES_AND_WITH_FILES")
+	assert.Contains(t, rec.Body.String(), "dfaa3eb7-8002-4cb7-bcc4-1095df46656f")
+}
+
+// withReplies のみ / withFiles のみは通る (両方同時のときだけ弾く)。
+func TestLocalTimeline_WithRepliesOnlyOK(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	h := newTimelineHandler(t, noteRepo, newFailingTimelineService(t))
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{"withReplies":true}`)
+	require.NoError(t, h.LocalTimeline(c))
+	// BOTH guard は通り、後段の failing service で 500 (= guard で弾かれていない)。
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 // policyProvider 未配線時は gate を skip する (= 旧挙動互換 / test fixture)。

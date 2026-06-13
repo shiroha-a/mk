@@ -103,8 +103,12 @@ const (
 
 	// UUIDLtlDisabled は upstream `notes/local-timeline` の `ltlDisabled` UUID。
 	// `ltlAvailable` role policy が false のときに 403 で reject する (#1026)。
-	// hybrid-timeline からも同 UUID で reject する upstream 仕様。
 	UUIDLtlDisabled = "45a6eb02-7695-4393-b023-dd3be9aaaefd"
+	// UUIDStlDisabled は upstream `notes/hybrid-timeline` の `stlDisabled` UUID。
+	// hybrid-timeline は ltlAvailable policy で gate するが、エラーコードは
+	// STL_DISABLED (Social TimeLine) で local-timeline の LTL_DISABLED とは別
+	// (#1554)。
+	UUIDStlDisabled = "620763f4-f621-4533-ab33-0577a1a3c342"
 	// UUIDGtlDisabled は upstream `notes/global-timeline` の `gtlDisabled` UUID。
 	// `gtlAvailable` role policy が false のときに 403 で reject する (#1026)。
 	UUIDGtlDisabled = "0332fc13-6ab2-4427-ae80-a9fadffd1a6b"
@@ -347,6 +351,12 @@ func RestrictedByRole() map[string]any {
 	return Error("RESTRICTED_BY_ROLE",
 		"This feature is restricted by your role.",
 		UUIDRestrictedByRole)
+}
+
+// StlDisabled returns a 403 STL_DISABLED error response (upstream
+// notes/hybrid-timeline の stlDisabled、#1554)。
+func StlDisabled() map[string]any {
+	return Error("STL_DISABLED", "Hybrid timeline has been disabled.", UUIDStlDisabled)
 }
 
 // LtlDisabled returns a 403 LTL_DISABLED error response. upstream

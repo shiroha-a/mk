@@ -58,6 +58,11 @@ func JSONLtlDisabled(c echo.Context) error {
 	return c.JSON(http.StatusForbidden, LtlDisabled())
 }
 
+// JSONStlDisabled writes a 403 STL_DISABLED response (notes/hybrid-timeline)。
+func JSONStlDisabled(c echo.Context) error {
+	return c.JSON(http.StatusForbidden, StlDisabled())
+}
+
 // JSONGtlDisabled writes a 403 GTL_DISABLED response. 詳細は GtlDisabled の doc。
 func JSONGtlDisabled(c echo.Context) error {
 	return c.JSON(http.StatusForbidden, GtlDisabled())

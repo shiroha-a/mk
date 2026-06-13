@@ -115,6 +115,14 @@ func TestJSONLtlDisabled(t *testing.T) {
 	assert.Equal(t, UUIDLtlDisabled, errObj["id"])
 }
 
+func TestJSONStlDisabled(t *testing.T) {
+	code, body := invoke(t, JSONStlDisabled)
+	assert.Equal(t, http.StatusForbidden, code)
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "STL_DISABLED", errObj["code"])
+	assert.Equal(t, UUIDStlDisabled, errObj["id"])
+}
+
 func TestJSONGtlDisabled(t *testing.T) {
 	code, body := invoke(t, JSONGtlDisabled)
 	assert.Equal(t, http.StatusForbidden, code)
