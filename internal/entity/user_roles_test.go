@@ -95,7 +95,9 @@ func TestPackBadgeRoles_FiltersAsBadgeAndIsPublic(t *testing.T) {
 			{ID: "r4", Name: "Badge2", AsBadge: true, IsPublic: true, DisplayOrder: 10},
 		},
 	}})
-	got := packBadgeRoles(&model.User{ID: "u1"})
+	gotPtr := packBadgeRoles(&model.User{ID: "u1"})
+	require.NotNil(t, gotPtr)
+	got := *gotPtr
 	require.Len(t, got, 2)
 	// displayOrder desc: r4 (10) → r1 (3)
 	got0 := got[0].(map[string]any)
@@ -106,31 +108,44 @@ func TestPackBadgeRoles_FiltersAsBadgeAndIsPublic(t *testing.T) {
 	assert.Equal(t, 3, got1["displayOrder"])
 }
 
-// packBadgeRoles: remote user (u.Host != nil) は upstream default で badge
-// 非表示 (meta.showRoleBadgesOfRemoteUsers 対応は follow-up)。
-func TestPackBadgeRoles_RemoteUserReturnsEmpty(t *testing.T) {
-	t.Cleanup(func() { SetUserRolesLookup(nil) })
+// packBadgeRoles: remote user は meta.showRoleBadgesOfRemoteUsers が off なら
+// nil を返し (= upstream undefined / JSON 省略)、on なら badge を pack する (#1653)。
+func TestPackBadgeRoles_RemoteUserGatedByMetaFlag(t *testing.T) {
+	t.Cleanup(func() { SetUserRolesLookup(nil); SetShowRemoteBadgesLookup(nil) })
 	SetUserRolesLookup(&stubRolesLookup{roles: map[string][]*model.Role{
-		"u1": {{ID: "r1", AsBadge: true, IsPublic: true}},
+		"u1": {{ID: "r1", Name: "Badge", AsBadge: true, IsPublic: true}},
 	}})
 	host := "remote.example"
-	got := packBadgeRoles(&model.User{ID: "u1", Host: &host})
-	assert.Empty(t, got)
+	remote := &model.User{ID: "u1", Host: &host}
+
+	// flag 未配線 (= off) → nil (omit)
+	assert.Nil(t, packBadgeRoles(remote))
+
+	// flag off → nil (omit)
+	SetShowRemoteBadgesLookup(func() bool { return false })
+	assert.Nil(t, packBadgeRoles(remote))
+
+	// flag on → badge を pack
+	SetShowRemoteBadgesLookup(func() bool { return true })
+	got := packBadgeRoles(remote)
+	require.NotNil(t, got)
+	require.Len(t, *got, 1)
+	assert.Equal(t, "Badge", (*got)[0].(map[string]any)["name"])
 }
 
-// packBadgeRoles: ロールがゼロでも空配列を返す。
-func TestPackBadgeRoles_EmptyReturnsEmptySlice(t *testing.T) {
+// packBadgeRoles: local user はロールがゼロでも空配列 present (&[]any{}) を返す。
+func TestPackBadgeRoles_LocalEmptyReturnsPresentEmpty(t *testing.T) {
 	t.Cleanup(func() { SetUserRolesLookup(nil) })
 	SetUserRolesLookup(nil)
 	got := packBadgeRoles(&model.User{ID: "u1"})
-	assert.NotNil(t, got)
-	assert.Empty(t, got)
+	require.NotNil(t, got, "local user は badge が無くても present (空配列)")
+	assert.Empty(t, *got)
 }
 
-// packBadgeRoles / packPublicRoles: nil user は安全に空配列を返す。
+// packBadgeRoles: nil user は nil (omit)、packPublicRoles は空配列。
 func TestPackRoles_NilUserReturnsEmpty(t *testing.T) {
 	t.Cleanup(func() { SetUserRolesLookup(nil) })
-	assert.Empty(t, packBadgeRoles(nil))
+	assert.Nil(t, packBadgeRoles(nil))
 	assert.Empty(t, packPublicRoles(nil))
 }
 
@@ -163,8 +178,9 @@ func TestPackUserLite_IncludesBadgeRoles(t *testing.T) {
 		},
 	}})
 	lite := PackUserLite(&model.User{ID: "u1", Username: "alice"})
-	require.Len(t, lite.BadgeRoles, 1)
-	br := lite.BadgeRoles[0].(map[string]any)
+	require.NotNil(t, lite.BadgeRoles)
+	require.Len(t, *lite.BadgeRoles, 1)
+	br := (*lite.BadgeRoles)[0].(map[string]any)
 	assert.Equal(t, "Cool", br["name"])
 	assert.Equal(t, &icon, br["iconUrl"])
 }

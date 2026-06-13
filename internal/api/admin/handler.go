@@ -590,7 +590,7 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 		"isCat":             detailed.IsCat,
 		"emojis":            detailed.Emojis,
 		"onlineStatus":      detailed.OnlineStatus,
-		"badgeRoles":        detailed.BadgeRoles,
+		"badgeRoles":        badgeRolesForMap(detailed.BadgeRoles),
 		// UserDetailed
 		"bannerUrl":      detailed.BannerURL,
 		"bannerBlurhash": detailed.BannerBlurhash,
@@ -761,6 +761,19 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+// badgeRolesForMap returns badgeRoles for admin map-based responses. The packer
+// now returns *[]any (nil = absent for remote users with
+// showRoleBadgesOfRemoteUsers off, #1653), but admin endpoints serialise via
+// map[string]any which ignores omitempty — a nil pointer would emit
+// schema-invalid `null` (UserLite.badgeRoles is nullable:false). Coerce nil to
+// `[]` so the admin response keeps its previous `[]` shape.
+func badgeRolesForMap(br *[]any) []any {
+	if br == nil {
+		return []any{}
+	}
+	return *br
+}
+
 // packAdminUser returns a MeDetailed-equivalent response for admin endpoints.
 func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[string]any {
 	detailed := entity.PackUserDetailed(u, profile)
@@ -771,7 +784,7 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		"avatarBlurhash": detailed.AvatarBlurhash, "avatarDecorations": detailed.AvatarDecorations,
 		"isBot": detailed.IsBot, "isCat": detailed.IsCat,
 		"emojis": detailed.Emojis, "onlineStatus": detailed.OnlineStatus,
-		"badgeRoles": detailed.BadgeRoles,
+		"badgeRoles": badgeRolesForMap(detailed.BadgeRoles),
 		// UserDetailed
 		"bannerUrl": detailed.BannerURL, "bannerBlurhash": detailed.BannerBlurhash,
 		"isLocked": detailed.IsLocked, "isSilenced": false, "isSuspended": detailed.IsSuspended,

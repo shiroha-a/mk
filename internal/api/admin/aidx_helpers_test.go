@@ -40,3 +40,17 @@ func TestAidxCreatedAtString_InvalidID(t *testing.T) {
 	assert.Error(t, err)
 	assert.False(t, errors.Is(err, ErrIDGenMissing), "non-aidx parse failure must not be reported as ErrIDGenMissing")
 }
+
+// #1653 badgeRolesForMap は nil (remote user で showRoleBadgesOfRemoteUsers off)
+// を空配列に coerce し、map 経路で schema-invalid な null を出さない。
+func TestBadgeRolesForMap(t *testing.T) {
+	// nil → 空配列 (admin map では `[]` を維持)
+	assert.NotNil(t, badgeRolesForMap(nil))
+	assert.Empty(t, badgeRolesForMap(nil))
+
+	// non-nil → そのまま deref
+	roles := []any{map[string]any{"name": "Badge"}}
+	got := badgeRolesForMap(&roles)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Badge", got[0].(map[string]any)["name"])
+}

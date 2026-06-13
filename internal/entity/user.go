@@ -53,7 +53,11 @@ type UserLite struct {
 	IsCat             bool                   `json:"isCat"`
 	Emojis            map[string]string      `json:"emojis"`
 	OnlineStatus      string                 `json:"onlineStatus"`
-	BadgeRoles        []any                  `json:"badgeRoles"`
+	// BadgeRoles は local user では常に present (空でも `[]`)、remote user では
+	// meta.showRoleBadgesOfRemoteUsers が off なら省略する (upstream: undefined)。
+	// 「空配列 present」と「absent」を区別するため *[]any + omitempty を使う
+	// (#1653)。
+	BadgeRoles *[]any `json:"badgeRoles,omitempty"`
 	// CanChat は upstream Misskey TS の boolean field (#692)。FE の
 	// /chat/room.vue が `!user.canChat` で「DM 受け付け不可」warning を
 	// 出すので、出さないと local user 同士で DM できないと誤表示される。

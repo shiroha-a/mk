@@ -1409,6 +1409,13 @@ func (s *Server) setupRoutes() {
 	// に表示されなかった。roleService.GetUserRoles も in-memory cache 経由
 	// (#761) で hot path コスト無し。
 	entity.SetUserRolesLookup(corerole.NewUserRolesLookup(roleService))
+	// remote user の badgeRoles を出すかは meta.showRoleBadgesOfRemoteUsers
+	// 次第 (upstream)。CachedMetaRepository.Fetch は cache 経由で hot path
+	// コスト無し。fetch 失敗時は false (= local-only の保守的 default) (#1653)。
+	entity.SetShowRemoteBadgesLookup(func() bool {
+		m, err := metaRepo.Fetch()
+		return err == nil && m != nil && m.ShowRoleBadgesOfRemoteUsers
+	})
 	// PackDriveFile / IdenticonURL が remote origin の media URL (note 添付・
 	// avatar・banner 等) を pack 時に media proxy 経由へ書き換えられるよう
 	// context を登録する (#1529)。これが無いと remote の url/thumbnailUrl/

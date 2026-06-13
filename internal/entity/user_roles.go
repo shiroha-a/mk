@@ -39,6 +39,37 @@ func SetUserRolesLookup(l UserRolesLookup) {
 	userRolesLookupMu.Unlock()
 }
 
+// showRemoteBadgesLookup resolves meta.showRoleBadgesOfRemoteUsers so
+// packBadgeRoles can decide whether a remote user's badge roles are exposed
+// (upstream `meta.showRoleBadgesOfRemoteUsers || user.host == null`、#1653)。
+// Router wires this once at startup with a closure that reads the cached meta.
+// nil leaves it false, which keeps the conservative local-only default for
+// tests that don't wire it.
+var (
+	showRemoteBadgesMu     sync.RWMutex
+	showRemoteBadgesLookup func() bool
+)
+
+// SetShowRemoteBadgesLookup wires the meta.showRoleBadgesOfRemoteUsers
+// accessor used by packBadgeRoles (#1653)。Pass nil to clear (used in tests).
+func SetShowRemoteBadgesLookup(fn func() bool) {
+	showRemoteBadgesMu.Lock()
+	showRemoteBadgesLookup = fn
+	showRemoteBadgesMu.Unlock()
+}
+
+// resolveShowRemoteBadges reports whether remote users' badge roles should be
+// exposed, falling back to false (= local-only) when the lookup is unwired.
+func resolveShowRemoteBadges() bool {
+	showRemoteBadgesMu.RLock()
+	fn := showRemoteBadgesLookup
+	showRemoteBadgesMu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	return fn()
+}
+
 // resolveUserRolesSorted returns the user's assigned roles sorted by
 // displayOrder descending (= upstream sort key). Returns a fresh slice so
 // callers can iterate / filter freely without mutating the role service's
@@ -73,20 +104,25 @@ func resolveUserRolesSorted(userID string) []*model.Role {
 // viewer context; that is a follow-up to thread viewer through the entity
 // pack path).
 //
-// `(meta.showRoleBadgesOfRemoteUsers || user.host == null)` 条件は本実装で
-// は「local user (= u.Host == nil) のみ」に限定する upstream の保守的な
-// デフォルト挙動を採用する。meta フラグ参照は別 lookup pattern を要する
-// ため、scope を core bug fix に絞って follow-up に回す。
+// upstream の `(meta.showRoleBadgesOfRemoteUsers || user.host == null)` 条件を
+// 再現する (#1653)。local user (host==nil) は常に pack し、remote user は
+// meta.showRoleBadgesOfRemoteUsers が on のときだけ pack する。
 //
-// Always returns a non-nil slice ([]any{}) so the JSON output is `[]` not
-// `null` (drop-in 互換: upstream は undefined を返すが mk-go の現実装は
-// JSON `[]` 固定なので、その shape を維持する)。
-func packBadgeRoles(u *model.User) []any {
-	out := []any{}
-	if u == nil || u.Host != nil {
-		// remote user は upstream default で badge を出さない
-		return out
+// 戻り値で「省略 (nil)」と「空配列 present (&[]any{})」を区別する:
+//   - local user: 常に non-nil (badge が無くても &[]any{} = JSON `[]`)
+//   - remote + flag off: nil (= upstream undefined、JSON では omitempty で省略)
+//   - remote + flag on: badge を pack した non-nil slice
+//
+// BadgeRoles は *[]any + omitempty なので nil → 省略、non-nil → present。
+func packBadgeRoles(u *model.User) *[]any {
+	if u == nil {
+		return nil
 	}
+	if u.Host != nil && !resolveShowRemoteBadges() {
+		// remote user は flag off なら badge を出さない (upstream: undefined)
+		return nil
+	}
+	out := []any{}
 	roles := resolveUserRolesSorted(u.ID)
 	for _, r := range roles {
 		if r == nil || !r.AsBadge || !r.IsPublic {
@@ -101,7 +137,7 @@ func packBadgeRoles(u *model.User) []any {
 			"displayOrder": r.DisplayOrder,
 		})
 	}
-	return out
+	return &out
 }
 
 // packPublicRoles returns the user's public roles ready for JSON
