@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // stubTransferEnqueuer records calls and optionally returns an error.
@@ -57,7 +58,8 @@ func newTransferHandlerWithDrive() (*Handler, *stubTransferEnqueuer, *testutil.M
 	h.SetTransferEnqueuer(enq)
 	driveRepo := testutil.NewMockDriveFileRepository()
 	uid := ownerID
-	driveRepo.Files[ownedFileID] = &model.DriveFile{ID: ownedFileID, UserID: &uid}
+	// Size > 0 でないと EMPTY_FILE で弾かれる (#1555)。happy path 用に非空にする。
+	driveRepo.Files[ownedFileID] = &model.DriveFile{ID: ownedFileID, UserID: &uid, Size: 16}
 	h.SetDriveFileRepo(driveRepo)
 	return h, enq, driveRepo
 }
@@ -160,7 +162,7 @@ func TestImport_NoEnqueuer(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	driveRepo := testutil.NewMockDriveFileRepository()
 	uid := ownerID
-	driveRepo.Files[ownedFileID] = &model.DriveFile{ID: ownedFileID, UserID: &uid}
+	driveRepo.Files[ownedFileID] = &model.DriveFile{ID: ownedFileID, UserID: &uid, Size: 16}
 	h.SetDriveFileRepo(driveRepo)
 	rec := post(h.ImportFollowing, `{"fileId":"f1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -251,4 +253,73 @@ func TestImport_OwnedFileAccepted(t *testing.T) {
 	assert.Len(t, enq.importCalls, 1)
 	assert.Equal(t, ownedFileID, enq.importCalls[0].FileID)
 	assert.Equal(t, ownerID, enq.importCalls[0].UserID)
+}
+
+// 空 file (size==0) は EMPTY_FILE で弾かれ、enqueue されない (#1555)。
+// 全 import endpoint で per-endpoint UUID を確認する。
+func TestImport_EmptyFileRejected(t *testing.T) {
+	for name, makeFn := range map[string]func(*Handler) func(c echo.Context) error{
+		"following":  func(h *Handler) func(c echo.Context) error { return h.ImportFollowing },
+		"blocking":   func(h *Handler) func(c echo.Context) error { return h.ImportBlocking },
+		"muting":     func(h *Handler) func(c echo.Context) error { return h.ImportMuting },
+		"user-lists": func(h *Handler) func(c echo.Context) error { return h.ImportUserLists },
+		"antennas":   func(h *Handler) func(c echo.Context) error { return h.ImportAntennas },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, enq, driveRepo := newTransferHandlerWithDrive()
+			uid := ownerID
+			driveRepo.Files["empty"] = &model.DriveFile{ID: "empty", UserID: &uid, Size: 0}
+			rec := post(makeFn(h), `{"fileId":"empty"}`, &model.User{ID: ownerID})
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "EMPTY_FILE")
+			wantID := map[string]string{
+				"following":  "31a1b42c-06f7-42ae-8a38-a661c5c9f691",
+				"blocking":   "6f3a4dcc-f060-a707-4950-806fbdbe60d6",
+				"muting":     "d2f12af1-e7b4-feac-86a3-519548f2728e",
+				"user-lists": "99efe367-ce6e-4d44-93f8-5fae7b040356",
+				"antennas":   "7f60115d-8d93-4b0f-bd0e-3815dcbb389f",
+			}[name]
+			assert.Contains(t, rec.Body.String(), wantID)
+			assert.Empty(t, enq.importCalls)
+		})
+	}
+}
+
+// 64KB 超の file は TOO_BIG_FILE で弾かれる (import-antennas を除く)。
+func TestImport_TooBigFileRejected(t *testing.T) {
+	for name, makeFn := range map[string]func(*Handler) func(c echo.Context) error{
+		"following":  func(h *Handler) func(c echo.Context) error { return h.ImportFollowing },
+		"blocking":   func(h *Handler) func(c echo.Context) error { return h.ImportBlocking },
+		"muting":     func(h *Handler) func(c echo.Context) error { return h.ImportMuting },
+		"user-lists": func(h *Handler) func(c echo.Context) error { return h.ImportUserLists },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, enq, driveRepo := newTransferHandlerWithDrive()
+			uid := ownerID
+			driveRepo.Files["big"] = &model.DriveFile{ID: "big", UserID: &uid, Size: 64*1024 + 1}
+			rec := post(makeFn(h), `{"fileId":"big"}`, &model.User{ID: ownerID})
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "TOO_BIG_FILE")
+			assert.Empty(t, enq.importCalls)
+		})
+	}
+}
+
+// import-antennas は upstream に tooBigFile が無いので 64KB 超でも通る。
+func TestImport_Antennas_NoTooBigCheck(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["big"] = &model.DriveFile{ID: "big", UserID: &uid, Size: 64*1024 + 1}
+	rec := post(h.ImportAntennas, `{"fileId":"big"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, enq.importCalls, 1)
+}
+
+// import-following の job-level withReplies が ImportPayload に伝わる (#1555)。
+func TestImport_Following_JobWithReplies(t *testing.T) {
+	h, enq, _ := newTransferHandlerWithDrive()
+	rec := post(h.ImportFollowing, `{"fileId":"f1","withReplies":true}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, enq.importCalls, 1)
+	assert.True(t, enq.importCalls[0].WithReplies)
 }

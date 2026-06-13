@@ -27,14 +27,19 @@ import (
 // Applied/Skipped 集計が per-pair 非同期化では「enqueue 数」しか数えられず
 // 不正確になるため (#1563 review)。queue surface (TaskTypeFollow /
 // EnqueueFollowBulk) は用意済みなので、集計を再設計する場合はそちらへ移行する。
-func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult, error) {
+func (i *Importer) importFollowing(user *model.User, body []byte, jobWithReplies bool) (*ImportResult, error) {
 	if i.deps.Following == nil {
 		return nil, fmt.Errorf("following service not configured")
 	}
 	lines := scanCSV(body)
 	res := &ImportResult{Total: len(lines)}
 	for _, line := range lines {
-		acctStr, opts := parseFollowingCSVLine(line)
+		acctStr, opts, withRepliesSet := parseFollowingCSVLine(line)
+		// CSV row が withReplies を省略していたら job-level の値を fallback に
+		// 使う (upstream `withReplies ?? job.data.withReplies`)。
+		if !withRepliesSet {
+			opts.WithReplies = jobWithReplies
+		}
 		target, err := i.resolveTargetUser(acctStr)
 		if err != nil || target == nil {
 			res.Skipped++
@@ -56,14 +61,18 @@ func (i *Importer) importFollowing(user *model.User, body []byte) (*ImportResult
 }
 
 // parseFollowingCSVLine splits a CSV row into its acct field and any optional
-// `key=value` fields, returning the acct and a populated FollowOptions.
+// `key=value` fields, returning the acct, a populated FollowOptions, and
+// whether the row carried an explicit `withReplies` field. The presence flag
+// lets the caller fall back to the job-level withReplies when the row omits it
+// (upstream `line[1] ? line[1] === 'true' : job.data.withReplies`)。
 //
 // 不正な field (= `=` を含まない trailing fragment や未知の key) は silently
 // skip する (= upstream の `switch (key)` で default なしの挙動と一致)。
-func parseFollowingCSVLine(line string) (string, FollowOptions) {
+func parseFollowingCSVLine(line string) (string, FollowOptions, bool) {
 	parts := strings.Split(line, ",")
 	acct := strings.TrimSpace(parts[0])
 	var opts FollowOptions
+	withRepliesSet := false
 	for _, kv := range parts[1:] {
 		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
 		if !ok {
@@ -74,9 +83,10 @@ func parseFollowingCSVLine(line string) (string, FollowOptions) {
 			// upstream Misskey TS の `value === 'true'` と同 semantics: 文字列
 			// "true" 以外は (空文字 / "false" / "invalid" 等) すべて false。
 			opts.WithReplies = v == "true"
+			withRepliesSet = true
 		}
 	}
-	return acct, opts
+	return acct, opts, withRepliesSet
 }
 
 // importBlocking parses `acct` lines and applies a block per entry.

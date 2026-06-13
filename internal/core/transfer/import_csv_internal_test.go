@@ -18,38 +18,46 @@ func TestParseFollowingCSVLine(t *testing.T) {
 		line    string
 		acct    string
 		options FollowOptions
+		// set は withReplies field が row に明示されていたか (job-level fallback
+		// 判定用)。
+		set bool
 	}{
 		{
 			name:    "acct only",
 			line:    "@bob@host.example",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: false},
+			set:     false,
 		},
 		{
 			name:    "withReplies=true",
 			line:    "@bob@host.example,withReplies=true",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: true},
+			set:     true,
 		},
 		{
 			name:    "withReplies=false",
 			line:    "@bob@host.example,withReplies=false",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: false},
+			set:     true,
 		},
 		{
 			name: "withReplies=invalid falls back to false",
 			// loose parsing: "true" 以外はすべて false (upstream の
-			// `value === 'true'` と同 semantics)。
+			// `value === 'true'` と同 semantics)。key は present 扱い。
 			line:    "@bob@host.example,withReplies=yes",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: false},
+			set:     true,
 		},
 		{
 			name:    "unknown key is silently ignored",
 			line:    "@bob@host.example,silent=true",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: false},
+			set:     false,
 		},
 		{
 			name: "malformed key=value fragment (no =) silently skipped",
@@ -58,21 +66,24 @@ func TestParseFollowingCSVLine(t *testing.T) {
 			line:    "@bob@host.example,bareToken,withReplies=true",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: true},
+			set:     true,
 		},
 		{
 			name:    "leading/trailing spaces stripped",
 			line:    "  @bob@host.example  ,  withReplies=true  ",
 			acct:    "@bob@host.example",
 			options: FollowOptions{WithReplies: true},
+			set:     true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			acct, opts := parseFollowingCSVLine(tc.line)
+			acct, opts, set := parseFollowingCSVLine(tc.line)
 			assert.Equal(t, tc.acct, acct)
 			assert.Equal(t, tc.options, opts)
+			assert.Equal(t, tc.set, set)
 		})
 	}
 }

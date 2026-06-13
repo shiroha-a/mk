@@ -76,10 +76,31 @@ type ImportResult struct {
 	Skipped int
 }
 
+// importConfig carries per-call options threaded through Import via functional
+// options. Currently only the import-following job-level withReplies fallback.
+type importConfig struct {
+	withReplies bool
+}
+
+// ImportOption configures a single Import call (functional-options pattern so
+// existing callers need no signature change)。
+type ImportOption func(*importConfig)
+
+// WithFollowReplies sets the import-following job-level withReplies fallback
+// used when a CSV row omits its per-line withReplies field (upstream
+// `withReplies ?? job.data.withReplies`)。他 import type では無視される。
+func WithFollowReplies(v bool) ImportOption {
+	return func(c *importConfig) { c.withReplies = v }
+}
+
 // Import reads the DriveFile referenced by fileID and dispatches the content
 // to the handler matching importType. Errors per-item are logged and counted
 // as Skipped so that a single malformed entry does not abort the batch.
-func (i *Importer) Import(ctx context.Context, userID, importType, fileID string) (*ImportResult, error) {
+func (i *Importer) Import(ctx context.Context, userID, importType, fileID string, opts ...ImportOption) (*ImportResult, error) {
+	var cfg importConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	user, err := i.deps.UserRepo.FindByID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("find user: %w", err)
@@ -95,7 +116,7 @@ func (i *Importer) Import(ctx context.Context, userID, importType, fileID string
 	var result *ImportResult
 	switch importType {
 	case ImportFollowing:
-		result, err = i.importFollowing(user, body)
+		result, err = i.importFollowing(user, body, cfg.withReplies)
 	case ImportBlocking:
 		result, err = i.importBlocking(user, body)
 	case ImportMuting:

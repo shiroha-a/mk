@@ -200,6 +200,10 @@ type ImportPayload struct {
 	UserID string `json:"userId"`
 	Type   string `json:"type"` // following, blocking, muting, user-lists, antennas
 	FileID string `json:"fileId"`
+	// WithReplies は import-following の job-level fallback。CSV row が per-line
+	// withReplies を省略したときの default に使う (upstream
+	// `withReplies ?? job.data.withReplies`)。他 type では無視される。
+	WithReplies bool `json:"withReplies,omitempty"`
 }
 
 // NewImportTask creates a driver.Task for data import.

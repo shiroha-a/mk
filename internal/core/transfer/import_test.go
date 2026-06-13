@@ -184,6 +184,31 @@ func TestImport_Following_DefaultsWithRepliesFalseWhenOmitted(t *testing.T) {
 	assert.False(t, fs.lastOpts.WithReplies, "missing withReplies field should default to false")
 }
 
+// #1555: CSV row が withReplies を省略したとき、job-level の値が fallback
+// として使われる (upstream `withReplies ?? job.data.withReplies`)。
+func TestImport_Following_JobWithRepliesFallback(t *testing.T) {
+	deps, user, fs, _, _, _ := newImporterDeps(t, []byte("bob\n"))
+	imp := transfer.NewImporter(deps)
+	res, err := imp.Import(context.Background(), user.ID, transfer.ImportFollowing, "fid",
+		transfer.WithFollowReplies(true))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Applied)
+	require.Len(t, fs.calls, 1)
+	assert.True(t, fs.lastOpts.WithReplies, "omitted per-line withReplies should fall back to job-level true")
+}
+
+// #1555: per-line の withReplies が明示されていれば job-level より優先される。
+func TestImport_Following_PerLineOverridesJob(t *testing.T) {
+	deps, user, fs, _, _, _ := newImporterDeps(t, []byte("bob,withReplies=false\n"))
+	imp := transfer.NewImporter(deps)
+	res, err := imp.Import(context.Background(), user.ID, transfer.ImportFollowing, "fid",
+		transfer.WithFollowReplies(true))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Applied)
+	require.Len(t, fs.calls, 1)
+	assert.False(t, fs.lastOpts.WithReplies, "explicit per-line withReplies=false must override job-level true")
+}
+
 func TestImport_Following_SkipsUnknown(t *testing.T) {
 	deps, user, fs, _, _, _ := newImporterDeps(t, []byte("ghost\nbob\n"))
 	imp := transfer.NewImporter(deps)

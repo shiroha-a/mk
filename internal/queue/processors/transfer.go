@@ -64,7 +64,7 @@ func (p *ImportProcessor) Handle(ctx context.Context, t driver.Task) error {
 	if payload.UserID == "" || payload.Type == "" || payload.FileID == "" {
 		return fmt.Errorf("import payload missing fields: %w", driver.SkipRetry)
 	}
-	if _, err := p.importer.Import(ctx, payload.UserID, payload.Type, payload.FileID); err != nil {
+	if _, err := p.importer.Import(ctx, payload.UserID, payload.Type, payload.FileID, transfer.WithFollowReplies(payload.WithReplies)); err != nil {
 		if errors.Is(err, transfer.ErrUnsupportedType) {
 			return fmt.Errorf("%w: %w", err, driver.SkipRetry)
 		}
