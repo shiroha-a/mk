@@ -346,6 +346,18 @@ func (p *Processor) Process(body []byte) error {
 		return errors.New("activity missing actor")
 	}
 
+	// upstream performOneActivity は actor.isSuspended なら dispatch 前に
+	// 早期 return する (ApInboxService.ts:144、#1560)。mk-go は既知の
+	// suspended remote actor を DB lookup で判定して drop する (新規 actor は
+	// まだ DB に無く suspended にもなり得ないので素通し)。fetch はせず DB read
+	// のみなので追加コストは小さい。
+	if p.userRepo != nil {
+		if actor, err := p.userRepo.FindByURI(act.Actor); err == nil && actor != nil && actor.IsSuspended {
+			slog.Info("federation: dropping activity from suspended actor", "actor", act.Actor, "type", act.Type)
+			return nil
+		}
+	}
+
 	switch strings.ToLower(act.Type) {
 	case "follow":
 		return p.handleFollow(act)
@@ -639,6 +651,8 @@ func (p *Processor) handleUndo(act genericActivity) error {
 		return p.handleUndoAnnounce(act, inner)
 	case "block":
 		return p.handleUndoBlock(act, inner)
+	case "accept":
+		return p.handleUndoAccept(act, inner)
 	case "emojireaction", "emojireact":
 		return p.handleUndoLike(act, inner)
 	case "invite":
@@ -656,6 +670,52 @@ func (p *Processor) handleUndo(act genericActivity) error {
 		return nil
 	}
 	return ErrUnsupportedActivity
+}
+
+// handleUndoAccept processes an inbound Undo(Accept): a remote followee revokes
+// a previously-accepted follow, which means we should drop our local follower's
+// following relationship to them (upstream ApInboxService.undoAccept、#1560)。
+//
+// 二段ネスト: act=Undo, inner=Accept, inner.Object=元の Follow。
+//   - act.Actor       = remote followee (accept を撤回した側)
+//   - Follow.actor     = local follower (フォローしていた側)
+//
+// follower→followee の Following があれば Unfollow する。
+func (p *Processor) handleUndoAccept(act genericActivity, inner genericActivity) error {
+	followee, err := p.resolver.ResolveActor(act.Actor)
+	if err != nil {
+		return err
+	}
+	// inner.Object は元の Follow。その actor が local follower。
+	var follow genericActivity
+	if uerr := json.Unmarshal(inner.Object, &follow); uerr != nil {
+		// object が Follow の URI 文字列だけのケースは follower を特定できない。
+		// upstream は getUserFromApId(activity.object) で解決するが、mk-go では
+		// Follow URI から follower を逆引きする経路が無いので skip (ack)。
+		return nil
+	}
+	follow.normalizeActor(inner.Object)
+	followerURI, err := readActorString(follow)
+	if err != nil || followerURI == "" {
+		return nil
+	}
+	var follower *model.User
+	if localID := p.resolver.ExtractLocalUserID(followerURI); localID != "" {
+		follower, err = p.userRepo.FindByID(localID)
+	} else {
+		follower, err = p.userRepo.FindByURI(followerURI)
+	}
+	if err != nil || follower == nil {
+		return nil
+	}
+	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil {
+		// フォローしていなければ no-op (upstream の 'skip: フォローされていない')。
+		if errors.Is(err, corefollowing.ErrNotFollowing) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // handleUndoFollow undoes a previously created Follow.
@@ -980,6 +1040,12 @@ func encodeAudienceIfChanged(raw json.RawMessage, merged []string) (json.RawMess
 // 1-on-1 chat federation。notes テーブルではなく chat_messages として処理する
 // ため IngestNote をスキップして chatService にルートする (#692)。
 func (p *Processor) handleCreate(act genericActivity) error {
+	// bearcaps (bear:) object URI は未対応として skip する (#1560、upstream
+	// ApInboxService.create の 'skip: bearcaps url not supported')。
+	if isBearcapURI(act.Object) {
+		slog.Info("federation: skipping Create with bearcaps object url", "actor", act.Actor)
+		return nil
+	}
 	actor, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
 		if errors.Is(err, ErrHostNotAllowed) {
@@ -1216,6 +1282,12 @@ func (p *Processor) handleLike(act genericActivity) error {
 
 // handleAnnounce creates a renote pointing at the announced note.
 func (p *Processor) handleAnnounce(act genericActivity) error {
+	// bearcaps (bear:) object URI は未対応として skip (#1560、upstream
+	// ApInboxService.announce の 'skip: bearcaps url not supported')。
+	if isBearcapURI(act.Object) {
+		slog.Info("federation: skipping Announce with bearcaps object url", "actor", act.Actor)
+		return nil
+	}
 	announcer, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
 		// permanent な actor resolve 失敗は ack して skip (#1183、handleLike
@@ -1250,6 +1322,26 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	// 場合のみ relay 由来と判定。
 	if p.relayActorChecker != nil && p.relayActorChecker.IsRelayActor(announcer) {
 		return p.publishRelayDeliveredNote(target, targetURI, act.Actor)
+	}
+	// upstream announceNote の 2 つの skip guard (#1560、ApInboxService.ts:350-361):
+	//   1. !isVisibleForMe(renote, actor): boost は public/home の note にしか
+	//      行えない。followers / specified の note を announce してくる activity は
+	//      不正なので drop する (mk-go は remote-remote の follow graph を持たない
+	//      ため、isVisibleForMe を「対象が public/home か」で近似する)。
+	//   2. activity.published < 対象 note の createdAt: announce が対象 note より
+	//      前に published されたと主張する malformed timestamp は drop する。
+	if target.Visibility != model.NoteVisibilityPublic && target.Visibility != model.NoteVisibilityHome {
+		slog.Info("federation: skipping Announce of non-public note", "object", targetURI, "actor", act.Actor, "visibility", target.Visibility)
+		return nil
+	}
+	if act.Published != "" {
+		if published, perr := time.Parse(time.RFC3339, act.Published); perr == nil {
+			if targetCreated, terr := p.resolver.idGen.ParseTime(target.ID); terr == nil && published.Before(targetCreated) {
+				slog.Info("federation: skipping Announce with malformed createdAt (published before target)",
+					"object", targetURI, "actor", act.Actor)
+				return nil
+			}
+		}
 	}
 	// announce 自身に id があれば URI として保存し、重複検出にも使う。
 	// upstream Misskey #17356 (= 2026.5.1 fix) は同 activity の重複処理 race を
@@ -1485,20 +1577,20 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		// Question / Article 等は未対応
 		return nil
 	}
-	user, err := p.userRepo.FindByURI(person.ID)
-	if err != nil {
+	if _, err := p.userRepo.FindByURI(person.ID); err != nil {
 		// 未取得のリモートユーザーなら無視 (次回 follow/inbox などで取り込まれる)
 		return nil
 	}
-	fields := map[string]any{}
-	if person.Name != "" {
-		name := person.Name
-		fields["name"] = &name
+	// upstream ApInboxService.update -> ApPersonService.updatePerson は actor を
+	// 強制再取得して name だけでなく avatar/banner/bio/fields/isBot/isCat/
+	// isLocked/movedTo/alsoKnownAs/emojis 等の全プロフィールを更新する (#1560)。
+	// mk-go も ForceResolveActor (TTL バイパスで refreshActor を回す既存経路、
+	// handleMove と同じ) を呼んで full refresh する。旧実装は name のみ反映して
+	// いた。fetch 失敗時は refreshActor が silent に既存値を維持する。
+	if _, err := p.resolver.ForceResolveActor(person.ID); err != nil {
+		return err
 	}
-	if len(fields) == 0 {
-		return nil
-	}
-	return p.userRepo.UpdateUser(user.ID, fields)
+	return nil
 }
 
 // peekObjectType reads only the "type" field from a JSON object body. パース
@@ -1514,6 +1606,33 @@ func peekObjectType(raw json.RawMessage) string {
 		return ""
 	}
 	return obj.Type
+}
+
+// objectAPID extracts the AP id of an activity object whether it is encoded as
+// a bare string URI or as an object with an "id" field (upstream getApId 相当)。
+func objectAPID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.ID
+	}
+	return ""
+}
+
+// isBearcapURI reports whether the object id is a bearcaps (`bear:`) URI.
+// upstream create()/announce() は bearcaps を未対応として skip する
+// (ApInboxService.ts:401,291、#1560)。mk-go の resolver も bear: を扱えないため
+// fetch で error にする前に cleanly skip する。
+func isBearcapURI(raw json.RawMessage) bool {
+	return strings.HasPrefix(objectAPID(raw), "bear:")
 }
 
 // handleReject undoes a Follow that was rejected by the followee.
@@ -1651,35 +1770,37 @@ func (p *Processor) handleFlag(act genericActivity) error {
 	if len(uris) == 0 {
 		return errors.New("flag: empty object")
 	}
-	// 最初のURIからターゲットユーザーを特定
+	// upstream flag() は object URI を config.url + '/users/' prefix の LOCAL
+	// user URI に絞ってから user id に map し users[0] を報告対象にする
+	// (#1560、ApInboxService.ts:560-577)。mk-go も ExtractLocalUserID で
+	// `{baseURL}/users/{id}` 形式のローカル URI だけを対象にする。旧実装は
+	// 任意 host の user/note URI を受け、note 作者 (リモート可) まで fallback
+	// して別 instance のユーザーを誤って報告し得た。
 	var targetUserID string
 	for _, uri := range uris {
-		if u, err := p.userRepo.FindByURI(uri); err == nil {
+		localID := p.resolver.ExtractLocalUserID(uri)
+		if localID == "" {
+			continue
+		}
+		if u, err := p.userRepo.FindByID(localID); err == nil && u != nil {
 			targetUserID = u.ID
 			break
 		}
 	}
 	if targetUserID == "" {
-		// ノートURIからユーザーを特定する試み
-		for _, uri := range uris {
-			if n, err := p.noteRepo.FindByURI(uri); err == nil {
-				targetUserID = n.UserID
-				break
-			}
-		}
+		// ローカル user を 1 件も解決できない Flag は ack して drop する
+		// (リモート対象や不正 URI。retry しても解決しないため error にしない)。
+		slog.Info("federation: skipping Flag with no resolvable local target", "actor", act.Actor)
+		return nil
 	}
-	if targetUserID == "" {
-		return errors.New("flag: cannot resolve target user")
-	}
-	// contentフィールドを取得
+	// contentフィールドを取得。upstream は comment に flagged URI 一覧を
+	// 付与する (`${content}\n${JSON.stringify(uris)}`、#1560)。
 	var content struct {
 		Content string `json:"content"`
 	}
 	_ = json.Unmarshal(act.raw, &content)
-	comment := content.Content
-	if comment == "" {
-		comment = "(flagged via ActivityPub)"
-	}
+	urisJSON, _ := json.Marshal(uris)
+	comment := content.Content + "\n" + string(urisJSON)
 	report := &model.AbuseUserReport{
 		ID:             p.abuseIDGen.Generate(nowFn()),
 		TargetUserID:   targetUserID,

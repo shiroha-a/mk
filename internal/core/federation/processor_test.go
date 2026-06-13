@@ -645,7 +645,8 @@ func TestProcess_FlagHappyPath(t *testing.T) {
 	require.NoError(t, p.Process(body))
 	assert.Len(t, abuseRepo.Reports, 1)
 	for _, r := range abuseRepo.Reports {
-		assert.Equal(t, "spam", r.Comment)
+		// #1560: comment は content + "\n" + JSON(flagged URIs)。
+		assert.Equal(t, "spam\n[\"https://example.com/users/bob\"]", r.Comment)
 	}
 }
 

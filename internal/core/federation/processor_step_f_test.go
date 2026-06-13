@@ -1051,9 +1051,22 @@ func TestProcess_UpdateNote_RepoErrorPropagates(t *testing.T) {
 }
 
 func TestProcess_UpdatePerson(t *testing.T) {
-	env := newFullProcessor(t, aliceActor)
+	// #1560: Update(Person) は actor を強制再 fetch して name だけでなく
+	// isBot/isLocked 等の full profile を更新する (upstream updatePerson)。
+	// fetcher が返す更新後 actor doc を反映することを検証する (旧実装は inline
+	// object の name のみ反映していた)。
+	updatedActor := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Service",
+		"preferredUsername": "alice",
+		"name": "Alice Updated",
+		"manuallyApprovesFollowers": true,
+		"inbox": "https://remote.example/users/alice/inbox"
+	}`
+	env := newFullProcessor(t, updatedActor)
 	uri := "https://remote.example/users/alice"
-	env.userRepo.Users["alice-id"] = &model.User{ID: "alice-id", Username: "alice", URI: &uri}
+	env.userRepo.Users["alice-id"] = &model.User{ID: "alice-id", Username: "alice", URI: &uri, IsBot: false, IsLocked: false}
 	body := []byte(`{
 		"type": "Update",
 		"actor": "https://remote.example/users/alice",
@@ -1064,8 +1077,13 @@ func TestProcess_UpdatePerson(t *testing.T) {
 		}
 	}`)
 	require.NoError(t, env.processor.Process(body))
-	require.NotNil(t, env.userRepo.Users["alice-id"].Name)
-	assert.Equal(t, "Alice Updated", *env.userRepo.Users["alice-id"].Name)
+	updated := env.userRepo.Users["alice-id"]
+	require.NotNil(t, updated.Name)
+	assert.Equal(t, "Alice Updated", *updated.Name)
+	// name 以外も full refresh されること (Service type -> isBot、
+	// manuallyApprovesFollowers -> isLocked)。旧 name-only 実装では false のまま。
+	assert.True(t, updated.IsBot, "Service actor type must update isBot (full refresh)")
+	assert.True(t, updated.IsLocked, "manuallyApprovesFollowers must update isLocked (full refresh)")
 }
 
 func TestProcess_UpdateUnknownActor(t *testing.T) {
