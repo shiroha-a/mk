@@ -81,16 +81,20 @@ type UserLite struct {
 // (#1251)。よって base UserDetailed には含めない。
 type UserDetailed struct {
 	UserLite
-	BannerURL           *string        `json:"bannerUrl"`
-	BannerBlurhash      *string        `json:"bannerBlurhash"`
-	IsLocked            bool           `json:"isLocked"`
-	IsSilenced          bool           `json:"isSilenced"`
-	IsSuspended         bool           `json:"isSuspended"`
-	Description         *string        `json:"description"`
-	Location            *string        `json:"location"`
-	Birthday            *string        `json:"birthday"`
-	Lang                *string        `json:"lang"`
-	FollowedMessage     *string        `json:"followedMessage"`
+	BannerURL      *string `json:"bannerUrl"`
+	BannerBlurhash *string `json:"bannerBlurhash"`
+	IsLocked       bool    `json:"isLocked"`
+	IsSilenced     bool    `json:"isSilenced"`
+	IsSuspended    bool    `json:"isSuspended"`
+	Description    *string `json:"description"`
+	Location       *string `json:"location"`
+	Birthday       *string `json:"birthday"`
+	Lang           *string `json:"lang"`
+	// FollowedMessage は follower / self だけに見せる private 文字列なので
+	// omitempty で「非 follower には省略」を表現する。packer はこの field を
+	// set せず、self は AsMeDetailed、follower は users/show handler が set する
+	// (upstream UserEntityService の relation/isMe ブロックでのみ emit、#1558)。
+	FollowedMessage     *string        `json:"followedMessage,omitempty"`
 	PublicReactions     bool           `json:"publicReactions"`
 	Fields              datatypes.JSON `json:"fields"`
 	VerifiedLinks       []string       `json:"verifiedLinks"`
@@ -166,6 +170,11 @@ type UserDetailed struct {
 // scoped to self-view (#968 / sibling of #693 ChatScope drift).
 type MeDetailed struct {
 	UserDetailed
+	// FollowedMessage は MeDetailed では required (self は isMe ブロックで必ず
+	// emit、null 可)。base UserDetailed 側は omitempty で「非 follower には省略」
+	// を表すため、MeDetailed では omitempty 無しの field で shadow して常に出す
+	// (#1558)。encoding/json は浅い深さの本 field を優先する。
+	FollowedMessage *string `json:"followedMessage"`
 	// avatarId / bannerId は self view 専用 (#1251)。misskey_dart の dispatch が
 	// `avatarId` key の存在で MeDetailed を判別するため、MeDetailed のみが出す。
 	AvatarID                 *string `json:"avatarId"`
@@ -326,6 +335,9 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		TwoFactorBackupCodesStock: "none",
 	}
 	if profile != nil {
+		// self は upstream の isMe ブロックで followedMessage を必ず見られる
+		// (#1558)。base packer は set しないので MeDetailed で埋め直す。
+		out.FollowedMessage = profile.FollowedMessage
 		out.NoCrawle = profile.NoCrawle
 		out.PreventAiLearning = profile.PreventAiLearning
 		out.AutoSensitive = profile.AutoSensitive
@@ -524,7 +536,9 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		d.Location = profile.Location
 		d.Birthday = profile.Birthday
 		d.Lang = profile.Lang
-		d.FollowedMessage = profile.FollowedMessage
+		// followedMessage は viewer-dependent (follower / self のみ)。packer は
+		// set せず、self は AsMeDetailed、follower は users/show handler が埋める
+		// (#1558 privacy gate)。base detailed には出さない。
 		d.PublicReactions = profile.PublicReactions
 		d.Fields = profile.Fields
 		if len(profile.VerifiedLinks) > 0 {
@@ -543,6 +557,28 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 	}
 
 	return d
+}
+
+// countVisible reports whether a followers/following count is visible to a
+// viewer, per upstream UserEntityService (followingCount/followersCount are
+// nulled → 0 unless): visibility=='public' OR self OR moderator OR
+// (visibility=='followers' && the viewer follows the target) (#1558)。
+func countVisible(visibility string, isMe, isModerator, isFollowing bool) bool {
+	return visibility == string(model.FollowingVisibilityPublic) || isMe || isModerator ||
+		(visibility == string(model.FollowingVisibilityFollowers) && isFollowing)
+}
+
+// GateCountVisibility zeroes followersCount / followingCount on a packed
+// UserDetailed when the viewer must not see them, mirroring upstream's null →
+// 0 for restricted (followers / private) visibility (#1558)。d.FollowersVisibility
+// / d.FollowingVisibility は PackUserDetailed が profile から埋めた値を読む。
+func GateCountVisibility(d *UserDetailed, isMe, isModerator, isFollowing bool) {
+	if !countVisible(d.FollowersVisibility, isMe, isModerator, isFollowing) {
+		d.FollowersCount = 0
+	}
+	if !countVisible(d.FollowingVisibility, isMe, isModerator, isFollowing) {
+		d.FollowingCount = 0
+	}
 }
 
 // backupCodesStock returns the 2FA backup-codes stock level. Mirrors upstream

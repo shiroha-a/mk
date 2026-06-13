@@ -672,6 +672,28 @@ func TestService_UpdateProfile_PublishesMeUpdated(t *testing.T) {
 	assert.Equal(t, "hello", m["description"])
 }
 
+// #1558 meUpdated は本人の self event なので follower-only の followedMessage も
+// 含む。PackUserDetailed が followedMessage を set しなくなった回帰を防ぐ。
+func TestService_UpdateProfile_MeUpdatedCarriesFollowedMessage(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	msg := "thanks for following"
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		FollowedMessage: ptr(ptr(msg)),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, pub.calls, 1)
+	raw, err := json.Marshal(pub.calls[0].body)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	assert.Equal(t, msg, m["followedMessage"], "meUpdated body は本人の followedMessage を含む")
+}
+
 func TestService_UpdateProfile_UserUpdateError_DoesNotPublish(t *testing.T) {
 	mockUR := testutil.NewMockUserRepository()
 	mockUR.Users["u1"] = &model.User{ID: "u1", Username: "alice"}

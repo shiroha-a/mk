@@ -364,6 +364,11 @@ func (h *Handler) Show(c echo.Context) error {
 			resolver.FillUserLite(&detailed.UserLite)
 			h.populateUserEmojis(b.User, &detailed.UserLite)
 			h.applyModerationNote(&detailed, iAmModerator, b.Profile)
+			// bulk は per-user の follow 関係を解決しないため isFollowing=false で
+			// gate する (#1558)。self / moderator は count を保持。non-public
+			// visibility の非 follower count は 0 化される (privacy 安全側)。
+			isMe := viewer != nil && viewer.ID == b.User.ID
+			entity.GateCountVisibility(&detailed, isMe, iAmModerator, false)
 			out = append(out, detailed)
 		}
 		return c.JSON(http.StatusOK, out)
@@ -455,6 +460,9 @@ func (h *Handler) Show(c echo.Context) error {
 	// viewerがログインしている場合、viewer依存フィールドを並列取得する。
 	// 各リポジトリへのクエリは完全に独立しているためgoroutineで並列実行し、
 	// 全結果が揃ってからdetailedに反映する。
+	// viewerIsFollowing は relation ブロックで解決し、count / followedMessage の
+	// viewer-dependent gate (#1558) でも参照するため関数スコープに持つ。
+	viewerIsFollowing := false
 	if viewer != nil && viewer.ID != bundle.User.ID {
 		var (
 			isFollowing, isFollowed      bool
@@ -500,10 +508,16 @@ func (h *Handler) Show(c echo.Context) error {
 		if h.followingRepo != nil {
 			detailed.IsFollowing = &isFollowing
 			detailed.IsFollowed = &isFollowed
+			viewerIsFollowing = isFollowing
 			if followRec != nil {
 				detailed.Notify = followRec.Notify
 				wr := followRec.WithReplies
 				detailed.WithReplies = &wr
+			}
+			// followedMessage は follower にだけ見せる (upstream relation ブロックの
+			// `relation.isFollowing ? profile.followedMessage : undefined`、#1558)。
+			if isFollowing && bundle.Profile != nil {
+				detailed.FollowedMessage = bundle.Profile.FollowedMessage
 			}
 		}
 		if h.blockingRepo != nil {
@@ -539,6 +553,10 @@ func (h *Handler) Show(c echo.Context) error {
 		me.Policies = corerole.DefaultPolicies()
 		return c.JSON(http.StatusOK, me)
 	}
+	// followers/following count を visibility で gate する (#1558)。ここに来るのは
+	// non-self (anonymous 含む)。isMe=false、isFollowing は relation ブロックで
+	// 解決済 (anonymous / 未配線なら false = 非 follower 扱い)。
+	entity.GateCountVisibility(&detailed, false, iAmModerator, viewerIsFollowing)
 	return c.JSON(http.StatusOK, detailed)
 }
 
@@ -579,6 +597,9 @@ func (h *Handler) Search(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	viewer := middleware.GetUser(c)
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
+
 	resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)
 
 	// detail は default true。false のとき UserLite を返す (upstream search.ts:56、#1547)。
@@ -607,6 +628,12 @@ func (h *Handler) Search(c echo.Context) error {
 		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
 		resolver.FillUserLite(&d.UserLite)
 		h.populateUserEmojis(u, &d.UserLite)
+		// moderator viewer には moderationNote を出す (#1558、users/show と対称)。
+		h.applyModerationNote(&d, iAmModerator, profiles[u.ID])
+		// count visibility gate (#1558)。search は per-user の follow 関係を
+		// 解決しないため isFollowing=false。self / moderator は count を保持。
+		isMe := viewer != nil && viewer.ID == u.ID
+		entity.GateCountVisibility(&d, isMe, iAmModerator, false)
 		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
@@ -967,6 +994,9 @@ func (h *Handler) packRelationItems(
 	// する (singleflight が同 key dedup、cache 1h で次 scroll は HTTP 0)。
 	remoteStatsMap := h.batchRemoteStatsOverride(ctx, bundleByID)
 
+	// count visibility gate (#1558) 用。moderator viewer は全 count を見られる。
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
+
 	out := make([]relationItem, 0, len(filtered))
 	for _, f := range filtered {
 		item := relationItem{ID: f.ID, FollowerID: f.FollowerID, FolloweeID: f.FolloweeID}
@@ -983,8 +1013,10 @@ func (h *Handler) packRelationItems(
 			d := entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 			resolver.FillUserLite(&d.UserLite)
 			h.populateUserEmojis(b.User, &d.UserLite)
+			isMe := viewer != nil && viewer.ID == b.User.ID
+			isFollowing := false
 			if viewer != nil && viewer.ID != b.User.ID {
-				isFollowing := followingMap[b.User.ID]
+				isFollowing = followingMap[b.User.ID]
 				isFollowed := followedMap[b.User.ID]
 				d.IsFollowing = &isFollowing
 				d.IsFollowed = &isFollowed
@@ -999,12 +1031,18 @@ func (h *Handler) packRelationItems(
 				// batch を壊さないため per-user lookup は避ける) ので best-effort
 				// false で埋める。正確な値は users/show 単体で取得される。
 				d.EnsureRelationFlags()
+				// follower にだけ followedMessage を見せる (#1558)。
+				if isFollowing && b.Profile != nil {
+					d.FollowedMessage = b.Profile.FollowedMessage
+				}
 			}
 			if stats := remoteStatsMap[b.User.ID]; stats != nil {
 				d.NotesCount = stats.NotesCount
 				d.FollowersCount = stats.FollowersCount
 				d.FollowingCount = stats.FollowingCount
 			}
+			// count visibility gate は remote stats override の後に適用する (#1558)。
+			entity.GateCountVisibility(&d, isMe, iAmModerator, isFollowing)
 			if followers {
 				item.Follower = &d
 			} else {

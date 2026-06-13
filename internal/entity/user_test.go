@@ -307,6 +307,38 @@ func TestPackUserDetailed_ProfileVisibility(t *testing.T) {
 	assert.Equal(t, "private", detailed.FollowingVisibility)
 }
 
+// #1558 GateCountVisibility は visibility / viewer 関係に応じて count を 0 化する。
+func TestGateCountVisibility(t *testing.T) {
+	cases := []struct {
+		name                           string
+		followersVis, followingVis     string
+		isMe, isModerator, isFollowing bool
+		wantFollowers, wantFollowing   int
+	}{
+		{"public always shown", "public", "public", false, false, false, 10, 20},
+		{"private hidden from non-follower", "private", "private", false, false, false, 0, 0},
+		{"private shown to self", "private", "private", true, false, false, 10, 20},
+		{"private shown to moderator", "private", "private", false, true, false, 10, 20},
+		{"followers hidden from non-follower", "followers", "followers", false, false, false, 0, 0},
+		{"followers shown to follower", "followers", "followers", false, false, true, 10, 20},
+		{"private hidden even from follower", "private", "private", false, false, true, 0, 0},
+		{"mixed: public followers + private following", "public", "private", false, false, false, 10, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := &UserDetailed{
+				FollowersCount:      10,
+				FollowingCount:      20,
+				FollowersVisibility: c.followersVis,
+				FollowingVisibility: c.followingVis,
+			}
+			GateCountVisibility(d, c.isMe, c.isModerator, c.isFollowing)
+			assert.Equal(t, c.wantFollowers, d.FollowersCount)
+			assert.Equal(t, c.wantFollowing, d.FollowingCount)
+		})
+	}
+}
+
 func TestPackUserDetailed_VerifiedLinks(t *testing.T) {
 	u := &model.User{
 		ID:                "user6",

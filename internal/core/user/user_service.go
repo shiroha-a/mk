@@ -696,6 +696,14 @@ func (s *Service) publishMeUpdated(bundle *UserWithProfile) {
 	// profile update / pin / unpin は頻度が低く hot path ではないため
 	// full pack する (UserLite ではなく UserDetailed)。
 	body := entity.PackUserDetailed(bundle.User, bundle.Profile, s.idGen)
+	// meUpdated は本人自身の main channel に流す self event なので、
+	// follower-only の followedMessage も本人には見せる (#1558)。PackUserDetailed
+	// は followedMessage を set しない (privacy gate) ため、self event では
+	// profile から補填する。これを欠くと i/update で followedMessage を変更しても
+	// frontend の $i.followedMessage が即時反映されない。
+	if bundle.Profile != nil {
+		body.FollowedMessage = bundle.Profile.FollowedMessage
+	}
 	// PackUserDetailed は pinnedNoteIDs を空で返すため、piningRepo が
 	// あれば pin ID だけ埋める (full note pack は不要で frontend 側で
 	// 必要に応じて fetch する)。piningRepo がない read-only 構成や
