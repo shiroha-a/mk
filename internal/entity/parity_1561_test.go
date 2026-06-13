@@ -151,3 +151,20 @@ func mustJSON(t *testing.T, v any) []byte {
 	require.NoError(t, err)
 	return b
 }
+
+// #1640 [LOW] REST pack (PackNote) は reactionAndUserPairCache を出さない
+// (upstream は withReactionAndUserPairCache=true の streaming/AP 経路のみ出力)。
+func TestPackNote_ReactionAndUserPairCacheOmittedInREST(t *testing.T) {
+	idGen := newTestIDGen(t)
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions:                datatypes.JSON([]byte("{}")),
+		ReactionAndUserPairCache: []string{"userA/👍"},
+	}
+	got := PackNote(n, idGen)
+	assert.Nil(t, got.ReactionAndUserPairCache, "REST pack omits reactionAndUserPairCache")
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(mustJSON(t, got), &m))
+	_, has := m["reactionAndUserPairCache"]
+	assert.False(t, has, "REST JSON must not contain reactionAndUserPairCache")
+}

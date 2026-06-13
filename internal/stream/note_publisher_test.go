@@ -704,3 +704,37 @@ func TestDrivePublisher_MarshalErrorIsLogged(t *testing.T) {
 func TestNotificationPublisher_ImplementsServiceInterface(t *testing.T) {
 	var _ corenotification.StreamingPublisher = (*NotificationPublisher)(nil)
 }
+
+// #1640: streaming note event は reactionAndUserPairCache を出力する
+// (upstream NoteCreateService の withReactionAndUserPairCache=true 経路相当)。
+// REST pack は出さないが streaming は空でも [] を出す。
+func TestNotePublisher_EmitsReactionAndUserPairCache(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+
+	// pair あり → 配列を出力
+	pub := &stubPublisher{}
+	np := NewNotePublisher(pub, idGen)
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		ReactionAndUserPairCache: []string{"userA/👍", "userB/❤"},
+	}
+	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
+	require.Len(t, pub.payloads, 1)
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(pub.payloads[0].(json.RawMessage), &m))
+	require.Contains(t, m, "reactionAndUserPairCache")
+	assert.JSONEq(t, `["userA/👍","userB/❤"]`, string(m["reactionAndUserPairCache"]))
+
+	// pair 空 → streaming は [] を出す (REST と異なり key を残す)
+	pub2 := &stubPublisher{}
+	np2 := NewNotePublisher(pub2, idGen)
+	n2 := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+	}
+	np2.PublishNote("homeTimeline:u1", n2, &model.User{ID: "u1", Username: "alice"})
+	require.Len(t, pub2.payloads, 1)
+	var m2 map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(pub2.payloads[0].(json.RawMessage), &m2))
+	require.Contains(t, m2, "reactionAndUserPairCache")
+	assert.Equal(t, "[]", string(m2["reactionAndUserPairCache"]))
+}

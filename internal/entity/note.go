@@ -79,7 +79,14 @@ type NoteEntity struct {
 	Mentions       []string `json:"mentions,omitempty"`
 	HasPoll        bool     `json:"hasPoll,omitempty"`
 	MyReaction     *string  `json:"myReaction,omitempty"`
-	IsHidden       bool     `json:"isHidden,omitempty"`
+	// ReactionAndUserPairCache は `userId/reaction` 形式の pair 配列で、
+	// クライアントが myReaction を API 無しで解決するために使う。upstream は
+	// opts.withReactionAndUserPairCache=true のときだけ出力し (空でも `[]`)、
+	// その指定は streaming / AP 経路 (NoteCreateService / ApInboxService) に
+	// 限られる (#1640)。REST pack では undefined。pointer 型で nil(REST→省略)
+	// と &[](streaming→空配列出力) を区別する。
+	ReactionAndUserPairCache *[]string `json:"reactionAndUserPairCache,omitempty"`
+	IsHidden                 bool      `json:"isHidden,omitempty"`
 }
 
 // ChannelLite is the minimal channel info embedded in NoteEntity.

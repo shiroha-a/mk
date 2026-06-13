@@ -117,6 +117,17 @@ func (p *NotePublisher) packNote(n *model.Note, author *model.User) []byte {
 	// context.Background() で進める (#657)。将来 PublishNote signature に
 	// ctx を追加するなら一緒に伝播させる。
 	pn := entity.PackNoteWithInstance(context.Background(), &noteForPack, p.idGen, p.instanceLookup, p.emojiLookup, p.reactionReader)
+	// streaming note event は upstream NoteCreateService が
+	// withReactionAndUserPairCache=true で pack する経路に対応するため、
+	// reactionAndUserPairCache を (空でも) 出力する (#1640)。REST pack は
+	// 出さない。mk-go は reaction-user pair を Redis buffer しない (deltas
+	// のみ) ので DB の note.reactionAndUserPairCache をそのまま使う
+	// (buffered pairs の concat は未対応)。
+	pairs := []string(noteForPack.ReactionAndUserPairCache)
+	if pairs == nil {
+		pairs = []string{}
+	}
+	pn.ReactionAndUserPairCache = &pairs
 	// REST 経路と同じ後段 resolver を通して Files / Channel を埋める。
 	// viewer 引数は streaming fanout の性質上「自分宛て」が複数 subscriber
 	// に展開されるため特定不能。viewer=nil で Apply を呼ぶと
