@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -35,6 +36,15 @@ type RemoteResolver interface {
 	ResolveNote(uri string) (*model.Note, error)
 }
 
+// HostBlockChecker reports whether a remote host is blocked / federation-allowed
+// under the running instance's federation policy (none / specified / blockedHosts)。
+// APIShow uses it to reject lookups of non-federated hosts (#1557、upstream
+// UtilityService.isFederationAllowedUri)。
+type HostBlockChecker interface {
+	IsBlocked(host string) bool
+	IsAllowed(host string) bool
+}
+
 // Handler handles ActivityPub resource endpoints.
 type Handler struct {
 	renderer         *activitypub.Renderer
@@ -46,6 +56,11 @@ type Handler struct {
 	remoteFetcher    RemoteFetcher
 	remoteResolver   RemoteResolver
 	nonAPFallback    echo.HandlerFunc
+	// hostBlocker / localHost は APIShow の federation-allow gate (#1557) に使う。
+	// localHost は自インスタンスの hostname (gate を skip する判定用)。未配線
+	// (nil) なら gate 無効 = 全 host 許可 (legacy 挙動)。
+	hostBlocker HostBlockChecker
+	localHost   string
 	// backfillGroup collapses parallel lazy-backfill 経路の Generate +
 	// InsertIfAbsent を同 user ID で 1 回に集約する。多 goroutine が
 	// 同時に backfill しても entropy / CPU を浪費しない (#1081 review #1)。
@@ -56,6 +71,13 @@ type Handler struct {
 func (h *Handler) SetRemote(fetcher RemoteFetcher, resolver RemoteResolver) {
 	h.remoteFetcher = fetcher
 	h.remoteResolver = resolver
+}
+
+// SetFederationGate wires the federation-policy checker and the local hostname
+// used by APIShow to reject lookups of blocked / non-federated hosts (#1557)。
+func (h *Handler) SetFederationGate(c HostBlockChecker, localHost string) {
+	h.hostBlocker = c
+	h.localHost = localHost
 }
 
 // SetNonAPFallback registers a handler to serve when the incoming Accept
@@ -343,6 +365,21 @@ func (h *Handler) APIShow(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "uri is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
+	// URI を解析して host を得る。http(s) でない / host 無しは URI_INVALID
+	// (upstream uriInvalid 1a5eab56)。
+	host, hostErr := apShowURIHost(req.URI)
+	if hostErr != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("URI_INVALID", "URI is invalid.", "1a5eab56-e47b-48c2-8d5e-217b897d70db"))
+	}
+	// federation-allow gate (upstream isFederationAllowedUri、#1557)。自 host は
+	// skip し、remote host が blocked / 非 federation なら FEDERATION_NOT_ALLOWED
+	// (974b799e) を返す。gate 未配線なら全許可 (legacy)。
+	if host != "" && host != h.localHost && h.hostBlocker != nil {
+		if h.hostBlocker.IsBlocked(host) || !h.hostBlocker.IsAllowed(host) {
+			return c.JSON(http.StatusForbidden, apierr.Error("FEDERATION_NOT_ALLOWED", "Federation for this host is not allowed.", "974b799e-1a29-4889-b706-18d4dd93e266"))
+		}
+	}
+
 	// ローカルのノートURIかチェック (/notes/ を含む)
 	if noteID := extractLocalID(req.URI, "/notes/"); noteID != "" {
 		n, err := h.queryService.Show(nil, noteID)
@@ -368,34 +405,55 @@ func (h *Handler) APIShow(c echo.Context) error {
 	// リモートオブジェクトをフェッチしてType判定
 	// Note の場合は ResolveNote でローカルDBに取り込み、local ID を返す。
 	// これにより後続の notes/reactions/create などが local note を見つけられる。
+	//
+	// fetchRequestFailed: fetch が 404/410 (= 不在) 以外の理由 (5xx / network /
+	// timeout) で失敗したときに立てる。webfinger fallback も失敗した場合に
+	// NO_SUCH_OBJECT ではなく REQUEST_FAILED (81b539cf) を返すための記録。
+	fetchRequestFailed := false
 	if h.remoteFetcher != nil {
-		if data, err := h.remoteFetcher.FetchObject(req.URI); err == nil {
+		data, fetchErr := h.remoteFetcher.FetchObject(req.URI)
+		switch {
+		case fetchErr != nil:
+			// 404 / 410 は「不在」なので NO_SUCH_OBJECT 経路へ。それ以外は
+			// REQUEST_FAILED 候補として記録 (webfinger fallback を先に試す)。
+			var se *activitypub.StatusError
+			if !(errors.As(fetchErr, &se) && (se.StatusCode == http.StatusNotFound || se.StatusCode == http.StatusGone)) {
+				fetchRequestFailed = true
+			}
+		default:
 			var parsed map[string]any
-			if json.Unmarshal(data, &parsed) == nil {
-				t, _ := parsed["type"].(string)
-				switch t {
-				case "Note", "Article", "Question":
-					if h.remoteResolver != nil {
-						if remoteNote, err := h.remoteResolver.ResolveNote(req.URI); err == nil {
-							return c.JSON(http.StatusOK, map[string]any{
-								"type":   "Note",
-								"object": h.packNoteForAPI(middleware.GetUser(c), remoteNote),
-							})
-						}
+			if json.Unmarshal(data, &parsed) != nil {
+				// fetch できたが JSON として不正 → RESPONSE_INVALID (70193c39)。
+				return c.JSON(http.StatusBadGateway, apierr.Error("RESPONSE_INVALID", "Response from remote server is invalid.", "70193c39-54f3-4813-82f0-70a680f7495b"))
+			}
+			// AP object は id 必須。欠落は upstream の `object.id == null` →
+			// responseInvalid に対応する。
+			if objID, _ := parsed["id"].(string); objID == "" {
+				return c.JSON(http.StatusBadGateway, apierr.Error("RESPONSE_INVALID", "Response from remote server is invalid.", "70193c39-54f3-4813-82f0-70a680f7495b"))
+			}
+			t, _ := parsed["type"].(string)
+			switch t {
+			case "Note", "Article", "Question":
+				if h.remoteResolver != nil {
+					if remoteNote, err := h.remoteResolver.ResolveNote(req.URI); err == nil {
+						return c.JSON(http.StatusOK, map[string]any{
+							"type":   "Note",
+							"object": h.packNoteForAPI(middleware.GetUser(c), remoteNote),
+						})
 					}
-					// Resolver 無し or ResolveNote 失敗時は raw AP JSON を返す
-					return c.JSON(http.StatusOK, map[string]any{
-						"type":   "Note",
-						"object": parsed,
-					})
-				case "Person", "Service", "Application", "Organization", "Group":
-					if h.remoteResolver != nil {
-						if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
-							return c.JSON(http.StatusOK, map[string]any{
-								"type":   "User",
-								"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
-							})
-						}
+				}
+				// Resolver 無し or ResolveNote 失敗時は raw AP JSON を返す
+				return c.JSON(http.StatusOK, map[string]any{
+					"type":   "Note",
+					"object": parsed,
+				})
+			case "Person", "Service", "Application", "Organization", "Group":
+				if h.remoteResolver != nil {
+					if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
+						return c.JSON(http.StatusOK, map[string]any{
+							"type":   "User",
+							"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
+						})
 					}
 				}
 			}
@@ -413,7 +471,23 @@ func (h *Handler) APIShow(c echo.Context) error {
 		}
 	}
 
+	// fetch が transport 失敗 (5xx / network) だった場合は REQUEST_FAILED、
+	// それ以外 (404/410 / 純粋に不在) は NO_SUCH_OBJECT。
+	if fetchRequestFailed {
+		return c.JSON(http.StatusBadGateway, apierr.Error("REQUEST_FAILED", "Request failed.", "81b539cf-4f57-4b29-bc98-032c33c0792e"))
+	}
 	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_OBJECT", "No such object.", "dc94d745-1262-4e63-a17d-fecaa57efc82"))
+}
+
+// apShowURIHost parses an ap/show URI and returns its hostname. Returns an
+// error for non-http(s) schemes or a missing host so the caller can emit
+// URI_INVALID (#1557)。
+func apShowURIHost(uri string) (string, error) {
+	u, err := url.Parse(uri)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("ap: invalid uri")
+	}
+	return u.Hostname(), nil
 }
 
 // resolveLocal attempts to resolve a local URI to an AP object.

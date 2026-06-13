@@ -680,7 +680,7 @@ func TestAPIShow_RemoteFetchNote(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	// ResolveNote fails -> fall through to raw AP JSON echo.
 	h.SetRemote(
-		&mockFetcher{data: []byte(`{"type":"Note","content":"hello"}`)},
+		&mockFetcher{data: []byte(`{"type":"Note","id":"https://remote.example/notes/1","content":"hello"}`)},
 		&mockResolver{noteErr: assert.AnError},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/notes/1"}`)
@@ -692,7 +692,7 @@ func TestAPIShow_RemoteFetchNote_ResolveNoteSuccess(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	// ResolveNote succeeds -> return the ingested local note object.
 	h.SetRemote(
-		&mockFetcher{data: []byte(`{"type":"Note","content":"hello"}`)},
+		&mockFetcher{data: []byte(`{"type":"Note","id":"https://remote.example/notes/1","content":"hello"}`)},
 		&mockResolver{note: &model.Note{ID: "ln1", UserID: "u1", Visibility: model.NoteVisibilityPublic, User: &model.User{ID: "u1", Username: "alice"}}},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/notes/1"}`)
@@ -704,7 +704,7 @@ func TestAPIShow_RemoteFetchNote_ResolveNoteSuccess(t *testing.T) {
 func TestAPIShow_RemoteFetchArticle_NoResolver(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	// Fetcher returns an Article; no resolver wired -> raw AP JSON.
-	h.SetRemote(&mockFetcher{data: []byte(`{"type":"Article","content":"long form"}`)}, nil)
+	h.SetRemote(&mockFetcher{data: []byte(`{"type":"Article","id":"https://remote.example/articles/1","content":"long form"}`)}, nil)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/articles/1"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"type":"Note"`)
@@ -739,7 +739,7 @@ func TestAPIShow_RemoteFetchServiceType(t *testing.T) {
 	// Coverage for actor subtypes: Service/Application/Organization/Group
 	// all take the same branch.
 	h.SetRemote(
-		&mockFetcher{data: []byte(`{"type":"Service"}`)},
+		&mockFetcher{data: []byte(`{"type":"Service","id":"https://remote.example/users/svc"}`)},
 		&mockResolver{user: &model.User{ID: "svc1", Username: "svc"}},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/users/svc"}`)
@@ -747,14 +747,84 @@ func TestAPIShow_RemoteFetchServiceType(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"type":"User"`)
 }
 
-func TestAPIShow_RemoteNothing(t *testing.T) {
+// apShowHostBlocker は federation gate test 用 stub。
+type apShowHostBlocker struct {
+	blocked map[string]bool
+	allowed map[string]bool // nil = 全 allow
+}
+
+func (b apShowHostBlocker) IsBlocked(host string) bool { return b.blocked[host] }
+func (b apShowHostBlocker) IsAllowed(host string) bool {
+	if b.allowed == nil {
+		return true
+	}
+	return b.allowed[host]
+}
+
+// #1557 不正な URI (http(s) でない / host 無し) → URI_INVALID。
+func TestAPIShow_URIInvalid(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	for _, uri := range []string{`not a url`, `ftp://example.com/x`, `/relative/path`, `https://`} {
+		rec := postJSON(h.APIShow, `{"uri":"`+uri+`"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, uri)
+		assert.Contains(t, rec.Body.String(), "URI_INVALID", uri)
+	}
+}
+
+// #1557 blocked / 非 federation host の URI → FEDERATION_NOT_ALLOWED。
+func TestAPIShow_FederationNotAllowed(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	h.SetFederationGate(apShowHostBlocker{blocked: map[string]bool{"blocked.example": true}}, "local.example")
+
+	rec := postJSON(h.APIShow, `{"uri":"https://blocked.example/users/x"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FEDERATION_NOT_ALLOWED")
+
+	// 自 host は gate を skip する (blocked 判定に巻き込まれない)。
+	h.SetFederationGate(apShowHostBlocker{allowed: map[string]bool{}}, "local.example")
+	rec = postJSON(h.APIShow, `{"uri":"https://local.example/notes/ghost"}`)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code, "自 host は federation gate で弾かない")
+}
+
+// #1557 fetch できたが id 欠落 / JSON 不正 → RESPONSE_INVALID。
+func TestAPIShow_ResponseInvalid(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	// id 欠落
+	h.SetRemote(&mockFetcher{data: []byte(`{"type":"Note","content":"no id"}`)}, nil)
+	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/notes/1"}`)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "RESPONSE_INVALID")
+
+	// JSON 不正
+	h.SetRemote(&mockFetcher{data: []byte(`not json`)}, nil)
+	rec = postJSON(h.APIShow, `{"uri":"https://remote.example/notes/2"}`)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "RESPONSE_INVALID")
+}
+
+// #1557 remote が 404/410 (= 不在) を返し fallback も失敗 → NO_SUCH_OBJECT。
+func TestAPIShow_RemoteNotFound(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	h.SetRemote(
+		&mockFetcher{err: &activitypub.StatusError{StatusCode: http.StatusNotFound}},
+		&mockResolver{err: assert.AnError},
+	)
+	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/unknown"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
+}
+
+// #1557 remote fetch が 404 以外 (network / 5xx) で失敗し fallback も失敗 →
+// REQUEST_FAILED (upstream の catch-all requestFailed)。
+func TestAPIShow_RemoteRequestFailed(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	h.SetRemote(
 		&mockFetcher{err: assert.AnError},
 		&mockResolver{err: assert.AnError},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/unknown"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "REQUEST_FAILED")
 }
 
 // --- UserByAcct + Accept header negotiation ---

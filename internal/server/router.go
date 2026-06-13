@@ -1644,6 +1644,11 @@ func (s *Server) setupRoutes() {
 	// ActivityPub resource endpoints
 	apHandler := ap.NewHandler(apRenderer, userService, noteQueryService, keypairRepo, idGen)
 	apHandler.SetRemote(apFetcher, federationResolver)
+	// ap/show の federation-allow gate (#1557)。instanceService が blocked /
+	// federation policy を判定する。local host は port 無しの hostname
+	// (config 起動時に validate 済で非空保証) を渡す — IsBlocked/IsAllowed は
+	// hostname suffix match のため。
+	apHandler.SetFederationGate(instanceService, s.config.Hostname)
 	// FEP-521a Multikey 対応で actor JSON に assertionMethod[] を expose する
 	// ため Ed25519 keypair repo を wire (#1067 / #1069)。
 	apHandler.SetKeypairExtraRepo(keypairExtraRepo)
