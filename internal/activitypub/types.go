@@ -200,13 +200,17 @@ func (i *Image) UnmarshalJSON(data []byte) error {
 // Person represents a user actor.
 type Person struct {
 	Object
-	Inbox                               string    `json:"inbox"`
-	Outbox                              string    `json:"outbox"`
-	Followers                           string    `json:"followers"`
-	Following                           string    `json:"following"`
-	PreferredUsername                   string    `json:"preferredUsername"`
-	Summary                             string    `json:"summary,omitempty"`
-	URL                                 string    `json:"url,omitempty"`
+	Inbox             string `json:"inbox"`
+	Outbox            string `json:"outbox"`
+	Followers         string `json:"followers"`
+	Following         string `json:"following"`
+	PreferredUsername string `json:"preferredUsername"`
+	Summary           string `json:"summary,omitempty"`
+	URL               string `json:"url,omitempty"`
+	// SharedInbox は upstream renderPerson が endpoints.sharedInbox とは別に
+	// top-level にも出す (#1560、ApRendererService.ts:551)。古い実装/一部の
+	// 受信側は top-level を見るため両方出す。
+	SharedInbox                         string    `json:"sharedInbox,omitempty"`
 	Endpoints                           Endpoints `json:"endpoints,omitzero"`
 	PublicKey                           PublicKey `json:"publicKey"`
 	Icon                                *Image    `json:"icon,omitempty"`

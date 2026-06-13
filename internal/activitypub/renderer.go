@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"log/slog"
 	"strings"
 	"time"
@@ -246,6 +247,7 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 		Following:         r.urls.UserFollowing(u.ID),
 		PreferredUsername: u.Username,
 		URL:               uri,
+		SharedInbox:       r.urls.SharedInbox(), // top-level (#1560)
 		Endpoints:         Endpoints{SharedInbox: r.urls.SharedInbox()},
 		PublicKey: PublicKey{
 			ID:           r.urls.UserKeyURI(u.ID),
@@ -308,9 +310,30 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 
 	// ユーザーのカスタム絵文字をEmoji tagとして追加
 	r.addEmojiTags(&p.Tag, u.Emojis, nil)
+	// user.tags を Hashtag として追加 (#1560、upstream renderHashtag)。
+	// href/name 形式は RenderNote の Hashtag と揃える。
+	for _, tag := range u.Tags {
+		p.Tag = append(p.Tag, Hashtag{
+			Type: "Hashtag",
+			Href: "https://" + r.host + "/tags/" + tag,
+			Name: "#" + tag,
+		})
+	}
 
 	AddContext(p)
 	return p
+}
+
+// rewriteFieldURLValue wraps an http(s) PropertyValue field value in an
+// `<a rel="me nofollow noopener">` link so non-Misskey clients render it as a
+// verifiable profile link (#1560、upstream tryRewriteUrl)。http(s) で始まらない
+// 値はそのまま返す。href / text とも HTML escape する。
+func rewriteFieldURLValue(value string) string {
+	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+		return value
+	}
+	esc := html.EscapeString(value)
+	return `<a href="` + esc + `" rel="me nofollow noopener" target="_blank">` + esc + `</a>`
 }
 
 // enrichPersonFromProfile fills profile-derived fields into Person.
@@ -343,7 +366,7 @@ func (r *Renderer) enrichPersonFromProfile(p *Person, profile *model.UserProfile
 				p.Attachment = append(p.Attachment, PropertyValue{
 					Type:  "PropertyValue",
 					Name:  f.Name,
-					Value: f.Value,
+					Value: rewriteFieldURLValue(f.Value),
 				})
 			}
 		}
@@ -370,7 +393,10 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 		AttributedTo: r.urls.UserURI(n.UserID),
 		Content:      htmlContent,
 		Published:    parseNoteTime(n.ID, idGen),
-		Sensitive:    n.CW != nil && *n.CW != "",
+		// upstream は sensitive = (note.cw != null) || files.some(isSensitive)
+		// (#1560、ApRendererService.ts:489)。空文字 CW でも cw!=null なら
+		// sensitive=true。file 由来の flip は下の attachment ループで行う。
+		Sensitive: n.CW != nil,
 	}
 
 	// _misskey_content / source: 標準ノードのみなら省略 (TS版 noMisskeyContent)
@@ -383,7 +409,14 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 	}
 
 	if n.CW != nil {
-		out.Summary = *n.CW
+		// upstream は summary = cw==='' ? ZWSP(U+200B) : cw (#1560、
+		// ApRendererService.ts:443)。空文字 CW を ZWSP にすることで summary
+		// omitempty に落とされず、受信側が「CW あり (本文は空)」と解釈できる。
+		if *n.CW == "" {
+			out.Summary = "\u200b" // ZWSP (upstream String.fromCharCode(0x200B))
+		} else {
+			out.Summary = *n.CW
+		}
 	}
 	if n.ReplyID != nil {
 		// リモート note への reply の場合、InReplyTo は相手側 (note.URI) を
@@ -399,6 +432,11 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 		if quoteURI != "" {
 			out.MisskeyQuote = quoteURI
 			out.QuoteURL = quoteURI
+			// 非 Misskey クライアント向けに content 末尾へ quote-inline span を
+			// 付ける (#1560、upstream ApRendererService.ts:436-441)。class名
+			// `quote-inline` は非 Misskey クライアントの quote 表示に使われる。
+			esc := html.EscapeString(quoteURI)
+			out.Content += `<br><br><span class="quote-inline">RE: <a href="` + esc + `">` + esc + `</a></span>`
 		}
 	}
 
@@ -419,13 +457,20 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 
 	to, cc := r.addressing(n)
 
-	// Resolve mentions into Tag entries and add mentioned user URIs to `to`
-	// so receiving instances (特に Misskey) が mention 通知を作成できる。
-	// mentionResolver 未設定なら tag は付けない (テスト互換)。
+	// Resolve mentions into Tag entries and add mentioned user URIs to the
+	// audience so receiving instances (特に Misskey) が mention 通知を作成できる。
+	// upstream は mention URI を public/home/followers では cc に、specified では
+	// to に置く (#1560、ApRendererService.ts:405-416)。mentionResolver 未設定
+	// なら tag は付けない (テスト互換)。
 	if r.mentionResolver != nil && len(n.Mentions) > 0 {
-		seenTo := make(map[string]struct{}, len(to))
+		// specified は to、それ以外は cc に追記する。
+		mentionToCC := n.Visibility != model.NoteVisibilitySpecified
+		seen := make(map[string]struct{}, len(to)+len(cc))
 		for _, v := range to {
-			seenTo[v] = struct{}{}
+			seen[v] = struct{}{}
+		}
+		for _, v := range cc {
+			seen[v] = struct{}{}
 		}
 		for _, uid := range n.Mentions {
 			name, uri, err := r.mentionResolver.ResolveMention(uid)
@@ -446,9 +491,14 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 				continue
 			}
 			out.Tag = append(out.Tag, NewMention(uri, name))
-			if _, dup := seenTo[uri]; !dup {
+			if _, dup := seen[uri]; dup {
+				continue
+			}
+			seen[uri] = struct{}{}
+			if mentionToCC {
+				cc = append(cc, uri)
+			} else {
 				to = append(to, uri)
-				seenTo[uri] = struct{}{}
 			}
 		}
 	}

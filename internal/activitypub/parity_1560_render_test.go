@@ -1,0 +1,68 @@
+package activitypub
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/stretchr/testify/assert"
+)
+
+// #1560 [LOW] RenderNote: 空文字 CW は summary=ZWSP + sensitive=true。
+func TestRenderNote_EmptyCWZWSP(t *testing.T) {
+	r := newRenderer()
+	idGen := newIDGen(t)
+	empty := ""
+	n := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic, CW: &empty}
+	out := r.RenderNote(n, idGen)
+	assert.Equal(t, "​", out.Summary, "empty CW must render ZWSP summary")
+	assert.True(t, out.Sensitive, "any non-nil CW (incl empty) must set sensitive=true")
+
+	// CW=nil は summary 無し / sensitive=false
+	n2 := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	out2 := r.RenderNote(n2, idGen)
+	assert.Empty(t, out2.Summary)
+	assert.False(t, out2.Sensitive)
+}
+
+// #1560 [LOW] RenderNote: quote note は content 末尾に quote-inline span を付ける。
+func TestRenderNote_QuoteInlineHTML(t *testing.T) {
+	r := newRenderer()
+	r.SetNoteResolver(stubNoteResolver1560{uri: "https://remote.example/notes/orig"})
+	idGen := newIDGen(t)
+	text := "my comment"
+	renoteID := "rt1"
+	n := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text, RenoteID: &renoteID}
+	out := r.RenderNote(n, idGen)
+	assert.Contains(t, out.Content, `<span class="quote-inline">RE: <a href="https://remote.example/notes/orig">https://remote.example/notes/orig</a></span>`)
+	assert.Equal(t, "https://remote.example/notes/orig", out.QuoteURL)
+}
+
+// #1560 [LOW] RenderPerson: top-level sharedInbox + user.tags Hashtag。
+func TestRenderPerson_SharedInboxAndHashtags(t *testing.T) {
+	r := newRenderer()
+	r.SetHost("example.com")
+	u := &model.User{ID: "u1", Username: "alice", Tags: pq.StringArray{"go", "misskey"}}
+	p := r.RenderPerson(u, nil, "PEM", nil)
+	assert.Equal(t, "https://example.com/inbox", p.SharedInbox, "top-level sharedInbox must be set")
+	assert.Equal(t, "https://example.com/inbox", p.Endpoints.SharedInbox)
+	// user.tags が Hashtag として tag に入る
+	var hashtags int
+	for _, tg := range p.Tag {
+		if h, ok := tg.(Hashtag); ok {
+			hashtags++
+			assert.True(t, strings.HasPrefix(h.Name, "#"))
+		}
+	}
+	assert.Equal(t, 2, hashtags, "user.tags must be rendered as Hashtag entries")
+}
+
+type stubNoteResolver1560 struct{ uri string }
+
+func (s stubNoteResolver1560) FindByID(string) (*model.Note, error) {
+	remote := "remote.example"
+	u := s.uri
+	return &model.Note{ID: "rt1", URI: &u, UserHost: &remote}, nil
+}

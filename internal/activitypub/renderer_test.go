@@ -351,8 +351,10 @@ func TestRenderer_RenderNote_WithMentions(t *testing.T) {
 	}
 	assert.Equal(t, "@alice", tagged["https://example.com/users/uA"])
 	assert.Equal(t, "@bob@remote.example", tagged["https://remote.example/users/bob"])
-	assert.Contains(t, out.To, "https://example.com/users/uA")
-	assert.Contains(t, out.To, "https://remote.example/users/bob")
+	// #1560: public note の mention URI は to ではなく cc に入る (upstream)。
+	assert.Contains(t, out.CC, "https://example.com/users/uA")
+	assert.Contains(t, out.CC, "https://remote.example/users/bob")
+	assert.NotContains(t, out.To, "https://example.com/users/uA")
 }
 
 func TestRenderer_RenderNote_WithMentions_DuplicateTo(t *testing.T) {
@@ -676,7 +678,8 @@ func TestRenderer_RenderPerson_WithProfile(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "PropertyValue", pv.Type)
 	assert.Equal(t, "Website", pv.Name)
-	assert.Equal(t, "https://example.com", pv.Value)
+	// #1560: http(s) PropertyValue value は <a rel="me"> で wrap される。
+	assert.Equal(t, `<a href="https://example.com" rel="me nofollow noopener" target="_blank">https://example.com</a>`, pv.Value)
 }
 
 func TestRenderer_RenderPerson_BannerAndMovedTo(t *testing.T) {
