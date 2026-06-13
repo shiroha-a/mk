@@ -428,6 +428,7 @@ func applyChannel(n *NoteEntity, chMap map[string]*model.Channel) {
 		target.Channel = &ChannelLite{
 			ID:                    ch.ID,
 			Name:                  ch.Name,
+			UserID:                ch.UserID,
 			Color:                 ch.Color,
 			IsSensitive:           ch.IsSensitive,
 			AllowRenoteToExternal: ch.AllowRenoteToExternal,

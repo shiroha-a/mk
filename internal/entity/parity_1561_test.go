@@ -1,0 +1,113 @@
+package entity
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
+)
+
+// #1561 [MEDIUM] clippedCount は model 実値を出す (旧: 0 ハードコード)。
+func TestPackNote_ClippedCountRealValue(t *testing.T) {
+	idGen := newTestIDGen(t)
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1",
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+		ClippedCount: 5,
+	}
+	assert.Equal(t, 5, PackNote(n, idGen).ClippedCount)
+}
+
+// #1561 [MEDIUM] visibleUserIds は specified のときだけ出力する。
+func TestPackNote_VisibleUserIDsSpecifiedOnly(t *testing.T) {
+	idGen := newTestIDGen(t)
+	base := func(vis model.NoteVisibility) *model.Note {
+		return &model.Note{
+			ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: vis,
+			Reactions: datatypes.JSON([]byte("{}")), VisibleUserIDs: []string{"a", "b"},
+		}
+	}
+	// specified: 出力される
+	spec := PackNote(base(model.NoteVisibilitySpecified), idGen)
+	assert.Equal(t, []string{"a", "b"}, spec.VisibleUserIDs)
+	bs, _ := json.Marshal(spec)
+	assert.Contains(t, string(bs), `"visibleUserIds":["a","b"]`)
+	// public: VisibleUserIDs が DB にあっても省略
+	pub := PackNote(base(model.NoteVisibilityPublic), idGen)
+	assert.Nil(t, pub.VisibleUserIDs)
+	bp, _ := json.Marshal(pub)
+	assert.NotContains(t, string(bp), `"visibleUserIds"`)
+}
+
+// #1561 [MEDIUM] name 付き note は text を 【name】prefix 整形する。
+func TestPackNote_NamePrefixedText(t *testing.T) {
+	idGen := newTestIDGen(t)
+	name := "Page Title"
+	body := "  hello body  "
+	url := "https://remote.example/pages/x"
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")), Name: &name, Text: &body, URL: &url,
+	}
+	got := PackNote(n, idGen)
+	require.NotNil(t, got.Text)
+	assert.Equal(t, "【Page Title】\nhello body\n\nhttps://remote.example/pages/x", *got.Text)
+
+	// url が無く uri があれば uri を使う。text が nil でも空本文で整形。
+	uri := "https://remote.example/notes/y"
+	n2 := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")), Name: &name, URI: &uri,
+	}
+	got2 := PackNote(n2, idGen)
+	require.NotNil(t, got2.Text)
+	assert.Equal(t, "【Page Title】\n\n\nhttps://remote.example/notes/y", *got2.Text)
+
+	// name はあるが url/uri が無ければ整形しない (text そのまま)。
+	n3 := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")), Name: &name, Text: &body,
+	}
+	assert.Equal(t, body, *PackNote(n3, idGen).Text)
+}
+
+// #1561 [MEDIUM] channel.userId が出力される (nil なら null)。
+func TestApplyChannel_UserID(t *testing.T) {
+	owner := "channel-owner"
+	chMap := map[string]*model.Channel{
+		"ch1": {ID: "ch1", Name: "general", UserID: &owner, Color: "#fff"},
+	}
+	chID := "ch1"
+	n := &NoteEntity{ID: "n1", ChannelID: &chID}
+	applyChannel(n, chMap)
+	require.NotNil(t, n.Channel)
+	require.NotNil(t, n.Channel.UserID)
+	assert.Equal(t, "channel-owner", *n.Channel.UserID)
+	b, _ := json.Marshal(n.Channel)
+	assert.Contains(t, string(b), `"userId":"channel-owner"`)
+}
+
+// #1561 [LOW] hasPoll は true のときだけ出力 / mentions は空なら省略。
+func TestPackNote_HasPollAndMentionsOmit(t *testing.T) {
+	idGen := newTestIDGen(t)
+	// hasPoll=true + mentions あり → 出力
+	withPoll := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")), HasPoll: true, Mentions: []string{"m1"},
+	}
+	bp, _ := json.Marshal(PackNote(withPoll, idGen))
+	assert.Contains(t, string(bp), `"hasPoll":true`)
+	assert.Contains(t, string(bp), `"mentions":["m1"]`)
+	// hasPoll=false + mentions 空 → 省略
+	plain := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")),
+	}
+	bn, _ := json.Marshal(PackNote(plain, idGen))
+	assert.NotContains(t, string(bn), `"hasPoll"`)
+	assert.NotContains(t, string(bn), `"mentions"`)
+}

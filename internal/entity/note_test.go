@@ -189,12 +189,19 @@ func TestPackNote_NilVisibleUserIDs_Mentions(t *testing.T) {
 
 	entity := PackNote(note, idGen)
 
-	// nil → empty slice
-	assert.NotNil(t, entity.VisibleUserIDs)
-	assert.Empty(t, entity.VisibleUserIDs)
-	assert.NotNil(t, entity.Mentions)
-	assert.Empty(t, entity.Mentions)
+	// #1561: public note では visibleUserIds は省略 (specified 限定) / mentions は
+	// 空なら省略 / hasPoll は false なら省略 → いずれも nil で omitempty が落とす。
+	assert.Nil(t, entity.VisibleUserIDs, "public note omits visibleUserIds")
+	assert.Nil(t, entity.Mentions, "empty mentions omitted")
 	assert.False(t, entity.HasPoll)
+
+	// JSON でも該当 key が出ないこと。
+	b, err := json.Marshal(entity)
+	require.NoError(t, err)
+	s := string(b)
+	assert.NotContains(t, s, `"visibleUserIds"`)
+	assert.NotContains(t, s, `"mentions"`)
+	assert.NotContains(t, s, `"hasPoll"`)
 }
 
 func TestNormalizeReactionKey(t *testing.T) {

@@ -4,11 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 )
+
+// firstNonNil returns the first non-nil/non-empty string among the pointers,
+// mirroring upstream `url ?? uri`. Used by the name-prefixed text formatting.
+func firstNonNil(ps ...*string) string {
+	for _, p := range ps {
+		if p != nil && *p != "" {
+			return *p
+		}
+	}
+	return ""
+}
 
 // BufferedReactionsReader reads buffered reaction deltas (Redis-side)
 // for a batch of notes. enableReactionsBuffering=true な instance では
@@ -55,20 +67,28 @@ type NoteEntity struct {
 	Emojis             map[string]string `json:"emojis"`
 	ChannelID          *string           `json:"channelId,omitempty"`
 	Channel            *ChannelLite      `json:"channel,omitempty"`
-	VisibleUserIDs     []string          `json:"visibleUserIds"`
-	Mentions           []string          `json:"mentions"`
-	HasPoll            bool              `json:"hasPoll"`
-	MyReaction         *string           `json:"myReaction,omitempty"`
-	IsHidden           bool              `json:"isHidden,omitempty"`
+	// visibleUserIds / mentions / hasPoll は upstream NoteEntityService が
+	// specified 以外 / 空 / false のとき undefined にして key を落とす
+	// (note.ts optional:true)。mk-go も omitempty + packer 側 conditional で
+	// 揃える (#1561)。
+	VisibleUserIDs []string `json:"visibleUserIds,omitempty"`
+	Mentions       []string `json:"mentions,omitempty"`
+	HasPoll        bool     `json:"hasPoll,omitempty"`
+	MyReaction     *string  `json:"myReaction,omitempty"`
+	IsHidden       bool     `json:"isHidden,omitempty"`
 }
 
 // ChannelLite is the minimal channel info embedded in NoteEntity.
 type ChannelLite struct {
-	ID                    string `json:"id"`
-	Name                  string `json:"name"`
-	Color                 string `json:"color"`
-	IsSensitive           bool   `json:"isSensitive"`
-	AllowRenoteToExternal bool   `json:"allowRenoteToExternal"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// UserID は channel の作成者。upstream note.ts:194-197 で channel object 内
+	// の non-optional / nullable:true field として定義され、pack 時に必ず含める
+	// (#1561)。system channel 等で nil のときは null を出すため非 omitempty。
+	UserID                *string `json:"userId"`
+	Color                 string  `json:"color"`
+	IsSensitive           bool    `json:"isSensitive"`
+	AllowRenoteToExternal bool    `json:"allowRenoteToExternal"`
 }
 
 // PollEntity is the poll representation in a note.
@@ -137,9 +157,10 @@ func packPoll(p *model.Poll) *PollEntity {
 // counts/hasPoll), so the frontend still renders a "hidden post" placeholder
 // card. Used by both the REST and streaming embed-visibility gates (#1536).
 //
-// visibleUserIds / fileIds / files は non-nil 空スライスにして JSON で [] を出す。
-// upstream hideNote は visibleUserIds を undefined にして key 自体を落とすが、
-// mk-go は全 note で visibleUserIds:[] を出す既存仕様 (packNoteAtDepth) に揃える。
+// fileIds / files は non-nil 空スライスにして JSON で [] を出す。
+// visibleUserIds は upstream hideNote (NoteEntityService.ts:184) と同じく nil に
+// して omitempty で key を落とす (#1561 で packer 全体を specified 限定 +
+// omitempty 化したことに合わせる)。
 func HideNoteEntity(n *NoteEntity) {
 	if n == nil {
 		return
@@ -149,7 +170,7 @@ func HideNoteEntity(n *NoteEntity) {
 	n.Poll = nil
 	n.FileIDs = make([]string, 0)
 	n.Files = []any{}
-	n.VisibleUserIDs = make([]string, 0)
+	n.VisibleUserIDs = nil
 	n.IsHidden = true
 }
 
@@ -164,21 +185,44 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		fileIDs = n.FileIDs
 	}
 
-	visibleUserIDs := make([]string, 0)
-	if n.VisibleUserIDs != nil {
-		visibleUserIDs = n.VisibleUserIDs
+	// visibleUserIds は visibility=specified のときだけ出す (upstream
+	// NoteEntityService.ts:405 `visibility==='specified' ? visibleUserIds :
+	// undefined`、#1561)。それ以外は nil のままにして omitempty で省略する。
+	var visibleUserIDs []string
+	if n.Visibility == model.NoteVisibilitySpecified {
+		visibleUserIDs = make([]string, 0)
+		if n.VisibleUserIDs != nil {
+			visibleUserIDs = n.VisibleUserIDs
+		}
 	}
 
-	mentions := make([]string, 0)
-	if n.Mentions != nil {
+	// mentions は空のとき省略する (upstream NoteEntityService.ts:427
+	// `mentions.length>0 ? mentions : undefined`、#1561)。空 slice を渡すと
+	// omitempty で消えるので nil/空のままで良い。
+	var mentions []string
+	if len(n.Mentions) > 0 {
 		mentions = n.Mentions
+	}
+
+	// name 付き note (AP の Page/Link 等) は upstream NoteEntityService.ts:379-381
+	// と同じく text を `【name】\n{text}\n\n{url??uri}` に整形する (#1561)。
+	text := n.Text
+	if n.Name != nil && *n.Name != "" {
+		if link := firstNonNil(n.URL, n.URI); link != "" {
+			body := ""
+			if n.Text != nil {
+				body = strings.TrimSpace(*n.Text)
+			}
+			formatted := "【" + *n.Name + "】\n" + body + "\n\n" + link
+			text = &formatted
+		}
 	}
 
 	entity := NoteEntity{
 		ID:                 n.ID,
 		CreatedAt:          createdAt,
 		UserID:             n.UserID,
-		Text:               n.Text,
+		Text:               text,
 		CW:                 n.CW,
 		Visibility:         string(n.Visibility),
 		LocalOnly:          n.LocalOnly,
@@ -188,7 +232,7 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		ReactionEmojis:     make(map[string]string),
 		RenoteCount:        n.RenoteCount,
 		RepliesCount:       n.RepliesCount,
-		ClippedCount:       0,
+		ClippedCount:       int(n.ClippedCount),
 		URI:                n.URI,
 		URL:                n.URL,
 		ReplyID:            n.ReplyID,

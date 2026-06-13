@@ -50,8 +50,10 @@ func TestHideNoteEntity_BlanksExactlySevenFields(t *testing.T) {
 	if n.Files == nil || len(n.Files) != 0 {
 		t.Errorf("Files not blanked to empty: %v", n.Files)
 	}
-	if n.VisibleUserIDs == nil || len(n.VisibleUserIDs) != 0 {
-		t.Errorf("VisibleUserIDs not blanked to empty: %v", n.VisibleUserIDs)
+	// #1561: upstream hideNote は visibleUserIds=undefined。mk-go も nil にして
+	// omitempty で省略する。
+	if n.VisibleUserIDs != nil {
+		t.Errorf("VisibleUserIDs must be nil (omitted), got: %v", n.VisibleUserIDs)
 	}
 	if !n.IsHidden {
 		t.Error("IsHidden not set")
@@ -87,13 +89,18 @@ func TestHideNoteEntity_JSONShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{`"text":null`, `"cw":null`, `"fileIds":[]`, `"files":[]`, `"visibleUserIds":[]`, `"isHidden":true`} {
+	for _, want := range []string{`"text":null`, `"cw":null`, `"fileIds":[]`, `"files":[]`, `"isHidden":true`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("hidden JSON missing %s\n%s", want, s)
 		}
 	}
 	if strings.Contains(s, `"poll"`) {
 		t.Errorf("poll must be omitted from hidden JSON\n%s", s)
+	}
+	// #1561: upstream hideNote は visibleUserIds=undefined。omitempty で key 自体
+	// が落ちること (`"visibleUserIds":[]` を出さない) を固定する。
+	if strings.Contains(s, `"visibleUserIds"`) {
+		t.Errorf("visibleUserIds must be omitted from hidden JSON (upstream undefined)\n%s", s)
 	}
 }
 
