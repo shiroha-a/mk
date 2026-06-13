@@ -1010,6 +1010,20 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 			f.ViewerID,
 		)
 	}
+	// suspended-user filter (#1686): note/reply/renote のいずれかの author が
+	// suspended なら除外する (upstream generateSuspendedUserQueryForNote)。
+	// timeline は viewer に依らず常に suspended user の note を隠すので無条件
+	// 適用。isSuspended は user table への NOT EXISTS で確認し bind parameter を
+	// 持たない。suspended user は post-suspension で fanout list に note ID が
+	// 残るため、Redis 経路の ApplyFilter にも対応する suspended check がある。
+	suspendedNotExists := func(col string) string {
+		return `NOT EXISTS (SELECT 1 FROM "user" su WHERE su."id" = ` + col + ` AND su."isSuspended" = true)`
+	}
+	q = q.Where(
+		suspendedNotExists(`"note"."userId"`) +
+			` AND ("replyUserId" IS NULL OR ` + suspendedNotExists(`"note"."replyUserId"`) + `)` +
+			` AND ("renoteUserId" IS NULL OR ` + suspendedNotExists(`"note"."renoteUserId"`) + `)`,
+	)
 	return q
 }
 

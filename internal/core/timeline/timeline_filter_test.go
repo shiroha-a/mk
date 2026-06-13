@@ -54,6 +54,44 @@ func withHost(host string) func(*model.Note) {
 	return func(n *model.Note) { n.UserHost = strPtr(host) }
 }
 
+// #1686 suspended: note/reply/renote のいずれかの author が suspended なら除外。
+// User relation は FindManyByIDsWithUser が配線する前提なのでテストでも seed する。
+func withAuthorSuspended(n *model.Note) {
+	n.User = &model.User{ID: n.UserID, IsSuspended: true}
+}
+func withReplyAuthorSuspended(n *model.Note) {
+	n.ReplyID = strPtr("rp1")
+	n.ReplyUserID = strPtr("suspended")
+	n.Reply = &model.Note{ID: "rp1", UserID: "suspended", User: &model.User{ID: "suspended", IsSuspended: true}}
+}
+func withRenoteAuthorSuspended(n *model.Note) {
+	n.RenoteID = strPtr("rn1")
+	n.RenoteUserID = strPtr("suspended")
+	n.Renote = &model.Note{ID: "rn1", UserID: "suspended", User: &model.User{ID: "suspended", IsSuspended: true}}
+}
+
+func TestApplyFilter_Suspended(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("a", withAuthorSuspended),       // note author が suspended
+		makeNote("b", withReplyAuthorSuspended),  // reply 先 author が suspended
+		makeNote("c", withRenoteAuthorSuspended), // renote 元 author が suspended
+		// User relation が nil なら pass-through (suspended 不明扱い)
+		makeNote("nilrel"),
+		// 非 suspended author は通す
+		func() *model.Note {
+			n := makeNote("ok")
+			n.User = &model.User{ID: "author", IsSuspended: false}
+			return n
+		}(),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{})
+	ids := make([]string, 0, len(out))
+	for _, n := range out {
+		ids = append(ids, n.ID)
+	}
+	assert.ElementsMatch(t, []string{"nilrel", "ok"}, ids)
+}
+
 // #1681 被block: note/reply/renote のいずれかの author が viewer を block して
 // いれば除外。
 func TestApplyFilter_Blocker(t *testing.T) {

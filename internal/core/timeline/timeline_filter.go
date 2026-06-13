@@ -75,6 +75,13 @@ func isPureRenote(n *model.Note) bool {
 	return n.RenoteID != nil && n.Text == nil && len(n.FileIDs) == 0
 }
 
+// userSuspended reports whether the (nilable) preloaded user is suspended.
+// relation が未取得 (nil) なら suspended ではないものとして扱う (SQL 側の
+// `replyUser.id IS NULL` 分岐と同じく pass-through)。
+func userSuspended(u *model.User) bool {
+	return u != nil && u.IsSuspended
+}
+
 // ApplyFilter filters notes in-memory according to the given TimelineFilter.
 // viewerID is the currently authenticated user's ID (empty string if anonymous).
 func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*model.Note {
@@ -146,6 +153,16 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 			if _, muted := mutedChannels[*n.ChannelID]; muted {
 				continue
 			}
+		}
+		// suspended-user filter (#1686): note/reply/renote のいずれかの author が
+		// suspended なら除外する (upstream generateSuspendedUserQueryForNote)。
+		// FindManyByIDsWithUser が note/sub-note の User relation を配線するため、
+		// reply/renote 先の author suspended も判定できる。SQL 側の
+		// applyTimelineFilter にも同等の NOT EXISTS があり 2 経路で一致する。
+		if userSuspended(n.User) ||
+			(n.Reply != nil && userSuspended(n.Reply.User)) ||
+			(n.Renote != nil && userSuspended(n.Renote.User)) {
+			continue
 		}
 		// user mute filter: 投稿者が muted user なら除外。renote / reply の
 		// author も check する (= upstream generateMutedUserQueryForNotes は

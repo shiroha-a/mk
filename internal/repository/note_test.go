@@ -149,6 +149,52 @@ func TestNoteRepository_ListHomeTimeline_BaseFilters(t *testing.T) {
 
 func strPtr2(s string) *string { return &s }
 
+// TestNoteRepository_ListHomeTimeline_SuspendedFilter は #1686 の suspended-user
+// filter を SQL 層で検証する。note/reply/renote のいずれかの author が
+// suspended なら除外される (upstream generateSuspendedUserQueryForNote)。
+func TestNoteRepository_ListHomeTimeline_SuspendedFilter(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "u_sus_v", "susviewer")
+	normal := insertTestUser(t, "u_sus_n", "susnormal")
+	susp := insertTestUser(t, "u_sus_s", "suspended")
+	defer cleanupUser(t, viewer.ID)
+	defer cleanupUser(t, normal.ID)
+	defer cleanupUser(t, susp.ID)
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "isSuspended" = true WHERE id = ?`, susp.ID).Error)
+
+	// viewer は normal / susp をフォロー (home timeline 対象)。
+	for i, fid := range []string{normal.ID, susp.ID} {
+		flid := "flw_sus_" + string(rune('a'+i))
+		require.NoError(t, testDB.Exec(`INSERT INTO "following" (id, "followerId", "followeeId") VALUES (?, ?, ?)`, flid, viewer.ID, fid).Error)
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, flid)
+	}
+
+	txt := "hi"
+	mkNote := func(n *model.Note) *model.Note {
+		n.Text = &txt
+		n.Visibility = model.NoteVisibilityPublic
+		n.Reactions = datatypes.JSON([]byte("{}"))
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, n.ID) })
+		return n
+	}
+	plain := mkNote(&model.Note{ID: "n_sus_plain", UserID: normal.ID})
+	bySusp := mkNote(&model.Note{ID: "n_sus_own", UserID: susp.ID})
+	replyToSusp := mkNote(&model.Note{ID: "n_sus_rep", UserID: normal.ID, ReplyID: strPtr2("n_sus_own"), ReplyUserID: &susp.ID})
+	renoteOfSusp := mkNote(&model.Note{ID: "n_sus_rnt", UserID: normal.ID, RenoteID: strPtr2("n_sus_own"), RenoteUserID: &susp.ID})
+
+	rows, err := repo.ListHomeTimeline(viewer.ID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range rows {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids[plain.ID], "非 suspended author の note は含まれる")
+	assert.False(t, ids[bySusp.ID], "suspended author の note は除外")
+	assert.False(t, ids[replyToSusp.ID], "suspended user 宛 reply は除外")
+	assert.False(t, ids[renoteOfSusp.ID], "suspended user の renote/quote は除外")
+}
+
 // TestNoteRepository_ListHomeTimeline_WithRepliesFalse_SelfThreadOnly は #1047
 // で導入された upstream 互換の reply filter semantics を SQL 層で直接検証する。
 //
