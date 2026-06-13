@@ -178,6 +178,11 @@ func DecodeDeliverPayload(body []byte) (DeliverPayload, error) {
 type ExportPayload struct {
 	UserID string `json:"userId"`
 	Type   string `json:"type"` // notes, following, blocking, mute, favorites, user-lists, antennas, clips
+	// ExcludeMuting / ExcludeInactive は export-following のみが使う。muted user
+	// を除外 / 90日以上 inactive な followee を除外する (upstream export-following.ts
+	// + ExportFollowingProcessorService)。他 type では無視される。
+	ExcludeMuting   bool `json:"excludeMuting,omitempty"`
+	ExcludeInactive bool `json:"excludeInactive,omitempty"`
 }
 
 // NewExportTask creates a driver.Task for data export.

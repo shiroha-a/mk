@@ -17,6 +17,49 @@ import (
 
 // --- data-driven edge branches ---
 
+// #1555 export-following の excludeMuting=true は muted followee を除外する。
+func TestExport_Following_ExcludeMuting(t *testing.T) {
+	saver, _, deps, user := newExportDeps(t)
+	fRepo := deps.FollowingRepo.(*testutil.MockFollowingRepository)
+	fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: user.ID, FolloweeID: "bob"}
+	fRepo.Followings["f2"] = &model.Following{ID: "f2", FollowerID: user.ID, FolloweeID: "carol"}
+	mRepo := deps.MutingRepo.(*testutil.MockMutingRepository)
+	mRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: user.ID, MuteeID: "carol"}
+
+	exporter := transfer.NewExporter(deps)
+	_, err := exporter.Export(context.Background(), user.ID, transfer.ExportFollowing,
+		transfer.WithExcludeMuting(true))
+	require.NoError(t, err)
+	body := string(saver.uploads[0].Body)
+	assert.Contains(t, body, "bob")
+	assert.NotContains(t, body, "carol") // muted なので除外
+}
+
+// #1555 excludeInactive=true は updatedAt が 90日より古い followee を除外し、
+// updatedAt が nil の followee は除外しない (upstream の `u.updatedAt &&` guard)。
+func TestExport_Following_ExcludeInactive(t *testing.T) {
+	saver, _, deps, user := newExportDeps(t)
+	userRepo := deps.UserRepo.(*testutil.MockUserRepository)
+	old := time.Now().Add(-100 * 24 * time.Hour)
+	recent := time.Now().Add(-1 * 24 * time.Hour)
+	userRepo.Users["stale"] = &model.User{ID: "stale", Username: "stale", UsernameLower: "stale", UpdatedAt: &old}
+	userRepo.Users["fresh"] = &model.User{ID: "fresh", Username: "fresh", UsernameLower: "fresh", UpdatedAt: &recent}
+	// bob は updatedAt nil → inactive 扱いしない (除外されない)。
+	fRepo := deps.FollowingRepo.(*testutil.MockFollowingRepository)
+	fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: user.ID, FolloweeID: "stale"}
+	fRepo.Followings["f2"] = &model.Following{ID: "f2", FollowerID: user.ID, FolloweeID: "fresh"}
+	fRepo.Followings["f3"] = &model.Following{ID: "f3", FollowerID: user.ID, FolloweeID: "bob"}
+
+	exporter := transfer.NewExporter(deps)
+	_, err := exporter.Export(context.Background(), user.ID, transfer.ExportFollowing,
+		transfer.WithExcludeInactive(true))
+	require.NoError(t, err)
+	body := string(saver.uploads[0].Body)
+	assert.NotContains(t, body, "stale") // 90日以上 inactive → 除外
+	assert.Contains(t, body, "fresh")
+	assert.Contains(t, body, "bob") // updatedAt nil → 除外しない
+}
+
 // 存在しない followee ID を含む following 行を追加して、
 // `u, err := UserRepo.FindByID; if err != nil { continue }` の経路をカバーする。
 func TestExport_Following_SkipsMissingUser(t *testing.T) {

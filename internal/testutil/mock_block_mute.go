@@ -160,6 +160,21 @@ func (m *MockMutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
 	return ids, nil
 }
 
+// ListAllMuteeIDs returns every muteeId for muterID (expiry filter なし)。
+func (m *MockMutingRepository) ListAllMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	for _, r := range m.Mutings {
+		if r.MuterID != muterID {
+			continue
+		}
+		ids = append(ids, r.MuteeID)
+	}
+	return ids, nil
+}
+
 // DeleteExpired removes muting rows whose ExpiresAt has passed. Returns the
 // number of rows removed.
 func (m *MockMutingRepository) DeleteExpired(now time.Time) (int64, error) {

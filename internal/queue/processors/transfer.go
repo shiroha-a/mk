@@ -32,7 +32,9 @@ func (p *ExportProcessor) Handle(ctx context.Context, t driver.Task) error {
 	if payload.UserID == "" || payload.Type == "" {
 		return fmt.Errorf("export payload missing fields: %w", driver.SkipRetry)
 	}
-	if _, err := p.exporter.Export(ctx, payload.UserID, payload.Type); err != nil {
+	if _, err := p.exporter.Export(ctx, payload.UserID, payload.Type,
+		transfer.WithExcludeMuting(payload.ExcludeMuting),
+		transfer.WithExcludeInactive(payload.ExcludeInactive)); err != nil {
 		// 未対応typeはリトライしても通らないので SkipRetry。
 		if errors.Is(err, transfer.ErrUnsupportedType) {
 			return fmt.Errorf("%w: %w", err, driver.SkipRetry)

@@ -4,15 +4,35 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // csvBatchSize controls how many rows are fetched per pagination step for
 // CSV exports (follow/block/mute/user-lists). 500 matches upstream.
 const csvBatchSize = 500
 
+// inactiveThreshold is upstream の excludeInactive 判定閾値 (90日)。
+// updatedAt がこれより古い followee は inactive とみなして除外する。
+const inactiveThreshold = 90 * 24 * time.Hour
+
 // exportFollowing emits one `acct,withReplies=(true|false)` line per followee.
-// 出力順は登録降順 (id DESC)。
-func (e *Exporter) exportFollowing(userID string) ([]byte, error) {
+// 出力順は登録降順 (id DESC)。excludeMuting=true なら muted user を、
+// excludeInactive=true なら 90日以上 updatedAt が古い followee を除外する
+// (upstream export-following.ts + ExportFollowingProcessorService)。
+func (e *Exporter) exportFollowing(userID string, excludeMuting, excludeInactive bool) ([]byte, error) {
+	// excludeMuting 用の muteeId 集合を 1 度だけ取得する。
+	var muted map[string]struct{}
+	if excludeMuting {
+		ids, err := e.deps.MutingRepo.ListMuteeIDs(userID)
+		if err != nil {
+			return nil, err
+		}
+		muted = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			muted[id] = struct{}{}
+		}
+	}
+	now := time.Now()
 	var buf bytes.Buffer
 	offset := 0
 	for {
@@ -24,8 +44,18 @@ func (e *Exporter) exportFollowing(userID string) ([]byte, error) {
 			break
 		}
 		for _, f := range rows {
+			if muted != nil {
+				if _, ok := muted[f.FolloweeID]; ok {
+					continue
+				}
+			}
 			u, err := e.deps.UserRepo.FindByID(f.FolloweeID)
 			if err != nil || u == nil {
+				continue
+			}
+			// upstream: u.updatedAt が存在し、かつ 90日より古ければ inactive。
+			// updatedAt が nil (未更新) の user は除外しない。
+			if excludeInactive && u.UpdatedAt != nil && now.Sub(*u.UpdatedAt) > inactiveThreshold {
 				continue
 			}
 			fmt.Fprintf(&buf, "%s,withReplies=%s\n", acct(u), strconv.FormatBool(f.WithReplies))

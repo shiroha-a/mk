@@ -114,10 +114,37 @@ func NewExporter(deps ExporterDeps) *Exporter {
 	return &Exporter{deps: deps}
 }
 
+// exportConfig carries per-call export options threaded via functional options.
+// Currently only the export-following muting / inactive filters.
+type exportConfig struct {
+	excludeMuting   bool
+	excludeInactive bool
+}
+
+// ExportOption configures a single Export call (functional-options pattern so
+// existing callers need no signature change)。
+type ExportOption func(*exportConfig)
+
+// WithExcludeMuting excludes muted users from export-following (upstream
+// excludeMuting param)。他 export type では無視される。
+func WithExcludeMuting(v bool) ExportOption {
+	return func(c *exportConfig) { c.excludeMuting = v }
+}
+
+// WithExcludeInactive excludes followees inactive for 90+ days from
+// export-following (upstream excludeInactive param)。他 type では無視される。
+func WithExcludeInactive(v bool) ExportOption {
+	return func(c *exportConfig) { c.excludeInactive = v }
+}
+
 // Export runs the export pipeline for a single (userID, exportType) pair.
 // On success the user is notified via NotificationDispatcher.Create with
 // Extra={exportedEntity, fileId}. Errors bubble out to the asynq processor.
-func (e *Exporter) Export(ctx context.Context, userID, exportType string) (*model.DriveFile, error) {
+func (e *Exporter) Export(ctx context.Context, userID, exportType string, opts ...ExportOption) (*model.DriveFile, error) {
+	var cfg exportConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	user, err := e.deps.UserRepo.FindByID(userID)
 	if err != nil {
 		return nil, fmt.Errorf("find user: %w", err)
@@ -132,7 +159,7 @@ func (e *Exporter) Export(ctx context.Context, userID, exportType string) (*mode
 		body, err = e.exportNotes(user.ID)
 		name = timestampedName("notes", "json")
 	case ExportFollowing:
-		body, err = e.exportFollowing(user.ID)
+		body, err = e.exportFollowing(user.ID, cfg.excludeMuting, cfg.excludeInactive)
 		name = timestampedName("following", "csv")
 	case ExportBlocking:
 		body, err = e.exportBlocking(user.ID)

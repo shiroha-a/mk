@@ -41,9 +41,18 @@ func (h *Handler) exportHandler(exportType string) echo.HandlerFunc {
 		if h.transferEnqueuer == nil {
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Transfer queue not configured.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		}
+		// export-following のみ excludeMuting / excludeInactive を受ける
+		// (upstream export-following.ts paramDef)。他 type では無視される。
+		var req struct {
+			ExcludeMuting   bool `json:"excludeMuting"`
+			ExcludeInactive bool `json:"excludeInactive"`
+		}
+		_ = c.Bind(&req)
 		if err := h.transferEnqueuer.EnqueueExport(queue.ExportPayload{
-			UserID: u.ID,
-			Type:   exportType,
+			UserID:          u.ID,
+			Type:            exportType,
+			ExcludeMuting:   req.ExcludeMuting,
+			ExcludeInactive: req.ExcludeInactive,
 		}); err != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to enqueue export.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		}

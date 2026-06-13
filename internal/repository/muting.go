@@ -20,6 +20,11 @@ type MutingRepository interface {
 	// for muterID. timeline endpoint で muted user の note を除外する
 	// filter 用 (#874)。
 	ListMuteeIDs(muterID string) ([]string, error)
+	// ListAllMuteeIDs returns the muteeIDs of ALL mute rows for muterID,
+	// including temporarily-expired ones. export-following の excludeMuting は
+	// upstream が expiry filter なしの mutingsRepository.findBy({muterId}) を使う
+	// ため、active-only の ListMuteeIDs ではなく本メソッドで一致させる (#1555)。
+	ListAllMuteeIDs(muterID string) ([]string, error)
 	// DeleteExpired physically removes muting rows whose expiresAt has
 	// passed. Read filters (ListMuteeIDs/Exists) already exclude them; this
 	// is the active prune run by the checkExpiredMutings cron (#1563).
@@ -95,6 +100,21 @@ func (r *mutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
 	if err := r.db.Model(&model.Muting{}).
 		Where(`"muterId" = ?`, muterID).
 		Where(`"expiresAt" IS NULL OR "expiresAt" > ?`, now).
+		Pluck(`"muteeId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// ListAllMuteeIDs returns every muteeId for muterID with no expiry filter
+// (upstream export-following が使う raw mutingsRepository.findBy 相当)。
+func (r *mutingRepository) ListAllMuteeIDs(muterID string) ([]string, error) {
+	if muterID == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.Muting{}).
+		Where(`"muterId" = ?`, muterID).
 		Pluck(`"muteeId"`, &ids).Error; err != nil {
 		return nil, err
 	}

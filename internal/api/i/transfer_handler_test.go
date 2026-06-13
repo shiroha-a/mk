@@ -120,6 +120,17 @@ func TestExport_AllTypesEnqueue(t *testing.T) {
 	_ = cases
 }
 
+// #1555 export-following の excludeMuting / excludeInactive が ExportPayload に
+// 伝わる。
+func TestExport_Following_ExcludeParams(t *testing.T) {
+	h, enq := newTransferHandler()
+	rec := post(h.ExportFollowing, `{"excludeMuting":true,"excludeInactive":true}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, enq.exportCalls, 1)
+	assert.True(t, enq.exportCalls[0].ExcludeMuting)
+	assert.True(t, enq.exportCalls[0].ExcludeInactive)
+}
+
 func TestExport_EnqueuerFailure(t *testing.T) {
 	h, enq := newTransferHandler()
 	enq.exportErr = errors.New("enq boom")

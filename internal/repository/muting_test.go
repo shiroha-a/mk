@@ -108,6 +108,8 @@ func TestMutingRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.ListMuteeIDs("a")
 	assert.Error(t, err)
+	_, err = repo.ListAllMuteeIDs("a")
+	assert.Error(t, err)
 }
 
 // ListMuteeIDs は active (非 expired) な mute だけを返すこと、空 muterID は
@@ -148,6 +150,15 @@ func TestMutingRepository_ListMuteeIDs(t *testing.T) {
 	ids, err = repo.ListMuteeIDs("")
 	require.NoError(t, err)
 	assert.Nil(t, ids)
+
+	// ListAllMuteeIDs は expiry filter なし → expired (u4) も含めた全件 (#1555)。
+	all, err := repo.ListAllMuteeIDs(u1.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{u2.ID, u3.ID, u4.ID}, all)
+
+	all, err = repo.ListAllMuteeIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, all)
 }
 
 func TestRenoteMutingRepository_CRUD(t *testing.T) {
