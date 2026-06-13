@@ -22,10 +22,13 @@ func TestResolveViewerFields_MyReactionEmbedded(t *testing.T) {
 	reactionRepo.Reactions["renote"] = &model.NoteReaction{ID: "renote", UserID: "v1", NoteID: "n2", Reaction: "❤"}
 	reactionRepo.Reactions["reply"] = &model.NoteReaction{ID: "reply", UserID: "v1", NoteID: "n3", Reaction: "🎉"}
 
+	// #1641: myReaction は reactionCount>0 の note のみ fetch するので、
+	// reaction 登録済み note には ReactionCount を立てる。
 	notes := []entity.NoteEntity{{
-		ID:     "n1",
-		Renote: &entity.NoteEntity{ID: "n2"},
-		Reply:  &entity.NoteEntity{ID: "n3"},
+		ID:            "n1",
+		ReactionCount: 1,
+		Renote:        &entity.NoteEntity{ID: "n2", ReactionCount: 1},
+		Reply:         &entity.NoteEntity{ID: "n3", ReactionCount: 1},
 	}}
 	viewer := &model.User{ID: "v1"}
 

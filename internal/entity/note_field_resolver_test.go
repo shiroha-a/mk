@@ -100,11 +100,15 @@ func TestNoteFieldResolver_ResolveViewerFields_EmbedsRenoteAndReply(t *testing.T
 	}}
 	r := NewNoteFieldResolver(nil, nil, nil, reactions, channels, makeIDGen(t))
 
+	// #1641: myReaction は reactionCount>0 の note だけ fetch するので、
+	// reaction を持つ note には ReactionCount を立てる (reaction row があるのに
+	// count=0 は本来あり得ない状態)。
 	notes := []NoteEntity{{
-		ID:        "n1",
-		ChannelID: &chID,
-		Renote:    &NoteEntity{ID: "n2", ChannelID: &chID},
-		Reply:     &NoteEntity{ID: "n3"},
+		ID:            "n1",
+		ChannelID:     &chID,
+		ReactionCount: 1,
+		Renote:        &NoteEntity{ID: "n2", ChannelID: &chID, ReactionCount: 1},
+		Reply:         &NoteEntity{ID: "n3", ReactionCount: 1},
 	}}
 	r.ResolveViewerFields(notes, &model.User{ID: "v1"})
 
@@ -434,4 +438,40 @@ func TestPackPoll(t *testing.T) {
 	assert.Equal(t, 1, got3.Choices[0].Votes)
 	assert.Equal(t, 0, got3.Choices[1].Votes)
 	assert.Equal(t, 0, got3.Choices[2].Votes)
+}
+
+// #1641: reactionCount==0 の note は myReaction fetch 対象から外す
+// (upstream populateMyReaction の reactionsCount===0 skip 相当)。
+type countingReactionLookup struct {
+	rows      map[string]*model.NoteReaction
+	queriedID []string
+}
+
+func (s *countingReactionLookup) FindByUserAndNoteIDs(_ string, noteIDs []string) (map[string]*model.NoteReaction, error) {
+	s.queriedID = append(s.queriedID, noteIDs...)
+	out := make(map[string]*model.NoteReaction, len(noteIDs))
+	for _, nid := range noteIDs {
+		if r, ok := s.rows[nid]; ok {
+			out[nid] = r
+		}
+	}
+	return out, nil
+}
+
+func TestNoteFieldResolver_MyReaction_SkipsZeroReactionNotes(t *testing.T) {
+	reactions := &countingReactionLookup{rows: map[string]*model.NoteReaction{
+		"hot": {NoteID: "hot", Reaction: "👍"},
+	}}
+	r := NewNoteFieldResolver(nil, nil, nil, reactions, nil, makeIDGen(t))
+
+	notes := []NoteEntity{
+		{ID: "hot", ReactionCount: 3},  // reaction あり → fetch 対象
+		{ID: "cold", ReactionCount: 0}, // reaction 無し → skip
+	}
+	r.ResolveViewerFields(notes, &model.User{ID: "v1"})
+
+	// fetch されたのは reactionCount>0 の "hot" のみ
+	assert.Equal(t, []string{"hot"}, reactions.queriedID)
+	require.NotNil(t, notes[0].MyReaction)
+	assert.Nil(t, notes[1].MyReaction, "zero-reaction note must not get myReaction")
 }

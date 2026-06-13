@@ -315,15 +315,32 @@ func appendNoteFileIDs(dst []string, n *NoteEntity) []string {
 	return dst
 }
 
+// appendNoteIDs collects note IDs whose viewer myReaction should be batch
+// fetched. reactionCount==0 の note は誰も reaction していない = viewer の
+// reaction もあり得ないので fetch 対象から外す (upstream populateMyReaction の
+// `if (reactionsCount === 0) return undefined` 相当、#1641)。これにより
+// reaction の無い note が多い timeline では IN リストが縮み myReaction の
+// batch SELECT が軽くなる。
+//
+// upstream の「作成 2 秒以内は fetch skip」guard と reactionAndUserPairCache
+// 優先参照は mk-go では採用しない (#1641 の意図的 divergence):
+//   - 2 秒 guard は per-note fetch を避ける TS の最適化だが、mk-go は元から
+//     ページ単位の単一 batch SELECT なので不要。むしろ guard を入れると直前に
+//     自分が reaction した直後 (<2s) の note で myReaction が undefined になり
+//     機能的に劣化する。mk-go は実値を返す方を優先する。
+//   - reactionAndUserPairCache 優先は REST note が pairCache を持たない
+//     (#1640 で streaming 限定) ため REST 経路では効かない。
 func appendNoteIDs(dst []string, n *NoteEntity) []string {
 	if n == nil {
 		return dst
 	}
-	dst = append(dst, n.ID)
-	if n.Renote != nil {
+	if n.ReactionCount > 0 {
+		dst = append(dst, n.ID)
+	}
+	if n.Renote != nil && n.Renote.ReactionCount > 0 {
 		dst = append(dst, n.Renote.ID)
 	}
-	if n.Reply != nil {
+	if n.Reply != nil && n.Reply.ReactionCount > 0 {
 		dst = append(dst, n.Reply.ID)
 	}
 	return dst
