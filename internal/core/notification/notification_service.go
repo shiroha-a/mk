@@ -110,6 +110,11 @@ type Notification struct {
 	// no note (e.g. follow / followRequestAccepted).
 	NoteVisibility string         `json:"noteVisibility,omitempty"`
 	Extra          map[string]any `json:"extra,omitempty"`
+	// AppAccessTokenID records the access token that created an 'app'
+	// notification (upstream notifications/create の appAccessTokenId、#1557)。
+	// 内部メタデータで API レスポンスには出さない (entity packer は spread
+	// しない)。
+	AppAccessTokenID string `json:"appAccessTokenId,omitempty"`
 }
 
 // CreateInput is the parameter set for Service.Create.
@@ -125,6 +130,8 @@ type CreateInput struct {
 	Reaction       string
 	Choice         *int
 	Extra          map[string]any
+	// AppAccessTokenID は 'app' 通知を作った access token の ID (#1557)。
+	AppAccessTokenID string
 }
 
 // StreamingPublisher receives a freshly created notification so that
@@ -242,15 +249,16 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, er
 
 	now := time.Now()
 	n := &Notification{
-		ID:             s.idGen.Generate(now),
-		CreatedAt:      now,
-		Type:           in.Type,
-		NotifierID:     in.NotifierID,
-		NoteID:         in.NoteID,
-		NoteVisibility: in.NoteVisibility,
-		Reaction:       in.Reaction,
-		Choice:         in.Choice,
-		Extra:          in.Extra,
+		ID:               s.idGen.Generate(now),
+		CreatedAt:        now,
+		Type:             in.Type,
+		NotifierID:       in.NotifierID,
+		NoteID:           in.NoteID,
+		NoteVisibility:   in.NoteVisibility,
+		Reaction:         in.Reaction,
+		Choice:           in.Choice,
+		Extra:            in.Extra,
+		AppAccessTokenID: in.AppAccessTokenID,
 	}
 
 	payload, err := json.Marshal(n)

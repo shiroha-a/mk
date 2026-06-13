@@ -1491,6 +1491,9 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetEmojiRepo(emojiRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
+	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に
+	// fallback するため access token repo を配線 (#1557)。
+	notificationsHandler.SetAccessTokenRepo(repository.NewAccessTokenRepository(s.db))
 	api.POST("/i/notifications", notificationsHandler.Show, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/i/notifications-grouped", notificationsHandler.Grouped, middleware.RequireAuth(), middleware.RequireScope("read:notifications"))
 	api.POST("/notifications/mark-all-as-read", notificationsHandler.MarkAllAsRead, middleware.RequireAuth(), middleware.RequireScope("write:notifications"))

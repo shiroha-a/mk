@@ -2,6 +2,8 @@
 package notifications
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 
@@ -31,6 +33,17 @@ type Handler struct {
 	testNotifier         TestNotifier
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
+	// accessTokenRepo は notifications/create の 'app' 通知で、リクエストに使われた
+	// access token を raw token から再解決し、header/icon の fallback (token.name /
+	// token.iconUrl) + appAccessTokenId を埋めるために使う (#1557)。未配線なら
+	// fallback 無し。
+	accessTokenRepo repository.AccessTokenRepository
+}
+
+// SetAccessTokenRepo wires the access token repo used by notifications/create
+// to resolve the request's app token for header/icon fallback (#1557)。
+func (h *Handler) SetAccessTokenRepo(r repository.AccessTokenRepository) {
+	h.accessTokenRepo = r
 }
 
 // SetRoleLookup wires the lookup used to pack roleAssigned notifications'
@@ -326,10 +339,13 @@ func (h *Handler) MarkAllAsRead(c echo.Context) error {
 // header / icon は任意。body / header / icon は Extra に格納し、entity の
 // Extra spread で notification 出力に surface される (#1217)。
 //
-// 注: upstream は header/icon が無い場合 token.name / token.iconUrl に
-// フォールバックし appAccessTokenId も記録するが、mk-go の request context は
-// raw token 文字列のみで AccessToken オブジェクトを持たないため、ここでは
-// 渡された body / header / icon のみを使う (token 由来の fallback は省略)。
+// header / icon は upstream 同様 `ps.header ?? token?.name ?? null` /
+// `ps.icon ?? token?.iconUrl ?? null` で、リクエスト値が無ければ access token の
+// name / iconUrl にフォールバックする (#1557)。token は raw token から
+// 再解決する (native session token は access_token 行が無いので nil = fallback
+// 無し)。'app' 通知の header/icon は schema 上 required + nullable なので、
+// 値が無くても null で常に present にする。appAccessTokenId も記録する
+// (内部メタデータ、レスポンスには出さない)。
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
@@ -347,24 +363,61 @@ func (h *Handler) Create(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 
-	extra := map[string]any{"body": *req.Body}
+	// リクエストの access token を再解決する (header/icon fallback + appAccessTokenId)。
+	token := h.resolveRequestToken(c)
+
+	// header = ps.header ?? token?.name ?? null。icon も同様。nil のままにすると
+	// Extra spread で `null` として出力され、required + nullable な schema に揃う。
+	var header any
 	if req.Header != nil {
-		extra["header"] = *req.Header
+		header = *req.Header
+	} else if token != nil && token.Name != nil {
+		header = *token.Name
 	}
+	var icon any
 	if req.Icon != nil {
-		extra["icon"] = *req.Icon
+		icon = *req.Icon
+	} else if token != nil && token.IconURL != nil {
+		icon = *token.IconURL
 	}
+	extra := map[string]any{"body": *req.Body, "header": header, "icon": icon}
+
+	appAccessTokenID := ""
+	if token != nil {
+		appAccessTokenID = token.ID
+	}
+
 	// app 通知は notifier を持たない。NotifierID を空にすることで
 	// service.Create の self-notification ガード (NotifierID == NotifieeID) も
 	// 回避する。upstream 同様 fire-and-forget なので結果は 204 固定。
 	if _, err := h.svc.Create(c.Request().Context(), notification.CreateInput{
-		NotifieeID: user.ID,
-		Type:       notification.TypeApp,
-		Extra:      extra,
+		NotifieeID:       user.ID,
+		Type:             notification.TypeApp,
+		Extra:            extra,
+		AppAccessTokenID: appAccessTokenID,
 	}); err != nil {
 		slog.Warn("notifications/create failed", "user", user.ID, "err", err)
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// resolveRequestToken re-resolves the request's raw token to its AccessToken
+// row (#1557)。native session login token は access_token 行を持たないので nil
+// (= header/icon fallback 無し)。repo 未配線 / token 無し / 解決失敗も nil。
+func (h *Handler) resolveRequestToken(c echo.Context) *model.AccessToken {
+	if h.accessTokenRepo == nil {
+		return nil
+	}
+	raw := middleware.GetToken(c)
+	if raw == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(raw))
+	at, err := h.accessTokenRepo.FindByHashOrToken(hex.EncodeToString(sum[:]), raw)
+	if err != nil {
+		return nil
+	}
+	return at
 }
 
 // Flush handles POST /api/notifications/flush.

@@ -326,11 +326,67 @@ func TestCreate_BodyOnly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
 	assert.Equal(t, "just body", resp[0]["body"])
-	// 未指定の header / icon はキーごと省略されること。
-	_, hasHeader := resp[0]["header"]
-	assert.False(t, hasHeader)
-	_, hasIcon := resp[0]["icon"]
-	assert.False(t, hasIcon)
+	// #1557: 'app' 通知の header / icon は required + nullable なので、未指定 +
+	// token fallback 無し (accessTokenRepo 未配線) のときは present かつ null。
+	hVal, hasHeader := resp[0]["header"]
+	assert.True(t, hasHeader)
+	assert.Nil(t, hVal)
+	iVal, hasIcon := resp[0]["icon"]
+	assert.True(t, hasIcon)
+	assert.Nil(t, iVal)
+}
+
+// #1557 notifications/create: header/icon 未指定なら access token の name/iconUrl に
+// fallback し、appAccessTokenId も記録する。
+func TestCreate_TokenFallback(t *testing.T) {
+	h, _ := newTestHandler(t)
+	atRepo := testutil.NewMockAccessTokenRepository()
+	appName, appIcon := "My App", "https://app.example/icon.png"
+	atRepo.Tokens["hash1"] = &model.AccessToken{ID: "at1", Token: "rawtoken", Name: &appName, IconURL: &appIcon}
+	h.SetAccessTokenRepo(atRepo)
+
+	c, rec := newJSONRequest(t, "/api/notifications/create", `{"body":"hi"}`)
+	setAuth(c, &model.User{ID: "alice"})
+	c.Set(string(middleware.TokenContextKey), "rawtoken")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	c2, rec2 := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+	setAuth(c2, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c2))
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "hi", resp[0]["body"])
+	assert.Equal(t, appName, resp[0]["header"], "header は token.name に fallback")
+	assert.Equal(t, appIcon, resp[0]["icon"], "icon は token.iconUrl に fallback")
+	// appAccessTokenId は内部メタデータでレスポンスには出さない。
+	_, hasATID := resp[0]["appAccessTokenId"]
+	assert.False(t, hasATID)
+}
+
+// 明示 header/icon は token fallback より優先される。
+func TestCreate_ExplicitHeaderIconOverridesToken(t *testing.T) {
+	h, _ := newTestHandler(t)
+	atRepo := testutil.NewMockAccessTokenRepository()
+	appName := "My App"
+	atRepo.Tokens["hash1"] = &model.AccessToken{ID: "at1", Token: "rawtoken", Name: &appName}
+	h.SetAccessTokenRepo(atRepo)
+
+	c, rec := newJSONRequest(t, "/api/notifications/create", `{"body":"hi","header":"Custom","icon":"https://x/i.png"}`)
+	setAuth(c, &model.User{ID: "alice"})
+	c.Set(string(middleware.TokenContextKey), "rawtoken")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	c2, rec2 := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+	setAuth(c2, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c2))
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "Custom", resp[0]["header"])
+	assert.Equal(t, "https://x/i.png", resp[0]["icon"])
 }
 
 func TestCreate_MissingBody(t *testing.T) {
