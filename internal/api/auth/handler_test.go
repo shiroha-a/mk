@@ -454,10 +454,25 @@ func TestSha256Hex(t *testing.T) {
 
 func TestPackSession_NilApp(t *testing.T) {
 	s := &model.AuthSession{ID: "s1", Token: "t1"}
-	result := packSession(s)
+	result := packSession(s, nil)
 	assert.Equal(t, "s1", result["id"])
 	_, hasApp := result["app"]
 	assert.False(t, hasApp)
+}
+
+// #1557 app.isAuthorized は non-nil 渡しのときだけ含める。
+func TestPackSession_AppIsAuthorized(t *testing.T) {
+	s := &model.AuthSession{ID: "s1", Token: "t1", App: &model.App{ID: "a1", Name: "App"}}
+
+	// isAuthorized nil (me==null) → 省略
+	app := packSession(s, nil)["app"].(map[string]any)
+	_, has := app["isAuthorized"]
+	assert.False(t, has)
+
+	// isAuthorized non-nil → 値が出る
+	yes := true
+	app2 := packSession(s, &yes)["app"].(map[string]any)
+	assert.Equal(t, true, app2["isAuthorized"])
 }
 
 func TestPackUserDetailed_NilUser(t *testing.T) {

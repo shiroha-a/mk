@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -14,10 +15,48 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// legacyPermRe matches the legacy `account/read` / `notes-write` permission
+// form so it can be migrated to the canonical `read:account` / `write:notes`
+// (upstream app/create.ts の `v.replace(/^(.+)(\/|-)(read|write)$/, '$3:$1')`)。
+var legacyPermRe = regexp.MustCompile(`^(.+)(/|-)(read|write)$`)
+
+// normalizeAppPermissions migrates legacy permission strings to the canonical
+// `<read|write>:<entity>` form and de-duplicates (preserving first-occurrence
+// order), mirroring upstream app/create.ts の `unique(ps.permission.map(...))`
+// (#1557)。
+func normalizeAppPermissions(perms []string) pq.StringArray {
+	seen := make(map[string]struct{}, len(perms))
+	out := make(pq.StringArray, 0, len(perms))
+	for _, p := range perms {
+		if m := legacyPermRe.FindStringSubmatch(p); m != nil {
+			p = m[3] + ":" + m[1]
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
 // Handler handles app-related API endpoints.
 type Handler struct {
 	repo  repository.AuthSessionRepository
 	idGen id.Generator
+}
+
+// isAuthorizedFor reports the App.isAuthorized value for a viewer (#1557)。
+// Returns nil when me is nil so the caller omits the field (upstream は me!=null
+// のときだけ含める)。non-nil のときは access_token が存在するか
+// (= accessTokensRepository.countBy({appId,userId}) > 0) を返す。
+func (h *Handler) isAuthorizedFor(appID string, me *model.User) *bool {
+	if me == nil {
+		return nil
+	}
+	_, err := h.repo.FindAccessTokenByAppAndUser(appID, me.ID)
+	v := err == nil
+	return &v
 }
 
 // NewHandler creates a new app Handler.
@@ -38,9 +77,10 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 
 	// 認証済みユーザーのIDを取得（任意）
+	me := middleware.GetUser(c)
 	var userID *string
-	if u := middleware.GetUser(c); u != nil {
-		userID = &u.ID
+	if me != nil {
+		userID = &me.ID
 	}
 
 	now := time.Now()
@@ -51,14 +91,18 @@ func (h *Handler) Create(c echo.Context) error {
 		Secret:      misc.SecureRandomHex(32),
 		Name:        req.Name,
 		Description: req.Description,
-		Permission:  pq.StringArray(req.Permission),
+		// legacy permission の正規化 + de-dup (upstream app/create.ts、#1557)。
+		Permission:  normalizeAppPermissions(req.Permission),
 		CallbackURL: req.CallbackURL,
 	}
 	if err := h.repo.CreateApp(a); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
-	return c.JSON(http.StatusOK, packApp(a, true))
+	// upstream app/create.ts は pack(app, null, ...) と me を null 固定で渡すため
+	// isAuthorized を常に省略する (authenticated でも含めない、#1557)。me は
+	// userID 取得にのみ使う。
+	return c.JSON(http.StatusOK, packApp(a, true, nil))
 }
 
 // Show handles POST /api/app/show.
@@ -76,12 +120,13 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	// 認証済み && 自分のアプリならsecretも返す
+	me := middleware.GetUser(c)
 	includeSecret := false
-	if u := middleware.GetUser(c); u != nil && a.UserID != nil && *a.UserID == u.ID {
+	if me != nil && a.UserID != nil && *a.UserID == me.ID {
 		includeSecret = true
 	}
 
-	return c.JSON(http.StatusOK, packApp(a, includeSecret))
+	return c.JSON(http.StatusOK, packApp(a, includeSecret, h.isAuthorizedFor(a.ID, me)))
 }
 
 // MyApps handles POST /api/my/apps.
@@ -117,18 +162,22 @@ func (h *Handler) MyApps(c echo.Context) error {
 
 	result := make([]map[string]any, len(apps))
 	for i, a := range apps {
-		result[i] = packApp(a, true)
+		result[i] = packApp(a, true, h.isAuthorizedFor(a.ID, u))
 	}
 	return c.JSON(http.StatusOK, result)
 }
 
-func packApp(a *model.App, includeSecret bool) map[string]any {
+// packApp builds the App entity response. isAuthorized is included only when
+// non-nil (upstream は me!=null のときだけ含める、#1557)。
+func packApp(a *model.App, includeSecret bool, isAuthorized *bool) map[string]any {
 	resp := map[string]any{
-		"id":           a.ID,
-		"name":         a.Name,
-		"callbackUrl":  a.CallbackURL,
-		"permission":   a.Permission,
-		"isAuthorized": false,
+		"id":          a.ID,
+		"name":        a.Name,
+		"callbackUrl": a.CallbackURL,
+		"permission":  a.Permission,
+	}
+	if isAuthorized != nil {
+		resp["isAuthorized"] = *isAuthorized
 	}
 	if includeSecret {
 		resp["secret"] = a.Secret

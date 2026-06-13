@@ -98,7 +98,16 @@ func (h *Handler) SessionShow(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eba7-4adb-a467-f171b8847250"))
 	}
 
-	return c.JSON(http.StatusOK, packSession(session))
+	// app.isAuthorized は認証済 caller (me) のときのみ含める (upstream
+	// AppEntityService、#1557)。me が app の access_token を持つかで判定する。
+	var isAuthorized *bool
+	if me := middleware.GetUser(c); me != nil && session.App != nil {
+		_, atErr := h.repo.FindAccessTokenByAppAndUser(session.App.ID, me.ID)
+		v := atErr == nil
+		isAuthorized = &v
+	}
+
+	return c.JSON(http.StatusOK, packSession(session, isAuthorized))
 }
 
 // Accept handles POST /api/auth/accept.
@@ -276,18 +285,23 @@ func (h *Handler) MiAuthCheck(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-func packSession(s *model.AuthSession) map[string]any {
+func packSession(s *model.AuthSession, isAuthorized *bool) map[string]any {
 	result := map[string]any{
 		"id":    s.ID,
 		"token": s.Token,
 	}
 	if s.App != nil {
-		result["app"] = map[string]any{
+		app := map[string]any{
 			"id":          s.App.ID,
 			"name":        s.App.Name,
 			"callbackUrl": s.App.CallbackURL,
 			"permission":  s.App.Permission,
 		}
+		// isAuthorized は me!=null のときだけ含める (upstream、#1557)。
+		if isAuthorized != nil {
+			app["isAuthorized"] = *isAuthorized
+		}
+		result["app"] = app
 	}
 	return result
 }
