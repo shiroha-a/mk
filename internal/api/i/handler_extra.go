@@ -192,7 +192,8 @@ func (h *Handler) Favorites(c echo.Context) error {
 			"id":     f.ID,
 			"noteId": f.NoteID,
 			// Misskey 本家互換のため createdAt を含める (#424 Devin review)。
-			"createdAt": f.CreatedAt.UTC().Format(time.RFC3339Nano),
+			// 他 packer と同じ固定 ms 精度 ISO-8601 で出す (#1556)。
+			"createdAt": f.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		}
 		if f.Note != nil {
 			if pn, ok := byID[f.Note.ID]; ok {

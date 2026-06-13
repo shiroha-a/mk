@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -264,6 +265,10 @@ func TestFavorites_WithNote(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
 	shapetest.Assert(t, "NoteFavorite", resp[0]) // L3 (#1286)
+	// #1556 createdAt は固定 ms 精度 ISO-8601 (RFC3339Nano ではない)。
+	createdAt, _ := resp[0]["createdAt"].(string)
+	_, perr := time.Parse("2006-01-02T15:04:05.000Z", createdAt)
+	assert.NoError(t, perr, "createdAt は ms 精度 ISO-8601: %q", createdAt)
 }
 
 // untilId 経由の cursor pagination が repo に正しく伝わり、cursor 以下の

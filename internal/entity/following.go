@@ -4,8 +4,6 @@
 package entity
 
 import (
-	"time"
-
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -53,7 +51,10 @@ func PackFollowing(
 	}
 	if idGen != nil {
 		if t, err := idGen.ParseTime(f.ID); err == nil {
-			out.CreatedAt = t.UTC().Format(time.RFC3339Nano)
+			// createdAt は他 packer と同じ固定 ms 精度 ISO-8601 で出す
+			// (upstream JS toISOString 互換、#1556)。RFC3339Nano は精度が
+			// 可変 (末尾ゼロ trim / 端数無し) になり drift するため使わない。
+			out.CreatedAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
 	}
 	if populateFollowee && lookup != nil {
