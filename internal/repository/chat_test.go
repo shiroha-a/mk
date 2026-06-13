@@ -588,6 +588,14 @@ func TestChatRepository_Invitation(t *testing.T) {
 	_, err = repo.FindInvitation("ghost", room.ID)
 	assert.Error(t, err)
 
+	// FindInvitationByID (#1559)
+	byID, err := repo.FindInvitationByID("inv_1")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, byID.UserID)
+	assert.Equal(t, room.ID, byID.RoomID)
+	_, err = repo.FindInvitationByID("ghost")
+	assert.Error(t, err)
+
 	// DeleteInvitation
 	require.NoError(t, repo.DeleteInvitation("inv_1"))
 }

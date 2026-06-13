@@ -406,6 +406,12 @@ func TestNotificationShapeL2(t *testing.T) {
 	roleLookup := entity.WithRoleLookup(func(string) (map[string]any, bool) {
 		return entity.PackRole(&model.Role{ID: "r1", Name: "VIP", IsPublic: true}, 0, idGenRole, corerole.DefaultPolicies()), true
 	})
+	chatInvLookup := entity.WithChatInvitationLookup(func(invID, _ string) (map[string]any, bool) {
+		return map[string]any{
+			"id": invID, "createdAt": "2026-05-25T00:00:00.000Z",
+			"userId": "u_invitee", "roomId": "room1",
+		}, true
+	})
 	cases := []struct {
 		typ      notification.Type
 		withUser bool
@@ -430,6 +436,9 @@ func TestNotificationShapeL2(t *testing.T) {
 		{notification.TypeTest, false, false, nil, nil},
 		// #1559: roleAssigned は Extra["roleId"] を read 時に packed role へ解決する。
 		{notification.TypeRoleAssigned, false, false, map[string]any{"roleId": "r1"}, []entity.NotificationOption{roleLookup}},
+		// #1559: chatRoomInvitationReceived は Extra["invitationId"] を read 時に
+		// packed invitation へ解決する。notifier(招待者) を持つので userId も出る。
+		{notification.TypeChatRoomInvitationReceived, true, false, map[string]any{"invitationId": "inv1"}, []entity.NotificationOption{chatInvLookup}},
 	}
 
 	allow, err := LoadAllowlist(filepath.Join("testdata", "allowlist_l2.json"))

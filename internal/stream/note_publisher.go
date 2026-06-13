@@ -183,14 +183,15 @@ type NotificationFollowingChecker interface {
 // the outbound JSON is packed via entity.PackNotification so the WebSocket
 // body matches Misskey's NotificationEntityService.pack shape.
 type NotificationPublisher struct {
-	pub            PubSubPublisher
-	userRepo       NotificationUserRepo
-	noteRepo       NotificationNoteRepo
-	followingRepo  NotificationFollowingChecker
-	idGen          id.Generator
-	instanceLookup entity.InstanceLookup
-	emojiLookup    entity.EmojiLookup
-	roleLookup     entity.RoleLookup
+	pub                  PubSubPublisher
+	userRepo             NotificationUserRepo
+	noteRepo             NotificationNoteRepo
+	followingRepo        NotificationFollowingChecker
+	idGen                id.Generator
+	instanceLookup       entity.InstanceLookup
+	emojiLookup          entity.EmojiLookup
+	roleLookup           entity.RoleLookup
+	chatInvitationLookup entity.ChatInvitationLookup
 }
 
 // NewNotificationPublisher constructs a NotificationPublisher.
@@ -235,6 +236,13 @@ func (p *NotificationPublisher) SetRoleLookup(fn entity.RoleLookup) {
 	p.roleLookup = fn
 }
 
+// SetChatInvitationLookup attaches the lookup used to pack
+// chatRoomInvitationReceived notifications' embedded invitation on the
+// streaming payload (#1559)。
+func (p *NotificationPublisher) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
+	p.chatInvitationLookup = fn
+}
+
 // Pack implements core/notification.Packer. Returns the packed map shape
 // when repos are wired, otherwise the raw Notification so callers can
 // fall back to prior behaviour.
@@ -272,7 +280,10 @@ func (p *NotificationPublisher) Pack(notifieeID string, n *corenotification.Noti
 			}
 		}
 	}
-	packed := entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup, entity.WithRoleLookup(p.roleLookup))
+	packed := entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup,
+		entity.WithRoleLookup(p.roleLookup),
+		entity.WithChatInvitationLookup(p.chatInvitationLookup),
+		entity.WithViewer(notifieeID))
 	if packed == nil {
 		// packer が通知を drop した (例: roleAssigned で role 削除済)。nil map を
 		// any に box すると非 nil interface になり、downstream の nil guard を

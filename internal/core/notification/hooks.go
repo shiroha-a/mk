@@ -264,6 +264,20 @@ func (h *Hook) OnRoleAssigned(userID, roleID string) {
 	})
 }
 
+// OnChatRoomInvitationReceived records a 'chatRoomInvitationReceived'
+// notification on the invitee's stream (upstream ChatService の招待作成)。
+// notifier は招待者で、invitation ID を Extra に格納する (entity 側で read 時に
+// packed invitation へ解決する)。リモート invitee 宛ては notifyLocalUser の
+// host guard で除外される。
+func (h *Hook) OnChatRoomInvitationReceived(inviteeID, inviterID, invitationID string) {
+	h.notifyLocalUser(context.Background(), inviteeID, CreateInput{
+		NotifieeID: inviteeID,
+		NotifierID: inviterID,
+		Type:       TypeChatRoomInvitationReceived,
+		Extra:      map[string]any{"invitationId": invitationID},
+	})
+}
+
 // notifyVisibleToTarget reports whether `targetID` should receive a notification
 // about note `n`, based on its visibility (upstream #17335 / triage #1006 +
 // upstream #17363 / triage #1010)。

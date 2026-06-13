@@ -73,6 +73,11 @@ const (
 	// 送る通知 (upstream RoleService.assign)。Extra["roleId"] に role ID を持ち、
 	// entity 側で read 時に packed role へ解決する (role 削除済なら通知を drop)。
 	TypeRoleAssigned Type = "roleAssigned"
+	// TypeChatRoomInvitationReceived: chat room へ招待された時に被招待ユーザーへ
+	// 送る通知 (upstream ChatService の招待作成)。notifier は招待者、
+	// Extra["invitationId"] に invitation ID を持ち、entity 側で read 時に packed
+	// ChatRoomInvitation へ解決する (招待削除済なら通知を drop)。
+	TypeChatRoomInvitationReceived Type = "chatRoomInvitationReceived"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.

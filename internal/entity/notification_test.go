@@ -286,3 +286,56 @@ func TestPackNotification_RoleAssigned_DroppedWhenLookupUnset(t *testing.T) {
 	}
 	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil))
 }
+
+// #1559 chatRoomInvitationReceived: lookup が invitation を返せば packed
+// invitation を embed し invitationId は出さない。
+func TestPackNotification_ChatRoomInvitation_PacksInvitation(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:         idGen.Generate(time.Now()),
+		CreatedAt:  time.Now(),
+		Type:       notification.TypeChatRoomInvitationReceived,
+		NotifierID: "u_inviter",
+		Extra:      map[string]any{"invitationId": "inv1"},
+	}
+	inviter := &model.User{ID: "u_inviter", Username: "inviter"}
+	lookup := func(invID, viewerID string) (map[string]any, bool) {
+		assert.Equal(t, "inv1", invID)
+		assert.Equal(t, "u_me", viewerID)
+		return map[string]any{"id": invID, "roomId": "room1"}, true
+	}
+	out := PackNotification(n, inviter, nil, idGen, nil, nil, WithChatInvitationLookup(lookup), WithViewer("u_me"))
+	require.NotNil(t, out)
+	assert.Equal(t, "chatRoomInvitationReceived", out["type"])
+	assert.Equal(t, "u_inviter", out["userId"], "notifier(招待者) は userId として出る")
+	inv, ok := out["invitation"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "room1", inv["roomId"])
+	_, hasInvID := out["invitationId"]
+	assert.False(t, hasInvID, "invitationId は packed invitation に解決済なので surface しない")
+}
+
+// invitation 削除済 (lookup が false) なら通知ごと drop する。
+func TestPackNotification_ChatRoomInvitation_DroppedWhenDeleted(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeChatRoomInvitationReceived,
+		Extra:     map[string]any{"invitationId": "gone"},
+	}
+	lookup := func(string, string) (map[string]any, bool) { return nil, false }
+	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil, WithChatInvitationLookup(lookup)))
+}
+
+// lookup 未配線でも安全側に倒して通知を drop する。
+func TestPackNotification_ChatRoomInvitation_DroppedWhenLookupUnset(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeChatRoomInvitationReceived,
+		Extra:     map[string]any{"invitationId": "inv1"},
+	}
+	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil))
+}

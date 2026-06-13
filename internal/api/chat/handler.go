@@ -35,6 +35,9 @@ type Handler struct {
 	// UserLite) で invitee user を解決するために使う (#... H-PR9a)。未配線時は
 	// user field を省略する。
 	userRepo repository.UserRepository
+	// invitationNotifier は invitations/create で被招待ユーザーへ
+	// 'chatRoomInvitationReceived' 通知を送る (#1559)。未配線なら通知しない。
+	invitationNotifier ChatInvitationNotifier
 }
 
 // maxRoomMembers mirrors upstream ChatService.MAX_ROOM_MEMBERS。join /
@@ -57,6 +60,50 @@ func (h *Handler) SetModeratorChecker(m ModeratorChecker) { h.moderatorChecker =
 // SetUserRepo wires the user repository for resolving invitee UserLite in the
 // invitations/create response.
 func (h *Handler) SetUserRepo(r repository.UserRepository) { h.userRepo = r }
+
+// ChatInvitationNotifier records a 'chatRoomInvitationReceived' notification on
+// the invitee's stream (#1559)。循環依存を避けるため interface で受け取る
+// (実装は core/notification.Hook)。
+type ChatInvitationNotifier interface {
+	OnChatRoomInvitationReceived(inviteeID, inviterID, invitationID string)
+}
+
+// SetInvitationNotifier wires the notifier used by invitations/create to send a
+// 'chatRoomInvitationReceived' notification (upstream ChatService の招待作成)。
+func (h *Handler) SetInvitationNotifier(n ChatInvitationNotifier) { h.invitationNotifier = n }
+
+// PackInvitationByID loads an invitation by ID (with room + invitee user) and
+// packs it for the given viewer, returning false when it no longer exists. Used
+// as the read-time lookup for chatRoomInvitationReceived notifications (#1559)。
+func (h *Handler) PackInvitationByID(invitationID, viewerID string) (map[string]any, bool) {
+	if h.repo == nil {
+		return nil, false
+	}
+	inv, err := h.repo.FindInvitationByID(invitationID)
+	if err != nil || inv == nil {
+		return nil, false
+	}
+	// room は schema 上必須。load 失敗時は通知を drop する (= 不完全な
+	// invitation を embed しない)。
+	room, err := h.repo.FindRoomByID(inv.RoomID)
+	if err != nil || room == nil {
+		return nil, false
+	}
+	inv.Room = room
+	// user (被招待者 UserLite) も schema 上必須。upstream packRoomInvitation は
+	// user 解決失敗で throw → NotificationEntityService が null で drop する。
+	// mk-go も解決不能なら通知を drop して shape 不完全な invitation を embed
+	// しない (= 通知 packing 経路は degraded path を取らない)。
+	if h.userRepo == nil {
+		return nil, false
+	}
+	u, uerr := h.userRepo.FindByID(inv.UserID)
+	if uerr != nil || u == nil {
+		return nil, false
+	}
+	inv.User = u
+	return h.packInvitationDetailed(inv, viewerID), true
+}
 
 // NewHandler creates a new chat handler.
 func NewHandler(repo repository.ChatRepository, idGen id.Generator) *Handler {
@@ -922,10 +969,12 @@ func (h *Handler) InvitationsCreate(c echo.Context) error {
 	if err := h.repo.CreateInvitation(inv); err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	// upstream は chatRoomInvitationReceived 通知も作成するが、mk-go の通知基盤
-	// (notification type + entity packer + handler 配線) が未対応のため本 PR では
-	// 未実装。通知対応は H-PR9 follow-up で別途扱う。
-	//
+	// 被招待ユーザー (local) へ chatRoomInvitationReceived 通知を送る (#1559)。
+	// notifier は招待者 (= room owner = request user)。リモート invitee は
+	// notifyLocalUser の host guard で除外される。
+	if h.invitationNotifier != nil {
+		h.invitationNotifier.OnChatRoomInvitationReceived(req.UserID, user.ID, inv.ID)
+	}
 	// invitee が remote user なら Invite activity を配送する (CherryPick group
 	// chat federation, #1201)。local invitee なら service 側で no-op。
 	if h.svc != nil {

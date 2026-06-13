@@ -303,6 +303,15 @@ func (m *MockChatRepository) UpdateInvitation(inv *model.ChatRoomInvitation) err
 	return nil
 }
 
+func (m *MockChatRepository) FindInvitationByID(id string) (*model.ChatRoomInvitation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if inv, ok := m.Invitations[id]; ok {
+		return inv, nil
+	}
+	return nil, ErrNotFound
+}
+
 func (m *MockChatRepository) FindInvitation(userID, roomID string) (*model.ChatRoomInvitation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -104,6 +104,21 @@ type Service struct {
 	// いないか判定する (upstream ChatService の YOU_HAVE_BEEN_BLOCKED gate)。
 	// nil なら block check は skip。
 	blockingRepo repository.BlockingRepository
+	// invitationNotifier: AP 経由で受け取った招待を local invitee へ通知する
+	// (#1559)。未配線なら通知しない。
+	invitationNotifier ChatInvitationNotifier
+}
+
+// ChatInvitationNotifier records a 'chatRoomInvitationReceived' notification on
+// the invitee's stream (#1559)。実装は core/notification.Hook。
+type ChatInvitationNotifier interface {
+	OnChatRoomInvitationReceived(inviteeID, inviterID, invitationID string)
+}
+
+// SetInvitationNotifier wires the notifier used by CreateInvitationViaAP to
+// notify local invitees of inbound (federated) chat room invitations (#1559)。
+func (s *Service) SetInvitationNotifier(n ChatInvitationNotifier) {
+	s.invitationNotifier = n
 }
 
 // NewService constructs a chat Service.
@@ -445,9 +460,23 @@ func (s *Service) CreateInvitationViaAP(roomID, inviteeUserID string) error {
 	if _, err := s.repo.FindInvitation(inviteeUserID, roomID); err == nil {
 		return nil
 	}
-	return s.repo.CreateInvitation(&model.ChatRoomInvitation{
+	inv := &model.ChatRoomInvitation{
 		ID: s.idGen.Generate(time.Now()), UserID: inviteeUserID, RoomID: roomID,
-	})
+	}
+	if err := s.repo.CreateInvitation(inv); err != nil {
+		return err
+	}
+	// local invitee へ chatRoomInvitationReceived 通知を送る (#1559)。notifier
+	// は招待者 (= room owner)。room load 失敗時は notifier 引数を空にして発火する
+	// (notifier 不明でも通知自体は出す)。
+	if s.invitationNotifier != nil {
+		inviterID := ""
+		if room, err := s.repo.FindRoomByID(roomID); err == nil && room != nil {
+			inviterID = room.OwnerID
+		}
+		s.invitationNotifier.OnChatRoomInvitationReceived(inviteeUserID, inviterID, inv.ID)
+	}
+	return nil
 }
 
 // AddMemberViaAP records a chat room membership for a (typically remote) user

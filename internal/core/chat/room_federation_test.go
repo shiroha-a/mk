@@ -59,6 +59,30 @@ func TestCreateInvitationViaAP_CreatesAndIdempotent(t *testing.T) {
 	assert.Equal(t, firstID, inv2.ID)
 }
 
+// recordingInvitationNotifier captures OnChatRoomInvitationReceived calls (#1559)。
+type recordingInvitationNotifier struct{ calls [][3]string }
+
+func (n *recordingInvitationNotifier) OnChatRoomInvitationReceived(invitee, inviter, invID string) {
+	n.calls = append(n.calls, [3]string{invitee, inviter, invID})
+}
+
+// #1559 [MEDIUM] AP 経由の招待でも local invitee へ通知し、notifier は room owner。
+func TestCreateInvitationViaAP_FiresNotifier(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "R", OwnerID: "remoteOwner"}))
+	notifier := &recordingInvitationNotifier{}
+	svc.SetInvitationNotifier(notifier)
+
+	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	require.Len(t, notifier.calls, 1)
+	assert.Equal(t, "localUser", notifier.calls[0][0])
+	assert.Equal(t, "remoteOwner", notifier.calls[0][1], "notifier は room owner")
+
+	// 重複招待では通知しない (no-op)。
+	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	assert.Len(t, notifier.calls, 1)
+}
+
 func TestAddMemberViaAP_RequiresPendingInvitation(t *testing.T) {
 	svc, repo := newRoomFedService(t)
 	// 招待が無い相手の Accept は membership 化しない (なりすまし防止)。

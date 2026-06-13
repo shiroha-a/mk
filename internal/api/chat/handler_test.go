@@ -683,6 +683,81 @@ func TestInvitationsCreate_Success(t *testing.T) {
 
 // userRepo 配線時に invitee user が存在しない (FindByID err) なら、upstream
 // packRoomInvitation の throw と同じく 500 を返し、invitation 行も作らない。
+// recordingInvitationNotifier captures OnChatRoomInvitationReceived calls (#1559)。
+type recordingInvitationNotifier struct{ calls [][3]string }
+
+func (n *recordingInvitationNotifier) OnChatRoomInvitationReceived(invitee, inviter, invID string) {
+	n.calls = append(n.calls, [3]string{invitee, inviter, invID})
+}
+
+// #1559 [MEDIUM] invitations/create で被招待ユーザーへ通知が発火し、notifier は
+// 招待者 (room owner)。
+func TestInvitationsCreate_FiresNotifier(t *testing.T) {
+	h, repo := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	notifier := &recordingInvitationNotifier{}
+	h.SetInvitationNotifier(notifier)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID, Owner: u1}))
+
+	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, notifier.calls, 1)
+	assert.Equal(t, "u2", notifier.calls[0][0], "invitee")
+	assert.Equal(t, "u1", notifier.calls[0][1], "inviter = room owner")
+	assert.NotEmpty(t, notifier.calls[0][2], "invitation ID")
+}
+
+// #1559 PackInvitationByID: 招待を packed ChatRoomInvitation に解決する。
+func TestPackInvitationByID(t *testing.T) {
+	h, repo := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: u1.ID, Owner: u1}))
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "inv1", UserID: "u2", RoomID: "r1"}))
+
+	packed, ok := h.PackInvitationByID("inv1", "u2")
+	require.True(t, ok)
+	assert.Equal(t, "inv1", packed["id"])
+	assert.Equal(t, "r1", packed["roomId"])
+	room, ok := packed["room"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "r1", room["id"])
+
+	// 削除済 (存在しない) invitation は (nil,false)。
+	_, ok = h.PackInvitationByID("gone", "u2")
+	assert.False(t, ok)
+}
+
+// room load 失敗時は通知を drop する (= 不完全な invitation を embed しない)。
+func TestPackInvitationByID_NoRoom(t *testing.T) {
+	h, repo := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "inv1", UserID: "u2", RoomID: "missing"}))
+	_, ok := h.PackInvitationByID("inv1", "u2")
+	assert.False(t, ok, "room が無ければ drop")
+}
+
+// 被招待者 user が解決できなければ通知を drop する (upstream の throw→null 相当)。
+func TestPackInvitationByID_UnresolvableUser(t *testing.T) {
+	h, repo := newTestHandler()
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "R", OwnerID: u1.ID}))
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: "inv1", UserID: "ghost", RoomID: "r1"}))
+
+	// userRepo 未配線 → drop
+	_, ok := h.PackInvitationByID("inv1", "ghost")
+	assert.False(t, ok, "userRepo 未配線なら drop")
+
+	// userRepo 配線済だが invitee user が存在しない → drop
+	h.SetUserRepo(testutil.NewMockUserRepository())
+	_, ok = h.PackInvitationByID("inv1", "ghost")
+	assert.False(t, ok, "invitee user 解決不能なら drop")
+}
+
 func TestInvitationsCreate_InviteeNotFound(t *testing.T) {
 	h, repo := newTestHandler()
 	h.SetUserRepo(testutil.NewMockUserRepository()) // invitee 未登録

@@ -383,6 +383,35 @@ func TestNotificationPublisher_RoleAssigned_DroppedWhenRoleDeleted(t *testing.T)
 	assert.Empty(t, pub.payloads, "削除済 role の roleAssigned は publish しない")
 }
 
+// #1559 chatRoomInvitationReceived: SetChatInvitationLookup で配線した lookup が
+// invitation を pack して streaming payload に embed する。viewer は notifiee。
+func TestNotificationPublisher_ChatInvitation_PacksInvitation(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(&stubNotifUserRepo{user: &model.User{ID: "inviter", Username: "inviter"}}, &stubNotifNoteRepo{}, idGen)
+	np.SetChatInvitationLookup(func(invID, viewerID string) (map[string]any, bool) {
+		assert.Equal(t, "invitee", viewerID, "viewer は notifiee")
+		return map[string]any{"id": invID, "roomId": "room1"}, true
+	})
+	n := &corenotification.Notification{
+		ID:         idGen.Generate(time.Now()),
+		Type:       corenotification.TypeChatRoomInvitationReceived,
+		NotifierID: "inviter",
+		Extra:      map[string]any{"invitationId": "inv1"},
+	}
+	np.PublishNotification("invitee", n)
+	require.Len(t, pub.payloads, 1)
+	raw, ok := pub.payloads[0].(json.RawMessage)
+	require.True(t, ok)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	assert.Equal(t, "chatRoomInvitationReceived", body["type"])
+	inv, ok := body["invitation"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "room1", inv["roomId"])
+}
+
 func TestNotificationPublisher_Pack_NilNotification(t *testing.T) {
 	np := NewNotificationPublisher(nil)
 	assert.Nil(t, np.Pack("alice", nil))

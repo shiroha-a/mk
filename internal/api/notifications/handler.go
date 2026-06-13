@@ -20,25 +20,37 @@ import (
 
 // Handler handles notifications-related API endpoints.
 type Handler struct {
-	svc           *notification.Service
-	idGen         id.Generator
-	userRepo      repository.UserRepository
-	noteRepo      repository.NoteRepository
-	queryService  *corenote.QueryService
-	followReqRepo repository.FollowRequestRepository
-	instanceRepo  repository.InstanceRepository
-	emojiRepo     repository.EmojiRepository
-	testNotifier  TestNotifier
-	roleLookup    entity.RoleLookup
+	svc                  *notification.Service
+	idGen                id.Generator
+	userRepo             repository.UserRepository
+	noteRepo             repository.NoteRepository
+	queryService         *corenote.QueryService
+	followReqRepo        repository.FollowRequestRepository
+	instanceRepo         repository.InstanceRepository
+	emojiRepo            repository.EmojiRepository
+	testNotifier         TestNotifier
+	roleLookup           entity.RoleLookup
+	chatInvitationLookup entity.ChatInvitationLookup
 }
 
 // SetRoleLookup wires the lookup used to pack roleAssigned notifications'
 // embedded role (#1559)。
 func (h *Handler) SetRoleLookup(fn entity.RoleLookup) { h.roleLookup = fn }
 
-// notificationOptions returns the per-call packing options (role lookup etc.)。
-func (h *Handler) notificationOptions() []entity.NotificationOption {
-	return []entity.NotificationOption{entity.WithRoleLookup(h.roleLookup)}
+// SetChatInvitationLookup wires the lookup used to pack
+// chatRoomInvitationReceived notifications' embedded invitation (#1559)。
+func (h *Handler) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
+	h.chatInvitationLookup = fn
+}
+
+// notificationOptions returns the per-call packing options (role / chat
+// invitation lookups, viewer) for the given viewer (= notifiee)。
+func (h *Handler) notificationOptions(viewerID string) []entity.NotificationOption {
+	return []entity.NotificationOption{
+		entity.WithRoleLookup(h.roleLookup),
+		entity.WithChatInvitationLookup(h.chatInvitationLookup),
+		entity.WithViewer(viewerID),
+	}
 }
 
 // NewHandler creates a new notifications Handler.
@@ -151,7 +163,7 @@ func (h *Handler) Show(c echo.Context) error {
 			Note: noteByID[n.NoteID],
 		})
 	}
-	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), h.notificationOptions()...)
+	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), h.notificationOptions(user.ID)...)
 	// depth-2 embed hide (#1570): collectNotifications の #1444 CanSeeNote gate は
 	// 見えない note を丸ごと落とすが embed (renote/reply) には再帰しない。通知 note の
 	// embed と著者設定ゲートを viewer 可視性で適用する。これを欠くと #1570 で塞いだ

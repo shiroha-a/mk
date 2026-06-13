@@ -189,6 +189,30 @@ func TestHook_OnRoleAssigned_RemoteSkipped(t *testing.T) {
 	assert.Empty(t, out)
 }
 
+// #1559 [MEDIUM] OnChatRoomInvitationReceived は notifier(招待者) と invitationId
+// を持つ通知を被招待ユーザーへ作る。
+func TestHook_OnChatRoomInvitationReceived(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "invitee", "invitee")
+	addLocalUser(repo, "inviter", "inviter")
+	h.OnChatRoomInvitationReceived("invitee", "inviter", "inv1")
+	out, err := svc.List(context.Background(), "invitee", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, TypeChatRoomInvitationReceived, out[0].Type)
+	assert.Equal(t, "inviter", out[0].NotifierID)
+	assert.Equal(t, "inv1", out[0].Extra["invitationId"])
+}
+
+// remote invitee 宛ては送られない。
+func TestHook_OnChatRoomInvitationReceived_RemoteSkipped(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addRemoteUser(repo, "remote", "remote", "example.com")
+	h.OnChatRoomInvitationReceived("remote", "inviter", "inv1")
+	out, _ := svc.List(context.Background(), "remote", 10)
+	assert.Empty(t, out)
+}
+
 // 自己通知でも remote user 宛ては送られない (notifyLocalUser の host guard)。
 func TestHook_SelfNotifications_RemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)

@@ -41,6 +41,9 @@ type ChatRepository interface {
 	CreateInvitation(inv *model.ChatRoomInvitation) error
 	DeleteInvitation(id string) error
 	FindInvitation(userID, roomID string) (*model.ChatRoomInvitation, error)
+	// FindInvitationByID looks up an invitation by its primary key. Used to
+	// pack chatRoomInvitationReceived notifications at read time (#1559)。
+	FindInvitationByID(id string) (*model.ChatRoomInvitation, error)
 	UpdateInvitation(inv *model.ChatRoomInvitation) error
 
 	// Unread count
@@ -273,6 +276,14 @@ func (r *chatRepository) UpdateInvitation(inv *model.ChatRoomInvitation) error {
 func (r *chatRepository) FindInvitation(userID, roomID string) (*model.ChatRoomInvitation, error) {
 	var inv model.ChatRoomInvitation
 	if err := r.db.Where(`"userId" = ? AND "roomId" = ?`, userID, roomID).First(&inv).Error; err != nil {
+		return nil, err
+	}
+	return &inv, nil
+}
+
+func (r *chatRepository) FindInvitationByID(id string) (*model.ChatRoomInvitation, error) {
+	var inv model.ChatRoomInvitation
+	if err := r.db.Where(`"id" = ?`, id).First(&inv).Error; err != nil {
 		return nil, err
 	}
 	return &inv, nil

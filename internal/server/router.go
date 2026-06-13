@@ -2336,6 +2336,14 @@ func (s *Server) setupRoutes() {
 	chatHandler.SetDriveFileRepo(driveFileRepo)
 	chatHandler.SetModeratorChecker(roleService)
 	chatHandler.SetUserRepo(userRepo)
+	// chatRoomInvitationReceived 通知 (#1559): 招待作成 (local handler / AP service)
+	// で発火し、entity 側で read 時に packed invitation へ解決する。lookup は
+	// 招待削除済なら (nil,false)。chatHandler が PackInvitationByID を提供する
+	// ため、notification packer (REST handler / stream) への配線はここで行う。
+	chatHandler.SetInvitationNotifier(notificationHook)
+	chatService.SetInvitationNotifier(notificationHook)
+	notificationsHandler.SetChatInvitationLookup(chatHandler.PackInvitationByID)
+	notificationPublisher.SetChatInvitationLookup(chatHandler.PackInvitationByID)
 	api.POST("/drive/files/attached-chat-messages", chatHandler.AttachedChatMessages, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/chat/rooms/create", chatHandler.RoomsCreate, middleware.RequireAuth(), middleware.RequireScope("write:chat"))
 	api.POST("/chat/rooms/show", chatHandler.RoomsShow, middleware.RequireAuth(), middleware.RequireScope("read:chat"))

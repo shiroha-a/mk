@@ -29,11 +29,22 @@ type NotificationItem struct {
 // (upstream NotificationEntityService が role==null で null を返すのと同じ)。
 type RoleLookup func(roleID string) (map[string]any, bool)
 
+// ChatInvitationLookup resolves a chat room invitation ID to its packed
+// representation for the given viewer, returning false when the invitation no
+// longer exists. Used to embed `invitation` on chatRoomInvitationReceived
+// notifications and to drop the notification when the invitation was deleted
+// (upstream NotificationEntityService が invitation==null で null を返すのと同じ)。
+type ChatInvitationLookup func(invitationID, viewerID string) (map[string]any, bool)
+
 // packOptions carries the optional read-time lookups required by notification
 // types that embed a related entity which must be packed fresh. Threaded via
 // functional options so existing call sites stay unchanged.
 type packOptions struct {
-	role RoleLookup
+	role           RoleLookup
+	chatInvitation ChatInvitationLookup
+	// viewer は invitation pack の視点 (= notifiee)。chatRoomInvitationReceived
+	// の room.isMuted / invitationExists を viewer 視点で算出するために渡す。
+	viewer string
 }
 
 // NotificationOption configures optional notification packing behavior.
@@ -43,6 +54,18 @@ type NotificationOption func(*packOptions)
 // notifications (#1559)。
 func WithRoleLookup(fn RoleLookup) NotificationOption {
 	return func(o *packOptions) { o.role = fn }
+}
+
+// WithChatInvitationLookup supplies the ChatInvitationLookup used to pack
+// chatRoomInvitationReceived notifications (#1559)。
+func WithChatInvitationLookup(fn ChatInvitationLookup) NotificationOption {
+	return func(o *packOptions) { o.chatInvitation = fn }
+}
+
+// WithViewer sets the viewer (= notifiee) used by viewer-dependent embeds such
+// as the chat invitation's room flags (#1559)。
+func WithViewer(viewerID string) NotificationOption {
+	return func(o *packOptions) { o.viewer = viewerID }
 }
 
 func buildPackOptions(opts []NotificationOption) *packOptions {
@@ -166,6 +189,19 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		}
 		out["role"] = packed
 	}
+	// chatRoomInvitationReceived は Extra["invitationId"] を read 時に packed
+	// invitation へ解決する。削除済 / lookup 未配線なら通知ごと drop する。
+	if n.Type == notification.TypeChatRoomInvitationReceived {
+		invID, _ := n.Extra["invitationId"].(string)
+		if opts == nil || opts.chatInvitation == nil {
+			return nil
+		}
+		packed, ok := opts.chatInvitation(invID, opts.viewer)
+		if !ok {
+			return nil
+		}
+		out["invitation"] = packed
+	}
 	if n.NotifierID != "" {
 		// TS本家はnotifierIdを"userId"として返す。
 		out["userId"] = n.NotifierID
@@ -202,9 +238,10 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		if _, collides := out[k]; collides {
 			continue
 		}
-		// roleAssigned の roleId は packed role (out["role"]) に解決済なので
-		// raw ID を surface しない (TS は role のみ返し roleId は出さない)。
-		if k == "roleId" {
+		// roleAssigned の roleId / chatRoomInvitationReceived の invitationId は
+		// packed entity (out["role"] / out["invitation"]) に解決済なので raw ID を
+		// surface しない (TS は packed entity のみ返す)。
+		if k == "roleId" || k == "invitationId" {
 			continue
 		}
 		// exportCompleted 通知の exportedEntity は misskey_dart / Misskey TS が
