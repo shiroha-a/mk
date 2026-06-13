@@ -111,3 +111,43 @@ func TestPackNote_HasPollAndMentionsOmit(t *testing.T) {
 	assert.NotContains(t, string(bn), `"hasPoll"`)
 	assert.NotContains(t, string(bn), `"mentions"`)
 }
+
+// #1639 [LOW] emojis は remote note (host!=nil) のみ出力 (custom emoji 無くても
+// {})、local note (host==nil) は省略する (upstream NoteEntityService.ts:412)。
+func TestPackNote_EmojisRemoteOnly(t *testing.T) {
+	idGen := newTestIDGen(t)
+	remote := "remote.example"
+
+	// local note: emojis 省略 (nil)
+	local := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		Reactions: datatypes.JSON([]byte("{}")),
+	}
+	lp := PackNote(local, idGen)
+	assert.Nil(t, lp.Emojis, "local note omits emojis")
+	// top-level の emojis key が無いことを確認 (user.emojis の null と混同しない
+	// よう unmarshal して top-level key の有無で判定)。
+	var lm map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(mustJSON(t, lp), &lm))
+	_, hasLocal := lm["emojis"]
+	assert.False(t, hasLocal, "local note must omit top-level emojis")
+
+	// remote note: custom emoji 無くても emojis={} を出力
+	rmt := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u2", UserHost: &remote,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	rp := PackNote(rmt, idGen)
+	require.NotNil(t, rp.Emojis, "remote note always carries emojis object")
+	assert.Empty(t, *rp.Emojis)
+	var rm map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(mustJSON(t, rp), &rm))
+	assert.Equal(t, "{}", string(rm["emojis"]), "remote note outputs emojis:{}")
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
+}

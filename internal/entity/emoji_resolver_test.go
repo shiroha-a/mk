@@ -96,13 +96,15 @@ func TestPopulateNoteEmojis(t *testing.T) {
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
-	entity := &NoteEntity{}
+	// remote note は packNoteAtDepth が Emojis=&{} を確保する。ここでは
+	// resolver 単体を試すため同様に事前確保する (#1639)。
+	entity := &NoteEntity{Emojis: &map[string]string{}}
 	r.PopulateNoteEmojis(note, entity)
 
 	// note.Emojisに対応するURLがentity.Emojisに設定される
 	require.NotNil(t, entity.Emojis)
-	assert.Equal(t, "https://remote.example/emoji/fire.webp", entity.Emojis["fire"])
-	assert.Equal(t, "https://remote.example/emoji/star.webp", entity.Emojis["star"])
+	assert.Equal(t, "https://remote.example/emoji/fire.webp", (*entity.Emojis)["fire"])
+	assert.Equal(t, "https://remote.example/emoji/star.webp", (*entity.Emojis)["star"])
 }
 
 func TestPopulateNoteEmojis_Empty(t *testing.T) {
@@ -115,12 +117,12 @@ func TestPopulateNoteEmojis_Empty(t *testing.T) {
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
-	entity := &NoteEntity{Emojis: map[string]string{"existing": "value"}}
+	entity := &NoteEntity{Emojis: &map[string]string{"existing": "value"}}
 
 	r.PopulateNoteEmojis(note, entity)
 
 	// 空emojisの場合、entity.Emojisは変更されない
-	assert.Equal(t, map[string]string{"existing": "value"}, entity.Emojis)
+	assert.Equal(t, map[string]string{"existing": "value"}, *entity.Emojis)
 }
 
 func TestPopulateUserEmojis(t *testing.T) {
@@ -190,9 +192,9 @@ func TestEmojiResolver_NilLookup(t *testing.T) {
 	assert.Empty(t, r.cache)
 
 	// PopulateNoteEmojisはno-op
-	entity := &NoteEntity{Emojis: map[string]string{"keep": "this"}}
+	entity := &NoteEntity{Emojis: &map[string]string{"keep": "this"}}
 	r.PopulateNoteEmojis(note, entity)
-	assert.Equal(t, map[string]string{"keep": "this"}, entity.Emojis)
+	assert.Equal(t, map[string]string{"keep": "this"}, *entity.Emojis)
 
 	// PopulateUserEmojisもno-op
 	user := &model.User{
@@ -259,11 +261,11 @@ func TestEmojiResolver_LocalEmojis(t *testing.T) {
 	// cacheに "name@" (空host) のキーで格納される
 	assert.Equal(t, "https://local.example/emoji/local_emoji.png", r.cache["local_emoji@"])
 
-	// PopulateNoteEmojisでローカル絵文字が解決される
+	// #1639: local note (UserHost==nil) は emojis field を出さない。packNoteAtDepth
+	// が Emojis=nil にするため、resolver は populate せず nil のままになる。
 	entity := &NoteEntity{}
 	r.PopulateNoteEmojis(note, entity)
-	require.NotNil(t, entity.Emojis)
-	assert.Equal(t, "https://local.example/emoji/local_emoji.png", entity.Emojis["local_emoji"])
+	assert.Nil(t, entity.Emojis, "local note must omit emojis (#1639)")
 }
 
 func TestEmojiResolver_PublicURLFallback(t *testing.T) {
@@ -289,10 +291,10 @@ func TestEmojiResolver_PublicURLFallback(t *testing.T) {
 	// PublicURLが空なのでOriginalURLが使われる
 	assert.Equal(t, "https://remote.example/emoji/rare_orig.png", r.cache["rare@remote.example"])
 
-	entity := &NoteEntity{}
+	entity := &NoteEntity{Emojis: &map[string]string{}}
 	r.PopulateNoteEmojis(note, entity)
 	require.NotNil(t, entity.Emojis)
-	assert.Equal(t, "https://remote.example/emoji/rare_orig.png", entity.Emojis["rare"])
+	assert.Equal(t, "https://remote.example/emoji/rare_orig.png", (*entity.Emojis)["rare"])
 }
 
 func TestEmojiResolver_MultipleHosts(t *testing.T) {
@@ -336,17 +338,17 @@ func TestEmojiResolver_MultipleHosts(t *testing.T) {
 	assert.Equal(t, "https://beta.example/emoji/wave.png", r.cache["wave@beta.example"])
 
 	// note1のemojisはalpha.exampleから解決される
-	entityA := &NoteEntity{}
+	entityA := &NoteEntity{Emojis: &map[string]string{}}
 	r.PopulateNoteEmojis(notes[0], entityA)
 	require.NotNil(t, entityA.Emojis)
-	assert.Equal(t, "https://alpha.example/emoji/smile.png", entityA.Emojis["smile"])
+	assert.Equal(t, "https://alpha.example/emoji/smile.png", (*entityA.Emojis)["smile"])
 
 	// note2のemojisはbeta.exampleから解決される
-	entityB := &NoteEntity{}
+	entityB := &NoteEntity{Emojis: &map[string]string{}}
 	r.PopulateNoteEmojis(notes[1], entityB)
 	require.NotNil(t, entityB.Emojis)
-	assert.Equal(t, "https://beta.example/emoji/smile.png", entityB.Emojis["smile"])
-	assert.Equal(t, "https://beta.example/emoji/wave.png", entityB.Emojis["wave"])
+	assert.Equal(t, "https://beta.example/emoji/smile.png", (*entityB.Emojis)["smile"])
+	assert.Equal(t, "https://beta.example/emoji/wave.png", (*entityB.Emojis)["wave"])
 }
 
 func TestNewEmojiResolver_NilNotesInSlice(t *testing.T) {
@@ -585,12 +587,12 @@ func TestPopulateNoteEmojis_UnresolvedEmojiExcluded(t *testing.T) {
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
-	entity := &NoteEntity{}
+	entity := &NoteEntity{Emojis: &map[string]string{}}
 	r.PopulateNoteEmojis(note, entity)
 
 	// cacheに存在する絵文字のみがentity.Emojisに含まれる
 	require.NotNil(t, entity.Emojis)
-	assert.Equal(t, "https://remote.example/emoji/known.png", entity.Emojis["known"])
-	_, exists := entity.Emojis["unknown"]
+	assert.Equal(t, "https://remote.example/emoji/known.png", (*entity.Emojis)["known"])
+	_, exists := (*entity.Emojis)["unknown"]
 	assert.False(t, exists, "unknown emoji should not be in entity.Emojis")
 }

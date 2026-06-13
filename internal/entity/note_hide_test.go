@@ -80,7 +80,7 @@ func TestHideNoteEntity_JSONShape(t *testing.T) {
 		ID: "n", CreatedAt: "2026-01-02T03:04:05.000Z", UserID: "a",
 		User: UserLite{ID: "a"}, Text: &text, Visibility: "followers",
 		Reactions: datatypes.JSON([]byte(`{}`)), ReactionEmojis: map[string]string{},
-		Emojis: map[string]string{}, FileIDs: []string{"f"}, Files: []any{},
+		FileIDs: []string{"f"}, Files: []any{},
 		VisibleUserIDs: []string{"u"}, Mentions: []string{},
 	}
 	HideNoteEntity(n)

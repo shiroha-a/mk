@@ -64,9 +64,13 @@ type NoteEntity struct {
 	Files              []any             `json:"files"`
 	Tags               []string          `json:"tags,omitempty"`
 	Poll               *PollEntity       `json:"poll,omitempty"`
-	Emojis             map[string]string `json:"emojis"`
-	ChannelID          *string           `json:"channelId,omitempty"`
-	Channel            *ChannelLite      `json:"channel,omitempty"`
+	// Emojis は upstream NoteEntityService.ts:412 `host != null ? populateEmojis
+	// : undefined` に合わせ、remote note (author host != nil) のみ出力する
+	// (custom emoji が無くても `{}`)。local note は nil → omitempty で省略
+	// (#1639)。pointer 型なので nil(省略) と &{}(空 object 出力) を区別できる。
+	Emojis    *map[string]string `json:"emojis,omitempty"`
+	ChannelID *string            `json:"channelId,omitempty"`
+	Channel   *ChannelLite       `json:"channel,omitempty"`
 	// visibleUserIds / mentions / hasPoll は upstream NoteEntityService が
 	// specified 以外 / 空 / false のとき undefined にして key を落とす
 	// (note.ts optional:true)。mk-go も omitempty + packer 側 conditional で
@@ -204,6 +208,16 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		mentions = n.Mentions
 	}
 
+	// emojis は remote note (author host != nil) のときだけ出力する (upstream
+	// NoteEntityService.ts:412、#1639)。remote は custom emoji が無くても &{} で
+	// 空 object を出し、local は nil のままにして omitempty で key を省略する。
+	// 実際の URL は PopulateNoteEmojis が後段でこの map に流し込む。
+	var emojis *map[string]string
+	if n.UserHost != nil {
+		m := make(map[string]string)
+		emojis = &m
+	}
+
 	// name 付き note (AP の Page/Link 等) は upstream NoteEntityService.ts:379-381
 	// と同じく text を `【name】\n{text}\n\n{url??uri}` に整形する (#1561)。
 	text := n.Text
@@ -240,7 +254,7 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		FileIDs:            fileIDs,
 		Files:              []any{},
 		Tags:               n.Tags,
-		Emojis:             make(map[string]string),
+		Emojis:             emojis,
 		ChannelID:          n.ChannelID,
 		VisibleUserIDs:     visibleUserIDs,
 		Mentions:           mentions,

@@ -49,8 +49,8 @@ func TestPackNote_Basic(t *testing.T) {
 	assert.Equal(t, []string{"file1", "file2"}, entity.FileIDs)
 	assert.Equal(t, []string{"tag1"}, entity.Tags)
 	assert.NotEmpty(t, entity.CreatedAt)
-	assert.NotNil(t, entity.Emojis)
-	assert.Empty(t, entity.Emojis)
+	// #1639: local note (UserHost==nil) は emojis を出さない (nil → 省略)。
+	assert.Nil(t, entity.Emojis)
 	assert.NotNil(t, entity.Files)
 	assert.Empty(t, entity.Files)
 }
@@ -348,7 +348,8 @@ func TestPackNotes_EmbeddedRenoteHasInstanceAndEmoji(t *testing.T) {
 	require.NotNil(t, out[0].Renote)
 	require.NotNil(t, out[0].Renote.User.Instance)
 	assert.Equal(t, strPtr("Remote"), out[0].Renote.User.Instance.Name)
-	assert.Equal(t, "https://remote.example/emoji/wave.png", out[0].Renote.Emojis["wave"])
+	require.NotNil(t, out[0].Renote.Emojis)
+	assert.Equal(t, "https://remote.example/emoji/wave.png", (*out[0].Renote.Emojis)["wave"])
 	assert.Equal(t, "https://remote.example/emoji/wave.png", out[0].Renote.User.Emojis["wave"])
 }
 

@@ -138,25 +138,26 @@ func NewEmojiResolver(lookup EmojiLookup, notes []*model.Note) *EmojiResolver {
 	return r
 }
 
-// PopulateNoteEmojis resolves emoji names stored in note.Emojis to URLs
-// and sets entity.Emojis. no-opの場合entity.Emojisは変更しない
-// (PackNoteが設定した空mapを維持する)。
+// PopulateNoteEmojis resolves emoji names stored in note.Emojis to URLs and
+// fills entity.Emojis. local note (host==nil) は packNoteAtDepth が
+// entity.Emojis を nil にしているため何もしない (upstream は local の emojis を
+// 出さない、#1639)。remote note は packNoteAtDepth が &{} を確保済みなので、
+// 解決できた emoji を流し込む (解決ゼロでも &{} のまま = 空 object 出力)。
 func (r *EmojiResolver) PopulateNoteEmojis(note *model.Note, entity *NoteEntity) {
-	if r == nil || note == nil || entity == nil || len(note.Emojis) == 0 {
+	if r == nil || note == nil || entity == nil || entity.Emojis == nil {
+		return
+	}
+	if len(note.Emojis) == 0 {
 		return
 	}
 	host := ""
 	if note.UserHost != nil {
 		host = *note.UserHost
 	}
-	emojis := make(map[string]string, len(note.Emojis))
 	for _, name := range note.Emojis {
 		if url, ok := r.cache[name+"@"+host]; ok {
-			emojis[name] = url
+			(*entity.Emojis)[name] = url
 		}
-	}
-	if len(emojis) > 0 {
-		entity.Emojis = emojis
 	}
 }
 
