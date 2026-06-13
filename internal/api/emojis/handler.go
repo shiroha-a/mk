@@ -30,13 +30,25 @@ func (h *Handler) Emojis(c echo.Context) error {
 
 	result := make([]map[string]any, 0, len(emojis))
 	for _, e := range emojis {
+		// url は upstream packSimple と同じく publicUrl || originalUrl で、
+		// publicUrl 空 (remote emoji 等) のとき originalUrl に fallback する
+		// (#1556)。EmojiSimple.url は required non-null。
+		url := e.PublicURL
+		if url == "" {
+			url = e.OriginalURL
+		}
 		item := map[string]any{
 			"name":        e.Name,
 			"category":    e.Category,
 			"aliases":     e.Aliases,
-			"url":         e.PublicURL,
+			"url":         url,
 			"localOnly":   e.LocalOnly,
 			"isSensitive": e.IsSensitive,
+		}
+		// roleIdsThatCanBeUsedThisEmojiAsReaction は length>0 のときだけ emit
+		// (upstream packSimple、#1556)。reaction-role gating UI が使う。
+		if len(e.RoleIDsThatCanBeUsedThisEmojiAsReaction) > 0 {
+			item["roleIdsThatCanBeUsedThisEmojiAsReaction"] = []string(e.RoleIDsThatCanBeUsedThisEmojiAsReaction)
 		}
 		result = append(result, item)
 	}

@@ -70,6 +70,47 @@ func TestEmojis_WithLocalEmojis(t *testing.T) {
 	shapetest.Assert(t, "EmojiSimple", emoji) // L3 (#1286)
 }
 
+// #1556 url は publicUrl 空のとき originalUrl に fallback、roleIds は length>0 の
+// ときだけ emit する (upstream packSimple)。
+func TestEmojis_URLFallbackAndRoleIds(t *testing.T) {
+	h, repo := setup()
+	// publicUrl 空 → originalUrl に fallback。roleIds 付き。
+	repo.Emojis["a@"] = &model.Emoji{
+		Name:                                    "a",
+		PublicURL:                               "",
+		OriginalURL:                             "https://example.com/emoji/a-orig.png",
+		Aliases:                                 []string{},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: []string{"role1", "role2"},
+	}
+	// roleIds 空 → field 省略。
+	repo.Emojis["b@"] = &model.Emoji{
+		Name:      "b",
+		PublicURL: "https://example.com/emoji/b.png",
+		Aliases:   []string{},
+	}
+
+	rec := doPost(h)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	arr := body["emojis"].([]any)
+	byName := map[string]map[string]any{}
+	for _, e := range arr {
+		m := e.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+
+	a := byName["a"]
+	assert.Equal(t, "https://example.com/emoji/a-orig.png", a["url"], "publicUrl 空 → originalUrl fallback")
+	roleIds, ok := a["roleIdsThatCanBeUsedThisEmojiAsReaction"].([]any)
+	require.True(t, ok, "roleIds が length>0 のとき emit される")
+	assert.Len(t, roleIds, 2)
+	shapetest.Assert(t, "EmojiSimple", a)
+
+	b := byName["b"]
+	_, hasRole := b["roleIdsThatCanBeUsedThisEmojiAsReaction"]
+	assert.False(t, hasRole, "roleIds 空のとき省略される")
+}
+
 // failingEmojiRepo always fails on ListLocal.
 type failingEmojiRepo struct {
 	*testutil.MockEmojiRepository
