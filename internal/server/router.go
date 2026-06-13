@@ -1458,19 +1458,19 @@ func (s *Server) setupRoutes() {
 	// i/import-* の canImport* role policy gate は #1020 で追加。policy=false
 	// の user (default 全 false) は 403 ROLE_PERMISSION_DENIED を返す。
 	api.POST("/i/import-following", iHandler.ImportFollowing,
-		middleware.RequireAuth(),
+		middleware.RequireAuth(), middleware.RequireNotMoved(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportFollowing), middleware.RequireSecure())
 	api.POST("/i/import-blocking", iHandler.ImportBlocking,
-		middleware.RequireAuth(),
+		middleware.RequireAuth(), middleware.RequireNotMoved(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportBlocking), middleware.RequireSecure())
 	api.POST("/i/import-muting", iHandler.ImportMuting,
-		middleware.RequireAuth(),
+		middleware.RequireAuth(), middleware.RequireNotMoved(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportMuting), middleware.RequireSecure())
 	api.POST("/i/import-user-lists", iHandler.ImportUserLists,
-		middleware.RequireAuth(),
+		middleware.RequireAuth(), middleware.RequireNotMoved(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportUserLists), middleware.RequireSecure())
 	api.POST("/i/import-antennas", iHandler.ImportAntennas,
-		middleware.RequireAuth(),
+		middleware.RequireAuth(), middleware.RequireNotMoved(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanImportAntennas), middleware.RequireSecure())
 
 	// i/webhooks/* — Webhook管理 (実データ)
@@ -1504,7 +1504,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/notifications/test-notification", notificationsHandler.TestNotification, middleware.RequireAuth(), middleware.RequireScope("write:notifications"))
 
 	// i/* ハンドラ
-	api.POST("/i/claim-achievement", iHandler.ClaimAchievement, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	// claim-achievement / import-* は upstream で prohibitMoved:true (移行済
+	// アカウントは YOUR_ACCOUNT_MOVED 403)。RequireNotMoved を配線する (#1555)。
+	api.POST("/i/claim-achievement", iHandler.ClaimAchievement, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/i/apps", iHandler.Apps, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/authorized-apps", iHandler.AuthorizedApps, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/signin-history", iHandler.SigninHistory, middleware.RequireAuth(), middleware.RequireSecure())
