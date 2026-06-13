@@ -41,6 +41,21 @@ func TestTwoFARegister_Success(t *testing.T) {
 	require.NotNil(t, profile.TwoFactorTempSecret)
 }
 
+// #1555 issuer は instance host (config.host) を使う (upstream register.ts)。
+// serverURL 配線時は host を返し、otpauth URL にも埋め込まれる。
+func TestTwoFARegister_IssuerFromHost(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	h.SetServerURL("https://misskey.example")
+	user := setupUserWithPassword(repo, "u1", "pass")
+	rec := postExtra(h.TwoFARegister, `{"password":"pass"}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "misskey.example", resp["issuer"])
+	// otpauth URL の issuer param にも host が埋まる。
+	assert.Contains(t, resp["url"], "misskey.example")
+}
+
 func TestTwoFARegister_WrongPassword(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
@@ -120,6 +135,50 @@ func TestTwoFADone_Success(t *testing.T) {
 	assert.Equal(t, secret, *profile.TwoFactorSecret)
 	assert.Nil(t, profile.TwoFactorTempSecret)
 	assert.Len(t, profile.TwoFactorBackupSecret, 5)
+}
+
+// #1555 TwoFADone は 2FA 有効化後に meUpdated を publish する (upstream done.ts)。
+func TestTwoFADone_PublishesMeUpdated(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	pub := &stubIMainStreamPublisher{}
+	h.SetMainStreamPublisher(pub)
+
+	rec := postExtra(h.TwoFARegister, `{"password":"pass"}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	token, err := totp.GenerateCode(resp["secret"].(string), time.Now())
+	require.NoError(t, err)
+
+	rec2 := postExtra(h.TwoFADone, `{"token":"`+token+`"}`, user)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	requireMeUpdated(t, pub, "u1")
+}
+
+// #1555 TwoFAUnregister は 2FA 解除後に meUpdated を publish する
+// (upstream unregister.ts)。
+func TestTwoFAUnregister_PublishesMeUpdated(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	pub := &stubIMainStreamPublisher{}
+	h.SetMainStreamPublisher(pub)
+
+	rec := postExtra(h.TwoFAUnregister, `{"password":"pass"}`, user)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	requireMeUpdated(t, pub, "u1")
+}
+
+// requireMeUpdated asserts the publisher captured at least one meUpdated event
+// for userID。
+func requireMeUpdated(t *testing.T, pub *stubIMainStreamPublisher, userID string) {
+	t.Helper()
+	for _, c := range pub.calls {
+		if c.eventType == "meUpdated" && c.userID == userID {
+			return
+		}
+	}
+	t.Fatalf("expected a meUpdated event for %s, got %d events", userID, len(pub.calls))
 }
 
 func TestTwoFADone_NoTempSecret(t *testing.T) {

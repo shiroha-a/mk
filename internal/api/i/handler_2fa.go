@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -61,7 +62,10 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "78d6c839-20c9-4c66-b90a-fc0542168b48"))
 	}
 
-	secret, uri, err := twofactor.GenerateSecret("Misskey", user.Username)
+	// issuer は upstream (register.ts) が config.host (instance hostname) を使う。
+	// authenticator アプリのラベルとレスポンスの issuer field を一致させる (#1555)。
+	issuer := h.twoFAIssuer()
+	secret, uri, err := twofactor.GenerateSecret(issuer, user.Username)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -81,8 +85,20 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 		"url":    uri,
 		"secret": secret,
 		"label":  user.Username,
-		"issuer": "Misskey",
+		"issuer": issuer,
 	})
+}
+
+// twoFAIssuer returns the TOTP issuer (instance hostname) derived from the
+// configured server URL, matching upstream's config.host (register.ts)。
+// serverURL 未配線 / parse 失敗時は "Misskey" にフォールバックする。
+func (h *Handler) twoFAIssuer() string {
+	if h.serverURL != "" {
+		if u, err := url.Parse(h.serverURL); err == nil && u.Host != "" {
+			return u.Host
+		}
+	}
+	return "Misskey"
 }
 
 // TwoFADone handles POST /api/i/2fa/done.
@@ -105,9 +121,10 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 	// ValidateWithReplay は同一コードの replay を refuse する (RFC 6238 §5.2)。
 	// temp secret は確認後すぐ permanent secret に昇格されるため strictly
 	// 必要ではないが、3 経路で挙動を揃える方が監査・テスト時の予測可能性が
-	// 高い。副作用: TwoFADone 成功直後 (~30s 以内) に同じ code で signin を
-	// 試みると replay として 403 になる (permanent secret に同 value で昇格
-	// するため Redis slot に hit する)。次の TOTP step に進めば解消する。
+	// 高い。副作用: TwoFADone 成功直後 (replay guard TTL = TOTP acceptance
+	// window 内) に同じ code で signin を試みると replay として 403 になる
+	// (permanent secret に同 value で昇格するため Redis slot に hit する)。
+	// 次の TOTP step に進めば解消する。
 	if !twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, req.Token, *profile.TwoFactorTempSecret) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
@@ -126,6 +143,10 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 		"twoFactorEnabled":      true,
 		"twoFactorBackupSecret": pq.StringArray(backupCodes),
 	})
+
+	// upstream (done.ts) は 2FA 有効化後に meUpdated を publish して UI を更新する
+	// (twoFactorEnabled の反映)。key 系 handler と挙動を揃える (#1555)。
+	h.publishMeUpdated(user.ID)
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"backupCodes": backupCodes,
@@ -166,6 +187,9 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 		"twoFactorEnabled":      false,
 		"twoFactorBackupSecret": pq.StringArray(nil),
 	})
+
+	// upstream (unregister.ts) は 2FA 解除後に meUpdated を publish する (#1555)。
+	h.publishMeUpdated(user.ID)
 
 	return c.NoContent(http.StatusNoContent)
 }
@@ -463,6 +487,16 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	user, _, ok := h.requireWebAuthn(c, req.Password, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	if !ok {
 		return nil
+	}
+	// upstream (update-key.ts) は key not-found (NO_SUCH_KEY) と not-owned
+	// (ACCESS_DENIED) を区別する。UpdateName は両者を ErrRecordNotFound に
+	// 畳むため、先に FindByID して所有権を判定する (#1555)。
+	key, err := h.securityKeyRepo.FindByID(req.CredentialID)
+	if err != nil || key == nil {
+		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
+	}
+	if key.UserID != user.ID {
+		return c.JSON(http.StatusForbidden, apierr.AccessDenied())
 	}
 	if err := h.securityKeyRepo.UpdateName(req.CredentialID, user.ID, req.Name); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())

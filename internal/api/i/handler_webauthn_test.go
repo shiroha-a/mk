@@ -420,6 +420,23 @@ func TestTwoFAUpdateKey_Success(t *testing.T) {
 	assert.Equal(t, "renamed", skRepo.keys["key1"].Name)
 }
 
+// #1555 他人所有の key を更新しようとすると ACCESS_DENIED (NO_SUCH_KEY ではない)。
+// upstream update-key.ts は key==null を noSuchKey、key.userId!==me.id を
+// accessDenied で区別する。
+func TestTwoFAUpdateKey_AccessDenied(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	// key は別ユーザー (u2) 所有。
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u2", Name: "old", PublicKey: "pk",
+	}))
+	rec := postExtra(h.TwoFAUpdateKey, `{"password":"pass","credentialId":"key1","name":"x"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	// 名前は変更されない。
+	assert.Equal(t, "old", skRepo.keys["key1"].Name)
+}
+
 // --- TwoFAPasswordLess ---
 //
 // upstream Misskey TS は paramDef を `{value: boolean}` で password を

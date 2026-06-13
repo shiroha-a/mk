@@ -16,9 +16,9 @@ import (
 // attempt of the OTP after the successful validation has been issued
 // for the first OTP". Upstream Misskey TS (UserAuthService) does not
 // implement this protection, so an attacker who observes a 6-digit code
-// (phishing, shoulder surfing, MITM proxy) can replay it up to ~90s
-// later — long enough to open multiple sessions or to chain into other
-// 2FA-gated endpoints (i/2fa/done, key registration, etc.).
+// (phishing, shoulder surfing, MITM proxy) can replay it within the code's
+// acceptance window — long enough to open multiple sessions or to chain into
+// other 2FA-gated endpoints (i/2fa/done, key registration, etc.).
 //
 // mk-go ships this as an independent hardening on top of the drop-in
 // compatible schema: no new tables, no new error codes, just a Redis
@@ -31,12 +31,15 @@ type ReplayGuard interface {
 	MarkUsed(ctx context.Context, userID, code string) (bool, error)
 }
 
-// defaultReplayTTL covers the full acceptance window of a TOTP code
-// under pquerna/otp defaults (Period=30s, Skew=1 → ±1 step = up to 90s
-// from the moment the code becomes valid). We pad to 120s so that even
-// when the first acceptance happens at the very end of the window, the
-// guard entry survives for any conceivable retry inside the window.
-const defaultReplayTTL = 120 * time.Second
+// defaultReplayTTL covers the full acceptance window of a TOTP code under
+// our validation settings (Period=30s, Skew=totpSkew). A code generated for
+// step T stays structurally valid across [T-skew, T+skew] = (2*skew+1) steps,
+// so the guard entry must survive at least that long after the first
+// acceptance — otherwise the code could be replayed during the residual
+// validity once the entry expires. We pad by one extra step for clock jitter.
+// 旧実装は Skew=1 前提の 120s 固定だったが、#1555 で Skew=5 に広げたため
+// totpSkew から導出して lockstep を保つ (Skew=5 → 11 steps = 330s + 30s pad)。
+const defaultReplayTTL = time.Duration(2*totpSkew+2) * 30 * time.Second
 
 // RedisReplayGuard implements ReplayGuard on top of go-redis. Keys are
 // per-user and per-code; collisions across users are impossible because
@@ -48,7 +51,8 @@ type RedisReplayGuard struct {
 	// guard without configuring anything else.
 	KeyPrefix string
 	// TTL is the lifetime of each replay record. When zero, defaults to
-	// 120 seconds (= TOTP acceptance window with safety margin).
+	// defaultReplayTTL (= TOTP acceptance window for the configured Skew,
+	// with a one-step safety margin).
 	TTL time.Duration
 }
 
@@ -77,6 +81,7 @@ func (g *RedisReplayGuard) MarkUsed(ctx context.Context, userID, code string) (b
 	}
 	ttl := g.TTL
 	if ttl <= 0 {
+		// 未設定時は TOTP acceptance window をカバーする default を使う。
 		ttl = defaultReplayTTL
 	}
 	key := fmt.Sprintf("%s:%s:%s", prefix, userID, code)

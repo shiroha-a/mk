@@ -6,10 +6,17 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image/png"
+	"time"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
+
+// totpSkew は許容する前後ステップ数。upstream Misskey は OTPAuth.TOTP.validate
+// を window:5 で呼ぶ (UserAuthService.ts / 2fa/done.ts) ため、pquerna の
+// デフォルト Skew=1 (±30s) ではなく ±5 ステップ (±150s) に合わせる。これにより
+// 端末の時計ずれが大きい環境でも upstream と同じコードを受理できる (#1555)。
+const totpSkew = 5
 
 // qrImageSize は frontend MkPoll 系コンポーネントが想定する QR コード画像
 // の 1 辺ピクセル数。Misskey TS upstream の `QRCode.toDataURL(url)` は
@@ -54,7 +61,14 @@ func QRDataURL(uri string) (string, error) {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// Validate checks if a TOTP code is valid for the given secret.
+// Validate checks if a TOTP code is valid for the given secret. The acceptance
+// window matches upstream Misskey (window:5 = ±5 steps ≈ ±150s)。
 func Validate(code, secret string) bool {
-	return totp.Validate(code, secret)
+	ok, err := totp.ValidateCustom(code, secret, time.Now().UTC(), totp.ValidateOpts{
+		Period:    30,
+		Skew:      totpSkew,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	return err == nil && ok
 }
