@@ -2069,30 +2069,74 @@ func TestNoteRepository_SearchByTag(t *testing.T) {
 	require.NoError(t, testDB.Create(n).Error)
 	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 
-	notes, err := repo.SearchByTag("golang", "", 10, "", "")
+	notes, err := repo.SearchByTag("golang", "", 10, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
-	notes, err = repo.SearchByTag("nonexistent", "", 10, "", "")
+	notes, err = repo.SearchByTag("nonexistent", "", 10, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Empty(t, notes)
 
 	// default limit
-	notes, err = repo.SearchByTag("golang", "", 0, "", "")
+	notes, err = repo.SearchByTag("golang", "", 0, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
 
 	// with cursors
-	notes, err = repo.SearchByTag("golang", "", 10, "000", "zzz")
+	notes, err = repo.SearchByTag("golang", "", 10, "000", "zzz", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, notes)
+}
+
+// #1554 SearchByTag の reply/renote/poll/withFiles filter。
+func TestNoteRepository_SearchByTag_Filters(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "sbtf_u", "sbtfuser")
+	defer cleanupUser(t, user.ID)
+	// reply の ReplyID は FK_note_replyId 制約があるため既存 note (plain) を指す。
+	parent := "sbtf_plain"
+	bt := func(v bool) *bool { return &v }
+
+	plain := &model.Note{ID: "sbtf_plain", UserID: user.ID, Visibility: "public", Tags: []string{"sbtf"}}
+	reply := &model.Note{ID: "sbtf_reply", UserID: user.ID, Visibility: "public", Tags: []string{"sbtf"}, ReplyID: &parent}
+	pollFile := &model.Note{ID: "sbtf_pf", UserID: user.ID, Visibility: "public", Tags: []string{"sbtf"}, HasPoll: true, FileIDs: []string{"f1"}}
+	for _, n := range []*model.Note{plain, reply, pollFile} {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	collect := func(f model.NoteSearchTagFilter) map[string]bool {
+		out, err := repo.SearchByTag("sbtf", "", 50, "", "", f)
+		require.NoError(t, err)
+		ids := map[string]bool{}
+		for _, n := range out {
+			ids[n.ID] = true
+		}
+		return ids
+	}
+
+	ids := collect(model.NoteSearchTagFilter{Reply: bt(true)})
+	assert.True(t, ids["sbtf_reply"])
+	assert.False(t, ids["sbtf_plain"])
+
+	ids = collect(model.NoteSearchTagFilter{Reply: bt(false)})
+	assert.False(t, ids["sbtf_reply"])
+	assert.True(t, ids["sbtf_plain"])
+
+	ids = collect(model.NoteSearchTagFilter{Poll: bt(true)})
+	assert.True(t, ids["sbtf_pf"])
+	assert.False(t, ids["sbtf_plain"])
+
+	ids = collect(model.NoteSearchTagFilter{WithFiles: true})
+	assert.True(t, ids["sbtf_pf"])
+	assert.False(t, ids["sbtf_plain"])
 }
 
 func TestNoteRepository_SearchByTag_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewNoteRepository(testDB.WithContext(ctx))
-	_, err := repo.SearchByTag("x", "", 10, "", "")
+	_, err := repo.SearchByTag("x", "", 10, "", "", model.NoteSearchTagFilter{})
 	assert.Error(t, err)
 }
 
@@ -2137,26 +2181,26 @@ func TestNoteRepository_SearchByTag_VisibilityPushDown(t *testing.T) {
 	}
 
 	// 匿名 / stranger は public のみ。
-	out, err := repo.SearchByTag("sbttag", "", 50, "", "")
+	out, err := repo.SearchByTag("sbttag", "", 50, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_sbt_pub"}, idsOf(out))
 
-	out, err = repo.SearchByTag("sbttag", stranger.ID, 50, "", "")
+	out, err = repo.SearchByTag("sbttag", stranger.ID, 50, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_sbt_pub"}, idsOf(out))
 
 	// follower は public + followers。
-	out, err = repo.SearchByTag("sbttag", follower.ID, 50, "", "")
+	out, err = repo.SearchByTag("sbttag", follower.ID, 50, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_sbt_fol", "n_sbt_pub"}, idsOf(out))
 
 	// visibleUserIds 対象は public + specified。
-	out, err = repo.SearchByTag("sbttag", allowed.ID, 50, "", "")
+	out, err = repo.SearchByTag("sbttag", allowed.ID, 50, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_sbt_pub", "n_sbt_spec"}, idsOf(out))
 
 	// author 本人は全 visibility。
-	out, err = repo.SearchByTag("sbttag", author.ID, 50, "", "")
+	out, err = repo.SearchByTag("sbttag", author.ID, 50, "", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_sbt_fol", "n_sbt_pub", "n_sbt_spec"}, idsOf(out))
 }
@@ -2872,14 +2916,14 @@ func TestNoteRepository_SinceIDFlipsOrderASC(t *testing.T) {
 	}
 
 	// sinceID単独指定: ASC順 (古い→新しい)。asc_n_a より大なので b, c が返る想定。
-	notes, err := repo.SearchByTag("ascflip", "", 10, "asc_n_a", "")
+	notes, err := repo.SearchByTag("ascflip", "", 10, "asc_n_a", "", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	require.Len(t, notes, 2)
 	assert.Equal(t, "asc_n_b", notes[0].ID)
 	assert.Equal(t, "asc_n_c", notes[1].ID)
 
 	// untilID単独指定: DESC順 (既存挙動)。asc_n_c より小なので b, a が返る。
-	notes, err = repo.SearchByTag("ascflip", "", 10, "", "asc_n_c")
+	notes, err = repo.SearchByTag("ascflip", "", 10, "", "asc_n_c", model.NoteSearchTagFilter{})
 	require.NoError(t, err)
 	require.Len(t, notes, 2)
 	assert.Equal(t, "asc_n_b", notes[0].ID)

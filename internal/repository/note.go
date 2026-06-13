@@ -137,8 +137,9 @@ type NoteRepository interface {
 	// SearchByTag returns notes carrying tag that viewerID is allowed to see.
 	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
 	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
-	// 同じ可視性条件を LIMIT 前に SQL で絞る (#1439)。
-	SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error)
+	// 同じ可視性条件を LIMIT 前に SQL で絞る (#1439)。filter で reply/renote/poll/
+	// withFiles を絞る (upstream search-by-tag.ts、#1554)。
+	SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error)
 	// ListByFileID returns notes whose fileIds array contains fileID, with
 	// cursor (sinceID/untilID) pagination matching upstream Misskey's
 	// makePaginationQuery. limit <= 0 defaults to 10.
@@ -785,7 +786,7 @@ func (r *noteRepository) ListMentions(userID, visibility string, following bool,
 	return notes, nil
 }
 
-func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -794,6 +795,27 @@ func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, u
 	// visibility push-down: core/note.CanSeeNote と同じ条件を LIMIT 前に絞る。
 	// ListByUserIDFiltered / clip の ListByClipVisible と同じ可視性定義 (#1439)。
 	q = applyViewerVisibility(q, viewerID)
+	// reply/renote/poll/withFiles filter (upstream search-by-tag.ts:124-150、#1554)。
+	if filter.Reply != nil {
+		if *filter.Reply {
+			q = q.Where(`"replyId" IS NOT NULL`)
+		} else {
+			q = q.Where(`"replyId" IS NULL`)
+		}
+	}
+	if filter.Renote != nil {
+		if *filter.Renote {
+			q = q.Where(`"renoteId" IS NOT NULL`)
+		} else {
+			q = q.Where(`"renoteId" IS NULL`)
+		}
+	}
+	if filter.Poll != nil {
+		q = q.Where(`"hasPoll" = ?`, *filter.Poll)
+	}
+	if filter.WithFiles {
+		q = q.Where(`"fileIds" != '{}'`)
+	}
 	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)

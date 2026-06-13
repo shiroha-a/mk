@@ -869,7 +869,7 @@ func (f *failingNoteRepo) FindRenoteByUser(_, _ string) (*model.Note, error) {
 func (f *failingNoteRepo) ListMentions(_, _ string, _ bool, _ int, _, _ string) ([]*model.Note, error) {
 	return nil, nil
 }
-func (f *failingNoteRepo) SearchByTag(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingNoteRepo) SearchByTag(_, _ string, _ int, _, _ string, _ model.NoteSearchTagFilter) ([]*model.Note, error) {
 	return nil, nil
 }
 func (f *failingNoteRepo) ListByFileID(_, _, _ string, _ int) ([]*model.Note, error) {

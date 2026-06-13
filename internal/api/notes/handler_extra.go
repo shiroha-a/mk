@@ -251,6 +251,10 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 		UntilID   string     `json:"untilId"`
 		SinceDate *int64     `json:"sinceDate"`
 		UntilDate *int64     `json:"untilDate"`
+		Reply     *bool      `json:"reply"`
+		Renote    *bool      `json:"renote"`
+		Poll      *bool      `json:"poll"`
+		WithFiles bool       `json:"withFiles"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -279,7 +283,9 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
-	notes, err := h.noteRepo.SearchByTag(req.Tag, viewerID, req.Limit, sinceID, untilID)
+	// reply/renote/poll/withFiles で絞る (upstream search-by-tag.ts、#1554)。
+	filter := model.NoteSearchTagFilter{Reply: req.Reply, Renote: req.Renote, Poll: req.Poll, WithFiles: req.WithFiles}
+	notes, err := h.noteRepo.SearchByTag(req.Tag, viewerID, req.Limit, sinceID, untilID, filter)
 	if err != nil {
 		// tag 検索失敗は従来どおり空配列で返す (TS 互換) が、visibility
 		// push-down 追加で SQL エラーも黙殺されうるため診断用に 1 行残す。
@@ -287,6 +293,12 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 		// Warn ではなく Debug に留める (#1446 review)。
 		slog.Debug("notes/search-by-tag: SearchByTag failed", "tag", req.Tag, "err", err)
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
+	}
+	// upstream search-by-tag は generateBaseNoteFilteringQuery で被block / mute /
+	// instance-mute を除外する (#1554)。block/mute は post-fetch で適用する。
+	notes, err = h.applyMuteBlock(viewer, notes)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }

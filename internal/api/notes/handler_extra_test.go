@@ -637,6 +637,39 @@ func TestSearchByTag_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1554 search-by-tag の reply filter: reply=true は reply note のみ返す。
+func TestSearchByTag_ReplyFilter(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	parent := "p1"
+	noteRepo.Notes["plain"] = &model.Note{ID: "plain", UserID: "u1", Tags: []string{"t"}, Visibility: "public", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["rep"] = &model.Note{ID: "rep", UserID: "u1", Tags: []string{"t"}, Visibility: "public", ReplyID: &parent, User: &model.User{ID: "u1"}}
+	rec := postExtra(h.SearchByTag, `{"tag":"t","reply":true}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "rep", resp[0]["id"])
+}
+
+// #1554 search-by-tag は viewer が mute した author の note を除外する。
+func TestSearchByTag_FiltersMutedAuthor(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["mn"] = &model.Note{ID: "mn", UserID: "muted", Tags: []string{"t"}, Visibility: "public", User: &model.User{ID: "muted"}}
+	mutingRepo := testutil.NewMockMutingRepository()
+	mutingRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "viewer", MuteeID: "muted"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["viewer"] = &model.User{ID: "viewer", Username: "viewer", UsernameLower: "viewer"}
+	h.SetMutingRepo(mutingRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	h.SetUserRepo(userRepo)
+
+	rec := postExtra(h.SearchByTag, `{"tag":"t"}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "mute した author の note は除外される")
+}
+
 func TestSearchByTag_QueryArray(t *testing.T) {
 	h, noteRepo, _ := newExtraHandler(t)
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Tags: []string{"go"}, Visibility: "public", User: &model.User{ID: "u1"}}
@@ -724,7 +757,7 @@ func TestSearchByTag_SpecifiedTargetAndAuthorSee(t *testing.T) {
 
 type failingSearchByTagRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingSearchByTagRepo) SearchByTag(_, _ string, _ int, _, _ string) ([]*model.Note, error) {
+func (f *failingSearchByTagRepo) SearchByTag(_, _ string, _ int, _, _ string, _ model.NoteSearchTagFilter) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

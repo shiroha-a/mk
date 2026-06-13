@@ -1246,12 +1246,25 @@ func (m *MockNoteRepository) ListMentions(userID, visibility string, following b
 	}, untilID, sinceID, limit), nil
 }
 
-func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string) ([]*model.Note, error) {
+func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	return m.listFiltered(func(n *model.Note) bool {
 		if !m.canViewerSeeNote(viewerID, n) {
+			return false
+		}
+		// reply/renote/poll/withFiles filter (#1554)。
+		if filter.Reply != nil && (n.ReplyID != nil) != *filter.Reply {
+			return false
+		}
+		if filter.Renote != nil && (n.RenoteID != nil) != *filter.Renote {
+			return false
+		}
+		if filter.Poll != nil && n.HasPoll != *filter.Poll {
+			return false
+		}
+		if filter.WithFiles && len(n.FileIDs) == 0 {
 			return false
 		}
 		for _, t := range n.Tags {
