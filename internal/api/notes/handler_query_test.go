@@ -81,6 +81,65 @@ func TestRenotes_OK(t *testing.T) {
 	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
+// #1554 renotes は viewer を block している author の note を除外する
+// (upstream generateBaseNoteFilteringQuery 相当)。
+func TestRenotes_FiltersBlockingAuthor(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	parent := seedPublicNote(repo, "parent")
+	pid := parent.ID
+	// blocker が parent を renote。blocker は viewer(alice) を block している。
+	r := seedPublicNote(repo, "r1")
+	r.UserID = "blocker"
+	r.RenoteID = &pid
+	r.User = &model.User{ID: "blocker", Username: "blocker", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	mutingRepo := testutil.NewMockMutingRepository()
+	blockingRepo := testutil.NewMockBlockingRepository()
+	blockingRepo.Blockings["b1"] = &model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "alice"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}
+	h.SetMutingRepo(mutingRepo)
+	h.SetBlockingRepo(blockingRepo)
+	h.SetUserRepo(userRepo)
+
+	c, rec := newJSONRequest(t, "/api/notes/renotes", `{"noteId":"parent"}`)
+	setAuthUser(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Renotes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// blocker の renote は除外される。
+	assert.Empty(t, resp)
+}
+
+// #1554 replies は viewer が mute した author の note を除外する。
+func TestReplies_FiltersMutedAuthor(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	parent := seedPublicNote(repo, "parent")
+	pid := parent.ID
+	reply := seedPublicNote(repo, "rep1")
+	reply.UserID = "muted"
+	reply.ReplyID = &pid
+	reply.User = &model.User{ID: "muted", Username: "muted", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	mutingRepo := testutil.NewMockMutingRepository()
+	mutingRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "alice", MuteeID: "muted"}
+	blockingRepo := testutil.NewMockBlockingRepository()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}
+	h.SetMutingRepo(mutingRepo)
+	h.SetBlockingRepo(blockingRepo)
+	h.SetUserRepo(userRepo)
+
+	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"parent"}`)
+	setAuthUser(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Replies(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp)
+}
+
 func TestRenotes_NotFound(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/renotes", `{"noteId":"ghost"}`)

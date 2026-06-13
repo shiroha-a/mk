@@ -48,11 +48,15 @@ type Handler struct {
 	channelMutingRepo repository.ChannelMutingRepository
 	mutingRepo        repository.MutingRepository
 	renoteMutingRepo  repository.RenoteMutingRepository
-	instanceRepo      repository.InstanceRepository
-	emojiRepo         repository.EmojiRepository
-	driveFolderRepo   repository.DriveFolderRepository
-	userRepo          repository.UserRepository
-	userListRepo      repository.UserListRepository
+	// blockingRepo は notes/children・replies・renotes の list 応答で被block /
+	// mute / instance-mute filter を適用するのに使う (#1554、upstream
+	// generateBaseNoteFilteringQuery 相当)。未配線時は filter skip。
+	blockingRepo    repository.BlockingRepository
+	instanceRepo    repository.InstanceRepository
+	emojiRepo       repository.EmojiRepository
+	driveFolderRepo repository.DriveFolderRepository
+	userRepo        repository.UserRepository
+	userListRepo    repository.UserListRepository
 	// clipRepo / clipNoteRepo / clipFavoriteRepo は notes/clips で「この note を
 	// 含む public clip」を Clip entity として返すのに使う (#1554)。未配線時は
 	// 空配列 fallback (旧 stub 互換)。
@@ -137,6 +141,12 @@ func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
 // upstream Misskey TS の generateMutedUserRelatedRenotesQuery と同 semantics。
 func (h *Handler) SetRenoteMutingRepo(r repository.RenoteMutingRepository) {
 	h.renoteMutingRepo = r
+}
+
+// SetBlockingRepo attaches a BlockingRepository so notes/children・replies・
+// renotes can exclude notes authored by users who block the viewer (#1554)。
+func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
+	h.blockingRepo = r
 }
 
 // SetTranslator attaches a DeepL translator for /api/notes/translate.
@@ -592,7 +602,34 @@ func (h *Handler) serveList(c echo.Context, noSuchNoteID string, fn func(*model.
 		}
 		return apierr.JSONInternalError(c)
 	}
+	// upstream children/replies/renotes は generateBaseNoteFilteringQuery で
+	// 被block / mute / instance-mute を除外する (#1554)。QueryService は
+	// 可視性しか見ないため、antennas/roles と同じ post-fetch filter をここで
+	// 適用する (blocked-host / suspended は別 follow-up)。
+	notes, err = h.applyMuteBlock(viewer, notes)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
+}
+
+// applyMuteBlock filters out notes the viewer should not see per the mute/block
+// dimensions of upstream generateBaseNoteFilteringQuery: muted-user / 被block /
+// muted-instance (note/reply/renote の author いずれか一致で除外)。
+// channel-mute は upstream の generateBaseNoteFilteringQuery には含まれず
+// timeline 系のみで適用されるため、ここでは channelMutingRepo に nil を渡して
+// 適用しない (children/replies/renotes parity、#1554)。blocked-host / suspended
+// は別 follow-up。blockingRepo 未配線 / viewer nil なら no-op。fail-closed:
+// lookup / filter エラーは呼び出し側で 500 にする。
+func (h *Handler) applyMuteBlock(viewer *model.User, notes []*model.Note) ([]*model.Note, error) {
+	if viewer == nil || h.blockingRepo == nil {
+		return notes, nil
+	}
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+	if err != nil {
+		return nil, err
+	}
+	return notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
 }
 
 // SearchRequest is the request body for notes/search.

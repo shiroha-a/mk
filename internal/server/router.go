@@ -1189,6 +1189,7 @@ func (s *Server) setupRoutes() {
 	// filter (#903)。未配線だと renote-mute は read 時に効かず、frontend
 	// で消えるべき renote が表示され続ける。production では必ず wire する。
 	notesHandler.SetRenoteMutingRepo(renoteMutingRepo)
+	notesHandler.SetBlockingRepo(blockingRepo) // #1554: children/replies/renotes mute/block filter
 	notesHandler.SetInstanceRepo(instanceRepo)
 	notesHandler.SetEmojiRepo(emojiRepo)
 	notesHandler.SetReactionReader(reactionCountWriter)
