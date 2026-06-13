@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -91,6 +92,8 @@ func (h *Handler) Timeline(c echo.Context) error {
 			MutedChannelIDs:       h.loadMutedChannelIDs(viewer),
 			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
+			BlockerIDs:            h.loadBlockerIDs(viewer),
+			MutedInstances:        h.loadMutedInstances(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -111,6 +114,8 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 			MutedChannelIDs:    h.loadMutedChannelIDs(viewer),
 			MutedUserIDs:       h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs: h.loadRenoteMutedUserIDs(viewer),
+			BlockerIDs:         h.loadBlockerIDs(viewer),
+			MutedInstances:     h.loadMutedInstances(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.LocalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -130,6 +135,8 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 			MutedChannelIDs:    h.loadMutedChannelIDs(viewer),
 			MutedUserIDs:       h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs: h.loadRenoteMutedUserIDs(viewer),
+			BlockerIDs:         h.loadBlockerIDs(viewer),
+			MutedInstances:     h.loadMutedInstances(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.GlobalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -157,6 +164,8 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			MutedChannelIDs:       h.loadMutedChannelIDs(viewer),
 			MutedUserIDs:          h.loadMutedUserIDs(viewer),
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
+			BlockerIDs:            h.loadBlockerIDs(viewer),
+			MutedInstances:        h.loadMutedInstances(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -216,6 +225,46 @@ func (h *Handler) loadRenoteMutedUserIDs(viewer *model.User) []string {
 		return nil
 	}
 	return ids
+}
+
+// loadBlockerIDs returns the ids of users who block the viewer (被block、#1681)。
+// timeline で note/reply/renote の author が viewer を block していれば除外する
+// (upstream generateBlockedUserQueryForNotes)。
+func (h *Handler) loadBlockerIDs(viewer *model.User) []string {
+	if viewer == nil || h.blockingRepo == nil {
+		return nil
+	}
+	ids, err := h.blockingRepo.ListBlockerIDs(viewer.ID)
+	if err != nil {
+		slog.Warn("timeline: failed to load blockers", "userId", viewer.ID, "err", err)
+		return nil
+	}
+	return ids
+}
+
+// loadMutedInstances returns the viewer's muted instance hosts (lowercase、#1681)。
+// user_profile.mutedInstances (jsonb host 配列) を parse する。profile 不在 /
+// 破損 jsonb は空扱い (best-effort、timeline を閉塞させない)。
+func (h *Handler) loadMutedInstances(viewer *model.User) []string {
+	if viewer == nil || h.userRepo == nil {
+		return nil
+	}
+	profile, err := h.userRepo.FindProfileByUserID(viewer.ID)
+	if err != nil || profile == nil || len(profile.MutedInstances) == 0 {
+		return nil
+	}
+	var hosts []string
+	if err := json.Unmarshal(profile.MutedInstances, &hosts); err != nil {
+		slog.Warn("timeline: failed to parse muted instances", "userId", viewer.ID, "err", err)
+		return nil
+	}
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if host != "" {
+			out = append(out, strings.ToLower(host))
+		}
+	}
+	return out
 }
 
 // serveTimeline factors out the common parsing and error handling for the four

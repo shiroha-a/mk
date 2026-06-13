@@ -218,6 +218,10 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		// renote-mute も同様に subquery 経路を使う (#903)。pure renote 条件
 		// は applyTimelineFilter 側で組み立てる。
 		UseRenoteMutingSubquery: viewerID != "",
+		// 被block / instance-mute は loader で取得した literal list を両経路に
+		// 渡す (#1681)。anon viewer では空。
+		BlockerIDs:     f.BlockerIDs,
+		MutedInstances: f.MutedInstances,
 	}
 }
 

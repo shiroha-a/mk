@@ -47,6 +47,59 @@ func TestIsPureRenote(t *testing.T) {
 	assert.False(t, isPureRenote(makeNote("4", withRenote, withFiles)))
 }
 
+func withReplyUser(uid string) func(*model.Note) {
+	return func(n *model.Note) { n.ReplyID = strPtr("rp1"); n.ReplyUserID = strPtr(uid) }
+}
+func withHost(host string) func(*model.Note) {
+	return func(n *model.Note) { n.UserHost = strPtr(host) }
+}
+
+// #1681 被block: note/reply/renote のいずれかの author が viewer を block して
+// いれば除外。
+func TestApplyFilter_Blocker(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("a", withUser("blocker")),                   // note author が blocker
+		makeNote("b", withReplyUser("blocker")),              // reply 先が blocker
+		makeNote("c", withRenote, withRenoteUser("blocker")), // renote 元が blocker
+		makeNote("ok", withUser("friend")),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{BlockerIDs: []string{"blocker"}})
+	assert.Len(t, out, 1)
+	assert.Equal(t, "ok", out[0].ID)
+}
+
+// #1681 reply著者mute: reply 先が muted user なら除外 (mutedUsers が reply
+// author も見る)。
+func TestApplyFilter_MutedReplyAuthor(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("a", withReplyUser("muted")),
+		makeNote("ok", withReplyUser("other")),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{MutedUserIDs: []string{"muted"}})
+	assert.Len(t, out, 1)
+	assert.Equal(t, "ok", out[0].ID)
+}
+
+// #1681 instance-mute: note/reply/renote のいずれかの author host が muted
+// instance なら除外。case-insensitive。
+func TestApplyFilter_MutedInstance(t *testing.T) {
+	notes := []*model.Note{
+		makeNote("a", withHost("Bad.Example")), // 大文字混じり host
+		makeNote("b", func(n *model.Note) { n.ReplyUserHost = strPtr("bad.example") }),
+		makeNote("local"), // host nil = local、常に通す
+		makeNote("ok", withHost("good.example")),
+	}
+	out := ApplyFilter(notes, "viewer", TimelineFilter{MutedInstances: []string{"bad.example"}})
+	ids := map[string]bool{}
+	for _, n := range out {
+		ids[n.ID] = true
+	}
+	assert.False(t, ids["a"])
+	assert.False(t, ids["b"])
+	assert.True(t, ids["local"])
+	assert.True(t, ids["ok"])
+}
+
 func TestApplyFilter_WithFiles(t *testing.T) {
 	notes := []*model.Note{
 		makeNote("1"),

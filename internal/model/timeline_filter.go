@@ -34,4 +34,14 @@ type TimelineDBFilter struct {
 	// note は通す。upstream Misskey TS の
 	// generateMutedUserRelatedRenotesQuery と同 semantics。
 	UseRenoteMutingSubquery bool
+	// BlockerIDs は viewer を block している user の id 一覧 (被block、#1681)。
+	// note/reply/renote のいずれかの author が含まれる note を除外する
+	// (upstream generateBlockedUserQueryForNotes)。viewer 単位で件数が少ない
+	// (= 自分を block している相手) ため literal NOT IN で十分。
+	BlockerIDs []string
+	// MutedInstances は viewer が mute した instance host の一覧 (#1681)。
+	// note/reply/renote のいずれかの author host が含まれる note を除外する
+	// (upstream generateMutedUserQueryForNotes の mutedInstances 分岐)。host は
+	// lowercase 前提 (AP canonical)。
+	MutedInstances []string
 }

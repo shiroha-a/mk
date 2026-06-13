@@ -925,13 +925,42 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		notExistsForCol := func(col string) string {
 			return `NOT EXISTS (SELECT 1 FROM "muting" m WHERE m."muterId" = ? AND m."muteeId" = ` + col + ` AND (m."expiresAt" IS NULL OR m."expiresAt" > NOW()))`
 		}
+		// note/renote/reply のいずれかの author が active mute なら除外
+		// (upstream generateMutedUserQueryForNotes は 3 author すべて見る、#1681)。
+		// reply著者mute は #1681 で追加 (旧実装は userId + renoteUserId のみ)。
 		q = q.Where(
-			notExistsForCol(`"note"."userId"`)+` AND ("renoteUserId" IS NULL OR `+notExistsForCol(`"note"."renoteUserId"`)+`)`,
-			f.ViewerID, f.ViewerID,
+			notExistsForCol(`"note"."userId"`)+
+				` AND ("renoteUserId" IS NULL OR `+notExistsForCol(`"note"."renoteUserId"`)+`)`+
+				` AND ("replyUserId" IS NULL OR `+notExistsForCol(`"note"."replyUserId"`)+`)`,
+			f.ViewerID, f.ViewerID, f.ViewerID,
 		)
 	} else if len(f.MutedUserIDs) > 0 {
 		// "userId" は JOIN 併用時の曖昧性回避のため "note". で修飾 (#1498)。
-		q = q.Where(`"note"."userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`, f.MutedUserIDs, f.MutedUserIDs)
+		// reply著者も check (#1681、upstream parity)。
+		q = q.Where(
+			`"note"."userId" NOT IN ? AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?) AND ("replyUserId" IS NULL OR "replyUserId" NOT IN ?)`,
+			f.MutedUserIDs, f.MutedUserIDs, f.MutedUserIDs,
+		)
+	}
+	// blocked-by filter (#1681): viewer を block している user が note/reply/renote
+	// のいずれかの author なら除外 (upstream generateBlockedUserQueryForNotes)。
+	if len(f.BlockerIDs) > 0 {
+		q = q.Where(
+			`"note"."userId" NOT IN ? AND ("replyUserId" IS NULL OR "replyUserId" NOT IN ?) AND ("renoteUserId" IS NULL OR "renoteUserId" NOT IN ?)`,
+			f.BlockerIDs, f.BlockerIDs, f.BlockerIDs,
+		)
+	}
+	// instance-mute filter (#1681): viewer が mute した instance の note/reply/
+	// renote author を除外 (upstream generateMutedUserQueryForNotes の
+	// mutedInstances 分岐)。local user (host NULL) は常に通す。host は lowercase 前提。
+	if len(f.MutedInstances) > 0 {
+		// host は LOWER() で突合する。Redis path (hostInSet) が note host を
+		// ToLower するため、SQL も case-insensitive にして 2 経路の結果を一致
+		// させる (#1681 review)。MutedInstances は loader で lowercase 済。
+		q = q.Where(
+			`("note"."userHost" IS NULL OR LOWER("userHost") NOT IN ?) AND ("replyUserHost" IS NULL OR LOWER("replyUserHost") NOT IN ?) AND ("renoteUserHost" IS NULL OR LOWER("renoteUserHost") NOT IN ?)`,
+			f.MutedInstances, f.MutedInstances, f.MutedInstances,
+		)
 	}
 	// renote-mute filter (#903): 投稿者が renote-muted で **かつ** pure
 	// renote の note のみ除外する。投稿者の plain note / quote renote は

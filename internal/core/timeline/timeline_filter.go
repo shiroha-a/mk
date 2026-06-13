@@ -1,6 +1,29 @@
 package timeline
 
-import "github.com/shiroha-a/mk/internal/model"
+import (
+	"strings"
+
+	"github.com/shiroha-a/mk/internal/model"
+)
+
+// idInSet reports whether the (nilable) id is present in set.
+func idInSet(set map[string]struct{}, id *string) bool {
+	if id == nil {
+		return false
+	}
+	_, ok := set[*id]
+	return ok
+}
+
+// hostInSet reports whether the (nilable) host (case-insensitive) is in set.
+// set のキーは lowercase 前提。
+func hostInSet(set map[string]struct{}, host *string) bool {
+	if host == nil {
+		return false
+	}
+	_, ok := set[strings.ToLower(*host)]
+	return ok
+}
 
 // TimelineFilter holds filtering options for timeline queries.
 // *bool フィールドは nil のときデフォルト値として扱う。
@@ -30,6 +53,13 @@ type TimelineFilter struct {
 	//   - pure renote (= text なし / file なし / renoteId あり) のみ skip
 	// upstream Misskey TS の generateMutedUserRelatedRenotesQuery と同 semantics。
 	RenoteMutedUserIDs []string
+	// BlockerIDs は viewer を block している user の id (被block、#1681)。
+	// note/reply/renote のいずれかの author が含まれる note を除外する
+	// (upstream generateBlockedUserQueryForNotes)。
+	BlockerIDs []string
+	// MutedInstances は viewer が mute した instance host (#1681、lowercase)。
+	// note/reply/renote のいずれかの author host が一致する note を除外する。
+	MutedInstances []string
 }
 
 // boolDefault returns *b if non-nil, else def.
@@ -85,6 +115,25 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		}
 	}
 
+	// 被block (#1681): viewer を block している user が note/reply/renote の
+	// author なら除外。
+	var blockers map[string]struct{}
+	if len(f.BlockerIDs) > 0 {
+		blockers = make(map[string]struct{}, len(f.BlockerIDs))
+		for _, id := range f.BlockerIDs {
+			blockers[id] = struct{}{}
+		}
+	}
+	// instance-mute (#1681): viewer が mute した instance の note/reply/renote
+	// author host を除外。host は lowercase で突合する。
+	var mutedInstances map[string]struct{}
+	if len(f.MutedInstances) > 0 {
+		mutedInstances = make(map[string]struct{}, len(f.MutedInstances))
+		for _, h := range f.MutedInstances {
+			mutedInstances[strings.ToLower(h)] = struct{}{}
+		}
+	}
+
 	out := make([]*model.Note, 0, len(notes))
 	for _, n := range notes {
 		if f.WithFiles && len(n.FileIDs) == 0 {
@@ -98,9 +147,9 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 				continue
 			}
 		}
-		// user mute filter: 投稿者が muted user なら除外。renote の場合は
-		// renote 元 user も check する (= upstream Misskey TS の muting JOIN
-		// と同 semantics、#874)。
+		// user mute filter: 投稿者が muted user なら除外。renote / reply の
+		// author も check する (= upstream generateMutedUserQueryForNotes は
+		// note/reply/renote の 3 author を見る、#874 / reply は #1681 で追加)。
 		if mutedUsers != nil {
 			if _, muted := mutedUsers[n.UserID]; muted {
 				continue
@@ -110,6 +159,21 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 					continue
 				}
 			}
+			if n.ReplyUserID != nil {
+				if _, muted := mutedUsers[*n.ReplyUserID]; muted {
+					continue
+				}
+			}
+		}
+		// 被block (#1681): note/reply/renote のいずれかの author が viewer を
+		// block していれば除外。
+		if blockers != nil && (idInSet(blockers, &n.UserID) || idInSet(blockers, n.ReplyUserID) || idInSet(blockers, n.RenoteUserID)) {
+			continue
+		}
+		// instance-mute (#1681): note/reply/renote のいずれかの author host が
+		// muted instance なら除外。
+		if mutedInstances != nil && (hostInSet(mutedInstances, n.UserHost) || hostInSet(mutedInstances, n.ReplyUserHost) || hostInSet(mutedInstances, n.RenoteUserHost)) {
+			continue
 		}
 		// renote-mute filter: 投稿者が renote-muted で **かつ** pure renote
 		// の場合のみ除外する (= upstream の generateMutedUserRelatedRenotesQuery

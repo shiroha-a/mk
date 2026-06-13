@@ -90,6 +90,65 @@ func TestNoteRepository_ListHomeTimeline_MutedChannelFilter(t *testing.T) {
 	// 返ってしまう。ここでは他ユーザーがいないので fan-out テストは省略。
 }
 
+// #1681 applyTimelineFilter の被block / reply著者mute / instance-mute を
+// ListHomeTimeline (SQL push-down) で検証する。
+func TestNoteRepository_ListHomeTimeline_BaseFilters(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "u_bf_v", "bfviewer")
+	author := insertTestUser(t, "u_bf_a", "bfauthor")
+	blocker := insertTestUser(t, "u_bf_b", "bfblocker")
+	muted := insertTestUser(t, "u_bf_m", "bfmuted")
+	defer cleanupUser(t, viewer.ID)
+	defer cleanupUser(t, author.ID)
+	defer cleanupUser(t, blocker.ID)
+	defer cleanupUser(t, muted.ID)
+
+	// viewer は author / blocker / muted をフォロー (home timeline 対象)。
+	for i, fid := range []string{author.ID, blocker.ID, muted.ID} {
+		flid := "flw_bf_" + string(rune('a'+i))
+		require.NoError(t, testDB.Exec(`INSERT INTO "following" (id, "followerId", "followeeId") VALUES (?, ?, ?)`, flid, viewer.ID, fid).Error)
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, flid)
+	}
+
+	txt := "hi"
+	mkNote := func(n *model.Note) *model.Note {
+		n.Text = &txt
+		n.Visibility = model.NoteVisibilityPublic
+		n.Reactions = datatypes.JSON([]byte("{}"))
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, n.ID) })
+		return n
+	}
+	plain := mkNote(&model.Note{ID: "n_bf_plain", UserID: author.ID})
+	byBlocker := mkNote(&model.Note{ID: "n_bf_blk", UserID: blocker.ID})
+	replyToMuted := mkNote(&model.Note{ID: "n_bf_rep", UserID: author.ID, ReplyID: strPtr2("n_bf_plain"), ReplyUserID: &muted.ID})
+	remoteHost := "bad.example"
+	fromBadInstance := mkNote(&model.Note{ID: "n_bf_inst", UserID: author.ID, UserHost: &remoteHost})
+	// 大文字混じり host も LOWER() 突合で除外されること (#1681 review)。
+	upperHost := "Bad.Example"
+	fromUpperInstance := mkNote(&model.Note{ID: "n_bf_inst_up", UserID: author.ID, UserHost: &upperHost})
+
+	filter := model.TimelineDBFilter{
+		ViewerID:       viewer.ID,
+		BlockerIDs:     []string{blocker.ID},
+		MutedInstances: []string{"bad.example"},
+		MutedUserIDs:   []string{muted.ID}, // literal path で reply著者mute を検証
+	}
+	rows, err := repo.ListHomeTimeline(viewer.ID, 50, "", "", filter)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range rows {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids[plain.ID], "通常 note は含まれる")
+	assert.False(t, ids[byBlocker.ID], "被block author の note は除外")
+	assert.False(t, ids[replyToMuted.ID], "muted user 宛 reply は除外")
+	assert.False(t, ids[fromBadInstance.ID], "muted instance の note は除外")
+	assert.False(t, ids[fromUpperInstance.ID], "大文字 host も LOWER() で除外")
+}
+
+func strPtr2(s string) *string { return &s }
+
 // TestNoteRepository_ListHomeTimeline_WithRepliesFalse_SelfThreadOnly は #1047
 // で導入された upstream 互換の reply filter semantics を SQL 層で直接検証する。
 //
