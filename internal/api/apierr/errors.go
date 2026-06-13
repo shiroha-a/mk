@@ -56,10 +56,32 @@ const (
 	// しない (上流は endpoint 固有 NO_SUCH_* を使う) ため mk-go 固有の
 	// 安定 UUID を発番する。frontend 側の i18n には未対応だが、code+id 組
 	// が安定するので将来 locale 引きを追加できる (#673 Phase A)。
-	UUIDNotFound     = "8e6f5b1d-4f62-4ae0-9d3c-7c8d5b2e9f12"
-	UUIDNoSuchNote   = "24fcbfc6-2e37-42b6-8388-c29b3861a08d"
-	UUIDNoSuchUser   = "4362f8dc-731f-4ad8-a694-be5a88922a24"
+	UUIDNotFound   = "8e6f5b1d-4f62-4ae0-9d3c-7c8d5b2e9f12"
+	UUIDNoSuchNote = "24fcbfc6-2e37-42b6-8388-c29b3861a08d"
+	UUIDNoSuchUser = "4362f8dc-731f-4ad8-a694-be5a88922a24"
+	// UUIDAccessDenied は endpoint 固有 ACCESS_DENIED の UUID。upstream の
+	// admin/accounts/create や i/2fa/update-key 等が使う endpoint-specific 値で、
+	// framework の secure accessDenied (UUIDAccessDeniedSecure) とは別物。汎用
+	// helper AccessDenied() はこちらを返すので、secure endpoint 文脈で誤用しない
+	// こと (#1559)。
 	UUIDAccessDenied = "1fb7cb09-d46a-4fff-b8df-057708cce513"
+	// UUIDAccessDeniedSecure は upstream `ApiCallService.ts` の framework secure
+	// accessDenied (= secure:true endpoint を非 secure token で叩いた時) の UUID。
+	// endpoint 固有 ACCESS_DENIED (UUIDAccessDenied) と区別する。RequireSecure
+	// middleware が使う (#1559)。
+	UUIDAccessDeniedSecure = "56f35758-7dd5-468b-8439-5d6fb8ec9b8e"
+
+	// UUIDCredentialRequired は requireCredential endpoint で未認証時に投げる
+	// CREDENTIAL_REQUIRED の UUID (upstream ApiCallService.ts)。auth middleware が使う。
+	UUIDCredentialRequired = "1384574d-a912-4b81-8601-c7b1c4085df1"
+	// UUIDAuthenticationFailed は upstream `ApiCallService.ts` が token 認証失敗
+	// (AuthenticationError = 無効 token) 時に投げる AUTHENTICATION_FAILED の UUID
+	// (kind:client、401 + WWW-Authenticate: error=invalid_token)。
+	UUIDAuthenticationFailed = "b0a7f5f8-dc2f-4171-b91f-de88ad238e14"
+	// UUIDYourAccountSuspended は upstream `ApiCallService.ts` が requireCredential
+	// 系 endpoint で user.isSuspended のとき投げる YOUR_ACCOUNT_SUSPENDED の UUID
+	// (kind:permission、403)。
+	UUIDYourAccountSuspended = "a8c724b3-6e9c-4b46-b1a8-bc3ed6258370"
 
 	// UUIDRolePermissionDenied は upstream `ApiCallService.ts` で requiredRolePolicy
 	// 違反時に投げられる ROLE_PERMISSION_DENIED の UUID (upstream #17121 / triage
@@ -260,9 +282,34 @@ func NoSuchNoteDraft() map[string]any {
 	return Error("NO_SUCH_NOTE_DRAFT", "No such note draft.", UUIDNoSuchNoteDraft)
 }
 
-// AccessDenied returns a 403 ACCESS_DENIED error response.
+// AccessDenied returns a 403 ACCESS_DENIED error response with the
+// endpoint-specific UUID (UUIDAccessDenied)。framework の secure accessDenied
+// (= secure endpoint を非 secure token で叩いた時) は別 UUID なので、その文脈
+// では本 helper ではなく UUIDAccessDeniedSecure を使うこと (#1559)。
 func AccessDenied() map[string]any {
 	return Error("ACCESS_DENIED", "Access denied.", UUIDAccessDenied)
+}
+
+// CredentialRequired returns a 401 CREDENTIAL_REQUIRED error response.
+// requireCredential endpoint で未認証のとき auth middleware が返す
+// (upstream ApiCallService.ts)。
+func CredentialRequired() map[string]any {
+	return Error("CREDENTIAL_REQUIRED", "Authentication is required.", UUIDCredentialRequired)
+}
+
+// AuthenticationFailed returns a 401 AUTHENTICATION_FAILED error response
+// (invalid token)。kind:client。WWW-Authenticate: error=invalid_token は
+// WWWAuthenticate middleware が body から判定して付ける (upstream
+// ApiCallService.ts の #sendAuthenticationError)。
+func AuthenticationFailed() map[string]any {
+	return Error("AUTHENTICATION_FAILED", "Authentication failed. Please ensure your token is correct.", UUIDAuthenticationFailed)
+}
+
+// YourAccountSuspended returns a 403 YOUR_ACCOUNT_SUSPENDED error response.
+// requireCredential 系 endpoint で凍結アカウントが叩いたとき auth middleware が
+// 返す (upstream ApiCallService.ts、kind:permission)。
+func YourAccountSuspended() map[string]any {
+	return ErrorWithKind("YOUR_ACCOUNT_SUSPENDED", "Your account has been suspended.", UUIDYourAccountSuspended, KindPermission)
 }
 
 // RolePermissionDenied returns a 403 ROLE_PERMISSION_DENIED error response.

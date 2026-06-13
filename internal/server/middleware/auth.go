@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/gorm"
 )
 
 // errOrphanedAccessToken は access_token 行は残っているが Preload した
@@ -34,6 +35,12 @@ const (
 	// authenticated request. RequireScope reads it to enforce endpoint
 	// meta.kind against an app token's permission array (#1552).
 	AuthScopeContextKey contextKey = "misskeyAuthScope"
+	// suspendedContextKey flags that the request carried a valid token whose
+	// account is suspended. The user is kept out of UserContextKey (so public
+	// endpoints treat it as anonymous, #962 P2) but credential-required gates
+	// read this flag to return 403 YOUR_ACCOUNT_SUSPENDED instead of 401
+	// CREDENTIAL_REQUIRED (upstream ApiCallService.ts、#1559)。
+	suspendedContextKey contextKey = "misskeySuspended"
 )
 
 // AuthScope is the OAuth scope view of an authenticated request. IsApp is
@@ -115,23 +122,35 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 
 			user, scopes, isApp, err := a.resolveUser(token)
 			if err != nil {
+				// token はあるが解決できない。token 不在 (= 無効 token) は
+				// upstream ApiCallService が AuthenticationError として 401
+				// AUTHENTICATION_FAILED を返す経路なのでそれに揃える (#1559)。
+				// WWW-Authenticate: error=invalid_token は WWWAuthenticate
+				// middleware が body から判定して付ける。orphaned access_token
+				// (#514) や transient な DB error は誤って全 request を 401 に
+				// しないよう従来どおり anonymous に落とし、後続の認可に委ねる。
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return c.JSON(http.StatusUnauthorized, apierr.AuthenticationFailed())
+				}
 				return next(c)
 			}
 
-			// 論理削除 / 凍結された user を anonymous request 扱いに落とす
-			// (#962 P2)。upstream Misskey は signin handler で isSuspended
-			// だけ check しているが (signin/handler.go:112)、有効 token を
-			// 既に持っている session は post-auth pipeline では gate されず、
-			// tokenCache (30s TTL) 経由でも bypass できてしまう。本 gate を
-			// 入れることで cache miss → DB fetch 経路では確実に弾ける。
-			//
-			// 限界: cache hit (= 凍結前にキャッシュされた entry) は stale
-			// な isSuspended=false を返すので gate は fire しない。
-			// self-mutation 経由 (i/delete-account #962 P0) は handler 側
-			// で InvalidateToken を呼ぶので 30s → μs window。admin 経由
-			// (admin/suspend-user 等、他 user の token を強制 invalidate
-			// する経路) は本 PR scope 外、別 issue で追跡する想定。
-			if user.IsSuspended || user.IsDeleted {
+			// 論理削除された user は anonymous request 扱いに落とす (#962 P2)。
+			if user.IsDeleted {
+				return next(c)
+			}
+			// 凍結された user は公開 endpoint では anonymous 扱いに落とす
+			// (#962 P2) が、credential 必須 endpoint では 403
+			// YOUR_ACCOUNT_SUSPENDED を返せるよう flag を積む (upstream
+			// ApiCallService.ts、#1559)。upstream は signin handler で
+			// isSuspended だけ check しているが、有効 token を既に持っている
+			// session は post-auth pipeline では gate されず tokenCache
+			// (30s TTL) 経由でも bypass できてしまうため、cache miss → DB
+			// fetch 経路で確実に弾く。cache hit (凍結前 entry) は stale な
+			// isSuspended=false を返すので self-mutation / admin 経路は
+			// InvalidateToken(sForUser) で 30s → μs window に縮める。
+			if user.IsSuspended {
+				c.Set(string(suspendedContextKey), true)
 				return next(c)
 			}
 
@@ -191,20 +210,25 @@ func (a *AuthMiddleware) touchLastActive(userID string) {
 	}(userID, now)
 }
 
+// credentialRequiredResponse writes the error for a credential-required gate
+// when GetUser is nil: 403 YOUR_ACCOUNT_SUSPENDED when the request carried a
+// valid token for a suspended account (upstream ApiCallService.ts、#1559)、else
+// 401 CREDENTIAL_REQUIRED. Shared by RequireAuth / RequireSecure /
+// RequireAdmin / RequireModerator so the suspended branch stays consistent.
+func credentialRequiredResponse(c echo.Context) error {
+	if v, _ := c.Get(string(suspendedContextKey)).(bool); v {
+		return c.JSON(http.StatusForbidden, apierr.YourAccountSuspended())
+	}
+	return c.JSON(http.StatusUnauthorized, apierr.CredentialRequired())
+}
+
 // RequireAuth is a middleware that requires authentication.
 func RequireAuth() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			user := GetUser(c)
 			if user == nil {
-				return c.JSON(http.StatusUnauthorized, map[string]any{
-					"error": map[string]any{
-						"message": "Authentication is required.",
-						"code":    "CREDENTIAL_REQUIRED",
-						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
-						"kind":    apierr.KindClient,
-					},
-				})
+				return credentialRequiredResponse(c)
 			}
 			return next(c)
 		}
@@ -226,24 +250,15 @@ func RequireSecure() echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			user := GetUser(c)
 			if user == nil {
-				return c.JSON(http.StatusUnauthorized, map[string]any{
-					"error": map[string]any{
-						"message": "Authentication is required.",
-						"code":    "CREDENTIAL_REQUIRED",
-						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
-						"kind":    apierr.KindClient,
-					},
-				})
+				return credentialRequiredResponse(c)
 			}
 			if user.Token == nil || *user.Token != GetToken(c) {
-				return c.JSON(http.StatusForbidden, map[string]any{
-					"error": map[string]any{
-						"message": "Access denied.",
-						"code":    "ACCESS_DENIED",
-						"id":      "56f35758-7dd5-468b-8439-5d6fb8ec9b8e",
-						"kind":    apierr.KindClient,
-					},
-				})
+				return c.JSON(http.StatusForbidden, apierr.ErrorWithKind(
+					"ACCESS_DENIED",
+					"Access denied.",
+					apierr.UUIDAccessDeniedSecure,
+					apierr.KindClient,
+				))
 			}
 			return next(c)
 		}
@@ -342,14 +357,7 @@ func RequireAdmin(checker RoleChecker) echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			user := GetUser(c)
 			if user == nil {
-				return c.JSON(http.StatusUnauthorized, map[string]any{
-					"error": map[string]any{
-						"message": "Authentication is required.",
-						"code":    "CREDENTIAL_REQUIRED",
-						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
-						"kind":    apierr.KindClient,
-					},
-				})
+				return credentialRequiredResponse(c)
 			}
 			if !checker.IsAdministrator(user.ID) {
 				return c.JSON(http.StatusForbidden, map[string]any{
@@ -372,14 +380,7 @@ func RequireModerator(checker RoleChecker) echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			user := GetUser(c)
 			if user == nil {
-				return c.JSON(http.StatusUnauthorized, map[string]any{
-					"error": map[string]any{
-						"message": "Authentication is required.",
-						"code":    "CREDENTIAL_REQUIRED",
-						"id":      "1384574d-a912-4b81-8601-c7b1c4085df1",
-						"kind":    apierr.KindClient,
-					},
-				})
+				return credentialRequiredResponse(c)
 			}
 			if !checker.IsModerator(user.ID) {
 				return c.JSON(http.StatusForbidden, map[string]any{

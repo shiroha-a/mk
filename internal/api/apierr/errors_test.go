@@ -45,6 +45,9 @@ func TestHelperKinds(t *testing.T) {
 		{"AccessDenied", AccessDenied(), KindClient},
 		{"RestrictedByRole", RestrictedByRole(), KindClient},
 		{"RateLimitExceeded", RateLimitExceeded(), KindClient},
+		{"CredentialRequired", CredentialRequired(), KindClient},
+		{"AuthenticationFailed", AuthenticationFailed(), KindClient},
+		{"YourAccountSuspended", YourAccountSuspended(), KindPermission},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			errObj := tc.body["error"].(map[string]any)
@@ -92,6 +95,26 @@ func TestInternalError(t *testing.T) {
 	assert.Equal(t, UUIDInternalError, errObj["id"])
 	// upstream の引数なし new ApiError() は kind 'server'。
 	assert.Equal(t, "server", errObj["kind"])
+}
+
+// #1559 framework auth errors の code / id を upstream ApiCallService.ts と固定。
+func TestAuthFrameworkErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     map[string]any
+		wantCode string
+		wantID   string
+	}{
+		{"CredentialRequired", CredentialRequired(), "CREDENTIAL_REQUIRED", "1384574d-a912-4b81-8601-c7b1c4085df1"},
+		{"AuthenticationFailed", AuthenticationFailed(), "AUTHENTICATION_FAILED", "b0a7f5f8-dc2f-4171-b91f-de88ad238e14"},
+		{"YourAccountSuspended", YourAccountSuspended(), "YOUR_ACCOUNT_SUSPENDED", "a8c724b3-6e9c-4b46-b1a8-bc3ed6258370"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errObj := tc.body["error"].(map[string]any)
+			assert.Equal(t, tc.wantCode, errObj["code"])
+			assert.Equal(t, tc.wantID, errObj["id"])
+		})
+	}
 }
 
 func TestNoSuchNote(t *testing.T) {

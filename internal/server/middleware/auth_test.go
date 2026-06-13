@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -214,8 +215,15 @@ func TestRequireAuth_SuspendedRejected(t *testing.T) {
 		return nil
 	}))
 	require.NoError(t, chained(c))
-	assert.Equal(t, http.StatusUnauthorized, rec.Code,
-		"凍結 user は RequireAuth で 401 が返る")
+	// 凍結 user が credential 必須 endpoint を叩くと 403 YOUR_ACCOUNT_SUSPENDED
+	// が返る (upstream ApiCallService.ts、#1559)。
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "YOUR_ACCOUNT_SUSPENDED", errObj["code"])
+	assert.Equal(t, "a8c724b3-6e9c-4b46-b1a8-bc3ed6258370", errObj["id"])
+	assert.Equal(t, apierr.KindPermission, errObj["kind"])
 }
 
 func TestAuthenticate_QueryParam(t *testing.T) {
@@ -353,15 +361,20 @@ func TestAuthenticate_InvalidToken(t *testing.T) {
 	c := e.NewContext(req, rec)
 
 	handler := auth.Authenticate()(func(c echo.Context) error {
-		user := GetUser(c)
-		// 無効なトークンの場合、ユーザーはnilだがリクエストは継続する
-		assert.Nil(t, user)
-		return c.String(http.StatusOK, "ok")
+		t.Fatal("無効 token では handler に到達しない")
+		return nil
 	})
 
+	// 無効 (= 解決不能) token は upstream ApiCallService と同じく 401
+	// AUTHENTICATION_FAILED を返す (#1559)。
 	err := handler(c)
 	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "AUTHENTICATION_FAILED", errObj["code"])
+	assert.Equal(t, "b0a7f5f8-dc2f-4171-b91f-de88ad238e14", errObj["id"])
 }
 
 func TestRequireAuth_Authenticated(t *testing.T) {
@@ -967,4 +980,77 @@ func TestRequireNotMoved_AnonymousPasses(t *testing.T) {
 	require.NoError(t, h(c))
 	assert.True(t, called)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1559 無効 token の 401 AUTHENTICATION_FAILED 応答に WWWAuthenticate
+// middleware が WWW-Authenticate: error=invalid_token を付ける (full chain)。
+func TestAuthenticate_InvalidToken_WWWAuthenticateHeader(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes/create", nil)
+	req.Header.Set("Authorization", "Bearer bogustoken")
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	chained := WWWAuthenticate()(auth.Authenticate()(func(c echo.Context) error {
+		t.Fatal("無効 token では handler に到達しない")
+		return nil
+	}))
+	require.NoError(t, chained(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `error="invalid_token"`)
+}
+
+// #1559 凍結 user は RequireSecure / RequireAdmin / RequireModerator でも
+// 403 YOUR_ACCOUNT_SUSPENDED を返す (credential 必須 gate 共通)。
+func TestSuspendedUser_403OnAllCredentialGates(t *testing.T) {
+	gates := map[string]echo.MiddlewareFunc{
+		"RequireAuth":      RequireAuth(),
+		"RequireSecure":    RequireSecure(),
+		"RequireAdmin":     RequireAdmin(&stubRoleChecker{admin: true}),
+		"RequireModerator": RequireModerator(&stubRoleChecker{moderator: true}),
+	}
+	for name, gate := range gates {
+		t.Run(name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			tokenRepo := testutil.NewMockAccessTokenRepository()
+			token := "frozen-token-" + name
+			userRepo.Tokens[token] = &model.User{ID: "u_s", Username: "frozen", IsSuspended: true}
+			auth := NewAuthMiddleware(userRepo, tokenRepo)
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			chained := auth.Authenticate()(gate(func(c echo.Context) error {
+				t.Fatal("凍結 user は gate を通過しない")
+				return nil
+			}))
+			require.NoError(t, chained(c))
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, "YOUR_ACCOUNT_SUSPENDED", resp["error"].(map[string]any)["code"])
+		})
+	}
+}
+
+// 未認証 (token 無し) は従来どおり 401 CREDENTIAL_REQUIRED (凍結 flag 無し)。
+func TestCredentialRequired_NoToken(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	handler := RequireAuth()(func(c echo.Context) error { return nil })
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "CREDENTIAL_REQUIRED", resp["error"].(map[string]any)["code"])
 }
