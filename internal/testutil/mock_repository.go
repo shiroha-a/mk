@@ -1246,9 +1246,41 @@ func (m *MockNoteRepository) ListMentions(userID, visibility string, following b
 	}, untilID, sinceID, limit), nil
 }
 
-func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
+func (m *MockNoteRepository) SearchByTag(tagGroups [][]string, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
+	}
+	// 空 tag を除いた有効 group のみ。有効 group が無ければ空。
+	groups := make([][]string, 0, len(tagGroups))
+	for _, g := range tagGroups {
+		clean := make([]string, 0, len(g))
+		for _, t := range g {
+			if t != "" {
+				clean = append(clean, t)
+			}
+		}
+		if len(clean) > 0 {
+			groups = append(groups, clean)
+		}
+	}
+	if len(groups) == 0 {
+		return []*model.Note{}, nil
+	}
+	// note.tags が group の全 tag を含むか (AND)、いずれかの group を満たすか (OR)。
+	hasAll := func(n *model.Note, g []string) bool {
+		for _, want := range g {
+			found := false
+			for _, t := range n.Tags {
+				if t == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
 	}
 	return m.listFiltered(func(n *model.Note) bool {
 		if !m.canViewerSeeNote(viewerID, n) {
@@ -1267,8 +1299,8 @@ func (m *MockNoteRepository) SearchByTag(tag, viewerID string, limit int, sinceI
 		if filter.WithFiles && len(n.FileIDs) == 0 {
 			return false
 		}
-		for _, t := range n.Tags {
-			if t == tag {
+		for _, g := range groups {
+			if hasAll(n, g) {
 				return true
 			}
 		}

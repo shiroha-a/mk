@@ -257,8 +257,9 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 }
 
 // SearchByTag handles POST /api/notes/search-by-tag.
-// TS互換: tag (string) または query (string[][] — AND/OR組み合わせ) を受け付ける。
-// query の完全なAND/OR交差はサポートせず、最初に見つかったタグで検索する。
+// TS互換: tag (string) または query (string[][] — 外側 OR・内側 AND の複合タグ
+// 検索) を受け付ける (#1683、upstream search-by-tag.ts)。tag が指定されれば
+// 単一タグ、無ければ query を OR-of-AND で検索する。
 func (h *Handler) SearchByTag(c echo.Context) error {
 	var req struct {
 		Tag       string     `json:"tag"`
@@ -276,16 +277,25 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	// query 配列から tag を抽出 (tag が空の場合のフォールバック)
-	if req.Tag == "" && len(req.Query) > 0 {
+	// tag / query を tagGroups ([][]string、外側 OR・内側 AND) に正規化する。
+	// upstream: 'tag' があれば単一タグ、無ければ query をそのまま使う。
+	var tagGroups [][]string
+	if req.Tag != "" {
+		tagGroups = [][]string{{req.Tag}}
+	} else {
 		for _, inner := range req.Query {
-			if len(inner) > 0 && inner[0] != "" {
-				req.Tag = inner[0]
-				break
+			g := make([]string, 0, len(inner))
+			for _, t := range inner {
+				if t != "" {
+					g = append(g, t)
+				}
+			}
+			if len(g) > 0 {
+				tagGroups = append(tagGroups, g)
 			}
 		}
 	}
-	if req.Tag == "" {
+	if len(tagGroups) == 0 {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
@@ -302,7 +312,7 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	}
 	// reply/renote/poll/withFiles で絞る (upstream search-by-tag.ts、#1554)。
 	filter := model.NoteSearchTagFilter{Reply: req.Reply, Renote: req.Renote, Poll: req.Poll, WithFiles: req.WithFiles}
-	notes, err := h.noteRepo.SearchByTag(req.Tag, viewerID, req.Limit, sinceID, untilID, filter)
+	notes, err := h.noteRepo.SearchByTag(tagGroups, viewerID, req.Limit, sinceID, untilID, filter)
 	if err != nil {
 		// tag 検索失敗は従来どおり空配列で返す (TS 互換) が、visibility
 		// push-down 追加で SQL エラーも黙殺されうるため診断用に 1 行残す。

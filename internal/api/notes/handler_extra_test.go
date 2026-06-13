@@ -700,19 +700,27 @@ func TestSearchByTag_FiltersMutedAuthor(t *testing.T) {
 	assert.Empty(t, resp, "mute した author の note は除外される")
 }
 
-func TestSearchByTag_QueryArray(t *testing.T) {
+// #1683 query は外側 OR・内側 AND の複合タグ検索。
+func TestSearchByTag_QueryOrOfAnd(t *testing.T) {
 	h, noteRepo, _ := newExtraHandler(t)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Tags: []string{"go"}, Visibility: "public", User: &model.User{ID: "u1"}}
-	// query の最初の要素がタグとして使われる
+	// goAndRust は go+rust 両方、webOnly は web、goOnly は go のみ。
+	noteRepo.Notes["goAndRust"] = &model.Note{ID: "goAndRust", UserID: "u1", Tags: []string{"go", "rust"}, Visibility: "public", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["webOnly"] = &model.Note{ID: "webOnly", UserID: "u1", Tags: []string{"web"}, Visibility: "public", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["goOnly"] = &model.Note{ID: "goOnly", UserID: "u1", Tags: []string{"go"}, Visibility: "public", User: &model.User{ID: "u1"}}
+
+	// query [["go","rust"],["web"]] = (go AND rust) OR (web)。
+	// goAndRust (両方) と webOnly はヒット、goOnly (go だけ、rust 欠) は外れる。
 	rec := postExtra(h.SearchByTag, `{"query":[["go","rust"],["web"]]}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	// #1491 audit 指摘 6: query 配列 parse の正しさを id 識別で fix。
-	// 旧 test は status のみ確認していて、tag が "rust"/"web" 等にズレても通って
-	// しまっていた。
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp, 1)
-	assert.Equal(t, "n1", resp[0]["id"])
+	ids := map[string]bool{}
+	for _, n := range resp {
+		ids[n["id"].(string)] = true
+	}
+	assert.True(t, ids["goAndRust"], "go AND rust を満たす note はヒット")
+	assert.True(t, ids["webOnly"], "web group を満たす note はヒット")
+	assert.False(t, ids["goOnly"], "go だけ (rust 欠) は (go AND rust) を満たさず外れる")
 }
 
 func TestSearchByTag_QueryArrayEmpty(t *testing.T) {
@@ -787,7 +795,7 @@ func TestSearchByTag_SpecifiedTargetAndAuthorSee(t *testing.T) {
 
 type failingSearchByTagRepo struct{ *testutil.MockNoteRepository }
 
-func (f *failingSearchByTagRepo) SearchByTag(_, _ string, _ int, _, _ string, _ model.NoteSearchTagFilter) ([]*model.Note, error) {
+func (f *failingSearchByTagRepo) SearchByTag(_ [][]string, _ string, _ int, _, _ string, _ model.NoteSearchTagFilter) ([]*model.Note, error) {
 	return nil, testutil.ErrNotFound
 }
 

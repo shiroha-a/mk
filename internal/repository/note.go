@@ -138,8 +138,9 @@ type NoteRepository interface {
 	// viewerID 空文字は匿名 (public/home のみ)。discovery 系の tag 検索は
 	// ID 既知公開 (notes/show) doctrine の対象外なので、core/note.CanSeeNote と
 	// 同じ可視性条件を LIMIT 前に SQL で絞る (#1439)。filter で reply/renote/poll/
-	// withFiles を絞る (upstream search-by-tag.ts、#1554)。
-	SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error)
+	// withFiles を絞る (upstream search-by-tag.ts、#1554)。tagGroups は外側 OR・
+	// 内側 AND の複合タグ検索 (string[][]、#1683)。単一タグは [][]string{{tag}}。
+	SearchByTag(tagGroups [][]string, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error)
 	// ListByFileID returns notes whose fileIds array contains fileID, with
 	// cursor (sinceID/untilID) pagination matching upstream Misskey's
 	// makePaginationQuery. limit <= 0 defaults to 10.
@@ -788,12 +789,41 @@ func (r *noteRepository) ListMentions(userID, visibility string, following bool,
 	return notes, nil
 }
 
-func (r *noteRepository) SearchByTag(tag, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
+func (r *noteRepository) SearchByTag(tagGroups [][]string, viewerID string, limit int, sinceID, untilID string, filter model.NoteSearchTagFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	// tagGroups は upstream search-by-tag.ts の query (string[][]) と同じ
+	// 外側 OR・内側 AND の複合タグ検索 (#1683)。各 group は AND (= note.tags が
+	// group の全 tag を含む = `tags @> ARRAY[inner]`)、group 同士は OR。単一タグ
+	// 検索は [][]string{{tag}} を渡せばよい。空 tag は除外し、有効な group が
+	// 無ければ空結果を返す。
+	var conds []string
+	var args []any
+	for _, g := range tagGroups {
+		clean := make([]string, 0, len(g))
+		for _, t := range g {
+			if t != "" {
+				clean = append(clean, t)
+			}
+		}
+		if len(clean) == 0 {
+			continue
+		}
+		ph := make([]string, len(clean))
+		for i := range clean {
+			ph[i] = "?"
+		}
+		conds = append(conds, "tags @> ARRAY["+strings.Join(ph, ",")+"]::varchar[]")
+		for _, t := range clean {
+			args = append(args, t)
+		}
+	}
+	if len(conds) == 0 {
+		return []*model.Note{}, nil
+	}
 	q := preloadNoteRelations(r.db).
-		Where("tags @> ARRAY[?]::varchar[]", tag)
+		Where("("+strings.Join(conds, " OR ")+")", args...)
 	// visibility push-down: core/note.CanSeeNote と同じ条件を LIMIT 前に絞る。
 	// ListByUserIDFiltered / clip の ListByClipVisible と同じ可視性定義 (#1439)。
 	q = applyViewerVisibility(q, viewerID)
