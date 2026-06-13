@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/translate"
+	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -54,6 +56,67 @@ func postExtra(h func(echo.Context) error, body string, user *model.User) *httpt
 	}
 	_ = h(c)
 	return rec
+}
+
+// --- Clips (#1554) ---
+
+// notes/clips は note を含む public clip を Clip entity で返す。private clip と
+// 他人 clip(非public)は除外、public なら他人の clip も含む。
+func TestClips_ReturnsPublicClips(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	// clip ID は createdAt 復元のため valid aidx である必要がある。
+	idGen, _ := id.NewGenerator("aidx")
+	c1 := idGen.Generate(time.Now())
+	c2 := idGen.Generate(time.Now())
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	clipRepo := testutil.NewMockClipRepository()
+	clipRepo.Clips[c1] = &model.Clip{ID: c1, UserID: "u2", Name: "pub", IsPublic: true}
+	clipRepo.Clips[c2] = &model.Clip{ID: c2, UserID: "u1", Name: "priv", IsPublic: false}
+	clipNoteRepo := testutil.NewMockClipNoteRepository()
+	clipNoteRepo.Entries["e1"] = &model.ClipNote{ID: "e1", ClipID: c1, NoteID: "n1"}
+	clipNoteRepo.Entries["e2"] = &model.ClipNote{ID: "e2", ClipID: c2, NoteID: "n1"}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = &model.User{ID: "u2", Username: "u2", UsernameLower: "u2"}
+	h.SetUserRepo(userRepo)
+	h.SetClipRepos(clipRepo, clipNoteRepo, testutil.NewMockClipFavoriteRepository())
+
+	rec := postExtra(h.Clips, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	// public clip c1 のみ (private c2 は除外)。
+	require.Len(t, got, 1)
+	assert.Equal(t, c1, got[0]["id"])
+	assert.Equal(t, true, got[0]["isPublic"])
+	user, ok := got[0]["user"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "u2", user["username"])
+	shapetest.Assert(t, "Clip", got[0])
+}
+
+// note が存在しなければ NO_SUCH_NOTE (clips 固有 UUID 47db1a1c)。
+func TestClips_NoSuchNote(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	h.SetClipRepos(testutil.NewMockClipRepository(), testutil.NewMockClipNoteRepository(), testutil.NewMockClipFavoriteRepository())
+	rec := postExtra(h.Clips, `{"noteId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+	assert.Contains(t, rec.Body.String(), "47db1a1c-b0af-458d-8fb4-986e4efafe1e")
+}
+
+// clip repo 未配線時は旧 stub 互換で空配列。
+func TestClips_NoRepoDegrades(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	rec := postExtra(h.Clips, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
+}
+
+func TestClips_InvalidParam(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	h.SetClipRepos(testutil.NewMockClipRepository(), testutil.NewMockClipNoteRepository(), testutil.NewMockClipFavoriteRepository())
+	rec := postExtra(h.Clips, `{}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- Favorites ---

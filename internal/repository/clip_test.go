@@ -37,6 +37,33 @@ func TestClipRepository_CreateAndFindByID(t *testing.T) {
 	assert.Equal(t, "alpha clip", got.Name)
 }
 
+// #1554 ListPublicByIDs は ids のうち isPublic=true の clip のみ返す。
+func TestClipRepository_ListPublicByIDs(t *testing.T) {
+	repo := NewClipRepository(testDB)
+	user := insertTestUser(t, "u_clp_pub", "clippubuser")
+	defer cleanupUser(t, user.ID)
+
+	pub := newTestClip("clp_pub_1", user.ID, "public")
+	pub.IsPublic = true
+	priv := newTestClip("clp_pub_2", user.ID, "private")
+	priv.IsPublic = false
+	require.NoError(t, repo.Create(pub))
+	require.NoError(t, repo.Create(priv))
+	defer cleanupClip(t, pub.ID)
+	defer cleanupClip(t, priv.ID)
+
+	// 空 ids は nil。
+	got, err := repo.ListPublicByIDs(nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// public のみ返る (private は除外)。
+	got, err = repo.ListPublicByIDs([]string{pub.ID, priv.ID, "clp_missing"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, pub.ID, got[0].ID)
+}
+
 func TestClipRepository_FindByID_NotFound(t *testing.T) {
 	repo := NewClipRepository(testDB)
 	_, err := repo.FindByID("missing")

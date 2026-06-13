@@ -1196,6 +1196,8 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetUserRepo(userRepo)
 	notesHandler.SetModeratorChecker(roleService) // #1538: moderator note delete
 	notesHandler.SetUserListRepo(userListRepo)
+	notesHandler.SetClipRepos(clipRepo, clipNoteRepo, clipFavoriteRepo) // #1554: notes/clips
+
 	notehide.SetFollowingRepo(followingRepo)
 	// LocalTimeline / GlobalTimeline / HybridTimeline で ltlAvailable /
 	// gtlAvailable role policy を gate するために配線 (#1026)。匿名 viewer に

@@ -25,6 +25,10 @@ type ClipNoteRepository interface {
 	// CountByClip returns the number of notes in the given clip. Used by
 	// noteEachClipsLimit policy gate (#1029 PR-1 follow-up).
 	CountByClip(clipID string) (int64, error)
+	// ListClipIDsByNote returns the distinct clipIds that contain noteID,
+	// across all clips/owners. notes/clips が「この note を含む public clip」を
+	// 引くのに使う (upstream clipNotesRepository.findBy({noteId}))。
+	ListClipIDsByNote(noteID string) ([]string, error)
 }
 
 type clipNoteRepository struct {
@@ -61,6 +65,17 @@ func (r *clipNoteRepository) CountByClip(clipID string) (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+func (r *clipNoteRepository) ListClipIDsByNote(noteID string) ([]string, error) {
+	var ids []string
+	if err := r.db.Model(&model.ClipNote{}).
+		Where(`"noteId" = ?`, noteID).
+		Distinct(`"clipId"`).
+		Pluck(`"clipId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // ListByClip returns the entries for a clip with since/until pagination on

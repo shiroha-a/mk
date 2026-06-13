@@ -21,6 +21,10 @@ type ClipRepository interface {
 	// users/clips when the viewer is not the owner so LIMIT applies to the
 	// already-filtered set. Same cursor semantics as ListByUser.
 	ListPublicByUser(userID string, sinceID, untilID string, limit, offset int) ([]*model.Clip, error)
+	// ListPublicByIDs returns the public clips whose id is in ids (any owner).
+	// notes/clips が「note を含む public clip」を引くのに使う (upstream
+	// clipsRepository.findBy({id: In(...), isPublic: true}))。
+	ListPublicByIDs(ids []string) ([]*model.Clip, error)
 	IncrementCount(clipID, column string, delta int) error
 }
 
@@ -43,6 +47,17 @@ func (r *clipRepository) FindByID(id string) (*model.Clip, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+func (r *clipRepository) ListPublicByIDs(ids []string) ([]*model.Clip, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var clips []*model.Clip
+	if err := r.db.Where(`"id" IN ? AND "isPublic" = ?`, ids, true).Find(&clips).Error; err != nil {
+		return nil, err
+	}
+	return clips, nil
 }
 
 func (r *clipRepository) UpdateFields(clipID string, fields map[string]any) error {

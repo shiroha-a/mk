@@ -53,8 +53,14 @@ type Handler struct {
 	driveFolderRepo   repository.DriveFolderRepository
 	userRepo          repository.UserRepository
 	userListRepo      repository.UserListRepository
-	moderatorChecker  ModeratorChecker
-	bufReader         entity.BufferedReactionsReader
+	// clipRepo / clipNoteRepo / clipFavoriteRepo は notes/clips で「この note を
+	// 含む public clip」を Clip entity として返すのに使う (#1554)。未配線時は
+	// 空配列 fallback (旧 stub 互換)。
+	clipRepo         repository.ClipRepository
+	clipNoteRepo     repository.ClipNoteRepository
+	clipFavoriteRepo repository.ClipFavoriteRepository
+	moderatorChecker ModeratorChecker
+	bufReader        entity.BufferedReactionsReader
 	// ugcVisibility controls what unauthenticated visitors can see.
 	// "all" (default), "local", "none"
 	ugcVisibility string

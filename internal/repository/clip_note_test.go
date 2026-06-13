@@ -53,6 +53,47 @@ func TestClipNoteRepository_LifeCycle(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// #1554 ListClipIDsByNote は note を含む clip の distinct clipId を返す。
+func TestClipNoteRepository_ListClipIDsByNote(t *testing.T) {
+	clipRepo := NewClipRepository(testDB)
+	repo := NewClipNoteRepository(testDB)
+	noteRepo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_cnlist", "cnlistuser")
+	defer cleanupUser(t, user.ID)
+
+	c1 := newTestClip("clp_cnl_1", user.ID, "c1")
+	c2 := newTestClip("clp_cnl_2", user.ID, "c2")
+	require.NoError(t, clipRepo.Create(c1))
+	require.NoError(t, clipRepo.Create(c2))
+	defer cleanupClip(t, c1.ID)
+	defer cleanupClip(t, c2.ID)
+
+	n := &model.Note{ID: "n_cnl_1", UserID: user.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	other := &model.Note{ID: "n_cnl_2", UserID: user.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	require.NoError(t, noteRepo.Create(n))
+	require.NoError(t, noteRepo.Create(other))
+	defer cleanupNote(t, n.ID)
+	defer cleanupNote(t, other.ID)
+
+	// n は c1 と c2 の両方に、other は c1 のみに含める。
+	for _, cn := range []*model.ClipNote{
+		{ID: "cn_l1", ClipID: c1.ID, NoteID: n.ID},
+		{ID: "cn_l2", ClipID: c2.ID, NoteID: n.ID},
+		{ID: "cn_l3", ClipID: c1.ID, NoteID: other.ID},
+	} {
+		require.NoError(t, repo.Create(cn))
+		defer testDB.Exec(`DELETE FROM "clip_note" WHERE id = ?`, cn.ID)
+	}
+
+	ids, err := repo.ListClipIDsByNote(n.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{c1.ID, c2.ID}, ids)
+
+	ids, err = repo.ListClipIDsByNote("n_cnl_nonexistent")
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
 func TestClipNoteRepository_FindByPair_NotFound(t *testing.T) {
 	repo := NewClipNoteRepository(testDB)
 	_, err := repo.FindByPair("nope", "nope")

@@ -278,9 +278,67 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 
+// SetClipRepos wires the clip repos used by notes/clips (#1554)。未配線時は
+// 旧 stub 同様に空配列を返す。
+func (h *Handler) SetClipRepos(clip repository.ClipRepository, clipNote repository.ClipNoteRepository, clipFavorite repository.ClipFavoriteRepository) {
+	h.clipRepo = clip
+	h.clipNoteRepo = clipNote
+	h.clipFavoriteRepo = clipFavorite
+}
+
 // Clips handles POST /api/notes/clips.
+//
+// upstream notes/clips.ts: getNote で note 存在確認 (無ければ NO_SUCH_NOTE) →
+// clipNotesRepository.findBy({noteId}) で note を含む clip を引き →
+// clipsRepository.findBy({id IN, isPublic:true}) → clipEntityService.packMany。
+// owner / 他人を問わず「その note を含む public clip」を返す (#1554)。
 func (h *Handler) Clips(c echo.Context) error {
-	return c.JSON(http.StatusOK, []any{})
+	var req struct {
+		NoteID string `json:"noteId"`
+	}
+	if err := c.Bind(&req); err != nil || req.NoteID == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// clip repo 未配線時は旧 stub 互換で空配列。
+	if h.clipRepo == nil || h.clipNoteRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
+	// note 存在確認 (upstream getterService.getNote)。可視性は問わず存在のみ。
+	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "47db1a1c-b0af-458d-8fb4-986e4efafe1e"))
+	}
+	clipIDs, err := h.clipNoteRepo.ListClipIDsByNote(req.NoteID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	clips, err := h.clipRepo.ListPublicByIDs(clipIDs)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	viewer := middleware.GetUser(c)
+	out := make([]map[string]any, 0, len(clips))
+	for _, cl := range clips {
+		// owner は clip ごとに異なりうる (note は複数 user の clip に入りうる)。
+		var owner *model.User
+		if h.userRepo != nil {
+			owner, _ = h.userRepo.FindByID(cl.UserID)
+		}
+		// favoritedCount は常時、isFavorited は認証 viewer のみ、notesCount は
+		// owner 閲覧時のみ (#1562、upstream ClipEntityService.pack)。
+		extras := entity.ClipExtras{ShowNotesCount: viewer != nil && viewer.ID == cl.UserID}
+		if h.clipFavoriteRepo != nil {
+			if n, err := h.clipFavoriteRepo.CountByClip(cl.ID); err == nil {
+				extras.FavoritedCount = n
+			}
+			if viewer != nil {
+				if ok, err := h.clipFavoriteRepo.Exists(viewer.ID, cl.ID); err == nil {
+					extras.IsFavorited = &ok
+				}
+			}
+		}
+		out = append(out, entity.PackClip(cl, h.idGen, owner, extras))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // Translate handles POST /api/notes/translate.

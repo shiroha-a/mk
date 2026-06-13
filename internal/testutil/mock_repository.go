@@ -3388,6 +3388,21 @@ func (m *MockClipRepository) ListPublicByUser(userID, sinceID, untilID string, l
 	return paginateClips(rows, sinceID, untilID, limit, offset), nil
 }
 
+// ListPublicByIDs returns the public clips whose id is in ids (any owner).
+func (m *MockClipRepository) ListPublicByIDs(ids []string) ([]*model.Clip, error) {
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	var rows []*model.Clip
+	for _, c := range m.Clips {
+		if _, ok := want[c.ID]; ok && c.IsPublic {
+			rows = append(rows, c)
+		}
+	}
+	return rows, nil
+}
+
 // paginateClips applies the same ordering / limit / cursor-vs-offset rules as
 // the real clipRepository so mock-based tests exercise the upstream
 // makePaginationQuery semantics. ASC ordering kicks in when sinceID is set
@@ -3494,6 +3509,21 @@ func (m *MockClipNoteRepository) CountByClip(clipID string) (int64, error) {
 		}
 	}
 	return count, nil
+}
+
+// ListClipIDsByNote returns the distinct clipIds containing noteID.
+func (m *MockClipNoteRepository) ListClipIDsByNote(noteID string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, cn := range m.Entries {
+		if cn.NoteID == noteID {
+			if _, dup := seen[cn.ClipID]; !dup {
+				seen[cn.ClipID] = struct{}{}
+				ids = append(ids, cn.ClipID)
+			}
+		}
+	}
+	return ids, nil
 }
 
 func (m *MockClipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
