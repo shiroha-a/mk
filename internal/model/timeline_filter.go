@@ -44,4 +44,10 @@ type TimelineDBFilter struct {
 	// (upstream generateMutedUserQueryForNotes の mutedInstances 分岐)。host は
 	// lowercase 前提 (AP canonical)。
 	MutedInstances []string
+	// FollowedChannelIDs は viewer がフォローしている channel の id 一覧
+	// (mute 済は除外、#1686)。ListHomeTimeline でのみ使う。空でなければ home に
+	// `channelId IN (...)` の followed channel note を含める (upstream
+	// timeline.ts の followingChannelIds 分岐)。空なら従来どおり channelId IS NULL
+	// の note のみ (= followed user の channel note は home から除外される)。
+	FollowedChannelIDs []string
 }

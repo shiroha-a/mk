@@ -72,9 +72,14 @@ func TestNoteRepository_ListHomeTimeline_MutedChannelFilter(t *testing.T) {
 	defer cleanupNote(t, inMuted.ID)
 	defer cleanupNote(t, inAllowed.ID)
 
+	// #1686: channel note は viewer が follow している channel のものだけ home
+	// に含まれる (follow user の channel note は除外)。両 channel を follow した
+	// 上で、muted channel の note は MutedChannelIDs 側で除外されることを検証する
+	// (= mute が channel-follow より優先)。
 	filter := model.TimelineDBFilter{
-		ViewerID:        viewer.ID,
-		MutedChannelIDs: []string{mutedCh.ID},
+		ViewerID:           viewer.ID,
+		MutedChannelIDs:    []string{mutedCh.ID},
+		FollowedChannelIDs: []string{mutedCh.ID, allowedCh.ID},
 	}
 	rows, err := repo.ListHomeTimeline(viewer.ID, 50, "", "", filter)
 	require.NoError(t, err)
@@ -84,10 +89,8 @@ func TestNoteRepository_ListHomeTimeline_MutedChannelFilter(t *testing.T) {
 		ids[n.ID] = true
 	}
 	assert.True(t, ids[plain.ID], "plain note must be included")
-	assert.True(t, ids[inAllowed.ID], "note in allowed channel must be included")
-	assert.False(t, ids[inMuted.ID], "note in muted channel must be excluded")
-	// OR 節のバグがあると、viewer が follow していない他ユーザーの note も
-	// 返ってしまう。ここでは他ユーザーがいないので fan-out テストは省略。
+	assert.True(t, ids[inAllowed.ID], "note in followed allowed channel must be included")
+	assert.False(t, ids[inMuted.ID], "note in muted channel must be excluded even when followed")
 }
 
 // #1681 applyTimelineFilter の被block / reply著者mute / instance-mute を
@@ -193,6 +196,65 @@ func TestNoteRepository_ListHomeTimeline_SuspendedFilter(t *testing.T) {
 	assert.False(t, ids[bySusp.ID], "suspended author の note は除外")
 	assert.False(t, ids[replyToSusp.ID], "suspended user 宛 reply は除外")
 	assert.False(t, ids[renoteOfSusp.ID], "suspended user の renote/quote は除外")
+}
+
+// TestNoteRepository_ListHomeTimeline_FollowedChannels は #1686 の home channel
+// 包含を検証する。follow 中 channel の note は home に含め、follow 中 user が
+// channel に投稿した note は (その channel を follow していない限り) home から
+// 除外される (upstream timeline.ts の followingChannelIds 分岐)。
+func TestNoteRepository_ListHomeTimeline_FollowedChannels(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "u_hc_v", "hcviewer")
+	fu := insertTestUser(t, "u_hc_fu", "hcfollowed")
+	x := insertTestUser(t, "u_hc_x", "hcother")
+	defer cleanupUser(t, viewer.ID)
+	defer cleanupUser(t, fu.ID)
+	defer cleanupUser(t, x.ID)
+
+	// viewer は fu のみ user-follow する。
+	require.NoError(t, testDB.Exec(`INSERT INTO "following" (id, "followerId", "followeeId") VALUES (?, ?, ?)`, "flw_hc", viewer.ID, fu.ID).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "flw_hc")
+
+	txt := "hi"
+	chFollowed := "ch_followed"
+	chOther := "ch_other"
+	mkNote := func(id, uid string, channelID *string) *model.Note {
+		n := &model.Note{ID: id, UserID: uid, Text: &txt, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), ChannelID: channelID}
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+		return n
+	}
+	plain := mkNote("n_hc_plain", fu.ID, nil)                   // followed user の通常 note
+	fuInOther := mkNote("n_hc_fuoth", fu.ID, &chOther)          // followed user の非follow channel note
+	inFollowed := mkNote("n_hc_inf", x.ID, &chFollowed)         // follow 中 channel の note (投稿者は未follow)
+	inOther := mkNote("n_hc_inoth", x.ID, &chOther)             // 非follow channel の note
+	ownInFollowed := mkNote("n_hc_own", viewer.ID, &chFollowed) // 自分の follow 中 channel note
+
+	collect := func(followed []string) map[string]bool {
+		rows, err := repo.ListHomeTimeline(viewer.ID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID, FollowedChannelIDs: followed})
+		require.NoError(t, err)
+		ids := map[string]bool{}
+		for _, n := range rows {
+			ids[n.ID] = true
+		}
+		return ids
+	}
+
+	// follow 中 channel あり: follow channel note は含む、follow user の channel
+	// note (非follow channel) は除外。
+	withCh := collect([]string{chFollowed})
+	assert.True(t, withCh[plain.ID], "通常 note は含まれる")
+	assert.False(t, withCh[fuInOther.ID], "follow user の非follow channel note は除外")
+	assert.True(t, withCh[inFollowed.ID], "follow 中 channel の note は含まれる")
+	assert.False(t, withCh[inOther.ID], "非follow channel の note は除外")
+	assert.True(t, withCh[ownInFollowed.ID], "自分の follow 中 channel note は含まれる")
+
+	// follow 中 channel なし: 全 channel note 除外、通常 note のみ。
+	noCh := collect(nil)
+	assert.True(t, noCh[plain.ID], "通常 note は含まれる")
+	assert.False(t, noCh[fuInOther.ID], "channel note は全除外")
+	assert.False(t, noCh[inFollowed.ID], "channel note は全除外")
+	assert.False(t, noCh[ownInFollowed.ID], "channel note は全除外")
 }
 
 // TestNoteRepository_ListHomeTimeline_WithRepliesFalse_SelfThreadOnly は #1047

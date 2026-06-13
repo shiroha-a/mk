@@ -60,6 +60,12 @@ type TimelineFilter struct {
 	// MutedInstances は viewer が mute した instance host (#1681、lowercase)。
 	// note/reply/renote のいずれかの author host が一致する note を除外する。
 	MutedInstances []string
+	// FollowedChannelIDs は viewer がフォローしている channel の id (mute 済は
+	// 除く、#1686)。home timeline でのみ使う。in-memory ApplyFilter では参照
+	// しない (Redis の home list は fanout が channel-follower の home へ push
+	// するため既に正しい)。DB fallback の ListHomeTimeline が
+	// `channelId IN (...)` で followed channel の note を home に含める。
+	FollowedChannelIDs []string
 }
 
 // boolDefault returns *b if non-nil, else def.

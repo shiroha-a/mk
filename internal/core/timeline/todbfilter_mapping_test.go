@@ -30,6 +30,7 @@ func TestToDBFilter_AllFieldsMapped(t *testing.T) {
 		IncludeRenotedMyNotes: &includeRenotedMyNotes,
 		IncludeLocalRenotes:   &includeLocalRenotes,
 		MutedChannelIDs:       []string{"ch1", "ch2"},
+		FollowedChannelIDs:    []string{"chf1", "chf2"},
 	}
 
 	out := toDBFilter(in, "viewer1")
@@ -51,6 +52,7 @@ func TestToDBFilter_AllFieldsMapped(t *testing.T) {
 		assert.False(t, *out.IncludeLocalRenotes)
 	}
 	assert.Equal(t, []string{"ch1", "ch2"}, out.MutedChannelIDs)
+	assert.Equal(t, []string{"chf1", "chf2"}, out.FollowedChannelIDs)
 
 	// viewerID 有なら mute / renote-mute の両 subquery が有効化される。
 	assert.True(t, out.UseMutingSubquery)

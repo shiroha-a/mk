@@ -94,6 +94,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
 			BlockerIDs:            h.loadBlockerIDs(viewer),
 			MutedInstances:        h.loadMutedInstances(viewer),
+			FollowedChannelIDs:    h.loadFollowedChannelIDs(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -193,6 +194,55 @@ func (h *Handler) loadMutedChannelIDs(viewer *model.User) []string {
 		ids = append(ids, m.ChannelID)
 	}
 	return ids
+}
+
+// loadFollowedChannelIDs returns the channel IDs the viewer follows, excluding
+// muted channels (#1686, upstream timeline.ts の followingChannelIds から
+// mutingChannelIds を除く分岐)。home timeline でのみ使い、空なら home は
+// channelId IS NULL の note のみ。anonymous viewer / repo 未配線 / 取得失敗時は
+// nil (best-effort、warning ログ)。
+func (h *Handler) loadFollowedChannelIDs(viewer *model.User) []string {
+	if viewer == nil || h.channelFollowingRepo == nil {
+		return nil
+	}
+	// 1 user の follow channel 数は通常少ないが、暴走防止に上限で打ち切る。
+	const pageSize = 100
+	const maxFollowedChannels = 500
+	var followed []string
+	for offset := 0; offset < maxFollowedChannels; offset += pageSize {
+		rows, err := h.channelFollowingRepo.ListFollowed(viewer.ID, "", "", pageSize, offset)
+		if err != nil {
+			slog.Warn("timeline: failed to load followed channels", "userId", viewer.ID, "err", err)
+			return nil
+		}
+		for _, f := range rows {
+			followed = append(followed, f.FolloweeID)
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	if len(followed) == 0 {
+		return nil
+	}
+	muted := h.loadMutedChannelIDs(viewer)
+	if len(muted) == 0 {
+		return followed
+	}
+	mutedSet := make(map[string]struct{}, len(muted))
+	for _, id := range muted {
+		mutedSet[id] = struct{}{}
+	}
+	out := followed[:0]
+	for _, id := range followed {
+		if _, m := mutedSet[id]; !m {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // loadMutedUserIDs returns userIDs that viewer has muted (active mutes only,

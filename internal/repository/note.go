@@ -1029,10 +1029,28 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 
 // ListHomeTimeline returns notes by the user and users they follow.
 // DBフォールバック用。Redisが空のときに使う。
+//
+// channel note の扱い (#1686, upstream timeline.ts の followingChannelIds 分岐):
+//   - followed user の note は `channelId IS NULL` のものだけ home に出す
+//     (= followed user が channel に投稿しても、その channel を follow して
+//     いなければ home には出さない)。
+//   - filter.FollowedChannelIDs が非空なら、follow 中 channel の note を
+//     `channelId IN (...)` で追加で含める (mute 済 channel は handler 側で
+//     除外済)。
 func (r *noteRepository) ListHomeTimeline(userID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error) {
-	q := preloadNoteRelations(r.db).
-		Where(`("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "visibility" IN ('public','home','followers')`, userID, userID).
-		Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit)
+	q := preloadNoteRelations(r.db)
+	if len(filter.FollowedChannelIDs) > 0 {
+		q = q.Where(
+			`(("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL OR "channelId" IN ?) AND "visibility" IN ('public','home','followers')`,
+			userID, userID, filter.FollowedChannelIDs,
+		)
+	} else {
+		q = q.Where(
+			`("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL AND "visibility" IN ('public','home','followers')`,
+			userID, userID,
+		)
+	}
+	q = q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit)
 	if sinceID != "" {
 		q = q.Where(`"id" > ?`, sinceID)
 	}

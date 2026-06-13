@@ -222,6 +222,9 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		// 渡す (#1681)。anon viewer では空。
 		BlockerIDs:     f.BlockerIDs,
 		MutedInstances: f.MutedInstances,
+		// followed channel (mute 済除外) を home DB fallback に渡す (#1686)。
+		// home 以外の timeline では handler が空のまま渡す。
+		FollowedChannelIDs: f.FollowedChannelIDs,
 	}
 }
 

@@ -251,6 +251,8 @@ func (s *Server) setupRoutes() {
 	timelineFanoutHook.SetCacheLimitsProvider(coretimeline.NewMetaRepoCacheLimits(metaRepo))
 	timelineFanoutHook.SetUserListRepo(userListRepo)
 	timelineFanoutHook.SetUserRolesLookup(roleService) // #1549: roleTimeline fanout
+	// #1686: channel note を channel follower の home timeline へ fanout する。
+	timelineFanoutHook.SetChannelFollowerRepo(channelFollowingRepo)
 	noteCreateService.SetFanoutHook(timelineFanoutHook)
 	// #379: Delete (inbound activity / local notes/delete どちらも) で
 	// Redis fanout timelines から note ID を LREM するための hook。
@@ -1181,6 +1183,8 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetNoteReactionRepo(reactionRepo)
 	notesHandler.SetChannelRepo(channelRepo)
 	notesHandler.SetChannelMutingRepo(channelMutingRepo)
+	// home timeline で follow 中 channel の note を含める (#1686)。
+	notesHandler.SetChannelFollowingRepo(channelFollowingRepo)
 	// timeline endpoint で muted user の note を除外する filter (#874)。
 	// 未配線だと user mute は read 時に効かず、cache のみ DB 整合の状態
 	// になる security/UX regression が残る。production では必ず wire する。

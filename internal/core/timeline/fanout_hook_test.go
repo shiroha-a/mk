@@ -121,6 +121,71 @@ func TestFanoutHook_FanoutsToFollowers(t *testing.T) {
 	}
 }
 
+// #1686: channel note は author の (user) follower ではなく channel の follower
+// の home へ fanout する。author home / LTL / GTL / user-follower home には乗せ
+// ない (upstream pushToTl の channelId 分岐)。
+func TestFanoutHook_ChannelNoteToChannelFollowers(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	// author は user-follower "uf" を持つが、channel note では uf の home に push
+	// されないことを確認する。
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "uf", FolloweeID: "author"}
+	chMock := testutil.NewMockChannelFollowingRepository()
+	chMock.Followings["cf1"] = &model.ChannelFollowing{ID: "cf1", FolloweeID: "ch1", FollowerID: "cf"}
+	h.SetChannelFollowerRepo(chMock)
+
+	noteID := idGen.Generate(time.Now())
+	ch := "ch1"
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &ch}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	// channel follower "cf" の home に入る
+	out, err := fanout.Get(ctx, HomeTimelineName("cf"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "channel follower home should receive channel note")
+
+	// author home / user-follower home / LTL / GTL には入らない
+	for _, name := range []Name{
+		HomeTimelineName("author"),
+		HomeTimelineName("uf"),
+		LocalTimeline,
+		GlobalTimeline,
+	} {
+		out, err := fanout.Get(ctx, name, "", "", 10)
+		require.NoError(t, err)
+		assert.Empty(t, out, "channel note should NOT be in %q", name)
+	}
+
+	// user timeline (step 1) には引き続き入る (users/notes 互換、scope 外)。
+	out, err = fanout.Get(ctx, UserTimelineName("author"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "author user timeline still receives channel note")
+}
+
+// #1686: channel note の OnNoteDeleted は channel follower の home からのみ掃除
+// する (push と対称)。
+func TestFanoutHook_OnNoteDeleted_ChannelNote(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+	chMock := testutil.NewMockChannelFollowingRepository()
+	chMock.Followings["cf1"] = &model.ChannelFollowing{ID: "cf1", FolloweeID: "ch1", FollowerID: "cf"}
+	h.SetChannelFollowerRepo(chMock)
+
+	noteID := idGen.Generate(time.Now())
+	ch := "ch1"
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &ch}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+	// push 済を確認
+	out, err := fanout.Get(ctx, HomeTimelineName("cf"), "", "", 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{noteID}, out)
+
+	h.OnNoteDeleted(n, &model.User{ID: "author"})
+	out, err = fanout.Get(ctx, HomeTimelineName("cf"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "channel follower home should be cleaned after delete")
+}
+
 // 他人宛 reply は WithReplies=true の follower にだけ push される (#1047)。
 // upstream Misskey TS の `following.withReplies` setting と互換にするため、
 // fanout 段階で per-follower flag を見て push を制御する。

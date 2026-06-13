@@ -74,3 +74,59 @@ func TestLoadRenoteMutedUserIDs_EmptyResultReturnsNil(t *testing.T) {
 	h.SetRenoteMutingRepo(repo)
 	assert.Nil(t, h.loadRenoteMutedUserIDs(&model.User{ID: "viewer"}))
 }
+
+// loadFollowedChannelIDs は viewer が follow している channel id を返し、mute
+// 済 channel を除外する (#1686)。
+func TestLoadFollowedChannelIDs(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockChannelFollowingRepository()
+	repo.Followings["cf1"] = &model.ChannelFollowing{ID: "cf1", FollowerID: "viewer", FolloweeID: "ch-f1"}
+	repo.Followings["cf2"] = &model.ChannelFollowing{ID: "cf2", FollowerID: "viewer", FolloweeID: "ch-f2"}
+	repo.Followings["cf3"] = &model.ChannelFollowing{ID: "cf3", FollowerID: "other", FolloweeID: "ch-x"}
+	h.SetChannelFollowingRepo(repo)
+	// ch-f2 は mute されているので除外される。
+	muting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, muting.Create(&model.ChannelMuting{ID: "m1", UserID: "viewer", ChannelID: "ch-f2"}))
+	h.SetChannelMutingRepo(muting)
+
+	ids := h.loadFollowedChannelIDs(&model.User{ID: "viewer"})
+	assert.ElementsMatch(t, []string{"ch-f1"}, ids)
+}
+
+func TestLoadFollowedChannelIDs_NoMute(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockChannelFollowingRepository()
+	repo.Followings["cf1"] = &model.ChannelFollowing{ID: "cf1", FollowerID: "viewer", FolloweeID: "ch-f1"}
+	repo.Followings["cf2"] = &model.ChannelFollowing{ID: "cf2", FollowerID: "viewer", FolloweeID: "ch-f2"}
+	h.SetChannelFollowingRepo(repo)
+	ids := h.loadFollowedChannelIDs(&model.User{ID: "viewer"})
+	assert.ElementsMatch(t, []string{"ch-f1", "ch-f2"}, ids)
+}
+
+func TestLoadFollowedChannelIDs_AllMutedReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockChannelFollowingRepository()
+	repo.Followings["cf1"] = &model.ChannelFollowing{ID: "cf1", FollowerID: "viewer", FolloweeID: "ch-f1"}
+	h.SetChannelFollowingRepo(repo)
+	muting := testutil.NewMockChannelMutingRepository()
+	require.NoError(t, muting.Create(&model.ChannelMuting{ID: "m1", UserID: "viewer", ChannelID: "ch-f1"}))
+	h.SetChannelMutingRepo(muting)
+	assert.Nil(t, h.loadFollowedChannelIDs(&model.User{ID: "viewer"}))
+}
+
+func TestLoadFollowedChannelIDs_AnonymousReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetChannelFollowingRepo(testutil.NewMockChannelFollowingRepository())
+	assert.Nil(t, h.loadFollowedChannelIDs(nil))
+}
+
+func TestLoadFollowedChannelIDs_RepoUnsetReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	assert.Nil(t, h.loadFollowedChannelIDs(&model.User{ID: "viewer"}))
+}
+
+func TestLoadFollowedChannelIDs_EmptyResultReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetChannelFollowingRepo(testutil.NewMockChannelFollowingRepository())
+	assert.Nil(t, h.loadFollowedChannelIDs(&model.User{ID: "viewer"}))
+}

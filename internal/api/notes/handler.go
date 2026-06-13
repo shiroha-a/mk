@@ -46,8 +46,12 @@ type Handler struct {
 	noteReactionRepo  repository.NoteReactionRepository
 	channelRepo       repository.ChannelRepository
 	channelMutingRepo repository.ChannelMutingRepository
-	mutingRepo        repository.MutingRepository
-	renoteMutingRepo  repository.RenoteMutingRepository
+	// channelFollowingRepo は home timeline で follow 中 channel の note を
+	// 含めるため、viewer の followed channel id を引くのに使う (#1686)。
+	// 未配線時は home に followed channel note を含めない (= channelId IS NULL のみ)。
+	channelFollowingRepo repository.ChannelFollowingRepository
+	mutingRepo           repository.MutingRepository
+	renoteMutingRepo     repository.RenoteMutingRepository
 	// blockingRepo は notes/children・replies・renotes の list 応答で被block /
 	// mute / instance-mute filter を適用するのに使う (#1554、upstream
 	// generateBaseNoteFilteringQuery 相当)。未配線時は filter skip。
@@ -127,6 +131,12 @@ func (h *Handler) SetPolicyProvider(p TimelinePolicyProvider) {
 // can exclude notes posted to channels the viewer has muted.
 func (h *Handler) SetChannelMutingRepo(r repository.ChannelMutingRepository) {
 	h.channelMutingRepo = r
+}
+
+// SetChannelFollowingRepo attaches a ChannelFollowingRepository so the home
+// timeline includes notes from channels the viewer follows (#1686).
+func (h *Handler) SetChannelFollowingRepo(r repository.ChannelFollowingRepository) {
+	h.channelFollowingRepo = r
 }
 
 // SetMutingRepo attaches a MutingRepository so timeline handlers can exclude

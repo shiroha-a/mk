@@ -63,15 +63,25 @@ type UserRolesLookup interface {
 	GetUserRoles(userID string) ([]*model.Role, error)
 }
 
+// ChannelFollowerLister abstracts cursor-paged "who follows this channel?" for
+// channel note home fanout (#1686). 循環依存回避のため narrow interface で受け
+// 取る (実装は repository.ChannelFollowingRepository)。channel note は author の
+// follower ではなく channel の follower の home へ push する (upstream pushToTl
+// の channelId 分岐)。
+type ChannelFollowerLister interface {
+	ListFollowerIDsPage(channelID, afterRowID string, limit int) (ids []string, nextCursor string, err error)
+}
+
 // FanoutHook implements note.TimelineFanoutHook by pushing newly-created notes
 // onto the appropriate Redis timelines (home/local/global/user).
 type FanoutHook struct {
-	fanout        *FanoutTimelineService
-	followingRepo repository.FollowingRepository
-	publisher     StreamingPublisher
-	limits        MetaCacheLimitsProvider
-	userListRepo  UserListMemberLookup
-	userRoles     UserRolesLookup
+	fanout              *FanoutTimelineService
+	followingRepo       repository.FollowingRepository
+	publisher           StreamingPublisher
+	limits              MetaCacheLimitsProvider
+	userListRepo        UserListMemberLookup
+	userRoles           UserRolesLookup
+	channelFollowerRepo ChannelFollowerLister
 }
 
 // NewFanoutHook constructs a FanoutHook.
@@ -97,6 +107,13 @@ func (h *FanoutHook) SetCacheLimitsProvider(p MetaCacheLimitsProvider) {
 // triggers push to userListTimeline:<listId> topics (#330).
 func (h *FanoutHook) SetUserListRepo(r UserListMemberLookup) {
 	h.userListRepo = r
+}
+
+// SetChannelFollowerRepo attaches a ChannelFollowerLister so that channel note
+// creation fans the note out to each channel-follower's home timeline (#1686).
+// Without it channel notes only reach the channel timeline / channel WS.
+func (h *FanoutHook) SetChannelFollowerRepo(r ChannelFollowerLister) {
+	h.channelFollowerRepo = r
 }
 
 // SetUserRolesLookup attaches a UserRolesLookup so that public note creation
@@ -127,32 +144,44 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	}
 	h.pushWithLimit(ctx, UserTimelineName(author.ID), n.ID, resolveCap(limits, userTimelineKind))
 
-	// 2. ホームタイムライン: 投稿者本人 + フォロワー全員
-	//    follower一覧の取得は1ページずつ繰り返し読みだす
+	// 2-5. channel note か否かで home/local/global/userList の配信先を分ける
+	//      (#1686, upstream NoteCreateService.pushToTl の channelId 分岐)。
 	homeCap := resolveCap(limits, HomeTimelineKind)
-	h.pushWithLimit(ctx, HomeTimelineName(author.ID), n.ID, homeCap)
-	h.publishNote("homeTimeline:"+author.ID, n, author)
-	if h.followingRepo != nil && shouldFanoutToFollowers(n) {
-		h.fanoutToFollowersAndStream(ctx, author.ID, n, author, homeCap)
-	}
+	if n.ChannelID != nil && *n.ChannelID != "" {
+		// channel note は author の follower ではなく channel の follower の home
+		// へ fanout する。LTL/GTL/userList へは出さない (channel note はこれらの
+		// timeline に乗らない = upstream 互換、LTL/GTL の DB query も channelId IS
+		// NULL で除外している)。channel WS への live publish は下記 step 6 が担う。
+		if h.channelFollowerRepo != nil {
+			h.fanoutToChannelFollowers(ctx, *n.ChannelID, n.ID, homeCap)
+		}
+	} else {
+		// 2. ホームタイムライン: 投稿者本人 + フォロワー全員
+		//    follower一覧の取得は1ページずつ繰り返し読みだす
+		h.pushWithLimit(ctx, HomeTimelineName(author.ID), n.ID, homeCap)
+		h.publishNote("homeTimeline:"+author.ID, n, author)
+		if h.followingRepo != nil && shouldFanoutToFollowers(n) {
+			h.fanoutToFollowersAndStream(ctx, author.ID, n, author, homeCap)
+		}
 
-	// 3. ローカルタイムライン: ローカル投稿でvisibility=publicのみ。
-	// home visibilityはフォロワー向けなのでLTLには出さない (本家と同じ挙動)。
-	if author.Host == nil && n.Visibility == model.NoteVisibilityPublic {
-		h.pushWithLimit(ctx, LocalTimeline, n.ID, MaxTimelineLength)
-		h.publishNote("localTimeline", n, author)
-	}
+		// 3. ローカルタイムライン: ローカル投稿でvisibility=publicのみ。
+		// home visibilityはフォロワー向けなのでLTLには出さない (本家と同じ挙動)。
+		if author.Host == nil && n.Visibility == model.NoteVisibilityPublic {
+			h.pushWithLimit(ctx, LocalTimeline, n.ID, MaxTimelineLength)
+			h.publishNote("localTimeline", n, author)
+		}
 
-	// 4. グローバルタイムライン: visibility=publicのみ
-	if n.Visibility == model.NoteVisibilityPublic {
-		h.pushWithLimit(ctx, GlobalTimeline, n.ID, MaxTimelineLength)
-		h.publishNote("globalTimeline", n, author)
-	}
+		// 4. グローバルタイムライン: visibility=publicのみ
+		if n.Visibility == model.NoteVisibilityPublic {
+			h.pushWithLimit(ctx, GlobalTimeline, n.ID, MaxTimelineLength)
+			h.publishNote("globalTimeline", n, author)
+		}
 
-	// 5. ユーザーリストタイムライン: 投稿者が属するリストへ配信
-	if h.userListRepo != nil && shouldFanoutToFollowers(n) {
-		listCap := resolveCap(limits, UserListTimelineKind)
-		h.fanoutToUserLists(ctx, n, author, listCap)
+		// 5. ユーザーリストタイムライン: 投稿者が属するリストへ配信
+		if h.userListRepo != nil && shouldFanoutToFollowers(n) {
+			listCap := resolveCap(limits, UserListTimelineKind)
+			h.fanoutToUserLists(ctx, n, author, listCap)
+		}
 	}
 
 	// 6. チャンネルタイムライン (Misskey channel): channel:<channelId> へ live
@@ -469,6 +498,62 @@ func (h *FanoutHook) fanoutToUserLists(ctx context.Context, n *model.Note, autho
 	}
 }
 
+// channelFollowerPageSize は channel follower fanout の cursor batch サイズ。
+// #320 の channel unread fanout (channel_service.go) と同値に揃える。
+const channelFollowerPageSize = 500
+
+// fanoutToChannelFollowers pushes a channel note ID onto every channel
+// follower's home timeline Redis list (#1686, upstream pushToTl の channelId
+// 分岐)。cursor-based pagination で全 follower を走査するため popular channel
+// でも O(followers / pageSize) 回のラウンドトリップで完了する。push 先は home
+// list のみ (live WS 配信は channel:<id> topic が担当するため home WS への
+// per-follower publish は行わない)。reply gating は適用しない (upstream の
+// channel 分岐も follower 全員へ push する)。
+func (h *FanoutHook) fanoutToChannelFollowers(ctx context.Context, channelID, noteID string, homeCap int) {
+	cursor := ""
+	for {
+		ids, next, err := h.channelFollowerRepo.ListFollowerIDsPage(channelID, cursor, channelFollowerPageSize)
+		if err != nil {
+			slog.Warn("fanoutToChannelFollowers: list channel followers failed", "err", err, "channel", channelID)
+			return
+		}
+		if len(ids) == 0 {
+			return
+		}
+		for _, fid := range ids {
+			h.pushWithLimit(ctx, HomeTimelineName(fid), noteID, homeCap)
+		}
+		if next == "" {
+			return
+		}
+		cursor = next
+	}
+}
+
+// removeFromChannelFollowerHomes removes a channel note ID from every channel
+// follower's home timeline list, mirroring fanoutToChannelFollowers for
+// OnNoteDeleted (#1686).
+func (h *FanoutHook) removeFromChannelFollowerHomes(ctx context.Context, channelID, noteID string) {
+	cursor := ""
+	for {
+		ids, next, err := h.channelFollowerRepo.ListFollowerIDsPage(channelID, cursor, channelFollowerPageSize)
+		if err != nil {
+			slog.Warn("removeFromChannelFollowerHomes: list channel followers failed", "err", err, "channel", channelID)
+			return
+		}
+		if len(ids) == 0 {
+			return
+		}
+		for _, fid := range ids {
+			h.removeBestEffort(ctx, HomeTimelineName(fid), noteID)
+		}
+		if next == "" {
+			return
+		}
+		cursor = next
+	}
+}
+
 // pushWithLimit wraps Push with error logging and an explicit cap.
 func (h *FanoutHook) pushWithLimit(ctx context.Context, name Name, id string, maxLen int) {
 	if err := h.fanout.Push(ctx, name, id, maxLen); err != nil {
@@ -490,25 +575,35 @@ func (h *FanoutHook) OnNoteDeleted(n *model.Note, author *model.User) {
 	// 1. ユーザータイムライン
 	h.removeBestEffort(ctx, UserTimelineName(author.ID), n.ID)
 
-	// 2. ホームタイムライン: 投稿者本人 + フォロワー全員
-	h.removeBestEffort(ctx, HomeTimelineName(author.ID), n.ID)
-	if h.followingRepo != nil && shouldFanoutToFollowers(n) {
-		h.removeFromFollowerHomes(ctx, author.ID, n.ID)
-	}
+	// 2-5. OnNoteCreated と対称に、channel note か否かで掃除先を分ける (#1686)。
+	if n.ChannelID != nil && *n.ChannelID != "" {
+		// channel note は channel follower の home にのみ push されているので
+		// そこから掃除する (author home / user-follower / LTL / GTL / userList
+		// には push していない)。
+		if h.channelFollowerRepo != nil {
+			h.removeFromChannelFollowerHomes(ctx, *n.ChannelID, n.ID)
+		}
+	} else {
+		// 2. ホームタイムライン: 投稿者本人 + フォロワー全員
+		h.removeBestEffort(ctx, HomeTimelineName(author.ID), n.ID)
+		if h.followingRepo != nil && shouldFanoutToFollowers(n) {
+			h.removeFromFollowerHomes(ctx, author.ID, n.ID)
+		}
 
-	// 3. ローカルタイムライン
-	if author.Host == nil && n.Visibility == model.NoteVisibilityPublic {
-		h.removeBestEffort(ctx, LocalTimeline, n.ID)
-	}
+		// 3. ローカルタイムライン
+		if author.Host == nil && n.Visibility == model.NoteVisibilityPublic {
+			h.removeBestEffort(ctx, LocalTimeline, n.ID)
+		}
 
-	// 4. グローバルタイムライン
-	if n.Visibility == model.NoteVisibilityPublic {
-		h.removeBestEffort(ctx, GlobalTimeline, n.ID)
-	}
+		// 4. グローバルタイムライン
+		if n.Visibility == model.NoteVisibilityPublic {
+			h.removeBestEffort(ctx, GlobalTimeline, n.ID)
+		}
 
-	// 5. ユーザーリストタイムライン
-	if h.userListRepo != nil && shouldFanoutToFollowers(n) {
-		h.removeFromUserLists(ctx, author.ID, n.ID)
+		// 5. ユーザーリストタイムライン
+		if h.userListRepo != nil && shouldFanoutToFollowers(n) {
+			h.removeFromUserLists(ctx, author.ID, n.ID)
+		}
 	}
 }
 
