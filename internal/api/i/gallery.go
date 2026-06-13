@@ -79,6 +79,7 @@ func (h *Handler) GalleryLikes(c echo.Context) error {
 		postByID[p.ID] = p
 	}
 	out := make([]map[string]any, 0, len(likes))
+	liked := true // この経路の post は viewer が like 済 (= isLiked true)。
 	for _, l := range likes {
 		// upstream Misskey TS は post が削除済の like row を Promise.all
 		// + pack の null フィルタで弾く。frontend の MkGalleryPostPreview
@@ -89,15 +90,42 @@ func (h *Handler) GalleryLikes(c echo.Context) error {
 		}
 		out = append(out, map[string]any{
 			"id":   l.ID,
-			"post": packGalleryPost(p, h.idGen),
+			"post": packGalleryPost(p, h.idGen, h.resolveGalleryFiles(p.FileIDs), &liked),
 		})
 	}
 	return c.JSON(http.StatusOK, out)
 }
 
+// resolveGalleryFiles resolves a gallery post's fileIds into packed DriveFile
+// entities in fileIds order (upstream driveFileEntityService.packManyByIds)。
+// driveFileRepo 未配線 / fileIds 空 / lookup miss は空配列で degrade する。
+// gallery post / file は公開前提なので owner-scope filter はしない (upstream 同様)。
+func (h *Handler) resolveGalleryFiles(fileIDs []string) []any {
+	files := []any{}
+	if h.driveFileRepo == nil || len(fileIDs) == 0 {
+		return files
+	}
+	found, err := h.driveFileRepo.FindByIDs([]string(fileIDs))
+	if err != nil {
+		return files
+	}
+	byID := make(map[string]*model.DriveFile, len(found))
+	for _, f := range found {
+		byID[f.ID] = f
+	}
+	for _, fid := range fileIDs {
+		if f, ok := byID[fid]; ok {
+			files = append(files, entity.PackDriveFile(f, h.idGen))
+		}
+	}
+	return files
+}
+
 // packGalleryPost は upstream の GalleryPost shape (createdAt / user 含む)
-// に揃えてレスポンス用の map を返す。
-func packGalleryPost(p *model.GalleryPost, idGen id.Generator) map[string]any {
+// に揃えてレスポンス用の map を返す。files は呼び出し側が resolveGalleryFiles
+// で解決した DriveFile entity 群、isLiked は viewer の like 状態 (nil で省略、
+// upstream は me==null 時に undefined)。
+func packGalleryPost(p *model.GalleryPost, idGen id.Generator, files []any, isLiked *bool) map[string]any {
 	const tsFormat = "2006-01-02T15:04:05.000Z"
 	createdAt := ""
 	if idGen != nil {
@@ -115,6 +143,9 @@ func packGalleryPost(p *model.GalleryPost, idGen id.Generator) map[string]any {
 	if tags == nil {
 		tags = []string{}
 	}
+	if files == nil {
+		files = []any{}
+	}
 	resp := map[string]any{
 		"id":          p.ID,
 		"createdAt":   createdAt,
@@ -123,10 +154,13 @@ func packGalleryPost(p *model.GalleryPost, idGen id.Generator) map[string]any {
 		"description": p.Description,
 		"userId":      p.UserID,
 		"fileIds":     fileIDs,
-		"files":       []any{},
+		"files":       files,
 		"isSensitive": p.IsSensitive,
 		"likedCount":  p.LikedCount,
 		"tags":        tags,
+	}
+	if isLiked != nil {
+		resp["isLiked"] = *isLiked
 	}
 	if p.User != nil {
 		resp["user"] = entity.PackUserLite(p.User)
@@ -154,7 +188,13 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 		if p.User == nil {
 			p.User = u
 		}
-		out = append(out, packGalleryPost(p, h.idGen))
+		// isLiked は viewer が自分の post を like しているか (upstream
+		// galleryLikesRepository.exists)。list は小さい前提で per-post lookup。
+		liked := false
+		if ok, err := h.galleryRepo.ExistsLike(u.ID, p.ID); err == nil {
+			liked = ok
+		}
+		out = append(out, packGalleryPost(p, h.idGen, h.resolveGalleryFiles(p.FileIDs), &liked))
 	}
 	return c.JSON(http.StatusOK, out)
 }

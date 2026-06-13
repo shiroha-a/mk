@@ -72,3 +72,47 @@ func TestGalleryRepository_EmptyList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, likes)
 }
+
+func TestGalleryRepository_ExistsLike(t *testing.T) {
+	repo := NewGalleryRepository(testDB)
+	seedUser(t, "gex_u1")
+	require.NoError(t, testDB.Create(&model.GalleryPost{ID: "gex_p1", UserID: "gex_u1", Title: "t", UpdatedAt: time.Now()}).Error)
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "gallery_like" WHERE "userId" = ?`, "gex_u1")
+		testDB.Exec(`DELETE FROM "gallery_post" WHERE id = ?`, "gex_p1")
+	})
+
+	// like 未作成 → false
+	ok, err := repo.ExistsLike("gex_u1", "gex_p1")
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	require.NoError(t, testDB.Create(&model.GalleryLike{ID: "gex_l1", UserID: "gex_u1", PostID: "gex_p1"}).Error)
+
+	// like 済 → true
+	ok, err = repo.ExistsLike("gex_u1", "gex_p1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	// 別 user / 別 post は false
+	ok, err = repo.ExistsLike("gex_other", "gex_p1")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestGalleryRepository_FindPostsByIDs(t *testing.T) {
+	repo := NewGalleryRepository(testDB)
+	seedUser(t, "gf_u1")
+	require.NoError(t, testDB.Create(&model.GalleryPost{ID: "gf_p1", UserID: "gf_u1", Title: "t1", UpdatedAt: time.Now()}).Error)
+	require.NoError(t, testDB.Create(&model.GalleryPost{ID: "gf_p2", UserID: "gf_u1", Title: "t2", UpdatedAt: time.Now()}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "gallery_post" WHERE "userId" = ?`, "gf_u1") })
+
+	// 空 ids は nil を返す (早期 return)。
+	posts, err := repo.FindPostsByIDs(nil)
+	require.NoError(t, err)
+	assert.Empty(t, posts)
+
+	posts, err = repo.FindPostsByIDs([]string{"gf_p1", "gf_p2", "gf_missing"})
+	require.NoError(t, err)
+	assert.Len(t, posts, 2)
+}

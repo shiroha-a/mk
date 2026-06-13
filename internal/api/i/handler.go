@@ -459,6 +459,8 @@ type GalleryRepository interface {
 	ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.GalleryPost, error)
 	ListLikesByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.GalleryLike, error)
 	FindPostsByIDs(ids []string) ([]*model.GalleryPost, error)
+	// ExistsLike は GalleryPost.isLiked 解決用 (#1555)。
+	ExistsLike(userID, postID string) (bool, error)
 }
 
 // SetAccessTokenRepo wires the access_token repo for i/authorized-apps and

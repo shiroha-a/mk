@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,6 +29,14 @@ func (s *stubGalleryRepo) ListLikesByUser(_, _, _ string, _, _ int) ([]*model.Ga
 }
 func (s *stubGalleryRepo) FindPostsByIDs(_ []string) ([]*model.GalleryPost, error) {
 	return s.posts, s.err
+}
+func (s *stubGalleryRepo) ExistsLike(_, postID string) (bool, error) {
+	for _, l := range s.likes {
+		if l.PostID == postID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func TestGalleryLikes(t *testing.T) {
@@ -55,7 +64,38 @@ func TestGalleryPosts_WithRepo(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got, 1)
 	assert.Equal(t, postID, got[0]["id"])
+	// 認証 viewer なので isLiked は present (like していないので false)。
+	assert.Equal(t, false, got[0]["isLiked"])
 	shapetest.Assert(t, "GalleryPost", got[0]) // L3 (#1322)
+}
+
+// #1555 i/gallery/posts は fileIds から DriveFile を解決し、自分が like 済の
+// post には isLiked=true を返す。
+func TestGalleryPosts_ResolvesFilesAndIsLiked(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	postID := idGen.Generate(time.Now())
+	h.SetGalleryRepo(&stubGalleryRepo{
+		posts: []*model.GalleryPost{{ID: postID, Title: "t", UserID: stubUser.ID, FileIDs: []string{"f1"}}},
+		// stub.ExistsLike は likes に postID があれば true を返す。
+		likes: []*model.GalleryLike{{ID: "l1", PostID: postID, UserID: stubUser.ID}},
+	})
+	driveRepo := testutil.NewMockDriveFileRepository()
+	owner := stubUser.ID
+	driveRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, Name: "a.png", Type: "image/png"}
+	h.SetDriveFileRepo(driveRepo)
+
+	rec := postExtra(h.GalleryPosts, `{}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+	files, ok := got[0]["files"].([]any)
+	require.True(t, ok)
+	require.Len(t, files, 1)
+	assert.Equal(t, "f1", files[0].(map[string]any)["id"])
+	assert.Equal(t, true, got[0]["isLiked"])
+	shapetest.Assert(t, "GalleryPost", got[0])
 }
 
 func TestGalleryLikes_WithRepo(t *testing.T) {

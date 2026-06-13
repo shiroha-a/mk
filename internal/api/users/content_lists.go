@@ -181,6 +181,8 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 	// galleryRepo.ListByUser が Preload("User") を行うので g.User を読んで
 	// user (UserLite) を embed できる。i/gallery/posts と同 shape。
 	const tsFormat = "2006-01-02T15:04:05.000Z"
+	// 認証 viewer がいれば isLiked を解決する (upstream は me==null で undefined)。
+	viewer := middleware.GetUser(c)
 	out := make([]map[string]any, 0, len(rows))
 	for _, g := range rows {
 		createdAt := ""
@@ -198,7 +200,15 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 			"tags":        []string(g.Tags),
 			"isSensitive": g.IsSensitive,
 			"likedCount":  g.LikedCount,
-			"files":       []any{},
+			// fileIds から DriveFile を解決する (#1555、i/gallery/posts と同じ)。
+			"files": h.resolveGalleryFiles(g.FileIDs),
+		}
+		if viewer != nil {
+			liked := false
+			if ok, err := h.galleryRepo.ExistsLike(viewer.ID, g.ID); err == nil {
+				liked = ok
+			}
+			entry["isLiked"] = liked
 		}
 		if g.User != nil {
 			entry["user"] = entity.PackUserLite(g.User)
@@ -206,6 +216,30 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 		out = append(out, entry)
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// resolveGalleryFiles resolves gallery fileIds into packed DriveFile entities
+// in fileIds order (upstream driveFileEntityService.packManyByIds)。
+// driveFileRepo 未配線 / 空 / miss は空配列で degrade。
+func (h *Handler) resolveGalleryFiles(fileIDs []string) []any {
+	files := []any{}
+	if h.driveFileRepo == nil || len(fileIDs) == 0 {
+		return files
+	}
+	found, err := h.driveFileRepo.FindByIDs(fileIDs)
+	if err != nil {
+		return files
+	}
+	byID := make(map[string]*model.DriveFile, len(found))
+	for _, f := range found {
+		byID[f.ID] = f
+	}
+	for _, fid := range fileIDs {
+		if f, ok := byID[fid]; ok {
+			files = append(files, entity.PackDriveFile(f, h.idGen))
+		}
+	}
+	return files
 }
 
 // Pages handles POST /api/users/pages.

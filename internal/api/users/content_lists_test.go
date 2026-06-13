@@ -31,6 +31,9 @@ func (s *stubGalleryRepo) ListLikesByUser(_, _, _ string, _, _ int) ([]*model.Ga
 func (s *stubGalleryRepo) FindPostsByIDs(_ []string) ([]*model.GalleryPost, error) {
 	return nil, nil
 }
+func (s *stubGalleryRepo) ExistsLike(_, _ string) (bool, error) {
+	return false, nil
+}
 
 // --- Clips ---
 
@@ -164,6 +167,31 @@ func TestGalleryPosts_ReturnsAll(t *testing.T) {
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Len(t, rows, 2)
+}
+
+// #1555 users/gallery/posts も fileIds から DriveFile を解決する
+// (i/gallery/posts と同じ)。未認証 viewer なので isLiked は省略される。
+func TestGalleryPosts_ResolvesFiles(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetGalleryRepo(&stubGalleryRepo{posts: []*model.GalleryPost{
+		{ID: "g1", UserID: "owner", Title: "t1", FileIDs: []string{"f1"}},
+	}})
+	driveRepo := testutil.NewMockDriveFileRepository()
+	owner := "owner"
+	driveRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner, Name: "a.png", Type: "image/png"}
+	h.SetDriveFileRepo(driveRepo)
+
+	rec := postStub(h.GalleryPosts, `{"userId":"owner"}`, nil)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	files, ok := rows[0]["files"].([]any)
+	require.True(t, ok)
+	require.Len(t, files, 1)
+	assert.Equal(t, "f1", files[0].(map[string]any)["id"])
+	// 未認証 viewer なので isLiked は出ない。
+	_, hasLiked := rows[0]["isLiked"]
+	assert.False(t, hasLiked)
 }
 
 // --- Pages ---

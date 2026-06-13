@@ -17,6 +17,9 @@ type GalleryRepository interface {
 	// FindPostsByIDs returns the posts whose id is in ids. Used by
 	// i/gallery/likes to embed the full GalleryPost in each like row.
 	FindPostsByIDs(ids []string) ([]*model.GalleryPost, error)
+	// ExistsLike reports whether userID has liked postID. GalleryPost.isLiked
+	// 用 (upstream galleryLikesRepository.exists({postId, userId}))。
+	ExistsLike(userID, postID string) (bool, error)
 }
 
 type galleryRepository struct {
@@ -60,6 +63,16 @@ func (r *galleryRepository) ListByUser(userID, sinceID, untilID string, limit, o
 		return nil, err
 	}
 	return posts, nil
+}
+
+func (r *galleryRepository) ExistsLike(userID, postID string) (bool, error) {
+	var count int64
+	if err := r.db.Model(&model.GalleryLike{}).
+		Where(`"userId" = ? AND "postId" = ?`, userID, postID).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (r *galleryRepository) FindPostsByIDs(ids []string) ([]*model.GalleryPost, error) {
