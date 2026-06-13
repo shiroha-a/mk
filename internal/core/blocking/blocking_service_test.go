@@ -86,6 +86,7 @@ type failingBlockingRepo struct {
 	*testutil.MockBlockingRepository
 	failExists bool
 	failCreate bool
+	failDelete bool
 }
 
 func (f *failingBlockingRepo) Exists(blockerID, blockeeID string) (bool, error) {
@@ -100,6 +101,13 @@ func (f *failingBlockingRepo) Create(b *model.Blocking) error {
 		return stubError
 	}
 	return f.MockBlockingRepository.Create(b)
+}
+
+func (f *failingBlockingRepo) Delete(b *model.Blocking) error {
+	if f.failDelete {
+		return stubError
+	}
+	return f.MockBlockingRepository.Delete(b)
 }
 
 func TestBlock_ExistsError(t *testing.T) {
@@ -212,4 +220,55 @@ func TestBlock_DecrementsInstanceCounters(t *testing.T) {
 	assert.Empty(t, fr.Followings)
 	// remote 側 follower カウントが -1
 	assert.Equal(t, 4, instanceRepo.Instances[host].FollowersCount)
+}
+
+// recordingFederationHook captures hook fires so we can assert that Block /
+// Unblock trigger AP delivery (#1560)。
+type recordingFederationHook struct {
+	blocked   [][2]string
+	unblocked [][2]string
+}
+
+func (h *recordingFederationHook) OnBlocked(blockerID, blockeeID string) {
+	h.blocked = append(h.blocked, [2]string{blockerID, blockeeID})
+}
+
+func (h *recordingFederationHook) OnUnblocked(blockerID, blockeeID string) {
+	h.unblocked = append(h.unblocked, [2]string{blockerID, blockeeID})
+}
+
+// Block / Unblock 成功時に federationHook が発火する (#1560)。
+func TestBlockUnblock_FiresFederationHook(t *testing.T) {
+	svc, ur, _, _ := newSvc(t)
+	addUser(ur, "a")
+	addUser(ur, "b")
+	hook := &recordingFederationHook{}
+	svc.SetFederationHook(hook)
+
+	_, err := svc.Block("a", "b")
+	require.NoError(t, err)
+	require.Equal(t, [][2]string{{"a", "b"}}, hook.blocked)
+
+	require.NoError(t, svc.Unblock("a", "b"))
+	require.Equal(t, [][2]string{{"a", "b"}}, hook.unblocked)
+}
+
+// Unblock で Delete が失敗したら error を返し、hook は発火しない (#1560)。
+func TestUnblock_DeleteError(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	addUser(userRepo, "a")
+	addUser(userRepo, "b")
+	idGen, _ := id.NewGenerator("aidx")
+	repo := &failingBlockingRepo{MockBlockingRepository: testutil.NewMockBlockingRepository()}
+	svc := blocking.NewService(userRepo, repo, nil, idGen)
+	hook := &recordingFederationHook{}
+	svc.SetFederationHook(hook)
+
+	_, err := svc.Block("a", "b")
+	require.NoError(t, err)
+
+	repo.failDelete = true
+	err = svc.Unblock("a", "b")
+	require.ErrorIs(t, err, stubError)
+	assert.Empty(t, hook.unblocked, "Delete 失敗時は Undo(Block) を配信しない")
 }
