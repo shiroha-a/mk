@@ -53,6 +53,14 @@ func (s *Service) Mute(muterID, muteeID string, expiresAt *time.Time) (*model.Mu
 		return nil, ErrAlreadyMuting
 	}
 
+	// 既に失効している expiresAt (<= now) の mute は no-op で成功扱いにする
+	// (upstream mute/create.ts の `if (ps.expiresAt && ps.expiresAt <= Date.now())
+	// return;`、#1557)。Muting row を作らないことで対象を re-muteable のまま残す。
+	// self / not-found / already-muting の検証より後 (= upstream の順序) に置く。
+	if expiresAt != nil && !expiresAt.After(time.Now()) {
+		return nil, nil
+	}
+
 	rec := &model.Muting{
 		ID:        s.idGen.Generate(time.Now()),
 		MuterID:   muterID,

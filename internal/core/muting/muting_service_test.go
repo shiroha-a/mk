@@ -67,6 +67,25 @@ func TestMute_WithExpiry(t *testing.T) {
 	assert.NotNil(t, rec.ExpiresAt)
 }
 
+// #1557 過去 (<= now) の expiresAt を渡した mute は no-op (row を作らず成功) で、
+// 対象を re-muteable のまま残す (upstream mute/create.ts)。
+func TestMute_PastExpiryIsNoOp(t *testing.T) {
+	svc, ur, mr := newMuteService(t)
+	addUser(ur, "a")
+	addUser(ur, "b")
+
+	past := time.Now().Add(-time.Hour)
+	rec, err := svc.Mute("a", "b", &past)
+	require.NoError(t, err)
+	assert.Nil(t, rec, "past-expiry は Muting record を返さない")
+	assert.Empty(t, mr.Mutings, "Muting row を作らない")
+
+	// re-muteable: 後から有効な mute を作れる (= ALREADY_MUTING にならない)。
+	rec2, err := svc.Mute("a", "b", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec2)
+}
+
 // failingMutingRepo lets us trigger Exists/Create errors.
 type failingMutingRepo struct {
 	*testutil.MockMutingRepository
