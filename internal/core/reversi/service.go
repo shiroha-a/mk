@@ -390,7 +390,19 @@ func (s *Service) UpdateReady(ctx context.Context, gameID, userID string, ready 
 		Ready: &readyVal,
 	})
 	if game.User1Ready && game.User2Ready {
-		return s.StartGame(ctx, game)
+		// 両者 ready=true を並行送信すると、もう一方の UpdateReady が先に
+		// StartGame を完了させ、こちらの再 read が isStarted=true の game を
+		// 観測することがある。その状態で StartGame を呼ぶと冒頭 guard が
+		// ErrAlreadyStarted を返すが、両者 ready で game が開始済み =
+		// 望む終状態に到達しているので idempotent success として nil に倒す
+		// (#1636)。MarkStarted の atomic claim は started イベントを 1 回に
+		// 抑えており、後勝ち側に spurious な ALREADY_STARTED を返さない。
+		// 非並行の「既に開始済み game への ready 操作」は本関数冒頭の
+		// game.IsStarted guard が引き続き ErrAlreadyStarted を返す。
+		if err := s.StartGame(ctx, game); err != nil && !errors.Is(err, ErrAlreadyStarted) {
+			return err
+		}
+		return nil
 	}
 	return nil
 }
