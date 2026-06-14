@@ -395,7 +395,7 @@ func TestService_PutStone_Valid(t *testing.T) {
 
 	// alice is black (BW="1")
 	// 8x8 default board: valid black moves include pos 19 (3,2), 26 (2,3), 37 (5,4), 44 (4,5)
-	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19))
+	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19, ""))
 
 	got, _ := repo.FindByID(game.ID)
 	var logs [][]int
@@ -411,6 +411,32 @@ func TestService_PutStone_Valid(t *testing.T) {
 	assert.Contains(t, types, "log")
 }
 
+// #1549: putStone の log event は client op id を含める。
+func TestService_PutStone_LogIncludesOpID(t *testing.T) {
+	game, _, pub, svc := startedGame(t)
+	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19, "op123"))
+	var logBody map[string]any
+	for _, e := range pub.events {
+		if e.kind == "log" {
+			logBody, _ = e.body.(map[string]any)
+		}
+	}
+	require.NotNil(t, logBody, "log event published")
+	assert.Equal(t, "op123", logBody["id"])
+}
+
+// op id が空のときは log.id を null (nil) で返す (upstream `id ?? null`)。
+func TestService_PutStone_LogOpIDNilWhenEmpty(t *testing.T) {
+	game, _, pub, svc := startedGame(t)
+	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19, ""))
+	for _, e := range pub.events {
+		if e.kind == "log" {
+			body, _ := e.body.(map[string]any)
+			assert.Nil(t, body["id"], "空 opID は null")
+		}
+	}
+}
+
 // TestService_CRC32MaintainedAcrossMoves guards that StartGame stores the
 // initial board crc32 and PutStone refreshes it on every move (#1553).
 // /reversi/verify は保存済み crc32 と比較する (upstream checkCrc 互換) ため、
@@ -424,7 +450,7 @@ func TestService_CRC32MaintainedAcrossMoves(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, strconv.FormatUint(uint64(engine.CalcCRC32()), 10), *started.CRC32)
 
-	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19))
+	require.NoError(t, svc.PutStone(context.Background(), game.ID, "alice", 19, ""))
 
 	moved, _ := repo.FindByID(game.ID)
 	require.NotNil(t, moved.CRC32)
@@ -437,19 +463,19 @@ func TestService_CRC32MaintainedAcrossMoves(t *testing.T) {
 func TestService_PutStone_NotYourTurn(t *testing.T) {
 	game, _, _, svc := startedGame(t)
 	// bob is white; black moves first
-	err := svc.PutStone(context.Background(), game.ID, "bob", 19)
+	err := svc.PutStone(context.Background(), game.ID, "bob", 19, "")
 	assert.ErrorIs(t, err, ErrNotYourTurn)
 }
 
 func TestService_PutStone_InvalidMove(t *testing.T) {
 	game, _, _, svc := startedGame(t)
-	err := svc.PutStone(context.Background(), game.ID, "alice", 0) // corner, not valid opening
+	err := svc.PutStone(context.Background(), game.ID, "alice", 0, "") // corner, not valid opening
 	assert.ErrorIs(t, err, ErrInvalidMove)
 }
 
 func TestService_PutStone_NotStarted(t *testing.T) {
 	game, _, _, svc := newPendingGame(t)
-	err := svc.PutStone(context.Background(), game.ID, "alice", 19)
+	err := svc.PutStone(context.Background(), game.ID, "alice", 19, "")
 	assert.ErrorIs(t, err, ErrNotStarted)
 }
 
@@ -457,13 +483,13 @@ func TestService_PutStone_AlreadyEnded(t *testing.T) {
 	game, repo, _, svc := startedGame(t)
 	game.IsEnded = true
 	_ = repo.Update(game)
-	err := svc.PutStone(context.Background(), game.ID, "alice", 19)
+	err := svc.PutStone(context.Background(), game.ID, "alice", 19, "")
 	assert.ErrorIs(t, err, ErrAlreadyEnded)
 }
 
 func TestService_PutStone_NotPlayer(t *testing.T) {
 	game, _, _, svc := startedGame(t)
-	err := svc.PutStone(context.Background(), game.ID, "carol", 19)
+	err := svc.PutStone(context.Background(), game.ID, "carol", 19, "")
 	assert.ErrorIs(t, err, ErrNotPlayer)
 }
 
@@ -732,10 +758,10 @@ func TestService_PutStone_RestoresFromLogs(t *testing.T) {
 	// Two moves: ensure the second move sees the board state from the first
 	game, _, _, svc := startedGame(t)
 	ctx := context.Background()
-	require.NoError(t, svc.PutStone(ctx, game.ID, "alice", 19)) // black
+	require.NoError(t, svc.PutStone(ctx, game.ID, "alice", 19, "")) // black
 	// after black at 19, white's valid moves include 18 (2,2) among others
 	// alice is black here so bob is white
-	require.NoError(t, svc.PutStone(ctx, game.ID, "bob", 18))
+	require.NoError(t, svc.PutStone(ctx, game.ID, "bob", 18, ""))
 }
 
 // capture UpdateError path
@@ -760,7 +786,7 @@ func TestService_Surrender_GameNotFound(t *testing.T) {
 
 func TestService_PutStone_GameNotFound(t *testing.T) {
 	_, _, _, svc := newPendingGame(t)
-	err := svc.PutStone(context.Background(), "ghost", "alice", 19)
+	err := svc.PutStone(context.Background(), "ghost", "alice", 19, "")
 	assert.ErrorIs(t, err, ErrGameNotFound)
 }
 

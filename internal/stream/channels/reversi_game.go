@@ -108,7 +108,7 @@ func (c *ReversiGameChannel) OnClientMessage(msgType string, body json.RawMessag
 		if jerr := json.Unmarshal(body, &req); jerr != nil {
 			return
 		}
-		err = c.svc.PutStone(ctx, c.gameID, user.ID, req.Pos)
+		err = c.svc.PutStone(ctx, c.gameID, user.ID, req.Pos, req.ID)
 	case "surrender":
 		err = c.svc.Surrender(ctx, c.gameID, user.ID)
 	case "cancel":

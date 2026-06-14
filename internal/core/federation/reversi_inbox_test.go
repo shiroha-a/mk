@@ -772,7 +772,7 @@ func TestReversiInbox_Update_PutStone(t *testing.T) {
 	_ = b.gameRepo.Update(g)
 
 	// bob (local, black) moves first, then alice (remote, white) via Update
-	require.NoError(t, b.reversiSvc.PutStone(context.Background(), g.ID, "bob", 19))
+	require.NoError(t, b.reversiSvc.PutStone(context.Background(), g.ID, "bob", 19, ""))
 
 	body := []byte(`{
 		"type": "Update",

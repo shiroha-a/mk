@@ -149,7 +149,7 @@ func TestService_Surrender_UpdateError(t *testing.T) {
 func TestService_PutStone_UpdateError(t *testing.T) {
 	game, repo, _, svc := startedGame(t)
 	repo.updateErr = errors.New("update boom")
-	err := svc.PutStone(context.Background(), game.ID, "alice", 19)
+	err := svc.PutStone(context.Background(), game.ID, "alice", 19, "")
 	assert.Error(t, err)
 }
 
@@ -159,7 +159,7 @@ func TestService_PutStone_BadLogs(t *testing.T) {
 	// 壊れた logs を書き込む
 	game.Logs = datatypes.JSON("not-json")
 	_ = repo.Update(game)
-	err := svc.PutStone(context.Background(), game.ID, "alice", 19)
+	err := svc.PutStone(context.Background(), game.ID, "alice", 19, "")
 	assert.Error(t, err)
 }
 

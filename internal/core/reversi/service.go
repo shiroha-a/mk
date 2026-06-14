@@ -535,7 +535,11 @@ func (s *Service) StartGame(ctx context.Context, game *model.ReversiGame) error 
 
 // PutStone validates and applies a move, publishes the log, and ends the game
 // if the engine reports terminal state.
-func (s *Service) PutStone(ctx context.Context, gameID, userID string, pos int) error {
+// PutStone places a stone at pos for userID. opID is the client-supplied
+// operation id (stream putStone の body.id); echoed back in the "log" event so
+// the client can reconcile its optimistic move (upstream putStoneToGame の id、
+// #1549)。federation 経由など op id が無い経路は空文字を渡す。
+func (s *Service) PutStone(ctx context.Context, gameID, userID string, pos int, opID string) error {
 	game, err := s.Get(ctx, gameID)
 	if err != nil {
 		return err
@@ -621,12 +625,19 @@ func (s *Service) PutStone(ctx context.Context, gameID, userID string, pos int) 
 		s.setTurnTimer(ctx, game.ID, len(logs), game.TimeLimitForEachTurn)
 	}
 
+	// upstream putStoneToGame は log event に client op id を含める
+	// (`{...log, id: id ?? null}`、#1549)。空 opID は null で返す。
+	var logID any
+	if opID != "" {
+		logID = opID
+	}
 	s.publish(gameID, "log", map[string]any{
 		"pos":       pos,
 		"color":     colorInt,
 		"player":    myColor,
 		"time":      time.Now().UnixMilli(),
 		"operation": "put",
+		"id":        logID,
 	})
 	if engine.Turn == nil {
 		s.publish(gameID, "ended", map[string]any{

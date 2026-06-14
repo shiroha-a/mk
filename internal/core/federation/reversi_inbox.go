@@ -258,7 +258,8 @@ func (p *Processor) handleReversiUpdate(act genericActivity) error {
 		if state.Pos == nil {
 			return errors.New("reversi update putstone: missing pos")
 		}
-		return p.reversiSvc.PutStone(ctx, game.ID, actor.ID, *state.Pos)
+		// 連合経由の手番には client op id が無いため空文字を渡す (#1549)。
+		return p.reversiSvc.PutStone(ctx, game.ID, actor.ID, *state.Pos, "")
 	}
 	return fmt.Errorf("reversi update: unknown game_state.type %q", state.Type)
 }

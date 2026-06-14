@@ -123,7 +123,7 @@ func TestService_PutStone_DeliversPutstoneUpdateToRemote(t *testing.T) {
 	before := len(d.calls)
 
 	// alice が 1 手置く (初手は 19 などの有効な黒手)
-	require.NoError(t, svc.PutStone(ctx, game.ID, "alice", 19))
+	require.NoError(t, svc.PutStone(ctx, game.ID, "alice", 19, ""))
 
 	assert.Equal(t, before+1, len(d.calls))
 	last := d.calls[len(d.calls)-1]

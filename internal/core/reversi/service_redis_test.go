@@ -150,7 +150,7 @@ func TestService_PutStone_EndsGame_SmallBoard(t *testing.T) {
 		}
 		uid := playerIDForColor(g, *engine.Turn)
 		require.NotEmpty(t, uid)
-		require.NoError(t, svc.PutStone(context.Background(), game.ID, uid, places[0]))
+		require.NoError(t, svc.PutStone(context.Background(), game.ID, uid, places[0], ""))
 	}
 
 	final, _ := repo.FindByID(game.ID)
