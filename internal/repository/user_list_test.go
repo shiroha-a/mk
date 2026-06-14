@@ -146,6 +146,52 @@ func TestUserListRepository_ListMembersByListIDs(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestUserListRepository_ListMembershipsPage は #1550 の get-memberships 用
+// cursor pagination + User preload を検証する。
+func TestUserListRepository_ListMembershipsPage(t *testing.T) {
+	repo := NewUserListRepository(testDB)
+	createTestUser(t, "ulp_o")
+	createTestUser(t, "ulp_m1")
+	createTestUser(t, "ulp_m2")
+	createTestUser(t, "ulp_m3")
+	list := &model.UserList{ID: "ulp_list", UserID: "ulp_o", Name: "L"}
+	require.NoError(t, repo.Create(list))
+	defer cleanupUserList(t, list.ID)
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_p_1", UserListID: list.ID, UserID: "ulp_m1"}))
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_p_2", UserListID: list.ID, UserID: "ulp_m2"}))
+	require.NoError(t, repo.AddMember(&model.UserListMembership{ID: "ulm_p_3", UserListID: list.ID, UserID: "ulp_m3"}))
+
+	ids := func(rows []*model.UserListMembership) []string {
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+
+	// default: id DESC、User preload あり。
+	rows, err := repo.ListMembershipsPage(list.ID, "", "", 30)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ulm_p_3", "ulm_p_2", "ulm_p_1"}, ids(rows))
+	require.NotNil(t, rows[0].User, "User が preload される")
+	assert.Equal(t, "ulp_m3", rows[0].User.ID)
+
+	// limit cap。
+	rows, err = repo.ListMembershipsPage(list.ID, "", "", 2)
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+
+	// untilID: cursor 未満 (DESC)。
+	rows, err = repo.ListMembershipsPage(list.ID, "", "ulm_p_3", 30)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ulm_p_2", "ulm_p_1"}, ids(rows))
+
+	// sinceID-only: cursor 超 + ASC。
+	rows, err = repo.ListMembershipsPage(list.ID, "ulm_p_1", "", 30)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ulm_p_2", "ulm_p_3"}, ids(rows))
+}
+
 // TestUserListRepository_AddMember_Duplicate verifies the (userListId, userId)
 // unique-constraint violation is mapped to ErrUserListDuplicateMember (#396),
 // so the API layer can return the TS-compat ALREADY_ADDED error.

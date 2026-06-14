@@ -25,6 +25,10 @@ type UserListRepository interface {
 	AddMember(m *model.UserListMembership) error
 	RemoveMember(listID, userID string) error
 	ListMembers(listID string) ([]*model.UserListMembership, error)
+	// ListMembershipsPage returns a list's memberships (User preloaded) with
+	// cursor pagination by membership id. Used by users/lists/get-memberships
+	// (#1550)。
+	ListMembershipsPage(listID, sinceID, untilID string, limit int) ([]*model.UserListMembership, error)
 	// CountMembers returns the number of members in the given list. Used by
 	// userEachUserListsLimit policy gate (#1029 PR-1 follow-up).
 	CountMembers(listID string) (int64, error)
@@ -121,6 +125,24 @@ func (r *userListRepository) CountMembers(listID string) (int64, error) {
 func (r *userListRepository) ListMembers(listID string) ([]*model.UserListMembership, error) {
 	var members []*model.UserListMembership
 	if err := r.db.Preload("User").Where("\"userListId\" = ?", listID).Find(&members).Error; err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func (r *userListRepository) ListMembershipsPage(listID, sinceID, untilID string, limit int) ([]*model.UserListMembership, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	q := r.db.Preload("User").Where(`"userListId" = ?`, listID)
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	var members []*model.UserListMembership
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&members).Error; err != nil {
 		return nil, err
 	}
 	return members, nil

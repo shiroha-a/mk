@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -260,31 +261,71 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 
 // ListsGetMemberships handles POST /api/users/lists/get-memberships.
 //
-// 認証ユーザが所有する UserList のうち、指定された userId を member として含む
-// ものの一覧を返す。Misskey 本家互換。認証は router の RequireAuth middleware
-// が 401 CREDENTIAL_REQUIRED で弾くため viewer は常に非 nil。
+// upstream get-memberships.ts: listId(required) の membership 配列
+// [{id, createdAt, userId, user(UserLite), withReplies}] を返す
+// (requireCredential:false の public endpoint)。可視性は forPublic=false かつ
+// 認証済なら own list のみ、それ以外は public list のみ (#1550)。
 func (h *Handler) ListsGetMemberships(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
-		UserID string `json:"userId"`
+		ListID    string `json:"listId"`
+		ForPublic bool   `json:"forPublic"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
-	if err := c.Bind(&req); err != nil || req.UserID == "" {
+	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
 	if h.userListRepo == nil {
-		return c.JSON(http.StatusOK, []any{})
+		return apierr.JSONInternalError(c)
 	}
-	lists, err := h.userListRepo.ListsContainingMember(viewer.ID, req.UserID)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	const noSuchList = "7bc05c21-1d7a-41ae-88f1-66820f4dc686"
+	list, err := h.userListRepo.FindByID(req.ListID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+	}
+	// upstream: !forPublic && me!=null → own list (任意 visibility)、それ以外は public list。
+	if !req.ForPublic && viewer != nil {
+		if list.UserID != viewer.ID {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+		}
+	} else if !list.IsPublic {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+	}
+
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	members, err := h.userListRepo.ListMembershipsPage(req.ListID, sinceID, untilID, limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	out := make([]map[string]any, 0, len(lists))
-	for _, l := range lists {
+	out := make([]map[string]any, 0, len(members))
+	for _, m := range members {
+		// User relation が取れない orphan membership は skip (UserLite を pack
+		// できないため。通常は FK で存在保証される)。
+		if m.User == nil {
+			continue
+		}
+		createdAt := ""
+		if t, perr := h.idGen.ParseTime(m.ID); perr == nil {
+			createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
 		out = append(out, map[string]any{
-			"id":       l.ID,
-			"name":     l.Name,
-			"userId":   l.UserID,
-			"isPublic": l.IsPublic,
+			"id":          m.ID,
+			"createdAt":   createdAt,
+			"userId":      m.UserID,
+			"user":        entity.PackUserLite(m.User),
+			"withReplies": m.WithReplies,
 		})
 	}
 	return c.JSON(http.StatusOK, out)

@@ -955,6 +955,9 @@ func (r *failingUserListRepo) CountMembers(_ string) (int64, error)           { 
 func (r *failingUserListRepo) ListMembers(_ string) ([]*model.UserListMembership, error) {
 	return nil, errors.New("list members error")
 }
+func (r *failingUserListRepo) ListMembershipsPage(_, _, _ string, _ int) ([]*model.UserListMembership, error) {
+	return nil, errors.New("list memberships page error")
+}
 func (r *failingUserListRepo) ListMembersByListIDs(_ []string) (map[string][]string, error) {
 	return nil, errors.New("list members by ids error")
 }

@@ -12,27 +12,88 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestListsGetMemberships(t *testing.T) {
+func TestListsGetMemberships_MissingListID(t *testing.T) {
 	h, _ := newTestHandler(t)
-	// 認証は router.RequireAuth が 401 を返す責務。ここでは userId 欠落のみ検証。
 	assert.Equal(t, http.StatusBadRequest, postStub(h.ListsGetMemberships, `{}`, &model.User{ID: "u1"}).Code)
 }
 
-func TestListsGetMemberships_ReturnsOwnedLists(t *testing.T) {
+// seedListWithMember seeds a list + a single member (with User preloaded) for
+// get-memberships tests.
+func seedListWithMember(repo *testutil.MockUserListRepository, listID, owner, memberID string, isPublic bool) {
+	repo.Lists[listID] = &model.UserList{ID: listID, UserID: owner, Name: "list", IsPublic: isPublic}
+	repo.Members = append(repo.Members, &model.UserListMembership{
+		ID: "mem_" + memberID, UserListID: listID, UserID: memberID, WithReplies: true,
+		User: &model.User{ID: memberID, Username: memberID, UsernameLower: memberID},
+	})
+}
+
+// #1550: get-memberships は listId の membership 配列 [{id,createdAt,userId,user,withReplies}]
+// を返す (own private list を owner が取得)。
+func TestListsGetMemberships_OwnPrivateList(t *testing.T) {
 	h, _ := newTestHandler(t)
 	repo := testutil.NewMockUserListRepository()
-	require.NoError(t, repo.Create(&model.UserList{ID: "l1", UserID: "owner", Name: "favs"}))
-	require.NoError(t, repo.Create(&model.UserList{ID: "l2", UserID: "other", Name: "other-favs"}))
-	require.NoError(t, repo.AddMember(&model.UserListMembership{UserListID: "l1", UserID: "u2"}))
-	require.NoError(t, repo.AddMember(&model.UserListMembership{UserListID: "l2", UserID: "u2"}))
+	seedListWithMember(repo, "l1", "owner", "u2", false)
 	h.SetUserListRepo(repo)
 
-	rec := postStub(h.ListsGetMemberships, `{"userId":"u2"}`, &model.User{ID: "owner"})
-	assert.Equal(t, http.StatusOK, rec.Code)
+	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
-	require.Len(t, rows, 1, "only caller-owned lists should be returned")
-	assert.Equal(t, "l1", rows[0]["id"])
+	require.Len(t, rows, 1)
+	assert.Equal(t, "u2", rows[0]["userId"])
+	assert.Equal(t, true, rows[0]["withReplies"])
+	assert.Contains(t, rows[0], "createdAt")
+	user := rows[0]["user"].(map[string]any)
+	assert.Equal(t, "u2", user["id"], "user は UserLite で埋め込まれる")
+}
+
+// 非 owner は forPublic=false では他人の (private/public 問わず) list を取得できない
+// (upstream: !forPublic && me!=null → own list only)。
+func TestListsGetMemberships_NonOwnerDeniedWithoutForPublic(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	seedListWithMember(repo, "l1", "owner", "u2", true) // public でも forPublic=false なら own-only
+	h.SetUserListRepo(repo)
+	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, &model.User{ID: "intruder"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// forPublic=true なら public list の membership を非 owner / 未認証でも取得できる。
+func TestListsGetMemberships_ForPublic(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	seedListWithMember(repo, "l1", "owner", "u2", true)
+	h.SetUserListRepo(repo)
+	rec := postStub(h.ListsGetMemberships, `{"listId":"l1","forPublic":true}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	assert.Len(t, rows, 1)
+}
+
+func TestListsGetMemberships_PublicUnauthenticatedAllowed(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	seedListWithMember(repo, "l1", "owner", "u2", true)
+	h.SetUserListRepo(repo)
+	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, nil) // 未認証
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestListsGetMemberships_PrivateUnauthenticatedDenied(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	seedListWithMember(repo, "l1", "owner", "u2", false)
+	h.SetUserListRepo(repo)
+	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestListsGetMemberships_NoSuchList(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserListRepo(testutil.NewMockUserListRepository())
+	rec := postStub(h.ListsGetMemberships, `{"listId":"ghost"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // --- ListsCreateFromPublic ---

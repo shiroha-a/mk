@@ -1372,7 +1372,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/users/get-frequently-replied-users", usersHandler.GetFrequentlyRepliedUsers)
 	api.POST("/users/get-following-users-by-birthday", usersHandler.GetFollowingUsersByBirthday, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/users/recommendation", usersHandler.UserRecommendation, middleware.RequireAuth(), middleware.RequireScope("read:account"))
-	api.POST("/users/lists/get-memberships", usersHandler.ListsGetMemberships, middleware.RequireAuth(), middleware.RequireScope("read:account"))
+	// get-memberships は requireCredential:false の public endpoint (#1550)。
+	// RequireScope は app token のみ gate するため public でも残してよい。
+	api.POST("/users/lists/get-memberships", usersHandler.ListsGetMemberships, middleware.RequireScope("read:account"))
 	api.POST("/users/lists/create-from-public", usersHandler.ListsCreateFromPublic, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/users/lists/favorite", usersHandler.ListsFavorite, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/users/lists/unfavorite", usersHandler.ListsUnfavorite, middleware.RequireAuth(), middleware.RequireScope("write:account"))

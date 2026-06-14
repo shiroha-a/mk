@@ -5466,6 +5466,38 @@ func (m *MockUserListRepository) ListMembers(listID string) ([]*model.UserListMe
 	return result, nil
 }
 
+// ListMembershipsPage mirrors the production cursor pagination (id ASC when
+// sinceID-only, else DESC) over the in-memory Members slice.
+func (m *MockUserListRepository) ListMembershipsPage(listID, sinceID, untilID string, limit int) ([]*model.UserListMembership, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	var result []*model.UserListMembership
+	for _, mem := range m.Members {
+		if mem.UserListID != listID {
+			continue
+		}
+		if sinceID != "" && mem.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && mem.ID >= untilID {
+			continue
+		}
+		result = append(result, mem)
+	}
+	asc := sinceID != "" && untilID == ""
+	sort.Slice(result, func(i, j int) bool {
+		if asc {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].ID > result[j].ID
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 // ListMembersByListIDs returns userIDs grouped by listID. Mirrors the
 // production batch fetch (#876) but iterates the in-memory slice.
 func (m *MockUserListRepository) ListMembersByListIDs(listIDs []string) (map[string][]string, error) {
