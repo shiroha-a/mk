@@ -2487,27 +2487,17 @@ func (s *Server) setupRoutes() {
 
 	// endpoints — 登録済みAPIエンドポイント一覧
 	api.POST("/endpoints", func(c echo.Context) error {
-		routes := s.echo.Routes()
-		names := make([]string, 0, len(routes))
-		seen := make(map[string]bool)
-		for _, r := range routes {
-			if r.Method != http.MethodPost {
-				continue
-			}
-			name := strings.TrimPrefix(r.Path, "/api/")
-			if name == r.Path || name == "" || name == "*" {
-				continue
-			}
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			names = append(names, name)
-		}
-		return c.JSON(http.StatusOK, names)
+		return c.JSON(http.StatusOK, apiEndpointNames(s.echo))
 	})
 
-	// endpoint — エンドポイント情報 (簡易版: パラメータ情報なし)
+	// endpoint — 指定 endpoint の情報を返す (#1695)。upstream endpoint.ts は
+	// 未知 endpoint で null、既知なら { params: [{name,type}, ...] } を返す。
+	// mk-go は per-endpoint の paramDef メタデータを保持しない (handler は
+	// router.go の inline closure で param schema を構造化していない) ため、
+	// param 名/型までは導出できない。ここでは response の shape (params は配列)
+	// と未知 endpoint の null だけ upstream に揃える。params 内容の導出は
+	// endpoint registry の新設が必要で本 endpoint の用途 (API introspection) に
+	// 対して費用対効果が低いため非対応 (#1695 に明記)。
 	api.POST("/endpoint", func(c echo.Context) error {
 		var req struct {
 			Endpoint string `json:"endpoint"`
@@ -2515,7 +2505,11 @@ func (s *Server) setupRoutes() {
 		if err := c.Bind(&req); err != nil || req.Endpoint == "" {
 			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
-		return c.JSON(http.StatusOK, map[string]any{"params": map[string]any{}})
+		// 未知 endpoint は null (upstream: ep == null → return null)。
+		if !isRegisteredAPIEndpoint(s.echo, req.Endpoint) {
+			return c.JSON(http.StatusOK, nil)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"params": []any{}})
 	})
 
 	// retention — リテンション統計
