@@ -2571,14 +2571,24 @@ func (s *Server) setupRoutes() {
 		if err := s.db.Find(&decorations).Error; err != nil {
 			return c.JSON(http.StatusOK, []any{})
 		}
+		// upstream get-avatar-decorations.ts は roleIdsThatCanBeUsedThisDecoration を
+		// 現存ロールのみに filter して削除済ロール ID を除去する (#1543)。meta は
+		// 1 度だけ引いて使い回す。取得失敗時は空集合 (= 全 roleId を除去) ではなく
+		// nil 扱いで filter すると全件落ちるため、エラー時は filter を skip して
+		// 旧挙動 (verbatim) にフォールバックする。
+		existingRoles, roleErr := roleService.ExistingRoleIDSet()
 		out := make([]map[string]any, 0, len(decorations))
 		for _, d := range decorations {
+			roleIDs := []string(d.RoleIDs)
+			if roleErr == nil {
+				roleIDs = corerole.FilterExistingRoleIDs(roleIDs, existingRoles)
+			}
 			out = append(out, map[string]any{
 				"id":                                 d.ID,
 				"name":                               d.Name,
 				"description":                        d.Description,
 				"url":                                d.URL,
-				"roleIdsThatCanBeUsedThisDecoration": d.RoleIDs,
+				"roleIdsThatCanBeUsedThisDecoration": roleIDs,
 				// upstream Misskey #17034 (= 2026.5.0) で追加された category field
 				// もここで返す。nullable なので null のままも許容。
 				"category": d.Category,

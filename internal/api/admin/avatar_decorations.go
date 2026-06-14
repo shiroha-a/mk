@@ -97,6 +97,20 @@ func (h *Handler) AvatarDecorationsDelete(c echo.Context) error {
 
 // AvatarDecorationsList handles POST /api/admin/avatar-decorations/list.
 func (h *Handler) AvatarDecorationsList(c echo.Context) error {
+	// upstream list.ts paramDef は limit/sinceId/untilId/sinceDate/untilDate/userId
+	// を受け取るが、実装は avatarDecorationService.getAll(true) で全件返す。mk-go も
+	// これに揃えて全件返す。params は受理するが結果には影響しない (#1543)。
+	var req struct {
+		Limit     int     `json:"limit"`
+		SinceID   string  `json:"sinceId"`
+		UntilID   string  `json:"untilId"`
+		SinceDate *int64  `json:"sinceDate"`
+		UntilDate *int64  `json:"untilDate"`
+		UserID    *string `json:"userId"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
+	}
 	if h.avatarDecoRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

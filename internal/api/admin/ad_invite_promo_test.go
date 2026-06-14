@@ -331,6 +331,27 @@ func TestAvatarDecorationsList_WithRepo(t *testing.T) {
 	assert.Len(t, rows, 2)
 }
 
+// upstream list.ts は limit/sinceId/untilId/sinceDate/untilDate/userId を受けるが
+// getAll(true) で全件返す。mk-go も params を受理しつつ全件返す (#1543)。
+func TestAvatarDecorationsList_AcceptsParamsReturnsAll(t *testing.T) {
+	h, _ := setupAvatarDecorationHandler(t,
+		&model.AvatarDecoration{ID: "d1", Name: "a"},
+		&model.AvatarDecoration{ID: "d2", Name: "b"},
+	)
+	// limit=1 を送っても TS 同様に全件 (2 件) 返る。
+	rec := doPost(h.AvatarDecorationsList, `{"limit":1,"sinceId":"x","userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []model.AvatarDecoration
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	assert.Len(t, rows, 2, "params を受理しても全件返す (TS getAll(true) 互換)")
+}
+
+func TestAvatarDecorationsList_InvalidJSON(t *testing.T) {
+	h, _ := setupAvatarDecorationHandler(t)
+	rec := doPost(h.AvatarDecorationsList, `{not`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestAvatarDecorationsUpdate_Success(t *testing.T) {
 	h, repo := setupAvatarDecorationHandler(t,
 		&model.AvatarDecoration{ID: "d1", Name: "old", URL: "u"},

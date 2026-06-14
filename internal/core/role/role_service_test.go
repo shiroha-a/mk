@@ -24,6 +24,37 @@ func newTestService(t *testing.T) (*role.Service, *testutil.MockRoleRepository, 
 	return svc, roleRepo, assignRepo, metaRepo
 }
 
+// FilterExistingRoleIDs は existing に含まれる id だけを順序保持で返し、
+// 戻り値は常に非 nil (#1543)。
+func TestFilterExistingRoleIDs(t *testing.T) {
+	existing := map[string]bool{"r1": true, "r3": true}
+	got := role.FilterExistingRoleIDs([]string{"r1", "r2", "r3"}, existing)
+	assert.Equal(t, []string{"r1", "r3"}, got, "r2 (非存在) は除去")
+
+	// 全て非存在 → 空でも非 nil ([])。
+	got = role.FilterExistingRoleIDs([]string{"gone"}, existing)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+
+	// nil 入力でも非 nil の空 slice。
+	got = role.FilterExistingRoleIDs(nil, existing)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
+// ExistingRoleIDSet は全ロールの id 集合を返す (#1543)。
+func TestExistingRoleIDSet(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["a"] = &model.Role{ID: "a", Name: "A"}
+	roleRepo.Roles["b"] = &model.Role{ID: "b", Name: "B"}
+
+	set, err := svc.ExistingRoleIDSet()
+	require.NoError(t, err)
+	assert.True(t, set["a"])
+	assert.True(t, set["b"])
+	assert.False(t, set["ghost"])
+}
+
 func TestGetUserRoles_NoRoles(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	roles, err := svc.GetUserRoles("user1")

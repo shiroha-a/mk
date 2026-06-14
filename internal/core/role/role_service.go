@@ -1042,6 +1042,34 @@ func (s *Service) List() ([]*model.Role, error) {
 	return s.roleRepo.List()
 }
 
+// ExistingRoleIDSet returns the set of all current role ids. get-avatar-
+// decorations / get-emoji 系が削除済ロール ID を除去するために使う (#1543)。
+func (s *Service) ExistingRoleIDSet() (map[string]bool, error) {
+	roles, err := s.roleRepo.List()
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		set[r.ID] = true
+	}
+	return set, nil
+}
+
+// FilterExistingRoleIDs returns the subset of ids that exist in `existing`,
+// preserving input order. 戻り値は常に非 nil (空でも []) なので JSON では null
+// ではなく [] になる。upstream get-avatar-decorations.ts は roleIds を現存ロール
+// で filter して削除済ロール ID を除去する (#1543)。
+func FilterExistingRoleIDs(ids []string, existing map[string]bool) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if existing[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // ListByRole returns role assignments (with User preloaded) for the given
 // role, paginated by untilID/sinceID (assignment.id keyset). Misskey TS の
 // admin/roles/users 互換 envelope ({id, createdAt, user}) を組み立てるため
