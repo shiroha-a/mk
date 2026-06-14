@@ -120,6 +120,51 @@ func TestAdList_Paginated(t *testing.T) {
 	shapetest.Assert(t, "Ad", rawRows[0]) // L3 (#1292)
 }
 
+// #1545: publishing=true は配信中 (startsAt<=now<expiresAt) のみ返す。
+func TestAdList_PublishingFilter(t *testing.T) {
+	now := time.Now()
+	h, _ := setupAdHandler(t,
+		&model.Ad{ID: "a_live", URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+			StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}, // 配信中
+		&model.Ad{ID: "a_expired", URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+			StartsAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}, // 終了
+		&model.Ad{ID: "a_future", URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+			StartsAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour)}, // 未開始
+	)
+
+	rec := doPost(h.AdList, `{"limit":10,"publishing":true}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "a_live", rows[0]["id"])
+
+	// publishing=false は非配信 (終了 + 未開始)。
+	rec = doPost(h.AdList, `{"limit":10,"publishing":false}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rows = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+}
+
+// #1545: untilId による cursor pagination。
+func TestAdList_CursorPagination(t *testing.T) {
+	ads := make([]*model.Ad, 5)
+	for i := 0; i < 5; i++ {
+		ads[i] = &model.Ad{ID: fmt.Sprintf("a%02d", i), URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+			StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	h, _ := setupAdHandler(t, ads...)
+
+	rec := doPost(h.AdList, `{"limit":10,"untilId":"a03"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	// a03 より小さい id (a02,a01,a00) を id DESC で返す。
+	require.Len(t, rows, 3)
+	assert.Equal(t, "a02", rows[0]["id"])
+}
+
 func TestAdUpdate_PartialFields(t *testing.T) {
 	h, repo := setupAdHandler(t,
 		&model.Ad{ID: "a1", URL: "old", Place: "square", Priority: "middle", Ratio: 1, ImageURL: "i"},
@@ -370,6 +415,30 @@ func TestInviteList_FilterUnused(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "t1", rows[0]["id"])
 	assert.Equal(t, false, rows[0]["used"])
+}
+
+// #1545: sort=-createdAt は id ASC (古い順)、default は id DESC。
+func TestInviteList_Sort(t *testing.T) {
+	h, _ := setupInviteHandler(t,
+		&model.RegistrationTicket{ID: "t1", Code: "c1"},
+		&model.RegistrationTicket{ID: "t2", Code: "c2"},
+		&model.RegistrationTicket{ID: "t3", Code: "c3"},
+	)
+	// default (sort 省略) は id DESC。
+	rec := doPost(h.InviteList, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 3)
+	assert.Equal(t, "t3", rows[0]["id"])
+
+	// -createdAt は id ASC。
+	rec = doPost(h.InviteList, `{"sort":"-createdAt"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rows = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 3)
+	assert.Equal(t, "t1", rows[0]["id"])
 }
 
 // #1048 / #1049: createdBy / usedBy が hardcoded nil で返って frontend で

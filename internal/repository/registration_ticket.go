@@ -48,6 +48,9 @@ type RegistrationTicketRepository interface {
 	// `now` is passed by callers so tests can supply a deterministic clock
 	// when evaluating the `expired` filter.
 	List(filter string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error)
+	// ListSorted is List plus the upstream admin/invite/list sort enum
+	// (+createdAt/-createdAt/+usedAt/-usedAt、#1545)。空 sort は id DESC。
+	ListSorted(filter, sort string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error)
 	// CountByCreatorSince returns the number of tickets created by creatorID
 	// whose ID compares strictly greater than sinceID. Used by
 	// invite/create + invite/limit endpoints to enforce the
@@ -113,6 +116,10 @@ func (r *registrationTicketRepository) markUsedOn(db *gorm.DB, ticketID, userID 
 }
 
 func (r *registrationTicketRepository) List(filter string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error) {
+	return r.ListSorted(filter, "", limit, offset, now)
+}
+
+func (r *registrationTicketRepository) ListSorted(filter, sort string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error) {
 	if limit <= 0 {
 		limit = 30
 	}
@@ -128,8 +135,21 @@ func (r *registrationTicketRepository) List(filter string, limit, offset int, no
 	case RegistrationTicketExpired:
 		q = q.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now)
 	}
+	// upstream admin/invite/list sort enum (#1545)。createdAt は aidx id に対応
+	// (+ が DESC、- が ASC という upstream の符号付け)。usedAt は NULLS 順も合わせる。
+	var order string
+	switch sort {
+	case "-createdAt":
+		order = `"id" ASC`
+	case "+usedAt":
+		order = `"usedAt" DESC NULLS LAST`
+	case "-usedAt":
+		order = `"usedAt" ASC NULLS FIRST`
+	default: // "+createdAt" / 空 / 不正値
+		order = `"id" DESC`
+	}
 	var rows []*model.RegistrationTicket
-	if err := q.Order(`"id" DESC`).Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+	if err := q.Order(order).Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

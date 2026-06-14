@@ -334,9 +334,12 @@ type stubAdRepo struct {
 func (s *stubAdRepo) ListActive(_ time.Time) ([]*model.Ad, error) {
 	return s.ads, s.err
 }
-func (s *stubAdRepo) Create(_ *model.Ad) error                      { return nil }
-func (s *stubAdRepo) FindByID(_ string) (*model.Ad, error)          { return nil, nil }
-func (s *stubAdRepo) List(_, _ int) ([]*model.Ad, error)            { return nil, nil }
+func (s *stubAdRepo) Create(_ *model.Ad) error             { return nil }
+func (s *stubAdRepo) FindByID(_ string) (*model.Ad, error) { return nil, nil }
+func (s *stubAdRepo) List(_, _ int) ([]*model.Ad, error)   { return nil, nil }
+func (s *stubAdRepo) ListFiltered(_ *bool, _, _ string, _ int, _ time.Time) ([]*model.Ad, error) {
+	return nil, nil
+}
 func (s *stubAdRepo) UpdateFields(_ string, _ map[string]any) error { return nil }
 func (s *stubAdRepo) Delete(_ string) error                         { return nil }
 

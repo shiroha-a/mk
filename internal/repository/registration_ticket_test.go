@@ -250,3 +250,55 @@ func TestRegistrationTicketRepository_ListByCreator_DBError(t *testing.T) {
 	_, err := repo.ListByCreator("any", "", "", 10)
 	assert.Error(t, err)
 }
+
+// #1545: ListSorted の sort enum (createdAt = id, usedAt 順 + NULLS 配置)。
+func TestRegistrationTicketRepository_ListSorted(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rts_a", "rts_b", "rts_c")
+	u := insertTestUser(t, "rts_user", "rtsu")
+	defer cleanupUser(t, u.ID)
+
+	t1 := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
+	t2 := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	// a: usedAt=t1, b: usedAt=t2, c: 未使用 (usedAt nil)。id は a<b<c。
+	a := &model.RegistrationTicket{ID: "rts_a", Code: "rts-a", UsedByID: &u.ID, UsedAt: &t1}
+	b := &model.RegistrationTicket{ID: "rts_b", Code: "rts-b", UsedByID: &u.ID, UsedAt: &t2}
+	c := &model.RegistrationTicket{ID: "rts_c", Code: "rts-c"}
+	for _, tk := range []*model.RegistrationTicket{a, b, c} {
+		require.NoError(t, repo.Create(tk))
+	}
+	defer cleanupInvite(t, a.ID, b.ID, c.ID)
+
+	only := func(rows []*model.RegistrationTicket) []string {
+		var out []string
+		for _, r := range rows {
+			switch r.ID {
+			case "rts_a", "rts_b", "rts_c":
+				out = append(out, r.ID)
+			}
+		}
+		return out
+	}
+
+	// -createdAt = id ASC。
+	asc, err := repo.ListSorted(RegistrationTicketAll, "-createdAt", 100, 0, time.Now())
+	require.NoError(t, err)
+	got := only(asc)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"rts_a", "rts_b", "rts_c"}, got)
+
+	// +createdAt = id DESC。
+	desc, err := repo.ListSorted(RegistrationTicketAll, "+createdAt", 100, 0, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rts_c", "rts_b", "rts_a"}, only(desc))
+
+	// +usedAt = usedAt DESC NULLS LAST (b=t2 newest, a=t1, c=nil last)。
+	uDesc, err := repo.ListSorted(RegistrationTicketAll, "+usedAt", 100, 0, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rts_b", "rts_a", "rts_c"}, only(uDesc))
+
+	// -usedAt = usedAt ASC NULLS FIRST (c=nil first, a=t1, b=t2)。
+	uAsc, err := repo.ListSorted(RegistrationTicketAll, "-usedAt", 100, 0, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rts_c", "rts_a", "rts_b"}, only(uAsc))
+}

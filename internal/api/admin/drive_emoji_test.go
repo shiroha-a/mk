@@ -81,6 +81,22 @@ func TestDriveFiles_FiltersByOrigin(t *testing.T) {
 	assert.Equal(t, "d2", rows[0]["id"])
 }
 
+// #1545: origin 省略時は upstream paramDef default の 'local' (userHost IS NULL) を返す。
+func TestDriveFiles_OriginDefaultsToLocal(t *testing.T) {
+	localUser := "u1"
+	remoteHost := "remote.example"
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "d1", UserID: &localUser, Type: "image/png"},
+		&model.DriveFile{ID: "d2", UserHost: &remoteHost, Type: "image/jpeg"},
+	)
+	rec := doPost(h.DriveFiles, `{"limit":10}`, adminUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, "d1", rows[0]["id"])
+}
+
 func TestDriveFiles_FiltersByUserID(t *testing.T) {
 	// admin/user/<id> のドライブタブは userId だけを送ってくる (#471)。
 	// upstream は userId 指定時に origin / hostname を読まないので、それに

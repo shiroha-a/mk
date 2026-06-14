@@ -7378,6 +7378,43 @@ func (m *MockAdRepository) List(limit, offset int) ([]*model.Ad, error) {
 	return rows[offset:end], nil
 }
 
+// ListFiltered applies the publishing filter + cursor pagination (#1545).
+func (m *MockAdRepository) ListFiltered(publishing *bool, sinceID, untilID string, limit int, now time.Time) ([]*model.Ad, error) {
+	if m.ListErr != nil {
+		return nil, m.ListErr
+	}
+	rows := make([]*model.Ad, 0, len(m.Ads))
+	for _, a := range m.Ads {
+		if publishing != nil {
+			isPublishing := !a.StartsAt.After(now) && a.ExpiresAt.After(now)
+			if *publishing != isPublishing {
+				continue
+			}
+		}
+		if sinceID != "" && a.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && a.ID >= untilID {
+			continue
+		}
+		rows = append(rows, a)
+	}
+	asc := sinceID != "" && untilID == ""
+	sortAdsByIDDesc(rows)
+	if asc {
+		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+			rows[i], rows[j] = rows[j], rows[i]
+		}
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 func (m *MockAdRepository) UpdateFields(id string, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
@@ -7622,6 +7659,80 @@ func (m *MockRegistrationTicketRepository) FindByID(id string) (*model.Registrat
 		return t, nil
 	}
 	return nil, ErrNotFound
+}
+
+// ListSorted filters like List and applies the upstream sort enum (#1545).
+func (m *MockRegistrationTicketRepository) ListSorted(filter, sort string, limit, offset int, now time.Time) ([]*model.RegistrationTicket, error) {
+	rows := make([]*model.RegistrationTicket, 0, len(m.Tickets))
+	for _, t := range m.Tickets {
+		switch filter {
+		case "unused":
+			if t.UsedByID != nil {
+				continue
+			}
+		case "used":
+			if t.UsedByID == nil {
+				continue
+			}
+		case "expired":
+			if t.ExpiresAt == nil || !t.ExpiresAt.Before(now) {
+				continue
+			}
+		}
+		rows = append(rows, t)
+	}
+	// sort: createdAt は id 順、usedAt は UsedAt 順 (NULLS 配置も合わせる)。
+	less := func(a, b *model.RegistrationTicket) bool {
+		switch sort {
+		case "-createdAt":
+			return a.ID < b.ID
+		case "+usedAt", "-usedAt":
+			ai, bi := a.UsedAt, b.UsedAt
+			if ai == nil && bi == nil {
+				return a.ID > b.ID
+			}
+			if sort == "+usedAt" { // DESC NULLS LAST
+				if ai == nil {
+					return false
+				}
+				if bi == nil {
+					return true
+				}
+				return ai.After(*bi)
+			}
+			// -usedAt: ASC NULLS FIRST
+			if ai == nil {
+				return true
+			}
+			if bi == nil {
+				return false
+			}
+			return ai.Before(*bi)
+		default: // +createdAt / 空: id DESC
+			return a.ID > b.ID
+		}
+	}
+	for i := 0; i < len(rows); i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if less(rows[j], rows[i]) {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(rows) {
+		return []*model.RegistrationTicket{}, nil
+	}
+	end := offset + limit
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[offset:end], nil
 }
 
 func (m *MockRegistrationTicketRepository) ListByCreator(creatorID, sinceID, untilID string, limit int) ([]*model.RegistrationTicket, error) {

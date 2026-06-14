@@ -166,6 +166,7 @@ func (h *Handler) InviteList(c echo.Context) error {
 		Limit  int    `json:"limit"`
 		Offset int    `json:"offset"`
 		Type   string `json:"type"`
+		Sort   string `json:"sort"`
 	}
 	_ = c.Bind(&req)
 	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
@@ -175,7 +176,14 @@ func (h *Handler) InviteList(c echo.Context) error {
 	default:
 		filter = "all"
 	}
-	rows, err := h.inviteRepo.List(filter, req.Limit, req.Offset, time.Now())
+	// upstream admin/invite/list sort enum (#1545)。未知値は repo 側で id DESC に倒れる。
+	sort := req.Sort
+	switch sort {
+	case "+createdAt", "-createdAt", "+usedAt", "-usedAt":
+	default:
+		sort = ""
+	}
+	rows, err := h.inviteRepo.ListSorted(filter, sort, req.Limit, req.Offset, time.Now())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

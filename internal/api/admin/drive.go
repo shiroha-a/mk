@@ -151,7 +151,11 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 		return c.JSON(http.StatusOK, out)
 	}
 	switch req.Origin {
-	case "", "combined", "local", "remote":
+	case "combined", "local", "remote":
+	case "":
+		// upstream files.ts paramDef は origin default='local' (#1545)。
+		// userId 未指定時は userHost IS NULL のローカルのみ返す。
+		req.Origin = "local"
 	default:
 		req.Origin = "combined"
 	}

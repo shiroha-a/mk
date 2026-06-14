@@ -118,3 +118,49 @@ func TestAdRepository_ListDefaults(t *testing.T) {
 	_, err := repo.List(0, -1)
 	require.NoError(t, err)
 }
+
+// #1545: ListFiltered の publishing フィルタ + cursor pagination。
+func TestAdRepository_ListFiltered(t *testing.T) {
+	repo := NewAdRepository(testDB)
+	now := time.Now()
+	mk := func(id string, starts, expires time.Duration) *model.Ad {
+		return &model.Ad{ID: id, URL: "u", ImageURL: "i", Place: "square", Priority: "middle", Ratio: 1,
+			StartsAt: now.Add(starts), ExpiresAt: now.Add(expires)}
+	}
+	live := mk("adf_live", -time.Hour, time.Hour)
+	expired := mk("adf_expired", -2*time.Hour, -time.Hour)
+	future := mk("adf_future", time.Hour, 2*time.Hour)
+	for _, a := range []*model.Ad{live, expired, future} {
+		require.NoError(t, repo.Create(a))
+		defer cleanupAd(t, a.ID)
+	}
+
+	yes := true
+	pub, err := repo.ListFiltered(&yes, "", "", 100, now)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, a := range pub {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids["adf_live"])
+	assert.False(t, ids["adf_expired"])
+	assert.False(t, ids["adf_future"])
+
+	no := false
+	notPub, err := repo.ListFiltered(&no, "", "", 100, now)
+	require.NoError(t, err)
+	ids = map[string]bool{}
+	for _, a := range notPub {
+		ids[a.ID] = true
+	}
+	assert.False(t, ids["adf_live"])
+	assert.True(t, ids["adf_expired"])
+	assert.True(t, ids["adf_future"])
+
+	// publishing=nil は全件、untilId で cursor 絞り込み。
+	all, err := repo.ListFiltered(nil, "", "adf_future", 100, now)
+	require.NoError(t, err)
+	for _, a := range all {
+		assert.Less(t, a.ID, "adf_future")
+	}
+}

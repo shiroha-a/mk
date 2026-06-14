@@ -159,6 +159,12 @@ func TestAdminCreate_Success(t *testing.T) {
 	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, repo.Items, 1)
+	// #1545: レスポンスは packed で createdAt (ID 由来) を含む。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	createdAt, ok := resp["createdAt"].(string)
+	require.True(t, ok, "create response must include createdAt")
+	assert.NotEmpty(t, createdAt)
 }
 
 func TestAdminCreate_InvalidParam(t *testing.T) {

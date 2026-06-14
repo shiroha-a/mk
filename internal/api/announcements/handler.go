@@ -254,7 +254,9 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 		"announcementId": a.ID,
 		"announcement":   a,
 	})
-	return c.JSON(http.StatusOK, a)
+	// upstream create.ts は packed (createdAt 等を含む) を返す。raw model は
+	// createdAt 列を持たない (ID 由来) ため packer を通す (#1545)。
+	return c.JSON(http.StatusOK, entity.PackAnnouncement(a, h.idGen, false))
 }
 
 // isValidAnnouncementIcon reports whether v matches upstream's
