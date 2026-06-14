@@ -1,8 +1,10 @@
 package notes
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -112,7 +114,7 @@ func (h *Handler) Featured(c echo.Context) error {
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// untilDate を aidx prefix に正規化 (#1166)。
 	_, untilID := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
-	notes, err := h.noteRepo.ListFeatured(req.ChannelID, untilID, req.Limit, req.Offset)
+	notes, err := h.featuredNotes(c.Request().Context(), req.ChannelID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -125,6 +127,78 @@ func (h *Handler) Featured(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
+}
+
+// featured ランキング取得の threshold / cache TTL (upstream featured.ts)。
+const (
+	featuredGlobalThreshold    = 100
+	featuredInChannelThreshold = 50
+	featuredGlobalCacheTTL     = 30 * time.Minute
+)
+
+// featuredNotes returns featured notes from the engagement ranking (#1687) when
+// the ranking reader is wired, falling back to the SQL count-DESC ranking when
+// it is unavailable or empty (fresh instance / Redis flush)。ranking 経路は
+// upstream featured.ts と同じく id DESC sort → untilId filter → limit。
+func (h *Handler) featuredNotes(ctx context.Context, channelID, untilID string, limit, offset int) ([]*model.Note, error) {
+	if h.featuredRanking == nil {
+		return h.noteRepo.ListFeatured(channelID, untilID, limit, offset)
+	}
+	var ids []string
+	var err error
+	if channelID != "" {
+		ids, err = h.featuredRanking.GetInChannelNotesRanking(ctx, channelID, featuredInChannelThreshold)
+	} else {
+		ids, err = h.cachedGlobalRanking(ctx)
+	}
+	if err != nil || len(ids) == 0 {
+		// Redis ranking が空 / 取得失敗 (fresh instance 等) は SQL fallback。
+		return h.noteRepo.ListFeatured(channelID, untilID, limit, offset)
+	}
+	ids = sortAndPageFeaturedIDs(ids, untilID, limit)
+	if len(ids) == 0 {
+		return []*model.Note{}, nil
+	}
+	return h.noteRepo.FindManyByIDsWithUser(ids)
+}
+
+// cachedGlobalRanking returns the global ranking with a 30-min in-memory cache
+// (upstream featured.ts の globalNotesRankingCache)。
+func (h *Handler) cachedGlobalRanking(ctx context.Context) ([]string, error) {
+	h.featuredGlobalCache.mu.Lock()
+	defer h.featuredGlobalCache.mu.Unlock()
+	if !h.featuredGlobalCache.fetchedAt.IsZero() && time.Since(h.featuredGlobalCache.fetchedAt) < featuredGlobalCacheTTL {
+		return h.featuredGlobalCache.ids, nil
+	}
+	ids, err := h.featuredRanking.GetGlobalNotesRanking(ctx, featuredGlobalThreshold)
+	if err != nil {
+		return nil, err
+	}
+	h.featuredGlobalCache.ids = ids
+	h.featuredGlobalCache.fetchedAt = time.Now()
+	return ids, nil
+}
+
+// sortAndPageFeaturedIDs sorts note IDs DESC, drops IDs >= untilID, and caps the
+// result to limit (upstream featured.ts の noteIds.sort / filter / slice)。入力
+// slice を破壊しないようコピーしてから操作する (cache 共有のため)。
+func sortAndPageFeaturedIDs(ids []string, untilID string, limit int) []string {
+	out := make([]string, len(ids))
+	copy(out, ids)
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
+	if untilID != "" {
+		filtered := out[:0]
+		for _, noteID := range out {
+			if noteID < untilID {
+				filtered = append(filtered, noteID)
+			}
+		}
+		out = filtered
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // Unrenote handles POST /api/notes/unrenote.

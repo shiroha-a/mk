@@ -1,10 +1,12 @@
 package users
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 	"unicode/utf8"
 
@@ -400,7 +402,7 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if h.isBlockedByTarget(viewer, req.UserID) {
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
-	notes, err := h.noteRepo.ListFeaturedByUser(req.UserID, viewerID, req.UntilID, req.Limit)
+	notes, err := h.featuredNotesByUser(c.Request().Context(), req.UserID, viewerID, req.UntilID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -419,6 +421,50 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	h.fieldRes.Apply(result, viewer)
 	notehide.HideEmbeds(viewer, result)
 	return c.JSON(http.StatusOK, result)
+}
+
+// featuredPerUserThreshold は per-user ranking から取得する上位件数 (upstream
+// featured-notes.ts の getPerUserNotesRanking(50))。
+const featuredPerUserThreshold = 50
+
+// featuredNotesByUser returns userID's featured notes from the per-user
+// engagement ranking (#1687)。ranking 未配線 / 空 (fresh instance 等) のときは
+// 既存の SQL count-DESC ranking (ListFeaturedByUser) に fallback する。ranking
+// 経路は upstream featured-notes.ts と同じく id DESC sort → untilId filter → limit。
+func (h *Handler) featuredNotesByUser(ctx context.Context, userID, viewerID, untilID string, limit int) ([]*model.Note, error) {
+	if h.featuredRanking == nil {
+		return h.noteRepo.ListFeaturedByUser(userID, viewerID, untilID, limit)
+	}
+	ids, err := h.featuredRanking.GetPerUserNotesRanking(ctx, userID, featuredPerUserThreshold)
+	if err != nil || len(ids) == 0 {
+		return h.noteRepo.ListFeaturedByUser(userID, viewerID, untilID, limit)
+	}
+	ids = sortAndPageFeaturedIDs(ids, untilID, limit)
+	if len(ids) == 0 {
+		return []*model.Note{}, nil
+	}
+	return h.noteRepo.FindManyByIDsWithUser(ids)
+}
+
+// sortAndPageFeaturedIDs sorts note IDs DESC, drops IDs >= untilID, and caps to
+// limit (upstream featured-notes.ts の noteIds.sort / filter / slice)。
+func sortAndPageFeaturedIDs(ids []string, untilID string, limit int) []string {
+	out := make([]string, len(ids))
+	copy(out, ids)
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
+	if untilID != "" {
+		filtered := out[:0]
+		for _, noteID := range out {
+			if noteID < untilID {
+				filtered = append(filtered, noteID)
+			}
+		}
+		out = filtered
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // SearchByUsernameAndHost handles POST /api/users/search-by-username-and-host.

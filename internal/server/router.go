@@ -1193,6 +1193,8 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetChannelMutingRepo(channelMutingRepo)
 	// home timeline で follow 中 channel の note を含める (#1686)。
 	notesHandler.SetChannelFollowingRepo(channelFollowingRepo)
+	// notes/featured の engagement ランキング読み取り (#1687)。
+	notesHandler.SetFeaturedRanking(featuredService)
 	// timeline endpoint で muted user の note を除外する filter (#874)。
 	// 未配線だと user mute は read 時に効かず、cache のみ DB 整合の状態
 	// になる security/UX regression が残る。production では必ず wire する。
@@ -1287,6 +1289,7 @@ func (s *Server) setupRoutes() {
 	// Users endpoints
 	usersHandler := users.NewHandler(userService, followingService, noteRepo, idGen)
 	usersHandler.SetChartHook(chartHooks)
+	usersHandler.SetFeaturedRanking(featuredService) // #1687: users/featured-notes ランキング
 	usersHandler.SetPiningRepo(piningRepo)
 	usersHandler.SetFollowingRepo(followingRepo)
 	usersHandler.SetBlockingRepo(blockingRepo)

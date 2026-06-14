@@ -74,6 +74,22 @@ type Handler struct {
 	// driveFileRepo は users/pages で page の attachedFiles / eyeCatchingImage を
 	// drive file から解決するのに使う (#1662)。未配線なら両 field は default。
 	driveFileRepo repository.DriveFileRepository
+	// featuredRanking は users/featured-notes の per-user engagement ランキング
+	// (#1687)。nil 時 (= 未配線 / test) は SQL count-DESC fallback を使う。
+	featuredRanking FeaturedRankingReader
+}
+
+// FeaturedRankingReader reads the per-user engagement ranking for
+// users/featured-notes (#1687). 循環依存回避のため narrow interface
+// (実装は core/featured.Service)。
+type FeaturedRankingReader interface {
+	GetPerUserNotesRanking(ctx context.Context, userID string, threshold int) ([]string, error)
+}
+
+// SetFeaturedRanking wires the per-user engagement ranking reader (#1687).
+// nil 注入時は SQL count-DESC fallback。
+func (h *Handler) SetFeaturedRanking(r FeaturedRankingReader) {
+	h.featuredRanking = r
 }
 
 // SetDriveFileRepo wires the drive file repo used by users/pages to resolve a

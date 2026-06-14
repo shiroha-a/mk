@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -85,6 +86,33 @@ type Handler struct {
 	// timelineCache は config flag enableTimelineCache (MK_ENABLETIMELINECACHE)
 	// 有効時のみ non-nil。first-page timeline 応答を per-viewer で短期キャッシュする。
 	timelineCache *timelineJSONCache
+	// featuredRanking は notes/featured の engagement ランキング (#1687)。nil 時
+	// (= 未配線 / test) は SQL count-DESC fallback を使う。
+	featuredRanking FeaturedRankingReader
+	// featuredGlobalCache は global ranking の 30分 in-memory cache
+	// (upstream featured.ts の globalNotesRankingCache)。channel ranking は cache
+	// しない (channel ごとなので)。
+	featuredGlobalCache featuredGlobalRankingCache
+}
+
+// FeaturedRankingReader reads the engagement ranking for notes/featured (#1687).
+// 循環依存回避のため narrow interface (実装は core/featured.Service)。
+type FeaturedRankingReader interface {
+	GetGlobalNotesRanking(ctx context.Context, threshold int) ([]string, error)
+	GetInChannelNotesRanking(ctx context.Context, channelID string, threshold int) ([]string, error)
+}
+
+// featuredGlobalRankingCache holds the 30-min global ranking cache.
+type featuredGlobalRankingCache struct {
+	mu        sync.Mutex
+	ids       []string
+	fetchedAt time.Time
+}
+
+// SetFeaturedRanking wires the engagement ranking reader so notes/featured uses
+// it (#1687). nil 注入時は SQL count-DESC fallback。
+func (h *Handler) SetFeaturedRanking(r FeaturedRankingReader) {
+	h.featuredRanking = r
 }
 
 // EnableTimelineJSONCache turns on the first-page timeline response cache with
