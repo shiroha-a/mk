@@ -2217,9 +2217,9 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetEmojiImageFetcher(apiadmin.NewEmojiImageFetcher(s.outboundClient(10*time.Second), driveService, s.config.UserAgent))
 	adminHandler.SetRelayService(relaySvc)
 	adminHandler.SetSystemWebhookRepo(systemWebhookRepo)
-	// admin/system-webhook/test の fire-and-forget POST も SSRF-safe transport
-	// + forward proxy 経由にする (#638)。
-	adminHandler.SetWebhookTestClient(s.outboundClient(10 * time.Second))
+	// admin/system-webhook/test は webhookService.DispatchSystemTest で real
+	// delivery (queue) を経由する。SSRF-safe transport は配送 processor 側
+	// (NewWebhookProcessor) で適用済 (#1542、旧 SetWebhookTestClient を廃止)。
 	adminHandler.SetRecipientRepo(recipientRepo)
 	// resolve-abuse-user-report 時に abuseReportResolved system webhook を発火
 	// する dispatcher (#1723)。

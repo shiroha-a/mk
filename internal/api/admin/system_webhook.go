@@ -1,10 +1,7 @@
 package admin
 
 import (
-	"fmt"
-	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -15,37 +12,53 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
-// sendWebhookTest sends a test webhook POST request.
-//
-// Misskey 本家の admin/system-webhook/test 互換。シークレットがあれば
-// X-Misskey-Hook-Secret ヘッダに平文を載せる (本家も同仕様)。
-//
-// client は SSRF-safe transport + forward proxy 経由を期待した HTTP client。
-// nil なら 10s timeout の素の Client にフォールバックする (#638)。
-func sendWebhookTest(client *http.Client, url, secret, eventType string) {
-	body := fmt.Sprintf(`{"type":"%s","body":{"test":true},"createdAt":"%s"}`,
-		eventType, time.Now().UTC().Format(time.RFC3339))
+// systemWebhookEventTypes is the allow-list of system webhook `on` event types,
+// mirroring upstream models/SystemWebhook.ts systemWebhookEventTypes (#1542)。
+var systemWebhookEventTypes = map[string]bool{
+	"abuseReport":                             true,
+	"abuseReportResolved":                     true,
+	"userCreated":                             true,
+	"inactiveModeratorsWarning":               true,
+	"inactiveModeratorsInvitationOnlyChanged": true,
+}
 
-	req, err := http.NewRequest("POST", url, strings.NewReader(body))
-	if err != nil {
-		slog.Warn("webhook test: request creation failed", "error", err)
-		return
+// validSystemWebhookEvents reports whether every entry of `on` is a known event
+// type. 空配列も valid (= required 検証は別途行う)。
+func validSystemWebhookEvents(on []string) bool {
+	for _, e := range on {
+		if !systemWebhookEventTypes[e] {
+			return false
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if secret != "" {
-		req.Header.Set("X-Misskey-Hook-Secret", secret)
-	}
+	return true
+}
 
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+// dummySystemWebhookBody builds a representative test payload per system event
+// type, matching upstream WebhookTestService の type 別 dummy 相当 (#1542)。
+func dummySystemWebhookBody(eventType string) map[string]any {
+	dummyUser := map[string]any{
+		"id":       "dummy-user-1",
+		"username": "dummy",
+		"host":     nil,
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Warn("webhook test: request failed", "error", err)
-		return
+	switch eventType {
+	case "abuseReport", "abuseReportResolved":
+		return map[string]any{
+			"id":           "dummy-report-1",
+			"comment":      "This is a dummy abuse report for testing purposes.",
+			"resolved":     eventType == "abuseReportResolved",
+			"reporterId":   "dummy-user-1",
+			"targetUserId": "dummy-user-2",
+			"reporter":     dummyUser,
+			"targetUser":   dummyUser,
+			"assignee":     nil,
+		}
+	case "userCreated":
+		return dummyUser
+	default:
+		// inactiveModeratorsWarning / inactiveModeratorsInvitationOnlyChanged 等。
+		return map[string]any{}
 	}
-	_ = resp.Body.Close()
-	slog.Info("webhook test sent", "url", url, "status", resp.StatusCode)
 }
 
 // SystemWebhookCreate handles POST /api/admin/system-webhook/create.
@@ -54,26 +67,28 @@ func (h *Handler) SystemWebhookCreate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		Name     string   `json:"name"`
-		URL      string   `json:"url"`
-		Secret   string   `json:"secret"`
-		On       []string `json:"on"`
-		IsActive *bool    `json:"isActive"`
+		Name   string `json:"name"`
+		URL    string `json:"url"`
+		Secret string `json:"secret"`
+		// upstream create.ts required:[isActive,name,on,url]。欠落を 400 で弾く
+		// ため On/IsActive はポインタで「未送出 (nil)」を判別する (#1542)。
+		On       *[]string `json:"on"`
+		IsActive *bool     `json:"isActive"`
 	}
-	if err := c.Bind(&req); err != nil || req.Name == "" || req.URL == "" {
+	if err := c.Bind(&req); err != nil || req.Name == "" || req.URL == "" || req.On == nil || req.IsActive == nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
-	isActive := true
-	if req.IsActive != nil {
-		isActive = *req.IsActive
+	// on は systemWebhookEventTypes enum のみ受理する (upstream create.ts)。
+	if !validSystemWebhookEvents(*req.On) {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("on contains an unknown event type."))
 	}
 	sw := &model.SystemWebhook{
 		ID:        h.idGen.Generate(time.Now()),
 		Name:      req.Name,
 		URL:       req.URL,
 		Secret:    req.Secret,
-		On:        req.On,
-		IsActive:  isActive,
+		On:        *req.On,
+		IsActive:  *req.IsActive,
 		UpdatedAt: time.Now(),
 	}
 	if err := h.systemWebhookRepo.Create(sw); err != nil {
@@ -140,22 +155,38 @@ func (h *Handler) SystemWebhookShow(c echo.Context) error {
 }
 
 // SystemWebhookTest handles POST /api/admin/system-webhook/test.
+//
+// upstream test.ts: webhook 不在なら NO_SUCH_WEBHOOK、override.url/secret を受け、
+// 配送 processor 経由で type 別 dummy payload を送る。mk-go も DispatchSystemTest
+// で real delivery (queue) を経由させ、header/envelope を本配送と一致させる (#1542)。
 func (h *Handler) SystemWebhookTest(c echo.Context) error {
 	var req struct {
 		WebhookID string `json:"webhookId"`
 		Type      string `json:"type"`
+		Override  *struct {
+			URL    string `json:"url"`
+			Secret string `json:"secret"`
+		} `json:"override"`
 	}
-	_ = c.Bind(&req)
-	if req.WebhookID == "" || h.systemWebhookRepo == nil {
-		return c.NoContent(http.StatusNoContent)
+	if err := c.Bind(&req); err != nil || req.WebhookID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("webhookId is required."))
+	}
+	if h.systemWebhookRepo == nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	sw, err := h.systemWebhookRepo.FindByID(req.WebhookID)
 	if err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "0c52149c-e913-18f8-5dc7-74870bfe0cf9"))
+	}
+	if h.systemWebhookDispatcher == nil {
+		// dispatcher 未配線時は no-op (DB lookup の NO_SUCH_WEBHOOK 検証は通す)。
 		return c.NoContent(http.StatusNoContent)
 	}
-	// テスト送信(非同期)。配送結果は latestStatus 系カラムに反映されないが、
-	// Misskey 本家の /system-webhook/test も fire-and-forget 挙動なので整合。
-	go sendWebhookTest(h.webhookTestClient, sw.URL, sw.Secret, req.Type)
+	var overrideURL, overrideSecret string
+	if req.Override != nil {
+		overrideURL, overrideSecret = req.Override.URL, req.Override.Secret
+	}
+	h.systemWebhookDispatcher.DispatchSystemTest(sw.ID, req.Type, dummySystemWebhookBody(req.Type), overrideURL, overrideSecret)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -195,6 +226,10 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 		fields["secret"] = *req.Secret
 	}
 	if req.On != nil {
+		// on は systemWebhookEventTypes enum のみ受理 (upstream update.ts、#1542)。
+		if !validSystemWebhookEvents(*req.On) {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam("on contains an unknown event type."))
+		}
 		// pq.StringArray でラップしないと GORM Updates(map) が空 string[] を
 		// NULL 化して NOT NULL 制約違反になる (#932、#931 / #896 と同 class)。
 		fields["on"] = pq.StringArray(*req.On)

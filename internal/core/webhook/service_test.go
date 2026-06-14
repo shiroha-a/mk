@@ -250,6 +250,26 @@ func TestDispatchSystemExcluding_SkipsExcluded(t *testing.T) {
 	assert.Equal(t, "h1", enq.systemCalls[0].WebhookID, "excludes の h2 は配送されない")
 }
 
+// DispatchSystemTest は webhookID 1 件に test 配送を enqueue し、override を
+// payload に載せる (#1542)。
+func TestDispatchSystemTest_EnqueuesWithOverride(t *testing.T) {
+	enq := &fakeEnqueuer{}
+	svc := webhook.NewService(enq, nil, nil, "https://example.com")
+	svc.DispatchSystemTest("w1", webhook.SystemEventAbuseReport, map[string]any{"id": "r1"}, "https://override.example", "ovsecret")
+	require.Len(t, enq.systemCalls, 1)
+	assert.Equal(t, "w1", enq.systemCalls[0].WebhookID)
+	assert.Equal(t, "https://override.example", enq.systemCalls[0].OverrideURL)
+	assert.Equal(t, "ovsecret", enq.systemCalls[0].OverrideSecret)
+	assert.Empty(t, enq.systemCalls[0].UserID, "system webhook は UserID を持たない")
+}
+
+func TestDispatchSystemTest_NilSafe(t *testing.T) {
+	var svc *webhook.Service
+	svc.DispatchSystemTest("w1", "abuseReport", nil, "", "")
+	svc = webhook.NewService(nil, nil, nil, "")
+	svc.DispatchSystemTest("w1", "abuseReport", nil, "", "")
+}
+
 // excludes が nil の場合は DispatchSystem と同じ全 active 配送。
 func TestDispatchSystemExcluding_NilExcludesDeliversAll(t *testing.T) {
 	enq := &fakeEnqueuer{}

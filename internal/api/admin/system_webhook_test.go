@@ -3,7 +3,6 @@ package admin_test
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,7 +21,7 @@ func TestSystemWebhookCreate_Success(t *testing.T) {
 	h.SetSystemWebhookRepo(repo)
 
 	rec := doPost(h.SystemWebhookCreate,
-		`{"name":"hook1","url":"https://example.com/hook","secret":"s","on":["abuseReport"]}`,
+		`{"name":"hook1","url":"https://example.com/hook","secret":"s","on":["abuseReport"],"isActive":true}`,
 		adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -45,12 +44,43 @@ func TestSystemWebhookCreate_MissingFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// upstream create.ts required:[isActive,name,on,url]。on / isActive 欠落は 400 (#1542)。
+func TestSystemWebhookCreate_RequiredOnIsActive(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetSystemWebhookRepo(testutil.NewMockSystemWebhookRepository())
+	// on 欠落
+	assert.Equal(t, http.StatusBadRequest,
+		doPost(h.SystemWebhookCreate, `{"name":"x","url":"https://x","isActive":true}`, adminUser).Code)
+	// isActive 欠落
+	assert.Equal(t, http.StatusBadRequest,
+		doPost(h.SystemWebhookCreate, `{"name":"x","url":"https://x","on":["abuseReport"]}`, adminUser).Code)
+}
+
+// on は systemWebhookEventTypes enum のみ受理。未知値は 400 (#1542)。
+func TestSystemWebhookCreate_InvalidEventType(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetSystemWebhookRepo(testutil.NewMockSystemWebhookRepository())
+	rec := doPost(h.SystemWebhookCreate,
+		`{"name":"x","url":"https://x","on":["bogusEvent"],"isActive":true}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// update も on の enum を検証する (#1542)。
+func TestSystemWebhookUpdate_InvalidEventType(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockSystemWebhookRepository()
+	require.NoError(t, repo.Create(&model.SystemWebhook{ID: "w1", Name: "x", URL: "https://x"}))
+	h.SetSystemWebhookRepo(repo)
+	rec := doPost(h.SystemWebhookUpdate, `{"id":"w1","on":["bogusEvent"]}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestSystemWebhookCreate_RepoError(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := testutil.NewMockSystemWebhookRepository()
 	repo.CreateErr = assertError{}
 	h.SetSystemWebhookRepo(repo)
-	rec := doPost(h.SystemWebhookCreate, `{"name":"x","url":"https://x"}`, adminUser)
+	rec := doPost(h.SystemWebhookCreate, `{"name":"x","url":"https://x","on":["abuseReport"],"isActive":true}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -151,44 +181,38 @@ func TestSystemWebhookTest_WithRepo(t *testing.T) {
 	repo := testutil.NewMockSystemWebhookRepository()
 	require.NoError(t, repo.Create(&model.SystemWebhook{ID: "w1", URL: "https://127.0.0.1:1"}))
 	h.SetSystemWebhookRepo(repo)
+	disp := &stubSystemWebhookDispatcher{}
+	h.SetSystemWebhookDispatcher(disp)
 
-	// webhookId 空は 204
-	assert.Equal(t, http.StatusNoContent, doPost(h.SystemWebhookTest, `{}`, adminUser).Code)
-	// 存在しない webhookId も 204
-	assert.Equal(t, http.StatusNoContent,
-		doPost(h.SystemWebhookTest, `{"webhookId":"missing"}`, adminUser).Code)
-	// 正常系も 204 (fire-and-forget)
+	// webhookId 空は 400 (required, #1542)。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.SystemWebhookTest, `{}`, adminUser).Code)
+	// 存在しない webhookId は NO_SUCH_WEBHOOK (400)。
+	rec := doPost(h.SystemWebhookTest, `{"webhookId":"missing"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_WEBHOOK")
+	// 正常系は 204 + dispatcher 呼び出し。
 	assert.Equal(t, http.StatusNoContent,
 		doPost(h.SystemWebhookTest, `{"webhookId":"w1","type":"abuseReport"}`, adminUser).Code)
+	require.Len(t, disp.testCalls, 1)
+	assert.Equal(t, "w1", disp.testCalls[0].webhookID)
+	assert.Equal(t, "abuseReport", disp.testCalls[0].eventType)
 }
 
-// SetWebhookTestClient で渡した *http.Client が SystemWebhookTest 経由で
-// 実際に使われ、fire-and-forget の goroutine が POST を打つことを確認 (#638)。
-func TestSystemWebhookTest_UsesInjectedClient(t *testing.T) {
+// override.url / override.secret を受け取り dispatcher にそのまま渡す (#1542)。
+func TestSystemWebhookTest_Override(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-
-	hit := make(chan *http.Request, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		hit <- r
-	}))
-	defer srv.Close()
-
 	repo := testutil.NewMockSystemWebhookRepository()
-	require.NoError(t, repo.Create(&model.SystemWebhook{ID: "w-inject", URL: srv.URL, Secret: "topsecret"}))
+	require.NoError(t, repo.Create(&model.SystemWebhook{ID: "w1", URL: "https://saved.example", Secret: "saved"}))
 	h.SetSystemWebhookRepo(repo)
-	h.SetWebhookTestClient(srv.Client())
+	disp := &stubSystemWebhookDispatcher{}
+	h.SetSystemWebhookDispatcher(disp)
 
-	rec := doPost(h.SystemWebhookTest, `{"webhookId":"w-inject","type":"abuseReport"}`, adminUser)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-
-	select {
-	case req := <-hit:
-		assert.Equal(t, http.MethodPost, req.Method)
-		assert.Equal(t, "topsecret", req.Header.Get("X-Misskey-Hook-Secret"))
-		assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
-	case <-time.After(2 * time.Second):
-		t.Fatal("injected client was not used: webhook POST never reached the test server")
-	}
+	rec := doPost(h.SystemWebhookTest,
+		`{"webhookId":"w1","type":"userCreated","override":{"url":"https://override.example","secret":"ovsecret"}}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, disp.testCalls, 1)
+	assert.Equal(t, "https://override.example", disp.testCalls[0].overrideURL)
+	assert.Equal(t, "ovsecret", disp.testCalls[0].overrideSecret)
 }
 
 // --- thin nil-repo smoke tests ---
@@ -219,7 +243,10 @@ func TestSystemWebhookShow(t *testing.T) {
 
 func TestSystemWebhookTest(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNoContent, doPost(h.SystemWebhookTest, `{}`, adminUser).Code)
+	// 空 webhookId は 400 (required, #1542)。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.SystemWebhookTest, `{}`, adminUser).Code)
+	// nil repo + webhookId 指定は 500 (lookup 不能)。
+	assert.Equal(t, http.StatusInternalServerError, doPost(h.SystemWebhookTest, `{"webhookId":"x"}`, adminUser).Code)
 }
 
 func TestSystemWebhookUpdate(t *testing.T) {
@@ -234,7 +261,7 @@ func TestSystemWebhookCreate_WritesModerationLog(t *testing.T) {
 	h.SetSystemWebhookRepo(testutil.NewMockSystemWebhookRepository())
 	repo := attachModLog(t, h)
 
-	rec := doPost(h.SystemWebhookCreate, `{"name":"hook","url":"https://x"}`, adminUser)
+	rec := doPost(h.SystemWebhookCreate, `{"name":"hook","url":"https://x","on":["abuseReport"],"isActive":true}`, adminUser)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
 	assert.Equal(t, "createSystemWebhook", repo.Snapshot()[0].Type)
