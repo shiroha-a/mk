@@ -1263,6 +1263,37 @@ func TestInvitationsOutbox(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, post(h.InvitationsOutbox, `{"roomId":"r1"}`, u2).Code)
 }
 
+// #1541: outbox の各 invitation は upstream packRoomInvitation 同様
+// createdAt と room を含む。
+func TestInvitationsOutbox_ShapeIncludesCreatedAtAndRoom(t *testing.T) {
+	h, repo := newTestHandler()
+	idGen, _ := id.NewGenerator("aidx")
+	invID := idGen.Generate(time.Now())
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID, Name: "room"}
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{ID: invID, UserID: u2.ID, RoomID: "r1"}))
+	rec := post(h.InvitationsOutbox, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	entry := resp[0]
+	assert.Equal(t, "r1", entry["roomId"])
+	assert.Equal(t, u2.ID, entry["userId"])
+	assert.NotEmpty(t, entry["createdAt"], "createdAt は invitation id から導出される")
+	room, ok := entry["room"].(map[string]any)
+	require.True(t, ok, "room (ChatRoom) を含む")
+	assert.Equal(t, "r1", room["id"])
+	assert.Equal(t, "room", room["name"])
+}
+
+// #1541: outbox の NO_SUCH_ROOM は upstream の golden id を返す。
+func TestInvitationsOutbox_NoSuchRoomGoldenID(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.InvitationsOutbox, `{"roomId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "a3c6b309-9717-4316-ae94-a69b53437237")
+}
+
 func TestRoomsJoin(t *testing.T) {
 	h, repo := newTestHandler()
 	// invalid param

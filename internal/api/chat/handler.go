@@ -1350,19 +1350,20 @@ func (h *Handler) InvitationsOutbox(c echo.Context) error {
 	// 自分が所有するルームの招待一覧を返す
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "b3926861-29ef-4df6-98b5-a7c640ad2b5a"))
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "a3c6b309-9717-4316-ae94-a69b53437237"))
 	}
 	rows, err := h.repo.ListInvitationsByRoom(req.RoomID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// upstream packRoomInvitation は {id, createdAt, roomId, room, userId, user} を
+	// 返す。旧 mk-go は createdAt と room を欠いていた (#1541)。ListInvitationsByRoom は
+	// User を Preload 済み、room は上で取得済みなので各 inv に詰めて
+	// packInvitationDetailed (createdAt + room + user) で pack する。
 	out := make([]map[string]any, 0, len(rows))
 	for _, inv := range rows {
-		entry := map[string]any{"id": inv.ID, "roomId": inv.RoomID, "userId": inv.UserID}
-		if inv.User != nil {
-			entry["user"] = packUser(inv.User)
-		}
-		out = append(out, entry)
+		inv.Room = room
+		out = append(out, h.packInvitationDetailed(inv, user.ID))
 	}
 	return c.JSON(http.StatusOK, out)
 }

@@ -327,8 +327,16 @@ func (m *MockChatRepository) ListInvitationsByUser(_ string, _ bool) ([]*model.C
 	return nil, nil
 }
 
-func (m *MockChatRepository) ListInvitationsByRoom(_ string) ([]*model.ChatRoomInvitation, error) {
-	return nil, nil
+func (m *MockChatRepository) ListInvitationsByRoom(roomID string) ([]*model.ChatRoomInvitation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var rows []*model.ChatRoomInvitation
+	for _, inv := range m.Invitations {
+		if inv.RoomID == roomID {
+			rows = append(rows, inv)
+		}
+	}
+	return rows, nil
 }
 
 // --- Read tracking / unread count ---
