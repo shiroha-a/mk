@@ -34,16 +34,23 @@ func (h *Handler) Stats(c echo.Context) error {
 
 	// "+" 接頭辞が DESC (= 上位順) なので、followers / following の多い順を
 	// 取るには +followers / +following を渡す (repository の sort の向きを本家
-	// TS の federation/instances に合わせたため)。
-	subs, err := h.svc.List(model.InstanceListFilter{SortBy: "+followers", Limit: req.Limit})
+	// TS の federation/instances に合わせたため)。upstream stats.ts は
+	// followersCount>0 / followingCount>0 で絞るので Subscribing / Publishing を
+	// 立てる (= instance.go の followersCount>0 / followingCount>0 フィルタ、#1544)。
+	yes := true
+	subs, err := h.svc.List(model.InstanceListFilter{Subscribing: &yes, SortBy: "+followers", Limit: req.Limit})
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	pubs, err := h.svc.List(model.InstanceListFilter{SortBy: "+following", Limit: req.Limit})
+	pubs, err := h.svc.List(model.InstanceListFilter{Publishing: &yes, SortBy: "+following", Limit: req.Limit})
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	totalFollowers, totalFollowing, err := totalCounts(h.svc)
+	// upstream stats.ts は following テーブルを count する (allSubCount =
+	// followeeHost not null, allPubCount = followerHost not null)。旧実装は
+	// instance テーブルの followersCount/followingCount 全行合算で semantics が
+	// 異なっていた (#1544)。followingRepo 未配線時は 0 (= other は 0 クランプ)。
+	allSubCount, allPubCount, err := h.remoteFollowCounts()
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -73,38 +80,35 @@ func (h *Handler) Stats(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"topSubInstances":     topSub,
-		"otherFollowersCount": totalFollowers - topSubFollowers,
+		"topSubInstances": topSub,
+		// upstream: Math.max(0, allSubCount - gotSubCount)。負値クランプを揃える。
+		"otherFollowersCount": maxInt(0, int(allSubCount)-topSubFollowers),
 		"topPubInstances":     topPub,
-		"otherFollowingCount": totalFollowing - topPubFollowing,
+		"otherFollowingCount": maxInt(0, int(allPubCount)-topPubFollowing),
 	})
 }
 
-// totalCounts sums followersCount / followingCount across every instance row.
-// Scans the whole instance table in pages; OK for current scale (a few
-// thousand rows) and matches upstream Misskey's aggregation approach.
-func totalCounts(svc interface {
-	List(filter model.InstanceListFilter) ([]*model.Instance, error)
-}) (int, int, error) {
-	totalFollowers := 0
-	totalFollowing := 0
-	offset := 0
-	for {
-		page, err := svc.List(model.InstanceListFilter{Limit: 100, Offset: offset})
-		if err != nil {
-			return 0, 0, err
-		}
-		if len(page) == 0 {
-			break
-		}
-		for _, inst := range page {
-			totalFollowers += inst.FollowersCount
-			totalFollowing += inst.FollowingCount
-		}
-		if len(page) < 100 {
-			break
-		}
-		offset += 100
+// remoteFollowCounts returns (allSubCount, allPubCount) from the following
+// table: allSubCount = rows with followeeHost not null, allPubCount = rows with
+// followerHost not null. followingRepo 未配線時は (0, 0)。
+func (h *Handler) remoteFollowCounts() (int64, int64, error) {
+	if h.followingRepo == nil {
+		return 0, 0, nil
 	}
-	return totalFollowers, totalFollowing, nil
+	sub, err := h.followingRepo.CountRemoteFollowees()
+	if err != nil {
+		return 0, 0, err
+	}
+	pub, err := h.followingRepo.CountRemoteFollowers()
+	if err != nil {
+		return 0, 0, err
+	}
+	return sub, pub, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

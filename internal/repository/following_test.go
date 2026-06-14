@@ -47,6 +47,42 @@ func TestFollowingRepository_FindByPair_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// CountRemoteFollowees / CountRemoteFollowers は federation/stats の
+// allSubCount / allPubCount に対応 (#1544)。グローバル count なので baseline
+// からの delta を検証する。
+func TestFollowingRepository_CountRemoteFollows(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	a := insertTestUser(t, "u_crf_a", "crfa")
+	b := insertTestUser(t, "u_crf_b", "crfb")
+	cc := insertTestUser(t, "u_crf_c", "crfc")
+	d := insertTestUser(t, "u_crf_d", "crfd")
+	defer cleanupUser(t, a.ID)
+	defer cleanupUser(t, b.ID)
+	defer cleanupUser(t, cc.ID)
+	defer cleanupUser(t, d.ID)
+
+	baseSub, err := repo.CountRemoteFollowees()
+	require.NoError(t, err)
+	basePub, err := repo.CountRemoteFollowers()
+	require.NoError(t, err)
+
+	remote := "remote.example"
+	// a→b: followeeHost set (remote followee = allSubCount)
+	subRow := &model.Following{ID: "crf_sub", FollowerID: a.ID, FolloweeID: b.ID, FolloweeHost: &remote}
+	// c→d: followerHost set (remote follower = allPubCount)
+	pubRow := &model.Following{ID: "crf_pub", FollowerID: cc.ID, FolloweeID: d.ID, FollowerHost: &remote}
+	require.NoError(t, repo.Create(subRow))
+	require.NoError(t, repo.Create(pubRow))
+	defer testDB.Exec(`DELETE FROM "following" WHERE id IN (?, ?)`, subRow.ID, pubRow.ID)
+
+	sub, err := repo.CountRemoteFollowees()
+	require.NoError(t, err)
+	assert.Equal(t, baseSub+1, sub, "followeeHost not null が 1 件増える")
+	pub, err := repo.CountRemoteFollowers()
+	require.NoError(t, err)
+	assert.Equal(t, basePub+1, pub, "followerHost not null が 1 件増える")
+}
+
 func TestFollowingRepository_Exists(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
 	follower := insertTestUser(t, "u_fl_3", "follower3")

@@ -5222,6 +5222,26 @@ func (m *MockFollowingRepository) ListFollowingByHost(host string, limit, offset
 	return paginate(rows, limit, offset), nil
 }
 
+func (m *MockFollowingRepository) CountRemoteFollowees() (int64, error) {
+	var n int64
+	for _, f := range m.Followings {
+		if f.FolloweeHost != nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *MockFollowingRepository) CountRemoteFollowers() (int64, error) {
+	var n int64
+	for _, f := range m.Followings {
+		if f.FollowerHost != nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *MockFollowingRepository) UpdateRelation(followerID, followeeID string, fields map[string]any) error {
 	for _, f := range m.Followings {
 		if f.FollowerID == followerID && f.FolloweeID == followeeID {

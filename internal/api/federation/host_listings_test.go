@@ -193,6 +193,33 @@ func TestUsers_NoRepoReturnsEmpty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// upstream users.ts は UserDetailedNotMe を返す。旧実装の最小 map では欠けて
+// いた createdAt / notesCount 等の UserDetailed field が含まれること (#1544)。
+func TestUsers_ReturnsUserDetailedShape(t *testing.T) {
+	h, _ := newHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	idGen, _ := id.NewGenerator("aidx")
+	uid := idGen.Generate(time.Now())
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "alice", Host: &remote}
+	userRepo.Profiles[uid] = &model.UserProfile{UserID: uid, Description: strPtr("hello")}
+	h.SetUserRepo(userRepo)
+
+	rec := postBody(h.Users, `{"host":"remote.example"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.GreaterOrEqual(t, len(rows), 1)
+	row := rows[0]
+	// UserDetailed 固有 field (最小 map には無かった) が存在すること。
+	assert.Contains(t, row, "createdAt")
+	assert.Contains(t, row, "notesCount")
+	assert.Contains(t, row, "followersCount")
+	assert.Equal(t, "alice", row["username"])
+}
+
+func strPtr(s string) *string { return &s }
+
 // bindHostPage の limit clamp 分岐 (>100) カバー
 func TestFollowers_LimitClampedAt100(t *testing.T) {
 	h, _ := newHandler(t)

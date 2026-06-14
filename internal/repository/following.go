@@ -46,6 +46,15 @@ type FollowingRepository interface {
 	// ユーザーがフォローしている = follower 側がそのホスト) ので、列は
 	// followerHost。
 	ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error)
+	// CountRemoteFollowees returns the number of Following rows whose
+	// followeeHost is non-NULL (= remote users being followed by anyone).
+	// federation/stats の allSubCount (upstream count where followeeHost is
+	// not null) に対応 (#1544)。
+	CountRemoteFollowees() (int64, error)
+	// CountRemoteFollowers returns the number of Following rows whose
+	// followerHost is non-NULL (= remote users following anyone). stats の
+	// allPubCount (upstream count where followerHost is not null) に対応 (#1544)。
+	CountRemoteFollowers() (int64, error)
 	// UpdateRelation applies partial updates to a Following row identified
 	// by (followerID, followeeID). Used by following/update.
 	UpdateRelation(followerID, followeeID string, fields map[string]any) error
@@ -230,6 +239,24 @@ func (r *followingRepository) ListFollowingByHost(host string, limit, offset int
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *followingRepository) CountRemoteFollowees() (int64, error) {
+	var n int64
+	if err := r.db.Model(&model.Following{}).
+		Where(`"followeeHost" IS NOT NULL`).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (r *followingRepository) CountRemoteFollowers() (int64, error) {
+	var n int64
+	if err := r.db.Model(&model.Following{}).
+		Where(`"followerHost" IS NOT NULL`).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // UpdateRelation applies a partial field update to a single (follower, followee)

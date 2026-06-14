@@ -77,19 +77,40 @@ func (h *Handler) Users(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	out := make([]map[string]any, 0, len(users))
+	// upstream users.ts は packMany(users, me, {schema:'UserDetailedNotMe'}) を
+	// 返す。旧実装は id/username/host/name/avatarUrl の最小 map のみで
+	// createdAt/notesCount/followersCount/description/fields/roles 等が欠落して
+	// いた (#1544)。UserDetailed で pack して shape を揃える。user_profile は
+	// 1 batch で解決して N+1 を回避。
+	profByID := h.userProfiles(users)
+	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
-		out = append(out, map[string]any{
-			"id":       u.ID,
-			"username": u.Username,
-			"host":     u.Host,
-			"name":     u.Name,
-			// リモートユーザーのアバターは proxy 経由にする (issue #1529)。
-			// IdenticonURL が avatar mode proxy 化と identicon fallback を担う。
-			"avatarUrl": entity.IdenticonURL(u),
-		})
+		out = append(out, entity.PackUserDetailed(u, profByID[u.ID], h.idGen))
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// userProfiles batch-loads the user_profile rows for the given users keyed by
+// userId (N+1 回避)。userRepo 未配線 / 取得失敗時は nil。
+func (h *Handler) userProfiles(users []*model.User) map[string]*model.UserProfile {
+	if h.userRepo == nil || len(users) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	profiles, err := h.userRepo.FindProfilesByUserIDs(ids)
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]*model.UserProfile, len(profiles))
+	for _, p := range profiles {
+		if p != nil {
+			byID[p.UserID] = p
+		}
+	}
+	return byID
 }
 
 // parseHostPage parses + validates the common per-host page request. Returns
