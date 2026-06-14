@@ -1,6 +1,7 @@
 package userlists
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -22,12 +23,21 @@ type Handler struct {
 	rolePolicyProvider RolePolicyProvider
 	userRepo           repository.UserRepository
 	blockingRepo       repository.BlockingRepository
+	favoriteRepo       UserListFavoriteReader
 }
 
 // RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
 // `userEachUserListsLimit` enforcement (#1029)。実装は core/role.Service。
 type RolePolicyProvider interface {
 	GetUserPolicies(userID string) map[string]any
+}
+
+// UserListFavoriteReader abstracts the favorite count / exists lookup for
+// users/lists/show forPublic の likedCount/isLiked (#1550)。実装は
+// repository.UserListFavoriteRepository。
+type UserListFavoriteReader interface {
+	CountByList(listID string) (int64, error)
+	Exists(userID, listID string) (bool, error)
 }
 
 // NewHandler creates a new userlists Handler.
@@ -55,6 +65,12 @@ func (h *Handler) SetUserRepo(r repository.UserRepository) {
 // intent.
 func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
 	h.blockingRepo = r
+}
+
+// SetFavoriteRepo wires a favorite reader so Show can return likedCount/isLiked
+// for forPublic public lists (#1550). nil 時は likedCount/isLiked を付与しない。
+func (h *Handler) SetFavoriteRepo(r UserListFavoriteReader) {
+	h.favoriteRepo = r
 }
 
 // List handles POST /api/users/lists/list.
@@ -163,7 +179,8 @@ func (h *Handler) Create(c echo.Context) error {
 // userIds を含む packed shape を返す (#871)。
 func (h *Handler) Show(c echo.Context) error {
 	var req struct {
-		ListID string `json:"listId"`
+		ListID    string `json:"listId"`
+		ForPublic bool   `json:"forPublic"`
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -179,7 +196,24 @@ func (h *Handler) Show(c echo.Context) error {
 	if !list.IsPublic && (viewer == nil || list.UserID != viewer.ID) {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
-	return c.JSON(http.StatusOK, entity.PackUserList(list, h.memberIDs(list.ID), h.idGen))
+	packed := entity.PackUserList(list, h.memberIDs(list.ID), h.idGen)
+	// upstream show.ts: forPublic && public のとき likedCount/isLiked を付与する。
+	// それ以外は通常の UserList shape のまま返す。
+	if !(req.ForPublic && list.IsPublic && h.favoriteRepo != nil) {
+		return c.JSON(http.StatusOK, packed)
+	}
+	// 追加フィールドを足すため UserList struct を map に展開する。
+	b, _ := json.Marshal(packed)
+	resp := map[string]any{}
+	_ = json.Unmarshal(b, &resp)
+	likedCount, _ := h.favoriteRepo.CountByList(req.ListID)
+	resp["likedCount"] = likedCount
+	isLiked := false
+	if viewer != nil {
+		isLiked, _ = h.favoriteRepo.Exists(viewer.ID, req.ListID)
+	}
+	resp["isLiked"] = isLiked
+	return c.JSON(http.StatusOK, resp)
 }
 
 // memberIDs returns the userId list of members of the given list.

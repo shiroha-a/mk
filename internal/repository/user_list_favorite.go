@@ -11,6 +11,9 @@ type UserListFavoriteRepository interface {
 	Delete(userID, listID string) error
 	ListByUser(userID string) ([]*model.UserListFavorite, error)
 	Exists(userID, listID string) (bool, error)
+	// CountByList returns the number of favorites of a list. Used by
+	// users/lists/show forPublic の likedCount (#1550)。
+	CountByList(listID string) (int64, error)
 }
 
 type userListFavoriteRepository struct {
@@ -44,4 +47,11 @@ func (r *userListFavoriteRepository) Exists(userID, listID string) (bool, error)
 	err := r.db.Model(&model.UserListFavorite{}).
 		Where(`"userId" = ? AND "userListId" = ?`, userID, listID).Count(&count).Error
 	return count > 0, err
+}
+
+func (r *userListFavoriteRepository) CountByList(listID string) (int64, error) {
+	var count int64
+	err := r.db.Model(&model.UserListFavorite{}).
+		Where(`"userListId" = ?`, listID).Count(&count).Error
+	return count, err
 }

@@ -47,3 +47,22 @@ func TestUserListFavoriteRepository_ListEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, list)
 }
+
+// #1550: CountByList は list の favorite 数を返す (show forPublic の likedCount)。
+func TestUserListFavoriteRepository_CountByList(t *testing.T) {
+	repo := NewUserListFavoriteRepository(testDB)
+	seedUser(t, "ulc_u1")
+	seedUser(t, "ulc_u2")
+	seedUserList(t, "ulc_l1", "ulc_u1")
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user_list_favorite" WHERE "userListId" = ?`, "ulc_l1") })
+
+	n, err := repo.CountByList("ulc_l1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+
+	require.NoError(t, repo.Create(&model.UserListFavorite{ID: "ulc_f1", UserID: "ulc_u1", UserListID: "ulc_l1"}))
+	require.NoError(t, repo.Create(&model.UserListFavorite{ID: "ulc_f2", UserID: "ulc_u2", UserListID: "ulc_l1"}))
+	n, err = repo.CountByList("ulc_l1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+}

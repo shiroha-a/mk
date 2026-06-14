@@ -2097,9 +2097,10 @@ func (s *Server) setupRoutes() {
 
 	// User lists (Phase 6)
 	userListHandler := apiuserlists.NewHandler(userListRepo, idGen)
-	userListHandler.SetRolePolicyProvider(roleService) // #1029: userListLimit / userEachUserListsLimit
-	userListHandler.SetUserRepo(userRepo)              // #1550: push NO_SUCH_USER check
-	userListHandler.SetBlockingRepo(blockingRepo)      // #1550: push YOU_HAVE_BEEN_BLOCKED check
+	userListHandler.SetRolePolicyProvider(roleService)    // #1029: userListLimit / userEachUserListsLimit
+	userListHandler.SetUserRepo(userRepo)                 // #1550: push NO_SUCH_USER check
+	userListHandler.SetBlockingRepo(blockingRepo)         // #1550: push YOU_HAVE_BEEN_BLOCKED check
+	userListHandler.SetFavoriteRepo(userListFavoriteRepo) // #1550: show forPublic likedCount/isLiked
 	// list は requireCredential:false の public endpoint (userId 指定で他人の
 	// public list を閲覧可、#1550)。未認証 && userId 未指定は handler が INVALID_PARAM。
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireScope("read:account"))

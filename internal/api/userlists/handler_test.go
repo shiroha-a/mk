@@ -506,6 +506,64 @@ func TestShow_PublicListNonOwnerVisible(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1550: forPublic && public のとき likedCount/isLiked を付与する。
+func TestShow_ForPublicLikedCountAndIsLiked(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	require.NoError(t, favRepo.Create(&model.UserListFavorite{ID: "f1", UserID: "viewer", UserListID: "l1"}))
+	require.NoError(t, favRepo.Create(&model.UserListFavorite{ID: "f2", UserID: "other", UserListID: "l1"}))
+	h.SetFavoriteRepo(favRepo)
+
+	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, float64(2), resp["likedCount"])
+	assert.Equal(t, true, resp["isLiked"])
+}
+
+// 未認証 forPublic は likedCount を返すが isLiked は false。
+func TestShow_ForPublicUnauthenticatedIsLikedFalse(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
+	favRepo := testutil.NewMockUserListFavoriteRepository()
+	require.NoError(t, favRepo.Create(&model.UserListFavorite{ID: "f1", UserID: "x", UserListID: "l1"}))
+	h.SetFavoriteRepo(favRepo)
+
+	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, float64(1), resp["likedCount"])
+	assert.Equal(t, false, resp["isLiked"])
+}
+
+// forPublic 無しなら likedCount/isLiked は付かない (通常 UserList shape)。
+func TestShow_NoForPublicNoLikedFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
+	h.SetFavoriteRepo(testutil.NewMockUserListFavoriteRepository())
+	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotContains(t, resp, "likedCount")
+	assert.NotContains(t, resp, "isLiked")
+}
+
+// forPublic=true でも private list (owner 閲覧) には likedCount/isLiked を付けない。
+func TestShow_ForPublicPrivateNoLikedFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "priv", IsPublic: false}
+	h.SetFavoriteRepo(testutil.NewMockUserListFavoriteRepository())
+	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotContains(t, resp, "likedCount")
+}
+
 // 他人 list への push が「存在しない」扱いで弾かれること。viewer が list owner
 // 以外なら NO_SUCH_LIST を返し、AddMember が呼ばれてはならない (= owner gate
 // 抜けの IDOR 回帰防止)。

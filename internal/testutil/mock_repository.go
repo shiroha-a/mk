@@ -6862,6 +6862,16 @@ func (m *MockUserListFavoriteRepository) Exists(userID, listID string) (bool, er
 	return ok, nil
 }
 
+func (m *MockUserListFavoriteRepository) CountByList(listID string) (int64, error) {
+	var count int64
+	for k := range m.Favorites {
+		if strings.HasSuffix(k, ":"+listID) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // MockRetentionAggregationRepository is a test double for repository.RetentionAggregationRepository.
 type MockRetentionAggregationRepository struct {
 	Records []*model.RetentionAggregation
