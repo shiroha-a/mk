@@ -43,6 +43,12 @@ func (c *ChannelTimelineChannel) OnRedisEvent(payload []byte) {
 	if noteChannelID(payload) != c.channelID {
 		return
 	}
+	// anon viewer + 著者 requireSigninToViewContents は note を丸ごと drop する
+	// (#1549, upstream channel.ts の note/renote/reply 3 連 gate)。hideEmbeds の
+	// blank 化より前に弾いて「何も送らない」upstream 挙動に揃える。
+	if anonRequireSigninDrop(payload, viewerIDFromCtx(c.ctx)) {
+		return
+	}
 	// per-subscriber 可視性 gate (#1549, fail-closed)。channel note は通常
 	// public だが、共通ゲートを通して非可視/壊れた payload を drop する。
 	if !streamNoteVisibleForViewer(payload, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {

@@ -92,6 +92,12 @@ func (c *HashtagChannel) OnRedisEvent(payload []byte) {
 		c.seen[id] = struct{}{}
 		c.mu.Unlock()
 	}
+	// anon viewer + 著者 requireSigninToViewContents は note を丸ごと drop する
+	// (#1549, upstream hashtag.ts の note/renote/reply 3 連 gate)。hideEmbeds の
+	// blank 化より前に弾いて「何も送らない」upstream 挙動に揃える。
+	if anonRequireSigninDrop(payload, viewerIDFromCtx(c.ctx)) {
+		return
+	}
 	// per-subscriber 可視性 gate (#1549, fail-closed)。TS notesStream は全可視性を
 	// 流して consumer 側で isNoteVisibleForMe する設計に合わせる。
 	if !streamNoteVisibleForViewer(payload, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {

@@ -162,6 +162,39 @@ func TestHashtag_FollowersVisibilityGate(t *testing.T) {
 	assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
 }
 
+// #1549: anon viewer + 著者 requireSigninToViewContents は note を丸ごと drop。
+// note/renote/reply のいずれかの author が requireSignin なら drop する。
+func TestHashtag_AnonRequireSigninDropped(t *testing.T) {
+	t.Run("top-level author", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
+		assert.Empty(t, ctx.sentType)
+	})
+	t.Run("renote author", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"u"},"renote":{"id":"r1","user":{"id":"ra","requireSigninToViewContents":true}}}`))
+		assert.Empty(t, ctx.sentType)
+	})
+	t.Run("reply author", func(t *testing.T) {
+		ctx := newCtx(nil)
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"u"},"reply":{"id":"p1","user":{"id":"pa","requireSigninToViewContents":true}}}`))
+		assert.Empty(t, ctx.sentType)
+	})
+	t.Run("authed viewer exempt", func(t *testing.T) {
+		ctx := newCtx(&model.User{ID: "viewer"})
+		ch := NewHashtag(ctx)
+		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
+		require.Len(t, ctx.sentType, 1)
+	})
+}
+
 // --- Antenna ---
 
 func TestAntenna_Lifecycle(t *testing.T) {
@@ -383,6 +416,24 @@ func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
 		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"alice","visibility":"followers"}`))
 		require.Len(t, ctx.sentType, 1)
 	})
+}
+
+// #1549: anon viewer + 著者 requireSigninToViewContents は note を丸ごと drop。
+func TestChannelTimeline_AnonRequireSigninDropped(t *testing.T) {
+	ctx := newCtx(nil) // anonymous connection
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
+	assert.Empty(t, ctx.sentType, "anon viewer must not receive a requireSignin author's note")
+}
+
+// 認証済み viewer には requireSignin gate が適用されない。
+func TestChannelTimeline_AuthedRequireSigninPassed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "viewer"})
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
+	require.Len(t, ctx.sentType, 1, "authenticated viewer is exempt from the requireSignin gate")
 }
 
 // --- UserList ---

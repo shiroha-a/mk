@@ -117,6 +117,50 @@ func noteVisibility(payload []byte) string {
 	return p.Visibility
 }
 
+// anonRequireSigninDrop reports whether an anonymous viewer (viewerID == "")
+// must be denied this note ENTIRELY because the note — or its embedded renote /
+// reply — has an author who enabled requireSigninToViewContents.
+//
+// upstream channel.ts / hashtag.ts は anon viewer に対し
+// `note.user.requireSigninToViewContents` (+ renote.user / reply.user) を
+// 3 連で評価して `return` (= note を丸ごと drop) する (#1549)。mk-go の
+// hideEmbeds は HideNoteByPrefsDecision 経由で同条件を「blank 化」するが、
+// それだと anon client に空の note shell が送られてしまい upstream の
+// 「何も送らない」挙動と差が出る。本 gate で blank 前に drop して揃える。
+//
+// requireCredential=false で anon 接続を受け付ける channel / hashtag 専用。
+// 認証済み viewer には常に false (gate 対象外)。parse 失敗は他 gate に委ねる。
+func anonRequireSigninDrop(payload []byte, viewerID string) bool {
+	if viewerID != "" {
+		return false
+	}
+	type userProbe struct {
+		RequireSigninToViewContents *bool `json:"requireSigninToViewContents"`
+	}
+	type embedRef struct {
+		User userProbe `json:"user"`
+	}
+	var p struct {
+		User   userProbe `json:"user"`
+		Renote *embedRef `json:"renote"`
+		Reply  *embedRef `json:"reply"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	requiresSignin := func(b *bool) bool { return b != nil && *b }
+	if requiresSignin(p.User.RequireSigninToViewContents) {
+		return true
+	}
+	if p.Renote != nil && requiresSignin(p.Renote.User.RequireSigninToViewContents) {
+		return true
+	}
+	if p.Reply != nil && requiresSignin(p.Reply.User.RequireSigninToViewContents) {
+		return true
+	}
+	return false
+}
+
 // streamNoteID decodes the note id from a streamed note payload ("" when
 // absent / unparseable). Used by the hashtag channel to dedupe a note that
 // arrives via multiple subscribed tag topics (#1549).

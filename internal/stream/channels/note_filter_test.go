@@ -297,3 +297,33 @@ func TestShouldEmit_HardMute_NoRulesIsNoOp(t *testing.T) {
 	assert.True(t, f.shouldEmit(payload, nil, "viewer"))
 	assert.True(t, f.shouldEmit(payload, []byte("[]"), "viewer"))
 }
+
+func TestAnonRequireSigninDrop(t *testing.T) {
+	t.Run("authed viewer always false", func(t *testing.T) {
+		p := []byte(`{"user":{"requireSigninToViewContents":true}}`)
+		assert.False(t, anonRequireSigninDrop(p, "viewer"))
+	})
+	t.Run("anon + top-level requireSignin drops", func(t *testing.T) {
+		p := []byte(`{"user":{"requireSigninToViewContents":true}}`)
+		assert.True(t, anonRequireSigninDrop(p, ""))
+	})
+	t.Run("anon + renote requireSignin drops", func(t *testing.T) {
+		p := []byte(`{"user":{"id":"u"},"renote":{"user":{"requireSigninToViewContents":true}}}`)
+		assert.True(t, anonRequireSigninDrop(p, ""))
+	})
+	t.Run("anon + reply requireSignin drops", func(t *testing.T) {
+		p := []byte(`{"user":{"id":"u"},"reply":{"user":{"requireSigninToViewContents":true}}}`)
+		assert.True(t, anonRequireSigninDrop(p, ""))
+	})
+	t.Run("anon + flag false passes", func(t *testing.T) {
+		p := []byte(`{"user":{"requireSigninToViewContents":false}}`)
+		assert.False(t, anonRequireSigninDrop(p, ""))
+	})
+	t.Run("anon + flag absent passes", func(t *testing.T) {
+		p := []byte(`{"user":{"id":"author"}}`)
+		assert.False(t, anonRequireSigninDrop(p, ""))
+	})
+	t.Run("malformed payload passes (fail to other gates)", func(t *testing.T) {
+		assert.False(t, anonRequireSigninDrop([]byte(`{not json`), ""))
+	})
+}
