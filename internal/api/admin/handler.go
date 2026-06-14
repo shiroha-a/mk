@@ -1973,6 +1973,12 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6503c040-6af4-4ed9-bf07-f2dd16678eab", "25b5bc31-dc79-4ebd-9bd2-c84978fd052c"); handled {
 		return err
 	}
+	// upstream assign.ts:77-81: 対象 user 不在なら NO_SUCH_USER (#1542)。
+	if h.userRepo != nil {
+		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "558ea170-f653-4700-94d0-5a818371d0df"))
+		}
+	}
 	var expiresAt *time.Time
 	if req.ExpiresAt != nil {
 		t := time.UnixMilli(*req.ExpiresAt)
@@ -2039,6 +2045,12 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	// ACCESS_DENIED の UUID は unassign 固有のもの。
 	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6e519036-a70d-4c76-b679-bc8fb18194e2", "24636eee-e8c1-493e-94b2-e16ad401e262"); handled {
 		return err
+	}
+	// upstream unassign.ts:80-84: 対象 user 不在なら NO_SUCH_USER (#1542)。
+	if h.userRepo != nil {
+		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
+		}
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {
 		if err == role.ErrNotAssigned {
@@ -2114,10 +2126,17 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 		if t, err := h.idGen.ParseTime(a.ID); err == nil {
 			createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
+		// upstream users.ts:101 は expiresAt: assign.expiresAt?.toISOString() ?? null
+		// を含める (#1542)。nil は JSON null。
+		var expiresAt any
+		if a.ExpiresAt != nil {
+			expiresAt = a.ExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
 		result = append(result, map[string]any{
 			"id":        a.ID,
 			"createdAt": createdAt,
 			"user":      h.packAdminUser(a.User, profileByUser[a.User.ID]),
+			"expiresAt": expiresAt,
 		})
 	}
 	return c.JSON(http.StatusOK, result)
@@ -2131,9 +2150,24 @@ func (h *Handler) RolesUpdateDefaultPolicies(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// upstream update-default-policies.ts は更新前後の policies を取得して
+	// moderationLogService.log('updateServerSettings', {before, after}) を記録する
+	// (#1542)。before snapshot を Update 前に取得する。
+	beforeMeta, _ := h.metaRepo.Fetch()
 	// Meta の policies フィールドを更新
 	if err := h.metaRepo.Update(map[string]any{"policies": req.Policies}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// moderation log (before/after policies)。TS は policies のみを記録する。
+	if afterMeta, err := h.metaRepo.Fetch(); err == nil {
+		var beforePolicies any
+		if beforeMeta != nil {
+			beforePolicies = beforeMeta.Policies
+		}
+		h.logModeration(c, moderationlog.LogUpdateServerSettings, map[string]any{
+			"before": beforePolicies,
+			"after":  afterMeta.Policies,
+		})
 	}
 	return c.NoContent(http.StatusNoContent)
 }

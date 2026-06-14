@@ -1344,7 +1344,8 @@ func TestRolesDelete_InvalidParam(t *testing.T) {
 }
 
 func TestRolesAssign_Success(t *testing.T) {
-	h, _, _, roleRepo := newTestHandler(t)
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	// canEditMembersByModerator=true の role は moderator (viewer 不問) でも
 	// 付け外しできる (#1542)。happy path はこの前提で seed する。
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
@@ -1355,7 +1356,8 @@ func TestRolesAssign_Success(t *testing.T) {
 // upstream assign.ts paramDef は expiresAt: type:'integer' (epoch ms)。number
 // を送って 400 にならず Assign まで到達することを確認する (#1542 regression)。
 func TestRolesAssign_WithExpiry(t *testing.T) {
-	h, _, _, roleRepo := newTestHandler(t)
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 4099-01-01 (= far future) を epoch ms で送る。
 	future := time.Date(4099, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
@@ -1367,7 +1369,8 @@ func TestRolesAssign_WithExpiry(t *testing.T) {
 // 過去 (現在以下) の expiresAt は upstream assign.ts:83-85 同様 no-op で 204 を
 // 返し、実際の assignment は作られない (#1542)。
 func TestRolesAssign_PastExpiry_NoOp(t *testing.T) {
-	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	past := time.Now().Add(-time.Hour).UnixMilli()
 	body := fmt.Sprintf(`{"userId":"u1","roleId":"r1","expiresAt":%d}`, past)
@@ -1384,7 +1387,8 @@ func TestRolesAssign_NotFound(t *testing.T) {
 }
 
 func TestRolesAssign_AlreadyAssigned(t *testing.T) {
-	h, _, _, roleRepo := newTestHandler(t)
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil) // first assign
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
@@ -1397,8 +1401,37 @@ func TestRolesAssign_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestRolesUnassign_Success(t *testing.T) {
+// upstream assign.ts:77-81: role は存在し canEdit を通るが対象 user が不在なら
+// NO_SUCH_USER (#1542)。
+func TestRolesAssign_NoSuchUser(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t) // userRepo は空 (u1 等 seed しない)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
+	rec := doPost(h.RolesAssign, `{"userId":"ghostuser","roleId":"r1"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+	assert.Equal(t, "558ea170-f653-4700-94d0-5a818371d0df", errObj["id"])
+}
+
+func TestRolesUnassign_NoSuchUser(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
+	rec := doPost(h.RolesUnassign, `{"userId":"ghostuser","roleId":"r1"}`, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj, _ := resp["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "NO_SUCH_USER", errObj["code"])
+	assert.Equal(t, "2b730f78-1179-461b-88ad-d24c9af1a5ce", errObj["id"])
+}
+
+func TestRolesUnassign_Success(t *testing.T) {
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
@@ -1444,6 +1477,8 @@ func adminViewerFixture(t *testing.T) (*apiadmin.Handler, *testutil.MockRoleRepo
 	t.Helper()
 	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
 	userRepo.Users["adm"] = &model.User{ID: "adm"}
+	// assign 対象の fixture user (#1542: NO_SUCH_USER 検証を通すため)。
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", IsAdministrator: true}
 	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "aa1", UserID: "adm", RoleID: "admrole"}))
 	return h, roleRepo, &model.User{ID: "adm"}
@@ -1537,6 +1572,25 @@ func TestRolesUsers_Success_ReturnsAssignmentEnvelope(t *testing.T) {
 	require.NotNil(t, user)
 	assert.Equal(t, "u1", user["id"])
 	assert.Equal(t, "alice", user["username"])
+	// upstream users.ts は expiresAt を含める。期限なしは null (#1542)。
+	require.Contains(t, resp[0], "expiresAt")
+	assert.Nil(t, resp[0]["expiresAt"])
+}
+
+// upstream users.ts:101 は expiresAt: assign.expiresAt?.toISOString() を含める (#1542)。
+func TestRolesUsers_IncludesExpiresAt(t *testing.T) {
+	h, userRepo, roleRepo, assignRepo := rolesUsersFixture(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	require.NoError(t, userRepo.Create(&model.User{ID: "u1", Username: "alice"}))
+	exp := time.Date(4099, 1, 2, 3, 4, 5, 0, time.UTC)
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "9c2bw9q5fa0000000000000001", UserID: "u1", RoleID: "r1", ExpiresAt: &exp}))
+
+	rec := doPost(h.RolesUsers, `{"roleId":"r1","limit":10}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "4099-01-02T03:04:05.000Z", resp[0]["expiresAt"])
 }
 
 func TestRolesUsers_Success_Empty(t *testing.T) {
@@ -1651,6 +1705,19 @@ func TestRolesUpdateDefaultPolicies_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// upstream update-default-policies.ts は updateServerSettings moderation log を
+// 記録する (#1542)。
+func TestRolesUpdateDefaultPolicies_WritesModerationLog(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	repo := attachModLog(t, h)
+
+	rec := doPost(h.RolesUpdateDefaultPolicies, `{"policies":{"driveCapacityMb":500}}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
+	assert.Equal(t, "updateServerSettings", repo.Snapshot()[0].Type)
+}
+
 func TestRolesUpdateDefaultPolicies_UpdateError(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	metaRepo := &failingUpdateMetaRepo{testutil.NewMockMetaRepository()}
@@ -1689,7 +1756,8 @@ func (f *failingCreateRoleRepo) Create(_ *model.Role) error { return assert.AnEr
 
 func TestRolesAssign_InternalError(t *testing.T) {
 	// Exists がエラーになるケースをテスト
-	h, _, _, roleRepo := newTestHandler(t)
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 1回目のassignは成功
 	doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
@@ -1699,7 +1767,8 @@ func TestRolesAssign_InternalError(t *testing.T) {
 }
 
 func TestRolesUnassign_InternalError(t *testing.T) {
-	h, _, _, roleRepo := newTestHandler(t)
+	h, userRepo, _, roleRepo := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 存在しないassignmentのunassign → NOT_ASSIGNED
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
@@ -1740,6 +1809,7 @@ func TestRolesAssign_ExistsError(t *testing.T) {
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
 	roleSvc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
 	h := apiadmin.NewHandler(signup.NewService(userRepo, metaRepo, idGen), roleSvc, metaRepo, userRepo, idGen)
@@ -1756,6 +1826,7 @@ func TestRolesUnassign_ExistsError(t *testing.T) {
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u1"] = &model.User{ID: "u1"}
 	idGen, _ := id.NewGenerator("aidx")
 	roleSvc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
 	h := apiadmin.NewHandler(signup.NewService(userRepo, metaRepo, idGen), roleSvc, metaRepo, userRepo, idGen)
