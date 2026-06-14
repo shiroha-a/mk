@@ -99,6 +99,11 @@ func (h *Handler) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Title == "" || req.Name == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream create.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
+	// 不在なら NO_SUCH_FILE (#1548)。
+	if !h.eyeCatchingImageOK(req.EyeCatchingImageID, user.ID) {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c"))
+	}
 	p, err := h.svc.Create(corepage.CreateInput{
 		OwnerID:             user.ID,
 		Title:               req.Title,
@@ -117,9 +122,29 @@ func (h *Handler) Create(c echo.Context) error {
 		if errors.Is(err, corepage.ErrPageNameConflict) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NAME_ALREADY_EXISTS", "The page name is already in use.", "4650348e-301c-499a-83c9-6aa988c66bc1"))
 		}
+		if errors.Is(err, corepage.ErrPageNameInvalid) {
+			return apierr.JSONInvalidParam(c)
+		}
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, h.pageToMap(p))
+}
+
+// eyeCatchingImageOK reports whether imageID (when non-nil / non-empty) refers
+// to a drive file owned by userID. Returns true when no image is set or when
+// the drive repo is unwired (test path). false means NO_SUCH_FILE (#1548).
+func (h *Handler) eyeCatchingImageOK(imageID *string, userID string) bool {
+	if imageID == nil || *imageID == "" {
+		return true
+	}
+	if h.driveFileRepo == nil {
+		return true
+	}
+	f, err := h.driveFileRepo.FindByID(*imageID)
+	if err != nil || f == nil || f.UserID == nil || *f.UserID != userID {
+		return false
+	}
+	return true
 }
 
 // ShowRequest is the request body for pages/show. upstream Misskey TS の
@@ -216,6 +241,11 @@ func (h *Handler) Update(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.PageID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream update.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
+	// 不在なら NO_SUCH_FILE (#1548)。
+	if !h.eyeCatchingImageOK(req.EyeCatchingImageID, user.ID) {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "cfc23c7c-3887-490e-af30-0ed576703c82"))
+	}
 	in := corepage.UpdateInput{
 		Title:               req.Title,
 		Name:                req.Name,
@@ -249,7 +279,8 @@ func (h *Handler) Update(c echo.Context) error {
 		case errors.Is(err, corepage.ErrAccessDenied):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "3c15cd52-3b4b-4274-967d-6456fc4f792b"))
 		case errors.Is(err, corepage.ErrPageNameRequired),
-			errors.Is(err, corepage.ErrPageTitleRequired):
+			errors.Is(err, corepage.ErrPageTitleRequired),
+			errors.Is(err, corepage.ErrPageNameInvalid):
 			return apierr.JSONInvalidParam(c)
 		case errors.Is(err, corepage.ErrPageNameConflict):
 			return c.JSON(http.StatusBadRequest, apierr.Error("NAME_ALREADY_EXISTS", "The page name is already in use.", "2298a392-d4a1-44c5-9ebb-ac1aeaa5a9ab"))

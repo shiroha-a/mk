@@ -61,6 +61,64 @@ func TestCreate_BadJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1548: name が禁止文字を含むと INVALID_PARAM (pageNameSchema)。
+func TestCreate_NameInvalidPattern(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","name":"has space"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #1548: eyeCatchingImageId が自分の drive file でなければ NO_SUCH_FILE。
+func TestCreate_EyeCatchingImageNoSuchFile(t *testing.T) {
+	h, _, _ := newHandler(t)
+	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository()) // 空 = 不在
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f_ghost"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c")
+}
+
+// 他人の drive file を eyeCatchingImageId に指定しても NO_SUCH_FILE。
+func TestCreate_EyeCatchingImageForeignFile(t *testing.T) {
+	h, _, _ := newHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	other := "bob"
+	dr.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &other}
+	h.SetDriveFileRepo(dr)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// 自分の drive file なら作成成功。
+func TestCreate_EyeCatchingImageOwned(t *testing.T) {
+	h, _, _ := newHandler(t)
+	dr := testutil.NewMockDriveFileRepository()
+	owner := "alice"
+	dr.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
+	h.SetDriveFileRepo(dr)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1548: update でも eyeCatchingImageId の所有検証が効く。
+func TestUpdate_EyeCatchingImageNoSuchFile(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha"}
+	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
+	c, rec := newReq(t, `{"pageId":"p1","eyeCatchingImageId":"f_ghost"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cfc23c7c-3887-490e-af30-0ed576703c82")
+}
+
 func TestCreate_TitleRequired(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{"name":"alpha"}`)

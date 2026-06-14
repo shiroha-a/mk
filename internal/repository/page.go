@@ -144,7 +144,10 @@ func (r *pageRepository) ListFeatured(sinceID, untilID string, limit, offset int
 	if limit > 100 {
 		limit = 100
 	}
-	q := r.db.Where("visibility = ?", string(model.PageVisibilityPublic))
+	// upstream pages/featured は public かつ likedCount>0 の page のみを返す
+	// (#1548)。0 like の public page は featured に出さない。
+	q := r.db.Where("visibility = ?", string(model.PageVisibilityPublic)).
+		Where(`"likedCount" > 0`)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}

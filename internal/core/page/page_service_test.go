@@ -83,6 +83,31 @@ func TestCreate_NameRequired(t *testing.T) {
 	assert.ErrorIs(t, err, page.ErrPageNameRequired)
 }
 
+// #1548: name が pageNameSchema の禁止文字を含むと ErrPageNameInvalid。
+func TestCreate_NameInvalidPattern(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	for _, bad := range []string{"has space", "slash/x", "colon:x", "hash#x", "at@x", "q?x"} {
+		_, err := svc.Create(page.CreateInput{OwnerID: "u1", Title: "t", Name: bad})
+		assert.ErrorIs(t, err, page.ErrPageNameInvalid, "name %q must be rejected", bad)
+	}
+}
+
+// 正常な name (英数 / ハイフン / アンダースコア等) は通る。
+func TestCreate_NameValidPattern(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	_, err := svc.Create(page.CreateInput{OwnerID: "u1", Title: "t", Name: "my-page_01.draft"})
+	require.NoError(t, err)
+}
+
+// #1548: update でも禁止文字 name は ErrPageNameInvalid。
+func TestUpdate_NameInvalidPattern(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Name: "ok"}
+	bad := "bad name"
+	_, err := svc.Update("u1", "p1", page.UpdateInput{Name: &bad})
+	assert.ErrorIs(t, err, page.ErrPageNameInvalid)
+}
+
 func TestCreate_NameConflict(t *testing.T) {
 	svc, repo, _ := newSvc(t)
 	repo.Pages["existing"] = &model.Page{ID: "existing", UserID: "u1", Name: "alpha"}

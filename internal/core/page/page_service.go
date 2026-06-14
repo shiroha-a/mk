@@ -5,6 +5,7 @@ package page
 
 import (
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -12,12 +13,19 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
+// pageNameRe mirrors upstream pageNameSchema (Page.ts): 1-256 文字で、空白 /
+// 制御文字 / 予約記号 (:/?#[]@!$&'()*+,;=\%) を含まない (#1548)。
+var pageNameRe = regexp.MustCompile(`^[^\s:/?#\[\]@!$&'()*+,;=\\%\x00-\x20]{1,256}$`)
+
 // Errors returned by Service.
 var (
 	// ErrPageNotFound is returned when the requested page does not exist.
 	ErrPageNotFound = errors.New("page not found")
 	// ErrPageNameRequired is returned when name is empty on Create / Update.
 	ErrPageNameRequired = errors.New("page name is required")
+	// ErrPageNameInvalid is returned when name violates pageNameSchema
+	// (禁止文字 / 長さ超過、#1548)。
+	ErrPageNameInvalid = errors.New("page name has invalid characters")
 	// ErrPageTitleRequired is returned when title is empty on Create / Update.
 	ErrPageTitleRequired = errors.New("page title is required")
 	// ErrAccessDenied is returned when the requester cannot view or mutate
@@ -95,6 +103,9 @@ func (s *Service) Create(in CreateInput) (*model.Page, error) {
 	}
 	if in.Name == "" {
 		return nil, ErrPageNameRequired
+	}
+	if !pageNameRe.MatchString(in.Name) {
+		return nil, ErrPageNameInvalid
 	}
 	if _, err := s.repo.FindByUserAndName(in.OwnerID, in.Name); err == nil {
 		return nil, ErrPageNameConflict
@@ -207,6 +218,9 @@ func (s *Service) Update(ownerID, pageID string, in UpdateInput) (*model.Page, e
 	if in.Name != nil {
 		if *in.Name == "" {
 			return nil, ErrPageNameRequired
+		}
+		if !pageNameRe.MatchString(*in.Name) {
+			return nil, ErrPageNameInvalid
 		}
 		// 名前変更時は (userId, name) 一意制約と衝突しないことを確認する。
 		if *in.Name != p.Name {

@@ -238,6 +238,30 @@ func TestPageRepository_ListFeatured(t *testing.T) {
 	assert.Equal(t, "pg_ft_2", found[2].ID)
 }
 
+// #1548: likedCount==0 の public page は featured から除外される。
+func TestPageRepository_ListFeatured_ExcludesZeroLikes(t *testing.T) {
+	repo := NewPageRepository(testDB)
+	user := insertTestUser(t, "u_pr_ftz", "pageuserftz")
+	defer cleanupUser(t, user.ID)
+
+	zero := newTestPage("pg_ftz_0", user.ID, "ftz0") // LikedCount 0
+	liked := newTestPage("pg_ftz_1", user.ID, "ftz1")
+	liked.LikedCount = 3
+	require.NoError(t, repo.Create(zero))
+	require.NoError(t, repo.Create(liked))
+	defer cleanupPage(t, zero.ID)
+	defer cleanupPage(t, liked.ID)
+
+	rows, err := repo.ListFeatured("", "", 100, 0)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, p := range rows {
+		ids[p.ID] = true
+	}
+	assert.True(t, ids["pg_ftz_1"], "liked page must appear")
+	assert.False(t, ids["pg_ftz_0"], "0-like page must be excluded")
+}
+
 func TestPageRepository_ListFeatured_LimitClamp(t *testing.T) {
 	repo := NewPageRepository(testDB)
 	rows, err := repo.ListFeatured("", "", 9999, 0)
