@@ -2302,8 +2302,10 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		LocalOnly   *bool    `json:"localOnly"`
 		RoleIDs     []string `json:"roleIdsThatCanBeUsedThisEmojiAsReaction"`
 	}
-	if err := c.Bind(&req); err != nil || req.ID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "id is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	// upstream update.ts paramDef は allOf+anyOf で {id} または {name} の
+	// どちらか必須。id 無し name 指定時は local emoji を name で解決する (#1543)。
+	if err := c.Bind(&req); err != nil || (req.ID == "" && (req.Name == nil || *req.Name == "")) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "id or name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -2311,15 +2313,25 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	// before snapshot for moderation log (also used to gate NO_SUCH_EMOJI when
 	// the row is missing — UpdateFields の RowsAffected==0 経路は repo 側で
 	// ErrRecordNotFound に昇格済み (#650 問題 2)).
-	before, err := h.emojiRepo.FindByID(req.ID)
-	if err != nil {
+	// id 指定があれば id 解決、無ければ name で local emoji を解決する。upstream
+	// CustomEmojiService.update は `data.id ? getEmojiById : getEmojiByName` (#1543)。
+	var before *model.Emoji
+	var err error
+	if req.ID != "" {
+		before, err = h.emojiRepo.FindByID(req.ID)
+	} else {
+		before, err = h.emojiRepo.FindByNameAndHost(*req.Name, nil)
+	}
+	if err != nil || before == nil {
 		// #729: 再現報告のため request 側 id と原因 (find vs update path) を
 		// log に残す。frontend 側で stale id を握っているのか、repo 側で
 		// 何か起きているのか切り分けに使う。
-		slog.WarnContext(c.Request().Context(), "EmojiUpdate: NO_SUCH_EMOJI on FindByID",
+		slog.WarnContext(c.Request().Context(), "EmojiUpdate: NO_SUCH_EMOJI on lookup",
 			"id", req.ID, "err", err)
 		return c.JSON(http.StatusNotFound, apierr.NoSuchEmoji())
 	}
+	// 以降の UpdateFields / moderation log は解決済み id を使う。
+	req.ID = before.ID
 	fields := map[string]any{}
 	if req.Name != nil {
 		// リネーム時は同名 local emoji の重複を弾く (SAME_NAME_EMOJI_EXISTS)。
