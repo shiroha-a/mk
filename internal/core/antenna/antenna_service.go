@@ -34,7 +34,38 @@ var (
 	ErrAccessDenied = errors.New("not the owner of this antenna")
 	// ErrInvalidSource is returned when src is not a known antenna source.
 	ErrInvalidSource = errors.New("invalid antenna source")
+	// ErrNoSuchUserList is returned when src=list references a user list the
+	// caller does not own / does not exist (upstream noSuchUserList、#1544)。
+	ErrNoSuchUserList = errors.New("no such user list")
 )
+
+// AllKeywordsEmpty reports whether every entry of a DNF keyword set is the
+// empty string (= upstream `keywords.flat().every(x => x === ”)`)。空配列も
+// vacuously true を返す。EMPTY_KEYWORD 検査 (endpoint 層) で用いる。
+func AllKeywordsEmpty(kw [][]string) bool {
+	for _, row := range kw {
+		for _, s := range row {
+			if s != "" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validateUserList enforces the upstream noSuchUserList check: when src=list
+// references a userListId, the list must exist and be owned by ownerID.
+// userListRepo 未配線時は skip (= list source を使わない構成)。
+func (s *Service) validateUserList(ownerID string, userListID *string) error {
+	if s.userListRepo == nil || userListID == nil || *userListID == "" {
+		return nil
+	}
+	list, err := s.userListRepo.FindByID(*userListID)
+	if err != nil || list == nil || list.UserID != ownerID {
+		return ErrNoSuchUserList
+	}
+	return nil
+}
 
 // MaxNotesPerAntenna caps how many notes are kept per antenna in the Redis
 // stream. 古いものから XADD MAXLEN ~ で削除される。
@@ -142,18 +173,19 @@ func (s *Service) SetClock(now func() time.Time) {
 
 // CreateInput is the parameter set for Service.Create.
 type CreateInput struct {
-	OwnerID         string
-	Name            string
-	Src             model.AntennaSource
-	UserListID      *string
-	Users           []string
-	Keywords        [][]string
-	ExcludeKeywords [][]string
-	CaseSensitive   bool
-	ExcludeBots     bool
-	WithReplies     bool
-	WithFile        bool
-	LocalOnly       bool
+	OwnerID                        string
+	Name                           string
+	Src                            model.AntennaSource
+	UserListID                     *string
+	Users                          []string
+	Keywords                       [][]string
+	ExcludeKeywords                [][]string
+	CaseSensitive                  bool
+	ExcludeBots                    bool
+	WithReplies                    bool
+	WithFile                       bool
+	LocalOnly                      bool
+	ExcludeNotesInSensitiveChannel bool
 }
 
 // Create persists a new antenna and returns it.
@@ -180,26 +212,33 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 			}
 		}
 	}
+	// upstream create.ts: src='list' で userListId 指定時、自分が所有する list か検証。
+	if in.Src == model.AntennaSourceList {
+		if err := s.validateUserList(in.OwnerID, in.UserListID); err != nil {
+			return nil, err
+		}
+	}
 	// Marshal of [][]string never fails, so we ignore the error.
 	keywords, _ := json.Marshal(normalizeKeywords(in.Keywords))
 	exclude, _ := json.Marshal(normalizeKeywords(in.ExcludeKeywords))
 	now := s.clock()
 	a := &model.Antenna{
-		ID:              s.idGen.Generate(now),
-		LastUsedAt:      now,
-		UserID:          in.OwnerID,
-		Name:            in.Name,
-		Src:             in.Src,
-		UserListID:      in.UserListID,
-		Users:           in.Users,
-		Keywords:        keywords,
-		ExcludeKeywords: exclude,
-		CaseSensitive:   in.CaseSensitive,
-		ExcludeBots:     in.ExcludeBots,
-		WithReplies:     in.WithReplies,
-		WithFile:        in.WithFile,
-		LocalOnly:       in.LocalOnly,
-		IsActive:        true,
+		ID:                             s.idGen.Generate(now),
+		LastUsedAt:                     now,
+		UserID:                         in.OwnerID,
+		Name:                           in.Name,
+		Src:                            in.Src,
+		UserListID:                     in.UserListID,
+		Users:                          in.Users,
+		Keywords:                       keywords,
+		ExcludeKeywords:                exclude,
+		CaseSensitive:                  in.CaseSensitive,
+		ExcludeBots:                    in.ExcludeBots,
+		WithReplies:                    in.WithReplies,
+		WithFile:                       in.WithFile,
+		LocalOnly:                      in.LocalOnly,
+		ExcludeNotesInSensitiveChannel: in.ExcludeNotesInSensitiveChannel,
+		IsActive:                       true,
 	}
 	if err := s.repo.Create(a); err != nil {
 		return nil, err
@@ -222,18 +261,19 @@ func (s *Service) Show(ownerID, antennaID string) (*model.Antenna, error) {
 // UpdateInput holds the editable fields of an antenna. nil の field は更新
 // されない。
 type UpdateInput struct {
-	Name            *string
-	Src             *model.AntennaSource
-	UserListID      *string
-	Users           *[]string
-	Keywords        *[][]string
-	ExcludeKeywords *[][]string
-	CaseSensitive   *bool
-	ExcludeBots     *bool
-	WithReplies     *bool
-	WithFile        *bool
-	LocalOnly       *bool
-	IsActive        *bool
+	Name                           *string
+	Src                            *model.AntennaSource
+	UserListID                     *string
+	Users                          *[]string
+	Keywords                       *[][]string
+	ExcludeKeywords                *[][]string
+	CaseSensitive                  *bool
+	ExcludeBots                    *bool
+	WithReplies                    *bool
+	WithFile                       *bool
+	LocalOnly                      *bool
+	IsActive                       *bool
+	ExcludeNotesInSensitiveChannel *bool
 }
 
 // Update applies the non-nil fields to an antenna owned by ownerID.
@@ -244,6 +284,13 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	}
 	if a.UserID != ownerID {
 		return nil, ErrAccessDenied
+	}
+	// upstream update.ts: 新 src か既存 src が list で userListId 指定時、
+	// 自分が所有する list か検証する。
+	if (in.Src != nil && *in.Src == model.AntennaSourceList) || a.Src == model.AntennaSourceList {
+		if err := s.validateUserList(ownerID, in.UserListID); err != nil {
+			return nil, err
+		}
 	}
 	fields := map[string]any{}
 	if in.Name != nil {
@@ -292,6 +339,9 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	}
 	if in.LocalOnly != nil {
 		fields["localOnly"] = *in.LocalOnly
+	}
+	if in.ExcludeNotesInSensitiveChannel != nil {
+		fields["excludeNotesInSensitiveChannel"] = *in.ExcludeNotesInSensitiveChannel
 	}
 	// 本家 update.ts は編集のたびに isActive=true へ復帰させる (deactivate された
 	// antenna は編集で再び有効化される)。mk-go は isActive をユーザー param として

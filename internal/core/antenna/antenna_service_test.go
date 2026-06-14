@@ -93,6 +93,32 @@ func TestCreate_ListSourceAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAllKeywordsEmpty(t *testing.T) {
+	assert.True(t, AllKeywordsEmpty(nil))
+	assert.True(t, AllKeywordsEmpty([][]string{}))
+	assert.True(t, AllKeywordsEmpty([][]string{{""}, {"", ""}}))
+	assert.False(t, AllKeywordsEmpty([][]string{{""}, {"foo"}}))
+	assert.False(t, AllKeywordsEmpty([][]string{{"bar"}}))
+}
+
+// src=list で他人所有 / 不在の list を参照すると ErrNoSuchUserList。
+func TestCreate_ListSource_NoSuchUserList(t *testing.T) {
+	svc, _ := newSvc(t)
+	lists := testutil.NewMockUserListRepository()
+	svc.SetUserListRepo(lists)
+	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "other", Name: "theirs"}))
+
+	// 他人所有の list。
+	notMine := "ul1"
+	_, err := svc.Create(CreateInput{OwnerID: "u1", Name: "alpha", Src: model.AntennaSourceList, UserListID: &notMine})
+	assert.ErrorIs(t, err, ErrNoSuchUserList)
+
+	// 存在しない list。
+	ghost := "ghost"
+	_, err = svc.Create(CreateInput{OwnerID: "u1", Name: "alpha", Src: model.AntennaSourceList, UserListID: &ghost})
+	assert.ErrorIs(t, err, ErrNoSuchUserList)
+}
+
 func TestCreate_RepoError(t *testing.T) {
 	svc, repo := newSvc(t)
 	repo.CreateErr = errors.New("boom")

@@ -125,17 +125,18 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 
 // CreateRequest is the request body for antennas/create.
 type CreateRequest struct {
-	Name            string              `json:"name"`
-	Src             model.AntennaSource `json:"src"`
-	UserListID      *string             `json:"userListId"`
-	Users           []string            `json:"users"`
-	Keywords        [][]string          `json:"keywords"`
-	ExcludeKeywords [][]string          `json:"excludeKeywords"`
-	CaseSensitive   bool                `json:"caseSensitive"`
-	ExcludeBots     bool                `json:"excludeBots"`
-	WithReplies     bool                `json:"withReplies"`
-	WithFile        bool                `json:"withFile"`
-	LocalOnly       bool                `json:"localOnly"`
+	Name                           string              `json:"name"`
+	Src                            model.AntennaSource `json:"src"`
+	UserListID                     *string             `json:"userListId"`
+	Users                          []string            `json:"users"`
+	Keywords                       [][]string          `json:"keywords"`
+	ExcludeKeywords                [][]string          `json:"excludeKeywords"`
+	CaseSensitive                  bool                `json:"caseSensitive"`
+	ExcludeBots                    bool                `json:"excludeBots"`
+	WithReplies                    bool                `json:"withReplies"`
+	WithFile                       bool                `json:"withFile"`
+	LocalOnly                      bool                `json:"localOnly"`
+	ExcludeNotesInSensitiveChannel bool                `json:"excludeNotesInSensitiveChannel"`
 }
 
 // Create handles POST /api/antennas/create.
@@ -145,25 +146,33 @@ func (h *Handler) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream create.ts: keywords と excludeKeywords が両方とも空なら EMPTY_KEYWORD。
+	if coreantenna.AllKeywordsEmpty(req.Keywords) && coreantenna.AllKeywordsEmpty(req.ExcludeKeywords) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("EMPTY_KEYWORD", "Either keywords or excludeKeywords is required.", "53ee222e-1ddd-4f9a-92e5-9fb82ddb463a"))
+	}
 	a, err := h.svc.Create(coreantenna.CreateInput{
-		OwnerID:         user.ID,
-		Name:            req.Name,
-		Src:             req.Src,
-		UserListID:      req.UserListID,
-		Users:           req.Users,
-		Keywords:        req.Keywords,
-		ExcludeKeywords: req.ExcludeKeywords,
-		CaseSensitive:   req.CaseSensitive,
-		ExcludeBots:     req.ExcludeBots,
-		WithReplies:     req.WithReplies,
-		WithFile:        req.WithFile,
-		LocalOnly:       req.LocalOnly,
+		OwnerID:                        user.ID,
+		Name:                           req.Name,
+		Src:                            req.Src,
+		UserListID:                     req.UserListID,
+		Users:                          req.Users,
+		Keywords:                       req.Keywords,
+		ExcludeKeywords:                req.ExcludeKeywords,
+		CaseSensitive:                  req.CaseSensitive,
+		ExcludeBots:                    req.ExcludeBots,
+		WithReplies:                    req.WithReplies,
+		WithFile:                       req.WithFile,
+		LocalOnly:                      req.LocalOnly,
+		ExcludeNotesInSensitiveChannel: req.ExcludeNotesInSensitiveChannel,
 	})
 	if err != nil {
-		// Name は事前 invalidParam で弾いているため、ここに来るのは
-		// ErrInvalidSource か repo エラー、または antennaLimit 超過のみ。
+		// Name / EMPTY_KEYWORD は事前に弾いているため、ここに来るのは
+		// ErrInvalidSource / NO_SUCH_USER_LIST / antennaLimit / repo エラー。
 		if errors.Is(err, coreantenna.ErrInvalidSource) {
 			return apierr.JSONInvalidParam(c)
+		}
+		if errors.Is(err, coreantenna.ErrNoSuchUserList) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "95063e93-a283-4b8b-9aa5-bcdb8df69a7f"))
 		}
 		if errors.Is(err, coreantenna.ErrTooManyAntennas) {
 			return apierr.JSONTooManyAntennas(c)
@@ -198,19 +207,20 @@ func (h *Handler) Show(c echo.Context) error {
 
 // UpdateRequest is the request body for antennas/update.
 type UpdateRequest struct {
-	AntennaID       string               `json:"antennaId"`
-	Name            *string              `json:"name"`
-	Src             *model.AntennaSource `json:"src"`
-	UserListID      *string              `json:"userListId"`
-	Users           *[]string            `json:"users"`
-	Keywords        *[][]string          `json:"keywords"`
-	ExcludeKeywords *[][]string          `json:"excludeKeywords"`
-	CaseSensitive   *bool                `json:"caseSensitive"`
-	ExcludeBots     *bool                `json:"excludeBots"`
-	WithReplies     *bool                `json:"withReplies"`
-	WithFile        *bool                `json:"withFile"`
-	LocalOnly       *bool                `json:"localOnly"`
-	IsActive        *bool                `json:"isActive"`
+	AntennaID                      string               `json:"antennaId"`
+	Name                           *string              `json:"name"`
+	Src                            *model.AntennaSource `json:"src"`
+	UserListID                     *string              `json:"userListId"`
+	Users                          *[]string            `json:"users"`
+	Keywords                       *[][]string          `json:"keywords"`
+	ExcludeKeywords                *[][]string          `json:"excludeKeywords"`
+	CaseSensitive                  *bool                `json:"caseSensitive"`
+	ExcludeBots                    *bool                `json:"excludeBots"`
+	WithReplies                    *bool                `json:"withReplies"`
+	WithFile                       *bool                `json:"withFile"`
+	LocalOnly                      *bool                `json:"localOnly"`
+	IsActive                       *bool                `json:"isActive"`
+	ExcludeNotesInSensitiveChannel *bool                `json:"excludeNotesInSensitiveChannel"`
 }
 
 // Update handles POST /api/antennas/update.
@@ -220,19 +230,26 @@ func (h *Handler) Update(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.AntennaID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream update.ts: keywords/excludeKeywords が両方指定され、かつ両方とも
+	// 空なら EMPTY_KEYWORD (片方のみ指定の場合は検査しない)。
+	if req.Keywords != nil && req.ExcludeKeywords != nil &&
+		coreantenna.AllKeywordsEmpty(*req.Keywords) && coreantenna.AllKeywordsEmpty(*req.ExcludeKeywords) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("EMPTY_KEYWORD", "Either keywords or excludeKeywords is required.", "721aaff6-4e1b-4d88-8de6-877fae9f68c4"))
+	}
 	a, err := h.svc.Update(user.ID, req.AntennaID, coreantenna.UpdateInput{
-		Name:            req.Name,
-		Src:             req.Src,
-		UserListID:      req.UserListID,
-		Users:           req.Users,
-		Keywords:        req.Keywords,
-		ExcludeKeywords: req.ExcludeKeywords,
-		CaseSensitive:   req.CaseSensitive,
-		ExcludeBots:     req.ExcludeBots,
-		WithReplies:     req.WithReplies,
-		WithFile:        req.WithFile,
-		LocalOnly:       req.LocalOnly,
-		IsActive:        req.IsActive,
+		Name:                           req.Name,
+		Src:                            req.Src,
+		UserListID:                     req.UserListID,
+		Users:                          req.Users,
+		Keywords:                       req.Keywords,
+		ExcludeKeywords:                req.ExcludeKeywords,
+		CaseSensitive:                  req.CaseSensitive,
+		ExcludeBots:                    req.ExcludeBots,
+		WithReplies:                    req.WithReplies,
+		WithFile:                       req.WithFile,
+		LocalOnly:                      req.LocalOnly,
+		IsActive:                       req.IsActive,
+		ExcludeNotesInSensitiveChannel: req.ExcludeNotesInSensitiveChannel,
 	})
 	if err != nil {
 		switch {
@@ -240,6 +257,8 @@ func (h *Handler) Update(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "10c673ac-8852-48eb-aa1f-f5b67f069290"))
 		case errors.Is(err, coreantenna.ErrAccessDenied):
 			return apierr.JSONAccessDenied(c)
+		case errors.Is(err, coreantenna.ErrNoSuchUserList):
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "1c6b35c9-943e-48c2-81e4-2844989407f7"))
 		case errors.Is(err, coreantenna.ErrAntennaNameRequired),
 			errors.Is(err, coreantenna.ErrInvalidSource):
 			return apierr.JSONInvalidParam(c)
