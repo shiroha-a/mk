@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -206,6 +207,16 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 	if showModerationNote {
 		moderationNote = inst.ModerationNote
 	}
+	// softwareSuspended: meta.deliverSuspendedSoftware に該当する software なら
+	// 配送停止扱い。upstream InstanceEntityService は
+	// isSuspended = suspensionState!=='none' || softwareSuspended、
+	// suspensionState は none かつ softwareSuspended なら 'softwareSuspended' (#1732)。
+	softwareSuspended := corefederation.MatchSuspendedSoftware(inst.SoftwareName, inst.SoftwareVersion, hosts.SuspendedSoftware)
+	isSuspended := inst.SuspensionState != model.SuspensionStateNone || softwareSuspended
+	var suspensionState any = inst.SuspensionState
+	if inst.SuspensionState == model.SuspensionStateNone && softwareSuspended {
+		suspensionState = "softwareSuspended"
+	}
 	return map[string]any{
 		"id":                      inst.ID,
 		"firstRetrievedAt":        inst.FirstRetrievedAt,
@@ -220,8 +231,8 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		"latestRequestReceivedAt": inst.LatestRequestReceivedAt,
 		"isNotResponding":         inst.IsNotResponding,
 		"notRespondingSince":      inst.NotRespondingSince,
-		"isSuspended":             inst.SuspensionState != model.SuspensionStateNone,
-		"suspensionState":         inst.SuspensionState,
+		"isSuspended":             isSuspended,
+		"suspensionState":         suspensionState,
 		"isBlocked":               coreinstance.HostMatchesAny(hosts.Blocked, inst.Host),
 		"isSilenced":              coreinstance.HostMatchesAny(hosts.Silenced, inst.Host),
 		"isMediaSilenced":         coreinstance.HostMatchesAny(hosts.MediaSilenced, inst.Host),

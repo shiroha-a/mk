@@ -3,6 +3,7 @@
 package instance
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -363,6 +364,9 @@ type FederationHostSets struct {
 	Blocked       []string
 	Silenced      []string
 	MediaSilenced []string
+	// SuspendedSoftware は meta.deliverSuspendedSoftware をパースしたもの。
+	// federation/instances 等の softwareSuspended 表示判定に使う (#1732)。
+	SuspendedSoftware []model.SuspendedSoftwareEntry
 }
 
 // FederationHostLists returns the blocked / silenced / media-silenced host
@@ -379,10 +383,17 @@ func (s *Service) FederationHostLists() (FederationHostSets, error) {
 	if err != nil {
 		return FederationHostSets{}, err
 	}
+	// deliverSuspendedSoftware (jsonb) を softwareSuspended 判定用に parse する
+	// (#1732)。不正な JSON は空扱い (best-effort)。
+	var suspended []model.SuspendedSoftwareEntry
+	if len(meta.DeliverSuspendedSoftware) > 0 {
+		_ = json.Unmarshal(meta.DeliverSuspendedSoftware, &suspended)
+	}
 	return FederationHostSets{
-		Blocked:       meta.BlockedHosts,
-		Silenced:      meta.SilencedHosts,
-		MediaSilenced: meta.MediaSilencedHosts,
+		Blocked:           meta.BlockedHosts,
+		Silenced:          meta.SilencedHosts,
+		MediaSilenced:     meta.MediaSilencedHosts,
+		SuspendedSoftware: suspended,
 	}, nil
 }
 

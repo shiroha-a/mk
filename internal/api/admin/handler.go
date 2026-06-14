@@ -29,6 +29,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -1223,6 +1224,9 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// すべての varchar[] 列に影響していたバグで、admin が whitelist 連合や
 	// host ブロックを保存しても永続化されない原因だった。
 	coerceMetaArrayFields(fields)
+	// jsonb 列 (deliverSuspendedSoftware) は decoded []any を []byte に marshal
+	// しないと UPDATE が型不一致で失敗する (#1732)。
+	coerceMetaJSONBFields(fields)
 
 	// VAPID 鍵 auto-generate (#492): Service Worker 有効化時に
 	// swPublicKey / swPrivateKey が両方空のとき backend で生成して詰める。
@@ -1453,6 +1457,34 @@ func coerceMetaArrayFields(fields map[string]any) {
 		}
 		// pq.StringArray / []string が来ているケースは driver.Valuer 互換
 		// なのでそのまま real repo に流す。
+	}
+}
+
+// metaJSONBColumns lists meta jsonb columns whose update-meta payload arrives as
+// a decoded []any / map[string]any and must be json.Marshal された []byte に
+// 変換しないと jsonb 列の UPDATE が型不一致で失敗する (#1732 deliverSuspendedSoftware)。
+var metaJSONBColumns = map[string]struct{}{
+	"deliverSuspendedSoftware": {},
+}
+
+// coerceMetaJSONBFields marshals decoded JSON values for known jsonb meta
+// columns into datatypes.JSON ([]byte) so GORM/pgx can write them. nil は
+// 空配列扱い、既に []byte/string のものはそのまま流す。
+func coerceMetaJSONBFields(fields map[string]any) {
+	for k, v := range fields {
+		if _, ok := metaJSONBColumns[k]; !ok {
+			continue
+		}
+		switch v.(type) {
+		case nil:
+			fields[k] = datatypes.JSON([]byte("[]"))
+		case []byte, string, datatypes.JSON:
+			// 既に raw JSON。そのまま流す。
+		default:
+			if raw, err := json.Marshal(v); err == nil {
+				fields[k] = datatypes.JSON(raw)
+			}
+		}
 	}
 }
 

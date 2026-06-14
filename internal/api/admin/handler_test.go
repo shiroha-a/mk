@@ -639,6 +639,20 @@ func TestUpdateMeta_SwPublickeyAliasIsTranslated(t *testing.T) {
 	assert.Equal(t, "KEY", *metaRepo.Meta.SwPublicKey)
 }
 
+// deliverSuspendedSoftware は jsonb 列。JSON decode された []any を
+// coerceMetaJSONBFields が []byte に marshal して永続化できること (#1732)。
+func TestUpdateMeta_DeliverSuspendedSoftware(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"deliverSuspendedSoftware":[{"software":"mastodon","versionRange":"*"}]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotEmpty(t, metaRepo.Meta.DeliverSuspendedSoftware, "jsonb 列が永続化される")
+	var entries []model.SuspendedSoftwareEntry
+	require.NoError(t, json.Unmarshal(metaRepo.Meta.DeliverSuspendedSoftware, &entries))
+	require.Len(t, entries, 1)
+	assert.Equal(t, "mastodon", entries[0].Software)
+	assert.Equal(t, "*", entries[0].VersionRange)
+}
+
 // JSON で送られてくる array は []any{...} に decode されるが、そのまま
 // repo.Update に流すと lib/pq が varchar[] 列に書けず "expression is of
 // type record" で UPDATE 全体が落ちる。handler 側の coerceMetaArrayFields

@@ -19,6 +19,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func newHandler(t *testing.T) (*Handler, *testutil.MockInstanceRepository) {
@@ -120,6 +121,68 @@ func TestShowInstance_ModerationNoteVisibleToModerator(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "secret moderator memo", resp["moderationNote"])
+}
+
+// softwareSuspended: meta.deliverSuspendedSoftware に該当する software の
+// instance は isSuspended=true、suspensionState='softwareSuspended' を返す (#1732)。
+func TestShowInstance_SoftwareSuspended(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	metaRepo.Meta = &model.Meta{
+		DeliverSuspendedSoftware: datatypes.JSON([]byte(`[{"software":"mastodon","versionRange":"*"}]`)),
+	}
+	inst := seedInstance(t, repo, "masto.example")
+	name := "mastodon"
+	ver := "4.2.0"
+	inst.SoftwareName = &name
+	inst.SoftwareVersion = &ver
+
+	c, rec := newReq(t, `{"host":"masto.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isSuspended"])
+	assert.Equal(t, "softwareSuspended", resp["suspensionState"])
+}
+
+// 該当しない software の instance は従来どおり isSuspended=false / state=none。
+func TestShowInstance_SoftwareNotSuspended(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	metaRepo.Meta = &model.Meta{
+		DeliverSuspendedSoftware: datatypes.JSON([]byte(`[{"software":"mastodon","versionRange":"*"}]`)),
+	}
+	inst := seedInstance(t, repo, "mk.example")
+	name := "misskey"
+	inst.SoftwareName = &name
+
+	c, rec := newReq(t, `{"host":"mk.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isSuspended"])
+	assert.Equal(t, "none", resp["suspensionState"])
+}
+
+// 手動 suspend 済みの instance は softwareSuspended に関わらず元の state を保つ。
+func TestShowInstance_ManualSuspensionStatePreserved(t *testing.T) {
+	h, repo, metaRepo := newHandlerWithMeta(t)
+	metaRepo.Meta = &model.Meta{
+		DeliverSuspendedSoftware: datatypes.JSON([]byte(`[{"software":"mastodon","versionRange":"*"}]`)),
+	}
+	inst := seedInstance(t, repo, "masto2.example")
+	name := "mastodon"
+	inst.SoftwareName = &name
+	inst.SuspensionState = model.SuspensionStateManuallySuspended
+
+	c, rec := newReq(t, `{"host":"masto2.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isSuspended"])
+	// none ではないので 'softwareSuspended' で上書きせず元の状態を返す。
+	assert.Equal(t, "manuallySuspended", resp["suspensionState"])
 }
 
 // 認証済みでも moderator でなければ moderationNote は隠す。

@@ -9,9 +9,40 @@ import (
 )
 
 // SuspendedSoftwareEntry represents one entry in meta.deliverSuspendedSoftware.
-type SuspendedSoftwareEntry struct {
-	Software     string `json:"software"`
-	VersionRange string `json:"versionRange"`
+// 型は model に置き、display (federation/instances 等) と deliver gate で共有
+// する。マッチ判定は MatchSuspendedSoftware に集約する (#1732)。
+type SuspendedSoftwareEntry = model.SuspendedSoftwareEntry
+
+// MatchSuspendedSoftware reports whether an instance running softwareName /
+// softwareVersion matches any deliverSuspendedSoftware entry. 本家
+// UtilityService.isDeliverSuspendedSoftware 相当で、softwareName を
+// case-insensitive 比較し、versionRange が "*" なら全バージョン一致、
+// softwareVersion が nil なら "*" 以外はマッチしない。バージョン比較は簡易
+// semver (完全一致 / "1.2" は "1.2.3" や "1.2-rc" にマッチ) で行う。federation/
+// instances 等の display と deliver gate の双方が使う。
+func MatchSuspendedSoftware(softwareName, softwareVersion *string, entries []SuspendedSoftwareEntry) bool {
+	if len(entries) == 0 || softwareName == nil {
+		return false
+	}
+	name := strings.ToLower(*softwareName)
+	for _, e := range entries {
+		if strings.ToLower(e.Software) != name {
+			continue
+		}
+		if e.VersionRange == "*" {
+			return true
+		}
+		if softwareVersion == nil {
+			continue
+		}
+		ver := *softwareVersion
+		if ver == e.VersionRange ||
+			strings.HasPrefix(ver, e.VersionRange+".") ||
+			strings.HasPrefix(ver, e.VersionRange+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 // SuspendedChecker determines whether delivery to an instance should be
@@ -41,32 +72,5 @@ func (c *SuspendedChecker) IsSuspended(host string) bool {
 		return false
 	}
 
-	return matchesSuspendedSoftware(inst, c.entries)
-}
-
-func matchesSuspendedSoftware(inst *model.Instance, entries []SuspendedSoftwareEntry) bool {
-	if inst.SoftwareName == nil {
-		return false
-	}
-	name := strings.ToLower(*inst.SoftwareName)
-
-	for _, e := range entries {
-		if strings.ToLower(e.Software) != name {
-			continue
-		}
-		// versionRange が "*" なら全バージョンマッチ
-		if e.VersionRange == "*" {
-			return true
-		}
-		// softwareVersion が nil なら "*" 以外ではマッチしない
-		if inst.SoftwareVersion == nil {
-			continue
-		}
-		// 完全一致 or プレフィックスマッチ (簡易 semver — "1.2" は "1.2.3" にマッチ)
-		ver := *inst.SoftwareVersion
-		if ver == e.VersionRange || strings.HasPrefix(ver, e.VersionRange+".") || strings.HasPrefix(ver, e.VersionRange+"-") {
-			return true
-		}
-	}
-	return false
+	return MatchSuspendedSoftware(inst.SoftwareName, inst.SoftwareVersion, c.entries)
 }

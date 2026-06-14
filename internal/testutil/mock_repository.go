@@ -9,6 +9,7 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -2520,6 +2521,15 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			setStrArr(&m.Meta.FederationHosts, k, v)
 		case "blockedHosts":
 			setStrArr(&m.Meta.BlockedHosts, k, v)
+		case "deliverSuspendedSoftware":
+			// jsonb 列。handler の coerceMetaJSONBFields で []byte/datatypes.JSON
+			// に正規化済みのものを反映する (#1732)。
+			switch b := v.(type) {
+			case datatypes.JSON:
+				m.Meta.DeliverSuspendedSoftware = b
+			case []byte:
+				m.Meta.DeliverSuspendedSoftware = datatypes.JSON(b)
+			}
 		case "silencedHosts":
 			setStrArr(&m.Meta.SilencedHosts, k, v)
 		case "mediaSilencedHosts":
