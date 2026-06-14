@@ -25,6 +25,7 @@ type Handler struct {
 	blockingRepo       repository.BlockingRepository
 	favoriteRepo       UserListFavoriteReader
 	proxyFollow        ProxyFollowEnqueuer
+	userListEventPub   UserListEventPublisher
 }
 
 // RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
@@ -85,6 +86,19 @@ type ProxyFollowEnqueuer interface {
 // pushed to a list (#1704). nil 時は proxy follow を skip する。
 func (h *Handler) SetProxyFollow(p ProxyFollowEnqueuer) {
 	h.proxyFollow = p
+}
+
+// UserListEventPublisher publishes userAdded/userRemoved membership events to a
+// list's stream so the userList WS channel updates members live (#1549)。実装は
+// stream.UserListStreamPublisher。
+type UserListEventPublisher interface {
+	PublishUserListEvent(listID, eventType string, body any)
+}
+
+// SetUserListEventPublisher wires the membership event publisher used by
+// push/pull (#1549). nil 時は membership event を発火しない。
+func (h *Handler) SetUserListEventPublisher(p UserListEventPublisher) {
+	h.userListEventPub = p
 }
 
 // List handles POST /api/users/lists/list.
@@ -329,6 +343,12 @@ func (h *Handler) Push(c echo.Context) error {
 	if h.proxyFollow != nil && target != nil && !target.IsLocal() {
 		h.proxyFollow.EnqueueProxyFollow([]string{req.UserID})
 	}
+	// userList channel に userAdded を流して member list を live 更新する
+	// (#1549、upstream UserListService.addMember の publishUserListStream)。
+	// body は packed UserLite (= upstream userEntityService.pack(target))。
+	if h.userListEventPub != nil && target != nil {
+		h.userListEventPub.PublishUserListEvent(list.ID, "userAdded", entity.PackUserLite(target))
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -355,13 +375,21 @@ func (h *Handler) Pull(c echo.Context) error {
 	// upstream pull.ts は removeMember 前に対象 user の存在を getterService.getUser
 	// で検証し、不在なら NO_SUCH_USER を返す (#1550)。userRepo 未配線の test 経路
 	// では skip する。
+	var target *model.User
 	if h.userRepo != nil {
-		if _, uerr := h.userRepo.FindByID(req.UserID); uerr != nil {
+		var uerr error
+		target, uerr = h.userRepo.FindByID(req.UserID)
+		if uerr != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
 		}
 	}
 	if err := h.repo.RemoveMember(req.ListID, req.UserID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// userList channel に userRemoved を流して member list を live 更新する
+	// (#1549、upstream UserListService.removeMember の publishUserListStream)。
+	if h.userListEventPub != nil && target != nil {
+		h.userListEventPub.PublishUserListEvent(list.ID, "userRemoved", entity.PackUserLite(target))
 	}
 	return c.NoContent(http.StatusNoContent)
 }

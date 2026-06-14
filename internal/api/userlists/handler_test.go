@@ -227,6 +227,73 @@ func TestPush_LocalUserNoProxyFollow(t *testing.T) {
 	assert.Equal(t, 0, pf.hits, "local user は proxy follow しない")
 }
 
+// stubUserListEventPublisher records PublishUserListEvent calls for #1549 tests.
+type stubUserListEventPublisher struct {
+	listIDs []string
+	types   []string
+	bodies  []any
+}
+
+func (s *stubUserListEventPublisher) PublishUserListEvent(listID, eventType string, body any) {
+	s.listIDs = append(s.listIDs, listID)
+	s.types = append(s.types, eventType)
+	s.bodies = append(s.bodies, body)
+}
+
+// #1549: push が成功したら userAdded membership event を publish する。
+func TestPush_PublishesUserAdded(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2", Username: "bob"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	pub := &stubUserListEventPublisher{}
+	h.SetUserListEventPublisher(pub)
+
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, pub.types, 1)
+	assert.Equal(t, "l1", pub.listIDs[0])
+	assert.Equal(t, "userAdded", pub.types[0])
+}
+
+// #1549: push が AddMember 失敗 (ALREADY_ADDED) で終わるときは userAdded を
+// publish しない。
+func TestPush_NoPublishOnAlreadyAdded(t *testing.T) {
+	repo := &duplicateAddMemberRepo{testutil.NewMockUserListRepository()}
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	idGen, _ := id.NewGenerator("aidx")
+	h := userlists.NewHandler(repo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	pub := &stubUserListEventPublisher{}
+	h.SetUserListEventPublisher(pub)
+
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, pub.types, "AddMember 失敗時は userAdded を publish しない")
+}
+
+// #1549: pull が成功したら userRemoved membership event を publish する。
+func TestPull_PublishesUserRemoved(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2", Username: "bob"}))
+	h.SetUserRepo(userRepo)
+	pub := &stubUserListEventPublisher{}
+	h.SetUserListEventPublisher(pub)
+
+	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, pub.types, 1)
+	assert.Equal(t, "l1", pub.listIDs[0])
+	assert.Equal(t, "userRemoved", pub.types[0])
+}
+
 // #1550: push は membership.userListUserId に list owner を設定する。
 func TestPush_SetsUserListUserID(t *testing.T) {
 	h, repo := newTestHandler(t)

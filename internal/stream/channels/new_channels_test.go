@@ -391,13 +391,33 @@ func TestUserList_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewUserList(ctx)
 	ch.Init(json.RawMessage(`{"listId":"l1"}`))
-	assert.Equal(t, []string{"userListTimeline:l1"}, ctx.subs)
+	// note 配信 topic と membership event topic の両方を subscribe する (#1549)。
+	assert.Equal(t, []string{"userListTimeline:l1", "userListStream:l1"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
 	require.Len(t, ctx.sentType, 1)
 
 	ch.Dispose()
-	assert.Equal(t, []string{"userListTimeline:l1"}, ctx.unsubs)
+	assert.Equal(t, []string{"userListTimeline:l1", "userListStream:l1"}, ctx.unsubs)
+}
+
+// #1549: userListStream: topic に流れる userAdded/userRemoved envelope は
+// note filter を経由せず、そのまま client に forward される。
+func TestUserList_MembershipEventForwarded(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+
+	ch.OnRedisEvent([]byte(`{"type":"userAdded","body":{"id":"u2","username":"bob"}}`))
+	require.Len(t, ctx.sentType, 1)
+	assert.Equal(t, "userAdded", ctx.sentType[0])
+	body, ok := ctx.sentBody[0].(json.RawMessage)
+	require.True(t, ok)
+	assert.Contains(t, string(body), "bob")
+
+	ch.OnRedisEvent([]byte(`{"type":"userRemoved","body":{"id":"u2","username":"bob"}}`))
+	require.Len(t, ctx.sentType, 2)
+	assert.Equal(t, "userRemoved", ctx.sentType[1])
 }
 
 func TestUserList_NoAuth(t *testing.T) {
@@ -420,7 +440,7 @@ func TestUserList_WithReplies(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewUserList(ctx)
 	ch.Init(json.RawMessage(`{"listId":"l1","withReplies":true}`))
-	assert.Equal(t, []string{"userListTimeline:l1"}, ctx.subs)
+	assert.Equal(t, []string{"userListTimeline:l1", "userListStream:l1"}, ctx.subs)
 
 	// リプライが通過する
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))

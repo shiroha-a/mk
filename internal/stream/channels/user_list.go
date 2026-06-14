@@ -22,9 +22,10 @@ import (
 // `model.UserListMembership.WithReplies` 追加と Init での map snapshot
 // 取得を伴うので別 issue で扱う想定。
 type UserListChannel struct {
-	ctx    stream.ChannelContext
-	topic  string
-	filter noteFilter
+	ctx         stream.ChannelContext
+	topic       string
+	streamTopic string
+	filter      noteFilter
 }
 
 // NewUserList returns a channel factory for "userList".
@@ -55,10 +56,26 @@ func (c *UserListChannel) Init(params json.RawMessage) error {
 	}
 	c.topic = "userListTimeline:" + p.ListID
 	c.ctx.Subscribe(c.topic)
+	// membership event (userAdded/userRemoved) は別 topic で届く (#1549, upstream
+	// userListStream:${listId})。note 配信 (userListTimeline:) とは分離されている。
+	c.streamTopic = "userListStream:" + p.ListID
+	c.ctx.Subscribe(c.streamTopic)
 	return nil
 }
 
 func (c *UserListChannel) OnRedisEvent(payload []byte) {
+	// userListStream: topic からの membership event は {type, body} envelope で
+	// 届く (#1549)。note 配信 (userListTimeline:) は raw note payload なので
+	// top-level type を持たず、ここで分岐できる。
+	var env struct {
+		Type string          `json:"type"`
+		Body json.RawMessage `json:"body"`
+	}
+	if json.Unmarshal(payload, &env) == nil && (env.Type == "userAdded" || env.Type == "userRemoved") {
+		_ = c.ctx.Send(env.Type, env.Body)
+		return
+	}
+
 	viewerID := viewerIDFromCtx(c.ctx)
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
@@ -84,6 +101,9 @@ func (c *UserListChannel) OnClientMessage(string, json.RawMessage) {}
 func (c *UserListChannel) Dispose() {
 	if c.topic != "" {
 		c.ctx.Unsubscribe(c.topic)
+	}
+	if c.streamTopic != "" {
+		c.ctx.Unsubscribe(c.streamTopic)
 	}
 }
 
