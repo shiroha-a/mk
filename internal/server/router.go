@@ -1323,6 +1323,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetFollowingRepo(followingRepo)
 	usersHandler.SetBlockingRepo(blockingRepo)
 	usersHandler.SetMutingRepo(mutingRepo)
+	usersHandler.SetRolePolicyProvider(roleService) // #1550: create-from-public userListLimit/userEachUserListsLimit
 	usersHandler.SetRenoteMutingRepo(renoteMutingRepo)
 	usersHandler.SetFollowRequestRepo(followRequestRepo)
 	usersHandler.SetInstanceRepo(instanceRepo)

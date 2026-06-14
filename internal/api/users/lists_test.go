@@ -308,6 +308,96 @@ func TestListsUnfavorite_NotFavorited(t *testing.T) {
 
 // --- ListsUpdate ---
 
+// stubListsPolicy is a RolePolicyProvider stub for create-from-public limit tests.
+type stubListsPolicy struct{ policies map[string]any }
+
+func (s *stubListsPolicy) GetUserPolicies(_ string) map[string]any { return s.policies }
+
+// newListsHandlerFull wires userListRepo / userRepo / blockingRepo /
+// rolePolicyProvider so create-from-public の各 gate を test できる。
+func newListsHandlerFull(t *testing.T) (*Handler, *testutil.MockUserListRepository, *testutil.MockUserRepository, *testutil.MockBlockingRepository, *stubListsPolicy) {
+	t.Helper()
+	h, userRepo := newTestHandler(t)
+	listRepo := testutil.NewMockUserListRepository()
+	blockRepo := testutil.NewMockBlockingRepository()
+	policy := &stubListsPolicy{policies: map[string]any{}}
+	h.SetUserListRepo(listRepo)
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(blockRepo)
+	h.SetRolePolicyProvider(policy)
+	return h, listRepo, userRepo, blockRepo, policy
+}
+
+// seedPublicSrc seeds a public source list with the given member user IDs (and
+// registers those users so NO_SUCH_USER passes).
+func seedPublicSrc(t *testing.T, listRepo *testutil.MockUserListRepository, userRepo *testutil.MockUserRepository, listID string, memberIDs ...string) {
+	t.Helper()
+	listRepo.Lists[listID] = &model.UserList{ID: listID, UserID: "srcowner", Name: "src", IsPublic: true}
+	for i, mid := range memberIDs {
+		require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "srcm_" + string(rune('a'+i)), UserListID: listID, UserID: mid}))
+		require.NoError(t, userRepo.Create(&model.User{ID: mid}))
+	}
+}
+
+// #1550: create-from-public は member を copy して packer shape を返す (全 gate 通過)。
+func TestListsCreateFromPublic_FullCopiesMembers(t *testing.T) {
+	h, listRepo, userRepo, _, _ := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src", "m1", "m2")
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.ElementsMatch(t, []any{"m1", "m2"}, resp["userIds"])
+	assert.NotContains(t, resp, "userId")
+}
+
+func TestListsCreateFromPublic_TooManyUserLists(t *testing.T) {
+	h, listRepo, userRepo, _, policy := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src")
+	// viewer は既に 1 list 所有、userListLimit=1 → TOO_MANY_USERLISTS。
+	listRepo.Lists["own1"] = &model.UserList{ID: "own1", UserID: "me", Name: "owned"}
+	policy.policies["userListLimit"] = 1
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "e9c105b2-c595-47de-97fb-7f7c2c33e92f")
+}
+
+func TestListsCreateFromPublic_NoSuchUserMember(t *testing.T) {
+	h, listRepo, _, _, _ := newListsHandlerFull(t)
+	// member u_missing を memberships に入れるが userRepo には登録しない。
+	listRepo.Lists["src"] = &model.UserList{ID: "src", UserID: "srcowner", Name: "src", IsPublic: true}
+	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "sm1", UserListID: "src", UserID: "u_missing"}))
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "13c457db-a8cb-4d88-b70a-211ceeeabb5f")
+}
+
+func TestListsCreateFromPublic_BlockedMember(t *testing.T) {
+	h, listRepo, userRepo, blockRepo, _ := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src", "blocker")
+	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "me"}))
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "a2497f2a-2389-439c-8626-5298540530f4")
+}
+
+func TestListsCreateFromPublic_TooManyUsers(t *testing.T) {
+	h, listRepo, userRepo, _, policy := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src", "m1", "m2")
+	policy.policies["userEachUserListsLimit"] = 1 // 1 件追加後に次で TOO_MANY_USERS
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "1845ea77-38d1-426e-8e4e-8b83b24f5bd7")
+}
+
+func TestListsCreateFromPublic_NameTooLong(t *testing.T) {
+	h, listRepo, userRepo, _, _ := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src")
+	body := `{"listId":"src","name":"` + strings.Repeat("a", 101) + `"}`
+	rec := postStub(h.ListsCreateFromPublic, body, &model.User{ID: "me"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestListsUpdate_MissingListID(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := postStub(h.ListsUpdate, `{}`, &model.User{ID: "u1"})

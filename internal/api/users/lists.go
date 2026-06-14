@@ -36,9 +36,11 @@ func (h *Handler) SetUserListRepo(r repository.UserListRepository) {
 
 // ListsCreateFromPublic handles POST /api/users/lists/create-from-public.
 //
-// 公開済みの UserList (listId) から名前を引き継いだ新しい list (name) を作って、
-// 元 list のメンバーをそのままコピーする。メンバー追加で一部失敗しても残りは
-// 続行する (1 件のブロックや重複で全体を失敗させないほうが UX 上望ましい)。
+// 公開済みの UserList (listId) から名前を引き継いだ新しい list (name) を作り、
+// 元 list のメンバーをコピーする。upstream create-from-public.ts に合わせて
+// userListLimit gate (TOO_MANY_USERLISTS)、各メンバーで getUser (NO_SUCH_USER) /
+// blocking (YOU_HAVE_BEEN_BLOCKED) / 既存 (ALREADY_ADDED) / member 上限
+// (TOO_MANY_USERS) を検証し、最初の失敗で中断・エラーを返す (#1550)。
 func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
@@ -48,12 +50,28 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Name == "" || req.ListID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream paramDef: name minLength:1 (=空チェック) / maxLength:100。
+	if utf8.RuneCountInString(req.Name) > 100 {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.userListRepo == nil {
 		return apierr.JSONInternalError(c)
 	}
 	src, err := h.userListRepo.FindByID(req.ListID)
 	if err != nil || !src.IsPublic {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "9292f798-6175-4f7d-93f4-b6742279667d"))
+	}
+	// userListLimit gate (TOO_MANY_USERLISTS)。
+	if h.rolePolicyProvider != nil {
+		if limit, ok := h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userListLimit"].(int); ok && limit >= 0 {
+			count, cerr := h.userListRepo.CountByUser(viewer.ID)
+			if cerr != nil {
+				return apierr.JSONInternalError(c)
+			}
+			if count >= int64(limit) {
+				return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_USERLISTS", "You cannot create user list any more.", "e9c105b2-c595-47de-97fb-7f7c2c33e92f"))
+			}
+		}
 	}
 	now := time.Now()
 	newList := &model.UserList{
@@ -70,21 +88,48 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		// list 自体は既に作成済みなので、メンバーコピー失敗時も新 list を返す。
 		return c.JSON(http.StatusOK, entity.PackUserList(newList, nil, h.idGen))
 	}
+	// member 上限 (userEachUserListsLimit)。-1 は無制限扱い。
+	memberLimit := -1
+	if h.rolePolicyProvider != nil {
+		if l, ok := h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userEachUserListsLimit"].(int); ok {
+			memberLimit = l
+		}
+	}
 	memberIDs := make([]string, 0, len(members))
 	for _, m := range members {
+		// NO_SUCH_USER: 対象 user が存在しなければ中断 (upstream getterService.getUser)。
+		if h.userRepo != nil {
+			if _, uerr := h.userRepo.FindByID(m.UserID); uerr != nil {
+				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "13c457db-a8cb-4d88-b70a-211ceeeabb5f"))
+			}
+		}
+		// YOU_HAVE_BEEN_BLOCKED: 対象が viewer を block していれば中断 (自分自身は除外)。
+		if h.blockingRepo != nil && m.UserID != viewer.ID {
+			blocked, berr := h.blockingRepo.Exists(m.UserID, viewer.ID)
+			if berr != nil || blocked {
+				return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "a2497f2a-2389-439c-8626-5298540530f4"))
+			}
+		}
+		// TOO_MANY_USERS: member 上限に達したら中断 (upstream addMember の TooManyUsersError)。
+		if memberLimit >= 0 && len(memberIDs) >= memberLimit {
+			return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_USERS", "You can not push users any more.", "1845ea77-38d1-426e-8e4e-8b83b24f5bd7"))
+		}
 		mb := &model.UserListMembership{
 			ID:         h.idGen.Generate(time.Now()),
 			UserListID: newList.ID,
 			UserID:     m.UserID,
 		}
-		// メンバー追加に成功したものだけ userIds に反映する (block/dup の
-		// 詳細エラーは #1550 follow-up、ここでは shape を upstream に揃える)。
-		if err := h.userListRepo.AddMember(mb); err == nil {
-			memberIDs = append(memberIDs, m.UserID)
+		if aerr := h.userListRepo.AddMember(mb); aerr != nil {
+			// 既 member は ALREADY_ADDED (copy 元が unique なら通常起きない、defensive)。
+			if errors.Is(aerr, repository.ErrUserListDuplicateMember) {
+				return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ADDED", "That user has already been added to that list.", "c3ad6fdb-692b-47ee-a455-7bd12c7af615"))
+			}
+			return apierr.JSONInternalError(c)
 		}
+		memberIDs = append(memberIDs, m.UserID)
 	}
 	// upstream create-from-public.ts は res:ref'UserList' を userListEntityService.pack
-	// で返す。model.UserList 生 JSON だと createdAt/userIds 欠落 + userId 露出する (#1550)。
+	// で返す (#1550)。
 	return c.JSON(http.StatusOK, entity.PackUserList(newList, memberIDs, h.idGen))
 }
 

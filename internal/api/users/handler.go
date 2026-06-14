@@ -42,6 +42,7 @@ type Handler struct {
 	followingRepo        repository.FollowingRepository
 	memoRepo             repository.UserMemoRepository
 	blockingRepo         repository.BlockingRepository
+	rolePolicyProvider   RolePolicyProvider
 	mutingRepo           repository.MutingRepository
 	renoteMutingRepo     repository.RenoteMutingRepository
 	followRequestRepo    repository.FollowRequestRepository
@@ -206,6 +207,20 @@ func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 // SetBlockingRepo attaches a BlockingRepository for block status queries.
 func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
 	h.blockingRepo = r
+}
+
+// RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
+// `userEachUserListsLimit` enforcement in create-from-public (#1550)。実装は
+// core/role.Service。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetRolePolicyProvider wires a RolePolicyProvider so create-from-public enforces
+// the userListLimit / userEachUserListsLimit role policies (#1550)。nil 時は
+// limit gate を skip する (= test / 旧挙動)。
+func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
+	h.rolePolicyProvider = p
 }
 
 // SetMutingRepo attaches a MutingRepository for mute status queries.
