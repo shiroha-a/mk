@@ -6,6 +6,7 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,6 +28,22 @@ func TestUpdateEmail_ClearEmail(t *testing.T) {
 	// email を null にセットしてクリア
 	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":null}`, stubUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1546: email=null かつ emailRequiredForSignup なら EMAIL_REQUIRED (324c7a88)。
+func TestUpdateEmail_ClearEmailRequired(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	pwd := hashPassword("secret")
+	email := "old@example.com"
+	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Password: &pwd, Email: &email}
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", EmailRequiredForSignup: true}
+	h.SetMetaRepo(metaRepo)
+
+	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":null}`, stubUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "EMAIL_REQUIRED")
+	assert.Contains(t, rec.Body.String(), "324c7a88-59f2-492f-903f-89134f93e47e")
 }
 
 func TestUpdateEmail_SetNewEmail(t *testing.T) {

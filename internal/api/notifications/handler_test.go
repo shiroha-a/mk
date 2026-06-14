@@ -105,6 +105,34 @@ func TestShow_WithEntries(t *testing.T) {
 	assert.Equal(t, "bob", resp[0]["userId"])
 }
 
+// #1546: 明示的な includeTypes:[] は空配列を返す (= 何も含めない)。
+// includeTypes 省略時は全件返ることと対比して固定する。
+func TestShow_IncludeTypesEmptyReturnsEmpty(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	// includeTypes:[] → []
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{"limit":50,"includeTypes":[]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "explicit includeTypes:[] must return []")
+
+	// includeTypes 省略 → 全件 (対比)。
+	c2, rec2 := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+	setAuth(c2, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c2))
+	var resp2 []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Len(t, resp2, 1, "omitted includeTypes returns all")
+}
+
 // sinceDate=0 (= 1970 epoch) を渡したら全 notification が post-fetch filter
 // を通過する。adapter pattern (= sinceDate → aidx prefix) が effectively に
 // 動くことの positive case (#1174)。

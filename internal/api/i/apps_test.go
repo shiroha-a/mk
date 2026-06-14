@@ -213,14 +213,19 @@ func TestRevokeToken_Owned(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestRevokeToken_ForeignToken_AccessDenied(t *testing.T) {
+// #1546: 他人所有の token 指定は upstream と同じく no-op (204)。403 を返すと
+// token の存在 / 所有者が leak するため、削除せず 204 を返す。
+func TestRevokeToken_ForeignTokenIsNoOp(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	tokens := testutil.NewMockAccessTokenRepository()
 	tokens.Tokens["h2"] = &model.AccessToken{ID: "t2", Hash: "h2", UserID: "other"}
 	h.SetAccessTokenRepo(tokens)
 
 	rec := postExtra(h.RevokeToken, `{"tokenId":"t2"}`, stubUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// 他人の token は削除されない。
+	_, err := tokens.FindByID("t2")
+	assert.NoError(t, err)
 }
 
 func TestRevokeToken_UnknownTokenIsIdempotent(t *testing.T) {
