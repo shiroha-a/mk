@@ -3,6 +3,7 @@ package hashtags
 import (
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -26,33 +27,50 @@ func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{db: db}
 }
 
-// validListSorts は upstream Misskey TS hashtags/list paramDef enum と一致 (#925)。
-var validListSorts = map[string]struct{}{
-	"+mentionedUsers": {}, "-mentionedUsers": {},
-	"+mentionedLocalUsers": {}, "-mentionedLocalUsers": {},
-	"+mentionedRemoteUsers": {}, "-mentionedRemoteUsers": {},
-	"+attachedUsers": {}, "-attachedUsers": {},
-	"+attachedLocalUsers": {}, "-attachedLocalUsers": {},
-	"+attachedRemoteUsers": {}, "-attachedRemoteUsers": {},
+// listSortOrders は upstream Misskey TS hashtags/list paramDef enum を、
+// 対応する order by 句に対応付ける (#925, #1544)。+ が DESC、- が ASC
+// (upstream の符号付けと同じ)。キー集合が paramDef enum の妥当値も兼ねる。
+var listSortOrders = map[string]string{
+	"+mentionedUsers": `"mentionedUsersCount" DESC`, "-mentionedUsers": `"mentionedUsersCount" ASC`,
+	"+mentionedLocalUsers": `"mentionedLocalUsersCount" DESC`, "-mentionedLocalUsers": `"mentionedLocalUsersCount" ASC`,
+	"+mentionedRemoteUsers": `"mentionedRemoteUsersCount" DESC`, "-mentionedRemoteUsers": `"mentionedRemoteUsersCount" ASC`,
+	"+attachedUsers": `"attachedUsersCount" DESC`, "-attachedUsers": `"attachedUsersCount" ASC`,
+	"+attachedLocalUsers": `"attachedLocalUsersCount" DESC`, "-attachedLocalUsers": `"attachedLocalUsersCount" ASC`,
+	"+attachedRemoteUsers": `"attachedRemoteUsersCount" DESC`, "-attachedRemoteUsers": `"attachedRemoteUsersCount" ASC`,
 }
 
 // List handles POST /api/hashtags/list.
 func (h *Handler) List(c echo.Context) error {
 	var req struct {
-		Limit  int    `json:"limit"`
-		Sort   string `json:"sort"`
-		Offset int    `json:"offset"`
+		Limit                    int    `json:"limit"`
+		Sort                     string `json:"sort"`
+		Offset                   int    `json:"offset"`
+		AttachedToUserOnly       bool   `json:"attachedToUserOnly"`
+		AttachedToLocalUserOnly  bool   `json:"attachedToLocalUserOnly"`
+		AttachedToRemoteUserOnly bool   `json:"attachedToRemoteUserOnly"`
 	}
 	if err := c.Bind(&req); err != nil || req.Sort == "" {
 		// upstream Misskey TS は paramDef で sort を required にしている (#925)。
 		// mk-go も同 shape に揃え、permissive な挙動を弾く。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if _, ok := validListSorts[req.Sort]; !ok {
+	order, ok := listSortOrders[req.Sort]
+	if !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "sort must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	q := h.db.Model(&model.Hashtag{}).Order("\"mentionedUsersCount\" DESC").Limit(req.Limit)
+	// upstream list.ts: attachedTo* で attachedUsersCount 系が != 0 の tag のみに絞る。
+	q := h.db.Model(&model.Hashtag{})
+	if req.AttachedToUserOnly {
+		q = q.Where(`"attachedUsersCount" != 0`)
+	}
+	if req.AttachedToLocalUserOnly {
+		q = q.Where(`"attachedLocalUsersCount" != 0`)
+	}
+	if req.AttachedToRemoteUserOnly {
+		q = q.Where(`"attachedRemoteUsersCount" != 0`)
+	}
+	q = q.Order(order).Limit(req.Limit)
 	if req.Offset > 0 {
 		q = q.Offset(req.Offset)
 	}
@@ -70,15 +88,26 @@ func (h *Handler) List(c echo.Context) error {
 // Search handles POST /api/hashtags/search.
 func (h *Handler) Search(c echo.Context) error {
 	var req struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Query  string `json:"query"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil || req.Query == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "query is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	// upstream search.ts: name LIKE sqlLikeEscape(query.toLowerCase())+'%' (前方一致)
+	// を mentionedLocalUsersCount DESC で並べ offset を適用する。hashtag.name は
+	// normalizeForSearch 済 (lowercase) で格納されるため小文字化で一致する。
+	q := h.db.Model(&model.Hashtag{}).
+		Where(`"name" LIKE ? ESCAPE '\'`, escapeLike(strings.ToLower(req.Query))+"%").
+		Order(`"mentionedLocalUsersCount" DESC`).
+		Limit(req.Limit)
+	if req.Offset > 0 {
+		q = q.Offset(req.Offset)
+	}
 	var tags []*model.Hashtag
-	if err := h.db.Where("name ILIKE ?", "%"+req.Query+"%").Limit(req.Limit).Find(&tags).Error; err != nil {
+	if err := q.Find(&tags).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	names := make([]string, 0, len(tags))
@@ -96,8 +125,11 @@ func (h *Handler) Show(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Tag == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// upstream show.ts: hashtags.findOneBy({name: normalizeForSearch(tag)})。
+	// hashtag.name は normalizeForSearch (NFKC+lowercase) 済で格納されるため、
+	// 入力も同じく正規化して一致させる ('Misskey' → 'misskey')。
 	var tag model.Hashtag
-	if err := h.db.Where("name = ?", req.Tag).First(&tag).Error; err != nil {
+	if err := h.db.Where("name = ?", searchnorm.Normalize(req.Tag)).First(&tag).Error; err != nil {
 		// HTTP semantics 的には not-found = 404 が望ましいが、upstream
 		// Misskey TS は ApiError の既定動作で 400 を返している (#925)。
 		// drop-in 互換を優先して 400 + NO_SUCH_HASHTAG body に揃える。
@@ -373,6 +405,16 @@ func (h *Handler) Users(c echo.Context) error {
 		out = append(out, entity.PackUserDetailed(u, profByID[u.ID], gen))
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// escapeLike escapes LIKE metacharacters so user input matches literally
+// (upstream sqlLikeEscape 相当)。PostgreSQL の既定 escape 文字は backslash
+// なので \ 自身もエスケープする。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func packTag(t *model.Hashtag) map[string]any {
