@@ -201,9 +201,113 @@ func TestShow_InvalidParam(t *testing.T) {
 
 func TestUsers_Success(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
-	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true}
+	// upstream は isPublic かつ isExplorable な role のみ対象 (#1544)。
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
 	rec := doPost(h.Users, `{"roleId":"r1"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// newUsersTestHandler は roleRepo / assignRepo (UserRepo 紐付け済) / userRepo を
+// 露出した handler を返す (roles/users の割当ユーザー一覧テスト用)。
+func newUsersTestHandler(t *testing.T) (*roles.Handler, *testutil.MockRoleRepository, *testutil.MockRoleAssignmentRepository, *testutil.MockUserRepository) {
+	t.Helper()
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	userRepo := testutil.NewMockUserRepository()
+	assignRepo.UserRepo = userRepo
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corerole.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	h := roles.NewHandler(svc, idGen)
+	h.SetUserRepo(userRepo)
+	return h, roleRepo, assignRepo, userRepo
+}
+
+// upstream users.ts: 割り当てユーザーを [{id, user:UserDetailed}] で返す (#1544)。
+func TestUsers_ReturnsAssignedUsers(t *testing.T) {
+	h, roleRepo, assignRepo, userRepo := newUsersTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", RoleID: "r1", UserID: "alice"}))
+
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "ra1", resp[0]["id"])
+	user, ok := resp[0]["user"].(map[string]any)
+	require.True(t, ok, "user は UserDetailed object")
+	assert.Equal(t, "alice", user["id"])
+}
+
+// 期限切れの割当 (expiresAt <= now) はユーザー一覧に現れない (#1544)。
+func TestUsers_ExpiredAssignmentExcluded(t *testing.T) {
+	h, roleRepo, assignRepo, userRepo := newUsersTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	past := time.Now().Add(-time.Hour)
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", RoleID: "r1", UserID: "alice", ExpiresAt: &past}))
+
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "期限切れ割当は除外される")
+}
+
+// userRepo 未配線でも user は packed される (profile なし)。
+func TestUsers_NilUserRepoPacksWithoutProfile(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	userRepo := testutil.NewMockUserRepository()
+	assignRepo.UserRepo = userRepo // assignment.User の preload 用
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corerole.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	h := roles.NewHandler(svc, idGen) // SetUserRepo は呼ばない (profile lookup 無効)
+
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", RoleID: "r1", UserID: "alice"}))
+
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "alice", resp[0]["user"].(map[string]any)["id"])
+}
+
+// assignment.User が nil (preload 失敗) の割当は skip され一覧に出ない。
+func TestUsers_NilUserSkipped(t *testing.T) {
+	h, roleRepo, assignRepo, _ := newUsersTestHandler(t)
+	// assignRepo.UserRepo に対応 user を入れない → a.User が nil のまま。
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", RoleID: "r1", UserID: "ghostuser"}))
+
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "User preload できなかった割当は skip")
+}
+
+// isPublic でも !isExplorable なら NO_SUCH_ROLE (#1544)。
+func TestUsers_NotExplorableIsNotFound(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: false}
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestUsers_NotPublicIsNotFound(t *testing.T) {
+	h, roleRepo := newTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: false, IsExplorable: true}
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestUsers_NotFound(t *testing.T) {
