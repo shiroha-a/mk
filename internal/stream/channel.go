@@ -66,6 +66,13 @@ type ChannelContext interface {
 	// should fall back to the 3 escape hatches only (= drop reply unless
 	// reply-to-me / isMe / self-thread).
 	FollowingSnapshot() map[string]bool
+	// MuteBlockSnapshot returns the viewer's mute/block snapshot (muting /
+	// blocking-me / renote-muting / muted-instances / muting-channels). The
+	// main / notifications channels use it to drop notifications / mentions
+	// involving muted instances, muted users, or users blocking the viewer
+	// (#1711). Returns nil when the connection is anonymous or the lookup is
+	// unwired — callers must treat nil as "no filtering" (fail-open).
+	MuteBlockSnapshot() *MuteBlockSnapshot
 }
 
 // PermittedChannel is an optional interface a Channel can implement to

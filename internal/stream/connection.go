@@ -85,6 +85,13 @@ type Connection struct {
 	// 完了する。read (per-publish) と write (refresh) は followingMu で protect。
 	followingMu       sync.RWMutex
 	followingSnapshot map[string]bool
+
+	// muteBlock は viewer の mute/block snapshot (#1711)。main / notifications
+	// channel が notification / mention 配信時に instance-mute / block / mute を
+	// gate するのに使う。接続確立時に 1 回 fetch する。followingSnapshot と同じく
+	// read (per-publish) と write (set) が並行するので muteBlockMu で protect。
+	muteBlockMu sync.RWMutex
+	muteBlock   *MuteBlockSnapshot
 }
 
 // NewConnection wraps an upgraded WebSocket. id は呼び出し側 (Manager) が一意
@@ -201,6 +208,31 @@ func (c *Connection) UpdateFollowingSnapshot(followeeID string, following bool) 
 		delete(next, followeeID)
 	}
 	c.followingSnapshot = next
+}
+
+// SetMuteBlockSnapshot attaches the viewer's mute/block snapshot so the main /
+// notifications channels can drop notifications / mentions involving muted
+// instances, muted users, or users blocking the viewer (#1711). Called once at
+// connection setup. nil leaves the gate disabled (fail-open: nothing dropped),
+// matching upstream の「Set が空 = 全通過」default。並行安全: 内部 pointer を
+// 全置換するだけで snapshot 内 map は mutate しない (reader は古い snapshot を
+// そのまま読み続けて GC される)。
+func (c *Connection) SetMuteBlockSnapshot(snap *MuteBlockSnapshot) {
+	c.muteBlockMu.Lock()
+	c.muteBlock = snap
+	c.muteBlockMu.Unlock()
+}
+
+// MuteBlockSnapshot returns the viewer's mute/block snapshot. Safe for
+// concurrent read while SetMuteBlockSnapshot updates the value. Returns nil for
+// anonymous connections / when the lookup is unwired or failed — callers must
+// treat nil as "no filtering" (fail-open).
+//
+// 戻り値は internal pointer / map の参照。caller は **mutate しないこと**。
+func (c *Connection) MuteBlockSnapshot() *MuteBlockSnapshot {
+	c.muteBlockMu.RLock()
+	defer c.muteBlockMu.RUnlock()
+	return c.muteBlock
 }
 
 // SetPermissions attaches OAuth2 permission scopes for this connection.

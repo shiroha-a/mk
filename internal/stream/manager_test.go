@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +88,53 @@ func TestManager_AcceptViaHTTPTestServer(t *testing.T) {
 	require.Eventually(t, func() bool { return m.Count() == 1 }, time.Second, 10*time.Millisecond)
 	_ = conn.Close()
 	require.Eventually(t, func() bool { return m.Count() == 0 }, time.Second, 10*time.Millisecond)
+}
+
+// stubMuteBlockLookup records the userID Accept passes so the wiring can be
+// asserted without inspecting the (otherwise un-addressable) Connection.
+type stubMuteBlockLookup struct {
+	mu         sync.Mutex
+	calledWith string
+	snap       *MuteBlockSnapshot
+}
+
+func (s *stubMuteBlockLookup) MuteBlockSnapshotForUser(userID string) *MuteBlockSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calledWith = userID
+	return s.snap
+}
+
+func (s *stubMuteBlockLookup) called() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calledWith
+}
+
+// TestManager_AcceptInvokesMuteBlockLookup verifies Accept fetches and attaches
+// the viewer's mute/block snapshot at connection setup (#1711).
+func TestManager_AcceptInvokesMuteBlockLookup(t *testing.T) {
+	m := NewManager(nil, nil)
+	lookup := &stubMuteBlockLookup{snap: &MuteBlockSnapshot{Muting: map[string]struct{}{"x": {}}}}
+	m.SetMuteBlockSnapshotLookup(lookup)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		go m.Accept(conn, &model.User{ID: "alice"})
+	}))
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	dialer := websocket.Dialer{HandshakeTimeout: time.Second}
+	conn, _, err := dialer.Dial(url, nil)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	require.Eventually(t, func() bool { return lookup.called() == "alice" }, time.Second, 10*time.Millisecond)
 }
 
 // TestManager_AcceptDispatchesConnectMessages verifies that Accept wires the

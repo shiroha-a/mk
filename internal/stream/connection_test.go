@@ -304,6 +304,23 @@ func TestConnection_HardMuteRules(t *testing.T) {
 	}
 }
 
+// #1711: SetMuteBlockSnapshot / MuteBlockSnapshot round-trip。
+func TestConnection_MuteBlockSnapshot(t *testing.T) {
+	c := NewConnection("c1", nil, nil)
+	if got := c.MuteBlockSnapshot(); got != nil {
+		t.Fatalf("default MuteBlockSnapshot = %v, want nil", got)
+	}
+	snap := &MuteBlockSnapshot{Muting: map[string]struct{}{"u1": {}}}
+	c.SetMuteBlockSnapshot(snap)
+	got := c.MuteBlockSnapshot()
+	if got == nil || len(got.Muting) != 1 {
+		t.Fatalf("MuteBlockSnapshot = %v, want %v", got, snap)
+	}
+	if _, ok := got.Muting["u1"]; !ok {
+		t.Fatalf("MuteBlockSnapshot.Muting missing u1")
+	}
+}
+
 // #1063: SetFollowingSnapshot / FollowingSnapshot round-trip。
 func TestConnection_FollowingSnapshot(t *testing.T) {
 	c := NewConnection("c1", nil, nil)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/pprof"
 	urlpkg "net/url"
@@ -1905,6 +1906,17 @@ func (s *Server) setupRoutes() {
 	// 失敗 / anonymous は nil 返却で degrade — channel は 3 escape hatch のみで
 	// 動く (= 旧来の "全 reply drop" よりは upstream 互換に近い)。
 	streamManager.SetFollowingSnapshotLookup(&followingSnapshotAdapter{repo: followingRepo})
+	// muteBlockSnapshot (#1711): main / notifications channel が notification /
+	// mention 配信時に instance-mute / block / mute を gate するための snapshot を
+	// 接続確立時に 1 回 fetch する。失敗 / anonymous は nil 返却で fail-open に
+	// degrade — filter 無しで動き続ける。
+	streamManager.SetMuteBlockSnapshotLookup(&muteBlockSnapshotAdapter{
+		muting:        mutingRepo,
+		blocking:      blockingRepo,
+		renoteMuting:  renoteMutingRepo,
+		channelMuting: channelMutingRepo,
+		userRepo:      userRepo,
+	})
 	// subNote visibility gate (#1460 IDOR fix): handleSubNote が任意の noteID
 	// で noteStream を subscribe させると、followers / specified note の
 	// reacted / unreacted / pollVoted / deleted event が非対象 viewer に
@@ -2895,6 +2907,81 @@ func (a *followingSnapshotAdapter) FollowingSnapshotForUser(userID string) map[s
 		}
 		offset += pageSize
 	}
+}
+
+// muteBlockSnapshotAdapter bridges the muting / blocking / renote-muting /
+// channel-muting repositories + user profile to stream.MuteBlockSnapshotLookup
+// so the streaming Manager can snapshot the viewer's mute/block relationships
+// at connection setup (#1711). The main / notifications channels consult it to
+// drop notifications / mentions involving muted instances, muted users, users
+// blocking the viewer, renote-muted authors, or muted channels.
+//
+// 各 set fetch は best-effort: 個別の repo error は空 set に degrade させ、
+// snapshot 全体は常に non-nil で返す (= 取得できた範囲だけ filter する)。
+// followingSnapshotAdapter と同じく接続ごとに 1 回読みだす connection-time
+// snapshot で、live refresh は未実装 (= 再接続まで stale)。
+type muteBlockSnapshotAdapter struct {
+	muting        repository.MutingRepository
+	blocking      repository.BlockingRepository
+	renoteMuting  repository.RenoteMutingRepository
+	channelMuting repository.ChannelMutingRepository
+	userRepo      repository.UserRepository
+}
+
+func (a *muteBlockSnapshotAdapter) MuteBlockSnapshotForUser(userID string) *stream.MuteBlockSnapshot {
+	if userID == "" {
+		return nil
+	}
+	snap := &stream.MuteBlockSnapshot{
+		Muting:         map[string]struct{}{},
+		BlockingMe:     map[string]struct{}{},
+		RenoteMuting:   map[string]struct{}{},
+		MutedInstances: map[string]struct{}{},
+		MutingChannels: map[string]struct{}{},
+	}
+	if a.muting != nil {
+		if ids, err := a.muting.ListMuteeIDs(userID); err == nil {
+			for _, id := range ids {
+				snap.Muting[id] = struct{}{}
+			}
+		}
+	}
+	if a.blocking != nil {
+		if ids, err := a.blocking.ListBlockerIDs(userID); err == nil {
+			for _, id := range ids {
+				snap.BlockingMe[id] = struct{}{}
+			}
+		}
+	}
+	if a.renoteMuting != nil {
+		if ids, err := a.renoteMuting.ListMuteeIDs(userID); err == nil {
+			for _, id := range ids {
+				snap.RenoteMuting[id] = struct{}{}
+			}
+		}
+	}
+	if a.channelMuting != nil {
+		if rows, err := a.channelMuting.ListByUser(userID); err == nil {
+			for _, r := range rows {
+				snap.MutingChannels[r.ChannelID] = struct{}{}
+			}
+		}
+	}
+	if a.userRepo != nil {
+		if profile, err := a.userRepo.FindProfileByUserID(userID); err == nil && profile != nil && len(profile.MutedInstances) > 0 {
+			var hosts []string
+			if json.Unmarshal(profile.MutedInstances, &hosts) == nil {
+				for _, h := range hosts {
+					if h != "" {
+						// host は AP canonical の lowercase で比較する
+						// (timeline filter / loadMutedInstances と統一)。
+						snap.MutedInstances[strings.ToLower(h)] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return snap
 }
 
 // hardMutePublisherAdapter bridges PubSubService to i.HardMutePublisher so

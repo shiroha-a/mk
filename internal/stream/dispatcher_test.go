@@ -1080,3 +1080,24 @@ func TestChannelContext_HardMuteRules_NilConn(t *testing.T) {
 		t.Fatalf("expected nil, got %q", got)
 	}
 }
+
+// #1711: channelContext.MuteBlockSnapshot forwards from Connection.
+func TestChannelContext_MuteBlockSnapshot(t *testing.T) {
+	conn := NewConnection("c1", nil, newFakeConn())
+	conn.SetMuteBlockSnapshot(&MuteBlockSnapshot{Muting: map[string]struct{}{"u1": {}}})
+	d := NewDispatcher(conn, nil, newStubBus())
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	got := ctx.MuteBlockSnapshot()
+	if got == nil || len(got.Muting) != 1 {
+		t.Fatalf("MuteBlockSnapshot = %v", got)
+	}
+}
+
+// nil connection (= disconnected) でも panic せず nil を返す。
+func TestChannelContext_MuteBlockSnapshot_NilConn(t *testing.T) {
+	d := &Dispatcher{}
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	if got := ctx.MuteBlockSnapshot(); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+}

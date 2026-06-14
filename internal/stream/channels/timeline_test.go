@@ -24,6 +24,7 @@ type stubContext struct {
 	hardMuteRules []byte
 	followingSnap map[string]bool
 	followingUpd  []followingUpdate
+	muteBlockSnap *stream.MuteBlockSnapshot
 }
 
 // followingUpdate records a call to UpdateFollowingSnapshot for assertions.
@@ -53,6 +54,9 @@ func (s *stubContext) Unsubscribe(topic string) {
 }
 func (s *stubContext) HardMuteRules() []byte              { return s.hardMuteRules }
 func (s *stubContext) FollowingSnapshot() map[string]bool { return s.followingSnap }
+func (s *stubContext) MuteBlockSnapshot() *stream.MuteBlockSnapshot {
+	return s.muteBlockSnap
+}
 func (s *stubContext) UpdateFollowingSnapshot(followeeID string, following bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

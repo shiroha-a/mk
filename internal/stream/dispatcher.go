@@ -448,6 +448,16 @@ func (c *channelContext) UpdateFollowingSnapshot(followeeID string, following bo
 	c.dispatcher.conn.UpdateFollowingSnapshot(followeeID, following)
 }
 
+// MuteBlockSnapshot forwards the connection-level mute/block snapshot so the
+// main / notifications channels can gate notification / mention delivery
+// (#1711).
+func (c *channelContext) MuteBlockSnapshot() *MuteBlockSnapshot {
+	if c.dispatcher.conn == nil {
+		return nil
+	}
+	return c.dispatcher.conn.MuteBlockSnapshot()
+}
+
 // --- readNotification / subNote / unsubNote ---
 
 // handleReadNotification marks all notifications as read for the connected user.

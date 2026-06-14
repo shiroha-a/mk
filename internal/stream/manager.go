@@ -40,6 +40,7 @@ type Manager struct {
 	notifReader     NotificationReader
 	hardMute        HardMuteRulesLookup
 	followingLookup FollowingSnapshotLookup
+	muteBlockLookup MuteBlockSnapshotLookup
 	noteVisibility  NoteVisibilityChecker
 }
 
@@ -75,6 +76,15 @@ func (m *Manager) SetFollowingSnapshotLookup(l FollowingSnapshotLookup) {
 	m.followingLookup = l
 }
 
+// SetMuteBlockSnapshotLookup wires a lookup that returns the viewer's
+// mute/block snapshot (muting / blocking-me / renote-muting / muted-instances /
+// muting-channels). Called at connection setup so the main / notifications
+// channels can gate notification / mention delivery (#1711). nil disables the
+// per-publish mute/block filter (fail-open).
+func (m *Manager) SetMuteBlockSnapshotLookup(l MuteBlockSnapshotLookup) {
+	m.muteBlockLookup = l
+}
+
 // SetNoteVisibilityChecker wires a NoteVisibilityChecker so per-connection
 // Dispatcher can refuse subNote subscriptions to non-visible notes
 // (#1460 IDOR fix)。未配線時は fail-closed で全 subNote が subscribe しない
@@ -98,6 +108,12 @@ func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 		// fetch 失敗 (= lookup nil 返却) は anonymous 同等に degrade し、reply
 		// gate は escape hatch のみで動く (#1063)。
 		c.SetFollowingSnapshot(m.followingLookup.FollowingSnapshotForUser(user.ID))
+	}
+	if m.muteBlockLookup != nil && user != nil {
+		// 接続後、最初の publish より前に mute/block snapshot を attach。fetch
+		// 失敗 (= nil 返却) は fail-open に degrade し、main / notifications は
+		// filter 無しで動き続ける (#1711)。
+		c.SetMuteBlockSnapshot(m.muteBlockLookup.MuteBlockSnapshotForUser(user.ID))
 	}
 	dispatcher := NewDispatcher(c, m.registry, m.bus)
 	if m.notifReader != nil {

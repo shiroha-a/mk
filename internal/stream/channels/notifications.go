@@ -32,6 +32,12 @@ func (c *NotificationsChannel) Init(_ json.RawMessage) error {
 }
 
 func (c *NotificationsChannel) OnRedisEvent(payload []byte) {
+	// muted instance 由来の通知は drop する (#1711, upstream main.ts の
+	// isUserFromMutedInstance)。user-mute は通知作成時に適用済みなのでここでは
+	// instance-mute のみ評価する。
+	if notificationFromMutedInstance(payload, c.ctx.MuteBlockSnapshot()) {
+		return
+	}
 	payload = hideNotificationNote(c.ctx, payload)
 	_ = c.ctx.Send("notification", json.RawMessage(payload))
 }
@@ -107,12 +113,32 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 		// note-hide ゲートより前に元の body で実行する。
 		c.maybeRefreshFollowing(env.Type, env.Body)
 		body := env.Body
+		// mention envelope は upstream main.ts と同じく isNoteVisibleForMe +
+		// isNoteMutedOrBlocked (instance-mute / user-mute / block / renote-mute /
+		// channel-mute) を適用してから送る (#1711)。reply / renote は upstream
+		// main.ts の switch でも gate されない (notification / mention のみ) ので
+		// そのまま転送する。可視性は publish 段の CanSeeNote でも gate 済だが、
+		// mention recipient は mentions/visibleUserIds に含まれるため再評価しても
+		// 誤 drop しない (defense-in-depth)。
+		if env.Type == "mention" {
+			if !streamNoteVisibleForViewer(env.Body, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
+				return
+			}
+			if noteMutedOrBlocked(env.Body, c.ctx.MuteBlockSnapshot()) {
+				return
+			}
+		}
 		// reply/renote/mention envelope の body は packed note。viewer 可視性で
 		// top-level 著者設定 + depth-2 embed を hide する (#1568)。
 		if isNoteEnvelope(env.Type) {
 			body = json.RawMessage(hideEmbedsForViewer(env.Body, viewerUserFromCtx(c.ctx), c.ctx.FollowingSnapshot(), time.Now().UnixMilli()))
 		}
 		_ = c.ctx.Send(env.Type, body)
+		return
+	}
+	// bare notification (notifications: topic) も muted instance 由来なら drop
+	// する (#1711)。NotificationsChannel と同 doctrine。
+	if notificationFromMutedInstance(payload, c.ctx.MuteBlockSnapshot()) {
 		return
 	}
 	payload = hideNotificationNote(c.ctx, payload)
