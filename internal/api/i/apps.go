@@ -193,7 +193,10 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if tok.UserID != u.ID {
-		return apierr.JSONAccessDenied(c)
+		// upstream revoke-token は delete を {id/token, userId: me.id} 条件で
+		// 実行するだけで、他人の token は単に no-op (成功 204) になる (#1546)。
+		// 403 を返すと token の存在 / 所有者が leak するため、no-op 204 に揃える。
+		return c.NoContent(http.StatusNoContent)
 	}
 	if err := h.accessTokenRepo.DeleteByID(tok.ID); err != nil {
 		return apierr.JSONInternalError(c)

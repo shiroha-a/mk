@@ -212,6 +212,14 @@ func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 // followers / specified notes the viewer cannot see are dropped so noteId
 // stays but the embedded detail does not leak.
 func (h *Handler) collectNotifications(c echo.Context, user *model.User, req ListRequest) ([]*notification.Notification, map[string]*model.User, map[string]*model.Note, error) {
+	// upstream notifications.ts: 明示的な includeTypes:[] は空配列を返す
+	// (= 何も含めない)。omit (nil) は全 type を通す。Go の []string は
+	// absent→nil / []→non-nil(len 0) で区別できるので、ここで早期 return する
+	// (#1546)。excludeTypes 全指定の空返却は下の per-row exclude filter で既に
+	// 成立するため特別扱い不要。
+	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
+		return nil, map[string]*model.User{}, map[string]*model.Note{}, nil
+	}
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.Limit)
 	if err != nil {
 		return nil, nil, nil, err

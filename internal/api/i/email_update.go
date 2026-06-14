@@ -77,8 +77,10 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	if req.Email == nil {
 		// email クリア。emailRequiredForSignup 時はクリア不可。
 		if h.metaRepo != nil {
+			// upstream update-email: email=null かつ emailRequiredForSignup なら
+			// EMAIL_REQUIRED (324c7a88) を返す (#1546)。
 			if m, err := h.metaRepo.Fetch(); err == nil && m.EmailRequiredForSignup {
-				return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Email is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("EMAIL_REQUIRED", "Email is required.", "324c7a88-59f2-492f-903f-89134f93e47e"))
 			}
 		}
 		fields["email"] = nil
