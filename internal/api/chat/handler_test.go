@@ -742,8 +742,11 @@ func TestReactionsCreate(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	// missing params → 400
 	assert.Equal(t, http.StatusBadRequest, post(h.ReactionsCreate, `{}`, u1).Code)
-	// #1549: React は service 経由で message を引くので seed が要る。
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	// #1549/#1541: React は service 経由で message を引くので seed が要る。
+	// #1541 で react guard が入ったため、reactor (u1) が受信者である DM にする
+	// (own-message でも others-message でもない有効な react)。
+	to := u1.ID
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
 	rec := post(h.ReactionsCreate, `{"messageId":"m1","reaction":"👍"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }

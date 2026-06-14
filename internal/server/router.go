@@ -2047,6 +2047,8 @@ func (s *Server) setupRoutes() {
 	// 1-on-1 DM で recipient が sender を block している場合に弾く
 	// (upstream YOU_HAVE_BEEN_BLOCKED 互換)。
 	chatService.SetBlockingRepo(blockingRepo)
+	// React で custom emoji (:name:) reaction の存在検証に使う (#1541)。
+	chatService.SetEmojiRepo(emojiRepo)
 	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
 	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。

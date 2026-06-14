@@ -597,7 +597,8 @@ func TestReact_DMPublishesReact(t *testing.T) {
 	svc, repo, pub := newSvc(t)
 	to := "bob"
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
-	reactor := &model.User{ID: "alice", Username: "alice"}
+	// upstream は 1-on-1 で受信者 (toUserId) だけが react できる。
+	reactor := &model.User{ID: "bob", Username: "bob"}
 	require.NoError(t, svc.React(context.Background(), "m1", reactor, "👍"))
 	require.Len(t, pub.userCalls, 1)
 	assert.Equal(t, corechat.EventReact, pub.userCalls[0].eventType)
@@ -611,6 +612,8 @@ func TestReact_DMPublishesReact(t *testing.T) {
 func TestReact_RoomPublishesReact(t *testing.T) {
 	svc, repo, pub := newSvc(t)
 	room := "r1"
+	// reactor は room member でなければ react できない (owner = member 扱い)。
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToRoomID: &room}
 	require.NoError(t, svc.React(context.Background(), "m1", &model.User{ID: "alice"}, "👍"))
 	require.Len(t, pub.roomCalls, 1)
@@ -638,6 +641,90 @@ func TestUnreact_MessageNotFound(t *testing.T) {
 	err := svc.Unreact(context.Background(), "ghost", &model.User{ID: "alice"}, "👍")
 	assert.ErrorIs(t, err, corechat.ErrNotFound)
 }
+
+// --- #1541: React validation (own/others/member/limit/emoji) ---
+
+// 自分のメッセージには react できない。
+func TestReact_OwnMessage(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "alice", ToUserID: &to}
+	err := svc.React(context.Background(), "m1", &model.User{ID: "alice"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrCannotReact)
+}
+
+// 1-on-1 で受信者でない第三者は react できない。
+func TestReact_OthersMessage1on1(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	err := svc.React(context.Background(), "m1", &model.User{ID: "dave"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrCannotReact)
+}
+
+// room メッセージは member でなければ react できない。
+func TestReact_RoomNotMember(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	room := "r1"
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToRoomID: &room}
+	err := svc.React(context.Background(), "m1", &model.User{ID: "dave"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrCannotReact)
+}
+
+// 100 reaction を超えると拒否する。
+func TestReact_TooManyReactions(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	to := "bob"
+	reactions := make([]string, maxReactionsForTest)
+	for i := range reactions {
+		reactions[i] = "u/x"
+	}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to, Reactions: reactions}
+	err := svc.React(context.Background(), "m1", &model.User{ID: "bob"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrTooManyReactions)
+}
+
+// 存在しない custom emoji は ErrNoSuchEmoji。
+func TestReact_NoSuchEmoji(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	svc.SetEmojiRepo(emojiRepo)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	err := svc.React(context.Background(), "m1", &model.User{ID: "bob"}, ":ghost:")
+	assert.ErrorIs(t, err, corechat.ErrNoSuchEmoji)
+}
+
+// 存在する local custom emoji は ":name:" に正規化されて publish される。
+func TestReact_CustomEmojiOK(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	emojiRepo.Emojis["party@"] = &model.Emoji{Name: "party"}
+	svc.SetEmojiRepo(emojiRepo)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	require.NoError(t, svc.React(context.Background(), "m1", &model.User{ID: "bob"}, ":party:"))
+	require.Len(t, pub.userCalls, 1)
+	body, ok := pub.userCalls[0].body.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, ":party:", body["reaction"], "custom emoji は :name: 形式に正規化される")
+}
+
+// unicode reaction は variation selector (U+FE0F) を strip して publish される。
+func TestReact_UnicodeStripsVariationSelector(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	require.NoError(t, svc.React(context.Background(), "m1", &model.User{ID: "bob"}, "❤️"))
+	require.Len(t, pub.userCalls, 1)
+	body, ok := pub.userCalls[0].body.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "❤", body["reaction"], "U+FE0F が除去される")
+}
+
+// maxReactionsForTest mirrors the service-internal cap for the limit test.
+const maxReactionsForTest = 100
 
 // ReadUserChat / ReadRoomChat は会話全体既読 (repo へ委譲、no-error)。
 func TestReadUserChat_NoError(t *testing.T) {
