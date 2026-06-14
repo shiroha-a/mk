@@ -634,6 +634,9 @@ func (h *Handler) RegistryGet(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
+	if !validRegistryScope(req.Scope) {
+		return apierr.JSONInvalidParam(c)
+	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, req.Domain)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "ac3ed68a-62f0-422b-a7bc-d5e09e8f6a6a"))
@@ -656,6 +659,9 @@ func (h *Handler) RegistrySet(c echo.Context) error {
 	}
 	if req.Scope == nil {
 		req.Scope = []string{}
+	}
+	if !validRegistryScope(req.Scope) {
+		return apierr.JSONInvalidParam(c)
 	}
 	item := &model.RegistryItem{
 		ID:        h.idGen.Generate(time.Now()),
@@ -695,6 +701,9 @@ func (h *Handler) RegistryGetAll(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
+	if !validRegistryScope(req.Scope) {
+		return apierr.JSONInvalidParam(c)
+	}
 	items, err := h.registryRepo.GetAll(u.ID, req.Scope, req.Domain)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -719,6 +728,9 @@ func (h *Handler) RegistryKeysWithType(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
+	if !validRegistryScope(req.Scope) {
+		return apierr.JSONInvalidParam(c)
+	}
 	keys, err := h.registryRepo.KeysWithType(u.ID, req.Scope, req.Domain)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -739,6 +751,9 @@ func (h *Handler) RegistryRemove(c echo.Context) error {
 	}
 	if req.Scope == nil {
 		req.Scope = []string{}
+	}
+	if !validRegistryScope(req.Scope) {
+		return apierr.JSONInvalidParam(c)
 	}
 	if err := h.registryRepo.Remove(u.ID, req.Key, req.Scope, req.Domain); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

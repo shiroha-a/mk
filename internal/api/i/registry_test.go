@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,49 @@ func TestRegistryKeys(t *testing.T) {
 func TestRegistryScopesWithDomain(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	assert.Equal(t, http.StatusOK, postExtra(h.RegistryScopesWithDomain, `{}`, stubUser).Code)
+}
+
+// #1546: scopes-with-domain は domain ごとに集約し scopes を string[][] で返す。
+func TestRegistryScopesWithDomain_GroupedByDomain(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	dom := "client.example"
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r1", UserID: stubUser.ID, Key: "a", Scope: pq.StringArray{"client", "base"}, Domain: &dom}))
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r2", UserID: stubUser.ID, Key: "b", Scope: pq.StringArray{"client", "theme"}, Domain: &dom}))
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r3", UserID: stubUser.ID, Key: "c", Scope: pq.StringArray{"main"}}))
+	h.SetRegistryRepo(reg)
+
+	rec := postExtra(h.RegistryScopesWithDomain, `{}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []struct {
+		Domain *string    `json:"domain"`
+		Scopes [][]string `json:"scopes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	byDomain := map[string][][]string{}
+	for _, e := range out {
+		k := "nil"
+		if e.Domain != nil {
+			k = *e.Domain
+		}
+		byDomain[k] = e.Scopes
+	}
+	require.Contains(t, byDomain, "client.example")
+	assert.Len(t, byDomain["client.example"], 2, "同一 domain の scope を scopes 配列に束ねる")
+	require.Contains(t, byDomain, "nil")
+	assert.Len(t, byDomain["nil"], 1)
+}
+
+// #1546: scope 要素が ^[a-zA-Z0-9_]+$ に反すると INVALID_PARAM。
+func TestRegistryScopePatternRejected(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	h.SetRegistryRepo(testutil.NewMockRegistryRepository())
+	// RegistryGetDetail (registry.go) と RegistryGetAll (handler.go) の両系統を確認。
+	assert.Equal(t, http.StatusBadRequest, postExtra(h.RegistryGetDetail, `{"key":"k","scope":["bad scope"]}`, stubUser).Code)
+	assert.Equal(t, http.StatusBadRequest, postExtra(h.RegistryGetAll, `{"scope":["has.dot"]}`, stubUser).Code)
+	assert.Equal(t, http.StatusBadRequest, postExtra(h.RegistryKeys, `{"scope":["nope!"]}`, stubUser).Code)
+	// 正常な scope は通る。
+	assert.Equal(t, http.StatusOK, postExtra(h.RegistryKeys, `{"scope":["client","base_1"]}`, stubUser).Code)
 }
 
 // --- P4-6 (#166): i/registry/* ---
@@ -102,8 +146,14 @@ func TestRegistryScopesWithDomain_ReturnsDistinctPairs(t *testing.T) {
 	h.SetRegistryRepo(reg)
 	rec := postExtra(h.RegistryScopesWithDomain, `{}`, stubUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var got []map[string]any
+	var got []struct {
+		Domain *string    `json:"domain"`
+		Scopes [][]string `json:"scopes"`
+	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	// 2 distinct scopes, domain は nil のみ
-	assert.Len(t, got, 2)
+	// #1546: domain (ここでは nil のみ) ごとに集約され、2 distinct scope が
+	// scopes 配列に束ねられる。
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0].Domain)
+	assert.Len(t, got[0].Scopes, 2)
 }
