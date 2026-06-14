@@ -366,19 +366,22 @@ func TestDelete_Error(t *testing.T) {
 
 // --- Test ---
 
-// stubDispatcher captures DispatchUser invocations for assertions.
+// stubDispatcher captures DispatchUserTest invocations for assertions.
 type stubDispatcher struct {
 	calls []stubDispatchCall
 }
 
 type stubDispatchCall struct {
-	userID    string
-	eventType string
-	body      any
+	webhookID      string
+	userID         string
+	eventType      string
+	body           any
+	overrideURL    string
+	overrideSecret string
 }
 
-func (s *stubDispatcher) DispatchUser(userID, eventType string, body any) {
-	s.calls = append(s.calls, stubDispatchCall{userID, eventType, body})
+func (s *stubDispatcher) DispatchUserTest(webhookID, userID, eventType string, body any, overrideURL, overrideSecret string) {
+	s.calls = append(s.calls, stubDispatchCall{webhookID, userID, eventType, body, overrideURL, overrideSecret})
 }
 
 func TestTest_Success(t *testing.T) {
@@ -390,8 +393,33 @@ func TestTest_Success(t *testing.T) {
 	rec := post(h.Test, `{"webhookId":"w1","type":"note"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	require.Len(t, disp.calls, 1)
+	assert.Equal(t, "w1", disp.calls[0].webhookID)
 	assert.Equal(t, "u1", disp.calls[0].userID)
 	assert.Equal(t, "note", disp.calls[0].eventType)
+	// #1546: dummy body は type に応じた shape ({note: ...})。{test:true} ではない。
+	body, ok := disp.calls[0].body.(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, body, "note")
+	assert.NotContains(t, body, "test")
+	// override 未指定なら空。
+	assert.Empty(t, disp.calls[0].overrideURL)
+}
+
+// #1546: override 指定で別 url/secret へ送る。
+func TestTest_Override(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1"}
+	disp := &stubDispatcher{}
+	h.SetDispatcher(disp)
+
+	rec := post(h.Test, `{"webhookId":"w1","type":"follow","override":{"url":"https://test.example/hook","secret":"sek"}}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, disp.calls, 1)
+	assert.Equal(t, "https://test.example/hook", disp.calls[0].overrideURL)
+	assert.Equal(t, "sek", disp.calls[0].overrideSecret)
+	// follow event の dummy body は {user: ...}。
+	body, _ := disp.calls[0].body.(map[string]any)
+	assert.Contains(t, body, "user")
 }
 
 func TestTest_TypeRequired(t *testing.T) {

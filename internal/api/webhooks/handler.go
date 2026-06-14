@@ -45,9 +45,10 @@ func validateOnArray(on []string) bool {
 
 // TestDispatcher is the minimal interface the Test endpoint uses to enqueue
 // a synthetic webhook payload. 循環依存を避けるため interface で受ける
-// (実装は core/webhook.Service 経由、dispatch through DispatchUser)。
+// (実装は core/webhook.Service 経由)。DispatchUserTest は指定 webhook 1 件だけに
+// 送り、overrideURL/Secret 非空時は保存済 webhook でなくそちらへ送る (#1546)。
 type TestDispatcher interface {
-	DispatchUser(userID, eventType string, body any)
+	DispatchUserTest(webhookID, userID, eventType string, body any, overrideURL, overrideSecret string)
 }
 
 // Handler handles i/webhooks/* endpoints.
@@ -255,6 +256,12 @@ func (h *Handler) Test(c echo.Context) error {
 	var req struct {
 		WebhookID string `json:"webhookId"`
 		Type      string `json:"type"`
+		// Override (#1546): 指定すると保存済 webhook でなく override.url/secret へ
+		// 送る (保存せずに別 URL/secret でテスト送信できる、upstream test.ts)。
+		Override *struct {
+			URL    string `json:"url"`
+			Secret string `json:"secret"`
+		} `json:"override"`
 	}
 	if err := c.Bind(&req); err != nil || req.WebhookID == "" || req.Type == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "webhookId and type are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
@@ -269,12 +276,51 @@ func (h *Handler) Test(c echo.Context) error {
 	}
 
 	if h.dispatcher != nil {
-		// ダミー body。クライアント側で判定するための最低限のフィールドを入れる。
-		h.dispatcher.DispatchUser(user.ID, req.Type, map[string]any{
-			"test":      true,
-			"webhookId": webhook.ID,
-		})
+		overrideURL, overrideSecret := "", ""
+		if req.Override != nil {
+			overrideURL = req.Override.URL
+			overrideSecret = req.Override.Secret
+		}
+		// upstream WebhookTestService は type ごとに dummy note/user payload を
+		// 生成して送る (#1546)。テスト対象 webhook 1 件だけに、override 指定時は
+		// その url/secret へ送る。
+		h.dispatcher.DispatchUserTest(webhook.ID, user.ID, req.Type, dummyWebhookBody(req.Type), overrideURL, overrideSecret)
 	}
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// dummyWebhookBody builds a representative test payload per event type, matching
+// the body shape the real hooks emit (note events → {note}, reaction →
+// {note, userId, reaction}, follow events → {user}), so the webhook receiver can
+// validate its integration against production-like data (#1546).
+func dummyWebhookBody(eventType string) map[string]any {
+	dummyUser := map[string]any{
+		"id":        "dummy-user-1",
+		"name":      "Dummy User",
+		"username":  "dummy",
+		"host":      nil,
+		"avatarUrl": nil,
+		"createdAt": "2020-01-01T00:00:00.000Z",
+	}
+	dummyNote := map[string]any{
+		"id":         "dummy-note-1",
+		"createdAt":  "2020-01-01T00:00:00.000Z",
+		"userId":     "dummy-user-1",
+		"user":       dummyUser,
+		"text":       "This is a dummy note for testing purposes.",
+		"cw":         nil,
+		"visibility": "public",
+		"fileIds":    []string{},
+		"replyId":    nil,
+		"renoteId":   nil,
+	}
+	switch eventType {
+	case "follow", "followed", "unfollow":
+		return map[string]any{"user": dummyUser}
+	case "reaction":
+		return map[string]any{"note": dummyNote, "userId": "dummy-user-1", "reaction": "👍"}
+	default: // note / reply / renote / mention
+		return map[string]any{"note": dummyNote}
+	}
 }

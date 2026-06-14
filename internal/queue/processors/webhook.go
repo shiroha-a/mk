@@ -85,9 +85,16 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 		return fmt.Errorf("webhook payload missing webhookId: %w", driver.SkipRetry)
 	}
 
-	url, secret, err := p.resolveTarget(payload.WebhookID, user)
-	if err != nil {
-		return fmt.Errorf("resolve webhook %s: %w: %w", payload.WebhookID, err, driver.SkipRetry)
+	// i/webhooks/test の override (#1546): 非空なら保存済 webhook を引かず指定の
+	// url/secret へ送る。test 送信なので saved webhook の status は汚さない (下記)。
+	isOverride := payload.OverrideURL != ""
+	url, secret := payload.OverrideURL, payload.OverrideSecret
+	if !isOverride {
+		var err error
+		url, secret, err = p.resolveTarget(payload.WebhookID, user)
+		if err != nil {
+			return fmt.Errorf("resolve webhook %s: %w: %w", payload.WebhookID, err, driver.SkipRetry)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload.Body))
@@ -106,8 +113,10 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 	sentAt := time.Now()
 	if err != nil {
 		// ネットワーク障害はリトライ対象 (asynq が再試行する)。
-		// ステータスコード 0 を記録しておく。
-		p.recordStatus(payload.WebhookID, user, sentAt, 0)
+		// ステータスコード 0 を記録しておく (override test 送信時は記録しない)。
+		if !isOverride {
+			p.recordStatus(payload.WebhookID, user, sentAt, 0)
+		}
 		slog.Warn("webhook deliver: http error",
 			"hookId", payload.WebhookID, "url", url, "err", err)
 		return err
@@ -117,7 +126,9 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 		_ = resp.Body.Close()
 	}()
 
-	p.recordStatus(payload.WebhookID, user, sentAt, resp.StatusCode)
+	if !isOverride {
+		p.recordStatus(payload.WebhookID, user, sentAt, resp.StatusCode)
+	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:

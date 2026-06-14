@@ -158,6 +158,25 @@ func TestWebhookProcessor_User_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, repo.statusCalled["h1"])
 }
 
+// #1546: OverrideURL/Secret 指定時は保存済 webhook でなく override 先へ送り、
+// 保存済 webhook の latestStatus も記録しない (test 送信は別 URL のため)。
+func TestWebhookProcessor_User_Override(t *testing.T) {
+	client := &stubHTTPClient{status: http.StatusOK}
+	p, repo, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
+		"h1": {ID: "h1", URL: "https://saved.example/u1", Secret: "saved"},
+	}, nil)
+	task := queue.NewUserWebhookTask(queue.WebhookPayload{
+		WebhookID: "h1", UserID: "alice", EventType: "note", Body: []byte(`{}`),
+		OverrideURL: "https://override.example/hook", OverrideSecret: "ovr",
+	})
+	require.NoError(t, p.HandleUser(context.Background(), task))
+	require.Len(t, client.reqs, 1)
+	assert.Equal(t, "https://override.example/hook", client.reqs[0].URL.String())
+	assert.Equal(t, "ovr", client.reqs[0].Header.Get("X-Misskey-Hook-Secret"))
+	_, recorded := repo.statusCalled["h1"]
+	assert.False(t, recorded, "override test send must not record status on the saved webhook")
+}
+
 func TestWebhookProcessor_User_NoSecretOmitsHeader(t *testing.T) {
 	client := &stubHTTPClient{}
 	p, _, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{

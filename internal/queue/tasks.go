@@ -281,6 +281,11 @@ type WebhookPayload struct {
 	UserID    string          `json:"userId,omitempty"` // user webhooks only
 	EventType string          `json:"eventType"`
 	Body      json.RawMessage `json:"body"`
+	// OverrideURL / OverrideSecret は i/webhooks/test の override 用 (#1546)。
+	// 非空のとき processor は保存済 webhook の url/secret でなくこちらへ送り、
+	// 保存済 webhook の latestStatus も汚さない (= テスト送信は別 URL なので)。
+	OverrideURL    string `json:"overrideUrl,omitempty"`
+	OverrideSecret string `json:"overrideSecret,omitempty"`
 }
 
 // NewUserWebhookTask serializes the payload into a driver.Task for

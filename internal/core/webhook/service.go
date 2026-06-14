@@ -117,6 +117,36 @@ func (s *Service) DispatchUser(userID, eventType string, body any) {
 	}
 }
 
+// DispatchUserTest enqueues a single test delivery for i/webhooks/test (#1546).
+// 通常の DispatchUser と違い (1) 指定 webhookID 1 件だけに送り (= テスト対象を
+// 限定)、(2) overrideURL/Secret が非空なら保存済 webhook でなくそちらへ送る。
+// イベント購読 (h.On) は無視する (テストは任意の type を送れる)。
+func (s *Service) DispatchUserTest(webhookID, userID, eventType string, body any, overrideURL, overrideSecret string) {
+	if s == nil || s.enqueuer == nil {
+		return
+	}
+	raw, _ := json.Marshal(Envelope{
+		Server:    s.server,
+		HookID:    webhookID,
+		UserID:    userID,
+		EventID:   uuid.NewString(),
+		CreatedAt: time.Now().UnixMilli(),
+		Type:      eventType,
+		Body:      body,
+	})
+	if err := s.enqueuer.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{
+		WebhookID:      webhookID,
+		UserID:         userID,
+		EventType:      eventType,
+		Body:           raw,
+		OverrideURL:    overrideURL,
+		OverrideSecret: overrideSecret,
+	}); err != nil {
+		slog.Warn("webhook: enqueue test webhook failed",
+			"hookId", webhookID, "event", eventType, "err", err)
+	}
+}
+
 // DispatchSystem mirrors DispatchUser for system webhooks (admin-level
 // events such as abuseReport / userCreated). 本家 SystemWebhookService.enqueueSystemWebhook 相当。
 func (s *Service) DispatchSystem(eventType string, body any) {
