@@ -78,6 +78,8 @@ const (
 	EventDeleted = "deleted"
 	EventEdited  = "edited"
 	EventRead    = "read"
+	EventReact   = "react"
+	EventUnreact = "unreact"
 )
 
 // ModeratorChecker reports whether a given user has moderator privileges.
@@ -1001,6 +1003,65 @@ func (s *Service) MarkReadByMessageID(ctx context.Context, userID, messageID str
 		}
 	}
 	return nil
+}
+
+// React adds a reaction to a chat message and publishes a `react` stream event
+// to the room (or both DM peers) so clients update reactions live (#1549,
+// upstream ChatService.react)。reaction は reactor.ID+"/"+emoji で永続化し、
+// stream event には raw emoji + reactor (UserLite) を載せる。
+func (s *Service) React(ctx context.Context, messageID string, reactor *model.User, emoji string) error {
+	msg, err := s.repo.FindMessageByID(messageID)
+	if err != nil {
+		return ErrNotFound
+	}
+	if err := s.repo.AddReaction(messageID, reactor.ID+"/"+emoji); err != nil {
+		return fmt.Errorf("add reaction: %w", err)
+	}
+	s.publishReaction(ctx, msg, EventReact, reactor, emoji)
+	return nil
+}
+
+// Unreact removes a reaction and publishes an `unreact` stream event (#1549)。
+func (s *Service) Unreact(ctx context.Context, messageID string, reactor *model.User, emoji string) error {
+	msg, err := s.repo.FindMessageByID(messageID)
+	if err != nil {
+		return ErrNotFound
+	}
+	if err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+emoji); err != nil {
+		return fmt.Errorf("remove reaction: %w", err)
+	}
+	s.publishReaction(ctx, msg, EventUnreact, reactor, emoji)
+	return nil
+}
+
+func (s *Service) publishReaction(ctx context.Context, msg *model.ChatMessage, eventType string, reactor *model.User, emoji string) {
+	if s.publisher == nil {
+		return
+	}
+	body := map[string]any{
+		"messageId": msg.ID,
+		"reaction":  emoji,
+		"user":      entity.PackUserLite(reactor),
+	}
+	switch {
+	case msg.ToRoomID != nil && *msg.ToRoomID != "":
+		s.publisher.PublishRoomMessage(ctx, *msg.ToRoomID, eventType, body)
+	case msg.ToUserID != nil && *msg.ToUserID != "":
+		s.publisher.PublishUserMessage(ctx, msg.FromUserID, *msg.ToUserID, eventType, body)
+	}
+}
+
+// ReadUserChat marks the whole DM conversation with otherID as read for readerID
+// (#1549, upstream readUserChatMessage)。stream channel の `read` (id 無し) が
+// 会話全体既読にするために使う。
+func (s *Service) ReadUserChat(_ context.Context, readerID, otherID string) error {
+	return s.repo.MarkAllReadFromUser(readerID, otherID)
+}
+
+// ReadRoomChat marks the whole room conversation as read for readerID (#1549,
+// upstream readRoomChatMessage)。
+func (s *Service) ReadRoomChat(_ context.Context, readerID, roomID string) error {
+	return s.repo.MarkAllReadInRoom(readerID, roomID)
 }
 
 // --- Queries used by the WebSocket channel for membership / auth checks ---

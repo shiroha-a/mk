@@ -89,13 +89,9 @@ func (c *ChatRoomChannel) OnClientMessage(msgType string, body json.RawMessage) 
 	}
 	switch msgType {
 	case "read":
-		var req struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil || req.ID == "" {
-			return
-		}
-		if err := c.svc.MarkReadByMessageID(context.Background(), user.ID, req.ID); err != nil {
+		// upstream chat-room.ts onMessage('read') は body を見ず部屋全体を既読化
+		// する (#1549)。
+		if err := c.svc.ReadRoomChat(context.Background(), user.ID, c.roomID); err != nil {
 			slog.Info("chat room channel: read failed",
 				"user", user.ID, "room", c.roomID, "err", err)
 		}

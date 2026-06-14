@@ -943,8 +943,8 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.MessageID == "" || req.Reaction == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	reaction := user.ID + "/" + req.Reaction
-	if err := h.repo.AddReaction(req.MessageID, reaction); err != nil {
+	// service 経由で AddReaction + react stream event を発火する (#1549)。
+	if err := h.svc.React(c.Request().Context(), req.MessageID, user, req.Reaction); err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -961,8 +961,8 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.MessageID == "" || req.Reaction == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	reaction := user.ID + "/" + req.Reaction
-	if err := h.repo.RemoveReaction(req.MessageID, reaction); err != nil {
+	// service 経由で RemoveReaction + unreact stream event を発火する (#1549)。
+	if err := h.svc.Unreact(c.Request().Context(), req.MessageID, user, req.Reaction); err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	return c.NoContent(http.StatusNoContent)

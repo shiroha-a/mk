@@ -590,3 +590,62 @@ func TestHasPermissionToViewRoomInfo_ModeratorCheckerNotConsulted(t *testing.T) 
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+// --- #1549: chat react / unreact stream events ---
+
+func TestReact_DMPublishesReact(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	reactor := &model.User{ID: "alice", Username: "alice"}
+	require.NoError(t, svc.React(context.Background(), "m1", reactor, "👍"))
+	require.Len(t, pub.userCalls, 1)
+	assert.Equal(t, corechat.EventReact, pub.userCalls[0].eventType)
+	body, ok := pub.userCalls[0].body.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "m1", body["messageId"])
+	assert.Equal(t, "👍", body["reaction"])
+	assert.NotNil(t, body["user"], "reactor が UserLite で含まれる")
+}
+
+func TestReact_RoomPublishesReact(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	room := "r1"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToRoomID: &room}
+	require.NoError(t, svc.React(context.Background(), "m1", &model.User{ID: "alice"}, "👍"))
+	require.Len(t, pub.roomCalls, 1)
+	assert.Equal(t, corechat.EventReact, pub.roomCalls[0].eventType)
+	assert.Empty(t, pub.userCalls)
+}
+
+func TestUnreact_PublishesUnreact(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "alice"}, "👍"))
+	require.Len(t, pub.userCalls, 1)
+	assert.Equal(t, corechat.EventUnreact, pub.userCalls[0].eventType)
+}
+
+func TestReact_MessageNotFound(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	err := svc.React(context.Background(), "ghost", &model.User{ID: "alice"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrNotFound)
+}
+
+func TestUnreact_MessageNotFound(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	err := svc.Unreact(context.Background(), "ghost", &model.User{ID: "alice"}, "👍")
+	assert.ErrorIs(t, err, corechat.ErrNotFound)
+}
+
+// ReadUserChat / ReadRoomChat は会話全体既読 (repo へ委譲、no-error)。
+func TestReadUserChat_NoError(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	assert.NoError(t, svc.ReadUserChat(context.Background(), "alice", "bob"))
+}
+
+func TestReadRoomChat_NoError(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	assert.NoError(t, svc.ReadRoomChat(context.Background(), "alice", "r1"))
+}

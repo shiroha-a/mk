@@ -633,19 +633,20 @@ func TestMessagesSearch(t *testing.T) {
 }
 
 func TestReactionsCreate(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newHandlerWithService(t)
 	// missing params → 400
 	assert.Equal(t, http.StatusBadRequest, post(h.ReactionsCreate, `{}`, u1).Code)
-	// valid
+	// #1549: React は service 経由で message を引くので seed が要る。
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
 	rec := post(h.ReactionsCreate, `{"messageId":"m1","reaction":"👍"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestReactionsDelete(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newHandlerWithService(t)
 	// missing params → 400
 	assert.Equal(t, http.StatusBadRequest, post(h.ReactionsDelete, `{}`, u1).Code)
-	// valid
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
 	rec := post(h.ReactionsDelete, `{"messageId":"m1","reaction":"👍"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }

@@ -81,13 +81,10 @@ func (c *ChatUserChannel) OnClientMessage(msgType string, body json.RawMessage) 
 	}
 	switch msgType {
 	case "read":
-		var req struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil || req.ID == "" {
-			return
-		}
-		if err := c.svc.MarkReadByMessageID(context.Background(), user.ID, req.ID); err != nil {
+		// upstream chat-user.ts onMessage('read') は body を見ず会話全体を既読化
+		// する (#1549)。message id 必須だった旧実装は id 無し read を no-op にして
+		// しまい unread が消えなかった。
+		if err := c.svc.ReadUserChat(context.Background(), user.ID, c.otherID); err != nil {
 			slog.Info("chat user channel: read failed",
 				"user", user.ID, "other", c.otherID, "err", err)
 		}
