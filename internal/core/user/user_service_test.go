@@ -436,6 +436,53 @@ func TestService_UpdateProfile_FollowVisibility(t *testing.T) {
 	assert.Equal(t, model.FollowingVisibilityPrivate, got.FollowersVisibility, "followersVisibility は omit で不変")
 }
 
+// #1546: jsonb passthrough (notificationRecieveConfig / mutedInstances /
+// emailNotificationTypes) と pinnedPageId / requireSigninToViewContents /
+// makeNotes*Before の set / clear を core 層で固定する。
+func TestService_UpdateProfile_ExtraParams(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+
+	nrc := json.RawMessage(`{"mention":{"type":"following"}}`)
+	mi := json.RawMessage(`["evil.example"]`)
+	ent := json.RawMessage(`["mention"]`)
+	pid := "pg1"
+	pidPtr := &pid
+	sig := true
+	fob := 1700000000
+	fobPtr := &fob
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{
+		NotificationRecieveConfig:    &nrc,
+		MutedInstances:               &mi,
+		EmailNotificationTypes:       &ent,
+		PinnedPageID:                 &pidPtr,
+		RequireSigninToViewContents:  &sig,
+		MakeNotesFollowersOnlyBefore: &fobPtr,
+	})
+	require.NoError(t, err)
+	p := repo.Profiles["u1"]
+	assert.JSONEq(t, `{"mention":{"type":"following"}}`, string(p.NotificationRecieveConfig))
+	assert.JSONEq(t, `["evil.example"]`, string(p.MutedInstances))
+	assert.JSONEq(t, `["mention"]`, string(p.EmailNotificationTypes))
+	require.NotNil(t, p.PinnedPageID)
+	assert.Equal(t, "pg1", *p.PinnedPageID)
+	assert.True(t, repo.Users["u1"].RequireSigninToViewContents)
+	require.NotNil(t, repo.Users["u1"].MakeNotesFollowersOnlyBefore)
+	assert.Equal(t, 1700000000, *repo.Users["u1"].MakeNotesFollowersOnlyBefore)
+
+	// clear: pinnedPageId / makeNotesFollowersOnlyBefore を null クリア。
+	var clearPage *string
+	var clearInt *int
+	_, err = svc.UpdateProfile("u1", user.UpdateInput{
+		PinnedPageID:                 &clearPage,
+		MakeNotesFollowersOnlyBefore: &clearInt,
+	})
+	require.NoError(t, err)
+	assert.Nil(t, repo.Profiles["u1"].PinnedPageID)
+	assert.Nil(t, repo.Users["u1"].MakeNotesFollowersOnlyBefore)
+}
+
 // #956: profile fields (name/value 配列) の persist + 正規化。
 // upstream Misskey TS は trim + 空 entry 排除を行うので、mk-go も同挙動に
 // 揃える (= name または value どちらかが trim 後に空なら drop)。

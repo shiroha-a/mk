@@ -443,6 +443,24 @@ type UpdateInput struct {
 	// 本家 update.ts は配列で保存するが mk-go は text csv で持つ (move_service
 	// 側の alsoKnownAsIncludes / appendIfMissing と同じ表現)。
 	AlsoKnownAs *[]string
+	// 以下は #1546 で追加した i/update 残り field。
+	//
+	// NotificationRecieveConfig / MutedInstances / EmailNotificationTypes は
+	// user_profile の jsonb 列にそのまま書く生バイト列。nil なら不変。
+	NotificationRecieveConfig *json.RawMessage
+	MutedInstances            *json.RawMessage
+	EmailNotificationTypes    *json.RawMessage
+	// PinnedPageID は user_profile.pinnedPageId。3 状態を **string で表す:
+	//   nil          → 不変 (no change)
+	//   &(*string)nil → CLEAR (NULL)
+	//   &&"<id>"     → SET (所有権検証はハンドラ側で済んでいる前提)
+	PinnedPageID **string
+	// RequireSigninToViewContents は user.requireSigninToViewContents。
+	RequireSigninToViewContents *bool
+	// MakeNotesFollowersOnlyBefore / MakeNotesHiddenBefore は user 列 (*int)。
+	// PinnedPageID と同じ 3 状態を **int で表す (nil=不変 / *nil=NULL / **v=値)。
+	MakeNotesFollowersOnlyBefore **int
+	MakeNotesHiddenBefore        **int
 }
 
 // FieldItem represents one row of user_profile.fields. upstream Misskey の
@@ -602,6 +620,41 @@ func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile
 			userFields["alsoKnownAs"] = nil
 		} else {
 			userFields["alsoKnownAs"] = strings.Join(*in.AlsoKnownAs, ",")
+		}
+	}
+	// #1546 i/update 残り field。jsonb 列は Room と同じく string キャストで
+	// bytea 化を防ぐ。
+	if in.NotificationRecieveConfig != nil {
+		profileFields["notificationRecieveConfig"] = string(*in.NotificationRecieveConfig)
+	}
+	if in.MutedInstances != nil {
+		profileFields["mutedInstances"] = string(*in.MutedInstances)
+	}
+	if in.EmailNotificationTypes != nil {
+		profileFields["emailNotificationTypes"] = string(*in.EmailNotificationTypes)
+	}
+	if in.PinnedPageID != nil {
+		if *in.PinnedPageID == nil {
+			profileFields["pinnedPageId"] = nil
+		} else {
+			profileFields["pinnedPageId"] = **in.PinnedPageID
+		}
+	}
+	if in.RequireSigninToViewContents != nil {
+		userFields["requireSigninToViewContents"] = *in.RequireSigninToViewContents
+	}
+	if in.MakeNotesFollowersOnlyBefore != nil {
+		if *in.MakeNotesFollowersOnlyBefore == nil {
+			userFields["makeNotesFollowersOnlyBefore"] = nil
+		} else {
+			userFields["makeNotesFollowersOnlyBefore"] = **in.MakeNotesFollowersOnlyBefore
+		}
+	}
+	if in.MakeNotesHiddenBefore != nil {
+		if *in.MakeNotesHiddenBefore == nil {
+			userFields["makeNotesHiddenBefore"] = nil
+		} else {
+			userFields["makeNotesHiddenBefore"] = **in.MakeNotesHiddenBefore
 		}
 	}
 

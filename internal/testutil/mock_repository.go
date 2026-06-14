@@ -465,6 +465,20 @@ func ptrOrNilString(v any) *string {
 	return nil
 }
 
+// ptrOrNilInt normalises a fields-map value (int / *int / untyped nil) into the
+// *int form used by model.User for the i/update nullable-int fields (#1546).
+func ptrOrNilInt(v any) *int {
+	switch n := v.(type) {
+	case nil:
+		return nil
+	case int:
+		return &n
+	case *int:
+		return n
+	}
+	return nil
+}
+
 func applyUserFields(u *model.User, fields map[string]any) {
 	for k, v := range fields {
 		switch k {
@@ -548,6 +562,15 @@ func applyUserFields(u *model.User, fields map[string]any) {
 				// 経路を mock でも反映する。
 				u.AlsoKnownAs = nil
 			}
+		// #1546 i/update 残り user 列 field。
+		case "requireSigninToViewContents":
+			if b, ok := v.(bool); ok {
+				u.RequireSigninToViewContents = b
+			}
+		case "makeNotesFollowersOnlyBefore":
+			u.MakeNotesFollowersOnlyBefore = ptrOrNilInt(v)
+		case "makeNotesHiddenBefore":
+			u.MakeNotesHiddenBefore = ptrOrNilInt(v)
 		case "avatarUrl":
 			u.AvatarURL = ptrOrNilString(v)
 		case "bannerUrl":
@@ -699,6 +722,30 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			case []byte:
 				p.Room = val
 			}
+		// #1546 i/update 残り field の jsonb / pinnedPageId 反映。
+		case "notificationRecieveConfig":
+			switch val := v.(type) {
+			case string:
+				p.NotificationRecieveConfig = []byte(val)
+			case []byte:
+				p.NotificationRecieveConfig = val
+			}
+		case "mutedInstances":
+			switch val := v.(type) {
+			case string:
+				p.MutedInstances = []byte(val)
+			case []byte:
+				p.MutedInstances = val
+			}
+		case "emailNotificationTypes":
+			switch val := v.(type) {
+			case string:
+				p.EmailNotificationTypes = []byte(val)
+			case []byte:
+				p.EmailNotificationTypes = val
+			}
+		case "pinnedPageId":
+			p.PinnedPageID = ptrOrNilString(v)
 		case "mutedWords":
 			switch val := v.(type) {
 			case string:

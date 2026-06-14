@@ -960,6 +960,26 @@ type UpdateRequest struct {
 	// クリア。i/move の前提となる alsoKnownAs を設定する経路 (これが無いと
 	// 移行 flow が成立しない)。
 	AlsoKnownAs *[]string `json:"alsoKnownAs"`
+	// 以下は #1546 で追加した i/update 残りの paramDef field。いずれも model 列 /
+	// entity packer (read 側) は既にあり write 経路だけ抜けていた asymmetric drift。
+	//
+	// NotificationRecieveConfig は通知種別ごとの受信設定 object (jsonb)。
+	// MutedInstances / EmailNotificationTypes は string 配列 (jsonb)。
+	// いずれも json.RawMessage で受けて jsonb 列へそのまま書く (len 0 = 省略=不変)。
+	NotificationRecieveConfig json.RawMessage `json:"notificationRecieveConfig"`
+	MutedInstances            json.RawMessage `json:"mutedInstances"`
+	EmailNotificationTypes    json.RawMessage `json:"emailNotificationTypes"`
+	// PinnedPageID はプロフィールにピン留めする page id (nullable)。upstream は
+	// truthy-string で所有権検証後に SET、null で CLEAR、undefined で不変。
+	// json.RawMessage で 3 状態 (省略 / null / 値) を区別する。
+	PinnedPageID json.RawMessage `json:"pinnedPageId"`
+	// RequireSigninToViewContents は未ログインへのコンテンツ非表示設定 (bool)。
+	RequireSigninToViewContents *bool `json:"requireSigninToViewContents"`
+	// MakeNotesFollowersOnlyBefore / MakeNotesHiddenBefore は過去ノートの自動
+	// followers-only 化 / 非表示化の基準時刻 (integer nullable)。null で解除、
+	// 値で設定、省略で不変。json.RawMessage で 3 状態を区別する。
+	MakeNotesFollowersOnlyBefore json.RawMessage `json:"makeNotesFollowersOnlyBefore"`
+	MakeNotesHiddenBefore        json.RawMessage `json:"makeNotesHiddenBefore"`
 }
 
 // FieldInput is the {name, value} shape accepted by i/update for profile
@@ -1100,6 +1120,27 @@ func containsProhibitedWord(name string, words []string) bool {
 // followingVisibility / followersVisibility enum values accepted by upstream
 // Misskey i/update (public / followers / private). Used to fail-close on any
 // other value instead of silently persisting a bogus privacy setting.
+// parseNullableInt decodes a request json.RawMessage for an integer-nullable
+// i/update field into the **int 3-state convention used by user.UpdateInput
+// (#1546): absent (len 0) → (nil,false) no change; explicit null →
+// (&(*int)(nil),true) clear; integer value → (&&v,true) set. A non-integer,
+// non-null body is a bind error.
+func parseNullableInt(raw json.RawMessage) (**int, bool, error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		var clear *int
+		return &clear, true, nil
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return nil, false, err
+	}
+	p := &n
+	return &p, true, nil
+}
+
 func isValidFollowVisibility(v string) bool {
 	switch model.FollowingVisibility(v) {
 	case model.FollowingVisibilityPublic,
@@ -1160,7 +1201,9 @@ func (h *Handler) Update(c echo.Context) error {
 		// クリアリクエストは検査対象外 (ユーザー体験上必要)。
 		if h.metaRepo != nil && *req.Name != "" {
 			if m, err := h.metaRepo.Fetch(); err == nil && containsProhibitedWord(*req.Name, m.ProhibitedWordsForNameOfUser) {
-				return c.JSON(http.StatusBadRequest, apierr.Error("NAME_CONTAINS_PROHIBITED_WORDS", "Your new name contains prohibited words.", "0b3f9f6a-2e7d-4c2c-9d7a-8c6f9b2e1a44"))
+				// upstream update.ts: code=YOUR_NAME_CONTAINS_PROHIBITED_WORDS /
+				// id=0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191 / httpStatusCode=422 (#1546)。
+				return c.JSON(http.StatusUnprocessableEntity, apierr.Error("YOUR_NAME_CONTAINS_PROHIBITED_WORDS", "Your new name contains prohibited words.", "0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191"))
 			}
 		}
 		in.Name = &req.Name
@@ -1324,6 +1367,58 @@ func (h *Handler) Update(c echo.Context) error {
 			return c.JSON(apiErr.status, apiErr.body)
 		}
 		in.AlsoKnownAs = &resolved
+	}
+	// #1546 残り field の request → input 変換。
+	// jsonb passthrough (notificationRecieveConfig / mutedInstances /
+	// emailNotificationTypes)。len 0 = 省略=不変。親 Unmarshal 済バイト列を
+	// コピーして所有権を切り離す。
+	if len(req.NotificationRecieveConfig) > 0 {
+		v := append(json.RawMessage(nil), req.NotificationRecieveConfig...)
+		in.NotificationRecieveConfig = &v
+	}
+	if len(req.MutedInstances) > 0 {
+		v := append(json.RawMessage(nil), req.MutedInstances...)
+		in.MutedInstances = &v
+	}
+	if len(req.EmailNotificationTypes) > 0 {
+		v := append(json.RawMessage(nil), req.EmailNotificationTypes...)
+		in.EmailNotificationTypes = &v
+	}
+	in.RequireSigninToViewContents = req.RequireSigninToViewContents
+	if v, ok, err := parseNullableInt(req.MakeNotesFollowersOnlyBefore); err != nil {
+		return apierr.JSONInvalidParam(c)
+	} else if ok {
+		in.MakeNotesFollowersOnlyBefore = v
+	}
+	if v, ok, err := parseNullableInt(req.MakeNotesHiddenBefore); err != nil {
+		return apierr.JSONInvalidParam(c)
+	} else if ok {
+		in.MakeNotesHiddenBefore = v
+	}
+	// pinnedPageId は upstream と同じ 3 分岐: null → CLEAR、truthy id →
+	// 所有権検証して SET、それ以外 (省略 / "") → 不変 (upstream の
+	// `if (ps.pinnedPageId)` は "" が falsy で no-op)。
+	if len(req.PinnedPageID) > 0 {
+		if string(bytes.TrimSpace(req.PinnedPageID)) == "null" {
+			var clear *string
+			in.PinnedPageID = &clear
+		} else {
+			var pid string
+			if err := json.Unmarshal(req.PinnedPageID, &pid); err != nil {
+				return apierr.JSONInvalidParam(c)
+			}
+			if pid != "" {
+				// 所有権検証: 自分の page でなければ NO_SUCH_PAGE。
+				if h.pageRepo != nil {
+					p, perr := h.pageRepo.FindByID(pid)
+					if perr != nil || p == nil || p.UserID != me.ID {
+						return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "8e01b590-7eb9-431b-a239-860e086c408e"))
+					}
+				}
+				ptr := &pid
+				in.PinnedPageID = &ptr
+			}
+		}
 	}
 
 	bundle, err := h.userService.UpdateProfile(me.ID, in)

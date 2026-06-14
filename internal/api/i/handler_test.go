@@ -1155,6 +1155,98 @@ func TestUpdate_FieldsPersisted(t *testing.T) {
 	)
 }
 
+// --- #1546 i/update 残り params ---
+
+func newProfileUser(repo *testutil.MockUserRepository) *model.User {
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1"}
+	return user
+}
+
+func TestUpdate_MutedInstancesPersisted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	rec := post(h.Update, `{"mutedInstances":["evil.example","bad.example"]}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `["evil.example","bad.example"]`, string(repo.Profiles["user1"].MutedInstances))
+}
+
+func TestUpdate_EmailNotificationTypesPersisted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	rec := post(h.Update, `{"emailNotificationTypes":["mention","reply"]}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `["mention","reply"]`, string(repo.Profiles["user1"].EmailNotificationTypes))
+}
+
+func TestUpdate_NotificationRecieveConfigPersisted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	rec := post(h.Update, `{"notificationRecieveConfig":{"mention":{"type":"following"}}}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"mention":{"type":"following"}}`, string(repo.Profiles["user1"].NotificationRecieveConfig))
+}
+
+func TestUpdate_RequireSigninToViewContentsPersisted(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	rec := post(h.Update, `{"requireSigninToViewContents":true}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, repo.Users["user1"].RequireSigninToViewContents)
+}
+
+func TestUpdate_MakeNotesBeforeSetAndClear(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	// set
+	rec := post(h.Update, `{"makeNotesFollowersOnlyBefore":1700000000,"makeNotesHiddenBefore":1700000001}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, repo.Users["user1"].MakeNotesFollowersOnlyBefore)
+	assert.Equal(t, 1700000000, *repo.Users["user1"].MakeNotesFollowersOnlyBefore)
+	require.NotNil(t, repo.Users["user1"].MakeNotesHiddenBefore)
+	assert.Equal(t, 1700000001, *repo.Users["user1"].MakeNotesHiddenBefore)
+	// clear via null
+	rec = post(h.Update, `{"makeNotesFollowersOnlyBefore":null}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Nil(t, repo.Users["user1"].MakeNotesFollowersOnlyBefore)
+	// hidden unchanged (omitted)
+	require.NotNil(t, repo.Users["user1"].MakeNotesHiddenBefore)
+}
+
+func TestUpdate_PinnedPageOwned(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	pageRepo := testutil.NewMockPageRepository()
+	pageRepo.Pages["pg1"] = &model.Page{ID: "pg1", UserID: "user1"}
+	h.SetPageRepo(pageRepo)
+	rec := post(h.Update, `{"pinnedPageId":"pg1"}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, repo.Profiles["user1"].PinnedPageID)
+	assert.Equal(t, "pg1", *repo.Profiles["user1"].PinnedPageID)
+}
+
+func TestUpdate_PinnedPageNotOwned(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	pageRepo := testutil.NewMockPageRepository()
+	pageRepo.Pages["pg1"] = &model.Page{ID: "pg1", UserID: "someoneelse"}
+	h.SetPageRepo(pageRepo)
+	rec := post(h.Update, `{"pinnedPageId":"pg1"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "8e01b590-7eb9-431b-a239-860e086c408e")
+}
+
+func TestUpdate_PinnedPageNullClears(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := newProfileUser(repo)
+	pinned := "pgOld"
+	repo.Profiles["user1"].PinnedPageID = &pinned
+	rec := post(h.Update, `{"pinnedPageId":null}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Nil(t, repo.Profiles["user1"].PinnedPageID)
+}
+
 // 空配列 fields=[] を投げると現状を `[]` で上書き (= clear)。nil との挙動
 // 差別化を handler 経路で確認する。
 func TestUpdate_FieldsEmptyClears(t *testing.T) {
@@ -1307,8 +1399,11 @@ func TestUpdate_ProhibitedWordRejected(t *testing.T) {
 	h.SetMetaRepo(metaRepo)
 
 	// "ContainsSpamString" は "Spam" を含むのでブロック (case-insensitive)。
+	// upstream は YOUR_NAME_CONTAINS_PROHIBITED_WORDS / 422 (#1546)。
 	rec := post(h.Update, `{"name":"ContainsSPAMString"}`, user)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), "YOUR_NAME_CONTAINS_PROHIBITED_WORDS")
+	assert.Contains(t, rec.Body.String(), "0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191")
 }
 
 func TestUpdate_ProhibitedWordAllowsClear(t *testing.T) {
