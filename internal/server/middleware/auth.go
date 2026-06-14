@@ -49,6 +49,10 @@ const (
 type AuthScope struct {
 	IsApp  bool
 	Scopes []string
+	// TokenID は app access_token の id。i/registry/* が app ごとの registry
+	// 空間を分離するための domain として使う (#1717)。native token / cookie
+	// session では "" (= 分離しない、ps.domain をそのまま使う)。
+	TokenID string
 }
 
 // lastActiveUpdateInterval は同一ユーザーの lastActiveDate 書き込みを抑制
@@ -120,7 +124,7 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			user, scopes, isApp, err := a.resolveUser(token)
+			user, scopes, tokenID, isApp, err := a.resolveUser(token)
 			if err != nil {
 				// token はあるが解決できない。token 不在 (= 無効 token) は
 				// upstream ApiCallService が AuthenticationError として 401
@@ -163,7 +167,7 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 			// OAuth scope view を積む。RequireScope が endpoint の meta.kind を
 			// app token の permission で強制する (#1552)。native token は
 			// IsApp=false で full access 扱い。
-			c.Set(string(AuthScopeContextKey), &AuthScope{IsApp: isApp, Scopes: scopes})
+			c.Set(string(AuthScopeContextKey), &AuthScope{IsApp: isApp, Scopes: scopes, TokenID: tokenID})
 			a.touchLastActive(user.ID)
 			return next(c)
 		}
@@ -446,17 +450,17 @@ func extractToken(c echo.Context) string {
 // isApp is true when the token is an app access_token (its permission array
 // is returned as scopes); false for a native login token (full access,
 // scopes nil). RequireScope (#1552) uses these to enforce endpoint meta.kind.
-func (a *AuthMiddleware) resolveUser(token string) (user *model.User, scopes []string, isApp bool, err error) {
+func (a *AuthMiddleware) resolveUser(token string) (user *model.User, scopes []string, tokenID string, isApp bool, err error) {
 	// hot path: TTL 内なら DB を引かずに cached user/scope を返す (#512)。
-	if u, sc, app, ok := a.tokenCache.get(token); ok {
-		return u, sc, app, nil
+	if u, sc, tid, app, ok := a.tokenCache.get(token); ok {
+		return u, sc, tid, app, nil
 	}
 
 	// まずnative tokenで検索 (= user 自身の login token, full access)。
 	user, err = a.userRepo.FindByToken(token)
 	if err == nil {
-		a.tokenCache.put(token, user, nil, false)
-		return user, nil, false, nil
+		a.tokenCache.put(token, user, nil, "", false)
+		return user, nil, "", false, nil
 	}
 
 	// hash 列 (miauth: sha256(token)) と token 列 (raw, app/auth) を 1 query
@@ -468,7 +472,7 @@ func (a *AuthMiddleware) resolveUser(token string) (user *model.User, scopes []s
 		// not-found 系は cache に積まない: 失効後 30 秒間 stale を返さない
 		// ようにするのと、未知 token 連打への DDoS を rate limiter 側に任せる
 		// 設計のため (#512 scope)。
-		return nil, nil, false, err
+		return nil, nil, "", false, err
 	}
 
 	// orphaned access_token (User 行が削除済み) のとき GORM の Preload は
@@ -476,13 +480,14 @@ func (a *AuthMiddleware) resolveUser(token string) (user *model.User, scopes []s
 	// user.ID dereference panic になるので、専用 error を返して anonymous
 	// request 扱いに落とす (Devin #514 FLAG-1)。cache にも積まない。
 	if accessToken.User == nil {
-		return nil, nil, false, errOrphanedAccessToken
+		return nil, nil, "", false, errOrphanedAccessToken
 	}
 	// app token は permission 配列を scope として持つ。空 ([]) でも isApp=true
-	// として扱い、RequireScope が kind 不足を弾けるようにする。
+	// として扱い、RequireScope が kind 不足を弾けるようにする。tokenID は
+	// registry domain 分離用 (#1717)。
 	scopes = []string(accessToken.Permission)
-	a.tokenCache.put(token, accessToken.User, scopes, true)
-	return accessToken.User, scopes, true, nil
+	a.tokenCache.put(token, accessToken.User, scopes, accessToken.ID, true)
+	return accessToken.User, scopes, accessToken.ID, true, nil
 }
 
 func sha256Hash(s string) string {

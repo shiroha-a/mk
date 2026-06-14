@@ -111,19 +111,19 @@ func TestAuthMiddleware_InvalidateTokensForUser(t *testing.T) {
 	auth := NewAuthMiddleware(userRepo, tokenRepo)
 
 	// 直接 cache に詰めて exported method の挙動だけを isolate に test する。
-	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, false)
-	auth.tokenCache.put("b", &model.User{ID: "u1"}, nil, false)
-	auth.tokenCache.put("c", &model.User{ID: "u2"}, nil, false)
+	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, "", false)
+	auth.tokenCache.put("b", &model.User{ID: "u1"}, nil, "", false)
+	auth.tokenCache.put("c", &model.User{ID: "u2"}, nil, "", false)
 
 	auth.InvalidateTokensForUser("u1")
 
-	if _, _, _, ok := auth.tokenCache.get("a"); ok {
+	if _, _, _, _, ok := auth.tokenCache.get("a"); ok {
 		t.Error("u1 token a が残っている")
 	}
-	if _, _, _, ok := auth.tokenCache.get("b"); ok {
+	if _, _, _, _, ok := auth.tokenCache.get("b"); ok {
 		t.Error("u1 token b が残っている")
 	}
-	if _, _, _, ok := auth.tokenCache.get("c"); !ok {
+	if _, _, _, _, ok := auth.tokenCache.get("c"); !ok {
 		t.Error("u2 token c が誤って削除された")
 	}
 }
@@ -132,9 +132,9 @@ func TestAuthMiddleware_InvalidateTokensForUser_EmptyUserIDIsNoop(t *testing.T) 
 	userRepo := testutil.NewMockUserRepository()
 	tokenRepo := testutil.NewMockAccessTokenRepository()
 	auth := NewAuthMiddleware(userRepo, tokenRepo)
-	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, false)
+	auth.tokenCache.put("a", &model.User{ID: "u1"}, nil, "", false)
 	auth.InvalidateTokensForUser("")
-	if _, _, _, ok := auth.tokenCache.get("a"); !ok {
+	if _, _, _, _, ok := auth.tokenCache.get("a"); !ok {
 		t.Error("userID 空で invalidate が走って巻き添えになった")
 	}
 }

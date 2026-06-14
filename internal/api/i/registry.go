@@ -24,6 +24,19 @@ func validRegistryScope(scope []string) bool {
 	return true
 }
 
+// registryEffectiveDomain returns the domain a registry request operates on.
+// An app access token forces its own id as the domain (= per-app isolated
+// registry space; it cannot read/write the main domain=null space). A native
+// login token / cookie session uses the request's domain unchanged (#1717,
+// upstream `accessToken != null ? accessToken.id : ps.domain ?? null`)。
+func registryEffectiveDomain(c echo.Context, reqDomain *string) *string {
+	if scope := middleware.GetAuthScope(c); scope != nil && scope.IsApp {
+		id := scope.TokenID
+		return &id
+	}
+	return reqDomain
+}
+
 // registryScopeDomainRequest is the canonical input shape for registry
 // read endpoints. scope は []string、domain は *string (省略可)。
 type registryScopeDomainRequest struct {
@@ -62,7 +75,7 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 	if !validRegistryScope(req.Scope) {
 		return apierr.JSONInvalidParam(c)
 	}
-	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, req.Domain)
+	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
 	}
@@ -87,7 +100,7 @@ func (h *Handler) RegistryKeys(c echo.Context) error {
 	if !validRegistryScope(req.Scope) {
 		return apierr.JSONInvalidParam(c)
 	}
-	keysMap, err := h.registryRepo.KeysWithType(u.ID, req.Scope, req.Domain)
+	keysMap, err := h.registryRepo.KeysWithType(u.ID, req.Scope, registryEffectiveDomain(c, req.Domain))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

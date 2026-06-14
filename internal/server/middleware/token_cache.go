@@ -27,6 +27,7 @@ type cachedAuthEntry struct {
 	user      *model.User
 	scopes    []string
 	isApp     bool
+	tokenID   string // app access_token の id (registry domain 分離用、#1717)。native は ""。
 	expiresAt time.Time
 }
 
@@ -54,27 +55,28 @@ func newTokenCache() *tokenCache {
 
 // get returns the cached user and its scope view if present and not expired.
 // Expired entries are deleted lazily on read.
-func (c *tokenCache) get(token string) (user *model.User, scopes []string, isApp, ok bool) {
+func (c *tokenCache) get(token string) (user *model.User, scopes []string, tokenID string, isApp, ok bool) {
 	v, loaded := c.m.Load(token)
 	if !loaded {
-		return nil, nil, false, false
+		return nil, nil, "", false, false
 	}
 	entry, isEntry := v.(*cachedAuthEntry)
 	if !isEntry || c.now().After(entry.expiresAt) {
 		c.m.Delete(token)
-		return nil, nil, false, false
+		return nil, nil, "", false, false
 	}
-	return entry.user, entry.scopes, entry.isApp, true
+	return entry.user, entry.scopes, entry.tokenID, entry.isApp, true
 }
 
 // put stores token → (user, scope view) with TTL. Triggers a full sweep every
 // sweepEvery stores so the cache size stays bounded by "active tokens within
 // the TTL window" rather than "every token ever seen".
-func (c *tokenCache) put(token string, user *model.User, scopes []string, isApp bool) {
+func (c *tokenCache) put(token string, user *model.User, scopes []string, tokenID string, isApp bool) {
 	c.m.Store(token, &cachedAuthEntry{
 		user:      user,
 		scopes:    scopes,
 		isApp:     isApp,
+		tokenID:   tokenID,
 		expiresAt: c.now().Add(c.ttl),
 	})
 	if c.sweepEvery > 0 && c.storeCount.Add(1)%c.sweepEvery == 0 {

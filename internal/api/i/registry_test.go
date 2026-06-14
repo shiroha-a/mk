@@ -3,15 +3,101 @@ package i
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
+
+// postRegistryWithScope posts to a registry handler with both the authenticated
+// user and an AuthScope (app token / native) set in the context, so #1717
+// domain-isolation can be exercised.
+func postRegistryWithScope(h func(echo.Context) error, body string, user *model.User, scope *middleware.AuthScope) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	if scope != nil {
+		c.Set(string(middleware.AuthScopeContextKey), scope)
+	}
+	_ = h(c)
+	return rec
+}
+
+// firstRegistryItem returns the single stored item (tests store exactly one).
+func firstRegistryItem(reg *testutil.MockRegistryRepository) *model.RegistryItem {
+	for _, it := range reg.Items {
+		return it
+	}
+	return nil
+}
+
+// #1717: app access token は registry domain を自分の token id に強制する。
+func TestRegistrySet_AppTokenForcesDomain(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	h.SetRegistryRepo(reg)
+	// client が domain を送っても app token は token id に上書きされる。
+	rec := postRegistryWithScope(h.RegistrySet, `{"key":"theme","value":"dark","scope":["client"],"domain":"ignored.example"}`,
+		stubUser, &middleware.AuthScope{IsApp: true, TokenID: "tok-1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	it := firstRegistryItem(reg)
+	require.NotNil(t, it)
+	require.NotNil(t, it.Domain)
+	assert.Equal(t, "tok-1", *it.Domain, "app token は domain を token id に強制する")
+}
+
+// native token / cookie session は request の domain をそのまま使う。
+func TestRegistrySet_NativeUsesRequestDomain(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	h.SetRegistryRepo(reg)
+	// AuthScope 無し (native)。
+	rec := postRegistryWithScope(h.RegistrySet, `{"key":"theme","value":"dark","scope":["client"],"domain":"client.example"}`,
+		stubUser, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	it := firstRegistryItem(reg)
+	require.NotNil(t, it)
+	require.NotNil(t, it.Domain)
+	assert.Equal(t, "client.example", *it.Domain)
+}
+
+// app token の set は domain が token id (非 nil) に強制されるため main へ
+// publish されない。
+func TestRegistrySet_AppTokenNoMainPublish(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	h.SetRegistryRepo(reg)
+	pub := &stubIMainStreamPublisher{}
+	h.SetMainStreamPublisher(pub)
+	rec := postRegistryWithScope(h.RegistrySet, `{"key":"theme","value":"dark","scope":["client"]}`,
+		stubUser, &middleware.AuthScope{IsApp: true, TokenID: "tok-1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, pub.calls, "app token (domain=token id) の set は main へ broadcast しない")
+}
+
+// native token (domain なし) の set は main へ publish される (従来挙動)。
+func TestRegistrySet_NativeMainPublish(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	h.SetRegistryRepo(reg)
+	pub := &stubIMainStreamPublisher{}
+	h.SetMainStreamPublisher(pub)
+	rec := postRegistryWithScope(h.RegistrySet, `{"key":"theme","value":"dark","scope":["client"]}`, stubUser, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, pub.calls, 1)
+	assert.Equal(t, "registryUpdated", pub.calls[0].eventType)
+}
 
 func TestRegistryGetDetail(t *testing.T) {
 	h, _ := newExtraHandler(t)
