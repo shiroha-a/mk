@@ -72,6 +72,7 @@ import (
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
 	"github.com/shiroha-a/mk/internal/core/event"
 	corefeatured "github.com/shiroha-a/mk/internal/core/featured"
@@ -1046,19 +1047,27 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Pinned users (public)
+	//
+	// upstream pinned-users.ts は res が UserDetailed 配列で、各 pinnedUsers の
+	// acct を Acct.parse して host?? IsNull() で local/remote 両方を検索する
+	// (#1551)。mk-go も acct の host 部分を解決し UserDetailed で返す。
 	api.POST("/pinned-users", func(c echo.Context) error {
 		m, err := metaRepo.Fetch()
 		if err != nil || len(m.PinnedUsers) == 0 {
 			return c.JSON(http.StatusOK, []any{})
 		}
-		var result []entity.UserLite
-		for _, username := range m.PinnedUsers {
-			if u, err := userRepo.FindByUsernameLower(username, nil); err == nil {
-				result = append(result, entity.PackUserLite(u))
+		result := make([]entity.UserDetailed, 0, len(m.PinnedUsers))
+		for _, acct := range m.PinnedUsers {
+			username, host := parseAcct(acct, localHost)
+			if username == "" {
+				continue
 			}
-		}
-		if result == nil {
-			result = []entity.UserLite{}
+			u, err := userRepo.FindByUsernameLower(strings.ToLower(username), host)
+			if err != nil {
+				continue
+			}
+			profile, _ := userRepo.FindProfileByUserID(u.ID)
+			result = append(result, entity.PackUserDetailed(u, profile, idGen))
 		}
 		return c.JSON(http.StatusOK, result)
 	})
@@ -1099,15 +1108,35 @@ func (s *Server) setupRoutes() {
 	api.POST("/signup-pending", signupHandler.SignupPending)
 
 	// Username availability check (フロントエンドの signup フォームが呼ぶ)
+	//
+	// upstream username/available.ts は available = (既存 user 無し) && (used_usernames
+	// 無し) && (preservedUsernames 非該当) の3条件で判定し、paramDef の
+	// localUsernameSchema で format 検証する (#1551)。format 不正は paramDef レベルで
+	// 弾かれるため INVALID_PARAM を返す。
+	usedUsernameRepo := repository.NewUsedUsernameRepository(s.db)
 	api.POST("/username/available", func(c echo.Context) error {
 		var req struct {
 			Username string `json:"username"`
 		}
-		if err := c.Bind(&req); err != nil || req.Username == "" {
-			return c.JSON(http.StatusOK, map[string]any{"available": false})
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
-		_, err := userRepo.FindByUsernameLower(strings.ToLower(req.Username), nil)
-		available := err != nil
+		// format 検証 (upstream localUsernameSchema、paramDef レベル拒否相当)。
+		if !coresignup.ValidUsernameFormat(req.Username) {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+		}
+		lower := strings.ToLower(req.Username)
+		// (1) 既存 local user
+		_, userErr := userRepo.FindByUsernameLower(lower, nil)
+		existsUser := userErr == nil
+		// (2) used_usernames (過去に使われ解放された username)
+		usedExists, _ := usedUsernameRepo.Exists(lower)
+		// (3) preservedUsernames (予約 username)
+		preserved := false
+		if m, err := metaRepo.Fetch(); err == nil && m != nil {
+			preserved = coresignup.IsReservedUsername(lower, m.PreservedUsernames)
+		}
+		available := !existsUser && !usedExists && !preserved
 		return c.JSON(http.StatusOK, map[string]any{"available": available})
 	})
 
@@ -2528,27 +2557,56 @@ func (s *Server) setupRoutes() {
 		return c.JSON(http.StatusOK, out)
 	})
 
-	// email-address/available — メールアドレスの利用可否チェック (認証必須)
+	// email-address/available — メールアドレスの利用可否チェック (public)
+	//
+	// upstream email-address/available.ts は requireCredential:false の public
+	// endpoint で、EmailService.validateEmailForAccount が reason を
+	// null|'used'|'format'|'disposable'|'mx'|'smtp'|'banned'|'network'|'blacklist'
+	// で返す (#1551)。mk-go は外部依存の active validation (mx/smtp/disposable) は
+	// 行わず、format → used (emailVerified=true 一致) → banned の順で判定する
+	// (upstream の enableActiveEmailValidation=false 相当)。
 	api.POST("/email-address/available", func(c echo.Context) error {
 		var req struct {
 			EmailAddress string `json:"emailAddress"`
 		}
-		if err := c.Bind(&req); err != nil || req.EmailAddress == "" {
+		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
-		var count int64
-		s.db.Model(&model.UserProfile{}).Where(`"email" = ?`, req.EmailAddress).Count(&count)
-		available := count == 0
+		// upstream paramDef は emailAddress に minLength を持たないため、空文字は
+		// 400 ではなく format 不正として available:false / reason:"format" を返す。
+		available := true
 		var reason *string
-		if !available {
-			r := "unavailable"
+		setReason := func(r string) {
+			available = false
 			reason = &r
+		}
+		switch {
+		case !coreemail.ValidateFormat(req.EmailAddress):
+			setReason("format")
+		default:
+			// emailVerified=true の profile とだけ照合する (upstream は
+			// countBy({emailVerified:true, email}))。未認証 email は重複扱いしない。
+			var count int64
+			s.db.Model(&model.UserProfile{}).
+				Where(`"email" = ? AND "emailVerified" = ?`, req.EmailAddress, true).
+				Count(&count)
+			if count > 0 {
+				setReason("used")
+			} else {
+				domain := ""
+				if at := strings.IndexByte(req.EmailAddress, '@'); at >= 0 {
+					domain = strings.ToLower(req.EmailAddress[at+1:])
+				}
+				if m, err := metaRepo.Fetch(); err == nil && m != nil && coreemail.IsBannedDomain(domain, m.BannedEmailDomains) {
+					setReason("banned")
+				}
+			}
 		}
 		return c.JSON(http.StatusOK, map[string]any{
 			"available": available,
 			"reason":    reason,
 		})
-	}, middleware.RequireAuth())
+	})
 
 	// promo/read — プロモノートの既読マーク (認証必須)
 	api.POST("/promo/read", func(c echo.Context) error {
@@ -2624,9 +2682,37 @@ func (s *Server) setupRoutes() {
 	api.POST("/v2/admin/emoji/list", adminHandler.EmojiListV2, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("read:admin:emoji"))
 
 	// --- その他の残りエンドポイント ---
-	// test — フロントエンドのテスト用
+	// test — フロントエンドのテスト用。upstream test.ts は validate 済の ps を
+	// そのまま echo し、required:['required'] が未指定なら 400 を返す (#1551)。
+	// default は 'hello'、nullableDefault も既定 'hello'。string / id は指定時のみ
+	// 含める。explicit null と absent の区別は test 用途なので簡略化している。
 	api.POST("/test", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]any{})
+		var req struct {
+			Required        *bool   `json:"required"`
+			String          *string `json:"string"`
+			Default         *string `json:"default"`
+			NullableDefault *string `json:"nullableDefault"`
+			ID              *string `json:"id"`
+		}
+		if err := c.Bind(&req); err != nil || req.Required == nil {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+		}
+		out := map[string]any{"required": *req.Required}
+		if req.String != nil {
+			out["string"] = *req.String
+		}
+		out["default"] = "hello"
+		if req.Default != nil {
+			out["default"] = *req.Default
+		}
+		out["nullableDefault"] = "hello"
+		if req.NullableDefault != nil {
+			out["nullableDefault"] = *req.NullableDefault
+		}
+		if req.ID != nil {
+			out["id"] = *req.ID
+		}
+		return c.JSON(http.StatusOK, out)
 	})
 
 	// API catchall — 意図的に 200 + 空オブジェクトを返す。未登録エンドポイントへの

@@ -97,3 +97,19 @@ func TestVerifyEmail_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, repo.Profiles["u1"].EmailVerified)
 }
+
+// #1551 verify-email 成功時に meUpdated を main stream へ publish する
+// (upstream verify-email.ts)。
+func TestVerifyEmail_PublishesMeUpdated(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	code := "abc"
+	repo.Profiles["u1"].EmailVerifyCode = &code
+	pub := &stubIMainStreamPublisher{}
+	h.SetMainStreamPublisher(pub)
+
+	rec := postExtra(h.VerifyEmail, `{"code":"abc"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Profiles["u1"].EmailVerified)
+	requireMeUpdated(t, pub, "u1")
+}

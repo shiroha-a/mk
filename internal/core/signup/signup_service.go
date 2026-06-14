@@ -43,6 +43,14 @@ func normalizeAndValidateUsername(username string) (string, error) {
 	return username, nil
 }
 
+// ValidUsernameFormat reports whether username matches the local username
+// schema (`^[a-zA-Z0-9_]{1,20}$`). Exposed so the username/available endpoint
+// shares the exact same format validation as signup (upstream localUsernameSchema、
+// #1551)。trim はしない (caller が必要なら行う)。
+func ValidUsernameFormat(username string) bool {
+	return localUsernamePattern.MatchString(username)
+}
+
 var (
 	// ErrUsernameAlreadyExists is returned when the username is taken.
 	ErrUsernameAlreadyExists = errors.New("username already exists")
@@ -627,4 +635,11 @@ func isReservedUsername(lower string, reserved []string) bool {
 		}
 	}
 	return false
+}
+
+// IsReservedUsername reports whether lower (already lowercased) matches any
+// entry in reserved case-insensitively. Exposed for the username/available
+// endpoint so it shares signup's preservedUsernames check (#1551)。
+func IsReservedUsername(lower string, reserved []string) bool {
+	return isReservedUsername(lower, reserved)
 }

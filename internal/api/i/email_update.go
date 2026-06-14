@@ -146,5 +146,9 @@ func (h *Handler) VerifyEmail(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	// upstream verify-email.ts は update 後に meUpdated を main stream へ publish
+	// しクライアントへ即時反映する (#1551)。2FA handler と同じ publisher を使う。
+	h.publishMeUpdated(profile.UserID)
+
 	return c.NoContent(http.StatusNoContent)
 }
