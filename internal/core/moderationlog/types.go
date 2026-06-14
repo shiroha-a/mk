@@ -87,6 +87,9 @@ const (
 	LogUpdateAbuseReportNotificationRecipient LogType = "updateAbuseReportNotificationRecipient"
 	LogDeleteAbuseReportNotificationRecipient LogType = "deleteAbuseReportNotificationRecipient"
 
+	// Content deletion by moderators
+	LogDeleteGalleryPost LogType = "deleteGalleryPost"
+
 	// Misc
 	LogUpdateProxyAccountDescription LogType = "updateProxyAccountDescription"
 )

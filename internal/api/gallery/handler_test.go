@@ -1,6 +1,7 @@
 package gallery_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/gallery"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -28,6 +30,7 @@ func init() {
 	testIDGen, _ = id.NewGenerator("aidx")
 	testutil.ApplyMigrations(testDB)
 	testDB.Exec(`INSERT INTO "user" (id, username, "usernameLower", "avatarDecorations") VALUES ('gal_u1', 'galuser', 'galuser', '[]') ON CONFLICT DO NOTHING`)
+	testDB.Exec(`INSERT INTO "user" (id, username, "usernameLower", "avatarDecorations") VALUES ('gal_u2', 'galuser2', 'galuser2', '[]') ON CONFLICT DO NOTHING`)
 }
 
 func newHandler() *gallery.Handler {
@@ -39,6 +42,61 @@ func brokenHandler() *gallery.Handler {
 	sqlDB, _ := db.DB()
 	_ = sqlDB.Close()
 	return gallery.NewHandler(db, testIDGen)
+}
+
+// stubRanking is an in-memory GalleryRanking for #1548 tests. It records
+// UpdateGalleryPostsRanking calls and returns a fixed ID list from Get.
+type stubRanking struct {
+	ids     []string
+	getErr  error
+	updates []ratingUpdate
+}
+
+type ratingUpdate struct {
+	postID string
+	score  float64
+}
+
+func (s *stubRanking) UpdateGalleryPostsRanking(_ context.Context, postID string, score float64) error {
+	s.updates = append(s.updates, ratingUpdate{postID, score})
+	return nil
+}
+
+func (s *stubRanking) GetGalleryPostsRanking(_ context.Context, _ int) ([]string, error) {
+	return s.ids, s.getErr
+}
+
+// stubRoles implements gallery.RoleChecker.
+type stubRoles struct{ moderators map[string]bool }
+
+func (s *stubRoles) IsModerator(userID string) bool { return s.moderators[userID] }
+
+// stubModLog records moderation log calls for #1548 tests.
+type stubModLog struct{ calls []modLogCall }
+
+type modLogCall struct {
+	moderatorID string
+	logType     moderationlog.LogType
+	info        map[string]any
+}
+
+func (s *stubModLog) Log(_ context.Context, moderatorID string, t moderationlog.LogType, info map[string]any) {
+	s.calls = append(s.calls, modLogCall{moderatorID, t, info})
+}
+
+func newHandlerWithRanking(r gallery.GalleryRanking) *gallery.Handler {
+	h := gallery.NewHandler(testDB, testIDGen)
+	h.SetRanking(r)
+	return h
+}
+
+func brokenHandlerWithRanking(r gallery.GalleryRanking) *gallery.Handler {
+	db := testutil.MustOpenTestDB()
+	sqlDB, _ := db.DB()
+	_ = sqlDB.Close()
+	h := gallery.NewHandler(db, testIDGen)
+	h.SetRanking(r)
+	return h
 }
 
 func cleanup() {
@@ -71,23 +129,54 @@ func doPost(h func(echo.Context) error, body string, user *model.User) *httptest
 
 // --- Featured / Popular / Posts ---
 
-func TestFeatured_Empty(t *testing.T) {
+// nil ranking (= 未配線) は空配列に degrade する (#1548)。
+func TestFeatured_NilRankingEmpty(t *testing.T) {
 	cleanup()
-	assert.Equal(t, http.StatusOK, doPost(newHandler().Featured, `{}`, nil).Code)
+	rec := doPost(newHandler().Featured, `{}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
 }
 
-func TestFeatured_WithData(t *testing.T) {
+// ranking が空 ID なら空配列 (#1548)。
+func TestFeatured_EmptyRanking(t *testing.T) {
+	cleanup()
+	rec := doPost(newHandlerWithRanking(&stubRanking{ids: nil}).Featured, `{}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "[]\n", rec.Body.String())
+}
+
+// ranking の ID で post を引いて返す (#1548)。
+func TestFeatured_WithRanking(t *testing.T) {
 	cleanup()
 	testDB.Create(&model.GalleryPost{ID: "gp_f1", UpdatedAt: time.Now(), Title: "Art", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
-	rec := doPost(newHandler().Featured, `{}`, nil)
+	rec := doPost(newHandlerWithRanking(&stubRanking{ids: []string{"gp_f1"}}).Featured, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Art")
 }
 
-func TestPopular(t *testing.T) {
+// untilId フィルタで ID 範囲を絞る (#1548)。
+func TestFeatured_UntilIDFilter(t *testing.T) {
 	cleanup()
-	assert.Equal(t, http.StatusOK, doPost(newHandler().Popular, `{}`, nil).Code)
+	testDB.Create(&model.GalleryPost{ID: "gp_aaa", UpdatedAt: time.Now(), Title: "Low", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	testDB.Create(&model.GalleryPost{ID: "gp_zzz", UpdatedAt: time.Now(), Title: "High", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	rec := doPost(newHandlerWithRanking(&stubRanking{ids: []string{"gp_aaa", "gp_zzz"}}).Featured, `{"untilId":"gp_bbb"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Low")
+	assert.NotContains(t, rec.Body.String(), "High")
+}
+
+// popular は likedCount>0 の post のみを likedCount DESC で返す (#1548)。
+func TestPopular_FiltersZeroLikes(t *testing.T) {
+	cleanup()
+	testDB.Create(&model.GalleryPost{ID: "gp_p0", UpdatedAt: time.Now(), Title: "Zero", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 0})
+	testDB.Create(&model.GalleryPost{ID: "gp_p1", UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 3})
+	defer cleanup()
+	rec := doPost(newHandler().Popular, `{}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Liked")
+	assert.NotContains(t, rec.Body.String(), "Zero")
 }
 
 func TestPosts_Success(t *testing.T) {
@@ -193,7 +282,9 @@ func TestPosts_InvalidJSON(t *testing.T) {
 }
 
 func TestFeatured_DBError(t *testing.T) {
-	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().Featured, `{}`, nil).Code)
+	// ranking が ID を返した後の id IN 取得で DB error → 500。
+	h := brokenHandlerWithRanking(&stubRanking{ids: []string{"gp_x"}})
+	assert.Equal(t, http.StatusInternalServerError, doPost(h.Featured, `{}`, nil).Code)
 }
 
 func TestPosts_DBError(t *testing.T) {
@@ -308,6 +399,58 @@ func TestPostsDelete_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().PostsDelete, `{}`, &model.User{ID: "u1"}).Code)
 }
 
+// 非所有者かつ非モデレータの削除は ACCESS_DENIED (#1548)。
+func TestPostsDelete_AccessDenied(t *testing.T) {
+	cleanup()
+	testDB.Create(&model.GalleryPost{ID: "gp_ad", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	h := newHandler()
+	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{}})
+	rec := doPost(h.PostsDelete, `{"postId":"gp_ad"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "c86e09de-1c48-43ac-a435-1c7e42ed4496")
+	// post は削除されていない。
+	var cnt int64
+	testDB.Model(&model.GalleryPost{}).Where("id = ?", "gp_ad").Count(&cnt)
+	assert.Equal(t, int64(1), cnt)
+}
+
+// モデレータは他人の post を削除でき、moderationLog を残す (#1548)。
+func TestPostsDelete_ModeratorWithModLog(t *testing.T) {
+	cleanup()
+	testDB.Create(&model.GalleryPost{ID: "gp_mod", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	h := newHandler()
+	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"gal_u2": true}})
+	ml := &stubModLog{}
+	h.SetModLog(ml)
+	rec := doPost(h.PostsDelete, `{"postId":"gp_mod"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	var cnt int64
+	testDB.Model(&model.GalleryPost{}).Where("id = ?", "gp_mod").Count(&cnt)
+	assert.Equal(t, int64(0), cnt)
+	require.Len(t, ml.calls, 1)
+	assert.Equal(t, moderationlog.LogDeleteGalleryPost, ml.calls[0].logType)
+	assert.Equal(t, "gal_u2", ml.calls[0].moderatorID)
+	assert.Equal(t, "gp_mod", ml.calls[0].info["postId"])
+	assert.Equal(t, "gal_u1", ml.calls[0].info["postUserId"])
+	assert.Equal(t, "galuser", ml.calls[0].info["postUserUsername"])
+}
+
+// 所有者自身の削除では moderationLog を残さない (#1548)。
+func TestPostsDelete_OwnerNoModLog(t *testing.T) {
+	cleanup()
+	testDB.Create(&model.GalleryPost{ID: "gp_own", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	h := newHandler()
+	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"gal_u1": true}})
+	ml := &stubModLog{}
+	h.SetModLog(ml)
+	rec := doPost(h.PostsDelete, `{"postId":"gp_own"}`, &model.User{ID: "gal_u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, ml.calls, "owner 自身の削除では監査ログを残さない")
+}
+
 // --- Update ---
 
 func TestPostsUpdate_Success(t *testing.T) {
@@ -370,7 +513,31 @@ func TestPostsLike_Success(t *testing.T) {
 	pid := testIDGen.Generate(time.Now())
 	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Likeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
-	assert.Equal(t, http.StatusNoContent, doPost(newHandler().PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u1"}).Code)
+	rank := &stubRanking{}
+	// gal_u2 が gal_u1 の post を like する (他人の post)。
+	assert.Equal(t, http.StatusNoContent, doPost(newHandlerWithRanking(rank).PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"}).Code)
+	// 作成直後の post なので ranking 更新が +1 で走る。
+	require.Len(t, rank.updates, 1)
+	assert.Equal(t, ratingUpdate{pid, 1}, rank.updates[0])
+}
+
+// 自分の post を like すると YOUR_POST (#1548)。
+func TestPostsLike_YourPost(t *testing.T) {
+	cleanup()
+	pid := testIDGen.Generate(time.Now())
+	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Mine", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	rec := doPost(newHandler().PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "f78f1511-5ebc-4478-a888-1198d752da68")
+}
+
+// 不在 post の like は NO_SUCH_POST (#1548)。
+func TestPostsLike_NoSuchPost(t *testing.T) {
+	cleanup()
+	rec := doPost(newHandler().PostsLike, `{"postId":"ghost"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "56c06af3-1287-442f-9701-c93f7c4a62ff")
 }
 
 func TestPostsLike_AlreadyLiked(t *testing.T) {
@@ -379,8 +546,8 @@ func TestPostsLike_AlreadyLiked(t *testing.T) {
 	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	h := newHandler()
-	doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u1"})
-	assert.Equal(t, http.StatusConflict, doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u1"}).Code)
+	doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusConflict, doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"}).Code)
 }
 
 func TestPostsLike_InvalidParam(t *testing.T) {
@@ -388,7 +555,35 @@ func TestPostsLike_InvalidParam(t *testing.T) {
 }
 
 func TestPostsUnlike_Success(t *testing.T) {
-	assert.Equal(t, http.StatusNoContent, doPost(newHandler().PostsUnlike, `{"postId":"p1"}`, &model.User{ID: "u1"}).Code)
+	cleanup()
+	pid := testIDGen.Generate(time.Now())
+	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unlikeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 1})
+	testDB.Create(&model.GalleryLike{ID: testIDGen.Generate(time.Now()), UserID: "gal_u2", PostID: pid})
+	defer cleanup()
+	rank := &stubRanking{}
+	rec := doPost(newHandlerWithRanking(rank).PostsUnlike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, rank.updates, 1)
+	assert.Equal(t, ratingUpdate{pid, -1}, rank.updates[0])
+}
+
+// 不在 post の unlike は NO_SUCH_POST (#1548)。
+func TestPostsUnlike_NoSuchPost(t *testing.T) {
+	cleanup()
+	rec := doPost(newHandler().PostsUnlike, `{"postId":"ghost"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "c32e6dd0-b555-4413-925e-b3757d19ed84")
+}
+
+// 未 like の post を unlike すると NOT_LIKED (#1548)。
+func TestPostsUnlike_NotLiked(t *testing.T) {
+	cleanup()
+	pid := testIDGen.Generate(time.Now())
+	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unliked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	defer cleanup()
+	rec := doPost(newHandler().PostsUnlike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "e3e8e06e-be37-41f7-a5b4-87a8250288f0")
 }
 
 func TestPostsUnlike_InvalidParam(t *testing.T) {

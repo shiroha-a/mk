@@ -18,6 +18,7 @@ const (
 	globalNotesRankingName    = "featuredGlobalNotesRanking"
 	inChannelNotesRankingName = "featuredInChannelNotesRanking" // ":<channelId>" を付ける
 	perUserNotesRankingName   = "featuredPerUserNotesRanking"   // ":<userId>" を付ける
+	galleryPostsRankingName   = "featuredGalleryPostsRanking"   // gallery/featured ランキング (#1548)
 )
 
 // Ranking time windows (upstream の *_RANKING_WINDOW 定数に対応)。各 window ごと
@@ -25,6 +26,9 @@ const (
 const (
 	globalNotesRankingWindow  = 3 * 24 * time.Hour // 3日ごと
 	perUserNotesRankingWindow = 7 * 24 * time.Hour // 1週間ごと
+	// galleryPostsRankingWindow は upstream GALLERY_POSTS_RANKING_WINDOW
+	// (= 3日) に対応する (#1548)。
+	galleryPostsRankingWindow = 3 * 24 * time.Hour
 )
 
 // featuredEpoch は window 番号計算の基準時刻 (upstream featuredEpoc =
@@ -163,4 +167,17 @@ func (s *Service) RemoveInChannelNotesRanking(ctx context.Context, channelID, no
 // RemovePerUserNotesRanking removes noteID from userID's per-user ranking windows.
 func (s *Service) RemovePerUserNotesRanking(ctx context.Context, userID, noteID string) error {
 	return s.removeFromRanking(ctx, perUserNotesRankingName+":"+userID, perUserNotesRankingWindow, noteID)
+}
+
+// UpdateGalleryPostsRanking adds score to postID in the gallery posts ranking
+// (upstream FeaturedService.updateGalleryPostsRanking, #1548). gallery/posts/like
+// で +1、unlike で -1 を加算する。
+func (s *Service) UpdateGalleryPostsRanking(ctx context.Context, postID string, score float64) error {
+	return s.updateRankingOf(ctx, galleryPostsRankingName, galleryPostsRankingWindow, postID, score)
+}
+
+// GetGalleryPostsRanking returns the top-threshold ranked gallery post IDs
+// (upstream FeaturedService.getGalleryPostsRanking, #1548). gallery/featured で使う。
+func (s *Service) GetGalleryPostsRanking(ctx context.Context, threshold int) ([]string, error) {
+	return s.getRankingOf(ctx, galleryPostsRankingName, galleryPostsRankingWindow, threshold)
 }

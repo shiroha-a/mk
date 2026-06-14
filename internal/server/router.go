@@ -1610,6 +1610,8 @@ func (s *Server) setupRoutes() {
 
 	// Gallery endpoints (Phase 6)
 	galleryHandler := apigallery.NewHandler(s.db, idGen)
+	galleryHandler.SetRanking(featuredService) // #1548: like/unlike/featured ランキング
+	galleryHandler.SetRoleChecker(roleService) // #1548: posts/delete モデレータ削除
 	api.POST("/gallery/featured", galleryHandler.Featured)
 	api.POST("/gallery/popular", galleryHandler.Popular)
 	api.POST("/gallery/posts", galleryHandler.Posts)
@@ -2198,6 +2200,7 @@ func (s *Server) setupRoutes() {
 	// modlog を書くため同じ service instance を共有する。
 	announcementHandler.SetModLogService(modLogService)
 	announcementHandler.SetUserRepo(userRepo)
+	galleryHandler.SetModLog(modLogService) // #1548: moderator による gallery post 削除の監査ログ
 	adminHandler.SetEmojiRepo(emojiRepo)
 	adminHandler.SetDriveFileRepo(driveFileRepo)
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で

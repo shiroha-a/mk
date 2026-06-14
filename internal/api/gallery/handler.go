@@ -1,13 +1,16 @@
 package gallery
 
 import (
+	"context"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -15,10 +18,38 @@ import (
 	"gorm.io/gorm"
 )
 
+// galleryPostsRankingWindow mirrors upstream GALLERY_POSTS_RANKING_WINDOW
+// (= 3日)。post 作成からこの期間内の like/unlike だけが featured ランキングへ
+// 反映される (#1548)。
+const galleryPostsRankingWindow = 3 * 24 * time.Hour
+
+// GalleryRanking is the subset of core/featured.Service used by gallery like /
+// unlike / featured (#1548). nil 配線時は ranking 更新を skip し、featured は
+// 空配列に degrade する。
+type GalleryRanking interface {
+	UpdateGalleryPostsRanking(ctx context.Context, postID string, score float64) error
+	GetGalleryPostsRanking(ctx context.Context, threshold int) ([]string, error)
+}
+
+// RoleChecker reports whether a user is a moderator. Satisfied by
+// *core/role.Service. nil 配線時は全員 non-moderator 扱い。
+type RoleChecker interface {
+	IsModerator(userID string) bool
+}
+
+// ModLogger records a moderation action. Satisfied by *core/moderationlog.Service.
+// nil 配線時は記録を skip する。
+type ModLogger interface {
+	Log(ctx context.Context, moderatorID string, t moderationlog.LogType, info map[string]any)
+}
+
 // Handler handles gallery-related API endpoints.
 type Handler struct {
-	db    *gorm.DB
-	idGen id.Generator
+	db      *gorm.DB
+	idGen   id.Generator
+	ranking GalleryRanking
+	roles   RoleChecker
+	modLog  ModLogger
 }
 
 // NewHandler creates a new gallery Handler.
@@ -26,18 +57,74 @@ func NewHandler(db *gorm.DB, idGen id.Generator) *Handler {
 	return &Handler{db: db, idGen: idGen}
 }
 
+// SetRanking wires the featured gallery-posts ranking used by like / unlike /
+// featured (#1548). nil disables ranking updates and degrades featured to [].
+func (h *Handler) SetRanking(r GalleryRanking) { h.ranking = r }
+
+// SetRoleChecker wires the moderator check used by posts/delete (#1548).
+func (h *Handler) SetRoleChecker(r RoleChecker) { h.roles = r }
+
+// SetModLog wires the moderation log writer used when a moderator deletes
+// another user's gallery post (#1548).
+func (h *Handler) SetModLog(m ModLogger) { h.modLog = m }
+
 // Featured handles POST /api/gallery/featured.
+//
+// upstream featured.ts は featuredService.getGalleryPostsRanking(100) (Redis
+// 時間窓ランキング) を読み、id DESC sort → untilId filter → limit slice →
+// id IN で取得して packMany する (#1548)。mk-go は upstream の 30 分メモリ
+// キャッシュは持たず毎回 Redis を読む (= 常に最新、API shape は同一)。ranking
+// 未配線時は空配列に degrade する。
 func (h *Handler) Featured(c echo.Context) error {
+	var req struct {
+		Limit   int    `json:"limit"`
+		UntilID string `json:"untilId"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	if h.ranking == nil {
+		return c.JSON(http.StatusOK, []map[string]any{})
+	}
+	ids, err := h.ranking.GetGalleryPostsRanking(c.Request().Context(), 100)
+	if err != nil || len(ids) == 0 {
+		return c.JSON(http.StatusOK, []map[string]any{})
+	}
+	// upstream は postIds を id DESC に sort してから untilId/limit を適用する。
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	if req.UntilID != "" {
+		filtered := ids[:0:0]
+		for _, pid := range ids {
+			if pid < req.UntilID {
+				filtered = append(filtered, pid)
+			}
+		}
+		ids = filtered
+	}
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	if len(ids) == 0 {
+		return c.JSON(http.StatusOK, []map[string]any{})
+	}
 	var posts []*model.GalleryPost
-	if err := h.db.Preload("User").Order("\"likedCount\" DESC").Limit(10).Find(&posts).Error; err != nil {
+	if err := h.db.Preload("User").Where("id IN ?", ids).Find(&posts).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.JSON(http.StatusOK, h.packMany(posts, middleware.GetUser(c)))
 }
 
 // Popular handles POST /api/gallery/popular.
+//
+// upstream popular.ts は likedCount>0 の post を likedCount DESC で 10 件返す
+// (#1548)。featured (Redis ランキング) とは別ロジック。
 func (h *Handler) Popular(c echo.Context) error {
-	return h.Featured(c) // 同じロジック
+	var posts []*model.GalleryPost
+	if err := h.db.Preload("User").Where("\"likedCount\" > 0").Order("\"likedCount\" DESC").Limit(10).Find(&posts).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	return c.JSON(http.StatusOK, h.packMany(posts, middleware.GetUser(c)))
 }
 
 // Posts handles POST /api/gallery/posts.
@@ -178,11 +265,40 @@ func (h *Handler) PostsDelete(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.PostID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "postId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	result := h.db.Where("id = ? AND \"userId\" = ?", req.PostID, user.ID).Delete(&model.GalleryPost{})
-	if result.RowsAffected == 0 {
+	var post model.GalleryPost
+	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "ae52f367-4bd7-4ecd-afc6-5672fff427f5"))
 	}
+	// upstream delete.ts: 所有者でもモデレータでもなければ ACCESS_DENIED。
+	// モデレータは他人の post も削除でき、その場合 moderationLog を残す (#1548)。
+	isOwner := post.UserID == user.ID
+	isModerator := h.roles != nil && h.roles.IsModerator(user.ID)
+	if !isOwner && !isModerator {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "c86e09de-1c48-43ac-a435-1c7e42ed4496"))
+	}
+	if err := h.db.Where("id = ?", post.ID).Delete(&model.GalleryPost{}).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// 他人の post をモデレータ権限で削除した場合のみ監査ログを残す。
+	if !isOwner && h.modLog != nil {
+		h.modLog.Log(c.Request().Context(), user.ID, moderationlog.LogDeleteGalleryPost, map[string]any{
+			"postId":           post.ID,
+			"postUserId":       post.UserID,
+			"postUserUsername": h.usernameOf(post.UserID),
+			"post":             h.buildPostMap(&post, h.resolveFiles(post.FileIDs), nil),
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// usernameOf returns the username for userID, or "" when the lookup fails.
+// Used to populate the moderation log info (#1548).
+func (h *Handler) usernameOf(userID string) string {
+	var u model.User
+	if err := h.db.Select("username").Where("id = ?", userID).First(&u).Error; err != nil {
+		return ""
+	}
+	return u.Username
 }
 
 // PostsUpdate handles POST /api/gallery/posts/update.
@@ -248,13 +364,37 @@ func (h *Handler) PostsLike(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.PostID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "postId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// upstream like.ts: post 不在 → NO_SUCH_POST、自分の post → YOUR_POST、
+	// 既 like → ALREADY_LIKED の順で判定する (#1548)。
+	var post model.GalleryPost
+	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "56c06af3-1287-442f-9701-c93f7c4a62ff"))
+	}
+	if post.UserID == user.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("YOUR_POST", "You cannot like your post.", "f78f1511-5ebc-4478-a888-1198d752da68"))
+	}
+	// 既 like は ALREADY_LIKED。upstream は insert 前に exists チェックするので、
+	// insert 自体の失敗 (= 想定外の DB error) は ALREADY_LIKED でなく 500 に倒す。
+	var existing int64
+	h.db.Model(&model.GalleryLike{}).Where("\"userId\" = ? AND \"postId\" = ?", user.ID, req.PostID).Count(&existing)
+	if existing > 0 {
+		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_LIKED", "Already liked.", "40e9ed56-a59c-473a-bf3f-f289c54fb5a7"))
+	}
 	like := &model.GalleryLike{
 		ID:     h.idGen.Generate(time.Now()),
 		UserID: user.ID,
 		PostID: req.PostID,
 	}
 	if err := h.db.Create(like).Error; err != nil {
-		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_LIKED", "Already liked.", "40e9ed56-a59c-473a-bf3f-f289c54fb5a7"))
+		// exists チェックを通った後の insert 失敗は競合 like の unique 違反含め
+		// 想定外。ALREADY_LIKED に丸めず INTERNAL_ERROR を返す。
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// ランキング更新は post 作成から RANKING_WINDOW 内のみ (#1548)。
+	if h.ranking != nil {
+		if t, err := h.idGen.ParseTime(post.ID); err == nil && time.Since(t) < galleryPostsRankingWindow {
+			_ = h.ranking.UpdateGalleryPostsRanking(c.Request().Context(), post.ID, 1)
+		}
 	}
 	h.db.Model(&model.GalleryPost{}).Where("id = ?", req.PostID).UpdateColumn("\"likedCount\"", gorm.Expr("\"likedCount\" + 1"))
 	return c.NoContent(http.StatusNoContent)
@@ -269,7 +409,21 @@ func (h *Handler) PostsUnlike(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.PostID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "postId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	h.db.Where("\"userId\" = ? AND \"postId\" = ?", user.ID, req.PostID).Delete(&model.GalleryLike{})
+	// upstream unlike.ts: post 不在 → NO_SUCH_POST、未 like → NOT_LIKED (#1548)。
+	var post model.GalleryPost
+	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "c32e6dd0-b555-4413-925e-b3757d19ed84"))
+	}
+	result := h.db.Where("\"userId\" = ? AND \"postId\" = ?", user.ID, req.PostID).Delete(&model.GalleryLike{})
+	if result.RowsAffected == 0 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_LIKED", "You have not liked that post.", "e3e8e06e-be37-41f7-a5b4-87a8250288f0"))
+	}
+	// ランキング更新は post 作成から RANKING_WINDOW 内のみ (#1548)。
+	if h.ranking != nil {
+		if t, err := h.idGen.ParseTime(post.ID); err == nil && time.Since(t) < galleryPostsRankingWindow {
+			_ = h.ranking.UpdateGalleryPostsRanking(c.Request().Context(), post.ID, -1)
+		}
+	}
 	h.db.Model(&model.GalleryPost{}).Where("id = ?", req.PostID).UpdateColumn("\"likedCount\"", gorm.Expr("GREATEST(\"likedCount\" - 1, 0)"))
 	return c.NoContent(http.StatusNoContent)
 }

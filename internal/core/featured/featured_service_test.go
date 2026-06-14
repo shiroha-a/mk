@@ -176,3 +176,25 @@ func TestNewService_DefaultClock(t *testing.T) {
 	require.NotNil(t, s.now)
 	assert.Positive(t, s.currentWindow(globalNotesRankingWindow))
 }
+
+// TestService_GalleryPostsRanking covers the gallery posts ranking used by
+// gallery/featured (#1548): +1 on like, -1 on unlike, score-DESC retrieval.
+func TestService_GalleryPostsRanking(t *testing.T) {
+	ctx := context.Background()
+	now := featuredEpoch.Add(80 * galleryPostsRankingWindow)
+	s := newSvc(t, now)
+
+	require.NoError(t, s.UpdateGalleryPostsRanking(ctx, "p_low", 1))
+	require.NoError(t, s.UpdateGalleryPostsRanking(ctx, "p_high", 1))
+	require.NoError(t, s.UpdateGalleryPostsRanking(ctx, "p_high", 2)) // p_high 累計 3
+
+	ids, err := s.GetGalleryPostsRanking(ctx, 100)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p_high", "p_low"}, ids)
+
+	// unlike (-1) を 2 回入れて p_high を p_low 以下に落とす。
+	require.NoError(t, s.UpdateGalleryPostsRanking(ctx, "p_high", -3))
+	ids, err = s.GetGalleryPostsRanking(ctx, 100)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p_low", "p_high"}, ids)
+}
