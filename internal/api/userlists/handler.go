@@ -59,15 +59,51 @@ func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
 
 // List handles POST /api/users/lists/list.
 //
-// upstream Misskey TS と同じ packed shape ({id, createdAt, name, userIds,
-// isPublic}) で返す (#871)。userIds は ListMembersByListIDs で 1 query batch
-// fetch する (= per-list N+1 を回避、#876)。
+// upstream list.ts は requireCredential:false で、userId(optional) 指定時は対象
+// ユーザーの public list を返す (host!=null は REMOTE_USER_NOT_ALLOWED、不在は
+// NO_SUCH_USER)。userId 未指定 && 未認証は INVALID_PARAM (#1550)。packed shape
+// ({id, createdAt, name, userIds, isPublic})、userIds は ListMembersByListIDs で
+// batch fetch (#876)。
 func (h *Handler) List(c echo.Context) error {
-	user := middleware.GetUser(c)
-	lists, err := h.repo.ListByUser(user.ID)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	viewer := middleware.GetUser(c)
+	var req struct {
+		UserID string `json:"userId"`
 	}
+	_ = c.Bind(&req) // userId は optional (upstream paramDef required:[])
+
+	var lists []*model.UserList
+	if req.UserID != "" {
+		// 対象ユーザーの public list を返す (upstream: findBy {userId, isPublic:true})。
+		if h.userRepo != nil {
+			u, uerr := h.userRepo.FindByID(req.UserID)
+			if uerr != nil || u == nil {
+				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "a8af4a82-0980-4cc4-a6af-8b0ffd54465e"))
+			}
+			if u.Host != nil && *u.Host != "" {
+				return c.JSON(http.StatusBadRequest, apierr.Error("REMOTE_USER_NOT_ALLOWED", "Not allowed to load the remote user's list", "53858f1b-3315-4a01-81b7-db9b48d4b79a"))
+			}
+		}
+		all, err := h.repo.ListByUser(req.UserID)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+		for _, l := range all {
+			if l.IsPublic {
+				lists = append(lists, l)
+			}
+		}
+	} else {
+		// userId 未指定は認証必須 (upstream: me===null なら INVALID_PARAM)。
+		if viewer == nil {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid param.", "ab36de0e-29e9-48cb-9732-d82f1281620d"))
+		}
+		var err error
+		lists, err = h.repo.ListByUser(viewer.ID)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+	}
+
 	listIDs := make([]string, 0, len(lists))
 	for _, l := range lists {
 		listIDs = append(listIDs, l.ID)
@@ -77,7 +113,7 @@ func (h *Handler) List(c echo.Context) error {
 		// repo error は best-effort で空 map にフォールバックして shape を保つ
 		// (= memberIDs helper と同 pattern、entity.PackUserList が [] で
 		// serialize する)。観測のため slog.Warn は残す。
-		slog.Warn("users/lists/list: failed to batch fetch members", "userId", user.ID, "error", err)
+		slog.Warn("users/lists/list: failed to batch fetch members", "error", err)
 		membersByList = map[string][]string{}
 	}
 	out := make([]entity.UserList, 0, len(lists))

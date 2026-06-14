@@ -46,6 +46,52 @@ func TestList_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1550: userId 指定で対象ユーザーの public list のみ返す (private は除外)。
+func TestList_ByUserIDReturnsPublicOnly(t *testing.T) {
+	h, repo := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	h.SetUserRepo(userRepo)
+	repo.Lists["pub"] = &model.UserList{ID: "pub", UserID: "u2", Name: "public", IsPublic: true}
+	repo.Lists["priv"] = &model.UserList{ID: "priv", UserID: "u2", Name: "private", IsPublic: false}
+
+	rec := doPost(h.List, `{"userId":"u2"}`, &model.User{ID: "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1, "public list のみ返る")
+	assert.Equal(t, "pub", out[0]["id"])
+}
+
+// #1550: userId 指定で対象 user が不在なら NO_SUCH_USER。
+func TestList_ByUserIDNoSuchUser(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserRepo(testutil.NewMockUserRepository())
+	rec := doPost(h.List, `{"userId":"ghost"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "a8af4a82-0980-4cc4-a6af-8b0ffd54465e")
+}
+
+// #1550: userId 指定で対象が remote user なら REMOTE_USER_NOT_ALLOWED。
+func TestList_ByUserIDRemoteUser(t *testing.T) {
+	h, _ := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	host := "remote.example"
+	require.NoError(t, userRepo.Create(&model.User{ID: "r1", Host: &host}))
+	h.SetUserRepo(userRepo)
+	rec := doPost(h.List, `{"userId":"r1"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "53858f1b-3315-4a01-81b7-db9b48d4b79a")
+}
+
+// #1550: userId 未指定 && 未認証は INVALID_PARAM。
+func TestList_NoUserIDUnauthenticated(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.List, `{}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ab36de0e-29e9-48cb-9732-d82f1281620d")
+}
+
 func TestCreate_Success(t *testing.T) {
 	h, repo := newTestHandler(t)
 	rec := doPost(h.Create, `{"name":"My List"}`, &model.User{ID: "u1"})
