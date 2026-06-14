@@ -46,6 +46,14 @@ type FollowingRepository interface {
 	// ユーザーがフォローしている = follower 側がそのホスト) ので、列は
 	// followerHost。
 	ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error)
+	// ListFollowersByHostCursor is ListFollowersByHost with id cursor pagination
+	// (sinceID/untilID) instead of offset. Used by federation/followers to match
+	// upstream makePaginationQuery (#1732)。sinceID のみ指定時は id ASC、
+	// それ以外は id DESC。
+	ListFollowersByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error)
+	// ListFollowingByHostCursor is ListFollowingByHost with id cursor pagination.
+	// Used by federation/following (#1732)。
+	ListFollowingByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error)
 	// CountRemoteFollowees returns the number of Following rows whose
 	// followeeHost is non-NULL (= remote users being followed by anyone).
 	// federation/stats の allSubCount (upstream count where followeeHost is
@@ -236,6 +244,52 @@ func (r *followingRepository) ListFollowingByHost(host string, limit, offset int
 	var rows []*model.Following
 	if err := r.db.Where(`"followerHost" = ?`, host).
 		Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListFollowersByHostCursor is the cursor-paginated variant of
+// ListFollowersByHost (federation/followers, #1732)。
+func (r *followingRepository) ListFollowersByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := r.db.Where(`"followeeHost" = ?`, host)
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	var rows []*model.Following
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListFollowingByHostCursor is the cursor-paginated variant of
+// ListFollowingByHost (federation/following, #1732)。
+func (r *followingRepository) ListFollowingByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := r.db.Where(`"followerHost" = ?`, host)
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	var rows []*model.Following
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

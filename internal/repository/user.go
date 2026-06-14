@@ -463,7 +463,28 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 	case "-follower":
 		q = q.Order(`"followersCount" ASC`)
 	default:
-		q = q.Order("id ASC")
+		// cursor 指定時は下で id order を付けるので default order は付けない。
+		if filter.SinceID == "" && filter.UntilID == "" {
+			q = q.Order("id ASC")
+		}
+	}
+
+	// cursor pagination (federation/users 等、#1732)。非空のときは Sort/Offset を
+	// 無視して id cursor で絞る (makePaginationQuery 互換)。
+	cursor := filter.SinceID != "" || filter.UntilID != ""
+	if filter.SinceID != "" {
+		q = q.Where(`"id" > ?`, filter.SinceID)
+	}
+	if filter.UntilID != "" {
+		q = q.Where(`"id" < ?`, filter.UntilID)
+	}
+	if cursor {
+		// sinceId のみ指定時は ASC、それ以外は DESC (Misskey keyset 互換)。
+		if filter.SinceID != "" && filter.UntilID == "" {
+			q = q.Order("id ASC")
+		} else {
+			q = q.Order("id DESC")
+		}
 	}
 
 	limit := filter.Limit
@@ -474,7 +495,7 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 		limit = 100
 	}
 	q = q.Limit(limit)
-	if filter.Offset > 0 {
+	if !cursor && filter.Offset > 0 {
 		q = q.Offset(filter.Offset)
 	}
 

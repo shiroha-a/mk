@@ -299,6 +299,30 @@ func (m *MockUserRepository) ListUsers(filter model.UserListFilter) ([]*model.Us
 	if limit <= 0 {
 		limit = 10
 	}
+	// cursor pagination (federation/users 等、#1732)。SinceID/UntilID 指定時は
+	// id cursor で絞り Offset を無視し、production の paginationOrder に揃えて
+	// sinceID-only は ASC、それ以外は DESC で並べる。
+	if filter.SinceID != "" || filter.UntilID != "" {
+		var filtered []*model.User
+		for _, u := range result {
+			if filter.SinceID != "" && u.ID <= filter.SinceID {
+				continue
+			}
+			if filter.UntilID != "" && u.ID >= filter.UntilID {
+				continue
+			}
+			filtered = append(filtered, u)
+		}
+		if filter.SinceID != "" && filter.UntilID == "" {
+			sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
+		} else {
+			sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].ID > filtered[j].ID })
+		}
+		if len(filtered) > limit {
+			filtered = filtered[:limit]
+		}
+		return filtered, nil
+	}
 	offset := filter.Offset
 	if offset >= len(result) {
 		return nil, nil
@@ -5234,6 +5258,51 @@ func (m *MockFollowingRepository) ListFollowingByHost(host string, limit, offset
 		}
 	}
 	return paginate(rows, limit, offset), nil
+}
+
+// hostCursorPage filters followings by a host-column selector with id cursor
+// pagination, mirroring paginationOrder (sinceID-only ASC, else DESC) (#1732)。
+func (m *MockFollowingRepository) hostCursorPage(match func(*model.Following) bool, sinceID, untilID string, limit int) []*model.Following {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var rows []*model.Following
+	for _, f := range m.Followings {
+		if !match(f) {
+			continue
+		}
+		if sinceID != "" && f.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && f.ID >= untilID {
+			continue
+		}
+		rows = append(rows, f)
+	}
+	if sinceID != "" && untilID == "" {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	} else {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
+func (m *MockFollowingRepository) ListFollowersByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	return m.hostCursorPage(func(f *model.Following) bool {
+		return f.FolloweeHost != nil && *f.FolloweeHost == host
+	}, sinceID, untilID, limit), nil
+}
+
+func (m *MockFollowingRepository) ListFollowingByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	return m.hostCursorPage(func(f *model.Following) bool {
+		return f.FollowerHost != nil && *f.FollowerHost == host
+	}, sinceID, untilID, limit), nil
 }
 
 func (m *MockFollowingRepository) CountRemoteFollowees() (int64, error) {

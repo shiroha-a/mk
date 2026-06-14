@@ -976,6 +976,42 @@ func TestUserRepository_ListUsers_RemoteOrigin(t *testing.T) {
 	assert.NotNil(t, users)
 }
 
+// ListUsers の id cursor (federation/users 等、#1732)。SinceID/UntilID 指定時は
+// Offset を無視し id 順に絞る。一意な host で seed して決定的に検証する。
+func TestUserRepository_ListUsers_Cursor(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	host := "lucursor.example"
+	tok := func(s string) *string { return &s }
+	hostP := host
+	for _, uid := range []string{"lu_cur_a", "lu_cur_b", "lu_cur_c"} {
+		u := &model.User{
+			ID: uid, Username: uid, UsernameLower: uid, Host: &hostP,
+			Token: tok("tok_" + uid), AvatarDecorations: datatypes.JSON([]byte("[]")),
+		}
+		require.NoError(t, testDB.Create(u).Error)
+		defer cleanupUser(t, uid)
+	}
+
+	f := model.UserListFilter{Origin: "remote", Hostname: host, Limit: 10}
+
+	// untilID=lu_cur_c → a, b のみ DESC で [b, a]。
+	f.UntilID = "lu_cur_c"
+	users, err := repo.ListUsers(f)
+	require.NoError(t, err)
+	require.Len(t, users, 2)
+	assert.Equal(t, "lu_cur_b", users[0].ID)
+	assert.Equal(t, "lu_cur_a", users[1].ID)
+
+	// sinceID=lu_cur_a → b, c のみ ASC で [b, c]。
+	f.UntilID = ""
+	f.SinceID = "lu_cur_a"
+	users, err = repo.ListUsers(f)
+	require.NoError(t, err)
+	require.Len(t, users, 2)
+	assert.Equal(t, "lu_cur_b", users[0].ID)
+	assert.Equal(t, "lu_cur_c", users[1].ID)
+}
+
 func TestUserRepository_ListUsers_AliveState(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	users, err := repo.ListUsers(model.UserListFilter{State: "alive", Limit: 10})
