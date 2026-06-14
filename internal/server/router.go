@@ -1940,6 +1940,9 @@ func (s *Server) setupRoutes() {
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
 	reversiPublisher := stream.NewReversiGamePublisher(streamPubSub)
 	mainStreamPublisher := stream.NewMainStreamPublisher(streamPubSub)
+	// #1549: report-abuse が各 moderator の adminStream:<id> へ newAbuseUserReport
+	// を配信できるよう admin publisher + moderator lister を usersHandler に配線。
+	usersHandler.SetAbuseReportFanout(roleService, stream.NewAdminStreamPublisher(streamPubSub))
 
 	// server / queue stats publishers (#344)。起動時から tick を回して
 	// `serverStats` / `queueStats` トピックへ定期 publish する。

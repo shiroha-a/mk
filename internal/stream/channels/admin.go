@@ -16,6 +16,7 @@ type AdminRoleChecker interface {
 type AdminChannel struct {
 	ctx         stream.ChannelContext
 	roleChecker AdminRoleChecker
+	topic       string
 	connected   bool
 }
 
@@ -44,7 +45,10 @@ func (c *AdminChannel) Init(_ json.RawMessage) error {
 		return stream.ErrInvalidParams
 	}
 	c.connected = true
-	c.ctx.Subscribe("adminStream")
+	// upstream admin.ts は per-user topic `adminStream:${userId}` を購読する
+	// (#1549)。各 moderator/admin は自分宛の newAbuseUserReport 等のみ受信する。
+	c.topic = "adminStream:" + user.ID
+	c.ctx.Subscribe(c.topic)
 	return nil
 }
 
@@ -70,7 +74,7 @@ func (c *AdminChannel) ShouldShare() bool { return true }
 func (c *AdminChannel) RequiredPermission() string { return "read:admin:stream" }
 
 func (c *AdminChannel) Dispose() {
-	if c.connected {
-		c.ctx.Unsubscribe("adminStream")
+	if c.connected && c.topic != "" {
+		c.ctx.Unsubscribe(c.topic)
 	}
 }

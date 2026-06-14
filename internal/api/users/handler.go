@@ -44,6 +44,8 @@ type Handler struct {
 	blockingRepo         repository.BlockingRepository
 	rolePolicyProvider   RolePolicyProvider
 	proxyFollow          ProxyFollowEnqueuer
+	moderatorLister      ModeratorLister
+	abuseNotifier        AbuseReportNotifier
 	mutingRepo           repository.MutingRepository
 	renoteMutingRepo     repository.RenoteMutingRepository
 	followRequestRepo    repository.FollowRequestRepository
@@ -133,6 +135,26 @@ type ModeratorChecker interface {
 // nil keeps the gate strict (= test fixture / unwired)。
 func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
 	h.moderatorChecker = m
+}
+
+// ModeratorLister lists moderator/administrator users for abuse-report fanout
+// (#1549)。実装は core/role.Service.GetModerators。
+type ModeratorLister interface {
+	GetModerators() ([]*model.User, error)
+}
+
+// AbuseReportNotifier publishes admin stream events (newAbuseUserReport) to a
+// moderator's per-user admin stream (#1549)。実装は stream.AdminStreamPublisher。
+type AbuseReportNotifier interface {
+	PublishAdminEvent(userID, eventType string, body any)
+}
+
+// SetAbuseReportFanout wires the moderator lister + admin event notifier so
+// report-abuse fans out newAbuseUserReport to every moderator/admin (#1549).
+// 片方でも nil なら fanout を skip する (= test / 旧挙動)。
+func (h *Handler) SetAbuseReportFanout(lister ModeratorLister, notifier AbuseReportNotifier) {
+	h.moderatorLister = lister
+	h.abuseNotifier = notifier
 }
 
 // SetUserRepo wires a UserRepository so users/notes filters out notes that

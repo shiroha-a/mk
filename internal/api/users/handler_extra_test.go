@@ -202,6 +202,32 @@ func TestReportAbuse_NilRepo(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// #1549: report-abuse は各 moderator の adminStream へ newAbuseUserReport を配信。
+type stubModeratorLister struct{ mods []*model.User }
+
+func (s stubModeratorLister) GetModerators() ([]*model.User, error) { return s.mods, nil }
+
+type stubAbuseNotifier struct {
+	calls []struct{ userID, eventType string }
+}
+
+func (s *stubAbuseNotifier) PublishAdminEvent(userID, eventType string, _ any) {
+	s.calls = append(s.calls, struct{ userID, eventType string }{userID, eventType})
+}
+
+func TestReportAbuse_NotifiesModerators(t *testing.T) {
+	h, _, _ := newExtraHandler(t)
+	notifier := &stubAbuseNotifier{}
+	h.SetAbuseReportFanout(stubModeratorLister{mods: []*model.User{{ID: "mod1"}, {ID: "mod2"}}}, notifier)
+
+	rec := postExtra(h.ReportAbuse, `{"userId":"u2","comment":"spam"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, notifier.calls, 2)
+	assert.Equal(t, "newAbuseUserReport", notifier.calls[0].eventType)
+	assert.ElementsMatch(t, []string{"mod1", "mod2"},
+		[]string{notifier.calls[0].userID, notifier.calls[1].userID})
+}
+
 // --- Reactions ---
 
 func TestReactions_Success(t *testing.T) {

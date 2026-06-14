@@ -618,7 +618,8 @@ func TestAdmin_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "admin1"})
 	ch := newAdminCh(ctx, true)
 	ch.Init(nil)
-	assert.Equal(t, []string{"adminStream"}, ctx.subs)
+	// #1549: per-user topic adminStream:<userId> を購読する。
+	assert.Equal(t, []string{"adminStream:admin1"}, ctx.subs)
 
 	// エンベロープ展開
 	ch.OnRedisEvent([]byte(`{"type":"newReport","body":{"id":"r1"}}`))
@@ -626,7 +627,7 @@ func TestAdmin_Lifecycle(t *testing.T) {
 	assert.Equal(t, "newReport", ctx.sentType[0])
 
 	ch.Dispose()
-	assert.Equal(t, []string{"adminStream"}, ctx.unsubs)
+	assert.Equal(t, []string{"adminStream:admin1"}, ctx.unsubs)
 }
 
 func TestAdmin_NoAuth(t *testing.T) {

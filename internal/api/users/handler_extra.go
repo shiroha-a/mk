@@ -199,7 +199,36 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 	if err := h.abuseRepo.Create(report); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// 各 moderator/admin の admin stream へ newAbuseUserReport を配信する
+	// (#1549, upstream AbuseReportNotificationService)。best-effort。
+	h.notifyModeratorsOfAbuseReport(report)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// notifyModeratorsOfAbuseReport publishes a newAbuseUserReport admin stream
+// event to every moderator/administrator (#1549)。lister / notifier 未配線時は
+// no-op。失敗は best-effort で握り潰す (report 自体は永続化済)。
+func (h *Handler) notifyModeratorsOfAbuseReport(report *model.AbuseUserReport) {
+	if h.moderatorLister == nil || h.abuseNotifier == nil {
+		return
+	}
+	mods, err := h.moderatorLister.GetModerators()
+	if err != nil {
+		slog.Warn("report-abuse: list moderators failed", "err", err)
+		return
+	}
+	// upstream AbuseReportNotificationService.notifyAdminStream は
+	// {id, targetUserId, reporterId, comment} のみを送る (misskey-js
+	// newAbuseUserReport 型も同4 field)。shape を厳密に揃える。
+	body := map[string]any{
+		"id":           report.ID,
+		"targetUserId": report.TargetUserID,
+		"reporterId":   report.ReporterID,
+		"comment":      report.Comment,
+	}
+	for _, m := range mods {
+		h.abuseNotifier.PublishAdminEvent(m.ID, "newAbuseUserReport", body)
+	}
 }
 
 // Reactions handles POST /api/users/reactions.
