@@ -110,15 +110,30 @@ func TestChatRepository_Messages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, dms2, 1)
 
-	// SearchMessages
-	results, err := repo.SearchMessages(user1.ID, "dm", 10)
+	// SearchMessages - default scope (own 1-on-1 + member/owned rooms)
+	results, err := repo.SearchMessages(user1.ID, "dm", 10, "", "")
 	require.NoError(t, err)
 	assert.Len(t, results, 1)
 
 	// SearchMessages - default limit
-	results2, err := repo.SearchMessages(user1.ID, "dm", 0)
+	results2, err := repo.SearchMessages(user1.ID, "dm", 0, "", "")
 	require.NoError(t, err)
 	assert.Len(t, results2, 1)
+
+	// SearchMessages - userId scope (1-on-1 with user2)
+	byUser, err := repo.SearchMessages(user1.ID, "dm", 10, user2.ID, "")
+	require.NoError(t, err)
+	assert.Len(t, byUser, 1)
+
+	// SearchMessages - roomId scope (room message "hello")
+	byRoom, err := repo.SearchMessages(user1.ID, "hello", 10, "", room.ID)
+	require.NoError(t, err)
+	assert.Len(t, byRoom, 1)
+
+	// SearchMessages - default scope finds the owned-room message too
+	byOwned, err := repo.SearchMessages(user1.ID, "hello", 10, "", "")
+	require.NoError(t, err)
+	assert.Len(t, byOwned, 1)
 
 	// MarkRead
 	require.NoError(t, repo.MarkRead(user2.ID, "cm_2"))

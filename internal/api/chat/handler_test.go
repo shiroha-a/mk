@@ -375,7 +375,7 @@ type mockMsgRepo struct{ *testutil.MockChatRepository }
 func (m *mockMsgRepo) ListMessagesByRoom(_ string, _ int) ([]*model.ChatMessage, error) {
 	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
 }
-func (m *mockMsgRepo) SearchMessages(_, _ string, _ int) ([]*model.ChatMessage, error) {
+func (m *mockMsgRepo) SearchMessages(_, _ string, _ int, _, _ string) ([]*model.ChatMessage, error) {
 	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
 }
 
@@ -738,6 +738,54 @@ func TestMessagesSearch(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1541: roomId 指定で存在しない room は NO_SUCH_ROOM。
+func TestMessagesSearch_RoomNotFound(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.MessagesSearch, `{"query":"x","roomId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "460b3669-81b0-4dc9-a997-44442141bf83")
+}
+
+// #1541: roomId 指定で非 member の room も NO_SUCH_ROOM。
+func TestMessagesSearch_RoomNotMember(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
+	rec := post(h.MessagesSearch, `{"query":"x","roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "460b3669-81b0-4dc9-a997-44442141bf83")
+}
+
+// #1541: member であれば roomId scope で検索でき、その room のメッセージを返す。
+func TestMessagesSearch_RoomScoped(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	roomID := "r1"
+	txt := "hello room"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Text: &txt, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	rec := post(h.MessagesSearch, `{"query":"hello","roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1)
+}
+
+// #1541: userId scope は相手との 1-on-1 のみを返す。
+func TestMessagesSearch_UserScoped(t *testing.T) {
+	h, repo := newTestHandler()
+	to := "u2"
+	txt := "hi bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: u1.ID, ToUserID: &to, Text: &txt, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	// 別人との DM はヒットしない。
+	other := "u3"
+	txt2 := "hi carol"
+	repo.Messages["m2"] = &model.ChatMessage{ID: "m2", FromUserID: u1.ID, ToUserID: &other, Text: &txt2, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	rec := post(h.MessagesSearch, `{"query":"hi","userId":"u2"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1)
+}
+
 func TestReactionsCreate(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	// missing params → 400
@@ -1062,6 +1110,25 @@ func TestUserTimeline_MarksReadOnOpen(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "u1", spy.markFromUserCalled.reader)
 	assert.Equal(t, "u_other", spy.markFromUserCalled.fromUser)
+}
+
+// #1541: userRepo 配線時、存在しない userId は NO_SUCH_USER を返す。
+func TestUserTimeline_NoSuchUser(t *testing.T) {
+	h, _ := newTestHandler()
+	h.SetUserRepo(testutil.NewMockUserRepository()) // 空 (u_ghost 未登録)
+	rec := post(h.UserTimeline, `{"userId":"u_ghost"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_USER", "11795c64-40ea-4198-b06e-3c873ed9039d")
+}
+
+// #1541: userId が存在すれば従来どおり 200。
+func TestUserTimeline_UserExists(t *testing.T) {
+	h, _ := newTestHandler()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	rec := post(h.UserTimeline, `{"userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestRoomTimeline_MarksReadOnOpen(t *testing.T) {

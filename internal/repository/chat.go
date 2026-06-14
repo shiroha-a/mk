@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -27,7 +29,7 @@ type ChatRepository interface {
 	// file, newest-first, with id-cursor pagination. Used by
 	// drive/files/attached-chat-messages.
 	ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error)
-	SearchMessages(userID, query string, limit int) ([]*model.ChatMessage, error)
+	SearchMessages(meID, query string, limit int, userID, roomID string) ([]*model.ChatMessage, error)
 
 	// Membership operations
 	CreateMembership(m *model.ChatRoomMembership) error
@@ -211,14 +213,38 @@ func (r *chatRepository) ListMessagesByUser(userID, otherUserID string, limit in
 	return msgs, nil
 }
 
-func (r *chatRepository) SearchMessages(userID, query string, limit int) ([]*model.ChatMessage, error) {
+// SearchMessages mirrors upstream ChatService.searchMessages: when userID is
+// set it scopes to the 1-on-1 conversation with that user, when roomID is set
+// it scopes to that room, and otherwise it covers every message the viewer can
+// see (own 1-on-1 messages + rooms they are a member of or own). The membership
+// + NO_SUCH_ROOM gate for roomID is enforced by the handler before this is
+// reached (upstream search.ts).
+func (r *chatRepository) SearchMessages(meID, query string, limit int, userID, roomID string) ([]*model.ChatMessage, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = 10
 	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := r.db.Preload("FromUser").Preload("ToUser").Preload("ToRoom").Preload("ToRoom.Owner").Preload("File")
+	switch {
+	case userID != "":
+		q = q.Where(`("fromUserId" = ? AND "toUserId" = ?) OR ("fromUserId" = ? AND "toUserId" = ?)`,
+			meID, userID, userID, meID)
+	case roomID != "":
+		q = q.Where(`"toRoomId" = ?`, roomID)
+	default:
+		// 自分の 1-on-1 + 所属 / 所有 room のメッセージを対象にする
+		// (upstream の membership / owned-room サブクエリ相当)。
+		memberSub := r.db.Model(&model.ChatRoomMembership{}).Select(`"roomId"`).Where(`"userId" = ?`, meID)
+		ownedSub := r.db.Model(&model.ChatRoom{}).Select(`"id"`).Where(`"ownerId" = ?`, meID)
+		q = q.Where(`"fromUserId" = ? OR "toUserId" = ? OR "toRoomId" IN (?) OR "toRoomId" IN (?)`,
+			meID, meID, memberSub, ownedSub)
+	}
+	// LIKE metacharacter を escape して literal 一致にする (upstream sqlLikeEscape)。
+	q = q.Where(`LOWER("text") LIKE ?`, "%"+escapeLike(strings.ToLower(query))+"%")
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("File").
-		Where(`("fromUserId" = ? OR "toUserId" = ?) AND "text" ILIKE ?`, userID, userID, "%"+query+"%").
-		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
+	if err := q.Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
