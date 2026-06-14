@@ -158,7 +158,7 @@ func TestErrorPaths_CancelledContext(t *testing.T) {
 	assert.Error(t, err)
 	_, err = cr.ListMessagesByUser("x", "y", 10)
 	assert.Error(t, err)
-	_, err = cr.SearchMessages("x", "q", 10)
+	_, err = cr.SearchMessages("x", "q", 10, "", "")
 	assert.Error(t, err)
 	_, err = cr.ListMembersByRoom("x")
 	assert.Error(t, err)

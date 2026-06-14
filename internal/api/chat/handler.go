@@ -1000,13 +1000,24 @@ func (h *Handler) Messages(c echo.Context) error {
 func (h *Handler) MessagesSearch(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Query  string `json:"query"`
+		Limit  int    `json:"limit"`
+		UserID string `json:"userId"`
+		RoomID string `json:"roomId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	msgs, _ := h.repo.SearchMessages(user.ID, req.Query, req.Limit)
+	// roomId 指定時は upstream search.ts と同じく room が存在し、かつ自分が member
+	// (owner 含む) でなければ NO_SUCH_ROOM を返す (存在しない room も非 member も
+	// 同じ code)。
+	if req.RoomID != "" {
+		room, err := h.repo.FindRoomByID(req.RoomID)
+		if err != nil || !h.isRoomMember(room, user.ID) {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "460b3669-81b0-4dc9-a997-44442141bf83"))
+		}
+	}
+	msgs, _ := h.repo.SearchMessages(user.ID, req.Query, req.Limit, req.UserID, req.RoomID)
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
 		result[i] = h.packMessageDetailed(m, user.ID)
@@ -1262,6 +1273,13 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// upstream user-timeline.ts は getUser(userId) で相手を解決し、不在なら
+	// NO_SUCH_USER を返す。userRepo 未配線 (legacy test) は検証 skip。
+	if h.userRepo != nil {
+		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
+		}
 	}
 	if req.Limit <= 0 {
 		req.Limit = 10

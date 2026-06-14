@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -208,8 +209,49 @@ func (m *MockChatRepository) ListMessagesByFileID(fileID, untilID, sinceID strin
 	return out, nil
 }
 
-func (m *MockChatRepository) SearchMessages(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
+func (m *MockChatRepository) SearchMessages(meID, query string, limit int, userID, roomID string) ([]*model.ChatMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	q := strings.ToLower(query)
+	var out []*model.ChatMessage
+	for _, msg := range m.Messages {
+		if msg.Text == nil || !strings.Contains(strings.ToLower(*msg.Text), q) {
+			continue
+		}
+		match := false
+		switch {
+		case userID != "":
+			match = (msg.FromUserID == meID && msg.ToUserID != nil && *msg.ToUserID == userID) ||
+				(msg.FromUserID == userID && msg.ToUserID != nil && *msg.ToUserID == meID)
+		case roomID != "":
+			match = msg.ToRoomID != nil && *msg.ToRoomID == roomID
+		default:
+			switch {
+			case msg.FromUserID == meID:
+				match = true
+			case msg.ToUserID != nil && *msg.ToUserID == meID:
+				match = true
+			case msg.ToRoomID != nil:
+				if _, ok := m.Memberships[membershipKey(meID, *msg.ToRoomID)]; ok {
+					match = true
+				} else if r, ok := m.Rooms[*msg.ToRoomID]; ok && r.OwnerID == meID {
+					match = true
+				}
+			}
+		}
+		if match {
+			cp := *msg
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // --- Memberships ---
