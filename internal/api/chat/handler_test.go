@@ -543,6 +543,112 @@ func TestMessagesCreate_Service_RoomForbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// --- #1541: create-message input validation ---
+
+// CONTENT_REQUIRED は text も file も無い場合に発火する (create-to-user)。
+func TestMessagesCreate_ContentRequired_ToUser(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	rec := post(h.MessagesCreate, `{"toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "CONTENT_REQUIRED", "25587321-b0e6-449c-9239-f8925092942c")
+}
+
+// CONTENT_REQUIRED は create-to-room では別 golden id を返す。
+func TestMessagesCreate_ContentRequired_ToRoom(t *testing.T) {
+	h, repo := newHandlerWithService(t)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	rec := post(h.MessagesCreate, `{"toRoomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "CONTENT_REQUIRED", "340517b7-6d04-42c0-bac1-37ee804e3594")
+}
+
+// fileId だけ与えれば CONTENT_REQUIRED は発火しない (file が content を満たす)。
+func TestMessagesCreate_FileOnly_NoContentRequired(t *testing.T) {
+	h, repo := newHandlerWithService(t)
+	fileRepo := testutil.NewMockDriveFileRepository()
+	owner := u1.ID
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
+	h.SetDriveFileRepo(fileRepo)
+	rec := post(h.MessagesCreate, `{"toUserId":"u2","fileId":"f1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, repo.Messages, 1)
+}
+
+// RECIPIENT_IS_YOURSELF は自分宛 DM を弾く。
+func TestMessagesCreate_RecipientIsYourself(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u1"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "RECIPIENT_IS_YOURSELF", "17e2ba79-e22a-4cbc-bf91-d327643f4a7e")
+}
+
+// NO_SUCH_FILE は存在しない fileId を弾く (create-to-user golden)。
+func TestMessagesCreate_NoSuchFile_ToUser(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
+	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u2","fileId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_FILE", "4372b8e2-185d-4146-8749-2f68864a3e5f")
+}
+
+// NO_SUCH_FILE は他人所有の file も弾く (create-to-room golden)。
+func TestMessagesCreate_NoSuchFile_ToRoom_NotOwner(t *testing.T) {
+	h, repo := newHandlerWithService(t)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	fileRepo := testutil.NewMockDriveFileRepository()
+	other := "otherUser"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &other}
+	h.SetDriveFileRepo(fileRepo)
+	rec := post(h.MessagesCreate, `{"text":"hi","toRoomId":"r1","fileId":"f1"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_FILE", "b6accbd3-1d7b-4d9f-bdb7-eb185bac06db")
+}
+
+// text maxLength(2000) 超過は INVALID_PARAM。
+func TestMessagesCreate_TextTooLong(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	long := strings.Repeat("a", 2001)
+	rec := post(h.MessagesCreate, `{"text":"`+long+`","toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "INVALID_PARAM", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8")
+}
+
+// text は trim されて保存される (前後の空白除去)。
+func TestMessagesCreate_TextTrimmed(t *testing.T) {
+	h, repo := newHandlerWithService(t)
+	rec := post(h.MessagesCreate, `{"text":"  hi  ","toUserId":"u2"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, repo.Messages, 1)
+	for _, m := range repo.Messages {
+		require.NotNil(t, m.Text)
+		assert.Equal(t, "hi", *m.Text)
+	}
+}
+
+// RoomsCreate の name / description maxLength 超過は INVALID_PARAM。
+func TestRoomsCreate_NameTooLong(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.RoomsCreate, `{"name":"`+strings.Repeat("a", 257)+`"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "INVALID_PARAM", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8")
+}
+
+func TestRoomsCreate_DescriptionTooLong(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.RoomsCreate, `{"name":"ok","description":"`+strings.Repeat("a", 1025)+`"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "INVALID_PARAM", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8")
+}
+
+// RoomsUpdate も同じく maxLength を強制する。
+func TestRoomsUpdate_DescriptionTooLong(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	rec := post(h.RoomsUpdate, `{"roomId":"r1","description":"`+strings.Repeat("a", 1025)+`"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "INVALID_PARAM", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8")
+}
+
 func TestMessagesDelete_Service(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	toID := "u2"

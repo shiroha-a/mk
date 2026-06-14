@@ -319,6 +319,8 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 		FromUserID: fromUserID,
 		ToUserID:   &toUserID,
 	}
+	// upstream は text.trim() を保存する (ChatService.createMessageToUser)。
+	text = strings.TrimSpace(text)
 	if text != "" {
 		msg.Text = &text
 	}
@@ -664,6 +666,8 @@ func (s *Service) CreateMessageToRoom(ctx context.Context, fromUserID, roomID, t
 		FromUserID: fromUserID,
 		ToRoomID:   &roomID,
 	}
+	// upstream は text.trim() を保存する (ChatService.createMessageToRoom)。
+	text = strings.TrimSpace(text)
 	if text != "" {
 		msg.Text = &text
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -513,6 +514,11 @@ func (h *Handler) RoomsCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
+	// upstream paramDef は name maxLength:256 / description maxLength:1024
+	// (chat/rooms/create.ts)。超過は schema validation で弾かれるため INVALID_PARAM。
+	if utf8.RuneCountInString(req.Name) > 256 || utf8.RuneCountInString(req.Description) > 1024 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name or description is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
 	room := &model.ChatRoom{
 		ID: h.idGen.Generate(time.Now()), Name: req.Name,
 		OwnerID: user.ID, Description: req.Description,
@@ -564,6 +570,11 @@ func (h *Handler) RoomsUpdate(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// upstream paramDef は name maxLength:256 / description maxLength:1024
+	// (chat/rooms/update.ts)。
+	if utf8.RuneCountInString(req.Name) > 256 || utf8.RuneCountInString(req.Description) > 1024 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name or description is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
@@ -721,25 +732,63 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		// 未wire時のフォールバック (テスト互換)
 		return h.messagesCreateLegacy(c, user, req.Text, req.ToUserID, req.ToRoomID, req.FileID)
 	}
+	// upstream は create-to-user / create-to-room の 2 endpoint に分かれ、検証順と
+	// golden error id が異なる。mk-go は単一 handler で分岐するため、先に宛先種別を
+	// 確定し以降の error id を切り替える (#1541)。
+	toRoom := req.ToRoomID != nil && *req.ToRoomID != ""
+	toUser := req.ToUserID != nil && *req.ToUserID != ""
+	if !toRoom && !toUser {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// create-to-user / create-to-room で CONTENT_REQUIRED / NO_SUCH_FILE の id が
+	// 異なる (golden_error_ids.json)。
+	contentRequiredID := "25587321-b0e6-449c-9239-f8925092942c"
+	noSuchFileID := "4372b8e2-185d-4146-8749-2f68864a3e5f"
+	if toRoom {
+		contentRequiredID = "340517b7-6d04-42c0-bac1-37ee804e3594"
+		noSuchFileID = "b6accbd3-1d7b-4d9f-bdb7-eb185bac06db"
+	}
+
 	text := ""
 	if req.Text != nil {
 		text = *req.Text
+	}
+	// upstream paramDef は text maxLength:2000 (create-to-user.ts/create-to-room.ts)。
+	// 超過は schema validation 段階で弾かれるため INVALID_PARAM 相当で reject する。
+	if utf8.RuneCountInString(text) > 2000 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "text is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	fileID := ""
 	if req.FileID != nil {
 		fileID = *req.FileID
 	}
+	// NO_SUCH_FILE: upstream は driveFilesRepository.findOneBy({id:fileId,userId:me})
+	// が null なら noSuchFile を投げる。所有者でない / 存在しない fileId を弾く。
+	// fileRepo 未配線 (legacy test) は素通しする。
+	if fileID != "" && h.fileRepo != nil {
+		f, ferr := h.fileRepo.FindByID(fileID)
+		if ferr != nil || f.UserID == nil || *f.UserID != user.ID {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", noSuchFileID))
+		}
+	}
+	// CONTENT_REQUIRED: upstream は text==null && file==null を弾く (text=="" でも
+	// null でなければ許容する挙動に合わせ、req.Text が nil の場合のみ無 text とみなす)。
+	if req.Text == nil && fileID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("CONTENT_REQUIRED", "Content required. You need to set text or fileId.", contentRequiredID))
+	}
+
 	var (
 		msg *model.ChatMessage
 		err error
 	)
-	switch {
-	case req.ToRoomID != nil && *req.ToRoomID != "":
+	if toRoom {
 		msg, err = h.svc.CreateMessageToRoom(c.Request().Context(), user.ID, *req.ToRoomID, text, fileID)
-	case req.ToUserID != nil && *req.ToUserID != "":
+	} else {
+		// RECIPIENT_IS_YOURSELF: 自分宛 DM は upstream で recipientIsYourself。
+		if *req.ToUserID == user.ID {
+			return c.JSON(http.StatusBadRequest, apierr.Error("RECIPIENT_IS_YOURSELF", "Cannot send a message to yourself.", "17e2ba79-e22a-4cbc-bf91-d327643f4a7e"))
+		}
 		msg, err = h.svc.CreateMessageToUser(c.Request().Context(), user.ID, *req.ToUserID, text, fileID)
-	default:
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	if err != nil {
 		return h.mapChatErr(c, err)
