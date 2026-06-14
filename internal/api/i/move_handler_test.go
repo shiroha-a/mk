@@ -29,12 +29,65 @@ func (s *stubMover) Move(src *model.User, dstURI string) error {
 func TestMove_InvalidParam(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetAccountMover(&stubMover{})
-	// moveToAccount 欠落
+	// moveToAccount 欠落は 400 (#1546: password は任意なので password だけでも moveToAccount 無しは 400)。
 	assert.Equal(t, http.StatusBadRequest, post(h.Move, `{"password":"pw"}`, &model.User{ID: "me"}).Code)
-	// password 欠落
-	assert.Equal(t, http.StatusBadRequest, post(h.Move, `{"moveToAccount":"https://x"}`, &model.User{ID: "me"}).Code)
-	// 両方欠落
 	assert.Equal(t, http.StatusBadRequest, post(h.Move, `{}`, &model.User{ID: "me"}).Code)
+}
+
+// #1546: password は任意。未指定でも 400 にならず移行が進む (upstream は password
+// param を持たず secure:true session 検証で代替するため)。
+func TestMove_PasswordOptional(t *testing.T) {
+	h, user, setMover := moveHandlerWithPasswordUser(t)
+	sm := &stubMover{}
+	setMover(sm)
+	// password を送らない。
+	rec := post(h.Move, `{"moveToAccount":"https://other.example/users/x"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, sm.called)
+	assert.Equal(t, "https://other.example/users/x", sm.gotURI)
+}
+
+// #1546: root ユーザーは移行不可 (NOT_ROOT_FORBIDDEN)。
+func TestMove_RootForbidden(t *testing.T) {
+	h, _, setMover := moveHandlerWithPasswordUser(t)
+	sm := &stubMover{}
+	setMover(sm)
+	root := &model.User{ID: "me", Username: "me", IsRoot: true}
+	rec := post(h.Move, `{"moveToAccount":"https://x","password":"pw"}`, root)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_ROOT_FORBIDDEN")
+	assert.Contains(t, rec.Body.String(), "4362e8dc-731f-4ad8-a694-be2a88922a24")
+	assert.False(t, sm.called)
+}
+
+// #1546: acct 形式 (@user@host) は canonical URI へ解決してから mover に渡す。
+func TestMove_AcctFormatResolved(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "me", Username: "me"}
+	userRepo.Users["me"] = user
+	// 移行先 remote user を local DB に用意し、acct → URI 解決させる。
+	host := "remote.example"
+	uri := "https://remote.example/users/bob"
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob", Host: &host, URI: &uri}
+	h.SetUserRepo(userRepo)
+	sm := &stubMover{}
+	h.SetAccountMover(sm)
+	rec := post(h.Move, `{"moveToAccount":"@bob@remote.example"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, sm.called)
+	assert.Equal(t, "https://remote.example/users/bob", sm.gotURI)
+}
+
+// acct を解決できなければ NO_SUCH_USER。
+func TestMove_AcctFormatNotFound(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "me", Username: "me"}
+	userRepo.Users["me"] = user
+	h.SetUserRepo(userRepo)
+	h.SetAccountMover(&stubMover{})
+	rec := post(h.Move, `{"moveToAccount":"@ghost@remote.example"}`, user)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 }
 
 func TestMove_NoProfile(t *testing.T) {
