@@ -296,6 +296,8 @@ func (h *Handler) Push(c echo.Context) error {
 		ID:         h.idGen.Generate(time.Now()),
 		UserListID: req.ListID,
 		UserID:     req.UserID,
+		// upstream addMember は userListUserId に list owner を入れる (#1550)。
+		UserListUserID: &list.UserID,
 	}
 	if err := h.repo.AddMember(m); err != nil {
 		// 既 member への push は TS 互換の ALREADY_ADDED (HTTP 400) で
@@ -327,6 +329,14 @@ func (h *Handler) Pull(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	if viewer == nil || list.UserID != viewer.ID {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+	}
+	// upstream pull.ts は removeMember 前に対象 user の存在を getterService.getUser
+	// で検証し、不在なら NO_SUCH_USER を返す (#1550)。userRepo 未配線の test 経路
+	// では skip する。
+	if h.userRepo != nil {
+		if _, uerr := h.userRepo.FindByID(req.UserID); uerr != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
+		}
 	}
 	if err := h.repo.RemoveMember(req.ListID, req.UserID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

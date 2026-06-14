@@ -118,6 +118,8 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 			ID:         h.idGen.Generate(time.Now()),
 			UserListID: newList.ID,
 			UserID:     m.UserID,
+			// upstream addMember は userListUserId に list owner を入れる (#1550)。
+			UserListUserID: &newList.UserID,
 		}
 		if aerr := h.userListRepo.AddMember(mb); aerr != nil {
 			// 既 member は ALREADY_ADDED (copy 元が unique なら通常起きない、defensive)。

@@ -165,6 +165,41 @@ func TestPull_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1550: pull は removeMember 前に対象 user 存在を検証し不在なら NO_SUCH_USER。
+func TestPull_NoSuchUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	h.SetUserRepo(testutil.NewMockUserRepository()) // u2 未登録
+	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "588e7f72-c744-4a61-b180-d354e912bda2")
+}
+
+func TestPull_UserExistsSucceeds(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	h.SetUserRepo(userRepo)
+	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// #1550: push は membership.userListUserId に list owner を設定する。
+func TestPush_SetsUserListUserID(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, repo.Members, 1)
+	require.NotNil(t, repo.Members[0].UserListUserID)
+	assert.Equal(t, "owner", *repo.Members[0].UserListUserID)
+}
+
 func TestDelete_Success(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}

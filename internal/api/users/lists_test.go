@@ -351,6 +351,25 @@ func TestListsCreateFromPublic_FullCopiesMembers(t *testing.T) {
 	assert.NotContains(t, resp, "userId")
 }
 
+// #1550: create-from-public は copy した membership の userListUserId に新 list の
+// owner を設定する。
+func TestListsCreateFromPublic_SetsUserListUserID(t *testing.T) {
+	h, listRepo, userRepo, _, _ := newListsHandlerFull(t)
+	seedPublicSrc(t, listRepo, userRepo, "src", "m1")
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	// copy された membership (UserID=m1) の userListUserId が owner "me"。
+	var found *model.UserListMembership
+	for _, m := range listRepo.Members {
+		if m.UserID == "m1" && m.UserListID != "src" {
+			found = m
+		}
+	}
+	require.NotNil(t, found, "copy された m1 membership が存在する")
+	require.NotNil(t, found.UserListUserID)
+	assert.Equal(t, "me", *found.UserListUserID)
+}
+
 func TestListsCreateFromPublic_TooManyUserLists(t *testing.T) {
 	h, listRepo, userRepo, _, policy := newListsHandlerFull(t)
 	seedPublicSrc(t, listRepo, userRepo, "src")
