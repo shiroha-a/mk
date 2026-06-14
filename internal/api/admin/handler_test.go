@@ -1870,6 +1870,13 @@ type stubSystemWebhookDispatcher struct {
 		body      any
 		excludes  []string
 	}
+	testCalls []struct {
+		webhookID      string
+		eventType      string
+		body           any
+		overrideURL    string
+		overrideSecret string
+	}
 }
 
 func (s *stubSystemWebhookDispatcher) DispatchSystemExcluding(eventType string, body any, excludes []string) {
@@ -1878,6 +1885,16 @@ func (s *stubSystemWebhookDispatcher) DispatchSystemExcluding(eventType string, 
 		body      any
 		excludes  []string
 	}{eventType, body, excludes})
+}
+
+func (s *stubSystemWebhookDispatcher) DispatchSystemTest(webhookID, eventType string, body any, overrideURL, overrideSecret string) {
+	s.testCalls = append(s.testCalls, struct {
+		webhookID      string
+		eventType      string
+		body           any
+		overrideURL    string
+		overrideSecret string
+	}{webhookID, eventType, body, overrideURL, overrideSecret})
 }
 
 // resolve は abuseReportResolved system webhook を発火し、inactive な

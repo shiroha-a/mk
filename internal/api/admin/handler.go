@@ -135,11 +135,6 @@ type Handler struct {
 	// log type 分岐をテストするため、`adminDB` 直叩きから repository 経由
 	// に剥がしている。未配線時は `adminDB` フォールバックは持たず no-op。
 	instanceRepo repository.InstanceRepository
-	// webhookTestClient は admin/system-webhook/test の fire-and-forget POST
-	// に使う SSRF-safe HTTP client。router.go で safehttp.WithProxy など共通
-	// outbound 設定を適用したものを差し込む (#638)。nil のときは default の
-	// 10s timeout client にフォールバックする (テスト容易性のため)。
-	webhookTestClient *http.Client
 	// userTokenInvalidator は admin が他 user を suspend / unsuspend /
 	// 論理削除した直後に target user の全 tokenCache entry を即時失効する
 	// ために使う (#965)。i/regenerate-token (#884) や i/update (#960) と
@@ -236,14 +231,6 @@ func (h *Handler) SetSystemWebhookRepo(r repository.SystemWebhookRepository) {
 	h.systemWebhookRepo = r
 }
 
-// SetWebhookTestClient attaches an SSRF-safe HTTP client used by
-// admin/system-webhook/test to POST a fire-and-forget probe request.
-// Typically wired with the server-wide outbound transport (forward proxy,
-// outgoing address, allowedPrivateNetworks 等を反映、#638)。
-func (h *Handler) SetWebhookTestClient(c *http.Client) {
-	h.webhookTestClient = c
-}
-
 // SetInstanceMetadataFetcher attaches the fetcher used by
 // admin/federation/refresh-remote-instance-metadata to re-fetch nodeinfo +
 // icon for a specific host on demand.
@@ -296,6 +283,9 @@ func (h *Handler) SetRecipientRepo(r repository.AbuseReportNotificationRecipient
 // (#1723).
 type SystemWebhookDispatcher interface {
 	DispatchSystemExcluding(eventType string, body any, excludes []string)
+	// DispatchSystemTest enqueues a single test delivery to a system webhook
+	// (admin/system-webhook/test, #1542). overrideURL/Secret が非空ならそちらへ。
+	DispatchSystemTest(webhookID, eventType string, body any, overrideURL, overrideSecret string)
 }
 
 // SetSystemWebhookDispatcher wires the system webhook dispatcher used to emit
