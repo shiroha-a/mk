@@ -26,6 +26,7 @@ type MockDriveFileRepository struct {
 	// テストするための注入フィールド。nil なら通常動作。
 	ListRemoteCacheErr error
 	ListByUserAllErr   error
+	ListOrphansErr     error
 	DeleteByIDsErr     error
 	// DeleteByIDsNoOp を true にすると DeleteByIDs が err=nil で 0 件削除する
 	// (= 行が縮小しない degenerate ケース。maxBatches 安全弁の終了性検証用)。
@@ -512,6 +513,30 @@ func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 		n++
 	}
 	return n, nil
+}
+
+// ListOrphans mirrors DeleteOrphans's selection without deleting (#1724).
+func (m *MockDriveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, error) {
+	if m.ListOrphansErr != nil {
+		return nil, m.ListOrphansErr
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	var out []*model.DriveFile
+	for _, f := range m.Files {
+		if f.UserID != nil {
+			continue
+		}
+		if m.EmojiReferencedURLs[f.URL] {
+			continue
+		}
+		out = append(out, f)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *MockDriveFileRepository) DeleteRemoteCache() (int64, error) {

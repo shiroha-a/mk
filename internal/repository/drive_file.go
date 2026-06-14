@@ -69,6 +69,11 @@ type DriveFileRepository interface {
 	UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error
 	// DeleteOrphans removes rows whose userId is NULL. Returns affected count.
 	DeleteOrphans() (int64, error)
+	// ListOrphans returns up to limit rows DeleteOrphans would delete (userId
+	// IS NULL, not referenced by any emoji) so the caller can delete each
+	// orphan's object-storage bytes before the DB rows (admin/drive/cleanup,
+	// #1724)。Order is unspecified; mirrors ListRemoteCache's batched shape.
+	ListOrphans(limit int) ([]*model.DriveFile, error)
 	// DeleteRemoteCache removes cached remote files (isLink=false with host set)
 	// — the rows whose actual bytes are cached locally / in object storage.
 	// Returns affected count. Used as the DB-only fallback for
@@ -418,14 +423,27 @@ func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string,
 // 同様に emoji 画像も巻き込む構造的バグを内包しているが、mk-go では本
 // guard で local emoji asset を保護する。
 func (r *driveFileRepository) DeleteOrphans() (int64, error) {
-	tx := r.db.Where(
-		`"userId" IS NULL AND NOT EXISTS (
-			SELECT 1 FROM "emoji" e
-			WHERE e."originalUrl" = "drive_file"."url"
-			   OR e."publicUrl"   = "drive_file"."url"
-		)`,
-	).Delete(&model.DriveFile{})
+	tx := r.db.Where(orphanWhere).Delete(&model.DriveFile{})
 	return tx.RowsAffected, tx.Error
+}
+
+// orphanWhere は orphan file (userId IS NULL かつ emoji 非参照) を選ぶ条件。
+// DeleteOrphans / ListOrphans で同一 guard を共有する (#1724)。
+const orphanWhere = `"userId" IS NULL AND NOT EXISTS (
+	SELECT 1 FROM "emoji" e
+	WHERE e."originalUrl" = "drive_file"."url"
+	   OR e."publicUrl"   = "drive_file"."url"
+)`
+
+func (r *driveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var rows []*model.DriveFile
+	if err := r.db.Where(orphanWhere).Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (r *driveFileRepository) DeleteRemoteCache() (int64, error) {

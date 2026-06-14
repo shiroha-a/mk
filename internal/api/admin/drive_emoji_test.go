@@ -309,6 +309,76 @@ func TestDriveCleanup_PreservesEmojiReferencedSystemFiles(t *testing.T) {
 	assert.Contains(t, repo.Files, "emoji_sys", "emoji-referenced system file must be preserved")
 }
 
+// cleanup: storage backend 配線時は orphan file の access/thumbnail/webpublic
+// object を削除してから DB 行を消す。user 所有 / emoji 参照 file は保持する (#1724)。
+func TestDriveCleanup_DeletesStorageObjects(t *testing.T) {
+	u := "u1"
+	ak1, tk1, ak2, aku := "ak1", "tk1", "ak2", "aku"
+	emojiURL := "http://test/system_emoji.png"
+	emojiKey := "akemoji"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "orph1", UserID: nil, AccessKey: &ak1, ThumbnailAccessKey: &tk1},
+		&model.DriveFile{ID: "orph2", UserID: nil, AccessKey: &ak2},
+		&model.DriveFile{ID: "kept", UserID: &u, AccessKey: &aku},
+		&model.DriveFile{ID: "emoji_sys", UserID: nil, URL: emojiURL, AccessKey: &emojiKey},
+	)
+	repo.EmojiReferencedURLs = map[string]bool{emojiURL: true}
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotContains(t, repo.Files, "orph1")
+	assert.NotContains(t, repo.Files, "orph2")
+	assert.Contains(t, repo.Files, "kept", "user-owned file は保持される")
+	assert.Contains(t, repo.Files, "emoji_sys", "emoji 参照 system file は保持される")
+	// orphan の object key のみ削除 (kept / emoji 参照の key は対象外)。
+	assert.ElementsMatch(t, []string{"ak1", "tk1", "ak2"}, sd.deleted)
+}
+
+// cleanup が driveCleanupBatchSize(100) を超える orphan を複数バッチで全削除する。
+func TestDriveCleanup_MultiBatch(t *testing.T) {
+	h, repo := setupDriveFileHandler(t)
+	for i := 0; i < 150; i++ {
+		ak := "ak" + strconv.Itoa(i)
+		require.NoError(t, repo.Create(&model.DriveFile{
+			ID: "o" + strconv.Itoa(i), UserID: nil, AccessKey: &ak,
+		}))
+	}
+	sd := &stubStorageDeleter{}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, repo.Files, "150 件すべて削除される (複数バッチ)")
+	assert.Len(t, sd.deleted, 150, "全 access key が storage 削除される")
+}
+
+// storage Delete が失敗しても他 key の削除を続行し DB 行は消す (best-effort)。
+func TestDriveCleanup_StorageDeleteFailureBestEffort(t *testing.T) {
+	ak1, tk1, ak2 := "ak1", "tk1", "ak2"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "o1", UserID: nil, AccessKey: &ak1, ThumbnailAccessKey: &tk1},
+		&model.DriveFile{ID: "o2", UserID: nil, AccessKey: &ak2},
+	)
+	sd := &stubStorageDeleter{failKeys: map[string]bool{"ak1": true}}
+	h.SetStorageDeleter(sd)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.ElementsMatch(t, []string{"ak1", "tk1", "ak2"}, sd.deleted)
+	assert.Empty(t, repo.Files)
+}
+
+// ListOrphans (DB) 失敗は 500 (DB-only 経路の 500 と整合)。
+func TestDriveCleanup_ListErrorReturns500(t *testing.T) {
+	h, repo := setupDriveFileHandler(t)
+	repo.ListOrphansErr = assertError{}
+	h.SetStorageDeleter(&stubStorageDeleter{})
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 func TestDriveCleanRemoteFiles_InvokesDeleteRemoteCache(t *testing.T) {
 	host := "remote.example"
 	u := "u1"

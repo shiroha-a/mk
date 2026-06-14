@@ -593,6 +593,57 @@ func TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced(t *testing.T
 	assert.NoError(t, err, "emoji.publicUrl 参照の system file は保持される")
 }
 
+// TestDriveFileRepository_ListOrphans は ListOrphans が DeleteOrphans と同じ
+// 選択条件 (userId NULL かつ emoji 非参照) で行を返し、limit を尊重し、削除は
+// 行わないことを検証する (#1724 admin/drive/cleanup の storage 削除経路)。
+func TestDriveFileRepository_ListOrphans(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	emojiRepo := NewEmojiRepository(testDB)
+	user := insertTestUser(t, "u_listorph", "listorph")
+	defer cleanupUser(t, user.ID)
+
+	pureOrphan := newTestDriveFile("lo_pure", user.ID, "lm5o", nil)
+	pureOrphan.UserID = nil
+	pureOrphan.URL = "http://test/lo_pure.bin"
+	kept := newTestDriveFile("lo_kept", user.ID, "lm5k", nil)
+	emojiRef := newTestDriveFile("lo_emoji", user.ID, "lm5e", nil)
+	emojiRef.UserID = nil
+	emojiRef.URL = "http://test/lo_emoji.png"
+
+	require.NoError(t, repo.Create(pureOrphan))
+	require.NoError(t, repo.Create(kept))
+	require.NoError(t, repo.Create(emojiRef))
+	defer cleanupDriveFile(t, pureOrphan.ID)
+	defer cleanupDriveFile(t, kept.ID)
+	defer cleanupDriveFile(t, emojiRef.ID)
+
+	emo := &model.Emoji{
+		ID:          "e_listorph",
+		Name:        "guard_listorph",
+		OriginalURL: emojiRef.URL,
+		PublicURL:   emojiRef.URL,
+	}
+	require.NoError(t, emojiRepo.Create(emo))
+	defer testDB.Exec(`DELETE FROM "emoji" WHERE id = ?`, emo.ID)
+
+	rows, err := repo.ListOrphans(0)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	assert.True(t, ids[pureOrphan.ID], "pure orphan は一覧に含まれる")
+	assert.False(t, ids[kept.ID], "user 所有 file は除外される")
+	assert.False(t, ids[emojiRef.ID], "emoji 参照 file は除外される")
+
+	// limit を尊重し、かつ ListOrphans 自体は削除しない (べき等)。
+	limited, err := repo.ListOrphans(1)
+	require.NoError(t, err)
+	assert.Len(t, limited, 1)
+	_, err = repo.FindByID(pureOrphan.ID)
+	assert.NoError(t, err, "ListOrphans は行を削除しない")
+}
+
 // --- 追加テスト (#260 repository coverage) ---
 
 func TestDriveFileRepository_FindByIDs(t *testing.T) {
