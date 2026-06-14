@@ -16,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/core/reaction"
+	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -202,7 +203,87 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 	// 各 moderator/admin の admin stream へ newAbuseUserReport を配信する
 	// (#1549, upstream AbuseReportNotificationService)。best-effort。
 	h.notifyModeratorsOfAbuseReport(report)
+	// abuseReport system webhook を発火する (#1542, upstream
+	// AbuseReportService.report → notifySystemWebhook(reports, 'abuseReport'))。
+	// best-effort。
+	h.fireAbuseReportWebhook(report, me, target)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// fireAbuseReportWebhook dispatches the abuseReport system webhook on report
+// creation, mirroring upstream notifySystemWebhook (#1542)。inactive な
+// notification recipient (method=webhook) が指す systemWebhookId を excludes に
+// 渡す。dispatcher 未配線時は no-op。
+func (h *Handler) fireAbuseReportWebhook(report *model.AbuseUserReport, reporter, target *model.User) {
+	if h.systemWebhookDispatcher == nil {
+		return
+	}
+	// reporter / targetUser を UserDetailed で pack する (assignee は作成時点では
+	// 常に nil)。profile は 1 batch で解決する。
+	var profByID map[string]*model.UserProfile
+	if h.userRepo != nil {
+		ids := make([]string, 0, 2)
+		if reporter != nil {
+			ids = append(ids, reporter.ID)
+		}
+		if target != nil {
+			ids = append(ids, target.ID)
+		}
+		if profiles, err := h.userRepo.FindProfilesByUserIDs(ids); err == nil {
+			profByID = make(map[string]*model.UserProfile, len(profiles))
+			for _, p := range profiles {
+				profByID[p.UserID] = p
+			}
+		}
+	}
+	packUser := func(u *model.User) any {
+		if u == nil {
+			return nil
+		}
+		d := entity.PackUserDetailed(u, profByID[u.ID], h.idGen)
+		return &d
+	}
+	createdAt := ""
+	if t, err := h.idGen.ParseTime(report.ID); err == nil {
+		createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
+	}
+	// admin/abuse-user-reports の packedAbuseReport と同 shape (#1542)。
+	body := map[string]any{
+		"id":             report.ID,
+		"createdAt":      createdAt,
+		"comment":        report.Comment,
+		"resolved":       false,
+		"reporterId":     report.ReporterID,
+		"targetUserId":   report.TargetUserID,
+		"assigneeId":     nil,
+		"reporter":       packUser(reporter),
+		"targetUser":     packUser(target),
+		"assignee":       nil,
+		"forwarded":      false,
+		"resolvedAs":     nil,
+		"moderationNote": "",
+	}
+	h.systemWebhookDispatcher.DispatchSystemExcluding(corewebhook.SystemEventAbuseReport, body, h.inactiveAbuseWebhookIDs())
+}
+
+// inactiveAbuseWebhookIDs returns the systemWebhookId values of inactive
+// abuse-report-notification recipients (method=webhook). 本家 notifySystemWebhook
+// の withoutWebhookIds 相当 (#1542)。recipientRepo 未配線 / 取得失敗時は nil。
+func (h *Handler) inactiveAbuseWebhookIDs() []string {
+	if h.recipientRepo == nil {
+		return nil
+	}
+	recipients, err := h.recipientRepo.List()
+	if err != nil {
+		return nil
+	}
+	var excludes []string
+	for _, r := range recipients {
+		if r.Method == "webhook" && !r.IsActive && r.SystemWebhookID != nil {
+			excludes = append(excludes, *r.SystemWebhookID)
+		}
+	}
+	return excludes
 }
 
 // notifyModeratorsOfAbuseReport publishes a newAbuseUserReport admin stream

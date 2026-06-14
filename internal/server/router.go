@@ -2168,6 +2168,9 @@ func (s *Server) setupRoutes() {
 	abuseReportRepo := repository.NewAbuseReportRepository(s.db)
 	modLogRepo := repository.NewModerationLogRepository(s.db)
 	recipientRepo := repository.NewAbuseReportNotificationRecipientRepository(s.db)
+	// users/report-abuse 時に abuseReport system webhook を発火する (#1542)。
+	// recipientRepo がここで揃うため本箇所で配線する。
+	usersHandler.SetAbuseReportWebhook(webhookService, recipientRepo)
 	adminHandler := apiadmin.NewHandler(signupService, roleService, metaRepo, userRepo, idGen)
 	// admin/suspend-user / admin/unsuspend-user / admin/accounts/delete が
 	// target user の全 token cache entry を即時 invalidate するために、

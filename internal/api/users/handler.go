@@ -81,6 +81,25 @@ type Handler struct {
 	// featuredRanking は users/featured-notes の per-user engagement ランキング
 	// (#1687)。nil 時 (= 未配線 / test) は SQL count-DESC fallback を使う。
 	featuredRanking FeaturedRankingReader
+	// systemWebhookDispatcher / recipientRepo は users/report-abuse 時に
+	// abuseReport system webhook を発火するために使う (#1542)。未配線なら発火しない。
+	systemWebhookDispatcher SystemWebhookDispatcher
+	recipientRepo           repository.AbuseReportNotificationRecipientRepository
+}
+
+// SystemWebhookDispatcher fires a system webhook event to subscribed webhooks,
+// excluding given ids. Implemented by *core/webhook.Service. report-abuse の
+// abuseReport 発火に使う (#1542)。
+type SystemWebhookDispatcher interface {
+	DispatchSystemExcluding(eventType string, body any, excludes []string)
+}
+
+// SetAbuseReportWebhook wires the system webhook dispatcher + notification
+// recipient repo so users/report-abuse fires the abuseReport system webhook
+// (#1542). nil dispatcher disables firing.
+func (h *Handler) SetAbuseReportWebhook(d SystemWebhookDispatcher, recipientRepo repository.AbuseReportNotificationRecipientRepository) {
+	h.systemWebhookDispatcher = d
+	h.recipientRepo = recipientRepo
 }
 
 // FeaturedRankingReader reads the per-user engagement ranking for
