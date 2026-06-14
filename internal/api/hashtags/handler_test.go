@@ -97,6 +97,60 @@ func TestList_DBError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().List, `{"sort":"+mentionedUsers"}`).Code)
 }
 
+// decodeTagNames は list/search レスポンスを順序保持で tag 名配列に変換する。
+func decodeListTagNames(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r["tag"].(string))
+	}
+	return out
+}
+
+// TestList_SortHonored: sort 値に応じて order by が切り替わること (#1544)。
+// 旧実装は常に mentionedUsersCount DESC 固定だった。
+func TestList_SortHonored(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_s1", Name: "alpha", MentionedUsersCount: 1, AttachedUsersCount: 9})
+	testDB.Create(&model.Hashtag{ID: "ht_s2", Name: "bravo", MentionedUsersCount: 9, AttachedUsersCount: 1})
+
+	// +mentionedUsers DESC → bravo(9) が先頭。
+	got := decodeListTagNames(t, doPost(newHandler().List, `{"sort":"+mentionedUsers"}`))
+	require.Len(t, got, 2)
+	assert.Equal(t, "bravo", got[0])
+
+	// -mentionedUsers ASC → alpha(1) が先頭。
+	got = decodeListTagNames(t, doPost(newHandler().List, `{"sort":"-mentionedUsers"}`))
+	require.Len(t, got, 2)
+	assert.Equal(t, "alpha", got[0])
+
+	// +attachedUsers DESC → alpha(9) が先頭 (列が切り替わる)。
+	got = decodeListTagNames(t, doPost(newHandler().List, `{"sort":"+attachedUsers"}`))
+	require.Len(t, got, 2)
+	assert.Equal(t, "alpha", got[0])
+}
+
+// TestList_AttachedToFilters: attachedTo* で count!=0 の tag のみ返す (#1544)。
+func TestList_AttachedToFilters(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_a1", Name: "withlocal", AttachedUsersCount: 3, AttachedLocalUsersCount: 3, AttachedRemoteUsersCount: 0})
+	testDB.Create(&model.Hashtag{ID: "ht_a2", Name: "withremote", AttachedUsersCount: 2, AttachedLocalUsersCount: 0, AttachedRemoteUsersCount: 2})
+	testDB.Create(&model.Hashtag{ID: "ht_a3", Name: "noattach", AttachedUsersCount: 0})
+
+	got := decodeListTagNames(t, doPost(newHandler().List, `{"sort":"+mentionedUsers","attachedToUserOnly":true}`))
+	assert.ElementsMatch(t, []string{"withlocal", "withremote"}, got)
+
+	got = decodeListTagNames(t, doPost(newHandler().List, `{"sort":"+mentionedUsers","attachedToLocalUserOnly":true}`))
+	assert.ElementsMatch(t, []string{"withlocal"}, got)
+
+	got = decodeListTagNames(t, doPost(newHandler().List, `{"sort":"+mentionedUsers","attachedToRemoteUserOnly":true}`))
+	assert.ElementsMatch(t, []string{"withremote"}, got)
+}
+
 // --- Search ---
 
 func TestSearch_Success(t *testing.T) {
@@ -114,6 +168,63 @@ func TestSearch_InvalidParam(t *testing.T) {
 
 func TestSearch_DBError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().Search, `{"query":"x"}`).Code)
+}
+
+// decodeSearchNames は search レスポンス (string 配列) を順序保持で返す。
+func decodeSearchNames(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var names []string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &names))
+	return names
+}
+
+// TestSearch_PrefixMatch: upstream は前方一致 (name LIKE query+'%')。部分一致では
+// ない。query="go" は "golang" に一致するが "mygolang" には一致しない (#1544)。
+func TestSearch_PrefixMatch(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_p1", Name: "golang"})
+	testDB.Create(&model.Hashtag{ID: "ht_p2", Name: "mygolang"})
+
+	names := decodeSearchNames(t, doPost(newHandler().Search, `{"query":"go"}`))
+	assert.Contains(t, names, "golang")
+	assert.NotContains(t, names, "mygolang", "部分一致ではなく前方一致")
+}
+
+// TestSearch_CaseInsensitivePrefix: query は lowercase 化されて前方一致する。
+func TestSearch_CaseInsensitivePrefix(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_ci", Name: "misskey"})
+	names := decodeSearchNames(t, doPost(newHandler().Search, `{"query":"Miss"}`))
+	assert.Contains(t, names, "misskey")
+}
+
+// TestSearch_OrderAndOffset: mentionedLocalUsersCount DESC で並び offset を適用する。
+func TestSearch_OrderAndOffset(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_o1", Name: "golow", MentionedLocalUsersCount: 1})
+	testDB.Create(&model.Hashtag{ID: "ht_o2", Name: "gohigh", MentionedLocalUsersCount: 9})
+
+	names := decodeSearchNames(t, doPost(newHandler().Search, `{"query":"go"}`))
+	require.Len(t, names, 2)
+	assert.Equal(t, "gohigh", names[0], "mentionedLocalUsersCount DESC")
+
+	// offset=1 で先頭 (gohigh) を飛ばす。
+	names = decodeSearchNames(t, doPost(newHandler().Search, `{"query":"go","offset":1}`))
+	require.Len(t, names, 1)
+	assert.Equal(t, "golow", names[0])
+}
+
+// TestSearch_EscapesWildcards: query 内の LIKE メタ文字 (% _) はリテラル扱い。
+func TestSearch_EscapesWildcards(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_w1", Name: "abc"})
+	// "%" を前方一致リテラルとして扱うため、"%" は "abc" に一致しない。
+	names := decodeSearchNames(t, doPost(newHandler().Search, `{"query":"%"}`))
+	assert.NotContains(t, names, "abc")
 }
 
 // --- Show ---
@@ -140,6 +251,23 @@ func TestShow_BadRequestForUnknownTag(t *testing.T) {
 
 func TestShow_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().Show, `{}`).Code)
+}
+
+// TestShow_NormalizesTag: upstream は normalizeForSearch (NFKC+lowercase) で
+// 引くため、大文字や全角入力でも格納名 (lowercase) に一致する (#1544)。
+// 旧実装は exact match で 'Misskey' が 'misskey' にヒットせず NO_SUCH_HASHTAG。
+func TestShow_NormalizesTag(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.Hashtag{ID: "ht_n1", Name: "misskey"})
+
+	rec := doPost(newHandler().Show, `{"tag":"Misskey"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "misskey")
+
+	// 全角 (NFKC で半角化) でも一致する。
+	rec = doPost(newHandler().Show, `{"tag":"ＭＩＳＳＫＥＹ"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 // --- Trend ---
