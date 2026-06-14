@@ -263,16 +263,21 @@ func TestListsCreateFromPublic_CopiesMembers(t *testing.T) {
 	rec := postP189(k.h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	var resp model.UserList
+	// #1550: res は UserList packer shape ({id,createdAt,name,userIds,isPublic})。
+	// model.UserList 生 JSON の userId は露出しない。
+	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "me", resp.UserID)
-	assert.Equal(t, "mine", resp.Name)
-	assert.False(t, resp.IsPublic)
+	assert.Equal(t, "mine", resp["name"])
+	assert.Equal(t, false, resp["isPublic"])
+	assert.NotContains(t, resp, "userId", "userId は露出しない")
+	assert.NotEmpty(t, resp["createdAt"], "createdAt が含まれる")
+	assert.ElementsMatch(t, []any{"u1", "u2"}, resp["userIds"], "コピーされた member が userIds に反映される")
 
 	// 新 list に u1, u2 が追加されているはず。
+	newID := resp["id"].(string)
 	copied := 0
 	for _, m := range k.listRepo.Members {
-		if m.UserListID == resp.ID {
+		if m.UserListID == newID {
 			copied++
 		}
 	}

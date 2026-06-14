@@ -3,6 +3,7 @@ package users
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -261,6 +262,42 @@ func TestListsUpdate_Success(t *testing.T) {
 	rec := postStub(h.ListsUpdate, `{"listId":"l1","name":"new"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "new", listRepo.Lists["l1"].Name)
+}
+
+// #1550: update は UserList packer shape ({id,createdAt,name,userIds,isPublic}) を
+// 返し userId を露出しない。
+func TestListsUpdate_ReturnsPackedShape(t *testing.T) {
+	h, _ := newTestHandler(t)
+	listRepo := testutil.NewMockUserListRepository()
+	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "old"}
+	listRepo.Members = append(listRepo.Members, &model.UserListMembership{ID: "m1", UserListID: "l1", UserID: "member1"})
+	h.SetUserListRepo(listRepo)
+
+	rec := postStub(h.ListsUpdate, `{"listId":"l1","name":"new"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "new", resp["name"])
+	assert.NotContains(t, resp, "userId", "userId は露出しない")
+	assert.Contains(t, resp, "createdAt", "createdAt field が shape に含まれる")
+	assert.ElementsMatch(t, []any{"member1"}, resp["userIds"])
+}
+
+// #1550: name は minLength:1/maxLength:100 で validate (渡された場合)。
+func TestListsUpdate_NameTooLong(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserListRepo(testutil.NewMockUserListRepository())
+	body := `{"listId":"l1","name":"` + strings.Repeat("a", 101) + `"}`
+	rec := postStub(h.ListsUpdate, body, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestListsUpdate_NameEmptyRejected(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserListRepo(testutil.NewMockUserListRepository())
+	// 空文字 name が渡されたら minLength 違反で 400 (絞り込み前に検証)。
+	rec := postStub(h.ListsUpdate, `{"listId":"l1","name":""}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsUpdate_NotFound(t *testing.T) {

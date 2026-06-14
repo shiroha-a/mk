@@ -4,9 +4,11 @@ import (
 	"errors"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -65,17 +67,24 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 	members, err := h.userListRepo.ListMembers(req.ListID)
 	if err != nil {
 		// list 自体は既に作成済みなので、メンバーコピー失敗時も新 list を返す。
-		return c.JSON(http.StatusOK, newList)
+		return c.JSON(http.StatusOK, entity.PackUserList(newList, nil, h.idGen))
 	}
+	memberIDs := make([]string, 0, len(members))
 	for _, m := range members {
 		mb := &model.UserListMembership{
 			ID:         h.idGen.Generate(time.Now()),
 			UserListID: newList.ID,
 			UserID:     m.UserID,
 		}
-		_ = h.userListRepo.AddMember(mb)
+		// メンバー追加に成功したものだけ userIds に反映する (block/dup の
+		// 詳細エラーは #1550 follow-up、ここでは shape を upstream に揃える)。
+		if err := h.userListRepo.AddMember(mb); err == nil {
+			memberIDs = append(memberIDs, m.UserID)
+		}
 	}
-	return c.JSON(http.StatusOK, newList)
+	// upstream create-from-public.ts は res:ref'UserList' を userListEntityService.pack
+	// で返す。model.UserList 生 JSON だと createdAt/userIds 欠落 + userId 露出する (#1550)。
+	return c.JSON(http.StatusOK, entity.PackUserList(newList, memberIDs, h.idGen))
 }
 
 // ListsFavorite handles POST /api/users/lists/favorite.
@@ -161,12 +170,19 @@ func (h *Handler) ListsUnfavorite(c echo.Context) error {
 func (h *Handler) ListsUpdate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		ListID   string `json:"listId"`
-		Name     string `json:"name"`
-		IsPublic *bool  `json:"isPublic"`
+		ListID   string  `json:"listId"`
+		Name     *string `json:"name"`
+		IsPublic *bool   `json:"isPublic"`
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// upstream update.ts は name を minLength:1/maxLength:100 で validate する。
+	// name は optional だが、渡されたら検証する (空文字や 100 超は INVALID_PARAM、#1550)。
+	if req.Name != nil {
+		if rc := utf8.RuneCountInString(*req.Name); rc < 1 || rc > 100 {
+			return apierr.JSONInvalidParam(c)
+		}
 	}
 	if h.userListRepo == nil {
 		return c.NoContent(http.StatusNoContent)
@@ -180,9 +196,9 @@ func (h *Handler) ListsUpdate(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
 	}
 	fields := map[string]any{}
-	if req.Name != "" {
-		fields["name"] = req.Name
-		list.Name = req.Name
+	if req.Name != nil {
+		fields["name"] = *req.Name
+		list.Name = *req.Name
 	}
 	if req.IsPublic != nil {
 		fields["isPublic"] = *req.IsPublic
@@ -193,7 +209,22 @@ func (h *Handler) ListsUpdate(c echo.Context) error {
 			return apierr.JSONInternalError(c)
 		}
 	}
-	return c.JSON(http.StatusOK, list)
+	// upstream update.ts は res:ref'UserList' を userListEntityService.pack で返す (#1550)。
+	return c.JSON(http.StatusOK, entity.PackUserList(list, h.listMemberIDs(req.ListID), h.idGen))
+}
+
+// listMemberIDs returns the member user IDs of a list for UserList packing.
+// 取得失敗時は nil (PackUserList が空配列に正規化する)。
+func (h *Handler) listMemberIDs(listID string) []string {
+	members, err := h.userListRepo.ListMembers(listID)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.UserID)
+	}
+	return ids
 }
 
 // ListsUpdateMembership handles POST /api/users/lists/update-membership.
