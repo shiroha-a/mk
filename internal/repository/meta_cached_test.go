@@ -91,6 +91,48 @@ func TestCachedMetaRepository_UpdateInvalidates(t *testing.T) {
 	assert.Equal(t, int32(2), inner.fetchCount.Load())
 }
 
+// SetInvalidationHook は Update / EnsureInitial 成功時に呼ばれる (#1740)。
+func TestCachedMetaRepository_InvalidationHookFires(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+	var hookCount atomic.Int32
+	cached.SetInvalidationHook(func() { hookCount.Add(1) })
+
+	require.NoError(t, cached.Update(map[string]any{"name": "new"}))
+	assert.Equal(t, int32(1), hookCount.Load(), "Update success fires hook")
+
+	require.NoError(t, cached.EnsureInitial("m1"))
+	assert.Equal(t, int32(2), hookCount.Load(), "EnsureInitial success fires hook")
+}
+
+// Update 失敗時は hook を呼ばない (#1740)。
+func TestCachedMetaRepository_InvalidationHookNotFiredOnError(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}, updateErr: errors.New("boom")}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+	var hookCount atomic.Int32
+	cached.SetInvalidationHook(func() { hookCount.Add(1) })
+
+	require.Error(t, cached.Update(map[string]any{"name": "new"}))
+	assert.Equal(t, int32(0), hookCount.Load(), "failed Update must not fire hook")
+}
+
+// Invalidate() は cache を drop し次の Fetch を再取得させる (cross-worker
+// subscriber が remote metaUpdated で呼ぶ経路、#1740)。
+func TestCachedMetaRepository_InvalidateDropsCache(t *testing.T) {
+	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
+	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)
+
+	_, err := cached.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), inner.fetchCount.Load())
+
+	cached.Invalidate()
+
+	_, err = cached.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), inner.fetchCount.Load(), "Invalidate forces re-fetch")
+}
+
 func TestCachedMetaRepository_EnsureInitialInvalidates(t *testing.T) {
 	inner := &countingMetaRepo{meta: &model.Meta{ID: "m1"}}
 	cached := repository.NewCachedMetaRepositoryWithTTL(inner, 1*time.Minute)

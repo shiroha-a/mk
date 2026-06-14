@@ -6,9 +6,12 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -184,4 +187,56 @@ func TestPubSubService_Publish_MarshalError(t *testing.T) {
 	// chanがJSONにmarshalできない
 	err := svc.Publish(ctx, "ch", make(chan int))
 	assert.Error(t, err)
+}
+
+// crossWorkerFakeMeta is a minimal MetaRepository inner used to count DB fetches
+// in the cross-worker invalidation e2e (#1740).
+type crossWorkerFakeMeta struct {
+	fetchCount atomic.Int32
+	meta       *model.Meta
+}
+
+func (r *crossWorkerFakeMeta) Fetch() (*model.Meta, error) {
+	r.fetchCount.Add(1)
+	return r.meta, nil
+}
+func (r *crossWorkerFakeMeta) Update(map[string]any) error { return nil }
+func (r *crossWorkerFakeMeta) EnsureInitial(string) error  { return nil }
+
+// TestPubSubService_CrossWorkerMetaInvalidation は #1740 の核となる合成を検証する:
+// worker A が meta を更新すると internal:metaUpdated が publish され、worker B が
+// 受信して自プロセスの CachedMetaRepository を invalidate し、次の Fetch で
+// 再取得する (= cross-worker で default policy 変更等が伝播する)。
+func TestPubSubService_CrossWorkerMetaInvalidation(t *testing.T) {
+	ctx := context.Background()
+	innerA := &crossWorkerFakeMeta{meta: &model.Meta{ID: "m1"}}
+	innerB := &crossWorkerFakeMeta{meta: &model.Meta{ID: "m1"}}
+	cachedA := repository.NewCachedMetaRepositoryWithTTL(innerA, time.Hour)
+	cachedB := repository.NewCachedMetaRepositoryWithTTL(innerB, time.Hour)
+
+	psA := NewPubSubService(testRedis.Client, "internal_e2e:")
+	psB := NewPubSubService(testRedis.Client, "internal_e2e:")
+	defer psA.Close()
+	defer psB.Close()
+
+	// worker A は更新時に metaUpdated を publish する。
+	cachedA.SetInvalidationHook(func() { _ = psA.Publish(ctx, "metaUpdated", struct{}{}) })
+	// 両 worker が購読し、受信で自 cache を invalidate する。
+	psA.Subscribe(ctx, "metaUpdated", func([]byte) { cachedA.Invalidate() })
+	psB.Subscribe(ctx, "metaUpdated", func([]byte) { cachedB.Invalidate() })
+	time.Sleep(100 * time.Millisecond) // subscription 登録待ち
+
+	// 両 cache を温める。
+	_, _ = cachedA.Fetch()
+	_, _ = cachedB.Fetch()
+	require.Equal(t, int32(1), innerB.fetchCount.Load())
+
+	// worker A が更新 → publish → worker B が invalidate。
+	require.NoError(t, cachedA.Update(map[string]any{"name": "x"}))
+
+	// B は受信後 cache が drop され、次の Fetch で再取得する。
+	require.Eventually(t, func() bool {
+		_, _ = cachedB.Fetch()
+		return innerB.fetchCount.Load() > 1
+	}, 3*time.Second, 20*time.Millisecond, "worker B should re-fetch after cross-worker metaUpdated")
 }

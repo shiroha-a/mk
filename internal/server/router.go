@@ -135,7 +135,10 @@ func (s *Server) setupRoutes() {
 	// 時の invalidate が両方に反映される (#300 3-3)。
 	userRepo := s.userRepo
 	noteRepo := repository.NewNoteRepository(s.db)
-	metaRepo := repository.NewCachedMetaRepository(repository.NewMetaRepository(s.db))
+	// cross-worker cache invalidation (#1740) のため concrete *CachedMetaRepository
+	// を保持する。internal event bus との配線は streamPubSub 生成箇所で行う。
+	cachedMeta := repository.NewCachedMetaRepositoryWithTTL(repository.NewMetaRepository(s.db), 5*time.Minute)
+	var metaRepo repository.MetaRepository = cachedMeta
 	// Seed the singleton meta row on first boot so that fresh installs
 	// can run /api/admin/accounts/create (initial setup) without tripping
 	// over a missing meta row.
@@ -1867,6 +1870,21 @@ func (s *Server) setupRoutes() {
 	// 1. Redis pubsub bus (核となる publish/subscribe チャンネル)
 	streamPubSub := event.NewPubSubService(s.redis.Pubsub, "stream:")
 	streamBus := stream.NewEventPubSubBus(streamPubSub)
+
+	// #1740: meta 更新の cross-worker cache invalidation。更新した worker は
+	// internal:metaUpdated を publish し、各 worker は受信して自プロセスの
+	// CachedMetaRepository を invalidate する。upstream の
+	// globalEventService.publishInternalEvent('metaUpdated'/'policiesUpdated') 相当で、
+	// update-meta / update-default-policies 等あらゆる meta 更新を 1 箇所で伝播する。
+	internalPubSub := event.NewPubSubService(s.redis.Pubsub, "internal:")
+	cachedMeta.SetInvalidationHook(func() {
+		if err := internalPubSub.Publish(context.Background(), "metaUpdated", struct{}{}); err != nil {
+			slog.Warn("meta: publish metaUpdated failed", "err", err)
+		}
+	})
+	internalPubSub.Subscribe(context.Background(), "metaUpdated", func([]byte) {
+		cachedMeta.Invalidate()
+	})
 
 	// pollVoted / reacted / unreacted / deleted を noteStream:<id> に publish
 	// する共通 publisher。subNote / sn メッセージで購読しているクライアントへ
