@@ -24,6 +24,7 @@ type Handler struct {
 	userRepo           repository.UserRepository
 	blockingRepo       repository.BlockingRepository
 	favoriteRepo       UserListFavoriteReader
+	proxyFollow        ProxyFollowEnqueuer
 }
 
 // RolePolicyProvider abstracts role-policy lookup for `userListLimit` /
@@ -71,6 +72,19 @@ func (h *Handler) SetBlockingRepo(r repository.BlockingRepository) {
 // for forPublic public lists (#1550). nil 時は likedCount/isLiked を付与しない。
 func (h *Handler) SetFavoriteRepo(r UserListFavoriteReader) {
 	h.favoriteRepo = r
+}
+
+// ProxyFollowEnqueuer makes the proxy account follow remote users added to a
+// list so their posts federate to this instance (#1704)。実装は
+// core/userlist.ProxyFollower。
+type ProxyFollowEnqueuer interface {
+	EnqueueProxyFollow(remoteUserIDs []string)
+}
+
+// SetProxyFollow wires the proxy-follow enqueuer used when a remote user is
+// pushed to a list (#1704). nil 時は proxy follow を skip する。
+func (h *Handler) SetProxyFollow(p ProxyFollowEnqueuer) {
+	h.proxyFollow = p
 }
 
 // List handles POST /api/users/lists/list.
@@ -263,8 +277,11 @@ func (h *Handler) Push(c echo.Context) error {
 	// upstream users/lists/push は AddMember 前に対象 user の存在を
 	// getterService.getUser で検証し、不在なら NO_SUCH_USER を返す (#1550)。
 	// userRepo 未配線の test 経路では skip する (production は router が必ず wire)。
+	var target *model.User
 	if h.userRepo != nil {
-		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+		var ferr error
+		target, ferr = h.userRepo.FindByID(req.UserID)
+		if ferr != nil {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a"))
 		}
 	}
@@ -306,6 +323,11 @@ func (h *Handler) Push(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ADDED", "That user has already been added to that list.", "1de7c884-1595-49e9-857e-61f12f4d4fc5"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// remote user を list に追加したら proxy account がフォローして連合投稿を
+	// 受信できるようにする (#1704、upstream addMember の isRemoteUser 分岐)。
+	if h.proxyFollow != nil && target != nil && !target.IsLocal() {
+		h.proxyFollow.EnqueueProxyFollow([]string{req.UserID})
 	}
 	return c.NoContent(http.StatusNoContent)
 }

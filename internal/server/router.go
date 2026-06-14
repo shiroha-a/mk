@@ -105,6 +105,7 @@ import (
 	coretwofactor "github.com/shiroha-a/mk/internal/core/twofactor"
 	coreurlpreview "github.com/shiroha-a/mk/internal/core/urlpreview"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	coreuserlist "github.com/shiroha-a/mk/internal/core/userlist"
 	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	corewebpush "github.com/shiroha-a/mk/internal/core/webpush"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -609,6 +610,9 @@ func (s *Server) setupRoutes() {
 	sysAcctSvc := coresystemaccount.NewService(userRepo, keypairRepo, repository.NewSystemAccountRepository(s.db), idGen)
 	// FEP-521a Multikey 対応で system account も Ed25519 鍵対を併発行 (#1067 / #1068)。
 	sysAcctSvc.SetKeypairExtraRepo(keypairExtraRepo)
+	// #1704: list に remote user を追加したとき proxy account がフォローして連合
+	// 投稿を受信できるようにする enqueuer。push / create-from-public で使う。
+	listProxyFollow := coreuserlist.NewProxyFollower(sysAcctSvc, s.queueClient)
 	relaySvc := corerelay.NewService(repository.NewRelayRepository(s.db), sysAcctSvc, apRenderer, deliverService, idGen)
 
 	// AP fetch のデフォルト signer に instance.actor を配線する (#419)。
@@ -1324,6 +1328,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetBlockingRepo(blockingRepo)
 	usersHandler.SetMutingRepo(mutingRepo)
 	usersHandler.SetRolePolicyProvider(roleService) // #1550: create-from-public userListLimit/userEachUserListsLimit
+	usersHandler.SetProxyFollow(listProxyFollow)    // #1704: create-from-public remote member proxy follow
 	usersHandler.SetRenoteMutingRepo(renoteMutingRepo)
 	usersHandler.SetFollowRequestRepo(followRequestRepo)
 	usersHandler.SetInstanceRepo(instanceRepo)
@@ -2102,6 +2107,7 @@ func (s *Server) setupRoutes() {
 	userListHandler.SetUserRepo(userRepo)                 // #1550: push NO_SUCH_USER check
 	userListHandler.SetBlockingRepo(blockingRepo)         // #1550: push YOU_HAVE_BEEN_BLOCKED check
 	userListHandler.SetFavoriteRepo(userListFavoriteRepo) // #1550: show forPublic likedCount/isLiked
+	userListHandler.SetProxyFollow(listProxyFollow)       // #1704: push remote member proxy follow
 	// list は requireCredential:false の public endpoint (userId 指定で他人の
 	// public list を閲覧可、#1550)。未認証 && userId 未指定は handler が INVALID_PARAM。
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireScope("read:account"))

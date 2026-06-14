@@ -96,10 +96,14 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		}
 	}
 	memberIDs := make([]string, 0, len(members))
+	var remoteMembers []string
 	for _, m := range members {
 		// NO_SUCH_USER: 対象 user が存在しなければ中断 (upstream getterService.getUser)。
+		var target *model.User
 		if h.userRepo != nil {
-			if _, uerr := h.userRepo.FindByID(m.UserID); uerr != nil {
+			var uerr error
+			target, uerr = h.userRepo.FindByID(m.UserID)
+			if uerr != nil {
 				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "13c457db-a8cb-4d88-b70a-211ceeeabb5f"))
 			}
 		}
@@ -129,6 +133,14 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 			return apierr.JSONInternalError(c)
 		}
 		memberIDs = append(memberIDs, m.UserID)
+		if target != nil && !target.IsLocal() {
+			remoteMembers = append(remoteMembers, m.UserID)
+		}
+	}
+	// remote member は proxy account がフォローして連合投稿を受信できるように
+	// する (#1704、upstream addMember の isRemoteUser 分岐)。
+	if h.proxyFollow != nil {
+		h.proxyFollow.EnqueueProxyFollow(remoteMembers)
 	}
 	// upstream create-from-public.ts は res:ref'UserList' を userListEntityService.pack
 	// で返す (#1550)。

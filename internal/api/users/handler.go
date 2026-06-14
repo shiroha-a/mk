@@ -43,6 +43,7 @@ type Handler struct {
 	memoRepo             repository.UserMemoRepository
 	blockingRepo         repository.BlockingRepository
 	rolePolicyProvider   RolePolicyProvider
+	proxyFollow          ProxyFollowEnqueuer
 	mutingRepo           repository.MutingRepository
 	renoteMutingRepo     repository.RenoteMutingRepository
 	followRequestRepo    repository.FollowRequestRepository
@@ -221,6 +222,18 @@ type RolePolicyProvider interface {
 // limit gate を skip する (= test / 旧挙動)。
 func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 	h.rolePolicyProvider = p
+}
+
+// ProxyFollowEnqueuer makes the proxy account follow remote users added to a
+// list (#1704)。実装は core/userlist.ProxyFollower。
+type ProxyFollowEnqueuer interface {
+	EnqueueProxyFollow(remoteUserIDs []string)
+}
+
+// SetProxyFollow wires the proxy-follow enqueuer used by create-from-public when
+// remote users are copied into the new list (#1704). nil 時は skip。
+func (h *Handler) SetProxyFollow(p ProxyFollowEnqueuer) {
+	h.proxyFollow = p
 }
 
 // SetMutingRepo attaches a MutingRepository for mute status queries.

@@ -185,6 +185,48 @@ func TestPull_UserExistsSucceeds(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// stubProxyFollow records EnqueueProxyFollow calls for #1704 tests.
+type stubProxyFollow struct {
+	got  []string
+	hits int
+}
+
+func (s *stubProxyFollow) EnqueueProxyFollow(ids []string) { s.hits++; s.got = ids }
+
+// #1704: remote user を push したら proxy follow を enqueue する。
+func TestPush_RemoteUserProxyFollow(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	userRepo := testutil.NewMockUserRepository()
+	host := "remote.example"
+	require.NoError(t, userRepo.Create(&model.User{ID: "r1", Host: &host}))
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	pf := &stubProxyFollow{}
+	h.SetProxyFollow(pf)
+
+	rec := doPost(h.Push, `{"listId":"l1","userId":"r1"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, 1, pf.hits)
+	assert.Equal(t, []string{"r1"}, pf.got)
+}
+
+// #1704: local user の push では proxy follow を enqueue しない。
+func TestPush_LocalUserNoProxyFollow(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u2"})) // local (Host nil)
+	h.SetUserRepo(userRepo)
+	h.SetBlockingRepo(testutil.NewMockBlockingRepository())
+	pf := &stubProxyFollow{}
+	h.SetProxyFollow(pf)
+
+	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "owner"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, 0, pf.hits, "local user は proxy follow しない")
+}
+
 // #1550: push は membership.userListUserId に list owner を設定する。
 func TestPush_SetsUserListUserID(t *testing.T) {
 	h, repo := newTestHandler(t)

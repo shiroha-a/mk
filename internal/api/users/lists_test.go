@@ -370,6 +370,31 @@ func TestListsCreateFromPublic_SetsUserListUserID(t *testing.T) {
 	assert.Equal(t, "me", *found.UserListUserID)
 }
 
+// stubUsersProxyFollow records EnqueueProxyFollow calls for #1704.
+type stubUsersProxyFollow struct {
+	got  []string
+	hits int
+}
+
+func (s *stubUsersProxyFollow) EnqueueProxyFollow(ids []string) { s.hits++; s.got = ids }
+
+// #1704: create-from-public で copy した remote member だけ proxy follow を enqueue。
+func TestListsCreateFromPublic_RemoteMemberProxyFollow(t *testing.T) {
+	h, listRepo, userRepo, _, _ := newListsHandlerFull(t)
+	listRepo.Lists["src"] = &model.UserList{ID: "src", UserID: "srcowner", Name: "src", IsPublic: true}
+	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "s1", UserListID: "src", UserID: "m1"}))
+	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "s2", UserListID: "src", UserID: "r1"}))
+	require.NoError(t, userRepo.Create(&model.User{ID: "m1"})) // local
+	host := "remote.example"
+	require.NoError(t, userRepo.Create(&model.User{ID: "r1", Host: &host})) // remote
+	pf := &stubUsersProxyFollow{}
+	h.SetProxyFollow(pf)
+
+	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"r1"}, pf.got, "remote member のみ proxy follow")
+}
+
 func TestListsCreateFromPublic_TooManyUserLists(t *testing.T) {
 	h, listRepo, userRepo, _, policy := newListsHandlerFull(t)
 	seedPublicSrc(t, listRepo, userRepo, "src")
