@@ -24,6 +24,9 @@ var (
 	// ErrAccessDenied is returned when a user attempts to mutate a Flash they
 	// do not own.
 	ErrAccessDenied = errors.New("not the owner of this flash")
+	// ErrYourFlash is returned when a user attempts to Like their own Flash
+	// (upstream flash/like の yourFlash, #1548)。
+	ErrYourFlash = errors.New("cannot like your own flash")
 	// ErrAlreadyLiked is returned when a user attempts to Like a Flash they
 	// have already liked.
 	ErrAlreadyLiked = errors.New("flash is already liked")
@@ -173,6 +176,18 @@ func (s *Service) Delete(ownerID, flashID string) error {
 	return s.repo.Delete(f)
 }
 
+// DeleteByID removes a Flash without an owner check. The caller is responsible
+// for authorization — used by the moderator-delete path in the handler where
+// the owner-or-moderator decision is made before calling (#1548). Returns
+// ErrFlashNotFound when the flash does not exist.
+func (s *Service) DeleteByID(flashID string) error {
+	f, err := s.repo.FindByID(flashID)
+	if err != nil {
+		return ErrFlashNotFound
+	}
+	return s.repo.Delete(f)
+}
+
 // My returns the flashes owned by userID with cursor (sinceID/untilID) or
 // offset pagination. Cursor 指定時は offset 無視。
 func (s *Service) My(userID, sinceID, untilID string, limit, offset int) ([]*model.Flash, error) {
@@ -195,8 +210,15 @@ func (s *Service) Like(userID, flashID string) error {
 	if userID == "" {
 		return errors.New("userId is required")
 	}
-	if _, err := s.repo.FindByID(flashID); err != nil {
+	f, err := s.repo.FindByID(flashID)
+	if err != nil {
 		return ErrFlashNotFound
+	}
+	// 自分の flash は like できない (upstream flash/like の yourFlash, #1548)。
+	// TS の順序 (noSuchFlash -> yourFlash -> alreadyLiked) に合わせ NotFound の
+	// 直後・already-liked チェックの前に置く。
+	if f.UserID == userID {
+		return ErrYourFlash
 	}
 	if exists, err := s.likeRepo.Exists(userID, flashID); err != nil {
 		return err
@@ -242,6 +264,24 @@ func (s *Service) IsLikedBy(userID, flashID string) (bool, error) {
 	return s.likeRepo.Exists(userID, flashID)
 }
 
+// LikedFlashIDs returns the set of flashIDs that userID has liked, in one
+// query. Used by list endpoints to batch-populate `isLiked` (#1548). Empty
+// userID / flashIDs returns an empty set without querying.
+func (s *Service) LikedFlashIDs(userID string, flashIDs []string) (map[string]bool, error) {
+	set := map[string]bool{}
+	if userID == "" || len(flashIDs) == 0 {
+		return set, nil
+	}
+	ids, err := s.likeRepo.ListLikedFlashIDs(userID, flashIDs)
+	if err != nil {
+		return set, err
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set, nil
+}
+
 // LikedFlash pairs a flash_like row id with the flash it points to. Used by
 // flash/my-likes to match upstream's `{id, flash: Flash}` response shape
 // (id = flash_like row id, NOT flash id).
@@ -251,9 +291,10 @@ type LikedFlash struct {
 }
 
 // MyLikes returns the flashes that userID has liked, newest first, paired
-// with the flash_like row id used for cursor pagination.
-func (s *Service) MyLikes(userID, sinceID, untilID string, limit, offset int) ([]LikedFlash, error) {
-	likes, err := s.likeRepo.ListByUser(userID, sinceID, untilID, limit, offset)
+// with the flash_like row id used for cursor pagination. search が空でなければ
+// flash の title/summary を ILIKE 絞り込みする (#1548, upstream myLikes search)。
+func (s *Service) MyLikes(userID, search, sinceID, untilID string, limit, offset int) ([]LikedFlash, error) {
+	likes, err := s.likeRepo.ListByUserSearch(userID, search, sinceID, untilID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

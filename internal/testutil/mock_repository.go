@@ -4174,6 +4174,31 @@ func (m *MockFlashLikeRepository) ListByUser(userID, sinceID, untilID string, li
 	return rows[offset:end], nil
 }
 
+// ListByUserSearch ignores the search filter (the mock holds no flash title /
+// summary to match against) and delegates to ListByUser. The SQL search path is
+// covered by the repository-level DB test.
+func (m *MockFlashLikeRepository) ListByUserSearch(userID, _, sinceID, untilID string, limit, offset int) ([]*model.FlashLike, error) {
+	return m.ListByUser(userID, sinceID, untilID, limit, offset)
+}
+
+// ListLikedFlashIDs returns the subset of flashIDs liked by userID.
+func (m *MockFlashLikeRepository) ListLikedFlashIDs(userID string, flashIDs []string) ([]string, error) {
+	want := make(map[string]struct{}, len(flashIDs))
+	for _, id := range flashIDs {
+		want[id] = struct{}{}
+	}
+	var out []string
+	for _, l := range m.Likes {
+		if l.UserID != userID {
+			continue
+		}
+		if _, ok := want[l.FlashID]; ok {
+			out = append(out, l.FlashID)
+		}
+	}
+	return out, nil
+}
+
 // MockPageLikeRepository is a test double for repository.PageLikeRepository.
 type MockPageLikeRepository struct {
 	Likes map[string]*model.PageLike

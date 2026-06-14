@@ -337,7 +337,7 @@ func TestMyLikes_HappyPath(t *testing.T) {
 	repo.Flashes["f2"] = &model.Flash{ID: "f2", UserID: "u1"}
 	require.NoError(t, svc.Like("u2", "f1"))
 	require.NoError(t, svc.Like("u2", "f2"))
-	rows, err := svc.MyLikes("u2", "", "", 10, 0)
+	rows, err := svc.MyLikes("u2", "", "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }
@@ -348,17 +348,17 @@ func TestMyLikes_SkipsMissingFlashes(t *testing.T) {
 	require.NoError(t, svc.Like("u2", "f1"))
 	// Insert a stale like pointing to a non-existent flash.
 	likeRepo.Likes["stale"] = &model.FlashLike{ID: "stale", UserID: "u2", FlashID: "missing"}
-	rows, err := svc.MyLikes("u2", "", "", 10, 0)
+	rows, err := svc.MyLikes("u2", "", "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 }
 
-// failingListLikeRepo causes ListByUser to fail.
+// failingListLikeRepo causes ListByUserSearch (used by MyLikes) to fail.
 type failingListLikeRepo struct {
 	*testutil.MockFlashLikeRepository
 }
 
-func (r *failingListLikeRepo) ListByUser(_, _, _ string, _, _ int) ([]*model.FlashLike, error) {
+func (r *failingListLikeRepo) ListByUserSearch(_, _, _, _ string, _, _ int) ([]*model.FlashLike, error) {
 	return nil, errors.New("boom")
 }
 
@@ -367,7 +367,7 @@ func TestMyLikes_RepoError(t *testing.T) {
 	likeRepo := &failingListLikeRepo{MockFlashLikeRepository: testutil.NewMockFlashLikeRepository()}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := flash.NewService(repo, likeRepo, idGen)
-	_, err := svc.MyLikes("u2", "", "", 10, 0)
+	_, err := svc.MyLikes("u2", "", "", "", 10, 0)
 	assert.Error(t, err)
 }
 
@@ -381,4 +381,57 @@ func TestSetClock(t *testing.T) {
 	f, err := svc.Create(flash.CreateInput{OwnerID: "u1", Title: "t", Script: "x"})
 	require.NoError(t, err)
 	assert.NotEmpty(t, f.ID)
+}
+
+// #1548: 自分の flash を like すると ErrYourFlash。
+func TestLike_YourFlash(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "u1"}
+	err := svc.Like("u1", "f1")
+	assert.ErrorIs(t, err, flash.ErrYourFlash)
+}
+
+// #1548: DeleteByID は owner チェックなしで削除する (moderator 経路)。
+func TestDeleteByID(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner"}
+	require.NoError(t, svc.DeleteByID("f1"))
+	_, err := repo.FindByID("f1")
+	assert.Error(t, err)
+}
+
+func TestDeleteByID_NotFound(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	assert.ErrorIs(t, svc.DeleteByID("ghost"), flash.ErrFlashNotFound)
+}
+
+// #1548: LikedFlashIDs は viewer が like した flashId の集合を返す。
+func TestLikedFlashIDs(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner"}
+	repo.Flashes["f2"] = &model.Flash{ID: "f2", UserID: "owner"}
+	require.NoError(t, svc.Like("u2", "f1"))
+
+	set, err := svc.LikedFlashIDs("u2", []string{"f1", "f2"})
+	require.NoError(t, err)
+	assert.True(t, set["f1"])
+	assert.False(t, set["f2"])
+
+	// 空 userID / flashIDs は空集合。
+	empty, err := svc.LikedFlashIDs("", []string{"f1"})
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// IsLikedBy reports the viewer's like state for a single flash.
+func TestIsLikedBy(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner"}
+	require.NoError(t, svc.Like("u2", "f1"))
+	liked, err := svc.IsLikedBy("u2", "f1")
+	require.NoError(t, err)
+	assert.True(t, liked)
+	notLiked, err := svc.IsLikedBy("u3", "f1")
+	require.NoError(t, err)
+	assert.False(t, notLiked)
 }

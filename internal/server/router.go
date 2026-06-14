@@ -1849,6 +1849,7 @@ func (s *Server) setupRoutes() {
 
 	// Flash endpoints (Phase 4.5)
 	flashHandler := apiflash.NewHandler(flashService, userRepo, idGen)
+	flashHandler.SetRoleChecker(roleService) // #1548: flash/delete モデレータ削除
 	api.POST("/flash/create", flashHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:flash"))
 	api.POST("/flash/show", flashHandler.Show)
 	api.POST("/flash/update", flashHandler.Update, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:flash"))
@@ -2201,6 +2202,7 @@ func (s *Server) setupRoutes() {
 	announcementHandler.SetModLogService(modLogService)
 	announcementHandler.SetUserRepo(userRepo)
 	galleryHandler.SetModLog(modLogService) // #1548: moderator による gallery post 削除の監査ログ
+	flashHandler.SetModLog(modLogService)   // #1548: moderator による flash 削除の監査ログ
 	adminHandler.SetEmojiRepo(emojiRepo)
 	adminHandler.SetDriveFileRepo(driveFileRepo)
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で
