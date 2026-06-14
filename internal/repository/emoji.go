@@ -2,10 +2,31 @@ package repository
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
+
+// emojiNameTokenRe extracts `:name:` tokens from an admin/emoji/list query,
+// mirroring upstream list.ts の `/\:([a-z0-9_]*)\:/g` (#1543)。
+var emojiNameTokenRe = regexp.MustCompile(`:([a-z0-9_]*):`)
+
+// extractEmojiNameTokens returns the inner names of all `:xxx:` tokens in query
+// (空トークンは除外)。1 つ以上見つかれば admin/emoji/list は完全一致集合で絞る。
+func extractEmojiNameTokens(query string) []string {
+	matches := emojiNameTokenRe.FindAllStringSubmatch(query, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m[1] != "" {
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
 
 // EmojiRepository provides data access for the `emoji` table.
 type EmojiRepository interface {
@@ -160,12 +181,22 @@ func (r *emojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID str
 }
 
 func (r *emojiRepository) ListWithFilter(query, category string, local bool, sinceID, untilID string, limit, offset int) ([]*model.Emoji, error) {
-	q := r.db.Order("id ASC")
+	// upstream list.ts は makePaginationQuery を使うため、カーソル無し時は
+	// id DESC (最新が先頭)、sinceId のみ指定時は id ASC で並べる (#1543)。
+	q := r.db.Order(paginationOrder(sinceID, untilID, "id"))
 	if local {
 		q = q.Where("host IS NULL")
 	}
 	if query != "" {
-		q = q.Where("name ILIKE ?", "%"+query+"%")
+		// upstream list.ts: query が :name: 形式を含むなら該当 emoji 名の完全一致
+		// 集合で絞り、そうでなければ name / aliases / category のいずれかに部分
+		// 一致する emoji を返す (#1543)。
+		if names := extractEmojiNameTokens(query); len(names) > 0 {
+			q = q.Where("name IN ?", names)
+		} else {
+			like := "%" + escapeLike(query) + "%"
+			q = q.Where(`name ILIKE ? ESCAPE '\' OR array_to_string(aliases, ',') ILIKE ? ESCAPE '\' OR category ILIKE ? ESCAPE '\'`, like, like, like)
+		}
 	}
 	if category != "" {
 		q = q.Where("category = ?", category)

@@ -1275,6 +1275,33 @@ func TestEmojiUpdate_SelfRenameOk(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// upstream paramDef は {name} のみでの更新も許す。id 無し name 指定時は
+// local emoji を name で解決して他フィールドを更新する (#1543)。
+func TestEmojiUpdate_NameOnly(t *testing.T) {
+	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	rec := doPost(h.EmojiUpdate, `{"name":"smile","category":"faces"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	got, err := emojiRepo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+	require.NotNil(t, got.Category)
+	assert.Equal(t, "faces", *got.Category, "name で解決した emoji の category が更新される")
+}
+
+// name のみ指定で該当 local emoji が無ければ NO_SUCH_EMOJI (#1543)。
+func TestEmojiUpdate_NameOnly_NotFound(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	rec := doPost(h.EmojiUpdate, `{"name":"ghost","category":"x"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_EMOJI")
+}
+
+// id も name も無ければ INVALID_PARAM (#1543)。
+func TestEmojiUpdate_NeitherIDNorName(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	rec := doPost(h.EmojiUpdate, `{"category":"x"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestEmojiUpdate_UnsupportedFileType(t *testing.T) {
 	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
 	dr := testutil.NewMockDriveFileRepository()

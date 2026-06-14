@@ -142,6 +142,81 @@ func TestEmojiRepository_ListWithFilter(t *testing.T) {
 	assert.LessOrEqual(t, len(emojis), 1)
 }
 
+// upstream list.ts は makePaginationQuery で id DESC (最新が先頭)。mk-go も
+// カーソル無し時は DESC で並べる (#1543)。
+func TestEmojiRepository_ListWithFilter_DefaultOrderDesc(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e1 := &model.Emoji{ID: "e_ord_1", Name: "ordone", OriginalURL: "https://example.com/1.png"}
+	e2 := &model.Emoji{ID: "e_ord_2", Name: "ordtwo", OriginalURL: "https://example.com/2.png"}
+	require.NoError(t, repo.Create(e1))
+	require.NoError(t, repo.Create(e2))
+	defer cleanupEmoji(t, e1.ID)
+	defer cleanupEmoji(t, e2.ID)
+
+	emojis, err := repo.ListWithFilter("", "", true, "", "", 100, 0)
+	require.NoError(t, err)
+	// id DESC なので e_ord_2 が e_ord_1 より前に来る。
+	var i1, i2 = -1, -1
+	for i, e := range emojis {
+		if e.ID == "e_ord_1" {
+			i1 = i
+		}
+		if e.ID == "e_ord_2" {
+			i2 = i
+		}
+	}
+	require.NotEqual(t, -1, i1)
+	require.NotEqual(t, -1, i2)
+	assert.Less(t, i2, i1, "id DESC: e_ord_2 が先")
+}
+
+// query が :name: 形式なら該当名の完全一致集合で絞る (#1543)。
+func TestEmojiRepository_ListWithFilter_ColonNameExactMatch(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	exact := &model.Emoji{ID: "e_cn_exact", Name: "alpha", OriginalURL: "https://example.com/a.png"}
+	prefixed := &model.Emoji{ID: "e_cn_prefixed", Name: "alphabet", OriginalURL: "https://example.com/ab.png"}
+	require.NoError(t, repo.Create(exact))
+	require.NoError(t, repo.Create(prefixed))
+	defer cleanupEmoji(t, exact.ID)
+	defer cleanupEmoji(t, prefixed.ID)
+
+	// ":alpha:" は alpha のみ完全一致 (部分一致の alphabet は含めない)。
+	emojis, err := repo.ListWithFilter(":alpha:", "", true, "", "", 100, 0)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, e := range emojis {
+		ids[e.ID] = true
+	}
+	assert.True(t, ids["e_cn_exact"])
+	assert.False(t, ids["e_cn_prefixed"], ":name: は完全一致のみ")
+}
+
+// query が :name: 形式でなければ name / aliases / category の部分一致で絞る (#1543)。
+func TestEmojiRepository_ListWithFilter_AliasAndCategoryMatch(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	byAlias := &model.Emoji{ID: "e_q_alias", Name: "nomatch1", Aliases: pq.StringArray{"zzqterm"}, OriginalURL: "https://example.com/al.png"}
+	byCategory := &model.Emoji{ID: "e_q_cat", Name: "nomatch2", Category: strPtrEmoji("zzqterm-cat"), OriginalURL: "https://example.com/c.png"}
+	unrelated := &model.Emoji{ID: "e_q_none", Name: "nomatch3", OriginalURL: "https://example.com/n.png"}
+	require.NoError(t, repo.Create(byAlias))
+	require.NoError(t, repo.Create(byCategory))
+	require.NoError(t, repo.Create(unrelated))
+	defer cleanupEmoji(t, byAlias.ID)
+	defer cleanupEmoji(t, byCategory.ID)
+	defer cleanupEmoji(t, unrelated.ID)
+
+	emojis, err := repo.ListWithFilter("zzqterm", "", true, "", "", 100, 0)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, e := range emojis {
+		ids[e.ID] = true
+	}
+	assert.True(t, ids["e_q_alias"], "aliases 部分一致")
+	assert.True(t, ids["e_q_cat"], "category 部分一致")
+	assert.False(t, ids["e_q_none"], "無関係は除外")
+}
+
+func strPtrEmoji(s string) *string { return &s }
+
 func TestEmojiRepository_ListWithFilter_DefaultLimit(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 	emojis, err := repo.ListWithFilter("", "", true, "", "", 0, 0) // limit=0 → default 50
