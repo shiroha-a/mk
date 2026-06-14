@@ -80,4 +80,9 @@ type UserListFilter struct {
 	Sort     string // "+createdAt", "-createdAt", "+updatedAt", "-updatedAt", etc.
 	Limit    int
 	Offset   int
+	// Cursor pagination (federation/users 等の makePaginationQuery 互換、#1732)。
+	// 非空のときは Sort/Offset を無視して id cursor で絞る。sinceID のみ指定時は
+	// id ASC、それ以外は id DESC。
+	SinceID string
+	UntilID string
 }

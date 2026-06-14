@@ -47,6 +47,79 @@ func TestFollowingRepository_FindByPair_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// ListFollowersByHostCursor / ListFollowingByHostCursor は federation の
+// followers/following を id cursor でページングする (#1732)。
+func TestFollowingRepository_ListByHostCursor(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	// following は (followerId, followeeId) が unique なので各行を別 pair にする。
+	la := insertTestUser(t, "u_hc_la", "hcla")
+	lb := insertTestUser(t, "u_hc_lb", "hclb")
+	lc := insertTestUser(t, "u_hc_lc", "hclc")
+	ru := insertTestUser(t, "u_hc_ru", "hcru")
+	defer cleanupUser(t, la.ID)
+	defer cleanupUser(t, lb.ID)
+	defer cleanupUser(t, lc.ID)
+	defer cleanupUser(t, ru.ID)
+
+	host := "hostcursor.example"
+	// followeeHost=host の 3 行 (federation/followers 対象)。id は昇順 a<b<c、
+	// pair は (la→ru), (lb→ru), (lc→ru) で distinct。
+	followers := []struct{ id, follower string }{
+		{"hc_fee_a", la.ID}, {"hc_fee_b", lb.ID}, {"hc_fee_c", lc.ID},
+	}
+	for _, r := range followers {
+		row := &model.Following{ID: r.id, FollowerID: r.follower, FolloweeID: ru.ID, FolloweeHost: &host}
+		require.NoError(t, repo.Create(row))
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, r.id)
+	}
+
+	// untilID=hc_fee_c → a, b のみ DESC で [b, a]。
+	rows, err := repo.ListFollowersByHostCursor(host, "", "hc_fee_c", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "hc_fee_b", rows[0].ID)
+	assert.Equal(t, "hc_fee_a", rows[1].ID)
+
+	// sinceID=hc_fee_a → b, c のみ ASC で [b, c]。
+	rows, err = repo.ListFollowersByHostCursor(host, "hc_fee_a", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "hc_fee_b", rows[0].ID)
+	assert.Equal(t, "hc_fee_c", rows[1].ID)
+
+	// followerHost 版 (federation/following) も動くこと (default id DESC)。
+	// pair は (ru→la), (ru→lb) で distinct。
+	host2 := "hostcursor2.example"
+	following := []struct{ id, followee string }{
+		{"hc_fer_a", la.ID}, {"hc_fer_b", lb.ID},
+	}
+	for _, r := range following {
+		row := &model.Following{ID: r.id, FollowerID: ru.ID, FollowerHost: &host2, FolloweeID: r.followee}
+		require.NoError(t, repo.Create(row))
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, r.id)
+	}
+	rows, err = repo.ListFollowingByHostCursor(host2, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "hc_fer_b", rows[0].ID, "default は id DESC")
+
+	// following 版の sinceID / untilID 分岐 + limit<=0 のデフォルト適用も通す。
+	rows, err = repo.ListFollowingByHostCursor(host2, "hc_fer_a", "", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "hc_fer_b", rows[0].ID, "sinceID 指定 + limit<=0 デフォルト")
+
+	rows, err = repo.ListFollowingByHostCursor(host2, "", "hc_fer_b", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "hc_fer_a", rows[0].ID, "untilID 指定")
+
+	// followers 版も limit<=0 デフォルト適用を通す (全 3 行返る)。
+	rows, err = repo.ListFollowersByHostCursor(host, "", "", 0)
+	require.NoError(t, err)
+	assert.Len(t, rows, 3)
+}
+
 // CountRemoteFollowees / CountRemoteFollowers は federation/stats の
 // allSubCount / allPubCount に対応 (#1544)。グローバル count なので baseline
 // からの delta を検証する。

@@ -7,15 +7,24 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
 // hostPageRequest is the common request body for the three per-host listing
 // endpoints (federation/followers, federation/following, federation/users).
 type hostPageRequest struct {
-	Host   string `json:"host"`
-	Limit  int    `json:"limit"`
-	Offset int    `json:"offset"`
+	Host      string `json:"host"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
+	// sinceID / untilID は parseHostPage が sinceDate/untilDate を aidx prefix に
+	// 正規化して埋める cursor 値 (#1732、upstream makePaginationQuery 互換)。
+	sinceID string
+	untilID string
 }
 
 // Followers handles POST /api/federation/followers.
@@ -30,7 +39,7 @@ func (h *Handler) Followers(c echo.Context) error {
 	if h.followingRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.followingRepo.ListFollowersByHost(req.Host, req.Limit, req.Offset)
+	rows, err := h.followingRepo.ListFollowersByHostCursor(req.Host, req.sinceID, req.untilID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -49,7 +58,7 @@ func (h *Handler) Following(c echo.Context) error {
 	if h.followingRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.followingRepo.ListFollowingByHost(req.Host, req.Limit, req.Offset)
+	rows, err := h.followingRepo.ListFollowingByHostCursor(req.Host, req.sinceID, req.untilID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -60,19 +69,20 @@ func (h *Handler) Following(c echo.Context) error {
 //
 // 指定リモートホストに属するユーザーの一覧を返す。
 func (h *Handler) Users(c echo.Context) error {
-	var req hostPageRequest
-	if err := c.Bind(&req); err != nil || req.Host == "" {
+	req, ok := parseHostPage(c)
+	if !ok {
 		return apierr.JSONInvalidParam(c)
 	}
 	if h.userRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	limit := pagination.ClampLimit(req.Limit, 10, 100)
 	users, err := h.userRepo.ListUsers(model.UserListFilter{
 		Origin:   "remote",
 		Hostname: req.Host,
-		Limit:    limit,
+		Limit:    req.Limit,
 		Offset:   req.Offset,
+		SinceID:  req.sinceID,
+		UntilID:  req.untilID,
 	})
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -122,6 +132,9 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 		return req, false
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	// sinceDate / untilDate を aidx prefix に正規化して cursor 値に落とす
+	// (#1732、upstream makePaginationQuery 互換)。
+	req.sinceID, req.untilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	return req, true
 }
 

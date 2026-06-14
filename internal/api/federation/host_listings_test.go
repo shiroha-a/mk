@@ -156,6 +156,67 @@ func TestFollowing_PackShape(t *testing.T) {
 	assert.False(t, hasFollowee, "missing followee user must leave followee absent")
 }
 
+// upstream followers.ts は makePaginationQuery で id cursor を使う。untilId で
+// それ以前の行のみ返ること (#1732)。
+func TestFollowers_CursorUntilID(t *testing.T) {
+	h, _ := newHandler(t)
+	repo := testutil.NewMockFollowingRepository()
+	remote := "remote.example"
+	repo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "l1", FolloweeID: "r1", FolloweeHost: &remote}
+	repo.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "l2", FolloweeID: "r2", FolloweeHost: &remote}
+	repo.Followings["f3"] = &model.Following{ID: "f3", FollowerID: "l3", FolloweeID: "r3", FolloweeHost: &remote}
+	h.SetFollowingRepo(repo)
+
+	// untilId=f3 → f3 より小さい id (f1, f2) のみ、DESC で [f2, f1]。
+	rec := postBody(h.Followers, `{"host":"remote.example","untilId":"f3"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	assert.Equal(t, "f2", rows[0]["id"])
+	assert.Equal(t, "f1", rows[1]["id"])
+}
+
+// sinceId 指定時は ASC で それ以降の行を返す (#1732)。
+func TestFollowing_CursorSinceID(t *testing.T) {
+	h, _ := newHandler(t)
+	repo := testutil.NewMockFollowingRepository()
+	remote := "remote.example"
+	repo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "r1", FollowerHost: &remote, FolloweeID: "l1"}
+	repo.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "r2", FollowerHost: &remote, FolloweeID: "l2"}
+	repo.Followings["f3"] = &model.Following{ID: "f3", FollowerID: "r3", FollowerHost: &remote, FolloweeID: "l3"}
+	h.SetFollowingRepo(repo)
+
+	// sinceId=f1 → f1 より大きい id (f2, f3) を ASC で [f2, f3]。
+	rec := postBody(h.Following, `{"host":"remote.example","sinceId":"f1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	assert.Equal(t, "f2", rows[0]["id"])
+	assert.Equal(t, "f3", rows[1]["id"])
+}
+
+// federation/users も id cursor (untilId) を受け付ける (#1732)。
+func TestUsers_CursorUntilID(t *testing.T) {
+	h, _ := newHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		userRepo.Users[uid] = &model.User{ID: uid, Username: uid, Host: &remote}
+	}
+	h.SetUserRepo(userRepo)
+
+	// untilId=u3 → u1, u2 のみ DESC で [u2, u1]。
+	rec := postBody(h.Users, `{"host":"remote.example","untilId":"u3"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	assert.Equal(t, "u2", rows[0]["id"])
+	assert.Equal(t, "u1", rows[1]["id"])
+}
+
 func TestUsers_FiltersByHost(t *testing.T) {
 	h, _ := newHandler(t)
 	userRepo := testutil.NewMockUserRepository()
