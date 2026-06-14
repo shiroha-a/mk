@@ -1,6 +1,7 @@
 package flash
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -41,11 +43,29 @@ func setUser(c echo.Context, userID string) {
 	c.Set(string(middleware.UserContextKey), &model.User{ID: userID})
 }
 
+// stubRoles implements flash.RoleChecker for #1548 tests.
+type stubRoles struct{ moderators map[string]bool }
+
+func (s *stubRoles) IsModerator(userID string) bool { return s.moderators[userID] }
+
+// stubModLog records moderation log calls for #1548 tests.
+type stubModLog struct{ calls []stubModLogCall }
+
+type stubModLogCall struct {
+	moderatorID string
+	logType     moderationlog.LogType
+	info        map[string]any
+}
+
+func (s *stubModLog) Log(_ context.Context, moderatorID string, t moderationlog.LogType, info map[string]any) {
+	s.calls = append(s.calls, stubModLogCall{moderatorID, t, info})
+}
+
 // --- Create ----------------------------------------------------------------
 
 func TestCreate_Success(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"title":"t","script":"x"}`)
+	c, rec := newReq(t, `{"title":"t","summary":"s","script":"x","permissions":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -53,6 +73,33 @@ func TestCreate_Success(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	shapetest.Assert(t, "Flash", resp) // L3 (#1270)
+}
+
+// #1548: summary が欠けると 400 (upstream paramDef required)。
+func TestCreate_SummaryRequired(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","script":"x","permissions":[]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #1548: permissions が欠けると 400 (upstream paramDef required)。
+func TestCreate_PermissionsRequired(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","summary":"s","script":"x"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #1548: summary="" / permissions=[] は present 扱いで作成される。
+func TestCreate_EmptySummaryAndPermissionsAccepted(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","summary":"","script":"x","permissions":[]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestCreate_BadJSON(t *testing.T) {
@@ -92,7 +139,7 @@ func TestCreate_RepoError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := coreflash.NewService(repo, testutil.NewMockFlashLikeRepository(), idGen)
 	h := NewHandler(svc, nil, nil)
-	c, rec := newReq(t, `{"title":"t","script":"x"}`)
+	c, rec := newReq(t, `{"title":"t","summary":"s","script":"x","permissions":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -252,6 +299,47 @@ func TestDelete_RepoError(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// #1548: モデレータは他人の flash を削除でき moderationLog を残す。
+func TestDelete_ModeratorWithModLog(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockFlashRepository()
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner", Title: "T"}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "owner", Username: "ownername"}))
+	svc := coreflash.NewService(repo, testutil.NewMockFlashLikeRepository(), idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"mod": true}})
+	ml := &stubModLog{}
+	h.SetModLog(ml)
+
+	c, rec := newReq(t, `{"flashId":"f1"}`)
+	setUser(c, "mod")
+	require.NoError(t, h.Delete(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := repo.FindByID("f1")
+	assert.Error(t, err, "flash must be deleted")
+	require.Len(t, ml.calls, 1)
+	assert.Equal(t, moderationlog.LogDeleteFlash, ml.calls[0].logType)
+	assert.Equal(t, "mod", ml.calls[0].moderatorID)
+	assert.Equal(t, "f1", ml.calls[0].info["flashId"])
+	assert.Equal(t, "owner", ml.calls[0].info["flashUserId"])
+	assert.Equal(t, "ownername", ml.calls[0].info["flashUserUsername"])
+}
+
+// #1548: 所有者自身の削除では moderationLog を残さない。
+func TestDelete_OwnerNoModLog(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice"}
+	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"alice": true}})
+	ml := &stubModLog{}
+	h.SetModLog(ml)
+	c, rec := newReq(t, `{"flashId":"f1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Delete(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, ml.calls)
 }
 
 // --- My ---------------------------------------------------------------------
@@ -414,6 +502,54 @@ func TestLike_AlreadyLiked(t *testing.T) {
 	_ = rec
 }
 
+// #1548: 自分の flash を like すると YOUR_FLASH。
+func TestLike_YourFlash(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice"}
+	c, rec := newReq(t, `{"flashId":"f1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Like(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "3fd8a0e7-5955-4ba9-85bb-bf3e0c30e13b")
+}
+
+// #1548: list endpoint (featured/my/search/my-likes) は viewer の isLiked を返す。
+func TestList_IsLikedPopulated(t *testing.T) {
+	h, repo, likeRepo := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner", Title: "liked"}
+	repo.Flashes["f2"] = &model.Flash{ID: "f2", UserID: "owner", Title: "notliked"}
+	likeRepo.Likes["l1"] = &model.FlashLike{ID: "l1", UserID: "bob", FlashID: "f1"}
+
+	c, rec := newReq(t, `{}`)
+	setUser(c, "bob")
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := map[string]map[string]any{}
+	for _, f := range resp {
+		byID[f["id"].(string)] = f
+	}
+	require.NotNil(t, byID["f1"])
+	require.NotNil(t, byID["f2"])
+	assert.Equal(t, true, byID["f1"]["isLiked"])
+	assert.Equal(t, false, byID["f2"]["isLiked"])
+}
+
+// 未認証 viewer では isLiked は省略される (upstream optional)。
+func TestList_IsLikedOmittedForAnon(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "owner", Title: "x"}
+	c, rec := newReq(t, `{}`)
+	require.NoError(t, h.Featured(c)) // no user
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	_, has := resp[0]["isLiked"]
+	assert.False(t, has, "anonymous viewer must not get isLiked")
+}
+
 // failingCreateLikeRepo causes Create to fail.
 type failingCreateLikeRepo struct {
 	*testutil.MockFlashLikeRepository
@@ -521,12 +657,12 @@ func TestMyLikes_BadJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// myLikesFailRepo causes ListByUser on the like repo to fail.
+// myLikesFailRepo causes ListByUserSearch (used by MyLikes) on the like repo to fail.
 type myLikesFailRepo struct {
 	*testutil.MockFlashLikeRepository
 }
 
-func (r *myLikesFailRepo) ListByUser(_, _, _ string, _, _ int) ([]*model.FlashLike, error) {
+func (r *myLikesFailRepo) ListByUserSearch(_, _, _, _ string, _, _ int) ([]*model.FlashLike, error) {
 	return nil, errors.New("boom")
 }
 

@@ -2,6 +2,7 @@
 package flash
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -16,11 +18,25 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// RoleChecker reports whether a user is a moderator. Satisfied by
+// *core/role.Service. nil 配線時は全員 non-moderator 扱い (#1548)。
+type RoleChecker interface {
+	IsModerator(userID string) bool
+}
+
+// ModLogger records a moderation action. Satisfied by *core/moderationlog.Service.
+// nil 配線時は記録を skip する (#1548)。
+type ModLogger interface {
+	Log(ctx context.Context, moderatorID string, t moderationlog.LogType, info map[string]any)
+}
+
 // Handler handles flash-related API endpoints.
 type Handler struct {
 	svc      *coreflash.Service
 	userRepo repository.UserRepository
 	idGen    id.Generator
+	roles    RoleChecker
+	modLog   ModLogger
 }
 
 // NewHandler creates a new flash Handler.
@@ -31,28 +47,39 @@ func NewHandler(svc *coreflash.Service, userRepo repository.UserRepository, idGe
 	return &Handler{svc: svc, userRepo: userRepo, idGen: idGen}
 }
 
-// CreateRequest is the request body for flash/create.
+// SetRoleChecker wires the moderator check used by flash/delete (#1548).
+func (h *Handler) SetRoleChecker(r RoleChecker) { h.roles = r }
+
+// SetModLog wires the moderation log writer used when a moderator deletes
+// another user's flash (#1548).
+func (h *Handler) SetModLog(m ModLogger) { h.modLog = m }
+
+// CreateRequest is the request body for flash/create. summary / permissions は
+// upstream paramDef で required なので pointer で受けて「キー欠如」を検出する
+// (#1548)。空文字 / 空配列は present 扱い (= upstream の required は presence 検査)。
 type CreateRequest struct {
-	Title       string   `json:"title"`
-	Summary     string   `json:"summary"`
-	Script      string   `json:"script"`
-	Permissions []string `json:"permissions"`
-	Visibility  string   `json:"visibility"`
+	Title       string    `json:"title"`
+	Summary     *string   `json:"summary"`
+	Script      string    `json:"script"`
+	Permissions *[]string `json:"permissions"`
+	Visibility  string    `json:"visibility"`
 }
 
 // Create handles POST /api/flash/create.
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req CreateRequest
-	if err := c.Bind(&req); err != nil || req.Title == "" || req.Script == "" {
+	// upstream paramDef required: ['title','summary','script','permissions']。
+	// summary/permissions の欠如は 400 にする (title/script は従来どおり空も弾く)。
+	if err := c.Bind(&req); err != nil || req.Title == "" || req.Script == "" || req.Summary == nil || req.Permissions == nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	f, err := h.svc.Create(coreflash.CreateInput{
 		OwnerID:     user.ID,
 		Title:       req.Title,
-		Summary:     req.Summary,
+		Summary:     *req.Summary,
 		Script:      req.Script,
-		Permissions: req.Permissions,
+		Permissions: *req.Permissions,
 		Visibility:  req.Visibility,
 	})
 	if err != nil {
@@ -144,16 +171,45 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.FlashID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if err := h.svc.Delete(user.ID, req.FlashID); err != nil {
-		switch {
-		case errors.Is(err, coreflash.ErrFlashNotFound):
+	// upstream delete.ts: 所有者でもモデレータでもなければ ACCESS_DENIED。
+	// モデレータは他人の flash も削除でき、その場合 moderationLog を残す (#1548)。
+	f, err := h.svc.Show("", req.FlashID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "de1623ef-bbb3-4289-a71e-14cfa83d9740"))
+	}
+	isOwner := f.UserID == user.ID
+	isModerator := h.roles != nil && h.roles.IsModerator(user.ID)
+	if !isOwner && !isModerator {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1036ad7b-9f92-4fff-89c3-0e50dc941704"))
+	}
+	if err := h.svc.DeleteByID(req.FlashID); err != nil {
+		if errors.Is(err, coreflash.ErrFlashNotFound) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "de1623ef-bbb3-4289-a71e-14cfa83d9740"))
-		case errors.Is(err, coreflash.ErrAccessDenied):
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1036ad7b-9f92-4fff-89c3-0e50dc941704"))
 		}
 		return apierr.JSONInternalError(c)
 	}
+	if !isOwner && h.modLog != nil {
+		h.modLog.Log(c.Request().Context(), user.ID, moderationlog.LogDeleteFlash, map[string]any{
+			"flashId":           f.ID,
+			"flashUserId":       f.UserID,
+			"flashUserUsername": h.usernameOf(f.UserID),
+			"flash":             flashToMap(f),
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// usernameOf returns the username for userID, or "" when the lookup fails.
+// Used to populate the moderation log info (#1548).
+func (h *Handler) usernameOf(userID string) string {
+	if h.userRepo == nil {
+		return ""
+	}
+	u, err := h.userRepo.FindByID(userID)
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.Username
 }
 
 // PaginationRequest is the shared body for list-style endpoints.
@@ -193,7 +249,7 @@ func (h *Handler) My(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.flashesToListWithUser(rows))
+	return c.JSON(http.StatusOK, h.flashesToListForViewer(rows, user))
 }
 
 // Featured handles POST /api/flash/featured.
@@ -209,7 +265,7 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.flashesToListWithUser(rows))
+	return c.JSON(http.StatusOK, h.flashesToListForViewer(rows, middleware.GetUser(c)))
 }
 
 // Search handles POST /api/flash/search.
@@ -225,7 +281,7 @@ func (h *Handler) Search(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.flashesToListWithUser(rows))
+	return c.JSON(http.StatusOK, h.flashesToListForViewer(rows, middleware.GetUser(c)))
 }
 
 // LikeRequest is the request body for flash/like and flash/unlike.
@@ -244,6 +300,8 @@ func (h *Handler) Like(c echo.Context) error {
 		switch {
 		case errors.Is(err, coreflash.ErrFlashNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FLASH", "No such flash.", "c07c1491-9161-4c5c-9d75-01906f911f73"))
+		case errors.Is(err, coreflash.ErrYourFlash):
+			return c.JSON(http.StatusBadRequest, apierr.Error("YOUR_FLASH", "You cannot like your flash.", "3fd8a0e7-5955-4ba9-85bb-bf3e0c30e13b"))
 		case errors.Is(err, coreflash.ErrAlreadyLiked):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "You already liked that flash.", "010065cf-ad43-40df-8067-abff9f4686e3"))
 		}
@@ -278,14 +336,18 @@ func (h *Handler) Unlike(c echo.Context) error {
 // flatten された Flash 配列を返しており frontend が空表示になっていた。
 func (h *Handler) MyLikes(c echo.Context) error {
 	user := middleware.GetUser(c)
-	var req PaginationRequest
+	var req struct {
+		PaginationRequest
+		// upstream my-likes paramDef: search (string, 1-100, nullable)。
+		Search string `json:"search"`
+	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	pairs, err := h.svc.MyLikes(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	pairs, err := h.svc.MyLikes(user.ID, req.Search, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -293,7 +355,7 @@ func (h *Handler) MyLikes(c echo.Context) error {
 	for _, p := range pairs {
 		flashes = append(flashes, p.Flash)
 	}
-	packed := h.flashesToListWithUser(flashes)
+	packed := h.flashesToListForViewer(flashes, user)
 	out := make([]map[string]any, 0, len(pairs))
 	for i, p := range pairs {
 		out = append(out, map[string]any{
@@ -340,18 +402,26 @@ func (h *Handler) flashWithKnownUser(f *model.Flash, owner *model.User) map[stri
 	return entry
 }
 
-// flashesToListWithUser packs flashes including the embedded `user`
-// (UserLite) and ISO-formatted `createdAt`, matching upstream Misskey TS
-// FlashEntityService output. The frontend Play page reads `flash.user`
-// for display so a missing user object causes empty card render.
+// flashesToListWithUser packs flashes for an anonymous viewer (no isLiked).
+func (h *Handler) flashesToListWithUser(rows []*model.Flash) []map[string]any {
+	return h.flashesToListForViewer(rows, nil)
+}
+
+// flashesToListForViewer packs flashes including the embedded `user`
+// (UserLite), ISO-formatted `createdAt`, and (when viewer != nil) the per-flash
+// `isLiked` flag, matching upstream Misskey TS FlashEntityService output. The
+// frontend Play page reads `flash.user` for display so a missing user object
+// causes empty card render; the like button reads `isLiked` (#1548).
 //
 // User lookups are deduped by author and fetched in a single FindManyByIDs
-// call to avoid the N+1 pattern.
-func (h *Handler) flashesToListWithUser(rows []*model.Flash) []map[string]any {
+// call; liked-flash ids are batch-loaded in one query, both avoiding N+1.
+func (h *Handler) flashesToListForViewer(rows []*model.Flash, viewer *model.User) []map[string]any {
 	const tsFormat = "2006-01-02T15:04:05.000Z"
 	userIDs := make([]string, 0, len(rows))
+	flashIDs := make([]string, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for _, f := range rows {
+		flashIDs = append(flashIDs, f.ID)
 		if _, ok := seen[f.UserID]; ok {
 			continue
 		}
@@ -366,6 +436,11 @@ func (h *Handler) flashesToListWithUser(rows []*model.Flash) []map[string]any {
 			}
 		}
 	}
+	// 認証 viewer のときだけ isLiked を埋める (upstream optional field)。
+	var likedSet map[string]bool
+	if viewer != nil {
+		likedSet, _ = h.svc.LikedFlashIDs(viewer.ID, flashIDs)
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, f := range rows {
 		entry := flashToMap(f)
@@ -378,6 +453,9 @@ func (h *Handler) flashesToListWithUser(rows []*model.Flash) []map[string]any {
 		entry["createdAt"] = createdAt
 		if u, ok := userByID[f.UserID]; ok {
 			entry["user"] = entity.PackUserLite(u)
+		}
+		if viewer != nil {
+			entry["isLiked"] = likedSet[f.ID]
 		}
 		out = append(out, entry)
 	}
