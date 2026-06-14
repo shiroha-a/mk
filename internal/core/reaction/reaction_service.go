@@ -2,7 +2,9 @@
 package reaction
 
 import (
+	"context"
 	"errors"
+	"math/rand"
 	"regexp"
 	"slices"
 	"strings"
@@ -12,6 +14,13 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+)
+
+// featured ランキング更新の sampling rate / note 年齢上限 (upstream
+// ReactionService / NoteCreateService と同値)。reaction は score=1。
+const (
+	featuredSampleRate = 0.3
+	featuredMaxNoteAge = 3 * 24 * time.Hour
 )
 
 // FallbackReaction is the default reaction used when no reaction is provided.
@@ -150,6 +159,15 @@ type MediaSilenceChecker interface {
 	IsMediaSilenced(host string) bool
 }
 
+// FeaturedRanking abstracts the engagement ranking store (#1687). 循環依存回避の
+// ため narrow interface で受け取る (実装は core/featured.Service)。reaction は
+// 対象 note の global / in-channel / per-user ranking を更新する。
+type FeaturedRanking interface {
+	UpdateGlobalNotesRanking(ctx context.Context, noteID string, score float64) error
+	UpdateInChannelNotesRanking(ctx context.Context, channelID, noteID string, score float64) error
+	UpdatePerUserNotesRanking(ctx context.Context, userID, noteID string, score float64) error
+}
+
 type Service struct {
 	noteRepo         repository.NoteRepository
 	reactionRepo     repository.NoteReactionRepository
@@ -165,6 +183,15 @@ type Service struct {
 	countWriter      ReactionCountWriter
 	userRoles        UserRolesProvider
 	mediaSilence     MediaSilenceChecker
+	featuredRanking  FeaturedRanking
+	// randFn は featured ランキング更新の 30% sampling 用。テストで固定する。
+	randFn func() float64
+}
+
+// SetFeaturedRanking wires the engagement ranking store so reactions update the
+// featured ranking (#1687). nil 注入時 (= 未配線 / test) は ranking 更新を skip。
+func (s *Service) SetFeaturedRanking(r FeaturedRanking) {
+	s.featuredRanking = r
 }
 
 // SetUserRolesProvider wires role lookup for role-gated emoji reaction gating (#1538).
@@ -202,6 +229,7 @@ func NewService(
 		followingRepo: followingRepo,
 		idGen:         idGen,
 		countWriter:   NewDirectWriter(noteRepo),
+		randFn:        rand.Float64,
 	}
 }
 
@@ -344,8 +372,41 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 	if s.noteStreamHook != nil {
 		s.noteStreamHook.OnReacted(target.ID, user.ID, decodeReactionForStream(reaction), s.resolveStreamEmoji(reaction))
 	}
+	// featured engagement ランキング更新もベストエフォート (#1687)。
+	s.updateFeaturedOnReaction(target, user.ID)
 
 	return reaction, nil
+}
+
+// updateFeaturedOnReaction boosts the reacted note's featured engagement ranking
+// (#1687, upstream ReactionService)。30% sampling、self-reaction 除外、note が
+// 3日以内、の gate を通った場合のみ。channel note は in-channel ranking、それ以外は
+// public かつ local かつ非 reply のときに global + per-user ranking を更新する。
+func (s *Service) updateFeaturedOnReaction(target *model.Note, reactorID string) {
+	if s.featuredRanking == nil || s.randFn == nil {
+		return
+	}
+	if s.randFn() >= featuredSampleRate {
+		return
+	}
+	if target.UserID == reactorID {
+		return
+	}
+	created, err := s.idGen.ParseTime(target.ID)
+	if err != nil || time.Since(created) >= featuredMaxNoteAge {
+		return
+	}
+	ctx := context.Background()
+	if target.ChannelID != nil && *target.ChannelID != "" {
+		if target.ReplyID == nil {
+			_ = s.featuredRanking.UpdateInChannelNotesRanking(ctx, *target.ChannelID, target.ID, 1)
+		}
+		return
+	}
+	if target.Visibility == model.NoteVisibilityPublic && target.UserHost == nil && target.ReplyID == nil {
+		_ = s.featuredRanking.UpdateGlobalNotesRanking(ctx, target.ID, 1)
+		_ = s.featuredRanking.UpdatePerUserNotesRanking(ctx, target.UserID, target.ID, 1)
+	}
 }
 
 // Delete removes the user's reaction from the note.

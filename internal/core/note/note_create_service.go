@@ -2,8 +2,10 @@
 package note
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"math/rand"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,6 +19,13 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+)
+
+// featured ランキング更新の sampling rate / note 年齢上限 (upstream
+// NoteCreateService.incRenoteCount と同値)。renote は score=5。
+const (
+	featuredSampleRate = 0.3
+	featuredMaxNoteAge = 3 * 24 * time.Hour
 )
 
 // Errors returned by NoteCreateService.
@@ -219,6 +228,27 @@ type CreateService struct {
 	metaRepo            repository.MetaRepository
 	channelRepo         repository.ChannelRepository
 	silencingProvider   SilencingProvider
+	featuredRanking     FeaturedRanking
+	// randFn は featured ランキング更新の 30% sampling 用。テストで固定する。
+	randFn func() float64
+}
+
+// FeaturedRanking abstracts the engagement ranking store (#1687). 循環依存回避の
+// ため narrow interface で受け取る (実装は core/featured.Service)。renote は
+// renote 対象 note の global / in-channel / per-user ranking を boost する。
+type FeaturedRanking interface {
+	UpdateGlobalNotesRanking(ctx context.Context, noteID string, score float64) error
+	UpdateInChannelNotesRanking(ctx context.Context, channelID, noteID string, score float64) error
+	UpdatePerUserNotesRanking(ctx context.Context, userID, noteID string, score float64) error
+}
+
+// SetFeaturedRanking wires the engagement ranking store so renotes boost the
+// renoted note's featured ranking (#1687). nil 注入時 (= 未配線 / test) は skip。
+func (s *CreateService) SetFeaturedRanking(r FeaturedRanking) {
+	s.featuredRanking = r
+	if s.randFn == nil {
+		s.randFn = rand.Float64
+	}
 }
 
 // SetUserRepo attaches a UserRepository for resolving mention usernames to IDs.
@@ -635,6 +665,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	if renoteTarget != nil && isPureRenote(in) {
 		_ = s.noteRepo.IncrementCount(renoteTarget.ID, "renoteCount", 1)
 	}
+	// featured engagement ランキング更新 (#1687, upstream incRenoteCount 内)。
+	// renote (quote 含む) で、自身の note でなく、bot でない renoter の場合に
+	// renote 対象 note を boost する (upstream の incRenoteCount 呼び出し条件)。
+	if renoteTarget != nil && renoteTarget.UserID != in.User.ID && !in.User.IsBot {
+		s.updateFeaturedOnRenote(renoteTarget)
+	}
 
 	// 投票が指定されていればPollレコードを作成しnote.hasPollを更新
 	if in.Poll != nil && len(in.Poll.Choices) > 0 {
@@ -720,6 +756,35 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	})
 
 	return finalNote, nil
+}
+
+// updateFeaturedOnRenote boosts the renoted target note's featured engagement
+// ranking (#1687, upstream NoteCreateService.incRenoteCount 内、score=5)。30%
+// sampling、target が 3日以内、の gate を通った場合のみ。channel note は
+// in-channel ranking、それ以外は public かつ local かつ非 reply のときに
+// global + per-user ranking を更新する。caller 側で self-renote / bot を除外済。
+func (s *CreateService) updateFeaturedOnRenote(target *model.Note) {
+	if s.featuredRanking == nil || s.randFn == nil {
+		return
+	}
+	if s.randFn() >= featuredSampleRate {
+		return
+	}
+	created, err := s.idGen.ParseTime(target.ID)
+	if err != nil || time.Since(created) >= featuredMaxNoteAge {
+		return
+	}
+	ctx := context.Background()
+	if target.ChannelID != nil && *target.ChannelID != "" {
+		if target.ReplyID == nil {
+			_ = s.featuredRanking.UpdateInChannelNotesRanking(ctx, *target.ChannelID, target.ID, 5)
+		}
+		return
+	}
+	if target.Visibility == model.NoteVisibilityPublic && target.UserHost == nil && target.ReplyID == nil {
+		_ = s.featuredRanking.UpdateGlobalNotesRanking(ctx, target.ID, 5)
+		_ = s.featuredRanking.UpdatePerUserNotesRanking(ctx, target.UserID, target.ID, 5)
+	}
 }
 
 // publishNoteMainEvents fans out `reply`, `renote`, and `mention` events to

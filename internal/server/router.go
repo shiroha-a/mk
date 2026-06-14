@@ -74,6 +74,7 @@ import (
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
 	"github.com/shiroha-a/mk/internal/core/event"
+	corefeatured "github.com/shiroha-a/mk/internal/core/featured"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
@@ -289,8 +290,15 @@ func (s *Server) setupRoutes() {
 	pageService := corepage.NewService(pageRepo, pageLikeRepo, idGen)
 	flashService := coreflash.NewService(flashRepo, flashLikeRepo, idGen)
 
+	// featured engagement ランキング (#1687)。reaction / renote の hook が
+	// global / in-channel / per-user の Redis windowed ZSET を更新し、
+	// notes/featured・users/featured-notes が読む。upstream と同じ default Redis。
+	featuredService := corefeatured.NewService(s.redis.Default)
+	noteCreateService.SetFeaturedRanking(featuredService)
+
 	// Reactions
 	reactionService := corereaction.NewService(noteRepo, reactionRepo, emojiRepo, followingRepo, idGen)
+	reactionService.SetFeaturedRanking(featuredService)
 
 	// Reactions buffering (issue #57): meta.enableReactionsBuffering が true なら
 	// Redis にバッファし、30秒ごとに DB へ flush する。
