@@ -90,6 +90,7 @@ const (
 	// Content deletion by moderators
 	LogDeleteGalleryPost LogType = "deleteGalleryPost"
 	LogDeleteFlash       LogType = "deleteFlash"
+	LogDeleteChatRoom    LogType = "deleteChatRoom"
 
 	// Misc
 	LogUpdateProxyAccountDescription LogType = "updateProxyAccountDescription"

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -20,6 +22,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubModLog records moderation-log calls for chat room delete tests (#1541).
+type stubModLog struct {
+	types    []moderationlog.LogType
+	lastInfo map[string]any
+}
+
+func (s *stubModLog) Log(_ context.Context, _ string, t moderationlog.LogType, info map[string]any) {
+	s.types = append(s.types, t)
+	s.lastInfo = info
+}
 
 var errMock = assert.AnError
 
@@ -198,6 +211,46 @@ func TestRoomsDelete_NotOwner(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #1541: delete の NO_SUCH_ROOM golden id。
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b")
+}
+
+// #1541: moderator は他人の room を削除でき、deleteChatRoom を監査ログに残す。
+func TestRoomsDelete_ModeratorDeletesOthersRoom(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other", Name: "victim"}
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{u1.ID: true}})
+	modLog := &stubModLog{}
+	h.SetModLog(modLog)
+	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	_, ok := repo.Rooms["r1"]
+	assert.False(t, ok, "room is deleted")
+	require.Len(t, modLog.types, 1)
+	assert.Equal(t, moderationlog.LogDeleteChatRoom, modLog.types[0])
+	assert.Equal(t, "r1", modLog.lastInfo["roomId"])
+}
+
+// #1541: owner (非 moderator) の削除は監査ログを残さない。
+func TestRoomsDelete_OwnerNoModLog(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	modLog := &stubModLog{}
+	h.SetModLog(modLog)
+	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, modLog.types, "owner delete must not write a moderation log")
+}
+
+// #1541: 非 owner かつ非 moderator は削除できない。
+func TestRoomsDelete_NonOwnerNonModerator(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{}})
+	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	_, ok := repo.Rooms["r1"]
+	assert.True(t, ok, "room must not be deleted by a non-owner non-moderator")
 }
 
 func TestRoomsOwned(t *testing.T) {

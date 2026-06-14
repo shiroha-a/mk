@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -39,6 +41,10 @@ type Handler struct {
 	// invitationNotifier は invitations/create で被招待ユーザーへ
 	// 'chatRoomInvitationReceived' 通知を送る (#1559)。未配線なら通知しない。
 	invitationNotifier ChatInvitationNotifier
+	// modLog は moderator が他人の room を削除した際に監査ログを残すために使う
+	// (#1541, upstream ChatService.deleteRoom の moderationLog.log)。未配線なら
+	// 記録を skip する。
+	modLog ModLogger
 }
 
 // maxRoomMembers mirrors upstream ChatService.MAX_ROOM_MEMBERS。join /
@@ -72,6 +78,16 @@ type ChatInvitationNotifier interface {
 // SetInvitationNotifier wires the notifier used by invitations/create to send a
 // 'chatRoomInvitationReceived' notification (upstream ChatService の招待作成)。
 func (h *Handler) SetInvitationNotifier(n ChatInvitationNotifier) { h.invitationNotifier = n }
+
+// ModLogger records a moderation action. Satisfied by *core/moderationlog.Service.
+// nil 配線時は記録を skip する (#1541)。
+type ModLogger interface {
+	Log(ctx context.Context, moderatorID string, t moderationlog.LogType, info map[string]any)
+}
+
+// SetModLog wires the moderation-log writer used when a moderator deletes
+// another user's chat room (#1541)。
+func (h *Handler) SetModLog(m ModLogger) { h.modLog = m }
 
 // PackInvitationByID loads an invitation by ID (with room + invitee user) and
 // packs it for the given viewer, returning false when it no longer exists. Used
@@ -602,10 +618,27 @@ func (h *Handler) RoomsDelete(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
-	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
+	}
+	// upstream hasPermissionToDeleteRoom は owner OR moderator を許可する。
+	// 旧 mk-go は owner-only だったため moderator が他人の room を削除できなかった。
+	isOwner := room.OwnerID == user.ID
+	isMod := h.isModerator(user.ID)
+	if !isOwner && !isMod {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
 	}
 	_ = h.repo.DeleteRoom(req.RoomID)
+	// upstream deleteRoom は deleter が moderator なら deleteChatRoom を監査ログに残す
+	// (owner かどうかに依らず moderator なら記録する)。
+	if isMod && h.modLog != nil {
+		h.modLog.Log(c.Request().Context(), user.ID, moderationlog.LogDeleteChatRoom, map[string]any{
+			"roomId": room.ID,
+			"room": map[string]any{
+				"id": room.ID, "name": room.Name, "ownerId": room.OwnerID, "description": room.Description,
+			},
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 

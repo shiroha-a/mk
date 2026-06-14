@@ -2467,6 +2467,7 @@ func (s *Server) setupRoutes() {
 	chatHandler.SetDriveFileRepo(driveFileRepo)
 	chatHandler.SetModeratorChecker(roleService)
 	chatHandler.SetUserRepo(userRepo)
+	chatHandler.SetModLog(modLogService) // #1541: moderator による chat room 削除の監査ログ
 	// chatRoomInvitationReceived 通知 (#1559): 招待作成 (local handler / AP service)
 	// で発火し、entity 側で read 時に packed invitation へ解決する。lookup は
 	// 招待削除済なら (nil,false)。chatHandler が PackInvitationByID を提供する
