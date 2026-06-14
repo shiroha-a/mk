@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -45,7 +46,28 @@ var (
 	// blocked the sender. Mirrors upstream ChatService's 'blocked' error
 	// (YOU_HAVE_BEEN_BLOCKED).
 	ErrChatBlocked = errors.New("you have been blocked by the recipient")
+	// ErrCannotReact is returned by React when the actor may not react to the
+	// target message: it is their own message, a 1-on-1 message not addressed to
+	// them, or a room message in a room they are not a member of. Mirrors
+	// upstream ChatService.react's 'cannot react to own/others message' (plain
+	// Error -> generic 500).
+	ErrCannotReact = errors.New("cannot react to this message")
+	// ErrTooManyReactions is returned by React when the message already has the
+	// maximum number of reactions (upstream MAX_REACTIONS_PER_MESSAGE).
+	ErrTooManyReactions = errors.New("too many reactions")
+	// ErrNoSuchEmoji is returned by React when a custom emoji reaction references
+	// a local emoji that does not exist (upstream 'no such emoji').
+	ErrNoSuchEmoji = errors.New("no such emoji")
 )
+
+// maxReactionsPerMessage caps the reactions on a single chat message
+// (upstream MAX_REACTIONS_PER_MESSAGE = 100).
+const maxReactionsPerMessage = 100
+
+// chatCustomEmojiPattern matches a local custom-emoji reaction (`:name:` or the
+// canonical `:name@.:` form). upstream isCustomEmojiRegexp は local emoji だけを
+// 対象とするため host 付き (`:name@host:`) は unicode として扱う。
+var chatCustomEmojiPattern = regexp.MustCompile(`^:([\w+\-]+)(?:@\.)?:$`)
 
 // StreamingPublisher is the Redis pub/sub dispatch interface the service uses
 // to broadcast chat events. Implementations live in internal/stream so the
@@ -109,6 +131,10 @@ type Service struct {
 	// invitationNotifier: AP 経由で受け取った招待を local invitee へ通知する
 	// (#1559)。未配線なら通知しない。
 	invitationNotifier ChatInvitationNotifier
+	// emojiRepo: React で custom emoji (`:name:`) reaction の存在検証に使う
+	// (#1541)。nil の場合は custom emoji を検証せず `:name:` をそのまま採用する
+	// (legacy/test path)。
+	emojiRepo repository.EmojiRepository
 }
 
 // ChatInvitationNotifier records a 'chatRoomInvitationReceived' notification on
@@ -121,6 +147,12 @@ type ChatInvitationNotifier interface {
 // notify local invitees of inbound (federated) chat room invitations (#1559)。
 func (s *Service) SetInvitationNotifier(n ChatInvitationNotifier) {
 	s.invitationNotifier = n
+}
+
+// SetEmojiRepo wires the emoji repository so React can validate custom-emoji
+// reactions against the local emoji table (#1541). nil disables the check.
+func (s *Service) SetEmojiRepo(r repository.EmojiRepository) {
+	s.emojiRepo = r
 }
 
 // NewService constructs a chat Service.
@@ -1014,15 +1046,70 @@ func (s *Service) MarkReadByMessageID(ctx context.Context, userID, messageID str
 // upstream ChatService.react)。reaction は reactor.ID+"/"+emoji で永続化し、
 // stream event には raw emoji + reactor (UserLite) を載せる。
 func (s *Service) React(ctx context.Context, messageID string, reactor *model.User, emoji string) error {
+	// upstream ChatService.react は emoji の正規化/存在検証を最初に行い、未存在の
+	// custom emoji は 'no such emoji' を投げる (message 検索より前)。
+	reaction, err := s.normalizeChatReaction(emoji)
+	if err != nil {
+		return err
+	}
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
 		return ErrNotFound
 	}
-	if err := s.repo.AddReaction(messageID, reactor.ID+"/"+emoji); err != nil {
+	// 自分のメッセージには react できない。
+	if msg.FromUserID == reactor.ID {
+		return ErrCannotReact
+	}
+	// 1-on-1 で自分が受信者でないメッセージには react できない
+	// (upstream: toRoomId === null && toUserId !== userId)。
+	if msg.ToRoomID == nil {
+		if msg.ToUserID == nil || *msg.ToUserID != reactor.ID {
+			return ErrCannotReact
+		}
+	}
+	// reaction 上限 (upstream MAX_REACTIONS_PER_MESSAGE)。
+	if len(msg.Reactions) >= maxReactionsPerMessage {
+		return ErrTooManyReactions
+	}
+	// room メッセージは member でなければ react できない。
+	if msg.ToRoomID != nil && *msg.ToRoomID != "" {
+		room, err := s.repo.FindRoomByID(*msg.ToRoomID)
+		if err != nil {
+			return ErrNotFound
+		}
+		isMember, err := s.isRoomMemberWith(room, reactor.ID, *msg.ToRoomID)
+		if err != nil {
+			return err
+		}
+		if !isMember {
+			return ErrCannotReact
+		}
+	}
+	if err := s.repo.AddReaction(messageID, reactor.ID+"/"+reaction); err != nil {
 		return fmt.Errorf("add reaction: %w", err)
 	}
-	s.publishReaction(ctx, msg, EventReact, reactor, emoji)
+	s.publishReaction(ctx, msg, EventReact, reactor, reaction)
 	return nil
+}
+
+// normalizeChatReaction validates and canonicalises a chat reaction string,
+// mirroring upstream ChatService.react: a `:name:` custom-emoji reaction is
+// looked up in the local emoji table (ErrNoSuchEmoji if absent) and stored as
+// `:name:`, while anything else is treated as a unicode emoji with its
+// variation selector (U+FE0F) stripped. emojiRepo 未配線時は custom emoji を
+// 検証せず `:name:` をそのまま採用する (legacy/test path)。
+func (s *Service) normalizeChatReaction(raw string) (string, error) {
+	if m := chatCustomEmojiPattern.FindStringSubmatch(raw); m != nil {
+		name := m[1]
+		if s.emojiRepo != nil {
+			if _, err := s.emojiRepo.FindByNameAndHost(name, nil); err != nil {
+				return "", ErrNoSuchEmoji
+			}
+		}
+		return ":" + name + ":", nil
+	}
+	// variation selector (U+FE0F) を strip して upstream の canonical form に揃える。
+	return strings.ReplaceAll(raw, "\ufe0f", ""), nil
 }
 
 // Unreact removes a reaction and publishes an `unreact` stream event (#1549)。
