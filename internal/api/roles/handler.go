@@ -155,17 +155,91 @@ func (h *Handler) Show(c echo.Context) error {
 }
 
 // Users handles POST /api/roles/users.
+//
+// upstream users.ts: isPublic かつ isExplorable な role の roleAssignments を
+// 期限有効分だけ取得し id cursor でページングして [{id, user:UserDetailed}] を
+// 返す。!isPublic / !isExplorable は NO_SUCH_ROLE 扱い (#1544)。
 func (h *Handler) Users(c echo.Context) error {
 	var req struct {
-		RoleID string `json:"roleId"`
+		RoleID    string `json:"roleId"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if _, err := h.roleService.Show(req.RoleID); err != nil {
+	r, err := h.roleService.Show(req.RoleID)
+	if err != nil || !r.IsPublic || !r.IsExplorable {
+		// upstream は findOneBy({id, isPublic:true, isExplorable:true}) が null
+		// なら NO_SUCH_ROLE。!isPublic / !isExplorable も同じ扱い。
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
 	}
-	return c.JSON(http.StatusOK, []any{})
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	// sinceDate / untilDate を aidx prefix に正規化 (Notes と同 pattern、#1173)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	assigns, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+
+	// reporter/assignee と同様に user_profile を 1 batch で解決して UserDetailed を
+	// pack する (N+1 回避)。userRepo 未配線時は profile なしで pack する。
+	profByID := h.assignmentProfiles(assigns)
+	out := make([]any, 0, len(assigns))
+	for _, a := range assigns {
+		if a.User == nil {
+			// preload 失敗 (user 削除等) は upstream では userId fallback だが、
+			// UserDetailed を組めないため skip する (defensive)。
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":   a.ID,
+			"user": entity.PackUserDetailed(a.User, profByID[a.UserID], h.idGen),
+		})
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// assignmentProfiles batch-fetches the user_profile rows of the assignees so
+// roles/users can pack UserDetailed without N+1 (#1544)。userRepo 未配線時は nil。
+func (h *Handler) assignmentProfiles(assigns []*model.RoleAssignment) map[string]*model.UserProfile {
+	if h.userRepo == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(assigns))
+	seen := map[string]struct{}{}
+	for _, a := range assigns {
+		if a.User == nil {
+			continue
+		}
+		if _, ok := seen[a.UserID]; ok {
+			continue
+		}
+		seen[a.UserID] = struct{}{}
+		ids = append(ids, a.UserID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	profiles, err := h.userRepo.FindProfilesByUserIDs(ids)
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]*model.UserProfile, len(profiles))
+	for _, p := range profiles {
+		byID[p.UserID] = p
+	}
+	return byID
 }
 
 // Notes handles POST /api/roles/notes.

@@ -123,7 +123,7 @@ func TestCreate_NameRequired(t *testing.T) {
 
 func TestCreate_InvalidSource(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"bogus"}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"bogus","keywords":[["foo"]]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -141,10 +141,88 @@ func TestCreate_RepoError(t *testing.T) {
 	repo := &failingAntennaRepo{MockAntennaRepository: mock}
 	svc := coreantenna.NewService(repo, testutil.NewMockUserRepository(), testRedis.Client, idGen)
 	h := NewHandler(svc, testutil.NewMockNoteRepository(), idGen)
-	c, rec := newReq(t, `{"name":"alpha","src":"all"}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// newHandlerWithUserList は userListRepo を配線した handler を返す
+// (NO_SUCH_USER_LIST 検証用)。
+func newHandlerWithUserList(t *testing.T) (*Handler, *testutil.MockAntennaRepository, *testutil.MockUserListRepository) {
+	t.Helper()
+	testRedis.FlushAll(context.Background())
+	repo := testutil.NewMockAntennaRepository()
+	lists := testutil.NewMockUserListRepository()
+	svc := coreantenna.NewService(repo, testutil.NewMockUserRepository(), testRedis.Client, idGen)
+	svc.SetUserListRepo(lists)
+	return NewHandler(svc, testutil.NewMockNoteRepository(), idGen), repo, lists
+}
+
+// upstream create.ts: keywords と excludeKeywords が両方空なら EMPTY_KEYWORD (#1544)。
+func TestCreate_EmptyKeyword(t *testing.T) {
+	h, _, _ := newHandler(t)
+	// keywords/excludeKeywords 未指定 → 両方空扱いで EMPTY_KEYWORD。
+	c, rec := newReq(t, `{"name":"alpha","src":"all"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "EMPTY_KEYWORD")
+
+	// 空文字のみの DNF も空扱い。
+	c, rec = newReq(t, `{"name":"alpha","src":"all","keywords":[[""]],"excludeKeywords":[[""]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// excludeKeywords のみ指定なら EMPTY_KEYWORD にはならない。
+func TestCreate_ExcludeKeywordOnlySatisfies(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","excludeKeywords":[["spam"]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// upstream create.ts: src=list で userListId が自分の list でないなら NO_SUCH_USER_LIST。
+func TestCreate_NoSuchUserList(t *testing.T) {
+	h, _, lists := newHandlerWithUserList(t)
+	// 他人 (bob) 所有の list を alice が参照 → NO_SUCH_USER_LIST。
+	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "bob", Name: "theirs"}))
+	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
+
+	// 存在しない list も同様。
+	c, rec = newReq(t, `{"name":"alpha","src":"list","userListId":"ghost","keywords":[["foo"]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 自分の list を参照する src=list は成功する。
+func TestCreate_OwnedUserListAccepted(t *testing.T) {
+	h, _, lists := newHandlerWithUserList(t)
+	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "alice", Name: "mine"}))
+	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// excludeNotesInSensitiveChannel が永続化されレスポンスに反映される (#1544)。
+func TestCreate_ExcludeNotesInSensitiveChannelPersisted(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeNotesInSensitiveChannel":true}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["excludeNotesInSensitiveChannel"])
 }
 
 // --- Show ------------------------------------------------------------------
@@ -260,6 +338,52 @@ func TestUpdate_RepoError(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// upstream update.ts: keywords/excludeKeywords が両方指定され両方空なら EMPTY_KEYWORD (#1544)。
+func TestUpdate_EmptyKeyword(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice", Name: "alpha"}
+	c, rec := newReq(t, `{"antennaId":"a1","keywords":[[""]],"excludeKeywords":[]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "EMPTY_KEYWORD")
+}
+
+// keywords のみ指定 (excludeKeywords 未指定) なら EMPTY_KEYWORD 検査しない。
+func TestUpdate_OneSidedKeywordsNotChecked(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice", Name: "alpha"}
+	c, rec := newReq(t, `{"antennaId":"a1","keywords":[[""]]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// upstream update.ts: 既存 src=list で userListId が自分の list でないなら NO_SUCH_USER_LIST。
+func TestUpdate_NoSuchUserList(t *testing.T) {
+	h, repo, lists := newHandlerWithUserList(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice", Name: "alpha", Src: model.AntennaSourceList}
+	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "bob", Name: "theirs"}))
+	c, rec := newReq(t, `{"antennaId":"a1","userListId":"ul1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
+}
+
+// excludeNotesInSensitiveChannel を update で更新できる (#1544)。
+func TestUpdate_ExcludeNotesInSensitiveChannelPersisted(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice", Name: "alpha"}
+	c, rec := newReq(t, `{"antennaId":"a1","excludeNotesInSensitiveChannel":true}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["excludeNotesInSensitiveChannel"])
 }
 
 // --- Delete ----------------------------------------------------------------

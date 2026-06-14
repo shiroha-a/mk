@@ -4457,6 +4457,10 @@ func applyAntennaFields(a *model.Antenna, fields map[string]any) {
 			if b, ok := v.(bool); ok {
 				a.LocalOnly = b
 			}
+		case "excludeNotesInSensitiveChannel":
+			if b, ok := v.(bool); ok {
+				a.ExcludeNotesInSensitiveChannel = b
+			}
 		case "lastUsedAt":
 			if t, ok := v.(time.Time); ok {
 				a.LastUsedAt = t
