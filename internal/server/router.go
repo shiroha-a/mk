@@ -2221,6 +2221,9 @@ func (s *Server) setupRoutes() {
 	// + forward proxy 経由にする (#638)。
 	adminHandler.SetWebhookTestClient(s.outboundClient(10 * time.Second))
 	adminHandler.SetRecipientRepo(recipientRepo)
+	// resolve-abuse-user-report 時に abuseReportResolved system webhook を発火
+	// する dispatcher (#1723)。
+	adminHandler.SetSystemWebhookDispatcher(webhookService)
 	adminHandler.SetAdRepo(repository.NewAdRepository(s.db))
 	adminHandler.SetAvatarDecorationRepo(repository.NewAvatarDecorationRepository(s.db))
 	adminHandler.SetInviteRepo(repository.NewRegistrationTicketRepository(s.db))

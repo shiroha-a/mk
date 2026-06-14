@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
+	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/core/webpush"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -83,25 +84,29 @@ type UnfollowEnqueuer interface {
 
 // Handler handles admin API endpoints.
 type Handler struct {
-	signupService           *signup.Service
-	roleService             *role.Service
-	metaRepo                repository.MetaRepository
-	userRepo                repository.UserRepository
-	abuseRepo               repository.AbuseReportRepository
-	modLogService           *moderationlog.Service
-	emojiRepo               repository.EmojiRepository
-	driveFileRepo           repository.DriveFileRepository
-	adminDB                 *gorm.DB
-	userIPRepo              repository.UserIPRepository
-	queueInspector          QueueInspector
-	queueRedis              QueueRedisInfoProvider
-	emojiEnqueuer           EmojiImportEnqueuer
-	emojiImageFetcher       EmojiImageFetcher
-	relayService            RelayService
-	abuseForwarder          AbuseForwarder
-	deleteAccountEnqueuer   DeleteAccountEnqueuer
-	systemWebhookRepo       repository.SystemWebhookRepository
-	recipientRepo           repository.AbuseReportNotificationRecipientRepository
+	signupService         *signup.Service
+	roleService           *role.Service
+	metaRepo              repository.MetaRepository
+	userRepo              repository.UserRepository
+	abuseRepo             repository.AbuseReportRepository
+	modLogService         *moderationlog.Service
+	emojiRepo             repository.EmojiRepository
+	driveFileRepo         repository.DriveFileRepository
+	adminDB               *gorm.DB
+	userIPRepo            repository.UserIPRepository
+	queueInspector        QueueInspector
+	queueRedis            QueueRedisInfoProvider
+	emojiEnqueuer         EmojiImportEnqueuer
+	emojiImageFetcher     EmojiImageFetcher
+	relayService          RelayService
+	abuseForwarder        AbuseForwarder
+	deleteAccountEnqueuer DeleteAccountEnqueuer
+	systemWebhookRepo     repository.SystemWebhookRepository
+	recipientRepo         repository.AbuseReportNotificationRecipientRepository
+	// systemWebhookDispatcher は resolve-abuse-user-report 時に
+	// abuseReportResolved system webhook を発火するための dispatcher
+	// (*core/webhook.Service)。nil なら発火しない (#1723)。
+	systemWebhookDispatcher SystemWebhookDispatcher
 	adRepo                  repository.AdRepository
 	avatarDecoRepo          repository.AvatarDecorationRepository
 	inviteRepo              repository.RegistrationTicketRepository
@@ -282,6 +287,20 @@ func (h *Handler) SetUnfollowEnqueuer(e UnfollowEnqueuer) {
 // admin/abuse-report/notification-recipient/*.
 func (h *Handler) SetRecipientRepo(r repository.AbuseReportNotificationRecipientRepository) {
 	h.recipientRepo = r
+}
+
+// SystemWebhookDispatcher fans a system-level event out to subscribed system
+// webhooks, optionally excluding specific webhook IDs. Implemented by
+// *core/webhook.Service. Used to fire abuseReportResolved on report resolution
+// (#1723).
+type SystemWebhookDispatcher interface {
+	DispatchSystemExcluding(eventType string, body any, excludes []string)
+}
+
+// SetSystemWebhookDispatcher wires the system webhook dispatcher used to emit
+// abuseReportResolved. nil disables firing (DB update still happens).
+func (h *Handler) SetSystemWebhookDispatcher(d SystemWebhookDispatcher) {
+	h.systemWebhookDispatcher = d
 }
 
 // SetAdRepo attaches an AdRepository for admin/ad/*.
@@ -2673,36 +2692,43 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	profByID := h.abuseUserProfiles(reports)
 	out := make([]packedAbuseReport, 0, len(reports))
 	for _, r := range reports {
-		p := packedAbuseReport{
-			ID:             r.ID,
-			Comment:        r.Comment,
-			Resolved:       r.Resolved,
-			ReporterID:     r.ReporterID,
-			TargetUserID:   r.TargetUserID,
-			AssigneeID:     r.AssigneeID,
-			Forwarded:      r.Forwarded,
-			ResolvedAs:     r.ResolvedAs,
-			ModerationNote: r.ModerationNote,
-			// 生 model.User を inline すると usernameLower / inbox 等の内部
-			// field が漏れ、UserDetailedNotMe 固有 field も欠ける。UserDetailed
-			// で pack する。
-			Reporter:   h.packAbuseUser(r.Reporter, profByID),
-			TargetUser: h.packAbuseUser(r.TargetUser, profByID),
-			Assignee:   h.packAbuseUser(r.Assignee, profByID),
-		}
-		if s, err := aidxCreatedAtString(h.idGen, r.ID); err == nil {
-			p.CreatedAt = s
-		} else if !errors.Is(err, ErrIDGenMissing) {
-			// idGen は wired されているのに parse 失敗した場合のみログに残す。
-			// 非 aidx 形式の legacy ID 等で createdAt が出せない時に frontend
-			// 側で「日時の解析が失敗しました。」が出る原因を後追いできるように
-			// する (ShowModerationLogs と同 pattern)。
-			slog.DebugContext(c.Request().Context(), "abuseReport: createdAt derive failed",
-				"reportId", r.ID, "err", err)
-		}
-		out = append(out, p)
+		out = append(out, h.packAbuseReport(c.Request().Context(), r, profByID))
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// packAbuseReport converts an abuse report into the wire shape shared by
+// admin/abuse-user-reports (list) and the abuseReportResolved system webhook
+// body (#1723). profByID は abuseUserProfiles で batch 解決した profile map。
+func (h *Handler) packAbuseReport(ctx context.Context, r *model.AbuseUserReport, profByID map[string]*model.UserProfile) packedAbuseReport {
+	p := packedAbuseReport{
+		ID:             r.ID,
+		Comment:        r.Comment,
+		Resolved:       r.Resolved,
+		ReporterID:     r.ReporterID,
+		TargetUserID:   r.TargetUserID,
+		AssigneeID:     r.AssigneeID,
+		Forwarded:      r.Forwarded,
+		ResolvedAs:     r.ResolvedAs,
+		ModerationNote: r.ModerationNote,
+		// 生 model.User を inline すると usernameLower / inbox 等の内部
+		// field が漏れ、UserDetailedNotMe 固有 field も欠ける。UserDetailed
+		// で pack する。
+		Reporter:   h.packAbuseUser(r.Reporter, profByID),
+		TargetUser: h.packAbuseUser(r.TargetUser, profByID),
+		Assignee:   h.packAbuseUser(r.Assignee, profByID),
+	}
+	if s, err := aidxCreatedAtString(h.idGen, r.ID); err == nil {
+		p.CreatedAt = s
+	} else if !errors.Is(err, ErrIDGenMissing) {
+		// idGen は wired されているのに parse 失敗した場合のみログに残す。
+		// 非 aidx 形式の legacy ID 等で createdAt が出せない時に frontend
+		// 側で「日時の解析が失敗しました。」が出る原因を後追いできるように
+		// する (ShowModerationLogs と同 pattern)。
+		slog.DebugContext(ctx, "abuseReport: createdAt derive failed",
+			"reportId", r.ID, "err", err)
+	}
+	return p
 }
 
 // abuseUserProfiles batch-fetches the profiles of every reporter / targetUser /
@@ -2815,8 +2841,6 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 	// fix と同方針: 既存 row の resolvedAs が意図せず書き換わる silent
 	// corruption を防ぐ)。
 	// upstream は resolve 時に assigneeId=moderator.id を記録する。
-	// (notifySystemWebhook('abuseReportResolved') は notification-recipient
-	// service 配線が要るため後続スライスで対応)。
 	fields := map[string]any{"resolved": true}
 	if me := middleware.GetUser(c); me != nil {
 		fields["assigneeId"] = me.ID
@@ -2838,7 +2862,51 @@ func (h *Handler) ResolveAbuseReport(c echo.Context) error {
 	if err := h.abuseRepo.UpdateFields(req.ReportID, fields); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "ac3794dd-2ce4-d878-e546-73c60c06b398", apierr.KindServer))
 	}
+	// upstream AbuseReportService.resolve は notifySystemWebhook('abuseReportResolved')
+	// を呼ぶ。best-effort: DB 更新は済んでいるので発火失敗は握り潰す (#1723)。
+	h.notifyAbuseReportResolved(c.Request().Context(), req.ReportID)
 	return c.NoContent(http.StatusNoContent)
+}
+
+// notifyAbuseReportResolved fires the abuseReportResolved system webhook for a
+// resolved report. 本家 AbuseReportNotificationService.notifySystemWebhook 相当:
+// inactive な notification recipient (method=webhook) が指す systemWebhookId を
+// excludes に渡し、残りの active system webhook へ packed report を配送する。
+// dispatcher / abuseRepo 未配線時は no-op (#1723)。
+func (h *Handler) notifyAbuseReportResolved(ctx context.Context, reportID string) {
+	if h.systemWebhookDispatcher == nil || h.abuseRepo == nil {
+		return
+	}
+	report, err := h.abuseRepo.FindByID(reportID)
+	if err != nil {
+		slog.WarnContext(ctx, "abuseReportResolved: load report failed", "reportId", reportID, "err", err)
+		return
+	}
+	profByID := h.abuseUserProfiles([]*model.AbuseUserReport{report})
+	body := h.packAbuseReport(ctx, report, profByID)
+	h.systemWebhookDispatcher.DispatchSystemExcluding(
+		corewebhook.SystemEventAbuseReportResolved, body, h.inactiveAbuseWebhookIDs())
+}
+
+// inactiveAbuseWebhookIDs returns the systemWebhookId values of inactive
+// abuse-report-notification recipients (method=webhook). 本家 notifySystemWebhook
+// の withoutWebhookIds 相当 (= 無効化された recipient 宛は配送しない)。recipientRepo
+// 未配線 / 取得失敗時は nil (= excludes 無し)。
+func (h *Handler) inactiveAbuseWebhookIDs() []string {
+	if h.recipientRepo == nil {
+		return nil
+	}
+	recipients, err := h.recipientRepo.List()
+	if err != nil {
+		return nil
+	}
+	var excludes []string
+	for _, r := range recipients {
+		if r.Method == "webhook" && !r.IsActive && r.SystemWebhookID != nil {
+			excludes = append(excludes, *r.SystemWebhookID)
+		}
+	}
+	return excludes
 }
 
 // ShowModerationLogs handles POST /api/admin/show-moderation-logs.

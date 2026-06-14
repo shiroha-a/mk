@@ -1777,6 +1777,80 @@ func TestAbuseReports_WithRepo(t *testing.T) {
 	assert.Len(t, resp, 1)
 }
 
+// stubSystemWebhookDispatcher records DispatchSystemExcluding calls for the
+// abuseReportResolved webhook tests (#1723).
+type stubSystemWebhookDispatcher struct {
+	calls []struct {
+		eventType string
+		body      any
+		excludes  []string
+	}
+}
+
+func (s *stubSystemWebhookDispatcher) DispatchSystemExcluding(eventType string, body any, excludes []string) {
+	s.calls = append(s.calls, struct {
+		eventType string
+		body      any
+		excludes  []string
+	}{eventType, body, excludes})
+}
+
+// resolve は abuseReportResolved system webhook を発火し、inactive な
+// notification recipient (method=webhook) の systemWebhookId を excludes に渡す
+// (#1723, upstream notifySystemWebhook)。
+func TestResolveAbuseReport_FiresResolvedWebhook(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1", ReporterID: "rep1", TargetUserID: "tgt1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	recipientRepo := testutil.NewMockAbuseReportNotificationRecipientRepository()
+	inactiveID := "wh_inactive"
+	activeID := "wh_active"
+	emailInactiveID := "wh_email"
+	require.NoError(t, recipientRepo.Create(&model.AbuseReportNotificationRecipient{
+		ID: "rc1", Method: "webhook", IsActive: false, SystemWebhookID: &inactiveID,
+	}))
+	require.NoError(t, recipientRepo.Create(&model.AbuseReportNotificationRecipient{
+		ID: "rc2", Method: "webhook", IsActive: true, SystemWebhookID: &activeID,
+	}))
+	require.NoError(t, recipientRepo.Create(&model.AbuseReportNotificationRecipient{
+		ID: "rc3", Method: "email", IsActive: false, SystemWebhookID: &emailInactiveID,
+	}))
+	h.SetRecipientRepo(recipientRepo)
+
+	disp := &stubSystemWebhookDispatcher{}
+	h.SetSystemWebhookDispatcher(disp)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, disp.calls, 1)
+	call := disp.calls[0]
+	assert.Equal(t, "abuseReportResolved", call.eventType)
+	// excludes は inactive な webhook recipient のみ (active webhook / email は除外しない)。
+	assert.Equal(t, []string{inactiveID}, call.excludes)
+	// body は packedAbuseReport。wire shape (JSON) で id / resolved を検証する
+	// (packedAbuseReport は unexported のため JSON 経由で assert)。
+	raw, err := json.Marshal(call.body)
+	require.NoError(t, err)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	assert.Equal(t, "r1", body["id"])
+	assert.Equal(t, true, body["resolved"])
+}
+
+// dispatcher 未配線時は webhook を発火しないが resolve 自体は成功する (#1723)。
+func TestResolveAbuseReport_NoDispatcherStillResolves(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	abuseRepo.Reports["r1"] = &model.AbuseUserReport{ID: "r1"}
+	h.SetAbuseRepo(abuseRepo)
+
+	rec := doPost(h.ResolveAbuseReport, `{"reportId":"r1"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, abuseRepo.Reports["r1"].Resolved)
+}
+
 func TestResolveAbuseReport_WithRepo(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	abuseRepo := testutil.NewMockAbuseReportRepository()

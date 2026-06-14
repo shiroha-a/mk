@@ -150,6 +150,15 @@ func (s *Service) DispatchUserTest(webhookID, userID, eventType string, body any
 // DispatchSystem mirrors DispatchUser for system webhooks (admin-level
 // events such as abuseReport / userCreated). 本家 SystemWebhookService.enqueueSystemWebhook 相当。
 func (s *Service) DispatchSystem(eventType string, body any) {
+	s.DispatchSystemExcluding(eventType, body, nil)
+}
+
+// DispatchSystemExcluding is DispatchSystem but skips any active system webhook
+// whose ID appears in excludes. 本家 enqueueSystemWebhook の opts.excludes 相当:
+// abuse-report-notification の resolve 通知では、inactive な notification
+// recipient が指す systemWebhookId を excludes に渡して配送対象から外す
+// (#1723、AbuseReportNotificationService.notifySystemWebhook)。
+func (s *Service) DispatchSystemExcluding(eventType string, body any, excludes []string) {
 	if s == nil || s.enqueuer == nil || s.systemRepo == nil {
 		return
 	}
@@ -162,6 +171,9 @@ func (s *Service) DispatchSystem(eventType string, body any) {
 	now := time.Now().UnixMilli()
 	for _, h := range hooks {
 		if !slices.Contains([]string(h.On), eventType) {
+			continue
+		}
+		if slices.Contains(excludes, h.ID) {
 			continue
 		}
 		raw, _ := json.Marshal(Envelope{

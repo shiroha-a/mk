@@ -235,3 +235,29 @@ func TestDispatchSystem_NilSafe(t *testing.T) {
 	svc = webhook.NewService(nil, nil, nil, "")
 	svc.DispatchSystem("userCreated", nil)
 }
+
+// DispatchSystemExcluding は excludes に含まれる webhook ID へは配送しない
+// (本家 enqueueSystemWebhook opts.excludes 相当、#1723)。
+func TestDispatchSystemExcluding_SkipsExcluded(t *testing.T) {
+	enq := &fakeEnqueuer{}
+	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
+		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+		"h2": {ID: "h2", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+	}}
+	svc := webhook.NewService(enq, nil, repo, "https://example.com")
+	svc.DispatchSystemExcluding(webhook.SystemEventAbuseReportResolved, map[string]any{"id": "r1"}, []string{"h2"})
+	require.Len(t, enq.systemCalls, 1)
+	assert.Equal(t, "h1", enq.systemCalls[0].WebhookID, "excludes の h2 は配送されない")
+}
+
+// excludes が nil の場合は DispatchSystem と同じ全 active 配送。
+func TestDispatchSystemExcluding_NilExcludesDeliversAll(t *testing.T) {
+	enq := &fakeEnqueuer{}
+	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
+		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+		"h2": {ID: "h2", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+	}}
+	svc := webhook.NewService(enq, nil, repo, "https://example.com")
+	svc.DispatchSystemExcluding(webhook.SystemEventAbuseReportResolved, nil, nil)
+	assert.Len(t, enq.systemCalls, 2)
+}
