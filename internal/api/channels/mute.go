@@ -35,12 +35,12 @@ func (h *Handler) MuteCreate(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "7174361e-d58f-31d6-2e7c-6fb830786a3f"))
 	}
 	// 本家 create.ts は alreadyMuting → expiresAt-past の順でチェックする。
-	// 既ミュート済みなら 204 を返す既存挙動 (#1540) を先に短絡させ、本家の順序に
-	// 揃える。これにより「既ミュート済み + 過去 expiresAt」で 400 を返す不整合も
-	// 解消する。Exists は期限切れを除外するため (#1603)、ここで true=能動的mute。
+	// 本家 create.ts は alreadyMuting → expiresAt-past の順でチェックする。既ミュート
+	// 済みは ALREADY_MUTING_CHANNEL を返す (#1540)。Exists は期限切れを除外するため
+	// (#1603)、ここで true=能動的 mute。
 	already, _ := h.mutingRepo.Exists(user.ID, req.ChannelID)
 	if already {
-		return c.NoContent(http.StatusNoContent)
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_MUTING_CHANNEL", "You are already muting that channel.", "5a251978-769a-da44-3e89-3931e43bb592"))
 	}
 	// 本家 create.ts: `ps.expiresAt && ps.expiresAt <= Date.now()` で過去なら
 	// EXPIRES_AT_IS_PAST。0 は JS で falsy のため無期限 (nil) として扱う。
@@ -75,6 +75,14 @@ func (h *Handler) MuteDelete(c echo.Context) error {
 	}
 	if h.mutingRepo == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// 本家 delete.ts は channel 不在 → NO_SUCH_CHANNEL、未ミュート → NOT_MUTING_CHANNEL
+	// の順でチェックしてから削除する (#1540)。
+	if _, err := h.svc.Show(req.ChannelID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "e7998769-6e94-d9c2-6b8f-94a527314aba"))
+	}
+	if muting, _ := h.mutingRepo.Exists(user.ID, req.ChannelID); !muting {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_MUTING_CHANNEL", "You are not muting that channel.", "14d55962-6ea8-d990-1333-d6bef78dc2ab"))
 	}
 	if err := h.mutingRepo.Delete(user.ID, req.ChannelID); err != nil {
 		return apierr.JSONInternalError(c)

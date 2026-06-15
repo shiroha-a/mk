@@ -61,15 +61,18 @@ func TestMuteCreate_ZeroExpiresAtIsIndefinite(t *testing.T) {
 	assert.Nil(t, mut.ExpiresAt, "expiresAt=0 は無期限 (nil) として保存")
 }
 
-func TestMuteCreate_AlreadyMutedPastExpiresAtReturns204(t *testing.T) {
+func TestMuteCreate_AlreadyMutedPastExpiresAtReturnsAlreadyMuting(t *testing.T) {
 	h, chRepo, _, mutRepo := newStubHandler(t)
 	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "test"}
 	mutRepo.Mutings["u1:ch1"] = &model.ChannelMuting{ID: "m1", UserID: "u1", ChannelID: "ch1"}
-	// 既ミュート済みなら過去 expiresAt でも EXPIRES_AT_IS_PAST(400) ではなく
-	// 204 (本家順序: alreadyMuting を先にチェック)。
+	// 既ミュート済みなら過去 expiresAt でも EXPIRES_AT_IS_PAST ではなく
+	// ALREADY_MUTING_CHANNEL (本家順序: alreadyMuting を先にチェック, #1540)。
 	past := time.Now().Add(-time.Hour).UnixMilli()
 	rec := postStubWithBody(t, h.MuteCreate, fmt.Sprintf(`{"channelId":"ch1","expiresAt":%d}`, past), "u1")
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "ALREADY_MUTING_CHANNEL", resp["error"].(map[string]any)["code"])
 }
 
 func TestMuteCreate_MissingChannelID(t *testing.T) {
@@ -89,13 +92,19 @@ func TestMuteCreate_AlreadyMuted(t *testing.T) {
 	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "test"}
 	mutRepo.Mutings["u1:ch1"] = &model.ChannelMuting{ID: "m1", UserID: "u1", ChannelID: "ch1"}
 	rec := postStubWithBody(t, h.MuteCreate, `{"channelId":"ch1"}`, "u1")
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "ALREADY_MUTING_CHANNEL", errObj["code"])
+	assert.Equal(t, "5a251978-769a-da44-3e89-3931e43bb592", errObj["id"])
 }
 
 // --- MuteDelete ---
 
 func TestMuteDelete_Success(t *testing.T) {
-	h, _, _, mutRepo := newStubHandler(t)
+	h, chRepo, _, mutRepo := newStubHandler(t)
+	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "test"}
 	mutRepo.Mutings["u1:ch1"] = &model.ChannelMuting{ID: "m1", UserID: "u1", ChannelID: "ch1"}
 	rec := postStubWithBody(t, h.MuteDelete, `{"channelId":"ch1"}`, "u1")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -107,6 +116,32 @@ func TestMuteDelete_MissingChannelID(t *testing.T) {
 	h, _, _, _ := newStubHandler(t)
 	rec := postStubWithBody(t, h.MuteDelete, `{}`, "u1")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #1540: delete は channel 不在で NO_SUCH_CHANNEL。
+func TestMuteDelete_ChannelNotFound(t *testing.T) {
+	h, _, _, mutRepo := newStubHandler(t)
+	mutRepo.Mutings["u1:ch1"] = &model.ChannelMuting{ID: "m1", UserID: "u1", ChannelID: "ch1"}
+	rec := postStubWithBody(t, h.MuteDelete, `{"channelId":"ch1"}`, "u1")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NO_SUCH_CHANNEL", errObj["code"])
+	assert.Equal(t, "e7998769-6e94-d9c2-6b8f-94a527314aba", errObj["id"])
+}
+
+// #1540: delete は未ミュートで NOT_MUTING_CHANNEL。
+func TestMuteDelete_NotMuting(t *testing.T) {
+	h, chRepo, _, _ := newStubHandler(t)
+	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "test"}
+	rec := postStubWithBody(t, h.MuteDelete, `{"channelId":"ch1"}`, "u1")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "NOT_MUTING_CHANNEL", errObj["code"])
+	assert.Equal(t, "14d55962-6ea8-d990-1333-d6bef78dc2ab", errObj["id"])
 }
 
 // --- MuteList ---
