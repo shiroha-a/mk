@@ -34,13 +34,13 @@ func TestChatRepository_Rooms(t *testing.T) {
 	require.NoError(t, repo.UpdateRoom(found))
 
 	// ListRoomsByOwner
-	rooms, err := repo.ListRoomsByOwner(user.ID)
+	rooms, err := repo.ListRoomsByOwner(user.ID, "", "", 30)
 	require.NoError(t, err)
 	assert.Len(t, rooms, 1)
 	assert.Equal(t, "Updated", rooms[0].Name)
 
 	// ListJoinedRooms (empty - no membership yet)
-	joined, err := repo.ListJoinedRooms(user.ID)
+	joined, err := repo.ListJoinedRooms(user.ID, "", "", 30)
 	require.NoError(t, err)
 	assert.Empty(t, joined)
 
@@ -81,12 +81,12 @@ func TestChatRepository_Messages(t *testing.T) {
 	assert.Error(t, err)
 
 	// ListMessagesByRoom
-	msgs, err := repo.ListMessagesByRoom(room.ID, 10)
+	msgs, err := repo.ListMessagesByRoom(room.ID, "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, msgs, 1)
 
 	// ListMessagesByRoom - default limit
-	msgs2, err := repo.ListMessagesByRoom(room.ID, 0)
+	msgs2, err := repo.ListMessagesByRoom(room.ID, "", "", 0)
 	require.NoError(t, err)
 	assert.Len(t, msgs2, 1)
 
@@ -101,12 +101,12 @@ func TestChatRepository_Messages(t *testing.T) {
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm.ID)
 
 	// ListMessagesByUser
-	dms, err := repo.ListMessagesByUser(user1.ID, user2.ID, 10)
+	dms, err := repo.ListMessagesByUser(user1.ID, user2.ID, "", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, dms, 1)
 
 	// ListMessagesByUser - default limit
-	dms2, err := repo.ListMessagesByUser(user1.ID, user2.ID, 0)
+	dms2, err := repo.ListMessagesByUser(user1.ID, user2.ID, "", "", 0)
 	require.NoError(t, err)
 	assert.Len(t, dms2, 1)
 
@@ -167,6 +167,36 @@ func TestChatRepository_Messages(t *testing.T) {
 	require.NoError(t, repo.DeleteMessage("cm_1"))
 }
 
+// #1747: id-cursor pagination on the chat list endpoints.
+func TestChatRepository_Pagination(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	user := insertTestUser(t, "u_chat_pg", "chatpg")
+	defer cleanupUser(t, user.ID)
+
+	for _, id := range []string{"pg_r1", "pg_r2", "pg_r3"} {
+		require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: id, Name: "p", OwnerID: user.ID}))
+		defer testDB.Exec(`DELETE FROM "chat_room" WHERE id = ?`, id)
+	}
+
+	// limit=2 → newest 2 (id 降順 pg_r3, pg_r2)
+	page, err := repo.ListRoomsByOwner(user.ID, "", "", 2)
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	assert.Equal(t, "pg_r3", page[0].ID)
+	assert.Equal(t, "pg_r2", page[1].ID)
+
+	// untilId=pg_r3 → id < pg_r3
+	older, err := repo.ListRoomsByOwner(user.ID, "", "pg_r3", 30)
+	require.NoError(t, err)
+	require.Len(t, older, 2)
+	assert.Equal(t, "pg_r2", older[0].ID)
+
+	// sinceId=pg_r1 → id > pg_r1
+	newer, err := repo.ListRoomsByOwner(user.ID, "pg_r1", "", 30)
+	require.NoError(t, err)
+	assert.Len(t, newer, 2)
+}
+
 func TestChatRepository_Membership(t *testing.T) {
 	repo := NewChatRepository(testDB)
 	user := insertTestUser(t, "u_chat_4", "chatuser4")
@@ -200,12 +230,12 @@ func TestChatRepository_Membership(t *testing.T) {
 	assert.Len(t, members, 1)
 
 	// ListJoinedRooms (now has membership)
-	joined, err := repo.ListJoinedRooms(user.ID)
+	joined, err := repo.ListJoinedRooms(user.ID, "", "", 30)
 	require.NoError(t, err)
 	assert.Len(t, joined, 1)
 
 	// ListMembershipsByUser returns the membership rows with Room (+ Owner) populated.
-	memberships, err := repo.ListMembershipsByUser(user.ID)
+	memberships, err := repo.ListMembershipsByUser(user.ID, "", "", 30)
 	require.NoError(t, err)
 	require.Len(t, memberships, 1)
 	assert.Equal(t, mem.ID, memberships[0].ID)
@@ -222,7 +252,7 @@ func TestChatRepository_Membership(t *testing.T) {
 	mem2 := &model.ChatRoomMembership{ID: "mem_2", UserID: user.ID, RoomID: room2.ID}
 	require.NoError(t, repo.CreateMembership(mem2))
 	defer testDB.Exec(`DELETE FROM "chat_room_membership" WHERE id = ?`, mem2.ID)
-	ordered, err := repo.ListMembershipsByUser(user.ID)
+	ordered, err := repo.ListMembershipsByUser(user.ID, "", "", 30)
 	require.NoError(t, err)
 	require.Len(t, ordered, 2)
 	assert.Equal(t, "mem_2", ordered[0].ID, "id 降順で新しい membership が先頭")
@@ -585,17 +615,17 @@ func TestChatRepository_ListInvitationsByUserAndRoom(t *testing.T) {
 	defer testDB.Exec(`DELETE FROM "chat_room_invitation" WHERE id = ?`, inv.ID)
 
 	// ListInvitationsByUser: ignored=false
-	rows, err := repo.ListInvitationsByUser(user2.ID, false)
+	rows, err := repo.ListInvitationsByUser(user2.ID, false, "", "", 30)
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 
 	// ignored=trueは0件
-	rows2, err := repo.ListInvitationsByUser(user2.ID, true)
+	rows2, err := repo.ListInvitationsByUser(user2.ID, true, "", "", 30)
 	require.NoError(t, err)
 	assert.Empty(t, rows2)
 
 	// ListInvitationsByRoom
-	roomInvs, err := repo.ListInvitationsByRoom(room.ID)
+	roomInvs, err := repo.ListInvitationsByRoom(room.ID, "", "", 30)
 	require.NoError(t, err)
 	assert.Len(t, roomInvs, 1)
 }

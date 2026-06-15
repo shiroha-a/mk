@@ -24,6 +24,33 @@ import (
 // legacy (non-service) path if needed. 現状は time.Now を直接返す。
 func legacyNow() time.Time { return time.Now() }
 
+// chatPageParams holds the standard chat list pagination params (#1747)。
+// 各 list endpoint の request struct に埋め込んで limit + 4 cursor を受ける。
+type chatPageParams struct {
+	Limit     int    `json:"limit"`
+	SinceID   string `json:"sinceId"`
+	UntilID   string `json:"untilId"`
+	SinceDate *int64 `json:"sinceDate"`
+	UntilDate *int64 `json:"untilDate"`
+}
+
+// cursor normalizes the 4 cursor params to (sinceID, untilID) via
+// id.NormalizeCursor (sinceDate/untilDate を aidx prefix へ変換)。
+func (p chatPageParams) cursor() (string, string) {
+	return id.NormalizeCursor(p.SinceID, p.UntilID, p.SinceDate, p.UntilDate)
+}
+
+// clampedLimit resolves limit<=0 to def and caps at 100 (upstream maximum)。
+func (p chatPageParams) clampedLimit(def int) int {
+	if p.Limit <= 0 {
+		return def
+	}
+	if p.Limit > 100 {
+		return 100
+	}
+	return p.Limit
+}
+
 // Handler handles chat/* endpoints.
 type Handler struct {
 	repo  repository.ChatRepository
@@ -645,7 +672,10 @@ func (h *Handler) RoomsDelete(c echo.Context) error {
 // RoomsOwned handles POST /api/chat/rooms/owned.
 func (h *Handler) RoomsOwned(c echo.Context) error {
 	user := middleware.GetUser(c)
-	rooms, _ := h.repo.ListRoomsByOwner(user.ID)
+	var req chatPageParams
+	_ = c.Bind(&req)
+	sinceID, untilID := req.cursor()
+	rooms, _ := h.repo.ListRoomsByOwner(user.ID, sinceID, untilID, req.clampedLimit(30))
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
 		// 全 room の owner = user.ID (= 一覧の filter 条件)。packRoomDetailed は
@@ -659,7 +689,10 @@ func (h *Handler) RoomsOwned(c echo.Context) error {
 // RoomsJoined handles POST /api/chat/rooms/joined.
 func (h *Handler) RoomsJoined(c echo.Context) error {
 	user := middleware.GetUser(c)
-	rooms, _ := h.repo.ListJoinedRooms(user.ID)
+	var req chatPageParams
+	_ = c.Bind(&req)
+	sinceID, untilID := req.cursor()
+	rooms, _ := h.repo.ListJoinedRooms(user.ID, sinceID, untilID, req.clampedLimit(30))
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
 		// joined 一覧は本人が member の room なので room ごとに membership
@@ -985,9 +1018,9 @@ func (h *Handler) Messages(c echo.Context) error {
 		if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 		}
-		msgs, _ = h.repo.ListMessagesByRoom(req.RoomID, req.Limit)
+		msgs, _ = h.repo.ListMessagesByRoom(req.RoomID, "", "", req.Limit)
 	} else if req.UserID != "" {
-		msgs, _ = h.repo.ListMessagesByUser(user.ID, req.UserID, req.Limit)
+		msgs, _ = h.repo.ListMessagesByUser(user.ID, req.UserID, "", "", req.Limit)
 	}
 	result := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
@@ -1269,7 +1302,7 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		UserID string `json:"userId"`
-		Limit  int    `json:"limit"`
+		chatPageParams
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -1281,13 +1314,8 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
 		}
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
-	if req.Limit > 100 {
-		req.Limit = 100
-	}
-	msgs, err := h.repo.ListMessagesByUser(user.ID, req.UserID, req.Limit)
+	sinceID, untilID := req.cursor()
+	msgs, err := h.repo.ListMessagesByUser(user.ID, req.UserID, sinceID, untilID, req.clampedLimit(10))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -1309,16 +1337,10 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
-		Limit  int    `json:"limit"`
+		chatPageParams
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return apierr.JSONInvalidParam(c)
-	}
-	if req.Limit <= 0 {
-		req.Limit = 10
-	}
-	if req.Limit > 100 {
-		req.Limit = 100
 	}
 	// upstream room-timeline.ts: room 不在 / 閲覧権限なし (member でも moderator でも
 	// ない) は NO_SUCH_ROOM。これが無いと任意の認証ユーザーが任意 room の発言を
@@ -1330,7 +1352,8 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 	}
-	msgs, err := h.repo.ListMessagesByRoom(req.RoomID, req.Limit)
+	sinceID, untilID := req.cursor()
+	msgs, err := h.repo.ListMessagesByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(10))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -1372,7 +1395,10 @@ func (h *Handler) InvitationsIgnore(c echo.Context) error {
 // InvitationsInbox handles POST /api/chat/rooms/invitations/inbox.
 func (h *Handler) InvitationsInbox(c echo.Context) error {
 	user := middleware.GetUser(c)
-	rows, err := h.repo.ListInvitationsByUser(user.ID, false)
+	var req chatPageParams
+	_ = c.Bind(&req)
+	sinceID, untilID := req.cursor()
+	rows, err := h.repo.ListInvitationsByUser(user.ID, false, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -1394,6 +1420,7 @@ func (h *Handler) InvitationsOutbox(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
+		chatPageParams
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -1403,7 +1430,8 @@ func (h *Handler) InvitationsOutbox(c echo.Context) error {
 	if err != nil || room.OwnerID != user.ID {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "a3c6b309-9717-4316-ae94-a69b53437237"))
 	}
-	rows, err := h.repo.ListInvitationsByRoom(req.RoomID)
+	sinceID, untilID := req.cursor()
+	rows, err := h.repo.ListInvitationsByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -1465,7 +1493,10 @@ func (h *Handler) RoomsJoin(c echo.Context) error {
 // だったが、shape が異なるため membership を返すよう独立実装する。
 func (h *Handler) RoomsJoining(c echo.Context) error {
 	user := middleware.GetUser(c)
-	rows, err := h.repo.ListMembershipsByUser(user.ID)
+	var req chatPageParams
+	_ = c.Bind(&req)
+	sinceID, untilID := req.cursor()
+	rows, err := h.repo.ListMembershipsByUser(user.ID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -1481,7 +1512,7 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
-		Limit  int    `json:"limit"`
+		chatPageParams
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return apierr.JSONInvalidParam(c)
@@ -1496,7 +1527,8 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 	if !h.isRoomMember(room, user.ID) {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
 	}
-	members, err := h.repo.ListMembersByRoom(req.RoomID)
+	sinceID, untilID := req.cursor()
+	members, err := h.repo.ListMembersByRoomPaged(req.RoomID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

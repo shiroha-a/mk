@@ -14,8 +14,8 @@ type ChatRepository interface {
 	FindRoomByID(id string) (*model.ChatRoom, error)
 	UpdateRoom(room *model.ChatRoom) error
 	DeleteRoom(id string) error
-	ListRoomsByOwner(ownerID string) ([]*model.ChatRoom, error)
-	ListJoinedRooms(userID string) ([]*model.ChatRoom, error)
+	ListRoomsByOwner(ownerID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error)
+	ListJoinedRooms(userID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error)
 
 	// Message operations
 	CreateMessage(msg *model.ChatMessage) error
@@ -23,8 +23,8 @@ type ChatRepository interface {
 	FindMessageByURI(uri string) (*model.ChatMessage, error)
 	UpdateMessage(msg *model.ChatMessage) error
 	DeleteMessage(id string) error
-	ListMessagesByRoom(roomID string, limit int) ([]*model.ChatMessage, error)
-	ListMessagesByUser(userID, otherUserID string, limit int) ([]*model.ChatMessage, error)
+	ListMessagesByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error)
+	ListMessagesByUser(userID, otherUserID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error)
 	// ListMessagesByFileID returns chat messages that attached the given drive
 	// file, newest-first, with id-cursor pagination. Used by
 	// drive/files/attached-chat-messages.
@@ -36,8 +36,14 @@ type ChatRepository interface {
 	FindMembership(userID, roomID string) (*model.ChatRoomMembership, error)
 	UpdateMembership(m *model.ChatRoomMembership) error
 	DeleteMembership(userID, roomID string) error
+	// ListMembersByRoom returns ALL memberships of a room. Used by federation
+	// fan-out (deliver to every member) and the room-full count, so it must not
+	// be paginated. The paginated room/members endpoint uses ListMembersByRoomPaged.
 	ListMembersByRoom(roomID string) ([]*model.ChatRoomMembership, error)
-	ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error)
+	// ListMembersByRoomPaged is the id-cursor paginated variant for the
+	// chat/rooms/members endpoint (#1747)。
+	ListMembersByRoomPaged(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error)
+	ListMembershipsByUser(userID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error)
 
 	// Invitation operations
 	CreateInvitation(inv *model.ChatRoomInvitation) error
@@ -62,8 +68,8 @@ type ChatRepository interface {
 	MarkRead(userID, messageID string) error
 
 	// Invitation listing
-	ListInvitationsByUser(userID string, ignored bool) ([]*model.ChatRoomInvitation, error)
-	ListInvitationsByRoom(roomID string) ([]*model.ChatRoomInvitation, error)
+	ListInvitationsByUser(userID string, ignored bool, sinceID, untilID string, limit int) ([]*model.ChatRoomInvitation, error)
+	ListInvitationsByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomInvitation, error)
 
 	// UpdateDeliveryStatus sets the AP delivery flags on a chat message.
 	UpdateDeliveryStatus(messageID string, delivering, failed bool) error
@@ -109,6 +115,30 @@ func NewChatRepository(db *gorm.DB) ChatRepository {
 	return &chatRepository{db: db}
 }
 
+// maxChatPageLimit caps the page size of the chat list endpoints (upstream
+// paramDef maximum:100)。
+const maxChatPageLimit = 100
+
+// applyIDCursor appends id-cursor (sinceID / untilID) + DESC ordering + limit to
+// a chat list query, mirroring upstream makePaginationQuery. idCol must be the
+// (optionally table-qualified) primary-key column to paginate on. limit<=0 falls
+// back to defaultLimit and is clamped to maxChatPageLimit (#1747)。
+func applyIDCursor(q *gorm.DB, idCol, sinceID, untilID string, limit, defaultLimit int) *gorm.DB {
+	if untilID != "" {
+		q = q.Where(idCol+" < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where(idCol+" > ?", sinceID)
+	}
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxChatPageLimit {
+		limit = maxChatPageLimit
+	}
+	return q.Order(idCol + " DESC").Limit(limit)
+}
+
 func (r *chatRepository) CreateRoom(room *model.ChatRoom) error {
 	return r.db.Create(room).Error
 }
@@ -129,19 +159,21 @@ func (r *chatRepository) DeleteRoom(id string) error {
 	return r.db.Where(`"id" = ?`, id).Delete(&model.ChatRoom{}).Error
 }
 
-func (r *chatRepository) ListRoomsByOwner(ownerID string) ([]*model.ChatRoom, error) {
+func (r *chatRepository) ListRoomsByOwner(ownerID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error) {
 	var rooms []*model.ChatRoom
-	if err := r.db.Where(`"ownerId" = ?`, ownerID).Order(`"id" DESC`).Find(&rooms).Error; err != nil {
+	q := applyIDCursor(r.db.Where(`"ownerId" = ?`, ownerID), `"id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&rooms).Error; err != nil {
 		return nil, err
 	}
 	return rooms, nil
 }
 
-func (r *chatRepository) ListJoinedRooms(userID string) ([]*model.ChatRoom, error) {
+func (r *chatRepository) ListJoinedRooms(userID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error) {
 	var rooms []*model.ChatRoom
-	if err := r.db.Joins(`JOIN "chat_room_membership" ON "chat_room_membership"."roomId" = "chat_room"."id"`).
-		Where(`"chat_room_membership"."userId" = ?`, userID).
-		Order(`"chat_room"."id" DESC`).Find(&rooms).Error; err != nil {
+	q := r.db.Joins(`JOIN "chat_room_membership" ON "chat_room_membership"."roomId" = "chat_room"."id"`).
+		Where(`"chat_room_membership"."userId" = ?`, userID)
+	q = applyIDCursor(q, `"chat_room"."id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&rooms).Error; err != nil {
 		return nil, err
 	}
 	return rooms, nil
@@ -175,13 +207,11 @@ func (r *chatRepository) DeleteMessage(id string) error {
 	return r.db.Where(`"id" = ?`, id).Delete(&model.ChatMessage{}).Error
 }
 
-func (r *chatRepository) ListMessagesByRoom(roomID string, limit int) ([]*model.ChatMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
+func (r *chatRepository) ListMessagesByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error) {
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("File").Where(`"toRoomId" = ?`, roomID).
-		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
+	q := applyIDCursor(r.db.Preload("FromUser").Preload("File").Where(`"toRoomId" = ?`, roomID),
+		`"id"`, sinceID, untilID, limit, 20)
+	if err := q.Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -206,15 +236,13 @@ func (r *chatRepository) ListMessagesByFileID(fileID, untilID, sinceID string, l
 	return msgs, nil
 }
 
-func (r *chatRepository) ListMessagesByUser(userID, otherUserID string, limit int) ([]*model.ChatMessage, error) {
-	if limit <= 0 {
-		limit = 20
-	}
+func (r *chatRepository) ListMessagesByUser(userID, otherUserID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error) {
 	var msgs []*model.ChatMessage
-	if err := r.db.Preload("FromUser").Preload("File").
+	q := r.db.Preload("FromUser").Preload("File").
 		Where(`("fromUserId" = ? AND "toUserId" = ?) OR ("fromUserId" = ? AND "toUserId" = ?)`,
-			userID, otherUserID, otherUserID, userID).
-		Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
+			userID, otherUserID, otherUserID, userID)
+	q = applyIDCursor(q, `"id"`, sinceID, untilID, limit, 20)
+	if err := q.Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil
@@ -285,10 +313,20 @@ func (r *chatRepository) ListMembersByRoom(roomID string) ([]*model.ChatRoomMemb
 	return members, nil
 }
 
-func (r *chatRepository) ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error) {
+func (r *chatRepository) ListMembersByRoomPaged(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error) {
+	var members []*model.ChatRoomMembership
+	q := applyIDCursor(r.db.Preload("User").Where(`"roomId" = ?`, roomID), `"id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&members).Error; err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func (r *chatRepository) ListMembershipsByUser(userID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error) {
 	var rows []*model.ChatRoomMembership
-	if err := r.db.Preload("Room").Preload("Room.Owner").Where(`"userId" = ?`, userID).
-		Order(`"id" DESC`).Find(&rows).Error; err != nil {
+	q := applyIDCursor(r.db.Preload("Room").Preload("Room.Owner").Where(`"userId" = ?`, userID),
+		`"id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -361,19 +399,20 @@ func (r *chatRepository) MarkRead(userID, messageID string) error {
 		userID, messageID, userID).Error
 }
 
-func (r *chatRepository) ListInvitationsByUser(userID string, ignored bool) ([]*model.ChatRoomInvitation, error) {
+func (r *chatRepository) ListInvitationsByUser(userID string, ignored bool, sinceID, untilID string, limit int) ([]*model.ChatRoomInvitation, error) {
 	var rows []*model.ChatRoomInvitation
-	if err := r.db.Preload("Room").Where(`"userId" = ? AND "ignored" = ?`, userID, ignored).
-		Order("id DESC").Find(&rows).Error; err != nil {
+	q := applyIDCursor(r.db.Preload("Room").Where(`"userId" = ? AND "ignored" = ?`, userID, ignored),
+		`"id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
-func (r *chatRepository) ListInvitationsByRoom(roomID string) ([]*model.ChatRoomInvitation, error) {
+func (r *chatRepository) ListInvitationsByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomInvitation, error) {
 	var rows []*model.ChatRoomInvitation
-	if err := r.db.Preload("User").Where(`"roomId" = ?`, roomID).
-		Order("id DESC").Find(&rows).Error; err != nil {
+	q := applyIDCursor(r.db.Preload("User").Where(`"roomId" = ?`, roomID), `"id"`, sinceID, untilID, limit, 30)
+	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

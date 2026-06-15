@@ -408,7 +408,7 @@ func TestRoomsUpdate_WithDescription(t *testing.T) {
 
 type mockJoinedRepo struct{ *testutil.MockChatRepository }
 
-func (m *mockJoinedRepo) ListJoinedRooms(_ string) ([]*model.ChatRoom, error) {
+func (m *mockJoinedRepo) ListJoinedRooms(_, _, _ string, _ int) ([]*model.ChatRoom, error) {
 	return []*model.ChatRoom{{ID: "r1", Name: "room", OwnerID: "u1"}}, nil
 }
 
@@ -425,7 +425,7 @@ func TestRoomsJoined_WithRooms(t *testing.T) {
 
 type mockMsgRepo struct{ *testutil.MockChatRepository }
 
-func (m *mockMsgRepo) ListMessagesByRoom(_ string, _ int) ([]*model.ChatMessage, error) {
+func (m *mockMsgRepo) ListMessagesByRoom(_, _, _ string, _ int) ([]*model.ChatMessage, error) {
 	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
 }
 func (m *mockMsgRepo) SearchMessages(_, _ string, _ int, _, _ string) ([]*model.ChatMessage, error) {
@@ -764,7 +764,7 @@ func TestMessagesRead_Service_NotFound(t *testing.T) {
 
 type mockUserMsgRepo struct{ *testutil.MockChatRepository }
 
-func (m *mockUserMsgRepo) ListMessagesByUser(_, _ string, _ int) ([]*model.ChatMessage, error) {
+func (m *mockUserMsgRepo) ListMessagesByUser(_, _, _, _ string, _ int) ([]*model.ChatMessage, error) {
 	return []*model.ChatMessage{{ID: "m2", FromUserID: "u2", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
 }
 
@@ -1185,6 +1185,59 @@ func TestHistory_IsRead_Room(t *testing.T) {
 	require.NoError(t, json.Unmarshal(post(h.History, `{"room":true}`, u1).Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
 	assert.Equal(t, false, resp[0]["isRead"], "未読 room message は isRead=false")
+}
+
+// --- #1747: list endpoint pagination (limit + id cursor) ---
+
+func decodeList(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any {
+	t.Helper()
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp
+}
+
+func TestRoomsOwned_Pagination(t *testing.T) {
+	h, repo := newTestHandler()
+	for _, id := range []string{"a1", "a2", "a3"} {
+		repo.Rooms[id] = &model.ChatRoom{ID: id, OwnerID: u1.ID, Name: id, Owner: u1}
+	}
+	// limit=2 → newest 2 (id 降順 a3, a2)
+	resp := decodeList(t, post(h.RoomsOwned, `{"limit":2}`, u1))
+	require.Len(t, resp, 2)
+	assert.Equal(t, "a3", resp[0]["id"])
+	assert.Equal(t, "a2", resp[1]["id"])
+	// untilId=a2 → id < a2 (= a1 のみ)
+	resp2 := decodeList(t, post(h.RoomsOwned, `{"untilId":"a2"}`, u1))
+	require.Len(t, resp2, 1)
+	assert.Equal(t, "a1", resp2[0]["id"])
+	// sinceId=a2 → id > a2 (= a3 のみ)
+	resp3 := decodeList(t, post(h.RoomsOwned, `{"sinceId":"a2"}`, u1))
+	require.Len(t, resp3, 1)
+	assert.Equal(t, "a3", resp3[0]["id"])
+}
+
+func TestRoomsMembers_Pagination(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	for _, mid := range []string{"b1", "b2", "b3"} {
+		repo.Memberships[mid+":r1"] = &model.ChatRoomMembership{ID: mid, UserID: mid, RoomID: "r1"}
+	}
+	resp := decodeList(t, post(h.RoomsMembers, `{"roomId":"r1","limit":2}`, u1))
+	require.Len(t, resp, 2)
+	assert.Equal(t, "b3", resp[0]["id"])
+}
+
+func TestUserTimeline_Pagination(t *testing.T) {
+	h, repo := newTestHandler()
+	to := "u2"
+	for _, mid := range []string{"c1", "c2", "c3"} {
+		repo.Messages[mid] = &model.ChatMessage{ID: mid, FromUserID: u1.ID, ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	}
+	// untilId=c3 → c2, c1 (id < c3)
+	resp := decodeList(t, post(h.UserTimeline, `{"userId":"u2","untilId":"c3"}`, u1))
+	require.Len(t, resp, 2)
+	assert.Equal(t, "c2", resp[0]["id"])
+	assert.Equal(t, "c1", resp[1]["id"])
 }
 
 // #692 review #7: UserTimeline / RoomTimeline がそれぞれ

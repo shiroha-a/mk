@@ -58,6 +58,29 @@ func NewMockChatRepository() *MockChatRepository {
 
 func membershipKey(userID, roomID string) string { return userID + ":" + roomID }
 
+// cursorKeep reports whether id passes the (sinceID, untilID) id-cursor used by
+// the paginated chat list mocks (#1747)。
+func cursorKeep(id, sinceID, untilID string) bool {
+	if untilID != "" && id >= untilID {
+		return false
+	}
+	if sinceID != "" && id <= sinceID {
+		return false
+	}
+	return true
+}
+
+// clampMockLimit resolves limit<=0 to def and caps at 100 (upstream maximum)。
+func clampMockLimit(limit, def int) int {
+	if limit <= 0 {
+		return def
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
+}
+
 // --- Rooms ---
 
 func (m *MockChatRepository) CreateRoom(room *model.ChatRoom) error {
@@ -93,30 +116,39 @@ func (m *MockChatRepository) DeleteRoom(id string) error {
 	return nil
 }
 
-func (m *MockChatRepository) ListRoomsByOwner(ownerID string) ([]*model.ChatRoom, error) {
+func (m *MockChatRepository) ListRoomsByOwner(ownerID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]*model.ChatRoom, 0)
 	for _, r := range m.Rooms {
-		if r.OwnerID == ownerID {
+		if r.OwnerID == ownerID && cursorKeep(r.ID, sinceID, untilID) {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return capRooms(out, clampMockLimit(limit, 30)), nil
 }
 
-func (m *MockChatRepository) ListJoinedRooms(userID string) ([]*model.ChatRoom, error) {
+func (m *MockChatRepository) ListJoinedRooms(userID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]*model.ChatRoom, 0)
 	for _, mem := range m.Memberships {
 		if mem.UserID == userID {
-			if r, ok := m.Rooms[mem.RoomID]; ok {
+			if r, ok := m.Rooms[mem.RoomID]; ok && cursorKeep(r.ID, sinceID, untilID) {
 				out = append(out, r)
 			}
 		}
 	}
-	return out, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return capRooms(out, clampMockLimit(limit, 30)), nil
+}
+
+func capRooms(rooms []*model.ChatRoom, limit int) []*model.ChatRoom {
+	if len(rooms) > limit {
+		return rooms[:limit]
+	}
+	return rooms
 }
 
 // --- Messages ---
@@ -175,12 +207,40 @@ func (m *MockChatRepository) DeleteMessage(id string) error {
 	return nil
 }
 
-func (m *MockChatRepository) ListMessagesByRoom(_ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
+func (m *MockChatRepository) ListMessagesByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*model.ChatMessage
+	for _, msg := range m.Messages {
+		if msg.ToRoomID != nil && *msg.ToRoomID == roomID && cursorKeep(msg.ID, sinceID, untilID) {
+			cp := *msg
+			out = append(out, &cp)
+		}
+	}
+	return capMessages(out, clampMockLimit(limit, 20)), nil
 }
 
-func (m *MockChatRepository) ListMessagesByUser(_, _ string, _ int) ([]*model.ChatMessage, error) {
-	return nil, nil
+func (m *MockChatRepository) ListMessagesByUser(userID, otherUserID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*model.ChatMessage
+	for _, msg := range m.Messages {
+		dm := (msg.FromUserID == userID && msg.ToUserID != nil && *msg.ToUserID == otherUserID) ||
+			(msg.FromUserID == otherUserID && msg.ToUserID != nil && *msg.ToUserID == userID)
+		if dm && cursorKeep(msg.ID, sinceID, untilID) {
+			cp := *msg
+			out = append(out, &cp)
+		}
+	}
+	return capMessages(out, clampMockLimit(limit, 20)), nil
+}
+
+func capMessages(msgs []*model.ChatMessage, limit int) []*model.ChatMessage {
+	sort.Slice(msgs, func(i, j int) bool { return msgs[i].ID > msgs[j].ID })
+	if len(msgs) > limit {
+		return msgs[:limit]
+	}
+	return msgs
 }
 
 func (m *MockChatRepository) ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error) {
@@ -298,7 +358,20 @@ func (m *MockChatRepository) ListMembersByRoom(roomID string) ([]*model.ChatRoom
 	return out, nil
 }
 
-func (m *MockChatRepository) ListMembershipsByUser(userID string) ([]*model.ChatRoomMembership, error) {
+func (m *MockChatRepository) ListMembersByRoomPaged(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*model.ChatRoomMembership, 0)
+	for _, mem := range m.Memberships {
+		if mem.RoomID == roomID && cursorKeep(mem.ID, sinceID, untilID) {
+			out = append(out, mem)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return capMemberships(out, clampMockLimit(limit, 30)), nil
+}
+
+func (m *MockChatRepository) ListMembershipsByUser(userID, sinceID, untilID string, limit int) ([]*model.ChatRoomMembership, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.ListMembershipsErr != nil {
@@ -306,7 +379,7 @@ func (m *MockChatRepository) ListMembershipsByUser(userID string) ([]*model.Chat
 	}
 	out := make([]*model.ChatRoomMembership, 0)
 	for _, mem := range m.Memberships {
-		if mem.UserID == userID {
+		if mem.UserID == userID && cursorKeep(mem.ID, sinceID, untilID) {
 			cp := *mem
 			if r, ok := m.Rooms[mem.RoomID]; ok {
 				cp.Room = r
@@ -316,7 +389,14 @@ func (m *MockChatRepository) ListMembershipsByUser(userID string) ([]*model.Chat
 	}
 	// upstream getMyMemberships は membership id 降順で返す。
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
-	return out, nil
+	return capMemberships(out, clampMockLimit(limit, 30)), nil
+}
+
+func capMemberships(rows []*model.ChatRoomMembership, limit int) []*model.ChatRoomMembership {
+	if len(rows) > limit {
+		return rows[:limit]
+	}
+	return rows
 }
 
 // --- Invitations ---
@@ -365,18 +445,22 @@ func (m *MockChatRepository) FindInvitation(userID, roomID string) (*model.ChatR
 	return nil, ErrNotFound
 }
 
-func (m *MockChatRepository) ListInvitationsByUser(_ string, _ bool) ([]*model.ChatRoomInvitation, error) {
+func (m *MockChatRepository) ListInvitationsByUser(_ string, _ bool, _, _ string, _ int) ([]*model.ChatRoomInvitation, error) {
 	return nil, nil
 }
 
-func (m *MockChatRepository) ListInvitationsByRoom(roomID string) ([]*model.ChatRoomInvitation, error) {
+func (m *MockChatRepository) ListInvitationsByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatRoomInvitation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var rows []*model.ChatRoomInvitation
 	for _, inv := range m.Invitations {
-		if inv.RoomID == roomID {
+		if inv.RoomID == roomID && cursorKeep(inv.ID, sinceID, untilID) {
 			rows = append(rows, inv)
 		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
+	if l := clampMockLimit(limit, 30); len(rows) > l {
+		rows = rows[:l]
 	}
 	return rows, nil
 }
