@@ -189,12 +189,42 @@ func TestChannelRepository_List_Sort(t *testing.T) {
 
 	for _, sortBy := range []string{
 		"+lastNotedAt", "-lastNotedAt", "+name", "-name",
-		"+notesCount", "-notesCount", "+usersCount", "-usersCount", "",
+		"+notesCount", "-notesCount", "+usersCount", "-usersCount", "+id", "-id", "",
 	} {
 		rows, err := repo.List(model.ChannelListFilter{Query: "sort-", SortBy: sortBy, Limit: 10})
 		require.NoError(t, err)
 		assert.Len(t, rows, 2)
 	}
+}
+
+// #1540: owned/search の cursor 無し default は id DESC、featured は
+// lastNotedAt IS NOT NULL で絞る。
+func TestChannelRepository_List_IDSortAndLastNotedAtFilter(t *testing.T) {
+	repo := NewChannelRepository(testDB)
+	uid := insertTestUser(t, "u_chr_ids", "channeluserids").ID
+	defer cleanupUser(t, uid)
+
+	now := time.Now()
+	a := newTestChannel("ch_ids_a", "ids-a", &uid) // lastNotedAt なし
+	b := newTestChannel("ch_ids_b", "ids-b", &uid)
+	b.LastNotedAt = &now
+	for _, ch := range []*model.Channel{a, b} {
+		require.NoError(t, repo.Create(ch))
+		defer cleanupChannel(t, ch.ID)
+	}
+
+	// SortBy "-id" は id 降順 (ch_ids_b > ch_ids_a)。
+	rows, err := repo.List(model.ChannelListFilter{Query: "ids-", SortBy: "-id", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "ch_ids_b", rows[0].ID)
+	assert.Equal(t, "ch_ids_a", rows[1].ID)
+
+	// LastNotedAtNotNull は lastNotedAt の無い channel を除外する。
+	rows, err = repo.List(model.ChannelListFilter{Query: "ids-", LastNotedAtNotNull: true, SortBy: "-lastNotedAt", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "ch_ids_b", rows[0].ID)
 }
 
 func TestChannelRepository_List_LimitClamp(t *testing.T) {

@@ -438,12 +438,31 @@ func TestListOwned(t *testing.T) {
 	assert.Len(t, rows, 2)
 }
 
+// #1540: owned は isArchived=FALSE を AND する (archived な自分の channel は出ない)。
+func TestListOwned_ExcludesArchived(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	owner := "u1"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", UserID: &owner}
+	repo.Channels["c2"] = &model.Channel{ID: "c2", UserID: &owner, IsArchived: true}
+	rows, err := svc.ListOwned("u1", "", "", 10, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "c1", rows[0].ID)
+}
+
 func TestListFeatured(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
-	repo.Channels["c1"] = &model.Channel{ID: "c1"}
-	rows, err := svc.ListFeatured("", "", 10, 0)
+	now := time.Now()
+	// 投稿のある非アーカイブ channel のみ featured に出る (#1540)。
+	repo.Channels["c1"] = &model.Channel{ID: "c1", LastNotedAt: &now}
+	// lastNotedAt が無い channel は除外される。
+	repo.Channels["c2"] = &model.Channel{ID: "c2"}
+	// archived channel も除外される。
+	repo.Channels["c3"] = &model.Channel{ID: "c3", LastNotedAt: &now, IsArchived: true}
+	rows, err := svc.ListFeatured()
 	require.NoError(t, err)
-	assert.Len(t, rows, 1)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "c1", rows[0].ID)
 }
 
 func TestSearch(t *testing.T) {

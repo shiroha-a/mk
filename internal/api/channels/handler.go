@@ -402,14 +402,17 @@ func (h *Handler) Owned(c echo.Context) error {
 }
 
 // Featured handles POST /api/channels/featured.
+//
+// upstream featured.ts は pagination param を持たず、lastNotedAt IS NOT NULL かつ
+// isArchived=FALSE の channel を lastNotedAt DESC で固定 10 件返す (#1540)。
+// cursor / limit は無視する (service が固定条件で返す) が、malformed JSON は
+// upstream のフレームワーク同様 400 で弾くため bind 検証だけ残す。
 func (h *Handler) Featured(c echo.Context) error {
 	var req PaginatedListRequest
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	rows, err := h.svc.ListFeatured(sinceID, untilID, req.Limit, req.Offset)
+	rows, err := h.svc.ListFeatured()
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
