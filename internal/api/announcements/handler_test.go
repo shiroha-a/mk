@@ -140,10 +140,33 @@ func TestReadAnnouncement_AlreadyRead(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-func TestReadAnnouncement_NotFound(t *testing.T) {
+// #1767: upstream read-announcement は不明な id を silent 204 で返す
+// (errors:{}、insert の FK 違反を握り潰す)。404 NO_SUCH_ANNOUNCEMENT は返さない。
+func TestReadAnnouncement_UnknownIsNoOp(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.ReadAnnouncement, `{"announcementId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// #1767: 自分宛て per-user announcement は初回 read で isActive=false に
+// deactivate する (upstream AnnouncementService.read:214-217)。
+func TestReadAnnouncement_DeactivatesOwnPerUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	uid := "u1"
+	repo.Items["a1"] = &model.Announcement{ID: "a1", UserID: &uid, IsActive: true}
+	rec := doPost(h.ReadAnnouncement, `{"announcementId":"a1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.False(t, repo.Items["a1"].IsActive, "自分宛て per-user は read で deactivate")
+}
+
+// #1767: 他ユーザー宛て per-user は silent 204 で、isActive も変えない。
+func TestReadAnnouncement_ForeignPerUserIsNoOp(t *testing.T) {
+	h, repo := newTestHandler(t)
+	other := "u2"
+	repo.Items["a1"] = &model.Announcement{ID: "a1", UserID: &other, IsActive: true}
+	rec := doPost(h.ReadAnnouncement, `{"announcementId":"a1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Items["a1"].IsActive, "他ユーザー宛ては deactivate しない")
 }
 
 func TestReadAnnouncement_InvalidParam(t *testing.T) {

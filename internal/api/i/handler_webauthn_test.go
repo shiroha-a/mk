@@ -329,11 +329,12 @@ func TestTwoFARemoveKey_MissingFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestTwoFARemoveKey_NotFound(t *testing.T) {
+// #1767: upstream remove-key は no-match でも no-op 成功 (204)。NO_SUCH_KEY は無い。
+func TestTwoFARemoveKey_MissingIsNoOp(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"ghost"}`, user)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestTwoFARemoveKey_Success(t *testing.T) {
@@ -406,7 +407,8 @@ func TestTwoFAUpdateKey_NotFound(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	rec := postExtra(h.TwoFAUpdateKey, `{"password":"pass","credentialId":"ghost","name":"x"}`, user)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #1767: upstream noSuchKey は httpStatusCode 未指定 = 400 (code は一致)。
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFAUpdateKey_Success(t *testing.T) {
@@ -431,7 +433,8 @@ func TestTwoFAUpdateKey_AccessDenied(t *testing.T) {
 		ID: "key1", UserID: "u2", Name: "old", PublicKey: "pk",
 	}))
 	rec := postExtra(h.TwoFAUpdateKey, `{"password":"pass","credentialId":"key1","name":"x"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// #1767: upstream accessDenied は httpStatusCode 未指定 = 400 (code は一致)。
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 	// 名前は変更されない。
 	assert.Equal(t, "old", skRepo.keys["key1"].Name)

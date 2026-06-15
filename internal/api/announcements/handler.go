@@ -156,13 +156,17 @@ func (h *Handler) ReadAnnouncement(c echo.Context) error {
 	}
 	a, err := h.repo.FindByID(req.AnnouncementID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-0158-4f8d-bd54-1ab374089a15"))
+		// upstream read-announcement.ts は errors:{} (NO_SUCH_ANNOUNCEMENT 無し)。
+		// AnnouncementService.read は insert を try/catch で囲み、不明な id は FK
+		// 違反が握り潰されて void (204) になる。mk-go も silent 204 で揃える
+		// (#1767。以前は 404 NO_SUCH_ANNOUNCEMENT)。
+		return c.NoContent(http.StatusNoContent)
 	}
-	// per-user announcementのうち他ユーザー宛ては、そのユーザー以外は
-	// 閲覧できないので「存在しない」扱いで弾く(IDから本人宛てか推測
-	// されるのを防ぐため)。
+	// per-user announcement のうち他ユーザー宛ては、upstream も ownership check が
+	// 無く read を記録して 204 を返すだけ (isActive は変えない)。mk-go は記録せず
+	// silent 204 で揃える (foreign read は surface しないため無害、#1767)。
 	if a.UserID != nil && *a.UserID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-0158-4f8d-bd54-1ab374089a15"))
+		return c.NoContent(http.StatusNoContent)
 	}
 	already, _ := h.repo.IsRead(user.ID, req.AnnouncementID)
 	if already {
@@ -175,6 +179,11 @@ func (h *Handler) ReadAnnouncement(c echo.Context) error {
 	}
 	if err := h.repo.MarkRead(read); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// upstream AnnouncementService.read:214-217: 自分宛て per-user announcement は
+	// 初回既読時に isActive=false にして自動 deactivate する (#1767)。best-effort。
+	if a.UserID != nil && *a.UserID == user.ID {
+		_ = h.repo.UpdateFields(req.AnnouncementID, map[string]any{"isActive": false})
 	}
 	// TS本家AnnouncementService.read(line 220): 残unread数が0になった時点で
 	// mainにreadAllAnnouncementsをpublishする(body: null)。

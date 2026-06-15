@@ -137,6 +137,26 @@ func TestTwoFADone_Success(t *testing.T) {
 	assert.Len(t, profile.TwoFactorBackupSecret, 5)
 }
 
+// #1767: upstream done.ts は token から空白を除去してから検証する
+// (authenticator が "123 456" と表示する code を受け付ける)。
+func TestTwoFADone_StripsWhitespaceFromToken(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	rec := postExtra(h.TwoFARegister, `{"password":"pass"}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	secret := resp["secret"].(string)
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	// 6 桁 code の中央に空白を挿入 ("123 456" 形式)。
+	spaced := token[:3] + " " + token[3:]
+	rec2 := postExtra(h.TwoFADone, `{"token":"`+spaced+`"}`, user)
+	require.Equal(t, http.StatusOK, rec2.Code, "空白入り TOTP code も受理される")
+	assert.True(t, repo.Profiles["u1"].TwoFactorEnabled)
+}
+
 // #1555 TwoFADone は 2FA 有効化後に meUpdated を publish する (upstream done.ts)。
 func TestTwoFADone_PublishesMeUpdated(t *testing.T) {
 	h, repo := newExtraHandler(t)

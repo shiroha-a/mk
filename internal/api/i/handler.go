@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -771,10 +773,38 @@ func (h *Handler) RegistryRemove(c echo.Context) error {
 // (email / mutedWords / twoFactor* / clientData / role / unread 等) を
 // resp map に merge する design (#971)。MeDetailed packer に新 field が
 // 追加されたとき自動追従する。
+// recordLoginDay appends today's date to the profile's loggedInDates when not
+// already present and persists it, mirroring upstream i.ts. The date format is
+// server-local `YYYY/M/D` (no zero-padding, 1-indexed month) to match
+// `${getFullYear()}/${getMonth()+1}/${getDate()}`. Updates profile in place so
+// the response's loggedInDays reflects the new count. Best-effort.
+func (h *Handler) recordLoginDay(userID string, profile *model.UserProfile) {
+	now := time.Now()
+	today := fmt.Sprintf("%d/%d/%d", now.Year(), int(now.Month()), now.Day())
+	for _, d := range profile.LoggedInDates {
+		if d == today {
+			return
+		}
+	}
+	newDates := append(append(pq.StringArray{}, profile.LoggedInDates...), today)
+	if err := h.userService.UpdateProfileFields(userID, map[string]any{"loggedInDates": newDates}); err != nil {
+		slog.Warn("i: record login day failed", "user", userID, "err", err)
+		return
+	}
+	profile.LoggedInDates = newDates
+}
+
 func (h *Handler) Me(c echo.Context) error {
 	u := middleware.GetUser(c)
 
 	profile := h.userService.GetProfile(u.ID)
+
+	// upstream i.ts:67-72: /api/i アクセスごとに当日を loggedInDates に追記する
+	// (loggedInDays と login-streak achievement の唯一の source、#1767)。
+	// best-effort: 永続化失敗でも応答は返す (upstream も update を await しない)。
+	if profile != nil {
+		h.recordLoginDay(u.ID, profile)
+	}
 
 	// MeDetailed を JSON round-trip で map に展開して base にする。
 	// 1 request あたり Marshal + Unmarshal が 1 回ずつ走るが、/api/i は

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -16,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // wrapWebAuthnRequest builds a fresh *http.Request whose body is the
@@ -125,7 +128,11 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 	// window 内) に同じ code で signin を試みると replay として 403 になる
 	// (permanent secret に同 value で昇格するため Redis slot に hit する)。
 	// 次の TOTP step に進めば解消する。
-	if !twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, req.Token, *profile.TwoFactorTempSecret) {
+	// upstream done.ts:54 は `ps.token.replace(/\s/g, '')` で TOTP code から
+	// 全空白を除去してから検証する (authenticator が "123 456" のように表示する
+	// code を受け付ける、#1767)。strings.Fields は連続空白も畳む。
+	token := strings.Join(strings.Fields(req.Token), "")
+	if !twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, token, *profile.TwoFactorTempSecret) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
@@ -458,8 +465,11 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "141c598d-a825-44c8-9173-cfb9d92be493"))
 	}
 
-	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
+	// upstream remove-key.ts:74-78 は delete を無条件に実行し no-match でも
+	// 成功 ({}) を返す (NO_SUCH_KEY error は定義されていない、#1767)。no-match
+	// (ErrRecordNotFound) は成功扱いで素通りし、実 DB error のみ 500 にする。
+	if err := h.securityKeyRepo.Delete(req.CredentialID, user.ID); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return apierr.JSONInternalError(c)
 	}
 
 	if remaining, err := h.securityKeyRepo.CountByUser(user.ID); err == nil && remaining == 0 {
@@ -491,15 +501,18 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	// upstream (update-key.ts) は key not-found (NO_SUCH_KEY) と not-owned
 	// (ACCESS_DENIED) を区別する。UpdateName は両者を ErrRecordNotFound に
 	// 畳むため、先に FindByID して所有権を判定する (#1555)。
+	// upstream update-key.ts の noSuchKey / accessDenied は httpStatusCode 未指定
+	// = kind 'client' default = 400 (#1767)。code/id は一致させつつ status を
+	// 400 に揃える (以前は 404 / 403 を返していた)。
 	key, err := h.securityKeyRepo.FindByID(req.CredentialID)
 	if err != nil || key == nil {
-		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
+		return c.JSON(http.StatusBadRequest, apierr.NoSuchKey())
 	}
 	if key.UserID != user.ID {
-		return c.JSON(http.StatusForbidden, apierr.AccessDenied())
+		return c.JSON(http.StatusBadRequest, apierr.AccessDenied())
 	}
 	if err := h.securityKeyRepo.UpdateName(req.CredentialID, user.ID, req.Name); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.NoSuchKey())
+		return c.JSON(http.StatusBadRequest, apierr.NoSuchKey())
 	}
 	// 表示名変更も meUpdated で UI 反映 (#707)。
 	h.publishMeUpdated(user.ID)

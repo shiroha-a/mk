@@ -334,7 +334,18 @@ func TestMe_LoggedInDays(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, float64(3), resp["loggedInDays"])
+	// #1767: Me が当日 (YYYY/M/D) を loggedInDates に追記するので 3 -> 4。
+	assert.Equal(t, float64(4), resp["loggedInDays"])
+	require.Len(t, userRepo.Profiles["user1"].LoggedInDates, 4)
+
+	// 2 回目の呼び出しでは当日が既に存在するので増えない (冪等)。
+	rec2 := httptest.NewRecorder()
+	c2 := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/i", nil), rec2)
+	c2.Set(string(middleware.UserContextKey), user)
+	require.NoError(t, h.Me(c2))
+	var resp2 map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, float64(4), resp2["loggedInDays"], "当日は二重追記しない")
 }
 
 func TestMe_BackupCodesStock(t *testing.T) {
