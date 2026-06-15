@@ -73,11 +73,19 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	if h.isProtectedAccount(req.UserID) {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
+	// AP Delete(actor) 配信のため、更新前に user を控える (#1759)。
+	user, _ := h.userRepo.FindByID(req.UserID)
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true, "isDeleted": true}); err == nil {
 		// AccountsDelete と同じ。target の全 token cache entry を即時
 		// invalidate (#965)。
 		h.invalidateUserTokenCache(req.UserID)
 		h.logUserAction(c, moderationlog.LogDeleteAccount, req.UserID)
+	}
+	// upstream DeleteAccountService: local user は物理削除 job の前に全 sharedInbox
+	// へ Delete(actor) を配信する (#1759)。mk-go の cascade は soft (user 行/鍵を
+	// 残す) ため queue 経由配信でも署名鍵は生存する。
+	if user != nil && h.userModerationFed != nil {
+		h.userModerationFed.OnUserDeleted(user)
 	}
 	h.scheduleAccountCascade(req.UserID)
 	return c.NoContent(http.StatusNoContent)

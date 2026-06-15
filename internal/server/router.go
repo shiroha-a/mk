@@ -2212,6 +2212,9 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetSigninRepo(signinRepo)
 	adminHandler.SetAbuseRepo(abuseReportRepo)
 	adminHandler.SetAbuseForwarder(coreabuse.NewForwarder(abuseReportRepo, sysAcctSvc, apRenderer, deliverService))
+	// suspend / delete-account / unsuspend 時に対象 local user の AP Delete /
+	// Undo(Delete) を remote instances へ配信する (#1759)。
+	adminHandler.SetUserModerationFederationHook(corefederation.NewUserModerationDeliveryHook(deliverService, apRenderer, userRepo))
 	adminHandler.SetDeleteAccountEnqueuer(s.queueClient)
 	adminHandler.SetPasswordResetRepo(resetReqRepo)
 	adminHandler.SetServerURL(s.config.URL)

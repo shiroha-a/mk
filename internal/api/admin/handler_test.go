@@ -566,6 +566,48 @@ func TestSuspendUser_NoInvalidatorIsNoop(t *testing.T) {
 		"invalidator 未配線でも core suspend 動作は止まらない")
 }
 
+// #1759: suspend / delete-account は対象 user の AP Delete を、unsuspend は
+// Undo(Delete) を federation hook 経由で配信する。
+type stubUserModFed struct {
+	deleted  []string
+	restored []string
+}
+
+func (s *stubUserModFed) OnUserDeleted(u *model.User)  { s.deleted = append(s.deleted, u.ID) }
+func (s *stubUserModFed) OnUserRestored(u *model.User) { s.restored = append(s.restored, u.ID) }
+
+func TestSuspendUser_DeliversAPDelete(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+	fed := &stubUserModFed{}
+	h.SetUserModerationFederationHook(fed)
+	rec := doPost(h.SuspendUser, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"u1"}, fed.deleted)
+	assert.Empty(t, fed.restored)
+}
+
+func TestUnsuspendUser_DeliversUndoDelete(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", IsSuspended: true}
+	fed := &stubUserModFed{}
+	h.SetUserModerationFederationHook(fed)
+	rec := doPost(h.UnsuspendUser, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"u1"}, fed.restored)
+	assert.Empty(t, fed.deleted)
+}
+
+func TestDeleteAccount_DeliversAPDelete(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+	fed := &stubUserModFed{}
+	h.SetUserModerationFederationHook(fed)
+	rec := doPost(h.DeleteAccount, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"u1"}, fed.deleted)
+}
+
 // SuspendUser が target を見つけられない (= UpdateUser 前に NotFound) と
 // invalidate は呼ばない。404 を返した時点で cache に target の entry が
 // 存在する保証もないので、空打ちを避ける。

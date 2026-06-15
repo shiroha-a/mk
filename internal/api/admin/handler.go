@@ -151,6 +151,27 @@ type Handler struct {
 	// するために使う (#1407 review)。未配線時は最大 cacheTTL (5min) 待ちで
 	// stale な配送可否判定が残るが security regression ではないため optional。
 	instanceSuspendInvalidator InstanceSuspendCacheInvalidator
+	// userModerationFed は suspend / delete-account / unsuspend 時に対象 local
+	// user の AP Delete / Undo(Delete) を remote instances へ配信する (#1759)。
+	// nil なら連合副作用は no-op (security guard / DB 更新には影響しない)。
+	userModerationFed UserModerationFederationHook
+}
+
+// UserModerationFederationHook delivers AP Delete / Undo(Delete) for a local
+// user's actor to remote instances when the account is suspended, deleted, or
+// unsuspended (#1759). Implemented by core/federation.UserModerationDeliveryHook.
+// nil disables the federation side-effect.
+type UserModerationFederationHook interface {
+	// OnUserDeleted は suspend / delete-account で Delete(actor) を配信する。
+	OnUserDeleted(user *model.User)
+	// OnUserRestored は unsuspend で Undo(Delete) を配信する。
+	OnUserRestored(user *model.User)
+}
+
+// SetUserModerationFederationHook wires the AP delivery hook used on
+// suspend / delete-account / unsuspend (#1759). nil disables federation.
+func (h *Handler) SetUserModerationFederationHook(hook UserModerationFederationHook) {
+	h.userModerationFed = hook
 }
 
 // InstanceSuspendCacheInvalidator drops the cached delivery-suspend decision
@@ -987,6 +1008,11 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	// 凍結直後の auth bypass 防止 (#965)。target の全 token cache entry を
 	// 即時削除し、middleware 通過後の P2 gate (#964) に依存せず確実に弾く。
 	h.invalidateUserTokenCache(req.UserID)
+	// upstream UserSuspendService.suspend: local user なら全 sharedInbox へ
+	// Delete(actor) を配信する (#1759)。best-effort (queue 経由)。
+	if h.userModerationFed != nil {
+		h.userModerationFed.OnUserDeleted(user)
+	}
 	h.logUserActionWithUser(c, moderationlog.LogSuspend, user)
 	return c.NoContent(http.StatusNoContent)
 }
@@ -1013,6 +1039,11 @@ func (h *Handler) UnsuspendUser(c echo.Context) error {
 	// P2 gate (#964) が cache hit 経路でも fire してしまい、解除済 user が
 	// 認証通らない逆方向の bug になる。
 	h.invalidateUserTokenCache(req.UserID)
+	// upstream UserSuspendService.unsuspend: local user なら全 sharedInbox へ
+	// Undo(Delete) を配信する (#1759)。
+	if h.userModerationFed != nil {
+		h.userModerationFed.OnUserRestored(user)
+	}
 	h.logUserActionWithUser(c, moderationlog.LogUnsuspend, user)
 	return c.NoContent(http.StatusNoContent)
 }

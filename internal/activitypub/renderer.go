@@ -1068,6 +1068,50 @@ func (r *Renderer) RenderDelete(author *model.User, noteURI string) *Delete {
 	return d
 }
 
+// RenderDeleteActor renders a Delete activity whose object is a local user's own
+// actor URI, used when an account is suspended or deleted (#1759). Mirrors
+// upstream ApRendererService.renderDelete(genLocalUserUri(user.id), user): both
+// actor と object が当該ユーザーの URI 文字列で、Tombstone ではなく bare IRI を
+// object に置く (note の Delete と違い actor delete は Tombstone を使わない)。
+func (r *Renderer) RenderDeleteActor(user *model.User) *Delete {
+	uri := r.urls.UserURI(user.ID)
+	d := &Delete{
+		Activity: Activity{
+			Object: Object{
+				ID:   uri + "#Delete",
+				Type: "Delete",
+			},
+			Actor: uri,
+			To:    []string{Public},
+		},
+		Object: uri,
+	}
+	AddContext(d)
+	return d
+}
+
+// RenderUndoDeleteActor wraps RenderDeleteActor in an Undo, used when a suspended
+// account is unsuspended (#1759). Mirrors upstream renderUndo(renderDelete(...))。
+// 内側 Delete は @context を持たない (Undo 側のみ context を付ける)。
+func (r *Renderer) RenderUndoDeleteActor(user *model.User) *Undo {
+	uri := r.urls.UserURI(user.ID)
+	inner := r.RenderDeleteActor(user)
+	inner.Context = nil // inner activity は @context を持たない
+	u := &Undo{
+		Activity: Activity{
+			Object: Object{
+				ID:   uri + "#Undo-Delete",
+				Type: "Undo",
+			},
+			Actor: uri,
+			To:    []string{Public},
+		},
+		Object: inner,
+	}
+	AddContext(u)
+	return u
+}
+
 // RenderFlag returns a Flag activity that forwards an abuse report to the
 // origin instance of a remote user. Mirrors upstream ApRendererService
 // renderFlag — the actor is the local instance's system account (to

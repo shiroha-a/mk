@@ -643,6 +643,33 @@ func TestRenderer_RenderDelete(t *testing.T) {
 	assert.Contains(t, d.To, Public)
 }
 
+// #1759: actor delete は object も actor も当該 user の URI 文字列 (Tombstone 不使用)。
+func TestRenderer_RenderDeleteActor(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "alice", Username: "alice"}
+	d := r.RenderDeleteActor(u)
+	assert.Equal(t, "Delete", d.Type)
+	assert.Equal(t, "https://example.com/users/alice", d.Actor)
+	assert.Equal(t, "https://example.com/users/alice#Delete", d.ID)
+	assert.Equal(t, "https://example.com/users/alice", d.Object)
+	assert.Contains(t, d.To, Public)
+	assert.NotEmpty(t, d.Context, "top-level Delete carries @context")
+}
+
+// #1759: unsuspend の Undo(Delete)。inner Delete は @context を持たない。
+func TestRenderer_RenderUndoDeleteActor(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "alice", Username: "alice"}
+	un := r.RenderUndoDeleteActor(u)
+	assert.Equal(t, "Undo", un.Type)
+	assert.Equal(t, "https://example.com/users/alice", un.Actor)
+	assert.NotEmpty(t, un.Context)
+	inner, ok := un.Object.(*Delete)
+	require.True(t, ok)
+	assert.Equal(t, "Delete", inner.Type)
+	assert.Nil(t, inner.Context, "inner Delete must not carry @context")
+}
+
 func TestRenderer_RenderPerson_Bot(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "bot", IsBot: true}
