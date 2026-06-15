@@ -30,6 +30,14 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// upstream reset-password.ts は rootUserId===target で 'cannot reset password
+	// of root' を投げる。mk-go は他の admin guard (suspend-user) と揃えて root を
+	// ACCESS_DENIED で弾く (#1539)。userRepo 未配線時は guard を skip。
+	if h.userRepo != nil {
+		if user, err := h.userRepo.FindByID(req.UserID); err == nil && user.IsRoot {
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot reset the password of a root account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		}
+	}
 	if sent := h.sendPasswordResetEmail(req.UserID); sent {
 		h.logUserAction(c, moderationlog.LogResetPassword, req.UserID)
 		return c.JSON(http.StatusOK, map[string]any{"sent": true})

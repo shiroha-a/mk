@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/smtp"
 )
 
@@ -19,8 +20,11 @@ func (h *Handler) SendEmail(c echo.Context) error {
 		Subject string `json:"subject"`
 		Text    string `json:"text"`
 	}
-	if err := c.Bind(&req); err != nil || req.To == "" {
-		return c.NoContent(http.StatusNoContent)
+	// upstream send-email.ts は paramDef required:['to','subject','text']。欠落は
+	// schema validation 段で 400 になるため、いずれか欠ければ INVALID_PARAM を返す
+	// (旧 mk-go は to のみ確認し subject/text 欠落でも 204 だった、#1539)。
+	if err := c.Bind(&req); err != nil || req.To == "" || req.Subject == "" || req.Text == "" {
+		return apierr.JSONInvalidParam(c)
 	}
 	if h.metaRepo != nil {
 		sender := smtp.SubjectBodySenderFromMeta(h.metaRepo, h.smtpProxyURL)
