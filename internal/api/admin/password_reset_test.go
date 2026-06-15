@@ -90,6 +90,15 @@ func TestResetPasswordAdmin_Success(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "password")
 }
 
+// #1539: root アカウントのパスワードはリセットできない (upstream root guard)。
+func TestResetPasswordAdmin_RootRejected(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["root1"] = &model.User{ID: "root1", Username: "admin", IsRoot: true}
+	rec := doPost(h.ResetPassword, `{"userId":"root1"}`, adminUser)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+}
+
 func TestResetPasswordAdmin_VerifiedEmailSendsResetLink(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "testuser"}

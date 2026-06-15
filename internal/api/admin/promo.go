@@ -15,11 +15,13 @@ func (h *Handler) PromoCreate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	var req struct {
-		NoteID    string `json:"noteId"`
-		ExpiresAt int64  `json:"expiresAt"`
+		NoteID string `json:"noteId"`
+		// upstream promo/create.ts は required:['noteId','expiresAt']。欠落を 0 (=epoch)
+		// で保存しないよう pointer で受け、nil を弾く (#1539)。
+		ExpiresAt *int64 `json:"expiresAt"`
 	}
-	if err := c.Bind(&req); err != nil || req.NoteID == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	if err := c.Bind(&req); err != nil || req.NoteID == "" || req.ExpiresAt == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId and expiresAt are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
 	// noteFinder 未配線時は visibility 検証ができないため fail-closed で
@@ -60,7 +62,7 @@ func (h *Handler) PromoCreate(c echo.Context) error {
 
 	promo := &model.PromoNote{
 		NoteID:    req.NoteID,
-		ExpiresAt: time.UnixMilli(req.ExpiresAt),
+		ExpiresAt: time.UnixMilli(*req.ExpiresAt),
 		UserID:    targetUserID,
 	}
 	if err := h.promoNoteRepo.Create(promo); err != nil {
