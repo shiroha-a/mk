@@ -121,6 +121,54 @@ func TestDeleteService_FederationHookInvoked(t *testing.T) {
 	assert.Equal(t, "n1", hook.note.ID)
 }
 
+// recordingModeratorDeleteHook captures deleteNote moderation-log hook firings.
+type recordingModeratorDeleteHook struct {
+	calls       int
+	moderatorID string
+	note        *model.Note
+	author      *model.User
+}
+
+func (h *recordingModeratorDeleteHook) OnModeratorNoteDeleted(moderatorID string, n *model.Note, a *model.User) {
+	h.calls++
+	h.moderatorID = moderatorID
+	h.note = n
+	h.author = a
+}
+
+// #1765: moderator が他人の note を削除したとき deleteNote modlog hook が発火する。
+func TestDeleteService_ModeratorDeleteHook_OtherUsersNote(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author1"}
+	svc := note.NewDeleteService(noteRepo)
+	hook := &recordingModeratorDeleteHook{}
+	svc.SetModeratorDeleteHook(hook)
+
+	require.NoError(t, svc.DeleteAs(&model.User{ID: "mod1"}, true, "n1"))
+	assert.Equal(t, 1, hook.calls)
+	assert.Equal(t, "mod1", hook.moderatorID)
+	require.NotNil(t, hook.note)
+	assert.Equal(t, "n1", hook.note.ID)
+	require.NotNil(t, hook.author)
+	assert.Equal(t, "author1", hook.author.ID)
+}
+
+// 自分の note 削除 / 著者本人の削除 (isModerator=false) では発火しない。
+func TestDeleteService_ModeratorDeleteHook_NotFiredForSelfOrAuthor(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["own"] = &model.Note{ID: "own", UserID: "mod1"}
+	noteRepo.Notes["n2"] = &model.Note{ID: "n2", UserID: "user2"}
+	svc := note.NewDeleteService(noteRepo)
+	hook := &recordingModeratorDeleteHook{}
+	svc.SetModeratorDeleteHook(hook)
+
+	// moderator が自分の note を削除 (note.userId == actor) → 発火しない。
+	require.NoError(t, svc.DeleteAs(&model.User{ID: "mod1"}, true, "own"))
+	// 著者本人の削除 (Delete = isModerator false) → 発火しない。
+	require.NoError(t, svc.Delete(&model.User{ID: "user2"}, "n2"))
+	assert.Equal(t, 0, hook.calls)
+}
+
 // recordingDeleteIndexHook captures index hook calls so we can check the
 // search-index hookup wired into DeleteService.
 type recordingDeleteIndexHook struct {

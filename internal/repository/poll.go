@@ -24,10 +24,10 @@ type PollRepository interface {
 	MarkNotified(noteID string, t time.Time) error
 	// ListRecommendation returns note ids of local public unexpired polls the
 	// viewer has not authored, not voted on, and whose author is not in
-	// mutedUserIDs, optionally excluding polls posted to excludeChannelIDs.
-	// Ordered by noteId DESC, paginated by limit/offset. Mirrors upstream
-	// notes/polls/recommendation (#1538).
-	ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error)
+	// mutedUserIDs. When excludeChannels is true, channel polls are excluded
+	// entirely (channelId IS NULL). Ordered by noteId DESC, paginated by
+	// limit/offset. Mirrors upstream notes/polls/recommendation (#1538, #1765).
+	ListRecommendation(viewerID string, mutedUserIDs []string, excludeChannels bool, limit, offset int) ([]string, error)
 }
 
 type pollRepository struct {
@@ -92,7 +92,7 @@ func (r *pollRepository) MarkNotified(noteID string, t time.Time) error {
 // not already voted on (NOT EXISTS poll_vote), authored by a non-muted user,
 // optionally excluding given channels; ordered by noteId DESC. OR-conditions are
 // parenthesized so they bind correctly against the other ANDed clauses.
-func (r *pollRepository) ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error) {
+func (r *pollRepository) ListRecommendation(viewerID string, mutedUserIDs []string, excludeChannels bool, limit, offset int) ([]string, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -105,8 +105,10 @@ func (r *pollRepository) ListRecommendation(viewerID string, mutedUserIDs, exclu
 	if len(mutedUserIDs) > 0 {
 		q = q.Where(`"userId" NOT IN ?`, mutedUserIDs)
 	}
-	if len(excludeChannelIDs) > 0 {
-		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, excludeChannelIDs)
+	if excludeChannels {
+		// upstream recommendation.ts:91-93 は excludeChannels=true で
+		// channelId IS NULL (= 全 channel poll 除外) を適用する。
+		q = q.Where(`"channelId" IS NULL`)
 	}
 	q = q.Order(`"noteId" DESC`).Limit(limit)
 	if offset > 0 {

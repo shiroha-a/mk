@@ -257,7 +257,7 @@ func TestDraftsCreate_NoteDraftLimitExceeded(t *testing.T) {
 	}})
 	rec := postDraft(h.DraftsCreate, `{"text":"third"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "TOO_MANY_NOTE_DRAFTS")
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_DRAFTS")
 }
 
 func TestDraftsCreate_NoteDraftLimit_PassesUnderLimit(t *testing.T) {

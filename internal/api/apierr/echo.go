@@ -106,7 +106,7 @@ func JSONTooManyUsers(c echo.Context) error {
 	return c.JSON(http.StatusBadRequest, TooManyUsers())
 }
 
-// JSONTooManyNoteDrafts writes a 400 TOO_MANY_NOTE_DRAFTS response.
+// JSONTooManyNoteDrafts writes a 400 TOO_MANY_DRAFTS response.
 func JSONTooManyNoteDrafts(c echo.Context) error {
 	return c.JSON(http.StatusBadRequest, TooManyNoteDrafts())
 }

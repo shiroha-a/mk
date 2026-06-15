@@ -506,9 +506,11 @@ func (h *Handler) ThreadMutingDelete(c echo.Context) error {
 func (h *Handler) PollsRecommendation(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit           int      `json:"limit"`
-		Offset          int      `json:"offset"`
-		ExcludeChannels []string `json:"excludeChannels"`
+		Limit  int `json:"limit"`
+		Offset int `json:"offset"`
+		// upstream recommendation.ts:35 は excludeChannels を boolean で受け、
+		// true のとき全 channel poll を除外する (#1765。以前は []string だった)。
+		ExcludeChannels bool `json:"excludeChannels"`
 	}
 	_ = c.Bind(&req)
 	if h.pollRepo == nil || h.noteRepo == nil {

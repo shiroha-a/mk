@@ -147,7 +147,7 @@ func TestJSONCountLimitHelpers(t *testing.T) {
 		{"TooManyClipNotes", JSONTooManyClipNotes, "TOO_MANY_CLIP_NOTES", UUIDTooManyClipNotes},
 		{"TooManyUserLists", JSONTooManyUserLists, "TOO_MANY_USERLISTS", UUIDTooManyUserLists},
 		{"TooManyUsers", JSONTooManyUsers, "TOO_MANY_USERS", UUIDTooManyUsers},
-		{"TooManyNoteDrafts", JSONTooManyNoteDrafts, "TOO_MANY_NOTE_DRAFTS", UUIDTooManyNoteDrafts},
+		{"TooManyNoteDrafts", JSONTooManyNoteDrafts, "TOO_MANY_DRAFTS", UUIDTooManyNoteDrafts},
 		{"TooManyMutedWords", JSONTooManyMutedWords, "TOO_MANY_MUTED_WORDS", UUIDTooManyMutedWords},
 		{"ExceededLimitOfCreateInviteCode", JSONExceededLimitOfCreateInviteCode, "EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE", UUIDExceededLimitOfCreateInviteCode},
 		{"MaxFileSizeExceeded", JSONMaxFileSizeExceeded, "MAX_FILE_SIZE_EXCEEDED", UUIDMaxFileSizeExceeded},

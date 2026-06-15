@@ -225,7 +225,7 @@ func TestCountLimitHelpers(t *testing.T) {
 		{"TooManyClipNotes", TooManyClipNotes, "TOO_MANY_CLIP_NOTES", UUIDTooManyClipNotes},
 		{"TooManyUserLists", TooManyUserLists, "TOO_MANY_USERLISTS", UUIDTooManyUserLists},
 		{"TooManyUsers", TooManyUsers, "TOO_MANY_USERS", UUIDTooManyUsers},
-		{"TooManyNoteDrafts", TooManyNoteDrafts, "TOO_MANY_NOTE_DRAFTS", UUIDTooManyNoteDrafts},
+		{"TooManyNoteDrafts", TooManyNoteDrafts, "TOO_MANY_DRAFTS", UUIDTooManyNoteDrafts},
 		{"TooManyMutedWords", TooManyMutedWords, "TOO_MANY_MUTED_WORDS", UUIDTooManyMutedWords},
 		{"ExceededLimitOfCreateInviteCode", ExceededLimitOfCreateInviteCode, "EXCEEDED_LIMIT_OF_CREATE_INVITE_CODE", UUIDExceededLimitOfCreateInviteCode},
 		{"MaxFileSizeExceeded", MaxFileSizeExceeded, "MAX_FILE_SIZE_EXCEEDED", UUIDMaxFileSizeExceeded},

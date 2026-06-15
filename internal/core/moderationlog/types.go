@@ -36,6 +36,9 @@ const (
 	LogUnsetUserAvatar LogType = "unsetUserAvatar"
 	LogUnsetUserBanner LogType = "unsetUserBanner"
 
+	// Notes
+	LogDeleteNote LogType = "deleteNote"
+
 	// Roles
 	LogCreateRole   LogType = "createRole"
 	LogUpdateRole   LogType = "updateRole"

@@ -19,6 +19,7 @@ func TestLogTypeValues(t *testing.T) {
 		{LogDeleteAccount, "deleteAccount"},
 		{LogUnsetUserAvatar, "unsetUserAvatar"},
 		{LogUnsetUserBanner, "unsetUserBanner"},
+		{LogDeleteNote, "deleteNote"},
 		{LogCreateRole, "createRole"},
 		{LogUpdateRole, "updateRole"},
 		{LogDeleteRole, "deleteRole"},

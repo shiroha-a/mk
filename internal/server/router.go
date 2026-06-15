@@ -2232,6 +2232,8 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetEmailSender(miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp))
 	modLogService := coremodlog.New(modLogRepo, idGen)
 	adminHandler.SetModLogService(modLogService)
+	// #1765: moderator が他人の note を削除したとき deleteNote moderation log を残す。
+	noteDeleteService.SetModeratorDeleteHook(coremodlog.NewNoteDeleteHook(modLogService))
 	// announcements (別パッケージの Handler) も AdminCreate/Update/Delete で
 	// modlog を書くため同じ service instance を共有する。
 	announcementHandler.SetModLogService(modLogService)

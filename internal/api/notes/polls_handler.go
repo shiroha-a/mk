@@ -30,8 +30,10 @@ func (h *Handler) PollsVote(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "ecafbd2e-c283-4d6d-aecb-1a0a33b75396"))
 		case errors.Is(err, poll.ErrNoPoll):
 			// upstream vote.ts は poll を持たない note への投票に対し NO_SUCH_NOTE
-			// でなく専用の NO_POLL を返す (#1538)。
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_POLL", "The note has no poll.", "5f979967-52d9-4314-a911-1c673727f92f"))
+			// でなく専用の NO_POLL を返す (#1538)。HTTP status は upstream noPoll が
+			// httpStatusCode 未指定 = kind 'client' default = 400 のため 400 に
+			// 揃える (#1765。以前は NO_SUCH_* 慣習で 404 を返していた)。
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_POLL", "The note has no poll.", "5f979967-52d9-4314-a911-1c673727f92f"))
 		case errors.Is(err, poll.ErrNoteNotVisible):
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, poll.ErrYouHaveBeenBlocked):

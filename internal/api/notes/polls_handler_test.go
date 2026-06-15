@@ -126,7 +126,8 @@ func TestPollsVote_NoPoll(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/polls/vote", `{"noteId":"n1","choice":0}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.PollsVote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// upstream noPoll は httpStatusCode 未指定 = 400 (#1765)。
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// upstream vote.ts は poll を持たない note に専用の NO_POLL を返す (#1538)。
 	assert.Contains(t, rec.Body.String(), "NO_POLL")
 	assert.Contains(t, rec.Body.String(), "5f979967-52d9-4314-a911-1c673727f92f")

@@ -414,11 +414,13 @@ func TooManyUsers() map[string]any {
 	return Error("TOO_MANY_USERS", "You can not push users any more.", UUIDTooManyUsers)
 }
 
-// TooManyNoteDrafts returns the upstream `NoteDraftService` の IdentifiableError
-// shape (notes/drafts/create)。upstream は code が無く message のみだが、mk-go は
-// `TOO_MANY_NOTE_DRAFTS` という code を発番して frontend が分岐できるようにする。
+// TooManyNoteDrafts returns the notes/drafts/create draft-limit error. upstream
+// drafts/create.ts:121-125 の tooManyDrafts は code='TOO_MANY_DRAFTS' / id=9ee33bbe
+// で、code・id とも upstream に揃える (#1765。以前は「upstream に code が無い」という
+// 誤った前提で TOO_MANY_NOTE_DRAFTS を独自発番しており、drop-in frontend が
+// 認識できなかった)。
 func TooManyNoteDrafts() map[string]any {
-	return Error("TOO_MANY_NOTE_DRAFTS", "Too many drafts.", UUIDTooManyNoteDrafts)
+	return Error("TOO_MANY_DRAFTS", "Too many drafts.", UUIDTooManyNoteDrafts)
 }
 
 // TooManyMutedWords returns the upstream `tooManyMutedWords` shape (i/update mutedWords)。

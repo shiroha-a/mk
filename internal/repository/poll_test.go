@@ -249,18 +249,18 @@ func TestPollRepository_ListRecommendation(t *testing.T) {
 	require.NoError(t, testDB.Create(&model.PollVote{ID: "pv_lr_1", UserID: viewer.ID, NoteID: "p_lr_voted", Choice: 0}).Error)
 	t.Cleanup(func() { testDB.Exec(`DELETE FROM "poll_vote" WHERE id = ?`, "pv_lr_1") })
 
-	ids, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, []string{ch}, 10, 0)
+	ids, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, true, 10, 0)
 	require.NoError(t, err)
 	// good1/good2 のみ (self/followers/expired/remote/muted/channel/voted は除外)、noteId DESC。
 	assert.Equal(t, []string{"p_lr_good2", "p_lr_good1"}, ids)
 
-	// excludeChannels 無しなら channel poll も含まれる。
-	ids2, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, nil, 10, 0)
+	// excludeChannels=false なら channel poll も含まれる。
+	ids2, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, false, 10, 0)
 	require.NoError(t, err)
 	assert.Contains(t, ids2, "p_lr_chan")
 
 	// limit/offset。
-	page, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, []string{ch}, 1, 1)
+	page, err := repo.ListRecommendation(viewer.ID, []string{muted.ID}, true, 1, 1)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"p_lr_good1"}, page)
 }

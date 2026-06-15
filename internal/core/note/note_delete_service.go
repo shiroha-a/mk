@@ -47,15 +47,24 @@ type DeleteNoteStreamHook interface {
 	OnNoteDeleted(noteID string, deletedAt time.Time)
 }
 
+// ModeratorDeleteHook is invoked when a moderator deletes another user's note
+// so the action can be written to the moderation log (upstream
+// NoteDeleteService writes a `deleteNote` moderation log when
+// `deleter && note.userId !== deleter.id`, #1765)。失敗はベストエフォート。
+type ModeratorDeleteHook interface {
+	OnModeratorNoteDeleted(moderatorID string, note *model.Note, author *model.User)
+}
+
 // DeleteService provides note deletion logic.
 type DeleteService struct {
-	noteRepo       repository.NoteRepository
-	userRepo       repository.UserRepository
-	federationHook DeleteFederationHook
-	indexHook      IndexHook
-	chartHook      DeleteChartHook
-	timelineHook   DeleteTimelineHook
-	noteStreamHook DeleteNoteStreamHook
+	noteRepo            repository.NoteRepository
+	userRepo            repository.UserRepository
+	federationHook      DeleteFederationHook
+	indexHook           IndexHook
+	chartHook           DeleteChartHook
+	timelineHook        DeleteTimelineHook
+	noteStreamHook      DeleteNoteStreamHook
+	moderatorDeleteHook ModeratorDeleteHook
 }
 
 // NewDeleteService creates a new DeleteService.
@@ -92,6 +101,13 @@ func (s *DeleteService) SetChartHook(h DeleteChartHook) {
 // Redis fanout timelines can be purged of the note ID (#379)。
 func (s *DeleteService) SetTimelineHook(h DeleteTimelineHook) {
 	s.timelineHook = h
+}
+
+// SetModeratorDeleteHook attaches a ModeratorDeleteHook invoked when a
+// moderator deletes another user's note so the action is written to the
+// moderation log (#1765)。
+func (s *DeleteService) SetModeratorDeleteHook(h ModeratorDeleteHook) {
+	s.moderatorDeleteHook = h
 }
 
 // SetNoteStreamHook attaches a DeleteNoteStreamHook invoked after Delete so
@@ -168,6 +184,12 @@ func (s *DeleteService) DeleteAs(actor *model.User, isModerator bool, noteID str
 	// クライアントへ即時反映する (#700)。失敗はベストエフォート。
 	if s.noteStreamHook != nil {
 		s.noteStreamHook.OnNoteDeleted(note.ID, deletedAt)
+	}
+	// moderator が他人の note を削除したときは moderation log に deleteNote を
+	// 残す (upstream NoteDeleteService の deleter && note.userId !== deleter.id、
+	// #1765)。自分の note 削除・federation 経路 (isModerator=false) では発火しない。
+	if isModerator && note.UserID != actor.ID && s.moderatorDeleteHook != nil {
+		s.moderatorDeleteHook.OnModeratorNoteDeleted(actor.ID, note, author)
 	}
 	return nil
 }

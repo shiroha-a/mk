@@ -2923,19 +2923,16 @@ var pollMockVoted = map[string]struct{}{}
 func MockPollVoted(userID, noteID string) { pollMockVoted[userID+":"+noteID] = struct{}{} }
 
 // ListRecommendation mirrors the live query in-memory: local public unexpired
-// polls not authored by / voted by the viewer, author not muted, channel not
-// excluded; ordered by noteId DESC; limit/offset applied.
-func (m *MockPollRepository) ListRecommendation(viewerID string, mutedUserIDs, excludeChannelIDs []string, limit, offset int) ([]string, error) {
+// polls not authored by / voted by the viewer, author not muted; when
+// excludeChannels is true all channel polls are dropped; ordered by noteId
+// DESC; limit/offset applied.
+func (m *MockPollRepository) ListRecommendation(viewerID string, mutedUserIDs []string, excludeChannels bool, limit, offset int) ([]string, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	muted := make(map[string]struct{}, len(mutedUserIDs))
 	for _, id := range mutedUserIDs {
 		muted[id] = struct{}{}
-	}
-	excl := make(map[string]struct{}, len(excludeChannelIDs))
-	for _, id := range excludeChannelIDs {
-		excl[id] = struct{}{}
 	}
 	now := time.Now()
 	var ids []string
@@ -2958,10 +2955,8 @@ func (m *MockPollRepository) ListRecommendation(viewerID string, mutedUserIDs, e
 		if _, ok := muted[p.UserID]; ok {
 			continue
 		}
-		if p.ChannelID != nil {
-			if _, ok := excl[*p.ChannelID]; ok {
-				continue
-			}
+		if excludeChannels && p.ChannelID != nil {
+			continue
 		}
 		ids = append(ids, p.NoteID)
 	}
