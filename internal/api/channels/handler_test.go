@@ -170,6 +170,70 @@ func TestShow_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// #1540: show は detailed=true 相当で pinnedNotes (展開済 Note[]) を pinnedNoteIds 順で返す。
+func TestShow_DetailedPinnedNotes(t *testing.T) {
+	h, repo, _, noteRepo := newHandler(t)
+	h.SetPinnedNoteRepo(noteRepo)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice"}
+	noteRepo.Notes["n2"] = &model.Note{ID: "n2", UserID: "alice"}
+	// shapetest の createdAt (aidx 派生) のため channel id は valid aidx を使う。
+	idGen, _ := id.NewGenerator("aidx")
+	cid := idGen.Generate(time.Now())
+	repo.Channels[cid] = &model.Channel{ID: cid, Name: "alpha", PinnedNoteIDs: []string{"n2", "n1"}}
+	c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	pn, ok := resp["pinnedNotes"].([]any)
+	require.True(t, ok, "pinnedNotes must be present")
+	require.Len(t, pn, 2)
+	// pinnedNoteIds の順 (n2, n1) を保つ
+	assert.Equal(t, "n2", pn[0].(map[string]any)["id"])
+	assert.Equal(t, "n1", pn[1].(map[string]any)["id"])
+	shapetest.Assert(t, "Channel", resp) // L3: detailed Channel (pinnedNotes 込み)
+}
+
+// pinnedNotes は detailed では常に存在し、ピン無しでも空配列を返す。
+func TestShow_PinnedNotesEmptyArray(t *testing.T) {
+	h, repo, _, noteRepo := newHandler(t)
+	h.SetPinnedNoteRepo(noteRepo)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha"}
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	require.NoError(t, h.Show(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	pn, ok := resp["pinnedNotes"].([]any)
+	require.True(t, ok)
+	assert.Empty(t, pn)
+}
+
+// #1540: viewer がある時 hasUnreadNote:false を必ず付ける (後方互換)。
+func TestShow_HasUnreadNoteWhenViewer(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha"}
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Show(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	val, ok := resp["hasUnreadNote"]
+	require.True(t, ok, "hasUnreadNote must be present when viewer exists")
+	assert.Equal(t, false, val)
+}
+
+// viewer が無い時は hasUnreadNote を出さない (upstream は me 無しで省略)。
+func TestShow_NoHasUnreadNoteWithoutViewer(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha"}
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	require.NoError(t, h.Show(c))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, ok := resp["hasUnreadNote"]
+	assert.False(t, ok, "hasUnreadNote must be absent without viewer")
+}
+
 // --- Update ----------------------------------------------------------------
 
 func TestUpdate_Success(t *testing.T) {
