@@ -135,6 +135,10 @@ type Service struct {
 	// (#1541)。nil の場合は custom emoji を検証せず `:name:` をそのまま採用する
 	// (legacy/test path)。
 	emojiRepo repository.EmojiRepository
+	// approvalRepo: 1-on-1 DM の chatApproval bypass に使う (#1748)。相手が過去に
+	// 自分へ送ってきている (otherApprovedMe) なら chatScope チェックを skip し、
+	// 送信後に自分→相手の approval を挿入する。nil なら従来どおり scope のみで判定。
+	approvalRepo repository.ChatApprovalRepository
 }
 
 // ChatInvitationNotifier records a 'chatRoomInvitationReceived' notification on
@@ -153,6 +157,14 @@ func (s *Service) SetInvitationNotifier(n ChatInvitationNotifier) {
 // reactions against the local emoji table (#1541). nil disables the check.
 func (s *Service) SetEmojiRepo(r repository.EmojiRepository) {
 	s.emojiRepo = r
+}
+
+// SetApprovalRepo wires the chat-approval repository so CreateMessageToUser can
+// apply the upstream chatApproval bypass: skip the chatScope check when the
+// recipient previously messaged the sender, and record an approval after a
+// successful send (#1748). nil disables the bypass (scope-only behaviour).
+func (s *Service) SetApprovalRepo(r repository.ChatApprovalRepository) {
+	s.approvalRepo = r
 }
 
 // NewService constructs a chat Service.
@@ -310,6 +322,27 @@ func (s *Service) canChat(sender, recipient *model.User) error {
 	return nil
 }
 
+// recordChatApproval records a (fromUserID -> toUserID) chat approval after a
+// successful 1-on-1 send so the recipient can later reply regardless of the
+// sender's chatScope (upstream ChatService.createMessageToUser の送信後 approval
+// 挿入)。冪等: 既に存在すれば挿入しない。best-effort で error はログのみ (#1748)。
+func (s *Service) recordChatApproval(fromUserID, toUserID string) {
+	if s.approvalRepo == nil {
+		return
+	}
+	// iApprovedOther: 自分が既に相手を許可済みなら重複挿入しない。
+	if ok, err := s.approvalRepo.Exists(fromUserID, toUserID); err != nil || ok {
+		return
+	}
+	if err := s.approvalRepo.Create(&model.ChatApproval{
+		ID:      s.idGen.Generate(time.Now()),
+		UserID:  fromUserID,
+		OtherID: toUserID,
+	}); err != nil {
+		slog.Warn("chat: failed to record chat approval", "from", fromUserID, "to", toUserID, "err", err)
+	}
+}
+
 // --- Message lifecycle ---
 
 // CreateMessageToUser persists a direct-message row and fires the
@@ -323,7 +356,16 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 	if fromUserID == "" || toUserID == "" {
 		return nil, ErrInvalidTarget
 	}
-	if s.userRepo != nil {
+	// upstream は scope チェックの前に chatApprovals を見て、相手 (toUser) が過去に
+	// 自分 (fromUser) へ送ってきている (otherApprovedMe) 場合は chatScope を bypass
+	// する (#1748)。approvalRepo 未配線なら従来どおり scope のみで判定する。
+	otherApprovedMe := false
+	if s.approvalRepo != nil {
+		if ok, err := s.approvalRepo.Exists(toUserID, fromUserID); err == nil {
+			otherApprovedMe = ok
+		}
+	}
+	if !otherApprovedMe && s.userRepo != nil {
 		recipient, err := s.userRepo.FindByID(toUserID)
 		if err == nil {
 			sender, err := s.userRepo.FindByID(fromUserID)
@@ -362,6 +404,10 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 	if err := s.repo.CreateMessage(msg); err != nil {
 		return nil, fmt.Errorf("create user message: %w", err)
 	}
+	// upstream は送信後、自分が相手をまだ許可していなければ (iApprovedOther でなければ)
+	// 自分→相手の approval を挿入する (= 以降、相手は自分へ scope に依らず返信できる)。
+	// best-effort: 失敗してもメッセージ送信は成功扱い (#1748)。
+	s.recordChatApproval(fromUserID, toUserID)
 	if s.publisher != nil {
 		s.publisher.PublishUserMessage(ctx, fromUserID, toUserID, EventMessage, s.packMessageStream(msg))
 	}
@@ -629,7 +675,15 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 			return existing, nil
 		}
 	}
-	if s.userRepo != nil {
+	// inbound でも chatApproval bypass を適用する: local recipient が過去に remote
+	// sender へ送っていれば (otherApprovedMe) scope チェックを skip する (#1748)。
+	otherApprovedMe := false
+	if s.approvalRepo != nil {
+		if ok, err := s.approvalRepo.Exists(toUserID, fromUser.ID); err == nil {
+			otherApprovedMe = ok
+		}
+	}
+	if !otherApprovedMe && s.userRepo != nil {
 		if recipient, err := s.userRepo.FindByID(toUserID); err == nil && recipient.IsLocal() {
 			if err := s.canChat(fromUser, recipient); err != nil {
 				return nil, err
@@ -662,6 +716,9 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 	if err := s.repo.CreateMessage(msg); err != nil {
 		return nil, fmt.Errorf("create AP message: %w", err)
 	}
+	// inbound 受信後、remote sender -> local recipient の approval を記録する
+	// (= 以降 local recipient は scope に依らず remote sender へ返信できる、#1748)。
+	s.recordChatApproval(fromUser.ID, toUserID)
 	if s.publisher != nil {
 		s.publisher.PublishUserMessage(ctx, fromUser.ID, toUserID, EventMessage, packMessage(msg))
 	}
