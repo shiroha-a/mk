@@ -36,3 +36,16 @@ type ModerationLog struct {
 }
 
 func (ModerationLog) TableName() string { return "moderation_log" }
+
+// ModerationLogFilter parameterises ModerationLogRepository.List, mirroring
+// upstream admin/show-moderation-logs paramDef (#1539). SinceID/UntilID are the
+// id-cursor (sinceDate/untilDate are normalized to ids by the handler); Type /
+// UserID narrow by log type / actor; Search is an info::text ILIKE match.
+type ModerationLogFilter struct {
+	Limit   int
+	SinceID string
+	UntilID string
+	Type    string
+	UserID  string
+	Search  string
+}

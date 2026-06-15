@@ -6270,18 +6270,35 @@ func (m *MockModerationLogRepository) CallCounts() (create, createMany int) {
 	return m.CreateCalls, m.CreateManyCalls
 }
 
-func (m *MockModerationLogRepository) List(limit, offset int) ([]*model.ModerationLog, error) {
+func (m *MockModerationLogRepository) List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 10
 	}
-	if offset >= len(m.Logs) {
-		return nil, nil
+	out := make([]*model.ModerationLog, 0, len(m.Logs))
+	for _, l := range m.Logs {
+		if filter.Type != "" && l.Type != filter.Type {
+			continue
+		}
+		if filter.UserID != "" && l.UserID != filter.UserID {
+			continue
+		}
+		if filter.Search != "" && !strings.Contains(strings.ToLower(string(l.Info)), strings.ToLower(filter.Search)) {
+			continue
+		}
+		if filter.UntilID != "" && l.ID >= filter.UntilID {
+			continue
+		}
+		if filter.SinceID != "" && l.ID <= filter.SinceID {
+			continue
+		}
+		out = append(out, l)
 	}
-	end := min(offset+limit, len(m.Logs))
-	out := make([]*model.ModerationLog, end-offset)
-	copy(out, m.Logs[offset:end])
+	if len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

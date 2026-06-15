@@ -196,14 +196,14 @@ func TestAbuseReportRepository_List_OriginFilter(t *testing.T) {
 
 func TestModerationLogRepository_List_DefaultLimit(t *testing.T) {
 	repo := NewModerationLogRepository(testDB)
-	logs, err := repo.List(0, 0) // limit=0 → default 10
+	logs, err := repo.List(model.ModerationLogFilter{}) // limit=0 → default 10
 	require.NoError(t, err)
 	_ = logs
 }
 
 func TestModerationLogRepository_List_LimitCap(t *testing.T) {
 	repo := NewModerationLogRepository(testDB)
-	logs, err := repo.List(999, 0) // > 100 → capped
+	logs, err := repo.List(model.ModerationLogFilter{Limit: 999}) // > 100 → capped
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(logs), 100)
 }
@@ -232,7 +232,7 @@ func TestModerationLogRepository_CRUD(t *testing.T) {
 	require.NoError(t, repo.Create(log))
 	defer cleanupModLog(t, log.ID)
 
-	logs, err := repo.List(10, 0)
+	logs, err := repo.List(model.ModerationLogFilter{Limit: 10})
 	require.NoError(t, err)
 	assert.NotEmpty(t, logs)
 }
@@ -251,7 +251,7 @@ func TestModerationLogRepository_CreateMany(t *testing.T) {
 	defer cleanupModLog(t, "ml_b2")
 	defer cleanupModLog(t, "ml_b3")
 
-	logs, err := repo.List(100, 0)
+	logs, err := repo.List(model.ModerationLogFilter{Limit: 100})
 	require.NoError(t, err)
 	// 3 件以上ある (他のテストの行も拾う可能性あるが少なくとも 3 件は入っている)
 	var found int
@@ -273,7 +273,7 @@ func TestModerationLogRepository_List_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	repo := NewModerationLogRepository(testDB.WithContext(ctx))
-	_, err := repo.List(10, 0)
+	_, err := repo.List(model.ModerationLogFilter{Limit: 10})
 	assert.Error(t, err)
 }
 
@@ -287,11 +287,45 @@ func TestModerationLogRepository_List_Pagination(t *testing.T) {
 	defer cleanupModLog(t, log1.ID)
 	defer cleanupModLog(t, log2.ID)
 
-	logs, err := repo.List(1, 0)
+	logs, err := repo.List(model.ModerationLogFilter{Limit: 1})
 	require.NoError(t, err)
 	assert.Len(t, logs, 1)
 
-	logs, err = repo.List(10, 1)
+	// #1539: untilId cursor で ml_p2 より前 (= ml_p1) を返す。
+	logs, err = repo.List(model.ModerationLogFilter{Limit: 10, UntilID: "ml_p2"})
 	require.NoError(t, err)
-	assert.NotEmpty(t, logs)
+	require.NotEmpty(t, logs)
+	for _, l := range logs {
+		assert.Less(t, l.ID, "ml_p2")
+	}
+}
+
+// #1539: type / userId / search の絞り込み。
+func TestModerationLogRepository_List_Filters(t *testing.T) {
+	repo := NewModerationLogRepository(testDB)
+	createTestUser(t, "ml_flt")
+	createTestUser(t, "ml_flt2")
+	a := &model.ModerationLog{ID: "ml_f1", UserID: "ml_flt", Type: "suspend", Info: []byte(`{"targetUserId":"victimA"}`)}
+	b := &model.ModerationLog{ID: "ml_f2", UserID: "ml_flt2", Type: "deleteNote", Info: []byte(`{"noteId":"n9"}`)}
+	require.NoError(t, repo.Create(a))
+	require.NoError(t, repo.Create(b))
+	defer cleanupModLog(t, a.ID)
+	defer cleanupModLog(t, b.ID)
+
+	byType, err := repo.List(model.ModerationLogFilter{Limit: 100, Type: "suspend"})
+	require.NoError(t, err)
+	for _, l := range byType {
+		assert.Equal(t, "suspend", l.Type)
+	}
+	byUser, err := repo.List(model.ModerationLogFilter{Limit: 100, UserID: "ml_flt2"})
+	require.NoError(t, err)
+	for _, l := range byUser {
+		assert.Equal(t, "ml_flt2", l.UserID)
+	}
+	bySearch, err := repo.List(model.ModerationLogFilter{Limit: 100, Search: "victimA"})
+	require.NoError(t, err)
+	require.NotEmpty(t, bySearch)
+	for _, l := range bySearch {
+		assert.Contains(t, string(l.Info), "victimA")
+	}
 }
