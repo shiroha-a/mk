@@ -69,7 +69,10 @@ type Handler struct {
 	clipNoteRepo     repository.ClipNoteRepository
 	clipFavoriteRepo repository.ClipFavoriteRepository
 	moderatorChecker ModeratorChecker
-	bufReader        entity.BufferedReactionsReader
+	// achievementGranter は notes/favorites/create で local note 著者に
+	// myNoteFavorited1 を付与するのに使う (#1762)。未配線時は付与しない。
+	achievementGranter AchievementGranter
+	bufReader          entity.BufferedReactionsReader
 	// ugcVisibility controls what unauthenticated visitors can see.
 	// "all" (default), "local", "none"
 	ugcVisibility string
@@ -212,6 +215,18 @@ type ModeratorChecker interface {
 // SetModeratorChecker wires the moderator check used by notes/delete.
 func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
 	h.moderatorChecker = m
+}
+
+// AchievementGranter unlocks a server-side achievement for a user. core/achievement.Service
+// implements it. Used by notes/favorites/create to grant myNoteFavorited1 (#1762).
+type AchievementGranter interface {
+	Grant(ctx context.Context, userID, name string) (bool, error)
+}
+
+// SetAchievementGranter wires the achievement grant service. When unset,
+// favorite-driven achievements are simply not granted (degrade).
+func (h *Handler) SetAchievementGranter(g AchievementGranter) {
+	h.achievementGranter = g
 }
 
 // SetPollRepo attaches a PollRepository used by notes/polls/recommendation (#1538).

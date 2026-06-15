@@ -62,6 +62,7 @@ import (
 	apiwebhooks "github.com/shiroha-a/mk/internal/api/webhooks"
 	"github.com/shiroha-a/mk/internal/api/wellknown"
 	coreabuse "github.com/shiroha-a/mk/internal/core/abuse"
+	coreachievement "github.com/shiroha-a/mk/internal/core/achievement"
 	coreannouncement "github.com/shiroha-a/mk/internal/core/announcement"
 	coreantenna "github.com/shiroha-a/mk/internal/core/antenna"
 	"github.com/shiroha-a/mk/internal/core/avatardecoration"
@@ -1284,6 +1285,11 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/polls/vote", notesHandler.PollsVote, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:votes"))
 	// Notes extra endpoints (Phase 6)
 	notesHandler.SetFavoriteRepo(noteFavoriteRepo)
+	// #1762: local note を favorite されたとき著者に myNoteFavorited1 を付与する
+	// server-side achievement infra。claim-achievement と同じ profile.achievements
+	// を更新する。
+	achievementService := coreachievement.NewService(userService, notificationService)
+	notesHandler.SetAchievementGranter(achievementService)
 	api.POST("/notes/favorites/create", notesHandler.FavoritesCreate, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:favorites"))
 	api.POST("/notes/favorites/delete", notesHandler.FavoritesDelete, middleware.RequireAuth(), middleware.RequireScope("write:favorites"))
 	api.POST("/notes/featured", notesHandler.Featured)

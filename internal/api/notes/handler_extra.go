@@ -10,6 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	coreachievement "github.com/shiroha-a/mk/internal/core/achievement"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -42,7 +43,8 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	if h.queryService == nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
-	if _, err := h.queryService.RequireVisible(user, req.NoteID); err != nil {
+	target, err := h.queryService.RequireVisible(user, req.NoteID)
+	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	if h.favoriteRepo == nil {
@@ -61,6 +63,14 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	}
 	if err := h.favoriteRepo.Create(fav); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// upstream favorites/create.ts: local note を他人が favorite したとき著者に
+	// myNoteFavorited1 を付与する (#1762)。best-effort で favorite 自体 (204) は
+	// 巻き戻さない。granter 未配線時は skip。
+	if h.achievementGranter != nil && target.UserHost == nil && target.UserID != user.ID {
+		if _, err := h.achievementGranter.Grant(c.Request().Context(), target.UserID, coreachievement.MyNoteFavorited1); err != nil {
+			slog.Warn("favorites/create: achievement grant failed", "author", target.UserID, "err", err)
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }

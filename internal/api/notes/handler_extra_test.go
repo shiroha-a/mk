@@ -1,7 +1,9 @@
 package notes
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	coreachievement "github.com/shiroha-a/mk/internal/core/achievement"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/translate"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -232,6 +235,68 @@ func TestFavoritesCreate_SpecifiedNote_InList_OK(t *testing.T) {
 		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified,
 		VisibleUserIDs: []string{"u2"},
 	}
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, favRepo.Favorites, 1)
+}
+
+// --- Favorites achievement (#1762) ---
+
+type recordingGranter struct {
+	calls [][2]string
+	err   error
+}
+
+func (g *recordingGranter) Grant(_ context.Context, userID, name string) (bool, error) {
+	g.calls = append(g.calls, [2]string{userID, name})
+	if g.err != nil {
+		return false, g.err
+	}
+	return true, nil
+}
+
+// local note を他人が favorite すると著者に myNoteFavorited1 が付与される。
+func TestFavoritesCreate_GrantsMyNoteFavorited1(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	g := &recordingGranter{}
+	h.SetAchievementGranter(g)
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, g.calls, 1)
+	assert.Equal(t, "u1", g.calls[0][0])
+	assert.Equal(t, coreachievement.MyNoteFavorited1, g.calls[0][1])
+}
+
+// 自分のノートを favorite しても付与しない (upstream note.userId !== me.id)。
+func TestFavoritesCreate_SelfFavorite_NoGrant(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	g := &recordingGranter{}
+	h.SetAchievementGranter(g)
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, g.calls)
+}
+
+// remote note (UserHost != nil) では著者に付与しない (upstream note.userHost == null)。
+func TestFavoritesCreate_RemoteNote_NoGrant(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	host := "remote.example"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "ru1", UserHost: &host, Visibility: model.NoteVisibilityPublic}
+	g := &recordingGranter{}
+	h.SetAchievementGranter(g)
+	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, g.calls)
+}
+
+// grant が失敗しても favorite (204) は成功する (best-effort)。
+func TestFavoritesCreate_GrantError_StillFavorites(t *testing.T) {
+	h, noteRepo, favRepo := newExtraHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	g := &recordingGranter{err: errors.New("boom")}
+	h.SetAchievementGranter(g)
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Len(t, favRepo.Favorites, 1)
