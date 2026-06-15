@@ -1799,6 +1799,7 @@ func (s *Server) setupRoutes() {
 	channelsHandler.SetReactionReader(reactionCountWriter)
 	channelsHandler.SetNoteFieldResolver(noteFieldResolver)
 	channelsHandler.SetUserRepo(userRepo)
+	channelsHandler.SetPinnedNoteRepo(noteRepo) // #1540: channels/show (detailed) の pinnedNotes 展開
 
 	// Antennas endpoints (Phase 4.3)
 	antennasHandler := antennas.NewHandler(antennaService, noteRepo, idGen)
