@@ -296,24 +296,30 @@ func (s *Service) ListFollowed(userID, sinceID, untilID string, limit, offset in
 // ListOwned returns channels owned by the user with cursor (sinceID/untilID)
 // or offset pagination.
 func (s *Service) ListOwned(userID, sinceID, untilID string, limit, offset int) ([]*model.Channel, error) {
+	// upstream owned.ts は isArchived=FALSE を AND し、cursor 無し時は id DESC で
+	// 並べる (makePaginationQuery, #1540)。
+	notArchived := false
 	return s.repo.List(model.ChannelListFilter{
-		OwnerID: userID,
-		Limit:   limit,
-		Offset:  offset,
-		SinceID: sinceID,
-		UntilID: untilID,
+		OwnerID:    userID,
+		IsArchived: &notArchived,
+		SortBy:     "-id",
+		Limit:      limit,
+		Offset:     offset,
+		SinceID:    sinceID,
+		UntilID:    untilID,
 	})
 }
 
-// ListFeatured returns the most active channels (notes count desc), or by
-// id when cursor is supplied (frontend Paginator対応)。
-func (s *Service) ListFeatured(sinceID, untilID string, limit, offset int) ([]*model.Channel, error) {
+// ListFeatured returns the upstream channels/featured set: channels that have
+// been posted to (lastNotedAt IS NOT NULL) and are not archived, ordered by
+// lastNotedAt DESC, capped at a fixed 10. featured には pagination が無い (#1540)。
+func (s *Service) ListFeatured() ([]*model.Channel, error) {
+	notArchived := false
 	return s.repo.List(model.ChannelListFilter{
-		SortBy:  "-notesCount",
-		Limit:   limit,
-		Offset:  offset,
-		SinceID: sinceID,
-		UntilID: untilID,
+		IsArchived:         &notArchived,
+		LastNotedAtNotNull: true,
+		SortBy:             "-lastNotedAt",
+		Limit:              10,
 	})
 }
 
@@ -321,12 +327,14 @@ func (s *Service) ListFeatured(sinceID, untilID string, limit, offset int) ([]*m
 // Search finds channels by name (and description when searchType is
 // "nameAndDescription", the upstream default). "nameOnly" matches name only.
 func (s *Service) Search(query, searchType, sinceID, untilID string, limit, offset int) ([]*model.Channel, error) {
-	// upstream channels/search は常に isArchived=FALSE を AND する。
+	// upstream channels/search は常に isArchived=FALSE を AND し、cursor 無し時は
+	// id DESC で並べる (makePaginationQuery, #1540)。
 	notArchived := false
 	return s.repo.List(model.ChannelListFilter{
 		Query:             query,
 		SearchDescription: searchType != "nameOnly",
 		IsArchived:        &notArchived,
+		SortBy:            "-id",
 		Limit:             limit,
 		Offset:            offset,
 		SinceID:           sinceID,

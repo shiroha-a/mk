@@ -44,10 +44,13 @@ type ChannelListFilter struct {
 	// SearchDescription: true で Query を name OR description にマッチさせる
 	// (upstream channels/search type=nameAndDescription, 既定)。false は name のみ。
 	SearchDescription bool
-	IsArchived        *bool  // archived 状態で絞る
-	SortBy            string // "+lastNotedAt" / "-lastNotedAt" / "+name" / "-notesCount" 等
-	Limit             int
-	Offset            int
+	IsArchived        *bool // archived 状態で絞る
+	// LastNotedAtNotNull: true で lastNotedAt IS NOT NULL を AND する
+	// (upstream channels/featured: 一度も投稿の無い channel を除外, #1540)。
+	LastNotedAtNotNull bool
+	SortBy             string // "+lastNotedAt" / "-lastNotedAt" / "+id" / "-id" / "+name" / "-notesCount" 等
+	Limit              int
+	Offset             int
 	// Cursor pagination (frontend Paginator). 指定時は SortBy を id 順に
 	// 上書きして cursor 一貫性を保つ。Offset は無視する。
 	SinceID string

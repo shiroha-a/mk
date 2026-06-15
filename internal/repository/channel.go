@@ -84,6 +84,9 @@ func (r *channelRepository) List(filter model.ChannelListFilter) ([]*model.Chann
 	if filter.IsArchived != nil {
 		q = q.Where("\"isArchived\" = ?", *filter.IsArchived)
 	}
+	if filter.LastNotedAtNotNull {
+		q = q.Where("\"lastNotedAt\" IS NOT NULL")
+	}
 	cursor := filter.SinceID != "" || filter.UntilID != ""
 	if filter.SinceID != "" {
 		q = q.Where("id > ?", filter.SinceID)
@@ -99,6 +102,10 @@ func (r *channelRepository) List(filter model.ChannelListFilter) ([]*model.Chann
 			q = q.Order("\"lastNotedAt\" ASC NULLS LAST")
 		case "-lastNotedAt":
 			q = q.Order("\"lastNotedAt\" DESC NULLS LAST")
+		case "+id":
+			q = q.Order("id ASC")
+		case "-id":
+			q = q.Order("id DESC")
 		case "+name":
 			q = q.Order("name ASC")
 		case "-name":

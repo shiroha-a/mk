@@ -4593,6 +4593,9 @@ func (m *MockChannelRepository) List(filter model.ChannelListFilter) ([]*model.C
 		if filter.IsArchived != nil && c.IsArchived != *filter.IsArchived {
 			continue
 		}
+		if filter.LastNotedAtNotNull && c.LastNotedAt == nil {
+			continue
+		}
 		rows = append(rows, c)
 	}
 	for i := 0; i < len(rows); i++ {
