@@ -631,6 +631,15 @@ func TestPromoCreate_MissingNoteID(t *testing.T) {
 		doPost(h.PromoCreate, `{}`, adminUser).Code)
 }
 
+// #1539: expiresAt 欠落は upstream required により 400 (旧 mk-go は epoch 0 で保存)。
+func TestPromoCreate_MissingExpiresAt(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetPromoNoteRepo(&stubPromoRepo{})
+	h.SetNoteFinder(&stubNoteFinder{})
+	assert.Equal(t, http.StatusBadRequest,
+		doPost(h.PromoCreate, `{"noteId":"n1"}`, adminUser).Code)
+}
+
 func TestPromoCreate_NoSuchNote(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetPromoNoteRepo(&stubPromoRepo{})
