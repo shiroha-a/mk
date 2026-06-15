@@ -385,6 +385,41 @@ func (m *MockChatRepository) ListInvitationsByRoom(roomID string) ([]*model.Chat
 
 func (m *MockChatRepository) CountUnread(_ string) (int64, error) { return 0, nil }
 
+// HasUnreadFromUser reports whether readerID has an unread 1-on-1 message from
+// otherID (readerID not in reads). Mirrors the production WHERE clause.
+func (m *MockChatRepository) HasUnreadFromUser(readerID, otherID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, msg := range m.Messages {
+		if msg.FromUserID == otherID && msg.ToUserID != nil && *msg.ToUserID == readerID && !readsContains(msg.Reads, readerID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasUnreadInRoom reports whether readerID has an unread room message (authored
+// by someone else) in roomID.
+func (m *MockChatRepository) HasUnreadInRoom(readerID, roomID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, msg := range m.Messages {
+		if msg.ToRoomID != nil && *msg.ToRoomID == roomID && msg.FromUserID != readerID && !readsContains(msg.Reads, readerID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readsContains(reads []string, id string) bool {
+	for _, r := range reads {
+		if r == id {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkRead appends userID to the message's reads slice (idempotency は real
 // impl 側のクエリで担保される。テスト用なので重複防止はしない)。
 func (m *MockChatRepository) MarkRead(userID, messageID string) error {

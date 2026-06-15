@@ -1545,11 +1545,37 @@ func (h *Handler) History(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// upstream history.ts は packMessagesDetailed の後に会話ごとの read 状態を
+	// 計算して各 message に isRead を載せる (#1749)。packMessageDetailed 自体は
+	// isRead を出さない (#861) ため、history endpoint でのみ上乗せする。
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, h.packMessageDetailed(m, user.ID))
+		packed := h.packMessageDetailed(m, user.ID)
+		packed["isRead"] = h.historyItemIsRead(user.ID, m, req.Room)
+		out = append(out, packed)
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// historyItemIsRead reports whether the conversation represented by a history
+// item has no unread messages for meID. Mirrors upstream getRoomReadStateMap /
+// getUserReadStateMap (mk-go は reads 配列から会話単位で導出する)。クエリ失敗時は
+// upstream の `?? false` と同じく未読 (false) 扱いにする。
+func (h *Handler) historyItemIsRead(meID string, m *model.ChatMessage, room bool) bool {
+	if room {
+		if m.ToRoomID == nil {
+			return true
+		}
+		unread, err := h.repo.HasUnreadInRoom(meID, *m.ToRoomID)
+		return err == nil && !unread
+	}
+	// 1-on-1: 相手 = 自分が sender なら toUser、そうでなければ fromUser。
+	otherID := m.FromUserID
+	if otherID == meID && m.ToUserID != nil {
+		otherID = *m.ToUserID
+	}
+	unread, err := h.repo.HasUnreadFromUser(meID, otherID)
+	return err == nil && !unread
 }
 
 // UnreadCount handles POST /api/chat/unread-count.

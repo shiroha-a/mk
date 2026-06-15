@@ -135,8 +135,28 @@ func TestChatRepository_Messages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, byOwned, 1)
 
+	// HasUnreadFromUser: user2 has an unread DM (cm_2) from user1
+	hasU, err := repo.HasUnreadFromUser(user2.ID, user1.ID)
+	require.NoError(t, err)
+	assert.True(t, hasU)
+
+	// HasUnreadInRoom: user2 has an unread room message (cm_1, authored by user1)
+	hasR, err := repo.HasUnreadInRoom(user2.ID, room.ID)
+	require.NoError(t, err)
+	assert.True(t, hasR)
+
+	// the author (user1) never has their own room message counted as unread
+	hasROwn, err := repo.HasUnreadInRoom(user1.ID, room.ID)
+	require.NoError(t, err)
+	assert.False(t, hasROwn)
+
 	// MarkRead
 	require.NoError(t, repo.MarkRead(user2.ID, "cm_2"))
+
+	// once read, the DM no longer counts as unread
+	hasU2, err := repo.HasUnreadFromUser(user2.ID, user1.ID)
+	require.NoError(t, err)
+	assert.False(t, hasU2)
 
 	// CountUnread
 	count, err := repo.CountUnread(user2.ID)

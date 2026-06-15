@@ -51,6 +51,13 @@ type ChatRepository interface {
 	// Unread count
 	CountUnread(userID string) (int64, error)
 
+	// HasUnreadFromUser reports whether readerID has any unread 1-on-1 message
+	// from otherID. Used by chat/history to populate isRead (#1749)。
+	HasUnreadFromUser(readerID, otherID string) (bool, error)
+	// HasUnreadInRoom reports whether readerID has any unread message in roomID
+	// (excluding their own). Used by chat/history to populate isRead (#1749)。
+	HasUnreadInRoom(readerID, roomID string) (bool, error)
+
 	// Mark read
 	MarkRead(userID, messageID string) error
 
@@ -323,6 +330,30 @@ func (r *chatRepository) CountUnread(userID string) (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// HasUnreadFromUser mirrors MarkAllReadFromUser's WHERE clause: a 1-on-1
+// message from otherID to readerID that readerID has not read yet.
+func (r *chatRepository) HasUnreadFromUser(readerID, otherID string) (bool, error) {
+	var count int64
+	if err := r.db.Model(&model.ChatMessage{}).
+		Where(`"fromUserId" = ? AND "toUserId" = ? AND NOT ("reads" @> ARRAY[?]::varchar[])`, otherID, readerID, readerID).
+		Limit(1).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// HasUnreadInRoom mirrors MarkAllReadInRoom's WHERE clause: a room message
+// authored by someone other than readerID that readerID has not read yet.
+func (r *chatRepository) HasUnreadInRoom(readerID, roomID string) (bool, error) {
+	var count int64
+	if err := r.db.Model(&model.ChatMessage{}).
+		Where(`"toRoomId" = ? AND "fromUserId" <> ? AND NOT ("reads" @> ARRAY[?]::varchar[])`, roomID, readerID, readerID).
+		Limit(1).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (r *chatRepository) MarkRead(userID, messageID string) error {

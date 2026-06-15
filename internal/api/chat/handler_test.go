@@ -1134,6 +1134,59 @@ func TestHistory(t *testing.T) {
 	assert.Equal(t, http.StatusOK, post(h.History, `{"limit":9999}`, u1).Code)
 }
 
+// historyRepo overrides ListUserHistory / ListRoomHistory to return seeded
+// conversations; HasUnread* fall through to the embedded mock (m.Messages).
+type historyRepo struct {
+	*testutil.MockChatRepository
+	userHistory []*model.ChatMessage
+	roomHistory []*model.ChatMessage
+}
+
+func (r *historyRepo) ListUserHistory(string, int) ([]*model.ChatMessage, error) {
+	return r.userHistory, nil
+}
+func (r *historyRepo) ListRoomHistory(string, int) ([]*model.ChatMessage, error) {
+	return r.roomHistory, nil
+}
+
+// #1749: history は会話ごとに isRead を載せる (1-on-1)。
+func TestHistory_IsRead_DM(t *testing.T) {
+	base := testutil.NewMockChatRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	to := u1.ID
+	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	hr := &historyRepo{MockChatRepository: base, userHistory: []*model.ChatMessage{base.Messages["m1"]}}
+	h := NewHandler(hr, idGen)
+
+	// 未読: u1 が cm を読んでいない → isRead=false
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(post(h.History, `{}`, u1).Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, false, resp[0]["isRead"])
+
+	// 既読化すると isRead=true
+	base.Messages["m1"].Reads = pq.StringArray{u1.ID}
+	var resp2 []map[string]any
+	require.NoError(t, json.Unmarshal(post(h.History, `{}`, u1).Body.Bytes(), &resp2))
+	require.Len(t, resp2, 1)
+	assert.Equal(t, true, resp2[0]["isRead"])
+}
+
+// #1749: room history も isRead を載せる。
+func TestHistory_IsRead_Room(t *testing.T) {
+	base := testutil.NewMockChatRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	roomID := "r1"
+	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	hr := &historyRepo{MockChatRepository: base, roomHistory: []*model.ChatMessage{base.Messages["m1"]}}
+	h := NewHandler(hr, idGen)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(post(h.History, `{"room":true}`, u1).Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, false, resp[0]["isRead"], "未読 room message は isRead=false")
+}
+
 // #692 review #7: UserTimeline / RoomTimeline がそれぞれ
 // MarkAllReadFromUser / MarkAllReadInRoom を呼んでチャット画面を開いた瞬間に
 // 既読化することを assert する (handler 側の wiring を guard)。
