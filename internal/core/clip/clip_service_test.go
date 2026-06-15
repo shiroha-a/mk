@@ -219,6 +219,19 @@ func TestAddNote_HappyPath(t *testing.T) {
 	assert.Len(t, noteRepo.Entries, 1)
 	assert.Equal(t, 1, repo.Clips["c1"].NotesCount)
 	require.NotNil(t, repo.Clips["c1"].LastClippedAt)
+	// #1768: note の clippedCount も increment される。
+	assert.Equal(t, int16(1), notes.Notes["n1"].ClippedCount)
+}
+
+// #1768: add -> remove で note の clippedCount が 1 -> 0 に維持される。
+func TestClippedCount_MaintainedOnAddRemove(t *testing.T) {
+	svc, repo, _, notes := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
+	assert.Equal(t, int16(1), notes.Notes["n1"].ClippedCount)
+	require.NoError(t, svc.RemoveNote("u1", "c1", "n1"))
+	assert.Equal(t, int16(0), notes.Notes["n1"].ClippedCount)
 }
 
 func TestAddNote_ClipNotFound(t *testing.T) {
@@ -293,11 +306,21 @@ func TestRemoveNote_NonOwnerHidden(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
-func TestRemoveNote_NotClipped(t *testing.T) {
+// #1768: note は実在するが clip に含まれない場合、upstream は idempotent delete で
+// silent success。NOT_CLIPPED error は返さない。
+func TestRemoveNote_NotInClipIsNoOp(t *testing.T) {
+	svc, repo, _, notes := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	assert.NoError(t, svc.RemoveNote("u1", "c1", "n1"))
+}
+
+// #1768: note 自体が存在しなければ NO_SUCH_NOTE (ErrNoteNotFound)。
+func TestRemoveNote_NoSuchNote(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
 	err := svc.RemoveNote("u1", "c1", "n1")
-	assert.ErrorIs(t, err, clip.ErrNotClipped)
+	assert.ErrorIs(t, err, clip.ErrNoteNotFound)
 }
 
 // failingDeleteRepo causes Delete to fail.

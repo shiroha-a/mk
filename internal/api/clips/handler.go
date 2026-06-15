@@ -385,8 +385,10 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b80525c6-97f7-49d7-a42d-ebccd49cfd52"))
-		case errors.Is(err, coreclip.ErrNotClipped):
-			return notClipped(c)
+		case errors.Is(err, coreclip.ErrNoteNotFound):
+			// upstream remove-note.ts は note 不在のみ NO_SUCH_NOTE を返す (#1768)。
+			// clip に含まれない note の削除は service 側で silent success になる。
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "aff017de-190e-434b-893e-33a9ff5049d8"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -508,8 +510,4 @@ func (h *Handler) clipExtras(cl *model.Clip, viewer *model.User) entity.ClipExtr
 		}
 	}
 	return extras
-}
-
-func notClipped(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("NOT_CLIPPED", "The note is not clipped.", "aff017de-190e-434b-893e-33a9ff5049d8"))
 }

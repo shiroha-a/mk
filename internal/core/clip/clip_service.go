@@ -26,8 +26,6 @@ var (
 	// ErrAlreadyClipped is returned when a note is already attached to the
 	// clip.
 	ErrAlreadyClipped = errors.New("note is already clipped")
-	// ErrNotClipped is returned when there is no clip_note row to remove.
-	ErrNotClipped = errors.New("note is not clipped")
 	// ErrTooManyClips は Create で clipLimit 超過 (#1029、upstream
 	// tooManyClips)。
 	ErrTooManyClips = errors.New("clip limit exceeded")
@@ -250,6 +248,9 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 		return err
 	}
 	_ = s.repo.IncrementCount(clipID, "notesCount", 1)
+	// upstream ClipService.addNote:131 は note の clippedCount を increment する
+	// (#1768。これまで未維持で常に 0 だった)。
+	_ = s.notes.IncrementCount(noteID, "clippedCount", 1)
 	_ = s.repo.UpdateFields(clipID, map[string]any{"lastClippedAt": &now})
 	return nil
 }
@@ -263,14 +264,23 @@ func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 	if c.UserID != ownerID {
 		return ErrClipNotFound
 	}
+	// upstream removeNote は note の存在を notesRepository で確認し、無ければ
+	// NoSuchNote を投げる (#1768)。
+	if _, err := s.notes.FindByID(noteID); err != nil {
+		return ErrNoteNotFound
+	}
 	cn, err := s.noteRepo.FindByPair(clipID, noteID)
 	if err != nil {
-		return ErrNotClipped
+		// upstream clipNotesRepository.delete は idempotent で、clip に含まれない
+		// note の削除は silent success (NOT_CLIPPED error は upstream に無い、#1768)。
+		return nil
 	}
 	if err := s.noteRepo.Delete(cn); err != nil {
 		return err
 	}
 	_ = s.repo.IncrementCount(clipID, "notesCount", -1)
+	// upstream ClipService.removeNote:156 は note の clippedCount を decrement する。
+	_ = s.notes.IncrementCount(noteID, "clippedCount", -1)
 	return nil
 }
 

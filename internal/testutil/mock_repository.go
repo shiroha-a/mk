@@ -955,6 +955,8 @@ func (m *MockNoteRepository) IncrementCount(noteID, column string, delta int) er
 		n.RenoteCount += int16(delta)
 	case "repliesCount":
 		n.RepliesCount += int16(delta)
+	case "clippedCount":
+		n.ClippedCount += int16(delta)
 	}
 	return nil
 }

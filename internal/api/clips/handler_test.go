@@ -646,13 +646,26 @@ func TestRemoveNote_NonOwnerHidden(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
-func TestRemoveNote_NotClipped(t *testing.T) {
+// #1768: note 不在は NO_SUCH_NOTE 404 (NOT_CLIPPED は廃止)。
+func TestRemoveNote_NoSuchNote(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
+}
+
+// #1768: note は実在するが clip に無い場合は silent success (204)。
+func TestRemoveNote_NotInClipIsNoOp(t *testing.T) {
+	h, repo, _, notes := newHandler(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
+	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.RemoveNote(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 // failingClipNoteDeleteRepo causes Delete to fail (other than not clipped).
@@ -669,7 +682,10 @@ func TestRemoveNote_RepoError(t *testing.T) {
 	mock.Entries["cn1"] = &model.ClipNote{ID: "cn1", ClipID: "c1", NoteID: "n1"}
 	noteRepo := &failingClipNoteDeleteRepo{MockClipNoteRepository: mock}
 	idGen, _ := id.NewGenerator("aidx")
-	svc := coreclip.NewService(repo, noteRepo, testutil.NewMockNoteRepository(), idGen)
+	// note は実在させて存在チェックを通し、clip_note Delete 失敗の 500 path に到達させる。
+	notes := testutil.NewMockNoteRepository()
+	notes.Notes["n1"] = &model.Note{ID: "n1"}
+	svc := coreclip.NewService(repo, noteRepo, notes, idGen)
 	h := NewHandler(svc, idGen)
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
