@@ -14,8 +14,8 @@ import (
 // 本家 update-proxy-account.ts と同じく proxy system user の profile.description
 // を更新する handler (旧 stub は誤って meta.proxyAccountId を書き換えていた、#348)。
 // frontend admin/settings 画面の proxyAccountForm が `{ description }` 形式で
-// 呼び出すのでこれに合わせる。Response は UserDetailed (mk-go では UserLite +
-// description で代替)。
+// 呼び出すのでこれに合わせる。Response は upstream update-proxy-account.ts と同じく
+// MeDetailed schema で返す (#1539)。
 func (h *Handler) UpdateProxyAccount(c echo.Context) error {
 	var req struct {
 		Description *string `json:"description"`
@@ -42,7 +42,7 @@ func (h *Handler) UpdateProxyAccount(c echo.Context) error {
 			"after":  req.Description,
 		})
 	}
-	// 更新後 profile を再取得して UserDetailed を返す。
+	// 更新後 profile を再取得して MeDetailed を返す (upstream schema 'MeDetailed')。
 	profile, _ := h.userRepo.FindProfileByUserID(proxy.ID)
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(proxy, profile))
+	return c.JSON(http.StatusOK, entity.PackMeDetailed(proxy, profile))
 }

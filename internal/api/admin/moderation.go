@@ -11,6 +11,9 @@ import (
 )
 
 // UnsetUserAvatar handles POST /api/admin/unset-user-avatar.
+//
+// upstream unset-user-avatar.ts: avatarId が既に null なら no-op (log も書かない)、
+// それ以外は解除して moderation log に fileId: 旧 avatarId を含めて記録する (#1539)。
 func (h *Handler) UnsetUserAvatar(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`
@@ -18,13 +21,25 @@ func (h *Handler) UnsetUserAvatar(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
+	user, err := h.userRepo.FindByID(req.UserID)
+	if err != nil || user == nil || user.AvatarID == nil {
+		// 既に未設定 / 不在なら no-op (upstream は avatarId==null で early-return)。
+		return c.NoContent(http.StatusNoContent)
+	}
+	// fileId は UpdateUser が user pointer を mutate する前に値で控える
+	// (log は goroutine で後から marshal するため、pointer のままだと nil 化する)。
+	fileID := *user.AvatarID
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"avatarId": nil, "avatarUrl": nil, "avatarBlurhash": nil}); err == nil {
-		h.logUserAction(c, moderationlog.LogUnsetUserAvatar, req.UserID)
+		info := moderationlog.UserInfo(user)
+		info["fileId"] = fileID
+		h.logModeration(c, moderationlog.LogUnsetUserAvatar, info)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
 // UnsetUserBanner handles POST /api/admin/unset-user-banner.
+//
+// upstream unset-user-banner.ts: bannerId 解除版の UnsetUserAvatar 相当 (#1539)。
 func (h *Handler) UnsetUserBanner(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`
@@ -32,8 +47,15 @@ func (h *Handler) UnsetUserBanner(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
+	user, err := h.userRepo.FindByID(req.UserID)
+	if err != nil || user == nil || user.BannerID == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	fileID := *user.BannerID
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"bannerId": nil, "bannerUrl": nil, "bannerBlurhash": nil}); err == nil {
-		h.logUserAction(c, moderationlog.LogUnsetUserBanner, req.UserID)
+		info := moderationlog.UserInfo(user)
+		info["fileId"] = fileID
+		h.logModeration(c, moderationlog.LogUnsetUserBanner, info)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

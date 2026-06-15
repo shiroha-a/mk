@@ -159,26 +159,50 @@ func TestUpdateAbuseUserReport_LogPayload(t *testing.T) {
 
 func TestUnsetUserAvatar_WritesModerationLog(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
-	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	avatarID := "av1"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", AvatarID: &avatarID}
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.UnsetUserAvatar, `{"userId":"u1"}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
-	assert.Equal(t, "unsetUserAvatar", repo.Snapshot()[0].Type)
+	log := repo.Snapshot()[0]
+	assert.Equal(t, "unsetUserAvatar", log.Type)
+	// #1539: log info に解除した fileId を含める。
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(log.Info, &info))
+	assert.Equal(t, "av1", info["fileId"])
+	assert.Equal(t, "u1", info["userId"])
 }
 
 func TestUnsetUserBanner_WritesModerationLog(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
-	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	bannerID := "bn1"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", BannerID: &bannerID}
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.UnsetUserBanner, `{"userId":"u1"}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
-	assert.Equal(t, "unsetUserBanner", repo.Snapshot()[0].Type)
+	log := repo.Snapshot()[0]
+	assert.Equal(t, "unsetUserBanner", log.Type)
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(log.Info, &info))
+	assert.Equal(t, "bn1", info["fileId"])
+}
+
+// #1539: 既に未設定なら no-op で moderation log を書かない。
+func TestUnsetUserAvatar_AlreadyUnsetNoLog(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"} // avatarId nil
+	repo := attachModLog(t, h)
+
+	rec := doPost(h.UnsetUserAvatar, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	time.Sleep(50 * time.Millisecond)
+	assert.Empty(t, repo.Snapshot(), "already-unset avatar must not write a log")
 }
 
 func TestUpdateAbuseUserReport_WritesModerationLog(t *testing.T) {
