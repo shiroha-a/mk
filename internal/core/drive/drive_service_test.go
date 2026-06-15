@@ -224,6 +224,19 @@ func (f *fakeMod) GetUserPolicies(userID string) map[string]any {
 	return f.policies[userID]
 }
 
+// #1769: Capacity は driveCapacityMb role policy から算出する
+// (1024*1024*driveCapacityMb)。roleChecker 未配線時は default 100 MiB。
+func TestCapacity_FromPolicy(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	// roleChecker 未配線 → default 100 MiB。
+	assert.Equal(t, int64(100*1024*1024), svc.Capacity("u1"))
+	// policy override は反映される。
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{"u1": {"driveCapacityMb": 500}}})
+	assert.Equal(t, int64(500*1024*1024), svc.Capacity("u1"))
+	// override の無い user は default 100 MiB に fallback。
+	assert.Equal(t, int64(100*1024*1024), svc.Capacity("u2"))
+}
+
 func TestShow_ModeratorBypass(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	other := "other"

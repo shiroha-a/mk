@@ -628,6 +628,20 @@ func (s *Service) FindByHash(user *model.User, md5 string) ([]*model.DriveFile, 
 	return s.fileRepo.FindAllByMD5(user.ID, md5)
 }
 
+// Capacity returns the user's drive capacity in bytes derived from the
+// driveCapacityMb role policy (1024*1024*driveCapacityMb), mirroring upstream
+// drive.ts (`capacity: 1024 * 1024 * policies.driveCapacityMb`). Falls back to
+// the default 100 MiB when no role checker is wired (#1769)。
+func (s *Service) Capacity(userID string) int64 {
+	mb := 100 // DefaultPolicies driveCapacityMb
+	if s.roleChecker != nil {
+		if v, ok := s.roleChecker.GetUserPolicies(userID)["driveCapacityMb"].(int); ok {
+			mb = v
+		}
+	}
+	return int64(1024 * 1024 * mb)
+}
+
 // UpdateInput holds the editable fields of a drive file.
 type UpdateInput struct {
 	Name        *string

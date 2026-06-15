@@ -354,6 +354,33 @@ func TestFilesUpdate_Success(t *testing.T) {
 	shapetest.Assert(t, "DriveFile", resp) // L3 (#1312)
 }
 
+// #1769: comment:null で既存 comment をクリアできる。
+func TestFilesUpdate_ClearsCommentWithNull(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	uid := "u1"
+	existing := "old comment"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, Name: "n", Comment: &existing}
+	c, rec := newJSONReq(t, `{"fileId":"f1","comment":null}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesUpdate(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Nil(t, fileRepo.Files["f1"].Comment, "comment:null で comment がクリアされる")
+}
+
+// #1769: comment 省略時は既存 comment を維持する (null クリアと区別)。
+func TestFilesUpdate_OmittedCommentKept(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	uid := "u1"
+	existing := "keep"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, Name: "n", Comment: &existing}
+	c, rec := newJSONReq(t, `{"fileId":"f1","name":"n2"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesUpdate(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, fileRepo.Files["f1"].Comment)
+	assert.Equal(t, "keep", *fileRepo.Files["f1"].Comment)
+}
+
 func TestFilesUpdate_InvalidParam(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newJSONReq(t, `{}`)

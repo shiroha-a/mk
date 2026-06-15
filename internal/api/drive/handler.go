@@ -321,11 +321,13 @@ func (h *Handler) packDriveFileShow(f *model.DriveFile) entity.DriveFileEntity {
 
 // FilesUpdateRequest is the body for drive/files/update.
 type FilesUpdateRequest struct {
-	FileID      string  `json:"fileId"`
-	Name        *string `json:"name"`
-	FolderID    *string `json:"folderId"`
-	Comment     *string `json:"comment"`
-	IsSensitive *bool   `json:"isSensitive"`
+	FileID string  `json:"fileId"`
+	Name   *string `json:"name"`
+	// upstream update.ts paramDef は comment が nullable。JSON の `comment:null`
+	// (= 明示クリア) と省略を区別するため json.RawMessage で受ける (#1769)。
+	Comment     json.RawMessage `json:"comment"`
+	FolderID    *string         `json:"folderId"`
+	IsSensitive *bool           `json:"isSensitive"`
 	// folderIdをnullに設定したい場合用 (JSON nullの判定不可なので明示フラグ)
 	UnsetFolder bool `json:"unsetFolder"`
 }
@@ -342,12 +344,22 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 		IsSensitive: req.IsSensitive,
 	}
 	if req.Comment != nil {
-		// upstream update.ts paramDef は comment maxLength=512 (#1564)。
-		if utf8.RuneCountInString(*req.Comment) > maxDriveCommentLength {
-			return apierr.JSONInvalidParam(c)
+		if string(req.Comment) == "null" {
+			// 明示 null → comment をクリア (upstream は comment:null で消せる、#1769)。
+			var nilStr *string
+			in.Comment = &nilStr
+		} else {
+			var comment string
+			if err := json.Unmarshal(req.Comment, &comment); err != nil {
+				return apierr.JSONInvalidParam(c)
+			}
+			// upstream update.ts paramDef は comment maxLength=512 (#1564)。
+			if utf8.RuneCountInString(comment) > maxDriveCommentLength {
+				return apierr.JSONInvalidParam(c)
+			}
+			cp := &comment
+			in.Comment = &cp
 		}
-		c2 := req.Comment
-		in.Comment = &c2
 	}
 	if req.UnsetFolder {
 		var nilPtr *string
@@ -683,8 +695,11 @@ func (h *Handler) Usage(c echo.Context) error {
 	if h.fileRepo != nil {
 		usage, _ = h.fileRepo.UsageByUser(user.ID)
 	}
+	// upstream drive.ts:49-53 は driveCapacityMb role policy から capacity を
+	// 算出する (1024*1024*driveCapacityMb)。以前は 1GiB ハードコードで policy /
+	// role 上書きを無視していた (#1769)。
 	return c.JSON(http.StatusOK, map[string]any{
-		"capacity": int64(1024 * 1024 * 1024), // 1GB default
+		"capacity": h.svc.Capacity(user.ID),
 		"usage":    usage,
 	})
 }
