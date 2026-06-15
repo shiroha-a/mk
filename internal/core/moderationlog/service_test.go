@@ -43,18 +43,19 @@ func (s *spyRepo) CreateMany(logs []*model.ModerationLog) error {
 	return nil
 }
 
-func (s *spyRepo) List(limit, offset int) ([]*model.ModerationLog, error) {
+func (s *spyRepo) List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if offset >= len(s.logs) {
-		return nil, nil
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 10
 	}
-	end := offset + limit
+	end := limit
 	if end > len(s.logs) {
 		end = len(s.logs)
 	}
-	out := make([]*model.ModerationLog, end-offset)
-	copy(out, s.logs[offset:end])
+	out := make([]*model.ModerationLog, end)
+	copy(out, s.logs[:end])
 	return out, nil
 }
 
@@ -261,8 +262,8 @@ type panicRepo struct{}
 func (panicRepo) Create(*model.ModerationLog) error {
 	panic("boom")
 }
-func (panicRepo) CreateMany([]*model.ModerationLog) error       { panic("boom") }
-func (panicRepo) List(int, int) ([]*model.ModerationLog, error) { return nil, nil }
+func (panicRepo) CreateMany([]*model.ModerationLog) error                        { panic("boom") }
+func (panicRepo) List(model.ModerationLogFilter) ([]*model.ModerationLog, error) { return nil, nil }
 
 func TestService_Log_recoverFromGoroutinePanic(t *testing.T) {
 	gen, err := id.NewGenerator("aidx")
@@ -280,13 +281,13 @@ func TestService_List_returnsEmptySliceWhenUnwired(t *testing.T) {
 	// Service.List は nil receiver / nil repo でも non-nil slice を返す。
 	// JSON encoder が `null` ではなく `[]` を出力するための契約。
 	var svc *Service
-	logs, err := svc.List(10, 0)
+	logs, err := svc.List(model.ModerationLogFilter{Limit: 10})
 	require.NoError(t, err)
 	assert.NotNil(t, logs)
 	assert.Empty(t, logs)
 
 	svc = New(nil, nil)
-	logs, err = svc.List(10, 0)
+	logs, err = svc.List(model.ModerationLogFilter{Limit: 10})
 	require.NoError(t, err)
 	assert.NotNil(t, logs)
 	assert.Empty(t, logs)
@@ -296,7 +297,7 @@ func TestService_List_returnsEmptySliceWhenRepoReturnsNil(t *testing.T) {
 	repo := &spyRepo{} // empty
 	svc := newSvc(t, repo)
 
-	logs, err := svc.List(10, 100) // offset 過大 → repo は nil 返却
+	logs, err := svc.List(model.ModerationLogFilter{Limit: 10}) // 空 repo → 空
 	require.NoError(t, err)
 	assert.NotNil(t, logs, "must return non-nil slice so JSON encodes as []")
 	assert.Empty(t, logs)
@@ -307,7 +308,7 @@ func TestService_List_passesThroughRepoError(t *testing.T) {
 	gen, _ := id.NewGenerator("aidx")
 	svc := New(repo, gen)
 
-	logs, err := svc.List(10, 0)
+	logs, err := svc.List(model.ModerationLogFilter{Limit: 10})
 	require.Error(t, err)
 	assert.Nil(t, logs)
 }
@@ -318,7 +319,7 @@ func TestService_List_returnsRepoEntries(t *testing.T) {
 	require.NoError(t, repo.Create(&model.ModerationLog{ID: "l1", Type: "suspend"}))
 	require.NoError(t, repo.Create(&model.ModerationLog{ID: "l2", Type: "unsuspend"}))
 
-	logs, err := svc.List(10, 0)
+	logs, err := svc.List(model.ModerationLogFilter{Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, logs, 2)
 }
@@ -329,7 +330,7 @@ type errorListRepo struct {
 
 func (r *errorListRepo) Create(*model.ModerationLog) error       { return nil }
 func (r *errorListRepo) CreateMany([]*model.ModerationLog) error { return nil }
-func (r *errorListRepo) List(int, int) ([]*model.ModerationLog, error) {
+func (r *errorListRepo) List(model.ModerationLogFilter) ([]*model.ModerationLog, error) {
 	return nil, r.err
 }
 

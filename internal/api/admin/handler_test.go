@@ -2069,6 +2069,53 @@ func TestShowModerationLogs_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1539: user は生 model.User でなく packed (UserDetailed) で返す。
+func TestShowModerationLogs_PacksUser(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	modLogRepo := testutil.NewMockModerationLogRepository()
+	require.NoError(t, modLogRepo.Create(&model.ModerationLog{
+		ID: "l1", UserID: "mod1", Type: "suspend", User: &model.User{ID: "mod1", Username: "modu"},
+	}))
+	gen, _ := id.NewGenerator("aidx")
+	h.SetModLogService(moderationlog.New(modLogRepo, gen))
+	userRepo.Profiles["mod1"] = &model.UserProfile{UserID: "mod1"}
+
+	rec := doPost(h.ShowModerationLogs, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	user, ok := resp[0]["user"].(map[string]any)
+	require.True(t, ok, "user must be a packed object, not raw model.User")
+	assert.Equal(t, "mod1", user["id"])
+	assert.Contains(t, user, "avatarUrl", "packed UserDetailed exposes avatarUrl")
+}
+
+// #1539: type / userId / search の絞り込み。
+func TestShowModerationLogs_Filters(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	modLogRepo := testutil.NewMockModerationLogRepository()
+	require.NoError(t, modLogRepo.Create(&model.ModerationLog{ID: "l1", UserID: "a", Type: "suspend", Info: []byte(`{"x":"findme"}`)}))
+	require.NoError(t, modLogRepo.Create(&model.ModerationLog{ID: "l2", UserID: "b", Type: "deleteNote", Info: []byte(`{}`)}))
+	gen, _ := id.NewGenerator("aidx")
+	h.SetModLogService(moderationlog.New(modLogRepo, gen))
+
+	listIDs := func(body string) []string {
+		rec := doPost(h.ShowModerationLogs, body, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp []map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		ids := make([]string, 0, len(resp))
+		for _, m := range resp {
+			ids = append(ids, m["id"].(string))
+		}
+		return ids
+	}
+	assert.Equal(t, []string{"l1"}, listIDs(`{"type":"suspend"}`))
+	assert.Equal(t, []string{"l2"}, listIDs(`{"userId":"b"}`))
+	assert.Equal(t, []string{"l1"}, listIDs(`{"search":"findme"}`))
+}
+
 type failingAbuseListRepo struct {
 	*testutil.MockAbuseReportRepository
 }
@@ -2417,7 +2464,7 @@ type failingModLogListRepo struct {
 	*testutil.MockModerationLogRepository
 }
 
-func (f *failingModLogListRepo) List(_ int, _ int) ([]*model.ModerationLog, error) {
+func (f *failingModLogListRepo) List(_ model.ModerationLogFilter) ([]*model.ModerationLog, error) {
 	return nil, assert.AnError
 }
 

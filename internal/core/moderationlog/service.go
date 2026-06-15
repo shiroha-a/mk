@@ -153,11 +153,11 @@ func (s *Service) LogMany(ctx context.Context, moderatorID string, entries []Ent
 // not `[]`, and the frontend expects a JSON array). Nil receiver /
 // nil repo also returns an empty slice so the read endpoint degrades
 // gracefully when the service has not been wired.
-func (s *Service) List(limit, offset int) ([]*model.ModerationLog, error) {
+func (s *Service) List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error) {
 	if s == nil || s.repo == nil {
 		return []*model.ModerationLog{}, nil
 	}
-	logs, err := s.repo.List(limit, offset)
+	logs, err := s.repo.List(filter)
 	if err != nil {
 		return nil, err
 	}

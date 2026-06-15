@@ -2986,17 +2986,37 @@ func (h *Handler) inactiveAbuseWebhookIDs() []string {
 // と同じく "2006-01-02T15:04:05.000Z" 形式 (Misskey の標準)。
 func (h *Handler) ShowModerationLogs(c echo.Context) error {
 	var req struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
+		Type      string `json:"type"`
+		UserID    string `json:"userId"`
+		Search    string `json:"search"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	logs, err := h.modLogService.List(req.Limit, req.Offset)
+	// sinceDate/untilDate を aidx prefix に正規化し、type/userId/search で絞る
+	// (upstream show-moderation-logs.ts, #1539)。
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	logs, err := h.modLogService.List(model.ModerationLogFilter{
+		Limit:   pagination.ClampLimit(req.Limit, 10, 100),
+		SinceID: sinceID,
+		UntilID: untilID,
+		Type:    req.Type,
+		UserID:  req.UserID,
+		Search:  req.Search,
+	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// upstream は user を UserDetailedNotMe (optional:false) で pack する。生 model.User
+	// を埋めると usernameLower/inbox 等の内部列が漏れ avatarUrl 等 packed field も欠ける。
+	// actor (moderator) の profile は重複が多いので distinct user で 1 度だけ fetch して
+	// pack する (#1539)。
+	profileByUser := map[string]*model.UserProfile{}
 	out := make([]map[string]any, 0, len(logs))
 	for _, l := range logs {
 		m := map[string]any{
@@ -3015,7 +3035,14 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 				"logId", l.ID, "err", err)
 		}
 		if l.User != nil {
-			m["user"] = l.User
+			prof, ok := profileByUser[l.UserID]
+			if !ok {
+				if h.userRepo != nil {
+					prof, _ = h.userRepo.FindProfileByUserID(l.UserID)
+				}
+				profileByUser[l.UserID] = prof
+			}
+			m["user"] = entity.PackUserDetailed(l.User, prof, h.idGen)
 		}
 		out = append(out, m)
 	}

@@ -96,7 +96,7 @@ type ModerationLogRepository interface {
 	// admin operations want to record N entries without spawning N
 	// goroutines + N round-trips (#671).
 	CreateMany(logs []*model.ModerationLog) error
-	List(limit, offset int) ([]*model.ModerationLog, error)
+	List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error)
 }
 
 type moderationLogRepository struct {
@@ -118,17 +118,33 @@ func (r *moderationLogRepository) CreateMany(logs []*model.ModerationLog) error 
 	return r.db.Create(&logs).Error
 }
 
-func (r *moderationLogRepository) List(limit, offset int) ([]*model.ModerationLog, error) {
+func (r *moderationLogRepository) List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 10
 	}
 	if limit > 100 {
 		limit = 100
 	}
-	q := r.db.Preload("User").Order("id DESC").Limit(limit)
-	if offset > 0 {
-		q = q.Offset(offset)
+	// upstream show-moderation-logs.ts: type / userId 完全一致 + info::text ILIKE
+	// search + id-cursor pagination (sinceId/untilId)。
+	q := r.db.Preload("User")
+	if filter.Type != "" {
+		q = q.Where("type = ?", filter.Type)
 	}
+	if filter.UserID != "" {
+		q = q.Where(`"userId" = ?`, filter.UserID)
+	}
+	if filter.Search != "" {
+		q = q.Where("info::text ILIKE ?", "%"+escapeLike(filter.Search)+"%")
+	}
+	if filter.UntilID != "" {
+		q = q.Where("id < ?", filter.UntilID)
+	}
+	if filter.SinceID != "" {
+		q = q.Where("id > ?", filter.SinceID)
+	}
+	q = q.Order("id DESC").Limit(limit)
 	var logs []*model.ModerationLog
 	if err := q.Find(&logs).Error; err != nil {
 		return nil, err
