@@ -2,6 +2,7 @@
 package channels
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -34,6 +35,21 @@ type Handler struct {
 	// bannerResolver は channel の bannerId を drive file に解決して bannerUrl
 	// を埋める (#1280)。未配線なら bannerUrl は null で出す。
 	bannerResolver ChannelBannerResolver
+	// pinnedNoteRepo は channels/show (detailed) の pinnedNotes 展開に使う
+	// (#1540)。未配線なら pinnedNotes は空配列で出す。
+	pinnedNoteRepo ChannelPinnedNoteRepo
+}
+
+// ChannelPinnedNoteRepo fetches the notes for the detailed channels/show
+// pinnedNotes field (#1540). The returned notes follow the order of `ids`.
+type ChannelPinnedNoteRepo interface {
+	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
+}
+
+// SetPinnedNoteRepo wires the note repository used to expand pinnedNoteIds into
+// pinnedNotes (Note[]) on the detailed channels/show response (#1540).
+func (h *Handler) SetPinnedNoteRepo(r ChannelPinnedNoteRepo) {
+	h.pinnedNoteRepo = r
 }
 
 // ChannelBannerResolver covers the drive-file lookups the channels handler
@@ -205,7 +221,38 @@ func (h *Handler) Show(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "6f6c314b-7486-4897-8966-c04a66a02923"))
 	}
-	return c.JSON(http.StatusOK, h.channelToMapForViewer(ch, middleware.GetUser(c)))
+	viewer := middleware.GetUser(c)
+	out := h.channelToMapForViewer(ch, viewer)
+	// upstream show.ts は pack(channel, me, detailed=true) を呼び、detailed 時のみ
+	// pinnedNotes (展開済 Note[]、pinnedNoteIds 順) を返す (#1540)。
+	out["pinnedNotes"] = h.packPinnedNotes(c.Request().Context(), ch, viewer)
+	return c.JSON(http.StatusOK, out)
+}
+
+// packPinnedNotes expands ch.PinnedNoteIDs into packed Note entities in
+// pinnedNoteIds order for the detailed channels/show response (#1540).
+// FindManyByIDsWithUser preserves the requested order, so no re-sort is needed
+// (upstream re-sorts because findBy does not). Returns an empty slice when there
+// are no pinned notes or the note repo / field resolver is unwired.
+func (h *Handler) packPinnedNotes(ctx context.Context, ch *model.Channel, viewer *model.User) []any {
+	out := make([]any, 0)
+	ids := []string(ch.PinnedNoteIDs)
+	if len(ids) == 0 || h.pinnedNoteRepo == nil {
+		return out
+	}
+	notes, err := h.pinnedNoteRepo.FindManyByIDsWithUser(ids)
+	if err != nil || len(notes) == 0 {
+		return out
+	}
+	entities := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
+	if h.fieldRes != nil {
+		h.fieldRes.Apply(entities, viewer)
+	}
+	notehide.HideEmbeds(viewer, entities)
+	for _, pn := range entities {
+		out = append(out, pn)
+	}
+	return out
 }
 
 // UpdateRequest is the request body for channels/update.
@@ -577,6 +624,9 @@ func (h *Handler) channelToMapForViewer(ch *model.Channel, viewer *model.User) m
 	if viewer == nil {
 		return out
 	}
+	// upstream は me がある時 hasUnreadNote:false を後方互換で必ず付ける
+	// (ChannelEntityService、#1540)。mk-go は未読判定を持たないため常に false。
+	out["hasUnreadNote"] = false
 	if h.followingRepo != nil {
 		if ok, err := h.followingRepo.Exists(viewer.ID, ch.ID); err == nil {
 			out["isFollowing"] = ok
