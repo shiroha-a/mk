@@ -102,12 +102,22 @@ func TestFavorite_NilRepo(t *testing.T) {
 // --- Unfavorite ---
 
 func TestUnfavorite_Success(t *testing.T) {
-	h, _, favRepo, _ := newStubHandler(t)
+	h, chRepo, favRepo, _ := newStubHandler(t)
+	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "test"}
 	favRepo.Favorites["u1:ch1"] = &model.ChannelFavorite{ID: "f1", UserID: "u1", ChannelID: "ch1"}
 	rec := postStubWithBody(t, h.Unfavorite, `{"channelId":"ch1"}`, "u1")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	exists, _ := favRepo.Exists("u1", "ch1")
 	assert.False(t, exists)
+}
+
+// #1770: 存在しない channel の unfavorite は NO_SUCH_CHANNEL (id 353c68dd)。
+func TestUnfavorite_NoSuchChannel(t *testing.T) {
+	h, _, _, _ := newStubHandler(t)
+	rec := postStubWithBody(t, h.Unfavorite, `{"channelId":"ghost"}`, "u1")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_CHANNEL")
+	assert.Contains(t, rec.Body.String(), "353c68dd-131a-476c-aa99-88a345e83668")
 }
 
 func TestUnfavorite_MissingChannelID(t *testing.T) {

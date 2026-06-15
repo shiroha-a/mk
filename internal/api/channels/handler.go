@@ -543,7 +543,13 @@ func (h *Handler) channelToMap(ch *model.Channel, bannerURL any) map[string]any 
 		"usersCount":            ch.UsersCount,
 		"isSensitive":           ch.IsSensitive,
 		"allowRenoteToExternal": ch.AllowRenoteToExternal,
-		"lastNotedAt":           ch.LastNotedAt,
+		"lastNotedAt":           nil,
+	}
+	// upstream ChannelEntityService は lastNotedAt を toISOString() で常に 3桁 ms
+	// にする。createdAt と同様 .000Z に正規化する (#1770。以前は *time.Time を生で
+	// 入れて Go 既定の RFC3339Nano になっていた)。nil は null のまま。
+	if ch.LastNotedAt != nil {
+		out["lastNotedAt"] = ch.LastNotedAt.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	// Misskey TS は createdAt を channel.id (aidx) から導出する。golden Channel
 	// でも createdAt は必須なので他 entity と同じ ISO ms 形式で埋める (#1280)。

@@ -1028,6 +1028,9 @@ func TestFeatured_BatchEmbedsFollowState(t *testing.T) {
 	assert.Equal(t, 1, fav.existsManyCalls)
 
 	body := rec.Body.String()
+	// #1770: lastNotedAt は upstream の toISOString() に合わせ 3桁 ms (.000Z) 形式。
+	assert.Regexp(t, `"lastNotedAt":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"`, body,
+		"lastNotedAt must be normalized to 3-digit ms ISO format")
 	assert.Contains(t, body, `"isFollowing":true`,
 		"alice's followed channel must report isFollowing=true")
 	assert.Contains(t, body, `"isFollowing":false`,
