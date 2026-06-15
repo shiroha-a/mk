@@ -608,6 +608,44 @@ func TestDeleteAccount_DeliversAPDelete(t *testing.T) {
 	assert.Equal(t, []string{"u1"}, fed.deleted)
 }
 
+// #1759: suspend は双方向 followRequest を削除し、outgoing follow を全 unfollow する
+// (incoming follower は触らない、upstream unFollowAll は followerId=user のみ)。
+func TestSuspendUser_CleansUpRelations(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+
+	followRepo := testutil.NewMockFollowingRepository()
+	followRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "u1", FolloweeID: "a"}
+	followRepo.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "u1", FolloweeID: "b"}
+	followRepo.Followings["f3"] = &model.Following{ID: "f3", FollowerID: "other", FolloweeID: "u1"} // incoming
+	h.SetFollowingRepo(followRepo)
+	enq := &stubUnfollowEnqueuer{}
+	h.SetUnfollowEnqueuer(enq)
+
+	frRepo := testutil.NewMockFollowRequestRepository()
+	frRepo.Requests["r1"] = &model.FollowRequest{ID: "r1", FollowerID: "u1", FolloweeID: "x"} // outgoing req
+	frRepo.Requests["r2"] = &model.FollowRequest{ID: "r2", FollowerID: "y", FolloweeID: "u1"} // incoming req
+	frRepo.Requests["r3"] = &model.FollowRequest{ID: "r3", FollowerID: "p", FolloweeID: "q"}  // unrelated
+	h.SetFollowRequestRepo(frRepo)
+
+	rec := doPost(h.SuspendUser, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	// 双方向 followRequest 削除 (無関係は残る)。
+	assert.NotContains(t, frRepo.Requests, "r1")
+	assert.NotContains(t, frRepo.Requests, "r2")
+	assert.Contains(t, frRepo.Requests, "r3")
+
+	// outgoing follow のみ unfollow される。
+	require.Len(t, enq.pairs, 2)
+	set := map[[2]string]bool{}
+	for _, p := range enq.pairs {
+		set[p] = true
+	}
+	assert.True(t, set[[2]string{"u1", "a"}])
+	assert.True(t, set[[2]string{"u1", "b"}])
+}
+
 // SuspendUser が target を見つけられない (= UpdateUser 前に NotFound) と
 // invalidate は呼ばない。404 を返した時点で cache に target の entry が
 // 存在する保証もないので、空打ちを避ける。

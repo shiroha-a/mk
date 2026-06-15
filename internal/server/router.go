@@ -2275,6 +2275,8 @@ func (s *Server) setupRoutes() {
 	// createUnfollowJob と等価。
 	adminHandler.SetFollowingRepo(followingRepo)
 	adminHandler.SetUnfollowEnqueuer(s.queueClient)
+	// suspend 時の双方向 followRequest 削除に使う (#1759)。
+	adminHandler.SetFollowRequestRepo(followRequestRepo)
 	api.POST("/admin/accounts/create", adminHandler.AccountsCreate)
 	api.POST("/admin/show-user", adminHandler.ShowUser, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:show-user"))
 	api.POST("/admin/show-users", adminHandler.ShowUsers, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:show-user"))

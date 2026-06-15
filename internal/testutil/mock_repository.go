@@ -5432,6 +5432,15 @@ func (m *MockFollowRequestRepository) Delete(r *model.FollowRequest) error {
 	return nil
 }
 
+func (m *MockFollowRequestRepository) DeleteAllByUser(userID string) error {
+	for id, r := range m.Requests {
+		if r.FollowerID == userID || r.FolloweeID == userID {
+			delete(m.Requests, id)
+		}
+	}
+	return nil
+}
+
 func (m *MockFollowRequestRepository) FindByPair(followerID, followeeID string) (*model.FollowRequest, error) {
 	for _, r := range m.Requests {
 		if r.FollowerID == followerID && r.FolloweeID == followeeID {

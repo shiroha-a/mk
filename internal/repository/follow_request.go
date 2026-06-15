@@ -29,6 +29,10 @@ type FollowRequestRepository interface {
 	// CountReceived returns the number of pending follow requests received by
 	// userID. Used by /api/i to compute hasPendingReceivedFollowRequest.
 	CountReceived(userID string) (int64, error)
+	// DeleteAllByUser removes every pending follow request involving userID in
+	// either direction (followerId = userID OR followeeId = userID). Used when a
+	// user is suspended (upstream UserSuspendService.postSuspend, #1759).
+	DeleteAllByUser(userID string) error
 }
 
 type followRequestRepository struct {
@@ -46,6 +50,11 @@ func (r *followRequestRepository) Create(req *model.FollowRequest) error {
 
 func (r *followRequestRepository) Delete(req *model.FollowRequest) error {
 	return r.db.Delete(req).Error
+}
+
+func (r *followRequestRepository) DeleteAllByUser(userID string) error {
+	return r.db.Where(`"followerId" = ? OR "followeeId" = ?`, userID, userID).
+		Delete(&model.FollowRequest{}).Error
 }
 
 func (r *followRequestRepository) FindByPair(followerID, followeeID string) (*model.FollowRequest, error) {

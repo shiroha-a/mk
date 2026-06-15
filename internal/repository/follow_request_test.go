@@ -145,6 +145,34 @@ func TestFollowRequestRepository_Delete(t *testing.T) {
 	assert.False(t, exists)
 }
 
+// #1759: DeleteAllByUser は user が follower / followee いずれかの request を
+// 双方向で消し、無関係な request は残す。
+func TestFollowRequestRepository_DeleteAllByUser(t *testing.T) {
+	repo := NewFollowRequestRepository(testDB)
+	u := insertTestUser(t, "u_fr_dab", "frdab")
+	defer cleanupUser(t, u.ID)
+	other := insertTestUser(t, "u_fr_dab2", "frdab2")
+	defer cleanupUser(t, other.ID)
+	p := insertTestUser(t, "u_fr_dab3", "frdab3")
+	defer cleanupUser(t, p.ID)
+	q := insertTestUser(t, "u_fr_dab4", "frdab4")
+	defer cleanupUser(t, q.ID)
+
+	outgoing := insertFollowRequest(t, "fr_dab_out", u.ID, other.ID) // u → other
+	incoming := insertFollowRequest(t, "fr_dab_in", other.ID, u.ID)  // other → u
+	unrelated := insertFollowRequest(t, "fr_dab_un", p.ID, q.ID)     // p → q
+	defer testDB.Exec(`DELETE FROM "follow_request" WHERE id = ?`, unrelated.ID)
+
+	require.NoError(t, repo.DeleteAllByUser(u.ID))
+
+	out, _ := repo.Exists(outgoing.FollowerID, outgoing.FolloweeID)
+	assert.False(t, out, "outgoing request involving user removed")
+	in, _ := repo.Exists(incoming.FollowerID, incoming.FolloweeID)
+	assert.False(t, in, "incoming request involving user removed")
+	un, _ := repo.Exists(unrelated.FollowerID, unrelated.FolloweeID)
+	assert.True(t, un, "unrelated request kept")
+}
+
 func TestFollowRequestRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

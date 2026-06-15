@@ -123,6 +123,9 @@ type Handler struct {
 	systemAccountFetcher    SystemAccountFetcher
 	followingRepo           repository.FollowingRepository
 	unfollowEnqueuer        UnfollowEnqueuer
+	// followReqRepo は suspend 時に対象 user の双方向 followRequest を削除する
+	// ために使う (#1759, upstream UserSuspendService.postSuspend)。nil なら skip。
+	followReqRepo repository.FollowRequestRepository
 	// storageDeleter は admin の bulk drive cleanup で物理オブジェクトを消す
 	// object storage backend (nil なら DB 行のみ削除)。
 	storageDeleter StorageDeleter
@@ -172,6 +175,12 @@ type UserModerationFederationHook interface {
 // suspend / delete-account / unsuspend (#1759). nil disables federation.
 func (h *Handler) SetUserModerationFederationHook(hook UserModerationFederationHook) {
 	h.userModerationFed = hook
+}
+
+// SetFollowRequestRepo wires the follow-request repository so SuspendUser can
+// delete the target's pending follow requests (both directions, #1759).
+func (h *Handler) SetFollowRequestRepo(r repository.FollowRequestRepository) {
+	h.followReqRepo = r
 }
 
 // InstanceSuspendCacheInvalidator drops the cached delivery-suspend decision
@@ -1013,6 +1022,9 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	if h.userModerationFed != nil {
 		h.userModerationFed.OnUserDeleted(user)
 	}
+	// upstream postSuspend + unFollowAll: 双方向 followRequest 削除 + outgoing
+	// follow の全 unfollow (#1759)。best-effort。
+	h.cleanupSuspendedUserRelations(req.UserID)
 	h.logUserActionWithUser(c, moderationlog.LogSuspend, user)
 	return c.NoContent(http.StatusNoContent)
 }

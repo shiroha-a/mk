@@ -102,6 +102,49 @@ func (h *Handler) FederationRefreshRemoteInstanceMetadata(c echo.Context) error 
 // Worker 側で処理されるため、enumeration 中に row 削除は発生しない。よって
 // offset ベースの pagination で安全に列挙できる (sync 版で必要だった seen-set
 // は不要)。
+// cleanupSuspendedUserRelations performs the local relationship side-effects of
+// suspending a user, mirroring upstream UserSuspendService.postSuspend +
+// unFollowAll (#1759): delete the user's pending follow requests (both
+// directions) and unfollow everyone the user follows (outgoing follows). All
+// best-effort — failures are logged but never block the suspend.
+func (h *Handler) cleanupSuspendedUserRelations(userID string) {
+	if h.followReqRepo != nil {
+		if err := h.followReqRepo.DeleteAllByUser(userID); err != nil {
+			slog.Warn("admin suspend: delete follow requests failed", "userId", userID, "err", err)
+		}
+	}
+	if h.followingRepo == nil || h.unfollowEnqueuer == nil {
+		return
+	}
+	const pageSize = 100
+	const maxBatches = 1000 // safety cap
+	for batch := 0; batch < maxBatches; batch++ {
+		// upstream unFollowAll は followerId = user の outgoing follow のみを
+		// silent に unfollow する (incoming follower は触らない)。EnqueueUnfollow が
+		// 行削除 + Undo(Follow) 連合を worker 側で行う。
+		rows, err := h.followingRepo.ListFollowing(userID, pageSize, batch*pageSize)
+		if err != nil {
+			slog.Warn("admin suspend: list following failed", "userId", userID, "err", err)
+			return
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, f := range rows {
+			if err := h.unfollowEnqueuer.EnqueueUnfollow(queue.UnfollowPayload{
+				FollowerID: f.FollowerID,
+				FolloweeID: f.FolloweeID,
+			}); err != nil {
+				slog.Warn("admin suspend: enqueue unfollow failed",
+					"follower", f.FollowerID, "followee", f.FolloweeID, "err", err)
+			}
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+}
+
 func (h *Handler) FederationRemoveAllFollowing(c echo.Context) error {
 	var req struct {
 		Host string `json:"host"`
