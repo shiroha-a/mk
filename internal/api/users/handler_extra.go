@@ -59,7 +59,10 @@ func (h *Handler) Relation(c echo.Context) error {
 		if single == "" {
 			return invalidParam()
 		}
-		return c.JSON(http.StatusOK, h.computeRelation(viewer, single))
+		// upstream relation.ts:135-137 は単一 userId (string) でも
+		// `.then(it => [it])` で単一要素配列を返す (res schema は object|array の
+		// oneOf だが実コードは常に配列)。drop-in 互換のため配列に揃える (#1766)。
+		return c.JSON(http.StatusOK, []map[string]any{h.computeRelation(viewer, single)})
 	}
 	var arr []string
 	if err := json.Unmarshal(req.UserID, &arr); err == nil {

@@ -1368,9 +1368,10 @@ func (s *Server) setupRoutes() {
 	api.POST("/users/report-abuse", usersHandler.ReportAbuse, middleware.RequireAuth(), middleware.RequireScope("write:report-abuse"))
 	api.POST("/users/reactions", usersHandler.Reactions)
 	api.POST("/users/featured-notes", usersHandler.FeaturedNotes)
-	api.POST("/users/search-by-username-and-host", usersHandler.SearchByUsernameAndHost,
-		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchUsers))
+	// upstream search-by-username-and-host.ts:13 は requireCredential:false かつ
+	// requiredRolePolicy 無し (匿名・全 role に開放)。mk-go が独自に付けていた
+	// RequireAuth + canSearchUsers gate を外して揃える (#1766)。
+	api.POST("/users/search-by-username-and-host", usersHandler.SearchByUsernameAndHost)
 	api.POST("/users/update-memo", usersHandler.UpdateMemo, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	usersHandler.SetAbuseRepo(repository.NewAbuseReportRepository(s.db))
 	usersHandler.SetMemoRepo(repository.NewUserMemoRepository(s.db))
@@ -2160,7 +2161,11 @@ func (s *Server) setupRoutes() {
 	// public list を閲覧可、#1550)。未認証 && userId 未指定は handler が INVALID_PARAM。
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireScope("read:account"))
 	api.POST("/users/lists/create", userListHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
-	api.POST("/users/lists/show", userListHandler.Show, middleware.RequireAuth(), middleware.RequireScope("read:account"))
+	// upstream users/lists/show.ts:16 は requireCredential:false (kind は token
+	// 認証時のみ適用)。public list は匿名でも閲覧可能で、Show handler も
+	// viewer==nil を許容する。RequireAuth を外し RequireScope のみ残す (匿名は
+	// RequireScope を素通り、app token のみ scope を強制、#1766)。
+	api.POST("/users/lists/show", userListHandler.Show, middleware.RequireScope("read:account"))
 	api.POST("/users/lists/push", userListHandler.Push, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/users/lists/pull", userListHandler.Pull, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/users/lists/delete", userListHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:account"))

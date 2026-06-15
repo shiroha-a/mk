@@ -829,6 +829,36 @@ func TestNotes_Success(t *testing.T) {
 	assert.Len(t, out, 1)
 }
 
+// #1766: viewer が target 本人を mute していても、target のプロフィール note は
+// mute filter から除外して返す (upstream notes.ts の excludeUserFromMute)。
+func TestNotes_ExcludesTargetFromMute(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // "user1" を target として追加
+	noteRepo := h.noteRepo.(*testutil.MockNoteRepository)
+	text := "from target"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "user1", Text: &text,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	// viewer1 が target (user1) を mute している。
+	mutingRepo := testutil.NewMockMutingRepository()
+	require.NoError(t, mutingRepo.Create(&model.Muting{ID: "m1", MuterID: "viewer1", MuteeID: "user1"}))
+	h.SetMutingRepo(mutingRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"userId":"user1"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: "viewer1"})
+
+	require.NoError(t, h.Notes(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Len(t, out, 1, "mute した相手本人のプロフィール note は除外されない")
+}
+
 // --- #1021: withFiles / withReplies / withRenotes / withChannelNotes filter ---
 
 // 4 種類のノート (text のみ / file 添付あり / reply / pure renote / channel) を

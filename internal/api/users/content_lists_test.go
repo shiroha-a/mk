@@ -146,6 +146,9 @@ func TestFlashs_HidesNonPublic(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	require.Len(t, rows, 1)
 	assert.Equal(t, "f1", rows[0]["id"])
+	// #1766: upstream Flash schema に permissions は無い (create paramDef のみ)。
+	_, hasPerm := rows[0]["permissions"]
+	assert.False(t, hasPerm, "permissions は packed Flash に含めない")
 }
 
 // --- GalleryPosts ---
@@ -167,6 +170,9 @@ func TestGalleryPosts_ReturnsAll(t *testing.T) {
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Len(t, rows, 2)
+	// #1766: 空 tags は出力しない (upstream は length>0 のみ)。
+	_, hasTags := rows[0]["tags"]
+	assert.False(t, hasTags, "空 tags は省略される")
 }
 
 // #1555 users/gallery/posts も fileIds から DriveFile を解決する

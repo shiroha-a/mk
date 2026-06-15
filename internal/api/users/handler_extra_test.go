@@ -59,8 +59,10 @@ func TestRelation_Success(t *testing.T) {
 	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var relArr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &relArr))
+	require.Len(t, relArr, 1)
+	resp := relArr[0]
 	assert.Equal(t, "u2", resp["id"])
 	assert.Equal(t, false, resp["isFollowing"])
 }
@@ -77,8 +79,10 @@ func TestRelation_NilViewer(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	rec := postExtra(h.Relation, `{"userId":"u2"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var relArr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &relArr))
+	require.Len(t, relArr, 1)
+	resp := relArr[0]
 	assert.Equal(t, false, resp["isFollowing"])
 	assert.Equal(t, false, resp["isBlocking"])
 }
@@ -104,8 +108,10 @@ func TestRelation_TransientDBErrorFallsBackToFalse(t *testing.T) {
 
 	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var relArr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &relArr))
+	require.Len(t, relArr, 1)
+	resp := relArr[0]
 	assert.Equal(t, false, resp["isFollowing"])
 	assert.Equal(t, false, resp["isFollowed"])
 }
@@ -121,8 +127,10 @@ func TestRelation_PartialDirection(t *testing.T) {
 
 	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var relArr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &relArr))
+	require.Len(t, relArr, 1)
+	resp := relArr[0]
 	// u1 → u2 follow のみ。逆方向 (= u2 → u1) は存在しない。
 	assert.Equal(t, true, resp["isFollowing"])
 	assert.Equal(t, false, resp["isFollowed"])
@@ -163,8 +171,10 @@ func TestRelation_PopulatedRelations(t *testing.T) {
 
 	rec := postExtra(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var relArr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &relArr))
+	require.Len(t, relArr, 1)
+	resp := relArr[0]
 	assert.Equal(t, "u2", resp["id"])
 	assert.Equal(t, true, resp["isFollowing"])
 	assert.Equal(t, true, resp["isFollowed"])

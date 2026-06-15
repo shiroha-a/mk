@@ -836,6 +836,13 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// upstream notes.ts:214-217 は generateBaseNoteFilteringQuery に
+	// excludeUserFromMute: ps.userId を渡し QueryService が
+	// `muting.muteeId != :excludeId` を加える。viewer が target 本人を mute して
+	// いても target のプロフィール note は mute filter から除外して表示するのが
+	// 標準挙動 (mute した相手のページを直接開けば見える)。mute set から target を
+	// 除いて同挙動にする (#1766)。block 判定は除外しない。
+	delete(sets.MutedUserIDs, req.UserID)
 	notes, err = notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
 	if err != nil {
 		return apierr.JSONInternalError(c)

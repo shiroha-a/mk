@@ -131,16 +131,15 @@ func (h *Handler) Flashs(c echo.Context) error {
 			createdAt = t.UTC().Format(tsFormat)
 		}
 		entry := map[string]any{
-			"id":          f.ID,
-			"createdAt":   createdAt,
-			"updatedAt":   f.UpdatedAt.UTC().Format(tsFormat),
-			"title":       f.Title,
-			"summary":     f.Summary,
-			"userId":      f.UserID,
-			"script":      f.Script,
-			"permissions": []string(f.Permissions),
-			"likedCount":  f.LikedCount,
-			"visibility":  f.Visibility,
+			"id":         f.ID,
+			"createdAt":  createdAt,
+			"updatedAt":  f.UpdatedAt.UTC().Format(tsFormat),
+			"title":      f.Title,
+			"summary":    f.Summary,
+			"userId":     f.UserID,
+			"script":     f.Script,
+			"likedCount": f.LikedCount,
+			"visibility": f.Visibility,
 		}
 		if packedUser != nil {
 			entry["user"] = packedUser
@@ -197,11 +196,16 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 			"title":       g.Title,
 			"description": g.Description,
 			"fileIds":     []string(g.FileIDs),
-			"tags":        []string(g.Tags),
 			"isSensitive": g.IsSensitive,
 			"likedCount":  g.LikedCount,
 			// fileIds から DriveFile を解決する (#1555、i/gallery/posts と同じ)。
 			"files": h.resolveGalleryFiles(g.FileIDs),
+		}
+		// upstream GalleryPostEntityService.ts:56 は tags を length>0 のときのみ
+		// 出力する (空なら undefined で省略)。空配列を "tags":[] として出さない
+		// よう揃える (#1766)。
+		if len(g.Tags) > 0 {
+			entry["tags"] = []string(g.Tags)
 		}
 		if viewer != nil {
 			liked := false

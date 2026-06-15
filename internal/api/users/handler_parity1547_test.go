@@ -42,13 +42,16 @@ func TestRelation_ArrayForm(t *testing.T) {
 	assert.Equal(t, "u3", out[1]["id"])
 }
 
-func TestRelation_SingleFormStillObject(t *testing.T) {
+// #1766: upstream relation.ts は単一 userId (string) でも単一要素配列を返す
+// (`.then(it => [it])`)。mk-go も配列に揃える。
+func TestRelation_SingleFormReturnsArray(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := postStub(h.Relation, `{"userId":"u2"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
-	var out map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out), "単体入力は従来どおりオブジェクト")
-	assert.Equal(t, "u2", out["id"])
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out), "単体入力でも単一要素配列で応答する")
+	require.Len(t, out, 1)
+	assert.Equal(t, "u2", out[0]["id"])
 }
 
 // --- N3 / X1 / X4: viewer が target にブロックされている場合の早期 [] ---
