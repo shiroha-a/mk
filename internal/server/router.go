@@ -2049,6 +2049,8 @@ func (s *Server) setupRoutes() {
 	chatService.SetBlockingRepo(blockingRepo)
 	// React で custom emoji (:name:) reaction の存在検証に使う (#1541)。
 	chatService.SetEmojiRepo(emojiRepo)
+	// 1-on-1 DM の chatApproval bypass + 送信後 approval 挿入に使う (#1748)。
+	chatService.SetApprovalRepo(repository.NewChatApprovalRepository(s.db))
 	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
 	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。

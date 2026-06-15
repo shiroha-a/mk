@@ -361,3 +361,90 @@ func TestFederateInvitation_DeliveryFailureIsSwallowed(t *testing.T) {
 	svc.FederateInvitation("room1", "bob")
 	assert.Equal(t, 1, deliverer.called)
 }
+
+// --- #1748: chatApproval bypass ---
+
+// fakeApprovalRepo is an in-memory repository.ChatApprovalRepository for the
+// chatApproval bypass tests.
+type fakeApprovalRepo struct {
+	approvals   map[string]bool // key: userID+"/"+otherID
+	createCount int
+	createErr   error
+}
+
+func newFakeApprovalRepo() *fakeApprovalRepo {
+	return &fakeApprovalRepo{approvals: map[string]bool{}}
+}
+
+func (f *fakeApprovalRepo) Create(a *model.ChatApproval) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.createCount++
+	f.approvals[a.UserID+"/"+a.OtherID] = true
+	return nil
+}
+func (f *fakeApprovalRepo) Delete(userID, otherID string) error {
+	delete(f.approvals, userID+"/"+otherID)
+	return nil
+}
+func (f *fakeApprovalRepo) Exists(userID, otherID string) (bool, error) {
+	return f.approvals[userID+"/"+otherID], nil
+}
+func (f *fakeApprovalRepo) ListByUser(string) ([]*model.ChatApproval, error) { return nil, nil }
+
+// 相手 (bob) が過去に自分 (alice) へ送っていれば (otherApprovedMe)、bob の
+// chatScope=followers でも alice→bob を許可する。
+func TestCreateMessageToUser_ApprovalBypassesScope(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	approvalRepo := newFakeApprovalRepo()
+	svc.SetApprovalRepo(approvalRepo)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "followers"}
+
+	// approval 無し: alice は follower でないので reject。
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+
+	// bob が過去に alice へ送った = approval{bob, alice}。otherApprovedMe で bypass。
+	approvalRepo.approvals["bob/alice"] = true
+	_, err = svc.CreateMessageToUser(context.Background(), "alice", "bob", "ok", "")
+	require.NoError(t, err)
+}
+
+// 送信成功後、自分→相手の approval が記録される。
+func TestCreateMessageToUser_RecordsApprovalAfterSend(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	approvalRepo := newFakeApprovalRepo()
+	svc.SetApprovalRepo(approvalRepo)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "everyone"}
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	require.NoError(t, err)
+	ok, _ := approvalRepo.Exists("alice", "bob")
+	assert.True(t, ok, "approval{alice, bob} must be recorded after send")
+}
+
+// 既に approval{alice, bob} があれば重複挿入しない (idempotent)。
+func TestCreateMessageToUser_ApprovalIdempotent(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	approvalRepo := newFakeApprovalRepo()
+	svc.SetApprovalRepo(approvalRepo)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "everyone"}
+	approvalRepo.approvals["alice/bob"] = true
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, approvalRepo.createCount, "既存 approval があれば Create を呼ばない")
+}
+
+// approvalRepo 未配線なら従来どおり scope のみで判定する (regression)。
+func TestCreateMessageToUser_NoApprovalRepoScopeEnforced(t *testing.T) {
+	svc, userRepo, _ := newScopeService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "followers"}
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "x", "")
+	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
+}
