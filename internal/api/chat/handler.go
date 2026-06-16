@@ -592,12 +592,13 @@ func (h *Handler) RoomsShow(c echo.Context) error {
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		// upstream chat/rooms/show.ts:30 の noSuchRoom id に揃える (#1771)。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
 	}
 	if h.svc != nil {
 		ok, err := h.svc.HasPermissionToViewRoomInfo(user.ID, room)
 		if err != nil || !ok {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
 		}
 	}
 	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
@@ -621,7 +622,8 @@ func (h *Handler) RoomsUpdate(c echo.Context) error {
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		// upstream chat/rooms/update.ts:30 の noSuchRoom id に揃える (#1771)。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "fcdb0f92-bda6-47f9-bd05-343e0e020932"))
 	}
 	if req.Name != "" {
 		room.Name = req.Name
@@ -729,15 +731,19 @@ func (h *Handler) RoomsMute(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
+		// upstream mute.ts:28-34 は mute:boolean を required で受け、isMuted=mute に
+		// する (mute:false で unmute)。以前は param を無視して常に mute していた (#1771)。
+		Mute bool `json:"mute"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	m, err := h.repo.FindMembership(user.ID, req.RoomID)
 	if err != nil {
-		return c.NoContent(http.StatusNoContent)
+		// upstream mute.ts は membership 不在で noSuchRoom を返す (以前は 204)。
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df"))
 	}
-	m.IsMuted = true
+	m.IsMuted = req.Mute
 	_ = h.repo.UpdateMembership(m)
 	return c.NoContent(http.StatusNoContent)
 }
@@ -806,6 +812,15 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	if !toRoom && !toUser {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
+	// upstream create-to-room.ts:77-91 は file/content 検証より先に room 存在を
+	// 確認し、無ければ noSuchRoom を返す。mk-go は単一 handler なので room path で
+	// 先に room を解決する (以前は service の ErrNotFound が NO_SUCH_MESSAGE に
+	// マップされ、検証順も逆だった、#1771)。
+	if toRoom && h.repo != nil {
+		if _, err := h.repo.FindRoomByID(*req.ToRoomID); err != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "8098520d-2da5-4e8f-8ee1-df78b55a4ec6"))
+		}
+	}
 	// create-to-user / create-to-room で CONTENT_REQUIRED / NO_SUCH_FILE の id が
 	// 異なる (golden_error_ids.json)。
 	contentRequiredID := "25587321-b0e6-449c-9239-f8925092942c"
@@ -853,6 +868,14 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		// RECIPIENT_IS_YOURSELF: 自分宛 DM は upstream で recipientIsYourself。
 		if *req.ToUserID == user.ID {
 			return c.JSON(http.StatusBadRequest, apierr.Error("RECIPIENT_IS_YOURSELF", "Cannot send a message to yourself.", "17e2ba79-e22a-4cbc-bf91-d327643f4a7e"))
+		}
+		// upstream create-to-user.ts:112-115 は getUser(toUserId) で recipient を
+		// 解決し、不在なら NO_SUCH_USER を返す (以前は不在 user にも message を作って
+		// いた、#1771)。user-timeline と同じ status/code/id に揃える。
+		if h.userRepo != nil {
+			if _, ferr := h.userRepo.FindByID(*req.ToUserID); ferr != nil {
+				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
+			}
 		}
 		msg, err = h.svc.CreateMessageToUser(c.Request().Context(), user.ID, *req.ToUserID, text, fileID)
 	}
@@ -1534,7 +1557,14 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(members))
 	for _, m := range members {
-		entry := map[string]any{"id": m.ID, "userId": m.UserID, "roomId": m.RoomID, "isMuted": m.IsMuted}
+		// upstream packRoomMembership は {id, createdAt, userId, roomId, user}。
+		// createdAt は required (id=aidx 由来)、isMuted は schema に無いので出さない (#1771)。
+		entry := map[string]any{"id": m.ID, "userId": m.UserID, "roomId": m.RoomID}
+		if h.idGen != nil {
+			if t, err := h.idGen.ParseTime(m.ID); err == nil {
+				entry["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
+			}
+		}
 		if m.User != nil {
 			entry["user"] = packUser(m.User)
 		}

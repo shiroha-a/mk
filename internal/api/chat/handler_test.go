@@ -119,6 +119,8 @@ func TestRoomsShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.RoomsShow, `{"roomId":"ghost"}`, u1)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #1771: upstream show.ts の noSuchRoom id に揃える。
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "857ae02f-8759-4d20-9adb-6e95fffe4fd7")
 }
 
 // upstream 2026.5.4 hasPermissionToViewRoomInfo gate: 他人の room に対する
@@ -172,6 +174,8 @@ func TestRoomsUpdate_NotOwner(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	rec := post(h.RoomsUpdate, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// #1771: upstream update.ts の noSuchRoom id に揃える。
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "fcdb0f92-bda6-47f9-bd05-343e0e020932")
 }
 
 func TestRoomsUpdate_InvalidParam(t *testing.T) {
@@ -278,17 +282,25 @@ func TestRoomsLeave_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1771: mute は mute:boolean param に従う (mute:true で mute、mute:false で unmute)。
 func TestRoomsMute(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Memberships["u1:r1"] = &model.ChatRoomMembership{UserID: "u1", RoomID: "r1"}
-	rec := post(h.RoomsMute, `{"roomId":"r1"}`, u1)
+	rec := post(h.RoomsMute, `{"roomId":"r1","mute":true}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Memberships["u1:r1"].IsMuted)
+
+	rec = post(h.RoomsMute, `{"roomId":"r1","mute":false}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.False(t, repo.Memberships["u1:r1"].IsMuted, "mute:false で unmute される")
 }
 
+// #1771: membership 不在は 204 でなく NO_SUCH_ROOM。
 func TestRoomsMute_NoMembership(t *testing.T) {
 	h, _ := newTestHandler()
-	rec := post(h.RoomsMute, `{"roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	rec := post(h.RoomsMute, `{"roomId":"r1","mute":true}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df")
 }
 
 func TestRoomsMute_InvalidParam(t *testing.T) {
@@ -583,10 +595,21 @@ func TestMessagesCreate_Service_NoTarget(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1771: create-to-room は room 不在で NO_SUCH_ROOM (NO_SUCH_MESSAGE ではない)。
 func TestMessagesCreate_Service_RoomNotFound(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	rec := post(h.MessagesCreate, `{"text":"hi","toRoomId":"ghost"}`, u1)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "8098520d-2da5-4e8f-8ee1-df78b55a4ec6")
+}
+
+// #1771: create-to-user は recipient 不在で NO_SUCH_USER を返す (userRepo 配線時)。
+func TestMessagesCreate_ToUser_NoSuchUser(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	h.SetUserRepo(testutil.NewMockUserRepository()) // recipient を seed しない
+	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_USER", "11795c64-40ea-4198-b06e-3c873ed9039d")
 }
 
 func TestMessagesCreate_Service_RoomForbidden(t *testing.T) {
@@ -1639,6 +1662,24 @@ func TestRoomsMembers_OwnerAllowed(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	rec := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1771: rooms/members の entry は createdAt を含み (required)、schema に無い
+// isMuted は出さない。
+func TestRoomsMembers_EntryShape(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	idGen, _ := id.NewGenerator("aidx")
+	mid := idGen.Generate(time.Now())
+	repo.Memberships["u2:r1"] = &model.ChatRoomMembership{ID: mid, UserID: u2.ID, RoomID: "r1", IsMuted: true, User: u2}
+	rec := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.NotEmpty(t, out[0]["createdAt"], "createdAt は required")
+	_, hasMuted := out[0]["isMuted"]
+	assert.False(t, hasMuted, "isMuted は ChatRoomMembership schema に無いので出さない")
 }
 
 func TestMembersUpdateMembership_Auth(t *testing.T) {
