@@ -210,6 +210,10 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
+	// upstream update.ts は required:['id','isActive','name','on','url'] だが、
+	// mk-go は意図的に partial update (id 以外は省略可) を許す superset 挙動を維持
+	// する (#1772 で確認)。frontend MkSystemWebhookEditor は常に全フィールドを送る
+	// ため drop-in 互換に影響せず、partial 対応は mk-go の追加の柔軟性。
 	// 存在確認 (GORM Updates(map) は 0 行影響でも nil を返すため)
 	before, err := h.systemWebhookRepo.FindByID(req.ID)
 	if err != nil {

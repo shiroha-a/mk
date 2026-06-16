@@ -417,3 +417,25 @@ func TestFederationUpdateInstance_DoesNotInvalidateWithoutSuspendChange(t *testi
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, inv.hosts, "note-only update must not flush the suspend cache")
 }
+
+type stubBulkDeleter struct {
+	host  string
+	calls int
+}
+
+func (s *stubBulkDeleter) DeleteAllByHost(host string) (int64, error) {
+	s.calls++
+	s.host = host
+	return 2, nil
+}
+
+// #1772: driveBulkDeleter 配線時は物理削除 + 使用量減算込みの DeleteAllByHost を使う。
+func TestFederationDeleteAllFiles_UsesBulkDeleter(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	bd := &stubBulkDeleter{}
+	h.SetDriveBulkDeleter(bd)
+	rec := doPost(h.FederationDeleteAllFiles, `{"host":"remote.example"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, 1, bd.calls)
+	assert.Equal(t, "remote.example", bd.host)
+}

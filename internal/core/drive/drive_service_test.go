@@ -1250,3 +1250,33 @@ func TestUpload_ImageProcessor_RepoCreateErrorRollback(t *testing.T) {
 	entries, _ := os.ReadDir(tmpDir)
 	assert.Empty(t, entries)
 }
+
+// #1772: DeleteAllByHost は対象ホストの file を row 削除し、usage chart を per-file
+// で減算する (local / 他ホストは残す)。
+func TestDeleteAllByHost(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	hook := &stubChartHook{}
+	svc.SetChartHook(hook)
+	host := "remote.example"
+	other := "other.example"
+	require.NoError(t, fileRepo.Create(&model.DriveFile{ID: "rf1", UserHost: &host}))
+	require.NoError(t, fileRepo.Create(&model.DriveFile{ID: "rf2", UserHost: &host}))
+	require.NoError(t, fileRepo.Create(&model.DriveFile{ID: "lf"}))                   // local (UserHost nil)
+	require.NoError(t, fileRepo.Create(&model.DriveFile{ID: "of", UserHost: &other})) // 他ホスト
+
+	n, err := svc.DeleteAllByHost(host)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+	assert.NotContains(t, fileRepo.Files, "rf1")
+	assert.NotContains(t, fileRepo.Files, "rf2")
+	assert.Contains(t, fileRepo.Files, "lf", "local file は残る")
+	assert.Contains(t, fileRepo.Files, "of", "他ホスト file は残る")
+	assert.ElementsMatch(t, []string{"rf1", "rf2"}, hook.deleted, "usage chart を per-file で減算")
+}
+
+func TestDeleteAllByHost_EmptyHost(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	n, err := svc.DeleteAllByHost("")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+}

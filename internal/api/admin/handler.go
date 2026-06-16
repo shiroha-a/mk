@@ -85,14 +85,18 @@ type UnfollowEnqueuer interface {
 
 // Handler handles admin API endpoints.
 type Handler struct {
-	signupService         *signup.Service
-	roleService           *role.Service
-	metaRepo              repository.MetaRepository
-	userRepo              repository.UserRepository
-	abuseRepo             repository.AbuseReportRepository
-	modLogService         *moderationlog.Service
-	emojiRepo             repository.EmojiRepository
-	driveFileRepo         repository.DriveFileRepository
+	signupService *signup.Service
+	roleService   *role.Service
+	metaRepo      repository.MetaRepository
+	userRepo      repository.UserRepository
+	abuseRepo     repository.AbuseReportRepository
+	modLogService *moderationlog.Service
+	emojiRepo     repository.EmojiRepository
+	driveFileRepo repository.DriveFileRepository
+	// driveBulkDeleter は federation/delete-all-files で host のファイルを物理
+	// ストレージ込みで削除し drive 使用量を減算する (#1772)。未配線時は
+	// driveFileRepo.DeleteByHost に degrade (row のみ削除)。
+	driveBulkDeleter      DriveBulkDeleter
 	adminDB               *gorm.DB
 	userIPRepo            repository.UserIPRepository
 	queueInspector        QueueInspector
@@ -2377,6 +2381,21 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// upstream update.ts:91-95 は emoji 解決より先に fileId の driveFile を検証し、
+	// null なら NO_SUCH_FILE を返す (#1772。emoji 不在 AND fileId 不正が同時のとき
+	// upstream は NO_SUCH_FILE を優先する)。ここで解決した file を後段の URL 差し替え
+	// でも再利用する。
+	var emojiFile *model.DriveFile
+	if req.FileID != nil && *req.FileID != "" {
+		if h.driveFileRepo == nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
+		if ferr != nil {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
+		}
+		emojiFile = f
+	}
 	// before snapshot for moderation log (also used to gate NO_SUCH_EMOJI when
 	// the row is missing — UpdateFields の RowsAffected==0 経路は repo 側で
 	// ErrRecordNotFound に昇格済み (#650 問題 2)).
@@ -2409,17 +2428,10 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		}
 		fields["name"] = *req.Name
 	}
-	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。
-	if req.FileID != nil && *req.FileID != "" {
-		if h.driveFileRepo == nil {
-			// fileId が来たのに drive を引けない構成は処理できない。silent 204
-			// (no-op 成功) を避けて 500 にする。
-			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-		}
-		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
-		if ferr != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
-		}
+	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。file は
+	// emoji 解決前に検証済み (emojiFile)、NO_SUCH_FILE はそこで返している (#1772)。
+	if emojiFile != nil {
+		f := emojiFile
 		if !isAllowedEmojiImageType(f.Type) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
 		}

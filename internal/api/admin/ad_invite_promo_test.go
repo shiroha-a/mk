@@ -71,6 +71,11 @@ func TestAdCreate_Success(t *testing.T) {
 	assert.Equal(t, 2, got.Ratio)
 	assert.True(t, got.IsSensitive)
 	assert.Contains(t, repo.Ads, got.ID)
+	// #1772: expiresAt/startsAt は upstream toISOString() に合わせ UTC .000Z 形式。
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`, raw["expiresAt"])
+	assert.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`, raw["startsAt"])
 }
 
 func TestAdCreate_MissingRequired(t *testing.T) {

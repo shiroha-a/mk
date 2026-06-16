@@ -637,3 +637,16 @@ func (m *MockDriveFileRepository) DeleteByHost(host string) (int64, error) {
 	}
 	return n, nil
 }
+
+func (m *MockDriveFileRepository) ListByHost(host string) ([]*model.DriveFile, error) {
+	if host == "" {
+		return nil, nil
+	}
+	var rows []*model.DriveFile
+	for _, f := range m.Files {
+		if f.UserHost != nil && *f.UserHost == host {
+			rows = append(rows, f)
+		}
+	}
+	return rows, nil
+}

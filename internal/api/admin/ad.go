@@ -61,7 +61,38 @@ func (h *Handler) AdCreate(c echo.Context) error {
 		"adId": ad.ID,
 		"ad":   ad,
 	})
-	return c.JSON(http.StatusOK, ad)
+	return c.JSON(http.StatusOK, packAd(ad))
+}
+
+// packAd serializes an Ad with expiresAt/startsAt as UTC `.000Z` strings,
+// matching upstream admin/ad/create.ts / list.ts which return
+// `ad.expiresAt.toISOString()` (#1772)。Go の time.Time 既定 marshal は server
+// ローカル TZ offset + nanosecond で upstream の Z+ミリ秒固定と書式が異なる。
+// field 集合は packedAdSchema と一致。
+func packAd(ad *model.Ad) map[string]any {
+	const isoMs = "2006-01-02T15:04:05.000Z"
+	return map[string]any{
+		"id":          ad.ID,
+		"expiresAt":   ad.ExpiresAt.UTC().Format(isoMs),
+		"startsAt":    ad.StartsAt.UTC().Format(isoMs),
+		"place":       ad.Place,
+		"priority":    ad.Priority,
+		"ratio":       ad.Ratio,
+		"url":         ad.URL,
+		"imageUrl":    ad.ImageURL,
+		"memo":        ad.Memo,
+		"dayOfWeek":   ad.DayOfWeek,
+		"isSensitive": ad.IsSensitive,
+	}
+}
+
+// packAds maps packAd over a slice (AdList).
+func packAds(ads []*model.Ad) []map[string]any {
+	out := make([]map[string]any, 0, len(ads))
+	for _, a := range ads {
+		out = append(out, packAd(a))
+	}
+	return out
 }
 
 // AdDelete handles POST /api/admin/ad/delete.
@@ -115,7 +146,7 @@ func (h *Handler) AdList(c echo.Context) error {
 		if rows == nil {
 			return c.JSON(http.StatusOK, []any{})
 		}
-		return c.JSON(http.StatusOK, rows)
+		return c.JSON(http.StatusOK, packAds(rows))
 	}
 	rows, err := h.adRepo.ListFiltered(req.Publishing, sinceID, untilID, req.Limit, time.Now())
 	if err != nil {
@@ -124,7 +155,7 @@ func (h *Handler) AdList(c echo.Context) error {
 	if rows == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	return c.JSON(http.StatusOK, rows)
+	return c.JSON(http.StatusOK, packAds(rows))
 }
 
 // AdUpdate handles POST /api/admin/ad/update.

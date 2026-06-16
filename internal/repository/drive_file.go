@@ -95,6 +95,10 @@ type DriveFileRepository interface {
 	// remote instance host. Returns affected count. Used by
 	// admin/federation/delete-all-files (#587)。
 	DeleteByHost(host string) (int64, error)
+	// ListByHost returns every drive_file whose userHost matches the given
+	// remote instance host. Used by the drive Service to physically delete each
+	// file's storage objects before the bulk row delete (#1772)。
+	ListByHost(host string) ([]*model.DriveFile, error)
 }
 
 type driveFileRepository struct {
@@ -365,8 +369,15 @@ func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, until
 		}
 	}
 	if fileType != "" {
-		// type is mimetype prefix match (e.g. "image/" matches image/png)
-		q = q.Where(`"type" LIKE ?`, fileType+"%")
+		// upstream admin/drive/files.ts:78-84: `/*` 終端は prefix LIKE
+		// (type.replace('/*','/')+'%')、それ以外は完全一致 (#1772、ListByUser と
+		// 同 semantics)。以前は無条件 prefix LIKE で image/* がほぼ 0 件、
+		// image/png が過剰マッチしていた。
+		if strings.HasSuffix(fileType, "/*") {
+			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
+		} else {
+			q = q.Where(`"type" = ?`, fileType)
+		}
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
@@ -390,9 +401,13 @@ func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, until
 func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	q := r.db.Model(&model.DriveFile{}).Where(`"userId" IS NULL`)
 	if fileType != "" {
-		// MIME prefix match: ListForAdmin と semantics 統一 (e.g. "image/" で
-		// image/* を全部拾う)。
-		q = q.Where(`"type" LIKE ?`, fileType+"%")
+		// upstream files.ts と同じく `/*` 終端は prefix LIKE、それ以外は完全一致
+		// (#1772、ListForAdmin と semantics 統一)。
+		if strings.HasSuffix(fileType, "/*") {
+			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
+		} else {
+			q = q.Where(`"type" = ?`, fileType)
+		}
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
@@ -501,4 +516,15 @@ func (r *driveFileRepository) DeleteByHost(host string) (int64, error) {
 	// ローカル user (userHost IS NULL) は誤って巻き込まないよう明示一致のみ。
 	tx := r.db.Where(`"userHost" = ?`, host).Delete(&model.DriveFile{})
 	return tx.RowsAffected, tx.Error
+}
+
+func (r *driveFileRepository) ListByHost(host string) ([]*model.DriveFile, error) {
+	if host == "" {
+		return nil, nil
+	}
+	var rows []*model.DriveFile
+	if err := r.db.Where(`"userHost" = ?`, host).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

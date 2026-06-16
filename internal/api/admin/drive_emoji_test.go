@@ -1239,6 +1239,18 @@ func TestEmojiUpdate_FileIdReplacesImage(t *testing.T) {
 	assert.Equal(t, "https://example/new.png", got.PublicURL)
 }
 
+// #1772: emoji 不在 AND fileId 不正が同時のとき、upstream は file 検証を先に行うため
+// NO_SUCH_FILE を返す (NO_SUCH_EMOJI でなく)。
+func TestEmojiUpdate_FileCheckedBeforeEmoji(t *testing.T) {
+	h, _ := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+	dr := testutil.NewMockDriveFileRepository()
+	h.SetDriveFileRepo(dr) // fileId は seed しない
+	rec := doPost(h.EmojiUpdate, `{"id":"ghost","fileId":"badfile"}`, adminUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
+	assert.Contains(t, rec.Body.String(), "14fb9fd9-0731-4e2f-aeb9-f09e4740333d")
+}
+
 func TestEmojiUpdate_RoleIds(t *testing.T) {
 	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
 	rec := doPost(h.EmojiUpdate, `{"id":"e1","roleIdsThatCanBeUsedThisEmojiAsReaction":["r1","r2"]}`, adminUser)

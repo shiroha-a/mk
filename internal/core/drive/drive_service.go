@@ -747,6 +747,41 @@ func (s *Service) Delete(user *model.User, id string) error {
 	return nil
 }
 
+// DeleteAllByHost physically deletes every drive file uploaded from the given
+// remote host and decrements drive usage charts, then bulk-deletes the rows.
+// Used by admin/federation/delete-all-files (upstream iterates driveService
+// .deleteFile per file). Unlike Delete it performs no owner check (an admin
+// purges another instance's files). Storage deletes are best-effort so a single
+// missing object does not abort the purge; the chart hook decrements usage per
+// file. Returns the number of rows deleted (#1772)。
+func (s *Service) DeleteAllByHost(host string) (int64, error) {
+	if host == "" {
+		return 0, nil
+	}
+	files, err := s.fileRepo.ListByHost(host)
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range files {
+		if f.AccessKey != nil {
+			if derr := s.storage.Delete(*f.AccessKey); derr != nil {
+				slog.Warn("drive: delete-all-by-host storage delete failed", "host", host, "accessKey", *f.AccessKey, "err", derr)
+			}
+		}
+		if f.ThumbnailAccessKey != nil {
+			_ = s.storage.Delete(*f.ThumbnailAccessKey)
+		}
+		if f.WebpublicAccessKey != nil {
+			_ = s.storage.Delete(*f.WebpublicAccessKey)
+		}
+		// usedRemote / instanceChart 等の使用量を per-file で減算する。
+		if s.chartHook != nil {
+			s.chartHook.OnFileDeleted(f)
+		}
+	}
+	return s.fileRepo.DeleteByHost(host)
+}
+
 // CreateFolder creates a new drive folder owned by user.
 func (s *Service) CreateFolder(user *model.User, name string, parentID *string) (*model.DriveFolder, error) {
 	if user == nil {

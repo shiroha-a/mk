@@ -35,18 +35,40 @@ func toPunyHost(host string) string {
 // FederationDeleteAllFiles handles POST /api/admin/federation/delete-all-files.
 //
 // 指定ホストの DriveFile (= リモート user の上げた添付) を一括削除する。
-// 旧実装は no-op だったが #587 で本実装化。Misskey TS 本家の挙動と等価:
-// packages/backend/src/server/api/endpoints/admin/federation/delete-all-files.ts。
+// DriveBulkDeleter physically deletes all drive files of a remote host
+// (storage objects + drive usage decrement + row delete). Implemented by
+// *core/drive.Service (DeleteAllByHost). 循環依存回避のため interface で受ける。
+type DriveBulkDeleter interface {
+	DeleteAllByHost(host string) (int64, error)
+}
+
+// SetDriveBulkDeleter wires the physical drive purge used by
+// federation/delete-all-files (#1772).
+func (h *Handler) SetDriveBulkDeleter(d DriveBulkDeleter) { h.driveBulkDeleter = d }
+
+// FederationDeleteAllFiles handles POST /api/admin/federation/delete-all-files.
 //
-// host が空または driveFileRepo 未配線の場合は no-op で 204 を返す。S3 等の
-// 物理オブジェクト削除は drive_file の deletion hook 経由 (別経路、本家と同じく
-// row 削除で hook が起動する)。
+// upstream delete-all-files.ts は host の各 file に driveService.deleteFile を
+// 呼び、物理ストレージ (S3 / internal) 削除 + drive 使用量減算 + row 削除を行う。
+// mk-go も driveBulkDeleter (= core/drive.Service.DeleteAllByHost) 経由で同等の
+// 物理削除を行う (#1772。以前は row のみ削除で S3 オブジェクトが orphan 化 +
+// 使用量カウンタが未減算だった)。driveBulkDeleter 未配線時は row のみ削除に
+// degrade。host 空 / repo 未配線は no-op 204。
 func (h *Handler) FederationDeleteAllFiles(c echo.Context) error {
 	var req struct {
 		Host string `json:"host"`
 	}
 	_ = c.Bind(&req)
-	if req.Host == "" || h.driveFileRepo == nil {
+	if req.Host == "" {
+		return c.NoContent(http.StatusNoContent)
+	}
+	if h.driveBulkDeleter != nil {
+		if _, err := h.driveBulkDeleter.DeleteAllByHost(req.Host); err != nil {
+			return apierr.JSONInternalError(c)
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+	if h.driveFileRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if _, err := h.driveFileRepo.DeleteByHost(req.Host); err != nil {

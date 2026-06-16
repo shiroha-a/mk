@@ -355,8 +355,8 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 	assert.True(t, ids[remoteFile.ID])
 	assert.False(t, ids[localFile.ID])
 
-	// type = image/ prefix
-	rows, err = repo.ListForAdmin("", "", "", "image/", "", "", 10)
+	// #1772: type=image/* は prefix LIKE → image/png にマッチ。
+	rows, err = repo.ListForAdmin("", "", "", "image/*", "", "", 10)
 	require.NoError(t, err)
 	ids = make(map[string]bool)
 	for _, r := range rows {
@@ -364,6 +364,26 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 	}
 	assert.True(t, ids[remoteFile.ID])
 	assert.False(t, ids[videoFile.ID])
+
+	// #1772: type=image/png は完全一致 → image/png にマッチ、video/mp4 は不一致。
+	rows, err = repo.ListForAdmin("", "", "", "image/png", "", "", 10)
+	require.NoError(t, err)
+	ids = make(map[string]bool)
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	assert.True(t, ids[remoteFile.ID])
+	assert.False(t, ids[videoFile.ID])
+
+	// #1772: wildcard 無しの "image/" は完全一致扱いなので image/png に当たらない
+	// (旧 prefix LIKE 挙動が消えたことの回帰 guard)。
+	rows, err = repo.ListForAdmin("", "", "", "image/", "", "", 10)
+	require.NoError(t, err)
+	ids = make(map[string]bool)
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	assert.False(t, ids[remoteFile.ID], `"image/" は完全一致で image/png に当たらない`)
 
 	// host exact match
 	rows, err = repo.ListForAdmin("", "", remoteHost, "", "", "", 10)
@@ -438,16 +458,16 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
 	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
 
-	// type=image/ で絞り込み: 本 test の fixture では sysImg のみ image/* に該当。
-	// 他 test が UserID=NULL + Type=image/* な system file 行を残しても本 test を
-	// 巻き込まないよう、 fixture ID で scoped assert する (#1098)。
-	rows, err = repo.ListSystemFiles("image/", "", "", 10)
+	// #1772: type=image/* (wildcard) で絞り込み: 本 test の fixture では sysImg のみ
+	// image/* に該当。他 test が UserID=NULL + Type=image/* な system file 行を残しても
+	// 本 test を巻き込まないよう、 fixture ID で scoped assert する (#1098)。
+	rows, err = repo.ListSystemFiles("image/*", "", "", 10)
 	require.NoError(t, err)
 	ids = make(map[string]bool, len(rows))
 	for _, r := range rows {
 		ids[r.ID] = true
 	}
-	assert.True(t, ids[sysImg.ID], "sysImg (image/png) should appear in image/ filter")
+	assert.True(t, ids[sysImg.ID], "sysImg (image/png) should appear in image/* filter")
 	assert.False(t, ids[sysZip.ID], "sysZip (application/zip) must not appear")
 	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
 	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")

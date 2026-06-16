@@ -2252,6 +2252,7 @@ func (s *Server) setupRoutes() {
 	flashHandler.SetModLog(modLogService)   // #1548: moderator による flash 削除の監査ログ
 	adminHandler.SetEmojiRepo(emojiRepo)
 	adminHandler.SetDriveFileRepo(driveFileRepo)
+	adminHandler.SetDriveBulkDeleter(driveService) // #1772: delete-all-files の物理削除 + 使用量減算
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で
 	// object storage の物理オブジェクトも消すため storage backend を渡す。
 	adminHandler.SetStorageDeleter(driveStorage)
