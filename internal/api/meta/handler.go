@@ -307,14 +307,20 @@ func (h *Handler) serializeActiveAds() []map[string]any {
 	}
 	out := make([]map[string]any, 0, len(ads))
 	for _, a := range ads {
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id":        a.ID,
 			"url":       a.URL,
 			"place":     a.Place,
 			"ratio":     a.Ratio,
 			"imageUrl":  a.ImageURL,
 			"dayOfWeek": a.DayOfWeek,
-		})
+		}
+		// upstream MetaEntityService は isSensitive: ad.isSensitive ? true : undefined。
+		// sensitive のときだけ true を出し、false なら field を omit する (#1777)。
+		if a.IsSensitive {
+			entry["isSensitive"] = true
+		}
+		out = append(out, entry)
 	}
 	return out
 }

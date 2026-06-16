@@ -9,16 +9,26 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
+// maxNoteTextLength mirrors upstream MAX_NOTE_TEXT_LENGTH advertised in nodeinfo
+// metadata。実際の投稿長 limit は別経路だが nodeinfo は upstream と同じ定数を出す。
+const maxNoteTextLength = 3000
+
+// defaultThemeColor mirrors upstream NodeinfoServerService の
+// `meta.themeColor ?? '#86b300'` fallback。
+const defaultThemeColor = "#86b300"
+
 // Handler handles nodeinfo endpoints.
 type Handler struct {
-	cfg      *config.Config
-	metaRepo repository.MetaRepository
-	userRepo repository.UserRepository
-	noteRepo repository.NoteRepository
-	clock    func() time.Time
+	cfg          *config.Config
+	metaRepo     repository.MetaRepository
+	userRepo     repository.UserRepository
+	noteRepo     repository.NoteRepository
+	proxyAccount func() (string, bool)
+	clock        func() time.Time
 }
 
 // NewHandler constructs a Handler.
@@ -48,12 +58,48 @@ func (h *Handler) SetClock(now func() time.Time) {
 	}
 }
 
+// SetProxyAccountResolver wires the resolver used to populate the
+// metadata.proxyAccountName field (#1777)。未配線なら proxyAccountName は null。
+func (h *Handler) SetProxyAccountResolver(r func() (string, bool)) {
+	h.proxyAccount = r
+}
+
 // Version2_1 handles GET /nodeinfo/2.1.
 func (h *Handler) Version2_1(c echo.Context) error {
+	return c.JSON(http.StatusOK, h.buildDocument("2.1"))
+}
+
+// Version2_0 handles GET /nodeinfo/2.0. /.well-known/nodeinfo が 2.0 リンクも
+// advertise するため、upstream NodeinfoServerService と同じく 2.0 も配信する
+// (#1777)。schema 2.0 には software.repository が無いので省略する (upstream は
+// version 2.0 で software.repository を delete する)。
+func (h *Handler) Version2_0(c echo.Context) error {
+	return c.JSON(http.StatusOK, h.buildDocument("2.0"))
+}
+
+// buildDocument assembles the nodeinfo document for the given schema version
+// ("2.0" / "2.1"). software.repository は 2.1 のみ (schema 2.0 には無い)。
+func (h *Handler) buildDocument(version string) map[string]any {
 	nodeName := h.cfg.Host
-	var nodeDescription string
-	var maintainerName, maintainerEmail string
-	openRegistrations := false
+	var (
+		nodeDescription              string
+		maintainerName               string
+		maintainerEmail              string
+		openRegistrations            bool
+		disableRegistration          bool
+		emailRequiredForSignup       bool
+		enableHcaptcha               bool
+		enableRecaptcha              bool
+		enableMcaptcha               bool
+		enableTurnstile              bool
+		enableEmail                  bool
+		enableServiceWorker          bool
+		langs                        = []string{}
+		themeColor                   = defaultThemeColor
+		mergedPolicies               = role.MergeMetaPolicies(nil)
+		tosURL, privacyURL, inqURL   any
+		impressumURL, repoURL, fbURL any
+	)
 	if h.metaRepo != nil {
 		if m, err := h.metaRepo.Fetch(); err == nil && m != nil {
 			if m.Name != nil && *m.Name != "" {
@@ -68,29 +114,73 @@ func (h *Handler) Version2_1(c echo.Context) error {
 			if m.MaintainerEmail != nil {
 				maintainerEmail = *m.MaintainerEmail
 			}
-			// DisableRegistration=true が登録無効、openRegistrations はその反対。
 			openRegistrations = !m.DisableRegistration
+			disableRegistration = m.DisableRegistration
+			emailRequiredForSignup = m.EmailRequiredForSignup
+			enableHcaptcha = m.EnableHcaptcha
+			enableRecaptcha = m.EnableRecaptcha
+			enableMcaptcha = m.EnableMcaptcha
+			enableTurnstile = m.EnableTurnstile
+			enableEmail = m.EnableEmail
+			enableServiceWorker = m.EnableServiceWorker
+			if ls := []string(m.Langs); ls != nil {
+				langs = ls
+			}
+			if m.ThemeColor != nil && *m.ThemeColor != "" {
+				themeColor = *m.ThemeColor
+			}
+			mergedPolicies = role.MergeMetaPolicies([]byte(m.Policies))
+			// *string をそのまま入れると nil は JSON null、値ありはその文字列になる。
+			tosURL, privacyURL, inqURL = m.TermsOfServiceURL, m.PrivacyPolicyURL, m.InquiryURL
+			impressumURL, repoURL, fbURL = m.ImpressumURL, m.RepositoryURL, m.FeedbackURL
 		}
 	}
+
+	var proxyAccountName any
+	if h.proxyAccount != nil {
+		if name, ok := h.proxyAccount(); ok {
+			proxyAccountName = name
+		}
+	}
+
+	maintainer := map[string]any{"name": maintainerName, "email": maintainerEmail}
 	metadata := map[string]any{
 		"nodeName":        nodeName,
 		"nodeDescription": nodeDescription,
-		"maintainer": map[string]any{
-			"name":  maintainerName,
-			"email": maintainerEmail,
-		},
+		"nodeAdmins":      []map[string]any{maintainer},
+		// deprecated だが upstream が残しているので維持する。
+		"maintainer":             maintainer,
+		"langs":                  langs,
+		"tosUrl":                 tosURL,
+		"privacyPolicyUrl":       privacyURL,
+		"inquiryUrl":             inqURL,
+		"impressumUrl":           impressumURL,
+		"repositoryUrl":          repoURL,
+		"feedbackUrl":            fbURL,
+		"disableRegistration":    disableRegistration,
+		"disableLocalTimeline":   !policyBool(mergedPolicies, "ltlAvailable"),
+		"disableGlobalTimeline":  !policyBool(mergedPolicies, "gtlAvailable"),
+		"emailRequiredForSignup": emailRequiredForSignup,
+		"enableHcaptcha":         enableHcaptcha,
+		"enableRecaptcha":        enableRecaptcha,
+		"enableMcaptcha":         enableMcaptcha,
+		"enableTurnstile":        enableTurnstile,
+		"maxNoteTextLength":      maxNoteTextLength,
+		"enableEmail":            enableEmail,
+		"enableServiceWorker":    enableServiceWorker,
+		"proxyAccountName":       proxyAccountName,
+		"themeColor":             themeColor,
 		// CherryPick 本家の reversi 連合拡張と互換性を示すバージョン。
 		// 相手側 (CherryPick) はこの値のメジャーバージョン一致で連合可否を
 		// 判定するので、破壊的変更が無い限り 1.1.x を維持する (#417 P3)。
 		// corereversi.ReversiVersion と drift しないよう定数参照する。
 		"reversiVersion": corereversi.ReversiVersion,
 	}
+
 	// 統計値は repo 経由で集計。未配線なら 0 (#403)。DB error は nodeinfo を
 	// 丸ごと failさせるより partial 値で返す方が federation crawler に優しい
 	// ので slog.Warn でログだけ残して 0 fallback する。
-	var (
-		usersTotal, usersMonth, usersHalf, localPosts, localComments int64
-	)
+	var usersTotal, usersMonth, usersHalf, localPosts, localComments int64
 	if h.userRepo != nil {
 		now := h.clock()
 		if v, err := h.userRepo.CountLocalUsers(); err != nil {
@@ -122,13 +212,18 @@ func (h *Handler) Version2_1(c echo.Context) error {
 		}
 	}
 
-	resp := map[string]any{
-		"version": "2.1",
-		"software": map[string]any{
-			"name":       "mk-go",
-			"version":    config.MkGoVersion,
-			"repository": "https://github.com/shiroha-a/mk",
-		},
+	software := map[string]any{
+		"name":    "mk-go",
+		"version": config.MkGoVersion,
+	}
+	// schema 2.0 には software.repository が無い (upstream は 2.0 で delete する)。
+	if version == "2.1" {
+		software["repository"] = "https://github.com/shiroha-a/mk"
+	}
+
+	return map[string]any{
+		"version":   version,
+		"software":  software,
 		"protocols": []string{"activitypub"},
 		"services": map[string]any{
 			"inbound":  []string{},
@@ -146,5 +241,16 @@ func (h *Handler) Version2_1(c echo.Context) error {
 		},
 		"metadata": metadata,
 	}
-	return c.JSON(http.StatusOK, resp)
+}
+
+// policyBool reads a boolean policy value with a conservative false default
+// (mirrors meta.PolicyBool; duplicated here to avoid importing the meta API
+// package from nodeinfo)。
+func policyBool(policies map[string]any, key string) bool {
+	v, ok := policies[key]
+	if !ok {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
 }

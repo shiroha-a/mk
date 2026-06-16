@@ -112,6 +112,27 @@ func TestInstanceRepository_IncrementCount(t *testing.T) {
 	assert.Equal(t, 2, got.UsersCount)
 }
 
+// #1777: host filter は LIKE metacharacter を escape する。"a_b" は literal
+// underscore 一致になり、"axb.example" を wildcard で誤マッチしない。
+func TestInstanceRepository_List_HostFilterEscapesLikeMetachars(t *testing.T) {
+	repo := NewInstanceRepository(testDB)
+	literal := newTestInstance("i_ir_esc1", "a_b.example")
+	wildcardish := newTestInstance("i_ir_esc2", "axb.example")
+	for _, inst := range []*model.Instance{literal, wildcardish} {
+		require.NoError(t, repo.Create(inst))
+		defer cleanupInstance(t, inst.ID)
+	}
+
+	rows, err := repo.List(model.InstanceListFilter{Host: "a_b"})
+	require.NoError(t, err)
+	hosts := map[string]bool{}
+	for _, r := range rows {
+		hosts[r.Host] = true
+	}
+	assert.True(t, hosts["a_b.example"], "literal a_b.example should match")
+	assert.False(t, hosts["axb.example"], "underscore must be escaped, not treated as a wildcard")
+}
+
 func TestInstanceRepository_List_Filters(t *testing.T) {
 	repo := NewInstanceRepository(testDB)
 	a := newTestInstance("i_ir_4a", "list-a.example")

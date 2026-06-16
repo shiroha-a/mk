@@ -66,6 +66,92 @@ func TestVersion2_1_ReflectsMetaName(t *testing.T) {
 	assert.Equal(t, "admin@example.com", maint["email"])
 }
 
+// #1777 [HIGH]: /.well-known/nodeinfo が advertise する /nodeinfo/2.0 を実際に配信し、
+// schema 2.0 には無い software.repository を省略する (2.1 では出す)。
+func TestVersion2_0(t *testing.T) {
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/nodeinfo/2.0", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, h.Version2_0(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "2.0", resp["version"])
+	sw := resp["software"].(map[string]any)
+	assert.Equal(t, "mk-go", sw["name"])
+	_, hasRepo := sw["repository"]
+	assert.False(t, hasRepo, "schema 2.0 は software.repository を含めない")
+
+	// 対照: 2.1 は repository を含む。
+	rec21 := httptest.NewRecorder()
+	require.NoError(t, h.Version2_1(e.NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec21)))
+	var resp21 map[string]any
+	require.NoError(t, json.Unmarshal(rec21.Body.Bytes(), &resp21))
+	_, has21 := resp21["software"].(map[string]any)["repository"]
+	assert.True(t, has21, "schema 2.1 は software.repository を含む")
+}
+
+// #1777 [MEDIUM]: metadata block が upstream の追加フィールド (themeColor /
+// nodeAdmins / langs / disable*Timeline / captcha / maxNoteTextLength /
+// proxyAccountName 等) を出す。
+func TestVersion2_1_FullMetadata(t *testing.T) {
+	metaRepo := testutil.NewMockMetaRepository()
+	name := "Inst"
+	tos := "https://example.com/tos"
+	theme := "#abcdef"
+	metaRepo.Meta = &model.Meta{
+		ID: "x", Name: &name,
+		TermsOfServiceURL:      &tos,
+		ThemeColor:             &theme,
+		Langs:                  []string{"ja-JP", "en-US"},
+		EnableHcaptcha:         true,
+		EmailRequiredForSignup: true,
+		DisableRegistration:    true,
+	}
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "fallback.example"})
+	h.SetMetaRepo(metaRepo)
+	h.SetProxyAccountResolver(func() (string, bool) { return "proxy.bot", true })
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Version2_1(e.NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	meta := resp["metadata"].(map[string]any)
+
+	assert.Equal(t, "#abcdef", meta["themeColor"])
+	assert.Equal(t, []any{"ja-JP", "en-US"}, meta["langs"])
+	assert.Equal(t, "https://example.com/tos", meta["tosUrl"])
+	assert.Equal(t, true, meta["enableHcaptcha"])
+	assert.Equal(t, true, meta["emailRequiredForSignup"])
+	assert.Equal(t, true, meta["disableRegistration"])
+	assert.Equal(t, float64(maxNoteTextLength), meta["maxNoteTextLength"])
+	assert.Equal(t, "proxy.bot", meta["proxyAccountName"])
+	// nodeAdmins は [{name,email}] 配列。
+	admins := meta["nodeAdmins"].([]any)
+	require.Len(t, admins, 1)
+	// disable*Timeline は policy 由来 (default policy では both available=true → false)。
+	assert.Equal(t, false, meta["disableLocalTimeline"])
+	assert.Equal(t, false, meta["disableGlobalTimeline"])
+}
+
+// themeColor 未設定時は upstream default '#86b300' を出す。
+func TestVersion2_1_ThemeColorDefault(t *testing.T) {
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Version2_1(e.NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)))
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, defaultThemeColor, resp["metadata"].(map[string]any)["themeColor"])
+}
+
 // Meta未設定時は cfg.Host が nodeName に入る。
 func TestVersion2_1_FallbackToConfigHost(t *testing.T) {
 	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})

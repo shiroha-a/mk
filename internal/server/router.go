@@ -1011,6 +1011,11 @@ func (s *Server) setupRoutes() {
 		var instancesCount int64
 		s.db.Model(&model.Instance{}).Count(&instancesCount)
 
+		// upstream stats.ts は reactionsCount を noteReactionsRepository.count() で
+		// 返す。mk-go は 0 固定だったので note_reaction の総数を集計する (#1777)。
+		var reactionsCount int64
+		s.db.Model(&model.NoteReaction{}).Count(&reactionsCount)
+
 		return c.JSON(http.StatusOK, map[string]any{
 			"notesCount":         notesCount,
 			"originalNotesCount": originalNotesCount,
@@ -1019,7 +1024,7 @@ func (s *Server) setupRoutes() {
 			"instances":          instancesCount,
 			"driveUsageLocal":    0,
 			"driveUsageRemote":   0,
-			"reactionsCount":     0,
+			"reactionsCount":     reactionsCount,
 		})
 	})
 
@@ -1771,7 +1776,11 @@ func (s *Server) setupRoutes() {
 	nodeinfoHandler := nodeinfo.NewHandler(s.config)
 	nodeinfoHandler.SetMetaRepo(metaRepo)
 	nodeinfoHandler.SetUsageRepos(userRepo, noteRepo)
+	// metadata.proxyAccountName 用に meta と同じ resolver を共有する (#1777)。
+	nodeinfoHandler.SetProxyAccountResolver(proxyAccountResolver)
 	s.echo.GET("/nodeinfo/2.1", nodeinfoHandler.Version2_1)
+	// /.well-known/nodeinfo が 2.0 リンクも advertise するので 2.0 も配信する (#1777)。
+	s.echo.GET("/nodeinfo/2.0", nodeinfoHandler.Version2_0)
 
 	// Inbox endpoints
 	inboxHandler := inbox.NewHandler(federationResolver, federationProcessor)

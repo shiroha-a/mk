@@ -373,6 +373,29 @@ func TestMeta_AdsExposed(t *testing.T) {
 	assert.Equal(t, float64(1), first["ratio"])
 }
 
+// #1777: ads[].isSensitive は sensitive のときだけ true を出し、それ以外は omit する
+// (upstream MetaEntityService の `ad.isSensitive ? true : undefined`)。
+func TestMeta_AdsIsSensitive(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	h.SetAdRepo(&stubAdRepo{ads: []*model.Ad{
+		{ID: "ad1", URL: "https://e.example", Place: "square", IsSensitive: true},
+		{ID: "ad2", URL: "https://e2.example", Place: "square", IsSensitive: false},
+	}})
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(httptest.NewRequest(http.MethodPost, "/api/meta", nil), rec)))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ads := resp["ads"].([]any)
+	require.Len(t, ads, 2)
+	assert.Equal(t, true, ads[0].(map[string]any)["isSensitive"], "sensitive ad は true")
+	_, has := ads[1].(map[string]any)["isSensitive"]
+	assert.False(t, has, "非 sensitive ad は isSensitive を omit する")
+}
+
 // AdRepository が未設定の場合 (既存テスト互換) は空配列が返る。
 func TestMeta_AdsUnwiredReturnsEmpty(t *testing.T) {
 	h, metaRepo := newTestHandler()

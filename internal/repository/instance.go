@@ -115,7 +115,10 @@ func (r *instanceRepository) ListForRefresh(staleBefore time.Time, limit int) ([
 func (r *instanceRepository) List(filter model.InstanceListFilter) ([]*model.Instance, error) {
 	q := r.db.Model(&model.Instance{})
 	if filter.Host != "" {
-		q = q.Where("host ILIKE ?", "%"+filter.Host+"%")
+		// LIKE metacharacter (% / _ / backslash) を escape して literal 一致にする
+		// (upstream instances.ts の sqlLikeEscape 相当、#1777)。escape しないと
+		// host に % / _ を含む query が wildcard 解釈される。
+		q = q.Where("host ILIKE ?", "%"+escapeLike(filter.Host)+"%")
 	}
 	if filter.Suspended != nil {
 		if *filter.Suspended {
