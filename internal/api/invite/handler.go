@@ -34,6 +34,7 @@ type Handler struct {
 	repo               repository.RegistrationTicketRepository
 	idGen              id.Generator
 	rolePolicyProvider RolePolicyProvider
+	userRepo           repository.UserRepository
 }
 
 // NewHandler returns a Handler wired with the given repository + id generator.
@@ -45,6 +46,13 @@ func NewHandler(repo repository.RegistrationTicketRepository, idGen id.Generator
 // Nil keeps the gate disabled (= test fixture / wire 未配線).
 func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 	h.rolePolicyProvider = p
+}
+
+// SetUserRepo wires the user repository used by List to pack the createdBy /
+// usedBy UserLite relations (#1776)。未配線なら usedBy は null のまま
+// (createdBy は middleware user から常に解決できる)。
+func (h *Handler) SetUserRepo(r repository.UserRepository) {
+	h.userRepo = r
 }
 
 // Create implements POST /api/invite/create. Upstream Misskey TS
@@ -127,14 +135,49 @@ func (h *Handler) List(c echo.Context) error {
 		// degrade する方が drop-in 互換性が高い。
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// upstream invite/list は createdBy / usedBy を UserLite で埋める
+	// (InviteCodeEntityService.pack)。list は createdById=me で絞っているので
+	// createdBy は常に呼び出し元自身。usedBy は使用済 ticket の利用者を batch 解決する
+	// (#1776)。frontend MkInviteCode.vue が createdBy/usedBy の avatar/username を
+	// 描画するため、ここを null 固定にすると招待管理画面の詳細表示が空になる。
+	createdByLite := entity.PackUserLite(user)
+	usedByMap := map[string]entity.UserLite{}
+	if h.userRepo != nil {
+		seen := make(map[string]struct{}, len(tickets))
+		ids := make([]string, 0, len(tickets))
+		for _, t := range tickets {
+			if t.UsedByID == nil {
+				continue
+			}
+			if _, ok := seen[*t.UsedByID]; ok {
+				continue
+			}
+			seen[*t.UsedByID] = struct{}{}
+			ids = append(ids, *t.UsedByID)
+		}
+		if len(ids) > 0 {
+			if users, err := h.userRepo.FindManyByIDs(ids); err == nil {
+				for _, u := range users {
+					usedByMap[u.ID] = entity.PackUserLite(u)
+				}
+			}
+		}
+	}
+
 	out := make([]map[string]any, 0, len(tickets))
 	for _, t := range tickets {
+		var usedBy any
+		if t.UsedByID != nil {
+			if lite, ok := usedByMap[*t.UsedByID]; ok {
+				usedBy = lite
+			}
+		}
 		entry := map[string]any{
 			"id":        t.ID,
 			"code":      t.Code,
 			"expiresAt": t.ExpiresAt,
-			"createdBy": nil,
-			"usedBy":    nil,
+			"createdBy": createdByLite,
+			"usedBy":    usedBy,
 			"usedAt":    t.UsedAt,
 			"used":      t.UsedByID != nil,
 		}

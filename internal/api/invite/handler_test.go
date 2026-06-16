@@ -167,6 +167,42 @@ func TestList_Empty(t *testing.T) {
 	assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
 }
 
+// #1776: list は createdBy を呼び出し元自身の UserLite で、usedBy を使用済 ticket の
+// 利用者 UserLite で埋める (null 固定ではない)。
+func TestList_ResolvesCreatedByAndUsedBy(t *testing.T) {
+	h, repo := newTestHandler(t)
+	me := "u1"
+	usedBy := "u2"
+	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "z_a1", Code: "code-a1", CreatedByID: &me}
+	repo.Tickets["t2"] = &model.RegistrationTicket{ID: "z_a2", Code: "code-a2", CreatedByID: &me, UsedByID: &usedBy}
+
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users[me] = &model.User{ID: me, Username: "alice", UsernameLower: "alice"}
+	userRepo.Users[usedBy] = &model.User{ID: usedBy, Username: "bob", UsernameLower: "bob"}
+	h.SetUserRepo(userRepo)
+
+	rec := post(h.List, `{"limit":50}`, &model.User{ID: me, Username: "alice", UsernameLower: "alice"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 2)
+	byID := map[string]map[string]any{}
+	for _, e := range out {
+		byID[e["id"].(string)] = e
+	}
+	// 全 entry に createdBy (= me) が乗る。
+	for _, e := range out {
+		cb, ok := e["createdBy"].(map[string]any)
+		require.True(t, ok, "createdBy must be a UserLite object")
+		assert.Equal(t, "alice", cb["username"])
+	}
+	// 未使用 ticket は usedBy=null、使用済 ticket は利用者の UserLite。
+	assert.Nil(t, byID["z_a1"]["usedBy"])
+	ub, ok := byID["z_a2"]["usedBy"].(map[string]any)
+	require.True(t, ok, "used ticket must resolve usedBy UserLite")
+	assert.Equal(t, "bob", ub["username"])
+}
+
 // listErrRepo は ListByCreator だけ error を返す stub。
 type listErrRepo struct {
 	*testutil.MockRegistrationTicketRepository

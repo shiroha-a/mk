@@ -2741,13 +2741,24 @@ func (s *Server) setupRoutes() {
 	// internal/api/invite/handler_test.go を参照。
 	inviteHandler := apiinvite.NewHandler(signupTicketRepo, idGen)
 	inviteHandler.SetRolePolicyProvider(roleService)
+	// invite/list が createdBy / usedBy を UserLite で解決するため (#1776)。
+	inviteHandler.SetUserRepo(userRepo)
 	api.POST("/invite/create", inviteHandler.Create,
 		middleware.RequireAuth(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite), middleware.RequireScope("write:invite-codes"))
 
-	api.POST("/invite/list", inviteHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:invite-codes"))
-	api.POST("/invite/delete", inviteHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:invite-codes"))
-	api.POST("/invite/limit", inviteHandler.Limit, middleware.RequireAuth(), middleware.RequireScope("read:invite-codes"))
+	// upstream は invite/list・delete・limit にも create と同じ
+	// requiredRolePolicy:'canInvite' を付ける。canInvite 非保持ユーザーが招待コード
+	// 一覧/削除/残数取得を実行できないよう gate を揃える (#1776)。
+	api.POST("/invite/list", inviteHandler.List,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite), middleware.RequireScope("read:invite-codes"))
+	api.POST("/invite/delete", inviteHandler.Delete,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite), middleware.RequireScope("write:invite-codes"))
+	api.POST("/invite/limit", inviteHandler.Limit,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite), middleware.RequireScope("read:invite-codes"))
 
 	// notes (plain) — bulk note lookup by noteIds
 	api.POST("/notes", notesHandler.BulkShow)

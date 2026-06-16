@@ -150,7 +150,7 @@ func (h *Handler) Signin(c echo.Context) error {
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(*req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
 
 	// 認証成功
@@ -244,7 +244,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 
 	if !profile.TwoFactorEnabled {
 		if !passwordOK {
-			return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+			return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 		}
 		return h.ok(c, user)
 	}
@@ -264,7 +264,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	// Step 3 (TOTP / Backup): token フィールドで 2FA を検証する。
 	if req.Token != nil && *req.Token != "" {
 		if !passwordOK {
-			return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+			return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 		}
 		// まず TOTP を試す。失敗したらバックアップコードにフォールバック。
 		// ValidateWithReplay は RFC 6238 §5.2 に従い同コードの 2 回目以降
@@ -279,16 +279,16 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 			})
 			return h.ok(c, user)
 		}
-		return c.JSON(http.StatusForbidden, errBody("cdf1235b-ac71-46d4-a3a6-84ccce48df6f"))
+		return h.fail(c, user, http.StatusForbidden, "cdf1235b-ac71-46d4-a3a6-84ccce48df6f")
 	}
 
 	// Step 3 (Key): credential が来ていれば WebAuthn assertion を検証する。
 	if len(req.Credential) > 0 {
 		if !passwordOK && !profile.UsePasswordLessLogin {
-			return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+			return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 		}
 		if !hasKeys || h.webauthnSvc == nil {
-			return c.JSON(http.StatusForbidden, errBody("93b86c4b-72f9-40eb-9815-798928603d1e"))
+			return h.fail(c, user, http.StatusForbidden, "93b86c4b-72f9-40eb-9815-798928603d1e")
 		}
 		httpReq, werr := wrapWebAuthnRequest(c.Request(), req.Credential)
 		if werr != nil {
@@ -301,7 +301,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 			// 返すが backend log には何で落ちたかを残しておくと #707 系の
 			// 「パスキーの検証に失敗しました」報告の調査に役立つ。
 			slog.Warn("signin: webauthn FinishLogin failed", "userId", user.ID, "err", werr)
-			return c.JSON(http.StatusForbidden, errBody("93b86c4b-72f9-40eb-9815-798928603d1e"))
+			return h.fail(c, user, http.StatusForbidden, "93b86c4b-72f9-40eb-9815-798928603d1e")
 		}
 		// counter 更新 (clone 検出用)
 		if h.securityKeyRepo != nil {
@@ -313,7 +313,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	// 2FA が必要だが token / credential いずれも来ていない。
 	// password が違う場合はここで弾く (challenge を発行しない)。
 	if !passwordOK {
-		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
 	// security key 保有なら assertion challenge を発行する (`next: 'passkey'`)。
 	// 本家 Misskey の SigninApiService と同じく `authRequest` フィールドに
@@ -347,7 +347,7 @@ func (h *Handler) ok(c echo.Context, user *model.User) error {
 	// Echoがリクエストを再利用する前にヘッダーをコピーする
 	if h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()
-		go h.recordSignin(user.ID, c.RealIP(), hdrs)
+		go h.recordSignin(user.ID, c.RealIP(), hdrs, true)
 	}
 	// login 通知を本人へ送る (upstream SigninService、#1559)。signin の
 	// レイテンシに乗らないよう非同期で発火する。
@@ -373,8 +373,11 @@ func sanitizeHeaders(h http.Header) {
 	h.Del("Set-Cookie")
 }
 
-// recordSignin persists a signin record asynchronously.
-func (h *Handler) recordSignin(userID, ip string, headers http.Header) {
+// recordSignin persists a signin record asynchronously. success=false は
+// 認証失敗履歴 (upstream SigninApiService.fail() の signins.insert) で、i/signin-history
+// に表示される security 機能。失敗時は main へ publish しない (成功ログインのみ
+// 他デバイスへ通知する upstream SigninService の挙動に揃える、#1776)。
+func (h *Handler) recordSignin(userID, ip string, headers http.Header, success bool) {
 	sanitizeHeaders(headers)
 	hdrs, err := json.Marshal(headers)
 	if err != nil {
@@ -386,10 +389,13 @@ func (h *Handler) recordSignin(userID, ip string, headers http.Header) {
 		UserID:  userID,
 		IP:      ip,
 		Headers: datatypes.JSON(hdrs),
-		Success: true,
+		Success: success,
 	}
 	if err := h.signinRepo.Create(s); err != nil {
-		slog.Warn("failed to record signin", "userId", userID, "err", err)
+		slog.Warn("failed to record signin", "userId", userID, "success", success, "err", err)
+		return
+	}
+	if !success {
 		return
 	}
 	// TS本家 SigninService.ts:49 と同じく、signin成功後にmainへpublishする。
@@ -397,6 +403,19 @@ func (h *Handler) recordSignin(userID, ip string, headers http.Header) {
 	if h.mainStreamPublisher != nil {
 		h.mainStreamPublisher.PublishMainEvent(userID, "signin", entity.PackSignin(s, h.idGen))
 	}
+}
+
+// fail records a failed signin (success:false) for the already-resolved user
+// and returns the error response. upstream SigninApiService.fail() は password
+// 不一致 / 2FA 失敗 / passkey passwordless 無効 等の認証失敗で signins に
+// success:false を insert してから error を返す (#1776)。user/signinRepo 未配線時は
+// 記録を skip して error だけ返す (= 旧挙動の superset、test fixture を壊さない)。
+func (h *Handler) fail(c echo.Context, user *model.User, status int, errID string) error {
+	if user != nil && h.signinRepo != nil && h.idGen != nil {
+		hdrs := c.Request().Header.Clone()
+		go h.recordSignin(user.ID, c.RealIP(), hdrs, false)
+	}
+	return c.JSON(status, errBody(errID))
 }
 
 func errBody(id string) map[string]any {

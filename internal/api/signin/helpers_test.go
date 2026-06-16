@@ -250,7 +250,9 @@ func TestRecordSignin_RepoError(t *testing.T) {
 	hdrs := http.Header{}
 	hdrs.Set("X-Test", "1")
 	// Create err でも return すること
-	h.recordSignin("u1", "1.2.3.4", hdrs)
+	h.recordSignin("u1", "1.2.3.4", hdrs, true)
+	// 失敗履歴 (success:false) 経路でも Create err を握りつぶす。
+	h.recordSignin("u1", "1.2.3.4", hdrs, false)
 }
 
 // counter update / ipLogger / signinRepo の hook が全て繋がった success path。

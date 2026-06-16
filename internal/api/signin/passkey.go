@@ -113,9 +113,10 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 	// passwordless login が有効化されていなければ拒否する。
-	// upstream の SigninWithPasskeyApiService と同じ ID を返す。
+	// upstream の SigninWithPasskeyApiService と同じ ID を返す。passkey 検証自体は
+	// 成功しているので upstream fail(user.id, ...) と同じく失敗履歴を残す (#1776)。
 	if !profile.UsePasswordLessLogin {
-		return c.JSON(http.StatusForbidden, errBody("2d84773e-f7b7-4d0b-8f72-bb69b584c912"))
+		return h.fail(c, user, http.StatusForbidden, "2d84773e-f7b7-4d0b-8f72-bb69b584c912")
 	}
 
 	// counter 更新 (clone 検出)
@@ -130,7 +131,7 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 	}
 	if h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()
-		go h.recordSignin(user.ID, c.RealIP(), hdrs)
+		go h.recordSignin(user.ID, c.RealIP(), hdrs, true)
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"signinResponse": signinResp,

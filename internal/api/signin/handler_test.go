@@ -334,6 +334,64 @@ func TestSignin_RecordsSigninHistory(t *testing.T) {
 	assert.Equal(t, 1, signinRepo.Len())
 }
 
+// #1776: 認証失敗 (パスワード不一致) でも signin 履歴を success:false で記録する。
+// upstream SigninApiService.fail() は全認証失敗で signins に success:false を insert。
+func TestSignin_RecordsFailedSignin(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "testuser", "password123")
+
+	signinRepo := testutil.NewMockSigninRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(signinRepo, idGen)
+
+	rec := doPost(h.Signin, `{"username":"testuser","password":"WRONG"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 1, signinRepo.Len())
+	assert.False(t, signinRepo.Signins[0].Success, "失敗ログインは success:false で記録する")
+}
+
+// #1776: SigninFlow の 2FA token 失敗でも success:false を記録する。
+func TestSigninFlow_RecordsFailed2FA(t *testing.T) {
+	h, repo := newTestHandler(t)
+	user := createTestUser(repo, "tfauser", "password123")
+	repo.Profiles[user.ID].TwoFactorEnabled = true
+	secret := "JBSWY3DPEHPK3PXP"
+	repo.Profiles[user.ID].TwoFactorSecret = &secret
+
+	signinRepo := testutil.NewMockSigninRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(signinRepo, idGen)
+
+	rec := doPost(h.SigninFlow, `{"username":"tfauser","password":"password123","token":"000000"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 1, signinRepo.Len())
+	assert.False(t, signinRepo.Signins[0].Success)
+}
+
+// #1776: 凍結アカウントの signin 試行は履歴に記録しない (upstream は suspended で
+// fail() を呼ばず先に弾く)。user-not-found も同様。
+func TestSignin_SuspendedAndNotFoundDoNotRecord(t *testing.T) {
+	h, repo := newTestHandler(t)
+	user := createTestUser(repo, "suspendeduser", "password123")
+	user.IsSuspended = true
+
+	signinRepo := testutil.NewMockSigninRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(signinRepo, idGen)
+
+	rec := doPost(h.Signin, `{"username":"suspendeduser","password":"password123"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	rec = doPost(h.Signin, `{"username":"ghost","password":"x"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, signinRepo.Len(), "suspended / user-not-found は失敗履歴を残さない")
+}
+
 // stubMainStreamPublisher captures PublishMainEvent calls.
 type stubMainStreamPublisher struct {
 	mu    sync.Mutex
