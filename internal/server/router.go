@@ -1360,9 +1360,11 @@ func (s *Server) setupRoutes() {
 		fetcher: corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent, s.outboundOpts()...),
 	})
 	api.POST("/users/show", usersHandler.Show)
+	// upstream search.ts:15-16 は requireCredential:false + requiredRolePolicy:
+	// canSearchUsers。canSearchUsers の base default は true なので匿名も検索でき、
+	// false の role のみ 403 になる。RequireAuth(401) は付けない (#1784)。
 	api.POST("/users/search", usersHandler.Search,
-		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchUsers))
+		middleware.RequireRolePolicyPublic(roleService, corerole.PolicyCanSearchUsers))
 	api.POST("/users/notes", usersHandler.Notes)
 	api.POST("/users/followers", usersHandler.Followers)
 	api.POST("/users/following", usersHandler.Following)

@@ -59,3 +59,26 @@ func RequireRolePolicy(checker RolePolicyChecker, policyKey string) echo.Middlew
 		}
 	}
 }
+
+// RequireRolePolicyPublic gates an endpoint on a role policy while allowing
+// anonymous access (upstream requireCredential:false + requiredRolePolicy、例:
+// users/search)。匿名は base/default policy で評価する (HasRolePolicy に空 userID を
+// 渡すと DefaultPolicies + meta.policies が引かれる)。policy 不許可は 403
+// ROLE_PERMISSION_DENIED、401 は返さない (#1784)。checker 未配線時は gate skip。
+func RequireRolePolicyPublic(checker RolePolicyChecker, policyKey string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if checker == nil {
+				return next(c)
+			}
+			uid := ""
+			if u := GetUser(c); u != nil {
+				uid = u.ID
+			}
+			if !checker.HasRolePolicy(uid, policyKey) {
+				return c.JSON(http.StatusForbidden, apierr.RolePermissionDenied())
+			}
+			return next(c)
+		}
+	}
+}

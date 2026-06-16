@@ -83,7 +83,9 @@ func TestClips_PublicFilterPushedDown(t *testing.T) {
 	assert.Len(t, rows, 2, "LIMIT must apply to already-public-filtered set")
 }
 
-func TestClips_OwnerSeesPrivate(t *testing.T) {
+// #1784: upstream clips.ts は owner でも公開 clip のみ返す (clip.isPublic=true)。
+// 非公開 clip は owner であっても users/clips には現れない。
+func TestClips_OwnerSeesOnlyPublic(t *testing.T) {
 	h, _ := newTestHandler(t)
 	repo := testutil.NewMockClipRepository()
 	require.NoError(t, repo.Create(&model.Clip{ID: "c1", UserID: "owner", IsPublic: true}))
@@ -93,7 +95,8 @@ func TestClips_OwnerSeesPrivate(t *testing.T) {
 	rec := postStub(h.Clips, `{"userId":"owner"}`, &model.User{ID: "owner"})
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
-	assert.Len(t, rows, 2)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "c1", rows[0]["id"])
 }
 
 // misskey_dart の Clip.fromJson が非null必須とする createdAt / user /

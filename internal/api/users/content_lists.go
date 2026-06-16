@@ -41,13 +41,10 @@ func (h *Handler) Clips(c echo.Context) error {
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
 	isSelf := viewer != nil && viewer.ID == req.UserID
-	var rows []*model.Clip
-	var err error
-	if isSelf {
-		rows, err = h.clipRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	} else {
-		rows, err = h.clipRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	}
+	// upstream clips.ts:54 は viewer に関係なく公開 clip のみ返す (clip.isPublic=true)。
+	// owner の非公開 clip は i/clips 等で取得する設計 (#1784)。notesCount は owner
+	// 閲覧時のみ出すため isSelf は下の ClipExtras で引き続き使う。
+	rows, err := h.clipRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -104,15 +101,9 @@ func (h *Handler) Flashs(c echo.Context) error {
 	clampListLimit(&req.Limit)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	viewer := middleware.GetUser(c)
-	isSelf := viewer != nil && viewer.ID == req.UserID
-	var rows []*model.Flash
-	var err error
-	if isSelf {
-		rows, err = h.flashRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	} else {
-		rows, err = h.flashRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	}
+	// upstream flashs.ts:54 は viewer に関係なく公開 flash のみ返す
+	// (visibility='public')。owner の非公開 flash は i/* 系で取得する設計 (#1784)。
+	rows, err := h.flashRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -272,15 +263,9 @@ func (h *Handler) Pages(c echo.Context) error {
 	clampListLimit(&req.Limit)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	viewer := middleware.GetUser(c)
-	isSelf := viewer != nil && viewer.ID == req.UserID
-	var rows []*model.Page
-	var err error
-	if isSelf {
-		rows, err = h.pageRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	} else {
-		rows, err = h.pageRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
-	}
+	// upstream pages.ts:54 は viewer に関係なく公開 page のみ返す
+	// (visibility='public')。owner の非公開 page は i/pages 等で取得する設計 (#1784)。
+	rows, err := h.pageRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

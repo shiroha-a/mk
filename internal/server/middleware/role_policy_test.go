@@ -127,3 +127,64 @@ func TestRequireRolePolicy_DifferentPolicyKey(t *testing.T) {
 	require.NoError(t, handler(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// #1784: RequireRolePolicyPublic は匿名 (uid="") も base policy で評価し、
+// policy=true なら通す (401 は返さない)。
+func TestRequireRolePolicyPublic_AnonymousAllowedByBasePolicy(t *testing.T) {
+	checker := newStubPolicyChecker()
+	checker.set("", "canSearchUsers", true) // base policy
+
+	c, rec := newRolePolicyReq(t, nil)
+	called := false
+	handler := RequireRolePolicyPublic(checker, "canSearchUsers")(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, "ok")
+	})
+
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusOK, rec.Code, "匿名でも base policy=true なら通る")
+	assert.True(t, called)
+}
+
+// base policy=false なら匿名は 403 ROLE_PERMISSION_DENIED (401 ではない)。
+func TestRequireRolePolicyPublic_AnonymousDenied(t *testing.T) {
+	checker := newStubPolicyChecker() // base canSearchUsers=false
+
+	c, rec := newRolePolicyReq(t, nil)
+	called := false
+	handler := RequireRolePolicyPublic(checker, "canSearchUsers")(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, "ok")
+	})
+
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLE_PERMISSION_DENIED")
+	assert.False(t, called)
+}
+
+// 認証済 user は自身の policy で評価される。
+func TestRequireRolePolicyPublic_AuthedUser(t *testing.T) {
+	checker := newStubPolicyChecker()
+	checker.set("alice", "canSearchUsers", true)
+
+	c, rec := newRolePolicyReq(t, &model.User{ID: "alice"})
+	handler := RequireRolePolicyPublic(checker, "canSearchUsers")(func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// checker 未配線時は gate skip。
+func TestRequireRolePolicyPublic_NilCheckerSkips(t *testing.T) {
+	c, rec := newRolePolicyReq(t, nil)
+	called := false
+	handler := RequireRolePolicyPublic(nil, "canSearchUsers")(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called)
+}
