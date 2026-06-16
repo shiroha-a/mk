@@ -169,6 +169,16 @@ func TestDispatcher_HandleChannelMessage(t *testing.T) {
 	assert.Equal(t, []string{"ping"}, holder.Value.clientMsgs)
 }
 
+// #1780: top-level type 'channel' は 'ch' の alias として同じ
+// onChannelMessageRequested に dispatch する (upstream Connection.ts)。
+func TestDispatcher_HandleChannelMessage_ChannelAlias(t *testing.T) {
+	d, _, _, _, holder := newDispatcherWithFake(t)
+	d.HandleClientMessage("connect", json.RawMessage(`{"id":"abc","channel":"test"}`))
+	require.NotNil(t, holder.Value)
+	d.HandleClientMessage("channel", json.RawMessage(`{"id":"abc","type":"ping","body":{}}`))
+	assert.Equal(t, []string{"ping"}, holder.Value.clientMsgs)
+}
+
 func TestDispatcher_HandleChannelMessageBadJSON(t *testing.T) {
 	d, _, _, _, _ := newDispatcherWithFake(t)
 	d.HandleClientMessage("ch", json.RawMessage(`{bad`))

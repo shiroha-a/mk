@@ -102,7 +102,10 @@ func (d *Dispatcher) HandleClientMessage(msgType string, body json.RawMessage) {
 		d.handleConnect(body)
 	case "disconnect":
 		d.handleDisconnect(body)
-	case "ch":
+	case "ch", "channel":
+		// upstream Connection.ts は 'channel' と alias 'ch' を同じ
+		// onChannelMessageRequested に dispatch する。official misskey-js は 'ch' を
+		// 送るが、非標準クライアントの 'channel' も受ける (#1780)。
 		d.handleChannelMessage(body)
 	case "readNotification":
 		d.handleReadNotification()

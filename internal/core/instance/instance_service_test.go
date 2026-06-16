@@ -62,6 +62,38 @@ func TestService_MarkRequestReceived(t *testing.T) {
 	require.NotNil(t, repo.Instances["alpha.example"].LatestRequestReceivedAt)
 }
 
+// #1780: 正当な inbound を受けたら isNotResponding をクリアする。
+func TestService_MarkRequestReceived_ClearsNotResponding(t *testing.T) {
+	svc, repo, _ := newService(t)
+	now := time.Now()
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true, NotRespondingSince: &now,
+	}
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.False(t, repo.Instances["alpha.example"].IsNotResponding, "inbound でクリアする")
+	assert.Nil(t, repo.Instances["alpha.example"].NotRespondingSince)
+}
+
+// #1780: autoSuspendedForNotResponding の instance から正当な inbound を受けると
+// suspensionState を none に復活させる。
+func TestService_MarkRequestReceived_RevivesAutoSuspended(t *testing.T) {
+	svc, repo, _ := newService(t)
+	now := time.Now()
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true, NotRespondingSince: &now,
+		SuspensionState: model.SuspensionStateAutoSuspendedForNotResponding,
+	}
+	require.NoError(t, svc.MarkRequestReceived("alpha.example"))
+	assert.Equal(t, model.SuspensionStateNone, repo.Instances["alpha.example"].SuspensionState)
+
+	// 手動 suspend (manuallySuspended) は inbound でも復活させない。
+	repo.Instances["beta.example"] = &model.Instance{
+		ID: "i2", Host: "beta.example", SuspensionState: model.SuspensionStateManuallySuspended,
+	}
+	require.NoError(t, svc.MarkRequestReceived("beta.example"))
+	assert.Equal(t, model.SuspensionStateManuallySuspended, repo.Instances["beta.example"].SuspensionState, "手動 suspend は復活させない")
+}
+
 func TestService_MarkRequestReceived_UnknownHost(t *testing.T) {
 	svc, _, _ := newService(t)
 	require.NoError(t, svc.MarkRequestReceived("missing.example"))

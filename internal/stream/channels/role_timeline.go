@@ -66,6 +66,12 @@ func (c *RoleTimelineChannel) OnRedisEvent(payload []byte) {
 	if noteVisibility(payload) != string(model.NoteVisibilityPublic) {
 		return
 	}
+	// anon viewer + 著者 requireSigninToViewContents は note を丸ごと drop する
+	// (upstream role-timeline.ts:53-55 の note/renote/reply 3 連 gate、channel /
+	// hashtag と同じ。role-timeline にだけ移植が漏れていた、#1780)。
+	if anonRequireSigninDrop(payload, viewerIDFromCtx(c.ctx)) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}

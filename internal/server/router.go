@@ -732,6 +732,10 @@ func (s *Server) setupRoutes() {
 	s.queueServer.Handle(queue.TaskTypeBlock, blockProcessor.Handle)
 	unblockProcessor := processors.NewUnblockProcessor(blockingService)
 	s.queueServer.Handle(queue.TaskTypeUnblock, unblockProcessor.Handle)
+	// buffering 有効起動時のみ 30s ごとに buffered reaction count を DB へ drain
+	// する。30s ticker は upstream の日次 cron より高頻度で反映遅延を抑える
+	// mk-go の運用。writer 型は起動時固定なので、実行時 OFF にしても ticker が
+	// buffered writer を drain し続け滞留しない (#1780)。
 	if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
 		go func() {
 			ticker := time.NewTicker(30 * time.Second)

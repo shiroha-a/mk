@@ -200,15 +200,36 @@ func (s *Service) MarkRequestReceived(host string) error {
 	}
 	s.mu.Unlock()
 
-	if _, err := s.repo.FindByHost(host); err != nil {
+	inst, err := s.repo.FindByHost(host)
+	if err != nil {
 		// 未登録 host はキャッシュせず次回も SELECT で確認する (登録後に窓集約が
 		// 効き始める)。
 		return nil
 	}
-	if err := s.repo.UpdateFields(host, map[string]any{
+	fields := map[string]any{
 		"latestRequestReceivedAt": &now,
-	}); err != nil {
+	}
+	// 正当な inbound を受けたら is-not-responding をクリアする (upstream
+	// performUpdateInstance は latestRequestReceivedAt と isNotResponding:false を
+	// 必ず書く、#1780)。
+	if inst.IsNotResponding {
+		fields["isNotResponding"] = false
+		fields["notRespondingSince"] = (*time.Time)(nil)
+	}
+	// autoSuspendedForNotResponding の instance から正当な inbound を受けたら
+	// suspensionState を none に自動復活させる (upstream の shouldUnsuspend)。
+	if inst.SuspensionState == model.SuspensionStateAutoSuspendedForNotResponding {
+		fields["suspensionState"] = string(model.SuspensionStateNone)
+	}
+	if err := s.repo.UpdateFields(host, fields); err != nil {
 		return err
+	}
+	// is-not-responding を clear したので、stale healthy-cache が回復 UPDATE を
+	// 取りこぼす逆経路を避けるため healthy-cache も整合させる。
+	if inst.IsNotResponding {
+		s.mu.Lock()
+		delete(s.responseHealthyCache, host)
+		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	// 書き込みついでに期限切れ entry を amortized に掃除する (suspendCache と同方針)。

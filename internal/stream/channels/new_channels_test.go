@@ -683,6 +683,26 @@ func TestRoleTimeline_ExplorablePublicEmitted(t *testing.T) {
 	assert.Equal(t, "note", ctx.sentType[0])
 }
 
+// #1780: anon viewer + 著者 requireSigninToViewContents の public note は drop する
+// (upstream role-timeline.ts:53-55、channel/hashtag と同じ gate が role-timeline に
+// だけ漏れていた)。
+func TestRoleTimeline_AnonRequireSigninDropped(t *testing.T) {
+	ctx := newCtx(nil) // anonymous
+	ch := newRoleCh(ctx, true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public","user":{"requireSigninToViewContents":true}}`))
+	assert.Empty(t, ctx.sentType, "anon viewer must not receive a requireSignin note")
+}
+
+// authed viewer なら requireSigninToViewContents の note でも受信する。
+func TestRoleTimeline_AuthedRequireSigninEmitted(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "viewer"})
+	ch := newRoleCh(ctx, true)
+	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public","user":{"requireSigninToViewContents":true}}`))
+	require.Len(t, ctx.sentType, 1)
+}
+
 // --- Admin ---
 
 func TestAdmin_Lifecycle(t *testing.T) {
