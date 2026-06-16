@@ -1863,6 +1863,42 @@ func TestShow_SingleSuspended_ModeratorSees(t *testing.T) {
 	assert.Equal(t, "sus", resp["id"])
 }
 
+// #1781: moderator が他ユーザーを users/show で見ると twoFactorEnabled /
+// usePasswordLessLogin / securityKeys が emit される (upstream
+// `isDetailed && (isMe || iAmModerator)` ブロック)。非 moderator には omit。
+func TestShow_Single_ModeratorGetsSecurityFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Users["target"] = &model.User{ID: "target", Username: "target", UsernameLower: "target", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Profiles["target"] = &model.UserProfile{
+		UserID:                "target",
+		TwoFactorEnabled:      true,
+		UsePasswordLessLogin:  false,
+		SecurityKeysAvailable: true,
+	}
+	h.SetModeratorChecker(visibilityModStub{modID: "u_mod"})
+
+	t.Run("moderator viewer", func(t *testing.T) {
+		rec := postStub(h.Show, `{"userId":"target"}`, &model.User{ID: "u_mod"})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, true, resp["twoFactorEnabled"])
+		assert.Equal(t, false, resp["usePasswordLessLogin"])
+		assert.Equal(t, true, resp["securityKeys"])
+	})
+
+	t.Run("non-moderator viewer omits the trio", func(t *testing.T) {
+		rec := postStub(h.Show, `{"userId":"target"}`, &model.User{ID: "u_plain"})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		_, hasTFA := resp["twoFactorEnabled"]
+		assert.False(t, hasTFA, "非 moderator には twoFactorEnabled を出さない")
+		_, hasSK := resp["securityKeys"]
+		assert.False(t, hasSK, "非 moderator には securityKeys を出さない")
+	})
+}
+
 // --- Internal error paths via failing repos ---
 
 type failingNoteRepo struct {

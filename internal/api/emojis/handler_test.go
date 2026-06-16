@@ -111,6 +111,48 @@ func TestEmojis_URLFallbackAndRoleIds(t *testing.T) {
 	assert.False(t, hasRole, "roleIds 空のとき省略される")
 }
 
+// #1781 localOnly / isSensitive は upstream packSimple の `? true : undefined`
+// に倣い、false のとき key 自体を省く。true のときだけ emit する。
+func TestEmojis_LocalOnlyIsSensitiveOmittedWhenFalse(t *testing.T) {
+	h, repo := setup()
+	repo.Emojis["plain@"] = &model.Emoji{
+		Name:        "plain",
+		PublicURL:   "https://example.com/emoji/plain.png",
+		Aliases:     []string{},
+		LocalOnly:   false,
+		IsSensitive: false,
+	}
+	repo.Emojis["flagged@"] = &model.Emoji{
+		Name:        "flagged",
+		PublicURL:   "https://example.com/emoji/flagged.png",
+		Aliases:     []string{},
+		LocalOnly:   true,
+		IsSensitive: true,
+	}
+
+	rec := doPost(h)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	arr := body["emojis"].([]any)
+	byName := map[string]map[string]any{}
+	for _, e := range arr {
+		m := e.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+
+	plain := byName["plain"]
+	_, hasLocalOnly := plain["localOnly"]
+	assert.False(t, hasLocalOnly, "localOnly=false は省略される")
+	_, hasIsSensitive := plain["isSensitive"]
+	assert.False(t, hasIsSensitive, "isSensitive=false は省略される")
+	shapetest.Assert(t, "EmojiSimple", plain)
+
+	flagged := byName["flagged"]
+	assert.Equal(t, true, flagged["localOnly"], "localOnly=true は emit される")
+	assert.Equal(t, true, flagged["isSensitive"], "isSensitive=true は emit される")
+	shapetest.Assert(t, "EmojiSimple", flagged)
+}
+
 // failingEmojiRepo always fails on ListLocal.
 type failingEmojiRepo struct {
 	*testutil.MockEmojiRepository

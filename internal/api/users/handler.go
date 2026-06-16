@@ -459,6 +459,7 @@ func (h *Handler) Show(c echo.Context) error {
 			resolver.FillUserLite(&detailed.UserLite)
 			h.populateUserEmojis(b.User, &detailed.UserLite)
 			h.applyModerationNote(&detailed, iAmModerator, b.Profile)
+			entity.ApplyModeratorSecurityFields(&detailed, iAmModerator, b.Profile)
 			// bulk は per-user の follow 関係を解決しないため isFollowing=false で
 			// gate する (#1558)。self / moderator は count を保持。non-public
 			// visibility の非 follower count は 0 化される (privacy 安全側)。
@@ -512,6 +513,10 @@ func (h *Handler) Show(c echo.Context) error {
 
 	detailed := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
 	h.applyModerationNote(&detailed, iAmModerator, bundle.Profile)
+	// moderator が他ユーザーを見るときは twoFactorEnabled/usePasswordLessLogin/
+	// securityKeys を出す (upstream UserEntityService、#1781)。self-view は下の
+	// AsMeDetailed が MeDetailed で常に出すため、ここでの set は shadow されて無害。
+	entity.ApplyModeratorSecurityFields(&detailed, iAmModerator, bundle.Profile)
 
 	// movedTo / alsoKnownAs を URI→ローカルID 解決して埋める (#1255)。単一
 	// ユーザー path なので FindByURI は数回で済む。list path (followers 等) は
@@ -660,6 +665,7 @@ func (h *Handler) Search(c echo.Context) error {
 		h.populateUserEmojis(u, &d.UserLite)
 		// moderator viewer には moderationNote を出す (#1558、users/show と対称)。
 		h.applyModerationNote(&d, iAmModerator, profiles[u.ID])
+		entity.ApplyModeratorSecurityFields(&d, iAmModerator, profiles[u.ID])
 		// count visibility gate (#1558)。search は per-user の follow 関係を
 		// 解決しないため isFollowing=false。self / moderator は count を保持。
 		isMe := viewer != nil && viewer.ID == u.ID

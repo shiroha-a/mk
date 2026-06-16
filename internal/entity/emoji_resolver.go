@@ -187,6 +187,13 @@ func (r *EmojiResolver) PopulateNoteReactionEmojis(note *model.Note, entity *Not
 // unicode reactions are filtered out. Same-name-different-host pairs
 // are preserved as separate entries (a name-keyed map would collapse
 // them and lose remote emoji URLs).
+//
+// upstream NoteEntityService:389-391 は reactionEmojiNames を
+// `.filter(x => x.startsWith(':') && x.includes('@') && !x.includes('@.'))`
+// で remote custom emoji のみに絞る (コメント: リモートカスタム絵文字のみ)。
+// local custom emoji (bare `:name:` / canonical `:name@.:`、いずれも
+// host="") は frontend が instance の emoji registry から解決するため
+// reactionEmojis には載せない。そこで host="" の entry は除外する (#1781)。
 func collectReactionEmojiNames(raw []byte) []emojiNameHost {
 	if len(raw) == 0 {
 		return nil
@@ -198,7 +205,7 @@ func collectReactionEmojiNames(raw []byte) []emojiNameHost {
 	var out []emojiNameHost
 	for reaction := range counts {
 		name, host, ok := parseCustomEmojiReaction(reaction)
-		if !ok {
+		if !ok || host == "" {
 			continue
 		}
 		out = append(out, emojiNameHost{name: name, host: host})

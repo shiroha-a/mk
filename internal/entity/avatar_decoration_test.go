@@ -95,6 +95,48 @@ func TestPackUserLite_AvatarDecorations_EmptyOrNull(t *testing.T) {
 	}
 }
 
+// #1781: angle / flipH / offsetX / offsetY は falsy (0 / false) のとき
+// JSON から省く (upstream `ud.angle || undefined`)。非 falsy 値は残す。
+func TestPackUserLite_AvatarDecorations_OmitsFalsyFields(t *testing.T) {
+	SetAvatarDecorationLookup(&stubDecoLookup{urls: map[string]string{"dec1": "https://cdn.test/d1.png"}})
+	defer SetAvatarDecorationLookup(nil)
+
+	t.Run("all falsy fields omitted", func(t *testing.T) {
+		u := &model.User{
+			ID:                "u1",
+			Username:          "alice",
+			AvatarDecorations: datatypes.JSON([]byte(`[{"id":"dec1","angle":0,"flipH":false,"offsetX":0,"offsetY":0}]`)),
+		}
+		out := PackUserLite(u)
+		b, err := json.Marshal(out.AvatarDecorations)
+		require.NoError(t, err)
+		s := string(b)
+		assert.NotContains(t, s, "angle")
+		assert.NotContains(t, s, "flipH")
+		assert.NotContains(t, s, "offsetX")
+		assert.NotContains(t, s, "offsetY")
+		// id / url は常に残る。
+		assert.Contains(t, s, "\"id\":\"dec1\"")
+		assert.Contains(t, s, "\"url\":\"https://cdn.test/d1.png\"")
+	})
+
+	t.Run("non-falsy fields retained", func(t *testing.T) {
+		u := &model.User{
+			ID:                "u1",
+			Username:          "alice",
+			AvatarDecorations: datatypes.JSON([]byte(`[{"id":"dec1","angle":0.5,"flipH":true,"offsetX":-0.25,"offsetY":0.25}]`)),
+		}
+		out := PackUserLite(u)
+		b, err := json.Marshal(out.AvatarDecorations)
+		require.NoError(t, err)
+		s := string(b)
+		assert.Contains(t, s, "\"angle\":0.5")
+		assert.Contains(t, s, "\"flipH\":true")
+		assert.Contains(t, s, "\"offsetX\":-0.25")
+		assert.Contains(t, s, "\"offsetY\":0.25")
+	})
+}
+
 func TestPackUserLite_AvatarDecorations_DropsEmptyIDEntry(t *testing.T) {
 	u := &model.User{
 		ID:                "u1",

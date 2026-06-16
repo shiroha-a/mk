@@ -283,6 +283,32 @@ func TestAvatarBannerProxying(t *testing.T) {
 			t.Errorf("identicon changed: %s", got)
 		}
 	})
+	// #1781: local system account (username に '.' を含む) は meta.iconUrl が
+	// 設定されていれば identicon ではなくインスタンスアイコンを返す。
+	t.Run("local system account uses meta.iconUrl when set", func(t *testing.T) {
+		SetInstanceIconURLLookup(func() string { return "https://example.test/icon.png" })
+		defer SetInstanceIconURLLookup(nil)
+		u0 := &model.User{Username: "relay.actor"} // local, no avatar
+		if got := IdenticonURL(u0); got != "https://example.test/icon.png" {
+			t.Errorf("system account should use meta.iconUrl, got: %s", got)
+		}
+	})
+	t.Run("local system account falls back to identicon when meta.iconUrl empty", func(t *testing.T) {
+		SetInstanceIconURLLookup(func() string { return "" })
+		defer SetInstanceIconURLLookup(nil)
+		u0 := &model.User{Username: "instance.actor"}
+		if got := IdenticonURL(u0); got != "/identicon/instance.actor" {
+			t.Errorf("empty meta.iconUrl should fall back to identicon, got: %s", got)
+		}
+	})
+	t.Run("local non-system account ignores meta.iconUrl", func(t *testing.T) {
+		SetInstanceIconURLLookup(func() string { return "https://example.test/icon.png" })
+		defer SetInstanceIconURLLookup(nil)
+		u0 := &model.User{Username: "alice"} // no '.' in username
+		if got := IdenticonURL(u0); got != "/identicon/alice" {
+			t.Errorf("non-system account must use identicon, got: %s", got)
+		}
+	})
 	t.Run("remote banner is proxied", func(t *testing.T) {
 		u0 := &model.User{Username: "dave", Host: sp(remoteHost), BannerID: sp("b1"), BannerURL: sp("https://" + remoteHost + "/b.png")}
 		d := PackUserDetailed(u0, nil)

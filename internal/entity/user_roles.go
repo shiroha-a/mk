@@ -70,6 +70,39 @@ func resolveShowRemoteBadges() bool {
 	return fn()
 }
 
+// instanceIconURLLookup resolves meta.iconUrl so IdenticonURL can apply
+// upstream's local-system-account special case: a local user whose username
+// contains '.' (relay.actor / instance.actor / proxy.actor) uses the instance
+// icon as its avatarUrl instead of the identicon route (upstream
+// getIdenticonUrl, UserEntityService.ts:386-391、#1781)。Router wires this once
+// at startup with a closure reading the cached meta. nil / 未配線時は "" を返し
+// identicon route に fallback する。
+var (
+	instanceIconURLMu     sync.RWMutex
+	instanceIconURLLookup func() string
+)
+
+// SetInstanceIconURLLookup wires the meta.iconUrl accessor used by IdenticonURL
+// for the local-system-account avatarUrl special case (#1781)。Pass nil to clear
+// (used in tests).
+func SetInstanceIconURLLookup(fn func() string) {
+	instanceIconURLMu.Lock()
+	instanceIconURLLookup = fn
+	instanceIconURLMu.Unlock()
+}
+
+// resolveInstanceIconURL returns meta.iconUrl, or "" when the lookup is unwired
+// or meta.iconUrl is unset.
+func resolveInstanceIconURL() string {
+	instanceIconURLMu.RLock()
+	fn := instanceIconURLLookup
+	instanceIconURLMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn()
+}
+
 // resolveUserRolesSorted returns the user's assigned roles sorted by
 // displayOrder descending (= upstream sort key). Returns a fresh slice so
 // callers can iterate / filter freely without mutating the role service's

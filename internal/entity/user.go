@@ -162,6 +162,15 @@ type UserDetailed struct {
 	// (upstream UserEntityService.ts:574: iAmModerator ? note ?? '' : undefined)。
 	// 非 moderator には omit する (#1547)。handler 側で viewer の role を見て set。
 	ModerationNote *string `json:"moderationNote,omitempty"`
+	// TwoFactorEnabled / UsePasswordLessLogin / SecurityKeys は upstream
+	// UserEntityService.ts:577-583 が `isDetailed && (isMe || iAmModerator)` で
+	// emit する。self-view は MeDetailed が plain bool で shadow して常に出すが
+	// (下記 MeDetailed)、moderator が他ユーザーを見る users/show では UserDetailed
+	// 側の本 field を handler が set する。非 moderator / 非 detailed には omit
+	// するため *bool + omitempty (#1781)。
+	TwoFactorEnabled     *bool `json:"twoFactorEnabled,omitempty"`
+	UsePasswordLessLogin *bool `json:"usePasswordLessLogin,omitempty"`
+	SecurityKeys         *bool `json:"securityKeys,omitempty"`
 }
 
 // MeDetailed extends UserDetailed with fields that upstream Misskey TS
@@ -433,6 +442,17 @@ func IdenticonURL(u *model.User) string {
 		// (ProxyAvatarURL は同一オリジン・相対 URL を wrap しない)。
 		return currentMediaURLContext().ProxyAvatarURL(*u.AvatarURL)
 	}
+	// upstream getIdenticonUrl (UserEntityService.ts:386-391): local かつ
+	// username に '.' を含むユーザー (= system account relay.actor /
+	// instance.actor / proxy.actor) は meta.iconUrl が設定されていれば
+	// identicon ではなくインスタンスアイコンを avatarUrl に使う (#1781)。
+	if u.Host == nil || *u.Host == "" {
+		if strings.Contains(u.Username, ".") {
+			if icon := resolveInstanceIconURL(); icon != "" {
+				return icon
+			}
+		}
+	}
 	host := ""
 	if u.Host != nil {
 		host = "@" + *u.Host
@@ -607,6 +627,25 @@ func GateCountVisibility(d *UserDetailed, isMe, isModerator, isFollowing bool) {
 	if !countVisible(d.FollowingVisibility, isMe, isModerator, isFollowing) {
 		d.FollowingCount = 0
 	}
+}
+
+// ApplyModeratorSecurityFields sets twoFactorEnabled / usePasswordLessLogin /
+// securityKeys on a UserDetailed when the viewer is a moderator, mirroring
+// upstream UserEntityService.ts:577-583 which emits them in the
+// `isDetailed && (isMe || iAmModerator)` block (#1781). The self-view path uses
+// MeDetailed (which always emits the trio as plain bool, shadowing these
+// pointers), so this only covers a moderator viewing another user. No-op for
+// non-moderator viewers or when profile is nil, leaving the fields omitted.
+func ApplyModeratorSecurityFields(d *UserDetailed, iAmModerator bool, profile *model.UserProfile) {
+	if !iAmModerator || profile == nil {
+		return
+	}
+	tfa := profile.TwoFactorEnabled
+	pwl := profile.UsePasswordLessLogin
+	sk := profile.SecurityKeysAvailable
+	d.TwoFactorEnabled = &tfa
+	d.UsePasswordLessLogin = &pwl
+	d.SecurityKeys = &sk
 }
 
 // backupCodesStock returns the 2FA backup-codes stock level. Mirrors upstream

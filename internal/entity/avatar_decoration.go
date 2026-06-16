@@ -35,12 +35,16 @@ func SetAvatarDecorationLookup(l AvatarDecorationLookup) {
 // AvatarDecorationItem is the per-entry shape sent to clients. Mirrors
 // upstream Misskey's UserEntityService output: {id, angle, flipH, offsetX,
 // offsetY, url}. `url` is resolved from the avatar_decoration catalog.
+//
+// angle / flipH / offsetX / offsetY は upstream UserEntityService が
+// `ud.angle || undefined` 等で falsy 値を省くため (#1781)、omitempty で
+// 0 / false のとき出力しない (json-schema 上 optional)。id / url は常に出す。
 type AvatarDecorationItem struct {
 	ID      string  `json:"id"`
-	Angle   float64 `json:"angle"`
-	FlipH   bool    `json:"flipH"`
-	OffsetX float64 `json:"offsetX"`
-	OffsetY float64 `json:"offsetY"`
+	Angle   float64 `json:"angle,omitempty"`
+	FlipH   bool    `json:"flipH,omitempty"`
+	OffsetX float64 `json:"offsetX,omitempty"`
+	OffsetY float64 `json:"offsetY,omitempty"`
 	URL     string  `json:"url"`
 }
 

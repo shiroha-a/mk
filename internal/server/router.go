@@ -1506,6 +1506,16 @@ func (s *Server) setupRoutes() {
 		m, err := metaRepo.Fetch()
 		return err == nil && m != nil && m.ShowRoleBadgesOfRemoteUsers
 	})
+	// local system account (relay.actor 等) の avatarUrl を meta.iconUrl に
+	// する upstream の特例 (#1781)。IdenticonURL が '.' を含む local username の
+	// fallback でのみ参照する。
+	entity.SetInstanceIconURLLookup(func() string {
+		m, err := metaRepo.Fetch()
+		if err != nil || m == nil || m.IconURL == nil {
+			return ""
+		}
+		return *m.IconURL
+	})
 	// PackDriveFile / IdenticonURL が remote origin の media URL (note 添付・
 	// avatar・banner 等) を pack 時に media proxy 経由へ書き換えられるよう
 	// context を登録する (#1529)。これが無いと remote の url/thumbnailUrl/

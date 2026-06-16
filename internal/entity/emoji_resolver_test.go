@@ -473,12 +473,16 @@ func TestPopulateNoteReactionEmojis(t *testing.T) {
 	// remote: key は frontend lookup `reaction.substring(1, length-1)` 仕様で "smile@remote.example"
 	assert.Equal(t, "https://remote.example/emoji/smile.png", entity.ReactionEmojis["smile@remote.example"])
 	assert.Equal(t, "https://remote.example/emoji/wave.png", entity.ReactionEmojis["wave@remote.example"])
-	// canonical local (`:local@.:`) は frontend lookup で "local@." に
-	// なるが、parser が `.` を空に戻すので map のキーは "local"
-	assert.Equal(t, "https://local.example/emoji/local.png", entity.ReactionEmojis["local"])
+	// canonical local (`:local@.:`) は upstream の `!x.includes('@.')` filter
+	// と同じく reactionEmojis に載せない (frontend が instance registry から
+	// 解決する、#1781)。host="" の entry は除外される。
+	_, hasLocal := entity.ReactionEmojis["local"]
+	assert.False(t, hasLocal, "local custom emoji should not appear in reactionEmojis")
 	// raw unicode は乗らない
 	_, hasHeart := entity.ReactionEmojis["❤️"]
 	assert.False(t, hasHeart, "raw unicode reactions should not appear in reactionEmojis")
+	// remote 2 件のみが残る
+	assert.Len(t, entity.ReactionEmojis, 2)
 }
 
 func TestPopulateNoteReactionEmojis_SameNameDifferentHosts(t *testing.T) {

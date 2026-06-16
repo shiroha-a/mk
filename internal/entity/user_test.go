@@ -184,6 +184,53 @@ func TestPackUserDetailed(t *testing.T) {
 	assert.Equal(t, &lang, detailed.Lang)
 }
 
+// #1781: moderator が他ユーザーを見るとき twoFactorEnabled /
+// usePasswordLessLogin / securityKeys を emit する。非 moderator には omit。
+func TestApplyModeratorSecurityFields(t *testing.T) {
+	profile := &model.UserProfile{
+		UserID:                "u1",
+		TwoFactorEnabled:      true,
+		UsePasswordLessLogin:  false,
+		SecurityKeysAvailable: true,
+	}
+
+	t.Run("moderator gets the trio", func(t *testing.T) {
+		d := UserDetailed{}
+		ApplyModeratorSecurityFields(&d, true, profile)
+		require.NotNil(t, d.TwoFactorEnabled)
+		assert.True(t, *d.TwoFactorEnabled)
+		require.NotNil(t, d.UsePasswordLessLogin)
+		assert.False(t, *d.UsePasswordLessLogin)
+		require.NotNil(t, d.SecurityKeys)
+		assert.True(t, *d.SecurityKeys)
+		// JSON では key が emit される。
+		b, err := json.Marshal(d)
+		require.NoError(t, err)
+		assert.Contains(t, string(b), "\"twoFactorEnabled\":true")
+		assert.Contains(t, string(b), "\"usePasswordLessLogin\":false")
+		assert.Contains(t, string(b), "\"securityKeys\":true")
+	})
+
+	t.Run("non-moderator omits the trio", func(t *testing.T) {
+		d := UserDetailed{}
+		ApplyModeratorSecurityFields(&d, false, profile)
+		assert.Nil(t, d.TwoFactorEnabled)
+		assert.Nil(t, d.UsePasswordLessLogin)
+		assert.Nil(t, d.SecurityKeys)
+		b, err := json.Marshal(d)
+		require.NoError(t, err)
+		assert.NotContains(t, string(b), "twoFactorEnabled")
+		assert.NotContains(t, string(b), "usePasswordLessLogin")
+		assert.NotContains(t, string(b), "securityKeys")
+	})
+
+	t.Run("nil profile is a no-op", func(t *testing.T) {
+		d := UserDetailed{}
+		ApplyModeratorSecurityFields(&d, true, nil)
+		assert.Nil(t, d.TwoFactorEnabled)
+	})
+}
+
 func TestPackUserDetailed_MoveFields(t *testing.T) {
 	fetched := time.Date(2026, 5, 25, 1, 2, 3, 0, time.UTC)
 	movedURI := "https://remote.example/users/moved"

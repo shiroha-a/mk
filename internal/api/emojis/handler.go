@@ -38,12 +38,19 @@ func (h *Handler) Emojis(c echo.Context) error {
 			url = e.OriginalURL
 		}
 		item := map[string]any{
-			"name":        e.Name,
-			"category":    e.Category,
-			"aliases":     e.Aliases,
-			"url":         url,
-			"localOnly":   e.LocalOnly,
-			"isSensitive": e.IsSensitive,
+			"name":     e.Name,
+			"category": e.Category,
+			"aliases":  e.Aliases,
+			"url":      url,
+		}
+		// upstream packSimple は localOnly / isSensitive を `? true : undefined`
+		// で出すため、false のとき key 自体を省く (json-schema 上 optional)。
+		// 常に false を載せると shape が upstream とずれる (#1781)。
+		if e.LocalOnly {
+			item["localOnly"] = true
+		}
+		if e.IsSensitive {
+			item["isSensitive"] = true
 		}
 		// roleIdsThatCanBeUsedThisEmojiAsReaction は length>0 のときだけ emit
 		// (upstream packSimple、#1556)。reaction-role gating UI が使う。
