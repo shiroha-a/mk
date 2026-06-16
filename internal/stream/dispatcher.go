@@ -452,8 +452,9 @@ func (c *channelContext) UpdateFollowingSnapshot(followeeID string, following bo
 }
 
 // MuteBlockSnapshot forwards the connection-level mute/block snapshot so the
-// main / notifications channels can gate notification / mention delivery
-// (#1711).
+// main / notifications channels (#1711) and every timeline channel (#1812) can
+// gate delivery of muted / blocked / muted-instance / renote-muted /
+// channel-muted notes.
 func (c *channelContext) MuteBlockSnapshot() *MuteBlockSnapshot {
 	if c.dispatcher.conn == nil {
 		return nil

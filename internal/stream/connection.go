@@ -211,9 +211,10 @@ func (c *Connection) UpdateFollowingSnapshot(followeeID string, following bool) 
 }
 
 // SetMuteBlockSnapshot attaches the viewer's mute/block snapshot so the main /
-// notifications channels can drop notifications / mentions involving muted
-// instances, muted users, or users blocking the viewer (#1711). Called once at
-// connection setup. nil leaves the gate disabled (fail-open: nothing dropped),
+// notifications channels (#1711) and the timeline channels (#1812) can drop
+// notes / notifications / mentions involving muted instances, muted users,
+// users blocking the viewer, renote-muted users, or muted channels. Called once
+// at connection setup. nil leaves the gate disabled (fail-open: nothing dropped),
 // matching upstream の「Set が空 = 全通過」default。並行安全: 内部 pointer を
 // 全置換するだけで snapshot 内 map は mutate しない (reader は古い snapshot を
 // そのまま読み続けて GC される)。

@@ -77,6 +77,35 @@ var (
 	_ stream.Channel = (*MainChannel)(nil)
 )
 
+// #1812: timeline channel は mute/block snapshot に該当する live note を drop する。
+func TestLocalTimeline_DropsMutedAndBlockedAndInstance(t *testing.T) {
+	// user-mute: muted author の note を落とす。
+	muted := newCtx(&model.User{ID: "viewer"})
+	muted.muteBlockSnap = &stream.MuteBlockSnapshot{Muting: map[string]struct{}{"bad": {}}}
+	chM := NewLocalTimeline(muted)
+	chM.Init(nil)
+	chM.OnRedisEvent([]byte(`{"id":"n1","userId":"bad"}`))
+	assert.Empty(t, muted.sentType, "muted author の note は drop する")
+	chM.OnRedisEvent([]byte(`{"id":"n2","userId":"ok"}`))
+	assert.Len(t, muted.sentType, 1, "非 mute author は通す")
+
+	// block (blockingMe): 自分を block している author の note を落とす。
+	blk := newCtx(&model.User{ID: "viewer"})
+	blk.muteBlockSnap = &stream.MuteBlockSnapshot{BlockingMe: map[string]struct{}{"enemy": {}}}
+	chB := NewLocalTimeline(blk)
+	chB.Init(nil)
+	chB.OnRedisEvent([]byte(`{"id":"n3","userId":"enemy"}`))
+	assert.Empty(t, blk.sentType, "blockingMe author の note は drop する")
+
+	// instance-mute: muted host の author の note を落とす。
+	inst := newCtx(&model.User{ID: "viewer"})
+	inst.muteBlockSnap = &stream.MuteBlockSnapshot{MutedInstances: map[string]struct{}{"bad.example": {}}}
+	chI := NewLocalTimeline(inst)
+	chI.Init(nil)
+	chI.OnRedisEvent([]byte(`{"id":"n4","userId":"r","user":{"host":"bad.example"}}`))
+	assert.Empty(t, inst.sentType, "muted instance の note は drop する")
+}
+
 func TestLocalTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewLocalTimeline(ctx)

@@ -80,6 +80,9 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
 	}
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
+		return
+	}
 	// followers visibility note の defense-in-depth filter (#1465)。fanout 段
 	// で list owner の follow 関係を check してから push する設計だが、過去に
 	// stream へ滞留した entry や fanout の設定ミスに対して WS 側でも 1 段

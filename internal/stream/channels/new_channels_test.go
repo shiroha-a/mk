@@ -436,6 +436,30 @@ func TestChannelTimeline_AuthedRequireSigninPassed(t *testing.T) {
 	require.Len(t, ctx.sentType, 1, "authenticated viewer is exempt from the requireSignin gate")
 }
 
+// #1812: channel timeline は upstream channel.ts の override に倣い、視聴中の
+// channel 自身が mute されていても note を流す (直接見ている以上は配信する)。
+func TestChannelTimeline_MutedOwnChannelStillStreamed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "viewer"})
+	// viewer は視聴中の ch1 を mute している。
+	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutingChannels: map[string]struct{}{"ch1": {}}}
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"public"}`))
+	require.Len(t, ctx.sentType, 1, "視聴中 channel の mute では own-channel note を落とさない")
+}
+
+// #1812: ただし他の mute された channel への renote は channel timeline でも落とす。
+func TestChannelTimeline_MutedRenoteChannelDropped(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "viewer"})
+	// viewer は ch1 を見ているが、別 channel ch2 を mute している。
+	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutingChannels: map[string]struct{}{"ch2": {}}}
+	ch := NewChannelTimeline(ctx)
+	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	// ch1 に流れた、ch2 の note への renote。
+	ch.OnRedisEvent([]byte(`{"id":"n2","channelId":"ch1","userId":"author","visibility":"public","renoteId":"r1","renote":{"channelId":"ch2","userId":"x","user":{"id":"x"}}}`))
+	assert.Empty(t, ctx.sentType, "他の mute された channel への renote は drop する")
+}
+
 // --- UserList ---
 
 func TestUserList_Lifecycle(t *testing.T) {

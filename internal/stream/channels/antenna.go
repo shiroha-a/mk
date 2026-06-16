@@ -88,6 +88,9 @@ func (c *AntennaChannel) OnRedisEvent(payload []byte) {
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
+		return
+	}
 	// embedded renote/reply の per-viewer 可視性 gate (#1536)。絶対に消さない:
 	// 消すと non-visible な引用/返信元が top-level antenna note 経由で漏れる
 	// IDOR を再 open する。

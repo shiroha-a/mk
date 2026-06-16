@@ -57,6 +57,12 @@ func (c *ChannelTimelineChannel) OnRedisEvent(payload []byte) {
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerIDFromCtx(c.ctx)) {
 		return
 	}
+	// channel timeline は upstream channel.ts の override に倣い、視聴中 channel
+	// 自身の mute は無視する (直接見ている channel の note は流す)。他 channel への
+	// renote の channel-mute のみ適用する (#1812)。
+	if noteMutedOrBlockedInChannel(payload, c.ctx.MuteBlockSnapshot(), c.channelID) {
+		return
+	}
 	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }

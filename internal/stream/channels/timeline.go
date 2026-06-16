@@ -38,6 +38,12 @@ func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
 	}
+	// live note も user-mute / block / instance-mute / renote-mute / channel-mute で
+	// filter する (upstream channel.ts isNoteMutedOrBlocked、#1812)。snapshot は
+	// connection 確立時にロード済 (未配線/anon は nil で fail-open)。
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
+		return
+	}
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateLocal) {
 		return
 	}
@@ -76,6 +82,12 @@ func (c *GlobalTimelineChannel) Init(params json.RawMessage) error {
 func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	// live note も user-mute / block / instance-mute / renote-mute / channel-mute で
+	// filter する (upstream channel.ts isNoteMutedOrBlocked、#1812)。snapshot は
+	// connection 確立時にロード済 (未配線/anon は nil で fail-open)。
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
 		return
 	}
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateGlobal) {
@@ -124,6 +136,12 @@ func (c *HomeTimelineChannel) Init(params json.RawMessage) error {
 func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	// live note も user-mute / block / instance-mute / renote-mute / channel-mute で
+	// filter する (upstream channel.ts isNoteMutedOrBlocked、#1812)。snapshot は
+	// connection 確立時にロード済 (未配線/anon は nil で fail-open)。
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
 		return
 	}
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), false, replyGateHome) {
@@ -175,6 +193,12 @@ func (c *HybridTimelineChannel) Init(params json.RawMessage) error {
 func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
+		return
+	}
+	// live note も user-mute / block / instance-mute / renote-mute / channel-mute で
+	// filter する (upstream channel.ts isNoteMutedOrBlocked、#1812)。snapshot は
+	// connection 確立時にロード済 (未配線/anon は nil で fail-open)。
+	if noteMutedOrBlocked(payload, c.ctx.MuteBlockSnapshot()) {
 		return
 	}
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateHybrid) {

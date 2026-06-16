@@ -63,6 +63,51 @@ func noteMutedOrBlocked(payload []byte, snap *stream.MuteBlockSnapshot) bool {
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return false
 	}
+	if mutedOrBlockedExceptChannel(p, snap) {
+		return true
+	}
+	// channel-mute: note の所属 channel か、renote 先の channel が muted。
+	return channelRelated(p, snap.MutingChannels)
+}
+
+// noteMutedOrBlockedInChannel mirrors upstream channel.ts's `override
+// isNoteMutedOrBlocked` for the "channel" timeline (#1812). It shares the
+// instance-mute / user-mute / block / renote-mute gate with the base, but for
+// channel-mute it deliberately ignores the note's own channel: directly viewing
+// a channel must keep streaming its notes even when that channel is muted. Only
+// a renote whose target channel differs from the viewed channel and is muted is
+// dropped (upstream: 「このソケットで見ているチャンネルがミュートされていたとしても、
+// チャンネルを直接見ている以上は流すようにしたい。ただし、他のミュートしている
+// チャンネルは流さないようにもしたい」). viewingChannelID is the channel this
+// socket subscribed to.
+func noteMutedOrBlockedInChannel(payload []byte, snap *stream.MuteBlockSnapshot, viewingChannelID string) bool {
+	if snap == nil {
+		return false
+	}
+	var p muteBlockProbe
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	if mutedOrBlockedExceptChannel(p, snap) {
+		return true
+	}
+	// channel-mute (override): own-channel は無視し、renote 先 channel が
+	// 視聴中 channel と異なり muted の場合のみ drop。
+	if len(snap.MutingChannels) > 0 && p.Renote != nil && p.Renote.ChannelID != nil {
+		if rc := *p.Renote.ChannelID; rc != viewingChannelID {
+			if _, ok := snap.MutingChannels[rc]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mutedOrBlockedExceptChannel applies the instance-mute / user-mute / block /
+// renote-mute checks shared by every channel's isNoteMutedOrBlocked, leaving the
+// channel-mute branch (which differs between the base and the channel-timeline
+// override) to the caller. p must already be unmarshaled.
+func mutedOrBlockedExceptChannel(p muteBlockProbe, snap *stream.MuteBlockSnapshot) bool {
 	// instance-mute: note / reply / renote の author host のいずれか。
 	if len(snap.MutedInstances) > 0 {
 		if hostMuted(p.User.Host, snap.MutedInstances) {
@@ -89,10 +134,6 @@ func noteMutedOrBlocked(payload []byte, snap *stream.MuteBlockSnapshot) bool {
 		if _, ok := snap.RenoteMuting[p.UserID]; ok {
 			return true
 		}
-	}
-	// channel-mute: note の所属 channel か、renote 先の channel が muted。
-	if channelRelated(p, snap.MutingChannels) {
-		return true
 	}
 	return false
 }

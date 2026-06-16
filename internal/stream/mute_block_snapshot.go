@@ -1,9 +1,11 @@
 package stream
 
 // MuteBlockSnapshot captures the viewer's mute / block relationships at
-// connection setup so the main / notifications channels can apply upstream
-// `main.ts` の instance-mute / block / mute gate per-publish without a DB round
-// trip (#1711). It mirrors the Connection-level Sets that upstream Misskey
+// connection setup so the main / notifications channels (#1711) and the
+// timeline channels (home/local/hybrid/global/userList/channel/hashtag/antenna/
+// roleTimeline, #1812) can apply upstream's instance-mute / block / mute /
+// renote-mute / channel-mute gate per-publish without a DB round trip. It
+// mirrors the Connection-level Sets that upstream Misskey
 // fetches in `Connection#fetch` (userIdsWhoMeMuting / userIdsWhoBlockingMe /
 // userIdsWhoMeMutingRenotes / userMutedInstances / mutingChannels).
 //
