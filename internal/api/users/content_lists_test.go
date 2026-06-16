@@ -264,3 +264,15 @@ func TestPages_ResolvesDriveFiles(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "eye1", eye["id"])
 }
+
+// clampListLimit: 0/負値は 10、100 超は 100 に clamp、範囲内はそのまま (#1802 margin)。
+func TestClampListLimit(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, 10}, {-5, 10}, {50, 50}, {100, 100}, {101, 100}, {1000, 100},
+	}
+	for _, c := range cases {
+		v := c.in
+		clampListLimit(&v)
+		assert.Equal(t, c.want, v, "clampListLimit(%d)", c.in)
+	}
+}

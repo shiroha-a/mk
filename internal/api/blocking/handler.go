@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -22,6 +23,7 @@ type Handler struct {
 	svc      *coreblocking.Service
 	userRepo repository.UserRepository
 	idGen    id.Generator
+	relation userrelation.Repos
 }
 
 // NewHandler creates a new blocking Handler.
@@ -29,6 +31,14 @@ type Handler struct {
 // `blockee` user object that the upstream Misskey frontend renders.
 func NewHandler(svc *coreblocking.Service, userRepo repository.UserRepository, idGen id.Generator) *Handler {
 	return &Handler{svc: svc, userRepo: userRepo, idGen: idGen}
+}
+
+// SetRelationRepos wires the repositories used to compute the viewer->blockee
+// relation block (isBlocking etc.) returned by create / delete (#1802). When
+// unset the relation flags are simply omitted (= legacy 204-ish behavior for
+// test fixtures).
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // PairRequest is the request body for blocking/create and blocking/delete.
@@ -60,7 +70,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return h.respondPackedUser(c, req.UserID)
+	return h.respondPackedUser(c, user, req.UserID)
 }
 
 // Delete handles POST /api/blocking/delete.
@@ -82,15 +92,18 @@ func (h *Handler) Delete(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return h.respondPackedUser(c, req.UserID)
+	return h.respondPackedUser(c, user, req.UserID)
 }
 
 // respondPackedUser fetches the target user + profile via userRepo and writes
-// a 200 + UserDetailed response. userRepo 未 wire (= 既存 test stub) なら
-// legacy 204 を返す互換 path に落ちる (production では router で必ず wire
-// されるので影響なし、#870)。lookup 失敗時も best-effort 204 にフォール
-// バックして block / unblock の副作用 (= state 反映) を尊重する。
-func (h *Handler) respondPackedUser(c echo.Context, userID string) error {
+// a 200 + UserDetailed response carrying the viewer->target relation block
+// (isBlocking etc.), matching upstream pack(blockee, blocker, UserDetailedNotMe)
+// (#1802). userRepo 未 wire (= 既存 test stub) なら legacy 204 を返す互換 path に
+// 落ちる (production では router で必ず wire されるので影響なし、#870)。lookup
+// 失敗時も best-effort 204 にフォールバックして block / unblock の副作用 (= state
+// 反映) を尊重する。relation block は h.relation 経由で viewer (= blocker) との関係を
+// 解決するため、block 後は isBlocking=true / unblock 後は isBlocking=false が乗る。
+func (h *Handler) respondPackedUser(c echo.Context, viewer *model.User, userID string) error {
 	if h.userRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
@@ -99,7 +112,11 @@ func (h *Handler) respondPackedUser(c echo.Context, userID string) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	profile, _ := h.userRepo.FindProfileByUserID(userID)
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(target, profile, h.idGen))
+	detailed := entity.PackUserDetailed(target, profile, h.idGen)
+	if viewer != nil {
+		h.relation.Apply(&detailed, viewer.ID, target, profile)
+	}
+	return c.JSON(http.StatusOK, detailed)
 }
 
 // ListRequest is the request body for blocking/list.

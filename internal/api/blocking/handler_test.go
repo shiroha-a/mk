@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -55,6 +56,37 @@ func TestCreate_Success(t *testing.T) {
 	// upstream Misskey TS と同じ 200 + UserDetailed (= drop-in 互換、#870)。
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"id":"bob"`)
+}
+
+// #1802: create / delete のレスポンスに viewer→blockee の relation block が乗り、
+// block 後は isBlocking=true / unblock 後は isBlocking=false になる。
+func TestCreateDelete_ReturnsIsBlockingRelation(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	blockingRepo := testutil.NewMockBlockingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coreblocking.NewService(userRepo, blockingRepo, nil, idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	// relation の Blocking は service と同一インスタンスを渡し、block 状態を反映させる。
+	h.SetRelationRepos(userrelation.Repos{Blocking: blockingRepo})
+	addUser(userRepo, "alice")
+	addUser(userRepo, "bob")
+
+	c, rec := newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "bob", resp["id"])
+	assert.Equal(t, true, resp["isBlocking"], "block 後は isBlocking=true")
+	assert.Equal(t, false, resp["isBlocked"])
+
+	c, rec = newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Delete(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isBlocking"], "unblock 後は isBlocking=false")
 }
 
 func TestCreate_InvalidParam(t *testing.T) {

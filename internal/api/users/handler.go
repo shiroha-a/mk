@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
@@ -551,100 +552,22 @@ func (h *Handler) Show(c echo.Context) error {
 	// pinned note の myReaction を埋めるのに使う (#426)。
 	h.fillPinned(c.Request().Context(), viewer, bundle.User, bundle.Profile, &detailed)
 
-	// viewerがログインしている場合、viewer依存フィールドを並列取得する。
-	// 各リポジトリへのクエリは完全に独立しているためgoroutineで並列実行し、
-	// 全結果が揃ってからdetailedに反映する。
-	// viewerIsFollowing は relation ブロックで解決し、count / followedMessage の
-	// viewer-dependent gate (#1558) でも参照するため関数スコープに持つ。
-	viewerIsFollowing := false
-	if viewer != nil && viewer.ID != bundle.User.ID {
-		var (
-			isFollowing, isFollowed      bool
-			isBlocking, isBlocked        bool
-			isMuted, isRenoteMuted       bool
-			hasPendingFrom, hasPendingTo bool
-			followRec                    *model.Following
-			memo                         *model.UserMemo
-			wg                           sync.WaitGroup
-		)
-
-		if h.followingRepo != nil {
-			wg.Add(3)
-			go func() { defer wg.Done(); isFollowing, _ = h.followingRepo.Exists(viewer.ID, bundle.User.ID) }()
-			go func() { defer wg.Done(); isFollowed, _ = h.followingRepo.Exists(bundle.User.ID, viewer.ID) }()
-			go func() { defer wg.Done(); followRec, _ = h.followingRepo.FindByPair(viewer.ID, bundle.User.ID) }()
-		}
-		if h.blockingRepo != nil {
-			wg.Add(2)
-			go func() { defer wg.Done(); isBlocking, _ = h.blockingRepo.Exists(viewer.ID, bundle.User.ID) }()
-			go func() { defer wg.Done(); isBlocked, _ = h.blockingRepo.Exists(bundle.User.ID, viewer.ID) }()
-		}
-		if h.mutingRepo != nil {
-			wg.Add(1)
-			go func() { defer wg.Done(); isMuted, _ = h.mutingRepo.Exists(viewer.ID, bundle.User.ID) }()
-		}
-		if h.renoteMutingRepo != nil {
-			wg.Add(1)
-			go func() { defer wg.Done(); isRenoteMuted, _ = h.renoteMutingRepo.Exists(viewer.ID, bundle.User.ID) }()
-		}
-		if h.followRequestRepo != nil {
-			wg.Add(2)
-			go func() { defer wg.Done(); hasPendingFrom, _ = h.followRequestRepo.Exists(viewer.ID, bundle.User.ID) }()
-			go func() { defer wg.Done(); hasPendingTo, _ = h.followRequestRepo.Exists(bundle.User.ID, viewer.ID) }()
-		}
-		if h.memoRepo != nil {
-			wg.Add(1)
-			go func() { defer wg.Done(); memo, _ = h.memoRepo.FindByPair(viewer.ID, bundle.User.ID) }()
-		}
-
-		wg.Wait()
-
-		if h.followingRepo != nil {
-			detailed.IsFollowing = &isFollowing
-			detailed.IsFollowed = &isFollowed
-			viewerIsFollowing = isFollowing
-			// notify / withReplies は relation ブロックが存在する限り (= authed
-			// 非self viewer) 常に emit する。upstream は
-			// `notify: relation.following?.notify ?? 'none'` /
-			// `withReplies: relation.following?.withReplies ?? false` で、follow row
-			// が無い / notify 未設定でも default を出す (#1558)。
-			none := "none"
-			withReplies := false
-			if followRec != nil {
-				if followRec.Notify != nil {
-					detailed.Notify = followRec.Notify
-				} else {
-					detailed.Notify = &none
-				}
-				withReplies = followRec.WithReplies
-			} else {
-				detailed.Notify = &none
-			}
-			detailed.WithReplies = &withReplies
-			// followedMessage は follower にだけ見せる (upstream relation ブロックの
-			// `relation.isFollowing ? profile.followedMessage : undefined`、#1558)。
-			if isFollowing && bundle.Profile != nil {
-				detailed.FollowedMessage = bundle.Profile.FollowedMessage
-			}
-		}
-		if h.blockingRepo != nil {
-			detailed.IsBlocking = &isBlocking
-			detailed.IsBlocked = &isBlocked
-		}
-		if h.mutingRepo != nil {
-			detailed.IsMuted = &isMuted
-		}
-		if h.renoteMutingRepo != nil {
-			detailed.IsRenoteMuted = &isRenoteMuted
-		}
-		if h.followRequestRepo != nil {
-			detailed.HasPendingFollowRequestFromYou = &hasPendingFrom
-			detailed.HasPendingFollowRequestToYou = &hasPendingTo
-		}
-		if h.memoRepo != nil && memo != nil {
-			detailed.Memo = &memo.Memo
-		}
+	// viewer→target の relation block を共有 resolver で解決し detailed に反映する。
+	// blocking/create・delete と同じ計算で、二重実装を避けるため抽出した (#1802)。
+	// anonymous (viewer nil) / self は Apply 内で no-op。viewerIsFollowing は count /
+	// followedMessage の viewer-dependent gate (#1558) でも参照する。
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
 	}
+	viewerIsFollowing := userrelation.Repos{
+		Following:     h.followingRepo,
+		Blocking:      h.blockingRepo,
+		Muting:        h.mutingRepo,
+		RenoteMuting:  h.renoteMutingRepo,
+		FollowRequest: h.followRequestRepo,
+		Memo:          h.memoRepo,
+	}.Apply(&detailed, viewerID, bundle.User, bundle.Profile)
 
 	// viewer===target の self-view では upstream `pack(user, me)` 互換で
 	// MeDetailed 拡張 field (isExplorable / noCrawle 等 11 個 + #985 で

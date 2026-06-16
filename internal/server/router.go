@@ -58,6 +58,7 @@ import (
 	apitest "github.com/shiroha-a/mk/internal/api/test"
 	apiurl "github.com/shiroha-a/mk/internal/api/url"
 	apiuserlists "github.com/shiroha-a/mk/internal/api/userlists"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/api/users"
 	apiwebhooks "github.com/shiroha-a/mk/internal/api/webhooks"
 	"github.com/shiroha-a/mk/internal/api/wellknown"
@@ -1643,6 +1644,16 @@ func (s *Server) setupRoutes() {
 
 	// Blocking endpoints
 	blockingHandler := blocking.NewHandler(blockingService, userRepo, idGen)
+	// blocking/create・delete のレスポンスに viewer→blockee の relation block
+	// (isBlocking 等) を載せるための共有 resolver 依存 (#1802)。
+	blockingHandler.SetRelationRepos(userrelation.Repos{
+		Following:     followingRepo,
+		Blocking:      blockingRepo,
+		Muting:        mutingRepo,
+		RenoteMuting:  renoteMutingRepo,
+		FollowRequest: followRequestRepo,
+		Memo:          repository.NewUserMemoRepository(s.db),
+	})
 	api.POST("/blocking/create", blockingHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/delete", blockingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/list", blockingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:blocks"))
