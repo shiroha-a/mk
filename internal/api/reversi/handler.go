@@ -134,10 +134,15 @@ func packGame(g *model.ReversiGame, idGen id.Generator) map[string]any {
 		"loopedBoard":          g.LoopedBoard,
 		"map":                  g.Map,
 		"bw":                   g.BW,
-		"startedAt":            g.StartedAt,
-		"endedAt":              g.EndedAt,
-		"logs":                 g.Logs,
-		"crc32":                g.CRC32,
+		// startedAt / endedAt は upstream ReversiGameEntityService が toISOString()
+		// で常にミリ秒 3 桁固定の ISO8601 を返す。*time.Time を生で map に入れると
+		// encoding/json が RFC3339Nano (小数 0 秒は .000 無し、pg microsecond は 6 桁)
+		// で出力し createdAt 等の .000Z 正規化と不一致になるため明示フォーマットする
+		// (nil は null、#1774)。
+		"startedAt": isoOrNull(g.StartedAt),
+		"endedAt":   isoOrNull(g.EndedAt),
+		"logs":      g.Logs,
+		"crc32":     g.CRC32,
 	}
 	if t, err := idGen.ParseTime(g.ID); err == nil {
 		result["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -175,6 +180,16 @@ func jsonOrNull(j datatypes.JSON) any {
 		return nil
 	}
 	return json.RawMessage(j)
+}
+
+// isoOrNull renders an optional timestamp as the millisecond-fixed ISO8601
+// string used across mk-go packers (toISOString-compatible), or null when the
+// pointer is nil. Used for ReversiGame startedAt / endedAt (#1774)。
+func isoOrNull(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
 // 標準8x8盤面
@@ -327,8 +342,16 @@ func (h *Handler) Match(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
 		UserID string `json:"userId"`
+		// upstream match.ts paramDef の noIrregularRules / multiple (既定 false)。
+		// noIrregularRules は specific-match では upstream も matched() で false 固定
+		// (ReversiService.ts:125) で、any-match (mk-go は 204 stub) でしか効かないため
+		// ここでは accept するが live path では inert。multiple は下の outbound dedup を
+		// スキップするのに使う (#1774)。
+		NoIrregularRules bool `json:"noIrregularRules"`
+		Multiple         bool `json:"multiple"`
 	}
 	_ = c.Bind(&req)
+	_ = req.NoIrregularRules // accepted for paramDef parity; inert on specific-match
 
 	// acct 形式 (@user / @user@host) を local user id に解決する
 	if strings.HasPrefix(req.UserID, "@") && h.userRepo != nil {
@@ -367,6 +390,18 @@ func (h *Handler) Match(c echo.Context) error {
 	if existing := h.findPendingInvitationFrom(user.ID, req.UserID); existing != nil {
 		h.sendJoinForAcceptedInvite(c, user, existing)
 		return c.JSON(http.StatusOK, packGame(existing, h.idGen))
+	}
+
+	// upstream matchSpecificUser: multiple=false なら直近 3 分以内の未開始 pending
+	// game を再利用して二重招待を防ぐ (ReversiService.ts:99-112)。mk-go では招待が
+	// 実 game 行なので、自分発 (User1=me, User2=target) の未開始 game が 3 分以内に
+	// あればそれを返す (再 Invite はしない = upstream も返すだけ)。相手発の再利用は
+	// 上の inbound-accept (mk-go 独自の Join 送信) が既に担うのでここでは扱わない。
+	// multiple=true は upstream 同様このスキップで毎回新規作成する (#1774)。
+	if !req.Multiple {
+		if existing := h.findPendingInvitationFrom(req.UserID, user.ID); existing != nil && h.withinMatchDedupWindow(existing) {
+			return c.JSON(http.StatusOK, packGame(existing, h.idGen))
+		}
 	}
 
 	// target user を一度だけ引いて pre-check と deliver 両方で使い回す
@@ -443,6 +478,18 @@ func (h *Handler) Match(c echo.Context) error {
 // ために使う。corereversi.FindPendingInvitation に共有実装。
 func (h *Handler) findPendingInvitationFrom(viewerID, inviterID string) *model.ReversiGame {
 	return corereversi.FindPendingInvitation(h.repo, viewerID, inviterID)
+}
+
+// withinMatchDedupWindow reports whether a pending game was created recently
+// enough to be reused by the multiple=false dedup. Upstream gates the dedup on
+// a 3-minute window (ReversiService.ts:103) so stale invites fall through to a
+// fresh game/invite (#1774)。idGen.ParseTime 不能なら安全側で false。
+func (h *Handler) withinMatchDedupWindow(g *model.ReversiGame) bool {
+	t, err := h.idGen.ParseTime(g.ID)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) < 3*time.Minute
 }
 
 // sendJoinForAcceptedInvite delivers a Join activity to the remote inviter so

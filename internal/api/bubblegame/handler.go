@@ -75,16 +75,26 @@ func (h *Handler) Register(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// Ranking handles POST /api/bubble-game/ranking.
+// Ranking handles GET/POST /api/bubble-game/ranking. upstream ranking.ts は
+// allowGet:true で、frontend drop-and-fusion.vue は misskeyApiGet (GET +
+// query string) で gameMode を投げる。Echo の Bind は GET だと query を
+// `query` タグでしか拾わないため、fetch-rss と同様に QueryParam を先に読み、
+// 無ければ JSON body に fallback する (#1774)。
 func (h *Handler) Ranking(c echo.Context) error {
-	var req struct {
-		GameMode string `json:"gameMode"`
+	gameMode := c.QueryParam("gameMode")
+	if gameMode == "" {
+		var req struct {
+			GameMode string `json:"gameMode"`
+		}
+		// Bind 失敗は無視 (空 gameMode のまま下の guard で 400 を返す)。
+		_ = c.Bind(&req)
+		gameMode = req.GameMode
 	}
-	if err := c.Bind(&req); err != nil || req.GameMode == "" {
+	if gameMode == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameMode is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
-	records, err := h.repo.Ranking(req.GameMode, 10)
+	records, err := h.repo.Ranking(gameMode, 10)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

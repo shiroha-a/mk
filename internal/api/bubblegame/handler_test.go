@@ -153,6 +153,38 @@ func TestRanking_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// getRanking issues a GET request with gameMode in the query string, mirroring
+// the frontend's misskeyApiGet call (#1774)。
+func getRanking(handler func(echo.Context) error, query string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?"+query, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	_ = handler(c)
+	return rec
+}
+
+// #1774: ranking は allowGet。frontend は GET + ?gameMode= で叩くため、query から
+// gameMode を読めること (JSON body 無しでも 400 にならないこと) を保証する。
+func TestRanking_GetWithQueryParam(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.records = []*model.BubbleGameRecord{
+		{ID: "r1", Score: 200, User: &model.User{ID: "u1", Username: "alice"}},
+	}
+	rec := getRanking(h.Ranking, "gameMode=normal")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1)
+}
+
+// GET で gameMode が無ければ POST 同様 400。
+func TestRanking_GetMissingGameMode(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := getRanking(h.Ranking, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestRanking_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Ranking, `{}`, nil)

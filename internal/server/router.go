@@ -2484,7 +2484,11 @@ func (s *Server) setupRoutes() {
 	bubbleGameRepo := repository.NewBubbleGameRepository(s.db)
 	bubbleGameHandler := apibubblegame.NewHandler(bubbleGameRepo, idGen)
 	api.POST("/bubble-game/register", bubbleGameHandler.Register, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	// ranking は upstream ranking.ts が allowGet:true。frontend drop-and-fusion.vue は
+	// misskeyApiGet で GET を投げるため GET+POST を二重 wire する (hashtags/trend や
+	// fetch-rss と同様、#1774)。
 	api.POST("/bubble-game/ranking", bubbleGameHandler.Ranking)
+	api.GET("/bubble-game/ranking", bubbleGameHandler.Ranking)
 
 	// chat/* — Misskey v2026 チャット機能 (実データ)
 	chatHandler := apichat.NewHandler(chatRepo, idGen)

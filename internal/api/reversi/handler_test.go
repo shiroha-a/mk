@@ -351,6 +351,46 @@ func TestMatch_CreateError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// TestMatch_MultipleDedup guards #1774: multiple=false reuses a recent (<3 min)
+// outbound pending game instead of creating a duplicate, while multiple=true and
+// stale games fall through to a fresh game (upstream matchSpecificUser の
+// 3 分 dedup を multiple で skip する挙動)。
+func TestMatch_MultipleDedup(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	seedPending := func(repo *mockReversiRepo, createdAt time.Time) string {
+		gid := idGen.Generate(createdAt)
+		repo.games[gid] = &model.ReversiGame{ID: gid, User1ID: "u1", User2ID: "u2"}
+		return gid
+	}
+
+	t.Run("multiple=false reuses recent pending outbound game", func(t *testing.T) {
+		h, repo := newTestHandler()
+		gid := seedPending(repo, time.Now())
+		rec := post(h.Match, `{"userId":"u2"}`, u1)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Len(t, repo.games, 1, "既存 pending game を再利用し新規作成しない")
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		assert.Equal(t, gid, out["id"])
+	})
+
+	t.Run("multiple=true skips dedup and creates a new game", func(t *testing.T) {
+		h, repo := newTestHandler()
+		seedPending(repo, time.Now())
+		rec := post(h.Match, `{"userId":"u2","multiple":true}`, u1)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Len(t, repo.games, 2, "multiple=true は dedup を skip して新規作成する")
+	})
+
+	t.Run("stale pending game (>3min) is not reused", func(t *testing.T) {
+		h, repo := newTestHandler()
+		seedPending(repo, time.Now().Add(-5*time.Minute))
+		rec := post(h.Match, `{"userId":"u2"}`, u1)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Len(t, repo.games, 2, "3 分超の古い pending game は再利用せず新規作成する")
+	})
+}
+
 // --- Match with acct (CherryPick extension) ---
 
 func TestMatch_AcctLocal(t *testing.T) {
@@ -939,6 +979,36 @@ func TestPackGame_FormFields(t *testing.T) {
 		form2, ok := decoded["form2"].([]any)
 		require.True(t, ok, "form2 must round-trip as the stored array")
 		require.Len(t, form2, 1)
+	})
+}
+
+// TestPackGame_TimestampFormat guards #1774: startedAt/endedAt are emitted as
+// millisecond-fixed ISO8601 (upstream ReversiGameEntityService の toISOString)
+// like createdAt, not Go's RFC3339Nano (where trailing-zero ms drop and pg
+// microseconds yield 6 digits). nil pointers serialize to null with the key
+// present.
+func TestPackGame_TimestampFormat(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	gid := idGen.Generate(timeRef())
+
+	t.Run("non-nil times render as .000Z millisecond ISO", func(t *testing.T) {
+		started := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)        // 0 fractional
+		ended := time.Date(2026, 6, 15, 12, 5, 30, 123456000, time.UTC) // 123456us
+		g := &model.ReversiGame{ID: gid, User1ID: "alice", User2ID: "bob", StartedAt: &started, EndedAt: &ended}
+		out := packGame(g, idGen)
+		assert.Equal(t, "2026-06-15T12:00:00.000Z", out["startedAt"])
+		assert.Equal(t, "2026-06-15T12:05:30.123Z", out["endedAt"])
+	})
+
+	t.Run("nil times serialize to null with key present", func(t *testing.T) {
+		g := &model.ReversiGame{ID: gid, User1ID: "alice", User2ID: "bob"}
+		out := packGame(g, idGen)
+		s, hasS := out["startedAt"]
+		e, hasE := out["endedAt"]
+		require.True(t, hasS, "startedAt key must always be present")
+		require.True(t, hasE, "endedAt key must always be present")
+		assert.Nil(t, s)
+		assert.Nil(t, e)
 	})
 }
 
