@@ -116,6 +116,28 @@ func TestSignin_FiresLoginNotifier(t *testing.T) {
 	}
 }
 
+// #1804: RecordSuccessfulSignin は signin / signup 共有の成功時 side-effect
+// entrypoint。signin 履歴 (success:true) + login 通知を発火する。
+func TestRecordSuccessfulSignin_FiresHistoryAndNotifier(t *testing.T) {
+	h, _ := newTestHandler(t)
+	signinRepo := testutil.NewMockSigninRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(signinRepo, idGen)
+	notifier := &chanLoginNotifier{ch: make(chan string, 1)}
+	h.SetLoginNotifier(notifier)
+
+	h.RecordSuccessfulSignin("u1", "1.2.3.4", http.Header{})
+
+	select {
+	case uid := <-notifier.ch:
+		assert.Equal(t, "u1", uid)
+	case <-time.After(2 * time.Second):
+		t.Fatal("login notifier was not fired")
+	}
+	require.Eventually(t, func() bool { return signinRepo.Len() == 1 }, 2*time.Second, 10*time.Millisecond)
+	assert.True(t, signinRepo.Signins[0].Success, "success:true で記録する")
+}
+
 func TestSignin_WrongPassword(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUser(repo, "admin", "pass123")

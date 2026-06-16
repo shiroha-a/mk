@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -268,6 +269,67 @@ func TestSignupPending_Success(t *testing.T) {
 	assert.NotEmpty(t, resp["id"])
 	assert.NotEmpty(t, resp["i"])
 	assert.Empty(t, pendingRepo.Rows)
+}
+
+// stubSigninRecorder captures RecordSuccessfulSignin calls (#1804).
+type stubSigninRecorder struct {
+	mu      sync.Mutex
+	userIDs []string
+}
+
+func (s *stubSigninRecorder) RecordSuccessfulSignin(userID, _ string, _ http.Header) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userIDs = append(s.userIDs, userID)
+}
+
+func (s *stubSigninRecorder) called() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.userIDs...)
+}
+
+// #1804: signup-pending 完了時に signin 副作用 (履歴 / login 通知 / main publish) を
+// 新規ユーザー ID で発火する。
+func TestSignupPending_FiresSigninSideEffects(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", EmailRequiredForSignup: true}
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coresignup.NewService(userRepo, metaRepo, idGen)
+	svc.SetUserPendingRepo(pendingRepo)
+	h := apisignup.NewHandler(svc, metaRepo, idGen)
+	rec := &stubSigninRecorder{}
+	h.SetSigninRecorder(rec)
+
+	row, err := svc.CreatePending("bob", "bob@example.com", "secret", nil)
+	require.NoError(t, err)
+
+	resp := parseResp(t, doPost(h.SignupPending, `{"code":"`+row.Code+`"}`))
+	require.NotEmpty(t, resp["id"])
+	called := rec.called()
+	require.Len(t, called, 1, "signup-pending 完了で signin 副作用を 1 回発火する")
+	assert.Equal(t, resp["id"], called[0], "新規ユーザー ID で発火する")
+}
+
+// #1804: 通常 signup 完了でも signin 副作用を発火する。
+func TestSignup_FiresSigninSideEffects(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coresignup.NewService(userRepo, metaRepo, idGen)
+	h := apisignup.NewHandler(svc, metaRepo, idGen)
+	h.SetTestMode(true)
+	rec := &stubSigninRecorder{}
+	h.SetSigninRecorder(rec)
+
+	resp := parseResp(t, doPost(h.Signup, `{"username":"alice","password":"password123"}`))
+	require.NotEmpty(t, resp["id"])
+	called := rec.called()
+	require.Len(t, called, 1)
+	assert.Equal(t, resp["id"], called[0])
 }
 
 func TestSignupPending_InvalidParam(t *testing.T) {

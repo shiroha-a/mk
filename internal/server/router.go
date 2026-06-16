@@ -1165,6 +1165,8 @@ func (s *Server) setupRoutes() {
 	signinRepo := repository.NewSigninRepository(s.db)
 	signinHandler.SetSigninRepo(signinRepo, idGen)
 	signinHandler.SetLoginNotifier(notificationHook)
+	// アカウント作成時も signin 副作用 (履歴 / login 通知 / main publish) を通す (#1804)。
+	signupHandler.SetSigninRecorder(signinHandler)
 	api.POST("/signin", signinHandler.Signin)
 	api.POST("/signin-flow", signinHandler.SigninFlow)
 	api.POST("/signin-with-passkey", signinHandler.SigninWithPasskey)

@@ -340,20 +340,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 // ok returns the standard "logged in" response. 認証経路 (TOTP / WebAuthn /
 // pwd-only) すべてで同じ shape を返したいのでヘルパに切り出している。
 func (h *Handler) ok(c echo.Context, user *model.User) error {
-	if h.ipLoggingOn && h.ipLogger != nil {
-		go h.ipLogger.Upsert(user.ID, c.RealIP())
-	}
-	// signinレコードを非同期で記録
-	// Echoがリクエストを再利用する前にヘッダーをコピーする
-	if h.signinRepo != nil && h.idGen != nil {
-		hdrs := c.Request().Header.Clone()
-		go h.recordSignin(user.ID, c.RealIP(), hdrs, true)
-	}
-	// login 通知を本人へ送る (upstream SigninService、#1559)。signin の
-	// レイテンシに乗らないよう非同期で発火する。
-	if h.loginNotifier != nil {
-		go h.loginNotifier.OnLogin(user.ID)
-	}
+	h.RecordSuccessfulSignin(user.ID, c.RealIP(), c.Request().Header.Clone())
 	token := ""
 	if user.Token != nil {
 		token = *user.Token
@@ -363,6 +350,29 @@ func (h *Handler) ok(c echo.Context, user *model.User) error {
 		"id":       user.ID,
 		"i":        token,
 	})
+}
+
+// RecordSuccessfulSignin fires the side-effects of a successful login:
+// IP logging, signin history (success:true) + main-stream publish, and the
+// 'login' notification. Shared by every signin path (password / 2FA / passkey)
+// and by account creation (signup / signup-pending) so a freshly created
+// account also gets a login-history entry + notification, matching upstream
+// SigninService.signin (#1804)。全て非同期で発火し signin/signup のレイテンシに
+// 乗せない。headers は呼び出し元が Clone 済みのものを渡す前提
+// (Echo が request を再利用する前にコピーする)。
+//
+// NOTE: upstream の new-login email は mk-go の signin 自体が未実装のため本 helper
+// にも含めない (signin/signup 双方の今後の課題)。
+func (h *Handler) RecordSuccessfulSignin(userID, ip string, headers http.Header) {
+	if h.ipLoggingOn && h.ipLogger != nil {
+		go h.ipLogger.Upsert(userID, ip)
+	}
+	if h.signinRepo != nil && h.idGen != nil {
+		go h.recordSignin(userID, ip, headers, true)
+	}
+	if h.loginNotifier != nil {
+		go h.loginNotifier.OnLogin(userID)
+	}
 }
 
 // sanitizeHeaders removes sensitive headers in-place before persisting.

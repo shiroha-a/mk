@@ -26,6 +26,15 @@ type TicketStore interface {
 	MarkUsed(ticketID, userID string) error
 }
 
+// SigninRecorder fires the side-effects of a successful login (signin history,
+// login notification, main-stream publish) after account creation, matching
+// upstream SignupApiService -> signinService.signin (#1804)。実装は
+// internal/api/signin.Handler.RecordSuccessfulSignin。未配線なら副作用を発火しない
+// だけ (response shape は不変)。
+type SigninRecorder interface {
+	RecordSuccessfulSignin(userID, ip string, headers http.Header)
+}
+
 // Handler handles POST /api/signup.
 type Handler struct {
 	signupService *coresignup.Service
@@ -45,6 +54,25 @@ type Handler struct {
 	// emailValidationClient は verifymail / truemail SaaS API への outbound
 	// に使う SSRF-safe HTTP client (#638)。nil ならデフォルト client が使われる。
 	emailValidationClient *http.Client
+	// signinRecorder はアカウント作成成功時に signin 副作用 (履歴 / login 通知 /
+	// main publish) を発火する。upstream SignupApiService が signinService.signin を
+	// 呼ぶのに相当 (#1804)。未配線なら副作用なし。
+	signinRecorder SigninRecorder
+}
+
+// SetSigninRecorder wires the recorder used to fire login side-effects after
+// account creation (#1804)。
+func (h *Handler) SetSigninRecorder(r SigninRecorder) {
+	h.signinRecorder = r
+}
+
+// fireSigninSideEffects records the successful-login side-effects for a newly
+// created account (#1804). headers は Echo が request を再利用する前に Clone する。
+func (h *Handler) fireSigninSideEffects(c echo.Context, userID string) {
+	if h.signinRecorder == nil || userID == "" {
+		return
+	}
+	h.signinRecorder.RecordSuccessfulSignin(userID, c.RealIP(), c.Request().Header.Clone())
 }
 
 // SetTestMode enables test-mode bypass (本家 `process.env.NODE_ENV !== 'test'` 相当).
@@ -235,6 +263,8 @@ func (h *Handler) Signup(c echo.Context) error {
 		_ = h.ticketStore.MarkUsed(ticket.ID, result.User.ID)
 	}
 
+	// アカウント作成も signin 経路を通す (履歴 / login 通知 / main publish、#1804)。
+	h.fireSigninSideEffects(c, result.User.ID)
 	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Token, h.idGen))
 }
 
@@ -281,6 +311,8 @@ func (h *Handler) SignupPending(c echo.Context) error {
 	if result.InvitationTicketID != nil && !result.InvitationTicketConsumed && h.ticketStore != nil {
 		_ = h.ticketStore.MarkUsed(*result.InvitationTicketID, result.User.ID)
 	}
+	// signup-pending 完了も signin 経路を通す (履歴 / login 通知 / main publish、#1804)。
+	h.fireSigninSideEffects(c, result.User.ID)
 	return c.JSON(http.StatusOK, map[string]any{
 		"id": result.User.ID,
 		"i":  result.Token,
