@@ -417,6 +417,29 @@ func TestSearch_OK(t *testing.T) {
 	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
+// #1783: canSearchNotes policy が false の viewer (匿名含む) は UNAVAILABLE。
+func TestSearch_CanSearchNotesDenied(t *testing.T) {
+	h, _ := newQueryHandler(t)
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{"canSearchNotes": false}})
+	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"x"}`)
+	require.NoError(t, h.Search(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"UNAVAILABLE"`)
+	assert.Contains(t, rec.Body.String(), "0b44998d-77aa-4427-80d0-d2c9b8523011")
+}
+
+// canSearchNotes=true なら検索が通る。
+func TestSearch_CanSearchNotesAllowed(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	hello := "hello"
+	n := seedPublicNote(repo, "n1")
+	n.Text = &hello
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{"canSearchNotes": true}})
+	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"hello"}`)
+	require.NoError(t, h.Search(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestSearch_LimitClamping(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"x","limit":1000}`)

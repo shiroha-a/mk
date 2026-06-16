@@ -44,6 +44,9 @@ type SearchOpts struct {
 	UserID    string
 	ChannelID string
 	Host      string
+	// Offset is the OFFSET-based pagination offset (upstream notes/search.ts:47
+	// `offset`). 0 = no offset (#1783)。
+	Offset int
 }
 
 // Pagination wraps the keyset pagination parameters used by SearchNote.

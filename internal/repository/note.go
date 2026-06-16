@@ -528,7 +528,12 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 	if limit <= 0 {
 		limit = 10
 	}
-	if err := q.Order(paginationOrder(f.SinceID, f.UntilID, "id")).Limit(limit).Find(&notes).Error; err != nil {
+	q = q.Order(paginationOrder(f.SinceID, f.UntilID, "id")).Limit(limit)
+	// upstream notes/search.ts:47 の offset (OFFSET-based paging) を適用 (#1783)。
+	if f.Offset > 0 {
+		q = q.Offset(f.Offset)
+	}
+	if err := q.Find(&notes).Error; err != nil {
 		return nil, err
 	}
 	return notes, nil

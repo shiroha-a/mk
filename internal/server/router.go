@@ -1243,6 +1243,7 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetRenoteMutingRepo(renoteMutingRepo)
 	notesHandler.SetBlockingRepo(blockingRepo) // #1554: children/replies/renotes mute/block filter
 	notesHandler.SetInstanceRepo(instanceRepo)
+	notesHandler.SetMetaRepo(metaRepo) // #1783: list endpoint の blocked-host filter
 	notesHandler.SetEmojiRepo(emojiRepo)
 	notesHandler.SetReactionReader(reactionCountWriter)
 	notesHandler.SetDriveFolderRepo(driveFolderRepo)
@@ -1270,9 +1271,10 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/replies", notesHandler.Replies)
 	api.POST("/notes/children", notesHandler.Children)
 	api.POST("/notes/conversation", notesHandler.Conversation)
-	api.POST("/notes/search", notesHandler.Search,
-		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchNotes))
+	// upstream search.ts は requireCredential:false で匿名も handler に到達させ、
+	// canSearchNotes policy を handler 内で検査して UNAVAILABLE を返す (#1783)。
+	// route 側の RequireAuth + RequireRolePolicy は外す。
+	api.POST("/notes/search", notesHandler.Search)
 	api.POST("/notes/state", notesHandler.State, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/notes/timeline", notesHandler.Timeline, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/notes/local-timeline", notesHandler.LocalTimeline)

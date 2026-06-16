@@ -21,6 +21,8 @@ type IndexSearchRequest struct {
 	Sort []string
 	// Limit caps the number of returned hits.
 	Limit int64
+	// Offset is the OFFSET-based pagination offset (upstream notes/search.ts:47)。
+	Offset int64
 	// AttributesToRetrieve narrows down the fields returned per hit.
 	AttributesToRetrieve []string
 	// MatchingStrategy mirrors the Meilisearch option of the same name.

@@ -121,6 +121,7 @@ func (p *MeilisearchProvider) SearchNote(viewer *model.User, query string, opts 
 		Filter:               filter,
 		Sort:                 []string{"createdAt:desc"},
 		Limit:                int64(limit),
+		Offset:               int64(opts.Offset),
 		AttributesToRetrieve: []string{"id", "createdAt"},
 		MatchingStrategy:     "all",
 	})

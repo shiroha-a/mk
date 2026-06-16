@@ -56,8 +56,11 @@ type Handler struct {
 	// blockingRepo は notes/children・replies・renotes の list 応答で被block /
 	// mute / instance-mute filter を適用するのに使う (#1554、upstream
 	// generateBaseNoteFilteringQuery 相当)。未配線時は filter skip。
-	blockingRepo    repository.BlockingRepository
-	instanceRepo    repository.InstanceRepository
+	blockingRepo repository.BlockingRepository
+	instanceRepo repository.InstanceRepository
+	// metaRepo は list endpoint の blocked-host filter で meta.blockedHosts を
+	// 引く (#1783)。未配線時は blocked-host filter を skip。
+	metaRepo        repository.MetaRepository
 	emojiRepo       repository.EmojiRepository
 	driveFolderRepo repository.DriveFolderRepository
 	userRepo        repository.UserRepository
@@ -675,14 +678,48 @@ func (h *Handler) serveList(c echo.Context, noSuchNoteID string, fn func(*model.
 // は別 follow-up。blockingRepo 未配線 / viewer nil なら no-op。fail-closed:
 // lookup / filter エラーは呼び出し側で 500 にする。
 func (h *Handler) applyMuteBlock(viewer *model.User, notes []*model.Note) ([]*model.Note, error) {
-	if viewer == nil || h.blockingRepo == nil {
-		return notes, nil
+	// muted-user / blocked-user / muted-channel / muted-instances は viewer 視点
+	// なので anonymous では対象外。
+	if viewer != nil && h.blockingRepo != nil {
+		sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+		if err != nil {
+			return nil, err
+		}
+		notes, err = notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
+		if err != nil {
+			return nil, err
+		}
 	}
-	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+	// suspended-user / blocked-host は upstream generateBaseNoteFilteringQuery と
+	// 同じく viewer 不問で常に除外する (#1783。children/replies/renotes/mentions/
+	// search-by-tag/featured の post-fetch 経路で漏れていた)。
+	notes = notesfilter.ApplySuspended(notes)
+	if h.metaRepo != nil {
+		blocked, err := h.blockedHosts()
+		if err != nil {
+			return nil, err
+		}
+		notes = notesfilter.ApplyBlockedHosts(notes, blocked)
+	}
+	return notes, nil
+}
+
+// SetMetaRepo wires a MetaRepository used for the blocked-host filter on the
+// post-fetch list endpoints (#1783, upstream generateBlockedHostQueryForNote)。
+func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
+	h.metaRepo = r
+}
+
+// blockedHosts returns meta.blockedHosts, or nil when the meta repo is unwired.
+func (h *Handler) blockedHosts() ([]string, error) {
+	if h.metaRepo == nil {
+		return nil, nil
+	}
+	meta, err := h.metaRepo.Fetch()
 	if err != nil {
 		return nil, err
 	}
-	return notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo)
+	return meta.BlockedHosts, nil
 }
 
 // applyThreadMute drops notes belonging to a thread the viewer has muted
@@ -707,6 +744,7 @@ func (h *Handler) applyThreadMute(viewer *model.User, notes []*model.Note) ([]*m
 type SearchRequest struct {
 	Query     string `json:"query"`
 	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
 	SinceDate *int64 `json:"sinceDate"`
@@ -731,6 +769,22 @@ func (h *Handler) Search(c echo.Context) error {
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
 	viewer := middleware.GetUser(c)
+
+	// upstream search.ts は requireCredential:false で匿名も handler に到達させ、
+	// canSearchNotes role policy が false なら UNAVAILABLE を返す (#1783)。匿名は
+	// base policy で評価する (GetUserPolicies("") = base)。以前は route 側で
+	// RequireAuth(401) + RequireRolePolicy(403 ROLE_PERMISSION_DENIED) を課して
+	// いた。policyProvider 未配線時 (test) は gate を skip。
+	if h.policyProvider != nil {
+		uid := ""
+		if viewer != nil {
+			uid = viewer.ID
+		}
+		if v, ok := h.policyProvider.GetUserPolicies(uid)["canSearchNotes"].(bool); !ok || !v {
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Search of notes unavailable.", "0b44998d-77aa-4427-80d0-d2c9b8523011"))
+		}
+	}
+
 	notes, err := h.searchService.SearchNote(
 		viewer,
 		req.Query,
@@ -738,6 +792,7 @@ func (h *Handler) Search(c echo.Context) error {
 			UserID:    req.UserID,
 			ChannelID: req.ChannelID,
 			Host:      req.Host,
+			Offset:    req.Offset,
 		},
 		search.Pagination{
 			UntilID: untilID,

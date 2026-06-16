@@ -1428,6 +1428,11 @@ func TestNoteRepository_SearchByFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"n_se_5", "n_se_6"}, idsOf(out))
 
+	// #1783 offset: id desc 順で先頭 1 件 (n_se_6) をスキップする。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", Limit: 10, Offset: 1})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_se_5", "n_se_4", "n_se_1"}, idsOf(out))
+
 	// Limit デフォルト (0 → 10) を踏むケース
 	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello"})
 	require.NoError(t, err)

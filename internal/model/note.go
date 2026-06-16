@@ -79,6 +79,9 @@ type NoteSearchFilter struct {
 	UntilID   string
 	SinceID   string
 	Limit     int
+	// Offset is the OFFSET-based pagination offset (upstream notes/search.ts:47)。
+	// 0 = no offset (#1783)。
+	Offset int
 	// ViewerID is the searching user's id for visibility push-down. 空文字は
 	// 匿名 (public/home のみ)。非空なら viewer 自身の followers/specified/
 	// visibleUserIds note も検索対象に含める (upstream SearchService の

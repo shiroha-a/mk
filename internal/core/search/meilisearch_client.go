@@ -64,6 +64,7 @@ func (c *MeilisearchClient) Search(query string, req IndexSearchRequest) (*Index
 	}
 	sdkReq := &meili.SearchRequest{
 		Limit:                req.Limit,
+		Offset:               req.Offset,
 		AttributesToRetrieve: req.AttributesToRetrieve,
 		Sort:                 req.Sort,
 	}

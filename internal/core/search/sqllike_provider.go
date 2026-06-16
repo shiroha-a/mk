@@ -69,6 +69,7 @@ func (p *SQLLikeProvider) SearchNote(viewer *model.User, query string, opts Sear
 		UntilID:   page.UntilID,
 		SinceID:   page.SinceID,
 		Limit:     limit,
+		Offset:    opts.Offset,
 		ViewerID:  viewerID,
 		Pgroonga:  p.pgroonga,
 	})
