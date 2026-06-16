@@ -217,6 +217,33 @@ func TestPosts_BatchFilesAndPerPostIsLiked(t *testing.T) {
 	assert.Equal(t, false, b["isLiked"])
 }
 
+// #1773: tags は upstream 同様 length>0 のときのみ出力し、空のときは field 自体を
+// omit する (空配列 [] を出さない)。fileIds は常に present のまま。
+func TestPosts_TagsOmittedWhenEmpty(t *testing.T) {
+	cleanup()
+	defer cleanup()
+	testDB.Create(&model.GalleryPost{ID: "gp_tagged", UpdatedAt: time.Now(), Title: "Tagged", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{"art", "wip"}})
+	testDB.Create(&model.GalleryPost{ID: "gp_notags", UpdatedAt: time.Now(), Title: "NoTags", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+
+	rec := doPost(newHandler().Posts, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := map[string]map[string]any{}
+	for _, p := range resp {
+		byID[p["id"].(string)] = p
+	}
+	tagged, notags := byID["gp_tagged"], byID["gp_notags"]
+	require.NotNil(t, tagged)
+	require.NotNil(t, notags)
+	assert.Equal(t, []any{"art", "wip"}, tagged["tags"])
+	_, has := notags["tags"]
+	assert.False(t, has, "empty tags must be omitted, not emitted as []")
+	// fileIds は tags の有無に関わらず常に出力される (upstream も同様)。
+	_, hasFileIDs := notags["fileIds"]
+	assert.True(t, hasFileIDs, "fileIds must always be present")
+}
+
 func TestPostsUpdate_DBError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError,
 		doPost(brokenHandler().PostsUpdate, `{"postId":"x","fileIds":["galf_x"]}`, &model.User{ID: "gal_u1"}).Code)
@@ -547,7 +574,10 @@ func TestPostsLike_AlreadyLiked(t *testing.T) {
 	defer cleanup()
 	h := newHandler()
 	doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
-	assert.Equal(t, http.StatusConflict, doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"}).Code)
+	// upstream alreadyLiked は httpStatusCode 未指定で 400 を返す (#1773)。
+	rec := doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "40e9ed56-a59c-473a-bf3f-f289c54fb5a7")
 }
 
 func TestPostsLike_InvalidParam(t *testing.T) {

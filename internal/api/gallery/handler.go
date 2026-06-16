@@ -378,7 +378,10 @@ func (h *Handler) PostsLike(c echo.Context) error {
 	var existing int64
 	h.db.Model(&model.GalleryLike{}).Where("\"userId\" = ? AND \"postId\" = ?", user.ID, req.PostID).Count(&existing)
 	if existing > 0 {
-		return c.JSON(http.StatusConflict, apierr.Error("ALREADY_LIKED", "Already liked.", "40e9ed56-a59c-473a-bf3f-f289c54fb5a7"))
+		// upstream gallery/posts/like.ts の alreadyLiked は httpStatusCode 未指定で、
+		// ApiError は kind:'client' 既定の 400 を返す。flash/like も同 ALREADY_LIKED を
+		// 400 で返しており、409 だと upstream とも mk-go 内とも不一致になる (#1773)。
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_LIKED", "Already liked.", "40e9ed56-a59c-473a-bf3f-f289c54fb5a7"))
 	}
 	like := &model.GalleryLike{
 		ID:     h.idGen.Generate(time.Now()),
@@ -539,10 +542,6 @@ func (h *Handler) buildPostMap(p *model.GalleryPost, files []entity.DriveFileEnt
 	if fileIDs == nil {
 		fileIDs = []string{}
 	}
-	tags := []string(p.Tags)
-	if tags == nil {
-		tags = []string{}
-	}
 	resp := map[string]any{
 		"id":          p.ID,
 		"createdAt":   createdAt,
@@ -554,7 +553,12 @@ func (h *Handler) buildPostMap(p *model.GalleryPost, files []entity.DriveFileEnt
 		"files":       files,
 		"isSensitive": p.IsSensitive,
 		"likedCount":  p.LikedCount,
-		"tags":        tags,
+	}
+	// upstream GalleryPostEntityService は tags: post.tags.length > 0 ? post.tags :
+	// undefined で、空のとき field 自体を omit する。mk-go も空配列を出さず omit して
+	// shape を一致させる (gallery-post.ts schema 上 tags は optional、#1773)。
+	if tags := []string(p.Tags); len(tags) > 0 {
+		resp["tags"] = tags
 	}
 	if p.User != nil {
 		resp["user"] = entity.PackUserLite(p.User)

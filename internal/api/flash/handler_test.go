@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -380,6 +381,41 @@ func TestMy_RepoError(t *testing.T) {
 	setUser(c, "alice")
 	require.NoError(t, h.My(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// #1773: flash/my は upstream flash/my.ts (packMany without me) に合わせ isLiked を
+// omit する。認証 viewer が自分の flash を like 済みでも my では isLiked を出さない
+// (featured/search/my-likes は me 付きで isLiked を出すのと対照的)。
+func TestMy_OmitsIsLiked(t *testing.T) {
+	h, repo, likeRepo := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice", Title: "mine"}
+	likeRepo.Likes["l1"] = &model.FlashLike{ID: "l1", UserID: "alice", FlashID: "f1"}
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	require.NoError(t, h.My(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	_, has := resp[0]["isLiked"]
+	assert.False(t, has, "flash/my must omit isLiked (upstream packMany without me)")
+}
+
+// #1773: flash の応答は permissions を含めない。upstream FlashEntityService.pack は
+// permissions を返さず flash.ts json-schema にも無いため、create が受理・保存しても
+// 応答 shape からは除外する。
+func TestFlashResponse_OmitsPermissions(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice", Title: "x", Permissions: pq.StringArray{"a", "b"}}
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	require.NoError(t, h.My(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	_, has := resp[0]["permissions"]
+	assert.False(t, has, "flash response must omit permissions (#1773)")
 }
 
 // --- Featured --------------------------------------------------------------

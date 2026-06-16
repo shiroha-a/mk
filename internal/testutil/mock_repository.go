@@ -4340,6 +4340,24 @@ func (m *MockPageLikeRepository) ListByUser(userID, sinceID, untilID string, lim
 	return out, nil
 }
 
+// ListLikedPageIDs returns the subset of pageIDs liked by userID.
+func (m *MockPageLikeRepository) ListLikedPageIDs(userID string, pageIDs []string) ([]string, error) {
+	want := make(map[string]struct{}, len(pageIDs))
+	for _, id := range pageIDs {
+		want[id] = struct{}{}
+	}
+	var ids []string
+	for _, l := range m.Likes {
+		if l.UserID != userID {
+			continue
+		}
+		if _, ok := want[l.PageID]; ok {
+			ids = append(ids, l.PageID)
+		}
+	}
+	return ids, nil
+}
+
 // MockAntennaRepository is a test double for repository.AntennaRepository.
 type MockAntennaRepository struct {
 	Antennas  map[string]*model.Antenna

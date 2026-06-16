@@ -249,7 +249,11 @@ func (h *Handler) My(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.flashesToListForViewer(rows, user))
+	// upstream flash/my.ts は packMany(flashs) を me 無しで呼ぶため isLiked を
+	// omit する (featured/search/my-likes は me 付きで isLiked を出すのと対照的)。
+	// mk-go の /api/i/flashs も同 handler を共有するが、upstream に i/flashs は無く
+	// flash/my と同 shape に揃えるため viewer 無しで pack する (#1773)。
+	return c.JSON(http.StatusOK, h.flashesToListWithUser(rows))
 }
 
 // Featured handles POST /api/flash/featured.
@@ -368,16 +372,20 @@ func (h *Handler) MyLikes(c echo.Context) error {
 
 func flashToMap(f *model.Flash) map[string]any {
 	const tsFormat = "2006-01-02T15:04:05.000Z"
+	// upstream FlashEntityService.pack は id/createdAt/updatedAt/userId/user/title/
+	// summary/script/visibility/likedCount/isLiked のみを返し permissions を含めない
+	// (flash.ts json-schema にも permissions プロパティは無い)。create/update は
+	// permissions を受理・保存するが応答には出さないため、mk-go も応答から除外して
+	// shape を一致させる (#1773)。
 	return map[string]any{
-		"id":          f.ID,
-		"updatedAt":   f.UpdatedAt.UTC().Format(tsFormat),
-		"title":       f.Title,
-		"summary":     f.Summary,
-		"userId":      f.UserID,
-		"script":      f.Script,
-		"permissions": []string(f.Permissions),
-		"likedCount":  f.LikedCount,
-		"visibility":  f.Visibility,
+		"id":         f.ID,
+		"updatedAt":  f.UpdatedAt.UTC().Format(tsFormat),
+		"title":      f.Title,
+		"summary":    f.Summary,
+		"userId":     f.UserID,
+		"script":     f.Script,
+		"likedCount": f.LikedCount,
+		"visibility": f.Visibility,
 	}
 }
 

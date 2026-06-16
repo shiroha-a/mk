@@ -360,3 +360,21 @@ func (s *Service) HasLiked(userID, pageID string) bool {
 	}
 	return exists
 }
+
+// LikedPageIDs returns the set of pageIDs that userID has liked, in one query.
+// Used by list endpoints (pages/featured) to batch-populate `isLiked` (#1773).
+// Empty userID / pageIDs returns an empty set without querying.
+func (s *Service) LikedPageIDs(userID string, pageIDs []string) (map[string]bool, error) {
+	set := map[string]bool{}
+	if userID == "" || len(pageIDs) == 0 {
+		return set, nil
+	}
+	ids, err := s.likeRepo.ListLikedPageIDs(userID, pageIDs)
+	if err != nil {
+		return set, err
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set, nil
+}

@@ -148,6 +148,74 @@ func TestCollectPageImageFileIDs(t *testing.T) {
 	assert.Nil(t, CollectPageImageFileIDs(nil))
 }
 
+// #1773: legacy `type:'input'` block を pack 時に textInput/numberInput へ migrate
+// する (upstream PageEntityService.migrate)。
+func TestMigratePageContent_TextInput(t *testing.T) {
+	out := migratePageContent([]byte(`[{"type":"input","inputType":"text","title":"t"}]`))
+	var got []map[string]any
+	b, _ := json.Marshal(out)
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.Equal(t, "textInput", got[0]["type"])
+}
+
+// numberInput は default を parseInt(base10) で整数化する ("7.9" -> 7)。
+func TestMigratePageContent_NumberInputParsesDefault(t *testing.T) {
+	out := migratePageContent([]byte(`[{"type":"input","inputType":"number","default":"7.9"}]`))
+	var got []map[string]any
+	b, _ := json.Marshal(out)
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.Equal(t, "numberInput", got[0]["type"])
+	assert.Equal(t, float64(7), got[0]["default"]) // JSON number は float64 に decode
+}
+
+// 非数値 default は parseInt が NaN になり JSON.stringify(NaN)=null と一致する。
+func TestMigratePageContent_NumberInputDefaultNaNNull(t *testing.T) {
+	out := migratePageContent([]byte(`[{"type":"input","inputType":"number","default":"abc"}]`))
+	var got []map[string]any
+	b, _ := json.Marshal(out)
+	require.NoError(t, json.Unmarshal(b, &got))
+	v, has := got[0]["default"]
+	require.True(t, has)
+	assert.Nil(t, v)
+}
+
+// children を再帰的に walk して入れ子の input block も migrate する。
+func TestMigratePageContent_RecursesChildren(t *testing.T) {
+	out := migratePageContent([]byte(`[{"type":"section","children":[{"type":"input","inputType":"text"}]}]`))
+	var got []map[string]any
+	b, _ := json.Marshal(out)
+	require.NoError(t, json.Unmarshal(b, &got))
+	child := got[0]["children"].([]any)[0].(map[string]any)
+	assert.Equal(t, "textInput", child["type"])
+}
+
+// modern content (input block 無し) は再 marshal せず stored bytes を verbatim 返す。
+func TestMigratePageContent_ModernUnchangedVerbatim(t *testing.T) {
+	raw := []byte(`[{"type":"text","text":"hello"},{"type":"numberInput","default":3}]`)
+	out := migratePageContent(raw)
+	rm, ok := out.(json.RawMessage)
+	require.True(t, ok, "modern content must be returned verbatim as RawMessage")
+	assert.Equal(t, raw, []byte(rm))
+}
+
+// inputType が text/number 以外なら type を書き換えず verbatim 返す。
+func TestMigratePageContent_UnknownInputTypeVerbatim(t *testing.T) {
+	raw := []byte(`[{"type":"input","inputType":"color"}]`)
+	out := migratePageContent(raw)
+	rm, ok := out.(json.RawMessage)
+	require.True(t, ok)
+	assert.Equal(t, raw, []byte(rm))
+}
+
+// 空は []、array でない / 不正 JSON は verbatim。
+func TestMigratePageContent_EmptyAndInvalid(t *testing.T) {
+	assert.Equal(t, []any{}, migratePageContent(nil))
+	out := migratePageContent([]byte(`not json`))
+	rm, ok := out.(json.RawMessage)
+	require.True(t, ok)
+	assert.Equal(t, []byte(`not json`), []byte(rm))
+}
+
 // stubPageDriveLookup is a minimal PageDriveFileLookup for ResolvePageDriveFiles.
 type stubPageDriveLookup struct{ files map[string]*model.DriveFile }
 

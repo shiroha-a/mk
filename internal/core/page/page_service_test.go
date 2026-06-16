@@ -358,6 +358,24 @@ func TestHasLiked(t *testing.T) {
 	assert.False(t, svc.HasLiked("u2", ""))
 }
 
+// #1773: LikedPageIDs は viewer が like した pageID の集合を返す
+// (pages/featured の batch isLiked 用)。empty userID / pageIDs は query せず空。
+func TestLikedPageIDs(t *testing.T) {
+	svc, _, likeRepo := newSvc(t)
+	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "u2", PageID: "p1"}))
+	set, err := svc.LikedPageIDs("u2", []string{"p1", "p2"})
+	require.NoError(t, err)
+	assert.True(t, set["p1"])
+	assert.False(t, set["p2"])
+
+	empty, err := svc.LikedPageIDs("", []string{"p1"})
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+	empty, err = svc.LikedPageIDs("u2", nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
 func TestLike_HappyPath(t *testing.T) {
 	svc, repo, likeRepo := newSvc(t)
 	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "u1", Visibility: model.PageVisibilityPublic}
@@ -431,6 +449,25 @@ func TestLike_ExistsError(t *testing.T) {
 	svc := page.NewService(repo, likeRepo, idGen)
 	err := svc.Like("u2", "p1")
 	assert.Error(t, err)
+}
+
+// failingListLikedPageIDsRepo causes ListLikedPageIDs to fail (#1773)。
+type failingListLikedPageIDsRepo struct {
+	*testutil.MockPageLikeRepository
+}
+
+func (r *failingListLikedPageIDsRepo) ListLikedPageIDs(_ string, _ []string) ([]string, error) {
+	return nil, errors.New("boom")
+}
+
+func TestLikedPageIDs_RepoError(t *testing.T) {
+	repo := testutil.NewMockPageRepository()
+	likeRepo := &failingListLikedPageIDsRepo{MockPageLikeRepository: testutil.NewMockPageLikeRepository()}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := page.NewService(repo, likeRepo, idGen)
+	set, err := svc.LikedPageIDs("u2", []string{"p1"})
+	assert.Error(t, err)
+	assert.Empty(t, set)
 }
 
 // failingCreateLikeRepo causes Create to fail.

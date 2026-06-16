@@ -16,6 +16,10 @@ type PageLikeRepository interface {
 	// (upstream `makePaginationQuery` 同 semantics、ASC/DESC は
 	// paginationOrder helper で sinceID-only 時のみ ASC に flip)。
 	ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.PageLike, error)
+	// ListLikedPageIDs returns the subset of pageIDs that userID has liked, in
+	// one query. Used by list endpoints (pages/featured) to batch-populate the
+	// per-row `isLiked` flag without N+1 lookups (mirrors flash ListLikedFlashIDs)。
+	ListLikedPageIDs(userID string, pageIDs []string) ([]string, error)
 }
 
 type pageLikeRepository struct {
@@ -77,4 +81,18 @@ func (r *pageLikeRepository) ListByUser(userID, sinceID, untilID string, limit, 
 		return nil, err
 	}
 	return likes, nil
+}
+
+// ListLikedPageIDs returns the subset of pageIDs that userID has liked.
+func (r *pageLikeRepository) ListLikedPageIDs(userID string, pageIDs []string) ([]string, error) {
+	if len(pageIDs) == 0 {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.PageLike{}).
+		Where(`"userId" = ? AND "pageId" IN ?`, userID, pageIDs).
+		Pluck(`"pageId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

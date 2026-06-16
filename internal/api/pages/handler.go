@@ -374,7 +374,10 @@ func (h *Handler) Featured(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	ownerLookup := h.batchOwnerLookup(rows)
-	return c.JSON(http.StatusOK, h.pagesToList(rows, ownerLookup))
+	// upstream pages/featured.ts は packMany(pages, me) を me 付きで呼び、認証
+	// viewer には各 page の isLiked を出す (i/pages・users/pages は me 無しで omit)。
+	// mk-go も viewer を渡して isLiked を埋める (#1773)。
+	return c.JSON(http.StatusOK, h.pagesToListForViewer(rows, ownerLookup, middleware.GetUser(c)))
 }
 
 // batchOwnerLookup returns a closure that resolves page.userId → *model.User
@@ -529,6 +532,33 @@ func (h *Handler) pagesToList(rows []*model.Page, ownerLookup func(userID string
 			continue
 		}
 		out = append(out, h.pageToMapWithOwner(p, owner, nil))
+	}
+	return out
+}
+
+// pagesToListForViewer packs a slice of pages like pagesToList but additionally
+// fills each row's `isLiked` from the viewer's like state (batch-loaded in one
+// query). When viewer is nil the field is omitted, matching upstream
+// packMany(pages, me) where `isLiked` is `meId ? exists(...) : undefined`
+// (pages/featured passes me; i/pages and users/pages do not). Rows whose owner
+// lookup misses are dropped, same as pagesToList (#1773 / #1134)。
+func (h *Handler) pagesToListForViewer(rows []*model.Page, ownerLookup func(userID string) *model.User, viewer *model.User) []map[string]any {
+	if viewer == nil {
+		return h.pagesToList(rows, ownerLookup)
+	}
+	pageIDs := make([]string, 0, len(rows))
+	for _, p := range rows {
+		pageIDs = append(pageIDs, p.ID)
+	}
+	likedSet, _ := h.svc.LikedPageIDs(viewer.ID, pageIDs)
+	out := make([]map[string]any, 0, len(rows))
+	for _, p := range rows {
+		owner := ownerLookup(p.UserID)
+		if owner == nil {
+			continue
+		}
+		liked := likedSet[p.ID]
+		out = append(out, h.pageToMapWithOwner(p, owner, &liked))
 	}
 	return out
 }

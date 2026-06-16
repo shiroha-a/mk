@@ -557,6 +557,49 @@ func TestFeatured_IncludesUserField(t *testing.T) {
 	}
 }
 
+// #1773: pages/featured は upstream packMany(pages, me) に合わせ、認証 viewer に
+// 各 row の isLiked を埋める (i/pages・users/pages は me 無しで omit)。
+func TestFeatured_IncludesIsLikedForViewer(t *testing.T) {
+	h, repo, likeRepo := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "liked", Visibility: model.PageVisibilityPublic}
+	repo.Pages["p2"] = &model.Page{ID: "p2", UserID: "alice", Name: "notliked", Visibility: model.PageVisibilityPublic}
+	require.NoError(t, likeRepo.Create(&model.PageLike{ID: "l1", UserID: "bob", PageID: "p1"}))
+	h.SetUserSource(&stubUserSource{
+		manyUsers: []*model.User{{ID: "alice", Username: "alice", UsernameLower: "alice"}},
+	})
+	c, rec := newReq(t, `{}`)
+	setUser(c, "bob")
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	byID := map[string]map[string]any{}
+	for _, r := range rows {
+		byID[r["id"].(string)] = r
+	}
+	require.NotNil(t, byID["p1"])
+	require.NotNil(t, byID["p2"])
+	assert.Equal(t, true, byID["p1"]["isLiked"])
+	assert.Equal(t, false, byID["p2"]["isLiked"])
+}
+
+// #1773: 未認証 viewer では isLiked を omit する (upstream meId ? ... : undefined)。
+func TestFeatured_OmitsIsLikedForAnon(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Visibility: model.PageVisibilityPublic}
+	h.SetUserSource(&stubUserSource{
+		manyUsers: []*model.User{{ID: "alice", Username: "alice", UsernameLower: "alice"}},
+	})
+	c, rec := newReq(t, `{}`)
+	require.NoError(t, h.Featured(c)) // no user
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	_, has := rows[0]["isLiked"]
+	assert.False(t, has, "anonymous viewer must not get isLiked (#1773)")
+}
+
 // TestFeatured_DropsRowsWithoutOwner guards the fail-soft path: when
 // userSource 未配線 (or batch fetch error) で owner が解決できない行は
 // pagesToList で drop される (= frontend が crash する代わりに silent skip)。

@@ -2,6 +2,9 @@ package entity
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
+	"strings"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -44,7 +47,7 @@ func PackPage(p *model.Page, idGens ...id.Generator) map[string]any {
 		// 非null List として cast するため、空でも null ではなく [] を返す
 		// (#1237)。content は golden Page でも PageBlock[] 必須 (non-null) だが、
 		// 当初 #1237 では content だけ rawJSONBytes のまま取りこぼしていた。
-		"content":       jsonArrayOrEmpty(p.Content),
+		"content":       migratePageContent(p.Content),
 		"variables":     jsonArrayOrEmpty(p.Variables),
 		"attachedFiles": []any{},
 		"script":        p.Script,
@@ -203,6 +206,112 @@ func ResolvePageDriveFiles(p *model.Page, lookup PageDriveFileLookup, idGen id.G
 		}
 	}
 	return attached, eyeCatchingImage
+}
+
+// migratePageContent applies upstream PageEntityService.migrate (#1773 re-audit)
+// at pack time: legacy `type:'input'` blocks are rewritten to `textInput` /
+// `numberInput` for backwards compatibility with very old pages, and a
+// numberInput's `default` is coerced to an integer (parseInt). The walk recurses
+// into `children` like upstream.
+//
+// When no legacy block is rewritten the original bytes are returned verbatim, so
+// modern pages (which never carry `type:'input'`) serialize byte-identically to
+// the stored jsonb. Empty / non-array / invalid content falls back to
+// jsonArrayOrEmpty.
+//
+// Unlike upstream, the migrated content is NOT written back to the DB: that is a
+// pure read-side optimization with no client-visible effect (the transform is
+// idempotent), and entity packers must remain free of DB side effects.
+func migratePageContent(content []byte) any {
+	if len(content) == 0 {
+		return []any{}
+	}
+	var blocks []any
+	if json.Unmarshal(content, &blocks) != nil {
+		// content が array でない / 不正 JSON は stored bytes を verbatim 返す。
+		return json.RawMessage(content)
+	}
+	migrated := false
+	var walk func(xs []any)
+	walk = func(xs []any) {
+		for _, x := range xs {
+			m, ok := x.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := m["type"].(string); t == "input" {
+				switch it, _ := m["inputType"].(string); it {
+				case "text":
+					m["type"] = "textInput"
+					migrated = true
+				case "number":
+					m["type"] = "numberInput"
+					// upstream: if (x.default) x.default = parseInt(x.default, 10)
+					if d, ok := m["default"]; ok && jsTruthy(d) {
+						m["default"] = jsParseInt10(d)
+					}
+					migrated = true
+				}
+			}
+			if ch, ok := m["children"].([]any); ok {
+				walk(ch)
+			}
+		}
+	}
+	walk(blocks)
+	if !migrated {
+		// 何も書き換えていなければ stored bytes を verbatim 返す (modern page は
+		// re-marshal による byte ずれを起こさない)。
+		return json.RawMessage(content)
+	}
+	return blocks
+}
+
+// jsTruthy mirrors JavaScript truthiness for the values decoded from page block
+// JSON (used by migratePageContent's `if (x.default)` guard)。
+func jsTruthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case string:
+		return t != ""
+	case float64:
+		return t != 0
+	default:
+		return true
+	}
+}
+
+// jsParseInt10 mirrors JavaScript `parseInt(v, 10)` for page numberInput
+// defaults. Strings are parsed up to the leading integer prefix (NaN → null to
+// match JSON.stringify(NaN)); numbers are truncated toward zero.
+func jsParseInt10(v any) any {
+	switch t := v.(type) {
+	case float64:
+		return int(math.Trunc(t))
+	case string:
+		s := strings.TrimSpace(t)
+		i := 0
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		j := i
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		if j == i {
+			return nil
+		}
+		n, err := strconv.Atoi(s[:j])
+		if err != nil {
+			return nil
+		}
+		return n
+	default:
+		return v
+	}
 }
 
 // rawJSONBytes returns the raw JSON bytes as json.RawMessage so JSON encoders
