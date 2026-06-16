@@ -16,6 +16,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/datatypes"
+
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -545,6 +547,58 @@ func TestShow_WithUserAndNoteResolution(t *testing.T) {
 	assert.Equal(t, "mention", resp[0]["type"])
 	assert.NotNil(t, resp[0]["user"])
 	assert.NotNil(t, resp[0]["note"])
+}
+
+// #1775: read 時の valid-notifier filter。now-muted / muted-instance / suspended
+// notifier からの通知は落とし、通常 notifier と notifier 無しの system 通知は残す。
+func TestShow_FiltersInvalidNotifiers(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	mutingRepo := testutil.NewMockMutingRepository()
+
+	mutedHost := "muted.example"
+	userRepo.Users["good"] = &model.User{ID: "good", Username: "good"}
+	userRepo.Users["mutedU"] = &model.User{ID: "mutedU", Username: "mutedu"}
+	userRepo.Users["suspendedU"] = &model.User{ID: "suspendedU", Username: "susp", IsSuspended: true}
+	userRepo.Users["instU"] = &model.User{ID: "instU", Username: "inst", Host: &mutedHost}
+	// alice が mutedU を mute / muted.example を instance-mute している。
+	require.NoError(t, mutingRepo.Create(&model.Muting{ID: "mu1", MuterID: "alice", MuteeID: "mutedU"}))
+	userRepo.Profiles["alice"] = &model.UserProfile{UserID: "alice", MutedInstances: datatypes.JSON(`["muted.example"]`)}
+
+	h.SetRepos(userRepo, noteRepo)
+	h.SetMutingRepo(mutingRepo)
+
+	ctx := context.Background()
+	for _, nid := range []string{"good", "mutedU", "suspendedU", "instU"} {
+		_, err := svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", NotifierID: nid, Type: notification.TypeReaction, Reaction: "👍"})
+		require.NoError(t, err)
+	}
+	// notifier 無しの system 通知 (achievementEarned) は常に残る。
+	_, err := svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", Type: notification.Type("achievementEarned")})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	notifiers := map[string]bool{}
+	systemSeen := false
+	for _, r := range resp {
+		if uid, ok := r["userId"].(string); ok {
+			notifiers[uid] = true
+		} else {
+			systemSeen = true
+		}
+	}
+	assert.True(t, notifiers["good"], "通常 notifier は残る")
+	assert.True(t, systemSeen, "notifier 無しの system 通知は残る")
+	assert.False(t, notifiers["mutedU"], "mute 済 notifier は落とす")
+	assert.False(t, notifiers["suspendedU"], "suspended notifier は落とす")
+	assert.False(t, notifiers["instU"], "muted-instance notifier は落とす")
 }
 
 // InstanceRepo / EmojiRepo 配線時にリモート notifier の user.instance が

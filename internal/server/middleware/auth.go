@@ -368,8 +368,9 @@ func RequireAdmin(checker RoleChecker) echo.MiddlewareFunc {
 					"error": map[string]any{
 						"message": "You are not an administrator.",
 						"code":    "ROLE_PERMISSION_DENIED",
-						"id":      "c3d38592-54c0-429d-bfe8-f1571e00eb14",
-						"kind":    apierr.KindPermission,
+						// upstream ApiCallService requireAdmin gate の UUID (#1775)。
+						"id":   "c3d38592-54c0-429d-be96-5636b0431a61",
+						"kind": apierr.KindPermission,
 					},
 				})
 			}
@@ -391,8 +392,10 @@ func RequireModerator(checker RoleChecker) echo.MiddlewareFunc {
 					"error": map[string]any{
 						"message": "You are not a moderator.",
 						"code":    "ROLE_PERMISSION_DENIED",
-						"id":      "c3d38592-54c0-429d-bfe8-f1571e00eb14",
-						"kind":    apierr.KindPermission,
+						// upstream ApiCallService requireModerator gate の UUID。admin gate
+						// (c3d38592-...) とは別物 (#1775)。
+						"id":   "d33d5333-db36-423d-a8f9-1a2b9549da41",
+						"kind": apierr.KindPermission,
 					},
 				})
 			}

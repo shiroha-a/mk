@@ -49,6 +49,16 @@ func (m *mockSwRepo) FindByUserAndEndpoint(userID, endpoint string) (*model.SwSu
 	return nil, gorm.ErrRecordNotFound
 }
 
+func (m *mockSwRepo) FindByUserEndpointAuthKey(userID, endpoint, auth, publicKey string) (*model.SwSubscription, error) {
+	if m.findErr != nil {
+		return nil, m.findErr
+	}
+	if s, ok := m.subs[userID+":"+endpoint]; ok && s.Auth == auth && s.PublicKey == publicKey {
+		return s, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
 func (m *mockSwRepo) FindByUserID(userID string) ([]*model.SwSubscription, error) {
 	out := make([]*model.SwSubscription, 0)
 	for _, s := range m.subs {
@@ -140,8 +150,10 @@ func TestRegister_New(t *testing.T) {
 
 func TestRegister_AlreadySubscribed(t *testing.T) {
 	h, repo := newTestHandler()
+	// #1775: already-subscribed は (userId, endpoint, auth, publickey) が完全一致した
+	// ときのみ。seed と request のキーを揃える。
 	repo.subs["u1:https://push.example/1"] = &model.SwSubscription{
-		ID: "s1", UserID: "u1", Endpoint: "https://push.example/1", SendReadMessage: true,
+		ID: "s1", UserID: "u1", Endpoint: "https://push.example/1", Auth: "a1", PublicKey: "pk1", SendReadMessage: true,
 	}
 	rec := post(h.Register, `{"endpoint":"https://push.example/1","auth":"a1","publickey":"pk1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -149,6 +161,27 @@ func TestRegister_AlreadySubscribed(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "already-subscribed", resp["state"])
+}
+
+// #1775: 同じ endpoint で auth/publickey が rotate した再 subscribe は
+// already-subscribed にせず新規登録し、最新キーを永続化する (upstream は新行を
+// insert。2-tuple match だと stale キーのままで Web Push が壊れていた)。
+func TestRegister_KeyRotationInsertsFreshKeys(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.subs["u1:https://push.example/1"] = &model.SwSubscription{
+		ID: "s1", UserID: "u1", Endpoint: "https://push.example/1", Auth: "old-auth", PublicKey: "old-pk", SendReadMessage: true,
+	}
+	rec := post(h.Register, `{"endpoint":"https://push.example/1","auth":"new-auth","publickey":"new-pk"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "subscribed", resp["state"], "rotated keys must not match the stale row")
+	// 最新キーが永続化されていること。
+	stored := repo.subs["u1:https://push.example/1"]
+	require.NotNil(t, stored)
+	assert.Equal(t, "new-auth", stored.Auth)
+	assert.Equal(t, "new-pk", stored.PublicKey)
 }
 
 func TestRegister_InvalidParam(t *testing.T) {

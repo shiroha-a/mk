@@ -8,6 +8,12 @@ import (
 // SwSubscriptionRepository handles sw_subscription persistence.
 type SwSubscriptionRepository interface {
 	FindByUserAndEndpoint(userID, endpoint string) (*model.SwSubscription, error)
+	// FindByUserEndpointAuthKey looks up a subscription by the full
+	// (userId, endpoint, auth, publickey) tuple. sw/register uses this to detect
+	// a genuine duplicate: a key rotation on the same endpoint must NOT match an
+	// existing row, so the handler inserts a fresh subscription with the current
+	// keys (upstream register.ts findOneBy 4-tuple、#1775)。
+	FindByUserEndpointAuthKey(userID, endpoint, auth, publicKey string) (*model.SwSubscription, error)
 	FindByUserID(userID string) ([]*model.SwSubscription, error)
 	Create(sub *model.SwSubscription) error
 	Update(sub *model.SwSubscription) error
@@ -27,6 +33,15 @@ func NewSwSubscriptionRepository(db *gorm.DB) SwSubscriptionRepository {
 func (r *swSubscriptionRepository) FindByUserAndEndpoint(userID, endpoint string) (*model.SwSubscription, error) {
 	var sub model.SwSubscription
 	if err := r.db.Where(`"userId" = ? AND "endpoint" = ?`, userID, endpoint).First(&sub).Error; err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+func (r *swSubscriptionRepository) FindByUserEndpointAuthKey(userID, endpoint, auth, publicKey string) (*model.SwSubscription, error) {
+	var sub model.SwSubscription
+	if err := r.db.Where(`"userId" = ? AND "endpoint" = ? AND "auth" = ? AND "publickey" = ?`,
+		userID, endpoint, auth, publicKey).First(&sub).Error; err != nil {
 		return nil, err
 	}
 	return &sub, nil

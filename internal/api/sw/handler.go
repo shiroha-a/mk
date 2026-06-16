@@ -46,8 +46,12 @@ func (h *Handler) Register(c echo.Context) error {
 		swPublicKey = m.SwPublicKey
 	}
 
-	// 既存サブスクリプションの確認
-	existing, err := h.repo.FindByUserAndEndpoint(user.ID, req.Endpoint)
+	// 既存サブスクリプションの確認は (userId, endpoint, auth, publickey) の 4-tuple
+	// で行う (upstream register.ts findOneBy)。auth / publickey が rotate した
+	// 再 subscribe は match しないため、下の新規登録に落ちて最新キーで insert される。
+	// 2-tuple (userId, endpoint) match だと stale キーのまま already-subscribed を
+	// 返して Web Push 配信が無言で壊れていた (#1775)。
+	existing, err := h.repo.FindByUserEndpointAuthKey(user.ID, req.Endpoint, req.Auth, req.PublicKey)
 	if err == nil && existing != nil {
 		return c.JSON(http.StatusOK, map[string]any{
 			"state":           "already-subscribed",

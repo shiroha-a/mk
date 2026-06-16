@@ -674,6 +674,9 @@ func TestRequireAdmin_NotAdmin(t *testing.T) {
 	err := handler(c)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// #1775: upstream ApiCallService requireAdmin gate の UUID と一致させる。
+	assert.Contains(t, rec.Body.String(), "ROLE_PERMISSION_DENIED")
+	assert.Contains(t, rec.Body.String(), "c3d38592-54c0-429d-be96-5636b0431a61")
 }
 
 func TestRequireAdmin_NoUser(t *testing.T) {
@@ -718,6 +721,9 @@ func TestRequireModerator_NotModerator(t *testing.T) {
 	err := handler(c)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// #1775: moderator gate は admin gate (c3d38592-…) とは別の upstream UUID。
+	assert.Contains(t, rec.Body.String(), "ROLE_PERMISSION_DENIED")
+	assert.Contains(t, rec.Body.String(), "d33d5333-db36-423d-a8f9-1a2b9549da41")
 }
 
 func TestRequireModerator_NoUser(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func newTestHook(t *testing.T) (*Hook, *Service, *testutil.MockUserRepository) {
@@ -429,6 +430,103 @@ func TestHook_OnReactionCreated(t *testing.T) {
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeReaction, out[0].Type)
 	assert.Equal(t, "👍", out[0].Reaction)
+}
+
+// #1775: notificationRecieveConfig による種別ごとの受信ゲート。
+func TestPassesReceiveConfig(t *testing.T) {
+	mkProfile := func(userID, cfgJSON string) *model.UserProfile {
+		return &model.UserProfile{UserID: userID, NotificationRecieveConfig: datatypes.JSON(cfgJSON)}
+	}
+
+	t.Run("never blocks the configured type", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"never"}}`)
+		assert.False(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		// 設定されていない type は許可。
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeMention, NotifierID: "bob"}))
+	})
+
+	t.Run("empty / missing config is allowed", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{}`)
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		// profile 自体が無い場合も許可 (best-effort)。
+		assert.True(t, h.passesReceiveConfig("ghost", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+	})
+
+	t.Run("following gate", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"following"}}`)
+		fr := testutil.NewMockFollowingRepository()
+		h.SetNoteNotifyRepos(fr, nil)
+		assert.False(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		require.NoError(t, fr.Create(&model.Following{ID: "f1", FollowerID: "alice", FolloweeID: "bob"}))
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+	})
+
+	t.Run("mutualFollow requires both directions", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"mutualFollow"}}`)
+		fr := testutil.NewMockFollowingRepository()
+		require.NoError(t, fr.Create(&model.Following{ID: "f1", FollowerID: "alice", FolloweeID: "bob"}))
+		h.SetNoteNotifyRepos(fr, nil)
+		assert.False(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		require.NoError(t, fr.Create(&model.Following{ID: "f2", FollowerID: "bob", FolloweeID: "alice"}))
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+	})
+
+	t.Run("followingOrFollower gate", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"followingOrFollower"}}`)
+		fr := testutil.NewMockFollowingRepository()
+		h.SetNoteNotifyRepos(fr, nil)
+		assert.False(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		// follower 方向だけでも許可。
+		require.NoError(t, fr.Create(&model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice"}))
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+	})
+
+	t.Run("list gate: member allowed, non-member blocked", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"list","userListId":"L1"}}`)
+		ulr := testutil.NewMockUserListRepository()
+		require.NoError(t, ulr.AddMember(&model.UserListMembership{ID: "m1", UserListID: "L1", UserID: "bob"}))
+		h.SetUserListRepo(ulr)
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		assert.False(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "carol"}))
+	})
+
+	// dep 未配線時は gate を素通り (best-effort)。
+	t.Run("missing deps are permissive", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"following"}}`)
+		// followingRepo 未配線。
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		repo.Profiles["alice"] = mkProfile("alice", `{"reaction":{"type":"list","userListId":"L1"}}`)
+		// userListRepo 未配線。
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+		// NotifierID 空のときは関係性 gate を評価せず許可。
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: ""}))
+	})
+
+	// 不正 JSON は許可側に倒す。
+	t.Run("invalid config json is permissive", func(t *testing.T) {
+		h, _, repo := newTestHook(t)
+		repo.Profiles["alice"] = mkProfile("alice", `not json`)
+		assert.True(t, h.passesReceiveConfig("alice", CreateInput{Type: TypeReaction, NotifierID: "bob"}))
+	})
+}
+
+// #1775: 'never' 設定の type は notifyLocalUser 経由でも実際に配信が抑制される。
+func TestHook_OnReactionCreated_NeverConfigSuppresses(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	repo.Profiles["alice"] = &model.UserProfile{UserID: "alice", NotificationRecieveConfig: datatypes.JSON(`{"reaction":{"type":"never"}}`)}
+	h.OnReactionCreated("alice", "bob", "n1", "👍")
+
+	out, err := svc.List(context.Background(), "alice", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "reaction=never の notifiee には reaction 通知を配信しない")
 }
 
 func TestHook_NotifyRemoteSkipped(t *testing.T) {

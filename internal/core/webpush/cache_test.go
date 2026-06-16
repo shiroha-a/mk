@@ -40,6 +40,9 @@ type fakeSwRepo struct {
 func (f *fakeSwRepo) FindByUserAndEndpoint(_, _ string) (*model.SwSubscription, error) {
 	return nil, errors.New("not used")
 }
+func (f *fakeSwRepo) FindByUserEndpointAuthKey(_, _, _, _ string) (*model.SwSubscription, error) {
+	return nil, errors.New("not used")
+}
 func (f *fakeSwRepo) FindByUserID(userID string) ([]*model.SwSubscription, error) {
 	f.calls++
 	if f.err != nil {

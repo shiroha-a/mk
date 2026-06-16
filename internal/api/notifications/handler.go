@@ -4,6 +4,7 @@ package notifications
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -22,12 +23,16 @@ import (
 
 // Handler handles notifications-related API endpoints.
 type Handler struct {
-	svc                  *notification.Service
-	idGen                id.Generator
-	userRepo             repository.UserRepository
-	noteRepo             repository.NoteRepository
-	queryService         *corenote.QueryService
-	followReqRepo        repository.FollowRequestRepository
+	svc           *notification.Service
+	idGen         id.Generator
+	userRepo      repository.UserRepository
+	noteRepo      repository.NoteRepository
+	queryService  *corenote.QueryService
+	followReqRepo repository.FollowRequestRepository
+	// mutingRepo は read 時の valid-notifier filter で viewer の muting set
+	// (ListMuteeIDs) を引くための optional 依存 (#1775)。未配線なら muting filter
+	// は素通り (suspended / mutedInstances filter は引き続き効く)。
+	mutingRepo           repository.MutingRepository
 	instanceRepo         repository.InstanceRepository
 	emojiRepo            repository.EmojiRepository
 	testNotifier         TestNotifier
@@ -244,7 +249,6 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// 600 round-trip の N+1 を出していた。#515)。
 	filtered := make([]*notification.Notification, 0, len(rows))
 	notifierIDSet := make(map[string]struct{})
-	noteIDSet := make(map[string]struct{})
 	for _, n := range rows {
 		// カーソルベースページネーション
 		if req.SinceID != "" && n.ID <= req.SinceID {
@@ -272,9 +276,6 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		if n.NotifierID != "" {
 			notifierIDSet[n.NotifierID] = struct{}{}
 		}
-		if n.NoteID != "" {
-			noteIDSet[n.NoteID] = struct{}{}
-		}
 	}
 
 	notifierByID := make(map[string]*model.User, len(notifierIDSet))
@@ -287,6 +288,20 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 			for _, u := range users {
 				notifierByID[u.ID] = u
 			}
+		}
+	}
+
+	// #1775: read-time valid-notifier filter。create 時 mute だけでなく read 時に
+	// も notifier が (a) いま viewer に mute されている / (b) viewer の mutedInstances
+	// host / (c) suspended のいずれかなら通知を落とす (upstream
+	// NotificationEntityService #filterValidNotifier)。noteIDSet は survivor から
+	// 組み立てる (落とした通知の note を無駄に引かない)。
+	filtered = h.filterValidNotifiers(user.ID, filtered, notifierByID)
+
+	noteIDSet := make(map[string]struct{})
+	for _, n := range filtered {
+		if n.NoteID != "" {
+			noteIDSet[n.NoteID] = struct{}{}
 		}
 	}
 	// noteByID 構築には CanSeeNote ゲートを挟む。followers / specified note は
@@ -312,6 +327,82 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		}
 	}
 	return filtered, notifierByID, noteByID, nil
+}
+
+// SetMutingRepo wires the muting repository used by the read-time
+// valid-notifier filter to load the viewer's muting set (#1775)。
+func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
+	h.mutingRepo = r
+}
+
+// filterValidNotifiers drops notifications whose notifier is no longer a valid
+// source for the viewer at READ time, mirroring upstream
+// NotificationEntityService #validateNotifier (#1775):
+//   - notifierId in the viewer's muting set
+//   - notifier.host in the viewer's mutedInstances
+//   - notifier.isSuspended
+//
+// Notifications without a notifierId (system notifications) always pass.
+// Unlike upstream, a notification whose notifier could not be resolved is kept
+// (not dropped): mk-go resolves notifiers best-effort and a transient
+// FindManyByIDs failure must not mass-drop the whole list; the packer renders a
+// missing notifier gracefully.
+func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Notification, notifierByID map[string]*model.User) []*notification.Notification {
+	muted := map[string]bool{}
+	if h.mutingRepo != nil {
+		if ids, err := h.mutingRepo.ListMuteeIDs(viewerID); err == nil {
+			for _, id := range ids {
+				muted[id] = true
+			}
+		}
+	}
+	mutedInstances := map[string]bool{}
+	if h.userRepo != nil {
+		if profile, err := h.userRepo.FindProfileByUserID(viewerID); err == nil && profile != nil && len(profile.MutedInstances) > 0 {
+			var hosts []string
+			if json.Unmarshal(profile.MutedInstances, &hosts) == nil {
+				for _, host := range hosts {
+					mutedInstances[host] = true
+				}
+			}
+		}
+	}
+	if len(muted) == 0 && len(mutedInstances) == 0 && !h.anyNotifierSuspended(rows, notifierByID) {
+		return rows
+	}
+	out := make([]*notification.Notification, 0, len(rows))
+	for _, n := range rows {
+		if n.NotifierID != "" {
+			if muted[n.NotifierID] {
+				continue
+			}
+			if notifier, ok := notifierByID[n.NotifierID]; ok {
+				if notifier.IsSuspended {
+					continue
+				}
+				if notifier.Host != nil && mutedInstances[*notifier.Host] {
+					continue
+				}
+			}
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// anyNotifierSuspended reports whether at least one resolved notifier is
+// suspended, so filterValidNotifiers can skip the rebuild loop entirely when
+// there is nothing to drop (no mutes, no muted instances, no suspended).
+func (h *Handler) anyNotifierSuspended(rows []*notification.Notification, notifierByID map[string]*model.User) bool {
+	for _, n := range rows {
+		if n.NotifierID == "" {
+			continue
+		}
+		if u, ok := notifierByID[n.NotifierID]; ok && u.IsSuspended {
+			return true
+		}
+	}
+	return false
 }
 
 // maybeMarkAsRead honours the implicit markAsRead side effect: 本家

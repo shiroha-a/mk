@@ -325,6 +325,8 @@ func (s *Server) setupRoutes() {
 	notificationHook.SetNoteUnreadRepo(noteUnreadRepo)
 	// note 通知 (notify='normal' フォロワーへの投稿通知、#1559) の fan-out 依存。
 	notificationHook.SetNoteNotifyRepos(followingRepo, renoteMutingRepo)
+	// notificationRecieveConfig type=='list' gate の member 確認用 (#1775)。
+	notificationHook.SetUserListRepo(userListRepo)
 	noteCreateService.SetNotificationHook(notificationHook)
 	noteCreateService.SetUserRepo(userRepo)
 	// roleAssigned 通知 (#1559): local public role 割当時に発火し、entity 側で
@@ -1565,6 +1567,8 @@ func (s *Server) setupRoutes() {
 	notificationsHandler.SetFollowRequestRepo(followRequestRepo)
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
+	// read 時 valid-notifier filter (now-muted notifier の除外) 用 (#1775)。
+	notificationsHandler.SetMutingRepo(mutingRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に

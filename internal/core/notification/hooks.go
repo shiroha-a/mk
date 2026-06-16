@@ -2,6 +2,7 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -52,6 +53,10 @@ type Hook struct {
 	// を発火しない。
 	followingRepo    repository.FollowingRepository
 	renoteMutingRepo repository.RenoteMutingRepository
+	// userListRepo は notificationRecieveConfig の type=='list' gate で notifier が
+	// 指定リストの member かを確認するための optional 依存 (#1775)。未配線なら
+	// list gate は素通り (best-effort)。
+	userListRepo repository.UserListRepository
 }
 
 // NewHook constructs a Hook bound to a NotificationService and userRepo.
@@ -95,6 +100,12 @@ func (h *Hook) SetNoteUnreadRepo(r repository.NoteUnreadRepository) {
 func (h *Hook) SetNoteNotifyRepos(following repository.FollowingRepository, renoteMuting repository.RenoteMutingRepository) {
 	h.followingRepo = following
 	h.renoteMutingRepo = renoteMuting
+}
+
+// SetUserListRepo attaches the user-list repository used by the
+// notificationRecieveConfig type=='list' gate (#1775)。
+func (h *Hook) SetUserListRepo(r repository.UserListRepository) {
+	h.userListRepo = r
 }
 
 // OnNoteCreated is called by note.CreateService after persisting a new note.
@@ -496,6 +507,10 @@ func (h *Hook) notifyLocalUser(ctx context.Context, notifieeID string, in Create
 			return
 		}
 	}
+	// notifiee の notificationRecieveConfig による種別ごとの受信ゲート (#1775)。
+	if !h.passesReceiveConfig(notifieeID, in) {
+		return
+	}
 	n, err := h.svc.Create(ctx, in)
 	if err != nil {
 		slog.Warn("notification create failed", "type", in.Type, "notifiee", notifieeID, "err", err)
@@ -507,6 +522,87 @@ func (h *Hook) notifyLocalUser(ctx context.Context, notifieeID string, in Create
 	if h.webpush != nil && n != nil {
 		h.webpush.PushNotification(notifieeID, h.buildPushBody(n, notifieeID))
 	}
+}
+
+// receiveConfigEntry mirrors one entry of profile.notificationRecieveConfig
+// ({ type, userListId? })。
+type receiveConfigEntry struct {
+	Type       string `json:"type"`
+	UserListID string `json:"userListId"`
+}
+
+// passesReceiveConfig reports whether the notifiee's notificationRecieveConfig
+// permits delivering a notification of in.Type from in.NotifierID. Mirrors
+// upstream NotificationService.createNotification の recieveConfig gate (#1775):
+// type==='never' は常に抑制、following/follower/mutualFollow/followingOrFollower/
+// list は関係性を満たさないと抑制する。設定未登録 (= 'all') / parse 不能 / 依存
+// 未配線は許可側に倒す (best-effort、通知の取りこぼしを避ける)。
+func (h *Hook) passesReceiveConfig(notifieeID string, in CreateInput) bool {
+	if h.userRepo == nil {
+		return true
+	}
+	profile, err := h.userRepo.FindProfileByUserID(notifieeID)
+	if err != nil || profile == nil || len(profile.NotificationRecieveConfig) == 0 {
+		return true
+	}
+	var cfg map[string]receiveConfigEntry
+	if json.Unmarshal(profile.NotificationRecieveConfig, &cfg) != nil {
+		return true
+	}
+	entry, ok := cfg[string(in.Type)]
+	if !ok {
+		return true
+	}
+	if entry.Type == "never" {
+		return false
+	}
+	if in.NotifierID == "" {
+		return true
+	}
+	switch entry.Type {
+	case "following":
+		return h.followingExists(notifieeID, in.NotifierID)
+	case "follower":
+		return h.followingExists(in.NotifierID, notifieeID)
+	case "mutualFollow":
+		return h.followingExists(notifieeID, in.NotifierID) && h.followingExists(in.NotifierID, notifieeID)
+	case "followingOrFollower":
+		return h.followingExists(notifieeID, in.NotifierID) || h.followingExists(in.NotifierID, notifieeID)
+	case "list":
+		return h.listContains(entry.UserListID, in.NotifierID)
+	}
+	return true
+}
+
+// followingExists reports whether followerID follows followeeID. dep 未配線 /
+// query error は許可側 (true) に倒す。
+func (h *Hook) followingExists(followerID, followeeID string) bool {
+	if h.followingRepo == nil {
+		return true
+	}
+	ex, err := h.followingRepo.Exists(followerID, followeeID)
+	if err != nil {
+		return true
+	}
+	return ex
+}
+
+// listContains reports whether userID is a member of listID. dep 未配線 / 空
+// listID / query error は許可側 (true) に倒す。
+func (h *Hook) listContains(listID, userID string) bool {
+	if h.userListRepo == nil || listID == "" {
+		return true
+	}
+	members, err := h.userListRepo.ListMembers(listID)
+	if err != nil {
+		return true
+	}
+	for _, m := range members {
+		if m.UserID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // buildPushBody converts a persisted Notification into a map matching

@@ -35,6 +35,15 @@ func TestSwSubscriptionRepository_Full(t *testing.T) {
 	_, err = repo.FindByUserAndEndpoint(user.ID, "https://ghost")
 	assert.Error(t, err)
 
+	// FindByUserEndpointAuthKey - 4-tuple full match (#1775)
+	found4, err := repo.FindByUserEndpointAuthKey(user.ID, "https://push.example/test", "authdata", "pubkeydata")
+	require.NoError(t, err)
+	assert.Equal(t, "sw_1", found4.ID)
+
+	// FindByUserEndpointAuthKey - key rotation (auth/publickey mismatch) must NOT match
+	_, err = repo.FindByUserEndpointAuthKey(user.ID, "https://push.example/test", "rotated-auth", "rotated-pk")
+	assert.Error(t, err)
+
 	// Update
 	found.SendReadMessage = true
 	require.NoError(t, repo.Update(found))

@@ -73,6 +73,9 @@ type fakeSwRepoForProcessor struct {
 func (r *fakeSwRepoForProcessor) FindByUserAndEndpoint(_, _ string) (*model.SwSubscription, error) {
 	return nil, errors.New("not used")
 }
+func (r *fakeSwRepoForProcessor) FindByUserEndpointAuthKey(_, _, _, _ string) (*model.SwSubscription, error) {
+	return nil, errors.New("not used")
+}
 func (r *fakeSwRepoForProcessor) FindByUserID(userID string) ([]*model.SwSubscription, error) {
 	return r.subs[userID], nil
 }
