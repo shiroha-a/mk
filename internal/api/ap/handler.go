@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -65,6 +66,16 @@ type Handler struct {
 	// InsertIfAbsent を同 user ID で 1 回に集約する。多 goroutine が
 	// 同時に backfill しても entropy / CPU を浪費しない (#1081 review #1)。
 	backfillGroup singleflight.Group
+	// relation は ap/show が返す UserDetailedNotMe に viewer→target の relation
+	// block (isFollowing 等) を埋めるための repo 束 (#1778)。未配線なら relation は
+	// omit (= legacy 挙動)。
+	relation userrelation.Repos
+}
+
+// SetRelationRepos wires the repositories used to populate the viewer relation
+// block on ap/show user responses (#1778)。
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // SetRemote attaches remote AP fetcher and resolver.
@@ -397,7 +408,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 		if err == nil && bundle.User.Host == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "User",
-				"object": h.packUserForAPI(bundle.User, bundle.Profile),
+				"object": h.packUserForAPI(middleware.GetUser(c), bundle.User, bundle.Profile),
 			})
 		}
 	}
@@ -452,7 +463,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 					if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
 						return c.JSON(http.StatusOK, map[string]any{
 							"type":   "User",
-							"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
+							"object": h.packUserForAPI(middleware.GetUser(c), remoteUser, h.userService.GetProfile(remoteUser.ID)),
 						})
 					}
 				}
@@ -466,7 +477,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 		if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "User",
-				"object": h.packUserForAPI(remoteUser, h.userService.GetProfile(remoteUser.ID)),
+				"object": h.packUserForAPI(middleware.GetUser(c), remoteUser, h.userService.GetProfile(remoteUser.ID)),
 			})
 		}
 	}
@@ -560,11 +571,18 @@ func (h *Handler) packNoteForAPI(viewer *model.User, n *model.Note) entity.NoteE
 // upstream ap/show which returns userEntityService.pack(user, me,
 // {schema:'UserDetailedNotMe'}) for the {type:'User', object} branch (#1557).
 // Previously this returned an ad-hoc minimal object (id/username/name/host).
-func (h *Handler) packUserForAPI(u *model.User, profile *model.UserProfile) any {
+func (h *Handler) packUserForAPI(viewer *model.User, u *model.User, profile *model.UserProfile) any {
 	if u == nil {
 		return map[string]any{}
 	}
-	return entity.PackUserDetailed(u, profile, h.idGen)
+	d := entity.PackUserDetailed(u, profile, h.idGen)
+	// upstream は pack(user, me, {schema:'UserDetailedNotMe'}) で me!=null のとき
+	// relation block (isFollowing/isBlocking 等) を埋める。authed viewer に同じ
+	// relation を載せる (#1778)。anonymous / self は Apply 内で no-op。
+	if viewer != nil {
+		h.relation.Apply(&d, viewer.ID, u, profile)
+	}
+	return d
 }
 
 // Note handles GET /notes/:id with ActivityPub content negotiation.

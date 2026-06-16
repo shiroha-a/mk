@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -594,7 +595,7 @@ func TestPackNoteForAPI_HidesNonVisibleEmbed(t *testing.T) {
 
 func TestPackUserForAPI_Nil(t *testing.T) {
 	h, _, _, _ := newHandler(t)
-	result := h.packUserForAPI(nil, nil)
+	result := h.packUserForAPI(nil, nil, nil)
 	m, ok := result.(map[string]any)
 	require.True(t, ok)
 	assert.Empty(t, m)
@@ -603,12 +604,28 @@ func TestPackUserForAPI_Nil(t *testing.T) {
 func TestPackUserForAPI_FullEntity(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	desc := "bio"
-	result := h.packUserForAPI(&model.User{ID: "u1", Username: "alice"}, &model.UserProfile{UserID: "u1", Description: &desc})
+	result := h.packUserForAPI(nil, &model.User{ID: "u1", Username: "alice"}, &model.UserProfile{UserID: "u1", Description: &desc})
 	d, ok := result.(entity.UserDetailed)
 	require.True(t, ok)
 	assert.Equal(t, "u1", d.ID)
 	require.NotNil(t, d.Description)
 	assert.Equal(t, "bio", *d.Description)
+	// anonymous viewer なので relation block は付かない。
+	assert.Nil(t, d.IsFollowing)
+}
+
+// #1778: authed viewer には relation block (isFollowing 等) を埋める。
+func TestPackUserForAPI_ViewerRelation(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	followRepo := testutil.NewMockFollowingRepository()
+	require.NoError(t, followRepo.Create(&model.Following{ID: "f1", FollowerID: "viewer", FolloweeID: "u1"}))
+	h.SetRelationRepos(userrelation.Repos{Following: followRepo})
+
+	result := h.packUserForAPI(&model.User{ID: "viewer"}, &model.User{ID: "u1", Username: "alice"}, nil)
+	d, ok := result.(entity.UserDetailed)
+	require.True(t, ok)
+	require.NotNil(t, d.IsFollowing)
+	assert.True(t, *d.IsFollowing, "viewer follows u1 → isFollowing=true")
 }
 
 func TestMustMarshal_Panics(t *testing.T) {

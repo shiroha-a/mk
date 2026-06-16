@@ -431,7 +431,20 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 			start = fmt.Sprintf("(%d-0", t.UnixMilli())
 		}
 	}
-	res, err := s.client.XRevRangeN(ctx, streamKey(antennaID), end, start, int64(limit)).Result()
+	// upstream notes.ts: sinceId 単独 (fetch-newer / scroll-up) は昇順
+	// (oldest-first) で sinceId 直後の最古 limit 件を返す。それ以外 (untilId /
+	// 無指定) は降順 (newest-first)。mk-go は常に XRevRange で newest-first だった
+	// ため sinceId 単独ページの並びと集合が逆になっていた (#1778)。
+	var (
+		res []redis.XMessage
+		err error
+	)
+	if sinceID != "" && untilID == "" {
+		// XRANGE は start<=stop の昇順。range は (sinceID, +]。
+		res, err = s.client.XRangeN(ctx, streamKey(antennaID), start, end, int64(limit)).Result()
+	} else {
+		res, err = s.client.XRevRangeN(ctx, streamKey(antennaID), end, start, int64(limit)).Result()
+	}
 	if err != nil {
 		return nil, err
 	}

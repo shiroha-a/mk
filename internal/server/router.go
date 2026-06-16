@@ -1757,6 +1757,15 @@ func (s *Server) setupRoutes() {
 	// FEP-521a Multikey 対応で actor JSON に assertionMethod[] を expose する
 	// ため Ed25519 keypair repo を wire (#1067 / #1069)。
 	apHandler.SetKeypairExtraRepo(keypairExtraRepo)
+	// ap/show が返す UserDetailedNotMe に viewer relation block を埋める (#1778)。
+	apHandler.SetRelationRepos(userrelation.Repos{
+		Following:     followingRepo,
+		Blocking:      blockingRepo,
+		Muting:        mutingRepo,
+		RenoteMuting:  renoteMutingRepo,
+		FollowRequest: followRequestRepo,
+		Memo:          repository.NewUserMemoRepository(s.db),
+	})
 	// AP リソース系エンドポイントは Accept ヘッダで content negotiation する。
 	// ブラウザからのリロード (Accept: text/html など) では SPA 用の HTML を
 	// 返したいので、フォールバックとして frontendHTML を注入しておく。

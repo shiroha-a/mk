@@ -419,10 +419,17 @@ func TestNotes_PagingSinceID(t *testing.T) {
 	require.NoError(t, svc.pushNote(context.Background(), "a1", id2, t1.Add(time.Millisecond)))
 	require.NoError(t, svc.pushNote(context.Background(), "a1", id3, t1.Add(2*time.Millisecond)))
 
-	// sinceID = id1 → strictly newer → id3, id2 (newest first)
+	// #1778: sinceID 単独 (fetch-newer) は昇順 (oldest-first) で返す
+	// (upstream notes.ts の sinceId-only ascending sort)。strictly newer の
+	// 最古から id2, id3 の順。
 	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, id1, "")
 	require.NoError(t, err)
-	assert.Equal(t, []string{id3, id2}, rows)
+	assert.Equal(t, []string{id2, id3}, rows)
+
+	// limit を絞ると sinceID 直後の最古 limit 件 (id2) を返す (newest ではなく)。
+	rows, err = svc.Notes(context.Background(), "u1", "a1", 1, id1, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{id2}, rows)
 }
 
 // #693 review #1: 同一 ms に同じアンテナへ複数回 pushNote しても XADD が

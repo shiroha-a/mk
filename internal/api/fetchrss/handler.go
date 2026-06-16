@@ -354,6 +354,14 @@ func packFeed(feed *gofeed.Feed) map[string]any {
 	}
 	out["items"] = items
 
+	// upstream は RFC5005 の atom:link rel=self/first/next/last/prev を
+	// paginationLinks (optional) として返すが、gofeed の universal Feed は
+	// link の rel 属性を unified model に surface しない (Feed.Links は href のみ)。
+	// 取得には atom 専用 re-parse が必要だが、(1) optional かつ paging を advertise
+	// する feed は稀、(2) drop-in frontend は paginationLinks を消費しない
+	// (misskey-js autogen 型に存在するのみ) ため、本フィールドは意図的に omit する
+	// (#1778)。
+
 	return out
 }
 
