@@ -1418,6 +1418,7 @@ func (s *Server) setupRoutes() {
 	// i/update-email の verifymail / truemail SaaS 呼び出しも SSRF-safe
 	// transport + forward proxy 経由にする (#638)。
 	iHandler.SetEmailValidationClient(s.outboundClient(10 * time.Second))
+	iHandler.SetVerifyLinkClient(s.outboundClient(10 * time.Second)) // #1786: rel=me link 検証
 	// SMTP メール送信を i/update-email 用に注入する。meta の SMTP 設定に従い、
 	// SenderFromMeta が closure 内で per-call 再 Fetch するため admin UI の
 	// 設定変更は即座に反映される (#1112)。smtpSecure 反映は #1111。

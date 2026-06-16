@@ -89,6 +89,9 @@ type Handler struct {
 	// emailValidationClient は verifymail / truemail SaaS への outbound に
 	// 使う SSRF-safe HTTP client (#638)。nil ならデフォルトクライアント。
 	emailValidationClient *http.Client
+	// verifyLinkClient は i/update の rel=me link 検証で profile field の URL を
+	// fetch するための SSRF-safe HTTP client (#1786)。nil なら検証を skip。
+	verifyLinkClient *http.Client
 	// hardMutePublisher は i/update で hardMutedWords を変更したときに
 	// streaming connection に reload signal を流す (#791)。未配線時は
 	// publish skip = 旧挙動 (= reconnect で反映)。
@@ -170,6 +173,12 @@ func (h *Handler) SetProfileUpdateHook(hook ProfileUpdateHook) {
 // + forward proxy 経由の client を渡すこと。
 func (h *Handler) SetEmailValidationClient(c *http.Client) {
 	h.emailValidationClient = c
+}
+
+// SetVerifyLinkClient wires the SSRF-safe outbound HTTP client used by i/update
+// to verify rel=me profile-field backlinks (#1786). nil disables verification.
+func (h *Handler) SetVerifyLinkClient(c *http.Client) {
+	h.verifyLinkClient = c
 }
 
 // SetNoteFieldResolver wires the shared resolver that fills Files /
@@ -1486,6 +1495,25 @@ func (h *Handler) Update(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("BANNER_NOT_AN_IMAGE", "The file specified as a banner is not an image.", "75aedb19-2afd-4e6d-87fc-67941256fa60"))
 		}
 		return apierr.JSONInternalError(c)
+	}
+
+	// upstream i/update.ts:532-593: verifiedLinks を一旦 [] にリセットし、profile
+	// fields の https URL それぞれについて rel=me backlink を非同期に検証して
+	// verifiedLinks に積み直す (#1786)。同期で [] に reset (応答も空で返す)、
+	// goroutine で再検証して書き込む。fire-and-forget は upstream と同様。
+	if h.verifyLinkClient != nil && me.Username != "" && h.serverURL != "" {
+		if err := h.userService.UpdateProfileFields(me.ID, map[string]any{"verifiedLinks": pq.StringArray{}}); err == nil && bundle.Profile != nil {
+			bundle.Profile.VerifiedLinks = nil
+		}
+		myLink := strings.TrimRight(h.serverURL, "/") + "/@" + me.Username
+		if urls := httpsFieldValues(bundle.Profile); len(urls) > 0 {
+			uid := me.ID
+			go func() {
+				if verified := verifyLinks(h.verifyLinkClient, myLink, urls); len(verified) > 0 {
+					_ = h.userService.UpdateProfileFields(uid, map[string]any{"verifiedLinks": pq.StringArray(verified)})
+				}
+			}()
+		}
 	}
 
 	// hardMutedWords が変更された場合は streaming connection に reload signal
