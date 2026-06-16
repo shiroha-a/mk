@@ -82,3 +82,50 @@ func RequireRolePolicyPublic(checker RolePolicyChecker, policyKey string) echo.M
 		}
 	}
 }
+
+// ChatAvailabilityChecker resolves a user's merged role policies so the
+// chatAvailability entry gate can read the `chatAvailability` string value.
+// core/role.Service implements GetUserPolicies.
+type ChatAvailabilityChecker interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// ChatAvailabilityAllows reports whether the chatAvailability policy value
+// permits the given mode ("read" | "write"), mirroring upstream
+// ChatService.getChatAvailability: available=>read+write, readonly=>read only,
+// unavailable=>neither. A missing / unknown value defaults to allow, matching
+// DefaultPolicies (chatAvailability="available") (#1796)。
+func ChatAvailabilityAllows(policy, mode string) bool {
+	switch policy {
+	case "readonly":
+		return mode == "read"
+	case "unavailable":
+		return false
+	default: // "available" または legacy/欠損 → default available
+		return true
+	}
+}
+
+// RequireChatAvailability gates a chat endpoint on the actor's chatAvailability
+// role policy for the given mode, mirroring upstream
+// chatService.checkChatAvailability(me.id, mode). Denied requests get 403
+// ROLE_PERMISSION_DENIED. Place after RequireAuth (GetUser must be non-nil);
+// a nil user / nil checker skips the gate (= 401 は RequireAuth が担当、#1796)。
+func RequireChatAvailability(checker ChatAvailabilityChecker, mode string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if checker == nil {
+				return next(c)
+			}
+			user := GetUser(c)
+			if user == nil {
+				return next(c)
+			}
+			policy, _ := checker.GetUserPolicies(user.ID)["chatAvailability"].(string)
+			if !ChatAvailabilityAllows(policy, mode) {
+				return c.JSON(http.StatusForbidden, apierr.RolePermissionDenied())
+			}
+			return next(c)
+		}
+	}
+}

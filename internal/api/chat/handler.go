@@ -65,6 +65,10 @@ type Handler struct {
 	// UserLite) で invitee user を解決するために使う (#... H-PR9a)。未配線時は
 	// user field を省略する。
 	userRepo repository.UserRepository
+	// chatAvail は create-to-user で recipient の chatAvailability(write) を検査する
+	// ため role policy を引く (#1796、upstream getChatAvailability(toUser).write)。
+	// 未配線なら recipient policy check を skip。
+	chatAvail middleware.ChatAvailabilityChecker
 	// invitationNotifier は invitations/create で被招待ユーザーへ
 	// 'chatRoomInvitationReceived' 通知を送る (#1559)。未配線なら通知しない。
 	invitationNotifier ChatInvitationNotifier
@@ -94,6 +98,12 @@ func (h *Handler) SetModeratorChecker(m ModeratorChecker) { h.moderatorChecker =
 // SetUserRepo wires the user repository for resolving invitee UserLite in the
 // invitations/create response.
 func (h *Handler) SetUserRepo(r repository.UserRepository) { h.userRepo = r }
+
+// SetChatAvailabilityChecker wires the role-policy provider used to verify a
+// recipient's chatAvailability(write) in create-to-user (#1796). nil skips it.
+func (h *Handler) SetChatAvailabilityChecker(c middleware.ChatAvailabilityChecker) {
+	h.chatAvail = c
+}
 
 // ChatInvitationNotifier records a 'chatRoomInvitationReceived' notification on
 // the invitee's stream (#1559)。循環依存を避けるため interface で受け取る
@@ -875,6 +885,15 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		if h.userRepo != nil {
 			if _, ferr := h.userRepo.FindByID(*req.ToUserID); ferr != nil {
 				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
+			}
+		}
+		// upstream ChatService.createMessageToUser:177-179 は recipient の
+		// chatAvailability(write) が false なら送信を拒否する (#1796)。recipient が
+		// chat 不可なので 403 ACCESS_DENIED を返す (upstream は generic error)。
+		if h.chatAvail != nil {
+			policy, _ := h.chatAvail.GetUserPolicies(*req.ToUserID)["chatAvailability"].(string)
+			if !middleware.ChatAvailabilityAllows(policy, "write") {
+				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "The recipient cannot receive chat messages.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 			}
 		}
 		msg, err = h.svc.CreateMessageToUser(c.Request().Context(), user.ID, *req.ToUserID, text, fileID)

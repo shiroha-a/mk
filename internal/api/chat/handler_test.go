@@ -612,6 +612,40 @@ func TestMessagesCreate_ToUser_NoSuchUser(t *testing.T) {
 	assertErrorCode(t, rec, "NO_SUCH_USER", "11795c64-40ea-4198-b06e-3c873ed9039d")
 }
 
+type stubChatAvailChecker struct{ avail string }
+
+func (s *stubChatAvailChecker) GetUserPolicies(_ string) map[string]any {
+	return map[string]any{"chatAvailability": s.avail}
+}
+
+// #1796: recipient の chatAvailability が write 不可 (unavailable) なら ACCESS_DENIED。
+func TestMessagesCreate_ToUser_RecipientUnavailable(t *testing.T) {
+	h, _ := newHandlerWithService(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "unavailable"})
+	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assertErrorCode(t, rec, "ACCESS_DENIED", "1fb7cb09-d46a-4fff-b8df-057708cce513")
+}
+
+// #1796: readonly recipient も write 不可で拒否、available は送信成功。
+func TestMessagesCreate_ToUser_RecipientReadonlyVsAvailable(t *testing.T) {
+	h, repo := newHandlerWithService(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["u2"] = u2
+	h.SetUserRepo(userRepo)
+	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "readonly"})
+	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "available"})
+	rec = post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, repo.Messages, 1)
+}
+
 func TestMessagesCreate_Service_RoomForbidden(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "otherUser"}

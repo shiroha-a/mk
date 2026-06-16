@@ -188,3 +188,64 @@ func TestRequireRolePolicyPublic_NilCheckerSkips(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, called)
 }
+
+// --- #1796: chatAvailability gate ---
+
+type stubChatAvail struct{ policy string }
+
+func (s *stubChatAvail) GetUserPolicies(_ string) map[string]any {
+	return map[string]any{"chatAvailability": s.policy}
+}
+
+func TestChatAvailabilityAllows(t *testing.T) {
+	assert.True(t, ChatAvailabilityAllows("available", "read"))
+	assert.True(t, ChatAvailabilityAllows("available", "write"))
+	assert.True(t, ChatAvailabilityAllows("readonly", "read"))
+	assert.False(t, ChatAvailabilityAllows("readonly", "write"))
+	assert.False(t, ChatAvailabilityAllows("unavailable", "read"))
+	assert.False(t, ChatAvailabilityAllows("unavailable", "write"))
+	assert.True(t, ChatAvailabilityAllows("", "write"), "欠損は default available")
+}
+
+func TestRequireChatAvailability_ReadonlyWriteDenied(t *testing.T) {
+	c, rec := newRolePolicyReq(t, &model.User{ID: "u1"})
+	called := false
+	h := RequireChatAvailability(&stubChatAvail{policy: "readonly"}, "write")(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLE_PERMISSION_DENIED")
+	assert.False(t, called)
+}
+
+func TestRequireChatAvailability_ReadonlyReadAllowed(t *testing.T) {
+	c, rec := newRolePolicyReq(t, &model.User{ID: "u1"})
+	h := RequireChatAvailability(&stubChatAvail{policy: "readonly"}, "read")(func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireChatAvailability_UnavailableReadDenied(t *testing.T) {
+	c, rec := newRolePolicyReq(t, &model.User{ID: "u1"})
+	h := RequireChatAvailability(&stubChatAvail{policy: "unavailable"}, "read")(func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestRequireChatAvailability_NilCheckerSkips(t *testing.T) {
+	c, rec := newRolePolicyReq(t, &model.User{ID: "u1"})
+	called := false
+	h := RequireChatAvailability(nil, "write")(func(c echo.Context) error {
+		called = true
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called)
+}
