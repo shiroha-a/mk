@@ -77,3 +77,13 @@ type FollowingBirthday struct {
 	// Birthday is the raw "YYYY-MM-DD" string as stored in user_profile.
 	Birthday string `gorm:"column:birthday"`
 }
+
+// RemoteInbox is a remote follower's delivery inbox plus whether it is the
+// instance's shared inbox (vs a personal inbox). Shared inboxes drive the
+// deliver goneSuspended decision on a 410 Gone (#1811)。query-result DTO なので
+// repository ではなく model に置く (testutil mock が repository を import すると
+// repository の internal test 経由で import cycle になるため)。
+type RemoteInbox struct {
+	Inbox  string
+	Shared bool
+}

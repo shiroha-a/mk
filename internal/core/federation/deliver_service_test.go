@@ -457,6 +457,40 @@ func TestDeliverToFollowers(t *testing.T) {
 	assert.Len(t, enq.calls, 2)
 }
 
+// #1811: DeliverToFollowers は shared inbox を payload.IsSharedInbox=true で配送し、
+// 個別 inbox は false にする (goneSuspended 判定用)。
+func TestDeliverToFollowers_ThreadsSharedInboxFlag(t *testing.T) {
+	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	sharedInbox := "https://remote.example/inbox"
+	personalInbox := "https://other.example/users/x/inbox"
+	followingRepo.RemoteInboxes["alice"] = []string{sharedInbox, personalInbox}
+	followingRepo.RemoteSharedInboxes[sharedInbox] = true
+
+	require.NoError(t, svc.DeliverToFollowers("alice", []byte(`{}`)))
+	require.Len(t, enq.calls, 2)
+	byInbox := map[string]bool{}
+	for _, c := range enq.calls {
+		byInbox[c.Inbox] = c.IsSharedInbox
+	}
+	assert.True(t, byInbox[sharedInbox], "shared inbox は IsSharedInbox=true")
+	assert.False(t, byInbox[personalInbox], "個別 inbox は IsSharedInbox=false")
+}
+
+// #1811: DeliverToUser は recipient の sharedInbox を IsSharedInbox=true にする。
+func TestDeliverToUser_ThreadsSharedInboxFlag(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	host := "remote.example"
+	shared := "https://remote.example/inbox"
+	personal := "https://remote.example/users/bob/inbox"
+	recipient := &model.User{ID: "bob", Host: &host, SharedInbox: &shared, Inbox: &personal}
+	require.NoError(t, svc.DeliverToUser("alice", recipient, []byte(`{}`)))
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, shared, enq.calls[0].Inbox)
+	assert.True(t, enq.calls[0].IsSharedInbox)
+}
+
 func TestDeliverToFollowers_RepoError(t *testing.T) {
 	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
@@ -472,7 +506,7 @@ type failingListInboxesRepo struct {
 	*testutil.MockFollowingRepository
 }
 
-func (f *failingListInboxesRepo) ListRemoteFollowerInboxes(_ string) ([]string, error) {
+func (f *failingListInboxesRepo) ListRemoteFollowerInboxes(_ string) ([]model.RemoteInbox, error) {
 	return nil, errors.New("db down")
 }
 

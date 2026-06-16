@@ -5098,6 +5098,9 @@ type MockFollowingRepository struct {
 	// RemoteInboxes stores per-followee inbox lists used by
 	// ListRemoteFollowerInboxes. テスト側で明示的に登録する。
 	RemoteInboxes map[string][]string
+	// RemoteSharedInboxes maps an inbox URL to whether it is a shared inbox
+	// (#1811). 未登録の URL は Shared=false 扱い。
+	RemoteSharedInboxes map[string]bool
 	// Birthdays maps followeeID -> "YYYY-MM-DD" string used by
 	// ListFollowingByBirthday. 未登録のユーザーは誕生日なしとして扱う。
 	Birthdays map[string]string
@@ -5105,9 +5108,10 @@ type MockFollowingRepository struct {
 
 func NewMockFollowingRepository() *MockFollowingRepository {
 	return &MockFollowingRepository{
-		Followings:    make(map[string]*model.Following),
-		RemoteInboxes: make(map[string][]string),
-		Birthdays:     make(map[string]string),
+		Followings:          make(map[string]*model.Following),
+		RemoteInboxes:       make(map[string][]string),
+		RemoteSharedInboxes: make(map[string]bool),
+		Birthdays:           make(map[string]string),
 	}
 }
 
@@ -5124,8 +5128,13 @@ func (m *MockFollowingRepository) DeleteAllByUser(userID string) (int64, error) 
 	return n, nil
 }
 
-func (m *MockFollowingRepository) ListRemoteFollowerInboxes(userID string) ([]string, error) {
-	return m.RemoteInboxes[userID], nil
+func (m *MockFollowingRepository) ListRemoteFollowerInboxes(userID string) ([]model.RemoteInbox, error) {
+	urls := m.RemoteInboxes[userID]
+	out := make([]model.RemoteInbox, 0, len(urls))
+	for _, u := range urls {
+		out = append(out, model.RemoteInbox{Inbox: u, Shared: m.RemoteSharedInboxes[u]})
+	}
+	return out, nil
 }
 
 func (m *MockFollowingRepository) Create(f *model.Following) error {

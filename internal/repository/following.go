@@ -73,10 +73,11 @@ type FollowingRepository interface {
 	// either the follower or the followee. Returns the total affected rows.
 	// Used by cascade account deletion.
 	DeleteAllByUser(userID string) (int64, error)
-	// ListRemoteFollowerInboxes returns the deduplicated list of inbox URLs for
-	// remote followers of userID. sharedInbox を持つフォロワーは sharedInbox
-	// に集約され、無いフォロワーは個別inboxを返す。
-	ListRemoteFollowerInboxes(userID string) ([]string, error)
+	// ListRemoteFollowerInboxes returns the deduplicated inboxes for remote
+	// followers of userID. sharedInbox を持つフォロワーは sharedInbox に集約され
+	// (Shared=true)、無いフォロワーは個別 inbox (Shared=false)。Shared フラグは
+	// deliver の goneSuspended 判定 (shared inbox の 410) に使う (#1811)。
+	ListRemoteFollowerInboxes(userID string) ([]model.RemoteInbox, error)
 	// ListFollowingByBirthday returns the followees of followerID whose
 	// birthday (mmdd) falls in [beginMMDD, endMMDD] inclusive. Passing
 	// beginMMDD > endMMDD treats the range as year-wrapping (e.g. 1225..0105).
@@ -350,22 +351,27 @@ func (r *followingRepository) DeleteAllByUser(userID string) (int64, error) {
 //  1. follower がリモート (host IS NOT NULL) のフォロワーをjoin
 //  2. sharedInbox があれば sharedInbox、無ければ inbox を選択
 //  3. NULL/空文字列を除外し DISTINCT で重複排除
-func (r *followingRepository) ListRemoteFollowerInboxes(userID string) ([]string, error) {
-	var inboxes []string
+func (r *followingRepository) ListRemoteFollowerInboxes(userID string) ([]model.RemoteInbox, error) {
+	var rows []struct {
+		Inbox  string
+		Shared bool
+	}
+	// shared フラグは sharedInbox が非空のとき true (= COALESCE で sharedInbox 側を
+	// 選んだ行)。同 shared inbox を共有する複数フォロワーは DISTINCT で 1 行に集約。
 	err := r.db.
 		Table(`"following" AS f`).
-		Select(`DISTINCT COALESCE(NULLIF(u."sharedInbox", ''), u.inbox) AS inbox`).
+		Select(`DISTINCT COALESCE(NULLIF(u."sharedInbox", ''), u.inbox) AS inbox, (u."sharedInbox" IS NOT NULL AND u."sharedInbox" != '') AS shared`).
 		Joins(`JOIN "user" u ON u.id = f."followerId"`).
 		Where(`f."followeeId" = ? AND u.host IS NOT NULL AND (u."sharedInbox" IS NOT NULL OR u.inbox IS NOT NULL)`, userID).
-		Pluck("inbox", &inboxes).Error
+		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	// COALESCE が NULL を返す可能性があるため、空文字を除去
-	out := make([]string, 0, len(inboxes))
-	for _, inb := range inboxes {
-		if inb != "" {
-			out = append(out, inb)
+	out := make([]model.RemoteInbox, 0, len(rows))
+	for _, row := range rows {
+		if row.Inbox != "" {
+			out = append(out, model.RemoteInbox{Inbox: row.Inbox, Shared: row.Shared})
 		}
 	}
 	return out, nil

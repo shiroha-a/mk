@@ -123,6 +123,75 @@ func TestService_RecordResponseError_AlreadyNotResponding(t *testing.T) {
 	assert.Equal(t, &since, repo.Instances["alpha.example"].NotRespondingSince)
 }
 
+// #1811: 1 週間以上 not-responding (suspensionState==none) なら
+// autoSuspendedForNotResponding に自動 suspend する。
+func TestService_RecordResponseError_AutoSuspendsAfter7Days(t *testing.T) {
+	svc, repo, _ := newService(t)
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example",
+		IsNotResponding: true, NotRespondingSince: &old,
+		SuspensionState: model.SuspensionStateNone,
+	}
+	require.NoError(t, svc.RecordResponseError("alpha.example"))
+	assert.Equal(t, model.SuspensionStateAutoSuspendedForNotResponding, repo.Instances["alpha.example"].SuspensionState)
+}
+
+// 7 日未満なら suspend しない。
+func TestService_RecordResponseError_NoSuspendBefore7Days(t *testing.T) {
+	svc, repo, _ := newService(t)
+	recent := time.Now().Add(-3 * 24 * time.Hour)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example",
+		IsNotResponding: true, NotRespondingSince: &recent,
+		SuspensionState: model.SuspensionStateNone,
+	}
+	require.NoError(t, svc.RecordResponseError("alpha.example"))
+	assert.Equal(t, model.SuspensionStateNone, repo.Instances["alpha.example"].SuspensionState)
+}
+
+// notRespondingSince が nil (旧データ) なら backfill する。
+func TestService_RecordResponseError_BackfillsNotRespondingSince(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example", IsNotResponding: true, NotRespondingSince: nil,
+		SuspensionState: model.SuspensionStateNone,
+	}
+	require.NoError(t, svc.RecordResponseError("alpha.example"))
+	require.NotNil(t, repo.Instances["alpha.example"].NotRespondingSince)
+	assert.Equal(t, model.SuspensionStateNone, repo.Instances["alpha.example"].SuspensionState)
+}
+
+// 既に手動 suspend の instance は 7 日経過でも自動切替しない。
+func TestService_RecordResponseError_DoesNotOverrideManualSuspend(t *testing.T) {
+	svc, repo, _ := newService(t)
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	repo.Instances["alpha.example"] = &model.Instance{
+		ID: "i1", Host: "alpha.example",
+		IsNotResponding: true, NotRespondingSince: &old,
+		SuspensionState: model.SuspensionStateManuallySuspended,
+	}
+	require.NoError(t, svc.RecordResponseError("alpha.example"))
+	assert.Equal(t, model.SuspensionStateManuallySuspended, repo.Instances["alpha.example"].SuspensionState)
+}
+
+// #1811: MarkGoneSuspended は goneSuspended に切替。手動 suspend / 既 gone は no-op。
+func TestService_MarkGoneSuspended(t *testing.T) {
+	svc, repo, _ := newService(t)
+	repo.Instances["alpha.example"] = &model.Instance{ID: "i1", Host: "alpha.example"}
+	require.NoError(t, svc.MarkGoneSuspended("alpha.example"))
+	assert.Equal(t, model.SuspensionStateGoneSuspended, repo.Instances["alpha.example"].SuspensionState)
+
+	// 手動 suspend は上書きしない。
+	repo.Instances["beta.example"] = &model.Instance{ID: "i2", Host: "beta.example", SuspensionState: model.SuspensionStateManuallySuspended}
+	require.NoError(t, svc.MarkGoneSuspended("beta.example"))
+	assert.Equal(t, model.SuspensionStateManuallySuspended, repo.Instances["beta.example"].SuspensionState)
+
+	// 未知 host / 空 host は no-op。
+	require.NoError(t, svc.MarkGoneSuspended("missing.example"))
+	require.NoError(t, svc.MarkGoneSuspended(""))
+}
+
 func TestService_RecordResponseError_UnknownHost(t *testing.T) {
 	svc, _, _ := newService(t)
 	require.NoError(t, svc.RecordResponseError("missing.example"))

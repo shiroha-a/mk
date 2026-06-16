@@ -337,6 +337,7 @@ func TestDeliverProcessor_Ed25519_DegradeFlagSkipsEd25519(t *testing.T) {
 type stubResponseHook struct {
 	successes []string
 	errors    []string
+	goneHosts []string
 }
 
 func (s *stubResponseHook) RecordResponseSuccess(host string) error {
@@ -346,6 +347,11 @@ func (s *stubResponseHook) RecordResponseSuccess(host string) error {
 
 func (s *stubResponseHook) RecordResponseError(host string) error {
 	s.errors = append(s.errors, host)
+	return nil
+}
+
+func (s *stubResponseHook) MarkGoneSuspended(host string) error {
+	s.goneHosts = append(s.goneHosts, host)
 	return nil
 }
 
@@ -367,6 +373,44 @@ func TestDeliverProcessor_ResponseHook_Gone_RecordsSuccess(t *testing.T) {
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
 	assert.Equal(t, []string{"remote.example"}, hook.successes)
+}
+
+// #1811: shared inbox が 410 Gone を返したらインスタンス全体を goneSuspended にする。
+func TestDeliverProcessor_SharedInbox_Gone_SuspendsInstance(t *testing.T) {
+	signer := &stubSigner{resp: okResponse(http.StatusGone)}
+	p := processors.NewDeliverProcessor(signer)
+	hook := &stubResponseHook{}
+	p.SetResponseHook(hook)
+	payload := makePayload(t)
+	payload.IsSharedInbox = true
+	err := p.Handle(context.Background(), makeTask(t, payload))
+	require.Error(t, err)
+	assert.Equal(t, []string{"remote.example"}, hook.goneHosts, "shared inbox 410 -> goneSuspended")
+}
+
+// 個別 inbox の 410 はインスタンスを suspend しない (個別 actor 不在の可能性)。
+func TestDeliverProcessor_PersonalInbox_Gone_NoSuspend(t *testing.T) {
+	signer := &stubSigner{resp: okResponse(http.StatusGone)}
+	p := processors.NewDeliverProcessor(signer)
+	hook := &stubResponseHook{}
+	p.SetResponseHook(hook)
+	payload := makePayload(t) // IsSharedInbox=false
+	err := p.Handle(context.Background(), makeTask(t, payload))
+	require.Error(t, err)
+	assert.Empty(t, hook.goneHosts, "personal inbox 410 must not suspend the instance")
+}
+
+// shared inbox でも 404 は suspend しない (410 Gone のみが「消滅」シグナル)。
+func TestDeliverProcessor_SharedInbox_NotFound_NoSuspend(t *testing.T) {
+	signer := &stubSigner{resp: okResponse(http.StatusNotFound)}
+	p := processors.NewDeliverProcessor(signer)
+	hook := &stubResponseHook{}
+	p.SetResponseHook(hook)
+	payload := makePayload(t)
+	payload.IsSharedInbox = true
+	err := p.Handle(context.Background(), makeTask(t, payload))
+	require.Error(t, err)
+	assert.Empty(t, hook.goneHosts, "404 must not suspend (only 410 Gone)")
 }
 
 func TestDeliverProcessor_ResponseHook_ClientError_RecordsSuccess(t *testing.T) {

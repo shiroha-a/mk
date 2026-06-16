@@ -377,7 +377,11 @@ func TestFollowingRepository_ListRemoteFollowerInboxes(t *testing.T) {
 
 	inboxes, err := repo.ListRemoteFollowerInboxes(followee.ID)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{sharedInbox1, inbox3}, inboxes)
+	// #1811: sharedInbox 集約は Shared=true、個別 inbox は Shared=false。
+	assert.ElementsMatch(t, []model.RemoteInbox{
+		{Inbox: sharedInbox1, Shared: true},
+		{Inbox: inbox3, Shared: false},
+	}, inboxes)
 }
 
 func TestUserRepository_IncrementFollowingCount(t *testing.T) {

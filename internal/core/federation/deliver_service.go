@@ -150,7 +150,7 @@ func (s *DeliverService) SetSyncDeliverHookForTest(fn func(payload queue.Deliver
 // 場合は DeliverActivityWithRecipient を使うと FEP-521a Multikey 対応サーバー
 // 向けに Ed25519 sign が試行される (#1067 / #1071)。
 func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inboxes []string) error {
-	return s.deliverInternal(signerUserID, body, inboxes, nil)
+	return s.deliverInternal(signerUserID, body, inboxes, nil, nil)
 }
 
 // DeliverActivityWithRecipient is DeliverActivity + recipient capability based
@@ -159,10 +159,14 @@ func (s *DeliverService) DeliverActivity(signerUserID string, body []byte, inbox
 // 鍵情報も詰める (DeliverProcessor 側で実際の sign 分岐 + degrade safeguard
 // を担う)。recipient == nil なら DeliverActivity と等価動作 (#1067 / #1071)。
 func (s *DeliverService) DeliverActivityWithRecipient(signerUserID string, body []byte, inboxes []string, recipient *model.User) error {
-	return s.deliverInternal(signerUserID, body, inboxes, recipient)
+	return s.deliverInternal(signerUserID, body, inboxes, recipient, nil)
 }
 
-func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inboxes []string, recipient *model.User) error {
+// deliverInternal enqueues one signed delivery per unique inbox. sharedInboxes
+// (optional) marks which inbox URLs are shared inboxes so the processor can
+// goneSuspend the instance on a 410 (#1811)。recipient の sharedInbox に一致する
+// inbox も shared 扱いにする。
+func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inboxes []string, recipient *model.User, sharedInboxes map[string]bool) error {
 	if len(inboxes) == 0 {
 		return nil
 	}
@@ -190,6 +194,8 @@ func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inbox
 			continue
 		}
 		seen[inbox] = struct{}{}
+		isShared := sharedInboxes[inbox] ||
+			(recipient != nil && recipient.SharedInbox != nil && *recipient.SharedInbox != "" && inbox == *recipient.SharedInbox)
 		payload := queue.DeliverPayload{
 			Inbox:          inbox,
 			Body:           body,
@@ -197,6 +203,7 @@ func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inbox
 			KeyPEM:         keyPEM,
 			Ed25519KeyID:   edKeyID,
 			Ed25519PrivPEM: edPrivPEM,
+			IsSharedInbox:  isShared,
 		}
 		if s.syncDeliverHook != nil {
 			// test 経路 (#780): queue を経由せず inline で sign + POST。
@@ -301,11 +308,22 @@ func (s *DeliverService) isBlockedInbox(inbox string) bool {
 // DeliverToFollowers enqueues delivery to all remote followers of signerUserID.
 // sharedInbox は repository 側で集約済み。
 func (s *DeliverService) DeliverToFollowers(signerUserID string, body []byte) error {
-	inboxes, err := s.followingRepo.ListRemoteFollowerInboxes(signerUserID)
+	rows, err := s.followingRepo.ListRemoteFollowerInboxes(signerUserID)
 	if err != nil {
 		return err
 	}
-	return s.DeliverActivity(signerUserID, body, inboxes)
+	inboxes := make([]string, 0, len(rows))
+	var sharedInboxes map[string]bool
+	for _, row := range rows {
+		inboxes = append(inboxes, row.Inbox)
+		if row.Shared {
+			if sharedInboxes == nil {
+				sharedInboxes = make(map[string]bool)
+			}
+			sharedInboxes[row.Inbox] = true
+		}
+	}
+	return s.deliverInternal(signerUserID, body, inboxes, nil, sharedInboxes)
 }
 
 // DeliverToUser enqueues a delivery to a single recipient user. Local users

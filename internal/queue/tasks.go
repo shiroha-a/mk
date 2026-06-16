@@ -154,6 +154,10 @@ type DeliverPayload struct {
 	Ed25519KeyID string `json:"ed25519KeyId,omitempty"`
 	// Ed25519PrivPEM is the PEM-encoded Ed25519 (PKCS8) private key.
 	Ed25519PrivPEM string `json:"ed25519PrivPem,omitempty"`
+	// IsSharedInbox marks deliveries to a remote instance's shared inbox. On a
+	// 410 Gone from a shared inbox the whole instance is suspended
+	// (goneSuspended)、upstream DeliverProcessorService と同じ (#1811)。
+	IsSharedInbox bool `json:"isSharedInbox,omitempty"`
 }
 
 // NewDeliverTask serializes the payload into a driver.Task ready to

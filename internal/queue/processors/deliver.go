@@ -45,6 +45,9 @@ type HTTPSigner interface {
 type ResponseHook interface {
 	RecordResponseSuccess(host string) error
 	RecordResponseError(host string) error
+	// MarkGoneSuspended suspends an instance whose shared inbox returned 410
+	// (goneSuspended、#1811)。
+	MarkGoneSuspended(host string) error
 }
 
 // ChartHook is invoked after each HTTP attempt so the chart subsystem
@@ -260,6 +263,15 @@ func (p *DeliverProcessor) recordSuccess(inbox string) {
 	}
 }
 
+// recordGoneSuspended is a best-effort wrapper that suspends the instance whose
+// shared inbox returned 410 Gone (#1811)。
+func (p *DeliverProcessor) recordGoneSuspended(inbox string) {
+	host := hostFromInbox(inbox)
+	if p.responseHook != nil && host != "" {
+		_ = p.responseHook.MarkGoneSuspended(host)
+	}
+}
+
 // recordError is a best-effort wrapper that fires both the response
 // hook and the chart hook for a failed inbox POST.
 func (p *DeliverProcessor) recordError(inbox string) {
@@ -347,6 +359,13 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		slog.Info("ap deliver: target gone",
 			"inbox", payload.Inbox, "status", resp.StatusCode)
 		p.recordSuccess(payload.Inbox)
+		// shared inbox が 410 Gone を返したらインスタンス全体が消滅したとみなし
+		// goneSuspended に切り替えて以後の配送を止める (upstream
+		// DeliverProcessorService の isSharedInbox && 410、#1811)。404 は個別 actor
+		// 不在の可能性があるので suspend しない。
+		if payload.IsSharedInbox && resp.StatusCode == http.StatusGone {
+			p.recordGoneSuspended(payload.Inbox)
+		}
 		return fmt.Errorf("target gone (%d): %w", resp.StatusCode, driver.SkipRetry)
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// その他の4xxは受信側の不正リクエスト扱い。HTTP として応答が返って

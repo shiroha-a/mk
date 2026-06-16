@@ -19,6 +19,12 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
+// autoSuspendNotRespondingThreshold is how long an instance must be
+// continuously not-responding before it is auto-suspended
+// (autoSuspendedForNotResponding)。upstream DeliverProcessorService の
+// `1000 * 60 * 60 * 24 * 7` (1 週間) と一致する (#1811)。
+const autoSuspendNotRespondingThreshold = 7 * 24 * time.Hour
+
 // hostMatchCaser folds host names case-insensitively in a Unicode-aware
 // manner. Misskey TS uses String.prototype.toLowerCase() which works on
 // arbitrary Unicode (e.g. \`Ä\` → \`ä\`); strings.ToLower in Go only handles
@@ -319,10 +325,23 @@ func (s *Service) RecordResponseError(host string) error {
 	if err != nil {
 		return nil
 	}
+	now := s.clock()
 	if inst.IsNotResponding {
+		// 既に not-responding。upstream DeliverProcessorService:
+		//   - notRespondingSince があり 1 週間以上不通 かつ suspensionState==none なら
+		//     autoSuspendedForNotResponding に自動 suspend する。
+		//   - notRespondingSince が無い (旧データ) なら backfill する。
+		if inst.NotRespondingSince == nil {
+			return s.repo.UpdateFields(host, map[string]any{"notRespondingSince": &now})
+		}
+		if inst.SuspensionState == model.SuspensionStateNone &&
+			!inst.NotRespondingSince.After(now.Add(-autoSuspendNotRespondingThreshold)) {
+			return s.repo.UpdateFields(host, map[string]any{
+				"suspensionState": string(model.SuspensionStateAutoSuspendedForNotResponding),
+			})
+		}
 		return nil
 	}
-	now := s.clock()
 	if err := s.repo.UpdateFields(host, map[string]any{
 		"isNotResponding":    true,
 		"notRespondingSince": &now,
@@ -337,6 +356,27 @@ func (s *Service) RecordResponseError(host string) error {
 	delete(s.responseHealthyCache, host)
 	s.mu.Unlock()
 	return nil
+}
+
+// MarkGoneSuspended suspends an instance whose shared inbox returned 410 Gone,
+// matching upstream DeliverProcessorService (isSharedInbox && 410 -> goneSuspended)
+// で以後の配送を止める (#1811)。既に同 state なら no-op。手動 suspend は上書き
+// しない (goneSuspended は自動判定で、admin の manuallySuspended を消さない)。
+func (s *Service) MarkGoneSuspended(host string) error {
+	if host == "" {
+		return nil
+	}
+	inst, err := s.repo.FindByHost(host)
+	if err != nil {
+		return nil
+	}
+	if inst.SuspensionState == model.SuspensionStateGoneSuspended ||
+		inst.SuspensionState == model.SuspensionStateManuallySuspended {
+		return nil
+	}
+	return s.repo.UpdateFields(host, map[string]any{
+		"suspensionState": string(model.SuspensionStateGoneSuspended),
+	})
 }
 
 // IsBlocked reports whether the host matches an entry in meta.blockedHosts.
