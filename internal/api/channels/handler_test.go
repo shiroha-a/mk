@@ -820,6 +820,32 @@ func TestTimeline_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1790: viewer が muted にしている channel を renote/quote した note は channel TL
+// から除外する (当該 channel 自身は muted set から除く)。
+func TestTimeline_ExcludesMutedChannelRenote(t *testing.T) {
+	h, repo, _, noteRepo := newHandler(t)
+	mutRepo := testutil.NewMockChannelMutingRepository()
+	h.SetMutingRepo(mutRepo)
+	repo.Channels["c1"] = &model.Channel{ID: "c1"}
+	cid := "c1"
+	mutedCh := "c_muted"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", ChannelID: &cid, UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	noteRepo.Notes["n2"] = &model.Note{ID: "n2", ChannelID: &cid, UserID: "u1", Visibility: model.NoteVisibilityPublic, RenoteChannelID: &mutedCh}
+	require.NoError(t, mutRepo.Create(&model.ChannelMuting{ID: "m1", UserID: "alice", ChannelID: mutedCh}))
+
+	c, rec := newReq(t, `{"channelId":"c1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Timeline(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	ids := make([]string, 0, len(out))
+	for _, n := range out {
+		ids = append(ids, n["id"].(string))
+	}
+	assert.ElementsMatch(t, []string{"n1"}, ids, "muted channel を renote した n2 は除外")
+}
+
 func TestTimeline_BadJSON(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	c, rec := newReq(t, `{not`)

@@ -507,6 +507,20 @@ func (h *Handler) Timeline(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
+	// upstream channels/timeline.ts: viewer の muted channel を renote/quote した
+	// note を除外する (renoteChannelId NOT IN mutedChannels)。当該 channel 自身は
+	// muted set から除く (ignoreAuthorChannelFromMute、#1790)。
+	if viewer != nil && h.mutingRepo != nil {
+		if muts, err := h.mutingRepo.ListByUser(viewer.ID); err == nil {
+			mutedChannelIDs := make([]string, 0, len(muts))
+			for _, m := range muts {
+				if m.ChannelID != req.ChannelID {
+					mutedChannelIDs = append(mutedChannelIDs, m.ChannelID)
+				}
+			}
+			notes = notesfilter.ApplyRenoteChannelMute(notes, mutedChannelIDs)
+		}
+	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
