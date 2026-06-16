@@ -2885,6 +2885,16 @@ func (m *MockPollRepository) IncrementVote(noteID string, choice int, delta int)
 	return nil
 }
 
+// UpdateVotes overwrites the poll's votes array (#1779)。
+func (m *MockPollRepository) UpdateVotes(noteID string, votes []int64) error {
+	p, ok := m.Polls[noteID]
+	if !ok {
+		return ErrNotFound
+	}
+	p.Votes = append(p.Votes[:0:0], votes...)
+	return nil
+}
+
 // ListExpiredUnnotified mirrors the live repo: returns polls with expiresAt
 // before `now` and notifiedAt == nil. ordering by expiresAt ASC for
 // deterministic testing.

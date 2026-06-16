@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -13,6 +14,10 @@ type PollRepository interface {
 	Create(poll *model.Poll) error
 	FindByNoteID(noteID string) (*model.Poll, error)
 	IncrementVote(noteID string, choice int, delta int) error
+	// UpdateVotes overwrites the whole votes array for a poll. inbound
+	// Update(Question) からリモート poll の vote 数を refresh するのに使う
+	// (upstream ApQuestionService.updateQuestion、#1779)。
+	UpdateVotes(noteID string, votes []int64) error
 	// ListExpiredUnnotified returns polls whose expiresAt has passed and have
 	// not yet been pollEnded-notified. Used by core/poll.ExpiryWorker (#690)。
 	// limit caps the batch so a long backlog (e.g. after restart) doesn't
@@ -59,6 +64,13 @@ func (r *pollRepository) IncrementVote(noteID string, choice int, delta int) err
 	pgChoice := choice + 1
 	q := fmt.Sprintf(`UPDATE "poll" SET votes[%d] = votes[%d] + ? WHERE "noteId" = ?`, pgChoice, pgChoice)
 	return r.db.Exec(q, delta, noteID).Error
+}
+
+// UpdateVotes overwrites poll.votes for noteID with the given counts.
+func (r *pollRepository) UpdateVotes(noteID string, votes []int64) error {
+	return r.db.Model(&model.Poll{}).
+		Where(`"noteId" = ?`, noteID).
+		UpdateColumn("votes", pq.Int64Array(votes)).Error
 }
 
 // ListExpiredUnnotified returns up to `limit` polls with expiresAt < now and

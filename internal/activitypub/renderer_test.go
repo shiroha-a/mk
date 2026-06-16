@@ -1069,8 +1069,10 @@ func TestRenderer_RenderNote_SingleChoicePoll(t *testing.T) {
 	assert.Equal(t, "A", out.OneOf[0].Name)
 	assert.Equal(t, 10, out.OneOf[0].Replies.TotalItems)
 	assert.Equal(t, "B", out.OneOf[1].Name)
-	assert.NotEmpty(t, out.EndTime)
+	// #1779: 期限切れ poll は closed のみ (endTime は出さない、upstream asPoll の
+	// 排他キー)。
 	assert.NotEmpty(t, out.Closed, "expired poll should have closed")
+	assert.Empty(t, out.EndTime, "expired poll must not also emit endTime")
 }
 
 func TestRenderer_RenderNote_MultipleChoicePoll(t *testing.T) {

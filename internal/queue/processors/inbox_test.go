@@ -190,7 +190,7 @@ func TestInboxProcessor_VerifiesSignatureAndCommitsHooks(t *testing.T) {
 	p.SetInstanceTracker(tracker)
 	p.SetChartHook(chart)
 
-	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice"}`)
+	body := []byte(`{"id":"https://remote.example/follows/1","type":"Follow","actor":"https://remote.example/users/alice"}`)
 	payload := signedInboxPayload(t, key, body)
 
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
@@ -200,6 +200,56 @@ func TestInboxProcessor_VerifiesSignatureAndCommitsHooks(t *testing.T) {
 	require.Len(t, stub.calls, 1, "Process should run after verify")
 	assert.Equal(t, []string{host}, tracker.hosts)
 	assert.Equal(t, []string{host}, chart.hosts)
+}
+
+// #1779: activity.id の host が actor の host と一致しなければ drop される
+// (foreign-host id spoofing 対策、upstream signerHost!==activity.id host gate)。
+func TestInboxProcessor_RejectsForeignActivityIDHost(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	host := "remote.example"
+	aliceURI := "https://remote.example/users/alice"
+	verifier := &stubVerifier{actor: &model.User{ID: "alice", Host: &host, URI: &aliceURI}, pubKey: pub}
+
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+
+	// activity.id が foreign host (evil.example) → drop。
+	body := []byte(`{"id":"https://evil.example/announces/1","type":"Announce","actor":"https://remote.example/users/alice"}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, payload),
+	}))
+	assert.Empty(t, stub.calls, "foreign-host activity.id must be dropped before Process")
+}
+
+// #1779: activity.id が欠落 (string でない) なら drop される。
+func TestInboxProcessor_RejectsMissingActivityID(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	host := "remote.example"
+	aliceURI := "https://remote.example/users/alice"
+	verifier := &stubVerifier{actor: &model.User{ID: "alice", Host: &host, URI: &aliceURI}, pubKey: pub}
+
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice"}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, payload),
+	}))
+	assert.Empty(t, stub.calls, "activity without a string id must be dropped")
 }
 
 // host が blockedHosts に入っていれば verify 後に Process まで到達せず
@@ -480,7 +530,7 @@ func TestInboxProcessor_ForwardedWithValidLDSig(t *testing.T) {
 	// LD-Signature が origin/alice の鍵で署名済 (creator が alice を指す)。
 	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, creator: "https://origin.example/users/alice#main-key"})
 
-	body := []byte(`{"type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://origin.example/users/alice#main-key"}}`)
+	body := []byte(`{"id":"https://origin.example/creates/1","type":"Create","actor":"https://origin.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://origin.example/users/alice#main-key"}}`)
 	payload := signedInboxPayload(t, key, body)
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
 		TypeName: queue.TaskTypeInbox,

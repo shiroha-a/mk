@@ -553,10 +553,13 @@ func (r *Renderer) applyPoll(out *Note, poll *model.Poll) {
 	}
 	if poll.ExpiresAt != nil {
 		ts := poll.ExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z")
-		out.EndTime = ts
-		// 期限切れの場合は closed もセット
+		// upstream asPoll は単一キー [expiresAt < now ? 'closed' : 'endTime']: expiresAt
+		// で endTime / closed を排他的に出す。期限切れは closed のみ、未期限は endTime
+		// のみ (両方は出さない、#1779)。
 		if poll.ExpiresAt.Before(time.Now()) {
 			out.Closed = ts
+		} else {
+			out.EndTime = ts
 		}
 	}
 }
@@ -572,10 +575,22 @@ func (r *Renderer) addAttachments(out *Note, n *model.Note) {
 		return
 	}
 	for _, f := range files {
+		// upstream renderDocument は mediaType: file.webpublicType ?? file.type、
+		// url: getPublicUrl(file) (= file.webpublicUrl ?? file.url) で web 最適化
+		// variant を優先する。連合先に転送する帯域/形式を抑えるため mk-go も揃える
+		// (original URL も有効なので最適化目的、#1779)。
+		mediaType := f.Type
+		if f.WebpublicType != nil && *f.WebpublicType != "" {
+			mediaType = *f.WebpublicType
+		}
+		fileURL := f.URL
+		if f.WebpublicURL != nil && *f.WebpublicURL != "" {
+			fileURL = *f.WebpublicURL
+		}
 		doc := Document{
 			Type:      "Document",
-			MediaType: f.Type,
-			URL:       f.URL,
+			MediaType: mediaType,
+			URL:       fileURL,
 			Name:      stringValue(f.Comment),
 			Sensitive: f.IsSensitive,
 		}

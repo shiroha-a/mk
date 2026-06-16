@@ -1228,6 +1228,76 @@ func (r *Resolver) createPollFromQuestion(note *model.Note, apNote *activitypub.
 	_ = r.pollRepo.Create(poll)
 }
 
+// UpdateRemoteQuestion applies an inbound Update(Question) to an existing remote
+// poll by refreshing its per-choice vote counts from the Question's oneOf/anyOf
+// replies.totalItems (upstream ApQuestionService.updateQuestion、#1779)。
+//
+// 動作:
+//   - object を Question として parse できなければ no-op
+//   - URI で note を引いて見つからなければ no-op (反映先が無い)
+//   - note の著者がローカルなら no-op (ローカル poll は remote Update で変更しない)
+//   - poll が無ければ no-op
+//   - Update activity の actor が poll 著者と一致しなければ拒否 (他 user の poll を
+//     更新させない、upstream の attribution check 相当)
+//   - 既存 choice 名で apChoice を照合し、新しい totalItems で votes を上書きする
+//
+// votes 以外 (choices / expiresAt) は更新しない (upstream も votes のみ更新)。
+func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string) error {
+	if r.noteRepo == nil || r.pollRepo == nil {
+		return nil
+	}
+	var apNote activitypub.Note
+	if err := json.Unmarshal(object, &apNote); err != nil || apNote.ID == "" {
+		return nil
+	}
+	note, err := r.noteRepo.FindByURI(apNote.ID)
+	if err != nil {
+		return nil
+	}
+	if note.UserHost == nil {
+		// ローカル著者の poll は remote からの Update で書き換えない。
+		return nil
+	}
+	poll, err := r.pollRepo.FindByNoteID(note.ID)
+	if err != nil || poll == nil {
+		return nil
+	}
+	// attribution: Update の actor は poll 著者 (note author) と一致必須。別 user の
+	// poll URI を指定した更新を拒否する。
+	if actorURI != "" && r.userRepo != nil {
+		if author, aerr := r.userRepo.FindByID(note.UserID); aerr == nil && author != nil && author.URI != nil && *author.URI != actorURI {
+			return nil
+		}
+	}
+	apChoices := apNote.OneOf
+	if len(apChoices) == 0 {
+		apChoices = apNote.AnyOf
+	}
+	if len(apChoices) == 0 {
+		return nil
+	}
+	// choice 名 -> totalItems。upstream は name 一致で照合する (位置ではない)。
+	counts := make(map[string]int64, len(apChoices))
+	for _, c := range apChoices {
+		if c.Replies != nil && c.Replies.TotalItems >= 0 {
+			counts[c.Name] = int64(c.Replies.TotalItems)
+		}
+	}
+	newVotes := make([]int64, len(poll.Choices))
+	copy(newVotes, poll.Votes)
+	changed := false
+	for i, name := range poll.Choices {
+		if v, ok := counts[name]; ok && v != newVotes[i] {
+			newVotes[i] = v
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return r.pollRepo.UpdateVotes(note.ID, newVotes)
+}
+
 // UpdateRemoteNote applies an inbound Update Note activity body to an existing
 // remote-authored note row. Misskey 本家にはノート編集機能が無いためローカル
 // note は不変だが、Mastodon 等から push されてくる Update activity は受信

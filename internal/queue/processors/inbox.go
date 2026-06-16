@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
@@ -268,6 +269,18 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 		// 判定不能なので素通しし、なりすまし対象が無い状態にする。
 		return nil
 	}
+	// activity.id host gate (upstream InboxProcessorService): activity.id は文字列
+	// 必須で、その host は actor の host と一致しなければならない。これが無いと、
+	// 署名検証を通った actor が他 host の id を持つ activity を stamp でき、Announce
+	// dedup の FindByURI(act.ID) / renote.URI=act.ID 等で foreign-host id を注入できる
+	// (#1779)。署名検証後 (= 認証済み actor) に評価する。
+	activityID := federation.ExtractActivityID(body)
+	if activityID == "" {
+		return fmt.Errorf("activity id is not a string")
+	}
+	if idHost, actorHost := uriHost(activityID), uriHost(bodyActor); idHost == "" || idHost != actorHost {
+		return fmt.Errorf("signerHost != activity.id host: actor=%q id=%q", bodyActor, activityID)
+	}
 	signerURI := ""
 	if signer != nil && signer.URI != nil {
 		signerURI = *signer.URI
@@ -315,6 +328,16 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 		return fmt.Errorf("ld-signature signer %q != activity.actor %q", ldURI, bodyActor)
 	}
 	return nil
+}
+
+// uriHost returns the lowercased hostname of a URI, or "" when the URI is
+// unparseable or has no host. Used by the activity.id host gate (#1779)。
+func uriHost(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // extractLDCreator reads `signature.creator` (the LD-Signature key URI) from a

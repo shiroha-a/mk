@@ -440,6 +440,26 @@ func ExtractActorIRI(body []byte) string {
 	return act.Actor
 }
 
+// ExtractActivityID returns the activity's top-level `id` after the same
+// unwrap+Normalize that Process applies. Used by the inbox authorization gate to
+// enforce that activity.id is a string whose host matches the actor's host
+// (upstream InboxProcessorService の signerHost!==activity.id host gate、#1779)。
+// 取得不能 / 欠落時は "" を返す。
+func ExtractActivityID(body []byte) string {
+	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
+		body = unwrapped
+	}
+	normalized, err := activitypub.Normalize(body)
+	if err != nil {
+		return ""
+	}
+	var act genericActivity
+	if err := json.Unmarshal(normalized, &act); err != nil {
+		return ""
+	}
+	return act.ID
+}
+
 // SetBlockingService wires the blocking service for Block/Undo Block activities.
 func (p *Processor) SetBlockingService(svc *coreblocking.Service) {
 	p.blockingService = svc
@@ -1562,6 +1582,11 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		}
 		return err
 	}
+	if strings.EqualFold(objectType, "question") {
+		// inbound Update(Question): リモート poll の vote 数を refresh する
+		// (upstream ApInboxService.update -> apQuestionService.updateQuestion、#1779)。
+		return p.resolver.UpdateRemoteQuestion(act.Object, act.Actor)
+	}
 
 	// object が単なる URI なら fetch、object 内に Person があればそれを使う
 	var person activitypub.Person
@@ -1574,7 +1599,7 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		person.ID = uri
 	}
 	if person.Type != "" && !strings.EqualFold(person.Type, "person") {
-		// Question / Article 等は未対応
+		// Note / Question / Game は上で dispatch 済。残り (Article 等) は未対応。
 		return nil
 	}
 	if _, err := p.userRepo.FindByURI(person.ID); err != nil {
