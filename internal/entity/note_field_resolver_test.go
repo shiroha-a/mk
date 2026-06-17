@@ -87,7 +87,8 @@ func TestNoteFieldResolver_ResolveFiles_EmbedsRenoteAndReply(t *testing.T) {
 	require.Len(t, notes[0].Reply.Files, 1)
 }
 
-// Renote / Reply の embed にも MyReaction / Channel が解決されることを確認。
+// renote embed には MyReaction / Channel が解決され、reply embed は detail:false
+// なので MyReaction を持たない (Channel は detail 外なので reply にも付く、#1816)。
 func TestNoteFieldResolver_ResolveViewerFields_EmbedsRenoteAndReply(t *testing.T) {
 	reactions := &stubNoteReactionLookup{rows: map[string]*model.NoteReaction{
 		"n1": {NoteID: "n1", Reaction: "👍"},
@@ -114,10 +115,26 @@ func TestNoteFieldResolver_ResolveViewerFields_EmbedsRenoteAndReply(t *testing.T
 
 	require.NotNil(t, notes[0].MyReaction)
 	require.NotNil(t, notes[0].Renote.MyReaction)
-	require.NotNil(t, notes[0].Reply.MyReaction)
+	// reply embed (detail:false) は myReaction を持たない (#1816)。
+	require.Nil(t, notes[0].Reply.MyReaction)
 	require.NotNil(t, notes[0].Channel)
 	assert.Equal(t, "general", notes[0].Channel.Name)
 	require.NotNil(t, notes[0].Renote.Channel)
+}
+
+// #1816: myReaction も legacy text alias (like→👍) を Unicode へ変換する
+// (upstream populateMyReaction、reactions map と一貫)。
+func TestNoteFieldResolver_MyReactionLegacyConverted(t *testing.T) {
+	reactions := &stubNoteReactionLookup{rows: map[string]*model.NoteReaction{
+		"n1": {NoteID: "n1", Reaction: "like"},
+	}}
+	r := NewNoteFieldResolver(nil, nil, nil, reactions, nil, makeIDGen(t))
+
+	notes := []NoteEntity{{ID: "n1", ReactionCount: 1}}
+	r.ResolveViewerFields(notes, &model.User{ID: "v1"})
+
+	require.NotNil(t, notes[0].MyReaction)
+	assert.Equal(t, "👍", *notes[0].MyReaction, "legacy text reaction は myReaction で Unicode に変換")
 }
 
 // nil receiver / nil viewer / 空 slice / nil lookup の網羅的 nil safe 確認。

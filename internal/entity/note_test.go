@@ -250,6 +250,34 @@ func TestPackNote_ReactionsKeyNormalized(t *testing.T) {
 	assert.Equal(t, 5, e.ReactionCount)
 }
 
+// #1816: legacy text reaction (like→👍 等) を packer で Unicode に変換する。
+// 既存の同 Unicode reaction とは count がマージされる。
+func TestPackNote_ReactionsLegacyTextAlias(t *testing.T) {
+	idGen := newTestIDGen(t)
+	noteID := idGen.Generate(time.Now())
+
+	// legacy "like" (2) + 既存 "👍" (3) → "👍":5 に集約。"love" (1) → "❤":1。
+	note := &model.Note{
+		ID:         noteID,
+		UserID:     "user1",
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte(`{"like":2,"👍":3,"love":1}`)),
+	}
+
+	e := PackNote(note, idGen)
+
+	var reactions map[string]float64
+	require.NoError(t, json.Unmarshal(e.Reactions, &reactions))
+	assert.Equal(t, float64(5), reactions["👍"], "like は 👍 に変換され既存 count とマージ")
+	assert.Equal(t, float64(1), reactions["❤"], "love は ❤ に変換")
+	_, hasLike := reactions["like"]
+	assert.False(t, hasLike, "legacy text key は残らない")
+	_, hasLove := reactions["love"]
+	assert.False(t, hasLove)
+	// reactionCount は変換しても総和は不変。
+	assert.Equal(t, 6, e.ReactionCount)
+}
+
 func TestPackNote_WithRenoteAndReply(t *testing.T) {
 	idGen := newTestIDGen(t)
 	renoteID := idGen.Generate(time.Now())
@@ -299,6 +327,69 @@ func TestPackNote_WithRenoteAndReply(t *testing.T) {
 	require.NotNil(t, e.Reply)
 	assert.Equal(t, replyID, e.Reply.ID)
 	assert.Equal(t, &replyText, e.Reply.Text)
+}
+
+// #1816: reply embed は upstream で detail:false なので clippedCount / poll を
+// 出力しない。renote embed は detail:true なので両方とも出す。
+func TestPackNote_ReplyEmbedDetailFalse(t *testing.T) {
+	idGen := newTestIDGen(t)
+	renoteID := idGen.Generate(time.Now())
+	replyID := idGen.Generate(time.Now())
+	noteID := idGen.Generate(time.Now())
+	text := "top"
+
+	poll := &model.Poll{Choices: pq.StringArray{"a", "b"}, Votes: pq.Int64Array{1, 2}}
+	note := &model.Note{
+		ID:         noteID,
+		UserID:     "user1",
+		Text:       &text,
+		RenoteID:   &renoteID,
+		ReplyID:    &replyID,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+		Renote: &model.Note{
+			ID:           renoteID,
+			UserID:       "user2",
+			Visibility:   model.NoteVisibilityPublic,
+			Reactions:    datatypes.JSON([]byte("{}")),
+			ClippedCount: 2,
+			HasPoll:      true,
+			Poll:         poll,
+		},
+		Reply: &model.Note{
+			ID:           replyID,
+			UserID:       "user3",
+			Visibility:   model.NoteVisibilityPublic,
+			Reactions:    datatypes.JSON([]byte("{}")),
+			ClippedCount: 3,
+			HasPoll:      true,
+			Poll:         poll,
+		},
+	}
+
+	e := PackNote(note, idGen)
+
+	// top-level (detail:true): clippedCount / poll を出す。
+	require.NotNil(t, e.ClippedCount)
+
+	// renote embed (detail:true): clippedCount / poll を出す。
+	require.NotNil(t, e.Renote)
+	require.NotNil(t, e.Renote.ClippedCount)
+	assert.Equal(t, 2, *e.Renote.ClippedCount)
+	assert.NotNil(t, e.Renote.Poll)
+
+	// reply embed (detail:false): clippedCount / poll を省く。hasPoll は detail 外
+	// なので残る。
+	require.NotNil(t, e.Reply)
+	assert.Nil(t, e.Reply.ClippedCount, "reply embed は clippedCount を出さない")
+	assert.Nil(t, e.Reply.Poll, "reply embed は poll を出さない")
+	assert.True(t, e.Reply.HasPoll, "hasPoll は detail 外なので reply にも残る")
+
+	// JSON でも reply embed から clippedCount / poll の key が消える。
+	b, err := json.Marshal(e.Reply)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "clippedCount")
+	assert.NotContains(t, string(b), "\"poll\"")
 }
 
 func TestPackNotes_EmbeddedRenoteHasInstanceAndEmoji(t *testing.T) {

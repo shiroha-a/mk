@@ -12,6 +12,7 @@ import (
 )
 
 // #1561 [MEDIUM] clippedCount は model 実値を出す (旧: 0 ハードコード)。
+// #1816: top-level note は detail:true なので clippedCount を *int で出力する。
 func TestPackNote_ClippedCountRealValue(t *testing.T) {
 	idGen := newTestIDGen(t)
 	n := &model.Note{
@@ -19,7 +20,9 @@ func TestPackNote_ClippedCountRealValue(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
 		ClippedCount: 5,
 	}
-	assert.Equal(t, 5, PackNote(n, idGen).ClippedCount)
+	packed := PackNote(n, idGen)
+	require.NotNil(t, packed.ClippedCount)
+	assert.Equal(t, 5, *packed.ClippedCount)
 }
 
 // #1561 [MEDIUM] visibleUserIds は specified のときだけ出力する。

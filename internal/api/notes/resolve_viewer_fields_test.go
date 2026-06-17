@@ -10,8 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// resolveViewerFields の MyReaction 解決が Renote / Reply の embed にも
-// 波及することを確認する (#416)。
+// resolveViewerFields の MyReaction 解決が outer / renote embed に波及すること
+// を確認する (#416)。reply embed は upstream で detail:false のため myReaction を
+// 持たない (#1816)。
 func TestResolveViewerFields_MyReactionEmbedded(t *testing.T) {
 	h, _ := newTestHandler(t)
 	reactionRepo := testutil.NewMockNoteReactionRepository()
@@ -38,8 +39,8 @@ func TestResolveViewerFields_MyReactionEmbedded(t *testing.T) {
 	assert.Equal(t, "👍", *notes[0].MyReaction)
 	require.NotNil(t, notes[0].Renote.MyReaction)
 	assert.Equal(t, "❤", *notes[0].Renote.MyReaction)
-	require.NotNil(t, notes[0].Reply.MyReaction)
-	assert.Equal(t, "🎉", *notes[0].Reply.MyReaction)
+	// reply embed (detail:false) は myReaction を持たない (#1816)。
+	assert.Nil(t, notes[0].Reply.MyReaction)
 }
 
 // Channel 解決も Renote / Reply の embed に波及する。

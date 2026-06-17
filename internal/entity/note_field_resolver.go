@@ -340,9 +340,8 @@ func appendNoteIDs(dst []string, n *NoteEntity) []string {
 	if n.Renote != nil && n.Renote.ReactionCount > 0 {
 		dst = append(dst, n.Renote.ID)
 	}
-	if n.Reply != nil && n.Reply.ReactionCount > 0 {
-		dst = append(dst, n.Reply.ID)
-	}
+	// reply embed は detail:false で pack され myReaction を出さない (#1816) ので
+	// fetch 対象に含めない (applyMyReaction も reply には適用しない)。
 	return dst
 }
 
@@ -412,22 +411,21 @@ func applyMyReaction(n *NoteEntity, reactionMap map[string]*model.NoteReaction) 
 	if n == nil {
 		return
 	}
+	// myReaction も upstream populateMyReaction と同じく legacy text alias を
+	// Unicode に変換してから colon-form 正規化する (reactions map と一貫、#1816)。
 	if r, ok := reactionMap[n.ID]; ok {
-		nr := NormalizeReactionKey(r.Reaction)
+		nr := normalizeReactionWithLegacy(r.Reaction)
 		n.MyReaction = &nr
 	}
 	if n.Renote != nil {
 		if r, ok := reactionMap[n.Renote.ID]; ok {
-			nr := NormalizeReactionKey(r.Reaction)
+			nr := normalizeReactionWithLegacy(r.Reaction)
 			n.Renote.MyReaction = &nr
 		}
 	}
-	if n.Reply != nil {
-		if r, ok := reactionMap[n.Reply.ID]; ok {
-			nr := NormalizeReactionKey(r.Reaction)
-			n.Reply.MyReaction = &nr
-		}
-	}
+	// reply embed は upstream で detail:false の pack のため myReaction を持たない
+	// (NoteEntityService.ts:437 reply は detail:false / :453-459 myReaction は
+	// detail block 内、#1816)。renote embed (detail:true) のみ myReaction を出す。
 }
 
 func applyChannel(n *NoteEntity, chMap map[string]*model.Channel) {

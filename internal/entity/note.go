@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/reactionlegacy"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 )
@@ -53,17 +54,22 @@ type NoteEntity struct {
 	ReactionEmojis     map[string]string `json:"reactionEmojis"`
 	RenoteCount        int16             `json:"renoteCount"`
 	RepliesCount       int16             `json:"repliesCount"`
-	ClippedCount       int               `json:"clippedCount"`
-	URI                *string           `json:"uri,omitempty"`
-	URL                *string           `json:"url,omitempty"`
-	ReplyID            *string           `json:"replyId"`
-	RenoteID           *string           `json:"renoteId"`
-	Reply              *NoteEntity       `json:"reply,omitempty"`
-	Renote             *NoteEntity       `json:"renote,omitempty"`
-	FileIDs            []string          `json:"fileIds"`
-	Files              []any             `json:"files"`
-	Tags               []string          `json:"tags,omitempty"`
-	Poll               *PollEntity       `json:"poll,omitempty"`
+	// ClippedCount は upstream の detail block (opts.detail) に属し、reply embed
+	// (detail:false) では key ごと省かれる (note.ts:255 optional:true)。pointer +
+	// omitempty で「detail のとき &n (0 含む) を出力 / reply embed では nil 省略」
+	// を表す (#1816)。plain int + omitempty だと detail 時の clippedCount:0 を
+	// 誤って落とすため pointer 必須。
+	ClippedCount *int        `json:"clippedCount,omitempty"`
+	URI          *string     `json:"uri,omitempty"`
+	URL          *string     `json:"url,omitempty"`
+	ReplyID      *string     `json:"replyId"`
+	RenoteID     *string     `json:"renoteId"`
+	Reply        *NoteEntity `json:"reply,omitempty"`
+	Renote       *NoteEntity `json:"renote,omitempty"`
+	FileIDs      []string    `json:"fileIds"`
+	Files        []any       `json:"files"`
+	Tags         []string    `json:"tags,omitempty"`
+	Poll         *PollEntity `json:"poll,omitempty"`
 	// Emojis は upstream NoteEntityService.ts:412 `host != null ? populateEmojis
 	// : undefined` に合わせ、remote note (author host != nil) のみ出力する
 	// (custom emoji が無くても `{}`)。local note は nil → omitempty で省略
@@ -126,7 +132,7 @@ const maxNoteEmbedDepth = 1
 // PackNote converts a model.Note to a NoteEntity. Renote / Reply の embed は
 // maxNoteEmbedDepth で制限する。
 func PackNote(n *model.Note, idGen id.Generator) NoteEntity {
-	return packNoteAtDepth(n, idGen, 0)
+	return packNoteAtDepth(n, idGen, 0, true)
 }
 
 // packPoll maps a preloaded model.Poll onto the Misskey-compatible PollEntity.
@@ -185,7 +191,14 @@ func HideNoteEntity(n *NoteEntity) {
 	n.IsHidden = true
 }
 
-func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
+// packNoteAtDepth packs a note at the given embed depth. detail mirrors
+// upstream NoteEntityService's `opts.detail`: when false (reply embeds) the
+// clippedCount / poll / myReaction fields and the reply/renote sub-embeds are
+// omitted. Top-level notes and renote embeds use detail:true; reply embeds use
+// detail:false (upstream NoteEntityService.ts:432-460, reply at :437 detail:false
+// / renote at :445 detail:true). myReaction is applied later by
+// note_field_resolver (which skips reply embeds), #1816.
+func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int, detail bool) NoteEntity {
 	createdAt := ""
 	if t, err := idGen.ParseTime(n.ID); err == nil {
 		createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -253,7 +266,6 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		ReactionEmojis:     make(map[string]string),
 		RenoteCount:        n.RenoteCount,
 		RepliesCount:       n.RepliesCount,
-		ClippedCount:       int(n.ClippedCount),
 		URI:                n.URI,
 		URL:                n.URL,
 		ReplyID:            n.ReplyID,
@@ -266,7 +278,15 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 		VisibleUserIDs:     visibleUserIDs,
 		Mentions:           mentions,
 		HasPoll:            n.HasPoll,
-		Poll:               packPoll(n.Poll),
+	}
+
+	// clippedCount / poll は upstream の detail block (opts.detail) に属する。
+	// reply embed (detail:false) では出力しない (#1816)。hasPoll は detail 外なので
+	// 上の struct literal で常に出す。
+	if detail {
+		clipped := int(n.ClippedCount)
+		entity.ClippedCount = &clipped
+		entity.Poll = packPoll(n.Poll)
 	}
 
 	if n.User != nil {
@@ -277,13 +297,16 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int) NoteEntity {
 	// Preload("Reply.User") されている前提で 1 段だけ展開する。preload が
 	// 無ければ n.Renote == nil になり、フロントエンドはこれを「削除された投稿」
 	// として描画する (renoteId だけが入ってる状態と区別するため #416)。
+	// renote embed は upstream で detail:true、reply embed は detail:false
+	// (NoteEntityService.ts:445 / :437)。reply embed では clippedCount/poll/
+	// myReaction を省く (#1816)。
 	if depth < maxNoteEmbedDepth {
 		if n.Renote != nil {
-			r := packNoteAtDepth(n.Renote, idGen, depth+1)
+			r := packNoteAtDepth(n.Renote, idGen, depth+1, true)
 			entity.Renote = &r
 		}
 		if n.Reply != nil {
-			r := packNoteAtDepth(n.Reply, idGen, depth+1)
+			r := packNoteAtDepth(n.Reply, idGen, depth+1, false)
 			entity.Reply = &r
 		}
 	}
@@ -496,9 +519,32 @@ func NormalizeReactionKey(key string) string {
 	return key
 }
 
-// normalizeReactionKeys rewrites reaction JSONB keys so that legacy
-// `:name:` entries are merged into `:name@.:`.
-// TS時代のレコードとmk時代のレコードが同一キーに集約される。
+// normalizeReactionWithLegacy applies the legacy text-alias conversion
+// (like→👍 等) and then the colon-form normalization (`:name:`→`:name@.:`),
+// the per-key transform shared by the reactions map and myReaction (#1816).
+// upstream NoteEntityService の reactions / populateMyReaction はどちらも
+// convertLegacyReaction を通すため、両者で同じ変換を使う。
+func normalizeReactionWithLegacy(raw string) string {
+	if u, ok := reactionlegacy.Convert(raw); ok {
+		raw = u
+	}
+	return NormalizeReactionKey(raw)
+}
+
+// normalizeReactionKeys rewrites reaction JSONB keys so that legacy text
+// aliases (like→👍 等) are converted to their Unicode equivalent and legacy
+// `:name:` entries are merged into `:name@.:`. Counts for keys that collapse
+// to the same canonical reaction are summed. TS時代のレコードとmk時代の
+// レコードが同一キーに集約される。
+//
+// upstream NoteEntityService.ts:373 は reactions を必ず convertLegacyReactions
+// (legacies map + decodeReaction) に通す (#1816)。upstream の `count>0` filter は
+// 適用しない: mk-native の write path (repository.IncrementReaction /
+// count_writer) は count が 0 以下になった key を削除するため 0-count entry が
+// 残らない。TS から移行直後の DB に TS が残した 0-count key が含まれる可能性は
+// あるが、それは別途扱う drop-in データ移行の話で本変換の対象外。なお
+// `:name:`→`:name@.:` の colon-form は mk-go の canonical (decodeReaction の逆)
+// で、reactions map の永続/出力形式として既存挙動を維持する。
 func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
 	if len(raw) == 0 {
 		// golden Note.reactions は Record (object) 必須。reactions 未設定の note
@@ -513,8 +559,9 @@ func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
 	}
 	normalized := make(map[string]float64, len(m))
 	for k, v := range m {
-		nk := NormalizeReactionKey(k)
-		normalized[nk] += v
+		// legacy text alias (like→👍 等) を Unicode へ変換し colon-form 正規化を
+		// 通す。同一 canonical key に集約される count は += でマージする。
+		normalized[normalizeReactionWithLegacy(k)] += v
 	}
 	data, err := json.Marshal(normalized)
 	if err != nil {

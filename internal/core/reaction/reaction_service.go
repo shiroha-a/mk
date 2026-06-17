@@ -12,6 +12,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/reactionlegacy"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -57,22 +58,6 @@ type BlockingChecker interface {
 	IsBlocked(blockerID, blockeeID string) (bool, error)
 }
 
-// legacyMap converts legacy text reactions like "like" or "love" to their
-// Unicode equivalents. Misskey本家のReactionServiceと同じ表を使用する。
-var legacyMap = map[string]string{
-	"like":     "👍",
-	"love":     "\u2764",
-	"laugh":    "😆",
-	"hmm":      "🤔",
-	"surprise": "😮",
-	"congrats": "🎉",
-	"angry":    "💢",
-	"confused": "😥",
-	"rip":      "😇",
-	"pudding":  "🍮",
-	"star":     "⭐",
-}
-
 // customEmojiPattern matches a custom emoji shortcode like ":smile:" or
 // ":smile@example.com:".
 var customEmojiPattern = regexp.MustCompile(`^:([\w+\-]+)(?:@([\w.\-]+))?:$`)
@@ -84,7 +69,7 @@ var customEmojiPattern = regexp.MustCompile(`^:([\w+\-]+)(?:@([\w.\-]+))?:$`)
 // plain unicode pass through unchanged. Pure (no DB); used by read paths such as
 // users/reactions where the raw DB string must not leak (#1547)。
 func ConvertLegacy(raw string) string {
-	if v, ok := legacyMap[raw]; ok {
+	if v, ok := reactionlegacy.Convert(raw); ok {
 		return v
 	}
 	if m := customEmojiPattern.FindStringSubmatch(raw); m != nil {
@@ -484,7 +469,7 @@ func (s *Service) resolveReaction(raw string, actorHost *string) (string, *model
 	if raw == "" {
 		return FallbackReaction, nil
 	}
-	if v, ok := legacyMap[raw]; ok {
+	if v, ok := reactionlegacy.Convert(raw); ok {
 		return v, nil
 	}
 	if m := customEmojiPattern.FindStringSubmatch(raw); m != nil {
