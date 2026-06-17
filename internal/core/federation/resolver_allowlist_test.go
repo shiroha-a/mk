@@ -111,7 +111,7 @@ func TestIngestNote_HostNotAllowedByAttributedTo(t *testing.T) {
 	blocker := &stubHostBlocker{disallowed: map[string]bool{"remote.example": true}}
 	r, _, noteRepo := newGatedResolver(t, sampleActor, blocker)
 
-	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	require.ErrorIs(t, err, federation.ErrHostNotAllowed)
 	assert.Empty(t, noteRepo.Notes, "blocked host の note は DB に作らない")
 }
@@ -124,7 +124,7 @@ func TestIngestNote_DedupHitPassesEvenIfHostBlocked(t *testing.T) {
 	uri := "https://remote.example/notes/n1"
 	noteRepo.Notes["existing"] = &model.Note{ID: "existing", URI: &uri}
 
-	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "existing", got.ID)

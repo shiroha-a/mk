@@ -1108,7 +1108,9 @@ func (p *Processor) handleCreate(act genericActivity) error {
 	// fail-closed に倒すため union 後の object を ingest に渡す。union に失敗した
 	// 場合は元の object を使う (= 既存挙動へ degrade)。
 	object := mergeCreateAudience(act)
-	note, created, err := p.resolver.IngestNoteWithCreated(object)
+	// act.Actor を配送 actor として渡し、note の著者 (attributedTo) が配送者本人で
+	// あることを検証させる (なりすまし forge 防止、#1839)。
+	note, created, err := p.resolver.IngestNoteWithCreated(object, act.Actor)
 	if errors.Is(err, corenote.ErrContainsTooManyMentions) {
 		// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): role policy
 		// 由来の "note contains too many mentions" は永続的に解決しない error な
@@ -1125,6 +1127,14 @@ func (p *Processor) handleCreate(act genericActivity) error {
 		// (#1419 review)。handleAnnounce 等は isPermanentSkipError で吸収する
 		// が、handleCreate は他の error を retry に乗せる方針なので明示分岐。
 		slog.Info("federation: dropping inbound Create(Note) from non-federated host",
+			"actor", act.Actor)
+		return nil
+	}
+	if errors.Is(err, ErrNoteAttributionMismatch) {
+		// id/attributedTo host 不一致・attribution≠配送actor (なりすまし forge) は
+		// retry で解消しないため ack して drop する (#1839)。malformed note
+		// (ErrInvalidNote) は従来どおり下の err 分岐で surface する。
+		slog.Info("federation: dropping forged inbound Create(Note) (attribution mismatch)",
 			"actor", act.Actor)
 		return nil
 	}

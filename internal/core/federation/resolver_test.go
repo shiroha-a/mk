@@ -575,7 +575,7 @@ func TestIngestNoteWithCreated_FreshIngest(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.True(t, created, "fresh ingest must report created=true so caller can fire chart hooks")
@@ -589,11 +589,53 @@ func TestIngestNoteWithCreated_DedupReturnsFalse(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "existing", got.ID)
 	assert.False(t, created, "dedup hit must report created=false so caller can skip non-idempotent chart hooks")
+}
+
+// #1839: inbound Create で note の著者 (attributedTo) が配送 actor と異なる場合、
+// なりすまし forge として拒否する (ErrNoteAttributionMismatch)。
+func TestIngestNoteWithCreated_AttributionMismatchRejected(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	// note の著者は remote.example/users/alice だが、配送 actor は別人。
+	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "https://other.example/users/mallory")
+	require.ErrorIs(t, err, federation.ErrNoteAttributionMismatch)
+	assert.Empty(t, noteRepo.Notes, "なりすまし note を作ってはいけない")
+}
+
+// #1839: note の id host と attributedTo host が異なる場合も cross-host forge と
+// して拒否する。
+func TestIngestNoteWithCreated_CrossHostIDRejected(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	// id は a.example、attributedTo は b.example。
+	body := `{"id":"https://a.example/notes/x","type":"Note","attributedTo":"https://b.example/users/y","content":"forge"}`
+	_, _, err := r.IngestNoteWithCreated([]byte(body), "")
+	require.ErrorIs(t, err, federation.ErrNoteAttributionMismatch)
+	assert.Empty(t, noteRepo.Notes)
+}
+
+// #1839: 著者が配送 actor 本人で id/attributedTo host が一致すれば従来どおり取り込む。
+func TestIngestNoteWithCreated_LegitAttributionAccepted(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "https://remote.example/users/alice")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, created)
 }
 
 func TestIngestNote_ResolveActorError(t *testing.T) {
@@ -4885,7 +4927,7 @@ func TestIngestNote_DedupRaceOnUniqueViolation(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	got, created, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	require.NoError(t, err, "unique violation should be treated as dedup hit, not an error")
 	assert.False(t, created, "race loser must be created=false so hooks/renoteCount don't double-fire")
 	require.NotNil(t, got)
@@ -4902,7 +4944,7 @@ func TestIngestNote_CreateErrorNonDedupPropagates(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote))
+	_, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
 	assert.Error(t, err, "non-dedup create error must propagate")
 }
 
@@ -4928,7 +4970,7 @@ func TestIngestNote_DedupRaceOnQuoteNoDoubleRenoteCount(t *testing.T) {
 		"_misskey_quote": "https://example.com/notes/q1",
 		"to": ["https://www.w3.org/ns/activitystreams#Public"]
 	}`
-	got, created, err := r.IngestNoteWithCreated([]byte(body))
+	got, created, err := r.IngestNoteWithCreated([]byte(body), "")
 	require.NoError(t, err)
 	assert.False(t, created)
 	assert.Equal(t, "winner", got.ID)

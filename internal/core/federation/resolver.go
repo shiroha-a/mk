@@ -82,6 +82,12 @@ var (
 	// upstream assertActivityMatchesUrl の hard requirement で object-spoofing を
 	// 防ぐ (#1820)。
 	ErrObjectHostMismatch = errors.New("fetched object id host does not match response host")
+	// ErrNoteAttributionMismatch is returned when an inbound Note's id host does
+	// not match its attributedTo host, or its attributedTo does not match the
+	// delivering actor. Mirrors upstream ApNoteService.validateNote で note 偽装
+	// (なりすまし) を防ぐ (#1839)。malformed note (ErrInvalidNote) と違い、これは
+	// retry しても解消しないため caller は ack して drop する。
+	ErrNoteAttributionMismatch = errors.New("note attribution does not match delivering actor or id host")
 )
 
 // DefaultActorTTL is the default duration after which a cached actor (and its
@@ -963,7 +969,9 @@ func (r *Resolver) resolveQuoteURI(uri string) *model.Note {
 // `created` フラグが必要な caller (e.g. processor.handleCreate の chart hook 発火
 // 判定) は IngestNoteWithCreated を直接呼ぶこと。
 func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
-	note, _, err := r.IngestNoteWithCreated(body)
+	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
+	// id host == attributedTo host 検証は IngestNoteWithCreated 側で常に行う。
+	note, _, err := r.IngestNoteWithCreated(body, "")
 	return note, err
 }
 
@@ -984,7 +992,12 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 // with `created == false`; callers MUST check `created` before firing any
 // non-idempotent hook (chart counters, notification, etc.) since the dedup
 // path otherwise looks indistinguishable from a fresh ingest at the call site.
-func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error) {
+// IngestNoteWithCreated は note body を取り込み、新規作成かどうかも返す。
+// deliveringActorURI は inbound Create(Note) の配送 actor URI で、note の著者
+// (attributedTo) が配送者本人であることの検証に使う (なりすまし防止、#1839)。
+// fetch 経由 (IngestNote) では空文字を渡し、この検証を skip する (upstream
+// validateNote が actor 未指定時に attribution==actor を skip するのと同じ)。
+func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
 		return nil, false, ErrInvalidNote
 	}
@@ -997,6 +1010,21 @@ func (r *Resolver) IngestNoteWithCreated(body []byte) (*model.Note, bool, error)
 	}
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
 		return existing, false, nil
+	}
+	// upstream ApNoteService.validateNote 相当の attribution 検証 (#1839):
+	//   1. note の id host と著者 (attributedTo) host が一致すること
+	//      (別 host の著者を詐称する cross-host forge を弾く)。
+	//   2. inbound Create では note の著者が配送 actor 本人であること
+	//      (alice@a が bob@b になりすました note を作る forge を弾く)。
+	idHost, idErr := hostFromURI(apNote.ID)
+	attrHost, attrErr := hostFromURI(apNote.AttributedTo)
+	if idErr != nil || attrErr != nil || !strings.EqualFold(idHost, attrHost) {
+		slog.Warn("federation: note id/attributedTo host mismatch", "id", apNote.ID, "attributedTo", apNote.AttributedTo)
+		return nil, false, ErrNoteAttributionMismatch
+	}
+	if deliveringActorURI != "" && apNote.AttributedTo != deliveringActorURI {
+		slog.Warn("federation: note attribution does not match delivering actor", "attributedTo", apNote.AttributedTo, "actor", deliveringActorURI)
+		return nil, false, ErrNoteAttributionMismatch
 	}
 	// quote cycle 遮断用に、この note URI を ingest 中として mark する (#1527)。
 	// quote 解決が fetch するネストした ingest から、この URI への再 fetch を
