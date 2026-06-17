@@ -623,6 +623,49 @@ func TestCreateService_CannotRenoteInvisibleNote(t *testing.T) {
 	require.ErrorIs(t, err, note.ErrCannotRenoteInvisibleNote)
 }
 
+// #1821: follower であっても他人の followers note は renote 不可。CanSeeNote は
+// follower に true を返すが、renote すると公開 TL / 連合へ漏洩するため reject する。
+func TestCreateService_CannotRenoteOthersFollowersNoteEvenIfFollower(t *testing.T) {
+	svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+	noteRepo.Notes["secret"] = &model.Note{
+		ID: "secret", UserID: "author", Visibility: model.NoteVisibilityFollowers,
+	}
+	// follower は author を follow している (= CanSeeNote は true)。
+	followingRepo.Followings["f1"] = &model.Following{FollowerID: "follower", FolloweeID: "author"}
+
+	user := &model.User{ID: "follower"}
+	renoteID := "secret"
+	_, err := svc.Create(note.CreateInput{User: user, RenoteID: &renoteID})
+	require.ErrorIs(t, err, note.ErrCannotRenoteInvisibleNote, "follower でも他人の followers note は renote 不可")
+	assert.Equal(t, int16(0), noteRepo.Notes["secret"].RenoteCount)
+}
+
+// #1821: 自分の followers note は renote (boost) 可能。
+func TestCreateService_CanRenoteOwnFollowersNote(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	noteRepo.Notes["mine"] = &model.Note{
+		ID: "mine", UserID: "author", Visibility: model.NoteVisibilityFollowers,
+	}
+	user := &model.User{ID: "author"}
+	renoteID := "mine"
+	created, err := svc.Create(note.CreateInput{User: user, RenoteID: &renoteID})
+	require.NoError(t, err)
+	assert.Equal(t, &renoteID, created.RenoteID)
+}
+
+// #1821: specified (DM) note は自分のものでも renote 不可 (upstream は無条件 reject)。
+func TestCreateService_CannotRenoteSpecifiedNote(t *testing.T) {
+	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+	noteRepo.Notes["dm"] = &model.Note{
+		ID: "dm", UserID: "author", Visibility: model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"author"},
+	}
+	user := &model.User{ID: "author"}
+	renoteID := "dm"
+	_, err := svc.Create(note.CreateInput{User: user, RenoteID: &renoteID})
+	require.ErrorIs(t, err, note.ErrCannotRenoteInvisibleNote, "specified note は自分のものでも renote 不可")
+}
+
 func TestCreateService_ReplyHappyPath(t *testing.T) {
 	svc, noteRepo, _ := newCreateService(t)
 	noteRepo.Notes["target"] = &model.Note{

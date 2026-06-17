@@ -514,6 +514,17 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		if !CanSeeNote(in.User, t, s.followingRepo) {
 			return nil, ErrCannotRenoteInvisibleNote
 		}
+		// renote 対象の可視性 gate (upstream NoteCreateService、#1821)。CanSeeNote は
+		// follower なら他人の followers note でも true を返すため、それだけだと
+		// followers 限定 note を renote 経由で公開 TL / 連合へ漏洩させられる。
+		// upstream は follow 関係を問わず「他人の followers note」と「(自分のもの
+		// 含む) specified note」を無条件 reject する。
+		if t.Visibility == model.NoteVisibilityFollowers && t.UserID != in.User.ID {
+			return nil, ErrCannotRenoteInvisibleNote
+		}
+		if t.Visibility == model.NoteVisibilitySpecified {
+			return nil, ErrCannotRenoteInvisibleNote
+		}
 		// pure renoteを更にrenoteするのは禁止 (TS: isRenote && !isQuote)
 		if IsPureRenote(t) {
 			return nil, ErrCannotRenoteToAPureRenote
