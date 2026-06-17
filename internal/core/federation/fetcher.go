@@ -48,10 +48,10 @@ func (f *APFetcher) SetSigner(s SignerProvider) {
 	f.signer = s
 }
 
-// FetchObject performs a default-signed GET against uri, falling back to
-// unsigned GET on 401/403. Resolver でアクター取得やリモート Note 取得に
-// 共通で使う (#419)。
-func (f *APFetcher) FetchObject(uri string) ([]byte, error) {
+// FetchObjectWithFinalURL is FetchObject but also returns the final response URL
+// (after redirects) so the resolver can bind a fetched object's id host to the
+// host that served it (object-spoofing 防止、#1820)。
+func (f *APFetcher) FetchObjectWithFinalURL(uri string) ([]byte, string, error) {
 	if f.signer != nil {
 		key, err := f.signer.Signer()
 		switch {
@@ -63,21 +63,29 @@ func (f *APFetcher) FetchObject(uri string) ([]byte, error) {
 			slog.Debug("ap fetcher: signer unavailable, falling back to unsigned",
 				"uri", uri, "err", err)
 		case key != nil:
-			body, ferr := f.client.FetchJSON(uri, key)
+			body, finalURL, ferr := f.client.FetchJSONWithURL(uri, key)
 			if ferr == nil {
-				return body, nil
+				return body, finalURL, nil
 			}
 			// 4xx の中でも 401/403 だけがフォールバック対象。404/410 は
 			// 「リソース不在」を意味するので unsigned で再リクエストしても
 			// 結果は同じ (#419 Devin review)。
 			if !shouldFallbackToUnsigned(ferr) {
-				return nil, ferr
+				return nil, "", ferr
 			}
 			slog.Debug("ap fetcher: signed fetch unauthorized, falling back to unsigned",
 				"uri", uri, "err", ferr)
 		}
 	}
-	return f.client.FetchUnsigned(uri)
+	return f.client.FetchUnsignedWithURL(uri)
+}
+
+// FetchObject performs a default-signed GET against uri, falling back to
+// unsigned GET on 401/403. Resolver でアクター取得やリモート Note 取得に
+// 共通で使う (#419)。
+func (f *APFetcher) FetchObject(uri string) ([]byte, error) {
+	body, _, err := f.FetchObjectWithFinalURL(uri)
+	return body, err
 }
 
 // FetchObjectUnsigned performs an explicit unsigned GET. nodeinfo /

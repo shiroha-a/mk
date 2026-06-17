@@ -97,30 +97,48 @@ func (c *Client) GetSigned(url string, key *PrivateKey, acceptOverride string) (
 	return c.httpClient.Do(req)
 }
 
-// FetchJSON performs a signed GET and returns the response body. Non-2xx
-// responses produce a *StatusError so callers can branch on status (e.g.
-// authorized-fetch fallback on 401/403, #419)。
-func (c *Client) FetchJSON(url string, key *PrivateKey) ([]byte, error) {
+// finalURLOf returns the response's final request URL (after redirects). Go's
+// http client points resp.Request at the last request in the redirect chain,
+// so this is the URL the body was actually served from — used to bind a fetched
+// AP object's id host to the host that served it (#1820)。fallback は要求 URL。
+func finalURLOf(resp *http.Response, fallback string) string {
+	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+		return resp.Request.URL.String()
+	}
+	return fallback
+}
+
+// FetchJSONWithURL is FetchJSON but also returns the final response URL (after
+// redirects) so callers can verify the fetched object's id host against the
+// host that served it (#1820)。
+func (c *Client) FetchJSONWithURL(url string, key *PrivateKey) ([]byte, string, error) {
 	resp, err := c.GetSigned(url, key, "")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		drainBody(resp)
-		return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
+		return nil, "", &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
 	}
-	return safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	body, rerr := safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	return body, finalURLOf(resp, url), rerr
 }
 
-// FetchUnsigned performs a plain GET without HTTP signing. 多くのAPサーバーは
-// アクター取得を未署名で許可するため、resolver の初回 fetch 用に使う。
-// Non-2xx responses produce a *StatusError so callers can branch on status
-// (e.g. authorized-fetch fallback on 401/403, #419)。
-func (c *Client) FetchUnsigned(url string) ([]byte, error) {
+// FetchJSON performs a signed GET and returns the response body. Non-2xx
+// responses produce a *StatusError so callers can branch on status (e.g.
+// authorized-fetch fallback on 401/403, #419)。
+func (c *Client) FetchJSON(url string, key *PrivateKey) ([]byte, error) {
+	body, _, err := c.FetchJSONWithURL(url, key)
+	return body, err
+}
+
+// FetchUnsignedWithURL is FetchUnsigned but also returns the final response URL
+// (after redirects) for object-host verification (#1820)。
+func (c *Client) FetchUnsignedWithURL(url string) ([]byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", MimeType+`, `+LDMimeType)
 	if c.userAgent != "" {
@@ -128,14 +146,24 @@ func (c *Client) FetchUnsigned(url string) ([]byte, error) {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		drainBody(resp)
-		return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
+		return nil, "", &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
 	}
-	return safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	body, rerr := safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	return body, finalURLOf(resp, url), rerr
+}
+
+// FetchUnsigned performs a plain GET without HTTP signing. 多くのAPサーバーは
+// アクター取得を未署名で許可するため、resolver の初回 fetch 用に使う。
+// Non-2xx responses produce a *StatusError so callers can branch on status
+// (e.g. authorized-fetch fallback on 401/403, #419)。
+func (c *Client) FetchUnsigned(url string) ([]byte, error) {
+	body, _, err := c.FetchUnsignedWithURL(url)
+	return body, err
 }
 
 // FetchUnsignedJSON performs an unsigned GET with `Accept: application/json, */*`.

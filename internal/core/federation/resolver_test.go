@@ -86,6 +86,51 @@ func TestResolveActor_NewUser(t *testing.T) {
 	assert.Contains(t, pem, "FAKE")
 }
 
+// finalURLStubFetcher は redirect 後の最終 URL を制御できる test fetcher。
+// resolver の unexported finalURLFetcher を構造的に満たす (#1820)。
+type finalURLStubFetcher struct {
+	body     []byte
+	finalURL string
+}
+
+func (f *finalURLStubFetcher) FetchObject(_ string) ([]byte, error) {
+	return f.body, nil
+}
+
+func (f *finalURLStubFetcher) FetchObjectWithFinalURL(_ string) ([]byte, string, error) {
+	return f.body, f.finalURL, nil
+}
+
+func newResolverWithFetcher(t *testing.T, f federation.HTTPFetcher) (*federation.Resolver, *testutil.MockUserRepository) {
+	t.Helper()
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	return federation.NewResolver(repo, noteRepo, urls, f, idGen), repo
+}
+
+// #1820: evil.example が victim(remote.example) になりすました actor を返しても、
+// 取得元 host (finalURL) と actor.id host が一致しないので拒否する (object-spoofing)。
+func TestResolveActor_HostSpoofRejected(t *testing.T) {
+	// body の id は remote.example だが、実際に body を返したのは evil.example。
+	f := &finalURLStubFetcher{body: []byte(sampleActor), finalURL: "https://evil.example/users/alice"}
+	r, repo := newResolverWithFetcher(t, f)
+	_, err := r.ResolveActor("https://evil.example/users/alice")
+	require.Error(t, err, "id host != fetch host の actor は拒否されるべき")
+	assert.Empty(t, repo.Users, "なりすまし actor を DB に作ってはいけない")
+}
+
+// #1820: 取得元 host と actor.id host が一致すれば従来どおり解決される。
+func TestResolveActor_HostMatchAccepted(t *testing.T) {
+	f := &finalURLStubFetcher{body: []byte(sampleActor), finalURL: "https://remote.example/users/alice"}
+	r, repo := newResolverWithFetcher(t, f)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", user.Username)
+	assert.Len(t, repo.Users, 1)
+}
+
 // #692: 新規 fetch で `_misskey_canChat` を chatScope に翻訳する。
 // 欠落 / true は "everyone"、false は "none" にマップ。
 func TestResolveActor_NewUserCanChatTranslation(t *testing.T) {

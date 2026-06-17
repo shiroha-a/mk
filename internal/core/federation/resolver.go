@@ -77,6 +77,11 @@ var (
 	// ingest content from a host that the local instance's federation policy
 	// (federation: none / specified, blockedHosts) does not allow.
 	ErrHostNotAllowed = errors.New("host not allowed by federation policy")
+	// ErrObjectHostMismatch is returned when a fetched AP object's id host does
+	// not match the host that actually served it (after redirects). Mirrors
+	// upstream assertActivityMatchesUrl の hard requirement で object-spoofing を
+	// 防ぐ (#1820)。
+	ErrObjectHostMismatch = errors.New("fetched object id host does not match response host")
 )
 
 // DefaultActorTTL is the default duration after which a cached actor (and its
@@ -685,7 +690,7 @@ func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
 	if !r.hostAllowedForURI(uri) {
 		return nil, ErrHostNotAllowed
 	}
-	body, err := r.fetcher.FetchObject(uri)
+	body, finalURL, err := r.fetchObjectWithFinalURL(uri)
 	if err != nil {
 		return nil, err
 	}
@@ -695,6 +700,13 @@ func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
 	}
 	if actor.ID == "" || actor.PreferredUsername == "" {
 		return nil, ErrInvalidActor
+	}
+	// actor.ID host が body を返した host と一致するか検証 (object-spoofing 防止、
+	// #1820)。以降 resolveActorOnce は actor.ID から host/URI を導出するため、
+	// ここで bind しておかないと別 host になりすました actor が作られる。
+	if err := assertResponseHostMatches(finalURL, actor.ID); err != nil {
+		slog.Warn("federation: actor id host mismatch", "uri", uri, "finalURL", finalURL, "id", actor.ID)
+		return nil, err
 	}
 	if !activitypub.IsValidActorType(actor.Type) {
 		// Note/Activity 等 Actor でない object が actor として参照された場合の
@@ -871,8 +883,19 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 	if !r.hostAllowedForURI(uri) {
 		return nil, ErrHostNotAllowed
 	}
-	body, err := r.fetcher.FetchObject(uri)
+	body, finalURL, err := r.fetchObjectWithFinalURL(uri)
 	if err != nil {
+		return nil, err
+	}
+	// note.id host が body を返した host と一致するか検証 (object-spoofing 防止、
+	// #1820)。IngestNote は apNote.ID をそのまま note.URI に採用するため、ここで
+	// bind しておく。
+	var idProbe struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &idProbe)
+	if err := assertResponseHostMatches(finalURL, idProbe.ID); err != nil {
+		slog.Warn("federation: note id host mismatch", "uri", uri, "finalURL", finalURL, "id", idProbe.ID)
 		return nil, err
 	}
 	return r.IngestNote(body)
@@ -1849,6 +1872,69 @@ func hostFromURI(uri string) (string, error) {
 		return "", fmt.Errorf("missing host in %q", uri)
 	}
 	return u.Host, nil
+}
+
+// finalURLFetcher は redirect 後の最終 URL も返せる fetcher。本番 APFetcher が
+// 実装し、resolver が fetch 元 host と object id host の一致検証に使う (#1820)。
+// テストダブル (stubFetcher) は実装しなくてよく、その場合 resolver は最終 URL
+// 不明として host 検証を skip する (本番 APFetcher は必ず最終 URL を返すので
+// production では常に検証される)。
+type finalURLFetcher interface {
+	FetchObjectWithFinalURL(uri string) ([]byte, string, error)
+}
+
+// fetchObjectWithFinalURL fetches uri and returns (body, finalURL). finalURL は
+// fetcher が finalURLFetcher を実装する場合のみ非空。未実装 (テスト) では ""
+// を返し、呼び出し側の host 検証を skip させる。
+func (r *Resolver) fetchObjectWithFinalURL(uri string) ([]byte, string, error) {
+	if ff, ok := r.fetcher.(finalURLFetcher); ok {
+		return ff.FetchObjectWithFinalURL(uri)
+	}
+	body, err := r.fetcher.FetchObject(uri)
+	return body, "", err
+}
+
+// assertResponseHostMatches enforces upstream assertActivityMatchesUrl の hard
+// requirement: fetch した AP object の id host が、実際に body を返した最終 URL
+// の host と一致すること。これにより evil.example の AP サーバーが
+// `{"id":"https://victim.example/..."}` を返して別 host になりすます
+// object-spoofing を防ぐ。id 欠落 / https→http downgrade も拒否する (#1820)。
+// finalURL が空 (最終 URL 不明) の場合は検証を skip する。
+func assertResponseHostMatches(finalURL, objectID string) error {
+	if finalURL == "" {
+		return nil
+	}
+	if objectID == "" {
+		return ErrObjectHostMismatch
+	}
+	fu, ferr := url.Parse(finalURL)
+	iu, ierr := url.Parse(objectID)
+	if ferr != nil || ierr != nil || fu.Hostname() == "" || iu.Hostname() == "" {
+		return ErrObjectHostMismatch
+	}
+	// https で取得したのに id が http の場合は downgrade 拒否 (upstream と同じ)。
+	if fu.Scheme == "https" && iu.Scheme != "https" {
+		return ErrObjectHostMismatch
+	}
+	if normalizeMatchHost(fu) != normalizeMatchHost(iu) {
+		return ErrObjectHostMismatch
+	}
+	return nil
+}
+
+// normalizeMatchHost canonicalizes a URL host for object-host comparison,
+// mirroring upstream の URL.host (default port を除去) + normalizeSynonymousSubdomain
+// (先頭 www. を除去)。これが無いと `remote.example:443` vs `remote.example` や
+// `www.remote.example` vs `remote.example` を誤って弾く (#1820 review)。
+func normalizeMatchHost(u *url.URL) string {
+	host := strings.ToLower(u.Hostname())
+	host = strings.TrimPrefix(host, "www.")
+	port := u.Port()
+	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
+	if port != "" && !isDefaultPort {
+		return host + ":" + port
+	}
+	return host
 }
 
 // extractAttachments parses the AP `attachment` array (heterogeneous []any
