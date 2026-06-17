@@ -1500,13 +1500,22 @@ func coerceMetaArrayFields(fields map[string]any) {
 // metaJSONBColumns lists meta jsonb columns whose update-meta payload arrives as
 // a decoded []any / map[string]any and must be json.Marshal された []byte に
 // 変換しないと jsonb 列の UPDATE が型不一致で失敗する (#1732 deliverSuspendedSoftware)。
+// policies は object 形 jsonb で update-default-policies / update-meta の両経路から
+// 来る (#1823)。
 var metaJSONBColumns = map[string]struct{}{
 	"deliverSuspendedSoftware": {},
+	"policies":                 {},
+}
+
+// metaJSONBObjectColumns は metaJSONBColumns のうち object ({}) 形のもの。nil の
+// とき array 形は `[]`、object 形は `{}` を default にするための区別 (#1823)。
+var metaJSONBObjectColumns = map[string]struct{}{
+	"policies": {},
 }
 
 // coerceMetaJSONBFields marshals decoded JSON values for known jsonb meta
 // columns into datatypes.JSON ([]byte) so GORM/pgx can write them. nil は
-// 空配列扱い、既に []byte/string のものはそのまま流す。
+// 空 default (array→`[]` / object→`{}`)、既に []byte/string のものはそのまま流す。
 func coerceMetaJSONBFields(fields map[string]any) {
 	for k, v := range fields {
 		if _, ok := metaJSONBColumns[k]; !ok {
@@ -1514,7 +1523,11 @@ func coerceMetaJSONBFields(fields map[string]any) {
 		}
 		switch v.(type) {
 		case nil:
-			fields[k] = datatypes.JSON([]byte("[]"))
+			if _, isObj := metaJSONBObjectColumns[k]; isObj {
+				fields[k] = datatypes.JSON([]byte("{}"))
+			} else {
+				fields[k] = datatypes.JSON([]byte("[]"))
+			}
 		case []byte, string, datatypes.JSON:
 			// 既に raw JSON。そのまま流す。
 		default:
@@ -2195,8 +2208,13 @@ func (h *Handler) RolesUpdateDefaultPolicies(c echo.Context) error {
 	// moderationLogService.log('updateServerSettings', {before, after}) を記録する
 	// (#1542)。before snapshot を Update 前に取得する。
 	beforeMeta, _ := h.metaRepo.Fetch()
-	// Meta の policies フィールドを更新
-	if err := h.metaRepo.Update(map[string]any{"policies": req.Policies}); err != nil {
+	// Meta の policies フィールドを更新。policies は jsonb 列なので decoded map を
+	// そのまま渡すと UPDATE が型不一致で失敗する (#1823)。coerceMetaJSONBFields で
+	// datatypes.JSON ([]byte) に変換してから渡す (RolesCreate/Update の Marshal と
+	// 同じ動機、UpdateMeta 経路と共通化)。
+	policyFields := map[string]any{"policies": req.Policies}
+	coerceMetaJSONBFields(policyFields)
+	if err := h.metaRepo.Update(policyFields); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	// moderation log (before/after policies)。TS は policies のみを記録する。

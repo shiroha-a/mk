@@ -9,6 +9,8 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // TestMetaArrayColumns_CoversAllStringArrayFields は metaArrayColumns set が
@@ -73,4 +75,40 @@ func diffSorted(a, b map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// #1823: coerceMetaJSONBFields は policies (object 形 jsonb) を decoded map から
+// datatypes.JSON ([]byte) に変換し、jsonb 列の UPDATE 型不一致 500 を防ぐ。
+func TestCoerceMetaJSONBFields_Policies(t *testing.T) {
+	t.Run("decoded map is marshaled to datatypes.JSON", func(t *testing.T) {
+		fields := map[string]any{"policies": map[string]any{"driveCapacityMb": float64(500)}}
+		coerceMetaJSONBFields(fields)
+		got, ok := fields["policies"].(datatypes.JSON)
+		if !assert.True(t, ok, "policies must be coerced to datatypes.JSON, got %T", fields["policies"]) {
+			return
+		}
+		assert.JSONEq(t, `{"driveCapacityMb":500}`, string(got))
+	})
+
+	t.Run("nil policies defaults to empty object not array", func(t *testing.T) {
+		fields := map[string]any{"policies": nil}
+		coerceMetaJSONBFields(fields)
+		got, ok := fields["policies"].(datatypes.JSON)
+		require.True(t, ok)
+		assert.Equal(t, "{}", string(got), "object 形 jsonb の nil default は {} (array の [] ではない)")
+	})
+
+	t.Run("array column nil still defaults to empty array", func(t *testing.T) {
+		fields := map[string]any{"deliverSuspendedSoftware": nil}
+		coerceMetaJSONBFields(fields)
+		got, ok := fields["deliverSuspendedSoftware"].(datatypes.JSON)
+		require.True(t, ok)
+		assert.Equal(t, "[]", string(got))
+	})
+
+	t.Run("already-raw JSON passes through", func(t *testing.T) {
+		fields := map[string]any{"policies": datatypes.JSON([]byte(`{"x":1}`))}
+		coerceMetaJSONBFields(fields)
+		assert.Equal(t, datatypes.JSON([]byte(`{"x":1}`)), fields["policies"])
+	})
 }
