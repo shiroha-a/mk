@@ -1125,13 +1125,61 @@ func TestUpdateRemoteNote_HappyPath(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody))
+	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Text)
 	assert.Equal(t, "edited content", *got.Text)
 	require.NotNil(t, got.CW)
 	assert.Equal(t, "edited cw", *got.CW)
+}
+
+// #1819: Update の actor が note 著者と一致しない場合、本文を改ざんさせない
+// (別 remote 著者の note URI を狙った Update(Note) を拒否、Question 経路と対称)。
+func TestUpdateRemoteNote_ActorMismatchRejected(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	host := "remote.example"
+	authorURI := "https://remote.example/users/alice"
+	original := "original"
+	repo.Users["alice-id"] = &model.User{ID: "alice-id", URI: &authorURI, Host: &host}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host, Text: &original,
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+	// 別 actor (mallory) が alice の note を Update しようとする → 拒否 (本文不変)。
+	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "https://evil.example/users/mallory")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.Text)
+	assert.Equal(t, "original", *got.Text, "actor 不一致の Update は本文を改ざんしない")
+}
+
+// #1819: actor が note 著者と一致すれば従来どおり更新される。
+func TestUpdateRemoteNote_ActorMatchProceeds(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	host := "remote.example"
+	authorURI := "https://remote.example/users/alice"
+	original := "original"
+	repo.Users["alice-id"] = &model.User{ID: "alice-id", URI: &authorURI, Host: &host}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host, Text: &original,
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), authorURI)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.Text)
+	assert.Equal(t, "edited content", *got.Text, "actor 一致の Update は反映される")
 }
 
 // #679: UpdateRemoteNote が note.tags を再計算する。tag 配列が変わった場合に
@@ -1158,7 +1206,7 @@ func TestUpdateRemoteNote_RecalculatesHashtags(t *testing.T) {
 			{"type": "Hashtag", "name": "#federation"}
 		]
 	}`
-	got, err := r.UpdateRemoteNote([]byte(body))
+	got, err := r.UpdateRemoteNote([]byte(body), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.ElementsMatch(t, []string{"federation", "news"}, []string(got.Tags), "古い tags は捨て、tag 配列 + 本文 fallback で再構築")
@@ -1186,7 +1234,7 @@ func TestUpdateRemoteNote_ClearsTagsToEmptyNotNull(t *testing.T) {
 		"attributedTo": "https://remote.example/users/alice",
 		"content": "edited, no more hashtags"
 	}`
-	got, err := r.UpdateRemoteNote([]byte(body))
+	got, err := r.UpdateRemoteNote([]byte(body), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Tags, "tags は非nilの空配列でなければ SQL NULL で NOT NULL 違反 (#1372)")
@@ -1198,7 +1246,7 @@ func TestUpdateRemoteNote_NoNoteRepo(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, nil, urls, &stubFetcher{}, idGen)
-	_, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody))
+	_, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "")
 	assert.ErrorIs(t, err, federation.ErrInvalidNote)
 }
 
@@ -1208,7 +1256,7 @@ func TestUpdateRemoteNote_BadJSON(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
-	_, err := r.UpdateRemoteNote([]byte(`{not json`))
+	_, err := r.UpdateRemoteNote([]byte(`{not json`), "")
 	assert.ErrorIs(t, err, federation.ErrInvalidNote)
 }
 
@@ -1218,7 +1266,7 @@ func TestUpdateRemoteNote_MissingID(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
-	_, err := r.UpdateRemoteNote([]byte(`{"type":"Note"}`))
+	_, err := r.UpdateRemoteNote([]byte(`{"type":"Note"}`), "")
 	assert.ErrorIs(t, err, federation.ErrInvalidNote)
 }
 
@@ -1228,7 +1276,7 @@ func TestUpdateRemoteNote_NotFound(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
-	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody))
+	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -1246,7 +1294,7 @@ func TestUpdateRemoteNote_LocalNoteSkipped(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody))
+	got, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	// Text は変わらない
@@ -1272,7 +1320,7 @@ func TestUpdateRemoteNote_EmptyContentNoOp(t *testing.T) {
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice"
 	}`)
-	got, err := r.UpdateRemoteNote(body)
+	got, err := r.UpdateRemoteNote(body, "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.NotNil(t, got.Text)
@@ -1298,7 +1346,7 @@ func TestUpdateRemoteNote_SensitiveWithoutSummary(t *testing.T) {
 		"content": "nsfw",
 		"sensitive": true
 	}`)
-	got, err := r.UpdateRemoteNote(body)
+	got, err := r.UpdateRemoteNote(body, "")
 	require.NoError(t, err)
 	require.NotNil(t, got.CW)
 	assert.Equal(t, "", *got.CW)
@@ -1325,7 +1373,7 @@ func TestUpdateRemoteNote_UpdateFieldsError(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
-	_, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody))
+	_, err := r.UpdateRemoteNote([]byte(remoteNoteUpdateBody), "")
 	assert.Error(t, err)
 }
 
@@ -1986,7 +2034,7 @@ func TestUpdateRemoteNote_HashtagHookFiresOnTagsChange(t *testing.T) {
 		"attributedTo": "https://remote.example/users/alice",
 		"content": "edited and now tagged #news"
 	}`
-	_, err := r.UpdateRemoteNote([]byte(body))
+	_, err := r.UpdateRemoteNote([]byte(body), "")
 	require.NoError(t, err)
 	require.Len(t, hook.calls, 1)
 	assert.Equal(t, "hh3", hook.calls[0].noteID)
@@ -2016,7 +2064,7 @@ func TestUpdateRemoteNote_HashtagHookSkipsWhenTagsUnchanged(t *testing.T) {
 		"attributedTo": "https://remote.example/users/alice",
 		"content": "edit body but tag unchanged #news"
 	}`
-	_, err := r.UpdateRemoteNote([]byte(body))
+	_, err := r.UpdateRemoteNote([]byte(body), "")
 	require.NoError(t, err)
 	assert.Empty(t, hook.calls, "tags が変化しなければ hook は呼ばれない")
 }
@@ -3011,7 +3059,7 @@ func TestUpdateRemoteNote_EmojiTagExtraction(t *testing.T) {
 			}
 		]
 	}`)
-	got, err := r.UpdateRemoteNote(updateBody)
+	got, err := r.UpdateRemoteNote(updateBody, "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -3065,7 +3113,7 @@ func TestUpdateRemoteNote_EmojiTagExtraction_ExistingEmoji(t *testing.T) {
 			}
 		]
 	}`)
-	got, err := r.UpdateRemoteNote(updateBody)
+	got, err := r.UpdateRemoteNote(updateBody, "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Len(t, got.Emojis, 1)
@@ -3792,7 +3840,7 @@ func TestUpdateRemoteNote_MentionsRecomputed(t *testing.T) {
 			{"type": "Mention", "href": "https://example.com/users/alice", "name": "@alice"}
 		]
 	}`)
-	got, err := r.UpdateRemoteNote(body)
+	got, err := r.UpdateRemoteNote(body, "")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []string{"alice"}, []string(got.Mentions))

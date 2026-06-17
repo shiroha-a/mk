@@ -1306,8 +1306,10 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 // 動作:
 //   - URI でノートを引いて見つからなければ何もせず nil
 //   - 見つかったが著者がローカルなら何もしない (ローカルノートは変更不可)
-//   - 著者がリモートなら text/cw/sensitive/mentions を更新
-func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
+//   - Update activity の actor (actorURI) が note 著者と一致しなければ無視
+//     (別 remote 著者の note URI を狙った改ざんを拒否、UpdateRemoteQuestion と対称、#1819)
+//   - 著者がリモートで actor が一致すれば text/cw/sensitive/mentions を更新
+func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -1327,6 +1329,15 @@ func (r *Resolver) UpdateRemoteNote(body []byte) (*model.Note, error) {
 	if existing.UserHost == nil {
 		// ローカルノートに対する Update は無視 (Misskey は編集機能を持たない)。
 		return existing, nil
+	}
+	// attribution: Update の actor は note 著者と一致必須。別 remote 著者の note URI を
+	// 指定した改ざん (text/cw/sensitive/mentions 上書き) を拒否する。inbox 層の
+	// authorizeActor は signer==activity.actor と activity.id host の整合しか保証
+	// しないため、ここで対象 note の著者まで照合する (#1819、UpdateRemoteQuestion と対称)。
+	if actorURI != "" && r.userRepo != nil {
+		if author, aerr := r.userRepo.FindByID(existing.UserID); aerr == nil && author != nil && author.URI != nil && *author.URI != actorURI {
+			return existing, nil
+		}
 	}
 	fields := map[string]any{}
 	// IngestNoteと同じ3段フォールバックでtext抽出

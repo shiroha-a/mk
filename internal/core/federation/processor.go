@@ -1575,7 +1575,8 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		return nil
 	}
 	if strings.EqualFold(objectType, "note") {
-		_, err := p.resolver.UpdateRemoteNote(act.Object)
+		// act.Actor を渡して note 著者との一致を検証させる (#1819、Question 経路と対称)。
+		_, err := p.resolver.UpdateRemoteNote(act.Object, act.Actor)
 		// ErrInvalidNote は受信側の不備として skip 扱い (200 を返す)。
 		if errors.Is(err, ErrInvalidNote) {
 			return nil
