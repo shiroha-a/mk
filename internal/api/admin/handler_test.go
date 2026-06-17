@@ -1657,6 +1657,32 @@ func TestRolesUsers_Success_ReturnsAssignmentEnvelope(t *testing.T) {
 	assert.Nil(t, resp[0]["expiresAt"])
 }
 
+// #1822: admin/roles/users は UserDetailed で pack し、email など includeSecrets
+// 限定 field を read:admin:roles scope に漏らさない。
+func TestRolesUsers_DoesNotLeakSecrets(t *testing.T) {
+	h, userRepo, roleRepo, assignRepo := rolesUsersFixture(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	require.NoError(t, userRepo.Create(&model.User{ID: "u1", Username: "alice"}))
+	email := "alice@example.com"
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Email: &email, EmailVerified: true}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "9c2bw9q5fa0000000000000099", UserID: "u1", RoleID: "r1"}))
+
+	rec := doPost(h.RolesUsers, `{"roleId":"r1","limit":10}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	user, _ := resp[0]["user"].(map[string]any)
+	require.NotNil(t, user)
+	assert.Equal(t, "u1", user["id"])
+	_, hasEmail := user["email"]
+	assert.False(t, hasEmail, "email を read:admin:roles に漏らさない")
+	_, hasEmailVerified := user["emailVerified"]
+	assert.False(t, hasEmailVerified, "emailVerified を漏らさない")
+	_, hasSecurityKeysList := user["securityKeysList"]
+	assert.False(t, hasSecurityKeysList, "securityKeysList を漏らさない")
+}
+
 // upstream users.ts:101 は expiresAt: assign.expiresAt?.toISOString() を含める (#1542)。
 func TestRolesUsers_IncludesExpiresAt(t *testing.T) {
 	h, userRepo, roleRepo, assignRepo := rolesUsersFixture(t)

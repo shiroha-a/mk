@@ -2172,7 +2172,11 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 		result = append(result, map[string]any{
 			"id":        a.ID,
 			"createdAt": createdAt,
-			"user":      h.packAdminUser(a.User, profileByUser[a.User.ID]),
+			// upstream users.ts:95 は packMany(users, me, {schema:'UserDetailed'})。
+			// packAdminUser を使うと email / signins / roleAssigns 等の admin 専用
+			// field が read:admin:roles scope に漏れる (show-user の admin guard 迂回)。
+			// ShowUsers と同様 UserDetailed に揃えて過剰露出を防ぐ (#1822)。
+			"user":      entity.PackUserDetailed(a.User, profileByUser[a.User.ID], h.idGen),
 			"expiresAt": expiresAt,
 		})
 	}
