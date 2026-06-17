@@ -857,10 +857,21 @@ func (h *Handler) Me(c echo.Context) error {
 	// 同一 roleService なので値は一致)。
 	resp["isSilenced"] = h.isSilenced(u.ID)
 
+	// isSecure: native login token (cookie / i param) のときだけ true。OAuth /
+	// MiAuth の app access token では false (RequireSecure と同一判定)。upstream
+	// i.ts の `isSecure = token == null` 相当で、email / emailVerified /
+	// securityKeysList を includeSecrets ブロックとして gate する (#1824)。これが
+	// 無いと read:account scope の app token だけで email・WebAuthn キー一覧が読めた。
+	isSecure := u.Token != nil && *u.Token == middleware.GetToken(c)
+
 	// Private fields from profile (MeDetailed scope 外)
 	if profile != nil {
-		resp["email"] = profile.Email
-		resp["emailVerified"] = profile.EmailVerified
+		if isSecure {
+			// email / emailVerified は includeSecrets 限定 (upstream
+			// UserEntityService.ts:624-626)。app token には出さない。
+			resp["email"] = profile.Email
+			resp["emailVerified"] = profile.EmailVerified
+		}
 		resp["twoFactorEnabled"] = profile.TwoFactorEnabled
 		resp["usePasswordLessLogin"] = profile.UsePasswordLessLogin
 		// mutedWords / mutedInstances は PackMeDetailed (AsMeDetailed) が profile
@@ -918,23 +929,27 @@ func (h *Handler) Me(c echo.Context) error {
 	h.fillPinnedFields(c.Request().Context(), u, profile, resp)
 	resp["policies"] = userPolicies
 	resp["roles"] = userRoles
-	// securityKeysList: WebAuthnキーの一覧
-	if h.securityKeyRepo != nil {
-		if keys, err := h.securityKeyRepo.ListByUser(u.ID); err == nil && len(keys) > 0 {
-			list := make([]map[string]any, len(keys))
-			for i, k := range keys {
-				list[i] = map[string]any{
-					"id":       k.ID,
-					"name":     k.Name,
-					"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
+	// securityKeysList: WebAuthnキーの一覧。includeSecrets 限定 (upstream
+	// UserEntityService.ts:627-639) なので native session のときだけ出す。app token
+	// では key 自体を省く (#1824、misskey-js golden で optional)。
+	if isSecure {
+		if h.securityKeyRepo != nil {
+			if keys, err := h.securityKeyRepo.ListByUser(u.ID); err == nil && len(keys) > 0 {
+				list := make([]map[string]any, len(keys))
+				for i, k := range keys {
+					list[i] = map[string]any{
+						"id":       k.ID,
+						"name":     k.Name,
+						"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
+					}
 				}
+				resp["securityKeysList"] = list
+			} else {
+				resp["securityKeysList"] = []any{}
 			}
-			resp["securityKeysList"] = list
 		} else {
 			resp["securityKeysList"] = []any{}
 		}
-	} else {
-		resp["securityKeysList"] = []any{}
 	}
 	// MeDetailed の notification-related 3 field (#985) は PackMeDetailed 経由で
 	// base 展開済 (#971 で集約)。ここで追加 override は不要。

@@ -148,6 +148,11 @@ func TestMe_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.Set(string(middleware.UserContextKey), user)
+	// native session token を配線して isSecure=true にする (#1824)。これが無いと
+	// email / securityKeysList は app token 扱いで省かれる。
+	nativeTok := "native-session-token"
+	user.Token = &nativeTok
+	c.Set(string(middleware.TokenContextKey), nativeTok)
 
 	err := h.Me(c)
 	require.NoError(t, err)
@@ -199,6 +204,48 @@ func TestMe_Success(t *testing.T) {
 	assert.Equal(t, false, resp["securityKeys"])
 	assert.Nil(t, resp["movedTo"])
 	assert.Nil(t, resp["alsoKnownAs"])
+}
+
+// #1824: OAuth/MiAuth の app access token (request token != user.Token) で /api/i を
+// 呼んだとき、email / emailVerified / securityKeysList を返さない (includeSecrets
+// 限定)。twoFactorEnabled 等の MeDetailed field は引き続き出す。
+func TestMe_AppTokenOmitsSecrets(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{
+		ID: "user1", Username: "testuser", Token: &nativeTok,
+		AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual",
+	}
+	require.NoError(t, userRepo.Create(user))
+	email := "secret@example.com"
+	userRepo.Profiles["user1"] = &model.UserProfile{
+		UserID: "user1", Email: &email, EmailVerified: true,
+		TwoFactorEnabled: true, Fields: datatypes.JSON([]byte("[]")),
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	// app access token: request token は user.Token (native) と一致しない。
+	c.Set(string(middleware.TokenContextKey), "app-access-token-xyz")
+
+	require.NoError(t, h.Me(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// secrets は省かれる。
+	_, hasEmail := resp["email"]
+	assert.False(t, hasEmail, "app token に email を漏らさない")
+	_, hasEmailVerified := resp["emailVerified"]
+	assert.False(t, hasEmailVerified, "app token に emailVerified を漏らさない")
+	_, hasSecurityKeysList := resp["securityKeysList"]
+	assert.False(t, hasSecurityKeysList, "app token に securityKeysList を漏らさない")
+	// MeDetailed の非 secret field は引き続き出る。
+	assert.Equal(t, "user1", resp["id"])
+	assert.Equal(t, true, resp["twoFactorEnabled"])
 }
 
 // TestMe_CanChatFromRolePolicy: #988 — Me handler が canChat を role policy
@@ -479,6 +526,10 @@ func TestMe_AvatarAndBannerIDs(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.Set(string(middleware.UserContextKey), user)
+	// native session token を配線して isSecure=true にする (#1824)。
+	nativeTok := "native-session-token"
+	user.Token = &nativeTok
+	c.Set(string(middleware.TokenContextKey), nativeTok)
 
 	err := h.Me(c)
 	require.NoError(t, err)
