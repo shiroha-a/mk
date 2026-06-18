@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/queue"
 )
 
@@ -52,11 +53,13 @@ func (h *Handler) AccountsFindByEmail(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
 	}
-	// 他の admin エンドポイント (ShowUser 等) と同じ packAdminUser を通して
-	// Misskey 本家互換のレスポンス整形をする。生 model.User を返すと
-	// inbox / sharedInbox / usernameLower 等の内部フィールドが漏れ、
-	// createdAt / roles / policies 等のフロントが期待するフィールドが欠落する。
-	return c.JSON(http.StatusOK, h.packAdminUser(user, profile))
+	// upstream admin/accounts/find-by-email.ts は pack(user, null,
+	// {schema:'UserDetailedNotMe'}) (includeSecrets 無し) を返すため email /
+	// emailVerified / securityKeysList は含めない。packAdminUser を使うとこれら
+	// includeSecrets 限定 field が漏れる (#1847、#1822 と同 class)。UserDetailed に
+	// 揃えて過剰露出を防ぐ (ShowUsers と同方針)。生 model.User の内部 field
+	// (inbox/sharedInbox/usernameLower) も UserDetailed では出ない。
+	return c.JSON(http.StatusOK, entity.PackUserDetailed(user, profile, h.idGen))
 }
 
 // DeleteAccount handles POST /api/admin/delete-account. AccountsDelete と

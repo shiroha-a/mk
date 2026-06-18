@@ -241,9 +241,11 @@ func TestAccountsFindByEmail_Found(t *testing.T) {
 }
 
 // TestAccountsFindByEmail_ResponseShape verifies that AccountsFindByEmail
-// returns the packAdminUser format: frontend-expected fields (createdAt,
-// roles, policies) must be present, and internal model fields (inbox,
-// sharedInbox, usernameLower) must NOT leak.
+// returns the UserDetailedNotMe shape (#1847): frontend-expected fields
+// (createdAt, roles) present; internal model fields (inbox, sharedInbox,
+// usernameLower) NOT leaked; and includeSecrets-only fields (email,
+// emailVerified, securityKeysList) NOT leaked. policies is a MeDetailed-only
+// field absent from UserDetailedNotMe (matches upstream).
 func TestAccountsFindByEmail_ResponseShape(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 
@@ -278,11 +280,21 @@ func TestAccountsFindByEmail_ResponseShape(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	// packAdminUser が付与する frontend 必須フィールドの存在確認
+	// UserDetailed が付与する frontend 必須フィールドの存在確認
 	assert.Equal(t, uid, resp["id"])
 	assert.NotNil(t, resp["createdAt"], "createdAt must be present")
 	assert.NotNil(t, resp["roles"], "roles must be present")
-	assert.NotNil(t, resp["policies"], "policies must be present")
+	// policies は MeDetailed 限定 field で UserDetailedNotMe には無い (upstream 一致)。
+	_, hasPolicies := resp["policies"]
+	assert.False(t, hasPolicies, "policies must NOT be present (UserDetailedNotMe shape)")
+
+	// includeSecrets 限定 field が漏れていないこと (#1847)。
+	_, hasEmail := resp["email"]
+	assert.False(t, hasEmail, "email must not be exposed (#1847)")
+	_, hasEmailVerified := resp["emailVerified"]
+	assert.False(t, hasEmailVerified, "emailVerified must not be exposed (#1847)")
+	_, hasSecurityKeysList := resp["securityKeysList"]
+	assert.False(t, hasSecurityKeysList, "securityKeysList must not be exposed (#1847)")
 
 	// 内部フィールドが response に漏れていないことを確認
 	_, hasInbox := resp["inbox"]
