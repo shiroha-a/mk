@@ -23,6 +23,7 @@ func newRenderer() *Renderer {
 func TestURLBuilder_Helpers(t *testing.T) {
 	b := NewURLBuilder("https://example.com")
 	assert.Equal(t, "https://example.com/users/u1", b.UserURI("u1"))
+	assert.Equal(t, "https://example.com/@alice", b.UserProfileURL("alice"))
 	assert.Equal(t, "https://example.com/users/u1/inbox", b.UserInbox("u1"))
 	assert.Equal(t, "https://example.com/users/u1/outbox", b.UserOutbox("u1"))
 	assert.Equal(t, "https://example.com/users/u1/followers", b.UserFollowers("u1"))
@@ -154,6 +155,9 @@ func TestRenderer_RenderPerson(t *testing.T) {
 	}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Equal(t, "https://example.com/users/u1", p.ID)
+	// url は id と区別し、人間向け profile ハンドル /@<username> を指す (#1869)。
+	assert.Equal(t, "https://example.com/@alice", p.URL)
+	assert.NotEqual(t, p.ID, p.URL, "actor url must differ from id")
 	assert.Equal(t, "Person", p.Type)
 	assert.Equal(t, "alice", p.PreferredUsername)
 	assert.Equal(t, "Alice", p.Name)
