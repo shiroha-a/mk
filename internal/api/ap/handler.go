@@ -934,7 +934,7 @@ func (h *Handler) Outbox(c echo.Context) error {
 func (h *Handler) packOutboxActivity(author *model.User, n *model.Note) any {
 	if corenote.IsPureRenote(n) && n.RenoteID != nil && *n.RenoteID != "" {
 		if targetURI := h.renoteTargetURI(*n.RenoteID); targetURI != "" {
-			ann := h.renderer.RenderAnnounce(author, n.ID, targetURI)
+			ann := h.renderer.RenderAnnounce(author, n.ID, targetURI, n.Visibility)
 			ann.Context = nil
 			return ann
 		}

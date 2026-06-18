@@ -1091,9 +1091,25 @@ func (r *Renderer) RenderUndoLike(reactor *model.User, like *Like) *Undo {
 	return u
 }
 
-// RenderAnnounce returns an Announce activity for a pure renote.
-// targetURI は元ノートの URI (リモート / ローカル)。renoteID は renote 自身の ID。
-func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID string, targetURI string) *Announce {
+// RenderAnnounce builds an Announce (boost) activity for a pure renote.
+// targetURI は元ノートの URI (リモート / ローカル)、renoteID は renote 自身の ID。
+// to/cc は renote 自身の visibility 由来で決める (upstream renderAnnounce、#1882):
+//   - public:    to=[Public],    cc=[followers]
+//   - home:      to=[followers], cc=[Public]
+//   - followers: to=[followers], cc=[]
+//
+// それ以外 (specified 等) は public 扱いにフォールバックする。なお specified な
+// pure renote を federate しない upstream の throw 相当の suppression は別スコープ
+// (#1886 参照)。
+func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID, targetURI string, visibility model.NoteVisibility) *Announce {
+	followers := r.urls.UserFollowers(renoter.ID)
+	to, cc := []string{Public}, []string{followers}
+	switch visibility {
+	case model.NoteVisibilityHome:
+		to, cc = []string{followers}, []string{Public}
+	case model.NoteVisibilityFollowers:
+		to, cc = []string{followers}, nil
+	}
 	a := &Announce{
 		Activity: Activity{
 			Object: Object{
@@ -1101,8 +1117,8 @@ func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID string, targetUR
 				Type: "Announce",
 			},
 			Actor: r.urls.UserURI(renoter.ID),
-			To:    []string{Public},
-			CC:    []string{r.urls.UserFollowers(renoter.ID)},
+			To:    to,
+			CC:    cc,
 		},
 		Object: targetURI,
 	}

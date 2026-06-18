@@ -1211,6 +1211,7 @@ func TestIsPureRenote_ModelNote(t *testing.T) {
 		{"with cw", &model.Note{RenoteID: &renoteID, CW: &cw}, false},
 		{"with files", &model.Note{RenoteID: &renoteID, FileIDs: []string{"f"}}, false},
 		{"with poll", &model.Note{RenoteID: &renoteID, HasPoll: true}, false},
+		{"with reply (quote)", &model.Note{RenoteID: &renoteID, ReplyID: &renoteID}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1049,6 +1049,11 @@ func IsPureRenote(n *model.Note) bool {
 	if n.HasPoll {
 		return false
 	}
+	// renote + reply は quote 扱い (upstream isQuote は replyId != null も quote)
+	// なので pure renote ではない。Announce ではなく Create で配信される (#1882)。
+	if n.ReplyID != nil && *n.ReplyID != "" {
+		return false
+	}
 	return true
 }
 

@@ -671,7 +671,7 @@ func TestRenderer_RenderUndoLike(t *testing.T) {
 func TestRenderer_RenderAnnounce(t *testing.T) {
 	r := newRenderer()
 	renoter := &model.User{ID: "alice"}
-	a := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig")
+	a := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic)
 	assert.Equal(t, "Announce", a.Type)
 	assert.Equal(t, "https://example.com/users/alice", a.Actor)
 	assert.Equal(t, "https://remote.example/notes/orig", a.Object)
@@ -680,10 +680,25 @@ func TestRenderer_RenderAnnounce(t *testing.T) {
 	assert.Contains(t, a.CC, "https://example.com/users/alice/followers")
 }
 
+// renote 自身の visibility で to/cc を入れ替える (#1882、upstream renderAnnounce)。
+func TestRenderer_RenderAnnounce_Visibility(t *testing.T) {
+	r := newRenderer()
+	renoter := &model.User{ID: "alice"}
+	followers := "https://example.com/users/alice/followers"
+
+	home := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityHome)
+	assert.Equal(t, []string{followers}, home.To, "home: to=[followers]")
+	assert.Equal(t, []string{Public}, home.CC, "home: cc=[Public]")
+
+	fol := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityFollowers)
+	assert.Equal(t, []string{followers}, fol.To, "followers: to=[followers]")
+	assert.Empty(t, fol.CC, "followers: cc empty")
+}
+
 func TestRenderer_RenderUndoAnnounce(t *testing.T) {
 	r := newRenderer()
 	renoter := &model.User{ID: "alice"}
-	announce := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig")
+	announce := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic)
 	u := r.RenderUndoAnnounce(renoter, announce)
 	assert.Equal(t, "Undo", u.Type)
 	assert.Equal(t, "https://example.com/users/alice", u.Actor)

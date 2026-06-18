@@ -214,7 +214,7 @@ func (h *NoteDeliveryHook) deliverAnnounce(note *model.Note, author *model.User)
 	if target.URI != nil && *target.URI != "" {
 		targetURI = *target.URI
 	}
-	announce := h.renderer.RenderAnnounce(author, note.ID, targetURI)
+	announce := h.renderer.RenderAnnounce(author, note.ID, targetURI, note.Visibility)
 	body, _ := json.Marshal(announce)
 	if err := h.deliver.DeliverToFollowers(author.ID, body); err != nil {
 		slog.Warn("note delivery: announce failed",
