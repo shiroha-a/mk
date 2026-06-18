@@ -666,6 +666,44 @@ func TestCreateService_CannotRenoteSpecifiedNote(t *testing.T) {
 	require.ErrorIs(t, err, note.ErrCannotRenoteInvisibleNote, "specified note は自分のものでも renote 不可")
 }
 
+// #1849: renote 対象の可視性に応じて renote 自身の可視性 / localOnly を調整する
+// (upstream NoteCreateService の switch + localOnly 伝播)。
+func TestCreateService_RenoteVisibilityAdjustment(t *testing.T) {
+	t.Run("home target downgrades public renote to home", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["h"] = &model.Note{ID: "h", UserID: "other", Visibility: model.NoteVisibilityHome}
+		rid := "h"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, RenoteID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "home note の public renote は home に降格")
+	})
+	t.Run("own followers target forces renote to followers", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["f"] = &model.Note{ID: "f", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+		rid := "f"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, RenoteID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "自分の followers note の renote は followers に強制")
+	})
+	t.Run("localOnly target propagates to renote", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "other", Visibility: model.NoteVisibilityPublic, LocalOnly: true}
+		rid := "lo"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, RenoteID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.True(t, created.LocalOnly, "local-only note の renote は local-only に伝播")
+	})
+	t.Run("public target keeps public renote (no adjustment)", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["p"] = &model.Note{ID: "p", UserID: "other", Visibility: model.NoteVisibilityPublic}
+		rid := "p"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, RenoteID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityPublic, created.Visibility)
+		assert.False(t, created.LocalOnly)
+	})
+}
+
 func TestCreateService_ReplyHappyPath(t *testing.T) {
 	svc, noteRepo, _ := newCreateService(t)
 	noteRepo.Notes["target"] = &model.Note{

@@ -380,6 +380,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	if visibility == "" {
 		visibility = model.NoteVisibilityPublic
 	}
+	// localOnly は renote 対象が local-only のとき伝播させる (#1849)。reply 対象の
+	// 伝播 / reply visibility 降格 / channel note の強制は #1855 で別途。
+	localOnly := in.LocalOnly
 
 	// canPublicNote=false の user が channel 外の public note を投げた場合、
 	// upstream Misskey TS の NoteCreateService と同様に visibility を home
@@ -525,6 +528,25 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		if t.Visibility == model.NoteVisibilitySpecified {
 			return nil, ErrCannotRenoteInvisibleNote
 		}
+		// 拒否を通過した renote 対象の可視性に応じて renote 自身の可視性を調整する
+		// (upstream NoteCreateService の switch、#1849)。silencing/sensitive 降格の
+		// 後に走らせるのは upstream と同順。
+		switch t.Visibility {
+		case model.NoteVisibilityHome:
+			// home 対象を public で renote したら home に降格 (home 以下のみ可)。
+			if visibility == model.NoteVisibilityPublic {
+				visibility = model.NoteVisibilityHome
+			}
+		case model.NoteVisibilityFollowers:
+			// ここに来るのは自分の followers note のみ (他人は上で reject)。
+			// upstream は renote 自身も followers に強制する。
+			visibility = model.NoteVisibilityFollowers
+		}
+		// local-only な対象を renote したら local-only にする (channel 外のみ、
+		// upstream `data.renote.localOnly && data.channel == null`)。
+		if t.LocalOnly && in.ChannelID == nil {
+			localOnly = true
+		}
 		// pure renoteを更にrenoteするのは禁止 (TS: isRenote && !isQuote)
 		if IsPureRenote(t) {
 			return nil, ErrCannotRenoteToAPureRenote
@@ -569,7 +591,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		Text:               in.Text,
 		CW:                 in.CW,
 		Visibility:         visibility,
-		LocalOnly:          in.LocalOnly,
+		LocalOnly:          localOnly,
 		ReactionAcceptance: in.ReactionAcceptance,
 		ReplyID:            in.ReplyID,
 		RenoteID:           in.RenoteID,
