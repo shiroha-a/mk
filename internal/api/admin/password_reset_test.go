@@ -119,16 +119,17 @@ func TestResetPasswordAdmin_NoLogWhenServiceUnwired(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestResetPasswordAdmin_NoLogWhenTargetMissing(t *testing.T) {
-	// targetUserId が DB に存在しないケース。logUserAction の FindByID が
-	// 失敗して log は書かれない。レアケースだが logUserAction の
-	// lookup-failure branch を guard する。
+func TestResetPasswordAdmin_TargetMissing(t *testing.T) {
+	// 存在しない userId への reset-password は upstream の 'user not found' に倣い
+	// NO_SUCH_USER を返し、password を再設定せず moderation log も残さない (#1862)。
 	h, _, _, _ := newTestHandler(t)
 	// u1 を userRepo に登録しない → FindByID は error 返す
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.ResetPassword, `{"userId":"u1"}`, adminUser)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.NotContains(t, rec.Body.String(), "password")
 
 	require.Never(t, func() bool {
 		return len(repo.Snapshot()) > 0
