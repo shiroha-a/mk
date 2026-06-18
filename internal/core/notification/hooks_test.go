@@ -618,6 +618,7 @@ func TestIsQuote_Variants(t *testing.T) {
 		{"with cw", &model.Note{RenoteID: &target, CW: ptrString("warn")}, true},
 		{"with file", &model.Note{RenoteID: &target, FileIDs: pq.StringArray{"f1"}}, true},
 		{"with poll", &model.Note{RenoteID: &target, HasPoll: true}, true},
+		{"with reply", &model.Note{RenoteID: &target, ReplyID: ptrString("r1")}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

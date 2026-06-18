@@ -45,6 +45,10 @@ func TestIsPureRenote(t *testing.T) {
 	assert.False(t, isPureRenote(makeNote("2")))
 	assert.False(t, isPureRenote(makeNote("3", withRenote, withText)))
 	assert.False(t, isPureRenote(makeNote("4", withRenote, withFiles)))
+	// quote 判定は cw / poll / reply も含む (#1886、upstream isPureRenote = !isQuote)。
+	assert.False(t, isPureRenote(makeNote("5", withRenote, func(n *model.Note) { n.CW = strPtr("cw") })))
+	assert.False(t, isPureRenote(makeNote("6", withRenote, func(n *model.Note) { n.HasPoll = true })))
+	assert.False(t, isPureRenote(makeNote("7", withRenote, withReply)), "renote + reply = quote")
 }
 
 func withReplyUser(uid string) func(*model.Note) {

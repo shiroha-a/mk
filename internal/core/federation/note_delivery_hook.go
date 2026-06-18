@@ -204,6 +204,14 @@ func (h *NoteDeliveryHook) findNoteAuthor(noteID string, origin *model.Note, kin
 // deliverAnnounce renders an Announce activity for a pure renote and ships it
 // to the renoter's followers.
 func (h *NoteDeliveryHook) deliverAnnounce(note *model.Note, author *model.User) {
+	// upstream renderAnnounce は specified visibility で throw し、federation 自体が
+	// 中止される (= specified pure renote は連合しない)。mk-go も specified renote を
+	// public-addressed Announce で follower へ漏らさないよう、ここで連合を skip する
+	// (#1886)。specified の宛先は visibleUsers 限定であり、renote の Announce を
+	// 配送する経路は upstream に存在しない。
+	if note.Visibility == model.NoteVisibilitySpecified {
+		return
+	}
 	target, err := h.noteRepo.FindByID(*note.RenoteID)
 	if err != nil {
 		slog.Warn("note delivery: renote target not found",

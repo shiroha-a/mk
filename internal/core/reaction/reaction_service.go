@@ -662,5 +662,9 @@ func isPureRenote(n *model.Note) bool {
 	if n.HasPoll {
 		return false
 	}
+	// renote + reply は quote 扱いなので pure renote ではない (#1886、upstream isQuote)。
+	if n.ReplyID != nil && *n.ReplyID != "" {
+		return false
+	}
 	return true
 }

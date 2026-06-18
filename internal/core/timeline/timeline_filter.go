@@ -76,9 +76,16 @@ func boolDefault(b *bool, def bool) bool {
 	return def
 }
 
-// isPureRenote returns true if the note is a pure renote (no text, no files).
+// isPureRenote returns true if the note is a pure renote (renote with no
+// text/cw/files/poll/reply)。upstream isPureRenote (= !isQuote) と揃える。quote
+// (text/cw/files/poll/replyId のいずれかを伴う renote) は pure renote ではない (#1886)。
 func isPureRenote(n *model.Note) bool {
-	return n.RenoteID != nil && n.Text == nil && len(n.FileIDs) == 0
+	return n.RenoteID != nil &&
+		(n.Text == nil || *n.Text == "") &&
+		(n.CW == nil || *n.CW == "") &&
+		!n.HasPoll &&
+		len(n.FileIDs) == 0 &&
+		(n.ReplyID == nil || *n.ReplyID == "")
 }
 
 // userSuspended reports whether the (nilable) preloaded user is suspended.

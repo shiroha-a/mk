@@ -469,6 +469,23 @@ func TestNoteDeliveryHook_PureRenote_RemoteTarget_UsesURI(t *testing.T) {
 	assert.Equal(t, uri, got["object"])
 }
 
+// specified visibility の pure renote は federate しない (#1886、upstream は
+// renderAnnounce が specified で throw して federation を中止する)。public-addressed
+// Announce を follower に漏らさない。
+func TestNoteDeliveryHook_SpecifiedPureRenote_NoAnnounce(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo, noteRepo := newNoteDeliveryHook(t)
+	author := makeLocalAuthor(t, userRepo, keypairRepo)
+	followingRepo.RemoteInboxes[author.ID] = []string{"https://r.example/inbox"}
+	noteRepo.Notes["tgt1"] = &model.Note{ID: "tgt1", UserID: "other", Visibility: model.NoteVisibilityPublic}
+
+	renoteID := "tgt1"
+	renote := makeNote(author.ID, model.NoteVisibilitySpecified)
+	renote.RenoteID = &renoteID
+
+	hook.OnNoteCreated(renote, author)
+	assert.Empty(t, enq.calls, "specified pure renote must not federate")
+}
+
 func TestNoteDeliveryHook_PureRenote_TargetNotFound(t *testing.T) {
 	hook, enq, userRepo, _, keypairRepo, _ := newNoteDeliveryHook(t)
 	author := makeLocalAuthor(t, userRepo, keypairRepo)

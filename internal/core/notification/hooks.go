@@ -642,7 +642,8 @@ func (h *Hook) buildPushBody(n *Notification, notifieeID string) map[string]any 
 	return body
 }
 
-// isQuote reports whether the note is a quote renote (renote with text/cw/files/poll).
+// isQuote reports whether the note is a quote renote (renote with
+// text/cw/files/poll/reply)。upstream isQuote は replyId != null も quote 扱い (#1886)。
 func isQuote(n *model.Note) bool {
 	if n.RenoteID == nil {
 		return false
@@ -657,6 +658,9 @@ func isQuote(n *model.Note) bool {
 		return true
 	}
 	if n.HasPoll {
+		return true
+	}
+	if n.ReplyID != nil && *n.ReplyID != "" {
 		return true
 	}
 	return false
