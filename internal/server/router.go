@@ -14,6 +14,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/activitypub/ld"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	apiannouncements "github.com/shiroha-a/mk/internal/api/announcements"
 	"github.com/shiroha-a/mk/internal/api/antennas"
@@ -622,6 +623,11 @@ func (s *Server) setupRoutes() {
 	// 投稿を受信できるようにする enqueuer。push / create-from-public で使う。
 	listProxyFollow := coreuserlist.NewProxyFollower(sysAcctSvc, s.queueClient)
 	relaySvc := corerelay.NewService(repository.NewRelayRepository(s.db), sysAcctSvc, apRenderer, deliverService, idGen)
+	// relay 配送 activity に RsaSignature2017 LD-Signature を付与する (#1870)。
+	// relay は downstream へ転送する際に元 HTTP-sig を保持できないので、LD-sig が
+	// 無いと downstream が真正性を検証できず reject する。署名者は activity の
+	// author (local user)。
+	relaySvc.SetLdSigning(keypairRepo, ld.NewProcessor(), s.config.URL)
 
 	// AP fetch のデフォルト signer に instance.actor を配線する (#419)。
 	// IceShrimp.NET 等の authorized-fetch peer では未署名 GET が 401 で

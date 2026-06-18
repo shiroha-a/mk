@@ -42,6 +42,18 @@ type Deliverer interface {
 	DeliverActivity(signerUserID string, body []byte, inboxes []string) error
 }
 
+// KeypairProvider resolves a local user's RSA keypair for LD signing.
+// repository.UserKeypairRepository がこれを満たす。
+type KeypairProvider interface {
+	FindByUserID(userID string) (*model.UserKeypair, error)
+}
+
+// LdSigner attaches an RsaSignature2017 LD-Signature to a JSON-LD activity map.
+// *activitypub/ld.Processor がこの signature を構造的に満たす。
+type LdSigner interface {
+	SignRsaSignature2017(activity map[string]any, privateKeyPEM, creator string, created time.Time) (map[string]any, error)
+}
+
 // Service orchestrates add/remove/mark/list/deliver operations against
 // the local relay table and the AP delivery pipeline.
 type Service struct {
@@ -51,6 +63,12 @@ type Service struct {
 	deliver  Deliverer
 	idGen    id.Generator
 	clock    func() time.Time
+
+	// LD-Signature 配送 (optional)。3 つとも揃ったときだけ relay 配送 activity に
+	// RsaSignature2017 を付与する (#1870)。未配線なら従来どおり HTTP-sig のみ。
+	keypairRepo KeypairProvider
+	ldSigner    LdSigner
+	baseURL     string
 
 	// accepted list cache with 10-minute TTL, matching upstream.
 	cacheMu     sync.RWMutex
@@ -83,6 +101,16 @@ func (s *Service) SetClock(now func() time.Time) {
 	if now != nil {
 		s.clock = now
 	}
+}
+
+// SetLdSigning wires the RsaSignature2017 LD-Signature path for relay delivery
+// (upstream deliverToRelays → attachLdSignature, #1870)。baseURL は creator key
+// URI 構築用 (例: "https://example.com")。引数のいずれかが nil/空なら LD 署名は
+// 無効化され、従来どおり HTTP-sig のみで配送する。
+func (s *Service) SetLdSigning(keypairRepo KeypairProvider, signer LdSigner, baseURL string) {
+	s.keypairRepo = keypairRepo
+	s.ldSigner = signer
+	s.baseURL = baseURL
 }
 
 // SetCacheMaxAge overrides the default 10-minute TTL on the accepted
@@ -183,15 +211,58 @@ func (s *Service) DeliverToAccepted(ctx context.Context, signerUserID string, ac
 	if len(relays) == 0 {
 		return nil
 	}
-	body, err := json.Marshal(activity)
+	body, err := s.marshalForRelay(ctx, signerUserID, activity)
 	if err != nil {
-		return fmt.Errorf("relay: marshal activity: %w", err)
+		return err
 	}
 	inboxes := make([]string, 0, len(relays))
 	for _, r := range relays {
 		inboxes = append(inboxes, r.Inbox)
 	}
 	return s.deliver.DeliverActivity(signerUserID, body, inboxes)
+}
+
+// marshalForRelay serializes activity for relay delivery, attaching an
+// RsaSignature2017 LD-Signature authored by signerUserID when LD signing is
+// wired (upstream deliverToRelays → attachLdSignature, #1870)。relay は
+// downstream subscriber へ転送する際に元 activity の HTTP signature を保持
+// できないため、LD-Signature が無いと downstream (Mastodon relay / 署名検証する
+// Misskey 等) が relay 経由 note の真正性を検証できず reject する。
+//
+// 署名は best-effort: keypair 解決や sign に失敗したら警告ログを残して unsigned で
+// 配送する (= 従来挙動。署名できないことを理由に relay 配送自体を止めない)。
+func (s *Service) marshalForRelay(ctx context.Context, signerUserID string, activity any) ([]byte, error) {
+	raw, err := json.Marshal(activity)
+	if err != nil {
+		return nil, fmt.Errorf("relay: marshal activity: %w", err)
+	}
+	// LD 署名が未配線なら従来どおりそのまま配送。
+	if s.ldSigner == nil || s.keypairRepo == nil || s.baseURL == "" {
+		return raw, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		// object でない activity (理論上発生しない) は署名対象外。
+		return raw, nil
+	}
+	// upstream: to が無ければ Public を補完してから署名する (空配列は尊重)。
+	if v, ok := m["to"]; !ok || v == nil {
+		m["to"] = []any{activitypub.Public}
+	}
+	kp, kerr := s.keypairRepo.FindByUserID(signerUserID)
+	if kerr != nil || kp == nil {
+		slog.WarnContext(ctx, "relay: LD signing skipped (keypair unavailable)",
+			"signerUserId", signerUserID, "err", kerr)
+		return json.Marshal(m)
+	}
+	creator := s.baseURL + "/users/" + signerUserID + "#main-key"
+	signed, serr := s.ldSigner.SignRsaSignature2017(m, kp.PrivateKey, creator, s.clock())
+	if serr != nil {
+		slog.WarnContext(ctx, "relay: LD signing failed, delivering unsigned",
+			"signerUserId", signerUserID, "err", serr)
+		return json.Marshal(m)
+	}
+	return json.Marshal(signed)
 }
 
 // sendFollow renders a Follow-Relay activity and enqueues it, signed by

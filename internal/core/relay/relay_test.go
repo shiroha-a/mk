@@ -2,13 +2,18 @@ package relay_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/activitypub/ld"
 	"github.com/shiroha-a/mk/internal/core/relay"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -340,4 +345,161 @@ func TestIsRelayActor(t *testing.T) {
 		assert.True(t, svc.IsRelayActor(&model.User{ID: "u4", Inbox: &other, SharedInbox: &shared}),
 			"actor.SharedInbox が登録済み relay の Inbox と一致 → true")
 	})
+}
+
+// stubLdSigner records its inputs and attaches a marker signature.
+type stubLdSigner struct {
+	gotActivity   map[string]any
+	gotPrivateKey string
+	gotCreator    string
+	err           error
+}
+
+func (s *stubLdSigner) SignRsaSignature2017(activity map[string]any, privateKeyPEM, creator string, _ time.Time) (map[string]any, error) {
+	s.gotActivity = activity
+	s.gotPrivateKey = privateKeyPEM
+	s.gotCreator = creator
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[string]any, len(activity)+1)
+	for k, v := range activity {
+		out[k] = v
+	}
+	out["signature"] = map[string]any{"type": "RsaSignature2017", "stub": true}
+	return out, nil
+}
+
+type stubKeypairProvider struct {
+	kp  *model.UserKeypair
+	err error
+}
+
+func (s *stubKeypairProvider) FindByUserID(string) (*model.UserKeypair, error) {
+	return s.kp, s.err
+}
+
+func acceptedRelaySvc(t *testing.T) (*relay.Service, *fakeDeliverer) {
+	t.Helper()
+	svc, _, _, deliv := newService(t)
+	rel, err := svc.Add(context.Background(), "https://r.example/inbox")
+	require.NoError(t, err)
+	require.NoError(t, svc.MarkAccepted(context.Background(), rel.ID))
+	return svc, deliv
+}
+
+func lastDeliveredBody(t *testing.T, deliv *fakeDeliverer) map[string]any {
+	t.Helper()
+	deliv.mu.Lock()
+	defer deliv.mu.Unlock()
+	require.NotEmpty(t, deliv.calls)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(deliv.calls[len(deliv.calls)-1].Body, &m))
+	return m
+}
+
+// LD 署名が配線されていると relay 配送 activity に to=Public 補完 + RsaSignature2017
+// が付与され、署名は author の keypair + creator key URI で行われる (#1870)。
+func TestDeliverToAccepted_AttachesLdSignature(t *testing.T) {
+	svc, deliv := acceptedRelaySvc(t)
+	signer := &stubLdSigner{}
+	kpr := &stubKeypairProvider{kp: &model.UserKeypair{UserID: "alice", PrivateKey: "PRIVPEM"}}
+	svc.SetLdSigning(kpr, signer, "https://example.com")
+
+	// to を持たない activity → Public 補完 + 署名
+	err := svc.DeliverToAccepted(context.Background(), "alice",
+		map[string]any{"type": "Create", "actor": "https://example.com/users/alice"})
+	require.NoError(t, err)
+
+	// signer が author の private key + creator key URI で呼ばれる
+	assert.Equal(t, "PRIVPEM", signer.gotPrivateKey)
+	assert.Equal(t, "https://example.com/users/alice#main-key", signer.gotCreator)
+	// signer に渡る activity は to 補完済み
+	assert.Equal(t, []any{activitypub.Public}, signer.gotActivity["to"])
+
+	// 配送 body に signature が乗り、to も補完されている
+	sent := lastDeliveredBody(t, deliv)
+	assert.Contains(t, sent, "signature")
+	assert.Equal(t, []any{activitypub.Public}, sent["to"])
+}
+
+// keypair が引けないときは署名を諦めて unsigned で配送する (best-effort、
+// relay 配送自体は止めない)。to 補完は適用される。
+func TestDeliverToAccepted_LdSigningKeypairMissing_UnsignedFallback(t *testing.T) {
+	svc, deliv := acceptedRelaySvc(t)
+	signer := &stubLdSigner{}
+	svc.SetLdSigning(&stubKeypairProvider{err: errors.New("not found")}, signer, "https://example.com")
+
+	require.NoError(t, svc.DeliverToAccepted(context.Background(), "alice",
+		map[string]any{"type": "Create"}))
+
+	assert.Empty(t, signer.gotCreator, "signer must not be called when keypair is missing")
+	sent := lastDeliveredBody(t, deliv)
+	assert.NotContains(t, sent, "signature", "keypair missing → unsigned fallback")
+	assert.Contains(t, sent, "to", "to is still completed")
+}
+
+// 署名処理がエラーになっても unsigned で配送する。
+func TestDeliverToAccepted_LdSigningError_UnsignedFallback(t *testing.T) {
+	svc, deliv := acceptedRelaySvc(t)
+	signer := &stubLdSigner{err: errors.New("sign boom")}
+	svc.SetLdSigning(&stubKeypairProvider{kp: &model.UserKeypair{UserID: "alice", PrivateKey: "PRIVPEM"}}, signer, "https://example.com")
+
+	require.NoError(t, svc.DeliverToAccepted(context.Background(), "alice",
+		map[string]any{"type": "Create"}))
+
+	sent := lastDeliveredBody(t, deliv)
+	assert.NotContains(t, sent, "signature", "sign error → unsigned fallback")
+}
+
+// LD 署名が未配線なら従来どおり unsigned で配送する (existing 挙動の regression guard)。
+func TestDeliverToAccepted_NoLdSigning_Unsigned(t *testing.T) {
+	svc, deliv := acceptedRelaySvc(t)
+	require.NoError(t, svc.DeliverToAccepted(context.Background(), "alice",
+		map[string]any{"type": "Create"}))
+	sent := lastDeliveredBody(t, deliv)
+	assert.NotContains(t, sent, "signature")
+}
+
+// end-to-end: 実 ld.Processor + 実 RSA keypair で marshalForRelay 経由に署名し、
+// 配送 body が production verifier (VerifyRsaSignature2017) を通ることを確認する。
+// stub signer ではなく実署名経路を drop-in critical path として封じる (#1870)。
+func TestDeliverToAccepted_LdSignature_VerifiesEndToEnd(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	privPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	}))
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	require.NoError(t, err)
+	pubPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+
+	svc, deliv := acceptedRelaySvc(t)
+	svc.SetLdSigning(
+		&stubKeypairProvider{kp: &model.UserKeypair{UserID: "alice", PrivateKey: privPEM}},
+		ld.NewProcessor(),
+		"https://example.com",
+	)
+
+	// to を持たない実 shape (@context 付き Create) を流す。
+	activity := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       "https://example.com/notes/n1/activity",
+		"type":     "Create",
+		"actor":    "https://example.com/users/alice",
+		"object": map[string]any{
+			"id":      "https://example.com/notes/n1",
+			"type":    "Note",
+			"content": "hello relay",
+		},
+	}
+	require.NoError(t, svc.DeliverToAccepted(context.Background(), "alice", activity))
+
+	sent := lastDeliveredBody(t, deliv)
+	require.Contains(t, sent, "signature", "real signer must attach a signature")
+	assert.Equal(t, []any{activitypub.Public}, sent["to"], "to は Public に補完される")
+
+	// production verifier で検証が通る = downstream が真正性を検証できる shape。
+	require.NoError(t, ld.NewProcessor().VerifyRsaSignature2017(sent, pubPEM),
+		"relay-signed activity must verify under the production LD verifier")
 }
