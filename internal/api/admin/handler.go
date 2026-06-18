@@ -1501,16 +1501,22 @@ func coerceMetaArrayFields(fields map[string]any) {
 // a decoded []any / map[string]any and must be json.Marshal された []byte に
 // 変換しないと jsonb 列の UPDATE が型不一致で失敗する (#1732 deliverSuspendedSoftware)。
 // policies は object 形 jsonb で update-default-policies / update-meta の両経路から
-// 来る (#1823)。
+// 来る (#1823)。clientOptions も object 形 jsonb で update-meta が whitelist 無しで
+// 受理するため、未登録だと同じ型不一致 500 になる (#1846)。
+//
+// model.Meta に datatypes.JSON 列を追加したらここにも登録すること。漏れは
+// TestMetaJSONBColumns_CoversAllJSONColumns (reflection guard) が検出する。
 var metaJSONBColumns = map[string]struct{}{
 	"deliverSuspendedSoftware": {},
 	"policies":                 {},
+	"clientOptions":            {},
 }
 
 // metaJSONBObjectColumns は metaJSONBColumns のうち object ({}) 形のもの。nil の
-// とき array 形は `[]`、object 形は `{}` を default にするための区別 (#1823)。
+// とき array 形は `[]`、object 形は `{}` を default にするための区別 (#1823 / #1846)。
 var metaJSONBObjectColumns = map[string]struct{}{
-	"policies": {},
+	"policies":      {},
+	"clientOptions": {},
 }
 
 // coerceMetaJSONBFields marshals decoded JSON values for known jsonb meta

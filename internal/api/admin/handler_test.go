@@ -733,6 +733,20 @@ func TestUpdateMeta_DeliverSuspendedSoftware(t *testing.T) {
 	assert.Equal(t, "*", entries[0].VersionRange)
 }
 
+// #1846: clientOptions は object 形 jsonb 列。decoded map を coerce せず repo に
+// 渡すと本番 Postgres で型不一致 500 になるため、handler→repo の経路で datatypes.JSON
+// に正規化され永続化されることを確認する (deliverSuspendedSoftware と同じ動機)。
+func TestUpdateMeta_ClientOptions(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rec := doPost(h.UpdateMeta, `{"clientOptions":{"entrancePageStyle":"simple","foo":1}}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotEmpty(t, metaRepo.Meta.ClientOptions, "object 形 jsonb 列が永続化される")
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal(metaRepo.Meta.ClientOptions, &obj))
+	assert.Equal(t, "simple", obj["entrancePageStyle"])
+	assert.Equal(t, float64(1), obj["foo"])
+}
+
 // JSON で送られてくる array は []any{...} に decode されるが、そのまま
 // repo.Update に流すと lib/pq が varchar[] 列に書けず "expression is of
 // type record" で UPDATE 全体が落ちる。handler 側の coerceMetaArrayFields

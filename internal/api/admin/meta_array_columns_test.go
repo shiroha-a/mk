@@ -77,6 +77,62 @@ func diffSorted(a, b map[string]struct{}) []string {
 	return out
 }
 
+// extractGormDefault は GORM tag から `default:...` 値を抽出する ("'{}'" 等)。
+func extractGormDefault(tag string) string {
+	for _, kv := range strings.Split(tag, ";") {
+		if v, ok := strings.CutPrefix(kv, "default:"); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// #1846: model.Meta の全 datatypes.JSON (jsonb) 列が metaJSONBColumns を被覆し、
+// default が object (`'{}'`) の列は metaJSONBObjectColumns にも登録されている
+// ことを reflection で担保する。これが無いと jsonb 列を追加したとき登録漏れで
+// update-meta 書込みが型不一致 500 になる (#1732 / #1823 / #1846 と同じ failure)。
+func TestMetaJSONBColumns_CoversAllJSONColumns(t *testing.T) {
+	metaType := reflect.TypeOf(model.Meta{})
+	jsonType := reflect.TypeOf(datatypes.JSON{})
+
+	expected := map[string]struct{}{}
+	objectCols := map[string]struct{}{}
+	for i := 0; i < metaType.NumField(); i++ {
+		f := metaType.Field(i)
+		if f.Type != jsonType {
+			continue
+		}
+		tag := f.Tag.Get("gorm")
+		col := extractGormColumn(tag)
+		if col == "" {
+			t.Fatalf("model.Meta.%s に column タグが無い", f.Name)
+		}
+		expected[col] = struct{}{}
+		// default が '{...}' で始まれば object 形、'[...]' なら array 形。
+		// 将来 default:'{"x":1}' のような非空 object default が来ても誤分類しない
+		// よう、Contains ではなく trim 後の先頭文字で判定する。
+		if def := strings.Trim(extractGormDefault(tag), "'"); strings.HasPrefix(def, "{") {
+			objectCols[col] = struct{}{}
+		}
+	}
+
+	missing := diffSorted(expected, metaJSONBColumns)
+	assert.Empty(t, missing,
+		"metaJSONBColumns に未登録の jsonb 列がある。新しい datatypes.JSON 列を追加した際は handler.go の metaJSONBColumns も更新してください (#1846)")
+
+	extra := diffSorted(metaJSONBColumns, expected)
+	assert.Empty(t, extra,
+		"metaJSONBColumns に model.Meta に無い列が混入している (typo / 列削除し忘れ)")
+
+	missingObj := diffSorted(objectCols, metaJSONBObjectColumns)
+	assert.Empty(t, missingObj,
+		"default '{}' の object 形 jsonb 列が metaJSONBObjectColumns に未登録 (nil default が [] になり不正、#1846)")
+
+	extraObj := diffSorted(metaJSONBObjectColumns, objectCols)
+	assert.Empty(t, extraObj,
+		"metaJSONBObjectColumns に object 形 ('{}') でない列が混入している")
+}
+
 // #1823: coerceMetaJSONBFields は policies (object 形 jsonb) を decoded map から
 // datatypes.JSON ([]byte) に変換し、jsonb 列の UPDATE 型不一致 500 を防ぐ。
 func TestCoerceMetaJSONBFields_Policies(t *testing.T) {
