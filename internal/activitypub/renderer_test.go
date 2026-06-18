@@ -201,6 +201,30 @@ func TestRenderer_RenderOrderedCollection(t *testing.T) {
 	assert.NotContains(t, js, "orderedItems")
 }
 
+func TestRenderer_RenderOrderedCollectionPage(t *testing.T) {
+	r := newRenderer()
+	partOf := "https://example.com/users/u1/followers"
+
+	// next あり: prev は空なので省略、orderedItems は空でも出力。
+	page := r.RenderOrderedCollectionPage(partOf+"?page=true", 7,
+		[]any{"https://a.example/users/x"}, partOf, "", partOf+"?page=true&cursor=c1")
+	assert.Equal(t, "OrderedCollectionPage", page.Type)
+	assert.Equal(t, partOf, page.PartOf)
+	assert.Equal(t, 7, page.TotalItems)
+	assert.Equal(t, partOf+"?page=true&cursor=c1", page.Next)
+	assert.Empty(t, page.Prev)
+
+	// nil items は [] に正規化され、JSON に必ず orderedItems が出る (prev は省略)。
+	empty := r.RenderOrderedCollectionPage(partOf+"?page=true", 0, nil, partOf, "", "")
+	require.NotNil(t, empty.OrderedItems)
+	b, err := json.Marshal(empty)
+	require.NoError(t, err)
+	js := string(b)
+	assert.Contains(t, js, `"orderedItems":[]`)
+	assert.NotContains(t, js, `"prev"`)
+	assert.NotContains(t, js, `"next"`)
+}
+
 func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "alice"}

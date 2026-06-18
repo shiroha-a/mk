@@ -116,6 +116,20 @@ type OrderedCollection struct {
 	OrderedItems []any  `json:"orderedItems,omitempty"`
 }
 
+// OrderedCollectionPage is a single page of an OrderedCollection (paginated
+// followers/following/outbox)。upstream ApRendererService.renderOrderedCollectionPage
+// と同 shape。orderedItems は常に出力し (空でも []), prev/next は cursor がある時のみ (#1877)。
+type OrderedCollectionPage struct {
+	Context      any    `json:"@context,omitempty"`
+	ID           string `json:"id"`
+	Type         string `json:"type"`
+	PartOf       string `json:"partOf"`
+	TotalItems   int    `json:"totalItems"`
+	OrderedItems []any  `json:"orderedItems"`
+	Prev         string `json:"prev,omitempty"`
+	Next         string `json:"next,omitempty"`
+}
+
 // PublicKey is the embedded JSON-LD object describing a user's signing key.
 type PublicKey struct {
 	ID           string `json:"id"`
@@ -614,6 +628,8 @@ func AddContext(o any) {
 	case *Move:
 		v.Context = ctx
 	case *OrderedCollection:
+		v.Context = ctx
+	case *OrderedCollectionPage:
 		v.Context = ctx
 	}
 }

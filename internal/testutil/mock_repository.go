@@ -5356,6 +5356,18 @@ func (m *MockFollowingRepository) ListFollowingByHostCursor(host, sinceID, until
 	}, sinceID, untilID, limit), nil
 }
 
+func (m *MockFollowingRepository) ListFollowersBefore(userID, cursor string, limit int) ([]*model.Following, error) {
+	return m.hostCursorPage(func(f *model.Following) bool {
+		return f.FolloweeID == userID
+	}, "", cursor, limit), nil
+}
+
+func (m *MockFollowingRepository) ListFollowingBefore(userID, cursor string, limit int) ([]*model.Following, error) {
+	return m.hostCursorPage(func(f *model.Following) bool {
+		return f.FollowerID == userID
+	}, "", cursor, limit), nil
+}
+
 func (m *MockFollowingRepository) CountRemoteFollowees() (int64, error) {
 	var n int64
 	for _, f := range m.Followings {

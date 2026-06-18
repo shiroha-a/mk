@@ -235,6 +235,24 @@ func (r *Renderer) RenderOrderedCollection(id string, totalItems int, first, las
 	}
 }
 
+// RenderOrderedCollectionPage builds a single OrderedCollectionPage (#1877)。
+// upstream renderOrderedCollectionPage と同じく orderedItems は常に出力 (空でも []),
+// prev/next は空なら省略する。@context は呼び出し側が AddContext で付与する。
+func (r *Renderer) RenderOrderedCollectionPage(id string, totalItems int, orderedItems []any, partOf, prev, next string) *OrderedCollectionPage {
+	if orderedItems == nil {
+		orderedItems = []any{}
+	}
+	return &OrderedCollectionPage{
+		ID:           id,
+		Type:         "OrderedCollectionPage",
+		PartOf:       partOf,
+		TotalItems:   totalItems,
+		OrderedItems: orderedItems,
+		Prev:         prev,
+		Next:         next,
+	}
+}
+
 // SetMentionResolver attaches a MentionResolver used by RenderNote to populate
 // the `tag` field and additional `to` audience entries. nil で無効化できる。
 func (r *Renderer) SetMentionResolver(mr MentionResolver) {

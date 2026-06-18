@@ -1777,6 +1777,7 @@ func (s *Server) setupRoutes() {
 	// FEP-521a Multikey 対応で actor JSON に assertionMethod[] を expose する
 	// ため Ed25519 keypair repo を wire (#1067 / #1069)。
 	apHandler.SetKeypairExtraRepo(keypairExtraRepo)
+	apHandler.SetFollowingRepo(followingRepo) // #1877 followers/following collection
 	// ap/show が返す UserDetailedNotMe に viewer relation block を埋める (#1778)。
 	apHandler.SetRelationRepos(userrelation.Repos{
 		Following:     followingRepo,
@@ -1792,6 +1793,8 @@ func (s *Server) setupRoutes() {
 	apHandler.SetNonAPFallback(frontend)
 	s.echo.GET("/users/:id", apHandler.User)
 	s.echo.GET("/users/:id/collections/featured", apHandler.Featured) // #1876 pinned notes
+	s.echo.GET("/users/:id/followers", apHandler.Followers)           // #1877
+	s.echo.GET("/users/:id/following", apHandler.Following)           // #1877
 	s.echo.GET("/notes/:id", apHandler.Note)
 	s.echo.GET("/@:acct", apHandler.UserByAcct)
 

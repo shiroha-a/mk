@@ -3,6 +3,7 @@ package ap
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1082,6 +1083,220 @@ func TestFeatured_NotFound(t *testing.T) {
 	c, rec := newReq(t, "id", "ghost")
 	require.NoError(t, h.Featured(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// --- followers / following collection (#1877) ---
+
+func newHandlerWithFollowing(t *testing.T) (*Handler, *testutil.MockUserRepository, *testutil.MockFollowingRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	userSvc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	keypairRepo := &memoryKeypairRepo{items: map[string]*model.UserKeypair{}}
+	h := NewHandler(activitypub.NewRenderer(activitypub.NewURLBuilder("https://example.com")), userSvc, querySvc, keypairRepo, idGen)
+	h.SetFollowingRepo(followingRepo)
+	return h, userRepo, followingRepo
+}
+
+// newReqQuery is newReq with a raw query string (page/cursor params)。
+func newReqQuery(t *testing.T, paramName, paramValue, rawQuery string) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?"+rawQuery, nil)
+	req.Header.Set(echo.HeaderAccept, "application/activity+json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames(paramName)
+	c.SetParamValues(paramValue)
+	return c, rec
+}
+
+func TestFollowers_IndexCollection(t *testing.T) {
+	h, userRepo, _ := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 42}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Followers(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	assert.Equal(t, "OrderedCollection", col["type"])
+	assert.Equal(t, "https://example.com/users/u1/followers", col["id"])
+	assert.Equal(t, float64(42), col["totalItems"])
+	assert.Equal(t, "https://example.com/users/u1/followers?page=true", col["first"])
+}
+
+func TestFollowers_Page_RendersActorURIs(t *testing.T) {
+	h, userRepo, followingRepo := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 2}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+	// local follower + remote follower
+	userRepo.Users["loc"] = &model.User{ID: "loc", Username: "bob"}
+	remoteURI := "https://remote.example/users/carol"
+	host := "remote.example"
+	userRepo.Users["rem"] = &model.User{ID: "rem", Username: "carol", Host: &host, URI: &remoteURI}
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FolloweeID: "u1", FollowerID: "loc"}))
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f2", FolloweeID: "u1", FollowerID: "rem"}))
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Followers(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Equal(t, "OrderedCollectionPage", page["type"])
+	assert.Equal(t, "https://example.com/users/u1/followers", page["partOf"])
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 2)
+	assert.Contains(t, items, "https://example.com/users/loc", "local follower → /users/<id>")
+	assert.Contains(t, items, remoteURI, "remote follower → stored uri")
+}
+
+func TestFollowers_PrivateVisibility_Forbidden(t *testing.T) {
+	for _, vis := range []model.FollowingVisibility{model.FollowingVisibilityPrivate, model.FollowingVisibilityFollowers} {
+		h, userRepo, _ := newHandlerWithFollowing(t)
+		userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: vis}
+		c, rec := newReq(t, "id", "u1")
+		require.NoError(t, h.Followers(c))
+		assert.Equal(t, http.StatusForbidden, rec.Code, "visibility=%s must 403", vis)
+		assert.Equal(t, "public, max-age=30", rec.Header().Get("Cache-Control"))
+	}
+}
+
+func TestFollowing_IndexCollection(t *testing.T) {
+	h, userRepo, _ := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowingCount: 7}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowingVisibility: model.FollowingVisibilityPublic}
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Following(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	assert.Equal(t, "https://example.com/users/u1/following", col["id"])
+	assert.Equal(t, float64(7), col["totalItems"])
+}
+
+func TestFollowers_Remote_NotFound(t *testing.T) {
+	h, userRepo, _ := newHandlerWithFollowing(t)
+	host := "remote.example"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Followers(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFollowers_UnknownUser_NotFound(t *testing.T) {
+	h, _, _ := newHandlerWithFollowing(t)
+	c, rec := newReq(t, "id", "ghost")
+	require.NoError(t, h.Followers(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFollowers_RepoUnwired_NotFound(t *testing.T) {
+	h, userRepo, _, _ := newHandlerWithPining(t) // followingRepo 未配線
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Followers(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// profile が引けない (transient DB error 等で Profile=nil) 場合は fail-closed で 403
+// にし、private 設定の follower list を public default で leak させない (#1877 review)。
+func TestFollowers_NilProfile_Forbidden(t *testing.T) {
+	h, userRepo, _ := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	// Profiles["u1"] を設定しない → ShowByID は Profile=nil を返す。
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Followers(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "public, max-age=30", rec.Header().Get("Cache-Control"))
+}
+
+func TestFollowers_Page_NextCursorWhenMore(t *testing.T) {
+	h, userRepo, followingRepo := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 11}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+	// 11 followers (limit=10 + 1) → next link が出る。
+	for i := 0; i < 11; i++ {
+		uid := fmt.Sprintf("fu%02d", i)
+		userRepo.Users[uid] = &model.User{ID: uid, Username: uid}
+		require.NoError(t, followingRepo.Create(&model.Following{
+			ID: fmt.Sprintf("ff%02d", i), FolloweeID: "u1", FollowerID: uid,
+		}))
+	}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Followers(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	assert.Len(t, items, 10, "page is capped at limit=10")
+	next, _ := page["next"].(string)
+	assert.Contains(t, next, "page=true&cursor=", "more rows → next link present")
+}
+
+func TestFollowing_Page_RendersActorURIs(t *testing.T) {
+	h, userRepo, followingRepo := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowingCount: 1}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowingVisibility: model.FollowingVisibilityPublic}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "g1", FolloweeID: "bob", FollowerID: "u1"}))
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Following(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 1)
+	assert.Equal(t, "https://example.com/users/bob", items[0])
+}
+
+// remote follower で URI が無いものは skip する (suspend/delete 等で 500 にしない)。
+func TestFollowers_Page_SkipsURILessRemote(t *testing.T) {
+	h, userRepo, followingRepo := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 1}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+	host := "remote.example"
+	userRepo.Users["rem"] = &model.User{ID: "rem", Username: "x", Host: &host} // URI=nil
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FolloweeID: "u1", FollowerID: "rem"}))
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Followers(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	assert.Empty(t, items, "URI-less remote follower is skipped, no 500")
+}
+
+type errFollowingRepo struct {
+	*testutil.MockFollowingRepository
+}
+
+func (errFollowingRepo) ListFollowersBefore(string, string, int) ([]*model.Following, error) {
+	return nil, errors.New("db down")
+}
+
+func TestFollowers_Page_RepoError_500(t *testing.T) {
+	h, userRepo, _ := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 3}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+	h.SetFollowingRepo(errFollowingRepo{testutil.NewMockFollowingRepository()})
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Followers(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestFeatured_Remote(t *testing.T) {

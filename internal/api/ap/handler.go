@@ -70,6 +70,15 @@ type Handler struct {
 	// block (isFollowing 等) を埋めるための repo 束 (#1778)。未配線なら relation は
 	// omit (= legacy 挙動)。
 	relation userrelation.Repos
+	// followingRepo は followers/following collection endpoint (#1877) の page
+	// 取得用。未配線なら両 endpoint は 404 (= legacy 挙動)。
+	followingRepo repository.FollowingRepository
+}
+
+// SetFollowingRepo wires the repository used by the followers/following AP
+// collection endpoints (#1877)。
+func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
+	h.followingRepo = r
 }
 
 // SetRelationRepos wires the repositories used to populate the viewer relation
@@ -644,4 +653,148 @@ func (h *Handler) Featured(c echo.Context) error {
 	col := h.renderer.RenderOrderedCollection(h.renderer.URLs().UserFeatured(id), len(items), "", "", items)
 	activitypub.AddContext(col)
 	return writeActivityJSON(c, col)
+}
+
+// Followers handles GET /users/:id/followers (#1877)。
+func (h *Handler) Followers(c echo.Context) error {
+	return h.serveFollowCollection(c, true)
+}
+
+// Following handles GET /users/:id/following (#1877)。
+func (h *Handler) Following(c echo.Context) error {
+	return h.serveFollowCollection(c, false)
+}
+
+// serveFollowCollection serves the followers / following OrderedCollection
+// for a local user (upstream ActivityPubServerService.followers/following, #1877)。
+// followers=true なら followers、false なら following。
+//
+// privacy: profile の followers/followingVisibility が public 以外なら 403
+// (unauthenticated AP request では公開リストのみ serve、upstream と同じ)。
+// base (page!=true) は totalItems + first link、?page=true は cursor ページングで
+// 相手側の actor URI を返す。
+func (h *Handler) serveFollowCollection(c echo.Context, followers bool) error {
+	c.Response().Header().Set("Vary", "Accept")
+	if h.followingRepo == nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	id := c.Param("id")
+	bundle, err := h.userService.ShowByID(id)
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	if !bundle.User.IsLocal() {
+		return c.NoContent(http.StatusNotFound)
+	}
+
+	// privacy gate: public 以外 (followers / private) は unauthenticated には出さない。
+	// profile を引けない (transient DB error 等で ShowByID が Profile=nil を返す) 場合は
+	// fail-closed で 403 にする。public default にすると private 設定の follower list を
+	// 一時的に leak し、しかも max-age=180 で 3 分 cache されてしまう (#1877 review、
+	// upstream は findOneByOrFail で 500 = fail-closed)。
+	if bundle.Profile == nil {
+		c.Response().Header().Set("Cache-Control", "public, max-age=30")
+		return c.NoContent(http.StatusForbidden)
+	}
+	vis := bundle.Profile.FollowersVisibility
+	if !followers {
+		vis = bundle.Profile.FollowingVisibility
+	}
+	if vis != model.FollowingVisibilityPublic {
+		c.Response().Header().Set("Cache-Control", "public, max-age=30")
+		return c.NoContent(http.StatusForbidden)
+	}
+
+	urls := h.renderer.URLs()
+	partOf := urls.UserFollowers(id)
+	totalItems := bundle.User.FollowersCount
+	if !followers {
+		partOf = urls.UserFollowing(id)
+		totalItems = bundle.User.FollowingCount
+	}
+
+	// index page: totalItems + first link (upstream renderOrderedCollection)。
+	if c.QueryParam("page") != "true" {
+		col := h.renderer.RenderOrderedCollection(partOf, totalItems, partOf+"?page=true", "", nil)
+		activitypub.AddContext(col)
+		c.Response().Header().Set("Cache-Control", "public, max-age=180")
+		return writeActivityJSON(c, col)
+	}
+
+	// paginated page: cursor (= Following row id) で id DESC ページング。
+	const limit = 10
+	cursor := c.QueryParam("cursor")
+	var rows []*model.Following
+	if followers {
+		rows, err = h.followingRepo.ListFollowersBefore(id, cursor, limit+1)
+	} else {
+		rows, err = h.followingRepo.ListFollowingBefore(id, cursor, limit+1)
+	}
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	inStock := len(rows) == limit+1
+	if inStock {
+		rows = rows[:limit]
+	}
+
+	counterpartIDs := make([]string, 0, len(rows))
+	for _, f := range rows {
+		if followers {
+			counterpartIDs = append(counterpartIDs, f.FollowerID)
+		} else {
+			counterpartIDs = append(counterpartIDs, f.FolloweeID)
+		}
+	}
+	items := h.resolveActorURIs(counterpartIDs)
+
+	// cursor は client 由来なので URL-encode して reflect する (upstream encodeURIComponent
+	// 相当)。aidx id は URL-safe だが、不正な cursor で id field が壊れないようにする。
+	pageID := partOf + "?page=true"
+	if cursor != "" {
+		pageID += "&cursor=" + url.QueryEscape(cursor)
+	}
+	next := ""
+	if inStock && len(rows) > 0 {
+		next = partOf + "?page=true&cursor=" + url.QueryEscape(rows[len(rows)-1].ID)
+	}
+	page := h.renderer.RenderOrderedCollectionPage(pageID, totalItems, items, partOf, "", next)
+	activitypub.AddContext(page)
+	return writeActivityJSON(c, page)
+}
+
+// resolveActorURIs maps a list of user IDs to their actor URIs (local:
+// /users/<id>, remote: user.uri), preserving order and dropping unresolved /
+// URI-less users. upstream renderFollowUser → getUserUri 相当 (#1877)。
+func (h *Handler) resolveActorURIs(ids []string) []any {
+	if len(ids) == 0 {
+		return []any{}
+	}
+	bundles, err := h.userService.ShowManyByIDs(ids)
+	if err != nil {
+		return []any{}
+	}
+	uriByID := make(map[string]string, len(bundles))
+	for _, b := range bundles {
+		uriByID[b.User.ID] = h.actorURI(b.User)
+	}
+	out := make([]any, 0, len(ids))
+	for _, uid := range ids {
+		if uri := uriByID[uid]; uri != "" {
+			out = append(out, uri)
+		}
+	}
+	return out
+}
+
+// actorURI returns the canonical actor URI for a user: local → /users/<id>,
+// remote → stored uri. Empty for a remote user with no uri (skipped by caller)。
+func (h *Handler) actorURI(u *model.User) string {
+	if u.IsLocal() {
+		return h.renderer.URLs().UserURI(u.ID)
+	}
+	if u.URI != nil {
+		return *u.URI
+	}
+	return ""
 }

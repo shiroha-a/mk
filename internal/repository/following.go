@@ -54,6 +54,13 @@ type FollowingRepository interface {
 	// ListFollowingByHostCursor is ListFollowingByHost with id cursor pagination.
 	// Used by federation/following (#1732)。
 	ListFollowingByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error)
+	// ListFollowersBefore returns Following rows (followeeId = userID) with
+	// id < cursor (cursor 空なら最新から), ordered id DESC, up to limit. AP
+	// followers collection の cursor pagination 用 (#1877)。
+	ListFollowersBefore(userID, cursor string, limit int) ([]*model.Following, error)
+	// ListFollowingBefore returns Following rows (followerId = userID) with
+	// id < cursor, ordered id DESC, up to limit. AP following collection 用 (#1877)。
+	ListFollowingBefore(userID, cursor string, limit int) ([]*model.Following, error)
 	// CountRemoteFollowees returns the number of Following rows whose
 	// followeeHost is non-NULL (= remote users being followed by anyone).
 	// federation/stats の allSubCount (upstream count where followeeHost is
@@ -291,6 +298,30 @@ func (r *followingRepository) ListFollowingByHostCursor(host, sinceID, untilID s
 	}
 	var rows []*model.Following
 	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *followingRepository) ListFollowersBefore(userID, cursor string, limit int) ([]*model.Following, error) {
+	q := r.db.Where(`"followeeId" = ?`, userID)
+	if cursor != "" {
+		q = q.Where("id < ?", cursor)
+	}
+	var rows []*model.Following
+	if err := q.Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (r *followingRepository) ListFollowingBefore(userID, cursor string, limit int) ([]*model.Following, error) {
+	q := r.db.Where(`"followerId" = ?`, userID)
+	if cursor != "" {
+		q = q.Where("id < ?", cursor)
+	}
+	var rows []*model.Following
+	if err := q.Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

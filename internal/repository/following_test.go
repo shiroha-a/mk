@@ -283,6 +283,55 @@ func TestFollowingRepository_ListFollowers_ListFollowing(t *testing.T) {
 	assert.Len(t, followingsOfA, 2)
 }
 
+// ListFollowersBefore / ListFollowingBefore は id DESC で cursor (id <) ページング
+// する (AP followers/following collection の page 用, #1877)。
+func TestFollowingRepository_ListFollowersBefore_ListFollowingBefore(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	target := insertTestUser(t, "u_fb_t", "fbtarget")
+	defer cleanupUser(t, target.ID)
+	f1 := insertTestUser(t, "u_fb_1", "fb1")
+	defer cleanupUser(t, f1.ID)
+	f2 := insertTestUser(t, "u_fb_2", "fb2")
+	defer cleanupUser(t, f2.ID)
+	f3 := insertTestUser(t, "u_fb_3", "fb3")
+	defer cleanupUser(t, f3.ID)
+	// f1,f2,f3 follow target → target の followers。row id 昇順 fb_a < fb_b < fb_c。
+	insertFollowing(t, "fb_a", f1.ID, target.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "fb_a")
+	insertFollowing(t, "fb_b", f2.ID, target.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "fb_b")
+	insertFollowing(t, "fb_c", f3.ID, target.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "fb_c")
+
+	// cursor 無し → 全件 id DESC。
+	all, err := repo.ListFollowersBefore(target.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+	assert.Equal(t, "fb_c", all[0].ID)
+	assert.Equal(t, "fb_a", all[2].ID)
+
+	// limit。
+	lim, err := repo.ListFollowersBefore(target.ID, "", 2)
+	require.NoError(t, err)
+	assert.Len(t, lim, 2)
+
+	// cursor: id < "fb_c" → fb_b, fb_a。
+	page, err := repo.ListFollowersBefore(target.ID, "fb_c", 10)
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	assert.Equal(t, "fb_b", page[0].ID)
+
+	// following 側: target が g1 を follow。
+	g1 := insertTestUser(t, "u_fb_g", "fbg")
+	defer cleanupUser(t, g1.ID)
+	insertFollowing(t, "fb_g", target.ID, g1.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "fb_g")
+	flw, err := repo.ListFollowingBefore(target.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, flw, 1)
+	assert.Equal(t, "fb_g", flw[0].ID)
+}
+
 // ListFollowersToNotify は notify='normal' の follower row だけを返す (#1559)。
 func TestFollowingRepository_ListFollowersToNotify(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
