@@ -526,12 +526,25 @@ func (h *Handler) resolveLocal(uri string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		// remote note は local-domain の id/uri で render すると別オブジェクトに
+		// なってしまうので local 専用 (#1873)。error 返しで caller は remote fetch
+		// → NO_SUCH_OBJECT へフォールバックする。
+		if n.UserHost != nil && *n.UserHost != "" {
+			return nil, http.ErrNotSupported
+		}
 		return h.renderer.RenderNote(n, h.idGen), nil
 	}
 	if userID := extractLocalID(uri, "/users/"); userID != "" {
 		bundle, err := h.userService.ShowByID(userID)
 		if err != nil {
 			return nil, err
+		}
+		// remote user (local aidx id を持つ) を local-domain actor として render
+		// すると id/url/featured が誤った自ドメイン URI になるので local 専用
+		// (#1873。連合向けの User/Followers/Following/Outbox/Featured handler は
+		// 既に Host guard 済みだが、この admin ap/get 経路だけ漏れていた)。
+		if !bundle.User.IsLocal() {
+			return nil, http.ErrNotSupported
 		}
 		keypair, err := h.keypairRepo.FindByUserID(bundle.User.ID)
 		if err != nil {

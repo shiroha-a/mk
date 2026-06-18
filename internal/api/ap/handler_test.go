@@ -463,6 +463,28 @@ func TestAPIGet_UserNotFound(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
+// remote user (local aidx id を持つ) を local-domain URI で ap/get しても、自ドメインの
+// 誤った Person を返さず NO_SUCH_OBJECT になる (#1873)。
+func TestAPIGet_RemoteUserViaLocalURI_NotFound(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	host := "remote.example"
+	userRepo.Users["rem1"] = &model.User{ID: "rem1", Username: "carol", Host: &host}
+	rec := postJSON(h.APIGet, `{"uri":"https://example.com/users/rem1"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
+	assert.NotContains(t, rec.Body.String(), "Person", "remote user must not be rendered as a local Person")
+}
+
+// remote note も local-domain URI 経由では render せず NO_SUCH_OBJECT (#1873)。
+func TestAPIGet_RemoteNoteViaLocalURI_NotFound(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	host := "remote.example"
+	noteRepo.Notes["rn1"] = &model.Note{ID: "rn1", UserID: "bob", Visibility: model.NoteVisibilityPublic, UserHost: &host}
+	rec := postJSON(h.APIGet, `{"uri":"https://example.com/notes/rn1"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
+}
+
 func TestAPIGet_UserKeypairError(t *testing.T) {
 	h, userRepo, _, keypairRepo := newHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
