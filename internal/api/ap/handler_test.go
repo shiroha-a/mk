@@ -992,3 +992,103 @@ func TestAPIGet_RemoteInvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
+
+// newHandlerWithPining is like newHandler but also exposes the pining + note
+// repos so featured-collection tests can seed pinned notes (#1876)。
+func newHandlerWithPining(t *testing.T) (*Handler, *testutil.MockUserRepository, *testutil.MockNoteRepository, *testutil.MockUserNotePiningRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	userSvc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	keypairRepo := &memoryKeypairRepo{items: map[string]*model.UserKeypair{}}
+	h := NewHandler(activitypub.NewRenderer(activitypub.NewURLBuilder("https://example.com")), userSvc, querySvc, keypairRepo, idGen)
+	return h, userRepo, noteRepo, piningRepo
+}
+
+func TestFeatured_ReturnsPinnedNotes(t *testing.T) {
+	h, userRepo, noteRepo, piningRepo := newHandlerWithPining(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	require.NoError(t, piningRepo.Create(&model.UserNotePining{ID: "p1", UserID: "u1", NoteID: "n1"}))
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	assert.Equal(t, "OrderedCollection", col["type"])
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", col["id"])
+	assert.Equal(t, float64(1), col["totalItems"])
+	items, _ := col["orderedItems"].([]any)
+	require.Len(t, items, 1)
+	assert.NotNil(t, col["@context"], "served collection must carry @context")
+}
+
+func TestFeatured_NoPins_EmptyCollection(t *testing.T) {
+	h, userRepo, _, _ := newHandlerWithPining(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	assert.Equal(t, float64(0), col["totalItems"])
+	// mk-go は orderedItems を omitempty で省略する (upstream は空でも []
+	// を出すが、consumer は absent を空集合として扱うため harmless な MINOR 差。
+	// omitempty は後続の base collection (outbox/followers の first/last のみ) で
+	// orderedItems を出さないために必要)。
+	_, hasItems := col["orderedItems"]
+	assert.False(t, hasItems, "empty featured omits orderedItems (accepted divergence)")
+}
+
+// upstream featured は !localOnly && visibility ∈ {public, home} のみ serve する。
+// followers/specified/localOnly な pinned note は unauthenticated AP へ leak しない (#1876)。
+func TestFeatured_ExcludesNonPublicAndLocalOnly(t *testing.T) {
+	h, userRepo, noteRepo, piningRepo := newHandlerWithPining(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "u1", Visibility: model.NoteVisibilityPublic}
+	noteRepo.Notes["home"] = &model.Note{ID: "home", UserID: "u1", Visibility: model.NoteVisibilityHome}
+	noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+	noteRepo.Notes["spec"] = &model.Note{ID: "spec", UserID: "u1", Visibility: model.NoteVisibilitySpecified}
+	noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "u1", Visibility: model.NoteVisibilityPublic, LocalOnly: true}
+	for i, nid := range []string{"pub", "home", "fol", "spec", "lo"} {
+		require.NoError(t, piningRepo.Create(&model.UserNotePining{ID: "p" + string(rune('1'+i)), UserID: "u1", NoteID: nid}))
+	}
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	// public + home の 2 件のみ。followers / specified / localOnly は除外。
+	assert.Equal(t, float64(2), col["totalItems"], "totalItems must be the post-filter count")
+	items, _ := col["orderedItems"].([]any)
+	require.Len(t, items, 2)
+	body := rec.Body.String()
+	assert.NotContains(t, body, `/notes/fol`, "followers-only pinned note must not leak")
+	assert.NotContains(t, body, `/notes/spec`, "specified pinned note must not leak")
+	assert.NotContains(t, body, `/notes/lo`, "localOnly pinned note must not leak")
+}
+
+func TestFeatured_NotFound(t *testing.T) {
+	h, _, _, _ := newHandlerWithPining(t)
+	c, rec := newReq(t, "id", "ghost")
+	require.NoError(t, h.Featured(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFeatured_Remote(t *testing.T) {
+	h, userRepo, _, _ := newHandlerWithPining(t)
+	host := "remote.example"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Featured(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "remote actor featured must 404")
+}

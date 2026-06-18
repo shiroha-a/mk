@@ -60,6 +60,12 @@ func (b *URLBuilder) UserFollowing(userID string) string {
 	return b.UserURI(userID) + "/following"
 }
 
+// UserFeatured returns the pinned-notes (featured) collection URL
+// (upstream: `${id}/collections/featured`, #1876)。
+func (b *URLBuilder) UserFeatured(userID string) string {
+	return b.UserURI(userID) + "/collections/featured"
+}
+
 // UserKeyURI returns the public key fragment URI used in HTTP signatures.
 func (b *URLBuilder) UserKeyURI(userID string) string {
 	return b.UserURI(userID) + "#main-key"
@@ -208,6 +214,27 @@ func NewRenderer(urls *URLBuilder) *Renderer {
 	return &Renderer{urls: urls}
 }
 
+// URLs exposes the URLBuilder so handlers can construct canonical collection
+// URLs (outbox/followers/following/featured) without holding a separate
+// builder (#1876)。
+func (r *Renderer) URLs() *URLBuilder {
+	return r.urls
+}
+
+// RenderOrderedCollection builds an AS OrderedCollection (#1876)。upstream
+// ApRendererService.renderOrderedCollection と同じく first/last/orderedItems は
+// 空なら省略する。@context は呼び出し側 (handler) が AddContext で付与する。
+func (r *Renderer) RenderOrderedCollection(id string, totalItems int, first, last string, orderedItems []any) *OrderedCollection {
+	return &OrderedCollection{
+		ID:           id,
+		Type:         "OrderedCollection",
+		TotalItems:   totalItems,
+		First:        first,
+		Last:         last,
+		OrderedItems: orderedItems,
+	}
+}
+
 // SetMentionResolver attaches a MentionResolver used by RenderNote to populate
 // the `tag` field and additional `to` audience entries. nil で無効化できる。
 func (r *Renderer) SetMentionResolver(mr MentionResolver) {
@@ -309,9 +336,10 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	if u.AlsoKnownAs != nil && *u.AlsoKnownAs != "" {
 		p.AlsoKnownAs = APStringList(strings.Split(*u.AlsoKnownAs, ","))
 	}
-	if u.Featured != nil && *u.Featured != "" {
-		p.Featured = *u.Featured
-	}
+	// upstream renderPerson は local actor に必ず featured: ${id}/collections/featured を
+	// 出力する。RenderPerson は local user 専用なので無条件に自ドメインの featured
+	// collection URI を入れる (pinned note を連合先へ公開する、#1876)。
+	p.Featured = r.urls.UserFeatured(u.ID)
 	p.MisskeyRequireSigninToViewContents = u.RequireSigninToViewContents
 	p.MisskeyMakeNotesFollowersOnlyBefore = u.MakeNotesFollowersOnlyBefore
 	p.MisskeyMakeNotesHiddenBefore = u.MakeNotesHiddenBefore

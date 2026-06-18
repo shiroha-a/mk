@@ -102,6 +102,20 @@ type Object struct {
 	Name    string `json:"name,omitempty"`
 }
 
+// OrderedCollection is an AS OrderedCollection used for actor-advertised
+// collections (outbox / followers / following / collections/featured)。upstream
+// ApRendererService.renderOrderedCollection と同 shape。orderedItems は inline 提供時
+// (featured 等) のみ、first/last は paginate 時のみ出力する (#1876)。
+type OrderedCollection struct {
+	Context      any    `json:"@context,omitempty"`
+	ID           string `json:"id"`
+	Type         string `json:"type"`
+	TotalItems   int    `json:"totalItems"`
+	First        string `json:"first,omitempty"`
+	Last         string `json:"last,omitempty"`
+	OrderedItems []any  `json:"orderedItems,omitempty"`
+}
+
 // PublicKey is the embedded JSON-LD object describing a user's signing key.
 type PublicKey struct {
 	ID           string `json:"id"`
@@ -598,6 +612,8 @@ func AddContext(o any) {
 	case *Flag:
 		v.Context = ctx
 	case *Move:
+		v.Context = ctx
+	case *OrderedCollection:
 		v.Context = ctx
 	}
 }

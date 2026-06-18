@@ -1791,6 +1791,7 @@ func (s *Server) setupRoutes() {
 	// 返したいので、フォールバックとして frontendHTML を注入しておく。
 	apHandler.SetNonAPFallback(frontend)
 	s.echo.GET("/users/:id", apHandler.User)
+	s.echo.GET("/users/:id/collections/featured", apHandler.Featured) // #1876 pinned notes
 	s.echo.GET("/notes/:id", apHandler.Note)
 	s.echo.GET("/@:acct", apHandler.UserByAcct)
 

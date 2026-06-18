@@ -3,6 +3,7 @@ package activitypub
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ func TestURLBuilder_Helpers(t *testing.T) {
 	b := NewURLBuilder("https://example.com")
 	assert.Equal(t, "https://example.com/users/u1", b.UserURI("u1"))
 	assert.Equal(t, "https://example.com/@alice", b.UserProfileURL("alice"))
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", b.UserFeatured("u1"))
 	assert.Equal(t, "https://example.com/users/u1/inbox", b.UserInbox("u1"))
 	assert.Equal(t, "https://example.com/users/u1/outbox", b.UserOutbox("u1"))
 	assert.Equal(t, "https://example.com/users/u1/followers", b.UserFollowers("u1"))
@@ -158,6 +160,8 @@ func TestRenderer_RenderPerson(t *testing.T) {
 	// url は id と区別し、人間向け profile ハンドル /@<username> を指す (#1869)。
 	assert.Equal(t, "https://example.com/@alice", p.URL)
 	assert.NotEqual(t, p.ID, p.URL, "actor url must differ from id")
+	// featured は local actor に無条件出力される (#1876)。
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", p.Featured)
 	assert.Equal(t, "Person", p.Type)
 	assert.Equal(t, "alice", p.PreferredUsername)
 	assert.Equal(t, "Alice", p.Name)
@@ -166,6 +170,35 @@ func TestRenderer_RenderPerson(t *testing.T) {
 	assert.True(t, p.Discoverable)
 	require.NotNil(t, p.Icon)
 	assert.Equal(t, avatar, p.Icon.URL)
+}
+
+func TestRenderer_URLs(t *testing.T) {
+	r := newRenderer()
+	require.NotNil(t, r.URLs())
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", r.URLs().UserFeatured("u1"))
+}
+
+func TestRenderer_RenderOrderedCollection(t *testing.T) {
+	r := newRenderer()
+
+	// inline items (featured 相当): orderedItems を持ち first/last は省略。
+	col := r.RenderOrderedCollection("https://example.com/users/u1/collections/featured", 2, "", "",
+		[]any{map[string]any{"id": "n1"}, map[string]any{"id": "n2"}})
+	assert.Equal(t, "OrderedCollection", col.Type)
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", col.ID)
+	assert.Equal(t, 2, col.TotalItems)
+	assert.Len(t, col.OrderedItems, 2)
+	assert.Empty(t, col.First)
+	assert.Empty(t, col.Last)
+
+	// first/last omitempty + orderedItems 無し → JSON に first/last/orderedItems が出ない。
+	base := r.RenderOrderedCollection("https://example.com/users/u1/outbox", 5, "", "", nil)
+	b, err := json.Marshal(base)
+	require.NoError(t, err)
+	js := string(b)
+	assert.Contains(t, js, `"totalItems":5`)
+	assert.NotContains(t, js, "first")
+	assert.NotContains(t, js, "orderedItems")
 }
 
 func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {

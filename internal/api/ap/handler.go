@@ -605,3 +605,43 @@ func (h *Handler) Note(c echo.Context) error {
 	note := h.renderer.RenderNote(n, h.idGen)
 	return writeActivityJSON(c, note)
 }
+
+// Featured handles GET /users/:id/collections/featured, serving the local
+// user's pinned notes as an OrderedCollection (upstream
+// ActivityPubServerService.featured, #1876)。actor が advertise する featured URI に
+// 対応する。pinned note は inline 出力 (pagination 無し、upstream と同じ)。
+//
+// upstream と同じく !localOnly かつ visibility ∈ {public, home} の note のみ serve し、
+// followers/specified/localOnly な pinned note を unauthenticated AP へ leak させない。
+func (h *Handler) Featured(c echo.Context) error {
+	c.Response().Header().Set("Vary", "Accept")
+	id := c.Param("id")
+	bundle, err := h.userService.ShowByID(id)
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	// local user 専用 (remote actor の featured collection は serve しない)。
+	if !bundle.User.IsLocal() {
+		return c.NoContent(http.StatusNotFound)
+	}
+	notes, err := h.userService.ListPinnedNotes(id)
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	items := make([]any, 0, len(notes))
+	for _, n := range notes {
+		// upstream featured の filter: !localOnly && visibility ∈ {public, home}。
+		if n.LocalOnly || (n.Visibility != model.NoteVisibilityPublic && n.Visibility != model.NoteVisibilityHome) {
+			continue
+		}
+		rn := h.renderer.RenderNote(n, h.idGen)
+		// collection 直下に embed するので per-note @context は外す
+		// (upstream renderNote は bare object を返し、@context は collection 側のみ)。
+		rn.Context = nil
+		items = append(items, rn)
+	}
+	// totalItems は filter 後の件数 (upstream は renderedNotes.length)。
+	col := h.renderer.RenderOrderedCollection(h.renderer.URLs().UserFeatured(id), len(items), "", "", items)
+	activitypub.AddContext(col)
+	return writeActivityJSON(c, col)
+}
