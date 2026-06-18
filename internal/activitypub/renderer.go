@@ -33,6 +33,13 @@ func (b *URLBuilder) UserURI(userID string) string {
 	return b.baseURL + "/users/" + userID
 }
 
+// UserProfileURL returns the human-facing profile page URL (/@username),
+// used as the actor's `url` field distinct from its `id` (/users/<id>)。
+// upstream renderPerson の url: `${config.url}/@${user.username}` に揃える (#1869)。
+func (b *URLBuilder) UserProfileURL(username string) string {
+	return b.baseURL + "/@" + username
+}
+
 // UserInbox returns the inbox URL for a user.
 func (b *URLBuilder) UserInbox(userID string) string {
 	return b.UserURI(userID) + "/inbox"
@@ -254,9 +261,13 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 		Followers:         r.urls.UserFollowers(u.ID),
 		Following:         r.urls.UserFollowing(u.ID),
 		PreferredUsername: u.Username,
-		URL:               uri,
-		SharedInbox:       r.urls.SharedInbox(), // top-level (#1560)
-		Endpoints:         Endpoints{SharedInbox: r.urls.SharedInbox()},
+		// url は id (/users/<id>) と区別し、人間向け profile ページ /@<username> を
+		// 指す (#1869、upstream renderPerson)。連合向け caller は local user (Host==nil)
+		// のみ RenderPerson に渡す前提なので自ドメインの /@username で正しい
+		// (admin debug 経路 resolveLocal の host guard 欠落は #1873 で別途対応)。
+		URL:         r.urls.UserProfileURL(u.Username),
+		SharedInbox: r.urls.SharedInbox(), // top-level (#1560)
+		Endpoints:   Endpoints{SharedInbox: r.urls.SharedInbox()},
 		PublicKey: PublicKey{
 			ID:           r.urls.UserKeyURI(u.ID),
 			Owner:        uri,
