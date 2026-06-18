@@ -740,6 +740,50 @@ func TestCreateService_ReplyAndChannelVisibilityAdjustment(t *testing.T) {
 	})
 }
 
+// #1859: 空文字 channelId は非 channel に正規化し、channel 強制対象外とする。
+func TestCreateService_EmptyChannelIDNormalized(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	text := "x"
+	empty := ""
+	created, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"}, Text: &text, ChannelID: &empty,
+		Visibility: model.NoteVisibilityHome,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "空文字 channelId は channel 扱いせず public 強制しない")
+	assert.False(t, created.LocalOnly)
+	assert.Nil(t, created.ChannelID, "空文字 channelId は nil に正規化")
+}
+
+// #1859: reply は対象の channel を継承する (channel note への reply は同 channel に入り
+// public/localOnly 強制を受ける)。
+func TestCreateService_ReplyInheritsChannel(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	chX := "chX"
+	noteRepo.Notes["cn"] = &model.Note{ID: "cn", UserID: "other", Visibility: model.NoteVisibilityPublic, ChannelID: &chX}
+	text := "re"
+	rid := "cn"
+	// channel 未指定で channel note へ reply。
+	created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid})
+	require.NoError(t, err)
+	require.NotNil(t, created.ChannelID)
+	assert.Equal(t, "chX", *created.ChannelID, "channel note への reply は同 channel に入る")
+	assert.Equal(t, model.NoteVisibilityPublic, created.Visibility, "channel 継承で public 強制")
+	assert.True(t, created.LocalOnly)
+}
+
+// #1859: channel 外 (非 channel note) への reply は指定 channel を外れる。
+func TestCreateService_ReplyOutsideChannelLeavesChannel(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	noteRepo.Notes["plain"] = &model.Note{ID: "plain", UserID: "other", Visibility: model.NoteVisibilityPublic}
+	text := "re"
+	rid := "plain"
+	chX := "chX"
+	created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, ChannelID: &chX})
+	require.NoError(t, err)
+	assert.Nil(t, created.ChannelID, "非 channel note への reply は指定 channel を外れる")
+}
+
 func TestCreateService_ReplyHappyPath(t *testing.T) {
 	svc, noteRepo, _ := newCreateService(t)
 	noteRepo.Notes["target"] = &model.Note{

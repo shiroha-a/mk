@@ -383,13 +383,51 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// localOnly は renote / reply 対象が local-only のとき伝播させる (#1849 / #1855)。
 	localOnly := in.LocalOnly
 
+	// reply/renote 先を取得する。reply 先の channel を継承する re-scoping (#1859) と
+	// channel-force / silencing が effective channel に依存するため、channel 判定より
+	// 前に fetch する。fetch error は後段の validation block で報告するので、報告順
+	// (reply → renote) は変わらない。ReplyID / RenoteID の fetch は独立なので並列に
+	// 走らせる (#300 2-5)。
+	var (
+		replyTarget, renoteTarget *model.Note
+		replyFetchErr             error
+		renoteFetchErr            error
+	)
+	{
+		var wg sync.WaitGroup
+		if in.ReplyID != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				replyTarget, replyFetchErr = s.noteRepo.FindByIDWithUser(*in.ReplyID)
+			}()
+		}
+		if in.RenoteID != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				renoteTarget, renoteFetchErr = s.noteRepo.FindByIDWithUser(*in.RenoteID)
+			}()
+		}
+		wg.Wait()
+	}
+
+	// effective channel を決める (#1859):
+	//   - 空文字 channelId は不正入力なので非 channel に正規化する (part 2)。
+	//   - reply がある場合は upstream NoteCreateService:444-458 ("reply は対象の
+	//     スコープに合わせる") に倣い reply 先の channel を継承する (part 1)。これにより
+	//     channel 外への reply は channel を外れ、channel note への reply は同 channel に
+	//     入る。specifiedChannelID は user 指定 channel の存在検証専用に別途保持する。
+	specifiedChannelID := normalizeChannelID(in.ChannelID)
+	effectiveChannelID := specifiedChannelID
+	if replyTarget != nil {
+		effectiveChannelID = normalizeChannelID(replyTarget.ChannelID)
+	}
+
 	// channel note は upstream NoteCreateService:463-465 と同じく visibility=public /
 	// localOnly=true を強制し、visibleUserIds を空にする (channel 機構が露出範囲を
-	// 管理するため、#1855)。channel 判定は channel membership 操作 (EnsureChannelExists
-	// / OnNotePosted) と同じ `in.ChannelID != nil && *in.ChannelID != ""` を採用する。
-	// 空文字 channelID は不正入力で実際の channel ではないため強制対象外
-	// (upstream は misskey:id schema で "" を 400 reject、その正規化は #1859)。
-	isChannelNote := in.ChannelID != nil && *in.ChannelID != ""
+	// 管理するため、#1855)。re-scope 後の effective channel で判定する。
+	isChannelNote := effectiveChannelID != nil
 	if isChannelNote {
 		visibility = model.NoteVisibilityPublic
 		localOnly = true
@@ -401,11 +439,10 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// 投稿は成功するが timeline 表出範囲だけ絞られる)。channel 内の note は
 	// channel 機構自体が露出範囲を管理するので降格しない (#1024)。
 	//
-	// channel 判定は upstream の `data.channel == null` に厳密対応させて
-	// `in.ChannelID == nil` のみとする。空文字 channelID は API として
-	// 不正値だが、空文字を「非 channel」と扱うと upstream で channel 扱い
-	// される request を mk-go で降格してしまう挙動差が出る (= 互換性破壊)。
-	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
+	// channel 判定は upstream の `data.channel == null` に対応する effectiveChannelID
+	// (空文字正規化 + reply 継承済、#1859) を使う。channel note は上で public 強制
+	// 済なのでこの gate は実質 channel 外の note にだけ効く。
+	if visibility == model.NoteVisibilityPublic && effectiveChannelID == nil {
 		if s.silencingProvider != nil && s.silencingProvider.IsSilenced(in.User.ID) {
 			visibility = model.NoteVisibilityHome
 		}
@@ -430,7 +467,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// federation broadcast から外れる effect で、admin が設定したセンシティブ
 	// ワード設定が実機で効くようにする (drop-in regression fix)。upstream と
 	// 同じく filter は `/regex/flags` または space 区切り AND match。
-	if visibility == model.NoteVisibilityPublic && in.ChannelID == nil {
+	if visibility == model.NoteVisibilityPublic && effectiveChannelID == nil {
 		if matchesSensitiveWords(meta, in.Text, in.CW) {
 			visibility = model.NoteVisibilityHome
 		}
@@ -456,43 +493,21 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		return nil, err
 	}
 
-	// channelId が指定されていれば存在チェック。channelHook 未設定なら
-	// channel 機能が無効なものとして扱い、エラーは返さない。
-	if in.ChannelID != nil && *in.ChannelID != "" && s.channelHook != nil {
-		if err := s.channelHook.EnsureChannelExists(*in.ChannelID); err != nil {
+	// user 指定 channel の存在チェック (空文字正規化済 specifiedChannelID)。reply
+	// 継承で得た channel は元 note が属する実在 channel なので検証不要 (#1859)。
+	// channelHook 未設定なら channel 機能無効として扱いエラーは返さない。
+	// 注: reply 先 channel が削除済の極端ケースでは upstream (findOneBy→null で
+	// channel=null) と異なり dangling な channelId を残す。mk-go に channel 削除
+	// 経路が無く到達しない上、OnNotePosted も no-op で無害なため許容する。
+	if specifiedChannelID != nil && s.channelHook != nil {
+		if err := s.channelHook.EnsureChannelExists(*specifiedChannelID); err != nil {
 			return nil, ErrChannelNotFound
 		}
 	}
 
-	// reply/renote先のノートを取得し、閲覧権限を確認する。
-	// 取得したノートは、後段のカウンタ更新と非正規化フィールドの埋め込みに使う。
-	// ReplyID と RenoteID の DB fetch は完全に独立しているので並列に走らせて
-	// 1 round-trip ぶん latency を削る (#300 2-5)。validation は fetch 後に
-	// 直列で走らせ、エラー報告順 (reply → renote) は変えない。
-	var (
-		replyTarget, renoteTarget *model.Note
-		replyFetchErr             error
-		renoteFetchErr            error
-	)
-	{
-		var wg sync.WaitGroup
-		if in.ReplyID != nil {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				replyTarget, replyFetchErr = s.noteRepo.FindByIDWithUser(*in.ReplyID)
-			}()
-		}
-		if in.RenoteID != nil {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				renoteTarget, renoteFetchErr = s.noteRepo.FindByIDWithUser(*in.RenoteID)
-			}()
-		}
-		wg.Wait()
-	}
-
+	// reply/renote 先の取得 (FindByIDWithUser) は visibility 決定のため上方へ移動済。
+	// ここでは取得済みの replyTarget / renoteTarget を validation に使う。報告順は
+	// reply → renote。
 	if in.ReplyID != nil {
 		if replyFetchErr != nil {
 			return nil, ErrReplyTargetNotFound
@@ -525,7 +540,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 		// local-only な対象への reply は local-only にする (channel 外のみ、
 		// upstream:541-543)。
-		if t.LocalOnly && in.ChannelID == nil {
+		if t.LocalOnly && effectiveChannelID == nil {
 			localOnly = true
 		}
 	}
@@ -565,7 +580,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 		// local-only な対象を renote したら local-only にする (channel 外のみ、
 		// upstream `data.renote.localOnly && data.channel == null`)。
-		if t.LocalOnly && in.ChannelID == nil {
+		if t.LocalOnly && effectiveChannelID == nil {
 			localOnly = true
 		}
 		// pure renoteを更にrenoteするのは禁止 (TS: isRenote && !isQuote)
@@ -578,10 +593,13 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 				return nil, err
 			}
 		}
-		// チャンネル外への renote 可否: 対象がチャンネル note で、本 note の
-		// ChannelID が対象と異なる (= チャンネル外への転送) 場合は channel の
-		// allowRenoteToExternal を確認する。
-		if t.ChannelID != nil && !sameChannel(t.ChannelID, in.ChannelID) {
+		// チャンネル外への renote 可否: 対象がチャンネル note で、ユーザー指定の
+		// channel が対象と異なる (= チャンネル外への転送) 場合は channel の
+		// allowRenoteToExternal を確認する。upstream は本 gate を createNote
+		// wrapper で **re-scope 前の data.channelId** で評価するため、reply 継承後の
+		// effectiveChannelID ではなく specifiedChannelID (= 正規化した user 指定) を
+		// 使う (#1859 review)。
+		if t.ChannelID != nil && !sameChannel(t.ChannelID, specifiedChannelID) {
 			if err := s.checkRenoteOutsideOfChannel(*t.ChannelID); err != nil {
 				return nil, err
 			}
@@ -616,7 +634,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		ReactionAcceptance: in.ReactionAcceptance,
 		ReplyID:            in.ReplyID,
 		RenoteID:           in.RenoteID,
-		ChannelID:          in.ChannelID,
+		ChannelID:          effectiveChannelID,
 		FileIDs:            in.FileIDs,
 		UserHost:           in.User.Host,
 		Tags:               pq.StringArray(tags),
@@ -739,7 +757,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 			NoteVisibility: visibility,
 			UserID:         in.User.ID,
 			UserHost:       in.User.Host,
-			ChannelID:      in.ChannelID,
+			ChannelID:      effectiveChannelID,
 			ExpiresAt:      in.Poll.ExpiresAt,
 		}
 		if err := s.pollRepo.Create(poll); err != nil {
@@ -772,8 +790,10 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	if s.federationHook != nil {
 		safeGo(func() { s.federationHook.OnNoteCreated(finalNote, in.User) })
 	}
-	if s.channelHook != nil && in.ChannelID != nil && *in.ChannelID != "" {
-		chID := *in.ChannelID
+	// OnNotePosted は note が実際に属する effective channel (re-scope 後、#1859) で
+	// 発火する。reply で別 channel に入った/外れた場合も正しい channel に通知する。
+	if s.channelHook != nil && effectiveChannelID != nil {
+		chID := *effectiveChannelID
 		noteID := finalNote.ID
 		authorID := in.User.ID
 		safeGo(func() { s.channelHook.OnNotePosted(chID, noteID, authorID) })
@@ -1042,6 +1062,17 @@ func sameChannel(a, b *string) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// normalizeChannelID は channelId pointer を正規化する: nil / 空文字 (不正入力) は
+// 「非 channel」を表す nil に畳む (#1859)。これで silencing / force / 構築など全 gate
+// で空文字 channelId を一貫して非 channel 扱いできる (upstream は misskey:id schema で
+// 空文字を 400 reject する)。
+func normalizeChannelID(id *string) *string {
+	if id == nil || *id == "" {
+		return nil
+	}
+	return id
 }
 
 // matchesSensitiveWords reports whether the note's CW or text contains any
