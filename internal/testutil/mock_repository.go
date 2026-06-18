@@ -23,6 +23,9 @@ type MockUserRepository struct {
 	// from ListUserRecommendations. Set by tests to emulate the "already
 	// following" filter.
 	RecommendationFollowing map[string][]string
+	// UpdateProfileErr, when non-nil, is returned by UpdateProfile so tests
+	// can exercise persistence-failure branches.
+	UpdateProfileErr error
 }
 
 func NewMockUserRepository() *MockUserRepository {
@@ -462,6 +465,9 @@ func (m *MockUserRepository) ListUserRecommendations(viewerID string, activeSinc
 }
 
 func (m *MockUserRepository) UpdateProfile(userID string, fields map[string]any) error {
+	if m.UpdateProfileErr != nil {
+		return m.UpdateProfileErr
+	}
 	p, ok := m.Profiles[userID]
 	if !ok {
 		// 既存プロフィールがなければ作成する(本物のDBではFK制約があるが、テストのモックでは緩い)

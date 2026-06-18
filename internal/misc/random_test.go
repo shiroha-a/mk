@@ -3,6 +3,7 @@ package misc
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,52 @@ func TestSecureRandomHex_PanicsOnRandFailure(t *testing.T) {
 		}
 	}()
 	_ = SecureRandomHex(16)
+}
+
+func TestSecureRandomString_LengthAndCharset(t *testing.T) {
+	for _, n := range []int{1, 8, 16, 64} {
+		s := SecureRandomString(n, AlphanumericChars)
+		if len(s) != n {
+			t.Errorf("SecureRandomString(%d) returned length %d", n, len(s))
+		}
+		for _, c := range s {
+			if !strings.ContainsRune(AlphanumericChars, c) {
+				t.Errorf("char %q not in AlphanumericChars", c)
+			}
+		}
+	}
+}
+
+func TestSecureRandomString_EmptyInputs(t *testing.T) {
+	if got := SecureRandomString(0, AlphanumericChars); got != "" {
+		t.Errorf("length 0 should return empty, got %q", got)
+	}
+	if got := SecureRandomString(-1, AlphanumericChars); got != "" {
+		t.Errorf("negative length should return empty, got %q", got)
+	}
+	if got := SecureRandomString(8, ""); got != "" {
+		t.Errorf("empty charset should return empty, got %q", got)
+	}
+}
+
+func TestSecureRandomString_SingleCharCharset(t *testing.T) {
+	// 単一文字の charset では全桁がその文字になる (modulo が常に 0)。
+	if got := SecureRandomString(5, "x"); got != "xxxxx" {
+		t.Errorf("expected xxxxx, got %q", got)
+	}
+}
+
+func TestSecureRandomString_PanicsOnRandFailure(t *testing.T) {
+	orig := randReader
+	randReader = failingReader{}
+	defer func() { randReader = orig }()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic, got none")
+		}
+	}()
+	_ = SecureRandomString(8, AlphanumericChars)
 }
 
 // limitedReader returns exactly n bytes then io.EOF, useful for verifying

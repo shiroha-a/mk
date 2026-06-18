@@ -2281,14 +2281,9 @@ func (s *Server) setupRoutes() {
 	// Undo(Delete) を remote instances へ配信する (#1759)。
 	adminHandler.SetUserModerationFederationHook(corefederation.NewUserModerationDeliveryHook(deliverService, apRenderer, userRepo))
 	adminHandler.SetDeleteAccountEnqueuer(s.queueClient)
-	adminHandler.SetPasswordResetRepo(resetReqRepo)
 	adminHandler.SetServerURL(s.config.URL)
 	adminHandler.SetConfigSetupPassword(s.config.SetupPassword)
 	adminHandler.SetSMTPProxyURL(s.config.ProxySmtp)
-	// admin/reset-password の確認メール送信。per-call 再 Fetch (#1112) +
-	// smtpSecure 反映 (#1111)。admin.EmailSender は (to, subject, body)
-	// 形式なので SubjectBodySenderFromMeta で wrap する。
-	adminHandler.SetEmailSender(miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp))
 	modLogService := coremodlog.New(modLogRepo, idGen)
 	adminHandler.SetModLogService(modLogService)
 	// #1765: moderator が他人の note を削除したとき deleteNote moderation log を残す。
