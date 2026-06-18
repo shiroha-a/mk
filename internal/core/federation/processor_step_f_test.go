@@ -1086,6 +1086,36 @@ func TestProcess_UpdatePerson(t *testing.T) {
 	assert.True(t, updated.IsLocked, "manuallyApprovesFollowers must update isLocked (full refresh)")
 }
 
+// #1848: 配送 actor と異なる object.id の Update(Person) は、対象 actor の
+// TTL-bypass 強制再取得 (amplification) を誘発させない。
+func TestProcess_UpdatePerson_CrossActorRejected(t *testing.T) {
+	// fetcher は呼ばれたら alice を "Hijacked" に書き換える doc を返す。gate が
+	// 効いていれば ForceResolveActor 自体が呼ばれず、alice は再取得されない。
+	refreshedDoc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Service",
+		"preferredUsername": "alice",
+		"name": "Hijacked",
+		"inbox": "https://remote.example/users/alice/inbox"
+	}`
+	env := newFullProcessor(t, refreshedDoc)
+	aliceURI := "https://remote.example/users/alice"
+	origName := "Alice Original"
+	env.userRepo.Users["alice-id"] = &model.User{ID: "alice-id", Username: "alice", URI: &aliceURI, Name: &origName}
+	// 配送 actor は別人 mallory、object.id は alice。
+	body := []byte(`{
+		"type": "Update",
+		"actor": "https://evil.example/users/mallory",
+		"object": {"id":"https://remote.example/users/alice","type":"Person","name":"Hijacked"}
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	updated := env.userRepo.Users["alice-id"]
+	require.NotNil(t, updated.Name)
+	assert.Equal(t, "Alice Original", *updated.Name, "別 actor の Update(Person) は対象を再取得・改変しない")
+	assert.False(t, updated.IsBot, "別 actor の Update では full refresh も起きない")
+}
+
 func TestProcess_UpdateUnknownActor(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
 	body := []byte(`{

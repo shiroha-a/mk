@@ -1613,6 +1613,13 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		// Note / Question / Game は上で dispatch 済。残り (Article 等) は未対応。
 		return nil
 	}
+	// upstream ApInboxService.update は配送 actor 本人 (actor.uri) のみを再取得・
+	// 更新する。object の id が配送 actor と異なる Update(Person) は、別 actor の
+	// TTL-bypass 強制再取得 (amplification) を誘発するため拒否する (Note/Question
+	// 経路と対称、#1848)。act.Actor は authorizeActor で署名者と一致を検証済み。
+	if act.Actor != "" && person.ID != act.Actor {
+		return nil
+	}
 	if _, err := p.userRepo.FindByURI(person.ID); err != nil {
 		// 未取得のリモートユーザーなら無視 (次回 follow/inbox などで取り込まれる)
 		return nil
