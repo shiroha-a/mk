@@ -1131,6 +1131,13 @@ func (m *MockNoteRepository) ListByUserID(userID string, untilID, sinceID string
 	}, untilID, sinceID, limit), nil
 }
 
+func (m *MockNoteRepository) ListPublicByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+	return m.listFiltered(func(n *model.Note) bool {
+		return n.UserID == userID && !n.LocalOnly &&
+			(n.Visibility == model.NoteVisibilityPublic || n.Visibility == model.NoteVisibilityHome)
+	}, untilID, sinceID, limit), nil
+}
+
 // ListByUserIDFiltered は ListByUserID に upstream `users/notes` 互換の
 // filter 引数を適用した版。production GORM impl と同 logic で predicate に
 // 詰めて listFiltered に委譲する (#1021)。bool 4 引数は repository interface

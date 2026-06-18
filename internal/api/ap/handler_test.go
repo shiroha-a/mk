@@ -1307,3 +1307,196 @@ func TestFeatured_Remote(t *testing.T) {
 	require.NoError(t, h.Featured(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "remote actor featured must 404")
 }
+
+// --- outbox collection (#1878) ---
+
+func newHandlerWithOutbox(t *testing.T) (*Handler, *testutil.MockUserRepository, *testutil.MockNoteRepository) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	userSvc := coreuser.NewService(userRepo, noteRepo, piningRepo, idGen)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	keypairRepo := &memoryKeypairRepo{items: map[string]*model.UserKeypair{}}
+	h := NewHandler(activitypub.NewRenderer(activitypub.NewURLBuilder("https://example.com")), userSvc, querySvc, keypairRepo, idGen)
+	h.SetNoteRepo(noteRepo)
+	return h, userRepo, noteRepo
+}
+
+func TestOutbox_IndexCollection(t *testing.T) {
+	h, userRepo, _ := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 10}
+
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "public, max-age=180", rec.Header().Get("Cache-Control"))
+
+	var col map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &col))
+	assert.Equal(t, "OrderedCollection", col["type"])
+	assert.Equal(t, "https://example.com/users/u1/outbox", col["id"])
+	assert.Equal(t, float64(10), col["totalItems"])
+	assert.Equal(t, "https://example.com/users/u1/outbox?page=true", col["first"])
+}
+
+func TestOutbox_Page_CreateActivities(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 2}
+	text := "hi"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text}
+	noteRepo.Notes["n2"] = &model.Note{ID: "n2", UserID: "u1", Visibility: model.NoteVisibilityHome, Text: &text}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.Equal(t, "OrderedCollectionPage", page["type"])
+	assert.Equal(t, "https://example.com/users/u1/outbox", page["partOf"])
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 2)
+	first, _ := items[0].(map[string]any)
+	assert.Equal(t, "Create", first["type"])
+	next, _ := page["next"].(string)
+	assert.Contains(t, next, "page=true&until_id=")
+}
+
+func TestOutbox_Page_PureRenoteAsAnnounce(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 1}
+	noteRepo.Notes["tgt"] = &model.Note{ID: "tgt", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	renoteID := "tgt"
+	noteRepo.Notes["re"] = &model.Note{ID: "re", UserID: "u1", Visibility: model.NoteVisibilityPublic, RenoteID: &renoteID}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 1)
+	item, _ := items[0].(map[string]any)
+	assert.Equal(t, "Announce", item["type"])
+	assert.Equal(t, "https://example.com/notes/tgt", item["object"], "Announce object = target note URI")
+}
+
+func TestOutbox_Page_ExcludesNonPublic(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 4}
+	text := "x"
+	noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text}
+	noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &text}
+	noteRepo.Notes["spec"] = &model.Note{ID: "spec", UserID: "u1", Visibility: model.NoteVisibilitySpecified, Text: &text}
+	noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "u1", Visibility: model.NoteVisibilityPublic, LocalOnly: true, Text: &text}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	assert.Len(t, items, 1, "followers/specified/localOnly notes excluded from outbox")
+}
+
+// since_id 指定時は repo が ASC で返すのを handler が DESC に反転し、prev/next を
+// 正しい向き (prev=最新, next=最古) で出すこと (#1878 review M1)。
+func TestOutbox_Page_SinceReverse(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 3}
+	text := "x"
+	for _, nid := range []string{"o1", "o2", "o3"} { // o1 < o2 < o3
+		noteRepo.Notes[nid] = &model.Note{ID: nid, UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text}
+	}
+
+	// since_id=o1 → id > o1 = {o2,o3}、ASC で取得 → DESC に反転 → [o3, o2]。
+	c, rec := newReqQuery(t, "id", "u1", "page=true&since_id=o1")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 2)
+	// 反転後の先頭は最新 (o3)。Create.object.id = .../notes/o3。
+	first, _ := items[0].(map[string]any)
+	obj, _ := first["object"].(map[string]any)
+	assert.Equal(t, "https://example.com/notes/o3", obj["id"], "reversed → newest first")
+	// prev=最新 (o3), next=最古 (o2)。
+	assert.Contains(t, page["prev"], "since_id=o3")
+	assert.Contains(t, page["next"], "until_id=o2")
+}
+
+// remote renote target は Announce.object に remote URI を出す (#1878 review m1)。
+func TestOutbox_Page_RemoteRenoteTarget_Announce(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 1}
+	host := "remote.example"
+	turi := "https://remote.example/notes/x"
+	noteRepo.Notes["tgt"] = &model.Note{ID: "tgt", UserID: "rem", Visibility: model.NoteVisibilityPublic, UserHost: &host, URI: &turi}
+	rid := "tgt"
+	noteRepo.Notes["re"] = &model.Note{ID: "re", UserID: "u1", Visibility: model.NoteVisibilityPublic, RenoteID: &rid}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 1)
+	item, _ := items[0].(map[string]any)
+	assert.Equal(t, "Announce", item["type"])
+	assert.Equal(t, turi, item["object"], "Announce object = remote target uri")
+}
+
+// target を解決できない pure renote は Create にフォールバックする (#1878 review m1)。
+func TestOutbox_Page_RenoteTargetMissing_CreateFallback(t *testing.T) {
+	h, userRepo, noteRepo := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", NotesCount: 1}
+	rid := "ghost" // target を seed しない
+	noteRepo.Notes["re"] = &model.Note{ID: "re", UserID: "u1", Visibility: model.NoteVisibilityPublic, RenoteID: &rid}
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true")
+	require.NoError(t, h.Outbox(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	items, _ := page["orderedItems"].([]any)
+	require.Len(t, items, 1)
+	item, _ := items[0].(map[string]any)
+	assert.Equal(t, "Create", item["type"], "unresolvable target → Create fallback")
+}
+
+func TestOutbox_SinceAndUntil_400(t *testing.T) {
+	h, userRepo, _ := newHandlerWithOutbox(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	c, rec := newReqQuery(t, "id", "u1", "page=true&since_id=a&until_id=b")
+	require.NoError(t, h.Outbox(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestOutbox_Remote_NotFound(t *testing.T) {
+	h, userRepo, _ := newHandlerWithOutbox(t)
+	host := "remote.example"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Outbox(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestOutbox_UnknownUser_NotFound(t *testing.T) {
+	h, _, _ := newHandlerWithOutbox(t)
+	c, rec := newReq(t, "id", "ghost")
+	require.NoError(t, h.Outbox(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestOutbox_RepoUnwired_NotFound(t *testing.T) {
+	h, userRepo, _, _ := newHandlerWithPining(t) // noteRepo (outbox) 未配線
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.Outbox(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}

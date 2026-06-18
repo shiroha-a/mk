@@ -66,6 +66,9 @@ type NoteRepository interface {
 	IncrementCount(noteID, column string, delta int) error
 	IncrementReaction(noteID, reaction string, delta int) error
 	ListByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListPublicByUserID is ListByUserID restricted to AP-servable notes
+	// (visibility IN (public, home) AND NOT localOnly), for the actor outbox (#1878)。
+	ListPublicByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error)
 	// ListByUserIDFiltered returns notes owned by userID with upstream
 	// `users/notes` filter parameters applied. 4 つの bool は upstream paramDef
 	// と同じ semantics で各々:
@@ -334,6 +337,24 @@ func (r *noteRepository) IncrementReaction(noteID, reaction string, delta int) e
 func (r *noteRepository) ListByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where("\"userId\" = ?", userID)
+	if untilID != "" {
+		q = q.Where("id < ?", untilID)
+	}
+	if sinceID != "" {
+		q = q.Where("id > ?", sinceID)
+	}
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&notes).Error; err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
+func (r *noteRepository) ListPublicByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
+	var notes []*model.Note
+	q := preloadNoteRelations(r.db).
+		Where("\"userId\" = ?", userID).
+		Where("visibility IN ?", []string{"public", "home"}).
+		Where("\"localOnly\" = ?", false)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}

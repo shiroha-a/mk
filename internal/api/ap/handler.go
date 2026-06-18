@@ -73,12 +73,21 @@ type Handler struct {
 	// followingRepo は followers/following collection endpoint (#1877) の page
 	// 取得用。未配線なら両 endpoint は 404 (= legacy 挙動)。
 	followingRepo repository.FollowingRepository
+	// noteRepo は outbox collection endpoint (#1878) の public note 取得 +
+	// pure renote の target URI 解決用。未配線なら outbox は 404。
+	noteRepo repository.NoteRepository
 }
 
 // SetFollowingRepo wires the repository used by the followers/following AP
 // collection endpoints (#1877)。
 func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 	h.followingRepo = r
+}
+
+// SetNoteRepo wires the repository used by the outbox AP collection endpoint
+// (#1878)。
+func (h *Handler) SetNoteRepo(r repository.NoteRepository) {
+	h.noteRepo = r
 }
 
 // SetRelationRepos wires the repositories used to populate the viewer relation
@@ -795,6 +804,109 @@ func (h *Handler) actorURI(u *model.User) string {
 	}
 	if u.URI != nil {
 		return *u.URI
+	}
+	return ""
+}
+
+// Outbox handles GET /users/:id/outbox, serving the local user's public/home
+// (non-localOnly) notes as Create/Announce activities in an OrderedCollection
+// (upstream ActivityPubServerService.outbox, #1878)。
+func (h *Handler) Outbox(c echo.Context) error {
+	c.Response().Header().Set("Vary", "Accept")
+	if h.noteRepo == nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	id := c.Param("id")
+	bundle, err := h.userService.ShowByID(id)
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	if !bundle.User.IsLocal() {
+		return c.NoContent(http.StatusNotFound)
+	}
+
+	partOf := h.renderer.URLs().UserOutbox(id)
+	totalItems := bundle.User.NotesCount
+
+	// index page: totalItems + first link (upstream renderOrderedCollection)。
+	// upstream は last link (since_id=<min>) も出すが ObjectId 前提の sentinel な
+	// ので、aidx の mk-go では first + next 走査のみで完結させ last は省略する。
+	if c.QueryParam("page") != "true" {
+		col := h.renderer.RenderOrderedCollection(partOf, totalItems, partOf+"?page=true", "", nil)
+		activitypub.AddContext(col)
+		c.Response().Header().Set("Cache-Control", "public, max-age=180")
+		return writeActivityJSON(c, col)
+	}
+
+	sinceID := c.QueryParam("since_id")
+	untilID := c.QueryParam("until_id")
+	// upstream: since_id と until_id を同時指定したら 400。
+	if sinceID != "" && untilID != "" {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	const limit = 20
+	notes, err := h.noteRepo.ListPublicByUserID(id, untilID, sinceID, limit)
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	// since_id 指定時は ASC で返るので、collection の新しい順 (DESC) に揃えるため反転。
+	if sinceID != "" {
+		for i, j := 0, len(notes)-1; i < j; i, j = i+1, j-1 {
+			notes[i], notes[j] = notes[j], notes[i]
+		}
+	}
+
+	items := make([]any, 0, len(notes))
+	for _, n := range notes {
+		items = append(items, h.packOutboxActivity(bundle.User, n))
+	}
+
+	pageID := partOf + "?page=true"
+	if sinceID != "" {
+		pageID += "&since_id=" + url.QueryEscape(sinceID)
+	}
+	if untilID != "" {
+		pageID += "&until_id=" + url.QueryEscape(untilID)
+	}
+	prev, next := "", ""
+	if len(notes) > 0 {
+		prev = partOf + "?page=true&since_id=" + url.QueryEscape(notes[0].ID)
+		next = partOf + "?page=true&until_id=" + url.QueryEscape(notes[len(notes)-1].ID)
+	}
+	page := h.renderer.RenderOrderedCollectionPage(pageID, totalItems, items, partOf, prev, next)
+	activitypub.AddContext(page)
+	return writeActivityJSON(c, page)
+}
+
+// packOutboxActivity renders an outbox item: a pure renote becomes an Announce,
+// everything else a Create (upstream packActivity, #1878)。embed するので
+// per-activity @context は外す (collection 側が持つ)。
+func (h *Handler) packOutboxActivity(author *model.User, n *model.Note) any {
+	if corenote.IsPureRenote(n) && n.RenoteID != nil && *n.RenoteID != "" {
+		if targetURI := h.renoteTargetURI(*n.RenoteID); targetURI != "" {
+			ann := h.renderer.RenderAnnounce(author, n.ID, targetURI)
+			ann.Context = nil
+			return ann
+		}
+		// target を解決できないときは Create にフォールバック (shape は valid のまま)。
+	}
+	create := h.renderer.RenderCreate(n, h.idGen)
+	create.Context = nil
+	return create
+}
+
+// renoteTargetURI resolves a renote target note id to its AP URI
+// (local → /notes/<id>, remote → stored uri)。
+func (h *Handler) renoteTargetURI(targetID string) string {
+	t, err := h.noteRepo.FindByID(targetID)
+	if err != nil || t == nil {
+		return ""
+	}
+	if t.UserHost == nil || *t.UserHost == "" {
+		return h.renderer.URLs().NoteURI(t.ID)
+	}
+	if t.URI != nil {
+		return *t.URI
 	}
 	return ""
 }

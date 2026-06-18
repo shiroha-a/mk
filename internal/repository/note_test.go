@@ -3239,3 +3239,50 @@ func TestNoteRepository_CountLocal_Error(t *testing.T) {
 	_, err = repo.CountLocalComments()
 	assert.Error(t, err)
 }
+
+// ListPublicByUserID は visibility ∈ {public, home} かつ !localOnly の note のみを
+// id DESC / cursor で返す (AP outbox 用, #1878)。
+func TestNoteRepository_ListPublicByUserID(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_obx", "obxuser")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, u.ID)
+
+	mk := func(id string, vis model.NoteVisibility, localOnly bool) {
+		require.NoError(t, repo.Create(&model.Note{ID: id, UserID: u.ID, Visibility: vis, LocalOnly: localOnly}))
+	}
+	mk("obx_pub1", model.NoteVisibilityPublic, false)
+	mk("obx_pub2", model.NoteVisibilityPublic, false)
+	mk("obx_home", model.NoteVisibilityHome, false)
+	mk("obx_fol", model.NoteVisibilityFollowers, false)
+	mk("obx_spec", model.NoteVisibilitySpecified, false)
+	mk("obx_lo", model.NoteVisibilityPublic, true)
+
+	all, err := repo.ListPublicByUserID(u.ID, "", "", 50)
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, n := range all {
+		got[n.ID] = true
+	}
+	assert.Len(t, all, 3, "public x2 + home only")
+	assert.True(t, got["obx_pub1"])
+	assert.True(t, got["obx_home"])
+	assert.False(t, got["obx_fol"], "followers excluded")
+	assert.False(t, got["obx_spec"], "specified excluded")
+	assert.False(t, got["obx_lo"], "localOnly excluded")
+
+	// untilID cursor: id < "obx_pub2"。
+	page, err := repo.ListPublicByUserID(u.ID, "obx_pub2", "", 50)
+	require.NoError(t, err)
+	for _, n := range page {
+		assert.Less(t, n.ID, "obx_pub2", "cursor excludes id >= until")
+	}
+
+	// sinceID cursor: id > "obx_home" → obx_pub1, obx_pub2 を ASC で返す
+	// (paginationOrder が since-only で ASC に倒す。handler 側で reverse される)。
+	sinceRows, err := repo.ListPublicByUserID(u.ID, "", "obx_home", 50)
+	require.NoError(t, err)
+	require.Len(t, sinceRows, 2)
+	assert.Equal(t, "obx_pub1", sinceRows[0].ID, "since-only is ASC")
+	assert.Equal(t, "obx_pub2", sinceRows[1].ID)
+}
