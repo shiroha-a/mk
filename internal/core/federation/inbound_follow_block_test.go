@@ -126,3 +126,41 @@ func TestProcess_FollowBlockingWithoutBlockingServiceErrors(t *testing.T) {
 	assert.Error(t, p.Process(inboundFollowBody),
 		"without blockingService the ErrBlocking must propagate as before")
 }
+
+// inbound Follow が remote followee を対象にしている場合、local DB に
+// remote->remote の Following 行を作らず skip して ack する (#1826、upstream
+// follow() の `if (followee.host != null) return 'skip: ...'` gate)。これが無いと
+// relay / 悪意ある remote actor が Follow(actor=remoteA, object=既知 remoteB) を
+// 送るだけで following graph を汚染できる。
+func TestProcess_FollowRemoteFolloweeSkipped(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+	followingSvc := corefollowing.NewService(repo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen)
+	p := federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
+	p.SetLocalBaseURL("https://example.com")
+	acceptor := &stubInboundFollowAcceptor{}
+	p.SetInboundFollowAcceptor(acceptor)
+
+	// remote follower alice + remote followee charlie を URI 付きで pre-seed
+	host := "remote.example"
+	aliceURI := "https://remote.example/users/alice"
+	charlieURI := "https://remote.example/users/charlie"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["charlie1"] = &model.User{ID: "charlie1", Username: "charlie", UsernameLower: "charlie", URI: &charlieURI, Host: &host}
+
+	body := []byte(`{
+		"type": "Follow",
+		"id": "https://remote.example/follows/remote1",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://remote.example/users/charlie"
+	}`)
+
+	require.NoError(t, p.Process(body), "inbound follow targeting a remote followee must ack, not error")
+	assert.Empty(t, followingRepo.Followings, "no following row must be created for a remote followee")
+	assert.Empty(t, acceptor.calls, "no Accept for a remote followee")
+	assert.Empty(t, acceptor.rejects, "no Reject for a remote followee")
+}

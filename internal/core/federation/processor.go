@@ -590,6 +590,17 @@ func (p *Processor) handleFollow(act genericActivity) error {
 	if err != nil {
 		return errors.New("unknown followee")
 	}
+	// upstream follow() は followee が remote の場合 'skip: フォローしようと
+	// しているユーザーはローカルユーザーではありません' で明示的に拒否する
+	// (ApInboxService.ts)。これが無いと relay / 悪意ある remote actor が
+	// Follow(actor=remoteA, object=既知 remoteB) を送るだけで local DB に
+	// remoteA->remoteB の Following 行が作られ、フォロワー数や timeline fanout を
+	// 汚染できる。skip は error にせず ack して終わる (inbox retry を防ぐ) (#1826)。
+	if !followee.IsLocal() {
+		slog.Info("federation: skipping inbound Follow targeting a remote followee",
+			"follower", act.Actor, "followee", followeeURI)
+		return nil
+	}
 	// inbound AP Follow は AP protocol で withReplies を運ばないので
 	// FollowOptions{} (default false) で作成する (#1056)。remote follower の
 	// per-followee withReplies preference は AP protocol 範囲外。
@@ -1387,12 +1398,29 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	// 遅延配送 Announce では activity.published を採用して timeline 並びを
 	// origin と揃える (#940)。空 / parse 不可なら nowFn にフォールバック。
 	now := parseAPPublishedTime(act.Published, nowFn())
+	// upstream announceNote は activity の to/cc から renote の visibility を決める。
+	// 旧実装は public 固定で、home renote 由来の Announce (Misskey renderAnnounce は
+	// home を to=[followers], cc=[Public] で送る) が public 化され public TL / RSS /
+	// 連合配送に乗っていた (#1826)。inbound Note と同じ deriveVisibility で揃える
+	// (Misskey renderAnnounce の public=to[Public] / home=to[followers]+cc[Public] /
+	// followers=to[followers] shape を正しく判定する)。実装が送らない exotic shape
+	// (cc のみ Public 等) での upstream parseAudience との差、および specified renote の
+	// visibleUsers / 通知の扱いは #1864 で別途対応する。
+	renoteVisibility := deriveVisibility(decodeAudience(act.To), decodeAudience(act.CC))
+	// upstream NoteCreateService は renote の visibility を対象 note 以下に clamp する
+	// (home note は public で renote できず home に落ちる)。target は上の gate で
+	// public/home に限定済みなので、home target に対する public boost を home に
+	// 落とす。これが無いと crafted Announce(to=[Public], object=home note) で home
+	// note を global timeline に leak させられる。
+	if target.Visibility == model.NoteVisibilityHome && renoteVisibility == model.NoteVisibilityPublic {
+		renoteVisibility = model.NoteVisibilityHome
+	}
 	renote := &model.Note{
 		ID:         p.resolver.idGen.Generate(now),
 		UserID:     announcer.ID,
 		UserHost:   announcer.Host,
 		RenoteID:   &target.ID,
-		Visibility: model.NoteVisibilityPublic,
+		Visibility: renoteVisibility,
 	}
 	if act.ID != "" {
 		uri := act.ID
