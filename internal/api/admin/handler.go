@@ -1261,8 +1261,27 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// すべての varchar[] 列に影響していたバグで、admin が whitelist 連合や
 	// host ブロックを保存しても永続化されない原因だった。
 	coerceMetaArrayFields(fields)
-	// jsonb 列 (deliverSuspendedSoftware) は decoded []any を []byte に marshal
-	// しないと UPDATE が型不一致で失敗する (#1732)。
+	// clientOptions は upstream update-meta.ts と同じく既存値への shallow merge
+	// (`{...serverSettings.clientOptions, ...ps.clientOptions}`) にする (#1851)。
+	// replace だと partial update で未指定キーが消える。incoming が map なら既存
+	// meta.clientOptions に上書きマージ、null (= map でない) なら incoming 無し
+	// として既存を維持する (upstream の `{...existing, ...null}` と同じ)。coerce
+	// 前に行い、merge 後の map を coerceMetaJSONBFields が datatypes.JSON 化する。
+	if raw, ok := fields["clientOptions"]; ok {
+		merged := map[string]any{}
+		if m, err := h.metaRepo.Fetch(); err == nil && m != nil && len(m.ClientOptions) > 0 {
+			_ = json.Unmarshal(m.ClientOptions, &merged)
+		}
+		if incoming, isMap := raw.(map[string]any); isMap {
+			for k, v := range incoming {
+				merged[k] = v
+			}
+		}
+		fields["clientOptions"] = merged
+	}
+	// jsonb 列 (deliverSuspendedSoftware / policies / clientOptions) は decoded
+	// []any / map を []byte に marshal しないと UPDATE が型不一致で失敗する
+	// (#1732 / #1823 / #1846)。
 	coerceMetaJSONBFields(fields)
 
 	// VAPID 鍵 auto-generate (#492): Service Worker 有効化時に

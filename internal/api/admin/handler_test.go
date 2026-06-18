@@ -747,6 +747,37 @@ func TestUpdateMeta_ClientOptions(t *testing.T) {
 	assert.Equal(t, float64(1), obj["foo"])
 }
 
+// #1851: clientOptions は upstream と同じく既存値に shallow merge する。partial
+// update で未指定キーが消えず、incoming キーが既存値を上書きする。
+func TestUpdateMeta_ClientOptionsMerge(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	// 既存 clientOptions: keep="A" (未指定で保持) / override="old" (上書き対象)。
+	metaRepo.Meta.ClientOptions = datatypes.JSON([]byte(`{"keep":"A","override":"old"}`))
+
+	rec := doPost(h.UpdateMeta, `{"clientOptions":{"override":"new","added":"B"}}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal(metaRepo.Meta.ClientOptions, &obj))
+	assert.Equal(t, "A", obj["keep"], "未指定の既存キーは保持される")
+	assert.Equal(t, "new", obj["override"], "incoming が既存キーを上書きする")
+	assert.Equal(t, "B", obj["added"], "incoming の新規キーが追加される")
+}
+
+// #1851: clientOptions:null は incoming 無し = 既存維持 (upstream の
+// {...existing, ...null} と同じ spread セマンティクス)。
+func TestUpdateMeta_ClientOptionsNullKeepsExisting(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.ClientOptions = datatypes.JSON([]byte(`{"keep":"A"}`))
+
+	rec := doPost(h.UpdateMeta, `{"clientOptions":null}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal(metaRepo.Meta.ClientOptions, &obj))
+	assert.Equal(t, "A", obj["keep"], "clientOptions:null は既存を維持する")
+}
+
 // JSON で送られてくる array は []any{...} に decode されるが、そのまま
 // repo.Update に流すと lib/pq が varchar[] 列に書けず "expression is of
 // type record" で UPDATE 全体が落ちる。handler 側の coerceMetaArrayFields
