@@ -496,6 +496,20 @@ func (s *Service) IsAllowed(host string) bool {
 	return !HostMatchesAny(meta.BlockedHosts, host)
 }
 
+// FederationDisabled reports whether the instance federation mode is "none"
+// (fully isolated)。AP serve handler (actor / note / collections) はこのとき
+// 403 を返す (upstream ActivityPubServerService の federation==='none' gate、#1879)。
+// inbound は既に IsAllowed で全 host deny されるので、serve も止めるのが整合的。
+// meta が読めない場合は inbound の IsAllowed と同じくベストエフォートで false
+// (= serve) に倒し、起動時 transient error で連合露出が落ちないようにする。
+func (s *Service) FederationDisabled() bool {
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		return false
+	}
+	return meta.Federation == "none"
+}
+
 // ShouldSkipDelivery reports whether ActivityPub delivery to host must be
 // skipped because the remote instance is blocked, excluded by the federation
 // mode, or administratively suspended (suspensionState != none). 配送の

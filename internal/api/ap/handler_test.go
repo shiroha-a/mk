@@ -789,8 +789,9 @@ func TestAPIShow_RemoteFetchServiceType(t *testing.T) {
 
 // apShowHostBlocker は federation gate test 用 stub。
 type apShowHostBlocker struct {
-	blocked map[string]bool
-	allowed map[string]bool // nil = 全 allow
+	blocked     map[string]bool
+	allowed     map[string]bool // nil = 全 allow
+	fedDisabled bool
 }
 
 func (b apShowHostBlocker) IsBlocked(host string) bool { return b.blocked[host] }
@@ -800,6 +801,7 @@ func (b apShowHostBlocker) IsAllowed(host string) bool {
 	}
 	return b.allowed[host]
 }
+func (b apShowHostBlocker) FederationDisabled() bool { return b.fedDisabled }
 
 // #1557 不正な URI (http(s) でない / host 無し) → URI_INVALID。
 func TestAPIShow_URIInvalid(t *testing.T) {
@@ -1521,4 +1523,54 @@ func TestOutbox_RepoUnwired_NotFound(t *testing.T) {
 	c, rec := newReq(t, "id", "u1")
 	require.NoError(t, h.Outbox(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// federation 無効 (mode=none) の instance は AP serve handler が一律 403 を返す
+// (#1879、upstream ActivityPubServerService の federation==='none' gate)。
+func TestAPServe_FederationDisabled_403(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Handler, echo.Context) error
+	}{
+		{"User", (*Handler).User},
+		{"UserByAcct", (*Handler).UserByAcct},
+		{"Note", (*Handler).Note},
+		{"Featured", (*Handler).Featured},
+		{"Followers", (*Handler).Followers},
+		{"Following", (*Handler).Following},
+		{"Outbox", (*Handler).Outbox},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, userRepo, _, _ := newHandler(t)
+			h.SetFederationGate(apShowHostBlocker{fedDisabled: true}, "local.example")
+			userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+			c, rec := newReq(t, "id", "u1") // AP Accept
+			require.NoError(t, tc.call(h, c))
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s must 403 when federation=none", tc.name)
+		})
+	}
+}
+
+// federation 有効時は従来どおり serve する (gate が false を返す regression guard)。
+func TestAPServe_FederationEnabled_Serves(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	h.SetFederationGate(apShowHostBlocker{fedDisabled: false}, "local.example")
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUB"}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Person")
+}
+
+// browser (非AP Accept) 経路は federation 無効でも redirect される (ローカル web UI は
+// federation gate の影響を受けない)。
+func TestUser_FederationDisabled_BrowserStillRedirects(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	h.SetFederationGate(apShowHostBlocker{fedDisabled: true}, "local.example")
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	c, rec := newBrowserReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusFound, rec.Code, "browser path must redirect even when federation disabled")
 }

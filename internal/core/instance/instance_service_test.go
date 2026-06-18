@@ -433,6 +433,26 @@ func TestService_IsAllowed_AllMode(t *testing.T) {
 	assert.True(t, svc.IsAllowed(""), "empty host (= local) is always allowed")
 }
 
+// FederationDisabled は federation mode が "none" のときだけ true (#1879)。
+func TestService_FederationDisabled(t *testing.T) {
+	svc, _, metaRepo := newService(t)
+	metaRepo.Meta.Federation = "none"
+	assert.True(t, svc.FederationDisabled())
+	metaRepo.Meta.Federation = "all"
+	assert.False(t, svc.FederationDisabled())
+	metaRepo.Meta.Federation = "specified"
+	assert.False(t, svc.FederationDisabled())
+	metaRepo.Meta.Federation = ""
+	assert.False(t, svc.FederationDisabled(), "empty federation mode is not 'none'")
+}
+
+// meta が読めない場合は fail-open (= false, serve) でベストエフォート (#1879)。
+func TestService_FederationDisabled_MetaError(t *testing.T) {
+	svc, _, metaRepo := newService(t)
+	metaRepo.Meta = nil
+	assert.False(t, svc.FederationDisabled())
+}
+
 // federation == "specified" は federationHosts に列挙された host だけ allow。
 func TestService_IsAllowed_SpecifiedMode(t *testing.T) {
 	svc, _, metaRepo := newService(t)

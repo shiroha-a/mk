@@ -44,6 +44,10 @@ type RemoteResolver interface {
 type HostBlockChecker interface {
 	IsBlocked(host string) bool
 	IsAllowed(host string) bool
+	// FederationDisabled reports whether the instance federation mode is
+	// "none" (fully isolated)。true のとき AP serve handler は 403 を返す
+	// (upstream ActivityPubServerService の federation==='none' gate、#1879)。
+	FederationDisabled() bool
 }
 
 // Handler handles ActivityPub resource endpoints.
@@ -107,6 +111,13 @@ func (h *Handler) SetRemote(fetcher RemoteFetcher, resolver RemoteResolver) {
 func (h *Handler) SetFederationGate(c HostBlockChecker, localHost string) {
 	h.hostBlocker = c
 	h.localHost = localHost
+}
+
+// federationDisabled reports whether the instance is fully isolated
+// (federation mode "none")。AP serve handler はこのとき 403 を返す
+// (#1879)。hostBlocker 未配線時は false (= serve、legacy 挙動)。
+func (h *Handler) federationDisabled() bool {
+	return h.hostBlocker != nil && h.hostBlocker.FederationDisabled()
 }
 
 // SetNonAPFallback registers a handler to serve when the incoming Accept
@@ -297,6 +308,12 @@ func (h *Handler) User(c echo.Context) error {
 		return c.Redirect(http.StatusFound, acct)
 	}
 
+	// federation 無効 (mode=none) なら actor を AP serve しない (#1879)。上の
+	// browser (非AP Accept) 経路は redirect 済みなので、ローカル web UI は影響しない。
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
+
 	// リモートユーザーへのリダイレクト相当は将来対応
 	if bundle.User.Host != nil {
 		return c.NoContent(http.StatusNotFound)
@@ -318,6 +335,12 @@ func (h *Handler) User(c echo.Context) error {
 func (h *Handler) UserByAcct(c echo.Context) error {
 	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
 		return h.serveNonAP(c)
+	}
+	// federation 無効 (mode=none) なら actor を AP serve しない (#1879)。/@acct も
+	// /users/:id と同じく upstream で gate されるため、こちらにも入れる。browser 経路は
+	// 上で serveNonAP に流れるので影響しない。
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
 	}
 	acct := c.Param("acct")
 	// /@alice or /@alice@host 形式。ローカルのみ扱う。
@@ -623,6 +646,11 @@ func (h *Handler) Note(c echo.Context) error {
 	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
 		return h.serveNonAP(c)
 	}
+	// federation 無効 (mode=none) なら AP serve しない (#1879)。browser (非AP) 経路は
+	// 上で serveNonAP に流れるので、ローカル web UI は影響しない。
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
 	noteID := c.Param("id")
 	// 公開ノートのみAPでフェッチ可能 (非ログインから取得されるため viewer=nil)
 	n, err := h.queryService.Show(nil, noteID)
@@ -646,6 +674,9 @@ func (h *Handler) Note(c echo.Context) error {
 // followers/specified/localOnly な pinned note を unauthenticated AP へ leak させない。
 func (h *Handler) Featured(c echo.Context) error {
 	c.Response().Header().Set("Vary", "Accept")
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
 	id := c.Param("id")
 	bundle, err := h.userService.ShowByID(id)
 	if err != nil {
@@ -697,6 +728,9 @@ func (h *Handler) Following(c echo.Context) error {
 // 相手側の actor URI を返す。
 func (h *Handler) serveFollowCollection(c echo.Context, followers bool) error {
 	c.Response().Header().Set("Vary", "Accept")
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
 	if h.followingRepo == nil {
 		return c.NoContent(http.StatusNotFound)
 	}
@@ -826,6 +860,9 @@ func (h *Handler) actorURI(u *model.User) string {
 // (upstream ActivityPubServerService.outbox, #1878)。
 func (h *Handler) Outbox(c echo.Context) error {
 	c.Response().Header().Set("Vary", "Accept")
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
 	if h.noteRepo == nil {
 		return c.NoContent(http.StatusNotFound)
 	}
