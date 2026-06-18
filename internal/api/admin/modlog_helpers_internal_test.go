@@ -40,3 +40,23 @@ func TestLogUserActionWithUser_NilTargetIsNoop(t *testing.T) {
 		t.Errorf("expected no log writes, got %d", len(got))
 	}
 }
+
+// logUserAction が targetUserID を FindByID で引けない (= 削除済 / bogus id) 場合は
+// debug ログだけ残して何も書かないことを直接 guard する。reset-password が
+// 存在チェックを前段に持つようになり (#1862) このパスを踏まなくなったので
+// helper 単体で覆う。
+func TestLogUserAction_MissingTargetIsNoop(t *testing.T) {
+	repo := testutil.NewMockModerationLogRepository()
+	gen, err := id.NewGenerator("aidx")
+	if err != nil {
+		t.Fatalf("idgen: %v", err)
+	}
+	// userRepo は空 → FindByID は ErrNotFound を返す。
+	h := &Handler{userRepo: testutil.NewMockUserRepository(), modLogService: moderationlog.New(repo, gen)}
+
+	h.logUserAction(newCtx(), moderationlog.LogResetPassword, "ghost")
+
+	if got := repo.Snapshot(); len(got) != 0 {
+		t.Errorf("expected no log writes for a missing target, got %d", len(got))
+	}
+}
