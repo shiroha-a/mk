@@ -985,6 +985,48 @@ func TestRenderer_RenderPerson_EmojiTag(t *testing.T) {
 	assert.Equal(t, ":verified:", et.Name)
 }
 
+// localOnly 絵文字は連合させない意図なので note/Person/Like の AP tag から
+// 除外する (#1868、upstream renderer の localOnly filter と一致)。
+func TestRenderer_RenderNote_LocalOnlyEmojiExcluded(t *testing.T) {
+	r := newRenderer()
+	r.SetEmojiResolver(&stubEmojiResolver{emojis: map[string]*model.Emoji{
+		"pub":    {Name: "pub", PublicURL: "https://example.com/files/pub.webp"},
+		"secret": {Name: "secret", PublicURL: "https://example.com/files/secret.webp", LocalOnly: true},
+	}})
+	idGen := newIDGen(t)
+	n := &model.Note{
+		ID:         idGen.Generate(time.Now()),
+		UserID:     "author",
+		Visibility: model.NoteVisibilityPublic,
+		Emojis:     pq.StringArray{"pub", "secret"},
+	}
+	out := r.RenderNote(n, idGen)
+	require.Len(t, out.Tag, 1, "localOnly emoji must be excluded")
+	et, ok := out.Tag[0].(EmojiTag)
+	require.True(t, ok)
+	assert.Equal(t, ":pub:", et.Name)
+}
+
+func TestRenderer_RenderPerson_LocalOnlyEmojiExcluded(t *testing.T) {
+	r := newRenderer()
+	r.SetEmojiResolver(&stubEmojiResolver{emojis: map[string]*model.Emoji{
+		"secret": {Name: "secret", PublicURL: "https://example.com/files/secret.webp", LocalOnly: true},
+	}})
+	u := &model.User{ID: "u1", Username: "alice", Emojis: pq.StringArray{"secret"}}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	assert.Empty(t, p.Tag, "localOnly emoji must be excluded from Person tag")
+}
+
+func TestRenderer_RenderLike_LocalOnlyEmojiNoTag(t *testing.T) {
+	r := newRenderer()
+	r.SetEmojiResolver(&stubEmojiResolver{emojis: map[string]*model.Emoji{
+		"secret": {Name: "secret", PublicURL: "https://example.com/files/secret.webp", LocalOnly: true},
+	}})
+	reactor := &model.User{ID: "alice"}
+	l := r.RenderLike(reactor, "https://remote.example/notes/n1", ":secret@.:", "https://example.com/likes/l9")
+	assert.Empty(t, l.Tag, "localOnly emoji must not be emitted as Like tag")
+}
+
 func TestRenderer_RenderNote_ContextIncludesMisskey(t *testing.T) {
 	r := newRenderer()
 	idGen := newIDGen(t)

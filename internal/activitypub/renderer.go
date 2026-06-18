@@ -623,6 +623,13 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 		if err != nil {
 			continue
 		}
+		// localOnly 絵文字は『この instance 限定』の明示意図なので AP tag から
+		// 除外する (upstream renderNote/renderPerson の emojis.filter(e => !e.localOnly)
+		// / renderLike の !emoji.localOnly と同じ、#1868)。FindByNameAndHost は
+		// 表示/リアクション経路とも共有するので gate は render 側に置く。
+		if emoji.LocalOnly {
+			continue
+		}
 		tag := EmojiTag{
 			Type: "Emoji",
 			Name: ":" + emoji.Name + ":",
