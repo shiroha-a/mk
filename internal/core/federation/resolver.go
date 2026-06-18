@@ -1865,12 +1865,21 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.Str
 	return names
 }
 
-// deriveVisibility maps an AS to/cc audience pair to a Misskey visibility.
+// deriveVisibility maps an AS to/cc audience pair to a Misskey visibility,
+// mirroring upstream ApAudienceService.parseAudience (#1864):
 //
 //   - to に Public があれば public
-//   - cc に Public があり to に followers があれば home
-//   - to に followers のみ (Public 無し) なら followers
+//   - cc に Public があれば home
+//   - to / cc のいずれかに followers があれば followers
 //   - それ以外 (specific actor 列挙) は specified
+//
+// Public は upstream isPublic と同じく full IRI / as:Public / 裸 Public の 3 形式を
+// 受ける。followers collection の判定は upstream isFollowers のような actor の
+// followersUri 厳密一致ではなく /followers サフィックスで近似する。このため別 actor の
+// followers URL が to/cc に入っていると upstream の specified でなく followers になる等の
+// 差は出るが、to/cc は note の author (Announce では announcer) が自分の note/boost に
+// 対して設定するものなので、緩めても自分のコンテンツの可視性が変わるだけで第三者の
+// note を露出させることはない。
 func deriveVisibility(to, cc []string) model.NoteVisibility {
 	hasFollowers := func(list []string) bool {
 		for _, v := range list {
@@ -1880,16 +1889,27 @@ func deriveVisibility(to, cc []string) model.NoteVisibility {
 		}
 		return false
 	}
-	if slices.Contains(to, activitypub.Public) {
+	if hasPublicAudience(to) {
 		return model.NoteVisibilityPublic
 	}
-	if slices.Contains(cc, activitypub.Public) && hasFollowers(to) {
+	if hasPublicAudience(cc) {
 		return model.NoteVisibilityHome
 	}
-	if hasFollowers(to) {
+	if hasFollowers(to) || hasFollowers(cc) {
 		return model.NoteVisibilityFollowers
 	}
 	return model.NoteVisibilitySpecified
+}
+
+// hasPublicAudience reports whether list contains the AS public collection in
+// any of the forms upstream ApAudienceService.isPublic accepts (#1864)。
+func hasPublicAudience(list []string) bool {
+	for _, v := range list {
+		if v == activitypub.Public || v == "as:Public" || v == "Public" {
+			return true
+		}
+	}
+	return false
 }
 
 // hostFromURI extracts the host portion from an actor URI.

@@ -238,3 +238,33 @@ func TestEncodeAudienceIfChanged(t *testing.T) {
 		assert.JSONEq(t, `["a"]`, string(out))
 	})
 }
+
+// TestDeriveVisibility seals the parseAudience-faithful mapping (#1864):
+// to-Public→public, cc-Public→home (no followers-in-to requirement),
+// followers in to OR cc→followers, else specified. Also covers the
+// as:Public / bare Public aliases upstream isPublic accepts.
+func TestDeriveVisibility(t *testing.T) {
+	const followers = "https://remote.example/users/alice/followers"
+	cases := []struct {
+		name string
+		to   []string
+		cc   []string
+		want string
+	}{
+		{"to has Public", []string{activitypub.Public}, []string{followers}, "public"},
+		{"unlisted: followers in to, Public in cc", []string{followers}, []string{activitypub.Public}, "home"},
+		{"cc-only Public, no followers in to", nil, []string{activitypub.Public}, "home"},
+		{"cc-only Public with mention in to", []string{"https://x/u1"}, []string{activitypub.Public}, "home"},
+		{"followers in to only", []string{followers}, nil, "followers"},
+		{"followers in cc only", nil, []string{followers}, "followers"},
+		{"specified: only mentions", []string{"https://x/u1"}, nil, "specified"},
+		{"empty audience", nil, nil, "specified"},
+		{"as:Public alias in to", []string{"as:Public"}, nil, "public"},
+		{"bare Public alias in cc", nil, []string{"Public"}, "home"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, string(deriveVisibility(tc.to, tc.cc)))
+		})
+	}
+}

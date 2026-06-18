@@ -1034,6 +1034,23 @@ func TestIngestNote_HomeVisibility(t *testing.T) {
 	assert.Equal(t, model.NoteVisibilityHome, got.Visibility)
 }
 
+// cc にのみ Public があり to に followers が無い shape も home に解決する。旧
+// deriveVisibility は home 判定に followers-in-to を要求していたため specified に
+// 落としていたが、upstream parseAudience は cc に Public があれば home とする (#1864)。
+func TestIngestNote_CCOnlyPublicVisibility(t *testing.T) {
+	// to=[], cc=[Public] → home
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := makeNoteJSON("vis-cc-public", []string{}, []string{"https://www.w3.org/ns/activitystreams#Public"})
+	got, err := r.IngestNote(body)
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityHome, got.Visibility)
+}
+
 func TestIngestNote_FollowersVisibility(t *testing.T) {
 	// to=[followers], cc=[] → followers
 	repo := testutil.NewMockUserRepository()
