@@ -23,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"golang.org/x/net/idna"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
@@ -1018,7 +1019,8 @@ func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string)
 	//      (alice@a が bob@b になりすました note を作る forge を弾く)。
 	idHost, idErr := hostFromURI(apNote.ID)
 	attrHost, attrErr := hostFromURI(apNote.AttributedTo)
-	if idErr != nil || attrErr != nil || !strings.EqualFold(idHost, attrHost) {
+	// idna 正規化して Unicode/punycode mixed-form の同一 host を誤 reject しない (#1850)。
+	if idErr != nil || attrErr != nil || punyHost(idHost) != punyHost(attrHost) {
 		slog.Warn("federation: note id/attributedTo host mismatch", "id", apNote.ID, "attributedTo", apNote.AttributedTo)
 		return nil, false, ErrNoteAttributionMismatch
 	}
@@ -1902,6 +1904,25 @@ func hostFromURI(uri string) (string, error) {
 	return u.Host, nil
 }
 
+// punyHost normalizes a host for comparison the way upstream
+// UtilityService.toPuny does (idna.ToASCII(lowercase), UTS#46)。Unicode IDN と
+// punycode の mixed-form (例: `パイ.example` vs `xn--eckve.example`) を同一視
+// するため host 一致比較の両辺に適用する (#1850)。idna が失敗する不正入力のみ
+// 小文字化で返す (Go default の lenient UTS#46 profile では port 付き host も
+// 成功し ASCII tail はそのまま残るため、fallback は実質ほぼ発生しない)。これは
+// 比較専用で、保存側 host (resolveActorOnce / hostAllowedForURI /
+// RegisterFromHost) の正規化統一は別スコープ。
+//
+// なお Go の idna は ideographic/fullwidth dot (U+3002 等) を `.` に畳まない
+// (Node の domainToASCII と異なるが、別 authority を同一視しない安全側)。
+func punyHost(host string) string {
+	lower := strings.ToLower(host)
+	if ascii, err := idna.ToASCII(lower); err == nil {
+		return ascii
+	}
+	return lower
+}
+
 // finalURLFetcher は redirect 後の最終 URL も返せる fetcher。本番 APFetcher が
 // 実装し、resolver が fetch 元 host と object id host の一致検証に使う (#1820)。
 // テストダブル (stubFetcher) は実装しなくてよく、その場合 resolver は最終 URL
@@ -1955,7 +1976,8 @@ func assertResponseHostMatches(finalURL, objectID string) error {
 // (先頭 www. を除去)。これが無いと `remote.example:443` vs `remote.example` や
 // `www.remote.example` vs `remote.example` を誤って弾く (#1820 review)。
 func normalizeMatchHost(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+	// idna 正規化で Unicode IDN と punycode の mixed-form を同一視する (#1850)。
+	host := punyHost(u.Hostname())
 	host = strings.TrimPrefix(host, "www.")
 	port := u.Port()
 	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")

@@ -27,6 +27,13 @@ func TestAssertResponseHostMatches(t *testing.T) {
 		// #1820 review: 先頭 www. は synonymous subdomain として除去して一致扱い。
 		{"www synonymous subdomain", "https://www.remote.example/x", "https://remote.example/users/alice", false},
 		{"www both sides", "https://www.remote.example/x", "https://www.remote.example/users/alice", false},
+		// #1850: Unicode IDN と punycode の mixed-form は idna 正規化で一致扱い。
+		{"IDN unicode final vs punycode id", "https://bücher.example/x", "https://xn--bcher-kva.example/users/a", false},
+		{"IDN punycode final vs unicode id", "https://xn--bcher-kva.example/x", "https://bücher.example/users/a", false},
+		{"IDN different domain still mismatch", "https://bücher.example/x", "https://xn--nxasmq6b.example/users/a", true},
+		// #1850 review: ideographic dot (U+3002) は `.` に畳まれない = victim.example へ
+		// なりすませない (spoofing regression guard)。Go idna は Node と異なり安全側。
+		{"ideographic dot does not collapse to victim host", "https://victim.example/x", "https://victim.example。evil.example/users/a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,5 +45,29 @@ func TestAssertResponseHostMatches(t *testing.T) {
 				t.Errorf("expected nil, got %v", err)
 			}
 		})
+	}
+}
+
+// #1850: punyHost は idna.ToASCII(lowercase) で Unicode IDN と punycode を同一
+// 正規形にし、id↔attributedTo / id↔final-host 比較の mixed-form 誤 reject を防ぐ。
+func TestPunyHost(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"bücher.example", "xn--bcher-kva.example"},
+		{"xn--bcher-kva.example", "xn--bcher-kva.example"},
+		{"Bücher.Example", "xn--bcher-kva.example"}, // 大文字も正規化
+		{"REMOTE.EXAMPLE", "remote.example"},        // ASCII は小文字化のみ
+		{"remote.example", "remote.example"},        // 既に正規形
+	}
+	for _, tc := range cases {
+		if got := punyHost(tc.in); got != tc.want {
+			t.Errorf("punyHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Unicode と punycode が同一正規形に畳まれる (= 比較で一致する) こと。
+	if punyHost("bücher.example") != punyHost("xn--bcher-kva.example") {
+		t.Errorf("Unicode と punycode の同一 host が一致しない")
 	}
 }
