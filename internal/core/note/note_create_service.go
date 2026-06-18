@@ -380,9 +380,20 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	if visibility == "" {
 		visibility = model.NoteVisibilityPublic
 	}
-	// localOnly は renote 対象が local-only のとき伝播させる (#1849)。reply 対象の
-	// 伝播 / reply visibility 降格 / channel note の強制は #1855 で別途。
+	// localOnly は renote / reply 対象が local-only のとき伝播させる (#1849 / #1855)。
 	localOnly := in.LocalOnly
+
+	// channel note は upstream NoteCreateService:463-465 と同じく visibility=public /
+	// localOnly=true を強制し、visibleUserIds を空にする (channel 機構が露出範囲を
+	// 管理するため、#1855)。channel 判定は channel membership 操作 (EnsureChannelExists
+	// / OnNotePosted) と同じ `in.ChannelID != nil && *in.ChannelID != ""` を採用する。
+	// 空文字 channelID は不正入力で実際の channel ではないため強制対象外
+	// (upstream は misskey:id schema で "" を 400 reject、その正規化は #1859)。
+	isChannelNote := in.ChannelID != nil && *in.ChannelID != ""
+	if isChannelNote {
+		visibility = model.NoteVisibilityPublic
+		localOnly = true
+	}
 
 	// canPublicNote=false の user が channel 外の public note を投げた場合、
 	// upstream Misskey TS の NoteCreateService と同様に visibility を home
@@ -507,6 +518,16 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 				return nil, err
 			}
 		}
+		// 返信対象が public でなければ visibility を home に降格する (upstream
+		// NoteCreateService:531-533、#1855)。renote の home 降格と同種。
+		if t.Visibility != model.NoteVisibilityPublic && visibility == model.NoteVisibilityPublic {
+			visibility = model.NoteVisibilityHome
+		}
+		// local-only な対象への reply は local-only にする (channel 外のみ、
+		// upstream:541-543)。
+		if t.LocalOnly && in.ChannelID == nil {
+			localOnly = true
+		}
 	}
 	if in.RenoteID != nil {
 		if renoteFetchErr != nil {
@@ -612,7 +633,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		note.RenoteChannelID = renoteTarget.ChannelID
 	}
 
-	if in.VisibleUserIDs != nil {
+	// channel note は visibleUserIds を空にする (upstream:464、#1855)。public 強制
+	// 済なので visibleUserIds は無意味だが、stray な指定を残さない。
+	if in.VisibleUserIDs != nil && !isChannelNote {
 		note.VisibleUserIDs = in.VisibleUserIDs
 	}
 

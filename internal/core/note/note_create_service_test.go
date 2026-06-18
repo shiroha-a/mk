@@ -704,6 +704,42 @@ func TestCreateService_RenoteVisibilityAdjustment(t *testing.T) {
 	})
 }
 
+// #1855: reply 対象の可視性 / localOnly に応じた調整 + channel note の強制。
+func TestCreateService_ReplyAndChannelVisibilityAdjustment(t *testing.T) {
+	t.Run("reply to non-public downgrades public to home", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["h"] = &model.Note{ID: "h", UserID: "other", Visibility: model.NoteVisibilityHome}
+		text := "re"
+		rid := "h"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "非 public note への public reply は home に降格")
+	})
+	t.Run("reply to localOnly propagates localOnly", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "other", Visibility: model.NoteVisibilityPublic, LocalOnly: true}
+		text := "re"
+		rid := "lo"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.True(t, created.LocalOnly, "local-only note への reply は local-only に伝播")
+	})
+	t.Run("channel note forces public + localOnly + empty visibleUserIds", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		text := "ch"
+		cid := "ch1"
+		created, err := svc.Create(note.CreateInput{
+			User: &model.User{ID: "u1"}, Text: &text, ChannelID: &cid,
+			// channel note なのに followers + visibleUserIds を指定 → 強制で上書きされる。
+			Visibility: model.NoteVisibilityFollowers, VisibleUserIDs: []string{"x"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityPublic, created.Visibility, "channel note は public に強制")
+		assert.True(t, created.LocalOnly, "channel note は localOnly に強制")
+		assert.Empty(t, created.VisibleUserIDs, "channel note は visibleUserIds を空にする")
+	})
+}
+
 func TestCreateService_ReplyHappyPath(t *testing.T) {
 	svc, noteRepo, _ := newCreateService(t)
 	noteRepo.Notes["target"] = &model.Note{
