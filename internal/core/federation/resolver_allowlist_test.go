@@ -162,7 +162,21 @@ func TestProcessCreate_AllowedSenderNonFederatedAttributedToIsDropped(t *testing
 	followingRepo := testutil.NewMockFollowingRepository()
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
-	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	// 送信者 (relay.allowed) の actor を返す。id host が request host と一致する
+	// (Strict request-host binding #1828 を通す)。
+	relayActor := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://relay.allowed/users/relay",
+		"type": "Application",
+		"preferredUsername": "relay",
+		"inbox": "https://relay.allowed/users/relay/inbox",
+		"publicKey": {
+			"id": "https://relay.allowed/users/relay#main-key",
+			"owner": "https://relay.allowed/users/relay",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+		}
+	}`
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(relayActor)}, idGen)
 	// note の attributedTo (remote.example) のみ非連合。送信者 host は許可。
 	resolver.SetHostBlockChecker(&stubHostBlocker{disallowed: map[string]bool{"remote.example": true}})
 	followingSvc := corefollowing.NewService(repo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen)

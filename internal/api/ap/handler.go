@@ -35,6 +35,11 @@ type RemoteFetcher interface {
 type RemoteResolver interface {
 	ResolveActor(uri string) (*model.User, error)
 	ResolveNote(uri string) (*model.Note, error)
+	// *AllowCrossHost variants relax the request-url ↔ id host binding for
+	// user-initiated /api/ap/show lookups (upstream CrossOrigin softfail、#1828)。
+	// federation-loop の解決は Strict な ResolveActor / ResolveNote を使う。
+	ResolveActorAllowCrossHost(uri string) (*model.User, error)
+	ResolveNoteAllowCrossHost(uri string) (*model.Note, error)
 }
 
 // HostBlockChecker reports whether a remote host is blocked / federation-allowed
@@ -487,7 +492,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 			switch t {
 			case "Note", "Article", "Question":
 				if h.remoteResolver != nil {
-					if remoteNote, err := h.remoteResolver.ResolveNote(req.URI); err == nil {
+					if remoteNote, err := h.remoteResolver.ResolveNoteAllowCrossHost(req.URI); err == nil {
 						return c.JSON(http.StatusOK, map[string]any{
 							"type":   "Note",
 							"object": h.packNoteForAPI(middleware.GetUser(c), remoteNote),
@@ -501,7 +506,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 				})
 			case "Person", "Service", "Application", "Organization", "Group":
 				if h.remoteResolver != nil {
-					if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
+					if remoteUser, err := h.remoteResolver.ResolveActorAllowCrossHost(req.URI); err == nil {
 						return c.JSON(http.StatusOK, map[string]any{
 							"type":   "User",
 							"object": h.packUserForAPI(middleware.GetUser(c), remoteUser, h.userService.GetProfile(remoteUser.ID)),
@@ -515,7 +520,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 	// フェッチ失敗 or Type 不明の場合は ResolveActor を試す (webfinger 経由の
 	// /@user URL に対する fetch が失敗するケースがあるため)。
 	if h.remoteResolver != nil {
-		if remoteUser, err := h.remoteResolver.ResolveActor(req.URI); err == nil {
+		if remoteUser, err := h.remoteResolver.ResolveActorAllowCrossHost(req.URI); err == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"type":   "User",
 				"object": h.packUserForAPI(middleware.GetUser(c), remoteUser, h.userService.GetProfile(remoteUser.ID)),

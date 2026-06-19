@@ -362,7 +362,8 @@ func TestResolveActor_MissingFields(t *testing.T) {
 }
 
 func TestResolveActor_BadHost(t *testing.T) {
-	// invalid URL with control char
+	// invalid URL with control char。request host (x.example) と id host が
+	// 一致しないため Strict request-host binding (#1828) が先に弾く。
 	body := `{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "://invalid",
@@ -371,11 +372,30 @@ func TestResolveActor_BadHost(t *testing.T) {
 	}`
 	r, _ := newResolver(t, body, nil)
 	_, err := r.ResolveActor("https://x.example/")
+	require.ErrorIs(t, err, federation.ErrObjectHostMismatch)
+}
+
+// TestResolveActorAllowCrossHost_BadIDHostRejected exercises the relaxed
+// (ap/show) path where the request-host binding is skipped: an actor with a
+// valid type but an unparseable / hostless id is still rejected by the
+// downstream hostFromURI check (#1828)。
+func TestResolveActorAllowCrossHost_BadIDHostRejected(t *testing.T) {
+	// type は valid なので fetchActor は通り、resolveActorOnce の hostFromURI で
+	// ErrInvalidActor になる経路 (relaxed path) を踏む。
+	body := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "mailto:alice@example.com",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "x"
+	}`
+	r, _ := newResolver(t, body, nil)
+	_, err := r.ResolveActorAllowCrossHost("https://x.example/")
 	require.ErrorIs(t, err, federation.ErrInvalidActor)
 }
 
 func TestResolveActor_EmptyHost(t *testing.T) {
-	// mailto: parses but has no host
+	// mailto: parses but has no host。request host 不一致で Strict binding が弾く。
 	body := `{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "mailto:alice@example.com",
@@ -384,7 +404,7 @@ func TestResolveActor_EmptyHost(t *testing.T) {
 	}`
 	r, _ := newResolver(t, body, nil)
 	_, err := r.ResolveActor("https://x.example/")
-	require.ErrorIs(t, err, federation.ErrInvalidActor)
+	require.ErrorIs(t, err, federation.ErrObjectHostMismatch)
 }
 
 // TestResolveActor_RejectsMissingContext pins the upstream invalid-response
@@ -555,6 +575,90 @@ func TestResolveNote_RecursionLimit(t *testing.T) {
 	// 上限を超えた先の note は ErrRecursionLimit で truncate され取り込まれない。
 	_, err = noteRepo.FindByURI("https://remote.example/notes/300")
 	require.Error(t, err)
+}
+
+// TestResolveActor_StrictRejectsCrossHostRedirect pins the upstream Strict
+// request-url ↔ id binding (#1828): a federation-loop fetch whose original
+// request host differs from the fetched actor's id host is rejected even when
+// the final (post-redirect) host matches the id host. This blocks an
+// attacker-controlled entry URI from redirecting to a victim actor.
+func TestResolveActor_StrictRejectsCrossHostRedirect(t *testing.T) {
+	f := &finalURLStubFetcher{body: []byte(sampleActor), finalURL: "https://remote.example/users/alice"}
+	r, repo := newResolverWithFetcher(t, f)
+	_, err := r.ResolveActor("https://attacker.example/users/alice")
+	require.ErrorIs(t, err, federation.ErrObjectHostMismatch)
+	assert.Empty(t, repo.Users)
+}
+
+// TestResolveActorAllowCrossHost_AllowsCrossHostRedirect: the user-initiated
+// ap/show path relaxes the request-host binding (upstream CrossOrigin softfail),
+// so a cross-host redirect resolves successfully (#1828)。
+func TestResolveActorAllowCrossHost_AllowsCrossHostRedirect(t *testing.T) {
+	f := &finalURLStubFetcher{body: []byte(sampleActor), finalURL: "https://remote.example/users/alice"}
+	r, repo := newResolverWithFetcher(t, f)
+	user, err := r.ResolveActorAllowCrossHost("https://attacker.example/users/alice")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", user.Username)
+	assert.Len(t, repo.Users, 1)
+}
+
+// crossHostDispatchFetcher serves the note for /notes/ URIs and the author actor
+// for /users/ URIs, each with a controllable final URL, so note resolution
+// (which resolves attributedTo) can be exercised end-to-end (#1828)。
+type crossHostDispatchFetcher struct {
+	noteBody, actorBody   string
+	noteFinal, actorFinal string
+}
+
+func (f *crossHostDispatchFetcher) FetchObject(uri string) ([]byte, error) {
+	b, _, err := f.FetchObjectWithFinalURL(uri)
+	return b, err
+}
+
+func (f *crossHostDispatchFetcher) FetchObjectWithFinalURL(uri string) ([]byte, string, error) {
+	if strings.Contains(uri, "/users/") {
+		return []byte(f.actorBody), f.actorFinal, nil
+	}
+	return []byte(f.noteBody), f.noteFinal, nil
+}
+
+// TestResolveNote_StrictRejectsCrossHostRedirect mirrors the actor test for
+// note resolution (#1828)。
+func TestResolveNote_StrictRejectsCrossHostRedirect(t *testing.T) {
+	f := &crossHostDispatchFetcher{
+		noteBody:   sampleRemoteNote,
+		noteFinal:  "https://remote.example/notes/n1",
+		actorBody:  sampleActor,
+		actorFinal: "https://remote.example/users/alice",
+	}
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, f, idGen)
+	_, err := r.ResolveNote("https://attacker.example/notes/x")
+	require.ErrorIs(t, err, federation.ErrObjectHostMismatch)
+	assert.Empty(t, noteRepo.Notes)
+}
+
+// TestResolveNoteAllowCrossHost_AllowsCrossHostRedirect: ap/show note lookup
+// relaxes the request-host binding and resolves the note (and its author)
+// across a cross-host redirect (#1828)。
+func TestResolveNoteAllowCrossHost_AllowsCrossHostRedirect(t *testing.T) {
+	f := &crossHostDispatchFetcher{
+		noteBody:   sampleRemoteNote,
+		noteFinal:  "https://remote.example/notes/n1",
+		actorBody:  sampleActor,
+		actorFinal: "https://remote.example/users/alice",
+	}
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, f, idGen)
+	note, err := r.ResolveNoteAllowCrossHost("https://attacker.example/notes/x")
+	require.NoError(t, err)
+	require.NotNil(t, note)
 }
 
 // failingUserRepo returns Create errors for the resolver.

@@ -686,6 +686,16 @@ func (m *mockResolver) ResolveNote(_ string) (*model.Note, error) {
 	return m.note, m.noteErr
 }
 
+// AllowCrossHost variants delegate to the same fields: the relaxed binding is
+// exercised by the resolver's own tests, here we only need shape compatibility.
+func (m *mockResolver) ResolveActorAllowCrossHost(_ string) (*model.User, error) {
+	return m.user, m.err
+}
+
+func (m *mockResolver) ResolveNoteAllowCrossHost(_ string) (*model.Note, error) {
+	return m.note, m.noteErr
+}
+
 func TestSetRemote(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	h.SetRemote(&mockFetcher{}, &mockResolver{})

@@ -370,12 +370,26 @@ func (r *Resolver) PublicKeyForActor(actorID string) (string, error) {
 // が actorTTL を超えていたら fetch しなおして name / inbox / sharedInbox /
 // publicKey を更新する。fetch 失敗時はベストエフォートで既存値を返す。
 func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
+	return r.resolveActor(uri, false)
+}
+
+// ResolveActorAllowCrossHost is ResolveActor for user-initiated lookups
+// (/api/ap/show) where upstream relaxes the request-url ↔ id binding to
+// CrossOrigin softfail (ap/show.ts:153、#1828)。entry URI が admin の手入力で
+// attacker 制御でないため cross-host redirect を許容する。finalURL ↔ id binding は
+// 引き続き適用される。
+func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
+	return r.resolveActor(uri, true)
+}
+
+// resolveActor is ResolveActor carrying the cross-host-allowed flag (#1828)。
+func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, error) {
 	// 同一 URI への並行呼び出しは singleflight で 1 つに collapse する
 	// (#300 3-7)。cache hit 経路は微秒なので serialize の影響は無視でき、
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
-	v, err, _ := r.resolveActorGroup.Do(uri, func() (any, error) {
-		return r.resolveActorOnce(uri)
+	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
+		return r.resolveActorOnce(uri, allowCrossHost)
 	})
 	if err != nil {
 		return nil, err
@@ -386,9 +400,9 @@ func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
 	return v.(*model.User), nil
 }
 
-// resolveActorOnce is the body of ResolveActor, invoked once per URI by
+// resolveActorOnce is the body of resolveActor, invoked once per URI by
 // singleflight.Do.
-func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
+func (r *Resolver) resolveActorOnce(uri string, allowCrossHost bool) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -411,7 +425,7 @@ func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
 		return existing, nil
 	}
 
-	actor, err := r.fetchActor(uri)
+	actor, err := r.fetchActor(uri, allowCrossHost)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +598,8 @@ func (r *Resolver) shouldRefreshActor(u *model.User) bool {
 // on the local user row. 失敗してもエラーは返さず (呼び出し側はベストエフォート
 // で既存値を使う)、ログは呼び出し元側で残す。
 func (r *Resolver) refreshActor(existing *model.User, uri string) {
-	actor, err := r.fetchActor(uri)
+	// background refresh は federation-loop 扱いで Strict (request host binding 有効)。
+	actor, err := r.fetchActor(uri, false)
 	if err != nil {
 		return
 	}
@@ -707,7 +722,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 // fetchActor fetches and decodes a remote actor document. Reject any
 // document whose `type` is not in activitypub.ValidActorTypes — this guards
 // against a non-Actor object (e.g. a Note) being interpreted as a Person.
-func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
+func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Person, error) {
 	// federation policy gate: ホワイトリスト連合 (federation: specified) や
 	// blockedHosts 設定下では、対象 URI の host が許可されていなければ HTTP
 	// fetch 自体を抑止する。refreshActor / refreshPublicKey / resolveActorOnce
@@ -740,6 +755,15 @@ func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
 		slog.Warn("federation: actor id host mismatch", "uri", uri, "finalURL", finalURL, "id", actor.ID)
 		return nil, err
 	}
+	// request URI host == id host も要求する (Strict、#1828)。attacker.example の
+	// entry URI から 302 で victim.example の actor 解決を誘発するのを防ぐ。
+	// user-initiated ap/show (allowCrossHost) は upstream 同様 cross-host を許容。
+	if !allowCrossHost {
+		if err := assertRequestHostMatches(uri, actor.ID); err != nil {
+			slog.Warn("federation: actor request host mismatch", "uri", uri, "id", actor.ID)
+			return nil, err
+		}
+	}
 	if !activitypub.IsValidActorType(actor.Type) {
 		// Note/Activity 等 Actor でない object が actor として参照された場合の
 		// 防衛策。デバッグのため URI と type を残してから拒否する。
@@ -752,7 +776,8 @@ func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
 // refreshPublicKey fetches the actor again and caches its public key. エラー
 // は呼び出し側でログするだけで上には伝搬しない。
 func (r *Resolver) refreshPublicKey(userID, uri string) {
-	actor, err := r.fetchActor(uri)
+	// background refresh は federation-loop 扱いで Strict。
+	actor, err := r.fetchActor(uri, false)
 	if err != nil {
 		return
 	}
@@ -877,18 +902,26 @@ func (r *Resolver) ResolveActorByKeyID(keyID string) (*model.User, error) {
 //   - リモート URI で既に取り込み済みなら noteRepo.FindByURI で返す
 //   - 未知のリモート URI なら fetcher で取得して IngestNote で永続化
 func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0)
+	return r.resolveNoteDepth(uri, 0, false)
+}
+
+// ResolveNoteAllowCrossHost is ResolveNote for user-initiated lookups
+// (/api/ap/show) where upstream relaxes the request-url ↔ id binding to
+// CrossOrigin softfail (#1828)。entry URI が attacker 制御でないため cross-host
+// redirect を許容する。finalURL ↔ id binding は引き続き適用される。
+func (r *Resolver) ResolveNoteAllowCrossHost(uri string) (*model.Note, error) {
+	return r.resolveNoteDepth(uri, 0, true)
 }
 
 // resolveNoteDepth is ResolveNote carrying the current recursion depth so the
 // note/quote chain can be bounded (#1828)。quote 解決経路 (resolveQuoteURI) が
-// depth+1 で再入する。
-func (r *Resolver) resolveNoteDepth(uri string, depth int) (*model.Note, error) {
+// depth+1 で再入する。allowCrossHost は user-initiated ap/show 経路でのみ true。
+func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost bool) (*model.Note, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
 	// 実行しないことが目的。
-	v, err, _ := r.resolveNoteGroup.Do(uri, func() (any, error) {
-		return r.resolveNoteOnce(uri, depth)
+	v, err, _ := r.resolveNoteGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
+		return r.resolveNoteOnce(uri, depth, allowCrossHost)
 	})
 	if err != nil {
 		return nil, err
@@ -900,8 +933,9 @@ func (r *Resolver) resolveNoteDepth(uri string, depth int) (*model.Note, error) 
 }
 
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
-// singleflight.Do. depth は quote chain の現在の深さ。
-func (r *Resolver) resolveNoteOnce(uri string, depth int) (*model.Note, error) {
+// singleflight.Do. depth は quote chain の現在の深さ。allowCrossHost は
+// user-initiated ap/show 経路でのみ true。
+func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost bool) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -955,6 +989,15 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int) (*model.Note, error) {
 	if err := assertResponseHostMatches(finalURL, idProbe.ID); err != nil {
 		slog.Warn("federation: note id host mismatch", "uri", uri, "finalURL", finalURL, "id", idProbe.ID)
 		return nil, err
+	}
+	// request URI host == id host も要求する (Strict、#1828)。Announce / quote 等
+	// attacker 制御の entry URI から cross-host redirect で第三者 note を解決させる
+	// のを防ぐ。user-initiated ap/show (allowCrossHost) は cross-host を許容。
+	if !allowCrossHost {
+		if err := assertRequestHostMatches(uri, idProbe.ID); err != nil {
+			slog.Warn("federation: note request host mismatch", "uri", uri, "id", idProbe.ID)
+			return nil, err
+		}
 	}
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// quote chain の depth を引き継いで再帰上限を効かせる。
@@ -1013,7 +1056,8 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int) *model.Note {
 	if _, inflight := r.ingesting.Load(uri); inflight {
 		return nil
 	}
-	if n, err := r.resolveNoteDepth(uri, depth+1); err == nil {
+	// quote 解決は federation-loop 扱いで Strict (request host binding 有効)。
+	if n, err := r.resolveNoteDepth(uri, depth+1, false); err == nil {
 		return n
 	}
 	return nil
@@ -2077,6 +2121,40 @@ func assertResponseHostMatches(finalURL, objectID string) error {
 		return ErrObjectHostMismatch
 	}
 	return nil
+}
+
+// assertRequestHostMatches enforces that the original request URI host equals
+// the fetched object's id host, mirroring upstream assertActivityMatchesUrl の
+// request-url ↔ id Strict 検証 (#1828)。federation-loop fetch (fetchActor /
+// resolveNoteOnce) で attacker 制御の entry URI から cross-host redirect を辿って
+// 第三者 object の解決/refresh を誘発される SSRF/amplification を防ぐ。finalURL ↔
+// id の binding は assertResponseHostMatches が別途担保するので、ここは request ↔
+// id の host 一致のみを見る (downgrade は final ↔ id 側で検出済み)。user-initiated
+// な ap/show 経路は upstream 同様 cross-host を許容するため、この検証を skip する。
+func assertRequestHostMatches(requestURI, objectID string) error {
+	if objectID == "" {
+		return ErrObjectHostMismatch
+	}
+	ru, rerr := url.Parse(requestURI)
+	iu, ierr := url.Parse(objectID)
+	if rerr != nil || ierr != nil || ru.Hostname() == "" || iu.Hostname() == "" {
+		return ErrObjectHostMismatch
+	}
+	if normalizeMatchHost(ru) != normalizeMatchHost(iu) {
+		return ErrObjectHostMismatch
+	}
+	return nil
+}
+
+// crossHostKey namespaces a singleflight key for cross-host-allowed (ap/show)
+// resolves so a Strict federation-loop resolve never collapses onto a relaxed
+// in-flight one (and thereby skip its request-host binding)。Strict 経路の key は
+// uri そのままなので通常の dedup 挙動は不変。
+func crossHostKey(uri string, allowCrossHost bool) string {
+	if allowCrossHost {
+		return "xhost\x00" + uri
+	}
+	return uri
 }
 
 // normalizeMatchHost canonicalizes a URL host for object-host comparison,
