@@ -501,12 +501,15 @@ func TestFilesFindByHash_Success(t *testing.T) {
 	assert.Nil(t, resp[0]["user"])
 }
 
-func TestFilesFindByHash_InvalidParam(t *testing.T) {
+// upstream find-by-hash は md5 {type:'string'} で空文字も valid。空 md5 は 0 件
+// 一致で 200 + [] を返す (INVALID_PARAM で弾かない、#1831)。
+func TestFilesFindByHash_EmptyMD5ReturnsEmpty(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newJSONReq(t, `{}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesFindByHash(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
 }
 
 func TestFilesFindByHash_NotFound(t *testing.T) {
@@ -567,14 +570,17 @@ func TestFoldersCreate_ParentNotFound(t *testing.T) {
 	assert.Equal(t, "53326628-a00d-40a6-a3cd-8975105c0f95", errObj["id"])
 }
 
-func TestFoldersCreate_AccessDenied(t *testing.T) {
+// 他人所有 parent は upstream folders/create 同様 NO_SUCH_FOLDER(404)、
+// ACCESS_DENIED(403) にしない (#1831)。
+func TestFoldersCreate_ParentOtherOwnerNotFound(t *testing.T) {
 	h, _, folderRepo := newHandler(t)
 	other := "other"
 	folderRepo.Folders["p"] = &model.DriveFolder{ID: "p", UserID: &other}
 	c, rec := newJSONReq(t, `{"name":"x","parentId":"p"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersCreate(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
 // failingFolderRepo causes Create to fail
@@ -674,14 +680,17 @@ func TestFoldersShow_NotFound(t *testing.T) {
 	assert.Equal(t, "d74ab9eb-bb09-4bba-bf24-fb58f761e1e9", errObj["id"])
 }
 
-func TestFoldersShow_AccessDenied(t *testing.T) {
+// 他人所有 folder は upstream folders/show 同様 NO_SUCH_FOLDER(404)、
+// ACCESS_DENIED(403) にしない (folder ID 存在 oracle 防止、#1831)。
+func TestFoldersShow_OtherOwnerNotFound(t *testing.T) {
 	h, _, folderRepo := newHandler(t)
 	other := "other"
 	folderRepo.Folders["p"] = &model.DriveFolder{ID: "p", UserID: &other}
 	c, rec := newJSONReq(t, `{"folderId":"p"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersShow(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
 // --- FoldersUpdate ---
@@ -869,12 +878,15 @@ func TestFilesFind_Success(t *testing.T) {
 	assert.Nil(t, resp[0]["user"])
 }
 
-func TestFilesFind_InvalidParam(t *testing.T) {
+// upstream files/find は name {type:'string'} で空文字も valid。空 name は 0 件
+// 一致で 200 + [] を返す (INVALID_PARAM で弾かない、#1831)。
+func TestFilesFind_EmptyNameReturnsEmpty(t *testing.T) {
 	h, _, _ := newHandlerWithRepos(t)
 	c, rec := newJSONReq(t, `{}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesFind(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
 }
 
 func TestFilesFind_NilRepo(t *testing.T) {
@@ -1162,12 +1174,15 @@ func TestFoldersFind_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestFoldersFind_InvalidParam(t *testing.T) {
+// upstream folders/find は name {type:'string'} で空文字も valid。空 name は
+// 0 件一致で 200 + [] を返す (INVALID_PARAM で弾かない、#1831)。
+func TestFoldersFind_EmptyNameReturnsEmpty(t *testing.T) {
 	h, _, _ := newHandlerWithRepos(t)
 	c, rec := newJSONReq(t, `{}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersFind(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
 }
 
 func TestFoldersFind_NilRepo(t *testing.T) {

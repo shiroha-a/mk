@@ -754,6 +754,29 @@ func TestDriveFileRepository_UsageByUser(t *testing.T) {
 	assert.Equal(t, int64(0), total)
 }
 
+// TestDriveFileRepository_UsageByUser_ExcludesLink: upstream calcDriveUsageOf は
+// isLink=FALSE の行のみ SUM(size) する。link (リモート/プロキシ) file の size は
+// usage に含めない (#1831)。
+func TestDriveFileRepository_UsageByUser_ExcludesLink(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	seedUser(t, "df_link_u1")
+
+	own := newTestDriveFile("df_link_own", "df_link_u1", "own", nil)
+	own.Size = 100
+	require.NoError(t, repo.Create(own))
+	t.Cleanup(func() { cleanupDriveFile(t, own.ID) })
+
+	link := newTestDriveFile("df_link_remote", "df_link_u1", "remote", nil)
+	link.Size = 999
+	link.IsLink = true
+	require.NoError(t, repo.Create(link))
+	t.Cleanup(func() { cleanupDriveFile(t, link.ID) })
+
+	total, err := repo.UsageByUser("df_link_u1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), total, "link file の size は usage に含めない")
+}
+
 func TestDriveFileRepository_UpdateBulkFolder(t *testing.T) {
 	repo := NewDriveFileRepository(testDB)
 	seedUser(t, "df_bulk_u1")

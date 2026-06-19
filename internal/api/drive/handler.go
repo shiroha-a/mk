@@ -401,7 +401,10 @@ type FilesFindByHashRequest struct {
 func (h *Handler) FilesFindByHash(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req FilesFindByHashRequest
-	if err := c.Bind(&req); err != nil || req.MD5 == "" {
+	// upstream find-by-hash の paramDef は md5 {type:'string'} で空文字も valid
+	// (required は presence のみ)。空 md5 は findBy で 0 件一致し 200 + [] を返す。
+	// INVALID_PARAM で弾かない (#1831)。
+	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	files, err := h.svc.FindByHash(user, req.MD5)
@@ -764,7 +767,9 @@ func (h *Handler) FilesFind(c echo.Context) error {
 		Name     string  `json:"name"`
 		FolderID *string `json:"folderId"`
 	}
-	if err := c.Bind(&req); err != nil || req.Name == "" {
+	// upstream files/find の paramDef は name {type:'string'} で空文字も valid。
+	// 空 name は findBy で 0 件一致し 200 + [] を返す (#1831)。
+	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	if h.fileRepo == nil {
@@ -1028,7 +1033,9 @@ func (h *Handler) FoldersFind(c echo.Context) error {
 		Name     string  `json:"name"`
 		ParentID *string `json:"parentId"`
 	}
-	if err := c.Bind(&req); err != nil || req.Name == "" {
+	// upstream folders/find の paramDef は name {type:'string'} で空文字も valid。
+	// 空 name は findBy で 0 件一致し 200 + [] を返す (#1831)。
+	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
 	if h.folderRepo == nil {

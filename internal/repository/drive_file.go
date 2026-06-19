@@ -335,7 +335,13 @@ func (r *driveFileRepository) ListByFileIDs(fileIDs []string) ([]*model.DriveFil
 
 func (r *driveFileRepository) UsageByUser(userID string) (int64, error) {
 	var total int64
-	if err := r.db.Model(&model.DriveFile{}).Where(`"userId" = ?`, userID).Select("COALESCE(SUM(size), 0)").Scan(&total).Error; err != nil {
+	// upstream calcDriveUsageOf は isLink=FALSE の行のみ SUM(size) する
+	// (link = リモート/プロキシ file は実体を保持しないため usage に含めない、
+	// #1831)。これが無いと link 行を持つ user の usage が本家より大きく出る。
+	if err := r.db.Model(&model.DriveFile{}).
+		Where(`"userId" = ?`, userID).
+		Where(`"isLink" = ?`, false).
+		Select("COALESCE(SUM(size), 0)").Scan(&total).Error; err != nil {
 		return 0, err
 	}
 	return total, nil

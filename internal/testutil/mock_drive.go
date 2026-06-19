@@ -178,6 +178,10 @@ func (m *MockDriveFileRepository) ListByFileIDs(ids []string) ([]*model.DriveFil
 func (m *MockDriveFileRepository) UsageByUser(userID string) (int64, error) {
 	var total int64
 	for _, f := range m.Files {
+		// 本番 repo 同様 isLink=false の行のみ合算する (#1831)。
+		if f.IsLink {
+			continue
+		}
 		if f.UserID != nil && *f.UserID == userID {
 			total += int64(f.Size)
 		}

@@ -792,8 +792,10 @@ func (s *Service) CreateFolder(user *model.User, name string, parentID *string) 
 		if err != nil {
 			return nil, ErrFolderNotFound
 		}
+		// upstream folders/create は parent を findOneBy({id, userId: me.id}) で
+		// 引き、他人所有 parent も「不在」として NO_SUCH_FOLDER を返す (#1831)。
 		if parent.UserID == nil || *parent.UserID != user.ID {
-			return nil, ErrAccessDenied
+			return nil, ErrFolderNotFound
 		}
 	}
 	userID := user.ID
@@ -821,8 +823,12 @@ func (s *Service) ShowFolder(user *model.User, id string) (*model.DriveFolder, e
 	if err != nil {
 		return nil, ErrFolderNotFound
 	}
+	// upstream folders/{show,update,delete} は findOneBy({id, userId: me.id}) で
+	// 他人所有 folder を「不在」と区別せず NO_SUCH_FOLDER(404) を返す。owner
+	// mismatch を ACCESS_DENIED(403) にすると folder ID 存在 oracle になる (mild
+	// IDOR)。ErrFolderNotFound に統一して 404 に揃える (#1831)。
 	if f.UserID == nil || *f.UserID != user.ID {
-		return nil, ErrAccessDenied
+		return nil, ErrFolderNotFound
 	}
 	return f, nil
 }
@@ -857,8 +863,11 @@ func (s *Service) UpdateFolder(user *model.User, id string, in UpdateFolderInput
 				// ErrFolderNotFound と区別する。
 				return nil, ErrParentFolderNotFound
 			}
+			// upstream folders/update は parent を findOneBy({id, userId: me.id})
+			// で引き、他人所有 parent も「不在」として NO_SUCH_PARENT_FOLDER を
+			// 返す (#1831、update.ts の noSuchParentFolder)。
 			if parent.UserID == nil || *parent.UserID != user.ID {
-				return nil, ErrAccessDenied
+				return nil, ErrParentFolderNotFound
 			}
 			// upstream checkCircle: 新 parent の祖先 chain に folder 自身が
 			// いたら循環 (#1564)。mk-go は過去に循環を作れてしまっていたため、

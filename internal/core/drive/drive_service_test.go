@@ -746,13 +746,15 @@ func TestCreateFolder_ParentNotFound(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
-func TestCreateFolder_ParentAccessDenied(t *testing.T) {
+// 他人所有 parent は upstream folders/create 同様「不在」扱いで
+// ErrFolderNotFound (=> NO_SUCH_FOLDER)、ACCESS_DENIED にしない (#1831)。
+func TestCreateFolder_ParentOtherOwnerNotFound(t *testing.T) {
 	svc, _, folderRepo := newSvc(t)
 	other := "other"
 	folderRepo.Folders["p"] = &model.DriveFolder{ID: "p", UserID: &other}
 	pid := "p"
 	_, err := svc.CreateFolder(&model.User{ID: "u1"}, "x", &pid)
-	require.ErrorIs(t, err, drive.ErrAccessDenied)
+	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
 // failingCreateFolderRepo causes Create to fail.
@@ -785,12 +787,15 @@ func TestShowFolder_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
-func TestShowFolder_AccessDenied(t *testing.T) {
+// 他人所有 folder は upstream folders/{show,update,delete} 同様「不在」扱いで
+// ErrFolderNotFound (=> 404 NO_SUCH_FOLDER)。owner mismatch を 403 にすると
+// folder ID 存在 oracle になる (#1831)。
+func TestShowFolder_OtherOwnerNotFound(t *testing.T) {
 	svc, _, folderRepo := newSvc(t)
 	other := "other"
 	folderRepo.Folders["p"] = &model.DriveFolder{ID: "p", UserID: &other}
 	_, err := svc.ShowFolder(&model.User{ID: "u1"}, "p")
-	require.ErrorIs(t, err, drive.ErrAccessDenied)
+	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
 func TestUpdateFolder_HappyPath(t *testing.T) {
@@ -821,7 +826,10 @@ func TestUpdateFolder_ParentNotFound(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrParentFolderNotFound)
 }
 
-func TestUpdateFolder_ParentAccessDenied(t *testing.T) {
+// 他人所有 parent は upstream folders/update 同様「不在」扱いで
+// ErrParentFolderNotFound (=> NO_SUCH_PARENT_FOLDER)、ACCESS_DENIED にしない
+// (#1831、update.ts は parent を findOneBy({id,userId}) で引き noSuchParentFolder)。
+func TestUpdateFolder_ParentOtherOwnerNotFound(t *testing.T) {
 	svc, _, folderRepo := newSvc(t)
 	uid := "u1"
 	other := "other"
@@ -830,7 +838,7 @@ func TestUpdateFolder_ParentAccessDenied(t *testing.T) {
 	pid := "p"
 	pidPtr := &pid
 	_, err := svc.UpdateFolder(&model.User{ID: "u1"}, "c", drive.UpdateFolderInput{ParentID: &pidPtr})
-	require.ErrorIs(t, err, drive.ErrAccessDenied)
+	require.ErrorIs(t, err, drive.ErrParentFolderNotFound)
 }
 
 func TestUpdateFolder_NullParent(t *testing.T) {
