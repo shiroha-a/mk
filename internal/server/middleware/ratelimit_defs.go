@@ -1,6 +1,10 @@
 package middleware
 
-import "time"
+import (
+	"time"
+
+	"github.com/shiroha-a/mk/internal/api/apierr"
+)
 
 // DefaultEndpointLimits defines per-endpoint rate limits matching
 // Misskey TS upstream. Endpoints not listed here have no rate limit.
@@ -114,11 +118,14 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// (1 確認 code 試行を 30 回まで許容、TTL 内で総当たりされても 16 byte
 	// hex の探索空間 (2^128) には到底届かない)。
 	"signup-pending": {Duration: time.Hour, Max: 30},
-	// signin / signin-flow は credential brute force 対策。1h 60 回。
-	// 正当な打ち間違い (typo, password manager 不発等) をブロックしない
-	// 最低限のしきい値。
-	"signin":      {Duration: time.Hour, Max: 60},
-	"signin-flow": {Duration: time.Hour, Max: 60},
+	// signin / signin-flow は credential brute force 対策。upstream
+	// SigninApiService に合わせて 1h 10 回 + 1s minInterval、超過時は専用の
+	// TOO_MANY_AUTHENTICATION_FAILURES (22d05606-...) を返す (#1829)。
+	"signin":      {Duration: time.Hour, Max: 10, MinInterval: time.Second, RejectResponse: apierr.TooManyAuthenticationFailures},
+	"signin-flow": {Duration: time.Hour, Max: 10, MinInterval: time.Second, RejectResponse: apierr.TooManyAuthenticationFailures},
+	// signin-with-passkey は upstream SigninWithPasskeyApiService に合わせて
+	// 30min 200 回 + 250ms minInterval、同 code (#1829)。
+	"signin-with-passkey": {Duration: 30 * time.Minute, Max: 200, MinInterval: 250 * time.Millisecond, RejectResponse: apierr.TooManyAuthenticationFailures},
 
 	// ── Admin ──────────────────────────────────────────
 	"admin/system-webhook/test": {Duration: 15 * time.Minute, Max: 60},

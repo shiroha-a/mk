@@ -522,8 +522,9 @@ func TestDefaultEndpointLimits_KnownEndpoints(t *testing.T) {
 		// Auth / password reset (#600 item 3): signup spam / brute-force 対策。
 		{"signup", 5},
 		{"signup-pending", 30},
-		{"signin", 60},
-		{"signin-flow", 60},
+		{"signin", 10},
+		{"signin-flow", 10},
+		{"signin-with-passkey", 200},
 		{"request-reset-password", 3},
 		{"reset-password", 30},
 	}
@@ -545,6 +546,9 @@ func TestDefaultEndpointLimits_MinIntervalEndpoints(t *testing.T) {
 		{"notes/unrenote", time.Second},
 		{"notes/reactions/delete", 3 * time.Second},
 		{"bubble-game/register", 30 * time.Second},
+		{"signin", time.Second},
+		{"signin-flow", time.Second},
+		{"signin-with-passkey", 250 * time.Millisecond},
 	}
 	for _, tc := range cases {
 		t.Run(tc.endpoint, func(t *testing.T) {
@@ -573,6 +577,72 @@ func TestMiddleware_RetryAfterNegativeClampsToZero(t *testing.T) {
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, "0", rec.Header().Get("Retry-After"))
+}
+
+// TestMiddleware_SigninReturnsTooManyAuthFailures verifies the signin endpoint's
+// 429 carries the upstream TOO_MANY_AUTHENTICATION_FAILURES code/id rather than
+// the generic RATE_LIMIT_EXCEEDED (#1829)。signin は minInterval(1s) と
+// duration/max(10/1h) の 2 gate を持つので、両方の reject 経路で custom error が
+// 返ることを確認する (1 件目で minInterval gate、2 件目で minInterval pass →
+// duration gate)。
+func TestMiddleware_SigninReturnsTooManyAuthFailures(t *testing.T) {
+	cases := []struct {
+		name    string
+		results []mockResult
+	}{
+		{
+			name:    "minInterval gate",
+			results: []mockResult{{Info: LimitInfo{Remaining: 0, ResetMs: time.Now().Add(time.Hour).UnixMilli()}}},
+		},
+		{
+			name: "duration gate",
+			results: []mockResult{
+				{Info: LimitInfo{Remaining: 1, ResetMs: time.Now().Add(time.Second).UnixMilli()}}, // minInterval pass
+				{Info: LimitInfo{Remaining: 0, ResetMs: time.Now().Add(time.Hour).UnixMilli()}},   // duration reject
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mockLimitStore{results: tc.results}
+			// 実際の wired def を使い、RejectResponse 配線まで含めて検証する。
+			limits := map[string]*EndpointLimit{"signin": DefaultEndpointLimits["signin"]}
+			rl := NewRateLimiter(store, true, limits)
+			e, h := setupEcho(rl)
+
+			rec := doRequest(e, rl.Middleware(), h, "/api/signin", &model.User{ID: "u1"})
+
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			errObj, _ := body["error"].(map[string]any)
+			require.NotNil(t, errObj)
+			assert.Equal(t, "TOO_MANY_AUTHENTICATION_FAILURES", errObj["code"])
+			assert.Equal(t, "22d05606-fbcf-421a-a2db-b32610dcfd1b", errObj["id"])
+		})
+	}
+}
+
+// TestMiddleware_GenericEndpointReturnsRateLimitExceeded confirms endpoints
+// without a RejectResponse override still return the generic error.
+func TestMiddleware_GenericEndpointReturnsRateLimitExceeded(t *testing.T) {
+	store := &mockLimitStore{
+		results: []mockResult{
+			{Info: LimitInfo{Remaining: 0, ResetMs: time.Now().Add(time.Hour).UnixMilli()}},
+		},
+	}
+	limits := map[string]*EndpointLimit{"notes/create": {Duration: time.Hour, Max: 300}}
+	rl := NewRateLimiter(store, true, limits)
+	e, h := setupEcho(rl)
+
+	rec := doRequest(e, rl.Middleware(), h, "/api/notes/create", &model.User{ID: "u1"})
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	errObj, _ := body["error"].(map[string]any)
+	require.NotNil(t, errObj)
+	assert.Equal(t, "RATE_LIMIT_EXCEEDED", errObj["code"])
 }
 
 // --- Redis integration test ---

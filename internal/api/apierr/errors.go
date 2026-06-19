@@ -163,6 +163,10 @@ const (
 	// UUID for rate limiting (third_party/misskey/.../ApiCallService.ts).
 	UUIDRateLimitExceeded = "d5826d14-3982-4d2e-8011-b9e9f02499ef"
 
+	// UUID for signin / signin-flow / signin-with-passkey rate limiting
+	// (third_party/misskey/.../SigninApiService.ts、SigninWithPasskeyApiService.ts).
+	UUIDTooManyAuthenticationFailures = "22d05606-fbcf-421a-a2db-b32610dcfd1b"
+
 	// UUID for users/show (third_party/misskey/.../endpoints/users/show.ts).
 	UUIDFailedToResolveRemoteUser = "ef7b9be4-9cba-4e6f-ab41-90ed171c7d3c"
 
@@ -554,6 +558,15 @@ func FailedToResolveRemoteUser() map[string]any {
 // RateLimitExceeded returns a 429 RATE_LIMIT_EXCEEDED error response.
 func RateLimitExceeded() map[string]any {
 	return Error("RATE_LIMIT_EXCEEDED", "Rate limit exceeded. Please try again later.", UUIDRateLimitExceeded)
+}
+
+// TooManyAuthenticationFailures returns the 429 error used by signin /
+// signin-flow / signin-with-passkey when the per-IP attempt limit is hit,
+// matching upstream SigninApiService (code TOO_MANY_AUTHENTICATION_FAILURES、
+// #1829)。汎用 RATE_LIMIT_EXCEEDED と区別して、認証失敗の brute-force 抑止で
+// あることをクライアントに伝える。
+func TooManyAuthenticationFailures() map[string]any {
+	return Error("TOO_MANY_AUTHENTICATION_FAILURES", "Too many failed attempts to sign in. Try again later.", UUIDTooManyAuthenticationFailures)
 }
 
 // InvalidToken returns a 403 INVALID_TOKEN error response. Used by 2FA flows

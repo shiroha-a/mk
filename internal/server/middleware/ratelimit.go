@@ -21,6 +21,10 @@ type EndpointLimit struct {
 	Duration    time.Duration // ウィンドウ幅（例: 1時間）
 	Max         int           // ウィンドウ内最大リクエスト数
 	MinInterval time.Duration // 連続リクエスト最小間隔（0なら無効）
+	// RejectResponse overrides the default RATE_LIMIT_EXCEEDED body returned on
+	// 429 for this endpoint. nil なら汎用 RateLimitExceeded。signin 系は
+	// TOO_MANY_AUTHENTICATION_FAILURES を返すために使う (#1829)。
+	RejectResponse func() map[string]any
 }
 
 // LimitInfo holds the result of a rate limit check.
@@ -177,7 +181,7 @@ func (rl *RateLimiter) Middleware() echo.MiddlewareFunc {
 						continue
 					}
 					if info.Remaining == 0 {
-						return rl.rejectRequest(c, info)
+						return rl.rejectRequest(c, info, limit)
 					}
 				}
 
@@ -189,7 +193,7 @@ func (rl *RateLimiter) Middleware() echo.MiddlewareFunc {
 						continue
 					}
 					if info.Remaining == 0 {
-						return rl.rejectRequest(c, info)
+						return rl.rejectRequest(c, info, limit)
 					}
 					if minRemaining < 0 || info.Remaining < minRemaining {
 						minRemaining = info.Remaining
@@ -281,13 +285,19 @@ func scaledMax(base int, factor float64) int {
 	return scaled
 }
 
-// rejectRequest returns a 429 response with appropriate headers.
-func (rl *RateLimiter) rejectRequest(c echo.Context, info LimitInfo) error {
+// rejectRequest returns a 429 response with appropriate headers. limit may
+// carry a per-endpoint RejectResponse override (e.g. signin returns
+// TOO_MANY_AUTHENTICATION_FAILURES instead of the generic RATE_LIMIT_EXCEEDED、
+// #1829)。
+func (rl *RateLimiter) rejectRequest(c echo.Context, info LimitInfo, limit *EndpointLimit) error {
 	retryAfterSec := (info.ResetMs - time.Now().UnixMilli() + 999) / 1000
 	if retryAfterSec < 0 {
 		retryAfterSec = 0
 	}
 	c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfterSec))
+	if limit != nil && limit.RejectResponse != nil {
+		return c.JSON(http.StatusTooManyRequests, limit.RejectResponse())
+	}
 	return c.JSON(http.StatusTooManyRequests, apierr.RateLimitExceeded())
 }
 
