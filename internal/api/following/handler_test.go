@@ -140,9 +140,22 @@ func TestCreate_Success(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "bob", resp["id"])
-	// following/create は PackUserDetailed (UserLite & UserDetailedNotMeOnly) を返す。
-	shapetest.Assert(t, "UserLite", resp)              // L3 (#1312)
-	shapetest.Assert(t, "UserDetailedNotMeOnly", resp) // L3 (#1312)
+	// upstream following/create は userEntityService.pack を schema 指定なしで呼ぶため
+	// 戻り値は UserLite (#1913)。UserDetailed 固有 field は出さない。
+	shapetest.Assert(t, "UserLite", resp) // L3 (#1312)
+	assertNoDetailedFields(t, resp)
+}
+
+// assertNoDetailedFields verifies a UserLite response carries none of the
+// UserDetailed-only fields. shapetest.Assert("UserLite") alone does NOT catch
+// extra fields (they degrade to SevInfo), so this guard locks the UserLite
+// parity for #1913.
+func assertNoDetailedFields(t *testing.T, resp map[string]any) {
+	t.Helper()
+	for _, f := range []string{"followersCount", "followingCount", "notesCount", "createdAt", "roles", "description"} {
+		_, has := resp[f]
+		assert.False(t, has, "UserLite 応答に UserDetailed 固有 field %q が混ざってはいけない", f)
+	}
 }
 
 func TestCreate_LockedReturnsOK(t *testing.T) {
@@ -307,8 +320,9 @@ func TestDelete_Success(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	shapetest.Assert(t, "UserLite", resp)              // L3 (#1312)
-	shapetest.Assert(t, "UserDetailedNotMeOnly", resp) // L3 (#1312)
+	// upstream following/delete も UserLite を返す (#1913)。
+	shapetest.Assert(t, "UserLite", resp) // L3 (#1312)
+	assertNoDetailedFields(t, resp)
 }
 
 func TestDelete_UserNotFound(t *testing.T) {

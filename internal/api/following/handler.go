@@ -95,7 +95,7 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
+	return c.JSON(http.StatusOK, entity.PackUserLite(bundle.User))
 }
 
 // DeleteRequest is the request body for following/delete.
@@ -128,7 +128,7 @@ func (h *Handler) Delete(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
+	return c.JSON(http.StatusOK, entity.PackUserLite(bundle.User))
 }
 
 // RequestActionRequest is the shared request body for following/requests/{accept,reject,cancel}.
@@ -209,14 +209,14 @@ func (h *Handler) CancelRequest(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
+	return c.JSON(http.StatusOK, entity.PackUserLite(bundle.User))
 }
 
 // ListRequestsResponseItem represents a single received follow request.
 type ListRequestsResponseItem struct {
-	ID       string              `json:"id"`
-	Follower entity.UserDetailed `json:"follower"`
-	Followee entity.UserDetailed `json:"followee"`
+	ID       string          `json:"id"`
+	Follower entity.UserLite `json:"follower"`
+	Followee entity.UserLite `json:"followee"`
 }
 
 // ListRequest is the request body for /api/following/list (upstream 2026.5.2
@@ -311,10 +311,10 @@ func (h *Handler) ListRequests(c echo.Context) error {
 	for _, r := range requests {
 		item := ListRequestsResponseItem{ID: r.ID}
 		if b, err := h.userService.ShowByID(r.FollowerID); err == nil {
-			item.Follower = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
+			item.Follower = entity.PackUserLite(b.User)
 		}
 		if b, err := h.userService.ShowByID(r.FolloweeID); err == nil {
-			item.Followee = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
+			item.Followee = entity.PackUserLite(b.User)
 		}
 		out = append(out, item)
 	}

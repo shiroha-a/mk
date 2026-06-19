@@ -40,7 +40,7 @@ func (h *Handler) Invalidate(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen))
+	return c.JSON(http.StatusOK, entity.PackUserLite(bundle.User))
 }
 
 // UpdateFollow handles POST /api/following/update.
@@ -90,7 +90,7 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(meBundle.User, meBundle.Profile, h.idGen))
+	return c.JSON(http.StatusOK, entity.PackUserLite(meBundle.User))
 }
 
 // normalizeNotify converts the upstream `notify` enum ("normal" / "none") to

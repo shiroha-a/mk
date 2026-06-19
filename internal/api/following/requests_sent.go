@@ -36,10 +36,10 @@ func (h *Handler) RequestsSent(c echo.Context) error {
 	for _, r := range rows {
 		item := ListRequestsResponseItem{ID: r.ID}
 		if b, err := h.userService.ShowByID(r.FollowerID); err == nil {
-			item.Follower = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
+			item.Follower = entity.PackUserLite(b.User)
 		}
 		if b, err := h.userService.ShowByID(r.FolloweeID); err == nil {
-			item.Followee = entity.PackUserDetailed(b.User, b.Profile, h.idGen)
+			item.Followee = entity.PackUserLite(b.User)
 		}
 		out = append(out, item)
 	}
