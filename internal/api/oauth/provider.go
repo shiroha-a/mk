@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/misc"
+	"github.com/shiroha-a/mk/internal/misc/permissions"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -113,10 +114,12 @@ func (h *Handler) Authorize(c echo.Context) error {
 		return directError(c, "invalid redirect_uri")
 	}
 
-	// 5. scope を dedupe。空は invalid_scope (redirect で返せる)。
-	scopes := dedupeFields(scopeParam)
+	// 5. scope を dedupe して既知 kinds に filter。既知 scope が無ければ
+	// invalid_scope (upstream OAuth2ProviderService と同じ、#1904)。未知 scope を
+	// token.permission に格納しないことで RequireScope の判定対象を健全に保つ。
+	scopes := filterKnownScopes(dedupeFields(scopeParam))
 	if len(scopes) == 0 {
-		return h.redirectError(c, redirectURI, state, "invalid_scope", "scope parameter has no scope")
+		return h.redirectError(c, redirectURI, state, "invalid_scope", "scope parameter has no known scope")
 	}
 
 	// 6. PKCE は必須 (S256 のみ)。downgrade attack 防止。
@@ -332,6 +335,18 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// filterKnownScopes keeps only recognized permission kinds, preserving order,
+// matching upstream's `.filter(s => kinds.includes(s))` (#1904)。
+func filterKnownScopes(scopes []string) []string {
+	out := scopes[:0:0]
+	for _, s := range scopes {
+		if permissions.IsKnown(s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // dedupeFields splits a space-separated scope string and removes duplicates,

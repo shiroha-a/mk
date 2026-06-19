@@ -239,6 +239,34 @@ func TestAuthorize_EmptyScope(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Location"), "error=invalid_scope")
 }
 
+// TestAuthorize_AllUnknownScope: 既知 kinds に 1 つも該当しない scope は
+// invalid_scope (#1904)。
+func TestAuthorize_AllUnknownScope(t *testing.T) {
+	hn := newHarness(t)
+	q := validAuthorizeQuery(hn, challengeFor("v"))
+	q.Set("scope", "bogus another:unknown")
+	rec := hn.authorize(t, q)
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Contains(t, rec.Header().Get("Location"), "error=invalid_scope")
+	assert.Nil(t, hn.consent)
+}
+
+// TestAuthorize_FiltersUnknownScopes: 未知 scope は除去され、既知 kinds のみが
+// consent / token に渡る (#1904)。
+func TestAuthorize_FiltersUnknownScopes(t *testing.T) {
+	hn := newHarness(t)
+	q := validAuthorizeQuery(hn, challengeFor("v"))
+	q.Set("scope", "read:account bogus write:notes read:*")
+	rec := hn.authorize(t, q)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, hn.consent)
+	assert.Equal(t, "read:account write:notes", hn.consent.Scope)
+	// 格納された txn の scopes も filter 済み。
+	txn := hn.store.txns[hn.consent.TransactionID]
+	require.NotNil(t, txn)
+	assert.Equal(t, []string{"read:account", "write:notes"}, txn.Scopes)
+}
+
 // --- Decision ---
 
 func TestDecision_IssuesCode(t *testing.T) {

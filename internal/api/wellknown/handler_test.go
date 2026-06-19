@@ -214,4 +214,11 @@ func TestOAuthAuthorizationServer(t *testing.T) {
 	assert.Equal(t, "https://example.com", resp["issuer"])
 	assert.Equal(t, "https://example.com/oauth/authorize", resp["authorization_endpoint"])
 	assert.Equal(t, "https://example.com/oauth/token", resp["token_endpoint"])
+	// scopes_supported は granular な permission kinds を広告する
+	// (Mastodon 風の "read"/"write"/"follow" ではない、#1904)。
+	scopes, ok := resp["scopes_supported"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, scopes)
+	assert.Contains(t, scopes, "read:account")
+	assert.Contains(t, scopes, "write:notes")
 }

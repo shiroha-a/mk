@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/misc/permissions"
 )
 
 // Handler handles webfinger / host-meta / nodeinfo discovery.
@@ -135,7 +136,7 @@ func (h *Handler) OAuthAuthorizationServer(c echo.Context) error {
 		"issuer":                                         h.origin,
 		"authorization_endpoint":                         h.origin + "/oauth/authorize",
 		"token_endpoint":                                 h.origin + "/oauth/token",
-		"scopes_supported":                               []string{"read", "write", "follow"},
+		"scopes_supported":                               permissions.All,
 		"response_types_supported":                       []string{"code"},
 		"grant_types_supported":                          []string{"authorization_code"},
 		"service_documentation":                          "https://misskey-hub.net",
