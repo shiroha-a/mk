@@ -725,6 +725,37 @@ func TestNoteRepository_ListByUserIDFiltered(t *testing.T) {
 	assert.Equal(t, "n_lf_file", out[0].ID)
 }
 
+// withRenotes=false は pure renote のみ除外し、cw/poll/reply を伴う quote renote は
+// 残す (#1888、pureRenoteCondSQL が cw/poll/reply を考慮)。
+func TestNoteRepository_ListByUserIDFiltered_WithRenotesFalseKeepsQuotes(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_wrq", "wrquser")
+	defer cleanupUser(t, user.ID)
+
+	mk := func(id string, mutate func(n *model.Note)) {
+		n := &model.Note{ID: id, UserID: user.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+		mutate(n)
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+	mk("n_wrq_target", func(n *model.Note) {})
+	tid := "n_wrq_target"
+	mk("n_wrq_pure", func(n *model.Note) { n.RenoteID = &tid })
+	mk("n_wrq_cw", func(n *model.Note) { n.RenoteID = &tid; cw := "w"; n.CW = &cw })
+	mk("n_wrq_poll", func(n *model.Note) { n.RenoteID = &tid; n.HasPoll = true })
+	mk("n_wrq_reply", func(n *model.Note) { n.RenoteID = &tid; n.ReplyID = &tid })
+
+	// withRenotes=false (3rd bool)。pure renote のみ除外される。
+	out, err := repo.ListByUserIDFiltered(user.ID, "", "", "", 20, false, true, false, false)
+	require.NoError(t, err)
+	got := idSet(out)
+	assert.True(t, got["n_wrq_target"])
+	assert.True(t, got["n_wrq_cw"], "cw renote は quote なので残る")
+	assert.True(t, got["n_wrq_poll"], "poll renote は quote なので残る")
+	assert.True(t, got["n_wrq_reply"], "reply renote は quote なので残る")
+	assert.NotContains(t, got, "n_wrq_pure", "pure renote は除外される")
+}
+
 // TestNoteRepository_ListByUserIDFiltered_VisibilityPushDown は users/notes の
 // visibility push-down (#1418 review) を検証する。author が public / followers /
 // specified の 3 note を持ち、viewer ごとに SQL 段階で見える note が変わること
@@ -1162,14 +1193,30 @@ func TestNoteRepository_ListChildrenOf_PureRenoteExcluded(t *testing.T) {
 		n.RenoteID = &parentID
 		n.HasPoll = true
 	})
+	// renote + cw → 含める (#1888: cw も quote 判定に含む)
+	mk("n_lcpr_c6_cw", func(n *model.Note) {
+		n.RenoteID = &parentID
+		cw := "warn"
+		n.CW = &cw
+	})
+	// 別 note への reply を伴う renote-of-parent → quote として含める (#1888: replyId も
+	// quote 判定に含む)。reply target は parent ではないので reply branch では拾われない。
+	mk("n_lcpr_other", func(n *model.Note) {})
+	otherID := "n_lcpr_other"
+	mk("n_lcpr_c7_replyquote", func(n *model.Note) {
+		n.RenoteID = &parentID
+		n.ReplyID = &otherID
+	})
 
 	out, err := repo.ListChildrenOf(parentID, "", "", "", 10)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]bool{
-		"n_lcpr_c1_reply": true,
-		"n_lcpr_c3_quote": true,
-		"n_lcpr_c4_file":  true,
-		"n_lcpr_c5_poll":  true,
+		"n_lcpr_c1_reply":      true,
+		"n_lcpr_c3_quote":      true,
+		"n_lcpr_c4_file":       true,
+		"n_lcpr_c5_poll":       true,
+		"n_lcpr_c6_cw":         true,
+		"n_lcpr_c7_replyquote": true,
 	}, idSet(out))
 	// pure renote が含まれていないことを明示
 	assert.NotContains(t, idSet(out), "n_lcpr_c2_pure")

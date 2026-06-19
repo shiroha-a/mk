@@ -390,14 +390,28 @@ type replyMeta struct {
 // 判定するのに使う。NoteEntityService.pack は packed note に `mentions:
 // string[]` を出力するので JSON tag で拾える。
 type notePayload struct {
-	UserID   string     `json:"userId"`
-	Text     *string    `json:"text"`
-	CW       *string    `json:"cw"`
-	RenoteID *string    `json:"renoteId"`
-	ReplyID  *string    `json:"replyId"`
-	FileIDs  []string   `json:"fileIds"`
-	Mentions []string   `json:"mentions"`
-	Reply    *replyMeta `json:"reply,omitempty"`
+	UserID   string          `json:"userId"`
+	Text     *string         `json:"text"`
+	CW       *string         `json:"cw"`
+	RenoteID *string         `json:"renoteId"`
+	ReplyID  *string         `json:"replyId"`
+	FileIDs  []string        `json:"fileIds"`
+	Mentions []string        `json:"mentions"`
+	Poll     json.RawMessage `json:"poll"`
+	Reply    *replyMeta      `json:"reply,omitempty"`
+}
+
+// isPureRenote reports whether the payload is a pure renote (renote with no
+// text/cw/files/poll/reply)。SQL pureRenoteCondSQL / core/note.IsPureRenote /
+// timeline.isPureRenote と揃える (#1888)。これが揺れると cache-hit (stream) と
+// DB fallback で withRenotes フィルタの挙動が割れる。
+func (n *notePayload) isPureRenote() bool {
+	return n.RenoteID != nil &&
+		n.Text == nil &&
+		n.CW == nil &&
+		n.ReplyID == nil &&
+		len(n.FileIDs) == 0 &&
+		(len(n.Poll) == 0 || string(n.Poll) == "null")
 }
 
 // shouldEmit returns true if the note passes non-reply filter conditions
@@ -414,9 +428,9 @@ func (f *noteFilter) shouldEmit(payload []byte, hardMuteRules []byte, viewerID s
 		return true
 	}
 
-	// 純リノート（テキストなし + renoteIdあり + ファイルなし）をフィルタ
-	// timeline_filter.goのisPureRenoteと一致させる
-	if !f.WithRenotes && note.Text == nil && note.RenoteID != nil && len(note.FileIDs) == 0 {
+	// 純リノート (text/cw/files/poll/reply 全て空 + renoteId あり) をフィルタ。
+	// SQL pureRenoteCondSQL / timeline_filter.go の isPureRenote と一致させる (#1888)。
+	if !f.WithRenotes && note.isPureRenote() {
 		return false
 	}
 

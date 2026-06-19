@@ -47,6 +47,23 @@ func TestShouldEmit_RenoteWithFilesAllowed(t *testing.T) {
 	assert.True(t, f.shouldEmit(payload, nil, ""))
 }
 
+// #1888: cw / poll / reply を伴う renote は quote なので withRenotes=false でも通過する
+// (SQL pureRenoteCondSQL と cache 経路の挙動を一致させる)。
+func TestShouldEmit_RenoteWithCWAllowed(t *testing.T) {
+	f := noteFilter{WithRenotes: false, WithReplies: false, WithFiles: false}
+	assert.True(t, f.shouldEmit([]byte(`{"renoteId":"r1","cw":"warn"}`), nil, ""))
+}
+
+func TestShouldEmit_RenoteWithPollAllowed(t *testing.T) {
+	f := noteFilter{WithRenotes: false, WithReplies: false, WithFiles: false}
+	assert.True(t, f.shouldEmit([]byte(`{"renoteId":"r1","poll":{"choices":[]}}`), nil, ""))
+}
+
+func TestShouldEmit_RenoteWithReplyAllowed(t *testing.T) {
+	f := noteFilter{WithRenotes: false, WithReplies: false, WithFiles: false}
+	assert.True(t, f.shouldEmit([]byte(`{"renoteId":"r1","replyId":"p1"}`), nil, ""))
+}
+
 // #1063: shouldEmit は reply blanket-drop を持たない (upstream Misskey TS の
 // home/hybrid/local channel に揃った semantics で、reply 表示可否は
 // replyShouldEmit が channel ごとに判定する)。WithReplies フィールドは

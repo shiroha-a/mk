@@ -26,6 +26,22 @@ const aidxTime2000Ms int64 = 946684800000
 // ことを保証する (#1491 review B 指摘の二重定義解消)。
 const FeaturedNotesPerUserPoolSize = 50
 
+// pureRenoteCondSQL は pure renote (= text/cw/files/poll/reply を伴わない renote)
+// を表す SQL 断片。upstream isPureRenote (= !isQuote) と揃える (#1888)。timeline
+// (withRenotes) / home TL / renote-mute の各 filter で共有し、列定義の drift を防ぐ。
+// 列は全 caller で曖昧にならないよう非修飾 (JOIN 先に同名列は無い)。
+//
+// text/cw/replyId は IS NULL のみ判定する (空文字は判定しない)。upstream isQuote は
+// `text != null` 等の null 判定なので、空文字 text="" の renote は upstream でも quote
+// 扱いになり、この SQL と一致する (= NULL のみが pure)。空文字を pure とみなす方向に
+// 変えない (それは upstream から乖離する)。
+const pureRenoteCondSQL = `"renoteId" IS NOT NULL AND "text" IS NULL AND "cw" IS NULL AND "fileIds" = '{}' AND "hasPoll" = false AND "replyId" IS NULL`
+
+// renoteHasContentSQL は pureRenoteCondSQL の content 部の否定 (= quote renote:
+// text/cw/files/poll/reply のいずれかを伴う renote)。children listing で quote を
+// 含めるのに使う (#1888)。
+const renoteHasContentSQL = `("text" IS NOT NULL OR "cw" IS NOT NULL OR "fileIds" != '{}' OR "hasPoll" = TRUE OR "replyId" IS NOT NULL)`
+
 // aidxCutoffID は与えられた time に対応する最小のaidx ID文字列を返す。
 // aidxは「時刻base36(8) + nodeID(4) + counter(4)」の 16 文字で、先頭 8 文字が
 // ms-since-2000 を base36 で表したもの。そのため lexicographic 比較で時刻順に
@@ -397,9 +413,9 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 		q = q.Where(`"replyId" IS NULL`)
 	}
 	if !withRenotes {
-		// pure renote (= text / fileIds / poll 全て空 + renoteId あり) を除外する。
-		// quote (= text あり + renoteId) は通常の投稿として残す。
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND "text" IS NULL AND "fileIds" = '{}' AND "hasPoll" = false)`)
+		// pure renote (= text/cw/files/poll/reply 全て空 + renoteId あり) を除外する。
+		// quote (= 本文等を伴う renote) は通常の投稿として残す (#1888)。
+		q = q.Where(`NOT (` + pureRenoteCondSQL + `)`)
 	}
 	if !withChannelNotes {
 		q = q.Where(`"channelId" IS NULL`)
@@ -485,11 +501,11 @@ func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID strin
 	// (#1500)。実際のリーク防止は ListChildrenOf_VisibilityPushDown の回帰テストで担保。
 	//
 	// renoteId 側は upstream notes/children (children.ts:53-67) に合わせ、本文・
-	// ファイル・投票のいずれかを持つ引用 renote のみ含める。pure renote (text NULL
-	// かつ fileIds = '{}' かつ hasPoll = false) は children に出さない (#1554)。
+	// text/cw/file/poll/reply のいずれかを持つ引用 renote のみ含める。pure renote は
+	// children に出さない (#1554、quote 判定は #1888 で cw/reply 込みに統一)。
 	// reply 側にはこの content ガードを掛けない (返信は本文が空でも子として返す)。
 	q := preloadNoteRelations(r.db).
-		Where(`("replyId" = ? OR ("renoteId" = ? AND ("text" IS NOT NULL OR "fileIds" != '{}' OR "hasPoll" = TRUE)))`, noteID, noteID)
+		Where(`("replyId" = ? OR ("renoteId" = ? AND `+renoteHasContentSQL+`))`, noteID, noteID)
 	// visibility push-down (#1500): viewer が見られる child のみ LIMIT 前に絞る。
 	q = applyViewerVisibility(q, viewerID)
 	if untilID != "" {
@@ -919,8 +935,8 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		q = q.Where(`"fileIds" != '{}'`)
 	}
 	if f.WithRenotes != nil && !*f.WithRenotes {
-		// pure renote (テキストもファイルもない renote) を除外
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}')`)
+		// pure renote (text/cw/files/poll/reply 全て空の renote) を除外 (#1888)。
+		q = q.Where(`NOT (` + pureRenoteCondSQL + `)`)
 	}
 	if f.WithReplies != nil && !*f.WithReplies {
 		// upstream Misskey TS Home TL と完全一致: `replyId IS NULL` か、
@@ -941,13 +957,13 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	if f.IncludeMyRenotes != nil && !*f.IncludeMyRenotes && f.ViewerID != "" {
 		// "userId" は JOIN を持つ呼び出し元 (ListByUserList の user_list_membership)
 		// で membership.userId と衝突するため "note". で修飾する (#1498)。
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "note"."userId" = ?)`, f.ViewerID)
+		q = q.Where(`NOT (`+pureRenoteCondSQL+` AND "note"."userId" = ?)`, f.ViewerID)
 	}
 	if f.IncludeRenotedMyNotes != nil && !*f.IncludeRenotedMyNotes && f.ViewerID != "" {
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "renoteUserId" = ?)`, f.ViewerID)
+		q = q.Where(`NOT (`+pureRenoteCondSQL+` AND "renoteUserId" = ?)`, f.ViewerID)
 	}
 	if f.IncludeLocalRenotes != nil && !*f.IncludeLocalRenotes {
-		q = q.Where(`NOT ("renoteId" IS NOT NULL AND text IS NULL AND "fileIds" = '{}' AND "renoteUserHost" IS NULL)`)
+		q = q.Where(`NOT (` + pureRenoteCondSQL + ` AND "renoteUserHost" IS NULL)`)
 	}
 	if len(f.MutedChannelIDs) > 0 {
 		// channel_mutingに登録されたチャンネルのノートはタイムラインから除外する。
@@ -1029,10 +1045,10 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	// path (RenoteMutedUserIDs を直接 IN) は現状 test/production とも未使用
 	// なので未実装。必要になったら同 file の MutedUserIDs literal 分岐と
 	// 同 pattern で追加可能。
-	// pure renote condition: text IS NULL AND fileIds = '{}' AND renoteId IS NOT NULL
+	// pure renote condition は pureRenoteCondSQL (text/cw/files/poll/reply 全空) を共有 (#1888)。
 	if f.UseRenoteMutingSubquery && f.ViewerID != "" {
 		q = q.Where(
-			`NOT (EXISTS (SELECT 1 FROM "renote_muting" rm WHERE rm."muterId" = ? AND rm."muteeId" = "note"."userId") AND text IS NULL AND "fileIds" = '{}' AND "renoteId" IS NOT NULL)`,
+			`NOT (EXISTS (SELECT 1 FROM "renote_muting" rm WHERE rm."muterId" = ? AND rm."muteeId" = "note"."userId") AND `+pureRenoteCondSQL+`)`,
 			f.ViewerID,
 		)
 	}

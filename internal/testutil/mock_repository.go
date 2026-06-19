@@ -1024,9 +1024,9 @@ func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID s
 			return true
 		}
 		if n.RenoteID != nil && *n.RenoteID == noteID {
-			// pure renote 判定は repository note.go の SQL (text IS NULL AND
-			// fileIds = '{}' AND hasPoll = false) と一致させる。
-			isPureRenote := n.Text == nil && len(n.FileIDs) == 0 && !n.HasPoll
+			// pure renote 判定は repository note.go の pureRenoteCondSQL
+			// (text/cw/fileIds/poll/replyId 全空) と一致させる (#1888)。
+			isPureRenote := n.Text == nil && n.CW == nil && len(n.FileIDs) == 0 && !n.HasPoll && n.ReplyID == nil
 			return !isPureRenote
 		}
 		return false
@@ -1159,12 +1159,9 @@ func (m *MockNoteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sin
 			return false
 		}
 		if !withRenotes {
-			// pure renote (text / fileIds / poll 全て空 + renoteId あり) を除外
-			text := ""
-			if n.Text != nil {
-				text = *n.Text
-			}
-			if n.RenoteID != nil && text == "" && len(n.FileIDs) == 0 && !n.HasPoll {
+			// pure renote (text/cw/fileIds/poll/replyId 全空 + renoteId あり) を除外。
+			// real SQL pureRenoteCondSQL と一致させる (#1888)。
+			if n.RenoteID != nil && n.Text == nil && n.CW == nil && len(n.FileIDs) == 0 && !n.HasPoll && n.ReplyID == nil {
 				return false
 			}
 		}
@@ -1560,10 +1557,9 @@ func (m *MockNoteRepository) ListByUserList(listID string, limit int, sinceID, u
 		if filter.WithFiles && len(n.FileIDs) == 0 {
 			continue
 		}
-		// pure renote 判定: applyTimelineFilter と同じく
-		// `RenoteID != nil && Text == nil && len(FileIDs) == 0` で一致させる
-		// (real SQL: renoteId IS NOT NULL AND text IS NULL AND fileIds = '{}')。
-		isPureRenote := n.RenoteID != nil && n.Text == nil && len(n.FileIDs) == 0
+		// pure renote 判定: real SQL pureRenoteCondSQL (renoteId IS NOT NULL AND
+		// text/cw/fileIds/poll/replyId 全空) と一致させる (#1888)。
+		isPureRenote := n.RenoteID != nil && n.Text == nil && n.CW == nil && len(n.FileIDs) == 0 && !n.HasPoll && n.ReplyID == nil
 		if !withRenotes && isPureRenote {
 			// pure renote (= boost) excluded; quote renote (text or files あり) は通る。
 			continue
