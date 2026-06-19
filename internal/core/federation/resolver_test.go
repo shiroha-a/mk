@@ -480,6 +480,83 @@ func TestIngestNote_NoContextStillIngested(t *testing.T) {
 	require.NotNil(t, note)
 }
 
+// TestResolveActor_RejectsFragmentURL pins the upstream b94fd5b1 guard (#1828):
+// an actor URL with a `#` fragment cannot be dereferenced and is rejected
+// before any fetch. (keyId fragments are stripped by ResolveActorByKeyID and
+// therefore still resolve — see TestResolveActorByKeyID.)
+func TestResolveActor_RejectsFragmentURL(t *testing.T) {
+	r, repo := newResolver(t, sampleActor, nil)
+	_, err := r.ResolveActor("https://remote.example/users/alice#frag")
+	require.ErrorIs(t, err, federation.ErrResolveFragment)
+	assert.Empty(t, repo.Users)
+}
+
+// TestResolveNote_RejectsFragmentURL pins the same guard for note resolution.
+func TestResolveNote_RejectsFragmentURL(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleRemoteNote)}, idGen)
+	_, err := r.ResolveNote("https://remote.example/notes/n1#frag")
+	require.ErrorIs(t, err, federation.ErrResolveFragment)
+}
+
+// quoteChainFetcher serves an unbounded chain of notes where note N quotes
+// note N+1, plus the shared author actor. Used to exercise the resolve
+// recursion limit (#1828) — without the limit the chain would never terminate.
+type quoteChainFetcher struct {
+	actorBody string
+	calls     atomic.Int64
+}
+
+func (f *quoteChainFetcher) FetchObject(uri string) ([]byte, error) {
+	f.calls.Add(1)
+	if strings.Contains(uri, "/users/") {
+		return []byte(f.actorBody), nil
+	}
+	n := 0
+	if i := strings.LastIndex(uri, "/"); i >= 0 {
+		n, _ = strconv.Atoi(uri[i+1:])
+	}
+	body := fmt.Sprintf(`{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": %q,
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "n%d",
+		"_misskey_quote": "https://remote.example/notes/%d"
+	}`, uri, n, n+1)
+	return []byte(body), nil
+}
+
+// TestResolveNote_RecursionLimit pins the upstream d592da9f guard (#1828): a
+// note whose quote chain is unbounded is resolved up to resolveRecursionLimit
+// (256) deep and then stops, rather than recursing forever. The top note is
+// still created; the chain just truncates. We observe the bound via the fetch
+// count (without the limit this test would not terminate).
+func TestResolveNote_RecursionLimit(t *testing.T) {
+	f := &quoteChainFetcher{actorBody: sampleActor}
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, f, idGen)
+
+	note, err := r.ResolveNote("https://remote.example/notes/0")
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	// 上限 (256) + 著者 actor 1 回程度で頭打ちになり、際限なく fetch しないこと
+	// (上限が無ければ chain は終わらない)。note/0..256 の 257 + actor 1 = 258 想定。
+	assert.LessOrEqual(t, f.calls.Load(), int64(260))
+	// 深く再帰したこと自体の確認: 上限近くの note は取り込まれている。
+	_, err = noteRepo.FindByURI("https://remote.example/notes/200")
+	require.NoError(t, err)
+	// 上限を超えた先の note は ErrRecursionLimit で truncate され取り込まれない。
+	_, err = noteRepo.FindByURI("https://remote.example/notes/300")
+	require.Error(t, err)
+}
+
 // failingUserRepo returns Create errors for the resolver.
 type failingUserRepo struct {
 	*testutil.MockUserRepository

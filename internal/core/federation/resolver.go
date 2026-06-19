@@ -89,7 +89,19 @@ var (
 	// (なりすまし) を防ぐ (#1839)。malformed note (ErrInvalidNote) と違い、これは
 	// retry しても解消しないため caller は ack して drop する。
 	ErrNoteAttributionMismatch = errors.New("note attribution does not match delivering actor or id host")
+	// ErrResolveFragment is returned when a resolve target URL carries a `#`
+	// fragment. Fragments are not transmitted over HTTP(S) so such URLs cannot
+	// be dereferenced; mirrors upstream Resolver の b94fd5b1 guard (#1828)。
+	ErrResolveFragment = errors.New("cannot resolve URL with fragment")
+	// ErrRecursionLimit is returned when a single resolve operation's note/quote
+	// chain exceeds resolveRecursionLimit, mirroring upstream Resolver の
+	// d592da9f guard。悪意ある quote チェーンによる無限再帰・amplification を防ぐ。
+	ErrRecursionLimit = errors.New("hit recursion limit")
 )
+
+// resolveRecursionLimit bounds how deep a single resolve operation may recurse
+// through note quote chains, matching upstream Resolver.recursionLimit (256)。
+const resolveRecursionLimit = 256
 
 // DefaultActorTTL is the default duration after which a cached actor (and its
 // public key) is considered stale and refetched on next access.
@@ -377,6 +389,12 @@ func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
 // resolveActorOnce is the body of ResolveActor, invoked once per URI by
 // singleflight.Do.
 func (r *Resolver) resolveActorOnce(uri string) (*model.User, error) {
+	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
+	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
+	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
+	if strings.Contains(uri, "#") {
+		return nil, ErrResolveFragment
+	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
 		if r.shouldRefreshActor(existing) {
 			r.refreshActor(existing, uri)
@@ -859,11 +877,18 @@ func (r *Resolver) ResolveActorByKeyID(keyID string) (*model.User, error) {
 //   - リモート URI で既に取り込み済みなら noteRepo.FindByURI で返す
 //   - 未知のリモート URI なら fetcher で取得して IngestNote で永続化
 func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
+	return r.resolveNoteDepth(uri, 0)
+}
+
+// resolveNoteDepth is ResolveNote carrying the current recursion depth so the
+// note/quote chain can be bounded (#1828)。quote 解決経路 (resolveQuoteURI) が
+// depth+1 で再入する。
+func (r *Resolver) resolveNoteDepth(uri string, depth int) (*model.Note, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
 	// 実行しないことが目的。
 	v, err, _ := r.resolveNoteGroup.Do(uri, func() (any, error) {
-		return r.resolveNoteOnce(uri)
+		return r.resolveNoteOnce(uri, depth)
 	})
 	if err != nil {
 		return nil, err
@@ -874,11 +899,20 @@ func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
 	return v.(*model.Note), nil
 }
 
-// resolveNoteOnce is the body of ResolveNote, invoked once per URI by
-// singleflight.Do.
-func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
+// resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
+// singleflight.Do. depth は quote chain の現在の深さ。
+func (r *Resolver) resolveNoteOnce(uri string, depth int) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
+	}
+	// fragment 付き URL は解決不能なため拒否 (本家 b94fd5b1 guard、#1828)。
+	if strings.Contains(uri, "#") {
+		return nil, ErrResolveFragment
+	}
+	// quote chain の再帰上限 (本家 d592da9f guard、#1828)。悪意ある深い
+	// quote チェーンによる無限再帰・amplification を防ぐ。
+	if depth > resolveRecursionLimit {
+		return nil, ErrRecursionLimit
 	}
 	if id := r.extractLocalNoteID(uri); id != "" {
 		if existing, err := r.noteRepo.FindByID(id); err == nil {
@@ -922,7 +956,10 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 		slog.Warn("federation: note id host mismatch", "uri", uri, "finalURL", finalURL, "id", idProbe.ID)
 		return nil, err
 	}
-	return r.IngestNote(body)
+	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
+	// quote chain の depth を引き継いで再帰上限を効かせる。
+	note, _, err := r.ingestNoteWithCreated(body, "", depth)
+	return note, err
 }
 
 // resolveQuoteTarget resolves the quote target of an inbound note from its
@@ -934,18 +971,18 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 // 既知 note (local ID / 取り込み済み URI) を fetch 無しで優先的に引く。未知 URI は
 // ResolveNote で fetch するが、その URI が現在 ingest 中 (quote cycle) の場合は
 // fetch を skip して無限再帰を防ぐ (#1527)。
-func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string) *model.Note {
+func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int) *model.Note {
 	if r.noteRepo == nil {
 		return nil
 	}
 	// upstream ApNoteService は `[_misskey_quote, quoteUrl]` を順に解決し、最初に
 	// 成功した note を採用する (`.at(0)`)。通常は両者同値だが、片方しか解決できない
 	// ケースで取りこぼさないよう順に試す。
-	if n := r.resolveQuoteURI(misskeyQuote); n != nil {
+	if n := r.resolveQuoteURI(misskeyQuote, depth); n != nil {
 		return n
 	}
 	if quoteURL != misskeyQuote {
-		if n := r.resolveQuoteURI(quoteURL); n != nil {
+		if n := r.resolveQuoteURI(quoteURL, depth); n != nil {
 			return n
 		}
 	}
@@ -955,7 +992,7 @@ func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string) *model.Note
 // resolveQuoteURI resolves a single quote URI to a local note row. 既知 note
 // (local ID / 取り込み済み URI) は fetch 無しで引き、未知 URI は cycle でなければ
 // ResolveNote で fetch する。空 URI / 解決不能は nil。
-func (r *Resolver) resolveQuoteURI(uri string) *model.Note {
+func (r *Resolver) resolveQuoteURI(uri string, depth int) *model.Note {
 	if uri == "" {
 		return nil
 	}
@@ -970,11 +1007,13 @@ func (r *Resolver) resolveQuoteURI(uri string) *model.Note {
 	if n, err := r.noteRepo.FindByURI(uri); err == nil {
 		return n
 	}
-	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。
+	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。in-flight URI
+	// (ancestor chain) は already-resolved として skip し quote cycle を防ぐ
+	// (#1527、本家 0dc86cf6 guard 相当)。depth+1 で再帰上限も効かせる。
 	if _, inflight := r.ingesting.Load(uri); inflight {
 		return nil
 	}
-	if n, err := r.ResolveNote(uri); err == nil {
+	if n, err := r.resolveNoteDepth(uri, depth+1); err == nil {
 		return n
 	}
 	return nil
@@ -989,7 +1028,7 @@ func (r *Resolver) resolveQuoteURI(uri string) *model.Note {
 func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// id host == attributedTo host 検証は IngestNoteWithCreated 側で常に行う。
-	note, _, err := r.IngestNoteWithCreated(body, "")
+	note, _, err := r.ingestNoteWithCreated(body, "", 0)
 	return note, err
 }
 
@@ -1016,6 +1055,13 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 // fetch 経由 (IngestNote) では空文字を渡し、この検証を skip する (upstream
 // validateNote が actor 未指定時に attribution==actor を skip するのと同じ)。
 func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string) (*model.Note, bool, error) {
+	// inbound delivery 起点は quote chain depth 0。
+	return r.ingestNoteWithCreated(body, deliveringActorURI, 0)
+}
+
+// ingestNoteWithCreated is the body of IngestNoteWithCreated carrying the
+// current note/quote-chain recursion depth (#1828)。
+func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string, depth int) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
 		return nil, false, ErrInvalidNote
 	}
@@ -1203,7 +1249,7 @@ func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string)
 	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
 	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
 	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
-	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL)
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL, depth)
 	// 引用先が followers / specified(DM) の場合は紐付けない。本家
 	// NoteCreateService.ts:346-352 は他人の followers note と全 specified note を
 	// renote 対象から reject するため、連合の正規 quote がこれらを指すことはない。
