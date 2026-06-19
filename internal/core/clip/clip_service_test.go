@@ -110,6 +110,22 @@ func TestShow_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, clip.ErrClipNotFound)
 }
 
+// TestGet_RawNoVisibilityGate: Get は visibility gate 無しで raw に引く
+// (clips/my-favorites 用、#1830)。他人所有の非公開 clip も返す。
+func TestGet_RawNoVisibilityGate(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "owner", IsPublic: false, Name: "private"}
+	got, err := svc.Get("c1")
+	require.NoError(t, err)
+	assert.Equal(t, "private", got.Name)
+}
+
+func TestGet_NotFound(t *testing.T) {
+	svc, _, _, _ := newSvc(t)
+	_, err := svc.Get("missing")
+	assert.ErrorIs(t, err, clip.ErrClipNotFound)
+}
+
 func TestShow_PrivateHiddenFromOthers(t *testing.T) {
 	svc, repo, _, _ := newSvc(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", IsPublic: false}

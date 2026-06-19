@@ -110,7 +110,11 @@ func (h *Handler) MyFavorites(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(favs))
 	for _, f := range favs {
-		cl, err := h.svc.Show(user.ID, f.ClipID)
+		// upstream clips/my-favorites は favorite に紐づく clip を visibility 無検査で
+		// 全件返す (公開時に favorite した clip を所有者が後で非公開化しても自分の
+		// favorites には残る、#1830)。Show は他人所有の非公開 clip を弾くので使わず、
+		// 可視性 gate 無しの Get を使う。clip 削除済み (orphan favorite) のみ drop。
+		cl, err := h.svc.Get(f.ClipID)
 		if err != nil {
 			continue
 		}

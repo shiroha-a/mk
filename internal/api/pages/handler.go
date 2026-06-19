@@ -347,15 +347,9 @@ func (h *Handler) My(c echo.Context) error {
 	return c.JSON(http.StatusOK, h.pagesToList(rows, func(string) *model.User { return user }))
 }
 
-// FeaturedRequest is the request body for pages/featured.
-type FeaturedRequest struct {
-	Limit     int    `json:"limit"`
-	Offset    int    `json:"offset"`
-	SinceID   string `json:"sinceId"`
-	UntilID   string `json:"untilId"`
-	SinceDate *int64 `json:"sinceDate"`
-	UntilDate *int64 `json:"untilDate"`
-}
+// featuredPageLimit is the fixed page count pages/featured returns, matching
+// upstream's `.limit(10)` (featured.ts)。
+const featuredPageLimit = 10
 
 // Featured handles POST /api/pages/featured.
 //
@@ -363,13 +357,10 @@ type FeaturedRequest struct {
 // pagesToList に owner closure で渡す (#1134)。userSource が未配線の test 経路
 // では owner 取得不能なので空 list を返す (= silent fail-soft、501 にしない)。
 func (h *Handler) Featured(c echo.Context) error {
-	var req FeaturedRequest
-	if err := c.Bind(&req); err != nil {
-		return apierr.JSONInvalidParam(c)
-	}
-	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	rows, err := h.svc.Featured(sinceID, untilID, req.Limit, req.Offset)
+	// upstream pages/featured は paramDef 空。limit/offset/sinceId/untilId を一切
+	// 受け取らず、常に visibility=public かつ likedCount>0 の page を likedCount
+	// DESC で固定 10 件返す (#1830)。REST 経由で順序・件数を変えさせない。
+	rows, err := h.svc.Featured("", "", featuredPageLimit, 0)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

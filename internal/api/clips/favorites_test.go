@@ -141,3 +141,31 @@ func TestClipMyFavorites_WithData(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &arr))
 	assert.Len(t, arr, 1)
 }
+
+// TestClipMyFavorites_IncludesNonPublicNonOwned: upstream は favorite に紐づく
+// clip を visibility 無検査で返す。公開時に favorite した他人所有 clip を所有者が
+// 後で非公開化しても、自分の favorites からは消えない (#1830)。
+func TestClipMyFavorites_IncludesNonPublicNonOwned(t *testing.T) {
+	h, clipRepo, favRepo := newStubHandler(t)
+	// u2 所有の非公開 clip を u1 が favorite している。
+	clipRepo.Clips["cl2"] = &model.Clip{ID: "cl2", UserID: "u2", Name: "private", IsPublic: false}
+	favRepo.Favorites["u1:cl2"] = &model.ClipFavorite{ID: "f2", UserID: "u1", ClipID: "cl2"}
+	rec := postStubWithBody(t, h.MyFavorites, `{}`, "u1")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var arr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &arr))
+	require.Len(t, arr, 1, "他人所有の非公開 favorited clip も返す (visibility 無検査)")
+	assert.Equal(t, "cl2", arr[0]["id"])
+}
+
+// TestClipMyFavorites_DropsDeletedClip: clip が削除済み (orphan favorite) の
+// 場合だけ drop する。
+func TestClipMyFavorites_DropsDeletedClip(t *testing.T) {
+	h, _, favRepo := newStubHandler(t)
+	favRepo.Favorites["u1:gone"] = &model.ClipFavorite{ID: "f3", UserID: "u1", ClipID: "gone"}
+	rec := postStubWithBody(t, h.MyFavorites, `{}`, "u1")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var arr []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &arr))
+	assert.Empty(t, arr)
+}

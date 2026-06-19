@@ -614,11 +614,41 @@ func TestFeatured_DropsRowsWithoutOwner(t *testing.T) {
 	assert.Empty(t, rows, "rows without owner must be dropped, not emitted with missing user field")
 }
 
-func TestFeatured_BadJSON(t *testing.T) {
+// TestFeatured_IgnoresBadJSON: upstream pages/featured は paramDef 空で body を
+// 読まないため、不正な JSON body でも 400 ではなく通常の featured 一覧を返す (#1830)。
+func TestFeatured_IgnoresBadJSON(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{not`)
 	require.NoError(t, h.Featured(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// featuredSpyRepo records the args ListFeatured was called with.
+type featuredSpyRepo struct {
+	*testutil.MockPageRepository
+	gotSince, gotUntil  string
+	gotLimit, gotOffset int
+}
+
+func (r *featuredSpyRepo) ListFeatured(since, until string, limit, offset int) ([]*model.Page, error) {
+	r.gotSince, r.gotUntil, r.gotLimit, r.gotOffset = since, until, limit, offset
+	return r.MockPageRepository.ListFeatured(since, until, limit, offset)
+}
+
+// TestFeatured_IgnoresRequestParams: limit/offset/sinceId/untilId を body で
+// 渡しても無視し、常に固定 10 件 / カーソル無しで問い合わせる (#1830)。
+func TestFeatured_IgnoresRequestParams(t *testing.T) {
+	repo := &featuredSpyRepo{MockPageRepository: testutil.NewMockPageRepository()}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := corepage.NewService(repo, testutil.NewMockPageLikeRepository(), idGen)
+	h := NewHandler(svc, idGen)
+	c, rec := newReq(t, `{"limit":3,"offset":5,"sinceId":"aaa","untilId":"zzz"}`)
+	require.NoError(t, h.Featured(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "", repo.gotSince, "sinceId は無視される")
+	assert.Equal(t, "", repo.gotUntil, "untilId は無視される")
+	assert.Equal(t, 10, repo.gotLimit, "limit は固定 10")
+	assert.Equal(t, 0, repo.gotOffset, "offset は無視される")
 }
 
 // featuredFailRepo causes ListFeatured to fail.

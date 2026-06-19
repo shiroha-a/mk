@@ -69,6 +69,11 @@ func (h *Handler) PageLikes(c echo.Context) error {
 		ownersByID[o.ID] = o
 	}
 
+	// i/page-likes は自分が like した page 一覧なので、埋め込み page の isLiked は
+	// 常に true。upstream は packMany(likes, me) で me を渡し isLiked を出す
+	// (PageEntityService.ts isLiked: meId ? exists(...) : undefined)。mk-go も
+	// IsLiked を立てて shape を揃える (#1830)。
+	liked := true
 	out := make([]map[string]any, 0, len(likes))
 	for _, l := range likes {
 		p, ok := pagesByID[l.PageID]
@@ -86,8 +91,9 @@ func (h *Handler) PageLikes(c echo.Context) error {
 		out = append(out, map[string]any{
 			"id": l.ID,
 			"page": entity.PackPageWithContext(p, entity.PackPageContext{
-				IDGen: h.idGen,
-				Owner: owner,
+				IDGen:   h.idGen,
+				Owner:   owner,
+				IsLiked: &liked,
 			}),
 		})
 	}

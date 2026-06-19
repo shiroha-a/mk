@@ -67,6 +67,8 @@ func TestPageLikes_FullShape(t *testing.T) {
 	user, ok := page["user"].(map[string]any)
 	require.True(t, ok, "page must include user field (#1136)")
 	assert.Equal(t, "author", user["username"])
+	// i/page-likes は自分の like 一覧なので埋め込み page の isLiked は true (#1830)。
+	assert.Equal(t, true, page["isLiked"], "embedded page must carry isLiked=true")
 	shapetest.Assert(t, "Page", page) // L3 (#1324)
 }
 

@@ -152,6 +152,18 @@ func (s *Service) Exists(clipID string) (bool, error) {
 	return true, nil
 }
 
+// Get returns a clip by ID WITHOUT a visibility gate. Used by
+// clips/my-favorites which mirrors upstream (favorite 行に紐づく clip を
+// visibility 無検査で全件返す: 公開 clip を favorite した後に所有者が非公開化
+// しても自分の favorites には残す、#1830)。可視性判定が必要な経路は Show を使う。
+func (s *Service) Get(clipID string) (*model.Clip, error) {
+	c, err := s.repo.FindByID(clipID)
+	if err != nil {
+		return nil, ErrClipNotFound
+	}
+	return c, nil
+}
+
 // UpdateInput holds the editable fields of a clip.
 type UpdateInput struct {
 	Name        *string
