@@ -137,6 +137,23 @@ func post(handler func(echo.Context) error, body string, user *model.User) *http
 	return rec
 }
 
+// postWithToken is post but also wires the raw auth token onto the context so
+// handlers that distinguish native session vs app access token (app/show
+// secret gate, #1829) can be exercised.
+func postWithToken(handler func(echo.Context) error, body string, user *model.User, token string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	if user != nil {
+		c.Set(string(middleware.UserContextKey), user)
+	}
+	c.Set(string(middleware.TokenContextKey), token)
+	_ = handler(c)
+	return rec
+}
+
 // --- Create ---
 
 func TestCreate_Success(t *testing.T) {
@@ -234,17 +251,41 @@ func TestShow_IsAuthorized(t *testing.T) {
 	assert.Equal(t, true, resp["isAuthorized"])
 }
 
+// TestShow_WithOwner: owner が native session (raw token == users.token) で
+// 叩くと secret を返す (upstream isSecure = token==null)。
 func TestShow_WithOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	uid := "u1"
 	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: pq.StringArray{"read:account"}}
 
-	rec := post(h.Show, `{"appId":"app1"}`, &model.User{ID: "u1"})
+	nativeTok := "native-session-token"
+	rec := postWithToken(h.Show, `{"appId":"app1"}`, &model.User{ID: "u1", Token: &nativeTok}, nativeTok)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "s1", resp["secret"])
+}
+
+// TestShow_OwnerViaAppTokenNoSecret: owner であっても app access token
+// (raw token != users.token) で叩くと secret を返さない。secret を app token に
+// 渡す privilege escalation の防止 (#1829, upstream isSecure = token==null)。
+func TestShow_OwnerViaAppTokenNoSecret(t *testing.T) {
+	h, repo := newTestHandler()
+	uid := "u1"
+	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+
+	nativeTok := "native-session-token"
+	// raw token は app access token (native token とは別) を渡す。
+	rec := postWithToken(h.Show, `{"appId":"app1"}`, &model.User{ID: "u1", Token: &nativeTok}, "app-access-token")
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasSecret := resp["secret"]
+	assert.False(t, hasSecret, "app access token (owner) には secret を返さない")
+	// name 等の public field は返る。
+	assert.Equal(t, "MyApp", resp["name"])
 }
 
 func TestShow_NotFound(t *testing.T) {

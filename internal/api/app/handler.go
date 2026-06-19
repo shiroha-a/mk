@@ -119,10 +119,16 @@ func (h *Handler) Show(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "dce83913-2dc6-4093-8a7b-71dbb11718a3"))
 	}
 
-	// 認証済み && 自分のアプリならsecretも返す
+	// upstream app/show は isSecure = (user != null && token == null) を計算し、
+	// native session (= users.token) かつ自分の app のときだけ secret を返す。
+	// OAuth/MiAuth の app access token (token != null) では owner でも secret を
+	// 返さない: secret は access token hash 生成に使う app credential であり、
+	// app token に渡すと privilege escalation になる (#1829)。RequireSecure と
+	// 同じ native-session 判定 (raw token == users.token) を inline で行う。
 	me := middleware.GetUser(c)
 	includeSecret := false
-	if me != nil && a.UserID != nil && *a.UserID == me.ID {
+	if me != nil && a.UserID != nil && *a.UserID == me.ID &&
+		me.Token != nil && *me.Token == middleware.GetToken(c) {
 		includeSecret = true
 	}
 
