@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -23,6 +24,16 @@ type Handler struct {
 	// idGen は /api/following/list の Following.createdAt 生成で使う。nil
 	// なら createdAt は空文字列で返す (= 互換性は維持しつつ degrade)。
 	idGen id.Generator
+	// relation は following/list の埋め込み followee に viewer-relation flag
+	// (isFollowing 等) を付与するための repo 束 (#1912)。未配線なら flag は omit
+	// (= legacy 挙動)。upstream は followee を UserDetailedNotMe + me で pack する。
+	relation userrelation.Repos
+}
+
+// SetRelationRepos wires the repositories used to populate viewer-relation flags
+// on the embedded followee in following/list (#1912)。
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // NewHandler creates a new following Handler.
@@ -262,7 +273,16 @@ func (h *Handler) List(c echo.Context) error {
 
 	out := make([]entity.Following, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, entity.PackFollowing(r, true, false, lookup, h.idGen))
+		packed := entity.PackFollowing(r, true, false, lookup, h.idGen)
+		// 埋め込み followee に viewer-relation flag を付与する (#1912)。upstream は
+		// followee を UserDetailedNotMe + me で pack し isFollowing 等を出す。これは
+		// 自分の following 一覧なので isFollowing=true が出る。
+		if packed.Followee != nil {
+			if b, ok := userIdx[r.FolloweeID]; ok {
+				h.relation.Apply(packed.Followee, me.ID, b.User, b.Profile)
+			}
+		}
+		out = append(out, packed)
 	}
 	return c.JSON(http.StatusOK, out)
 }

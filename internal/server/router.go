@@ -1687,14 +1687,27 @@ func (s *Server) setupRoutes() {
 	api.POST("/blocking/delete", blockingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/list", blockingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:blocks"))
 
+	// following/list・mute/list・renote-mute/list の埋め込み user に viewer-relation
+	// flag (isFollowing/isMuted 等) を付与するための共有 repo 束 (#1912)。
+	listRelationRepos := userrelation.Repos{
+		Following:     followingRepo,
+		Blocking:      blockingRepo,
+		Muting:        mutingRepo,
+		RenoteMuting:  renoteMutingRepo,
+		FollowRequest: followRequestRepo,
+		Memo:          repository.NewUserMemoRepository(s.db),
+	}
+
 	// Mute endpoints
 	muteHandler := mute.NewHandler(mutingService, userRepo, idGen)
+	muteHandler.SetRelationRepos(listRelationRepos)
 	api.POST("/mute/create", muteHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:mutes"))
 	api.POST("/mute/delete", muteHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:mutes"))
 	api.POST("/mute/list", muteHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:mutes"))
 
 	// Renote mute endpoints
 	renoteMuteHandler := renotemute.NewHandler(renoteMutingService, userRepo, idGen)
+	renoteMuteHandler.SetRelationRepos(listRelationRepos)
 	api.POST("/renote-mute/create", renoteMuteHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:mutes"))
 	api.POST("/renote-mute/delete", renoteMuteHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:mutes"))
 	api.POST("/renote-mute/list", renoteMuteHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:mutes"))
@@ -2202,6 +2215,7 @@ func (s *Server) setupRoutes() {
 	// Following endpoints
 	followingHandler := following.NewHandler(followingService, userService)
 	followingHandler.SetIDGen(idGen)
+	followingHandler.SetRelationRepos(listRelationRepos)
 	api.POST("/following/create", followingHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:following"))
 	api.POST("/following/delete", followingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:following"))
 	api.POST("/following/list", followingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:following"))

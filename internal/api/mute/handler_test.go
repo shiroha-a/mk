@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	coremuting "github.com/shiroha-a/mk/internal/core/muting"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -215,6 +216,41 @@ func TestList_OK(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp, 1)
 	shapetest.Assert(t, "Muting", resp[0]) // L3 (#1286)
+}
+
+// TestList_EmbedsRelationFlags: mute/list の埋め込み mutee に viewer-relation
+// flag が付与される (#1912)。mute 一覧なので isMuted=true。
+func TestList_EmbedsRelationFlags(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	mutingRepo := testutil.NewMockMutingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coremuting.NewService(userRepo, mutingRepo, idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	h.SetRelationRepos(userrelation.Repos{
+		Following:     testutil.NewMockFollowingRepository(),
+		Blocking:      testutil.NewMockBlockingRepository(),
+		Muting:        mutingRepo,
+		RenoteMuting:  testutil.NewMockRenoteMutingRepository(),
+		FollowRequest: testutil.NewMockFollowRequestRepository(),
+	})
+	addUser(userRepo, "alice")
+	addUser(userRepo, "bob")
+	c1, _ := newReq(t, `{"userId":"bob"}`)
+	setUser(c1, "alice")
+	require.NoError(t, h.Create(c1))
+
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	mutee, ok := resp[0]["mutee"].(map[string]any)
+	require.True(t, ok, "muting row must embed mutee")
+	assert.Equal(t, true, mutee["isMuted"], "mute 一覧の mutee は isMuted=true")
+	assert.Equal(t, false, mutee["isFollowing"])
+	assert.Equal(t, false, mutee["isBlocking"])
 }
 
 func TestList_LimitClamping(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	coremuting "github.com/shiroha-a/mk/internal/core/muting"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -22,6 +23,15 @@ type Handler struct {
 	svc      *coremuting.RenoteService
 	userRepo repository.UserRepository
 	idGen    id.Generator
+	// relation は renote-mute/list の埋め込み mutee に viewer-relation flag
+	// (isRenoteMuted 等) を付与する repo 束 (#1912)。未配線なら flag は omit。
+	relation userrelation.Repos
+}
+
+// SetRelationRepos wires the repositories used to populate viewer-relation flags
+// on the embedded mutee in renote-mute/list (#1912)。
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // NewHandler creates a new Handler.
@@ -103,7 +113,7 @@ func (h *Handler) List(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	muteeMap := h.fetchMuteeMap(rows)
+	muteeMap := h.fetchMuteeMap(user.ID, rows)
 	const tsFormat = "2006-01-02T15:04:05.000Z"
 	out := make([]map[string]any, 0, len(rows))
 	for _, m := range rows {
@@ -128,7 +138,7 @@ func (h *Handler) List(c echo.Context) error {
 
 // fetchMuteeMap batches user + profile lookups for the muteeIds in rows so
 // the response build loop performs zero per-row DB queries.
-func (h *Handler) fetchMuteeMap(rows []*model.RenoteMuting) map[string]entity.UserDetailed {
+func (h *Handler) fetchMuteeMap(viewerID string, rows []*model.RenoteMuting) map[string]entity.UserDetailed {
 	if h.userRepo == nil || len(rows) == 0 {
 		return nil
 	}
@@ -155,7 +165,11 @@ func (h *Handler) fetchMuteeMap(rows []*model.RenoteMuting) map[string]entity.Us
 	}
 	out := make(map[string]entity.UserDetailed, len(users))
 	for _, u := range users {
-		out[u.ID] = entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
+		d := entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
+		// viewer-relation flag を付与 (#1912)。renote-mute 一覧なので
+		// isRenoteMuted=true が出る。
+		h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		out[u.ID] = d
 	}
 	return out
 }

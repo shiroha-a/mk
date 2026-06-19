@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -341,6 +342,45 @@ func TestDelete_InvalidParam(t *testing.T) {
 
 	rec := postJSON(h.Delete, `{}`, alice)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestList_EmbedsRelationFlags: following/list の埋め込み followee に
+// viewer-relation flag が付与される (#1912)。自分の following 一覧なので
+// isFollowing=true、block/mute 系は false で present。
+func TestList_EmbedsRelationFlags(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	fRepo := testutil.NewMockFollowingRepository()
+	frRepo := testutil.NewMockFollowRequestRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	fSvc := corefollowing.NewService(userRepo, fRepo, frRepo, idGen)
+	uSvc := coreuser.NewService(userRepo, nil, nil, nil)
+	h := NewHandler(fSvc, uSvc)
+	h.SetIDGen(idGen)
+	h.SetRelationRepos(userrelation.Repos{
+		Following:     fRepo,
+		Blocking:      testutil.NewMockBlockingRepository(),
+		Muting:        testutil.NewMockMutingRepository(),
+		RenoteMuting:  testutil.NewMockRenoteMutingRepository(),
+		FollowRequest: frRepo,
+	})
+
+	addUser(userRepo, "alice", false)
+	bob := addUser(userRepo, "bob", false)
+	// bob -> alice (alice not locked → 即 follow)。
+	require.Equal(t, http.StatusOK, postJSON(h.Create, `{"userId":"alice"}`, bob).Code)
+
+	rec := postJSON(h.List, `{}`, bob)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	followee, ok := out[0]["followee"].(map[string]any)
+	require.True(t, ok, "following row must embed followee")
+	assert.Equal(t, true, followee["isFollowing"], "following 一覧の followee は isFollowing=true")
+	// UserDetailedNotMe の relation block は block/mute flag も present (false)。
+	assert.Equal(t, false, followee["isMuted"])
+	assert.Equal(t, false, followee["isBlocking"])
+	assert.Equal(t, false, followee["hasPendingFollowRequestFromYou"])
 }
 
 func TestRequests_AcceptRejectCancel(t *testing.T) {
