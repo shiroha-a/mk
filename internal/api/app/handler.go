@@ -166,9 +166,13 @@ func (h *Handler) MyApps(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// upstream my/apps は appEntityService.pack(app, me, {detail:true}) を呼び
+	// includeSecret 未指定 (= false) なので secret を返さない。secret 取得は
+	// app/show (secure session) 経由のみ。app token でも叩ける my/apps で
+	// secret を返すと全 app の credential が漏れる (#1900)。
 	result := make([]map[string]any, len(apps))
 	for i, a := range apps {
-		result[i] = packApp(a, true, h.isAuthorizedFor(a.ID, u))
+		result[i] = packApp(a, false, h.isAuthorizedFor(a.ID, u))
 	}
 	return c.JSON(http.StatusOK, result)
 }

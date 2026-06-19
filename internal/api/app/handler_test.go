@@ -316,9 +316,12 @@ func TestMyApps_Success(t *testing.T) {
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 2)
-	// secretが含まれている
+	// my/apps は secret を返さない (upstream parity、#1900)。secret 取得は
+	// app/show (secure session) 経由のみ。public field (name 等) は返る。
 	for _, a := range resp {
-		assert.NotEmpty(t, a["secret"])
+		_, hasSecret := a["secret"]
+		assert.False(t, hasSecret, "my/apps は secret を含めない")
+		assert.NotEmpty(t, a["name"])
 	}
 }
 
