@@ -134,6 +134,12 @@ func (h *Handler) AcceptRequest(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream accept.ts は getUser を先に呼び、userId が無効なら NO_SUCH_USER
+	// (id 66ce1645) を返す。request 不在は別 error NO_FOLLOW_REQUEST (bcde4f8b)
+	// で区別する (#1911)。
+	if _, err := h.userService.ShowByID(req.UserID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "66ce1645-d66c-46bb-8b79-96739af885bd"))
+	}
 	if err := h.followingService.AcceptRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_FOLLOW_REQUEST", "No such follow request.", "bcde4f8b-0913-4614-8881-614e522fb041"))
@@ -152,9 +158,16 @@ func (h *Handler) RejectRequest(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream reject.ts は getUser を先に呼び、userId が無効なら NO_SUCH_USER
+	// (id abc2ffa6) を返す。reject.ts に NO_FOLLOW_REQUEST 系 error は無い (#1911)。
+	if _, err := h.userService.ShowByID(req.UserID); err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "abc2ffa6-25b2-4380-ba99-321ff3a94555"))
+	}
+	// request 不在は upstream removeFollowRequest が silent return するため成功
+	// 扱い (204 No Content)。404 にしない (#1911)。
 	if err := h.followingService.RejectRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_FOLLOW_REQUEST", "No such follow request.", "abc2ffa6-25b2-4380-ba99-321ff3a94555"))
+			return c.NoContent(http.StatusNoContent)
 		}
 		return apierr.JSONInternalError(c)
 	}

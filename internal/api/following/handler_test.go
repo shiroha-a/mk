@@ -363,12 +363,27 @@ func TestRequests_AcceptRejectCancel(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-func TestAcceptRequest_NotFound(t *testing.T) {
+// alice が存在しない → upstream accept.ts は getUser 先行で NO_SUCH_USER (66ce1645)。
+func TestAcceptRequest_NoSuchUser(t *testing.T) {
 	h, repo := newTestHandler(t)
 	bob := addUser(repo, "bob", false)
 
 	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "66ce1645-d66c-46bb-8b79-96739af885bd")
+}
+
+// alice は存在するが pending request 無し → NO_FOLLOW_REQUEST (bcde4f8b)。
+func TestAcceptRequest_NoFollowRequest(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+
+	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_FOLLOW_REQUEST")
+	assert.Contains(t, rec.Body.String(), "bcde4f8b-0913-4614-8881-614e522fb041")
 }
 
 func TestAcceptRequest_InvalidParam(t *testing.T) {
@@ -389,12 +404,26 @@ func TestRejectRequest_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-func TestRejectRequest_NotFound(t *testing.T) {
+// alice が存在しない → upstream reject.ts は getUser 先行で NO_SUCH_USER (abc2ffa6)。
+func TestRejectRequest_NoSuchUser(t *testing.T) {
 	h, repo := newTestHandler(t)
 	bob := addUser(repo, "bob", false)
 
 	rec := postJSON(h.RejectRequest, `{"userId": "alice"}`, bob)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	assert.Contains(t, rec.Body.String(), "abc2ffa6-25b2-4380-ba99-321ff3a94555")
+}
+
+// alice は存在するが pending request 無し → upstream removeFollowRequest は silent
+// return なので 204 No Content (NO_FOLLOW_REQUEST 系 error は reject.ts に無い、#1911)。
+func TestRejectRequest_NoRequestSilent204(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+
+	rec := postJSON(h.RejectRequest, `{"userId": "alice"}`, bob)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestRejectRequest_InvalidParam(t *testing.T) {
