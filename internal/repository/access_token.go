@@ -36,6 +36,9 @@ type AccessTokenRepository interface {
 	//   それ以外 ("" 含む) → token.id ASC (TS の default)
 	ListByUserIDPreloadApp(userID, sort string) ([]*model.AccessToken, error)
 	DeleteByID(id string) error
+	// Create inserts a new access token. Used by the OAuth2 provider to mint a
+	// token after a successful authorization-code exchange (#1899)。
+	Create(token *model.AccessToken) error
 }
 
 type accessTokenRepository struct {
@@ -45,6 +48,10 @@ type accessTokenRepository struct {
 // NewAccessTokenRepository creates a new AccessTokenRepository.
 func NewAccessTokenRepository(db *gorm.DB) AccessTokenRepository {
 	return &accessTokenRepository{db: db}
+}
+
+func (r *accessTokenRepository) Create(token *model.AccessToken) error {
+	return r.db.Create(token).Error
 }
 
 func (r *accessTokenRepository) FindByHash(hash string) (*model.AccessToken, error) {

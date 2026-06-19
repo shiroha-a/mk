@@ -2681,6 +2681,15 @@ func (m *MockAccessTokenRepository) SetApp(app *model.App) {
 	m.Apps[app.ID] = app
 }
 
+// Create inserts a token keyed by its hash (mirrors the real repo's INSERT).
+func (m *MockAccessTokenRepository) Create(token *model.AccessToken) error {
+	if m.Tokens == nil {
+		m.Tokens = make(map[string]*model.AccessToken)
+	}
+	m.Tokens[token.Hash] = token
+	return nil
+}
+
 func (m *MockAccessTokenRepository) FindByHash(hash string) (*model.AccessToken, error) {
 	t, ok := m.Tokens[hash]
 	if !ok {

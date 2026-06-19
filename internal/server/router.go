@@ -46,6 +46,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/notes"
 	"github.com/shiroha-a/mk/internal/api/notifications"
+	"github.com/shiroha-a/mk/internal/api/oauth"
 	"github.com/shiroha-a/mk/internal/api/pages"
 	apiproxy "github.com/shiroha-a/mk/internal/api/proxy"
 	"github.com/shiroha-a/mk/internal/api/renotemute"
@@ -120,6 +121,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/processors"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/stream"
 	"github.com/shiroha-a/mk/internal/stream/channels"
@@ -1807,6 +1809,31 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
 	s.echo.GET("/.well-known/nodeinfo", wellknownHandler.NodeInfoDiscovery)
 	s.echo.GET("/.well-known/oauth-authorization-server", wellknownHandler.OAuthAuthorizationServer)
+
+	// OAuth2 / IndieAuth provider (#1899)。RFC8414 discovery が広告する
+	// /oauth/authorize /decision /token を実装する。client discovery fetch は
+	// attacker-suppliable な client_id URL を叩くため SSRF-guarded transport を使う。
+	// 明示ルートは SPA catchall (s.echo.GET("/*")) より Echo router 上で優先される。
+	oauthHandler := oauth.NewHandler(
+		oauth.NewRedisStore(s.redis.Default),
+		&http.Client{
+			Timeout:   10 * time.Second,
+			Transport: safehttp.NewSSRFSafeTransport(s.config.AllowedPrivateNetworks),
+		},
+		userRepo,
+		repository.NewAccessTokenRepository(s.db),
+		idGen,
+		s.config.URL,
+		false, // production は https client_id のみ
+		frontendConsentHTML(s.config, metaRepo, proxyAccountResolver),
+	)
+	s.echo.GET("/oauth/authorize", oauthHandler.Authorize)
+	s.echo.POST("/oauth/decision", oauthHandler.Decision)
+	s.echo.POST("/oauth/token", oauthHandler.Token)
+	// unknown /oauth/* は 404 (client が endpoint 対応有無を判別できるよう、
+	// upstream の catch-all 同様)。明示ルートが優先されるので authorize/decision/
+	// token はここに落ちない。
+	s.echo.Any("/oauth/*", oauthHandler.NotFound)
 
 	nodeinfoHandler := nodeinfo.NewHandler(s.config)
 	nodeinfoHandler.SetMetaRepo(metaRepo)

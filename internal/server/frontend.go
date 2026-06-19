@@ -3,14 +3,17 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	stdhtml "html"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/meta"
+	"github.com/shiroha-a/mk/internal/api/oauth"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/frontendutil"
@@ -29,48 +32,56 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 	clientEntry := frontendutil.DetectClientEntry()
 
 	return func(c echo.Context) error {
-		instanceName := "Misskey"
-		instanceDesc := ""
-		iconURL := "/static-assets/icons/192.png"
-		themeColor := "#86b300"
-		// splash 中央のアイコンは upstream `_splash.tsx` 互換で server
-		// iconUrl を使う (= 管理者が設定したインスタンス画像)。未設定なら
-		// `/static-assets/splash.png` (Misskey ロゴ) にフォールバック。
-		// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
-		splashIconURL := "/static-assets/splash.png"
-		metaJSON := "{}"
-		if m, err := metaRepo.Fetch(); err == nil {
-			if m.Name != nil && *m.Name != "" {
-				instanceName = *m.Name
-			}
-			if m.Description != nil {
-				instanceDesc = *m.Description
-			}
-			if m.IconURL != nil && *m.IconURL != "" {
-				iconURL = *m.IconURL
-				splashIconURL = *m.IconURL
-			}
-			if m.ThemeColor != nil && *m.ThemeColor != "" {
-				themeColor = *m.ThemeColor
-			}
-			metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver)
-		}
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, clientEntry, "")
+	}
+}
 
-		// CLIENT_ENTRYの設定
-		clientEntryJS := "null"
-		viteClientTag := `<script type="module" src="/vite/@vite/client"></script>`
-		cssLinkTags := ""
-		if clientEntry.Script != "" {
-			clientEntryJS = fmt.Sprintf("'%s'", clientEntry.Script)
-			viteClientTag = "" // production ではVite clientは不要
-			// Vite manifest の CSS 依存を <link> タグとして挿入する。
-			// これがないとエントリの CSS (100KB+) が読み込まれずスタイル崩れになる。
-			for _, css := range clientEntry.CSS {
-				cssLinkTags += fmt.Sprintf(`<link rel="stylesheet" href="/vite/%s">`, css) + "\n"
-			}
+// renderFrontendShell renders the Misskey frontend SPA shell. extraHead is
+// injected verbatim into <head> (used by the OAuth consent page to add the
+// misskey:oauth:* meta tags, #1899); pass "" for the normal shell.
+func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
+	instanceName := "Misskey"
+	instanceDesc := ""
+	iconURL := "/static-assets/icons/192.png"
+	themeColor := "#86b300"
+	// splash 中央のアイコンは upstream `_splash.tsx` 互換で server
+	// iconUrl を使う (= 管理者が設定したインスタンス画像)。未設定なら
+	// `/static-assets/splash.png` (Misskey ロゴ) にフォールバック。
+	// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
+	splashIconURL := "/static-assets/splash.png"
+	metaJSON := "{}"
+	if m, err := metaRepo.Fetch(); err == nil {
+		if m.Name != nil && *m.Name != "" {
+			instanceName = *m.Name
 		}
+		if m.Description != nil {
+			instanceDesc = *m.Description
+		}
+		if m.IconURL != nil && *m.IconURL != "" {
+			iconURL = *m.IconURL
+			splashIconURL = *m.IconURL
+		}
+		if m.ThemeColor != nil && *m.ThemeColor != "" {
+			themeColor = *m.ThemeColor
+		}
+		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver)
+	}
 
-		html := fmt.Sprintf(`<!DOCTYPE html>
+	// CLIENT_ENTRYの設定
+	clientEntryJS := "null"
+	viteClientTag := `<script type="module" src="/vite/@vite/client"></script>`
+	cssLinkTags := ""
+	if clientEntry.Script != "" {
+		clientEntryJS = fmt.Sprintf("'%s'", clientEntry.Script)
+		viteClientTag = "" // production ではVite clientは不要
+		// Vite manifest の CSS 依存を <link> タグとして挿入する。
+		// これがないとエントリの CSS (100KB+) が読み込まれずスタイル崩れになる。
+		for _, css := range clientEntry.CSS {
+			cssLinkTags += fmt.Sprintf(`<link rel="stylesheet" href="/vite/%s">`, css) + "\n"
+		}
+	}
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
 <meta name="application-name" content="Misskey">
@@ -90,6 +101,7 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 <link rel="manifest" href="/manifest.json">
 %s
 %s
+%s
 <link rel="stylesheet" href="/vite/loader/style.css">
 <script>const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];</script>
 <script type="application/json" id="misskey_meta" data-generated-at="%d">%s</script>
@@ -104,11 +116,28 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 </div>
 </div>
 </body></html>`, instanceName, instanceName, instanceDesc, iconURL, cfg.URL,
-			themeColor, cfg.URL, instanceName, iconURL, viteClientTag, cssLinkTags,
-			cfg.Version, clientEntryJS,
-			time.Now().UnixMilli(), metaJSON, splashIconURL)
+		themeColor, cfg.URL, instanceName, iconURL, extraHead, viteClientTag, cssLinkTags,
+		cfg.Version, clientEntryJS,
+		time.Now().UnixMilli(), metaJSON, splashIconURL)
 
-		return c.HTML(http.StatusOK, html)
+	return c.HTML(http.StatusOK, html)
+}
+
+// frontendConsentHTML returns an oauth.ConsentRenderer that serves the frontend
+// SPA shell with the misskey:oauth:* meta tags injected, so the frontend's
+// OAuth component can render the authorization prompt (#1899). Values are
+// HTML-escaped (client name/logo are attacker-suppliable via discovery).
+func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver) oauth.ConsentRenderer {
+	clientEntry := frontendutil.DetectClientEntry()
+	return func(c echo.Context, m oauth.ConsentMeta) error {
+		var sb strings.Builder
+		sb.WriteString(`<meta name="misskey:oauth:transaction-id" content="` + stdhtml.EscapeString(m.TransactionID) + `">` + "\n")
+		sb.WriteString(`<meta name="misskey:oauth:client-name" content="` + stdhtml.EscapeString(m.ClientName) + `">` + "\n")
+		if m.ClientLogo != "" {
+			sb.WriteString(`<meta name="misskey:oauth:client-logo" content="` + stdhtml.EscapeString(m.ClientLogo) + `">` + "\n")
+		}
+		sb.WriteString(`<meta name="misskey:oauth:scope" content="` + stdhtml.EscapeString(m.Scope) + `">`)
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, clientEntry, sb.String())
 	}
 }
 
