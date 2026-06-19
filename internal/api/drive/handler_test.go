@@ -178,14 +178,17 @@ func TestFilesCreate_FolderNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestFilesCreate_FolderAccessDenied(t *testing.T) {
+// 他人所有の宛先 folder は NO_SUCH_FOLDER(404) で返す (missing と同じ response、
+// folder 存在 oracle を閉じる、#1908)。
+func TestFilesCreate_OtherOwnerFolderNotFound(t *testing.T) {
 	h, _, folderRepo := newHandler(t)
 	other := "other"
 	folderRepo.Folders["fid"] = &model.DriveFolder{ID: "fid", UserID: &other}
 	c, rec := newMultipartReq(t, "hello.txt", "hello", map[string]string{"folderId": "fid"})
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
 // failingFileRepo causes Create to fail.
@@ -427,6 +430,22 @@ func TestFilesUpdate_FolderNotFound(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// 他人所有の宛先 folder は missing と同じ NO_SUCH_FOLDER(404) を返す (upstream
+// files/update の NoSuchFolderError ea8fb7a5、folder 存在 oracle を閉じる、#1908)。
+func TestFilesUpdate_OtherOwnerFolderNotFound(t *testing.T) {
+	h, fileRepo, folderRepo := newHandler(t)
+	uid := "u1"
+	other := "other"
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid}
+	folderRepo.Folders["fid"] = &model.DriveFolder{ID: "fid", UserID: &other}
+	c, rec := newJSONReq(t, `{"fileId":"f1","folderId":"fid"}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesUpdate(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
+	assert.Contains(t, rec.Body.String(), "ea8fb7a5-af77-4a08-b608-c0218176cd73")
 }
 
 // failingUpdateFileRepo causes Update to fail with non-mapped error.

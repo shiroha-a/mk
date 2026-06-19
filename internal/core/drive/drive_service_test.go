@@ -137,13 +137,15 @@ func TestUpload_FolderNotFound(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
-func TestUpload_FolderAccessDenied(t *testing.T) {
+// 他人所有の宛先 folder は「不在」扱いで ErrFolderNotFound、ACCESS_DENIED に
+// しない (folder 存在 oracle を閉じる、#1908)。
+func TestUpload_OtherOwnerFolderNotFound(t *testing.T) {
 	svc, _, folderRepo := newSvc(t)
 	other := "other"
 	folderRepo.Folders["fid"] = &model.DriveFolder{ID: "fid", UserID: &other}
 	folderID := "fid"
 	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x"), FolderID: &folderID})
-	require.ErrorIs(t, err, drive.ErrAccessDenied)
+	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
 // failingFileRepo causes Create to fail.
@@ -649,7 +651,9 @@ func TestUpdate_FolderNotFound(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
-func TestUpdate_FolderAccessDenied(t *testing.T) {
+// 他人所有の宛先 folder は upstream files/update 同様「不在」扱いで
+// ErrFolderNotFound (→ NO_SUCH_FOLDER ea8fb7a5)、ACCESS_DENIED にしない (#1908)。
+func TestUpdate_OtherOwnerFolderNotFound(t *testing.T) {
 	svc, fileRepo, folderRepo := newSvc(t)
 	uid := "u1"
 	other := "other"
@@ -659,7 +663,7 @@ func TestUpdate_FolderAccessDenied(t *testing.T) {
 	folderID := "fid"
 	folderPtr := &folderID
 	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{FolderID: &folderPtr})
-	require.ErrorIs(t, err, drive.ErrAccessDenied)
+	require.ErrorIs(t, err, drive.ErrFolderNotFound)
 }
 
 func TestUpdate_FolderNullable(t *testing.T) {
