@@ -118,6 +118,7 @@ func TestClient_GetSigned_SignError(t *testing.T) {
 func TestClient_FetchJSON(t *testing.T) {
 	key, _ := newTestKey(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/activity+json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
@@ -145,6 +146,7 @@ func TestClient_FetchJSON_ResponseTooLarge(t *testing.T) {
 	key, _ := newTestKey(t)
 	oversized := make([]byte, int(MaxBodyBytes)+10)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/activity+json")
 		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
@@ -158,6 +160,7 @@ func TestClient_FetchJSON_ResponseTooLarge(t *testing.T) {
 func TestClient_FetchUnsigned_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, int(MaxBodyBytes)+10)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/activity+json")
 		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
@@ -306,4 +309,48 @@ func TestClient_FetchUnsigned_NetworkError(t *testing.T) {
 	c := NewClient(nil, "")
 	_, err := c.FetchUnsigned("http://127.0.0.1:1/")
 	assert.Error(t, err)
+}
+
+// TestValidateAPContentType pins upstream validateContentTypeSetAsActivityPub
+// parity (#1828): only application/activity+json (any params) or
+// application/ld+json carrying the ActivityStreams profile is accepted; a
+// missing or non-AP Content-Type is rejected with ErrInvalidAPContentType.
+func TestValidateAPContentType(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string // empty = do not set the header at all
+		ok          bool
+	}{
+		{"missing content-type", "", false},
+		{"activity+json", "application/activity+json", true},
+		{"activity+json with charset", "application/activity+json; charset=utf-8", true},
+		{"activity+json uppercase", "APPLICATION/ACTIVITY+JSON", true},
+		{"ld+json with AS profile", `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`, true},
+		{"ld+json without semicolon", "application/ld+json", false},
+		{"ld+json without AS profile", "application/ld+json; charset=utf-8", false},
+		{"plain json", "application/json", false},
+		{"text/html error page", "text/html; charset=utf-8", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				} else {
+					// Go の http server は body sniffing で Content-Type を
+					// 自動付与するため、未設定ケースは空文字を明示的に上書きする。
+					w.Header()["Content-Type"] = nil
+				}
+				_, _ = w.Write([]byte(`{"@context":"https://www.w3.org/ns/activitystreams","id":"https://x/1"}`))
+			}))
+			defer srv.Close()
+
+			_, err := NewClient(nil, "test").FetchUnsigned(srv.URL)
+			if tc.ok {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, ErrInvalidAPContentType)
+			}
+		})
+	}
 }

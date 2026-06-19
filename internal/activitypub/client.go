@@ -23,6 +23,34 @@ type StatusError struct {
 	URL        string
 }
 
+// ErrInvalidAPContentType is returned by the AP-object fetch paths
+// (FetchJSON / FetchUnsigned) when the response Content-Type is not an
+// ActivityPub media type. Mirrors upstream validateContentTypeSetAsActivityPub
+// (#1828): only `application/activity+json` (any params) or
+// `application/ld+json; ...` carrying the ActivityStreams profile is accepted;
+// a missing Content-Type is rejected too. これにより誤設定 proxy の HTML
+// エラーページや plain JSON API レスポンスを AP object として unmarshal するのを
+// 防ぐ。
+var ErrInvalidAPContentType = errors.New("invalid AP content-type")
+
+// validateAPContentType replicates upstream validateContentTypeSetAsActivityPub
+// (core/activitypub/misc/validator.ts)。getActivityJson (unsigned) / signedGet
+// 両経路で必ず適用される本家の防御層を移植したもの。
+func validateAPContentType(resp *http.Response) error {
+	// 本家同様に lowercase 化のみで trim はしない (startsWith 判定を厳密に揃える)。
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if ct == "" {
+		return ErrInvalidAPContentType
+	}
+	if strings.HasPrefix(ct, "application/activity+json") {
+		return nil
+	}
+	if strings.HasPrefix(ct, "application/ld+json;") && strings.Contains(ct, ContextURL) {
+		return nil
+	}
+	return ErrInvalidAPContentType
+}
+
 // Error returns "unexpected status: NNN <text>" — same shape as the legacy
 // errors.New("unexpected status: ...") so existing log readers keep working.
 func (e *StatusError) Error() string {
@@ -121,6 +149,10 @@ func (c *Client) FetchJSONWithURL(url string, key *PrivateKey) ([]byte, string, 
 		drainBody(resp)
 		return nil, "", &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
 	}
+	if err := validateAPContentType(resp); err != nil {
+		drainBody(resp)
+		return nil, "", err
+	}
 	body, rerr := safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
 	return body, finalURLOf(resp, url), rerr
 }
@@ -152,6 +184,10 @@ func (c *Client) FetchUnsignedWithURL(url string) ([]byte, string, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		drainBody(resp)
 		return nil, "", &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
+	}
+	if err := validateAPContentType(resp); err != nil {
+		drainBody(resp)
+		return nil, "", err
 	}
 	body, rerr := safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
 	return body, finalURLOf(resp, url), rerr

@@ -52,6 +52,7 @@ func (b *blockingFetcher) FetchObject(_ string) ([]byte, error) {
 }
 
 const sampleActor = `{
+	"@context": "https://www.w3.org/ns/activitystreams",
 	"id": "https://remote.example/users/alice",
 	"type": "Person",
 	"preferredUsername": "alice",
@@ -145,7 +146,7 @@ func TestResolveActor_NewUserCanChatTranslation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 				"id": "https://remote.example/users/alice",
 				"type": "Person",
 				"preferredUsername": "alice",
@@ -162,7 +163,7 @@ func TestResolveActor_NewUserCanChatTranslation(t *testing.T) {
 
 func TestResolveActor_NewUserIngestsIconBanner(t *testing.T) {
 	// actor.icon / actor.image があれば avatarUrl / bannerUrl に取り込む。
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -184,7 +185,7 @@ func TestResolveActor_NewUserIngestsManuallyApproves(t *testing.T) {
 	// actor.manuallyApprovesFollowers が true のリモートアカウントは
 	// IsLocked=true で保存する (follow 時に FollowRequest 経路に入るように
 	// するため)。
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/locked",
 		"type": "Person",
 		"preferredUsername": "locked",
@@ -223,7 +224,7 @@ func TestResolveActor_NewUserWithoutIconBanner(t *testing.T) {
 // (生 HTML を保存すると frontend MFM render が escape してリテラル表示する
 // drop-in regression を起こす、#1140)。
 func TestResolveActor_NewUserIngestsDescription(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -248,7 +249,7 @@ func TestResolveActor_NewUserIngestsDescription(t *testing.T) {
 // 確認 (生 HTML が残ると frontend MFM render が escape して `<p>` 等が
 // リテラル表示される drop-in regression)。
 func TestResolveActor_MastodonStyleSummaryConvertedToMFM(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://mstdn.example/users/bob",
 		"type": "Person",
 		"preferredUsername": "bob",
@@ -275,7 +276,7 @@ func TestResolveActor_MastodonStyleSummaryConvertedToMFM(t *testing.T) {
 // `_misskey_summary` がある場合は AP `summary` より優先される (upstream
 // ApPersonService と同じ logic、MFM が壊れずに保存される)。
 func TestResolveActor_NewUserPrefersMisskeySummary(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -308,7 +309,7 @@ func TestResolveActor_NewUserNoSummary(t *testing.T) {
 // rune 単位で切ることで UTF-8 multibyte 文字境界が壊れない。
 func TestResolveActor_NewUserDescriptionTruncated(t *testing.T) {
 	long := strings.Repeat("あ", 2100) // 2100 rune
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -355,7 +356,7 @@ func TestResolveActor_BadJSON(t *testing.T) {
 }
 
 func TestResolveActor_MissingFields(t *testing.T) {
-	r, _ := newResolver(t, `{"id":"x"}`, nil)
+	r, _ := newResolver(t, `{"@context":"https://www.w3.org/ns/activitystreams","id":"x"}`, nil)
 	_, err := r.ResolveActor("https://remote.example/users/x")
 	require.ErrorIs(t, err, federation.ErrInvalidActor)
 }
@@ -363,6 +364,7 @@ func TestResolveActor_MissingFields(t *testing.T) {
 func TestResolveActor_BadHost(t *testing.T) {
 	// invalid URL with control char
 	body := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "://invalid",
 		"preferredUsername": "alice",
 		"inbox": "x"
@@ -375,6 +377,7 @@ func TestResolveActor_BadHost(t *testing.T) {
 func TestResolveActor_EmptyHost(t *testing.T) {
 	// mailto: parses but has no host
 	body := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "mailto:alice@example.com",
 		"preferredUsername": "alice",
 		"inbox": "x"
@@ -382,6 +385,99 @@ func TestResolveActor_EmptyHost(t *testing.T) {
 	r, _ := newResolver(t, body, nil)
 	_, err := r.ResolveActor("https://x.example/")
 	require.ErrorIs(t, err, federation.ErrInvalidActor)
+}
+
+// TestResolveActor_RejectsMissingContext pins the upstream invalid-response
+// guard (72180409, #1828): a fetched actor without an ActivityStreams @context
+// is rejected even when all other fields are valid.
+func TestResolveActor_RejectsMissingContext(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox"
+	}`
+	r, repo := newResolver(t, body, nil)
+	_, err := r.ResolveActor("https://remote.example/users/alice")
+	require.ErrorIs(t, err, federation.ErrInvalidActor)
+	assert.Empty(t, repo.Users)
+}
+
+// TestResolveActor_RejectsNonASContext rejects a fetched actor whose @context
+// is a non-ActivityStreams string.
+func TestResolveActor_RejectsNonASContext(t *testing.T) {
+	body := `{
+		"@context": "https://example.com/other",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox"
+	}`
+	r, _ := newResolver(t, body, nil)
+	_, err := r.ResolveActor("https://remote.example/users/alice")
+	require.ErrorIs(t, err, federation.ErrInvalidActor)
+}
+
+// TestResolveActor_AcceptsArrayContext accepts a fetched actor whose @context
+// is an array that includes the ActivityStreams namespace (the common shape
+// real implementations emit alongside the security vocabulary).
+func TestResolveActor_AcceptsArrayContext(t *testing.T) {
+	body := `{
+		"@context": ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"],
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {
+			"id": "https://remote.example/users/alice#main-key",
+			"owner": "https://remote.example/users/alice",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+		}
+	}`
+	r, repo := newResolver(t, body, nil)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", user.Username)
+	assert.Len(t, repo.Users, 1)
+}
+
+// TestResolveNote_RejectsMissingContext rejects a fetched note that lacks an
+// ActivityStreams @context. The fetch path enforces @context while inbound
+// delivery (IngestNote with an inlined object) intentionally does not.
+func TestResolveNote_RejectsMissingContext(t *testing.T) {
+	body := `{
+		"id": "https://remote.example/notes/n1",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "hello"
+	}`
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	_, err := r.ResolveNote("https://remote.example/notes/n1")
+	require.ErrorIs(t, err, federation.ErrInvalidNote)
+}
+
+// TestIngestNote_NoContextStillIngested confirms inbound delivery does NOT
+// require @context on the inlined object (it lives on the outer activity).
+func TestIngestNote_NoContextStillIngested(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// attributedTo を先に解決できるよう actor を fetch 可能にしておく。
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	body := `{
+		"id": "https://remote.example/notes/inlined",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "inlined"
+	}`
+	note, err := r.IngestNote([]byte(body))
+	require.NoError(t, err)
+	require.NotNil(t, note)
 }
 
 // failingUserRepo returns Create errors for the resolver.
@@ -420,6 +516,7 @@ func TestPublicKeyForActor_Missing(t *testing.T) {
 // --- ResolveNote / IngestNote --------------------------------------------------
 
 const sampleRemoteNote = `{
+	"@context": "https://www.w3.org/ns/activitystreams",
 	"id": "https://remote.example/notes/n1",
 	"type": "Note",
 	"attributedTo": "https://remote.example/users/alice",
@@ -619,7 +716,7 @@ func TestIngestNoteWithCreated_CrossHostIDRejected(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 	// id は a.example、attributedTo は b.example。
-	body := `{"id":"https://a.example/notes/x","type":"Note","attributedTo":"https://b.example/users/y","content":"forge"}`
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", "id":"https://a.example/notes/x","type":"Note","attributedTo":"https://b.example/users/y","content":"forge"}`
 	_, _, err := r.IngestNoteWithCreated([]byte(body), "")
 	require.ErrorIs(t, err, federation.ErrNoteAttributionMismatch)
 	assert.Empty(t, noteRepo.Notes)
@@ -665,7 +762,7 @@ func TestIngestNote_HashtagsFromTagArray(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -691,7 +788,7 @@ func TestIngestNote_HashtagsFromTextFallback(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h2",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -711,7 +808,7 @@ func TestIngestNote_HashtagsMergeAndDedup(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h3",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -738,7 +835,7 @@ func TestIngestNote_HashtagsFromCW(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h-cw",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -762,7 +859,7 @@ func TestIngestNote_HashtagWithoutPrefixDefensive(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h-noprefix",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -785,7 +882,7 @@ func TestIngestNote_NoHashtags(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/h4",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -845,7 +942,7 @@ func TestIngestNote_APVoteRoutedToPollService(t *testing.T) {
 	voter := &stubPollVoter{}
 	r.SetPollVoter(voter)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice#votes/pollNote",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -879,7 +976,7 @@ func TestIngestNote_APVoteUnknownChoiceFallsThrough(t *testing.T) {
 	voter := &stubPollVoter{}
 	r.SetPollVoter(voter)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice#votes/pollNote",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -912,7 +1009,7 @@ func TestIngestNote_NormalReplyToPollNotConfusedAsVote(t *testing.T) {
 	voter := &stubPollVoter{}
 	r.SetPollVoter(voter)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/normalreply",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -934,7 +1031,7 @@ func TestIngestNote_ReplyToLocal(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n2",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -956,7 +1053,7 @@ func TestIngestNote_ReplyToRemote(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n3",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -976,7 +1073,7 @@ func TestIngestNote_SensitiveWithoutSummary(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n4",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -996,7 +1093,7 @@ func TestIngestNote_SensitiveWithoutSummary(t *testing.T) {
 func makeNoteJSON(noteID string, to, cc []string) []byte {
 	toJSON, _ := json.Marshal(to)
 	ccJSON, _ := json.Marshal(cc)
-	return []byte(fmt.Sprintf(`{
+	return []byte(fmt.Sprintf(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/%s",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1103,7 +1200,7 @@ func TestIngestNote_TextFallback_SourceContent(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/source1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1125,7 +1222,7 @@ func TestIngestNote_TextFallback_MisskeyContent(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/mk1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1147,7 +1244,7 @@ func TestIngestNote_TextFallback_HTMLConversion(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/html1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1168,7 +1265,7 @@ func TestIngestNote_TextFallback_Priority(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/prio1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1191,7 +1288,7 @@ func TestIngestNote_TextFallback_SourceWrongMediaType(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/wrongmt1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1208,7 +1305,7 @@ func TestIngestNote_TextFallback_SourceWrongMediaType(t *testing.T) {
 
 // --- UpdateRemoteNote (Step J) -----------------------------------------------
 
-const remoteNoteUpdateBody = `{
+const remoteNoteUpdateBody = `{ "@context": "https://www.w3.org/ns/activitystreams", 
 	"id": "https://remote.example/notes/n1",
 	"type": "Note",
 	"attributedTo": "https://remote.example/users/alice",
@@ -1301,7 +1398,7 @@ func TestUpdateRemoteNote_RecalculatesHashtags(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1332,7 +1429,7 @@ func TestUpdateRemoteNote_ClearsTagsToEmptyNotNull(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1419,7 +1516,7 @@ func TestUpdateRemoteNote_EmptyContentNoOp(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice"
@@ -1443,7 +1540,7 @@ func TestUpdateRemoteNote_SensitiveWithoutSummary(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -1498,7 +1595,7 @@ func TestResolveActor_TTLRefresh(t *testing.T) {
 		LastFetchedAt: &old,
 	}
 	// 更新後の actor を返す
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1543,7 +1640,7 @@ func TestResolveActor_TTLRefreshUpdatesDescription(t *testing.T) {
 		UserID:      "existing",
 		Description: &oldDesc,
 	}
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1583,7 +1680,7 @@ func TestResolveActor_TTLRefreshConvertsHTMLDescription(t *testing.T) {
 		UserID:      "existing-bob",
 		Description: &staleDesc,
 	}
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://mstdn.example/users/bob",
 		"type": "Person",
 		"preferredUsername": "bob",
@@ -1619,7 +1716,7 @@ func TestResolveActor_TTLRefreshBackfillsProfile(t *testing.T) {
 		LastFetchedAt: &old,
 	}
 	// profile 行は意図的に未作成
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1654,7 +1751,7 @@ func TestResolveActor_TTLRefreshUpdatesIconBanner(t *testing.T) {
 		BannerURL:     &oldBanner,
 		LastFetchedAt: &old,
 	}
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1689,7 +1786,7 @@ func TestResolveActor_TTLRefreshPreservesIconWhenOmitted(t *testing.T) {
 		LastFetchedAt: &old,
 	}
 	// icon / image を含まない更新 actor
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1719,7 +1816,7 @@ func TestResolveActor_TTLRefreshUpdatesIsLocked(t *testing.T) {
 		IsLocked:      false,
 		LastFetchedAt: &old,
 	}
-	updated := `{
+	updated := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -1993,7 +2090,7 @@ func (s *stubHashtagHook) UpdateUsertags(userID string, isLocal bool, oldTags, n
 // remote actor の新規取り込みで usertag 集計 hook が発火する (#1362)。
 // old=nil / new=正規化済み tags / isLocal=false。
 func TestResolveActor_UsertagHookFiresOnNewUser(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/htagger",
 		"type": "Person",
 		"preferredUsername": "htagger",
@@ -2016,7 +2113,7 @@ func TestResolveActor_UsertagHookFiresOnNewUser(t *testing.T) {
 // actor 再取得 (refreshActor) でも usertag 集計 hook が発火し、old/new tags が
 // 渡る (#1362)。
 func TestResolveActor_UsertagHookFiresOnRefresh(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -2049,7 +2146,7 @@ func TestResolveActor_UsertagHookFiresOnRefresh(t *testing.T) {
 // Updates() 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反し、actor 更新
 // (emojis / name / lastFetchedAt 等を含む atomic UPDATE) 全体が失敗する。
 func TestResolveActor_RefreshClearsTagsToEmptyNotNull(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -2081,7 +2178,7 @@ func TestIngestNote_HashtagHookFiresOnRemoteIngest(t *testing.T) {
 	hook := &stubHashtagHook{}
 	r.SetHashtagHook(hook)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/hh1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -2105,7 +2202,7 @@ func TestIngestNote_HashtagHookSkipsWhenNoTags(t *testing.T) {
 	hook := &stubHashtagHook{}
 	r.SetHashtagHook(hook)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/hh2",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -2132,7 +2229,7 @@ func TestUpdateRemoteNote_HashtagHookFiresOnTagsChange(t *testing.T) {
 	hook := &stubHashtagHook{}
 	r.SetHashtagHook(hook)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/hh3",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -2162,7 +2259,7 @@ func TestUpdateRemoteNote_HashtagHookSkipsWhenTagsUnchanged(t *testing.T) {
 	hook := &stubHashtagHook{}
 	r.SetHashtagHook(hook)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/hh4",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -2245,6 +2342,7 @@ func TestRefreshPublicKey_OnExistingUser_FetchError(t *testing.T) {
 // actorJSON renders a minimal actor JSON document with the given type.
 func actorJSON(actorType string) string {
 	return fmt.Sprintf(`{
+		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "https://remote.example/users/x",
 		"type": %q,
 		"preferredUsername": "x",
@@ -2343,7 +2441,7 @@ func TestRefreshActor_UpdatesChatScopeFromCanChat(t *testing.T) {
 				ChatScope:     tc.initialScope,
 				LastFetchedAt: &stale,
 			}
-			body := `{
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 				"id": "https://remote.example/users/x",
 				"type": "Person",
 				"preferredUsername": "x",
@@ -2961,7 +3059,7 @@ func TestUpsertEmojis(t *testing.T) {
 }
 
 // sampleActorWithEmoji is a Person JSON with emoji tags in the tag array.
-const sampleActorWithEmoji = `{
+const sampleActorWithEmoji = `{ "@context": "https://www.w3.org/ns/activitystreams", 
 	"id": "https://remote.example/users/alice",
 	"type": "Person",
 	"preferredUsername": "alice",
@@ -3063,7 +3161,7 @@ func TestRefreshActor_EmojiTagExtraction(t *testing.T) {
 }
 
 // sampleNoteWithEmoji is a Note JSON with emoji tags in the tag array.
-const sampleNoteWithEmoji = `{
+const sampleNoteWithEmoji = `{ "@context": "https://www.w3.org/ns/activitystreams", 
 	"id": "https://remote.example/notes/emoji1",
 	"type": "Note",
 	"attributedTo": "https://remote.example/users/alice",
@@ -3149,7 +3247,7 @@ func TestUpdateRemoteNote_EmojiTagExtraction(t *testing.T) {
 	emojiRepo := testutil.NewMockEmojiRepository()
 	r.SetEmojiRepo(emojiRepo)
 
-	updateBody := []byte(`{
+	updateBody := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/emoji1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -3203,7 +3301,7 @@ func TestUpdateRemoteNote_EmojiTagExtraction_ExistingEmoji(t *testing.T) {
 		PublicURL:   "https://remote.example/emojis/old-blobcat.webp",
 	}
 
-	updateBody := []byte(`{
+	updateBody := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/emoji1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -3835,7 +3933,7 @@ func TestIngestNote_SpecifiedDMPopulatesMentionsAndVisibleUserIDs(t *testing.T) 
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/dm1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -3863,7 +3961,7 @@ func TestIngestNote_NonSpecifiedSkipsVisibleUserIDs(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/pub1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -3896,7 +3994,7 @@ func TestIngestNote_TagMentionsMergedWithTextMentions(t *testing.T) {
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
 	// 本文 "@bob" → bob-local-id、tag → alice。両方が mentions に入ること。
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/merge1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -3935,7 +4033,7 @@ func TestUpdateRemoteNote_MentionsRecomputed(t *testing.T) {
 	}
 	noteRepo.Notes[existing.ID] = existing
 
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/edit1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4015,7 +4113,7 @@ func TestResolveNote_DedupesConcurrentCalls(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4165,7 +4263,7 @@ func TestResolveActor_PersistsAssertionMethod(t *testing.T) {
 	mb, err := activitypub.EncodeEd25519Multikey(pub)
 	require.NoError(t, err)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -4210,7 +4308,7 @@ func TestResolveActor_SkipsMalformedAssertionMethod(t *testing.T) {
 	mb, err := activitypub.EncodeEd25519Multikey(pub)
 	require.NoError(t, err)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -4282,7 +4380,7 @@ func TestResolveActor_RefreshRemovesStaleAssertionMethod(t *testing.T) {
 	mb, err := activitypub.EncodeEd25519Multikey(pub)
 	require.NoError(t, err)
 
-	bodyTwoKeys := `{
+	bodyTwoKeys := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -4293,7 +4391,7 @@ func TestResolveActor_RefreshRemovesStaleAssertionMethod(t *testing.T) {
 			{"id": "https://remote.example/users/alice#new-key", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"}
 		]
 	}`
-	bodyOneKey := `{
+	bodyOneKey := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -4413,7 +4511,7 @@ func TestIngestNote_MentionLimitExceededReturnsSentinel(t *testing.T) {
 		}
 		tagJSON += `{"type": "Mention", "href": "https://example.com/users/u` + strconv.Itoa(i) + `"}`
 	}
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/over",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4443,7 +4541,7 @@ func TestIngestNote_MentionLimitBoundaryAccepted(t *testing.T) {
 		}
 		tagJSON += `{"type": "Mention", "href": "https://example.com/users/u` + strconv.Itoa(i) + `"}`
 	}
-	body := []byte(`{
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/boundary",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4461,7 +4559,7 @@ func TestIngestNote_MentionLimitBoundaryAccepted(t *testing.T) {
 // で person.tag の変化が user.tags に追従することを確認する (#1360, Part 2)。
 // 自己紹介の hashtag を編集した remote user が hashtags/users に反映されるための前提。
 func TestResolveActor_ExistingUserRefreshesHashtags(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/alice",
 		"type": "Person",
 		"preferredUsername": "alice",
@@ -4489,7 +4587,7 @@ func TestResolveActor_ExistingUserRefreshesHashtags(t *testing.T) {
 // Hashtag entry が正規化されて user.tags に取り込まれることを確認する
 // (#1360, Part 2)。hashtags/users が remote user を引けるための前提。
 func TestResolveActor_NewUserIngestsHashtags(t *testing.T) {
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/users/tagger",
 		"type": "Person",
 		"preferredUsername": "tagger",
@@ -4523,7 +4621,7 @@ func TestIngestNote_QuoteMisskeyQuote(t *testing.T) {
 	// attributedTo の actor 解決のみ fetch (quote は DB hit)。
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4551,7 +4649,7 @@ func TestIngestNote_QuoteUrlFallback(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4572,7 +4670,7 @@ func TestIngestNote_QuoteFetchesUnknownTarget(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	// 1: outer note の actor 解決 / 2: quote 先 note / 3: quote 先 note の actor 解決。
-	quotedNote := `{
+	quotedNote := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/quoted",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4582,7 +4680,7 @@ func TestIngestNote_QuoteFetchesUnknownTarget(t *testing.T) {
 	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor), []byte(quotedNote), []byte(sampleActor)}}
 	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4616,7 +4714,7 @@ func TestIngestNote_QuoteUnresolvableDegrades(t *testing.T) {
 	// actor は解決できるが quote fetch は失敗する。
 	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor)}}
 	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4639,7 +4737,7 @@ func TestIngestNote_QuoteCycleNoInfiniteRecursion(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	// A.ingest: actor(alice) fetch → quote B fetch → B.ingest: actor は DB hit、
 	// quote A は in-flight で skip。よって body は [actor, B-note] で足りる。
-	bNote := `{
+	bNote := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/B",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4649,7 +4747,7 @@ func TestIngestNote_QuoteCycleNoInfiniteRecursion(t *testing.T) {
 	}`
 	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(sampleActor), []byte(bNote)}}
 	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
-	aBody := `{
+	aBody := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/A",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4694,7 +4792,7 @@ func TestIngestNote_QuoteLocalNote(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4715,7 +4813,7 @@ func TestIngestNote_QuoteLocalNoteMissing(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4738,7 +4836,7 @@ func TestIngestNote_QuoteIncrementsRenoteCountAndSetsHost(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4764,7 +4862,7 @@ func TestIngestNote_SelfQuoteNoIncrement(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4789,7 +4887,7 @@ func TestIngestNote_ReplyAndQuote(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4818,7 +4916,7 @@ func TestIngestNote_QuotePrefersResolvableUrl(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	// _misskey_quote は未知 remote (fetch 失敗); quoteUrl は local 解決可。
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4846,7 +4944,7 @@ func TestIngestNote_QuoteFollowersTargetDegrades(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4871,7 +4969,7 @@ func TestIngestNote_QuoteSpecifiedTargetDegrades(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4894,7 +4992,7 @@ func TestIngestNote_QuoteHomeTargetLinks(t *testing.T) {
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/q1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",
@@ -4979,7 +5077,7 @@ func TestIngestNote_DedupRaceOnQuoteNoDoubleRenoteCount(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	r := federation.NewResolver(repo, raceRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
 
-	body := `{
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams", 
 		"id": "https://remote.example/notes/n1",
 		"type": "Note",
 		"attributedTo": "https://remote.example/users/alice",

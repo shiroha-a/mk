@@ -20,6 +20,7 @@ import (
 )
 
 const aliceActor = `{
+	"@context": "https://www.w3.org/ns/activitystreams",
 	"id": "https://remote.example/users/alice",
 	"type": "Person",
 	"preferredUsername": "alice",

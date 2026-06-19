@@ -200,6 +200,7 @@ func TestStatusError_PreservesLegacyErrorString(t *testing.T) {
 // FetchJSON (Iceshrimp.NET nodeinfo 互換) を coverage 化。
 func TestAPFetcher_FetchObjectUnsigned(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/activity+json")
 		_, _ = w.Write([]byte(`{"object":"x"}`))
 	}))
 	defer srv.Close()

@@ -705,6 +705,13 @@ func (r *Resolver) fetchActor(uri string) (*activitypub.Person, error) {
 	if err := json.Unmarshal(body, &actor); err != nil {
 		return nil, ErrInvalidActor
 	}
+	// fetch した document が AS @context を持つことを要求する (本家 resolve の
+	// invalid-response guard、#1828)。誤設定 endpoint が返す non-AP JSON を
+	// actor として取り込むのを防ぐ。
+	if !hasActivityStreamsContext(actor.Context) {
+		slog.Warn("federation: actor missing ActivityStreams @context", "uri", uri)
+		return nil, ErrInvalidActor
+	}
 	if actor.ID == "" || actor.PreferredUsername == "" {
 		return nil, ErrInvalidActor
 	}
@@ -898,9 +905,19 @@ func (r *Resolver) resolveNoteOnce(uri string) (*model.Note, error) {
 	// #1820)。IngestNote は apNote.ID をそのまま note.URI に採用するため、ここで
 	// bind しておく。
 	var idProbe struct {
-		ID string `json:"id"`
+		ID      string `json:"id"`
+		Context any    `json:"@context"`
 	}
 	_ = json.Unmarshal(body, &idProbe)
+	// fetch した document が AS @context を持つことを要求する (本家 resolve の
+	// invalid-response guard、#1828)。inbound delivery (handleCreate → IngestNote)
+	// で配送される inlined Note は @context を持たないことがあるためここでは
+	// 検証せず、fetch した standalone document (= この resolveNoteOnce 経路) の
+	// みに適用する。
+	if !hasActivityStreamsContext(idProbe.Context) {
+		slog.Warn("federation: note missing ActivityStreams @context", "uri", uri)
+		return nil, ErrInvalidNote
+	}
 	if err := assertResponseHostMatches(finalURL, idProbe.ID); err != nil {
 		slog.Warn("federation: note id host mismatch", "uri", uri, "finalURL", finalURL, "id", idProbe.ID)
 		return nil, err
@@ -1961,6 +1978,31 @@ func (r *Resolver) fetchObjectWithFinalURL(uri string) ([]byte, string, error) {
 	}
 	body, err := r.fetcher.FetchObject(uri)
 	return body, "", err
+}
+
+// hasActivityStreamsContext reports whether a fetched AP object's `@context`
+// includes the ActivityStreams 2.0 namespace, replicating upstream
+// Resolver.resolve の invalid-response guard (72180409, #1828)。本家同様に
+// `@context` が配列なら AS URL を含むこと、配列でなければ AS URL と完全一致
+// することを要求する。AS context を持たない任意 JSON を actor/note として
+// 取り込むのを防ぐ。fetch 経路専用 — inbound delivery で配送される inlined
+// object は外側 activity 側に @context があり object 自身は持たないことがある
+// ため、この検証は fetch した standalone document にのみ適用する。
+func hasActivityStreamsContext(ctx any) bool {
+	switch v := ctx.(type) {
+	case string:
+		return v == activitypub.ContextURL
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok && s == activitypub.ContextURL {
+				return true
+			}
+		}
+		return false
+	default:
+		// nil (欠落) / object / number 等はいずれも AS context 不在として reject。
+		return false
+	}
 }
 
 // assertResponseHostMatches enforces upstream assertActivityMatchesUrl の hard
