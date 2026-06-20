@@ -1685,6 +1685,16 @@ func TestCreateService_NoSuchFile_WrongOwner(t *testing.T) {
 
 // --- MainStreamPublisher emit (Phase 7-4b-5 / #301) ---
 
+// threadMutedFor is a NoteThreadMutingRepository stub that reports userID as
+// having muted every thread, used to assert the thread-mute gate independently
+// of the (generated) note id (#1954).
+type threadMutedFor struct{ userID string }
+
+func (m threadMutedFor) Create(*model.NoteThreadMuting) error        { return nil }
+func (m threadMutedFor) Delete(string, string) error                 { return nil }
+func (m threadMutedFor) Exists(userID, _ string) (bool, error)       { return userID == m.userID, nil }
+func (m threadMutedFor) ListMutedThreadIDs(string) ([]string, error) { return nil, nil }
+
 // stubMainStreamPublisher captures PublishMainEvent calls for test assertions.
 type stubMainStreamPublisher struct {
 	calls []mainEventCall
@@ -1742,6 +1752,73 @@ func TestCreateService_SkipsReplyToSelf(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Empty(t, pub.userIDsOf("reply"))
+}
+
+// #1954: reply 先がスレッドをミュートしていれば reply main-stream event を出さない。
+// thread は reply 先ノートの threadId (root の r1 は自身の id)。
+func TestCreateService_SkipsReplyToThreadMuted(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "bob", ThreadID: "r1"}))
+	svc.SetThreadMutingRepo(muteRepo)
+
+	noteRepo.Notes["r1"] = &model.Note{ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	replyID := "r1"
+	text := "hi"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "alice"}, Text: &text, ReplyID: &replyID})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("reply"), "thread-muted reply 先には reply event を出さない (#1954)")
+}
+
+// #1954: reply 先が threaded note (ThreadID 持ち) の場合、その threadId で
+// ミュート判定する (root の id ではなく)。
+func TestCreateService_ReplyThreadMuteUsesThreadID(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "bob", ThreadID: "troot"}))
+	svc.SetThreadMutingRepo(muteRepo)
+
+	troot := "troot"
+	noteRepo.Notes["r1"] = &model.Note{ID: "r1", UserID: "bob", ThreadID: &troot, Visibility: model.NoteVisibilityPublic}
+	replyID := "r1"
+	text := "hi"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "alice"}, Text: &text, ReplyID: &replyID})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("reply"), "reply 先ノートの threadId でミュート判定する (#1954)")
+}
+
+// #1954: renote はスレッドミュートで gate されない (upstream も ungated)。
+func TestCreateService_RenoteThreadMuteNotGated(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	svc.SetThreadMutingRepo(threadMutedFor{userID: "bob"})
+
+	noteRepo.Notes["r1"] = &model.Note{ID: "r1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	renoteID := "r1"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "alice"}, RenoteID: &renoteID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bob"}, pub.userIDsOf("renote"), "renote はスレッドミュートで抑制されない (#1954)")
+}
+
+// #1954: mention 先がスレッドをミュートしていれば mention main-stream event を出さない。
+func TestCreateService_SkipsMentionToThreadMuted(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["uA"] = &model.User{ID: "uA", Username: "alice", UsernameLower: "alice"}
+	svc.SetUserRepo(userRepo)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	svc.SetThreadMutingRepo(threadMutedFor{userID: "uA"})
+
+	text := "hi @alice"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "author1"}, Text: &text})
+	require.NoError(t, err)
+	assert.Empty(t, pub.userIDsOf("mention"), "thread-muted mention 先には mention event を出さない (#1954)")
 }
 
 func TestCreateService_SkipsReplyToRemoteTarget(t *testing.T) {

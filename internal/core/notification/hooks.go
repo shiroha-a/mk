@@ -57,6 +57,9 @@ type Hook struct {
 	// 指定リストの member かを確認するための optional 依存 (#1775)。未配線なら
 	// list gate は素通り (best-effort)。
 	userListRepo repository.UserListRepository
+	// threadMuteRepo は reply/mention 通知のスレッドミュート gate に使う
+	// optional 依存 (#1954)。未配線なら gate は素通り。
+	threadMuteRepo repository.NoteThreadMutingRepository
 }
 
 // NewHook constructs a Hook bound to a NotificationService and userRepo.
@@ -102,6 +105,13 @@ func (h *Hook) SetNoteNotifyRepos(following repository.FollowingRepository, reno
 	h.renoteMutingRepo = renoteMuting
 }
 
+// SetThreadMutingRepo attaches a NoteThreadMutingRepository so reply/mention
+// notifications are suppressed for recipients who thread-muted the thread,
+// matching upstream NoteCreateService (#1954). nil disables the gate.
+func (h *Hook) SetThreadMutingRepo(r repository.NoteThreadMutingRepository) {
+	h.threadMuteRepo = r
+}
+
 // SetUserListRepo attaches the user-list repository used by the
 // notificationRecieveConfig type=='list' gate (#1775)。
 func (h *Hook) SetUserListRepo(r repository.UserListRepository) {
@@ -144,9 +154,12 @@ func (h *Hook) OnNoteCreated(n *model.Note, author *model.User, replyTarget, ren
 	// #17363 で null = no filter に揃った)。default (= 不明 visibility) は
 	// 通知 fan-out 自体を停止して安全側に倒す。
 
-	// reply: 親ノートの投稿者がローカルユーザーなら通知
+	// reply: 親ノートの投稿者がローカルユーザーなら通知。ただし reply 先が
+	// スレッドをミュートしていれば通知しない (#1954)。thread は reply 先ノートの
+	// threadId (無ければ自身の id)。
 	if replyTarget != nil && replyTarget.UserID != author.ID &&
-		h.notifyVisibleToTarget(n, replyTarget.UserID) {
+		h.notifyVisibleToTarget(n, replyTarget.UserID) &&
+		!h.isThreadMuted(replyTarget.UserID, replyTarget) {
 		h.notifyLocalUser(ctx, replyTarget.UserID, CreateInput{
 			NotifieeID:     replyTarget.UserID,
 			NotifierID:     author.ID,
@@ -179,6 +192,11 @@ func (h *Hook) OnNoteCreated(n *model.Note, author *model.User, replyTarget, ren
 			continue
 		}
 		if !h.notifyVisibleToTarget(n, mentionedID) {
+			continue
+		}
+		// mention 先がこのスレッドをミュートしていれば通知しない (#1954)。
+		// thread は新規ノート自身の threadId (無ければ自身の id)。
+		if h.isThreadMuted(mentionedID, n) {
 			continue
 		}
 		h.notifyLocalUser(ctx, mentionedID, CreateInput{
@@ -301,6 +319,22 @@ func (h *Hook) OnChatRoomInvitationReceived(inviteeID, inviterID, invitationID s
 // 注: VisibleUserIDs 比較は線形探索だが、specified note の visibleUserIds 配列
 // は通常 10 件以下なので map 化のコスト (= 各通知呼び出しで毎回 map 構築) より
 // 安い。
+// isThreadMuted reports whether userID has muted the thread that threadNote
+// belongs to. The thread root is threadNote.ThreadID (falling back to its own
+// id), mirroring upstream `note.threadId ?? note.id`. Returns false when the
+// repository is not wired (gate disabled) or on lookup error (fail-open: notify).
+func (h *Hook) isThreadMuted(userID string, threadNote *model.Note) bool {
+	if h.threadMuteRepo == nil || threadNote == nil {
+		return false
+	}
+	threadID := threadNote.ID
+	if threadNote.ThreadID != nil && *threadNote.ThreadID != "" {
+		threadID = *threadNote.ThreadID
+	}
+	muted, err := h.threadMuteRepo.Exists(userID, threadID)
+	return err == nil && muted
+}
+
 func (h *Hook) notifyVisibleToTarget(n *model.Note, targetID string) bool {
 	switch n.Visibility {
 	case "", model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityFollowers:

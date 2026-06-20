@@ -228,6 +228,7 @@ type CreateService struct {
 	metaRepo            repository.MetaRepository
 	channelRepo         repository.ChannelRepository
 	silencingProvider   SilencingProvider
+	threadMuteRepo      repository.NoteThreadMutingRepository
 	featuredRanking     FeaturedRanking
 	// randFn は featured ランキング更新の 30% sampling 用。テストで固定する。
 	randFn func() float64
@@ -267,6 +268,13 @@ func (s *CreateService) SetSilencingProvider(p SilencingProvider) {
 // block violations. When unset the block check is skipped (backward compat).
 func (s *CreateService) SetBlockingRepo(r repository.BlockingRepository) {
 	s.blockingRepo = r
+}
+
+// SetThreadMutingRepo attaches a NoteThreadMutingRepository so reply/mention
+// main-stream events are suppressed for recipients who thread-muted the thread,
+// matching upstream NoteCreateService (#1954). nil disables the gate.
+func (s *CreateService) SetThreadMutingRepo(r repository.NoteThreadMutingRepository) {
+	s.threadMuteRepo = r
 }
 
 // SetDriveFileRepo attaches a DriveFileRepository for validating fileIds.
@@ -897,7 +905,9 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 	// と重ねて防御。
 	if replyTarget != nil && replyTarget.UserHost == nil && replyTarget.UserID != author.ID {
 		viewer := &model.User{ID: replyTarget.UserID}
-		if CanSeeNote(viewer, note, s.followingRepo) {
+		// upstream はスレッドミュート中の reply 先には reply event を出さない
+		// (#1954)。thread は reply 先ノートの threadId (無ければ自身の id)。
+		if CanSeeNote(viewer, note, s.followingRepo) && !s.isThreadMuted(replyTarget.UserID, replyTarget) {
 			s.mainStreamPublisher.PublishMainEvent(replyTarget.UserID, "reply", packed)
 		}
 	}
@@ -935,8 +945,29 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 		if !CanSeeNote(u, note, s.followingRepo) {
 			continue
 		}
+		// mention 先がこのスレッドをミュートしていれば mention event を出さない
+		// (#1954)。thread は新規ノート自身の threadId (無ければ自身の id)。
+		if s.isThreadMuted(uid, note) {
+			continue
+		}
 		s.mainStreamPublisher.PublishMainEvent(uid, "mention", packed)
 	}
+}
+
+// isThreadMuted reports whether userID has muted the thread that threadNote
+// belongs to. The thread root is threadNote.ThreadID (falling back to its own
+// id), mirroring upstream `note.threadId ?? note.id`. Returns false when the
+// repository is not wired (gate disabled) or on lookup error (fail-open: emit).
+func (s *CreateService) isThreadMuted(userID string, threadNote *model.Note) bool {
+	if s.threadMuteRepo == nil || threadNote == nil {
+		return false
+	}
+	threadID := threadNote.ID
+	if threadNote.ThreadID != nil && *threadNote.ThreadID != "" {
+		threadID = *threadNote.ThreadID
+	}
+	muted, err := s.threadMuteRepo.Exists(userID, threadID)
+	return err == nil && muted
 }
 
 // safeGo runs fn in a new goroutine, recovering from panics.

@@ -50,6 +50,83 @@ func TestHook_OnNoteCreated_ReplyNotification(t *testing.T) {
 	assert.Equal(t, TypeReply, out[0].Type)
 }
 
+// #1954: reply 先がスレッドをミュートしていれば reply 通知を出さない。
+func TestHook_OnNoteCreated_ReplyThreadMutedSkipped(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	addLocalUser(repo, "bob", "bob")
+
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	// alice が thread n_parent (root) をミュート。
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "alice", ThreadID: "n_parent"}))
+	h.SetThreadMutingRepo(muteRepo)
+
+	parent := &model.Note{ID: "n_parent", UserID: "alice"}
+	note := &model.Note{ID: "n_reply", UserID: "bob"}
+	h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
+
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
+	assert.Empty(t, out, "thread-muted reply 先には reply 通知を出さない (#1954)")
+}
+
+// #1954: reply 先が threaded note (ThreadID 持ち) の場合、その threadId で判定する。
+func TestHook_OnNoteCreated_ReplyThreadMuteUsesThreadID(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	addLocalUser(repo, "bob", "bob")
+
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "alice", ThreadID: "troot"}))
+	h.SetThreadMutingRepo(muteRepo)
+
+	troot := "troot"
+	parent := &model.Note{ID: "n_parent", UserID: "alice", ThreadID: &troot}
+	note := &model.Note{ID: "n_reply", UserID: "bob"}
+	h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
+
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
+	assert.Empty(t, out, "reply 先ノートの threadId でミュート判定する (#1954)")
+}
+
+// #1954: mention 先がスレッドをミュートしていれば mention 通知を出さない。
+func TestHook_OnNoteCreated_MentionThreadMutedSkipped(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	addLocalUser(repo, "bob", "bob")
+
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	// alice が thread n_m (note 自身 = root) をミュート。
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "alice", ThreadID: "n_m"}))
+	h.SetThreadMutingRepo(muteRepo)
+
+	note := &model.Note{ID: "n_m", UserID: "bob", Mentions: pq.StringArray{"alice"}}
+	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
+
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
+	assert.Empty(t, out, "thread-muted mention 先には mention 通知を出さない (#1954)")
+}
+
+// #1954: renote はスレッドミュートで gate されない (upstream も ungated)。
+func TestHook_OnNoteCreated_RenoteThreadMuteNotGated(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	addLocalUser(repo, "alice", "alice")
+	addLocalUser(repo, "bob", "bob")
+
+	muteRepo := testutil.NewMockNoteThreadMutingRepository()
+	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "alice", ThreadID: "n_target"}))
+	h.SetThreadMutingRepo(muteRepo)
+
+	target := "n_target"
+	original := &model.Note{ID: target, UserID: "alice"}
+	note := &model.Note{ID: "n_renote", UserID: "bob", RenoteID: &target}
+	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, original)
+
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "renote はスレッドミュートで抑制されない (#1954)")
+	assert.Equal(t, TypeRenote, out[0].Type)
+}
+
 func TestHook_OnNoteCreated_ReplyToSelfSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addLocalUser(repo, "alice", "alice")

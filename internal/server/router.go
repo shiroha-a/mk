@@ -231,6 +231,8 @@ func (s *Server) setupRoutes() {
 	// canPublicNote=false の user の public note を home に降格させる
 	// silencing 機構 (#1024)。
 	noteCreateService.SetSilencingProvider(roleService)
+	// reply/mention の main-stream event をスレッドミュート済 recipient に出さない (#1954)。
+	noteCreateService.SetThreadMutingRepo(noteThreadMutingRepo)
 	noteDeleteService := corenote.NewDeleteService(noteRepo)
 	noteDeleteService.SetUserRepo(userRepo) // #1538: resolve author for moderator delete
 	noteQueryService := corenote.NewQueryService(noteRepo, followingRepo)
@@ -331,6 +333,8 @@ func (s *Server) setupRoutes() {
 	notificationHook.SetNoteNotifyRepos(followingRepo, renoteMutingRepo)
 	// notificationRecieveConfig type=='list' gate の member 確認用 (#1775)。
 	notificationHook.SetUserListRepo(userListRepo)
+	// reply/mention 通知をスレッドミュート済 recipient に出さない (#1954)。
+	notificationHook.SetThreadMutingRepo(noteThreadMutingRepo)
 	noteCreateService.SetNotificationHook(notificationHook)
 	noteCreateService.SetUserRepo(userRepo)
 	// roleAssigned 通知 (#1559): local public role 割当時に発火し、entity 側で
