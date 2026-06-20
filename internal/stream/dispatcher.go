@@ -143,6 +143,12 @@ func (d *Dispatcher) handleConnect(body json.RawMessage) {
 	if factory == nil {
 		return
 	}
+	// requireCredential channel (hybrid/home/main/notifications/antenna/drive/
+	// admin/reversi/chat 等) は anon (user==nil) 接続を弾く (upstream connectChannel
+	// の requireCredential gate、silent return で connected ack も送らない、#1944)。
+	if d.registry.RequiresCredential(req.Channel) && (d.conn == nil || d.conn.User() == nil) {
+		return
+	}
 	d.mu.Lock()
 	if _, exists := d.channels[req.ID]; exists {
 		d.mu.Unlock()

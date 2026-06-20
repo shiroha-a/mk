@@ -104,6 +104,48 @@ func TestRegistry_RegisterAndLookup(t *testing.T) {
 	assert.Nil(t, r.Lookup("missing"))
 }
 
+// #1944: RegisterCredentialed marks a channel as requiring auth; Register does not.
+func TestRegistry_Credentialed(t *testing.T) {
+	r := NewRegistry()
+	r.Register("anon", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	r.RegisterCredentialed("authed", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	assert.False(t, r.RequiresCredential("anon"))
+	assert.True(t, r.RequiresCredential("authed"))
+	assert.False(t, r.RequiresCredential("unknown"))
+	assert.NotNil(t, r.Lookup("authed"), "RegisterCredentialed も factory を登録する")
+}
+
+// #1944: anon (user==nil) は requireCredential channel に接続できず、認証済みは接続できる。
+// non-credentialed channel は anon も接続できる。
+func TestDispatcher_RequireCredential(t *testing.T) {
+	newReg := func() *Registry {
+		r := NewRegistry()
+		r.RegisterCredentialed("authed", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+		r.Register("open", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+		return r
+	}
+	hasChannel := func(d *Dispatcher, id string) bool {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		_, ok := d.channels[id]
+		return ok
+	}
+
+	// anon → credentialed: 拒否。
+	anon := NewDispatcher(NewConnection("c1", nil, newFakeConn()), newReg(), newStubBus())
+	anon.HandleClientMessage("connect", json.RawMessage(`{"id":"a","channel":"authed"}`))
+	assert.False(t, hasChannel(anon, "a"), "anon は requireCredential channel に接続できない")
+
+	// anon → non-credentialed: 許可。
+	anon.HandleClientMessage("connect", json.RawMessage(`{"id":"o","channel":"open"}`))
+	assert.True(t, hasChannel(anon, "o"), "anon でも非 credentialed channel は接続できる")
+
+	// authed → credentialed: 許可。
+	authed := NewDispatcher(NewConnection("c2", &model.User{ID: "alice"}, newFakeConn()), newReg(), newStubBus())
+	authed.HandleClientMessage("connect", json.RawMessage(`{"id":"b","channel":"authed"}`))
+	assert.True(t, hasChannel(authed, "b"), "認証済みは requireCredential channel に接続できる")
+}
+
 func TestDispatcher_HandleConnect(t *testing.T) {
 	d, _, _, bus, _ := newDispatcherWithFake(t)
 	d.HandleClientMessage("connect", json.RawMessage(`{"id":"abc","channel":"test","params":{}}`))

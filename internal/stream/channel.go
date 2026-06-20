@@ -112,13 +112,14 @@ type ChannelFactory func(ctx ChannelContext) Channel
 // Registry maps channel name → ChannelFactory. router.go で各 Channel 実装を
 // register することで Manager が参照できる。
 type Registry struct {
-	mu        sync.RWMutex
-	factories map[string]ChannelFactory
+	mu           sync.RWMutex
+	factories    map[string]ChannelFactory
+	credentialed map[string]bool
 }
 
 // NewRegistry constructs an empty Registry.
 func NewRegistry() *Registry {
-	return &Registry{factories: make(map[string]ChannelFactory)}
+	return &Registry{factories: make(map[string]ChannelFactory), credentialed: make(map[string]bool)}
 }
 
 // Register binds name → factory. 同名で複数回 register した場合は最後の登録が
@@ -127,6 +128,26 @@ func (r *Registry) Register(name string, factory ChannelFactory) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.factories[name] = factory
+}
+
+// RegisterCredentialed binds name → factory and marks the channel as requiring
+// an authenticated connection (upstream requireCredential=true). Anonymous
+// (user==nil) connect requests to such a channel are silently rejected by the
+// Dispatcher (#1944)。requireCredential は channel ごとの登録時プロパティなので、
+// scope (PermittedChannel) と分けて registry 側で一括宣言する。
+func (r *Registry) RegisterCredentialed(name string, factory ChannelFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.factories[name] = factory
+	r.credentialed[name] = true
+}
+
+// RequiresCredential reports whether the named channel requires an authenticated
+// connection (#1944). Unknown names return false.
+func (r *Registry) RequiresCredential(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.credentialed[name]
 }
 
 // Lookup returns the factory for name, or nil when name is unknown.
