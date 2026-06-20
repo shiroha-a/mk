@@ -267,10 +267,11 @@ func verifyParsed(req *http.Request, parsed *ParsedSignature, pub crypto.PublicK
 	if err := verifyAlgorithm(parsed.Algorithm, kt, pub, []byte(signingString), sig); err != nil {
 		return err
 	}
-	// Digest check (for POST bodies)
+	// Digest check (for POST bodies). 形式 (sha-256= prefix) のみを見る軽い
+	// guard で、authoritative な値検証 (sha256(body) との一致) は inbox handler の
+	// admission (VerifyInboxAdmission) 側で行う (#1949)。ここで body を読むと
+	// legacy 経路では既に drain 済みのため値比較できない。
 	if expected := req.Header.Get("Digest"); expected != "" && req.Body != nil {
-		// Caller is responsible for already-buffered body verification; we
-		// only check the format here.
 		if !strings.HasPrefix(strings.ToLower(expected), "sha-256=") {
 			return errors.New("unsupported digest algorithm")
 		}

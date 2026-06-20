@@ -63,6 +63,10 @@ type Handler struct {
 	// verify で公開鍵パースをメモ化する (#1426)。worker 側 InboxProcessor と
 	// 同じ最適化を、enqueue せず inline verify する構成にも適用する。
 	keyCache *activitypub.PublicKeyCache
+	// expectedHost は config 由来の自ホスト (host:port)。inbox admission の
+	// host 署名必須 + 一致チェックに使う。未設定時は host チェックを skip する
+	// (#1949)。
+	expectedHost string
 }
 
 // NewHandler constructs a Handler.
@@ -89,6 +93,13 @@ func (h *Handler) SetHostBlockChecker(c HostBlockChecker) {
 // 成功するたびに対応 instance row の latestRequestReceivedAt が更新される。
 func (h *Handler) SetInstanceTracker(t InstanceTracker) {
 	h.instanceTracker = t
+}
+
+// SetExpectedHost wires the configured host (host:port) used by inbox admission
+// to require the request Host header to be signed and to match this server.
+// Mirrors upstream `request.headers.host !== this.config.host` (#1949).
+func (h *Handler) SetExpectedHost(host string) {
+	h.expectedHost = host
 }
 
 // SetChartHook attaches a ChartHook invoked after each successfully
@@ -157,14 +168,18 @@ func (h *Handler) Inbox(c echo.Context) error {
 		c.Request().Header.Set("Host", c.Request().Host)
 	}
 
+	// upstream ActivityPubServerService.inbox と同じく、queue/処理に回す前に
+	// host 署名+一致・digest 署名・digest 値 (sha256(body)) を検証する。RSA は
+	// 走らない O(body) の安価なチェックで、fast write / legacy 両 path 共通。
+	// Signature ヘッダ欠落/malformed もここで 401 になる (#1949 body integrity)。
+	if err := h.admitInbox(c.Request(), body); err != nil {
+		slog.Warn("inbox admission rejected", "err", err)
+		return c.NoContent(http.StatusUnauthorized)
+	}
+
 	if h.enqueuer != nil {
-		// Fast write path. signature 検証は worker 側で再現するので
-		// handler では実施しない。最低限のチェックだけ handler で行う:
-		// Signature ヘッダの presence (= 明らかな malformed を 401 で
-		// 即返す)。これは O(1) の文字列存在 check で RSA は走らない。
-		if c.Request().Header.Get("Signature") == "" {
-			return c.NoContent(http.StatusUnauthorized)
-		}
+		// Fast write path. signature の crypto 検証は worker 側で再現する。
+		// admitInbox を上で通しているので handler 側の presence check は不要。
 		payload := queue.InboxPayload{
 			Body:    body,
 			Method:  c.Request().Method,
@@ -216,6 +231,19 @@ func (h *Handler) processSynchronously(c echo.Context, body []byte) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 	return c.NoContent(http.StatusAccepted)
+}
+
+// admitInbox enforces the upstream inbox admission checks before the activity
+// is queued or processed: the Host header must be signed and match the
+// configured host, the Digest header must be signed, and its SHA-256 value must
+// equal the body hash. Returns an error to reject with 401 (#1949). The Signature
+// header must parse; a missing/malformed Signature also fails here.
+func (h *Handler) admitInbox(req *http.Request, body []byte) error {
+	parsed, err := activitypub.ParseSignatureHeader(req.Header.Get("Signature"))
+	if err != nil {
+		return err
+	}
+	return activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost, req.Header.Get("Digest"), body)
 }
 
 // verifySignature parses the Signature header, resolves the actor, and

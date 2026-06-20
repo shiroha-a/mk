@@ -1864,6 +1864,8 @@ func (s *Server) setupRoutes() {
 	inboxHandler.SetHostBlockChecker(instanceService)
 	inboxHandler.SetInstanceTracker(instanceService)
 	inboxHandler.SetChartHook(chartHooks)
+	// inbox admission の host 署名+一致チェックに自ホストを配線する (#1949)。
+	inboxHandler.SetExpectedHost(s.config.Host)
 	// #534: signature 検証成功後の Process(body) を inbox queue に逃がす。
 	// 未配線時は legacy 同期処理にフォールバック (テスト互換)。
 	inboxHandler.SetEnqueuer(s.queueClient)
