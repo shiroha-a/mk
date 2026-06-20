@@ -1111,3 +1111,23 @@ func TestChannelContext_MuteBlockSnapshot_NilConn(t *testing.T) {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }
+
+// #1942: channelContext.UserPolicies forwards from Connection.
+func TestChannelContext_UserPolicies(t *testing.T) {
+	conn := NewConnection("c1", nil, newFakeConn())
+	conn.SetPolicies(map[string]any{"ltlAvailable": false, "gtlAvailable": true})
+	d := NewDispatcher(conn, nil, newStubBus())
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	got := ctx.UserPolicies()
+	if got == nil || got["ltlAvailable"] != false || got["gtlAvailable"] != true {
+		t.Fatalf("UserPolicies = %v", got)
+	}
+}
+
+func TestChannelContext_UserPolicies_NilConn(t *testing.T) {
+	d := &Dispatcher{}
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	if got := ctx.UserPolicies(); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+}

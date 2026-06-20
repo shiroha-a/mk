@@ -10,6 +10,19 @@ import (
 	"github.com/shiroha-a/mk/internal/stream"
 )
 
+// timelinePolicyAllows reports whether the connection may subscribe to a
+// policy-gated timeline. nil policies (provider 未配線、test/旧挙動) → allow
+// (fail-open)。それ以外は named policy が true でなければ不許可 (upstream
+// `if (!policies.ltlAvailable) return` 相当、#1942)。
+func timelinePolicyAllows(ctx stream.ChannelContext, key string) bool {
+	policies := ctx.UserPolicies()
+	if policies == nil {
+		return true
+	}
+	v, ok := policies[key].(bool)
+	return ok && v
+}
+
 // LocalTimelineChannel forwards local-public/home notes.
 type LocalTimelineChannel struct {
 	ctx    stream.ChannelContext
@@ -22,9 +35,14 @@ func NewLocalTimeline(ctx stream.ChannelContext) stream.Channel {
 	return &LocalTimelineChannel{ctx: ctx}
 }
 
-// Init subscribes to the local-timeline pubsub topic.
+// Init subscribes to the local-timeline pubsub topic, gated by ltlAvailable.
 func (c *LocalTimelineChannel) Init(params json.RawMessage) error {
 	c.filter = parseNoteFilter(params)
+	// upstream local-timeline.ts init(): ltlAvailable=false なら subscribe せず
+	// return (接続は成立するが note は流れない、#1942)。
+	if !timelinePolicyAllows(c.ctx, "ltlAvailable") {
+		return nil
+	}
 	c.ctx.Subscribe("localTimeline")
 	return nil
 }
@@ -35,6 +53,12 @@ func (c *LocalTimelineChannel) Init(params json.RawMessage) error {
 // 3 escape hatch を OR で評価する。
 func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
+	// anon viewer + note/renote/reply 著者が requireSigninToViewContents なら note を
+	// 丸ごと drop (#1942、upstream local-timeline.ts の 3 連 gate)。hideEmbeds の
+	// blank 化より前に弾いて「何も送らない」upstream 挙動に揃える。
+	if anonRequireSigninDrop(payload, viewerID) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
 	}
@@ -72,6 +96,10 @@ func NewGlobalTimeline(ctx stream.ChannelContext) stream.Channel {
 
 func (c *GlobalTimelineChannel) Init(params json.RawMessage) error {
 	c.filter = parseNoteFilter(params)
+	// upstream global-timeline.ts init(): gtlAvailable=false なら subscribe しない (#1942)。
+	if !timelinePolicyAllows(c.ctx, "gtlAvailable") {
+		return nil
+	}
 	c.ctx.Subscribe("globalTimeline")
 	return nil
 }
@@ -81,6 +109,11 @@ func (c *GlobalTimelineChannel) Init(params json.RawMessage) error {
 // ので、ここでも replyShouldEmit を呼ばずに pass-through 相当の挙動になる。
 func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
+	// anon viewer + note/renote/reply 著者が requireSigninToViewContents なら drop
+	// (#1942、upstream global-timeline.ts の 3 連 gate)。hideEmbeds より前に弾く。
+	if anonRequireSigninDrop(payload, viewerID) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
 	}
@@ -178,6 +211,11 @@ func NewHybridTimeline(ctx stream.ChannelContext) stream.Channel {
 
 func (c *HybridTimelineChannel) Init(params json.RawMessage) error {
 	c.filter = parseNoteFilter(params)
+	// upstream hybrid-timeline.ts init(): ltlAvailable=false なら subscribe しない
+	// (local / home 両方、#1942)。
+	if !timelinePolicyAllows(c.ctx, "ltlAvailable") {
+		return nil
+	}
 	c.ctx.Subscribe("localTimeline")
 	if user, ok := c.ctx.User().(*model.User); ok && user != nil {
 		c.homeTopic = "homeTimeline:" + user.ID
@@ -192,6 +230,14 @@ func (c *HybridTimelineChannel) Init(params json.RawMessage) error {
 // が違う (#1063)。
 func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
 	viewerID := viewerIDFromCtx(c.ctx)
+	// anon viewer + requireSigninToViewContents は note を丸ごと drop (#1942)。
+	// upstream hybrid-timeline.ts は requireCredential=true で anon が到達しない
+	// 前提のため明示 gate を持たないが、mk-go は cookie/anon が hybrid の
+	// localTimeline topic を購読できるため、LTL/GTL と同じく blank shell を送らず
+	// drop して揃える (requireCredential 非適用の root cause は別 issue)。
+	if anonRequireSigninDrop(payload, viewerID) {
+		return
+	}
 	if !c.filter.shouldEmit(payload, c.ctx.HardMuteRules(), viewerID) {
 		return
 	}

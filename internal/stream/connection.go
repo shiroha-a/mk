@@ -92,6 +92,14 @@ type Connection struct {
 	// read (per-publish) と write (set) が並行するので muteBlockMu で protect。
 	muteBlockMu sync.RWMutex
 	muteBlock   *MuteBlockSnapshot
+
+	// policies は viewer の role policy snapshot (#1942)。timeline channel が
+	// init() で ltlAvailable / gtlAvailable を gate するのに使う。接続確立時に
+	// 1 回 fetch する (anon は base policy)。set-once だが Manager goroutine で
+	// 書き接続後の read-loop goroutine で読むため mutex で happens-before を張る。
+	// nil = provider 未配線 (test/旧挙動) → gate skip (fail-open)。
+	policiesMu sync.RWMutex
+	policies   map[string]any
 }
 
 // NewConnection wraps an upgraded WebSocket. id は呼び出し側 (Manager) が一意
@@ -176,6 +184,23 @@ func (c *Connection) FollowingSnapshot() map[string]bool {
 	c.followingMu.RLock()
 	defer c.followingMu.RUnlock()
 	return c.followingSnapshot
+}
+
+// SetPolicies attaches the viewer's role-policy snapshot (#1942). Called once
+// at connect time by the Manager. nil leaves timeline policy gating disabled
+// (fail-open).
+func (c *Connection) SetPolicies(p map[string]any) {
+	c.policiesMu.Lock()
+	c.policies = p
+	c.policiesMu.Unlock()
+}
+
+// Policies returns the viewer's role-policy snapshot, or nil when the policy
+// provider is unwired. Read-only; callers must not mutate.
+func (c *Connection) Policies() map[string]any {
+	c.policiesMu.RLock()
+	defer c.policiesMu.RUnlock()
+	return c.policies
 }
 
 // UpdateFollowingSnapshot mutates the live followee snapshot after a

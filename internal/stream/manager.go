@@ -42,6 +42,14 @@ type Manager struct {
 	followingLookup FollowingSnapshotLookup
 	muteBlockLookup MuteBlockSnapshotLookup
 	noteVisibility  NoteVisibilityChecker
+	policyProvider  RolePolicyProvider
+}
+
+// RolePolicyProvider returns a user's effective role policies. Timeline channels
+// gate ltlAvailable / gtlAvailable on it (#1942). userID == "" yields the base
+// (anonymous) policies, mirroring upstream getUserPolicies(null).
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
 }
 
 // NewManager constructs a Manager with no live connections. registry / bus が
@@ -93,6 +101,13 @@ func (m *Manager) SetNoteVisibilityChecker(c NoteVisibilityChecker) {
 	m.noteVisibility = c
 }
 
+// SetPolicyProvider wires a RolePolicyProvider so timeline channels can gate
+// ltlAvailable / gtlAvailable at connect time (#1942). nil disables the gate
+// (fail-open, test/旧挙動).
+func (m *Manager) SetPolicyProvider(p RolePolicyProvider) {
+	m.policyProvider = p
+}
+
 // Accept implements api/streaming.ConnectionAcceptor. *websocket.Conn から
 // Connection を組み立て、Dispatcher 経由で channel framework に橋渡しする。
 func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
@@ -114,6 +129,16 @@ func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 		// 失敗 (= nil 返却) は fail-open に degrade し、main / notifications は
 		// filter 無しで動き続ける (#1711)。
 		c.SetMuteBlockSnapshot(m.muteBlockLookup.MuteBlockSnapshotForUser(user.ID))
+	}
+	if m.policyProvider != nil {
+		// timeline channel の ltlAvailable / gtlAvailable gate 用に role policy を
+		// 接続確立時に 1 回 fetch (#1942)。anon (user==nil) は base policy
+		// (GetUserPolicies("")) を引く (upstream getUserPolicies(null) 相当)。
+		uid := ""
+		if user != nil {
+			uid = user.ID
+		}
+		c.SetPolicies(m.policyProvider.GetUserPolicies(uid))
 	}
 	dispatcher := NewDispatcher(c, m.registry, m.bus)
 	if m.notifReader != nil {

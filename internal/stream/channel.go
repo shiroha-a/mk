@@ -73,6 +73,11 @@ type ChannelContext interface {
 	// (#1711). Returns nil when the connection is anonymous or the lookup is
 	// unwired — callers must treat nil as "no filtering" (fail-open).
 	MuteBlockSnapshot() *MuteBlockSnapshot
+	// UserPolicies returns the viewer's effective role policies, fetched once at
+	// connect time. Timeline channels gate ltlAvailable / gtlAvailable on it
+	// (#1942). Returns nil when the policy provider is unwired — callers treat
+	// nil as "no gating" (fail-open).
+	UserPolicies() map[string]any
 }
 
 // PermittedChannel is an optional interface a Channel can implement to

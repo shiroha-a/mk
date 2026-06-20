@@ -462,6 +462,13 @@ func (c *channelContext) MuteBlockSnapshot() *MuteBlockSnapshot {
 	return c.dispatcher.conn.MuteBlockSnapshot()
 }
 
+func (c *channelContext) UserPolicies() map[string]any {
+	if c.dispatcher.conn == nil {
+		return nil
+	}
+	return c.dispatcher.conn.Policies()
+}
+
 // --- readNotification / subNote / unsubNote ---
 
 // handleReadNotification marks all notifications as read for the connected user.
