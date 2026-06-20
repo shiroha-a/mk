@@ -1817,6 +1817,8 @@ func (s *Server) setupRoutes() {
 
 	// Discovery endpoints
 	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
+	// federation='none' のとき discovery を 403 で塞ぐため metaRepo を inject (#1924)。
+	wellknownHandler.SetMetaRepo(metaRepo)
 	s.echo.GET("/.well-known/webfinger", wellknownHandler.Webfinger)
 	s.echo.GET("/.well-known/host-meta", wellknownHandler.HostMeta)
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
@@ -2012,19 +2014,19 @@ func (s *Server) setupRoutes() {
 
 	// 2. Channel registry: Misskey 互換のチャンネル名で各 factory を登録する
 	streamRegistry := stream.NewRegistry()
-	streamRegistry.Register("homeTimeline", channels.NewHomeTimeline)
+	streamRegistry.RegisterCredentialed("homeTimeline", channels.NewHomeTimeline)
 	streamRegistry.Register("localTimeline", channels.NewLocalTimeline)
 	streamRegistry.Register("globalTimeline", channels.NewGlobalTimeline)
-	streamRegistry.Register("hybridTimeline", channels.NewHybridTimeline)
-	streamRegistry.Register("notifications", channels.NewNotifications)
-	streamRegistry.Register("main", channels.NewMain)
-	streamRegistry.Register("drive", channels.NewDrive)
+	streamRegistry.RegisterCredentialed("hybridTimeline", channels.NewHybridTimeline)
+	streamRegistry.RegisterCredentialed("notifications", channels.NewNotifications)
+	streamRegistry.RegisterCredentialed("main", channels.NewMain)
+	streamRegistry.RegisterCredentialed("drive", channels.NewDrive)
 	streamRegistry.Register("hashtag", channels.NewHashtag)
-	streamRegistry.Register("antenna", channels.NewAntennaFactory(antennaRepo).New)
+	streamRegistry.RegisterCredentialed("antenna", channels.NewAntennaFactory(antennaRepo).New)
 	streamRegistry.Register("channel", channels.NewChannelTimeline)
 	streamRegistry.Register("userList", channels.NewUserList)
 	streamRegistry.Register("roleTimeline", channels.NewRoleTimelineFactory(roleService).New)
-	streamRegistry.Register("admin", channels.NewAdminFactory(roleService).New)
+	streamRegistry.RegisterCredentialed("admin", channels.NewAdminFactory(roleService).New)
 	// serverStats / queueStats は publisher を後段で構築するため、ここでは
 	// 仮 register せず、publisher 生成後に登録する (1497 行付近)。
 
@@ -2058,6 +2060,10 @@ func (s *Server) setupRoutes() {
 	// 漏れる (HTTP 側 #1444 i/notifications IDOR の WS 版)。noteQueryService
 	// の RequireVisible が NoteVisibilityChecker interface を自動 satisfy する。
 	streamManager.SetNoteVisibilityChecker(noteQueryService)
+	// timeline channel (LTL/GTL/HTL) の ltlAvailable / gtlAvailable gate 用に role
+	// policy provider を配線する (#1942)。REST timeline と同じく WS でも policy で
+	// 無効化された timeline を subscribe させない (policy bypass 解消)。
+	streamManager.SetPolicyProvider(roleService)
 	// hardMutedWords 変更時に reload event を受け取って該当 connection の
 	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
@@ -2144,7 +2150,7 @@ func (s *Server) setupRoutes() {
 	// 5. Reversi WebSocket channel (Phase 9.6) を登録する
 	reversiService := corereversi.NewService(reversiRepo, reversiPublisher, s.redis.Default)
 	streamRegistry.Register("reversiGame", channels.NewReversiGameFactory(reversiService).New)
-	streamRegistry.Register("reversi", channels.NewReversi)
+	streamRegistry.RegisterCredentialed("reversi", channels.NewReversi)
 
 	// 6. Chat WebSocket channels (Phase 9.8): chatRoom と chatUser を登録する
 	chatPublisher := stream.NewChatPublisher(streamPubSub)
@@ -2165,8 +2171,8 @@ func (s *Server) setupRoutes() {
 	chatService.SetEmojiRepo(emojiRepo)
 	// 1-on-1 DM の chatApproval bypass + 送信後 approval 挿入に使う (#1748)。
 	chatService.SetApprovalRepo(repository.NewChatApprovalRepository(s.db))
-	streamRegistry.Register("chatRoom", channels.NewChatRoomFactory(chatService).New)
-	streamRegistry.Register("chatUser", channels.NewChatUserFactory(chatService).New)
+	streamRegistry.RegisterCredentialed("chatRoom", channels.NewChatRoomFactory(chatService).New)
+	streamRegistry.RegisterCredentialed("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。
 	// FederationIDCache は本家 Misskey DB スキーマ互換のため DB カラムを持たず
 	// Redis のみで session↔gameID の双方向 mapping を保持する。api handler と

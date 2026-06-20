@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -21,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/langmap"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -880,7 +883,10 @@ func (h *Handler) Me(c echo.Context) error {
 		resp["publicReactions"] = profile.PublicReactions
 		resp["loggedInDays"] = len(profile.LoggedInDates)
 		resp["achievements"] = jsonbArray(profile.Achievements)
-		resp["securityKeys"] = profile.SecurityKeysAvailable
+		// upstream UserEntityService.ts:580 と同じく securityKeys は 2FA 有効時のみ
+		// 真。PackMeDetailed も同 gate だが、ここで profile 値を override するため
+		// 揃える (#1921)。
+		resp["securityKeys"] = profile.TwoFactorEnabled && profile.SecurityKeysAvailable
 		// hardMutedWords / twoFactorBackupCodesStock は PackMeDetailed (AsMeDetailed)
 		// が profile から正しい shape で乗せるので override 不要 (#1258 follow-up)。
 		// clientData / room は jsonb を生のまま返すと frontend (本家) が
@@ -931,22 +937,12 @@ func (h *Handler) Me(c echo.Context) error {
 	resp["roles"] = userRoles
 	// securityKeysList: WebAuthnキーの一覧。includeSecrets 限定 (upstream
 	// UserEntityService.ts:627-639) なので native session のときだけ出す。app token
-	// では key 自体を省く (#1824、misskey-js golden で optional)。
+	// では key 自体を省く (#1824、misskey-js golden で optional)。さらに upstream は
+	// `twoFactorEnabled ? find() : []` で 2FA 有効時のみ実リストを返すため、無効時は
+	// repo を引かず [] にする (#1921)。
 	if isSecure {
-		if h.securityKeyRepo != nil {
-			if keys, err := h.securityKeyRepo.ListByUser(u.ID); err == nil && len(keys) > 0 {
-				list := make([]map[string]any, len(keys))
-				for i, k := range keys {
-					list[i] = map[string]any{
-						"id":       k.ID,
-						"name":     k.Name,
-						"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
-					}
-				}
-				resp["securityKeysList"] = list
-			} else {
-				resp["securityKeysList"] = []any{}
-			}
+		if profile != nil && profile.TwoFactorEnabled {
+			resp["securityKeysList"] = h.securityKeysList(u.ID)
 		} else {
 			resp["securityKeysList"] = []any{}
 		}
@@ -1116,6 +1112,54 @@ func (h *Handler) meDetailedWithUnread(ctx context.Context, u *model.User, profi
 	return resp
 }
 
+// appendIncludeSecrets adds the includeSecrets-gated MeDetailed fields (email /
+// emailVerified / securityKeysList) to resp when the request is a native login
+// session, mirroring upstream pack(..., {includeSecrets: isSecure}). isSecure =
+// the request's raw token equals users.token (= RequireSecure と同一判定);
+// OAuth/MiAuth の app token (token != users.token) では出さない。
+//
+// /api/i (Me) は同等の判定を inline で持つ (#1824)。/api/i/update もこの helper で
+// native session に email 系を返す (#1919)。両者が drift しないよう、変更時は
+// Me handler の isSecure ブロックと揃えること。
+func (h *Handler) appendIncludeSecrets(c echo.Context, u *model.User, profile *model.UserProfile, resp map[string]any) {
+	if u == nil || u.Token == nil || *u.Token != middleware.GetToken(c) {
+		return
+	}
+	if profile != nil {
+		resp["email"] = profile.Email
+		resp["emailVerified"] = profile.EmailVerified
+	}
+	// upstream UserEntityService.ts:627 は `twoFactorEnabled ? find() : []` なので
+	// 2FA 有効時のみ実リスト、無効時は [] (#1921)。Me handler の isSecure ブロックと
+	// 同 gate を保つこと。
+	if profile != nil && profile.TwoFactorEnabled {
+		resp["securityKeysList"] = h.securityKeysList(u.ID)
+	} else {
+		resp["securityKeysList"] = []map[string]any{}
+	}
+}
+
+// securityKeysList returns the user's WebAuthn key list for the includeSecrets
+// block, returning [] when no repo is wired or no keys exist.
+func (h *Handler) securityKeysList(userID string) []map[string]any {
+	list := []map[string]any{}
+	if h.securityKeyRepo == nil {
+		return list
+	}
+	keys, err := h.securityKeyRepo.ListByUser(userID)
+	if err != nil {
+		return list
+	}
+	for _, k := range keys {
+		list = append(list, map[string]any{
+			"id":       k.ID,
+			"name":     k.Name,
+			"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
+		})
+	}
+	return list
+}
+
 // countMuteWords returns the total number of entries in a muted-words
 // payload, flattening AND-groups. mirrors upstream Misskey TS i/update.ts
 // `checkMuteWordCount`: 各 entry が string なら 1、array なら array.length
@@ -1225,11 +1269,42 @@ func isValidFollowVisibility(v string) bool {
 }
 
 // Update handles POST /api/i/update.
+// birthdayPattern mirrors upstream birthdaySchema (User.ts:325)。
+var birthdayPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+// profileTextWithinLimit reports whether s (when present and non-empty) is
+// within max code points, mirroring upstream nameSchema/descriptionSchema/
+// locationSchema/followedMessageSchema maxLength (#1918)。nil / "" (= mk-go の
+// クリア要求) は常に許容する。長さは他の mk-go handler と同じく rune 数で数える。
+func profileTextWithinLimit(s *string, max int) bool {
+	if s == nil || *s == "" {
+		return true
+	}
+	return utf8.RuneCountInString(*s) <= max
+}
+
 func (h *Handler) Update(c echo.Context) error {
 	me := middleware.GetUser(c)
 
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil {
+		return apierr.JSONInvalidParam(c)
+	}
+
+	// upstream paramDef の maxLength / pattern / enum を検証する (#1918)。
+	// name≤50 / description≤1500 / location≤50 / followedMessage≤256、
+	// birthday は ^YYYY-MM-DD$、lang は langmap enum。空文字 ("") は mk-go の
+	// クリア要求として通すため検証は非空値のみに適用し、違反は INVALID_PARAM(400)。
+	if !profileTextWithinLimit(req.Name, 50) ||
+		!profileTextWithinLimit(req.Description, 1500) ||
+		!profileTextWithinLimit(req.Location, 50) ||
+		!profileTextWithinLimit(req.FollowedMessage, 256) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Birthday != nil && *req.Birthday != "" && !birthdayPattern.MatchString(*req.Birthday) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Lang != nil && *req.Lang != "" && !langmap.IsValid(*req.Lang) {
 		return apierr.JSONInvalidParam(c)
 	}
 
@@ -1556,7 +1631,13 @@ func (h *Handler) Update(c echo.Context) error {
 	// 側に無いと session の `$i` が更新されず stale なまま残る (#968)。
 	// unread 系は meDetailedWithUnread で実値を埋める。生 PackMeDetailed だと
 	// unreadNotificationsCount:0 等の default が `$i` を clobber する (#1258 fu)。
-	return c.JSON(http.StatusOK, h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile))
+	resp := h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile)
+	// upstream i/update は pack(..., {includeSecrets: isSecure}) を返すため native
+	// session では email / emailVerified / securityKeysList を含める (#1919)。Token
+	// 判定は middleware が確実に load する me を使い、email は更新後の最新 profile を
+	// 使う。app token (token != users.token) では出さない。
+	h.appendIncludeSecrets(c, me, bundle.Profile, resp)
+	return c.JSON(http.StatusOK, resp)
 }
 
 // avatarDecorationAPIError carries a (status, body) pair from

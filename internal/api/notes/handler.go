@@ -504,6 +504,29 @@ func validateCreateInput(req *CreateRequest, fileIDs []string) error {
 			return errors.New("text must contain at least one non-whitespace character")
 		}
 	}
+	// visibility / reactionAcceptance enum (#1930)。notes/drafts/create と共有する
+	// (#1934)。
+	return validateNoteEnums(req.Visibility, req.ReactionAcceptance)
+}
+
+// validateNoteEnums checks the visibility / reactionAcceptance enum values shared
+// by notes/create and notes/drafts/create (upstream create.ts:132,138 /
+// drafts/create.ts:161,168). An empty visibility (the service defaults it to
+// public) and a nil reactionAcceptance (no restriction) are allowed; any other
+// value outside the enum returns an error that maps to INVALID_PARAM (#1930 / #1934).
+func validateNoteEnums(visibility string, reactionAcceptance *string) error {
+	switch model.NoteVisibility(visibility) {
+	case "", model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityFollowers, model.NoteVisibilitySpecified:
+	default:
+		return errors.New("visibility must be one of public, home, followers, specified")
+	}
+	if reactionAcceptance != nil {
+		switch *reactionAcceptance {
+		case "likeOnly", "likeOnlyForRemote", "nonSensitiveOnly", "nonSensitiveOnlyForLocalLikeOnlyForRemote":
+		default:
+			return errors.New("invalid reactionAcceptance")
+		}
+	}
 	return nil
 }
 
@@ -811,6 +834,15 @@ func (h *Handler) Search(c echo.Context) error {
 		if errors.Is(err, search.ErrUnavailable) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Search of notes unavailable.", "0b44998d-77aa-4427-80d0-d2c9b8523011"))
 		}
+		return apierr.JSONInternalError(c)
+	}
+	// upstream searchNoteByLike / searchNoteByMeilisearch は generateBaseNoteFilteringQuery
+	// で suspended-user / blocked-host (匿名でも) と被block/mute/renote-mute user の note を
+	// 除外する。provider は visibility しか掛けないため、search-by-tag 等と同じく post-fetch で
+	// applyMuteBlock を適用する (#1938)。upstream search は thread-mute を掛けないため
+	// applyThreadMute は不要。
+	notes, err = h.applyMuteBlock(viewer, notes)
+	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))

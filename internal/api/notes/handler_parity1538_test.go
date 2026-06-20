@@ -48,6 +48,20 @@ func TestValidateCreateInput(t *testing.T) {
 		{"whitespace-only text-only", &CreateRequest{Text: strPtr("   \n\t")}, nil, true},
 		{"whitespace text with file ok", &CreateRequest{Text: strPtr("   ")}, []string{"f1"}, false},
 		{"whitespace text with renote ok", &CreateRequest{Text: strPtr("   "), RenoteID: strPtr("r1")}, nil, false},
+		// #1930: visibility / reactionAcceptance enum 検証。
+		{"visibility empty defaults ok", &CreateRequest{Text: strPtr("x"), Visibility: ""}, nil, false},
+		{"visibility public", &CreateRequest{Text: strPtr("x"), Visibility: "public"}, nil, false},
+		{"visibility home", &CreateRequest{Text: strPtr("x"), Visibility: "home"}, nil, false},
+		{"visibility followers", &CreateRequest{Text: strPtr("x"), Visibility: "followers"}, nil, false},
+		{"visibility specified", &CreateRequest{Text: strPtr("x"), Visibility: "specified"}, nil, false},
+		{"visibility invalid", &CreateRequest{Text: strPtr("x"), Visibility: "foo"}, nil, true},
+		{"reactionAcceptance nil ok", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: nil}, nil, false},
+		{"reactionAcceptance likeOnly", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("likeOnly")}, nil, false},
+		{"reactionAcceptance likeOnlyForRemote", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("likeOnlyForRemote")}, nil, false},
+		{"reactionAcceptance nonSensitiveOnly", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("nonSensitiveOnly")}, nil, false},
+		{"reactionAcceptance nonSensitiveOnlyForLocalLikeOnlyForRemote", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("nonSensitiveOnlyForLocalLikeOnlyForRemote")}, nil, false},
+		{"reactionAcceptance invalid", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("bogus")}, nil, true},
+		{"reactionAcceptance empty rejected", &CreateRequest{Text: strPtr("x"), ReactionAcceptance: strPtr("")}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

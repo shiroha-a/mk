@@ -47,6 +47,12 @@ type NoteVisibilityChecker interface {
 // Dispatcher is the per-Connection state holding registered channels and the
 // reverse map "topic → channel id" used to route inbound pubsub events.
 //
+// maxChannelsPerConnection は 1 WebSocket 接続が保持できる channel 数の上限
+// (upstream Connection.ts MAX_CHANNELS_PER_CONNECTION、#1943)。超過した connect
+// 要求は silent に無視する。各 channel は pubsub subscribe を伴うため resource
+// exhaustion を防ぐ。
+const maxChannelsPerConnection = 32
+
 // 1 つの Connection に対して 1 つの Dispatcher がぶら下がり、複数の Channel
 // を保持する。pubsub の global subscription 管理は Manager の Router (K-4)
 // に集約するため、Dispatcher は per-channel の subscribe/unsubscribe API を
@@ -137,6 +143,12 @@ func (d *Dispatcher) handleConnect(body json.RawMessage) {
 	if factory == nil {
 		return
 	}
+	// requireCredential channel (hybrid/home/main/notifications/antenna/drive/
+	// admin/reversi/chat 等) は anon (user==nil) 接続を弾く (upstream connectChannel
+	// の requireCredential gate、silent return で connected ack も送らない、#1944)。
+	if d.registry.RequiresCredential(req.Channel) && (d.conn == nil || d.conn.User() == nil) {
+		return
+	}
 	d.mu.Lock()
 	if _, exists := d.channels[req.ID]; exists {
 		d.mu.Unlock()
@@ -146,6 +158,13 @@ func (d *Dispatcher) handleConnect(body json.RawMessage) {
 	if d.hasShareableChannelLocked(req.Channel) {
 		d.mu.Unlock()
 		d.sendConnectedIfRequested(req.ID, req.Pong)
+		return
+	}
+	// 1 接続あたりの channel 数上限 (upstream MAX_CHANNELS_PER_CONNECTION=32、#1943)。
+	// 超過した connect 要求は silent に無視する (upstream connectChannel と同じ)。
+	// 既存 id / shareable hit は上で return 済なので、新規 channel 追加のみを制限する。
+	if len(d.channels) >= maxChannelsPerConnection {
+		d.mu.Unlock()
 		return
 	}
 	entry := &channelEntry{id: req.ID, name: req.Channel, topics: map[string]struct{}{}}
@@ -460,6 +479,13 @@ func (c *channelContext) MuteBlockSnapshot() *MuteBlockSnapshot {
 		return nil
 	}
 	return c.dispatcher.conn.MuteBlockSnapshot()
+}
+
+func (c *channelContext) UserPolicies() map[string]any {
+	if c.dispatcher.conn == nil {
+		return nil
+	}
+	return c.dispatcher.conn.Policies()
 }
 
 // --- readNotification / subNote / unsubNote ---

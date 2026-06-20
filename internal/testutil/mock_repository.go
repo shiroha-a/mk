@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,10 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+// mockLocalUsernamePattern mirrors localUsernameSchema (^\w{1,20}$) for the mock
+// SearchUsers username-shape check (#1939).
+var mockLocalUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
 // MockUserRepository is a test double for repository.UserRepository.
 type MockUserRepository struct {
@@ -185,10 +190,42 @@ func (m *MockUserRepository) IncrementFollowersCount(userID string, delta int) e
 	return nil
 }
 
-func (m *MockUserRepository) SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error) {
+// SearchUsers mirrors the production SearchUsers contract closely enough for
+// handler/service tests: display-name partial OR username (prefix for an @handle,
+// partial for a username-shaped query) OR description fallback, excluding
+// suspended users and honouring the origin filter. activeThreshold / muting /
+// updatedAt sort are NOT modelled (covered by the real-DB repository test, #1939).
+func (m *MockUserRepository) SearchUsers(query, meID string, limit, offset int, origin string) ([]*model.User, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	lq := strings.ToLower(query)
+	isUsername := strings.HasPrefix(query, "@") && !strings.Contains(query, " ") && !strings.Contains(query[1:], "@")
+	unamePrefix := strings.ToLower(strings.ReplaceAll(query, "@", ""))
+	isUsernameShape := mockLocalUsernamePattern.MatchString(query)
 	var matches []*model.User
 	for _, u := range m.Users {
-		if len(u.UsernameLower) >= len(query) && u.UsernameLower[:len(query)] == query {
+		if u.IsSuspended {
+			continue
+		}
+		if origin == "local" && u.Host != nil {
+			continue
+		}
+		if origin == "remote" && u.Host == nil {
+			continue
+		}
+		match := u.Name != nil && strings.Contains(strings.ToLower(*u.Name), lq)
+		if !match && isUsername {
+			match = strings.HasPrefix(u.UsernameLower, unamePrefix)
+		} else if !match && isUsernameShape {
+			match = strings.Contains(u.UsernameLower, lq)
+		}
+		if !match {
+			if p, ok := m.Profiles[u.ID]; ok && p != nil && p.Description != nil && strings.Contains(strings.ToLower(*p.Description), lq) {
+				match = true
+			}
+		}
+		if match {
 			matches = append(matches, u)
 		}
 	}
@@ -1051,10 +1088,13 @@ func (m *MockNoteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.
 		if !strings.Contains(strings.ToLower(*n.Text), q) {
 			return false
 		}
-		if f.UserID != "" && n.UserID != f.UserID {
-			return false
-		}
-		if f.ChannelID != "" {
+		// upstream searchNoteByLike は userId 優先の排他 (userId があれば channelId は
+		// 無視)。real repo (SearchByFilter) の else-if と挙動を揃える (#1938)。
+		if f.UserID != "" {
+			if n.UserID != f.UserID {
+				return false
+			}
+		} else if f.ChannelID != "" {
 			if n.ChannelID == nil || *n.ChannelID != f.ChannelID {
 				return false
 			}

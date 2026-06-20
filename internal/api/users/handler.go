@@ -627,12 +627,17 @@ func (h *Handler) Search(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
-	users, err := h.userService.Search(req.Query, req.Limit, req.Offset, req.Origin)
+	// meID を渡して muting 除外を効かせる (upstream UserSearchService、#1939)。
+	viewer := middleware.GetUser(c)
+	meID := ""
+	if viewer != nil {
+		meID = viewer.ID
+	}
+	users, err := h.userService.Search(req.Query, meID, req.Limit, req.Offset, req.Origin)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
 
-	viewer := middleware.GetUser(c)
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 
 	resolver := entity.NewInstanceResolver(h.instanceLookup(), users...)

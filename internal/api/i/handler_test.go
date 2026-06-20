@@ -807,6 +807,178 @@ func TestUpdate_AvatarID_NullClearAllowedRegardlessOfPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "null clear は gate 対象外")
 }
 
+// --- i/update paramDef validation (#1918) ---
+
+func updateUser(repo *testutil.MockUserRepository) *model.User {
+	u := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = u
+	return u
+}
+
+func TestUpdate_NameTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"`+strings.Repeat("a", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
+func TestUpdate_DescriptionTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"description":"`+strings.Repeat("d", 1501)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_FollowedMessageTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"followedMessage":"`+strings.Repeat("m", 257)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_LocationTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"location":"`+strings.Repeat("l", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 境界: 50 字ちょうどは通る、51 字は弾く (#1918)。
+func TestUpdate_NameBoundary(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"`+strings.Repeat("a", 50)+`"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "50 字ちょうどは valid")
+	rec = post(h.Update, `{"name":"`+strings.Repeat("a", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "51 字は INVALID_PARAM")
+}
+
+func TestUpdate_BirthdayBadPattern(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"birthday":"1999/01/01"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_BirthdayValid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"birthday":"1999-01-01"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestUpdate_LangInvalid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"lang":"klingon"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_LangValid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"lang":"ja-JP"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// 空文字 / null はクリア要求として検証対象外 (#1918)。
+func TestUpdate_EmptyValuesPassValidation(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"","description":"","birthday":"","lang":""}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// updateWithToken は i/update を UserContextKey + TokenContextKey 付きで叩く。
+func updateWithToken(h *Handler, body string, user *model.User, token string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i/update", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	c.Set(string(middleware.TokenContextKey), token)
+	_ = h.Update(c)
+	return rec
+}
+
+// #1919: native session (request token == users.token) で i/update を呼ぶと
+// email / emailVerified / securityKeysList を含む (includeSecrets)。
+func TestUpdate_NativeSessionIncludesSecrets(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	email := "secret@example.com"
+	// 2FA 有効 + key 登録済 → securityKeysList が format されて返る (#1921 gate を通る)。
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, TwoFactorEnabled: true, SecurityKeysAvailable: true, Fields: datatypes.JSON([]byte("[]"))}
+	skRepo := newInMemSKRepo()
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "key1", UserID: "user1", Name: "yubikey", PublicKey: "pk"}))
+	h.SetWebAuthn(nil, skRepo)
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, nativeTok)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "secret@example.com", resp["email"])
+	assert.Equal(t, true, resp["emailVerified"])
+	list, ok := resp["securityKeysList"].([]any)
+	require.True(t, ok, "native session は securityKeysList を array で含む")
+	require.Len(t, list, 1)
+	key := list[0].(map[string]any)
+	assert.Equal(t, "key1", key["id"])
+	assert.Equal(t, "yubikey", key["name"])
+	assert.Contains(t, key, "lastUsed")
+	// securityKeys bool も 2FA 有効 + key 有りなので true。
+	assert.Equal(t, true, resp["securityKeys"])
+}
+
+// #1921: native session でも 2FA 無効なら securityKeysList は [] (repo を引かない)、
+// securityKeys bool も SecurityKeysAvailable に関わらず false。
+func TestUpdate_SecurityKeysGatedByTwoFactorDisabled(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	// 2FA 無効だが key 登録 + SecurityKeysAvailable=true (stale flag) の状況。
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", TwoFactorEnabled: false, SecurityKeysAvailable: true, Fields: datatypes.JSON([]byte("[]"))}
+	skRepo := newInMemSKRepo()
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "key1", UserID: "user1", Name: "yubikey", PublicKey: "pk"}))
+	h.SetWebAuthn(nil, skRepo)
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, nativeTok)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp["securityKeysList"].([]any)
+	require.True(t, ok, "securityKeysList は存在する (includeSecrets)")
+	assert.Empty(t, list, "2FA 無効なら securityKeysList は [] (key があっても)")
+	assert.Equal(t, false, resp["securityKeys"], "2FA 無効なら securityKeys は false")
+}
+
+// #1919: app access token (request token != users.token) で i/update を呼ぶと
+// email / emailVerified / securityKeysList を出さない (over-leak 防止、Me と整合)。
+func TestUpdate_AppTokenOmitsSecrets(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	email := "secret@example.com"
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, "app-access-token-xyz")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasEmail := resp["email"]
+	assert.False(t, hasEmail, "app token に email を漏らさない")
+	_, hasEmailVerified := resp["emailVerified"]
+	assert.False(t, hasEmailVerified)
+	_, hasSKL := resp["securityKeysList"]
+	assert.False(t, hasSKL, "app token に securityKeysList を漏らさない")
+}
+
 func TestUpdate_BannerID_RestrictedByRole(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}

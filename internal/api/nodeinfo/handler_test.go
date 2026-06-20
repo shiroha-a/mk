@@ -31,6 +31,9 @@ func TestVersion2_1(t *testing.T) {
 	sw := resp["software"].(map[string]any)
 	assert.Equal(t, "mk-go", sw["name"])
 	assert.Equal(t, config.MkGoVersion, sw["version"])
+	// #1925: 2.1 は homepage=repository=softwareRepository。
+	assert.Equal(t, softwareRepository, sw["homepage"])
+	assert.Equal(t, softwareRepository, sw["repository"])
 }
 
 // admin で設定した Meta.Name / Description がnodeinfo.metadata に反映される
@@ -85,6 +88,8 @@ func TestVersion2_0(t *testing.T) {
 	assert.Equal(t, "mk-go", sw["name"])
 	_, hasRepo := sw["repository"]
 	assert.False(t, hasRepo, "schema 2.0 は software.repository を含めない")
+	// #1925: 2.0 は repository を delete するが homepage は残す。
+	assert.Equal(t, softwareRepository, sw["homepage"], "schema 2.0 も software.homepage を含む")
 
 	// 対照: 2.1 は repository を含む。
 	rec21 := httptest.NewRecorder()

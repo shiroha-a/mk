@@ -117,19 +117,21 @@ func (s *QueryService) ListRenotes(viewer *model.User, noteID, untilID, sinceID 
 }
 
 // ListReplies returns replies to the given noteID after filtering for visibility.
+//
+// upstream replies.ts は親 note の存在/可視性チェックを行わず、replyId=noteId の
+// visibility-filtered query を実行し空なら 200 [] を返す (getNote を呼ばない、#1929)。
+// reply 自体は repository が viewer 可視性で filter するため、親が不在/不可視でも
+// leak は増えない。renotes.ts は getNote で 404 にするため ListRenotes は requireVisible
+// を維持する点と非対称 (upstream の各 endpoint 仕様に合わせる)。
 func (s *QueryService) ListReplies(viewer *model.User, noteID, untilID, sinceID string, limit int) ([]*model.Note, error) {
-	if _, err := s.requireVisible(viewer, noteID); err != nil {
-		return nil, err
-	}
 	// visibility は repository が LIMIT 前に SQL push-down する (#1500)。
 	return s.noteRepo.ListRepliesOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }
 
 // ListChildren returns notes that reply to or quote the given noteID.
+//
+// upstream children.ts も replies.ts 同様に親 note チェックを行わず空なら 200 [] (#1929)。
 func (s *QueryService) ListChildren(viewer *model.User, noteID, untilID, sinceID string, limit int) ([]*model.Note, error) {
-	if _, err := s.requireVisible(viewer, noteID); err != nil {
-		return nil, err
-	}
 	// visibility は repository が LIMIT 前に SQL push-down する (#1500)。
 	return s.noteRepo.ListChildrenOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }

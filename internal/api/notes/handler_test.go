@@ -572,6 +572,36 @@ func TestCreate_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// #1930: 不正な visibility enum は 400 INVALID_PARAM。
+func TestCreate_InvalidVisibility(t *testing.T) {
+	h, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "testuser"}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes/create", strings.NewReader(`{"text":"x","visibility":"foo"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	setAuthUser(c, user)
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
+// #1930: 不正な reactionAcceptance enum は 400 INVALID_PARAM。
+func TestCreate_InvalidReactionAcceptance(t *testing.T) {
+	h, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "testuser"}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes/create", strings.NewReader(`{"text":"x","reactionAcceptance":"bogus"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	setAuthUser(c, user)
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
 func TestCreate_WithVisibleUserIDs(t *testing.T) {
 	h, noteRepo := newTestHandler(t)
 

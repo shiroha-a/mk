@@ -137,6 +137,48 @@ func TestManager_AcceptInvokesMuteBlockLookup(t *testing.T) {
 	require.Eventually(t, func() bool { return lookup.called() == "alice" }, time.Second, 10*time.Millisecond)
 }
 
+// #1942: Accept は policy provider を接続確立時に呼び、Connection に policies を attach する。
+type stubPolicyProvider struct {
+	mu         sync.Mutex
+	calledWith string
+}
+
+func (s *stubPolicyProvider) GetUserPolicies(userID string) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calledWith = userID
+	return map[string]any{"ltlAvailable": false}
+}
+func (s *stubPolicyProvider) called() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calledWith
+}
+
+func TestManager_AcceptInvokesPolicyProvider(t *testing.T) {
+	m := NewManager(nil, nil)
+	provider := &stubPolicyProvider{}
+	m.SetPolicyProvider(provider)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		go m.Accept(conn, &model.User{ID: "alice"})
+	}))
+	defer srv.Close()
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	dialer := websocket.Dialer{HandshakeTimeout: time.Second}
+	conn, _, err := dialer.Dial(url, nil)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	require.Eventually(t, func() bool { return provider.called() == "alice" }, time.Second, 10*time.Millisecond)
+}
+
 // TestManager_AcceptDispatchesConnectMessages verifies that Accept wires the
 // Dispatcher into the Connection so that client `connect` envelopes reach the
 // registered Channel factory and the topic is registered on the bus.

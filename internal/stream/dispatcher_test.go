@@ -3,6 +3,7 @@ package stream
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +102,48 @@ func TestRegistry_RegisterAndLookup(t *testing.T) {
 	r.Register("foo", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
 	assert.NotNil(t, r.Lookup("foo"))
 	assert.Nil(t, r.Lookup("missing"))
+}
+
+// #1944: RegisterCredentialed marks a channel as requiring auth; Register does not.
+func TestRegistry_Credentialed(t *testing.T) {
+	r := NewRegistry()
+	r.Register("anon", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	r.RegisterCredentialed("authed", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	assert.False(t, r.RequiresCredential("anon"))
+	assert.True(t, r.RequiresCredential("authed"))
+	assert.False(t, r.RequiresCredential("unknown"))
+	assert.NotNil(t, r.Lookup("authed"), "RegisterCredentialed も factory を登録する")
+}
+
+// #1944: anon (user==nil) は requireCredential channel に接続できず、認証済みは接続できる。
+// non-credentialed channel は anon も接続できる。
+func TestDispatcher_RequireCredential(t *testing.T) {
+	newReg := func() *Registry {
+		r := NewRegistry()
+		r.RegisterCredentialed("authed", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+		r.Register("open", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+		return r
+	}
+	hasChannel := func(d *Dispatcher, id string) bool {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		_, ok := d.channels[id]
+		return ok
+	}
+
+	// anon → credentialed: 拒否。
+	anon := NewDispatcher(NewConnection("c1", nil, newFakeConn()), newReg(), newStubBus())
+	anon.HandleClientMessage("connect", json.RawMessage(`{"id":"a","channel":"authed"}`))
+	assert.False(t, hasChannel(anon, "a"), "anon は requireCredential channel に接続できない")
+
+	// anon → non-credentialed: 許可。
+	anon.HandleClientMessage("connect", json.RawMessage(`{"id":"o","channel":"open"}`))
+	assert.True(t, hasChannel(anon, "o"), "anon でも非 credentialed channel は接続できる")
+
+	// authed → credentialed: 許可。
+	authed := NewDispatcher(NewConnection("c2", &model.User{ID: "alice"}, newFakeConn()), newReg(), newStubBus())
+	authed.HandleClientMessage("connect", json.RawMessage(`{"id":"b","channel":"authed"}`))
+	assert.True(t, hasChannel(authed, "b"), "認証済みは requireCredential channel に接続できる")
 }
 
 func TestDispatcher_HandleConnect(t *testing.T) {
@@ -482,6 +525,32 @@ func TestDispatcher_NonShareableChannel_AllowsMultiple(t *testing.T) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	assert.Len(t, d.channels, 2)
+}
+
+// #1943: 1 接続あたり maxChannelsPerConnection(32) を超えた connect は silent に無視する。
+func TestDispatcher_MaxChannelsPerConnection(t *testing.T) {
+	bus := newStubBus()
+	registry := NewRegistry()
+	registry.Register("test", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	conn := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	d := NewDispatcher(conn, registry, bus)
+
+	for i := 0; i < maxChannelsPerConnection; i++ {
+		d.HandleClientMessage("connect", json.RawMessage(fmt.Sprintf(`{"id":"ch%d","channel":"test"}`, i)))
+	}
+	d.mu.RLock()
+	n := len(d.channels)
+	d.mu.RUnlock()
+	require.Equal(t, maxChannelsPerConnection, n, "32 個までは登録できる")
+
+	// 33 個目は無視される (silent、登録されない)。
+	d.HandleClientMessage("connect", json.RawMessage(`{"id":"overflow","channel":"test"}`))
+	d.mu.RLock()
+	_, exists := d.channels["overflow"]
+	n = len(d.channels)
+	d.mu.RUnlock()
+	assert.Equal(t, maxChannelsPerConnection, n, "上限超過の connect は無視")
+	assert.False(t, exists, "overflow channel は登録されない")
 }
 
 // --- OAuth2 scope check (PermittedChannel) ---
@@ -1108,6 +1177,26 @@ func TestChannelContext_MuteBlockSnapshot_NilConn(t *testing.T) {
 	d := &Dispatcher{}
 	ctx := &channelContext{dispatcher: d, id: "ch1"}
 	if got := ctx.MuteBlockSnapshot(); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+}
+
+// #1942: channelContext.UserPolicies forwards from Connection.
+func TestChannelContext_UserPolicies(t *testing.T) {
+	conn := NewConnection("c1", nil, newFakeConn())
+	conn.SetPolicies(map[string]any{"ltlAvailable": false, "gtlAvailable": true})
+	d := NewDispatcher(conn, nil, newStubBus())
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	got := ctx.UserPolicies()
+	if got == nil || got["ltlAvailable"] != false || got["gtlAvailable"] != true {
+		t.Fatalf("UserPolicies = %v", got)
+	}
+}
+
+func TestChannelContext_UserPolicies_NilConn(t *testing.T) {
+	d := &Dispatcher{}
+	ctx := &channelContext{dispatcher: d, id: "ch1"}
+	if got := ctx.UserPolicies(); got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }

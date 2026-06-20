@@ -1204,6 +1204,16 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 			note.ReplyID = &replyTarget.ID
 			note.ReplyUserID = &replyTarget.UserID
 			note.ReplyUserHost = replyTarget.UserHost
+			// thread-muting が深い thread でも効くよう threadId を thread root に
+			// 揃える (local create path #1928 と同 logic、upstream NoteCreateService:
+			// 623-627: threadId = data.reply.threadId ?? data.reply.id)。AP 経由で
+			// 取り込んだ remote reply にも適用しないと remote thread の deep muting が
+			// 効かない (#1931)。
+			threadID := replyTarget.ID
+			if replyTarget.ThreadID != nil && *replyTarget.ThreadID != "" {
+				threadID = *replyTarget.ThreadID
+			}
+			note.ThreadID = &threadID
 		}
 	}
 	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が

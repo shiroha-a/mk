@@ -25,6 +25,7 @@ type stubContext struct {
 	followingSnap map[string]bool
 	followingUpd  []followingUpdate
 	muteBlockSnap *stream.MuteBlockSnapshot
+	policies      map[string]any
 }
 
 // followingUpdate records a call to UpdateFollowingSnapshot for assertions.
@@ -57,6 +58,7 @@ func (s *stubContext) FollowingSnapshot() map[string]bool { return s.followingSn
 func (s *stubContext) MuteBlockSnapshot() *stream.MuteBlockSnapshot {
 	return s.muteBlockSnap
 }
+func (s *stubContext) UserPolicies() map[string]any { return s.policies }
 func (s *stubContext) UpdateFollowingSnapshot(followeeID string, following bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,6 +124,80 @@ func TestLocalTimeline_Lifecycle(t *testing.T) {
 	ch.OnClientMessage("ignored", json.RawMessage(`{}`))
 	ch.Dispose()
 	assert.Equal(t, []string{"localTimeline"}, ctx.unsubs)
+}
+
+// #1942 F1: ltlAvailable=false の connection は localTimeline を subscribe しない
+// (= 接続は成立するが note が流れない、upstream init() return 相当)。nil policies
+// (provider 未配線) は fail-open で subscribe する (TestLocalTimeline_Lifecycle で担保)。
+func TestLocalTimeline_PolicyGate(t *testing.T) {
+	disabled := newCtx(&model.User{ID: "v"})
+	disabled.policies = map[string]any{"ltlAvailable": false}
+	NewLocalTimeline(disabled).Init(nil)
+	assert.Empty(t, disabled.subs, "ltlAvailable=false は subscribe しない")
+
+	enabled := newCtx(&model.User{ID: "v"})
+	enabled.policies = map[string]any{"ltlAvailable": true}
+	NewLocalTimeline(enabled).Init(nil)
+	assert.Equal(t, []string{"localTimeline"}, enabled.subs, "ltlAvailable=true は subscribe する")
+}
+
+// #1942 F1: gtlAvailable gate。
+func TestGlobalTimeline_PolicyGate(t *testing.T) {
+	disabled := newCtx(&model.User{ID: "v"})
+	disabled.policies = map[string]any{"gtlAvailable": false}
+	NewGlobalTimeline(disabled).Init(nil)
+	assert.Empty(t, disabled.subs)
+
+	enabled := newCtx(&model.User{ID: "v"})
+	enabled.policies = map[string]any{"gtlAvailable": true}
+	NewGlobalTimeline(enabled).Init(nil)
+	assert.Equal(t, []string{"globalTimeline"}, enabled.subs)
+}
+
+// #1942 F1: hybrid は ltlAvailable=false なら local も home も subscribe しない。
+func TestHybridTimeline_PolicyGate(t *testing.T) {
+	disabled := newCtx(&model.User{ID: "v"})
+	disabled.policies = map[string]any{"ltlAvailable": false}
+	NewHybridTimeline(disabled).Init(nil)
+	assert.Empty(t, disabled.subs, "ltlAvailable=false は local も home も subscribe しない")
+}
+
+// #1942 F2: anon viewer + note/renote/reply 著者 requireSigninToViewContents の note は
+// 丸ごと drop する (blank shell を送らない)。
+func TestLocalTimeline_AnonRequireSigninDrop(t *testing.T) {
+	anon := newCtx(nil) // viewerID ""
+	ch := NewLocalTimeline(anon)
+	ch.Init(nil)
+	ch.OnRedisEvent([]byte(`{"id":"n1","user":{"requireSigninToViewContents":true}}`))
+	assert.Empty(t, anon.sentType, "anon に requireSignin note を送らない")
+	ch.OnRedisEvent([]byte(`{"id":"n2","user":{"requireSigninToViewContents":false}}`))
+	assert.Len(t, anon.sentType, 1, "通常 note は通す")
+
+	// authed viewer には requireSignin note も流れる (gate は anon 限定)。
+	authed := newCtx(&model.User{ID: "v"})
+	ca := NewLocalTimeline(authed)
+	ca.Init(nil)
+	ca.OnRedisEvent([]byte(`{"id":"n3","user":{"requireSigninToViewContents":true}}`))
+	assert.Len(t, authed.sentType, 1, "authed viewer には流れる")
+}
+
+// #1942 F2: GTL は reply 著者の requireSignin も anon に対して drop する。
+func TestGlobalTimeline_AnonRequireSigninDrop(t *testing.T) {
+	anon := newCtx(nil)
+	ch := NewGlobalTimeline(anon)
+	ch.Init(nil)
+	ch.OnRedisEvent([]byte(`{"id":"n1","reply":{"user":{"requireSigninToViewContents":true}}}`))
+	assert.Empty(t, anon.sentType, "anon に reply 著者 requireSignin の note を送らない")
+}
+
+// #1942 F2: mk-go は anon が hybrid を購読できる (upstream は requireCredential)
+// ため hybrid も anon に requireSignin note を blank shell で送らず drop する。
+func TestHybridTimeline_AnonRequireSigninDrop(t *testing.T) {
+	anon := newCtx(nil)
+	ch := NewHybridTimeline(anon)
+	ch.Init(nil)
+	ch.OnRedisEvent([]byte(`{"id":"n1","user":{"requireSigninToViewContents":true}}`))
+	assert.Empty(t, anon.sentType, "anon hybrid に requireSignin note を送らない")
 }
 
 func TestGlobalTimeline_Lifecycle(t *testing.T) {

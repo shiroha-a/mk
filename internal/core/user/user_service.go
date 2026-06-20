@@ -316,15 +316,20 @@ func (s *Service) ListRecommendations(viewerID string, activeSince time.Time, li
 //   - "local"    → host IS NULL のみ
 //   - "remote"   → host IS NOT NULL のみ
 //   - "combined" / 空 → filter なし (default)
-func (s *Service) Search(query string, limit, offset int, origin string) ([]*model.User, error) {
-	q := strings.TrimSpace(strings.TrimPrefix(query, "@"))
-	if q == "" {
+//
+// meID is the requesting user's ID ("" for anonymous), used to exclude muted
+// users from the results (upstream UserSearchService、#1939)。
+func (s *Service) Search(query, meID string, limit, offset int, origin string) ([]*model.User, error) {
+	// raw query を repo に渡す (name ILIKE / @handle 判定 / username 部分一致は
+	// repo 側で行うため、@ 除去・lowercase はここで行わない、#1939)。
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 10
 	}
-	return s.userRepo.SearchByUsername(strings.ToLower(q), limit, offset, origin)
+	return s.userRepo.SearchUsers(query, meID, limit, offset, origin)
 }
 
 // SearchByUsernameAndHost narrows username prefix matches with a host filter.

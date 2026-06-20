@@ -541,10 +541,12 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 	// 非空なら viewer 自身の followers/specified/visibleUserIds note も含む。
 	// core/note.CanSeeNote と同条件 (mentions / search-by-tag と同じ helper)。
 	q = applyViewerVisibility(q, f.ViewerID)
+	// upstream searchNoteByLike は userId 優先の排他: userId があれば channelId は
+	// 無視する (`if (opts.userId) {} else if (opts.channelId) {}`、SearchService.ts:208-212、
+	// #1938)。両指定時に mk-go が両方 AND していた divergence を解消する。
 	if f.UserID != "" {
 		q = q.Where("\"userId\" = ?", f.UserID)
-	}
-	if f.ChannelID != "" {
+	} else if f.ChannelID != "" {
 		q = q.Where("\"channelId\" = ?", f.ChannelID)
 	}
 	if f.Host != "" {

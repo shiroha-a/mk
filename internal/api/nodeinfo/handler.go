@@ -21,6 +21,12 @@ const maxNoteTextLength = 3000
 // `meta.themeColor ?? '#86b300'` fallback。
 const defaultThemeColor = "#86b300"
 
+// softwareRepository is the mk-go source repository URL advertised in the
+// nodeinfo software block. Upstream advertises homepage/repository in the same
+// object (2.0: homepage only; 2.1: homepage=repository=repositoryUrl); mk-go has
+// no separate hub, so both point at the repository (#1925)。
+const softwareRepository = "https://github.com/shiroha-a/mk"
+
 // Handler handles nodeinfo endpoints.
 type Handler struct {
 	cfg          *config.Config
@@ -212,13 +218,17 @@ func (h *Handler) buildDocument(version string) map[string]any {
 		}
 	}
 
+	// upstream NodeinfoServerService: software は name/version/homepage/repository
+	// を持ち、2.0 は repository を delete (homepage は残す)、2.1 は homepage=repository。
+	// mk-go は homepage=repository=softwareRepository で両 version に homepage を出す (#1925)。
 	software := map[string]any{
-		"name":    "mk-go",
-		"version": config.MkGoVersion,
+		"name":     "mk-go",
+		"version":  config.MkGoVersion,
+		"homepage": softwareRepository,
 	}
 	// schema 2.0 には software.repository が無い (upstream は 2.0 で delete する)。
 	if version == "2.1" {
-		software["repository"] = "https://github.com/shiroha-a/mk"
+		software["repository"] = softwareRepository
 	}
 
 	return map[string]any{
