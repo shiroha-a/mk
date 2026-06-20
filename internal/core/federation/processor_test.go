@@ -1715,6 +1715,69 @@ func TestProcess_CreateReplyPassesReplyTarget(t *testing.T) {
 	assert.Equal(t, "local-parent", calls[0].replyTarget.ID)
 }
 
+// #1931: AP 経由で取り込んだ reply note も threadId を thread root に揃える
+// (local create path #1928 と同 logic)。これが無いと remote thread の deep muting が効かない。
+func TestProcess_CreateReplySetsThreadID(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	localURI := "https://example.com/notes/root-parent"
+	// root-parent は threadId 無し (= thread root)。
+	noteRepo.Notes["root-parent"] = &model.Note{
+		ID: "root-parent", UserID: "bob", URI: &localURI, Visibility: model.NoteVisibilityPublic,
+	}
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/notes/reply1",
+			"attributedTo": "https://remote.example/users/alice",
+			"inReplyTo": "https://example.com/notes/root-parent",
+			"content": "remote reply",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Eventually(t, func() bool {
+		n, err := noteRepo.FindByURI("https://remote.example/notes/reply1")
+		return err == nil && n != nil
+	}, time.Second, 10*time.Millisecond)
+	created, err := noteRepo.FindByURI("https://remote.example/notes/reply1")
+	require.NoError(t, err)
+	require.NotNil(t, created.ThreadID)
+	assert.Equal(t, "root-parent", *created.ThreadID, "AP reply の threadId は root.id を指す")
+}
+
+// #1931: 深い AP reply (親が既に threadId を持つ) は root threadId を継承する。
+func TestProcess_CreateReplyInheritsThreadID(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	rootThread := "root"
+	localURI := "https://example.com/notes/mid-parent"
+	noteRepo.Notes["mid-parent"] = &model.Note{
+		ID: "mid-parent", UserID: "bob", URI: &localURI, Visibility: model.NoteVisibilityPublic, ThreadID: &rootThread,
+	}
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/notes/reply2",
+			"attributedTo": "https://remote.example/users/alice",
+			"inReplyTo": "https://example.com/notes/mid-parent",
+			"content": "deep remote reply",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Eventually(t, func() bool {
+		n, err := noteRepo.FindByURI("https://remote.example/notes/reply2")
+		return err == nil && n != nil
+	}, time.Second, 10*time.Millisecond)
+	created, err := noteRepo.FindByURI("https://remote.example/notes/reply2")
+	require.NoError(t, err)
+	require.NotNil(t, created.ThreadID)
+	assert.Equal(t, "root", *created.ThreadID, "深い AP reply は root threadId を継承")
+}
+
 func TestProcess_CreateWithoutNotificationHook(t *testing.T) {
 	// notificationHook が nil でも Create は panic しない。
 	p, _, _, noteRepo := newProcessor(t, aliceActor)
