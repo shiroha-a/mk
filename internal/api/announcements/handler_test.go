@@ -66,6 +66,40 @@ func java_time() time.Time {
 	return time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
 }
 
+// #1955: 匿名 (requireCredential:false) の List では isRead key を省略する。
+func TestList_AnonymousOmitsIsRead(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "Hi", Text: "Hello", IsActive: true}
+	rec := doPost(h.List, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	_, hasIsRead := resp[0]["isRead"]
+	assert.False(t, hasIsRead, "匿名 List には isRead key を出さない (#1955)")
+}
+
+// #1955: authed List は item ごとに実 read 状態を isRead に反映する。
+func TestList_AuthenticatedReflectsReadState(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a_read"] = &model.Announcement{ID: "a_read", Title: "R", Text: "read", IsActive: true}
+	repo.Items["a_unread"] = &model.Announcement{ID: "a_unread", Title: "U", Text: "unread", IsActive: true}
+	require.NoError(t, repo.MarkRead(&model.AnnouncementRead{UserID: "u1", AnnouncementID: "a_read"}))
+
+	rec := doPost(h.List, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := map[string]map[string]any{}
+	for _, it := range resp {
+		byID[it["id"].(string)] = it
+	}
+	require.Contains(t, byID, "a_read")
+	require.Contains(t, byID, "a_unread")
+	assert.Equal(t, true, byID["a_read"]["isRead"], "既読 item は isRead:true (#1955)")
+	assert.Equal(t, false, byID["a_unread"]["isRead"], "未読 item は isRead:false (#1955)")
+}
+
 func TestList_InvalidJSON(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.List, `invalid`, nil)

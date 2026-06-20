@@ -36,6 +36,45 @@ func TestShow_Success(t *testing.T) {
 	shapetest.Assert(t, "Announcement", resp) // L3 (#1318)
 }
 
+// #1955: 匿名 caller には isRead key を出さない (upstream pack() は me==null で
+// isRead を undefined にする)。
+func TestShow_AnonymousOmitsIsRead(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "hi", Text: "hello", IsActive: true}
+	rec := doPost(h.Show, `{"announcementId":"a1"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasIsRead := resp["isRead"]
+	assert.False(t, hasIsRead, "匿名には isRead key を出さない (#1955)")
+}
+
+// #1955: 既読のログインユーザーには isRead:true を返す (旧実装は常に false)。
+func TestShow_AuthenticatedReflectsReadState(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "hi", Text: "hello", IsActive: true}
+	require.NoError(t, repo.MarkRead(&model.AnnouncementRead{UserID: "u1", AnnouncementID: "a1"}))
+
+	rec := doPost(h.Show, `{"announcementId":"a1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isRead"], "既読ユーザーには isRead:true (#1955)")
+}
+
+// 未読のログインユーザーには isRead:false。
+func TestShow_AuthenticatedUnreadIsReadFalse(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "hi", Text: "hello", IsActive: true}
+
+	rec := doPost(h.Show, `{"announcementId":"a1"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["isRead"], "未読ユーザーには isRead:false (#1955)")
+}
+
 // upstream Misskey TS 2026.5.4 fix: userId-targeted announcement に対して
 // 非ログイン user (me == nil) は 404 を返す。旧 mk-go では Show 経路に権限
 // check が一切なく、admin が特定 user に向けた通知が漏れる drop-in regression
@@ -70,4 +109,18 @@ func TestShow_UserTargeted_OwnerReturnsOK(t *testing.T) {
 	alice := &model.User{ID: "alice"}
 	rec := doPost(h.Show, `{"announcementId":"a1"}`, alice)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1955: user-targeted announcement の owner でも isRead が read 状態を反映する。
+func TestShow_UserTargeted_OwnerReflectsReadState(t *testing.T) {
+	h, repo := newTestHandler(t)
+	uid := "alice"
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "private", Text: "to alice", IsActive: true, UserID: &uid}
+	require.NoError(t, repo.MarkRead(&model.AnnouncementRead{UserID: "alice", AnnouncementID: "a1"}))
+
+	rec := doPost(h.Show, `{"announcementId":"a1"}`, &model.User{ID: "alice"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isRead"], "owner-targeted でも既読は isRead:true (#1955)")
 }

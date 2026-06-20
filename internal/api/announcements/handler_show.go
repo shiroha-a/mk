@@ -34,11 +34,21 @@ func (h *Handler) Show(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 	}
+	me := middleware.GetUser(c)
 	if a.UserID != nil {
-		me := middleware.GetUser(c)
 		if me == nil || *a.UserID != me.ID {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 		}
 	}
-	return c.JSON(http.StatusOK, packAnnouncement(a, h.idGen))
+	item := packAnnouncement(a, h.idGen)
+	// upstream getAnnouncement は announcement_reads を引いて isRead=(read!==null)
+	// を pack する。匿名では isRead を undefined にし key を省略する。mk-go は read
+	// 状態を見ずに常に false を返していた (#1955)。
+	if me != nil {
+		read, _ := h.repo.IsRead(me.ID, a.ID)
+		item["isRead"] = read
+	} else {
+		delete(item, "isRead")
+	}
+	return c.JSON(http.StatusOK, item)
 }

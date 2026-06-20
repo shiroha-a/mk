@@ -139,6 +139,11 @@ func (h *Handler) List(c echo.Context) error {
 		if user != nil {
 			read, _ := h.repo.IsRead(user.ID, a.ID)
 			item["isRead"] = read
+		} else {
+			// 匿名 (requireCredential:false) では upstream pack() が isRead を
+			// undefined にし key ごと省略する。mk-go の packAnnouncement は常に
+			// false を入れるため、ここで削除して shape を揃える (#1955)。
+			delete(item, "isRead")
 		}
 		result = append(result, item)
 	}
