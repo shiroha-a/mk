@@ -177,11 +177,27 @@ func TestReplies_OK(t *testing.T) {
 	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
-func TestReplies_NotFound(t *testing.T) {
+// #1929: 親 note が存在しない場合、upstream replies.ts は親チェックを行わず
+// 200 空配列を返す (404 NO_SUCH_NOTE ではない)。
+func TestReplies_ParentMissingReturnsEmpty(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"ghost"}`)
 	require.NoError(t, h.Replies(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp)
+}
+
+// #1929: children も親不在で 200 空配列。
+func TestChildren_ParentMissingReturnsEmpty(t *testing.T) {
+	h, _ := newQueryHandler(t)
+	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"ghost"}`)
+	require.NoError(t, h.Children(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp)
 }
 
 func TestChildren_OK(t *testing.T) {

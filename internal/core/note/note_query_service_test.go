@@ -125,10 +125,13 @@ func TestQueryService_ListReplies(t *testing.T) {
 	assert.Len(t, out, 1)
 }
 
+// #1929: 親 note が存在しない/不可視でも 404 ではなく空リストを返す
+// (upstream replies.ts は親チェックを行わない)。
 func TestQueryService_ListReplies_ParentMissing(t *testing.T) {
 	svc, _, _ := newQueryService(t)
-	_, err := svc.ListReplies(nil, "ghost", "", "", 10)
-	require.ErrorIs(t, err, note.ErrNoteNotFound)
+	out, err := svc.ListReplies(nil, "ghost", "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out)
 }
 
 func TestQueryService_ListChildren(t *testing.T) {
@@ -167,10 +170,30 @@ func TestQueryService_ListChildren_PureRenoteExcluded(t *testing.T) {
 	assert.NotContains(t, got, "pure")
 }
 
+// #1929: children も親不在/不可視で 404 ではなく空リスト (upstream children.ts)。
 func TestQueryService_ListChildren_ParentMissing(t *testing.T) {
 	svc, _, _ := newQueryService(t)
-	_, err := svc.ListChildren(nil, "ghost", "", "", 10)
-	require.ErrorIs(t, err, note.ErrNoteNotFound)
+	out, err := svc.ListChildren(nil, "ghost", "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
+// #1929: 親が viewer に不可視 (followers-only) でも 404 にせず、reply 自体の
+// 可視性で filter した結果を返す (upstream は親チェックを行わない)。public reply は
+// 返り、followers-only reply は匿名 viewer から filter される (= leak しない)。
+func TestQueryService_ListReplies_InvisibleParentStillFiltersReplies(t *testing.T) {
+	svc, noteRepo, _ := newQueryService(t)
+	// 親 P は followers-only (匿名 viewer には不可視)。
+	noteRepo.Notes["P"] = &model.Note{ID: "P", UserID: "a", Visibility: model.NoteVisibilityFollowers}
+	pid := "P"
+	noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "b", Visibility: model.NoteVisibilityPublic, ReplyID: &pid}
+	noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "a", Visibility: model.NoteVisibilityFollowers, ReplyID: &pid}
+
+	// 匿名 viewer: 親不可視でも 404 にならず、public reply のみ返る (followers reply は filter)。
+	out, err := svc.ListReplies(nil, "P", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, "pub", out[0].ID, "不可視親でも public reply は返る / followers reply は leak しない")
 }
 
 // #1500: visibility は repository の SQL push-down に委譲される。QueryService は
