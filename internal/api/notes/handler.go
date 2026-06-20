@@ -504,6 +504,22 @@ func validateCreateInput(req *CreateRequest, fileIDs []string) error {
 			return errors.New("text must contain at least one non-whitespace character")
 		}
 	}
+	// visibility enum (upstream create.ts:132)。空文字は service が public に default
+	// するため許容し、非空の不正値のみ弾く (#1930)。
+	switch model.NoteVisibility(req.Visibility) {
+	case "", model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityFollowers, model.NoteVisibilitySpecified:
+	default:
+		return errors.New("visibility must be one of public, home, followers, specified")
+	}
+	// reactionAcceptance enum (upstream create.ts:138)。null (nil) は制限なしとして
+	// 許容、非 nil は 4 値のいずれかでなければ INVALID_PARAM (#1930)。
+	if req.ReactionAcceptance != nil {
+		switch *req.ReactionAcceptance {
+		case "likeOnly", "likeOnlyForRemote", "nonSensitiveOnly", "nonSensitiveOnlyForLocalLikeOnlyForRemote":
+		default:
+			return errors.New("invalid reactionAcceptance")
+		}
+	}
 	return nil
 }
 
