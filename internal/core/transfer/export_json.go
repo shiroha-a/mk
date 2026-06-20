@@ -49,7 +49,8 @@ func (e *Exporter) exportFavorites(userID string) ([]byte, error) {
 			break
 		}
 		// 結果は id DESC で帰ってくるので最後の (= 最も古い) ID を次の
-		// untilID に渡して次ページを取得する。
+		// untilID に渡して次ページを取得する。favorites は note_favorite.id で
+		// ページネーションするので cursor も note_favorite.id (= rows[].ID)。
 		untilID = rows[len(rows)-1].ID
 	}
 	buf.WriteByte(']')
@@ -134,7 +135,10 @@ func (e *Exporter) collectClipNotes(clipID string) ([]*model.Note, error) {
 			}
 			out = append(out, n)
 		}
-		untilID = rows[len(rows)-1].ID
+		// ListByClip は note.id (= clip_note.noteId) で keyset ページネーションする
+		// ため、次ページの cursor も note.id を渡す。clip_note.id を渡すと無関係な
+		// ULID で比較されページ抜け/重複が起きる (#1950)。
+		untilID = rows[len(rows)-1].NoteID
 		if len(rows) < 100 {
 			break
 		}

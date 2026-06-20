@@ -79,8 +79,9 @@ func (r *clipNoteRepository) ListClipIDsByNote(noteID string) ([]string, error) 
 }
 
 // ListByClip returns the entries for a clip with since/until pagination on
-// the clip_note id. Order flips to ASC when only sinceID is supplied,
-// matching paginationOrder (upstream QueryService.makePaginationQuery parity).
+// the referenced note id (clip_note.noteId == note.id). Order flips to ASC when
+// only sinceID is supplied, matching paginationOrder (upstream
+// QueryService.makePaginationQuery on the note builder parity, #1950).
 func (r *clipNoteRepository) ListByClip(clipID string, untilID, sinceID string, limit int) ([]*model.ClipNote, error) {
 	return r.listByClip(clipID, "", false, untilID, sinceID, limit, nil)
 }
@@ -120,14 +121,21 @@ func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibilit
 		cond.WriteString(`)`)
 		q = q.Where(cond.String(), args...)
 	}
+	// upstream clips/notes は makePaginationQuery を note builder に対して掛けるため
+	// sinceId/untilId は note.id と比較され note.id DESC (作成順, 新しい note が先頭)
+	// で並ぶ。client は最後に返った note.id を untilId として渡すので、比較列も
+	// 並び替え列も note.id でなければならない。clip_note.noteId は note.id (FK) と
+	// 同値なので、join せず noteId 列でページネーションすれば等価になる。clip_note.id
+	// (AddNote 時に独立採番される PK) で比較していた旧実装は、client が渡す note.id と
+	// 無関係な ULID を比較してページ窓が壊れていた (#1950)。
 	if untilID != "" {
-		q = q.Where("id < ?", untilID)
+		q = q.Where(`"clip_note"."noteId" < ?`, untilID)
 	}
 	if sinceID != "" {
-		q = q.Where("id > ?", sinceID)
+		q = q.Where(`"clip_note"."noteId" > ?`, sinceID)
 	}
 	var rows []*model.ClipNote
-	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
+	if err := q.Order(paginationOrder(sinceID, untilID, `"clip_note"."noteId"`)).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

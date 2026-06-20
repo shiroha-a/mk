@@ -131,13 +131,69 @@ func TestClipNoteRepository_ListByClip_LimitClampAndPagination(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rows, 3)
 
-	rows, err = repo.ListByClip(c.ID, "cn_n_cn_2c", "", 10)
+	// cursor は client が渡す note.id (= clip_note.noteId)。clip_note.id ではない (#1950)。
+	rows, err = repo.ListByClip(c.ID, "n_cn_2c", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 
-	rows, err = repo.ListByClip(c.ID, "", "cn_n_cn_2a", 10)
+	rows, err = repo.ListByClip(c.ID, "", "n_cn_2a", 10)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
+}
+
+// TestClipNoteRepository_ListByClip_PaginatesOnNoteID は #1950 の回帰テスト。
+// clip_note.id (AddNote 時に独立採番) の並びと note.id (作成順) の並びが食い違う
+// ように、古い note を後から clip し新しい note を先に clip する。ページネーションが
+// note.id でなされること (upstream clips/notes parity) を、(1) 並び順が newest-NOTE-first
+// であること、(2) client が最後の note.id を untilId に渡すと正しく次ページに進むこと
+// で検証する。旧実装 (clip_note.id 比較) では並び順が逆転し untilId も無関係 ULID と
+// 比較されて壊れる。
+func TestClipNoteRepository_ListByClip_PaginatesOnNoteID(t *testing.T) {
+	clipRepo := NewClipRepository(testDB)
+	repo := NewClipNoteRepository(testDB)
+	noteRepo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_cn_3", "cnuser3")
+	defer cleanupUser(t, user.ID)
+
+	c := newTestClip("clp_cn_3", user.ID, "gamma")
+	require.NoError(t, clipRepo.Create(c))
+	defer cleanupClip(t, c.ID)
+
+	mkNote := func(id string) {
+		n := &model.Note{ID: id, UserID: user.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, noteRepo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, n.ID) })
+	}
+	mkClipNote := func(clipNoteID, noteID string) {
+		cn := &model.ClipNote{ID: clipNoteID, ClipID: c.ID, NoteID: noteID}
+		require.NoError(t, repo.Create(cn))
+		t.Cleanup(func() { testDB.Exec(`DELETE FROM "clip_note" WHERE id = ?`, cn.ID) })
+	}
+
+	mkNote("n_p001") // 古い note (小さい note.id)
+	mkNote("n_p999") // 新しい note (大きい note.id)
+	// 新しい note を先に clip (小さい clip_note.id)、古い note を後で clip (大きい clip_note.id)。
+	mkClipNote("cn_001_early", "n_p999")
+	mkClipNote("cn_999_late", "n_p001")
+
+	// 並び順は note.id DESC (newest-note-first)。clip_note.id 順なら逆になる。
+	rows, err := repo.ListByClip(c.ID, "", "", 50)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "n_p999", rows[0].NoteID, "newest note must be first (note.id order, not clip order)")
+	assert.Equal(t, "n_p001", rows[1].NoteID)
+
+	// client は最後に返った note.id (n_p999) を untilId として渡す -> 次は n_p001 のみ。
+	rows, err = repo.ListByClip(c.ID, "n_p999", "", 50)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "n_p001", rows[0].NoteID)
+
+	// sinceId に古い note.id を渡すと新しい側 (n_p999) のみ。
+	rows, err = repo.ListByClip(c.ID, "", "n_p001", 50)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "n_p999", rows[0].NoteID)
 }
 
 // TestClipNoteRepository_ListByClipVisible は clips/notes の visibility

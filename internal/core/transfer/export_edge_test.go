@@ -3,6 +3,7 @@ package transfer_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,44 @@ func TestExport_Clips_WithNotes(t *testing.T) {
 	assert.Contains(t, body, "c1")
 	assert.Contains(t, body, "clipped")
 	assert.NotContains(t, body, "missing")
+}
+
+// TestExport_Clips_MultiPage は #1950 の export 経路回帰テスト。collectClipNotes は
+// ListByClip を keyset でページネーションするが、#1950 で比較列が note.id になったため
+// 次ページの cursor も note.id を渡さなければならない (clip_note.id を渡すと無関係 ULID
+// で比較され 2 ページ目が空になり全件 export できない)。clip_note.id と note.id の prefix
+// を変えて cross-column バグを顕在化させ、101 件超でも全件 export されることを検証する。
+func TestExport_Clips_MultiPage(t *testing.T) {
+	saver, _, deps, user := newExportDeps(t)
+	clipRepo := deps.ClipRepo.(*testutil.MockClipRepository)
+	clipNoteRepo := deps.ClipNoteRepo.(*testutil.MockClipNoteRepository)
+	noteRepo := deps.NoteRepo.(*testutil.MockNoteRepository)
+
+	clipRepo.Clips["c1"] = &model.Clip{ID: "c1", UserID: user.ID, Name: "big", IsPublic: true}
+
+	const total = 150 // > 1 ページ (100)
+	for i := 1; i <= total; i++ {
+		noteID := fmt.Sprintf("n_%03d", i)
+		// clip_note.id は note.id と prefix を変える (cross-column バグを露出させる)。
+		clipNoteRepo.Entries[fmt.Sprintf("link_%03d", i)] = &model.ClipNote{
+			ID: fmt.Sprintf("link_%03d", i), ClipID: "c1", NoteID: noteID,
+		}
+		text := "n" + noteID
+		noteRepo.Notes[noteID] = &model.Note{ID: noteID, UserID: user.ID, Text: &text}
+	}
+
+	exporter := transfer.NewExporter(deps)
+	_, err := exporter.Export(context.Background(), user.ID, transfer.ExportClips)
+	require.NoError(t, err)
+
+	body := string(saver.uploads[0].Body)
+	missing := 0
+	for i := 1; i <= total; i++ {
+		if !strings.Contains(body, fmt.Sprintf(`"%s"`, fmt.Sprintf("n_%03d", i))) {
+			missing++
+		}
+	}
+	assert.Equal(t, 0, missing, "all %d clipped notes must be exported across pages", total)
 }
 
 // UserLists: members without preloaded User trigger the UserRepo.FindByID fallback.

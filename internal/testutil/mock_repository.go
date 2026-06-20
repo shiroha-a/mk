@@ -3780,24 +3780,26 @@ func (m *MockClipNoteRepository) listByClip(clipID, viewerID string, filterVisib
 		if !noteMatchesSearchWords(m.Notes[cn.NoteID], searchWords) {
 			continue
 		}
-		if untilID != "" && cn.ID >= untilID {
+		// cursor / sort は note.id (= clip_note.noteId) で行う。client は note.id を
+		// 渡し upstream も note.id でページネーションする (#1950、production listByClip と一致)。
+		if untilID != "" && cn.NoteID >= untilID {
 			continue
 		}
-		if sinceID != "" && cn.ID <= sinceID {
+		if sinceID != "" && cn.NoteID <= sinceID {
 			continue
 		}
 		rows = append(rows, cn)
 	}
-	// production の paginationOrder と同じ ASC-flip (#405 Devin指摘)。
+	// production の paginationOrder と同じ ASC-flip (#405 Devin指摘)。比較列は noteId。
 	asc := sinceID != "" && untilID == ""
 	for i := 0; i < len(rows); i++ {
 		for j := i + 1; j < len(rows); j++ {
 			if asc {
-				if rows[i].ID > rows[j].ID {
+				if rows[i].NoteID > rows[j].NoteID {
 					rows[i], rows[j] = rows[j], rows[i]
 				}
 			} else {
-				if rows[i].ID < rows[j].ID {
+				if rows[i].NoteID < rows[j].NoteID {
 					rows[i], rows[j] = rows[j], rows[i]
 				}
 			}
