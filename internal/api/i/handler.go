@@ -883,7 +883,10 @@ func (h *Handler) Me(c echo.Context) error {
 		resp["publicReactions"] = profile.PublicReactions
 		resp["loggedInDays"] = len(profile.LoggedInDates)
 		resp["achievements"] = jsonbArray(profile.Achievements)
-		resp["securityKeys"] = profile.SecurityKeysAvailable
+		// upstream UserEntityService.ts:580 と同じく securityKeys は 2FA 有効時のみ
+		// 真。PackMeDetailed も同 gate だが、ここで profile 値を override するため
+		// 揃える (#1921)。
+		resp["securityKeys"] = profile.TwoFactorEnabled && profile.SecurityKeysAvailable
 		// hardMutedWords / twoFactorBackupCodesStock は PackMeDetailed (AsMeDetailed)
 		// が profile から正しい shape で乗せるので override 不要 (#1258 follow-up)。
 		// clientData / room は jsonb を生のまま返すと frontend (本家) が
@@ -934,22 +937,12 @@ func (h *Handler) Me(c echo.Context) error {
 	resp["roles"] = userRoles
 	// securityKeysList: WebAuthnキーの一覧。includeSecrets 限定 (upstream
 	// UserEntityService.ts:627-639) なので native session のときだけ出す。app token
-	// では key 自体を省く (#1824、misskey-js golden で optional)。
+	// では key 自体を省く (#1824、misskey-js golden で optional)。さらに upstream は
+	// `twoFactorEnabled ? find() : []` で 2FA 有効時のみ実リストを返すため、無効時は
+	// repo を引かず [] にする (#1921)。
 	if isSecure {
-		if h.securityKeyRepo != nil {
-			if keys, err := h.securityKeyRepo.ListByUser(u.ID); err == nil && len(keys) > 0 {
-				list := make([]map[string]any, len(keys))
-				for i, k := range keys {
-					list[i] = map[string]any{
-						"id":       k.ID,
-						"name":     k.Name,
-						"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
-					}
-				}
-				resp["securityKeysList"] = list
-			} else {
-				resp["securityKeysList"] = []any{}
-			}
+		if profile != nil && profile.TwoFactorEnabled {
+			resp["securityKeysList"] = h.securityKeysList(u.ID)
 		} else {
 			resp["securityKeysList"] = []any{}
 		}
@@ -1136,7 +1129,14 @@ func (h *Handler) appendIncludeSecrets(c echo.Context, u *model.User, profile *m
 		resp["email"] = profile.Email
 		resp["emailVerified"] = profile.EmailVerified
 	}
-	resp["securityKeysList"] = h.securityKeysList(u.ID)
+	// upstream UserEntityService.ts:627 は `twoFactorEnabled ? find() : []` なので
+	// 2FA 有効時のみ実リスト、無効時は [] (#1921)。Me handler の isSecure ブロックと
+	// 同 gate を保つこと。
+	if profile != nil && profile.TwoFactorEnabled {
+		resp["securityKeysList"] = h.securityKeysList(u.ID)
+	} else {
+		resp["securityKeysList"] = []map[string]any{}
+	}
 }
 
 // securityKeysList returns the user's WebAuthn key list for the includeSecrets

@@ -229,6 +229,17 @@ func TestApplyModeratorSecurityFields(t *testing.T) {
 		ApplyModeratorSecurityFields(&d, true, nil)
 		assert.Nil(t, d.TwoFactorEnabled)
 	})
+
+	// #1921: 2FA 無効なら securityKeys は SecurityKeysAvailable に関わらず false。
+	t.Run("securityKeys false when 2FA disabled", func(t *testing.T) {
+		off := &model.UserProfile{UserID: "u1", TwoFactorEnabled: false, SecurityKeysAvailable: true}
+		d := UserDetailed{}
+		ApplyModeratorSecurityFields(&d, true, off)
+		require.NotNil(t, d.TwoFactorEnabled)
+		assert.False(t, *d.TwoFactorEnabled)
+		require.NotNil(t, d.SecurityKeys)
+		assert.False(t, *d.SecurityKeys, "2FA 無効なら securityKeys は false")
+	})
 }
 
 func TestPackUserDetailed_MoveFields(t *testing.T) {
@@ -895,17 +906,23 @@ func TestPackMeDetailed_ProfileDerivedHighFields(t *testing.T) {
 		Fields:                datatypes.JSON([]byte("[]")),
 		HardMutedWords:        datatypes.JSON([]byte(`[["foo","bar"],["baz"]]`)),
 		TwoFactorEnabled:      true,
+		SecurityKeysAvailable: true,
 		TwoFactorBackupSecret: pq.StringArray{"a", "b"}, // 2 codes -> partial
 	}
 	me := PackMeDetailed(u, profile)
 	assert.Len(t, me.HardMutedWords, 2, "hardMutedWords は jsonb から展開")
 	assert.Equal(t, "partial", me.TwoFactorBackupCodesStock)
+	// #1921: 2FA 有効 + key 有り → securityKeys true。
+	assert.True(t, me.SecurityKeys, "2FA 有効 + key 有りで securityKeys true")
 
 	profile.TwoFactorBackupSecret = pq.StringArray{"a", "b", "c", "d", "e"} // >=5 -> full
 	assert.Equal(t, "full", PackMeDetailed(u, profile).TwoFactorBackupCodesStock)
 
 	profile.TwoFactorEnabled = false // 2FA off -> none
-	assert.Equal(t, "none", PackMeDetailed(u, profile).TwoFactorBackupCodesStock)
+	off := PackMeDetailed(u, profile)
+	assert.Equal(t, "none", off.TwoFactorBackupCodesStock)
+	// #1921: 2FA 無効なら SecurityKeysAvailable=true でも securityKeys false。
+	assert.False(t, off.SecurityKeys, "2FA 無効なら securityKeys false")
 }
 
 // #1240: PackMeDetailed 単体 (policies override 無し) は policies を **出さない**

@@ -911,9 +911,8 @@ func TestUpdate_NativeSessionIncludesSecrets(t *testing.T) {
 	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
 	require.NoError(t, userRepo.Create(user))
 	email := "secret@example.com"
-	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, Fields: datatypes.JSON([]byte("[]"))}
-	// securityKeyRepo に 1 件登録し、native session で list が format されて
-	// 返ること (id/name/lastUsed) も確認する。
+	// 2FA 有効 + key 登録済 → securityKeysList が format されて返る (#1921 gate を通る)。
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, TwoFactorEnabled: true, SecurityKeysAvailable: true, Fields: datatypes.JSON([]byte("[]"))}
 	skRepo := newInMemSKRepo()
 	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "key1", UserID: "user1", Name: "yubikey", PublicKey: "pk"}))
 	h.SetWebAuthn(nil, skRepo)
@@ -931,6 +930,31 @@ func TestUpdate_NativeSessionIncludesSecrets(t *testing.T) {
 	assert.Equal(t, "key1", key["id"])
 	assert.Equal(t, "yubikey", key["name"])
 	assert.Contains(t, key, "lastUsed")
+	// securityKeys bool も 2FA 有効 + key 有りなので true。
+	assert.Equal(t, true, resp["securityKeys"])
+}
+
+// #1921: native session でも 2FA 無効なら securityKeysList は [] (repo を引かない)、
+// securityKeys bool も SecurityKeysAvailable に関わらず false。
+func TestUpdate_SecurityKeysGatedByTwoFactorDisabled(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	// 2FA 無効だが key 登録 + SecurityKeysAvailable=true (stale flag) の状況。
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", TwoFactorEnabled: false, SecurityKeysAvailable: true, Fields: datatypes.JSON([]byte("[]"))}
+	skRepo := newInMemSKRepo()
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "key1", UserID: "user1", Name: "yubikey", PublicKey: "pk"}))
+	h.SetWebAuthn(nil, skRepo)
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, nativeTok)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	list, ok := resp["securityKeysList"].([]any)
+	require.True(t, ok, "securityKeysList は存在する (includeSecrets)")
+	assert.Empty(t, list, "2FA 無効なら securityKeysList は [] (key があっても)")
+	assert.Equal(t, false, resp["securityKeys"], "2FA 無効なら securityKeys は false")
 }
 
 // #1919: app access token (request token != users.token) で i/update を呼ぶと

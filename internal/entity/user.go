@@ -362,7 +362,10 @@ func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeD
 		// security 系は profile から正確に埋める (#1237)。
 		out.TwoFactorEnabled = profile.TwoFactorEnabled
 		out.UsePasswordLessLogin = profile.UsePasswordLessLogin
-		out.SecurityKeys = profile.SecurityKeysAvailable
+		// upstream UserEntityService.ts:580 は securityKeys を
+		// `twoFactorEnabled ? (key 数 >= 1) : false` とするため、2FA 無効時は
+		// 登録済みキーがあっても false にする (#1921)。
+		out.SecurityKeys = profile.TwoFactorEnabled && profile.SecurityKeysAvailable
 		// twoFactorBackupCodesStock は profile 由来なので全 view で正しい値にする
 		// (handler override 不要 = meUpdated / i-update でも clobber しない)。
 		out.TwoFactorBackupCodesStock = backupCodesStock(profile)
@@ -642,7 +645,9 @@ func ApplyModeratorSecurityFields(d *UserDetailed, iAmModerator bool, profile *m
 	}
 	tfa := profile.TwoFactorEnabled
 	pwl := profile.UsePasswordLessLogin
-	sk := profile.SecurityKeysAvailable
+	// upstream UserEntityService.ts:580 と同じく securityKeys は 2FA 有効時のみ
+	// 真になりうる (#1921)。
+	sk := profile.TwoFactorEnabled && profile.SecurityKeysAvailable
 	d.TwoFactorEnabled = &tfa
 	d.UsePasswordLessLogin = &pwl
 	d.SecurityKeys = &sk
