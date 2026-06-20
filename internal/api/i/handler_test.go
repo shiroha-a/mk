@@ -807,6 +807,89 @@ func TestUpdate_AvatarID_NullClearAllowedRegardlessOfPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "null clear は gate 対象外")
 }
 
+// --- i/update paramDef validation (#1918) ---
+
+func updateUser(repo *testutil.MockUserRepository) *model.User {
+	u := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = u
+	return u
+}
+
+func TestUpdate_NameTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"`+strings.Repeat("a", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
+func TestUpdate_DescriptionTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"description":"`+strings.Repeat("d", 1501)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_FollowedMessageTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"followedMessage":"`+strings.Repeat("m", 257)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_LocationTooLong(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"location":"`+strings.Repeat("l", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 境界: 50 字ちょうどは通る、51 字は弾く (#1918)。
+func TestUpdate_NameBoundary(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"`+strings.Repeat("a", 50)+`"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, "50 字ちょうどは valid")
+	rec = post(h.Update, `{"name":"`+strings.Repeat("a", 51)+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "51 字は INVALID_PARAM")
+}
+
+func TestUpdate_BirthdayBadPattern(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"birthday":"1999/01/01"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_BirthdayValid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"birthday":"1999-01-01"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestUpdate_LangInvalid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"lang":"klingon"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdate_LangValid(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"lang":"ja-JP"}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// 空文字 / null はクリア要求として検証対象外 (#1918)。
+func TestUpdate_EmptyValuesPassValidation(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"name":"","description":"","birthday":"","lang":""}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestUpdate_BannerID_RestrictedByRole(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}

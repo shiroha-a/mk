@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -21,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/langmap"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -1225,11 +1228,42 @@ func isValidFollowVisibility(v string) bool {
 }
 
 // Update handles POST /api/i/update.
+// birthdayPattern mirrors upstream birthdaySchema (User.ts:325)。
+var birthdayPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+// profileTextWithinLimit reports whether s (when present and non-empty) is
+// within max code points, mirroring upstream nameSchema/descriptionSchema/
+// locationSchema/followedMessageSchema maxLength (#1918)。nil / "" (= mk-go の
+// クリア要求) は常に許容する。長さは他の mk-go handler と同じく rune 数で数える。
+func profileTextWithinLimit(s *string, max int) bool {
+	if s == nil || *s == "" {
+		return true
+	}
+	return utf8.RuneCountInString(*s) <= max
+}
+
 func (h *Handler) Update(c echo.Context) error {
 	me := middleware.GetUser(c)
 
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil {
+		return apierr.JSONInvalidParam(c)
+	}
+
+	// upstream paramDef の maxLength / pattern / enum を検証する (#1918)。
+	// name≤50 / description≤1500 / location≤50 / followedMessage≤256、
+	// birthday は ^YYYY-MM-DD$、lang は langmap enum。空文字 ("") は mk-go の
+	// クリア要求として通すため検証は非空値のみに適用し、違反は INVALID_PARAM(400)。
+	if !profileTextWithinLimit(req.Name, 50) ||
+		!profileTextWithinLimit(req.Description, 1500) ||
+		!profileTextWithinLimit(req.Location, 50) ||
+		!profileTextWithinLimit(req.FollowedMessage, 256) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Birthday != nil && *req.Birthday != "" && !birthdayPattern.MatchString(*req.Birthday) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Lang != nil && *req.Lang != "" && !langmap.IsValid(*req.Lang) {
 		return apierr.JSONInvalidParam(c)
 	}
 
