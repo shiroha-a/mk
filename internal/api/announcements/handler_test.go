@@ -224,6 +224,26 @@ func TestAdminCreate_Success(t *testing.T) {
 	assert.NotEmpty(t, createdAt)
 }
 
+// #1977: admin/announcements/create のレスポンスは upstream の wire 実体 (= pack の
+// full object) と一致し、imageUrl だけ raw を返す。upstream は `packed` をそのまま返し
+// res schema (6 フィールド) では strip されないため、forYou/isRead 等は wire に含まれる。
+// 唯一 imageUrl は upstream が raw を返すので mk-go も proxy しない。
+func TestAdminCreate_ResponseImageURLRaw(t *testing.T) {
+	h, _ := newTestHandler(t)
+	rec := doPost(h.AdminCreate, `{"title":"News","text":"x","imageUrl":"https://remote.example/i.png"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// imageUrl は raw (proxy しない)。これが #1977 の本質的な修正点。
+	assert.Equal(t, "https://remote.example/i.png", resp["imageUrl"], "imageUrl は raw (proxy しない、#1977)")
+	// upstream wire は full pack なので forYou/isRead 等は含まれる (strip しない)。
+	assert.Contains(t, resp, "forYou", "upstream wire は full pack (forYou を含む、#1977)")
+	assert.Contains(t, resp, "isRead")
+	for _, k := range []string{"id", "createdAt", "updatedAt", "title", "text", "imageUrl"} {
+		assert.Contains(t, resp, k, "create response に %s が必要", k)
+	}
+}
+
 func TestAdminCreate_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.AdminCreate, `{}`, nil)

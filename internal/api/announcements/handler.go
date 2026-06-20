@@ -268,9 +268,15 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 		"announcementId": a.ID,
 		"announcement":   a,
 	})
-	// upstream create.ts は packed (createdAt 等を含む) を返す。raw model は
-	// createdAt 列を持たない (ID 由来) ため packer を通す (#1545)。
-	return c.JSON(http.StatusOK, entity.PackAnnouncement(a, h.idGen, false))
+	// upstream admin/announcements/create.ts は `packed` (= AnnouncementEntityService
+	// .pack の full object) をそのまま返す。`meta.res` の 6 フィールドは型契約/doc 用で、
+	// ランタイムでは strip されない (Ajv は paramDef のみ検証)。よって wire 実体は
+	// forYou/isRead/icon 等を含む full shape。唯一 imageUrl だけ upstream は raw を返す
+	// (admin/list #1967 と同じく proxy しない)。public 用 PackAnnouncement は #1529 で
+	// imageUrl を proxy 化するため、その field だけ raw に上書きする (#1977)。
+	resp := entity.PackAnnouncement(a, h.idGen, false)
+	resp["imageUrl"] = a.ImageURL // upstream wire は raw imageUrl
+	return c.JSON(http.StatusOK, resp)
 }
 
 // isValidAnnouncementIcon reports whether v matches upstream's
