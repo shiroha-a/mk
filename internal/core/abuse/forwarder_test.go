@@ -3,6 +3,7 @@ package abuse_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -118,6 +119,28 @@ func TestForwardReport_RemoteTargetEnqueuesFlag(t *testing.T) {
 	assert.Equal(t, "instance", render.lastActor.ID)
 	assert.Equal(t, "https://remote.example/users/alice", render.lastURI)
 	assert.Equal(t, "spam!", render.lastBody)
+}
+
+// TestForwardReport_RealRendererIncludesID は #1951 の回帰テスト。stub ではなく実
+// activitypub.Renderer を通し、配信される Flag body に非空の id が乗ることを検証する。
+// id を持たない activity は受信側 InboxProcessor に silent drop されるため。
+func TestForwardReport_RealRendererIncludesID(t *testing.T) {
+	report := &model.AbuseUserReport{ID: "r1", Comment: "spam!", TargetUser: remoteTarget()}
+	store := &stubReportStore{report: report}
+	sys := &stubSystemActor{actor: &model.User{ID: "instance"}}
+	render := activitypub.NewRenderer(activitypub.NewURLBuilder("https://local.example"))
+	deliver := &spyDeliverer{}
+
+	f := abuse.NewForwarder(store, sys, render, deliver)
+	require.NoError(t, f.ForwardReport("r1"))
+
+	require.Equal(t, 1, deliver.called)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(deliver.body, &payload))
+	id, ok := payload["id"].(string)
+	require.True(t, ok, "delivered Flag must carry a string id")
+	assert.NotEmpty(t, id)
+	assert.True(t, strings.HasPrefix(id, "https://local.example/"))
 }
 
 func TestForwardReport_LocalTargetMarksForwardedOnly(t *testing.T) {

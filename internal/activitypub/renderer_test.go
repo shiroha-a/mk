@@ -1148,6 +1148,13 @@ func TestRenderer_RenderFlag(t *testing.T) {
 	assert.Equal(t, "spam comment", flag.Content)
 	// AddContext 済 (Context が設定される)
 	assert.NotNil(t, flag.Context)
+	// id を持たない Flag は受信側 InboxProcessor に silent drop されるため、
+	// 非空の id が埋まり marshal 後の JSON にも残ること (#1951)。
+	assert.NotEmpty(t, flag.ID)
+	assert.True(t, strings.HasPrefix(flag.ID, "https://example.com/"))
+	raw, err := json.Marshal(flag)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"id":"https://example.com/`)
 }
 
 // --- Poll (Question) rendering ---

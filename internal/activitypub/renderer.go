@@ -1215,8 +1215,16 @@ func (r *Renderer) RenderUndoDeleteActor(user *model.User) *Undo {
 func (r *Renderer) RenderFlag(actor *model.User, targetURI, content string) *Flag {
 	f := &Flag{
 		Activity: Activity{
-			Object: Object{Type: "Flag"},
-			Actor:  r.urls.UserURI(actor.ID),
+			// upstream AbuseReportService は renderFlag を addContext で包み、
+			// addContext が id 不在時に `{config.url}/{uuid}` を必ず注入する。
+			// id を持たない activity は受信側 InboxProcessor に
+			// "activity id is not a string" で silent drop されるため、
+			// RenderAccept/Reject/Invite と同様にここで id を埋める (#1951)。
+			Object: Object{
+				ID:   r.urls.baseURL + "/" + uuid.NewString(),
+				Type: "Flag",
+			},
+			Actor: r.urls.UserURI(actor.ID),
 		},
 		Object:  targetURI,
 		Content: content,
