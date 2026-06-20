@@ -1,12 +1,18 @@
 package repository
 
 import (
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
+
+// localUsernameSearchPattern mirrors upstream localUsernameSchema (^\w{1,20}$),
+// used by SearchUsers to decide whether a bare (non-@) query should also match
+// usernames by partial (#1939)。`\w` = [a-zA-Z0-9_]。
+var localUsernameSearchPattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
 // SearchOrigin は users/search の origin 引数の enum。upstream Misskey TS の
 // paramDef enum (`local` / `remote` / `combined`) に揃える (#763)。
@@ -44,11 +50,10 @@ type UserRepository interface {
 	// UPDATE していたが、CachedUserRepository wrapper の invalidate を
 	// 通すため userRepo 経由に統一する (Devin review #552 BUG-2)。
 	IncrementNotesCount(userID string, delta int) error
-	// SearchByUsername は usernameLower の prefix で user を検索する。
-	// origin は upstream Misskey TS と同じ semantics (#763)。値は
-	// SearchOriginLocal / SearchOriginRemote / SearchOriginCombined を使う。
-	// 空文字列 / 未知値は SearchOriginCombined と同等扱い。
-	SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error)
+	// SearchUsers は display name / username / description で user を検索する
+	// (upstream UserSearchService 相当、#1939)。origin は SearchOriginLocal /
+	// SearchOriginRemote / SearchOriginCombined。空文字列 / 未知値は Combined 扱い。
+	SearchUsers(query, meID string, limit, offset int, origin string) ([]*model.User, error)
 	// SearchByUsernameAndHost は username prefix と host を SQL で絞り込む
 	// (#766 / #1054 / #1064)。upstream Misskey TS の同名 endpoint と同じ
 	// semantics:
@@ -219,32 +224,93 @@ func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
 		UpdateColumn("notesCount", gorm.Expr("\"notesCount\" + ?", delta)).Error
 }
 
-// SearchByUsername returns users whose usernameLower starts with the given query.
-// Phase 4でMeilisearch統合予定だが、現状は単純なLIKE検索のみ。
-//
-// origin で host filter を切り替える (#763)。
-//
-// query は escapeSQLLikePattern で SQL LIKE wildcard (`\` / `%` / `_`) を
-// escape する (#1061)。username は仕様上 `_` を含めうるため、escape 無しだと
-// `alice_bob` を search すると `alice1bob` 等の関係ない user も hit してしまう。
-// upstream Misskey TS UserSearchService.ts:197 と同じ semantics。
-func (r *userRepository) SearchByUsername(query string, limit, offset int, origin string) ([]*model.User, error) {
-	var users []*model.User
-	q := r.db.Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%")
-	switch origin {
-	case SearchOriginLocal:
-		q = q.Where("\"host\" IS NULL")
-	case SearchOriginRemote:
-		q = q.Where("\"host\" IS NOT NULL")
+// SearchUsers searches users by display name (ILIKE partial) OR username (prefix
+// for an @handle query, partial for a username-shaped query), with a
+// userProfile.description ILIKE fallback appended when fewer than `limit` rows
+// match. Mirrors upstream UserSearchService.search (#1939): only active users
+// (updatedAt within 30 days or NULL), isSuspended excluded, muted users excluded
+// when meID is set, ordered by updatedAt DESC NULLS LAST. query is the raw user
+// input (with any leading @ and original case preserved).
+func (r *userRepository) SearchUsers(query, meID string, limit, offset int, origin string) ([]*model.User, error) {
+	if limit <= 0 {
+		limit = 10
 	}
-	if err := q.
-		Order("\"followersCount\" DESC, id ASC").
-		Limit(limit).
-		Offset(offset).
-		Find(&users).Error; err != nil {
+	activeThreshold := time.Now().Add(-30 * 24 * time.Hour)
+	escaped := escapeSQLLikePattern(query)
+
+	// name ILIKE '%query%' OR username 一致 (upstream nameQuery の Brackets)。
+	// @handle (空白なし・@ が先頭のみ) は usernameLower 前方一致、username 形式の
+	// query は usernameLower 部分一致。それ以外は name のみ。
+	nameOrUsername := r.db.Where(`"name" ILIKE ? ESCAPE '\'`, "%"+escaped+"%")
+	isUsername := strings.HasPrefix(query, "@") && !strings.Contains(query, " ") && !strings.Contains(query[1:], "@")
+	if isUsername {
+		uname := escapeSQLLikePattern(strings.ToLower(strings.ReplaceAll(query, "@", "")))
+		nameOrUsername = nameOrUsername.Or(`"usernameLower" LIKE ? ESCAPE '\'`, uname+"%")
+	} else if localUsernameSearchPattern.MatchString(query) {
+		nameOrUsername = nameOrUsername.Or(`"usernameLower" LIKE ? ESCAPE '\'`, "%"+escapeSQLLikePattern(strings.ToLower(query))+"%")
+	}
+
+	mutingSub := func() *gorm.DB {
+		return r.db.Table("muting").Select(`"muteeId"`).Where(`"muterId" = ?`, meID)
+	}
+
+	q := r.db.Model(&model.User{}).
+		Where(nameOrUsername).
+		Where(`("updatedAt" IS NULL OR "updatedAt" > ?)`, activeThreshold).
+		Where(`"isSuspended" = false`)
+	q = applyUserSearchOrigin(q, origin)
+	if meID != "" {
+		q = q.Where(`"id" NOT IN (?)`, mutingSub())
+	}
+
+	var users []*model.User
+	if err := q.Order(`"updatedAt" DESC NULLS LAST`).Limit(limit).Offset(offset).Find(&users).Error; err != nil {
 		return nil, err
 	}
-	return users, nil
+	if len(users) >= limit {
+		return users, nil
+	}
+
+	// description fallback (upstream profQuery)。既に name/username で hit した ID は
+	// 除外して重複を避ける (upstream は重複しうるが mk-go では dedup する)。
+	foundIDs := make([]string, 0, len(users))
+	for _, u := range users {
+		foundIDs = append(foundIDs, u.ID)
+	}
+	profSub := r.db.Table("user_profile").Select(`"userId"`).Where(`"description" ILIKE ? ESCAPE '\'`, "%"+escaped+"%")
+	switch origin {
+	case SearchOriginLocal:
+		profSub = profSub.Where(`"userHost" IS NULL`)
+	case SearchOriginRemote:
+		profSub = profSub.Where(`"userHost" IS NOT NULL`)
+	}
+	if meID != "" {
+		profSub = profSub.Where(`"userId" NOT IN (?)`, mutingSub())
+	}
+	dq := r.db.Model(&model.User{}).
+		Where(`"id" IN (?)`, profSub).
+		Where(`("updatedAt" IS NULL OR "updatedAt" > ?)`, activeThreshold).
+		Where(`"isSuspended" = false`)
+	if len(foundIDs) > 0 {
+		dq = dq.Where(`"id" NOT IN ?`, foundIDs)
+	}
+	var descUsers []*model.User
+	if err := dq.Order(`"updatedAt" DESC NULLS LAST`).Limit(limit).Offset(offset).Find(&descUsers).Error; err != nil {
+		return nil, err
+	}
+	return append(users, descUsers...), nil
+}
+
+// applyUserSearchOrigin adds the local/remote host filter shared by the name and
+// description user-search queries.
+func applyUserSearchOrigin(q *gorm.DB, origin string) *gorm.DB {
+	switch origin {
+	case SearchOriginLocal:
+		return q.Where(`"host" IS NULL`)
+	case SearchOriginRemote:
+		return q.Where(`"host" IS NOT NULL`)
+	}
+	return q
 }
 
 // SearchByUsernameAndHost narrows username prefix matches with a host filter.

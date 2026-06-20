@@ -39,7 +39,7 @@ func (m *mockUserRepo) FindByURI(string) (*model.User, error)     { return nil, 
 func (m *mockUserRepo) FindByToken(string) (*model.User, error)   { return nil, errMock }
 func (m *mockUserRepo) IncrementFollowingCount(string, int) error { return nil }
 func (m *mockUserRepo) IncrementFollowersCount(string, int) error { return nil }
-func (m *mockUserRepo) SearchByUsername(string, int, int, string) ([]*model.User, error) {
+func (m *mockUserRepo) SearchUsers(string, string, int, int, string) ([]*model.User, error) {
 	return nil, nil
 }
 func (m *mockUserRepo) SearchByUsernameAndHost(string, *string, bool, int) ([]*model.User, error) {

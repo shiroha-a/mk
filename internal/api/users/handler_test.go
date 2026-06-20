@@ -707,6 +707,31 @@ func TestSearch_Success(t *testing.T) {
 	shapetest.Assert(t, "UserDetailedNotMeOnly", out[0]) // L3 (#1314)
 }
 
+// #1939: users/search は isSuspended ユーザーを除外する。
+func TestSearch_ExcludesSuspendedUser(t *testing.T) {
+	h, repo := newTestHandler(t)
+	name := "Test Suspended"
+	repo.Users["sus1"] = &model.User{ID: "sus1", Username: "testsuspended", UsernameLower: "testsuspended", Name: &name, IsSuspended: true, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Search, `{"query":"testsuspended"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Empty(t, out, "suspended user は users/search に出ない")
+}
+
+// #1939: users/search は display name 部分一致で hit する (username 不一致でも)。
+func TestSearch_MatchesDisplayName(t *testing.T) {
+	h, repo := newTestHandler(t)
+	name := "Zqx Display Name"
+	repo.Users["dn1"] = &model.User{ID: "dn1", Username: "randomhandle", UsernameLower: "randomhandle", Name: &name, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	rec := post(h.Search, `{"query":"zqx display"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1, "display name 部分一致で hit")
+	assert.Equal(t, "dn1", out[0]["id"])
+}
+
 // users/search bulk path is now batch (#517). Per-row FindProfileByUserID
 // must not be called and the new batch FindProfilesByUserIDs is invoked once
 // with all matched user IDs.
@@ -1917,7 +1942,7 @@ type failingUserRepo struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingUserRepo) SearchByUsername(_ string, _, _ int, _ string) ([]*model.User, error) {
+func (f *failingUserRepo) SearchUsers(_, _ string, _, _ int, _ string) ([]*model.User, error) {
 	return nil, assertErr
 }
 

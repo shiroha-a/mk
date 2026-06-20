@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,7 +335,7 @@ func TestUserRepository_SearchByUsername(t *testing.T) {
 	b := insertTestUser(t, "u_sb_2", "searchbeta")
 	defer cleanupUser(t, b.ID)
 
-	out, err := repo.SearchByUsername("search", 10, 0, "")
+	out, err := repo.SearchUsers("search", "", 10, 0, "")
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(out), 2)
 }
@@ -354,7 +355,7 @@ func TestUserRepository_SearchByUsername_LikeWildcardEscape(t *testing.T) {
 	t.Run("underscore in query is escaped to literal", func(t *testing.T) {
 		// `wild_` prefix で escape 有り → literal `_` として扱われ
 		// `wild_user` のみ hit、`wild1user` は hit しない
-		out, err := repo.SearchByUsername("wild_", 10, 0, "")
+		out, err := repo.SearchUsers("wild_", "", 10, 0, "")
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -378,7 +379,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	defer cleanupUser(t, remote.ID)
 
 	t.Run("local only excludes remote", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginLocal)
+		out, err := repo.SearchUsers("origin", "", 10, 0, SearchOriginLocal)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -389,7 +390,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 
 	t.Run("remote only excludes local", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginRemote)
+		out, err := repo.SearchUsers("origin", "", 10, 0, SearchOriginRemote)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -400,7 +401,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 
 	t.Run("combined returns both", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, SearchOriginCombined)
+		out, err := repo.SearchUsers("origin", "", 10, 0, SearchOriginCombined)
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -411,7 +412,7 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 	})
 
 	t.Run("empty origin treated as combined", func(t *testing.T) {
-		out, err := repo.SearchByUsername("origin", 10, 0, "")
+		out, err := repo.SearchUsers("origin", "", 10, 0, "")
 		require.NoError(t, err)
 		ids := make(map[string]bool, len(out))
 		for _, u := range out {
@@ -420,6 +421,62 @@ func TestUserRepository_SearchByUsername_OriginFilter(t *testing.T) {
 		assert.True(t, ids[local.ID])
 		assert.True(t, ids[remote.ID])
 	})
+}
+
+// #1939: SearchUsers の UserSearchService parity — display name 部分一致 /
+// description fallback / isSuspended 除外 / activeThreshold(30日) 除外 / muting 除外。
+func TestUserRepository_SearchUsers_Parity(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	now := time.Now()
+	stale := now.Add(-40 * 24 * time.Hour)
+	const q = "zqxparity"
+
+	mk := func(id, uname string, name *string, updatedAt *time.Time, suspended bool) *model.User {
+		u := &model.User{
+			ID: id, Username: uname, UsernameLower: strings.ToLower(uname),
+			Name: name, UpdatedAt: updatedAt, IsSuspended: suspended,
+			AvatarDecorations: datatypes.JSON([]byte("[]")),
+		}
+		require.NoError(t, testDB.Create(u).Error)
+		t.Cleanup(func() { cleanupUser(t, id) })
+		return u
+	}
+	idSet := func(users []*model.User) map[string]bool {
+		s := make(map[string]bool, len(users))
+		for _, u := range users {
+			s[u.ID] = true
+		}
+		return s
+	}
+
+	// username に q を含まない → name / description 経路でのみ hit する。
+	byName := mk("u_par_name", "plainuser1", strPtr2("Zqxparity Display"), &now, false)
+	byDesc := mk("u_par_desc", "plainuser2", nil, &now, false)
+	require.NoError(t, testDB.Create(&model.UserProfile{UserID: byDesc.ID, Description: strPtr2("loves zqxparity stuff")}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user_profile" WHERE "userId" = ?`, byDesc.ID) })
+	susp := mk("u_par_susp", "plainuser3", strPtr2("Zqxparity Suspended"), &now, true)
+	staleU := mk("u_par_stale", "plainuser4", strPtr2("Zqxparity Stale"), &stale, false)
+	muted := mk("u_par_muted", "plainuser5", strPtr2("Zqxparity Muted"), &now, false)
+
+	// anonymous (meID="")。
+	out, err := repo.SearchUsers(q, "", 50, 0, "")
+	require.NoError(t, err)
+	ids := idSet(out)
+	assert.True(t, ids[byName.ID], "display name 部分一致 (username 不一致でも)")
+	assert.True(t, ids[byDesc.ID], "description fallback")
+	assert.False(t, ids[susp.ID], "isSuspended は除外")
+	assert.False(t, ids[staleU.ID], "activeThreshold (40日前) は除外")
+	assert.True(t, ids[muted.ID], "anonymous は muting 除外しない")
+
+	// logged-in (me mutes `muted`)。
+	me := mk("u_par_me", "plainme", nil, &now, false)
+	require.NoError(t, testDB.Create(&model.Muting{ID: "mut_par", MuterID: me.ID, MuteeID: muted.ID}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "muting" WHERE id = ?`, "mut_par") })
+	out, err = repo.SearchUsers(q, me.ID, 50, 0, "")
+	require.NoError(t, err)
+	ids = idSet(out)
+	assert.True(t, ids[byName.ID])
+	assert.False(t, ids[muted.ID], "muting 除外 (meID 指定時)")
 }
 
 // host filter 3-state semantics (#766 / #1054 / #1064):
@@ -641,7 +698,7 @@ func TestUserRepository_SearchByUsername_QueryError(t *testing.T) {
 	db := testDB.WithContext(ctx)
 	repo := NewUserRepository(db)
 
-	_, err := repo.SearchByUsername("anything", 10, 0, "")
+	_, err := repo.SearchUsers("anything", "", 10, 0, "")
 	assert.Error(t, err)
 }
 

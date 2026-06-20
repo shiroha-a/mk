@@ -327,7 +327,7 @@ func TestService_GetProfile_Missing(t *testing.T) {
 
 func TestService_Search_Empty(t *testing.T) {
 	svc, _, _, _ := newFullSvc(t)
-	out, err := svc.Search("   ", 10, 0, "")
+	out, err := svc.Search("   ", "", 10, 0, "")
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -335,7 +335,7 @@ func TestService_Search_Empty(t *testing.T) {
 func TestService_Search_AtPrefix(t *testing.T) {
 	svc, repo, _, _ := newFullSvc(t)
 	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
-	out, err := svc.Search("@al", 10, 0, "")
+	out, err := svc.Search("@al", "", 10, 0, "")
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
@@ -343,7 +343,7 @@ func TestService_Search_AtPrefix(t *testing.T) {
 func TestService_Search_DefaultLimit(t *testing.T) {
 	svc, repo, _, _ := newFullSvc(t)
 	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
-	out, err := svc.Search("a", 0, 0, "")
+	out, err := svc.Search("a", "", 0, 0, "")
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
