@@ -213,6 +213,10 @@ type Renderer struct {
 	noteResolver    NoteResolver
 	pollResolver    PollResolver
 	host            string // ローカルホスト名 (MFM変換用)
+	// instanceImages は system actor の icon/banner fallback に使う meta.iconUrl /
+	// meta.bannerUrl を実行時に解決する lookup (#1969)。meta は admin が変更しうる
+	// ため static でなく lookup で都度取得する。nil なら system fallback 無し。
+	instanceImages func() (iconURL, bannerURL string)
 }
 
 // NewRenderer constructs a Renderer.
@@ -225,6 +229,12 @@ func NewRenderer(urls *URLBuilder) *Renderer {
 // builder (#1876)。
 func (r *Renderer) URLs() *URLBuilder {
 	return r.urls
+}
+
+// SetInstanceImageLookup wires a lookup for meta.iconUrl / meta.bannerUrl used
+// as the icon/image fallback for system actors in RenderPerson (#1969).
+func (r *Renderer) SetInstanceImageLookup(fn func() (iconURL, bannerURL string)) {
+	r.instanceImages = fn
 }
 
 // RenderOrderedCollection builds an AS OrderedCollection (#1876)。upstream
@@ -348,11 +358,31 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 				"userID", u.ID, "error", err)
 		}
 	}
-	if u.AvatarURL != nil {
-		p.Icon = &Image{Type: "Image", URL: *u.AvatarURL}
+	// upstream renderPerson の icon/image fallback (#1969):
+	//   icon  = avatar ? renderImage(avatar) : isSystem ? renderSystemAvatar : renderIdenticon
+	//   image = banner ? renderImage(banner) : isSystem ? renderSystemBanner  : null
+	// avatar/banner 未設定の全ローカル actor に icon (identicon) を必ず付ける。
+	// system actor (username に '.') は meta.iconUrl / bannerUrl を優先する。
+	var instanceIcon, instanceBanner string
+	if r.instanceImages != nil {
+		instanceIcon, instanceBanner = r.instanceImages()
 	}
-	if u.BannerURL != nil {
+	isSystem := strings.Contains(u.Username, ".")
+	switch {
+	case u.AvatarURL != nil && *u.AvatarURL != "":
+		p.Icon = &Image{Type: "Image", URL: *u.AvatarURL}
+	case isSystem && instanceIcon != "":
+		p.Icon = &Image{Type: "Image", URL: instanceIcon}
+	default:
+		// identicon URL は mk-go の /identicon/<username> route 規則に合わせる
+		// (entity.IdenticonURL と同一 seed なので REST avatarUrl と同じ画像)。
+		p.Icon = &Image{Type: "Image", URL: r.urls.baseURL + "/identicon/" + u.Username}
+	}
+	switch {
+	case u.BannerURL != nil && *u.BannerURL != "":
 		p.Image = &Image{Type: "Image", URL: *u.BannerURL}
+	case isSystem && instanceBanner != "":
+		p.Image = &Image{Type: "Image", URL: instanceBanner}
 	}
 	if u.MovedToURI != nil && *u.MovedToURI != "" {
 		p.MovedTo = *u.MovedToURI

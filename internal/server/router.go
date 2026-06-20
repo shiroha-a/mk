@@ -528,6 +528,21 @@ func (s *Server) setupRoutes() {
 	apRenderer.SetEmojiResolver(emojiRepo)
 	apRenderer.SetNoteResolver(noteRepo)
 	apRenderer.SetPollResolver(pollRepo)
+	// system actor の icon/banner fallback 用に meta.iconUrl / bannerUrl を都度解決する (#1969)。
+	apRenderer.SetInstanceImageLookup(func() (string, string) {
+		m, err := metaRepo.Fetch()
+		if err != nil {
+			return "", ""
+		}
+		icon, banner := "", ""
+		if m.IconURL != nil {
+			icon = *m.IconURL
+		}
+		if m.BannerURL != nil {
+			banner = *m.BannerURL
+		}
+		return icon, banner
+	})
 	// config.URL は "https://example.com" 形式。ホスト部分だけ抽出して
 	// apRenderer と webfinger 側で共有する (下の resolver 設定でも再利用)。
 	localHost := ""

@@ -230,8 +230,71 @@ func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	u := &model.User{ID: "u1", Username: "alice"}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Empty(t, p.Name)
-	assert.Nil(t, p.Icon)
+	// #1969: avatar 未設定でも upstream は identicon を icon に必ず付ける。
+	require.NotNil(t, p.Icon)
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL)
+	// 通常 user で banner 未設定なら image は付かない (upstream null)。
+	assert.Nil(t, p.Image)
 	assert.False(t, p.ManuallyApproves)
+}
+
+// #1969: avatar 未設定でも全ローカル actor に icon=identicon が付く (upstream renderPerson)。
+func TestRenderer_RenderPerson_IdenticonFallback(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u1", Username: "alice"}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p.Icon)
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL)
+}
+
+// #1969: system actor は meta.iconUrl / bannerUrl を icon/image に使う。
+// instance image 未設定 (lookup 空) なら system でも identicon にフォールバック。
+func TestRenderer_RenderPerson_SystemActorUsesInstanceImages(t *testing.T) {
+	r := newRenderer()
+	r.SetInstanceImageLookup(func() (string, string) {
+		return "https://example.com/files/icon.png", "https://example.com/files/banner.png"
+	})
+	u := &model.User{ID: "u_sys", Username: "relay.actor"}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p.Icon)
+	assert.Equal(t, "https://example.com/files/icon.png", p.Icon.URL, "system actor の icon は meta.iconUrl")
+	require.NotNil(t, p.Image)
+	assert.Equal(t, "https://example.com/files/banner.png", p.Image.URL, "system actor の image は meta.bannerUrl")
+
+	// instance image 未設定なら system でも icon=identicon、image は付かない。
+	r2 := newRenderer()
+	p2 := r2.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p2.Icon)
+	assert.Equal(t, "https://example.com/identicon/relay.actor", p2.Icon.URL)
+	assert.Nil(t, p2.Image)
+}
+
+// #1969: instance image が配線済みでも、通常 user (username に '.' 無し) には
+// instance icon/banner を漏らさず identicon / 省略にフォールバックする (isSystem gate)。
+func TestRenderer_RenderPerson_NormalUserDoesNotLeakInstanceImages(t *testing.T) {
+	r := newRenderer()
+	r.SetInstanceImageLookup(func() (string, string) {
+		return "https://example.com/files/icon.png", "https://example.com/files/banner.png"
+	})
+	u := &model.User{ID: "u1", Username: "alice"} // 通常 user
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p.Icon)
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL, "通常 user は instance icon でなく identicon")
+	assert.Nil(t, p.Image, "通常 user は banner 未設定で image 省略 (instance banner を漏らさない)")
+}
+
+// avatar/banner 設定済みなら raw URL を使う (identicon/instance image にしない)。
+func TestRenderer_RenderPerson_AvatarBannerRaw(t *testing.T) {
+	r := newRenderer()
+	r.SetInstanceImageLookup(func() (string, string) { return "https://i/icon.png", "https://i/banner.png" })
+	avatar := "https://example.com/files/a.png"
+	banner := "https://example.com/files/b.png"
+	u := &model.User{ID: "u1", Username: "relay.actor", AvatarURL: &avatar, BannerURL: &banner}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p.Icon)
+	assert.Equal(t, avatar, p.Icon.URL, "avatar 設定済みなら raw avatar (instance icon でない)")
+	require.NotNil(t, p.Image)
+	assert.Equal(t, banner, p.Image.URL)
 }
 
 // #1956: system actor (username に '.' を含む relay.actor / instance.actor /
