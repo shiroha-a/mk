@@ -59,48 +59,55 @@ func TestWebfinger_AcctWithoutHost(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1834 F3: 別ホスト acct は upstream fromAcct と同じく 422。
 func TestWebfinger_AcctWrongHost(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@other.example")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
+// acct:alice@bob@charlie は host=bob(@charlie) と解釈され別ホスト扱い → 422。
 func TestWebfinger_AcctMalformed(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@bob@charlie")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
+// #1834 F2: actor-URI 形式 (${url}/users/<id>) は id で解決する。
 func TestWebfinger_HTTPSResource(t *testing.T) {
 	h, repo := newHandler(t)
 	addUser(repo, "u1", "alice")
-	c, rec := newReq(t, "/.well-known/webfinger?resource=https://example.com/users/alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=https://example.com/users/u1")
 	require.NoError(t, h.Webfinger(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// http スキームは origin (https://example.com) と不一致のため actor-URI として
+// マッチせず username 検索に落ちて 404 (upstream は config.url を scheme 込みで照合)。
 func TestWebfinger_HTTPResource(t *testing.T) {
 	h, repo := newHandler(t)
 	addUser(repo, "u1", "alice")
-	c, rec := newReq(t, "/.well-known/webfinger?resource=http://example.com/users/alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=http://example.com/users/u1")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// 別ホストの actor-URI は /users/ prefix に一致せず username 検索に落ちて 404。
 func TestWebfinger_HTTPSWrongHost(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, "/.well-known/webfinger?resource=https://other.example/users/alice")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// /users/ でも /@ でもない path は username 検索に落ちて 404。
 func TestWebfinger_HTTPSWrongPath(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, "/.well-known/webfinger?resource=https://example.com/something")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestWebfinger_HTTPSInvalidURL(t *testing.T) {
@@ -112,11 +119,13 @@ func TestWebfinger_HTTPSInvalidURL(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code)
 }
 
+// mailto:alice@example.com は host=example.com (自ホスト) と解釈され username
+// "mailto:alice" の検索に落ちて 404 (upstream Acct.parse と同じ挙動)。
 func TestWebfinger_UnknownScheme(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, "/.well-known/webfinger?resource=mailto:alice@example.com")
 	require.NoError(t, h.Webfinger(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestWebfinger_NoResource(t *testing.T) {
@@ -221,4 +230,168 @@ func TestOAuthAuthorizationServer(t *testing.T) {
 	require.NotEmpty(t, scopes)
 	assert.Contains(t, scopes, "read:account")
 	assert.Contains(t, scopes, "write:notes")
+}
+
+// --- #1834 F1: federation='none' で discovery が 403 ---
+
+func newHandlerWithFederation(t *testing.T, federation string) (*Handler, *testutil.MockUserRepository) {
+	h, repo := newHandler(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", Federation: federation}
+	h.SetMetaRepo(metaRepo)
+	return h, repo
+}
+
+func TestWebfinger_FederationNone403(t *testing.T) {
+	h, repo := newHandlerWithFederation(t, "none")
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestWebfinger_FederationAllResolves(t *testing.T) {
+	h, repo := newHandlerWithFederation(t, "all")
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestDiscovery_FederationNone403(t *testing.T) {
+	h, _ := newHandlerWithFederation(t, "none")
+	cases := []struct {
+		name string
+		fn   func(echo.Context) error
+	}{
+		{"host-meta", h.HostMeta},
+		{"host-meta.json", h.HostMetaJSON},
+		{"nodeinfo", h.NodeInfoDiscovery},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newReq(t, "/.well-known/"+tc.name)
+			require.NoError(t, tc.fn(c))
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+		})
+	}
+}
+
+// metaRepo 未配線なら fail-open (403 にしない)。
+func TestWebfinger_NoMetaRepoFailsOpen(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// --- #1834 F5: /@username 形式・XRD negotiation・Cache-Control ---
+
+func TestWebfinger_AtUsernameForm(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=https://example.com/@alice")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "acct:alice@example.com")
+}
+
+func TestWebfinger_JRDDefault(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/jrd+json")
+	assert.Equal(t, "public, max-age=180", rec.Header().Get("Cache-Control"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
+func TestWebfinger_XRDContentNegotiation(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	c.Request().Header.Set("Accept", "application/xrd+xml")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/xrd+xml")
+	body := rec.Body.String()
+	assert.Contains(t, body, "<XRD")
+	assert.Contains(t, body, "acct:alice@example.com")
+	assert.Contains(t, body, "application/activity+json")
+}
+
+// jrd を明示的に要求したら XML ではなく JSON。
+func TestWebfinger_JRDExplicit(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	c.Request().Header.Set("Accept", "application/jrd+json")
+	require.NoError(t, h.Webfinger(c))
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/jrd+json")
+}
+
+// meta fetch が error なら fail-open (403 にしない)。MockMetaRepository は Meta が
+// nil のとき Fetch が error を返す。
+func TestWebfinger_FetchErrorFailsOpen(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	metaRepo := testutil.NewMockMetaRepository() // Meta=nil -> Fetch errors
+	h.SetMetaRepo(metaRepo)
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1924 M1: suspended local user は upstream isSuspended:false gate と同じく 404。
+func TestWebfinger_SuspendedUserNotFound(t *testing.T) {
+	h, repo := newHandler(t)
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice", IsSuspended: true}
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// actor-URI の id 部分に余分な path があれば 400。
+func TestWebfinger_ActorURIExtraPath(t *testing.T) {
+	h, _ := newHandler(t)
+	c, rec := newReq(t, "/.well-known/webfinger?resource=https://example.com/users/u1/extra")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestWantsXRD(t *testing.T) {
+	cases := []struct {
+		accept string
+		want   bool
+	}{
+		{"", false},
+		{"application/jrd+json", false},
+		{"application/json", false}, // jrd の sibling は match しない -> JRD (else 分岐)
+		{"application/xrd+xml", true},
+		{"*/*", false}, // tie -> jrd 優先
+		{"application/xrd+xml, application/jrd+json", false},            // 両 q=1 tie -> jrd
+		{"application/xrd+xml;q=0.9, application/jrd+json;q=0.5", true}, // xrd 優勢
+		{"application/jrd+json;q=0.9, application/xrd+xml;q=0.5", false},
+		{"application/json, application/xrd+xml", true}, // xrd だけが match
+		{"text/html", false},
+	}
+	for _, tc := range cases {
+		assert.Equalf(t, tc.want, wantsXRD(tc.accept), "Accept=%q", tc.accept)
+	}
+}
+
+func TestParseQ(t *testing.T) {
+	cases := []struct {
+		s    string
+		want float64
+	}{
+		{"", 1.0}, {"1", 1.0}, {"1.0", 1.0}, {"0", 0.0}, {"0.0", 0.0},
+		{"0.5", 0.5}, {"0.9", 0.9}, {"0.25", 0.25}, {"bad", 0.0},
+		{"2", 1.0}, {"1.5", 1.0}, // 範囲外は 1.0 にクランプ
+	}
+	for _, tc := range cases {
+		assert.InDeltaf(t, tc.want, parseQ(tc.s), 0.0001, "q=%q", tc.s)
+	}
 }

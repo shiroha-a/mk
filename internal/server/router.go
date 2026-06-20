@@ -1817,6 +1817,8 @@ func (s *Server) setupRoutes() {
 
 	// Discovery endpoints
 	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
+	// federation='none' のとき discovery を 403 で塞ぐため metaRepo を inject (#1924)。
+	wellknownHandler.SetMetaRepo(metaRepo)
 	s.echo.GET("/.well-known/webfinger", wellknownHandler.Webfinger)
 	s.echo.GET("/.well-known/host-meta", wellknownHandler.HostMeta)
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
