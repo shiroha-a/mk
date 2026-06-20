@@ -320,19 +320,57 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, er
 	return n, nil
 }
 
-// List returns the notifications for the given user, newest first, capped to limit.
-func (s *Service) List(ctx context.Context, userID string, limit int) ([]*Notification, error) {
+// List returns the notifications for the given user with cursor pagination and
+// type filtering, mirroring upstream NotificationService.getNotifications.
+//
+// Direction: with sinceID set and untilID absent, results are the OLDEST `limit`
+// strictly newer than sinceID, in ascending order; otherwise the newest `limit`
+// in descending order (QueryService.makePaginationQuery と同じ向き). The type
+// filter (includeTypes else excludeTypes) is applied before the limit so that an
+// older matching notification surfaces even when the newest `limit` are all
+// filtered out (upstream の refetch loop 相当)。
+func (s *Service) List(ctx context.Context, userID, sinceID, untilID string, limit int, includeTypes, excludeTypes []string) ([]*Notification, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	if limit > 100 {
 		limit = 100
 	}
-	res, err := s.client.XRevRangeN(ctx, s.streamKey(userID), "+", "-", int64(limit)).Result()
+
+	// upstream は Redis stream id を notification id から導出して COUNT=limit の
+	// 範囲取得をループするが、mk-go の stream id は `<ms>-<redis採番seq>` で
+	// notification id とは別軸のため、id での精密な範囲指定ができない。代わりに
+	// MaxPerUser=300 cap 内で全件を向き付きで取得し、cursor(n.ID)/type で in-app
+	// filter して limit 件を取る。stream は実質 300 件上限なので、これは upstream の
+	// refetch loop と観測上等価 (返る通知集合と並び順が一致する)。なお XADD MAXLEN は
+	// approximate trim (`~`) のため stream が一時的に 300 を僅かに超えうるが、その分は
+	// 最古 tail 側であり、深い type-filter ページネーションでの取りこぼしは実害無視可能。
+	ascending := sinceID != "" && untilID == ""
+	// cursor も type filter も無ければ post-filter で行が落ちないので、newest limit
+	// 件だけ取れば足りる (= 旧実装と同コスト、first-page load の hot path)。それ以外
+	// は post-filter で limit 未満に減りうるため MaxPerUser cap まで取得してから絞る。
+	fetchN := int64(MaxPerUser)
+	if sinceID == "" && untilID == "" && len(includeTypes) == 0 && len(excludeTypes) == 0 {
+		fetchN = int64(limit)
+	}
+	key := s.streamKey(userID)
+	var (
+		res []redis.XMessage
+		err error
+	)
+	if ascending {
+		res, err = s.client.XRangeN(ctx, key, "-", "+", fetchN).Result()
+	} else {
+		res, err = s.client.XRevRangeN(ctx, key, "+", "-", fetchN).Result()
+	}
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*Notification, 0, len(res))
+
+	includeSet := toTypeSet(includeTypes)
+	excludeSet := toTypeSet(excludeTypes)
+
+	out := make([]*Notification, 0, limit)
 	for _, msg := range res {
 		raw, ok := msg.Values["data"].(string)
 		if !ok {
@@ -342,9 +380,43 @@ func (s *Service) List(ctx context.Context, userID string, limit int) ([]*Notifi
 		if err := json.Unmarshal([]byte(raw), &n); err != nil {
 			continue
 		}
+		// cursor は exclusive (upstream の `(` 境界)。
+		if sinceID != "" && n.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && n.ID >= untilID {
+			continue
+		}
+		// type filter。upstream は include があれば include のみ、無ければ exclude
+		// を見る (if / else if)。
+		if len(includeSet) > 0 {
+			if !includeSet[n.Type] {
+				continue
+			}
+		} else if len(excludeSet) > 0 {
+			if excludeSet[n.Type] {
+				continue
+			}
+		}
 		out = append(out, &n)
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out, nil
+}
+
+// toTypeSet converts a slice of raw type strings into a set keyed by Type.
+// Empty / nil input yields a nil map (no filtering).
+func toTypeSet(types []string) map[Type]bool {
+	if len(types) == 0 {
+		return nil
+	}
+	set := make(map[Type]bool, len(types))
+	for _, t := range types {
+		set[Type(t)] = true
+	}
+	return set
 }
 
 // DeleteByTypeAndNotifier removes all notifications of the given type sent by

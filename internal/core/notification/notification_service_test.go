@@ -123,7 +123,7 @@ func TestService_DeleteByTypeAndNotifier(t *testing.T) {
 	// bob からの receiveFollowRequest のみ消す。
 	require.NoError(t, svc.DeleteByTypeAndNotifier(ctx, "alice", TypeReceiveFollowReq, "bob"))
 
-	out, err := svc.List(ctx, "alice", 10)
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 2) // carol の receiveFollowRequest + bob の follow が残る
 	for _, n := range out {
@@ -151,11 +151,57 @@ func TestService_CreateAndList(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	out, err := svc.List(ctx, "alice", 10)
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 3)
 	// 新しい順
 	assert.Equal(t, TypeReaction, out[0].Type)
+}
+
+// #1953-2: type filter で新しい limit 件が全て落ちても、より古い一致通知が
+// あればそれを返す (upstream getNotifications の refetch loop 相当)。旧実装は
+// 新しい limit 件だけ取得して filter したため、空を返していた。
+func TestService_List_TypeFilterSurfacesOlderMatch(t *testing.T) {
+	svc := newTestSvc(t)
+	ctx := context.Background()
+
+	// 最古に follow を 1 件、その後 reaction を 20 件積む。
+	_, err := svc.Create(ctx, CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: TypeFollow})
+	require.NoError(t, err)
+	for i := 0; i < 20; i++ {
+		_, err := svc.Create(ctx, CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: TypeReaction, NoteID: "n1"})
+		require.NoError(t, err)
+	}
+
+	// excludeTypes=[reaction], limit=10: 新しい 10 件は全て reaction で除外されるが、
+	// 最古の follow を拾って返す。
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, []string{"reaction"})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, TypeFollow, out[0].Type)
+}
+
+// #1953-3: sinceId のみ指定時は sinceId より新しい「最古」の limit 件を昇順で
+// 返す (upstream XRANGE 方向)。旧実装は常に新しい順で取り、新しい側 limit 件を
+// 返していた。
+func TestService_List_SinceIdReturnsOldestAscending(t *testing.T) {
+	svc := newTestSvc(t)
+	ctx := context.Background()
+
+	ids := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		n, err := svc.Create(ctx, CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: TypeFollow})
+		require.NoError(t, err)
+		ids = append(ids, n.ID)
+	}
+
+	// ids[0] が最古。sinceId=ids[0], limit=2 -> ids[0] より新しい最古の 2 件
+	// (ids[1], ids[2]) を昇順で返す。
+	out, err := svc.List(ctx, "alice", ids[0], "", 2, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	assert.Equal(t, ids[1], out[0].ID, "oldest-after-sinceId first (ascending)")
+	assert.Equal(t, ids[2], out[1].ID)
 }
 
 // stubStreamingPublisher records every PublishNotification call.
@@ -373,12 +419,12 @@ func TestService_ListLimitClampingDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// limit <= 0 はデフォルト10
-	out, err := svc.List(ctx, "alice", 0)
+	out, err := svc.List(ctx, "alice", "", "", 0, nil, nil)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 
 	// limit > 100 は100にクランプ (要素は1件のみだが正常終了することを確認)
-	out, err = svc.List(ctx, "alice", 1000)
+	out, err = svc.List(ctx, "alice", "", "", 1000, nil, nil)
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
@@ -414,7 +460,7 @@ func TestService_Flush(t *testing.T) {
 	require.NoError(t, svc.MarkAllAsRead(ctx, "alice"))
 
 	require.NoError(t, svc.Flush(ctx, "alice"))
-	out, err := svc.List(ctx, "alice", 10)
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 
@@ -430,7 +476,7 @@ func TestService_RedisErrors(t *testing.T) {
 	_, err := svc.Create(ctx, CreateInput{NotifieeID: "u", NotifierID: "v", Type: TypeFollow})
 	assert.Error(t, err)
 
-	_, err = svc.List(ctx, "u", 10)
+	_, err = svc.List(ctx, "u", "", "", 10, nil, nil)
 	assert.Error(t, err)
 
 	err = svc.MarkAllAsRead(ctx, "u")
@@ -501,7 +547,7 @@ func TestService_List_SkipsBadEntries(t *testing.T) {
 	_, err := svc.Create(ctx, CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: TypeFollow})
 	require.NoError(t, err)
 
-	out, err := svc.List(ctx, "alice", 10)
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeFollow, out[0].Type)

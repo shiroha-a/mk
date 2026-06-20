@@ -44,7 +44,7 @@ func TestHook_OnNoteCreated_ReplyNotification(t *testing.T) {
 	note := &model.Note{ID: "n_reply", UserID: "bob"}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeReply, out[0].Type)
@@ -58,7 +58,7 @@ func TestHook_OnNoteCreated_ReplyToSelfSkipped(t *testing.T) {
 	note := &model.Note{ID: "n_reply", UserID: "alice"}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, parent, nil)
 
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -72,7 +72,7 @@ func TestHook_OnNoteCreated_PureRenote(t *testing.T) {
 	note := &model.Note{ID: "n_renote", UserID: "bob", RenoteID: &target}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, original)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeRenote, out[0].Type)
@@ -89,7 +89,7 @@ func TestHook_OnNoteCreated_QuoteRenote(t *testing.T) {
 	note := &model.Note{ID: "n_quote", UserID: "bob", RenoteID: &target, Text: &text}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, original)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeQuote, out[0].Type)
@@ -106,7 +106,7 @@ func TestHook_OnNoteCreated_Mention(t *testing.T) {
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeMention, out[0].Type)
@@ -123,7 +123,7 @@ func TestHook_OnNoteCreated_MentionSkipsSelfAndUnknown(t *testing.T) {
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
 	// 自分自身&存在しない/空文字はスキップされる
-	out, _ := svc.List(context.Background(), "bob", 10)
+	out, _ := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -139,7 +139,7 @@ func TestHook_OnNoteCreated_MentionDedupedWithReply(t *testing.T) {
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	// reply通知のみで、mentionは抑制される
 	require.Len(t, out, 1)
@@ -352,7 +352,7 @@ func TestHook_OnFollowed(t *testing.T) {
 	addLocalUser(repo, "alice", "alice")
 	h.OnFollowed("bob", "alice")
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeFollow, out[0].Type)
@@ -363,7 +363,7 @@ func TestHook_OnFollowRequested(t *testing.T) {
 	addLocalUser(repo, "alice", "alice")
 	h.OnFollowRequested("bob", "alice")
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeReceiveFollowReq, out[0].Type)
@@ -377,14 +377,14 @@ func TestHook_OnFollowRejected(t *testing.T) {
 	addLocalUser(repo, "alice", "alice")
 	// 既存の receive-follow-request 通知を alice (followee) 側に作っておく
 	h.OnFollowRequested("bob", "alice")
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Equal(t, TypeReceiveFollowReq, out[0].Type)
 
 	// reject されたら follower=bob 由来の receive-follow-request 通知を削除
 	h.OnFollowRejected("bob", "alice")
-	out, err = svc.List(context.Background(), "alice", 10)
+	out, err = svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out, "receiveFollowRequest from rejected follower should be removed")
 }
@@ -401,7 +401,7 @@ func TestHook_OnFollowAccepted(t *testing.T) {
 	addLocalUser(repo, "bob", "bob")
 	h.OnFollowAccepted("bob", "alice")
 
-	out, err := svc.List(context.Background(), "bob", 10)
+	out, err := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeFollowRequestAccept, out[0].Type)
@@ -412,7 +412,7 @@ func TestHook_OnPollVote(t *testing.T) {
 	addLocalUser(repo, "alice", "alice")
 	h.OnPollVote("alice", "bob", "n1", 2)
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypePollVote, out[0].Type)
@@ -425,7 +425,7 @@ func TestHook_OnReactionCreated(t *testing.T) {
 	addLocalUser(repo, "alice", "alice")
 	h.OnReactionCreated("alice", "bob", "n1", "👍")
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeReaction, out[0].Type)
@@ -524,7 +524,7 @@ func TestHook_OnReactionCreated_NeverConfigSuppresses(t *testing.T) {
 	repo.Profiles["alice"] = &model.UserProfile{UserID: "alice", NotificationRecieveConfig: datatypes.JSON(`{"reaction":{"type":"never"}}`)}
 	h.OnReactionCreated("alice", "bob", "n1", "👍")
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out, "reaction=never の notifiee には reaction 通知を配信しない")
 }
@@ -533,7 +533,7 @@ func TestHook_NotifyRemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addRemoteUser(repo, "alice", "alice", "remote.example")
 	h.OnFollowed("bob", "alice")
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -541,7 +541,7 @@ func TestHook_NotifyRemoteSkipped(t *testing.T) {
 func TestHook_NotifyMissingUserSkipped(t *testing.T) {
 	h, svc, _ := newTestHook(t)
 	h.OnFollowed("bob", "ghost")
-	out, _ := svc.List(context.Background(), "ghost", 10)
+	out, _ := svc.List(context.Background(), "ghost", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -552,7 +552,7 @@ func TestHook_NotifyWithoutUserRepo(t *testing.T) {
 	h := NewHook(svc, nil)
 	h.OnFollowed("bob", "alice")
 
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 }
@@ -582,7 +582,7 @@ func TestHook_NotifyMutedNotifierSkipped(t *testing.T) {
 	h.SetMuteChecker(&stubMuteChecker{muted: true})
 
 	h.OnFollowed("bob", "alice")
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -592,7 +592,7 @@ func TestHook_NotifyMuteCheckerErrorAllowed(t *testing.T) {
 	h.SetMuteChecker(&stubMuteChecker{err: errSentinel})
 
 	h.OnFollowed("bob", "alice")
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	// muteチェッカーがエラーを返した場合は通知を許可する
 	assert.Len(t, out, 1)
 }
@@ -820,8 +820,8 @@ func TestHook_OnNoteCreated_VisibilityFiltersMentions(t *testing.T) {
 			}
 			h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
-			outA, _ := svc.List(context.Background(), "alice", 10)
-			outC, _ := svc.List(context.Background(), "charlie", 10)
+			outA, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
+			outC, _ := svc.List(context.Background(), "charlie", "", "", 10, nil, nil)
 			if tc.wantNotifyA {
 				require.Len(t, outA, 1, "alice should receive mention notification")
 				assert.Equal(t, TypeMention, outA[0].Type)
@@ -856,7 +856,7 @@ func TestHook_OnNoteCreated_VisibilityFiltersReplyAndRenote(t *testing.T) {
 			VisibleUserIDs: pq.StringArray{"someone_else"},
 		}
 		h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
-		out, _ := svc.List(context.Background(), "alice", 10)
+		out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 		assert.Empty(t, out, "reply target が visibleUserIds 外なら通知しない")
 	})
 
@@ -874,7 +874,7 @@ func TestHook_OnNoteCreated_VisibilityFiltersReplyAndRenote(t *testing.T) {
 			VisibleUserIDs: pq.StringArray{"someone_else"},
 		}
 		h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, original)
-		out, _ := svc.List(context.Background(), "alice", 10)
+		out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 		assert.Empty(t, out, "renote target が visibleUserIds 外なら通知しない")
 	})
 }

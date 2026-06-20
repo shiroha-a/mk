@@ -225,24 +225,17 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
 		return nil, map[string]*model.User{}, map[string]*model.Note{}, nil
 	}
-	rows, err := h.svc.List(c.Request().Context(), user.ID, req.Limit)
+	// svc.List が upstream NotificationService.getNotifications 相当に cursor
+	// (sinceId/untilId)・向き (sinceId-only は昇順)・type filter・limit を適用して
+	// 返す (#1953)。ここではその後段で upstream packMany 側の drop (解決済み follow
+	// request / invalid notifier / 不可視 note) を適用する。
+	rows, err := h.svc.List(c.Request().Context(), user.ID, req.SinceID, req.UntilID, req.Limit, req.IncludeTypes, req.ExcludeTypes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	// includeTypes / excludeTypes フィルタ
-	includeSet := make(map[string]bool, len(req.IncludeTypes))
-	for _, t := range req.IncludeTypes {
-		includeSet[t] = true
-	}
-	excludeSet := make(map[string]bool, len(req.ExcludeTypes))
-	for _, t := range req.ExcludeTypes {
-		excludeSet[t] = true
-	}
-
 	// 2-pass で組み立てる:
-	//   pass 1: cursor / type / followReq filter を通して残った rows と、
-	//           その notifierID / noteID を集約
+	//   pass 1: followReq filter を通して残った rows と notifierID を集約
 	//   pass 2: userRepo.FindManyByIDs / noteRepo.FindManyByIDsWithUser で
 	//           まとめて引き、map で O(1) 解決して PackNotifications に渡す
 	// (旧実装は 1 通知ごとに FindByID + FindByIDWithRelations を呼んで最大
@@ -250,20 +243,6 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	filtered := make([]*notification.Notification, 0, len(rows))
 	notifierIDSet := make(map[string]struct{})
 	for _, n := range rows {
-		// カーソルベースページネーション
-		if req.SinceID != "" && n.ID <= req.SinceID {
-			continue
-		}
-		if req.UntilID != "" && n.ID >= req.UntilID {
-			continue
-		}
-		// タイプフィルタ
-		if len(includeSet) > 0 && !includeSet[string(n.Type)] {
-			continue
-		}
-		if excludeSet[string(n.Type)] {
-			continue
-		}
 		// 既に解決された follow request (accept / reject で消えた) に対応する
 		// receiveFollowRequest 通知はユーザー視点で既に古く「残り続ける」ので
 		// 除外する (#349 コメント対応、本家 NotificationEntityService 互換)。
@@ -306,11 +285,9 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	}
 	// noteByID 構築には CanSeeNote ゲートを挟む。followers / specified note は
 	// 通知 recipient が author の follower でない / visibleUserIds に含まれない
-	// 場合に embed を nil 化する。これが無いと B の followers note への reply
-	// 通知経由で「A が B を follow していなくても」B の full note + author が
-	// 漏れる (#1444 IDOR)。通知行自体は残し、note field だけ落とすことで本家
-	// NotificationEntityService と同じ shape (noteId は残るが detail は無い) を
-	// 維持する。queryService 未配線時は fail-closed で note embed を完全 skip
+	// 場合に不可視になる。これが無いと B の followers note への reply 通知経由で
+	// 「A が B を follow していなくても」B の full note + author が漏れる
+	// (#1444 IDOR)。queryService 未配線時は fail-closed で note 解決を完全 skip
 	// する (= production router は必ず wire、test の partial setup を漏れに
 	// 繋げない)。
 	noteByID := make(map[string]*model.Note, len(noteIDSet))
@@ -325,6 +302,27 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 				noteByID[nn.ID] = nn
 			}
 		}
+	}
+
+	// upstream packMany は note-required 通知 (noteId を持つ type) の note が削除済
+	// または viewer に不可視で pack できない場合、通知行ごと drop する
+	// (`validNotifications.filter(x => !('noteId' in x) || packedNotes.has(x.noteId))`、
+	// #1953)。以前は note embed だけ nil 化して行を残していたが、upstream は noteId
+	// だけの通知を返さない。noteByID は可視性 filter 済なので NoteID があるのに
+	// noteByID に無い行を落とす。repo / queryService 配線済のときだけ適用する
+	// (未配線の partial test では note 解決自体が走らず、全 note-required 通知を
+	// 誤って落とさないため)。
+	if h.noteRepo != nil && h.queryService != nil {
+		kept := filtered[:0]
+		for _, n := range filtered {
+			if n.NoteID != "" {
+				if _, ok := noteByID[n.NoteID]; !ok {
+					continue
+				}
+			}
+			kept = append(kept, n)
+		}
+		filtered = kept
 	}
 	return filtered, notifierByID, noteByID, nil
 }

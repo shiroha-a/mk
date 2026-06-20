@@ -43,7 +43,7 @@ func TestHook_OnNoteCreated_NoteNotificationToNotifyFollower(t *testing.T) {
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil)
 
-	out, err := svc.List(context.Background(), "bob", 10)
+	out, err := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeNote, out[0].Type)
@@ -62,7 +62,7 @@ func TestHook_OnNoteCreated_NoteNotificationSkippedForReply(t *testing.T) {
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic, ReplyID: &replyID}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, parent, nil)
 
-	out, _ := svc.List(context.Background(), "bob", 10)
+	out, _ := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	assert.Empty(t, out, "reply は note 通知を発火しない")
 }
 
@@ -75,7 +75,7 @@ func TestHook_OnNoteCreated_NoteNotificationSkippedForSpecified(t *testing.T) {
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilitySpecified}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil)
 
-	out, _ := svc.List(context.Background(), "bob", 10)
+	out, _ := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	assert.Empty(t, out, "specified note は note 通知を発火しない")
 }
 
@@ -92,7 +92,7 @@ func TestHook_OnNoteCreated_NoteNotificationSkipsRenoteMuted(t *testing.T) {
 	note := &model.Note{ID: "r1", UserID: "alice", Visibility: model.NoteVisibilityPublic, RenoteID: &target}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, original)
 
-	out, _ := svc.List(context.Background(), "bob", 10)
+	out, _ := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	assert.Empty(t, out, "renote-mute 済みフォロワーには pure renote の note 通知を送らない")
 }
 
@@ -109,7 +109,7 @@ func TestHook_OnNoteCreated_NoteNotificationQuoteIgnoresRenoteMute(t *testing.T)
 	note := &model.Note{ID: "q1", UserID: "alice", Visibility: model.NoteVisibilityPublic, RenoteID: &target, Text: &text}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, original)
 
-	out, err := svc.List(context.Background(), "bob", 10)
+	out, err := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeNote, out[0].Type)
@@ -126,7 +126,7 @@ func TestHook_OnNoteCreated_NoteNotificationSkipsNonNotifyFollower(t *testing.T)
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil)
 
-	out, _ := svc.List(context.Background(), "bob", 10)
+	out, _ := svc.List(context.Background(), "bob", "", "", 10, nil, nil)
 	assert.Empty(t, out, "notify 未設定のフォロワーには送らない")
 }
 
@@ -138,7 +138,7 @@ func TestHook_OnNoteCreated_NoteNotificationDisabledWithoutRepo(t *testing.T) {
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil)
 
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -158,7 +158,7 @@ func TestHook_SelfNotifications(t *testing.T) {
 			h, svc, repo := newTestHook(t)
 			addLocalUser(repo, "alice", "alice")
 			c.fire(h, "alice")
-			out, err := svc.List(context.Background(), "alice", 10)
+			out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 			require.NoError(t, err)
 			require.Len(t, out, 1)
 			assert.Equal(t, c.want, out[0].Type)
@@ -172,7 +172,7 @@ func TestHook_OnRoleAssigned(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addLocalUser(repo, "alice", "alice")
 	h.OnRoleAssigned("alice", "role1")
-	out, err := svc.List(context.Background(), "alice", 10)
+	out, err := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeRoleAssigned, out[0].Type)
@@ -185,7 +185,7 @@ func TestHook_OnRoleAssigned_RemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addRemoteUser(repo, "remote", "remote", "example.com")
 	h.OnRoleAssigned("remote", "role1")
-	out, _ := svc.List(context.Background(), "remote", 10)
+	out, _ := svc.List(context.Background(), "remote", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -196,7 +196,7 @@ func TestHook_OnChatRoomInvitationReceived(t *testing.T) {
 	addLocalUser(repo, "invitee", "invitee")
 	addLocalUser(repo, "inviter", "inviter")
 	h.OnChatRoomInvitationReceived("invitee", "inviter", "inv1")
-	out, err := svc.List(context.Background(), "invitee", 10)
+	out, err := svc.List(context.Background(), "invitee", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	assert.Equal(t, TypeChatRoomInvitationReceived, out[0].Type)
@@ -209,7 +209,7 @@ func TestHook_OnChatRoomInvitationReceived_RemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addRemoteUser(repo, "remote", "remote", "example.com")
 	h.OnChatRoomInvitationReceived("remote", "inviter", "inv1")
-	out, _ := svc.List(context.Background(), "remote", 10)
+	out, _ := svc.List(context.Background(), "remote", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -218,7 +218,7 @@ func TestHook_SelfNotifications_RemoteSkipped(t *testing.T) {
 	h, svc, repo := newTestHook(t)
 	addRemoteUser(repo, "remote", "remote", "example.com")
 	h.OnLogin("remote")
-	out, _ := svc.List(context.Background(), "remote", 10)
+	out, _ := svc.List(context.Background(), "remote", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }
 
@@ -232,7 +232,7 @@ func TestHook_OnNoteCreated_NoteNotificationSkipsSelfFollow(t *testing.T) {
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil)
 
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	assert.Empty(t, out, "自己フォロー edge には note 通知を送らない")
 }
 
@@ -257,6 +257,6 @@ func TestHook_OnNoteCreated_NoteNotificationListError(t *testing.T) {
 
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	assert.NotPanics(t, func() { h.OnNoteCreated(note, &model.User{ID: "alice"}, nil, nil) })
-	out, _ := svc.List(context.Background(), "alice", 10)
+	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
 	assert.Empty(t, out)
 }

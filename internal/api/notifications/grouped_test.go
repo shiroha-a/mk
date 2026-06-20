@@ -270,12 +270,13 @@ func TestGrouped_LimitSlicesAfterGrouping(t *testing.T) {
 	require.Len(t, resp, 2)
 }
 
-// renote 通知だが target note が visible map に無い (= 非可視 / 解決不能) と
-// grouping key が空になり別グループのまま残る fail-closed を確認する。
-func TestGrouped_RenoteWithUnresolvableTargetStaysSeparate(t *testing.T) {
+// renote 通知だが target note が削除済 / 非可視で pack できない場合、upstream
+// packMany は通知行ごと drop する (#1953)。grouped 経路でも note-required 通知が
+// 落ちて空になることを確認する (以前は noteId だけの行を残していた)。
+func TestGrouped_RenoteWithUnresolvableTargetDropped(t *testing.T) {
 	h, svc, userRepo, noteRepo := groupedHandler(t)
 	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
-	// renote note 自体を repo に登録しない → noteByID に乗らず RenoteID 取得不能。
+	// renote note 自体を repo に登録しない → noteByID に乗らず note pack 不能。
 	_ = noteRepo
 
 	ctx := context.Background()
@@ -289,9 +290,7 @@ func TestGrouped_RenoteWithUnresolvableTargetStaysSeparate(t *testing.T) {
 	require.NoError(t, h.Grouped(c))
 
 	resp := decodeGrouped(t, rec.Body.Bytes())
-	require.Len(t, resp, 2)
-	assert.Equal(t, "renote", resp[0]["type"])
-	assert.Equal(t, "renote", resp[1]["type"])
+	require.Len(t, resp, 0, "note を pack できない note-required 通知は drop される (#1953)")
 }
 
 // grouped endpoint も markAsRead の暗黙副作用を持つ (#420 と同挙動)。

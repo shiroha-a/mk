@@ -471,7 +471,7 @@ func TestFlush_Success(t *testing.T) {
 
 	// handler が Flush() を呼んでいれば stream 長 0。
 	// 以前は MarkAllAsRead() を呼んでいたため元通知が残ってしまっていた。
-	out, err := svc.List(ctx, "alice", 10)
+	out, err := svc.List(ctx, "alice", "", "", 10, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -831,11 +831,11 @@ func TestShow_FollowersReply_NonFollower_NoteHidden(t *testing.T) {
 
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp, 1, "通知行自体は残ること (= IDOR 修正で通知を消すのではなく embed のみ落とす)")
-	assert.Equal(t, "reply", resp[0]["type"])
-	assert.Equal(t, "n1", resp[0]["noteId"], "noteId は echo される (本家 shape 互換)")
-	_, hasNote := resp[0]["note"]
-	assert.False(t, hasNote, "followers note の full body が非フォロワーに漏れないこと (#1444)")
+	// upstream packMany は note が不可視/削除済で pack できない note-required 通知を
+	// 行ごと drop する (`!('noteId' in x) || packedNotes.has(x.noteId)`、#1953)。以前は
+	// embed のみ nil 化して noteId だけの行を残していたが upstream 非互換だった。
+	// 非フォロワーには followers note への reply 通知自体が出ない (#1444 IDOR も更に強化)。
+	require.Len(t, resp, 0, "不可視 note の note-required 通知は行ごと drop される (#1953 / #1444)")
 }
 
 // 上記の positive counterpart: A が B を follow していれば followers reply
