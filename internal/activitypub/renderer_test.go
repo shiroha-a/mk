@@ -234,6 +234,26 @@ func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	assert.False(t, p.ManuallyApproves)
 }
 
+// #1956: system actor (username に '.' を含む relay.actor / instance.actor /
+// proxy.actor 等) は AS actor type 'Application' で render する。isSystem は
+// IsBot より優先される (upstream renderPerson)。
+func TestRenderer_RenderPerson_SystemActorIsApplication(t *testing.T) {
+	r := newRenderer()
+	// relay.actor は system account として作成され IsBot=true。それでも
+	// Application が優先されること (isSystem > isBot) を確認する。
+	u := &model.User{ID: "u_relay", Username: "relay.actor", IsBot: true}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	assert.Equal(t, "Application", p.Type)
+}
+
+// 通常の bot (username に '.' 無し) は Service のまま。
+func TestRenderer_RenderPerson_BotIsService(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u_bot", Username: "botuser", IsBot: true}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	assert.Equal(t, "Service", p.Type)
+}
+
 func TestRenderer_RenderPerson_AssertionMethodOmittedWhenNoEd25519(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "alice"}

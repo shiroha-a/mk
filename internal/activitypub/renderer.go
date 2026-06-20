@@ -188,10 +188,16 @@ type PollResolver interface {
 	FindByNoteID(noteID string) (*model.Poll, error)
 }
 
-// actorTypeForUser returns the AP actor `type` to emit for a local user.
-// 現状: IsBot=true なら Service、それ以外は Person。Application (system actor)
-// 出力は将来のシステムアカウント機能で別経路を追加する想定。
+// actorTypeForUser returns the AP actor `type` to emit for a local user,
+// mirroring upstream ApRendererService.renderPerson: a system account
+// (username が '.' を含む、例 relay.actor / instance.actor / proxy.actor) は
+// 'Application' を最優先で返す。それ以外は IsBot なら 'Service'、通常は 'Person'
+// (#1956)。Mastodon/Misskey の relay ロジックや actor-type ベースの UI は
+// Application を特別扱いするため、wire 上一致させる必要がある。
 func actorTypeForUser(u *model.User) string {
+	if strings.Contains(u.Username, ".") {
+		return "Application"
+	}
 	if u.IsBot {
 		return "Service"
 	}
