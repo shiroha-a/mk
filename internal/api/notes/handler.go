@@ -836,6 +836,15 @@ func (h *Handler) Search(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
+	// upstream searchNoteByLike / searchNoteByMeilisearch は generateBaseNoteFilteringQuery
+	// で suspended-user / blocked-host (匿名でも) と被block/mute/renote-mute user の note を
+	// 除外する。provider は visibility しか掛けないため、search-by-tag 等と同じく post-fetch で
+	// applyMuteBlock を適用する (#1938)。upstream search は thread-mute を掛けないため
+	// applyThreadMute は不要。
+	notes, err = h.applyMuteBlock(viewer, notes)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 

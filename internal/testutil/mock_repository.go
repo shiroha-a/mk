@@ -1051,10 +1051,13 @@ func (m *MockNoteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.
 		if !strings.Contains(strings.ToLower(*n.Text), q) {
 			return false
 		}
-		if f.UserID != "" && n.UserID != f.UserID {
-			return false
-		}
-		if f.ChannelID != "" {
+		// upstream searchNoteByLike は userId 優先の排他 (userId があれば channelId は
+		// 無視)。real repo (SearchByFilter) の else-if と挙動を揃える (#1938)。
+		if f.UserID != "" {
+			if n.UserID != f.UserID {
+				return false
+			}
+		} else if f.ChannelID != "" {
 			if n.ChannelID == nil || *n.ChannelID != f.ChannelID {
 				return false
 			}

@@ -1456,6 +1456,12 @@ func TestNoteRepository_SearchByFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"n_se_5"}, idsOf(out))
 
+	// #1938: userId と channelId 両指定時は userId 優先 (channelId 無視)。旧実装は両
+	// AND で n_se_5 のみだったが、upstream else-if では localUser の全 hello note (n_se_1 含む)。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", UserID: localUser.ID, ChannelID: channelID, Limit: 10})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_se_1", "n_se_5"}, idsOf(out), "userId 指定時は channelId を無視 (userId 優先排他)")
+
 	// host フィルタ "." → ローカル限定
 	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "hello", Host: ".", Limit: 10})
 	require.NoError(t, err)

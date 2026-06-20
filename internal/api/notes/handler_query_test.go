@@ -433,6 +433,39 @@ func TestSearch_OK(t *testing.T) {
 	shapetest.Assert(t, "Note", resp[0]) // L3 (#1316)
 }
 
+// #1938 F1: notes/search は suspended author の note を除外する (applyMuteBlock 経由、
+// upstream generateBaseNoteFilteringQuery 相当)。匿名でも効く。
+func TestSearch_ExcludesSuspendedAuthor(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	hello := "hello suspended"
+	n := seedPublicNote(repo, "n1")
+	n.Text = &hello
+	n.User.IsSuspended = true
+
+	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"hello"}`)
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp, "suspended author の note は search 結果から除外")
+}
+
+// #1938 F5: userId 指定時は channelId を無視する (upstream の userId 優先排他)。
+// author の note (channel 無し) は channelId="other" を指定しても userId 一致で返る。
+func TestSearch_UserIDOverridesChannelID(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	hello := "hello exclusive"
+	n := seedPublicNote(repo, "n1") // UserID="author", channel 無し
+	n.Text = &hello
+
+	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"hello","userId":"author","channelId":"other"}`)
+	require.NoError(t, h.Search(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1, "userId 一致なら channelId 不一致でも返る (channelId は無視)")
+}
+
 // #1783: canSearchNotes policy が false の viewer (匿名含む) は UNAVAILABLE。
 func TestSearch_CanSearchNotesDenied(t *testing.T) {
 	h, _ := newQueryHandler(t)
