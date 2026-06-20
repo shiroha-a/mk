@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -420,6 +421,51 @@ func TestTwoFAUpdateKey_Success(t *testing.T) {
 	rec := postExtra(h.TwoFAUpdateKey, `{"password":"pass","credentialId":"key1","name":"renamed"}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, "renamed", skRepo.keys["key1"].Name)
+}
+
+// #1952 upstream update-key.ts の paramDef は {name, credentialId} のみで password を
+// 受け付けない。standard misskey-js client は password を送らないので、password 無しで
+// 204 成功し rename されることを検証する。
+func TestTwoFAUpdateKey_NoPasswordSucceeds(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u1", Name: "old", PublicKey: "pk",
+	}))
+	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"key1","name":"renamed"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "renamed", skRepo.keys["key1"].Name)
+}
+
+// name が maxLength:30 超は INVALID_PARAM (upstream paramDef、#1952)。
+func TestTwoFAUpdateKey_NameTooLong(t *testing.T) {
+	h, repo, skRepo := newWebAuthnHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{
+		ID: "key1", UserID: "u1", Name: "old", PublicKey: "pk",
+	}))
+	long := strings.Repeat("a", 31)
+	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"key1","name":"`+long+`"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+	// 名前は変更されない。
+	assert.Equal(t, "old", skRepo.keys["key1"].Name)
+}
+
+// securityKeyRepo 未配線 (WebAuthn 未設定) は 503 UNAVAILABLE (#1952)。
+func TestTwoFAUpdateKey_NotConfigured(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"k","name":"x"}`, user)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// session user 不在は ACCESS_DENIED (secure session 認証前提、#1952)。
+func TestTwoFAUpdateKey_NoUser(t *testing.T) {
+	h, _, _ := newWebAuthnHandler(t)
+	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"k","name":"x"}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 }
 
 // #1555 他人所有の key を更新しようとすると ACCESS_DENIED (NO_SUCH_KEY ではない)。

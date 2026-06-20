@@ -487,16 +487,28 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 // 鍵の表示名を変更する。
 func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	var req struct {
-		Password     string `json:"password"`
 		CredentialID string `json:"credentialId"`
 		Name         string `json:"name"`
 	}
-	if err := c.Bind(&req); err != nil || req.Password == "" || req.CredentialID == "" || req.Name == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password / credentialId / name are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	if err := c.Bind(&req); err != nil || req.CredentialID == "" || req.Name == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "credentialId / name are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	user, _, ok := h.requireWebAuthn(c, req.Password, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
-	if !ok {
-		return nil
+	// upstream paramDef は name: { minLength: 1, maxLength: 30 }。TwoFAKeyDone と
+	// 同じく API 直叩き経路の defense-in-depth として上限も enforce する (#1952)。
+	if len(req.Name) > twoFAKeyNameMaxLen {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is too long.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// upstream update-key.ts は paramDef を {name, credentialId} のみで宣言し、
+	// secure:true の session 認証だけで password を再確認しない。standard misskey-js
+	// client ({name, credentialId} のみ送信) で passkey rename が壊れるため、mk-go も
+	// password 必須を撤回し session 認証 + 所有権チェックに依拠する (#1952、
+	// TwoFAPasswordLess #758 と同方針)。
+	if h.securityKeyRepo == nil {
+		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "WebAuthn is not configured.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	user := middleware.GetUser(c)
+	if user == nil {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// upstream (update-key.ts) は key not-found (NO_SUCH_KEY) と not-owned
 	// (ACCESS_DENIED) を区別する。UpdateName は両者を ErrRecordNotFound に
