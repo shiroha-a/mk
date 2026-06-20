@@ -1100,9 +1100,10 @@ func (s *Server) setupRoutes() {
 		users, err := userRepo.ListUsers(model.UserListFilter{
 			State: req.State, Origin: req.Origin, Sort: req.Sort,
 			Limit: req.Limit, Offset: req.Offset,
-			Hostname:         req.Hostname,
-			ExplorableOnly:   true,
-			ExcludeRelatedTo: viewerID,
+			Hostname:             req.Hostname,
+			ExplorableOnly:       true,
+			ExcludeRelatedTo:     viewerID,
+			UpdatedAtSortNonNull: true, // #1975: public /users は updatedAt sort で NULL updatedAt を除外
 		})
 		if err != nil {
 			return c.JSON(http.StatusOK, []any{})

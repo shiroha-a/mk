@@ -815,6 +815,46 @@ func TestUserRepository_ListUsers_ExplorableAndMuteBlockFilter(t *testing.T) {
 	assert.False(t, got[blocker.ID], "viewer を block した user も除外 (双方向、#1957-b)")
 }
 
+// #1975: public /users は +updatedAt/-updatedAt sort で updatedAt IS NOT NULL を
+// 強制 (UpdatedAtSortNonNull=true)。admin/show-users (flag false) は NULL を保持する。
+func TestUserRepository_ListUsers_UpdatedAtSortNonNull(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	withUpd := insertTestUser(t, "lu_upd_y", "luupdy")
+	defer cleanupUser(t, withUpd.ID)
+	noUpd := insertTestUser(t, "lu_upd_n", "luupdn")
+	defer cleanupUser(t, noUpd.ID)
+	// GORM は UpdatedAt を Create 時に自動設定するため、NULL updatedAt は明示的に
+	// 落として作る (upstream TypeORM では未更新 user の updatedAt が NULL になりうる)。
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = NULL WHERE id = ?`, noUpd.ID).Error)
+
+	idSet := func(filter model.UserListFilter) map[string]bool {
+		us, err := repo.ListUsers(filter)
+		require.NoError(t, err)
+		m := make(map[string]bool, len(us))
+		for _, u := range us {
+			m[u.ID] = true
+		}
+		return m
+	}
+
+	// public /users mode: NULL updatedAt を除外。
+	got := idSet(model.UserListFilter{Sort: "+updatedAt", UpdatedAtSortNonNull: true, Limit: 1000})
+	assert.True(t, got[withUpd.ID], "updatedAt 有 user は残る")
+	assert.False(t, got[noUpd.ID], "public /users は updatedAt NULL を除外 (#1975)")
+
+	// admin/show-users mode (flag false): NULL を保持 (NULLS LAST)。
+	got = idSet(model.UserListFilter{Sort: "+updatedAt", Limit: 1000})
+	assert.True(t, got[withUpd.ID])
+	assert.True(t, got[noUpd.ID], "admin/show-users は updatedAt NULL を保持 (NULLS LAST)")
+
+	// -updatedAt sort でも同じ (public は NULL 除外、admin は保持)。
+	got = idSet(model.UserListFilter{Sort: "-updatedAt", UpdatedAtSortNonNull: true, Limit: 1000})
+	assert.True(t, got[withUpd.ID])
+	assert.False(t, got[noUpd.ID], "public /users は -updatedAt でも NULL を除外 (#1975)")
+	got = idSet(model.UserListFilter{Sort: "-updatedAt", Limit: 1000})
+	assert.True(t, got[noUpd.ID], "admin/show-users は -updatedAt でも NULL を保持")
+}
+
 func TestUserRepository_ListUsers_LocalOnly(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	u := insertTestUser(t, "lu_loc", "localonly")

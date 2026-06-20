@@ -530,8 +530,17 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 	case "-createdAt":
 		q = q.Order("id ASC")
 	case "+updatedAt":
+		// public users.ts は updatedAt sort 時 IS NOT NULL を andWhere して NULL
+		// updatedAt user を除外する (#1975)。admin/show-users は NULLS LAST で
+		// 保持するため UpdatedAtSortNonNull は public /users のみ true。
+		if filter.UpdatedAtSortNonNull {
+			q = q.Where(`"updatedAt" IS NOT NULL`)
+		}
 		q = q.Order(`"updatedAt" DESC NULLS LAST`)
 	case "-updatedAt":
+		if filter.UpdatedAtSortNonNull {
+			q = q.Where(`"updatedAt" IS NOT NULL`)
+		}
 		q = q.Order(`"updatedAt" ASC NULLS FIRST`)
 	case "+lastActiveDate":
 		q = q.Order(`"lastActiveDate" DESC NULLS LAST`)

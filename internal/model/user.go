@@ -92,4 +92,8 @@ type UserListFilter struct {
 	// および viewer を block している user を除外する (upstream
 	// generateMutedUserQueryForUsers / generateBlockQueryForUsers、#1957-b)。
 	ExcludeRelatedTo string
+	// UpdatedAtSortNonNull が true のとき、+updatedAt/-updatedAt sort で
+	// updatedAt IS NOT NULL を強制する (upstream public users.ts、#1975)。
+	// admin/show-users は NULLS LAST/FIRST で NULL を保持するため false のまま。
+	UpdatedAtSortNonNull bool
 }
