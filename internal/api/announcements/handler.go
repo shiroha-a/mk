@@ -442,12 +442,40 @@ func (h *Handler) AdminList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// upstream admin/announcements/list.ts は生 row を返す: public list 用の
+	// forYou / isRead は持たず、imageUrl は media-proxy せず raw を返す (#1967)。
+	// public 用 packAnnouncement を流用すると非 upstream な forYou/isRead が混入し、
+	// forYou の意味 (userId === me.id) とも乖離するため、ここでは明示的に組み立てる。
+	const tsFormat = "2006-01-02T15:04:05.000Z"
 	out := make([]map[string]any, 0, len(items))
 	for _, a := range items {
-		row := packAnnouncement(a, h.idGen)
-		row["userId"] = a.UserID
-		row["reads"] = reads[a.ID]
-		out = append(out, row)
+		createdAt := ""
+		if h.idGen != nil {
+			if t, err := h.idGen.ParseTime(a.ID); err == nil {
+				createdAt = t.UTC().Format(tsFormat)
+			}
+		}
+		var updatedAt *string
+		if a.UpdatedAt != nil {
+			s := a.UpdatedAt.UTC().Format(tsFormat)
+			updatedAt = &s
+		}
+		out = append(out, map[string]any{
+			"id":                     a.ID,
+			"createdAt":              createdAt,
+			"updatedAt":              updatedAt,
+			"title":                  a.Title,
+			"text":                   a.Text,
+			"imageUrl":               a.ImageURL, // raw (*string, nullable) — proxy しない
+			"icon":                   a.Icon,
+			"display":                a.Display,
+			"isActive":               a.IsActive,
+			"forExistingUsers":       a.ForExistingUsers,
+			"silence":                a.Silence,
+			"needConfirmationToRead": a.NeedConfirmationToRead,
+			"userId":                 a.UserID,
+			"reads":                  reads[a.ID],
+		})
 	}
 	return c.JSON(http.StatusOK, out)
 }

@@ -489,6 +489,36 @@ func TestAdminList_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1967: admin/announcements/list は upstream の生 row 形 (forYou/isRead 無し、
+// imageUrl は raw)。public list 用の packAnnouncement を流用しない。
+func TestAdminList_ShapeMatchesUpstream(t *testing.T) {
+	h, repo := newTestHandler(t)
+	remoteImg := "https://remote.example/img.png"
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	// global announcement (userId IS NULL) — mock ListForAdmin は userId 無し要求で
+	// global のみ返す。updatedAt non-null で .000Z 形式の経路も踏む。
+	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "t", Text: "x", IsActive: true, ImageURL: &remoteImg, UpdatedAt: &updated}
+	rec := doPost(h.AdminList, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	row := resp[0]
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", row["updatedAt"], "updatedAt は toISOString 互換 .000Z 形式 (#1967)")
+	_, hasForYou := row["forYou"]
+	assert.False(t, hasForYou, "admin/list に forYou key は出さない (#1967)")
+	_, hasIsRead := row["isRead"]
+	assert.False(t, hasIsRead, "admin/list に isRead key は出さない (#1967)")
+	// imageUrl は proxy せず raw を返す。
+	assert.Equal(t, remoteImg, row["imageUrl"], "imageUrl は raw (proxy しない、#1967)")
+	// upstream の生 row フィールドは揃う (userId は global なので null)。
+	assert.Contains(t, row, "userId")
+	assert.Nil(t, row["userId"])
+	assert.Contains(t, row, "reads")
+	assert.Contains(t, row, "forExistingUsers")
+}
+
 // /admin/user/<id> のお知らせタブが userId で narrow したときに、対象
 // ユーザー宛 announcement のみ返り、サーバー全体 announcement (userId
 // IS NULL) が混ざらないこと (#472)。
