@@ -3,6 +3,7 @@ package stream
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -482,6 +483,32 @@ func TestDispatcher_NonShareableChannel_AllowsMultiple(t *testing.T) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	assert.Len(t, d.channels, 2)
+}
+
+// #1943: 1 接続あたり maxChannelsPerConnection(32) を超えた connect は silent に無視する。
+func TestDispatcher_MaxChannelsPerConnection(t *testing.T) {
+	bus := newStubBus()
+	registry := NewRegistry()
+	registry.Register("test", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	conn := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	d := NewDispatcher(conn, registry, bus)
+
+	for i := 0; i < maxChannelsPerConnection; i++ {
+		d.HandleClientMessage("connect", json.RawMessage(fmt.Sprintf(`{"id":"ch%d","channel":"test"}`, i)))
+	}
+	d.mu.RLock()
+	n := len(d.channels)
+	d.mu.RUnlock()
+	require.Equal(t, maxChannelsPerConnection, n, "32 個までは登録できる")
+
+	// 33 個目は無視される (silent、登録されない)。
+	d.HandleClientMessage("connect", json.RawMessage(`{"id":"overflow","channel":"test"}`))
+	d.mu.RLock()
+	_, exists := d.channels["overflow"]
+	n = len(d.channels)
+	d.mu.RUnlock()
+	assert.Equal(t, maxChannelsPerConnection, n, "上限超過の connect は無視")
+	assert.False(t, exists, "overflow channel は登録されない")
 }
 
 // --- OAuth2 scope check (PermittedChannel) ---
