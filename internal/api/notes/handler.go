@@ -504,17 +504,24 @@ func validateCreateInput(req *CreateRequest, fileIDs []string) error {
 			return errors.New("text must contain at least one non-whitespace character")
 		}
 	}
-	// visibility enum (upstream create.ts:132)。空文字は service が public に default
-	// するため許容し、非空の不正値のみ弾く (#1930)。
-	switch model.NoteVisibility(req.Visibility) {
+	// visibility / reactionAcceptance enum (#1930)。notes/drafts/create と共有する
+	// (#1934)。
+	return validateNoteEnums(req.Visibility, req.ReactionAcceptance)
+}
+
+// validateNoteEnums checks the visibility / reactionAcceptance enum values shared
+// by notes/create and notes/drafts/create (upstream create.ts:132,138 /
+// drafts/create.ts:161,168). An empty visibility (the service defaults it to
+// public) and a nil reactionAcceptance (no restriction) are allowed; any other
+// value outside the enum returns an error that maps to INVALID_PARAM (#1930 / #1934).
+func validateNoteEnums(visibility string, reactionAcceptance *string) error {
+	switch model.NoteVisibility(visibility) {
 	case "", model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityFollowers, model.NoteVisibilitySpecified:
 	default:
 		return errors.New("visibility must be one of public, home, followers, specified")
 	}
-	// reactionAcceptance enum (upstream create.ts:138)。null (nil) は制限なしとして
-	// 許容、非 nil は 4 値のいずれかでなければ INVALID_PARAM (#1930)。
-	if req.ReactionAcceptance != nil {
-		switch *req.ReactionAcceptance {
+	if reactionAcceptance != nil {
+		switch *reactionAcceptance {
 		case "likeOnly", "likeOnlyForRemote", "nonSensitiveOnly", "nonSensitiveOnlyForLocalLikeOnlyForRemote":
 		default:
 			return errors.New("invalid reactionAcceptance")

@@ -85,6 +85,12 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
 	}
+	// visibility / reactionAcceptance enum 検証 (notes/create と共有、#1934)。
+	// draft 経由でも upstream drafts/create.ts:161,168 の enum 制約に揃え、不正値が
+	// scheduled-note 処理経由で投稿されるのを防ぐ。
+	if err := validateNoteEnums(req.Visibility, req.ReactionAcceptance); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), apierr.UUIDInvalidParam))
+	}
 	if req.Visibility == "" {
 		req.Visibility = "public"
 	}
@@ -216,6 +222,12 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.DraftID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("draftId is required."))
+	}
+	// visibility / reactionAcceptance enum 検証 (drafts/create と共有、#1934)。"" /
+	// nil は「変更しない」セマンティクスなので許容し、非空の不正値のみ弾く。paramDef
+	// 相当なので draft 不在 (404) より先に 400 を返す。
+	if err := validateNoteEnums(req.Visibility, req.ReactionAcceptance); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), apierr.UUIDInvalidParam))
 	}
 	draft, err := h.draftRepo.FindByIDAndUser(req.DraftID, user.ID)
 	if err != nil {

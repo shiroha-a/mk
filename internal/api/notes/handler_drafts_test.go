@@ -176,6 +176,23 @@ func TestDraftsCreate_DefaultVisibility(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1934: drafts/create も visibility / reactionAcceptance enum を検証する。
+func TestDraftsCreate_InvalidVisibility(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	rec := postDraft(h.DraftsCreate, `{"text":"x","visibility":"foo"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+	assert.Empty(t, repo.drafts, "不正値の draft は保存しない")
+}
+
+func TestDraftsCreate_InvalidReactionAcceptance(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	rec := postDraft(h.DraftsCreate, `{"text":"x","reactionAcceptance":"bogus"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+	assert.Empty(t, repo.drafts)
+}
+
 // create が replyId/renoteId/channelId/visibleUserIds/reactionAcceptance/
 // localOnly/hashtag/poll を永続化し、{createdDraft} で full shape を返す。
 func TestDraftsCreate_PersistsAllFieldsAndWraps(t *testing.T) {
@@ -454,6 +471,27 @@ func TestDraftsUpdate_InvalidParam(t *testing.T) {
 	h, _ := newDraftHandlerWithRepo()
 	rec := postDraft(h.DraftsUpdate, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #1934: drafts/update も visibility / reactionAcceptance enum を検証する。
+// 不正 enum は draft 不在 (404) より先に 400 で弾く (paramDef 相当)。
+func TestDraftsUpdate_InvalidVisibility(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	text := "old"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Text: &text, Visibility: "public"}
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","visibility":"foo"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+	assert.Equal(t, "public", repo.drafts["d1"].Visibility, "不正値で draft は変更されない")
+}
+
+func TestDraftsUpdate_InvalidReactionAcceptance(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	text := "old"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Text: &text, Visibility: "public"}
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","reactionAcceptance":"bogus"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
 }
 
 // #1421: 他人 draftID を投げると NO_SUCH_NOTE_DRAFT 404 で reject される
