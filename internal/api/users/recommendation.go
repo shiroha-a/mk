@@ -54,8 +54,11 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 		if peak > 0 {
 			weight = float64(r.Count) / float64(peak)
 		}
+		d := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
+		// 認証 viewer には viewer->user の relation block を付与 (upstream packMany(users, me)、#1973)。
+		h.viewerRelationRepos().Apply(&d, viewerID, bundle.User, bundle.Profile)
 		out = append(out, map[string]any{
-			"user":   entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen),
+			"user":   d,
 			"weight": weight,
 		})
 	}
@@ -180,7 +183,10 @@ func (h *Handler) UserRecommendation(c echo.Context) error {
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
 		profile := h.userService.GetProfile(u.ID)
-		out = append(out, entity.PackUserDetailed(u, profile, h.idGen))
+		d := entity.PackUserDetailed(u, profile, h.idGen)
+		// 認証 viewer には viewer->user の relation block を付与 (upstream packMany(users, me)、#1973)。
+		h.viewerRelationRepos().Apply(&d, viewer.ID, u, profile)
+		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
 }

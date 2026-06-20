@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/roles"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -240,6 +241,38 @@ func TestUsers_ReturnsAssignedUsers(t *testing.T) {
 	user, ok := resp[0]["user"].(map[string]any)
 	require.True(t, ok, "user は UserDetailed object")
 	assert.Equal(t, "alice", user["id"])
+}
+
+// #1973: roles/users の embed user に viewer 視点の relation block が乗る。
+// viewer が assigned user を follow していれば isFollowing=true、匿名なら省略。
+func TestUsers_EmbedsViewerRelation(t *testing.T) {
+	h, roleRepo, assignRepo, userRepo := newUsersTestHandler(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: true}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", RoleID: "r1", UserID: "alice"}))
+	followingRepo := testutil.NewMockFollowingRepository()
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "viewer1", FolloweeID: "alice"}
+	h.SetRelationRepos(userrelation.Repos{Following: followingRepo})
+
+	// 認証 viewer: isFollowing=true。
+	vc := newCtxWithViewer(`{"roleId":"r1"}`, "viewer1")
+	require.NoError(t, h.Users(vc.ctx))
+	require.Equal(t, http.StatusOK, vc.rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(vc.rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	user := resp[0]["user"].(map[string]any)
+	assert.Equal(t, true, user["isFollowing"], "viewer の embed user に isFollowing=true (#1973)")
+
+	// 匿名: relation 省略。
+	rec := doPost(h.Users, `{"roleId":"r1"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	anonUser := anon[0]["user"].(map[string]any)
+	_, has := anonUser["isFollowing"]
+	assert.False(t, has, "匿名には relation を出さない (#1973)")
 }
 
 // 期限切れの割当 (expiresAt <= now) はユーザー一覧に現れない (#1544)。

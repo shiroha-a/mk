@@ -2302,6 +2302,7 @@ func (s *Server) setupRoutes() {
 	rolesHandler.SetNoteFieldResolver(noteFieldResolver)
 	rolesHandler.SetUserRepo(userRepo)
 	rolesHandler.SetMuteBlockRepos(mutingRepo, blockingRepo, channelMutingRepo) // #1544: Notes の mute/block/channel-mute filter
+	rolesHandler.SetRelationRepos(listRelationRepos)                            // #1973: roles/users の embed user に viewer-relation
 	api.POST("/roles/list", rolesHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/roles/show", rolesHandler.Show)
 	api.POST("/roles/users", rolesHandler.Users)

@@ -242,6 +242,20 @@ func (h *Handler) SetMemoRepo(r repository.UserMemoRepository) {
 	h.memoRepo = r
 }
 
+// viewerRelationRepos returns the Repos bundle used to populate viewer->target
+// relation fields on packed users (users/show, users/recommendation,
+// get-frequently-replied-users)。二重実装を避けるため抽出 (#1802 / #1973)。
+func (h *Handler) viewerRelationRepos() userrelation.Repos {
+	return userrelation.Repos{
+		Following:     h.followingRepo,
+		Blocking:      h.blockingRepo,
+		Muting:        h.mutingRepo,
+		RenoteMuting:  h.renoteMutingRepo,
+		FollowRequest: h.followRequestRepo,
+		Memo:          h.memoRepo,
+	}
+}
+
 // SetFollowingRepo attaches a FollowingRepository for follow relation queries.
 func (h *Handler) SetFollowingRepo(r repository.FollowingRepository) {
 	h.followingRepo = r
@@ -565,14 +579,7 @@ func (h *Handler) Show(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
-	viewerIsFollowing := userrelation.Repos{
-		Following:     h.followingRepo,
-		Blocking:      h.blockingRepo,
-		Muting:        h.mutingRepo,
-		RenoteMuting:  h.renoteMutingRepo,
-		FollowRequest: h.followRequestRepo,
-		Memo:          h.memoRepo,
-	}.Apply(&detailed, viewerID, bundle.User, bundle.Profile)
+	viewerIsFollowing := h.viewerRelationRepos().Apply(&detailed, viewerID, bundle.User, bundle.Profile)
 
 	// viewer===target の self-view では upstream `pack(user, me)` 互換で
 	// MeDetailed 拡張 field (isExplorable / noCrawle 等 11 個 + #985 で

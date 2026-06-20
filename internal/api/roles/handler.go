@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -39,6 +40,15 @@ type Handler struct {
 	mutingRepo        repository.MutingRepository
 	blockingRepo      repository.BlockingRepository
 	channelMutingRepo repository.ChannelMutingRepository
+	// relation は roles/users の embed user に viewer 視点の relation block を
+	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1973)。
+	relation userrelation.Repos
+}
+
+// SetRelationRepos wires the repositories used to populate viewer-relative
+// relation fields on roles/users embedded users (#1973). Unset = relations omitted.
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // SetUserRepo wires a UserRepository so roles/notes filters out notes that
@@ -194,6 +204,10 @@ func (h *Handler) Users(c echo.Context) error {
 
 	// reporter/assignee と同様に user_profile を 1 batch で解決して UserDetailed を
 	// pack する (N+1 回避)。userRepo 未配線時は profile なしで pack する。
+	viewerID := ""
+	if v := middleware.GetUser(c); v != nil {
+		viewerID = v.ID
+	}
 	profByID := h.assignmentProfiles(assigns)
 	out := make([]any, 0, len(assigns))
 	for _, a := range assigns {
@@ -202,9 +216,12 @@ func (h *Handler) Users(c echo.Context) error {
 			// UserDetailed を組めないため skip する (defensive)。
 			continue
 		}
+		d := entity.PackUserDetailed(a.User, profByID[a.UserID], h.idGen)
+		// 認証 viewer には viewer->user の relation block を付与 (匿名/self は no-op、#1973)。
+		h.relation.Apply(&d, viewerID, a.User, profByID[a.UserID])
 		out = append(out, map[string]any{
 			"id":   a.ID,
-			"user": entity.PackUserDetailed(a.User, profByID[a.UserID], h.idGen),
+			"user": d,
 		})
 	}
 	return c.JSON(http.StatusOK, out)
