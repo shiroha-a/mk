@@ -85,4 +85,11 @@ type UserListFilter struct {
 	// id ASC、それ以外は id DESC。
 	SinceID string
 	UntilID string
+	// ExplorableOnly は public /users endpoint 用の base filter。true のとき
+	// isExplorable = TRUE AND isSuspended = FALSE で絞る (upstream users.ts、#1957-b)。
+	ExplorableOnly bool
+	// ExcludeRelatedTo が非空のとき、その viewer が mute / block している user、
+	// および viewer を block している user を除外する (upstream
+	// generateMutedUserQueryForUsers / generateBlockQueryForUsers、#1957-b)。
+	ExcludeRelatedTo string
 }

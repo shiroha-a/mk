@@ -1060,11 +1060,12 @@ func (s *Server) setupRoutes() {
 	// Users endpoint (public) — ユーザー一覧
 	api.POST("/users", func(c echo.Context) error {
 		var req struct {
-			Limit  int    `json:"limit"`
-			Offset int    `json:"offset"`
-			Sort   string `json:"sort"`
-			State  string `json:"state"`
-			Origin string `json:"origin"`
+			Limit    int    `json:"limit"`
+			Offset   int    `json:"offset"`
+			Sort     string `json:"sort"`
+			State    string `json:"state"`
+			Origin   string `json:"origin"`
+			Hostname string `json:"hostname"`
 		}
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusOK, []any{})
@@ -1075,16 +1076,21 @@ func (s *Server) setupRoutes() {
 		if req.Origin == "" {
 			req.Origin = "local"
 		}
-		users, err := userRepo.ListUsers(model.UserListFilter{
-			State: req.State, Origin: req.Origin, Sort: req.Sort,
-			Limit: req.Limit, Offset: req.Offset,
-		})
-		if err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
 		viewerID := ""
 		if v := middleware.GetUser(c); v != nil {
 			viewerID = v.ID
+		}
+		// upstream users.ts: base filter isExplorable=TRUE AND isSuspended=FALSE、
+		// hostname 絞り込み、認証時は mute/block 除外 (#1957-b)。
+		users, err := userRepo.ListUsers(model.UserListFilter{
+			State: req.State, Origin: req.Origin, Sort: req.Sort,
+			Limit: req.Limit, Offset: req.Offset,
+			Hostname:         req.Hostname,
+			ExplorableOnly:   true,
+			ExcludeRelatedTo: viewerID,
+		})
+		if err != nil {
+			return c.JSON(http.StatusOK, []any{})
 		}
 		result := make([]entity.UserDetailed, 0, len(users))
 		for _, u := range users {

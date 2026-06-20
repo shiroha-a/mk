@@ -451,6 +451,19 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 		// 突合する。host は lowercase 保存なので大文字混在でも match させる。
 		q = q.Where("host = ?", strings.ToLower(filter.Hostname))
 	}
+	// public /users endpoint の base filter (upstream users.ts:58-59、#1957-b)。
+	if filter.ExplorableOnly {
+		q = q.Where(`"isExplorable" = true`).Where(`"isSuspended" = false`)
+	}
+	// 認証 caller が mute / block している user、および caller を block している
+	// user を除外する (upstream generateMutedUserQueryForUsers /
+	// generateBlockQueryForUsers、#1957-b)。block は双方向、mute は片方向。
+	if filter.ExcludeRelatedTo != "" {
+		vid := filter.ExcludeRelatedTo
+		q = q.Where(`id NOT IN (SELECT "muteeId" FROM muting WHERE "muterId" = ?)`, vid).
+			Where(`id NOT IN (SELECT "blockeeId" FROM blocking WHERE "blockerId" = ?)`, vid).
+			Where(`id NOT IN (SELECT "blockerId" FROM blocking WHERE "blockeeId" = ?)`, vid)
+	}
 	// username prefix フィルタ (upstream show-users.ts:92-94 の
 	// usernameLower LIKE sqlLikeEscape(lower)+'%')。LIKE メタ文字を escape し
 	// ESCAPE '\' を明示して prefix match させる (sibling query と統一)。

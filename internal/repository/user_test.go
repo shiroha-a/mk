@@ -762,6 +762,59 @@ func TestUserRepository_ListUsers_Default(t *testing.T) {
 	assert.GreaterOrEqual(t, len(users), 2)
 }
 
+// #1957-b: public /users の base filter (isExplorable=TRUE AND isSuspended=FALSE) と
+// 認証 viewer の mute/block 除外 (双方向 block) を検証する。
+func TestUserRepository_ListUsers_ExplorableAndMuteBlockFilter(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	viewer := insertTestUser(t, "lub_v", "lubviewer")
+	defer cleanupUser(t, viewer.ID)
+	visible := insertTestUser(t, "lub_vis", "lubvisible")
+	defer cleanupUser(t, visible.ID)
+	hidden := insertTestUser(t, "lub_hid", "lubhidden")
+	defer cleanupUser(t, hidden.ID)
+	require.NoError(t, repo.UpdateUser(hidden.ID, map[string]any{"isExplorable": false}))
+	susp := insertTestUser(t, "lub_sus", "lubsusp")
+	defer cleanupUser(t, susp.ID)
+	require.NoError(t, repo.UpdateUser(susp.ID, map[string]any{"isSuspended": true}))
+	muted := insertTestUser(t, "lub_mut", "lubmuted")
+	defer cleanupUser(t, muted.ID)
+	blocked := insertTestUser(t, "lub_blk", "lubblocked")
+	defer cleanupUser(t, blocked.ID)
+	blocker := insertTestUser(t, "lub_blkr", "lubblocker")
+	defer cleanupUser(t, blocker.ID)
+
+	require.NoError(t, testDB.Create(&model.Muting{ID: "mut_lub", MuterID: viewer.ID, MuteeID: muted.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "muting" WHERE id = ?`, "mut_lub")
+	require.NoError(t, testDB.Create(&model.Blocking{ID: "blk_lub", BlockerID: viewer.ID, BlockeeID: blocked.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "blocking" WHERE id = ?`, "blk_lub")
+	// blocker が viewer を block (逆方向)。
+	require.NoError(t, testDB.Create(&model.Blocking{ID: "blk_rev_lub", BlockerID: blocker.ID, BlockeeID: viewer.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "blocking" WHERE id = ?`, "blk_rev_lub")
+
+	idSet := func(filter model.UserListFilter) map[string]bool {
+		us, err := repo.ListUsers(filter)
+		require.NoError(t, err)
+		m := make(map[string]bool, len(us))
+		for _, u := range us {
+			m[u.ID] = true
+		}
+		return m
+	}
+
+	// ExplorableOnly: non-explorable / suspended を除外。
+	got := idSet(model.UserListFilter{ExplorableOnly: true, Limit: 1000})
+	assert.True(t, got[visible.ID], "explorable user は残る")
+	assert.False(t, got[hidden.ID], "non-explorable は除外 (#1957-b)")
+	assert.False(t, got[susp.ID], "suspended は除外 (#1957-b)")
+
+	// + ExcludeRelatedTo=viewer: mute / block (双方向) を除外。
+	got = idSet(model.UserListFilter{ExplorableOnly: true, ExcludeRelatedTo: viewer.ID, Limit: 1000})
+	assert.True(t, got[visible.ID])
+	assert.False(t, got[muted.ID], "viewer が mute した user は除外 (#1957-b)")
+	assert.False(t, got[blocked.ID], "viewer が block した user は除外 (#1957-b)")
+	assert.False(t, got[blocker.ID], "viewer を block した user も除外 (双方向、#1957-b)")
+}
+
 func TestUserRepository_ListUsers_LocalOnly(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	u := insertTestUser(t, "lu_loc", "localonly")
