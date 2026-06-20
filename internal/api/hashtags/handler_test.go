@@ -11,9 +11,12 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/hashtags"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +48,18 @@ func doPost(h func(echo.Context) error, body string) *httptest.ResponseRecorder 
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
+	_ = h(c)
+	return rec
+}
+
+// doPostAs is doPost with an authenticated viewer set in the context (#1957-a).
+func doPostAs(h func(echo.Context) error, body, viewerID string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: viewerID})
 	_ = h(c)
 	return rec
 }
@@ -447,6 +462,40 @@ func TestUsers_ContainmentAndShape(t *testing.T) {
 	assert.Equal(t, "htua", list[0]["username"])
 	assert.Contains(t, list[0], "followersCount")
 	assert.Contains(t, list[0], "notesCount")
+}
+
+// #1957-a: hashtags/users の embed user に viewer 視点の relation block が乗る。
+// viewer が tag user を follow していれば isFollowing=true、匿名なら省略。
+func TestUsers_EmbedsViewerRelation(t *testing.T) {
+	now := time.Now()
+	seedTagUser(t, "u_htu_rel", "hturel", []string{"reltag"}, nil, false, 1, now)
+	// viewer 自身も user 行が要る (following の FK 制約)。tag 無しなので結果には出ない。
+	seedTagUser(t, "viewer1", "htuviewer", nil, nil, false, 0, now)
+	// viewer1 -> u_htu_rel の following 行を作る。
+	require.NoError(t, repository.NewFollowingRepository(testDB).Create(&model.Following{
+		ID: "f_htu_rel", FollowerID: "viewer1", FolloweeID: "u_htu_rel",
+	}))
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "f_htu_rel") })
+
+	h := hashtags.NewHandler(testDB)
+	h.SetRelationRepos(userrelation.Repos{Following: repository.NewFollowingRepository(testDB)})
+
+	// 認証 viewer: isFollowing=true。
+	rec := doPostAs(h.Users, `{"tag":"reltag","sort":"+follower"}`, "viewer1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, true, rows[0]["isFollowing"], "認証 viewer の embed user に isFollowing=true (#1957-a)")
+
+	// 匿名: relation 省略。
+	rec = doPost(h.Users, `{"tag":"reltag","sort":"+follower"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	_, has := anon[0]["isFollowing"]
+	assert.False(t, has, "匿名には relation を出さない (#1957-a)")
 }
 
 // suspended user は除外される (isSuspended = FALSE)。

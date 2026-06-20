@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -215,6 +216,81 @@ func TestUsers_CursorUntilID(t *testing.T) {
 	require.Len(t, rows, 2)
 	assert.Equal(t, "u2", rows[0]["id"])
 	assert.Equal(t, "u1", rows[1]["id"])
+}
+
+// #1957-a: federation/users の embed user に viewer 視点の relation block が乗る。
+// 認証 viewer が remote user を follow していれば isFollowing=true、匿名なら省略。
+func TestUsers_EmbedsViewerRelation(t *testing.T) {
+	h, _ := newHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	userRepo.Users["r1"] = &model.User{ID: "r1", Username: "r1", Host: &remote}
+	h.SetUserRepo(userRepo)
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(idGen)
+	followingRepo := testutil.NewMockFollowingRepository()
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "local1", FolloweeID: "r1"}
+	h.SetFollowingRepo(followingRepo)
+	h.SetRelationRepos(userrelation.Repos{Following: followingRepo})
+
+	// 認証 viewer local1: r1 を follow しているので isFollowing=true。
+	rec := postBodyAs(h.Users, `{"host":"remote.example","limit":10}`, "local1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, true, rows[0]["isFollowing"], "認証 viewer の embed user に isFollowing=true (#1957-a)")
+
+	// 匿名 caller: relation は省略される (key 不在)。fresh な slice に unmarshal する
+	// (既存 slice 再利用だと json が map をマージし前回の isFollowing が残るため)。
+	rec = postBody(h.Users, `{"host":"remote.example","limit":10}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anonRows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anonRows))
+	require.Len(t, anonRows, 1)
+	_, hasIsFollowing := anonRows[0]["isFollowing"]
+	assert.False(t, hasIsFollowing, "匿名 caller には relation を出さない (#1957-a)")
+}
+
+// #1957-a: federation/followers の embed followee に viewer 視点の relation block が
+// 乗る。viewer が followee を follow していれば followee.isFollowing=true、匿名なら省略。
+// packFollowings の二重 lookup + pf.Followee ポインタ経路の回帰ガード。
+func TestFollowers_FolloweeCarriesViewerRelation(t *testing.T) {
+	h, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(idGen)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	userRepo.Users["rf1"] = &model.User{ID: "rf1", Username: "rf1", Host: &remote}
+	h.SetUserRepo(userRepo)
+
+	followingRepo := testutil.NewMockFollowingRepository()
+	// Followers が返す行 (followeeHost=remote)。
+	followingRepo.Followings["f_listed"] = &model.Following{ID: "f_listed", FollowerID: "someone", FolloweeID: "rf1", FolloweeHost: &remote}
+	// viewer1 -> rf1 の follow (isFollowing 検出用)。
+	followingRepo.Followings["f_viewer"] = &model.Following{ID: "f_viewer", FollowerID: "viewer1", FolloweeID: "rf1"}
+	h.SetFollowingRepo(followingRepo)
+	h.SetRelationRepos(userrelation.Repos{Following: followingRepo})
+
+	// 認証 viewer: embed followee に isFollowing=true。
+	rec := postBodyAs(h.Followers, `{"host":"remote.example","limit":10}`, "viewer1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	followee, ok := rows[0]["followee"].(map[string]any)
+	require.True(t, ok, "followee が embed される")
+	assert.Equal(t, true, followee["isFollowing"], "embed followee に viewer の isFollowing=true (#1957-a)")
+
+	// 匿名: relation 省略。
+	rec = postBody(h.Followers, `{"host":"remote.example","limit":10}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	anonFollowee, _ := anon[0]["followee"].(map[string]any)
+	_, has := anonFollowee["isFollowing"]
+	assert.False(t, has, "匿名には followee relation を出さない (#1957-a)")
 }
 
 func TestUsers_FiltersByHost(t *testing.T) {

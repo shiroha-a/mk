@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // hostPageRequest is the common request body for the three per-host listing
@@ -43,7 +44,7 @@ func (h *Handler) Followers(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.packFollowings(rows))
+	return c.JSON(http.StatusOK, h.packFollowings(viewerIDOf(c), rows))
 }
 
 // Following handles POST /api/federation/following.
@@ -62,7 +63,7 @@ func (h *Handler) Following(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, h.packFollowings(rows))
+	return c.JSON(http.StatusOK, h.packFollowings(viewerIDOf(c), rows))
 }
 
 // Users handles POST /api/federation/users.
@@ -92,12 +93,25 @@ func (h *Handler) Users(c echo.Context) error {
 	// createdAt/notesCount/followersCount/description/fields/roles 等が欠落して
 	// いた (#1544)。UserDetailed で pack して shape を揃える。user_profile は
 	// 1 batch で解決して N+1 を回避。
+	viewerID := viewerIDOf(c)
 	profByID := h.userProfiles(users)
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
-		out = append(out, entity.PackUserDetailed(u, profByID[u.ID], h.idGen))
+		d := entity.PackUserDetailed(u, profByID[u.ID], h.idGen)
+		// 認証 caller には viewer->user の relation block を付与 (匿名/self は no-op、#1957-a)。
+		h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// viewerIDOf returns the authenticated viewer's ID, or "" for anonymous callers.
+// federation/* は requireCredential:false なので nil viewer を許容する。
+func viewerIDOf(c echo.Context) string {
+	if u := middleware.GetUser(c); u != nil {
+		return u.ID
+	}
+	return ""
 }
 
 // userProfiles batch-loads the user_profile rows for the given users keyed by
@@ -146,12 +160,19 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 // true}) を呼ぶため followee (UserDetailedNotMe) を必ず embed する。followee の
 // User+UserProfile は ID をまとめて 1 度引いて N+1 を避ける。userRepo が nil の
 // 場合 (= test 等で未配線) は followee を埋めずに id 系フィールドだけ返す。
-func (h *Handler) packFollowings(rows []*model.Following) []entity.Following {
+func (h *Handler) packFollowings(viewerID string, rows []*model.Following) []entity.Following {
 	lookup := h.followeeLookup(rows)
 	out := make([]entity.Following, 0, len(rows))
 	for _, f := range rows {
 		// populateFollowee=true / populateFollower=false (本家と同じ)。
-		out = append(out, entity.PackFollowing(f, true, false, lookup, h.idGen))
+		pf := entity.PackFollowing(f, true, false, lookup, h.idGen)
+		// embed followee に viewer 視点の relation block を付与 (#1957-a)。
+		if pf.Followee != nil {
+			if u, p := lookup(f.FolloweeID); u != nil {
+				h.relation.Apply(pf.Followee, viewerID, u, p)
+			}
+		}
+		out = append(out, pf)
 	}
 	return out
 }

@@ -89,6 +89,37 @@ func TestCreateDelete_ReturnsIsBlockingRelation(t *testing.T) {
 	assert.Equal(t, false, resp["isBlocking"], "unblock 後は isBlocking=false")
 }
 
+// #1957-a: blocking/list の embed blockee に viewer->blockee の relation block が
+// 乗る (isBlocking=true)。upstream BlockingEntityService.packMany が
+// UserDetailedNotMe + me で pack するのと一致。mute/list と同様。
+func TestList_BlockeeCarriesIsBlocking(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	blockingRepo := testutil.NewMockBlockingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coreblocking.NewService(userRepo, blockingRepo, nil, idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	// relation の Blocking は service と同一インスタンスで block 状態を反映。
+	h.SetRelationRepos(userrelation.Repos{Blocking: blockingRepo})
+	addUser(userRepo, "alice")
+	addUser(userRepo, "bob")
+
+	c1, _ := newReq(t, `{"userId":"bob"}`)
+	setUser(c1, "alice")
+	require.NoError(t, h.Create(c1))
+
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	blockee, ok := resp[0]["blockee"].(map[string]any)
+	require.True(t, ok, "blockee が embed される")
+	assert.Equal(t, true, blockee["isBlocking"], "embed blockee に isBlocking=true が乗る (#1957-a)")
+}
+
 func TestCreate_InvalidParam(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, `{}`)

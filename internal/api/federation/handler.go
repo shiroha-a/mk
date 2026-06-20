@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -43,6 +44,9 @@ type Handler struct {
 	// で createdAt を aidx ID から導出するために使う。nil の場合 createdAt は
 	// 空文字列になる (= 互換性は維持しつつ degrade)。
 	idGen id.Generator
+	// relation は embed する user/followee に viewer 視点の relation block を
+	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1957-a)。
+	relation userrelation.Repos
 }
 
 // NewHandler creates a new federation Handler.
@@ -69,6 +73,12 @@ func (h *Handler) SetIDGen(g id.Generator) {
 // SetResolver attaches an ActorResolver for update-remote-user.
 func (h *Handler) SetResolver(r ActorResolver) {
 	h.resolver = r
+}
+
+// SetRelationRepos wires the repositories used to populate viewer-relative
+// relation fields on embedded users/followees (#1957-a). Unset = relations omitted.
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // SetModeratorChecker attaches a ModeratorChecker so moderationNote is only

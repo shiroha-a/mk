@@ -66,6 +66,19 @@ func postStub(handler func(echo.Context) error) *httptest.ResponseRecorder {
 	return postBody(handler, `{}`)
 }
 
+// postBodyAs is postBody with an authenticated viewer set in the context, used
+// to exercise viewer-relative relation packing (#1957-a).
+func postBodyAs(handler func(echo.Context) error, body, viewerID string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), &model.User{ID: viewerID})
+	_ = handler(c)
+	return rec
+}
+
 func seedInstance(t *testing.T, repo *testutil.MockInstanceRepository, host string) *model.Instance {
 	t.Helper()
 	inst := &model.Instance{

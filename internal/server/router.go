@@ -1044,6 +1044,19 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// listRelationRepos は embed user に viewer 視点の relation block を付与する
+	// 共有 Repos。/users・/pinned-users の inline handler と mute/renote-mute/
+	// following/federation/hashtags handler が共有する (#1957-a)。Apply は
+	// 匿名 / self / 未配線で no-op。
+	listRelationRepos := userrelation.Repos{
+		Following:     followingRepo,
+		Blocking:      blockingRepo,
+		Muting:        mutingRepo,
+		RenoteMuting:  renoteMutingRepo,
+		FollowRequest: followRequestRepo,
+		Memo:          repository.NewUserMemoRepository(s.db),
+	}
+
 	// Users endpoint (public) — ユーザー一覧
 	api.POST("/users", func(c echo.Context) error {
 		var req struct {
@@ -1069,12 +1082,19 @@ func (s *Server) setupRoutes() {
 		if err != nil {
 			return c.JSON(http.StatusOK, []any{})
 		}
+		viewerID := ""
+		if v := middleware.GetUser(c); v != nil {
+			viewerID = v.ID
+		}
 		result := make([]entity.UserDetailed, 0, len(users))
 		for _, u := range users {
 			profile, _ := userRepo.FindProfileByUserID(u.ID)
 			// idGen を渡して createdAt を有効にする。未配線だと createdAt="" で
 			// misskey_dart の DateTimeConverter が FormatException で落ちる (#1251)。
-			result = append(result, entity.PackUserDetailed(u, profile, idGen))
+			d := entity.PackUserDetailed(u, profile, idGen)
+			// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
+			listRelationRepos.Apply(&d, viewerID, u, profile)
+			result = append(result, d)
 		}
 		return c.JSON(http.StatusOK, result)
 	})
@@ -1089,6 +1109,10 @@ func (s *Server) setupRoutes() {
 		if err != nil || len(m.PinnedUsers) == 0 {
 			return c.JSON(http.StatusOK, []any{})
 		}
+		pinnedViewerID := ""
+		if v := middleware.GetUser(c); v != nil {
+			pinnedViewerID = v.ID
+		}
 		result := make([]entity.UserDetailed, 0, len(m.PinnedUsers))
 		for _, acct := range m.PinnedUsers {
 			username, host := parseAcct(acct, localHost)
@@ -1100,7 +1124,10 @@ func (s *Server) setupRoutes() {
 				continue
 			}
 			profile, _ := userRepo.FindProfileByUserID(u.ID)
-			result = append(result, entity.PackUserDetailed(u, profile, idGen))
+			d := entity.PackUserDetailed(u, profile, idGen)
+			// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
+			listRelationRepos.Apply(&d, pinnedViewerID, u, profile)
+			result = append(result, d)
 		}
 		return c.JSON(http.StatusOK, result)
 	})
@@ -1651,6 +1678,7 @@ func (s *Server) setupRoutes() {
 
 	// Hashtags endpoints (Phase 6)
 	hashtagsHandler := apihashtags.NewHandler(s.db)
+	hashtagsHandler.SetRelationRepos(listRelationRepos) // #1957-a: hashtags/users の embed user に relation
 	api.POST("/hashtags/list", hashtagsHandler.List)
 	api.POST("/hashtags/search", hashtagsHandler.Search)
 	api.POST("/hashtags/show", hashtagsHandler.Show)
@@ -1690,17 +1718,6 @@ func (s *Server) setupRoutes() {
 	api.POST("/blocking/create", blockingHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/delete", blockingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/list", blockingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:blocks"))
-
-	// following/list・mute/list・renote-mute/list の埋め込み user に viewer-relation
-	// flag (isFollowing/isMuted 等) を付与するための共有 repo 束 (#1912)。
-	listRelationRepos := userrelation.Repos{
-		Following:     followingRepo,
-		Blocking:      blockingRepo,
-		Muting:        mutingRepo,
-		RenoteMuting:  renoteMutingRepo,
-		FollowRequest: followRequestRepo,
-		Memo:          repository.NewUserMemoRepository(s.db),
-	}
 
 	// Mute endpoints
 	muteHandler := mute.NewHandler(mutingService, userRepo, idGen)
@@ -1882,6 +1899,7 @@ func (s *Server) setupRoutes() {
 	federationHandler.SetUserRepo(userRepo)
 	federationHandler.SetIDGen(idGen)
 	federationHandler.SetResolver(federationResolver)
+	federationHandler.SetRelationRepos(listRelationRepos) // #1957-a: followers/following/users の embed user に relation
 	// moderationNote は公開エンドポイントで moderator にのみ返す (情報漏洩対策)。
 	federationHandler.SetModeratorChecker(roleService)
 	api.POST("/federation/instances", federationHandler.Instances)

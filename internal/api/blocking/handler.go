@@ -148,7 +148,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	// upstream frontend が item.blockee で MkUserCardMini を描画するので
 	// batch fetch で N+1 を回避しつつ user object を embed する。
-	blockeeMap := h.fetchBlockeeMap(rows)
+	blockeeMap := h.fetchBlockeeMap(user.ID, rows)
 	const tsFormat = "2006-01-02T15:04:05.000Z"
 	out := make([]map[string]any, 0, len(rows))
 	for _, b := range rows {
@@ -173,7 +173,11 @@ func (h *Handler) List(c echo.Context) error {
 
 // fetchBlockeeMap batches user + profile lookups for the blockee IDs in
 // rows so the response build loop performs zero per-row DB queries.
-func (h *Handler) fetchBlockeeMap(rows []*model.Blocking) map[string]entity.UserDetailed {
+// viewerID は embed する blockee に viewer->blockee の relation block
+// (isBlocking=true 等) を付与するために使う。mute/list / renote-mute/list と
+// 揃える (upstream BlockingEntityService.packMany が UserDetailedNotMe + me で
+// pack するため、#1957-a)。
+func (h *Handler) fetchBlockeeMap(viewerID string, rows []*model.Blocking) map[string]entity.UserDetailed {
 	if h.userRepo == nil || len(rows) == 0 {
 		return nil
 	}
@@ -201,7 +205,11 @@ func (h *Handler) fetchBlockeeMap(rows []*model.Blocking) map[string]entity.User
 	}
 	out := make(map[string]entity.UserDetailed, len(users))
 	for _, u := range users {
-		out[u.ID] = entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
+		d := entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
+		// viewer->blockee の relation block を付与 (isBlocking=true 等)。Apply は
+		// viewerID 空 / self では no-op。relation 未配線 (test stub) でも安全。
+		h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		out[u.ID] = d
 	}
 	return out
 }

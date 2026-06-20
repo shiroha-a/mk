@@ -10,21 +10,32 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"gorm.io/gorm"
 )
 
 // Handler handles hashtag-related API endpoints.
 type Handler struct {
 	db *gorm.DB
+	// relation は hashtags/users の embed user に viewer 視点の relation block を
+	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1957-a)。
+	relation userrelation.Repos
 }
 
 // NewHandler creates a new hashtags Handler.
 func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{db: db}
+}
+
+// SetRelationRepos wires the repositories used to populate viewer-relative
+// relation fields on hashtags/users (#1957-a). Unset = relations omitted.
+func (h *Handler) SetRelationRepos(r userrelation.Repos) {
+	h.relation = r
 }
 
 // listSortOrders は upstream Misskey TS hashtags/list paramDef enum を、
@@ -400,9 +411,16 @@ func (h *Handler) Users(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	viewerID := ""
+	if v := middleware.GetUser(c); v != nil {
+		viewerID = v.ID
+	}
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
-		out = append(out, entity.PackUserDetailed(u, profByID[u.ID], gen))
+		d := entity.PackUserDetailed(u, profByID[u.ID], gen)
+		// 認証 caller には viewer->user の relation block を付与 (匿名/self は no-op、#1957-a)。
+		h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
 }
