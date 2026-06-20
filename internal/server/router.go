@@ -369,7 +369,10 @@ func (s *Server) setupRoutes() {
 
 	// Webhook (Phase 9.5): ユーザー/システムwebhookの配信を非同期処理する。
 	webhookService := corewebhook.NewService(s.queueClient, webhookRepo, systemWebhookRepo, s.config.URL)
-	noteCreateService.SetWebhookHook(corewebhook.NewNoteCreateHook(webhookService, idGen))
+	webhookNoteHook := corewebhook.NewNoteCreateHook(webhookService, idGen)
+	// reply/mention webhook をスレッドミュート済 recipient に出さない (#1965)。
+	webhookNoteHook.SetThreadMutingRepo(noteThreadMutingRepo)
+	noteCreateService.SetWebhookHook(webhookNoteHook)
 	reactionService.SetWebhookHook(corewebhook.NewReactionCreateHook(webhookService, idGen))
 	followingService.SetWebhookHook(corewebhook.NewFollowingHook(webhookService))
 	signupService.SetWebhookHook(corewebhook.NewSignupHook(webhookService))

@@ -6,6 +6,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // NoteCreateHook wraps Service to implement the WebhookHook interface
@@ -20,11 +21,36 @@ import (
 type NoteCreateHook struct {
 	svc   *Service
 	idGen id.Generator
+	// threadMuteRepo は reply/mention webhook のスレッドミュート gate に使う
+	// optional 依存 (#1965)。未配線なら gate は素通り。
+	threadMuteRepo repository.NoteThreadMutingRepository
 }
 
 // NewNoteCreateHook constructs a NoteCreateHook.
 func NewNoteCreateHook(svc *Service, idGen id.Generator) *NoteCreateHook {
 	return &NoteCreateHook{svc: svc, idGen: idGen}
+}
+
+// SetThreadMutingRepo attaches a NoteThreadMutingRepository so reply/mention
+// webhook events are suppressed for recipients who thread-muted the thread,
+// matching upstream NoteCreateService (#1965). nil disables the gate.
+func (h *NoteCreateHook) SetThreadMutingRepo(r repository.NoteThreadMutingRepository) {
+	h.threadMuteRepo = r
+}
+
+// isThreadMuted reports whether userID has muted the thread that threadNote
+// belongs to (threadNote.ThreadID ?? threadNote.ID)。repo 未配線 / lookup error
+// では false (fail-open: 配信)。#1954 / notification.Hook.isThreadMuted と同一規則。
+func (h *NoteCreateHook) isThreadMuted(userID string, threadNote *model.Note) bool {
+	if h.threadMuteRepo == nil || threadNote == nil {
+		return false
+	}
+	threadID := threadNote.ID
+	if threadNote.ThreadID != nil && *threadNote.ThreadID != "" {
+		threadID = *threadNote.ThreadID
+	}
+	muted, err := h.threadMuteRepo.Exists(userID, threadID)
+	return err == nil && muted
 }
 
 // OnNoteCreated fires note / reply / renote / mention webhook events. 失敗は
@@ -38,17 +64,22 @@ func (h *NoteCreateHook) OnNoteCreated(note *model.Note, author *model.User, rep
 	// 作者本人のwebhook
 	h.svc.DispatchUser(author.ID, EventNote, body)
 
-	// reply: 親ノート投稿者
-	if replyTarget != nil && replyTarget.UserID != author.ID {
+	// reply: 親ノート投稿者。upstream はスレッドミュート中の reply 先には reply
+	// webhook を出さない (#1965)。thread は reply 先ノートの threadId。
+	if replyTarget != nil && replyTarget.UserID != author.ID && !h.isThreadMuted(replyTarget.UserID, replyTarget) {
 		h.svc.DispatchUser(replyTarget.UserID, EventReply, body)
 	}
-	// renote: 対象ノート投稿者
+	// renote: 対象ノート投稿者 (renote はスレッドミュートで gate しない、upstream 同様)。
 	if renoteTarget != nil && renoteTarget.UserID != author.ID {
 		h.svc.DispatchUser(renoteTarget.UserID, EventRenote, body)
 	}
-	// mention: 本文から抽出されたユーザー ID ごとに配信
+	// mention: 本文から抽出されたユーザー ID ごとに配信。スレッドミュート中の
+	// mention 先には mention webhook を出さない (#1965)。thread は新規ノートの threadId。
 	for _, mentionID := range note.Mentions {
 		if mentionID == "" || mentionID == author.ID {
+			continue
+		}
+		if h.isThreadMuted(mentionID, note) {
 			continue
 		}
 		h.svc.DispatchUser(mentionID, EventMention, body)
