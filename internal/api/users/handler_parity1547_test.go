@@ -129,6 +129,76 @@ func TestSearchByUsernameAndHost_DetailFalseUserLite(t *testing.T) {
 	assert.False(t, hasDetailedField(out[0]), "detail=false は UserLite (#1547)")
 }
 
+// #1980: users/search の Detail (default) 経路の embed user に viewer 視点の relation
+// block が乗る。viewer が結果 user を follow していれば isFollowing=true、匿名なら省略。
+func TestSearch_DetailEmbedsViewerRelation(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 / testuser
+	fRepo := testutil.NewMockFollowingRepository()
+	require.NoError(t, fRepo.Create(&model.Following{ID: "f1", FollowerID: "viewer1", FolloweeID: "user1"}))
+	h.SetFollowingRepo(fRepo)
+
+	rec := postStub(h.Search, `{"query":"test"}`, &model.User{ID: "viewer1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, true, out[0]["isFollowing"], "search detail の embed user に isFollowing=true (#1980)")
+
+	rec = post(h.Search, `{"query":"test"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	_, has := anon[0]["isFollowing"]
+	assert.False(t, has, "匿名 search には relation を出さない (#1980)")
+}
+
+// #1980: search-by-username-and-host の Detail (default) 経路にも relation block。
+func TestSearchByUsernameAndHost_EmbedsViewerRelation(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo)
+	fRepo := testutil.NewMockFollowingRepository()
+	require.NoError(t, fRepo.Create(&model.Following{ID: "f1", FollowerID: "viewer1", FolloweeID: "user1"}))
+	h.SetFollowingRepo(fRepo)
+
+	rec := postStub(h.SearchByUsernameAndHost, `{"username":"testuser"}`, &model.User{ID: "viewer1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, true, out[0]["isFollowing"], "search-by-username-and-host の embed user に isFollowing=true (#1980)")
+
+	rec = postStub(h.SearchByUsernameAndHost, `{"username":"testuser"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	_, has := anon[0]["isFollowing"]
+	assert.False(t, has, "匿名には relation を出さない (#1980)")
+}
+
+// #1980: search-by-username-and-host は followers-visibility の count を非フォロワーに
+// leak させない (count gate を users/search と対称に追加した)。
+func TestSearchByUsernameAndHost_GatesFollowersCount(t *testing.T) {
+	h, repo := newTestHandler(t)
+	u := addTestUser(repo) // user1 / testuser
+	u.FollowersCount = 7
+	repo.Profiles["user1"] = &model.UserProfile{
+		UserID:              "user1",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+
+	// 非フォロワー viewer: followersVisibility=followers の count は 0 に潰される。
+	rec := postStub(h.SearchByUsernameAndHost, `{"username":"testuser"}`, &model.User{ID: "stranger"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.EqualValues(t, 0, out[0]["followersCount"], "followers-only count は非フォロワーに leak しない (#1980)")
+}
+
 // --- S5: moderator viewer sees moderationNote ---
 
 type modStub struct{}

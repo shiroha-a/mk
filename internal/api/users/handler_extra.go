@@ -615,6 +615,12 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 		return c.JSON(http.StatusOK, result)
 	}
 
+	viewer := middleware.GetUser(c)
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 	ids := make([]string, 0, len(users))
 	for _, u := range users {
 		ids = append(ids, u.ID)
@@ -625,6 +631,13 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
 		resolver.FillUserLite(&d.UserLite)
 		h.populateUserEmojis(u, &d.UserLite)
+		// upstream search-by-username-and-host は packMany(users, me, {schema:'UserDetailed'})
+		// で embed user に viewer 視点の relation block を付ける (#1980)。匿名/self で no-op。
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, u, profiles[u.ID])
+		// upstream pack は count gate (followersVisibility=followers 等) を isFollowing で
+		// 解く。これが無いと followers-only count が非フォロワーに leak する (#1980、users/search と対称)。
+		isMe := viewer != nil && viewer.ID == u.ID
+		entity.GateCountVisibility(&d, isMe, iAmModerator, viewerIsFollowing)
 		result = append(result, d)
 	}
 	return c.JSON(http.StatusOK, result)

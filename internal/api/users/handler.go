@@ -670,6 +670,10 @@ func (h *Handler) Search(c echo.Context) error {
 	}
 	profiles := h.userService.GetProfilesByUserIDs(ids)
 
+	viewerID := ""
+	if viewer != nil {
+		viewerID = viewer.ID
+	}
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
@@ -678,10 +682,12 @@ func (h *Handler) Search(c echo.Context) error {
 		// moderator viewer には moderationNote を出す (#1558、users/show と対称)。
 		h.applyModerationNote(&d, iAmModerator, profiles[u.ID])
 		entity.ApplyModeratorSecurityFields(&d, iAmModerator, profiles[u.ID])
-		// count visibility gate (#1558)。search は per-user の follow 関係を
-		// 解決しないため isFollowing=false。self / moderator は count を保持。
+		// upstream search.ts は packMany(users, me, {schema}) で embed user に viewer
+		// 視点の relation block を付ける (#1980)。Apply は匿名/self で no-op。戻り値の
+		// isFollowing を count visibility gate (#1558) に渡す (以前は hardcode false)。
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, u, profiles[u.ID])
 		isMe := viewer != nil && viewer.ID == u.ID
-		entity.GateCountVisibility(&d, isMe, iAmModerator, false)
+		entity.GateCountVisibility(&d, isMe, iAmModerator, viewerIsFollowing)
 		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
