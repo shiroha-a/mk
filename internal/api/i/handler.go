@@ -1119,6 +1119,47 @@ func (h *Handler) meDetailedWithUnread(ctx context.Context, u *model.User, profi
 	return resp
 }
 
+// appendIncludeSecrets adds the includeSecrets-gated MeDetailed fields (email /
+// emailVerified / securityKeysList) to resp when the request is a native login
+// session, mirroring upstream pack(..., {includeSecrets: isSecure}). isSecure =
+// the request's raw token equals users.token (= RequireSecure と同一判定);
+// OAuth/MiAuth の app token (token != users.token) では出さない。
+//
+// /api/i (Me) は同等の判定を inline で持つ (#1824)。/api/i/update もこの helper で
+// native session に email 系を返す (#1919)。両者が drift しないよう、変更時は
+// Me handler の isSecure ブロックと揃えること。
+func (h *Handler) appendIncludeSecrets(c echo.Context, u *model.User, profile *model.UserProfile, resp map[string]any) {
+	if u == nil || u.Token == nil || *u.Token != middleware.GetToken(c) {
+		return
+	}
+	if profile != nil {
+		resp["email"] = profile.Email
+		resp["emailVerified"] = profile.EmailVerified
+	}
+	resp["securityKeysList"] = h.securityKeysList(u.ID)
+}
+
+// securityKeysList returns the user's WebAuthn key list for the includeSecrets
+// block, returning [] when no repo is wired or no keys exist.
+func (h *Handler) securityKeysList(userID string) []map[string]any {
+	list := []map[string]any{}
+	if h.securityKeyRepo == nil {
+		return list
+	}
+	keys, err := h.securityKeyRepo.ListByUser(userID)
+	if err != nil {
+		return list
+	}
+	for _, k := range keys {
+		list = append(list, map[string]any{
+			"id":       k.ID,
+			"name":     k.Name,
+			"lastUsed": k.LastUsed.UTC().Format("2006-01-02T15:04:05.000Z"),
+		})
+	}
+	return list
+}
+
 // countMuteWords returns the total number of entries in a muted-words
 // payload, flattening AND-groups. mirrors upstream Misskey TS i/update.ts
 // `checkMuteWordCount`: 各 entry が string なら 1、array なら array.length
@@ -1590,7 +1631,13 @@ func (h *Handler) Update(c echo.Context) error {
 	// 側に無いと session の `$i` が更新されず stale なまま残る (#968)。
 	// unread 系は meDetailedWithUnread で実値を埋める。生 PackMeDetailed だと
 	// unreadNotificationsCount:0 等の default が `$i` を clobber する (#1258 fu)。
-	return c.JSON(http.StatusOK, h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile))
+	resp := h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile)
+	// upstream i/update は pack(..., {includeSecrets: isSecure}) を返すため native
+	// session では email / emailVerified / securityKeysList を含める (#1919)。Token
+	// 判定は middleware が確実に load する me を使い、email は更新後の最新 profile を
+	// 使う。app token (token != users.token) では出さない。
+	h.appendIncludeSecrets(c, me, bundle.Profile, resp)
+	return c.JSON(http.StatusOK, resp)
 }
 
 // avatarDecorationAPIError carries a (status, body) pair from

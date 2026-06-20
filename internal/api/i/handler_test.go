@@ -890,6 +890,71 @@ func TestUpdate_EmptyValuesPassValidation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// updateWithToken は i/update を UserContextKey + TokenContextKey 付きで叩く。
+func updateWithToken(h *Handler, body string, user *model.User, token string) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i/update", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	c.Set(string(middleware.TokenContextKey), token)
+	_ = h.Update(c)
+	return rec
+}
+
+// #1919: native session (request token == users.token) で i/update を呼ぶと
+// email / emailVerified / securityKeysList を含む (includeSecrets)。
+func TestUpdate_NativeSessionIncludesSecrets(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	email := "secret@example.com"
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, Fields: datatypes.JSON([]byte("[]"))}
+	// securityKeyRepo に 1 件登録し、native session で list が format されて
+	// 返ること (id/name/lastUsed) も確認する。
+	skRepo := newInMemSKRepo()
+	require.NoError(t, skRepo.Create(&model.UserSecurityKey{ID: "key1", UserID: "user1", Name: "yubikey", PublicKey: "pk"}))
+	h.SetWebAuthn(nil, skRepo)
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, nativeTok)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "secret@example.com", resp["email"])
+	assert.Equal(t, true, resp["emailVerified"])
+	list, ok := resp["securityKeysList"].([]any)
+	require.True(t, ok, "native session は securityKeysList を array で含む")
+	require.Len(t, list, 1)
+	key := list[0].(map[string]any)
+	assert.Equal(t, "key1", key["id"])
+	assert.Equal(t, "yubikey", key["name"])
+	assert.Contains(t, key, "lastUsed")
+}
+
+// #1919: app access token (request token != users.token) で i/update を呼ぶと
+// email / emailVerified / securityKeysList を出さない (over-leak 防止、Me と整合)。
+func TestUpdate_AppTokenOmitsSecrets(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	nativeTok := "native-login-token"
+	user := &model.User{ID: "user1", Username: "testuser", Token: &nativeTok, AvatarDecorations: datatypes.JSON([]byte("[]")), ChatScope: "mutual"}
+	require.NoError(t, userRepo.Create(user))
+	email := "secret@example.com"
+	userRepo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Email: &email, EmailVerified: true, Fields: datatypes.JSON([]byte("[]"))}
+
+	rec := updateWithToken(h, `{"name":"newname"}`, user, "app-access-token-xyz")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	_, hasEmail := resp["email"]
+	assert.False(t, hasEmail, "app token に email を漏らさない")
+	_, hasEmailVerified := resp["emailVerified"]
+	assert.False(t, hasEmailVerified)
+	_, hasSKL := resp["securityKeysList"]
+	assert.False(t, hasSKL, "app token に securityKeysList を漏らさない")
+}
+
 func TestUpdate_BannerID_RestrictedByRole(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
