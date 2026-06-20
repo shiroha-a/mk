@@ -644,6 +644,15 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	if replyTarget != nil {
 		note.ReplyUserID = &replyTarget.UserID
 		note.ReplyUserHost = replyTarget.UserHost
+		// thread-muting が深い thread でも効くよう threadId を thread root に揃える
+		// (upstream NoteCreateService.ts:623-627: threadId = data.reply.threadId ??
+		// data.reply.id)。reply の threadId が NULL だと thread-muting / isMutedThread /
+		// timeline filter が reply を root と紐付けられず深さ2以上で破綻する (#1928)。
+		threadID := replyTarget.ID
+		if replyTarget.ThreadID != nil && *replyTarget.ThreadID != "" {
+			threadID = *replyTarget.ThreadID
+		}
+		note.ThreadID = &threadID
 	}
 	if renoteTarget != nil {
 		note.RenoteUserID = &renoteTarget.UserID

@@ -740,6 +740,40 @@ func TestCreateService_ReplyAndChannelVisibilityAdjustment(t *testing.T) {
 	})
 }
 
+// #1928: reply note の threadId は thread root (= reply 先の threadId ?? id) を指す。
+// これが NULL だと深さ2以上の thread で thread-muting が破綻する。
+func TestCreateService_ReplyThreadID(t *testing.T) {
+	t.Run("reply to root sets threadId to root id", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["root"] = &model.Note{ID: "root", UserID: "other", Visibility: model.NoteVisibilityPublic}
+		text := "re"
+		rid := "root"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		require.NotNil(t, created.ThreadID)
+		assert.Equal(t, "root", *created.ThreadID, "root への reply は threadId=root.id")
+	})
+	t.Run("reply to a reply inherits root threadId (deep thread)", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		rootThread := "root"
+		// mid は root への reply で threadId=root を持つ。これへの reply は root を継承する。
+		noteRepo.Notes["mid"] = &model.Note{ID: "mid", UserID: "other", Visibility: model.NoteVisibilityPublic, ThreadID: &rootThread}
+		text := "re"
+		rid := "mid"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		require.NotNil(t, created.ThreadID)
+		assert.Equal(t, "root", *created.ThreadID, "深い reply も threadId=root (reply.threadId を継承)")
+	})
+	t.Run("non-reply note has nil threadId", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		text := "top"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Nil(t, created.ThreadID, "reply でない note は threadId=nil")
+	})
+}
+
 // #1859: 空文字 channelId は非 channel に正規化し、channel 強制対象外とする。
 func TestCreateService_EmptyChannelIDNormalized(t *testing.T) {
 	svc, _, _ := newCreateService(t)
