@@ -608,3 +608,29 @@ func TestListsUpdateMembership_MemberNotFound(t *testing.T) {
 	rec := postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"ghost","withReplies":true}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+// #2005: update-membership の意図的挙動を pin する。(1) withReplies 省略 (nil) は既存値を
+// 維持して 204 (upstream は TypeORM 空 SET で 500 だが mk-go は堅牢挙動を採る)。
+// (2) member でない user 指定は NO_SUCH_USER 404 (upstream は user 存在時 500 だが mk-go は 404)。
+func TestListsUpdateMembership_DeliberateDeviations(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	h.SetUserListRepo(repo)
+	seedListWithMember(repo, "l1", "owner", "member1", false) // WithReplies: true で seed
+	owner := &model.User{ID: "owner"}
+
+	// (1) withReplies 省略 → 既存 true を維持、204。
+	rec := postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"member1"}`, owner)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "省略は 204 (#2005)")
+	assert.Equal(t, true, repo.Members[0].WithReplies, "省略時は既存値維持 (#2005)")
+
+	// withReplies=false を明示 → 更新される。
+	rec = postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"member1","withReplies":false}`, owner)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, false, repo.Members[0].WithReplies, "明示値は更新 (#2005)")
+
+	// (2) member でない user → NO_SUCH_USER 404。
+	rec = postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"notmember"}`, owner)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER", "非 member は NO_SUCH_USER 404 (#2005)")
+}

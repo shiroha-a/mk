@@ -316,6 +316,10 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
 	if err := h.userListRepo.UpdateMembership(req.ListID, req.UserID, req.WithReplies); err != nil {
+		// membership 行が無い (= 対象 user が list member でない) ときは NO_SUCH_USER
+		// (404)。upstream は user レコード存在時 (member でないだけ) は 500 を投げ、
+		// NO_SUCH_USER は user 自体が無いときのみだが、mk-go は両ケースを 404 NO_SUCH_USER に
+		// 寄せた方が合理的なのでそちらを採る (#2005 で方針決定: mk-go の堅牢挙動を維持)。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
 		}
