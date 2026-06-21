@@ -293,6 +293,101 @@ func TestFollowers_FolloweeCarriesViewerRelation(t *testing.T) {
 	assert.False(t, has, "匿名には followee relation を出さない (#1957-a)")
 }
 
+// #1988: federation/users の embed user の followers-only count は非フォロワー
+// (federation/* は requireCredential:false なので匿名含む) に leak しない。
+func TestUsers_GatesFollowersCount(t *testing.T) {
+	h, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(idGen)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	userRepo.Users["r1"] = &model.User{ID: "r1", Username: "r1", Host: &remote, FollowersCount: 7}
+	userRepo.Profiles["r1"] = &model.UserProfile{
+		UserID:              "r1",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+	h.SetUserRepo(userRepo)
+	h.SetRelationRepos(userrelation.Repos{Following: testutil.NewMockFollowingRepository()})
+
+	// 匿名 caller: followers-only count は 0 に潰される。
+	rec := postBody(h.Users, `{"host":"remote.example","limit":10}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.EqualValues(t, 0, rows[0]["followersCount"], "followers-only count は匿名に leak しない (#1988)")
+
+	// moderator caller: count をそのまま見せる。
+	h.SetModeratorChecker(fakeModerator{ids: map[string]bool{"mod1": true}})
+	rec = postBodyAs(h.Users, `{"host":"remote.example","limit":10}`, "mod1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var modRows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &modRows))
+	require.Len(t, modRows, 1)
+	assert.EqualValues(t, 7, modRows[0]["followersCount"], "moderator には count を見せる (#1988)")
+}
+
+// #1988: federation/followers の embed followee の followers-only count も非フォロワー
+// (匿名含む) に leak しない。
+func TestFollowers_FolloweeGatesFollowersCount(t *testing.T) {
+	h, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(idGen)
+	userRepo := testutil.NewMockUserRepository()
+	remote := "remote.example"
+	userRepo.Users["rf1"] = &model.User{ID: "rf1", Username: "rf1", Host: &remote, FollowersCount: 7}
+	userRepo.Profiles["rf1"] = &model.UserProfile{
+		UserID:              "rf1",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+	h.SetUserRepo(userRepo)
+	followingRepo := testutil.NewMockFollowingRepository()
+	followingRepo.Followings["f_listed"] = &model.Following{ID: "f_listed", FollowerID: "someone", FolloweeID: "rf1", FolloweeHost: &remote}
+	h.SetFollowingRepo(followingRepo)
+	h.SetRelationRepos(userrelation.Repos{Following: followingRepo})
+
+	// 匿名: embed followee の followers-only count は 0。
+	rec := postBody(h.Followers, `{"host":"remote.example","limit":10}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	followee := rows[0]["followee"].(map[string]any)
+	assert.EqualValues(t, 0, followee["followersCount"], "followee の followers-only count は匿名に leak しない (#1988)")
+}
+
+// #1988: federation/following も同じ packFollowings 経路を通るため、embed followee の
+// followers-only count が非フォロワー (匿名含む) に leak しないことを明示的に確認する。
+func TestFollowing_FolloweeGatesFollowersCount(t *testing.T) {
+	h, _ := newHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(idGen)
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["lf1"] = &model.User{ID: "lf1", Username: "lf1", FollowersCount: 7}
+	userRepo.Profiles["lf1"] = &model.UserProfile{
+		UserID:              "lf1",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+	h.SetUserRepo(userRepo)
+	followingRepo := testutil.NewMockFollowingRepository()
+	remote := "remote.example"
+	// federation/following は followerHost=remote の行が対象 (embed されるのは followee=lf1)。
+	followingRepo.Followings["f_listed"] = &model.Following{ID: "f_listed", FollowerID: "someone", FollowerHost: &remote, FolloweeID: "lf1"}
+	h.SetFollowingRepo(followingRepo)
+	h.SetRelationRepos(userrelation.Repos{Following: followingRepo})
+
+	rec := postBody(h.Following, `{"host":"remote.example","limit":10}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	followee := rows[0]["followee"].(map[string]any)
+	assert.EqualValues(t, 0, followee["followersCount"], "followee の followers-only count は匿名に leak しない (#1988)")
+}
+
 func TestUsers_FiltersByHost(t *testing.T) {
 	h, _ := newHandler(t)
 	userRepo := testutil.NewMockUserRepository()

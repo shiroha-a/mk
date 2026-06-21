@@ -94,12 +94,16 @@ func (h *Handler) Users(c echo.Context) error {
 	// いた (#1544)。UserDetailed で pack して shape を揃える。user_profile は
 	// 1 batch で解決して N+1 を回避。
 	viewerID := viewerIDOf(c)
+	iAmModerator := h.moderator != nil && viewerID != "" && h.moderator.IsModerator(viewerID)
 	profByID := h.userProfiles(users)
 	out := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profByID[u.ID], h.idGen)
 		// 認証 caller には viewer->user の relation block を付与 (匿名/self は no-op、#1957-a)。
-		h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		viewerIsFollowing := h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		// followers-only count を非フォロワー (federation/* は requireCredential:false なので
+		// 匿名含む) に leak させない (upstream packMany(users, me) の count gate、#1988)。
+		entity.GateCountVisibility(&d, u.ID == viewerID, iAmModerator, viewerIsFollowing)
 		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)
@@ -162,6 +166,7 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 // 場合 (= test 等で未配線) は followee を埋めずに id 系フィールドだけ返す。
 func (h *Handler) packFollowings(viewerID string, rows []*model.Following) []entity.Following {
 	lookup := h.followeeLookup(rows)
+	iAmModerator := h.moderator != nil && viewerID != "" && h.moderator.IsModerator(viewerID)
 	out := make([]entity.Following, 0, len(rows))
 	for _, f := range rows {
 		// populateFollowee=true / populateFollower=false (本家と同じ)。
@@ -169,7 +174,10 @@ func (h *Handler) packFollowings(viewerID string, rows []*model.Following) []ent
 		// embed followee に viewer 視点の relation block を付与 (#1957-a)。
 		if pf.Followee != nil {
 			if u, p := lookup(f.FolloweeID); u != nil {
-				h.relation.Apply(pf.Followee, viewerID, u, p)
+				viewerIsFollowing := h.relation.Apply(pf.Followee, viewerID, u, p)
+				// followers-only count を非フォロワー (匿名含む) に leak させない
+				// (upstream FollowingEntityService が followee を pack(_, me) で gate、#1988)。
+				entity.GateCountVisibility(pf.Followee, u.ID == viewerID, iAmModerator, viewerIsFollowing)
 			}
 		}
 		out = append(out, pf)
