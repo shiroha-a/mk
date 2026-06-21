@@ -774,3 +774,26 @@ func TestPackItem_PublishedFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, parsed.UTC().Equal(updated))
 }
+
+// #2054: POST と raw-token 付き GET には Cache-Control を付けない (upstream `!token && !user`)。
+func TestFetchRSS_CacheControlGate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+	h := newTestHandler(t, srv)
+
+	// POST → cache 無し。
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/fetch-rss", strings.NewReader(fmt.Sprintf(`{"url":%q}`, srv.URL)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Fetch(e.NewContext(req, rec)))
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "POST には Cache-Control を付けない (#2054)")
+
+	// raw token 付き GET → cache 無し (auth middleware が積む flag を simulate)。
+	c2, rec2 := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL))
+	c2.Set("misskeyRawTokenPresent", true)
+	require.NoError(t, h.Fetch(c2))
+	assert.Empty(t, rec2.Header().Get("Cache-Control"), "raw token GET には Cache-Control を付けない (#2054)")
+}

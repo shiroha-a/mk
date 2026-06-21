@@ -24,6 +24,7 @@ import (
 	"github.com/mmcdole/gofeed"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/safehttp"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -222,7 +223,13 @@ func (h *Handler) Fetch(c echo.Context) error {
 // 同一になる (TS upstream とも整合)。
 func writeCachedJSON(c echo.Context, body []byte) error {
 	resp := c.Response()
-	resp.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", CacheSeconds))
+	// upstream fetch-rss.ts は cacheSec:180 + allowGet:true。ApiCallService は
+	// `GET && cacheSec && !token && !user` のときだけ Cache-Control を付ける。
+	// POST / 認証済み / raw token 付き GET には付けない (charts/bubble-game と同
+	// convention、#2054)。token は HasRawToken (解決可否に依らない) で判定する。
+	if c.Request().Method == http.MethodGet && middleware.GetUser(c) == nil && !middleware.HasRawToken(c) {
+		resp.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", CacheSeconds))
+	}
 	resp.Header().Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	resp.WriteHeader(http.StatusOK)
 	_, err := resp.Write(body)
