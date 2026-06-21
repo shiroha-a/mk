@@ -246,6 +246,39 @@ func TestUpdate_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1948-15: description の absent/null/value を区別する。
+//
+//	absent → 維持 / null → NULL clear / "x" → 設定 (upstream は !== undefined で spread)。
+func TestUpdate_DescriptionNullAbsentValue(t *testing.T) {
+	h, repo, _, _ := newHandler(t)
+	owner := "alice"
+	old := "old desc"
+	repo.Channels["c1"] = &model.Channel{ID: "c1", Name: "alpha", UserID: &owner, Description: &old}
+
+	// absent → 維持。
+	c, rec := newReq(t, `{"channelId":"c1","name":"a2"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, repo.Channels["c1"].Description, "description 省略は維持 (#1948-15)")
+	assert.Equal(t, "old desc", *repo.Channels["c1"].Description)
+
+	// null → NULL clear。
+	c, rec = newReq(t, `{"channelId":"c1","description":null}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Nil(t, repo.Channels["c1"].Description, "description:null は NULL clear (#1948-15)")
+
+	// "new" → 設定。
+	c, rec = newReq(t, `{"channelId":"c1","description":"new"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, repo.Channels["c1"].Description)
+	assert.Equal(t, "new", *repo.Channels["c1"].Description)
+}
+
 func TestUpdate_BadJSON(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	c, rec := newReq(t, `{not`)

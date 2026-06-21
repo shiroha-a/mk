@@ -552,6 +552,27 @@ func TestListsUpdateMembership_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// #1948-15: withReplies を省略すると既存値を維持する (upstream は undefined カラムを
+// skip)。明示値は更新する。
+func TestListsUpdateMembership_WithRepliesOmittedPreserves(t *testing.T) {
+	h, _ := newTestHandler(t)
+	listRepo := testutil.NewMockUserListRepository()
+	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "test"}
+	mem := &model.UserListMembership{ID: "m1", UserListID: "l1", UserID: "u2", WithReplies: true}
+	listRepo.Members = append(listRepo.Members, mem)
+	h.SetUserListRepo(listRepo)
+
+	// withReplies 省略 → 既存 true を維持。
+	rec := postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, mem.WithReplies, "withReplies 省略時は既存値を維持 (#1948-15)")
+
+	// withReplies:false → 明示更新。
+	rec = postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"u2","withReplies":false}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.False(t, mem.WithReplies, "明示 false は更新する (#1948-15)")
+}
+
 func TestListsUpdateMembership_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	listRepo := testutil.NewMockUserListRepository()

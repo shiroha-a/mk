@@ -5840,10 +5840,13 @@ func (m *MockUserListRepository) UpdateList(id string, fields map[string]any) er
 	return nil
 }
 
-func (m *MockUserListRepository) UpdateMembership(listID, userID string, withReplies bool) error {
+func (m *MockUserListRepository) UpdateMembership(listID, userID string, withReplies *bool) error {
 	for _, mem := range m.Members {
 		if mem.UserListID == listID && mem.UserID == userID {
-			mem.WithReplies = withReplies
+			// nil (= 省略) は既存値を維持 (#1948-15)。
+			if withReplies != nil {
+				mem.WithReplies = *withReplies
+			}
 			return nil
 		}
 	}

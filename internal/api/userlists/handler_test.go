@@ -642,11 +642,16 @@ func TestShow_PrivateListNonOwnerHidden(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }
 
-// public リストは非所有者でも閲覧可 (upstream: isPublic なら誰でも閲覧)。
-func TestShow_PublicListNonOwnerVisible(t *testing.T) {
+// #1948-15: 非所有者が他人の public list を閲覧するには forPublic=true が必要。
+// default (forPublic=false) は {id, userId:me} selection なので 404 (upstream 一致)。
+func TestShow_PublicListNonOwnerNeedsForPublic(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Public", IsPublic: true}
+	// default forPublic=false → 404。
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// forPublic=true → 200。
+	rec = doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "u2"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
@@ -696,16 +701,45 @@ func TestShow_NoForPublicNoLikedFields(t *testing.T) {
 	assert.NotContains(t, resp, "isLiked")
 }
 
-// forPublic=true でも private list (owner 閲覧) には likedCount/isLiked を付けない。
-func TestShow_ForPublicPrivateNoLikedFields(t *testing.T) {
+// #1948-15: forPublic=true は {id, isPublic:true} selection なので、自分の private
+// list でも 404 (NO_SUCH_LIST) になる (upstream show.ts と一致)。
+func TestShow_ForPublicOwnPrivateNotFound(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "priv", IsPublic: false}
 	h.SetFavoriteRepo(testutil.NewMockUserListFavoriteRepository())
 	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "owner"})
-	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+}
+
+// #1948-15: default (forPublic=false) で認証非所有者は他人の public list を読めない
+// ({id, userId:me} selection)。
+func TestShow_NonOwnerPublicListNotFound(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
+	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "other"})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
+}
+
+// #1948-15: default で所有者は自分の private list を読める ({id, userId:me})。
+func TestShow_OwnerPrivateListVisible(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "priv", IsPublic: false}
+	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "owner"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1948-15: forPublic=true で他人の public list は読める ({id, isPublic:true})。
+func TestShow_ForPublicOtherPublicVisible(t *testing.T) {
+	h, repo := newTestHandler(t)
+	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
+	h.SetFavoriteRepo(testutil.NewMockUserListFavoriteRepository())
+	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "other"})
+	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotContains(t, resp, "likedCount")
+	assert.Contains(t, resp, "likedCount", "forPublic && public は likedCount を付与")
 }
 
 // 他人 list への push が「存在しない」扱いで弾かれること。viewer が list owner

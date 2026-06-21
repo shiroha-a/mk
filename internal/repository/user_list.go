@@ -36,7 +36,7 @@ type UserListRepository interface {
 	// (= users/lists/list の N+1 を消す batch fetch、#876)。
 	ListMembersByListIDs(listIDs []string) (map[string][]string, error)
 	UpdateList(id string, fields map[string]any) error
-	UpdateMembership(listID, userID string, withReplies bool) error
+	UpdateMembership(listID, userID string, withReplies *bool) error
 	// ListsContainingMember returns lists owned by ownerID that include
 	// memberUserID as a member. Used by users/lists/get-memberships.
 	ListsContainingMember(ownerID, memberUserID string) ([]*model.UserList, error)
@@ -152,10 +152,25 @@ func (r *userListRepository) UpdateList(id string, fields map[string]any) error 
 	return r.db.Model(&model.UserList{}).Where("id = ?", id).Updates(fields).Error
 }
 
-func (r *userListRepository) UpdateMembership(listID, userID string, withReplies bool) error {
+func (r *userListRepository) UpdateMembership(listID, userID string, withReplies *bool) error {
+	// withReplies が nil (= request で省略) の場合は既存値を維持する (旧 false
+	// clobber bug の修正、#1948-15)。membership 不在時は handler の NO_SUCH_USER
+	// 判定のため ErrRecordNotFound を返す必要があるので存在確認を行う。
+	if withReplies == nil {
+		var count int64
+		if err := r.db.Model(&model.UserListMembership{}).
+			Where("\"userListId\" = ? AND \"userId\" = ?", listID, userID).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}
 	result := r.db.Model(&model.UserListMembership{}).
 		Where("\"userListId\" = ? AND \"userId\" = ?", listID, userID).
-		Update("withReplies", withReplies)
+		Update("withReplies", *withReplies)
 	if result.Error != nil {
 		return result.Error
 	}

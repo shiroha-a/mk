@@ -291,9 +291,15 @@ func (h *Handler) listMemberIDs(listID string) []string {
 func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		ListID      string `json:"listId"`
-		UserID      string `json:"userId"`
-		WithReplies bool   `json:"withReplies"`
+		ListID string `json:"listId"`
+		UserID string `json:"userId"`
+		// upstream update-membership.ts は withReplies を optional param とする。
+		// 旧 mk-go は non-pointer bool で「省略時に false へ clobber」していたが、
+		// これは partial update で既存 withReplies を意図せず潰す bug だった。*bool に
+		// して absent(nil)=維持、明示値=更新と区別する (#1948-15)。なお upstream は
+		// withReplies 省略時に TypeORM の空 SET で 500 を投げる挙動だが、mk-go は
+		// 既存値維持の方が合理的なのでそちらを採る (#2005 で方針追跡)。
+		WithReplies *bool `json:"withReplies"`
 	}
 	if err := c.Bind(&req); err != nil || req.ListID == "" || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)

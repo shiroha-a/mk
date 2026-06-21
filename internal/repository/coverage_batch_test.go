@@ -327,7 +327,8 @@ func TestUserListRepository_UpdateList_UpdateMembership_ListsContainingMember(t 
 	).Error)
 	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, "ul_cov_mem1")
 
-	require.NoError(t, repo.UpdateMembership("ul_cov_l1", member.ID, true))
+	wrTrue := true
+	require.NoError(t, repo.UpdateMembership("ul_cov_l1", member.ID, &wrTrue))
 
 	// ListsContainingMember (owner視点でmemberを含むリスト一覧)
 	lists, err := repo.ListsContainingMember(owner.ID, member.ID)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/optional"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -181,12 +182,12 @@ func (h *Handler) Show(c echo.Context) error {
 func (h *Handler) Update(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		WebhookID string   `json:"webhookId"`
-		Name      string   `json:"name"`
-		URL       string   `json:"url"`
-		Secret    *string  `json:"secret"`
-		On        []string `json:"on"`
-		Active    *bool    `json:"active"`
+		WebhookID string                    `json:"webhookId"`
+		Name      string                    `json:"name"`
+		URL       string                    `json:"url"`
+		Secret    optional.Nullable[string] `json:"secret"`
+		On        []string                  `json:"on"`
+		Active    *bool                     `json:"active"`
 	}
 	if err := c.Bind(&req); err != nil || req.WebhookID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "webhookId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
@@ -206,8 +207,14 @@ func (h *Handler) Update(c echo.Context) error {
 	if req.URL != "" {
 		w.URL = req.URL
 	}
-	if req.Secret != nil {
-		w.Secret = *req.Secret
+	// upstream i/webhooks/update.ts: secret===null ? '' : secret。absent は維持、
+	// explicit null は空文字 reset、値は設定 (#1948-15)。
+	if req.Secret.Present {
+		if req.Secret.Value == nil {
+			w.Secret = ""
+		} else {
+			w.Secret = *req.Secret.Value
+		}
 	}
 	if req.On != nil {
 		w.On = req.On

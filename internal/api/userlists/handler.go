@@ -217,11 +217,20 @@ func (h *Handler) Show(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
-	// upstream users/lists/show: 非公開リストは所有者のみ閲覧可。public リスト
-	// は誰でも閲覧可。所有者でも public でもない場合は存在を隠す (NO_SUCH_LIST)。
-	// これが無いと任意の認証ユーザーが他人の私的リスト (とメンバー) を読めてしまう。
+	// upstream show.ts は forPublic で selection を切り替える (#1948-15):
+	//   !forPublic && me != null  → {id, userId: me.id}  (= 自分の list のみ。private 可)
+	//   それ以外 (forPublic / 匿名) → {id, isPublic: true} (= public list のみ)
+	// 以前の mk-go は「private は所有者のみ / public は誰でも」と緩く、(a) 認証
+	// 非所有者が他人の public list を forPublic 無しで読め、(b) forPublic=true で
+	// 自分の private list が 404 にならない、という乖離があった。
 	viewer := middleware.GetUser(c)
-	if !list.IsPublic && (viewer == nil || list.UserID != viewer.ID) {
+	var visible bool
+	if !req.ForPublic && viewer != nil {
+		visible = list.UserID == viewer.ID
+	} else {
+		visible = list.IsPublic
+	}
+	if !visible {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
 	packed := entity.PackUserList(list, h.memberIDs(list.ID), h.idGen)

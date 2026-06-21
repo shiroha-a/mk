@@ -76,8 +76,34 @@ func TestReversiRepository_Extras(t *testing.T) {
 
 func TestUserListRepository_UpdateMembership_NotFound(t *testing.T) {
 	r := NewUserListRepository(testDB)
-	err := r.UpdateMembership("nonexistent_list", "nonexistent_user", true)
+	wrTrue := true
+	err := r.UpdateMembership("nonexistent_list", "nonexistent_user", &wrTrue)
 	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+}
+
+// #1948-15: withReplies=nil (= request 省略) は既存値を維持し、membership 存在のみ確認する。
+func TestUserListRepository_UpdateMembership_NilPreservesAndExistence(t *testing.T) {
+	r := NewUserListRepository(testDB)
+	owner := insertTestUser(t, "ulnowner", "ulnilowner")
+	defer cleanupUser(t, owner.ID)
+	member := insertTestUser(t, "ulnmember", "ulnilmember")
+	defer cleanupUser(t, member.ID)
+	list := &model.UserList{ID: "ul_nil_l1", UserID: owner.ID, Name: "nil-test"}
+	require.NoError(t, r.Create(list))
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, list.ID)
+	mem := &model.UserListMembership{ID: "ul_nil_m1", UserListID: list.ID, UserID: member.ID, WithReplies: true}
+	require.NoError(t, r.AddMember(mem))
+	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, mem.ID)
+
+	// nil + 存在: 既存 withReplies=true を維持 (no-op)。
+	require.NoError(t, r.UpdateMembership(list.ID, member.ID, nil))
+	var got model.UserListMembership
+	require.NoError(t, testDB.Where("id = ?", mem.ID).First(&got).Error)
+	assert.True(t, got.WithReplies, "nil 渡しは既存値を維持 (#1948-15)")
+
+	// nil + 不在: NO_SUCH_USER 判定のため ErrRecordNotFound を返す。
+	err := r.UpdateMembership(list.ID, "ghost_member", nil)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound, "nil + membership 不在は ErrRecordNotFound (#1948-15)")
 }
 
 // --- page: ListPublicByUser limit defaults ---

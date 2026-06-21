@@ -278,7 +278,8 @@ func TestErrorPaths_CancelledContext(t *testing.T) {
 	// 追加のerror paths
 	_, err = cr.FindMessageByURI("x")
 	assert.Error(t, err)
-	err = NewUserListRepository(db).UpdateMembership("x", "y", true)
+	wrTrue := true
+	err = NewUserListRepository(db).UpdateMembership("x", "y", &wrTrue)
 	assert.Error(t, err)
 	_, err = NewUserListRepository(db).ListsContainingMember("x", "y")
 	assert.Error(t, err)

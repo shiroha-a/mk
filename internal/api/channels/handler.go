@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
+	"github.com/shiroha-a/mk/internal/api/optional"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	corechannel "github.com/shiroha-a/mk/internal/core/channel"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
@@ -257,15 +258,15 @@ func (h *Handler) packPinnedNotes(ctx context.Context, ch *model.Channel, viewer
 
 // UpdateRequest is the request body for channels/update.
 type UpdateRequest struct {
-	ChannelID             string    `json:"channelId"`
-	Name                  *string   `json:"name"`
-	Description           *string   `json:"description"`
-	Color                 *string   `json:"color"`
-	IsArchived            *bool     `json:"isArchived"`
-	IsSensitive           *bool     `json:"isSensitive"`
-	BannerID              *string   `json:"bannerId"`
-	PinnedNoteIDs         *[]string `json:"pinnedNoteIds"`
-	AllowRenoteToExternal *bool     `json:"allowRenoteToExternal"`
+	ChannelID             string                    `json:"channelId"`
+	Name                  *string                   `json:"name"`
+	Description           optional.Nullable[string] `json:"description"`
+	Color                 *string                   `json:"color"`
+	IsArchived            *bool                     `json:"isArchived"`
+	IsSensitive           *bool                     `json:"isSensitive"`
+	BannerID              *string                   `json:"bannerId"`
+	PinnedNoteIDs         *[]string                 `json:"pinnedNoteIds"`
+	AllowRenoteToExternal *bool                     `json:"allowRenoteToExternal"`
 }
 
 // Update handles POST /api/channels/update.
@@ -284,8 +285,11 @@ func (h *Handler) Update(c echo.Context) error {
 		PinnedNoteIDs:         req.PinnedNoteIDs,
 		AllowRenoteToExternal: req.AllowRenoteToExternal,
 	}
-	if req.Description != nil {
-		desc := req.Description
+	// upstream channels/update.ts は description を `!== undefined` で spread するため、
+	// explicit null も書き込んで NULL clear する。absent は維持 (#1948-15)。
+	// in.Description は **string: nil=未変更 / *が nil=NULL clear / 値=設定。
+	if req.Description.Present {
+		desc := req.Description.Value // *string (nil for explicit null)
 		in.Description = &desc
 	}
 	// bannerId 設定時 (空文字 = 解除は検証不要) は所有権を検証する

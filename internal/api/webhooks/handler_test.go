@@ -325,6 +325,31 @@ func TestUpdate_Partial(t *testing.T) {
 	assert.Equal(t, newSecret, repo.webhooks["w1"].Secret)
 }
 
+// #1948-15: secret の absent/null/value を区別する。
+//
+//	absent  → 維持
+//	null    → "" reset (upstream: secret===null ? '')
+//	"x"     → 設定
+func TestUpdate_SecretNullAbsentValue(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "n", URL: "https://e", Secret: "old", On: pq.StringArray{}}
+
+	// absent → 維持。
+	rec := post(h.Update, `{"webhookId":"w1","name":"x"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "old", repo.webhooks["w1"].Secret, "secret 省略は維持 (#1948-15)")
+
+	// null → "" reset。
+	rec = post(h.Update, `{"webhookId":"w1","secret":null}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "", repo.webhooks["w1"].Secret, "secret:null は空文字 reset (#1948-15)")
+
+	// "v" → 設定。
+	rec = post(h.Update, `{"webhookId":"w1","secret":"v"}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "v", repo.webhooks["w1"].Secret)
+}
+
 func TestUpdate_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Update, `{"webhookId":"ghost"}`, &model.User{ID: "u1"})
