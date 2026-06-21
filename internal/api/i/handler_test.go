@@ -2103,6 +2103,46 @@ func TestPin_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// fakePinHook records OnLocalPinChanged calls for #2024 wiring tests.
+type fakePinHook struct {
+	calls []struct {
+		userID, noteID string
+		isAddition     bool
+	}
+}
+
+func (f *fakePinHook) OnLocalPinChanged(userID, noteID string, isAddition bool) {
+	f.calls = append(f.calls, struct {
+		userID, noteID string
+		isAddition     bool
+	}{userID, noteID, isAddition})
+}
+
+// #2024: Pin/Unpin 成功時に PinDeliveryHook が (userID, noteID, isAddition) で呼ばれ、
+// 失敗時は呼ばれない。
+func TestPin_InvokesDeliveryHook(t *testing.T) {
+	h, repo, noteRepo, _ := newTestHandler(t)
+	hook := &fakePinHook{}
+	h.SetPinDeliveryHook(hook)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "user1"}
+
+	require.Equal(t, http.StatusOK, post(h.Pin, `{"noteId":"n1"}`, user).Code)
+	require.Len(t, hook.calls, 1)
+	assert.Equal(t, "user1", hook.calls[0].userID)
+	assert.Equal(t, "n1", hook.calls[0].noteID)
+	assert.True(t, hook.calls[0].isAddition, "pin は isAddition=true (#2024)")
+
+	require.Equal(t, http.StatusOK, post(h.Unpin, `{"noteId":"n1"}`, user).Code)
+	require.Len(t, hook.calls, 2)
+	assert.False(t, hook.calls[1].isAddition, "unpin は isAddition=false (#2024)")
+
+	// pin 失敗 (note 不在) では hook を呼ばない。
+	require.Equal(t, http.StatusNotFound, post(h.Pin, `{"noteId":"ghost"}`, user).Code)
+	assert.Len(t, hook.calls, 2, "pin 失敗時は hook を呼ばない (#2024)")
+}
+
 func TestPin_NoteNotFound(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{ID: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}

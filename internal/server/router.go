@@ -2145,6 +2145,10 @@ func (s *Server) setupRoutes() {
 	profileUpdateHook.SetKeypairExtraRepo(keypairExtraRepo)
 	profileUpdateHook.SetRelayBroadcaster(relaySvc)
 	iHandler.SetProfileUpdateHook(profileUpdateHook)
+	// note pin/unpin の Add/Remove(featured collection) を followers/relay へ配信 (#2024)。
+	pinDeliveryHook := corefederation.NewPinDeliveryHook(deliverService, apRenderer, userRepo, noteRepo)
+	pinDeliveryHook.SetRelayBroadcaster(relaySvc)
+	iHandler.SetPinDeliveryHook(pinDeliveryHook)
 	notePublisher := stream.NewNotePublisher(streamPubSub, idGen)
 	notePublisher.SetEmojiLookup(emojiRepo)
 	notePublisher.SetInstanceLookup(instanceRepo)

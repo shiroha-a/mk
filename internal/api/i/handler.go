@@ -99,6 +99,9 @@ type Handler struct {
 	// streaming connection に reload signal を流す (#791)。未配線時は
 	// publish skip = 旧挙動 (= reconnect で反映)。
 	hardMutePublisher HardMutePublisher
+	// pinDeliveryHook は note pin/unpin 時に Add/Remove(featured) を followers へ
+	// 配信する (#2024)。未配線なら連合配信 skip。
+	pinDeliveryHook PinDeliveryHook
 	// profileUpdateHook は profile 編集時に Update(Person) を followers へ
 	// 配信する (#1560)。nil なら配信しない。
 	profileUpdateHook ProfileUpdateHook
@@ -156,6 +159,17 @@ type HardMutePublisher interface {
 // profile edit (#1560)。実装は core/federation。
 type ProfileUpdateHook interface {
 	OnLocalProfileUpdated(userID string)
+}
+
+// PinDeliveryHook delivers Add/Remove(featured collection) to remote followers
+// when a local user pins/unpins a note (#2024)。実装は core/federation。
+type PinDeliveryHook interface {
+	OnLocalPinChanged(userID, noteID string, isAddition bool)
+}
+
+// SetPinDeliveryHook wires the AP Add/Remove featured-collection delivery hook (#2024)。
+func (h *Handler) SetPinDeliveryHook(hook PinDeliveryHook) {
+	h.pinDeliveryHook = hook
 }
 
 // SetHardMutePublisher wires a publisher that emits wordmute reload events
@@ -1797,6 +1811,11 @@ func (h *Handler) Pin(c echo.Context) error {
 		}
 	}
 
+	// featured collection への pin を followers/relay へ連合配信 (#2024)。
+	if h.pinDeliveryHook != nil {
+		h.pinDeliveryHook.OnLocalPinChanged(me.ID, req.NoteID, true)
+	}
+
 	return h.Me(c)
 }
 
@@ -1814,6 +1833,11 @@ func (h *Handler) Unpin(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "454170ce-9d63-4a43-9da1-ea10afe81e21"))
 		}
 		return apierr.JSONInternalError(c)
+	}
+
+	// featured collection からの unpin を followers/relay へ連合配信 (#2024)。
+	if h.pinDeliveryHook != nil {
+		h.pinDeliveryHook.OnLocalPinChanged(me.ID, req.NoteID, false)
 	}
 
 	return h.Me(c)

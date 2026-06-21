@@ -464,8 +464,18 @@ type Invite struct {
 // Remove represents a Remove activity. CherryPick group chat federation uses
 // it to announce a member leaving a chat room: actor and object are the
 // leaving member's actor URI, target is the room URI. Mirrors
-// ApRendererService.renderRemove.
+// ApRendererService.renderRemove. featured collection からの note unpin にも使う
+// (target=featured collection, object=note URI、#2024)。
 type Remove struct {
+	Activity
+	Object any    `json:"object"`
+	Target string `json:"target,omitempty"`
+}
+
+// Add represents an Add activity, used to federate a note pin into the actor's
+// featured collection (target=featured collection, object=note URI). Mirrors
+// ApRendererService.renderAdd (#2024)。
+type Add struct {
 	Activity
 	Object any    `json:"object"`
 	Target string `json:"target,omitempty"`
@@ -622,6 +632,8 @@ func AddContext(o any) {
 	case *Invite:
 		v.Context = ctx
 	case *Remove:
+		v.Context = ctx
+	case *Add:
 		v.Context = ctx
 	case *Undo:
 		v.Context = ctx

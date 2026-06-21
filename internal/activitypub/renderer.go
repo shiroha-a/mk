@@ -1120,6 +1120,43 @@ func (r *Renderer) RenderInvite(ownerID string, inner any, targetURI string) *In
 // ChatService.leaveRoom's renderRemove: actor = object = the leaving user,
 // target = the room. id は addContext 互換で `{baseURL}/{UUID}` を必ず入れる
 // (id 無し activity は受信側 InboxProcessor で弾かれる)。
+// RenderAddToFeatured builds an Add activity announcing that a local user pinned
+// a note into their featured collection (upstream NotePiningService.deliverPinnedChange
+// + renderAdd、#2024)。target=featured collection、object=note URI。
+func (r *Renderer) RenderAddToFeatured(userID, noteID string) *Add {
+	a := &Add{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.baseURL + "/" + uuid.NewString(),
+				Type: "Add",
+			},
+			Actor: r.urls.UserURI(userID),
+		},
+		Object: r.urls.NoteURI(noteID),
+		Target: r.urls.UserFeatured(userID),
+	}
+	AddContext(a)
+	return a
+}
+
+// RenderRemoveFromFeatured builds a Remove activity announcing that a local user
+// unpinned a note from their featured collection (upstream renderRemove、#2024)。
+func (r *Renderer) RenderRemoveFromFeatured(userID, noteID string) *Remove {
+	rm := &Remove{
+		Activity: Activity{
+			Object: Object{
+				ID:   r.urls.baseURL + "/" + uuid.NewString(),
+				Type: "Remove",
+			},
+			Actor: r.urls.UserURI(userID),
+		},
+		Object: r.urls.NoteURI(noteID),
+		Target: r.urls.UserFeatured(userID),
+	}
+	AddContext(rm)
+	return rm
+}
+
 func (r *Renderer) RenderChatRoomRemove(leavingUserURI, roomURI string) *Remove {
 	rm := &Remove{
 		Activity: Activity{

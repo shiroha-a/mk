@@ -1375,3 +1375,21 @@ func TestRenderer_RenderNote_NoPollResolver(t *testing.T) {
 	assert.Equal(t, "Note", out.Type)
 	assert.Empty(t, out.OneOf)
 }
+
+// #2024: RenderAddToFeatured / RenderRemoveFromFeatured は featured collection への
+// note pin/unpin を Add/Remove(target=featured, object=note URI) で表現する。
+func TestRenderer_RenderAddRemoveFeatured(t *testing.T) {
+	r := newRenderer()
+	add := marshalMap(t, r.RenderAddToFeatured("u1", "n1"))
+	assert.Equal(t, "Add", add["type"])
+	assert.Equal(t, "https://example.com/users/u1", add["actor"])
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", add["target"])
+	assert.Equal(t, "https://example.com/notes/n1", add["object"])
+	assert.NotEmpty(t, add["id"], "addContext 相当の id を持つ")
+	assert.NotNil(t, add["@context"])
+
+	rm := marshalMap(t, r.RenderRemoveFromFeatured("u1", "n1"))
+	assert.Equal(t, "Remove", rm["type"])
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", rm["target"])
+	assert.Equal(t, "https://example.com/notes/n1", rm["object"])
+}
