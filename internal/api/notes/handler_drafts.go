@@ -595,10 +595,12 @@ func (h *Handler) packDraft(ctx context.Context, viewer *model.User, d *model.No
 	// reply/renote を解決し (見つからなければ null)、未設定なら key を省略する
 	// (#1948-19)。reply は detail:false、renote は detail:true 相当。
 	if d.ReplyID != nil {
-		result["reply"] = h.packDraftNote(ctx, viewer, *d.ReplyID)
+		// reply は upstream で detail:false (clippedCount/poll/myReaction/nested embed 省略、#2016)。
+		result["reply"] = h.packDraftNote(ctx, viewer, *d.ReplyID, false)
 	}
 	if d.RenoteID != nil {
-		result["renote"] = h.packDraftNote(ctx, viewer, *d.RenoteID)
+		// renote は detail:true。
+		result["renote"] = h.packDraftNote(ctx, viewer, *d.RenoteID, true)
 	}
 	// channel は channelId set かつ channel が見つかったときだけ {id,name,color,
 	// isSensitive,allowRenoteToExternal,userId} を出力、それ以外は key 省略 (#1948-19)。
@@ -646,7 +648,7 @@ func (h *Handler) packDraft(ctx context.Context, viewer *model.User, d *model.No
 // packDraftNote resolves a draft's reply/renote target Note and packs it for the
 // viewer, returning nil when the note no longer exists (upstream
 // nullIfEntityNotFound). noteRepo 未配線時も nil (#1948-19)。
-func (h *Handler) packDraftNote(ctx context.Context, viewer *model.User, noteID string) any {
+func (h *Handler) packDraftNote(ctx context.Context, viewer *model.User, noteID string, detail bool) any {
 	if h.noteRepo == nil {
 		return nil
 	}
@@ -656,7 +658,8 @@ func (h *Handler) packDraftNote(ctx context.Context, viewer *model.User, noteID 
 	}
 	// packMany は timeline 用 hard-mute drop を行い非可視 note を漏らすため使わない。
 	// packReferencedNote が hard-mute skip + visibility hide を行う (#1948-19)。
-	return h.packReferencedNote(ctx, n, viewer)
+	// reply は detail:false、renote は detail:true で pack する (#2016)。
+	return h.packReferencedNote(ctx, n, viewer, detail)
 }
 
 // packDraftChannel resolves a draft's channel into the upstream NoteDraft.channel

@@ -203,6 +203,39 @@ func TestPackDraft_ResolvesReplyRenoteChannelAndPoll(t *testing.T) {
 	assert.False(t, hasExp, "poll.expiresAt nil は key 省略 (#1948-19)")
 }
 
+// #2016: draft の reply は upstream で detail:false (clippedCount/poll/myReaction/
+// nested embed を省く)、renote は detail:true。clippedCount は detail:true で常に
+// 出力 (&n.ClippedCount)、detail:false で省略されるので、reply は省略・renote は
+// 出力されることを確認する。
+func TestPackDraft_ReplyDetailFalse_RenoteDetailTrue(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	mkNote := func(id string) *model.Note {
+		return &model.Note{ID: id, UserID: "author", Visibility: "public",
+			Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	}
+	noteRepo.Notes["reply1"] = mkNote("reply1")
+	noteRepo.Notes["renote1"] = mkNote("renote1")
+	h.noteRepo = noteRepo
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+
+	replyID, renoteID := "reply1", "renote1"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Visibility: "public", ReplyID: &replyID, RenoteID: &renoteID}
+	rec := postDraft(h.DraftsList, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	d := resp[0]
+
+	reply := d["reply"].(map[string]any)
+	_, hasClipped := reply["clippedCount"]
+	assert.False(t, hasClipped, "reply は detail:false なので clippedCount 省略 (#2016)")
+
+	renote := d["renote"].(map[string]any)
+	_, rHasClipped := renote["clippedCount"]
+	assert.True(t, rHasClipped, "renote は detail:true なので clippedCount 出力 (#2016)")
+}
+
 // #1948-19 (security): draft owner が閲覧不可な note を replyId に入れても、その
 // 本文は漏れず hideNote stub される (followers/specified の intrinsic hide)。
 func TestPackDraft_ReplyToInvisibleNote_Hidden(t *testing.T) {

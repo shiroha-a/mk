@@ -945,7 +945,7 @@ func (h *Handler) BulkShow(c echo.Context) error {
 // specified 対象外) は entity.HideNoteEntity で本文を blank し isHidden を立てる
 // (upstream shouldHideNote→hideNote)。draft は owner-only だが、replyId/renoteId に
 // 任意の note ID を入れて非可視 note の本文を読み出す leak を塞ぐ (#1948-19)。
-func (h *Handler) packReferencedNote(ctx context.Context, n *model.Note, viewer *model.User) entity.NoteEntity {
+func (h *Handler) packReferencedNote(ctx context.Context, n *model.Note, viewer *model.User, detail bool) entity.NoteEntity {
 	packed := entity.PackNotes(ctx, []*model.Note{n}, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldResolver().Apply(packed, viewer)
 	notehide.HideEmbeds(viewer, packed)
@@ -953,6 +953,16 @@ func (h *Handler) packReferencedNote(ctx context.Context, n *model.Note, viewer 
 	// queryService 未配線時は fail-closed で hide (= 検証不能なら隠す)。
 	if h.queryService == nil || !h.queryService.CanSee(viewer, n) {
 		entity.HideNoteEntity(&out)
+	}
+	// PackNotes は top-level を常に detail:true で pack する。draft の reply は
+	// upstream で detail:false なので detail block (clippedCount/poll/myReaction/
+	// nested reply/renote embed) を落とす (#2016。reactions 自体は detail 外で残す)。
+	if !detail {
+		out.ClippedCount = nil
+		out.Poll = nil
+		out.MyReaction = nil
+		out.Reply = nil
+		out.Renote = nil
 	}
 	return out
 }
