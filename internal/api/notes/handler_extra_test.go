@@ -882,9 +882,25 @@ func TestClips_Success(t *testing.T) {
 // --- Translate ---
 
 func TestTranslate_NoTranslator(t *testing.T) {
-	h, _, _ := newExtraHandler(t)
+	// #1948-17: translator-nil(unavailable) check は note fetch / text check の後に
+	// 移動したので、可視 + text 有りの note を seed して 503 path を踏ませる。
+	h, noteRepo, _ := newExtraHandler(t)
+	txt := "hello"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &txt}
 	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// #1948-17: text == null の note は upstream translate.ts:86-88 と同じく 204
+// (res optional, return;)。mk-go の旧 400 CANNOT_TRANSLATE は廃止。translator
+// unavailable でも null-text は 204 が先に返る。
+func TestTranslate_NullText_204(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	// text=nil (file/poll only note)。public で可視。translator は未配線。
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: nil}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "null-text は 204 no-op (#1948-17)")
+	assert.Empty(t, rec.Body.String(), "body は空")
 }
 
 func TestTranslate_InvalidParam(t *testing.T) {
@@ -946,20 +962,19 @@ func TestTranslate_SpecifiedNote_NotInList_Invisible(t *testing.T) {
 }
 
 // follower / visibleUserIds 対象 / author は visibility gate を通過する。
-// Text を空にして text-empty 経路 (CANNOT_TRANSLATE) で止め、DeepL を呼ばずに
-// 「gate を通った」ことを検証する (invisible エラーでないことを確認)。
+// #1948-17: text=nil の note を使い null-text 経路 (204) で止め、DeepL を呼ばずに
+// 「gate を通った」ことを検証する (invisible なら手前で 400 になる)。
 func TestTranslate_VisibleViewers_PassVisibilityGate(t *testing.T) {
-	empty := ""
 	cases := []struct {
 		name   string
 		note   *model.Note
 		viewer *model.User
 		follow bool
 	}{
-		{"follower", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &empty}, &model.User{ID: "u2"}, true},
-		{"author", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: &empty}, &model.User{ID: "u1"}, false},
-		{"specified target", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"u2"}, Text: &empty}, &model.User{ID: "u2"}, false},
-		{"public anonymous", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &empty}, nil, false},
+		{"follower", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: nil}, &model.User{ID: "u2"}, true},
+		{"author", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers, Text: nil}, &model.User{ID: "u1"}, false},
+		{"specified target", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"u2"}, Text: nil}, &model.User{ID: "u2"}, false},
+		{"public anonymous", &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: nil}, nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -969,9 +984,8 @@ func TestTranslate_VisibleViewers_PassVisibilityGate(t *testing.T) {
 				fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: tc.viewer.ID, FolloweeID: "u1"}
 			}
 			rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, tc.viewer)
-			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			code, _ := translateBody(t, rec)
-			assert.Equal(t, "CANNOT_TRANSLATE", code, "visibility gate を通過し text-empty 経路に到達する")
+			// 可視 → null-text の 204 に到達 (invisible なら 400 で手前 reject)。
+			assert.Equal(t, http.StatusNoContent, rec.Code, "visibility gate を通過し null-text 経路 (204) に到達する")
 		})
 	}
 }

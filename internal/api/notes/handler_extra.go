@@ -487,10 +487,10 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId and targetLang are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	if h.translator == nil {
-		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "Translator is not configured.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
-	}
-
+	// upstream translate.ts の順序に合わせる (#1948-17): note fetch → visibility →
+	// text==null で 204 → unavailable → translate。translator-nil(unavailable) を
+	// note/text check より前に置くと、null-text note が upstream の 204 ではなく
+	// UNAVAILABLE を返してしまうため後ろに移動する。
 	n, err := h.noteRepo.FindByID(req.NoteID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "bea9b03f-36e0-49c5-a4db-627a029f8971"))
@@ -507,8 +507,15 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_TRANSLATE_INVISIBLE_NOTE", "Cannot translate invisible note.", "ea29f2ca-c368-43b3-aaf1-5ac3e74bbe5d"))
 	}
 
-	if n.Text == nil || *n.Text == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_TRANSLATE", "Nothing to translate.", "bef6e895-c05f-4572-96ab-58f5ae1e2e28"))
+	// upstream translate.ts:86-88: note.text == null は return; (res optional → 204
+	// No Content)。空文字は upstream が DeepL へ POST するので素通しする。mk-go の
+	// 旧 CANNOT_TRANSLATE は upstream に無い独自 error だったので廃止 (#1948-17)。
+	if n.Text == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+
+	if h.translator == nil {
+		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "Translator is not configured.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
 	}
 
 	result, err := h.translator.Translate(c.Request().Context(), *n.Text, req.TargetLang)

@@ -887,7 +887,24 @@ func (h *Handler) Conversation(c echo.Context) error {
 		// 現状QueryService.ConversationはErrNoteNotFound以外を返さない
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))
 	}
-	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
+	// Conversation は非可視な祖先も raw に返すので、ここで CanSee 判定して
+	// 非可視 note を hideNote stub する (upstream packMany(_, me) の hideNote 挙動、
+	// #1948-17)。index ずれ (ApplyHardMute の drop) に強いよう note ID で突合する。
+	hidden := make(map[string]struct{})
+	for _, n := range notes {
+		if !h.queryService.CanSee(viewer, n) {
+			hidden[n.ID] = struct{}{}
+		}
+	}
+	packed := h.packMany(c.Request().Context(), notes, viewer)
+	if len(hidden) > 0 {
+		for i := range packed {
+			if _, ok := hidden[packed[i].ID]; ok {
+				entity.HideNoteEntity(&packed[i])
+			}
+		}
+	}
+	return c.JSON(http.StatusOK, packed)
 }
 
 // BulkShow handles POST /api/notes — bulk note lookup by noteIds.

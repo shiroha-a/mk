@@ -292,9 +292,9 @@ func TestQueryService_Conversation_Walks(t *testing.T) {
 	out, err := svc.Conversation(nil, "c", 10, 0)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
-	// 古い順 (祖先が先頭)
-	assert.Equal(t, "g", out[0].ID)
-	assert.Equal(t, "p", out[1].ID)
+	// nearest-first (直接の親が先頭、upstream conversation.ts、#1948-17)
+	assert.Equal(t, "p", out[0].ID)
+	assert.Equal(t, "g", out[1].ID)
 }
 
 func TestQueryService_Conversation_DefaultLimit(t *testing.T) {
@@ -322,9 +322,9 @@ func TestQueryService_Conversation_LimitRespected(t *testing.T) {
 	out, err := svc.Conversation(nil, "d", 2, 0)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
-	// 直近の親2件: c, b. 古い順なのでb, c
-	assert.Equal(t, "b", out[0].ID)
-	assert.Equal(t, "c", out[1].ID)
+	// 直近の親2件: c, b。nearest-first なので c, b (#1948-17)
+	assert.Equal(t, "c", out[0].ID)
+	assert.Equal(t, "b", out[1].ID)
 }
 
 // #1554 offset は note に近い親を skip する (upstream conversation.ts:72-74)。
@@ -339,12 +339,12 @@ func TestQueryService_Conversation_Offset(t *testing.T) {
 	cID := "c"
 	noteRepo.Notes["d"] = &model.Note{ID: "d", UserID: "u", Visibility: model.NoteVisibilityPublic, ReplyID: &cID}
 
-	// offset=1: 最近の親 c を skip → b, a を収集。古い順で a, b。
+	// offset=1: 最近の親 c を skip → b, a を収集。nearest-first で b, a (#1948-17)。
 	out, err := svc.Conversation(nil, "d", 10, 1)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
-	assert.Equal(t, "a", out[0].ID)
-	assert.Equal(t, "b", out[1].ID)
+	assert.Equal(t, "b", out[0].ID)
+	assert.Equal(t, "a", out[1].ID)
 
 	// offset=1 + limit=1: c skip → b のみ。
 	out, err = svc.Conversation(nil, "d", 1, 1)
@@ -353,16 +353,23 @@ func TestQueryService_Conversation_Offset(t *testing.T) {
 	assert.Equal(t, "b", out[0].ID)
 }
 
-func TestQueryService_Conversation_HiddenAncestorTerminates(t *testing.T) {
+// #1948-17: 閲覧不可な祖先は walk を打ち切らず raw に含める (stub 化は handler の
+// 責務)。以前は CanSeeNote で break して可視な祖先まで truncate していた。
+func TestQueryService_Conversation_HiddenAncestorIncludedRaw(t *testing.T) {
 	svc, noteRepo, _ := newQueryService(t)
-	noteRepo.Notes["secret"] = &model.Note{ID: "secret", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	// チェーン: leaf(public) -> secret(followers, 不可視) -> gp(public)。
+	gpID := "gp"
+	noteRepo.Notes["gp"] = &model.Note{ID: "gp", UserID: "author", Visibility: model.NoteVisibilityPublic}
+	noteRepo.Notes["secret"] = &model.Note{ID: "secret", UserID: "author", Visibility: model.NoteVisibilityFollowers, ReplyID: &gpID}
 	secretID := "secret"
 	noteRepo.Notes["leaf"] = &model.Note{ID: "leaf", UserID: "viewer", Visibility: model.NoteVisibilityPublic, ReplyID: &secretID}
 
 	out, err := svc.Conversation(&model.User{ID: "viewer"}, "leaf", 10, 0)
 	require.NoError(t, err)
-	// 親は閲覧不可なのでチェーンが切れる
-	assert.Empty(t, out)
+	// 不可視 secret で打ち切らず、その先の可視 gp も返る (nearest-first)。
+	require.Len(t, out, 2)
+	assert.Equal(t, "secret", out[0].ID, "不可視祖先も raw に含む (handler が stub する、#1948-17)")
+	assert.Equal(t, "gp", out[1].ID, "不可視祖先の先の可視 note も truncate しない (#1948-17)")
 }
 
 func TestQueryService_Conversation_StartMissing(t *testing.T) {

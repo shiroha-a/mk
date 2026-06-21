@@ -136,9 +136,18 @@ func (s *QueryService) ListChildren(viewer *model.User, noteID, untilID, sinceID
 	return s.noteRepo.ListChildrenOf(noteID, viewerIDOf(viewer), untilID, sinceID, limit)
 }
 
-// Conversation walks up the reply chain from the given noteID and returns
-// up to `limit` ancestors, ordered from oldest to newest. The starting note
-// itself is NOT included. Notes the viewer cannot see terminate the walk.
+// Conversation walks up the reply chain from the given noteID and returns up to
+// `limit` ancestors nearest-first ([direct parent, ..., deepest ancestor]),
+// matching upstream conversation.ts which pushes ancestors in walk order without
+// reversal (#1948-17). The starting note itself is NOT included.
+//
+// 重要 (#1948-17): ancestor は visibility で filter せず raw に返す。upstream
+// conversation.ts は findOneBy({id}) で全 ancestor を walk し、packMany(_, me) 側
+// の hideNote で非可視 note を stub する。よって walk を可視性で打ち切らない
+// (以前は CanSeeNote で break しており、可視な祖先まで truncate していた)。返り値
+// には閲覧不可な ancestor も含まれるため、**呼び出し側は CanSee で判定して非可視
+// note を entity.HideNoteEntity で stub する責務を負う** (handler 側で実施)。起点
+// note の可視性は従来どおり Show で gate する。
 func (s *QueryService) Conversation(viewer *model.User, noteID string, limit, offset int) ([]*model.Note, error) {
 	start, err := s.Show(viewer, noteID)
 	if err != nil {
@@ -170,9 +179,8 @@ func (s *QueryService) Conversation(viewer *model.User, noteID string, limit, of
 		if err != nil {
 			break
 		}
-		if !CanSeeNote(viewer, parent, s.followingRepo) {
-			break
-		}
+		// 可視性で break しない: 非可視な祖先も含めて辿り、stub 化は呼び出し側に
+		// 委ねる (upstream packMany hideNote 挙動、#1948-17)。
 		visited[parentID] = struct{}{}
 		i++
 		// 最初の offset 件 (note に近い親) は skip する。
@@ -181,8 +189,8 @@ func (s *QueryService) Conversation(viewer *model.User, noteID string, limit, of
 		}
 		current = parent
 	}
-	// 古い順 (最深の親を先頭) に並び替える
-	reverseNotes(ancestors)
+	// upstream は nearest-first ([直接の親, ..., 最深] ) で返す。以前の
+	// reverseNotes(oldest-first) を削除 (#1948-17)。
 	return ancestors, nil
 }
 
@@ -191,6 +199,13 @@ func (s *QueryService) Conversation(viewer *model.User, noteID string, limit, of
 //
 // upstream Misskey の notes/state は isFavorited / isMutedThread のみを返す
 // (isWatching は廃止) ため、こちらも同じ shape に揃える。
+//
+// 可視性 gate について (#1948-17): upstream notes/state.ts は findOneByOrFail({id})
+// のみで visibility check を持たず、note ID を知る viewer は閲覧不可 note の
+// isFavorited/isMutedThread を読め、かつ存在(200)/不在(500)を区別できる existence
+// oracle になる。mk-go は requireVisible(CanSeeNote) で gate し、閲覧不可・不在の
+// 両方を NO_SUCH_NOTE に潰す。これは upstream より strict だが existence oracle と
+// state leak を塞ぐ意図的な deviation として維持する (gate を外さない)。
 func (s *QueryService) State(viewer *model.User, noteID string) (*NoteState, error) {
 	// State は note.ID と note.ThreadID しか触らないので軽量経路で十分 (#425)。
 	note, err := s.requireVisible(viewer, noteID)
@@ -251,10 +266,4 @@ func (s *QueryService) filterVisible(viewer *model.User, rows []*model.Note) []*
 		}
 	}
 	return out
-}
-
-func reverseNotes(notes []*model.Note) {
-	for i, j := 0, len(notes)-1; i < j; i, j = i+1, j-1 {
-		notes[i], notes[j] = notes[j], notes[i]
-	}
 }

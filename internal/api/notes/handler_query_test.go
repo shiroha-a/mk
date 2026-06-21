@@ -619,6 +619,38 @@ func TestConversation_OK(t *testing.T) {
 	assert.Equal(t, "root", resp[0]["id"])
 }
 
+// #1948-17: 非可視な祖先は walk を打ち切らず hideNote stub で返す (upstream
+// packMany(_, me) の hideNote 挙動)。可視な祖先 (gp) は通常通り返る。
+func TestConversation_HiddenAncestorStubbed(t *testing.T) {
+	h, repo := newQueryHandler(t)
+	// leaf(public) -> secret(followers, 匿名には不可視, text 有り) -> gp(public)。
+	gp := seedPublicNote(repo, "gp")
+	gpID := gp.ID
+	secretTxt := "secret content"
+	secret := &model.Note{ID: "secret", UserID: "author", Visibility: model.NoteVisibilityFollowers, ReplyID: &gpID, Text: &secretTxt, Reactions: datatypes.JSON([]byte("{}"))}
+	putUserOnNote(secret)
+	repo.Notes["secret"] = secret
+	leaf := seedPublicNote(repo, "leaf")
+	sID := "secret"
+	leaf.ReplyID = &sID
+
+	// 匿名 viewer: secret は followers-only なので不可視 → stub。
+	c, rec := newJSONRequest(t, "/api/notes/conversation", `{"noteId":"leaf"}`)
+	require.NoError(t, h.Conversation(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 2, "不可視祖先で打ち切らず gp まで返る (#1948-17)")
+	// nearest-first: [secret(stub), gp]。
+	assert.Equal(t, "secret", resp[0]["id"])
+	assert.Equal(t, true, resp[0]["isHidden"], "不可視祖先は isHidden:true で stub (#1948-17)")
+	assert.Nil(t, resp[0]["text"], "stub は text を消す (#1948-17)")
+	assert.NotContains(t, rec.Body.String(), "secret content", "本文が leak しない")
+	// gp は public なので通常表示。
+	assert.Equal(t, "gp", resp[1]["id"])
+	assert.NotEqual(t, true, resp[1]["isHidden"])
+}
+
 func TestConversation_LimitClamping(t *testing.T) {
 	h, repo := newQueryHandler(t)
 	seedPublicNote(repo, "n1")
