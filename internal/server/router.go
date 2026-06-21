@@ -2138,6 +2138,8 @@ func (s *Server) setupRoutes() {
 	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
 	streamManager.SubscribeWordMuteReload()
+	// broadcast stream (emojiAdded/Updated/Deleted 等) を全 connection へ forward (#2046)。
+	streamManager.SubscribeBroadcast()
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
 	// profile 編集を remote followers に Update(Person) で配信する (#1560)。
 	// actor endpoint と同じ shape にするため ed25519 keypair を、follower 以外の
@@ -2432,6 +2434,8 @@ func (s *Server) setupRoutes() {
 	galleryHandler.SetModLog(modLogService) // #1548: moderator による gallery post 削除の監査ログ
 	flashHandler.SetModLog(modLogService)   // #1548: moderator による flash 削除の監査ログ
 	adminHandler.SetEmojiRepo(emojiRepo)
+	// emoji の add/update/delete を broadcast stream へ流し emoji picker を live-refresh (#2046)。
+	adminHandler.SetBroadcastPublisher(stream.NewBroadcastPublisher(streamPubSub))
 	adminHandler.SetDriveFileRepo(driveFileRepo)
 	adminHandler.SetDriveBulkDeleter(driveService) // #1772: delete-all-files の物理削除 + 使用量減算
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で

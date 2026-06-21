@@ -52,6 +52,7 @@ func (h *Handler) EmojiAddAliasesBulk(c echo.Context) error {
 				"emojiId", e.ID, "err", err)
 		}
 	}
+	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -135,6 +136,7 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		"emojiId": copied.ID,
 		"emoji":   &copied,
 	})
+	h.publishEmojiAdded(&copied) // #2046
 	return c.JSON(http.StatusOK, map[string]any{"id": copied.ID})
 }
 
@@ -181,6 +183,8 @@ func (h *Handler) EmojiDeleteBulk(c echo.Context) error {
 		}
 		h.logModerationMany(c, entries)
 	}
+	// 削除前 snapshot を broadcast (#2046)。snapshot 取得失敗時は空で no-op。
+	h.publishEmojiDeleted(snapshots...)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -308,6 +312,7 @@ func (h *Handler) EmojiRemoveAliasesBulk(c echo.Context) error {
 				"emojiId", e.ID, "err", err)
 		}
 	}
+	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -331,6 +336,7 @@ func (h *Handler) EmojiSetAliasesBulk(c echo.Context) error {
 	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"aliases": pq.StringArray(req.Aliases)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -352,6 +358,7 @@ func (h *Handler) EmojiSetCategoryBulk(c echo.Context) error {
 	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"category": nullableString(req.Category)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -381,5 +388,6 @@ func (h *Handler) EmojiSetLicenseBulk(c echo.Context) error {
 	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"license": nullableString(req.License)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
 	return c.NoContent(http.StatusNoContent)
 }

@@ -2653,6 +2653,82 @@ func TestEmojiAdd_NilRepo(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// captureBroadcast records PublishBroadcast calls (#2046)。
+type captureBroadcast struct {
+	events []string
+}
+
+func (c *captureBroadcast) PublishBroadcast(eventType string, _ any) {
+	c.events = append(c.events, eventType)
+}
+
+// #2046: emoji の add/update/delete が broadcast stream へ emojiAdded/Updated/Deleted を流す。
+// name 変更 update は emojiDeleted+emojiAdded。
+func TestEmoji_BroadcastEvents(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	h.SetEmojiRepo(emojiRepo)
+	bc := &captureBroadcast{}
+	h.SetBroadcastPublisher(bc)
+
+	// add → emojiAdded。
+	rec := doPost(h.EmojiAdd, `{"name":"smile","url":"https://example.com/s.png"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"emojiAdded"}, bc.events)
+
+	// non-name update → emojiUpdated。
+	bc.events = nil
+	emojiRepo.Emojis["test@"] = &model.Emoji{ID: "e1", Name: "test"}
+	rec = doPost(h.EmojiUpdate, `{"id":"e1","category":"face"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"emojiUpdated"}, bc.events)
+
+	// name 変更 update → emojiDeleted + emojiAdded。
+	bc.events = nil
+	emojiRepo.Emojis["ren@"] = &model.Emoji{ID: "e2", Name: "ren"}
+	rec = doPost(h.EmojiUpdate, `{"id":"e2","name":"renamed"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"emojiDeleted", "emojiAdded"}, bc.events)
+
+	// delete → emojiDeleted。
+	bc.events = nil
+	emojiRepo.Emojis["del@"] = &model.Emoji{ID: "e3", Name: "del"}
+	rec = doPost(h.EmojiDelete, `{"id":"e3"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"emojiDeleted"}, bc.events)
+}
+
+// #2046: bulk 操作 (set-category-bulk / delete-bulk / copy) も broadcast を流す。
+func TestEmoji_BroadcastEvents_Bulk(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	emojiRepo := testutil.NewMockEmojiRepository()
+	h.SetEmojiRepo(emojiRepo)
+	bc := &captureBroadcast{}
+	h.SetBroadcastPublisher(bc)
+	emojiRepo.Emojis["a@"] = &model.Emoji{ID: "ba1", Name: "a"}
+	emojiRepo.Emojis["b@"] = &model.Emoji{ID: "ba2", Name: "b"}
+
+	// set-category-bulk → emojiUpdated (1 件にまとめる)。
+	bc.events = nil
+	rec := doPost(h.EmojiSetCategoryBulk, `{"ids":["ba1","ba2"],"category":"face"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"emojiUpdated"}, bc.events)
+
+	// delete-bulk → emojiDeleted。
+	bc.events = nil
+	rec = doPost(h.EmojiDeleteBulk, `{"ids":["ba1","ba2"]}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"emojiDeleted"}, bc.events)
+
+	// copy (remote → local) → emojiAdded。
+	bc.events = nil
+	host := "remote.example"
+	emojiRepo.Emojis["srcemoji@remote.example"] = &model.Emoji{ID: "src1", Name: "srcemoji", Host: &host}
+	rec = doPost(h.EmojiCopy, `{"emojiId":"src1"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"emojiAdded"}, bc.events)
+}
+
 func TestEmojiUpdate_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	emojiRepo := testutil.NewMockEmojiRepository()

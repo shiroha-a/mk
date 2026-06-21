@@ -92,6 +92,10 @@ type Handler struct {
 	abuseRepo     repository.AbuseReportRepository
 	modLogService *moderationlog.Service
 	emojiRepo     repository.EmojiRepository
+	// broadcastPub は emoji の add/update/delete を broadcast stream へ流し、全
+	// connection の emoji picker を live-refresh するために使う (#2046)。未配線なら
+	// 通知しない。
+	broadcastPub  BroadcastPublisher
 	driveFileRepo repository.DriveFileRepository
 	// driveBulkDeleter は federation/delete-all-files で host のファイルを物理
 	// ストレージ込みで削除し drive 使用量を減算する (#1772)。未配線時は
@@ -2243,6 +2247,61 @@ func (h *Handler) RolesUpdateDefaultPolicies(c echo.Context) error {
 // SetEmojiRepo attaches the emoji repository.
 func (h *Handler) SetEmojiRepo(r repository.EmojiRepository) { h.emojiRepo = r }
 
+// BroadcastPublisher emits an instance-wide stream event to every connected
+// client. Implemented by *stream.BroadcastPublisher (#2046)。
+type BroadcastPublisher interface {
+	PublishBroadcast(eventType string, body any)
+}
+
+// SetBroadcastPublisher wires the broadcast stream publisher used to emit
+// emojiAdded / emojiUpdated / emojiDeleted (#2046)。nil disables emission.
+func (h *Handler) SetBroadcastPublisher(p BroadcastPublisher) { h.broadcastPub = p }
+
+// publishEmojiAdded emits emojiAdded `{emoji}` (single packed emoji).
+func (h *Handler) publishEmojiAdded(e *model.Emoji) {
+	if h.broadcastPub == nil {
+		return
+	}
+	h.broadcastPub.PublishBroadcast("emojiAdded", map[string]any{"emoji": entity.PackEmojiDetailed(e)})
+}
+
+// publishEmojiUpdated emits emojiUpdated `{emojis:[...]}` (packed array).
+func (h *Handler) publishEmojiUpdated(emojis ...*model.Emoji) {
+	if h.broadcastPub == nil || len(emojis) == 0 {
+		return
+	}
+	packed := make([]any, len(emojis))
+	for i, e := range emojis {
+		packed[i] = entity.PackEmojiDetailed(e)
+	}
+	h.broadcastPub.PublishBroadcast("emojiUpdated", map[string]any{"emojis": packed})
+}
+
+// publishEmojiDeleted emits emojiDeleted `{emojis:[...]}` (packed array).
+func (h *Handler) publishEmojiDeleted(emojis ...*model.Emoji) {
+	if h.broadcastPub == nil || len(emojis) == 0 {
+		return
+	}
+	packed := make([]any, len(emojis))
+	for i, e := range emojis {
+		packed[i] = entity.PackEmojiDetailed(e)
+	}
+	h.broadcastPub.PublishBroadcast("emojiDeleted", map[string]any{"emojis": packed})
+}
+
+// publishEmojiUpdatedByIDs re-fetches the given emoji ids and emits a single
+// emojiUpdated event (upstream bulk ops の packDetailedMany(ids) 相当、#2046)。
+func (h *Handler) publishEmojiUpdatedByIDs(ids []string) {
+	if h.broadcastPub == nil || h.emojiRepo == nil || len(ids) == 0 {
+		return
+	}
+	rows, err := h.emojiRepo.FindManyByIDs(ids)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	h.publishEmojiUpdated(rows...)
+}
+
 // EmojiAdd handles POST /api/admin/emoji/add.
 //
 // upstream Misskey TS は `fileId` を必須として drive 経由でしか emoji を
@@ -2326,6 +2385,8 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		"emojiId": e.ID,
 		"emoji":   e,
 	})
+	// local emoji の追加を broadcast stream へ流し emoji picker を live-refresh (#2046)。
+	h.publishEmojiAdded(e)
 	// upstream は EmojiDetailed (packDetailed) を返す。raw model.Emoji を返すと
 	// `url` が欠落し originalUrl/publicUrl/uri/type 等の内部 field が漏れる。
 	return c.JSON(http.StatusOK, entity.PackEmojiDetailed(e))
@@ -2447,6 +2508,9 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	// 以降の UpdateFields / moderation log は解決済み id を使う。
 	req.ID = before.ID
+	// name 変更判定用に旧 name を UpdateFields 前に控える (#2046 broadcast 用。
+	// GORM では before は別 struct だが、in-place 更新する実装に依らず安全側)。
+	oldName := before.Name
 	fields := map[string]any{}
 	if req.Name != nil {
 		// リネーム時は同名 local emoji の重複を弾く (SAME_NAME_EMOJI_EXISTS)。
@@ -2518,6 +2582,14 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		"before":  before,
 		"after":   after,
 	})
+	// broadcast stream へ流す (#2046)。upstream は name 変更時のみ
+	// emojiDeleted(old)+emojiAdded(new)、それ以外は emojiUpdated(after)。
+	if req.Name != nil && *req.Name != oldName {
+		h.publishEmojiDeleted(before)
+		h.publishEmojiAdded(after)
+	} else {
+		h.publishEmojiUpdated(after)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -2556,6 +2628,8 @@ func (h *Handler) EmojiDelete(c echo.Context) error {
 		"emojiId": req.ID,
 		"emoji":   snapshot,
 	})
+	// 削除を broadcast stream へ流し emoji picker から消す (#2046)。
+	h.publishEmojiDeleted(snapshot)
 	return c.NoContent(http.StatusNoContent)
 }
 

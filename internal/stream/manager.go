@@ -205,6 +205,7 @@ func (m *Manager) Shutdown() {
 	// pubsub subscriber goroutine を先に停止して、停止中の connection に
 	// reload signal が届かないようにする (#791)。
 	m.UnsubscribeWordMuteReload()
+	m.UnsubscribeBroadcast()
 	m.mu.Lock()
 	conns := make([]*Connection, 0, len(m.conns))
 	for _, c := range m.conns {
