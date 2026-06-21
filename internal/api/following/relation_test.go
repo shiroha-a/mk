@@ -160,3 +160,21 @@ func TestUpdateFollow_NotifyNormal_StoredAsString(t *testing.T) {
 	require.NotNil(t, fRepo.Followings["f1"].Notify)
 	assert.Equal(t, "normal", *fRepo.Followings["f1"].Notify)
 }
+
+// #2027: notify enum (normal/none) 外は 400 で弾く (verbatim 保存しない)。
+func TestUpdateFollow_InvalidNotifyEnum(t *testing.T) {
+	h, repo, fRepo, _ := newTestHandlerWithRepos(t)
+	alice := addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", false)
+	fRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: alice.ID, FolloweeID: bob.ID}
+	rec := postJSON(h.UpdateFollow, `{"userId":"bob","notify":"bogus"}`, alice)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "notify enum 外は 400 (#2027)")
+}
+
+// #2027: update-all も notify enum 外を 400 で弾く。
+func TestUpdateFollowAll_InvalidNotifyEnum(t *testing.T) {
+	h, repo, _, _ := newTestHandlerWithRepos(t)
+	alice := addUser(repo, "alice", false)
+	rec := postJSON(h.UpdateFollowAll, `{"notify":"bogus"}`, alice)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "update-all notify enum 外は 400 (#2027)")
+}

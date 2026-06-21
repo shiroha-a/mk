@@ -76,6 +76,12 @@ func (h *Handler) SetUserSource(s UserBundleSource) {
 	h.userSource = s
 }
 
+// jsonAbsent reports whether a json.RawMessage field was omitted or sent as the
+// literal `null` (= ajv の required 違反相当、#2027)。
+func jsonAbsent(r json.RawMessage) bool {
+	return len(r) == 0 || string(r) == "null"
+}
+
 // CreateRequest is the request body for pages/create. Content / Variables
 // are stored verbatim into jsonb columns; we don't interpret them.
 type CreateRequest struct {
@@ -97,6 +103,12 @@ func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req CreateRequest
 	if err := c.Bind(&req); err != nil || req.Title == "" || req.Name == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream pages/create.ts は required:['title','name','content','variables','script']。
+	// content/variables の欠落 (omitted/null) を ajv 同様 400 で弾く (#2027。script は
+	// Go の string で omitted と "" を区別できないため presence 強制は見送る)。
+	if jsonAbsent(req.Content) || jsonAbsent(req.Variables) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream create.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、

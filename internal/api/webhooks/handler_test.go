@@ -174,7 +174,7 @@ func TestCreate_InvalidOnEnum(t *testing.T) {
 func TestCreate_Error(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.createErr = errMock
-	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com","on":["note"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -194,7 +194,7 @@ func TestCreate_WebhookLimitExceeded(t *testing.T) {
 	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
 		"webhookLimit": 2,
 	}})
-	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com","on":["note"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "TOO_MANY_WEBHOOKS")
 	assert.Contains(t, rec.Body.String(), "87a9bb19-111e-4e37-81d3-a3e7426453b0")
@@ -205,7 +205,7 @@ func TestCreate_WebhookLimit_PassesUnderLimit(t *testing.T) {
 	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
 		"webhookLimit": 10,
 	}})
-	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com","on":["note"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code, "limit 内なら通常成功")
 }
 
@@ -222,7 +222,7 @@ func TestCreate_WebhookLimit_CountError(t *testing.T) {
 	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
 		"webhookLimit": 5,
 	}})
-	rec := post(h.Create, `{"name":"test","url":"https://example.com"}`, &model.User{ID: "u1"})
+	rec := post(h.Create, `{"name":"test","url":"https://example.com","on":["note"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -499,4 +499,14 @@ func TestTest_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Test, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #2027: on 欠落は 400、空配列 [] は present 扱いで許容。
+func TestCreate_OnRequired(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.Create, `{"name":"t","url":"https://e.example"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "on 欠落は 400 (#2027)")
+	rec = post(h.Create, `{"name":"t","url":"https://e.example","on":[]}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusOK, rec.Code, "空 on は許容")
+	assert.Contains(t, rec.Body.String(), `"on":[]`, "response on は [] (null でない、#2027)")
 }

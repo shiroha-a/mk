@@ -39,6 +39,10 @@ func (h *Handler) Register(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Seed == "" || req.GameMode == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "score, seed, logs, gameMode, gameVersion are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
+	// upstream register.ts paramDef は score:{minimum:0}。負値を ajv 同様 400 で弾く (#2027)。
+	if req.Score < 0 {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "score must be >= 0.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
 
 	// シード検証: seedはUnixタイムスタンプ文字列
 	seedMs, err := strconv.ParseInt(req.Seed, 10, 64)

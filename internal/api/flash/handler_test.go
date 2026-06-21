@@ -713,3 +713,11 @@ func TestMyLikes_RepoError(t *testing.T) {
 	require.NoError(t, h.MyLikes(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// #2027: visibility enum 外は 400。
+func TestCreate_InvalidVisibility(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","script":"s","summary":"","permissions":[],"visibility":"bogus"}`)
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

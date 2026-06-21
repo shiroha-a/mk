@@ -78,6 +78,11 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 	}
 	fields := map[string]any{}
 	if req.Notify != nil {
+		// upstream update.ts paramDef は notify:{enum:['normal','none']}。enum 外を
+		// verbatim 保存すると DB 列が壊れるので ajv 同様 400 で弾く (#2027)。
+		if !validNotify(*req.Notify) {
+			return apierr.JSONInvalidParam(c)
+		}
 		fields["notify"] = normalizeNotify(*req.Notify)
 	}
 	if req.WithReplies != nil {
@@ -91,6 +96,12 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, entity.PackUserLite(meBundle.User))
+}
+
+// validNotify reports whether v is one of upstream's `notify` enum values
+// ('normal' / 'none')。enum 外は ajv で 400 になるので caller で弾く (#2027)。
+func validNotify(v string) bool {
+	return v == "normal" || v == "none"
 }
 
 // normalizeNotify converts the upstream `notify` enum ("normal" / "none") to
@@ -120,6 +131,10 @@ func (h *Handler) UpdateFollowAll(c echo.Context) error {
 	}
 	fields := map[string]any{}
 	if req.Notify != nil {
+		// upstream update-all.ts も notify:{enum:['normal','none']} (#2027)。
+		if !validNotify(*req.Notify) {
+			return apierr.JSONInvalidParam(c)
+		}
 		// upstream #17385 互換: notify="none" は SQL NULL に正規化する。
 		fields["notify"] = normalizeNotify(*req.Notify)
 	}

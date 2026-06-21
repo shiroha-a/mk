@@ -85,11 +85,17 @@ func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 }
 
 func packWebhook(w *model.Webhook) map[string]any {
+	// upstream の webhook.on は常に string[]。nil (旧 row 等) は [] に倒して
+	// response が null にならないようにする (#2027)。
+	on := w.On
+	if on == nil {
+		on = []string{}
+	}
 	return map[string]any{
 		"id":     w.ID,
 		"userId": w.UserID,
 		"name":   w.Name,
-		"on":     w.On,
+		"on":     on,
 		"url":    w.URL,
 		"secret": w.Secret,
 		"active": w.Active,
@@ -111,6 +117,11 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || req.Name == "" || req.URL == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name and url are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// upstream i/webhooks/create.ts は required:['name','url','on']。on 欠落 (nil) は
+	// ajv 同様 400 で弾く (空配列 [] は present 扱いで許容、#2027)。
+	if req.On == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "on is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	if !validateOnArray(req.On) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "on must contain only webhookEventTypes values.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))

@@ -74,6 +74,11 @@ func (h *Handler) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Title == "" || req.Script == "" || req.Summary == nil || req.Permissions == nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// upstream flash/create.ts は visibility:{enum:['public','private']}。空は public
+	// default (service 側) なので許容、それ以外の非 enum 値は 400 で弾く (#2027)。
+	if req.Visibility != "" && req.Visibility != "public" && req.Visibility != "private" {
+		return apierr.JSONInvalidParam(c)
+	}
 	f, err := h.svc.Create(coreflash.CreateInput{
 		OwnerID:     user.ID,
 		Title:       req.Title,
@@ -136,6 +141,10 @@ func (h *Handler) Update(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil || req.FlashID == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// upstream flash/update.ts も visibility:{enum:['public','private']} (#2027)。
+	if req.Visibility != nil && *req.Visibility != "public" && *req.Visibility != "private" {
 		return apierr.JSONInvalidParam(c)
 	}
 	f, err := h.svc.Update(user.ID, req.FlashID, coreflash.UpdateInput{

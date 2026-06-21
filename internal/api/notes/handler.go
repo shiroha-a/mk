@@ -490,10 +490,20 @@ func validateCreateInput(req *CreateRequest, fileIDs []string) error {
 		if n := len(req.Poll.Choices); n < 2 || n > 10 {
 			return errors.New("poll must have between 2 and 10 choices")
 		}
+		seen := make(map[string]bool, len(req.Poll.Choices))
 		for _, ch := range req.Poll.Choices {
 			if n := len([]rune(ch)); n < 1 || n > 50 {
 				return errors.New("each poll choice must be between 1 and 50 characters")
 			}
+			// upstream notes/create.ts poll.choices は uniqueItems:true (#2027)。
+			if seen[ch] {
+				return errors.New("poll choices must be unique")
+			}
+			seen[ch] = true
+		}
+		// upstream poll.expiredAfter は minimum:1 (#2027)。
+		if req.Poll.ExpiredAfter != nil && *req.Poll.ExpiredAfter < 1 {
+			return errors.New("expiredAfter must be at least 1")
 		}
 	}
 	// text のみで成立する note (renote/file/poll 無し) は空白だけの text を弾く

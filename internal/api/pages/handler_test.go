@@ -47,7 +47,7 @@ func setUser(c echo.Context, userID string) {
 
 func TestCreate_Success(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"title":"t","name":"alpha"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -74,7 +74,7 @@ func TestCreate_NameInvalidPattern(t *testing.T) {
 func TestCreate_EyeCatchingImageNoSuchFile(t *testing.T) {
 	h, _, _ := newHandler(t)
 	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository()) // 空 = 不在
-	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f_ghost"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f_ghost","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -88,7 +88,7 @@ func TestCreate_EyeCatchingImageForeignFile(t *testing.T) {
 	other := "bob"
 	dr.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &other}
 	h.SetDriveFileRepo(dr)
-	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -101,7 +101,7 @@ func TestCreate_EyeCatchingImageOwned(t *testing.T) {
 	owner := "alice"
 	dr.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &owner}
 	h.SetDriveFileRepo(dr)
-	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -138,7 +138,7 @@ func TestCreate_NameRequired(t *testing.T) {
 func TestCreate_NameConflict(t *testing.T) {
 	h, repo, _ := newHandler(t)
 	repo.Pages["existing"] = &model.Page{ID: "existing", UserID: "alice", Name: "alpha"}
-	c, rec := newReq(t, `{"title":"t","name":"alpha"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -158,7 +158,7 @@ func TestCreate_RepoError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := corepage.NewService(repo, testutil.NewMockPageLikeRepository(), idGen)
 	h := NewHandler(svc, idGen)
-	c, rec := newReq(t, `{"title":"t","name":"alpha"}`)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -1009,4 +1009,12 @@ func TestShow_NoDriveRepoKeepsDefaults(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, attached, "未配線なら空配列")
 	assert.Nil(t, row["eyeCatchingImage"], "未配線なら null")
+}
+
+// #2027: content/variables 欠落は 400。
+func TestCreate_ContentVariablesRequired(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","variables":[]}`)
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "content 欠落は 400 (#2027)")
 }

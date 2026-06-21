@@ -1033,3 +1033,16 @@ func TestBulkShow_NoBody(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "[]\n", rec.Body.String())
 }
+
+// #2027: poll choices uniqueItems + expiredAfter>=1 を validateCreateInput が弾く。
+func TestValidateCreateInput_PollUniqueAndExpiredAfter(t *testing.T) {
+	dupChoices := &CreateRequest{Poll: &PollRequest{Choices: []string{"a", "a"}}}
+	assert.Error(t, validateCreateInput(dupChoices, nil), "重複 choice は弾く")
+
+	ok := &CreateRequest{Poll: &PollRequest{Choices: []string{"a", "b"}}}
+	assert.NoError(t, validateCreateInput(ok, nil), "ユニークな choice は通る")
+
+	bad := int64(0)
+	badExpire := &CreateRequest{Poll: &PollRequest{Choices: []string{"a", "b"}, ExpiredAfter: &bad}}
+	assert.Error(t, validateCreateInput(badExpire, nil), "expiredAfter<1 は弾く")
+}

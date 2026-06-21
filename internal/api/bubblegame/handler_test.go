@@ -245,3 +245,11 @@ func TestRanking_NilUser(t *testing.T) {
 	_, hasUser := resp[0]["user"]
 	assert.False(t, hasUser)
 }
+
+// #2027: score<0 は upstream の minimum:0 に従い 400 (seed parse より前に弾く)。
+func TestRegister_NegativeScoreRejected(t *testing.T) {
+	h, _ := newTestHandler()
+	rec := post(h.Register, `{"score":-1,"seed":"x","gameMode":"normal","gameVersion":1}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
