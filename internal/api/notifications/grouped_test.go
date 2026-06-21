@@ -332,3 +332,25 @@ func TestGrouped_MarkAsReadFalseSkipsRead(t *testing.T) {
 	assert.NotContains(t, pub.types("alice"), "readAllNotifications",
 		"Grouped with markAsRead:false must not publish readAllNotifications")
 }
+
+// #2062: includeTypes/excludeTypes の enum 外は 400、enum 内 (obsolete 含む) は通る。
+func TestGrouped_NotificationTypeEnum(t *testing.T) {
+	h, _, _, _ := groupedHandler(t)
+	// enum 外 type → 400。
+	c, rec := newJSONRequest(t, "/api/i/notifications-grouped", `{"includeTypes":["bogus"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Grouped(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "enum 外 includeTypes は 400 (#2062)")
+
+	// excludeTypes enum 外 → 400。
+	c, rec = newJSONRequest(t, "/api/i/notifications-grouped", `{"excludeTypes":["nope"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Grouped(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "enum 外 excludeTypes は 400 (#2062)")
+
+	// enum 内 (obsolete pollVote 含む) → 200。
+	c, rec = newJSONRequest(t, "/api/i/notifications-grouped", `{"excludeTypes":["reaction","pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Grouped(c))
+	assert.Equal(t, http.StatusOK, rec.Code, "enum 内 (obsolete 含む) は通る")
+}

@@ -191,12 +191,43 @@ func (h *Handler) Show(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
+// notificationTypeEnum mirrors upstream `[...notificationTypes,
+// ...obsoleteNotificationTypes]` (types.ts)。includeTypes/excludeTypes の
+// 要素検証に使う (#2062)。mk-go が produce しない type も upstream paramDef の
+// enum に含まれるため許容する (filter で何も match しないだけ)。
+var notificationTypeEnum = map[string]bool{
+	"note": true, "follow": true, "mention": true, "reply": true, "renote": true,
+	"quote": true, "reaction": true, "pollEnded": true, "scheduledNotePosted": true,
+	"scheduledNotePostFailed": true, "receiveFollowRequest": true, "followRequestAccepted": true,
+	"roleAssigned": true, "chatRoomInvitationReceived": true, "achievementEarned": true,
+	"exportCompleted": true, "login": true, "createToken": true, "app": true, "test": true,
+	// obsoleteNotificationTypes (paramDef enum に含まれる)
+	"pollVote": true, "groupInvited": true,
+}
+
+// validNotificationTypes reports whether every element of types is a known
+// notification type enum value (nil / empty は valid、#2062)。
+func validNotificationTypes(types []string) bool {
+	for _, t := range types {
+		if !notificationTypeEnum[t] {
+			return false
+		}
+	}
+	return true
+}
+
 // bindListRequest binds the shared i/notifications(-grouped) request body and
 // normalizes the cursor / limit. Returns ok=false on a bind error so callers
 // can emit INVALID_PARAM.
 func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 	var req ListRequest
 	if err := c.Bind(&req); err != nil {
+		return req, false
+	}
+	// upstream notifications(-grouped).ts は includeTypes/excludeTypes を
+	// [...notificationTypes, ...obsoleteNotificationTypes] の enum で検証する。
+	// enum 外を ajv 同様 400 で弾く (#2062)。
+	if !validNotificationTypes(req.IncludeTypes) || !validNotificationTypes(req.ExcludeTypes) {
 		return req, false
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1174)。Notification.ID
