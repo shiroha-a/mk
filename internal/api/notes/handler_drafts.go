@@ -166,7 +166,7 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	// 固有の code/id (drafts/create.ts meta.errors) で 400 を返す。error 文字列を
 	// この handler 内に直接置くことで entitycompat の error-id gate が正しい endpoint
 	// に紐付けられる (package-level var だと textual に別 handler へ誤割当される)。
-	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftReplyRenoteErrs{
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.ChannelID, req.Visibility, draftReplyRenoteErrs{
 		noSuchRenote:   apierr.Error("NO_SUCH_RENOTE_TARGET", "No such renote target.", "b5c90186-4ab0-49c8-9bba-a1f76c282ba4"),
 		noSuchReply:    apierr.Error("NO_SUCH_REPLY_TARGET", "No such reply target.", "749ee0f6-d3da-459a-bf02-282e2da4292c"),
 		pureRenote:     apierr.Error("CANNOT_RENOTE_TO_A_PURE_RENOTE", "You can not Renote a pure Renote.", "fd4cc33e-2a37-48dd-99cc-9b806eb2031a"),
@@ -294,7 +294,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	// 値を再検証して編集不能にしない (#2017)。code/id は update endpoint 固有
 	// (drafts/update.ts meta.errors)。error 文字列を handler 内に直接置く理由は
 	// DraftsCreate 側のコメント参照。
-	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftReplyRenoteErrs{
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.ChannelID, req.Visibility, draftReplyRenoteErrs{
 		noSuchRenote:   apierr.Error("NO_SUCH_RENOTE", "No such renote.", "64929870-2540-4d11-af41-3b484d78c956"),
 		noSuchReply:    apierr.Error("NO_SUCH_REPLY", "No such reply.", "c4721841-22fc-4bb7-ad3d-897ef1d375b5"),
 		pureRenote:     apierr.Error("CANNOT_RENOTE", "Cannot renote.", "76cc5583-5a14-4ad3-8717-0298507e32db"),
@@ -381,7 +381,7 @@ type draftReplyRenoteErrs struct {
 // **リクエストで明示指定された値**を渡すこと (upstream は data.replyId != null の
 // ときだけ検証し、既存 draft の値は再検証しない、#2017)。errs は endpoint 固有の
 // code/id。戻り値 status==0 は検証成功。noteRepo/viewer 未配線時は skip。
-func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID *string, visibility string, errs draftReplyRenoteErrs) (int, map[string]any) {
+func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID, channelID *string, visibility string, errs draftReplyRenoteErrs) (int, map[string]any) {
 	if h.noteRepo == nil || viewer == nil {
 		return 0, nil
 	}
@@ -393,10 +393,19 @@ func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID
 		if corenote.IsPureRenote(t) {
 			return http.StatusBadRequest, errs.pureRenote
 		}
+		// renote 対象の作者に block されていたら拒否 (upstream blockingsRepository.exists、#2039)。
+		if h.draftBlockedBy(t.UserID, viewer.ID) {
+			return http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You have been blocked by this user.", "b390d7e1-8a5e-46ed-b625-06271cafd3d3")
+		}
 		// renote 対象が他人の followers note / specified note は (renote 経由の公開
 		// 拡散になるため) 拒否する。upstream は isVisibleForMe ではなくこの 2 条件のみ。
 		if (t.Visibility == model.NoteVisibilityFollowers && t.UserID != viewer.ID) || t.Visibility == model.NoteVisibilitySpecified {
 			return http.StatusBadRequest, apierr.Error("CANNOT_RENOTE_DUE_TO_VISIBILITY", "You can not Renote due to target visibility.", "be9529e9-fe72-4de0-ae43-0b363c4938af")
+		}
+		// channel note を別 channel / channel 外へ renote する場合、対象 channel が
+		// 外部 renote を許可していなければ拒否 (upstream の renote.channelId check、#2039)。
+		if status, body := h.validateRenoteChannel(t.ChannelID, channelID); status != 0 {
+			return status, body
 		}
 	}
 	if replyID != nil {
@@ -418,6 +427,48 @@ func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID
 		if t.Visibility == model.NoteVisibilitySpecified && visibility != string(model.NoteVisibilitySpecified) {
 			return http.StatusBadRequest, errs.replySpecified
 		}
+		// reply 対象の作者に block されていたら拒否 (#2039)。
+		if h.draftBlockedBy(t.UserID, viewer.ID) {
+			return http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You have been blocked by this user.", "b390d7e1-8a5e-46ed-b625-06271cafd3d3")
+		}
+	}
+	// draft 自身の channelId が指定されていれば存在 (非 archived) 確認 (#2039)。
+	if channelID != nil && *channelID != "" && h.channelRepo != nil {
+		ch, err := h.channelRepo.FindByID(*channelID)
+		if err != nil || ch == nil || ch.IsArchived {
+			return http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "b1653923-5453-4edc-b786-7c4f39bb0bbb")
+		}
+	}
+	return 0, nil
+}
+
+// draftBlockedBy reports whether targetUserID blocks the viewer (upstream
+// blockingsRepository.exists({blockerId: target, blockeeId: me})、#2039)。
+// 自分自身 / blockingRepo 未配線時は false。
+func (h *Handler) draftBlockedBy(targetUserID, viewerID string) bool {
+	if targetUserID == viewerID || h.blockingRepo == nil {
+		return false
+	}
+	blocked, err := h.blockingRepo.Exists(targetUserID, viewerID)
+	return err == nil && blocked
+}
+
+// validateRenoteChannel enforces the upstream renote.channelId check: renote 対象が
+// channel note で、draft が同 channel 以外 (= 外部/別 channel) へ renote する場合、
+// 対象 channel が allowRenoteToExternal でなければ拒否する (#2039)。status==0 は OK。
+func (h *Handler) validateRenoteChannel(renoteChannelID, draftChannelID *string) (int, map[string]any) {
+	if renoteChannelID == nil || *renoteChannelID == "" || h.channelRepo == nil {
+		return 0, nil
+	}
+	if draftChannelID != nil && *draftChannelID == *renoteChannelID {
+		return 0, nil // 同一 channel への renote は対象外
+	}
+	ch, err := h.channelRepo.FindByID(*renoteChannelID)
+	if err != nil || ch == nil {
+		return http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "b1653923-5453-4edc-b786-7c4f39bb0bbb")
+	}
+	if !ch.AllowRenoteToExternal {
+		return http.StatusBadRequest, apierr.Error("CANNOT_RENOTE_TO_EXTERNAL", "Cannot Renote to External.", "ed1952ac-2d26-4957-8b30-2deda76bedf7")
 	}
 	return 0, nil
 }

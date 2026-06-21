@@ -273,6 +273,61 @@ func TestDraftsUpdate_ReplyRenoteValidation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "replyId 未指定の update は既存値を再検証しない (#2017 HIGH-2)")
 }
 
+// #2039: DraftsCreate は reply/renote 作者の block / channel renote-external /
+// 自 channelId 存在を検証する (upstream NoteDraftService の blocked+channel block)。
+func TestDraftsCreate_BlockedAndChannelValidation(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	txt := "x"
+	mk := func(id, author string, ch *string) *model.Note {
+		return &model.Note{ID: id, UserID: author, Visibility: "public", Text: &txt, ChannelID: ch,
+			Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: author, AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	}
+	chID, openID, ghostID := "ch1", "chopen", "ghostch"
+	noteRepo.Notes["byblocker"] = mk("byblocker", "blocker", nil)
+	noteRepo.Notes["chnote"] = mk("chnote", "author", &chID)
+	noteRepo.Notes["opennote"] = mk("opennote", "author", &openID)
+	noteRepo.Notes["ghostnote"] = mk("ghostnote", "author", &ghostID)
+	h.noteRepo = noteRepo
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+	blk := testutil.NewMockBlockingRepository()
+	blk.Blockings["b1"] = &model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "u1"}
+	h.SetBlockingRepo(blk)
+	chRepo := testutil.NewMockChannelRepository()
+	owner := "owner"
+	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "c", UserID: &owner, AllowRenoteToExternal: false}
+	chRepo.Channels["chopen"] = &model.Channel{ID: "chopen", Name: "o", UserID: &owner, AllowRenoteToExternal: true}
+	h.SetChannelRepo(chRepo)
+	u := &model.User{ID: "u1"}
+
+	// 400 を返すケース。
+	rejectCases := []struct{ name, body, wantCode string }{
+		{"blocked renote", `{"text":"x","renoteId":"byblocker"}`, "YOU_HAVE_BEEN_BLOCKED"},
+		{"renote channel disallows external", `{"text":"x","renoteId":"chnote"}`, "CANNOT_RENOTE_TO_EXTERNAL"},
+		{"renote channel not found", `{"text":"x","renoteId":"ghostnote"}`, "NO_SUCH_CHANNEL"},
+		{"draft channelId not found", `{"text":"x","channelId":"missing"}`, "NO_SUCH_CHANNEL"},
+	}
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postDraft(h.DraftsCreate, tc.body, u)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantCode, "#2039")
+		})
+	}
+
+	// 通過するケース (200)。
+	okCases := []struct{ name, body string }{
+		{"renote channel allows external", `{"text":"x","renoteId":"opennote"}`},
+		{"same-channel renote", `{"text":"x","renoteId":"chnote","channelId":"ch1"}`}, // 同一 channel は external check skip
+	}
+	for _, tc := range okCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postDraft(h.DraftsCreate, tc.body, u)
+			assert.Equal(t, http.StatusOK, rec.Code, "#2039 通過 (%s)", tc.name)
+		})
+	}
+}
+
 // #2016: draft の reply は upstream で detail:false (clippedCount/poll/myReaction/
 // nested embed を省く)、renote は detail:true。clippedCount は detail:true で常に
 // 出力 (&n.ClippedCount)、detail:false で省略されるので、reply は省略・renote は
