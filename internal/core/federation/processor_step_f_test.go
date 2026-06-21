@@ -222,6 +222,25 @@ func TestProcess_LikeWithContent(t *testing.T) {
 	}
 }
 
+// #1948-21: content/_misskey_reaction が無い Like は activity.name を reaction の
+// fallback に使う (upstream `_misskey_reaction ?? content ?? name`)。一部の
+// Mastodon-fork / Pleroma 系 EmojiReact は shortcode を name に乗せる。
+func TestProcess_LikeWithName(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "Like",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1",
+		"name": "🐧"
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	require.Len(t, env.reactionRepo.Reactions, 1)
+	for _, r := range env.reactionRepo.Reactions {
+		assert.Equal(t, "🐧", r.Reaction, "content/_misskey_reaction 無しなら name を reaction に使う (#1948-21)")
+	}
+}
+
 func TestProcess_LikeWithMisskeyReaction(t *testing.T) {
 	// _misskey_reaction は content より優先される
 	env := newFullProcessor(t, aliceActor)

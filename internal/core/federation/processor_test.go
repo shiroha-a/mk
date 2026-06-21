@@ -264,6 +264,67 @@ func TestProcess_UndoFollow(t *testing.T) {
 	assert.Empty(t, followingRepo.Followings)
 }
 
+// #1948-21: locked local user 宛の Undo(Follow) は pending FollowRequest を取り消す
+// (upstream undoFollow は cancelFollowRequest を呼ぶ。これが無いと phantom request が残る)。
+func TestProcess_UndoFollowCancelsPendingRequest(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	followReqRepo := testutil.NewMockFollowRequestRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+	followingSvc := corefollowing.NewService(repo, followingRepo, followReqRepo, idGen)
+	p := federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
+	p.SetLocalBaseURL("https://example.com")
+	p.SetInboundFollowAcceptor(&stubInboundFollowAcceptor{})
+	// locked local user → Follow は FollowRequest を作る。
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", IsLocked: true}
+
+	follow := []byte(`{
+		"type": "Follow",
+		"id": "https://remote.example/follows/1",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/users/bob"
+	}`)
+	require.NoError(t, p.Process(follow))
+	received, _ := followReqRepo.CountReceived("bob")
+	require.Equal(t, int64(1), received, "locked user への Follow で FollowRequest が作られる")
+
+	undo := []byte(`{
+		"type": "Undo",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Follow",
+			"actor": "https://remote.example/users/alice",
+			"object": "https://example.com/users/bob"
+		}
+	}`)
+	require.NoError(t, p.Process(undo))
+	received, _ = followReqRepo.CountReceived("bob")
+	assert.Equal(t, int64(0), received, "Undo(Follow) で pending FollowRequest が削除される (#1948-21)")
+}
+
+// #1948-21: target が無い Move は actor を force-resolve しない (upstream は
+// 'skip: invalid activity target')。
+func TestProcess_MoveWithoutTargetSkips(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	body := []byte(`{"type":"Move","actor":"https://remote.example/users/alice"}`)
+	require.NoError(t, p.Process(body))
+	_, err := repo.FindByURI("https://remote.example/users/alice")
+	assert.Error(t, err, "target が無い Move は actor を force-resolve しない (#1948-21)")
+}
+
+// #1948-21: target がある Move は actor を force-resolve する (upstream updatePerson)。
+func TestProcess_MoveWithTargetResolvesActor(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	body := []byte(`{"type":"Move","actor":"https://remote.example/users/alice","target":"https://remote.example/users/alice2"}`)
+	require.NoError(t, p.Process(body))
+	u, err := repo.FindByURI("https://remote.example/users/alice")
+	require.NoError(t, err, "target がある Move は actor を force-resolve する (#1948-21)")
+	assert.NotNil(t, u)
+}
+
 func TestProcess_UndoUnknownType(t *testing.T) {
 	p, _, _, _ := newProcessor(t, aliceActor)
 	undo := []byte(`{
@@ -697,13 +758,30 @@ func TestProcess_FlagFromNote(t *testing.T) {
 
 func TestProcess_Move(t *testing.T) {
 	p, _, _ := newProcessorWithBlocking(t)
-	// Moveはactorの再解決のみ
+	// target を伴う Move は actor を再解決する (target-less の skip は
+	// TestProcess_MoveWithoutTargetSkips で別途 pin、#1948-21)。
 	body := []byte(`{
 		"type": "Move",
 		"actor": "https://remote.example/users/alice",
-		"object": "https://remote.example/users/alice"
+		"object": "https://remote.example/users/alice",
+		"target": "https://remote.example/users/alice2"
 	}`)
 	require.NoError(t, p.Process(body))
+}
+
+// #1948-21: target が AS Link object ({href:...}) 形式でも getApHrefNullable 相当に
+// href を読んで受理する (readObjectString の {id} 読みでは誤 skip していた)。
+func TestProcess_MoveTargetHrefObject(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	body := []byte(`{
+		"type": "Move",
+		"actor": "https://remote.example/users/alice",
+		"target": {"type": "Link", "href": "https://remote.example/users/alice2"}
+	}`)
+	require.NoError(t, p.Process(body))
+	u, err := repo.FindByURI("https://remote.example/users/alice")
+	require.NoError(t, err, "{href} 形式 target でも actor を force-resolve する (#1948-21)")
+	assert.NotNil(t, u)
 }
 
 // --- EmojiReaction ---

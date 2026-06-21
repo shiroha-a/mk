@@ -763,10 +763,16 @@ func (p *Processor) handleUndoFollow(act genericActivity, inner genericActivity)
 	if err != nil {
 		return errors.New("unknown followee")
 	}
-	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil {
-		if errors.Is(err, corefollowing.ErrNotFollowing) {
-			return nil
-		}
+	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil &&
+		!errors.Is(err, corefollowing.ErrNotFollowing) {
+		return err
+	}
+	// locked local followee 宛の pending follow request を取り消す。upstream
+	// undoFollow は requestExist を見て cancelFollowRequest を呼ぶ。これが無いと
+	// remote が accept 前に Undo(Follow) を送った場合、phantom な follow request 行と
+	// receiveFollowRequest 通知が残る (handleReject と同じ pattern、#1948-21)。
+	if err := p.followingService.CancelRequest(follower.ID, followee.ID); err != nil &&
+		!errors.Is(err, corefollowing.ErrRequestNotFound) {
 		return err
 	}
 	return nil
@@ -1271,6 +1277,13 @@ func (p *Processor) handleLike(act genericActivity) error {
 	reaction := like.Content
 	if like.MisskeyReaction != "" {
 		reaction = like.MisskeyReaction
+	}
+	// upstream like() は reaction を `_misskey_reaction ?? content ?? name` で解決
+	// する。一部の Mastodon-fork / Pleroma 系 EmojiReact は shortcode を `name` に
+	// 乗せるため、content/_misskey_reaction が無ければ name を fallback に使う
+	// (#1948-21)。like.Name は埋め込み Object の name (AS activity の name)。
+	if reaction == "" {
+		reaction = like.Name
 	}
 	// reversi game session URI (`/games/{UUID}/{sessionID}`) は CherryPick
 	// 拡張の reaction 連合。純正 Misskey フロントは `reacted` を表示する UI を
@@ -1895,6 +1908,20 @@ func (p *Processor) handleFlag(act genericActivity) error {
 // リモートactorのプロフィールを強制再取得する。TTLキャッシュをバイパスして
 // movedTo/alsoKnownAsの最新値を反映する。
 func (p *Processor) handleMove(act genericActivity) error {
+	// upstream move() は activity.target を getApHrefNullable で読み、無い/不正なら
+	// 'skip: invalid activity target' で早期 return する。target が無い Move で
+	// ForceResolveActor (TTL-bypass の強制 refetch) を発火させない (#1948-21)。
+	// getApHrefNullable は string か object.href を読む (id ではない) ので、同じ
+	// 受理集合になるよう readApHref を使う。
+	var t struct {
+		Target json.RawMessage `json:"target"`
+	}
+	if len(act.raw) > 0 {
+		_ = json.Unmarshal(act.raw, &t)
+	}
+	if readApHref(t.Target) == "" {
+		return nil // skip: invalid activity target
+	}
 	if _, err := p.resolver.ForceResolveActor(act.Actor); err != nil {
 		return err
 	}
@@ -2039,6 +2066,28 @@ func readObjectString(raw json.RawMessage) (string, error) {
 		return "", errors.New("object missing id")
 	}
 	return obj.ID, nil
+}
+
+// readApHref mirrors upstream getApHrefNullable: it returns the value when it is
+// a bare URI string, or its `href` property when it is an AS Link/object, and ""
+// otherwise (including {id}-only objects, which upstream also treats as absent).
+// Used for fields like Move.target that upstream reads via getApHrefNullable
+// rather than getApId (#1948-21).
+func readApHref(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		Href string `json:"href"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.Href
+	}
+	return ""
 }
 
 // readActorString reads an activity's actor field, supporting both string and
