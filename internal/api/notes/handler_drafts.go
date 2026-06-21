@@ -162,8 +162,16 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	if pollAlreadyExpired(req.Poll, now) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_CREATE_ALREADY_EXPIRED_POLL", "Cannot create an already expired poll.", "04da457d-b083-4055-9082-955525eda5a5"))
 	}
-	// reply/renote target の存在・可視性・pure-renote 検証 (#2017)。
-	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftCreateReplyRenoteErrs); status != 0 {
+	// reply/renote target の存在・可視性・pure-renote 検証 (#2017)。create endpoint
+	// 固有の code/id (drafts/create.ts meta.errors) で 400 を返す。error 文字列を
+	// この handler 内に直接置くことで entitycompat の error-id gate が正しい endpoint
+	// に紐付けられる (package-level var だと textual に別 handler へ誤割当される)。
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftReplyRenoteErrs{
+		noSuchRenote:   apierr.Error("NO_SUCH_RENOTE_TARGET", "No such renote target.", "b5c90186-4ab0-49c8-9bba-a1f76c282ba4"),
+		noSuchReply:    apierr.Error("NO_SUCH_REPLY_TARGET", "No such reply target.", "749ee0f6-d3da-459a-bf02-282e2da4292c"),
+		pureRenote:     apierr.Error("CANNOT_RENOTE_TO_A_PURE_RENOTE", "You can not Renote a pure Renote.", "fd4cc33e-2a37-48dd-99cc-9b806eb2031a"),
+		replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
+	}); status != 0 {
 		return c.JSON(status, body)
 	}
 	draft := &model.NoteDraft{
@@ -283,8 +291,15 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	}
 	// reply/renote はリクエストで明示指定された場合のみ検証する。upstream update は
 	// data.replyId/renoteId が undefined のとき検証 block を skip するので、既存 draft の
-	// 値を再検証して編集不能にしない (#2017)。code/id は update endpoint 固有。
-	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftUpdateReplyRenoteErrs); status != 0 {
+	// 値を再検証して編集不能にしない (#2017)。code/id は update endpoint 固有
+	// (drafts/update.ts meta.errors)。error 文字列を handler 内に直接置く理由は
+	// DraftsCreate 側のコメント参照。
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftReplyRenoteErrs{
+		noSuchRenote:   apierr.Error("NO_SUCH_RENOTE", "No such renote.", "64929870-2540-4d11-af41-3b484d78c956"),
+		noSuchReply:    apierr.Error("NO_SUCH_REPLY", "No such reply.", "c4721841-22fc-4bb7-ad3d-897ef1d375b5"),
+		pureRenote:     apierr.Error("CANNOT_RENOTE", "Cannot renote.", "76cc5583-5a14-4ad3-8717-0298507e32db"),
+		replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
+	}); status != 0 {
 		return c.JSON(status, body)
 	}
 	// scheduled 関連 field の変更検出 (#1045 Phase 2-C)。リクエストに
@@ -359,24 +374,6 @@ type draftReplyRenoteErrs struct {
 	noSuchReply    map[string]any
 	pureRenote     map[string]any // renote target が pure renote
 	replySpecified map[string]any
-}
-
-// draftCreateReplyRenoteErrs / draftUpdateReplyRenoteErrs map the same validation
-// to the endpoint-specific code/id (drafts/create.ts vs drafts/update.ts の
-// meta.errors)。upstream は NoteDraftService が共通の internal error を throw し、
-// 各 endpoint の catch が別 code/id にマップする (#2017)。
-var draftCreateReplyRenoteErrs = draftReplyRenoteErrs{
-	noSuchRenote:   apierr.Error("NO_SUCH_RENOTE_TARGET", "No such renote target.", "b5c90186-4ab0-49c8-9bba-a1f76c282ba4"),
-	noSuchReply:    apierr.Error("NO_SUCH_REPLY_TARGET", "No such reply target.", "749ee0f6-d3da-459a-bf02-282e2da4292c"),
-	pureRenote:     apierr.Error("CANNOT_RENOTE_TO_A_PURE_RENOTE", "You can not Renote a pure Renote.", "fd4cc33e-2a37-48dd-99cc-9b806eb2031a"),
-	replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
-}
-
-var draftUpdateReplyRenoteErrs = draftReplyRenoteErrs{
-	noSuchRenote:   apierr.Error("NO_SUCH_RENOTE", "No such renote.", "64929870-2540-4d11-af41-3b484d78c956"),
-	noSuchReply:    apierr.Error("NO_SUCH_REPLY", "No such reply.", "c4721841-22fc-4bb7-ad3d-897ef1d375b5"),
-	pureRenote:     apierr.Error("CANNOT_RENOTE", "Cannot renote.", "76cc5583-5a14-4ad3-8717-0298507e32db"),
-	replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
 }
 
 // validateDraftReplyRenote validates the draft's reply/renote targets, mirroring
