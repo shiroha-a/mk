@@ -389,23 +389,25 @@ func NewDrivePublisher(pub PubSubPublisher) *DrivePublisher {
 	return &DrivePublisher{pub: pub}
 }
 
-// PublishDriveEvent wraps the drive file in `{type, body}` envelope and
-// publishes to drive:<userID>.
-func (p *DrivePublisher) PublishDriveEvent(userID, eventType string, file *model.DriveFile) {
-	if p.pub == nil || userID == "" || file == nil || eventType == "" {
+// PublishDriveEvent wraps the drive event body in a `{type, body}` envelope and
+// publishes to drive:<userID>. body は upstream publishDriveStream に揃え、
+// fileCreated/fileUpdated は packed DriveFileEntity、fileDeleted は file id 文字列
+// (#2002)。
+func (p *DrivePublisher) PublishDriveEvent(userID, eventType string, body any) {
+	if p.pub == nil || userID == "" || body == nil || eventType == "" {
 		return
 	}
 	envelope := map[string]any{
 		"type": eventType,
-		"body": file,
+		"body": body,
 	}
-	body, err := json.Marshal(envelope)
+	raw, err := json.Marshal(envelope)
 	if err != nil {
 		slog.Warn("drive publisher: marshal failed", "err", err)
 		return
 	}
 	topic := "drive:" + userID
-	if err := p.pub.Publish(context.Background(), topic, json.RawMessage(body)); err != nil {
+	if err := p.pub.Publish(context.Background(), topic, json.RawMessage(raw)); err != nil {
 		slog.Warn("drive publisher: publish failed", "topic", topic, "err", err)
 	}
 }

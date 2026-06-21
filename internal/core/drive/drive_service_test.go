@@ -924,10 +924,12 @@ func TestDeleteFolder_HasChildrenError(t *testing.T) {
 // stubDriveStreamPublisher records every PublishDriveEvent call.
 type stubDriveStreamPublisher struct {
 	events []string // "<userID>:<eventType>"
+	bodies []any    // body passed for each call (#2002)
 }
 
-func (s *stubDriveStreamPublisher) PublishDriveEvent(userID, eventType string, _ *model.DriveFile) {
+func (s *stubDriveStreamPublisher) PublishDriveEvent(userID, eventType string, body any) {
 	s.events = append(s.events, userID+":"+eventType)
+	s.bodies = append(s.bodies, body)
 }
 
 func TestUpload_PublishesStreamingEvent(t *testing.T) {
@@ -938,6 +940,10 @@ func TestUpload_PublishesStreamingEvent(t *testing.T) {
 	_, err := svc.Upload(context.Background(), drive.UploadInput{User: user, Body: []byte("hi"), Name: "x.txt"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"u1:fileCreated"}, pub.events)
+	// #2002: fileCreated は packed DriveFileEntity (self) を送る (raw *model.DriveFile ではない)。
+	require.Len(t, pub.bodies, 1)
+	_, ok := pub.bodies[0].(entity.DriveFileEntity)
+	assert.True(t, ok, "fileCreated body は DriveFileEntity (#2002)")
 }
 
 func TestUpdate_PublishesStreamingEvent(t *testing.T) {
@@ -952,6 +958,10 @@ func TestUpdate_PublishesStreamingEvent(t *testing.T) {
 	_, err = svc.Update(user, f.ID, drive.UpdateInput{Name: &name})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"u1:fileUpdated"}, pub.events)
+	// #2002: fileUpdated も packed DriveFileEntity (self)。
+	require.Len(t, pub.bodies, 1)
+	_, ok := pub.bodies[0].(entity.DriveFileEntity)
+	assert.True(t, ok, "fileUpdated body は DriveFileEntity (#2002)")
 }
 
 func TestDelete_PublishesStreamingEvent(t *testing.T) {
@@ -964,6 +974,9 @@ func TestDelete_PublishesStreamingEvent(t *testing.T) {
 	svc.SetStreamingPublisher(pub)
 	require.NoError(t, svc.Delete(user, f.ID))
 	assert.Equal(t, []string{"u1:fileDeleted"}, pub.events)
+	// #2002: fileDeleted は file id 文字列のみ (upstream publishDriveStream(_, 'fileDeleted', file.id))。
+	require.Len(t, pub.bodies, 1)
+	assert.Equal(t, f.ID, pub.bodies[0], "fileDeleted body は file id 文字列 (#2002)")
 }
 
 // stubChartHook captures chart hook fires from the drive service.

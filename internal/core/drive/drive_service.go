@@ -84,16 +84,19 @@ func ValidateFileName(name string) bool {
 // WebSocket subscribers (the "drive" channel) can be pushed in real time.
 // パッケージ間の循環依存を避けるためinterfaceで受け取る(実装はinternal/
 // stream)。eventTypeは"fileCreated"/"fileUpdated"/"fileDeleted"。
+// PublishDriveEvent body は upstream publishDriveStream に揃え、fileCreated /
+// fileUpdated は packed DriveFileEntity (self)、fileDeleted は file id 文字列を
+// 渡す (#2002)。型が event ごとに異なるため any で受ける。
 type StreamingPublisher interface {
-	PublishDriveEvent(userID, eventType string, file *model.DriveFile)
+	PublishDriveEvent(userID, eventType string, body any)
 }
 
 // FolderStreamingPublisher receives drive folder life-cycle events for the
 // "drive" WebSocket channel. upstream の publishDriveStream(userID,
 // 'folderCreated'|'folderUpdated', folderObj) / ('folderDeleted', folder.id)
 // に対応する (#1564)。body は packed folder (created/updated) または folder
-// id 文字列 (deleted)。StreamingPublisher (file 専用、*model.DriveFile 固定)
-// とは payload 型が異なるため別 interface にする。実装は internal/stream。
+// id 文字列 (deleted)。file 系イベントを扱う StreamingPublisher とは eventType
+// 名前空間が別なので interface を分けている。実装は internal/stream。
 type FolderStreamingPublisher interface {
 	PublishDriveFolderEvent(userID, eventType string, body any)
 }
@@ -223,11 +226,11 @@ func (s *Service) SetVideoProcessor(p VideoProcessor) {
 }
 
 // publishEvent is a tiny best-effort wrapper around publisher.PublishDriveEvent.
-func (s *Service) publishEvent(userID, eventType string, f *model.DriveFile) {
+func (s *Service) publishEvent(userID, eventType string, body any) {
 	if s.publisher == nil || userID == "" {
 		return
 	}
-	s.publisher.PublishDriveEvent(userID, eventType, f)
+	s.publisher.PublishDriveEvent(userID, eventType, body)
 }
 
 // UploadInput is the parameter set for Service.Upload.
@@ -441,7 +444,8 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	// stream publish 系を skip する。publishEvent / mainStreamPublisher は
 	// それぞれ userID を必要とする。
 	if in.User != nil {
-		s.publishEvent(in.User.ID, "fileCreated", f)
+		// upstream は packedFile (self) を drive channel に送る (#2002)。
+		s.publishEvent(in.User.ID, "fileCreated", entity.PackDriveFileSelf(f, s.idGen))
 		// Misskey本家DriveService.addFileはdrive topicに加えてmainにも
 		// driveFileCreatedをemitしてUploader自身のUI(ドロップアップロード等)
 		// を即時反映させる(TS: DriveService.ts:665)。
@@ -727,7 +731,7 @@ func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.Dr
 	if err != nil {
 		return nil, err
 	}
-	s.publishEvent(user.ID, "fileUpdated", updated)
+	s.publishEvent(user.ID, "fileUpdated", entity.PackDriveFileSelf(updated, s.idGen))
 	return updated, nil
 }
 
@@ -754,7 +758,8 @@ func (s *Service) Delete(user *model.User, id string) error {
 	if err := s.fileRepo.Delete(f); err != nil {
 		return err
 	}
-	s.publishEvent(user.ID, "fileDeleted", f)
+	// upstream は fileDeleted に file.id (文字列) だけを送る (#2002)。
+	s.publishEvent(user.ID, "fileDeleted", f.ID)
 	if s.chartHook != nil {
 		s.chartHook.OnFileDeleted(f)
 	}
