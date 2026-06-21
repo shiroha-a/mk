@@ -657,6 +657,13 @@ type UpdateInput struct {
 // Update applies the non-nil fields to a drive file owned by the user.
 // Owner-only: moderator が他ユーザーの file を編集できないよう
 // findOwnedFile() を使う (#499)。
+//
+// upstream drive/files/update.ts は `!isModerator && file.userId !== me.id` の
+// ときのみ ACCESS_DENIED とし、moderator は他人の file を編集できる (markSensitive
+// の moderationLog も残す)。mk-go はこの moderator write bypass を**意図的に
+// 排除**している (#499 で privilege-escalation として hardening 済)。moderator が
+// 他ユーザーの file を moderation する正規経路は /admin/drive/* で、本 endpoint は
+// owner-only を維持する。これは upstream からの deliberate deviation (#1948-16)。
 func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.DriveFile, error) {
 	f, err := s.findOwnedFile(user, id)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
@@ -564,6 +565,44 @@ func TestFoldersCreate_DefaultName(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "Untitled", resp["name"])
+}
+
+// #1948-16: explicit な空文字 name は 'Untitled' に置換せずそのまま保持する
+// (upstream paramDef は default を absent 時のみ適用、minLength 無し)。
+func TestFoldersCreate_ExplicitEmptyNameKept(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newJSONReq(t, `{"name":""}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FoldersCreate(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "", resp["name"], "explicit \"\" は Untitled に置換しない (#1948-16)")
+}
+
+// #1948-16: move-bulk は fileIds の maxItems:100 / uniqueItems を強制する。
+func TestFilesMoveBulk_TooManyAndDuplicate(t *testing.T) {
+	h, _, _ := newHandler(t)
+	// 101 件 → 400。
+	ids := make([]string, 101)
+	for i := range ids {
+		ids[i] = "f" + timeSuffixDrive(i)
+	}
+	body, _ := json.Marshal(map[string]any{"fileIds": ids})
+	c, rec := newJSONReq(t, string(body))
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "maxItems:100 超過は 400 (#1948-16)")
+
+	// 重複 → 400。
+	c, rec = newJSONReq(t, `{"fileIds":["a","a"]}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesMoveBulk(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "uniqueItems 違反は 400 (#1948-16)")
+}
+
+func timeSuffixDrive(i int) string {
+	return time.Date(2025, 1, 1, 0, 0, i, 0, time.UTC).Format("20060102150405")
 }
 
 func TestFoldersCreate_InvalidJSON(t *testing.T) {

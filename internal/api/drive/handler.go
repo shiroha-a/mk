@@ -424,7 +424,10 @@ func (h *Handler) FilesFindByHash(c echo.Context) error {
 
 // FoldersCreateRequest is the body for drive/folders/create.
 type FoldersCreateRequest struct {
-	Name     string  `json:"name"`
+	// upstream paramDef は name に default:'Untitled' を持つ。default は key 省略時
+	// のみ適用され、明示的な空文字 "" はそのまま保持される (minLength 無し)。absent と
+	// explicit "" を区別するため *string にする (#1948-16)。
+	Name     *string `json:"name"`
 	ParentID *string `json:"parentId"`
 }
 
@@ -435,14 +438,17 @@ func (h *Handler) FoldersCreate(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// name 省略 (nil) のときだけ default 'Untitled' を適用する。explicit "" は
+	// upstream paramDef (minLength 無し) と同じくそのまま保持する (#1948-16)。
+	name := "Untitled"
+	if req.Name != nil {
+		name = *req.Name
+	}
 	// upstream folders/create paramDef は name maxLength=200 (#1564)。
-	if utf8.RuneCountInString(req.Name) > maxDriveFolderNameLength {
+	if utf8.RuneCountInString(name) > maxDriveFolderNameLength {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Name == "" {
-		req.Name = "Untitled"
-	}
-	f, err := h.svc.CreateFolder(user, req.Name, req.ParentID)
+	f, err := h.svc.CreateFolder(user, name, req.ParentID)
 	if err != nil {
 		return mapFolderError(c, err, folderEndpointCreate)
 	}
@@ -931,6 +937,18 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil || len(req.FileIDs) == 0 {
 		return apierr.JSONInvalidParam(c)
+	}
+	// upstream move-bulk.ts paramDef は fileIds に minItems:1 / maxItems:100 /
+	// uniqueItems:true を課す。100 超過・重複は INVALID_PARAM で reject する (#1948-16)。
+	if len(req.FileIDs) > 100 {
+		return apierr.JSONInvalidParam(c)
+	}
+	seen := make(map[string]struct{}, len(req.FileIDs))
+	for _, id := range req.FileIDs {
+		if _, dup := seen[id]; dup {
+			return apierr.JSONInvalidParam(c)
+		}
+		seen[id] = struct{}{}
 	}
 	// 空文字 folderId は root(null) と同義に正規化する (upstream の
 	// `folderId ?? null` 相当、#parity review DRV-2)。
