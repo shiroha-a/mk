@@ -2362,6 +2362,48 @@ func TestNoteRepository_SearchByTag(t *testing.T) {
 	assert.NotEmpty(t, notes)
 }
 
+// #1948-18: query は normalizeForSearch (NFKC+lowercase) してから突合するので、
+// 正規化済み note.tags ("misskey") を 'Misskey' や全角 query で検索できる。
+func TestNoteRepository_SearchByTag_QueryNormalized(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "tagn_u", "tagnuser")
+	defer cleanupUser(t, user.ID)
+	// note.tags は正規化済み (lowercase) を格納する前提。
+	n := &model.Note{ID: "tagn_n1", UserID: user.ID, Visibility: "public", Tags: []string{"misskey"}}
+	require.NoError(t, testDB.Create(n).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+
+	// 大文字混在 query → normalize で 'misskey' に。
+	notes, err := repo.SearchByTag([][]string{{"Misskey"}}, "", 10, "", "", model.NoteSearchTagFilter{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, notes, "大文字 query が normalize されて match (#1948-18)")
+
+	// 全角 query → NFKC で 'misskey' に。
+	notes, err = repo.SearchByTag([][]string{{"Ｍｉｓｓｋｅｙ"}}, "", 10, "", "", model.NoteSearchTagFilter{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, notes, "全角 query が NFKC normalize されて match (#1948-18)")
+}
+
+// #1948-18: mentions は sinceId があれば untilId の有無に関わらず ASC で order する
+// (upstream mentions.ts:69)。汎用 paginationOrder (sinceID && !untilID で ASC) と異なる。
+func TestNoteRepository_ListMentions_SinceIDWithUntilID_ASC(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "mord_a", "mordauthor")
+	target := insertTestUser(t, "mord_t", "mordtarget")
+	defer cleanupUser(t, author.ID)
+	defer cleanupUser(t, target.ID)
+	for _, nid := range []string{"mord1", "mord2", "mord3"} {
+		n := &model.Note{ID: nid, UserID: author.ID, Visibility: "public", Mentions: []string{target.ID}}
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, nid)
+	}
+	// sinceID + untilID 両方指定: upstream は ASC。
+	out, err := repo.ListMentions(target.ID, "", false, 50, "mord0", "mord9")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(out), 2)
+	assert.True(t, out[0].ID < out[1].ID, "sinceId 指定時は untilId があっても ASC (#1948-18)")
+}
+
 // #1683 query (外側OR・内側AND) の複合タグ検索を実 SQL で検証する。
 func TestNoteRepository_SearchByTag_OrOfAnd(t *testing.T) {
 	repo := NewNoteRepository(testDB)

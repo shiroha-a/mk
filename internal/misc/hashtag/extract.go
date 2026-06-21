@@ -10,6 +10,7 @@ package hashtag
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	"github.com/shiroha-a/mk/internal/misc/searchnorm"
@@ -18,6 +19,10 @@ import (
 // MaxUserTags は user.tags に格納する hashtag の最大件数。upstream
 // (i/update / ApPersonService) の `.splice(0, 32)` と一致させる。
 const MaxUserTags = 32
+
+// MaxNoteTags は note.tags に格納する hashtag の最大件数。upstream
+// NoteCreateService の `.splice(0, 32)` と一致させる。
+const MaxNoteTags = 32
 
 // MaxTagLength は note.tags 列の varchar(128) 制約に合わせた tag 長
 // 上限。これを超える tag は truncate される (drop ではなく trim にする
@@ -50,6 +55,68 @@ func Extract(parts ...string) []string {
 		}
 		seen[key] = struct{}{}
 		out = append(out, tag)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ExtractNoteTags extracts hashtags from the given text fragments and returns
+// them in the form stored in note.tags: filtered to <=128 code points (dropped,
+// not truncated), capped at MaxNoteTags, and normalized via searchnorm.Normalize
+// (NFKC + lowercase), de-duplicated. Mirrors upstream NoteCreateService
+// (`extractHashtags(...).filter(t => Array.from(t).length <= 128).splice(0, 32)`
+// then `tags.map(normalizeForSearch)` on store, #1948-18). search-by-tag は同じ
+// normalizeForSearch を query に適用するため、stored 値と一致する。
+func ExtractNoteTags(parts ...string) []string {
+	return NormalizeNoteTags(mfm.CollectHashtags(parts...))
+}
+
+// NormalizeNoteTags applies the note.tags store normalization to a pre-extracted
+// tag list (used for AP-received apHashtags where the tags come from the remote
+// Object rather than MFM extraction). >128 code-point tags are dropped, the list
+// is capped at MaxNoteTags, each is normalized, and duplicates collapse (#1948-18).
+func NormalizeNoteTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	// upstream の順序 (NoteCreateService.ts:581,632) は raw dedup(extractHashtags の
+	// unique) → filter(<=128 code point) → splice(0,32) → map(normalizeForSearch)。
+	// 順序が重要: cap を normalize より**前**に効かせないと、case/width 衝突で空いた
+	// cap slot に upstream が落とす tag が残り、>32 tag note で stored tags がずれる
+	// (#1948-18)。よって RAW のまま dedup + 128filter + 32cap してから normalize する。
+	rawSeen := make(map[string]struct{}, len(tags))
+	capped := make([]string, 0, MaxNoteTags)
+	for _, tag := range tags {
+		if utf8.RuneCountInString(tag) > MaxTagLength {
+			continue
+		}
+		if _, dup := rawSeen[tag]; dup {
+			continue
+		}
+		rawSeen[tag] = struct{}{}
+		capped = append(capped, tag)
+		if len(capped) >= MaxNoteTags {
+			break
+		}
+	}
+	// normalize して post-normalize の clean dedup を行う。upstream は normalize 後の
+	// duplicate (例 'Misskey'/'misskey' → ['misskey','misskey']) をそのまま格納するが、
+	// `@> ARRAY[]` 検索・trends 集計は duplicate に非感応なので clean array にする
+	// (surviving source tag 集合は cap を先に効かせたので upstream と一致)。
+	normSeen := make(map[string]struct{}, len(capped))
+	out := make([]string, 0, len(capped))
+	for _, tag := range capped {
+		n := searchnorm.Normalize(tag)
+		if n == "" {
+			continue
+		}
+		if _, ok := normSeen[n]; ok {
+			continue
+		}
+		normSeen[n] = struct{}{}
+		out = append(out, n)
 	}
 	if len(out) == 0 {
 		return nil

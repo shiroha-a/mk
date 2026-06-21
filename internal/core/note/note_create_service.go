@@ -629,7 +629,10 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		if in.CW != nil {
 			hashtagParts = append(hashtagParts, *in.CW)
 		}
-		tags = hashtag.Extract(hashtagParts...)
+		// upstream NoteCreateService は note.tags を normalizeForSearch (NFKC +
+		// lowercase) で正規化し、>128 char を drop、32 件 cap してから格納する。
+		// search-by-tag が同 normalize を query に適用するため一致させる (#1948-18)。
+		tags = hashtag.ExtractNoteTags(hashtagParts...)
 	}
 
 	note := &model.Note{

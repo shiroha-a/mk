@@ -151,6 +151,65 @@ func TestExtractUserTags(t *testing.T) {
 	}
 }
 
+// #1948-18: ExtractNoteTags は note.tags を NFKC+lowercase 正規化し、>128 char を
+// drop、32 件 cap、case-insensitive dedup する (upstream NoteCreateService)。
+func TestExtractNoteTags(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"normalizes to lowercase", []string{"#Misskey and #misskey"}, []string{"misskey"}},
+		{"NFKC folds full-width", []string{"#Ｍｉｓｓｋｅｙ"}, []string{"misskey"}},
+		{"no hashtags returns nil", []string{"plain text"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ExtractNoteTags(tc.in...))
+		})
+	}
+}
+
+// #1948-18: >128 code point の tag は drop する (truncate ではない)。
+func TestExtractNoteTags_DropsTooLong(t *testing.T) {
+	long := strings.Repeat("a", 129)
+	got := ExtractNoteTags("#short #" + long)
+	assert.Equal(t, []string{"short"}, got, ">128 char tag は drop され short のみ残る (#1948-18)")
+}
+
+// #1948-18: NormalizeNoteTags は AP 由来の事前抽出 tag 配列を同じく正規化する。
+func TestNormalizeNoteTags(t *testing.T) {
+	assert.Equal(t, []string{"misskey", "art"}, NormalizeNoteTags([]string{"Misskey", "misskey", "Art"}))
+	assert.Nil(t, NormalizeNoteTags(nil))
+	assert.Nil(t, NormalizeNoteTags([]string{strings.Repeat("x", 200)}), ">128 char は drop")
+}
+
+// #1948-18: cap(32) は normalize より前に効く (upstream splice→map 順)。case 衝突で
+// 空いた slot に upstream が落とす tag が残らないことを確認する。
+func TestNormalizeNoteTags_CapBeforeNormalize(t *testing.T) {
+	// ['Misskey','misskey','a1'..'a31'] (33 raw-distinct)。upstream は raw cap32 で
+	// ['Misskey','misskey','a1'..'a30'] を残し a31 を drop → normalize → ['misskey','a1'..'a30']。
+	in := []string{"Misskey", "misskey"}
+	for i := 1; i <= 31; i++ {
+		in = append(in, "a"+string(rune('0'+i/10))+string(rune('0'+i%10)))
+	}
+	got := NormalizeNoteTags(in)
+	assert.Contains(t, got, "misskey")
+	assert.Contains(t, got, "a01")
+	assert.Contains(t, got, "a30")
+	assert.NotContains(t, got, "a31", "cap が normalize より前に効くので a31 は drop (#1948-18)")
+}
+
+// caps at MaxNoteTags (32) entries.
+func TestExtractNoteTags_Cap(t *testing.T) {
+	parts := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		parts = append(parts, "#tag"+string(rune('a'+i%26))+string(rune('0'+i/26)))
+	}
+	got := ExtractNoteTags(strings.Join(parts, " "))
+	assert.Len(t, got, MaxNoteTags)
+}
+
 // caps at MaxUserTags (32) entries.
 func TestExtractUserTags_Cap(t *testing.T) {
 	parts := make([]string, 0, 40)

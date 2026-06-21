@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -819,7 +820,15 @@ func (r *noteRepository) ListMentions(userID, visibility string, following bool,
 	if following {
 		q = q.Where(`("userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?) OR "userId" = ?)`, userID, userID)
 	}
-	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+	// upstream mentions.ts:69 は makePaginationQuery を使わず、sinceId/sinceDate が
+	// あれば untilId の有無に関わらず ASC、無ければ DESC で order する。汎用
+	// paginationOrder (ASC は sinceID && !untilID のみ) と異なるので mentions 専用
+	// の order に揃える (#1948-18)。
+	mentionsOrder := "id DESC"
+	if sinceID != "" {
+		mentionsOrder = "id ASC"
+	}
+	q = q.Order(mentionsOrder).Limit(limit)
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
@@ -847,8 +856,11 @@ func (r *noteRepository) SearchByTag(tagGroups [][]string, viewerID string, limi
 	for _, g := range tagGroups {
 		clean := make([]string, 0, len(g))
 		for _, t := range g {
-			if t != "" {
-				clean = append(clean, t)
+			// upstream search-by-tag.ts:106,113 は query tag を normalizeForSearch
+			// (NFKC+lowercase) してから `:tag <@ note.tags` で突合する。note.tags も
+			// 同 normalize で格納されるので、query も正規化して一致させる (#1948-18)。
+			if n := searchnorm.Normalize(t); n != "" {
+				clean = append(clean, n)
 			}
 		}
 		if len(clean) == 0 {

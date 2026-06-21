@@ -1284,7 +1284,9 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if note.CW != nil {
 		hashtagSources = append(hashtagSources, *note.CW)
 	}
-	if tags := hashtag.Extract(hashtagSources...); len(tags) > 0 {
+	// note.tags は upstream と同じく normalizeForSearch (NFKC+lowercase) + 128drop
+	// + 32cap で正規化して格納する (#1948-18)。
+	if tags := hashtag.ExtractNoteTags(hashtagSources...); len(tags) > 0 {
 		note.Tags = pq.StringArray(tags)
 	}
 	// AP `attachment` 配列を drive_file 行に upsert (#378)。link 形式のみで
@@ -1576,7 +1578,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	if existing.CW != nil {
 		hashtagSources = append(hashtagSources, *existing.CW)
 	}
-	newTags := hashtag.Extract(hashtagSources...)
+	newTags := hashtag.ExtractNoteTags(hashtagSources...) // 正規化して格納 (#1948-18)
 	tagsChanged := !slices.Equal([]string(existing.Tags), newTags)
 	if tagsChanged {
 		// Extract は hashtag が無いと nil を返すが、nil の pq.StringArray は
