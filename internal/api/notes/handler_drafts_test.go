@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,9 @@ import (
 	"github.com/shiroha-a/mk/internal/queue/driver"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -153,6 +156,113 @@ func TestDraftsList_WithData(t *testing.T) {
 	var resp []any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+}
+
+// #1948-19: packDraft は replyId/renoteId set 時に Note を resolve し、未設定なら
+// key を省略する。channelId 同様。poll.expiresAt は nil で key 省略。
+func TestPackDraft_ResolvesReplyRenoteChannelAndPoll(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["reply1"] = &model.Note{ID: "reply1", UserID: "author", Visibility: "public", Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	noteRepo.Notes["renote1"] = &model.Note{ID: "renote1", UserID: "author", Visibility: "public", Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	h.noteRepo = noteRepo
+	// public note は viewer に可視なので CanSee=true。queryService を wire する。
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+	chRepo := testutil.NewMockChannelRepository()
+	owner := "u1"
+	chRepo.Channels["ch1"] = &model.Channel{ID: "ch1", Name: "general", Color: "#fff", IsSensitive: true, AllowRenoteToExternal: false, UserID: &owner}
+	h.channelRepo = chRepo
+
+	replyID, renoteID, channelID := "reply1", "renote1", "ch1"
+	repo.drafts["d1"] = &model.NoteDraft{
+		ID: "d1", UserID: "u1", Visibility: "public",
+		ReplyID: &replyID, RenoteID: &renoteID, ChannelID: &channelID,
+		HasPoll: true, PollChoices: pq.StringArray{"a", "b"}, // PollExpiresAt nil
+	}
+	rec := postDraft(h.DraftsList, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	d := resp[0]
+	// reply/renote が resolve される。
+	reply, ok := d["reply"].(map[string]any)
+	require.True(t, ok, "replyId set なら reply object を resolve (#1948-19)")
+	assert.Equal(t, "reply1", reply["id"])
+	renote, ok := d["renote"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "renote1", renote["id"])
+	// channel summary。
+	ch, ok := d["channel"].(map[string]any)
+	require.True(t, ok, "channelId set なら channel summary を resolve (#1948-19)")
+	assert.Equal(t, "general", ch["name"])
+	assert.Equal(t, true, ch["isSensitive"])
+	// poll.expiresAt は nil なので key 省略。
+	poll := d["poll"].(map[string]any)
+	_, hasExp := poll["expiresAt"]
+	assert.False(t, hasExp, "poll.expiresAt nil は key 省略 (#1948-19)")
+}
+
+// #1948-19 (security): draft owner が閲覧不可な note を replyId に入れても、その
+// 本文は漏れず hideNote stub される (followers/specified の intrinsic hide)。
+func TestPackDraft_ReplyToInvisibleNote_Hidden(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	secret := "TOP SECRET BODY"
+	// followers-only note by author; viewer (u1) は author を follow していない。
+	noteRepo.Notes["secret1"] = &model.Note{ID: "secret1", UserID: "author", Visibility: "followers", Text: &secret, Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	h.noteRepo = noteRepo
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+
+	replyID := "secret1"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Visibility: "public", ReplyID: &replyID}
+	rec := postDraft(h.DraftsList, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "TOP SECRET BODY", "非可視 reply note の本文が漏れない (#1948-19)")
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	reply := resp[0]["reply"].(map[string]any)
+	assert.Equal(t, true, reply["isHidden"], "非可視 reply は isHidden:true で stub (#1948-19)")
+	assert.Nil(t, reply["text"], "stub は text を消す")
+}
+
+// #1948-19: replyId/renoteId/channelId 未設定なら reply/renote/channel key を省略する。
+func TestPackDraft_OmitsKeysWhenUnset(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	text := "plain"
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Text: &text, Visibility: "public"}
+	rec := postDraft(h.DraftsList, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	d := resp[0]
+	for _, k := range []string{"reply", "renote", "channel"} {
+		_, has := d[k]
+		assert.False(t, has, k+" は未設定時に key 省略 (#1948-19)")
+	}
+}
+
+// #1948-19: drafts/list は sinceDate/untilDate を id cursor に正規化する。
+func TestDraftsList_DateCursor(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	idGen, _ := id.NewGenerator("aidx")
+	// 2 件: 古い (2020) と新しい (2026)。
+	oldID := idGen.Generate(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	newID := idGen.Generate(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	repo.drafts[oldID] = &model.NoteDraft{ID: oldID, UserID: "u1", Visibility: "public"}
+	repo.drafts[newID] = &model.NoteDraft{ID: newID, UserID: "u1", Visibility: "public"}
+	// sinceDate = 2023 → 2026 の draft のみ (id > sinceID)。
+	body := `{"sinceDate":` + itoaMillis(time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)) + `}`
+	rec := postDraft(h.DraftsList, body, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "sinceDate cursor で 2023 以降の draft のみ (#1948-19)")
+	assert.Equal(t, newID, resp[0]["id"])
+}
+
+func itoaMillis(t time.Time) string {
+	return strconv.FormatInt(t.UnixMilli(), 10)
 }
 
 // --- DraftsCreate ---

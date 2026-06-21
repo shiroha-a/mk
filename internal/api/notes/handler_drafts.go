@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -28,17 +30,21 @@ func (h *Handler) DraftsList(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// upstream drafts/list.ts は limit(default30/max100) + sinceId/untilId +
-	// scheduled(boolean) を受ける (#1538)。sinceDate/untilDate は mk-go の
-	// id-based keyset 方針 (NoteDraft に createdAt 列が無い) のため非対応。
+	// sinceDate/untilDate + scheduled(boolean) を受ける (#1538)。NoteDraft.id は
+	// aidx で時刻を内包するので、sinceDate/untilDate は id cursor に正規化して
+	// keyset pagination に乗せる (#1948-19)。
 	var req struct {
 		Limit     int    `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 		Scheduled *bool  `json:"scheduled"`
 	}
 	_ = c.Bind(&req)
 	limit := pagination.ClampLimit(req.Limit, 30, 100)
-	drafts, err := h.draftRepo.ListByUser(user.ID, req.SinceID, req.UntilID, req.Scheduled, limit)
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	drafts, err := h.draftRepo.ListByUser(user.ID, sinceID, untilID, req.Scheduled, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -52,7 +58,7 @@ func (h *Handler) DraftsList(c echo.Context) error {
 	for i, d := range drafts {
 		// drafts は viewer 自身のものなので user を埋める (repo は Preload しない)。
 		d.User = user
-		out[i] = h.packDraft(d, fileByID)
+		out[i] = h.packDraft(c.Request().Context(), user, d, fileByID)
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -191,7 +197,7 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	}
 	draft.User = user
 	// upstream res は { createdDraft: NoteDraft } で包む。
-	return c.JSON(http.StatusOK, map[string]any{"createdDraft": h.packDraft(draft, nil)})
+	return c.JSON(http.StatusOK, map[string]any{"createdDraft": h.packDraft(c.Request().Context(), user, draft, nil)})
 }
 
 // DraftsUpdate handles POST /api/notes/drafts/update.
@@ -323,7 +329,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	}
 	draft.User = user
 	// upstream res は { updatedDraft: NoteDraft } で包む。
-	return c.JSON(http.StatusOK, map[string]any{"updatedDraft": h.packDraft(draft, nil)})
+	return c.JSON(http.StatusOK, map[string]any{"updatedDraft": h.packDraft(c.Request().Context(), user, draft, nil)})
 }
 
 // draftPoll mirrors the upstream notes/drafts poll param object.
@@ -558,7 +564,7 @@ func (h *Handler) PollsRecommendation(c echo.Context) error {
 // packDraft packs a draft. fileByID, when non-nil, is a pre-resolved DriveFile
 // map (List uses it to batch all drafts' files in one query, avoiding N+1).
 // When nil, files are resolved per-draft (single create/update/show path).
-func (h *Handler) packDraft(d *model.NoteDraft, fileByID map[string]entity.DriveFileEntity) map[string]any {
+func (h *Handler) packDraft(ctx context.Context, viewer *model.User, d *model.NoteDraft, fileByID map[string]entity.DriveFileEntity) map[string]any {
 	const tsFmt = "2006-01-02T15:04:05.000Z"
 	visibleUserIDs := []string(d.VisibleUserIDs)
 	if visibleUserIDs == nil {
@@ -583,11 +589,23 @@ func (h *Handler) packDraft(d *model.NoteDraft, fileByID map[string]entity.Drive
 		"channelId":           d.ChannelID,
 		"hashtag":             d.Hashtag,
 		"isActuallyScheduled": d.IsActuallyScheduled,
-		// 解決済みオブジェクトは未対応 (ID は上で返す)。
-		"reply":   nil,
-		"renote":  nil,
-		"channel": nil,
-		"files":   h.draftFiles(fileIDs, fileByID),
+		"files":               h.draftFiles(fileIDs, fileByID),
+	}
+	// upstream NoteDraftEntityService.pack (detail) は replyId/renoteId set 時のみ
+	// reply/renote を解決し (見つからなければ null)、未設定なら key を省略する
+	// (#1948-19)。reply は detail:false、renote は detail:true 相当。
+	if d.ReplyID != nil {
+		result["reply"] = h.packDraftNote(ctx, viewer, *d.ReplyID)
+	}
+	if d.RenoteID != nil {
+		result["renote"] = h.packDraftNote(ctx, viewer, *d.RenoteID)
+	}
+	// channel は channelId set かつ channel が見つかったときだけ {id,name,color,
+	// isSensitive,allowRenoteToExternal,userId} を出力、それ以外は key 省略 (#1948-19)。
+	if d.ChannelID != nil {
+		if ch := h.packDraftChannel(*d.ChannelID); ch != nil {
+			result["channel"] = ch
+		}
 	}
 	if t, err := h.idGen.ParseTime(d.ID); err == nil {
 		result["createdAt"] = t.UTC().Format(tsFmt)
@@ -610,10 +628,10 @@ func (h *Handler) packDraft(d *model.NoteDraft, fileByID map[string]entity.Drive
 			"multiple":     d.PollMultiple,
 			"expiredAfter": d.PollExpiredAfter,
 		}
+		// upstream は expiresAt: pollExpiresAt?.toISOString() で、nil のとき key を
+		// 省略する (undefined。null ではない、#1948-19)。
 		if d.PollExpiresAt != nil {
 			poll["expiresAt"] = d.PollExpiresAt.UTC().Format(tsFmt)
-		} else {
-			poll["expiresAt"] = nil
 		}
 		result["poll"] = poll
 	} else {
@@ -623,6 +641,43 @@ func (h *Handler) packDraft(d *model.NoteDraft, fileByID map[string]entity.Drive
 		result["user"] = entity.PackUserLite(d.User)
 	}
 	return result
+}
+
+// packDraftNote resolves a draft's reply/renote target Note and packs it for the
+// viewer, returning nil when the note no longer exists (upstream
+// nullIfEntityNotFound). noteRepo 未配線時も nil (#1948-19)。
+func (h *Handler) packDraftNote(ctx context.Context, viewer *model.User, noteID string) any {
+	if h.noteRepo == nil {
+		return nil
+	}
+	n, err := h.noteRepo.FindByIDWithUser(noteID)
+	if err != nil || n == nil {
+		return nil
+	}
+	// packMany は timeline 用 hard-mute drop を行い非可視 note を漏らすため使わない。
+	// packReferencedNote が hard-mute skip + visibility hide を行う (#1948-19)。
+	return h.packReferencedNote(ctx, n, viewer)
+}
+
+// packDraftChannel resolves a draft's channel into the upstream NoteDraft.channel
+// summary {id,name,color,isSensitive,allowRenoteToExternal,userId}, or nil when
+// the channel is missing / channelRepo unwired so the caller omits the key (#1948-19).
+func (h *Handler) packDraftChannel(channelID string) map[string]any {
+	if h.channelRepo == nil {
+		return nil
+	}
+	ch, err := h.channelRepo.FindByID(channelID)
+	if err != nil || ch == nil {
+		return nil
+	}
+	return map[string]any{
+		"id":                    ch.ID,
+		"name":                  ch.Name,
+		"color":                 ch.Color,
+		"isSensitive":           ch.IsSensitive,
+		"allowRenoteToExternal": ch.AllowRenoteToExternal,
+		"userId":                ch.UserID,
+	}
 }
 
 // draftFiles resolves a draft's fileIds to packed DriveFiles in order. When

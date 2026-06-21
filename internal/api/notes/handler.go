@@ -938,6 +938,25 @@ func (h *Handler) BulkShow(c echo.Context) error {
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 
+// packReferencedNote packs a single note referenced by a draft (reply/renote)
+// for the viewer. upstream の `noteEntityService.pack(noteId, me, {skipHide:false})`
+// に合わせ、(1) timeline の hard-mute drop は適用しない (upstream pack には
+// hard-mute が無い)、(2) viewer が閲覧不可な note (followers 非フォロワー /
+// specified 対象外) は entity.HideNoteEntity で本文を blank し isHidden を立てる
+// (upstream shouldHideNote→hideNote)。draft は owner-only だが、replyId/renoteId に
+// 任意の note ID を入れて非可視 note の本文を読み出す leak を塞ぐ (#1948-19)。
+func (h *Handler) packReferencedNote(ctx context.Context, n *model.Note, viewer *model.User) entity.NoteEntity {
+	packed := entity.PackNotes(ctx, []*model.Note{n}, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
+	h.fieldResolver().Apply(packed, viewer)
+	notehide.HideEmbeds(viewer, packed)
+	out := packed[0]
+	// queryService 未配線時は fail-closed で hide (= 検証不能なら隠す)。
+	if h.queryService == nil || !h.queryService.CanSee(viewer, n) {
+		entity.HideNoteEntity(&out)
+	}
+	return out
+}
+
 // packMany serializes a list of notes into NoteEntity objects.
 // driveFileRepoが設定されている場合、ファイル情報を解決してFilesに含める。
 // viewerがnon-nilの場合、myReactionなどのviewer依存フィールドも解決する。
