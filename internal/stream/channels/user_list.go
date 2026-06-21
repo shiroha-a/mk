@@ -7,30 +7,51 @@ import (
 	"github.com/shiroha-a/mk/internal/stream"
 )
 
+// UserListMembershipLookup fetches a list's memberships so the channel can
+// snapshot per-member withReplies at Init (#2020、upstream user-list.ts の
+// membershipsMap)。
+type UserListMembershipLookup interface {
+	ListMembers(listID string) ([]*model.UserListMembership, error)
+}
+
 // UserListChannel forwards notes from members of a user list.
 //
-// upstream `user-list.ts` は per-membership の withReplies (= 各 list member
-// の MiUserListMembership.withReplies) で reply を gate する設計だが、mk-go
-// にはまだ list membership に紐づく withReplies model が無いため、本 channel
-// は connect 時の `withReplies` boolean param のみで gate する暫定実装。
-//
-// #1063 で noteFilter.shouldEmit から reply blanket-drop を撤廃した副作用で、
-// 現状は `withReplies=false` でも reply が pass-through する。upstream の
-// 「per-member withReplies が default false で reply を drop」semantics より
-// 緩い (= 全 member の reply を見せる) degrade だが、旧 mk-go の「list 全体で
-// reply を drop」よりは upstream 寄り。完全互換 (= per-member gate) は
-// `model.UserListMembership.WithReplies` 追加と Init での map snapshot
-// 取得を伴うので別 issue で扱う想定。
+// upstream `user-list.ts` は Init で `membershipsMap[userId] = {withReplies}` を
+// snapshot し、reply を per-member の withReplies で gate する。mk-go も
+// membershipLookup が配線されていれば同じく Init snapshot を取って per-member
+// gate する (#2020)。lookup 未配線時は従来どおり reply gate を skip する
+// (後方互換、test 経路)。
 type UserListChannel struct {
 	ctx         stream.ChannelContext
 	topic       string
 	streamTopic string
 	filter      noteFilter
+	memberships UserListMembershipLookup
+	// withRepliesByUser は member userID → withReplies の Init snapshot。
+	// nil の間は per-member reply gate を skip する。
+	withRepliesByUser map[string]bool
 }
 
-// NewUserList returns a channel factory for "userList".
+// NewUserList returns a "userList" channel without a membership lookup. reply は
+// per-member gate されず従来挙動 (主に test 経路)。本番は NewUserListFactory を使う。
 func NewUserList(ctx stream.ChannelContext) stream.Channel {
 	return &UserListChannel{ctx: ctx}
+}
+
+// UserListFactory carries the membership lookup so per-member withReplies gating
+// is available (#2020)。
+type UserListFactory struct {
+	memberships UserListMembershipLookup
+}
+
+// NewUserListFactory constructs a UserListFactory with the given membership lookup.
+func NewUserListFactory(m UserListMembershipLookup) *UserListFactory {
+	return &UserListFactory{memberships: m}
+}
+
+// New builds a new UserListChannel. Usable as a stream.ChannelFactory.
+func (f *UserListFactory) New(ctx stream.ChannelContext) stream.Channel {
+	return &UserListChannel{ctx: ctx, memberships: f.memberships}
 }
 
 func (c *UserListChannel) Init(params json.RawMessage) error {
@@ -53,6 +74,16 @@ func (c *UserListChannel) Init(params json.RawMessage) error {
 	// withRepliesパラメータがtrueなら上書き
 	if p.WithReplies != nil && *p.WithReplies {
 		c.filter.WithReplies = true
+	}
+	// per-member withReplies を Init で snapshot する (upstream membershipsMap、#2020)。
+	// lookup 未配線時は nil のまま = reply gate skip (後方互換)。
+	if c.memberships != nil {
+		c.withRepliesByUser = map[string]bool{}
+		if members, err := c.memberships.ListMembers(p.ListID); err == nil {
+			for _, m := range members {
+				c.withRepliesByUser[m.UserID] = m.WithReplies
+			}
+		}
 	}
 	c.topic = "userListTimeline:" + p.ListID
 	c.ctx.Subscribe(c.topic)
@@ -95,6 +126,11 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 	if !userListVisibilityShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
 		return
 	}
+	// per-member withReplies gate (#2020)。snapshot 配線時のみ適用。
+	if c.withRepliesByUser != nil &&
+		!userListReplyShouldEmit(payload, viewerID, c.withRepliesByUser, c.ctx.FollowingSnapshot()) {
+		return
+	}
 	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
@@ -115,6 +151,46 @@ func (c *UserListChannel) Dispose() {
 type userListVisibilityPayload struct {
 	UserID     string `json:"userId"`
 	Visibility string `json:"visibility"`
+}
+
+// userListReplyPayload は reply gate が参照する最小 fields。
+type userListReplyPayload struct {
+	UserID string `json:"userId"`
+	Reply  *struct {
+		UserID     string `json:"userId"`
+		Visibility string `json:"visibility"`
+	} `json:"reply"`
+}
+
+// userListReplyShouldEmit applies upstream user-list.ts の per-member withReplies
+// reply gate (#2020):
+//   - 投稿者 (note.userId) の withReplies が true: reply 先が followers visibility で
+//     viewer が reply.userId を follow していなければ drop。
+//   - withReplies が false: 「接続主 (viewer) への reply」「接続主自身の投稿」「投稿者の
+//     自己 reply」のいずれでもなければ drop。
+//
+// reply でない note / parse 失敗は pass (visibility gate 側で fail-closed 済)。
+func userListReplyShouldEmit(payload []byte, viewerID string, withRepliesByUser, following map[string]bool) bool {
+	var note userListReplyPayload
+	if err := json.Unmarshal(payload, &note); err != nil || note.Reply == nil {
+		return true
+	}
+	isMe := viewerID != "" && viewerID == note.UserID
+	if withRepliesByUser[note.UserID] {
+		if note.Reply.Visibility == "followers" {
+			if following == nil {
+				return false
+			}
+			_, follows := following[note.Reply.UserID]
+			return follows
+		}
+		return true
+	}
+	// withReplies=false: 接続主への reply / 接続主の投稿 / 自己 reply 以外は drop。
+	if note.Reply.UserID != viewerID && !isMe && note.Reply.UserID != note.UserID {
+		return false
+	}
+	return true
 }
 
 // userListVisibilityShouldEmit returns false when a `followers` visibility note

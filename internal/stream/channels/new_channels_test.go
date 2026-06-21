@@ -1012,3 +1012,63 @@ func TestHybridTimeline_FilterDefault(t *testing.T) {
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
 	assert.Len(t, ctx.sentType, 1) // 増えない
 }
+
+// stubMembershipLookup is a test double for UserListMembershipLookup.
+type stubMembershipLookup struct {
+	members []*model.UserListMembership
+}
+
+func (s *stubMembershipLookup) ListMembers(string) ([]*model.UserListMembership, error) {
+	return s.members, nil
+}
+
+// #2020: userList channel は Init で per-member withReplies を snapshot し、reply を
+// upstream user-list.ts と同じ per-member gate で drop する。
+func TestUserList_PerMemberWithRepliesGate(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"}) // viewer = alice (list owner)
+	lookup := &stubMembershipLookup{members: []*model.UserListMembership{
+		{UserID: "bob", WithReplies: false},
+		{UserID: "carol", WithReplies: true},
+	}}
+	ch := NewUserListFactory(lookup).New(ctx)
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
+
+	send := func(payload string) int {
+		ctx.sentType = nil
+		ch.OnRedisEvent([]byte(payload))
+		return len(ctx.sentType)
+	}
+
+	// bob (withReplies=false) の第三者 reply → drop。
+	assert.Equal(t, 0, send(`{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`),
+		"withReplies=false member の第三者 reply は drop (#2020)")
+	// bob の接続主 (alice) への reply → pass。
+	assert.Equal(t, 1, send(`{"id":"n2","userId":"bob","visibility":"public","reply":{"userId":"alice","visibility":"public"}}`),
+		"接続主への reply は pass")
+	// bob の自己 reply (bob→bob) → pass。
+	assert.Equal(t, 1, send(`{"id":"n2b","userId":"bob","visibility":"public","reply":{"userId":"bob","visibility":"public"}}`),
+		"自己 reply は pass")
+	// carol (withReplies=true) の通常 public reply → pass。
+	assert.Equal(t, 1, send(`{"id":"n3","userId":"carol","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`),
+		"withReplies=true member の reply は pass")
+	// carol の followers reply で viewer が reply 先を follow していない → drop。
+	ctx.followingSnap = map[string]bool{}
+	assert.Equal(t, 0, send(`{"id":"n4","userId":"carol","visibility":"public","reply":{"userId":"dave","visibility":"followers"}}`),
+		"withReplies=true で followers reply 先を非フォローなら drop (#2020)")
+	// carol の followers reply で viewer が reply 先を follow → pass。
+	ctx.followingSnap = map[string]bool{"dave": true}
+	assert.Equal(t, 1, send(`{"id":"n4b","userId":"carol","visibility":"public","reply":{"userId":"dave","visibility":"followers"}}`),
+		"reply 先を follow していれば pass")
+	// reply でない note は gate 対象外。
+	assert.Equal(t, 1, send(`{"id":"n5","userId":"bob","visibility":"public"}`), "reply でない note は pass")
+}
+
+// #2020: lookup 未配線 (NewUserList) では reply gate を skip (後方互換)。
+func TestUserList_NoLookupSkipsReplyGate(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserList(ctx)
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
+	ctx.sentType = nil
+	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`))
+	assert.Len(t, ctx.sentType, 1, "lookup 未配線時は reply gate skip (後方互換、#2020)")
+}

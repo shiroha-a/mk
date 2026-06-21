@@ -2093,7 +2093,8 @@ func (s *Server) setupRoutes() {
 	streamRegistry.Register("hashtag", channels.NewHashtag)
 	streamRegistry.RegisterCredentialed("antenna", channels.NewAntennaFactory(antennaRepo).New)
 	streamRegistry.Register("channel", channels.NewChannelTimeline)
-	streamRegistry.Register("userList", channels.NewUserList)
+	// userList は membership lookup を渡して per-member withReplies gate を有効化 (#2020)。
+	streamRegistry.Register("userList", channels.NewUserListFactory(userListRepo).New)
 	streamRegistry.Register("roleTimeline", channels.NewRoleTimelineFactory(roleService).New)
 	streamRegistry.RegisterCredentialed("admin", channels.NewAdminFactory(roleService).New)
 	// serverStats / queueStats は publisher を後段で構築するため、ここでは
