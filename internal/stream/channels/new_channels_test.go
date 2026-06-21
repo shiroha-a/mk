@@ -15,19 +15,21 @@ var errAntennaLookup = errors.New("antenna lookup failed")
 
 // mockRoleChecker is a test double for AdminRoleChecker.
 type mockRoleChecker struct {
-	admins map[string]bool
+	mods map[string]bool
 }
 
-func (m *mockRoleChecker) IsAdministrator(userID string) bool {
-	return m.admins[userID]
+func (m *mockRoleChecker) IsModerator(userID string) bool {
+	return m.mods[userID]
 }
 
-func newAdminCh(ctx stream.ChannelContext, isAdmin bool) stream.Channel {
+// newAdminCh builds an admin channel where the connecting user is a moderator
+// (= admin stream は moderator scope で gate される、#1948-20) per the flag.
+func newAdminCh(ctx stream.ChannelContext, isMod bool) stream.Channel {
 	userID := ""
 	if u, ok := ctx.User().(*model.User); ok && u != nil {
 		userID = u.ID
 	}
-	checker := &mockRoleChecker{admins: map[string]bool{userID: isAdmin}}
+	checker := &mockRoleChecker{mods: map[string]bool{userID: isMod}}
 	return NewAdminFactory(checker).New(ctx)
 }
 
@@ -99,6 +101,17 @@ func TestHashtag_EmptyQ(t *testing.T) {
 	ch := NewHashtag(ctx)
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+	ch.Dispose()
+}
+
+// #1948-20: 全グループが非空でなければ接続拒否する (upstream q.every(x.length>=1))。
+// 第1グループが非空でも後続グループが空なら reject。
+func TestHashtag_EmptyGroupRejected(t *testing.T) {
+	ctx := newCtx(nil)
+	ch := NewHashtag(ctx)
+	err := ch.Init(json.RawMessage(`{"q":[["a"],[]]}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams, "後続グループが空なら接続拒否 (#1948-20)")
 	assert.Empty(t, ctx.subs)
 	ch.Dispose()
 }

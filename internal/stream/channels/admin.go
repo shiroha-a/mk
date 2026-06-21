@@ -7,9 +7,19 @@ import (
 	"github.com/shiroha-a/mk/internal/stream"
 )
 
-// AdminRoleChecker checks whether a user has admin privileges.
+// AdminRoleChecker checks whether a user has moderator/admin privileges.
+//
+// upstream の admin stream channel は streaming layer で role check せず、
+// requireCredential=true (native session) または kind='read:admin:stream'
+// permission (OAuth token) のみで gate する。`read:admin:stream` は moderator
+// 用 scope なので moderator が購読できるのが意図。mk-go は native session に
+// role/permission 概念を持たないため、その scope 意図を server-side の
+// moderator check で代替する (= upstream より厳格だが abuse report 等の event
+// を漏らさず moderator にも届ける)。以前は IsAdministrator で admin 限定にして
+// おり、moderator を不当に弾いていた (#1948-20)。IsModerator は administrator
+// も含む。
 type AdminRoleChecker interface {
-	IsAdministrator(userID string) bool
+	IsModerator(userID string) bool
 }
 
 // AdminChannel forwards admin-only events. Requires authenticated admin user.
@@ -40,8 +50,10 @@ func (c *AdminChannel) Init(_ json.RawMessage) error {
 	if !ok || user == nil {
 		return stream.ErrInvalidParams
 	}
-	// admin権限チェック
-	if c.roleChecker == nil || !c.roleChecker.IsAdministrator(user.ID) {
+	// moderator/admin 権限チェック (read:admin:stream scope 相当、AdminRoleChecker
+	// の docstring 参照)。moderator も abuse report 等を受信できる (#1948-20。以前は
+	// IsAdministrator で admin 限定だった)。
+	if c.roleChecker == nil || !c.roleChecker.IsModerator(user.ID) {
 		return stream.ErrInvalidParams
 	}
 	c.connected = true

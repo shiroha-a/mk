@@ -37,9 +37,16 @@ func (c *HashtagChannel) Init(params json.RawMessage) error {
 	if len(params) > 0 {
 		_ = json.Unmarshal(params, &p)
 	}
-	// TS Misskey は q が配列でない/要素がないと init が false を返して接続拒否
-	if len(p.Q) == 0 || len(p.Q[0]) == 0 {
+	// upstream hashtag.ts:36-42 は `q.every(x => Array.isArray(x) && x.length >= 1)`
+	// で**全グループ**が非空であることを要求し、1 つでも空なら接続拒否する。以前は
+	// q[0] (第1グループ) のみ検証していた (#1948-20)。
+	if len(p.Q) == 0 {
 		return stream.ErrInvalidParams
+	}
+	for _, group := range p.Q {
+		if len(group) == 0 {
+			return stream.ErrInvalidParams
+		}
 	}
 	c.filter = parseNoteFilter(params)
 	// q を正規化して保持し、全グループの全タグの distinct 正規化キーを購読する。
