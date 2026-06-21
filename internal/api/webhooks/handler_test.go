@@ -245,6 +245,25 @@ func TestList_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1948-10: packWebhook の latestSentAt は upstream toISOString() (.000Z / null)。
+// raw *time.Time の RFC3339Nano だと wire-byte が乖離する。
+func TestList_LatestSentAtFormat(t *testing.T) {
+	h, repo := newTestHandler()
+	sent := time.Date(2026, 6, 21, 1, 2, 3, 456_000_000, time.UTC)
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: pq.StringArray{"note"}, LatestSentAt: &sent}
+	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", Name: "hook2", On: pq.StringArray{}}
+	rec := post(h.List, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := map[string]map[string]any{}
+	for _, e := range resp {
+		byID[e["id"].(string)] = e
+	}
+	assert.Equal(t, "2026-06-21T01:02:03.456Z", byID["w1"]["latestSentAt"], "latestSentAt は .000Z (#1948-10)")
+	assert.Nil(t, byID["w2"]["latestSentAt"], "nil latestSentAt は null (#1948-10)")
+}
+
 type failListRepo struct{ *mockWebhookRepo }
 
 func (f *failListRepo) ListByUserID(_ string) ([]*model.Webhook, error) { return nil, errMock }

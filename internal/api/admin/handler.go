@@ -2745,8 +2745,10 @@ func packEmojiDetailedAdmin(e *model.Emoji, roleNames map[string]string) map[str
 		aliases = []string{}
 	}
 	return map[string]any{
-		"id":          e.ID,
-		"updatedAt":   e.UpdatedAt,
+		"id": e.ID,
+		// upstream EmojiEntityService.ts:112 は updatedAt?.toISOString() ?? null。
+		// raw *time.Time だと RFC3339Nano になるため .000Z/null に揃える (#1948-10)。
+		"updatedAt":   entity.ISOMillisPtr(e.UpdatedAt),
 		"name":        e.Name,
 		"host":        e.Host,
 		"publicUrl":   e.PublicURL,

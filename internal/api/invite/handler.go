@@ -98,9 +98,10 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 
 	resp := map[string]any{
-		"id":        ticket.ID,
-		"code":      ticket.Code,
-		"expiresAt": ticket.ExpiresAt,
+		"id":   ticket.ID,
+		"code": ticket.Code,
+		// upstream InviteCodeEntityService.ts:47 は expiresAt ? toISOString() : null (#1948-10)。
+		"expiresAt": entity.ISOMillisPtr(ticket.ExpiresAt),
 		"createdBy": entity.PackUserLite(user),
 		"usedBy":    nil,
 		"usedAt":    nil,
@@ -173,12 +174,13 @@ func (h *Handler) List(c echo.Context) error {
 			}
 		}
 		entry := map[string]any{
-			"id":        t.ID,
-			"code":      t.Code,
-			"expiresAt": t.ExpiresAt,
+			"id":   t.ID,
+			"code": t.Code,
+			// upstream InviteCodeEntityService.ts:47,51 は expiresAt/usedAt ? toISOString() : null (#1948-10)。
+			"expiresAt": entity.ISOMillisPtr(t.ExpiresAt),
 			"createdBy": createdByLite,
 			"usedBy":    usedBy,
-			"usedAt":    t.UsedAt,
+			"usedAt":    entity.ISOMillisPtr(t.UsedAt),
 			"used":      t.UsedByID != nil,
 		}
 		if ts, err := h.idGen.ParseTime(t.ID); err == nil {

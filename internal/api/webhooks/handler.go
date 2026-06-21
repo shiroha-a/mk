@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -84,14 +85,16 @@ func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 
 func packWebhook(w *model.Webhook) map[string]any {
 	return map[string]any{
-		"id":           w.ID,
-		"userId":       w.UserID,
-		"name":         w.Name,
-		"on":           w.On,
-		"url":          w.URL,
-		"secret":       w.Secret,
-		"active":       w.Active,
-		"latestSentAt": w.LatestSentAt,
+		"id":     w.ID,
+		"userId": w.UserID,
+		"name":   w.Name,
+		"on":     w.On,
+		"url":    w.URL,
+		"secret": w.Secret,
+		"active": w.Active,
+		// upstream i/webhooks/list.ts:54 は latestSentAt ? toISOString() : null。
+		// raw *time.Time だと RFC3339Nano になるため .000Z/null に揃える (#1948-10)。
+		"latestSentAt": entity.ISOMillisPtr(w.LatestSentAt),
 		"latestStatus": w.LatestStatus,
 	}
 }

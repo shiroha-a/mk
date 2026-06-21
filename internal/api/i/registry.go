@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -80,7 +81,8 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
 	}
 	return c.JSON(http.StatusOK, map[string]any{
-		"updatedAt": item.UpdatedAt,
+		// upstream i/registry/get-detail.ts:62 は updatedAt.toISOString()。
+		"updatedAt": entity.ISOMillis(item.UpdatedAt),
 		"value":     item.Value,
 		"scope":     []string(item.Scope),
 		"domain":    item.Domain,

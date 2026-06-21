@@ -793,6 +793,27 @@ func TestEmojiListV2_RoleObjectsAndShape(t *testing.T) {
 	shapetest.Assert(t, "EmojiDetailedAdmin", em) // L3 (#1300)
 }
 
+// #1948-10: EmojiDetailedAdmin の updatedAt は upstream toISOString() (.000Z / null)。
+// raw *time.Time の RFC3339Nano だと wire-byte が乖離する。
+func TestEmojiListV2_UpdatedAtFormat(t *testing.T) {
+	upd := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "smile", PublicURL: "https://example.com/s.png", UpdatedAt: &upd},
+		&model.Emoji{ID: "e2", Name: "wave", PublicURL: "https://example.com/w.png"}, // updatedAt nil
+	)
+	rec := doPost(h.EmojiListV2, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	byID := map[string]map[string]any{}
+	for _, raw := range resp["emojis"].([]any) {
+		em := raw.(map[string]any)
+		byID[em["id"].(string)] = em
+	}
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", byID["e1"]["updatedAt"], "updatedAt は .000Z (#1948-10)")
+	assert.Nil(t, byID["e2"]["updatedAt"], "nil updatedAt は null (#1948-10)")
+}
+
 func TestEmojiListV2_NilRepo(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.EmojiListV2, `{}`, adminUser)

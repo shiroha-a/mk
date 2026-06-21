@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -201,6 +202,30 @@ func TestList_ResolvesCreatedByAndUsedBy(t *testing.T) {
 	ub, ok := byID["z_a2"]["usedBy"].(map[string]any)
 	require.True(t, ok, "used ticket must resolve usedBy UserLite")
 	assert.Equal(t, "bob", ub["username"])
+}
+
+// #1948-10: List の expiresAt / usedAt は upstream toISOString() (.000Z / null)。
+// raw *time.Time の RFC3339Nano だと wire-byte が乖離する。
+func TestList_DateFormat(t *testing.T) {
+	h, repo := newTestHandler(t)
+	me := "u1"
+	exp := time.Date(2026, 6, 21, 1, 2, 3, 456_000_000, time.UTC)
+	used := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "z_a1", Code: "c1", CreatedByID: &me, ExpiresAt: &exp, UsedAt: &used}
+	repo.Tickets["t2"] = &model.RegistrationTicket{ID: "z_a2", Code: "c2", CreatedByID: &me}
+
+	rec := post(h.List, `{"limit":50}`, &model.User{ID: me})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	byID := map[string]map[string]any{}
+	for _, e := range out {
+		byID[e["id"].(string)] = e
+	}
+	assert.Equal(t, "2026-06-21T01:02:03.456Z", byID["z_a1"]["expiresAt"], "expiresAt は .000Z (#1948-10)")
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", byID["z_a1"]["usedAt"], "usedAt は .000Z (#1948-10)")
+	assert.Nil(t, byID["z_a2"]["expiresAt"], "nil expiresAt は null (#1948-10)")
+	assert.Nil(t, byID["z_a2"]["usedAt"], "nil usedAt は null (#1948-10)")
 }
 
 // listErrRepo は ListByCreator だけ error を返す stub。

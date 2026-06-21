@@ -98,6 +98,26 @@ func TestInstances_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #1948-10: instance の firstRetrievedAt / infoUpdatedAt / latestRequestReceivedAt
+// は upstream toISOString() (.000Z / null)。raw time.Time の RFC3339Nano だと乖離。
+func TestShowInstance_DateFormat(t *testing.T) {
+	h, repo := newHandler(t)
+	inst := seedInstance(t, repo, "alpha.example")
+	inst.FirstRetrievedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	infoUpdated := time.Date(2026, 6, 21, 1, 2, 3, 456_000_000, time.UTC)
+	inst.InfoUpdatedAt = &infoUpdated
+	// latestRequestReceivedAt は nil のまま → null。
+
+	c, rec := newReq(t, `{"host":"alpha.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", resp["firstRetrievedAt"], "firstRetrievedAt は .000Z (#1948-10)")
+	assert.Equal(t, "2026-06-21T01:02:03.456Z", resp["infoUpdatedAt"], "infoUpdatedAt は .000Z (#1948-10)")
+	assert.Nil(t, resp["latestRequestReceivedAt"], "nil は null (#1948-10)")
+}
+
 // fakeModerator implements ModeratorChecker for the moderationNote gate tests.
 type fakeModerator struct{ ids map[string]bool }
 

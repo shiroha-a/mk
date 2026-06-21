@@ -101,6 +101,39 @@ func TestSystemWebhookList_ReturnsRows(t *testing.T) {
 	assert.Equal(t, "w1", rows[1].ID)
 }
 
+// #1948-10: SystemWebhook の updatedAt / latestSentAt は upstream toISOString()
+// (.000Z / null) で返す。raw time.Time の RFC3339Nano だと wire-byte が乖離する。
+func TestSystemWebhookShow_DateFormat(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	repo := testutil.NewMockSystemWebhookRepository()
+	sent := time.Date(2026, 6, 21, 1, 2, 3, 456_000_000, time.UTC)
+	// w1: 秒ちょうど (RFC3339Nano なら .000 を落とす) updatedAt + latestSentAt set。
+	require.NoError(t, repo.Create(&model.SystemWebhook{
+		ID: "w1", Name: "hook", URL: "u", IsActive: true,
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), LatestSentAt: &sent,
+	}))
+	// w2: latestSentAt nil。
+	require.NoError(t, repo.Create(&model.SystemWebhook{
+		ID: "w2", Name: "hook2", URL: "u", IsActive: true,
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}))
+	h.SetSystemWebhookRepo(repo)
+
+	rec := doPost(h.SystemWebhookShow, `{"id":"w1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", got["updatedAt"], "updatedAt は .000Z 形式 (#1948-10)")
+	assert.Equal(t, "2026-06-21T01:02:03.456Z", got["latestSentAt"], "latestSentAt は .000Z 形式 (#1948-10)")
+	// createdAt は upstream SystemWebhook pack に無い (model にも無い) → 露出しない。
+	_, hasCreatedAt := got["createdAt"]
+	assert.False(t, hasCreatedAt, "createdAt は SystemWebhook shape に含まれない")
+
+	rec = doPost(h.SystemWebhookShow, `{"id":"w2"}`, adminUser)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Nil(t, got["latestSentAt"], "latestSentAt nil は null (#1948-10)")
+}
+
 func TestSystemWebhookShow_FoundAndNotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	repo := testutil.NewMockSystemWebhookRepository()

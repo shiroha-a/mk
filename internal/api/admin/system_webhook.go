@@ -9,8 +9,35 @@ import (
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 )
+
+// packSystemWebhook serializes a SystemWebhook into the upstream
+// SystemWebhookEntityService.pack shape (SystemWebhookEntityService.ts:33-43):
+// the same 9 fields the model carries, but with updatedAt / latestSentAt
+// rendered via Date.toISOString() (.000Z) rather than the model's raw time.Time
+// (which encoding/json would emit as RFC3339Nano). Returning the model directly
+// diverged on those two timestamp fields (#1948-10).
+func packSystemWebhook(w *model.SystemWebhook) map[string]any {
+	// on は string[] 必須 (non-null)。nil pq.StringArray は null になるため
+	// [] へ coalesce する (model 直返し時の pq.StringArray と同じ array 表現を維持)。
+	on := []string(w.On)
+	if on == nil {
+		on = []string{}
+	}
+	return map[string]any{
+		"id":           w.ID,
+		"isActive":     w.IsActive,
+		"updatedAt":    entity.ISOMillis(w.UpdatedAt),
+		"latestSentAt": entity.ISOMillisPtr(w.LatestSentAt),
+		"latestStatus": w.LatestStatus,
+		"name":         w.Name,
+		"on":           on,
+		"url":          w.URL,
+		"secret":       w.Secret,
+	}
+}
 
 // systemWebhookEventTypes is the allow-list of system webhook `on` event types,
 // mirroring upstream models/SystemWebhook.ts systemWebhookEventTypes (#1542)。
@@ -98,7 +125,7 @@ func (h *Handler) SystemWebhookCreate(c echo.Context) error {
 		"systemWebhookId": sw.ID,
 		"webhook":         sw,
 	})
-	return c.JSON(http.StatusOK, sw)
+	return c.JSON(http.StatusOK, packSystemWebhook(sw))
 }
 
 // SystemWebhookDelete handles POST /api/admin/system-webhook/delete.
@@ -135,7 +162,11 @@ func (h *Handler) SystemWebhookList(c echo.Context) error {
 	if rows == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	return c.JSON(http.StatusOK, rows)
+	out := make([]map[string]any, 0, len(rows))
+	for _, w := range rows {
+		out = append(out, packSystemWebhook(w))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 // SystemWebhookShow handles POST /api/admin/system-webhook/show.
@@ -151,7 +182,7 @@ func (h *Handler) SystemWebhookShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
-	return c.JSON(http.StatusOK, sw)
+	return c.JSON(http.StatusOK, packSystemWebhook(sw))
 }
 
 // SystemWebhookTest handles POST /api/admin/system-webhook/test.
@@ -253,5 +284,5 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 		"before":          before,
 		"after":           sw,
 	})
-	return c.JSON(http.StatusOK, sw)
+	return c.JSON(http.StatusOK, packSystemWebhook(sw))
 }

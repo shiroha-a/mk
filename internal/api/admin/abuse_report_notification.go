@@ -22,16 +22,19 @@ type packedRecipient struct {
 	// RFC3339Nano (秒ちょうどは .000 を落とし、非 UTC は +09:00 表記) になり、
 	// upstream の Date.toISOString() (常に 3 桁ミリ秒 + Z) と乖離する。entity 層と
 	// 同じ canonical layout で文字列化し、embedded 側の updatedAt を shadow する。
-	UpdatedAt     string               `json:"updatedAt"`
-	User          *entity.UserLite     `json:"user,omitempty"`
-	SystemWebhook *model.SystemWebhook `json:"systemWebhook,omitempty"`
+	UpdatedAt string           `json:"updatedAt"`
+	User      *entity.UserLite `json:"user,omitempty"`
+	// systemWebhook は upstream SystemWebhookEntityService.pack shape で返す。
+	// model 直埋め込みだと updatedAt/latestSentAt が RFC3339Nano になるため
+	// packSystemWebhook 経由で .000Z に揃える (#1948-10)。
+	SystemWebhook map[string]any `json:"systemWebhook,omitempty"`
 }
 
 // packRecipient resolves the recipient's user / systemWebhook for the response
 // (upstream AbuseReportNotificationRecipientEntityService.pack).
 func (h *Handler) packRecipient(r *model.AbuseReportNotificationRecipient) packedRecipient {
 	p := packedRecipient{AbuseReportNotificationRecipient: r}
-	p.UpdatedAt = r.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+	p.UpdatedAt = entity.ISOMillis(r.UpdatedAt)
 	if r.UserID != nil && *r.UserID != "" && h.userRepo != nil {
 		if u, err := h.userRepo.FindByID(*r.UserID); err == nil && u != nil {
 			lite := entity.PackUserLite(u)
@@ -40,7 +43,7 @@ func (h *Handler) packRecipient(r *model.AbuseReportNotificationRecipient) packe
 	}
 	if r.SystemWebhookID != nil && *r.SystemWebhookID != "" && h.systemWebhookRepo != nil {
 		if w, err := h.systemWebhookRepo.FindByID(*r.SystemWebhookID); err == nil && w != nil {
-			p.SystemWebhook = w
+			p.SystemWebhook = packSystemWebhook(w)
 		}
 	}
 	return p

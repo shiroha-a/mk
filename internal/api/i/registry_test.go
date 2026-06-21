@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -168,6 +169,23 @@ func TestRegistryGetDetail_Found(t *testing.T) {
 	h.SetRegistryRepo(reg)
 	rec := postExtra(h.RegistryGetDetail, `{"key":"theme"}`, stubUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// #1948-10: get-detail の updatedAt は upstream toISOString() (.000Z)。
+// raw time.Time の RFC3339Nano だと wire-byte が乖離する。
+func TestRegistryGetDetail_UpdatedAtFormat(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	require.NoError(t, reg.Set(&model.RegistryItem{
+		ID: "r1", UserID: stubUser.ID, Key: "theme", Value: datatypes.JSON(`"dark"`),
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}))
+	h.SetRegistryRepo(reg)
+	rec := postExtra(h.RegistryGetDetail, `{"key":"theme"}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "2026-01-02T03:04:05.000Z", got["updatedAt"], "updatedAt は .000Z 形式 (#1948-10)")
 }
 
 func TestRegistryGetDetail_NotFound(t *testing.T) {

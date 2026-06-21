@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -229,7 +230,7 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 	}
 	return map[string]any{
 		"id":                      inst.ID,
-		"firstRetrievedAt":        inst.FirstRetrievedAt,
+		"firstRetrievedAt":        entity.ISOMillis(inst.FirstRetrievedAt),
 		"host":                    inst.Host,
 		"usersCount":              inst.UsersCount,
 		"notesCount":              inst.NotesCount,
@@ -238,7 +239,7 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		"federating":              inst.FollowingCount > 0 || inst.FollowersCount > 0,
 		"subscribing":             inst.FollowersCount > 0,
 		"publishing":              inst.FollowingCount > 0,
-		"latestRequestReceivedAt": inst.LatestRequestReceivedAt,
+		"latestRequestReceivedAt": entity.ISOMillisPtr(inst.LatestRequestReceivedAt),
 		"isNotResponding":         inst.IsNotResponding,
 		"notRespondingSince":      inst.NotRespondingSince,
 		"isSuspended":             isSuspended,
@@ -256,7 +257,7 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		"iconUrl":                 inst.IconURL,
 		"faviconUrl":              inst.FaviconURL,
 		"themeColor":              inst.ThemeColor,
-		"infoUpdatedAt":           inst.InfoUpdatedAt,
+		"infoUpdatedAt":           entity.ISOMillisPtr(inst.InfoUpdatedAt),
 		"moderationNote":          moderationNote,
 	}
 }
