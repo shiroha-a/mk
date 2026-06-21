@@ -55,13 +55,17 @@ type Handler struct {
 	bufReader            entity.BufferedReactionsReader
 	userListFavoriteRepo UserListFavoriteRepository
 	userListRepo         repository.UserListRepository
-	clipRepo             repository.ClipRepository
-	clipFavoriteRepo     repository.ClipFavoriteRepository
-	flashRepo            repository.FlashRepository
-	galleryRepo          repository.GalleryRepository
-	pageRepo             repository.PageRepository
-	piningRepo           repository.UserNotePiningRepository
-	fieldRes             *entity.NoteFieldResolver
+	// userListEventPub は update-membership で withReplies が変わった際に
+	// userListStream へ userUpdated を流し、接続中の userList channel の snapshot を
+	// live 更新するために使う (#2051)。未配線なら通知しない。
+	userListEventPub UserListMembershipEventPublisher
+	clipRepo         repository.ClipRepository
+	clipFavoriteRepo repository.ClipFavoriteRepository
+	flashRepo        repository.FlashRepository
+	galleryRepo      repository.GalleryRepository
+	pageRepo         repository.PageRepository
+	piningRepo       repository.UserNotePiningRepository
+	fieldRes         *entity.NoteFieldResolver
 	// userRepo は users/notes / users/search-by-username-and-host 経由で
 	// 表示する note list の hardMutedWords filter (#787) に使う。
 	userRepo repository.UserRepository
@@ -184,6 +188,18 @@ func (h *Handler) SetAbuseReportFanout(lister ModeratorLister, notifier AbuseRep
 // unwired の場合 users/reactions は access control を skip して
 // noteReactionRepo の有無に応じて空配列か list を返す test 互換 path に
 // 落ちる (= production 影響なし、test 用 fall-through)。
+// UserListMembershipEventPublisher publishes membership events (here:
+// userUpdated for a withReplies change) to userListStream:{listId} (#2051)。
+type UserListMembershipEventPublisher interface {
+	PublishUserListEvent(listID, eventType string, body any)
+}
+
+// SetUserListEventPublisher wires the userListStream publisher used to live-update
+// connected userList channels when update-membership changes withReplies (#2051)。
+func (h *Handler) SetUserListEventPublisher(p UserListMembershipEventPublisher) {
+	h.userListEventPub = p
+}
+
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
 }

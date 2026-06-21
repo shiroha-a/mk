@@ -634,3 +634,43 @@ func TestListsUpdateMembership_DeliberateDeviations(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER", "非 member は NO_SUCH_USER 404 (#2005)")
 }
+
+// stubUserListEventPub records PublishUserListEvent calls (#2051)。
+type stubUserListEventPub struct {
+	calls []struct {
+		listID, eventType string
+		body              any
+	}
+}
+
+func (s *stubUserListEventPub) PublishUserListEvent(listID, eventType string, body any) {
+	s.calls = append(s.calls, struct {
+		listID, eventType string
+		body              any
+	}{listID, eventType, body})
+}
+
+// #2051: update-membership で withReplies を明示変更したときだけ userUpdated を流す。
+func TestListsUpdateMembership_EmitsUserUpdated(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockUserListRepository()
+	h.SetUserListRepo(repo)
+	pub := &stubUserListEventPub{}
+	h.SetUserListEventPublisher(pub)
+	seedListWithMember(repo, "l1", "owner", "member1", false)
+	owner := &model.User{ID: "owner"}
+
+	// withReplies 省略 → event 無し。
+	postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"member1"}`, owner)
+	assert.Empty(t, pub.calls, "withReplies 省略時は userUpdated を流さない (#2051)")
+
+	// withReplies=true 明示 → userUpdated {id, withReplies:true}。
+	postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"member1","withReplies":true}`, owner)
+	require.Len(t, pub.calls, 1)
+	assert.Equal(t, "l1", pub.calls[0].listID)
+	assert.Equal(t, "userUpdated", pub.calls[0].eventType)
+	body, ok := pub.calls[0].body.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "member1", body["id"])
+	assert.Equal(t, true, body["withReplies"])
+}

@@ -2345,6 +2345,9 @@ func (s *Server) setupRoutes() {
 	userListHandler.SetFavoriteRepo(userListFavoriteRepo)                                      // #1550: show forPublic likedCount/isLiked
 	userListHandler.SetProxyFollow(listProxyFollow)                                            // #1704: push remote member proxy follow
 	userListHandler.SetUserListEventPublisher(stream.NewUserListStreamPublisher(streamPubSub)) // #1549: push/pull userAdded/userRemoved
+	// users/lists/update-membership の withReplies 変更を userUpdated として流し、接続中の
+	// userList channel snapshot を live 更新する (#2051)。
+	usersHandler.SetUserListEventPublisher(stream.NewUserListStreamPublisher(streamPubSub))
 	// list は requireCredential:false の public endpoint (userId 指定で他人の
 	// public list を閲覧可、#1550)。未認証 && userId 未指定は handler が INVALID_PARAM。
 	api.POST("/users/lists/list", userListHandler.List, middleware.RequireScope("read:account"))

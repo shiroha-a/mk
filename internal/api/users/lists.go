@@ -325,6 +325,15 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 		}
 		return apierr.JSONInternalError(c)
 	}
+	// withReplies を明示変更したときは userListStream へ userUpdated を流し、接続中の
+	// userList channel の per-member snapshot を live 更新する (#2051。upstream は 5s
+	// poll で反映するが mk-go は event 駆動)。
+	if req.WithReplies != nil && h.userListEventPub != nil {
+		h.userListEventPub.PublishUserListEvent(req.ListID, "userUpdated", map[string]any{
+			"id":          req.UserID,
+			"withReplies": *req.WithReplies,
+		})
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 

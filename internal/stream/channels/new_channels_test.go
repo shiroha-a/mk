@@ -3,6 +3,7 @@ package channels
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -1071,4 +1072,59 @@ func TestUserList_NoLookupSkipsReplyGate(t *testing.T) {
 	ctx.sentType = nil
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`))
 	assert.Len(t, ctx.sentType, 1, "lookup 未配線時は reply gate skip (後方互換、#2020)")
+}
+
+// #2051: userUpdated event で per-member withReplies snapshot を live 更新し、
+// userRemoved で除去する。userUpdated は client へ forward しない。
+func TestUserList_MembershipSnapshotLiveUpdate(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	lookup := &stubMembershipLookup{members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
+	ch := NewUserListFactory(lookup).New(ctx)
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
+
+	replyNote := `{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`
+	send := func(payload string) int {
+		ctx.sentType = nil
+		ch.OnRedisEvent([]byte(payload))
+		return len(ctx.sentType)
+	}
+
+	// 初期 (bob withReplies=false): 第三者 reply は drop。
+	assert.Equal(t, 0, send(replyNote), "withReplies=false で drop")
+	// userUpdated で bob を withReplies=true に (client へは流さない)。
+	assert.Equal(t, 0, send(`{"type":"userUpdated","body":{"id":"bob","withReplies":true}}`),
+		"userUpdated は client へ流さない (#2051)")
+	// 更新後: bob の第三者 reply が pass。
+	assert.Equal(t, 1, send(replyNote), "userUpdated で withReplies=true 反映 → reply pass (#2051)")
+	// userRemoved で bob を除去 (client へ forward) → 以降 absent (default false)。
+	assert.Equal(t, 1, send(`{"type":"userRemoved","body":{"id":"bob"}}`), "userRemoved は forward")
+	assert.Equal(t, 0, send(replyNote), "userRemoved 後は absent → withReplies=false → drop")
+}
+
+// #2051: note 配信と membership event は別 topic で並行 fanout されうるため、
+// withRepliesByUser は mu で保護される。-race で並行アクセスの安全性を検証する。
+func TestUserList_ConcurrentSnapshotAndNote(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	lookup := &stubMembershipLookup{members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
+	ch := NewUserListFactory(lookup).New(ctx)
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// goroutine A: membership event で snapshot を書き換え続ける。
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			ch.OnRedisEvent([]byte(`{"type":"userUpdated","body":{"id":"bob","withReplies":true}}`))
+			ch.OnRedisEvent([]byte(`{"type":"userUpdated","body":{"id":"bob","withReplies":false}}`))
+		}
+	}()
+	// goroutine B: note 配信で snapshot を読み続ける。
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			ch.OnRedisEvent([]byte(`{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`))
+		}
+	}()
+	wg.Wait()
 }

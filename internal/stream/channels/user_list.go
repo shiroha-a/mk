@@ -2,6 +2,7 @@ package channels
 
 import (
 	"encoding/json"
+	"sync"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
@@ -27,8 +28,11 @@ type UserListChannel struct {
 	streamTopic string
 	filter      noteFilter
 	memberships UserListMembershipLookup
-	// withRepliesByUser は member userID → withReplies の Init snapshot。
-	// nil の間は per-member reply gate を skip する。
+	// withRepliesByUser は member userID → withReplies の snapshot。Init で構築し、
+	// userAdded/userRemoved event で live 更新する (#2051)。nil の間は per-member
+	// reply gate を skip する。note 配信 (userListTimeline:) と membership event
+	// (userListStream:) は別 topic で並行 fanout されうるため mu で保護する。
+	mu                sync.RWMutex
 	withRepliesByUser map[string]bool
 }
 
@@ -102,8 +106,13 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 		Type string          `json:"type"`
 		Body json.RawMessage `json:"body"`
 	}
-	if json.Unmarshal(payload, &env) == nil && (env.Type == "userAdded" || env.Type == "userRemoved") {
-		_ = c.ctx.Send(env.Type, env.Body)
+	if json.Unmarshal(payload, &env) == nil && (env.Type == "userAdded" || env.Type == "userRemoved" || env.Type == "userUpdated") {
+		c.applyMembershipEvent(env.Type, env.Body)
+		// userUpdated は snapshot 更新専用の internal event。upstream に無く frontend も
+		// 解さないので client へは流さない (#2051)。
+		if env.Type != "userUpdated" {
+			_ = c.ctx.Send(env.Type, env.Body)
+		}
 		return
 	}
 
@@ -126,13 +135,54 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 	if !userListVisibilityShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
 		return
 	}
-	// per-member withReplies gate (#2020)。snapshot 配線時のみ適用。
-	if c.withRepliesByUser != nil &&
-		!userListReplyShouldEmit(payload, viewerID, c.withRepliesByUser, c.ctx.FollowingSnapshot()) {
-		return
+	// per-member withReplies gate (#2020)。snapshot 配線時のみ適用。投稿者の
+	// withReplies を mu 下で 1 件 lookup してから gate に渡す (#2051)。
+	if c.withRepliesByUser != nil {
+		var author struct {
+			UserID string `json:"userId"`
+		}
+		_ = json.Unmarshal(payload, &author)
+		c.mu.RLock()
+		authorWithReplies := c.withRepliesByUser[author.UserID]
+		c.mu.RUnlock()
+		if !userListReplyShouldEmit(payload, viewerID, authorWithReplies, c.ctx.FollowingSnapshot()) {
+			return
+		}
 	}
 	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
+}
+
+// applyMembershipEvent live-updates the withReplies snapshot on membership
+// events (#2051):
+//   - userAdded: body は UserLite (id のみ、withReplies を持たない) なので新規 member は
+//     withReplies=false default で追加 (upstream の membership 作成時 default と一致)。
+//   - userUpdated: update-membership による withReplies 変更を body の値で反映。
+//   - userRemoved: snapshot から除去。
+//
+// これにより upstream user-list.ts の 5s poll refresh と等価な add/remove/toggle 反映を
+// event 駆動で実現する。
+func (c *UserListChannel) applyMembershipEvent(eventType string, body json.RawMessage) {
+	if c.withRepliesByUser == nil {
+		return // gate 未配線時は snapshot を保持しない
+	}
+	var u struct {
+		ID          string `json:"id"`
+		WithReplies bool   `json:"withReplies"`
+	}
+	if json.Unmarshal(body, &u) != nil || u.ID == "" {
+		return
+	}
+	c.mu.Lock()
+	switch eventType {
+	case "userAdded":
+		c.withRepliesByUser[u.ID] = false // UserLite body は withReplies を持たない (新規 default false)
+	case "userUpdated":
+		c.withRepliesByUser[u.ID] = u.WithReplies // body の withReplies を反映 (#2051)
+	case "userRemoved":
+		delete(c.withRepliesByUser, u.ID)
+	}
+	c.mu.Unlock()
 }
 
 func (c *UserListChannel) OnClientMessage(string, json.RawMessage) {}
@@ -170,13 +220,15 @@ type userListReplyPayload struct {
 //     自己 reply」のいずれでもなければ drop。
 //
 // reply でない note / parse 失敗は pass (visibility gate 側で fail-closed 済)。
-func userListReplyShouldEmit(payload []byte, viewerID string, withRepliesByUser, following map[string]bool) bool {
+// authorWithReplies は投稿者 (note.userId) の membership withReplies (呼び出し側で
+// lookup 済)。
+func userListReplyShouldEmit(payload []byte, viewerID string, authorWithReplies bool, following map[string]bool) bool {
 	var note userListReplyPayload
 	if err := json.Unmarshal(payload, &note); err != nil || note.Reply == nil {
 		return true
 	}
 	isMe := viewerID != "" && viewerID == note.UserID
-	if withRepliesByUser[note.UserID] {
+	if authorWithReplies {
 		if note.Reply.Visibility == "followers" {
 			if following == nil {
 				return false
