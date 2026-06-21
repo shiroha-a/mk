@@ -727,11 +727,14 @@ func TestEmojiDeleteBulk_Batch(t *testing.T) {
 	assert.Error(t, err, "e3 should be deleted")
 }
 
-func TestEmojiImportZip_UnknownFileReturns400(t *testing.T) {
+// #1999: upstream import-zip.ts は drive file の存在確認をせず無条件で enqueue する。
+// 不明な fileId でも同期 NO_SUCH_FILE で弾かず 204 を返して job 側に委ねる。
+func TestEmojiImportZip_UnknownFileEnqueues(t *testing.T) {
 	h, _ := setupDriveFileHandler(t)
-	h.SetEmojiImportEnqueuer(&stubEmojiImportEnqueuer{})
+	enq := &stubEmojiImportEnqueuer{}
+	h.SetEmojiImportEnqueuer(enq)
 	rec := doPost(h.EmojiImportZip, `{"fileId":"missing"}`, adminUser)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "存在確認せず enqueue (#1999)")
 }
 
 // --- EmojiListV2 -------------------------------------------------------------

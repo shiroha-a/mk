@@ -210,12 +210,10 @@ func (h *Handler) EmojiImportZip(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.FileID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "fileId is required.", "5f4c9d8a-7c39-4bfa-9dcb-09f17e0f7a25"))
 	}
-	// drive file の存在確認 (ジョブが後で失敗するよりここで早期に弾く)
-	if h.driveFileRepo != nil {
-		if _, err := h.driveFileRepo.FindByID(req.FileID); err != nil {
-			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "ac4f7b11-1a6e-47e3-bf3d-3dce9a0e07ab"))
-		}
-	}
+	// upstream import-zip.ts:30 は drive file の存在確認をせず無条件で
+	// createImportCustomEmojisJob を enqueue する (存在しなければ job が後で失敗)。
+	// mk-go の同期 NO_SUCH_FILE check は upstream に無い divergence なので外す
+	// (= 不正 fileId でも 204 を返し job 側に委ねる、#1999)。
 	if h.emojiEnqueuer == nil {
 		return c.NoContent(http.StatusNoContent)
 	}

@@ -601,6 +601,42 @@ func TestEmojiRepository_ListV2_NameFilter(t *testing.T) {
 	assert.Equal(t, "ev_n1", rows[0].ID)
 }
 
+// #1999: v2 buildV2Query は upstream fetchEmojis に揃える: case-sensitive LIKE +
+// escapeLike + multipleWordsToQuery (空白分割 OR) + aliases 要素単位 + updatedAt date cast。
+func TestEmojiRepository_ListV2_QueryParity(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	mk := func(id, name, category string, aliases []string) *model.Emoji {
+		e := &model.Emoji{ID: id, Name: name, Category: &category, Aliases: pq.StringArray(aliases), OriginalURL: "https://x"}
+		require.NoError(t, repo.Create(e))
+		t.Cleanup(func() { cleanupEmoji(t, id) })
+		return e
+	}
+	mk("evp_upper", "ParityUpper", "Cat", []string{"smile", "happy_face"})
+	mk("evp_lower", "paritylower", "cat", []string{"frown"})
+
+	// case-sensitive: "Parity" は ParityUpper のみ match (paritylower は小文字)。
+	rows, err := repo.ListV2(model.EmojiV2Filter{Query: &model.EmojiV2Query{Name: "Parity"}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "evp_upper", rows[0].ID)
+
+	// multipleWordsToQuery: 空白区切りは各語の OR。"Upper lower" は両方 match。
+	rows, err = repo.ListV2(model.EmojiV2Filter{Query: &model.EmojiV2Query{Name: "Upper lower"}, Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+
+	// escapeLike: "%" は literal 扱いで wildcard 化しない (どちらにも無いので 0 件)。
+	rows, err = repo.ListV2(model.EmojiV2Filter{Query: &model.EmojiV2Query{Name: "Par%ity"}, Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+
+	// aliases は要素単位突合: "happy_face" の under_score は escape され、"smile" alias は要素一致。
+	rows, err = repo.ListV2(model.EmojiV2Filter{Query: &model.EmojiV2Query{Aliases: "smile"}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "evp_upper", rows[0].ID)
+}
+
 func TestEmojiRepository_ListV2_SortKeys(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 

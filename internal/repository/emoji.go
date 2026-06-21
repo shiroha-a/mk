@@ -3,6 +3,7 @@ package repository
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -259,42 +260,83 @@ var v2SortAllowList = map[string]string{
 	"roleIdsThatCanBeUsedThisEmojiAsReaction": `"roleIdsThatCanBeUsedThisEmojiAsReaction"`,
 }
 
+// multipleWordsToQuery mirrors upstream CustomEmojiService.multipleWordsToQuery:
+// クエリを空白で分割し、各語を sqlLikeEscape(escapeLike) して `%word%` の LIKE
+// パターン配列にする。各フィールドはこの配列に対する `~~ ANY(...)` (case-sensitive
+// LIKE の OR) で突合する (#1999)。
+func multipleWordsToQuery(words string) []string {
+	parts := strings.Fields(words)
+	out := make([]string, 0, len(parts))
+	for _, x := range parts {
+		out = append(out, "%"+escapeLike(x)+"%")
+	}
+	return out
+}
+
 // buildV2Query constructs the common WHERE clause for ListV2/CountV2.
+//
+// upstream CustomEmojiService.fetchEmojis に揃える (#1999): 各テキストフィールドは
+// case-sensitive な `LIKE ANY(...)` + multipleWordsToQuery (空白分割 OR) + escapeLike、
+// updatedAt は `CAST(... AS DATE)` で date 切り捨て、aliases は unnest で要素単位突合。
 func (r *emojiRepository) buildV2Query(filter model.EmojiV2Filter) *gorm.DB {
 	q := r.db.Model(&model.Emoji{})
 	if filter.Query != nil {
 		fq := filter.Query
-		if fq.HostType == "local" {
+		// likeAny applies `(<col> LIKE p1 OR <col> LIKE p2 ...)` (case-sensitive,
+		// ESCAPE '\') over the whitespace-split escaped patterns = upstream の
+		// `<col> ~~ ANY(multipleWordsToQuery(...))` と等価。空白のみの値は ANY(空) =
+		// false 相当で空結果にする。OR 展開で `ARRAY[?]` の record 化を避ける。
+		likeAny := func(col, val string) {
+			if val == "" {
+				return
+			}
+			patterns := multipleWordsToQuery(val)
+			if len(patterns) == 0 {
+				q = q.Where("1 = 0")
+				return
+			}
+			conds := make([]string, len(patterns))
+			args := make([]any, len(patterns))
+			for i, p := range patterns {
+				conds[i] = col + ` LIKE ? ESCAPE '\'`
+				args[i] = p
+			}
+			q = q.Where("("+strings.Join(conds, " OR ")+")", args...)
+		}
+		// host: upstream は local→IS NULL、remote→host 指定時 LIKE ANY / 未指定時
+		// IS NOT NULL。combined/未指定 hostType では host 条件を付けない。
+		switch fq.HostType {
+		case "local":
 			q = q.Where("host IS NULL")
-		} else if fq.HostType == "remote" {
-			q = q.Where("host IS NOT NULL")
+		case "remote":
+			if fq.Host != "" {
+				likeAny("host", fq.Host)
+			} else {
+				q = q.Where("host IS NOT NULL")
+			}
 		}
-		if fq.Name != "" {
-			q = q.Where("name ILIKE ?", "%"+fq.Name+"%")
-		}
-		if fq.Host != "" {
-			q = q.Where("host ILIKE ?", "%"+fq.Host+"%")
-		}
-		if fq.Category != "" {
-			q = q.Where("category ILIKE ?", "%"+fq.Category+"%")
-		}
-		if fq.Type != "" {
-			q = q.Where("type ILIKE ?", "%"+fq.Type+"%")
-		}
+		likeAny("name", fq.Name)
+		likeAny("category", fq.Category)
+		likeAny("type", fq.Type)
+		likeAny("license", fq.License)
+		likeAny("uri", fq.URI)
+		likeAny(`"publicUrl"`, fq.PublicURL)
+		likeAny(`"originalUrl"`, fq.OriginalURL)
+		// aliases は配列要素ごとに突合する (upstream は unnest(aliases) の subquery)。
+		// array_to_string 結合では要素境界を跨いだ誤 match が起きるため避ける。
 		if fq.Aliases != "" {
-			q = q.Where("array_to_string(aliases, ',') ILIKE ?", "%"+fq.Aliases+"%")
-		}
-		if fq.License != "" {
-			q = q.Where("license ILIKE ?", "%"+fq.License+"%")
-		}
-		if fq.URI != "" {
-			q = q.Where("uri ILIKE ?", "%"+fq.URI+"%")
-		}
-		if fq.PublicURL != "" {
-			q = q.Where(`"publicUrl" ILIKE ?`, "%"+fq.PublicURL+"%")
-		}
-		if fq.OriginalURL != "" {
-			q = q.Where(`"originalUrl" ILIKE ?`, "%"+fq.OriginalURL+"%")
+			patterns := multipleWordsToQuery(fq.Aliases)
+			if len(patterns) == 0 {
+				q = q.Where("1 = 0")
+			} else {
+				conds := make([]string, len(patterns))
+				args := make([]any, len(patterns))
+				for i, p := range patterns {
+					conds[i] = `alias LIKE ? ESCAPE '\'`
+					args[i] = p
+				}
+				q = q.Where(`EXISTS (SELECT 1 FROM unnest(aliases) AS alias WHERE (`+strings.Join(conds, " OR ")+`))`, args...)
+			}
 		}
 		if fq.IsSensitive != nil {
 			q = q.Where(`"isSensitive" = ?`, *fq.IsSensitive)
@@ -302,11 +344,12 @@ func (r *emojiRepository) buildV2Query(filter model.EmojiV2Filter) *gorm.DB {
 		if fq.LocalOnly != nil {
 			q = q.Where(`"localOnly" = ?`, *fq.LocalOnly)
 		}
+		// updatedAtFrom/To は upstream 同様 date 単位に切り捨てて突合する。
 		if fq.UpdatedAtFrom != "" {
-			q = q.Where(`"updatedAt" >= ?`, fq.UpdatedAtFrom)
+			q = q.Where(`CAST("updatedAt" AS DATE) >= ?`, fq.UpdatedAtFrom)
 		}
 		if fq.UpdatedAtTo != "" {
-			q = q.Where(`"updatedAt" <= ?`, fq.UpdatedAtTo)
+			q = q.Where(`CAST("updatedAt" AS DATE) <= ?`, fq.UpdatedAtTo)
 		}
 		if len(fq.RoleIDs) > 0 {
 			q = q.Where(`"roleIdsThatCanBeUsedThisEmojiAsReaction" && ARRAY[?]::varchar[]`, fq.RoleIDs)
