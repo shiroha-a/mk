@@ -189,6 +189,22 @@ func TestRanking_PostNoCacheControl(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Cache-Control"), "POST には Cache-Control を付けない (#2027)")
 }
 
+// #2049: raw token を付けた GET (= 無効/suspended token で anonymous に落ちた場合) は
+// HasRawToken=true なので Cache-Control を付けない (upstream `!token` 判定)。
+func TestRanking_GetWithRawTokenNoCacheControl(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.records = []*model.BubbleGameRecord{{ID: "r1", Score: 200}}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?gameMode=normal", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	// auth middleware が raw token 検出時に積む flag (#2049) を simulate する。
+	c.Set("misskeyRawTokenPresent", true)
+	_ = h.Ranking(c)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "raw token GET には Cache-Control を付けない (#2049)")
+}
+
 // GET で gameMode が無ければ POST 同様 400。
 func TestRanking_GetMissingGameMode(t *testing.T) {
 	h, _ := newTestHandler()

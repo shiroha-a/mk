@@ -161,9 +161,39 @@ func TestAuthenticate_SuspendedUserTreatedAsAnonymous(t *testing.T) {
 	handler := auth.Authenticate()(func(c echo.Context) error {
 		assert.Nil(t, GetUser(c), "凍結 user は context に attach されない")
 		assert.Equal(t, "", GetToken(c), "凍結 user は token も context に attach されない")
+		// raw token は存在する (解決できなくても)。cacheSec gate がこれで cache を抑える (#2049)。
+		assert.True(t, HasRawToken(c), "raw token は HasRawToken=true (#2049)")
 		return c.String(http.StatusOK, "ok")
 	})
 	require.NoError(t, handler(c))
+}
+
+// #2049: 無効/suspended/deleted token を付けた未認証 GET は HasRawToken=true なので
+// cacheSec endpoint で public Cache-Control を付けない (upstream `!token` 判定)。一方
+// token を一切付けない GET は HasRawToken=false。
+func TestAuthenticate_HasRawToken(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	tokenRepo := testutil.NewMockAccessTokenRepository()
+	auth := NewAuthMiddleware(userRepo, tokenRepo)
+	e := echo.New()
+
+	// token 無し → HasRawToken=false。
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	c := e.NewContext(req, httptest.NewRecorder())
+	require.NoError(t, auth.Authenticate()(func(c echo.Context) error {
+		assert.False(t, HasRawToken(c), "token 無しは HasRawToken=false")
+		return nil
+	})(c))
+
+	// query param i= の token (解決不能でも transient error 経路で anonymous) → HasRawToken=true。
+	deleted := &model.User{ID: "ud", Username: "del", IsDeleted: true}
+	userRepo.Tokens["dtok"] = deleted
+	req2 := httptest.NewRequest(http.MethodGet, "/?i=dtok", nil)
+	c2 := e.NewContext(req2, httptest.NewRecorder())
+	require.NoError(t, auth.Authenticate()(func(c echo.Context) error {
+		assert.True(t, HasRawToken(c), "deleted token でも raw token はあるので HasRawToken=true")
+		return nil
+	})(c2))
 }
 
 func TestAuthenticate_DeletedUserTreatedAsAnonymous(t *testing.T) {

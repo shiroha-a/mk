@@ -115,7 +115,8 @@ func (h *Handler) Ranking(c echo.Context) error {
 	}
 	// upstream ranking.ts は cacheSec:60 → 未認証 GET に Cache-Control: public,
 	// max-age=60 を付ける (ApiCallService。POST/認証済みには付けない、#2027)。
-	if c.Request().Method == http.MethodGet && middleware.GetUser(c) == nil && middleware.GetToken(c) == "" {
+	// token は raw token (HasRawToken) で見るので無効 token GET でも cache を付けない (#2049)。
+	if c.Request().Method == http.MethodGet && middleware.GetUser(c) == nil && !middleware.HasRawToken(c) {
 		c.Response().Header().Set("Cache-Control", "public, max-age=60")
 	}
 	return c.JSON(http.StatusOK, result)

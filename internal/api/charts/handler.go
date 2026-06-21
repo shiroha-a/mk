@@ -245,9 +245,11 @@ func (h *Handler) parseRequest(req *Request) (chart.Span, int, *time.Time, *para
 // request に optional 適用済みのため、RequireAuth 無しの chart route でも
 // GetUser/GetToken が populate される (未認証なら nil / "")。
 func setCacheControl(c echo.Context) {
+	// upstream `!token && !user` の token は raw token なので、無効/suspended token を
+	// 付けた GET でも cache を付けない (HasRawToken、#2049)。
 	if c.Request().Method == http.MethodGet &&
 		middleware.GetUser(c) == nil &&
-		middleware.GetToken(c) == "" {
+		!middleware.HasRawToken(c) {
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 	}
 }

@@ -41,6 +41,11 @@ const (
 	// read this flag to return 403 YOUR_ACCOUNT_SUSPENDED instead of 401
 	// CREDENTIAL_REQUIRED (upstream ApiCallService.ts、#1559)。
 	suspendedContextKey contextKey = "misskeySuspended"
+	// rawTokenPresentContextKey flags that the request carried a raw auth token
+	// (Bearer / body `i`), regardless of whether it resolved to a valid user.
+	// upstream ApiCallService が cacheSec の Cache-Control 判定を raw token (`!token`)
+	// で行うため、無効/suspended/deleted token でも cache を付けないようにする (#2049)。
+	rawTokenPresentContextKey contextKey = "misskeyRawTokenPresent"
 )
 
 // AuthScope is the OAuth scope view of an authenticated request. IsApp is
@@ -123,6 +128,9 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 			if token == "" {
 				return next(c)
 			}
+			// raw token が存在することを記録する (解決可否に依らず)。cacheSec の
+			// Cache-Control 判定が upstream の `!token` (raw token) を見るため (#2049)。
+			c.Set(string(rawTokenPresentContextKey), true)
 
 			user, scopes, tokenID, isApp, err := a.resolveUser(token)
 			if err != nil {
@@ -290,6 +298,15 @@ func GetToken(c echo.Context) string {
 		return ""
 	}
 	return t
+}
+
+// HasRawToken reports whether the request carried a raw auth token (Bearer /
+// body `i`), regardless of whether it resolved to a valid user. cacheSec
+// endpoints use this so an invalid/suspended/deleted token still suppresses the
+// public Cache-Control, matching upstream ApiCallService's `!token` check (#2049).
+func HasRawToken(c echo.Context) bool {
+	v, _ := c.Get(string(rawTokenPresentContextKey)).(bool)
+	return v
 }
 
 // GetAuthScope returns the OAuth scope view for the current request, or nil
