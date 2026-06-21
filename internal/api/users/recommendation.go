@@ -29,10 +29,12 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "e6965129-7b2a-40a4-bae2-cd84cd434822"))
 	}
+	viewer := middleware.GetUser(c)
 	var viewerID string
-	if viewer := middleware.GetUser(c); viewer != nil {
+	if viewer != nil {
 		viewerID = viewer.ID
 	}
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 	rows, err := h.noteRepo.CountReplyTargets(req.UserID, viewerID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -56,7 +58,11 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 		}
 		d := entity.PackUserDetailed(bundle.User, bundle.Profile, h.idGen)
 		// 認証 viewer には viewer->user の relation block を付与 (upstream packMany(users, me)、#1973)。
-		h.viewerRelationRepos().Apply(&d, viewerID, bundle.User, bundle.Profile)
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, bundle.User, bundle.Profile)
+		// followers-only count を非フォロワーに leak させない (upstream UserEntityService の
+		// count gate、#1985)。
+		isMe := viewer != nil && viewer.ID == bundle.User.ID
+		entity.GateCountVisibility(&d, isMe, iAmModerator, viewerIsFollowing)
 		out = append(out, map[string]any{
 			"user":   d,
 			"weight": weight,
@@ -176,6 +182,7 @@ func (h *Handler) UserRecommendation(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	clampListLimit(&req.Limit)
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 	users, err := h.userService.ListRecommendations(viewer.ID, time.Now().AddDate(0, 0, -7), req.Limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -185,7 +192,12 @@ func (h *Handler) UserRecommendation(c echo.Context) error {
 		profile := h.userService.GetProfile(u.ID)
 		d := entity.PackUserDetailed(u, profile, h.idGen)
 		// 認証 viewer には viewer->user の relation block を付与 (upstream packMany(users, me)、#1973)。
-		h.viewerRelationRepos().Apply(&d, viewer.ID, u, profile)
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewer.ID, u, profile)
+		// followers-only count を非フォロワーに leak させない (upstream UserEntityService の
+		// count gate、#1985)。recommendation は未フォロー/非 self のみ返すため通常 isMe/isFollowing
+		// は false だが、moderator viewer には count を見せる upstream 挙動に揃える。
+		isMe := viewer != nil && viewer.ID == u.ID
+		entity.GateCountVisibility(&d, isMe, iAmModerator, viewerIsFollowing)
 		out = append(out, d)
 	}
 	return c.JSON(http.StatusOK, out)

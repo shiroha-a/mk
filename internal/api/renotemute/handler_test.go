@@ -243,6 +243,67 @@ func TestList_EmbedsRelationFlags(t *testing.T) {
 	assert.Equal(t, false, mutee["isFollowing"])
 }
 
+// modStub implements ModeratorChecker for the count-gate tests.
+type modStub struct{ mods map[string]bool }
+
+func (m modStub) IsModerator(id string) bool { return m.mods[id] }
+
+// newGatedHandler wires relation + moderator repos and renote-mutes "bob" whose
+// followersVisibility=followers and followersCount=7.
+func newGatedHandler(t *testing.T, mod ModeratorChecker) (*Handler, *httptest.ResponseRecorder, echo.Context) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	rmRepo := testutil.NewMockRenoteMutingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coremuting.NewRenoteService(userRepo, rmRepo, idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	h.SetRelationRepos(userrelation.Repos{
+		Following:    testutil.NewMockFollowingRepository(),
+		RenoteMuting: rmRepo,
+	})
+	if mod != nil {
+		h.SetModeratorChecker(mod)
+	}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", FollowersCount: 7}
+	userRepo.Profiles["bob"] = &model.UserProfile{
+		UserID:              "bob",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+	c1, _ := newReq(t, `{"userId":"bob"}`)
+	setUser(c1, "alice")
+	require.NoError(t, h.Create(c1))
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	return h, rec, c
+}
+
+// TestList_GatesFollowersCount: followers-only count を非フォロワー viewer に
+// leak させない (#1985)。
+func TestList_GatesFollowersCount(t *testing.T) {
+	h, rec, c := newGatedHandler(t, nil)
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	mutee := resp[0]["mutee"].(map[string]any)
+	assert.EqualValues(t, 0, mutee["followersCount"], "followers-only count は非フォロワーに leak しない (#1985)")
+}
+
+// TestList_ModeratorSeesFollowersCount: moderator viewer には gate をかけない。
+func TestList_ModeratorSeesFollowersCount(t *testing.T) {
+	h, rec, c := newGatedHandler(t, modStub{mods: map[string]bool{"alice": true}})
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	mutee := resp[0]["mutee"].(map[string]any)
+	assert.EqualValues(t, 7, mutee["followersCount"], "moderator viewer には count を見せる (#1985)")
+}
+
 func TestList_LimitClamping(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, `{"limit":1000}`)

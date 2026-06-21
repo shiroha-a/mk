@@ -156,6 +156,90 @@ func TestGetFrequentlyRepliedUsers_VisibilityIDOR(t *testing.T) {
 	assert.Equal(t, target1.ID, u["id"])
 }
 
+// p189ModStub implements users.ModeratorChecker for the count-gate tests.
+type p189ModStub struct{ mods map[string]bool }
+
+func (m p189ModStub) IsModerator(id string) bool     { return m.mods[id] }
+func (m p189ModStub) IsAdministrator(id string) bool { return m.mods[id] }
+
+// seedFollowersOnly registers a user with followersVisibility=followers and
+// followersCount=7 so the count-gate behavior can be observed.
+func seedFollowersOnly(k *p189Kit, id string) {
+	k.userRepo.Users[id] = &model.User{ID: id, Username: id, FollowersCount: 7}
+	k.userRepo.Profiles[id] = &model.UserProfile{
+		UserID:              id,
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+}
+
+// #1985: get-frequently-replied-users の embed user の followers-only count は
+// 非フォロワー viewer に leak しない。
+func TestGetFrequentlyRepliedUsers_GatesFollowersCount(t *testing.T) {
+	k := newP189Kit(t)
+	k.userRepo.Users["auth"] = &model.User{ID: "auth", Username: "auth"}
+	seedFollowersOnly(k, "bob")
+	replyDummy, bobID := "src", "bob"
+	k.noteRepo.Notes["np"] = &model.Note{ID: "np", UserID: "auth", ReplyID: &replyDummy, ReplyUserID: &bobID, Visibility: model.NoteVisibilityPublic}
+
+	// 非フォロワー viewer: count は 0 に潰される。
+	rec := postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"auth","limit":10}`, &model.User{ID: "stranger"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	u := out[0]["user"].(map[string]any)
+	assert.EqualValues(t, 0, u["followersCount"], "followers-only count は非フォロワーに leak しない (#1985)")
+}
+
+// #1985: moderator viewer には count をそのまま見せる。
+func TestGetFrequentlyRepliedUsers_ModeratorSeesFollowersCount(t *testing.T) {
+	k := newP189Kit(t)
+	k.h.SetModeratorChecker(p189ModStub{mods: map[string]bool{"mod": true}})
+	k.userRepo.Users["auth"] = &model.User{ID: "auth", Username: "auth"}
+	seedFollowersOnly(k, "bob")
+	replyDummy, bobID := "src", "bob"
+	k.noteRepo.Notes["np"] = &model.Note{ID: "np", UserID: "auth", ReplyID: &replyDummy, ReplyUserID: &bobID, Visibility: model.NoteVisibilityPublic}
+
+	rec := postP189(k.h.GetFrequentlyRepliedUsers, `{"userId":"auth","limit":10}`, &model.User{ID: "mod"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	u := out[0]["user"].(map[string]any)
+	assert.EqualValues(t, 7, u["followersCount"], "moderator viewer には count を見せる (#1985)")
+}
+
+// #1985: users/recommendation の embed user の followers-only count も gate する。
+func TestUserRecommendation_GatesFollowersCount(t *testing.T) {
+	k := newP189Kit(t)
+	now := time.Now()
+	k.userRepo.Users["me"] = &model.User{ID: "me"}
+	// recommend 対象 r1 は followers-only の count。me は r1 を follow していない。
+	k.userRepo.Users["r1"] = &model.User{ID: "r1", Username: "r1", IsExplorable: true, UpdatedAt: &now, FollowersCount: 7}
+	k.userRepo.Profiles["r1"] = &model.UserProfile{
+		UserID:              "r1",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+
+	rec := postP189(k.h.UserRecommendation, `{"limit":10}`, &model.User{ID: "me"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.EqualValues(t, 0, out[0]["followersCount"], "followers-only count は非フォロワーに leak しない (#1985)")
+
+	// moderator viewer には count を見せる。
+	k.h.SetModeratorChecker(p189ModStub{mods: map[string]bool{"me": true}})
+	rec = postP189(k.h.UserRecommendation, `{"limit":10}`, &model.User{ID: "me"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	out = out[:0]
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.EqualValues(t, 7, out[0]["followersCount"], "moderator viewer には count を見せる (#1985)")
+}
+
 // --- GetFollowingUsersByBirthday ---
 
 func TestGetFollowingUsersByBirthday_SingleDayMatch(t *testing.T) {

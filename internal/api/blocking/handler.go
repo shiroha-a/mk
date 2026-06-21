@@ -18,12 +18,22 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// ModeratorChecker reports whether a user holds moderator privileges. Used to
+// let moderator viewers see follower/following counts that would otherwise be
+// gated by visibility (mirrors upstream UserEntityService iAmModerator, #1985)。
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Handler handles blocking-related API endpoints.
 type Handler struct {
 	svc      *coreblocking.Service
 	userRepo repository.UserRepository
 	idGen    id.Generator
 	relation userrelation.Repos
+	// moderator は blocking/list の埋め込み blockee の count gate で moderator
+	// viewer を判定する (#1985)。未配線なら non-moderator 扱い。
+	moderator ModeratorChecker
 }
 
 // NewHandler creates a new blocking Handler.
@@ -39,6 +49,12 @@ func NewHandler(svc *coreblocking.Service, userRepo repository.UserRepository, i
 // test fixtures).
 func (h *Handler) SetRelationRepos(r userrelation.Repos) {
 	h.relation = r
+}
+
+// SetModeratorChecker wires the moderator check used by blocking/list's count
+// gate so a moderator viewer keeps seeing follower/following counts (#1985)。
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
+	h.moderator = m
 }
 
 // PairRequest is the request body for blocking/create and blocking/delete.
@@ -114,7 +130,12 @@ func (h *Handler) respondPackedUser(c echo.Context, viewer *model.User, userID s
 	profile, _ := h.userRepo.FindProfileByUserID(userID)
 	detailed := entity.PackUserDetailed(target, profile, h.idGen)
 	if viewer != nil {
-		h.relation.Apply(&detailed, viewer.ID, target, profile)
+		viewerIsFollowing := h.relation.Apply(&detailed, viewer.ID, target, profile)
+		// followers-only count を非フォロワーに leak させない (upstream blocking/create・delete も
+		// pack(blockee, blocker, UserDetailedNotMe) で count gate を通す、#1985)。block 自己不可
+		// なので isMe は常に false。
+		iAmModerator := h.moderator != nil && h.moderator.IsModerator(viewer.ID)
+		entity.GateCountVisibility(&detailed, false, iAmModerator, viewerIsFollowing)
 	}
 	return c.JSON(http.StatusOK, detailed)
 }
@@ -203,12 +224,16 @@ func (h *Handler) fetchBlockeeMap(viewerID string, rows []*model.Blocking) map[s
 	for _, p := range profiles {
 		profileByUser[p.UserID] = p
 	}
+	iAmModerator := h.moderator != nil && viewerID != "" && h.moderator.IsModerator(viewerID)
 	out := make(map[string]entity.UserDetailed, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
 		// viewer->blockee の relation block を付与 (isBlocking=true 等)。Apply は
 		// viewerID 空 / self では no-op。relation 未配線 (test stub) でも安全。
-		h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		viewerIsFollowing := h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		// followers-only count を非フォロワーに leak させない (upstream packMany(_, me) の
+		// count gate、#1985)。blockee は viewer 自身ではないため isMe は常に false。
+		entity.GateCountVisibility(&d, u.ID == viewerID, iAmModerator, viewerIsFollowing)
 		out[u.ID] = d
 	}
 	return out

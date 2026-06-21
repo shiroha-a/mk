@@ -120,6 +120,102 @@ func TestList_BlockeeCarriesIsBlocking(t *testing.T) {
 	assert.Equal(t, true, blockee["isBlocking"], "embed blockee に isBlocking=true が乗る (#1957-a)")
 }
 
+// modStub implements ModeratorChecker for the count-gate tests.
+type modStub struct{ mods map[string]bool }
+
+func (m modStub) IsModerator(id string) bool { return m.mods[id] }
+
+// newGatedHandler wires relation + moderator repos and blocks "bob" whose
+// followersVisibility=followers and followersCount=7.
+func newGatedHandler(t *testing.T, mod ModeratorChecker) (*Handler, *httptest.ResponseRecorder, echo.Context) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	blockingRepo := testutil.NewMockBlockingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coreblocking.NewService(userRepo, blockingRepo, nil, idGen)
+	h := NewHandler(svc, userRepo, idGen)
+	h.SetRelationRepos(userrelation.Repos{
+		Following: testutil.NewMockFollowingRepository(),
+		Blocking:  blockingRepo,
+	})
+	if mod != nil {
+		h.SetModeratorChecker(mod)
+	}
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", FollowersCount: 7}
+	userRepo.Profiles["bob"] = &model.UserProfile{
+		UserID:              "bob",
+		FollowersVisibility: model.FollowingVisibilityFollowers,
+		FollowingVisibility: model.FollowingVisibilityPublic,
+	}
+	c1, _ := newReq(t, `{"userId":"bob"}`)
+	setUser(c1, "alice")
+	require.NoError(t, h.Create(c1))
+	c, rec := newReq(t, `{}`)
+	setUser(c, "alice")
+	return h, rec, c
+}
+
+// TestCreate_GatesFollowersCount: blocking/create のレスポンス (UserDetailedNotMe)
+// でも followers-only count を非フォロワーに leak させない (upstream は
+// pack(blockee, blocker) で gate を通す、#1985)。
+func TestCreate_GatesFollowersCount(t *testing.T) {
+	h, _, _ := newGatedHandler(t, nil)
+	// 別途 Create を直接叩いてレスポンスを検証する (newGatedHandler は List 用の
+	// context を返すため)。alice は bob を既に block 済みなので unblock してから。
+	c, rec := newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Delete(c)) // 既存 block を解除
+	c, rec = newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 0, resp["followersCount"], "create レスポンスでも followers-only count は leak しない (#1985)")
+}
+
+// TestCreate_ModeratorSeesFollowersCount: moderator viewer の create レスポンスは
+// gate しない。
+func TestCreate_ModeratorSeesFollowersCount(t *testing.T) {
+	h, _, _ := newGatedHandler(t, modStub{mods: map[string]bool{"alice": true}})
+	c, rec := newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Delete(c))
+	c, rec = newReq(t, `{"userId":"bob"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 7, resp["followersCount"], "moderator viewer には count を見せる (#1985)")
+}
+
+// TestList_GatesFollowersCount: followers-only count を非フォロワー viewer に
+// leak させない (#1985)。
+func TestList_GatesFollowersCount(t *testing.T) {
+	h, rec, c := newGatedHandler(t, nil)
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	blockee := resp[0]["blockee"].(map[string]any)
+	assert.EqualValues(t, 0, blockee["followersCount"], "followers-only count は非フォロワーに leak しない (#1985)")
+}
+
+// TestList_ModeratorSeesFollowersCount: moderator viewer には gate をかけない。
+func TestList_ModeratorSeesFollowersCount(t *testing.T) {
+	h, rec, c := newGatedHandler(t, modStub{mods: map[string]bool{"alice": true}})
+	require.NoError(t, h.List(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	blockee := resp[0]["blockee"].(map[string]any)
+	assert.EqualValues(t, 7, blockee["followersCount"], "moderator viewer には count を見せる (#1985)")
+}
+
 func TestCreate_InvalidParam(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, `{}`)

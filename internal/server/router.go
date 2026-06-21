@@ -1740,6 +1740,7 @@ func (s *Server) setupRoutes() {
 		FollowRequest: followRequestRepo,
 		Memo:          repository.NewUserMemoRepository(s.db),
 	})
+	blockingHandler.SetModeratorChecker(roleService) // #1985: blocking/list の count gate で moderator viewer 判定
 	api.POST("/blocking/create", blockingHandler.Create, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/delete", blockingHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:blocks"))
 	api.POST("/blocking/list", blockingHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:blocks"))
@@ -1747,6 +1748,7 @@ func (s *Server) setupRoutes() {
 	// Mute endpoints
 	muteHandler := mute.NewHandler(mutingService, userRepo, idGen)
 	muteHandler.SetRelationRepos(listRelationRepos)
+	muteHandler.SetModeratorChecker(roleService) // #1985: mute/list の count gate で moderator viewer 判定
 	api.POST("/mute/create", muteHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:mutes"))
 	api.POST("/mute/delete", muteHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:mutes"))
 	api.POST("/mute/list", muteHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:mutes"))
@@ -1754,6 +1756,7 @@ func (s *Server) setupRoutes() {
 	// Renote mute endpoints
 	renoteMuteHandler := renotemute.NewHandler(renoteMutingService, userRepo, idGen)
 	renoteMuteHandler.SetRelationRepos(listRelationRepos)
+	renoteMuteHandler.SetModeratorChecker(roleService) // #1985: renote-mute/list の count gate で moderator viewer 判定
 	api.POST("/renote-mute/create", renoteMuteHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:mutes"))
 	api.POST("/renote-mute/delete", renoteMuteHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:mutes"))
 	api.POST("/renote-mute/list", renoteMuteHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:mutes"))

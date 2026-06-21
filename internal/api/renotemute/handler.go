@@ -18,6 +18,13 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// ModeratorChecker reports whether a user holds moderator privileges. Used to
+// let moderator viewers see follower/following counts that would otherwise be
+// gated by visibility (mirrors upstream UserEntityService iAmModerator, #1985)。
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Handler handles renote-mute endpoints.
 type Handler struct {
 	svc      *coremuting.RenoteService
@@ -26,12 +33,21 @@ type Handler struct {
 	// relation は renote-mute/list の埋め込み mutee に viewer-relation flag
 	// (isRenoteMuted 等) を付与する repo 束 (#1912)。未配線なら flag は omit。
 	relation userrelation.Repos
+	// moderator は renote-mute/list の埋め込み mutee の count gate で moderator
+	// viewer を判定する (#1985)。未配線なら non-moderator 扱い。
+	moderator ModeratorChecker
 }
 
 // SetRelationRepos wires the repositories used to populate viewer-relation flags
 // on the embedded mutee in renote-mute/list (#1912)。
 func (h *Handler) SetRelationRepos(r userrelation.Repos) {
 	h.relation = r
+}
+
+// SetModeratorChecker wires the moderator check used by renote-mute/list's count
+// gate so a moderator viewer keeps seeing follower/following counts (#1985)。
+func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
+	h.moderator = m
 }
 
 // NewHandler creates a new Handler.
@@ -163,12 +179,16 @@ func (h *Handler) fetchMuteeMap(viewerID string, rows []*model.RenoteMuting) map
 	for _, p := range profiles {
 		profileByUser[p.UserID] = p
 	}
+	iAmModerator := h.moderator != nil && viewerID != "" && h.moderator.IsModerator(viewerID)
 	out := make(map[string]entity.UserDetailed, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
 		// viewer-relation flag を付与 (#1912)。renote-mute 一覧なので
 		// isRenoteMuted=true が出る。
-		h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		viewerIsFollowing := h.relation.Apply(&d, viewerID, u, profileByUser[u.ID])
+		// followers-only count を非フォロワーに leak させない (upstream packMany(_, me) の
+		// count gate、#1985)。mutee は viewer 自身ではないため isMe は常に false。
+		entity.GateCountVisibility(&d, u.ID == viewerID, iAmModerator, viewerIsFollowing)
 		out[u.ID] = d
 	}
 	return out
