@@ -2169,6 +2169,8 @@ func (s *Server) setupRoutes() {
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
 	reversiPublisher := stream.NewReversiGamePublisher(streamPubSub)
 	mainStreamPublisher := stream.NewMainStreamPublisher(streamPubSub)
+	// broadcast stream publisher (emoji / global announcement 等を全 connection へ、#2046/#2056)。
+	broadcastPublisher := stream.NewBroadcastPublisher(streamPubSub)
 	// #1549: report-abuse が各 moderator の adminStream:<id> へ newAbuseUserReport
 	// を配信できるよう admin publisher + moderator lister を usersHandler に配線。
 	usersHandler.SetAbuseReportFanout(roleService, stream.NewAdminStreamPublisher(streamPubSub))
@@ -2376,7 +2378,7 @@ func (s *Server) setupRoutes() {
 		roleService,
 		metaRepo,
 		userRepo,
-		coreannouncement.NewCreator(announcementRepo, idGen, mainStreamPublisher),
+		coreannouncement.NewCreator(announcementRepo, idGen, mainStreamPublisher, broadcastPublisher),
 		webhookService,
 		idGen,
 		miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp),
@@ -2388,6 +2390,7 @@ func (s *Server) setupRoutes() {
 	iHandler.SetAnnouncementRepo(announcementRepo)
 	announcementHandler := apiannouncements.NewHandler(announcementRepo, idGen)
 	announcementHandler.SetMainStreamPublisher(mainStreamPublisher)
+	announcementHandler.SetBroadcastPublisher(broadcastPublisher) // global announcementCreated (#2056)
 	api.POST("/announcements", announcementHandler.List)
 	api.POST("/i/read-announcement", announcementHandler.ReadAnnouncement, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 
@@ -2435,7 +2438,7 @@ func (s *Server) setupRoutes() {
 	flashHandler.SetModLog(modLogService)   // #1548: moderator による flash 削除の監査ログ
 	adminHandler.SetEmojiRepo(emojiRepo)
 	// emoji の add/update/delete を broadcast stream へ流し emoji picker を live-refresh (#2046)。
-	adminHandler.SetBroadcastPublisher(stream.NewBroadcastPublisher(streamPubSub))
+	adminHandler.SetBroadcastPublisher(broadcastPublisher)
 	adminHandler.SetDriveFileRepo(driveFileRepo)
 	adminHandler.SetDriveBulkDeleter(driveService) // #1772: delete-all-files の物理削除 + 使用量減算
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で

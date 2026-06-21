@@ -24,11 +24,19 @@ type MainStreamPublisher interface {
 	PublishMainEvent(userID, eventType string, body any)
 }
 
+// BroadcastPublisher emits an instance-wide event to every connected client
+// (internal/stream.BroadcastPublisher)。global announcement の
+// announcementCreated 配信に使う (#2056)。
+type BroadcastPublisher interface {
+	PublishBroadcast(eventType string, body any)
+}
+
 // Handler handles announcement-related API endpoints.
 type Handler struct {
 	repo                repository.AnnouncementRepository
 	idGen               id.Generator
 	mainStreamPublisher MainStreamPublisher
+	broadcastPublisher  BroadcastPublisher
 	modLogService       *moderationlog.Service
 	userRepo            repository.UserRepository
 }
@@ -43,6 +51,12 @@ func NewHandler(repo repository.AnnouncementRepository, idGen id.Generator) *Han
 // disables emit.
 func (h *Handler) SetMainStreamPublisher(p MainStreamPublisher) {
 	h.mainStreamPublisher = p
+}
+
+// SetBroadcastPublisher attaches the broadcast publisher used to emit
+// `announcementCreated` for global announcements (#2056). nil disables emit.
+func (h *Handler) SetBroadcastPublisher(p BroadcastPublisher) {
+	h.broadcastPublisher = p
 }
 
 // SetModLogService attaches the moderation log writer used by AdminCreate/
@@ -257,12 +271,15 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 	if err := h.repo.Create(a); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	// TS本家AnnouncementService.create(line 87): per-user announcement
-	// (userId指定)の場合のみmainにpublishする。global announcementは
-	// publishBroadcastStream経由だがGo側では別インフラ未実装なのでskip。
-	if h.mainStreamPublisher != nil && a.UserID != nil {
-		body := map[string]any{"announcement": entity.PackAnnouncement(a, h.idGen, false)}
-		h.mainStreamPublisher.PublishMainEvent(*a.UserID, "announcementCreated", body)
+	// upstream AnnouncementService.create: per-user (userId 指定) は main へ、
+	// global (userId 無し) は broadcast stream へ announcementCreated を流す (#2056)。
+	body := map[string]any{"announcement": entity.PackAnnouncement(a, h.idGen, false)}
+	if a.UserID != nil {
+		if h.mainStreamPublisher != nil {
+			h.mainStreamPublisher.PublishMainEvent(*a.UserID, "announcementCreated", body)
+		}
+	} else if h.broadcastPublisher != nil {
+		h.broadcastPublisher.PublishBroadcast("announcementCreated", body)
 	}
 	h.logAnnouncementAction(c, moderationlog.LogCreateGlobalAnnouncement, moderationlog.LogCreateUserAnnouncement, a, map[string]any{
 		"announcementId": a.ID,

@@ -768,3 +768,20 @@ func TestAdminDelete_WritesAnnouncementLog(t *testing.T) {
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
 	assert.Equal(t, "deleteGlobalAnnouncement", repo.Snapshot()[0].Type)
 }
+
+// fakeBroadcastPub records PublishBroadcast calls (#2056)。
+type fakeBroadcastPub struct{ events []string }
+
+func (f *fakeBroadcastPub) PublishBroadcast(eventType string, _ any) {
+	f.events = append(f.events, eventType)
+}
+
+// #2056: global announcement (userId 無し) は broadcast stream へ announcementCreated を流す。
+func TestAdminCreate_GlobalBroadcasts(t *testing.T) {
+	h, _ := newTestHandler(t)
+	bc := &fakeBroadcastPub{}
+	h.SetBroadcastPublisher(bc)
+	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"announcementCreated"}, bc.events, "global は broadcast へ (#2056)")
+}
