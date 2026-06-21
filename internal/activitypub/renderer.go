@@ -224,6 +224,10 @@ type Renderer struct {
 	// meta.bannerUrl を実行時に解決する lookup (#1969)。meta は admin が変更しうる
 	// ため static でなく lookup で都度取得する。nil なら system fallback 無し。
 	instanceImages func() (iconURL, bannerURL string)
+	// driveFileMeta は actor の avatar/banner drive file の isSensitive / comment を
+	// 解決する lookup (#2031)。upstream renderImage は actor icon/image に
+	// sensitive: file.isSensitive / name: file.comment を付ける。nil なら付けない。
+	driveFileMeta func(fileID string) (isSensitive bool, comment *string, ok bool)
 }
 
 // NewRenderer constructs a Renderer.
@@ -242,6 +246,30 @@ func (r *Renderer) URLs() *URLBuilder {
 // as the icon/image fallback for system actors in RenderPerson (#1969).
 func (r *Renderer) SetInstanceImageLookup(fn func() (iconURL, bannerURL string)) {
 	r.instanceImages = fn
+}
+
+// SetDriveFileMetaLookup wires a lookup that resolves an avatar/banner drive
+// file's isSensitive / comment, used to populate actor icon/image sensitive/name
+// in RenderPerson (#2031). nil disables the enrichment (falls back to {type,url}).
+func (r *Renderer) SetDriveFileMetaLookup(fn func(fileID string) (isSensitive bool, comment *string, ok bool)) {
+	r.driveFileMeta = fn
+}
+
+// applyDriveFileMeta sets img.Sensitive / img.Name from the drive file fileID via
+// the driveFileMeta lookup (upstream renderImage: sensitive=file.isSensitive,
+// name=file.comment)。fileID 空 / lookup 未配線 / 見つからない時は no-op (#2031)。
+func (r *Renderer) applyDriveFileMeta(img *Image, fileID *string) {
+	if img == nil || fileID == nil || *fileID == "" || r.driveFileMeta == nil {
+		return
+	}
+	sensitive, comment, ok := r.driveFileMeta(*fileID)
+	if !ok {
+		return
+	}
+	img.Sensitive = &sensitive
+	if comment != nil {
+		img.Name = *comment
+	}
 }
 
 // RenderOrderedCollection builds an AS OrderedCollection (#1876)。upstream
@@ -378,6 +406,8 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	switch {
 	case u.AvatarURL != nil && *u.AvatarURL != "":
 		p.Icon = &Image{Type: "Image", URL: *u.AvatarURL}
+		// drive file 由来の avatar には sensitive/name を付ける (#2031)。
+		r.applyDriveFileMeta(p.Icon, u.AvatarID)
 	case isSystem && instanceIcon != "":
 		p.Icon = &Image{Type: "Image", URL: instanceIcon}
 	default:
@@ -388,6 +418,7 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	switch {
 	case u.BannerURL != nil && *u.BannerURL != "":
 		p.Image = &Image{Type: "Image", URL: *u.BannerURL}
+		r.applyDriveFileMeta(p.Image, u.BannerID)
 	case isSystem && instanceBanner != "":
 		p.Image = &Image{Type: "Image", URL: instanceBanner}
 	}

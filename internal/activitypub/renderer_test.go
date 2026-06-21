@@ -172,6 +172,38 @@ func TestRenderer_RenderPerson(t *testing.T) {
 	assert.Equal(t, avatar, p.Icon.URL)
 }
 
+// #2031: drive file 由来の actor avatar/banner には sensitive (file.isSensitive) /
+// name (file.comment) を付ける (upstream renderImage)。lookup 未配線時は付けない。
+func TestRenderer_RenderPerson_IconSensitiveName(t *testing.T) {
+	r := newRenderer()
+	comment := "alt text"
+	r.SetDriveFileMetaLookup(func(fileID string) (bool, *string, bool) {
+		switch fileID {
+		case "avatarfile":
+			return true, &comment, true
+		case "bannerfile":
+			return false, nil, true
+		}
+		return false, nil, false
+	})
+	avatar, banner := "https://example.com/a.png", "https://example.com/b.png"
+	avatarID, bannerID := "avatarfile", "bannerfile"
+	u := &model.User{
+		ID: "u1", Username: "alice",
+		AvatarURL: &avatar, AvatarID: &avatarID,
+		BannerURL: &banner, BannerID: &bannerID,
+	}
+	p := r.RenderPerson(u, nil, "PUBKEY", nil)
+	require.NotNil(t, p.Icon)
+	require.NotNil(t, p.Icon.Sensitive)
+	assert.True(t, *p.Icon.Sensitive, "avatar の sensitive=file.isSensitive (#2031)")
+	assert.Equal(t, "alt text", p.Icon.Name, "avatar の name=file.comment (#2031)")
+	require.NotNil(t, p.Image)
+	require.NotNil(t, p.Image.Sensitive)
+	assert.False(t, *p.Image.Sensitive, "banner の sensitive=false")
+	assert.Equal(t, "", p.Image.Name, "banner の comment nil は name 省略")
+}
+
 func TestRenderer_URLs(t *testing.T) {
 	r := newRenderer()
 	require.NotNil(t, r.URLs())

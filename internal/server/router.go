@@ -546,6 +546,15 @@ func (s *Server) setupRoutes() {
 		}
 		return icon, banner
 	})
+	// actor の avatar/banner drive file の isSensitive / comment を解決して
+	// AP icon/image に sensitive/name を付ける (#2031)。
+	apRenderer.SetDriveFileMetaLookup(func(fileID string) (bool, *string, bool) {
+		f, err := driveFileRepo.FindByID(fileID)
+		if err != nil || f == nil {
+			return false, nil, false
+		}
+		return f.IsSensitive, f.Comment, true
+	})
 	// config.URL は "https://example.com" 形式。ホスト部分だけ抽出して
 	// apRenderer と webfinger 側で共有する (下の resolver 設定でも再利用)。
 	localHost := ""
