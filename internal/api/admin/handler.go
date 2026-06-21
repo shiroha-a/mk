@@ -2665,10 +2665,10 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		allPages = int((allCount + int64(limit) - 1) / int64(limit))
 	}
 
-	roleNames := h.emojiRoleNameMap()
+	roleByID := h.emojiRoleByID()
 	packed := make([]map[string]any, 0, len(emojis))
 	for _, e := range emojis {
-		packed = append(packed, packEmojiDetailedAdmin(e, roleNames))
+		packed = append(packed, packEmojiDetailedAdmin(e, roleByID))
 	}
 
 	return c.JSON(http.StatusOK, emojiListV2Response{
@@ -2708,12 +2708,12 @@ type emojiListV2Response struct {
 	AllPages int              `json:"allPages"`
 }
 
-// emojiRoleNameMap resolves all role ids to their names once, so the v2 emoji
-// packer can embed {id, name} for roleIdsThatCanBeUsedThisEmojiAsReaction
-// without an N+1 lookup per emoji (#1300)。roleService 未配線 / 取得失敗時は
-// 空 map を返し、未知 role 同様 roleIds から省かれる。
-func (h *Handler) emojiRoleNameMap() map[string]string {
-	out := map[string]string{}
+// emojiRoleByID resolves all roles by id once, so the v2 emoji packer can embed
+// {id, name} for roleIdsThatCanBeUsedThisEmojiAsReaction without an N+1 lookup
+// per emoji (#1300), and sort them by displayOrder/id like upstream (#1948-13)。
+// roleService 未配線 / 取得失敗時は空 map を返し、未知 role 同様 roleIds から省かれる。
+func (h *Handler) emojiRoleByID() map[string]*model.Role {
+	out := map[string]*model.Role{}
 	if h.roleService == nil {
 		return out
 	}
@@ -2722,7 +2722,7 @@ func (h *Handler) emojiRoleNameMap() map[string]string {
 		return out
 	}
 	for _, r := range roles {
-		out[r.ID] = r.Name
+		out[r.ID] = r
 	}
 	return out
 }
@@ -2731,12 +2731,24 @@ func (h *Handler) emojiRoleNameMap() map[string]string {
 // admin emoji list. upstream packDetailedAdmin と同じく roleIds を {id, name}
 // に解決する (golden は object array、生の string[] ではない)。未知 role は
 // 省く (#1300)。scalar field は model.Emoji の json tag と一致する。
-func packEmojiDetailedAdmin(e *model.Emoji, roleNames map[string]string) map[string]any {
-	roles := make([]map[string]any, 0, len(e.RoleIDsThatCanBeUsedThisEmojiAsReaction))
+func packEmojiDetailedAdmin(e *model.Emoji, roleByID map[string]*model.Role) map[string]any {
+	// upstream packDetailedAdmin は解決した role を displayOrder DESC, id ASC で
+	// sort してから {id, name} に map する (EmojiEntityService、#1948-13)。
+	resolved := make([]*model.Role, 0, len(e.RoleIDsThatCanBeUsedThisEmojiAsReaction))
 	for _, rid := range e.RoleIDsThatCanBeUsedThisEmojiAsReaction {
-		if name, ok := roleNames[rid]; ok {
-			roles = append(roles, map[string]any{"id": rid, "name": name})
+		if r, ok := roleByID[rid]; ok {
+			resolved = append(resolved, r)
 		}
+	}
+	sort.SliceStable(resolved, func(i, j int) bool {
+		if resolved[i].DisplayOrder != resolved[j].DisplayOrder {
+			return resolved[i].DisplayOrder > resolved[j].DisplayOrder // displayOrder DESC
+		}
+		return resolved[i].ID < resolved[j].ID // id ASC
+	})
+	roles := make([]map[string]any, 0, len(resolved))
+	for _, r := range resolved {
+		roles = append(roles, map[string]any{"id": r.ID, "name": r.Name})
 	}
 	// golden aliases は string[] 必須 (non-null)。nil pq.StringArray は null に
 	// なるため [] へ coalesce する。

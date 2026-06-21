@@ -62,6 +62,64 @@ func TestEmojiRepository_UpdateFields_RoleIdsAndType(t *testing.T) {
 	assert.Empty(t, []string(got.RoleIDsThatCanBeUsedThisEmojiAsReaction))
 }
 
+// #1948-13: UpdateFields / UpdateFieldsMany は updatedAt を bump する
+// (upstream CustomEmojiService は全 mutation で updatedAt=now を書く)。
+func TestEmojiRepository_UpdateFieldsBumpsUpdatedAt(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e := &model.Emoji{ID: "e_bump", Name: "bumpx", OriginalURL: "https://example.com/x.png"}
+	require.NoError(t, testDB.Create(e).Error)
+	defer cleanupEmoji(t, e.ID)
+	// updatedAt を明示的に NULL にしておく。
+	require.NoError(t, testDB.Exec(`UPDATE emoji SET "updatedAt" = NULL WHERE id = ?`, e.ID).Error)
+
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"name": "bumped"}))
+	got, err := repo.FindByID(e.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.UpdatedAt, "UpdateFields は updatedAt を bump する (#1948-13)")
+
+	// UpdateFieldsMany も bump する。
+	require.NoError(t, testDB.Exec(`UPDATE emoji SET "updatedAt" = NULL WHERE id = ?`, e.ID).Error)
+	require.NoError(t, repo.UpdateFieldsMany([]string{e.ID}, map[string]any{"category": "x"}))
+	got, err = repo.FindByID(e.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.UpdatedAt, "UpdateFieldsMany は updatedAt を bump する (#1948-13)")
+}
+
+// #1948-13: list-remote の query は case-sensitive LIKE かつ %/_ を escape する。
+func TestEmojiRepository_ListRemoteCaseSensitiveAndEscape(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	host := "remote.example"
+	lower := &model.Emoji{ID: "e_lr_lower", Name: "catface", Host: &host, OriginalURL: "https://r/x.png"}
+	upper := &model.Emoji{ID: "e_lr_upper", Name: "CATFACE", Host: &host, OriginalURL: "https://r/y.png"}
+	pct := &model.Emoji{ID: "e_lr_pct", Name: "a%b", Host: &host, OriginalURL: "https://r/z.png"}
+	for _, e := range []*model.Emoji{lower, upper, pct} {
+		require.NoError(t, testDB.Create(e).Error)
+		defer cleanupEmoji(t, e.ID)
+	}
+
+	// query "cat" は case-sensitive で "catface" のみ match (CATFACE は除外)。
+	got, err := repo.ListRemoteWithFilter("cat", host, "", "", 100, 0)
+	require.NoError(t, err)
+	ids := emojiIDSet(got)
+	assert.Contains(t, ids, lower.ID, "case-sensitive LIKE で catface が match (#1948-13)")
+	assert.NotContains(t, ids, upper.ID, "case-sensitive LIKE で CATFACE は除外 (#1948-13)")
+
+	// query "a%b" の % は escape され literal match ("a%b" 名のみ)。
+	got, err = repo.ListRemoteWithFilter("a%b", host, "", "", 100, 0)
+	require.NoError(t, err)
+	ids = emojiIDSet(got)
+	assert.Contains(t, ids, pct.ID, "% は escape され literal match する (#1948-13)")
+	assert.NotContains(t, ids, lower.ID, "% は wildcard として解釈されない")
+}
+
+func emojiIDSet(emojis []*model.Emoji) map[string]struct{} {
+	ids := make(map[string]struct{}, len(emojis))
+	for _, e := range emojis {
+		ids[e.ID] = struct{}{}
+	}
+	return ids
+}
+
 func TestEmojiRepository_FindByNameAndHost_Remote(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 

@@ -2173,11 +2173,16 @@ func (m *MockEmojiRepository) UpdateFieldsMany(ids []string, fields map[string]a
 		for k, v := range fields {
 			switch k {
 			case "category":
-				if s, ok := v.(string); ok {
+				// nil (any) は null reset (#1948-13)。string は値設定。
+				if v == nil {
+					e.Category = nil
+				} else if s, ok := v.(string); ok {
 					e.Category = &s
 				}
 			case "license":
-				if s, ok := v.(string); ok {
+				if v == nil {
+					e.License = nil
+				} else if s, ok := v.(string); ok {
 					e.License = &s
 				}
 			case "aliases":
@@ -2229,7 +2234,9 @@ func (m *MockEmojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID
 		if host != "" && *e.Host != host {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(e.Name), strings.ToLower(query)) {
+		// production ListRemoteWithFilter は case-sensitive LIKE (#1948-13) なので
+		// mock も case-sensitive Contains に揃える。
+		if query != "" && !strings.Contains(e.Name, query) {
 			continue
 		}
 		if sinceID != "" && e.ID <= sinceID {

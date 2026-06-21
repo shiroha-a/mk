@@ -793,6 +793,76 @@ func TestEmojiListV2_RoleObjectsAndShape(t *testing.T) {
 	shapetest.Assert(t, "EmojiDetailedAdmin", em) // L3 (#1300)
 }
 
+// #1948-13: roleIdsThatCanBeUsedThisEmojiAsReaction は displayOrder DESC, id ASC
+// で sort される (upstream packDetailedAdmin)。
+func TestEmojiListV2_RoleSortByDisplayOrder(t *testing.T) {
+	h, _, _, roleRepo := newTestHandler(t)
+	// displayOrder: rB=10, rA=5, rC=5 (同 displayOrder は id ASC)。
+	require.NoError(t, roleRepo.Create(&model.Role{ID: "rB", Name: "B", DisplayOrder: 10}))
+	require.NoError(t, roleRepo.Create(&model.Role{ID: "rA", Name: "A", DisplayOrder: 5}))
+	require.NoError(t, roleRepo.Create(&model.Role{ID: "rC", Name: "C", DisplayOrder: 5}))
+	repo := testutil.NewMockEmojiRepository()
+	require.NoError(t, repo.Create(&model.Emoji{
+		ID: "e1", Name: "smile", PublicURL: "https://example.com/s.png",
+		// 格納順は意図的にバラバラ。
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"rA", "rC", "rB"},
+	}))
+	h.SetEmojiRepo(repo)
+
+	rec := doPost(h.EmojiListV2, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	em := resp["emojis"].([]any)[0].(map[string]any)
+	roles := em["roleIdsThatCanBeUsedThisEmojiAsReaction"].([]any)
+	require.Len(t, roles, 3)
+	// 期待順: rB(displayOrder10) → rA(5,id A) → rC(5,id C)。
+	assert.Equal(t, "rB", roles[0].(map[string]any)["id"], "displayOrder DESC で rB が先頭 (#1948-13)")
+	assert.Equal(t, "rA", roles[1].(map[string]any)["id"], "同 displayOrder は id ASC で rA (#1948-13)")
+	assert.Equal(t, "rC", roles[2].(map[string]any)["id"])
+}
+
+// #1948-13: set-category-bulk / set-license-bulk に null を送ると SQL NULL に
+// reset される (旧 non-pointer string では "" になっていた)。
+func TestEmojiSetCategoryLicenseBulk_NullClears(t *testing.T) {
+	cat, lic := "anime", "MIT"
+	h, repo := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "a", Category: &cat, License: &lic},
+	)
+	get := func() *model.Emoji {
+		e, err := repo.FindByID("e1")
+		require.NoError(t, err)
+		return e
+	}
+	rec := doPost(h.EmojiSetCategoryBulk, `{"ids":["e1"],"category":null}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, get().Category, "category null は NULL reset (#1948-13)")
+
+	rec = doPost(h.EmojiSetLicenseBulk, `{"ids":["e1"],"license":null}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, get().License, "license null は NULL reset (#1948-13)")
+
+	// 非 null は値設定 (回帰防止)。
+	rec = doPost(h.EmojiSetCategoryBulk, `{"ids":["e1"],"category":"manga"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, get().Category)
+	assert.Equal(t, "manga", *get().Category)
+}
+
+// #1948-13: list-remote の host は toPuny (lowercase + IDN punycode) 正規化される。
+func TestEmojiListRemote_HostToPuny(t *testing.T) {
+	punyHost := "xn--eckwd4c7c.example" // "ドメイン.example" の punycode
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "e1", Name: "remote1", Host: &punyHost},
+	)
+	// Unicode IDN を query → handler が toPunyHost で正規化して match。
+	rec := doPost(h.EmojiListRemote, `{"host":"ドメイン.example"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1, "IDN host が punycode 正規化されて match する (#1948-13)")
+}
+
 // #1948-10: EmojiDetailedAdmin の updatedAt は upstream toISOString() (.000Z / null)。
 // raw *time.Time の RFC3339Nano だと wire-byte が乖離する。
 func TestEmojiListV2_UpdatedAtFormat(t *testing.T) {

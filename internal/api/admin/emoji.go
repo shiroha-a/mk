@@ -251,7 +251,14 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, req.Host, sinceID, untilID, req.Limit, req.Offset)
+	// upstream list-remote.ts:69 は host を toPuny (lowercase + IDN punycode) して
+	// から equality 突合する。host は punycode 正規化して保存されているため、IDN /
+	// 大文字混在の host param を正規化しないと match しない (#1948-13)。
+	host := req.Host
+	if host != "" {
+		host = toPunyHost(host)
+	}
+	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, host, sinceID, untilID, req.Limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
@@ -333,7 +340,7 @@ func (h *Handler) EmojiSetAliasesBulk(c echo.Context) error {
 func (h *Handler) EmojiSetCategoryBulk(c echo.Context) error {
 	var req struct {
 		IDs      []string `json:"ids"`
-		Category string   `json:"category"`
+		Category *string  `json:"category"`
 	}
 	if err := c.Bind(&req); err != nil || len(req.IDs) == 0 {
 		return c.NoContent(http.StatusNoContent)
@@ -341,17 +348,30 @@ func (h *Handler) EmojiSetCategoryBulk(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"category": req.Category}); err != nil {
+	// upstream set-category-bulk は category nullable ('Use null to reset') で
+	// ps.category ?? null を書く。*string にして JSON null を SQL NULL に落とす
+	// (旧 non-pointer string だと null が "" になっていた、#1948-13)。
+	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"category": nullableString(req.Category)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// nullableString returns the dereferenced string for a non-nil pointer, else nil
+// so a GORM map Updates writes SQL NULL (matching upstream's `?? null` reset
+// semantics for nullable emoji fields, #1948-13).
+func nullableString(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // EmojiSetLicenseBulk handles POST /api/admin/emoji/set-license-bulk.
 func (h *Handler) EmojiSetLicenseBulk(c echo.Context) error {
 	var req struct {
 		IDs     []string `json:"ids"`
-		License string   `json:"license"`
+		License *string  `json:"license"`
 	}
 	if err := c.Bind(&req); err != nil || len(req.IDs) == 0 {
 		return c.NoContent(http.StatusNoContent)
@@ -359,7 +379,8 @@ func (h *Handler) EmojiSetLicenseBulk(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"license": req.License}); err != nil {
+	// upstream set-license-bulk も license nullable で ps.license ?? null を書く (#1948-13)。
+	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"license": nullableString(req.License)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	return c.NoContent(http.StatusNoContent)

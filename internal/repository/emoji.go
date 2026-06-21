@@ -3,10 +3,21 @@ package repository
 import (
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
+
+// bumpEmojiUpdatedAt injects updatedAt=now into an emoji write field map when the
+// caller did not set it. upstream CustomEmojiService は update / 各 bulk op で
+// 必ず updatedAt = new Date() を書くため、map-based GORM Updates でも同等に bump
+// する (model.Emoji.UpdatedAt は autoUpdateTime tag を持たない、#1948-13)。
+func bumpEmojiUpdatedAt(fields map[string]any) {
+	if _, ok := fields["updatedAt"]; !ok {
+		fields["updatedAt"] = time.Now()
+	}
+}
 
 // emojiNameTokenRe extracts `:name:` tokens from an admin/emoji/list query,
 // mirroring upstream list.ts の `/\:([a-z0-9_]*)\:/g` (#1543)。
@@ -90,6 +101,7 @@ func (r *emojiRepository) FindByID(id string) (*model.Emoji, error) {
 }
 
 func (r *emojiRepository) UpdateFields(id string, fields map[string]any) error {
+	bumpEmojiUpdatedAt(fields)
 	res := r.db.Model(&model.Emoji{}).Where("id = ?", id).Updates(fields)
 	if res.Error != nil {
 		return res.Error
@@ -118,6 +130,7 @@ func (r *emojiRepository) UpdateFieldsMany(ids []string, fields map[string]any) 
 	if len(ids) == 0 || len(fields) == 0 {
 		return nil
 	}
+	bumpEmojiUpdatedAt(fields)
 	return r.db.Model(&model.Emoji{}).Where("id IN ?", ids).Updates(fields).Error
 }
 
@@ -152,7 +165,10 @@ func (r *emojiRepository) FindManyByNamesAndHost(names []string, host *string) (
 func (r *emojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID string, limit, offset int) ([]*model.Emoji, error) {
 	q := r.db.Where("host IS NOT NULL").Order("id DESC")
 	if query != "" {
-		q = q.Where("name ILIKE ?", "%"+query+"%")
+		// upstream list-remote.ts:72 は `name LIKE :query` (Postgres LIKE は
+		// case-sensitive) かつ sqlLikeEscape で %/_ を literal 化する。mk-go も
+		// case-sensitive LIKE + escapeLike + ESCAPE '\' に揃える (#1948-13)。
+		q = q.Where(`name LIKE ? ESCAPE '\'`, "%"+escapeLike(query)+"%")
 	}
 	if host != "" {
 		q = q.Where("host = ?", host)
@@ -194,8 +210,10 @@ func (r *emojiRepository) ListWithFilter(query, category string, local bool, sin
 		if names := extractEmojiNameTokens(query); len(names) > 0 {
 			q = q.Where("name IN ?", names)
 		} else {
+			// upstream list.ts は JS String.includes (case-sensitive 部分一致) で
+			// in-memory filter する。mk-go も case-sensitive LIKE に揃える (#1948-13)。
 			like := "%" + escapeLike(query) + "%"
-			q = q.Where(`name ILIKE ? ESCAPE '\' OR array_to_string(aliases, ',') ILIKE ? ESCAPE '\' OR category ILIKE ? ESCAPE '\'`, like, like, like)
+			q = q.Where(`name LIKE ? ESCAPE '\' OR array_to_string(aliases, ',') LIKE ? ESCAPE '\' OR category LIKE ? ESCAPE '\'`, like, like, like)
 		}
 	}
 	if category != "" {
