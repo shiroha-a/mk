@@ -358,6 +358,16 @@ func (p *Processor) Process(body []byte) error {
 		}
 	}
 
+	return p.dispatchActivity(act, 0)
+}
+
+// maxCollectionDepth bounds nested Collection/OrderedCollection unrolling so a
+// collection-of-collections cannot recurse without limit (#2023).
+const maxCollectionDepth = 1
+
+// dispatchActivity routes a parsed activity to its handler. depth tracks
+// Collection/OrderedCollection unrolling so handleCollection can bound recursion.
+func (p *Processor) dispatchActivity(act genericActivity, depth int) error {
 	switch strings.ToLower(act.Type) {
 	case "follow":
 		return p.handleFollow(act)
@@ -411,8 +421,67 @@ func (p *Processor) Process(body []byte) error {
 		return p.handleReversiLeave(act)
 	case "misskey:chatmessage":
 		return p.handleChatMessage(act)
+	case "collection", "orderedcollection":
+		return p.handleCollection(act, depth)
 	}
 	return ErrUnsupportedActivity
+}
+
+// handleCollection unrolls a Collection / OrderedCollection activity, dispatching
+// each inline item whose id host matches the collection actor's host. Mirrors
+// upstream ApInboxService.performActivity の collection branch: items 数が
+// recursion limit を超えたら skip、各 item は extractDbHost(item.id) ==
+// extractDbHost(actor.uri) を要求する (spoofing 防止)。URI 文字列の item は解決せず
+// skip する (fetch 増幅を避ける; relay の inline 配送のみ対応、#2023)。
+func (p *Processor) handleCollection(act genericActivity, depth int) error {
+	if depth >= maxCollectionDepth {
+		return nil // skip: nested collection beyond depth limit
+	}
+	var col struct {
+		Items        []json.RawMessage `json:"items"`
+		OrderedItems []json.RawMessage `json:"orderedItems"`
+	}
+	if len(act.raw) > 0 {
+		_ = json.Unmarshal(act.raw, &col)
+	}
+	// upstream は type に応じて片方のみ読む (Collection→items / OrderedCollection→
+	// orderedItems)。
+	items := col.OrderedItems
+	if strings.ToLower(act.Type) == "collection" {
+		items = col.Items
+	}
+	// 過大な collection は upstream の getRecursionLimit と同様に弾く。
+	if len(items) >= resolveRecursionLimit {
+		return nil
+	}
+	actorHost, err := hostFromURI(act.Actor)
+	if err != nil {
+		return nil
+	}
+	for _, item := range items {
+		var itemAct genericActivity
+		if err := json.Unmarshal(item, &itemAct); err != nil {
+			// 文字列 URI 等の inline でない item は skip。
+			continue
+		}
+		itemAct.raw = item
+		// per-item: id host == collection actor host を要求する (upstream の host 一致
+		// check)。punyHost で IDN/大文字を正規化して比較する (#1850 と同方針)。
+		itemHost, herr := hostFromURI(itemAct.ID)
+		if itemAct.ID == "" || herr != nil || punyHost(itemHost) != punyHost(actorHost) {
+			continue
+		}
+		// upstream performActivity は collection item を **collection の認証済み actor**
+		// の権威で performOneActivity に渡す (item.actor は使わない)。item が別 actor を
+		// 詐称しても collection actor として処理されるよう actor を上書きする (#2023
+		// security)。これにより third-party actor を詐称した reaction/announce 等の
+		// 注入を防ぐ。
+		itemAct.Actor = act.Actor
+		if derr := p.dispatchActivity(itemAct, depth+1); derr != nil && !errors.Is(derr, ErrUnsupportedActivity) {
+			slog.Error("federation: collection item failed", "id", itemAct.ID, "type", itemAct.Type, "err", derr)
+		}
+	}
+	return nil
 }
 
 // ExtractActorIRI returns the authoritative actor IRI of an inbound activity,

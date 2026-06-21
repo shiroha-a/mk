@@ -1735,3 +1735,75 @@ func TestProcess_AnnounceCreateError(t *testing.T) {
 	err := p.Process(body)
 	assert.Error(t, err)
 }
+
+// #2023: OrderedCollection / Collection を受信したら items を unroll し、id host が
+// collection actor の host と一致する各 item を dispatch する。host 不一致 item は skip。
+func TestProcess_CollectionUnrollsItems(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "OrderedCollection",
+		"actor": "https://remote.example/users/alice",
+		"orderedItems": [
+			{
+				"id": "https://remote.example/likes/l1",
+				"type": "Like",
+				"actor": "https://remote.example/users/alice",
+				"object": "https://example.com/notes/n1",
+				"content": "⭐"
+			}
+		]
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	require.Len(t, env.reactionRepo.Reactions, 1, "collection 内の Like が dispatch される (#2023)")
+}
+
+// #2023: item の id host が collection actor の host と一致しないときは skip する。
+func TestProcess_CollectionSkipsHostMismatch(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "Collection",
+		"actor": "https://remote.example/users/alice",
+		"items": [
+			{
+				"id": "https://evil.example/likes/l2",
+				"type": "Like",
+				"actor": "https://remote.example/users/alice",
+				"object": "https://example.com/notes/n1",
+				"content": "❤"
+			}
+		]
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, env.reactionRepo.Reactions, "host 不一致 item は skip (#2023)")
+}
+
+// #2023 (security): collection item が別 actor を詐称しても、collection の認証 actor の
+// 権威で処理される (item.actor は使わない)。詐称 reaction が victim 名義で記録されない。
+func TestProcess_CollectionItemActorSpoofIgnored(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	// collection actor は alice@remote.example。item は victim@other.example を actor に詐称。
+	// item.id host は remote.example で collection actor と一致するため host check は通過するが、
+	// actor は collection actor (alice) に上書きされる。
+	body := []byte(`{
+		"type": "OrderedCollection",
+		"actor": "https://remote.example/users/alice",
+		"orderedItems": [
+			{
+				"id": "https://remote.example/likes/spoof",
+				"type": "Like",
+				"actor": "https://other.example/users/victim",
+				"object": "https://example.com/notes/n1",
+				"content": "⭐"
+			}
+		]
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	require.Len(t, env.reactionRepo.Reactions, 1)
+	for _, r := range env.reactionRepo.Reactions {
+		// reaction は alice (collection actor) 名義であり victim 名義ではない。
+		assert.NotContains(t, r.UserID, "victim", "詐称 actor では記録されない (#2023 security)")
+	}
+}
