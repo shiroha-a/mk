@@ -213,8 +213,10 @@ func (r *emojiRepository) ListWithFilter(query, category string, local bool, sin
 		} else {
 			// upstream list.ts は JS String.includes (case-sensitive 部分一致) で
 			// in-memory filter する。mk-go も case-sensitive LIKE に揃える (#1948-13)。
+			// aliases は upstream の `aliases.some(a => a.includes(q))` と同じく要素単位で
+			// 突合する (array_to_string 結合だと要素境界を跨いだ誤 match が起きる、#2034)。
 			like := "%" + escapeLike(query) + "%"
-			q = q.Where(`name LIKE ? ESCAPE '\' OR array_to_string(aliases, ',') LIKE ? ESCAPE '\' OR category LIKE ? ESCAPE '\'`, like, like, like)
+			q = q.Where(`name LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM unnest(aliases) AS alias WHERE alias LIKE ? ESCAPE '\') OR category LIKE ? ESCAPE '\'`, like, like, like)
 		}
 	}
 	if category != "" {
@@ -321,7 +323,9 @@ func (r *emojiRepository) buildV2Query(filter model.EmojiV2Filter) *gorm.DB {
 		likeAny("license", fq.License)
 		likeAny("uri", fq.URI)
 		likeAny(`"publicUrl"`, fq.PublicURL)
-		likeAny(`"originalUrl"`, fq.OriginalURL)
+		// originalUrl は upstream v2 list の paramDef にあるが fetchEmojis では WHERE 句に
+		// 使われず無視される。filter すると upstream と乖離するため適用しない (#2034。
+		// EmojiV2Query.OriginalURL は request 互換のため残すが query では使わない)。
 		// aliases は配列要素ごとに突合する (upstream は unnest(aliases) の subquery)。
 		// array_to_string 結合では要素境界を跨いだ誤 match が起きるため避ける。
 		if fq.Aliases != "" {

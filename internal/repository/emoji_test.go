@@ -902,3 +902,32 @@ func TestEmojiRepository_ListV2_TypeFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rows, 1)
 }
+
+// #2034: v2 list の originalUrl filter は upstream fetchEmojis で無視されるので、
+// originalUrl query を指定しても絞り込まれない。
+func TestEmojiRepository_ListV2_OriginalURLIgnored(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e := &model.Emoji{ID: "evou1", Name: "evouname", OriginalURL: "https://real.example/x"}
+	require.NoError(t, repo.Create(e))
+	defer cleanupEmoji(t, e.ID)
+	rows, err := repo.ListV2(model.EmojiV2Filter{Query: &model.EmojiV2Query{Name: "evouname", OriginalURL: "nonmatching"}, Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, rows, 1, "originalUrl filter は無視される (#2034)")
+}
+
+// #2034: legacy list の aliases は要素単位で突合する (array_to_string 結合の要素境界
+// 跨ぎ誤 match を避ける)。
+func TestEmojiRepository_ListWithFilter_AliasesElementBoundary(t *testing.T) {
+	repo := NewEmojiRepository(testDB)
+	e := &model.Emoji{ID: "elb1", Name: "elbname", OriginalURL: "https://x", Aliases: pq.StringArray{"foo", "bar"}}
+	require.NoError(t, repo.Create(e))
+	defer cleanupEmoji(t, e.ID)
+	// "foo,bar" は結合文字列 "foo,bar" には部分一致するが、単一 alias には無い。
+	rows, err := repo.ListWithFilter("foo,bar", "", false, "", "", 10, 0)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "要素境界を跨いだ query は match しない (#2034)")
+	// 単一要素 "foo" は match する。
+	rows, err = repo.ListWithFilter("foo", "", false, "", "", 10, 0)
+	require.NoError(t, err)
+	assert.Len(t, rows, 1)
+}
