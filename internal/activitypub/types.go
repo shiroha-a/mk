@@ -164,6 +164,12 @@ type Endpoints struct {
 type Image struct {
 	Type string `json:"type"`
 	URL  string `json:"url"`
+	// MediaType / Sensitive / Name は upstream renderImage / renderEmoji icon の
+	// 追加プロパティ (ApRendererService.ts:186-191,253-260)。omitempty なので
+	// 未設定時は従来どおり {type,url} のみ出力し後方互換を保つ (#1948-11)。
+	MediaType string `json:"mediaType,omitempty"`
+	Sensitive *bool  `json:"sensitive,omitempty"`
+	Name      string `json:"name,omitempty"`
 }
 
 // UnmarshalJSON accepts both forms allowed by ActivityStreams 2.0 for
@@ -238,24 +244,28 @@ type Person struct {
 	// SharedInbox は upstream renderPerson が endpoints.sharedInbox とは別に
 	// top-level にも出す (#1560、ApRendererService.ts:551)。古い実装/一部の
 	// 受信側は top-level を見るため両方出す。
-	SharedInbox                         string    `json:"sharedInbox,omitempty"`
-	Endpoints                           Endpoints `json:"endpoints,omitzero"`
-	PublicKey                           PublicKey `json:"publicKey"`
-	Icon                                *Image    `json:"icon,omitempty"`
-	Image                               *Image    `json:"image,omitempty"`
-	Attachment                          []any     `json:"attachment,omitempty"`
-	Tag                                 []any     `json:"tag,omitempty"`
-	Featured                            string    `json:"featured,omitempty"`
-	ManuallyApproves                    bool      `json:"manuallyApprovesFollowers,omitempty"`
-	Discoverable                        bool      `json:"discoverable,omitempty"`
-	IsCat                               bool      `json:"isCat,omitempty"`
-	VcardBday                           string    `json:"vcard:bday,omitempty"`
-	VcardAddress                        string    `json:"vcard:Address,omitempty"`
-	MisskeySummary                      string    `json:"_misskey_summary,omitempty"`
-	MisskeyFollowedMessage              string    `json:"_misskey_followedMessage,omitempty"`
-	MisskeyRequireSigninToViewContents  bool      `json:"_misskey_requireSigninToViewContents,omitempty"`
-	MisskeyMakeNotesFollowersOnlyBefore *int      `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
-	MisskeyMakeNotesHiddenBefore        *int      `json:"_misskey_makeNotesHiddenBefore,omitempty"`
+	SharedInbox string    `json:"sharedInbox,omitempty"`
+	Endpoints   Endpoints `json:"endpoints,omitzero"`
+	PublicKey   PublicKey `json:"publicKey"`
+	Icon        *Image    `json:"icon,omitempty"`
+	Image       *Image    `json:"image,omitempty"`
+	Attachment  []any     `json:"attachment,omitempty"`
+	Tag         []any     `json:"tag,omitempty"`
+	Featured    string    `json:"featured,omitempty"`
+	// upstream renderPerson は manuallyApprovesFollowers/discoverable/isCat/
+	// _misskey_requireSigninToViewContents を常に boolean で出力する。omitempty だと
+	// false で key 自体が消えて wire-shape が乖離するため omitempty を外す (#1948-11)。
+	// 値は RenderPerson で user 状態から populate 済み。
+	ManuallyApproves                    bool   `json:"manuallyApprovesFollowers"`
+	Discoverable                        bool   `json:"discoverable"`
+	IsCat                               bool   `json:"isCat"`
+	VcardBday                           string `json:"vcard:bday,omitempty"`
+	VcardAddress                        string `json:"vcard:Address,omitempty"`
+	MisskeySummary                      string `json:"_misskey_summary,omitempty"`
+	MisskeyFollowedMessage              string `json:"_misskey_followedMessage,omitempty"`
+	MisskeyRequireSigninToViewContents  bool   `json:"_misskey_requireSigninToViewContents"`
+	MisskeyMakeNotesFollowersOnlyBefore *int   `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
+	MisskeyMakeNotesHiddenBefore        *int   `json:"_misskey_makeNotesHiddenBefore,omitempty"`
 	// MisskeyCanChat は CherryPick の chat 連合 capability flag (#692)。
 	// 受信側 instance が DM を受け付けるか (false なら拒絶) を表す boolean。
 	// pointer で持つことで「未指定 (= 旧実装 / 互換) → 許可」を区別する。

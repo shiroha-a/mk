@@ -17,6 +17,13 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
+// publishedLayout is the millisecond ISO8601 layout (JS Date.toISOString()) used
+// for every AP `published` / `updated` timestamp, matching upstream
+// ApRendererService which formats all of them via toISOString() (#1948-11).
+// stdlib time.RFC3339 produces second precision (no `.000`), diverging on the
+// wire from Misskey's millisecond form.
+const publishedLayout = "2006-01-02T15:04:05.000Z"
+
 // URLBuilder constructs canonical URLs for the local instance.
 // 同じデータでも複数の場所から参照されるので、ヘルパとして集約しておく。
 type URLBuilder struct {
@@ -500,8 +507,18 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 		Sensitive: n.CW != nil,
 	}
 
-	// _misskey_content / source: 標準ノードのみなら省略 (TS版 noMisskeyContent)
-	if text != "" && !mfm.IsSimple(nodes) {
+	// quote renote の URI を先に解決する (gate と quote-inline span の両方で使う)。
+	var quoteURI string
+	if n.RenoteID != nil && text != "" {
+		quoteURI = r.resolveNoteURI(*n.RenoteID)
+	}
+
+	// _misskey_content / source: 標準ノードのみなら省略 (TS版 noMisskeyContent)。
+	// ただし quote renote は upstream getNoteHtml が extraHtml(!=null) を渡して
+	// noMisskeyContent=false を強制するため、simple text でも必ず source/
+	// _misskey_content を出す (受信 Misskey が raw markdown を失わないように、#1948-11)。
+	hasExtraHtml := quoteURI != ""
+	if text != "" && (hasExtraHtml || !mfm.IsSimple(nodes)) {
 		out.MisskeyContent = text
 		out.Source = &Source{
 			Content:   text,
@@ -528,17 +545,14 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 	}
 
 	// Quote renote: text付きrenoteは_misskey_quote + quoteUrlを付ける
-	if n.RenoteID != nil && text != "" {
-		quoteURI := r.resolveNoteURI(*n.RenoteID)
-		if quoteURI != "" {
-			out.MisskeyQuote = quoteURI
-			out.QuoteURL = quoteURI
-			// 非 Misskey クライアント向けに content 末尾へ quote-inline span を
-			// 付ける (#1560、upstream ApRendererService.ts:436-441)。class名
-			// `quote-inline` は非 Misskey クライアントの quote 表示に使われる。
-			esc := html.EscapeString(quoteURI)
-			out.Content += `<br><br><span class="quote-inline">RE: <a href="` + esc + `">` + esc + `</a></span>`
-		}
+	if quoteURI != "" {
+		out.MisskeyQuote = quoteURI
+		out.QuoteURL = quoteURI
+		// 非 Misskey クライアント向けに content 末尾へ quote-inline span を
+		// 付ける (#1560、upstream ApRendererService.ts:436-441)。class名
+		// `quote-inline` は非 Misskey クライアントの quote 表示に使われる。
+		esc := html.EscapeString(quoteURI)
+		out.Content += `<br><br><span class="quote-inline">RE: <a href="` + esc + `">` + esc + `</a></span>`
 	}
 
 	// 添付ファイル
@@ -723,13 +737,36 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 		if emoji.LocalOnly {
 			continue
 		}
+		// upstream renderEmoji の icon: mediaType = emoji.type ?? 'image/png'、
+		// url = publicUrl || originalUrl (publicUrl 空時の後方互換 fallback) (#1948-11)。
+		iconURL := emoji.PublicURL
+		if iconURL == "" {
+			iconURL = emoji.OriginalURL
+		}
+		mediaType := "image/png"
+		if emoji.Type != nil && *emoji.Type != "" {
+			mediaType = *emoji.Type
+		}
 		tag := EmojiTag{
 			Type: "Emoji",
 			Name: ":" + emoji.Name + ":",
-			Icon: Image{Type: "Image", URL: emoji.PublicURL},
+			Icon: Image{Type: "Image", MediaType: mediaType, URL: iconURL},
 		}
+		// id: remote emoji は元 URI を保持、local emoji は自ドメインの
+		// /emojis/<name> (upstream renderEmoji は常に local URL を出すが、remote
+		// emoji の参照同一性を壊さないため URI を優先する保守的方針、#1948-11)。
 		if emoji.URI != nil {
 			tag.ID = *emoji.URI
+		} else {
+			tag.ID = r.urls.baseURL + "/emojis/" + emoji.Name
+		}
+		// updated: upstream renderEmoji は updatedAt?.toISOString() ?? now を常に
+		// 出力する。受信側 instance が cache 済 emoji を再取得するか判定するため、
+		// local emoji でも必ず付与する (#1948-11)。
+		if emoji.UpdatedAt != nil {
+			tag.Updated = emoji.UpdatedAt.UTC().Format(publishedLayout)
+		} else {
+			tag.Updated = time.Now().UTC().Format(publishedLayout)
 		}
 		// #731: upstream Misskey TS の renderEmoji と同じく `_misskey_license`
 		// を出力する。受信側 mk-go / Misskey TS は wrapper を見て license を
@@ -753,15 +790,17 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 // drop されて count が古いまま固定される (#690 review)。
 func (r *Renderer) RenderQuestionUpdate(n *model.Note, idGen id.Generator) *Update {
 	question := r.RenderNote(n, idGen)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Activity ID は同一秒内の連続投票でも衝突しないよう nano 精度を保つが、
+	// published は upstream toISOString() の .000Z 形式に揃える (#1948-11)。
+	t := time.Now().UTC()
 	u := &Update{
 		Activity: Activity{
 			Object: Object{
-				ID:   r.urls.NoteURI(n.ID) + "#updates/" + now,
+				ID:   r.urls.NoteURI(n.ID) + "#updates/" + t.Format(time.RFC3339Nano),
 				Type: "Update",
 			},
 			Actor:     r.urls.UserURI(n.UserID),
-			Published: now,
+			Published: t.Format(publishedLayout),
 			To:        question.To,
 			CC:        question.CC,
 		},
@@ -778,16 +817,15 @@ func (r *Renderer) RenderQuestionUpdate(n *model.Note, idGen id.Generator) *Upda
 // はリモート側の note.URI を使う (local URL で render すると相手が解決でき
 // ない)。authorURI は target.UserID から URLBuilder 経由で組み立てる。
 func (r *Renderer) RenderVote(voter *model.User, target *model.Note, targetURI, authorURI, choiceName string) *Create {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(publishedLayout)
 	noteID := r.urls.VoteActivityURI(voter.ID, target.ID)
-	note := &Note{
-		Object: Object{
-			ID:   noteID,
-			Type: "Note",
-		},
+	// upstream renderVote の object Note は {id, type, attributedTo, to, inReplyTo, name}
+	// のみ。汎用 Note 構造体は content/published(omitempty 無し) を必ず出力してしまい
+	// upstream が送らない余剰フィールドが乗るため、最小 struct で組む (#1948-11)。
+	note := &voteNote{
+		ID:           noteID,
+		Type:         "Note",
 		AttributedTo: r.urls.UserURI(voter.ID),
-		Content:      "",
-		Published:    now,
 		To:           []string{authorURI},
 		InReplyTo:    targetURI,
 		Name:         choiceName,
@@ -806,6 +844,18 @@ func (r *Renderer) RenderVote(voter *model.User, target *model.Note, targetURI, 
 	}
 	AddContext(c)
 	return c
+}
+
+// voteNote is the minimal AP Note shape upstream renderVote emits for a poll
+// vote: exactly {id, type, attributedTo, to, inReplyTo, name} with no content /
+// published / sensitive (#1948-11).
+type voteNote struct {
+	ID           string   `json:"id"`
+	Type         string   `json:"type"`
+	AttributedTo string   `json:"attributedTo"`
+	To           []string `json:"to"`
+	InReplyTo    string   `json:"inReplyTo"`
+	Name         string   `json:"name"`
 }
 
 // RenderCreate wraps a Note into a Create activity addressed to the same audience.
@@ -859,7 +909,7 @@ func (r *Renderer) RenderUpdate(person *Person) *Update {
 			},
 			Actor:     actor,
 			To:        []string{Public},
-			Published: time.Now().UTC().Format(time.RFC3339),
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: person,
 	}
@@ -897,7 +947,7 @@ func (r *Renderer) RenderUndoBlock(blockerID, blockeeURI string) *Undo {
 				Type: "Undo",
 			},
 			Actor:     r.urls.UserURI(blockerID),
-			Published: time.Now().UTC().Format(time.RFC3339),
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: inner,
 	}
@@ -1120,6 +1170,8 @@ func (r *Renderer) RenderUndoLike(reactor *model.User, like *Like) *Undo {
 				Type: "Undo",
 			},
 			Actor: r.urls.UserURI(reactor.ID),
+			// upstream renderUndo は published を常に付与する (#1948-11)。
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: like,
 	}
@@ -1171,6 +1223,8 @@ func (r *Renderer) RenderUndoAnnounce(renoter *model.User, announce *Announce) *
 				Type: "Undo",
 			},
 			Actor: r.urls.UserURI(renoter.ID),
+			// upstream renderUndo は published を常に付与する (#1948-11)。
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: announce,
 	}
@@ -1189,6 +1243,8 @@ func (r *Renderer) RenderDelete(author *model.User, noteURI string) *Delete {
 			},
 			Actor: r.urls.UserURI(author.ID),
 			To:    []string{Public},
+			// upstream renderDelete は published を常に付与する (#1948-11)。
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: Tombstone{
 			ID:   noteURI,
@@ -1214,6 +1270,8 @@ func (r *Renderer) RenderDeleteActor(user *model.User) *Delete {
 			},
 			Actor: uri,
 			To:    []string{Public},
+			// upstream renderDelete は published を常に付与する (#1948-11)。
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: uri,
 	}
@@ -1236,6 +1294,8 @@ func (r *Renderer) RenderUndoDeleteActor(user *model.User) *Undo {
 			},
 			Actor: uri,
 			To:    []string{Public},
+			// upstream renderUndo は published を常に付与する (#1948-11)。
+			Published: time.Now().UTC().Format(publishedLayout),
 		},
 		Object: inner,
 	}
@@ -1408,7 +1468,7 @@ func parseNoteTime(noteID string, idGen id.Generator) string {
 	t, err := idGen.ParseTime(noteID)
 	if err != nil {
 		slog.Warn("renderer: failed to parse note ID for timestamp, using time.Now()", "noteId", noteID, "err", err)
-		return time.Now().UTC().Format(time.RFC3339)
+		return time.Now().UTC().Format(publishedLayout)
 	}
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Format(publishedLayout)
 }
