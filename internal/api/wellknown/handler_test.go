@@ -50,6 +50,23 @@ func TestWebfinger_AcctWithHost(t *testing.T) {
 	assert.Equal(t, "acct:alice@example.com", resp["subject"])
 }
 
+// #1948-22: upstream WellKnownServerService は jrd/xrd を bare content-type
+// (charset 無し) で返す。webfinger JRD と host-meta XRD の Content-Type を pin する。
+func TestWebfinger_JRDBareContentType(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "u1", "alice")
+	c, rec := newReq(t, "/.well-known/webfinger?resource=acct:alice@example.com")
+	require.NoError(t, h.Webfinger(c))
+	assert.Equal(t, "application/jrd+json", rec.Header().Get("Content-Type"))
+}
+
+func TestHostMeta_XRDBareContentType(t *testing.T) {
+	h, _ := newHandler(t)
+	c, rec := newReq(t, "/.well-known/host-meta")
+	require.NoError(t, h.HostMeta(c))
+	assert.Equal(t, "application/xrd+xml", rec.Header().Get("Content-Type"))
+}
+
 func TestWebfinger_AcctWithoutHost(t *testing.T) {
 	h, repo := newHandler(t)
 	addUser(repo, "u1", "alice")

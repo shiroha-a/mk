@@ -130,7 +130,7 @@ func (h *Handler) Webfinger(c echo.Context) error {
 		if err != nil {
 			return c.NoContent(http.StatusInternalServerError)
 		}
-		return c.Blob(http.StatusOK, "application/xrd+xml; charset=utf-8", append([]byte(xml.Header), body...))
+		return c.Blob(http.StatusOK, "application/xrd+xml", append([]byte(xml.Header), body...))
 	}
 
 	resp := map[string]any{
@@ -147,7 +147,7 @@ func (h *Handler) Webfinger(c echo.Context) error {
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	return c.Blob(http.StatusOK, "application/jrd+json; charset=utf-8", body)
+	return c.Blob(http.StatusOK, "application/jrd+json", body)
 }
 
 // HostMeta handles GET /.well-known/host-meta.
@@ -160,7 +160,7 @@ func (h *Handler) HostMeta(c echo.Context) error {
 <XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
   <Link rel="lrdd" type="application/xrd+xml" template="` + h.origin + `/.well-known/webfinger?resource={uri}"/>
 </XRD>`
-	return c.Blob(http.StatusOK, "application/xrd+xml; charset=utf-8", []byte(xml))
+	return c.Blob(http.StatusOK, "application/xrd+xml", []byte(xml))
 }
 
 // NodeInfoDiscovery handles GET /.well-known/nodeinfo.

@@ -36,6 +36,33 @@ func TestVersion2_1(t *testing.T) {
 	assert.Equal(t, softwareRepository, sw["repository"])
 }
 
+// #1948-22: upstream NodeinfoServerService は schema-profile つき Content-Type +
+// Cache-Control: public, max-age=600 + CORS/Expose ヘッダを返す。
+func TestVersion2_1_ResponseHeaders(t *testing.T) {
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Version2_1(e.NewContext(req, rec)))
+	assert.Equal(t, `application/json; profile="http://nodeinfo.diaspora.software/ns/schema/2.1#"`, rec.Header().Get("Content-Type"))
+	assert.Equal(t, "public, max-age=600", rec.Header().Get("Cache-Control"))
+	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "GET, OPTIONS", rec.Header().Get("Access-Control-Allow-Methods"))
+	assert.Equal(t, "Accept", rec.Header().Get("Access-Control-Allow-Headers"))
+	assert.Equal(t, "Vary", rec.Header().Get("Access-Control-Expose-Headers"))
+}
+
+// #1948-22: 2.0 は 2.0# profile を返す。
+func TestVersion2_0_ResponseHeaders(t *testing.T) {
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/nodeinfo/2.0", nil)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Version2_0(e.NewContext(req, rec)))
+	assert.Equal(t, `application/json; profile="http://nodeinfo.diaspora.software/ns/schema/2.0#"`, rec.Header().Get("Content-Type"))
+	assert.Equal(t, "public, max-age=600", rec.Header().Get("Cache-Control"))
+}
+
 // admin で設定した Meta.Name / Description がnodeinfo.metadata に反映される
 // (#348)。これが効かないとリモートが受け取る nodeName はconfig default
 // (= host) のまま更新されない。
@@ -216,10 +243,11 @@ func TestVersion2_1_UsageStatsFromRepos(t *testing.T) {
 	usage := resp["usage"].(map[string]any)
 	users := usage["users"].(map[string]any)
 	assert.Equal(t, float64(4), users["total"]) // u1-u4 local
-	assert.Equal(t, float64(2), users["activeMonth"])
-	assert.Equal(t, float64(3), users["activeHalfyear"])
+	// #1948-22: upstream は activeMonth/activeHalfyear=null、localComments=0 固定。
+	assert.Nil(t, users["activeMonth"])
+	assert.Nil(t, users["activeHalfyear"])
 	assert.Equal(t, float64(5), usage["localPosts"])
-	assert.Equal(t, float64(2), usage["localComments"])
+	assert.Equal(t, float64(0), usage["localComments"])
 }
 
 // repo のerror path を通して slog.Warn 分岐を cover する。他の test
@@ -269,8 +297,8 @@ func TestVersion2_1_UsageStatsCountErrorsFallbackToZero(t *testing.T) {
 	usage := resp["usage"].(map[string]any)
 	users := usage["users"].(map[string]any)
 	assert.Equal(t, float64(0), users["total"])
-	assert.Equal(t, float64(0), users["activeMonth"])
-	assert.Equal(t, float64(0), users["activeHalfyear"])
+	assert.Nil(t, users["activeMonth"])
+	assert.Nil(t, users["activeHalfyear"])
 	assert.Equal(t, float64(0), usage["localPosts"])
 	assert.Equal(t, float64(0), usage["localComments"])
 }
@@ -290,8 +318,8 @@ func TestVersion2_1_UsageStatsZeroWhenReposMissing(t *testing.T) {
 	usage := resp["usage"].(map[string]any)
 	users := usage["users"].(map[string]any)
 	assert.Equal(t, float64(0), users["total"])
-	assert.Equal(t, float64(0), users["activeMonth"])
-	assert.Equal(t, float64(0), users["activeHalfyear"])
+	assert.Nil(t, users["activeMonth"])
+	assert.Nil(t, users["activeHalfyear"])
 	assert.Equal(t, float64(0), usage["localPosts"])
 	assert.Equal(t, float64(0), usage["localComments"])
 }
