@@ -55,18 +55,8 @@ func (h *FollowingDeliveryHook) OnLocalUnfollowed(follower, followee *model.User
 	switch {
 	case shouldDeliverFollow(follower, followee):
 		// 標準的な local→remote unfollow。Undo(Follow) を follower 名義で送る。
-		follow := h.renderer.RenderFollow(follower.ID, *followee.URI)
-		undo := &activitypub.Undo{
-			Activity: activitypub.Activity{
-				Object: activitypub.Object{
-					Type: "Undo",
-					ID:   follow.ID + "/undo",
-				},
-				Actor: follow.Actor,
-			},
-			Object: follow,
-		}
-		activitypub.AddContext(undo)
+		// renderer 経由で組み、upstream renderUndo と同じく published(.000Z) を付ける (#1993)。
+		undo := h.renderer.RenderUndoFollow(follower.ID, *followee.URI)
 		body, _ := json.Marshal(undo)
 		if err := h.deliver.DeliverToUser(follower.ID, followee, body); err != nil {
 			slog.Warn("following delivery: unfollow failed",

@@ -97,9 +97,16 @@ func TestFollowingHook_OnLocalUnfollowed_Remote(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(enq.calls[0].Body, &got))
 	assert.Equal(t, "Undo", got["type"])
+	// #1993: upstream renderUndo は全 Undo に published(.000Z) を付ける。
+	published, ok := got["published"].(string)
+	require.True(t, ok, "Undo(Follow) に published がある (#1993)")
+	assert.Regexp(t, `\.\d{3}Z$`, published, "published は toISOString() の .000Z 形式")
 	inner, ok := got["object"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "Follow", inner["type"])
+	// inner Follow は @context を持たない (outer Undo のみ持つ)。
+	_, hasCtx := inner["@context"]
+	assert.False(t, hasCtx, "inner Follow は @context を持たない (#1993)")
 }
 
 func TestFollowingHook_OnLocalUnfollowed_LocalSkipped(t *testing.T) {

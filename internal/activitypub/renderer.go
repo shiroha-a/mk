@@ -955,6 +955,28 @@ func (r *Renderer) RenderUndoBlock(blockerID, blockeeURI string) *Undo {
 	return u
 }
 
+// RenderUndoFollow wraps a Follow activity in an Undo for a local→remote
+// unfollow. upstream renderUndo は全ての Undo に published を付けるため、ここでも
+// .000Z published を入れる (#1993)。inner Follow の @context は upstream 同様
+// 落とす (outer Undo のみ @context を持つ)。
+func (r *Renderer) RenderUndoFollow(followerID, followeeURI string) *Undo {
+	inner := r.RenderFollow(followerID, followeeURI)
+	inner.Context = nil
+	u := &Undo{
+		Activity: Activity{
+			Object: Object{
+				ID:   inner.ID + "/undo",
+				Type: "Undo",
+			},
+			Actor:     r.urls.UserURI(followerID),
+			Published: time.Now().UTC().Format(publishedLayout),
+		},
+		Object: inner,
+	}
+	AddContext(u)
+	return u
+}
+
 // RenderFollowRelay returns the special-purpose Follow activity used to
 // subscribe the instance's relay system actor to a relay endpoint.
 //

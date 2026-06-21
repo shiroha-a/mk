@@ -67,6 +67,16 @@ func TestRenderDeleteAndUndo_HavePublished(t *testing.T) {
 
 	uda := marshalMap(t, r.RenderUndoDeleteActor(author))
 	assert.Regexp(t, millisZ, uda["published"], "UndoDeleteActor.published は .000Z (#1948-11)")
+
+	// #1993: RenderUndoFollow (local→remote unfollow) も published(.000Z) を持つ。
+	uf := marshalMap(t, r.RenderUndoFollow("u1", "https://remote.example/users/b"))
+	assert.Regexp(t, millisZ, uf["published"], "UndoFollow.published は .000Z (#1993)")
+	assert.Equal(t, "Undo", uf["type"])
+	inner, ok := uf["object"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "Follow", inner["type"])
+	_, hasCtx := inner["@context"]
+	assert.False(t, hasCtx, "inner Follow は @context を持たない (#1993)")
 }
 
 // #1948-11: RenderQuestionUpdate の published は .000Z だが、Activity ID は
