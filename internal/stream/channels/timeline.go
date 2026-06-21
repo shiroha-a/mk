@@ -72,6 +72,8 @@ func (c *LocalTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に in-memory 算出して inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerID)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
@@ -127,6 +129,8 @@ func (c *GlobalTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に in-memory 算出して inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerID)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 func (c *GlobalTimelineChannel) OnClientMessage(string, json.RawMessage) {}
@@ -181,6 +185,8 @@ func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に in-memory 算出して inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerID)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
@@ -251,6 +257,8 @@ func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に in-memory 算出して inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerID)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

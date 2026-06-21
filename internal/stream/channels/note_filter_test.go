@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultNoteFilter(t *testing.T) {
@@ -343,4 +344,54 @@ func TestAnonRequireSigninDrop(t *testing.T) {
 	t.Run("malformed payload passes (fail to other gates)", func(t *testing.T) {
 		assert.False(t, anonRequireSigninDrop([]byte(`{not json`), ""))
 	})
+}
+
+// #2058: pure renote の renote.myReaction を reactionAndUserPairCache から in-memory 算出。
+func TestInjectRenoteMyReaction(t *testing.T) {
+	base := `{"id":"n1","userId":"author","renoteId":"r1","renote":{"id":"r1","reactions":{"👍":2},"reactionAndUserPairCache":["alice/👍","bob/❤"]}}`
+
+	// alice は reaction 済 → renote.myReaction="👍" がセットされる。
+	out := injectRenoteMyReaction([]byte(base), "alice")
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(out, &m))
+	renote := m["renote"].(map[string]any)
+	assert.Equal(t, "👍", renote["myReaction"], "viewer の reaction が inject される (#2058)")
+
+	// carol は未 reaction → payload 不変 (myReaction 無し)。
+	assert.Equal(t, base, string(injectRenoteMyReaction([]byte(base), "carol")), "未 reaction は不変")
+	// 未認証 (viewerID="") → 不変。
+	assert.Equal(t, base, string(injectRenoteMyReaction([]byte(base), "")), "anon は不変")
+	// quote renote (text あり = 非 pure renote) → 不変。
+	quote := `{"id":"n2","userId":"a","renoteId":"r1","text":"q","renote":{"reactions":{"👍":1},"reactionAndUserPairCache":["alice/👍"]}}`
+	assert.Equal(t, quote, string(injectRenoteMyReaction([]byte(quote), "alice")), "quote は対象外")
+	// renote.reactions 空 → 不変。
+	noReact := `{"id":"n3","userId":"a","renoteId":"r1","renote":{"reactions":{},"reactionAndUserPairCache":[]}}`
+	assert.Equal(t, noReact, string(injectRenoteMyReaction([]byte(noReact), "alice")), "reactions 空は対象外")
+	// cache が reaction 種類数より少ない (truncated) → 不変。
+	trunc := `{"id":"n4","userId":"a","renoteId":"r1","renote":{"reactions":{"👍":1,"❤":1},"reactionAndUserPairCache":["alice/👍"]}}`
+	assert.Equal(t, trunc, string(injectRenoteMyReaction([]byte(trunc), "alice")), "truncated cache は skip")
+	// renote でない → 不変。
+	plain := `{"id":"n5","userId":"a"}`
+	assert.Equal(t, plain, string(injectRenoteMyReaction([]byte(plain), "alice")))
+}
+
+// #2058 HIGH-1: truncated 判定は reaction 種類数でなく総数 (sum) で行う。
+// #2058 HIGH-2: pair suffix の raw reaction を colon-form/legacy 正規化する。
+func TestInjectRenoteMyReaction_SumAndNormalize(t *testing.T) {
+	// 単一種類だが総数 3 > cache 長 2 → truncated 扱いで skip (key-count なら誤って算出)。
+	trunc := `{"id":"n1","userId":"a","renoteId":"r1","renote":{"reactions":{"👍":3},"reactionAndUserPairCache":["bob/👍","carol/👍"]}}`
+	assert.Equal(t, trunc, string(injectRenoteMyReaction([]byte(trunc), "alice")), "総数>cache長は truncated で skip (#2058 HIGH-1)")
+
+	// legacy text reaction "like" は "👍" に正規化される。
+	legacy := `{"id":"n2","userId":"a","renoteId":"r1","renote":{"reactions":{"👍":1},"reactionAndUserPairCache":["alice/like"]}}`
+	out := injectRenoteMyReaction([]byte(legacy), "alice")
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(out, &m))
+	assert.Equal(t, "👍", m["renote"].(map[string]any)["myReaction"], "legacy reaction を正規化 (#2058 HIGH-2)")
+
+	// custom emoji :smile: は :smile@.: に正規化される。
+	custom := `{"id":"n3","userId":"a","renoteId":"r1","renote":{"reactions":{":smile@.:":1},"reactionAndUserPairCache":["alice/:smile:"]}}`
+	out = injectRenoteMyReaction([]byte(custom), "alice")
+	require.NoError(t, json.Unmarshal(out, &m))
+	assert.Equal(t, ":smile@.:", m["renote"].(map[string]any)["myReaction"], "custom emoji を正規化 (#2058 HIGH-2)")
 }

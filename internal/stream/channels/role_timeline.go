@@ -79,6 +79,8 @@ func (c *RoleTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerIDFromCtx(c.ctx))
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

@@ -570,6 +570,14 @@ func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
 	return data
 }
 
+// NormalizeReactionWithLegacy normalizes a raw reaction string (colon-form +
+// legacy text alias), e.g. `:smile:`→`:smile@.:`, `like`→`👍`。streaming channel の
+// renote.myReaction inject が REST 経路と同じ正規化を適用するための export wrapper
+// (#2058)。reactionAndUserPairCache は raw reaction を保持するため必須。
+func NormalizeReactionWithLegacy(raw string) string {
+	return normalizeReactionWithLegacy(raw)
+}
+
 // sumReactions decodes the reactions JSONB and sums all values.
 func sumReactions(raw datatypes.JSON) int {
 	if len(raw) == 0 {

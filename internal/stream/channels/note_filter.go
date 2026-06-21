@@ -3,6 +3,7 @@ package channels
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"time"
 
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -11,6 +12,85 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
 )
+
+// injectRenoteMyReaction sets note.renote.myReaction for a pure renote whose
+// renote has reactions, computing the viewer's reaction IN-MEMORY from the
+// renote's reactionAndUserPairCache (upstream timeline channel onNote の
+// populateMyReaction cache 経路、#2058)。per-subscriber の DB lookup を避けるため
+// cache-only で算出し、cache が truncated (reaction 種類数 > pair 数) なら skip する
+// (upstream は DB fallback するが mk-go は cache のみ)。
+//
+// 非該当 (未認証 / pure renote でない / renote.reactions 空 / viewer 未 reaction /
+// cache truncated / parse 失敗) では payload を変えずに返す。
+func injectRenoteMyReaction(payload []byte, viewerID string) []byte {
+	if viewerID == "" {
+		return payload
+	}
+	var probe struct {
+		notePayload
+		Renote *struct {
+			Reactions json.RawMessage `json:"reactions"`
+			Cache     []string        `json:"reactionAndUserPairCache"`
+		} `json:"renote"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return payload
+	}
+	if !probe.isPureRenote() || probe.Renote == nil {
+		return payload
+	}
+	// upstream populateMyReaction は reactionsCount = Σ(reactions の値) (種類数でなく
+	// 総数) で cache 充足を判定する。総数 > cache 長なら cache は truncated なので
+	// 算出しない (upstream は DB fallback だが mk-go は cache-only、#2058)。
+	reactionCount := reactionValueSum(probe.Renote.Reactions)
+	if reactionCount == 0 || len(probe.Renote.Cache) < reactionCount {
+		return payload
+	}
+	prefix := viewerID + "/"
+	reaction := ""
+	for _, pair := range probe.Renote.Cache {
+		if strings.HasPrefix(pair, prefix) {
+			// pair suffix は raw reaction。REST 経路と同じく colon-form/legacy 正規化を
+			// 適用しないと reactions map の key (正規化済) と突合できない (#2058 HIGH)。
+			reaction = entity.NormalizeReactionWithLegacy(pair[len(prefix):])
+			break
+		}
+	}
+	if reaction == "" {
+		return payload // viewer は reaction していない → myReaction null のまま
+	}
+	// full unmarshal → set → re-marshal (hideNoteRawForViewer と同パターン)。算出に
+	// 成功した pure-renote-with-reactions のときだけ marshal するので hot-path 全体には
+	// 乗らない。
+	var full entity.NoteEntity
+	if err := json.Unmarshal(payload, &full); err != nil || full.Renote == nil {
+		return payload
+	}
+	full.Renote.MyReaction = &reaction
+	out, err := json.Marshal(&full)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// reactionValueSum returns Σ of a reactions JSON object's values (the total
+// reaction count, matching upstream `Object.values(reactions).reduce(...)` /
+// entity.sumReactions、#2058)。0 for null / empty / parse error。
+func reactionValueSum(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var m map[string]float64
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return 0
+	}
+	total := 0
+	for _, v := range m {
+		total += int(v)
+	}
+	return total
+}
 
 // viewerIDFromCtx extracts the authenticated user's ID from a ChannelContext.
 // Returns "" for anonymous connections so wordmute.MatchNote treats every

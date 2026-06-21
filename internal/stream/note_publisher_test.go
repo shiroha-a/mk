@@ -812,3 +812,29 @@ func TestNotePublisher_EmitsReactionAndUserPairCache(t *testing.T) {
 	require.Contains(t, m2, "reactionAndUserPairCache")
 	assert.Equal(t, "[]", string(m2["reactionAndUserPairCache"]))
 }
+
+// #2058: pure renote の renote embed にも reactionAndUserPairCache を載せ、subscriber
+// 側 channel が renote.myReaction を算出できるようにする。
+func TestNotePublisher_EmitsRenoteReactionAndUserPairCache(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	pub := &stubPublisher{}
+	np := NewNotePublisher(pub, idGen)
+
+	renote := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u2", Visibility: model.NoteVisibilityPublic,
+		ReactionAndUserPairCache: []string{"userA/👍"},
+	}
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		RenoteID: &renote.ID, Renote: renote,
+	}
+	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
+	require.Len(t, pub.payloads, 1)
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(pub.payloads[0].(json.RawMessage), &m))
+	require.Contains(t, m, "renote")
+	var renoteObj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(m["renote"], &renoteObj))
+	require.Contains(t, renoteObj, "reactionAndUserPairCache", "renote embed に cache を載せる (#2058)")
+	assert.JSONEq(t, `["userA/👍"]`, string(renoteObj["reactionAndUserPairCache"]))
+}

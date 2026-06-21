@@ -95,6 +95,8 @@ func (c *AntennaChannel) OnRedisEvent(payload []byte) {
 	// 消すと non-visible な引用/返信元が top-level antenna note 経由で漏れる
 	// IDOR を再 open する。
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerIDFromCtx(c.ctx))
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 

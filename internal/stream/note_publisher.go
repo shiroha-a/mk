@@ -128,6 +128,17 @@ func (p *NotePublisher) packNote(n *model.Note, author *model.User) []byte {
 		pairs = []string{}
 	}
 	pn.ReactionAndUserPairCache = &pairs
+	// pure renote の renote embed にも reactionAndUserPairCache を載せ、subscriber 側の
+	// timeline channel が renote.myReaction を per-viewer に in-memory 算出できるように
+	// する (upstream populateMyReaction の cache 経路、#2058)。renote model が preload
+	// されていれば DB の cache をそのまま渡す。
+	if pn.Renote != nil && noteForPack.Renote != nil {
+		rpairs := []string(noteForPack.Renote.ReactionAndUserPairCache)
+		if rpairs == nil {
+			rpairs = []string{}
+		}
+		pn.Renote.ReactionAndUserPairCache = &rpairs
+	}
 	// REST 経路と同じ後段 resolver を通して Files / Channel を埋める。
 	// viewer 引数は streaming fanout の性質上「自分宛て」が複数 subscriber
 	// に展開されるため特定不能。viewer=nil で Apply を呼ぶと

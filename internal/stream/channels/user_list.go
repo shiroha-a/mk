@@ -150,6 +150,8 @@ func (c *UserListChannel) OnRedisEvent(payload []byte) {
 		}
 	}
 	payload = hideEmbeds(c.ctx, payload)
+	// pure renote の renote.myReaction を viewer 毎に inject (#2058)。
+	payload = injectRenoteMyReaction(payload, viewerID)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
 
