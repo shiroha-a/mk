@@ -880,10 +880,10 @@ func TestUserRepository_ListUsers_Suspended(t *testing.T) {
 	}
 }
 
-// adminOrModerator filter joins role_assignment + role and returns only
-// users with isAdministrator/isModerator role and host IS NULL (#421)。
-// 旧実装は state=adminOrModerator を黙って無視していたので admin/overview
-// の moderator 一覧に観測した全リモートユーザーが流れ込んでいた。
+// adminOrModerator filter joins role_assignment + role and returns users with
+// isAdministrator/isModerator role. upstream show-users は role state に host
+// filter をかけず、host は origin param で別途絞る (#1948-12)。以前は role state
+// 自体に host IS NULL を付けていたが upstream と乖離していた。
 func TestUserRepository_ListUsers_AdminOrModerator(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	host := "remote.example"
@@ -908,7 +908,7 @@ func TestUserRepository_ListUsers_AdminOrModerator(t *testing.T) {
 	require.NoError(t, testDB.Create(role).Error)
 	defer testDB.Exec(`DELETE FROM "role" WHERE id = ?`, role.ID)
 
-	// local mod + remote (incorrectly) get the moderator role
+	// local mod + remote both get the moderator role
 	for _, uid := range []string{mod.ID, remote.ID} {
 		ra := &model.RoleAssignment{ID: "ra_" + uid, UserID: uid, RoleID: role.ID}
 		require.NoError(t, testDB.Create(ra).Error)
@@ -923,23 +923,28 @@ func TestUserRepository_ListUsers_AdminOrModerator(t *testing.T) {
 	}
 	assert.Contains(t, ids, mod.ID, "local moderator must be listed")
 	assert.NotContains(t, ids, plain.ID, "non-moderator local user must be excluded")
-	assert.NotContains(t, ids, remote.ID, "remote user must be excluded even if assigned the role")
+	// upstream parity: role state は host を問わない。remote の role 保持者も含まれる。
+	assert.Contains(t, ids, remote.ID, "remote moderator is included (host is filtered by origin, not state)")
+
+	// origin=local を併用すると remote は除外される (upstream の origin filter)。
+	localUsers, err := repo.ListUsers(model.UserListFilter{State: "adminOrModerator", Origin: "local", Limit: 100})
+	require.NoError(t, err)
+	localIDs := make(map[string]struct{}, len(localUsers))
+	for _, u := range localUsers {
+		localIDs[u.ID] = struct{}{}
+	}
+	assert.Contains(t, localIDs, mod.ID)
+	assert.NotContains(t, localIDs, remote.ID, "origin=local excludes the remote moderator")
 }
 
-// admin / adminOrModerator フィルタは meta.rootUserId を暗黙の admin として
-// 含める必要がある。本家 RoleService.getModeratorIds の rootUserIds union と
-// 同じ挙動で、これが無いと「初期 root のみ」のインスタンスでは moderator
-// カードが空になる (#421 Devin review)。
-func TestUserRepository_ListUsers_AdminIncludesRootUser(t *testing.T) {
+// #1948-12: admin / adminOrModerator は root user を暗黙 admin として含めない
+// (upstream getAdministratorIds は TODO で未対応 / getModeratorIds の includeRoot
+// 既定 false)。以前の mk-go は root を OR union で含めており乖離していた。
+func TestUserRepository_ListUsers_AdminDoesNotIncludeRootUser(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	root := insertTestUser(t, "lu_root", "rootuser")
 	defer cleanupUser(t, root.ID)
-	other := insertTestUser(t, "lu_other", "otheruser")
-	defer cleanupUser(t, other.ID)
 
-	// root を meta.rootUserId に設定する。テスト終了時に元の値へ戻す。
-	// migration には meta シードが無いので、行が無ければ INSERT でブート
-	// ストラップする。
 	var rowCount int64
 	require.NoError(t, testDB.Raw(`SELECT COUNT(*) FROM meta`).Scan(&rowCount).Error)
 	if rowCount == 0 {
@@ -958,23 +963,66 @@ func TestUserRepository_ListUsers_AdminIncludesRootUser(t *testing.T) {
 		})
 	}
 
-	for _, state := range []string{"admin", "adminOrModerator"} {
+	// root は role_assignment を持たないので、どの role state にも現れない。
+	for _, state := range []string{"admin", "adminOrModerator", "moderator"} {
 		users, err := repo.ListUsers(model.UserListFilter{State: state, Limit: 100})
 		require.NoError(t, err)
-		ids := make(map[string]struct{}, len(users))
 		for _, u := range users {
-			ids[u.ID] = struct{}{}
+			assert.NotEqual(t, root.ID, u.ID, "root must NOT be in state=%s (upstream parity, #1948-12)", state)
 		}
-		assert.Contains(t, ids, root.ID, "root user must be in state=%s results", state)
-		assert.NotContains(t, ids, other.ID, "non-admin local user must not be in state=%s results", state)
 	}
+}
 
-	// pure moderator フィルタは root (admin) を含まない。
-	users, err := repo.ListUsers(model.UserListFilter{State: "moderator", Limit: 100})
+// #1948-12: state=alive は updatedAt > now-5d、state=available は isSuspended=false
+// の別 filter。expired role assignment も role state に含まれる (excludeExpire 既定 false)。
+func TestUserRepository_ListUsers_AliveAvailableAndExpiry(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	// recent: updatedAt = now、stale: updatedAt = now-10d、suspended。
+	recent := insertTestUser(t, "lu_recent", "recentuser")
+	defer cleanupUser(t, recent.ID)
+	stale := insertTestUser(t, "lu_stale", "staleuser")
+	defer cleanupUser(t, stale.ID)
+	susp := insertTestUser(t, "lu_susp", "suspuser")
+	defer cleanupUser(t, susp.ID)
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = ? WHERE id = ?`, time.Now(), recent.ID).Error)
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = ? WHERE id = ?`, time.Now().Add(-10*24*time.Hour), stale.ID).Error)
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "isSuspended" = true WHERE id = ?`, susp.ID).Error)
+
+	// state=alive: recent のみ (stale は 5 日窓外、susp は updatedAt=now でも... 別途)。
+	aliveUsers, err := repo.ListUsers(model.UserListFilter{State: "alive", Limit: 100})
 	require.NoError(t, err)
+	aliveIDs := userIDSet(aliveUsers)
+	assert.Contains(t, aliveIDs, recent.ID, "alive は直近 5 日の user を含む")
+	assert.NotContains(t, aliveIDs, stale.ID, "alive は 5 日より古い user を除外する (#1948-12)")
+
+	// state=available: suspended でない user (recent/stale)、susp は除外。
+	availUsers, err := repo.ListUsers(model.UserListFilter{State: "available", Limit: 100})
+	require.NoError(t, err)
+	availIDs := userIDSet(availUsers)
+	assert.Contains(t, availIDs, stale.ID, "available は updatedAt に依らず未 suspend を含む")
+	assert.NotContains(t, availIDs, susp.ID, "available は suspended を除外する")
+
+	// expired role assignment も role state に含まれる (upstream excludeExpire 既定 false)。
+	now := time.Now()
+	role := &model.Role{ID: "role_lu_exp", Name: "exp-mod", IsModerator: true, UpdatedAt: now, LastUsedAt: now}
+	require.NoError(t, testDB.Create(role).Error)
+	defer testDB.Exec(`DELETE FROM "role" WHERE id = ?`, role.ID)
+	past := now.Add(-1 * time.Hour)
+	ra := &model.RoleAssignment{ID: "ra_exp", UserID: recent.ID, RoleID: role.ID, ExpiresAt: &past}
+	require.NoError(t, testDB.Create(ra).Error)
+	defer testDB.Exec(`DELETE FROM "role_assignment" WHERE id = ?`, ra.ID)
+
+	modUsers, err := repo.ListUsers(model.UserListFilter{State: "moderator", Limit: 100})
+	require.NoError(t, err)
+	assert.Contains(t, userIDSet(modUsers), recent.ID, "expired assignment も moderator state に含まれる (#1948-12)")
+}
+
+func userIDSet(users []*model.User) map[string]struct{} {
+	ids := make(map[string]struct{}, len(users))
 	for _, u := range users {
-		assert.NotEqual(t, root.ID, u.ID, "root must NOT be in state=moderator (admin-only)")
+		ids[u.ID] = struct{}{}
 	}
+	return ids
 }
 
 func TestUserRepository_ListUsers_SortAndPagination(t *testing.T) {

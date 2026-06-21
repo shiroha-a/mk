@@ -474,51 +474,40 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 	switch filter.State {
 	case "suspended":
 		q = q.Where("\"isSuspended\" = true")
-	case "alive", "available":
-		// `available` は本家 admin/show-users で `alive` と同義 (suspended で
-		// ない = アクティブ)。`alive` だけ受け付けると admin UI が空返却に
-		// なるので両方カバーする。
+	case "available":
+		// upstream show-users.ts:64 — available = isSuspended = FALSE (#1948-12)。
 		q = q.Where("\"isSuspended\" = false")
+	case "alive":
+		// upstream show-users.ts:65 — alive は updatedAt > now-5d の「直近アクティブ」
+		// window で、available (= 未 suspend) とは別 filter。以前は alive を available
+		// の synonym 扱いにしていたが upstream と乖離していた (#1948-12)。
+		q = q.Where(`"updatedAt" > ?`, time.Now().Add(-5*24*time.Hour))
 	case "admin", "moderator", "adminOrModerator":
-		// 本家 RoleService.getModeratorIds と等価な条件を SQL に落とす。
-		// expiresAt が過ぎている assignment は除外、role の
-		// isAdministrator / isModerator フラグで絞る。host は問わない方が
-		// 上位表示で柔軟だが、admin/overview の moderator カードはローカル
-		// だけを期待するので host IS NULL も付ける (#421)。
+		// upstream show-users.ts は getAdministratorIds / getModeratorIds で role 由来の
+		// id 集合に絞る。これらは (1) host を問わない (origin param が別途 host を filter
+		// する)、(2) expiresAt を filter しない (getModeratorIds の excludeExpire は既定
+		// false、getAdministratorIds は expiry 非考慮)、(3) root を含めない
+		// (getAdministratorIds は TODO で未対応 / getModeratorIds の includeRoot 既定
+		// false) — の 3 点を満たす。以前の mk-go は host IS NULL / expiresAt filter /
+		// root union を付けており upstream と乖離していた (#1948-12)。
 		//
-		// root user (meta.rootUserId) は role_assignment 行を持たない
-		// 暗黙の administrator なので admin / adminOrModerator では OR 条件
-		// で必ず含める。本家 getModeratorIds の rootUserIds union と同じ
-		// (#421 Devin review)。pure moderator フィルタは root を含まない。
+		// upstream #17334 の「複数 admin role を持つ user の id 重複」は、本 SQL の
+		// `id IN (SELECT ra."userId" ...)` が PostgreSQL の IN semantics で自動 dedup
+		// するため等価に解消される。
 		var roleCond string
-		includeRoot := false
 		switch filter.State {
 		case "admin":
 			roleCond = `r."isAdministrator" = true`
-			includeRoot = true
 		case "moderator":
 			roleCond = `r."isModerator" = true`
 		default: // adminOrModerator
 			roleCond = `(r."isAdministrator" = true OR r."isModerator" = true)`
-			includeRoot = true
 		}
-		// upstream Misskey #17334 (= 2026.5.0 fix / triage #1007): RoleService.
-		// getAdministratorIds で「複数 admin role を持つ user の ID が重複する」bug。
-		// mk-go では admin user 解決を method ベースの map+slice ではなく、本 SQL
-		// の `id IN (SELECT ra."userId" ...)` 構造で実装しているため、PostgreSQL の
-		// IN subquery semantics で自動的に dedup される (= 内部行が複数あっても
-		// 外側 id は 1 度しか match しない)。よって upstream の Set 経由 dedup と
-		// 等価な挙動が SQL レベルで保証されている。
-		idCond := `id IN (
+		q = q.Where(`id IN (
 			SELECT ra."userId" FROM role_assignment ra
 			JOIN role r ON ra."roleId" = r.id
 			WHERE ` + roleCond + `
-			  AND (ra."expiresAt" IS NULL OR ra."expiresAt" > now())
-		)`
-		if includeRoot {
-			idCond = "(" + idCond + ` OR id = (SELECT "rootUserId" FROM meta WHERE "rootUserId" IS NOT NULL LIMIT 1))`
-		}
-		q = q.Where("host IS NULL").Where(idCond)
+		)`)
 	}
 
 	// sort 方向は upstream admin/show-users.ts:99-110 に一致させる。'+' は
