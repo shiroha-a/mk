@@ -881,6 +881,30 @@ func TestClips_Success(t *testing.T) {
 
 // --- Translate ---
 
+// #2010: canUseTranslator policy が false なら note fetch より前に 503 UNAVAILABLE を
+// 返す (汎用 RequireRolePolicy の 403 ROLE_PERMISSION_DENIED ではない、upstream translate.ts:72-75)。
+func TestTranslate_CannotUseTranslator_503Unavailable(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{"canUseTranslator": false}})
+	txt := "hello"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &txt}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "canUseTranslator false は 400 UNAVAILABLE (#2010)")
+	assert.Contains(t, rec.Body.String(), "UNAVAILABLE")
+	assert.Contains(t, rec.Body.String(), "50a70314", "translate 固有 error id")
+}
+
+// #2010: canUseTranslator true なら policy gate を通過する。null-text note を使い、
+// gate 通過後に note fetch → text==null で 204 に到達することで gate-pass を確認する
+// (gate で弾かれていれば note fetch 前に 400 になる)。
+func TestTranslate_CanUseTranslator_PassesPolicyGate(t *testing.T) {
+	h, noteRepo, _ := newExtraHandler(t)
+	h.SetPolicyProvider(&draftStubPolicyProvider{policies: map[string]any{"canUseTranslator": true}})
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: nil}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusNoContent, rec.Code, "policy gate 通過後 null-text 204 に到達 (#2010)")
+}
+
 func TestTranslate_NoTranslator(t *testing.T) {
 	// #1948-17: translator-nil(unavailable) check は note fetch / text check の後に
 	// 移動したので、可視 + text 有りの note を seed して 503 path を踏ませる。
@@ -888,7 +912,7 @@ func TestTranslate_NoTranslator(t *testing.T) {
 	txt := "hello"
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &txt}
 	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // #1948-17: text == null の note は upstream translate.ts:86-88 と同じく 204

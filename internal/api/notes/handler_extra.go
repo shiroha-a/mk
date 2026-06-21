@@ -487,6 +487,18 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "noteId and targetLang are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
+	// upstream translate.ts:72-75: canUseTranslator policy が false なら note fetch より
+	// 前に 503 UNAVAILABLE を返す。汎用 RequireRolePolicy middleware の 403
+	// ROLE_PERMISSION_DENIED ではなく translate 固有の error なので handler 側で評価する
+	// (#2010)。policyProvider 未配線 (test) では gate を skip。
+	if u := middleware.GetUser(c); u != nil && h.policyProvider != nil {
+		if v, ok := h.policyProvider.GetUserPolicies(u.ID)["canUseTranslator"].(bool); !ok || !v {
+			// upstream の unavailable error は httpStatusCode 未指定 + kind 既定 'client'
+			// なので ApiCallService が 400 にマップする (503 ではない、#2010)。
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Translate of notes unavailable.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
+		}
+	}
+
 	// upstream translate.ts の順序に合わせる (#1948-17): note fetch → visibility →
 	// text==null で 204 → unavailable → translate。translator-nil(unavailable) を
 	// note/text check より前に置くと、null-text note が upstream の 204 ではなく
@@ -515,7 +527,8 @@ func (h *Handler) Translate(c echo.Context) error {
 	}
 
 	if h.translator == nil {
-		return c.JSON(http.StatusServiceUnavailable, apierr.Error("UNAVAILABLE", "Translator is not configured.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
+		// upstream deeplAuthKey==null も同 unavailable error で 400 (#2010)。
+		return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Translate of notes unavailable.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
 	}
 
 	result, err := h.translator.Translate(c.Request().Context(), *n.Text, req.TargetLang)

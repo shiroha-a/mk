@@ -1385,9 +1385,11 @@ func (s *Server) setupRoutes() {
 	api.POST("/notes/user-list-timeline", notesHandler.UserListTimeline, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/notes/search-by-tag", notesHandler.SearchByTag)
 	api.POST("/notes/clips", notesHandler.Clips)
+	// canUseTranslator は upstream translate.ts 同様 handler 側で評価し、拒否時は
+	// 503 UNAVAILABLE を返す (RequireRolePolicy の 403 ではない、#2010)。
 	api.POST("/notes/translate", notesHandler.Translate,
 		middleware.RequireAuth(),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanUseTranslator), middleware.RequireScope("read:account"))
+		middleware.RequireScope("read:account"))
 	api.POST("/notes/show-partial-bulk", notesHandler.ShowPartialBulk)
 	// notes/drafts + notes/thread-muting + notes/polls/recommendation (実データ)
 	noteDraftRepo := repository.NewNoteDraftRepository(s.db)
