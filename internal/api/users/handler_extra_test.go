@@ -1012,3 +1012,14 @@ func TestReportAbuse_SavesTargetUserHost(t *testing.T) {
 		assert.Equal(t, "remote.example", *r.TargetUserHost)
 	}
 }
+
+// #1996: public /users の state enum は ['all','alive'] (空は default 'all')。
+// 範囲外 (moderator/admin 等) は reject させる (= ValidListState=false → handler 400)。
+func TestValidListState(t *testing.T) {
+	for _, ok := range []string{"", "all", "alive"} {
+		assert.True(t, users.ValidListState(ok), "state=%q は許容 (#1996)", ok)
+	}
+	for _, bad := range []string{"moderator", "admin", "available", "suspended", "ALL"} {
+		assert.False(t, users.ValidListState(bad), "state=%q は範囲外で reject (#1996)", bad)
+	}
+}

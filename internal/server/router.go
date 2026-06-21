@@ -1088,6 +1088,12 @@ func (s *Server) setupRoutes() {
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusOK, []any{})
 		}
+		// upstream users.ts:35 の state enum は ['all','alive'] (default 'all')。
+		// 範囲外 (moderator/admin 等の role state) は ajv が 400 で reject するので、
+		// public /users でも同じく弾く (ListUsers の role filter に到達させない、#1996)。
+		if !users.ValidListState(req.State) {
+			return apierr.JSONInvalidParam(c)
+		}
 		if req.Limit <= 0 {
 			req.Limit = 10
 		}

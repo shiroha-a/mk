@@ -369,6 +369,19 @@ func (h *Handler) populateUserEmojis(u *model.User, lite *entity.UserLite) {
 
 // NewHandler creates a new users Handler.
 // followingService, noteRepo, idGen are optional for the bare /show endpoint.
+// ValidListState reports whether state is an accepted value for the public
+// /users listing. upstream users.ts:35 の state enum は ['all','alive']
+// (default 'all'); 空文字列は default 'all' として許容する。範囲外は ajv 同様に
+// reject する想定 (#1996)。
+func ValidListState(state string) bool {
+	switch state {
+	case "", "all", "alive":
+		return true
+	default:
+		return false
+	}
+}
+
 func NewHandler(
 	userService *user.Service,
 	followingService *corefollowing.Service,
