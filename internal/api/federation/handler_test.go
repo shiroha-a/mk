@@ -451,38 +451,27 @@ func TestShowInstance_MetaError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// TestShowInstance_FederatingFlags verifies that the response includes the
-// computed federating / subscribing / publishing fields expected by misskey-js.
-func TestShowInstance_FederatingFlags(t *testing.T) {
-	cases := []struct {
-		name        string
-		following   int
-		followers   int
-		federating  bool
-		subscribing bool
-		publishing  bool
-	}{
-		{name: "no federation", following: 0, followers: 0, federating: false, subscribing: false, publishing: false},
-		{name: "only outgoing", following: 3, followers: 0, federating: true, subscribing: false, publishing: true},
-		{name: "only incoming", following: 0, followers: 5, federating: true, subscribing: true, publishing: false},
-		{name: "bidirectional", following: 4, followers: 2, federating: true, subscribing: true, publishing: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h, repo := newHandler(t)
-			inst := seedInstance(t, repo, "flags.example")
-			inst.FollowingCount = tc.following
-			inst.FollowersCount = tc.followers
+// TestShowInstance_OmitsNonUpstreamFields verifies that the response does NOT
+// include the federating/subscribing/publishing/notRespondingSince fields, which
+// are upstream federation/instances query params (not InstanceEntity response
+// fields). isNotResponding (boolean) is the upstream response field (#1991).
+func TestShowInstance_OmitsNonUpstreamFields(t *testing.T) {
+	h, repo := newHandler(t)
+	inst := seedInstance(t, repo, "flags.example")
+	inst.FollowingCount = 4
+	inst.FollowersCount = 2
 
-			c, rec := newReq(t, `{"host":"flags.example"}`)
-			require.NoError(t, h.ShowInstance(c))
-			require.Equal(t, http.StatusOK, rec.Code)
+	c, rec := newReq(t, `{"host":"flags.example"}`)
+	require.NoError(t, h.ShowInstance(c))
+	require.Equal(t, http.StatusOK, rec.Code)
 
-			var got map[string]any
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-			assert.Equal(t, tc.federating, got["federating"])
-			assert.Equal(t, tc.subscribing, got["subscribing"])
-			assert.Equal(t, tc.publishing, got["publishing"])
-		})
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	for _, k := range []string{"federating", "subscribing", "publishing", "notRespondingSince"} {
+		_, has := got[k]
+		assert.False(t, has, k+" は upstream の response field でないため省略する (#1991)")
 	}
+	// upstream response の isNotResponding (boolean) は残す。
+	_, hasIsNotResponding := got["isNotResponding"]
+	assert.True(t, hasIsNotResponding, "isNotResponding は upstream response field")
 }

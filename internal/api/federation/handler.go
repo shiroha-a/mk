@@ -201,10 +201,9 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 
 // instanceToMap shapes an Instance row into the JSON response object expected
 // by misskey-js. 不明値や nil ポインタはそのまま JSON null になるよう map に
-// 載せる。
-//
-// federating / subscribing / publishingは本家Misskeyと同様に
-// followingCount / followersCountから動的に計算する (DBには列を持たない)。
+// 載せる。response field は upstream InstanceEntityService.pack に揃える
+// (federating/subscribing/publishing/notRespondingSince は response field では
+// なく federation/instances の query param なので含めない、#1991)。
 //
 // isBlocked / isSilenced / isMediaSilenced は instance 列ではなく
 // meta.blockedHosts / silencedHosts / mediaSilencedHosts との suffix-match で
@@ -229,19 +228,21 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		suspensionState = "softwareSuspended"
 	}
 	return map[string]any{
-		"id":                      inst.ID,
-		"firstRetrievedAt":        entity.ISOMillis(inst.FirstRetrievedAt),
-		"host":                    inst.Host,
-		"usersCount":              inst.UsersCount,
-		"notesCount":              inst.NotesCount,
-		"followingCount":          inst.FollowingCount,
-		"followersCount":          inst.FollowersCount,
-		"federating":              inst.FollowingCount > 0 || inst.FollowersCount > 0,
-		"subscribing":             inst.FollowersCount > 0,
-		"publishing":              inst.FollowingCount > 0,
+		"id":               inst.ID,
+		"firstRetrievedAt": entity.ISOMillis(inst.FirstRetrievedAt),
+		"host":             inst.Host,
+		"usersCount":       inst.UsersCount,
+		"notesCount":       inst.NotesCount,
+		"followingCount":   inst.FollowingCount,
+		"followersCount":   inst.FollowersCount,
+		// federating/subscribing/publishing は upstream では federation/instances の
+		// query 用 paramDef であって InstanceEntity の response field ではない。
+		// notRespondingSince も upstream InstanceEntityService.pack に無い (response は
+		// isNotResponding boolean のみ)。strict parity のため 4 余剰 field を削除した
+		// (#1991。frontend は federating 等を request filter としてのみ使い response を
+		// 読まない)。
 		"latestRequestReceivedAt": entity.ISOMillisPtr(inst.LatestRequestReceivedAt),
 		"isNotResponding":         inst.IsNotResponding,
-		"notRespondingSince":      inst.NotRespondingSince,
 		"isSuspended":             isSuspended,
 		"suspensionState":         suspensionState,
 		"isBlocked":               coreinstance.HostMatchesAny(hosts.Blocked, inst.Host),
