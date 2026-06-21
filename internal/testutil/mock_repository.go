@@ -6480,6 +6480,22 @@ func (m *MockRoleRepository) List() ([]*model.Role, error) {
 	return result, nil
 }
 
+// ListByLastUsed returns roles sorted by lastUsedAt DESC (id ASC tie-break),
+// mirroring the production query for admin/roles/list (#2061)。
+func (m *MockRoleRepository) ListByLastUsed() ([]*model.Role, error) {
+	result := make([]*model.Role, 0, len(m.Roles))
+	for _, r := range m.Roles {
+		result = append(result, r)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].LastUsedAt.Equal(result[j].LastUsedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].LastUsedAt.After(result[j].LastUsedAt)
+	})
+	return result, nil
+}
+
 func (m *MockRoleRepository) UpdateFields(id string, fields map[string]any) error {
 	r, ok := m.Roles[id]
 	if !ok {
@@ -6547,6 +6563,11 @@ func (m *MockRoleRepository) UpdateFields(id string, fields map[string]any) erro
 	if v, ok := fields["policies"]; ok {
 		if b, ok := v.([]byte); ok {
 			r.Policies = b
+		}
+	}
+	if v, ok := fields["lastUsedAt"]; ok {
+		if t, ok := v.(time.Time); ok {
+			r.LastUsedAt = t
 		}
 	}
 	return nil

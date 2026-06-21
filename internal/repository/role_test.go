@@ -350,3 +350,32 @@ func TestUserRepository_ListUsers_AdminFilterDedupsMultipleRoles(t *testing.T) {
 	}
 	assert.Equal(t, 1, count, "user with multiple admin roles should appear exactly once (= SQL IN subquery dedup)")
 }
+
+// #2061: ListByLastUsed は lastUsedAt DESC で返す。
+func TestRoleRepository_ListByLastUsed(t *testing.T) {
+	repo := NewRoleRepository(testDB)
+	mk := func(id string, year int) {
+		require.NoError(t, repo.Create(&model.Role{
+			ID: id, Name: id, UpdatedAt: time.Now(),
+			LastUsedAt:  time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC),
+			Target:      model.RoleTargetManual,
+			Policies:    datatypes.JSON([]byte("{}")),
+			CondFormula: datatypes.JSON([]byte("{}")),
+		}))
+		t.Cleanup(func() { cleanupRole(t, id) })
+	}
+	mk("rlu_old", 2020)
+	mk("rlu_new", 2024)
+	mk("rlu_mid", 2022)
+
+	roles, err := repo.ListByLastUsed()
+	require.NoError(t, err)
+	// seed した 3 件が lastUsedAt DESC 順 (new→mid→old) で並ぶこと (他の既存 role が
+	// 混ざりうるので相対順序で検証)。
+	pos := map[string]int{}
+	for i, r := range roles {
+		pos[r.ID] = i
+	}
+	assert.Less(t, pos["rlu_new"], pos["rlu_mid"], "new は mid より前 (#2061)")
+	assert.Less(t, pos["rlu_mid"], pos["rlu_old"], "mid は old より前 (#2061)")
+}

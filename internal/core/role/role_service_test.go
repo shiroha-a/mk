@@ -1596,3 +1596,30 @@ func TestService_GetModerators_NilUserRepo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, mods)
 }
+
+// #2061: Assign / Unassign は role.lastUsedAt を更新する (upstream RoleService)。
+func TestAssignUnassign_UpdatesLastUsedAt(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Admin", LastUsedAt: old}
+
+	require.NoError(t, svc.Assign("user1", "r1", nil))
+	assert.True(t, roleRepo.Roles["r1"].LastUsedAt.After(old), "Assign が lastUsedAt を更新 (#2061)")
+
+	roleRepo.Roles["r1"].LastUsedAt = old // reset
+	require.NoError(t, svc.Unassign("user1", "r1"))
+	assert.True(t, roleRepo.Roles["r1"].LastUsedAt.After(old), "Unassign が lastUsedAt を更新 (#2061)")
+}
+
+// #2061: ListByLastUsed は lastUsedAt DESC で返す。
+func TestService_ListByLastUsed(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["a"] = &model.Role{ID: "a", LastUsedAt: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}
+	roleRepo.Roles["b"] = &model.Role{ID: "b", LastUsedAt: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
+	roleRepo.Roles["c"] = &model.Role{ID: "c", LastUsedAt: time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC)}
+
+	roles, err := svc.ListByLastUsed()
+	require.NoError(t, err)
+	require.Len(t, roles, 3)
+	assert.Equal(t, []string{"b", "c", "a"}, []string{roles[0].ID, roles[1].ID, roles[2].ID}, "lastUsedAt DESC (#2061)")
+}

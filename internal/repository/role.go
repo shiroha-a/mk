@@ -12,6 +12,10 @@ type RoleRepository interface {
 	Create(role *model.Role) error
 	FindByID(id string) (*model.Role, error)
 	List() ([]*model.Role, error)
+	// ListByLastUsed returns roles ordered by lastUsedAt DESC for admin/roles/list
+	// (upstream `order: { lastUsedAt: 'DESC' }`、#2061)。eval 用の List() (cached,
+	// displayOrder 順) とは別に毎回 fresh で引く。
+	ListByLastUsed() ([]*model.Role, error)
 	UpdateFields(id string, fields map[string]any) error
 	Delete(id string) error
 }
@@ -40,6 +44,16 @@ func (r *roleRepository) FindByID(id string) (*model.Role, error) {
 func (r *roleRepository) List() ([]*model.Role, error) {
 	var roles []*model.Role
 	if err := r.db.Order("\"displayOrder\" DESC, id ASC").Find(&roles).Error; err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+func (r *roleRepository) ListByLastUsed() ([]*model.Role, error) {
+	var roles []*model.Role
+	// upstream admin/roles/list.ts: `order: { lastUsedAt: 'DESC' }` (#2061)。
+	// 同 lastUsedAt の安定順のため id ASC を tie-breaker に足す。
+	if err := r.db.Order("\"lastUsedAt\" DESC, id ASC").Find(&roles).Error; err != nil {
 		return nil, err
 	}
 	return roles, nil

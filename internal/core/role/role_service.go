@@ -938,6 +938,12 @@ func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
 	if err := s.assignmentRepo.Create(a); err != nil {
 		return err
 	}
+	// upstream RoleService.assign は role.lastUsedAt を更新する (#2061)。eval は
+	// lastUsedAt を使わないので rolesListCache の invalidate は不要 (admin/roles/list は
+	// ListByLastUsed で fresh に引く)。失敗しても割当自体は成功扱いで続行する。
+	if err := s.roleRepo.UpdateFields(roleID, map[string]any{"lastUsedAt": time.Now()}); err != nil {
+		slog.Warn("role assign: lastUsedAt update failed", "role", roleID, "err", err)
+	}
 	s.InvalidateUserRoleCache(userID)
 	// public role の割当のみ通知する (upstream RoleService.assign の
 	// `if (role.isPublic && user.host === null)`)。local 判定は notifier 側の
@@ -959,6 +965,10 @@ func (s *Service) Unassign(userID, roleID string) error {
 	}
 	if err := s.assignmentRepo.Delete(userID, roleID); err != nil {
 		return err
+	}
+	// upstream RoleService.unassign も role.lastUsedAt を更新する (#2061)。
+	if err := s.roleRepo.UpdateFields(roleID, map[string]any{"lastUsedAt": time.Now()}); err != nil {
+		slog.Warn("role unassign: lastUsedAt update failed", "role", roleID, "err", err)
 	}
 	s.InvalidateUserRoleCache(userID)
 	return nil
@@ -1040,6 +1050,13 @@ func (s *Service) Show(id string) (*model.Role, error) {
 // List returns all roles.
 func (s *Service) List() ([]*model.Role, error) {
 	return s.roleRepo.List()
+}
+
+// ListByLastUsed returns roles ordered by lastUsedAt DESC for admin/roles/list
+// (upstream `order: { lastUsedAt: 'DESC' }`、#2061)。eval 用の cache を経由せず
+// 毎回 fresh で引くので、Assign/Unassign の lastUsedAt 更新が即反映される。
+func (s *Service) ListByLastUsed() ([]*model.Role, error) {
+	return s.roleRepo.ListByLastUsed()
 }
 
 // ExistingRoleIDSet returns the set of all current role ids. get-avatar-

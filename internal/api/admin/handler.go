@@ -1843,7 +1843,8 @@ func (h *Handler) RolesShow(c echo.Context) error {
 
 // RolesList handles POST /api/admin/roles/list.
 func (h *Handler) RolesList(c echo.Context) error {
-	roles, err := h.roleService.List()
+	// upstream admin/roles/list.ts は lastUsedAt DESC で返す (#2061)。
+	roles, err := h.roleService.ListByLastUsed()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

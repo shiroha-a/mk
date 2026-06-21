@@ -1930,7 +1930,8 @@ type failingListRoleRepo struct {
 	*testutil.MockRoleRepository
 }
 
-func (f *failingListRoleRepo) List() ([]*model.Role, error) { return nil, assert.AnError }
+func (f *failingListRoleRepo) List() ([]*model.Role, error)           { return nil, assert.AnError }
+func (f *failingListRoleRepo) ListByLastUsed() ([]*model.Role, error) { return nil, assert.AnError }
 
 func TestRolesList_Error(t *testing.T) {
 	failRepo := &failingListRoleRepo{testutil.NewMockRoleRepository()}

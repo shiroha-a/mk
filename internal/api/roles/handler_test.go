@@ -373,7 +373,8 @@ type failingListRepo struct {
 	*testutil.MockRoleRepository
 }
 
-func (f *failingListRepo) List() ([]*model.Role, error) { return nil, assert.AnError }
+func (f *failingListRepo) List() ([]*model.Role, error)           { return nil, assert.AnError }
+func (f *failingListRepo) ListByLastUsed() ([]*model.Role, error) { return nil, assert.AnError }
 
 // --- Notes ---
 
