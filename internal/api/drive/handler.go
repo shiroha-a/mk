@@ -141,7 +141,7 @@ var driveTypePatternRe = regexp.MustCompile(`^[a-zA-Z/\-*]+$`)
 // self list path とは異なり userId も **null にする** 点に注意 (= pack は
 // detail=false で userId を返さない、packNullable とは別経路)。
 func packDriveFileSelfSingle(f *model.DriveFile, idGen id.Generator) entity.DriveFileEntity {
-	e := entity.PackDriveFile(f, idGen)
+	e := entity.PackDriveFileSelf(f, idGen)
 	e.UserID = nil
 	return e
 }
@@ -159,7 +159,7 @@ func packDriveFileSelfSingle(f *model.DriveFile, idGen id.Generator) entity.Driv
 // self single path (#812) とは異なり userId は **owner ID を維持** する
 // (= packNullable は userId を常時返す)。
 func (h *Handler) packDriveFileSelfList(f *model.DriveFile) entity.DriveFileEntity {
-	return entity.PackDriveFile(f, h.idGen)
+	return entity.PackDriveFileSelf(f, h.idGen)
 }
 
 // readMultipartFile extracts the uploaded file's bytes and original filename.
@@ -303,7 +303,7 @@ func (h *Handler) FilesShow(c echo.Context) error {
 // (#1564)。folder / user は各 1 回だけ fetch する (full pack 経由の二重
 // fetch を解消、#1564 review)。
 func (h *Handler) packDriveFileShow(f *model.DriveFile) entity.DriveFileEntity {
-	e := entity.PackDriveFile(f, h.idGen)
+	e := entity.PackDriveFileSelf(f, h.idGen)
 	if h.folderRepo != nil && f.FolderID != nil {
 		if fo, err := h.folderRepo.FindByID(*f.FolderID); err == nil {
 			d := h.packDriveFolderDetail(fo)

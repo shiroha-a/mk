@@ -145,15 +145,35 @@ func TestPackDriveFile_AllPropertyFields(t *testing.T) {
 		URL:        "https://example.com/p.jpg",
 		Properties: datatypes.JSON(props),
 	}
+	// #1948-14: PackDriveFile は非 self (公開) view なので getPublicProperties を
+	// 適用する。orientation=8 (>=5) なので width/height が swap され、orientation は
+	// strip される (upstream getPublicProperties)。
 	out := PackDriveFile(f, idGen)
 	require.NotNil(t, out.Properties.Width)
-	assert.Equal(t, 1280, *out.Properties.Width)
+	assert.Equal(t, 720, *out.Properties.Width, "orientation>=5 で width/height が swap (#1948-14)")
 	require.NotNil(t, out.Properties.Height)
-	assert.Equal(t, 720, *out.Properties.Height)
-	require.NotNil(t, out.Properties.Orientation)
-	assert.Equal(t, 8, *out.Properties.Orientation)
+	assert.Equal(t, 1280, *out.Properties.Height)
+	assert.Nil(t, out.Properties.Orientation, "非 self view は orientation を strip (#1948-14)")
 	require.NotNil(t, out.Properties.AvgColor)
 	assert.Equal(t, "rgb(40,65,87)", *out.Properties.AvgColor)
+
+	// #1948-14: self path (PackDriveFileSelf) は raw properties を保持する。
+	self := PackDriveFileSelf(f, idGen)
+	assert.Equal(t, 1280, *self.Properties.Width, "self view は raw width を保持")
+	assert.Equal(t, 720, *self.Properties.Height)
+	require.NotNil(t, self.Properties.Orientation, "self view は orientation を保持 (#1948-14)")
+	assert.Equal(t, 8, *self.Properties.Orientation)
+}
+
+// #1948-14: orientation < 5 は width/height を swap せず orientation だけ strip する。
+func TestPackDriveFile_PublicPropertiesNoSwapBelowFive(t *testing.T) {
+	idGen := newTestIDGen(t)
+	props, _ := json.Marshal(map[string]any{"width": 1280, "height": 720, "orientation": 3})
+	f := &model.DriveFile{ID: idGen.Generate(time.Now()), Name: "p.jpg", URL: "https://e/p.jpg", Properties: datatypes.JSON(props)}
+	out := PackDriveFile(f, idGen)
+	assert.Equal(t, 1280, *out.Properties.Width, "orientation<5 は swap しない")
+	assert.Equal(t, 720, *out.Properties.Height)
+	assert.Nil(t, out.Properties.Orientation, "orientation は strip される")
 }
 
 func TestPackDriveFile_InvalidPropertiesJSON_Defaults(t *testing.T) {

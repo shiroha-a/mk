@@ -446,7 +446,7 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		// driveFileCreatedをemitしてUploader自身のUI(ドロップアップロード等)
 		// を即時反映させる(TS: DriveService.ts:665)。
 		if s.mainStreamPublisher != nil {
-			s.mainStreamPublisher.PublishMainEvent(in.User.ID, "driveFileCreated", entity.PackDriveFile(f, s.idGen))
+			s.mainStreamPublisher.PublishMainEvent(in.User.ID, "driveFileCreated", entity.PackDriveFileSelf(f, s.idGen))
 		}
 	}
 	// chartHook は user nil でも発火させる: bytes / count は instance-wide
