@@ -690,18 +690,22 @@ func (d *UserDetailed) ResolveMoveTargets(u *model.User, resolve MoveTargetResol
 		}
 	}
 	if u.AlsoKnownAs != nil && *u.AlsoKnownAs != "" {
-		var ids []string
+		ids := []string{} // 非 nil。解決後 0 件でも [] を serialize する。
+		hadURI := false
 		for _, uri := range strings.Split(*u.AlsoKnownAs, ",") {
 			uri = strings.TrimSpace(uri)
 			if uri == "" {
 				continue
 			}
+			hadURI = true
 			if id, ok := resolve(uri); ok {
 				ids = append(ids, id)
 			}
 		}
-		// upstream は解決後 0 件なら null (空配列にしない)。
-		if len(ids) > 0 {
+		// upstream は `xs.length === 0 ? null : xs.filter(...)` で、xs は解決結果の配列
+		// (filter 前)。alsoKnownAs に >=1 URI があれば xs.length>=1 なので、全 URI が
+		// 解決不能でも null ではなく [] を返す。URI が皆無のときだけ null (#2027)。
+		if hadURI {
 			d.AlsoKnownAs = ids
 		}
 	}

@@ -176,6 +176,17 @@ func TestRanking_GetWithQueryParam(t *testing.T) {
 	var resp []any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+	// #2027: 未認証 GET には cacheSec:60 由来の Cache-Control が付く。
+	assert.Equal(t, "public, max-age=60", rec.Header().Get("Cache-Control"))
+}
+
+// #2027: POST (= 非 GET) には Cache-Control を付けない。
+func TestRanking_PostNoCacheControl(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.records = []*model.BubbleGameRecord{{ID: "r1", Score: 200}}
+	rec := post(h.Ranking, `{"gameMode":"normal"}`, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "POST には Cache-Control を付けない (#2027)")
 }
 
 // GET で gameMode が無ければ POST 同様 400。

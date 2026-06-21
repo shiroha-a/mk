@@ -189,8 +189,10 @@ func (h *Handler) Meta(c echo.Context) error {
 // Ping returns a simple pong response.
 // POST /api/ping
 func (h *Handler) Ping(c echo.Context) error {
+	// upstream ping.ts は `{ pong: Date.now() }` (epoch-ms number) を返す。
+	// misskey-js PingResponse.pong も number 型 (boolean ではない、#2027)。
 	return c.JSON(http.StatusOK, map[string]any{
-		"pong": true,
+		"pong": time.Now().UnixMilli(),
 	})
 }
 

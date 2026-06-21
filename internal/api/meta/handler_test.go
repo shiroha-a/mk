@@ -130,7 +130,10 @@ func TestPing(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, true, resp["pong"])
+	// #2027: pong は epoch-ms number (boolean ではない)。JSON round-trip で float64。
+	pong, ok := resp["pong"].(float64)
+	require.True(t, ok, "pong は number (#2027)")
+	assert.Greater(t, pong, float64(0))
 }
 
 // requireSetup は rootUserId が nil のとき true を返す。

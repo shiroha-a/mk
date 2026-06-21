@@ -311,6 +311,26 @@ func TestResolveMoveTargets(t *testing.T) {
 	assert.Equal(t, []string{"x_id", "y_id"}, d.AlsoKnownAs)
 }
 
+// #2027: alsoKnownAs に URI はあるが全て解決不能なら、null ではなく [] を返す
+// (upstream xs.length===0?null は URI 皆無のときだけ true)。
+func TestResolveMoveTargets_AllUnresolvableYieldsEmptyArray(t *testing.T) {
+	aka := "https://unknown.example/users/a, https://unknown.example/users/b"
+	u := &model.User{ID: "u1", AlsoKnownAs: &aka}
+	resolve := func(string) (string, bool) { return "", false } // 全て解決不能
+
+	d := PackUserDetailed(u, nil)
+	d.ResolveMoveTargets(u, resolve)
+	require.NotNil(t, d.AlsoKnownAs, "URI があれば全解決不能でも [] (#2027)")
+	assert.Empty(t, d.AlsoKnownAs)
+
+	// URI が皆無 (空文字列) のときは null のまま。
+	empty := ""
+	u2 := &model.User{ID: "u2", AlsoKnownAs: &empty}
+	d2 := PackUserDetailed(u2, nil)
+	d2.ResolveMoveTargets(u2, resolve)
+	assert.Nil(t, d2.AlsoKnownAs, "URI 皆無は null")
+}
+
 func TestResolveMoveTargets_NilAndUnresolvable(t *testing.T) {
 	// nil resolve / nil user は no-op。
 	d := UserDetailed{}
@@ -318,14 +338,16 @@ func TestResolveMoveTargets_NilAndUnresolvable(t *testing.T) {
 	assert.Nil(t, d.MovedTo)
 	assert.Nil(t, d.AlsoKnownAs)
 
-	// すべて解決不能なら null のまま (空配列にしない)。
+	// alsoKnownAs に URI があれば全解決不能でも [] (upstream xs.length>=1 → filter→[]、
+	// #2027)。movedTo は解決不能なら null のまま。
 	movedURI := "https://x/u"
 	aka := "https://y/u"
 	u := &model.User{MovedToURI: &movedURI, AlsoKnownAs: &aka}
 	d2 := UserDetailed{}
 	d2.ResolveMoveTargets(u, func(string) (string, bool) { return "", false })
 	assert.Nil(t, d2.MovedTo)
-	assert.Nil(t, d2.AlsoKnownAs, "all-unresolvable alsoKnownAs stays null, not []")
+	require.NotNil(t, d2.AlsoKnownAs)
+	assert.Empty(t, d2.AlsoKnownAs, "URI があれば全解決不能でも [] (#2027)")
 }
 
 func TestPackUserDetailed_MemoNullNotOmitted(t *testing.T) {
