@@ -9,6 +9,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -161,6 +162,10 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	if pollAlreadyExpired(req.Poll, now) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_CREATE_ALREADY_EXPIRED_POLL", "Cannot create an already expired poll.", "04da457d-b083-4055-9082-955525eda5a5"))
 	}
+	// reply/renote target の存在・可視性・pure-renote 検証 (#2017)。
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftCreateReplyRenoteErrs); status != 0 {
+		return c.JSON(status, body)
+	}
 	draft := &model.NoteDraft{
 		ID:                  h.idGen.Generate(now),
 		UserID:              user.ID,
@@ -276,6 +281,12 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	if req.Hashtag != nil {
 		draft.Hashtag = req.Hashtag
 	}
+	// reply/renote はリクエストで明示指定された場合のみ検証する。upstream update は
+	// data.replyId/renoteId が undefined のとき検証 block を skip するので、既存 draft の
+	// 値を再検証して編集不能にしない (#2017)。code/id は update endpoint 固有。
+	if status, body := h.validateDraftReplyRenote(user, req.ReplyID, req.RenoteID, req.Visibility, draftUpdateReplyRenoteErrs); status != 0 {
+		return c.JSON(status, body)
+	}
 	// scheduled 関連 field の変更検出 (#1045 Phase 2-C)。リクエストに
 	// scheduledAt / isActuallyScheduled が含まれている場合のみ削除 + 再
 	// enqueue する。それ以外は既存 draft 状態を維持。
@@ -338,6 +349,80 @@ type draftPoll struct {
 	Multiple     bool     `json:"multiple"`
 	ExpiresAt    *int64   `json:"expiresAt"`
 	ExpiredAfter *int64   `json:"expiredAfter"`
+}
+
+// draftReplyRenoteErrs holds the 4 reply/renote error responses that differ
+// between drafts/create.ts and drafts/update.ts. renote-visibility / reply-invisible
+// / reply-pure-renote are identical between the two endpoints (#2017)。
+type draftReplyRenoteErrs struct {
+	noSuchRenote   map[string]any
+	noSuchReply    map[string]any
+	pureRenote     map[string]any // renote target が pure renote
+	replySpecified map[string]any
+}
+
+// draftCreateReplyRenoteErrs / draftUpdateReplyRenoteErrs map the same validation
+// to the endpoint-specific code/id (drafts/create.ts vs drafts/update.ts の
+// meta.errors)。upstream は NoteDraftService が共通の internal error を throw し、
+// 各 endpoint の catch が別 code/id にマップする (#2017)。
+var draftCreateReplyRenoteErrs = draftReplyRenoteErrs{
+	noSuchRenote:   apierr.Error("NO_SUCH_RENOTE_TARGET", "No such renote target.", "b5c90186-4ab0-49c8-9bba-a1f76c282ba4"),
+	noSuchReply:    apierr.Error("NO_SUCH_REPLY_TARGET", "No such reply target.", "749ee0f6-d3da-459a-bf02-282e2da4292c"),
+	pureRenote:     apierr.Error("CANNOT_RENOTE_TO_A_PURE_RENOTE", "You can not Renote a pure Renote.", "fd4cc33e-2a37-48dd-99cc-9b806eb2031a"),
+	replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
+}
+
+var draftUpdateReplyRenoteErrs = draftReplyRenoteErrs{
+	noSuchRenote:   apierr.Error("NO_SUCH_RENOTE", "No such renote.", "64929870-2540-4d11-af41-3b484d78c956"),
+	noSuchReply:    apierr.Error("NO_SUCH_REPLY", "No such reply.", "c4721841-22fc-4bb7-ad3d-897ef1d375b5"),
+	pureRenote:     apierr.Error("CANNOT_RENOTE", "Cannot renote.", "76cc5583-5a14-4ad3-8717-0298507e32db"),
+	replySpecified: apierr.Error("CANNOT_REPLY_TO_SPECIFIED_NOTE_WITH_EXTENDED_VISIBILITY", "You cannot reply to a specified visibility note with extended visibility.", "ed940410-535c-4d5e-bfa3-af798671e93c"),
+}
+
+// validateDraftReplyRenote validates the draft's reply/renote targets, mirroring
+// upstream NoteDraftService.validate (renote → reply order)。replyID/renoteID は
+// **リクエストで明示指定された値**を渡すこと (upstream は data.replyId != null の
+// ときだけ検証し、既存 draft の値は再検証しない、#2017)。errs は endpoint 固有の
+// code/id。戻り値 status==0 は検証成功。noteRepo/viewer 未配線時は skip。
+func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID *string, visibility string, errs draftReplyRenoteErrs) (int, map[string]any) {
+	if h.noteRepo == nil || viewer == nil {
+		return 0, nil
+	}
+	if renoteID != nil {
+		t, err := h.noteRepo.FindByIDWithUser(*renoteID)
+		if err != nil || t == nil {
+			return http.StatusBadRequest, errs.noSuchRenote
+		}
+		if corenote.IsPureRenote(t) {
+			return http.StatusBadRequest, errs.pureRenote
+		}
+		// renote 対象が他人の followers note / specified note は (renote 経由の公開
+		// 拡散になるため) 拒否する。upstream は isVisibleForMe ではなくこの 2 条件のみ。
+		if (t.Visibility == model.NoteVisibilityFollowers && t.UserID != viewer.ID) || t.Visibility == model.NoteVisibilitySpecified {
+			return http.StatusBadRequest, apierr.Error("CANNOT_RENOTE_DUE_TO_VISIBILITY", "You can not Renote due to target visibility.", "be9529e9-fe72-4de0-ae43-0b363c4938af")
+		}
+	}
+	if replyID != nil {
+		t, err := h.noteRepo.FindByIDWithUser(*replyID)
+		if err != nil || t == nil {
+			return http.StatusBadRequest, errs.noSuchReply
+		}
+		// 可視性チェックを pure-renote より先に行う (mk-go の existence-oracle hardening
+		// doctrine、note_create_service の Devin #270 と同方針)。upstream NoteDraftService は
+		// pure-renote を先に見るが、不可視 note の「pure-renote か否か」を error code で
+		// 漏らさないよう mk-go では invisible を優先する。error code 自体は upstream 互換。
+		// queryService 未配線時は fail-closed で invisible 扱い。
+		if h.queryService == nil || !h.queryService.CanSee(viewer, t) {
+			return http.StatusBadRequest, apierr.Error("CANNOT_REPLY_TO_AN_INVISIBLE_NOTE", "You cannot reply to an invisible Note.", "b98980fa-3780-406c-a935-b6d0eeee10d1")
+		}
+		if corenote.IsPureRenote(t) {
+			return http.StatusBadRequest, apierr.Error("CANNOT_REPLY_TO_A_PURE_RENOTE", "You can not reply to a pure Renote.", "3ac74a84-8fd5-4bb0-870f-01804f82ce15")
+		}
+		if t.Visibility == model.NoteVisibilitySpecified && visibility != string(model.NoteVisibilitySpecified) {
+			return http.StatusBadRequest, errs.replySpecified
+		}
+	}
+	return 0, nil
 }
 
 // allDraftFilesOwned reports whether every fileID exists and is owned by

@@ -203,6 +203,76 @@ func TestPackDraft_ResolvesReplyRenoteChannelAndPoll(t *testing.T) {
 	assert.False(t, hasExp, "poll.expiresAt nil は key 省略 (#1948-19)")
 }
 
+// #2017: DraftsCreate は reply/renote target の存在・可視性・pure-renote を検証し、
+// drafts/create.ts meta.errors の code/id で 400 を返す。
+func TestDraftsCreate_ReplyRenoteValidation(t *testing.T) {
+	h, _ := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	mk := func(id, vis string) *model.Note {
+		txt := "body"
+		return &model.Note{ID: id, UserID: "author", Visibility: model.NoteVisibility(vis), Text: &txt,
+			Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	}
+	noteRepo.Notes["visible"] = mk("visible", "public")
+	noteRepo.Notes["followers"] = mk("followers", "followers")
+	h.noteRepo = noteRepo
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+	u := &model.User{ID: "u1"}
+
+	cases := []struct {
+		name, body, wantCode string
+		wantStatus           int
+	}{
+		{"no such reply", `{"text":"x","replyId":"missing"}`, "NO_SUCH_REPLY_TARGET", http.StatusBadRequest},
+		{"invisible reply", `{"text":"x","replyId":"followers"}`, "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE", http.StatusBadRequest},
+		{"no such renote", `{"text":"x","renoteId":"missing"}`, "NO_SUCH_RENOTE_TARGET", http.StatusBadRequest},
+		{"renote of others followers", `{"text":"x","renoteId":"followers"}`, "CANNOT_RENOTE_DUE_TO_VISIBILITY", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postDraft(h.DraftsCreate, tc.body, u)
+			assert.Equal(t, tc.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantCode, "#2017")
+		})
+	}
+
+	// 可視 public note への reply は成功 (draft 作成 200)。
+	rec := postDraft(h.DraftsCreate, `{"text":"x","replyId":"visible"}`, u)
+	assert.Equal(t, http.StatusOK, rec.Code, "可視 reply target は通過 (#2017)")
+}
+
+// #2017: DraftsUpdate は (1) update endpoint 固有の error code/id を返す
+// (NO_SUCH_REPLY ≠ create の NO_SUCH_REPLY_TARGET)、(2) reply/renote をリクエストで
+// 明示指定したときのみ検証し、既存 draft の値を再検証しない (over-rejection 回避)。
+func TestDraftsUpdate_ReplyRenoteValidation(t *testing.T) {
+	h, repo := newDraftHandlerWithRepo()
+	noteRepo := testutil.NewMockNoteRepository()
+	secret := "s"
+	noteRepo.Notes["followers"] = &model.Note{ID: "followers", UserID: "author", Visibility: model.NoteVisibilityFollowers, Text: &secret,
+		Reactions: datatypes.JSON([]byte("{}")), User: &model.User{ID: "author", AvatarDecorations: datatypes.JSON([]byte("[]"))}}
+	h.noteRepo = noteRepo
+	h.queryService = corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository())
+	u := &model.User{ID: "u1"}
+
+	// (1) update endpoint 固有 code: NO_SUCH_REPLY / c4721841 (create の TARGET 系ではない)。
+	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1", Visibility: "public"}
+	rec := postDraft(h.DraftsUpdate, `{"draftId":"d1","replyId":"missing"}`, u)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var er struct {
+		Error struct{ Code, ID string } `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &er))
+	assert.Equal(t, "NO_SUCH_REPLY", er.Error.Code, "update は NO_SUCH_REPLY (#2017)")
+	assert.Equal(t, "c4721841-22fc-4bb7-ad3d-897ef1d375b5", er.Error.ID)
+
+	// (2) over-rejection 回避: 既存 draft の replyId が invisible でも、replyId を
+	// 指定しない update は再検証されず成功する。
+	replyID := "followers"
+	repo.drafts["d2"] = &model.NoteDraft{ID: "d2", UserID: "u1", Visibility: "public", ReplyID: &replyID}
+	rec = postDraft(h.DraftsUpdate, `{"draftId":"d2","text":"new"}`, u)
+	assert.Equal(t, http.StatusOK, rec.Code, "replyId 未指定の update は既存値を再検証しない (#2017 HIGH-2)")
+}
+
 // #2016: draft の reply は upstream で detail:false (clippedCount/poll/myReaction/
 // nested embed を省く)、renote は detail:true。clippedCount は detail:true で常に
 // 出力 (&n.ClippedCount)、detail:false で省略されるので、reply は省略・renote は
