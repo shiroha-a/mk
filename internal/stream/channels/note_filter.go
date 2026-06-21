@@ -414,6 +414,49 @@ func (n *notePayload) isPureRenote() bool {
 		(len(n.Poll) == 0 || string(n.Poll) == "null")
 }
 
+// renoteReplyProbe parses a pure-renote の renote.reply を見るための最小 fields。
+type renoteReplyProbe struct {
+	notePayload
+	Renote *struct {
+		Reply *replyMeta `json:"reply"`
+	} `json:"renote"`
+}
+
+// renoteReplyShouldEmit applies upstream home-/hybrid-timeline.ts の pure-renote
+// 用 renote.reply gate (#2020 item2):
+//
+//	if (isRenote && !isQuote && note.renote?.reply) {
+//	    if (reply.visibility === 'followers'
+//	        && !following.has(reply.userId)
+//	        && reply.userId !== me) return; // drop
+//	}
+//
+// pure renote 以外 / renote.reply が無い / followers 以外 / 自分宛て or follow 済は pass。
+// parse 失敗は他 gate に委ねて pass。local/global timeline は upstream に本 gate が
+// 無いので呼ばない。
+func renoteReplyShouldEmit(payload []byte, viewerID string, following map[string]bool) bool {
+	var probe renoteReplyProbe
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return true
+	}
+	if !probe.isPureRenote() || probe.Renote == nil || probe.Renote.Reply == nil {
+		return true
+	}
+	reply := probe.Renote.Reply
+	if reply.Visibility != "followers" {
+		return true
+	}
+	if viewerID != "" && reply.UserID == viewerID {
+		return true
+	}
+	if following != nil {
+		if _, ok := following[reply.UserID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldEmit returns true if the note passes non-reply filter conditions
 // (renote / file / hardmute). reply の表示可否は channel ごとに異なる
 // semantics で別途 replyShouldEmit が判定する (#1063)。

@@ -344,3 +344,30 @@ func TestAnonRequireSigninDrop(t *testing.T) {
 		assert.False(t, anonRequireSigninDrop([]byte(`{not json`), ""))
 	})
 }
+
+// #2020 item2: pure renote の renote.reply が followers-only かつ viewer 非フォローなら
+// drop。それ以外 (非 pure renote / 非 followers / 自分宛て / follow 済 / renote.reply 無し)
+// は pass。
+func TestRenoteReplyShouldEmit(t *testing.T) {
+	pureFollowersReply := func(replyUser string) []byte {
+		return []byte(`{"userId":"author","renoteId":"r1","renote":{"reply":{"userId":"` + replyUser + `","visibility":"followers"}}}`)
+	}
+	// followers reply, viewer が dave を非フォロー → drop。
+	assert.False(t, renoteReplyShouldEmit(pureFollowersReply("dave"), "alice", map[string]bool{}))
+	// viewer が dave を follow → pass。
+	assert.True(t, renoteReplyShouldEmit(pureFollowersReply("dave"), "alice", map[string]bool{"dave": true}))
+	// reply.userId == viewer → pass。
+	assert.True(t, renoteReplyShouldEmit(pureFollowersReply("alice"), "alice", map[string]bool{}))
+	// snap nil + 非自分宛て → drop (fail-closed)。
+	assert.False(t, renoteReplyShouldEmit(pureFollowersReply("dave"), "alice", nil))
+	// public な renote.reply → pass。
+	assert.True(t, renoteReplyShouldEmit([]byte(`{"userId":"author","renoteId":"r1","renote":{"reply":{"userId":"dave","visibility":"public"}}}`), "alice", map[string]bool{}))
+	// quote renote (text あり = 非 pure renote) → gate 対象外、pass。
+	assert.True(t, renoteReplyShouldEmit([]byte(`{"userId":"author","renoteId":"r1","text":"q","renote":{"reply":{"userId":"dave","visibility":"followers"}}}`), "alice", map[string]bool{}))
+	// renote.reply 無し → pass。
+	assert.True(t, renoteReplyShouldEmit([]byte(`{"userId":"author","renoteId":"r1","renote":{}}`), "alice", map[string]bool{}))
+	// renote でない → pass。
+	assert.True(t, renoteReplyShouldEmit([]byte(`{"userId":"author"}`), "alice", map[string]bool{}))
+	// parse 失敗 → pass。
+	assert.True(t, renoteReplyShouldEmit([]byte(`not-json`), "alice", map[string]bool{}))
+}

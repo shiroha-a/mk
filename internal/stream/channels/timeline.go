@@ -180,6 +180,10 @@ func (c *HomeTimelineChannel) OnRedisEvent(payload []byte) {
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), false, replyGateHome) {
 		return
 	}
+	// pure renote の renote.reply が followers-only かつ非フォローなら drop (#2020 item2)。
+	if !renoteReplyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
+		return
+	}
 	payload = hideEmbeds(c.ctx, payload)
 	_ = c.ctx.Send("note", json.RawMessage(payload))
 }
@@ -248,6 +252,10 @@ func (c *HybridTimelineChannel) OnRedisEvent(payload []byte) {
 		return
 	}
 	if !replyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot(), c.filter.WithReplies, replyGateHybrid) {
+		return
+	}
+	// pure renote の renote.reply が followers-only かつ非フォローなら drop (#2020 item2)。
+	if !renoteReplyShouldEmit(payload, viewerID, c.ctx.FollowingSnapshot()) {
 		return
 	}
 	payload = hideEmbeds(c.ctx, payload)

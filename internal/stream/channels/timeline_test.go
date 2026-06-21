@@ -351,3 +351,33 @@ func TestHybridTimeline_AnonymousReplyPassthrough(t *testing.T) {
 	ch.OnRedisEvent(payload)
 	require.Len(t, ctx.sentType, 1)
 }
+
+// #2020 item2: home/hybrid timeline は pure renote の renote.reply が followers-only
+// かつ viewer 非フォローなら note を drop する。
+func TestHomeHybridTimeline_DropsFollowersOnlyRenoteReply(t *testing.T) {
+	// home: viewer は author を follow するが renote.reply 先 (dave) は非フォロー。
+	dropRenote := `{"id":"n1","userId":"author","renoteId":"r1","renote":{"reply":{"userId":"dave","visibility":"followers"}}}`
+	passRenote := `{"id":"n2","userId":"author","renoteId":"r2","renote":{"reply":{"userId":"dave","visibility":"public"}}}`
+
+	for _, tc := range []struct {
+		name string
+		ch   func(stream.ChannelContext) stream.Channel
+	}{
+		{"home", NewHomeTimeline},
+		{"hybrid", NewHybridTimeline},
+	} {
+		ctx := newCtx(&model.User{ID: "viewer"})
+		ctx.followingSnap = map[string]bool{"author": true} // dave は含めない
+		ctx.policies = map[string]any{"ltlAvailable": true} // hybrid Init 用
+		ch := tc.ch(ctx)
+		require.NoError(t, ch.Init(nil))
+
+		ctx.sentType = nil
+		ch.OnRedisEvent([]byte(dropRenote))
+		assert.Empty(t, ctx.sentType, tc.name+": followers-only renote.reply を非フォローなら drop (#2020)")
+
+		ctx.sentType = nil
+		ch.OnRedisEvent([]byte(passRenote))
+		assert.Len(t, ctx.sentType, 1, tc.name+": public renote.reply は pass")
+	}
+}
