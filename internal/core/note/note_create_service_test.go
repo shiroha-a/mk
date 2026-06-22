@@ -677,13 +677,26 @@ func TestCreateService_RenoteVisibilityAdjustment(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "home note の public renote は home に降格")
 	})
-	t.Run("own followers target forces renote to followers", func(t *testing.T) {
+	t.Run("own followers target downgrades public renote to followers", func(t *testing.T) {
 		svc, noteRepo, _ := newCreateServiceWithFollowing(t)
 		noteRepo.Notes["f"] = &model.Note{ID: "f", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
 		rid := "f"
 		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, RenoteID: &rid, Visibility: model.NoteVisibilityPublic})
 		require.NoError(t, err)
-		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "自分の followers note の renote は followers に強制")
+		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "public 引用は followers に降格")
+	})
+	t.Run("own followers target keeps direct(specified) quote (#15961)", func(t *testing.T) {
+		// upstream #15961: followers note を direct で引用したら direct を維持する
+		// (public/home のみ followers に降格)。
+		svc, noteRepo, _ := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["f2"] = &model.Note{ID: "f2", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+		rid := "f2"
+		created, err := svc.Create(note.CreateInput{
+			User: &model.User{ID: "u1"}, RenoteID: &rid,
+			Text: ptrString("quote"), Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"u2"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilitySpecified, created.Visibility, "direct 引用は specified を維持 (#15961)")
 	})
 	t.Run("localOnly target propagates to renote", func(t *testing.T) {
 		svc, noteRepo, _ := newCreateService(t)

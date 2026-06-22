@@ -582,9 +582,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 				visibility = model.NoteVisibilityHome
 			}
 		case model.NoteVisibilityFollowers:
-			// ここに来るのは自分の followers note のみ (他人は上で reject)。
-			// upstream は renote 自身も followers に強制する。
-			visibility = model.NoteVisibilityFollowers
+			// ここに来るのは自分の followers note のみ (他人は上で reject)。upstream
+			// #15961: public / home の引用のみ followers に降格し、ユーザーが選んだより
+			// 狭い可視性 (specified / direct / followers) は維持する。
+			if visibility == model.NoteVisibilityPublic || visibility == model.NoteVisibilityHome {
+				visibility = model.NoteVisibilityFollowers
+			}
 		}
 		// local-only な対象を renote したら local-only にする (channel 外のみ、
 		// upstream `data.renote.localOnly && data.channel == null`)。
