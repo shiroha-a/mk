@@ -37,8 +37,10 @@ type ReplayGuard interface {
 // so the guard entry must survive at least that long after the first
 // acceptance — otherwise the code could be replayed during the residual
 // validity once the entry expires. We pad by one extra step for clock jitter.
-// 旧実装は Skew=1 前提の 120s 固定だったが、#1555 で Skew=5 に広げたため
-// totpSkew から導出して lockstep を保つ (Skew=5 → 11 steps = 330s + 30s pad)。
+// totpSkew から導出して lockstep を保つ。#2069 で totpSkew が 5→1 になった
+// (upstream #17580 validationWindow:1 追従) ため Skew=1 → 4 steps = 120s
+// (validity 90s + 30s jitter pad)。upstream ttl=timeStep*(window*2+1)=90s より 1 step
+// 保守的。
 const defaultReplayTTL = time.Duration(2*totpSkew+2) * 30 * time.Second
 
 // RedisReplayGuard implements ReplayGuard on top of go-redis. Keys are

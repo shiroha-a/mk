@@ -34,20 +34,20 @@ func TestValidate_WrongCode(t *testing.T) {
 	assert.False(t, Validate("000000", secret))
 }
 
-// #1555 acceptance window は upstream (window:5 ≈ ±150s) に合わせる。
-// 旧 Skew=1 (±30s) では落ちる ±120s ずれのコードを受理できることを確認する。
-func TestValidate_WideWindow(t *testing.T) {
+// #2069 (upstream #17580): acceptance window は upstream validationWindow:1 に
+// 合わせ ±1 step (±30s)。±30s 内は受理、それを超えるずれは拒否する。
+func TestValidate_Window(t *testing.T) {
 	secret, _, err := GenerateSecret("Misskey", "testuser")
 	require.NoError(t, err)
-	// 120秒前 (4 steps) のコード。Skew=1 では拒否、Skew=5 では受理。
-	code, err := totp.GenerateCode(secret, time.Now().Add(-120*time.Second))
+	// 30秒前 (1 step) のコードは Skew=1 で受理。
+	code, err := totp.GenerateCode(secret, time.Now().Add(-30*time.Second))
 	require.NoError(t, err)
-	assert.True(t, Validate(code, secret), "code within ±150s window must be accepted")
+	assert.True(t, Validate(code, secret), "code within ±30s (1 step) window must be accepted")
 
-	// 窓外 (300秒前 = 10 steps) は拒否される。
-	farCode, err := totp.GenerateCode(secret, time.Now().Add(-300*time.Second))
+	// 120秒前 (4 steps) は窓外 (旧 Skew=5 では受理だったが #17580 追従で拒否)。
+	farCode, err := totp.GenerateCode(secret, time.Now().Add(-120*time.Second))
 	require.NoError(t, err)
-	assert.False(t, Validate(farCode, secret), "code far outside the window must be rejected")
+	assert.False(t, Validate(farCode, secret), "code outside ±30s window must be rejected (#2069)")
 }
 
 func TestValidate_EmptySecret(t *testing.T) {

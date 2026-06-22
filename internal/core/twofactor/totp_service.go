@@ -12,11 +12,12 @@ import (
 	"github.com/pquerna/otp/totp"
 )
 
-// totpSkew は許容する前後ステップ数。upstream Misskey は OTPAuth.TOTP.validate
-// を window:5 で呼ぶ (UserAuthService.ts / 2fa/done.ts) ため、pquerna の
-// デフォルト Skew=1 (±30s) ではなく ±5 ステップ (±150s) に合わせる。これにより
-// 端末の時計ずれが大きい環境でも upstream と同じコードを受理できる (#1555)。
-const totpSkew = 5
+// totpSkew は許容する前後ステップ数。upstream Misskey 2026.6.0 (#17580) で
+// UserAuthService の validationWindow が 5→1 に絞られた (replay surface 縮小)。
+// drop-in 互換のため mk-go も ±1 ステップ (±30s) に揃える。Misskey TS 側も
+// window:1 になったため両者 ±30s で時計ずれ許容も一致する (旧 #1555 の window:5
+// 追従は upstream 変更で陳腐化)。
+const totpSkew = 1
 
 // qrImageSize は frontend MkPoll 系コンポーネントが想定する QR コード画像
 // の 1 辺ピクセル数。Misskey TS upstream の `QRCode.toDataURL(url)` は
