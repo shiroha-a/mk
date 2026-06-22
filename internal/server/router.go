@@ -2002,6 +2002,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/antennas/delete", antennasHandler.Delete, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/antennas/list", antennasHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/antennas/notes", antennasHandler.Notes, middleware.RequireAuth(), middleware.RequireScope("read:account"))
+	api.POST("/antennas/remove-note", antennasHandler.RemoveNote, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account")) // #2069 #17463
 
 	// Clips endpoints (Phase 4.4)
 	clipsHandler := clips.NewHandler(clipService, idGen)

@@ -810,3 +810,38 @@ func TestNotes_FollowersNote_VisibleToFollower(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "n-ok")
 }
+
+// #2069 (upstream #17463): antennas/remove-note の handler。
+func TestRemoveNote_Success(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice"}
+	c, rec := newReq(t, `{"antennaId":"a1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.RemoveNote(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code, "存在しないノート除去も 204 (no-op)")
+}
+
+func TestRemoveNote_NoSuchAntenna(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "bob"} // 他人所有
+	// not-owner → NO_SUCH_ANTENNA。
+	c, rec := newReq(t, `{"antennaId":"a1","noteId":"n1"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.RemoveNote(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NO_SUCH_ANTENNA")
+	assert.Contains(t, rec.Body.String(), "850926e0-fd3b-49b6-b69a-b28a5dbd82fe")
+	// 未存在 antenna も NO_SUCH_ANTENNA。
+	c2, rec2 := newReq(t, `{"antennaId":"nope","noteId":"n1"}`)
+	setUser(c2, "alice")
+	require.NoError(t, h.RemoveNote(c2))
+	assert.Equal(t, http.StatusNotFound, rec2.Code)
+}
+
+func TestRemoveNote_BadParam(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"antennaId":"a1"}`) // noteId 欠落
+	setUser(c, "alice")
+	require.NoError(t, h.RemoveNote(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

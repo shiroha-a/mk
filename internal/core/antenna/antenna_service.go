@@ -378,6 +378,40 @@ func (s *Service) Delete(ownerID, antennaID string) error {
 	return nil
 }
 
+// RemoveNote removes a specific note from an antenna's timeline (upstream
+// antennas/remove-note、#2069 #17463)。owner 検証後、Redis Stream を走査して
+// noteId 一致 entry を XDel する。upstream は List-based の LREM だが mk-go の
+// antenna TL は Stream (entry id = push 時刻ベース) なので noteId で照合して
+// 削除する。該当ノートが無い場合は no-op で成功 (upstream も同様)。
+func (s *Service) RemoveNote(ownerID, antennaID, noteID string) error {
+	a, err := s.repo.FindByID(antennaID)
+	if err != nil {
+		return ErrAntennaNotFound
+	}
+	if a.UserID != ownerID {
+		return ErrAccessDenied
+	}
+	ctx := context.Background()
+	key := streamKey(antennaID)
+	// MaxNotesPerAntenna で stream 長は bounded なので全件走査は許容範囲。
+	msgs, err := s.client.XRange(ctx, key, "-", "+").Result()
+	if err != nil {
+		return err
+	}
+	entryIDs := make([]string, 0, 1)
+	for _, m := range msgs {
+		if v, _ := m.Values["noteId"].(string); v == noteID {
+			entryIDs = append(entryIDs, m.ID)
+		}
+	}
+	if len(entryIDs) > 0 {
+		if err := s.client.XDel(ctx, key, entryIDs...).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ListByUser returns the antennas owned by userID.
 func (s *Service) ListByUser(userID string) ([]*model.Antenna, error) {
 	return s.repo.ListByUser(userID)

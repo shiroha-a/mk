@@ -292,6 +292,28 @@ func (h *Handler) Delete(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// RemoveNote handles POST /api/antennas/remove-note (upstream #17463, #2069).
+// antenna TL から特定ノートを除去する。upstream は findOneBy({id, userId}) で
+// not-found / not-owner を区別せず NO_SUCH_ANTENNA を返すので、mk-go も両方を
+// NO_SUCH_ANTENNA に倒す。
+func (h *Handler) RemoveNote(c echo.Context) error {
+	user := middleware.GetUser(c)
+	var req struct {
+		AntennaID string `json:"antennaId"`
+		NoteID    string `json:"noteId"`
+	}
+	if err := c.Bind(&req); err != nil || req.AntennaID == "" || req.NoteID == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	if err := h.svc.RemoveNote(user.ID, req.AntennaID, req.NoteID); err != nil {
+		if errors.Is(err, coreantenna.ErrAntennaNotFound) || errors.Is(err, coreantenna.ErrAccessDenied) {
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANTENNA", "No such antenna.", "850926e0-fd3b-49b6-b69a-b28a5dbd82fe"))
+		}
+		return apierr.JSONInternalError(c)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 // List handles POST /api/antennas/list.
 func (h *Handler) List(c echo.Context) error {
 	user := middleware.GetUser(c)

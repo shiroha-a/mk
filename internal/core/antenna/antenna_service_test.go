@@ -1331,3 +1331,29 @@ func TestOnNoteCreated_NilPublisherIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n1"}, rows)
 }
+
+// #2069 (upstream #17463): RemoveNote は antenna TL stream から noteId 一致 entry を
+// 削除する。owner 検証 (not-found / not-owner)、存在しないノートは no-op 成功。
+func TestRemoveNote(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	ctx := context.Background()
+	for _, n := range []string{"n1", "n2", "n3"} {
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: streamKey("a1"), Values: map[string]any{"noteId": n},
+		}).Err())
+	}
+
+	// n2 を削除 → n1, n3 が残る。
+	require.NoError(t, svc.RemoveNote("u1", "a1", "n2"))
+	rows, err := svc.Notes(ctx, "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n1", "n3"}, rows, "n2 のみ削除される (#2069)")
+
+	// 存在しないノートは no-op 成功。
+	require.NoError(t, svc.RemoveNote("u1", "a1", "ghost"))
+
+	// not-owner は ErrAccessDenied、未存在 antenna は ErrAntennaNotFound。
+	assert.ErrorIs(t, svc.RemoveNote("other", "a1", "n1"), ErrAccessDenied)
+	assert.ErrorIs(t, svc.RemoveNote("u1", "nope", "n1"), ErrAntennaNotFound)
+}
