@@ -3,6 +3,7 @@ package inbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -177,6 +178,14 @@ func (h *Handler) Inbox(c echo.Context) error {
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
+	// upstream ActivityPubServerService.inbox (#17558): actor を持たない activity は
+	// authenticate 不能なので enqueue せず 400 で弾く。mk-go は actor 欠落で worker 側が
+	// drop する (crash はしない) が、無駄な enqueue/retry を避けるため早期 reject する。
+	if !bodyHasActor(body) {
+		slog.Warn("inbox rejected: activity has no actor")
+		return c.NoContent(http.StatusBadRequest)
+	}
+
 	if h.enqueuer != nil {
 		// Fast write path. signature の crypto 検証は worker 側で再現する。
 		// admitInbox を上で通しているので handler 側の presence check は不要。
@@ -303,4 +312,17 @@ func (h *Handler) commitChart(actor *model.User) {
 		return
 	}
 	h.chartHook.OnInboxReceived(*actor.Host)
+}
+
+// bodyHasActor reports whether the inbox activity body is a JSON object with a
+// non-null `actor` field. upstream #17558: actor 無し activity は authenticate
+// 不能なので enqueue 前に弾く。actor は string ID / embedded object どちらも許容
+// (presence + 非 null のみ判定)。
+func bodyHasActor(body []byte) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false // object でない (= 不正) → reject
+	}
+	actor, ok := probe["actor"]
+	return ok && len(actor) > 0 && string(actor) != "null"
 }

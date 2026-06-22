@@ -614,3 +614,25 @@ func TestInbox_HostSignedAndMatchAccepted(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Len(t, followingRepo.Followings, 1)
 }
+
+// #2069 (upstream #17558): bodyHasActor は actor を持つ object のみ true。
+func TestBodyHasActor(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"string actor", `{"type":"Create","actor":"https://r/u/a"}`, true},
+		{"embedded object actor", `{"type":"Create","actor":{"id":"https://r/u/a"}}`, true},
+		{"no actor key", `{"type":"Create","object":{}}`, false},
+		{"null actor", `{"type":"Create","actor":null}`, false},
+		{"not an object (array)", `[{"actor":"x"}]`, false},
+		{"not json", `garbage`, false},
+		{"empty actor string is present", `{"actor":""}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, bodyHasActor([]byte(tc.body)))
+		})
+	}
+}
