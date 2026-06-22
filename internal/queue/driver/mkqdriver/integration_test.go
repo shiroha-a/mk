@@ -1268,3 +1268,47 @@ func TestServer_Resize_ToZeroStopsAll(t *testing.T) {
 		}
 	}
 }
+
+// #2069 (upstream #17436): Inspector.PauseQueue/UnpauseQueue + GetQueueInfo.IsPaused の
+// wiring と、pause 中 enqueue した job が resume で処理される (orphan しない) ことを検証。
+func TestPauseResume_EndToEnd(t *testing.T) {
+	d := newDriver(t)
+	insp := d.Inspector()
+
+	// wiring: pause → IsPaused true、resume → false。
+	require.NoError(t, insp.PauseQueue("deliver"))
+	info, err := insp.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	assert.True(t, info.IsPaused, "pause 後は IsPaused=true")
+
+	// worker を起動。pause 中は fetch されない。
+	var received int32
+	var wg sync.WaitGroup
+	wg.Add(1)
+	srv := d.Server()
+	srv.Handle("test:pause", func(_ context.Context, _ driver.Task) error {
+		atomic.AddInt32(&received, 1)
+		wg.Done()
+		return nil
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// pause 中に enqueue。
+	require.NoError(t, d.Client().Enqueue(context.Background(), "test:pause", []byte(`{}`),
+		driver.WithQueue("deliver")))
+
+	// pause 中は処理されない (1s 待っても handler 未起動 = lua gate が wait を fetch しない)。
+	time.Sleep(1 * time.Second)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&received), "pause 中は job が処理されない")
+
+	// resume → IsPaused false + parked job が処理される (orphan しない)。
+	require.NoError(t, insp.UnpauseQueue("deliver"))
+	info, err = insp.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	assert.False(t, info.IsPaused, "resume 後は IsPaused=false")
+	if !waitGroupTimeout(&wg, 5*time.Second) {
+		t.Fatal("resume 後に parked job が処理されなかった (orphan)")
+	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&received))
+}

@@ -97,6 +97,10 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	// #1187 で内訳が変わったが合計値は不変: scheduledCount + retryCount ==
 	// counts.Delayed (= 同じ delayed bucket を partition しただけ) なので、
 	// Size 計算では partition 前の counts.Delayed をそのまま使える。
+	// paused 状態 (meta.paused) は best-effort で取得 (失敗しても info 全体は
+	// 返す、admin panel を真っ白にしない方針)。
+	paused, _ := q.IsPaused(inspectorCtx())
+
 	return &driver.InspectorInfo{
 		Queue:     qname,
 		Size:      int(counts.Wait+counts.Active+counts.Delayed+counts.Prioritized+counts.Failed) + int(repeatCount),
@@ -106,7 +110,35 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 		Failed:    int(counts.Failed),
 		Scheduled: scheduledCount + int(repeatCount),
 		Retry:     retryCount,
+		IsPaused:  paused,
 	}, nil
+}
+
+// PauseQueue pauses the named queue via mkq's BullMQ-compatible Queue.Pause
+// (meta.paused フラグ + wait→paused list 移動)。paused 中の enqueue も paused に
+// 入り orphan しない (mkq v1.0.3 #70)。
+func (i *Inspector) PauseQueue(qname string) error {
+	q := i.driver.queueFor(qname)
+	if q == nil {
+		return fmt.Errorf("mkqdriver: unknown queue %q", qname)
+	}
+	if err := q.Pause(inspectorCtx()); err != nil {
+		return fmt.Errorf("mkqdriver: pause %q: %w", qname, err)
+	}
+	return nil
+}
+
+// UnpauseQueue resumes the named queue via mkq's Queue.Resume (paused→wait に
+// 戻し marker を poke して blocking worker を起こす)。
+func (i *Inspector) UnpauseQueue(qname string) error {
+	q := i.driver.queueFor(qname)
+	if q == nil {
+		return fmt.Errorf("mkqdriver: unknown queue %q", qname)
+	}
+	if err := q.Resume(inspectorCtx()); err != nil {
+		return fmt.Errorf("mkqdriver: resume %q: %w", qname, err)
+	}
+	return nil
 }
 
 // partitionDelayedByAttempts inspects mkq's delayed bucket and partitions

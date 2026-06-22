@@ -2587,6 +2587,8 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/queue/inbox-delayed", adminHandler.QueueInboxDelayed, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 	api.POST("/admin/queue/jobs", adminHandler.QueueJobs, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 	api.POST("/admin/queue/promote-jobs", adminHandler.QueuePromoteJobs, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:queue"))
+	api.POST("/admin/queue/pause", adminHandler.QueuePause, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:queue"))   // #2069 #17436
+	api.POST("/admin/queue/resume", adminHandler.QueueResume, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:queue")) // #2069 #17436
 	api.POST("/admin/queue/queue-stats", adminHandler.QueueQueueStats, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 	api.POST("/admin/queue/queues", adminHandler.QueueQueues, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 	api.POST("/admin/queue/remove-job", adminHandler.QueueRemoveJob, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:queue"))

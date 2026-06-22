@@ -37,7 +37,18 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 		Failed:    info.Failed,
 		Scheduled: info.Scheduled,
 		Retry:     info.Retry,
+		IsPaused:  info.Paused,
 	}, nil
+}
+
+// PauseQueue pauses the named queue via asynq's native PauseQueue (#17436)。
+func (i *Inspector) PauseQueue(qname string) error {
+	return i.inner.PauseQueue(qname)
+}
+
+// UnpauseQueue resumes the named queue via asynq's native UnpauseQueue。
+func (i *Inspector) UnpauseQueue(qname string) error {
+	return i.inner.UnpauseQueue(qname)
 }
 
 // DeleteTask deletes the named task from the named queue.

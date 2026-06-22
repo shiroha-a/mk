@@ -73,9 +73,28 @@ type stubQueueInspector struct {
 	deleted       []string
 	runCalls      []string
 	deleteAllHits []string
+	pauseCalls    []string
+	resumeCalls   []string
+	pauseErr      error
 	queuesErr     error
 	runErr        error
 	deleteErr     error
+}
+
+func (s *stubQueueInspector) PauseQueue(q string) error {
+	if s.pauseErr != nil {
+		return s.pauseErr
+	}
+	s.pauseCalls = append(s.pauseCalls, q)
+	return nil
+}
+
+func (s *stubQueueInspector) UnpauseQueue(q string) error {
+	if s.pauseErr != nil {
+		return s.pauseErr
+	}
+	s.resumeCalls = append(s.resumeCalls, q)
+	return nil
 }
 
 func (s *stubQueueInspector) Queues() ([]string, error) { return s.queues, s.queuesErr }
@@ -1101,4 +1120,65 @@ func TestQueueJobs_SearchReturnsUpTo100(t *testing.T) {
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Len(t, rows, 100, "search は最大 100 件 (RETURN_LIMIT)")
+}
+
+// #2069 (upstream #17436): admin/queue/pause・resume。
+func TestQueuePause_Success(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver", "inbox"}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueuePause, `{"queue":"deliver"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"deliver"}, insp.pauseCalls)
+	assert.Empty(t, insp.resumeCalls)
+}
+
+func TestQueueResume_Success(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver", "inbox"}}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueueResume, `{"queue":"inbox"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"inbox"}, insp.resumeCalls)
+	assert.Empty(t, insp.pauseCalls)
+}
+
+func TestQueuePauseResume_Validation(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver"}}
+	h.SetQueueInspector(insp)
+	// queue 欠落 → 400。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueuePause, `{}`, adminUser).Code)
+	// QUEUE_TYPES 外 → 400。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueuePause, `{"queue":"bogus"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueueResume, `{"queue":"bogus"}`, adminUser).Code)
+	assert.Empty(t, insp.pauseCalls)
+	assert.Empty(t, insp.resumeCalls)
+}
+
+// #2069 H1: QUEUE_TYPES enum だが mk-go が運用しない queue (Queues() に無い) は
+// no-op 204 (frontend が全 QUEUE_TYPES タブを出すため 500 にしない)。
+func TestQueuePause_UnmanagedQueueNoOp(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver", "inbox"}}
+	h.SetQueueInspector(insp)
+	// "system" は enum だが managed でない → 204、PauseQueue は呼ばれない。
+	rec := doPost(h.QueuePause, `{"queue":"system"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, insp.pauseCalls)
+}
+
+func TestQueuePause_InspectorError(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver"}, pauseErr: assert.AnError}
+	h.SetQueueInspector(insp)
+	rec := doPost(h.QueuePause, `{"queue":"deliver"}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestQueuePause_NoInspector(t *testing.T) {
+	// queueInspector 未配線時は no-op 204 (QueueClear と同パターン)。
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.QueuePause, `{"queue":"deliver"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }

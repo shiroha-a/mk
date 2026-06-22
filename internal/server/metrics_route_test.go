@@ -73,6 +73,8 @@ func (i *fakeMetricsInspector) DeleteAllPendingTasks(qname string) (int, error) 
 	return 0, nil
 }
 func (i *fakeMetricsInspector) RunTask(qname, taskID string) error { return nil }
+func (i *fakeMetricsInspector) PauseQueue(qname string) error      { return nil }
+func (i *fakeMetricsInspector) UnpauseQueue(qname string) error    { return nil }
 func (i *fakeMetricsInspector) ListPendingTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }

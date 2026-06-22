@@ -65,7 +65,16 @@ func (a *queueInspectorAdapter) GetQueueInfo(qname string) (*apiadmin.QueueInfoR
 		Failed:    info.Failed,
 		Scheduled: info.Scheduled,
 		Retry:     info.Retry,
+		IsPaused:  info.IsPaused,
 	}, nil
+}
+
+func (a *queueInspectorAdapter) PauseQueue(qname string) error {
+	return a.inner.PauseQueue(qname)
+}
+
+func (a *queueInspectorAdapter) UnpauseQueue(qname string) error {
+	return a.inner.UnpauseQueue(qname)
 }
 
 func (a *queueInspectorAdapter) DeleteTask(qname, taskID string) error {

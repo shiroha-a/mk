@@ -39,6 +39,16 @@ func (i *Inspector) GetQueueInfo(qname string) (*InspectorInfo, error) {
 	return i.inner.GetQueueInfo(qname)
 }
 
+// PauseQueue pauses the named queue (#17436)。
+func (i *Inspector) PauseQueue(qname string) error {
+	return i.inner.PauseQueue(qname)
+}
+
+// UnpauseQueue resumes the named queue (#17436)。
+func (i *Inspector) UnpauseQueue(qname string) error {
+	return i.inner.UnpauseQueue(qname)
+}
+
 // DeleteTask deletes a task by queue and ID.
 func (i *Inspector) DeleteTask(qname, taskID string) error {
 	return i.inner.DeleteTask(qname, taskID)

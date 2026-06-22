@@ -421,6 +421,9 @@ type QueueInspector interface {
 	DeleteTask(qname, taskID string) error
 	DeleteAllPendingTasks(qname string) (int, error)
 	RunTask(qname, taskID string) error
+	// PauseQueue / UnpauseQueue pause and resume a queue (#17436)。
+	PauseQueue(qname string) error
+	UnpauseQueue(qname string) error
 	// Task listing APIs. page is 1-indexed.
 	ListPendingTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListActiveTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
@@ -451,6 +454,7 @@ type QueueInfoResult struct {
 	Failed    int
 	Scheduled int
 	Retry     int
+	IsPaused  bool
 }
 
 // QueueTaskSummary mirrors queue.TaskSummary for handler responses without

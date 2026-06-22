@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/queue"
 )
 
@@ -469,6 +470,75 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"promoted": promoted})
 }
 
+// queuePauseResumeTypes mirrors upstream QueueService.QUEUE_TYPES (admin/queue/
+// pause・resume の param enum、#17436)。enum 外の queue は invalidParam で弾く。
+var queuePauseResumeTypes = map[string]struct{}{
+	"system": {}, "endedPollNotification": {}, "postScheduledNote": {}, "deliver": {},
+	"inbox": {}, "db": {}, "relationship": {}, "objectStorage": {},
+	"userWebhookDeliver": {}, "systemWebhookDeliver": {},
+}
+
+// QueuePause handles POST /api/admin/queue/pause (upstream #17436)。
+func (h *Handler) QueuePause(c echo.Context) error { return h.queuePauseResume(c, true) }
+
+// QueueResume handles POST /api/admin/queue/resume (upstream #17436)。
+func (h *Handler) QueueResume(c echo.Context) error { return h.queuePauseResume(c, false) }
+
+// queuePauseResume は pause / resume 共通処理。queue param を QUEUE_TYPES で検証し、
+// queueInspector の PauseQueue/UnpauseQueue を呼んで moderationLog に記録する。
+// upstream pause.ts / resume.ts と同じく res は無し (204)。
+func (h *Handler) queuePauseResume(c echo.Context, pause bool) error {
+	var req struct {
+		Queue string `json:"queue"`
+	}
+	if err := c.Bind(&req); err != nil || req.Queue == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue is required."))
+	}
+	if _, ok := queuePauseResumeTypes[req.Queue]; !ok {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("invalid queue."))
+	}
+	if h.queueInspector == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	// mk-go が運用しない queue (QUEUE_TYPES enum だが worker 無し) は no-op 204。
+	// upstream は全 queue が実在するが mk-go は subset のみ運用するため、frontend が
+	// 全 QUEUE_TYPES のタブを出して未運用 queue を pause しようとしても、GetQueueInfo /
+	// queue-stats の zero-fill 同様 graceful に成功させる (500 を返さない)。
+	if !h.queueIsManaged(req.Queue) {
+		return c.NoContent(http.StatusNoContent)
+	}
+	var err error
+	logType := moderationlog.LogResumeQueue
+	if pause {
+		err = h.queueInspector.PauseQueue(req.Queue)
+		logType = moderationlog.LogPauseQueue
+	} else {
+		err = h.queueInspector.UnpauseQueue(req.Queue)
+	}
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	// upstream は moderationLog.log(me, 'pauseQueue') を detail 無し (空 object) で
+	// 記録するため、info も空にして parity を保つ。
+	h.logModeration(c, logType, map[string]any{})
+	return c.NoContent(http.StatusNoContent)
+}
+
+// queueIsManaged reports whether qname is a queue mk-go actually runs (= present
+// in Inspector.Queues())。判定不能 (Queues error) 時は通常経路へ倒す。
+func (h *Handler) queueIsManaged(qname string) bool {
+	queues, err := h.queueInspector.Queues()
+	if err != nil {
+		return true
+	}
+	for _, q := range queues {
+		if q == qname {
+			return true
+		}
+	}
+	return false
+}
+
 // shapeQueueForFrontend adapts a QueueInfoResult to the Misskey Bull-shaped
 // JSON expected by the admin/job-queue.vue page.
 //
@@ -496,7 +566,7 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 	return map[string]any{
 		"name":          info.Queue,
 		"qualifiedName": info.Queue,
-		"isPaused":      false,
+		"isPaused":      info.IsPaused,
 		"counts": map[string]any{
 			"active":    info.Active,
 			"delayed":   delayed,

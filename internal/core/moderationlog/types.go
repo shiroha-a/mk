@@ -10,7 +10,8 @@
 //     spec even if the UI falls back to the generic display).
 //
 // Types defined in upstream but skipped for now:
-//   - clearQueue / promoteQueue: tooling-only, no UI branch
+//   - clearQueue / promoteQueue: tooling-only, no UI branch (pauseQueue /
+//     resumeQueue は admin/queue/pause・resume で記録するため下に定義済み)
 //   - markSensitiveDriveFile / unmarkSensitiveDriveFile / deleteDriveFile:
 //     mk-go admin/drive write handlers are not implemented
 //   - deleteNote / deletePage / deleteFlash / deleteGalleryPost / deleteChatRoom:
@@ -94,6 +95,10 @@ const (
 	LogDeleteGalleryPost LogType = "deleteGalleryPost"
 	LogDeleteFlash       LogType = "deleteFlash"
 	LogDeleteChatRoom    LogType = "deleteChatRoom"
+
+	// Queue (admin/queue/pause・resume、upstream #17436)
+	LogPauseQueue  LogType = "pauseQueue"
+	LogResumeQueue LogType = "resumeQueue"
 
 	// Misc
 	LogUpdateProxyAccountDescription LogType = "updateProxyAccountDescription"

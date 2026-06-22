@@ -37,6 +37,9 @@ type InspectorInfo struct {
 	Failed    int
 	Scheduled int
 	Retry     int
+	// IsPaused reports whether the queue is paused (BullMQ meta.paused)。
+	// upstream admin/queue は queueInfo.isPaused でボタンを切り替える (#17436)。
+	IsPaused bool
 }
 
 // MetricsResult is the BullMQ-compatible per-minute history of
@@ -95,6 +98,13 @@ type Inspector interface {
 	DeleteTask(qname, taskID string) error
 	DeleteAllPendingTasks(qname string) (int, error)
 	RunTask(qname, taskID string) error
+
+	// PauseQueue / UnpauseQueue pause and resume a queue (BullMQ
+	// Queue.pause()/resume()、upstream admin/queue/pause・resume #17436)。
+	// paused 中は worker が job を fetch しない。enqueue された job は drop
+	// されず resume で再開される (driver の保証)。
+	PauseQueue(qname string) error
+	UnpauseQueue(qname string) error
 
 	ListPendingTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	ListActiveTasks(qname string, page, pageSize int) ([]*TaskSummary, error)

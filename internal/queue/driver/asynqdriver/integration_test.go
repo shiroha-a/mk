@@ -289,3 +289,28 @@ func TestScheduler_RegisterAndStart(t *testing.T) {
 	require.NoError(t, sched.Start())
 	sched.Shutdown()
 }
+
+// #2069 (upstream #17436): Inspector.PauseQueue/UnpauseQueue + GetQueueInfo.IsPaused が
+// asynq native pause に wire されていることを検証。
+func TestInspector_PauseResume(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d := newDriver()
+	t.Cleanup(func() { _ = d.Close() })
+
+	// queue を実体化するため 1 件 enqueue。
+	require.NoError(t, d.Client().Enqueue(context.Background(),
+		"pause:probe", []byte("x"), driver.WithQueue("deliver")))
+
+	ins := d.Inspector()
+	require.NoError(t, ins.PauseQueue("deliver"))
+	info, err := ins.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	assert.True(t, info.IsPaused, "pause 後は IsPaused=true")
+
+	require.NoError(t, ins.UnpauseQueue("deliver"))
+	info, err = ins.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	assert.False(t, info.IsPaused, "resume 後は IsPaused=false")
+}

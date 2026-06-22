@@ -92,6 +92,8 @@ func (i *scriptableInspector) DeleteAllPendingTasks(qname string) (int, error) {
 	return 0, nil
 }
 func (i *scriptableInspector) RunTask(qname, taskID string) error { return nil }
+func (i *scriptableInspector) PauseQueue(qname string) error      { return nil }
+func (i *scriptableInspector) UnpauseQueue(qname string) error    { return nil }
 func (i *scriptableInspector) ListPendingTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
