@@ -732,11 +732,35 @@ func (r *Renderer) addAttachments(out *Note, n *model.Note) {
 			Name:      stringValue(f.Comment),
 			Sensitive: f.IsSensitive,
 		}
+		// upstream renderDocument は file.properties?.width / height を Document に
+		// 載せる (画像の寸法メタデータ、upstream #17563)。drive_file.properties は
+		// `{"width":..,"height":..}` jsonb。非画像は width/height を持たず omitempty で
+		// 出ない。
+		if w, h := driveImageDimensions([]byte(f.Properties)); w > 0 || h > 0 {
+			doc.Width = w
+			doc.Height = h
+		}
 		out.Attachment = append(out.Attachment, doc)
 		if f.IsSensitive {
 			out.Sensitive = true
 		}
 	}
+}
+
+// driveImageDimensions extracts width/height from a drive_file.properties jsonb
+// (`{"width":..,"height":..}`)。値が無い / parse 失敗 / 非画像なら 0,0 を返す (#2069)。
+func driveImageDimensions(props []byte) (int, int) {
+	if len(props) == 0 {
+		return 0, 0
+	}
+	var p struct {
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	}
+	if err := json.Unmarshal(props, &p); err != nil {
+		return 0, 0
+	}
+	return p.Width, p.Height
 }
 
 // resolveNoteURI returns the canonical URI for a note (remote URI or local).

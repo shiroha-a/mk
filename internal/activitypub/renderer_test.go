@@ -972,7 +972,8 @@ func TestRenderer_RenderNote_WithAttachment(t *testing.T) {
 	r := newRenderer()
 	comment := "photo"
 	r.SetFileResolver(&stubFileResolver{files: []*model.DriveFile{
-		{Type: "image/png", URL: "https://example.com/files/f1.png", Comment: &comment, IsSensitive: false},
+		{Type: "image/png", URL: "https://example.com/files/f1.png", Comment: &comment, IsSensitive: false,
+			Properties: datatypes.JSON(`{"width":800,"height":600}`)},
 		{Type: "video/mp4", URL: "https://example.com/files/f2.mp4", IsSensitive: true},
 	}})
 	idGen := newIDGen(t)
@@ -990,9 +991,15 @@ func TestRenderer_RenderNote_WithAttachment(t *testing.T) {
 	assert.Equal(t, "image/png", doc0.MediaType)
 	assert.Equal(t, "photo", doc0.Name)
 	assert.False(t, doc0.Sensitive)
+	// #2069 (upstream #17563): 画像の width/height を properties から付与。
+	assert.Equal(t, 800, doc0.Width)
+	assert.Equal(t, 600, doc0.Height)
 	doc1, ok := out.Attachment[1].(Document)
 	require.True(t, ok)
 	assert.True(t, doc1.Sensitive)
+	// 非画像 (properties 無し) は width/height 0 (omitempty)。
+	assert.Equal(t, 0, doc1.Width)
+	assert.Equal(t, 0, doc1.Height)
 	// sensitive ファイルがあるのでNote自体もsensitiveになる
 	assert.True(t, out.Sensitive)
 }
