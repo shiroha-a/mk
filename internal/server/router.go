@@ -211,6 +211,8 @@ func (s *Server) setupRoutes() {
 
 	// Core services
 	roleService := corerole.NewService(roleRepo, roleAssignmentRepo, metaRepo, idGen)
+	// server 全体の upload 上限 (MB) を role policy maxFileSizeMb の cap に使う (#2069/#17389)。
+	roleService.SetServerMaxFileSizeMb(int(s.config.MaxFileSize / (1024 * 1024)))
 	// drop-in 互換 (#785): Misskey TS は signup root user を user.isRoot=true で
 	// マークし meta.rootUserId は set しない。TS DB を引き継いだ mk-go では
 	// meta.rootUserId=nil となり admin paths で 403 が返る regression を防ぐ

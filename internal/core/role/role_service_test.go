@@ -1623,3 +1623,26 @@ func TestService_ListByLastUsed(t *testing.T) {
 	require.Len(t, roles, 3)
 	assert.Equal(t, []string{"b", "c", "a"}, []string{roles[0].ID, roles[1].ID, roles[2].ID}, "lastUsedAt DESC (#2061)")
 }
+
+// #2069 (upstream #17389): maxFileSizeMb は server 全体上限 (SetServerMaxFileSizeMb)
+// で cap される。role が server 上限超の値を持っても cap 後の値になり、base-only
+// (role 無し) ユーザーでも cap が効く。
+func TestGetUserPolicies_MaxFileSizeServerCap(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	svc.SetServerMaxFileSizeMb(100) // server 全体 100MB
+
+	// role が maxFileSizeMb=500 を要求 → server cap 100 に丸められる。
+	roleRepo.Roles["r1"] = &model.Role{
+		ID: "r1", Name: "Big",
+		Policies: datatypes.JSON([]byte(`{"maxFileSizeMb": {"useDefault": false, "priority": 0, "value": 500}}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+	assert.Equal(t, 100, svc.GetUserPolicies("user1")["maxFileSizeMb"], "role 値 500 は server cap 100 に丸められる (#2069)")
+
+	// role 無し (base-only) でも cap が効く: default 30 < cap 100 なので default 維持。
+	assert.Equal(t, 30, svc.GetUserPolicies("user2")["maxFileSizeMb"], "base default 30 は cap 100 未満で維持")
+
+	// cap が default 未満なら default も cap される (base-role-only bug fix)。
+	svc.SetServerMaxFileSizeMb(10)
+	assert.Equal(t, 10, svc.GetUserPolicies("user2")["maxFileSizeMb"], "cap 10 < default 30 → base-only でも 10 に cap (#2069)")
+}

@@ -94,6 +94,10 @@ type Service struct {
 	assignmentRepo repository.RoleAssignmentRepository
 	metaRepo       repository.MetaRepository
 	idGen          id.Generator
+	// serverMaxFileSizeMb は config.maxFileSize を MB 換算した server 全体の
+	// upload 上限。GetUserPolicies の maxFileSizeMb を upstream #17389 同様に
+	// この値で cap する (0 なら cap しない、router で配線)。
+	serverMaxFileSizeMb int
 	// userRepo は drop-in 互換 (#785) のため optional に注入される。
 	// Misskey TS upstream で signup された root user は user.isRoot=true で
 	// 識別され meta.rootUserId は set されない。drop-in で TS DB を引き継いだ
@@ -541,6 +545,38 @@ type rolePolicyOverride struct {
 //
 // userID が "" の場合は base policies のみを返す (= upstream の userId==null
 // と同等)。
+// SetServerMaxFileSizeMb wires the server-wide upload size limit (MB) used to
+// cap the aggregated maxFileSizeMb policy (upstream #17389)。0 で cap 無効。
+func (s *Service) SetServerMaxFileSizeMb(mb int) { s.serverMaxFileSizeMb = mb }
+
+// capServerMaxFileSize caps the maxFileSizeMb policy at serverMaxFileSizeMb,
+// mirroring upstream `Math.min(serverMaxFileSizeMb, aggregated)` (#17389)。
+// base-only / role 集約どちらの経路でも適用するため、全 return 直前で呼ぶ。
+func (s *Service) capServerMaxFileSize(policies map[string]any) map[string]any {
+	if s.serverMaxFileSizeMb <= 0 || policies == nil {
+		return policies
+	}
+	if v, ok := policies["maxFileSizeMb"]; ok {
+		if cur, ok := policyIntValue(v); ok && cur > s.serverMaxFileSizeMb {
+			policies["maxFileSizeMb"] = s.serverMaxFileSizeMb
+		}
+	}
+	return policies
+}
+
+// policyIntValue extracts an int from a policy value (int / int64 / float64)。
+func policyIntValue(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	}
+	return 0, false
+}
+
 func (s *Service) GetUserPolicies(userID string) map[string]any {
 	// applyMetaBasePolicies が basePolicies を mutate するため、共有 cache では
 	// なく clone を使う (DefaultPolicies の共有 map を壊さない、#1377)。
@@ -548,16 +584,18 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 	s.applyMetaBasePolicies(basePolicies)
 
 	if userID == "" {
-		return basePolicies
+		return s.capServerMaxFileSize(basePolicies)
 	}
 	roles, err := s.GetUserRoles(userID)
 	if err != nil {
 		// role 取得失敗時は base policies で fallback (upstream は throw
 		// するが、mk-go は fail-soft で gate を default 値に倒す)。
-		return basePolicies
+		return s.capServerMaxFileSize(basePolicies)
 	}
 	if len(roles) == 0 {
-		return basePolicies
+		// upstream #17389: base role only でも server cap を効かせる (旧 upstream は
+		// 素通しだった base-role-only bug を aggregate([base]) で修正)。
+		return s.capServerMaxFileSize(basePolicies)
 	}
 
 	// 各 role の policies JSON を Unmarshal して一度だけ展開する。
@@ -579,7 +617,7 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 	for key, baseVal := range basePolicies {
 		out[key] = computePolicy(key, baseVal, roleOverrides)
 	}
-	return out
+	return s.capServerMaxFileSize(out)
 }
 
 // applyMetaBasePolicies overlays `meta.policies` (admin UI 設定の base
