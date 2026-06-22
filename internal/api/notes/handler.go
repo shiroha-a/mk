@@ -785,6 +785,10 @@ type SearchRequest struct {
 	UserID    string `json:"userId"`
 	ChannelID string `json:"channelId"`
 	Host      string `json:"host"`
+	// rangeStartAt / rangeEndAt は投稿日時範囲 (epoch ms、upstream #16119 #2069)。
+	// sinceDate/untilDate (cursor 正規化用) とは別物で、cursor と独立に AND される。
+	RangeStartAt *int64 `json:"rangeStartAt"`
+	RangeEndAt   *int64 `json:"rangeEndAt"`
 }
 
 // Search handles POST /api/notes/search.
@@ -822,10 +826,12 @@ func (h *Handler) Search(c echo.Context) error {
 		viewer,
 		req.Query,
 		search.SearchOpts{
-			UserID:    req.UserID,
-			ChannelID: req.ChannelID,
-			Host:      req.Host,
-			Offset:    req.Offset,
+			UserID:       req.UserID,
+			ChannelID:    req.ChannelID,
+			Host:         req.Host,
+			Offset:       req.Offset,
+			RangeStartAt: req.RangeStartAt,
+			RangeEndAt:   req.RangeEndAt,
 		},
 		search.Pagination{
 			UntilID: untilID,

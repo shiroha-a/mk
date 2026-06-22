@@ -47,6 +47,10 @@ type SearchOpts struct {
 	// Offset is the OFFSET-based pagination offset (upstream notes/search.ts:47
 	// `offset`). 0 = no offset (#1783)。
 	Offset int
+	// RangeStartAt / RangeEndAt は投稿日時範囲 (epoch ms、upstream #16119 #2069)。
+	// nil = 無制限。sinceId/untilId cursor とは独立に AND される。
+	RangeStartAt *int64
+	RangeEndAt   *int64
 }
 
 // Pagination wraps the keyset pagination parameters used by SearchNote.

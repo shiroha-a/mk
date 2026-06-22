@@ -564,6 +564,13 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 	if f.SinceID != "" {
 		q = q.Where("id > ?", f.SinceID)
 	}
+	// 投稿日時範囲 (upstream #16119、#2069)。cursor とは独立に AND する。
+	if f.RangeStartID != "" {
+		q = q.Where("id > ?", f.RangeStartID)
+	}
+	if f.RangeEndID != "" {
+		q = q.Where("id < ?", f.RangeEndID)
+	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 10

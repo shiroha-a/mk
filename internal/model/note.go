@@ -78,7 +78,12 @@ type NoteSearchFilter struct {
 	Host      string
 	UntilID   string
 	SinceID   string
-	Limit     int
+	// RangeStartID / RangeEndID は投稿日時範囲検索 (upstream #16119、#2069) の id
+	// 境界。rangeStartAt/rangeEndAt (epoch ms) を aidx prefix に変換したもので、
+	// sinceID/untilID cursor とは独立に AND される (空なら無視)。
+	RangeStartID string
+	RangeEndID   string
+	Limit        int
 	// Offset is the OFFSET-based pagination offset (upstream notes/search.ts:47)。
 	// 0 = no offset (#1783)。
 	Offset int

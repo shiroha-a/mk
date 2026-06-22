@@ -1,10 +1,30 @@
 package search
 
 import (
+	"time"
+
 	"github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
+
+// rangeStartID / rangeEndID convert a date-range bound (epoch ms) to an aidx
+// prefix id boundary, mirroring upstream `idService.gen(rangeStartAt-1)` /
+// `gen(rangeEndAt+1)` (#16119 #2069)。±1ms で範囲を inclusive にする。
+func rangeStartID(at *int64) string {
+	if at == nil {
+		return ""
+	}
+	return id.AidxCutoffPrefix(time.UnixMilli(*at - 1))
+}
+
+func rangeEndID(at *int64) string {
+	if at == nil {
+		return ""
+	}
+	return id.AidxCutoffPrefix(time.UnixMilli(*at + 1))
+}
 
 // SQLLikeProvider is the default backend that delegates to
 // `noteRepo.SearchByFilter`. It performs a case-insensitive substring match
@@ -62,16 +82,18 @@ func (p *SQLLikeProvider) SearchNote(viewer *model.User, query string, opts Sear
 		viewerID = viewer.ID
 	}
 	rows, err := p.noteRepo.SearchByFilter(model.NoteSearchFilter{
-		Query:     query,
-		UserID:    opts.UserID,
-		ChannelID: opts.ChannelID,
-		Host:      opts.Host,
-		UntilID:   page.UntilID,
-		SinceID:   page.SinceID,
-		Limit:     limit,
-		Offset:    opts.Offset,
-		ViewerID:  viewerID,
-		Pgroonga:  p.pgroonga,
+		Query:        query,
+		UserID:       opts.UserID,
+		ChannelID:    opts.ChannelID,
+		Host:         opts.Host,
+		UntilID:      page.UntilID,
+		SinceID:      page.SinceID,
+		RangeStartID: rangeStartID(opts.RangeStartAt),
+		RangeEndID:   rangeEndID(opts.RangeEndAt),
+		Limit:        limit,
+		Offset:       opts.Offset,
+		ViewerID:     viewerID,
+		Pgroonga:     p.pgroonga,
 	})
 	if err != nil {
 		return nil, err

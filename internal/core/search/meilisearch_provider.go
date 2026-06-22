@@ -196,6 +196,14 @@ func (p *MeilisearchProvider) buildFilter(opts SearchOpts, page Pagination) stri
 	if t := p.timestampOfID(page.SinceID); t != 0 {
 		clauses = append(clauses, fmt.Sprintf("(createdAt > %d)", t))
 	}
+	// 投稿日時範囲 (upstream #16119、#2069)。createdAt は epoch ms で index 済なので
+	// rangeStartAt/rangeEndAt (epoch ms) と直接比較する。cursor とは独立に AND。
+	if opts.RangeStartAt != nil {
+		clauses = append(clauses, fmt.Sprintf("(createdAt >= %d)", *opts.RangeStartAt))
+	}
+	if opts.RangeEndAt != nil {
+		clauses = append(clauses, fmt.Sprintf("(createdAt <= %d)", *opts.RangeEndAt))
+	}
 	if opts.UserID != "" {
 		clauses = append(clauses, fmt.Sprintf("(userId = %s)", quoteValue(opts.UserID)))
 	}

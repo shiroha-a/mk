@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3380,4 +3381,38 @@ func TestNoteRepository_ListPublicByUserID(t *testing.T) {
 	require.Len(t, sinceRows, 2)
 	assert.Equal(t, "obx_pub1", sinceRows[0].ID, "since-only is ASC")
 	assert.Equal(t, "obx_pub2", sinceRows[1].ID)
+}
+
+// #2069 (upstream #16119): SearchByFilter は RangeStartID/RangeEndID (投稿日時範囲を
+// aidx prefix に変換した境界) で cursor とは独立に絞り込む。
+func TestNoteRepository_SearchByFilter_DateRange(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_dr_1", "drangeuser")
+	defer cleanupUser(t, u.ID)
+	idGen, _ := id.NewGenerator("aidx")
+	txt := "drangesearchabletoken"
+	mk := func(ts time.Time) string {
+		nid := idGen.Generate(ts)
+		require.NoError(t, repo.Create(&model.Note{
+			ID: nid, UserID: u.ID, Text: &txt,
+			Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+		}))
+		t.Cleanup(func() { cleanupNote(t, nid) })
+		return nid
+	}
+	id2021 := mk(time.Date(2021, 6, 1, 0, 0, 0, 0, time.UTC))
+	id2022 := mk(time.Date(2022, 6, 1, 0, 0, 0, 0, time.UTC))
+	id2023 := mk(time.Date(2023, 6, 1, 0, 0, 0, 0, time.UTC))
+
+	// 2022 年のみを範囲指定 (start 2022-01-01 / end 2022-12-31)。
+	rangeStart := id.AidxCutoffPrefix(time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC))
+	rangeEnd := id.AidxCutoffPrefix(time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC))
+	out, err := repo.SearchByFilter(model.NoteSearchFilter{
+		Query: "drangesearchabletoken", RangeStartID: rangeStart, RangeEndID: rangeEnd, Limit: 50,
+	})
+	require.NoError(t, err)
+	got := idsOf(out)
+	assert.Contains(t, got, id2022, "2022 の note は範囲内 (#2069)")
+	assert.NotContains(t, got, id2021, "2021 は範囲外")
+	assert.NotContains(t, got, id2023, "2023 は範囲外")
 }

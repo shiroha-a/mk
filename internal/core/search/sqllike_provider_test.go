@@ -3,6 +3,7 @@ package search
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -129,4 +130,16 @@ func TestSQLLikeProvider_VisibilityFilterDropsHidden(t *testing.T) {
 	out, err := p.SearchNote(nil, "hello", SearchOpts{}, Pagination{Limit: 10})
 	require.NoError(t, err)
 	assert.Len(t, out, 1)
+}
+
+// #2069 (upstream #16119): rangeStartID/rangeEndID は epoch ms → aidx prefix 境界。
+// nil は空文字 (制限なし)、非 nil は AidxCutoffPrefix の値。
+func TestRangeBoundConversion(t *testing.T) {
+	assert.Equal(t, "", rangeStartID(nil))
+	assert.Equal(t, "", rangeEndID(nil))
+	at := time.Date(2022, 6, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	assert.NotEmpty(t, rangeStartID(&at))
+	assert.NotEmpty(t, rangeEndID(&at))
+	// end は start より後ろの境界 (rangeEndAt+1 > rangeStartAt-1 で prefix も大)。
+	assert.Greater(t, rangeEndID(&at), rangeStartID(&at))
 }
