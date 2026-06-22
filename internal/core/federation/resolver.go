@@ -1251,16 +1251,26 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if note.Text != nil {
 		textMentions = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(*note.Text))
 	}
-	tagMentions := r.resolveMentionedUserIDs(extractMentionTags(apNote.Tag))
+	tagHrefs := extractMentionTags(apNote.Tag)
+	tagMentions := r.resolveMentionedUserIDs(tagHrefs)
 	note.Mentions = mergeMentionIDs(textMentions, tagMentions)
 	// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): mentionLimit を
 	// 超える note は無効と扱い、保存せずに ErrContainsTooManyMentions を返す。
 	// caller (processor.handleCreate) が当該 sentinel を catch して queue retry
 	// 経路から除外することで、罠の inbox job が永続蓄積するのを防ぐ。
-	// limit 値は corenote.DefaultMentionLimit (= 20) を参照し、local create
-	// path (NoteCreateService.checkMentionLimit) と同じ policy を federation
-	// 受信側にも適用する。
-	if corenote.DefaultMentionLimit > 0 && len(note.Mentions) > corenote.DefaultMentionLimit {
+	// upstream #17576: 制限判定は「解決できたユーザー数」(= len(note.Mentions)) でなく、
+	// remote が宣言した raw mention 数 (AP tag の Mention href ユニーク数) との max で
+	// 行う。一部しか解決できなくても大量 mention をすり抜けさせない。limit 値は
+	// corenote.DefaultMentionLimit (= 20、local create path と同 policy)。
+	rawTagSet := make(map[string]struct{}, len(tagHrefs))
+	for _, h := range tagHrefs {
+		rawTagSet[h] = struct{}{}
+	}
+	effectiveMentions := len(note.Mentions)
+	if len(rawTagSet) > effectiveMentions {
+		effectiveMentions = len(rawTagSet)
+	}
+	if corenote.DefaultMentionLimit > 0 && effectiveMentions > corenote.DefaultMentionLimit {
 		return nil, false, corenote.ErrContainsTooManyMentions
 	}
 	// specified visibility では AP `to` 配列が宛先 actor URI 列。CanView の

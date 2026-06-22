@@ -4707,6 +4707,39 @@ func TestIngestNote_MentionLimitExceededReturnsSentinel(t *testing.T) {
 	require.Error(t, lookupErr, "limit exceed note should NOT be persisted")
 }
 
+// #2069 (upstream #17576): 解決できたユーザー数が少なくても、raw な AP tag mention
+// 数 (href ユニーク数) が limit を超えれば reject する。21 件の未知 remote mention URI
+// は resolveMentionedUserIDs で全て skip され note.Mentions=0 になるが、raw count=21 が
+// limit を超えるので ErrContainsTooManyMentions を返す (修正前は 0 ≤ 20 で受理されていた)。
+func TestIngestNote_MentionLimitRawCountExceeded(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	var tagJSON string
+	for i := 1; i <= corenote.DefaultMentionLimit+1; i++ {
+		if i > 1 {
+			tagJSON += ","
+		}
+		// 未知の remote URI (repo に無い) なので resolveMentionedUserIDs は skip する。
+		tagJSON += `{"type": "Mention", "href": "https://remote.example/users/m` + strconv.Itoa(i) + `"}`
+	}
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/notes/rawover",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "x",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"tag": [` + tagJSON + `]
+	}`)
+	_, err := r.IngestNote(body)
+	require.ErrorIs(t, err, corenote.ErrContainsTooManyMentions)
+	_, lookupErr := noteRepo.FindByURI("https://remote.example/notes/rawover")
+	require.Error(t, lookupErr, "raw mention 超過 note は保存されない")
+}
+
 // 境界条件 (= limit ぴったりの 20 件) は受理される。off-by-one 検出。
 func TestIngestNote_MentionLimitBoundaryAccepted(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
