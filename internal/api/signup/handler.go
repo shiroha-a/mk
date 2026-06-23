@@ -205,7 +205,8 @@ func (h *Handler) Signup(c echo.Context) error {
 				return duplicatedUsernameError(c)
 			}
 			if errors.Is(perr, coresignup.ErrInvalidUsername) {
-				return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
+				// upstream SignupService は INVALID_USERNAME を投げる (#2081)。
+				return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_USERNAME")
 			}
 			if errors.Is(perr, coresignup.ErrUsernameUsed) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
@@ -252,7 +253,8 @@ func (h *Handler) Signup(c echo.Context) error {
 			return duplicatedUsernameError(c)
 		}
 		if errors.Is(err, coresignup.ErrInvalidUsername) {
-			return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
+			// upstream SignupService は INVALID_USERNAME を投げる (#2081)。
+			return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_USERNAME")
 		}
 		if errors.Is(err, coresignup.ErrUsernameUsed) {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")

@@ -168,6 +168,10 @@ func TestFinishPasskeySignin_NilUser(t *testing.T) {
 	rec := c.Response().Writer.(*httptest.ResponseRecorder)
 	require.NoError(t, h.finishPasskeySignin(c, nil, nil))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+	// #2081: user==null は upstream SigninWithPasskeyApiService:155 の 652f899f。
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "652f899f-66d4-490e-993e-6606c8ec04c3", resp["error"].(map[string]any)["id"])
 }
 
 func TestFinishPasskeySignin_Suspended(t *testing.T) {

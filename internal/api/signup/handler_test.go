@@ -671,13 +671,14 @@ func TestSignupPending_MarksInvitationTicketUsed(t *testing.T) {
 // --- coverage 補完 (#739): Signup / SignupPending の error 分岐を network 化 ---
 
 // 129 文字 username → service が ErrInvalidUsername を返す。email-required path
-// 経由で 400 INVALID_PARAM が返ることを確認する。
+// 経由で 400 INVALID_USERNAME が返ることを確認する (#2081: upstream SignupService の
+// INVALID_USERNAME に揃える、旧 INVALID_PARAM)。
 func TestSignup_EmailRequired_InvalidUsername(t *testing.T) {
 	h, _, metaRepo := newTestHandler(t)
 	metaRepo.Meta.EmailRequiredForSignup = true
 	long := strings.Repeat("a", 129)
 	rec := doPost(h.Signup, `{"username":"`+long+`","password":"pass","emailAddress":"x@example.com"}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "INVALID_USERNAME")
 }
 
 // #2080: preserved username が email-required path で DENIED_USERNAME を返すこと

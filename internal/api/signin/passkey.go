@@ -102,7 +102,10 @@ func (h *Handler) resolvePasskeyUser(_, userHandle []byte) (*model.User, []*mode
 // しやすくするため。
 func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *webauthn.Credential) error {
 	if user == nil {
-		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		// upstream SigninWithPasskeyApiService:155 の user==null ケースは 652f899f
+		// (authorizedUserId は得たが user row が無い)。932c904e は upstream の
+		// !authorizedUserId (challenge 未解決) 用で別ステージ (#2081)。
+		return c.JSON(http.StatusForbidden, errBody("652f899f-66d4-490e-993e-6606c8ec04c3"))
 	}
 	if user.IsSuspended {
 		return c.JSON(http.StatusForbidden, errBody("e03a5f46-d309-4865-9b69-56282d94e1eb"))
