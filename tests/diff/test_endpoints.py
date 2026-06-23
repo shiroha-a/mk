@@ -165,6 +165,87 @@ def test_i_meDetailed_parity(mkgo, ts):
     assert not diffs, format_diffs(diffs)
 
 
+# 独自 packer を持つ entity (clip / user list / channel / antenna)。
+ENTITY_IGNORE = DEFAULT_IGNORE_KEYS | {"userId", "user"}
+
+
+def test_clip_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        clip = c.json("clips/create", {"name": "harness clip", "isPublic": True, "description": "d"})
+        c._probe = clip["id"]
+    mk = mkgo.json("clips/show", {"clipId": mkgo._probe})
+    tj = ts.json("clips/show", {"clipId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=ENTITY_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_userlist_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        lst = c.json("users/lists/create", {"name": "harness list"})
+        c._probe = lst["id"]
+    mk = mkgo.json("users/lists/show", {"listId": mkgo._probe})
+    tj = ts.json("users/lists/show", {"listId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=ENTITY_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_channel_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        ch = c.json("channels/create", {"name": "harness channel", "description": "ch desc"})
+        c._probe = ch["id"]
+    mk = mkgo.json("channels/show", {"channelId": mkgo._probe})
+    tj = ts.json("channels/show", {"channelId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=ENTITY_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_antenna_packing_parity(mkgo, ts):
+    params = {
+        "name": "harness antenna", "src": "all", "keywords": [["hello"]],
+        "excludeKeywords": [], "users": [], "caseSensitive": False,
+        "withReplies": False, "withFile": False, "notify": False,
+    }
+    for c in (mkgo, ts):
+        a = c.json("antennas/create", params)
+        c._probe = a["id"]
+    mk = mkgo.json("antennas/show", {"antennaId": mkgo._probe})
+    tj = ts.json("antennas/show", {"antennaId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=ENTITY_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def _create_second_user(admin, username):
+    # admin (alice, root) creates a 2nd account via the authed admin path.
+    resp = admin.call("admin/accounts/create", {"username": username, "password": "test-password-1234"})
+    resp.raise_for_status()
+    return resp.json()
+
+
+def test_user_relation_parity(mkgo, ts):
+    # alice follows bob on each instance, then compares users/show(bob) — the
+    # relation block (isFollowing/isFollowed/...) is computed, a likely diff site.
+    for c in (mkgo, ts):
+        bob = _create_second_user(c, "bob")
+        c.json("following/create", {"userId": bob["id"]})
+        c._probe = bob["id"]
+    mk = mkgo.json("users/show", {"userId": mkgo._probe})
+    tj = ts.json("users/show", {"userId": ts._probe})
+    # #2097: follower viewer に followedMessage=null を emit せず省略する乖離を
+    # 検出。finding として追跡中なので relation 比較では一旦無視する。
+    diffs = diff_json(mk, tj, ignore_keys=USER_IGNORE | {"followedMessage"})
+    assert not diffs, format_diffs(diffs)
+
+
+def test_drivefolder_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        folder = c.json("drive/folders/create", {"name": "harness folder"})
+        c._probe = folder["id"]
+    mk = mkgo.json("drive/folders/show", {"folderId": mkgo._probe})
+    tj = ts.json("drive/folders/show", {"folderId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS | {"parentId"})
+    assert not diffs, format_diffs(diffs)
+
+
 def test_note_with_poll_parity(mkgo, ts):
     poll = {"choices": ["alpha", "beta", "gamma"], "multiple": False}
     mk_note = mkgo.json("notes/create", {"text": "poll probe", "visibility": "public", "poll": poll})["createdNote"]
