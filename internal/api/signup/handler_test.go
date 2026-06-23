@@ -25,15 +25,17 @@ import (
 
 // mockTicketStore is a test double for signup.TicketStore.
 type mockTicketStore struct {
-	tickets  map[string]*model.RegistrationTicket // keyed by code
-	markUsed map[string]string                    // ticketID → userID
-	markErr  error
+	tickets     map[string]*model.RegistrationTicket // keyed by code
+	markUsed    map[string]string                    // ticketID → userID
+	markPending map[string]string                    // ticketID → pendingID
+	markErr     error
 }
 
 func newMockTicketStore() *mockTicketStore {
 	return &mockTicketStore{
-		tickets:  make(map[string]*model.RegistrationTicket),
-		markUsed: make(map[string]string),
+		tickets:     make(map[string]*model.RegistrationTicket),
+		markUsed:    make(map[string]string),
+		markPending: make(map[string]string),
 	}
 }
 
@@ -50,6 +52,23 @@ func (m *mockTicketStore) MarkUsed(ticketID, userID string) error {
 		return m.markErr
 	}
 	m.markUsed[ticketID] = userID
+	return nil
+}
+
+func (m *mockTicketStore) MarkPending(ticketID, pendingID string) error {
+	if m.markErr != nil {
+		return m.markErr
+	}
+	m.markPending[ticketID] = pendingID
+	// validateInvitationCode の 30分窓検証で参照されるよう、ticket の usedAt/pendingId も更新。
+	for _, t := range m.tickets {
+		if t.ID == ticketID {
+			now := time.Now()
+			t.UsedAt = &now
+			pid := pendingID
+			t.PendingID = &pid
+		}
+	}
 	return nil
 }
 
@@ -695,3 +714,35 @@ func TestSignup_EmailRequired_ReservedUsername(t *testing.T) {
 // service.PromotePending の **tx 経路** (db + ticketRepo wired) でのみ発火し、
 // mock ベース handler test では再現不可。これらの coverage は repository /
 // service integration test 側で別途担保する想定で本 handler test では skip。
+
+// #2083: email-required + invitation 併用時、確認メール送信 (MarkPending) から 30 分以内の
+// 同一 code 再送は弾き、30 分経過後は再び許可する (upstream SignupApiService の usedAt 窓)。
+func TestSignup_EmailRequired_TicketResendWindow(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", EmailRequiredForSignup: true, DisableRegistration: true}
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coresignup.NewService(userRepo, metaRepo, idGen)
+	svc.SetUserPendingRepo(pendingRepo)
+	h := apisignup.NewHandler(svc, metaRepo, idGen)
+	store := newMockTicketStore()
+	store.tickets["code1"] = &model.RegistrationTicket{ID: "t1", Code: "code1"}
+	h.SetTicketStore(store)
+
+	// 1 回目: fresh ticket → 204 + MarkPending (usedAt セット)。
+	rec := doPost(h.Signup, `{"username":"alice","password":"pass1234","emailAddress":"a@example.com","invitationCode":"code1"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotEmpty(t, store.markPending["t1"], "ticket が pending として予約される")
+	require.NotNil(t, store.tickets["code1"].UsedAt)
+
+	// 2 回目 (30分以内): 同一 code は弾かれる。
+	rec2 := doPost(h.Signup, `{"username":"bob","password":"pass1234","emailAddress":"b@example.com","invitationCode":"code1"}`)
+	assert.Equal(t, http.StatusBadRequest, rec2.Code, "30分以内の再送は INVITATION_CODE_INVALID")
+
+	// usedAt を 31 分前にすると窓が空けて再送可能。
+	old := time.Now().Add(-31 * time.Minute)
+	store.tickets["code1"].UsedAt = &old
+	rec3 := doPost(h.Signup, `{"username":"carol","password":"pass1234","emailAddress":"c@example.com","invitationCode":"code1"}`)
+	assert.Equal(t, http.StatusNoContent, rec3.Code, "30分経過後は再送可能")
+}

@@ -43,6 +43,12 @@ type RegistrationTicketRepository interface {
 	// PromotePending tx 経路で SELECT FOR UPDATE ロック中に使うので、
 	// commit までロックを保持して race を完全に閉じる。
 	MarkUsedTx(tx *gorm.DB, ticketID, userID string) error
+	// MarkPending records that a ticket has been used to create a pending
+	// signup (email 確認待ち): usedAt + pendingUserId をセットする (usedById は
+	// 立てない)。upstream SignupApiService の email path で確認メール送信時に
+	// `update({usedAt, pendingUserId})` する挙動と一致 (#2083)。確認完了時に
+	// MarkUsed で usedById が立つ。
+	MarkPending(ticketID, pendingID string) error
 	// List returns tickets matching the filter, paginated with limit/offset.
 	// Unknown filter values are treated as "all".
 	// `now` is passed by callers so tests can supply a deterministic clock
@@ -112,6 +118,14 @@ func (r *registrationTicketRepository) markUsedOn(db *gorm.DB, ticketID, userID 
 	return db.Model(&model.RegistrationTicket{}).Where(`"id" = ?`, ticketID).Updates(map[string]any{
 		"usedById": userID,
 		"usedAt":   now,
+	}).Error
+}
+
+func (r *registrationTicketRepository) MarkPending(ticketID, pendingID string) error {
+	// usedAt + pendingUserId のみ更新 (usedById は確認完了時に MarkUsed が立てる)。
+	return r.db.Model(&model.RegistrationTicket{}).Where(`"id" = ?`, ticketID).Updates(map[string]any{
+		"usedAt":        time.Now(),
+		"pendingUserId": pendingID,
 	}).Error
 }
 

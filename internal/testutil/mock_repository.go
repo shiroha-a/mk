@@ -8108,3 +8108,17 @@ func (m *MockRegistrationTicketRepository) MarkUsed(ticketID, userID string) err
 func (m *MockRegistrationTicketRepository) MarkUsedTx(_ *gorm.DB, ticketID, userID string) error {
 	return m.MarkUsed(ticketID, userID)
 }
+
+// MarkPending sets usedAt + pendingUserId (not usedById)。email 確認待ち ticket
+// の予約 (#2083)。
+func (m *MockRegistrationTicketRepository) MarkPending(ticketID, pendingID string) error {
+	t, ok := m.Tickets[ticketID]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now()
+	t.UsedAt = &now
+	pid := pendingID
+	t.PendingID = &pid
+	return nil
+}

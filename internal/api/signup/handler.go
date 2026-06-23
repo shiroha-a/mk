@@ -3,6 +3,7 @@ package signup
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -24,6 +25,9 @@ import (
 type TicketStore interface {
 	FindByCode(code string) (*model.RegistrationTicket, error)
 	MarkUsed(ticketID, userID string) error
+	// MarkPending records usedAt + pendingUserId for an email-confirmation
+	// signup (確認メール再送防止窓、#2083)。
+	MarkPending(ticketID, pendingID string) error
 }
 
 // SigninRecorder fires the side-effects of a successful login (signin history,
@@ -153,7 +157,7 @@ func (h *Handler) Signup(c echo.Context) error {
 	// 登録無効時はinvitation code必須 (テストモードではバイパス — 本家 TS 互換)
 	var ticket *model.RegistrationTicket
 	if !h.testMode && meta.DisableRegistration {
-		t, vErr := h.validateInvitationCode(req.InvitationCode)
+		t, vErr := h.validateInvitationCode(req.InvitationCode, meta.EmailRequiredForSignup)
 		if vErr != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INVITATION_CODE_INVALID", "Invalid invitation code.", "11e71a03-43c4-4a99-92cf-bb7e2c581998"))
 		}
@@ -220,6 +224,17 @@ func (h *Handler) Signup(c echo.Context) error {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
 			}
 			return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
+		}
+		// 招待制併用時は ticket に usedAt + pendingId をセットし、確認メール送信から
+		// 30 分間の再送を validateInvitationCode で弾く (upstream SignupApiService の
+		// update({usedAt, pendingUserId})、#2083)。確認完了時に PromotePending が
+		// MarkUsed で usedById を立てる。
+		if ticket != nil && h.ticketStore != nil {
+			if merr := h.ticketStore.MarkPending(ticket.ID, pending.ID); merr != nil {
+				// best-effort (pending は作成済) だが、失敗すると再送防止窓が効かないので
+				// observability のため warn を残す (#2083)。
+				slog.Warn("signup: failed to mark invitation ticket pending", "ticketId", ticket.ID, "err", merr)
+			}
 		}
 		if h.emailSender != nil {
 			siteName := "Misskey"
@@ -350,7 +365,10 @@ func validateEmailWithMeta(ctx context.Context, meta *model.Meta, addr string, c
 }
 
 // validateInvitationCode checks the ticket store for a valid invitation code.
-func (h *Handler) validateInvitationCode(code string) (*model.RegistrationTicket, error) {
+// emailRequired は emailRequiredForSignup。upstream SignupApiService の usedAt
+// gate (#2083) を再現する: email 確認制では確認メール送信から 30 分以内の ticket を
+// 弾き (再送防止)、非 email 制では usedAt が立っている ticket を弾く。
+func (h *Handler) validateInvitationCode(code string, emailRequired bool) (*model.RegistrationTicket, error) {
 	if code == "" || h.ticketStore == nil {
 		return nil, errInvalidCode
 	}
@@ -362,6 +380,15 @@ func (h *Handler) validateInvitationCode(code string) (*model.RegistrationTicket
 		return nil, errInvalidCode
 	}
 	if ticket.ExpiresAt != nil && ticket.ExpiresAt.Before(time.Now()) {
+		return nil, errInvalidCode
+	}
+	if emailRequired {
+		// 確認メール送信 (= MarkPending で usedAt セット) から 30 分以内は再送不可。
+		if ticket.UsedAt != nil && ticket.UsedAt.Add(30*time.Minute).After(time.Now()) {
+			return nil, errInvalidCode
+		}
+	} else if ticket.UsedAt != nil {
+		// 非 email 制では usedAt が立っていれば使用済 (upstream の else if 分岐)。
 		return nil, errInvalidCode
 	}
 	return ticket, nil

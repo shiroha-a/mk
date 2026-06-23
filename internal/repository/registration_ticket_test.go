@@ -302,3 +302,23 @@ func TestRegistrationTicketRepository_ListSorted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"rts_c", "rts_a", "rts_b"}, only(uAsc))
 }
+
+// #2083: MarkPending は usedAt + pendingUserId をセットし usedById は立てない
+// (確認メール再送防止 ticket 予約)。pendingUserId は user_pending 行の ID で user に
+// 存在しないため、000064 で FK を撤去済 (FK が残っていると本テストが FK 違反で落ちる)。
+func TestRegistrationTicketRepository_MarkPending(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rt_mp")
+	defer cleanupInvite(t, "rt_mp")
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_mp", Code: "rtmp_code"}))
+
+	// pendingID は user に存在しない user_pending ID (FK 撤去後なので書ける)。
+	require.NoError(t, repo.MarkPending("rt_mp", "pending_xyz"))
+
+	got, err := repo.FindByCode("rtmp_code")
+	require.NoError(t, err)
+	require.NotNil(t, got.UsedAt, "usedAt がセットされる")
+	require.NotNil(t, got.PendingID)
+	assert.Equal(t, "pending_xyz", *got.PendingID)
+	assert.Nil(t, got.UsedByID, "MarkPending は usedById を立てない")
+}
