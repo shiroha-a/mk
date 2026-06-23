@@ -161,6 +161,14 @@ func captureSignatureHeaders(req *http.Request) map[string]string {
 func (h *Handler) Inbox(c echo.Context) error {
 	body, err := io.ReadAll(c.Request().Body)
 	if err != nil {
+		// BodyLimit (#1958) が wrap した limitedReader は 64KB 超過時に 413 HTTPError を
+		// 返す。ContentLength での即時 reject は handler に到達しないが、chunked 超過は
+		// ここで read error になるため echo.HTTPError を伝播して upstream fastify と同じ
+		// 413 を返す (それ以外の read error は従来通り 400)。
+		var he *echo.HTTPError
+		if errors.As(err, &he) {
+			return he
+		}
 		return c.NoContent(http.StatusBadRequest)
 	}
 

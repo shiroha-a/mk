@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	emiddleware "github.com/labstack/echo/v4/middleware"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
@@ -635,4 +636,42 @@ func TestBodyHasActor(t *testing.T) {
 			assert.Equal(t, tc.want, bodyHasActor([]byte(tc.body)))
 		})
 	}
+}
+
+// #1958: inbox route の 64KB body limit。upstream ActivityPubServerService の
+// bodyLimit: 1024*64 相当。署名検証前に巨大 body を弾く DoS 対策で、超過時は
+// upstream fastify と同じ 413 を返す。
+func TestInbox_BodyLimit(t *testing.T) {
+	_, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	h, _, _ := newHandler(t, pub)
+
+	e := echo.New()
+	// router.go と同じ wiring (BodyLimit("64KiB")=65536 + handler)。
+	e.POST("/inbox", h.Inbox, emiddleware.BodyLimit("64KiB"))
+
+	serve := func(body []byte, chunked bool) int {
+		req := httptest.NewRequest(http.MethodPost, "https://example.com/inbox", bytes.NewReader(body))
+		req.Header.Set("Host", "example.com")
+		if chunked {
+			// Content-Length を消して limitedReader 経路 (read 中の 413) を通す。
+			req.ContentLength = -1
+		}
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	big := bytes.Repeat([]byte("a"), 64*1024+1)   // 64KB 超
+	atLimit := bytes.Repeat([]byte("a"), 64*1024) // ちょうど 64KB (許容)
+	small := []byte(`{"actor":"https://remote.example/users/x"}`)
+
+	// Content-Length > 64KB → BodyLimit が即時 413 (handler 未到達)。
+	assert.Equal(t, http.StatusRequestEntityTooLarge, serve(big, false), "Content-Length 超過は 413")
+	// chunked (Content-Length 不明) で 64KB 超 → handler が limitedReader の 413 を伝播。
+	assert.Equal(t, http.StatusRequestEntityTooLarge, serve(big, true), "chunked 超過も 413")
+	// ちょうど 64KB は通過 (413 にならない、署名なしで admission が 401 になるが 413 ではない)。
+	assert.NotEqual(t, http.StatusRequestEntityTooLarge, serve(atLimit, false), "64KB ちょうどは許容")
+	// 小さい body は 413 にならない。
+	assert.NotEqual(t, http.StatusRequestEntityTooLarge, serve(small, false))
 }
