@@ -1,0 +1,100 @@
+# Differential e2e diff stack (#2089): runs mk-go (2026.6.0) and Misskey TS
+# (2026.5.4) side-by-side with independent DB/Redis, plus a pytest diff-runner
+# that calls identical endpoints on both and reports value-level deviations the
+# entitycompat golden gate cannot catch.
+#
+# API-only (HTTP, no TLS/federation) — the runner hits the backends directly on
+# :3000. Fully isolated stack (own project/network/volumes); NEVER touches the
+# UDS production. Tear down with `make diff-down` (-v drops volumes).
+#
+#   make diff-up      # build + start mkgo + ts (+ their DB/Redis)
+#   make diff-test    # run the diff-runner (pytest) against both
+#   make diff-down    # stop + remove (incl. volumes)
+
+# 専用 project name で隔離する。これが無いと compose の default project は
+# directory 名 `mk` になり、本番 UDS stack (compose.uds.yaml, 同じ project `mk`)
+# の `mkgo` サービスと衝突して本番コンテナを recreate してしまう (実際に踏んだ)。
+name: mkdiff
+
+services:
+  # --- mk-go side ---
+  postgres-mk:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: misskey, POSTGRES_USER: misskey, POSTGRES_PASSWORD: testpass}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U misskey"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [diff]
+  redis-mk:
+    image: redis:7-alpine
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 3s, timeout: 3s, retries: 30}
+    networks: [diff]
+  mkgo:
+    build:
+      context: .
+      dockerfile: tests/federation/common/Dockerfile.mkgo
+    environment: {TZ: Asia/Tokyo}
+    volumes:
+      - ./tests/diff/mkgo.yml:/app/.config/default.yml:ro
+    healthcheck:
+      test: ["CMD", "/app/misskey", "-healthcheck", "-config", ".config/default.yml"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    depends_on:
+      postgres-mk: {condition: service_healthy}
+      redis-mk: {condition: service_healthy}
+    networks: [diff]
+
+  # --- Misskey TS side (version-matched-ish: 2026.5.4 vs mk-go 2026.6.0) ---
+  postgres-ts:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: misskey, POSTGRES_USER: misskey, POSTGRES_PASSWORD: testpass}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U misskey"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [diff]
+  redis-ts:
+    image: redis:7-alpine
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 3s, timeout: 3s, retries: 30}
+    networks: [diff]
+  ts:
+    image: misskey/misskey:2026.5.4
+    volumes:
+      - ./tests/diff/ts.yml:/misskey/.config/default.yml:ro
+    healthcheck:
+      # Misskey image has curl (not wget); /api/ping は JSON body 必須 (空 POST は 400)。
+      test: ["CMD-SHELL", "curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    depends_on:
+      postgres-ts: {condition: service_healthy}
+      redis-ts: {condition: service_healthy}
+    networks: [diff]
+
+  # --- diff runner (pytest) ---
+  diff-runner:
+    profiles: [test]
+    build:
+      context: ./tests/diff
+      dockerfile: Dockerfile.runner
+    environment:
+      MKGO_URL: http://mkgo:3000
+      TS_URL: http://ts:3000
+    volumes:
+      - ./tests/diff:/work
+    working_dir: /work
+    depends_on:
+      mkgo: {condition: service_healthy}
+      ts: {condition: service_healthy}
+    networks: [diff]
+
+networks:
+  diff:

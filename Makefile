@@ -9,7 +9,8 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check
+	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check \
+	diff-up diff-test diff-down diff-logs
 
 # Binary output
 BINARY=misskey
@@ -390,6 +391,24 @@ playwright-ts-test:
 
 playwright-ts-down:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) down -v
+
+# Differential e2e diff harness (#2089) ― mk-go (2026.6.0) と Misskey TS
+# (2026.5.4) を並列に立て、同一 endpoint のレスポンスを diff して entitycompat
+# golden gate がカバーしない値レベル乖離を検出する。詳細は docs/diff-e2e.md。
+# 隔離 stack (own network/volumes)、production UDS には触れない。
+DIFF_COMPOSE=docker-compose.diff.yml
+
+diff-up:
+	docker compose -f $(DIFF_COMPOSE) up -d --build
+
+diff-test:
+	docker compose -f $(DIFF_COMPOSE) --profile test run --rm --build diff-runner
+
+diff-down:
+	docker compose -f $(DIFF_COMPOSE) down -v
+
+diff-logs:
+	docker compose -f $(DIFF_COMPOSE) logs -f
 
 # API compatibility matrix ― mk-go と Misskey TS の API endpoint 実装状況を
 # 突き合わせて docs/api-compat.md を生成する。

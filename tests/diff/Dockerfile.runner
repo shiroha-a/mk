@@ -1,0 +1,6 @@
+# Diff-runner: pytest + requests against the mk-go and TS instances (#2089).
+FROM python:3.12-alpine
+RUN pip install --no-cache-dir pytest==8.3.3 requests==2.32.3
+WORKDIR /work
+# diff_core.py / conftest.py / test_*.py are bind-mounted at run time.
+CMD ["pytest", "-q"]

@@ -1,0 +1,31 @@
+# mk-go config for the differential e2e diff stack (#2089). API-only (HTTP, no
+# TLS/federation): the diff-runner hits http://mkgo:3000 directly.
+url: http://mkgo:3000/
+port: 3000
+db:
+  host: postgres-mk
+  port: 5432
+  db: misskey
+  user: misskey
+  pass: testpass
+redis:
+  host: redis-mk
+  port: 6379
+redisForPubsub:
+  host: redis-mk
+  port: 6379
+redisForJobQueue:
+  host: redis-mk
+  port: 6379
+redisForTimelines:
+  host: redis-mk
+  port: 6379
+id: aidx
+jobQueueDriver: mkq
+disableEndpointRateLimits: true
+enableIpRateLimit: false
+allowedPrivateNetworks:
+  - 127.0.0.0/8
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
