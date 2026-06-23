@@ -680,13 +680,14 @@ func TestSignup_EmailRequired_InvalidUsername(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// preserved username が email-required path で USED_USERNAME を返すこと。
+// #2080: preserved username が email-required path で DENIED_USERNAME を返すこと
+// (upstream SignupApiService。非 email path の USED_USERNAME とは異なる)。
 func TestSignup_EmailRequired_ReservedUsername(t *testing.T) {
 	h, _, metaRepo := newTestHandler(t)
 	metaRepo.Meta.EmailRequiredForSignup = true
 	metaRepo.Meta.PreservedUsernames = []string{"admin"}
 	rec := doPost(h.Signup, `{"username":"admin","password":"pass","emailAddress":"x@example.com"}`)
-	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "USED_USERNAME")
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "DENIED_USERNAME")
 }
 
 // 注: SignupPending の ErrInvitationAlreadyUsed / ErrInvitationRevoked は

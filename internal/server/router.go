@@ -1216,6 +1216,7 @@ func (s *Server) setupRoutes() {
 	// localUsernameSchema で format 検証する (#1551)。format 不正は paramDef レベルで
 	// 弾かれるため INVALID_PARAM を返す。
 	usedUsernameRepo := repository.NewUsedUsernameRepository(s.db)
+	signupService.SetUsedUsernameRepo(usedUsernameRepo) // #2080: 削除済 username 再利用を弾く
 	api.POST("/username/available", func(c echo.Context) error {
 		var req struct {
 			Username string `json:"username"`

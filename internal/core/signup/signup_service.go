@@ -60,6 +60,10 @@ var (
 	// meta.preservedUsernames (case-insensitive). 初回セットアップ時は root
 	// ユーザー作成を妨げないため、このチェックはスキップする。
 	ErrUsernameReserved = errors.New("username is reserved")
+	// ErrUsernameUsed is returned when the username matches a deleted account's
+	// username recorded in used_usernames (再利用防止)。upstream SignupService /
+	// SignupApiService の usedUsernamesRepository.exists 相当 (#2080)。
+	ErrUsernameUsed = errors.New("username was used by a deleted account")
 	// ErrPendingNotFound is returned when no user_pending row matches the code.
 	ErrPendingNotFound = errors.New("pending signup not found")
 	// ErrPendingExpired is returned when the pending signup is past its TTL.
@@ -103,6 +107,9 @@ type Service struct {
 	keypairExtraRepo repository.UserKeypairExtraRepository
 	pendingRepo      repository.UserPendingRepository
 	ticketRepo       repository.RegistrationTicketRepository
+	// usedUsernameRepo は削除済 account の username 再利用を弾く (#2080)。
+	// optional (nil なら used_usernames チェックを skip、後方互換)。
+	usedUsernameRepo repository.UsedUsernameRepository
 	// db は PromotePending を transaction 化して partial failure rollback と
 	// invitation ticket の SELECT FOR UPDATE ロックを実現する用途。未設定 (nil)
 	// なら従来の repo-based 非 tx パスにフォールバックする (mock テスト用)。
@@ -121,6 +128,24 @@ func NewService(userRepo repository.UserRepository, metaRepo repository.MetaRepo
 // 非 tx パスで動作する (mock テスト用)。
 func (s *Service) SetDB(db *gorm.DB) {
 	s.db = db
+}
+
+// SetUsedUsernameRepo wires the UsedUsernameRepository so Signup / CreatePending
+// reject usernames of deleted accounts (#2080)。未設定なら used_usernames チェックを
+// skip する (後方互換)。
+func (s *Service) SetUsedUsernameRepo(r repository.UsedUsernameRepository) {
+	s.usedUsernameRepo = r
+}
+
+// isUsedUsername reports whether lower (already lowercased) is recorded in
+// used_usernames (削除済 account)。repo 未配線 / 照合失敗時は false (fail-open、
+// オンライン性優先で既存 preserved/duplicate ガードに委ねる)。
+func (s *Service) isUsedUsername(lower string) bool {
+	if s.usedUsernameRepo == nil {
+		return false
+	}
+	used, err := s.usedUsernameRepo.Exists(lower)
+	return err == nil && used
 }
 
 // SetTicketRepo wires the RegistrationTicketRepository so PromotePending tx
@@ -234,6 +259,12 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 	lower := strings.ToLower(username)
 	if _, err := s.userRepo.FindByUsernameLower(lower, nil); err == nil {
 		return nil, ErrUsernameAlreadyExists
+	}
+
+	// 削除済 account の username 再利用を弾く (upstream SignupService:87、existing →
+	// used → preserved の順、#2080)。
+	if s.isUsedUsername(lower) {
+		return nil, ErrUsernameUsed
 	}
 
 	// meta.preservedUsernames チェック。初回セットアップ (root ユーザー作成) は
@@ -360,6 +391,10 @@ func (s *Service) CreatePending(username, email, password string, invitationTick
 	// PromotePending 直前まで気付けず無駄なメール送信になる)。
 	if _, err := s.userRepo.FindByUsernameLower(lower, nil); err == nil {
 		return nil, ErrUsernameAlreadyExists
+	}
+	// 削除済 account の username 再利用を弾く (upstream SignupApiService:178、#2080)。
+	if s.isUsedUsername(lower) {
+		return nil, ErrUsernameUsed
 	}
 	if meta, err := s.metaRepo.Fetch(); err == nil && isReservedUsername(lower, meta.PreservedUsernames) {
 		return nil, ErrUsernameReserved

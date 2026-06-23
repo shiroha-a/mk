@@ -207,8 +207,13 @@ func (h *Handler) Signup(c echo.Context) error {
 			if errors.Is(perr, coresignup.ErrInvalidUsername) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 			}
-			if errors.Is(perr, coresignup.ErrUsernameReserved) {
+			if errors.Is(perr, coresignup.ErrUsernameUsed) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
+			}
+			if errors.Is(perr, coresignup.ErrUsernameReserved) {
+				// upstream SignupApiService の email-required path は preserved を
+				// DENIED_USERNAME で返す (非 email path の USED_USERNAME とは異なる、#2080)。
+				return apierr.FastifyReply(c, http.StatusBadRequest, "DENIED_USERNAME")
 			}
 			if errors.Is(perr, coresignup.ErrPasswordTooLong) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
@@ -249,7 +254,11 @@ func (h *Handler) Signup(c echo.Context) error {
 		if errors.Is(err, coresignup.ErrInvalidUsername) {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_PARAM")
 		}
+		if errors.Is(err, coresignup.ErrUsernameUsed) {
+			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
+		}
 		if errors.Is(err, coresignup.ErrUsernameReserved) {
+			// 非 email path は upstream SignupService と同じく preserved も USED_USERNAME (#2080)。
 			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
 		}
 		if errors.Is(err, coresignup.ErrPasswordTooLong) {

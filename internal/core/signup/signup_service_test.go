@@ -541,3 +541,24 @@ func TestPromotePending_NoTicketIDReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, result.InvitationTicketID, "non-invitation pending では nil で伝搬する")
 }
+
+// #2080: used_usernames (削除済 account の username) は Signup で ErrUsernameUsed を
+// 返す (existing → used → preserved の順、upstream SignupService:87 相当)。
+func TestSignup_UsedUsername(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	usedRepo := testutil.NewMockUsedUsernameRepository()
+	usedRepo.Usernames["taken"] = true
+	svc.SetUsedUsernameRepo(usedRepo)
+
+	_, err := svc.Signup("taken", "password123", false)
+	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+
+	// 大文字違いも lowercase 照合で弾く。
+	_, err = svc.Signup("TAKEN", "password123", false)
+	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+
+	// repo 未配線なら skip (後方互換) — 別 svc で確認。
+	svc2, _, _ := newTestService(t)
+	_, err = svc2.Signup("taken", "password123", false)
+	assert.NoError(t, err, "repo 未配線時は used_usernames を見ない")
+}
