@@ -11,6 +11,15 @@ import (
 // Inbox admission errors mirror the 401 conditions Misskey's
 // ActivityPubServerService.inbox enforces before queueing an inbound activity.
 var (
+	// ErrInboxRequestTargetUnsigned is returned when `(request-target)` is not
+	// part of the signed header set. upstream の parseRequest は
+	// `headers: ['(request-target)', 'host', 'date']` を必須にするため、これが
+	// 署名されていないと 401 になる。署名が HTTP method/path に束縛されない
+	// 非準拠署名を弾く (#2087)。
+	ErrInboxRequestTargetUnsigned = errors.New("inbox: (request-target) is not signed")
+	// ErrInboxDateUnsigned is returned when `date` is not part of the signed
+	// header set (upstream parseRequest の必須 header、#2087)。
+	ErrInboxDateUnsigned = errors.New("inbox: date header is not signed")
 	// ErrInboxHostUnsigned is returned when `host` is not part of the signed
 	// header set. Upstream requires the Host header to be covered by the
 	// signature so it cannot be swapped after signing.
@@ -54,6 +63,17 @@ var (
 func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, digestHeader string, body []byte) error {
 	if parsed == nil {
 		return errors.New("inbox: missing parsed signature")
+	}
+
+	// (request-target) / date: 署名対象であること (upstream parseRequest の必須
+	// header ['(request-target)', 'host', 'date'] 相当、#2087)。host と違い configured
+	// host への依存が無いので expectedHost に関わらず必須。production の正規 peer
+	// (Misskey/Mastodon 等) も mk-go 自身の deliver も 4 header を署名する。
+	if !containsHeaderFold(parsed.Headers, "(request-target)") {
+		return ErrInboxRequestTargetUnsigned
+	}
+	if !containsHeaderFold(parsed.Headers, "date") {
+		return ErrInboxDateUnsigned
 	}
 
 	// host: 署名対象 + 自ホスト一致。expectedHost が未設定の呼び出し元

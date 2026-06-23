@@ -79,6 +79,26 @@ func TestVerifyInboxAdmission(t *testing.T) {
 			wantErr:      ErrInboxDigestAlgo,
 		},
 		{
+			// #2087: (request-target) 未署名は upstream parseRequest 同様 reject。
+			name:         "request-target not signed",
+			parsed:       sig("date", "host", "digest"),
+			hostHeader:   host,
+			expectedHost: host,
+			digestHeader: goodDigest,
+			body:         body,
+			wantErr:      ErrInboxRequestTargetUnsigned,
+		},
+		{
+			// #2087: date 未署名も reject (expectedHost 未設定でも必須)。
+			name:         "date not signed (even when expectedHost empty)",
+			parsed:       sig("(request-target)", "host", "digest"),
+			hostHeader:   host,
+			expectedHost: "",
+			digestHeader: goodDigest,
+			body:         body,
+			wantErr:      ErrInboxDateUnsigned,
+		},
+		{
 			name:         "host not signed when expectedHost set",
 			parsed:       sig("(request-target)", "date", "digest"),
 			hostHeader:   host,
