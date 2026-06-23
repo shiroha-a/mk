@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	emiddleware "github.com/labstack/echo/v4/middleware"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/ld"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
@@ -1938,14 +1937,11 @@ func (s *Server) setupRoutes() {
 	// #534: signature 検証成功後の Process(body) を inbox queue に逃がす。
 	// 未配線時は legacy 同期処理にフォールバック (テスト互換)。
 	inboxHandler.SetEnqueuer(s.queueClient)
-	// upstream ActivityPubServerService は両 inbox route に bodyLimit: 1024*64 を設定する
-	// (#1958)。未認証で巨大 body を投げられる DoS surface を防ぐため、署名検証前に 64KB で
-	// 弾く。超過時は upstream fastify と同じ 413 (echo BodyLimit は ContentLength 即時 reject /
-	// chunked は limitedReader が 413 error を返し handler が伝播)。"64KiB" = 65536 で
-	// upstream の 1024*64 と厳密一致 (gommon の "64K"/"64KB" は decimal 64000 になる罠)。
-	inboxBodyLimit := emiddleware.BodyLimit("64KiB")
-	s.echo.POST("/inbox", inboxHandler.Inbox, inboxBodyLimit)
-	s.echo.POST("/users/:id/inbox", inboxHandler.Inbox, inboxBodyLimit)
+	// inbox の 64KB body limit は global pre-auth な middleware.BodyLimitByPath で適用する
+	// (#1958 / #2075)。route-level に置くと global な auth.Authenticate の token 抽出 read が
+	// 先に走って bypass されるため、ここでは limit を付けない。
+	s.echo.POST("/inbox", inboxHandler.Inbox)
+	s.echo.POST("/users/:id/inbox", inboxHandler.Inbox)
 
 	// Federation endpoints
 	federationHandler := apifederation.NewHandler(instanceService)

@@ -203,6 +203,11 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	userRepo := repository.NewCachedUserRepository(repository.NewUserRepository(db))
 	accessTokenRepo := repository.NewAccessTokenRepository(db)
 
+	// body size 制限は auth.Authenticate より前に置く: auth は token 抽出のため
+	// body を io.ReadAll するので、後に置くと巨大 body が auth で先に読まれて
+	// bypass される (#1958 / #2075)。/api → 1MiB / inbox → 64KiB / multipart 除外。
+	e.Use(middleware.BodyLimitByPath())
+
 	auth := middleware.NewAuthMiddleware(userRepo, accessTokenRepo)
 	e.Use(auth.Authenticate())
 

@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -84,6 +85,14 @@ func JSONBodyParse() echo.MiddlewareFunc {
 
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
+				// BodyLimitByPath (#2075) が wrap した limitedReader は body 超過時に
+				// 413 HTTPError を返す。ContentLength 経路は middleware 段で 413 に
+				// なるが、chunked 超過はここで read error になるため echo.HTTPError を
+				// 伝播して upstream fastify と同じ 413 を返す (その他 read error は 400)。
+				var he *echo.HTTPError
+				if errors.As(err, &he) {
+					return he
+				}
 				return c.JSON(http.StatusBadRequest, errInvalidJSONBody)
 			}
 			if len(body) == 0 {
