@@ -25,6 +25,11 @@ type HostBlockChecker interface {
 	// the current admin federation mode (none / specified / all) and the
 	// host is not in blockedHosts.
 	IsAllowed(host string) bool
+	// FederationDisabled reports whether the instance federation mode is
+	// "none". upstream ActivityPubServerService.inbox は federation==='none' の
+	// とき body を読む前に 403 を即返す (#1959)。per-actor の IsAllowed は actor が
+	// local 扱い (host nil) のとき素通る余地があるため、最前段の mode gate を別途置く。
+	FederationDisabled() bool
 }
 
 // InstanceTracker is invoked after a successfully verified inbound request so
@@ -159,6 +164,13 @@ func captureSignatureHeaders(req *http.Request) map[string]string {
 // 単体テスト / 旧来配線を維持するためのもので、production 配線では
 // SetEnqueuer 経由の async path を踏む。
 func (h *Handler) Inbox(c echo.Context) error {
+	// upstream ActivityPubServerService.inbox と同じく、federation mode が "none" なら
+	// body を読む前に 403 を即返す (#1959)。per-actor の IsAllowed gate は actor が
+	// local 扱い (host nil) や async enqueue 後にしか効かない経路があるため、最前段で弾く。
+	if h.hostBlocker != nil && h.hostBlocker.FederationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
+
 	body, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		// BodyLimit (#1958) が wrap した limitedReader は 64KB 超過時に 413 HTTPError を

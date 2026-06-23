@@ -258,12 +258,14 @@ func TestInbox_PublicKeyMissing(t *testing.T) {
 // disallowed simulates federation mode "specified" / "none". 既定 (zero-value)
 // では allow-all。
 type stubBlocker struct {
-	blocked    map[string]bool
-	disallowed map[string]bool
+	blocked     map[string]bool
+	disallowed  map[string]bool
+	fedDisabled bool
 }
 
 func (s *stubBlocker) IsBlocked(host string) bool { return s.blocked[host] }
 func (s *stubBlocker) IsAllowed(host string) bool { return !s.disallowed[host] }
+func (s *stubBlocker) FederationDisabled() bool   { return s.fedDisabled }
 
 func TestInbox_BlockedHost(t *testing.T) {
 	priv, pub, err := activitypub.GenerateRSAKeypair()
@@ -674,4 +676,42 @@ func TestInbox_BodyLimit(t *testing.T) {
 	assert.NotEqual(t, http.StatusRequestEntityTooLarge, serve(atLimit, false), "64KB ちょうどは許容")
 	// 小さい body は 413 にならない。
 	assert.NotEqual(t, http.StatusRequestEntityTooLarge, serve(small, false))
+}
+
+// #1959: federation mode が "none" のとき inbox は最前段で 403 を返す (upstream
+// ActivityPubServerService.inbox の federation==='none' gate)。署名の有無に依らず、
+// body を読む前に gate する (per-actor IsAllowed より前)。
+func TestInbox_FederationDisabled(t *testing.T) {
+	_, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	h, _, _ := newHandler(t, pub)
+	h.SetHostBlockChecker(&stubBlocker{fedDisabled: true})
+
+	// 署名なしの素の body でも、federation gate が先に効いて 403 (401 ではない)。
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+	c, rec := newPost(t, body)
+	c.Request().Host = "example.com"
+	require.NoError(t, h.Inbox(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "federation=none は最前段で 403")
+}
+
+// federation 有効時 (fedDisabled=false) は gate を素通りし通常の admission に進む
+// (gate が誤って常時 403 にしないことの確認)。
+func TestInbox_FederationEnabled_NotGated(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+	h, repo, _ := newHandler(t, pub)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+	h.SetHostBlockChecker(&stubBlocker{fedDisabled: false})
+
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+	c, rec := newPost(t, body)
+	req := c.Request()
+	require.NoError(t, activitypub.SignRequest(req, key, activitypub.SHA256Digest(body), []string{"(request-target)", "date", "host", "digest"}))
+	req.Host = "example.com"
+	require.NoError(t, h.Inbox(c))
+	assert.NotEqual(t, http.StatusForbidden, rec.Code, "federation 有効時は gate を素通り")
 }
