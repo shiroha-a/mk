@@ -1,6 +1,7 @@
 package userrelation
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/entity"
@@ -76,7 +77,7 @@ func TestApply_FullRelationBlock(t *testing.T) {
 	require.NotNil(t, d.WithReplies)
 	assert.True(t, *d.WithReplies)
 	require.NotNil(t, d.FollowedMessage)
-	assert.Equal(t, "thanks for following", *d.FollowedMessage)
+	assert.JSONEq(t, `"thanks for following"`, string(d.FollowedMessage))
 	require.NotNil(t, d.IsBlocked)
 	assert.True(t, *d.IsBlocked, "target blocks viewer")
 	require.NotNil(t, d.IsBlocking)
@@ -125,8 +126,9 @@ func TestApply_FollowWithoutNotify(t *testing.T) {
 	r.Apply(&d, "viewer", target, profile)
 	require.NotNil(t, d.Notify)
 	assert.Equal(t, "none", *d.Notify)
-	// follower なので followedMessage は出すが、profile に無いので nil のまま。
-	assert.Nil(t, d.FollowedMessage)
+	// follower なので followedMessage を出す。profile に無くても upstream 互換で
+	// null を emit する (#2097)。
+	assert.Equal(t, json.RawMessage("null"), d.FollowedMessage)
 }
 
 // nil repo は対応する flag を skip する (= omit)。

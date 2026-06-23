@@ -1131,7 +1131,7 @@ func (h *Handler) packRelationItems(
 				d.EnsureRelationFlags()
 				// follower にだけ followedMessage を見せる (#1558)。
 				if isFollowing && b.Profile != nil {
-					d.FollowedMessage = b.Profile.FollowedMessage
+					entity.SetFollowedMessageForFollower(&d, b.Profile.FollowedMessage)
 				}
 			}
 			if stats := remoteStatsMap[b.User.ID]; stats != nil {

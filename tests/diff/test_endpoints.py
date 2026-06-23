@@ -230,9 +230,9 @@ def test_user_relation_parity(mkgo, ts):
         c._probe = bob["id"]
     mk = mkgo.json("users/show", {"userId": mkgo._probe})
     tj = ts.json("users/show", {"userId": ts._probe})
-    # #2097: follower viewer に followedMessage=null を emit せず省略する乖離を
-    # 検出。finding として追跡中なので relation 比較では一旦無視する。
-    diffs = diff_json(mk, tj, ignore_keys=USER_IGNORE | {"followedMessage"})
+    # (#2097 修正済: follower には followedMessage=null を emit するようになったため
+    # 回帰 gate に戻した = ここで ignore しない。)
+    diffs = diff_json(mk, tj, ignore_keys=USER_IGNORE)
     assert not diffs, format_diffs(diffs)
 
 

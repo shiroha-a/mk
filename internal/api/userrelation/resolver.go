@@ -104,10 +104,11 @@ func (r Repos) Apply(detailed *entity.UserDetailed, viewerID string, target *mod
 			detailed.Notify = &none
 		}
 		detailed.WithReplies = &withReplies
-		// followedMessage は follower にだけ見せる (upstream relation ブロックの
-		// `relation.isFollowing ? profile.followedMessage : undefined`、#1558)。
+		// followedMessage は follower にだけ見せる。upstream は未設定でも null を
+		// emit する (`relation.isFollowing ? (profile.followedMessage ?? null) :
+		// undefined`、#1558 / #2097)。
 		if isFollowing && profile != nil {
-			detailed.FollowedMessage = profile.FollowedMessage
+			entity.SetFollowedMessageForFollower(detailed, profile.FollowedMessage)
 		}
 	}
 	if r.Blocking != nil {

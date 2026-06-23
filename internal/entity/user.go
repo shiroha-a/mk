@@ -94,19 +94,20 @@ type UserDetailed struct {
 	Location       *string `json:"location"`
 	Birthday       *string `json:"birthday"`
 	Lang           *string `json:"lang"`
-	// FollowedMessage は follower / self だけに見せる private 文字列なので
-	// omitempty で「非 follower には省略」を表現する。packer はこの field を
-	// set せず、self は AsMeDetailed、follower は users/show handler が set する
-	// (upstream UserEntityService の relation/isMe ブロックでのみ emit、#1558)。
-	FollowedMessage     *string        `json:"followedMessage,omitempty"`
-	PublicReactions     bool           `json:"publicReactions"`
-	Fields              datatypes.JSON `json:"fields"`
-	VerifiedLinks       []string       `json:"verifiedLinks"`
-	FollowersCount      int            `json:"followersCount"`
-	FollowingCount      int            `json:"followingCount"`
-	NotesCount          int            `json:"notesCount"`
-	FollowersVisibility string         `json:"followersVisibility"`
-	FollowingVisibility string         `json:"followingVisibility"`
+	// FollowedMessage は follower / self だけに見せる (#1558)。upstream は follower
+	// には未設定でも null を emit する (#2097) ため、単純な *string + omitempty では
+	// 「null を出す」と「省略する」を区別できない。RawMessage にして、follower path は
+	// SetFollowedMessageForFollower で null/値をセットし、非 follower path は未設定
+	// (nil → omitempty で省略) で表現する。
+	FollowedMessage     json.RawMessage `json:"followedMessage,omitempty"`
+	PublicReactions     bool            `json:"publicReactions"`
+	Fields              datatypes.JSON  `json:"fields"`
+	VerifiedLinks       []string        `json:"verifiedLinks"`
+	FollowersCount      int             `json:"followersCount"`
+	FollowingCount      int             `json:"followingCount"`
+	NotesCount          int             `json:"notesCount"`
+	FollowersVisibility string          `json:"followersVisibility"`
+	FollowingVisibility string          `json:"followingVisibility"`
 	// ChatScope は 1-on-1 チャットの受信許可レベル (#692)。FE の
 	// /settings/privacy が `i/update` レスポンスから直接 `$i.chatScope` に
 	// 反映するため、この field を expose しないと UI が保存後に古い値で
@@ -630,6 +631,25 @@ func GateCountVisibility(d *UserDetailed, isMe, isModerator, isFollowing bool) {
 	if !countVisible(d.FollowingVisibility, isMe, isModerator, isFollowing) {
 		d.FollowingCount = 0
 	}
+}
+
+// SetFollowedMessageForFollower marks followedMessage as visible to a
+// follower/self on d, emitting `null` when msg is nil. upstream は follower には
+// 未設定でも null を返す (UserEntityService の `relation.isFollowing ?
+// (profile.followedMessage ?? null) : undefined`) ので、follower path は必ずこの
+// helper を通すこと。非 follower path はこの helper を呼ばず field を未設定のままに
+// して omitempty で省略させる (#2097)。
+func SetFollowedMessageForFollower(d *UserDetailed, msg *string) {
+	if msg == nil {
+		d.FollowedMessage = json.RawMessage("null")
+		return
+	}
+	b, err := json.Marshal(*msg)
+	if err != nil {
+		d.FollowedMessage = json.RawMessage("null")
+		return
+	}
+	d.FollowedMessage = b
 }
 
 // ApplyModeratorSecurityFields sets twoFactorEnabled / usePasswordLessLogin /

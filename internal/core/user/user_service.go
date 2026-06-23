@@ -760,7 +760,8 @@ func (s *Service) publishMeUpdated(bundle *UserWithProfile) {
 	// profile から補填する。これを欠くと i/update で followedMessage を変更しても
 	// frontend の $i.followedMessage が即時反映されない。
 	if bundle.Profile != nil {
-		body.FollowedMessage = bundle.Profile.FollowedMessage
+		// self event は本人なので follower 扱いで emit (未設定でも null、#2097)。
+		entity.SetFollowedMessageForFollower(&body, bundle.Profile.FollowedMessage)
 	}
 	// PackUserDetailed は pinnedNoteIDs を空で返すため、piningRepo が
 	// あれば pin ID だけ埋める (full note pack は不要で frontend 側で
