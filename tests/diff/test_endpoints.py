@@ -149,9 +149,12 @@ I_IGNORE = META_IGNORE | {
     "twoFactorEnabled", "usePasswordLessLogin", "securityKeys",
     "notesCount", "twoFactorBackupCodesStock", "lastActiveDate", "onlineStatus",
     "isAdmin", "isModerator",  # role 依存 (root fallback) は users/show 側で gate 済
-    # #2094: presence 乖離 (moderationNote 未 emit / room・clientData の vestigial
-    # extra)。finding として追跡中なので harness では一旦無視する。
-    "moderationNote", "room", "clientData",
+    # room / clientData は mk-go の **意図的な** pass-through extra (upstream は削除済
+    # だが mk-go は client 固有 JSON 保存機能として read/write/test 付きで保持、#2094 で
+    # intentional と判断)。upstream に無い field なので harness では永続無視する。
+    "room", "clientData",
+    # (#2094 修正済: moderationNote は moderator viewer に emit するようになったため
+    # ここで ignore しない = 回帰 gate に戻した。)
 }
 
 

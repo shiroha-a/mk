@@ -2757,3 +2757,43 @@ func TestVerifyURL(t *testing.T) {
 	h2 := &Handler{serverURL: "https://example.com"}
 	assert.Equal(t, "https://example.com/verify-email/abc", h2.verifyURL("abc"))
 }
+
+// #2094: /api/i は moderator viewer (= self が moderator) のとき moderationNote を
+// emit する (空なら "")。非 moderator では field を出さない (upstream の undefined 相当)。
+func TestMe_ModerationNote_ModeratorGated(t *testing.T) {
+	mn := "keep an eye on this account"
+	callMe := func(t *testing.T, h *Handler, user *model.User) map[string]any {
+		t.Helper()
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.Set(string(middleware.UserContextKey), user)
+		require.NoError(t, h.Me(c))
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	t.Run("moderator sees moderationNote", func(t *testing.T) {
+		h, userRepo, _, _ := newTestHandler(t)
+		h.SetRoleProvider(&stubRoleProvider{moderator: true})
+		user := &model.User{ID: "u1", Username: "u1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+		userRepo.Users["u1"] = user
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", ModerationNote: &mn, Fields: datatypes.JSON([]byte("[]"))}
+		resp := callMe(t, h, user)
+		assert.Equal(t, mn, resp["moderationNote"])
+	})
+
+	t.Run("non-moderator omits moderationNote", func(t *testing.T) {
+		h, userRepo, _, _ := newTestHandler(t)
+		h.SetRoleProvider(&stubRoleProvider{moderator: false})
+		user := &model.User{ID: "u2", Username: "u2", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+		userRepo.Users["u2"] = user
+		userRepo.Profiles["u2"] = &model.UserProfile{UserID: "u2", ModerationNote: &mn, Fields: datatypes.JSON([]byte("[]"))}
+		resp := callMe(t, h, user)
+		_, present := resp["moderationNote"]
+		assert.False(t, present, "non-moderator must not receive moderationNote")
+	})
+}

@@ -939,6 +939,17 @@ func (h *Handler) Me(c echo.Context) error {
 	}
 	resp["isAdmin"] = isAdmin
 	resp["isModerator"] = isMod
+	// upstream UserEntityService.ts:574: moderationNote は moderator viewer のみに
+	// emit する (空なら '')。/api/i は self-view なので viewer==self、self が moderator
+	// のとき自身の profile.moderationNote を返す。非 moderator では field 自体を出さない
+	// (upstream の undefined 相当、#2094)。
+	if isMod && profile != nil {
+		mn := ""
+		if profile.ModerationNote != nil {
+			mn = *profile.ModerationNote
+		}
+		resp["moderationNote"] = mn
+	}
 	// isDeleted / isExplorable は PackMeDetailed 由来で base 展開済 (#971)。
 	// 未読系フィールドを依存する repo / service から実際に引く
 	// (hasUnreadAntenna / hasUnreadChannel は antennaUnreadRepo /
