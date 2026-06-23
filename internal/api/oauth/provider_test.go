@@ -527,7 +527,8 @@ func TestAuthorize_DiscoveryFailure(t *testing.T) {
 		func(c echo.Context, _ ConsentMeta) error { return c.HTML(http.StatusOK, "x") })
 	e := echo.New()
 	q := url.Values{
-		"client_id": {srv.URL + "/"}, "redirect_uri": {srv.URL + "/cb"},
+		"response_type": {"code"},
+		"client_id":     {srv.URL + "/"}, "redirect_uri": {srv.URL + "/cb"},
 		"scope": {"read:account"}, "code_challenge": {challengeFor("v")}, "code_challenge_method": {"S256"},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil)
@@ -592,4 +593,28 @@ func TestNotFound(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
 	assert.Equal(t, "UNKNOWN_OAUTH_ENDPOINT", errObj["code"])
+}
+
+// #2079: response_type が code 以外 / 欠落のとき、client_id 検証より前に 501
+// unsupported_response_type を直接返す (redirect しない、upstream OAuth2ProviderService)。
+func TestAuthorize_UnsupportedResponseType(t *testing.T) {
+	hn := newHarness(t)
+	for _, rt := range []string{"token", "", "id_token"} {
+		q := validAuthorizeQuery(hn, challengeFor("verifier-abc"))
+		q.Set("response_type", rt)
+		if rt == "" {
+			q.Del("response_type")
+		}
+		rec := hn.authorize(t, q)
+		require.Equal(t, http.StatusNotImplemented, rec.Code, "response_type=%q は 501", rt)
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "unsupported_response_type", body["error"], "response_type=%q", rt)
+		// redirect していないこと (consent も発行されない)。
+		assert.Empty(t, rec.Header().Get("Location"))
+		assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	}
+	// code は従来通り consent。
+	rec := hn.authorize(t, validAuthorizeQuery(hn, challengeFor("verifier-abc")))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }

@@ -94,6 +94,14 @@ func (h *Handler) Authorize(c echo.Context) error {
 	codeChallengeMethod := q.Get("code_challenge_method")
 	state := q.Get("state")
 
+	// 0. response_type 検証。upstream OAuth2ProviderService は client_id 検証より前に
+	// response_type を見て、code 以外なら 501 unsupported_response_type を直接返す
+	// (redirect しない、#2079)。implicit grant 等を弾く。
+	if q.Get("response_type") != "code" {
+		applyOAuthNoStore(c)
+		return c.JSON(http.StatusNotImplemented, map[string]any{"error": "unsupported_response_type"})
+	}
+
 	// 1. client_id 検証 (失敗時は信頼できる redirect 先が無いので直接 400)。
 	cu, err := validateClientID(clientID, h.allowHTTP)
 	if err != nil {
@@ -386,6 +394,13 @@ func directError(c echo.Context, desc string) error {
 		"error":             "invalid_request",
 		"error_description": desc,
 	})
+}
+
+// applyOAuthNoStore sets the no-cache headers upstream's applyNoStore applies to
+// authorization-endpoint responses (#2079)。
+func applyOAuthNoStore(c echo.Context) {
+	c.Response().Header().Set("Cache-Control", "no-store")
+	c.Response().Header().Set("Pragma", "no-cache")
 }
 
 // redirectError redirects to the (validated) client redirect_uri with the OAuth
