@@ -2159,6 +2159,7 @@ func (s *Server) setupRoutes() {
 	notePublisher.SetEmojiLookup(emojiRepo)
 	notePublisher.SetInstanceLookup(instanceRepo)
 	notePublisher.SetReactionReader(reactionCountWriter)
+	notePublisher.SetReactionPairReader(reactionRepo) // #2067: renote embed の pair cache を note_reaction から埋める
 	notePublisher.SetFieldResolver(noteFieldResolver)
 	notificationPublisher := stream.NewNotificationPublisher(streamPubSub)
 	notificationPublisher.SetRepos(userRepo, noteRepo, idGen)

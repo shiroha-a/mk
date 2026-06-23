@@ -838,3 +838,85 @@ func TestNotePublisher_EmitsRenoteReactionAndUserPairCache(t *testing.T) {
 	require.Contains(t, renoteObj, "reactionAndUserPairCache", "renote embed に cache を載せる (#2058)")
 	assert.JSONEq(t, `["userA/👍"]`, string(renoteObj["reactionAndUserPairCache"]))
 }
+
+// stubReactionPairReader records ListReactionPairs calls and returns canned pairs.
+type stubReactionPairReader struct {
+	pairs map[string][]string
+	calls []string
+}
+
+func (s *stubReactionPairReader) ListReactionPairs(noteID string, _ int) ([]string, error) {
+	s.calls = append(s.calls, noteID)
+	return s.pairs[noteID], nil
+}
+
+// #2067: pure renote で renote に reaction がある場合、renote embed の
+// reactionAndUserPairCache を note_reaction (reader) から埋める。
+func TestNotePublisher_RenotePairCacheFromReader(t *testing.T) {
+	pub := &stubPublisher{}
+	idGen, _ := id.NewGenerator("aidx")
+	np := NewNotePublisher(pub, idGen)
+	renoteID := idGen.Generate(time.Now())
+	noteID := idGen.Generate(time.Now())
+	reader := &stubReactionPairReader{pairs: map[string][]string{renoteID: {"alice/👍", "bob/❤"}}}
+	np.SetReactionPairReader(reader)
+
+	n := &model.Note{
+		ID: noteID, UserID: "u1", RenoteID: &renoteID, Visibility: model.NoteVisibilityPublic,
+		Renote: &model.Note{
+			ID: renoteID, UserID: "u2", Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte(`{"👍":2}`)),
+			User:      &model.User{ID: "u2", Username: "author2"},
+		},
+	}
+	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
+
+	require.Len(t, pub.payloads, 1)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(pub.payloads[0].(json.RawMessage), &body))
+	renote := body["renote"].(map[string]any)
+	assert.Equal(t, []any{"alice/👍", "bob/❤"}, renote["reactionAndUserPairCache"])
+	assert.Equal(t, []string{renoteID}, reader.calls, "pure renote + reactions のときだけ reader を引く")
+}
+
+// quote renote (text あり = 非 pure) では reader を引かない。
+func TestNotePublisher_QuoteRenoteSkipsPairReader(t *testing.T) {
+	pub := &stubPublisher{}
+	idGen, _ := id.NewGenerator("aidx")
+	np := NewNotePublisher(pub, idGen)
+	renoteID := idGen.Generate(time.Now())
+	reader := &stubReactionPairReader{pairs: map[string][]string{renoteID: {"alice/👍"}}}
+	np.SetReactionPairReader(reader)
+	quoteText := "quote"
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", RenoteID: &renoteID, Text: &quoteText,
+		Visibility: model.NoteVisibilityPublic,
+		Renote: &model.Note{
+			ID: renoteID, UserID: "u2", Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte(`{"👍":1}`)),
+			User:      &model.User{ID: "u2", Username: "author2"},
+		},
+	}
+	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
+	assert.Empty(t, reader.calls, "非 pure renote では reader を引かない")
+}
+
+// reaction の無い renote では reader を引かない。
+func TestNotePublisher_NoReactionsSkipsPairReader(t *testing.T) {
+	pub := &stubPublisher{}
+	idGen, _ := id.NewGenerator("aidx")
+	np := NewNotePublisher(pub, idGen)
+	renoteID := idGen.Generate(time.Now())
+	reader := &stubReactionPairReader{}
+	np.SetReactionPairReader(reader)
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1", RenoteID: &renoteID, Visibility: model.NoteVisibilityPublic,
+		Renote: &model.Note{
+			ID: renoteID, UserID: "u2", Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte(`{}`)),
+			User:      &model.User{ID: "u2", Username: "author2"},
+		},
+	}
+	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
+	assert.Empty(t, reader.calls, "reaction 無しの renote では reader を引かない")
+}

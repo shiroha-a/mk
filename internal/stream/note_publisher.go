@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	corenotification "github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -31,6 +32,10 @@ type NotePublisher struct {
 	emojiLookup    entity.EmojiLookup
 	instanceLookup entity.InstanceLookup
 	reactionReader entity.BufferedReactionsReader
+	// reactionPairReader は pure renote の renote embed の reactionAndUserPairCache
+	// を note_reaction から埋めるために使う (#2067)。nil 時は DB の (通常空の) cache
+	// をそのまま使う = #2058 の streaming renote.myReaction は事実上発火しない。
+	reactionPairReader ReactionPairReader
 	// fieldResolver は Files / Channel など PackNoteWithInstance では
 	// 解決されない後段 field を埋める。未設定時は従来通り Files が
 	// 空配列のまま publish される (旧挙動)。SetFieldResolver で配線。
@@ -66,6 +71,38 @@ func (p *NotePublisher) SetInstanceLookup(lookup entity.InstanceLookup) {
 // nil 配線時は DB の note.Reactions のみ反映 (旧挙動)。
 func (p *NotePublisher) SetReactionReader(r entity.BufferedReactionsReader) {
 	p.reactionReader = r
+}
+
+// ReactionPairReader lists up to `limit` "<userId>/<reaction>" pairs for a note,
+// backed by note_reaction (#2067)。
+type ReactionPairReader interface {
+	ListReactionPairs(noteID string, limit int) ([]string, error)
+}
+
+// reactionPairCacheMax は renote embed の reactionAndUserPairCache に載せる pair の
+// 上限。upstream PER_NOTE_REACTION_USER_PAIR_CACHE_MAX (16) と揃える。これを超える
+// reaction 数の renote は injectRenoteMyReaction が truncated skip する (#2067)。
+const reactionPairCacheMax = 16
+
+// SetReactionPairReader attaches a ReactionPairReader so that pure-renote streaming
+// payloads carry the renote's reaction/user pairs, letting subscribers resolve
+// renote.myReaction in-memory (#2067)。
+func (p *NotePublisher) SetReactionPairReader(r ReactionPairReader) {
+	p.reactionPairReader = r
+}
+
+// reactionsNonEmpty reports whether a packed reactions JSON object has at least
+// one entry (`{}` / null / empty → false)。pair cache を埋めるか (= note_reaction を
+// 引くか) の gate に使う。
+func reactionsNonEmpty(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	return len(m) > 0
 }
 
 // SetFieldResolver attaches a NoteFieldResolver so that streaming payloads
@@ -130,10 +167,22 @@ func (p *NotePublisher) packNote(n *model.Note, author *model.User) []byte {
 	pn.ReactionAndUserPairCache = &pairs
 	// pure renote の renote embed にも reactionAndUserPairCache を載せ、subscriber 側の
 	// timeline channel が renote.myReaction を per-viewer に in-memory 算出できるように
-	// する (upstream populateMyReaction の cache 経路、#2058)。renote model が preload
-	// されていれば DB の cache をそのまま渡す。
+	// する (upstream populateMyReaction の cache 経路、#2058)。
 	if pn.Renote != nil && noteForPack.Renote != nil {
-		rpairs := []string(noteForPack.Renote.ReactionAndUserPairCache)
+		var rpairs []string
+		// mk-go は note.reactionAndUserPairCache を維持しない (DB は常に空) ため、上位 note が
+		// pure renote で renote に reaction がある場合のみ note_reaction から pair を引いて埋める
+		// (#2067)。note_reaction 行は reaction 時に即 persist されるので count buffer 中の reaction
+		// も含まれる = buffered reaction をした viewer の renote.myReaction も streaming で拾える。
+		if p.reactionPairReader != nil && reactionsNonEmpty(pn.Renote.Reactions) && corenote.IsPureRenote(&noteForPack) {
+			if pairs, err := p.reactionPairReader.ListReactionPairs(noteForPack.Renote.ID, reactionPairCacheMax); err == nil {
+				rpairs = pairs
+			}
+		}
+		if rpairs == nil {
+			// fallback: DB cache (通常空) をそのまま使う。
+			rpairs = []string(noteForPack.Renote.ReactionAndUserPairCache)
+		}
 		if rpairs == nil {
 			rpairs = []string{}
 		}

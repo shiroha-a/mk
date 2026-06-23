@@ -21,6 +21,13 @@ type NoteReactionRepository interface {
 	// noteIDをキーとしたmapを返す。
 	FindByUserAndNoteIDs(userID string, noteIDs []string) (map[string]*model.NoteReaction, error)
 	ListByNoteID(noteID string, untilID, sinceID string, limit int, reactions []string) ([]*model.NoteReaction, error)
+	// ListReactionPairs returns up to `limit` "<userId>/<reaction>" pairs for a
+	// note (oldest first), mirroring upstream's reactionAndUserPairCache capped at
+	// PER_NOTE_REACTION_USER_PAIR_CACHE_MAX. Used by the streaming note publisher
+	// to fill the renote embed pair cache for per-subscriber renote.myReaction
+	// (#2067)。note_reaction 行は reaction 時に即 persist されるため count buffer 中の
+	// reaction も含まれる。User は preload しない (userId だけ要るため)。
+	ListReactionPairs(noteID string, limit int) ([]string, error)
 	// ListByUserID returns reactions made by the given user, with User and Note
 	// preloaded for packing. upstream Misskey TS の users/reactions endpoint
 	// 用 (reactor 視点の reaction list)。viewerID は閲覧者 (空文字列で匿名) で、
@@ -98,6 +105,30 @@ func (r *noteReactionRepository) ListByNoteID(noteID string, untilID, sinceID st
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *noteReactionRepository) ListReactionPairs(noteID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var rows []struct {
+		UserID   string `gorm:"column:userId"`
+		Reaction string `gorm:"column:reaction"`
+	}
+	// User を preload せず userId / reaction の 2 列だけを引く (publish path の軽量化)。
+	if err := r.db.Model(&model.NoteReaction{}).
+		Select(`"userId", reaction`).
+		Where(`"noteId" = ?`, noteID).
+		Order("id").
+		Limit(limit).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	pairs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		pairs = append(pairs, row.UserID+"/"+row.Reaction)
+	}
+	return pairs, nil
 }
 
 // ListByUserID returns reactions made by the given user. upstream Misskey TS

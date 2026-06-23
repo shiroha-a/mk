@@ -314,3 +314,46 @@ func TestNoteReactionRepository_QueryErrors(t *testing.T) {
 	_, err = repo.ListByNoteID("n", "", "", 10, nil)
 	assert.Error(t, err)
 }
+
+// #2067: ListReactionPairs は "<userId>/<reaction>" を id 昇順 (oldest first) で
+// 最大 limit 件返す。note_reaction 行が即 persist されるため buffered count とは独立。
+func TestNoteReactionRepository_ListReactionPairs(t *testing.T) {
+	repo := NewNoteReactionRepository(testDB)
+	u1 := insertTestUser(t, "u_lrp_1", "lrpuser1")
+	defer cleanupUser(t, u1.ID)
+	u2 := insertTestUser(t, "u_lrp_2", "lrpuser2")
+	defer cleanupUser(t, u2.ID)
+
+	noteRepo := NewNoteRepository(testDB)
+	note := &model.Note{ID: "n_lrp_1", UserID: u1.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+	require.NoError(t, noteRepo.Create(note))
+	defer cleanupNote(t, note.ID)
+
+	// id 昇順で rx_lrp_1 (u1/👍) → rx_lrp_2 (u2/❤)。
+	for _, rec := range []*model.NoteReaction{
+		{ID: "rx_lrp_1", UserID: u1.ID, NoteID: note.ID, Reaction: "👍"},
+		{ID: "rx_lrp_2", UserID: u2.ID, NoteID: note.ID, Reaction: "❤"},
+	} {
+		require.NoError(t, repo.Create(rec))
+		defer cleanupReaction(t, rec.ID)
+	}
+
+	pairs, err := repo.ListReactionPairs(note.ID, 16)
+	require.NoError(t, err)
+	assert.Equal(t, []string{u1.ID + "/👍", u2.ID + "/❤"}, pairs, "oldest first")
+
+	// limit でキャップされる (oldest 1 件のみ)。
+	capped, err := repo.ListReactionPairs(note.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{u1.ID + "/👍"}, capped)
+
+	// limit <= 0 は nil。
+	none, err := repo.ListReactionPairs(note.ID, 0)
+	require.NoError(t, err)
+	assert.Nil(t, none)
+
+	// reaction の無い note は空。
+	empty, err := repo.ListReactionPairs("n_lrp_nonexistent", 16)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}

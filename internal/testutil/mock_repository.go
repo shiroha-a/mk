@@ -1846,6 +1846,29 @@ func (m *MockNoteReactionRepository) ListByNoteID(noteID, untilID, sinceID strin
 	return rows, nil
 }
 
+// ListReactionPairs returns up to `limit` "<userId>/<reaction>" pairs for a note,
+// oldest (smallest id) first, mirroring the production repo (#2067)。
+func (m *MockNoteReactionRepository) ListReactionPairs(noteID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var matched []*model.NoteReaction
+	for _, r := range m.Reactions {
+		if r.NoteID == noteID {
+			matched = append(matched, r)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	pairs := make([]string, 0, len(matched))
+	for _, r := range matched {
+		pairs = append(pairs, r.UserID+"/"+r.Reaction)
+	}
+	return pairs, nil
+}
+
 // ListByUserID returns reactions made by a user. paginationOrder と同じく
 // sinceID 単独指定時のみ ASC、それ以外 DESC (ListByNoteID と同 logic)。
 func (m *MockNoteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID string, limit int) ([]*model.NoteReaction, error) {
