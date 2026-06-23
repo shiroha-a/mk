@@ -60,10 +60,8 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     # onlineStatus は lastActiveDate 由来の timing-state (mk-go は activity で即
     # 'online'、TS は throttle で 'unknown')。安定した parity 比較対象ではない。
     "onlineStatus", "lastActiveDate",
-    # #2091: users/show self-view が isAdmin/isModerator を populate しない (root を
-    # 反映せず常に false)。finding として追跡中なので harness では一旦無視する。
-    # #2091 修正後にこの 2 つを外して回帰 gate に戻すこと。
-    "isAdmin", "isModerator",
+    # (#2091 修正済: isAdmin/isModerator は self-view で populate されるように
+    # なったため回帰 gate に戻した。ここで ignore しない。)
 }
 
 

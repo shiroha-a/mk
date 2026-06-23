@@ -622,6 +622,14 @@ func (h *Handler) Show(c echo.Context) error {
 		// 入れる (misskey_dart の MeDetailed.fromJson は policies を非null Map と
 		// して要求する、#1240)。権威値は /api/i 経由で取得される。
 		me.Policies = corerole.DefaultPolicies()
+		// isAdmin / isModerator も role 依存で entity 層では出せない。upstream は
+		// MeDetailedOnly でこれらを埋める (RoleService.isAdministrator/isModerator、
+		// root fallback 込み) ので、self-view では /api/i と同値になるよう
+		// moderatorChecker (= roleService) から populate する (#2091)。
+		if h.moderatorChecker != nil {
+			me.IsAdmin = h.moderatorChecker.IsAdministrator(bundle.User.ID)
+			me.IsModerator = h.moderatorChecker.IsModerator(bundle.User.ID)
+		}
 		return c.JSON(http.StatusOK, me)
 	}
 	// followers/following count を visibility で gate する (#1558)。ここに来るのは
