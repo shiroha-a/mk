@@ -45,35 +45,42 @@ func TestPreview_EmptyURL(t *testing.T) {
 	assert.Equal(t, apierr.UUIDInvalidParam, errObj["id"])
 }
 
-// fetcher が error を返したとき、handler は HTTP 200 + 全 field null の degrade
-// body を返す (= upstream Misskey /api/url の「取得失敗でも 200 で空 card」挙動)。
-// degrade body の shape (key 一式 + null 初期化 + player object + url echo) を
-// 固定する。
-func TestPreview_FetcherError_DegradeBody(t *testing.T) {
-	// disabled fetcher は Fetch で ErrDisabled を返すので degrade 経路に入る。
+// #2106 N18: url preview が disabled のとき、handler は 403 + URL_PREVIEW_DISABLED
+// を返す (以前は 200 + null degrade body で frontend の !res.ok 分岐が機能しなかった)。
+func TestPreview_Disabled_Returns403(t *testing.T) {
 	h := apiurl.NewHandler(urlpreview.NewFetcher(urlpreview.Config{Enabled: false}, nil, "", nil))
-	rawURL := "https://example.com/article"
-	rec := doPreview(h, rawURL)
+	rec := doPreview(h, "https://example.com/article")
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	e, ok := body["error"].(map[string]any)
+	require.True(t, ok, "error object であること")
+	assert.Equal(t, "URL_PREVIEW_DISABLED", e["code"])
+	assert.Equal(t, "58b36e13-d2f5-0323-b0c6-76aa9dabefb8", e["id"])
+}
 
-	// メタ系は null、url は要求 URL を echo、sensitive は false。
-	for _, k := range []string{"title", "description", "thumbnail", "icon", "sitename", "activityPub"} {
-		assert.Nil(t, body[k], "degrade body の %q は null であること", k)
-	}
-	assert.Equal(t, rawURL, body["url"])
-	assert.Equal(t, false, body["sensitive"])
+// #2106 N18: enabled fetcher が取得失敗すると 422 + URL_PREVIEW_FAILED を返す。
+func TestPreview_FetchFailed_Returns422(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	failURL := srv.URL
+	srv.Close() // close して connection refused にし fetch を失敗させる
 
-	player, ok := body["player"].(map[string]any)
-	require.True(t, ok, "player は object であること")
-	assert.Nil(t, player["url"])
-	assert.Nil(t, player["width"])
-	assert.Nil(t, player["height"])
-	allow, ok := player["allow"].([]any)
-	require.True(t, ok, "player.allow は array であること")
-	assert.Empty(t, allow)
+	f := urlpreview.NewFetcher(urlpreview.Config{
+		Enabled: true, TimeoutMs: 2000, MaxContentLength: 1 << 20,
+	}, nil, "", nil)
+	f.SetHTTPClient(&http.Client{})
+	h := apiurl.NewHandler(f)
+
+	rec := doPreview(h, failURL)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	e, ok := body["error"].(map[string]any)
+	require.True(t, ok, "error object であること")
+	assert.Equal(t, "URL_PREVIEW_FAILED", e["code"])
+	assert.Equal(t, "09d01cb5-53b9-4856-82e5-38a50c290a3b", e["id"])
+	assert.Equal(t, "max-age=86400, immutable", rec.Header().Get("Cache-Control"))
 }
 
 // fetcher が成功したとき、parse された Result をそのまま 200 で返す。

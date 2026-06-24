@@ -2,6 +2,7 @@
 package url
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -30,17 +31,17 @@ func (h *Handler) Preview(c echo.Context) error {
 
 	result, err := h.fetcher.Fetch(c.Request().Context(), rawURL)
 	if err != nil {
-		return c.JSON(http.StatusOK, map[string]any{
-			"title":       nil,
-			"description": nil,
-			"thumbnail":   nil,
-			"icon":        nil,
-			"sitename":    nil,
-			"url":         rawURL,
-			"player":      map[string]any{"url": nil, "width": nil, "height": nil, "allow": []string{}},
-			"sensitive":   false,
-			"activityPub": nil,
-		})
+		// #2106 N18: upstream UrlPreviewService は disabled で 403 URL_PREVIEW_DISABLED、
+		// 取得失敗で 422 URL_PREVIEW_FAILED を固有 UUID 付きで返す。以前は両方 200+null
+		// preview を返しており frontend MkUrlPreview の !res.ok 分岐が機能しなかった。
+		if errors.Is(err, urlpreview.ErrDisabled) {
+			return c.JSON(http.StatusForbidden, apierr.Error("URL_PREVIEW_DISABLED",
+				"URL preview is disabled", "58b36e13-d2f5-0323-b0c6-76aa9dabefb8"))
+		}
+		// upstream 同様、失敗も 1 日キャッシュして同一 URL の re-fetch を抑止する。
+		c.Response().Header().Set("Cache-Control", "max-age=86400, immutable")
+		return c.JSON(http.StatusUnprocessableEntity, apierr.Error("URL_PREVIEW_FAILED",
+			"Failed to get preview", "09d01cb5-53b9-4856-82e5-38a50c290a3b"))
 	}
 
 	// thumbnail (OGP og:image) / icon (favicon) は外部サイトの画像。frontend
@@ -49,5 +50,7 @@ func (h *Handler) Preview(c echo.Context) error {
 	// なので対象外。
 	result.Thumbnail = entity.ProxyMediaURLPtr(result.Thumbnail)
 	result.Icon = entity.ProxyMediaURLPtr(result.Icon)
+	// #2106 N18: upstream は成功 preview を 1 日キャッシュさせる。
+	c.Response().Header().Set("Cache-Control", "max-age=86400, immutable")
 	return c.JSON(http.StatusOK, result)
 }
