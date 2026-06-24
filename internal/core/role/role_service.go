@@ -288,9 +288,21 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	// 配慮した soft-fail。
 	condRoles := s.evaluateConditionalRoles(userID, assignedRoles)
 	roles := append(assignedRoles, condRoles...)
+	// #2106 S5: cache 失効を「TTL」と「最も早い assignment expiresAt」の min にする。
+	// ListByUser は fetch 時点で有効な assignment しか返さないが、TTL 中に期限切れに
+	// なる time-limited assignment はそのまま cache に残り、最大 roleCacheTTL の間
+	// role/policy として効き続けてしまう (upstream は getUserAssigns で read 毎に
+	// expiresAt を再 filter)。entry を soonest expiry で drop すれば、次 read が
+	// 再 fetch して DB filter が期限切れ assignment を除外する。
+	cacheExpiry := time.Now().Add(roleCacheTTL)
+	for _, a := range assignments {
+		if a.ExpiresAt != nil && a.ExpiresAt.Before(cacheExpiry) {
+			cacheExpiry = *a.ExpiresAt
+		}
+	}
 	s.userRoleCache.Store(userID, &roleCacheEntry{
 		roles:     roles,
-		expiresAt: time.Now().Add(roleCacheTTL),
+		expiresAt: cacheExpiry,
 	})
 	return roles, nil
 }
