@@ -40,6 +40,9 @@ func cleanupSignupRows(t *testing.T, db *gorm.DB, prefix string) {
 	db.Exec(`DELETE FROM "user_keypair_extra" WHERE "userId" LIKE ?`, prefix+"%")
 	db.Exec(`DELETE FROM "user" WHERE id LIKE ? OR "usernameLower" LIKE ?`, prefix+"%", prefix+"%")
 	db.Exec(`DELETE FROM "registration_ticket" WHERE id LIKE ? OR code LIKE ?`, prefix+"%", prefix+"%")
+	// #2106 N23: promotePendingTx は used_username に必ず insert するため、idempotent な
+	// 再実行のために prefix 付き行を掃除する (used_username は account 削除後も残る設計)。
+	db.Exec(`DELETE FROM "used_username" WHERE "username" LIKE ?`, prefix+"%")
 }
 
 func newTxService(t *testing.T, db *gorm.DB) *signup.Service {

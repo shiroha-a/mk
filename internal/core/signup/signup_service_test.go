@@ -1,6 +1,7 @@
 package signup_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -561,4 +562,52 @@ func TestSignup_UsedUsername(t *testing.T) {
 	svc2, _, _ := newTestService(t)
 	_, err = svc2.Signup("taken", "password123", false)
 	assert.NoError(t, err, "repo 未配線時は used_usernames を見ない")
+}
+
+// #2106 N23: Signup は used_username に lowercase username を記録する
+// (account 削除後の同名 username 再取得を恒久的に防ぐ guard のため)。
+func TestSignup_RecordsUsedUsername(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	usedRepo := testutil.NewMockUsedUsernameRepository()
+	svc.SetUsedUsernameRepo(usedRepo)
+
+	_, err := svc.Signup("NewUser", "password123", false)
+	require.NoError(t, err)
+
+	exists, err := usedRepo.Exists("newuser")
+	require.NoError(t, err)
+	assert.True(t, exists, "signup は used_username に lowercase username を記録する")
+}
+
+// errUsedUsernameRepo always fails Create to exercise the best-effort error path.
+type errUsedUsernameRepo struct{}
+
+func (errUsedUsernameRepo) Create(string) error         { return errors.New("used_username create failed") }
+func (errUsedUsernameRepo) Exists(string) (bool, error) { return false, nil }
+
+// #2106 N23: used_username 記録失敗は best-effort で握り (signup は成功)。
+func TestSignup_UsedUsernameCreateErrorIsBestEffort(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	svc.SetUsedUsernameRepo(errUsedUsernameRepo{})
+	result, err := svc.Signup("besteffort", "password123", false)
+	require.NoError(t, err, "used_username 記録失敗でも signup は成功する")
+	require.NotNil(t, result)
+}
+
+// #2106 N23: non-tx (mock) promote 経路でも used_username に記録する。
+func TestPromotePending_NoTxRecordsUsedUsername(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+	usedRepo := testutil.NewMockUsedUsernameRepository()
+	svc.SetUsedUsernameRepo(usedRepo)
+
+	row, err := svc.CreatePending("PendUser", "pend@example.com", "password123", nil)
+	require.NoError(t, err)
+	_, err = svc.PromotePending(row.Code)
+	require.NoError(t, err)
+
+	exists, err := usedRepo.Exists("penduser")
+	require.NoError(t, err)
+	assert.True(t, exists, "non-tx promote も used_username に記録する")
 }

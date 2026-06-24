@@ -137,6 +137,19 @@ func (s *Service) SetUsedUsernameRepo(r repository.UsedUsernameRepository) {
 	s.usedUsernameRepo = r
 }
 
+// recordUsedUsername best-effort records lower in used_username so the username
+// cannot be reclaimed after account deletion (#2106 N23). Failures are logged but
+// never fail the signup; the non-transactional callers have already created the
+// user/profile, so aborting here would leave an inconsistent state.
+func (s *Service) recordUsedUsername(lower string) {
+	if s.usedUsernameRepo == nil {
+		return
+	}
+	if err := s.usedUsernameRepo.Create(lower); err != nil {
+		slog.Warn("failed to record used username", "username", lower, "error", err)
+	}
+}
+
 // isUsedUsername reports whether lower (already lowercased) is recorded in
 // used_usernames (削除済 account)。repo 未配線 / 照合失敗時は false (fail-open、
 // オンライン性優先で既存 preserved/duplicate ガードに委ねる)。
@@ -322,6 +335,10 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 	if err := s.userRepo.CreateProfile(profile); err != nil {
 		return nil, err
 	}
+
+	// #2106 N23: upstream SignupService は全 signup で used_username に記録し、account
+	// 削除後も同名 username の再取得を恒久的に防ぐ (SignupService.ts:151-154)。
+	s.recordUsedUsername(lower)
 
 	// RSA keypair (federation 用)。keypairRepo が未設定の場合はスキップする
 	// (従来の単体テストのため)。
@@ -537,6 +554,13 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 			return err
 		}
 
+		// #2106 N23: used_username に同 tx 内で記録する (upstream SignupService:151-154、
+		// 削除後の username 再取得を恒久的に防ぐ)。fresh username のみ到達するため
+		// (Exists guard が既使用を事前に弾く) conflict は起きない想定。
+		if err := tx.Create(&model.UsedUsername{Username: lower}).Error; err != nil {
+			return err
+		}
+
 		// keypair (federation 用) — keypairRepo が wire されているときのみ
 		if s.keypairRepo != nil {
 			privPEM, pubPEM, err := activitypub.GenerateRSAKeypair()
@@ -631,6 +655,8 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 	if err := s.userRepo.CreateProfile(profile); err != nil {
 		return nil, err
 	}
+	// #2106 N23: used_username に記録 (non-tx 経路。Signup と mirror)。
+	s.recordUsedUsername(lower)
 	if s.keypairRepo != nil {
 		privPEM, pubPEM, err := activitypub.GenerateRSAKeypair()
 		if err != nil {
