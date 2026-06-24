@@ -575,3 +575,12 @@ func TestDeliverProcessor_Ed25519KeyCacheReuse(t *testing.T) {
 	require.Len(t, signer.keys, 2)
 	assert.Same(t, signer.keys[0], signer.keys[1], "同一 Ed25519 PEM は cache hit で再利用する")
 }
+
+// #2106 N30: 429 (rate limited) は 4xx だが upstream 同様 retryable (SkipRetry を付けない)。
+func TestDeliverProcessor_RateLimited_Retries(t *testing.T) {
+	signer := &stubSigner{resp: okResponse(http.StatusTooManyRequests)}
+	p := processors.NewDeliverProcessor(signer)
+	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, driver.SkipRetry)
+}

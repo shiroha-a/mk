@@ -133,6 +133,10 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// #2106 N30: 429 は 4xx だが upstream status-error.ts では retryable。
+		// rate-limited な webhook 先には backoff 付きで再試行する (SkipRetry を付けない)。
+		return errors.New("webhook rate limited: " + resp.Status)
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// 4xx は受信側の不正リクエスト扱いでリトライしない。
 		return fmt.Errorf("webhook client error (%d): %w", resp.StatusCode, driver.SkipRetry)

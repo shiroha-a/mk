@@ -295,3 +295,16 @@ func TestWebhookProcessor_BodyForwardedUnchanged(t *testing.T) {
 	require.NoError(t, p.HandleUser(context.Background(), task))
 	assert.Equal(t, body, client.body)
 }
+
+// #2106 N30: webhook 先が 429 を返したら retryable (SkipRetry を付けない)。
+func TestWebhookProcessor_User_429Retries(t *testing.T) {
+	client := &stubHTTPClient{status: http.StatusTooManyRequests}
+	p, repo, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
+		"h1": {ID: "h1", URL: "https://hook.example/u1"},
+	}, nil)
+	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
+	err := p.HandleUser(context.Background(), task)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.Equal(t, http.StatusTooManyRequests, repo.statusCalled["h1"])
+}

@@ -333,7 +333,9 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	// Ed25519 sign で 4xx が返った場合は host を degrade して RSA で 1 回 retry
 	// する safety net。"assertionMethod を expose しているが Ed25519 verify が
 	// 壊れている" broken impl 対策。retry も失敗したら通常 4xx 経路で扱う。
-	if useEd25519 && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusGone && resp.StatusCode != http.StatusNotFound {
+	// #2106 N30: 429 (rate limited) は Ed25519 verify の問題ではなく単なる送信過多なので、
+	// Ed25519→RSA degrade 経路には乗せず通常の retryable 扱い (下の switch) に落とす。
+	if useEd25519 && resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusGone && resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusTooManyRequests {
 		slog.Warn("ap deliver: ed25519 4xx, recording failure + retry with RSA",
 			"host", host, "status", resp.StatusCode)
 		p.recordEd25519Failure(host)
@@ -367,6 +369,15 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 			p.recordGoneSuspended(payload.Inbox)
 		}
 		return fmt.Errorf("target gone (%d): %w", resp.StatusCode, driver.SkipRetry)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// #2106 N30: 429 は 4xx だが upstream status-error.ts では retryable
+		// (isRetryable = !isClientError || statusCode === 429)。rate-limited な配送先には
+		// backoff 付きで再試行する。「応答した」事実があるので isNotResponding は解除する
+		// (instance は健在で rate-limit しているだけ)。SkipRetry を付けず queue に retry させる。
+		slog.Warn("ap deliver: rate limited (429), will retry",
+			"inbox", payload.Inbox)
+		p.recordSuccess(payload.Inbox)
+		return fmt.Errorf("rate limited (429): %s", resp.Status)
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// その他の4xxは受信側の不正リクエスト扱い。HTTP として応答が返って
 		// きているので isNotResponding 状態は解除する。
