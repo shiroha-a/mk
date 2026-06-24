@@ -437,9 +437,9 @@ func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit 
 	}
 	var reactions []string
 	if reaction != "" {
-		// List はローカルクエリ context (filter 用) なので actor host
-		// 補完は不要。nil で従来挙動を維持する。
-		reactions = reactionVariants(s.normalizeReaction(reaction, nil))
+		// #2106 N17: type filter は emoji 存在検証なしで正規化する。normalizeReaction だと
+		// 未キャッシュの remote custom emoji が ❤ に化けて誤った reaction を返していた。
+		reactions = reactionVariants(s.normalizeReactionForFilter(reaction))
 	}
 	return s.reactionRepo.ListByNoteID(target.ID, untilID, sinceID, limit, reactions)
 }
@@ -459,6 +459,34 @@ func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit 
 func (s *Service) normalizeReaction(raw string, actorHost *string) string {
 	n, _ := s.resolveReaction(raw, actorHost)
 	return n
+}
+
+// normalizeReactionForFilter normalizes a reaction string for use as the
+// notes/reactions type filter. Unlike normalizeReaction it does NOT verify custom
+// emoji existence (#2106 N17: an uncached remote custom emoji like
+// ":foo@remote.example:" was rewritten to ❤ and the filter returned hearts instead
+// of the requested reaction) and does NOT fall back non-emoji unicode to ❤ (a
+// garbage filter simply matches nothing). Local custom emoji are normalized to the
+// "@." canonical so reactionVariants also queries the bare ":name:" form; remote
+// custom emoji and unicode are kept verbatim (unicode only loses its variation
+// selector to match the stored canonical). Mirrors upstream notes/reactions which
+// filters by the requested type verbatim.
+func (s *Service) normalizeReactionForFilter(raw string) string {
+	if v, ok := reactionlegacy.Convert(raw); ok {
+		return v
+	}
+	if m := customEmojiPattern.FindStringSubmatch(raw); m != nil {
+		name := m[1]
+		host := ""
+		if len(m) >= 3 {
+			host = m[2]
+		}
+		if host == "" || host == "." {
+			return ":" + name + "@.:"
+		}
+		return ":" + name + "@" + host + ":"
+	}
+	return stripVariationSelector(raw)
 }
 
 // resolveReaction is the shared core of normalizeReaction. In addition to the

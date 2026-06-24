@@ -824,3 +824,22 @@ func TestService_Create_NoAcceptanceKeepsEmoji(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ":custom@.:", r)
 }
+
+// #2106 N17: 未キャッシュの remote custom emoji で filter しても (❤ に化けず) その
+// reaction だけを返す。旧実装は emojiRepo に無い remote emoji を ❤ fallback していた。
+func TestService_List_RemoteCustomEmojiFilter(t *testing.T) {
+	svc, noteRepo, reactRepo, _, _ := newService(t)
+	seedNote(noteRepo, "n1", "author", model.NoteVisibilityPublic)
+	// emojiRepo には foo@remote.example を入れない (= 未キャッシュ remote emoji)
+	reactRepo.Reactions["rx_remote"] = &model.NoteReaction{
+		ID: "rx_remote", UserID: "u1", NoteID: "n1", Reaction: ":foo@remote.example:",
+	}
+	reactRepo.Reactions["rx_heart"] = &model.NoteReaction{
+		ID: "rx_heart", UserID: "u2", NoteID: "n1", Reaction: "❤",
+	}
+
+	out, err := svc.List(nil, "n1", "", "", 10, ":foo@remote.example:")
+	require.NoError(t, err)
+	require.Len(t, out, 1, "remote custom emoji filter は該当 reaction のみ返す (❤ に化けない)")
+	assert.Equal(t, ":foo@remote.example:", out[0].Reaction)
+}
