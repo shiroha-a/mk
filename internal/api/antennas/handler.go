@@ -45,6 +45,30 @@ type Handler struct {
 	mutingRepo        repository.MutingRepository
 	blockingRepo      repository.BlockingRepository
 	channelMutingRepo repository.ChannelMutingRepository
+	// metaRepo は antennas/notes の blocked-host filter (#2106 N5、upstream
+	// generateBlockedHostQueryForNote) のために meta.blockedHosts を引く。clips/notes と
+	// 同じ設計。未配線時は blocked-host filter skip。
+	metaRepo repository.MetaRepository
+}
+
+// SetMetaRepo wires a MetaRepository used by the antennas/notes blocked-host filter.
+func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
+	h.metaRepo = r
+}
+
+// blockedHosts returns meta.blockedHosts, or nil when the meta repo is unwired.
+func (h *Handler) blockedHosts() ([]string, error) {
+	if h.metaRepo == nil {
+		return nil, nil
+	}
+	meta, err := h.metaRepo.Fetch()
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil {
+		return nil, nil
+	}
+	return meta.BlockedHosts, nil
 }
 
 // SetMuteBlockRepos wires the muting / blocking / channel-muting repositories so
@@ -398,6 +422,16 @@ func (h *Handler) Notes(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, user, notes)
+	// #2106 N5: admin の blockedHosts でブロックした remote host の note と、suspended な
+	// author の note を除外する (upstream notes.ts:132-133 の generateBaseNoteFilteringQuery
+	// = generateBlockedHostQueryForNote + generateSuspendedUserQueryForNote)。clips/notes が
+	// blocked-host を適用済なのに antennas は未適用で非対称だった。truncate 前に適用する。
+	blockedHosts, err := h.blockedHosts()
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
+	notes = notesfilter.ApplySuspended(notes)
 	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
 	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
 	if len(notes) > req.Limit {

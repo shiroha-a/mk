@@ -2005,6 +2005,7 @@ func (s *Server) setupRoutes() {
 	antennasHandler.SetUserRepo(userRepo)
 	antennasHandler.SetQueryService(noteQueryService)                              // #1464: Notes の visibility filter (defense-in-depth)
 	antennasHandler.SetMuteBlockRepos(mutingRepo, blockingRepo, channelMutingRepo) // #1544: Notes の mute/block/channel-mute filter
+	antennasHandler.SetMetaRepo(metaRepo)                                          // #2106 N5: Notes の blocked-host filter
 	api.POST("/antennas/create", antennasHandler.Create, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
 	api.POST("/antennas/show", antennasHandler.Show, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/antennas/update", antennasHandler.Update, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))

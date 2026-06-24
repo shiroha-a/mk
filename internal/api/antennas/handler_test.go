@@ -845,3 +845,35 @@ func TestRemoveNote_BadParam(t *testing.T) {
 	require.NoError(t, h.RemoveNote(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// #2106 N5: antennas/notes は admin の blockedHosts でブロックした remote host の note と
+// suspended author の note を除外する (upstream generateBaseNoteFilteringQuery 相当)。
+func TestNotes_FiltersBlockedHostAndSuspended(t *testing.T) {
+	h, repo, noteRepo := newHandler(t)
+	repo.Antennas["a-n5"] = &model.Antenna{ID: "a-n5", UserID: "alice"}
+
+	meta := testutil.NewMockMetaRepository()
+	meta.Meta = &model.Meta{ID: "x", BlockedHosts: []string{"blocked.example"}}
+	h.SetMetaRepo(meta)
+
+	host := "blocked.example"
+	noteRepo.Notes["n-blocked"] = &model.Note{ID: "n-blocked", UserID: "remote1", UserHost: &host}
+	noteRepo.Notes["n-suspended"] = &model.Note{ID: "n-suspended", UserID: "susp", User: &model.User{ID: "susp", IsSuspended: true}}
+	noteRepo.Notes["n-ok"] = &model.Note{ID: "n-ok", UserID: "alice"}
+
+	ctx := context.Background()
+	for _, e := range []struct{ id, sid string }{{"n-blocked", "1-0"}, {"n-suspended", "2-0"}, {"n-ok", "3-0"}} {
+		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+			Stream: "antennaTimeline:a-n5", ID: e.sid, Values: map[string]any{"noteId": e.id},
+		}).Err())
+	}
+
+	c, rec := newReq(t, `{"antennaId":"a-n5"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Notes(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, "n-blocked", "blockedHosts の note を除外")
+	assert.NotContains(t, body, "n-suspended", "suspended author の note を除外")
+	assert.Contains(t, body, "n-ok", "通常 note は残る")
+}
