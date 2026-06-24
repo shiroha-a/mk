@@ -1565,7 +1565,18 @@ func (r *Renderer) addressing(n *model.Note) (to []string, cc []string) {
 	case model.NoteVisibilitySpecified:
 		to = make([]string, 0, len(n.VisibleUserIDs))
 		for _, uid := range n.VisibleUserIDs {
-			to = append(to, r.urls.UserURI(uid))
+			// #2106 H5: visibleUser の AP URI を解決する。remote 受信者には remote
+			// actor の実 URI (例 https://remote/users/xxx) を入れないと、受信側 Misskey が
+			// resolvePerson に失敗して visibleUsers が空になり DM が silent-drop する
+			// (自ドメイン /users/<remoteId> は送信元で 404、内部 ID 漏洩にもなる)。
+			// mentionResolver は local→UserURI / remote→user.URI を返す (mention と同経路)。
+			uri := r.urls.UserURI(uid)
+			if r.mentionResolver != nil {
+				if _, resolved, err := r.mentionResolver.ResolveMention(uid); err == nil && resolved != "" {
+					uri = resolved
+				}
+			}
+			to = append(to, uri)
 		}
 	}
 	return to, cc

@@ -1400,3 +1400,24 @@ func TestRenderer_RenderAddRemoveFeatured(t *testing.T) {
 	assert.Equal(t, "https://example.com/users/u1/collections/featured", rm["target"])
 	assert.Equal(t, "https://example.com/notes/n1", rm["object"])
 }
+
+// #2106 H5: specified(DM) の to は remote 受信者に remote actor の実 URI を入れる
+// (自ドメイン /users/<id> ではない)。これを欠くと連合先で DM が silent-drop する。
+func TestRenderer_RenderNote_SpecifiedRemoteRecipient(t *testing.T) {
+	r := newRenderer()
+	r.SetMentionResolver(&stubMentionResolver{entries: map[string]struct{ name, uri string }{
+		"u2":      {name: "@local", uri: "https://example.com/users/u2"},
+		"uRemote": {name: "@bob@remote.example", uri: "https://remote.example/users/bob"},
+	}})
+	idGen := newIDGen(t)
+	n := &model.Note{
+		ID:             idGen.Generate(time.Now()),
+		UserID:         "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: pq.StringArray{"u2", "uRemote"},
+	}
+	out := r.RenderNote(n, idGen)
+	assert.Contains(t, out.To, "https://remote.example/users/bob", "remote recipient must get its real remote URI")
+	assert.NotContains(t, out.To, "https://example.com/users/uRemote", "remote recipient must NOT get an own-domain URI")
+	assert.Contains(t, out.To, "https://example.com/users/u2", "local recipient keeps local URI")
+}
