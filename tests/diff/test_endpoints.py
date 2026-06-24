@@ -9,6 +9,8 @@ Run via the diff-runner container: `make diff-test`.
 
 from __future__ import annotations
 
+import base64
+
 from diff_core import DEFAULT_IGNORE_KEYS, diff_json, format_diffs
 
 # meta carries a lot of operator-specific config (names, urls, versions, limits
@@ -211,6 +213,63 @@ def test_antenna_packing_parity(mkgo, ts):
     mk = mkgo.json("antennas/show", {"antennaId": mkgo._probe})
     tj = ts.json("antennas/show", {"antennaId": ts._probe})
     diffs = diff_json(mk, tj, ignore_keys=ENTITY_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+# 1x1 transparent PNG for drive upload parity.
+_PNG_1x1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+def _upload(c, name="probe.png"):
+    resp = c.session.post(
+        f"{c.base}/api/drive/files/create",
+        files={"file": (name, _PNG_1x1, "image/png")},
+        data={"i": c.token},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def test_drivefile_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        f = _upload(c)
+        c._probe = f["id"]
+    mk = mkgo.json("drive/files/show", {"fileId": mkgo._probe})
+    tj = ts.json("drive/files/show", {"fileId": ts._probe})
+    # blurhash / properties は画像処理 impl 依存で割れうるので除外。md5/size/type/name は
+    # 同一コンテンツなので比較対象に残す。
+    file_ignore = DEFAULT_IGNORE_KEYS | {"userId", "user", "folderId", "folder", "blurhash", "properties"}
+    diffs = diff_json(mk, tj, ignore_keys=file_ignore)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_rich_profile_parity(mkgo, ts):
+    update = {
+        "description": "hello bio", "location": "Tokyo", "birthday": "2000-01-01",
+        "lang": "ja", "fields": [{"name": "site", "value": "https://example.com"}],
+    }
+    for c in (mkgo, ts):
+        c.json("i/update", update)
+    mk = mkgo.json("users/show", {"username": "alice"})
+    tj = ts.json("users/show", {"username": "alice"})
+    diffs = diff_json(mk, tj, ignore_keys=USER_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_locked_follow_request_parity(mkgo, ts):
+    # bob locks his account, alice follows -> pending follow request. Compares the
+    # relation block (hasPendingFollowRequestFromYou etc.) on users/show(bob).
+    for c in (mkgo, ts):
+        bob = _create_second_user(c, "boblocked")
+        c.call("i/update", {"isLocked": True}, token=bob["token"])
+        c.json("following/create", {"userId": bob["id"]})
+        c._probe = bob["id"]
+    mk = mkgo.json("users/show", {"userId": mkgo._probe})
+    tj = ts.json("users/show", {"userId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=USER_IGNORE)
     assert not diffs, format_diffs(diffs)
 
 
