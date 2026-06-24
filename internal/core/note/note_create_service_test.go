@@ -1972,10 +1972,11 @@ func TestCreateService_PublishesReplyMainEvent_FollowersToFollower(t *testing.T)
 	assert.Equal(t, []string{"bob"}, pub.userIDsOf("reply"))
 }
 
-// specified visibility note を visibleUserIDs 外の reply target に publish
-// しない (DM 用 visibility 経路で reply target が ill-formed に含まれて
-// しまった場合の defense-in-depth)。
-func TestCreateService_SkipsReplyMainEvent_SpecifiedExcludesNonRecipient(t *testing.T) {
+// #2106 N13: specified note でも reply target は visibleUserIds に自動追加されるため
+// (upstream NoteCreateService.ts:603-605)、reply 相手は main event を受け取る。以前は
+// #1444/#1472 で「visibleUserIds に無い reply target を除外」していたが、これは upstream
+// 契約 (reply は必ず相手に届く) に反し連合 DM 返信が欠落するため upstream に揃えた。
+func TestCreateService_SpecifiedReplyTargetAutoAddedToVisible(t *testing.T) {
 	svc, noteRepo, _ := newCreateServiceWithFollowing(t)
 	pub := &stubMainStreamPublisher{}
 	svc.SetMainStreamPublisher(pub)
@@ -1989,10 +1990,11 @@ func TestCreateService_SkipsReplyMainEvent_SpecifiedExcludesNonRecipient(t *test
 		Text:           &text,
 		ReplyID:        &replyID,
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: []string{"charlie"}, // bob は含まれない
+		VisibleUserIDs: []string{"charlie"}, // bob を明示列挙しなくても auto-add される
 	})
 	require.NoError(t, err)
-	assert.Empty(t, pub.userIDsOf("reply"))
+	assert.Equal(t, []string{"bob"}, pub.userIDsOf("reply"),
+		"specified note の reply target は auto-add され main event を受け取る")
 }
 
 // specified visibility で reply target が visibleUserIDs に含まれていれば
@@ -2099,4 +2101,27 @@ func TestSafeGo_RecoversPanic(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("safeGo did not recover panic")
 	}
+}
+
+// #2106 N13: specified(direct) note では reply target が visibleUserIds に自動追加される
+// (含めずに送っても reply 相手が閲覧・通知受信・連合配送できるように)。mention 対象は
+// upstream 同様 visibleUserIds には追加されない。
+func TestCreateService_SpecifiedAddsReplyTargetToVisible(t *testing.T) {
+	svc, noteRepo, _ := newCreateService(t)
+	parentText := "parent"
+	noteRepo.Notes["A"] = &model.Note{ID: "A", UserID: "userB", Text: &parentText, Visibility: "public", User: &model.User{ID: "userB"}}
+
+	user := &model.User{ID: "userA"}
+	text := "reply to B"
+	replyID := "A"
+	created, err := svc.Create(note.CreateInput{
+		User:           user,
+		Text:           &text,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{}, // 意図的に reply 相手 userB を含めない
+		ReplyID:        &replyID,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, []string(created.VisibleUserIDs), "userB",
+		"specified note の reply target は visibleUserIds に自動追加される")
 }

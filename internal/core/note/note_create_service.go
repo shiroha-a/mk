@@ -680,6 +680,26 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		note.VisibleUserIDs = in.VisibleUserIDs
 	}
 
+	// #2106 N13: specified(direct) note では reply target を必ず visibleUserIds に含める
+	// (upstream NoteCreateService.ts:603-605)。これを欠くと reply 相手が note を閲覧できず
+	// (CanSeeNote)・reply 通知も飛ばず (notifyVisibleToTarget)・AP の to にも入らないため
+	// 連合先 reply 相手にも配送されない。client が visibleUserIds に reply 相手を含めずに
+	// specified reply を送るケース (upstream contract は backend 補完を前提) を救う。
+	// なお mention 対象は upstream も visibleUsers には追加しない (597-601 は visibleUsers
+	// → mentionedUsers の向きで逆ではない) ため、ここでも追加しない。
+	if note.Visibility == model.NoteVisibilitySpecified && replyTarget != nil && replyTarget.UserID != note.UserID {
+		alreadyVisible := false
+		for _, id := range note.VisibleUserIDs {
+			if id == replyTarget.UserID {
+				alreadyVisible = true
+				break
+			}
+		}
+		if !alreadyVisible {
+			note.VisibleUserIDs = append(note.VisibleUserIDs, replyTarget.UserID)
+		}
+	}
+
 	// メンションの抽出。ユーザー名+ホストをユーザーIDに解決する。
 	// ローカル (host="") は host IS NULL で、リモート (host!="") は
 	// host 列の等価比較で lookup する。未知のユーザーは単にスキップする
