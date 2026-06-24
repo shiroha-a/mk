@@ -180,6 +180,10 @@ type Resolver struct {
 	// (全 host 許可) にフォールバック。
 	hostBlocker HostBlockChecker
 
+	// silencedChecker は remote note ingest 時に meta.silencedHosts 該当 host の
+	// public note を home に降格する判定に使う (#2106 N14)。未配線時は降格しない。
+	silencedChecker SilencedHostChecker
+
 	// resolveActorGroup / resolveNoteGroup は同一 URI への並行 ResolveActor /
 	// ResolveNote 呼び出しを 1 度の DB lookup + HTTP fetch に collapse する
 	// (#300 3-7)。inbox 受信時に同じ remote actor / note を参照する activity
@@ -313,6 +317,19 @@ func (r *Resolver) SetDriveFileRepo(repo repository.DriveFileRepository) {
 // gate が無効化されて legacy 挙動 (全 host 許可) に倒れる。
 func (r *Resolver) SetHostBlockChecker(c HostBlockChecker) {
 	r.hostBlocker = c
+}
+
+// SilencedHostChecker reports whether a remote host is in meta.silencedHosts.
+// *instance.Service implements it (IsSilenced).
+type SilencedHostChecker interface {
+	IsSilenced(host string) bool
+}
+
+// SetSilencedHostChecker attaches the meta.silencedHosts checker used to demote
+// a silenced remote instance's public notes to home on ingest (#2106 N14).
+// 未配線時は降格しない。
+func (r *Resolver) SetSilencedHostChecker(c SilencedHostChecker) {
+	r.silencedChecker = c
 }
 
 // hostAllowed reports whether the resolver may talk to / persist content
@@ -1163,6 +1180,14 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		UserHost:   actor.Host,
 		URI:        &noteURI,
 		Visibility: deriveVisibility(apNote.To, apNote.CC),
+	}
+	// #2106 N14: silenced instance (meta.silencedHosts) の remote public note は home に
+	// 降格する (upstream NoteCreateService.ts:491-495 の inSilencedInstance 降格)。public
+	// timeline / 連合 broadcast から外す admin moderation 機能。silencedChecker 未配線時は
+	// 降格しない (legacy 挙動)。
+	if note.Visibility == model.NoteVisibilityPublic && actor.Host != nil && *actor.Host != "" &&
+		r.silencedChecker != nil && r.silencedChecker.IsSilenced(*actor.Host) {
+		note.Visibility = model.NoteVisibilityHome
 	}
 	// TS本家ApNoteService.tsと同じ3段フォールバックでtext抽出:
 	// 1. source.content (MFM) → 2. _misskey_content → 3. content (HTML→MFM変換)

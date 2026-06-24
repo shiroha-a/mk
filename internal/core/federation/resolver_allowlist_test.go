@@ -186,3 +186,30 @@ func TestProcessCreate_AllowedSenderNonFederatedAttributedToIsDropped(t *testing
 	require.NoError(t, p.Process(body))
 	assert.Empty(t, noteRepo.Notes, "非連合 host (attributedTo) の note は永続化しない")
 }
+
+// stubSilencedChecker implements federation.SilencedHostChecker.
+type stubSilencedChecker struct{ silenced map[string]bool }
+
+func (s *stubSilencedChecker) IsSilenced(host string) bool { return s.silenced[host] }
+
+// #2106 N14: silenced instance (meta.silencedHosts) の remote public note は home に降格される。
+func TestIngestNote_SilencedHostPublicDemotedToHome(t *testing.T) {
+	r, _, _ := newGatedResolver(t, sampleActor, nil)
+	r.SetSilencedHostChecker(&stubSilencedChecker{silenced: map[string]bool{"remote.example": true}})
+
+	note, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	assert.Equal(t, model.NoteVisibilityHome, note.Visibility, "silenced host の public note は home に降格")
+}
+
+// #2106 N14: silenced でない host の public note は public のまま (降格しない)。
+func TestIngestNote_NonSilencedHostPublicStaysPublic(t *testing.T) {
+	r, _, _ := newGatedResolver(t, sampleActor, nil)
+	r.SetSilencedHostChecker(&stubSilencedChecker{silenced: map[string]bool{"other.example": true}})
+
+	note, _, err := r.IngestNoteWithCreated([]byte(sampleRemoteNote), "")
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	assert.Equal(t, model.NoteVisibilityPublic, note.Visibility, "silenced でない host は public のまま")
+}
