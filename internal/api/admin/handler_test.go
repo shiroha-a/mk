@@ -3510,3 +3510,23 @@ func TestUpdateMeta_IdentityColumnsCarvedOut(t *testing.T) {
 	require.NotNil(t, metaRepo.Meta.TermsOfServiceURL)
 	assert.Equal(t, "https://example.test/tos", *metaRepo.Meta.TermsOfServiceURL)
 }
+
+// #2106 S2: admin/accounts/create は app/OAuth access token (IsApp) を root でも拒否する
+// (upstream の inline `token !== null` gate)。native login token のみ許可。
+func TestAccountsCreate_AppTokenDenied(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
+	rootUser := &model.User{ID: "root1", Username: "root"}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"username":"user2","password":"pass"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), rootUser)
+	c.Set(string(middleware.AuthScopeContextKey), &middleware.AuthScope{IsApp: true})
+
+	_ = h.AccountsCreate(c)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "app/OAuth token must be denied even for root")
+}

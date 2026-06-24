@@ -582,6 +582,13 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 		if meta.RootUserID == nil || *meta.RootUserID != user.ID {
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
+		// #2106 S2: upstream create.ts の inline `token !== null` gate を再現する。
+		// この endpoint は route middleware を持たず paramDef に kind も無いため、
+		// app/OAuth access token (read:account 等の狭い scope) でも root に到達して
+		// アカウント作成できる scope 越境になる。native login token のみ許可する。
+		if sc := middleware.GetAuthScope(c); sc != nil && sc.IsApp {
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		}
 	}
 
 	result, err := h.signupService.Signup(req.Username, req.Password, isInitialSetup)
