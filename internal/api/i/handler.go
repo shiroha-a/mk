@@ -1657,6 +1657,13 @@ func (h *Handler) Update(c echo.Context) error {
 	// unread 系は meDetailedWithUnread で実値を埋める。生 PackMeDetailed だと
 	// unreadNotificationsCount:0 等の default が `$i` を clobber する (#1258 fu)。
 	resp := h.meDetailedWithUnread(c.Request().Context(), bundle.User, bundle.Profile)
+	// #2106 N1: isAdmin/isModerator は role 依存で PackMeDetailed が埋めない (MeDetailed の
+	// 両 field は omitempty 無し bool なので default false が乗る)。Me handler 同様
+	// roleProvider から override し upstream の MeDetailed isMe ブロック (実値を返す) に揃える。
+	if h.roleProvider != nil {
+		resp["isAdmin"] = h.roleProvider.IsAdministrator(bundle.User.ID)
+		resp["isModerator"] = h.roleProvider.IsModerator(bundle.User.ID)
+	}
 	// upstream i/update は pack(..., {includeSecrets: isSecure}) を返すため native
 	// session では email / emailVerified / securityKeysList を含める (#1919)。Token
 	// 判定は middleware が確実に load する me を使い、email は更新後の最新 profile を

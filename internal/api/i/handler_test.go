@@ -2797,3 +2797,20 @@ func TestMe_ModerationNote_ModeratorGated(t *testing.T) {
 		assert.False(t, present, "non-moderator must not receive moderationNote")
 	})
 }
+
+// #2106 N1: i/update のレスポンス (MeDetailed) は moderator/admin に対し isAdmin/isModerator
+// を実値で返す (Me handler と同様 roleProvider から override)。
+func TestUpdate_ReturnsRoleFlags(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["u1"] = user
+	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Fields: datatypes.JSON([]byte("[]"))}
+	h.SetRoleProvider(&stubRoleProvider{admin: true, moderator: true})
+
+	rec := post(h.Update, `{"name":"updated"}`, user)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["isAdmin"], "admin の i/update は isAdmin=true を返す")
+	assert.Equal(t, true, resp["isModerator"])
+}
