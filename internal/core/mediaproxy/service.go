@@ -508,6 +508,14 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 			return s.passThrough(data, contentType)
 		}
 	}
+	// #2106 N19: resize 系 mode (emoji/avatar/static/preview/badge) は変換可能な image を
+	// 要求する。video 静止画化 + animated passThrough を経た後でも convertible でない MIME
+	// (text/html, application/pdf 等) は upstream FileServerProxyHandler の "Unexpected mime"
+	// と同じく 404 にする。生 bytes を宣言 content-type で配信すると passThrough 経路の
+	// browsersafe allowlist を回避でき、CSP の無い /proxy 上で XSS 補助面になる。
+	if isResizeMode(mode) && !isConvertibleImage(contentType) {
+		return nil, ErrNotFound
+	}
 	switch mode {
 	case ModeEmoji:
 		return s.processResize(data, contentType, 0, emojiHeight, out)

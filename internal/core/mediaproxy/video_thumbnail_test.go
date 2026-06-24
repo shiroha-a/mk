@@ -319,3 +319,14 @@ func TestIsResizeMode(t *testing.T) {
 	}
 	assert.False(t, isResizeMode(ModeDefault))
 }
+
+// #2106 N19: resize 系 mode は非変換 MIME (text/html 等) を 404 にする (生 bytes を
+// 宣言 content-type で配信しない)。upstream FileServerProxyHandler の "Unexpected mime" 404。
+func TestProcessAndReturn_ResizeMode_NonConvertibleMIME_NotFound(t *testing.T) {
+	s := testService(nil)
+	html := []byte("<html><body><script>alert(1)</script></body></html>")
+	for _, mode := range []ProxyMode{ModeEmoji, ModeAvatar, ModeStatic, ModePreview, ModeBadge} {
+		_, err := s.processAndReturn(context.Background(), html, "text/html", mode, FormatWebP, "https://remote.example/x.html")
+		assert.ErrorIs(t, err, ErrNotFound, "mode=%v: 非変換 MIME は 404", mode)
+	}
+}
