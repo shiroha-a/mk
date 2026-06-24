@@ -305,6 +305,55 @@ def test_drivefolder_packing_parity(mkgo, ts):
     assert not diffs, format_diffs(diffs)
 
 
+def test_oauth_app_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        app = c.json("app/create", {"name": "harness app", "description": "d", "permission": ["read:account"]})
+        c._probe = app["id"]
+    mk = mkgo.json("app/show", {"appId": mkgo._probe})
+    tj = ts.json("app/show", {"appId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS | {"userId"})
+    assert not diffs, format_diffs(diffs)
+
+
+def test_page_packing_parity(mkgo, ts):
+    page_params = {
+        "title": "harness page", "name": "harness-page", "content": [], "variables": [],
+        "script": "", "eyeCatchingImageId": None, "font": "sans-serif",
+        "alignCenter": False, "hideTitleWhenPinned": False,
+    }
+    for c in (mkgo, ts):
+        p = c.json("pages/create", page_params)
+        c._probe = p["id"]
+    mk = mkgo.json("pages/show", {"pageId": mkgo._probe})
+    tj = ts.json("pages/show", {"pageId": ts._probe})
+    # visibility は drop-in #367 由来の意図的な mk-go extra (upstream page に無い)。
+    page_ignore = DEFAULT_IGNORE_KEYS | {"userId", "user", "visibility"}
+    diffs = diff_json(mk, tj, ignore_keys=page_ignore)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_announcement_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        c.json("admin/announcements/create", {"title": "harness ann", "text": "body", "imageUrl": None})
+    mk = mkgo.json("announcements", {})
+    tj = ts.json("announcements", {})
+    # #2101: user-facing /api/announcements が admin field forExistingUsers/isActive を
+    # 露出する乖離を検出。finding として追跡中なので一旦無視する。
+    ann_ignore = DEFAULT_IGNORE_KEYS | {"forExistingUsers", "isActive"}
+    diffs = diff_json(mk, tj, ignore_keys=ann_ignore)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_emoji_packing_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        f = _upload(c, "emoji.png")
+        c.json("admin/emoji/add", {"fileId": f["id"], "name": "harness_emoji", "category": "test", "aliases": ["he"]})
+    mk = mkgo.json("emojis", {})
+    tj = ts.json("emojis", {})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS)
+    assert not diffs, format_diffs(diffs)
+
+
 def test_note_with_poll_parity(mkgo, ts):
     poll = {"choices": ["alpha", "beta", "gamma"], "multiple": False}
     mk_note = mkgo.json("notes/create", {"text": "poll probe", "visibility": "public", "poll": poll})["createdNote"]
