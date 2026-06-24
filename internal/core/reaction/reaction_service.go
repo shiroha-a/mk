@@ -309,6 +309,13 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 		if s.federationHook != nil {
 			s.federationHook.OnReactionRemoved(user, target, existing.Reaction)
 		}
+		// #2106 N16: noteStream に古いリアクションの unreacted を publish する。upstream
+		// ReactionService.create の置き換えは delete() 経由で unreacted を発火するが、mk-go は
+		// 新 reaction の reacted のみ送っており、subNote 購読クライアントで古い reaction の
+		// カウントが reload まで残存していた。reacted/unreacted を対称にする。
+		if s.noteStreamHook != nil {
+			s.noteStreamHook.OnUnreacted(target.ID, user.ID, decodeReactionForStream(existing.Reaction))
+		}
 	}
 
 	rec := &model.NoteReaction{

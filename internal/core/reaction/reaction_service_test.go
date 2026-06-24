@@ -667,9 +667,11 @@ func TestService_NoteStreamHook_OnDelete(t *testing.T) {
 	assert.Equal(t, ":smile@.:", hook.unreacted[0].reaction)
 }
 
-// 同じ user が別 reaction に置き換えた場合は upstream 互換で reacted のみ
-// 1 度だけ発火、unreacted は走らない。
-func TestService_NoteStreamHook_OnReplace_NoUnreacted(t *testing.T) {
+// #2106 N16: 同じ user が別 reaction に置き換えた場合、新 reaction の reacted と
+// 古い reaction の unreacted を両方発火する (upstream ReactionService.create は置き換えを
+// delete() 経由で行い unreacted を publish する)。旧テストは「unreacted は走らない」と
+// 誤った upstream 互換を主張していた。
+func TestService_NoteStreamHook_OnReplace_PublishesBoth(t *testing.T) {
 	svc, repo, _, _, _ := newService(t)
 	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
 	hook := &recordingNoteStreamHook{}
@@ -682,7 +684,8 @@ func TestService_NoteStreamHook_OnReplace_NoUnreacted(t *testing.T) {
 	require.Len(t, hook.reacted, 2)
 	assert.Equal(t, "👍", hook.reacted[0].reaction)
 	assert.Equal(t, "🎉", hook.reacted[1].reaction)
-	assert.Empty(t, hook.unreacted, "置き換え経路では unreacted は呼ばない (upstream 挙動)")
+	require.Len(t, hook.unreacted, 1, "置き換えで古い reaction の unreacted を publish")
+	assert.Equal(t, "👍", hook.unreacted[0].reaction)
 }
 
 // 古い `:name:` 形式 (TS-era DB レコード) で保存された reaction を Delete
