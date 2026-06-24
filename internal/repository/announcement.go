@@ -62,9 +62,10 @@ func (r *announcementRepository) FindByID(id string) (*model.Announcement, error
 
 func (r *announcementRepository) List(activeOnly bool, limit, offset int, sinceID, untilID string) ([]*model.Announcement, error) {
 	q := r.db.Order(paginationOrder(sinceID, untilID, "id"))
-	if activeOnly {
-		q = q.Where("\"isActive\" = true")
-	}
+	// #2106 N7: activeOnly は upstream announcements.ts の ps.isActive (default true)
+	// に相当する「フィルタ値」。常に等値比較を当てる (true=active のみ / false=inactive
+	// のみ)。false を「フィルタ無し」と解釈して active+inactive 両方返す regression を修正。
+	q = q.Where("\"isActive\" = ?", activeOnly)
 	if limit <= 0 {
 		limit = 10
 	}
@@ -91,9 +92,10 @@ func (r *announcementRepository) List(activeOnly bool, limit, offset int, sinceI
 
 func (r *announcementRepository) ListGlobal(activeOnly bool, limit, offset int, sinceID, untilID string) ([]*model.Announcement, error) {
 	q := r.db.Where(`"userId" IS NULL`).Order(paginationOrder(sinceID, untilID, "id"))
-	if activeOnly {
-		q = q.Where("\"isActive\" = true")
-	}
+	// #2106 N7: activeOnly は upstream announcements.ts の ps.isActive (default true)
+	// に相当する「フィルタ値」。常に等値比較を当てる (true=active のみ / false=inactive
+	// のみ)。false を「フィルタ無し」と解釈して active+inactive 両方返す regression を修正。
+	q = q.Where("\"isActive\" = ?", activeOnly)
 	if limit <= 0 {
 		limit = 10
 	}
@@ -122,9 +124,10 @@ func (r *announcementRepository) ListForUser(userID string, activeOnly bool, lim
 	// 囲まれないので、明示的に囲まないとAND側の他フィルタ(isActive等)を
 	// バイパスしてしまう(SQL優先順位: AND > OR)。note.go:423と同じ gotcha。
 	q := r.db.Where(`("userId" IS NULL OR "userId" = ?)`, userID).Order(paginationOrder(sinceID, untilID, "id"))
-	if activeOnly {
-		q = q.Where("\"isActive\" = true")
-	}
+	// #2106 N7: activeOnly は upstream announcements.ts の ps.isActive (default true)
+	// に相当する「フィルタ値」。常に等値比較を当てる (true=active のみ / false=inactive
+	// のみ)。false を「フィルタ無し」と解釈して active+inactive 両方返す regression を修正。
+	q = q.Where("\"isActive\" = ?", activeOnly)
 	if limit <= 0 {
 		limit = 10
 	}

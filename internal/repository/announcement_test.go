@@ -26,15 +26,18 @@ func TestAnnouncementRepository_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Test", found.Title)
 
-	// List (active)
+	// List (active) — 作成した active な ann_1 が返る
 	items, err := repo.List(true, 10, 0, "", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, items)
 
-	// List (all)
+	// #2106 N7: List は isActive を等値フィルタで扱う。List(false)=inactive のみなので
+	// active な ann_1 は含まれない (旧実装は false を「フィルタ無し」と誤解釈していた)。
 	items, err = repo.List(false, 10, 0, "", "")
 	require.NoError(t, err)
-	assert.NotEmpty(t, items)
+	for _, it := range items {
+		assert.NotEqual(t, "ann_1", it.ID, "List(false) は active announcement を含めない")
+	}
 
 	// UpdateFields
 	require.NoError(t, repo.UpdateFields(a.ID, map[string]any{"title": "Updated"}))
@@ -523,4 +526,37 @@ func TestAnnouncementRepository_CountReadsByAnnouncementIDs(t *testing.T) {
 	out, err = repo.CountReadsByAnnouncementIDs(nil)
 	require.NoError(t, err)
 	assert.Empty(t, out)
+}
+
+// #2106 N7: ListGlobal は isActive を等値フィルタで扱う (false=inactive のみ、active を混ぜない)。
+func TestAnnouncementRepository_ListGlobal_IsActiveFilter(t *testing.T) {
+	repo := NewAnnouncementRepository(testDB)
+	active := &model.Announcement{ID: "ann_n7_act", Title: "A", Text: "t", Icon: "info", Display: "normal", IsActive: true}
+	inactive := &model.Announcement{ID: "ann_n7_inact", Title: "B", Text: "t", Icon: "info", Display: "normal", IsActive: false}
+	require.NoError(t, repo.Create(active))
+	require.NoError(t, repo.Create(inactive))
+	// GORM は bool zero-value (false) を Create で省略し column default:true を当てるため、
+	// inactive を確実に isActive=false にするには明示 UpdateFields する。
+	require.NoError(t, repo.UpdateFields(inactive.ID, map[string]any{"isActive": false}))
+	defer cleanupAnnouncement(t, active.ID)
+	defer cleanupAnnouncement(t, inactive.ID)
+
+	contains := func(items []*model.Announcement, id string) bool {
+		for _, a := range items {
+			if a.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	got, err := repo.ListGlobal(true, 100, 0, "", "")
+	require.NoError(t, err)
+	assert.True(t, contains(got, "ann_n7_act"), "isActive=true returns active")
+	assert.False(t, contains(got, "ann_n7_inact"), "isActive=true excludes inactive")
+
+	got, err = repo.ListGlobal(false, 100, 0, "", "")
+	require.NoError(t, err)
+	assert.True(t, contains(got, "ann_n7_inact"), "isActive=false returns inactive")
+	assert.False(t, contains(got, "ann_n7_act"), "isActive=false must NOT mix in active announcements")
 }
