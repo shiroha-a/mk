@@ -353,6 +353,37 @@ def test_emoji_packing_parity(mkgo, ts):
     assert not diffs, format_diffs(diffs)
 
 
+def test_flash_parity(mkgo, ts):
+    params = {"title": "harness flash", "summary": "s", "script": "<: 'hi'", "permissions": []}
+    for c in (mkgo, ts):
+        f = c.json("flash/create", params)
+        c._probe = f["id"]
+    mk = mkgo.json("flash/show", {"flashId": mkgo._probe})
+    tj = ts.json("flash/show", {"flashId": ts._probe})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS | {"userId", "user"})
+    assert not diffs, format_diffs(diffs)
+
+
+def test_favorites_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        note = c.json("notes/create", {"text": "fav me", "visibility": "public"})["createdNote"]
+        c.json("notes/favorites/create", {"noteId": note["id"]})
+    mk = mkgo.json("i/favorites", {})
+    tj = ts.json("i/favorites", {})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS | {"noteId", "note"})
+    assert not diffs, format_diffs(diffs)
+
+
+def test_mute_list_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        bob = _create_second_user(c, "bobmute")
+        c.json("mute/create", {"userId": bob["id"]})
+    mk = mkgo.json("mute/list", {})
+    tj = ts.json("mute/list", {})
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS | {"muteeId", "mutee"})
+    assert not diffs, format_diffs(diffs)
+
+
 def test_note_with_poll_parity(mkgo, ts):
     poll = {"choices": ["alpha", "beta", "gamma"], "multiple": False}
     mk_note = mkgo.json("notes/create", {"text": "poll probe", "visibility": "public", "poll": poll})["createdNote"]
