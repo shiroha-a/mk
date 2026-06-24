@@ -576,6 +576,14 @@ func (h *Handler) Show(c echo.Context) error {
 	s := []entity.NoteEntity{packed}
 	h.fieldResolver().Apply(s, viewer)
 	notehide.HideEmbeds(viewer, s)
+	// #2106 H1: ID-known doctrine (#799) で note は 200 で返すが、follower/specified を
+	// 見られない viewer (非フォロワー/匿名/非対象) には upstream NoteEntityService.hideNote
+	// 同様に本文 (text/cw/files/poll/visibleUserIds) を blank する。これを欠くと ID を
+	// 知るだけで非公開ノートの本文が full leak する。upstream は shouldHideNote=true の
+	// とき 200 + blanked content を返す挙動と一致 (status は #799 で 200 を維持)。
+	if h.queryService != nil && !h.queryService.CanSee(viewer, n) {
+		entity.HideNoteEntity(&s[0])
+	}
 	return c.JSON(http.StatusOK, s[0])
 }
 
