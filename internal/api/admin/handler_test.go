@@ -3495,3 +3495,18 @@ func TestShowUsers_DoesNotLeakAdminOnlyFields(t *testing.T) {
 	// UserDetailed の基本 field は出る。
 	assert.Equal(t, "leaky", resp[0]["username"])
 }
+
+// #2106 S1: update-meta は identity / 専用 endpoint 管轄の column (rootUserId / id /
+// proxyAccountId) を書き込めない (admin→root 昇格防止)。他 meta field は従来通り更新可。
+func TestUpdateMeta_IdentityColumnsCarvedOut(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	orig := "root-original"
+	metaRepo.Meta.RootUserID = &orig
+	rec := doPost(h.UpdateMeta, `{"rootUserId":"attacker","id":"evil","tosUrl":"https://example.test/tos"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, metaRepo.Meta.RootUserID)
+	assert.Equal(t, "root-original", *metaRepo.Meta.RootUserID, "rootUserId must NOT be writable via update-meta")
+	// 他 field (tosUrl→termsOfServiceUrl) は従来通り更新される。
+	require.NotNil(t, metaRepo.Meta.TermsOfServiceURL)
+	assert.Equal(t, "https://example.test/tos", *metaRepo.Meta.TermsOfServiceURL)
+}

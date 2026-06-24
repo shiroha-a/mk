@@ -1222,6 +1222,14 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	}
 	// "i" フィールドを除外 (auth token)
 	delete(fields, "i")
+	// #2106 S1: identity / 専用 endpoint 管轄の column を generic map 経路から除外する。
+	// update-meta は admin が任意 meta column を書ける generic passthrough 設計 (model
+	// コメント参照) だが、rootUserId を書けると root 権限を別 user に付け替えられ
+	// (admin→root 昇格)、id は singleton PK を壊す。proxyAccountId は
+	// admin/update-proxy-account が管轄。upstream の paramDef もこれらを accept しない。
+	for _, protected := range []string{"id", "rootUserId", "proxyAccountId"} {
+		delete(fields, protected)
+	}
 	// upstream update-meta.ts の enum 制約を持つ field を pre-validate (#1108
 	// sweep)。silent fallback で不正値が DB に書かれる drift を防ぐ:
 	// sensitiveMediaDetection が "purple" のような不正値で保存されると
