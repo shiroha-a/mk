@@ -1200,3 +1200,23 @@ func TestChannelContext_UserPolicies_NilConn(t *testing.T) {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }
+
+// #2106 H6: stream の 'sr' message は note 購読のみ行い、全通知既読 (readAllNotification)
+// を起こしてはならない。frontend は note capture の度に 'sr' を送るため。
+type fakeNotifReader struct{ called int }
+
+func (f *fakeNotifReader) ReadAll(string) error { f.called++; return nil }
+
+func TestDispatcher_SrDoesNotReadAllNotifications(t *testing.T) {
+	conn := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	d := NewDispatcher(conn, NewRegistry(), newStubBus())
+	nr := &fakeNotifReader{}
+	d.SetNotificationReader(nr)
+
+	d.HandleClientMessage("sr", json.RawMessage(`{"id":"note1"}`))
+	assert.Equal(t, 0, nr.called, "'sr' (subNote alias) must NOT trigger readAllNotifications")
+
+	// 正規の readNotification は引き続き全通知既読を行う。
+	d.HandleClientMessage("readNotification", json.RawMessage(`{}`))
+	assert.Equal(t, 1, nr.called, "'readNotification' must mark all notifications read")
+}

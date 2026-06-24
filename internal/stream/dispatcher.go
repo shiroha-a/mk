@@ -115,11 +115,13 @@ func (d *Dispatcher) HandleClientMessage(msgType string, body json.RawMessage) {
 		d.handleChannelMessage(body)
 	case "readNotification":
 		d.handleReadNotification()
-	case "subNote", "s":
+	case "subNote", "s", "sr":
+		// upstream Connection.ts:152 では 'sr' は 'onSubscribeNote' (= subNote/s)
+		// の単純な alias。全通知既読 (readAllNotification) は別 type 'readNotification'
+		// のみが行う。'sr' で handleReadNotification を呼ぶと、frontend が note を
+		// capture する度 (use-note-capture が 'sr' を送る) に未読通知が全消去される
+		// バグになる (#2106 H6)。
 		d.handleSubNote(body)
-	case "sr":
-		d.handleSubNote(body)
-		d.handleReadNotification()
 	case "unsubNote", "un":
 		d.handleUnsubNote(body)
 	}
