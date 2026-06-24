@@ -785,3 +785,23 @@ func TestAdminCreate_GlobalBroadcasts(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, []string{"announcementCreated"}, bc.events, "global は broadcast へ (#2056)")
 }
+
+// #2101: user-facing List は admin 管理用 field (forExistingUsers / isActive) を
+// 露出しない (upstream user-facing pack に揃える)。admin は AdminList が返す。
+func TestList_OmitsAdminFields(t *testing.T) {
+	h, repo := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	validID := idGen.Generate(java_time())
+	repo.Items[validID] = &model.Announcement{ID: validID, Title: "Hi", Text: "Hello", IsActive: true, ForExistingUsers: true}
+	rec := doPost(h.List, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	item := resp[0].(map[string]any)
+	_, hasForExisting := item["forExistingUsers"]
+	_, hasIsActive := item["isActive"]
+	assert.False(t, hasForExisting, "user-facing List は forExistingUsers を出さない")
+	assert.False(t, hasIsActive, "user-facing List は isActive を出さない")
+	assert.Equal(t, "Hi", item["title"], "user-facing field は維持")
+}

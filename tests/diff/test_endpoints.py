@@ -337,10 +337,9 @@ def test_announcement_packing_parity(mkgo, ts):
         c.json("admin/announcements/create", {"title": "harness ann", "text": "body", "imageUrl": None})
     mk = mkgo.json("announcements", {})
     tj = ts.json("announcements", {})
-    # #2101: user-facing /api/announcements が admin field forExistingUsers/isActive を
-    # 露出する乖離を検出。finding として追跡中なので一旦無視する。
-    ann_ignore = DEFAULT_IGNORE_KEYS | {"forExistingUsers", "isActive"}
-    diffs = diff_json(mk, tj, ignore_keys=ann_ignore)
+    # (#2101 修正済: user-facing から admin field forExistingUsers/isActive を除去した
+    # ため回帰 gate に戻した = ここで ignore しない。)
+    diffs = diff_json(mk, tj, ignore_keys=DEFAULT_IGNORE_KEYS)
     assert not diffs, format_diffs(diffs)
 
 

@@ -503,14 +503,11 @@ func (h *Handler) AdminList(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// packAnnouncement wraps entity.PackAnnouncement for handler use. isRead
-// defaults to false at this layer; the caller overrides after viewer check.
-// Retains `forExistingUsers` / `isActive` which List pre-existing API
-// clients may rely on (entity packer targets the event body which TS
-// doesn't include these two).
+// packAnnouncement wraps entity.PackAnnouncement for the user-facing List/Show.
+// isRead defaults to false at this layer; the caller overrides after the viewer
+// check. admin 管理用 field (forExistingUsers / isActive) は user-facing には
+// 出さない: upstream の user-facing pack (AnnouncementEntityService.pack) はこれらを
+// 返さず、admin は AdminList が別途返す (#2101)。
 func packAnnouncement(a *model.Announcement, idGen id.Generator) map[string]any {
-	out := entity.PackAnnouncement(a, idGen, false)
-	out["forExistingUsers"] = a.ForExistingUsers
-	out["isActive"] = a.IsActive
-	return out
+	return entity.PackAnnouncement(a, idGen, false)
 }
