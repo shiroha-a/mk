@@ -1244,3 +1244,39 @@ func TestFollow_NoInstanceRepoStillWorks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, fRepo.Followings, 1)
 }
+
+// #2106 N11: UnfollowSilent は Undo(Follow) を逆配送しない (federationHook 不発火) が、
+// main stream の unfollow event は upstream remoteReject 同様に publish する。
+func TestUnfollowSilent_DoesNotFederateButPublishes(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+
+	// Follow 時の hook 呼び出しを無視するため fresh な hook / pub に差し替える。
+	fed := &stubFederationHook{}
+	svc.SetFederationHook(fed)
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	require.NoError(t, svc.UnfollowSilent("alice", "bob"))
+	assert.Empty(t, fed.unfollowed, "UnfollowSilent は Undo(Follow) を逆配送しない")
+	require.Len(t, pub.calls, 1, "main stream の unfollow event は publish する")
+	assert.Equal(t, "unfollow", pub.calls[0].eventType)
+}
+
+// #2106 N11 regression guard: 通常 Unfollow は従来通り federationHook (Undo 配送) を発火する。
+func TestUnfollow_StillFederates(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+
+	fed := &stubFederationHook{}
+	svc.SetFederationHook(fed)
+
+	require.NoError(t, svc.Unfollow("alice", "bob"))
+	assert.Equal(t, []string{"alice->bob"}, fed.unfollowed, "通常 Unfollow は Undo を配送する")
+}

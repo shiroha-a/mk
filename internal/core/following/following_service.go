@@ -352,6 +352,20 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 
 // Unfollow removes a following relationship from follower to followee.
 func (s *Service) Unfollow(followerID, followeeID string) error {
+	return s.unfollow(followerID, followeeID, true)
+}
+
+// UnfollowSilent removes the following without delivering an Undo(Follow) to a
+// remote followee, mirroring upstream UserFollowingService.remoteReject which
+// cleans up the local relation (and publishes the main-stream unfollow event)
+// without any AP delivery. Used by inbound Reject(Follow) handling (#2106 N11)
+// so that receiving a Reject does not bounce a spurious Undo(Follow) back to the
+// rejecter. The normal Unfollow path still federates.
+func (s *Service) UnfollowSilent(followerID, followeeID string) error {
+	return s.unfollow(followerID, followeeID, false)
+}
+
+func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 	if followerID == followeeID {
 		return ErrSelfFollow
 	}
@@ -377,7 +391,10 @@ func (s *Service) Unfollow(followerID, followeeID string) error {
 		follower, ferr := s.userRepo.FindByID(followerID)
 		followee, eerr := s.userRepo.FindByID(followeeID)
 		if ferr == nil && eerr == nil {
-			if s.federationHook != nil {
+			// #2106 N11: deliver=false (inbound Reject 処理) では Undo(Follow) を
+			// rejecter へ逆配送しない。chart / webhook / main stream は upstream
+			// remoteReject も publishUnfollow するので維持する。
+			if deliver && s.federationHook != nil {
 				s.federationHook.OnLocalUnfollowed(follower, followee)
 			}
 			if s.chartHook != nil {

@@ -1829,7 +1829,10 @@ func (p *Processor) handleReject(act genericActivity) error {
 		return nil
 	}
 	// 既存のフォローがあれば解除する。pending な follow request も同様。
-	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil &&
+	// #2106 N11: upstream remoteReject は AP 配送を伴わない内部削除なので、federating な
+	// Unfollow ではなく UnfollowSilent を使い、rejecter へ余計な Undo(Follow) を逆配送
+	// しない (Following 行が残るエッジケースでの連合ノイズ / 相手の重複処理を防ぐ)。
+	if err := p.followingService.UnfollowSilent(follower.ID, followee.ID); err != nil &&
 		!errors.Is(err, corefollowing.ErrNotFollowing) {
 		return err
 	}
