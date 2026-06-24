@@ -289,12 +289,17 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	}
 
 	notifierByID := make(map[string]*model.User, len(notifierIDSet))
+	// #2106 N6: notifier fetch が成功したかを記録する。成功時のみ unresolved notifier の
+	// notifier-required 通知を drop する (transient な FindManyByIDs 失敗で全件 mass-drop
+	// しないため)。userRepo 未配線 / notifier 不要のときは false のままで drop しない。
+	notifierFetchOK := false
 	if h.userRepo != nil && len(notifierIDSet) > 0 {
 		ids := make([]string, 0, len(notifierIDSet))
 		for id := range notifierIDSet {
 			ids = append(ids, id)
 		}
 		if users, err := h.userRepo.FindManyByIDs(ids); err == nil {
+			notifierFetchOK = true
 			for _, u := range users {
 				notifierByID[u.ID] = u
 			}
@@ -307,6 +312,25 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// NotificationEntityService #filterValidNotifier)。noteIDSet は survivor から
 	// 組み立てる (落とした通知の note を無駄に引かない)。
 	filtered = h.filterValidNotifiers(user.ID, filtered, notifierByID)
+
+	// #2106 N6: notifier user が解決できなかった notifier-required 通知を drop する
+	// (upstream NotificationEntityService #packInternal の `needsUser && !userIfNeed →
+	// return null`)。misskey-js / misskey_dart は Notification.user を non-null 必須で
+	// decode するため、hard-delete された notifier の shape 不整合通知を返すと strict
+	// client が当該ページ decode で crash する。transient な fetch 失敗では mass-drop
+	// しないよう、fetch 成功時のみ適用する。
+	if notifierFetchOK {
+		kept := filtered[:0]
+		for _, n := range filtered {
+			if n.NotifierID != "" {
+				if _, ok := notifierByID[n.NotifierID]; !ok {
+					continue
+				}
+			}
+			kept = append(kept, n)
+		}
+		filtered = kept
+	}
 
 	noteIDSet := make(map[string]struct{})
 	for _, n := range filtered {

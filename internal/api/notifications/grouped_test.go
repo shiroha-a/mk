@@ -191,18 +191,18 @@ func TestGrouped_RenotesDifferentTargetsStaySeparate(t *testing.T) {
 	assert.Equal(t, "renote", resp[1]["type"])
 }
 
-// renote grouping で notifier user が解決できない場合でも group は成立し、
-// users[] は解決できた分のみになる (renoteUsers の空初期化分岐を覆う)。
-func TestGrouped_RenoteGroupWithUnresolvedFirstUser(t *testing.T) {
+// #2106 N6: renote 通知の notifier user が解決できない (= hard-delete 等) 場合、その通知は
+// 丸ごと drop される (upstream #packInternal の needsUser && !userIfNeed)。bob が解決不能なら
+// bob の renote 通知は落ち、解決できた carol の renote 1 件のみが残る (単独なので grouped で
+// なく単発の "renote")。
+func TestGrouped_RenoteUnresolvedNotifierDropped(t *testing.T) {
 	h, svc, userRepo, noteRepo := groupedHandler(t)
-	// 最初の notifier (bob) は userRepo に登録しない → packed["user"] 不在。
+	// notifier bob は userRepo に登録しない → notifier 解決不能 → 通知ごと drop。
 	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
 	noteRepo.Notes["rn1"] = &model.Note{ID: "rn1", UserID: "bob", Visibility: "public", RenoteID: strPtr("target"), User: &model.User{ID: "bob"}}
 	noteRepo.Notes["rn2"] = &model.Note{ID: "rn2", UserID: "carol", Visibility: "public", RenoteID: strPtr("target"), User: &model.User{ID: "carol"}}
 
 	ctx := context.Background()
-	// carol を先に作る → list は newest-first で [bob(rn1), carol(rn2)]。
-	// 先頭 (bob) が未解決なので renoteUsers は空初期化、続く carol だけ users[] に入る。
 	_, err := svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", NotifierID: "carol", Type: notification.TypeRenote, NoteID: "rn2"})
 	require.NoError(t, err)
 	_, err = svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeRenote, NoteID: "rn1"})
@@ -213,11 +213,8 @@ func TestGrouped_RenoteGroupWithUnresolvedFirstUser(t *testing.T) {
 	require.NoError(t, h.Grouped(c))
 
 	resp := decodeGrouped(t, rec.Body.Bytes())
-	require.Len(t, resp, 1)
-	assert.Equal(t, "renote:grouped", resp[0]["type"])
-	users, _ := resp[0]["users"].([]any)
-	// bob は解決不能なので carol の 1 件のみ。
-	assert.Len(t, users, 1)
+	require.Len(t, resp, 1, "bob (解決不能 notifier) の通知は drop され carol の 1 件のみ")
+	assert.Equal(t, "renote", resp[0]["type"], "残り 1 件は単発の renote")
 }
 
 // reaction group の後ろに非グループ通知 (follow) が並ぶと grouping が途切れる。

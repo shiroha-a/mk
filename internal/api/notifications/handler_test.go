@@ -944,3 +944,26 @@ func TestShow_QueryServiceNil_NoteEmbedDropped(t *testing.T) {
 	assert.False(t, hasNote, "queryService 未配線時は fail-closed で note embed を skip すること")
 	assert.Equal(t, "n1", resp[0]["noteId"], "noteId 自体は echo される")
 }
+
+// #2106 N6: i/notifications は notifier user が解決できない notifier-required 通知を drop
+// する (upstream #packInternal の needsUser && !userIfNeed)。strict client (misskey_dart 等)
+// は Notification.user を non-null 必須で decode するため shape 不整合通知を返さない。
+func TestShow_UnresolvedNotifierDropped(t *testing.T) {
+	h, svc, userRepo, _ := groupedHandler(t)
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol"}
+	// bob は userRepo に登録しない → 解決不能 → 通知ごと drop。
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", NotifierID: "carol", Type: notification.TypeFollow})
+	require.NoError(t, err)
+	_, err = svc.Create(ctx, notification.CreateInput{NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "bob (解決不能 notifier) の follow 通知は drop、carol のみ残る")
+	assert.Equal(t, "carol", resp[0]["userId"])
+}
