@@ -1968,7 +1968,13 @@ func (s *Server) setupRoutes() {
 	// admin overview から `misskeyApiGet` で叩かれるため GET も登録 (#421)。
 	api.POST("/federation/stats", federationHandler.Stats)
 	api.GET("/federation/stats", federationHandler.Stats)
-	api.POST("/federation/update-remote-user", federationHandler.UpdateRemoteUser, middleware.RequireModerator(roleService))
+	// #2106 N29/N10: upstream update-remote-user.ts は requireCredential:false の公開
+	// endpoint で、frontend get-user-menu はリモートユーザーメニューの「リモート情報を
+	// 更新」を全ログインユーザーに無条件表示する。RequireModerator だと非モデレーターが
+	// 403 ROLE_PERMISSION_DENIED になり frontend 機能が壊れるため緩和する。匿名トリガー
+	// 可能な AP 再 fetch (amplification) を防ぐため、upstream の anonymous 許可までは
+	// 開けず RequireAuth に留める (frontend は menu 表示にログイン必須なので互換性は保つ)。
+	api.POST("/federation/update-remote-user", federationHandler.UpdateRemoteUser, middleware.RequireAuth())
 
 	// Channels endpoints (Phase 4.2)
 	channelsHandler := apichannels.NewHandler(channelService, idGen)
