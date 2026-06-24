@@ -384,6 +384,52 @@ def test_mute_list_parity(mkgo, ts):
     assert not diffs, format_diffs(diffs)
 
 
+TIMELINE_IGNORE = DEFAULT_IGNORE_KEYS | {"userId", "user", "renoteId", "replyId"}
+
+
+def test_home_timeline_parity(mkgo, ts):
+    # create a fresh note, then read the home timeline (limit=1). The note must
+    # be fanned out to the creator's own home timeline and packed identically.
+    for c in (mkgo, ts):
+        c.json("notes/create", {"text": "home timeline probe", "visibility": "public"})
+    mk = mkgo.json("notes/timeline", {"limit": 1})
+    tj = ts.json("notes/timeline", {"limit": 1})
+    diffs = diff_json(mk, tj, ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_local_timeline_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        c.json("notes/create", {"text": "local timeline probe", "visibility": "public"})
+    mk = mkgo.json("notes/local-timeline", {"limit": 1})
+    tj = ts.json("notes/local-timeline", {"limit": 1})
+    diffs = diff_json(mk, tj, ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_user_notes_timeline_parity(mkgo, ts):
+    for c in (mkgo, ts):
+        c.json("notes/create", {"text": "user notes probe", "visibility": "public"})
+        c._probe = c.json("i", {})["id"]
+    mk = mkgo.json("users/notes", {"userId": mkgo._probe, "limit": 1})
+    tj = ts.json("users/notes", {"userId": ts._probe, "limit": 1})
+    diffs = diff_json(mk, tj, ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_home_timeline_followee_parity(mkgo, ts):
+    # alice follows bob; bob posts; bob's note must be fanned out to alice's home
+    # timeline (cross-user fanout — the core of FanoutTimeline).
+    for c in (mkgo, ts):
+        bob = _create_second_user(c, "bobtl")
+        c.json("following/create", {"userId": bob["id"]})
+        c.call("notes/create", {"text": "followee fanout probe", "visibility": "public"}, token=bob["token"])
+    mk = mkgo.json("notes/timeline", {"limit": 1})
+    tj = ts.json("notes/timeline", {"limit": 1})
+    diffs = diff_json(mk, tj, ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
 def test_note_with_poll_parity(mkgo, ts):
     poll = {"choices": ["alpha", "beta", "gamma"], "multiple": False}
     mk_note = mkgo.json("notes/create", {"text": "poll probe", "visibility": "public", "poll": poll})["createdNote"]
