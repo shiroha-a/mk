@@ -1432,6 +1432,10 @@ func (s *Server) setupRoutes() {
 	// Users endpoints
 	usersHandler := users.NewHandler(userService, followingService, noteRepo, idGen)
 	usersHandler.SetChartHook(chartHooks)
+	// #2106 S3: 匿名 visitor への remote profile 露出を ugcVisibilityForVisitor で gate。
+	if ugcMeta, err := metaRepo.Fetch(); err == nil {
+		usersHandler.SetUGCVisibility(ugcMeta.UgcVisibilityForVisitor)
+	}
 	usersHandler.SetFeaturedRanking(featuredService) // #1687: users/featured-notes ランキング
 	usersHandler.SetPiningRepo(piningRepo)
 	usersHandler.SetFollowingRepo(followingRepo)

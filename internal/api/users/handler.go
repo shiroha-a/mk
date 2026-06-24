@@ -80,6 +80,9 @@ type Handler struct {
 	// 判定し、remote user / 非 public reactions の閲覧制限を bypass するため
 	// に使う (upstream の iAmModerator 経路)。
 	moderatorChecker ModeratorChecker
+	// ugcVisibility は meta.ugcVisibilityForVisitor。'local' (既定) のとき匿名
+	// visitor に remote user プロフィールを出さない (upstream users/show、#2106 S3)。
+	ugcVisibility string
 	// driveFileRepo は users/pages で page の attachedFiles / eyeCatchingImage を
 	// drive file から解決するのに使う (#1662)。未配線なら両 field は default。
 	driveFileRepo repository.DriveFileRepository
@@ -159,6 +162,12 @@ type ModeratorChecker interface {
 // nil keeps the gate strict (= test fixture / unwired)。
 func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
 	h.moderatorChecker = m
+}
+
+// SetUGCVisibility sets the meta.ugcVisibilityForVisitor policy used to hide
+// remote user profiles from anonymous visitors when set to "local" (#2106 S3).
+func (h *Handler) SetUGCVisibility(v string) {
+	h.ugcVisibility = v
 }
 
 // ModeratorLister lists moderator/administrator users for abuse-report fanout
@@ -524,6 +533,12 @@ func (h *Handler) Show(c echo.Context) error {
 	if req.UserID != nil {
 		bundle, err = h.userService.ShowByID(*req.UserID)
 	} else {
+		// #2106 S3: ugcVisibilityForVisitor='local' のとき、匿名 visitor が host 指定で
+		// remote user を解決させること自体を resolve 前に弾く (upstream show.ts:157-159、
+		// 未知 remote host への外向き resolve 誘発 = SSRF amplification も防ぐ)。
+		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibility == "local" {
+			return apierr.JSONNoSuchUser(c)
+		}
 		bundle, err = h.userService.ShowByUsername(*req.Username, req.Host)
 	}
 
@@ -538,6 +553,12 @@ func (h *Handler) Show(c echo.Context) error {
 	// 存在しないものとして扱い NO_SUCH_USER(4362f8dc...) を返す。moderator は
 	// 従来どおり閲覧できる。匿名/未配線は iAmModerator=false で fail-closed。
 	if !iAmModerator && bundle.User.IsSuspended {
+		return apierr.JSONNoSuchUser(c)
+	}
+
+	// #2106 S3: ugcVisibilityForVisitor='local' のとき匿名 visitor に remote user を
+	// 出さない (upstream show.ts:177-179)。userId 指定経路もここでカバーする。
+	if viewer == nil && bundle.User.Host != nil && h.ugcVisibility == "local" {
 		return apierr.JSONNoSuchUser(c)
 	}
 
