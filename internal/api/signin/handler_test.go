@@ -578,3 +578,20 @@ func TestSigninFlow_Step1_CaptchaNext_WhenNoCaptchaConfigured(t *testing.T) {
 	assert.Equal(t, false, resp["finished"])
 	assert.Equal(t, "captcha", resp["next"])
 }
+
+// #2106 H2 (CRITICAL): レガシー /api/signin は 2FA 有効ユーザーに password だけで
+// token を発行してはならない。challenge を返し /signin-flow へ誘導する。
+func TestSignin_LegacyTwoFactorNotBypassed(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123")
+	repo.Profiles["u1"].TwoFactorEnabled = true
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["finished"])
+	assert.Equal(t, "totp", resp["next"])
+	_, hasToken := resp["i"]
+	assert.False(t, hasToken, "2FA user must NOT receive a session token via legacy /signin")
+}

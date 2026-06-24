@@ -153,7 +153,25 @@ func (h *Handler) Signin(c echo.Context) error {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
 
-	// 認証成功
+	// #2106 H2 (CRITICAL): 2FA 有効ユーザーには password のみで token を発行しない。
+	// レガシー /api/signin は 2 要素を完遂できない (req に token/credential が無い)
+	// ため challenge を返して /signin-flow へ誘導する。これを欠くと 2FA が完全に
+	// バイパスされ password 漏洩だけでアカウントが乗っ取られる (SigninFlow は正しく
+	// 2FA を扱う、本 endpoint のみが穴だった)。
+	if profile.TwoFactorEnabled {
+		next := "totp"
+		if h.webauthnSvc != nil && h.securityKeyRepo != nil {
+			if ks, kerr := h.securityKeyRepo.ListByUser(user.ID); kerr == nil && len(ks) > 0 {
+				next = "passkey"
+			}
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"finished": false,
+			"next":     next,
+		})
+	}
+
+	// 認証成功 (2FA 無し)
 	return h.ok(c, user)
 }
 
