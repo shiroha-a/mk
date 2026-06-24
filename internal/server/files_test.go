@@ -204,3 +204,20 @@ func TestFilesHandler_SetsDetectedContentType(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "image/png", rec.Header().Get(echo.HeaderContentType))
 }
+
+// #2106 H3: 非 browser-safe MIME (HTML/SVG 等) は application/octet-stream に矯正し、
+// CSP / nosniff 防御 header を付けて stored XSS を防ぐ。
+func TestFilesHandler_NonBrowserSafeIsOctetStreamWithCSP(t *testing.T) {
+	key := "html-key"
+	htmlBody := "<html><body><script>alert(1)</script></body></html>"
+	primary := &memStorage{byKey: map[string]string{key: htmlBody}}
+	c, rec := newFilesTestContext(t, key)
+	h := filesHandler(nil, primary, nil)
+	require.NoError(t, h(c))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/octet-stream", rec.Header().Get(echo.HeaderContentType),
+		"HTML must be served as octet-stream, not text/html (XSS)")
+	assert.Contains(t, rec.Header().Get("Content-Security-Policy"), "default-src 'none'")
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+}

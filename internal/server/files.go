@@ -82,6 +82,11 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 		buf := make([]byte, 512)
 		n, _ := seeker.Read(buf)
 		contentType := http.DetectContentType(buf[:n])
+		// #2106 H3: sniff した MIME を browser-safe allowlist に通し、非該当
+		// (text/html, image/svg+xml, text/xml 等) は application/octet-stream に
+		// 矯正する。これを欠くと任意アップロードが file origin から active content
+		// として実行され stored XSS になる (upstream FileServerUtils.getSafeContentType)。
+		contentType = coredrive.BrowserSafeContentType(contentType)
 		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
 			return c.NoContent(http.StatusInternalServerError)
 		}
@@ -92,6 +97,12 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 		// する + サイズが切れる」現象を起こす。`immutable` で長期 cache 化、
 		// `no-transform` で binary 1:1 配信を契約する。
 		c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable, no-transform")
+		// #2106 H3: upstream FileServerService と同じ防御 header。CSP で file origin
+		// からの script/object 実行を封じ、nosniff で MIME sniffing を止め、
+		// Content-Disposition: inline で download 名を制御する (octet-stream と多層防御)。
+		c.Response().Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'")
+		c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+		c.Response().Header().Set("Content-Disposition", "inline")
 		c.Response().Header().Set(echo.HeaderContentType, contentType)
 		http.ServeContent(c.Response(), c.Request(), key, modtime, seeker)
 		return nil
