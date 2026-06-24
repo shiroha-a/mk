@@ -475,3 +475,23 @@ func TestShowInstance_OmitsNonUpstreamFields(t *testing.T) {
 	_, hasIsNotResponding := got["isNotResponding"]
 	assert.True(t, hasIsNotResponding, "isNotResponding は upstream response field")
 }
+
+// #2106 N9: GET /federation/instances は query param を束縛する (json タグだけだと
+// echo の GET binder が無視し、limit/sort/blocked 等が全て効かなくなる)。
+func TestInstances_GETBindsQueryParams(t *testing.T) {
+	h, repo := newHandler(t)
+	seedInstance(t, repo, "alpha.example")
+	seedInstance(t, repo, "beta.example")
+	seedInstance(t, repo, "gamma.example")
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/federation/instances?limit=1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, h.Instances(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 1, "GET ?limit=1 must bind the query param (else default 30 returns all 3)")
+}

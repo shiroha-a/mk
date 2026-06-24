@@ -103,22 +103,27 @@ func (h *Handler) requesterIsModerator(c echo.Context) bool {
 }
 
 // InstancesRequest is the request body for federation/instances.
+//
+// query タグは upstream instances.ts の allowGet:true 経路用 (#2106 N9)。echo の
+// DefaultBinder は GET で BindQueryParams を呼ぶが、explicit query タグの無い field は
+// 束縛しない。frontend welcome.entrance.classic.vue は misskeyApiGet で sort/limit/blocked
+// 等を渡すため、これらが無いと表示順・件数・block 除外が全て効かなくなる。
 type InstancesRequest struct {
-	Host          string `json:"host"`
-	Suspended     *bool  `json:"suspended"`
-	NotResponding *bool  `json:"notResponding"`
-	Blocked       *bool  `json:"blocked"`
-	Silenced      *bool  `json:"silenced"`
-	Federating    *bool  `json:"federating"`
-	Subscribing   *bool  `json:"subscribing"`
-	Publishing    *bool  `json:"publishing"`
-	Sort          string `json:"sort"`
-	Limit         int    `json:"limit"`
-	Offset        int    `json:"offset"`
-	SinceID       string `json:"sinceId"`
-	UntilID       string `json:"untilId"`
-	SinceDate     *int64 `json:"sinceDate"`
-	UntilDate     *int64 `json:"untilDate"`
+	Host          string `json:"host" query:"host"`
+	Suspended     *bool  `json:"suspended" query:"suspended"`
+	NotResponding *bool  `json:"notResponding" query:"notResponding"`
+	Blocked       *bool  `json:"blocked" query:"blocked"`
+	Silenced      *bool  `json:"silenced" query:"silenced"`
+	Federating    *bool  `json:"federating" query:"federating"`
+	Subscribing   *bool  `json:"subscribing" query:"subscribing"`
+	Publishing    *bool  `json:"publishing" query:"publishing"`
+	Sort          string `json:"sort" query:"sort"`
+	Limit         int    `json:"limit" query:"limit"`
+	Offset        int    `json:"offset" query:"offset"`
+	SinceID       string `json:"sinceId" query:"sinceId"`
+	UntilID       string `json:"untilId" query:"untilId"`
+	SinceDate     *int64 `json:"sinceDate" query:"sinceDate"`
+	UntilDate     *int64 `json:"untilDate" query:"untilDate"`
 }
 
 // Instances handles POST /api/federation/instances.
