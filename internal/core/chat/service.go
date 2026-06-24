@@ -1169,16 +1169,34 @@ func (s *Service) normalizeChatReaction(raw string) (string, error) {
 	return strings.ReplaceAll(raw, "\ufe0f", ""), nil
 }
 
+// normalizeChatReactionForm canonicalises a chat reaction string WITHOUT validating
+// custom emoji existence: a `:name:` custom-emoji reaction is kept as `:name:`,
+// anything else is treated as a unicode emoji with its variation selector (U+FE0F)
+// stripped. normalizeChatReaction (react、存在検証あり) と Unreact (#2106 N4、検証不要)
+// で同じ canonical form を使い、array_append と array_remove を一致させる。
+func normalizeChatReactionForm(raw string) string {
+	if m := chatCustomEmojiPattern.FindStringSubmatch(raw); m != nil {
+		return ":" + m[1] + ":"
+	}
+	return strings.ReplaceAll(raw, "️", "")
+}
+
 // Unreact removes a reaction and publishes an `unreact` stream event (#1549)。
 func (s *Service) Unreact(ctx context.Context, messageID string, reactor *model.User, emoji string) error {
+	// #2106 N4: React と同じく emoji を canonical form に正規化してから array_remove する。
+	// React は VS strip / custom `:name:` 化して保存するため、raw emoji (VS 付き等) のままだと
+	// 厳密一致 array_remove で取り消せず silent fail する。custom emoji の存在検証は unreact
+	// では不要なので form だけ揃える (upstream ChatService.unreact も同様)。
+	reaction := normalizeChatReactionForm(emoji)
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
 		return ErrNotFound
 	}
-	if err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+emoji); err != nil {
+	if err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+reaction); err != nil {
 		return fmt.Errorf("remove reaction: %w", err)
 	}
-	s.publishReaction(ctx, msg, EventUnreact, reactor, emoji)
+	// #2106 N4: stream event も正規化済 reaction で publish し React と対称にする。
+	s.publishReaction(ctx, msg, EventUnreact, reactor, reaction)
 	return nil
 }
 

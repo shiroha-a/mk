@@ -736,3 +736,23 @@ func TestReadRoomChat_NoError(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	assert.NoError(t, svc.ReadRoomChat(context.Background(), "alice", "r1"))
 }
+
+// #2106 N4: Unreact は React と同じく emoji を正規化 (VS strip / custom :name:) してから
+// array_remove する。raw (VS 付き) のままだと厳密一致で取り消せず silent fail していた。
+func TestUnreact_NormalizesVariationSelector(t *testing.T) {
+	svc, repo, pub := newSvc(t)
+	to := "bob"
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
+
+	// VS 付き ❤️ で react → "bob/❤" (VS strip) で保存。
+	require.NoError(t, svc.React(context.Background(), "m1", &model.User{ID: "bob"}, "❤️"))
+	require.Contains(t, repo.AddedReactions, "bob/❤")
+
+	// VS 付き ❤️ (raw) で unreact → 正規化されて同じ "bob/❤" key で array_remove。
+	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "bob"}, "❤️"))
+	require.Contains(t, repo.RemovedReactions, "bob/❤", "VS strip した key で array_remove する")
+	// stream event も正規化済 reaction で publish。
+	last := pub.userCalls[len(pub.userCalls)-1]
+	body := last.body.(map[string]any)
+	assert.Equal(t, "❤", body["reaction"])
+}

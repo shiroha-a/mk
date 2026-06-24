@@ -35,6 +35,10 @@ type MockChatRepository struct {
 	Memberships map[string]*model.ChatRoomMembership
 	// Invitations keyed by invitation ID.
 	Invitations map[string]*model.ChatRoomInvitation
+	// AddedReactions / RemovedReactions record the keys passed to
+	// AddReaction / RemoveReaction so tests can assert canonicalisation (#2106 N4).
+	AddedReactions   []string
+	RemovedReactions []string
 
 	// CreateErr forces Create* to return this error without persisting.
 	CreateErr error
@@ -537,5 +541,12 @@ func (m *MockChatRepository) ListRoomHistory(_ string, _ int) ([]*model.ChatMess
 
 // --- Reactions ---
 
-func (m *MockChatRepository) AddReaction(_, _ string) error    { return nil }
-func (m *MockChatRepository) RemoveReaction(_, _ string) error { return nil }
+func (m *MockChatRepository) AddReaction(_, key string) error {
+	m.AddedReactions = append(m.AddedReactions, key)
+	return nil
+}
+
+func (m *MockChatRepository) RemoveReaction(_, key string) error {
+	m.RemovedReactions = append(m.RemovedReactions, key)
+	return nil
+}
