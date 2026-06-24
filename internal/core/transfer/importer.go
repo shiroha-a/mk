@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -132,18 +131,10 @@ func (i *Importer) Import(ctx context.Context, userID, importType, fileID string
 		return nil, err
 	}
 
-	if i.deps.Notifier != nil {
-		_, _ = i.deps.Notifier.Create(ctx, notification.CreateInput{
-			NotifieeID: user.ID,
-			Type:       notification.TypeImportCompleted,
-			Extra: map[string]any{
-				"importedEntity": importType,
-				"total":          result.Total,
-				"applied":        result.Applied,
-				"skipped":        result.Skipped,
-			},
-		})
-	}
+	// #2106 N25: upstream の通知 type enum には exportCompleted のみが存在し importCompleted
+	// は無い (Import*ProcessorService も完了通知を発火しない)。import 完了通知を出すと
+	// strict-enum decode を行う client (misskey_dart 等) が未知 type で notification 一覧の
+	// decode を巻き込んで crash しうるため、upstream 同様に通知を発火しない。
 	return result, nil
 }
 

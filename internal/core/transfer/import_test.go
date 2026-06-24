@@ -152,9 +152,9 @@ func TestImport_Following_AppliesEachRow(t *testing.T) {
 	require.Len(t, fs.callsOpts, 2)
 	assert.True(t, fs.callsOpts[0].WithReplies, "row 1 (bob,withReplies=true) should propagate WithReplies=true")
 	assert.False(t, fs.callsOpts[1].WithReplies, "row 2 (carol,withReplies=false) should propagate WithReplies=false")
-	require.Len(t, notifier.calls, 1)
-	assert.Equal(t, "importCompleted", string(notifier.calls[0].Type))
-	assert.Equal(t, "following", notifier.calls[0].Extra["importedEntity"])
+	// #2106 N25: import 完了通知は upstream の通知 type enum に存在しない (exportCompleted のみ)
+	// ため発火しない。strict-enum client の notification decode crash を防ぐ。
+	require.Empty(t, notifier.calls, "import 完了通知は発火しない")
 }
 
 // #1058: CSV row の withReplies=true が FollowOptions として Service に threading
