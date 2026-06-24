@@ -611,3 +611,31 @@ func TestPromotePending_NoTxRecordsUsedUsername(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, exists, "non-tx promote も used_username に記録する")
 }
+
+// #2106 N20: meta.prohibitedWordsForNameOfUser に該当する username を signup で弾く。
+func TestSignup_ProhibitedUsername(t *testing.T) {
+	svc, _, metaRepo := newTestService(t)
+	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
+	_, err := svc.Signup("badname123", "pass", false)
+	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+}
+
+// #2106 N20: 初回セットアップ (isInitialSetup=true / rootUserId==null) では prohibited
+// チェックを skip する (upstream は rootUserId!=null のときのみ評価)。
+func TestSignup_ProhibitedUsernameAllowedOnInitialSetup(t *testing.T) {
+	svc, _, metaRepo := newTestService(t)
+	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
+	result, err := svc.Signup("badname123", "pass", true)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+}
+
+// #2106 N20: CreatePending (email 確認経路) でも prohibited username を弾く。
+func TestCreatePending_ProhibitedUsername(t *testing.T) {
+	svc, _, metaRepo := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
+	_, err := svc.CreatePending("badname123", "x@example.com", "pass", nil)
+	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+}

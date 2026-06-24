@@ -12,6 +12,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/crypto/bcrypt"
@@ -284,8 +285,17 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 	// admin / root が予約ワードに含まれうるので除外する。meta fetch 失敗時は
 	// ベストエフォートで通過させる (オンライン性を優先)。
 	if !isInitialSetup {
-		if meta, err := s.metaRepo.Fetch(); err == nil && isReservedUsername(lower, meta.PreservedUsernames) {
-			return nil, ErrUsernameReserved
+		if meta, err := s.metaRepo.Fetch(); err == nil {
+			if isReservedUsername(lower, meta.PreservedUsernames) {
+				return nil, ErrUsernameReserved
+			}
+			// #2106 N20: meta.prohibitedWordsForNameOfUser に該当する username を弾く
+			// (upstream SignupService:97-100、rootUserId!=null = 非初回セットアップ時)。
+			// upstream は 'USED_USERNAME' を throw するので USED_USERNAME にマップされる
+			// ErrUsernameUsed を返す (preserved の DENIED_USERNAME とは別コード)。
+			if keyword.IsKeyWordIncluded(lower, meta.ProhibitedWordsForNameOfUser) {
+				return nil, ErrUsernameUsed
+			}
 		}
 	}
 
@@ -413,8 +423,14 @@ func (s *Service) CreatePending(username, email, password string, invitationTick
 	if s.isUsedUsername(lower) {
 		return nil, ErrUsernameUsed
 	}
-	if meta, err := s.metaRepo.Fetch(); err == nil && isReservedUsername(lower, meta.PreservedUsernames) {
-		return nil, ErrUsernameReserved
+	if meta, err := s.metaRepo.Fetch(); err == nil {
+		if isReservedUsername(lower, meta.PreservedUsernames) {
+			return nil, ErrUsernameReserved
+		}
+		// #2106 N20: prohibited words for username (Signup と同じ guard、email 確認経路)。
+		if keyword.IsKeyWordIncluded(lower, meta.ProhibitedWordsForNameOfUser) {
+			return nil, ErrUsernameUsed
+		}
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
