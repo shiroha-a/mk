@@ -294,3 +294,44 @@ func TestFlashRepository_Search_QueryError(t *testing.T) {
 	_, err := repo.Search("any", "", "", 10, 0)
 	assert.Error(t, err)
 }
+
+// #2106 N8: flash/search は query を空白区切りで各語を AND し (全語を含む検索)、
+// LIKE メタ文字 (% _) を escape する (wildcard 無効化)。
+func TestFlashRepository_Search_WordAndAndLikeEscape(t *testing.T) {
+	repo := NewFlashRepository(testDB)
+	user := insertTestUser(t, "u_fla_n8", "flashusern8")
+	defer cleanupUser(t, user.ID)
+
+	flashes := map[string]string{
+		"fl_n8_both": "foo bar baz", // foo と baz 両方含む
+		"fl_n8_foo":  "foo only",    // baz を含まない
+		"fl_n8_pct":  "100%done",    // literal %
+		"fl_n8_oth":  "100Xdone",    // % を wildcard 扱いするとヒットしてしまう対象
+	}
+	for id, title := range flashes {
+		f := newTestFlash(id, user.ID, title)
+		require.NoError(t, repo.Create(f))
+		defer cleanupFlash(t, f.ID)
+	}
+
+	contains := func(rows []*model.Flash, id string) bool {
+		for _, f := range rows {
+			if f.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// word-AND: 'foo baz' は両語を含む flash のみ
+	rows, err := repo.Search("foo baz", "", "", 100, 0)
+	require.NoError(t, err)
+	assert.True(t, contains(rows, "fl_n8_both"), "全語を含む flash はヒット")
+	assert.False(t, contains(rows, "fl_n8_foo"), "baz を含まない flash は除外 (word-AND)")
+
+	// LIKE escape: '100%done' の % は literal として扱う (100Xdone を拾わない)
+	rows, err = repo.Search("100%done", "", "", 100, 0)
+	require.NoError(t, err)
+	assert.True(t, contains(rows, "fl_n8_pct"), "literal % にマッチ")
+	assert.False(t, contains(rows, "fl_n8_oth"), "% は wildcard でなく literal (100Xdone は除外)")
+}

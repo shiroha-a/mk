@@ -3,6 +3,7 @@ package repository
 import (
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
+	"strings"
 )
 
 // FlashRepository provides data access for the `flash` table.
@@ -156,9 +157,16 @@ func (r *flashRepository) Search(query, sinceID, untilID string, limit, offset i
 	if limit > 100 {
 		limit = 100
 	}
-	q := r.db.Where("title ILIKE ? OR summary ILIKE ?", "%"+query+"%", "%"+query+"%")
 	// upstream FlashService.search: 公開 flash のみを検索対象にする。
-	q = q.Where("visibility = ?", "public")
+	q := r.db.Where("visibility = ?", "public")
+	// #2106 N8: upstream は query を空白区切りで各語を AND し sqlLikeEscape する
+	// (= 全語を含む検索 + wildcard 無効化)。単一 substring + escape 漏れだった旧実装を
+	// flash_like.go の search と同じ word-split + escapeLike に揃える。空 query は語が
+	// 無いので visibility=public 全件 (= upstream の ILIKE '%%' と同じ)。
+	for _, word := range strings.Fields(query) {
+		like := "%" + escapeLike(word) + "%"
+		q = q.Where("title ILIKE ? OR summary ILIKE ?", like, like)
+	}
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
