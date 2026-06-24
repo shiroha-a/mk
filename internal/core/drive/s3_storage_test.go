@@ -266,3 +266,25 @@ func TestS3Storage_PublicURL_PrefixWithoutTrailingSlash(t *testing.T) {
 	assert.Equal(t, "files/abc123", *mock.putInput.Key,
 		"S3 PutObject Key must be 'files/abc123' even when operator omits the trailing slash")
 }
+
+// #2106 H4: 非 browser-safe MIME (HTML/SVG 等) は S3 object でも octet-stream に
+// 矯正し Content-Disposition: inline を付ける (public-read CDN 直配信での stored XSS 防止)。
+func TestS3Storage_Put_NonBrowserSafeOctetStream(t *testing.T) {
+	mock := &mockS3API{}
+	st := NewS3Storage(S3StorageConfig{Client: mock, Bucket: "b", BaseURL: "https://cdn.example.com"})
+	_, err := st.Put("htmlkey", bytes.NewReader([]byte("<html><body><script>alert(1)</script></body></html>")))
+	require.NoError(t, err)
+	require.NotNil(t, mock.putInput)
+	assert.Equal(t, "application/octet-stream", *mock.putInput.ContentType, "HTML must be stored as octet-stream")
+	require.NotNil(t, mock.putInput.ContentDisposition)
+	assert.Equal(t, "inline", *mock.putInput.ContentDisposition)
+}
+
+func TestS3Storage_Put_ImageKeepsContentType(t *testing.T) {
+	mock := &mockS3API{}
+	st := NewS3Storage(S3StorageConfig{Client: mock, Bucket: "b", BaseURL: "https://cdn.example.com"})
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 16)...)
+	_, err := st.Put("pngkey", bytes.NewReader(png))
+	require.NoError(t, err)
+	assert.Equal(t, "image/png", *mock.putInput.ContentType, "browser-safe image keeps its MIME")
+}

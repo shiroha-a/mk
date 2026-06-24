@@ -101,14 +101,21 @@ func (s *S3Storage) Put(accessKey string, body io.Reader) (string, error) {
 	if len(sniff) > 512 {
 		sniff = sniff[:512]
 	}
-	contentType := http.DetectContentType(sniff)
+	// #2106 H4: sniff した MIME を browser-safe allowlist に通す。public-read S3/CDN
+	// 直配信では /files ハンドラ・media proxy を両方バイパスして object の Content-Type が
+	// 描画を支配するため、非 browser-safe (HTML/SVG/XML 等) を octet-stream に矯正
+	// しないと CDN ドメイン上で stored XSS になる (upstream DriveService と同等)。
+	contentType := BrowserSafeContentType(http.DetectContentType(sniff))
 
 	input := &s3.PutObjectInput{
-		Bucket:       aws.String(s.bucket),
-		Key:          aws.String(key),
-		Body:         bytes.NewReader(data),
-		ContentType:  aws.String(contentType),
-		CacheControl: aws.String("max-age=31536000, immutable"),
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+		// octet-stream 矯正と併せ Content-Disposition: inline を付け、active content の
+		// インライン実行をさらに抑止する (upstream FileServerUtils.setFileResponseHeaders 相当)。
+		ContentType:        aws.String(contentType),
+		ContentDisposition: aws.String("inline"),
+		CacheControl:       aws.String("max-age=31536000, immutable"),
 	}
 	if s.setPublicRead {
 		input.ACL = types.ObjectCannedACLPublicRead
