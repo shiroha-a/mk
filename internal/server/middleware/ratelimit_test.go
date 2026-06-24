@@ -214,8 +214,8 @@ func TestMiddleware_AuthenticatedActor_IPDisabled(t *testing.T) {
 	assert.Equal(t, "u1:notes/create", store.calls[0].Key)
 }
 
-// PolicyProvider 経由で rateLimitFactor=2.0 が反映されると Max が
-// scale される (#606 item 4)。
+// PolicyProvider 経由で rateLimitFactor=2.0 が反映されると Max が upstream 同様
+// max/factor で scale される (#606 item 4 / #2106 N28: factor=2.0 で 1/2 に厳格化)。
 func TestMiddleware_PolicyProviderScalesMax(t *testing.T) {
 	store := &mockLimitStore{
 		results: []mockResult{
@@ -233,8 +233,8 @@ func TestMiddleware_PolicyProviderScalesMax(t *testing.T) {
 	doRequest(e, rl.Middleware(), h, "/api/notes/create", &model.User{ID: "vip"})
 
 	require.Len(t, store.calls, 2)
-	// userID bucket は factor=2.0 で 600 に scale、IP bucket は factor=1.0
-	assert.Equal(t, 600, store.calls[0].Max, "userID bucket: 300 * 2.0")
+	// userID bucket は factor=2.0 で 150 に scale (300/2.0)、IP bucket は factor=1.0
+	assert.Equal(t, 150, store.calls[0].Max, "userID bucket: 300 / 2.0 (factor は除数)")
 	assert.Equal(t, 300, store.calls[1].Max, "IP bucket は factor 適用外")
 }
 
@@ -276,14 +276,24 @@ func (s stubPolicy) GetUserPolicies(_ string) map[string]any {
 	return map[string]any{"rateLimitFactor": s.factor}
 }
 
-// scaledMax の境界値テスト (factor=0.001 等で 1 を下回らずクランプ)
+// scaledMax は upstream RateLimiterService の max/factor (除数) semantics (#2106 N28)。
+// factor が大きいほど実効 max が小さく (厳格)、小さいほど大きく (緩和) なる。
 func TestScaledMax(t *testing.T) {
 	assert.Equal(t, 300, scaledMax(300, 1.0))
-	assert.Equal(t, 600, scaledMax(300, 2.0))
-	assert.Equal(t, 150, scaledMax(300, 0.5))
-	assert.Equal(t, 1, scaledMax(10, 0.001), "極小 factor でも 1 にクランプ")
+	assert.Equal(t, 150, scaledMax(300, 2.0), "factor=2.0 (200%) で 1/2 に厳格化")
+	assert.Equal(t, 600, scaledMax(300, 0.5), "factor=0.5 (50%) で 2x に緩和")
+	assert.Equal(t, 1, scaledMax(10, 1000.0), "極大 factor でも 1 にクランプ")
 	assert.Equal(t, 300, scaledMax(300, 0), "factor=0 は 1.0 扱い (= base)")
 	assert.Equal(t, 300, scaledMax(300, -1), "負数も 1.0 扱い (防御)")
+}
+
+// scaledMinInterval は upstream の minInterval*factor semantics (#2106 N28)。
+func TestScaledMinInterval(t *testing.T) {
+	base := 1000 * time.Millisecond
+	assert.Equal(t, base, scaledMinInterval(base, 1.0))
+	assert.Equal(t, 2000*time.Millisecond, scaledMinInterval(base, 2.0), "factor=2.0 で window 2x (厳格)")
+	assert.Equal(t, 500*time.Millisecond, scaledMinInterval(base, 0.5), "factor=0.5 で window 半分 (緩和)")
+	assert.Equal(t, base, scaledMinInterval(base, 0), "factor=0 は base")
 }
 
 func TestMiddleware_UnauthenticatedIPActor(t *testing.T) {

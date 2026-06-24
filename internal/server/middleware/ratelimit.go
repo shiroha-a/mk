@@ -172,10 +172,12 @@ func (rl *RateLimiter) Middleware() echo.MiddlewareFunc {
 			for _, a := range actors {
 				effectiveMax := scaledMax(limit.Max, a.factor)
 
-				// minInterval チェック (factor は適用しない — minInterval は連投
-				// 抑止が目的なので user role で緩和する semantics ではない)
+				// minInterval チェック。#2106 N28: upstream RateLimiterService は
+				// `duration: minInterval * factor` で window に factor を乗算する
+				// (旧 mk-go は factor 未適用で乖離していた)。
 				if limit.MinInterval > 0 {
-					info, err := rl.store.Check(ctx, a.key+":"+endpoint+":min", limit.MinInterval, 1)
+					minInterval := scaledMinInterval(limit.MinInterval, a.factor)
+					info, err := rl.store.Check(ctx, a.key+":"+endpoint+":min", minInterval, 1)
 					if err != nil {
 						slog.Warn("rate limit store error (minInterval)", "endpoint", endpoint, "err", err)
 						continue
@@ -271,16 +273,34 @@ func (rl *RateLimiter) userFactor(userID string) float64 {
 	return 1.0
 }
 
-// scaledMax applies factor to the base Max. factor=1.0 では base そのまま、
-// factor が小さすぎても 1 を下回らないようにクランプ (factor=0 等の事故で
-// 全 user が瞬時に 429 を食らうのを防ぐ)。
+// scaledMax divides the base Max by factor, mirroring upstream
+// RateLimiterService.limit() の `max: limitation.max / factor` (#2106 N28)。
+// rateLimitFactor は **除数** で、値が大きいほど実効 max が小さくなる
+// (= role policy で締める) — 例 factor=3(300%) で 1/3 に厳格化、factor=0.3(30%) で
+// 約 3.3x に緩和。factor=1.0 / 不正値 (<=0) は base そのまま。結果は最低 1 に
+// クランプ (factor 過大の事故で全 user が瞬時に 429 を食らうのを防ぐ)。
 func scaledMax(base int, factor float64) int {
 	if factor <= 0 || factor == 1.0 {
 		return base
 	}
-	scaled := int(float64(base) * factor)
+	scaled := int(float64(base) / factor)
 	if scaled < 1 {
 		return 1
+	}
+	return scaled
+}
+
+// scaledMinInterval multiplies the base minInterval window by factor, mirroring
+// upstream RateLimiterService の `duration: limitation.minInterval * factor`
+// (#2106 N28)。max と同じく factor が大きいほど window が長くなり (= 連投間隔が
+// 厳しくなる)、小さいほど緩む。factor=1.0 / 不正値は base そのまま。
+func scaledMinInterval(base time.Duration, factor float64) time.Duration {
+	if factor <= 0 || factor == 1.0 {
+		return base
+	}
+	scaled := time.Duration(float64(base) * factor)
+	if scaled < 0 {
+		return base
 	}
 	return scaled
 }
