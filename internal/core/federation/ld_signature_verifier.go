@@ -116,3 +116,27 @@ func (v *LDSignatureVerifier) VerifyAndCreator(rawBody []byte) (string, bool, er
 	}
 	return creator, true, nil
 }
+
+// CheckForbiddenDirectivesIfPresent runs only the forbidden-directive hardening of
+// the LD-Signature pipeline (no public-key resolution, no RsaSignature2017 verify).
+//
+// Used by the signer==actor inbound path (#2106 N26) where upstream
+// InboxProcessorService skips LD-Signature processing entirely. mk-go keeps the
+// JSON-LD term-redefinition defense (CheckForForbiddenDirectives) but, unlike
+// VerifyIfPresent, does NOT drop an HTTP-signature-authenticated activity merely
+// because its LD-Signature fails to verify (uncached creator key / legacy or
+// mismatched LD-sig / normalize 差異). Returns nil when the body carries no
+// `signature` field (same scope as VerifyIfPresent).
+func (v *LDSignatureVerifier) CheckForbiddenDirectivesIfPresent(rawBody []byte) error {
+	if v == nil {
+		return nil
+	}
+	var act map[string]any
+	if err := json.Unmarshal(rawBody, &act); err != nil {
+		return fmt.Errorf("ld-sig: body unmarshal: %w", err)
+	}
+	if sigRaw, hasSig := act["signature"]; !hasSig || sigRaw == nil {
+		return nil
+	}
+	return ld.NewProcessor().CheckForForbiddenDirectives(act)
+}

@@ -147,3 +147,38 @@ func TestLDSignatureVerifier_InterfaceShape(t *testing.T) {
 }
 
 var _ error = errors.New("compile-time anchor for errors import")
+
+// #2106 N26: CheckForbiddenDirectivesIfPresent は signature 無しを素通しする。
+func TestLDSignatureVerifier_CheckForbidden_NoSignature(t *testing.T) {
+	v := corefederation.NewLDSignatureVerifier(testutil.NewMockUserPublickeyRepository())
+	require.NoError(t, v.CheckForbiddenDirectivesIfPresent([]byte(`{"type":"Note","id":"https://example.com/n1"}`)))
+}
+
+// #2106 N26: forbidden directive は CheckForbiddenDirectivesIfPresent でも reject される。
+func TestLDSignatureVerifier_CheckForbidden_ForbiddenDirective(t *testing.T) {
+	v := corefederation.NewLDSignatureVerifier(testutil.NewMockUserPublickeyRepository())
+	err := v.CheckForbiddenDirectivesIfPresent([]byte(`{
+		"type":"Note","@graph":[{"type":"Note"}],
+		"signature":{"type":"RsaSignature2017","creator":"https://example.com/users/alice#main-key","signatureValue":"AAAA"}
+	}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "forbidden")
+}
+
+// #2106 N26: forbidden directive が無ければ、creator 鍵が未解決でも (= VerifyIfPresent なら
+// verify 失敗で drop する状況でも) CheckForbiddenDirectivesIfPresent は nil を返す。
+func TestLDSignatureVerifier_CheckForbidden_UnresolvableKeyStillPasses(t *testing.T) {
+	v := corefederation.NewLDSignatureVerifier(testutil.NewMockUserPublickeyRepository())
+	body := []byte(`{
+		"@context":"https://www.w3.org/ns/activitystreams","type":"Note",
+		"signature":{"type":"RsaSignature2017","creator":"https://example.com/users/alice#main-key","signatureValue":"AAAA"}
+	}`)
+	require.Error(t, v.VerifyIfPresent(body), "VerifyIfPresent は creator 鍵未解決で error")
+	require.NoError(t, v.CheckForbiddenDirectivesIfPresent(body), "forbidden 無し + 鍵不要なので nil")
+}
+
+// #2106 N26: 不正 JSON は CheckForbiddenDirectivesIfPresent でも error。
+func TestLDSignatureVerifier_CheckForbidden_BadJSON(t *testing.T) {
+	v := corefederation.NewLDSignatureVerifier(testutil.NewMockUserPublickeyRepository())
+	require.Error(t, v.CheckForbiddenDirectivesIfPresent([]byte(`{not json`)))
+}

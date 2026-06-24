@@ -439,11 +439,19 @@ type stubLDVerifier struct {
 	creator      string
 	present      bool
 	creatorCount int
+	// CheckForbiddenDirectivesIfPresent outcome (signer==actor path, #2106 N26).
+	forbiddenErr   error
+	forbiddenCount int
 }
 
 func (s *stubLDVerifier) VerifyIfPresent(_ []byte) error {
 	s.callCount++
 	return s.err
+}
+
+func (s *stubLDVerifier) CheckForbiddenDirectivesIfPresent(_ []byte) error {
+	s.forbiddenCount++
+	return s.forbiddenErr
 }
 
 func (s *stubLDVerifier) VerifyAndCreator(_ []byte) (string, bool, error) {
@@ -759,4 +767,66 @@ func TestInboxProcessor_GenericErrorPropagatesForRetry(t *testing.T) {
 	assert.True(t, errors.Is(err, boom), "underlying error must be wrapped, not swallowed")
 	assert.False(t, errors.Is(err, driver.SkipRetry),
 		"transient errors should NOT carry SkipRetry — driver retry handles them")
+}
+
+// #2106 N26: HTTP 署名済 + signer==actor の通常経路では、LD-Signature verify 失敗
+// (creator 鍵未解決 / legacy LD-sig 等) でも正規 activity を drop しない (upstream は
+// LD-Signature を一切検証しない)。forbidden-directive hardening は維持する。
+func TestInboxProcessor_SignerIsActor_LDSigVerifyFailureNotDropped(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	host := "remote.example"
+	verifier := &multiActorVerifier{
+		pubKey: pub,
+		byURI: map[string]*model.User{
+			"https://remote.example/users/alice": {ID: "alice", Host: &host, URI: uptr("https://remote.example/users/alice")},
+		},
+	}
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	// VerifyIfPresent はエラー (鍵未解決) だが forbidden-directive check は通る。
+	ldv := &stubLDVerifier{present: true, err: errors.New("ld-sig: public key not found"), forbiddenErr: nil}
+	p.SetLDSignatureVerifier(ldv)
+
+	body := []byte(`{"id":"https://remote.example/creates/1","type":"Create","actor":"https://remote.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://remote.example/users/alice#main-key"}}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload),
+	}))
+	require.Len(t, stub.calls, 1, "signer==actor の HTTP 署名済 activity は LD-sig verify 失敗でも処理される")
+	assert.Equal(t, 0, ldv.callCount, "signer==actor 経路では VerifyIfPresent を呼ばない")
+	assert.Equal(t, 1, ldv.forbiddenCount, "forbidden-directive hardening は実行する")
+}
+
+// #2106 N26: signer==actor でも forbidden directive が検出されれば drop する (hardening 維持)。
+func TestInboxProcessor_SignerIsActor_ForbiddenDirectiveDropped(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	host := "remote.example"
+	verifier := &multiActorVerifier{
+		pubKey: pub,
+		byURI: map[string]*model.User{
+			"https://remote.example/users/alice": {ID: "alice", Host: &host, URI: uptr("https://remote.example/users/alice")},
+		},
+	}
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	ldv := &stubLDVerifier{present: true, forbiddenErr: errors.New("ld-sig: forbidden directive")}
+	p.SetLDSignatureVerifier(ldv)
+
+	body := []byte(`{"id":"https://remote.example/creates/1","type":"Create","actor":"https://remote.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://remote.example/users/alice#main-key"}}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload),
+	}))
+	require.Len(t, stub.calls, 0, "forbidden directive は signer==actor でも drop する")
+	assert.Equal(t, 1, ldv.forbiddenCount)
 }

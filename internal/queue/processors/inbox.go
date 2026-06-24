@@ -80,6 +80,11 @@ type InboxChartHook interface {
 // 実装は core/federation.LDSignatureVerifier。
 type LDSignatureVerifier interface {
 	VerifyIfPresent(rawBody []byte) error
+	// CheckForbiddenDirectivesIfPresent runs only the forbidden-directive hardening
+	// (no key resolution / RSA verify). Used by the signer==actor path (#2106 N26)
+	// so an HTTP-signature-authenticated activity is not dropped just because its
+	// LD-Signature fails to verify, while keeping the JSON-LD injection defense.
+	CheckForbiddenDirectivesIfPresent(rawBody []byte) error
 	// VerifyAndCreator additionally reports whether the activity carried an
 	// LD-Signature and, on success, the verified signature.creator key URI.
 	// Used to authenticate forwarded activities whose HTTP signer differs
@@ -287,9 +292,13 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	}
 
 	if signerURI != "" && signerURI == bodyActor {
-		// 署名者 == actor。LD-Signature があれば hardening のため検証する。
+		// #2106 N26: 署名者 == actor かつ HTTP 署名検証済みの通常経路では、upstream
+		// InboxProcessorService は LD-Signature を一切検証しない。mk-go は
+		// forbidden-directive hardening (JSON-LD term 再定義防御) のみ残し、署名 verify
+		// 失敗 (creator 鍵未解決 / legacy LD-sig / normalize 差異) で HTTP 署名済の正規
+		// activity を drop しないようにする。
 		if p.ldVerifier != nil {
-			return p.ldVerifier.VerifyIfPresent(body)
+			return p.ldVerifier.CheckForbiddenDirectivesIfPresent(body)
 		}
 		return nil
 	}
