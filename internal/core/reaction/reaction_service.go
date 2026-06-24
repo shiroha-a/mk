@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forPelevin/gomoji"
 	"github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/reactionlegacy"
@@ -500,6 +501,15 @@ func (s *Service) resolveReaction(raw string, actorHost *string) (string, *model
 			return ":" + name + "@" + host + ":", emoji
 		}
 		// 見つからなければFallbackにする
+		return FallbackReaction, nil
+	}
+	// #2106 N15: upstream ReactionService.normalize は emojiRegex に一致しない
+	// (= 非絵文字・非legacy・非custom の) 入力を ❤ (FallbackReaction) に矯正する。
+	// mk-go は未検証で任意文字列をそのまま reaction として保存していたため、gomoji で
+	// raw が全て絵文字かを判定し、非絵文字を含むなら fallback する。resolveReaction は
+	// Create / AP inbound (Like の _misskey_reaction) 双方が通る chokepoint なので、
+	// ここに置けば local/連合とも任意文字列 reaction の蓄積を防げる。
+	if gomoji.RemoveEmojis(raw) != "" {
 		return FallbackReaction, nil
 	}
 	// Unicode emoji は variation selector (U+FE0F) を strip して upstream
