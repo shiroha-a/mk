@@ -2125,3 +2125,44 @@ func TestCreateService_SpecifiedAddsReplyTargetToVisible(t *testing.T) {
 	assert.Contains(t, []string(created.VisibleUserIDs), "userB",
 		"specified note の reply target は visibleUserIds に自動追加される")
 }
+
+// #2106 N12: prohibited words は poll choices も検査する (upstream checkProhibitedWordsContain)。
+func TestCreateService_ProhibitedWords_PollChoice(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", ProhibitedWords: []string{"badword"}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "clean text"
+	_, err := svc.Create(note.CreateInput{
+		User: &model.User{ID: "u1"},
+		Text: &text,
+		Poll: &note.PollInput{Choices: []string{"ok choice", "has badword inside"}},
+	})
+	assert.ErrorIs(t, err, note.ErrContainsProhibitedWords, "poll choice 内の禁止語をブロック")
+}
+
+// #2106 N12: prohibited words は /regex/flags 形式を解釈する (素朴 Contains でない)。
+func TestCreateService_ProhibitedWords_Regex(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", ProhibitedWords: []string{"/b[a4]dword/i"}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "this is a b4dword test"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
+	assert.ErrorIs(t, err, note.ErrContainsProhibitedWords, "regex 形式の禁止語をブロック")
+}
+
+// #2106 N12: prohibited words の判定は case-sensitive (upstream isKeyWordIncluded 準拠)。
+// 旧実装は強制 lowercase で upstream とマッチ結果が乖離していた。
+func TestCreateService_ProhibitedWords_CaseSensitive(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "m1", ProhibitedWords: []string{"badword"}}
+	svc.SetMetaRepo(metaRepo)
+
+	text := "this has BADWORD in caps"
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
+	require.NoError(t, err, "大文字の BADWORD は小文字 badword フィルタに (case-sensitive で) マッチしない")
+}

@@ -481,8 +481,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 	}
 
-	// プロhibited wordsチェック (meta.prohibitedWordsマッチ)
-	if err := checkProhibitedWords(meta, in.Text, in.CW); err != nil {
+	// プロhibited wordsチェック (meta.prohibitedWordsマッチ)。#2106 N12: poll choices も検査。
+	var prohibitedPollChoices []string
+	if in.Poll != nil {
+		prohibitedPollChoices = in.Poll.Choices
+	}
+	if err := checkProhibitedWords(meta, in.Text, in.CW, prohibitedPollChoices); err != nil {
 		return nil, err
 	}
 
@@ -1182,31 +1186,32 @@ func matchesSensitiveWords(meta *model.Meta, text, cw *string) bool {
 	return false
 }
 
-// checkProhibitedWords scans text + cw for any word listed in
+// checkProhibitedWords scans cw + text + poll choices for any word listed in
 // meta.prohibitedWords. Returns ErrContainsProhibitedWords on match.
 // meta が nil または prohibitedWords が空なら skip する (= caller の
 // fetch error も nil 渡しで fail-open される)。meta は呼び元の Create が
 // 1 度だけ fetch して渡す (perf: matchesSensitiveWords と統合)。
-func checkProhibitedWords(meta *model.Meta, text, cw *string) error {
+//
+// #2106 N12: 旧実装は text+cw のみを strings.ToLower→Contains で素朴に検査し、
+// poll choices を見ず、`/regex/flags` / スペース区切り AND も解釈せず、強制 lowercase で
+// case-sensitive な upstream とも乖離していた。matchesSensitiveWords と同じく
+// keyword.IsKeyWordIncluded (regex / space-AND / case-sensitive) に揃え、upstream
+// checkProhibitedWordsContain と同じく poll choices も検査対象に含める。各 field を
+// 独立に渡すのは sensitiveWords (#1106) と同方針 (concat 案は改行越境 match で挙動が読みにくい)。
+func checkProhibitedWords(meta *model.Meta, text, cw *string, pollChoices []string) error {
 	if meta == nil || len(meta.ProhibitedWords) == 0 {
 		return nil
 	}
-	haystacks := make([]string, 0, 2)
-	if text != nil && *text != "" {
-		haystacks = append(haystacks, strings.ToLower(*text))
+	words := []string(meta.ProhibitedWords)
+	if cw != nil && *cw != "" && keyword.IsKeyWordIncluded(*cw, words) {
+		return ErrContainsProhibitedWords
 	}
-	if cw != nil && *cw != "" {
-		haystacks = append(haystacks, strings.ToLower(*cw))
+	if text != nil && *text != "" && keyword.IsKeyWordIncluded(*text, words) {
+		return ErrContainsProhibitedWords
 	}
-	for _, word := range meta.ProhibitedWords {
-		word = strings.TrimSpace(strings.ToLower(word))
-		if word == "" {
-			continue
-		}
-		for _, h := range haystacks {
-			if strings.Contains(h, word) {
-				return ErrContainsProhibitedWords
-			}
+	for _, choice := range pollChoices {
+		if choice != "" && keyword.IsKeyWordIncluded(choice, words) {
+			return ErrContainsProhibitedWords
 		}
 	}
 	return nil
