@@ -40,6 +40,15 @@ type Handler struct {
 	bufReader    entity.BufferedReactionsReader
 	fieldRes     *entity.NoteFieldResolver
 	urlUploader  URLUploadProcessor
+	// metaRepo は drive/files/create で meta.enableIpLogging を確認し、無効時に
+	// requestIp / requestHeaders を保存しないために使う (#2106 S4)。nil なら保存しない
+	// (= 安全側)。
+	metaRepo repository.MetaRepository
+}
+
+// SetMetaRepo wires the meta repository used to honor enableIpLogging on upload.
+func (h *Handler) SetMetaRepo(m repository.MetaRepository) {
+	h.metaRepo = m
 }
 
 // SetURLUploader wires the processor used by /drive/files/upload-from-url to
@@ -189,10 +198,17 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	}
 
 	in := coredrive.UploadInput{
-		User:           user,
-		Body:           body,
-		RequestIP:      requestIPFromContext(c),
-		RequestHeaders: requestHeadersForDrive(c),
+		User: user,
+		Body: body,
+	}
+	// #2106 S4: requestIp / requestHeaders は meta.enableIpLogging が有効なときのみ
+	// 保存する (upstream create.ts:120-121 の `enableIpLogging ? x : null`)。プライバシー
+	// 設定を尊重し PII の過剰保存を防ぐ。upload-from-url は upstream 同様 gate しない (別 handler)。
+	if h.metaRepo != nil {
+		if m, ferr := h.metaRepo.Fetch(); ferr == nil && m != nil && m.EnableIPLogging {
+			in.RequestIP = requestIPFromContext(c)
+			in.RequestHeaders = requestHeadersForDrive(c)
+		}
 	}
 	// upstream create.ts:98-108 の name 決定: ps.name ?? file.name を trim し、
 	// 空 / 'blob' は null 化、それ以外は validateFileName 失敗で

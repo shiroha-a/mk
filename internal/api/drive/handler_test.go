@@ -119,6 +119,10 @@ func TestFilesCreate_AllFormFields(t *testing.T) {
 // 含まれていないことも assert (DB dump 流出時の token 漏洩防止)。
 func TestFilesCreate_RecordsRequestIPAndHeaders(t *testing.T) {
 	h, fileRepo, _ := newHandler(t)
+	// #2106 S4: requestIp/headers は enableIpLogging=true のときのみ記録される。
+	mr := testutil.NewMockMetaRepository()
+	mr.Meta = &model.Meta{ID: "x", EnableIPLogging: true}
+	h.SetMetaRepo(mr)
 	c, rec := newMultipartReq(t, "ip.txt", "hello", nil)
 	// echo.Context の RealIP() は X-Forwarded-For / X-Real-IP / RemoteAddr
 	// の順で resolve される。test では RemoteAddr が "192.0.2.1:1234" 形式

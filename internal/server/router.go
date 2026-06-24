@@ -1793,6 +1793,7 @@ func (s *Server) setupRoutes() {
 	driveHandler.SetEmojiRepo(emojiRepo)
 	driveHandler.SetReactionReader(reactionCountWriter)
 	driveHandler.SetNoteFieldResolver(noteFieldResolver)
+	driveHandler.SetMetaRepo(metaRepo) // #2106 S4: enableIpLogging を尊重して requestIp/headers 保存を gate
 	api.POST("/drive", driveHandler.Usage, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/drive/files", driveHandler.FilesList, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/drive/files/create", driveHandler.FilesCreate, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
