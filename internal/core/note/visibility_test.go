@@ -99,3 +99,31 @@ func TestCanSeeNote_UnknownVisibility(t *testing.T) {
 	n := &model.Note{UserID: "author", Visibility: model.NoteVisibility("unknown")}
 	assert.False(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, nil))
 }
+
+// #2106 N27: followers note で viewer が mention されていれば read 可 (upstream)。
+func TestCanSeeNote_FollowersMentioned(t *testing.T) {
+	repo := testutil.NewMockFollowingRepository() // 非フォロワー
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilityFollowers, Mentions: pq.StringArray{"viewer"}}
+	assert.True(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, repo))
+}
+
+// #2106 N27: followers note で reply 先が viewer なら read 可 (upstream followers 分岐の replyUserId)。
+func TestCanSeeNote_FollowersReplyToViewer(t *testing.T) {
+	repo := testutil.NewMockFollowingRepository() // 非フォロワー
+	rid := "viewer"
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilityFollowers, ReplyUserID: &rid}
+	assert.True(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, repo))
+}
+
+// #2106 N27: specified note で mention されていれば visibleUserIds 外でも read 可 (cross-visibility)。
+func TestCanSeeNote_SpecifiedMentioned(t *testing.T) {
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{"other"}, Mentions: pq.StringArray{"viewer"}}
+	assert.True(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, nil))
+}
+
+// #2106 N27 regression guard: followers note で非フォロワー・非mention・非reply は依然 不可視。
+func TestCanSeeNote_FollowersStrangerStillHidden(t *testing.T) {
+	repo := testutil.NewMockFollowingRepository()
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilityFollowers, Mentions: pq.StringArray{"someone-else"}}
+	assert.False(t, note.CanSeeNote(&model.User{ID: "stranger"}, n, repo))
+}

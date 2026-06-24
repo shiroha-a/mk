@@ -937,7 +937,7 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 		viewer := &model.User{ID: replyTarget.UserID}
 		// upstream はスレッドミュート中の reply 先には reply event を出さない
 		// (#1954)。thread は reply 先ノートの threadId (無ければ自身の id)。
-		if CanSeeNote(viewer, note, s.followingRepo) && !s.isThreadMuted(replyTarget.UserID, replyTarget) {
+		if canSeeNoteForStream(viewer, note, s.followingRepo) && !s.isThreadMuted(replyTarget.UserID, replyTarget) {
 			s.mainStreamPublisher.PublishMainEvent(replyTarget.UserID, "reply", packed)
 		}
 	}
@@ -946,7 +946,7 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 	// renote (= Text/CW 持ち) は本文ごと leak する。
 	if renoteTarget != nil && renoteTarget.UserHost == nil && renoteTarget.UserID != author.ID {
 		viewer := &model.User{ID: renoteTarget.UserID}
-		if CanSeeNote(viewer, note, s.followingRepo) {
+		if canSeeNoteForStream(viewer, note, s.followingRepo) {
 			s.mainStreamPublisher.PublishMainEvent(renoteTarget.UserID, "renote", packed)
 		}
 	}
@@ -972,7 +972,7 @@ func (s *CreateService) publishNoteMainEvents(note *model.Note, author *model.Us
 		// 指定は別) ため、CanSeeNote の slices.Contains で visibleUserIDs 外の
 		// mention target を弾く。followers visibility 経路でも non-follower
 		// mention をここで止める。
-		if !CanSeeNote(u, note, s.followingRepo) {
+		if !canSeeNoteForStream(u, note, s.followingRepo) {
 			continue
 		}
 		// mention 先がこのスレッドをミュートしていれば mention event を出さない

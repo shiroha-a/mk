@@ -1556,14 +1556,35 @@ func (m *MockNoteRepository) ListByUserList(listID string, limit int, sinceID, u
 				continue
 			}
 			if viewerID != n.UserID {
-				followed := false
-				for _, fid := range m.Following[viewerID] {
-					if fid == n.UserID {
-						followed = true
+				// #2106 N27: visibleUserIds / mentions に含まれる、または reply 先が
+				// viewer の followers note は閲覧可 (CanSeeNote / real SQL と整合)。
+				visible := false
+				for _, id := range n.VisibleUserIDs {
+					if id == viewerID {
+						visible = true
 						break
 					}
 				}
-				if !followed {
+				if !visible {
+					for _, id := range n.Mentions {
+						if id == viewerID {
+							visible = true
+							break
+						}
+					}
+				}
+				if !visible && n.ReplyUserID != nil && *n.ReplyUserID == viewerID {
+					visible = true
+				}
+				if !visible {
+					for _, fid := range m.Following[viewerID] {
+						if fid == n.UserID {
+							visible = true
+							break
+						}
+					}
+				}
+				if !visible {
 					continue
 				}
 			}
@@ -1939,8 +1960,24 @@ func noteVisibleToViewer(viewerID string, n *model.Note, following map[string][]
 	if viewerID == n.UserID {
 		return true
 	}
+	// #2106 N27: visibility 横断で mentions / visibleUserIds に含まれる viewer は閲覧可
+	// (CanSeeNote の N27 緩和と整合させる drift detector #1507)。
+	for _, id := range n.Mentions {
+		if id == viewerID {
+			return true
+		}
+	}
+	for _, id := range n.VisibleUserIDs {
+		if id == viewerID {
+			return true
+		}
+	}
 	switch n.Visibility {
 	case model.NoteVisibilityFollowers:
+		// #2106 N27: reply 先が viewer の followers note は閲覧可。
+		if n.ReplyUserID != nil && *n.ReplyUserID == viewerID {
+			return true
+		}
 		for _, followee := range following[viewerID] {
 			if followee == n.UserID {
 				return true
@@ -1948,11 +1985,7 @@ func noteVisibleToViewer(viewerID string, n *model.Note, following map[string][]
 		}
 		return false
 	case model.NoteVisibilitySpecified:
-		for _, id := range n.VisibleUserIDs {
-			if id == viewerID {
-				return true
-			}
-		}
+		// visibleUserIds は上で判定済。
 		return false
 	}
 	return false

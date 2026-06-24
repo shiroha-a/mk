@@ -18,12 +18,19 @@ func applyViewerVisibility(q *gorm.DB, viewerID string) *gorm.DB {
 	if viewerID == "" {
 		return q.Where(`"visibility" IN ('public','home')`)
 	}
+	// #2106 N27: upstream QueryService.generateVisibilityQuery 相当の OR を網羅する。
+	// visibleUserIds / mentions は visibility 横断で許可し (specified に限らない)、
+	// followers 分岐には reply 先が viewer のケース (replyUserId=viewer) を足す。これが
+	// 無いと followers note の mention/reply/visibleUser 宛が read 経路で過剰に隠れる。
+	// (main-stream realtime push の #1472 strict gate は core/note.canSeeNoteForStream
+	// 側で別途維持しており、本 helper の read 緩和とは独立。)
 	return q.Where(
 		`("visibility" IN ('public','home') `+
 			`OR "userId" = ? `+
-			`OR ("visibility" = 'followers' AND "userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-			`OR ("visibility" = 'specified' AND ? = ANY("visibleUserIds")))`,
-		viewerID, viewerID, viewerID)
+			`OR ? = ANY("visibleUserIds") `+
+			`OR ? = ANY("mentions") `+
+			`OR ("visibility" = 'followers' AND ("userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?) OR "replyUserId" = ?)))`,
+		viewerID, viewerID, viewerID, viewerID, viewerID)
 }
 
 // applyViewerVisibilityExists is the correlated-EXISTS variant of
@@ -38,11 +45,13 @@ func applyViewerVisibilityExists(q *gorm.DB, noteIDColumn, viewerID string) *gor
 	if viewerID == "" {
 		return q.Where(`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = ` + noteIDColumn + ` AND v."visibility" IN ('public','home'))`)
 	}
+	// #2106 N27: applyViewerVisibility と同じく generateVisibilityQuery 相当に揃える。
 	return q.Where(
 		`EXISTS (SELECT 1 FROM "note" v WHERE v."id" = `+noteIDColumn+` AND (`+
 			`v."visibility" IN ('public','home') `+
 			`OR v."userId" = ? `+
-			`OR (v."visibility" = 'followers' AND v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?)) `+
-			`OR (v."visibility" = 'specified' AND ? = ANY(v."visibleUserIds"))))`,
-		viewerID, viewerID, viewerID)
+			`OR ? = ANY(v."visibleUserIds") `+
+			`OR ? = ANY(v."mentions") `+
+			`OR (v."visibility" = 'followers' AND (v."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?) OR v."replyUserId" = ?))))`,
+		viewerID, viewerID, viewerID, viewerID, viewerID)
 }

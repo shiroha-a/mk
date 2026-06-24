@@ -2154,10 +2154,13 @@ func TestNoteRepository_ListMentions_Following(t *testing.T) {
 	assert.False(t, ids["lmf_ns"], "非フォローの stranger の note は除外される")
 }
 
-// TestNoteRepository_ListMentions_VisibilityPushDown は #1441 を検証する。
-// mention 対象 (= viewer) が CanSeeNote で見られない followers / specified note を
-// mention されただけでは取得できないこと、follow / visibleUserIds 対象なら
-// 取得できることを確認する。
+// TestNoteRepository_ListMentions_VisibilityPushDown は #2106 N27 を検証する。
+// upstream QueryService.generateVisibilityQuery と同じく、mention 対象 (= viewer) は
+// followers / specified note でも mention されていれば read できる (旧 #1441 の
+// 「mention だけでは見えない」挙動を upstream に揃えて revert した)。follow も
+// visibleUserIds も不要で、mention だけで read 経路では可視になる。
+// (main-stream realtime push の #1472 strict gate は core/note.canSeeNoteForStream で
+// 別途維持しており、本 read 緩和とは独立。)
 func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	followingRepo := NewFollowingRepository(testDB)
@@ -2190,20 +2193,17 @@ func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 		return out
 	}
 
-	// follow なし / visibleUserIds 非対象 -> public のみ (followers/specified は隠れる)。
+	// #2106 N27: follow なし / visibleUserIds 非対象でも、mention されていれば
+	// followers / specified note を read できる (upstream の mentions cross-visibility)。
 	out, err := repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"n_lm_pub"}, idsOf(out))
+	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub", "n_lm_spec"}, idsOf(out),
+		"mention されていれば followers/specified も read 経路では可視")
 
-	// victim が author を follow すると followers note も見える。
+	// follow しても visibleUserIds に追加しても結果は不変 (既に mention で可視)。
 	f := &model.Following{ID: "fl_lm_1", FollowerID: victim.ID, FolloweeID: author.ID}
 	require.NoError(t, followingRepo.Create(f))
 	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
-	out, err = repo.ListMentions(victim.ID, "", false, 50, "", "")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub"}, idsOf(out))
-
-	// specified の visibleUserIds に victim を含めると specified も見える。
 	require.NoError(t, repo.UpdateFields("n_lm_spec", map[string]any{"visibleUserIds": pq.StringArray{victim.ID}}))
 	out, err = repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)

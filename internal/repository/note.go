@@ -1234,11 +1234,18 @@ func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, until
 	if viewerID == "" {
 		q = q.Where(`"note"."visibility" IN ('public','home')`)
 	} else {
+		// #2106 N27: followers note でも viewer が visibleUserIds / mentions に含まれる、
+		// もしくは reply 先が viewer のときは閲覧可 (CanSeeNote と整合)。specified (DM) は
+		// list timeline では従来通り drop するため、これらの cross-visibility 条件は
+		// followers 分岐内に限定する。
 		q = q.Where(
 			`("note"."visibility" IN ('public','home') `+
 				`OR ("note"."visibility" = 'followers' AND ("note"."userId" = ? `+
-				`OR "note"."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?))))`,
-			viewerID, viewerID)
+				`OR "note"."userId" IN (SELECT f."followeeId" FROM "following" f WHERE f."followerId" = ?) `+
+				`OR ? = ANY("note"."visibleUserIds") `+
+				`OR ? = ANY("note"."mentions") `+
+				`OR "note"."replyUserId" = ?)))`,
+			viewerID, viewerID, viewerID, viewerID, viewerID)
 	}
 	// reply 内包: user_list_membership.withReplies を尊重して返信を出し分ける
 	// (#1496, upstream user-list-timeline getFromDb と一致)。返信でない / 自己への
