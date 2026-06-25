@@ -63,7 +63,8 @@ func QRDataURL(uri string) (string, error) {
 }
 
 // Validate checks if a TOTP code is valid for the given secret. The acceptance
-// window matches upstream Misskey (window:5 = ±5 steps ≈ ±150s)。
+// window is ±totpSkew steps (= ±30s for Skew=1), matching upstream UserAuthService
+// の validationWindow:1 (#2106 L46: 旧 window:5 / ±150s の記述を実値に修正)。
 func Validate(code, secret string) bool {
 	ok, err := totp.ValidateCustom(code, secret, time.Now().UTC(), totp.ValidateOpts{
 		Period:    30,

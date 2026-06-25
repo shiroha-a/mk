@@ -307,6 +307,11 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	}
 	if in.UserListID != nil {
 		// 空文字列での nullify を許すため ポインタ非 nil なら上書き対象扱い。
+		// #2106 L48 (documented limitation): upstream update.ts は userListId の明示 null で clear、
+		// 非 list src で null 化するが、Go の *string は JSON の null と absent を区別できないため
+		// mk-go は「空文字列で clear」の convention を採る (JSON null clear / 非 list src 自動 null 化は
+		// 未対応)。validateUserList 連携の都合で edge を残す。通常 UI 経路 (src=list 時のみ
+		// userListId を送る) では乖離しない。
 		fields["userListId"] = in.UserListID
 	}
 	if in.Users != nil {

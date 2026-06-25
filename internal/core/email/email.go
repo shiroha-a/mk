@@ -68,6 +68,10 @@ func (s *Service) Validate(ctx context.Context, email string) error {
 	}
 
 	domain := domainOf(email)
+	// #2106 L47: upstream は banned 判定を external validation (disposable/mx/smtp) の後段に
+	// 置くが、mk-go は意図的に banned を先に短絡する (既知 banned ドメインに対し外部
+	// verifymail/truemail/MX への問い合わせを発生させない = 外部漏洩・コスト回避)。caller は
+	// reason を一律 UNAVAILABLE に潰すため client から観測できる差は無い。
 	if IsBannedDomain(domain, s.bannedDomains) {
 		return ErrBanned
 	}
