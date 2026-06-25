@@ -565,8 +565,8 @@ func (r *Resolver) resolveActorOnce(uri string, allowCrossHost bool) (*model.Use
 // が良く、mid-tag 切断による壊れ HTML を parser に渡す経路が無い。
 func extractRemoteDescription(actor *activitypub.Person) *string {
 	var raw string
-	if actor.MisskeySummary != "" {
-		raw = actor.MisskeySummary
+	if actor.MisskeySummary != nil && *actor.MisskeySummary != "" {
+		raw = *actor.MisskeySummary
 	} else if actor.Summary != "" {
 		// AP summary は Mastodon / Pleroma 等が HTML で送ってくる仕様
 		// (`<p>...</p>` ラップが典型)。MFM render を期待する frontend に
@@ -2034,6 +2034,12 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.Str
 // 差は出るが、to/cc は note の author (Announce では announcer) が自分の note/boost に
 // 対して設定するものなので、緩めても自分のコンテンツの可視性が変わるだけで第三者の
 // note を露出させることはない。
+//
+// #2106 L31 (documented limitation): mk-go は remote user の followersUri を保持しないため
+// upstream ApAudienceService.isFollowers (`id === actor.followersUri ?? actor.uri+'/followers'`)
+// の厳密一致を行えず suffix heuristic で近似する。exotic audience (他人の followers collection
+// を to/cc に含む note) で upstream が specified に倒すところを followers に倒す微差が残る
+// (#1864 の既知トレードオフ)。将来 followersUri を保持・参照できるようになったら厳密化する。
 func deriveVisibility(to, cc []string) model.NoteVisibility {
 	hasFollowers := func(list []string) bool {
 		for _, v := range list {

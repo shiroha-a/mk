@@ -886,10 +886,13 @@ func TestRenderer_RenderPerson_WithProfile(t *testing.T) {
 	}
 	p := r.RenderPerson(u, profile, "PUBKEY", nil)
 	assert.Contains(t, p.Summary, "<b>hello</b>")
-	assert.Equal(t, desc, p.MisskeySummary)
+	// #2106 L50: _misskey_summary / _misskey_followedMessage は *string で常時出力される。
+	require.NotNil(t, p.MisskeySummary)
+	assert.Equal(t, desc, *p.MisskeySummary)
 	assert.Equal(t, "2000-01-01", p.VcardBday)
 	assert.Equal(t, "Tokyo", p.VcardAddress)
-	assert.Equal(t, "Thanks!", p.MisskeyFollowedMessage)
+	require.NotNil(t, p.MisskeyFollowedMessage)
+	assert.Equal(t, "Thanks!", *p.MisskeyFollowedMessage)
 	assert.True(t, p.IsCat)
 	require.Len(t, p.Attachment, 1)
 	pv, ok := p.Attachment[0].(PropertyValue)
@@ -1420,4 +1423,21 @@ func TestRenderer_RenderNote_SpecifiedRemoteRecipient(t *testing.T) {
 	assert.Contains(t, out.To, "https://remote.example/users/bob", "remote recipient must get its real remote URI")
 	assert.NotContains(t, out.To, "https://example.com/users/uRemote", "remote recipient must NOT get an own-domain URI")
 	assert.Contains(t, out.To, "https://example.com/users/u2", "local recipient keeps local URI")
+}
+
+// #2106 L50: description/followedMessage が無い actor でも _misskey_summary /
+// _misskey_followedMessage を null として常時出力する (key 省略しない)。
+func TestRenderer_RenderPerson_MisskeyFieldsAlwaysPresent(t *testing.T) {
+	r := newRenderer()
+	u := &model.User{ID: "u1", Username: "alice"}
+	profile := &model.UserProfile{UserID: "u1"} // description / followedMessage 無し
+	p := r.RenderPerson(u, profile, "PUBKEY", nil)
+	assert.Nil(t, p.MisskeySummary)
+	assert.Nil(t, p.MisskeyFollowedMessage)
+
+	b, err := json.Marshal(p)
+	require.NoError(t, err)
+	s := string(b)
+	assert.Contains(t, s, `"_misskey_summary":null`)
+	assert.Contains(t, s, `"_misskey_followedMessage":null`)
 }

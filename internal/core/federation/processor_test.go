@@ -2038,3 +2038,41 @@ func TestProcess_CreateNote_ObjectAudienceStillHonored(t *testing.T) {
 	note := findIngestedRemoteNote(t, noteRepo, noteURI)
 	assert.Equal(t, model.NoteVisibilityPublic, note.Visibility)
 }
+
+// #2106 L30: remote followee 宛の Undo(Follow) は skip される (handleFollow gate と対称)。
+func TestProcess_UndoFollow_RemoteFolloweeSkipped(t *testing.T) {
+	p, repo, _, _ := newProcessor(t, aliceActor)
+	bobURI := "https://remote2.example/users/bob"
+	bobHost := "remote2.example"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI, Host: &bobHost}
+
+	undo := []byte(`{
+		"type": "Undo",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Follow",
+			"actor": "https://remote.example/users/alice",
+			"object": "https://remote2.example/users/bob"
+		}
+	}`)
+	require.NoError(t, p.Process(undo)) // remote followee なので skip (nil)
+}
+
+// #2106 L30: remote blockee 宛の Undo(Block) は skip される (handleBlock gate と対称)。
+func TestProcess_UndoBlock_RemoteBlockeeSkipped(t *testing.T) {
+	p, repo, _ := newProcessorWithBlocking(t)
+	bobURI := "https://remote2.example/users/bob"
+	bobHost := "remote2.example"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI, Host: &bobHost}
+
+	undoBody := []byte(`{
+		"type": "Undo",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Block",
+			"actor": "https://remote.example/users/alice",
+			"object": "https://remote2.example/users/bob"
+		}
+	}`)
+	require.NoError(t, p.Process(undoBody)) // remote blockee なので skip (nil)
+}

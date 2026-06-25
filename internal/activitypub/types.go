@@ -256,16 +256,19 @@ type Person struct {
 	// _misskey_requireSigninToViewContents を常に boolean で出力する。omitempty だと
 	// false で key 自体が消えて wire-shape が乖離するため omitempty を外す (#1948-11)。
 	// 値は RenderPerson で user 状態から populate 済み。
-	ManuallyApproves                    bool   `json:"manuallyApprovesFollowers"`
-	Discoverable                        bool   `json:"discoverable"`
-	IsCat                               bool   `json:"isCat"`
-	VcardBday                           string `json:"vcard:bday,omitempty"`
-	VcardAddress                        string `json:"vcard:Address,omitempty"`
-	MisskeySummary                      string `json:"_misskey_summary,omitempty"`
-	MisskeyFollowedMessage              string `json:"_misskey_followedMessage,omitempty"`
-	MisskeyRequireSigninToViewContents  bool   `json:"_misskey_requireSigninToViewContents"`
-	MisskeyMakeNotesFollowersOnlyBefore *int   `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
-	MisskeyMakeNotesHiddenBefore        *int   `json:"_misskey_makeNotesHiddenBefore,omitempty"`
+	ManuallyApproves bool   `json:"manuallyApprovesFollowers"`
+	Discoverable     bool   `json:"discoverable"`
+	IsCat            bool   `json:"isCat"`
+	VcardBday        string `json:"vcard:bday,omitempty"`
+	VcardAddress     string `json:"vcard:Address,omitempty"`
+	// #2106 L50: upstream renderPerson は _misskey_summary / _misskey_followedMessage を常時
+	// 出力する (description/followedMessage が null なら JSON null)。*string + omitempty 無しで
+	// nil→null を明示出力し wire-shape を揃える。
+	MisskeySummary                      *string `json:"_misskey_summary"`
+	MisskeyFollowedMessage              *string `json:"_misskey_followedMessage"`
+	MisskeyRequireSigninToViewContents  bool    `json:"_misskey_requireSigninToViewContents"`
+	MisskeyMakeNotesFollowersOnlyBefore *int    `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
+	MisskeyMakeNotesHiddenBefore        *int    `json:"_misskey_makeNotesHiddenBefore,omitempty"`
 	// MisskeyCanChat は CherryPick の chat 連合 capability flag (#692)。
 	// 受信側 instance が DM を受け付けるか (false なら拒絶) を表す boolean。
 	// pointer で持つことで「未指定 (= 旧実装 / 互換) → 許可」を区別する。

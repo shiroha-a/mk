@@ -832,6 +832,12 @@ func (p *Processor) handleUndoFollow(act genericActivity, inner genericActivity)
 	if err != nil {
 		return errors.New("unknown followee")
 	}
+	// #2106 L30: upstream undoFollow は followee が remote (host != null) なら skip する
+	// (handleFollow の gate と対称)。remote→remote の Undo を DB 走査 / counter 経路に
+	// 入れない防御線を Undo 側にも揃える。
+	if followee.Host != nil {
+		return nil
+	}
 	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil &&
 		!errors.Is(err, corefollowing.ErrNotFollowing) {
 		return err
@@ -1893,6 +1899,11 @@ func (p *Processor) handleUndoBlock(act genericActivity, inner genericActivity) 
 	blockee, err := p.resolveTargetUser(blockeeURI)
 	if err != nil {
 		return errors.New("unknown blockee")
+	}
+	// #2106 L30: upstream undoBlock は blockee が remote (host != null) なら skip する
+	// (handleBlock の gate と対称)。
+	if blockee.Host != nil {
+		return nil
 	}
 	if err := p.blockingService.Unblock(blocker.ID, blockee.ID); err != nil {
 		if errors.Is(err, coreblocking.ErrNotBlocking) {

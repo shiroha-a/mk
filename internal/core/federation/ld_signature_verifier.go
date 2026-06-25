@@ -102,6 +102,14 @@ func (v *LDSignatureVerifier) VerifyAndCreator(rawBody []byte) (string, bool, er
 	// に切り替える必要がある (= remote context が後付け directive を inject
 	// する経路が成立してしまうため)。その場合は本コメントを更新し、
 	// `proc.Compact(act, ...)` を挟んでから check するフローに変更する。
+	//
+	// #2106 L49 (documented limitation): upstream は verify 前に compact して任意の @context を
+	// 標準形へ畳んでから URDNA2015 normalize するが、mk-go は compact を省く。3 つの preload
+	// context (AS2.0 / security v1 / identity v1) 外の custom context を参照する activity は
+	// normalize 段で ErrContextNotPreloaded になり、HTTP 署名の無い forwarded/relay 経路
+	// (LD-Signature が唯一の authenticator) で reject されうる。標準 context のみの一般的な
+	// Misskey/Mastodon activity では問題にならない。compact 導入は LD-Signature 経路の
+	// security-sensitive な変更のため、現状は documented limitation として維持する。
 	proc := ld.NewProcessor()
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {
 		return "", true, err

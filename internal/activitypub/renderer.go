@@ -477,12 +477,12 @@ func rewriteFieldURLValue(value string) string {
 
 // enrichPersonFromProfile fills profile-derived fields into Person.
 func (r *Renderer) enrichPersonFromProfile(p *Person, profile *model.UserProfile) {
+	// #2106 L50: _misskey_summary / _misskey_followedMessage は raw 値を常時出力する (null/値)。
+	// pointer をそのまま渡し、空時も null として出す。Summary (AS2 HTML) は非空時のみ MFM 変換。
+	p.MisskeySummary = profile.Description
 	if profile.Description != nil && *profile.Description != "" {
-		desc := *profile.Description
-		// MFM → HTML
-		nodes := mfm.Parse(desc)
+		nodes := mfm.Parse(*profile.Description)
 		p.Summary = mfm.ToHTML(nodes, r.host)
-		p.MisskeySummary = desc
 	}
 	if profile.Birthday != nil && *profile.Birthday != "" {
 		p.VcardBday = *profile.Birthday
@@ -490,9 +490,7 @@ func (r *Renderer) enrichPersonFromProfile(p *Person, profile *model.UserProfile
 	if profile.Location != nil && *profile.Location != "" {
 		p.VcardAddress = *profile.Location
 	}
-	if profile.FollowedMessage != nil && *profile.FollowedMessage != "" {
-		p.MisskeyFollowedMessage = *profile.FollowedMessage
-	}
+	p.MisskeyFollowedMessage = profile.FollowedMessage
 
 	// profile.Fields → PropertyValue attachment
 	if len(profile.Fields) > 0 {
