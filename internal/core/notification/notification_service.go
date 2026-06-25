@@ -240,6 +240,20 @@ var (
 // Create writes a notification entry to the user's notification stream.
 // notifier == notifiee の場合は何もしない (Misskey本家の挙動を踏襲)。
 func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, error) {
+	return s.createWithPush(ctx, in, nil)
+}
+
+// CreateWithPush is Create plus a Web Push delivery callback that is fired inside
+// the same 2-second + latestRead guard as the unreadNotification stream event
+// (#2106 L35 / #2224). pushFn receives the persisted Notification and is invoked
+// only when the recipient has NOT read their notifications within the delay window,
+// so a quick MarkAllAsRead suppresses both the stream badge and the push (upstream
+// NotificationService.ts parity). pushFn nil = no push (the other Create callers).
+func (s *Service) CreateWithPush(ctx context.Context, in CreateInput, pushFn func(*Notification)) (*Notification, error) {
+	return s.createWithPush(ctx, in, pushFn)
+}
+
+func (s *Service) createWithPush(ctx context.Context, in CreateInput, pushFn func(*Notification)) (*Notification, error) {
 	if in.NotifieeID == "" {
 		return nil, errors.New("notifieeId is required")
 	}
@@ -316,7 +330,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, er
 	// `latestReadNotification` Redis key の値で、これは MarkAllAsRead が
 	// `XRevRangeN(...)[0].ID` (= 実 streamID) を書き込むので、Redis が
 	// 採番した actual な streamID を渡す。
-	s.scheduleUnreadPublish(in.NotifieeID, streamID, packed)
+	// #2106 L35: push を unreadNotification と同じ 2 秒 + latestRead guard 経路に乗せる。
+	// pushFn は createWithPush 呼び元が指定した時のみ非 nil (notifyLocalUser のみ)。
+	var boundPush func()
+	if pushFn != nil {
+		boundPush = func() { pushFn(n) }
+	}
+	s.scheduleUnreadPublish(in.NotifieeID, streamID, packed, boundPush)
 	return n, nil
 }
 
@@ -463,25 +483,32 @@ func (s *Service) DeleteByTypeAndNotifier(ctx context.Context, notifieeID string
 // (#420 follow-up)。streamID は Redis が採番した `<unix-ms>-<seq>` 形式
 // (XAdd の Result) で、`latestReadNotification` Redis key と直接
 // lexicographic 比較できる。delay==0 は同期 publish (テスト用)。
-func (s *Service) scheduleUnreadPublish(notifieeID, streamID string, packed any) {
-	if s.mainStreamPublisher == nil {
+func (s *Service) scheduleUnreadPublish(notifieeID, streamID string, packed any, pushFn func()) {
+	if s.mainStreamPublisher == nil && pushFn == nil {
 		// SetMainStreamPublisher は nil で実行する (= publish 機能を無効化
 		// する) ことを明示的に許容している。テストや mainStream が不要な
 		// 構成でも Create が呼ばれるたびに Warn ログを出すと noise になる
-		// ので silent skip する (#420 Devin review)。
+		// ので silent skip する (#420 Devin review)。push も無いなら何もしない。
 		return
 	}
 	publish := func() {
 		latestRead, err := s.client.Get(context.Background(), s.readKey(notifieeID)).Result()
 		if err == nil && latestRead != "" && latestRead >= streamID {
-			// 待機中に既読化された → publish skip。badge を burn しない。
-			slog.Debug("notification: unreadNotification suppressed (already read)",
+			// 待機中に既読化された → unreadNotification も Web Push も skip。
+			// badge を burn せず、冗長な push も送らない (#2106 L35)。
+			slog.Debug("notification: unreadNotification/push suppressed (already read)",
 				"userId", notifieeID, "streamId", streamID, "latestRead", latestRead)
 			return
 		}
-		s.mainStreamPublisher.PublishMainEvent(notifieeID, "unreadNotification", packed)
-		slog.Debug("notification: published unreadNotification",
-			"userId", notifieeID, "streamId", streamID)
+		if s.mainStreamPublisher != nil {
+			s.mainStreamPublisher.PublishMainEvent(notifieeID, "unreadNotification", packed)
+			slog.Debug("notification: published unreadNotification",
+				"userId", notifieeID, "streamId", streamID)
+		}
+		// #2106 L35: Web Push も latestRead guard を越えた後にのみ発火する。
+		if pushFn != nil {
+			pushFn()
+		}
 	}
 	if s.unreadPublishDelay <= 0 {
 		publish()

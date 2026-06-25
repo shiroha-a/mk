@@ -545,23 +545,24 @@ func (h *Hook) notifyLocalUser(ctx context.Context, notifieeID string, in Create
 	if !h.passesReceiveConfig(notifieeID, in) {
 		return
 	}
-	n, err := h.svc.Create(ctx, in)
-	if err != nil {
+	// #2106 L35 / #2224: Web Push を notification.Service の scheduleUnreadPublish guard 内へ
+	// 移す。upstream NotificationService 同様、作成から unreadPublishDelay (既定 2 秒) 以内に
+	// 既読化 (MarkAllAsRead) されると unreadNotification stream event だけでなく Web Push も
+	// 抑制される。pushFn は webpush 配線時のみ渡し、guard の latestRead チェックを越えた後に
+	// 永続化済 Notification から push body を組んで配信する。
+	// packer 未設定でも type/id/userId は最低限埋まるので sw.js 側の 24h 破棄チェックと
+	// ユーザー判定は成立する。
+	var pushFn func(*Notification)
+	if h.webpush != nil {
+		pushFn = func(n *Notification) {
+			if n != nil {
+				h.webpush.PushNotification(notifieeID, h.buildPushBody(n, notifieeID))
+			}
+		}
+	}
+	if _, err := h.svc.CreateWithPush(ctx, in, pushFn); err != nil {
 		slog.Warn("notification create failed", "type", in.Type, "notifiee", notifieeID, "err", err)
 		return
-	}
-	// 通知の永続化に成功したらWeb Push配信キューへ投入する。
-	// packerが未設定でもtype/id/userIdは最低限埋まるので、sw.js側の24h
-	// 破棄チェックとユーザー判定は成立する。
-	//
-	// #2106 L35 (known divergence, follow-up #2224): upstream NotificationService は
-	// push を 2 秒の setTimeout + latestRead guard の後にのみ発火し、作成から 2 秒以内に既読化
-	// (MarkAllAsRead) されると push も抑制する。mk-go は push を即時・無条件で配信するため、
-	// すぐ既読化しても冗長な push が届く (unreadNotification stream event 側は
-	// scheduleUnreadPublish で guard 済)。push を同 guard 経路へ移す改修は notification.Service
-	// への push delivery thread が要るため follow-up issue に切り出す。
-	if h.webpush != nil && n != nil {
-		h.webpush.PushNotification(notifieeID, h.buildPushBody(n, notifieeID))
 	}
 }
 

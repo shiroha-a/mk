@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -16,6 +17,9 @@ func newTestHook(t *testing.T) (*Hook, *Service, *testutil.MockUserRepository) {
 	t.Helper()
 	testRedis.FlushAll(context.Background())
 	svc := NewService(testRedis.Client, idGen, "")
+	// #2106 L35: push が scheduleUnreadPublish guard 経由になったので、Hook test では delay=0 で
+	// 同期発火させて push の同期 assert を維持する。
+	svc.SetUnreadPublishDelay(0)
 	userRepo := testutil.NewMockUserRepository()
 	return NewHook(svc, userRepo), svc, userRepo
 }
@@ -981,4 +985,26 @@ func TestHook_NotifyVisibleToTarget(t *testing.T) {
 			assert.Equal(t, tc.want, h.notifyVisibleToTarget(n, tc.target))
 		})
 	}
+}
+
+// #2106 L35 / #2224: 作成から unreadPublishDelay 以内に MarkAllAsRead されると、
+// unreadNotification だけでなく Web Push も抑制される。
+func TestHook_WebPushSuppressedAfterRead(t *testing.T) {
+	h, svc, repo := newTestHook(t)
+	svc.SetUnreadPublishDelay(50 * time.Millisecond) // deferred 化して read レースを作る
+	addLocalUser(repo, "alice", "alice")
+
+	pub := &stubWebPushPublisher{}
+	h.SetWebPushPublisher(pub)
+	h.SetPackers(
+		stubUserPacker{out: map[string]any{"id": "bob"}},
+		stubNotePacker{out: map[string]any{"id": "n1"}},
+	)
+
+	h.OnReactionCreated("alice", "bob", "n1", "\U0001F44D") // deferred push をスケジュール
+	// delay 前に既読化 (latestRead marker を最新へ前進)。
+	require.NoError(t, svc.MarkAllAsRead(context.Background(), "alice"))
+	// delay 経過を待つ。
+	time.Sleep(120 * time.Millisecond)
+	assert.Empty(t, pub.calls, "delay 内既読化で Web Push が抑制される")
 }
