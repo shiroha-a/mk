@@ -118,6 +118,13 @@ func (r *hashtagRepository) recordImpl(
 		).Error; err != nil {
 			return err
 		}
+		// 段階 1.5: #2106 L55: 同一 (name, userID) への concurrent record (連投 / inbox 同時処理)
+		// で array_append + count++ が二重発行され、attachedUserIds に重複が入り count が膨らむ
+		// race を防ぐため、対象 hashtag 行を FOR UPDATE で直列化する。2 つ目の tx は 1 つ目の
+		// commit を待ってから NOT (...=ANY) を再評価する (append 済の userID を見て skip)。
+		if err := tx.Exec(`SELECT 1 FROM "hashtag" WHERE name = ? FOR UPDATE`, name).Error; err != nil {
+			return err
+		}
 		// 段階 2: 該当 user がまだ list に居なければ append + count++。
 		// total / (local|remote) を 1 度の UPDATE で更新する。
 		// 文字列連結で column 名を組むのは固定 const のみなので injection 安全。

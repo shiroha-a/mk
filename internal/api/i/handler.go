@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/core/wordmute"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/langmap"
@@ -1426,6 +1427,13 @@ func (h *Handler) Update(c echo.Context) error {
 			}
 		}
 		return wordMuteLimitValue, wordMuteLimitOk
+	}
+	// #2106 L3: upstream i/update.ts は validateMuteWordRegex で /pattern/flags リテラルが
+	// compile 不能なら INVALID_REGEXP(400) を投げる。mk-go も書き込み時に検証する (読み取り側
+	// wordmute は不正 regex を nil rule で握り潰すため、ここで弾かないとユーザーへの
+	// フィードバックが無く黙殺される)。
+	if wordmute.ValidateMutedWords(req.MutedWords) != nil || wordmute.ValidateMutedWords(req.HardMutedWords) != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_REGEXP", "Invalid Regular Expression.", "0d786918-10df-41cd-8f33-8dec7d9a89a5"))
 	}
 	if mw, ok, err := normalizeMutedWords(req.MutedWords); err != nil {
 		return apierr.JSONInvalidParam(c)

@@ -14,6 +14,7 @@ package wordmute
 
 import (
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -145,30 +146,7 @@ func parseEntry(e json.RawMessage) rule {
 	var s string
 	if err := json.Unmarshal(e, &s); err == nil {
 		// Misskey TS upstream allows /regex/flags literal as a string entry.
-		// Flags は upstream RE2 (TS) 仕様の i/m/s をサポートする。Go の regexp は
-		// inline flag (?ims) が必要なので prefix で組み立てる。g (global) は Go
-		// regexp の default 動作 (= 全 match) と等価なので無視。u/y は近い等価
-		// 機能が無いが、Go regexp は default で UTF-8 解釈するため u は実質的
-		// に常時 ON、y (sticky) は streaming 用途では使われないので no-op。
-		if m := regexLiteral.FindStringSubmatch(s); m != nil {
-			pattern, flags := m[1], m[2]
-			var inline string
-			if strings.ContainsRune(flags, 'i') {
-				inline += "i"
-			}
-			if strings.ContainsRune(flags, 'm') {
-				inline += "m"
-			}
-			if strings.ContainsRune(flags, 's') {
-				inline += "s"
-			}
-			// 二重指定回避: pattern が既に inline flag group `(?ims)` で始まる
-			// 場合のみ skip する。`(?:...)` / `(?P<n>...)` 等の non-flag group
-			// に対しては flag を inject しないと意図した m / s 等が消えてしまう。
-			if inline != "" && !inlineFlagPrefix.MatchString(pattern) {
-				pattern = "(?" + inline + ")" + pattern
-			}
-			re, err := regexp.Compile(pattern)
+		if re, isLiteral, err := goRegexFromLiteral(s); isLiteral {
 			if err != nil {
 				return nil
 			}
@@ -190,6 +168,66 @@ func parseEntry(e json.RawMessage) rule {
 			return nil
 		}
 		return out
+	}
+	return nil
+}
+
+// goRegexFromLiteral compiles a /pattern/flags literal into a Go regexp, applying
+// the i/m/s inline-flag conversion (g/u/y are no-ops, see parseEntry). Returns
+// (nil, false, nil) when s is not a /.../ literal, and (nil, true, err) when it is
+// a literal that fails to compile (#2106 L3 validation reuse).
+func goRegexFromLiteral(s string) (*regexp.Regexp, bool, error) {
+	m := regexLiteral.FindStringSubmatch(s)
+	if m == nil {
+		return nil, false, nil
+	}
+	pattern, flags := m[1], m[2]
+	var inline string
+	if strings.ContainsRune(flags, 'i') {
+		inline += "i"
+	}
+	if strings.ContainsRune(flags, 'm') {
+		inline += "m"
+	}
+	if strings.ContainsRune(flags, 's') {
+		inline += "s"
+	}
+	// 二重指定回避: pattern が既に inline flag group `(?ims)` で始まる場合のみ skip。
+	if inline != "" && !inlineFlagPrefix.MatchString(pattern) {
+		pattern = "(?" + inline + ")" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, true, err
+	}
+	return re, true, nil
+}
+
+// ErrInvalidRegexp is returned by ValidateMutedWords when a regex-literal entry
+// fails to compile. Callers map it to the upstream INVALID_REGEXP API error.
+var ErrInvalidRegexp = errors.New("invalid regexp literal in muted words")
+
+// ValidateMutedWords reports whether every /pattern/flags regex-literal entry in
+// the muted-words JSON compiles, returning ErrInvalidRegexp on the first failure
+// (#2106 L3, upstream i/update.ts validateMuteWordRegex). Non-regex entries (plain
+// keywords / AND-group arrays) and shape errors are ignored here (shape is handled
+// by the caller's normalize step).
+func ValidateMutedWords(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		var s string
+		if err := json.Unmarshal(e, &s); err != nil {
+			continue // array (AND group), not a regex literal
+		}
+		if _, isLiteral, err := goRegexFromLiteral(s); isLiteral && err != nil {
+			return ErrInvalidRegexp
+		}
 	}
 	return nil
 }

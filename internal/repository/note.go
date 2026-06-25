@@ -1104,15 +1104,20 @@ func (r *noteRepository) ListHomeTimeline(userID string, limit int, sinceID, unt
 	q := preloadNoteRelations(r.db)
 	if len(filter.FollowedChannelIDs) > 0 {
 		q = q.Where(
-			`(("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL OR "channelId" IN ?) AND "visibility" IN ('public','home','followers')`,
+			`(("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL OR "channelId" IN ?)`,
 			userID, userID, filter.FollowedChannelIDs,
 		)
 	} else {
 		q = q.Where(
-			`("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL AND "visibility" IN ('public','home','followers')`,
+			`("userId" = ? OR "userId" IN (SELECT "followeeId" FROM "following" WHERE "followerId" = ?)) AND "channelId" IS NULL`,
 			userID, userID,
 		)
 	}
+	// #2106 L54: 旧 `visibility IN ('public','home','followers')` リテラルを applyViewerVisibility に
+	// 置換し、followee が viewer 宛てに送った specified DM (visibleUserIds に viewer) も home TL の
+	// DB fallback に surface させる (upstream timeline.ts の generateVisibilityQuery 互換)。read 経路は
+	// N27 で upstream 化済で、main-stream realtime push の #1472 strict gate とは独立。
+	q = applyViewerVisibility(q, userID)
 	q = q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit)
 	if sinceID != "" {
 		q = q.Where(`"id" > ?`, sinceID)

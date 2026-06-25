@@ -200,3 +200,19 @@ func TestMatch_EvictedRuleReParsesCorrectly(t *testing.T) {
 	assert.True(t, wordmute.Match(first, "find original-keyword again"))
 	assert.False(t, wordmute.Match(first, "no match here"))
 }
+
+// #2106 L3: ValidateMutedWords は不正な /regex/ リテラルで ErrInvalidRegexp を返し、
+// 妥当な regex / 通常語 / AND group では nil を返す。
+func TestValidateMutedWords(t *testing.T) {
+	// 不正 regex リテラル。
+	assert.ErrorIs(t, wordmute.ValidateMutedWords([]byte(`["/[/"]`)), wordmute.ErrInvalidRegexp)
+	// 妥当 regex リテラル。
+	assert.NoError(t, wordmute.ValidateMutedWords([]byte(`["/abc/i"]`)))
+	// 通常語 (regex でない)。
+	assert.NoError(t, wordmute.ValidateMutedWords([]byte(`["plain"]`)))
+	// AND group (配列要素) は regex 検証対象外。
+	assert.NoError(t, wordmute.ValidateMutedWords([]byte(`[["a","b"]]`)))
+	// 空 / nil。
+	assert.NoError(t, wordmute.ValidateMutedWords(nil))
+	assert.NoError(t, wordmute.ValidateMutedWords([]byte(`[]`)))
+}

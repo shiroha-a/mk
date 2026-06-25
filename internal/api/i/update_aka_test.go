@@ -204,3 +204,11 @@ func TestUpdate_AlsoKnownAs_NoUserRepoFailsClosed(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 }
+
+// #2106 L3: 不正な regex リテラルの mutedWords は INVALID_REGEXP(400) で拒否する。
+func TestUpdate_InvalidMutedWordsRegex(t *testing.T) {
+	h, me := akaHandler(t)
+	rec := post(h.Update, `{"mutedWords":["/[/"]}`, me)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_REGEXP")
+}
