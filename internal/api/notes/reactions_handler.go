@@ -37,6 +37,9 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 		case errors.Is(err, reaction.ErrNoteNotFound):
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "033d0620-5bfe-4027-965d-980b0c85a3ea"))
 		case errors.Is(err, reaction.ErrNoteNotVisible):
+			// #2106 L38 (意図的 divergence): upstream は ReactionService の可視性 IdentifiableError を
+			// catch せず ApiCallService が generic INTERNAL_ERROR(500) に包む。mk-go は semantics 上
+			// 適切な 403 ACCESS_DENIED を維持する (worse な 500 拡散を避ける)。
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, reaction.ErrAlreadyReacted):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_REACTED", "You are already reacting to that note.", "71efcf98-86d6-4e2b-b2ad-9d032369366b"))
@@ -136,7 +139,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 			"id":        r.ID,
 			"createdAt": createdAt,
 			"user":      userField,
-			"type":      r.Reaction,
+			// #2106 L7: upstream NoteReactionEntityService.pack は convertLegacyReaction を通す。
+			// TS から移行した legacy 値 (like / :smile: host無) を 👍 / :smile@.: に正規化して揃える
+			// (mk-native は write-time 正規化済だが drop-in 直後の DB 値はここで揃う)。
+			"type": entity.NormalizeReactionWithLegacy(r.Reaction),
 		})
 	}
 	return c.JSON(http.StatusOK, out)

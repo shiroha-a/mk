@@ -553,6 +553,13 @@ func (h *Hook) notifyLocalUser(ctx context.Context, notifieeID string, in Create
 	// 通知の永続化に成功したらWeb Push配信キューへ投入する。
 	// packerが未設定でもtype/id/userIdは最低限埋まるので、sw.js側の24h
 	// 破棄チェックとユーザー判定は成立する。
+	//
+	// #2106 L35 (known divergence, follow-up #2224): upstream NotificationService は
+	// push を 2 秒の setTimeout + latestRead guard の後にのみ発火し、作成から 2 秒以内に既読化
+	// (MarkAllAsRead) されると push も抑制する。mk-go は push を即時・無条件で配信するため、
+	// すぐ既読化しても冗長な push が届く (unreadNotification stream event 側は
+	// scheduleUnreadPublish で guard 済)。push を同 guard 経路へ移す改修は notification.Service
+	// への push delivery thread が要るため follow-up issue に切り出す。
 	if h.webpush != nil && n != nil {
 		h.webpush.PushNotification(notifieeID, h.buildPushBody(n, notifieeID))
 	}

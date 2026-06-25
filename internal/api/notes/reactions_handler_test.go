@@ -386,3 +386,23 @@ func TestReactionsCreate_MissingReaction(t *testing.T) {
 	require.NoError(t, h.ReactionsCreate(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// #2106 L7: TS-era legacy reaction (like / host無 :smile:) は convertLegacyReaction 相当の
+// 正規化を type に適用する (👍 / :smile@.:)。
+func TestReactions_List_LegacyReactionNormalized(t *testing.T) {
+	h, repo, reactRepo := newReactionHandler(t)
+	seedReactionNote(repo, "n1", "public")
+	idGen, _ := id.NewGenerator("aidx")
+	rxID := idGen.Generate(timeNow())
+	reactRepo.Reactions[rxID] = &model.NoteReaction{
+		ID: rxID, UserID: "viewer", NoteID: "n1", Reaction: "like", // legacy
+	}
+
+	c, rec := newJSONRequest(t, "/api/notes/reactions", `{"noteId":"n1"}`)
+	require.NoError(t, h.Reactions(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "👍", resp[0]["type"], "legacy like を 👍 に正規化")
+}

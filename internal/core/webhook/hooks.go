@@ -98,6 +98,12 @@ func NewReactionCreateHook(svc *Service, idGen id.Generator) *ReactionCreateHook
 }
 
 // OnReactionCreated fires the `reaction` webhook event on the note author.
+//
+// #2106 L42 (intentional additive extension): upstream は webhookEventTypes に 'reaction' を
+// 定義しているものの (Webhook.ts), enqueueUserWebhook では reaction を一切 fire しない
+// (note/reply/renote/mention/follow 系のみ)。mk-go は valid な購読 enum である 'reaction' を
+// 実際に配信する additive 拡張。'reaction' webhook が来ないことを前提にした client との観測差は
+// あるが破壊ではない (購読していなければ届かない)。upstream が未配信であることを差分として記録。
 func (h *ReactionCreateHook) OnReactionCreated(note *model.Note, reactor *model.User, reaction string) {
 	if h == nil || h.svc == nil || note == nil || reactor == nil {
 		return

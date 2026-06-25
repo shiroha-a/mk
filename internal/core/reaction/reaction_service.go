@@ -442,6 +442,11 @@ func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit 
 	if err != nil {
 		return nil, ErrNoteNotFound
 	}
+	// #2106 L37 (意図的 divergence): upstream notes/reactions は requireCredential:false で
+	// 可視性 filter を一切掛けず、followers/specified note の reaction list も誰にでも 200 で
+	// 返す。mk-go は閲覧不可 viewer に CanSeeNote gate を掛け 404 NO_SUCH_NOTE を返す
+	// (本文だけでなく reaction list も漏らさない privacy 強化)。worse な upstream 露出に
+	// 揃えず mk-go の堅牢な挙動を維持する。
 	if !note.CanSeeNote(user, target, s.followingRepo) {
 		return nil, ErrNoteNotVisible
 	}
