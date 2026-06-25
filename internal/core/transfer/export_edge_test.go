@@ -265,3 +265,36 @@ func TestExport_UserLists_FallsBackToUserRepo(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(body), "\n")
 	assert.Len(t, lines, 1)
 }
+
+// #2106 N24: list source antenna は member を acct 解決して userListAccts に出力し、
+// excludeNotesInSensitiveChannel も含める (cross-instance import 互換)。
+func TestExport_Antennas_UserListAccts(t *testing.T) {
+	saver, _, deps, user := newExportDeps(t)
+	aRepo := deps.AntennaRepo.(*testutil.MockAntennaRepository)
+	listRepo := deps.UserListRepo.(*testutil.MockUserListRepository)
+	userRepo := deps.UserRepo.(*testutil.MockUserRepository)
+	listID := "list1"
+	aRepo.Antennas["a1"] = &model.Antenna{
+		ID: "a1", UserID: user.ID, Name: "news", Src: "list", UserListID: &listID,
+		Keywords: []byte(`[]`), ExcludeKeywords: []byte(`[]`), Users: pq.StringArray{},
+		ExcludeNotesInSensitiveChannel: true,
+	}
+	listRepo.Lists[listID] = &model.UserList{ID: listID, UserID: user.ID, Name: "src"}
+	host := "remote.example"
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}                    // local → "bob"
+	userRepo.Users["carol"] = &model.User{ID: "carol", Username: "carol", Host: &host} // remote → "carol@remote.example"
+	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "m1", UserListID: listID, UserID: "bob"}))
+	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "m2", UserListID: listID, UserID: "carol"}))
+
+	exporter := transfer.NewExporter(deps)
+	_, err := exporter.Export(context.Background(), user.ID, transfer.ExportAntennas)
+	require.NoError(t, err)
+
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(saver.uploads[0].Body, &out))
+	require.Len(t, out, 1)
+	accts, ok := out[0]["userListAccts"].([]any)
+	require.True(t, ok, "list source は userListAccts を配列で出す")
+	assert.ElementsMatch(t, []any{"bob", "carol@remote.example"}, accts)
+	assert.Equal(t, true, out[0]["excludeNotesInSensitiveChannel"])
+}

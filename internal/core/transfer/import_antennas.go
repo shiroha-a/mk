@@ -21,11 +21,15 @@ type antennaImportEntry struct {
 	ExcludeKeywords json.RawMessage `json:"excludeKeywords"`
 	Users           []string        `json:"users"`
 	UserListID      *string         `json:"userListId"`
-	CaseSensitive   bool            `json:"caseSensitive"`
-	LocalOnly       bool            `json:"localOnly"`
-	ExcludeBots     bool            `json:"excludeBots"`
-	WithReplies     bool            `json:"withReplies"`
-	WithFile        bool            `json:"withFile"`
+	// UserListAccts は upstream ExportedAntenna の list source 用 acct 配列。import 側で
+	// list→users 変換に使う (#2106 N24)。
+	UserListAccts                  []string `json:"userListAccts"`
+	CaseSensitive                  bool     `json:"caseSensitive"`
+	LocalOnly                      bool     `json:"localOnly"`
+	ExcludeBots                    bool     `json:"excludeBots"`
+	WithReplies                    bool     `json:"withReplies"`
+	WithFile                       bool     `json:"withFile"`
+	ExcludeNotesInSensitiveChannel bool     `json:"excludeNotesInSensitiveChannel"`
 }
 
 // importAntennas decodes a JSON array of antenna entries and creates one
@@ -44,22 +48,38 @@ func (i *Importer) importAntennas(user *model.User, body []byte) (*ImportResult,
 		keywords := normalizeJSON(ent.Keywords, "[]")
 		excludeKeywords := normalizeJSON(ent.ExcludeKeywords, "[]")
 
+		// #2106 N24: upstream ImportAntennasProcessorService 互換 — list source antenna は
+		// userListAccts を users source へ倒して取り込む (cross-instance では userListId が
+		// 無意味なため)。userListAccts が無ければ src は維持する。
+		src := model.AntennaSource(ent.Src)
+		users := pq.StringArray(ent.Users)
+		userListID := ent.UserListID
+		if src == model.AntennaSourceList && len(ent.UserListAccts) > 0 {
+			src = model.AntennaSourceUsers
+			users = pq.StringArray(ent.UserListAccts)
+			userListID = nil
+		}
+		if users == nil {
+			users = pq.StringArray{}
+		}
+
 		antenna := &model.Antenna{
-			ID:              i.deps.IDGen.Generate(time.Now()),
-			UserID:          user.ID,
-			Name:            ent.Name,
-			Src:             model.AntennaSource(ent.Src),
-			UserListID:      ent.UserListID,
-			Users:           pq.StringArray(ent.Users),
-			Keywords:        datatypes.JSON(keywords),
-			ExcludeKeywords: datatypes.JSON(excludeKeywords),
-			CaseSensitive:   ent.CaseSensitive,
-			LocalOnly:       ent.LocalOnly,
-			ExcludeBots:     ent.ExcludeBots,
-			WithReplies:     ent.WithReplies,
-			WithFile:        ent.WithFile,
-			IsActive:        true,
-			LastUsedAt:      time.Now(),
+			ID:                             i.deps.IDGen.Generate(time.Now()),
+			UserID:                         user.ID,
+			Name:                           ent.Name,
+			Src:                            src,
+			UserListID:                     userListID,
+			Users:                          users,
+			Keywords:                       datatypes.JSON(keywords),
+			ExcludeKeywords:                datatypes.JSON(excludeKeywords),
+			CaseSensitive:                  ent.CaseSensitive,
+			LocalOnly:                      ent.LocalOnly,
+			ExcludeBots:                    ent.ExcludeBots,
+			WithReplies:                    ent.WithReplies,
+			WithFile:                       ent.WithFile,
+			ExcludeNotesInSensitiveChannel: ent.ExcludeNotesInSensitiveChannel,
+			IsActive:                       true,
+			LastUsedAt:                     time.Now(),
 		}
 		if err := i.deps.AntennaRepo.Create(antenna); err != nil {
 			res.Skipped++

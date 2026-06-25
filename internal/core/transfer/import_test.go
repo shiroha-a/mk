@@ -402,3 +402,24 @@ func TestFollowingServiceAdapter(t *testing.T) {
 	_, err := a.Follow("f", "g", transfer.FollowOptions{})
 	assert.NoError(t, err)
 }
+
+// #2106 N24: import は list source antenna の userListAccts を users source へ変換する。
+func TestImport_Antennas_UserListAcctsConvertsToUsers(t *testing.T) {
+	body := []byte(`[{"name":"news","src":"list","keywords":[[]],"userListId":"oldlist","userListAccts":["bob","carol@remote.example"]}]`)
+	deps, user, _, _, _, _ := newImporterDeps(t, body)
+	imp := transfer.NewImporter(deps)
+	res, err := imp.Import(context.Background(), user.ID, transfer.ImportAntennas, "fid")
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Applied)
+
+	aRepo := deps.AntennaRepo.(*testutil.MockAntennaRepository)
+	require.Len(t, aRepo.Antennas, 1)
+	var got *model.Antenna
+	for _, a := range aRepo.Antennas {
+		got = a
+	}
+	require.NotNil(t, got)
+	assert.Equal(t, model.AntennaSourceUsers, got.Src, "list+userListAccts は users source に変換")
+	assert.Nil(t, got.UserListID, "変換後は cross-instance で無意味な userListId を捨てる")
+	assert.ElementsMatch(t, []string{"bob", "carol@remote.example"}, []string(got.Users))
+}
