@@ -1316,3 +1316,35 @@ func TestFollow_LockedAutoAcceptFollowed_NoMutual_CreatesRequest(t *testing.T) {
 	assert.Nil(t, res.Following)
 	assert.Len(t, frRepo.Requests, 1)
 }
+
+// #2106 N22: carefulBot=true の非 locked followee を bot が follow すると follow request になる。
+func TestFollow_CarefulBot_BotFollowerCreatesRequest(t *testing.T) {
+	svc, userRepo, fRepo, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false) // alice は非 locked
+	userRepo.Profiles["alice"] = &model.UserProfile{UserID: "alice", CarefulBot: true}
+	// bob は bot。
+	addUser(t, userRepo, "bob", false)
+	userRepo.Users["bob"].IsBot = true
+
+	res, err := svc.Follow("bob", "alice", following.FollowOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, res.Request, "carefulBot + bot follower は follow request 化")
+	assert.Nil(t, res.Following)
+	assert.Empty(t, fRepo.Followings)
+	assert.Len(t, frRepo.Requests, 1)
+}
+
+// #2106 N22: carefulBot でも非 bot follower は通常通り即フォロー成立。
+func TestFollow_CarefulBot_NonBotFollowerFollowsDirectly(t *testing.T) {
+	svc, userRepo, fRepo, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	userRepo.Profiles["alice"] = &model.UserProfile{UserID: "alice", CarefulBot: true}
+	addUser(t, userRepo, "carol", false) // 非 bot
+
+	res, err := svc.Follow("carol", "alice", following.FollowOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, res.Following, "非 bot follower は carefulBot の影響を受けない")
+	assert.Nil(t, res.Request)
+	ex, _ := fRepo.Exists("carol", "alice")
+	assert.True(t, ex)
+}

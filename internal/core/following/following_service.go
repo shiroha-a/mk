@@ -274,12 +274,20 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 		}
 	}
 
-	// Lockedアカウントへのフォローはリクエスト扱い。ただし #2106 N21: followee が
-	// local + profile.autoAcceptFollowed=true + 相互フォロー (followee→follower) のときは
-	// upstream UserFollowingService 同様に follow request を作らず即 Following を成立させる
-	// (下の通常 Following 作成経路に fall through する)。remote follower の場合は handleFollow が
+	// follow request 化の判定 (upstream UserFollowingService.follow の OR 条件)。
+	// #2106 N22: locked に加え、bot follower かつ local followee の profile.carefulBot=true でも
+	// follow request 化する (「Bot からのフォローに慎重」設定)。
+	needsApproval := followee.IsLocked
+	if !needsApproval && follower.IsBot && followee.Host == nil {
+		if profile, perr := s.userRepo.FindProfileByUserID(followeeID); perr == nil && profile != nil && profile.CarefulBot {
+			needsApproval = true
+		}
+	}
+	// #2106 N21: followee が local + profile.autoAcceptFollowed=true + 相互フォロー
+	// (followee→follower) のときは follow request を作らず即 Following を成立させる
+	// (下の通常 Following 作成経路に fall through)。remote follower の場合は handleFollow が
 	// result.Following を見て AP Accept を返送する。
-	if followee.IsLocked && !s.shouldAutoAcceptFollow(followee, followerID) {
+	if needsApproval && !s.shouldAutoAcceptFollow(followee, followerID) {
 		// 既存リクエストがあればエラー
 		if exists, err := s.followRequestRepo.Exists(followerID, followeeID); err != nil {
 			return nil, err
