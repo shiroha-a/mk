@@ -618,3 +618,14 @@ func TestAuthorize_UnsupportedResponseType(t *testing.T) {
 	rec := hn.authorize(t, validAuthorizeQuery(hn, challengeFor("verifier-abc")))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+// #2106 L21/L22: 空 login_token は lookup 前に弾く。redirect error に error_description を載せない。
+func TestDecision_EmptyLoginToken(t *testing.T) {
+	hn := newHarness(t)
+	hn.store.txns["txn1"] = &transaction{ClientID: hn.clientID, RedirectURI: hn.redirect}
+	rec := hn.post(t, hn.h.Decision, url.Values{"transaction_id": {"txn1"}, "login_token": {""}})
+	require.Equal(t, http.StatusFound, rec.Code)
+	loc := rec.Header().Get("Location")
+	assert.Contains(t, loc, "error=access_denied")
+	assert.NotContains(t, loc, "error_description", "#2106 L22: redirect に error_description を載せない")
+}

@@ -426,3 +426,31 @@ func TestSigninWithPasskey_BeginFails(t *testing.T) {
 	rec := doPost(h.SigninWithPasskey, `{}`)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// #2106 L20: usePasswordLessLogin=true なら signin-flow で誤パスワードでも passkey
+// challenge を発行する (upstream SigninApiService と同じく same || usePasswordLessLogin)。
+func Test2FA_WebAuthnPasswordless_WrongPassword_StillChallenges(t *testing.T) {
+	h, repo := newTestHandler(t)
+	if signinTestRedis == nil {
+		t.Skip("redis testcontainer unavailable")
+	}
+	signinTestRedis.FlushAll(context.Background())
+	svc, err := twofactor.NewWebAuthnService("https://example.com", "Misskey", signinTestRedis.Client)
+	require.NoError(t, err)
+	skRepo := &inMemorySK{
+		keys: map[string][]*model.UserSecurityKey{
+			"u1": {{ID: "AAEC", PublicKey: "AwQF", UserID: "u1"}},
+		},
+	}
+	h.SetWebAuthn(svc, skRepo)
+
+	newTestUserWithTOTP(repo, "alice", "pass", "JBSWY3DPEHPK3PXP", nil)
+	repo.Profiles["u1"].UsePasswordLessLogin = true
+
+	// 誤パスワードでも passkey challenge (next:passkey) が返る。
+	rec := doPost(h.SigninFlow, `{"username":"alice","password":"wrong"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "passkey", resp["next"], "usePasswordLessLogin なら誤パスワードでも challenge を発行")
+}

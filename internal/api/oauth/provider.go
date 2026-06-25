@@ -183,6 +183,12 @@ func (h *Handler) Decision(c echo.Context) error {
 		return h.redirectError(c, txn.RedirectURI, txn.State, "access_denied", "the user denied the request")
 	}
 
+	// #2106 L21: upstream OAuth2ProviderService は lookup 前に空 login_token を弾く
+	// (InvalidRequestError 'No user')。空文字で FindByToken("") を実行しないようガードする
+	// (token='' 行が万一存在しても consent 完了を防ぐ defense-in-depth)。
+	if loginToken == "" {
+		return h.redirectError(c, txn.RedirectURI, txn.State, "access_denied", "no such user")
+	}
 	// login_token は native session token のみ一致する (app token は別テーブル)。
 	user, err := h.userRepo.FindByToken(loginToken)
 	if err != nil || user == nil {
@@ -406,11 +412,13 @@ func applyOAuthNoStore(c echo.Context) {
 // redirectError redirects to the (validated) client redirect_uri with the OAuth
 // error parameters, including the RFC9207 iss.
 func (h *Handler) redirectError(c echo.Context, redirectURI, state, code, desc string) error {
+	// #2106 L22: upstream は redirect error に error / state / iss のみ載せ、error_description は
+	// 付与しない (RFC 上 optional、token endpoint の JSON error にのみ含める)。desc は log に残す。
+	slog.Debug("oauth: redirect error", "code", code, "desc", desc)
 	redirect := appendQuery(redirectURI, map[string]string{
-		"error":             code,
-		"error_description": desc,
-		"state":             state,
-		"iss":               h.issuer,
+		"error": code,
+		"state": state,
+		"iss":   h.issuer,
 	})
 	return c.Redirect(http.StatusFound, redirect)
 }

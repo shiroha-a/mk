@@ -329,8 +329,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	}
 
 	// 2FA が必要だが token / credential いずれも来ていない。
-	// password が違う場合はここで弾く (challenge を発行しない)。
-	if !passwordOK {
+	// password が違う場合はここで弾く (challenge を発行しない)。ただし #2106 L20:
+	// usePasswordLessLogin=true なら upstream 同様 password 不一致でも passkey challenge を
+	// 発行する (credential 提供済み branch (line 305) と判定を揃える)。
+	if !passwordOK && !profile.UsePasswordLessLogin {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
 	// security key 保有なら assertion challenge を発行する (`next: 'passkey'`)。
