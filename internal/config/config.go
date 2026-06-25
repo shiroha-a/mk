@@ -196,9 +196,9 @@ type Source struct {
 	AutoScaleCooldownSeconds *int `mapstructure:"autoScaleCooldownSeconds"`
 
 	// JobQueueDriver selects the worker / inspector implementation
-	// behind internal/queue. "asynq" (default) uses
-	// hibiken/asynq; "mkq" uses the BullMQ-compatible
-	// shiroha-a/mkq library. Empty / unset = "asynq".
+	// behind internal/queue. "mkq" (default, recommended) uses the
+	// BullMQ-compatible shiroha-a/mkq library; "asynq" is the legacy
+	// hibiken/asynq driver. Empty / unset = "mkq".
 	JobQueueDriver string `mapstructure:"jobQueueDriver"`
 
 	MediaProxy              string `mapstructure:"mediaProxy"`

@@ -84,9 +84,11 @@ func TestExtract(t *testing.T) {
 			want: []string{"foo", "bar"},
 		},
 		{
-			name: "long tag truncated",
-			in:   []string{"#" + strings.Repeat("a", MaxTagLength+50)},
-			want: []string{strings.Repeat("a", MaxTagLength)},
+			// #2106 L65: >128 code point の tag は byte truncate でなく drop する
+			// (NormalizeNoteTags と揃える)。同行の有効な tag は残る。
+			name: "long tag dropped",
+			in:   []string{"#" + strings.Repeat("a", MaxTagLength+50) + " #ok"},
+			want: []string{"ok"},
 		},
 		{
 			name: "fenced code block excluded",

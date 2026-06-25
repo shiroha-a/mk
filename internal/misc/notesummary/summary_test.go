@@ -60,7 +60,26 @@ func TestGet_ReplyIDWithoutReplyObject(t *testing.T) {
 		"text":    "x",
 		"replyId": "n1",
 	}
-	assert.Equal(t, "x", notesummary.Get(note))
+	// #2106 L63: replyId が立っているのに reply が未 hydrate でも upstream は "RE: ..." を付与する。
+	assert.Equal(t, "x\n\nRE: ...", notesummary.Get(note))
+}
+
+// #2106 L63: renoteId が立っているのに renote が未 hydrate でも "RN: ..." を付与する。
+func TestGet_RenoteIDWithoutRenoteObject(t *testing.T) {
+	note := map[string]any{
+		"text":     "y",
+		"renoteId": "n2",
+	}
+	assert.Equal(t, "y\n\nRN: ...", notesummary.Get(note))
+}
+
+// #2106 L64: 空文字 CW は (null ではないので) text にフォールバックせず空 CW を採用する。
+func TestGet_EmptyStringCW(t *testing.T) {
+	note := map[string]any{
+		"cw":   "",
+		"text": "body",
+	}
+	assert.Equal(t, "", notesummary.Get(note))
 }
 
 func TestGet_Nil(t *testing.T) {

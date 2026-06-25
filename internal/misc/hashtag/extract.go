@@ -46,8 +46,11 @@ func Extract(parts ...string) []string {
 	seen := make(map[string]struct{}, len(tags))
 	out := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		if len(tag) > MaxTagLength {
-			tag = tag[:MaxTagLength]
+		// #2106 L65: byte 単位の truncate は multibyte rune を途中で分割し不正な UTF-8 を
+		// 生成する。NormalizeNoteTags と同じく code point 数で判定し、>128 の tag は drop する
+		// (upstream の user-tag 経路も truncate せず DB varchar 制約に委ねる)。
+		if utf8.RuneCountInString(tag) > MaxTagLength {
+			continue
 		}
 		key := strings.ToLower(tag)
 		if _, ok := seen[key]; ok {

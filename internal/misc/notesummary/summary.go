@@ -27,8 +27,12 @@ func Get(note map[string]any) string {
 	}
 
 	var summary string
-	if cw, ok := note["cw"].(string); ok && cw != "" {
-		summary = cw
+	// #2106 L64: upstream は note.cw != null で判定する (空文字 CW でも採用し text に
+	// フォールバックしない)。cw キーが存在し非 nil なら CW (空文字含む) を使う。
+	if cwVal, exists := note["cw"]; exists && cwVal != nil {
+		if cw, ok := cwVal.(string); ok {
+			summary = cw
+		}
 	} else if text, ok := note["text"].(string); ok {
 		summary = text
 	}
@@ -39,14 +43,20 @@ func Get(note map[string]any) string {
 	if poll, ok := note["poll"]; ok && poll != nil {
 		summary += " (\U0001F4CA)"
 	}
+	// #2106 L63: replyId/renoteId が立っているのに reply/renote が未 hydrate の場合でも
+	// upstream は "RE: ..." / "RN: ..." を付与する (push 通知本文の reply/renote 示唆を保つ)。
 	if replyID, ok := note["replyId"].(string); ok && replyID != "" {
 		if reply, ok := note["reply"].(map[string]any); ok {
 			summary += "\n\nRE: " + Get(reply)
+		} else {
+			summary += "\n\nRE: ..."
 		}
 	}
 	if renoteID, ok := note["renoteId"].(string); ok && renoteID != "" {
 		if renote, ok := note["renote"].(map[string]any); ok {
 			summary += "\n\nRN: " + Get(renote)
+		} else {
+			summary += "\n\nRN: ..."
 		}
 	}
 	return strings.TrimSpace(summary)
