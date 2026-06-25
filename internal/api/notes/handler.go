@@ -932,34 +932,63 @@ func (h *Handler) Conversation(c echo.Context) error {
 	return c.JSON(http.StatusOK, packed)
 }
 
-// BulkShow handles POST /api/notes — bulk note lookup by noteIds.
-// visibility チェックを通して非公開ノートの漏洩を防ぐ。
+// BulkShow handles POST /api/notes.
+//
+// #2106 L4 / #2215: hybrid endpoint。upstream notes.ts は {local,reply,renote,withFiles,
+// poll,limit,sinceId/untilId/sinceDate/untilDate} で public(visibility=public,
+// localOnly=FALSE) note の一覧を時系列ページングする公開タイムライン的 endpoint。mk-go は
+// 加えて独自拡張の noteIds bulk lookup も同 endpoint で受ける: noteIds 指定時は bulk
+// (visibility filter 付き)、不在時は upstream 互換の public note 一覧を返す。これで
+// misskey-js SDK の {local:true,limit:30} 呼び出しも、既存の {noteIds:[...]} 呼び出しも
+// 両立する。
 func (h *Handler) BulkShow(c echo.Context) error {
 	var req struct {
 		NoteIDs []string `json:"noteIds"`
+		// upstream notes.ts public-note timeline params (noteIds 不在時に使用)。
+		Local     bool   `json:"local"`
+		Reply     *bool  `json:"reply"`
+		Renote    *bool  `json:"renote"`
+		WithFiles *bool  `json:"withFiles"`
+		Poll      *bool  `json:"poll"`
+		Limit     int    `json:"limit"`
+		SinceID   string `json:"sinceId"`
+		UntilID   string `json:"untilId"`
+		SinceDate *int64 `json:"sinceDate"`
+		UntilDate *int64 `json:"untilDate"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	if len(req.NoteIDs) == 0 {
-		return c.JSON(http.StatusOK, []any{})
+	viewer := middleware.GetUser(c)
+
+	// noteIds 指定時は mk-go 拡張の bulk lookup。visibility チェックを通して非公開ノートの
+	// 漏洩を防ぐ。queryService 未配線時は fail-closed で空配列 (#509 / #505)。
+	if len(req.NoteIDs) > 0 {
+		if len(req.NoteIDs) > 100 {
+			req.NoteIDs = req.NoteIDs[:100]
+		}
+		notes, err := h.noteRepo.FindManyByIDsWithUser(req.NoteIDs)
+		if err != nil || h.queryService == nil {
+			return c.JSON(http.StatusOK, []any{})
+		}
+		notes = h.queryService.FilterVisible(viewer, notes)
+		return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 	}
-	if len(req.NoteIDs) > 100 {
-		req.NoteIDs = req.NoteIDs[:100]
-	}
-	notes, err := h.noteRepo.FindManyByIDsWithUser(req.NoteIDs)
+
+	// noteIds 不在時は upstream notes.ts の public note 一覧。public note のみなので追加の
+	// visibility filter は不要 (upstream も requireCredential:false で filter 無し)。
+	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	notes, err := h.noteRepo.ListPublicNotes(model.PublicNotesFilter{
+		Local:     req.Local,
+		Reply:     req.Reply,
+		Renote:    req.Renote,
+		WithFiles: req.WithFiles,
+		Poll:      req.Poll,
+	}, limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	viewer := middleware.GetUser(c)
-	// queryService 未配線時は visibility filter を経ずに全 note を返してしまう
-	// と、followers / specified visibility のノートが任意の閲覧者に漏洩する。
-	// production の router.go では常に wire されるが、wiring が壊れた場合の
-	// fail-closed として空配列で返す (#509、#445 / PR #505 と同じ defensive)。
-	if h.queryService == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
-	notes = h.queryService.FilterVisible(viewer, notes)
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, viewer))
 }
 

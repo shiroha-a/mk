@@ -169,6 +169,10 @@ type NoteRepository interface {
 	ListHomeTimeline(userID string, limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error)
 	ListLocalTimeline(limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error)
 	ListGlobalTimeline(limit int, sinceID, untilID string, filter model.TimelineDBFilter) ([]*model.Note, error)
+	// ListPublicNotes returns public, non-localOnly notes for the upstream
+	// notes.ts public-note timeline (#2106 L4 / #2215), with optional
+	// local/reply/renote/withFiles/poll filters and keyset pagination.
+	ListPublicNotes(filter model.PublicNotesFilter, limit int, sinceID, untilID string) ([]*model.Note, error)
 	// DeleteExpiredRemoteNotes deletes up to batchSize remote notes older
 	// than expiryDays in a single DELETE statement. Returns the count
 	// actually removed in this batch. Callers drive the loop themselves so
@@ -1145,6 +1149,58 @@ func (r *noteRepository) ListLocalTimeline(limit int, sinceID, untilID string, f
 		q = q.Where(`"id" < ?`, untilID)
 	}
 	q = applyTimelineFilter(q, filter)
+	var notes []*model.Note
+	if err := q.Find(&notes).Error; err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
+// ListPublicNotes implements the upstream notes.ts query: public, non-localOnly
+// notes time-ordered with optional local/reply/renote/withFiles/poll filters.
+// Unlike ListGlobalTimeline this does NOT exclude channel notes (upstream notes.ts
+// has no channelId filter) (#2106 L4 / #2215).
+func (r *noteRepository) ListPublicNotes(filter model.PublicNotesFilter, limit int, sinceID, untilID string) ([]*model.Note, error) {
+	q := preloadNoteRelations(r.db).
+		Where(`"visibility" = 'public' AND "localOnly" = FALSE`).
+		Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit)
+	if sinceID != "" {
+		q = q.Where(`"id" > ?`, sinceID)
+	}
+	if untilID != "" {
+		q = q.Where(`"id" < ?`, untilID)
+	}
+	if filter.Local {
+		q = q.Where(`"userHost" IS NULL`)
+	}
+	if filter.Reply != nil {
+		if *filter.Reply {
+			q = q.Where(`"replyId" IS NOT NULL`)
+		} else {
+			q = q.Where(`"replyId" IS NULL`)
+		}
+	}
+	if filter.Renote != nil {
+		if *filter.Renote {
+			q = q.Where(`"renoteId" IS NOT NULL`)
+		} else {
+			q = q.Where(`"renoteId" IS NULL`)
+		}
+	}
+	if filter.WithFiles != nil {
+		if *filter.WithFiles {
+			q = q.Where(`"fileIds" != '{}'`)
+		} else {
+			q = q.Where(`"fileIds" = '{}'`)
+		}
+	}
+	if filter.Poll != nil {
+		if *filter.Poll {
+			q = q.Where(`"hasPoll" = TRUE`)
+		} else {
+			q = q.Where(`"hasPoll" = FALSE`)
+		}
+	}
 	var notes []*model.Note
 	if err := q.Find(&notes).Error; err != nil {
 		return nil, err

@@ -1460,6 +1460,30 @@ func (m *MockNoteRepository) ListGlobalTimeline(limit int, sinceID, untilID stri
 	}, untilID, sinceID, limit), nil
 }
 
+func (m *MockNoteRepository) ListPublicNotes(filter model.PublicNotesFilter, limit int, sinceID, untilID string) ([]*model.Note, error) {
+	return m.listFiltered(func(n *model.Note) bool {
+		if string(n.Visibility) != "public" || n.LocalOnly {
+			return false
+		}
+		if filter.Local && n.UserHost != nil {
+			return false
+		}
+		if filter.Reply != nil && (*filter.Reply) != (n.ReplyID != nil) {
+			return false
+		}
+		if filter.Renote != nil && (*filter.Renote) != (n.RenoteID != nil) {
+			return false
+		}
+		if filter.WithFiles != nil && (*filter.WithFiles) != (len(n.FileIDs) > 0) {
+			return false
+		}
+		if filter.Poll != nil && (*filter.Poll) != n.HasPoll {
+			return false
+		}
+		return true
+	}, untilID, sinceID, limit), nil
+}
+
 func (m *MockNoteRepository) DeleteExpiredRemoteNotes(_, _ int) (int64, error) {
 	return 0, nil
 }

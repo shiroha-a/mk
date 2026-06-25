@@ -3416,3 +3416,75 @@ func TestNoteRepository_SearchByFilter_DateRange(t *testing.T) {
 	assert.NotContains(t, got, id2021, "2021 は範囲外")
 	assert.NotContains(t, got, id2023, "2023 は範囲外")
 }
+
+// #2106 L4 / #2215: ListPublicNotes は public/非 localOnly note を返し、
+// local/reply/renote/withFiles/poll の各 filter を適用する。
+func TestNoteRepository_ListPublicNotes(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	user := insertTestUser(t, "u_lpn_1", "lpnuser")
+	defer cleanupUser(t, user.ID)
+
+	text := "x"
+	host := "remote.example"
+	mk := func(id string, mut func(*model.Note)) *model.Note {
+		n := &model.Note{ID: id, UserID: user.ID, Text: &text, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))}
+		mut(n)
+		require.NoError(t, repo.Create(n))
+		return n
+	}
+	// reply/renote の FK 制約を満たすため参照先 note を先に作る。
+	refNote := mk("n_lpn_ref", func(n *model.Note) {})
+	ref := refNote.ID
+	plain := mk("n_lpn_plain", func(n *model.Note) {})
+	remote := mk("n_lpn_remote", func(n *model.Note) { n.UserHost = &host })
+	reply := mk("n_lpn_reply", func(n *model.Note) { n.ReplyID = &ref })
+	renote := mk("n_lpn_renote", func(n *model.Note) { n.RenoteID = &ref })
+	files := mk("n_lpn_files", func(n *model.Note) { n.FileIDs = pq.StringArray{"f1"} })
+	poll := mk("n_lpn_poll", func(n *model.Note) { n.HasPoll = true })
+	localonly := mk("n_lpn_localonly", func(n *model.Note) { n.LocalOnly = true })
+	followers := mk("n_lpn_followers", func(n *model.Note) { n.Visibility = model.NoteVisibilityFollowers })
+	for _, n := range []*model.Note{refNote, plain, remote, reply, renote, files, poll, localonly, followers} {
+		defer cleanupNote(t, n.ID)
+	}
+
+	has := func(f model.PublicNotesFilter, id string) bool {
+		rows, err := repo.ListPublicNotes(f, 50, "", "")
+		require.NoError(t, err)
+		for _, r := range rows {
+			if r.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	tr, fa := true, false
+
+	// no filter: public/非 localOnly のみ。localOnly / followers は除外。
+	assert.True(t, has(model.PublicNotesFilter{}, plain.ID))
+	assert.True(t, has(model.PublicNotesFilter{}, remote.ID))
+	assert.False(t, has(model.PublicNotesFilter{}, localonly.ID))
+	assert.False(t, has(model.PublicNotesFilter{}, followers.ID))
+	// local: userHost IS NULL のみ。
+	assert.True(t, has(model.PublicNotesFilter{Local: true}, plain.ID))
+	assert.False(t, has(model.PublicNotesFilter{Local: true}, remote.ID))
+	// reply true/false。
+	assert.True(t, has(model.PublicNotesFilter{Reply: &tr}, reply.ID))
+	assert.False(t, has(model.PublicNotesFilter{Reply: &tr}, plain.ID))
+	assert.True(t, has(model.PublicNotesFilter{Reply: &fa}, plain.ID))
+	assert.False(t, has(model.PublicNotesFilter{Reply: &fa}, reply.ID))
+	// renote true/false。
+	assert.True(t, has(model.PublicNotesFilter{Renote: &tr}, renote.ID))
+	assert.True(t, has(model.PublicNotesFilter{Renote: &fa}, plain.ID))
+	// withFiles true/false。
+	assert.True(t, has(model.PublicNotesFilter{WithFiles: &tr}, files.ID))
+	assert.True(t, has(model.PublicNotesFilter{WithFiles: &fa}, plain.ID))
+	// poll true/false。
+	assert.True(t, has(model.PublicNotesFilter{Poll: &tr}, poll.ID))
+	assert.True(t, has(model.PublicNotesFilter{Poll: &fa}, plain.ID))
+
+	// since/until 分岐。
+	_, err := repo.ListPublicNotes(model.PublicNotesFilter{}, 50, "nonexistent", "")
+	require.NoError(t, err)
+	_, err = repo.ListPublicNotes(model.PublicNotesFilter{}, 50, "", "nonexistent")
+	require.NoError(t, err)
+}

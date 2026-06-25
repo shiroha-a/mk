@@ -51,3 +51,14 @@ type TimelineDBFilter struct {
 	// の note のみ (= followed user の channel note は home から除外される)。
 	FollowedChannelIDs []string
 }
+
+// PublicNotesFilter carries the optional filters of the upstream notes.ts
+// public-note timeline (#2106 L4 / #2215). Pointer bools distinguish "unset"
+// (no filter) from an explicit true/false, matching upstream's `!== undefined`.
+type PublicNotesFilter struct {
+	Local     bool  // userHost IS NULL (local-only notes)
+	Reply     *bool // replyId IS [NOT] NULL
+	Renote    *bool // renoteId IS [NOT] NULL
+	WithFiles *bool // fileIds != / = '{}'
+	Poll      *bool // hasPoll = TRUE / FALSE
+}

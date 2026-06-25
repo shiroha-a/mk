@@ -918,6 +918,9 @@ func (f *failingNoteRepo) ListLocalTimeline(_ int, _, _ string, _ model.Timeline
 func (f *failingNoteRepo) ListGlobalTimeline(_ int, _, _ string, _ model.TimelineDBFilter) ([]*model.Note, error) {
 	return nil, nil
 }
+func (f *failingNoteRepo) ListPublicNotes(_ model.PublicNotesFilter, _ int, _, _ string) ([]*model.Note, error) {
+	return nil, errors.New("boom")
+}
 func (f *failingNoteRepo) DeleteExpiredRemoteNotes(_, _ int) (int64, error) { return 0, nil }
 func (f *failingNoteRepo) DeleteByUserBatch(_ string, _ int) (int64, error) { return 0, nil }
 func (f *failingNoteRepo) CountReplyTargets(_, _ string, _ int) ([]model.ReplyTargetCount, error) {
@@ -1076,4 +1079,25 @@ func TestCreate_PollExpiredAfterTakesPriority(t *testing.T) {
 		// expiredAfter (now+1h) を採用 → 30 日後の expiresAt よりずっと前になる。
 		assert.True(t, poll.ExpiresAt.Before(time.Now().Add(2*time.Hour)), "expiredAfter を優先すべき、got %v", poll.ExpiresAt)
 	}
+}
+
+// #2106 L4 / #2215: noteIds 不在の POST /notes は upstream notes.ts の public note 一覧を返す
+// (localOnly note は除外)。
+func TestBulkShow_PublicTimeline(t *testing.T) {
+	h, noteRepo := newTestHandler(t)
+	noteRepo.Notes["np1"] = &model.Note{ID: "np1", UserID: "u1", Visibility: "public", User: &model.User{ID: "u1"}}
+	noteRepo.Notes["np2"] = &model.Note{ID: "np2", UserID: "u1", Visibility: "public", LocalOnly: true, User: &model.User{ID: "u1"}}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes", strings.NewReader(`{"limit":30}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, h.BulkShow(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	// localOnly (np2) は除外され、public な np1 のみ返る。
+	require.Len(t, out, 1)
+	assert.Equal(t, "np1", out[0]["id"])
 }
