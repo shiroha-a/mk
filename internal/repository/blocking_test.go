@@ -54,6 +54,17 @@ func TestBlockingRepository_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, empty)
 
+	// #2106 N3: ListBlockeeIDs は blocker 視点で「自分が block している blockee」を返す。
+	blockeeIDs, err := repo.ListBlockeeIDs(u1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{u2.ID}, blockeeIDs)
+	noneBlockee, err := repo.ListBlockeeIDs(u2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, noneBlockee)
+	emptyBlockee, err := repo.ListBlockeeIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, emptyBlockee)
+
 	require.NoError(t, repo.Delete(b))
 	_, err = repo.FindByPair(u1.ID, u2.ID)
 	assert.Error(t, err)

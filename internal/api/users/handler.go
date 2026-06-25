@@ -1113,6 +1113,8 @@ func (h *Handler) packRelationItems(
 	// `isFollowing` だけだと「pending 中なのに Follow ボタン」が出る regression
 	// になる。upstream UserDetailedNotMe schema と整合させる。
 	pendingFromMap, pendingToMap := h.batchPendingRequestRelations(viewer, bundleByID)
+	// #2106 N3: block/mute relation も batch query で実値を解決する (旧 best-effort false を是正)。
+	blockingMap, blockedMap, mutingMap, renoteMutingMap := h.batchBlockMuteRelations(viewer)
 
 	// remote user の notes/followers/following count を origin instance の
 	// /api/users/show から fetch して上書き (#1146)。Show 経路 (handler.go:329)
@@ -1150,13 +1152,20 @@ func (h *Handler) packRelationItems(
 				pendingTo := pendingToMap[b.User.ID]
 				d.HasPendingFollowRequestFromYou = &pendingFrom
 				d.HasPendingFollowRequestToYou = &pendingTo
-				// misskey_dart の UserDetailed union は isFollowing が present だと
-				// UserDetailedNotMeWithRelations を選び、isBlocking/isBlocked/
-				// isMuted/isRenoteMuted も非null bool として cast する (#1249)。
-				// follow/follower list は block/mute の権威ソースではない (#1144 の
-				// batch を壊さないため per-user lookup は避ける) ので best-effort
-				// false で埋める。正確な値は users/show 単体で取得される。
-				d.EnsureRelationFlags()
+				// #2106 N3: misskey_dart の UserDetailed union は isFollowing が present だと
+				// UserDetailedNotMeWithRelations を選び isBlocking/isBlocked/isMuted/isRenoteMuted も
+				// 非null bool として cast する (#1249)。旧実装は best-effort false に倒していたが、
+				// upstream getRelations 同様 batch query (viewer の outgoing/incoming を 1 query ずつ)
+				// で実値を埋める。
+				isBlocking := blockingMap[b.User.ID]
+				isBlocked := blockedMap[b.User.ID]
+				isMuted := mutingMap[b.User.ID]
+				isRenoteMuted := renoteMutingMap[b.User.ID]
+				d.IsBlocking = &isBlocking
+				d.IsBlocked = &isBlocked
+				d.IsMuted = &isMuted
+				d.IsRenoteMuted = &isRenoteMuted
+				d.EnsureRelationFlags() // 残った nil field を defensive に false で埋める
 				// follower にだけ followedMessage を見せる (#1558)。
 				if isFollowing && b.Profile != nil {
 					entity.SetFollowedMessageForFollower(&d, b.Profile.FollowedMessage)
@@ -1205,6 +1214,44 @@ func (h *Handler) batchFollowRelations(viewer *model.User, bundleByID map[string
 		}
 	}
 	return followingMap, followedMap
+}
+
+// batchBlockMuteRelations resolves viewer's block/mute relations across the whole
+// candidate set in a few batch queries, mirroring upstream getRelations (#2106 N3):
+// blocking = viewer blocks candidate, blocked = candidate blocks viewer, muting /
+// renoteMuting = viewer mutes / renote-mutes candidate. viewer の outgoing/incoming を
+// 1 query ずつ取得して set 化するので per-user N+1 を避けられる (候補との照合は呼び元)。
+// viewer nil / repo 未配線時は nil map (= 各 dimension を解決しない、best-effort)。
+func (h *Handler) batchBlockMuteRelations(viewer *model.User) (blocking, blocked, muting, renoteMuting map[string]bool) {
+	if viewer == nil {
+		return nil, nil, nil, nil
+	}
+	toSet := func(ids []string) map[string]bool {
+		m := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			m[id] = true
+		}
+		return m
+	}
+	if h.blockingRepo != nil {
+		if ids, err := h.blockingRepo.ListBlockeeIDs(viewer.ID); err == nil {
+			blocking = toSet(ids)
+		}
+		if ids, err := h.blockingRepo.ListBlockerIDs(viewer.ID); err == nil {
+			blocked = toSet(ids)
+		}
+	}
+	if h.mutingRepo != nil {
+		if ids, err := h.mutingRepo.ListMuteeIDs(viewer.ID); err == nil {
+			muting = toSet(ids)
+		}
+	}
+	if h.renoteMutingRepo != nil {
+		if ids, err := h.renoteMutingRepo.ListMuteeIDs(viewer.ID); err == nil {
+			renoteMuting = toSet(ids)
+		}
+	}
+	return blocking, blocked, muting, renoteMuting
 }
 
 // batchPendingRequestRelations resolves viewer's pending follow_request

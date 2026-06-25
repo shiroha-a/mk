@@ -2228,3 +2228,33 @@ type stubBufferedReactions struct{}
 func (stubBufferedReactions) GetBufferedMany(_ context.Context, _ []string) (map[string]map[string]int64, error) {
 	return map[string]map[string]int64{}, nil
 }
+
+// #2106 N3: users/followers の embed user に viewer 視点の block/mute 実値を埋める
+// (旧実装は EnsureRelationFlags の best-effort false に倒していた)。
+func TestFollowers_PopulatesBlockMute(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 = target profile
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["alice"] = &model.User{ID: "alice", Username: "alice", UsernameLower: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	// alice follows user1 → alice が表示される follower。
+	_, err := h.followingService.Follow("alice", "user1", corefollowing.FollowOptions{})
+	require.NoError(t, err)
+	// viewer(bob) が alice を block + mute。
+	blockRepo := testutil.NewMockBlockingRepository()
+	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "bl1", BlockerID: "bob", BlockeeID: "alice"}))
+	h.SetBlockingRepo(blockRepo)
+	muteRepo := testutil.NewMockMutingRepository()
+	require.NoError(t, muteRepo.Create(&model.Muting{ID: "mu1", MuterID: "bob", MuteeID: "alice"}))
+	h.SetMutingRepo(muteRepo)
+
+	rec := postStub(h.Followers, `{"userId":"user1"}`, repo.Users["bob"])
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	follower := out[0]["follower"].(map[string]any)
+	assert.Equal(t, true, follower["isBlocking"], "viewer が block している follower は isBlocking=true")
+	assert.Equal(t, true, follower["isMuted"], "viewer が mute している follower は isMuted=true")
+	assert.Equal(t, false, follower["isBlocked"])
+	assert.Equal(t, false, follower["isRenoteMuted"])
+}

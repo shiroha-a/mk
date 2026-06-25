@@ -81,6 +81,24 @@ func (m *MockBlockingRepository) ListBlockerIDs(blockeeID string) ([]string, err
 	return ids, nil
 }
 
+// ListBlockeeIDs returns blockeeIDs of every block row whose blockerId equals
+// blockerID (#2106 N3).
+func (m *MockBlockingRepository) ListBlockeeIDs(blockerID string) ([]string, error) {
+	if blockerID == "" {
+		return nil, nil
+	}
+	if m.ExistsErr != nil {
+		return nil, m.ExistsErr
+	}
+	var ids []string
+	for _, b := range m.Blockings {
+		if b.BlockerID == blockerID {
+			ids = append(ids, b.BlockeeID)
+		}
+	}
+	return ids, nil
+}
+
 // MockMutingRepository is a test double for repository.MutingRepository.
 type MockMutingRepository struct {
 	Mutings map[string]*model.Muting

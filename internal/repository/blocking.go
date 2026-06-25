@@ -18,6 +18,10 @@ type BlockingRepository interface {
 	// roles/notes) to drop notes authored by someone who has blocked the
 	// viewer, matching upstream generateBlockedUserQueryForNotes (#1544).
 	ListBlockerIDs(blockeeID string) ([]string, error)
+	// ListBlockeeIDs returns the blockeeIDs of every block row whose blockerId
+	// equals the given user (= who blockerID blocks). users/followers・following
+	// で viewer の isBlocking を batch 解決するのに使う (#2106 N3)。
+	ListBlockeeIDs(blockerID string) ([]string, error)
 }
 
 type blockingRepository struct {
@@ -82,6 +86,22 @@ func (r *blockingRepository) ListBlockerIDs(blockeeID string) ([]string, error) 
 	if err := r.db.Model(&model.Blocking{}).
 		Where(`"blockeeId" = ?`, blockeeID).
 		Pluck(`"blockerId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// ListBlockeeIDs returns the blockeeIDs of every block row whose blockerId equals
+// blockerID (= who blockerID blocks). Used by users/followers・following to batch
+// resolve viewer's isBlocking (#2106 N3).
+func (r *blockingRepository) ListBlockeeIDs(blockerID string) ([]string, error) {
+	if blockerID == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.Blocking{}).
+		Where(`"blockerId" = ?`, blockerID).
+		Pluck(`"blockeeId"`, &ids).Error; err != nil {
 		return nil, err
 	}
 	return ids, nil
