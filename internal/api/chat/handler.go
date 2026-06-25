@@ -430,15 +430,11 @@ func (h *Handler) packMessageDetailed(m *model.ChatMessage, meID string) map[str
 	// base の {reaction} のまま。room 判定は ToRoomID 列で行う (ToRoom の eager
 	// load 有無に依らない)。
 	//
-	// 既知の差分: upstream は messages/show・search・history で full schema
-	// (packedChatMessageSchema) を使い、1on1 message でも reactions[].user を
-	// 含める。mk-go は全 endpoint が単一の packMessageDetailed を通り、room
-	// だけ user を付けるため、これらの endpoint で 1on1 message を返すと user が
-	// 欠ける。1on1 は参加者が 2 人で reactor が自明なため実害は小さく、room
-	// (多人数) の reactor 表示を優先して本 PR では room のみ対応する。
-	if m.ToRoomID != nil {
-		result["reactions"] = h.packRoomReactions(m)
-	}
+	// #2106 L18: upstream は messages/show・search・history で full schema
+	// (packedChatMessageSchema) を使い、1on1 message でも reactions[].user を必須にする
+	// (frontend XMessage.vue が record.user.id を参照する)。packRoomReactions は ToRoomID
+	// 非依存に "userID/reaction" を解決できるので、room/1on1 双方で user を埋める。
+	result["reactions"] = h.packRoomReactions(m)
 	return result
 }
 
@@ -889,7 +885,9 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		}
 		// upstream ChatService.createMessageToUser:177-179 は recipient の
 		// chatAvailability(write) が false なら送信を拒否する (#1796)。recipient が
-		// chat 不可なので 403 ACCESS_DENIED を返す (upstream は generic error)。
+		// chat 不可なので 403 ACCESS_DENIED を返す。
+		// #2106 L19 (意図的 divergence): upstream は generic Error で 500 INTERNAL_ERROR に
+		// なるが、mk-go は semantics 上適切な 403 ACCESS_DENIED を維持する (worse な 500 回避)。
 		if h.chatAvail != nil {
 			policy, _ := h.chatAvail.GetUserPolicies(*req.ToUserID)["chatAvailability"].(string)
 			if !middleware.ChatAvailabilityAllows(policy, "write") {

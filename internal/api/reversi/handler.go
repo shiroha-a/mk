@@ -269,6 +269,11 @@ func (h *Handler) Games(c echo.Context) error {
 	} else {
 		games, _ = h.repo.ListStartedCursor(sinceID, untilID, req.Limit)
 	}
+	// #2106 L15 (cherrypick-lineage divergence): vanilla の reversi/games は ReversiGameLite
+	// (form1/form2/logs/map を含まない) を返すが、mk-go は cherrypick 系統 + 連合対戦拡張
+	// (crc32 等) を持ち全 endpoint で Detailed packGame を共有する。追加 field は加算的で
+	// misskey-js は未知 field を無視するため drop-in client は壊れない。vanilla golden では
+	// なく cherrypick + 連合拡張を権威とする (MEMORY: reversi_cherrypick_lineage)。
 	out := make([]map[string]any, len(games))
 	for i, g := range games {
 		out[i] = packGame(g, h.idGen)
@@ -591,6 +596,11 @@ func (h *Handler) Surrender(c echo.Context) error {
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
+	}
+	// #2106 L16: upstream surrender.ts は isEnded(ALREADY_ENDED) を player 判定(ACCESS_DENIED)
+	// より先に評価する。終了済 game への非プレイヤー surrender は ALREADY_ENDED(400) を返す。
+	if game.IsEnded {
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ENDED", "Game has already ended.", "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d"))
 	}
 	if game.User1ID != user.ID && game.User2ID != user.ID {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))

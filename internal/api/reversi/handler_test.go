@@ -1094,3 +1094,14 @@ func surrenderErrorRec(t *testing.T, err error) *httptest.ResponseRecorder {
 	require.NoError(t, surrenderErrorResponse(c, err))
 	return rec
 }
+
+// #2106 L16: 終了済 game への非プレイヤー surrender は ACCESS_DENIED より先に ALREADY_ENDED。
+func TestSurrender_EndedBeforeNotPlayer(t *testing.T) {
+	h, repo := newTestHandler()
+	g := sampleGame()
+	g.IsEnded = true
+	repo.games["g1"] = g
+	rec := post(h.Surrender, `{"gameId":"g1"}`, &model.User{ID: "u3"}) // 非プレイヤー
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ALREADY_ENDED")
+}

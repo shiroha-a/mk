@@ -1831,7 +1831,8 @@ func TestPackMessageDetailed_RoomReactionsIncludeUser(t *testing.T) {
 }
 
 // 1on1 (lite) message の reactions は user を含まない。
-func TestPackMessageDetailed_1on1ReactionsOmitUser(t *testing.T) {
+// #2106 L18: 1on1 message の reactions も room と同じく user を含む (full ChatMessage schema)。
+func TestPackMessageDetailed_1on1ReactionsIncludeUser(t *testing.T) {
 	h, _ := newTestHandler()
 	userRepo := testutil.NewMockUserRepository()
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
@@ -1846,8 +1847,9 @@ func TestPackMessageDetailed_1on1ReactionsOmitUser(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, reactions, 1)
 	assert.Equal(t, "👍", reactions[0]["reaction"])
-	_, hasUser := reactions[0]["user"]
-	assert.False(t, hasUser, "1on1 lite reactions は user を省略する")
+	user, hasUser := reactions[0]["user"]
+	assert.True(t, hasUser, "1on1 reactions も user を含む (frontend が record.user.id を参照)")
+	require.NotNil(t, user)
 }
 
 // userRepo 未配線の room message は base の {reaction} に degrade する (crash しない)。

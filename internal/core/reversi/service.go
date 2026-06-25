@@ -682,6 +682,9 @@ func (s *Service) Surrender(ctx context.Context, gameID, userID string) error {
 	}
 	// PutStone 等と同じ順序でガードする。未スタートの対局に対する surrender は
 	// 「勝ち逃げ」と区別が付かなくなるので、開始前は拒否する。
+	// #2106 L17 (intentional divergence): vanilla/cherrypick の surrender は IsStarted を
+	// ガードせず pending game も終局させられるが、mk-go は勝ち逃げ防止のため未開始を
+	// NOT_STARTED で弾く意図的拡張。除去せず明文化する。
 	if !game.IsStarted {
 		return ErrNotStarted
 	}
