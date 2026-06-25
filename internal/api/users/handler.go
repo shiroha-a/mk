@@ -506,17 +506,24 @@ func (h *Handler) Show(c echo.Context) error {
 		// で pack する。旧実装は UserLite を返していた (#1547)。move 解決と remote
 		// stats fetch は list path 同様 N+1 回避のため bulk では行わない。
 		out := make([]entity.UserDetailed, 0, len(visible))
+		viewerID := ""
+		if viewer != nil {
+			viewerID = viewer.ID
+		}
 		for _, b := range visible {
 			detailed := entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 			resolver.FillUserLite(&detailed.UserLite)
 			h.populateUserEmojis(b.User, &detailed.UserLite)
 			h.applyModerationNote(&detailed, iAmModerator, b.Profile)
 			entity.ApplyModeratorSecurityFields(&detailed, iAmModerator, b.Profile)
-			// bulk は per-user の follow 関係を解決しないため isFollowing=false で
-			// gate する (#1558)。self / moderator は count を保持。non-public
-			// visibility の非 follower count は 0 化される (privacy 安全側)。
+			// #2106 N2: バルク show も他のマルチユーザー path (search / recommendation 等) 同様に
+			// viewer relation (isFollowing/isBlocking/isMuted/hasPendingFollowRequest* 等) を解決する。
+			// upstream show.ts:151 の packMany は getRelations を batch で当てる。最大 100 件なので
+			// per-user Apply で許容範囲。viewerIsFollowing は GateCountVisibility に渡し、follower の
+			// non-public count が誤って 0 化されないようにする。
+			viewerIsFollowing := h.viewerRelationRepos().Apply(&detailed, viewerID, b.User, b.Profile)
 			isMe := viewer != nil && viewer.ID == b.User.ID
-			entity.GateCountVisibility(&detailed, isMe, iAmModerator, false)
+			entity.GateCountVisibility(&detailed, isMe, iAmModerator, viewerIsFollowing)
 			out = append(out, detailed)
 		}
 		return c.JSON(http.StatusOK, out)

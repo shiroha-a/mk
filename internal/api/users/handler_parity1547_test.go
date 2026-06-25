@@ -228,3 +228,28 @@ func TestShow_NonModeratorOmitsModerationNote(t *testing.T) {
 	_, ok := out["moderationNote"]
 	assert.False(t, ok, "非 moderator には moderationNote を omit (#1547)")
 }
+
+// #2106 N2: users/show の userIds バルクモードも viewer relation (isFollowing 等) を emit する。
+func TestShow_BulkUserIDs_EmbedsViewerRelation(t *testing.T) {
+	h, repo := newTestHandler(t)
+	addTestUser(repo) // user1 / testuser
+	fRepo := testutil.NewMockFollowingRepository()
+	require.NoError(t, fRepo.Create(&model.Following{ID: "f1", FollowerID: "viewer1", FolloweeID: "user1"}))
+	h.SetFollowingRepo(fRepo)
+
+	rec := postStub(h.Show, `{"userIds":["user1"]}`, &model.User{ID: "viewer1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 1)
+	assert.Equal(t, true, out[0]["isFollowing"], "bulk show の user に viewer relation (isFollowing=true)")
+
+	// 匿名 bulk には relation を出さない。
+	rec = post(h.Show, `{"userIds":["user1"]}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var anon []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anon))
+	require.Len(t, anon, 1)
+	_, has := anon[0]["isFollowing"]
+	assert.False(t, has, "匿名 bulk show には relation を出さない")
+}
