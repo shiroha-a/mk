@@ -379,6 +379,18 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		return nil, errors.New("user is required")
 	}
 
+	// #2106 L33: upstream NoteCreateService は text を trim し、trim 後が空なら null に正規化
+	// してから content-less 判定・保存を行う。先頭/末尾空白を upstream と同じく除去して
+	// 保存値・AP 配送値を揃える。
+	if in.Text != nil {
+		trimmed := strings.TrimSpace(*in.Text)
+		if trimmed == "" {
+			in.Text = nil
+		} else {
+			in.Text = &trimmed
+		}
+	}
+
 	// notes/createのバリデーション: text/fileIds/renoteIdのいずれかが必須
 	if (in.Text == nil || *in.Text == "") && in.RenoteID == nil && len(in.FileIDs) == 0 {
 		return nil, ErrNoteContentRequired

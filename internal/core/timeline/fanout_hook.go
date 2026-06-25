@@ -364,6 +364,12 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 			}
 		}
 		for _, f := range rows {
+			// #2106 L34: upstream pushToTl は local かつ非 hibernated follower のみ home TL へ
+			// push する。remote follower はこのインスタンスの home TL を読まず、hibernated user は
+			// inactive なので、不要な Redis 書き込み・stream publish を避ける。
+			if f.FollowerHost != nil || f.IsFollowerHibernated {
+				continue
+			}
 			isReplyToFollower := isReply && n.ReplyUserID != nil && *n.ReplyUserID == f.FollowerID
 			// follower が note.mentions に含まれているなら withReplies=false の
 			// reply filter を escape する (mk-go 独自仕様 / 上流 TS は持たない

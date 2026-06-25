@@ -1384,3 +1384,28 @@ func TestFanoutHook_OnNoteDeleted_UserListLookupError(t *testing.T) {
 	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
 	h.OnNoteDeleted(n, &model.User{ID: "author"})
 }
+
+// #2106 L34: remote / hibernated follower の home TL には push しない (local non-hibernated のみ)。
+func TestFanoutHook_SkipsRemoteAndHibernatedFollowers(t *testing.T) {
+	h, fanout, following := newTestHook(t)
+	ctx := context.Background()
+	remoteHost := "remote.example"
+	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "localf", FolloweeID: "author"}
+	following.Followings["f2"] = &model.Following{ID: "f2", FollowerID: "remotef", FolloweeID: "author", FollowerHost: &remoteHost}
+	following.Followings["f3"] = &model.Following{ID: "f3", FollowerID: "hibf", FolloweeID: "author", IsFollowerHibernated: true}
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
+	author := &model.User{ID: "author"}
+	h.OnNoteCreated(n, author)
+
+	out, err := fanout.Get(ctx, HomeTimelineName("localf"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "local non-hibernated follower receives home push")
+
+	for _, fid := range []string{"remotef", "hibf"} {
+		out, err := fanout.Get(ctx, HomeTimelineName(fid), "", "", 10)
+		require.NoError(t, err)
+		assert.Empty(t, out, "follower %q (remote/hibernated) should not receive home push", fid)
+	}
+}

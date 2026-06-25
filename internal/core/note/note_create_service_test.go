@@ -2166,3 +2166,21 @@ func TestCreateService_ProhibitedWords_CaseSensitive(t *testing.T) {
 	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
 	require.NoError(t, err, "大文字の BADWORD は小文字 badword フィルタに (case-sensitive で) マッチしない")
 }
+
+// #2106 L33: 先頭/末尾空白を含む text は trim して保存する。
+func TestCreate_TrimsText(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	text := "  hello  "
+	n, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic})
+	require.NoError(t, err)
+	require.NotNil(t, n.Text)
+	assert.Equal(t, "hello", *n.Text)
+}
+
+// #2106 L33: 空白のみ text + ファイル/renote 無しは trim 後 nil で content-less 扱い。
+func TestCreate_WhitespaceOnlyTextRejected(t *testing.T) {
+	svc, _, _ := newCreateService(t)
+	text := "   "
+	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic})
+	require.ErrorIs(t, err, note.ErrNoteContentRequired)
+}

@@ -334,3 +334,12 @@ func TestVote_HappyPathIncrementsVotes(t *testing.T) {
 	require.NoError(t, svc.Vote(&model.User{ID: "viewer"}, "n1", 1))
 	assert.Equal(t, int64(1), pollRepo.Polls["n1"].Votes[1])
 }
+
+// #2106 L32: 期限切れ poll への範囲外 choice は invalidChoice より先に ALREADY_EXPIRED を返す。
+func TestVote_ExpiredBeforeInvalidChoice(t *testing.T) {
+	svc, noteRepo, pollRepo, _ := newSvc(t)
+	past := time.Now().Add(-time.Hour)
+	seedPollNote(noteRepo, pollRepo, "n1", "author", false, &past)
+	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 99) // choice=99 は範囲外
+	require.ErrorIs(t, err, poll.ErrPollExpired)
+}

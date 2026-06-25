@@ -155,11 +155,13 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 		return ErrNoPoll
 	}
 
-	if choice < 0 || choice >= len(p.Choices) {
-		return ErrInvalidChoice
-	}
+	// #2106 L32: upstream notes/polls/vote.ts は alreadyExpired を invalidChoice より先に
+	// 判定する。期限切れ poll への範囲外 choice は ALREADY_EXPIRED を返す。
 	if p.ExpiresAt != nil && !s.nowFn().Before(*p.ExpiresAt) {
 		return ErrPollExpired
+	}
+	if choice < 0 || choice >= len(p.Choices) {
+		return ErrInvalidChoice
 	}
 
 	// 既に同じ choice に投票していたら重複エラー
