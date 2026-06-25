@@ -33,9 +33,13 @@ type DriveFileEntity struct {
 	Comment      *string             `json:"comment"`
 	URL          string              `json:"url"`
 	ThumbnailURL *string             `json:"thumbnailUrl"`
-	WebpublicURL *string             `json:"webpublicUrl"`
-	FolderID     *string             `json:"folderId"`
-	UserID       *string             `json:"userId"`
+	// WebpublicURL は upstream の packedDriveFileSchema / misskey-js autogen に存在しない
+	// mk-go 拡張 field (#460 / #1529 由来、proxy 化済み)。misskey-js は structural typing で
+	// 未知 field を無視するため drop-in client は壊れず、値も proxy 化済で IP leak は無い。
+	// 厳密 parity では余剰だが既存 client 依存の可能性を考慮し保持する (#2106 L51)。
+	WebpublicURL *string `json:"webpublicUrl"`
+	FolderID     *string `json:"folderId"`
+	UserID       *string `json:"userId"`
 	// Folder は upstream が detail packing で常に出す (= null or DriveFolder)。
 	// 旧実装は omitempty で省略していたが drop-in shape drift だったため #812
 	// で外した。caller (detail 経路) で pre-fetch してセットし、未設定なら

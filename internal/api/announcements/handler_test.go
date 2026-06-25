@@ -312,7 +312,8 @@ func TestAdminCreate_PerUserPublishesAnnouncementCreated(t *testing.T) {
 	packed, ok := body["announcement"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "You", packed["title"])
-	assert.Equal(t, true, packed["forYou"])
+	// #2106 L24/L52: create event は me-less pack なので forYou=false。
+	assert.Equal(t, false, packed["forYou"])
 	assert.Equal(t, false, packed["isRead"])
 }
 

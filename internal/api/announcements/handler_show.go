@@ -40,7 +40,12 @@ func (h *Handler) Show(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 		}
 	}
-	item := packAnnouncement(a, h.idGen)
+	// #2106 L52: forYou は viewer 自身宛てで true。匿名は viewerID="" (forYou=false)。
+	viewerID := ""
+	if me != nil {
+		viewerID = me.ID
+	}
+	item := packAnnouncement(a, h.idGen, viewerID)
 	// upstream getAnnouncement は announcement_reads を引いて isRead=(read!==null)
 	// を pack する。匿名では isRead を undefined にし key を省略する。mk-go は read
 	// 状態を見ずに常に false を返していた (#1955)。

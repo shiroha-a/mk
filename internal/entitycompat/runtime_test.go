@@ -337,7 +337,7 @@ func TestAnnouncementShapeL2(t *testing.T) {
 		},
 	}
 	for name, a := range cases {
-		assertNoGatedDrift(t, "Announcement["+name+"]", entity.PackAnnouncement(a, idGen, true), schema)
+		assertNoGatedDrift(t, "Announcement["+name+"]", entity.PackAnnouncement(a, idGen, true, ""), schema)
 	}
 }
 

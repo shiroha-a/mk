@@ -10,7 +10,10 @@ import (
 // isRead is a viewer-dependent flag controlled by the caller; for events
 // emitted at creation time it should be false. forYou is set to true when
 // the announcement targets a specific user (UserID != nil).
-func PackAnnouncement(a *model.Announcement, idGen id.Generator, isRead bool) map[string]any {
+// PackAnnouncement serialises an announcement into the upstream-compatible shape.
+// viewerID is the requesting user's ID ("" for me-less paths such as admin create
+// and broadcast events); it drives forYou (#2106 L52: upstream は userId === me.id 判定)。
+func PackAnnouncement(a *model.Announcement, idGen id.Generator, isRead bool, viewerID string) map[string]any {
 	if a == nil {
 		return nil
 	}
@@ -40,7 +43,10 @@ func PackAnnouncement(a *model.Announcement, idGen id.Generator, isRead bool) ma
 		"display":                a.Display,
 		"needConfirmationToRead": a.NeedConfirmationToRead,
 		"silence":                a.Silence,
-		"forYou":                 a.UserID != nil,
-		"isRead":                 isRead,
+		// #2106 L52: upstream は forYou = (announcement.userId === me?.id)。me-less (viewerID="")
+		// では false。通常は List クエリで user-targeted 行が viewer にしか返らないため一致するが、
+		// create レスポンス (me-less) や匿名閲覧で厳密一致させる。
+		"forYou": a.UserID != nil && *a.UserID == viewerID,
+		"isRead": isRead,
 	}
 }

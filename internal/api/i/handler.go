@@ -1911,7 +1911,8 @@ func (h *Handler) fillUnreadFields(ctx context.Context, u *model.User, resp map[
 				// 含む upstream 互換の shape に揃える。独自 map だと createdAt が
 				// 欠落し、misskey_dart の AnnouncementsResponse.fromJson が
 				// createdAt を非null String として cast して落ちる (#1224)。
-				packed := entity.PackAnnouncement(a, h.idGen, false)
+				// #2106 L52: UnreadForUser は viewer u 宛て/global の announcement。viewerID=u.ID。
+				packed := entity.PackAnnouncement(a, h.idGen, false, u.ID)
 				if packed == nil {
 					// nil entry を配列に入れると [null] になり、misskey_dart が
 					// 各要素を fromJson する際 null で落ちるため除外する。

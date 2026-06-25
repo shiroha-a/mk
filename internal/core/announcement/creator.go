@@ -58,7 +58,8 @@ func (c *Creator) Create(a *model.Announcement) error {
 	if err := c.repo.Create(a); err != nil {
 		return err
 	}
-	body := map[string]any{"announcement": entity.PackAnnouncement(a, c.idGen, false)}
+	// #2106 L52: broadcast event は me-less なので viewerID="" (forYou=false)。
+	body := map[string]any{"announcement": entity.PackAnnouncement(a, c.idGen, false, "")}
 	if a.UserID != nil {
 		if c.publisher != nil {
 			c.publisher.PublishMainEvent(*a.UserID, "announcementCreated", body)

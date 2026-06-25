@@ -87,7 +87,8 @@ func TestCreate_PerUserPublishesAnnouncementCreated(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, a.ID, packed["id"])
 	assert.Equal(t, "Change to Invitation-Only", packed["title"])
-	assert.Equal(t, true, packed["forYou"])
+	// #2106 L24/L52: create event は upstream 同様 me-less pack なので forYou=false。
+	assert.Equal(t, false, packed["forYou"])
 	assert.Equal(t, false, packed["isRead"])
 	assert.Equal(t, "2026-06-01T12:00:00.000Z", packed["createdAt"])
 }

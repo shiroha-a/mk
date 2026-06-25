@@ -132,10 +132,13 @@ func resolveUserRolesSorted(userID string) []*model.Role {
 
 // packBadgeRoles returns the user's badge roles ready for JSON serialisation
 // as the `badgeRoles` field of a UserLite. Filter mirrors upstream
-// `r.asBadge && r.isPublic` (the iAmModerator branch — "moderators can see
-// private badges" — is not yet implemented because PackUserLite has no
-// viewer context; that is a follow-up to thread viewer through the entity
-// pack path).
+// `r.asBadge && r.isPublic`.
+//
+// #2106 L11/L53 (documented limitation): upstream は `r.isPublic || iAmModerator` で
+// filter し moderator は非公開 badge も見られるが、mk-go は PackUserLite に viewer context
+// が無いため常に public のみで filter する。viewer/iAmModerator を全 pack 経路に thread する
+// 大改修が必要なため現状は documented limitation として維持する (一般ユーザー視点の出力は
+// upstream と一致、moderator が他者の非公開 badge を見る軽微なケースのみ乖離)。
 //
 // upstream の `(meta.showRoleBadgesOfRemoteUsers || user.host == null)` 条件を
 // 再現する (#1653)。local user (host==nil) は常に pack し、remote user は

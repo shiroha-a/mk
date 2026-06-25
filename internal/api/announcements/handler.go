@@ -147,9 +147,14 @@ func (h *Handler) List(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// #2106 L52: forYou は viewer 自身宛て announcement で true。匿名は viewerID="" (forYou=false)。
+	viewerID := ""
+	if user != nil {
+		viewerID = user.ID
+	}
 	result := make([]map[string]any, 0, len(items))
 	for _, a := range items {
-		item := packAnnouncement(a, h.idGen)
+		item := packAnnouncement(a, h.idGen, viewerID)
 		if user != nil {
 			read, _ := h.repo.IsRead(user.ID, a.ID)
 			item["isRead"] = read
@@ -273,7 +278,8 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 	}
 	// upstream AnnouncementService.create: per-user (userId 指定) は main へ、
 	// global (userId 無し) は broadcast stream へ announcementCreated を流す (#2056)。
-	body := map[string]any{"announcement": entity.PackAnnouncement(a, h.idGen, false)}
+	// #2106 L24/L52: create event は upstream 同様 me-less で pack する (viewerID="" → forYou=false)。
+	body := map[string]any{"announcement": entity.PackAnnouncement(a, h.idGen, false, "")}
 	if a.UserID != nil {
 		if h.mainStreamPublisher != nil {
 			h.mainStreamPublisher.PublishMainEvent(*a.UserID, "announcementCreated", body)
@@ -291,7 +297,8 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 	// forYou/isRead/icon 等を含む full shape。唯一 imageUrl だけ upstream は raw を返す
 	// (admin/list #1967 と同じく proxy しない)。public 用 PackAnnouncement は #1529 で
 	// imageUrl を proxy 化するため、その field だけ raw に上書きする (#1977)。
-	resp := entity.PackAnnouncement(a, h.idGen, false)
+	// #2106 L24: upstream create は me-less pack なので forYou=false (viewerID="")。
+	resp := entity.PackAnnouncement(a, h.idGen, false, "")
 	resp["imageUrl"] = a.ImageURL // upstream wire は raw imageUrl
 	return c.JSON(http.StatusOK, resp)
 }
@@ -508,6 +515,6 @@ func (h *Handler) AdminList(c echo.Context) error {
 // check. admin 管理用 field (forExistingUsers / isActive) は user-facing には
 // 出さない: upstream の user-facing pack (AnnouncementEntityService.pack) はこれらを
 // 返さず、admin は AdminList が別途返す (#2101)。
-func packAnnouncement(a *model.Announcement, idGen id.Generator) map[string]any {
-	return entity.PackAnnouncement(a, idGen, false)
+func packAnnouncement(a *model.Announcement, idGen id.Generator, viewerID string) map[string]any {
+	return entity.PackAnnouncement(a, idGen, false, viewerID)
 }
