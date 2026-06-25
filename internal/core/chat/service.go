@@ -1245,6 +1245,23 @@ func (s *Service) IsRoomMember(userID, roomID string) (bool, error) {
 	return false, nil
 }
 
+// CanViewRoomTimeline reports whether userID may subscribe to the room's timeline
+// stream: a room member (owner/member) or a moderator (#2106 L57, mirrors upstream
+// hasPermissionToViewRoomTimeline = isRoomMember || isModerator)。
+func (s *Service) CanViewRoomTimeline(userID, roomID string) (bool, error) {
+	member, err := s.IsRoomMember(userID, roomID)
+	if err != nil {
+		return false, err
+	}
+	if member {
+		return true, nil
+	}
+	if s.moderatorChecker != nil && s.moderatorChecker.IsModerator(userID) {
+		return true, nil
+	}
+	return false, nil
+}
+
 // packMessage produces a JSON-serializable projection of a ChatMessage for
 // outbound WebSocket events. フロント互換のため本家 ChatMessageLite と同じ
 // 主要フィールドを含める。createdAt は idGen の初期化未完了時 (テスト等)

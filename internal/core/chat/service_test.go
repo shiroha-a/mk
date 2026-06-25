@@ -756,3 +756,22 @@ func TestUnreact_NormalizesVariationSelector(t *testing.T) {
 	body := last.body.(map[string]any)
 	assert.Equal(t, "❤", body["reaction"])
 }
+
+// #2106 L57: moderator は non-member room の timeline を購読できる (CanViewRoomTimeline)。
+func TestCanViewRoomTimeline_ModeratorBypass(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", Name: "test-room", OwnerID: "alice"}
+	svc.SetModeratorChecker(&stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+
+	ok, err := svc.CanViewRoomTimeline("mod1", "r1")
+	require.NoError(t, err)
+	assert.True(t, ok, "moderator は non-member room を購読できる")
+
+	ok2, err := svc.CanViewRoomTimeline("bob", "r1")
+	require.NoError(t, err)
+	assert.False(t, ok2, "非 moderator non-member は購読不可")
+
+	ok3, err := svc.CanViewRoomTimeline("alice", "r1")
+	require.NoError(t, err)
+	assert.True(t, ok3, "owner は moderator でなくても購読可")
+}

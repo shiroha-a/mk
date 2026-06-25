@@ -159,7 +159,8 @@ func (d *Dispatcher) handleConnect(body json.RawMessage) {
 	// shouldShare付きチャンネルで既に同名が接続済みなら新規作成しない
 	if d.hasShareableChannelLocked(req.Channel) {
 		d.mu.Unlock()
-		d.sendConnectedIfRequested(req.ID, req.Pong)
+		// #2106 L58: upstream Connection.ts は既接続 shareable channel への重複 connect を
+		// pong 有無に関わらず silent に return する (connected ack を送らない)。
 		return
 	}
 	// 1 接続あたりの channel 数上限 (upstream MAX_CHANNELS_PER_CONNECTION=32、#1943)。

@@ -51,8 +51,10 @@ func (c *ChatRoomChannel) Init(params json.RawMessage) error {
 		return stream.ErrInvalidParams
 	}
 	if c.svc != nil {
-		member, err := c.svc.IsRoomMember(user.ID, p.RoomID)
-		if err != nil || !member {
+		// #2106 L57: room メンバーに加え moderator も購読を許可する
+		// (upstream hasPermissionToViewRoomTimeline)。
+		ok, err := c.svc.CanViewRoomTimeline(user.ID, p.RoomID)
+		if err != nil || !ok {
 			return stream.ErrInvalidParams
 		}
 	}

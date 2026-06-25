@@ -958,6 +958,17 @@ func (s *Server) setupRoutes() {
 	// この writer を通る。
 	api.Use(middleware.WWWAuthenticate())
 
+	// #2106 L56: upstream ApiServerService は /api scope の全応答に既定の
+	// Cache-Control: private, max-age=0, must-revalidate を付与する。cacheSec endpoint は
+	// handler 内で public, max-age=... に上書きする (handler の Set が後勝ち)。非 cacheSec の
+	// allowGet GET を中間 proxy が誤キャッシュするのを防ぐ。
+	api.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Response().Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+			return next(c)
+		}
+	})
+
 	// Fastify互換のJSON body事前パース (#1609)。本家はbody parseが
 	// endpoint handler (rate limit / 認証を含む) より先に走るため、
 	// rate limiterより前に登録して malformed JSON を FST_ERR_CTP_* envelope

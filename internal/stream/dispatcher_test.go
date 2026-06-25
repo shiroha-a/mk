@@ -696,7 +696,9 @@ func TestDispatcher_NonPermittedChannel_AlwaysAllowed(t *testing.T) {
 	assert.Len(t, d.channels, 1)
 }
 
-func TestDispatcher_ShareablePongAck(t *testing.T) {
+// #2106 L58: 既接続 shareable channel への重複 connect は pong=true でも connected ack を
+// 返さない (upstream Connection.ts は silent return)。
+func TestDispatcher_ShareableNoPongAck(t *testing.T) {
 	bus := newStubBus()
 	registry := NewRegistry()
 	registry.Register("shared", func(ctx ChannelContext) Channel {
@@ -710,12 +712,14 @@ func TestDispatcher_ShareablePongAck(t *testing.T) {
 	go conn.Start()
 	defer conn.Close()
 
-	// 1回目: 作成される
+	// 1回目: 作成され connected ack が返る。
 	d.HandleClientMessage("connect", json.RawMessage(`{"id":"a","channel":"shared","pong":true}`))
-	// 2回目: 既存共有なのでエントリは作られないが、pongはACKされる
-	d.HandleClientMessage("connect", json.RawMessage(`{"id":"b","channel":"shared","pong":true}`))
+	require.Eventually(t, func() bool { return fc.writeCount() >= 1 }, time.Second, 10*time.Millisecond)
 
-	require.Eventually(t, func() bool { return fc.writeCount() >= 2 }, time.Second, 10*time.Millisecond)
+	// 2回目: 既存共有なので ack しない (write が増えない)。
+	d.HandleClientMessage("connect", json.RawMessage(`{"id":"b","channel":"shared","pong":true}`))
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 1, fc.writeCount(), "既接続 shareable への重複 connect は ack しない")
 }
 
 // --- Init error path ---
