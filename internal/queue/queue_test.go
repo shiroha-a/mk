@@ -728,6 +728,10 @@ func TestClient_EnqueueUserWebhook(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeUserWebhook, tasks[0].Type)
+	// #2106 L59: upstream の総試行 4 回 (= WithMaxRetry(3) → asynq MaxRetry=3 = 3 retries + 1)。
+	info, err := insp.GetTaskInfo(queue.WebhookQueueName, tasks[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, info.MaxRetry, "webhook は総試行 4 回 (asynq MaxRetry=3)")
 }
 
 func TestClient_EnqueueUserWebhook_ClosedClientFails(t *testing.T) {

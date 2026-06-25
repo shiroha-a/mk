@@ -177,7 +177,8 @@ func TestWebhookProcessor_User_Override(t *testing.T) {
 	assert.False(t, recorded, "override test send must not record status on the saved webhook")
 }
 
-func TestWebhookProcessor_User_NoSecretOmitsHeader(t *testing.T) {
+// #2106 L62: secret 空でも upstream は X-Misskey-Hook-Secret ヘッダーを (空値で) 送る。
+func TestWebhookProcessor_User_EmptySecretSendsEmptyHeader(t *testing.T) {
 	client := &stubHTTPClient{}
 	p, _, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
 		"h1": {ID: "h1", URL: "https://hook.example/u1"},
@@ -185,6 +186,9 @@ func TestWebhookProcessor_User_NoSecretOmitsHeader(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	require.NoError(t, p.HandleUser(context.Background(), task))
 	require.Len(t, client.reqs, 1)
+	// ヘッダー自体は存在し (omit しない)、値は空。
+	_, present := client.reqs[0].Header["X-Misskey-Hook-Secret"]
+	assert.True(t, present, "secret 空でも header は送出される")
 	assert.Empty(t, client.reqs[0].Header.Get("X-Misskey-Hook-Secret"))
 }
 
@@ -221,8 +225,8 @@ func TestWebhookProcessor_User_NetworkError(t *testing.T) {
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, driver.SkipRetry)
-	// ネットワークエラーは status=0 で記録
-	assert.Equal(t, 0, repo.statusCalled["h1"])
+	// #2106 L60: ネットワーク障害 (非 StatusError) は upstream 同様 status=1 で記録する。
+	assert.Equal(t, 1, repo.statusCalled["h1"])
 }
 
 func TestWebhookProcessor_User_NotFoundSkipsRetry(t *testing.T) {

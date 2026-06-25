@@ -105,17 +105,18 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 	req.Header.Set("User-Agent", p.userAgent)
 	req.Header.Set("X-Misskey-Host", p.host)
 	req.Header.Set("X-Misskey-Hook-Id", payload.WebhookID)
-	if secret != "" {
-		req.Header.Set("X-Misskey-Hook-Secret", secret)
-	}
+	// #2106 L62: upstream は secret 空でも X-Misskey-Hook-Secret ヘッダーを無条件に送る
+	// (受信側が header の有無で分岐する場合の wire 互換)。
+	req.Header.Set("X-Misskey-Hook-Secret", secret)
 
 	resp, err := p.client.Do(req)
 	sentAt := time.Now()
 	if err != nil {
-		// ネットワーク障害はリトライ対象 (asynq が再試行する)。
-		// ステータスコード 0 を記録しておく (override test 送信時は記録しない)。
+		// ネットワーク障害はリトライ対象。
+		// #2106 L60: upstream は非 StatusError (ネットワーク障害) のとき latestStatus=1 を
+		// 記録する (StatusError なら statusCode)。0 は「未送信」を示すので 1 に揃える。
 		if !isOverride {
-			p.recordStatus(payload.WebhookID, user, sentAt, 0)
+			p.recordStatus(payload.WebhookID, user, sentAt, 1)
 		}
 		slog.Warn("webhook deliver: http error",
 			"hookId", payload.WebhookID, "url", url, "err", err)

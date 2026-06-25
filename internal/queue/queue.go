@@ -368,7 +368,10 @@ func (c *Client) EnqueueUserWebhook(ctx context.Context, payload WebhookPayload)
 	body := mustMarshal(payload)
 	base := []driver.EnqueueOption{
 		driver.WithQueue(WebhookQueueName),
-		driver.WithMaxRetry(4),
+		// #2106 L59: upstream QueueService は BullMQ attempts:4 (= 総試行 4 回)。
+		// mkqdriver は WithMaxRetry(N)→WithAttempts(N+1) 変換なので総試行 4 には
+		// WithMaxRetry(3) が正しい (deliver/inbox と同じ total→MaxRetry 規約)。
+		driver.WithMaxRetry(3),
 		// deliver/inbox と同じ custom backoff を webhook 配送にも付与する。
 		// worker 側 strategy は全 queue に登録済みなので enqueue 側で付けるだけで
 		// 段階的なリトライ間隔が効く (#1408)。
@@ -383,7 +386,8 @@ func (c *Client) EnqueueSystemWebhook(ctx context.Context, payload WebhookPayloa
 	body := mustMarshal(payload)
 	base := []driver.EnqueueOption{
 		driver.WithQueue(WebhookQueueName),
-		driver.WithMaxRetry(4),
+		// #2106 L59: upstream 総試行 4 回に揃える (WithMaxRetry(3)+1=4)。
+		driver.WithMaxRetry(3),
 		// user webhook と同様に custom backoff を付与する (#1408)。
 		driver.WithFederationBackoff(),
 	}

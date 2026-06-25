@@ -210,10 +210,10 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 	}
 	publishedNote, err := p.publisher.Create(in)
 	if err != nil {
-		// publish 失敗時は asynq retry に任せ、draft 行はそのまま残す
-		// (= 次回 retry で再試行可能)。同時に user に postFailed 通知を
-		// 1 度だけ発火する (= upstream \`scheduledNotePostFailed\` と同 shape、
-		// extra に noteDraftId)。
+		// #2106 L61: upstream PostScheduledNoteProcessorService は publish 失敗時に
+		// scheduledNotePostFailed 通知のみ行い rethrow せず正常終了する (retry しない)。
+		// mk-go も error を返さず job を完了扱いにする。これにより lock TTL 内の silent
+		// skip / TTL 超過後の二重 publish (二重通知) という潜在 retry バグを回避する。
 		slog.Warn("scheduled note publish failed",
 			"noteDraftId", payload.NoteDraftID, "userId", draft.UserID, "err", err)
 		if p.notifier != nil {
@@ -222,12 +222,10 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 				Type:       notification.TypeScheduledNotePostFailed,
 				Extra:      map[string]any{"noteDraftId": draft.ID},
 			}); nerr != nil {
-				// notification 失敗は publish error 経路に影響させない (= retry
-				// 中に多重通知を避ける best-effort)。
 				logNotificationErr("postFailed", payload.NoteDraftID, nerr)
 			}
 		}
-		return fmt.Errorf("publish scheduled note: %w", err)
+		return nil
 	}
 	// publish 成功通知 (#1045 Phase 2-B)。upstream は `noteId` を引数で渡し、
 	// frontend が note を embed して表示する。

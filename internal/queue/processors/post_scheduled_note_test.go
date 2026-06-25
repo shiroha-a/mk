@@ -133,8 +133,9 @@ func TestPostScheduledNote_Unscheduled(t *testing.T) {
 	assert.Contains(t, draftRepo.drafts, "d1", "unscheduled draft は残す")
 }
 
-// publish 失敗時は error を返して asynq retry に任せる。draft は残る。
-func TestPostScheduledNote_PublishErrorRetries(t *testing.T) {
+// #2106 L61: publish 失敗時も upstream 同様 error を返さず job を完了扱いにする
+// (retry しない)。draft は残る。
+func TestPostScheduledNote_PublishErrorNoRetry(t *testing.T) {
 	scheduledAt := timeFromMs(1234)
 	drafts := map[string]*model.NoteDraft{
 		"d1": {
@@ -146,7 +147,7 @@ func TestPostScheduledNote_PublishErrorRetries(t *testing.T) {
 	p, draftRepo, pub := newProcessor(drafts, users)
 	pub.err = errors.New("publish boom")
 	err := p.Handle(context.Background(), taskFor("d1"))
-	require.Error(t, err)
+	require.NoError(t, err, "publish 失敗でも retry せず job 完了 (upstream 互換)")
 	assert.Contains(t, draftRepo.drafts, "d1", "publish 失敗時は draft 残す")
 }
 
@@ -347,7 +348,7 @@ func TestPostScheduledNote_NotifiesOnFailed(t *testing.T) {
 	p.SetNotifier(notif)
 
 	err := p.Handle(context.Background(), taskFor("d1"))
-	require.Error(t, err, "publish 失敗は handler error で伝播")
+	require.NoError(t, err, "#2106 L61: publish 失敗でも error を返さない (retry しない)")
 	require.Len(t, notif.calls, 1, "postFailed 通知が 1 度発火")
 	assert.Equal(t, "u1", notif.calls[0].NotifieeID)
 	assert.Equal(t, notification.TypeScheduledNotePostFailed, notif.calls[0].Type)
