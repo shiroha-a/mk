@@ -68,3 +68,16 @@ func TestParseHTML_InvalidHTML(t *testing.T) {
 	r := ParseHTML(strings.NewReader("<not valid <<< html"), "https://example.com")
 	assert.Equal(t, "https://example.com", r.URL)
 }
+
+// #2106 L45: og:url が javascript:/data: 等の危険な scheme の場合、url field は安全な
+// pageURL にフォールバックする (素通ししない)。
+func TestParseHTML_DangerousCanonicalURL(t *testing.T) {
+	html := `<html><head>
+		<meta property="og:title" content="x">
+		<meta property="og:url" content="javascript:alert(1)">
+	</head></html>`
+	r := ParseHTML(strings.NewReader(html), "https://example.com/original")
+	if r.URL != "https://example.com/original" {
+		t.Fatalf("dangerous og:url should fall back to pageURL, got %q", r.URL)
+	}
+}

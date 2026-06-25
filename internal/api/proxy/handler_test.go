@@ -628,3 +628,15 @@ func TestHandle_TooLarge(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 }
+
+// #2106 L43: mk-go 自身の UA (mk-go/) も recursive proxy として弾く。
+func TestHandle_RecursiveProxy_MkGoUA(t *testing.T) {
+	h, e, imgServer := setupHandler(t, map[string]bool{})
+	defer imgServer.Close()
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?url="+imgServer.URL+"/avatar.png",
+		map[string]string{"User-Agent": "mk-go/0.9.1 (https://other.example)"})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}

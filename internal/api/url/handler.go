@@ -24,6 +24,9 @@ func NewHandler(fetcher *urlpreview.Fetcher) *Handler {
 // Preview handles GET /url (matches Misskey's endpoint path).
 // フロントエンドがリンクプレビューカード表示のために呼ぶ。
 func (h *Handler) Preview(c echo.Context) error {
+	// #2106 L44: upstream は lang query を summaly に渡し OGP の言語別 alternate を選ぶが、
+	// mk-go は HTML を直接 parse する設計のため lang を honor できず無視する (preview の
+	// 言語選択のみ乖離、実害は軽微)。
 	rawURL := c.QueryParam("url")
 	if rawURL == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url is required.", apierr.UUIDInvalidParam))

@@ -212,6 +212,13 @@ func isHTTPSURL(u string) bool {
 	return strings.HasPrefix(strings.ToLower(u), "https://")
 }
 
+// isHTTPOrHTTPSURL は http:// または https:// scheme を string match で判定する
+// (#2106 L45: canonical url の scheme 検証用)。
+func isHTTPOrHTTPSURL(u string) bool {
+	lu := strings.ToLower(u)
+	return strings.HasPrefix(lu, "http://") || strings.HasPrefix(lu, "https://")
+}
+
 // numAttr coerces an oEmbed width/height field (which can be number or
 // string in the wild — providers are inconsistent) to int. 0 on failure.
 func numAttr(v any) int {

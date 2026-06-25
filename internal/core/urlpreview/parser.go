@@ -32,7 +32,10 @@ func ParseHTML(r io.Reader, pageURL string) *Result {
 	apID := resolveURL(base, firstNonEmpty(meta["ap:id"]))
 
 	canonical := resolveURL(base, meta["og:url"])
-	if canonical == "" {
+	// #2106 L45: upstream は summary.url が http(s) でなければ throw する。canonical (og:url) が
+	// javascript:/data: 等の危険な scheme の場合、API レスポンスの url field に素通ししないよう
+	// 安全な pageURL にフォールバックする (defense-in-depth)。
+	if canonical == "" || !isHTTPOrHTTPSURL(canonical) {
 		canonical = pageURL
 	}
 	result := &Result{
