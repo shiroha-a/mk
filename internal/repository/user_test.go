@@ -1500,3 +1500,30 @@ func TestUserRepository_CountLocalUsers_Error(t *testing.T) {
 	_, err = repo.CountLocalUsersActiveSince(time.Now())
 	assert.Error(t, err)
 }
+
+// #2230: HardDeleteUser は user 行を物理削除し、FK ON DELETE CASCADE で従属行
+// (note 等) も消える。delete-account cascade の local user 物理削除を支える。
+func TestUserRepository_HardDeleteUser(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	user := insertTestUser(t, "u_hd_1", "hduser")
+
+	text := "x"
+	require.NoError(t, testDB.Create(&model.Note{
+		ID: "n_hd_1", UserID: user.ID, Text: &text,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}).Error)
+
+	require.NoError(t, repo.HardDeleteUser(user.ID))
+
+	// user 行が消えている。
+	_, err := repo.FindByID(user.ID)
+	assert.Error(t, err, "user row must be physically gone")
+	// note が FK cascade で消えている。
+	var nc int64
+	require.NoError(t, testDB.Model(&model.Note{}).Where(`"userId" = ?`, user.ID).Count(&nc).Error)
+	assert.Zero(t, nc, "notes must cascade on user delete")
+
+	// 空 ID / 不在 ID は no-op (error にしない)。
+	require.NoError(t, repo.HardDeleteUser(""))
+	require.NoError(t, repo.HardDeleteUser("nonexistent_hd"))
+}

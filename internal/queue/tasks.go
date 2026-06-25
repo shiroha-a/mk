@@ -321,6 +321,12 @@ func DecodeWebhookPayload(body []byte) (WebhookPayload, error) {
 // cascade-deleted by the background processor.
 type DeleteAccountPayload struct {
 	UserID string `json:"userId"`
+	// Soft, when true, keeps the user row as a tombstone (notes/files are still
+	// purged). Remote-user deletion (inbound AP Delete(actor)) uses Soft=true to
+	// avoid resurrection on re-federation. Local self/admin deletion uses
+	// Soft=false to physically remove the row so the account fully disappears
+	// (#2230). upstream DeleteAccountProcessorService の `job.data.soft` 準拠。
+	Soft bool `json:"soft"`
 }
 
 // NewDeleteAccountTask serializes a DeleteAccountPayload into a driver.Task.

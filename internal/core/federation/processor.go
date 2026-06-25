@@ -1654,7 +1654,9 @@ func (p *Processor) handleActorDelete(actor *model.User) error {
 		return fmt.Errorf("actor delete: mark deleted: %w", err)
 	}
 	if p.accountDeleteEnqueuer != nil {
-		if err := p.accountDeleteEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: actor.ID}); err != nil {
+		// #2230: inbound Delete(actor) は remote user なので Soft=true で行を tombstone として
+		// 残す。物理削除すると再連合 (resolve) でアカウントが復活し得る (upstream 同様)。
+		if err := p.accountDeleteEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: actor.ID, Soft: true}); err != nil {
 			slog.Warn("actor delete: enqueue cascade purge failed", "userId", actor.ID, "err", err)
 		}
 	}

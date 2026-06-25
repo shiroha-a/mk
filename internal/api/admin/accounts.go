@@ -24,6 +24,8 @@ func (h *Handler) AccountsDelete(c echo.Context) error {
 	if h.isProtectedAccount(req.UserID) {
 		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
+	// #2230: local user は物理削除 (Soft=false)、remote user は tombstone (Soft=true)。
+	user, _ := h.userRepo.FindByID(req.UserID)
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true, "isDeleted": true}); err == nil {
 		// 論理削除直後の auth bypass 防止 (#965)。target の全 token cache
 		// entry を即時 invalidate して 30s stale window を消す。DB 更新が
@@ -31,7 +33,7 @@ func (h *Handler) AccountsDelete(c echo.Context) error {
 		h.invalidateUserTokenCache(req.UserID)
 		h.logUserAction(c, moderationlog.LogDeleteAccount, req.UserID)
 	}
-	h.scheduleAccountCascade(req.UserID)
+	h.scheduleAccountCascade(req.UserID, user != nil && user.Host != nil)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -85,12 +87,17 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 		h.logUserAction(c, moderationlog.LogDeleteAccount, req.UserID)
 	}
 	// upstream DeleteAccountService: local user は物理削除 job の前に全 sharedInbox
-	// へ Delete(actor) を配信する (#1759)。mk-go の cascade は soft (user 行/鍵を
-	// 残す) ため queue 経由配信でも署名鍵は生存する。
+	// へ Delete(actor) を配信する (#1759)。deliver は cascade より先に enqueue され、
+	// cascade も note purge を先に行うため実運用では署名鍵が生存した状態で配信される
+	// (別 queue ゆえ厳密な順序保証は無い best-effort、upstream も同構造)。
 	if user != nil && h.userModerationFed != nil {
 		h.userModerationFed.OnUserDeleted(user)
 	}
-	h.scheduleAccountCascade(req.UserID)
+	// #2230: local user (host==nil) は user 行を物理削除 (Soft=false)、remote user は再連合での
+	// 復活を防ぐため tombstone として残す (Soft=true)。upstream DeleteAccountService の
+	// isLocalUser 分岐に対応する。
+	soft := user != nil && user.Host != nil
+	h.scheduleAccountCascade(req.UserID, soft)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -129,11 +136,11 @@ func (h *Handler) isProtectedAccount(userID string) bool {
 // from the enqueuer are logged but never surfaced — the admin flag flip
 // is the user-visible source of truth, so a failed enqueue only delays
 // the cleanup until the next manual retry.
-func (h *Handler) scheduleAccountCascade(userID string) {
+func (h *Handler) scheduleAccountCascade(userID string, soft bool) {
 	if h.deleteAccountEnqueuer == nil || userID == "" {
 		return
 	}
-	if err := h.deleteAccountEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: userID}); err != nil {
+	if err := h.deleteAccountEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: userID, Soft: soft}); err != nil {
 		slog.Warn("admin: enqueue delete-account failed", "userId", userID, "err", err)
 	}
 }

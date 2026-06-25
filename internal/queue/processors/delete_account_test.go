@@ -219,3 +219,35 @@ func TestDeleteAccountProcessor_NotesDeletedAcrossMultipleBatches(t *testing.T) 
 		assert.NotEqual(t, "target", n.UserID)
 	}
 }
+
+// #2230: local user (Soft=false) は cascade 後に user 行を物理削除する。
+func TestDeleteAccountProcessor_HardDeletesLocalUser(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["target"] = &model.User{ID: "target"}
+	p := processors.NewDeleteAccountProcessor(noteRepo, testutil.NewMockDriveFileRepository(), testutil.NewMockFollowingRepository())
+	p.SetUserRepo(userRepo)
+
+	task := deleteAccountTask(t, queue.DeleteAccountPayload{UserID: "target", Soft: false})
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.NotContains(t, userRepo.Users, "target", "local user row must be physically deleted")
+}
+
+// #2230: remote user (Soft=true) は再連合での復活を防ぐため user 行を残す。
+func TestDeleteAccountProcessor_SoftKeepsUser(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["remote"] = &model.User{ID: "remote"}
+	p := processors.NewDeleteAccountProcessor(testutil.NewMockNoteRepository(), testutil.NewMockDriveFileRepository(), testutil.NewMockFollowingRepository())
+	p.SetUserRepo(userRepo)
+
+	task := deleteAccountTask(t, queue.DeleteAccountPayload{UserID: "remote", Soft: true})
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.Contains(t, userRepo.Users, "remote", "soft delete must keep the user row as tombstone")
+}
+
+// #2230: userRepo 未配線なら hard delete を skip する (従来の soft 挙動)。
+func TestDeleteAccountProcessor_NoUserRepoSkipsHardDelete(t *testing.T) {
+	p := processors.NewDeleteAccountProcessor(testutil.NewMockNoteRepository(), testutil.NewMockDriveFileRepository(), testutil.NewMockFollowingRepository())
+	task := deleteAccountTask(t, queue.DeleteAccountPayload{UserID: "x", Soft: false})
+	require.NoError(t, p.Handle(context.Background(), task))
+}

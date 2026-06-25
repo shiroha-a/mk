@@ -603,12 +603,14 @@ func TestClaimAchievement_Duplicate_NoNotification(t *testing.T) {
 // --- #2230: i/delete-account の cascade 削除 + 連合 Delete ---
 
 type fakeDeleteEnqueuer struct {
-	called []string
-	err    error
+	called   []string
+	payloads []queue.DeleteAccountPayload
+	err      error
 }
 
 func (f *fakeDeleteEnqueuer) EnqueueDeleteAccount(p queue.DeleteAccountPayload) error {
 	f.called = append(f.called, p.UserID)
+	f.payloads = append(f.payloads, p)
 	return f.err
 }
 
@@ -633,6 +635,9 @@ func TestDeleteAccount_EnqueuesCascadeAndFederates(t *testing.T) {
 	assert.True(t, repo.Users["u1"].IsDeleted)
 	assert.Equal(t, []string{"u1"}, enq.called, "cascade delete job must be enqueued")
 	assert.Equal(t, []string{"u1"}, fed.deleted, "AP Delete(actor) must be delivered")
+	// 自己削除は local user なので user 行を物理削除する hard delete (Soft=false)。
+	require.Len(t, enq.payloads, 1)
+	assert.False(t, enq.payloads[0].Soft, "self-delete must hard-delete the user row")
 }
 
 // #2230: enqueue が失敗しても論理削除フラグは立ったままなので 204 を返す

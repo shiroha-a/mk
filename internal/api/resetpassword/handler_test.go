@@ -342,3 +342,5 @@ func TestSecureRandomHex(t *testing.T) {
 	s2 := misc.SecureRandomHex(64)
 	assert.NotEqual(t, s, s2)
 }
+
+func (m *mockUserRepo) HardDeleteUser(string) error { return nil }

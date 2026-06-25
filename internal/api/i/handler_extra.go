@@ -130,15 +130,17 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// handler.go の invalidateUserTokenCache を参照。
 	h.invalidateUserTokenCache(u.ID)
 
-	// #2230: 論理削除フラグを立てるだけでは notes / drive / following が purge されず、
-	// 連合先にも削除が伝わらない (= 「凍結止まりで削除が実行されない」)。admin/delete-account と
-	// 同様に (1) sharedInbox へ Delete(actor) を配信し、(2) cascade 削除 job を enqueue する。
-	// cascade は soft (user 行 / 署名鍵を残す) なので queue 経由配信でも鍵は生存する。
+	// #2230: 論理削除フラグを立てるだけでは notes / drive / following が purge されず、user 行も
+	// 残るので「凍結状態のまま消えない」。admin/delete-account と同様に (1) sharedInbox へ
+	// Delete(actor) を配信し、(2) cascade 削除 job を enqueue する。Delete(actor) deliver は
+	// cascade より先に enqueue し、cascade も note purge を先に行うため実運用では署名鍵が生存した
+	// 状態で配信される (別 queue ゆえ厳密な順序保証は無い best-effort、upstream も同構造)。
 	if h.accountDeletionFed != nil {
 		h.accountDeletionFed.OnUserDeleted(u)
 	}
 	if h.deleteAccountEnqueuer != nil {
-		if err := h.deleteAccountEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: u.ID}); err != nil {
+		// 自己削除は常に local user なので Soft=false で user 行を物理削除する (#2230)。
+		if err := h.deleteAccountEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: u.ID, Soft: false}); err != nil {
 			// enqueue 失敗は user 可視のエラーにしない (フラグは既に立っている)。
 			// 次回手動 retry / 再ログイン不可状態は維持されるため 204 を返す。
 			slog.Warn("i/delete-account: enqueue cascade failed", "userId", u.ID, "err", err)

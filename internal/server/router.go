@@ -755,6 +755,8 @@ func (s *Server) setupRoutes() {
 	// Account cascade deletion (issue #187): admin/accounts/delete の後続
 	// バックグラウンド処理。note / drive_file / following 関連行を掃除する。
 	deleteAccountProcessor := processors.NewDeleteAccountProcessor(noteRepo, driveFileRepo, followingRepo)
+	// #2230: local user の物理削除に userRepo を配線。未配線だと soft 削除止まりで行が残る。
+	deleteAccountProcessor.SetUserRepo(userRepo)
 	s.queueServer.Handle(queue.TaskTypeDeleteAccount, deleteAccountProcessor.Handle)
 
 	// Per-pair Unfollow job (#587): admin/federation/remove-all-following

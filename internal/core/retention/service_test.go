@@ -434,3 +434,5 @@ func TestService_Aggregate_CorruptDataRowIsSkipped(t *testing.T) {
 	// merge が失敗 → continue で Update は走らない。
 	assert.Equal(t, 0, retentions.updateCalls)
 }
+
+func (s *stubUserRepo) HardDeleteUser(string) error { return nil }

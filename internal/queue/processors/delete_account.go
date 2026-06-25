@@ -12,13 +12,23 @@ import (
 )
 
 // DeleteAccountProcessor cascades through a user's related rows (notes,
-// drive files, follow graph) after admin/accounts/delete has flipped the
-// soft-delete flags. The user row itself is NOT deleted — it is kept for
-// moderation log retention with only isDeleted=true set.
+// drive files, follow graph) after delete-account has flipped the soft-delete
+// flags. For a non-soft (local) deletion it then physically removes the user
+// row so the account fully disappears; for a soft (remote) deletion the row is
+// kept as a tombstone to prevent resurrection on re-federation (#2230).
 type DeleteAccountProcessor struct {
 	noteRepo      repository.NoteRepository
 	driveFileRepo repository.DriveFileRepository
 	followingRepo repository.FollowingRepository
+	// userRepo は Soft=false (local) 時の user 行物理削除に使う optional 依存 (#2230)。
+	// 未配線なら hard delete を skip し従来の soft 削除のままになる。
+	userRepo repository.UserRepository
+}
+
+// SetUserRepo wires the UserRepository used to physically delete the user row
+// for non-soft (local) account deletion (#2230). nil keeps the soft behavior.
+func (p *DeleteAccountProcessor) SetUserRepo(r repository.UserRepository) {
+	p.userRepo = r
 }
 
 // NewDeleteAccountProcessor wires the processor with the repositories it
@@ -92,6 +102,22 @@ func (p *DeleteAccountProcessor) Handle(ctx context.Context, t driver.Task) erro
 			slog.Info("delete-account: following rows deleted",
 				"userId", payload.UserID, "count", deleted)
 		}
+	}
+
+	// #2230: local user (Soft=false) は user 行を物理削除する。FK ON DELETE CASCADE で
+	// profile / keypair / 残りの従属行も消えるため、論理削除フラグだけ立った「凍結状態の
+	// tombstone」が残らずアカウントが完全に消える。remote user (Soft=true) は再連合での
+	// 復活を防ぐため行を残す (upstream DeleteAccountProcessorService の soft 分岐と同じ)。
+	if !payload.Soft && p.userRepo != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := p.userRepo.HardDeleteUser(payload.UserID); err != nil {
+			slog.Error("delete-account: user row purge failed",
+				"userId", payload.UserID, "err", err)
+			return err
+		}
+		slog.Info("delete-account: user row deleted", "userId", payload.UserID)
 	}
 	return nil
 }

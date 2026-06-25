@@ -291,6 +291,12 @@ func (m *MockUserRepository) UpdateUser(userID string, fields map[string]any) er
 	return nil
 }
 
+func (m *MockUserRepository) HardDeleteUser(userID string) error {
+	delete(m.Users, userID)
+	delete(m.Profiles, userID)
+	return nil
+}
+
 func (m *MockUserRepository) CreateProfile(profile *model.UserProfile) error {
 	m.Profiles[profile.UserID] = profile
 	return nil

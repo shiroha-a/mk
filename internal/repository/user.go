@@ -91,6 +91,11 @@ type UserRepository interface {
 	// viewer does not already follow, ordered by followersCount descending.
 	// viewerID is excluded from results. Used by users/recommendation.
 	ListUserRecommendations(viewerID string, activeSince time.Time, limit, offset int) ([]*model.User, error)
+	// HardDeleteUser permanently removes the user row. FK ON DELETE CASCADE purges
+	// dependent rows (profile, keypair, following, blocking, ...). Used by the
+	// delete-account cascade for local users (Soft=false) so the account fully
+	// disappears instead of lingering as a suspended tombstone (#2230).
+	HardDeleteUser(userID string) error
 }
 
 type userRepository struct {
@@ -381,6 +386,15 @@ func (r *userRepository) UpdateUser(userID string, fields map[string]any) error 
 		return nil
 	}
 	return r.db.Model(&model.User{}).Where("id = ?", userID).Updates(fields).Error
+}
+
+// HardDeleteUser permanently removes the user row, relying on FK ON DELETE
+// CASCADE to purge dependent rows (profile/keypair/following/...) (#2230).
+func (r *userRepository) HardDeleteUser(userID string) error {
+	if userID == "" {
+		return nil
+	}
+	return r.db.Exec(`DELETE FROM "user" WHERE "id" = ?`, userID).Error
 }
 
 // UpdateProfile updates the given columns on the user_profile table.
