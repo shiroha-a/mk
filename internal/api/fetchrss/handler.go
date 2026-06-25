@@ -36,6 +36,11 @@ const CacheSeconds = 60 * 3
 // MaxBodyBytes caps the response read from the upstream feed server. Real-world
 // feeds rarely exceed a few hundred KB; capping at 1 MiB blocks pathological
 // hosts that try to drown the parser in arbitrary bytes.
+//
+// #2106 L27: upstream HttpRequestService の default size は 10 MiB (fetch-rss は size
+// 未指定)。requireCredential:false の公開エンドポイントなので mk-go は意図的に 1 MiB へ
+// 硬化している (DoS 表面の縮小)。1〜10 MiB の巨大フィードのみ upstream では取得できて
+// mk-go では 502 になる稀な乖離。
 const MaxBodyBytes int64 = 1 << 20
 
 // FetchTimeout matches the upstream `timeout: 5000` ms used by Misskey TS.
@@ -151,6 +156,9 @@ func (h *Handler) Fetch(c echo.Context) error {
 	}
 
 	if rawURL == "" {
+		// #2106 L28: upstream は url 欠落を ajv schema validation で INVALID_PARAM(400) に、
+		// 不正 scheme を send 内 throw → INTERNAL_ERROR(500) に包む。mk-go は両方を意図的に
+		// 明快な INVALID_URL(400) で返す (worse な 500 拡散を避ける)。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "url is required.", "9c5ad7d3-6e15-4f3a-87b8-39ec2e91d5a3"))
 	}
 
@@ -158,6 +166,7 @@ func (h *Handler) Fetch(c echo.Context) error {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		// 不正 scheme / host 欠落と「URL 未指定」を frontend 側で別扱いに
 		// したい運用に備え、Misskey の慣行どおり別 ID を割り当てる。
+		// #2106 L28: upstream は scheme 不正を 500 INTERNAL_ERROR にするが mk-go は 400 を保つ。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "url must be http(s).", "f5b2bd41-7c0a-4d49-b8c8-3d3a4d9b8e21"))
 	}
 
