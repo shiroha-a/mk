@@ -1,215 +1,361 @@
 # アーキテクチャ
 
-## レイヤ構成
+mk-go は Misskey (TypeScript/NestJS) のバックエンドを Go で書き換えたプロジェクトです。
+本ドキュメントは各レイヤ・パッケージが**どのような責務を持ち、Misskey-TS のどこに対応するか**を
+詳述します。upstream の参照実装は `third_party/misskey/packages/backend/`（submodule）。
+
+## 0. 設計思想
+
+- **wire 互換が最優先**: REST API 応答 shape・エラーコード・ActivityPub の wire format を upstream と一致させる。
+- **Go らしい再構成**: TS のパターンをそのまま移植せず、明示的 interface・エラー値・構造体埋め込みで書き直す。
+- **互換を機械的に守る**: golden/shapetest・drift detector・値レベル diff harness・drop-in e2e で乖離を CI 検出する（§8）。
+- **1.0 以降の方針**: 完全互換 backend から「互換を保ちつつ frontend (third_party/misskey fork) も独自進化させる Misskey ファミリー fork」へ。API 拡張は additive-only、ActivityPub は硬く互換維持、REST は自フロント主導でケースバイケース。
+
+---
+
+## 1. レイヤ構成
 
 ```
-┌─────────────────────────────────────┐
-│  api (HTTPハンドラ)                  │  ← Echo v4のルーティング
-├─────────────────────────────────────┤
-│  core (ビジネスロジック)              │  ← ドメインサービス
-├─────────────────────────────────────┤
-│  repository (データアクセス)          │  ← GORM + PostgreSQL
-├─────────────────────────────────────┤
-│  model (DBエンティティ)              │  ← GORMモデル定義
-└─────────────────────────────────────┘
-```
-
-**依存方向**: api → core → repository → model の一方向のみ。逆方向の依存は禁止。
+┌─────────────────────────────────────────────┐
+│  api (HTTP ハンドラ)            Echo v4       │  ← server/api/endpoints/* + server/*Service
+├─────────────────────────────────────────────┤
+│  core (ビジネスロジック)        ドメインサービス │  ← core/*Service.ts
+├─────────────────────────────────────────────┤
+│  repository (データアクセス)    GORM interface  │  ← TypeORM repository (TS は明示層なし)
+├─────────────────────────────────────────────┤
+│  model (DB エンティティ)        GORM 構造体     │  ← models/ (TypeORM entity)
+└─────────────────────────────────────────────┘
 
 補助レイヤ:
-- **entity** — レスポンス変換専用のDTO。ドメインロジックを入れない
-- **activitypub** — coreから呼び出されるActivityPub実装
-- **queue** — asynqによる非同期ジョブ処理
-- **stream** — WebSocketストリーミング
+  entity       … model → JSON レスポンス変換       ← core/entities/*EntityService
+  activitypub  … AP の型/署名/レンダラ/解決         ← core/activitypub/*
+  queue        … 非同期ジョブ (mkq / asynq)         ← queue/processors/*
+  stream       … WebSocket チャンネル               ← server/api/stream/channels/*
+```
 
-## パッケージ構成
+**依存方向**: `api → core → repository → model` の一方向のみ。逆向き依存は禁止。`entity` は変換専用でドメインロジックを持たない。
 
-### `cmd/`
+### mk-go と Misskey-TS の構造的相違（重要）
 
-| パッケージ | 用途 |
+| 観点 | Misskey-TS | mk-go | 理由 |
+|---|---|---|---|
+| DI | NestJS (`@Injectable`, `di-symbols.ts`) | **手動配線** (`internal/server/router.go`) | フレームワーク非依存・起動経路の明示化 |
+| データアクセス | サービスが TypeORM repository を直接注入 | **明示的な `repository` interface 層** | mock 注入による単体テスト容易性 |
+| pack | `*EntityService.pack()` は DI されたサービス | **`entity.PackX()` は純関数** | 変換とドメインロジックの分離 |
+| クロスカット | `GlobalEventService` (event emitter) + 直接注入 | **明示的 hook interface** (`SetFanoutHook` 等) | import cycle 回避（§6） |
+| ジョブキュー | BullMQ | **mkq** (BullMQ wire 互換, 既定) / asynq (legacy) | Redis ストリーム互換 + Go ネイティブ |
+| HTTP 署名 | `@misskey-dev/node-http-message-signatures` | **自前実装** (`internal/activitypub/signature.go`) | 依存削減・RSA/Ed25519 両対応 |
+
+---
+
+## 2. Misskey-TS との対応関係（全体マップ）
+
+| mk-go | Misskey-TS | 備考 |
+|---|---|---|
+| `internal/api/*` | `server/api/endpoints/*` | endpoint 群（admin, notes, users, i, drive, …） |
+| `internal/api/{inbox,wellknown,nodeinfo,proxy,streaming}` | `server/{ActivityPub,WellKnown,Nodeinfo,FileServer,Streaming}ServerService` | endpoints でなくサーバ層 |
+| `internal/core/*` | `core/*Service.ts` | ドメインサービス（§3.2 に対応表） |
+| `internal/entity/*` | `core/entities/*EntityService` | pack 関数 ↔ EntityService.pack |
+| `internal/repository/*` | （TypeORM repository を各サービスが直接利用） | mk-go のみ明示層 |
+| `internal/model/*` | `models/` (TypeORM entity) | テーブル 1:1 |
+| `internal/activitypub/*` + `internal/core/federation/*` | `core/activitypub/*` | 型/署名/レンダラ/解決/inbox |
+| `internal/queue/processors/*` | `queue/processors/*ProcessorService` | 非同期ジョブ |
+| `internal/stream/channels/*` | `server/api/stream/channels/*` | WS チャンネル |
+| `internal/misc/id` | `core/IdService` | ID 生成 (aidx 既定) |
+| `internal/safehttp` | `core/HttpRequestService`(の SSRF guard) | private-network 拒否 transport |
+| `internal/config` + `cmd/misskey` | `config.ts` + `boot/` | 設定・起動 |
+| `internal/server/router.go` | NestJS `MainModule`/`ServerModule` の配線 | DI 相当を手動で |
+
+---
+
+## 3. レイヤ詳細
+
+### 3.1 `internal/api/` — HTTP ハンドラ（≈50 パッケージ / 459 ルート）
+
+upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位で実装。upstream 439 endpoint の **ほぼ全て（charts 含む）を実装**。
+
+**endpoint 群**（`server/api/endpoints/<同名>` に対応）:
+
+| パッケージ | 対応エンドポイント / 機能 |
 |---|---|
-| `cmd/misskey` | メインサーバーのエントリポイント |
-| `cmd/migrate` | マイグレーションCLIツール |
+| `admin` | `admin/*` — accounts, roles, emoji, relays, queue (pause/resume), announcements, ad, moderation |
+| `notes` | `notes/*` — CRUD, timeline (home/local/global/hybrid), reactions, polls, translate, thread-muting |
+| `users` | `users/*` — show(bulk可), followers/following, search, reactions, relation, lists |
+| `i` | `i/*` — 自アカウント update / notifications / webhooks / registry / 2fa / move |
+| `drive` | `drive/*` — files (upload/list/find), folders |
+| `following` `blocking` `mute` `renotemute` | フォロー/ブロック/ミュート/リノートミュート |
+| `antennas` `clips` `channels` `userlists` | アンテナ / クリップ / チャンネル / リスト |
+| `notifications` | `notifications/*` — list, grouped, mark-all-read |
+| `roles` | `roles/*` — role 一覧/notes、policy |
+| `gallery` `pages` `flash` | ギャラリー / ページ / Play (AiScript) |
+| `emojis` `hashtags` `federation` | カスタム絵文字 / ハッシュタグ / 連合情報 |
+| `auth` `oauth` `signin` `signup` `resetpassword` | MiAuth / OAuth2 / ログイン (TOTP/passkey/captcha) / 登録 |
+| `app` `webhooks` `invite` `abuse` `meta` | アプリ / Webhook / 招待 / 通報 / meta |
+| `reversi` `chat` `bubblegame` | リバーシ / チャット / バブルゲーム（§9 参照） |
+| `ap` | `ap/show`, `ap/get` — リモート AP オブジェクト解決 |
+| `charts` | `charts/*` — 12 chart engine（別登録、`buildChartBundle`） |
+| `sw` | `sw/*` — Service Worker 登録 |
 
-### `internal/api/` (HTTPハンドラ、40パッケージ)
+**サーバ層**（`server/*ServerService` に対応、endpoint ではない）:
 
-エンドポイント単位で分割。主要なもの:
+| パッケージ | 対応 | 機能 |
+|---|---|---|
+| `inbox` | `ActivityPubServerService` (inbox) | SharedInbox + 個別 inbox。HTTP handler は 202 即返し、verify は worker (§7) |
+| `wellknown` | `WellKnownServerService` | `.well-known/webfinger` / `nodeinfo` / `host-meta` |
+| `nodeinfo` | `NodeinfoServerService` | NodeInfo 2.0/2.1 |
+| `proxy` | `FileServerService` | メディアプロキシ (`/proxy/*`)、リモート画像キャッシュ |
+| `streaming` | `StreamingApiServerService` | WebSocket 接続のアップグレード（§実体は `internal/stream`） |
 
-| パッケージ | 対応エンドポイント |
+**mk-go 固有のヘルパー**（endpoint ではない内部パッケージ）:
+
+| パッケージ | 役割 |
 |---|---|
-| `admin` | `admin/*` — 管理API (accounts, roles, queue, relays等) |
-| `notes` | `notes/*` — ノートCRUD、タイムライン |
-| `users` | `users/*` — ユーザー情報、フォロー |
-| `i` | `i/*` — 自アカウント操作 |
-| `drive` | `drive/*` — ファイルアップロード・管理 |
-| `streaming` | WebSocketストリーミング接続 |
-| `inbox` | ActivityPub Inbox (SharedInbox + 個別) |
-| `wellknown` | `.well-known/webfinger`, `.well-known/nodeinfo` |
-| `signin` | ログインフロー (TOTP/WebAuthn/CAPTCHA対応) |
-| `auth` | MiAuth/OAuth認証セッション |
+| `apierr` | Misskey 互換のエラーコード/UUID 定義 |
+| `pagination` | sinceId/untilId/sinceDate/untilDate の正規化 |
+| `optional` | JSON の null/absent を区別する Nullable 型 |
+| `notehide` | per-viewer の hideNote ゲートを全 REST に一律適用（TS は各 pack 内 `hideNote`） |
+| `userrelation` | viewer 視点の relation block (isFollowing 等) 解決 |
+| `middleware` | 認証 / rate limit / WWW-Authenticate / Cache-Control |
 
-未実装エンドポイントへのリクエストはAPIキャッチオールハンドラが`200 {}`で応答する。
+### 3.2 `internal/core/` — ビジネスロジック（≈50 パッケージ）
 
-### `internal/core/` (ビジネスロジック、36パッケージ)
+`core/*Service.ts` に対応。主要対応表:
 
-ドメイン単位で分割。主要なもの:
+| mk-go core | Misskey-TS core | 責務 |
+|---|---|---|
+| `note` | NoteCreate/NoteDelete/NoteDraft/NotePining Service | ノート作成・削除・下書き・ピン |
+| `user` | UserService / AccountUpdate / UserSuspend / DeleteAccount | ユーザー CRUD・凍結・削除 |
+| `signup` | SignupService | 登録（禁止ワード検証等） |
+| `following` | UserFollowingService | フォロー/承認 (autoAcceptFollowed, carefulBot) |
+| `blocking` `muting` | UserBlocking / UserMuting / UserRenoteMuting Service | ブロック/ミュート/リノートミュート |
+| `reaction` | ReactionService / ReactionsBufferingService | リアクション付与・削除・buffer flush |
+| `timeline` | FanoutTimeline / FanoutTimelineEndpoint Service | Redis fanout 配信 + 取得 |
+| `note` の filter / `notesfilter` | QueryService (+ check-word-mute) | 可視性 / mute / block / word-mute の SQL filter |
+| `wordmute` | check-word-mute.ts | 単語/正規表現ミュートのパース・LRU キャッシュ |
+| `federation` | core/activitypub/* | AP 受信処理・解決・配信（§3.6） |
+| `relay` | RelayService | リレー購読・配信 |
+| `instance` | FederatedInstance / FetchInstanceMetadata Service | リモートインスタンス情報 |
+| `drive` | DriveService / InternalStorage / S3 / ImageProcessing | ファイル保存 (Local/S3)・画像変換 |
+| `mediaproxy` | （FileServerService 内のプロキシ） | リモート画像キャッシュ、AVIF/HEIC decode |
+| `urlpreview` | UrlPreviewService | OG/Twitter/oEmbed プレビュー（Shift_JIS 等正規化） |
+| `notification` | NotificationService | 通知生成・stream/push 配信（2秒既読 guard） |
+| `webpush` | PushNotificationService | Web Push (VAPID) |
+| `webhook` | UserWebhook / SystemWebhook / WebhookTest Service | Webhook 発火 |
+| `chart` | core/chart/* | 12 chart engine（notes/users/drive/federation/instance/…） |
+| `search` | SearchService | 全文検索 (Meilisearch / SQL fallback) |
+| `twofactor` | UserAuthService / WebAuthnService | TOTP / WebAuthn(passkey) |
+| `email` `captcha` | EmailService / CaptchaService | メール送信 / CAPTCHA 検証 |
+| `channel` | ChannelFollowing / ChannelMuting Service (+ CRUD) | チャンネル |
+| `clip` `antenna` `page` `flash` | Clip / Antenna / Page / Flash Service | クリップ/アンテナ/ページ/Play |
+| `announcement` `abuse` `achievement` | Announcement / AbuseReport(+Notification) / Achievement Service | お知らせ/通報/実績 |
+| `avatardecoration` `featured` `hashtag` | AvatarDecoration / Featured / Hashtag Service | アバター装飾/注目/ハッシュタグ |
+| `emojiimport` | CustomEmojiService (import) | 絵文字インポート |
+| `role` | RoleService | ロール・ポリシー解決 |
+| `moderationlog` `moderatoractivity` | ModerationLog Service / CheckModeratorsActivity | モデレーションログ/モデレータ活動 |
+| `move` | AccountMoveService | アカウント移行 (Move/alsoKnownAs) |
+| `transfer` | Export*/Import* Processor | データ export/import |
+| `poll` | PollService | 投票 |
+| `chat` `reversi` | ChatService / ReversiService | §9（vanilla + 連合拡張） |
+| `systemaccount` | SystemAccountService | instance.actor 等のシステムアカウント |
+| `serverstats` `retention` | （server-stats daemon）/ AggregateRetention | サーバ統計 / 継続率 |
+| `cache` `event` | CacheService / GlobalEventService | キャッシュ / イベント発火 |
 
-| パッケージ | 責務 |
+### 3.3 `internal/entity/` — レスポンス DTO
+
+`core/entities/*EntityService.pack()` に対応。ただし mk-go は**純関数 `PackX()`**（DI なし・ドメインロジックなし）。
+
+| mk-go | Misskey-TS |
 |---|---|
-| `note` | ノート作成・削除・更新 |
-| `user` | ユーザー作成・更新・削除 |
-| `following` | フォロー・アンフォロー・リクエスト承認 |
-| `reaction` | リアクション付与・削除 |
-| `timeline` | Redis fanoutによるタイムライン配信 |
-| `federation` | AP配信・受信・リモートオブジェクト解決、`RemoteStatsFetcher` (リモート users/show counts 取得、#943) |
-| `drive` | ファイルストレージ (Local/S3)、画像変換 |
-| `mediaproxy` | リモート画像のキャッシュ proxy。GIF/APNG はアニメ pass-through (#941)、AVIF/HEIC/JXL decode 等 |
-| `urlpreview` | OG/Twitter/oEmbed プレビュー取得。`charset.NewReader` で Shift_JIS/EUC-JP 等の自動正規化 (#942) |
-| `notification` | 通知生成・配信 |
-| `chart` | 統計チャートエンジン (12エンジン) |
-| `search` | 全文検索 (Meilisearch / SQLフォールバック) |
-| `twofactor` | TOTP/WebAuthn認証 |
-| `wordmute` | 単語ミュートのパース・キャッシュ (LRU、#790) |
+| `PackNote` / `PackNotes` (note.go) | NoteEntityService |
+| `PackUserLite` / `PackUserDetailed` (user系) | UserEntityService |
+| `PackNotification` | NotificationEntityService |
+| `PackDriveFile` / `PackDriveFolder` | DriveFile/DriveFolder EntityService |
+| `note_reaction` 系 | NoteReactionEntityService |
+| `role.go` / `clip.go` / `announcement.go` / `page.go` / … | Role/Clip/Announcement/Page … EntityService |
+| `note_field_resolver.go` | （pack 内の field 解決を batch 化した mk-go 集約） |
+| `emoji_resolver.go` / `instance_resolver.go` / `mediaurl.go` | 絵文字/instance/メディア URL の解決ヘルパー |
 
-### `internal/repository/` (データアクセス、46ファイル)
+### 3.4 `internal/repository/` — データアクセス（74 ファイル）
 
-エンティティごとにインターフェース + GORM実装 + コンストラクタのパターン。
+エンティティ毎に `interface + GORM 実装 + コンストラクタ`。**Misskey-TS には明示層が無く**、各サービスが TypeORM repository を直接注入する。mk-go は mock 注入で単体テストを成立させるためにこの層を設けている。
 
 ```go
 type NoteRepository interface {
     FindByID(id string) (*model.Note, error)
     Create(note *model.Note) error
+    ListGlobalTimeline(limit int, sinceID, untilID string, f model.TimelineDBFilter) ([]*model.Note, error)
+    ListPublicNotes(f model.PublicNotesFilter, limit int, sinceID, untilID string) ([]*model.Note, error) // upstream notes.ts
     // ...
 }
-
-func NewNoteRepository(db *gorm.DB) NoteRepository {
-    return &noteRepository{db: db}
-}
+func NewNoteRepository(db *gorm.DB) NoteRepository { return &noteRepository{db: db} }
 ```
 
-### `internal/model/` (DBモデル、46ファイル)
+可視性の SQL push-down（`applyViewerVisibility`）は upstream `QueryService.generateVisibilityQuery` に対応。
 
-Misskey-TSのテーブルと1:1対応するGORM構造体。
+### 3.5 `internal/model/` — DB モデル（61 ファイル）
 
-### `internal/entity/` (レスポンスDTO)
+Misskey-TS の `models/`（TypeORM entity）とテーブル 1:1 対応の GORM 構造体。列名・型・default を upstream に合わせる。enum・jsonb の扱いも互換。
 
-`PackUserDetailed`、`PackUserLite`、`PackNote`等のmodel→JSONレスポンス変換関数を提供。
+### 3.6 `internal/activitypub/` + `internal/core/federation/` — ActivityPub
 
-### `internal/activitypub/`
+upstream `core/activitypub/*` に対応。型/署名/レンダラは `activitypub` パッケージ、受信処理・解決・配信ロジックは `core/federation` に分かれる。
 
-| ファイル | 責務 |
+| mk-go | Misskey-TS | 責務 |
+|---|---|---|
+| `activitypub/types.go` | `activitypub/type.ts` | ActivityStreams 型定義 |
+| `activitypub/renderer.go` | `ApRendererService` | Go model → AP JSON-LD (Person/Note/Activity) |
+| `activitypub/signature.go` | `ApRequestService`(+署名 lib) | HTTP Signatures (RSA-SHA256 / Ed25519) |
+| `activitypub/client.go` | `ApRequestService` | 署名付き fetch（SSRF-safe transport） |
+| `activitypub/jsonld.go` + `ld/` | `JsonLdService` | `@context` 構築・URDNA2015 正規化・LD-Signature |
+| `activitypub/keypair.go` | `UserKeypairService` | RSA/Ed25519 鍵生成・解析 |
+| `activitypub/multikey.go` | （FEP-521a Multikey, Ed25519 公開鍵公開） | assertionMethod |
+| `activitypub/public_key_cache.go` | `ApDbResolverService`(key cache) | 公開鍵キャッシュ |
+| `activitypub/webfinger.go` | `WebfingerService` | WebFinger 解決 |
+| `activitypub/inbox_admission.go` | （ApInboxService の入口 gate） | forbidden directive 検査・freeze |
+| `activitypub/mfm/` | `ApMfmService` / `MfmService` | MFM ↔ HTML |
+| `core/federation/processor.go` | `ApInboxService` | inbox activity の処理 (Follow/Undo/Like/Announce/…) |
+| `core/federation/resolver.go` | `ApResolver/ApDbResolver/RemoteUserResolve Service` | リモートオブジェクト解決・キャッシュ |
+| `core/federation` の deliver | `ApDeliverManagerService` + queue/deliver | 配信（fan-out, retry） |
+| `core/federation` の deriveVisibility | `ApAudienceService` | to/cc → visibility 判定 |
+
+### 3.7 `internal/queue/` — ジョブキュー
+
+driver は `mkq`（BullMQ wire 互換, 既定）/ `asynq`（legacy）。`jobQueueDriver` で切替。`processors/` 配下:
+
+| mk-go processor | Misskey-TS processor | 内容 |
+|---|---|---|
+| `deliver` | DeliverProcessorService | AP 配信（retry/backoff） |
+| `inbox` | InboxProcessorService | AP 受信（verify-in-worker） |
+| `follow` `unfollow` `block` `unblock` | RelationshipProcessorService | 関係操作ジョブ |
+| `webhook` | User/System WebhookDeliverProcessorService | Webhook 配送 |
+| `webpush` | （PushNotificationService 経由） | Web Push |
+| `emoji_import` | ImportCustomEmojisProcessorService | 絵文字 import |
+| `transfer` | Export*/Import* ProcessorService | データ export/import |
+| `reaction_flush` | BakeBufferedReactionsProcessorService | リアクション buffer → DB |
+| `clean_remote_notes` | CleanRemoteNotesProcessorService | リモートノート GC |
+| `check_expired_mutings` | CheckExpiredMutingsProcessorService | 期限切れミュート解除 |
+| `check_moderators_activity` | CheckModeratorsActivityProcessorService | モデレータ活動監視 |
+| `retention` | AggregateRetentionProcessorService | 継続率集計 |
+| `chart` | Tick/Resync/Clean ChartsProcessorService | チャート集計 |
+| `delete_account` | DeleteAccountProcessorService | アカウント削除 |
+| `post_scheduled_note` (+ `scheduled_note_lock`) | PostScheduledNoteProcessorService | 予約投稿 |
+| `instance_refresh` | FetchInstanceMetadata 系 | instance メタ更新 |
+| `clean` | Clean/CleanCharts ProcessorService | 定期クリーンアップ |
+
+### 3.8 `internal/stream/` — WebSocket
+
+`server/api/stream/channels/*` に対応。`channels/` 配下:
+
+| mk-go | Misskey-TS |
 |---|---|
-| `types.go` | ActivityStreams 2.0の型定義 |
-| `renderer.go` | Goモデル → AP JSON-LD変換 (Person, Note, Activity) |
-| `signature.go` | HTTP Signatures (RSA-SHA256) の署名・検証 |
-| `client.go` | AP HTTPクライアント (署名付きfetch) |
-| `jsonld.go` | `@context`構築、JSON-LD正規化 |
-| `keypair.go` | RSA鍵ペアの生成・解析 |
-| `mfm/` | MFM(Misskey Flavored Markdown) → HTML変換 |
+| timeline (home/local/hybrid/global) | home-/local-/hybrid-/global-timeline |
+| main / notifications | main |
+| chat_room / chat_user | chat-room / chat-user |
+| reversi_game | reversi-game / reversi |
+| drive | drive |
+| role-timeline / hashtag / antenna / user-list | role-timeline / hashtag / antenna / user-list |
 
-### `internal/queue/` (ジョブキュー)
+dispatcher が shareable channel の共有・pong ack を upstream `Connection.ts` 互換で扱う。
 
-driver は `mkq` (BullMQ wire-compatible、デフォルト) または `asynq` (legacy)。設定 `jobQueueDriver` で切替 (#571 audit、#563 で 3-way bench 後 mkq を default 化)。`processors/`配下にタスク実装:
+### 3.9 その他
 
-- `deliver` — AP配信 (リトライ付き)
-- `inbox` — AP受信 (#565 で verify-in-worker 化、HTTP handler は 202 即返し)
-- `webhook` — Webhook送信
-- `webpush` — Web Push通知
-- `emoji_import` — カスタム絵文字インポート
-- `clean_remote_notes` — リモートノートクリーンアップ
-- `reaction_flush` — リアクションバッファのDB書き込み
-- `transfer` — アカウント移行
+| mk-go | Misskey-TS | 役割 |
+|---|---|---|
+| `internal/misc/id` | `core/IdService` | ID 生成 (aidx 既定 / aid/meid/ulid/objectid) |
+| `internal/safehttp` | `core/HttpRequestService` の private-network guard | SSRF-safe transport（urlpreview/mediaproxy/federation で共用） |
+| `internal/misc/notesummary` | （push 本文生成） | 通知/Web Push の本文要約 |
+| `internal/config` + `cmd/misskey` | `config.ts` + `boot/` | Viper 設定解決・起動 |
+| `internal/entitycompat` | （golden 突合の自前基盤） | autogen 型に対する shape 検証（§8） |
 
-### `internal/safehttp/`
+---
 
-SSRF-safe HTTP transport を提供 (`NewSSRFSafeTransport`)。private IP / loopback / metadata service への接続を DNS resolve 段階で reject。`urlpreview` / `mediaproxy` / federation の `RemoteStatsFetcher` で共通利用。
+## 4. DI / 配線
 
-### `internal/stream/` (WebSocket)
-
-`channels/`配下にストリーミングチャンネル実装:
-
-timeline, drive, notifications, chat_room, chat_user, reversi_game
-
-### `internal/misc/`
-
-- `id/` — IDジェネレータ (aidx, aid, meid, ulid, objectid)。デフォルトはaidx
-- `smtp` — SMTP送信
-- `random` — セキュアな乱数生成
-- `notesummary` — ノート要約生成
-
-## DI (依存性注入)
-
-すべてのサービス生成と配線は`internal/server/router.go`の`setupRoutes()`で行う。
+すべてのサービス生成・配線は `internal/server/router.go` の `setupRoutes()` で手動実行（NestJS 相当を関数呼び出しで構築）。DI フレームワークは使わない。
 
 ```
-server.New()
-  └→ setupRoutes()  (router.go, ~1500行)
-      ├→ Repository生成 (userRepo, noteRepo, ... 30+個)
-      ├→ Coreサービス生成 (noteCreateService, followingService, ...)
-      ├→ フック注入 (後述)
-      ├→ Handlerの生成とルート登録
-      └→ WebSocket/静的ファイル設定
+server.New() → setupRoutes()
+  ├→ Repository 生成 (userRepo, noteRepo, … 30+)
+  ├→ Core サービス生成 (noteCreateService, followingService, …)
+  ├→ hook 注入 (§6)
+  ├→ Handler 生成 + ルート登録 (459)
+  └→ WebSocket / 静的ファイル / middleware
 ```
 
-DIフレームワークは使わず、すべて手動の関数呼び出しで組み立てる。
+## 5. フック注入パターン
 
-## フック注入パターン
-
-循環依存を避けつつクロスカッティングな処理を注入するパターン。`noteCreateService`を例に:
+import cycle を避けつつクロスカットを注入する mk-go 固有パターン（TS は NestJS DI + GlobalEventService）。例: `noteCreateService`:
 
 ```
 noteCreateService
-  ├→ SetFanoutHook(timelineFanoutHook)       ← タイムライン配信
-  ├→ SetFederationHook(noteDeliveryHook)      ← AP配信
-  ├→ SetNotificationHook(notificationHook)    ← 通知生成
-  ├→ SetWebhookHook(noteCreateWebhookHook)    ← Webhook発火
-  ├→ SetChartHook(chartHooks)                 ← 統計更新
-  └→ SetIndexHook(noteIndexHook)              ← 検索インデックス
+  ├→ SetFanoutHook(timelineFanoutHook)     ← タイムライン配信
+  ├→ SetFederationHook(noteDeliveryHook)    ← AP 配信
+  ├→ SetNotificationHook(notificationHook)  ← 通知生成（CreateWithPush で push を guard 経由）
+  ├→ SetWebhookHook(noteCreateWebhookHook)  ← Webhook
+  ├→ SetChartHook(chartHooks)               ← 統計
+  └→ SetIndexHook(noteIndexHook)            ← 検索 index
 ```
 
-フック一覧:
-- **FanoutHook** — タイムラインへの配信
-- **FederationHook** — ActivityPubリモート配信
-- **NotificationHook** — 通知の生成と配信
-- **WebhookHook** — Webhook/SystemWebhook発火
-- **ChartHook** — チャート統計の更新
-- **IndexHook** — 検索インデックスの更新/削除
-- **BlockingChecker** — ブロック判定 (フォロー、リアクション時)
+hook: Fanout / Federation / Notification / Webhook / Chart / Index / BlockingChecker。
 
-## Redis分離設計
+## 6. Redis 分離
 
-Misskeyは用途別に複数のRedis接続を持つ。設定で同一ホストを指しても論理的に分離される。
+用途別に複数 Redis 接続を論理分離（設定で同一ホストでも別クライアント扱い）。
 
-| 用途 | 設定キー | デフォルト |
+| 用途 | 設定キー | 既定 |
 |---|---|---|
-| 汎用キャッシュ | `redis` | (必須) |
-| PubSub | `redisForPubsub` | `redis`にフォールバック |
-| ジョブキュー | `redisForJobQueue` | `redis`にフォールバック |
-| タイムライン | `redisForTimelines` | `redis`にフォールバック |
-| リアクション | `redisForReactions` | `redis`にフォールバック |
+| 汎用キャッシュ | `redis` | 必須 |
+| PubSub | `redisForPubsub` | `redis` fallback |
+| ジョブキュー | `redisForJobQueue` | `redis` fallback |
+| タイムライン | `redisForTimelines` | `redis` fallback |
+| リアクション | `redisForReactions` | `redis` fallback |
 
-## 設定解決フロー
+## 7. parity 品質ゲート（互換性の moat）
+
+wire 互換を機械的に守る多層防御。upstream は **official `misskey/misskey` Docker image** を使うため、`third_party/misskey`（自フロント fork）の改造とは独立して機能する。
+
+| 仕組み | 内容 | docs |
+|---|---|---|
+| golden / shapetest | misskey-js autogen 型に対する応答 shape 突合（`internal/entitycompat`） | shape-drift.md |
+| drift detector | CanSeeNote ↔ SQL push-down 等のロジック整合検出 | shape-drift.md |
+| 値レベル diff harness | TS インスタンス ↔ mk-go の応答を値単位で diff（`make diff-test`） | diff-e2e.md |
+| drop-in e2e | 実 Misskey TS ↔ mk-go 切替の連合/フロント互換（nightly） | dropin-e2e.md / dropin-frontend-e2e.md |
+| playwright | Phase 1 spec を mk-go/ts 両 backend で（nightly） | — |
+| inbound/outbound 連合 | Fedibird-like mock との Ed25519 双方向 verify | federation.md |
+
+CI（`ci.yml`）は build / 4-shard test（パッケージ毎 90% カバレッジ強制）/ lint を必須化。
+
+## 8. mk-go 独自・cherrypick 拡張
+
+upstream に無い、または cherrypick 由来の加算機能（wire 互換を壊さない additive 拡張）。
+
+| 機能 | 系統 | 備考 |
+|---|---|---|
+| federated chat | vanilla chat shape + yojo-art/cherrypick 連合 | 1-on-1 DM を `Create+Note(_misskey_talk:true)` で AP 配送 |
+| federated reversi | vanilla reversi + cherrypick 連合対戦 | crc32 等は packed schema 外（連合 verify 用） |
+| Ed25519 / Multikey (FEP-521a) | 連合拡張 | RSA に加え Ed25519 署名 |
+| `_misskey_*` AP 拡張 | Misskey 系共通 | renderPerson 等で常時出力 |
+
+> 注: chat / reversi は vanilla Misskey 2026.x にも存在する。mk-go が持つのは「vanilla 基盤 + cherrypick 由来の連合拡張」であり、vanilla misskey-js golden で厳密 gate するのは不適切（拡張 field を許容）。
+
+## 9. 設定・マイグレーション
+
+設定解決:
 
 ```
-.config/default.yml
-       ↓ Viper読み込み
-  Source構造体 (YAMLの生値)
-       ↓ resolve()
-  Config構造体 (解決済み: URL→Scheme/Host分解、ポートデフォルト等)
-       ↓
-  各サービスに注入
+.config/default.yml → Viper → Source 構造体(生値) → resolve() → Config 構造体(解決済) → 各サービス
 ```
 
-環境変数オーバーライド: `MK_`プレフィックス付きの変数で設定値を上書き可能 (例: `MK_DB_HOST`)。詳細は[設定リファレンス](configuration.md)参照。
+`MK_` プレフィックスの環境変数でオーバーライド可（例 `MK_DB_HOST`）。詳細は [configuration.md](configuration.md)。
 
-## マイグレーション
+マイグレーション（`migration/`、golang-migrate、現在 64 本）:
 
-`migration/`ディレクトリにgolang-migrate用のSQLファイルを配置 (000001 ~ 000047、2026-05-09 時点)。
-
-TS版Misskeyの既存テーブルには追加のみで破壊的変更を行わない。Go固有のテーブル追加とカラム追加はすべてIF NOT EXISTS付き。drop-in テスト (#367) で発見した補完カラム (`note.pageCount` / `note.renoteChannelId`) は `000039_dropin_compat.up.sql` で追加済。
+- TS Misskey の既存テーブルへは**追加のみ**（破壊的変更なし）。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
+- drop-in テストで発見した補完列は専用マイグレーションで追加。
+- down スクリプトは必須（data loss する場合はコメント明記）。
 
 ```bash
-make migrate-up      # 最新まで適用
-make migrate-down    # 1段階ロールバック
-make migrate-create  # 新規マイグレーション作成
+make migrate-up      # 最新まで
+make migrate-down    # 1 段ロールバック
+make migrate-create  # 新規作成
 ```
