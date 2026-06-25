@@ -327,3 +327,25 @@ func TestShouldHideNoteByTime(t *testing.T) {
 		})
 	}
 }
+
+// #2106 L5: public/home が makeNotesFollowersOnlyBefore window を過ぎたら visibility を
+// followers へ降格する (viewer 非依存)。
+func TestShouldDowngradeVisibility(t *testing.T) {
+	cases := []struct {
+		name string
+		f    EmbedFacts
+		want bool
+	}{
+		{"public past window", EmbedFacts{Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true}, true},
+		{"home past window", EmbedFacts{Visibility: "home", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true}, true},
+		{"within window", EmbedFacts{Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 1000, AuthorPrefsKnown: true}, false},
+		{"already followers", EmbedFacts{Visibility: "followers", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true}, false},
+		{"prefs unknown", EmbedFacts{Visibility: "public", MakeNotesFollowersOnlyBefore: ptrInt(-3600), CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: false}, false},
+		{"no pref set", EmbedFacts{Visibility: "public", MakeNotesFollowersOnlyBefore: nil, CreatedAtMs: hideTestNowMs - 2*3600*1000, AuthorPrefsKnown: true}, false},
+	}
+	for _, tc := range cases {
+		if got := ShouldDowngradeVisibility(tc.f, hideTestNowMs); got != tc.want {
+			t.Errorf("%s: ShouldDowngradeVisibility = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

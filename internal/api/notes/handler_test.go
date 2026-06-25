@@ -1046,3 +1046,34 @@ func TestValidateCreateInput_PollUniqueAndExpiredAfter(t *testing.T) {
 	badExpire := &CreateRequest{Poll: &PollRequest{Choices: []string{"a", "b"}, ExpiredAfter: &bad}}
 	assert.Error(t, validateCreateInput(badExpire, nil), "expiredAfter<1 は弾く")
 }
+
+// #2106 L6: poll で expiresAt と expiredAfter 両方指定時は expiredAfter (相対) を優先する。
+func TestCreate_PollExpiredAfterTakesPriority(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	pollRepo := testutil.NewMockPollRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	createSvc := corenote.NewCreateService(noteRepo, pollRepo, idGen, nil)
+	deleteSvc := corenote.NewDeleteService(noteRepo)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	h := NewHandler(noteRepo, createSvc, deleteSvc, querySvc, nil, nil, nil, nil, idGen)
+	user := &model.User{ID: "user1", Username: "testuser", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	farFutureMs := time.Now().Add(30 * 24 * time.Hour).UnixMilli() // expiresAt: 30 日後
+	expiredAfterMs := int64(3600 * 1000)                           // expiredAfter: 1 時間
+	body := fmt.Sprintf(`{"text": "Vote!", "poll": {"choices": ["A", "B"], "expiresAt": %d, "expiredAfter": %d}}`, farFutureMs, expiredAfterMs)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes/create", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	setAuthUser(c, user)
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, pollRepo.Polls, 1)
+	for _, poll := range pollRepo.Polls {
+		require.NotNil(t, poll.ExpiresAt)
+		// expiredAfter (now+1h) を採用 → 30 日後の expiresAt よりずっと前になる。
+		assert.True(t, poll.ExpiresAt.Before(time.Now().Add(2*time.Hour)), "expiredAfter を優先すべき、got %v", poll.ExpiresAt)
+	}
+}

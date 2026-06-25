@@ -408,14 +408,15 @@ func (h *Handler) Create(c echo.Context) error {
 		}
 		// Misskey TS API 互換: expiresAt (絶対 unix ms) と expiredAfter (相対 ms)
 		// のどちらか / 両方が送られる。frontend の form は「期限なし / 日時指定 /
-		// X 後」の 3 択で、相対指定時は expiredAfter のみが入る。両方来た時は
-		// expiresAt を優先する (TS PollService と同じ挙動、#690)。
+		// X 後」の 3 択で、相対指定時は expiredAfter のみが入る。
+		// #2106 L6: 両方来た時は upstream create.ts:230 と同じく expiredAfter (相対) を優先する
+		// (旧コメントの『TS PollService』は誤り、endpoint の create.ts が expiry を決定する)。
 		switch {
-		case req.Poll.ExpiresAt != nil:
-			t := time.UnixMilli(*req.Poll.ExpiresAt)
-			in.Poll.ExpiresAt = &t
 		case req.Poll.ExpiredAfter != nil:
 			t := time.Now().Add(time.Duration(*req.Poll.ExpiredAfter) * time.Millisecond)
+			in.Poll.ExpiresAt = &t
+		case req.Poll.ExpiresAt != nil:
+			t := time.UnixMilli(*req.Poll.ExpiresAt)
 			in.Poll.ExpiresAt = &t
 		}
 	}

@@ -137,6 +137,22 @@ func HideNoteByPrefsDecision(viewer *model.User, f EmbedFacts, follows func(auth
 	return false
 }
 
+// ShouldDowngradeVisibility reports whether a public/home note must have its
+// PACKED visibility field downgraded to 'followers' because the author opted into
+// makeNotesFollowersOnlyBefore and the note is past that window (#2106 L5, upstream
+// treatVisibility). Viewer-INDEPENDENT — even a follower who can still see the note
+// receives visibility:'followers' (drives the frontend lock icon / renote 可否)。
+// content-hide は別 concern (HideNoteByPrefsDecision)。
+func ShouldDowngradeVisibility(f EmbedFacts, nowMs int64) bool {
+	if !f.AuthorPrefsKnown {
+		return false
+	}
+	if f.Visibility != string(model.NoteVisibilityPublic) && f.Visibility != string(model.NoteVisibilityHome) {
+		return false
+	}
+	return shouldHideNoteByTime(f.MakeNotesFollowersOnlyBefore, f.CreatedAtMs, nowMs)
+}
+
 // viewerIsFollowersRecipient reports whether viewer is allowed to see a
 // followers-visibility note: the reply-target author, a mentioned user, or a
 // follower of the author. Anonymous (viewerID == "") is never a recipient.

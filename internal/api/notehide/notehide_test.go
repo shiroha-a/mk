@@ -423,3 +423,17 @@ func TestHideNotificationNotes_NilRepoFailClosed(t *testing.T) {
 		t.Error("nil followingRepo must fail closed (blank followers depth-2 embed)")
 	}
 }
+
+// #2106 L5: public note が makeNotesFollowersOnlyBefore window を過ぎたら packed visibility を
+// followers へ降格する (viewer 非依存)。createdAt は heNowMs より十分過去にする。
+func TestHideEmbedsAt_TreatVisibilityDowngrade(t *testing.T) {
+	mk := -3600
+	pub := entity.NoteEntity{ID: "p", UserID: "a", CreatedAt: "2023-01-01T00:00:00.000Z",
+		User: entity.UserLite{ID: "a", MakeNotesFollowersOnlyBefore: &mk}, Visibility: "public",
+		Text: heStr("hi"), FileIDs: []string{}, Files: []any{}, VisibleUserIDs: []string{}, Mentions: []string{}}
+	packed := []entity.NoteEntity{pub}
+	hideEmbedsAt(nil, packed, followsRepo(), heNowMs)
+	if packed[0].Visibility != "followers" {
+		t.Errorf("public note past makeNotesFollowersOnlyBefore window should downgrade to followers, got %q", packed[0].Visibility)
+	}
+}

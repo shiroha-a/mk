@@ -98,6 +98,23 @@ func hideEmbedsAt(viewer *model.User, packed []entity.NoteEntity, repo repositor
 		hideTopLevelIfNeeded(viewer, &packed[i], follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Renote, follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Reply, follows, nowMs)
+		// #2106 L5: treatVisibility downgrade を packed entity の visibility field にも反映する
+		// (hide 判定が元の visibility を読み終えた後に書き換える、viewer 非依存)。
+		downgradeVisibilityIfNeeded(&packed[i], nowMs)
+		downgradeVisibilityIfNeeded(packed[i].Renote, nowMs)
+		downgradeVisibilityIfNeeded(packed[i].Reply, nowMs)
+	}
+}
+
+// downgradeVisibilityIfNeeded rewrites a public/home note's packed visibility to
+// 'followers' when the author's makeNotesFollowersOnlyBefore window has passed
+// (#2106 L5, upstream treatVisibility). Viewer-independent.
+func downgradeVisibilityIfNeeded(n *entity.NoteEntity, nowMs int64) {
+	if n == nil {
+		return
+	}
+	if corenote.ShouldDowngradeVisibility(embedFactsFromEntity(n), nowMs) {
+		n.Visibility = string(model.NoteVisibilityFollowers)
 	}
 }
 
