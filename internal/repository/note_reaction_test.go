@@ -84,7 +84,9 @@ func TestNoteReactionRepository_Delete(t *testing.T) {
 
 	rec := &model.NoteReaction{ID: "rx_del_1", UserID: user.ID, NoteID: note.ID, Reaction: "👍"}
 	require.NoError(t, repo.Create(rec))
-	require.NoError(t, repo.Delete(rec))
+	affected, derr := repo.Delete(rec)
+	require.NoError(t, derr)
+	assert.Equal(t, int64(1), affected) // #2106 L40: 削除した行数を返す
 
 	_, err := repo.FindByPair(user.ID, note.ID)
 	assert.Error(t, err)

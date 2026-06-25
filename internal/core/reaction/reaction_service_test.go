@@ -219,8 +219,8 @@ type failingReactionRepoOnDelete struct {
 	*testutil.MockNoteReactionRepository
 }
 
-func (f *failingReactionRepoOnDelete) Delete(_ *model.NoteReaction) error {
-	return errors.New("delete boom")
+func (f *failingReactionRepoOnDelete) Delete(_ *model.NoteReaction) (int64, error) {
+	return 0, errors.New("delete boom")
 }
 
 func TestService_Create_ReplaceDeleteError(t *testing.T) {
@@ -276,8 +276,8 @@ type failingDeleteRepo struct {
 	*testutil.MockNoteReactionRepository
 }
 
-func (f *failingDeleteRepo) Delete(_ *model.NoteReaction) error {
-	return errors.New("delete fail")
+func (f *failingDeleteRepo) Delete(_ *model.NoteReaction) (int64, error) {
+	return 0, errors.New("delete fail")
 }
 
 func TestService_Delete_RepoError(t *testing.T) {
@@ -845,4 +845,35 @@ func TestService_List_RemoteCustomEmojiFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1, "remote custom emoji filter は該当 reaction のみ返す (❤ に化けない)")
 	assert.Equal(t, ":foo@remote.example:", out[0].Reaction)
+}
+
+// zeroAffectedDeleteRepo simulates a concurrent delete: FindByPair finds the row
+// (embedded mock) but Delete reports 0 affected rows (already removed by a racer).
+type zeroAffectedDeleteRepo struct {
+	*testutil.MockNoteReactionRepository
+}
+
+func (z *zeroAffectedDeleteRepo) Delete(_ *model.NoteReaction) (int64, error) {
+	return 0, nil
+}
+
+// #2106 L40: 並行 delete で affected==0 のときは ErrReactionNotFound を返し、カウントを
+// 二重デクリメントしない (upstream の affected!==1 ガード相当)。
+func TestService_Delete_ConcurrentZeroAffected(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	seedNote(noteRepo, "n1", "author", model.NoteVisibilityPublic)
+	mock := testutil.NewMockNoteReactionRepository()
+	mock.Reactions["existing"] = &model.NoteReaction{
+		ID: "existing", UserID: "viewer", NoteID: "n1", Reaction: "👍",
+	}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := reaction.NewService(
+		noteRepo,
+		&zeroAffectedDeleteRepo{MockNoteReactionRepository: mock},
+		testutil.NewMockEmojiRepository(),
+		testutil.NewMockFollowingRepository(),
+		idGen,
+	)
+	err := svc.Delete(&model.User{ID: "viewer"}, "n1")
+	assert.ErrorIs(t, err, reaction.ErrReactionNotFound)
 }

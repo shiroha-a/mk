@@ -25,7 +25,9 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 
 	var req ReactionCreateRequest
-	if err := c.Bind(&req); err != nil || req.NoteID == "" {
+	// #2106 L36: upstream create.ts の paramDef は required:['noteId','reaction']。reaction
+	// 欠落を endpoint 層で 400 にする (欠落時に FallbackReaction(❤) で reaction しない)。
+	if err := c.Bind(&req); err != nil || req.NoteID == "" || req.Reaction == "" {
 		return apierr.JSONInvalidParam(c)
 	}
 
@@ -39,7 +41,7 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 		case errors.Is(err, reaction.ErrAlreadyReacted):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_REACTED", "You are already reacting to that note.", "71efcf98-86d6-4e2b-b2ad-9d032369366b"))
 		case errors.Is(err, reaction.ErrCannotReactToPureRenote):
-			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_REACT_TO_RENOTE", "You can not react to a pure Renote.", "eaccdc08-ddef-43fe-908f-d108faad57f5"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_REACT_TO_RENOTE", "You cannot react to Renote.", "eaccdc08-ddef-43fe-908f-d108faad57f5"))
 		case errors.Is(err, reaction.ErrBlocked):
 			// upstream notes/reactions/create.ts は ReactionService の内部 id
 			// (e70412a4…) を catch し、endpoint error youHaveBeenBlocked

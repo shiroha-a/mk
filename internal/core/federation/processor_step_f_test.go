@@ -1378,8 +1378,8 @@ type deleteFailReactionRepo struct {
 	*testutil.MockNoteReactionRepository
 }
 
-func (r *deleteFailReactionRepo) Delete(_ *model.NoteReaction) error {
-	return errors.New("react delete failed")
+func (r *deleteFailReactionRepo) Delete(_ *model.NoteReaction) (int64, error) {
+	return 0, errors.New("react delete failed")
 }
 
 // deleteFailFollowingRepo causes Delete on followingRepo to fail (for handleReject Unfollow).

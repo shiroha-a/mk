@@ -1791,9 +1791,12 @@ func (m *MockNoteReactionRepository) Create(r *model.NoteReaction) error {
 	return nil
 }
 
-func (m *MockNoteReactionRepository) Delete(r *model.NoteReaction) error {
+func (m *MockNoteReactionRepository) Delete(r *model.NoteReaction) (int64, error) {
+	if _, ok := m.Reactions[r.ID]; !ok {
+		return 0, nil
+	}
 	delete(m.Reactions, r.ID)
-	return nil
+	return 1, nil
 }
 
 func (m *MockNoteReactionRepository) FindByPair(userID, noteID string) (*model.NoteReaction, error) {

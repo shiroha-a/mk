@@ -15,7 +15,9 @@ var ErrDuplicateReaction = errors.New("user has already reacted to this note")
 // NoteReactionRepository provides data access for note_reaction rows.
 type NoteReactionRepository interface {
 	Create(r *model.NoteReaction) error
-	Delete(r *model.NoteReaction) error
+	// Delete removes the reaction row and returns the number of affected rows so
+	// callers can detect concurrent deletes (#2106 L40: avoid double count-decrement).
+	Delete(r *model.NoteReaction) (int64, error)
 	FindByPair(userID, noteID string) (*model.NoteReaction, error)
 	// FindByUserAndNoteIDs returns reactions for a user across multiple notes.
 	// noteIDをキーとしたmapを返す。
@@ -57,8 +59,9 @@ func (r *noteReactionRepository) Create(rec *model.NoteReaction) error {
 	return nil
 }
 
-func (r *noteReactionRepository) Delete(rec *model.NoteReaction) error {
-	return r.db.Delete(rec).Error
+func (r *noteReactionRepository) Delete(rec *model.NoteReaction) (int64, error) {
+	result := r.db.Delete(rec)
+	return result.RowsAffected, result.Error
 }
 
 func (r *noteReactionRepository) FindByPair(userID, noteID string) (*model.NoteReaction, error) {

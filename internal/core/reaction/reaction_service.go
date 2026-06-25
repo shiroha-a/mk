@@ -300,7 +300,7 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 			return "", ErrAlreadyReacted
 		}
 		// 別のリアクションがすでにあるので置き換える
-		if err := s.reactionRepo.Delete(existing); err != nil {
+		if _, err := s.reactionRepo.Delete(existing); err != nil {
 			return "", err
 		}
 		// 集計列も古いリアクションを-1
@@ -415,8 +415,14 @@ func (s *Service) Delete(user *model.User, noteID string) error {
 	if err != nil {
 		return ErrReactionNotFound
 	}
-	if err := s.reactionRepo.Delete(existing); err != nil {
+	affected, err := s.reactionRepo.Delete(existing)
+	if err != nil {
 		return err
+	}
+	// #2106 L40: 並行 unreact で既に削除済 (affected==0) の場合はカウント減算・Undo・stream
+	// 発火を全てスキップする (upstream の `if (result.affected !== 1) throw` 相当、二重デクリ防止)。
+	if affected == 0 {
+		return ErrReactionNotFound
 	}
 	_ = s.countWriter.Increment(target.ID, existing.Reaction, -1)
 	if s.federationHook != nil {
@@ -617,6 +623,12 @@ func (s *Service) reactorHasAllowedRole(userID string, allowed []string) bool {
 // upstream Misskey TS は同様の正規化を行うため、両 backend の reaction
 // 文字列を揃えるのに必要 (#864)。
 func stripVariationSelector(s string) string {
+	// #2106 L39: upstream normalize \u306f ZWJ (U+200D) \u3092\u542b\u3080\u5408\u5b57\u7d75\u6587\u5b57 (\u4e00\u90e8\u306e\u8077\u696d/\u5bb6\u65cf\u7d75\u6587\u5b57)
+	// \u3067\u306f U+FE0F \u3092\u6b8b\u3059 (`unicode.match('\u200d') ? unicode : unicode.replace(/\ufe0f/g, '')`)\u3002
+	// ZWJ \u3092\u542b\u3080\u5834\u5408\u306f variation selector \u3092 strip \u305b\u305a\u539f\u6587\u3092\u8fd4\u3057 reaction key \u3092 upstream \u306b\u63c3\u3048\u308b\u3002
+	if strings.Contains(s, "\u200d") {
+		return s
+	}
 	return strings.ReplaceAll(s, "\ufe0f", "")
 }
 
