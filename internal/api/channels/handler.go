@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -159,9 +160,11 @@ func NewHandler(svc *corechannel.Service, idGen id.Generator) *Handler {
 
 // CreateRequest is the request body for channels/create.
 type CreateRequest struct {
-	Name                  string  `json:"name"`
-	Description           *string `json:"description"`
-	Color                 string  `json:"color"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	// #2106 L13: Color は *string で absent (nil → core が default 適用) と explicit ""
+	// (minLength:1 違反で reject) を区別する。
+	Color                 *string `json:"color"`
 	IsSensitive           bool    `json:"isSensitive"`
 	BannerID              *string `json:"bannerId"`
 	AllowRenoteToExternal *bool   `json:"allowRenoteToExternal"`
@@ -177,6 +180,18 @@ func (h *Handler) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Name == "" {
 		return apierr.JSONInvalidParam(c)
 	}
+	// #2106 L12/L13: upstream paramDef の長さ制約を検証する (超過時 DB の varchar 制約で
+	// 500 になるのを防ぎ 400 INVALID_PARAM を返す)。name 1-128 / description <=2048 /
+	// color 指定時 1-16 (空文字 color は minLength:1 違反で reject)。
+	if utf8.RuneCountInString(req.Name) > 128 ||
+		(req.Description != nil && utf8.RuneCountInString(*req.Description) > 2048) {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Color != nil {
+		if n := utf8.RuneCountInString(*req.Color); n < 1 || n > 16 {
+			return apierr.JSONInvalidParam(c)
+		}
+	}
 	// bannerId="" は「banner 無し」に正規化する (TS は misskey:id format で空文字を
 	// 400 にするため空文字が DB に入ることはない。mk-go では空文字 column を作らない)。
 	if req.BannerID != nil && *req.BannerID == "" {
@@ -189,11 +204,15 @@ func (h *Handler) Create(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "cd1e9f3e-5a12-4ab4-96f6-5d0a2cc32050"))
 		}
 	}
+	colorVal := ""
+	if req.Color != nil {
+		colorVal = *req.Color
+	}
 	ch, err := h.svc.Create(corechannel.CreateInput{
 		OwnerID:               user.ID,
 		Name:                  req.Name,
 		Description:           req.Description,
-		Color:                 req.Color,
+		Color:                 colorVal,
 		IsSensitive:           req.IsSensitive,
 		BannerID:              req.BannerID,
 		AllowRenoteToExternal: req.AllowRenoteToExternal,
@@ -275,6 +294,22 @@ func (h *Handler) Update(c echo.Context) error {
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil || req.ChannelID == "" {
 		return apierr.JSONInvalidParam(c)
+	}
+	// #2106 L12: upstream update.ts paramDef の長さ制約を検証する (超過時 DB 制約 500 でなく
+	// 400)。name 指定時 1-128 / description 非 null 時 <=2048 / color 指定時 1-16。
+	if req.Name != nil {
+		if n := utf8.RuneCountInString(*req.Name); n < 1 || n > 128 {
+			return apierr.JSONInvalidParam(c)
+		}
+	}
+	if req.Description.Present && req.Description.Value != nil &&
+		utf8.RuneCountInString(*req.Description.Value) > 2048 {
+		return apierr.JSONInvalidParam(c)
+	}
+	if req.Color != nil {
+		if n := utf8.RuneCountInString(*req.Color); n < 1 || n > 16 {
+			return apierr.JSONInvalidParam(c)
+		}
 	}
 	in := corechannel.UpdateInput{
 		Name:                  req.Name,

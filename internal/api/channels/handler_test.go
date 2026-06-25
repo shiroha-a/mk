@@ -1195,3 +1195,22 @@ func TestResolveBannerURLs_Batch(t *testing.T) {
 	// 全 channel banner なし -> FindByIDs を呼ばず empty。
 	assert.Empty(t, h.resolveBannerURLs([]*model.Channel{{ID: "c3"}}))
 }
+
+// #2106 L12: name が 128 文字超だと DB 500 でなく 400 INVALID_PARAM を返す。
+func TestCreate_NameTooLong(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	long := strings.Repeat("a", 129)
+	c, rec := newReq(t, `{"name":"`+long+`"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// #2106 L13: explicit に color:"" を送ると minLength:1 違反で 400 (absent は default 適用)。
+func TestCreate_EmptyColorRejected(t *testing.T) {
+	h, _, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"name":"x","color":""}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

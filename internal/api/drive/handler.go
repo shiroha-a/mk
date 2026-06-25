@@ -730,6 +730,17 @@ func (h *Handler) Usage(c echo.Context) error {
 }
 
 // FilesList handles POST /api/drive/files — lists user's files.
+// emptyFolderIDToNil normalizes an empty-string folderId pointer to nil so the
+// repository treats it as "root" (folderId IS NULL) instead of filtering on the
+// literal empty string. #2106 L14: upstream は falsy folderId を root 扱いし、
+// 空文字 "" は misskey:id format 違反として扱う。mk-go は "" を root に正規化する。
+func emptyFolderIDToNil(s *string) *string {
+	if s != nil && *s == "" {
+		return nil
+	}
+	return s
+}
+
 func (h *Handler) FilesList(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
@@ -759,7 +770,7 @@ func (h *Handler) FilesList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	files, err := h.fileRepo.ListByUser(user.ID, req.FolderID, false, req.Type, req.Sort, untilID, sinceID, req.Limit)
+	files, err := h.fileRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), false, req.Type, req.Sort, untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -797,7 +808,7 @@ func (h *Handler) FilesFind(c echo.Context) error {
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	files, err := h.fileRepo.FindByName(user.ID, req.Name, req.FolderID)
+	files, err := h.fileRepo.FindByName(user.ID, req.Name, emptyFolderIDToNil(req.FolderID))
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -1047,7 +1058,7 @@ func (h *Handler) FoldersList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	folders, err := h.folderRepo.ListByUser(user.ID, req.FolderID, untilID, sinceID, req.Limit)
+	folders, err := h.folderRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), untilID, sinceID, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

@@ -1254,3 +1254,17 @@ func TestFoldersFind_NilRepo(t *testing.T) {
 	require.NoError(t, h.FoldersFind(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+// #2106 L14: folderId:"" は root (folderId IS NULL) として扱う (0 件返却にしない)。
+func TestFilesList_EmptyFolderIDTreatedAsRoot(t *testing.T) {
+	h, fileRepo, _ := newHandlerWithRepos(t)
+	uid := "u1"
+	// root (FolderID=nil) の file。
+	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, Name: "root.png"}
+	c, rec := newJSONReq(t, `{"folderId":""}`)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesList(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	// "" → nil 正規化により root の file が返る。
+	assert.Contains(t, rec.Body.String(), "root.png")
+}
