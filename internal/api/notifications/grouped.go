@@ -106,6 +106,10 @@ func groupNotifications(filtered []*notification.Notification, packed []map[stri
 			if pt, ct := renoteTargetID(prev, noteByID), renoteTargetID(cur, noteByID); pt != "" && pt == ct {
 				if asString(last["type"]) != "renote:grouped" {
 					last = newRenoteGroup(prev, packed[i-1])
+					// #2106 L23: upstream i/notifications-grouped は renote group seed の createdAt に
+					// cur (= group 内 2 番目 = より古い) 通知の時刻を採る (reaction group は prev で一致)。
+					// newRenoteGroup は prev の createdAt を入れるので cur で上書きする。
+					last["createdAt"] = packed[i]["createdAt"]
 					out[len(out)-1] = last
 				}
 				appendRenoteUser(last, packed[i])

@@ -1739,6 +1739,7 @@ func (s *Server) setupRoutes() {
 
 	// Hashtags endpoints (Phase 6)
 	hashtagsHandler := apihashtags.NewHandler(s.db)
+	hashtagsHandler.SetIDGen(idGen)                     // #2106 L25: 設定済 ID generator を共有 (毎回 aidx 生成を廃止)
 	hashtagsHandler.SetRelationRepos(listRelationRepos) // #1957-a: hashtags/users の embed user に relation
 	api.POST("/hashtags/list", hashtagsHandler.List)
 	api.POST("/hashtags/search", hashtagsHandler.Search)

@@ -25,11 +25,28 @@ type Handler struct {
 	// relation は hashtags/users の embed user に viewer 視点の relation block を
 	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1957-a)。
 	relation userrelation.Repos
+	// idGen は note ID parse / createdAt 抽出に使う (#2106 L25)。未配線時は aidx に fallback。
+	idGen id.Generator
 }
 
 // NewHandler creates a new hashtags Handler.
 func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{db: db}
+}
+
+// SetIDGen wires the configured ID generator so Trend / Users use the operator's
+// configured generator instead of constructing an aidx generator per request (#2106 L25).
+func (h *Handler) SetIDGen(g id.Generator) {
+	h.idGen = g
+}
+
+// generator returns the wired ID generator, falling back to aidx when unset
+// (preserves test compat for handlers constructed without SetIDGen)。
+func (h *Handler) generator() (id.Generator, error) {
+	if h.idGen != nil {
+		return h.idGen, nil
+	}
+	return id.NewGenerator("aidx")
 }
 
 // SetRelationRepos wires the repositories used to populate viewer-relative
@@ -183,7 +200,7 @@ func (h *Handler) Trend(c echo.Context) error {
 		topN          = 10
 	)
 
-	gen, err := id.NewGenerator("aidx")
+	gen, err := h.generator()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -407,7 +424,7 @@ func (h *Handler) Users(c echo.Context) error {
 	}
 
 	// createdAt 抽出用の idGen は Trend と同じく aidx を使う。
-	gen, err := id.NewGenerator("aidx")
+	gen, err := h.generator()
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

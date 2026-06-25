@@ -190,6 +190,9 @@ func (h *Handler) PostsCreate(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// #2106 L26: upstream gallery/posts/create は files 全件 not-owned のとき bare Error を投げ
+	// INTERNAL_ERROR(500) になるが、mk-go は semantics 上適切な 400 INVALID_PARAM を意図的に
+	// 維持する (worse な 500 拡散を避ける、#2106 方針)。
 	if len(owned) == 0 {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "No valid files.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}

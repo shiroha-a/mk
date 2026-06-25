@@ -32,7 +32,11 @@ func init() {
 }
 
 func newHandler() *hashtags.Handler {
-	return hashtags.NewHandler(testDB)
+	h := hashtags.NewHandler(testDB)
+	// #2106 L25: 設定済 ID generator を共有する経路を test でも通す。
+	gen, _ := id.NewGenerator("aidx")
+	h.SetIDGen(gen)
+	return h
 }
 
 func brokenHandler() *hashtags.Handler {
