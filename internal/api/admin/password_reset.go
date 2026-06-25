@@ -39,10 +39,12 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 	if h.userRepo != nil {
 		user, err := h.userRepo.FindByID(req.UserID)
 		if err != nil || user == nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
+			// #2106 L2: upstream reset-password.ts:26 固有の UUID に揃える。
+			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 		}
 		if user.IsRoot {
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot reset the password of a root account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			// #2106 L1: upstream は専用エラー cannotResetPasswordOfRootUser (kind 未指定 = 400) を投げる。
+			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_RESET_PASSWORD_OF_ROOT_USER", "Cannot reset password of the root user.", "f28fc207-42ca-44c7-a577-44b4f0ec5999"))
 		}
 		target = user
 	}

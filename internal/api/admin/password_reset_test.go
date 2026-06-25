@@ -79,8 +79,10 @@ func TestResetPasswordAdmin_RootRejected(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["root1"] = &model.User{ID: "root1", Username: "admin", IsRoot: true}
 	rec := doPost(h.ResetPassword, `{"userId":"root1"}`, adminUser)
-	require.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	// #2106 L1: upstream は専用エラー CANNOT_RESET_PASSWORD_OF_ROOT_USER (400)。
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CANNOT_RESET_PASSWORD_OF_ROOT_USER")
+	assert.Contains(t, rec.Body.String(), "f28fc207-42ca-44c7-a577-44b4f0ec5999")
 }
 
 func TestResetPasswordAdmin_WritesModerationLog(t *testing.T) {
