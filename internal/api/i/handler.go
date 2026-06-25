@@ -58,38 +58,41 @@ type AccountMover interface {
 
 // Handler handles account-related API endpoints.
 type Handler struct {
-	userService          *user.Service
-	idGen                id.Generator
-	roleProvider         RoleProvider
-	registryRepo         repository.RegistryRepository
-	favoriteRepo         repository.NoteFavoriteRepository
-	transferEnqueuer     TransferEnqueuer
-	webauthnSvc          *twofactor.WebAuthnService
-	securityKeyRepo      repository.UserSecurityKeyRepository
-	metaRepo             repository.MetaRepository
-	emailSender          EmailSender
-	serverURL            string
-	signinRepo           repository.SigninRepository
-	accessTokenRepo      repository.AccessTokenRepository
-	galleryRepo          GalleryRepository
-	pageLikeRepo         repository.PageLikeRepository
-	mover                AccountMover
-	notificationSvc      UnreadNotificationSource
-	achievementNotifier  AchievementNotifier
-	followRequestRepo    repository.FollowRequestRepository
-	announcementRepo     AnnouncementUnreadSource
-	chatRepo             ChatUnreadSource
-	antennaUnreadRepo    AntennaUnreadSource
-	channelUnreadRepo    ChannelUnreadSource
-	piningRepo           repository.UserNotePiningRepository
-	noteRepo             repository.NoteRepository
-	pageRepo             repository.PageRepository
-	instanceRepo         repository.InstanceRepository
-	emojiRepo            repository.EmojiRepository
-	bufReader            entity.BufferedReactionsReader
-	avatarDecorationRepo repository.AvatarDecorationRepository
-	mainStreamPublisher  MainStreamPublisher
-	fieldRes             *entity.NoteFieldResolver
+	userService      *user.Service
+	idGen            id.Generator
+	roleProvider     RoleProvider
+	registryRepo     repository.RegistryRepository
+	favoriteRepo     repository.NoteFavoriteRepository
+	transferEnqueuer TransferEnqueuer
+	// #2230: i/delete-account の cascade 削除と連合 Delete 配信 (admin/delete-account と同経路)。
+	deleteAccountEnqueuer DeleteAccountEnqueuer
+	accountDeletionFed    AccountDeletionFederationHook
+	webauthnSvc           *twofactor.WebAuthnService
+	securityKeyRepo       repository.UserSecurityKeyRepository
+	metaRepo              repository.MetaRepository
+	emailSender           EmailSender
+	serverURL             string
+	signinRepo            repository.SigninRepository
+	accessTokenRepo       repository.AccessTokenRepository
+	galleryRepo           GalleryRepository
+	pageLikeRepo          repository.PageLikeRepository
+	mover                 AccountMover
+	notificationSvc       UnreadNotificationSource
+	achievementNotifier   AchievementNotifier
+	followRequestRepo     repository.FollowRequestRepository
+	announcementRepo      AnnouncementUnreadSource
+	chatRepo              ChatUnreadSource
+	antennaUnreadRepo     AntennaUnreadSource
+	channelUnreadRepo     ChannelUnreadSource
+	piningRepo            repository.UserNotePiningRepository
+	noteRepo              repository.NoteRepository
+	pageRepo              repository.PageRepository
+	instanceRepo          repository.InstanceRepository
+	emojiRepo             repository.EmojiRepository
+	bufReader             entity.BufferedReactionsReader
+	avatarDecorationRepo  repository.AvatarDecorationRepository
+	mainStreamPublisher   MainStreamPublisher
+	fieldRes              *entity.NoteFieldResolver
 	// emailValidationClient は verifymail / truemail SaaS への outbound に
 	// 使う SSRF-safe HTTP client (#638)。nil ならデフォルトクライアント。
 	emailValidationClient *http.Client

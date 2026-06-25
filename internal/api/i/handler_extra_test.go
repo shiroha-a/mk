@@ -3,6 +3,7 @@ package i
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -596,4 +598,78 @@ func TestClaimAchievement_Duplicate_NoNotification(t *testing.T) {
 	rec := postExtra(h.ClaimAchievement, `{"name":"notes1"}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, notifier.calls)
+}
+
+// --- #2230: i/delete-account の cascade 削除 + 連合 Delete ---
+
+type fakeDeleteEnqueuer struct {
+	called []string
+	err    error
+}
+
+func (f *fakeDeleteEnqueuer) EnqueueDeleteAccount(p queue.DeleteAccountPayload) error {
+	f.called = append(f.called, p.UserID)
+	return f.err
+}
+
+type fakeAccountDeletionFed struct{ deleted []string }
+
+func (f *fakeAccountDeletionFed) OnUserDeleted(u *model.User) {
+	f.deleted = append(f.deleted, u.ID)
+}
+
+// #2230: noteIds/drive purge の cascade job enqueue と AP Delete(actor) 配信が
+// 走ることを検証する (論理削除フラグだけでなく実削除が triggered される)。
+func TestDeleteAccount_EnqueuesCascadeAndFederates(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	enq := &fakeDeleteEnqueuer{}
+	fed := &fakeAccountDeletionFed{}
+	h.SetDeleteAccountEnqueuer(enq)
+	h.SetAccountDeletionFederationHook(fed)
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Users["u1"].IsDeleted)
+	assert.Equal(t, []string{"u1"}, enq.called, "cascade delete job must be enqueued")
+	assert.Equal(t, []string{"u1"}, fed.deleted, "AP Delete(actor) must be delivered")
+}
+
+// #2230: enqueue が失敗しても論理削除フラグは立ったままなので 204 を返す
+// (フラグが source of truth、cleanup は次回 retry に委ねる)。
+func TestDeleteAccount_EnqueueErrorStillReturns204(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	h.SetDeleteAccountEnqueuer(&fakeDeleteEnqueuer{err: errors.New("boom")})
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, repo.Users["u1"].IsDeleted)
+}
+
+// #2230: root アカウントの自己削除は cascade 前に 403 で拒否し、削除も enqueue もしない。
+func TestDeleteAccount_ProtectedRootRejected(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	user.IsRoot = true
+	enq := &fakeDeleteEnqueuer{}
+	h.SetDeleteAccountEnqueuer(enq)
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	assert.False(t, repo.Users["u1"].IsDeleted, "protected account must not be marked deleted")
+	assert.Empty(t, enq.called, "protected account must not enqueue cascade")
+}
+
+// #2230: ローカル system account (host=nil + username に '.') も自己削除を拒否する。
+func TestDeleteAccount_ProtectedSystemRejected(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	user.Username = "relay.actor"
+	user.Host = nil
+
+	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, repo.Users["u1"].IsDeleted)
 }

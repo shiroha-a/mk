@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -18,6 +19,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/achievement"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -103,6 +105,13 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
+	// #2230: root / system アカウントの自己削除は連合・instance を壊すため拒否する
+	// (admin/delete-account の isProtectedAccount と同じ guard、upstream DeleteAccountService の
+	// rootUserId / system account ガード相当)。cascade を走らせる前に弾く。
+	if isProtectedSelfDelete(u) {
+		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+
 	// isSuspended + isDeleted を true に設定 (論理削除)
 	if err := h.userService.UpdateUserFields(u.ID, map[string]any{
 		"isSuspended": true,
@@ -120,7 +129,60 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// 本 helper の O(N) cache scan cost は許容範囲。helper の詳細は
 	// handler.go の invalidateUserTokenCache を参照。
 	h.invalidateUserTokenCache(u.ID)
+
+	// #2230: 論理削除フラグを立てるだけでは notes / drive / following が purge されず、
+	// 連合先にも削除が伝わらない (= 「凍結止まりで削除が実行されない」)。admin/delete-account と
+	// 同様に (1) sharedInbox へ Delete(actor) を配信し、(2) cascade 削除 job を enqueue する。
+	// cascade は soft (user 行 / 署名鍵を残す) なので queue 経由配信でも鍵は生存する。
+	if h.accountDeletionFed != nil {
+		h.accountDeletionFed.OnUserDeleted(u)
+	}
+	if h.deleteAccountEnqueuer != nil {
+		if err := h.deleteAccountEnqueuer.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: u.ID}); err != nil {
+			// enqueue 失敗は user 可視のエラーにしない (フラグは既に立っている)。
+			// 次回手動 retry / 再ログイン不可状態は維持されるため 204 を返す。
+			slog.Warn("i/delete-account: enqueue cascade failed", "userId", u.ID, "err", err)
+		}
+	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// DeleteAccountEnqueuer schedules the background cascade deletion of an account
+// (notes / drive / following purge), mirroring admin/delete-account (#2230).
+type DeleteAccountEnqueuer interface {
+	EnqueueDeleteAccount(payload queue.DeleteAccountPayload) error
+}
+
+// SetDeleteAccountEnqueuer wires the cascade-deletion enqueuer used by
+// i/delete-account (#2230). nil leaves the account logically deleted only.
+func (h *Handler) SetDeleteAccountEnqueuer(e DeleteAccountEnqueuer) {
+	h.deleteAccountEnqueuer = e
+}
+
+// AccountDeletionFederationHook delivers the AP Delete(actor) activity to the
+// account's followers' sharedInboxes on self-deletion (#2230).
+type AccountDeletionFederationHook interface {
+	OnUserDeleted(user *model.User)
+}
+
+// SetAccountDeletionFederationHook wires the federation Delete(actor) hook used
+// by i/delete-account (#2230). nil skips federation delivery.
+func (h *Handler) SetAccountDeletionFederationHook(hook AccountDeletionFederationHook) {
+	h.accountDeletionFed = hook
+}
+
+// isProtectedSelfDelete reports whether the self-deleting user is a root or local
+// system account that must never be deleted (#2230). Mirrors admin's
+// isProtectedAccount: IsRoot, or a local (host==nil) account whose username
+// contains '.' (systemaccount uses `<kind>.actor`).
+func isProtectedSelfDelete(u *model.User) bool {
+	if u == nil {
+		return false
+	}
+	if u.IsRoot {
+		return true
+	}
+	return u.Host == nil && strings.Contains(u.Username, ".")
 }
 
 // Favorites handles POST /api/i/favorites.

@@ -1645,6 +1645,10 @@ func (s *Server) setupRoutes() {
 
 	// i/export-* and i/import-* (Phase 9.4)
 	iHandler.SetTransferEnqueuer(s.queueClient)
+	// #2230: i/delete-account の cascade 削除 (notes/drive/following purge) と AP Delete(actor)
+	// 配信を admin/delete-account と同経路で配線する。未配線だと論理削除フラグだけ立って実削除が走らない。
+	iHandler.SetDeleteAccountEnqueuer(s.queueClient)
+	iHandler.SetAccountDeletionFederationHook(corefederation.NewUserModerationDeliveryHook(deliverService, apRenderer, userRepo))
 	api.POST("/i/export-notes", iHandler.ExportNotes, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/export-following", iHandler.ExportFollowing, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/export-blocking", iHandler.ExportBlocking, middleware.RequireAuth(), middleware.RequireSecure())
