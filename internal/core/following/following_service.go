@@ -217,6 +217,24 @@ func (s *Service) adjustInstanceCountsForFollowing(f *model.Following, delta int
 // Phase 2 Step B implementation only handles local follows. Federation
 // (HTTP signatures, AP delivery), block checks, and notifications are
 // added in later phases.
+// shouldAutoAcceptFollow reports whether a follow toward a locked followee should be
+// auto-accepted (create Following directly) instead of a follow request, mirroring
+// upstream UserFollowingService.follow の autoAccept 分岐 (#2106 N21): followee が
+// local user で profile.autoAcceptFollowed=true、かつ followee→follower の follow が既に
+// 存在する (相互フォロー) とき。既に follow 済のケースは呼び元の ErrAlreadyFollowing guard で
+// 別途処理される。
+func (s *Service) shouldAutoAcceptFollow(followee *model.User, followerID string) bool {
+	if followee.Host != nil { // remote followee は相手側のサーバーで承認処理される
+		return false
+	}
+	profile, err := s.userRepo.FindProfileByUserID(followee.ID)
+	if err != nil || profile == nil || !profile.AutoAcceptFollowed {
+		return false
+	}
+	mutual, err := s.followingRepo.Exists(followee.ID, followerID)
+	return err == nil && mutual
+}
+
 func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*FollowResult, error) {
 	if followerID == followeeID {
 		return nil, ErrSelfFollow
@@ -256,8 +274,12 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 		}
 	}
 
-	// Lockedアカウントへのフォローはリクエスト扱い
-	if followee.IsLocked {
+	// Lockedアカウントへのフォローはリクエスト扱い。ただし #2106 N21: followee が
+	// local + profile.autoAcceptFollowed=true + 相互フォロー (followee→follower) のときは
+	// upstream UserFollowingService 同様に follow request を作らず即 Following を成立させる
+	// (下の通常 Following 作成経路に fall through する)。remote follower の場合は handleFollow が
+	// result.Following を見て AP Accept を返送する。
+	if followee.IsLocked && !s.shouldAutoAcceptFollow(followee, followerID) {
 		// 既存リクエストがあればエラー
 		if exists, err := s.followRequestRepo.Exists(followerID, followeeID); err != nil {
 			return nil, err

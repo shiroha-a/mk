@@ -1280,3 +1280,39 @@ func TestUnfollow_StillFederates(t *testing.T) {
 	require.NoError(t, svc.Unfollow("alice", "bob"))
 	assert.Equal(t, []string{"alice->bob"}, fed.unfollowed, "通常 Unfollow は Undo を配送する")
 }
+
+// #2106 N21: locked + autoAcceptFollowed の followee に相互フォロー相手から follow すると
+// follow request でなく即 Following が成立する (upstream UserFollowingService の autoAccept)。
+func TestFollow_LockedAutoAcceptFollowed_AutoAccepts(t *testing.T) {
+	svc, userRepo, fRepo, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true) // bob is locked
+	userRepo.Profiles["bob"] = &model.UserProfile{UserID: "bob", AutoAcceptFollowed: true}
+	// bob → alice (相互フォローの片側)。alice は非 locked なので即 Following。
+	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
+	require.NoError(t, err)
+
+	// alice → bob (locked + autoAcceptFollowed + 相互) → 即 Following。
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, res.Following, "autoAcceptFollowed + 相互で即 Following")
+	assert.Nil(t, res.Request)
+	assert.Empty(t, frRepo.Requests, "follow request は作られない")
+	// alice→bob の Following が存在する。
+	ex, _ := fRepo.Exists("alice", "bob")
+	assert.True(t, ex)
+}
+
+// #2106 N21: autoAcceptFollowed でも相互フォローでなければ通常通り follow request 止まり。
+func TestFollow_LockedAutoAcceptFollowed_NoMutual_CreatesRequest(t *testing.T) {
+	svc, userRepo, _, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	userRepo.Profiles["bob"] = &model.UserProfile{UserID: "bob", AutoAcceptFollowed: true}
+	// bob は alice を follow していない (非相互)。
+	res, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, res.Request, "相互でなければ request 止まり")
+	assert.Nil(t, res.Following)
+	assert.Len(t, frRepo.Requests, 1)
+}
