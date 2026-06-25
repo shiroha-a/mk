@@ -1023,3 +1023,17 @@ func TestValidListState(t *testing.T) {
 		assert.False(t, users.ValidListState(bad), "state=%q は範囲外で reject (#1996)", bad)
 	}
 }
+
+// #2106 L8: viewer が block されていても remote target には block 早期 return より先に
+// IS_REMOTE_USER を返す (upstream reactions.ts の評価順)。
+func TestReactions_BlockedAndRemote_ReturnsRemoteError(t *testing.T) {
+	h, userRepo, _ := newReactionsHandler(t)
+	host := "remote.example"
+	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Host: &host}
+	blockRepo := testutil.NewMockBlockingRepository()
+	_ = blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "u_remote", BlockeeID: "u_viewer"})
+	h.SetBlockingRepo(blockRepo)
+	rec := postExtra(h.Reactions, `{"userId":"u_remote"}`, &model.User{ID: "u_viewer"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "IS_REMOTE_USER")
+}

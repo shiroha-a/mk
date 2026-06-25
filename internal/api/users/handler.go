@@ -546,7 +546,9 @@ func (h *Handler) Show(c echo.Context) error {
 		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibility == "local" {
 			return apierr.JSONNoSuchUser(c)
 		}
-		bundle, err = h.userService.ShowByUsername(*req.Username, req.Host)
+		// #2106 L10: upstream show.ts は lookup 前に username を trim する。前後空白を含む
+		// リクエストでも usernameLower 一致するよう揃える。
+		bundle, err = h.userService.ShowByUsername(strings.TrimSpace(*req.Username), req.Host)
 	}
 
 	if err != nil {
@@ -788,8 +790,10 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 
+	// #2106 L9: upstream notes.ts は user 存在確認をせず単に note を query するため、存在しない
+	// userId では [] を返す (noSuchUser は meta の vestigial error)。404 でなく空配列に揃える。
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
+		return c.JSON(http.StatusOK, []any{})
 	}
 
 	// upstream paramDef のデフォルトに合わせる (= withFiles=false /
@@ -902,7 +906,8 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		if req.Username == "" {
 			return apierr.JSONInvalidParam(c)
 		}
-		bundle, err := h.userService.ShowByUsername(strings.ToLower(req.Username), req.Host)
+		// #2106 L10: Followers/Following も Show と同じく lookup 前に trim する。
+		bundle, err := h.userService.ShowByUsername(strings.ToLower(strings.TrimSpace(req.Username)), req.Host)
 		if err != nil || bundle == nil {
 			nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
 			if followers {

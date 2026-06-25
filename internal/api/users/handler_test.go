@@ -1096,10 +1096,12 @@ func TestNotes_LimitClamp(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// #2106 L9: 存在しない userId は upstream notes.ts 同様 200 [] を返す (404 でない)。
 func TestNotes_UserNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := post(h.Notes, `{"userId": "ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
 }
 
 func TestNotes_InvalidParam(t *testing.T) {
@@ -2257,4 +2259,15 @@ func TestFollowers_PopulatesBlockMute(t *testing.T) {
 	assert.Equal(t, true, follower["isMuted"], "viewer が mute している follower は isMuted=true")
 	assert.Equal(t, false, follower["isBlocked"])
 	assert.Equal(t, false, follower["isRenoteMuted"])
+}
+
+// #2106 L10: username の前後空白を trim して lookup する (upstream show.ts と同じ)。
+func TestShow_ByUsernameTrimmed(t *testing.T) {
+	h, userRepo := newTestHandler(t)
+	addTestUser(userRepo)
+	rec := post(h.Show, `{"username": "  testuser  "}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "user1", resp["id"], "前後空白を trim して testuser に解決")
 }

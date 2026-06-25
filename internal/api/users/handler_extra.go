@@ -352,12 +352,6 @@ func (h *Handler) Reactions(c echo.Context) error {
 	// 丸ごと bypass して reaction list を返す。
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 
-	// viewer が target にブロックされていれば空配列 (upstream reactions.ts:91-94 の
-	// 非 moderator path 早期 return、#1547)。moderator は bypass。
-	if !iAmModerator && h.isBlockedByTarget(viewer, req.UserID) {
-		return c.JSON(http.StatusOK, []any{})
-	}
-
 	// target user lookup + remote / publicReactions check (non-moderator のみ)。
 	// production では userRepo が必ず wire されるが、既存の handler test
 	// (TestReactions_Success 等) は userRepo を wire しないので nil guard で
@@ -382,6 +376,13 @@ func (h *Handler) Reactions(c echo.Context) error {
 				return c.JSON(http.StatusForbidden, apierr.Error("REACTIONS_NOT_PUBLIC", "Reactions of the user is not public.", "673a7dd2-6924-1093-e0c0-e68456ceae5c"))
 			}
 		}
+	}
+
+	// #2106 L8: block 早期 return は upstream reactions.ts 同様 remote/public check の後に置く。
+	// block されていても remote/非公開 target には IS_REMOTE_USER/REACTIONS_NOT_PUBLIC を先に返す。
+	// moderator は bypass。
+	if !iAmModerator && h.isBlockedByTarget(viewer, req.UserID) {
+		return c.JSON(http.StatusOK, []any{})
 	}
 
 	// reactor の reaction list を取得 (User / Note を Preload 済み)。
