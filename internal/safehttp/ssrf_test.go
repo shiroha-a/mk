@@ -25,6 +25,7 @@ func TestIsPrivateIP_IPv4Private(t *testing.T) {
 		{"172.31.x", "172.31.255.255"},
 		{"192.168.x", "192.168.1.1"},
 		{"link-local", "169.254.1.1"},
+		{"unspecified", "0.0.0.0"},
 		{"zero network", "0.0.0.1"},
 		{"CGN", "100.64.0.1"},
 		{"documentation 192.0.2.x", "192.0.2.1"},
@@ -46,6 +47,7 @@ func TestIsPrivateIP_IPv6Private(t *testing.T) {
 		name string
 		ip   string
 	}{
+		{"unspecified", "::"},
 		{"loopback", "::1"},
 		{"link-local", "fe80::1"},
 		{"unique-local fd", "fd00::1"},
@@ -125,6 +127,20 @@ func TestNewSSRFSafeTransport_BlocksLoopback(t *testing.T) {
 	client := &http.Client{Transport: tr}
 
 	_, err := client.Get(ts.URL + "/test")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "private IP blocked")
+}
+
+// IPv6 unspecified `::` 宛は SSRF block される。Linux では connect(::) が
+// loopback (::1) にルートされるため、`http://0.0.0.0:PORT/` を弾く保護を
+// `http://[::]:PORT/` で回避できてはならない (`::/128` を privateRanges に
+// 追加して 0.0.0.0/8 と対称化した)。
+func TestNewSSRFSafeTransport_BlocksIPv6Unspecified(t *testing.T) {
+	tr := NewSSRFSafeTransport(nil)
+	client := &http.Client{Transport: tr}
+
+	// dial 前の isPrivateIP(::) 判定で弾かれるため実際の接続は発生しない。
+	_, err := client.Get("http://[::]:80/test")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "private IP blocked")
 }

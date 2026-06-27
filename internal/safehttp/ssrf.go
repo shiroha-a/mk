@@ -36,6 +36,11 @@ func init() {
 		"224.0.0.0/4",
 		"240.0.0.0/4",
 		// IPv6 private / reserved
+		// IPv4 の 0.0.0.0/8 と対称に IPv6 unspecified も遮断する。これが無いと
+		// `http://[::]:PORT/` が isPrivateIP をすり抜け、Linux の connect(::) が
+		// loopback (::1) にルートされて SSRF 保護を回避できる (upstream ipaddr.js
+		// も :: を unspecified range として遮断する)。
+		"::/128",
 		"::1/128",
 		"fe80::/10",
 		"fc00::/7",
