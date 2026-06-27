@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -24,6 +25,10 @@ type NoteCreateHook struct {
 	// threadMuteRepo は reply/mention webhook のスレッドミュート gate に使う
 	// optional 依存 (#1965)。未配線なら gate は素通り。
 	threadMuteRepo repository.NoteThreadMutingRepository
+	// followingRepo は note payload の embed (renote/reply/引用先) を受信者の
+	// 可視性で gate するために使う。未配線なら fail-closed (followers/specified
+	// embed を隠す)。
+	followingRepo repository.FollowingRepository
 }
 
 // NewNoteCreateHook constructs a NoteCreateHook.
@@ -36,6 +41,13 @@ func NewNoteCreateHook(svc *Service, idGen id.Generator) *NoteCreateHook {
 // matching upstream NoteCreateService (#1965). nil disables the gate.
 func (h *NoteCreateHook) SetThreadMutingRepo(r repository.NoteThreadMutingRepository) {
 	h.threadMuteRepo = r
+}
+
+// SetFollowingRepo attaches a FollowingRepository used to gate the embed
+// (renote/reply/引用先) visibility of the note payload per recipient. nil keeps
+// the gate fail-closed (followers/specified embeds hidden).
+func (h *NoteCreateHook) SetFollowingRepo(r repository.FollowingRepository) {
+	h.followingRepo = r
 }
 
 // isThreadMuted reports whether userID has muted the thread that threadNote
@@ -59,19 +71,25 @@ func (h *NoteCreateHook) OnNoteCreated(note *model.Note, author *model.User, rep
 	if h == nil || h.svc == nil || note == nil || author == nil {
 		return
 	}
-	body := map[string]any{"note": packNote(note, author, h.idGen)}
+	// note payload は受信者ごとに pack + embed gate する。同一 body を共有すると、
+	// ある受信者が見られない embed (第三者の followers 引用先など) が別受信者に
+	// leak する。upstream の mention webhook と同じ per-recipient gate。
+	emit := func(recipientID, event string) {
+		body := map[string]any{"note": h.packNoteFor(note, author, recipientID)}
+		h.svc.DispatchUser(recipientID, event, body)
+	}
 
 	// 作者本人のwebhook
-	h.svc.DispatchUser(author.ID, EventNote, body)
+	emit(author.ID, EventNote)
 
 	// reply: 親ノート投稿者。upstream はスレッドミュート中の reply 先には reply
 	// webhook を出さない (#1965)。thread は reply 先ノートの threadId。
 	if replyTarget != nil && replyTarget.UserID != author.ID && !h.isThreadMuted(replyTarget.UserID, replyTarget) {
-		h.svc.DispatchUser(replyTarget.UserID, EventReply, body)
+		emit(replyTarget.UserID, EventReply)
 	}
 	// renote: 対象ノート投稿者 (renote はスレッドミュートで gate しない、upstream 同様)。
 	if renoteTarget != nil && renoteTarget.UserID != author.ID {
-		h.svc.DispatchUser(renoteTarget.UserID, EventRenote, body)
+		emit(renoteTarget.UserID, EventRenote)
 	}
 	// mention: 本文から抽出されたユーザー ID ごとに配信。スレッドミュート中の
 	// mention 先には mention webhook を出さない (#1965)。thread は新規ノートの threadId。
@@ -82,19 +100,42 @@ func (h *NoteCreateHook) OnNoteCreated(note *model.Note, author *model.User, rep
 		if h.isThreadMuted(mentionID, note) {
 			continue
 		}
-		h.svc.DispatchUser(mentionID, EventMention, body)
+		emit(mentionID, EventMention)
 	}
+}
+
+// packNoteFor packs note for a single webhook recipient and applies the
+// per-recipient embed visibility gate (renote/reply/引用先) with recipientID as
+// the viewer. entity.PackNote produces fresh embed pointers each call, so the
+// per-recipient blank never mutates another recipient's payload.
+func (h *NoteCreateHook) packNoteFor(note *model.Note, author *model.User, recipientID string) map[string]any {
+	if note.User == nil && author != nil {
+		clone := *note
+		clone.User = author
+		note = &clone
+	}
+	packed := entity.PackNote(note, h.idGen)
+	gateNoteEmbeds(&model.User{ID: recipientID}, &packed, h.followingRepo, time.Now().UnixMilli())
+	return noteEntityToMap(packed)
 }
 
 // ReactionCreateHook implements the reaction WebhookHook interface.
 type ReactionCreateHook struct {
-	svc   *Service
-	idGen id.Generator
+	svc           *Service
+	idGen         id.Generator
+	followingRepo repository.FollowingRepository
 }
 
 // NewReactionCreateHook constructs a ReactionCreateHook.
 func NewReactionCreateHook(svc *Service, idGen id.Generator) *ReactionCreateHook {
 	return &ReactionCreateHook{svc: svc, idGen: idGen}
+}
+
+// SetFollowingRepo attaches a FollowingRepository used to gate the embed
+// visibility of the reaction note payload for the recipient (= note author).
+// nil keeps the gate fail-closed.
+func (h *ReactionCreateHook) SetFollowingRepo(r repository.FollowingRepository) {
+	h.followingRepo = r
 }
 
 // OnReactionCreated fires the `reaction` webhook event on the note author.
@@ -108,8 +149,18 @@ func (h *ReactionCreateHook) OnReactionCreated(note *model.Note, reactor *model.
 	if h == nil || h.svc == nil || note == nil || reactor == nil {
 		return
 	}
+	// reaction webhook の受信者は note 著者 (note.UserID)。embed は受信者 (= 著者)
+	// の可視性で gate する。著者本人が見られない第三者ネスト引用先が leak しないように。
+	noteForPack := note
+	if note.User == nil {
+		clone := *note
+		clone.User = &model.User{ID: note.UserID}
+		noteForPack = &clone
+	}
+	packed := entity.PackNote(noteForPack, h.idGen)
+	gateNoteEmbeds(&model.User{ID: note.UserID}, &packed, h.followingRepo, time.Now().UnixMilli())
 	body := map[string]any{
-		"note":     packNote(note, note.User, h.idGen),
+		"note":     noteEntityToMap(packed),
 		"userId":   reactor.ID,
 		"reaction": reaction,
 	}
@@ -169,17 +220,10 @@ func (h *SignupHook) OnUserCreated(user *model.User) {
 	h.svc.DispatchSystem(SystemEventUserCreated, packUser(user))
 }
 
-// packNote turns a model.Note into a generic map matching entity.NoteEntity.
-// 既存の entity.PackNote を JSON 経由で map[string]any に変換する。
-// Note/User/IDGen は呼び出し元でnil-check済みの前提。json.Marshal/Unmarshal は
-// 正常値に対して失敗しないため戻り値は常に非nil。
-func packNote(note *model.Note, author *model.User, idGen id.Generator) map[string]any {
-	if note.User == nil && author != nil {
-		clone := *note
-		clone.User = author
-		note = &clone
-	}
-	packed := entity.PackNote(note, idGen)
+// noteEntityToMap converts a packed NoteEntity into the generic map[string]any
+// shape the webhook envelope carries. json.Marshal/Unmarshal は正常値に対して
+// 失敗しないため戻り値は常に非 nil。
+func noteEntityToMap(packed entity.NoteEntity) map[string]any {
 	raw, _ := json.Marshal(packed)
 	out := map[string]any{}
 	_ = json.Unmarshal(raw, &out)

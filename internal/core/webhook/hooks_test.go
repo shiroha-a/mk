@@ -1,6 +1,7 @@
 package webhook_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/lib/pq"
@@ -223,6 +224,114 @@ func TestReactionCreateHook_NilSafe(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	h = webhook.NewReactionCreateHook(nil, idGen)
 	h.OnReactionCreated(nil, nil, "")
+}
+
+// --- per-recipient embed visibility gate on the note payload ---
+
+// nestedQuoteNote builds: top (public, by topAuthor) → renote = quote (public, by
+// midAuthor) → renote.renote = target (targetVis, by targetAuthor). embed 著者には
+// User を attach して AuthorPrefsKnown を立てる。
+func nestedQuoteNote(topAuthor, midAuthor, targetAuthor string, targetVis model.NoteVisibility) *model.Note {
+	tText, qText, topText := "secret target", "quoting", "top body"
+	targetID, quoteID := "t_nested", "q_nested"
+	target := &model.Note{
+		ID: targetID, UserID: targetAuthor, Visibility: targetVis, Text: &tText,
+		User: &model.User{ID: targetAuthor, Username: targetAuthor, UsernameLower: targetAuthor},
+	}
+	quote := &model.Note{
+		ID: quoteID, UserID: midAuthor, Visibility: model.NoteVisibilityPublic, Text: &qText,
+		RenoteID: &targetID, Renote: target,
+		User: &model.User{ID: midAuthor, Username: midAuthor, UsernameLower: midAuthor},
+	}
+	return &model.Note{
+		ID: "top_nested", UserID: topAuthor, Visibility: model.NoteVisibilityPublic, Text: &topText,
+		RenoteID: &quoteID, Renote: quote,
+	}
+}
+
+// renoteRenoteOf extracts body.note.renote.renote (depth-2 引用先) from an
+// enqueued webhook Envelope body.
+func renoteRenoteOf(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var env struct {
+		Body struct {
+			Note map[string]any `json:"note"`
+		} `json:"body"`
+	}
+	require.NoError(t, json.Unmarshal(body, &env))
+	require.NotNil(t, env.Body.Note, "note must be present")
+	renote, _ := env.Body.Note["renote"].(map[string]any)
+	require.NotNil(t, renote, "depth-1 renote (quote) must be present")
+	rr, _ := renote["renote"].(map[string]any)
+	require.NotNil(t, rr, "depth-2 renote.renote (quote target) must be present")
+	return rr
+}
+
+// 引用先 (renote.renote) が followers-only のとき、非フォロワー受信者の webhook
+// payload で blank される (#timeline nested quote の embed leak を webhook でも防ぐ)。
+func TestNoteCreateHook_GatesDepthTwoFollowersQuoteTarget(t *testing.T) {
+	svc, enq, userRepo, _ := newTestService(t)
+	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"note"}}
+	idGen, _ := id.NewGenerator("aidx")
+	follow := testutil.NewMockFollowingRepository() // alice follows nobody
+	h := webhook.NewNoteCreateHook(svc, idGen)
+	h.SetFollowingRepo(follow)
+
+	top := nestedQuoteNote("alice", "host", "carol", model.NoteVisibilityFollowers)
+	h.OnNoteCreated(top, &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}, nil, nil)
+
+	require.Len(t, enq.userCalls, 1)
+	rr := renoteRenoteOf(t, enq.userCalls[0].Body)
+	assert.Equal(t, true, rr["isHidden"], "depth-2 followers quote target must be blanked for non-follower recipient")
+	assert.Nil(t, rr["text"], "blanked embed drops text")
+}
+
+// 引用先がフォロワー受信者には見える (過剰 blank しない回帰)。
+func TestNoteCreateHook_DepthTwoQuoteTargetVisibleToFollower(t *testing.T) {
+	svc, enq, userRepo, _ := newTestService(t)
+	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"note"}}
+	idGen, _ := id.NewGenerator("aidx")
+	follow := testutil.NewMockFollowingRepository()
+	follow.Followings["f"] = &model.Following{ID: "f", FollowerID: "alice", FolloweeID: "carol"}
+	h := webhook.NewNoteCreateHook(svc, idGen)
+	h.SetFollowingRepo(follow)
+
+	top := nestedQuoteNote("alice", "host", "carol", model.NoteVisibilityFollowers)
+	h.OnNoteCreated(top, &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}, nil, nil)
+
+	require.Len(t, enq.userCalls, 1)
+	rr := renoteRenoteOf(t, enq.userCalls[0].Body)
+	assert.NotEqual(t, true, rr["isHidden"], "follower recipient sees the depth-2 quote target")
+	assert.Equal(t, "secret target", rr["text"])
+}
+
+// per-recipient: 同じノートでも受信者ごとに別 body を pack/gate するため、引用先が
+// 見える受信者 (follower) と見えない受信者 (non-follower) が混在しても leak しない。
+// 共有 body だとこのテストは fail する。
+func TestNoteCreateHook_PerRecipientEmbedGate(t *testing.T) {
+	svc, enq, userRepo, _ := newTestService(t)
+	userRepo.hooks["hd"] = &model.Webhook{ID: "hd", UserID: "dave", Active: true, On: pq.StringArray{"mention"}}
+	userRepo.hooks["he"] = &model.Webhook{ID: "he", UserID: "eve", Active: true, On: pq.StringArray{"mention"}}
+	idGen, _ := id.NewGenerator("aidx")
+	follow := testutil.NewMockFollowingRepository()
+	follow.Followings["f"] = &model.Following{ID: "f", FollowerID: "dave", FolloweeID: "carol"} // dave follows carol, eve does not
+	h := webhook.NewNoteCreateHook(svc, idGen)
+	h.SetFollowingRepo(follow)
+
+	top := nestedQuoteNote("alice", "host", "carol", model.NoteVisibilityFollowers)
+	top.Mentions = pq.StringArray{"dave", "eve"}
+	h.OnNoteCreated(top, &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}, nil, nil)
+
+	require.Len(t, enq.userCalls, 2) // alice (note) は webhook 未登録 → call 無し
+	byUser := map[string]map[string]any{}
+	for _, c := range enq.userCalls {
+		byUser[c.UserID] = renoteRenoteOf(t, c.Body)
+	}
+	require.NotNil(t, byUser["dave"])
+	require.NotNil(t, byUser["eve"])
+	assert.NotEqual(t, true, byUser["dave"]["isHidden"], "follower dave sees the depth-2 quote target")
+	assert.Equal(t, "secret target", byUser["dave"]["text"])
+	assert.Equal(t, true, byUser["eve"]["isHidden"], "non-follower eve has the depth-2 quote target blanked")
 }
 
 func TestFollowingHook_FiresFollowAndFollowed(t *testing.T) {

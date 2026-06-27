@@ -374,8 +374,12 @@ func (s *Server) setupRoutes() {
 	webhookNoteHook := corewebhook.NewNoteCreateHook(webhookService, idGen)
 	// reply/mention webhook をスレッドミュート済 recipient に出さない (#1965)。
 	webhookNoteHook.SetThreadMutingRepo(noteThreadMutingRepo)
+	// note payload の embed (renote/reply/引用先) を受信者の可視性で gate する。
+	webhookNoteHook.SetFollowingRepo(followingRepo)
 	noteCreateService.SetWebhookHook(webhookNoteHook)
-	reactionService.SetWebhookHook(corewebhook.NewReactionCreateHook(webhookService, idGen))
+	webhookReactionHook := corewebhook.NewReactionCreateHook(webhookService, idGen)
+	webhookReactionHook.SetFollowingRepo(followingRepo)
+	reactionService.SetWebhookHook(webhookReactionHook)
 	followingService.SetWebhookHook(corewebhook.NewFollowingHook(webhookService))
 	signupService.SetWebhookHook(corewebhook.NewSignupHook(webhookService))
 	// Webhook delivery: SSRF-safe transport + forward proxy 経由で user-supplied
