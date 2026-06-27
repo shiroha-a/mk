@@ -32,8 +32,13 @@ func TestIsPrivateIP_IPv4Private(t *testing.T) {
 		{"documentation 198.51.100.x", "198.51.100.1"},
 		{"documentation 203.0.113.x", "203.0.113.1"},
 		{"benchmark 198.18.x", "198.18.0.1"},
+		{"6to4 relay anycast", "192.88.99.1"},
+		{"AS112 direct", "192.175.48.1"},
+		{"AS112 v4", "192.31.196.1"},
+		{"AMT anycast", "192.52.193.1"},
 		{"multicast", "224.0.0.1"},
 		{"reserved 240.x", "240.0.0.1"},
+		{"broadcast", "255.255.255.255"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,6 +57,27 @@ func TestIsPrivateIP_IPv6Private(t *testing.T) {
 		{"link-local", "fe80::1"},
 		{"unique-local fd", "fd00::1"},
 		{"unique-local fc", "fc00::1"},
+		{"deprecated site-local", "fec0::1"},
+		{"multicast", "ff00::1"},
+		{"multicast all-nodes", "ff02::1"},
+		{"discard", "100::1"},
+		// embedded-v4 系 (NAT64 / 6to4 / rfc6145): 内部 IPv4 を埋め込んで NAT64/6to4
+		// gateway 経由で到達しうるため遮断する。To4() では展開されない。
+		{"rfc6145 ipv4-translatable", "0:0:0:0:ffff:0:7f00:1"},
+		{"NAT64 well-known", "64:ff9b::1"},
+		{"NAT64 well-known embeds loopback", "64:ff9b::7f00:1"},
+		{"NAT64 local-use", "64:ff9b:1::1"},
+		{"6to4", "2002::1"},
+		{"6to4 embeds private v4", "2002:c0a8:1::1"},
+		// 2001::/23 集約レンジ
+		{"teredo", "2001::1"},
+		{"benchmarking", "2001:2::1"},
+		{"orchid2", "2001:20::1"},
+		// documentation / special-use
+		{"documentation db8", "2001:db8::1"},
+		{"documentation 3fff", "3fff::1"},
+		{"AS112 v6", "2620:4f:8000::1"},
+		{"SRv6 SID", "5f00::1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,13 +103,31 @@ func TestIsPrivateIP_PublicIP(t *testing.T) {
 		{"Google DNS", "8.8.8.8"},
 		{"Cloudflare DNS", "1.1.1.1"},
 		{"random public", "203.104.209.7"},
-		{"IPv6 public", "2001:4860:4860::8888"},
+		{"IPv6 public Google", "2001:4860:4860::8888"},
+		// over-block 回帰: special-use レンジ拡張で正規 public IPv6 を誤遮断しない。
+		// いずれも 2001::/23 等の拡張レンジの外 (第2 hextet > 0x01ff)。
+		{"IPv6 public Cloudflare", "2606:4700:4700::1111"},
+		{"IPv6 public HE tunnelbroker", "2001:470::1"},
+		{"IPv6 public Quad9", "2620:fe::fe"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.False(t, isPrivateIP(net.ParseIP(tt.ip), nil), "%s should be public", tt.ip)
 		})
 	}
+}
+
+// ipv4-mapped IPv6 の意図的 divergence を lock する: mk-go は To4() で埋め込み v4 を
+// 評価するため public 埋め込み (::ffff:8.8.8.8) は許可、private 埋め込み
+// (::ffff:127.0.0.1) は遮断する。upstream は ipv4-mapped を一律遮断するが、mk-go の
+// 方が精密 (内部到達しうるものだけ遮断) という divergence を回帰で固定する。
+func TestIsPrivateIP_IPv4MappedDivergence(t *testing.T) {
+	assert.False(t, isPrivateIP(net.ParseIP("::ffff:8.8.8.8"), nil),
+		"public ipv4-mapped は許可される (upstream との意図的乖離)")
+	assert.True(t, isPrivateIP(net.ParseIP("::ffff:127.0.0.1"), nil),
+		"private ipv4-mapped は遮断される")
+	assert.True(t, isPrivateIP(net.ParseIP("::ffff:169.254.169.254"), nil),
+		"link-local (cloud metadata) の ipv4-mapped は遮断される")
 }
 
 func TestIsPrivateIP_AllowedCIDR(t *testing.T) {
@@ -141,6 +185,18 @@ func TestNewSSRFSafeTransport_BlocksIPv6Unspecified(t *testing.T) {
 
 	// dial 前の isPrivateIP(::) 判定で弾かれるため実際の接続は発生しない。
 	_, err := client.Get("http://[::]:80/test")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "private IP blocked")
+}
+
+// NAT64 well-known prefix (64:ff9b::/96) 宛は SSRF block される。末尾 32bit に
+// 内部 IPv4 を埋め込めるため、NAT64 gateway 経由の内部到達を dial 前に遮断する。
+func TestNewSSRFSafeTransport_BlocksNAT64(t *testing.T) {
+	tr := NewSSRFSafeTransport(nil)
+	client := &http.Client{Transport: tr}
+
+	// 64:ff9b::7f00:1 = NAT64 representation of 127.0.0.1
+	_, err := client.Get("http://[64:ff9b::7f00:1]:80/test")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "private IP blocked")
 }

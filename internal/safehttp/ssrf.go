@@ -19,31 +19,57 @@ import (
 var privateRanges []*net.IPNet
 
 func init() {
+	// privateRanges は upstream Misskey TS (HttpRequestService.isPrivateIp) が
+	// ipaddr.js の `range() !== 'unicast'` で遮断する「非 unicast」集合に揃える。
+	// 単なる RFC1918/loopback だけでなく、embedded/relay で内部 IPv4 へ到達しうる
+	// NAT64 / 6to4 / rfc6145 や、multicast / documentation / tunneling 等の特殊用途
+	// レンジも遮断する。operator が正当に使うレンジは config.allowedPrivateNetworks
+	// で opt-out できる (isPrivateIP は allowedNets を privateRanges より先に評価)。
 	cidrs := []string{
-		// IPv4 private / reserved
-		"0.0.0.0/8",
-		"10.0.0.0/8",
-		"100.64.0.0/10",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"172.16.0.0/12",
-		"192.0.0.0/24",
-		"192.0.2.0/24",
-		"192.168.0.0/16",
-		"198.18.0.0/15",
-		"198.51.100.0/24",
-		"203.0.113.0/24",
-		"224.0.0.0/4",
-		"240.0.0.0/4",
-		// IPv6 private / reserved
-		// IPv4 の 0.0.0.0/8 と対称に IPv6 unspecified も遮断する。これが無いと
+		// === IPv4 private / reserved (RFC5735 / RFC6890 系) ===
+		"0.0.0.0/8",       // unspecified / this-host
+		"10.0.0.0/8",      // private (RFC1918)
+		"100.64.0.0/10",   // carrier-grade NAT (RFC6598)
+		"127.0.0.0/8",     // loopback
+		"169.254.0.0/16",  // link-local
+		"172.16.0.0/12",   // private (RFC1918)
+		"192.0.0.0/24",    // IETF protocol assignments
+		"192.0.2.0/24",    // documentation TEST-NET-1
+		"192.31.196.0/24", // AS112-v4 (RFC7535)
+		"192.52.193.0/24", // AMT anycast (RFC7450)
+		"192.88.99.0/24",  // 6to4 relay anycast, deprecated (RFC7526)
+		"192.168.0.0/16",  // private (RFC1918)
+		"192.175.48.0/24", // AS112 direct delegation (RFC7534)
+		"198.18.0.0/15",   // benchmarking (RFC2544)
+		"198.51.100.0/24", // documentation TEST-NET-2
+		"203.0.113.0/24",  // documentation TEST-NET-3
+		"224.0.0.0/4",     // multicast
+		"240.0.0.0/4",     // reserved (255.255.255.255 broadcast を内包)
+		// === IPv6 private / reserved (ipaddr.js の non-unicast 集合に対応) ===
+		// IPv4 の 0.0.0.0/8 と対称に IPv6 unspecified (::) も遮断する。これが無いと
 		// `http://[::]:PORT/` が isPrivateIP をすり抜け、Linux の connect(::) が
-		// loopback (::1) にルートされて SSRF 保護を回避できる (upstream ipaddr.js
-		// も :: を unspecified range として遮断する)。
-		"::/128",
-		"::1/128",
-		"fe80::/10",
-		"fc00::/7",
+		// loopback (::1) にルートされて SSRF 保護を回避できる。
+		"::/128",    // unspecified
+		"::1/128",   // loopback
+		"fc00::/7",  // unique-local (RFC4193)
+		"fe80::/10", // link-local
+		"fec0::/10", // deprecated site-local (RFC3879)
+		"ff00::/8",  // multicast (IPv4 224.0.0.0/4 と対称)
+		"100::/64",  // discard-only (RFC6666)
+		// embedded/relay で内部 IPv4 へ到達しうる SSRF 直結レンジ。To4() は
+		// ::ffff:x.x.x.x (ipv4-mapped) しか展開しないため、下記は CIDR で明示遮断する。
+		"0:0:0:0:ffff:0:0:0/96", // IPv4-translatable (RFC6145), embeds v4
+		"64:ff9b::/96",          // NAT64 well-known prefix (RFC6052), embeds v4
+		"64:ff9b:1::/48",        // NAT64 local-use (RFC8215), embeds v4
+		"2002::/16",             // 6to4 (RFC3056), embeds v4
+		// 2001::/23 は teredo (2001::/32, v4 を埋め込む) を含み、benchmarking /
+		// amt / orchid / drone / as112v6(2001:4:112) も 1 本に集約する。本番 unicast
+		// (例 Google 2001:4860) は第2 hextet > 0x01ff なので含まれない。
+		"2001::/23",
+		"2001:db8::/32",     // documentation (RFC3849)
+		"2620:4f:8000::/48", // AS112 (RFC7534)
+		"3fff::/20",         // documentation (RFC9637)
+		"5f00::/16",         // SRv6 SID (RFC9602)
 	}
 	for _, cidr := range cidrs {
 		_, ipNet, err := net.ParseCIDR(cidr)
@@ -276,7 +302,14 @@ func matchFamily(ip net.IP, family string) bool {
 // isPrivateIP returns true if ip falls within a private/reserved range
 // and is NOT covered by any of the allowedNets exceptions.
 func isPrivateIP(ip net.IP, allowedNets []*net.IPNet) bool {
-	// IPv4-mapped IPv6 (::ffff:x.x.x.x) の中身を取り出してIPv4として判定
+	// IPv4-mapped IPv6 (::ffff:x.x.x.x) の中身を取り出してIPv4として判定する。
+	// upstream Misskey (ipaddr.js range='ipv4Mapped') は public 埋め込みも含め
+	// ::ffff:0:0/96 を一律遮断するが、mk-go は埋め込み v4 を IPv4 レンジで評価する
+	// ため private 埋め込み (::ffff:127.0.0.1 等) は遮断しつつ public 埋め込み
+	// (::ffff:8.8.8.8) は許可する。dial 先 IP は public で内部到達しないため SSRF 的
+	// には完全かつ upstream の over-block より精密、という意図的な divergence。
+	// なお RFC6145 (0:0:0:0:ffff:0:0:0/96) や NAT64 (64:ff9b::/96) は To4() では
+	// 展開されないため privateRanges 側で明示遮断している。
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
