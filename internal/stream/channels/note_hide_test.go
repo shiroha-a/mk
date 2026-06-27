@@ -91,6 +91,33 @@ func TestHideEmbedsForViewer_FollowersEmbed(t *testing.T) {
 	})
 }
 
+// depth-2 引用先 (renote.renote) が followers-only のとき、非フォロワー viewer 向け
+// streaming payload で blank される (#timeline nested quote の embed leak 防止)。
+// renote (quote) 自体は public なので残る。
+func TestHideEmbedsForViewer_DepthTwoQuoteTarget(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	target := embed("followers", "secret-author", nil) // depth-2 引用先
+	quote := entity.NoteEntity{
+		ID: "quote", UserID: "qa", CreatedAt: "2026-01-02T03:04:05.000Z",
+		User: entity.UserLite{ID: "qa"}, Visibility: "public", Text: sptr("quoting"),
+		FileIDs: []string{}, Files: []any{}, VisibleUserIDs: []string{}, Mentions: []string{},
+		Renote: &target,
+	}
+	payload := parentJSON(t, quote)
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+
+	var n entity.NoteEntity
+	if err := json.Unmarshal(out, &n); err != nil {
+		t.Fatal(err)
+	}
+	if n.Renote == nil || n.Renote.IsHidden || n.Renote.Text == nil {
+		t.Error("public quote embed must stay visible")
+	}
+	if n.Renote.Renote == nil || !n.Renote.Renote.IsHidden || n.Renote.Renote.Text != nil {
+		t.Error("depth-2 followers-only quote target must be blanked for non-follower")
+	}
+}
+
 func TestHideEmbedsForViewer_PublicVerbatim(t *testing.T) {
 	payload := parentJSON(t, embed("public", "author", nil))
 	out := hideEmbedsForViewer(payload, nil, nil, hideNowMs)

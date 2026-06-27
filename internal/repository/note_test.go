@@ -932,6 +932,112 @@ func TestNoteRepository_FindManyByIDsWithUser_HydratesRelations(t *testing.T) {
 	assert.Equal(t, np.ID, got.Reply.Poll.NoteID)
 }
 
+// 純粋リノート (boost) が引用投稿 (quote) を包む場合、timeline batch loader が
+// renote embed の renote (= 引用先) を 2 段 hydrate すること。これが無いと frontend
+// で引用先が「削除されたノート」になる (timeline bug)。packer は renote.renote のみ
+// depth-2 で出す (renote.reply は出さない) ので、reply は 2 段目を hydrate しない
+// ことも併せて検証する。バッチに renote を持たない note (引用先自身) も混ぜ、
+// level-2 の RenoteID==nil 分岐も網羅する。
+func TestNoteRepository_FindManyByIDsWithUser_HydratesNestedRenote(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+
+	ut := insertTestUser(t, "u_nr_t", "nr_target")
+	uq := insertTestUser(t, "u_nr_q", "nr_quoter")
+	ub := insertTestUser(t, "u_nr_b", "nr_booster")
+	urp := insertTestUser(t, "u_nr_rp", "nr_replytgt")
+	defer cleanupUser(t, ut.ID)
+	defer cleanupUser(t, uq.ID)
+	defer cleanupUser(t, ub.ID)
+	defer cleanupUser(t, urp.ID)
+
+	mkNote := func(id, uid string, renoteID, replyID, text *string) *model.Note {
+		n := &model.Note{ID: id, UserID: uid, Text: text, Visibility: model.NoteVisibilityPublic, RenoteID: renoteID, ReplyID: replyID, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+		return n
+	}
+
+	qtext := "quoting"
+	target := mkNote("n_nr_t", ut.ID, nil, nil, nil) // LV2 引用先
+	rtgt := mkNote("n_nr_rp", urp.ID, nil, nil, nil) // quote の reply 先 (depth-2 では hydrate されない)
+	// LV1 引用投稿 = renote(target) + reply(rtgt) + text。
+	quote := mkNote("n_nr_q", uq.ID, &target.ID, &rtgt.ID, &qtext)
+	boost := mkNote("n_nr_b", ub.ID, &quote.ID, nil, nil) // LV0 pure renote
+
+	// boost に加え、renote を持たない target も問い合わせて RenoteID==nil 経路を通す。
+	out, err := repo.FindManyByIDsWithUser([]string{boost.ID, target.ID})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	byID := map[string]*model.Note{}
+	for _, n := range out {
+		byID[n.ID] = n
+	}
+	got := byID[boost.ID]
+	require.NotNil(t, got)
+
+	// LV1: 引用投稿
+	require.NotNil(t, got.Renote, "renote (quote) must be hydrated")
+	assert.Equal(t, quote.ID, got.Renote.ID)
+	require.NotNil(t, got.Renote.User, "renote.user must be hydrated")
+	assert.Equal(t, uq.ID, got.Renote.User.ID)
+	// LV2 renote: 引用先 — 本バグの修正点
+	require.NotNil(t, got.Renote.Renote, "renote.renote (quote target) must be hydrated")
+	assert.Equal(t, target.ID, got.Renote.Renote.ID)
+	require.NotNil(t, got.Renote.Renote.User, "quote target user must be hydrated")
+	assert.Equal(t, ut.ID, got.Renote.Renote.User.ID)
+	// renote.reply (depth-2) は hydrate しない (packer が出さないため)。
+	assert.Nil(t, got.Renote.Reply, "renote.reply (depth-2) must not be hydrated")
+}
+
+// aliasing 回帰: 同ページの別ノートが depth-2 ターゲットを既に depth-1 sub として
+// 読み込んでいる場合でも、quote の引用先 (renote.renote) が配線されること。
+// level-2 の配線が lvl2IDSet の有無に依存していると、このケースで配線が skip され
+// quote-of-quote が「削除されたノート」表示で再発する。
+func TestNoteRepository_FindManyByIDsWithUser_NestedRenoteAliasing(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+
+	ut := insertTestUser(t, "u_al_t", "al_target")
+	uq := insertTestUser(t, "u_al_q", "al_quoter")
+	ua := insertTestUser(t, "u_al_a", "al_booster")
+	urb := insertTestUser(t, "u_al_b", "al_replier")
+	defer cleanupUser(t, ut.ID)
+	defer cleanupUser(t, uq.ID)
+	defer cleanupUser(t, ua.ID)
+	defer cleanupUser(t, urb.ID)
+
+	mkNote := func(id, uid string, renoteID, replyID, text *string) *model.Note {
+		n := &model.Note{ID: id, UserID: uid, Text: text, Visibility: model.NoteVisibilityPublic, RenoteID: renoteID, ReplyID: replyID, Reactions: datatypes.JSON([]byte("{}"))}
+		require.NoError(t, repo.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+		return n
+	}
+
+	qtext := "quoting"
+	btext := "replying"
+	target := mkNote("n_al_t", ut.ID, nil, nil, nil)           // T = 引用先
+	quote := mkNote("n_al_q", uq.ID, &target.ID, nil, &qtext)  // Q = T の引用 (ページに直接は無い)
+	boost := mkNote("n_al_a", ua.ID, &quote.ID, nil, nil)      // A = Q の pure renote
+	reply := mkNote("n_al_b", urb.ID, nil, &target.ID, &btext) // B = T への reply
+
+	// A と B を同ページで取得する。B の reply target として T が depth-1 sub に入るため、
+	// Q の renote(T) は lvl2IDSet に乗らない (aliasing) が、配線は必須。
+	out, err := repo.FindManyByIDsWithUser([]string{boost.ID, reply.ID})
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	byID := map[string]*model.Note{}
+	for _, n := range out {
+		byID[n.ID] = n
+	}
+	got := byID[boost.ID]
+	require.NotNil(t, got)
+
+	require.NotNil(t, got.Renote, "renote (quote) must be hydrated")
+	assert.Equal(t, quote.ID, got.Renote.ID)
+	// aliasing でも引用先が配線されること (本回帰の核心)。
+	require.NotNil(t, got.Renote.Renote, "renote.renote must be wired even when target was loaded as another note's depth-1 sub")
+	assert.Equal(t, target.ID, got.Renote.Renote.ID)
+}
+
 func TestNoteRepository_QueryErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

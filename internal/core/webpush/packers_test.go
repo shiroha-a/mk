@@ -331,6 +331,46 @@ func TestNoteRepoPacker_EmbedPublicNotHidden(t *testing.T) {
 	assert.Equal(t, "secret", embed["text"])
 }
 
+// depth-2 引用先 (renote.renote): public renote(boost) → public quote → followers
+// 引用先。引用先が非フォロワー受信者の push payload で blank されること。packer が
+// depth-2 を emit するようになったため、depth-1 と同じ embed gate を depth-2 にも
+// 適用する必要がある (これが無いと followers 引用先が leak する IDOR)。
+func TestNoteRepoPacker_EmbedRenoteRenoteHiddenFromNonFollower(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil) // depth-2 引用先
+	quote := seedRenoteOf(repo, idGen, target)                                            // depth-1 public quote (quote.Renote=target)
+	top := seedRenoteOf(repo, idGen, quote)                                               // depth-0 public boost (top.Renote=quote)
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	out, ok := p.PackNoteByID(top.ID, "stranger") // public top, not author, not follower
+	assert.True(t, ok, "public top-level note must be delivered")
+	renote := embedOf(out, "renote")
+	assert.NotEqual(t, true, renote["isHidden"], "depth-1 public quote stays visible")
+	rr := embedOf(renote, "renote")
+	assert.Equal(t, true, rr["isHidden"], "depth-2 followers quote target must be blanked for a non-follower recipient")
+	assert.Nil(t, rr["text"], "blanked depth-2 embed must drop text")
+}
+
+// depth-2 引用先がフォロワー受信者には見える (gate が過剰 blank しない回帰)。
+func TestNoteRepoPacker_EmbedRenoteRenoteVisibleToFollower(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
+	quote := seedRenoteOf(repo, idGen, target)
+	top := seedRenoteOf(repo, idGen, quote)
+	seedFollow(follow, "viewer", "author")
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	out, ok := p.PackNoteByID(top.ID, "viewer")
+	assert.True(t, ok)
+	rr := embedOf(embedOf(out, "renote"), "renote")
+	assert.NotEqual(t, true, rr["isHidden"], "depth-2 quote target visible to a follower recipient")
+	assert.Equal(t, "secret", rr["text"])
+}
+
 func TestNoteRepoPacker_EmbedFollowersOnlyBeforeDowngrade(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	repo := testutil.NewMockNoteRepository()

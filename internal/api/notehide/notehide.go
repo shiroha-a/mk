@@ -4,9 +4,11 @@
 //
 // Two layers, both blanking content in place (entity.HideNoteEntity), never
 // filtering rows:
-//   - Embedded renote/reply: the FULL decision (corenote.HideEmbedDecision),
-//     including intrinsic followers/specified — depth-2 embeds have no upstream
-//     visibility gate of their own (#1536).
+//   - Embedded renote/reply (depth-1) と引用先 (renote.renote, depth-2): the FULL
+//     decision (corenote.HideEmbedDecision), including intrinsic
+//     followers/specified — embeds have no upstream visibility gate of their own
+//     (#1536)。packer が pure renote → quote の引用先 (renote.renote) を depth-2 で
+//     出すようになったため、その引用先も同じ embed gate で blank する。
 //   - Top-level note: the author-PREFERENCE subset only
 //     (corenote.HideNoteByPrefsDecision): treatVisibility downgrade
 //     (makeNotesFollowersOnlyBefore), makeNotesHiddenBefore and
@@ -98,11 +100,20 @@ func hideEmbedsAt(viewer *model.User, packed []entity.NoteEntity, repo repositor
 		hideTopLevelIfNeeded(viewer, &packed[i], follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Renote, follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Reply, follows, nowMs)
+		// pure renote → quote の引用先 (renote.renote, depth-2) も embed gate を適用する。
+		// packer がこの depth-2 を出すようになった (#timeline nested quote) ため、
+		// 非公開の引用先が renote 経由で leak しないようここで blank する。
+		if packed[i].Renote != nil {
+			hideEmbedIfNeeded(viewer, packed[i].Renote.Renote, follows, nowMs)
+		}
 		// #2106 L5: treatVisibility downgrade を packed entity の visibility field にも反映する
 		// (hide 判定が元の visibility を読み終えた後に書き換える、viewer 非依存)。
 		downgradeVisibilityIfNeeded(&packed[i], nowMs)
 		downgradeVisibilityIfNeeded(packed[i].Renote, nowMs)
 		downgradeVisibilityIfNeeded(packed[i].Reply, nowMs)
+		if packed[i].Renote != nil {
+			downgradeVisibilityIfNeeded(packed[i].Renote.Renote, nowMs)
+		}
 	}
 }
 
@@ -153,6 +164,10 @@ func buildFollowSet(viewer *model.User, packed []entity.NoteEntity, repo reposit
 		collectTopLevelAuthor(&packed[i], viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Renote, viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Reply, viewer.ID, seen)
+		// depth-2 引用先 (renote.renote) の著者も follow 判定対象に含める。
+		if packed[i].Renote != nil {
+			collectEmbedAuthor(packed[i].Renote.Renote, viewer.ID, seen)
+		}
 	}
 	if len(seen) == 0 {
 		return never

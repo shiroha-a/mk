@@ -229,10 +229,17 @@ func NewNoteRepository(db *gorm.DB) NoteRepository {
 	return &noteRepository{db: db}
 }
 
-// preloadNoteRelations applies Preload for the author plus 1 level of
-// reply/renote targets (with their authors). NoteEntity の packer は
-// renote/reply の target note を埋めるためこれらの preload が必須。
+// preloadNoteRelations applies Preload for the author plus the reply/renote
+// targets (with their authors) needed by the NoteEntity packer. NoteEntity の
+// packer は renote/reply の target note を埋めるためこれらの preload が必須。
 // GORM の preload は明示した relation しか辿らないので N+1 には成らない。
+//
+// renote ブランチだけ 2 段展開する: 純粋リノート (boost) が引用投稿 (quote) を
+// 包む場合、renote (= quote) のさらに renote (= 引用先) まで preload しないと
+// frontend が引用先を「削除されたノート」として描画してしまう (packer の
+// maxNoteEmbedDepth=2 と一致)。packer は renote.renote のみ depth-2 で出す
+// (renote.reply / reply.* の depth-2 は出さない) ので、preload も Renote.Renote
+// のみ 2 段にする。
 //
 // Poll は note.hasPoll==true のとき 1:1 で attach する (#690)。Preload は
 // 自動的に hasPoll=false の note では何も読まないので overhead は小さい
@@ -242,6 +249,9 @@ func preloadNoteRelations(db *gorm.DB) *gorm.DB {
 		Preload("Renote").
 		Preload("Renote.User").
 		Preload("Renote.Poll").
+		Preload("Renote.Renote").
+		Preload("Renote.Renote.User").
+		Preload("Renote.Renote.Poll").
 		Preload("Reply").
 		Preload("Reply.User").
 		Preload("Reply.Poll").
@@ -597,12 +607,17 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 		return nil, nil
 	}
 	// timeline read hot path。GORM の Preload は relation ごとに別クエリを発行する
-	// ため preloadNoteRelations (8 relation) は 1 ページ ~9 往復になる (#1368 計測)。
-	// ここでは relation を種類ごとに batch IN で引いて Go 側で配線し、往復を 4 query
-	// (notes / sub-notes / users / polls) に畳む。出力 shape は preload 版と同一
-	// (TestNoteRepository_FindManyByIDsWithUser_HydratesRelations が回帰を捕捉)。
-	// preload は Renote/Reply を 1 段しか展開しない (maxNoteEmbedDepth=1) ので
-	// sub-note の renote/reply は辿らない。
+	// ため preloadNoteRelations は 1 ページ多数往復になる (#1368 計測)。ここでは
+	// relation を種類ごとに batch IN で引いて Go 側で配線し、往復を ~5 query
+	// (notes / sub-notes / sub-sub-notes / users / polls) に畳む。出力 shape は
+	// preload 版と同一 (TestNoteRepository_FindManyByIDsWithUser_HydratesRelations
+	// が回帰を捕捉)。
+	//
+	// renote ブランチは 2 段展開する: 純粋リノート (boost) が引用投稿 (quote) を
+	// 包む場合、renote (= quote) のさらに renote/reply (= 引用先) まで配線しないと
+	// frontend が引用先を「削除されたノート」として描画する (packer の
+	// maxNoteEmbedDepth=2 / detail gate と一致)。reply embed は detail:false で
+	// 子を持たないため、reply target の子は辿らない。
 	var notes []*model.Note
 	if err := r.db.Where("id IN ?", ids).Find(&notes).Error; err != nil {
 		return nil, err
@@ -637,6 +652,46 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 			if n.ReplyID != nil {
 				n.Reply = subByID[*n.ReplyID]
 			}
+		}
+	}
+
+	// (2.5) 2 段目: 1 段目 renote target (= quote 候補) の renote (= 引用先) を
+	// さらに 1 query で取得し配線する。pure renote → quote → 引用先 の 3 段目を
+	// 埋めるため。packer は renote.renote のみ depth-2 で出す (renote.reply /
+	// reply.* は出さない) ので、ここも renote ブランチのみ辿る。
+	var renoteTargetSubs []*model.Note
+	for _, n := range notes {
+		if n.RenoteID != nil {
+			if s := subByID[*n.RenoteID]; s != nil {
+				renoteTargetSubs = append(renoteTargetSubs, s)
+			}
+		}
+	}
+	lvl2IDSet := make(map[string]struct{})
+	for _, s := range renoteTargetSubs {
+		if s.RenoteID != nil {
+			if _, ok := subByID[*s.RenoteID]; !ok {
+				lvl2IDSet[*s.RenoteID] = struct{}{}
+			}
+		}
+	}
+	if len(lvl2IDSet) > 0 {
+		var lvl2 []*model.Note
+		if err := r.db.Where("id IN ?", mapKeys(lvl2IDSet)).Find(&lvl2).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range lvl2 {
+			subByID[s.ID] = s
+		}
+	}
+	// 1 段目 renote target に 2 段目 renote を配線する。配線は lvl2IDSet が空でも
+	// 必ず実行する: 同ページの別ノートが既に depth-2 ターゲットを depth-1 sub として
+	// 読み込んでいる (aliasing) と lvl2IDSet が空になるが、その場合でも subByID には
+	// ターゲットが入っているので配線が必要 (これを skip すると quote-of-quote が
+	// 「削除されたノート」表示で再発する)。
+	for _, s := range renoteTargetSubs {
+		if s.RenoteID != nil {
+			s.Renote = subByID[*s.RenoteID]
 		}
 	}
 

@@ -67,6 +67,30 @@ func TestHideEmbedsAt_SingleQueryForMixedAuthors(t *testing.T) {
 	}
 }
 
+// depth-2 引用先 (renote.renote) が followers-only の場合、非フォロワー viewer には
+// blank される (#timeline nested quote の embed leak 防止)。renote (quote) 自体は
+// public なので残る。
+func TestHideEmbedsAt_DepthTwoQuoteTargetHidden(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	repo := followsRepo() // viewer は誰もフォローしていない
+	quoteTarget := followersEmbed("qt", "secret-author")
+	quote := &entity.NoteEntity{
+		ID: "quote", UserID: "qa", CreatedAt: "2026-01-02T03:04:05.000Z",
+		User: entity.UserLite{ID: "qa"}, Visibility: "public", Text: heStr("quoting"),
+		FileIDs: []string{}, Files: []any{}, VisibleUserIDs: []string{}, Mentions: []string{},
+		Renote: quoteTarget,
+	}
+	packed := []entity.NoteEntity{noteWithRenote("boost", quote)}
+	hideEmbedsAt(viewer, packed, repo, heNowMs)
+
+	if packed[0].Renote.IsHidden || packed[0].Renote.Text == nil {
+		t.Error("public quote embed must stay visible")
+	}
+	if !packed[0].Renote.Renote.IsHidden || packed[0].Renote.Renote.Text != nil {
+		t.Error("depth-2 followers-only quote target must be hidden for non-follower")
+	}
+}
+
 func TestHideEmbedsAt_PublicBatchZeroQuery(t *testing.T) {
 	viewer := &model.User{ID: "viewer"}
 	repo := followsRepo()

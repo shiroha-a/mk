@@ -313,7 +313,20 @@ func hideNoteRawForViewer(payload []byte, viewer *model.User, snap map[string]bo
 	hideTop := topNoteHideable(probe.embedProbe, probe.Reply, viewer, snap, nowMs)
 	hideRenote := embedRawHideable(probe.Renote, viewer, snap, nowMs)
 	hideReply := embedRawHideable(probe.Reply, viewer, snap, nowMs)
-	if !hideTop && !hideRenote && !hideReply {
+	// depth-2 引用先 (renote.renote): packer が pure renote → quote の引用先を出す
+	// ようになったため、非公開の引用先が renote 経由で leak しないよう embed gate を
+	// 適用する (#timeline nested quote)。renote raw から nested renote を取り出す。
+	var renoteRenoteRaw json.RawMessage
+	if len(probe.Renote) > 0 {
+		var rp struct {
+			Renote json.RawMessage `json:"renote"`
+		}
+		if json.Unmarshal(probe.Renote, &rp) == nil {
+			renoteRenoteRaw = rp.Renote
+		}
+	}
+	hideRenoteRenote := embedRawHideable(renoteRenoteRaw, viewer, snap, nowMs)
+	if !hideTop && !hideRenote && !hideReply && !hideRenoteRenote {
 		// 隠すものが無い (= no-embed / public / own / follower) → verbatim。
 		return payload, false
 	}
@@ -326,6 +339,9 @@ func hideNoteRawForViewer(payload []byte, viewer *model.User, snap map[string]bo
 	}
 	if hideRenote && full.Renote != nil {
 		entity.HideNoteEntity(full.Renote)
+	}
+	if hideRenoteRenote && full.Renote != nil && full.Renote.Renote != nil {
+		entity.HideNoteEntity(full.Renote.Renote)
 	}
 	if hideReply && full.Reply != nil {
 		entity.HideNoteEntity(full.Reply)

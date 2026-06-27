@@ -122,12 +122,16 @@ type PollChoice struct {
 	IsVoted bool   `json:"isVoted"`
 }
 
-// maxNoteEmbedDepth caps how many levels of Renote / Reply are expanded when
-// packing. repository 側の preloadNoteRelations は 1 段しか preload しない
-// ので通常 1 で十分だが、テストや将来の preload 変更で n.Renote.Renote などが
-// 意図せず非 nil になった場合でも応答を bounded に保つためのガード (#416
-// Devin review)。
-const maxNoteEmbedDepth = 1
+// maxNoteEmbedDepth caps how many levels of Renote chain are expanded when
+// packing. 純粋リノート (boost) が引用投稿 (quote) を包む場合、TL の最上位は
+// pure renote で、その renote (= quote) の renote (= 引用先) まで出さないと
+// frontend が引用先を「削除されたノート」として描画してしまう。upstream
+// NoteEntityService は renote 埋め込みを detail:true で再帰 pack するため
+// renote チェーンは実質無制限だが、frontend の quote box (MkNoteSimple) は
+// 再帰しないので表示には 2 段で足りる。reply 埋め込みは detail:false (子を
+// 持たない) なので depth ではなく detail gate で 1 段に止める (下記 packNoteAtDepth)。
+// 2 にすることで preload / batch loader 側も renote ブランチを 2 段供給する。
+const maxNoteEmbedDepth = 2
 
 // PackNote converts a model.Note to a NoteEntity. Renote / Reply の embed は
 // maxNoteEmbedDepth で制限する。
@@ -293,19 +297,29 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int, detail bool) 
 		entity.User = PackUserLite(n.User)
 	}
 
-	// Renote / Reply の target は repository 層で Preload("Renote.User") /
-	// Preload("Reply.User") されている前提で 1 段だけ展開する。preload が
+	// Renote / Reply の target は repository 層で preload (Renote.User /
+	// Renote.Renote.User / Reply.User …) されている前提で展開する。preload が
 	// 無ければ n.Renote == nil になり、フロントエンドはこれを「削除された投稿」
 	// として描画する (renoteId だけが入ってる状態と区別するため #416)。
-	// renote embed は upstream で detail:true、reply embed は detail:false
-	// (NoteEntityService.ts:445 / :437)。reply embed では clippedCount/poll/
-	// myReaction を省く (#1816)。
-	if depth < maxNoteEmbedDepth {
+	//
+	// 展開は detail==true のときだけ行う。upstream NoteEntityService は renote
+	// embed を detail:true (NoteEntityService.ts:445)、reply embed を detail:false
+	// (:437) で pack し、detail:false の note は renote/reply を一切持たない。
+	// renote チェーンは detail:true のまま maxNoteEmbedDepth まで再帰させ、
+	// 「pure renote → quote → 引用先」の引用先 (renote.renote) を出す。これが
+	// 無いと frontend が引用先を「削除されたノート」として描画する。
+	//
+	// reply embed は top-level (depth 0) のみ展開する。renote 埋め込み内の reply
+	// (depth 2) は frontend の表示要件が無く、かつ depth-2 embed には可視性ゲート
+	// (notehide / streaming note_filter) を別途用意する必要があるため、不要な leak
+	// 面を増やさないよう展開しない (renote.renote だけを depth-2 で出す)。reply
+	// embed では clippedCount/poll/myReaction を省く (#1816)。
+	if detail && depth < maxNoteEmbedDepth {
 		if n.Renote != nil {
 			r := packNoteAtDepth(n.Renote, idGen, depth+1, true)
 			entity.Renote = &r
 		}
-		if n.Reply != nil {
+		if depth == 0 && n.Reply != nil {
 			r := packNoteAtDepth(n.Reply, idGen, depth+1, false)
 			entity.Reply = &r
 		}

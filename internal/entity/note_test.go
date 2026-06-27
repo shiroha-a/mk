@@ -329,6 +329,79 @@ func TestPackNote_WithRenoteAndReply(t *testing.T) {
 	assert.Equal(t, &replyText, e.Reply.Text)
 }
 
+// 純粋リノート (boost) が引用投稿 (quote) を包む場合、引用先 (renote.renote) まで
+// pack されること。これが無いと frontend は引用先を「削除されたノート」として
+// 描画する (timeline bug)。併せて (1) reply embed は detail:false leaf、(2) renote
+// embed 内の reply (renote.reply, depth-2) は展開しない (top-level reply のみ)、
+// (3) renote chain は maxNoteEmbedDepth=2 で止まる、ことを検証する。
+func TestPackNote_NestedRenoteEmbedPacksQuoteTarget(t *testing.T) {
+	idGen := newTestIDGen(t)
+	deepID := idGen.Generate(time.Now())       // LV3 (cap で出ないはず)
+	targetID := idGen.Generate(time.Now())     // LV2 引用先
+	quoteReplyID := idGen.Generate(time.Now()) // quote の reply (depth-2、出ないはず)
+	replyChildID := idGen.Generate(time.Now()) // top.reply の renote (leaf、出ないはず)
+	quoteID := idGen.Generate(time.Now())      // LV1 引用投稿
+	replyID := idGen.Generate(time.Now())      // top の reply
+	topID := idGen.Generate(time.Now())        // LV0 pure renote
+
+	targetText := "quote target body"
+	quoteText := "quoting"
+
+	mk := func(id, uid string) *model.Note {
+		return &model.Note{
+			ID: id, UserID: uid, Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte("{}")),
+		}
+	}
+
+	// LV2 引用先。さらに自分の renote (LV3) を持たせて cap=2 の打ち切りを検証。
+	target := mk(targetID, "u3")
+	target.Text = &targetText
+	target.User = &model.User{ID: "u3", Username: "target_author", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	target.RenoteID = &deepID
+	target.Renote = mk(deepID, "u4")
+
+	// LV1 引用投稿 (text 付き renote = quote)。reply も持たせ、renote.reply が depth-2 で
+	// 展開されないこと (top-level reply のみ展開) を検証する。
+	quote := mk(quoteID, "u2")
+	quote.Text = &quoteText
+	quote.RenoteID = &targetID
+	quote.ReplyID = &quoteReplyID
+	quote.Reply = mk(quoteReplyID, "u7")
+	quote.User = &model.User{ID: "u2", Username: "quote_author", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	quote.Renote = target
+
+	// top の reply target。自分の renote を持たせ、reply embed が leaf であることを検証。
+	reply := mk(replyID, "u5")
+	reply.RenoteID = &replyChildID
+	reply.Renote = mk(replyChildID, "u6")
+
+	// LV0 pure renote (text 無し) が quote を包む。
+	top := mk(topID, "u1")
+	top.RenoteID = &quoteID
+	top.ReplyID = &replyID
+	top.Renote = quote
+	top.Reply = reply
+
+	e := PackNote(top, idGen)
+
+	// LV1: 引用投稿
+	require.NotNil(t, e.Renote, "top.renote (quote) should pack")
+	assert.Equal(t, quoteID, e.Renote.ID)
+	// LV2: 引用先 — 本バグの修正点。depth 2 まで展開される。
+	require.NotNil(t, e.Renote.Renote, "renote.renote (quote target) must pack, else frontend shows deleted note")
+	assert.Equal(t, targetID, e.Renote.Renote.ID)
+	assert.Equal(t, &targetText, e.Renote.Renote.Text)
+	// LV3: maxNoteEmbedDepth=2 で打ち切られる。
+	assert.Nil(t, e.Renote.Renote.Renote, "renote chain must stop at maxNoteEmbedDepth=2")
+	// renote embed 内の reply (depth-2) は展開しない (top-level reply のみ)。
+	assert.Nil(t, e.Renote.Reply, "renote.reply (depth-2) must not be packed")
+
+	// reply embed は detail:false leaf なので自分の renote を展開しない (upstream 一致)。
+	require.NotNil(t, e.Reply, "top.reply should pack")
+	assert.Nil(t, e.Reply.Renote, "reply embed is detail:false leaf and must not expand its renote")
+}
+
 // #1816: reply embed は upstream で detail:false なので clippedCount / poll を
 // 出力しない。renote embed は detail:true なので両方とも出す。
 func TestPackNote_ReplyEmbedDetailFalse(t *testing.T) {

@@ -73,6 +73,12 @@ func (p *NoteRepoPacker) hideEmbeds(viewer *model.User, packed *entity.NoteEntit
 	follows := p.buildFollowSet(viewer, packed)
 	hideEmbedIfNeeded(viewer, packed.Renote, follows, nowMs)
 	hideEmbedIfNeeded(viewer, packed.Reply, follows, nowMs)
+	// depth-2 引用先 (renote.renote): packer が pure renote → quote の引用先を出す
+	// ようになったため、非公開の引用先が push payload に leak しないよう gate する
+	// (notehide / stream note_filter と整合)。
+	if packed.Renote != nil {
+		hideEmbedIfNeeded(viewer, packed.Renote.Renote, follows, nowMs)
+	}
 }
 
 // buildFollowSet resolves, in ONE query, which embed authors `viewer` follows.
@@ -90,6 +96,10 @@ func (p *NoteRepoPacker) buildFollowSet(viewer *model.User, packed *entity.NoteE
 	seen := make(map[string]struct{})
 	collectEmbedAuthor(packed.Renote, viewer.ID, seen)
 	collectEmbedAuthor(packed.Reply, viewer.ID, seen)
+	// depth-2 引用先 (renote.renote) の著者も follow 判定対象に含める。
+	if packed.Renote != nil {
+		collectEmbedAuthor(packed.Renote.Renote, viewer.ID, seen)
+	}
 	if len(seen) == 0 {
 		return never
 	}
