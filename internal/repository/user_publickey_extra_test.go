@@ -32,9 +32,6 @@ func TestUserPublickeyExtraRepository_UpsertAndFind(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pk1.KeyPEM, got.KeyPEM)
 	assert.Equal(t, model.AlgEd25519, got.Alg)
-
-	got, err = repo.FindByKeyID(pk1.KeyID)
-	require.NoError(t, err)
 	assert.Equal(t, user.ID, got.UserID)
 
 	// 同一 (userId, keyId) で再 Upsert すると更新される
@@ -108,8 +105,6 @@ func TestUserPublickeyExtraRepository_NotFound(t *testing.T) {
 	repo := NewUserPublickeyExtraRepository(testDB)
 	_, err := repo.FindByUserAndKeyID("nope_user", "nope_key")
 	assert.Error(t, err)
-	_, err = repo.FindByKeyID("nope_key")
-	assert.Error(t, err)
 }
 
 func TestUserPublickeyExtraRepository_QueryErrors(t *testing.T) {
@@ -120,8 +115,6 @@ func TestUserPublickeyExtraRepository_QueryErrors(t *testing.T) {
 	err := repo.Upsert(&model.UserPublickeyExtra{UserID: "x", KeyID: "k", KeyPEM: "p", Alg: model.AlgEd25519})
 	assert.Error(t, err)
 	_, err = repo.FindByUserAndKeyID("x", "k")
-	assert.Error(t, err)
-	_, err = repo.FindByKeyID("k")
 	assert.Error(t, err)
 	_, err = repo.ListByUserID("x")
 	assert.Error(t, err)

@@ -12,8 +12,12 @@ import (
 // publish multiple keys (e.g. RSA + Ed25519).
 type UserPublickeyExtraRepository interface {
 	Upsert(pk *model.UserPublickeyExtra) error
+	// FindByUserAndKeyID looks up a key scoped to its owning actor. 鍵検索は必ず
+	// (userID, keyID) で行うこと。keyID 単独の global lookup は、攻撃者 actor が
+	// assertionMethod に victim の keyId を載せて鍵を植え込み、victim を名乗る署名を
+	// verify 通過させる key confusion (連合認証バイパス) を許すため、本 interface
+	// には意図的に用意しない (#security: HTTP-sig key confusion)。
 	FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error)
-	FindByKeyID(keyID string) (*model.UserPublickeyExtra, error)
 	ListByUserID(userID string) ([]model.UserPublickeyExtra, error)
 	// DeleteByKeyID deletes a single (userID, keyID) row. resolver が actor
 	// fetch 時に assertionMethod[] から消えた keyId を purge する用途 (key
@@ -41,14 +45,6 @@ func (r *userPublickeyExtraRepository) Upsert(pk *model.UserPublickeyExtra) erro
 func (r *userPublickeyExtraRepository) FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error) {
 	var pk model.UserPublickeyExtra
 	if err := r.db.Where(`"userId" = ? AND "keyId" = ?`, userID, keyID).First(&pk).Error; err != nil {
-		return nil, err
-	}
-	return &pk, nil
-}
-
-func (r *userPublickeyExtraRepository) FindByKeyID(keyID string) (*model.UserPublickeyExtra, error) {
-	var pk model.UserPublickeyExtra
-	if err := r.db.Where(`"keyId" = ?`, keyID).First(&pk).Error; err != nil {
 		return nil, err
 	}
 	return &pk, nil

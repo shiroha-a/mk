@@ -38,6 +38,13 @@ func (r *userPublickeyRepository) FindByUserID(userID string) (*model.UserPublic
 	return &pk, nil
 }
 
+// FindByKeyID looks up an RSA primary key by keyId alone (global). This is safe
+// ONLY because the resolver enforces a write-time invariant that a row's keyId
+// host always equals its owning actor's host (fetchActor の publicKey.id host
+// binding, Fix A)。この不変条件が崩れると、攻撃者が victim の keyId で自分の鍵を
+// 植え込んで LD-Signature 経路の verify をすり抜ける key confusion が再発する。
+// 新たに keyId を保存する経路を足すときは必ず host binding を通すこと
+// (#security: HTTP-sig key confusion)。
 func (r *userPublickeyRepository) FindByKeyID(keyID string) (*model.UserPublickey, error) {
 	var pk model.UserPublickey
 	if err := r.db.Where(`"keyId" = ?`, keyID).First(&pk).Error; err != nil {

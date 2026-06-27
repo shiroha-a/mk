@@ -4351,18 +4351,6 @@ func (s *stubPublickeyExtraRepo) Upsert(pk *model.UserPublickeyExtra) error {
 	return nil
 }
 
-func (s *stubPublickeyExtraRepo) FindByKeyID(keyID string) (*model.UserPublickeyExtra, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if pk, ok := s.entries[keyID]; ok {
-		return pk, nil
-	}
-	// production の gorm 経由 repository は ErrRecordNotFound を返すので、
-	// stub も同じ semantic を返して PublicKeyForKeyID の DB error と "行なし"
-	// の区別 path をテスト経由でも walk できるようにする (#1070 follow-up)。
-	return nil, gorm.ErrRecordNotFound
-}
-
 func (s *stubPublickeyExtraRepo) ListByUserID(userID string) ([]model.UserPublickeyExtra, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -4396,7 +4384,10 @@ func (s *stubPublickeyExtraRepo) FindByUserAndKeyID(userID, keyID string) (*mode
 	if pk, ok := s.entries[keyID]; ok && pk.UserID == userID {
 		return pk, nil
 	}
-	return nil, errors.New("not found")
+	// production の gorm repository は miss 時 ErrRecordNotFound を返す。
+	// PublicKeyForKeyID は ErrRecordNotFound を silent fallback、それ以外を warn と
+	// 区別するので、stub も同じ semantic を返して fallback path を正確に再現する。
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (s *stubPublickeyExtraRepo) DeleteByUserID(userID string) error {
@@ -4469,7 +4460,7 @@ func TestResolveActor_PersistsAssertionMethod(t *testing.T) {
 	user, err := r.ResolveActor("https://remote.example/users/alice")
 	require.NoError(t, err)
 
-	row, err := extra.FindByKeyID("https://remote.example/users/alice#ed25519-key")
+	row, err := extra.FindByUserAndKeyID(user.ID, "https://remote.example/users/alice#ed25519-key")
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, row.UserID)
 	assert.Equal(t, model.AlgEd25519, row.Alg)
@@ -4550,6 +4541,97 @@ func TestPublicKeyForKeyID_DualLookup(t *testing.T) {
 	pem, err = r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#main-key")
 	require.NoError(t, err)
 	assert.Contains(t, pem, "RSA-FAKE")
+}
+
+// Fix A (security): cross-host な publicKey.id を持つ actor は fetchActor で
+// reject される。これが無いと攻撃者 actor が publicKey.id に victim の keyId を
+// 載せて自分の RSA 鍵を植え込み、LD-Signature 経路の global FindByKeyID 解決で
+// victim を名乗る活動を verify 通過させられる (key confusion / 連合認証バイパス)。
+func TestResolveActor_RejectsCrossHostPublicKeyID(t *testing.T) {
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://evil.example/users/mal",
+		"type": "Person",
+		"preferredUsername": "mal",
+		"inbox": "https://evil.example/users/mal/inbox",
+		"publicKey": {
+			"id": "https://victim.example/users/alice#main-key",
+			"owner": "https://victim.example/users/alice",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nATTACKER\n-----END PUBLIC KEY-----"
+		}
+	}`
+	r, repo := newResolver(t, body, nil)
+	_, err := r.ResolveActor("https://evil.example/users/mal")
+	require.Error(t, err, "cross-host publicKey.id を持つ actor は拒否されるべき")
+	assert.ErrorIs(t, err, federation.ErrObjectHostMismatch)
+	assert.Empty(t, repo.Users, "拒否された actor を DB に作ってはいけない")
+}
+
+// Fix B (security): assertionMethod の keyId (am.ID) host が actor host と一致
+// しない entry は保存されない。攻撃者 actor (evil.example) が victim ドメインの
+// keyId を載せても user_publickey_extra に入らず、key confusion を成立させない。
+// 同一 host の正規 entry は従来どおり保存される。
+func TestResolveActor_SkipsCrossHostAssertionMethodKeyID(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://evil.example/users/mal",
+		"type": "Person",
+		"preferredUsername": "mal",
+		"inbox": "https://evil.example/users/mal/inbox",
+		"publicKey": {"id": "https://evil.example/users/mal#main-key", "owner": "https://evil.example/users/mal", "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"},
+		"assertionMethod": [
+			{"id": "https://evil.example/users/mal#ed25519-key", "type": "Multikey", "controller": "https://evil.example/users/mal", "publicKeyMultibase": "` + mb + `"},
+			{"id": "https://victim.example/users/alice#x9z", "type": "Multikey", "controller": "https://victim.example/users/alice", "publicKeyMultibase": "` + mb + `"}
+		]
+	}`
+	r, _ := newResolver(t, body, nil)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	user, err := r.ResolveActor("https://evil.example/users/mal")
+	require.NoError(t, err)
+
+	// 同一 host の entry のみ保存され、cross-host の victim keyId は drop される
+	rows, err := extra.ListByUserID(user.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "https://evil.example/users/mal#ed25519-key", rows[0].KeyID)
+
+	// 植え込もうとした victim の keyId は user_publickey_extra に存在しない
+	_, err = extra.FindByUserAndKeyID(user.ID, "https://victim.example/users/alice#x9z")
+	require.Error(t, err, "cross-host keyId は保存されていないはず")
+}
+
+// Fix C (security, defense-in-depth): PublicKeyForKeyID は actorID-scope で鍵を
+// 引く。万一 cross-host keyId が別 actor (mal) 配下に存在しても、victim を actorID
+// に指定した lookup ではヒットせず、攻撃者鍵を返さない。RSA primary に fallback する。
+func TestPublicKeyForKeyID_ActorScopedRejectsPlantedKey(t *testing.T) {
+	r, _ := newResolver(t, sampleActor, nil)
+	pkRepo := &stubPublickeyRepo{entries: map[string]*model.UserPublickey{}}
+	r.SetPublickeyRepo(pkRepo)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	// victim alice の正規 RSA primary
+	require.NoError(t, pkRepo.Upsert(&model.UserPublickey{
+		UserID: "alice", KeyID: "https://victim.example/users/alice#main-key",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nALICE-RSA\n-----END PUBLIC KEY-----",
+	}))
+	// 攻撃者が mal 配下に alice の keyId で植え込んだ Ed25519 鍵 (Fix B を擦り抜けたと仮定)
+	require.NoError(t, extra.Upsert(&model.UserPublickeyExtra{
+		UserID: "mal", KeyID: "https://victim.example/users/alice#x9z",
+		KeyPEM: "-----BEGIN PUBLIC KEY-----\nATTACKER\n-----END PUBLIC KEY-----",
+		Alg:    model.AlgEd25519,
+	}))
+
+	// alice を actorID にした lookup は植え込み鍵を返さず、alice の RSA primary に fallback
+	pem, err := r.PublicKeyForKeyID("alice", "https://victim.example/users/alice#x9z")
+	require.NoError(t, err)
+	assert.NotContains(t, pem, "ATTACKER", "他 actor 配下の植え込み鍵を返してはいけない")
+	assert.Contains(t, pem, "ALICE-RSA")
 }
 
 // 同じ actor を refresh する経路で stale keyId が削除されることを検証する。

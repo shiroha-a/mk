@@ -133,7 +133,11 @@ type PublickeyStore interface {
 // の rogue verify を許してしまう (#1070 follow-up)。
 type PublickeyExtraStore interface {
 	Upsert(pk *model.UserPublickeyExtra) error
-	FindByKeyID(keyID string) (*model.UserPublickeyExtra, error)
+	// FindByUserAndKeyID は (userID, keyID) で actor-scope に鍵を引く。keyID 単独の
+	// global lookup (FindByKeyID) は、攻撃者 actor が assertionMethod に victim の
+	// keyId を載せて鍵を植え込み victim を verify する key confusion を許すため、
+	// 意図的に interface へ公開しない (#security: HTTP-sig key confusion)。
+	FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error)
 	ListByUserID(userID string) ([]model.UserPublickeyExtra, error)
 	DeleteByKeyID(userID, keyID string) error
 }
@@ -543,7 +547,7 @@ func (r *Resolver) resolveActorOnce(uri string, allowCrossHost bool) (*model.Use
 		slog.Warn("create remote user profile failed", "userId", user.ID, "err", err)
 	}
 	r.cachePublicKey(user.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
-	r.cacheAssertionMethods(user.ID, actor.AssertionMethod)
+	r.cacheAssertionMethods(user.ID, actor.ID, actor.AssertionMethod)
 	r.notifyInstance(host)
 	if r.chartHook != nil {
 		r.chartHook.OnRemoteUserCreated(user)
@@ -730,7 +734,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		_ = r.userRepo.UpdateProfile(existing.ID, map[string]any{"description": desc})
 	}
 	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
-	r.cacheAssertionMethods(existing.ID, actor.AssertionMethod)
+	r.cacheAssertionMethods(existing.ID, actor.ID, actor.AssertionMethod)
 	if existing.Host != nil {
 		r.notifyInstance(*existing.Host)
 	}
@@ -787,6 +791,18 @@ func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Per
 		slog.Warn("federation: rejecting non-actor type", "uri", uri, "type", actor.Type)
 		return nil, ErrInvalidActor
 	}
+	// publicKey.id (= HTTP Signature keyId) host を actor.ID host に縛る (Fix A、
+	// upstream validateActor の publicKey.id host check と同型、#1820 の object-host
+	// binding を鍵にも拡張)。これが無いと攻撃者 actor が publicKey.id に victim
+	// ドメインの keyId を載せて自分の RSA 鍵を植え込み、LD-Signature 経路の
+	// global FindByKeyID 解決で victim を名乗る活動を verify 通過させられる
+	// (key confusion / 連合認証バイパス)。allowCrossHost (ap/show) でも keyId は
+	// actor 自身の host に縛る (request host とは独立、upstream expectHost と同じ)。
+	if actor.PublicKey.ID != "" && !sameURIHost(actor.PublicKey.ID, actor.ID) {
+		slog.Warn("federation: actor publicKey.id host mismatch",
+			"uri", uri, "id", actor.ID, "publicKeyID", actor.PublicKey.ID)
+		return nil, ErrObjectHostMismatch
+	}
 	return &actor, nil
 }
 
@@ -799,7 +815,7 @@ func (r *Resolver) refreshPublicKey(userID, uri string) {
 		return
 	}
 	r.cachePublicKey(userID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
-	r.cacheAssertionMethods(userID, actor.AssertionMethod)
+	r.cacheAssertionMethods(userID, actor.ID, actor.AssertionMethod)
 }
 
 // cachePublicKey stores a PEM in the in-memory cache and optionally persists
@@ -830,7 +846,7 @@ func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
 // 上必須。publickeyExtraRepo 未配線 (= 旧 deployment) のときは何もしない。
 // 不正な entry (非 Multikey type / decode 失敗 / persist 失敗) は warn log
 // + skip して RSA only にフォールバックする (fail-soft)。
-func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multikey) {
+func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams []activitypub.Multikey) {
 	if r.publickeyExtraRepo == nil {
 		return
 	}
@@ -838,6 +854,19 @@ func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multik
 	receivedKeyIDs := make(map[string]bool, len(ams))
 	for _, am := range ams {
 		if am.Type != activitypub.MultikeyType || am.ID == "" || am.PublicKeyMultibase == "" {
+			continue
+		}
+		// keyId (am.ID) の host を actor の host に縛る (Fix B, upstream validateActor の
+		// publicKey.id host check と同型)。これが無いと攻撃者 actor が assertionMethod に
+		// victim ドメインの keyId を載せ、自分の Ed25519 鍵を victim の keyId で植え込んで
+		// victim を名乗る署名を verify 通過させられる (key confusion / 連合認証バイパス)。
+		// 検証鍵の lookup key は am.ID 自身 (PublicKeyForKeyID) なので、am.ID の host を
+		// actor に縛れば植え込み経路は塞がる (controller は lookup に使われないため追加検証
+		// は不要)。不正 entry は既存の decode 失敗時と同じく warn + skip (fail-soft、
+		// actor 自体は取り込む)。
+		if !sameURIHost(am.ID, actorURI) {
+			slog.Warn("assertionMethod keyId host mismatch",
+				"userID", userID, "actorURI", actorURI, "keyID", am.ID)
 			continue
 		}
 		pub, err := activitypub.DecodeEd25519Multikey(am.PublicKeyMultibase)
@@ -888,13 +917,19 @@ func (r *Resolver) cacheAssertionMethods(userID string, ams []activitypub.Multik
 // から正しい公開鍵を選ぶための path で、in-memory cache は介さない (= 永続層
 // の最新値で verify する)。
 //
+// 鍵は必ず actorID-scope で引く (FindByUserAndKeyID)。keyID 単独の global lookup に
+// すると、攻撃者 actor が assertionMethod に victim の keyId を載せて自分の鍵を
+// 植え込み、victim を名乗る署名を verify 通過させる key confusion (連合認証
+// バイパス) が成立する。actor (= keyId base から解決した signer) に紐づく鍵だけを
+// 許すことで、植え込まれた cross-actor 鍵を読取段でも排除する (Fix C, 二重防御)。
+//
 // `gorm.ErrRecordNotFound` (= keyId 一致なし = 通常状態) は silent fallback、
 // それ以外の DB error は診断のため slog.Warn を出す (= silent degradation を
 // 回避)。stale assertion key の削除は cacheAssertionMethods 側で actor fetch
 // 時に diff & delete するため、ここでは古い行が引っかかる可能性は最小化される。
 func (r *Resolver) PublicKeyForKeyID(actorID, keyID string) (string, error) {
 	if r.publickeyExtraRepo != nil && keyID != "" {
-		row, err := r.publickeyExtraRepo.FindByKeyID(keyID)
+		row, err := r.publickeyExtraRepo.FindByUserAndKeyID(actorID, keyID)
 		if err == nil {
 			return row.KeyPEM, nil
 		}
@@ -2224,6 +2259,19 @@ func normalizeMatchHost(u *url.URL) string {
 		return host + ":" + port
 	}
 	return host
+}
+
+// sameURIHost reports whether two absolute URIs share the same normalized host
+// (normalizeMatchHost: punycode + default-port + leading-www 正規化)。署名鍵の
+// keyId (publicKey.id / assertionMethod[].id) を actor URI の host に縛るために
+// 使う。どちらかが parse 不能 / host 欠落なら false (= 不一致扱い) を返す。
+func sameURIHost(a, b string) bool {
+	au, aerr := url.Parse(a)
+	bu, berr := url.Parse(b)
+	if aerr != nil || berr != nil || au.Hostname() == "" || bu.Hostname() == "" {
+		return false
+	}
+	return normalizeMatchHost(au) == normalizeMatchHost(bu)
 }
 
 // extractAttachments parses the AP `attachment` array (heterogeneous []any
