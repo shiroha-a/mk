@@ -197,6 +197,13 @@ func (h *Handler) Fetch(c echo.Context) error {
 	if !h.inflightEnter(key) {
 		return c.JSON(http.StatusServiceUnavailable, apierr.ErrorWithKind("FETCH_RSS_UNAVAILABLE", "RSS fetching is temporarily unavailable.", "91e6ff44-c63f-4725-9ad0-b7a40d7f7655", apierr.KindServer))
 	}
+	// 解放は「fetch 完了時点」で行いたい (レスポンス送信を上限内に含めると、
+	// body を読まないクライアントが socket buffer を埋めるだけでスロットを
+	// 無期限占有できる) が、singleflight は fn 内の panic を全 caller に再
+	// panic させるため defer 無しだと panic 経路でスロットが恒久リークする。
+	// OnceFunc で「早期解放 + panic-safe」を両立する。
+	leaveOnce := sync.OnceFunc(func() { h.inflightLeave(key) })
+	defer leaveOnce()
 
 	// singleflight で同 URL への concurrent miss を 1 fetch に集約する。
 	// 後続 caller は同じ result を共有 (upstream に thundering herd を流さない)。
@@ -234,12 +241,9 @@ func (h *Handler) Fetch(c echo.Context) error {
 		h.cachePut(key, body)
 		return body, nil
 	})
-	// 並行スロットは fetch 完了時点で解放する (upstream は .finally() を fetch
-	// promise に付けており、serialize / レスポンス送信は上限の外)。defer で
-	// writeCachedJSON まで保持すると、body を読まないクライアントが socket
-	// buffer を埋めるだけで 32 スロットを無期限に占有でき、endpoint 全体が
-	// 恒久的に 503 になる。
-	h.inflightLeave(key)
+	// upstream は .finally() を fetch promise に付けており、serialize /
+	// レスポンス送信は並行上限の外。ここで先に解放する。
+	leaveOnce()
 	if err != nil {
 		// SSRF block / dial fail / parse fail はすべて upstream 2026.7.0 と同じ
 		// FETCH_RSS_FAILED (422, kind server) に丸める。err.Error() を直接
@@ -298,6 +302,10 @@ func normalizeFeedURL(raw string) (string, bool) {
 	// host は case-insensitive。hostname だけ小文字化し port は保持する。
 	host := strings.ToLower(u.Hostname())
 	if port := u.Port(); port != "" && !isDefaultPort(u.Scheme, port) {
+		// 非 canonical な数値表記 (`:08080`) も畳んでキー変種を防ぐ。
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
 		u.Host = net.JoinHostPort(host, port)
 	} else {
 		u.Host = host
@@ -306,15 +314,25 @@ func normalizeFeedURL(raw string) (string, bool) {
 			u.Host = "[" + host + "]"
 		}
 	}
+	// WHATWG URL は空 path を "/" に正規化する。
+	if u.Path == "" {
+		u.Path = "/"
+	}
 	u.Fragment = ""
 	u.RawFragment = ""
 	return u.String(), true
 }
 
 // isDefaultPort reports whether port is the scheme's default (WHATWG URL は
-// default port を href から落とす)。
+// default port を href から落とす)。`:080` のような非 canonical 表記も同じ
+// 番号として畳む (文字列比較だと port 表記を変えるだけでキー変種を無限に
+// 作れてしまう)。
 func isDefaultPort(scheme, port string) bool {
-	return (scheme == "http" && port == "80") || (scheme == "https" && port == "443")
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return (scheme == "http" && n == 80) || (scheme == "https" && n == 443)
 }
 
 // inflightEnter registers the request against the concurrency cap. Returns

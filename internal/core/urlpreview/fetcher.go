@@ -188,14 +188,21 @@ func (f *Fetcher) applySensitiveList(result *Result) {
 // validateResultSchemes rejects previews whose resolved url / player.url is
 // not http(s) (upstream 2026.7.0 は cache 前に unsupported schema を弾く)。
 func validateResultSchemes(result *Result) error {
-	if !strings.HasPrefix(result.URL, "http://") && !strings.HasPrefix(result.URL, "https://") {
+	if !isHTTPScheme(result.URL) {
 		return fmt.Errorf("%w: unsupported schema in result url", ErrFetchFailed)
 	}
-	if result.Player.URL != nil && *result.Player.URL != "" &&
-		!strings.HasPrefix(*result.Player.URL, "http://") && !strings.HasPrefix(*result.Player.URL, "https://") {
+	if result.Player.URL != nil && *result.Player.URL != "" && !isHTTPScheme(*result.Player.URL) {
 		return fmt.Errorf("%w: unsupported schema in player url", ErrFetchFailed)
 	}
 	return nil
+}
+
+// isHTTPScheme reports whether the URL uses http(s)。scheme は
+// case-insensitive なので (`HTTP://…` を返す proxy/ページがある)、upstream の
+// `new URL().protocol` 比較と同じく大文字小文字を無視する。
+func isHTTPScheme(raw string) bool {
+	lower := strings.ToLower(raw)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
 func (f *Fetcher) fetchAndParse(ctx context.Context, rawURL string) (*Result, error) {

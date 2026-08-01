@@ -271,3 +271,37 @@ func TestValidateResultSchemes(t *testing.T) {
 		})
 	}
 }
+
+// summaly proxy の応答も scheme 検証を通す (operator-trusted な proxy でも
+// 応答内容までは信頼しない。javascript: が frontend の href/iframe に流れる)。
+func TestFetcher_ViaProxy_RejectsNonHTTPScheme(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(Result{URL: "javascript:alert(1)"})
+	}))
+	defer proxy.Close()
+
+	f := NewFetcher(Config{Enabled: true, SummaryProxyURL: proxy.URL, TimeoutMs: 5000, MaxContentLength: 1 << 20}, nil, "", nil)
+	_, err := f.Fetch(context.Background(), "https://example.com")
+	assert.ErrorIs(t, err, ErrFetchFailed)
+}
+
+// proxy 経路でも urlPreviewSensitiveList の keyword 一致は効く。
+func TestFetcher_ViaProxy_AppliesSensitiveList(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(Result{URL: "https://nsfw.example/x"})
+	}))
+	defer proxy.Close()
+
+	f := NewFetcher(Config{Enabled: true, SummaryProxyURL: proxy.URL, TimeoutMs: 5000, MaxContentLength: 1 << 20}, nil, "", nil)
+	f.SetSensitiveListProvider(func() []string { return []string{"nsfw.example"} })
+	result, err := f.Fetch(context.Background(), "https://nsfw.example/x")
+	require.NoError(t, err)
+	assert.True(t, result.Sensitive)
+}
+
+// scheme は case-insensitive (HTTP:// を返す proxy/ページを誤って弾かない)。
+func TestValidateResultSchemes_CaseInsensitive(t *testing.T) {
+	assert.NoError(t, validateResultSchemes(&Result{URL: "HTTPS://example.com"}))
+	upper := "HTTP://example.com/p"
+	assert.NoError(t, validateResultSchemes(&Result{URL: "https://example.com", Player: PlayerResult{URL: &upper}}))
+}

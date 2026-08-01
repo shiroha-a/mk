@@ -73,6 +73,7 @@ func TestUnsetMfa_Success(t *testing.T) {
 		TwoFactorSecret:       &secret,
 		TwoFactorBackupSecret: pq.StringArray{"b1", "b2"},
 		UsePasswordLessLogin:  true,
+		SecurityKeysAvailable: true,
 	}
 	skRepo := newFakeSecurityKeyRepo()
 	skRepo.keys["k1"] = &model.UserSecurityKey{ID: "k1", UserID: "u1"}
@@ -88,6 +89,7 @@ func TestUnsetMfa_Success(t *testing.T) {
 	assert.Nil(t, p.TwoFactorSecret)
 	assert.Empty(t, p.TwoFactorBackupSecret)
 	assert.False(t, p.UsePasswordLessLogin)
+	assert.False(t, p.SecurityKeysAvailable, "鍵を全削除したので securityKeysAvailable も落とす")
 	assert.NotContains(t, skRepo.keys, "k1", "target user's passkeys are removed")
 	assert.Contains(t, skRepo.keys, "k2", "other users' passkeys are untouched")
 

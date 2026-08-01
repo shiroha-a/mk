@@ -52,13 +52,18 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	if err := h.securityKeyRepo.DeleteByUser(user.ID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
-	// upstream 同様 securityKeysAvailable は触らない (unset-mfa 後の値は TS と
-	// 一致させる)。
+	// securityKeysAvailable も false にする。upstream はこの列を書かないが、
+	// `securityKeys` を毎回 count クエリで算出する (UserEntityService) ため
+	// 列が陳腐化しない。mk-go は列をキャッシュとして読む
+	// (entity/user.go の SecurityKeys) ので、全鍵削除に合わせて更新しないと
+	// 「鍵 0 件なのに securityKeys=true」になる (被害者が後で TOTP を再有効化
+	// した時に露見する)。i/2fa/remove-key の 0 件時挙動とも揃う。
 	if err := h.userRepo.UpdateProfile(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
 		"twoFactorBackupSecret": pq.StringArray(nil),
 		"twoFactorEnabled":      false,
 		"usePasswordLessLogin":  false,
+		"securityKeysAvailable": false,
 	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

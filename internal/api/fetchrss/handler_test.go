@@ -969,14 +969,78 @@ func TestFetchRSS_SlotReleasedAfterFetch(t *testing.T) {
 	h2.inflightMu.Unlock()
 }
 
+// TestFetchRSS_SlotReleasedOnPanic: singleflight は fn 内 panic を caller に
+// 再 panic させるため、defer 無しで解放するとスロットが恒久リークする。
+func TestFetchRSS_SlotReleasedOnPanic(t *testing.T) {
+	panicking := &http.Client{Transport: roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		panic("boom")
+	})}
+	h := New(panicking, testUserAgent)
+	c, _ := newRequestCtx(http.MethodGet, "/api/fetch-rss?url=http://example.com/feed")
+	assert.Panics(t, func() { _ = h.Fetch(c) })
+	h.inflightMu.Lock()
+	defer h.inflightMu.Unlock()
+	assert.Empty(t, h.inflight, "panic 経路でもスロットは解放される")
+}
+
+// TestFetchRSS_SlotFreeDuringResponseWrite: スロットは fetch 完了時点で解放
+// され、レスポンス書き込み中は占有していない (書き込みでブロックする
+// クライアントが endpoint 全体を 503 にできないことの回帰テスト)。
+func TestFetchRSS_SlotFreeDuringResponseWrite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	inflightDuringWrite := -1
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/feed"), nil)
+	rec := &slotObservingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		onWrite: func() {
+			h.inflightMu.Lock()
+			inflightDuringWrite = len(h.inflight)
+			h.inflightMu.Unlock()
+		},
+	}
+	require.NoError(t, h.Fetch(e.NewContext(req, rec)))
+	assert.Equal(t, 0, inflightDuringWrite, "レスポンス書き込み中はスロットを保持していない")
+}
+
+// slotObservingRecorder は Write の瞬間に hook を呼ぶ ResponseWriter。
+type slotObservingRecorder struct {
+	*httptest.ResponseRecorder
+	onWrite func()
+}
+
+func (r *slotObservingRecorder) Write(b []byte) (int, error) {
+	if r.onWrite != nil {
+		r.onWrite()
+	}
+	return r.ResponseRecorder.Write(b)
+}
+
 // TestFetchRSS_HostNormalization: host の大文字小文字 / default port 違いは
 // 同一 cache entry に正規化される (WHATWG URL 相当)。
 func TestFetchRSS_HostNormalization(t *testing.T) {
-	u, err := normalizeFeedURL("http://ExAmPle.COM:80/Feed?a=B#frag")
-	require.True(t, err)
+	u, ok := normalizeFeedURL("http://ExAmPle.COM:80/Feed?a=B#frag")
+	require.True(t, ok)
 	assert.Equal(t, "http://example.com/Feed?a=B", u, "host 小文字化 + default port 除去 + fragment 除去、path/query は保持")
 
-	u, ok := normalizeFeedURL("https://Example.com:8443/x")
+	u, ok = normalizeFeedURL("http://example.com:080/feed")
+	require.True(t, ok)
+	assert.Equal(t, "http://example.com/feed", u, "非 canonical な default port 表記も畳む")
+
+	u, ok = normalizeFeedURL("http://example.com")
+	require.True(t, ok)
+	assert.Equal(t, "http://example.com/", u, "空 path は / に正規化")
+
+	u, ok = normalizeFeedURL("http://example.com:08080/x")
+	require.True(t, ok)
+	assert.Equal(t, "http://example.com:8080/x", u, "非 canonical な非 default port も数値正規化")
+
+	u, ok = normalizeFeedURL("https://Example.com:8443/x")
 	require.True(t, ok)
 	assert.Equal(t, "https://example.com:8443/x", u, "非 default port は保持")
 
@@ -1015,4 +1079,14 @@ func TestFetchRSS_PostPrefersBody(t *testing.T) {
 	require.NoError(t, h.Fetch(e.NewContext(req, rec)))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "/from-body", gotPath)
+}
+
+// IPv6 リテラル (zone id 付き含む) が正規化で壊れないこと。
+func TestFetchRSS_IPv6ZoneNormalization(t *testing.T) {
+	u, ok := normalizeFeedURL("http://[fe80::1%25eth0]/feed")
+	require.True(t, ok)
+	assert.Equal(t, "http://[fe80::1%25eth0]/feed", u, "zone id の %25 エンコードを保つ")
+	parsed, err := url.Parse(u)
+	require.NoError(t, err)
+	assert.Equal(t, "fe80::1%eth0", parsed.Hostname())
 }

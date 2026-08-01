@@ -510,7 +510,8 @@ func (h *Handler) SetUserIPRepo(r repository.UserIPRepository) {
 }
 
 // SetSecurityKeyRepo attaches a UserSecurityKeyRepository for admin/unset-mfa
-// (passkey bulk deletion). 未配線時は key 削除を skip して 2FA 無効化のみ行う。
+// (passkey bulk deletion). 未配線のまま unset-mfa を呼ぶと 500 になる
+// (パスキーを消さずに成功を返すと危険な中間状態が残るため)。
 func (h *Handler) SetSecurityKeyRepo(r repository.UserSecurityKeyRepository) {
 	h.securityKeyRepo = r
 }
