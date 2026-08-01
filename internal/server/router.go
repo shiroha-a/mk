@@ -2489,6 +2489,7 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetStorageDeleter(driveStorage)
 	adminHandler.SetAdminDB(s.db)
 	adminHandler.SetUserIPRepo(userIPRepo)
+	adminHandler.SetSecurityKeyRepo(userSecurityKeyRepo)
 	adminHandler.SetEmojiImportEnqueuer(s.queueClient)
 	// admin/emoji/copy で remote 画像を local drive に保存するための fetcher
 	// を wire する (#670)。outboundClient 経由なので SSRF / proxy / outgoing
@@ -2565,6 +2566,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/delete-account", adminHandler.DeleteAccount, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:delete-account"))
 	api.POST("/admin/delete-all-files-of-a-user", adminHandler.DeleteAllFilesOfUser, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:delete-all-files-of-a-user"))
 	api.POST("/admin/reset-password", adminHandler.ResetPassword, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:reset-password"))
+	api.POST("/admin/unset-mfa", adminHandler.UnsetMfa, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-mfa"))
 	api.POST("/admin/send-email", adminHandler.SendEmail, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:send-email"))
 	api.POST("/admin/unset-user-avatar", adminHandler.UnsetUserAvatar, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-user-avatar"))
 	api.POST("/admin/unset-user-banner", adminHandler.UnsetUserBanner, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-user-banner"))

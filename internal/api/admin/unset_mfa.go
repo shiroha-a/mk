@@ -1,0 +1,62 @@
+package admin
+
+import (
+	"net/http"
+
+	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/server/middleware"
+)
+
+// UnsetMfa handles POST /api/admin/unset-mfa (upstream 2026.7.0 #17614).
+//
+// Removes every registered security key (passkey) of the target user and
+// disables TOTP / password-less login. Targets that are administrators can
+// only be reset by themselves (ACCESS_DENIED otherwise), mirroring the
+// upstream fork-merge authorization fix.
+func (h *Handler) UnsetMfa(c echo.Context) error {
+	var req struct {
+		UserID string `json:"userId"`
+	}
+	if err := c.Bind(&req); err != nil || req.UserID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+	}
+	if h.userRepo == nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	user, err := h.userRepo.FindByID(req.UserID)
+	if err != nil || user == nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
+	}
+	// reset-password と同型の administrator 保護 (upstream: 対象が admin かつ
+	// 実行者 != 対象なら ACCESS_DENIED)。
+	if h.roleService != nil {
+		me := middleware.GetUser(c)
+		if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
+			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
+		}
+	}
+
+	// upstream は 1 トランザクションで key 削除 + profile 更新を行う。mk-go は
+	// repository 境界を保つため順次実行とし、profile の 2FA 無効化を先に行う
+	// (途中失敗しても「2FA は無効だが key 行が残る」安全側の状態に倒れる)。
+	// upstream 同様 securityKeysAvailable は触らない (unset-mfa 後の値は TS と
+	// 一致させる)。
+	if err := h.userRepo.UpdateProfile(user.ID, map[string]any{
+		"twoFactorSecret":       nil,
+		"twoFactorBackupSecret": nil,
+		"twoFactorEnabled":      false,
+		"usePasswordLessLogin":  false,
+	}); err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if h.securityKeyRepo != nil {
+		if err := h.securityKeyRepo.DeleteByUser(user.ID); err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
+	}
+
+	h.logUserActionWithUser(c, moderationlog.LogUnsetMfa, user)
+	return c.NoContent(http.StatusNoContent)
+}

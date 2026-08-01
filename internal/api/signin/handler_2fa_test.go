@@ -90,6 +90,7 @@ func (r *inMemorySK) ListByUser(userID string) ([]*model.UserSecurityKey, error)
 func (r *inMemorySK) UpdateName(_, _, _ string) error       { return nil }
 func (r *inMemorySK) UpdateCounter(_ string, _ int64) error { return nil }
 func (r *inMemorySK) Delete(_, _ string) error              { return nil }
+func (r *inMemorySK) DeleteByUser(_ string) error           { return nil }
 func (r *inMemorySK) CountByUser(_ string) (int64, error)   { return 0, nil }
 
 var _ repository.UserSecurityKeyRepository = (*inMemorySK)(nil)

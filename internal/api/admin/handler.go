@@ -103,6 +103,7 @@ type Handler struct {
 	driveBulkDeleter      DriveBulkDeleter
 	adminDB               *gorm.DB
 	userIPRepo            repository.UserIPRepository
+	securityKeyRepo       repository.UserSecurityKeyRepository
 	queueInspector        QueueInspector
 	queueRedis            QueueRedisInfoProvider
 	emojiEnqueuer         EmojiImportEnqueuer
@@ -504,6 +505,12 @@ func (h *Handler) SetAdminDB(db *gorm.DB) {
 // SetUserIPRepo attaches a UserIPRepository for admin/get-user-ips.
 func (h *Handler) SetUserIPRepo(r repository.UserIPRepository) {
 	h.userIPRepo = r
+}
+
+// SetSecurityKeyRepo attaches a UserSecurityKeyRepository for admin/unset-mfa
+// (passkey bulk deletion). 未配線時は key 削除を skip して 2FA 無効化のみ行う。
+func (h *Handler) SetSecurityKeyRepo(r repository.UserSecurityKeyRepository) {
+	h.securityKeyRepo = r
 }
 
 // SetQueueInspector attaches a queue inspector for admin queue endpoints.

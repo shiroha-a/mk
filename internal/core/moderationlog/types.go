@@ -33,6 +33,7 @@ const (
 	LogUnsuspend       LogType = "unsuspend"
 	LogUpdateUserNote  LogType = "updateUserNote"
 	LogResetPassword   LogType = "resetPassword"
+	LogUnsetMfa        LogType = "unsetMfa"
 	LogDeleteAccount   LogType = "deleteAccount"
 	LogUnsetUserAvatar LogType = "unsetUserAvatar"
 	LogUnsetUserBanner LogType = "unsetUserBanner"
