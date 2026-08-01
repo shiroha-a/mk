@@ -141,3 +141,35 @@ func TestUserSecurityKeyRepository_CountByUser_Multiple(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), n)
 }
+
+// admin/unset-mfa 用の一括削除 (upstream 2026.7.0)。対象 user の鍵だけを消し、
+// 他 user の鍵は残す。0 件でもエラーにしない。
+func TestUserSecurityKeyRepository_DeleteByUser(t *testing.T) {
+	repo := NewUserSecurityKeyRepository(testDB)
+	victim := insertTestUser(t, "u_sk_del1", "sk_del_victim")
+	defer cleanupUser(t, victim.ID)
+	other := insertTestUser(t, "u_sk_del2", "sk_del_other")
+	defer cleanupUser(t, other.ID)
+
+	for _, k := range []*model.UserSecurityKey{
+		{ID: "del-key-1", UserID: victim.ID, Name: "a", PublicKey: "pk-a"},
+		{ID: "del-key-2", UserID: victim.ID, Name: "b", PublicKey: "pk-b"},
+		{ID: "del-key-3", UserID: other.ID, Name: "c", PublicKey: "pk-c"},
+	} {
+		require.NoError(t, repo.Create(k))
+		defer cleanupSecurityKey(t, k.ID)
+	}
+
+	require.NoError(t, repo.DeleteByUser(victim.ID))
+
+	n, err := repo.CountByUser(victim.ID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n, "対象 user の鍵は全削除")
+
+	n, err = repo.CountByUser(other.ID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n, "他 user の鍵は残る")
+
+	// 鍵を持たない user への呼び出しは no-op で成功する (upstream 準拠)。
+	assert.NoError(t, repo.DeleteByUser(victim.ID))
+}

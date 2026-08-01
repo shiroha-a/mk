@@ -473,6 +473,10 @@ func TestFollow_AlreadyFollowing(t *testing.T) {
 	setUser(c2, "alice")
 	require.NoError(t, h.Follow(c2))
 	assert.Equal(t, http.StatusBadRequest, rec2.Code)
+	assert.Contains(t, rec2.Body.String(), "ALREADY_FOLLOWING")
+	// upstream 2026.7.0 (#17802) の canonical id。mk-go は先行実装していたが
+	// 独自 id だったため揃えた。
+	assert.Contains(t, rec2.Body.String(), "7db31665-651e-40c1-8e6e-28e9ad829a2d")
 	_ = rec
 }
 

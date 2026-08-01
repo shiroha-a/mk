@@ -178,6 +178,7 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/admin/system-webhook/show` |
 | POST | `/api/admin/system-webhook/test` |
 | POST | `/api/admin/system-webhook/update` |
+| POST | `/api/admin/unset-mfa` |
 | POST | `/api/admin/unset-user-avatar` |
 | POST | `/api/admin/unset-user-banner` |
 | POST | `/api/admin/unsuspend-user` |

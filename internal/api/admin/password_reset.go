@@ -8,6 +8,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -32,8 +33,7 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 	// 'user not found' を throw する。mk-go は他の admin user-lookup (#1542 の roles
 	// assign 等) と揃えて NO_SUCH_USER を返す (#1862)。これが無いと存在しない userId
 	// でも UpdateProfile の 0 行 UPDATE が no-op で成功し、実際には設定されていない
-	// 偽の password を 200 で返してしまう。root は他の admin guard (suspend-user) と
-	// 揃えて ACCESS_DENIED で弾く (#1539)。userRepo 未配線時は guard を skip
+	// 偽の password を 200 で返してしまう。userRepo 未配線時は guard を skip
 	// (production では常に配線済み)。
 	var target *model.User
 	if h.userRepo != nil {
@@ -42,9 +42,16 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 			// #2106 L2: upstream reset-password.ts:26 固有の UUID に揃える。
 			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 		}
-		if user.IsRoot {
-			// #2106 L1: upstream は専用エラー cannotResetPasswordOfRootUser (kind 未指定 = 400) を投げる。
-			return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_RESET_PASSWORD_OF_ROOT_USER", "Cannot reset password of the root user.", "f28fc207-42ca-44c7-a577-44b4f0ec5999"))
+		// upstream 2026.7.0 (fork merge): moderator が administrator の password を
+		// リセットできた improper authorization の修正。旧 root-only guard
+		// (CANNOT_RESET_PASSWORD_OF_ROOT_USER) は廃止され、「対象が administrator
+		// かつ実行者 != 対象」を ACCESS_DENIED で弾く。IsAdministrator は root を
+		// 含むため root 保護は維持される。
+		if h.roleService != nil {
+			me := middleware.GetUser(c)
+			if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
+				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
+			}
 		}
 		target = user
 	}

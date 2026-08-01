@@ -557,11 +557,8 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 				return nil, err
 			}
 		}
-		// 返信対象が public でなければ visibility を home に降格する (upstream
-		// NoteCreateService:531-533、#1855)。renote の home 降格と同種。
-		if t.Visibility != model.NoteVisibilityPublic && visibility == model.NoteVisibilityPublic {
-			visibility = model.NoteVisibilityHome
-		}
+		// 返信対象の可視性に応じて段階クランプする (upstream 2026.7.0 #17747)。
+		visibility = ClampVisibilityForReply(t.Visibility, visibility)
 		// local-only な対象への reply は local-only にする (channel 外のみ、
 		// upstream:541-543)。
 		if t.LocalOnly && effectiveChannelID == nil {

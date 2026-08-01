@@ -146,6 +146,11 @@ type Service struct {
 	// Sensitive media detection
 	sensitiveDetector SensitiveDetector
 	sensitiveCfg      SensitiveConfig
+	// officialSensitiveDetector は公式 sensitive-detector 契約 (2026.7.0) の
+	// client。meta の API URL が設定されているとき優先される。
+	officialSensitiveDetector *OfficialDetector
+	// sensitiveSettingsProvider は meta を都度参照する live settings 源。
+	sensitiveSettingsProvider func() SensitiveSettings
 	// Optional moderator bypass for Show. Nil keeps the default "owner-only"
 	// guard.
 	roleChecker RoleChecker
@@ -177,6 +182,29 @@ func (s *Service) SetRoleChecker(rc RoleChecker) { s.roleChecker = rc }
 func (s *Service) SetSensitiveDetection(detector SensitiveDetector, cfg SensitiveConfig) {
 	s.sensitiveDetector = detector
 	s.sensitiveCfg = cfg
+}
+
+// SensitiveSettings bundles the meta-driven sensitive detection state used
+// per upload. Config は従来の検出モード/感度、Official は 2026.7.0 の公式
+// sensitive-detector 接続設定。
+type SensitiveSettings struct {
+	Config   SensitiveConfig
+	Official OfficialDetectorSettings
+}
+
+// SetSensitiveSettingsProvider wires a live meta source for sensitive
+// detection settings. upstream TS は meta を都度参照するため、admin の設定
+// 変更が再起動なしで反映される。provider が nil の場合は
+// SetSensitiveDetection の起動時 snapshot (旧挙動) を使う。
+func (s *Service) SetSensitiveSettingsProvider(p func() SensitiveSettings) {
+	s.sensitiveSettingsProvider = p
+}
+
+// SetOfficialSensitiveDetector attaches the official sensitive-detector
+// client (upstream 2026.7.0 protocol)。meta.sensitiveMediaDetectionApiUrl が
+// 設定されているとき legacy detector より優先される。
+func (s *Service) SetOfficialSensitiveDetector(d *OfficialDetector) {
+	s.officialSensitiveDetector = d
 }
 
 // NewService constructs a DriveService.
@@ -468,20 +496,31 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 // ctx は upload リクエストの context を伝播する (#749)。client が早期に
 // 切断したら detector 呼び出しもキャンセルされる。
 func (s *Service) detectSensitive(ctx context.Context, user *model.User, body []byte, mime string) bool {
-	cfg := s.sensitiveCfg
+	settings := SensitiveSettings{Config: s.sensitiveCfg}
+	if s.sensitiveSettingsProvider != nil {
+		settings = s.sensitiveSettingsProvider()
+	}
+	cfg := settings.Config
 
 	// mediaSilencedHosts: リモートユーザーのホストが silenced ならば無条件 sensitive
 	if user.Host != nil && IsSilencedHost(*user.Host, cfg.SilencedHosts) {
 		return true
 	}
 
-	if !cfg.SetFlagAutomatically || s.sensitiveDetector == nil {
+	// 公式 sensitive-detector (2026.7.0) は meta の API URL 設定時のみ有効。
+	officialEnabled := s.officialSensitiveDetector != nil && strings.TrimSpace(settings.Official.APIURL) != ""
+
+	if !cfg.SetFlagAutomatically || (s.sensitiveDetector == nil && !officialEnabled) {
 		return false
 	}
 
 	isLocal := user.Host == nil || *user.Host == ""
 	if !ShouldDetect(cfg, isLocal) {
 		return false
+	}
+
+	if officialEnabled {
+		return s.detectSensitiveOfficial(ctx, body, mime, cfg, settings.Official)
 	}
 
 	// 動画チェック: enableForVideos が false なら動画はスキップ
@@ -500,6 +539,63 @@ func (s *Service) detectSensitive(ctx context.Context, user *model.User, body []
 
 	threshold := SensitivityThreshold(cfg.Sensitivity)
 	return score >= threshold
+}
+
+// detectSensitiveOfficial runs the upstream 2026.7.0 detection pipeline:
+// 画像は 299x299 PNG に正規化して単発判定、動画/APNG はフレーム抽出して
+// batch 判定 + 割合集約。すべての失敗は fail-open (非センシティブ)。
+func (s *Service) detectSensitiveOfficial(ctx context.Context, body []byte, mime string, cfg SensitiveConfig, official OfficialDetectorSettings) bool {
+	threshold := OfficialSensitivityThreshold(cfg.Sensitivity)
+
+	// upstream は `image/apng` を動画側 (FFmpeg フレーム抽出) に流す。mk-go の
+	// mime 検出は APNG を image/vnd.mozilla.apng と報告するため両方受ける。
+	isAPNG := mime == "image/apng" || mime == "image/vnd.mozilla.apng"
+	if (IsVideoMIME(mime) || isAPNG) && cfg.EnableForVideos {
+		extractor, ok := s.videoProcessor.(DetectionFrameExtractor)
+		if !ok {
+			slog.Warn("drive: official sensitive detection for videos requires FFmpeg video processor", "mime", mime)
+			return false
+		}
+		frames, err := extractor.ExtractDetectionFrames(body)
+		if err != nil || len(frames) == 0 {
+			if err != nil {
+				slog.Warn("drive: detection frame extraction failed", "mime", mime, "err", err)
+			}
+			return false
+		}
+		predictions := s.officialSensitiveDetector.DetectMany(ctx, frames, official)
+		// 判定に成功したフレームのみ集約する。0 件なら false (upstream の
+		// results.length > 0 ガード = 全動画センシティブ化バグの回避)。
+		var judged []bool
+		for _, preds := range predictions {
+			if preds == nil {
+				continue
+			}
+			sensitive, _ := JudgePredictions(preds, threshold)
+			judged = append(judged, sensitive)
+		}
+		return AggregateFrameJudgements(judged, threshold)
+	}
+	if IsVideoMIME(mime) {
+		// 動画で enableForVideos=false は判定しない (upstream analyzeVideo)。
+		return false
+	}
+	if !isMimeImage(mime) {
+		// upstream の isMimeImage('sharp-convertible-image-with-bmp') guard 相当。
+		return false
+	}
+
+	normalized, err := NormalizeImageForDetection(body, mime)
+	if err != nil {
+		slog.Warn("drive: image normalization for detection failed", "mime", mime, "err", err)
+		return false
+	}
+	predictions := s.officialSensitiveDetector.DetectMany(ctx, [][]byte{normalized}, official)
+	if len(predictions) == 0 || predictions[0] == nil {
+		return false
+	}
+	sensitive, _ := JudgePredictions(predictions[0], threshold)
+	return sensitive
 }
 
 // generateAltsResult holds the results of image/video processing.

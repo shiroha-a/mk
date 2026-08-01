@@ -216,3 +216,111 @@ func TestFetcher_FetchViaProxy_BadJSON(t *testing.T) {
 	_, err := f.Fetch(context.Background(), "https://example.com/page")
 	assert.ErrorIs(t, err, ErrFetchFailed)
 }
+
+// ── 2026.7.0 #17635 urlPreviewSensitiveList / scheme 検証 ─────────────
+
+func TestFetcher_SensitiveListMatchForcesSensitive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	f.SetSensitiveListProvider(func() []string { return []string{"127.0.0.1"} })
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	assert.True(t, result.Sensitive, "URL が keyword 一致したら sensitive=true に上書き")
+}
+
+func TestFetcher_SensitiveListNoMatchKeepsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	f.SetSensitiveListProvider(func() []string { return []string{"no-such-keyword"} })
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	assert.False(t, result.Sensitive)
+}
+
+func TestValidateResultSchemes(t *testing.T) {
+	httpsURL := "https://example.com"
+	jsURL := "javascript:alert(1)"
+	tests := []struct {
+		name    string
+		result  *Result
+		wantErr bool
+	}{
+		{"http url ok", &Result{URL: "http://example.com"}, false},
+		{"https url + player ok", &Result{URL: "https://example.com", Player: PlayerResult{URL: &httpsURL}}, false},
+		{"non-http url rejected", &Result{URL: "javascript:alert(1)"}, true},
+		{"non-http player rejected", &Result{URL: "https://example.com", Player: PlayerResult{URL: &jsURL}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResultSchemes(tt.result)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, ErrFetchFailed)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// summaly proxy の応答も scheme 検証を通す (operator-trusted な proxy でも
+// 応答内容までは信頼しない。javascript: が frontend の href/iframe に流れる)。
+func TestFetcher_ViaProxy_RejectsNonHTTPScheme(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(Result{URL: "javascript:alert(1)"})
+	}))
+	defer proxy.Close()
+
+	f := NewFetcher(Config{Enabled: true, SummaryProxyURL: proxy.URL, TimeoutMs: 5000, MaxContentLength: 1 << 20}, nil, "", nil)
+	_, err := f.Fetch(context.Background(), "https://example.com")
+	assert.ErrorIs(t, err, ErrFetchFailed)
+}
+
+// proxy 経路でも urlPreviewSensitiveList の keyword 一致は効く。
+func TestFetcher_ViaProxy_AppliesSensitiveList(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(Result{URL: "https://nsfw.example/x"})
+	}))
+	defer proxy.Close()
+
+	f := NewFetcher(Config{Enabled: true, SummaryProxyURL: proxy.URL, TimeoutMs: 5000, MaxContentLength: 1 << 20}, nil, "", nil)
+	f.SetSensitiveListProvider(func() []string { return []string{"nsfw.example"} })
+	result, err := f.Fetch(context.Background(), "https://nsfw.example/x")
+	require.NoError(t, err)
+	assert.True(t, result.Sensitive)
+}
+
+// scheme は case-insensitive (HTTP:// を返す proxy/ページを誤って弾かない)。
+func TestValidateResultSchemes_CaseInsensitive(t *testing.T) {
+	assert.NoError(t, validateResultSchemes(&Result{URL: "HTTPS://example.com"}))
+	upper := "HTTP://example.com/p"
+	assert.NoError(t, validateResultSchemes(&Result{URL: "https://example.com", Player: PlayerResult{URL: &upper}}))
+}
+
+// thumbnail / icon が非 http(s) なら値を落とす (preview 自体は返す)。
+// mk-go の ProxyMediaURL は host 無し URL を素通しするため、ここで落とさないと
+// javascript:/data: がクライアントに出る。
+func TestValidateResultSchemes_DropsNonHTTPThumbnailAndIcon(t *testing.T) {
+	js := "javascript:alert(1)"
+	data := "data:image/png;base64,AAAA"
+	ok := "https://example.com/i.png"
+
+	r := &Result{URL: "https://example.com", Thumbnail: &js, Icon: &data}
+	require.NoError(t, validateResultSchemes(r))
+	assert.Nil(t, r.Thumbnail, "javascript: thumbnail は落とす")
+	assert.Nil(t, r.Icon, "data: icon は落とす")
+
+	r2 := &Result{URL: "https://example.com", Thumbnail: &ok, Icon: &ok}
+	require.NoError(t, validateResultSchemes(r2))
+	assert.Equal(t, &ok, r2.Thumbnail, "http(s) の thumbnail は保持")
+	assert.Equal(t, &ok, r2.Icon)
+}

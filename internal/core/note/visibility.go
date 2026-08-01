@@ -97,3 +97,36 @@ func canSeeNoteForStream(viewer *model.User, n *model.Note, followingChecker rep
 	}
 	return false
 }
+
+// ClampVisibilityForReply narrows a reply's visibility so it can never be
+// wider than the note it replies to (upstream 2026.7.0 #17747)。
+//
+// 旧仕様は「reply 先が public 以外なら public→home」だけで、followers 限定
+// note への reply を home/public で作成して文脈を晒せた (visibility
+// escalation)。upstream は reply 先の可視性ごとに段階クランプする。
+//
+// ローカル投稿経路と AP 受信経路の双方から呼ぶ (upstream は ApNoteService も
+// NoteCreateService.create を通るため、リモート発の reply にも同じクランプが
+// 掛かる)。
+func ClampVisibilityForReply(replyTargetVisibility, visibility model.NoteVisibility) model.NoteVisibility {
+	switch replyTargetVisibility {
+	case model.NoteVisibilityHome:
+		// home 対象への reply は home 以下のみ可。
+		if visibility == model.NoteVisibilityPublic {
+			return model.NoteVisibilityHome
+		}
+	case model.NoteVisibilityFollowers:
+		// followers 対象への reply は followers 以下のみ可。
+		if visibility == model.NoteVisibilityPublic || visibility == model.NoteVisibilityHome {
+			return model.NoteVisibilityFollowers
+		}
+	case model.NoteVisibilitySpecified:
+		// specified 対象への reply は specified のみ可。ローカル経路では手前の
+		// ErrCannotReplyToSpecifiedVisibility で弾かれるため到達しないが、AP
+		// 受信経路ではここが実効的なガードになる。
+		if visibility != model.NoteVisibilitySpecified {
+			return model.NoteVisibilitySpecified
+		}
+	}
+	return visibility
+}

@@ -138,6 +138,11 @@ type Meta struct {
 	SetSensitiveFlagAutomatically          bool           `gorm:"column:setSensitiveFlagAutomatically;default:false" json:"setSensitiveFlagAutomatically"`
 	EnableSensitiveMediaDetectionForVideos bool           `gorm:"column:enableSensitiveMediaDetectionForVideos;default:false" json:"enableSensitiveMediaDetectionForVideos"`
 	MediaSilencedHosts                     pq.StringArray `gorm:"column:mediaSilencedHosts;type:varchar(1024)[];default:'{}'" json:"mediaSilencedHosts"`
+	// 公式 sensitive-detector サービスへの接続設定 (upstream 2026.7.0 #17570)。
+	SensitiveMediaDetectionAPIURL              *string `gorm:"column:sensitiveMediaDetectionApiUrl;type:varchar(1024)" json:"sensitiveMediaDetectionApiUrl"`
+	SensitiveMediaDetectionAPIKey              *string `gorm:"column:sensitiveMediaDetectionApiKey;type:varchar(1024)" json:"sensitiveMediaDetectionApiKey"`
+	SensitiveMediaDetectionTimeout             int     `gorm:"column:sensitiveMediaDetectionTimeout;default:60000" json:"sensitiveMediaDetectionTimeout"`
+	SensitiveMediaDetectionMaxImagesPerRequest int     `gorm:"column:sensitiveMediaDetectionMaxImagesPerRequest;default:4" json:"sensitiveMediaDetectionMaxImagesPerRequest"`
 
 	// URL preview (7)
 	URLPreviewEnabled              bool    `gorm:"column:urlPreviewEnabled;default:true" json:"urlPreviewEnabled"`
@@ -147,6 +152,9 @@ type Meta struct {
 	URLPreviewRequireContentLength bool    `gorm:"column:urlPreviewRequireContentLength;default:false" json:"urlPreviewRequireContentLength"`
 	URLPreviewSummaryProxyURL      *string `gorm:"column:urlPreviewSummaryProxyUrl;type:varchar(1024)" json:"urlPreviewSummaryProxyUrl"`
 	URLPreviewUserAgent            *string `gorm:"column:urlPreviewUserAgent;type:varchar(1024)" json:"urlPreviewUserAgent"`
+	// URLPreviewSensitiveList は URL が keyword 一致したプレビューを
+	// sensitive 扱いにするリスト (upstream 2026.7.0 #17635)。
+	URLPreviewSensitiveList pq.StringArray `gorm:"column:urlPreviewSensitiveList;type:varchar(3072)[];default:'{}'" json:"urlPreviewSensitiveList"`
 
 	// Cache tuning (4)
 	PerLocalUserUserTimelineCacheMax  int `gorm:"column:perLocalUserUserTimelineCacheMax;default:300" json:"perLocalUserUserTimelineCacheMax"`

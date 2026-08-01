@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -103,6 +105,7 @@ type Handler struct {
 	driveBulkDeleter      DriveBulkDeleter
 	adminDB               *gorm.DB
 	userIPRepo            repository.UserIPRepository
+	securityKeyRepo       repository.UserSecurityKeyRepository
 	queueInspector        QueueInspector
 	queueRedis            QueueRedisInfoProvider
 	emojiEnqueuer         EmojiImportEnqueuer
@@ -506,6 +509,13 @@ func (h *Handler) SetUserIPRepo(r repository.UserIPRepository) {
 	h.userIPRepo = r
 }
 
+// SetSecurityKeyRepo attaches a UserSecurityKeyRepository for admin/unset-mfa
+// (passkey bulk deletion). 未配線のまま unset-mfa を呼ぶと 500 になる
+// (パスキーを消さずに成功を返すと危険な中間状態が残るため)。
+func (h *Handler) SetSecurityKeyRepo(r repository.UserSecurityKeyRepository) {
+	h.securityKeyRepo = r
+}
+
 // SetQueueInspector attaches a queue inspector for admin queue endpoints.
 func (h *Handler) SetQueueInspector(qi QueueInspector) {
 	h.queueInspector = qi
@@ -575,11 +585,18 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_INITIAL_PASSWORD", "Initial password is incorrect.", "97147c55-1ae1-4f6f-91d6-e1c3e0e76d62"))
 		}
 	} else {
-		// 初回セットアップ以外はadmin権限必須
+		// 初回セットアップ以外はadministrator権限必須。upstream 2026.7.0 (#17783)
+		// で「rootUserId 本人のみ」から「任意の administrator」に緩和された
+		// (初期設定で作った root 以外の admin がこの API を使えなかった修正)。
+		// roleService 未配線時は旧仕様の root 本人比較に fallback (fail-closed)。
 		if user == nil {
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
-		if meta.RootUserID == nil || *meta.RootUserID != user.ID {
+		if h.roleService != nil {
+			if !h.roleService.IsAdministrator(user.ID) {
+				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			}
+		} else if meta.RootUserID == nil || *meta.RootUserID != user.ID {
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 		// #2106 S2: upstream create.ts の inline `token !== null` gate を再現する。
@@ -1161,8 +1178,13 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"sensitiveMediaDetectionSensitivity":     m.SensitiveMediaDetectionSensitivity,
 		"setSensitiveFlagAutomatically":          m.SetSensitiveFlagAutomatically,
 		"enableSensitiveMediaDetectionForVideos": m.EnableSensitiveMediaDetectionForVideos,
-		"enableIpLogging":                        m.EnableIPLogging,
-		"enableActiveEmailValidation":            m.EnableActiveEmailValidation,
+		// 公式 sensitive-detector 接続設定 (upstream 2026.7.0 #17570)。
+		"sensitiveMediaDetectionApiUrl":              m.SensitiveMediaDetectionAPIURL,
+		"sensitiveMediaDetectionApiKey":              m.SensitiveMediaDetectionAPIKey,
+		"sensitiveMediaDetectionTimeout":             m.SensitiveMediaDetectionTimeout,
+		"sensitiveMediaDetectionMaxImagesPerRequest": m.SensitiveMediaDetectionMaxImagesPerRequest,
+		"enableIpLogging":                            m.EnableIPLogging,
+		"enableActiveEmailValidation":                m.EnableActiveEmailValidation,
 		// Feature flags
 		"enableChartsForRemoteUser":         m.EnableChartsForRemoteUser,
 		"enableChartsForFederatedInstances": m.EnableChartsForFederatedInstances,
@@ -1205,6 +1227,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"urlPreviewUserAgent":            m.URLPreviewUserAgent,
 		"urlPreviewSummaryProxyUrl":      m.URLPreviewSummaryProxyURL,
 		"urlPreviewAllowRedirect":        m.URLPreviewAllowRedirect,
+		"urlPreviewSensitiveList":        m.URLPreviewSensitiveList,
 		// upstream: summalyProxy は urlPreviewSummaryProxyUrl の別名で同値を返す
 		"summalyProxy": m.URLPreviewSummaryProxyURL,
 		// Timeline cache
@@ -1245,6 +1268,9 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// drastic な network 遮断や匿名 view 不可化を引き起こすので、こちらは
 	// silent corruption 防止としても重要。
 	if err := validateUpdateMetaEnums(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if err := validateUpdateMetaNumericMinimums(fields); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
@@ -1425,6 +1451,39 @@ var updateMetaEnumAllowed = map[string]map[string]struct{}{
 // enum-constrained key whose value isn't in the allowed set. nil / non-string
 // values are reject (= upstream の json schema validator が string + enum で
 // 制約する semantics に合わせる)。
+// updateMetaNumericMinimums は update-meta で `minimum` 制約を持つ integer
+// カラム (upstream ajv paramDef の minimum 相当)。JSON decode 後の数値は
+// float64 で届く。
+var updateMetaNumericMinimums = map[string]float64{
+	// upstream 2026.7.0 sensitiveMediaDetection 外部サービス設定 (minimum: 1)。
+	"sensitiveMediaDetectionTimeout":             1,
+	"sensitiveMediaDetectionMaxImagesPerRequest": 1,
+}
+
+// validateUpdateMetaNumericMinimums rejects non-numeric or below-minimum
+// values for integer meta columns (ajv `type: integer, minimum: N` 相当)。
+func validateUpdateMetaNumericMinimums(fields map[string]any) error {
+	for key, minimum := range updateMetaNumericMinimums {
+		v, ok := fields[key]
+		if !ok {
+			continue
+		}
+		// JSON null は upstream の ajv (nullable 無しの integer) が弾く。
+		// mk-go で素通しすると NOT NULL 列に NULL を書いて 500 になる。
+		if v == nil {
+			return errors.New(key + " must be an integer")
+		}
+		n, ok := v.(float64)
+		if !ok || n != math.Trunc(n) {
+			return errors.New(key + " must be an integer")
+		}
+		if n < minimum {
+			return fmt.Errorf("%s must be >= %d", key, int(minimum))
+		}
+	}
+	return nil
+}
+
 func validateUpdateMetaEnums(fields map[string]any) error {
 	for key, allowed := range updateMetaEnumAllowed {
 		v, ok := fields[key]
@@ -1470,6 +1529,7 @@ var metaArrayColumns = map[string]struct{}{
 	"federationHosts":              {},
 	"bannedEmailDomains":           {},
 	"preservedUsernames":           {},
+	"urlPreviewSensitiveList":      {},
 }
 
 // coerceMetaArrayFields normalises array-shaped values bound from JSON
@@ -1575,7 +1635,7 @@ func coerceMetaJSONBFields(fields map[string]any) {
 // 変換するので、後続の coerceMetaArrayFields は pass-through となる。
 func normalizeUpdateMetaFields(fields map[string]any) {
 	// filter(Boolean): 空文字列要素を除去する array columns。
-	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser"} {
+	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser", "urlPreviewSensitiveList"} {
 		if arr, ok := metaStringSlice(fields[key]); ok {
 			fields[key] = pq.StringArray(filterNonEmptyHosts(arr, false))
 		}
@@ -1636,6 +1696,14 @@ func normalizeUpdateMetaFields(fields map[string]any) {
 	} else if v, hasB := fields["summalyProxy"]; hasB {
 		fields["urlPreviewSummaryProxyUrl"] = trimToNil(v)
 		delete(fields, "summalyProxy")
+	}
+	// upstream 2026.7.0 update-meta.ts は sensitive-detector の URL / key を
+	// `ps.X === '' ? null : ps.X` で null 化する (コントロールパネルで欄を空に
+	// したら未設定に戻る)。
+	for _, key := range []string{"sensitiveMediaDetectionApiUrl", "sensitiveMediaDetectionApiKey"} {
+		if v, ok := fields[key]; ok {
+			fields[key] = trimToNil(v)
+		}
 	}
 }
 

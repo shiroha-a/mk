@@ -122,6 +122,15 @@ func (r *inMemorySecurityKeyRepo) UpdateCounter(id string, counter int64) error 
 	return nil
 }
 
+func (r *inMemorySecurityKeyRepo) DeleteByUser(userID string) error {
+	for id, k := range r.keys {
+		if k.UserID == userID {
+			delete(r.keys, id)
+		}
+	}
+	return nil
+}
+
 func (r *inMemorySecurityKeyRepo) Delete(id, userID string) error {
 	k, ok := r.keys[id]
 	if !ok || k.UserID != userID {

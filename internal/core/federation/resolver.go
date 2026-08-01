@@ -1274,6 +1274,12 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 				threadID = *replyTarget.ThreadID
 			}
 			note.ThreadID = &threadID
+			// reply 先より広い可視性にはできない (upstream 2026.7.0 #17747)。
+			// upstream の ApNoteService は NoteCreateService.create を経由する
+			// ため、リモート発の reply にも同じクランプが掛かる。これが無いと
+			// 「ローカルの followers 限定 note へリモートが to:[Public] で返信」
+			// でローカル TL / 再配送に本文文脈が漏れる。
+			note.Visibility = corenote.ClampVisibilityForReply(replyTarget.Visibility, note.Visibility)
 		}
 	}
 	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が
@@ -1337,7 +1343,25 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// VisibleUserIDs チェック (core/note/visibility.go) で受信者が note を
 	// 参照できるよう、ここで ID へ解決して埋める (#397)。
 	if note.Visibility == model.NoteVisibilitySpecified {
-		note.VisibleUserIDs = pq.StringArray(r.resolveMentionedUserIDs(apNote.To))
+		visible := r.resolveMentionedUserIDs(apNote.To)
+		// reply target を必ず含める (upstream NoteCreateService.ts:603-605、
+		// ローカル create 経路の #2106 N13 と同型)。特に #17747 の clamp で
+		// `to:[Public]` の reply を specified へ降格させた場合、apNote.To から
+		// は宛先が 1 件も解決できず VisibleUserIDs が空になり、reply 先の当人
+		// (= specified note の作者) すら本文を参照できなくなる。
+		if replyTarget != nil && replyTarget.UserID != note.UserID {
+			alreadyVisible := false
+			for _, id := range visible {
+				if id == replyTarget.UserID {
+					alreadyVisible = true
+					break
+				}
+			}
+			if !alreadyVisible {
+				visible = append(visible, replyTarget.UserID)
+			}
+		}
+		note.VisibleUserIDs = pq.StringArray(visible)
 	}
 	// AP Note Tag配列からカスタム絵文字を抽出してDBにupsert
 	if actor.Host != nil {

@@ -87,6 +87,7 @@ func (errSecurityKeyRepo) ListByUser(string) ([]*model.UserSecurityKey, error) {
 func (errSecurityKeyRepo) UpdateName(string, string, string) error { return nil }
 func (errSecurityKeyRepo) UpdateCounter(string, int64) error       { return nil }
 func (errSecurityKeyRepo) Delete(string, string) error             { return nil }
+func (errSecurityKeyRepo) DeleteByUser(string) error               { return nil }
 func (errSecurityKeyRepo) CountByUser(string) (int64, error)       { return 0, nil }
 
 // resolvePasskeyUser は user 不在 / securityKeyRepo nil / ListByUser err / 正常
@@ -149,6 +150,7 @@ func (r *inMemorySKInternal) ListByUser(userID string) ([]*model.UserSecurityKey
 func (r *inMemorySKInternal) UpdateName(string, string, string) error { return nil }
 func (r *inMemorySKInternal) UpdateCounter(string, int64) error       { return nil }
 func (r *inMemorySKInternal) Delete(string, string) error             { return nil }
+func (r *inMemorySKInternal) DeleteByUser(string) error               { return nil }
 func (r *inMemorySKInternal) CountByUser(string) (int64, error)       { return 0, nil }
 
 // helper: build an echo.Context with empty body.
@@ -270,6 +272,7 @@ func (r *recCounterRepo) ListByUser(string) ([]*model.UserSecurityKey, error) { 
 func (r *recCounterRepo) UpdateName(string, string, string) error             { return nil }
 func (r *recCounterRepo) UpdateCounter(string, int64) error                   { r.called = true; return nil }
 func (r *recCounterRepo) Delete(string, string) error                         { return nil }
+func (r *recCounterRepo) DeleteByUser(string) error                           { return nil }
 func (r *recCounterRepo) CountByUser(string) (int64, error)                   { return 0, nil }
 
 type stubIPLogger struct{ logged chan struct{} }

@@ -15,6 +15,7 @@ type UserSecurityKeyRepository interface {
 	UpdateName(id, userID, name string) error
 	UpdateCounter(id string, counter int64) error
 	Delete(id, userID string) error
+	DeleteByUser(userID string) error
 	CountByUser(userID string) (int64, error)
 }
 
@@ -86,6 +87,13 @@ func (r *userSecurityKeyRepository) Delete(id, userID string) error {
 		return gorm.ErrRecordNotFound
 	}
 	return nil
+}
+
+// DeleteByUser removes every security key registered by the user. Used by
+// admin/unset-mfa (upstream 2026.7.0). 0 行削除はエラーにしない (パスキー
+// 未登録ユーザーへの unset-mfa も成功扱いにする upstream 準拠)。
+func (r *userSecurityKeyRepository) DeleteByUser(userID string) error {
+	return r.db.Where(`"userId" = ?`, userID).Delete(&model.UserSecurityKey{}).Error
 }
 
 func (r *userSecurityKeyRepository) CountByUser(userID string) (int64, error) {

@@ -59,6 +59,7 @@ var All = []string{
 	"read:admin:show-moderation-log",
 	"read:admin:show-user",
 	"write:admin:suspend-user",
+	"write:admin:unset-mfa",
 	"write:admin:unset-user-avatar",
 	"write:admin:unset-user-banner",
 	"write:admin:unsuspend-user",

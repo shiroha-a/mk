@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -154,6 +155,20 @@ func TestAccountsCreate_AsRootUser(t *testing.T) {
 
 	rootUser := &model.User{ID: "root1", Username: "root"}
 	rec := doPost(h.AccountsCreate, `{"username":"user2","password":"pass"}`, rootUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// upstream 2026.7.0 (#17783): root 本人でなくても administrator role を持つ
+// user はアカウント作成 API を使える。
+func TestAccountsCreate_AsNonRootAdministrator_Allowed(t *testing.T) {
+	h, userRepo, metaRepo, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
+	userRepo.Users["adm1"] = &model.User{ID: "adm1", Username: "adm"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+
+	rec := doPost(h.AccountsCreate, `{"username":"user2","password":"pass"}`, userRepo.Users["adm1"])
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
@@ -697,6 +712,59 @@ func TestUpdateMeta_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.UpdateMeta, `{"name":"My Instance"}`, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// upstream 2026.7.0: sensitive-detector 接続設定の integer は minimum:1
+// (ajv 相当の validation)。
+func TestUpdateMeta_SensitiveDetectorNumericMinimum(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+
+	rec := doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":0}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionMaxImagesPerRequest":-1}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":1.5}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "non-integer must be rejected")
+
+	// JSON null は NOT NULL 列を壊すので 400 で弾く (upstream ajv 相当)。
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":null}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "null must be rejected")
+
+	// 空文字は null 化して「未設定」に戻す (upstream update-meta.ts)。
+	apiURL := "https://old.example"
+	metaRepo.Meta.SensitiveMediaDetectionAPIURL = &apiURL
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionApiUrl":""}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, metaRepo.Meta.SensitiveMediaDetectionAPIURL, "空文字は null に正規化")
+
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":30000,"sensitiveMediaDetectionMaxImagesPerRequest":8,"sensitiveMediaDetectionApiUrl":"https://detector.example.test"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, 30000, metaRepo.Meta.SensitiveMediaDetectionTimeout)
+	assert.Equal(t, 8, metaRepo.Meta.SensitiveMediaDetectionMaxImagesPerRequest)
+	require.NotNil(t, metaRepo.Meta.SensitiveMediaDetectionAPIURL)
+	assert.Equal(t, "https://detector.example.test", *metaRepo.Meta.SensitiveMediaDetectionAPIURL)
+}
+
+// admin/meta は sensitive-detector 4 フィールドを公開する (2026.7.0)。
+func TestAdminMeta_SensitiveDetectorFields(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	apiURL := "https://detector.example.test"
+	metaRepo.Meta.SensitiveMediaDetectionAPIURL = &apiURL
+	metaRepo.Meta.SensitiveMediaDetectionTimeout = 60000
+	metaRepo.Meta.SensitiveMediaDetectionMaxImagesPerRequest = 4
+	metaRepo.Meta.URLPreviewSensitiveList = pq.StringArray{"nsfw.example"}
+
+	rec := doPost(h.AdminMeta, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, apiURL, resp["sensitiveMediaDetectionApiUrl"])
+	assert.Nil(t, resp["sensitiveMediaDetectionApiKey"])
+	assert.EqualValues(t, 60000, resp["sensitiveMediaDetectionTimeout"])
+	assert.EqualValues(t, 4, resp["sensitiveMediaDetectionMaxImagesPerRequest"])
+	assert.NotNil(t, resp["urlPreviewSensitiveList"])
 }
 
 // frontend が送る `tosUrl` alias は DB column `termsOfServiceUrl` に

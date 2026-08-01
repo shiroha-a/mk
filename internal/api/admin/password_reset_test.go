@@ -74,15 +74,42 @@ func TestResetPasswordAdmin_UpdateProfileError(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
-// #1539: root アカウントのパスワードはリセットできない (upstream root guard)。
+// upstream 2026.7.0 (fork merge): administrator のパスワードは他人からリセット
+// できない。root は IsAdministrator に含まれるため引き続き保護される。旧
+// CANNOT_RESET_PASSWORD_OF_ROOT_USER (400) は廃止され ACCESS_DENIED (403)。
 func TestResetPasswordAdmin_RootRejected(t *testing.T) {
-	h, userRepo, _, _ := newTestHandler(t)
+	h, userRepo, metaRepo, _ := newTestHandler(t)
 	userRepo.Users["root1"] = &model.User{ID: "root1", Username: "admin", IsRoot: true}
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
 	rec := doPost(h.ResetPassword, `{"userId":"root1"}`, adminUser)
-	// #2106 L1: upstream は専用エラー CANNOT_RESET_PASSWORD_OF_ROOT_USER (400)。
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "CANNOT_RESET_PASSWORD_OF_ROOT_USER")
-	assert.Contains(t, rec.Body.String(), "f28fc207-42ca-44c7-a577-44b4f0ec5999")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	assert.Contains(t, rec.Body.String(), "cda8f8ce-89a6-4f92-8055-33bbe0c1464d")
+}
+
+// 非 root の administrator も他人からはリセット不可 (upstream 2026.7.0)。
+func TestResetPasswordAdmin_AdministratorTargetRejected(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["adm1"] = &model.User{ID: "adm1", Username: "adm"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+	rec := doPost(h.ResetPassword, `{"userId":"adm1"}`, adminUser)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cda8f8ce-89a6-4f92-8055-33bbe0c1464d")
+}
+
+// administrator 本人によるセルフリセットは許可 (upstream: me.id !== user.id の
+// 条件により self は素通り)。
+func TestResetPasswordAdmin_AdminSelfResetAllowed(t *testing.T) {
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	userRepo.Users["adm1"] = &model.User{ID: "adm1", Username: "adm"}
+	userRepo.Profiles["adm1"] = &model.UserProfile{UserID: "adm1"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+	rec := doPost(h.ResetPassword, `{"userId":"adm1"}`, userRepo.Users["adm1"])
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "password")
 }
 
 func TestResetPasswordAdmin_WritesModerationLog(t *testing.T) {

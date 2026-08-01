@@ -467,6 +467,38 @@ func (s *Server) setupRoutes() {
 			})
 		}
 		driveService.SetSensitiveDetection(nsfwDetector, sensCfg)
+
+		// 公式 sensitive-detector (upstream 2026.7.0 #17570)。接続設定は meta
+		// 駆動 (コントロールパネルから変更可) なので live provider で渡す。
+		// timeout は per-request に meta 値を context で適用するため、client
+		// 自体の Timeout は掛けない (0 = transport 側 SSRF guard のみ)。
+		driveService.SetOfficialSensitiveDetector(coredrive.NewOfficialDetector(s.outboundClient(0)))
+		driveService.SetSensitiveSettingsProvider(func() coredrive.SensitiveSettings {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return coredrive.SensitiveSettings{Config: sensCfg}
+			}
+			settings := coredrive.SensitiveSettings{
+				Config: coredrive.SensitiveConfig{
+					Detection:            m.SensitiveMediaDetection,
+					Sensitivity:          m.SensitiveMediaDetectionSensitivity,
+					SetFlagAutomatically: m.SetSensitiveFlagAutomatically,
+					EnableForVideos:      m.EnableSensitiveMediaDetectionForVideos,
+					SilencedHosts:        m.MediaSilencedHosts,
+				},
+				Official: coredrive.OfficialDetectorSettings{
+					TimeoutMs:           m.SensitiveMediaDetectionTimeout,
+					MaxImagesPerRequest: m.SensitiveMediaDetectionMaxImagesPerRequest,
+				},
+			}
+			if m.SensitiveMediaDetectionAPIURL != nil {
+				settings.Official.APIURL = *m.SensitiveMediaDetectionAPIURL
+			}
+			if m.SensitiveMediaDetectionAPIKey != nil {
+				settings.Official.APIKey = *m.SensitiveMediaDetectionAPIKey
+			}
+			return settings
+		})
 	}
 
 	// Export / Import workers (Phase 9.4): drive に保存するエクスポートと
@@ -1034,6 +1066,15 @@ func (s *Server) setupRoutes() {
 			previewCfg.SummaryProxyURL = *previewMeta.URLPreviewSummaryProxyURL
 		}
 		urlPreviewFetcher := coreurlpreview.NewFetcher(previewCfg, s.redis.Default, s.config.Redis.KeyPrefix(), s.config.AllowedPrivateNetworks, s.outboundOpts()...)
+		// urlPreviewSensitiveList は admin が随時変更するため live provider で
+		// 渡す (metaRepo は cached、update-meta で invalidate される)。
+		urlPreviewFetcher.SetSensitiveListProvider(func() []string {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return nil
+			}
+			return m.URLPreviewSensitiveList
+		})
 		urlHandler := apiurl.NewHandler(urlPreviewFetcher)
 		s.echo.GET("/url", urlHandler.Preview)
 	}
@@ -2489,6 +2530,7 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetStorageDeleter(driveStorage)
 	adminHandler.SetAdminDB(s.db)
 	adminHandler.SetUserIPRepo(userIPRepo)
+	adminHandler.SetSecurityKeyRepo(userSecurityKeyRepo)
 	adminHandler.SetEmojiImportEnqueuer(s.queueClient)
 	// admin/emoji/copy で remote 画像を local drive に保存するための fetcher
 	// を wire する (#670)。outboundClient 経由なので SSRF / proxy / outgoing
@@ -2565,6 +2607,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/delete-account", adminHandler.DeleteAccount, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:delete-account"))
 	api.POST("/admin/delete-all-files-of-a-user", adminHandler.DeleteAllFilesOfUser, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:delete-all-files-of-a-user"))
 	api.POST("/admin/reset-password", adminHandler.ResetPassword, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:reset-password"))
+	api.POST("/admin/unset-mfa", adminHandler.UnsetMfa, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-mfa"))
 	api.POST("/admin/send-email", adminHandler.SendEmail, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:send-email"))
 	api.POST("/admin/unset-user-avatar", adminHandler.UnsetUserAvatar, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-user-avatar"))
 	api.POST("/admin/unset-user-banner", adminHandler.UnsetUserBanner, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unset-user-banner"))

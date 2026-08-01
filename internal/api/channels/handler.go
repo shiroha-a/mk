@@ -760,7 +760,9 @@ func (h *Handler) channelsToList(rows []*model.Channel, viewer *model.User) []ma
 }
 
 func alreadyFollowing(c echo.Context) error {
-	return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FOLLOWING", "You are already following that channel.", "35dbf050-f1cc-4da8-9322-87bb0acce8c7"))
+	// mk-go は upstream 2026.7.0 (#17802) に先行して ALREADY_FOLLOWING を実装
+	// していたが id が独自だった。upstream が canonical id を定義したので揃える。
+	return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_FOLLOWING", "You are already following that channel.", "7db31665-651e-40c1-8e6e-28e9ad829a2d"))
 }
 
 func notFollowing(c echo.Context) error {

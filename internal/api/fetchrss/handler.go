@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,18 +34,24 @@ import (
 // against mk-go and the original TS backend.
 const CacheSeconds = 60 * 3
 
-// MaxBodyBytes caps the response read from the upstream feed server. Real-world
-// feeds rarely exceed a few hundred KB; capping at 1 MiB blocks pathological
-// hosts that try to drown the parser in arbitrary bytes.
+// MaxBodyBytes caps the response read from the upstream feed server.
 //
-// #2106 L27: upstream HttpRequestService の default size は 10 MiB (fetch-rss は size
-// 未指定)。requireCredential:false の公開エンドポイントなので mk-go は意図的に 1 MiB へ
-// 硬化している (DoS 表面の縮小)。1〜10 MiB の巨大フィードのみ upstream では取得できて
-// mk-go では 502 になる稀な乖離。
+// mk-go は #2106 L27 で先行して 1 MiB に硬化していた。upstream も 2026.7.0 の
+// GHSA hardening で `size: MAX_RESPONSE_SIZE (1 MiB)` を指定するようになり、
+// 現在は完全一致 (乖離解消)。
 const MaxBodyBytes int64 = 1 << 20
 
 // FetchTimeout matches the upstream `timeout: 5000` ms used by Misskey TS.
 const FetchTimeout = 5 * time.Second
+
+// MaxURLLength caps the accepted feed URL length (upstream 2026.7.0
+// MAX_URL_LENGTH = 8192).
+const MaxURLLength = 8192
+
+// MaxConcurrentRequests caps the number of distinct feed URLs being fetched
+// at once (upstream 2026.7.0 MAX_CONCURRENT_REQUESTS = 32). 超過は
+// FETCH_RSS_UNAVAILABLE (503)。同一 URL への合流 (dedup) は上限に数えない。
+const MaxConcurrentRequests = 32
 
 // DefaultCacheMaxEntries は in-memory cache が同時に保持するエントリ数の
 // soft cap。攻撃者が大量の異なる URL を送り込むケースで無制限に成長しない
@@ -84,6 +91,14 @@ type Handler struct {
 	// 後続リクエストは同じ Do 結果を共有する。
 	sf singleflight.Group
 
+	// inflight は「現在処理中の distinct URL → 参加リクエスト数」。upstream
+	// 2026.7.0 の activeRequestCount 相当で、distinct URL 数が maxConcurrent
+	// を超えたら新規 fetch を 503 で拒否する。既に in-flight な URL への
+	// 合流は upstream 同様に上限へ数えない。
+	inflightMu    sync.Mutex
+	inflight      map[string]int
+	maxConcurrent int
+
 	// now は cacheGet / cachePut で使う clock。テストで stub する。
 	now func() time.Time
 }
@@ -107,11 +122,21 @@ func New(httpClient *http.Client, userAgent string) *Handler {
 		// gofeed.Parser の goroutine 安全性は明記されていないため pool 経由で
 		// 1 リクエスト 1 インスタンスに分離する。Pool reuse でアロケーションは
 		// 実質ゼロに保つ。
-		parserPool:  &sync.Pool{New: func() any { return gofeed.NewParser() }},
-		cacheTTL:    time.Duration(CacheSeconds) * time.Second,
-		cacheMaxLen: DefaultCacheMaxEntries,
-		cache:       make(map[string]cacheEntry),
-		now:         time.Now,
+		parserPool:    &sync.Pool{New: func() any { return gofeed.NewParser() }},
+		cacheTTL:      time.Duration(CacheSeconds) * time.Second,
+		cacheMaxLen:   DefaultCacheMaxEntries,
+		cache:         make(map[string]cacheEntry),
+		inflight:      make(map[string]int),
+		maxConcurrent: MaxConcurrentRequests,
+		now:           time.Now,
+	}
+}
+
+// SetMaxConcurrentFetches overrides the distinct-URL concurrency cap.
+// Intended for tests; 0 以下は無視。
+func (h *Handler) SetMaxConcurrentFetches(n int) {
+	if n > 0 {
+		h.maxConcurrent = n
 	}
 }
 
@@ -142,40 +167,43 @@ func (h *Handler) SetClock(now func() time.Time) {
 
 // Fetch handles GET/POST /api/fetch-rss. The frontend RSS widget uses GET with
 // a query string, so we accept both shapes.
+//
+// URL 検証と error 体系は upstream 2026.7.0 の GHSA hardening (normalizeUrl +
+// INVALID_URL / FETCH_RSS_FAILED / FETCH_RSS_UNAVAILABLE) に揃える。
 func (h *Handler) Fetch(c echo.Context) error {
-	rawURL := strings.TrimSpace(c.QueryParam("url"))
-	if rawURL == "" {
-		var body struct {
-			URL string `json:"url"`
-		}
-		// Bind 失敗は無視 (空 URL のままバリデーションで弾く)。Misskey TS は
-		// JSON Schema で require するが、こちらでは下の guard で同等の
-		// 400 を返す。
-		_ = c.Bind(&body)
-		rawURL = strings.TrimSpace(body.URL)
+	rawURL, provided := h.extractURL(c)
+	if !provided {
+		// upstream は url 欠落を ajv schema validation の INVALID_PARAM (400)
+		// で弾く (info に param/reason を含む)。param が存在して不正な場合は
+		// 下の normalize で INVALID_URL。
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParamClient("url", "must have required property 'url'"))
 	}
 
-	if rawURL == "" {
-		// #2106 L28: upstream は url 欠落を ajv schema validation で INVALID_PARAM(400) に、
-		// 不正 scheme を send 内 throw → INTERNAL_ERROR(500) に包む。mk-go は両方を意図的に
-		// 明快な INVALID_URL(400) で返す (worse な 500 拡散を避ける)。
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "url is required.", "9c5ad7d3-6e15-4f3a-87b8-39ec2e91d5a3"))
+	key, ok := normalizeFeedURL(rawURL)
+	if !ok {
+		// upstream normalizeUrl: 空 / 8192 字超 / parse 失敗 / 非 http(s) /
+		// userinfo 付きをすべて INVALID_URL (400) に丸める。
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "Invalid URL.", "89b7ee05-ccfc-4bdd-9b13-61172fd1e06c"))
 	}
-
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		// 不正 scheme / host 欠落と「URL 未指定」を frontend 側で別扱いに
-		// したい運用に備え、Misskey の慣行どおり別 ID を割り当てる。
-		// #2106 L28: upstream は scheme 不正を 500 INTERNAL_ERROR にするが mk-go は 400 を保つ。
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_URL", "url must be http(s).", "f5b2bd41-7c0a-4d49-b8c8-3d3a4d9b8e21"))
-	}
-
-	key := u.String()
 
 	// Cache hit fast path: TTL 内ならパースなしで JSON bytes をそのまま返す。
 	if body, ok := h.cacheGet(key); ok {
 		return writeCachedJSON(c, body)
 	}
+
+	// upstream 2026.7.0 の MAX_CONCURRENT_REQUESTS: distinct URL の同時 fetch
+	// が上限を超えたら 503。既存 flight への合流は数えない (upstream の
+	// inFlightRequests 共有と同じ)。
+	if !h.inflightEnter(key) {
+		return c.JSON(http.StatusServiceUnavailable, apierr.ErrorWithKind("FETCH_RSS_UNAVAILABLE", "RSS fetching is temporarily unavailable.", "91e6ff44-c63f-4725-9ad0-b7a40d7f7655", apierr.KindServer))
+	}
+	// 解放は「fetch 完了時点」で行いたい (レスポンス送信を上限内に含めると、
+	// body を読まないクライアントが socket buffer を埋めるだけでスロットを
+	// 無期限占有できる) が、singleflight は fn 内の panic を全 caller に再
+	// panic させるため defer 無しだと panic 経路でスロットが恒久リークする。
+	// OnceFunc で「早期解放 + panic-safe」を両立する。
+	leaveOnce := sync.OnceFunc(func() { h.inflightLeave(key) })
+	defer leaveOnce()
 
 	// singleflight で同 URL への concurrent miss を 1 fetch に集約する。
 	// 後続 caller は同じ result を共有 (upstream に thundering herd を流さない)。
@@ -213,17 +241,126 @@ func (h *Handler) Fetch(c echo.Context) error {
 		h.cachePut(key, body)
 		return body, nil
 	})
+	// upstream は .finally() を fetch promise に付けており、serialize /
+	// レスポンス送信は並行上限の外。ここで先に解放する。
+	leaveOnce()
 	if err != nil {
-		// SSRF block / dial fail / parse fail はすべて upstream 側の問題として
-		// 502 にまとめる。err.Error() を直接 client に返すと resolved IP や
-		// SSRF 文言が漏れるため static メッセージに置き換え、詳細はサーバ側
-		// ログに残す。frontend は items の有無しか見ていないので、stub と
-		// 同じく空 array を返す道もあるが、ウィジェット側で「取得失敗」と
-		// 「フィードが空」を区別したい運用に備えて explicit error にする。
+		// SSRF block / dial fail / parse fail はすべて upstream 2026.7.0 と同じ
+		// FETCH_RSS_FAILED (422, kind server) に丸める。err.Error() を直接
+		// client に返すと resolved IP や SSRF 文言が漏れるため static
+		// メッセージに置き換え、詳細はサーバ側ログに残す。
 		slog.WarnContext(c.Request().Context(), "fetch-rss upstream failed", "url", key, "err", err)
-		return c.JSON(http.StatusBadGateway, apierr.Error("UPSTREAM_ERROR", "Failed to fetch feed.", "0e0e1f5b-2c97-4f17-a51c-1f9c2e9b4d82"))
+		return c.JSON(http.StatusUnprocessableEntity, apierr.ErrorWithKind("FETCH_RSS_FAILED", "Failed to fetch RSS.", "8db5d3d8-31d7-452f-b0cc-ca3b8925de12", apierr.KindServer))
 	}
 	return writeCachedJSON(c, v.([]byte))
+}
+
+// extractURL pulls the url parameter and reports whether it was provided at
+// all (ajv の required 相当の判定に使う)。POST は upstream 同様 body を
+// 優先し、frontend の RSS widget が使う GET は query から取る。
+func (h *Handler) extractURL(c echo.Context) (string, bool) {
+	if c.Request().Method != http.MethodGet {
+		var body struct {
+			URL *string `json:"url"`
+		}
+		// Bind 失敗は「未指定」扱い (上位で INVALID_PARAM)。
+		_ = c.Bind(&body)
+		if body.URL != nil {
+			return strings.TrimSpace(*body.URL), true
+		}
+	}
+	if qp := c.QueryParams(); len(qp["url"]) > 0 {
+		return strings.TrimSpace(qp.Get("url")), true
+	}
+	return "", false
+}
+
+// normalizeFeedURL validates and canonicalizes the feed URL following
+// upstream 2026.7.0 normalizeUrl: 空 / 8192 字超 / parse 不能 / 非 http(s) /
+// userinfo 付きを拒否し、fragment を除去した canonical 形を返す。
+//
+// 加えて WHATWG URL (upstream の `new URL()`) が行う正規化のうち、host の
+// 小文字化と default port の除去を再現する。これが無いと `example.com` /
+// `EXAMPLE.com` / `example.com:80` が別キーになり、DNS は case-insensitive
+// なので同一実体に対していくらでも cache / 並行スロットを食い潰せる。
+func normalizeFeedURL(raw string) (string, bool) {
+	if raw == "" || len(raw) > MaxURLLength {
+		return "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", false
+	}
+	// Go の http.Client は URL の userinfo を Basic 認証ヘッダとして外部に
+	// 送出するため、upstream 同様に拒否する (credential 転送防止)。
+	if u.User != nil {
+		return "", false
+	}
+	// host は case-insensitive。hostname だけ小文字化し port は保持する。
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !isDefaultPort(u.Scheme, port) {
+		// 非 canonical な数値表記 (`:08080`) も畳んでキー変種を防ぐ。
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
+		u.Host = net.JoinHostPort(host, port)
+	} else {
+		u.Host = host
+		// IPv6 リテラルは JoinHostPort を通さないと角括弧が落ちる。
+		if strings.Contains(host, ":") {
+			u.Host = "[" + host + "]"
+		}
+	}
+	// port だけの URL (`http://:80/x`) は Hostname() が空になる。WHATWG の
+	// `new URL()` は throw するので、こちらも INVALID_URL に倒す (素通しすると
+	// 壊れた cache key を作った上で 422 になり error shape が upstream とずれる)。
+	if host == "" {
+		return "", false
+	}
+	// WHATWG URL は空 path を "/" に正規化する。
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	return u.String(), true
+}
+
+// isDefaultPort reports whether port is the scheme's default (WHATWG URL は
+// default port を href から落とす)。`:080` のような非 canonical 表記も同じ
+// 番号として畳む (文字列比較だと port 表記を変えるだけでキー変種を無限に
+// 作れてしまう)。
+func isDefaultPort(scheme, port string) bool {
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return (scheme == "http" && n == 80) || (scheme == "https" && n == 443)
+}
+
+// inflightEnter registers the request against the concurrency cap. Returns
+// false if starting a fetch for a new distinct URL would exceed the cap.
+func (h *Handler) inflightEnter(key string) bool {
+	h.inflightMu.Lock()
+	defer h.inflightMu.Unlock()
+	if h.inflight[key] == 0 && len(h.inflight) >= h.maxConcurrent {
+		return false
+	}
+	h.inflight[key]++
+	return true
+}
+
+func (h *Handler) inflightLeave(key string) {
+	h.inflightMu.Lock()
+	defer h.inflightMu.Unlock()
+	if h.inflight[key] <= 1 {
+		delete(h.inflight, key)
+	} else {
+		h.inflight[key]--
+	}
 }
 
 // writeCachedJSON は echo.Context.JSON 相当の応答を pre-serialized body から
@@ -316,6 +453,15 @@ func (h *Handler) fetchFeed(ctx context.Context, feedURL string) (*gofeed.Feed, 
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// upstream 2026.7.0: リダイレクト追跡後の最終 URL の protocol を再検証する。
+	// Go transport は非 http(s) への redirect を自力で拒否するが、明示チェックを
+	// upstream に揃えて defense-in-depth にする。
+	if resp.Request != nil && resp.Request.URL != nil {
+		if s := resp.Request.URL.Scheme; s != "http" && s != "https" {
+			return nil, fmt.Errorf("invalid final URL protocol: %s", s)
+		}
+	}
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
