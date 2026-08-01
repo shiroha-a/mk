@@ -58,13 +58,16 @@ func TestReadMkRoutesInvalidJSON(t *testing.T) {
 
 // runEnv builds the per-test directory layout used by the run-level tests:
 //   - <tmp>/ts/meta.ts                  : single Misskey TS endpoint
+//   - <tmp>/ApiServerService.ts         : fastify 直登録 endpoint の抽出元
 //   - <tmp>/routes.json                 : DumpedRoutes payload
 //   - <tmp>/out.md                      : expected markdown output target
-func runEnv(t *testing.T, routes *DumpedRoutes) (tsDir, routesPath, outPath string) {
+func runEnv(t *testing.T, routes *DumpedRoutes) (tsDir, directPath, routesPath, outPath string) {
 	t.Helper()
 	root := t.TempDir()
 	tsDir = filepath.Join(root, "ts")
 	mustWrite(t, filepath.Join(tsDir, "meta.ts"), "")
+	directPath = filepath.Join(root, "ApiServerService.ts")
+	mustWrite(t, directPath, "fastify.post<{ Body: { code: string; } }>('/signup-pending', h);\n")
 	routesPath = filepath.Join(root, "routes.json")
 	raw, err := json.Marshal(routes)
 	if err != nil {
@@ -74,11 +77,11 @@ func runEnv(t *testing.T, routes *DumpedRoutes) (tsDir, routesPath, outPath stri
 		t.Fatalf("write routes: %v", err)
 	}
 	outPath = filepath.Join(root, "out.md")
-	return tsDir, routesPath, outPath
+	return tsDir, directPath, routesPath, outPath
 }
 
 func TestRunWritesMarkdownToOutFile(t *testing.T) {
-	tsDir, routesPath, outPath := runEnv(t, &DumpedRoutes{
+	tsDir, directPath, routesPath, outPath := runEnv(t, &DumpedRoutes{
 		MisskeyVersion: "ver-ts",
 		MkGoVersion:    "ver-mk",
 		Routes: []DumpedRoute{
@@ -87,7 +90,7 @@ func TestRunWritesMarkdownToOutFile(t *testing.T) {
 	})
 
 	err := run(
-		[]string{"-ts-endpoints-dir", tsDir, "-mk-routes", routesPath, "-out", outPath},
+		[]string{"-ts-endpoints-dir", tsDir, "-ts-api-server-service", directPath, "-mk-routes", routesPath, "-out", outPath},
 		nil,
 		io.Discard,
 		io.Discard,
@@ -112,7 +115,7 @@ func TestRunWritesMarkdownToOutFile(t *testing.T) {
 }
 
 func TestRunWritesToStdoutWhenOutNotGiven(t *testing.T) {
-	tsDir, routesPath, _ := runEnv(t, &DumpedRoutes{
+	tsDir, directPath, routesPath, _ := runEnv(t, &DumpedRoutes{
 		MisskeyVersion: "x",
 		MkGoVersion:    "y",
 		Routes:         []DumpedRoute{{Method: "POST", Path: "/api/meta"}},
@@ -120,7 +123,7 @@ func TestRunWritesToStdoutWhenOutNotGiven(t *testing.T) {
 
 	var stdout bytes.Buffer
 	if err := run(
-		[]string{"-ts-endpoints-dir", tsDir, "-mk-routes", routesPath},
+		[]string{"-ts-endpoints-dir", tsDir, "-ts-api-server-service", directPath, "-mk-routes", routesPath},
 		nil,
 		&stdout,
 		io.Discard,
@@ -136,6 +139,8 @@ func TestRunUsesStdinForRoutes(t *testing.T) {
 	root := t.TempDir()
 	tsDir := filepath.Join(root, "ts")
 	mustWrite(t, filepath.Join(tsDir, "meta.ts"), "")
+	directPath := filepath.Join(root, "ApiServerService.ts")
+	mustWrite(t, directPath, "fastify.post('/signup', h);\n")
 	raw, err := json.Marshal(&DumpedRoutes{
 		MisskeyVersion: "x", MkGoVersion: "y",
 		Routes: []DumpedRoute{{Method: "POST", Path: "/api/meta"}},
@@ -145,7 +150,7 @@ func TestRunUsesStdinForRoutes(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	if err := run(
-		[]string{"-ts-endpoints-dir", tsDir},
+		[]string{"-ts-endpoints-dir", tsDir, "-ts-api-server-service", directPath},
 		bytes.NewReader(raw),
 		&stdout,
 		io.Discard,
@@ -161,8 +166,10 @@ func TestRunErrorsOnMissingTSDir(t *testing.T) {
 	root := t.TempDir()
 	routesPath := filepath.Join(root, "routes.json")
 	mustWrite(t, routesPath, `{"routes":[]}`)
+	directPath := filepath.Join(root, "ApiServerService.ts")
+	mustWrite(t, directPath, "fastify.post('/signup', h);\n")
 	err := run(
-		[]string{"-ts-endpoints-dir", filepath.Join(root, "does-not-exist"), "-mk-routes", routesPath},
+		[]string{"-ts-endpoints-dir", filepath.Join(root, "does-not-exist"), "-ts-api-server-service", directPath, "-mk-routes", routesPath},
 		nil,
 		io.Discard,
 		io.Discard,
@@ -177,8 +184,10 @@ func TestRunErrorsOnMissingTSDir(t *testing.T) {
 
 func TestRunErrorsOnMissingRoutesFile(t *testing.T) {
 	tsDir := t.TempDir()
+	directPath := filepath.Join(t.TempDir(), "ApiServerService.ts")
+	mustWrite(t, directPath, "fastify.post('/signup', h);\n")
 	err := run(
-		[]string{"-ts-endpoints-dir", tsDir, "-mk-routes", filepath.Join(t.TempDir(), "missing.json")},
+		[]string{"-ts-endpoints-dir", tsDir, "-ts-api-server-service", directPath, "-mk-routes", filepath.Join(t.TempDir(), "missing.json")},
 		nil,
 		io.Discard,
 		io.Discard,
@@ -192,13 +201,13 @@ func TestRunErrorsOnMissingRoutesFile(t *testing.T) {
 }
 
 func TestRunErrorsOnInvalidOutPath(t *testing.T) {
-	tsDir, routesPath, _ := runEnv(t, &DumpedRoutes{
+	tsDir, directPath, routesPath, _ := runEnv(t, &DumpedRoutes{
 		Routes: []DumpedRoute{{Method: "POST", Path: "/api/meta"}},
 	})
 	// 存在しないディレクトリ下への出力は os.Create が失敗する。
 	badOut := filepath.Join(t.TempDir(), "no-such-dir", "out.md")
 	err := run(
-		[]string{"-ts-endpoints-dir", tsDir, "-mk-routes", routesPath, "-out", badOut},
+		[]string{"-ts-endpoints-dir", tsDir, "-ts-api-server-service", directPath, "-mk-routes", routesPath, "-out", badOut},
 		nil,
 		io.Discard,
 		io.Discard,

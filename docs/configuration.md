@@ -126,6 +126,10 @@ cp .config/docker.yml.example .config/docker.yml
 | `mediaProxy` | string | - | メディアプロキシURL |
 | `mediaProxySecret` | string | - | メディアプロキシの署名シークレット |
 | `videoThumbnailGenerator` | string | - | 動画サムネイル生成サービスURL |
+| `videoThumbnailGeneratorMode` | string | `post` | 生成サービスの呼び出し方式。`post` (multipart POST、SSRF surface を generator に持ち込まない) / `get` (Misskey TS の GET `?url=` 仕様互換) |
+| `nsfwDetectorUrl` | string | - | mk-go 独自の汎用 NSFW 判定 service endpoint。`POST` に画像/動画 bytes、応答は `{"score": float64}`。**upstream 2026.7.0 の公式 sensitive-detector (meta の `sensitiveMediaDetectionApiUrl`) が未設定のときの fallback** として動く。空なら手動 isSensitive フラグのみ |
+| `nsfwDetectorAuthHeader` | string | - | 上記 detector へ付与する 1 行 HTTP header (例 `Authorization: Bearer xxx`)。SaaS detector を thin proxy 無しで直接呼ぶ用 |
+| `nsfwDetectorTimeout` | duration | `30s` | 上記 detector 1 リクエストあたりの timeout |
 
 ### ネットワーク
 
