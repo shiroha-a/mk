@@ -728,6 +728,38 @@ func TestCreateService_ReplyAndChannelVisibilityAdjustment(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "非 public note への public reply は home に降格")
 	})
+	// upstream 2026.7.0 #17747: followers note への reply を home で作成できる
+	// visibility escalation の修正。reply 先の可視性で段階クランプする。
+	t.Run("reply to followers target clamps home to followers (#17747)", func(t *testing.T) {
+		svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["f"] = &model.Note{ID: "f", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+		followingRepo.Followings["f1"] = &model.Following{FollowerID: "u1", FolloweeID: "author"}
+		text := "re"
+		rid := "f"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityHome})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "followers note への home reply は followers に降格")
+	})
+	t.Run("reply to followers target clamps public to followers (#17747)", func(t *testing.T) {
+		svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["f"] = &model.Note{ID: "f", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+		followingRepo.Followings["f1"] = &model.Following{FollowerID: "u1", FolloweeID: "author"}
+		text := "re"
+		rid := "f"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "followers note への public reply は followers に降格")
+	})
+	t.Run("reply to followers target keeps specified (#17747)", func(t *testing.T) {
+		svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["f"] = &model.Note{ID: "f", UserID: "author", Visibility: model.NoteVisibilityFollowers}
+		followingRepo.Followings["f1"] = &model.Following{FollowerID: "u1", FolloweeID: "author"}
+		text := "re"
+		rid := "f"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilitySpecified})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilitySpecified, created.Visibility, "ユーザーが選んだより狭い可視性 (specified) は維持")
+	})
 	t.Run("reply to localOnly propagates localOnly", func(t *testing.T) {
 		svc, noteRepo, _ := newCreateService(t)
 		noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "other", Visibility: model.NoteVisibilityPublic, LocalOnly: true}

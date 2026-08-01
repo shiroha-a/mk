@@ -557,10 +557,27 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 				return nil, err
 			}
 		}
-		// 返信対象が public でなければ visibility を home に降格する (upstream
-		// NoteCreateService:531-533、#1855)。renote の home 降格と同種。
-		if t.Visibility != model.NoteVisibilityPublic && visibility == model.NoteVisibilityPublic {
-			visibility = model.NoteVisibilityHome
+		// 返信対象の可視性に応じて段階クランプする (upstream 2026.7.0 #17747)。
+		// 旧仕様は「public 以外への reply は public→home」のみで、followers
+		// note への reply を home で作成して文脈を晒せた (visibility escalation)。
+		switch t.Visibility {
+		case model.NoteVisibilityHome:
+			// home 対象への reply は home 以下のみ可。
+			if visibility == model.NoteVisibilityPublic {
+				visibility = model.NoteVisibilityHome
+			}
+		case model.NoteVisibilityFollowers:
+			// followers 対象への reply は followers 以下のみ可。
+			if visibility == model.NoteVisibilityPublic || visibility == model.NoteVisibilityHome {
+				visibility = model.NoteVisibilityFollowers
+			}
+		case model.NoteVisibilitySpecified:
+			// specified 対象は上の reject (ErrCannotReplyToSpecifiedVisibility)
+			// で弾いているため通常到達しない。upstream は API 経路で reject し
+			// 内部経路の clamp を併置しているので defense-in-depth で揃える。
+			if visibility != model.NoteVisibilitySpecified {
+				visibility = model.NoteVisibilitySpecified
+			}
 		}
 		// local-only な対象への reply は local-only にする (channel 外のみ、
 		// upstream:541-543)。
