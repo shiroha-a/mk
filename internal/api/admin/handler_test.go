@@ -157,6 +157,20 @@ func TestAccountsCreate_AsRootUser(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// upstream 2026.7.0 (#17783): root 本人でなくても administrator role を持つ
+// user はアカウント作成 API を使える。
+func TestAccountsCreate_AsNonRootAdministrator_Allowed(t *testing.T) {
+	h, userRepo, metaRepo, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
+	userRepo.Users["adm1"] = &model.User{ID: "adm1", Username: "adm"}
+	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
+	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+
+	rec := doPost(h.AccountsCreate, `{"username":"user2","password":"pass"}`, userRepo.Users["adm1"])
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestAccountsCreate_AsNonRoot_Denied(t *testing.T) {
 	h, _, metaRepo, _ := newTestHandler(t)
 	rootID := "root1"

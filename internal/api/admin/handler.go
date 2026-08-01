@@ -575,11 +575,18 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_INITIAL_PASSWORD", "Initial password is incorrect.", "97147c55-1ae1-4f6f-91d6-e1c3e0e76d62"))
 		}
 	} else {
-		// 初回セットアップ以外はadmin権限必須
+		// 初回セットアップ以外はadministrator権限必須。upstream 2026.7.0 (#17783)
+		// で「rootUserId 本人のみ」から「任意の administrator」に緩和された
+		// (初期設定で作った root 以外の admin がこの API を使えなかった修正)。
+		// roleService 未配線時は旧仕様の root 本人比較に fallback (fail-closed)。
 		if user == nil {
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
-		if meta.RootUserID == nil || *meta.RootUserID != user.ID {
+		if h.roleService != nil {
+			if !h.roleService.IsAdministrator(user.ID) {
+				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			}
+		} else if meta.RootUserID == nil || *meta.RootUserID != user.ID {
 			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 		// #2106 S2: upstream create.ts の inline `token !== null` gate を再現する。
