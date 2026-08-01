@@ -305,3 +305,22 @@ func TestValidateResultSchemes_CaseInsensitive(t *testing.T) {
 	upper := "HTTP://example.com/p"
 	assert.NoError(t, validateResultSchemes(&Result{URL: "https://example.com", Player: PlayerResult{URL: &upper}}))
 }
+
+// thumbnail / icon が非 http(s) なら値を落とす (preview 自体は返す)。
+// mk-go の ProxyMediaURL は host 無し URL を素通しするため、ここで落とさないと
+// javascript:/data: がクライアントに出る。
+func TestValidateResultSchemes_DropsNonHTTPThumbnailAndIcon(t *testing.T) {
+	js := "javascript:alert(1)"
+	data := "data:image/png;base64,AAAA"
+	ok := "https://example.com/i.png"
+
+	r := &Result{URL: "https://example.com", Thumbnail: &js, Icon: &data}
+	require.NoError(t, validateResultSchemes(r))
+	assert.Nil(t, r.Thumbnail, "javascript: thumbnail は落とす")
+	assert.Nil(t, r.Icon, "data: icon は落とす")
+
+	r2 := &Result{URL: "https://example.com", Thumbnail: &ok, Icon: &ok}
+	require.NoError(t, validateResultSchemes(r2))
+	assert.Equal(t, &ok, r2.Thumbnail, "http(s) の thumbnail は保持")
+	assert.Equal(t, &ok, r2.Icon)
+}

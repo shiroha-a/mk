@@ -2109,3 +2109,37 @@ func TestProcess_CreateReplyClampsVisibilityToTarget(t *testing.T) {
 	assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility,
 		"followers 限定 note への public reply は followers に降格される")
 }
+
+// #17747 clamp で specified に降格したリモート reply は、reply 先の作者を
+// visibleUserIds に含める必要がある (apNote.To が Public だけだと宛先が 1 件も
+// 解決できず、DM の当事者すら本文を参照できない note が残る)。
+func TestProcess_CreateReplyClampedToSpecifiedKeepsTargetVisible(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	localURI := "https://example.com/notes/specified-parent"
+	noteRepo.Notes["specified-parent"] = &model.Note{
+		ID: "specified-parent", UserID: "bob", URI: &localURI,
+		Visibility: model.NoteVisibilitySpecified,
+	}
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/notes/reply-specified",
+			"attributedTo": "https://remote.example/users/alice",
+			"inReplyTo": "https://example.com/notes/specified-parent",
+			"content": "remote reply to DM",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Eventually(t, func() bool {
+		n, err := noteRepo.FindByURI("https://remote.example/notes/reply-specified")
+		return err == nil && n != nil
+	}, time.Second, 10*time.Millisecond)
+	created, err := noteRepo.FindByURI("https://remote.example/notes/reply-specified")
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilitySpecified, created.Visibility)
+	assert.Contains(t, []string(created.VisibleUserIDs), "bob",
+		"reply 先の作者が visibleUserIds に入っていないと当人が本文を読めない")
+}

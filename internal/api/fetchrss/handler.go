@@ -314,6 +314,12 @@ func normalizeFeedURL(raw string) (string, bool) {
 			u.Host = "[" + host + "]"
 		}
 	}
+	// port だけの URL (`http://:80/x`) は Hostname() が空になる。WHATWG の
+	// `new URL()` は throw するので、こちらも INVALID_URL に倒す (素通しすると
+	// 壊れた cache key を作った上で 422 になり error shape が upstream とずれる)。
+	if host == "" {
+		return "", false
+	}
 	// WHATWG URL は空 path を "/" に正規化する。
 	if u.Path == "" {
 		u.Path = "/"

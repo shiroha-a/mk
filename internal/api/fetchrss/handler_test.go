@@ -1090,3 +1090,13 @@ func TestFetchRSS_IPv6ZoneNormalization(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "fe80::1%eth0", parsed.Hostname())
 }
+
+// host が空の URL (`http://:80/x`) は WHATWG の new URL() が throw するので
+// INVALID_URL (400) に倒す。素通しすると壊れた cache key を作った上で 422 に
+// なり error shape が upstream とずれる。
+func TestFetchRSS_EmptyHostWithPortRejected(t *testing.T) {
+	for _, raw := range []string{"http://:80/feed", "http://:8080/x"} {
+		_, ok := normalizeFeedURL(raw)
+		assert.False(t, ok, "host 空の URL は拒否: %s", raw)
+	}
+}

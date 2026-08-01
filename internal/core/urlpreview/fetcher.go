@@ -186,7 +186,13 @@ func (f *Fetcher) applySensitiveList(result *Result) {
 }
 
 // validateResultSchemes rejects previews whose resolved url / player.url is
-// not http(s) (upstream 2026.7.0 は cache 前に unsupported schema を弾く)。
+// not http(s) (upstream 2026.7.0 は cache 前に unsupported schema を弾く)、
+// および非 http(s) の thumbnail / icon を落とす。
+//
+// upstream は thumbnail / icon を無条件に mediaProxy URL へ書き換えるので
+// 非 http(s) 値がクライアントに出ることが構造上ありえないが、mk-go の
+// `entity.ProxyMediaURL` は host を持たない URL (`javascript:…` / `data:…`) を
+// proxy 対象外として素通しするため、ここで落とす必要がある。
 func validateResultSchemes(result *Result) error {
 	if !isHTTPScheme(result.URL) {
 		return fmt.Errorf("%w: unsupported schema in result url", ErrFetchFailed)
@@ -194,12 +200,27 @@ func validateResultSchemes(result *Result) error {
 	if result.Player.URL != nil && *result.Player.URL != "" && !isHTTPScheme(*result.Player.URL) {
 		return fmt.Errorf("%w: unsupported schema in player url", ErrFetchFailed)
 	}
+	// thumbnail / icon は preview 全体を落とすほどではないので、値だけ捨てる
+	// (upstream も画像が壊れているだけで preview 自体は返す)。
+	dropNonHTTP(&result.Thumbnail)
+	dropNonHTTP(&result.Icon)
 	return nil
 }
 
-// isHTTPScheme reports whether the URL uses http(s)。scheme は
-// case-insensitive なので (`HTTP://…` を返す proxy/ページがある)、upstream の
-// `new URL().protocol` 比較と同じく大文字小文字を無視する。
+// dropNonHTTP clears an optional URL field when it is not http(s).
+func dropNonHTTP(field **string) {
+	if *field != nil && **field != "" && !isHTTPScheme(**field) {
+		*field = nil
+	}
+}
+
+// isHTTPScheme reports whether the URL uses http(s)。
+//
+// upstream (`UrlPreviewService.ts`) は生文字列の case-sensitive な
+// `startsWith('http://')` で判定するが、URL scheme は RFC 3986 上
+// case-insensitive なので `HTTP://…` を返す summaly proxy / ページを
+// 誤って弾かないよう mk-go は大文字小文字を無視する。許可方向の乖離で
+// (upstream が弾くものを mk-go は通す)、非 http(s) の遮断力は同じ。
 func isHTTPScheme(raw string) bool {
 	lower := strings.ToLower(raw)
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
