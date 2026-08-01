@@ -1344,7 +1344,9 @@ func (s *Server) setupRoutes() {
 
 	// TOTP replay guard — accept した TOTP コードを Redis に SETNX で
 	// 記録し、acceptance window 内 (~90s) の再利用を refuse する
-	// (RFC 6238 §5.2)。upstream Misskey TS は持たない mk-go 独自 hardening。
+	// (RFC 6238 §5.2)。mk-go が先行実装した hardening だが、upstream も
+	// 2026.6.0 の UserAuthService.validateOtp で同等機構 (Redis SET NX EX、
+	// TTL 90s) を入れたため現在は挙動が揃っている。
 	// signin と /api/i の 2 経路で共通の guard を共有する。
 	totpReplayGuard := coretwofactor.NewRedisReplayGuard(s.redis.Default)
 	signinHandler.SetTOTPReplayGuard(totpReplayGuard)

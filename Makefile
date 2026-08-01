@@ -419,6 +419,9 @@ diff-logs:
 # - APICOMPAT_ROUTES: dump-routes が書き出す中間ファイルの path。
 #   `$(BUILD_DIR)` 配下にして hermetic に保つ ( /tmp 共有事故を避ける)。
 APICOMPAT_TS_DIR    ?= third_party/misskey/packages/backend/src/server/api/endpoints
+# fastify 直登録 endpoint (signup / signin-flow / miauth check / instance peers)
+# の抽出元。endpoints/ の file-walk では拾えないので source から直接読む。
+APICOMPAT_TS_DIRECT ?= third_party/misskey/packages/backend/src/server/api/ApiServerService.ts
 APICOMPAT_CONFIG    ?= .config/default.yml
 APICOMPAT_ROUTES    ?= $(BUILD_DIR)/apicompat-routes.json
 APICOMPAT_OUT       ?= docs/api-compat.md
@@ -437,6 +440,7 @@ apicompat-routes: build
 apicompat-render:
 	go run ./tools/apicompat \
 		-ts-endpoints-dir $(APICOMPAT_TS_DIR) \
+		-ts-api-server-service $(APICOMPAT_TS_DIRECT) \
 		-mk-routes $(APICOMPAT_ROUTES) \
 		-out $(APICOMPAT_OUT)
 	@echo "wrote $(APICOMPAT_OUT)"

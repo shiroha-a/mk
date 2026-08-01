@@ -328,6 +328,7 @@ CI（`ci.yml`）は build / 4-shard test（パッケージ毎 90% カバレッ�
 ## 8. mk-go 独自・cherrypick 拡張
 
 upstream に無い、または cherrypick 由来の加算機能（wire 互換を壊さない additive 拡張）。
+下表は概観で、**全項目の網羅カタログは [divergence.md](divergence.md)** を参照。
 
 | 機能 | 系統 | 備考 |
 |---|---|---|

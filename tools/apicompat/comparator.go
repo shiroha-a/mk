@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -80,9 +82,18 @@ func dedupSorted(in []string) []string {
 
 // Report holds the comparison result between TS and mk-go endpoints.
 type Report struct {
-	Both   []string
-	TSOnly []string
+	Both []string
+	// TSOnly は method 込みで持つ。endpoints/ 由来はすべて POST だが、
+	// ApiServerService.ts の直登録には GET (`/api/v1/instance/peers`) も
+	// あり、method を落とすと未実装 endpoint を正しく表示できない。
+	TSOnly []TSOnlyRoute
 	MkOnly []MkOnlyRoute
+}
+
+// TSOnlyRoute is a Misskey TS endpoint that mk-go does not implement.
+type TSOnlyRoute struct {
+	Method string
+	Path   string
 }
 
 // MkOnlyCategory classifies why a mk-go route has no counterpart in TS, so
@@ -107,32 +118,64 @@ type MkOnlyRoute struct {
 	Category MkOnlyCategory
 }
 
-// tsRouterDirectPOSTPaths lists Misskey TS endpoints registered as POST
-// under /api/ via `ApiServerService.ts` (fastify direct) rather than via the
-// endpoints/ directory convention. filename-derived collection would miss
-// these and incorrectly flag them as "mk-go only" — augment the TS set with
-// them so they match mk-go's POST handlers naturally.
+// tsDirectRoute is one endpoint that Misskey TS registers directly on
+// fastify in `ApiServerService.ts` instead of via the endpoints/ directory
+// convention. filename-derived collection cannot see these.
+type tsDirectRoute struct {
+	Method string
+	Path   string
+}
+
+// fastifyDirectRe matches `fastify.post(...)` / `fastify.get(...)` route
+// registrations and captures the method plus the quoted path. The generic
+// type parameter (`fastify.post<{ Body: ... }>(`) may span multiple lines,
+// so the path is captured from the argument list rather than requiring it on
+// the same line as the method name.
 //
-// 注意: `/api/signin` (= bare signin) は Misskey TS が `/api/signin-flow` に
-// 統合した過去がある backward-compat shim で、現行 ApiServerService.ts には
-// 存在しない。mk-go は互換性のため `/api/signin` も登録しているが、これは
-// 真の "mk-go only" として扱う (= ここに含めない)。
+// 対応する 2 形:
 //
-// TODO: third_party/misskey 1 submodule bump 時はこの list が古くなって
-// いないか必ず確認する。`grep -nE "fastify\.post\(.*['\"]\/.+['\"]"`
-// `third_party/misskey/packages/backend/src/server/api/ApiServerService.ts`
-// で TS が直登録している現行 path を出して、ここの list と diff を取る。
-// Phase 2 (api.json ベース比較) に移行すれば自動追従するので、この
-// hardcode は消える予定。
+//	fastify.post<{ Body: { code: string; } }>('/signup-pending', ...)   // 1 行
+//	fastify.post<{                                                      // 複数行
+//	    Body: { ... };
+//	}>('/signup', ...)
+var fastifyDirectRe = regexp.MustCompile(`fastify\.(post|get)\s*(?:<[\s\S]*?>)?\s*\(\s*'([^']+)'`)
+
+// collectTSDirectRoutes parses ApiServerService.ts and returns the routes it
+// registers straight on fastify (i.e. outside endpoints/).
 //
-// source: third_party/misskey/packages/backend/src/server/api/
+// 以前は path を hardcode していたが、submodule bump のたびに手で追随する
+// 必要があり実際に古くなっていた (`/miauth/:session/check` が漏れ、
+// `GET /v1/instance/peers` は method 違いで検出対象ですらなかった)。
+// source から直接読むことで bump 時の追随漏れを構造的に無くす。
 //
-//	ApiServerService.ts
-var tsRouterDirectPOSTPaths = []string{
-	"/api/signup",
-	"/api/signup-pending",
-	"/api/signin-flow",
-	"/api/signin-with-passkey",
+// path が空 (= ファイル不在 / 想定外の書式) の場合は呼び出し側でエラーに
+// する。silently 空集合にすると直登録 endpoint が丸ごと "mk-go only" に
+// 誤分類され、matrix が静かに壊れるため。
+func collectTSDirectRoutes(path string) ([]tsDirectRoute, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ApiServerService.ts: %w", err)
+	}
+	var out []tsDirectRoute
+	for _, m := range fastifyDirectRe.FindAllStringSubmatch(string(src), -1) {
+		method, p := strings.ToUpper(m[1]), m[2]
+		// `fastify.get('/*', ...)` は 404 fallback の catch-all で endpoint
+		// ではない。mk-go 側でも Echo の catch-all を除外している。
+		if p == "/*" {
+			continue
+		}
+		out = append(out, tsDirectRoute{Method: method, Path: "/api" + p})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no direct fastify routes found in %s (format changed?)", path)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Method < out[j].Method
+	})
+	return out, nil
 }
 
 // classifyMkOnly assigns a category. Priority order:
@@ -147,19 +190,25 @@ func classifyMkOnly(method, path string, mkHasPOST map[string]bool) MkOnlyCatego
 	return CatOther
 }
 
-func compare(tsEndpoints []string, mk *DumpedRoutes) Report {
-	ts := make(map[string]bool, len(tsEndpoints)+len(tsRouterDirectPOSTPaths))
+func compare(tsEndpoints []string, direct []tsDirectRoute, mk *DumpedRoutes) Report {
+	ts := make(map[string]bool, len(tsEndpoints)+len(direct))
 	for _, p := range tsEndpoints {
 		ts[p] = true
 	}
-	// filename-derived な TS endpoint 集合に、ApiServerService.ts が
-	// router 直登録している POST 用 path を補う。これらは TS endpoints/
-	// 配下に無いので walk では拾えない。
-	for _, p := range tsRouterDirectPOSTPaths {
-		ts[p] = true
+	// filename-derived な TS endpoint 集合に、ApiServerService.ts が router
+	// 直登録している POST path を補う。これらは endpoints/ 配下に無いので
+	// walk では拾えない。非 POST の直登録は method 単位で別途突き合わせる。
+	var tsDirectNonPOST []tsDirectRoute
+	for _, d := range direct {
+		if d.Method == "POST" {
+			ts[d.Path] = true
+			continue
+		}
+		tsDirectNonPOST = append(tsDirectNonPOST, d)
 	}
 
 	mkPOSTpaths := make(map[string]bool)
+	mkMethodPaths := make(map[string]bool)
 	type pendingRoute struct{ method, path string }
 	var pending []pendingRoute
 	for _, r := range mk.Routes {
@@ -180,17 +229,27 @@ func compare(tsEndpoints []string, mk *DumpedRoutes) Report {
 		if r.Method == "POST" {
 			mkPOSTpaths[p] = true
 		}
+		mkMethodPaths[r.Method+" "+p] = true
 		pending = append(pending, pendingRoute{method: r.Method, path: p})
 	}
 
 	var both []string
-	var tsOnly []string
+	var tsOnly []TSOnlyRoute
 	for p := range ts {
 		if mkPOSTpaths[p] {
 			both = append(both, p)
 		} else {
-			tsOnly = append(tsOnly, p)
+			tsOnly = append(tsOnly, TSOnlyRoute{Method: "POST", Path: p})
 		}
+	}
+	// 非 POST の直登録 (現状 `GET /api/v1/instance/peers`) は method 込みで
+	// 突き合わせる。mk-go 側に同 method の route が無ければ未実装。
+	for _, d := range tsDirectNonPOST {
+		if mkMethodPaths[d.Method+" "+d.Path] {
+			both = append(both, d.Path)
+			continue
+		}
+		tsOnly = append(tsOnly, TSOnlyRoute{Method: d.Method, Path: d.Path})
 	}
 
 	// classify pending mk-go routes into "both" vs "mk-go only" 後に
@@ -209,7 +268,12 @@ func compare(tsEndpoints []string, mk *DumpedRoutes) Report {
 	}
 
 	sort.Strings(both)
-	sort.Strings(tsOnly)
+	sort.Slice(tsOnly, func(i, j int) bool {
+		if tsOnly[i].Path != tsOnly[j].Path {
+			return tsOnly[i].Path < tsOnly[j].Path
+		}
+		return tsOnly[i].Method < tsOnly[j].Method
+	})
 	sort.Slice(mkOnly, func(i, j int) bool {
 		if mkOnly[i].Path != mkOnly[j].Path {
 			return mkOnly[i].Path < mkOnly[j].Path
@@ -292,8 +356,8 @@ func renderMarkdown(r Report, tsVersion, mkVersion string) string {
 		b.WriteString("(なし)\n\n")
 	} else {
 		b.WriteString("| Method | Path |\n|--------|------|\n")
-		for _, p := range r.TSOnly {
-			fmt.Fprintf(&b, "| POST | `%s` |\n", p)
+		for _, e := range r.TSOnly {
+			fmt.Fprintf(&b, "| %s | `%s` |\n", e.Method, e.Path)
 		}
 		b.WriteString("\n")
 	}

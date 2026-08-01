@@ -83,7 +83,16 @@ func TestCompare(t *testing.T) {
 		},
 	}
 
-	got := compare(ts, mk)
+	direct := []tsDirectRoute{
+		{Method: "POST", Path: "/api/signup"},
+		{Method: "POST", Path: "/api/signup-pending"},
+		{Method: "POST", Path: "/api/signin-flow"},
+		{Method: "POST", Path: "/api/signin-with-passkey"},
+		// 非 POST の直登録。mk-go 側に GET 登録が無いので TSOnly に出る。
+		{Method: "GET", Path: "/api/v1/instance/peers"},
+	}
+
+	got := compare(ts, direct, mk)
 
 	wantBoth := []string{
 		"/api/meta",
@@ -94,12 +103,14 @@ func TestCompare(t *testing.T) {
 	if !reflect.DeepEqual(got.Both, wantBoth) {
 		t.Errorf("Both mismatch\n got %v\nwant %v", got.Both, wantBoth)
 	}
-	wantTSOnly := []string{
+	wantTSOnly := []TSOnlyRoute{
 		// router-direct ts paths が mk-go に未登録だった場合に TSOnly に
 		// 出ることを担保する。
-		"/api/signin-with-passkey",
-		"/api/signup-pending",
-		"/api/users/show",
+		{Method: "POST", Path: "/api/signin-with-passkey"},
+		{Method: "POST", Path: "/api/signup-pending"},
+		{Method: "POST", Path: "/api/users/show"},
+		// 非 POST 直登録は method 込みで未実装判定される。
+		{Method: "GET", Path: "/api/v1/instance/peers"},
 	}
 	if !reflect.DeepEqual(got.TSOnly, wantTSOnly) {
 		t.Errorf("TSOnly mismatch\n got %v\nwant %v", got.TSOnly, wantTSOnly)
@@ -118,7 +129,7 @@ func TestCompare(t *testing.T) {
 func TestRenderMarkdownHeader(t *testing.T) {
 	r := Report{
 		Both:   []string{"/api/meta"},
-		TSOnly: []string{"/api/foo"},
+		TSOnly: []TSOnlyRoute{{Method: "POST", Path: "/api/foo"}},
 		MkOnly: []MkOnlyRoute{
 			{Method: "POST", Path: "/api/test/reset-db", Category: CatOther},
 			{Method: "GET", Path: "/api/charts/users", Category: CatGETVariant},
@@ -198,5 +209,67 @@ func mustWrite(t *testing.T, path, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile %s: %v", path, err)
+	}
+}
+
+// collectTSDirectRoutes は ApiServerService.ts の fastify 直登録 route を
+// method 込みで抽出する。1 行形式と複数行 generic 形式の両方、および
+// catch-all `/*` の除外を固定する。
+func TestCollectTSDirectRoutes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ApiServerService.ts")
+	src := `
+		fastify.post<{
+			Body: { username: string; };
+		}>('/signup', (request, reply) => this.signupApiService.signup(request, reply));
+
+		fastify.post<{ Body: { code: string; } }>('/signup-pending', (request, reply) => x);
+
+		fastify.get('/v1/instance/peers', async (request, reply) => {
+			return [];
+		});
+
+		fastify.post<{ Params: { session: string; } }>('/miauth/:session/check', async (request, reply) => {
+			return {};
+		});
+
+		fastify.get('/*', (request, reply) => {
+			reply.code(404);
+		});
+	`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	got, err := collectTSDirectRoutes(path)
+	if err != nil {
+		t.Fatalf("collectTSDirectRoutes: %v", err)
+	}
+	want := []tsDirectRoute{
+		{Method: "POST", Path: "/api/miauth/:session/check"},
+		{Method: "POST", Path: "/api/signup"},
+		{Method: "POST", Path: "/api/signup-pending"},
+		{Method: "GET", Path: "/api/v1/instance/peers"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("direct routes mismatch\n got %v\nwant %v", got, want)
+	}
+}
+
+// 書式が変わって 1 件も取れなくなったら、静かに空集合を返さずエラーにする
+// (直登録 endpoint が丸ごと "mk-go only" に誤分類されるのを防ぐ)。
+func TestCollectTSDirectRoutes_EmptyIsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ApiServerService.ts")
+	if err := os.WriteFile(path, []byte("// no routes here\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if _, err := collectTSDirectRoutes(path); err == nil {
+		t.Fatal("expected error when no direct routes are found")
+	}
+}
+
+func TestCollectTSDirectRoutes_MissingFile(t *testing.T) {
+	if _, err := collectTSDirectRoutes(filepath.Join(t.TempDir(), "nope.ts")); err == nil {
+		t.Fatal("expected error for missing file")
 	}
 }
