@@ -1219,6 +1219,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"urlPreviewUserAgent":            m.URLPreviewUserAgent,
 		"urlPreviewSummaryProxyUrl":      m.URLPreviewSummaryProxyURL,
 		"urlPreviewAllowRedirect":        m.URLPreviewAllowRedirect,
+		"urlPreviewSensitiveList":        m.URLPreviewSensitiveList,
 		// upstream: summalyProxy は urlPreviewSummaryProxyUrl の別名で同値を返す
 		"summalyProxy": m.URLPreviewSummaryProxyURL,
 		// Timeline cache
@@ -1484,6 +1485,7 @@ var metaArrayColumns = map[string]struct{}{
 	"federationHosts":              {},
 	"bannedEmailDomains":           {},
 	"preservedUsernames":           {},
+	"urlPreviewSensitiveList":      {},
 }
 
 // coerceMetaArrayFields normalises array-shaped values bound from JSON
@@ -1589,7 +1591,7 @@ func coerceMetaJSONBFields(fields map[string]any) {
 // 変換するので、後続の coerceMetaArrayFields は pass-through となる。
 func normalizeUpdateMetaFields(fields map[string]any) {
 	// filter(Boolean): 空文字列要素を除去する array columns。
-	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser"} {
+	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser", "urlPreviewSensitiveList"} {
 		if arr, ok := metaStringSlice(fields[key]); ok {
 			fields[key] = pq.StringArray(filterNonEmptyHosts(arr, false))
 		}

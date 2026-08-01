@@ -147,6 +147,9 @@ type Meta struct {
 	URLPreviewRequireContentLength bool    `gorm:"column:urlPreviewRequireContentLength;default:false" json:"urlPreviewRequireContentLength"`
 	URLPreviewSummaryProxyURL      *string `gorm:"column:urlPreviewSummaryProxyUrl;type:varchar(1024)" json:"urlPreviewSummaryProxyUrl"`
 	URLPreviewUserAgent            *string `gorm:"column:urlPreviewUserAgent;type:varchar(1024)" json:"urlPreviewUserAgent"`
+	// URLPreviewSensitiveList は URL が keyword 一致したプレビューを
+	// sensitive 扱いにするリスト (upstream 2026.7.0 #17635)。
+	URLPreviewSensitiveList pq.StringArray `gorm:"column:urlPreviewSensitiveList;type:varchar(3072)[];default:'{}'" json:"urlPreviewSensitiveList"`
 
 	// Cache tuning (4)
 	PerLocalUserUserTimelineCacheMax  int `gorm:"column:perLocalUserUserTimelineCacheMax;default:300" json:"perLocalUserUserTimelineCacheMax"`

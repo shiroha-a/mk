@@ -216,3 +216,58 @@ func TestFetcher_FetchViaProxy_BadJSON(t *testing.T) {
 	_, err := f.Fetch(context.Background(), "https://example.com/page")
 	assert.ErrorIs(t, err, ErrFetchFailed)
 }
+
+// ── 2026.7.0 #17635 urlPreviewSensitiveList / scheme 検証 ─────────────
+
+func TestFetcher_SensitiveListMatchForcesSensitive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	f.SetSensitiveListProvider(func() []string { return []string{"127.0.0.1"} })
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	assert.True(t, result.Sensitive, "URL が keyword 一致したら sensitive=true に上書き")
+}
+
+func TestFetcher_SensitiveListNoMatchKeepsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(Config{Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20})
+	f.SetSensitiveListProvider(func() []string { return []string{"no-such-keyword"} })
+	result, err := f.Fetch(context.Background(), srv.URL)
+	require.NoError(t, err)
+	assert.False(t, result.Sensitive)
+}
+
+func TestValidateResultSchemes(t *testing.T) {
+	httpsURL := "https://example.com"
+	jsURL := "javascript:alert(1)"
+	tests := []struct {
+		name    string
+		result  *Result
+		wantErr bool
+	}{
+		{"http url ok", &Result{URL: "http://example.com"}, false},
+		{"https url + player ok", &Result{URL: "https://example.com", Player: PlayerResult{URL: &httpsURL}}, false},
+		{"non-http url rejected", &Result{URL: "javascript:alert(1)"}, true},
+		{"non-http player rejected", &Result{URL: "https://example.com", Player: PlayerResult{URL: &jsURL}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResultSchemes(tt.result)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, ErrFetchFailed)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

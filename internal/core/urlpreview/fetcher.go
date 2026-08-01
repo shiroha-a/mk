@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/safehttp"
 	"golang.org/x/net/html/charset"
 )
@@ -51,6 +52,18 @@ type Fetcher struct {
 	keyPrefix   string // TS drop-in互換用 `<host>:` prefix
 	client      *http.Client
 	proxyClient *http.Client
+
+	// sensitiveList は meta.urlPreviewSensitiveList を返す provider
+	// (upstream 2026.7.0 #17635)。admin が随時変更するため、起動時
+	// snapshot の Config ではなく都度評価する (metaRepo は cached なので
+	// per-request コストは無視できる)。nil なら keyword 上書きを skip。
+	sensitiveList func() []string
+}
+
+// SetSensitiveListProvider wires the live meta.urlPreviewSensitiveList
+// source used to force Sensitive=true on keyword-matching preview URLs.
+func (f *Fetcher) SetSensitiveListProvider(p func() []string) {
+	f.sensitiveList = p
 }
 
 // SetHTTPClient replaces the HTTP client (for tests that need to bypass
@@ -108,7 +121,12 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 	// 外部summarizer proxyが設定されていればそちらに委譲する。
 	if f.cfg.SummaryProxyURL != "" {
-		return f.fetchViaProxy(ctx, rawURL)
+		result, err := f.fetchViaProxy(ctx, rawURL)
+		if err != nil {
+			return nil, err
+		}
+		f.applySensitiveList(result)
+		return result, nil
 	}
 
 	// Redisキャッシュ確認
@@ -117,6 +135,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 		if cached, err := f.redis.Get(ctx, cacheKey).Bytes(); err == nil {
 			var result Result
 			if json.Unmarshal(cached, &result) == nil {
+				// sensitive 上書きは cache 読み出し後に評価する (upstream 同様、
+				// リスト変更が cache 済み entry にも即時反映される)。
+				f.applySensitiveList(&result)
 				return &result, nil
 			}
 		}
@@ -127,14 +148,46 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 		return nil, err
 	}
 
-	// Redisキャッシュ保存
+	// upstream 2026.7.0: summaly 結果の url / player.url が http(s) 以外なら
+	// 不正としてキャッシュせず失敗させる (javascript: 等の scheme 混入防止)。
+	if err := validateResultSchemes(result); err != nil {
+		return nil, err
+	}
+
+	// Redisキャッシュ保存 (keyword 由来の sensitive 上書き前の生値を保存し、
+	// リスト変更が過去 entry へ遡って効くようにする)。
 	if f.redis != nil {
 		if data, err := json.Marshal(result); err == nil {
 			f.redis.Set(ctx, cacheKey, data, cacheTTL)
 		}
 	}
 
+	f.applySensitiveList(result)
 	return result, nil
+}
+
+// applySensitiveList forces Sensitive=true when the preview URL matches
+// meta.urlPreviewSensitiveList keywords (upstream UrlPreviewService)。
+func (f *Fetcher) applySensitiveList(result *Result) {
+	if result == nil || result.Sensitive || f.sensitiveList == nil {
+		return
+	}
+	if keyword.IsKeyWordIncluded(result.URL, f.sensitiveList()) {
+		result.Sensitive = true
+	}
+}
+
+// validateResultSchemes rejects previews whose resolved url / player.url is
+// not http(s) (upstream 2026.7.0 は cache 前に unsupported schema を弾く)。
+func validateResultSchemes(result *Result) error {
+	if !strings.HasPrefix(result.URL, "http://") && !strings.HasPrefix(result.URL, "https://") {
+		return fmt.Errorf("%w: unsupported schema in result url", ErrFetchFailed)
+	}
+	if result.Player.URL != nil && *result.Player.URL != "" &&
+		!strings.HasPrefix(*result.Player.URL, "http://") && !strings.HasPrefix(*result.Player.URL, "https://") {
+		return fmt.Errorf("%w: unsupported schema in player url", ErrFetchFailed)
+	}
+	return nil
 }
 
 func (f *Fetcher) fetchAndParse(ctx context.Context, rawURL string) (*Result, error) {

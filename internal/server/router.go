@@ -1034,6 +1034,15 @@ func (s *Server) setupRoutes() {
 			previewCfg.SummaryProxyURL = *previewMeta.URLPreviewSummaryProxyURL
 		}
 		urlPreviewFetcher := coreurlpreview.NewFetcher(previewCfg, s.redis.Default, s.config.Redis.KeyPrefix(), s.config.AllowedPrivateNetworks, s.outboundOpts()...)
+		// urlPreviewSensitiveList は admin が随時変更するため live provider で
+		// 渡す (metaRepo は cached、update-meta で invalidate される)。
+		urlPreviewFetcher.SetSensitiveListProvider(func() []string {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return nil
+			}
+			return m.URLPreviewSensitiveList
+		})
 		urlHandler := apiurl.NewHandler(urlPreviewFetcher)
 		s.echo.GET("/url", urlHandler.Preview)
 	}
