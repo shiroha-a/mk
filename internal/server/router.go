@@ -467,6 +467,38 @@ func (s *Server) setupRoutes() {
 			})
 		}
 		driveService.SetSensitiveDetection(nsfwDetector, sensCfg)
+
+		// 公式 sensitive-detector (upstream 2026.7.0 #17570)。接続設定は meta
+		// 駆動 (コントロールパネルから変更可) なので live provider で渡す。
+		// timeout は per-request に meta 値を context で適用するため、client
+		// 自体の Timeout は掛けない (0 = transport 側 SSRF guard のみ)。
+		driveService.SetOfficialSensitiveDetector(coredrive.NewOfficialDetector(s.outboundClient(0)))
+		driveService.SetSensitiveSettingsProvider(func() coredrive.SensitiveSettings {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return coredrive.SensitiveSettings{Config: sensCfg}
+			}
+			settings := coredrive.SensitiveSettings{
+				Config: coredrive.SensitiveConfig{
+					Detection:            m.SensitiveMediaDetection,
+					Sensitivity:          m.SensitiveMediaDetectionSensitivity,
+					SetFlagAutomatically: m.SetSensitiveFlagAutomatically,
+					EnableForVideos:      m.EnableSensitiveMediaDetectionForVideos,
+					SilencedHosts:        m.MediaSilencedHosts,
+				},
+				Official: coredrive.OfficialDetectorSettings{
+					TimeoutMs:           m.SensitiveMediaDetectionTimeout,
+					MaxImagesPerRequest: m.SensitiveMediaDetectionMaxImagesPerRequest,
+				},
+			}
+			if m.SensitiveMediaDetectionAPIURL != nil {
+				settings.Official.APIURL = *m.SensitiveMediaDetectionAPIURL
+			}
+			if m.SensitiveMediaDetectionAPIKey != nil {
+				settings.Official.APIKey = *m.SensitiveMediaDetectionAPIKey
+			}
+			return settings
+		})
 	}
 
 	// Export / Import workers (Phase 9.4): drive に保存するエクスポートと

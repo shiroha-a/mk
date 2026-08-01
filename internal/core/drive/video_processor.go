@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,4 +84,72 @@ func (p *FFmpegVideoProcessor) GenerateThumbnail(body []byte, mimeType string) (
 	}
 
 	return nil, nil
+}
+
+// ExtractDetectionFrames extracts normalized 299x299 PNG frames for the
+// official sensitive-detector (upstream FileInfoService detectSensitivity の
+// FFmpeg パイプライン移植)。I-frame のみを選び、暗部 50% 以上のフレームを
+// 除外し、scale=299:299 で正規化した連番 PNG を出力してから、upstream と
+// 同じ index 間引きループでフレームを選ぶ。失敗時は nil (fail-open)。
+func (p *FFmpegVideoProcessor) ExtractDetectionFrames(body []byte) ([][]byte, error) {
+	tmpDir, err := osMkdirTemp("", "misskey-sensitive-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	inputPath := filepath.Join(tmpDir, "input")
+	if err := osWriteFile(inputPath, body, 0o600); err != nil {
+		return nil, err
+	}
+
+	// upstream の filter 列 (skip_frame nokey / lowres 3 / I-frame select /
+	// blackframe<50% / scale 299x299 / vsync 0) をそのまま使う。
+	_, err = p.runner.Run("ffmpeg",
+		"-skip_frame", "nokey",
+		"-lowres", "3",
+		"-i", inputPath,
+		"-an",
+		"-vf", "select=eq(pict_type\\,PICT_TYPE_I),blackframe=amount=0,metadata=select:key=lavfi.blackframe.pblack:value=50:function=less,scale=299:299",
+		"-vsync", "0",
+		"-f", "image2",
+		filepath.Join(tmpDir, "%d.png"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// ffmpeg image2 の %d は 1 始まりの連番。数値順で列挙する (Glob は辞書順
+	// なので 10.png が 2.png より先に来てしまう)。
+	var paths []string
+	for i := 1; ; i++ {
+		path := filepath.Join(tmpDir, fmt.Sprintf("%d.png", i))
+		if _, err := os.Stat(path); err != nil {
+			break
+		}
+		paths = append(paths, path)
+	}
+
+	// upstream FileInfoService の index 間引きループを忠実に移植する。
+	// (コメント上は fibonacci だが、実際の挙動は先頭側の少数フレームに
+	// 収束する。判定対象フレーム集合を TS と一致させるため同じ式を使う。)
+	var frames [][]byte
+	frameIndex := 0
+	targetIndex := 0
+	nextIndex := 1
+	for _, path := range paths {
+		index := frameIndex
+		frameIndex++
+		if index != targetIndex {
+			continue
+		}
+		targetIndex = nextIndex
+		nextIndex += index
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		frames = append(frames, data)
+	}
+	return frames, nil
 }

@@ -2688,6 +2688,20 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			setNullableStr(&m.Meta.URLPreviewUserAgent, v)
 		case "urlPreviewSummaryProxyUrl":
 			setNullableStr(&m.Meta.URLPreviewSummaryProxyURL, v)
+		case "urlPreviewSensitiveList":
+			setStrArr(&m.Meta.URLPreviewSensitiveList, k, v)
+		case "sensitiveMediaDetectionApiUrl":
+			setNullableStr(&m.Meta.SensitiveMediaDetectionAPIURL, v)
+		case "sensitiveMediaDetectionApiKey":
+			setNullableStr(&m.Meta.SensitiveMediaDetectionAPIKey, v)
+		case "sensitiveMediaDetectionTimeout":
+			if f, ok := v.(float64); ok {
+				m.Meta.SensitiveMediaDetectionTimeout = int(f)
+			}
+		case "sensitiveMediaDetectionMaxImagesPerRequest":
+			if f, ok := v.(float64); ok {
+				m.Meta.SensitiveMediaDetectionMaxImagesPerRequest = int(f)
+			}
 		case "federationHosts":
 			setStrArr(&m.Meta.FederationHosts, k, v)
 		case "blockedHosts":

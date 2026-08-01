@@ -138,6 +138,11 @@ type Meta struct {
 	SetSensitiveFlagAutomatically          bool           `gorm:"column:setSensitiveFlagAutomatically;default:false" json:"setSensitiveFlagAutomatically"`
 	EnableSensitiveMediaDetectionForVideos bool           `gorm:"column:enableSensitiveMediaDetectionForVideos;default:false" json:"enableSensitiveMediaDetectionForVideos"`
 	MediaSilencedHosts                     pq.StringArray `gorm:"column:mediaSilencedHosts;type:varchar(1024)[];default:'{}'" json:"mediaSilencedHosts"`
+	// 公式 sensitive-detector サービスへの接続設定 (upstream 2026.7.0 #17570)。
+	SensitiveMediaDetectionAPIURL              *string `gorm:"column:sensitiveMediaDetectionApiUrl;type:varchar(1024)" json:"sensitiveMediaDetectionApiUrl"`
+	SensitiveMediaDetectionAPIKey              *string `gorm:"column:sensitiveMediaDetectionApiKey;type:varchar(1024)" json:"sensitiveMediaDetectionApiKey"`
+	SensitiveMediaDetectionTimeout             int     `gorm:"column:sensitiveMediaDetectionTimeout;default:60000" json:"sensitiveMediaDetectionTimeout"`
+	SensitiveMediaDetectionMaxImagesPerRequest int     `gorm:"column:sensitiveMediaDetectionMaxImagesPerRequest;default:4" json:"sensitiveMediaDetectionMaxImagesPerRequest"`
 
 	// URL preview (7)
 	URLPreviewEnabled              bool    `gorm:"column:urlPreviewEnabled;default:true" json:"urlPreviewEnabled"`

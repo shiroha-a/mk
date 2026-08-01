@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1175,8 +1177,13 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"sensitiveMediaDetectionSensitivity":     m.SensitiveMediaDetectionSensitivity,
 		"setSensitiveFlagAutomatically":          m.SetSensitiveFlagAutomatically,
 		"enableSensitiveMediaDetectionForVideos": m.EnableSensitiveMediaDetectionForVideos,
-		"enableIpLogging":                        m.EnableIPLogging,
-		"enableActiveEmailValidation":            m.EnableActiveEmailValidation,
+		// 公式 sensitive-detector 接続設定 (upstream 2026.7.0 #17570)。
+		"sensitiveMediaDetectionApiUrl":              m.SensitiveMediaDetectionAPIURL,
+		"sensitiveMediaDetectionApiKey":              m.SensitiveMediaDetectionAPIKey,
+		"sensitiveMediaDetectionTimeout":             m.SensitiveMediaDetectionTimeout,
+		"sensitiveMediaDetectionMaxImagesPerRequest": m.SensitiveMediaDetectionMaxImagesPerRequest,
+		"enableIpLogging":                            m.EnableIPLogging,
+		"enableActiveEmailValidation":                m.EnableActiveEmailValidation,
 		// Feature flags
 		"enableChartsForRemoteUser":         m.EnableChartsForRemoteUser,
 		"enableChartsForFederatedInstances": m.EnableChartsForFederatedInstances,
@@ -1260,6 +1267,9 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// drastic な network 遮断や匿名 view 不可化を引き起こすので、こちらは
 	// silent corruption 防止としても重要。
 	if err := validateUpdateMetaEnums(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if err := validateUpdateMetaNumericMinimums(fields); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
@@ -1440,6 +1450,34 @@ var updateMetaEnumAllowed = map[string]map[string]struct{}{
 // enum-constrained key whose value isn't in the allowed set. nil / non-string
 // values are reject (= upstream の json schema validator が string + enum で
 // 制約する semantics に合わせる)。
+// updateMetaNumericMinimums は update-meta で `minimum` 制約を持つ integer
+// カラム (upstream ajv paramDef の minimum 相当)。JSON decode 後の数値は
+// float64 で届く。
+var updateMetaNumericMinimums = map[string]float64{
+	// upstream 2026.7.0 sensitiveMediaDetection 外部サービス設定 (minimum: 1)。
+	"sensitiveMediaDetectionTimeout":             1,
+	"sensitiveMediaDetectionMaxImagesPerRequest": 1,
+}
+
+// validateUpdateMetaNumericMinimums rejects non-numeric or below-minimum
+// values for integer meta columns (ajv `type: integer, minimum: N` 相当)。
+func validateUpdateMetaNumericMinimums(fields map[string]any) error {
+	for key, minimum := range updateMetaNumericMinimums {
+		v, ok := fields[key]
+		if !ok || v == nil {
+			continue
+		}
+		n, ok := v.(float64)
+		if !ok || n != math.Trunc(n) {
+			return errors.New(key + " must be an integer")
+		}
+		if n < minimum {
+			return fmt.Errorf("%s must be >= %d", key, int(minimum))
+		}
+	}
+	return nil
+}
+
 func validateUpdateMetaEnums(fields map[string]any) error {
 	for key, allowed := range updateMetaEnumAllowed {
 		v, ok := fields[key]
