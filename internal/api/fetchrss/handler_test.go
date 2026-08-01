@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -199,9 +200,9 @@ func TestFetchRSS_MissingURL(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "INVALID_URL", errObj["code"])
-	// 空 URL と「URL は http(s) のみ」は別 ID で frontend が分岐できる
-	assert.Equal(t, "9c5ad7d3-6e15-4f3a-87b8-39ec2e91d5a3", errObj["id"])
+	// url パラメータ欠落は upstream の ajv schema validation (INVALID_PARAM)
+	// 相当として扱う (2026.7.0 hardening 追従)。
+	assert.Equal(t, "INVALID_PARAM", errObj["code"])
 }
 
 func TestFetchRSS_InvalidScheme(t *testing.T) {
@@ -214,7 +215,8 @@ func TestFetchRSS_InvalidScheme(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
 	assert.Equal(t, "INVALID_URL", errObj["code"])
-	assert.Equal(t, "f5b2bd41-7c0a-4d49-b8c8-3d3a4d9b8e21", errObj["id"])
+	// upstream 2026.7.0 の canonical id。
+	assert.Equal(t, "89b7ee05-ccfc-4bdd-9b13-61172fd1e06c", errObj["id"])
 }
 
 func TestFetchRSS_EmptyURLAfterTrim(t *testing.T) {
@@ -240,12 +242,14 @@ func TestFetchRSS_UpstreamErrorStatus(t *testing.T) {
 	h := newTestHandler(t, srv)
 	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL))
 	require.NoError(t, h.Fetch(c))
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "UPSTREAM_ERROR", errObj["code"])
+	assert.Equal(t, "FETCH_RSS_FAILED", errObj["code"])
+	assert.Equal(t, "8db5d3d8-31d7-452f-b0cc-ca3b8925de12", errObj["id"])
+	assert.Equal(t, "server", errObj["kind"])
 }
 
 func TestFetchRSS_UnparseableBody(t *testing.T) {
@@ -257,13 +261,13 @@ func TestFetchRSS_UnparseableBody(t *testing.T) {
 	h := newTestHandler(t, srv)
 	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL))
 	require.NoError(t, h.Fetch(c))
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
 func TestFetchRSS_OversizedBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Cap is 1 MiB; send 2 MiB. ReadAllLimit returns ErrMaxBytesExceeded so
-		// fetchFeed surfaces UPSTREAM_ERROR before we ever call gofeed.
+		// fetchFeed surfaces FETCH_RSS_FAILED before we ever call gofeed.
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", 2<<20))
 		w.Write(make([]byte, 2<<20))
 	}))
@@ -272,7 +276,7 @@ func TestFetchRSS_OversizedBody(t *testing.T) {
 	h := newTestHandler(t, srv)
 	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL))
 	require.NoError(t, h.Fetch(c))
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
 // TestFetchRSS_DialFails covers the case where the outbound transport itself
@@ -287,16 +291,16 @@ func TestFetchRSS_DialFails(t *testing.T) {
 	h := New(failingClient, testUserAgent)
 	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url=http://10.0.0.1/feed.xml")
 	require.NoError(t, h.Fetch(c))
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
-	assert.Equal(t, "UPSTREAM_ERROR", errObj["code"])
+	assert.Equal(t, "FETCH_RSS_FAILED", errObj["code"])
 	// resolved IP / SSRF 文言が err.Error() 経由で漏れないこと: 静的メッセージ
 	// に置き換わっており、敏感な substring を含まない。
 	msg, _ := errObj["message"].(string)
-	assert.Equal(t, "Failed to fetch feed.", msg)
+	assert.Equal(t, "Failed to fetch RSS.", msg)
 	assert.NotContains(t, msg, "ssrf")
 	assert.NotContains(t, msg, "10.0.0.1")
 }
@@ -529,7 +533,7 @@ func TestFetchRSS_Singleflight_CallerCancelDoesNotAbortPeers(t *testing.T) {
 }
 
 // TestFetchRSS_ErrorNotCached: upstream 5xx の場合は cache されず、次回呼び出し
-// で再度 upstream に到達する (短期障害から復旧した feed が古い 502 で塞がれない)。
+// で再度 upstream に到達する (短期障害から復旧した feed が古い error で塞がれない)。
 func TestFetchRSS_ErrorNotCached(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -543,7 +547,7 @@ func TestFetchRSS_ErrorNotCached(t *testing.T) {
 	for range 3 {
 		c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL))
 		require.NoError(t, h.Fetch(c))
-		require.Equal(t, http.StatusBadGateway, rec.Code)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	}
 	assert.EqualValues(t, 3, hits.Load(), "errors must not be cached")
 }
@@ -796,4 +800,140 @@ func TestFetchRSS_CacheControlGate(t *testing.T) {
 	c2.Set("misskeyRawTokenPresent", true)
 	require.NoError(t, h.Fetch(c2))
 	assert.Empty(t, rec2.Header().Get("Cache-Control"), "raw token GET には Cache-Control を付けない (#2054)")
+}
+
+// ── 2026.7.0 GHSA hardening (#2240 item 3) ──────────────────────────
+
+// TestFetchRSS_URLTooLong: 8192 字超の URL は INVALID_URL (400)。
+func TestFetchRSS_URLTooLong(t *testing.T) {
+	h := New(&http.Client{Timeout: FetchTimeout}, testUserAgent)
+	long := "http://example.com/" + strings.Repeat("a", MaxURLLength)
+	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(long))
+	require.NoError(t, h.Fetch(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "89b7ee05-ccfc-4bdd-9b13-61172fd1e06c")
+}
+
+// TestFetchRSS_UserinfoRejected: userinfo 付き URL は Basic 認証として外部へ
+// 転送されるため INVALID_URL で拒否 (upstream normalizeUrl と同じ)。
+func TestFetchRSS_UserinfoRejected(t *testing.T) {
+	h := New(&http.Client{Timeout: FetchTimeout}, testUserAgent)
+	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape("http://user:pass@example.com/feed"))
+	require.NoError(t, h.Fetch(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_URL")
+}
+
+// TestFetchRSS_FragmentNormalized: fragment 違いの URL は同一 cache entry を
+// 共有する (fragment で cache/singleflight を無限にすり抜ける穴の防止)。
+func TestFetchRSS_FragmentNormalized(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	for _, frag := range []string{"%23a", "%23b", "%23c"} {
+		c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/feed")+frag)
+		require.NoError(t, h.Fetch(c))
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+	assert.EqualValues(t, 1, hits.Load(), "fragment 違いは同一 cache entry に正規化される")
+}
+
+// TestFetchRSS_ConcurrencyLimit: distinct URL の同時 fetch が上限を超えたら
+// FETCH_RSS_UNAVAILABLE (503, kind server)。
+func TestFetchRSS_ConcurrencyLimit(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	h := newTestHandler(t, srv)
+	h.SetMaxConcurrentFetches(1)
+
+	started := make(chan struct{})
+	go func() {
+		c, _ := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/slow"))
+		close(started)
+		_ = h.Fetch(c)
+	}()
+	<-started
+	// 1 本目が inflight に登録されるのを待つ。
+	require.Eventually(t, func() bool {
+		h.inflightMu.Lock()
+		defer h.inflightMu.Unlock()
+		return len(h.inflight) == 1
+	}, time.Second, time.Millisecond)
+
+	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/other"))
+	require.NoError(t, h.Fetch(c))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	errObj := resp["error"].(map[string]any)
+	assert.Equal(t, "FETCH_RSS_UNAVAILABLE", errObj["code"])
+	assert.Equal(t, "91e6ff44-c63f-4725-9ad0-b7a40d7f7655", errObj["id"])
+	assert.Equal(t, "server", errObj["kind"])
+}
+
+// TestFetchRSS_ConcurrencyAllowsJoin: 同一 URL への合流は上限に数えない
+// (upstream の inFlightRequests 共有と同じ)。
+func TestFetchRSS_ConcurrencyAllowsJoin(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	h.SetMaxConcurrentFetches(1)
+
+	target := srv.URL + "/feed"
+	results := make(chan int, 2)
+	for range 2 {
+		go func() {
+			c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(target))
+			_ = h.Fetch(c)
+			results <- rec.Code
+		}()
+	}
+	// 両方が inflight に入った (= 2 本目が 503 されず合流した) のを確認して解放。
+	require.Eventually(t, func() bool {
+		h.inflightMu.Lock()
+		defer h.inflightMu.Unlock()
+		return h.inflight[target] == 2 || len(results) == 2
+	}, time.Second, time.Millisecond)
+	close(release)
+	for range 2 {
+		assert.Equal(t, http.StatusOK, <-results)
+	}
+}
+
+// TestFetchRSS_FinalURLProtocolRechecked: リダイレクト後の最終 URL が
+// http(s) 以外なら FETCH_RSS_FAILED (defense-in-depth、upstream 準拠)。
+func TestFetchRSS_FinalURLProtocolRechecked(t *testing.T) {
+	client := &http.Client{
+		Timeout: FetchTimeout,
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			// transport 層で最終 URL を非 http(s) に差し替えた状況を再現する。
+			req.URL.Scheme = "ftp"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(sampleRSS2)),
+				Request:    req,
+			}, nil
+		}),
+	}
+	h := New(client, testUserAgent)
+	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape("http://example.com/feed"))
+	require.NoError(t, h.Fetch(c))
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FETCH_RSS_FAILED")
 }

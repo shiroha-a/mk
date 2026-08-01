@@ -132,5 +132,7 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 
 	// ── Misc ───────────────────────────────────────────
 	"fetch-external-resources": {Duration: time.Hour, Max: 50},
-	"users/lists/push":         {Duration: time.Hour, Max: 30},
+	// upstream 2026.7.0 GHSA hardening: fetch-rss は 60s/300 回。
+	"fetch-rss":        {Duration: time.Minute, Max: 300},
+	"users/lists/push": {Duration: time.Hour, Max: 30},
 }
