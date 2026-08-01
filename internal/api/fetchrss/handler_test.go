@@ -937,3 +937,82 @@ func TestFetchRSS_FinalURLProtocolRechecked(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	assert.Contains(t, rec.Body.String(), "FETCH_RSS_FAILED")
 }
+
+// TestFetchRSS_SlotReleasedAfterFetch: 並行スロットは fetch 完了時点で解放
+// される (レスポンス書き込みまで保持すると、body を読まないクライアントが
+// socket buffer を埋めるだけで endpoint 全体を恒久 503 にできる)。
+func TestFetchRSS_SlotReleasedAfterFetch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	// 成功経路。
+	c, rec := newRequestCtx(http.MethodGet, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/ok"))
+	require.NoError(t, h.Fetch(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	h.inflightMu.Lock()
+	assert.Empty(t, h.inflight, "成功後にスロットが残らない")
+	h.inflightMu.Unlock()
+
+	// 失敗経路 (dial error)。
+	failing := &http.Client{Transport: roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		return nil, errors.New("boom")
+	})}
+	h2 := New(failing, testUserAgent)
+	c2, rec2 := newRequestCtx(http.MethodGet, "/api/fetch-rss?url=http://example.com/feed")
+	require.NoError(t, h2.Fetch(c2))
+	require.Equal(t, http.StatusUnprocessableEntity, rec2.Code)
+	h2.inflightMu.Lock()
+	assert.Empty(t, h2.inflight, "失敗後もスロットが残らない")
+	h2.inflightMu.Unlock()
+}
+
+// TestFetchRSS_HostNormalization: host の大文字小文字 / default port 違いは
+// 同一 cache entry に正規化される (WHATWG URL 相当)。
+func TestFetchRSS_HostNormalization(t *testing.T) {
+	u, err := normalizeFeedURL("http://ExAmPle.COM:80/Feed?a=B#frag")
+	require.True(t, err)
+	assert.Equal(t, "http://example.com/Feed?a=B", u, "host 小文字化 + default port 除去 + fragment 除去、path/query は保持")
+
+	u, ok := normalizeFeedURL("https://Example.com:8443/x")
+	require.True(t, ok)
+	assert.Equal(t, "https://example.com:8443/x", u, "非 default port は保持")
+
+	u, ok = normalizeFeedURL("http://[2001:DB8::1]:80/feed")
+	require.True(t, ok)
+	assert.Equal(t, "http://[2001:db8::1]/feed", u, "IPv6 リテラルの角括弧を保つ")
+}
+
+// TestFetchRSS_URLLengthBoundary: 8192 字ちょうどは通り、超過は弾く。
+func TestFetchRSS_URLLengthBoundary(t *testing.T) {
+	base := "http://example.com/"
+	exact := base + strings.Repeat("a", MaxURLLength-len(base))
+	require.Len(t, exact, MaxURLLength)
+	_, ok := normalizeFeedURL(exact)
+	assert.True(t, ok, "8192 字ちょうどは許可")
+
+	_, ok = normalizeFeedURL(exact + "a")
+	assert.False(t, ok, "8193 字は拒否")
+}
+
+// TestFetchRSS_PostPrefersBody: POST は upstream 同様 body を優先する。
+func TestFetchRSS_PostPrefersBody(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, sampleRSS2)
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newTestHandler(t, srv)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/fetch-rss?url="+url.QueryEscape(srv.URL+"/from-query"),
+		strings.NewReader(`{"url":"`+srv.URL+`/from-body"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Fetch(e.NewContext(req, rec)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/from-body", gotPath)
+}

@@ -199,6 +199,8 @@ func TestExtractDetectionFrames_SamplesUpstreamIndices(t *testing.T) {
 	assert.Equal(t, "frame-2", string(frames[1]))
 	// I-frame select + blackframe + 299x299 scale の filter が渡っている。
 	joined := strings.Join(runner.gotArgs, " ")
+	// ffmpeg 側を早期終了させ、長尺動画で temp を溢れさせない。
+	assert.Contains(t, joined, "-frames:v 2")
 	assert.Contains(t, joined, "PICT_TYPE_I")
 	assert.Contains(t, joined, "blackframe")
 	assert.Contains(t, joined, "scale=299:299")

@@ -132,19 +132,36 @@ func TestUnsetMfa_AdminSelfAllowed(t *testing.T) {
 	userRepo.Profiles["adm1"] = &model.UserProfile{UserID: "adm1", TwoFactorEnabled: true}
 	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
 	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
+	h.SetSecurityKeyRepo(newFakeSecurityKeyRepo())
 
 	rec := doPost(h.UnsetMfa, `{"userId":"adm1"}`, userRepo.Users["adm1"])
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.False(t, userRepo.Profiles["adm1"].TwoFactorEnabled)
 }
 
-// securityKeyRepo 未配線でも profile の 2FA 無効化は行う (fail-soft)。
+// securityKeyRepo 未配線は成功扱いにしない。パスキーを消さずに 204 を返すと
+// 「2FA 無効 + key 行残存」が残り、後の TOTP 再有効化で攻撃者のパスキーが
+// 復活する。
 func TestUnsetMfa_NoSecurityKeyRepo(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
 	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", TwoFactorEnabled: true}
 
 	rec := doPost(h.UnsetMfa, `{"userId":"u1"}`, adminUser)
-	require.Equal(t, http.StatusNoContent, rec.Code)
-	assert.False(t, userRepo.Profiles["u1"].TwoFactorEnabled)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.True(t, userRepo.Profiles["u1"].TwoFactorEnabled, "2FA は無効化されないまま")
+}
+
+// パスキー削除に失敗したら profile を触らず 500 (部分失敗で危険な状態を作らない)。
+func TestUnsetMfa_SecurityKeyDeleteFails(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", TwoFactorEnabled: true}
+	skRepo := newFakeSecurityKeyRepo()
+	skRepo.err = assertError{}
+	h.SetSecurityKeyRepo(skRepo)
+
+	rec := doPost(h.UnsetMfa, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.True(t, userRepo.Profiles["u1"].TwoFactorEnabled, "key 削除に失敗したら 2FA は維持")
 }

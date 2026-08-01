@@ -2076,3 +2076,36 @@ func TestProcess_UndoBlock_RemoteBlockeeSkipped(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(undoBody)) // remote blockee なので skip (nil)
 }
+
+// upstream 2026.7.0 #17747: AP 受信の reply も reply 先より広い可視性には
+// できない。upstream の ApNoteService は NoteCreateService.create 経由なので
+// 同じクランプが掛かる。これが無いと「ローカルの followers 限定 note へ
+// リモートが to:[Public] で返信」でローカル TL / 再配送に文脈が漏れる。
+func TestProcess_CreateReplyClampsVisibilityToTarget(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	localURI := "https://example.com/notes/followers-parent"
+	noteRepo.Notes["followers-parent"] = &model.Note{
+		ID: "followers-parent", UserID: "bob", URI: &localURI, Visibility: model.NoteVisibilityFollowers,
+	}
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/notes/reply-clamp",
+			"attributedTo": "https://remote.example/users/alice",
+			"inReplyTo": "https://example.com/notes/followers-parent",
+			"content": "remote public reply",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Eventually(t, func() bool {
+		n, err := noteRepo.FindByURI("https://remote.example/notes/reply-clamp")
+		return err == nil && n != nil
+	}, time.Second, 10*time.Millisecond)
+	created, err := noteRepo.FindByURI("https://remote.example/notes/reply-clamp")
+	require.NoError(t, err)
+	assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility,
+		"followers 限定 note への public reply は followers に降格される")
+}

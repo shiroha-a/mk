@@ -125,6 +125,12 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		// upstream は fetcher クロージャで直取得/プロキシ両経路を検証する。
+		// プロキシは operator-trusted だが応答内容までは信頼しない
+		// (javascript: 等の scheme 混入で frontend の href/iframe に流れる)。
+		if err := validateResultSchemes(result); err != nil {
+			return nil, err
+		}
 		f.applySensitiveList(result)
 		return result, nil
 	}
@@ -134,7 +140,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	if f.redis != nil {
 		if cached, err := f.redis.Get(ctx, cacheKey).Bytes(); err == nil {
 			var result Result
-			if json.Unmarshal(cached, &result) == nil {
+			// 旧バージョン期に検証前の値が入った可能性に備え、cache 読み出し
+			// にも scheme 検証を掛ける (不正 entry は miss 扱いで再取得)。
+			if json.Unmarshal(cached, &result) == nil && validateResultSchemes(&result) == nil {
 				// sensitive 上書きは cache 読み出し後に評価する (upstream 同様、
 				// リスト変更が cache 済み entry にも即時反映される)。
 				f.applySensitiveList(&result)

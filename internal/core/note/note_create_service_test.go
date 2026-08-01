@@ -760,6 +760,30 @@ func TestCreateService_ReplyAndChannelVisibilityAdjustment(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, model.NoteVisibilitySpecified, created.Visibility, "ユーザーが選んだより狭い可視性 (specified) は維持")
 	})
+	// reply と renote を同時指定した場合、両 clamp の合成結果が upstream と
+	// 一致すること (mk-go は reply→renote の順、upstream は逆順だが min() 相当
+	// なので同値になる。順序不変性をここで固定する)。
+	t.Run("reply+renote combined clamps to the narrowest (#17747)", func(t *testing.T) {
+		svc, noteRepo, followingRepo := newCreateServiceWithFollowing(t)
+		noteRepo.Notes["rf"] = &model.Note{ID: "rf", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
+		noteRepo.Notes["rh"] = &model.Note{ID: "rh", UserID: "other", Visibility: model.NoteVisibilityHome}
+		followingRepo.Followings["f1"] = &model.Following{FollowerID: "u1", FolloweeID: "other"}
+		text := "re"
+		// reply 先 = home / renote 先 = 自分の followers → followers に収束。
+		rid, qid := "rh", "rf"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, RenoteID: &qid, Visibility: model.NoteVisibilityPublic})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityFollowers, created.Visibility, "reply/renote の狭い方に収束")
+	})
+	t.Run("reply to home target clamps public to home (#17747)", func(t *testing.T) {
+		svc, noteRepo, _ := newCreateService(t)
+		noteRepo.Notes["h"] = &model.Note{ID: "h", UserID: "other", Visibility: model.NoteVisibilityHome}
+		text := "re"
+		rid := "h"
+		created, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, ReplyID: &rid, Visibility: model.NoteVisibilityHome})
+		require.NoError(t, err)
+		assert.Equal(t, model.NoteVisibilityHome, created.Visibility, "home 先への home reply は据え置き")
+	})
 	t.Run("reply to localOnly propagates localOnly", func(t *testing.T) {
 		svc, noteRepo, _ := newCreateService(t)
 		noteRepo.Notes["lo"] = &model.Note{ID: "lo", UserID: "other", Visibility: model.NoteVisibilityPublic, LocalOnly: true}

@@ -728,6 +728,17 @@ func TestUpdateMeta_SensitiveDetectorNumericMinimum(t *testing.T) {
 	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":1.5}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "non-integer must be rejected")
 
+	// JSON null は NOT NULL 列を壊すので 400 で弾く (upstream ajv 相当)。
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":null}`, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "null must be rejected")
+
+	// 空文字は null 化して「未設定」に戻す (upstream update-meta.ts)。
+	apiURL := "https://old.example"
+	metaRepo.Meta.SensitiveMediaDetectionAPIURL = &apiURL
+	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionApiUrl":""}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Nil(t, metaRepo.Meta.SensitiveMediaDetectionAPIURL, "空文字は null に正規化")
+
 	rec = doPost(h.UpdateMeta, `{"sensitiveMediaDetectionTimeout":30000,"sensitiveMediaDetectionMaxImagesPerRequest":8,"sensitiveMediaDetectionApiUrl":"https://detector.example.test"}`, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, 30000, metaRepo.Meta.SensitiveMediaDetectionTimeout)

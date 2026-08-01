@@ -127,3 +127,30 @@ func TestCanSeeNote_FollowersStrangerStillHidden(t *testing.T) {
 	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilityFollowers, Mentions: pq.StringArray{"someone-else"}}
 	assert.False(t, note.CanSeeNote(&model.User{ID: "stranger"}, n, repo))
 }
+
+// upstream 2026.7.0 #17747: reply は reply 先より広い可視性になれない。
+// ローカル投稿経路と AP 受信経路の双方から使う共有ヘルパー。
+func TestClampVisibilityForReply(t *testing.T) {
+	tests := []struct {
+		name       string
+		target     model.NoteVisibility
+		visibility model.NoteVisibility
+		want       model.NoteVisibility
+	}{
+		{"public target keeps public", model.NoteVisibilityPublic, model.NoteVisibilityPublic, model.NoteVisibilityPublic},
+		{"public target keeps home", model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityHome},
+		{"home target clamps public", model.NoteVisibilityHome, model.NoteVisibilityPublic, model.NoteVisibilityHome},
+		{"home target keeps followers", model.NoteVisibilityHome, model.NoteVisibilityFollowers, model.NoteVisibilityFollowers},
+		{"followers target clamps public", model.NoteVisibilityFollowers, model.NoteVisibilityPublic, model.NoteVisibilityFollowers},
+		{"followers target clamps home", model.NoteVisibilityFollowers, model.NoteVisibilityHome, model.NoteVisibilityFollowers},
+		{"followers target keeps specified", model.NoteVisibilityFollowers, model.NoteVisibilitySpecified, model.NoteVisibilitySpecified},
+		{"specified target clamps public", model.NoteVisibilitySpecified, model.NoteVisibilityPublic, model.NoteVisibilitySpecified},
+		{"specified target clamps followers", model.NoteVisibilitySpecified, model.NoteVisibilityFollowers, model.NoteVisibilitySpecified},
+		{"specified target keeps specified", model.NoteVisibilitySpecified, model.NoteVisibilitySpecified, model.NoteVisibilitySpecified},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, note.ClampVisibilityForReply(tt.target, tt.visibility))
+		})
+	}
+}

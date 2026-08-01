@@ -1274,6 +1274,12 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 				threadID = *replyTarget.ThreadID
 			}
 			note.ThreadID = &threadID
+			// reply 先より広い可視性にはできない (upstream 2026.7.0 #17747)。
+			// upstream の ApNoteService は NoteCreateService.create を経由する
+			// ため、リモート発の reply にも同じクランプが掛かる。これが無いと
+			// 「ローカルの followers 限定 note へリモートが to:[Public] で返信」
+			// でローカル TL / 再配送に本文文脈が漏れる。
+			note.Visibility = corenote.ClampVisibilityForReply(replyTarget.Visibility, note.Visibility)
 		}
 	}
 	// AP vote 判定: reply target が poll を持ち apNote.Name (choice 名) が

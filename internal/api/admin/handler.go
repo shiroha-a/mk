@@ -1464,8 +1464,13 @@ var updateMetaNumericMinimums = map[string]float64{
 func validateUpdateMetaNumericMinimums(fields map[string]any) error {
 	for key, minimum := range updateMetaNumericMinimums {
 		v, ok := fields[key]
-		if !ok || v == nil {
+		if !ok {
 			continue
+		}
+		// JSON null は upstream の ajv (nullable 無しの integer) が弾く。
+		// mk-go で素通しすると NOT NULL 列に NULL を書いて 500 になる。
+		if v == nil {
+			return errors.New(key + " must be an integer")
 		}
 		n, ok := v.(float64)
 		if !ok || n != math.Trunc(n) {
@@ -1690,6 +1695,14 @@ func normalizeUpdateMetaFields(fields map[string]any) {
 	} else if v, hasB := fields["summalyProxy"]; hasB {
 		fields["urlPreviewSummaryProxyUrl"] = trimToNil(v)
 		delete(fields, "summalyProxy")
+	}
+	// upstream 2026.7.0 update-meta.ts は sensitive-detector の URL / key を
+	// `ps.X === '' ? null : ps.X` で null 化する (コントロールパネルで欄を空に
+	// したら未設定に戻る)。
+	for _, key := range []string{"sensitiveMediaDetectionApiUrl", "sensitiveMediaDetectionApiKey"} {
+		if v, ok := fields[key]; ok {
+			fields[key] = trimToNil(v)
+		}
 	}
 }
 

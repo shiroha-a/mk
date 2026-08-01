@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -39,22 +41,26 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	}
 
 	// upstream は 1 トランザクションで key 削除 + profile 更新を行う。mk-go は
-	// repository 境界を保つため順次実行とし、profile の 2FA 無効化を先に行う
-	// (途中失敗しても「2FA は無効だが key 行が残る」安全側の状態に倒れる)。
+	// repository 境界を保つため順次実行だが、**パスキー削除を先に行う**。
+	// 逆順だと部分失敗時に「2FA 無効 + key 行残存」が残り、被害者が後で TOTP を
+	// 再有効化した瞬間に攻撃者のパスキーが復活する (インシデント対応 endpoint
+	// としては許容できない)。repo 未配線も同じ理由で成功扱いにせず 500。
+	if h.securityKeyRepo == nil {
+		slog.Error("admin/unset-mfa: security key repository is not wired")
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if err := h.securityKeyRepo.DeleteByUser(user.ID); err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	// upstream 同様 securityKeysAvailable は触らない (unset-mfa 後の値は TS と
 	// 一致させる)。
 	if err := h.userRepo.UpdateProfile(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
-		"twoFactorBackupSecret": nil,
+		"twoFactorBackupSecret": pq.StringArray(nil),
 		"twoFactorEnabled":      false,
 		"usePasswordLessLogin":  false,
 	}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-	}
-	if h.securityKeyRepo != nil {
-		if err := h.securityKeyRepo.DeleteByUser(user.ID); err != nil {
-			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-		}
 	}
 
 	h.logUserActionWithUser(c, moderationlog.LogUnsetMfa, user)

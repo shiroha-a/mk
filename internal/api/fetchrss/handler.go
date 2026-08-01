@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -173,8 +174,9 @@ func (h *Handler) Fetch(c echo.Context) error {
 	rawURL, provided := h.extractURL(c)
 	if !provided {
 		// upstream は url 欠落を ajv schema validation の INVALID_PARAM (400)
-		// で弾く。param が存在して不正な場合は下の normalize で INVALID_URL。
-		return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+		// で弾く (info に param/reason を含む)。param が存在して不正な場合は
+		// 下の normalize で INVALID_URL。
+		return c.JSON(http.StatusBadRequest, apierr.InvalidParamClient("url", "must have required property 'url'"))
 	}
 
 	key, ok := normalizeFeedURL(rawURL)
@@ -195,7 +197,6 @@ func (h *Handler) Fetch(c echo.Context) error {
 	if !h.inflightEnter(key) {
 		return c.JSON(http.StatusServiceUnavailable, apierr.ErrorWithKind("FETCH_RSS_UNAVAILABLE", "RSS fetching is temporarily unavailable.", "91e6ff44-c63f-4725-9ad0-b7a40d7f7655", apierr.KindServer))
 	}
-	defer h.inflightLeave(key)
 
 	// singleflight で同 URL への concurrent miss を 1 fetch に集約する。
 	// 後続 caller は同じ result を共有 (upstream に thundering herd を流さない)。
@@ -233,6 +234,12 @@ func (h *Handler) Fetch(c echo.Context) error {
 		h.cachePut(key, body)
 		return body, nil
 	})
+	// 並行スロットは fetch 完了時点で解放する (upstream は .finally() を fetch
+	// promise に付けており、serialize / レスポンス送信は上限の外)。defer で
+	// writeCachedJSON まで保持すると、body を読まないクライアントが socket
+	// buffer を埋めるだけで 32 スロットを無期限に占有でき、endpoint 全体が
+	// 恒久的に 503 になる。
+	h.inflightLeave(key)
 	if err != nil {
 		// SSRF block / dial fail / parse fail はすべて upstream 2026.7.0 と同じ
 		// FETCH_RSS_FAILED (422, kind server) に丸める。err.Error() を直接
@@ -244,28 +251,34 @@ func (h *Handler) Fetch(c echo.Context) error {
 	return writeCachedJSON(c, v.([]byte))
 }
 
-// extractURL pulls the url parameter from query string or JSON body and
-// reports whether it was provided at all (ajv の required 相当の判定に使う)。
+// extractURL pulls the url parameter and reports whether it was provided at
+// all (ajv の required 相当の判定に使う)。POST は upstream 同様 body を
+// 優先し、frontend の RSS widget が使う GET は query から取る。
 func (h *Handler) extractURL(c echo.Context) (string, bool) {
+	if c.Request().Method != http.MethodGet {
+		var body struct {
+			URL *string `json:"url"`
+		}
+		// Bind 失敗は「未指定」扱い (上位で INVALID_PARAM)。
+		_ = c.Bind(&body)
+		if body.URL != nil {
+			return strings.TrimSpace(*body.URL), true
+		}
+	}
 	if qp := c.QueryParams(); len(qp["url"]) > 0 {
 		return strings.TrimSpace(qp.Get("url")), true
-	}
-	var body struct {
-		URL *string `json:"url"`
-	}
-	// Bind 失敗は「未指定」扱い (上位で INVALID_PARAM)。
-	_ = c.Bind(&body)
-	if body.URL != nil {
-		return strings.TrimSpace(*body.URL), true
 	}
 	return "", false
 }
 
 // normalizeFeedURL validates and canonicalizes the feed URL following
 // upstream 2026.7.0 normalizeUrl: 空 / 8192 字超 / parse 不能 / 非 http(s) /
-// userinfo 付きを拒否し、fragment を除去した canonical 形を返す。fragment
-// 除去は cache / singleflight キーの無限バリエーション化 (`#1`, `#2`, ...)
-// を塞ぐ意味もある。
+// userinfo 付きを拒否し、fragment を除去した canonical 形を返す。
+//
+// 加えて WHATWG URL (upstream の `new URL()`) が行う正規化のうち、host の
+// 小文字化と default port の除去を再現する。これが無いと `example.com` /
+// `EXAMPLE.com` / `example.com:80` が別キーになり、DNS は case-insensitive
+// なので同一実体に対していくらでも cache / 並行スロットを食い潰せる。
 func normalizeFeedURL(raw string) (string, bool) {
 	if raw == "" || len(raw) > MaxURLLength {
 		return "", false
@@ -282,9 +295,26 @@ func normalizeFeedURL(raw string) (string, bool) {
 	if u.User != nil {
 		return "", false
 	}
+	// host は case-insensitive。hostname だけ小文字化し port は保持する。
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !isDefaultPort(u.Scheme, port) {
+		u.Host = net.JoinHostPort(host, port)
+	} else {
+		u.Host = host
+		// IPv6 リテラルは JoinHostPort を通さないと角括弧が落ちる。
+		if strings.Contains(host, ":") {
+			u.Host = "[" + host + "]"
+		}
+	}
 	u.Fragment = ""
 	u.RawFragment = ""
 	return u.String(), true
+}
+
+// isDefaultPort reports whether port is the scheme's default (WHATWG URL は
+// default port を href から落とす)。
+func isDefaultPort(scheme, port string) bool {
+	return (scheme == "http" && port == "80") || (scheme == "https" && port == "443")
 }
 
 // inflightEnter registers the request against the concurrency cap. Returns
