@@ -30,7 +30,11 @@ jobs:
   spec:
     name: spec (${{ matrix.backend }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 min では足りない。browser 不整合 (#2251 P0) を直すまでは page fixture
+    # を使う 192 spec が起動即失敗していたため job 全体が 8 min で終わって
+    # いたが、修正後は UI spec が実際に走るので所要時間が大幅に伸びる。
+    # 初回の手動 dispatch は 20 min の timeout で cancel された。
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
