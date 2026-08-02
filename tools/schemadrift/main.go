@@ -23,15 +23,23 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 )
 
 const (
-	upstreamModelsDir = "third_party/misskey/packages/backend/src/models"
-	goldenPath        = "internal/entitycompat/testdata/golden_upstream_columns.json"
+	upstreamModelsDir     = "third_party/misskey/packages/backend/src/models"
+	upstreamMigrationsDir = "third_party/misskey/packages/backend/migration"
+	goldenPath            = "internal/entitycompat/testdata/golden_upstream_columns.json"
+	migrationsGoldenPath  = "internal/entitycompat/testdata/golden_upstream_migrations.json"
 )
 
 var (
 	entityRe = regexp.MustCompile(`@Entity\('([^']+)'\)`)
+	// TypeORM の未実行判定に使われる migration 名。`name = '...'` プロパティが
+	// あればそれ、無ければ class 名 (MigrationExecutor の
+	// `migration.name ?? migration.constructor.name`)。
+	migrationNameRe  = regexp.MustCompile(`(?m)^\s*name\s*=\s*'([^']+)'`)
+	migrationClassRe = regexp.MustCompile(`export class (\w+)`)
 	// @Column / @PrimaryColumn / @PrimaryGeneratedColumn の後に来る最初の
 	// `public <name>` を列名とみなす。@Index 等が間に挟まることがあるので、
 	// relation decorator だけを境界にする (relation プロパティは列を作らない)。
@@ -60,6 +68,68 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("wrote %s (%d tables)\n", goldenPath, len(tables))
+
+	migrations, err := collectMigrationNames(upstreamMigrationsDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "schemadrift:", err)
+		os.Exit(1)
+	}
+	if len(migrations) == 0 {
+		fmt.Fprintf(os.Stderr, "schemadrift: no migrations found under %s (submodule missing?)\n", upstreamMigrationsDir)
+		os.Exit(1)
+	}
+	mblob, err := json.MarshalIndent(migrations, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "schemadrift:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(migrationsGoldenPath, append(mblob, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "schemadrift:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("wrote %s (%d migrations)\n", migrationsGoldenPath, len(migrations))
+}
+
+// collectMigrationNames returns the TypeORM migration names, sorted by the
+// 13-digit timestamp embedded in each name.
+//
+// 1690796169261-play-visibility.js のように class 名と name プロパティが
+// 食い違う例があるので、TypeORM と同じ優先順位で解決する。
+func collectMigrationNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".js" {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		name := ""
+		if m := migrationNameRe.FindSubmatch(src); m != nil {
+			name = string(m[1])
+		} else if m := migrationClassRe.FindSubmatch(src); m != nil {
+			name = string(m[1])
+		} else {
+			return nil, fmt.Errorf("%s: no migration name found", e.Name())
+		}
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return tsOf(names[i]) < tsOf(names[j]) })
+	return names, nil
+}
+
+// tsOf extracts the 13-digit timestamp TypeORM appends to every migration name.
+func tsOf(name string) int64 {
+	if len(name) < 13 {
+		return 0
+	}
+	n, _ := strconv.ParseInt(name[len(name)-13:], 10, 64)
+	return n
 }
 
 // collect maps upstream table name -> sorted column names.

@@ -157,12 +157,27 @@ git add third_party/misskey
 `TestEntityShapeDrift` に反映される。
 
 ```bash
-make shapecheck-gen   # internal/entitycompat/testdata/golden_schemas.json を再生成
-make shapecheck       # gate がまだ通るか確認 (新規 drift が出たら allowlist or 修正)
-git add internal/entitycompat/testdata/golden_schemas.json
+make shapecheck-gen           # internal/entitycompat/testdata/ の golden を全て再生成
+make shapecheck               # gate がまだ通るか確認 (新規 drift が出たら allowlist or 修正)
+go test ./internal/entitycompat/   # schema / migration seed gate も含めて確認
+git add internal/entitycompat/testdata/
 ```
 
 詳細は [shape-drift.md](./shape-drift.md)。
+
+### submodule bump 後に必須: TypeORM migrations seed の追加
+
+upstream に新しい migration が入った場合、`migrations` テーブルへの seed も追加する。
+これが漏れると、mk-go で動かした DB に本家を繋ぎ直したときに TypeORM が当該
+migration を未実行と判定して**再実行**し、適用済み DDL への `ADD COLUMN` 重複や
+`DROP COLUMN` によるデータ喪失につながりうる (#2244)。
+
+`TestMigrationSeed_CoversUpstream` が漏れを検出するので、落ちたら
+`migration/000067_migrations_typeorm_names.up.sql` と同じ形式で seed を足す。
+
+**seed する前に、その migration の DDL が mk-go 側にも入っているか必ず確認すること。**
+入っていないまま seed すると、本家が「適用済み」と誤認して skip し、schema が
+ずれたまま放置される。DDL が未実装なら先に mk-go 側の migration を書く。
 
 ---
 
