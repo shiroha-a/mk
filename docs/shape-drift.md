@@ -373,3 +373,30 @@ fresh な mk-go DB にだけ残るが誰も読み書きしない列は、テス�
 go test ./internal/entitycompat/ -run TestSchemaDrift   # gate をローカル実行
 make shapecheck-gen                                     # golden_upstream_columns.json も再生成
 ```
+
+## Migration seed gate（drop-in 復路）
+
+`TestMigrationSeed_CoversUpstream`は、TypeORMのbookkeepingテーブル`migrations`へのseedが、upstreamの全migrationを網羅していることを検証する。
+
+mk-goで動かしたDBに本家Misskeyを繋ぎ直したとき、TypeORMは
+
+```js
+allMigrations.filter(m => !executed.find(e => e.name === m.name))
+```
+
+で未実行migrationを選ぶ(`MigrationExecutor`)。比較キーは**`name`列の文字列一致**で、比較対象は`migration.name ?? migration.constructor.name`(= `DeleteCreatedAt1697420555911`形式)。seedに漏れがあるとそのmigrationが再実行され、適用済みDDLへの`ADD COLUMN`重複や`DROP COLUMN`によるデータ喪失につながりうる(#2244)。
+
+nameは原則class名だが、`name = '...'`プロパティがあればそちらが優先される。`1690796169261-play-visibility.js`はclass名(`PlayVisibility1689102832143`)とnameプロパティ(`PlayVisibility1690796169261`)が食い違う唯一の例で、実DBには後者が入る。
+
+`tools/schemadrift`がupstreamのmigrationファイルからname一覧をgolden(`golden_upstream_migrations.json`)に出力し、gateがmigration SQL中のTypeORM形式name literalと突合する。
+
+**seedを追加する前に、そのmigrationのDDLがmk-go側にも入っているか必ず確認すること。** 入っていないままseedすると、TS側が「適用済み」と誤認してskipし、schemaがずれたまま放置される。
+
+`make dropin-swap-test`のstage 8dにも、TS復帰後に`migrations`テーブルが変化していないことのassertを入れている(ただしこちらはTS製DBから始まるshapeなので general guard であって、本gateの代替にはならない)。
+
+### 運用
+
+```bash
+go test ./internal/entitycompat/ -run TestMigrationSeed   # gate をローカル実行
+make shapecheck-gen                                        # golden_upstream_migrations.json も再生成
+```

@@ -112,6 +112,28 @@ docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pyte
 echo "===> stage 7: stop mk-A backend (roundtrip 戻し前準備)"
 docker compose -f "$BASE" -f "$OVERLAY" stop app-a
 
+# TypeORM の bookkeeping テーブルを控える (#2244)。TS に戻したとき、seed した
+# migration が「未実行」と判定されて再実行されると、適用済み DDL への
+# ADD COLUMN 重複や DROP COLUMN によるデータ喪失が起きうる。再実行されれば
+# TypeORM が migrations 行を追加するので、行数と内容の hash で検知できる。
+#
+# 注: 本 shape は TS-A が作った DB から始まるので、TS 由来の正式名の行が
+# 最初から入っている。mk-go 由来 DB (= 000029 の seed だけがある状態) に TS を
+# 繋ぐ経路はここでは通らないため、この check は general guard であって
+# #2244 そのものの regression test ではない (あちらは
+# internal/entitycompat の TestMigrationSeed_CoversUpstream が担保する)。
+migrations_digest() {
+  local sql
+  sql=$(cat <<'SQL'
+SELECT count(*) || ':' || coalesce(md5(string_agg("name", ',' ORDER BY "name")), '-') FROM "migrations";
+SQL
+)
+  docker compose -f "$BASE" exec -T postgres-a \
+    psql -U misskey -d misskey -t -A -c "$sql" 2>/dev/null | tr -d '[:space:]'
+}
+MIGRATIONS_BEFORE=$(migrations_digest)
+echo "     migrations bookkeeping before roundtrip: $MIGRATIONS_BEFORE"
+
 echo "===> stage 8: bring up TS-A backend (overlay 解除で TS に戻す)"
 # overlay を指定せず base のみで up することで、app-a が TS-A の image に戻る。
 # --force-recreate で停止中の mk-A container を確実に破棄し、新規 TS-A
@@ -140,6 +162,21 @@ done
 
 echo "===> stage 8c: restart nginx-a so the upstream re-resolves to TS-A"
 docker compose -f "$BASE" restart nginx-a
+
+echo "===> stage 8d: assert TS did not re-run migrations (#2244)"
+MIGRATIONS_AFTER=$(migrations_digest)
+echo "     migrations bookkeeping after roundtrip:  $MIGRATIONS_AFTER"
+if [ -z "$MIGRATIONS_BEFORE" ] || [ -z "$MIGRATIONS_AFTER" ]; then
+  echo "FAIL: could not read the migrations bookkeeping table"
+  exit 1
+fi
+if [ "$MIGRATIONS_BEFORE" != "$MIGRATIONS_AFTER" ]; then
+  echo "FAIL: TS re-ran migrations after the roundtrip"
+  echo "  before: $MIGRATIONS_BEFORE"
+  echo "  after:  $MIGRATIONS_AFTER"
+  docker compose -f "$BASE" logs app-a | tail -50
+  exit 1
+fi
 
 echo "===> stage 9: verify federation continuity after TS roundtrip (#1082)"
 docker compose -f "$BASE" --profile test run --rm test-runner pytest test_swap_roundtrip_verify.py -v
