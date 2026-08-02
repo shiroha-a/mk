@@ -38,6 +38,20 @@ type CachedUserRepository struct {
 	mu       sync.RWMutex
 	users    map[string]userCacheEntry
 	profiles map[string]profileCacheEntry
+	// invalidatedAt は「その userID を最後に invalidate した時刻」。
+	// FindXxx は DB read を始めた時刻を控えておき、store 時に
+	// invalidatedAt がそれ以降なら書き込みを捨てる。これが無いと
+	//
+	//   R: cache miss → DB SELECT (更新前の行を読む)
+	//   W:                          UPDATE → invalidate()
+	//   R:                                              store(更新前の行)
+	//
+	// の順で **更新前の値が TTL 分 (5 分) キャッシュに居座る**。
+	// ブラウザを開いていると read は常時走るので実際に踏む (#2257)。
+	invalidatedAt map[string]time.Time
+	// uriInvalidatedAt は byURI 側の同等物。storeURIMissing は user 不在の
+	// negative cache なので userID で守れず、URI 単位で判定する必要がある。
+	uriInvalidatedAt map[string]time.Time
 	// byURI は AP 由来 URI → user のキャッシュ。inbox worker の hot path
 	// (federation.Resolver.ResolveActor) が毎リクエスト FindByURI を叩く
 	// ため、これを cache せずに DB に行くと PR #566 で軽量化した HTTP
@@ -98,12 +112,14 @@ func newCachedUserRepository(inner UserRepository, ttl time.Duration, maxEntries
 		maxEntries = userCacheMaxEntries
 	}
 	return &CachedUserRepository{
-		UserRepository: inner,
-		ttl:            ttl,
-		maxEntries:     maxEntries,
-		users:          make(map[string]userCacheEntry),
-		profiles:       make(map[string]profileCacheEntry),
-		byURI:          make(map[string]uriCacheEntry),
+		UserRepository:   inner,
+		ttl:              ttl,
+		maxEntries:       maxEntries,
+		users:            make(map[string]userCacheEntry),
+		profiles:         make(map[string]profileCacheEntry),
+		byURI:            make(map[string]uriCacheEntry),
+		invalidatedAt:    make(map[string]time.Time),
+		uriInvalidatedAt: make(map[string]time.Time),
 	}
 }
 
@@ -130,15 +146,57 @@ func (c *CachedUserRepository) invalidate(userID string) {
 	if userID == "" {
 		return
 	}
+	now := time.Now()
 	c.mu.Lock()
 	delete(c.users, userID)
 	delete(c.profiles, userID)
 	for uri, e := range c.byURI {
 		if !e.missing && e.user != nil && e.user.ID == userID {
 			delete(c.byURI, uri)
+			c.uriInvalidatedAt[uri] = now
 		}
 	}
+	c.markInvalidatedLocked(userID, now)
 	c.mu.Unlock()
+}
+
+// markInvalidatedLocked records the invalidation instant for userID and
+// prunes entries that can no longer affect any in-flight read (older than
+// the cache TTL). Caller must hold c.mu.
+func (c *CachedUserRepository) markInvalidatedLocked(userID string, now time.Time) {
+	if userID != "" {
+		c.invalidatedAt[userID] = now
+	}
+	if len(c.invalidatedAt) > c.maxEntries {
+		cutoff := now.Add(-c.ttl)
+		for k, t := range c.invalidatedAt {
+			if t.Before(cutoff) {
+				delete(c.invalidatedAt, k)
+			}
+		}
+	}
+	if len(c.uriInvalidatedAt) > c.maxEntries {
+		cutoff := now.Add(-c.ttl)
+		for k, t := range c.uriInvalidatedAt {
+			if t.Before(cutoff) {
+				delete(c.uriInvalidatedAt, k)
+			}
+		}
+	}
+}
+
+// staleLocked reports whether a read that started at readStart may no longer
+// be stored: true when userID was invalidated at or after readStart.
+// Caller must hold c.mu.
+func (c *CachedUserRepository) staleLocked(userID string, readStart time.Time) bool {
+	t, ok := c.invalidatedAt[userID]
+	return ok && !t.Before(readStart)
+}
+
+// uriStaleLocked is staleLocked for the byURI map. Caller must hold c.mu.
+func (c *CachedUserRepository) uriStaleLocked(uri string, readStart time.Time) bool {
+	t, ok := c.uriInvalidatedAt[uri]
+	return ok && !t.Before(readStart)
 }
 
 // Invalidate is the public counterpart of invalidate. Out-of-band code paths
@@ -164,18 +222,19 @@ func (c *CachedUserRepository) FindByID(id string) (*model.User, error) {
 	}
 	c.mu.RUnlock()
 
+	readStart := time.Now()
 	u, err := c.UserRepository.FindByID(id)
 	if err != nil {
 		// 「見つからない」は negative-cache する。timeline 描画で
 		// 削除済みユーザーへの参照が大量に来る可能性に備える。それ
 		// 以外の err は cache せず caller に返して上位で扱わせる。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.storeUserMissing(id)
+			c.storeUserMissing(id, readStart)
 			return nil, err
 		}
 		return nil, err
 	}
-	c.storeUser(id, u)
+	c.storeUser(id, u, readStart)
 	return u, nil
 }
 
@@ -195,43 +254,54 @@ func (c *CachedUserRepository) FindProfileByUserID(userID string) (*model.UserPr
 	}
 	c.mu.RUnlock()
 
+	readStart := time.Now()
 	p, err := c.UserRepository.FindProfileByUserID(userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.storeProfileMissing(userID)
+			c.storeProfileMissing(userID, readStart)
 			return nil, err
 		}
 		return nil, err
 	}
-	c.storeProfile(userID, p)
+	c.storeProfile(userID, p, readStart)
 	return p, nil
 }
 
-func (c *CachedUserRepository) storeUser(id string, u *model.User) {
+// storeUser caches u under id unless the entry was invalidated while the
+// DB read (started at readStart) was in flight. See invalidatedAt.
+func (c *CachedUserRepository) storeUser(id string, u *model.User, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredUsersLocked()
-	c.users[id] = userCacheEntry{user: u, expiresAt: time.Now().Add(c.ttl)}
+	if !c.staleLocked(id, readStart) {
+		c.evictExpiredUsersLocked()
+		c.users[id] = userCacheEntry{user: u, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
-func (c *CachedUserRepository) storeUserMissing(id string) {
+func (c *CachedUserRepository) storeUserMissing(id string, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredUsersLocked()
-	c.users[id] = userCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	if !c.staleLocked(id, readStart) {
+		c.evictExpiredUsersLocked()
+		c.users[id] = userCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
-func (c *CachedUserRepository) storeProfile(userID string, p *model.UserProfile) {
+func (c *CachedUserRepository) storeProfile(userID string, p *model.UserProfile, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredProfilesLocked()
-	c.profiles[userID] = profileCacheEntry{profile: p, expiresAt: time.Now().Add(c.ttl)}
+	if !c.staleLocked(userID, readStart) {
+		c.evictExpiredProfilesLocked()
+		c.profiles[userID] = profileCacheEntry{profile: p, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
-func (c *CachedUserRepository) storeProfileMissing(userID string) {
+func (c *CachedUserRepository) storeProfileMissing(userID string, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredProfilesLocked()
-	c.profiles[userID] = profileCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	if !c.staleLocked(userID, readStart) {
+		c.evictExpiredProfilesLocked()
+		c.profiles[userID] = profileCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
@@ -258,32 +328,39 @@ func (c *CachedUserRepository) FindByURI(uri string) (*model.User, error) {
 	}
 	c.mu.RUnlock()
 
+	readStart := time.Now()
 	u, err := c.UserRepository.FindByURI(uri)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.storeURIMissing(uri)
+			c.storeURIMissing(uri, readStart)
 			return nil, err
 		}
 		return nil, err
 	}
-	c.storeURI(uri, u)
+	c.storeURI(uri, u, readStart)
 	// FindByID 経路の cache にも入れておく。worker は両方の lookup を
 	// する経路があり、片方 miss → DB → 反対側だけ updated は無駄なので。
-	c.storeUser(u.ID, u)
+	c.storeUser(u.ID, u, readStart)
 	return u, nil
 }
 
-func (c *CachedUserRepository) storeURI(uri string, u *model.User) {
+func (c *CachedUserRepository) storeURI(uri string, u *model.User, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredURIsLocked()
-	c.byURI[uri] = uriCacheEntry{user: u, expiresAt: time.Now().Add(c.ttl)}
+	// URI 単位と userID 単位の両方を見る。URI が未 cache のまま user 側だけ
+	// invalidate された場合は uriInvalidatedAt に印が付かないため。
+	if !c.uriStaleLocked(uri, readStart) && !(u != nil && c.staleLocked(u.ID, readStart)) {
+		c.evictExpiredURIsLocked()
+		c.byURI[uri] = uriCacheEntry{user: u, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
-func (c *CachedUserRepository) storeURIMissing(uri string) {
+func (c *CachedUserRepository) storeURIMissing(uri string, readStart time.Time) {
 	c.mu.Lock()
-	c.evictExpiredURIsLocked()
-	c.byURI[uri] = uriCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	if !c.uriStaleLocked(uri, readStart) {
+		c.evictExpiredURIsLocked()
+		c.byURI[uri] = uriCacheEntry{missing: true, expiresAt: time.Now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 }
 
@@ -356,8 +433,11 @@ func (c *CachedUserRepository) invalidateURI(uri string) {
 	if uri == "" {
 		return
 	}
+	now := time.Now()
 	c.mu.Lock()
 	delete(c.byURI, uri)
+	c.uriInvalidatedAt[uri] = now
+	c.markInvalidatedLocked("", now)
 	c.mu.Unlock()
 }
 

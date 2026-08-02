@@ -566,3 +566,225 @@ func TestCachedUserRepository_EmptyIDIsBypassed(t *testing.T) {
 	assert.Equal(t, int64(3), inner.findByIDCalls.Load())
 	assert.Equal(t, int64(3), inner.findProfileByUserIDCalls.Load())
 }
+
+// slowUserRepo は「DB read が始まってから完了するまでの間に UPDATE +
+// invalidate が割り込む」レースを決定的に再現するための stub。
+// FindByID / FindProfileByUserID / FindByURI は読み取りを開始した時点の
+// 値を返し、途中で hook を呼んで caller に割り込みの機会を与える。
+type slowUserRepo struct {
+	repository.UserRepository
+
+	user    *model.User
+	profile *model.UserProfile
+	// onRead は DB からの読み取り「後」、cache へ store される「前」に
+	// 呼ばれる。ここで UpdateUser を叩けば実運用のレース窓と同じ順序になる。
+	onRead func()
+}
+
+func (s *slowUserRepo) FindByID(string) (*model.User, error) {
+	snapshot := s.user
+	if s.onRead != nil {
+		s.onRead()
+	}
+	return snapshot, nil
+}
+
+func (s *slowUserRepo) FindProfileByUserID(string) (*model.UserProfile, error) {
+	snapshot := s.profile
+	if s.onRead != nil {
+		s.onRead()
+	}
+	return snapshot, nil
+}
+
+func (s *slowUserRepo) FindByURI(string) (*model.User, error) {
+	snapshot := s.user
+	if s.onRead != nil {
+		s.onRead()
+	}
+	return snapshot, nil
+}
+
+func (s *slowUserRepo) UpdateUser(string, map[string]any) error    { return nil }
+func (s *slowUserRepo) UpdateProfile(string, map[string]any) error { return nil }
+
+// 更新と重なった読み取りが「更新前の値」を cache に焼き付けないこと (#2257)。
+//
+// 旧実装は store 時に無条件で map へ書いていたため、
+//
+//	R: cache miss → DB SELECT (更新前)
+//	W:                         UPDATE → invalidate()
+//	R:                                             store(更新前)
+//
+// の順で更新前の値が TTL (5 分) 居座り、i/update 直後の i / users/show が
+// 古い値を返し続けた。
+func TestCachedUserRepository_StaleReadNotCachedAcrossInvalidate(t *testing.T) {
+	t.Run("FindByID", func(t *testing.T) {
+		oldUser := &model.User{ID: "u1", Name: strPtrUserCached("old")}
+		newUser := &model.User{ID: "u1", Name: strPtrUserCached("new")}
+		inner := &slowUserRepo{user: oldUser}
+		cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+		inner.onRead = func() {
+			// 読み取り中に更新が確定したことにする
+			inner.user = newUser
+			require.NoError(t, cached.UpdateUser("u1", map[string]any{"name": "new"}))
+		}
+
+		got, err := cached.FindByID("u1")
+		require.NoError(t, err)
+		assert.Equal(t, "old", *got.Name, "in-flight read still returns its own snapshot")
+
+		// 次の読み取りは cache ではなく DB を見て新しい値を返すこと
+		inner.onRead = nil
+		got2, err := cached.FindByID("u1")
+		require.NoError(t, err)
+		assert.Equal(t, "new", *got2.Name, "stale snapshot must not be cached")
+	})
+
+	t.Run("FindProfileByUserID", func(t *testing.T) {
+		oldProfile := &model.UserProfile{UserID: "u1", Description: strPtrUserCached("old")}
+		newProfile := &model.UserProfile{UserID: "u1", Description: strPtrUserCached("new")}
+		inner := &slowUserRepo{profile: oldProfile}
+		cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+		inner.onRead = func() {
+			inner.profile = newProfile
+			require.NoError(t, cached.UpdateProfile("u1", map[string]any{"description": "new"}))
+		}
+
+		_, err := cached.FindProfileByUserID("u1")
+		require.NoError(t, err)
+
+		inner.onRead = nil
+		got2, err := cached.FindProfileByUserID("u1")
+		require.NoError(t, err)
+		assert.Equal(t, "new", *got2.Description, "stale profile must not be cached")
+	})
+
+	t.Run("FindByURI", func(t *testing.T) {
+		uri := "https://remote.example/users/1"
+		oldUser := &model.User{ID: "u1", Name: strPtrUserCached("old"), URI: &uri}
+		newUser := &model.User{ID: "u1", Name: strPtrUserCached("new"), URI: &uri}
+		inner := &slowUserRepo{user: oldUser}
+		cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+		inner.onRead = func() {
+			inner.user = newUser
+			require.NoError(t, cached.UpdateUser("u1", map[string]any{"name": "new"}))
+		}
+
+		_, err := cached.FindByURI(uri)
+		require.NoError(t, err)
+
+		inner.onRead = nil
+		got2, err := cached.FindByURI(uri)
+		require.NoError(t, err)
+		assert.Equal(t, "new", *got2.Name, "stale byURI entry must not be cached")
+		// FindByURI は byID 側にも書くので、そちらも stale であってはならない
+		got3, err := cached.FindByID("u1")
+		require.NoError(t, err)
+		assert.Equal(t, "new", *got3.Name, "stale byID entry must not be cached from FindByURI")
+	})
+}
+
+func strPtrUserCached(s string) *string { return &s }
+
+// markInvalidatedLocked の prune 分岐: invalidatedAt / uriInvalidatedAt が
+// maxEntries を超えたら TTL より古い印を落として unbounded growth を防ぐこと。
+func TestCachedUserRepository_InvalidationMarkerPruning(t *testing.T) {
+	inner := newCountingUserRepo()
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, 10*time.Millisecond)
+	cached.SetMaxEntriesForTest(2)
+
+	// TTL より古くなる印を 3 件作る
+	for _, id := range []string{"old1", "old2", "old3"} {
+		require.NoError(t, cached.UpdateUser(id, map[string]any{"name": "x"}))
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// maxEntries 超過状態で更に invalidate すると prune が走る。
+	// 観測点: prune 後も「今 invalidate した id」は stale 判定が効くこと。
+	require.NoError(t, cached.UpdateUser("fresh", map[string]any{"name": "x"}))
+
+	inner.users["old1"] = &model.User{ID: "old1", Name: strPtrUserCached("v1")}
+	got, err := cached.FindByID("old1")
+	require.NoError(t, err)
+	assert.Equal(t, "v1", *got.Name, "prune 済みの古い印は以後の store を妨げない")
+
+	// URI 側の印も同様に prune 対象。
+	cached.InvalidateURI("https://remote.example/users/pruned")
+	uri := "https://remote.example/users/live"
+	inner.users["u9"] = &model.User{ID: "u9", Name: strPtrUserCached("v9"), URI: &uri}
+	byURI, err := cached.FindByURI(uri)
+	require.NoError(t, err)
+	assert.Equal(t, "v9", *byURI.Name)
+}
+
+// negative cache (missing) 側も invalidate と競合したら焼き付けないこと。
+// 「作成中の user を並行 read が 404 と cache する」と Create 直後の
+// lookup が TTL の間ずっと 404 になる。
+func TestCachedUserRepository_StaleMissingNotCachedAcrossInvalidate(t *testing.T) {
+	t.Run("FindByID", func(t *testing.T) {
+		inner := &missingThenFoundRepo{user: &model.User{ID: "u1", Name: strPtrUserCached("created")}}
+		cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+		inner.onRead = func() {
+			inner.found = true
+			require.NoError(t, cached.UpdateUser("u1", map[string]any{"name": "created"}))
+		}
+
+		_, err := cached.FindByID("u1")
+		require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+
+		inner.onRead = nil
+		got, err := cached.FindByID("u1")
+		require.NoError(t, err, "stale negative cache must not stick")
+		assert.Equal(t, "created", *got.Name)
+	})
+
+	t.Run("FindByURI", func(t *testing.T) {
+		uri := "https://remote.example/users/new"
+		u := &model.User{ID: "u1", Name: strPtrUserCached("created"), URI: &uri}
+		inner := &missingThenFoundRepo{user: u}
+		cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+		inner.onRead = func() {
+			inner.found = true
+			cached.InvalidateURI(uri)
+		}
+
+		_, err := cached.FindByURI(uri)
+		require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+
+		inner.onRead = nil
+		got, err := cached.FindByURI(uri)
+		require.NoError(t, err, "stale negative byURI cache must not stick")
+		assert.Equal(t, "created", *got.Name)
+	})
+}
+
+// missingThenFoundRepo は「read 開始時点では未作成、read 中に作成される」
+// 状況を再現する stub。
+type missingThenFoundRepo struct {
+	repository.UserRepository
+
+	user   *model.User
+	found  bool
+	onRead func()
+}
+
+func (m *missingThenFoundRepo) find() (*model.User, error) {
+	wasFound := m.found
+	if m.onRead != nil {
+		m.onRead()
+	}
+	if !wasFound {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return m.user, nil
+}
+
+func (m *missingThenFoundRepo) FindByID(string) (*model.User, error)  { return m.find() }
+func (m *missingThenFoundRepo) FindByURI(string) (*model.User, error) { return m.find() }
+func (m *missingThenFoundRepo) UpdateUser(string, map[string]any) error {
+	return nil
+}
