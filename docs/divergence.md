@@ -34,7 +34,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 ## 1. API endpoint
 
-upstream の endpoint (`endpoints/` 配下 438 件) は **100% 実装済み**。
+upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち 442 件を実装済み (coverage 99.5%)。
 
 ### 1-1. mk-go にしかない (41)
 
@@ -52,7 +52,7 @@ upstream の endpoint (`endpoints/` 配下 438 件) は **100% 実装済み**。
 |---|---|---|
 | GET | `/api/v1/instance/peers` | Mastodon 互換の連合ピア一覧。upstream は `ApiServerService.ts` で fastify 直登録しており `endpoints/` 配下に無い。→ #2245 |
 
-`/api/reset-db` は `docs/api-compat.md` に「TS only」と出るが、mk-go では `config.TestMode` 時のみ登録される (実装済み)。default config で route dump するため matrix 上は偽陽性になる。
+`docs/api-compat.md` の「TS only (mk-go 未実装) 2」のうち `/api/reset-db` は**偽陽性**。mk-go では `config.TestMode` 時のみ登録されるが、matrix 生成は default config で route dump するため未実装に見える。実質の未実装は `GET /api/v1/instance/peers` の 1 件のみ。
 
 ---
 
@@ -227,7 +227,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 ## メンテナンス
 
 - **API endpoint の差分**: `make apicompat` で `docs/api-compat.md` を自動生成する (DB / Redis 稼働が必要)。upstream 側の fastify 直登録 endpoint は `ApiServerService.ts` から自動抽出するので、submodule bump 時の追随漏れは起きない。
-  **注意: 現在の `api-compat.md` は TS 2026.5.4 / mk-go 0.9.1 時点の生成物で古い** (本ドキュメント §1 の数字とは一致しない)。submodule を 2026.7.0-mk.0 へ bump した後に再生成すること
+  生成には DB / Redis 稼働が必要なので、使い捨ての postgres / valkey を `docker run` で立てて `-dump-routes` を回す (compose を使うと本番 UDS の project へ合流する事故があるため使わない)
 - **entity shape の差分**: `docs/shape-drift.md` の L0 / L2 / L3 gate が CI で自動検出する
 - **値レベルの差分**: `make diff-test` (mk-go ↔ TS の応答を値単位で diff)
 - **コード内の divergence 注記**: `grep -rn "#2106 L" internal/` で全件を辿れる
