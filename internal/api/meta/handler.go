@@ -67,9 +67,15 @@ func (h *Handler) Meta(c echo.Context) error {
 	mergedPolicies := role.MergeMetaPolicies(m.Policies)
 
 	resp := map[string]any{
-		"maintainerName":         m.MaintainerName,
-		"maintainerEmail":        m.MaintainerEmail,
-		"version":                h.config.Version,
+		"maintainerName":  m.MaintainerName,
+		"maintainerEmail": m.MaintainerEmail,
+		"version":         h.config.Version,
+		// mkGoVersion は mk-go 独自の additive field (#2274)。`version` は
+		// drop-in 互換のため **互換 Misskey バージョン** を返す必要がある
+		// (第三者クライアントの feature detection と、frontend の
+		// `_error_.vue` が build 定数と比較する版ずれ検出がこれに依存する)
+		// ので、実際に動いている実装の版は別 field で出す。
+		"mkGoVersion":            config.MkGoVersion,
 		"name":                   m.Name,
 		"shortName":              m.ShortName,
 		"uri":                    h.config.URL,

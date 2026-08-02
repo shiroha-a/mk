@@ -153,6 +153,16 @@ func TestFrontendHTML_EmbeddedMetaPolicies(t *testing.T) {
 		assert.Equal(t, true, features["globalTimeline"])
 	})
 
+	// SSR 埋め込み meta も /api/meta と同じく version = 互換 Misskey 版、
+	// mkGoVersion = mk-go の実装版で出すこと (#2274)。about 系ページが
+	// fetchInstance を待たずに実装版を表示できるようにするため。
+	t.Run("exposes mkGoVersion alongside the compatible Misskey version", func(t *testing.T) {
+		parsed := render(t, &model.Meta{ID: "x"})
+
+		assert.Equal(t, cfg.Version, parsed["version"], "version は互換 Misskey 版")
+		assert.Equal(t, config.MkGoVersion, parsed["mkGoVersion"], "mkGoVersion は mk-go の実装版")
+	})
+
 	t.Run("meta.policies override is reflected", func(t *testing.T) {
 		parsed := render(t, &model.Meta{
 			ID:       "x",

@@ -739,3 +739,30 @@ func TestMeta_ProxyAccountName_NoResolver(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Nil(t, resp["proxyAccountName"])
 }
+
+// /api/meta は `version` に **互換 Misskey バージョン** を返し、mk-go 自身の
+// 実装バージョンは additive な `mkGoVersion` で出すこと (#2274)。
+//
+// version を mk-go の版に差し替えると
+//   - 第三者クライアントの feature detection (Misskey の版で機能有無を判断)
+//   - frontend `_error_.vue` の版ずれ検出 (build 定数 === meta.version)
+//
+// が壊れるので、両者は必ず別 field で出す。
+func TestMeta_ExposesMkGoVersionSeparately(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(req, rec)))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, config.MisskeyVersion, resp["version"], "version は互換 Misskey 版のまま")
+	assert.Equal(t, config.MkGoVersion, resp["mkGoVersion"], "mkGoVersion は mk-go の実装版")
+	assert.NotEqual(t, resp["version"], resp["mkGoVersion"], "両者は別物として出す")
+}
