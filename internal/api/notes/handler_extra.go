@@ -461,7 +461,15 @@ func (h *Handler) Clips(c echo.Context) error {
 		}
 		// favoritedCount は常時、isFavorited は認証 viewer のみ、notesCount は
 		// owner 閲覧時のみ (#1562、upstream ClipEntityService.pack)。
-		extras := entity.ClipExtras{ShowNotesCount: viewer != nil && viewer.ID == cl.UserID}
+		extras := entity.ClipExtras{}
+		// notesCount は owner 閲覧時のみ。clip.notesCount 列は upstream に無く
+		// TS 製 DB では生えないため clip_note を実カウントする (#2243)。
+		if viewer != nil && viewer.ID == cl.UserID && h.clipNoteRepo != nil {
+			if n, err := h.clipNoteRepo.CountByClip(cl.ID); err == nil {
+				count := int(n)
+				extras.NotesCount = &count
+			}
+		}
 		if h.clipFavoriteRepo != nil {
 			if n, err := h.clipFavoriteRepo.CountByClip(cl.ID); err == nil {
 				extras.FavoritedCount = n

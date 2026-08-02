@@ -2,6 +2,7 @@ package users
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -15,8 +16,16 @@ import (
 func TestClips_FavoritedCountAndIsFavorited(t *testing.T) {
 	h, _ := newTestHandler(t)
 	repo := testutil.NewMockClipRepository()
-	require.NoError(t, repo.Create(&model.Clip{ID: "c1", UserID: "owner", Name: "pub", IsPublic: true, NotesCount: 4}))
+	require.NoError(t, repo.Create(&model.Clip{ID: "c1", UserID: "owner", Name: "pub", IsPublic: true}))
 	h.SetClipRepo(repo)
+	// notesCount は clip_note の実カウント (#2243)。owner 閲覧時のみ出る。
+	clipNoteRepo := testutil.NewMockClipNoteRepository()
+	for i := 0; i < 4; i++ {
+		require.NoError(t, clipNoteRepo.Create(&model.ClipNote{
+			ID: fmt.Sprintf("cn%d", i), ClipID: "c1", NoteID: fmt.Sprintf("n%d", i),
+		}))
+	}
+	h.SetClipNoteRepo(clipNoteRepo)
 	favRepo := testutil.NewMockClipFavoriteRepository()
 	favRepo.Favorites["viewer:c1"] = &model.ClipFavorite{ID: "f1", UserID: "viewer", ClipID: "c1"}
 	favRepo.Favorites["other:c1"] = &model.ClipFavorite{ID: "f2", UserID: "other", ClipID: "c1"}

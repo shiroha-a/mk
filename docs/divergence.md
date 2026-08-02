@@ -82,8 +82,8 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `user` | `isRoot` | mk-go 独自 | upstream は system_account 移行で DROP 済み。`role.Service.isRootUser` の fallback に必要 |
 | `meta` | `proxyAccountId` | mk-go 独自 | 同じく upstream は DROP 済み。`admin/update-proxy-account` が書き込む |
 | `note_favorite` | `createdAt` | mk-go 独自 | upstream は `deleteCreatedAt` で DROP 済み。`/api/i/favorites` の response 要件で復活 |
-| `app` / `auth_session` | `createdAt` | mk-go 独自 | 同上。**ただし `CREATE TABLE IF NOT EXISTS` 内でのみ定義されており、TS 製 DB では生えない** → #2243 |
-| `clip` | `notesCount` | mk-go 独自 | 非正規化カウンタ。**`app`/`auth_session` と同じく `CREATE TABLE IF NOT EXISTS` 内でのみ定義されており TS 製 DB では生えない** → #2243 |
+| `app` / `auth_session` | `createdAt` | 列のみ残存 | upstream は `deleteCreatedAt` で DROP 済み。mk-go も **読み書きしない** (#2243 で model から除去)。fresh な mk-go DB には列が残るが未使用 |
+| `clip` | `notesCount` | 列のみ残存 | 旧・非正規化カウンタ。#2243 で撤去し、件数は upstream 同様 `clip_note` の実カウントで算出する |
 | `poll` | `notifiedAt` | mk-go 独自 | pollEnded 通知の二重送信防止 |
 | `user_pending` | `invitationTicketId` | mk-go 独自 | 1 招待で複数アカウントを作れる gap を塞ぐ |
 

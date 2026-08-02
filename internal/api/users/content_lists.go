@@ -59,7 +59,15 @@ func (h *Handler) Clips(c echo.Context) error {
 	for _, cl := range rows {
 		// favoritedCount は常時実カウント、isFavorited は認証 viewer のみ、
 		// notesCount は owner 閲覧時のみ (#1562、upstream ClipEntityService.pack)。
-		extras := entity.ClipExtras{ShowNotesCount: isSelf}
+		extras := entity.ClipExtras{}
+		// notesCount は owner 閲覧時のみ。clip.notesCount 列は upstream に無く
+		// TS 製 DB では生えないため clip_note を実カウントする (#2243)。
+		if isSelf && h.clipNoteRepo != nil {
+			if n, err := h.clipNoteRepo.CountByClip(cl.ID); err == nil {
+				count := int(n)
+				extras.NotesCount = &count
+			}
+		}
 		if viewer != nil {
 			fav := false
 			extras.IsFavorited = &fav

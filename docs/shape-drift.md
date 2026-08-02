@@ -349,3 +349,27 @@ mk-goは全認証がtoken経由(session無し)で、native token = `users.token`
 make perm-check       # permission + secure gate をローカル実行
 make shapecheck-gen   # golden_secure_endpoints.json も再生成
 ```
+
+## Schema drift gate（drop-in で生えない列）
+
+`TestSchemaDrift_CreateOnlyColumns`は、mk-goのmigrationが**`CREATE TABLE IF NOT EXISTS`の中でしか定義していない列**のうち、upstreamのentityに存在しないものを検出する。
+
+Misskey TSが既に作ったテーブルに対して`CREATE TABLE IF NOT EXISTS`はno-opになるため、この形の列は**TS製DBにだけ生えない**。upstreamにも同名の列があればTS側が作っているので問題ないが、mk-go独自の列は生えず、読み書きすると drop-in 環境でのみ`column "..." of relation "..." does not exist`で落ちる。新規にmk-goから作ったDBでは`CREATE TABLE`が実際に走るため再現せず、通常のテストでは踏まない。
+
+実際に`app.createdAt` / `auth_session.createdAt` / `clip.notesCount`の3本がこの形で紛れ込んでいた(#2243)。`ALTER TABLE ... ADD COLUMN`で追加した列は両方のshapeで冪等に効くのでgateの対象外。
+
+検出時の解消方法は2つ:
+
+- **(a) その列への依存を外す** — upstreamに無いということは本来不要なはず。#2243はこちらを採った(createdAt 2本はそもそも読んでいなかった、notesCountは`clip_note`の実カウントに寄せた)
+- **(b) ALTERで足す** — どうしても必要なら`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`のmigrationを追加する(`000039_dropin_compat.up.sql`と同じ方式)。既存行のbackfillも併せて検討すること
+
+`tools/schemadrift`がupstream entityの`@Entity('table')` + `@Column`系decoratorからテーブル別の列一覧をgolden(`golden_upstream_columns.json`)に出力し、gateがmigrationのparse結果と突合する。
+
+fresh な mk-go DB にだけ残るが誰も読み書きしない列は、テスト内の`createOnlyAllowlist`に理由付きで登録する。**その列を使い始めるときは必ずallowlistから外すこと**(使うなら(b)のmigrationが要る)。
+
+### 運用
+
+```bash
+go test ./internal/entitycompat/ -run TestSchemaDrift   # gate をローカル実行
+make shapecheck-gen                                     # golden_upstream_columns.json も再生成
+```

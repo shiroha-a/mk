@@ -67,12 +67,10 @@ func (h *Handler) SessionGenerate(c echo.Context) error {
 	}
 
 	token := uuid.New().String()
-	now := time.Now()
 	session := &model.AuthSession{
-		ID:        h.idGen.Generate(now),
-		CreatedAt: now,
-		Token:     token,
-		AppID:     app.ID,
+		ID:    h.idGen.Generate(time.Now()),
+		Token: token,
+		AppID: app.ID,
 	}
 	if err := h.repo.CreateSession(session); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

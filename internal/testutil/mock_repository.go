@@ -3767,17 +3767,6 @@ func paginateClips(rows []*model.Clip, sinceID, untilID string, limit, offset in
 	return rows[:limit]
 }
 
-func (m *MockClipRepository) IncrementCount(clipID, column string, delta int) error {
-	c, ok := m.Clips[clipID]
-	if !ok {
-		return ErrNotFound
-	}
-	if column == "notesCount" {
-		c.NotesCount += delta
-	}
-	return nil
-}
-
 func applyClipFields(c *model.Clip, fields map[string]any) {
 	for k, v := range fields {
 		switch k {

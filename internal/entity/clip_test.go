@@ -14,10 +14,11 @@ func TestPackClip_Basic(t *testing.T) {
 	desc := "my clip"
 	owner := &model.User{ID: "u1", Username: "alice"}
 	lastClipped := time.Date(2026, 4, 10, 1, 2, 3, 0, time.UTC)
-	cl := &model.Clip{ID: clipID, UserID: "u1", Name: "favs", Description: &desc, IsPublic: true, NotesCount: 5, LastClippedAt: &lastClipped}
+	cl := &model.Clip{ID: clipID, UserID: "u1", Name: "favs", Description: &desc, IsPublic: true, LastClippedAt: &lastClipped}
 
 	fav := true
-	out := PackClip(cl, idGen, owner, ClipExtras{FavoritedCount: 3, IsFavorited: &fav, ShowNotesCount: true})
+	notesCount := 5
+	out := PackClip(cl, idGen, owner, ClipExtras{FavoritedCount: 3, IsFavorited: &fav, NotesCount: &notesCount})
 	assert.Equal(t, clipID, out["id"])
 	assert.Equal(t, "u1", out["userId"])
 	assert.Equal(t, "favs", out["name"])
@@ -42,7 +43,7 @@ func TestPackClip_Basic(t *testing.T) {
 // (upstream ClipEntityService.pack の undefined と同じ省略、#1562)。
 func TestPackClip_ViewerDependentFieldsHidden(t *testing.T) {
 	idGen := newTestIDGen(t)
-	cl := &model.Clip{ID: idGen.Generate(time.Now()), UserID: "u1", Name: "favs", IsPublic: true, NotesCount: 5}
+	cl := &model.Clip{ID: idGen.Generate(time.Now()), UserID: "u1", Name: "favs", IsPublic: true}
 
 	out := PackClip(cl, idGen, &model.User{ID: "u1"}, ClipExtras{})
 	_, hasNotesCount := out["notesCount"]

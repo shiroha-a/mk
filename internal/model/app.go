@@ -1,15 +1,13 @@
 package model
 
-import (
-	"time"
-
-	"github.com/lib/pq"
-)
+import "github.com/lib/pq"
 
 // App represents the `app` table for MiAuth applications.
+//
+// createdAt 列は持たない。upstream が 1697420555911-deleteCreatedAt で DROP
+// 済みで TS 製 DB には存在せず、mk-go も読み取っていなかった (#2243)。
 type App struct {
 	ID          string         `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	CreatedAt   time.Time      `gorm:"column:createdAt;type:timestamp with time zone;not null" json:"createdAt"`
 	UserID      *string        `gorm:"column:userId;type:varchar(32)" json:"userId"`
 	Secret      string         `gorm:"column:secret;type:varchar(64);not null" json:"secret"`
 	Name        string         `gorm:"column:name;type:varchar(128);not null" json:"name"`

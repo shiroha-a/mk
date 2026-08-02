@@ -259,7 +259,8 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	if err := s.noteRepo.Create(cn); err != nil {
 		return err
 	}
-	_ = s.repo.IncrementCount(clipID, "notesCount", 1)
+	// clip.notesCount への increment は行わない。同列は upstream に存在せず
+	// TS 製 DB では生えないため、件数は CountNotes で clip_note を数える (#2243)。
 	// upstream ClipService.addNote:131 は note の clippedCount を increment する
 	// (#1768。これまで未維持で常に 0 だった)。
 	_ = s.notes.IncrementCount(noteID, "clippedCount", 1)
@@ -290,10 +291,28 @@ func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 	if err := s.noteRepo.Delete(cn); err != nil {
 		return err
 	}
-	_ = s.repo.IncrementCount(clipID, "notesCount", -1)
+	// notesCount は非正規化しない (AddNote 側のコメント参照、#2243)。
 	// upstream ClipService.removeNote:156 は note の clippedCount を decrement する。
 	_ = s.notes.IncrementCount(noteID, "clippedCount", -1)
 	return nil
+}
+
+// CountNotes returns how many notes the clip holds. upstream
+// ClipEntityService.pack と同じく clip_note をその場で数える (#2243)。
+//
+// mk-go は以前 clip.notesCount 列に非正規化していたが、この列は upstream の
+// Clip entity に無く TS 製 DB では生えない。加えて TS ↔ mk-go を行き来すると
+// TS 側での add/remove がカウンタに反映されず恒久的にずれるため、実カウントに
+// 寄せている。notesCount は owner 閲覧時しか出さないので呼び出し頻度も低い。
+func (s *Service) CountNotes(clipID string) (int, error) {
+	if s.noteRepo == nil {
+		return 0, nil
+	}
+	n, err := s.noteRepo.CountByClip(clipID)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // Notes returns the notes attached to the clip newest first. requesterID は

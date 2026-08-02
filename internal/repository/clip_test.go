@@ -108,21 +108,6 @@ func TestClipRepository_Delete(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestClipRepository_IncrementCount(t *testing.T) {
-	repo := NewClipRepository(testDB)
-	user := insertTestUser(t, "u_clr_4", "clipuser4")
-	defer cleanupUser(t, user.ID)
-
-	c := newTestClip("clp_cr_4", user.ID, "delta")
-	require.NoError(t, repo.Create(c))
-	defer cleanupClip(t, c.ID)
-
-	require.NoError(t, repo.IncrementCount(c.ID, "notesCount", 3))
-	got, err := repo.FindByID(c.ID)
-	require.NoError(t, err)
-	assert.Equal(t, 3, got.NotesCount)
-}
-
 func TestClipRepository_ListByUser(t *testing.T) {
 	repo := NewClipRepository(testDB)
 	user := insertTestUser(t, "u_clr_5", "clipuser5")

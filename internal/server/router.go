@@ -1511,6 +1511,7 @@ func (s *Server) setupRoutes() {
 	usersHandler.SetReactionReader(reactionCountWriter)
 	usersHandler.SetClipRepo(clipRepo)
 	usersHandler.SetClipFavoriteRepo(clipFavoriteRepo) // #1562: users/clips の favoritedCount / isFavorited
+	usersHandler.SetClipNoteRepo(clipNoteRepo)         // #2243: users/clips の notesCount 実カウント
 	usersHandler.SetFlashRepo(flashRepo)
 	usersHandler.SetGalleryRepo(repository.NewGalleryRepository(s.db))
 	usersHandler.SetPageRepo(pageRepo)

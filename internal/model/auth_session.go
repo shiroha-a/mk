@@ -1,14 +1,13 @@
 package model
 
-import "time"
-
 // AuthSession represents the `auth_session` table for MiAuth flow.
+//
+// createdAt 列は持たない。理由は model.App と同じ (#2243)。
 type AuthSession struct {
-	ID        string    `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	CreatedAt time.Time `gorm:"column:createdAt;type:timestamp with time zone;not null" json:"createdAt"`
-	Token     string    `gorm:"column:token;type:varchar(128);not null" json:"token"`
-	UserID    *string   `gorm:"column:userId;type:varchar(32)" json:"userId"`
-	AppID     string    `gorm:"column:appId;type:varchar(32);not null" json:"appId"`
+	ID     string  `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	Token  string  `gorm:"column:token;type:varchar(128);not null" json:"token"`
+	UserID *string `gorm:"column:userId;type:varchar(32)" json:"userId"`
+	AppID  string  `gorm:"column:appId;type:varchar(32);not null" json:"appId"`
 
 	// Relations
 	App  *App  `gorm:"foreignKey:AppID" json:"app,omitempty"`

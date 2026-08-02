@@ -25,7 +25,6 @@ type ClipRepository interface {
 	// notes/clips が「note を含む public clip」を引くのに使う (upstream
 	// clipsRepository.findBy({id: In(...), isPublic: true}))。
 	ListPublicByIDs(ids []string) ([]*model.Clip, error)
-	IncrementCount(clipID, column string, delta int) error
 }
 
 type clipRepository struct {
@@ -132,11 +131,4 @@ func (r *clipRepository) ListPublicByUser(userID, sinceID, untilID string, limit
 		return nil, err
 	}
 	return rows, nil
-}
-
-// IncrementCount adjusts a counter column on the clip row by delta.
-func (r *clipRepository) IncrementCount(clipID, column string, delta int) error {
-	return r.db.Model(&model.Clip{}).
-		Where("id = ?", clipID).
-		UpdateColumn(column, gorm.Expr("\""+column+"\" + ?", delta)).Error
 }
