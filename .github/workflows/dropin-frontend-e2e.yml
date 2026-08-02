@@ -38,6 +38,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || 'develop' }}
+          # stage 3 の mk-go image build (tests/federation/common/Dockerfile.mkgo)
+          # が third_party/misskey/built/ と assets/ を COPY するので、submodule
+          # を展開しないと "failed to calculate checksum ... not found" で死ぬ。
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # frontend bundle (built/_frontend_vite_ / _frontend_dist_ / _sw_dist_) は
+      # repo に commit されていないのでここで生成する。playwright workflow が
+      # 同じことをしており、こちらだけ欠けていたため stage 2 (cypress baseline)
+      # を通過した後の stage 3 で必ず docker build に失敗していた。
+      - name: Build third_party/misskey frontend bundle
+        working-directory: third_party/misskey
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
