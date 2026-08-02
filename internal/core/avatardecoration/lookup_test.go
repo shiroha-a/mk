@@ -138,3 +138,40 @@ func TestResolver_LookupURL_CacheServesWithinTTL(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "u1", url)
 }
+
+// Invalidate は次回 LookupURL を強制的に DB 再読込にすること。
+//
+// catalog cache は 30s TTL なので、admin が decoration を作成した直後に
+// ユーザーが装着すると lookup miss になり、entity 側 packer が
+// avatarDecorations の entry を silent drop する。API 応答は `[]` なのに
+// DB には行がある、という乖離が最大 30 秒続いていた (#2258)。
+func TestResolver_InvalidateForcesRefresh(t *testing.T) {
+	mock := testutil.NewMockAvatarDecorationRepository()
+	mock.Decorations["d1"] = &model.AvatarDecoration{ID: "d1", URL: "https://example.test/d1.png"}
+	repo := &countingDecoRepo{MockAvatarDecorationRepository: mock}
+	r := NewResolver(repo)
+
+	url, ok := r.LookupURL("d1")
+	assert.True(t, ok)
+	assert.Equal(t, "https://example.test/d1.png", url)
+	assert.Equal(t, 1, repo.listCalls)
+
+	// catalog に後から追加された decoration は cache 有効な間は見えない
+	mock.Decorations["d2"] = &model.AvatarDecoration{ID: "d2", URL: "https://example.test/d2.png"}
+	_, ok = r.LookupURL("d2")
+	assert.False(t, ok, "TTL 内は cache が効いて見えない (前提条件)")
+	assert.Equal(t, 1, repo.listCalls)
+
+	r.Invalidate()
+
+	url2, ok := r.LookupURL("d2")
+	assert.True(t, ok, "Invalidate 後は再読込されて見えること")
+	assert.Equal(t, "https://example.test/d2.png", url2)
+	assert.Equal(t, 2, repo.listCalls)
+}
+
+// nil receiver でも panic しないこと (未配線経路の defensive guard)。
+func TestResolver_InvalidateNilSafe(t *testing.T) {
+	var r *Resolver
+	assert.NotPanics(t, func() { r.Invalidate() })
+}

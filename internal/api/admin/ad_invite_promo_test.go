@@ -816,3 +816,50 @@ func TestPromoCreate(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	assert.Equal(t, http.StatusNoContent, doPost(h.PromoCreate, `{}`, adminUser).Code)
 }
+
+// catalogInvalidatorSpy counts Invalidate() calls from the avatar decoration
+// mutation handlers.
+type catalogInvalidatorSpy struct{ calls int }
+
+func (s *catalogInvalidatorSpy) Invalidate() { s.calls++ }
+
+// avatar-decorations の create / update / delete が entity 側 catalog cache を
+// invalidate すること (#2258)。TTL 任せだと作成直後に装着された decoration が
+// packer の lookup miss で silent drop され、DB に行があるのに API 応答は
+// avatarDecorations: [] になる。
+func TestAvatarDecorations_MutationsInvalidateCatalogCache(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		h, _ := setupAvatarDecorationHandler(t)
+		spy := &catalogInvalidatorSpy{}
+		h.SetAvatarDecorationInvalidator(spy)
+
+		rec := doPost(h.AvatarDecorationsCreate,
+			`{"name":"deco","url":"https://example.test/d.png"}`, adminUser)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, 1, spy.calls)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		h, _ := setupAvatarDecorationHandler(t, &model.AvatarDecoration{
+			ID: "d1", Name: "deco", URL: "https://example.test/d.png",
+		})
+		spy := &catalogInvalidatorSpy{}
+		h.SetAvatarDecorationInvalidator(spy)
+
+		rec := doPost(h.AvatarDecorationsUpdate, `{"id":"d1","name":"renamed"}`, adminUser)
+		require.Less(t, rec.Code, 300)
+		assert.Equal(t, 1, spy.calls)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		h, _ := setupAvatarDecorationHandler(t, &model.AvatarDecoration{
+			ID: "d1", Name: "deco", URL: "https://example.test/d.png",
+		})
+		spy := &catalogInvalidatorSpy{}
+		h.SetAvatarDecorationInvalidator(spy)
+
+		rec := doPost(h.AvatarDecorationsDelete, `{"id":"d1"}`, adminUser)
+		require.Less(t, rec.Code, 300)
+		assert.Equal(t, 1, spy.calls)
+	})
+}
