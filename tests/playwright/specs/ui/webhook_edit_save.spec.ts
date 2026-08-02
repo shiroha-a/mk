@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
+import { deleteWebhooksNamed } from '../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/webhook/edit/:id update flow', () => {
@@ -13,12 +14,21 @@ test.describe('UI: /settings/webhook/edit/:id update flow', () => {
   });
   test.setTimeout(60_000);
 
+  // 作った webhook は片付ける。root を共有しているので放置すると
+  // webhookLimit (既定 3) を使い切って無関係な spec が create で落ちる (#2264)。
+  const createdWebhooks: string[] = [];
+  test.afterEach(async ({ request }) => {
+    await deleteWebhooksNamed(request, root.token, createdWebhooks);
+    createdWebhooks.length = 0;
+  });
+
   test('create webhook via API → edit name → Save → /api/i/webhooks/update', async ({
     page,
     baseURL,
     request,
   }) => {
     const initialName = `pwwh-init-${Date.now().toString().slice(-9)}`;
+    createdWebhooks.push(initialName);
     const createResp = await callApi(request, 'i/webhooks/create', {
       i: root.token,
       name: initialName,
@@ -45,6 +55,7 @@ test.describe('UI: /settings/webhook/edit/:id update flow', () => {
     );
 
     const newName = `pwwh-updated-${Date.now().toString().slice(-9)}`;
+    createdWebhooks.push(newName);
     await page.evaluate(
       ({ from, to }) => {
         const target = (

@@ -174,6 +174,36 @@ make federation-misskey-down
 - スケジュール: nightly 17:00 UTC (`.github/workflows/playwright.yml`)
 - spec は **backend-agnostic** (= URL 切替だけで両 backend で動く)、spec 失敗 = drop-in 互換 regression として issue 化
 
+### spec を書くときの注意: root の per-user quota
+
+UI spec は root (alice) を共有する。antenna / webhook / clip / avatar decoration には role policy の上限があり、**作りっぱなしにすると枠を使い切って無関係な spec が setup の create で落ちる**。落ちる場所が原因から離れるので診断が難しい (#2254 の調査中、実際に spec 側の bug と誤認しかけた)。
+
+| policy | 既定値 |
+|---|---|
+| `antennaLimit` | 5 |
+| `webhookLimit` | 3 |
+| `clipLimit` | 10 |
+| `avatarDecorationLimit` | 1 |
+
+対策は 2 段構え (#2264):
+
+- **globalSetup が run の先頭で root の quota を purge する** — 前回 run の残骸対策。同じ stack を使い回してもクリーンな状態から始まる
+- **spec 自身が afterEach で片付ける** — 1 回の run の中で枠を食い潰さないため。`fixtures/quota.ts` の `deleteAntennasNamed` / `deleteWebhooksNamed` を使う
+
+上限のあるリソースを新しく作る spec を足すときは、後者を必ず入れること。
+
+```ts
+import { deleteAntennasNamed } from '../../fixtures/quota';
+
+const createdAntennas: string[] = [];
+test.afterEach(async ({ request }) => {
+  await deleteAntennasNamed(request, root.token, createdAntennas);
+  createdAntennas.length = 0;
+});
+```
+
+`test.afterAll` では test-scope の `request` fixture が使えないので `afterEach` を使う。
+
 ### Drift detection workflow
 
 Playwright で発見した drift は LCD 化 → strict 化 のサイクルで消化する:

@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
+import { deleteAntennasNamed } from '../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /my/antennas/:id update flow', () => {
@@ -13,12 +14,21 @@ test.describe('UI: /my/antennas/:id update flow', () => {
   });
   test.setTimeout(60_000);
 
+  // 作った antenna は片付ける。root を共有しているので放置すると
+  // antennaLimit (既定 5) を使い切って無関係な spec が create で落ちる (#2264)。
+  const createdAntennas: string[] = [];
+  test.afterEach(async ({ request }) => {
+    await deleteAntennasNamed(request, root.token, createdAntennas);
+    createdAntennas.length = 0;
+  });
+
   test('create antenna via API → edit name → Save → /api/antennas/update', async ({
     page,
     baseURL,
     request,
   }) => {
     const initialName = `pwant-init-${Date.now().toString().slice(-9)}`;
+    createdAntennas.push(initialName);
     const createResp = await callApi(request, 'antennas/create', {
       i: root.token,
       name: initialName,
@@ -50,6 +60,7 @@ test.describe('UI: /my/antennas/:id update flow', () => {
     );
 
     const newName = `pwant-updated-${Date.now().toString().slice(-9)}`;
+    createdAntennas.push(newName);
     await page.evaluate(
       ({ from, to }) => {
         const target = (

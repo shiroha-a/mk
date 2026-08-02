@@ -12,6 +12,11 @@
 //      の default は true で、initial state の signup endpoint は invitation
 //      コード必須。Phase 1 spec は signup-flow で fresh user を作るので
 //      registration を open にしておく
+//   4. root の per-user quota を purge — antenna / webhook / clip / user list
+//      は role policy に上限があり (antennaLimit 5 / webhookLimit 3 /
+//      clipLimit 10 / avatarDecorationLimit 1)、spec が後始末しない分が
+//      DB に残る。同じ stack へ 2 回目を流すと枠を使い切って**無関係な
+//      spec** が setup の create で落ちる (#2264)。run の先頭で空にする
 //
 // root の credentials は `.auth/root.json` に書き出して spec から読める
 // ようにする。複数 spec で root token を再利用するための fixture。
@@ -87,6 +92,67 @@ async function signinAsExistingRoot(ctx: APIRequestContext): Promise<RootCreds> 
   return { id: body.id, token: body.i, username: ROOT_USERNAME };
 }
 
+// purgeRootQuotas deletes the per-user-limited resources root accumulated in
+// previous runs. これをやらないと 2 回目以降の run で antenna / webhook 系の
+// spec が「作れない」ことによる謎の失敗を起こす (#2264)。
+//
+// nightly CI は毎回 stack を作り直すので影響しないが、ローカルで
+// `make playwright-up` した stack を使い回すと必ず踏む。診断のノイズになる
+// (#2254 の調査中、実際に spec 側の bug と誤認しかけた)。
+async function purgeRootQuotas(ctx: APIRequestContext, token: string): Promise<void> {
+  // list endpoint / delete endpoint / delete の id param 名。
+  const resources: Array<{ name: string; list: string; del: string; idKey: string }> = [
+    { name: 'antenna', list: 'antennas/list', del: 'antennas/delete', idKey: 'antennaId' },
+    { name: 'webhook', list: 'i/webhooks/list', del: 'i/webhooks/delete', idKey: 'webhookId' },
+    { name: 'clip', list: 'clips/list', del: 'clips/delete', idKey: 'clipId' },
+    { name: 'userList', list: 'users/lists/list', del: 'users/lists/delete', idKey: 'listId' },
+  ];
+
+  for (const r of resources) {
+    const listResp = await ctx.post(`${baseURL}/api/${r.list}`, {
+      data: { i: token, limit: 100 },
+      failOnStatusCode: false,
+    });
+    if (listResp.status() !== 200) {
+      throw new Error(
+        `globalSetup ${r.list} failed: ${listResp.status()} ${await listResp.text()}`,
+      );
+    }
+    const rows = (await listResp.json()) as Array<{ id?: string }>;
+    if (!Array.isArray(rows)) {
+      throw new Error(`globalSetup ${r.list} returned non-array: ${JSON.stringify(rows)}`);
+    }
+    for (const row of rows) {
+      if (typeof row.id !== 'string') continue;
+      const delResp = await ctx.post(`${baseURL}/api/${r.del}`, {
+        data: { i: token, [r.idKey]: row.id },
+        failOnStatusCode: false,
+      });
+      if (delResp.status() !== 200 && delResp.status() !== 204) {
+        throw new Error(
+          `globalSetup ${r.del} failed for ${row.id}: ${delResp.status()} ${await delResp.text()}`,
+        );
+      }
+    }
+    if (rows.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[globalSetup] purged ${rows.length} leftover ${r.name}(s)`);
+    }
+  }
+
+  // avatarDecorationLimit は既定 1 なので、装着済みが残っていると
+  // avatar_decoration_attach spec が「Remaining: 0」で attach できない。
+  const decoResp = await ctx.post(`${baseURL}/api/i/update`, {
+    data: { i: token, avatarDecorations: [] },
+    failOnStatusCode: false,
+  });
+  if (decoResp.status() !== 200) {
+    throw new Error(
+      `globalSetup i/update avatarDecorations reset failed: ${decoResp.status()} ${await decoResp.text()}`,
+    );
+  }
+}
+
 export default async function globalSetup(): Promise<void> {
   // 1. Redis flush (#744 PR-2). 失敗は throw して fail-fast にする —
   // silent warn だと後段の signup spec が 429 で fail して原因が見えない。
@@ -140,6 +206,9 @@ export default async function globalSetup(): Promise<void> {
         `globalSetup i/registry/set accountSetupWizard failed: ${wizardResp.status()} ${await wizardResp.text()}`,
       );
     }
+
+    // 5. 前回 run の残骸で per-user quota を使い切らないよう purge (#2264)
+    await purgeRootQuotas(ctx, root.token);
 
     // root credentials を spec から読めるように file 出力
     mkdirSync('.auth', { recursive: true });

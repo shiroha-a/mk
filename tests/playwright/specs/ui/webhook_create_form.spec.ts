@@ -10,6 +10,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { deleteWebhooksNamed } from '../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /settings/webhook/new form flow', () => {
@@ -18,6 +19,14 @@ test.describe('UI: /settings/webhook/new form flow', () => {
     root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
   });
   test.setTimeout(60_000);
+
+  // 作った webhook は片付ける。root を共有しているので放置すると
+  // webhookLimit (既定 3) を使い切って無関係な spec が create で落ちる (#2264)。
+  const createdWebhooks: string[] = [];
+  test.afterEach(async ({ request }) => {
+    await deleteWebhooksNamed(request, root.token, createdWebhooks);
+    createdWebhooks.length = 0;
+  });
 
   test('navigate /settings/webhook/new → fill name+url+secret → Create → i/webhooks/create round-trips', async ({
     page,
@@ -39,6 +48,7 @@ test.describe('UI: /settings/webhook/new form flow', () => {
     );
 
     const webhookName = `pwwhui-${Date.now().toString().slice(-9)}`;
+    createdWebhooks.push(webhookName);
     const webhookUrl = 'https://example.test/webhook';
     const webhookSecret = 'pwwhui-secret';
 
