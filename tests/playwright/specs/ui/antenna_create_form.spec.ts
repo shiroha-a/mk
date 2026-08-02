@@ -40,6 +40,21 @@ test.describe('UI: /my/antennas/create form flow', () => {
       target.dispatchEvent(new Event('input', { bubbles: true }));
     }, antennaName);
 
+    // antennas/create は keywords か excludeKeywords のいずれかが必須
+    // (upstream #14491 以降 EMPTY_KEYWORD を投げる)。エディタの最初の
+    // textarea が "Keywords to listen to" なのでここを埋める。
+    await page.evaluate(() => {
+      const target = document.querySelector('textarea') as HTMLTextAreaElement | null;
+      if (!target) return;
+      target.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(target, 'pwkeyword');
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
     // antennas/create response を捕捉して Save click
     const createResp = page.waitForResponse(
       (r) => r.url().includes('/api/antennas/create') && r.status() === 200,

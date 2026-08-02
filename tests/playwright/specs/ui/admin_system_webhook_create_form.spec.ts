@@ -52,11 +52,15 @@ test.describe('UI: /admin/system-webhook create flow', () => {
       { timeout: 10_000 },
     );
 
-    // title / url を投入。3rd (secret) は optional なので空のまま。
+    // title / url / secret を投入。MkSystemWebhookEditor.vue の
+    // `disableSubmitButton` は title / url に加えて **secret も必須** に
+    // しており (`if (!secret.value) return true`)、空のままだと OK button が
+    // disabled のままで click が効かない。
     const title = `pw-webhook-${Date.now()}`;
     const url = `https://example.invalid/pw/${Date.now()}`;
+    const secret = `pw-secret-${Date.now()}`;
     await page.evaluate(
-      ({ t, u }) => {
+      ({ t, u, s }) => {
         const inputs = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[]).filter(
           (i) => i.type === 'text',
         );
@@ -64,18 +68,15 @@ test.describe('UI: /admin/system-webhook create flow', () => {
           window.HTMLInputElement.prototype,
           'value',
         )?.set;
-        if (inputs[0]) {
-          inputs[0].focus();
-          setter?.call(inputs[0], t);
-          inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        if (inputs[1]) {
-          inputs[1].focus();
-          setter?.call(inputs[1], u);
-          inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+        for (const [idx, value] of [t, u, s].entries()) {
+          const target = inputs[idx];
+          if (!target) continue;
+          target.focus();
+          setter?.call(target, value);
+          target.dispatchEvent(new Event('input', { bubbles: true }));
         }
       },
-      { t: title, u: url },
+      { t: title, u: url, s: secret },
     );
 
     // Submit button = MkSystemWebhookEditor.vue:84 の `<MkButton primary

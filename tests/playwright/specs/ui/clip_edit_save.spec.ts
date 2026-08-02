@@ -49,20 +49,24 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
     );
 
     // 3. header の pencil アイコン button (= edit handler) が hydrate
-    // するまで待ってから click。複数 ti-pencil が居るとき (= ページ内
-    // 別 button) と区別するため、MkPageHeader の headerActions に属する
-    // button (`<button><i class="ti ti-pencil">`) のうち最初の 1 個を
-    // 取る。clip own user の clip detail で edit は他に置き換えが無い。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-pencil') !== null);
-      },
-      { timeout: 15_000 },
-    );
+    // するまで待ってから click。
+    //
+    // 単に「最初の ti-pencil button」を取ると **navbar の "Note" (投稿)
+    // button** に当たる (こちらも ti-pencil を持ち DOM 上で先に来る)。
+    // 実際 post form が開いてしまい clips/update は永久に飛ばなかった。
+    // header action の pencil は icon only (= textContent が空) なので、
+    // "Note" / "Edit widgets" 等ラベル付きの pencil button を除外する。
+    await page.waitForFunction(() => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      return btns.some(
+        (b) => b.querySelector('i.ti-pencil') !== null && (b.textContent ?? '').trim() === '',
+      );
+    }, { timeout: 15_000 });
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const editBtn = btns.find((b) => b.querySelector('i.ti-pencil') !== null);
+      const editBtn = btns.find(
+        (b) => b.querySelector('i.ti-pencil') !== null && (b.textContent ?? '').trim() === '',
+      );
       editBtn?.click();
     });
 

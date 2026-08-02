@@ -66,7 +66,13 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
       { timeout: 15_000 },
     );
 
-    // 最初の "Export" button (= "Notes" section の export) を click
+    // 最初の "Export" button (= "Notes" section の export) を click。
+    //
+    // 内側の MkFolder は label が "Export" / icon が ti-download なので、
+    // **folder header button 自身**も `ti-download` + "Export" に match して
+    // しまう。しかも DOM 上こちらが先に来るため、素朴な find では folder の
+    // 開閉を toggle するだけで i/export-notes は永久に飛ばなかった。
+    // `data-testid="folder-header"` を除外して本物の MkButton を取る。
     const exportResp = page.waitForResponse(
       (r) => r.url().includes('/api/i/export-notes') && r.status() < 300,
       { timeout: 15_000 },
@@ -76,7 +82,8 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
       const target = btns.find(
         (b) =>
           b.querySelector('i.ti-download') !== null &&
-          (b.textContent ?? '').includes('Export'),
+          (b.textContent ?? '').includes('Export') &&
+          b.closest('[data-testid="folder-header"]') === null,
       );
       target?.click();
     });

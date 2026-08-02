@@ -61,22 +61,20 @@ test.describe('UI: /settings/avatar-decoration attach via dialog flow', () => {
 
     // 5. 該当 decoration の card を click (= openDecoration → XDialog)
     // avatar-decoration.decoration.vue の root は `<div :class="$style.root"
-    // @click="emit('click')">` で CSS module の root class を持つ。元の
-    // `div, button` 全部対象 + textContent.includes selector は body 等の
-    // page-level 親要素を pickup して click を listener 持たない要素に投げ、
-    // XDialog が出ないまま 90s timeout する flake になっていた。
-    // `[class*="decorations"]` (= 親 grid container) 内の `[class*="root"]`
-    // (= XDecoration root) で精度高く絞る。CSS module hash の差分は
-    // `[class*="..."]` で吸収。
+    // @click="emit('click')">`。ただし production build では CSS module 名が
+    // ハッシュ (`xndfW` 等) に潰れるため `[class*="decorations"]` /
+    // `[class*="root"]` は 1 件も match しない (ここが 90s timeout の原因)。
+    // 代わりに decoration name を含む**最内要素**を click する。HTMLElement
+    // .click() は bubbling する click event を投げるので、card root の
+    // @click ハンドラまで確実に届く。
     await page.evaluate((n) => {
-      const roots: Element[] = [];
-      document.querySelectorAll('[class*="decorations"]').forEach((c) => {
-        c.querySelectorAll('[class*="root"]').forEach((r) => roots.push(r));
-      });
-      const target = roots.find(
-        (el) => (el.textContent ?? '').includes(n),
-      ) as HTMLElement | undefined;
-      target?.click();
+      const hits = Array.from(document.querySelectorAll('*')).filter((el) =>
+        (el.textContent ?? '').includes(n),
+      );
+      const innermost = hits.filter(
+        (el) => !hits.some((other) => other !== el && el.contains(other)),
+      );
+      (innermost[0] as HTMLElement | undefined)?.click();
     }, decorationName);
 
     // 6. XDialog の "Attach" button (ti-check + "Attach" text) hydrate を待つ
@@ -95,7 +93,13 @@ test.describe('UI: /settings/avatar-decoration attach via dialog flow', () => {
 
     // 7. Attach click → i/update round-trip
     const updateResp = page.waitForResponse(
-      (r) => r.url().includes('/api/i/update') && r.status() < 300,
+      // i/update は settings 系の他操作でも飛ぶので、payload に
+      // avatarDecorations を含む request のみを対象にする。素朴な URL 一致
+      // だと無関係な i/update を掴んで body.avatarDecorations が空になる。
+      (r) =>
+        r.url().includes('/api/i/update') &&
+        r.status() < 300 &&
+        (r.request().postData() ?? '').includes('avatarDecorations'),
       { timeout: 15_000 },
     );
     await page.evaluate(() => {

@@ -3,6 +3,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /admin/object-storage page hydrates storage form', () => {
@@ -14,7 +15,17 @@ test.describe('UI: /admin/object-storage page hydrates storage form', () => {
 
   test.setTimeout(60_000);
 
-  test('object storage form hydrates with bucket / endpoint inputs', async ({ page, baseURL }) => {
+  // 他 spec に設定を持ち越さないよう必ず元に戻す。
+  test.afterEach(async ({ request }) => {
+    await callApi(request, 'admin/update-meta', { i: root.token, useObjectStorage: false });
+  });
+
+  test('object storage form hydrates with bucket / endpoint inputs', async ({ page, baseURL, request }) => {
+    // フォーム本体は object-storage.vue の `<template v-if="useObjectStorage">` でゲートされており、
+    // 機能を有効にしないと input が mount されない (この v-if は 2026.6.0 にも
+    // あり、本 spec は元から通っていなかった)。meta を立ててから開く。
+    await callApi(request, 'admin/update-meta', { i: root.token, useObjectStorage: true });
+
     await uiSigninAsRoot(page, baseURL, root);
     const resp = await page.goto(`${baseURL}/admin/object-storage`, {
       waitUntil: 'domcontentloaded',

@@ -98,14 +98,17 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
     );
 
     // 7. invitee.username を type → search 結果が出る。
-    // 旧実装は native `dispatchEvent(new Event('input'))` で v-model bind を
-    // trigger していたが、何らかの timing で MkInput の `@update:modelValue`
-    // → search() chain が走らないケースがあり、search 結果が DOM に出ず
-    // 後段の wait が timeout していた。Playwright の `locator.fill()` は
-    // 内部で keystroke emulation + input event を自動 dispatch するので、
-    // Vue v-model が確実に反応する。`.last()` で dialog 内の最新 mount
-    // input を取る。
-    await page.locator('input[type="text"]').last().fill(invitee.username);
+    // native `dispatchEvent(new Event('input'))` だと MkInput の
+    // `@update:modelValue` → search() chain が走らないケースがあるため、
+    // keystroke emulation + input event を自動 dispatch する
+    // `locator.fill()` を使う。`.last()` で dialog 内の最新 mount input を取る。
+    //
+    // selector は `input[type="text"]` ではなく `input`。MkInput は type を
+    // 明示しないので DOM に **type 属性が付かず**、CSS の
+    // `[type="text"]` は 1 件も match しない (JS の `input.type` は既定値
+    // "text" を返すので DOM 走査では気付けない)。ここで locator が解決せず
+    // fill が 90s 待ち続けていた。
+    await page.locator('input').last().fill(invitee.username);
 
     // 8. 検索結果リストに invitee が出るまで待つ
     await page.waitForFunction(
