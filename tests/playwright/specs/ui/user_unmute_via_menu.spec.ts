@@ -93,7 +93,11 @@ test.describe('UI: user 3-dot menu unmute flow', () => {
       userId: target.id,
     });
     expect(relResp.status()).toBe(200);
-    const rel = await relResp.json();
+    // upstream users/relation は単一 userId (string) でも
+    // `.then(it => [it])` で **必ず配列** を返す (relation.ts:135-137)。
+    // mk-go も #1766 で配列に揃えているので、単体オブジェクトとして
+    // 扱うと全 field が undefined になる。
+    const [rel] = await relResp.json();
     expect(rel.isMuted).toBe(false);
   });
 });

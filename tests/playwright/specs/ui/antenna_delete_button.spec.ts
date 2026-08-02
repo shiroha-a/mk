@@ -91,7 +91,7 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
     await deleteResp;
 
     // 5. API 経由で削除確認 — antennas/show は 404 + NO_SUCH_ANTENNA を返す
-    // (antennas/handler.go:315、UUID 3a1fb010-b54c-4f28-9a06-a5c7c7c1c33a)。
+    // (antennas/show の UUID c06569fb-b025-4f23-b22d-1fcd20d2816b)。
     const showResp = await callApi(request, 'antennas/show', {
       i: root.token,
       antennaId,
@@ -99,6 +99,6 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
     expect(showResp.status()).toBe(404);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_ANTENNA');
-    expect(showBody.error?.id).toBe('3a1fb010-b54c-4f28-9a06-a5c7c7c1c33a');
+    expect(showBody.error?.id).toBe('c06569fb-b025-4f23-b22d-1fcd20d2816b');
   });
 });
