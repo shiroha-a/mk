@@ -20,12 +20,25 @@ BUILD_DIR=./built
 GOFLAGS=-trimpath
 
 # バージョン情報。MisskeyVersion は /api/meta の version フィールド
-# (Misskey TS 互換クライアント向け) で使われる。drop-in 互換のため固定値。
-MKGO_VERSION ?= 0.9.0
-MISSKEY_VERSION ?= 2026.5.1
-LDFLAGS=-s -w \
-	-X github.com/shiroha-a/mk/internal/config.MkGoVersion=$(MKGO_VERSION) \
-	-X github.com/shiroha-a/mk/internal/config.MisskeyVersion=$(MISSKEY_VERSION)
+# (Misskey TS 互換クライアント向け) で使われる。
+#
+# 既定では -X を付けず `internal/config` の定数をそのまま使う。以前はここに
+# 版数をハードコードしていたが、追従のたびに更新が漏れて `make build` が
+# 2 リリース前の版数を報告する状態になっていた (Dockerfile は -X を付けない
+# ので本番は無事だったが、`make build` 産のバイナリと route dump が古い版数を
+# 名乗っていた)。定数を唯一の source of truth にして二重管理をやめる。
+#
+# リリースビルドで上書きしたい場合のみ変数を渡す:
+#   make build MKGO_VERSION=1.0.0
+MKGO_VERSION ?=
+MISSKEY_VERSION ?=
+LDFLAGS=-s -w
+ifneq ($(MKGO_VERSION),)
+LDFLAGS += -X github.com/shiroha-a/mk/internal/config.MkGoVersion=$(MKGO_VERSION)
+endif
+ifneq ($(MISSKEY_VERSION),)
+LDFLAGS += -X github.com/shiroha-a/mk/internal/config.MisskeyVersion=$(MISSKEY_VERSION)
+endif
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey
