@@ -121,6 +121,7 @@ type Handler struct {
 	systemWebhookDispatcher SystemWebhookDispatcher
 	adRepo                  repository.AdRepository
 	avatarDecoRepo          repository.AvatarDecorationRepository
+	avatarDecoInvalidator   AvatarDecorationCacheInvalidator
 	inviteRepo              repository.RegistrationTicketRepository
 	promoNoteRepo           repository.PromoNoteRepository
 	noteFinder              NoteFinder
@@ -330,6 +331,29 @@ func (h *Handler) SetSystemWebhookDispatcher(d SystemWebhookDispatcher) {
 
 // SetAdRepo attaches an AdRepository for admin/ad/*.
 func (h *Handler) SetAdRepo(r repository.AdRepository) { h.adRepo = r }
+
+// AvatarDecorationCacheInvalidator drops the process-wide avatar decoration
+// catalog cache used by entity.PackUserLite. Implemented by
+// core/avatardecoration.Resolver.
+type AvatarDecorationCacheInvalidator interface {
+	Invalidate()
+}
+
+// SetAvatarDecorationInvalidator wires the catalog cache invalidator so that
+// admin-side catalog mutations are visible to user packing immediately
+// instead of after the resolver TTL (#2258).
+func (h *Handler) SetAvatarDecorationInvalidator(inv AvatarDecorationCacheInvalidator) {
+	h.avatarDecoInvalidator = inv
+}
+
+// invalidateAvatarDecorationCache is a nil-safe helper for the mutation
+// handlers. noop when the invalidator is not wired (unit tests).
+func (h *Handler) invalidateAvatarDecorationCache() {
+	if h.avatarDecoInvalidator == nil {
+		return
+	}
+	h.avatarDecoInvalidator.Invalidate()
+}
 
 // SetAvatarDecorationRepo attaches an AvatarDecorationRepository for
 // admin/avatar-decorations/*.
