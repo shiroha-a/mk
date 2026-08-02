@@ -73,17 +73,25 @@ test.describe('UI: note detail page with attached drive file', () => {
     expect(shown.files.length, 'note should have 1 file attached').toBe(1);
     expect(shown.files[0].id).toBe(driveFile.id);
 
-    // MkMediaList は file.url を href にした <a> + 内部 <img> (= thumbnailUrl
-    // 経由の別 host になりうる) を mount する。href は file.url 直リンクなので
-    // pathname で照合すれば偽陽性を避けつつ proxy / 直接配信 両 shape OK。
+    // MkMediaImage は原寸 (file.url) ではなく **thumbnailUrl** を <img src>
+    // に載せる。mk-go の thumbnail は原寸とは別 accessKey で保存されるので
+    // `/files/<accessKey>` は url と一致しない。かつ現行の MkMediaImage は
+    // <a href> ではなく <button> + image viewer なので href 照合も効かない。
+    // よって url / thumbnailUrl どちらかの pathname が <img src> か <a href>
+    // に現れることを条件にする (proxy / 直接配信 両 shape OK)。
     const fileUrl: string = shown.files[0].url;
     expect(typeof fileUrl, 'file.url should be a string').toBe('string');
-    const filePath = new URL(fileUrl).pathname;
+    const candidatePaths = [fileUrl, shown.files[0].thumbnailUrl]
+      .filter((u): u is string => typeof u === 'string' && u.length > 0)
+      .map((u) => new URL(u).pathname);
     await page.waitForFunction(
-      (path) =>
-        Array.from(document.querySelectorAll('a')).some((a) => a.href.includes(path)) ||
-        Array.from(document.querySelectorAll('img')).some((img) => img.src.includes(path)),
-      filePath,
+      (paths) =>
+        paths.some(
+          (path) =>
+            Array.from(document.querySelectorAll('a')).some((a) => a.href.includes(path)) ||
+            Array.from(document.querySelectorAll('img')).some((img) => img.src.includes(path)),
+        ),
+      candidatePaths,
       { timeout: 20_000 },
     );
   });

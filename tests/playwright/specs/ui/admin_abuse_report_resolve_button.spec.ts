@@ -56,23 +56,42 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
       { timeout: 20_000 },
     );
 
-    // 4. "Resolve (accept)" button (= ti-check icon) を click。
+    // 4. 該当 report の row を展開してから "Resolve (Accept)" を click。
     //
-    // 旧実装は「comment text を含み内部に ti-check button を持つ `<div>`」
-    // という selector だったが、textContent.includes 判定で **body / main 等
-    // page-level 親の div** が先に hit して、その親の最初の ti-check button
-    // を click していた可能性。abuse list 上の resolve button ではなく
-    // 別の button (page header / sidebar) を click していたため API が
-    // 走らず 15s timeout していた。
+    // /admin/abuses の各 report は折り畳まれた MkFolder 行で、header は
+    // `<button>` + `i.ti-exclamation-circle`。展開しない限り
+    // "Resolve (Accept)" button は DOM に存在しない。
     //
-    // setup で signup → 1 件の abuse report を作って即解決する flow なので、
-    // /admin/abuses 上の **最初の ti-check button = 該当 report の accept**
-    // と前提できる。シンプルに button-level で取る方が安定。
+    // 「最初の ti-check button を click」という旧実装は、ページ上唯一の
+    // ti-check が AGPL source-code 告知 popup の "Got it!" だったため、
+    // 無関係な button を押して API が飛ばず 15s timeout していた。
     await page.waitForFunction(
-      () => {
+      (u) => {
         const btns = Array.from(document.querySelectorAll('button'));
-        return btns.some((b) => b.querySelector('i.ti-check') !== null);
+        return btns.some(
+          (b) =>
+            b.querySelector('i.ti-exclamation-circle') !== null &&
+            (b.textContent ?? '').includes(u),
+        );
       },
+      target.username,
+      { timeout: 15_000 },
+    );
+    await page.evaluate((u) => {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const header = btns.find(
+        (b) =>
+          b.querySelector('i.ti-exclamation-circle') !== null &&
+          (b.textContent ?? '').includes(u),
+      );
+      header?.click();
+    }, target.username);
+
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('button')).some(
+          (b) => (b.textContent ?? '').trim() === 'Resolve (Accept)',
+        ),
       { timeout: 15_000 },
     );
 
@@ -84,8 +103,8 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
     );
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-check') !== null);
-      target?.click();
+      const accept = btns.find((b) => (b.textContent ?? '').trim() === 'Resolve (Accept)');
+      accept?.click();
     });
     await resolveResp;
   });

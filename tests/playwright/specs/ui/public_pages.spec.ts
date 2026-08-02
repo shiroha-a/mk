@@ -5,12 +5,30 @@
 // を含む public route (= /search / /channels / /tags 等) を navigate して、
 // SPA component が API 応答を受けて render することを verify する。
 
+import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
+import type { RootFixture } from '../../fixtures/ui_auth';
 
 test.describe('UI: public SPA pages with API hydration', () => {
+  let root: RootFixture;
+
+  test.beforeAll(() => {
+    root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
+  });
+
   test.setTimeout(30_000);
 
-  test('navigate to /search and search input is rendered', async ({ page, baseURL }) => {
+  test('navigate to /search and search input is rendered', async ({ page, baseURL, request }) => {
+    // search.vue は `notesSearchAvailable` (= 未ログイン時は
+    // instance.policies.canSearchNotes) が false だと input の代わりに
+    // "Note search is unavailable." を出す。canSearchNotes は upstream の
+    // DEFAULT_POLICIES でも false なので、default policy を立ててから開く。
+    await callApi(request, 'admin/roles/update-default-policies', {
+      i: root.token,
+      policies: { canSearchNotes: true },
+    });
+
     await page.setViewportSize({ width: 1600, height: 900 });
     const resp = await page.goto(`${baseURL}/search`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
@@ -20,6 +38,12 @@ test.describe('UI: public SPA pages with API hydration', () => {
       () => document.querySelectorAll('input').length > 0,
       { timeout: 20_000 },
     );
+
+    // 他 spec に policy を持ち越さない
+    await callApi(request, 'admin/roles/update-default-policies', {
+      i: root.token,
+      policies: { canSearchNotes: false },
+    });
   });
 
   test('navigate to /channels (public channel list)', async ({ page, baseURL }) => {

@@ -80,10 +80,18 @@ test.describe('auth: 2FA (WebAuthn passkey)', () => {
     const regResp = await callApi(request, 'i/2fa/register', { i: me.token, password });
     expect(regResp.status()).toBe(200);
     const regBody = await regResp.json();
-    // TOTP code を 1 回生成して全 verify で再利用 (#839 と同じ理由)。
     const totpToken = authenticator.generate(regBody.secret);
     const doneResp = await callApi(request, 'i/2fa/done', { i: me.token, token: totpToken });
     expect(doneResp.status()).toBe(200);
+
+    // mk-go は TOTP の replay guard (RFC 6238 §5.2) を持つ独自 hardening が
+    // あり、i/2fa/done で消費した code を register-key / key-done で再利用
+    // すると 403 になる。同一 time step 内では新しい code も作れないので、
+    // 以降の 2FA verify には done が返す **single-use backup code** を
+    // 1 個ずつ使う (verify2FAToken は backup code も受け付ける)。
+    const backupCodes: string[] = (await doneResp.json()).backupCodes;
+    expect(Array.isArray(backupCodes)).toBe(true);
+    expect(backupCodes.length).toBeGreaterThanOrEqual(2);
 
     // /api/i/2fa/register-key で WebAuthn creationOptions を取得。
     // upstream は #705 fix 後 PublicKeyCredentialCreationOptions を直返し
@@ -91,7 +99,7 @@ test.describe('auth: 2FA (WebAuthn passkey)', () => {
     const regKeyResp = await callApi(request, 'i/2fa/register-key', {
       i: me.token,
       password,
-      token: totpToken,
+      token: backupCodes[0],
     });
     expect(regKeyResp.status()).toBe(200);
     const creationOpts = await regKeyResp.json();
@@ -135,7 +143,7 @@ test.describe('auth: 2FA (WebAuthn passkey)', () => {
     const keyDoneResp = await callApi(request, 'i/2fa/key-done', {
       i: me.token,
       password,
-      token: totpToken,
+      token: backupCodes[1],
       name: 'virtual-key',
       credential: createdCred,
     });

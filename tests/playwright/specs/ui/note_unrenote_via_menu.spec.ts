@@ -62,32 +62,33 @@ test.describe('UI: own note unrenote via menu flow', () => {
       { timeout: 20_000 },
     );
 
-    // 4. renoteTime button (= ti-repeat icon を持つ button、renote note
-    // 自体の header にある) を click → showRenoteMenu。
-    // MkNote.vue:28 の renote header に `<button ref="renoteTime"
-    // :class="$style.renoteTime"...>` が、line 139 footer に renoteButton
-    // も ti-repeat icon を持つ。CSS module の `.renoteTime` は Vite build
-    // で hash 化されるが `[class*="renoteTime"]` でマッチできる
-    // (#974 review でも同 pattern を採用)。`ti-fw 無し ti-repeat` だけだと
-    // 元 note の footer renote button にも match して race するので、CSS
-    // module class で renoteTime header button だけを精度高く特定する。
+    // 4. renoteTime button (renote note 自体の header) を click →
+    // showRenoteMenu。
+    //
+    // 旧実装の `button[class*="renoteTime"]` は production build で CSS
+    // module 名がハッシュ (`xndfW` 等) に潰れるため 1 件も match しない。
+    // さらに MkNote.vue:28-31 の renoteTime button が持つ icon は
+    // `ti-repeat` ではなく **`ti-dots`** で、この 2 点で selector が
+    // 二重に外れていた。
+    //
+    // 代わりに「`i.ti-dots` と `<time>` (= MkTime) を両方含む button」で
+    // 特定する。note footer の "more" menu button も ti-dots を持つが
+    // そちらに <time> は無いので誤爆しない。
     await page.waitForFunction(
-      () => {
-        const btns = Array.from(
-          document.querySelectorAll('button[class*="renoteTime"]'),
-        ) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-repeat') !== null);
-      },
+      () =>
+        (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]).some(
+          (b) => b.querySelector('i.ti-dots') !== null && b.querySelector('time') !== null,
+        ),
       { timeout: 15_000 },
     );
     // MkNote.vue:28 の renoteTime button は `@mousedown.prevent` のため
     // click event では popup が開かない。mousedown を dispatch する。詳細は
     // note_delete_via_menu.spec.ts のコメント参照。
     await page.evaluate(() => {
-      const btns = Array.from(
-        document.querySelectorAll('button[class*="renoteTime"]'),
-      ) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-repeat') !== null);
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+      const target = btns.find(
+        (b) => b.querySelector('i.ti-dots') !== null && b.querySelector('time') !== null,
+      );
       target?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
     });
 

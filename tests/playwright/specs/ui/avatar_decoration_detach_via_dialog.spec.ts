@@ -82,31 +82,50 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
     // に到達 → bubbling は通るが listener が走らない race の場面があり
     // 90s timeout していた)。
     //
+    // production build では CSS module 名がハッシュ (`xndfW` 等) に潰れるため
+    // `[class*="decorations"]` / `[class*="root"]` は 1 件も match せず、
+    // click が誰にも届かないまま 90s timeout していた。
+    //
     // avatar-decoration.vue は **上部 = 装着済 (attached) / 下部 = 利用可能
-    // (available)** の 2 つの `[class*="decorations"]` grid を持ち、本 spec
-    // の setup では同じ decoration が両方に表示される。`querySelectorAll` は
-    // DOM 順を保証するので 0 番目 (= attached) container を strict に取り、
-    // 下部 available 側を誤って click してしまう risk を排除する。
-    // CSS module hash 差分は `[class*="..."]` で吸収。
-    await page.evaluate((u) => {
-      const containers = Array.from(
-        document.querySelectorAll('[class*="decorations"]'),
+    // (available)** の順で card を並べ、本 spec の setup では同じ decoration
+    // が両方に出る。decoration name を含む最内要素を DOM 順に取り、先頭
+    // (= attached 側) を click する。HTMLElement.click() は bubbling する
+    // click event を投げるので card root の @click まで届く。
+    //
+    // attached grid が available grid より後に mount する race があるため、
+    // 「name を含む最内要素が 2 個 (= attached + available) 出揃う」まで待って
+    // から先頭を click する。1 個の時点で click すると available 側を掴んで
+    // Attach dialog が開き、Remove button が永久に現れない。
+    await page.waitForFunction(
+      (n) => {
+        const hits = Array.from(document.querySelectorAll('*')).filter((el) =>
+          (el.textContent ?? '').includes(n),
+        );
+        return (
+          hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)))
+            .length >= 2
+        );
+      },
+      decorationName,
+      { timeout: 20_000 },
+    );
+    await page.evaluate((n) => {
+      const hits = Array.from(document.querySelectorAll('*')).filter((el) =>
+        (el.textContent ?? '').includes(n),
       );
-      const attachedContainer = containers[0];
-      if (!attachedContainer) return;
-      const roots = Array.from(
-        attachedContainer.querySelectorAll('[class*="root"]'),
+      const innermost = hits.filter(
+        (el) => !hits.some((other) => other !== el && el.contains(other)),
       );
-      const target = roots.find((el) => {
-        const img = el.querySelector('img') as HTMLImageElement | null;
-        return img !== null && img.src.includes(u);
-      }) as HTMLElement | undefined;
-      target?.click();
-    }, decorationUrl);
+      (innermost[0] as HTMLElement | undefined)?.click();
+    }, decorationName);
 
-    // 5. XDialog の "Detach" button (ti-x + "Detach") hydrate を待つ。
+    // 5. XDialog の detach button hydrate を待つ。
     // attach button は usingIndex == null のときに表示されるが、本 spec は
     // usingIndex != null path なので detach button が出現する。
+    //
+    // label は `i18n.ts.detach` で、en-US では **"Remove"** ("Detach" では
+    // ない)。旧実装は "detach" を探していて永久に見つからなかった。
+    // 装着一覧の "Remove All" とは ti-x icon の有無で区別する。
     await page.waitForFunction(
       () => {
         const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
@@ -114,7 +133,7 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
           (b) =>
             !b.disabled &&
             b.querySelector('i.ti-x') !== null &&
-            (b.textContent ?? '').toLowerCase().includes('detach'),
+            (b.textContent ?? '').trim() === 'Remove',
         );
       },
       { timeout: 15_000 },
@@ -122,7 +141,11 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
 
     // 6. Detach click → i/update round-trip (avatarDecorations 配列が縮む)
     const updateResp = page.waitForResponse(
-      (r) => r.url().includes('/api/i/update') && r.status() < 300,
+      // 無関係な i/update を掴まないよう payload で絞る (attach spec と同様)。
+      (r) =>
+        r.url().includes('/api/i/update') &&
+        r.status() < 300 &&
+        (r.request().postData() ?? '').includes('avatarDecorations'),
       { timeout: 15_000 },
     );
     await page.evaluate(() => {
@@ -131,7 +154,7 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
         (b) =>
           !b.disabled &&
           b.querySelector('i.ti-x') !== null &&
-          (b.textContent ?? '').toLowerCase().includes('detach'),
+          (b.textContent ?? '').trim() === 'Remove',
       );
       target?.click();
     });
