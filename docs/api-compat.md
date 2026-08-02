@@ -5,17 +5,16 @@
 - Misskey (TS) version: `2026.7.0`
 - mk-go version: `0.9.2`
 - TS endpoints (POST `/api/*`): **444**
-- mk-go implemented (TS の subset): **442**
-- mk-go coverage of TS: **99.5%**
-- TS only (mk-go 未実装): **2**
+- mk-go implemented (TS の subset): **443**
+- mk-go coverage of TS: **99.8%**
+- TS only (mk-go 未実装): **1**
 - mk-go only (TS spec 外): **41**
 
-## TS 側に存在するが mk-go で未実装 (2)
+## TS 側に存在するが mk-go で未実装 (1)
 
 | Method | Path |
 |--------|------|
 | POST | `/api/reset-db` |
-| GET | `/api/v1/instance/peers` |
 
 ## mk-go 側にしかない endpoint (41)
 
@@ -81,7 +80,7 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/i/flashs/likes` |
 | POST | `/api/signin` |
 
-## 両方に存在する endpoint (442)
+## 両方に存在する endpoint (443)
 
 <details>
 <summary>展開する</summary>
@@ -528,6 +527,7 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/users/search-by-username-and-host` |
 | POST | `/api/users/show` |
 | POST | `/api/users/update-memo` |
+| GET | `/api/v1/instance/peers` |
 | POST | `/api/v2/admin/emoji/list` |
 | POST | `/api/verify-email` |
 

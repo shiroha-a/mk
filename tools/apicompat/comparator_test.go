@@ -94,11 +94,11 @@ func TestCompare(t *testing.T) {
 
 	got := compare(ts, direct, mk)
 
-	wantBoth := []string{
-		"/api/meta",
-		"/api/notes/create",
-		"/api/signin-flow",
-		"/api/signup",
+	wantBoth := []BothRoute{
+		{Method: "POST", Path: "/api/meta"},
+		{Method: "POST", Path: "/api/notes/create"},
+		{Method: "POST", Path: "/api/signin-flow"},
+		{Method: "POST", Path: "/api/signup"},
 	}
 	if !reflect.DeepEqual(got.Both, wantBoth) {
 		t.Errorf("Both mismatch\n got %v\nwant %v", got.Both, wantBoth)
@@ -128,7 +128,7 @@ func TestCompare(t *testing.T) {
 
 func TestRenderMarkdownHeader(t *testing.T) {
 	r := Report{
-		Both:   []string{"/api/meta"},
+		Both:   []BothRoute{{Method: "POST", Path: "/api/meta"}},
 		TSOnly: []TSOnlyRoute{{Method: "POST", Path: "/api/foo"}},
 		MkOnly: []MkOnlyRoute{
 			{Method: "POST", Path: "/api/test/reset-db", Category: CatOther},
@@ -271,5 +271,52 @@ func TestCollectTSDirectRoutes_EmptyIsError(t *testing.T) {
 func TestCollectTSDirectRoutes_MissingFile(t *testing.T) {
 	if _, err := collectTSDirectRoutes(filepath.Join(t.TempDir(), "nope.ts")); err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+// TS が直登録している非 POST endpoint を mk-go が実装している場合、
+// both に **その method で** 入り、mk-only にも TSOnly にも現れないこと。
+//
+// 旧実装は mk-only の走査で `pr.method == "POST" && ts[pr.path]` しか
+// skip しておらず、`GET /api/v1/instance/peers` を実装しても
+// 「mk-go 独自 endpoint」として二重計上していた。加えて both は path だけを
+// 持ち renderer が method を "POST" 固定で出力していたため、matrix 上は
+// `POST /api/v1/instance/peers` という実在しない行になっていた (#2245)。
+func TestCompareTSDirectNonPOSTImplemented(t *testing.T) {
+	ts := []string{"/api/meta"}
+	mk := &DumpedRoutes{
+		MisskeyVersion: "2026.7.0",
+		MkGoVersion:    "0.9.2",
+		Routes: []DumpedRoute{
+			{Method: "POST", Path: "/api/meta"},
+			{Method: "GET", Path: "/api/v1/instance/peers"},
+		},
+	}
+	direct := []tsDirectRoute{
+		{Method: "GET", Path: "/api/v1/instance/peers"},
+	}
+
+	got := compare(ts, direct, mk)
+
+	wantBoth := []BothRoute{
+		{Method: "POST", Path: "/api/meta"},
+		{Method: "GET", Path: "/api/v1/instance/peers"},
+	}
+	if !reflect.DeepEqual(got.Both, wantBoth) {
+		t.Errorf("Both mismatch\n got %v\nwant %v", got.Both, wantBoth)
+	}
+	if len(got.TSOnly) != 0 {
+		t.Errorf("TSOnly should be empty, got %v", got.TSOnly)
+	}
+	if len(got.MkOnly) != 0 {
+		t.Errorf("MkOnly should be empty, got %v", got.MkOnly)
+	}
+
+	md := renderMarkdown(got, "2026.7.0", "0.9.2")
+	if !strings.Contains(md, "| GET | `/api/v1/instance/peers` |") {
+		t.Error("both table should render the GET method for the direct route")
+	}
+	if strings.Contains(md, "| POST | `/api/v1/instance/peers` |") {
+		t.Error("both table must not render the direct GET route as POST")
 	}
 }

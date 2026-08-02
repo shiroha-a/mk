@@ -458,6 +458,16 @@ func (s *Service) FederationHostLists() (FederationHostSets, error) {
 	}, nil
 }
 
+// PeerHosts returns the hosts of every known instance that is not suspended.
+// Backs the Mastodon-compatible GET /api/v1/instance/peers endpoint (#2245).
+//
+// upstream ApiServerService は blocked / silenced を除外せず suspensionState
+// だけで絞る。ここで独自にフィルタを足すと fediverse の統計サイトが見る
+// ピア一覧が TS 実装と食い違うので、あえて同じ条件のままにする。
+func (s *Service) PeerHosts() ([]string, error) {
+	return s.repo.ListPeerHosts()
+}
+
 // IsAllowed reports whether the local instance is willing to federate with
 // the given host. Misskey TS の admin/federation 設定と同じく、3 段階の
 // federation mode + blockedHosts の組み合わせで判定する (#536)。

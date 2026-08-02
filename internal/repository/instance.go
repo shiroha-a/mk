@@ -18,6 +18,13 @@ type InstanceRepository interface {
 	UpdateFields(host string, fields map[string]any) error
 	IncrementCount(host, column string, delta int) error
 	List(filter model.InstanceListFilter) ([]*model.Instance, error)
+	// ListPeerHosts returns the host of every instance that is not suspended,
+	// for the Mastodon-compatible GET /api/v1/instance/peers endpoint.
+	// upstream ApiServerService は `select: {host: true}` /
+	// `where: {suspensionState: 'none'}` の全件走査で limit も order も持たない
+	// ため、こちらも同じ semantics にする (#2245)。host 列だけを引くので
+	// List() の全列 SELECT より軽い。
+	ListPeerHosts() ([]string, error)
 	// ListForRefresh returns instances whose metadata should be refreshed by
 	// the periodic instance-refresh job (#393). Only live instances
 	// (suspensionState = 'none' AND isNotResponding = false) whose
@@ -109,6 +116,19 @@ func (r *instanceRepository) ListForRefresh(staleBefore time.Time, limit int) ([
 		return nil, err
 	}
 	return rows, nil
+}
+
+// ListPeerHosts returns non-suspended instance hosts. See the interface doc.
+func (r *instanceRepository) ListPeerHosts() ([]string, error) {
+	var hosts []string
+	err := r.db.Model(&model.Instance{}).
+		Where(`"suspensionState" = ?`, string(model.SuspensionStateNone)).
+		Order("host ASC").
+		Pluck("host", &hosts).Error
+	if err != nil {
+		return nil, err
+	}
+	return hosts, nil
 }
 
 // List returns instances matching the filter, ordered by the requested sort.

@@ -82,12 +82,21 @@ func dedupSorted(in []string) []string {
 
 // Report holds the comparison result between TS and mk-go endpoints.
 type Report struct {
-	Both []string
+	// Both も method 込みで持つ。endpoints/ 由来はすべて POST だが、
+	// ApiServerService.ts 直登録の `GET /api/v1/instance/peers` を POST と
+	// 表示してしまうと matrix が実態と食い違う。
+	Both []BothRoute
 	// TSOnly は method 込みで持つ。endpoints/ 由来はすべて POST だが、
 	// ApiServerService.ts の直登録には GET (`/api/v1/instance/peers`) も
 	// あり、method を落とすと未実装 endpoint を正しく表示できない。
 	TSOnly []TSOnlyRoute
 	MkOnly []MkOnlyRoute
+}
+
+// BothRoute is an endpoint present on both sides.
+type BothRoute struct {
+	Method string
+	Path   string
 }
 
 // TSOnlyRoute is a Misskey TS endpoint that mk-go does not implement.
@@ -233,11 +242,15 @@ func compare(tsEndpoints []string, direct []tsDirectRoute, mk *DumpedRoutes) Rep
 		pending = append(pending, pendingRoute{method: r.Method, path: p})
 	}
 
-	var both []string
+	var both []BothRoute
 	var tsOnly []TSOnlyRoute
+	// matchedBoth は "METHOD PATH" で both に分類済の mk-go route を記録する。
+	// mk-only の走査でこれを引いて二重計上を防ぐ。
+	matchedBoth := make(map[string]bool)
 	for p := range ts {
 		if mkPOSTpaths[p] {
-			both = append(both, p)
+			both = append(both, BothRoute{Method: "POST", Path: p})
+			matchedBoth["POST "+p] = true
 		} else {
 			tsOnly = append(tsOnly, TSOnlyRoute{Method: "POST", Path: p})
 		}
@@ -245,8 +258,10 @@ func compare(tsEndpoints []string, direct []tsDirectRoute, mk *DumpedRoutes) Rep
 	// 非 POST の直登録 (現状 `GET /api/v1/instance/peers`) は method 込みで
 	// 突き合わせる。mk-go 側に同 method の route が無ければ未実装。
 	for _, d := range tsDirectNonPOST {
-		if mkMethodPaths[d.Method+" "+d.Path] {
-			both = append(both, d.Path)
+		key := d.Method + " " + d.Path
+		if mkMethodPaths[key] {
+			both = append(both, BothRoute{Method: d.Method, Path: d.Path})
+			matchedBoth[key] = true
 			continue
 		}
 		tsOnly = append(tsOnly, TSOnlyRoute{Method: d.Method, Path: d.Path})
@@ -257,7 +272,7 @@ func compare(tsEndpoints []string, direct []tsDirectRoute, mk *DumpedRoutes) Rep
 	// 上の POST 走査が完了してから行う必要がある。
 	var mkOnly []MkOnlyRoute
 	for _, pr := range pending {
-		if pr.method == "POST" && ts[pr.path] {
+		if matchedBoth[pr.method+" "+pr.path] {
 			continue // 既に both に分類済
 		}
 		mkOnly = append(mkOnly, MkOnlyRoute{
@@ -267,7 +282,12 @@ func compare(tsEndpoints []string, direct []tsDirectRoute, mk *DumpedRoutes) Rep
 		})
 	}
 
-	sort.Strings(both)
+	sort.Slice(both, func(i, j int) bool {
+		if both[i].Path != both[j].Path {
+			return both[i].Path < both[j].Path
+		}
+		return both[i].Method < both[j].Method
+	})
 	sort.Slice(tsOnly, func(i, j int) bool {
 		if tsOnly[i].Path != tsOnly[j].Path {
 			return tsOnly[i].Path < tsOnly[j].Path
@@ -375,8 +395,8 @@ func renderMarkdown(r Report, tsVersion, mkVersion string) string {
 	} else {
 		b.WriteString("<details>\n<summary>展開する</summary>\n\n")
 		b.WriteString("| Method | Path |\n|--------|------|\n")
-		for _, p := range r.Both {
-			fmt.Fprintf(&b, "| POST | `%s` |\n", p)
+		for _, rt := range r.Both {
+			fmt.Fprintf(&b, "| %s | `%s` |\n", rt.Method, rt.Path)
 		}
 		b.WriteString("\n</details>\n")
 	}

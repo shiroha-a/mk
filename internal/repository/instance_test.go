@@ -422,3 +422,46 @@ func TestInstanceRepository_IncrementCounters_DBError(t *testing.T) {
 	assert.Error(t, repo.IncrementFollowersCount("any.example", 1))
 	assert.Error(t, repo.IncrementFollowingCount("any.example", 1))
 }
+
+// ListPeerHosts は suspended を除いた host を昇順で返すこと。
+// GET /api/v1/instance/peers (Mastodon 互換) の裏側 (#2245)。
+func TestInstanceRepository_ListPeerHosts(t *testing.T) {
+	repo := NewInstanceRepository(testDB)
+
+	live1 := newTestInstance("i_peers_1", "zeta.peers.example")
+	live2 := newTestInstance("i_peers_2", "alpha.peers.example")
+	suspended := newTestInstance("i_peers_3", "gone.peers.example")
+	suspended.SuspensionState = model.SuspensionStateManuallySuspended
+	autoSuspended := newTestInstance("i_peers_4", "dead.peers.example")
+	autoSuspended.SuspensionState = model.SuspensionStateAutoSuspendedForNotResponding
+	// blocked / 応答不能でも upstream は除外しないので peers に残ること
+	notResponding := newTestInstance("i_peers_5", "down.peers.example")
+	notResponding.IsNotResponding = true
+
+	for _, inst := range []*model.Instance{live1, live2, suspended, autoSuspended, notResponding} {
+		require.NoError(t, repo.Create(inst))
+		defer cleanupInstance(t, inst.ID)
+	}
+
+	hosts, err := repo.ListPeerHosts()
+	require.NoError(t, err)
+
+	got := map[string]bool{}
+	for _, h := range hosts {
+		got[h] = true
+	}
+	assert.True(t, got["alpha.peers.example"])
+	assert.True(t, got["zeta.peers.example"])
+	assert.True(t, got["down.peers.example"], "isNotResponding は除外しない")
+	assert.False(t, got["gone.peers.example"], "手動 suspend は除外する")
+	assert.False(t, got["dead.peers.example"], "自動 suspend も除外する")
+
+	// 並びは host ASC。テスト用 host だけ抜き出して単調増加を確認する。
+	var ours []string
+	for _, h := range hosts {
+		if len(h) > len(".peers.example") && h[len(h)-len(".peers.example"):] == ".peers.example" {
+			ours = append(ours, h)
+		}
+	}
+	assert.Equal(t, []string{"alpha.peers.example", "down.peers.example", "zeta.peers.example"}, ours)
+}
