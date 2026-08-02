@@ -42,7 +42,7 @@ test.describe('UI: /admin/moderation blockedHosts save flow', () => {
       await page.waitForFunction(
         () => {
           const headers = Array.from(
-            document.querySelectorAll('[data-cy-folder-header]'),
+            document.querySelectorAll('[data-testid="folder-header"]'),
           ) as HTMLElement[];
           return headers.some((h) =>
             (h.textContent ?? '').includes('Blocked Instances'),
@@ -54,7 +54,7 @@ test.describe('UI: /admin/moderation blockedHosts save flow', () => {
       // "Blocked hosts" folder を expand
       await page.evaluate(() => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
           (h.textContent ?? '').includes('Blocked Instances'),

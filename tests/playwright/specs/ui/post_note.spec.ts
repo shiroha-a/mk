@@ -30,11 +30,11 @@ test.describe('UI: post note via composer modal', () => {
     // (force: true でも actionable check が race することがあるため、
     // dispatchEvent で直接 button の click handler を呼ぶ)。
     await page.evaluate(() => {
-      const btn = document.querySelector('[data-cy-open-post-form]') as HTMLButtonElement | null;
+      const btn = document.querySelector('[data-testid="open-post-form"]') as HTMLButtonElement | null;
       btn?.click();
     });
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-post-form-text]') !== null,
+      () => document.querySelector('[data-testid="post-form-text"]') !== null,
       { timeout: 15_000 },
     );
 
@@ -45,7 +45,7 @@ test.describe('UI: post note via composer modal', () => {
     // / fill は modal の actionable check で stuck しやすいので、native focus
     // + value set + dispatchEvent('input') で Vue v-model に届ける。
     await page.evaluate((text) => {
-      const t = document.querySelector('[data-cy-post-form-text]') as HTMLTextAreaElement | null;
+      const t = document.querySelector('[data-testid="post-form-text"]') as HTMLTextAreaElement | null;
       if (!t) return;
       t.focus();
       // native HTMLTextAreaElement の value setter を経由して Vue が反応する
@@ -57,13 +57,13 @@ test.describe('UI: post note via composer modal', () => {
     // Vue の reactivity 反映 + canPost 計算待ち
     await page.waitForFunction(
       () => {
-        const submit = document.querySelector('[data-cy-open-post-form-submit]') as HTMLButtonElement | null;
+        const submit = document.querySelector('[data-testid="post-form-submit"]') as HTMLButtonElement | null;
         return submit !== null && !submit.disabled;
       },
       { timeout: 5_000 },
     );
 
-    // submit ボタン (= [data-cy-open-post-form-submit]) も同じく programmatic
+    // submit ボタン (= [data-testid="post-form-submit"]) も同じく programmatic
     // click で動作させる (= modal 内に複数 submit ボタンがある可能性 + Vue
     // の click handler が disabled state 連動で再 binding されるため、
     // dispatchEvent ベースで確実に発火する)。
@@ -72,7 +72,7 @@ test.describe('UI: post note via composer modal', () => {
       { timeout: 15_000 },
     );
     await page.evaluate(() => {
-      const submit = document.querySelector('[data-cy-open-post-form-submit]') as HTMLButtonElement | null;
+      const submit = document.querySelector('[data-testid="post-form-submit"]') as HTMLButtonElement | null;
       submit?.click();
     });
     const noteCreate = await createResp;

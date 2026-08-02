@@ -50,7 +50,7 @@ test.describe('UI: authenticated route navigation', () => {
     expect(resp!.status()).toBe(200);
     // SPA hydration 完了 = splash が消えて navbar が visible になる
     // (= authenticated state が維持されている確認も兼ねる)
-    await expect(page.locator('[data-cy-open-post-form]').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('[data-testid="open-post-form"]').first()).toBeVisible({ timeout: 20_000 });
   });
 
   test('navigate to /settings/profile after signin', async ({ page, baseURL }) => {
@@ -74,9 +74,9 @@ test.describe('UI: authenticated route navigation', () => {
     expect(resp!.status()).toBe(200);
 
     // local timeline は WebSocket + initial GET を経由するため hydration
-    // 完了まで時間がかかる。最低限 navbar (= [data-cy-open-post-form]) が
+    // 完了まで時間がかかる。最低限 navbar (= [data-testid="open-post-form"]) が
     // 維持されていれば authenticated state が維持されている確認になる。
-    await expect(page.locator('[data-cy-open-post-form]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-testid="open-post-form"]').first()).toBeVisible({ timeout: 15_000 });
   });
 
   test('navigate to /@alice (own profile by username)', async ({ page, baseURL }) => {

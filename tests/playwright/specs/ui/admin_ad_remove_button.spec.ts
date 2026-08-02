@@ -80,7 +80,7 @@ test.describe('UI: /admin/ads remove button flow', () => {
 
     // 4. confirm dialog OK click
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
 
@@ -90,7 +90,7 @@ test.describe('UI: /admin/ads remove button flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

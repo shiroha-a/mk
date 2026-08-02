@@ -94,7 +94,7 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
     }, newName);
 
     // 6. MkFormDialog OK → clips/update round-trip
-    // 注: `[data-cy-modal-dialog-ok]` 属性は MkDialog.vue (= os.confirm /
+    // 注: `[data-testid="modal-dialog-ok"]` 属性は MkDialog.vue (= os.confirm /
     // os.alert 系) にしかない。MkFormDialog.vue (= os.form 経由) は
     // MkModalWindow の `<MkButton primary gradate small rounded>{{
     // i18n.ts.done }} <i class="ti ti-check">` (MkModalWindow.vue:15) を

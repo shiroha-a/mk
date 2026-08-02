@@ -30,11 +30,11 @@ test.describe('UI: /admin/external-services Google Analytics save flow', () => {
 
     // 1 つ目の folder header (Google Analytics) を click して expand
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-folder-header]') !== null,
+      () => document.querySelector('[data-testid="folder-header"]') !== null,
       { timeout: 20_000 },
     );
     await page.evaluate(() => {
-      const header = document.querySelector('[data-cy-folder-header]') as
+      const header = document.querySelector('[data-testid="folder-header"]') as
         | HTMLButtonElement
         | null;
       header?.click();

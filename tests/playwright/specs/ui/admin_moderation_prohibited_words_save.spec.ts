@@ -36,7 +36,7 @@ test.describe('UI: /admin/moderation prohibitedWords save flow', () => {
       });
 
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
+        () => document.querySelectorAll('[data-testid="folder-header"]').length >= 5,
         { timeout: 20_000 },
       );
 
@@ -45,7 +45,7 @@ test.describe('UI: /admin/moderation prohibitedWords save flow', () => {
       // "Prohibited words" で始まり "username" を含まないものを選ぶ。
       await page.evaluate(() => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         const target = headers.find((h) => {
           const t = (h.textContent ?? '').trim();

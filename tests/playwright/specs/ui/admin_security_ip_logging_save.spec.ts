@@ -42,14 +42,14 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
     // page hydrate を待つ — admin/security の folder header (data-cy-folder-header)
     // が複数 mount するまで。
     await page.waitForFunction(
-      () => document.querySelectorAll('[data-cy-folder-header]').length >= 3,
+      () => document.querySelectorAll('[data-testid="folder-header"]').length >= 3,
       { timeout: 20_000 },
     );
 
     // "Log IP address" を含む folder header を click して expand
     await page.evaluate(() => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Log IP address'),
