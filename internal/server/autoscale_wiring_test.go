@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
+	"github.com/shiroha-a/mk/internal/queue/runtimestats"
 )
 
 // scriptableDriver is a driver.Driver fake whose WorkerCount /
@@ -126,7 +127,7 @@ func TestStartAutoScale_DisabledReturnsNil(t *testing.T) {
 	cfg := &config.Config{JobQueueAutoScale: false}
 	d := newScriptableDriver(nil)
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
 	assert.Nil(t, runner, "runner should be nil when auto-scale is off")
 	assert.Equal(t, int32(0), d.resizes.Load(), "no Resize call when auto-scale is off")
@@ -154,7 +155,7 @@ func TestStartAutoScale_DeliverInboxKnobsOnly_OthersStillManaged(t *testing.T) {
 		"deliver": dc, "inbox": ic, "export": 0, "push": 0, "webhook": 0,
 	})
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner, "runner should start for unmanaged queues (export/push/webhook)")
 	t.Cleanup(func() { runner.Stop(context.Background()) })
@@ -183,7 +184,7 @@ func TestStartAutoScale_RejectsAsynqDriver(t *testing.T) {
 	d := newScriptableDriver(nil)
 	d.resizeErr = driver.ErrResizeNotSupported
 
-	_, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	_, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, driver.ErrResizeNotSupported)
 }
@@ -200,7 +201,7 @@ func TestStartAutoScale_MinWorkersFloorExceedsGlobalCapRejected(t *testing.T) {
 	}
 	d := newScriptableDriver(nil)
 
-	_, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	_, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds maxWorkersGlobal")
 }
@@ -222,7 +223,7 @@ func TestStartAutoScale_TickerScalesUpOnBacklog(t *testing.T) {
 	d := newScriptableDriver(nil)
 	m := queuemetrics.New()
 
-	runner, err := startAutoScale(context.Background(), cfg, d, m)
+	runner, err := startAutoScale(context.Background(), cfg, d, m, nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 	t.Cleanup(func() { runner.Stop(context.Background()) })
@@ -273,7 +274,7 @@ func TestStartAutoScale_GlobalCapBlocksScaleUp(t *testing.T) {
 	d := newScriptableDriver(nil)
 	m := queuemetrics.New()
 
-	runner, err := startAutoScale(context.Background(), cfg, d, m)
+	runner, err := startAutoScale(context.Background(), cfg, d, m, nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 	t.Cleanup(func() { runner.Stop(context.Background()) })
@@ -298,7 +299,7 @@ func TestAutoscaleRunner_Stop(t *testing.T) {
 	cfg := &config.Config{JobQueueAutoScale: true}
 	d := newScriptableDriver(nil)
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 
@@ -324,7 +325,7 @@ func TestAutoscaleRunner_Stop_RespectsDeadline(t *testing.T) {
 	cfg := &config.Config{JobQueueAutoScale: true}
 	d := newScriptableDriver(nil)
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 
@@ -377,7 +378,7 @@ func TestStartAutoScale_TickRecoversFromPanic(t *testing.T) {
 	// 初期 Resize × 5 queue + 1 tick の Resize で 6 = panic 発火タイミング。
 	d.panicAfter.Store(6)
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 
@@ -410,10 +411,63 @@ func TestStartAutoScale_InitialResizeFailureDoesNotPreventStart(t *testing.T) {
 	d.resizeErr = errors.New("temporary redis hiccup")
 	defer func() { d.resizeErr = nil }()
 
-	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New())
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	// startup-time validation passes (Resize is called but failure is logged
 	// and tolerated); only ErrResizeNotSupported triggers startup rejection.
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 	t.Cleanup(func() { runner.Stop(context.Background()) })
+}
+
+// scale-up が起きたとき、Prometheus counter だけでなく runtimestats の履歴にも
+// 記録されること (#2277)。counter は「何回起きたか」しか持たないので、
+// admin UI が「いつ何本から何本へ動いたか」を出すにはこちらが要る。
+func TestStartAutoScale_RecordsScaleEventsForAdminUI(t *testing.T) {
+	minW := 2
+	maxW := 64
+	cooldown := 1
+	cfg := &config.Config{
+		JobQueueAutoScale:        true,
+		MinWorkers:               &minW,
+		MaxWorkers:               &maxW,
+		AutoScaleCooldownSeconds: &cooldown,
+	}
+	d := newScriptableDriver(nil)
+	stats := runtimestats.New()
+
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), stats)
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
+
+	// 初期 Resize で min まで上がるのを待つ。
+	deadline := time.After(2 * time.Second)
+	for d.WorkerCount("deliver") != minW {
+		select {
+		case <-deadline:
+			t.Fatalf("deliver never reached min=%d", minW)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// depth を閾値 (workers × 4) 超えにして scale-up を誘発。
+	d.setPending("deliver", 100)
+
+	deadline = time.After(5 * time.Second)
+	for len(stats.Snapshot("deliver").ScaleEvents) == 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("scale event was never recorded (workers=%d)", d.WorkerCount("deliver"))
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	ev := stats.Snapshot("deliver").ScaleEvents[0]
+	assert.Equal(t, "deliver", ev.Queue)
+	assert.Equal(t, "up", ev.Direction)
+	assert.Greater(t, ev.To, ev.From, "scale-up は worker 数が増える方向")
+	assert.False(t, ev.At.IsZero(), "発生時刻が入っていること")
+
+	// 他 queue は depth 0 のままなので履歴も空 (誤って全 queue に記録しない)。
+	assert.Empty(t, stats.Snapshot("inbox").ScaleEvents)
 }

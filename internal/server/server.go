@@ -22,6 +22,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
+	"github.com/shiroha-a/mk/internal/queue/runtimestats"
 	"github.com/shiroha-a/mk/internal/repository"
 	mksentry "github.com/shiroha-a/mk/internal/sentry"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -50,8 +51,13 @@ type Server struct {
 	// auto-scale が活きていれば counter は内部 increment するが、register
 	// されないので外部公開はされない。
 	queueMetrics *queuemetrics.Metrics
-	autoscale    *autoscaleRunner
-	chartMgmt    *chart.ManagementService
+
+	// queueRuntimeStats は admin UI 向けの短期ランタイム統計 (worker 遅延 /
+	// auto-scale 履歴)。/metrics は無認証公開で LB ACL 必須のため admin から
+	// 読めない。その穴を埋めるプロセスローカルな snapshot (#2277)。
+	queueRuntimeStats *runtimestats.Recorder
+	autoscale         *autoscaleRunner
+	chartMgmt         *chart.ManagementService
 	// deliverSvc は federation deliver service への参照。本番では asynq
 	// 経由で deliver を enqueue するが、test (#780) で queue を bypass する
 	// ための SetSyncDeliverHookForTest を呼べるよう参照を保持する。
@@ -242,6 +248,16 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		queueScheduler: queueScheduler,
 		queueInspector: queueInspector,
 		queueMetrics:   newQueueMetrics(queueDriver),
+
+		// admin UI 向けの短期ランタイム統計 (#2277)。config に関係なく常に
+		// 有効。ring buffer 固定長なのでメモリは queue 数 × 数 KB。
+		queueRuntimeStats: runtimestats.New(),
+	}
+
+	// driver の dispatch hook を Prometheus と runtimestats の両方へ配る。
+	// SetObserver は Start 前に呼ぶ必要がある (Start が closure に snapshot する)。
+	if setter, ok := queueDriver.Server().(interface{ SetObserver(driver.Observer) }); ok {
+		s.queueRuntimeStatsObserver(setter)
 	}
 
 	s.setupRoutes()
@@ -315,7 +331,7 @@ func (s *Server) StartBackgroundForTest() error {
 	// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
 	// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
 	// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
-	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics)
+	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics, s.queueRuntimeStats)
 	if err != nil {
 		return fmt.Errorf("start autoscale: %w", err)
 	}
@@ -380,7 +396,7 @@ func (s *Server) Start() error {
 	// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
 	// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
 	// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
-	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics)
+	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics, s.queueRuntimeStats)
 	if err != nil {
 		return fmt.Errorf("start autoscale: %w", err)
 	}
@@ -458,4 +474,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // from setupRoutes after the chart engines are constructed.
 func (s *Server) setChartManagement(m *chart.ManagementService) {
 	s.chartMgmt = m
+}
+
+// queueRuntimeStatsObserver wires the driver dispatch hook to both the
+// Prometheus histograms and the admin-facing runtimestats recorder (#2277).
+//
+// 分離しているのは、Prometheus 側は長期の scrape 用 / runtimestats 側は
+// admin UI が読む短期 snapshot 用で寿命が違うため。driver からは 1 本の
+// Observer に見せる。
+func (s *Server) queueRuntimeStatsObserver(setter interface{ SetObserver(driver.Observer) }) {
+	obs := queuemetrics.MultiObserver{
+		queuemetrics.NewObserver(s.queueMetrics),
+		s.queueRuntimeStats,
+	}
+	setter.SetObserver(obs)
 }

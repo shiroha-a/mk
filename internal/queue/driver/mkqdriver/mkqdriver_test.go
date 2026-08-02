@@ -5,10 +5,13 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mkq"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -411,7 +414,7 @@ func TestDeriveJobState(t *testing.T) {
 }
 
 func TestNewDispatchHandler_NoHandler(t *testing.T) {
-	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{})
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{}, "deliver", nil)
 	job := &mkq.Job[framedPayload]{Data: framedPayload{Type: "missing"}}
 	_, err := dispatch(context.Background(), job)
 	if err == nil || !errIs(err, mkq.ErrUnrecoverable) {
@@ -426,7 +429,7 @@ func TestNewDispatchHandler_SkipRetryConverts(t *testing.T) {
 			called++
 			return driver.SkipRetry
 		},
-	})
+	}, "deliver", nil)
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "x"}})
 	if err == nil || !errIs(err, mkq.ErrUnrecoverable) || !errIs(err, driver.SkipRetry) {
 		t.Fatalf("SkipRetry must wrap both driver.SkipRetry and mkq.ErrUnrecoverable, got %v", err)
@@ -449,7 +452,7 @@ func TestNewDispatchHandler_NormalReturn(t *testing.T) {
 			}
 			return nil
 		},
-	})
+	}, "deliver", nil)
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "x", Body: []byte("body")}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -597,4 +600,130 @@ func TestInspector_Queues_ReturnsManagedNamesOnly(t *testing.T) {
 	if got2[0] != "deliver" {
 		t.Fatalf("driver state mutated via returned slice: got2[0]=%q", got2[0])
 	}
+}
+
+// recordingObserver captures driver.Observer callbacks for assertions.
+type recordingObserver struct {
+	mu       sync.Mutex
+	waits    []time.Duration
+	procs    []time.Duration
+	failures []bool
+	queues   []string
+}
+
+func (o *recordingObserver) ObserveDispatchWait(queue string, d time.Duration) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.queues = append(o.queues, queue)
+	o.waits = append(o.waits, d)
+}
+
+func (o *recordingObserver) ObserveProcessing(queue string, d time.Duration, failed bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.procs = append(o.procs, d)
+	o.failures = append(o.failures, failed)
+}
+
+// observer を配線すると dispatch wait と処理時間の両方が観測されること (#2277)。
+// dispatch wait は job.Timestamp (BullMQ の作成時刻) からの経過。
+func TestDispatchHandler_ObservesTimings(t *testing.T) {
+	obs := &recordingObserver{}
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
+		"t": func(ctx context.Context, task driver.Task) error {
+			time.Sleep(2 * time.Millisecond)
+			return nil
+		},
+	}, "deliver", obs)
+
+	job := &mkq.Job[framedPayload]{
+		Data:      framedPayload{Type: "t"},
+		Timestamp: time.Now().Add(-50 * time.Millisecond),
+	}
+	_, err := dispatch(context.Background(), job)
+	require.NoError(t, err)
+
+	require.Len(t, obs.waits, 1)
+	assert.Equal(t, []string{"deliver"}, obs.queues)
+	assert.GreaterOrEqual(t, obs.waits[0], 50*time.Millisecond)
+	require.Len(t, obs.procs, 1)
+	assert.GreaterOrEqual(t, obs.procs[0], time.Millisecond)
+	assert.Equal(t, []bool{false}, obs.failures)
+}
+
+// handler が error を返したら failed=true で観測されること。
+func TestDispatchHandler_ObservesFailure(t *testing.T) {
+	obs := &recordingObserver{}
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
+		"t": func(ctx context.Context, task driver.Task) error { return errors.New("boom") },
+	}, "inbox", obs)
+
+	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
+		Data: framedPayload{Type: "t"}, Timestamp: time.Now(),
+	})
+	require.Error(t, err)
+	assert.Equal(t, []bool{true}, obs.failures)
+}
+
+// retry (AttemptsMade > 0) では dispatch wait を観測しない。job.Timestamp は
+// 作成時刻のままなので、含めると backoff 待ちが「詰まり」として混ざる。
+// 処理時間は毎試行観測する。
+func TestDispatchHandler_SkipsWaitOnRetry(t *testing.T) {
+	obs := &recordingObserver{}
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
+		"t": func(ctx context.Context, task driver.Task) error { return nil },
+	}, "webhook", obs)
+
+	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
+		Data:         framedPayload{Type: "t"},
+		Timestamp:    time.Now().Add(-90 * time.Second),
+		AttemptsMade: 2,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, obs.waits, "backoff 待ちを dispatch wait として数えない")
+	assert.Len(t, obs.procs, 1)
+}
+
+// Timestamp が zero の job では dispatch wait を観測しない (誤った巨大値を
+// 出さない)。処理時間は観測する。
+func TestDispatchHandler_SkipsWaitWithoutTimestamp(t *testing.T) {
+	obs := &recordingObserver{}
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
+		"t": func(ctx context.Context, task driver.Task) error { return nil },
+	}, "deliver", obs)
+
+	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "t"}})
+	require.NoError(t, err)
+	assert.Empty(t, obs.waits)
+	assert.Len(t, obs.procs, 1)
+}
+
+// observer 未配線でも従来どおり動くこと (hot path の nil guard)。
+func TestDispatchHandler_NilObserver(t *testing.T) {
+	called := false
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
+		"t": func(ctx context.Context, task driver.Task) error { called = true; return nil },
+	}, "deliver", nil)
+
+	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
+		Data: framedPayload{Type: "t"}, Timestamp: time.Now(),
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+// SetObserver は Start が closure に snapshot するので Start 前に呼ぶ契約。
+// ここでは設定した observer が Server に保持されることだけを確認する
+// (実際の dispatch 経路は TestDispatchHandler_* が直接検証する)。
+func TestServer_SetObserver(t *testing.T) {
+	s := &Server{handlers: map[string]driver.HandlerFunc{}}
+	assert.Nil(t, s.observer)
+
+	obs := &recordingObserver{}
+	s.SetObserver(obs)
+	assert.Same(t, obs, s.observer)
+
+	// 上書きできること (最後の caller が勝つ)。
+	s.SetObserver(nil)
+	assert.Nil(t, s.observer)
 }

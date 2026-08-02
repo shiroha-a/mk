@@ -69,6 +69,10 @@ type Server struct {
 	perQueueConcurrent map[string]int
 	perQueueRate       map[string]int
 
+	// observer is the optional per-job timing hook (#2277). nil のときは
+	// dispatch path で clock も触らない。
+	observer driver.Observer
+
 	mu       sync.Mutex
 	handlers map[string]driver.HandlerFunc
 	pools    map[string]*workerPool
@@ -140,8 +144,6 @@ func (s *Server) Start() error {
 	s.started = true
 	s.mu.Unlock()
 
-	dispatch := newDispatchHandler(handlersSnapshot)
-
 	// Iterate queue names in deterministic order so partial-startup
 	// error messages are reproducible across runs (Go map iteration
 	// is randomized).
@@ -190,7 +192,7 @@ func (s *Server) Start() error {
 
 		pool := &workerPool{
 			queue:    s.driver.queues[name],
-			handler:  dispatch,
+			handler:  newDispatchHandler(handlersSnapshot, name, s.observer),
 			optsBase: optsBase,
 		}
 		// `*Locked` 名 method の convention で pool.mu を保持。新規構築直後の
@@ -366,7 +368,7 @@ func stopWorker(w *mkq.Worker) {
 //
 // driver.SkipRetry → mkq.ErrUnrecoverable conversion lives here so
 // processors can keep their existing %w-wrap idiom unchanged.
-func newDispatchHandler(handlers map[string]driver.HandlerFunc) mkq.Handler[framedPayload] {
+func newDispatchHandler(handlers map[string]driver.HandlerFunc, queue string, obs driver.Observer) mkq.Handler[framedPayload] {
 	return func(ctx context.Context, job *mkq.Job[framedPayload]) (any, error) {
 		taskType := job.Data.Type
 		h := handlers[taskType]
@@ -375,10 +377,36 @@ func newDispatchHandler(handlers map[string]driver.HandlerFunc) mkq.Handler[fram
 			// いないので無限ループになる)。
 			return nil, fmt.Errorf("mkqdriver: no handler for %q: %w", taskType, mkq.ErrUnrecoverable)
 		}
+		// observer 未配線なら clock も触らない (hot path、#2277)。
+		if obs == nil {
+			err := h(ctx, mkqTask{taskType: taskType, payload: job.Data.Body})
+			if err != nil && errors.Is(err, driver.SkipRetry) {
+				return nil, fmt.Errorf("%w: %w", err, mkq.ErrUnrecoverable)
+			}
+			return nil, err
+		}
+		// dispatch wait は **初回試行のみ** 観測する。job.Timestamp は BullMQ の
+		// 作成時刻で attempt ごとに更新されないため、retry 分を含めると backoff
+		// 待ち (意図的な遅延) が「詰まり」として混ざり、p95 が数十秒に化ける。
+		// 見たいのは「enqueue された job がどれだけ待たされてから最初に拾われたか」
+		// = 混雑度なので、AttemptsMade == 0 に限定する。
+		if job.AttemptsMade == 0 && !job.Timestamp.IsZero() {
+			obs.ObserveDispatchWait(queue, time.Since(job.Timestamp))
+		}
+		started := time.Now()
 		err := h(ctx, mkqTask{taskType: taskType, payload: job.Data.Body})
+		obs.ObserveProcessing(queue, time.Since(started), err != nil)
 		if err != nil && errors.Is(err, driver.SkipRetry) {
 			return nil, fmt.Errorf("%w: %w", err, mkq.ErrUnrecoverable)
 		}
 		return nil, err
 	}
+}
+
+// SetObserver wires the per-job timing hook. Must be called before Start;
+// Start snapshots the observer into each queue's dispatch closure.
+func (s *Server) SetObserver(obs driver.Observer) {
+	s.mu.Lock()
+	s.observer = obs
+	s.mu.Unlock()
 }

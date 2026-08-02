@@ -179,3 +179,19 @@ type Driver interface {
 	// because the auto-scale controller enforces it upstream).
 	Resize(qname string, n int) error
 }
+
+// Observer receives per-job timing observations from a driver's dispatch
+// path. Wiring is optional: drivers that have no observer configured must
+// behave exactly as before (no allocation, no clock reads on the hot path).
+//
+// driver パッケージが Prometheus や admin API を知らずに済むよう、
+// 観測は interface で外に出す。実装は internal/queue/runtimestats と
+// internal/queue/metrics 側が持つ (#2277)。
+type Observer interface {
+	// ObserveDispatchWait reports the gap between enqueue and the worker
+	// picking the job up. Drivers that cannot determine the enqueue time
+	// skip this call entirely.
+	ObserveDispatchWait(queue string, d time.Duration)
+	// ObserveProcessing reports handler wall time and whether it failed.
+	ObserveProcessing(queue string, d time.Duration, failed bool)
+}

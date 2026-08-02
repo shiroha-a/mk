@@ -50,6 +50,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 | endpoint | field | 内容 |
 |---|---|---|
+| `admin/queue/queues` / `admin/queue/queue-stats` | `runtime` | worker 現在数 / auto-scale 範囲・有効性 / dispatch wait・processing の分位数 / 直近失敗数 / scale 履歴。upstream は worker 数を静的 config でしか持たず該当情報が無い。provider 未配線・未知 queue では block ごと省く (#2277) |
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |
 
 ### 1-2. 未実装 (1)
@@ -181,6 +182,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `2026.7.0-mk.1` | mk-go が実装済みの chat / reversi 連合を UI で解禁 (#2270) |
 | `2026.7.0-mk.2` | 自動生成した VAPID 鍵を admin 画面へ即時反映 (#2272) |
 | `2026.7.0-mk.3` | バージョン表示を mk-go の実装版にする (#2274) |
+| `2026.7.0-mk.4` | job queue の worker runtime (auto-scale / 遅延) を admin UI に表示 (#2277) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -208,6 +210,14 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 
 いずれも `mkGoVersion` が無い場合 (純正 backend) は従来表示へフォールバックする。
 
+`2026.7.0-mk.4` の内訳:
+
+| 箇所 | 変更 |
+|---|---|
+| `pages/admin/job-queue.vue` | queue 一覧カードに Workers 行、Overview に auto-scale 状態 / dispatch wait / processing の p50・p95 / 直近失敗数 / scale 履歴を追加 |
+
+`runtime` block が無い応答 (純正 backend) では該当 UI を出さない。
+
 ---
 
 ## 5. 運用・性能機能 (mk-go 独自)
@@ -216,8 +226,8 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 |---|---|
 | inbox verify-in-worker 化 | HTTP handler は body + signature header を payload 化して即 202、署名 verify / host block / instance touch は worker 側。HTTP 受信 rps が **TS の 2.6〜2.8 倍** |
 | mkq queue driver | BullMQ wire 互換の Go 実装。queue-bench で BullMQ / asynq / mkq を 3-way 比較 (送信 rps は mkq 優位、drain time は asynq 優位。詳細は [queue-bench.md](queue-bench.md)) |
-| AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics |
-| Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須** |
+| AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
+| Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須**。admin から読めない分は `admin/queue/*` の `runtime` block が補う (#2277) |
 | timeline JSON cache | first-page per-viewer cache (opt-in) |
 | mediaproxy のアニメ pass-through | `?emoji` / `?avatar` / `?preview` で gif/apng を decode せず raw 返し (Go std の `image.Decode` は 1 frame しか返さず静止画化するため) |
 | URL preview の charset 自動正規化 | Content-Type + `<meta charset>` から UTF-8 化。Shift_JIS / EUC-JP / ISO-2022-JP で文字化けしない (upstream は外部 `summaly` package に委譲しているため同等機能の有無は未確認) |

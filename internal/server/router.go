@@ -2563,6 +2563,10 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetNoteFinder(noteRepo)
 	if s.queueInspector != nil {
 		adminHandler.SetQueueInspector(&queueInspectorAdapter{inner: s.queueInspector})
+		// mk-go 独自の worker runtime block (#2277)。/metrics は無認証公開で
+		// LB ACL 必須のため admin からは読めない。その情報を moderator が
+		// control panel で見られるようにする。
+		adminHandler.SetQueueRuntimeProvider(s.newQueueRuntimeProvider())
 	}
 	// per-queue db (Redis INFO: memory / clients / uptime) を admin queue 画面に
 	// 出すため job-queue Redis を配線 (#1393)。
