@@ -46,6 +46,12 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 **reversi は endpoint レベルの差分ゼロ。** mk-go の 7 本 (`games` / `invitations` / `show-game` / `match` / `cancel-match` / `surrender` / `verify`) は upstream 2026.7.0 と完全一致。`crc32` カラムと `reversi/verify` も upstream 標準 (`models/ReversiGame.ts` / `endpoints/reversi/verify.ts`)。**cherrypick 由来の拡張は ActivityPub 層と、packed game レスポンスに `crc32` 等を additive に載せる点に現れる** (§3-1 参照)。
 
+### 1-1b. レスポンスの additive field
+
+| endpoint | field | 内容 |
+|---|---|---|
+| `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |
+
 ### 1-2. 未実装 (1)
 
 | Method | Path | 備考 |
@@ -174,6 +180,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `2026.7.0-mk.0` | `MkModal` の content children[0] null guard |
 | `2026.7.0-mk.1` | mk-go が実装済みの chat / reversi 連合を UI で解禁 (#2270) |
 | `2026.7.0-mk.2` | 自動生成した VAPID 鍵を admin 画面へ即時反映 (#2272) |
+| `2026.7.0-mk.3` | バージョン表示を mk-go の実装版にする (#2274) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -191,6 +198,15 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `pages/admin/settings.vue` | Service Worker 設定の保存後に `admin/meta` を引き直してフォームへ書き戻す。`update-meta` は 204 で生成鍵を返さず `meta` はページ表示時の 1 回しか読まないため、放置すると入力欄が空のままになり (a) 生成された公開鍵を確認できない (b) 次の保存で空文字が再送されて鍵が作り直され既存の push 購読が全部無効になる |
 
 いずれも純正は backend が federation しない (`core/ChatService.ts` の remote 配送はコメントアウト) ため、純正へ PR しても意味がない。upstream 追従時は cherry-pick で持ち越す。
+
+`2026.7.0-mk.3` の内訳:
+
+| 箇所 | 変更 |
+|---|---|
+| `pages/about.overview.vue` | サーバー情報に `mk-go` 行を追加。Misskey 欄の値を build 時定数から `instance.version` (サーバー申告値) に変更 |
+| `pages/about-misskey.vue` | Misskey の版の下に `mk-go vX.Y.Z` を併記。本ページは Misskey 本体の説明なので見出しは Misskey のまま |
+
+いずれも `mkGoVersion` が無い場合 (純正 backend) は従来表示へフォールバックする。
 
 ---
 

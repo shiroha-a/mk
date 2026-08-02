@@ -163,9 +163,13 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 	mergedPolicies := role.MergeMetaPolicies(m.Policies)
 
 	resp := map[string]any{
-		"maintainerName":               m.MaintainerName,
-		"maintainerEmail":              m.MaintainerEmail,
-		"version":                      cfg.Version,
+		"maintainerName":  m.MaintainerName,
+		"maintainerEmail": m.MaintainerEmail,
+		"version":         cfg.Version,
+		// /api/meta と同じく mk-go の実装バージョンを additive に出す (#2274)。
+		// SSR 埋め込みにも載せることで、about 系ページが fetchInstance を
+		// 待たずに表示できる。
+		"mkGoVersion":                  config.MkGoVersion,
 		"name":                         m.Name,
 		"shortName":                    m.ShortName,
 		"uri":                          cfg.URL,
