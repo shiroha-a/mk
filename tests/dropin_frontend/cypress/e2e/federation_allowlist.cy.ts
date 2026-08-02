@@ -13,7 +13,7 @@
 import { api, INSTANCES } from '../support/api';
 import {
   Trio,
-  establishFederation,
+  establishMutualFederation,
   setupTrio,
   waitForNoteInTimeline,
 } from '../support/setup';
@@ -75,7 +75,14 @@ describe('dropin-frontend federation allowlist (#536)', () => {
     setupTrio().then((t) => {
       trio = t;
     });
-    cy.then(() => establishFederation(trio));
+    // **双方向** follow を張る必要がある。この spec だけが「A の alice が
+    // 投稿し、B / C 側で観測する」向きを検証するが、片方向版
+    // (establishFederation) では alice を follow している者が誰もいないため
+    // alice の public note には配送先が 1 つも存在しない。結果、
+    // (a) 「B に届く」assertion は永久に成立せず、
+    // (b) 「C に届かない」assertion は federation mode に関係なく常に pass
+    //     する偽陽性になり、#536 の allowlist 実装を一切検証できていなかった。
+    cy.then(() => establishMutualFederation(trio));
   });
 
   // テスト終了後に A の federation mode を必ず "all" に戻す。後続 spec が
@@ -111,7 +118,9 @@ describe('dropin-frontend federation allowlist (#536)', () => {
     // B (in allowlist) には deliver が届く
     cy.then(() => waitForNoteInTimeline(trio.bob, marker, { retries: 30 }));
 
-    // C (not in allowlist) には届かない
+    // C (not in allowlist) には届かない。上の assertion が通っている =
+    // 「同条件で配送自体は機能している」ことの裏付けが取れているので、
+    // ここでの不達は allowlist が効いた結果と言える。
     cy.then(() => expectNoteNeverArrives(trio.charlie, marker, 20_000));
   });
 

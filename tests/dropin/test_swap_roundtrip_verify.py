@@ -20,8 +20,11 @@
 
 from __future__ import annotations
 
+import time
+
 from conftest import A_DOMAIN  # type: ignore[import-not-found]
 from conftest_base import MisskeyLikeClient, poll_until  # type: ignore[import-not-found]
+from test_swap_setup import BASELINE_NOTE_TEXT  # type: ignore[import-not-found]
 
 
 def test_roundtrip_alice_actor_no_longer_exposes_assertion_method(
@@ -63,19 +66,32 @@ def test_roundtrip_alice_can_post_and_bob_receives(
     alice: dict,
     bob: dict,
 ) -> None:
-    """TS-A 戻し後の alice が新規 note を投稿し、TS-B (= bob) 側に federation
-    経由で届くことを確認する。Ed25519 鍵を失った (= 出さなくなった) 状態で
-    RSA fallback で deliver / verify が継続する evidence。
+    """TS-A 戻し後の alice が投稿し、TS-B (= bob) 側に federation 経由で届く
+    ことを確認する。Ed25519 鍵を失った (= 出さなくなった) 状態で RSA fallback
+    で deliver / verify が継続する evidence。
+
+    検証手法は stage 6 の `test_post_swap_alice_can_reply` と同じく
+    「bob の note への reply を作り、bob の通知で受信を確認する」形にする。
+    setup が張る follow は alice → bob の片方向だけなので、alice の public
+    note には B 側の配送先が存在せず、bob の home timeline にも (bob は誰も
+    follow していないので) 現れない。reply なら reply 先の作者 = bob の
+    inbox へ確実に配送され、通知として観測できる。
     """
-    note_text = "dropin-roundtrip-after-ts-restore"
-    instance_a.create_note(note_text)
+    tl = instance_a._api("notes/timeline", {"limit": 40})
+    baseline = next((n for n in tl if n.get("text") == BASELINE_NOTE_TEXT), None)
+    assert baseline is not None, "baseline note missing — cannot reply"
+
+    reply_text = f"dropin-roundtrip-reply-{int(time.time())}"
+    instance_a._api("notes/create", {"text": reply_text, "replyId": baseline["id"]})
 
     def _arrived() -> bool:
-        tl = instance_b._api("notes/timeline", {"limit": 40})
-        return any(n.get("text") == note_text for n in tl)
+        notifications = instance_b.get_notifications(limit=20)
+        return any(
+            (n.get("note") or {}).get("text") == reply_text for n in notifications
+        )
 
     assert poll_until(
-        _arrived, timeout=120, desc="bob receives post-roundtrip note from TS-A alice"
+        _arrived, timeout=120, desc="bob receives post-roundtrip reply from TS-A alice"
     )
 
 
@@ -89,25 +105,36 @@ def test_roundtrip_bob_can_react_to_alice_note(
     alice 側 (TS-A) に federation 経由で届くことを確認する。逆方向
     (TS-B → TS-A) の deliver も RSA で動く evidence。
 
-    本 test は前段 test に依存せず独立に動くよう、自身で reaction target
-    note を作って bob 側に伝搬するまで待ってからリアクションを付ける。
+    本 test は前段 test に依存せず独立に動くよう、自身で reaction target を
+    作る。前段と同じ理由で public note ではなく bob の note への reply を
+    使い、bob 側では通知から note id を取得する。
     """
-    target_text = "dropin-roundtrip-bob-react-target"
-    instance_a.create_note(target_text)
+    tl = instance_a._api("notes/timeline", {"limit": 40})
+    baseline = next((n for n in tl if n.get("text") == BASELINE_NOTE_TEXT), None)
+    assert baseline is not None, "baseline note missing — cannot reply"
+
+    target_text = f"dropin-roundtrip-react-target-{int(time.time())}"
+    instance_a._api("notes/create", {"text": target_text, "replyId": baseline["id"]})
 
     def _arrived_on_b() -> bool:
-        tl = instance_b._api("notes/timeline", {"limit": 40})
-        return any(n.get("text") == target_text for n in tl)
+        notifications = instance_b.get_notifications(limit=20)
+        return any(
+            (n.get("note") or {}).get("text") == target_text for n in notifications
+        )
 
     assert poll_until(
-        _arrived_on_b, timeout=120, desc="bob receives roundtrip reaction-target note"
+        _arrived_on_b, timeout=120, desc="bob receives roundtrip reaction-target reply"
     )
 
-    tl_b = instance_b._api("notes/timeline", {"limit": 40})
-    target = next(n for n in tl_b if n.get("text") == target_text)
+    notifications = instance_b.get_notifications(limit=20)
+    target = next(
+        (n.get("note") or {})
+        for n in notifications
+        if (n.get("note") or {}).get("text") == target_text
+    )
 
     try:
-        instance_b.react(target["id"], "🎉")
+        instance_b.react(target["id"], "\U0001F389")
     except RuntimeError as e:
         if "ALREADY" not in str(e).upper():
             raise

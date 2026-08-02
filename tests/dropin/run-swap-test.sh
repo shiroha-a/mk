@@ -25,7 +25,22 @@ cd "$REPO_ROOT"
 BASE=docker-compose.dropin.yml
 OVERLAY=docker-compose.dropin.mk.yml
 
+# 失敗時の診断情報を残してから stack を落とす。
+#
+# 以前は down -v だけを行っていたため、workflow 側の "Capture docker compose
+# logs on failure" step が走る時点でコンテナが全滅しており、artifact の
+# compose.log が 0 バイト / ps.log がヘッダ行のみになっていた。nightly が
+# 80 日間失敗し続けても原因が追えなかった一因。
+DIAG_DIR="${DROPIN_DIAG_DIR:-/tmp/dropin-logs}"
 cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "===> capturing diagnostics (exit=$rc) -> $DIAG_DIR"
+    mkdir -p "$DIAG_DIR" || true
+    docker compose -f "$BASE" -f "$OVERLAY" ps > "$DIAG_DIR/ps.log" 2>&1 || true
+    docker compose -f "$BASE" -f "$OVERLAY" logs --no-color --tail=2000 \
+      > "$DIAG_DIR/compose.log" 2>&1 || true
+  fi
   echo "===> cleanup"
   docker compose -f "$BASE" -f "$OVERLAY" down -v >/dev/null 2>&1 || true
 }
