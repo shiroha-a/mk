@@ -1637,7 +1637,8 @@ func (s *Server) setupRoutes() {
 	// PackUserLite が avatarDecorations の各エントリに url を埋め込めるよう
 	// 共有 catalog resolver を entity package に登録する (#521)。catalog は
 	// admin 管理で低頻度更新のため 30s TTL の in-memory cache で十分。
-	entity.SetAvatarDecorationLookup(avatardecoration.NewResolver(avatarDecorationRepo))
+	avatarDecorationResolver := avatardecoration.NewResolver(avatarDecorationRepo)
+	entity.SetAvatarDecorationLookup(avatarDecorationResolver)
 	// PackUserLite の canChat を role policy 由来 (= upstream
 	// `chatAvailability === "available"`) に揃える (#988)。roleService 自体
 	// が in-memory cache を持つ (#761) ので追加 DB 負荷は実質ゼロ。
@@ -2488,6 +2489,9 @@ func (s *Server) setupRoutes() {
 	// recipientRepo がここで揃うため本箇所で配線する。
 	usersHandler.SetAbuseReportWebhook(webhookService, recipientRepo)
 	adminHandler := apiadmin.NewHandler(signupService, roleService, metaRepo, userRepo, idGen)
+	// catalog 更新を entity 側 packer に即時反映する (#2258)。TTL 任せだと
+	// 作成直後に装着された decoration が lookup miss で silent drop される。
+	adminHandler.SetAvatarDecorationInvalidator(avatarDecorationResolver)
 	// admin/suspend-user / admin/unsuspend-user / admin/accounts/delete が
 	// target user の全 token cache entry を即時 invalidate するために、
 	// auth middleware を inject する (#965)。未配線時は 30 秒 cache TTL 待ち

@@ -61,6 +61,22 @@ func (r *Resolver) LookupURL(id string) (string, bool) {
 	return url, ok
 }
 
+// Invalidate drops the cached catalog so the next LookupURL re-reads from
+// the DB. admin/avatar-decorations/{create,update,delete} call this: without
+// it, a decoration created and attached within the same cacheTTL window is
+// missing from the catalog, and entity.resolveAvatarDecorations **silently
+// drops** the entry — the user's avatarDecorations reads back as `[]` from
+// every API for up to 30 秒 while the DB row is already correct (#2258).
+func (r *Resolver) Invalidate() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.loaded = time.Time{}
+	r.urls = nil
+	r.mu.Unlock()
+}
+
 // refresh reloads the full catalog. Failures keep the previous map so a
 // transient DB blip doesn't blank avatarDecorations across the site — admins
 // get up to one cacheTTL of staleness instead. 失敗時も loaded は
