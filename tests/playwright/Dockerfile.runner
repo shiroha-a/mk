@@ -5,10 +5,17 @@
 # 理由は、後続 PR で page.goto ベース spec を追加するときに browser が
 # 即座に使えるよう構成を固定しておきたいため。
 #
-# 公式 v1.59 を pin。package.json の @playwright/test と base image の
-# version は両方を sync する必要がある (caret 範囲で npm install が新版
-# に切り替わると base image の browser binary と不一致になる)。
-FROM mcr.microsoft.com/playwright:v1.59.1-jammy
+# base image の version と package.json の @playwright/test は**必ず同じ値**に
+# する。base image には対応 version の browser binary しか同梱されないため、
+# ずれると `browserType.launch: Executable doesn't exist` で page 系 spec が
+# 全滅する。
+#
+# 過去に caret レンジ (^1.59.1) + 固定 base image + lockfile 不在の 3 点が
+# 揃っていたため、CI のコールドキャッシュで npm install が毎回最新を解決し、
+# 1.59.1 → 1.62.1 まで漂流して nightly が 86 日間全滅した。現在は
+# package.json を完全固定 + lockfile を commit + npm ci で再現性を担保する。
+# version を上げるときは **この FROM と package.json を同一 PR で両方**変更する。
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 # globalSetup から redis-cli を呼んで rate limit counter を flush する
 # (#744 PR-2): mk-go の signup endpoint は IP base で 1h 5 回 hardcoded で
@@ -22,8 +29,11 @@ WORKDIR /work
 # package.json と package-lock.json を先 copy して node_modules を image に
 # 焼く。spec / config は volume mount で渡すので image rebuild なしで反復
 # できる (cypress runner と同 pattern)。
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+# lockfile は repo に commit 済み。npm ci は lockfile と package.json の
+# 不一致を検出して落ちるので、version drift が CI で即座に顕在化する
+# (npm install だと黙って解決してしまう)。
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 # ENTRYPOINT に npx を使うと global npx cache に playwright を再 install し
 # /work/node_modules を見落とすので、image 内の local binary を直接呼ぶ。
