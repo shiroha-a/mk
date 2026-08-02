@@ -111,7 +111,7 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
     // 3. 該当 folder を expand
     await page.evaluate((t) => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLButtonElement[];
       const target = headers.find((h) => (h.textContent ?? '').includes(t));
       target?.click();

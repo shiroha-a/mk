@@ -93,7 +93,7 @@ test.describe('UI: /admin/user suspend toggle flow', () => {
 
     // 4. confirm dialog OK click → admin/suspend-user 走る
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
     const suspendResp = page.waitForResponse(
@@ -103,7 +103,7 @@ test.describe('UI: /admin/user suspend toggle flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

@@ -32,14 +32,14 @@ test.describe('UI: /admin/moderation sensitiveWords save flow', () => {
       });
 
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-cy-folder-header]').length >= 5,
+        () => document.querySelectorAll('[data-testid="folder-header"]').length >= 5,
         { timeout: 20_000 },
       );
 
       // "Sensitive words" folder を expand
       await page.evaluate(() => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
           (h.textContent ?? '').includes('Sensitive words'),

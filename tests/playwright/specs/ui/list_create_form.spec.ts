@@ -44,7 +44,7 @@ test.describe('UI: /my/lists "Create list" form flow', () => {
     // MkDialog input field 出現を polling 待ち。data-cy-modal-dialog-ok の
     // 兄弟要素として input が render される。
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
 
@@ -53,7 +53,7 @@ test.describe('UI: /my/lists "Create list" form flow', () => {
     await page.evaluate((n) => {
       // modal 内の最後の input が target (= MkDialog の MkInput)。
       // 複数 input がある場合 modal 内のものを取りたいので、
-      // [data-cy-bg] 内部の input を取る。
+      // [data-testid="bg"] 内部の input を取る。
       const inputs = Array.from(
         document.querySelectorAll('input'),
       ) as HTMLInputElement[];
@@ -75,7 +75,7 @@ test.describe('UI: /my/lists "Create list" form flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

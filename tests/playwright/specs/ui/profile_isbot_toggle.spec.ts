@@ -48,7 +48,7 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
     // en-US.yml の `advancedSettings: "Advanced settings"` を直 reference。
     await page.evaluate(() => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Advanced settings'),

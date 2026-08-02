@@ -38,7 +38,7 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
     await page.waitForFunction(
       () => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         return headers.some((h) =>
           (h.textContent ?? '').includes('All notes'),
@@ -48,7 +48,7 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
     );
     await page.evaluate(() => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('All notes'),

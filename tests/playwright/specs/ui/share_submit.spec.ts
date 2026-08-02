@@ -34,7 +34,7 @@ test.describe('UI: /share submit creates note via form', () => {
     await page.waitForFunction(
       (t) => {
         const ta = document.querySelector(
-          '[data-cy-post-form-text]',
+          '[data-testid="post-form-text"]',
         ) as HTMLTextAreaElement | null;
         return ta !== null && ta.value.includes(t);
       },
@@ -46,7 +46,7 @@ test.describe('UI: /share submit creates note via form', () => {
     await page.waitForFunction(
       () => {
         const btn = document.querySelector(
-          '[data-cy-open-post-form-submit]',
+          '[data-testid="post-form-submit"]',
         ) as HTMLButtonElement | null;
         return btn !== null && !btn.disabled;
       },
@@ -62,7 +62,7 @@ test.describe('UI: /share submit creates note via form', () => {
     );
     await page.evaluate(() => {
       const btn = document.querySelector(
-        '[data-cy-open-post-form-submit]',
+        '[data-testid="post-form-submit"]',
       ) as HTMLButtonElement | null;
       btn?.click();
     });

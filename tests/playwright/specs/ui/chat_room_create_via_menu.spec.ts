@@ -126,7 +126,7 @@ test.describe('UI: /chat room create via menu flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

@@ -40,7 +40,7 @@ test.describe('UI: /admin/relays add form flow', () => {
 
     // MkDialog が open するまで待つ
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
 
@@ -67,7 +67,7 @@ test.describe('UI: /admin/relays add form flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

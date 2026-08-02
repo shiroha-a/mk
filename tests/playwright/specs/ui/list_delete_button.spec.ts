@@ -56,7 +56,7 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
     await page.waitForFunction(
       () => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         return headers.some((h) =>
           (h.textContent ?? '').includes('Settings'),
@@ -66,7 +66,7 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
     );
     await page.evaluate(() => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Settings'),
@@ -96,7 +96,7 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
 
     // 4. confirm dialog OK click → API 呼出
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
 
@@ -106,7 +106,7 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
     );
     await page.evaluate(() => {
       const ok = document.querySelector(
-        '[data-cy-modal-dialog-ok]',
+        '[data-testid="modal-dialog-ok"]',
       ) as HTMLButtonElement | null;
       ok?.click();
     });

@@ -35,7 +35,7 @@ test.describe('UI: /admin/federation page hydrates', () => {
 
     // navbar (= 認証済 home の data-cy) が維持されているか確認。これで
     // /admin route guard も成立している。
-    await expect(page.locator('[data-cy-open-post-form]').first()).toBeVisible({
+    await expect(page.locator('[data-testid="open-post-form"]').first()).toBeVisible({
       timeout: 15_000,
     });
   });

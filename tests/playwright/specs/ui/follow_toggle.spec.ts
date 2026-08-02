@@ -55,7 +55,7 @@ test.describe('UI: follow button click toggles following relation', () => {
     });
     // confirm dialog 出現待ち
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-modal-dialog-ok]') !== null,
+      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
       { timeout: 10_000 },
     );
     const followResp = page.waitForResponse(
@@ -63,7 +63,7 @@ test.describe('UI: follow button click toggles following relation', () => {
       { timeout: 15_000 },
     );
     await page.evaluate(() => {
-      const ok = document.querySelector('[data-cy-modal-dialog-ok]') as HTMLButtonElement | null;
+      const ok = document.querySelector('[data-testid="modal-dialog-ok"]') as HTMLButtonElement | null;
       ok?.click();
     });
     await followResp;

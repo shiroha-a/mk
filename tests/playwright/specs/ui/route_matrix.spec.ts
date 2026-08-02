@@ -94,7 +94,7 @@ test.describe('UI: authenticated SPA route matrix', () => {
         // hydration 完了確認: navbar の post button が visible (= authenticated
         // state 維持 + Vue mount 成功)
         await expect(
-          page.locator('[data-cy-open-post-form]').first(),
+          page.locator('[data-testid="open-post-form"]').first(),
           `${route.label} should hydrate with authenticated navbar`,
         ).toBeVisible({ timeout: 20_000 });
       });

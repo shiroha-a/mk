@@ -27,13 +27,13 @@ test.describe('UI: /admin/invites create form flow', () => {
 
     // MkFolder header が hydrate するまで待つ
     await page.waitForFunction(
-      () => document.querySelector('[data-cy-folder-header]') !== null,
+      () => document.querySelector('[data-testid="folder-header"]') !== null,
       { timeout: 20_000 },
     );
 
     // 1 つ目の MkFolder を expand (= "Create invite code" form を開く)
     await page.evaluate(() => {
-      const header = document.querySelector('[data-cy-folder-header]') as HTMLButtonElement | null;
+      const header = document.querySelector('[data-testid="folder-header"]') as HTMLButtonElement | null;
       header?.click();
     });
 

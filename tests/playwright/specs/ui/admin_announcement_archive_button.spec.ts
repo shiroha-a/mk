@@ -49,7 +49,7 @@ test.describe('UI: /admin/announcements archive button flow', () => {
     // textContent に title を含む button (= folder header) を click。
     await page.evaluate((t) => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLButtonElement[];
       const target = headers.find((h) => (h.textContent ?? '').includes(t));
       target?.click();

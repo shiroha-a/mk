@@ -37,14 +37,14 @@ test.describe('UI: /admin/security email validation form save flow', () => {
       });
 
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-cy-folder-header]').length >= 3,
+        () => document.querySelectorAll('[data-testid="folder-header"]').length >= 3,
         { timeout: 20_000 },
       );
 
       // "Active Email Validation" folder を expand
       await page.evaluate(() => {
         const headers = Array.from(
-          document.querySelectorAll('[data-cy-folder-header]'),
+          document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
           (h.textContent ?? '').includes('Active Email Validation'),

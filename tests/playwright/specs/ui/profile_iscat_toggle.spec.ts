@@ -56,7 +56,7 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
 
     await page.evaluate(() => {
       const headers = Array.from(
-        document.querySelectorAll('[data-cy-folder-header]'),
+        document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       headers[1]?.click();
     });

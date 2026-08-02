@@ -32,7 +32,7 @@ test.describe('UI: /share page hydrates with prefilled text', () => {
     await page.waitForFunction(
       (m) => {
         const t = document.querySelector(
-          '[data-cy-post-form-text]',
+          '[data-testid="post-form-text"]',
         ) as HTMLTextAreaElement | null;
         return t !== null && t.value.includes(m);
       },
