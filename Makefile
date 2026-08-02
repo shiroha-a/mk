@@ -392,7 +392,7 @@ playwright-ts-test:
 playwright-ts-down:
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) down -v
 
-# Differential e2e diff harness (#2089) ― mk-go (2026.6.0) と Misskey TS
+# Differential e2e diff harness (#2089) ― mk-go (2026.7.0) と Misskey TS
 # (2026.5.4) を並列に立て、同一 endpoint のレスポンスを diff して entitycompat
 # golden gate がカバーしない値レベル乖離を検出する。詳細は docs/diff-e2e.md。
 # 隔離 stack (own network/volumes)、production UDS には触れない。
