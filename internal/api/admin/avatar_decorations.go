@@ -39,6 +39,10 @@ func (h *Handler) AvatarDecorationsCreate(c echo.Context) error {
 	if err := h.avatarDecoRepo.Create(d); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	// entity 側の catalog cache (30s TTL) を落とす。これが無いと作成直後に
+	// 装着した decoration が packer の lookup miss で silent drop され、
+	// DB には入っているのに API 応答は avatarDecorations: [] になる (#2258)。
+	h.invalidateAvatarDecorationCache()
 	h.logModeration(c, moderationlog.LogCreateAvatarDecoration, map[string]any{
 		"avatarDecorationId": d.ID,
 		"avatarDecoration":   d,
@@ -86,11 +90,14 @@ func (h *Handler) AvatarDecorationsDelete(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	snapshot, _ := h.avatarDecoRepo.FindByID(req.ID)
-	if err := h.avatarDecoRepo.Delete(req.ID); err == nil && snapshot != nil {
-		h.logModeration(c, moderationlog.LogDeleteAvatarDecoration, map[string]any{
-			"avatarDecorationId": req.ID,
-			"avatarDecoration":   snapshot,
-		})
+	if err := h.avatarDecoRepo.Delete(req.ID); err == nil {
+		h.invalidateAvatarDecorationCache()
+		if snapshot != nil {
+			h.logModeration(c, moderationlog.LogDeleteAvatarDecoration, map[string]any{
+				"avatarDecorationId": req.ID,
+				"avatarDecoration":   snapshot,
+			})
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -171,6 +178,7 @@ func (h *Handler) AvatarDecorationsUpdate(c echo.Context) error {
 	if err := h.avatarDecoRepo.UpdateFields(req.ID, fields); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.invalidateAvatarDecorationCache()
 	if after, err := h.avatarDecoRepo.FindByID(req.ID); err == nil && after != nil {
 		h.logModeration(c, moderationlog.LogUpdateAvatarDecoration, map[string]any{
 			"avatarDecorationId": req.ID,
