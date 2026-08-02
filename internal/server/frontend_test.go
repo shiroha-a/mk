@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,5 +93,82 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 			"mascot URL should not appear in splash img")
 		// default splash.png が使われる
 		assert.Contains(t, splashSection, `src="/static-assets/splash.png"`)
+	})
+}
+
+// SSR 埋め込み meta (`#misskey_meta`) の policies が
+// `{...DEFAULT_POLICIES, ...meta.policies}` になること。
+//
+// upstream HtmlTemplateService は metaEntityService.packDetailed(meta) を
+// そのまま埋め込むため instance.policies の上書きが反映される。mk-go は
+// 以前 role.DefaultPolicies() 固定を埋めていたため、
+// admin/roles/update-default-policies や update-meta で policy を変えても
+// client 側の instance.policies に一切反映されなかった。frontend の
+// instance.ts は data-generated-at が localStorage の instanceCachedAt より
+// 新しいと SSR 値で cache を上書きし以後 1 時間 /api/meta を叩かないので、
+// 誤った policies が恒久的に居座る。
+func TestFrontendHTML_EmbeddedMetaPolicies(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	extractMeta := func(t *testing.T, body string) map[string]any {
+		t.Helper()
+		const openTag = `id="misskey_meta"`
+		idx := strings.Index(body, openTag)
+		require.NotEqual(t, -1, idx, "misskey_meta script should be embedded")
+		start := strings.Index(body[idx:], ">")
+		require.NotEqual(t, -1, start)
+		start += idx + 1
+		end := strings.Index(body[start:], "</script>")
+		require.NotEqual(t, -1, end)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(body[start:start+end]), &parsed))
+		return parsed
+	}
+
+	render := func(t *testing.T, m *model.Meta) map[string]any {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		repo.Meta = m
+		handler := frontendHTML(cfg, repo, nil)
+
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+		return extractMeta(t, rec.Body.String())
+	}
+
+	t.Run("no override falls back to default policies", func(t *testing.T) {
+		parsed := render(t, &model.Meta{ID: "x"})
+
+		policies, ok := parsed["policies"].(map[string]any)
+		require.True(t, ok, "policies should be an object")
+		assert.Equal(t, false, policies["canSearchNotes"])
+		assert.Equal(t, true, policies["ltlAvailable"])
+
+		features, ok := parsed["features"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, true, features["localTimeline"])
+		assert.Equal(t, true, features["globalTimeline"])
+	})
+
+	t.Run("meta.policies override is reflected", func(t *testing.T) {
+		parsed := render(t, &model.Meta{
+			ID:       "x",
+			Policies: []byte(`{"canSearchNotes":true,"ltlAvailable":false,"gtlAvailable":false}`),
+		})
+
+		policies, ok := parsed["policies"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, true, policies["canSearchNotes"], "admin override should win")
+		assert.Equal(t, false, policies["ltlAvailable"])
+		// 上書きしていない key は default のまま残る
+		assert.Equal(t, true, policies["canPublicNote"])
+
+		features, ok := parsed["features"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, false, features["localTimeline"])
+		assert.Equal(t, false, features["globalTimeline"])
 	})
 }
