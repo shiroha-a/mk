@@ -2,10 +2,10 @@
 
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
-- 基準: mk-go `0.9.2` + Unreleased (2026.7.0 backend 追従を取り込み済、1.0.0 リリース前) ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-02
+- 基準: **mk-go 1.0.0** (= Misskey TS `2026.7.0` 追従完了時点) ⇔ Misskey TS `2026.7.0`
+- 最終更新: 2026-08-03
 
-> 注: 本ドキュメント作成時点で `MisskeyVersion` 定数と `third_party/misskey` submodule はまだ `2026.6.0` を指している (bump は 1.0.0 リリース作業の一部)。差分の突き合わせは upstream の `2026.7.0` tag に対して行っている。
+> 注: `MisskeyVersion = 2026.7.0` と `third_party/misskey` submodule (`2026.7.0-mk.4`) は bump 済み。`MkGoVersion` 定数の `1.0.0` 化はリリース作業 (別 issue) で行うため、この時点のコードでは `0.9.2` のままになっている。本ドキュメントの内容は 1.0.0 として固定するベースラインそのもの。
 
 ## このドキュメントの位置づけ
 
@@ -18,23 +18,29 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | **安全側 divergence** | upstream より厳しい / 正確な挙動 | 維持し理由を明記 ([[feedback_parity_mkgo_better_keep_document]] 方針) |
 | **未実装 / 欠落** | upstream にあって mk-go に無い | issue 化して解消する |
 
-1.0.0 = Misskey 2026.7.0 追従完了 (予定)。そこで drop-in 互換をベースラインとして固定し、以降 frontend の独自進化を解禁する。本ドキュメントはその「固定するベースラインからの距離」を一覧するもの。
+1.0.0 = Misskey 2026.7.0 追従完了。**ここで drop-in 互換をベースラインとして固定し、以降 frontend の独自進化を解禁する。** 本ドキュメントはその「固定したベースラインからの距離」の一覧であり、1.0.0 時点のスナップショットとして機能する。
+
+以降 upstream を追従するときは、本ドキュメントとの差分が新たな divergence になる。追従手順は [upstream-catch-up.md](upstream-catch-up.md) を参照。
 
 ## サマリ
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 | chat 15 | 1 (`GET /api/v1/instance/peers`) |
+| API endpoint | GET variant 23 + alias 3 | chat 15 | **0** |
+| API レスポンスの additive field | 2 (`runtime` / `mkGoVersion`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 5 (+ bookkeeping 2) | 0 | 0 |
-| DB カラム | 8 | 3 | 0 |
+| DB カラム | 5 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
+| fork frontend の独自変更 | 4 tag (`-mk.1` ～ `-mk.4`) | — | — |
+
+**upstream endpoint の未実装はゼロ** (coverage 99.8%、残 1 件は TestMode 限定登録の偽陽性)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
 ---
 
 ## 1. API endpoint
 
-upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち 442 件を実装済み (coverage 99.5%)。
+upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **443 件を実装済み (coverage 99.8%)**。
 
 ### 1-1. mk-go にしかない (41)
 
@@ -53,13 +59,11 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `admin/queue/queues` / `admin/queue/queue-stats` | `runtime` | worker 現在数 / auto-scale 範囲・有効性 / dispatch wait・processing の分位数 / 直近失敗数 / scale 履歴。upstream は worker 数を静的 config でしか持たず該当情報が無い。provider 未配線・未知 queue では block ごと省く (#2277) |
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |
 
-### 1-2. 未実装 (1)
+### 1-2. 未実装 (0)
 
-| Method | Path | 備考 |
-|---|---|---|
-| GET | `/api/v1/instance/peers` | Mastodon 互換の連合ピア一覧。upstream は `ApiServerService.ts` で fastify 直登録しており `endpoints/` 配下に無い。→ #2245 |
+**upstream endpoint の未実装はゼロ。** 最後まで残っていた `GET /api/v1/instance/peers` (Mastodon 互換の連合ピア一覧) は #2245 で実装した。upstream は `ApiServerService.ts` で fastify 直登録しており `endpoints/` 配下に無いため、matrix 生成ツールの file-walk から漏れて長らく不可視になっていた (現在は `ApiServerService.ts` を正規表現で直接読むので追随漏れが起きない)。
 
-`docs/api-compat.md` の「TS only (mk-go 未実装) 2」のうち `/api/reset-db` は**偽陽性**。mk-go では `config.TestMode` 時のみ登録されるが、matrix 生成は default config で route dump するため未実装に見える。実質の未実装は `GET /api/v1/instance/peers` の 1 件のみ。
+`docs/api-compat.md` に残る「TS only (mk-go 未実装) 1」= `/api/reset-db` は**偽陽性**。mk-go では `config.TestMode` 時のみ登録されるが、matrix 生成は default config で route dump するため未実装に見える。
 
 ---
 
@@ -76,12 +80,14 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `antenna_note_unread` | mk-go 独自 | per-user per-note の antenna 未読 |
 | `channel_note_unread` | mk-go 独自 | channel follower の未読追跡 |
 | `note_unread` | 準・独自 | upstream DB にも legacy 遺物として残るが 2026.7.0 の `models/` に entity は無く参照 0 件。mk-go はこれを実用し `/api/i` の `hasUnreadSpecifiedNotes` / `hasUnreadMentions` を Redis stream を舐めずに解決する。upstream legacy 版にある `noteChannelId` は mk-go の定義に無い (TS 製 DB では `CREATE TABLE IF NOT EXISTS` が no-op なので実害なし) |
-| `migrations` | drop-in 互換 | TypeORM の bookkeeping。mk-go 由来 DB に TS を後から繋いだ時に migration を再実行させないための seed (→ 課題 #2244) |
+| `migrations` | drop-in 互換 | TypeORM の bookkeeping。mk-go 由来 DB に TS を後から繋いだ時に migration を再実行させないための seed。name は本家と同じ `ClassName+timestamp` 形式で 346 件を保持する (#2244 で短縮形から是正)。漏れは `TestMigrationSeed_CoversUpstream` が CI で検出する |
 | `schema_migrations` | tooling | golang-migrate 用 |
 
 `__chart__*` / `__chart_day__*` 24 テーブルは独自ではない (upstream では `models/` ではなく `core/chart/charts/entities/` で定義されるため、`models/` だけを見ると誤検出する)。
 
-### 2-2. 独自カラム (11 = mk-go 独自 8 + cherrypick 3)
+### 2-2. 独自カラム (11 = 実使用 8 + 未使用の残存 3)
+
+うち **mk-go が実際に読み書きするのは 8 件** (cherrypick 由来 3 + mk-go 独自 5)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
 
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
@@ -106,8 +112,29 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `note.uri` UNIQUE | upstream にも UNIQUE がある。差分は **partial にしている点と index 名** |
 | `note.tags` / `note.mentions` / `note.fileIds` の GIN | **upstream にも同じ GIN がある** (`IDX_NOTE_TAGS` / `IDX_NOTE_MENTIONS` / `IDX_NOTE_FILE_IDS`)。mk-go は名前だけが違う (`IDX_note_tags` / `IDX_note_mentions` / `IDX_note_fileIds` — case に加え `fileIds` は語区切りも異なる) |
 
-> **drop-in 時の注意 (構造的な問題)**: mk-go は index を `IDX_<table>_<col>` で命名するが、upstream は TypeORM 生成の hash 名 (`IDX_e5848eac...`) を使う。`CREATE INDEX IF NOT EXISTS` は**名前**で存在判定するため、TS 製 DB に mk-go の migration を流すと **共有テーブルの index は原則すべて二重化する** (上表に挙げたものに限らない)。mk-go 側だけで 195 本の `CREATE INDEX` があり、upstream の `Init.js` だけでも hash 名 index が 112 本ある。特に最大テーブル `note` の GIN 二重化は書き込みコストに直結する。
-> なお `migration/000058_channel_muting_expires_at.up.sql` は upstream の hash 名をそのまま使って二重化を避けており、対処の前例がある。→ #2246
+#### index 命名の非対称と、その解消 (#2246)
+
+mk-go は index を `IDX_<table>_<col>` で命名するが、upstream は TypeORM 生成の hash 名 (`IDX_e5848eac...`) を使う。`CREATE INDEX IF NOT EXISTS` は **index 名**で存在判定するため、定義が同一でも名前が違えば新規作成され、TS 製 DB では index が全面的に二重化していた。
+
+Misskey TS 2026.7.0 が作った DB に mk-go の全 migration を適用した実測:
+
+| | index 数 |
+|---|---|
+| TS のみ | 442 |
+| mk-go migration 適用後 | 639 (+197) |
+| `000068_drop_redundant_indexes` 適用後 | **474** (165 本を削除、upstream 由来の削除は 0 本) |
+
+`000068` は「mk-go の migration が作る index のうち、同一テーブルに定義が一致する upstream 由来の index が存在するもの」だけを実行時に落とす。**upstream 由来の index には一切触れない** (TS へ戻したとき本家が再作成できず復路が壊れるため)。mk-go 由来 DB では同一定義の別名 index が無いので何も落ちない。
+
+上表の partial 化 3 件 (`note.uri` / `drive_file(uri)` / `user(usernameLower, host)`) も、upstream の full index が同じ役割を果たすと個別に判断して削除対象に含めている。一方 `note_unread` の partial 2 件と `user.tags` の GIN、`user(usernameLower) WHERE host IS NULL` は **意図的に定義が違う**ので残す。
+
+新規に同型の重複を作らないよう、`TestIndexNaming_NoNewUpstreamDuplicates` が CI で検出する。upstream に同内容の index があるなら **upstream の index 名をそのまま使う** (`000058_channel_muting_expires_at.up.sql` が前例)。
+
+#### migration の冪等性
+
+mk-go の migration は TS 製の既存 DB にも流れるため、`CREATE TABLE` / `ADD COLUMN` / `CREATE INDEX` は `IF NOT EXISTS`、`DROP *` は `IF EXISTS` が必須。欠けると upstream が既に作った構造と衝突して migration が dirty 停止し、**drop-in 手順そのものが完走しない**。実際 `000048` が upstream 2026.5.0 の `AddCategoryToAvatarDecorations` と衝突しており、2026.5.0 以降の TS 製 DB からの drop-in が不可能だった (#2246 で修正)。`TestMigrationIdempotency_RequiresIfExists` が CI で強制する。
+
+同じ「`IF NOT EXISTS` が drop-in で意図どおり効かない」クラスとして、`CREATE TABLE` 内でしか定義されていない upstream 非存在カラムも問題になる (TS 製 DB では列が生えない)。`TestSchemaDrift_CreateOnlyColumns` が検出する (#2243)。
 
 ---
 
@@ -124,9 +151,9 @@ cherrypick 由来の拡張が中心。比較のため関連する upstream 標�
 | reversi の pack 粒度 | `api/reversi/handler.go` | upstream の `reversi/games` は Lite (`packLiteMany`、`form1`/`form2`/`logs`/`map` を含まない) を返すが、mk-go は cherrypick 系統 + 連合拡張を持つため**全 endpoint で Detailed 相当の `packGame` を共有**する (#2106 L15)。上記 crc32 と併せて reversi は vanilla golden gate の対象外 ([shape-drift.md](shape-drift.md)) |
 | reversi 受信 dispatch | `core/federation/reversi_inbox.go` | `invite` / `join` / `leave` を受信。Invite 受信時にローカル game 行を自動作成、session→gameID は Redis mapping。**招待を受ける側は純正 frontend でも表示できる**ので、fork 側の変更は招待を出す側 (対戦相手選択) のみ (#2270) |
 | `reversiVersion` (nodeinfo) | `api/nodeinfo/handler.go` | CherryPick 側がメジャーバージョン一致で連合可否を判定するため 1.1.x を維持 |
-| **1-on-1 chat 連合** | `activitypub/renderer.go` | DM を `Create + Note(_misskey_talk: true)` で配送。未対応実装では単なる Note として黙殺される設計 |
-| **group chat room 連合** | `activitypub/renderer.go` / `core/federation/chat_room_inbox.go` | chat room を AP `Group` object (`https://host/chat/rooms/{id}`) として Invite / Accept / Reject / Remove |
-| `_misskey_canChat` | `activitypub/types.go` / `core/federation/resolver.go` | chat 連合の capability flag。欠落時は everyone 扱い |
+| **1-on-1 chat 連合** | `activitypub/renderer.go` / `core/chat/service.go` | DM を `Create + Note(_misskey_talk: true)` で配送。未対応実装では単なる Note として黙殺される設計。**純正は `core/ChatService.ts:381-384` で remote 配送がコメントアウトされており federation しない**ため、純正 frontend は remote を一律ブロックしていた (fork 側で解禁、#2270) |
+| **group chat room 連合** | `activitypub/renderer.go` / `core/federation/chat_room_inbox.go` | chat room を AP `Group` object (`https://host/chat/rooms/{id}`) として Invite / Accept / Reject / Remove。room owner が local の場合のみ Invite を署名配送する (remote owner の room は秘密鍵が無い) |
+| `_misskey_canChat` | `activitypub/types.go` / `core/federation/resolver.go` | chat 連合の capability flag。欠落時は everyone 扱い (chat 非対応実装を "none" に倒すと送信前 reject で UX が悪化するため、安全側ではなく寛容側に倒す判断)。`false` は `user.chatScope = "none"` に落とし、fork frontend はこれを見て「相手が受け付けない」表示にする |
 
 ### 3-2. Ed25519 / FEP-521a (mk-go 独自)
 
@@ -284,9 +311,15 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 - **API endpoint の差分**: `make apicompat` で `docs/api-compat.md` を自動生成する (DB / Redis 稼働が必要)。upstream 側の fastify 直登録 endpoint は `ApiServerService.ts` から自動抽出するので、submodule bump 時の追随漏れは起きない。
   生成には DB / Redis 稼働が必要なので、使い捨ての postgres / valkey を `docker run` で立てて `-dump-routes` を回す (compose を使うと本番 UDS の project へ合流する事故があるため使わない)
 - **entity shape の差分**: `docs/shape-drift.md` の L0 / L2 / L3 gate が CI で自動検出する
+- **DB schema / migration の drop-in 安全性**: 以下の gate が CI で強制する (詳細は [shape-drift.md](shape-drift.md))
+  - `TestSchemaDrift_CreateOnlyColumns` — `CREATE TABLE` 内でしか定義されていない upstream 非存在カラム (TS 製 DB では生えない)
+  - `TestMigrationSeed_CoversUpstream` — TypeORM `migrations` テーブルの seed 漏れ (TS 復帰時の再実行)
+  - `TestMigrationIdempotency_RequiresIfExists` — DDL の `IF [NOT] EXISTS` 漏れ (drop-in で migration が dirty 停止)
+  - `TestIndexNaming_NoNewUpstreamDuplicates` — upstream と同内容の index を別名で追加 (TS 製 DB で二重化)
 - **値レベルの差分**: `make diff-test` (mk-go ↔ TS の応答を値単位で diff)
 - **コード内の divergence 注記**: `grep -rn "#2106 L" internal/` で全件を辿れる
-- **upstream 追従時**: `docs/update/` に release ごとの diff doc を追加し、そこで確定した divergence を本ドキュメントへ反映する
+- **upstream 追従時**: `docs/update/` に release ごとの diff doc を追加し、そこで確定した divergence を本ドキュメントへ反映する。golden の再生成 (`make shapecheck-gen`) と TypeORM seed の追加も必要 ([upstream-catch-up.md](upstream-catch-up.md))
+- **fork frontend の変更**: `third_party/misskey` に custom commit を積んで `X.Y.Z-mk.N` tag を打ち、mk 側の submodule pin を bump する。純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針
 
 ## 関連ドキュメント
 
@@ -295,4 +328,5 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 - [`federation.md`](federation.md) — 連合実装の詳細
 - [`configuration.md`](configuration.md) — 設定キー一覧
 - [`migration-from-ts.md`](migration-from-ts.md) — TS からの移行手順
+- [`upstream-catch-up.md`](upstream-catch-up.md) — upstream 追従の手順とチェックリスト
 - [`update/`](update/) — upstream release ごとの差分 doc
