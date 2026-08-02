@@ -115,7 +115,7 @@ cherrypick 由来の拡張が中心。比較のため関連する upstream 標�
 | **reversi 連合対戦** | `core/reversi/federation.go` | 固定 `GameTypeUUID = 1c086295-...` を持つ独自 AP object `{type:"Game", game_type_uuid, extent_flags, game_state{...}}`。`game_state.type` は settings / ready_states / putstone |
 | reversi 盤面 CRC32 | `core/reversi/game.go` / `service.go` / `api/reversi/handler.go` | DB カラムと `reversi/verify` は **upstream 標準** (`MiReversiGame.crc32`)。ただし **packed game に `crc32` を載せるのは mk-go (cherrypick 系統) 側の拡張** — upstream の `ReversiGameEntityService.packDetail` / json-schema には無い |
 | reversi の pack 粒度 | `api/reversi/handler.go` | upstream の `reversi/games` は Lite (`packLiteMany`、`form1`/`form2`/`logs`/`map` を含まない) を返すが、mk-go は cherrypick 系統 + 連合拡張を持つため**全 endpoint で Detailed 相当の `packGame` を共有**する (#2106 L15)。上記 crc32 と併せて reversi は vanilla golden gate の対象外 ([shape-drift.md](shape-drift.md)) |
-| reversi 受信 dispatch | `core/federation/reversi_inbox.go` | `invite` / `join` / `leave` を受信。Invite 受信時にローカル game 行を自動作成 (フロントに対戦相手選択 UI が無いため)、session→gameID は Redis mapping |
+| reversi 受信 dispatch | `core/federation/reversi_inbox.go` | `invite` / `join` / `leave` を受信。Invite 受信時にローカル game 行を自動作成、session→gameID は Redis mapping。**招待を受ける側は純正 frontend でも表示できる**ので、fork 側の変更は招待を出す側 (対戦相手選択) のみ (#2270) |
 | `reversiVersion` (nodeinfo) | `api/nodeinfo/handler.go` | CherryPick 側がメジャーバージョン一致で連合可否を判定するため 1.1.x を維持 |
 | **1-on-1 chat 連合** | `activitypub/renderer.go` | DM を `Create + Note(_misskey_talk: true)` で配送。未対応実装では単なる Note として黙殺される設計 |
 | **group chat room 連合** | `activitypub/renderer.go` / `core/federation/chat_room_inbox.go` | chat room を AP `Group` object (`https://host/chat/rooms/{id}`) として Invite / Accept / Reject / Remove |
@@ -162,6 +162,28 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `MK_*` 環境変数オーバーライド | upstream に同等機構なし |
 
 逆方向 (upstream にあって mk-go に無い): `threadPoolSize`、`logging.format` / `logging.level` / `logging.domains` / `logging.access` (2026.7.0 のログ基盤刷新分。`logging.sql.*` は mk-go にもある)、`sentryForBackend.disabledIntegrations`。
+
+---
+
+## 4-2. fork frontend の独自変更
+
+`third_party/misskey` fork (`shiroha-a/misskey-ts`) に載せている frontend の custom commit。純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。
+
+| tag | 内容 |
+|---|---|
+| `2026.7.0-mk.0` | `MkModal` の content children[0] null guard |
+| `2026.7.0-mk.1` | mk-go が実装済みの chat / reversi 連合を UI で解禁 (#2270) |
+
+`2026.7.0-mk.1` の内訳:
+
+| 箇所 | 変更 |
+|---|---|
+| `pages/chat/room.vue` | 「相手のアカウントで DM が使えない」warning の条件から `host !== null` を外し `chatScope === 'none'` で判定。room 招待の相手選択から `localOnly` を外す |
+| `pages/chat/home.home.vue` | チャット開始の相手選択から `localOnly` を外す (純正の `// TODO: localOnly は連合に対応したら消す` の解消) |
+| `utility/get-user-menu.ts` | 「チャットする」を `host == null` で隠すのをやめる |
+| `pages/reversi/index.vue` | 対戦相手選択から `localOnly` を外す |
+
+いずれも純正は backend が federation しない (`core/ChatService.ts` の remote 配送はコメントアウト) ため、純正へ PR しても意味がない。upstream 追従時は cherry-pick で持ち越す。
 
 ---
 
