@@ -3232,6 +3232,9 @@ type MockInstanceRepository struct {
 	// the in-memory map state. Used to exercise non-NotFound DB error paths
 	// (#915 review: Service must surface raw err for observability).
 	FindByHostErr error
+	// ListPeerHostsErr injects a DB error from ListPeerHosts so the
+	// /api/v1/instance/peers handler の 500 経路を試験できる (#2245)。
+	ListPeerHostsErr error
 	// FindCalls counts FindByHost invocations so tests can assert caching
 	// behaviour in callers (e.g. instance.ShouldSkipDelivery, #1407). Not
 	// goroutine-safe; tests asserting on it must drive the service serially.
@@ -3387,6 +3390,24 @@ func (m *MockInstanceRepository) IncrementFollowingCount(host string, delta int)
 
 // List returns all stored instances filtered by the most common predicates.
 // 並び順は host 昇順 (テストの安定性のため)。
+// ListPeerHosts mirrors the real repository: non-suspended hosts, ASC。
+// production の DB column default は 'none' だが Go 構造体の zero value は ""
+// なので両方 live 扱いにする (ListForRefresh と同じ扱い)。
+func (m *MockInstanceRepository) ListPeerHosts() ([]string, error) {
+	if m.ListPeerHostsErr != nil {
+		return nil, m.ListPeerHostsErr
+	}
+	hosts := []string{}
+	for _, inst := range m.Instances {
+		if inst.SuspensionState != "" && inst.SuspensionState != model.SuspensionStateNone {
+			continue
+		}
+		hosts = append(hosts, inst.Host)
+	}
+	sort.Strings(hosts)
+	return hosts, nil
+}
+
 func (m *MockInstanceRepository) List(filter model.InstanceListFilter) ([]*model.Instance, error) {
 	var rows []*model.Instance
 	for _, inst := range m.Instances {

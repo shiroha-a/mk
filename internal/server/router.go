@@ -2041,6 +2041,10 @@ func (s *Server) setupRoutes() {
 	// 可能な AP 再 fetch (amplification) を防ぐため、upstream の anonymous 許可までは
 	// 開けず RequireAuth に留める (frontend は menu 表示にログイン必須なので互換性は保つ)。
 	api.POST("/federation/update-remote-user", federationHandler.UpdateRemoteUser, middleware.RequireAuth())
+	// Mastodon 互換のピア一覧 (#2245)。upstream は endpoints/ 配下ではなく
+	// ApiServerService.ts で fastify に直接登録しているので、mk-go でも
+	// endpoint 群とは別に /api/v1/... として生やす。
+	api.GET("/v1/instance/peers", federationHandler.Peers)
 
 	// Channels endpoints (Phase 4.2)
 	channelsHandler := apichannels.NewHandler(channelService, idGen)
