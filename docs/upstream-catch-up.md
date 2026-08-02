@@ -179,6 +179,26 @@ migration を未実行と判定して**再実行**し、適用済み DDL への 
 入っていないまま seed すると、本家が「適用済み」と誤認して skip し、schema が
 ずれたまま放置される。DDL が未実装なら先に mk-go 側の migration を書く。
 
+### submodule bump 後に必須: index golden の再生成
+
+upstream が index を足した場合、`golden_upstream_indexes.json` も撮り直す。これは
+TypeORM の decorator から正規形を再現できないため **実 DB から採る** 必要がある
+(手順は [shape-drift.md](./shape-drift.md#golden-の再生成))。
+
+撮り直したら `TestIndexNaming_NoNewUpstreamDuplicates` を走らせる。mk-go 側に
+同内容・別名の index があれば検出されるので、upstream 名に揃えるか
+`known_duplicate_indexes.json` に追加して `000068` の扱いを見直す (#2246)。
+
+### mk-go 側の migration を書くときの必須ルール
+
+mk-go の migration は Misskey TS が作った既存 DB にも流れる。以下は
+`TestMigrationIdempotency_RequiresIfExists` が強制する。
+
+- `CREATE TABLE` / `ADD COLUMN` / `CREATE INDEX` は必ず `IF NOT EXISTS`
+- `DROP TABLE` / `DROP COLUMN` / `DROP INDEX` は必ず `IF EXISTS`
+- upstream に同じ内容の index があるなら **upstream の index 名をそのまま使う**
+  (`000058` が前例)。名前が違うと `IF NOT EXISTS` が効かず TS 製 DB で二重化する
+
 ---
 
 ## 3. 参考リンク

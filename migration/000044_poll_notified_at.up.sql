@@ -2,7 +2,8 @@
 -- が author + 投票者に発火済みかを記録し、periodic ticker (core/poll/
 -- expiry_worker) が二重通知を避ける。
 -- nullable timestamp。NULL は「まだ送ってない」、NOT NULL は「送信済み (時刻)」。
-ALTER TABLE "poll" ADD COLUMN "notifiedAt" timestamp with time zone;
+-- IF NOT EXISTS を付けて再適用・drop-in 双方で冪等にする (#2246)。
+ALTER TABLE "poll" ADD COLUMN IF NOT EXISTS "notifiedAt" timestamp with time zone;
 
 -- expiresAt < NOW() AND notifiedAt IS NULL を高速 scan するための部分 index。
 -- ticker が頻繁に空 scan するため、expired AND unnotified のみを対象にする
