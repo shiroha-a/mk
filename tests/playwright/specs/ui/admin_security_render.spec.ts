@@ -23,9 +23,24 @@ test.describe('UI: /admin/security page hydrates form controls', () => {
     const resp = await page.goto(`${baseURL}/admin/security`, { waitUntil: 'domcontentloaded' });
     expect(resp!.status()).toBe(200);
 
+    // 2026.7.0 の /admin/security は各設定を MkFolder (折りたたみ) に入れて
+    // おり、展開するまで中の input は mount されない (折りたたみ状態では
+    // input が 1 個しか出ず、この spec は 3 個を待って timeout していた)。
+    // folder header をすべて click して展開してから数える。
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="folder-header"]').length > 0,
+      { timeout: 20_000 },
+    );
+    await page.evaluate(() => {
+      for (const h of Array.from(
+        document.querySelectorAll('[data-testid="folder-header"]'),
+      ) as HTMLElement[]) {
+        h.click();
+      }
+    });
+
     // sensitiveMediaDetection radios + sensitivity range + bot protection
-    // 等で input/checkbox が複数 mount される。最低 3 個でほぼ全 backend で
-    // mount される。
+    // 等で input/checkbox が複数 mount される。
     await page.waitForFunction(
       () => document.querySelectorAll('input').length >= 3,
       { timeout: 20_000 },
