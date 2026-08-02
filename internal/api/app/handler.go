@@ -83,10 +83,8 @@ func (h *Handler) Create(c echo.Context) error {
 		userID = &me.ID
 	}
 
-	now := time.Now()
 	a := &model.App{
-		ID:          h.idGen.Generate(now),
-		CreatedAt:   now,
+		ID:          h.idGen.Generate(time.Now()),
 		UserID:      userID,
 		Secret:      misc.SecureRandomHex(32),
 		Name:        req.Name,

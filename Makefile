@@ -479,6 +479,7 @@ shapecheck-gen:
 	go run ./tools/limitspec
 	go run ./tools/permspec
 	go run ./tools/securespec
+	go run ./tools/schemadrift
 
 # 全 family の drift を severity 付きで一覧表示する (gate にかける前の調査用)。
 shapecheck-report:

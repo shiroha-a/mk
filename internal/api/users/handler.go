@@ -61,11 +61,14 @@ type Handler struct {
 	userListEventPub UserListMembershipEventPublisher
 	clipRepo         repository.ClipRepository
 	clipFavoriteRepo repository.ClipFavoriteRepository
-	flashRepo        repository.FlashRepository
-	galleryRepo      repository.GalleryRepository
-	pageRepo         repository.PageRepository
-	piningRepo       repository.UserNotePiningRepository
-	fieldRes         *entity.NoteFieldResolver
+	// clipNoteRepo は users/clips の notesCount を clip_note の実カウントで
+	// 出すために使う (#2243)。未配線時は notesCount を省略する。
+	clipNoteRepo repository.ClipNoteRepository
+	flashRepo    repository.FlashRepository
+	galleryRepo  repository.GalleryRepository
+	pageRepo     repository.PageRepository
+	piningRepo   repository.UserNotePiningRepository
+	fieldRes     *entity.NoteFieldResolver
 	// userRepo は users/notes / users/search-by-username-and-host 経由で
 	// 表示する note list の hardMutedWords filter (#787) に使う。
 	userRepo repository.UserRepository
@@ -252,6 +255,10 @@ func (h *Handler) SetClipRepo(r repository.ClipRepository) { h.clipRepo = r }
 // SetClipFavoriteRepo attaches a ClipFavoriteRepository so users/clips can
 // resolve favoritedCount / isFavorited (#1562).
 func (h *Handler) SetClipFavoriteRepo(r repository.ClipFavoriteRepository) { h.clipFavoriteRepo = r }
+
+// SetClipNoteRepo attaches a ClipNoteRepository so users/clips can report
+// notesCount for the owner (#2243).
+func (h *Handler) SetClipNoteRepo(r repository.ClipNoteRepository) { h.clipNoteRepo = r }
 
 // SetFlashRepo attaches a FlashRepository for users/flashs.
 func (h *Handler) SetFlashRepo(r repository.FlashRepository) { h.flashRepo = r }

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"testing"
-	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -62,7 +61,6 @@ func TestAuthSessionRepository_FindAppByID_ListAppsByUserID(t *testing.T) {
 
 	app := &model.App{
 		ID:          "app_cov_1",
-		CreatedAt:   time.Now(),
 		UserID:      &u.ID,
 		Secret:      "sec_cov_1",
 		Name:        "test app",

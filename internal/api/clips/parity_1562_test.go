@@ -76,17 +76,28 @@ func TestUpdate_EmptyDescriptionNormalizedToNull(t *testing.T) {
 
 // --- #1562: favoritedCount / isFavorited / notesCount の出し分け ---
 
-func newHandlerWithFavorites(t *testing.T) (*Handler, *testutil.MockClipRepository, *testutil.MockClipFavoriteRepository) {
+func newHandlerWithFavorites(t *testing.T) (
+	*Handler,
+	*testutil.MockClipRepository,
+	*testutil.MockClipFavoriteRepository,
+	*testutil.MockClipNoteRepository,
+) {
 	t.Helper()
-	h, repo, _, _ := newHandler(t)
+	h, repo, clipNoteRepo, _ := newHandler(t)
 	favRepo := testutil.NewMockClipFavoriteRepository()
 	h.SetFavoriteRepo(favRepo)
-	return h, repo, favRepo
+	return h, repo, favRepo, clipNoteRepo
 }
 
 func TestShow_OwnerSeesCountsAndFavorited(t *testing.T) {
-	h, repo, favRepo := newHandlerWithFavorites(t)
-	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true, NotesCount: 7}
+	h, repo, favRepo, clipNoteRepo := newHandlerWithFavorites(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true}
+	// notesCount は clip 行の非正規化カウンタではなく clip_note の実カウント (#2243)。
+	for i := 0; i < 7; i++ {
+		require.NoError(t, clipNoteRepo.Create(&model.ClipNote{
+			ID: fmt.Sprintf("cn%d", i), ClipID: "c1", NoteID: fmt.Sprintf("n%d", i),
+		}))
+	}
 	favRepo.Favorites["alice:c1"] = &model.ClipFavorite{ID: "f1", UserID: "alice", ClipID: "c1"}
 	favRepo.Favorites["bob:c1"] = &model.ClipFavorite{ID: "f2", UserID: "bob", ClipID: "c1"}
 
@@ -101,8 +112,8 @@ func TestShow_OwnerSeesCountsAndFavorited(t *testing.T) {
 }
 
 func TestShow_NonOwnerHidesNotesCount(t *testing.T) {
-	h, repo, _ := newHandlerWithFavorites(t)
-	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true, NotesCount: 7}
+	h, repo, _, _ := newHandlerWithFavorites(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true}
 
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "bob")
@@ -115,7 +126,7 @@ func TestShow_NonOwnerHidesNotesCount(t *testing.T) {
 }
 
 func TestShow_AnonymousOmitsIsFavorited(t *testing.T) {
-	h, repo, _ := newHandlerWithFavorites(t)
+	h, repo, _, _ := newHandlerWithFavorites(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: true}
 
 	c, rec := newReq(t, `{"clipId":"c1"}`)

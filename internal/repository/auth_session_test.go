@@ -2,7 +2,6 @@ package repository
 
 import (
 	"testing"
-	"time"
 
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
@@ -18,7 +17,6 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 	// App作成
 	app := &model.App{
 		ID:          "app_as_1",
-		CreatedAt:   time.Now(),
 		Secret:      "secret_as_1",
 		Name:        "TestApp",
 		Description: "test app",
@@ -38,10 +36,9 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 
 	// Session作成
 	session := &model.AuthSession{
-		ID:        "sess_as_1",
-		CreatedAt: time.Now(),
-		Token:     "token_as_1",
-		AppID:     app.ID,
+		ID:    "sess_as_1",
+		Token: "token_as_1",
+		AppID: app.ID,
 	}
 	require.NoError(t, repo.CreateSession(session))
 	defer testDB.Exec(`DELETE FROM "auth_session" WHERE id = ?`, session.ID)

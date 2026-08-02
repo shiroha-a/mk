@@ -491,8 +491,13 @@ func (h *Handler) clipToMap(cl *model.Clip, viewer *model.User) map[string]any {
 // 認証 viewer のみ、notesCount は owner 閲覧時のみ出す。favoriteRepo 未配線
 // や lookup 失敗時は count 0 / isFavorited false に degrade する。
 func (h *Handler) clipExtras(cl *model.Clip, viewer *model.User) entity.ClipExtras {
-	extras := entity.ClipExtras{
-		ShowNotesCount: viewer != nil && viewer.ID == cl.UserID,
+	extras := entity.ClipExtras{}
+	// notesCount は owner 閲覧時のみ (upstream は他人には undefined を返し
+	// note 件数を露出しない、#1562)。件数は clip_note の実カウント (#2243)。
+	if viewer != nil && viewer.ID == cl.UserID && h.svc != nil {
+		if n, err := h.svc.CountNotes(cl.ID); err == nil {
+			extras.NotesCount = &n
+		}
 	}
 	if viewer != nil {
 		fav := false

@@ -233,7 +233,10 @@ func TestAddNote_HappyPath(t *testing.T) {
 	notes.Notes["n1"] = &model.Note{ID: "n1"}
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
 	assert.Len(t, noteRepo.Entries, 1)
-	assert.Equal(t, 1, repo.Clips["c1"].NotesCount)
+	// notesCount は clip 行に非正規化せず clip_note の実カウントで出す (#2243)。
+	n, err := svc.CountNotes("c1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
 	require.NotNil(t, repo.Clips["c1"].LastClippedAt)
 	// #1768: note の clippedCount も increment される。
 	assert.Equal(t, int16(1), notes.Notes["n1"].ClippedCount)
@@ -306,7 +309,9 @@ func TestRemoveNote_HappyPath(t *testing.T) {
 	notes.Notes["n1"] = &model.Note{ID: "n1"}
 	require.NoError(t, svc.AddNote("u1", "c1", "n1"))
 	require.NoError(t, svc.RemoveNote("u1", "c1", "n1"))
-	assert.Equal(t, 0, repo.Clips["c1"].NotesCount)
+	n, err := svc.CountNotes("c1")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
 }
 
 func TestRemoveNote_ClipNotFound(t *testing.T) {

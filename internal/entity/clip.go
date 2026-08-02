@@ -15,9 +15,15 @@ type ClipExtras struct {
 	// IsFavorited reports whether the viewer favorited this clip. nil なら
 	// フィールド自体を省略する (匿名 viewer、upstream は undefined)。
 	IsFavorited *bool
-	// ShowNotesCount controls whether notesCount is emitted. upstream は
-	// viewer == owner のときのみ出力する。
-	ShowNotesCount bool
+	// NotesCount is the number of notes in this clip. nil ならフィールド自体を
+	// 省略する (upstream は viewer != owner のとき undefined)。
+	//
+	// upstream ClipEntityService と同じく **その場で clip_note を数える**。
+	// mk-go は以前 clip.notesCount 列に非正規化していたが、この列は upstream
+	// に存在せず TS 製 DB では生えないため drop-in で壊れる。加えて TS と
+	// mk-go を行き来すると TS 側での追加/削除がカウンタに反映されず恒久的に
+	// ずれる (#2243)。
+	NotesCount *int
 }
 
 // PackClip converts a model.Clip into the Misskey-compatible clip shape.
@@ -50,8 +56,8 @@ func PackClip(cl *model.Clip, idGen id.Generator, owner *model.User, extras Clip
 	}
 	// notesCount は owner 閲覧時のみ (upstream は他人には undefined を返し
 	// note 件数を露出しない、#1562)。
-	if extras.ShowNotesCount {
-		out["notesCount"] = cl.NotesCount
+	if extras.NotesCount != nil {
+		out["notesCount"] = *extras.NotesCount
 	}
 	if extras.IsFavorited != nil {
 		out["isFavorited"] = *extras.IsFavorited
