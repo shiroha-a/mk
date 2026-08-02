@@ -93,3 +93,40 @@ jobs:
           docker compose -f docker-compose.dropin-frontend.yml \
             -f docker-compose.dropin-frontend.mk.yml down -v \
             >/dev/null 2>&1 || true
+
+  # nightly が壊れたまま放置されるのを防ぐ。schedule 実行が失敗したときだけ
+  # issue を起票し、既に open な同名 issue があれば何もしない (重複抑止)。
+  # 手動 dispatch では起票しない。
+  #
+  # 背景: 本 workflow は最後の success から数十日以上 failure が続いていたが、
+  # PR の required check に入っておらず通知も無かったため気付かれなかった。
+  # 原因を解消したら起票された issue を close すること (次回失敗時に再起票)。
+  notify-failure:
+    needs: [frontend-e2e]
+    if: ${{ always() && github.event_name == 'schedule' && needs.frontend-e2e.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open tracking issue when absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "nightly dropin-frontend-e2e が失敗しています"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "既に open な issue #$existing があるので起票しない"
+            exit 0
+          fi
+          {
+            printf 'nightly workflow `%s` が失敗しました。\n\n' "dropin-frontend-e2e"
+            printf -- '- 失敗した run: %s\n' "$RUN_URL"
+            printf -- '- 対象 branch: develop\n\n'
+            printf 'この issue は nightly の schedule 実行が失敗したときに自動起票されます。\n'
+            printf '既に open な同名 issue がある間は重複起票しません。原因を解消したら\n'
+            printf 'この issue を close してください (次回失敗時に再度起票されます)。\n'
+          } > /tmp/nightly-issue.md
+          gh issue create --title "$TITLE" --body-file /tmp/nightly-issue.md

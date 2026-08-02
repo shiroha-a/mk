@@ -17,8 +17,13 @@ import { callApi } from '../../fixtures/api';
 import { randomUsername, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 
-const UUID_SCHEDULED_AT_REQUIRED = '94a89a43-3591-400a-9c17-dd166e71fdfa';
-const UUID_SCHEDULED_AT_MUST_BE_IN_FUTURE = 'b34d0c1b-996f-4e34-a428-c636d98df457';
+// upstream は SCHEDULED_AT_* に endpoint 固有の id を割り当てる
+// (notes/drafts/create.ts と update.ts で別値)。本 spec は create 経路のみを
+// 叩くので create 側の id を使う。
+// 旧値 (94a89a43… / b34d0c1b…) は NoteDraftService 内部の IdentifiableError id
+// で、endpoint 側の switch で endpoint 固有 id に翻訳される前のもの。
+const UUID_SCHEDULED_AT_REQUIRED = '15e28a55-e74c-4d65-89b7-8880cdaaa87d';
+const UUID_SCHEDULED_AT_MUST_BE_IN_FUTURE = 'e4bed6c9-017e-4934-aed0-01c22cc60ec1';
 
 test.describe('notes: scheduled drafts', () => {
   test.beforeAll(() => {
@@ -40,9 +45,10 @@ test.describe('notes: scheduled drafts', () => {
 
     expect(resp.status()).toBe(200);
     const body = await resp.json();
-    expect(body.id).toBeTruthy();
-    expect(body.text).toBe('scheduled hello');
-    expect(body.visibility).toBe('public');
+    // upstream notes/drafts/create の res は { createdDraft: NoteDraft }。
+    expect(body.createdDraft?.id).toBeTruthy();
+    expect(body.createdDraft?.text).toBe('scheduled hello');
+    expect(body.createdDraft?.visibility).toBe('public');
   });
 
   test('rejects scheduledAt missing when isActuallyScheduled=true', async ({ request }) => {
@@ -104,7 +110,7 @@ test.describe('notes: scheduled drafts', () => {
     });
     expect(created.status()).toBe(200);
     const draftBody = await created.json();
-    const draftId = draftBody.id;
+    const draftId = draftBody.createdDraft.id;
 
     const updated = Date.now() + 2 * 60 * 60 * 1000;
     const updResp = await callApi(request, 'notes/drafts/update', {
@@ -126,7 +132,7 @@ test.describe('notes: scheduled drafts', () => {
       isActuallyScheduled: true,
     });
     expect(created.status()).toBe(200);
-    const draftId = (await created.json()).id;
+    const draftId = (await created.json()).createdDraft.id;
 
     const delResp = await callApi(request, 'notes/drafts/delete', {
       i: me.token,

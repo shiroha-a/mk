@@ -133,10 +133,13 @@ export function establishFederation(trio: Trio): Cypress.Chainable {
     .then(() => followRemote(trio.bob, trio.charlie));
 }
 
-// A↔B, A↔C, B↔C の 6 本 bidirectional follow を張る。establishFederation が
-// 片方向で足りない spec (例: bob が alice の followers-only note を観測) の
-// ために用意。Phase 14-2 時点では未使用だが Phase 14-3 以降で追加予定
-// (Devin #390)。
+// A↔B, A↔C, B↔C の 6 本 bidirectional follow を張る。establishFederation の
+// 片方向 follow では足りない spec 用。
+//
+// 具体的には「A の alice が投稿し B / C 側で観測する」向きの検証で必須。
+// 片方向版だと alice を follow している者がいないため配送先が存在せず、
+// 到達 assertion は永久に成立せず、不達 assertion は常に pass する偽陽性に
+// なる (federation_allowlist.cy.ts が実際にこれで 95 日間 red だった)。
 export function establishMutualFederation(trio: Trio): Cypress.Chainable {
   return cy
     .then(() => followRemote(trio.alice, trio.bob))

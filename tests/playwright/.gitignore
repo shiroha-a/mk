@@ -2,7 +2,11 @@
 node_modules/
 test-results/
 playwright-report/
-package-lock.json
+# 注: package-lock.json は **ignore しない**。caret レンジ + 固定 base image +
+# lockfile 不在の 3 点が揃うと、CI のコールドキャッシュで npm install が毎回
+# 最新の playwright を解決し、base image 同梱の browser binary とずれる
+# (実際に 1.59.1 → 1.62.1 まで漂流し nightly が 86 日間全滅した)。
+# lockfile を repo に置き Dockerfile 側は npm ci で再現性を固定する。
 # json reporter の出力 (= playwright.config.ts の `reporter: ... ['json', { outputFile: 'results.json' }]`)。
 # spec 実行のたびに上書きされる ephemeral file。
 results.json
