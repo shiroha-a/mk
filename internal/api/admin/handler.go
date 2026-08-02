@@ -102,11 +102,14 @@ type Handler struct {
 	// driveBulkDeleter は federation/delete-all-files で host のファイルを物理
 	// ストレージ込みで削除し drive 使用量を減算する (#1772)。未配線時は
 	// driveFileRepo.DeleteByHost に degrade (row のみ削除)。
-	driveBulkDeleter      DriveBulkDeleter
-	adminDB               *gorm.DB
-	userIPRepo            repository.UserIPRepository
-	securityKeyRepo       repository.UserSecurityKeyRepository
-	queueInspector        QueueInspector
+	driveBulkDeleter DriveBulkDeleter
+	adminDB          *gorm.DB
+	userIPRepo       repository.UserIPRepository
+	securityKeyRepo  repository.UserSecurityKeyRepository
+	queueInspector   QueueInspector
+	// queueRuntime は mk-go 独自の worker 実行時情報 (#2277)。
+	// 未配線なら admin/queue 応答から runtime block を省く。
+	queueRuntime          QueueRuntimeProvider
 	queueRedis            QueueRedisInfoProvider
 	emojiEnqueuer         EmojiImportEnqueuer
 	emojiImageFetcher     EmojiImageFetcher
@@ -543,6 +546,54 @@ func (h *Handler) SetSecurityKeyRepo(r repository.UserSecurityKeyRepository) {
 // SetQueueInspector attaches a queue inspector for admin queue endpoints.
 func (h *Handler) SetQueueInspector(qi QueueInspector) {
 	h.queueInspector = qi
+}
+
+// QueueRuntimeProvider exposes the mk-go-only worker runtime view backing the
+// `runtime` block on admin/queue responses (#2277): how many workers a queue
+// currently has, the configured auto-scale bounds, recent latency quantiles
+// and the recent scale events.
+//
+// upstream Misskey は worker 数を静的な config でしか持たないので該当情報が
+// 無い。additive block なので純正 frontend は無視する。
+type QueueRuntimeProvider interface {
+	// QueueRuntime returns the runtime view for qname. ok=false when the
+	// queue is unknown to the provider (= no block emitted).
+	QueueRuntime(qname string) (QueueRuntime, bool)
+}
+
+// QueueRuntime is the per-queue runtime view. Durations are milliseconds so
+// the JSON stays language-neutral.
+type QueueRuntime struct {
+	Workers        int               `json:"workers"`
+	MinWorkers     int               `json:"minWorkers"`
+	MaxWorkers     int               `json:"maxWorkers"`
+	AutoScale      bool              `json:"autoScale"`
+	DispatchWaitMs Quantiles         `json:"dispatchWaitMs"`
+	ProcessingMs   Quantiles         `json:"processingMs"`
+	RecentFailures int               `json:"recentFailures"`
+	ScaleEvents    []QueueScaleEvent `json:"scaleEvents"`
+}
+
+// Quantiles summarises a latency window. Count is the number of samples the
+// window currently holds (bounded ring buffer), not a lifetime total.
+type Quantiles struct {
+	Count int     `json:"count"`
+	P50   float64 `json:"p50"`
+	P95   float64 `json:"p95"`
+	Max   float64 `json:"max"`
+}
+
+// QueueScaleEvent is one committed auto-scale decision, newest first.
+type QueueScaleEvent struct {
+	At        string `json:"at"`
+	Direction string `json:"direction"`
+	From      int    `json:"from"`
+	To        int    `json:"to"`
+}
+
+// SetQueueRuntimeProvider wires the runtime view (#2277).
+func (h *Handler) SetQueueRuntimeProvider(p QueueRuntimeProvider) {
+	h.queueRuntime = p
 }
 
 // NewHandler creates a new admin Handler.

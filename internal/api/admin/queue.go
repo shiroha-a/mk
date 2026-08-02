@@ -550,7 +550,7 @@ func (h *Handler) queueIsManaged(qname string) bool {
 // 残る非互換: frontend は Misskey の queue 名 (system / endedPollNotification /
 // postScheduledNote 等) を列挙しうるが、mk-go が実行しない queue は GetQueueInfo
 // が空を返すため 0 表示になる (#1393 で別途整理予定)。
-func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetricsResult, db map[string]any) map[string]any {
+func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetricsResult, db map[string]any, runtime *QueueRuntime) map[string]any {
 	// delayed は Misskey 用語で scheduled + retry の合計に相当する
 	// (どちらも「すぐには実行されない」状態)。
 	delayed := info.Scheduled + info.Retry
@@ -563,7 +563,7 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 	completedData, completedCount := metricsToFrontend(completed, int64(info.Completed))
 	failedData, failedCount := metricsToFrontend(failed, int64(info.Failed))
 
-	return map[string]any{
+	out := map[string]any{
 		"name":          info.Queue,
 		"qualifiedName": info.Queue,
 		"isPaused":      info.IsPaused,
@@ -586,6 +586,13 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 		// で全 queue 同値)。provider 未配線時は defaultQueueDB() の 0 埋め。
 		"db": db,
 	}
+	// runtime は mk-go 独自の additive block (#2277)。upstream Misskey は
+	// worker 数を静的 config でしか持たないので該当情報が無い。純正 frontend は
+	// 未知 field として無視する。
+	if runtime != nil {
+		out["runtime"] = runtime
+	}
+	return out
 }
 
 // queueMetricObject builds the upstream QueueMetrics shape ({meta, data, count}).
@@ -648,10 +655,10 @@ func (h *Handler) QueueQueueStats(c echo.Context) error {
 	info, err := h.queueInspector.GetQueueInfo(req.Queue)
 	if err != nil || info == nil {
 		completed, failed := h.fetchQueueMetrics(req.Queue)
-		return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed, db))
+		return c.JSON(http.StatusOK, shapeQueueForFrontend(&QueueInfoResult{Queue: req.Queue}, completed, failed, db, h.queueRuntimeFor(req.Queue)))
 	}
 	completed, failed := h.fetchQueueMetrics(req.Queue)
-	return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed, db))
+	return c.JSON(http.StatusOK, shapeQueueForFrontend(info, completed, failed, db, h.queueRuntimeFor(info.Queue)))
 }
 
 // fetchQueueMetrics queries the inspector for completed / failed
@@ -686,7 +693,7 @@ func (h *Handler) QueueQueues(c echo.Context) error {
 			continue
 		}
 		completed, failed := h.fetchQueueMetrics(q)
-		result = append(result, shapeQueueForFrontend(info, completed, failed, db))
+		result = append(result, shapeQueueForFrontend(info, completed, failed, db, h.queueRuntimeFor(q)))
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -937,4 +944,17 @@ func (h *Handler) QueueStats(c echo.Context) error {
 		}
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// queueRuntimeFor returns the runtime block for qname, or nil when the
+// provider is unwired (= plain drop-in build) or does not know the queue.
+func (h *Handler) queueRuntimeFor(qname string) *QueueRuntime {
+	if h.queueRuntime == nil {
+		return nil
+	}
+	rt, ok := h.queueRuntime.QueueRuntime(qname)
+	if !ok {
+		return nil
+	}
+	return &rt
 }

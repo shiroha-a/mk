@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue/autoscale"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
+	"github.com/shiroha-a/mk/internal/queue/runtimestats"
 )
 
 // defaultMinWorkers is the per-queue worker lower bound when MinWorkers
@@ -39,6 +40,10 @@ type autoscaleRunner struct {
 	// after each Resize commit.
 	mu           sync.Mutex
 	workerCounts map[string]int
+
+	// stats records committed scale events so the admin UI can show what
+	// the controller actually did (#2277). nil のときは記録しない。
+	stats *runtimestats.Recorder
 }
 
 // startAutoScale constructs an AIMDController per managed queue, starts
@@ -63,6 +68,7 @@ func startAutoScale(
 	cfg *config.Config,
 	drv driver.Driver,
 	metrics *queuemetrics.Metrics,
+	stats *runtimestats.Recorder,
 ) (*autoscaleRunner, error) {
 	if !cfg.JobQueueAutoScale {
 		return nil, nil
@@ -86,14 +92,7 @@ func startAutoScale(
 
 	// 変数名は Go 1.21+ builtin min / max を shadow しないよう
 	// minWorkers / maxWorkers と書く。
-	minWorkers := defaultMinWorkers
-	if cfg.MinWorkers != nil && *cfg.MinWorkers > 0 {
-		minWorkers = *cfg.MinWorkers
-	}
-	maxWorkers := runtime.NumCPU() * 16
-	if cfg.MaxWorkers != nil && *cfg.MaxWorkers > 0 {
-		maxWorkers = *cfg.MaxWorkers
-	}
+	minWorkers, maxWorkers := resolveAutoScaleBounds(cfg)
 	cooldown := time.Second
 	if cfg.AutoScaleCooldownSeconds != nil && *cfg.AutoScaleCooldownSeconds > 0 {
 		cooldown = time.Duration(*cfg.AutoScaleCooldownSeconds) * time.Second
@@ -114,6 +113,7 @@ func startAutoScale(
 		cancel:       cancel,
 		wg:           &sync.WaitGroup{},
 		workerCounts: make(map[string]int, len(queues)),
+		stats:        stats,
 	}
 
 	for _, qname := range queues {
@@ -263,6 +263,11 @@ func (r *autoscaleRunner) tick(
 			direction = "up"
 		}
 		metrics.ScaleEventsTotal.WithLabelValues(qname, direction).Inc()
+		// admin UI 用の短期履歴 (#2277)。Prometheus counter は「何回起きたか」
+		// しか持たないので、いつ何本から何本へ動いたかはここで保持する。
+		if r.stats != nil {
+			r.stats.RecordScale(qname, direction, current, action.TargetWorkers)
+		}
 		slog.Info("server: autoscale resized",
 			"queue", qname, "direction", direction,
 			"from", current, "to", action.TargetWorkers, "depth", depth)
@@ -352,4 +357,21 @@ func maxWorkersGlobalDescription(v *int) string {
 		return "none"
 	}
 	return fmt.Sprintf("%d", *v)
+}
+
+// resolveAutoScaleBounds resolves the effective [min, max] worker bounds from
+// config, applying the same defaults the controller uses. Shared with the
+// admin runtime view so the UI never disagrees with the controller (#2277).
+func resolveAutoScaleBounds(cfg *config.Config) (minWorkers, maxWorkers int) {
+	// 変数名は Go 1.21+ builtin min / max を shadow しないよう
+	// minWorkers / maxWorkers と書く。
+	minWorkers = defaultMinWorkers
+	if cfg.MinWorkers != nil && *cfg.MinWorkers > 0 {
+		minWorkers = *cfg.MinWorkers
+	}
+	maxWorkers = runtime.NumCPU() * 16
+	if cfg.MaxWorkers != nil && *cfg.MaxWorkers > 0 {
+		maxWorkers = *cfg.MaxWorkers
+	}
+	return minWorkers, maxWorkers
 }

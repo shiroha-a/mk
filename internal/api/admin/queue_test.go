@@ -1182,3 +1182,91 @@ func TestQueuePause_NoInspector(t *testing.T) {
 	rec := doPost(h.QueuePause, `{"queue":"deliver"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
+
+// stubQueueRuntime は mk-go 独自 runtime block (#2277) の provider stub。
+type stubQueueRuntime struct {
+	known map[string]apiadmin.QueueRuntime
+}
+
+func (s *stubQueueRuntime) QueueRuntime(q string) (apiadmin.QueueRuntime, bool) {
+	rt, ok := s.known[q]
+	return rt, ok
+}
+
+// runtime provider を配線すると admin/queue/queues の各 queue に
+// worker 数 / auto-scale 範囲 / 遅延 / scale 履歴が additive に載ること。
+func TestQueueQueues_IncludesRuntimeBlock(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		queues: []string{"deliver"},
+		info: map[string]*apiadmin.QueueInfoResult{
+			"deliver": {Queue: "deliver", Active: 2, Pending: 3},
+		},
+	}
+	h.SetQueueInspector(insp)
+	h.SetQueueRuntimeProvider(&stubQueueRuntime{known: map[string]apiadmin.QueueRuntime{
+		"deliver": {
+			Workers: 6, MinWorkers: 4, MaxWorkers: 32, AutoScale: true,
+			DispatchWaitMs: apiadmin.Quantiles{Count: 10, P50: 1.5, P95: 9, Max: 12},
+			ProcessingMs:   apiadmin.Quantiles{Count: 10, P50: 40, P95: 220, Max: 900},
+			RecentFailures: 1,
+			ScaleEvents: []apiadmin.QueueScaleEvent{
+				{At: "2026-08-02T12:00:00Z", Direction: "up", From: 4, To: 6},
+			},
+		},
+	}})
+
+	rec := doPost(h.QueueQueues, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+
+	rt, ok := rows[0]["runtime"].(map[string]any)
+	require.True(t, ok, "runtime block should be present")
+	assert.EqualValues(t, 6, rt["workers"])
+	assert.EqualValues(t, 4, rt["minWorkers"])
+	assert.EqualValues(t, 32, rt["maxWorkers"])
+	assert.Equal(t, true, rt["autoScale"])
+	assert.EqualValues(t, 1, rt["recentFailures"])
+
+	events, ok := rt["scaleEvents"].([]any)
+	require.True(t, ok)
+	require.Len(t, events, 1)
+	assert.Equal(t, "up", events[0].(map[string]any)["direction"])
+}
+
+// provider 未配線 (= 純正互換ビルド / driver 未対応) では runtime block を
+// 一切出さない。upstream shape を汚さないため。
+func TestQueueQueues_OmitsRuntimeWhenUnwired(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		queues: []string{"deliver"},
+		info:   map[string]*apiadmin.QueueInfoResult{"deliver": {Queue: "deliver"}},
+	})
+
+	rec := doPost(h.QueueQueues, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	_, hasRuntime := rows[0]["runtime"]
+	assert.False(t, hasRuntime, "runtime must be omitted when the provider is unwired")
+}
+
+// provider が知らない queue も block を出さない (部分配線でも壊れない)。
+func TestQueueQueues_OmitsRuntimeForUnknownQueue(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		queues: []string{"deliver"},
+		info:   map[string]*apiadmin.QueueInfoResult{"deliver": {Queue: "deliver"}},
+	})
+	h.SetQueueRuntimeProvider(&stubQueueRuntime{known: map[string]apiadmin.QueueRuntime{}})
+
+	rec := doPost(h.QueueQueues, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	_, hasRuntime := rows[0]["runtime"]
+	assert.False(t, hasRuntime)
+}
