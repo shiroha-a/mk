@@ -13,6 +13,7 @@ import { callApi } from '../../fixtures/api';
 import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import { pollForTimelineNote } from '../../fixtures/timeline';
+import { deleteAntennasNamed } from '../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /timeline/antenna/:id renders matching notes', () => {
@@ -25,6 +26,14 @@ test.describe('UI: /timeline/antenna/:id renders matching notes', () => {
 
   test.setTimeout(60_000);
 
+  // 作った antenna は片付ける。root を共有しているので放置すると
+  // antennaLimit (既定 5) を使い切って無関係な spec が create で落ちる (#2264)。
+  const createdAntennas: string[] = [];
+  test.afterEach(async ({ request }) => {
+    await deleteAntennasNamed(request, root.token, createdAntennas);
+    createdAntennas.length = 0;
+  });
+
   test('antenna timeline renders a note that matches keyword', async ({
     page,
     baseURL,
@@ -32,9 +41,11 @@ test.describe('UI: /timeline/antenna/:id renders matching notes', () => {
   }) => {
     // 一意 keyword を使って antenna を作成
     const keyword = `pwant${Date.now().toString().slice(-9)}`;
+    const antennaName = `pw-antenna ${Date.now()}`;
+    createdAntennas.push(antennaName);
     const antennaResp = await callApi(request, 'antennas/create', {
       i: root.token,
-      name: `pw-antenna ${Date.now()}`,
+      name: antennaName,
       src: 'all',
       keywords: [[keyword]],
       excludeKeywords: [[]],

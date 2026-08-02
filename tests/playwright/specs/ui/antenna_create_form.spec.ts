@@ -4,6 +4,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { deleteAntennasNamed } from '../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
 
 test.describe('UI: /my/antennas/create form flow', () => {
@@ -12,6 +13,14 @@ test.describe('UI: /my/antennas/create form flow', () => {
     root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));
   });
   test.setTimeout(60_000);
+
+  // 作った antenna は片付ける。root を共有しているので放置すると
+  // antennaLimit (既定 5) を使い切って無関係な spec が create で落ちる (#2264)。
+  const createdAntennas: string[] = [];
+  test.afterEach(async ({ request }) => {
+    await deleteAntennasNamed(request, root.token, createdAntennas);
+    createdAntennas.length = 0;
+  });
 
   test('navigate /my/antennas/create → fill name → save → list shows new antenna', async ({
     page,
@@ -28,6 +37,7 @@ test.describe('UI: /my/antennas/create form flow', () => {
 
     // name input (= 最初の input) に書き込み (post_note と同 pattern)
     const antennaName = `pwantui-${Date.now().toString().slice(-9)}`;
+    createdAntennas.push(antennaName);
     await page.evaluate((n) => {
       const target = document.querySelector('input') as HTMLInputElement | null;
       if (!target) return;
