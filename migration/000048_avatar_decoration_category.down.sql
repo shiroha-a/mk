@@ -1,1 +1,1 @@
-ALTER TABLE "avatar_decoration" DROP COLUMN "category";
+ALTER TABLE "avatar_decoration" DROP COLUMN IF EXISTS "category";

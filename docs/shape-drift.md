@@ -400,3 +400,51 @@ nameは原則class名だが、`name = '...'`プロパティがあればそちら
 go test ./internal/entitycompat/ -run TestMigrationSeed   # gate をローカル実行
 make shapecheck-gen                                        # golden_upstream_migrations.json も再生成
 ```
+
+## Index naming gate / migration idempotency gate（drop-in で二重化・停止しない）
+
+drop-in では mk-go の migration が **Misskey TS の作った既存 DB** にも流れる(`docs/migration-from-ts.md`)。upstream が既に作った構造と衝突しないよう、2 つの静的 gate を置いている。
+
+### `TestMigrationIdempotency_RequiresIfExists`
+
+migration の DDL に `IF NOT EXISTS` / `IF EXISTS` が付いていることを強制する。条件なしの DDL は upstream が作った列 / テーブル / index と衝突して
+
+```
+column "category" of relation "avatar_decoration" already exists
+```
+
+で migration が dirty 停止し、**drop-in 手順そのものが完走しない**。実際 `000048` が upstream 2026.5.0 の `AddCategoryToAvatarDecorations` と衝突して、2026.5.0 以降の TS 製 DB からの drop-in が不可能な状態だった(#2246)。新規 DB でしか試さないと絶対に踏まない。
+
+### `TestIndexNaming_NoNewUpstreamDuplicates`
+
+mk-go が upstream と同内容の index を**別名で**追加するのを防ぐ。
+
+mk-go は `IDX_<table>_<col>`、upstream (TypeORM) は `IDX_e5848eac4940934e23dbc17581` のような hash 名を使う。`CREATE INDEX IF NOT EXISTS` は **index 名**でしか存在判定しないので、定義が同一でも名前が違えば新規作成され、TS 製 DB では index が二重化する。
+
+実測 (Misskey TS 2026.7.0 が作った DB に mk-go の全 migration を適用):
+
+| | index 数 |
+|---|---|
+| TS のみ | 442 |
+| mk-go migration 適用後 | 639 (+197) |
+| `000068` 適用後 | 474 (165 本を削除、upstream 由来は 0 本削除) |
+
+`note` は最大テーブルなので GIN index の二重化は INSERT / UPDATE のたびに 2 本分の更新コストがかかる。読み取り性能には効かないが書き込みスループットと容量に効く。
+
+**新しく index を足すとき、upstream に同じ (table, unique, method, columns) の index があるなら upstream の index 名をそのまま使うこと。** `000058_channel_muting_expires_at.up.sql` が前例。そうすれば `IF NOT EXISTS` が効いて二重化しない。
+
+既存の 167 本は `testdata/known_duplicate_indexes.json` に記録し、`000068` が実行時に落とす。意図的に定義を変えている場合 (partial 化等) も同ファイルに追加する。
+
+### golden の再生成
+
+index の golden は**実 DB から**採る (TypeORM の decorator からは正規形を再現できないため)。upstream を bump したら以下で撮り直す:
+
+```bash
+# 任意の隔離 stack で misskey/misskey:<version> を clean DB に対して起動し、
+# migration が完走したあとに実行する
+psql -t -A -F'|' -c "SELECT tablename, indexname, indexdef FROM pg_indexes \
+  WHERE schemaname='public' ORDER BY tablename, indexname;"
+```
+
+出力を `internal/entitycompat/testdata/golden_upstream_indexes.json` の形式
+(`{table, name, def}`、`def` は `CREATE (UNIQUE )?INDEX <name> ON ` を `UNIQUE|` / `|` に潰したもの) に変換して commit する。
