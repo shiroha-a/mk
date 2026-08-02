@@ -153,6 +153,15 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 	// translatorAvailable
 	translatorAvailable := m.DeeplAuthKey != nil && *m.DeeplAuthKey != ""
 
+	// SSR 埋め込み meta の policies は upstream HtmlTemplateService と同じく
+	// packDetailed 相当 (= DEFAULT_POLICIES に instance.policies を上書き) に
+	// する。DefaultPolicies() 固定だと admin/roles/update-default-policies や
+	// update-meta の変更が client に一切反映されない。frontend の instance.ts は
+	// data-generated-at が localStorage の instanceCachedAt より新しいと SSR 値で
+	// cache を上書きし、以後 1 時間 /api/meta を再取得しないため、誤った policies
+	// が恒久的に居座る。
+	mergedPolicies := role.MergeMetaPolicies(m.Policies)
+
 	resp := map[string]any{
 		"maintainerName":               m.MaintainerName,
 		"maintainerEmail":              m.MaintainerEmail,
@@ -215,12 +224,12 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 		"sentryForFrontend":            sentryForFrontendForSSR(cfg.SentryForFrontend),
 		"googleAnalyticsMeasurementId": m.GoogleAnalyticsMeasurementID,
 		"clientOptions":                clientOptionsJSON(m.ClientOptions),
-		"policies":                     role.DefaultPolicies(),
+		"policies":                     mergedPolicies,
 		"features": map[string]any{
 			"registration":           !m.DisableRegistration,
 			"emailRequiredForSignup": m.EmailRequiredForSignup,
-			"localTimeline":          meta.PolicyBool(role.DefaultPolicies(), "ltlAvailable"),
-			"globalTimeline":         meta.PolicyBool(role.DefaultPolicies(), "gtlAvailable"),
+			"localTimeline":          meta.PolicyBool(mergedPolicies, "ltlAvailable"),
+			"globalTimeline":         meta.PolicyBool(mergedPolicies, "gtlAvailable"),
 			"hcaptcha":               m.EnableHcaptcha,
 			"recaptcha":              m.EnableRecaptcha,
 			"turnstile":              m.EnableTurnstile,
