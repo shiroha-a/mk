@@ -32,7 +32,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 10 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 6 tag (`-mk.1` ～ `-mk.6`) | — | — |
+| fork frontend の独自変更 | 7 tag (`-mk.1` ～ `-mk.7`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 99.8%、残 1 件は TestMode 限定登録の偽陽性)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -215,6 +215,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `2026.7.0-mk.4` | job queue の worker runtime (auto-scale / 遅延) を admin UI に表示 (#2277) |
 | `2026.7.0-mk.5` | mk-go 向けフロントエンドアセット専用イメージを publish する CI (#2306)。frontend の挙動は変えず、`Dockerfile.assets` + workflow の追加のみ |
 | `2026.7.0-mk.6` | 分割アップロードへの対応 (#2314) |
+| `2026.7.0-mk.7` | ジョブキューのタブを mk-go の queue 構成に合わせる (#2323) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -261,6 +262,28 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 `runtime` block が無い応答 (純正 backend) では該当 UI を出さない。
 
 ---
+
+## 4-3. job queue の構成差分
+
+upstream は用途ごとに **10 queue** に分けるが、mk-go は **6 queue** に集約している (`internal/queue/driver/mkqdriver` の `QueueNames`)。処理する仕事は同じで、束ね方だけが違う。
+
+| upstream の queue | mk-go の実体 |
+|---|---|
+| `deliver` | `deliver` |
+| `inbox` | `inbox` |
+| `system` | `maintenance` (cron 群: chart tick/resync/clean, checkExpiredMutings, clean, cleanRemoteNotes, checkModeratorsActivity, instanceRefresh, retentionAggregate, chunkedUploadGc) |
+| `endedPollNotification` | **queue ではなく常駐 goroutine** (`corepoll.ExpiryWorker`、60 秒間隔) |
+| `postScheduledNote` | `maintenance` の `note:postScheduled` |
+| `db` | `export` / `import` / `importCustomEmojis` / `maintenance:deleteAccount` |
+| `relationship` | `maintenance` の `relationship:{follow,unfollow,block,unblock}` |
+| `userWebhookDeliver` | `webhook` の `webhook:user` |
+| `systemWebhookDeliver` | `webhook` の `webhook:system` |
+| `objectStorage` | **queue 化していない**。削除は `deleteFileStorageObjects` で同期実行する |
+| — | `push` (Web Push 配信、upstream は system queue 内で処理) |
+
+`objectStorage` だけは実装方式そのものが違う。upstream は `deleteFile` / `cleanRemoteFiles` を非同期 queue で回すため、(a) 大量削除でも API が即返る (b) ストレージ不調時にリトライされる。mk-go は同期実行なので、`admin/drive/clean-remote-files` は完了まで待ち、失敗時のリトライも無い。
+
+**管理画面のタブはこの構成に合わせて fork 側で書き換えている** (`misskey-js` の `queueTypes`、`2026.7.0-mk.7`)。upstream のタブは API 応答ではなくこの定数から生成されるため、書き換えないと mk-go に存在しない 8 タブが常時ゼロ表示になり、実在する `push` / `export` / `webhook` / `maintenance` が画面から見えなくなる (#2323)。**mk-go の queue を増減したら fork の `queueTypes` も合わせること。**
 
 ## 5. 運用・性能機能 (mk-go 独自)
 

@@ -18,6 +18,13 @@ import (
 // the corresponding mkq.Queue handle is created and a worker is
 // spawned for it. The list mirrors the Queues map asynqdriver Server
 // configures.
+//
+// **この一覧を変えたら fork (third_party/misskey) の
+// `packages/misskey-js/src/consts.ts` の `queueTypes` も合わせること。**
+// 管理画面のジョブキュータブは API 応答ではなくその定数から生成されるため、
+// ずれると存在しない queue のタブが常時ゼロ表示になり、実在する queue が
+// 画面から見えなくなる (#2323)。upstream との対応表は
+// docs/divergence.md の「4-3. job queue の構成差分」。
 var QueueNames = []string{
 	"deliver",
 	"inbox",
