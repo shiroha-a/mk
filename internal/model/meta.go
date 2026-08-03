@@ -76,6 +76,17 @@ type Meta struct {
 	ObjectStorageSetPublicRead    bool    `gorm:"column:objectStorageSetPublicRead;default:false" json:"objectStorageSetPublicRead"`
 	ObjectStorageS3ForcePathStyle bool    `gorm:"column:objectStorageS3ForcePathStyle;default:true" json:"objectStorageS3ForcePathStyle"`
 
+	// Chunked upload (#2313)。mk-go 独自の列。分割アップロードは S3 マルチ
+	// パートに委譲するため、設定はオブジェクトストレージの一部として扱う。
+	// 既定 false は「リバースプロキシの client_max_body_size を確認せずに
+	// 有効化すると必ず失敗する」ため (管理者が意図的に入れる形にする)。
+	ChunkedUploadEnabled           bool `gorm:"column:chunkedUploadEnabled;default:false" json:"chunkedUploadEnabled"`
+	ChunkedUploadChunkSizeMb       int  `gorm:"column:chunkedUploadChunkSizeMb;default:10" json:"chunkedUploadChunkSizeMb"`
+	ChunkedUploadSessionTTLMinutes int  `gorm:"column:chunkedUploadSessionTtlMinutes;default:60" json:"chunkedUploadSessionTtlMinutes"`
+	// 下 2 つは role policy に対するサーバー cap (capServerMaxFileSize と同じ役割)。
+	ChunkedUploadMaxSessionsPerUser  int `gorm:"column:chunkedUploadMaxSessionsPerUser;default:8" json:"chunkedUploadMaxSessionsPerUser"`
+	ChunkedUploadMaxPendingMbPerUser int `gorm:"column:chunkedUploadMaxPendingMbPerUser;default:2048" json:"chunkedUploadMaxPendingMbPerUser"`
+
 	// Policies & Rules
 	Policies    datatypes.JSON `gorm:"column:policies;type:jsonb;default:'{}'" json:"policies"`
 	ServerRules pq.StringArray `gorm:"column:serverRules;type:varchar(280)[];default:'{}'" json:"serverRules"`

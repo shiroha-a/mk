@@ -2702,6 +2702,27 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			if f, ok := v.(float64); ok {
 				m.Meta.SensitiveMediaDetectionMaxImagesPerRequest = int(f)
 			}
+		// 分割アップロード (#2313)。
+		case "chunkedUploadEnabled":
+			if b, ok := v.(bool); ok {
+				m.Meta.ChunkedUploadEnabled = b
+			}
+		case "chunkedUploadChunkSizeMb":
+			if f, ok := v.(float64); ok {
+				m.Meta.ChunkedUploadChunkSizeMb = int(f)
+			}
+		case "chunkedUploadSessionTtlMinutes":
+			if f, ok := v.(float64); ok {
+				m.Meta.ChunkedUploadSessionTTLMinutes = int(f)
+			}
+		case "chunkedUploadMaxSessionsPerUser":
+			if f, ok := v.(float64); ok {
+				m.Meta.ChunkedUploadMaxSessionsPerUser = int(f)
+			}
+		case "chunkedUploadMaxPendingMbPerUser":
+			if f, ok := v.(float64); ok {
+				m.Meta.ChunkedUploadMaxPendingMbPerUser = int(f)
+			}
 		case "federationHosts":
 			setStrArr(&m.Meta.FederationHosts, k, v)
 		case "blockedHosts":
