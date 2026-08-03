@@ -32,7 +32,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 10 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 4 tag (`-mk.1` ～ `-mk.4`) | — | — |
+| fork frontend の独自変更 | 6 tag (`-mk.1` ～ `-mk.6`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 99.8%、残 1 件は TestMode 限定登録の偽陽性)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -213,6 +213,8 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `2026.7.0-mk.2` | 自動生成した VAPID 鍵を admin 画面へ即時反映 (#2272) |
 | `2026.7.0-mk.3` | バージョン表示を mk-go の実装版にする (#2274) |
 | `2026.7.0-mk.4` | job queue の worker runtime (auto-scale / 遅延) を admin UI に表示 (#2277) |
+| `2026.7.0-mk.5` | mk-go 向けフロントエンドアセット専用イメージを publish する CI (#2306)。frontend の挙動は変えず、`Dockerfile.assets` + workflow の追加のみ |
+| `2026.7.0-mk.6` | 分割アップロードへの対応 (#2314) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -229,7 +231,17 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 |---|---|
 | `pages/admin/settings.vue` | Service Worker 設定の保存後に `admin/meta` を引き直してフォームへ書き戻す。`update-meta` は 204 で生成鍵を返さず `meta` はページ表示時の 1 回しか読まないため、放置すると入力欄が空のままになり (a) 生成された公開鍵を確認できない (b) 次の保存で空文字が再送されて鍵が作り直され既存の push 購読が全部無効になる |
 
-いずれも純正は backend が federation しない (`core/ChatService.ts` の remote 配送はコメントアウト) ため、純正へ PR しても意味がない。upstream 追従時は cherry-pick で持ち越す。
+`2026.7.0-mk.6` の内訳:
+
+| 箇所 | 変更 |
+|---|---|
+| `utility/drive.ts` | `/api/meta` が `chunkedUpload` を告知しており、かつファイルサイズが告知された `chunkSize` を超える場合に分割アップロード経路 (`drive/files/create-chunked/*`) を使う。閾値もチャンクサイズもサーバー告知に従い、フロントエンドにハードコードしない (S3 互換サービスごとに最小パートサイズや「最終パート以外は同一サイズ」等の制約が異なるため)。進捗はチャンク合算で単発と同じ体験を維持し、中断時はセッション破棄 API を呼ぶ。エラーダイアログの分岐は単発経路と共通化 |
+| `pages/admin/object-storage.vue` | 分割アップロードの有効/無効・チャンクサイズ・セッション有効期限を追加。`admin/meta` に該当 field が無い純正 backend では UI ごと隠す。**チャンクサイズがリバースプロキシの上限を超えていると有効にしても失敗する**旨を警告として表示 |
+| `locales/ja-JP.yml` | 分割アップロード固有のエラー / 設定文言 (`_chunkedUpload`) |
+
+純正 Misskey には分割アップロードの backend が無いため `chunkedUpload` は常に `undefined` になり、従来の単発アップロードに倒れる。
+
+チャット / reversi の解禁 (`-mk.1`) はいずれも純正は backend が federation しない (`core/ChatService.ts` の remote 配送はコメントアウト) ため、純正へ PR しても意味がない。upstream 追従時は cherry-pick で持ち越す。
 
 `2026.7.0-mk.3` の内訳:
 

@@ -19,7 +19,7 @@
 #   docker build -f Dockerfile.bundled -t mk-go:bundled .
 #   docker compose -f docker-compose.image.yml up -d   (publish 済みイメージを pull)
 
-ARG MISSKEY_ASSETS_IMAGE=ghcr.io/shiroha-a/misskey-ts-assets:2026.7.0-mk.5
+ARG MISSKEY_ASSETS_IMAGE=ghcr.io/shiroha-a/misskey-ts-assets:2026.7.0-mk.6
 
 # Stage 1: Go binary
 #
