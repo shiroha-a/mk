@@ -157,6 +157,10 @@ type Service struct {
 	// folderPublisher emits folderCreated/folderUpdated/folderDeleted to the
 	// drive channel (#1564)。nil disables folder events.
 	folderPublisher FolderStreamingPublisher
+	// localStorage は storedInternal=true な行の実体があるローカル FS を常に
+	// 指す backend。storage が object storage に切り替わっても、切替前に
+	// 保存されたファイルはこちらにある (#1414 / #2315)。
+	localStorage Storage
 }
 
 // SetFolderStreamingPublisher attaches the drive-channel publisher for folder
@@ -177,6 +181,25 @@ func (s *Service) publishFolderEvent(userID, eventType string, body any) {
 // inspect any file (matching upstream Misskey's drive/files/show behaviour).
 // Nil keeps the existing owner-only check.
 func (s *Service) SetRoleChecker(rc RoleChecker) { s.roleChecker = rc }
+
+// SetLocalStorage wires the always-local backend used to reach rows whose
+// `storedInternal` is true while object storage is the active backend (#1414 /
+// #2315). Optional: when unset those rows fall back to the primary storage,
+// which is correct only while object storage is disabled.
+func (s *Service) SetLocalStorage(st Storage) { s.localStorage = st }
+
+// storageFor picks the backend that holds f, mirroring upstream
+// `DriveService.deleteFile` which branches on `file.storedInternal`.
+//
+// オブジェクトストレージを有効にする前に保存されたファイルはローカル FS に
+// 残る。primary だけを見て消すと、S3 に存在しないキーを消しに行って空振りし、
+// ローカルに孤児が残り続ける。
+func (s *Service) storageFor(f *model.DriveFile) Storage {
+	if f != nil && f.StoredInternal && s.localStorage != nil {
+		return s.localStorage
+	}
+	return ResolveStorage(s.storage)
+}
 
 // SetSensitiveDetection attaches the sensitive media detector and config.
 func (s *Service) SetSensitiveDetection(detector SensitiveDetector, cfg SensitiveConfig) {
@@ -367,11 +390,17 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		}
 	}
 
+	// backend は meta から動的に解決される (#2315)。本体・サムネイル・
+	// webpublic の書き込みと storedInternal の決定が途中の設定変更で
+	// ちぐはぐにならないよう、ここで一度だけ固定する。
+	backend := ResolveStorage(s.storage)
+	storedInternal := StorageIsLocal(backend)
+
 	accessKey, err := newAccessKey()
 	if err != nil {
 		return nil, err
 	}
-	url, err := s.storage.Put(accessKey, bytes.NewReader(info.Body))
+	url, err := backend.Put(accessKey, bytes.NewReader(info.Body))
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +426,7 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	if thumbnail != nil {
 		tKey, err := newAccessKey()
 		if err == nil {
-			tURL, err := s.storage.Put(tKey, bytes.NewReader(thumbnail.Data))
+			tURL, err := backend.Put(tKey, bytes.NewReader(thumbnail.Data))
 			if err == nil {
 				thumbnailURL = &tURL
 				thumbnailAccessKey = &tKey
@@ -407,7 +436,7 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	if webpublic != nil {
 		wKey, err := newAccessKey()
 		if err == nil {
-			wURL, err := s.storage.Put(wKey, bytes.NewReader(webpublic.Data))
+			wURL, err := backend.Put(wKey, bytes.NewReader(webpublic.Data))
 			if err == nil {
 				webpublicURL = &wURL
 				webpublicAccessKey = &wKey
@@ -426,17 +455,22 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		userHostPtr = in.User.Host
 	}
 	f := &model.DriveFile{
-		ID:                 fileID,
-		UserID:             userIDPtr,
-		UserHost:           userHostPtr,
-		MD5:                info.MD5,
-		Name:               in.Name,
-		Type:               info.MimeType,
-		Size:               info.Size,
-		Comment:            in.Comment,
-		Blurhash:           blurhash,
-		Properties:         properties,
-		StoredInternal:     true,
+		ID:         fileID,
+		UserID:     userIDPtr,
+		UserHost:   userHostPtr,
+		MD5:        info.MD5,
+		Name:       in.Name,
+		Type:       info.MimeType,
+		Size:       info.Size,
+		Comment:    in.Comment,
+		Blurhash:   blurhash,
+		Properties: properties,
+		// upstream DriveService.save は useObjectStorage で true/false を
+		// 出し分ける。ここを true 固定にしていたため、オブジェクトストレージに
+		// 保存したファイルまで「ローカル保存」と記録され、`/files/:accessKey`
+		// がローカルを見に行って 404 になっていた (#2315)。TS へ切り戻した
+		// ときも FileServerService が同じ列を見るので drop-in にも効く。
+		StoredInternal:     storedInternal,
 		URL:                url,
 		ThumbnailURL:       thumbnailURL,
 		WebpublicURL:       webpublicURL,
@@ -459,12 +493,12 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 
 	if err := s.fileRepo.Create(f); err != nil {
 		// ロールバックとして storage を削除する
-		_ = s.storage.Delete(accessKey)
+		_ = backend.Delete(accessKey)
 		if thumbnailAccessKey != nil {
-			_ = s.storage.Delete(*thumbnailAccessKey)
+			_ = backend.Delete(*thumbnailAccessKey)
 		}
 		if webpublicAccessKey != nil {
-			_ = s.storage.Delete(*webpublicAccessKey)
+			_ = backend.Delete(*webpublicAccessKey)
 		}
 		return nil, err
 	}
@@ -839,17 +873,18 @@ func (s *Service) Delete(user *model.User, id string) error {
 	if err != nil {
 		return err
 	}
+	backend := s.storageFor(f)
 	if f.AccessKey != nil {
-		if err := s.storage.Delete(*f.AccessKey); err != nil {
+		if err := backend.Delete(*f.AccessKey); err != nil {
 			return err
 		}
 	}
 	// サムネイル/webpublic の storage も削除
 	if f.ThumbnailAccessKey != nil {
-		_ = s.storage.Delete(*f.ThumbnailAccessKey)
+		_ = backend.Delete(*f.ThumbnailAccessKey)
 	}
 	if f.WebpublicAccessKey != nil {
-		_ = s.storage.Delete(*f.WebpublicAccessKey)
+		_ = backend.Delete(*f.WebpublicAccessKey)
 	}
 	if err := s.fileRepo.Delete(f); err != nil {
 		return err
@@ -878,16 +913,17 @@ func (s *Service) DeleteAllByHost(host string) (int64, error) {
 		return 0, err
 	}
 	for _, f := range files {
+		backend := s.storageFor(f)
 		if f.AccessKey != nil {
-			if derr := s.storage.Delete(*f.AccessKey); derr != nil {
+			if derr := backend.Delete(*f.AccessKey); derr != nil {
 				slog.Warn("drive: delete-all-by-host storage delete failed", "host", host, "accessKey", *f.AccessKey, "err", derr)
 			}
 		}
 		if f.ThumbnailAccessKey != nil {
-			_ = s.storage.Delete(*f.ThumbnailAccessKey)
+			_ = backend.Delete(*f.ThumbnailAccessKey)
 		}
 		if f.WebpublicAccessKey != nil {
-			_ = s.storage.Delete(*f.WebpublicAccessKey)
+			_ = backend.Delete(*f.WebpublicAccessKey)
 		}
 		// usedRemote / instanceChart 等の使用量を per-file で減算する。
 		if s.chartHook != nil {

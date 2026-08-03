@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1304,4 +1305,130 @@ func TestDeleteAllByHost_EmptyHost(t *testing.T) {
 	n, err := svc.DeleteAllByHost("")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), n)
+}
+
+// fakeObjectStorage stands in for a non-local backend. 実 S3 client は
+// テストから叩けないので、「ローカル FS ではない Storage」であることだけを
+// 満たす最小実装を使う。
+type fakeObjectStorage struct {
+	objects map[string][]byte
+	deleted []string
+}
+
+func newFakeObjectStorage() *fakeObjectStorage {
+	return &fakeObjectStorage{objects: map[string][]byte{}}
+}
+
+func (f *fakeObjectStorage) Put(accessKey string, body io.Reader) (string, error) {
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return "", err
+	}
+	f.objects[accessKey] = b
+	return "https://cdn.example.test/" + accessKey, nil
+}
+
+func (f *fakeObjectStorage) Get(accessKey string) (io.ReadCloser, error) {
+	b, ok := f.objects[accessKey]
+	if !ok {
+		return nil, drive.ErrObjectNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+func (f *fakeObjectStorage) Delete(accessKey string) error {
+	delete(f.objects, accessKey)
+	f.deleted = append(f.deleted, accessKey)
+	return nil
+}
+
+func newSvcWithStorage(t *testing.T, st drive.Storage) (*drive.Service, *testutil.MockDriveFileRepository) {
+	t.Helper()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	folderRepo := testutil.NewMockDriveFolderRepository()
+	folderRepo.FilesRef = fileRepo
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return drive.NewService(fileRepo, folderRepo, st, idGen), fileRepo
+}
+
+// #2315: storedInternal は「実際にローカルへ書いたか」を反映する。true 固定
+// だった頃は、オブジェクトストレージへ保存したファイルまで「ローカル保存」と
+// 記録され `/files/:accessKey` がローカルを見て 404 になっていた。TS へ
+// 切り戻したときも FileServerService が同じ列を見るので drop-in にも効く。
+func TestUpload_StoredInternalReflectsBackend(t *testing.T) {
+	localSvc, _ := newSvcWithStorage(t, drive.NewLocalStorage(t.TempDir(), "https://example.com/files"))
+	f, err := localSvc.Upload(context.Background(), drive.UploadInput{Body: []byte("local"), Name: "a.bin"})
+	require.NoError(t, err)
+	assert.True(t, f.StoredInternal, "ローカル保存なら true")
+
+	objStore := newFakeObjectStorage()
+	objSvc, _ := newSvcWithStorage(t, objStore)
+	f2, err := objSvc.Upload(context.Background(), drive.UploadInput{Body: []byte("remote"), Name: "b.bin"})
+	require.NoError(t, err)
+	assert.False(t, f2.StoredInternal, "オブジェクトストレージ保存なら false")
+	require.NotNil(t, f2.AccessKey)
+	assert.Contains(t, objStore.objects, *f2.AccessKey, "実体が object storage 側にあること")
+}
+
+// MetaStorage 越しでも同じ判定になること (= 設定変更が storedInternal に効く)。
+func TestUpload_StoredInternalFollowsMetaStorage(t *testing.T) {
+	current := &model.Meta{ID: "x"} // object storage 無効
+	st := drive.NewMetaStorage(func() (*model.Meta, error) { return current, nil }, t.TempDir(), "https://example.com/files")
+	svc, _ := newSvcWithStorage(t, st)
+
+	f, err := svc.Upload(context.Background(), drive.UploadInput{Body: []byte("local"), Name: "a.bin"})
+	require.NoError(t, err)
+	assert.True(t, f.StoredInternal)
+}
+
+// storedInternal=true な行 (= object storage 有効化より前に保存されたファイル)
+// の削除は、primary がオブジェクトストレージでもローカルへ届くこと。届かないと
+// ローカルに孤児が残り続ける。
+func TestDelete_RoutesByStoredInternal(t *testing.T) {
+	localDir := t.TempDir()
+	local := drive.NewLocalStorage(localDir, "https://example.com/files")
+	objStore := newFakeObjectStorage()
+
+	svc, fileRepo := newSvcWithStorage(t, objStore)
+	svc.SetLocalStorage(local)
+
+	// 切替前に保存されたローカルファイル。
+	_, err := local.Put("legacy-key", bytes.NewReader([]byte("old")))
+	require.NoError(t, err)
+	uid := "u1"
+	legacy := "legacy-key"
+	require.NoError(t, fileRepo.Create(&model.DriveFile{
+		ID: "f1", UserID: &uid, AccessKey: &legacy, StoredInternal: true, Size: 3,
+	}))
+
+	require.NoError(t, svc.Delete(&model.User{ID: uid}, "f1"))
+	_, err = local.Get("legacy-key")
+	assert.ErrorIs(t, err, drive.ErrObjectNotFound, "ローカルの実体が消えること")
+	assert.Empty(t, objStore.deleted, "object storage 側は触らない")
+
+	// 切替後に保存されたファイルは object storage 側から消す。
+	objStore.objects["new-key"] = []byte("new")
+	newKey := "new-key"
+	require.NoError(t, fileRepo.Create(&model.DriveFile{
+		ID: "f2", UserID: &uid, AccessKey: &newKey, StoredInternal: false, Size: 3,
+	}))
+	require.NoError(t, svc.Delete(&model.User{ID: uid}, "f2"))
+	assert.Contains(t, objStore.deleted, "new-key")
+}
+
+// localStorage 未配線なら primary に倒す (object storage 無効な既存 wiring を
+// 壊さない)。
+func TestDelete_WithoutLocalStorageFallsBackToPrimary(t *testing.T) {
+	objStore := newFakeObjectStorage()
+	svc, fileRepo := newSvcWithStorage(t, objStore)
+
+	objStore.objects["k"] = []byte("x")
+	uid := "u1"
+	ak := "k"
+	require.NoError(t, fileRepo.Create(&model.DriveFile{
+		ID: "f1", UserID: &uid, AccessKey: &ak, StoredInternal: true, Size: 1,
+	}))
+	require.NoError(t, svc.Delete(&model.User{ID: uid}, "f1"))
+	assert.Contains(t, objStore.deleted, "k")
 }

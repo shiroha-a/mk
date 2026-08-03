@@ -43,6 +43,23 @@ func NewStorageFromMeta(meta *model.Meta, localDir, localBaseURL string) Storage
 	})
 }
 
+// PublicBaseURL returns the URL base that objects in the configured object
+// storage are served from, or "" when object storage is not in use.
+//
+// pack 層が「この URL は自分がホストしている」と判定するのに使う (#2315)。
+// NewStorageFromMeta と同じ条件・同じ buildBaseURL を通すので、実際に
+// drive_file.url へ書かれる値と必ず同じ base になる。
+func PublicBaseURL(meta *model.Meta) string {
+	if meta == nil || !meta.UseObjectStorage {
+		return ""
+	}
+	if meta.ObjectStorageBucket == nil || *meta.ObjectStorageBucket == "" {
+		// bucket 未設定は NewStorageFromMeta が local に fallback する条件。
+		return ""
+	}
+	return buildBaseURL(meta)
+}
+
 // buildBaseURL constructs the public URL base from Meta settings.
 // ObjectStorageBaseURL が設定されていればそれを使い、
 // 未設定の場合はエンドポイントから自動生成する。

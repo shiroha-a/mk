@@ -1,10 +1,12 @@
 package drive
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func strPtr(s string) *string { return &s }
@@ -202,4 +204,39 @@ func TestBuildS3Client_PartialCredentials(t *testing.T) {
 	}
 	client := buildS3Client(meta)
 	assert.NotNil(t, client)
+}
+
+// #2315: pack 層が「この URL は自分がホストしている」と判定するのに使う。
+// NewStorageFromMeta と同じ条件で "" / base URL を返すこと。
+func TestPublicBaseURL(t *testing.T) {
+	assert.Equal(t, "", PublicBaseURL(nil))
+	assert.Equal(t, "", PublicBaseURL(&model.Meta{}), "object storage 無効なら空")
+
+	bucket := "b"
+	assert.Equal(t, "", PublicBaseURL(&model.Meta{UseObjectStorage: true}), "bucket 未設定は local fallback なので空")
+	empty := ""
+	assert.Equal(t, "", PublicBaseURL(&model.Meta{UseObjectStorage: true, ObjectStorageBucket: &empty}))
+
+	base := "https://cdn.example/b"
+	assert.Equal(t, base, PublicBaseURL(&model.Meta{
+		UseObjectStorage: true, ObjectStorageBucket: &bucket, ObjectStorageBaseURL: &base,
+	}))
+
+	// baseUrl 未設定ならエンドポイントから自動生成した値 (= 実際に
+	// drive_file.url へ書かれる base) と一致すること。
+	endpoint := "s3.example.test"
+	m := &model.Meta{
+		UseObjectStorage:      true,
+		ObjectStorageBucket:   &bucket,
+		ObjectStorageEndpoint: &endpoint,
+		ObjectStorageUseSSL:   true,
+	}
+	assert.Equal(t, "https://s3.example.test/b", PublicBaseURL(m))
+
+	// 実際に drive_file.url へ書かれる値と同じ base であること (ネットワークは
+	// 使わず URL 生成だけを見る)。
+	st, ok := NewStorageFromMeta(m, t.TempDir(), "https://example.com/files").(*S3Storage)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(st.publicURL("k"), PublicBaseURL(m)+"/"),
+		"生成される URL の base が PublicBaseURL と一致すること: %s", st.publicURL("k"))
 }
