@@ -25,10 +25,10 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     "defaultLightTheme", "defaultDarkTheme", "mascotImageUrl", "languages",
     # instance-specific addressing / state (host-derived URL, per-instance proxy account)
     "mediaProxy", "proxyAccountName", "proxyAccountId",
-    # version-gap (mk-go 2026.6.0 が持ち TS 2026.5.4 に無い field)。golden gate が
-    # 2026.6.0 golden で presence を担保済なので diff harness では noise として無視。
-    # version-matched TS に切替えたら見直す。
-    "app192IconUrl", "app512IconUrl", "singleUserMode",
+    # mk-go 独自の additive field。`version` は drop-in 互換のため互換 Misskey
+    # バージョンを返す契約なので、mk-go の実装版は別 field にしている (#2274)。
+    # TS 側に存在しないのが仕様。
+    "mkGoVersion",
     "globalTimeline", "localTimeline",
 }
 

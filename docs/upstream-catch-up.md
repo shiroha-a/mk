@@ -189,6 +189,25 @@ TypeORM の decorator から正規形を再現できないため **実 DB から
 同内容・別名の index があれば検出されるので、upstream 名に揃えるか
 `known_duplicate_indexes.json` に追加して `000068` の扱いを見直す (#2246)。
 
+### submodule bump 後に必須: 比較対象の TS image を全部揃える
+
+mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の image tag を
+`MisskeyVersion` と同じ版に上げる**こと。ここがずれていると upstream 自身の
+バージョン間差分が差分として出てしまい、mk-go 固有の乖離と区別できない。
+
+| ファイル | 対象 |
+|---|---|
+| `docker-compose.diff.yml` | 差分比較ハーネス ([diff-e2e.md](./diff-e2e.md)) |
+| `docker-compose.playwright.ts.yml` | Playwright の TS baseline |
+| `.github/workflows/playwright.yml` | 上記の pre-pull (tag が sync していないと pull が無駄になる) |
+
+**除外リストの「version-gap」注記は、版を揃えたら必ず読み直す。** 実例として、
+diff harness の `META_IGNORE` には `app192IconUrl` / `app512IconUrl` /
+`singleUserMode` が「mk-go 2026.6.0 が持ち TS 2026.5.4 に無い」として除外されて
+いたが、TS を 2026.7.0 に揃えたら 3 件とも残った。実際は upstream では
+`admin/meta` にしか無く公開 `/api/meta` には元から含まれない = **mk-go の余剰
+フィールド**で、版ずれが誤診断を固定していた (#2303)。
+
 ### submodule bump 後に必須: TS baseline で Playwright を回す
 
 ```bash

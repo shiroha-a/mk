@@ -176,8 +176,6 @@ func TestMeta_RequireSetupFalseWhenRootExists(t *testing.T) {
 func TestMeta_BrandingFieldsExposed(t *testing.T) {
 	h, repo := newTestHandler()
 	mascot := "https://example.com/mascot.png"
-	app192 := "https://example.com/app192.png"
-	app512 := "https://example.com/app512.png"
 	srvErr := "https://example.com/err.png"
 	notFound := "https://example.com/404.png"
 	info := "https://example.com/info.png"
@@ -188,8 +186,6 @@ func TestMeta_BrandingFieldsExposed(t *testing.T) {
 	repo.Meta = &model.Meta{
 		ID:                           "x",
 		MascotImageURL:               &mascot,
-		App192IconURL:                &app192,
-		App512IconURL:                &app512,
 		ServerErrorImageURL:          &srvErr,
 		NotFoundImageURL:             &notFound,
 		InfoImageURL:                 &info,
@@ -211,8 +207,12 @@ func TestMeta_BrandingFieldsExposed(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, mascot, resp["mascotImageUrl"])
-	assert.Equal(t, app192, resp["app192IconUrl"])
-	assert.Equal(t, app512, resp["app512IconUrl"])
+	// app192IconUrl / app512IconUrl は upstream では admin/meta にしか無く、
+	// 公開 /api/meta の res schema に含まれない。管理画面も admin/meta から
+	// 取るので公開側には出さない (#2089 diff harness で検出)。
+	assert.NotContains(t, resp, "app192IconUrl")
+	assert.NotContains(t, resp, "app512IconUrl")
+	assert.NotContains(t, resp, "singleUserMode")
 	assert.Equal(t, srvErr, resp["serverErrorImageUrl"])
 	assert.Equal(t, notFound, resp["notFoundImageUrl"])
 	assert.Equal(t, info, resp["infoImageUrl"])

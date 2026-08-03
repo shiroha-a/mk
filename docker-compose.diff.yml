@@ -66,7 +66,10 @@ services:
     healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 3s, timeout: 3s, retries: 30}
     networks: [diff]
   ts:
-    image: misskey/misskey:2026.5.4
+    # mk-go の追従先と同じ版に揃える。ここが古いと upstream 自身の
+    # バージョン間差分まで diff に出て偽陽性になる。MisskeyVersion を
+    # 上げるときはこの tag も一緒に上げること。
+    image: misskey/misskey:2026.7.0
     volumes:
       - ./tests/diff/ts.yml:/misskey/.config/default.yml:ro
     healthcheck:

@@ -113,8 +113,10 @@ func (h *Handler) Meta(c echo.Context) error {
 		"serverErrorImageUrl": m.ServerErrorImageURL,
 		"notFoundImageUrl":    m.NotFoundImageURL,
 		"infoImageUrl":        m.InfoImageURL,
-		"app192IconUrl":       m.App192IconURL,
-		"app512IconUrl":       m.App512IconURL,
+		// app192IconUrl / app512IconUrl / singleUserMode は upstream では
+		// admin/meta にしか無く、公開 /api/meta の res schema に含まれない。
+		// 管理画面 (admin/branding.vue / MkServerSetupWizard.vue) も admin/meta
+		// から取るので公開側に載せる必要が無い (#2089 diff harness で検出)。
 		// mascotImageUrl: meta 値があればそれを返す。空または nil なら従来の
 		// /assets/ai.png にフォールバック (フロントエンドが no-image にならないため)。
 		"mascotImageUrl":               mascotURL(m.MascotImageURL),
@@ -126,7 +128,6 @@ func (h *Handler) Meta(c echo.Context) error {
 		"mediaProxy":                   h.config.MediaProxy,
 		"cacheRemoteSensitiveFiles":    m.CacheRemoteSensitiveFiles,
 		"requireSetup":                 m.RootUserID == nil,
-		"singleUserMode":               m.SingleUserMode,
 		"providesTarball":              h.config.PublishTarballInsteadOfProvideRepositoryUrl,
 		"maxFileSize":                  h.config.MaxFileSize,
 		"proxyAccountName":             resolveProxyAccountName(h.proxyAccountName),
@@ -176,9 +177,6 @@ func (h *Handler) Meta(c echo.Context) error {
 			"cacheRemoteSensitiveFiles": {},
 			"requireSetup":              {},
 			"proxyAccountName":          {},
-			// singleUserMode は golden の MetaLite/MetaDetailedOnly どちらにも無い
-			// mk-go 内部 field。lite では従来どおり省く。
-			"singleUserMode": {},
 		}
 		lite := make(map[string]any, len(resp))
 		for k, v := range resp {
