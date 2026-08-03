@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -224,16 +225,18 @@ func TestShowUser_Success(t *testing.T) {
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// MeDetailed fields
-	assert.Equal(t, uid, resp["id"])
-	assert.NotNil(t, resp["createdAt"])
+	// upstream show-user は profile / role 由来の field だけを返す。
+	// id / createdAt / publicReactions / securityKeysList のような
+	// UserLite / UserDetailed / MeDetailed 由来の field は含まない (#2287)。
+	assert.NotContains(t, resp, "id")
+	assert.NotContains(t, resp, "createdAt")
+	assert.NotContains(t, resp, "publicReactions")
+	assert.NotContains(t, resp, "securityKeysList")
+	assert.NotContains(t, resp, "isAdmin")
 	assert.NotNil(t, resp["policies"])
 	assert.NotNil(t, resp["roles"])
-	assert.Equal(t, true, resp["publicReactions"])
-	assert.Equal(t, "public", resp["followersVisibility"])
-	assert.NotNil(t, resp["securityKeysList"])
-	assert.NotNil(t, resp["achievements"])
-	assert.Equal(t, false, resp["isAdmin"])
+	assert.Equal(t, true, resp["autoAcceptFollowed"])
+	assert.Equal(t, false, resp["isSuspended"])
 	// signins / roleAssigns は repo / assignment 未配線でも nil ではなく
 	// 空配列で返る (frontend の `.map(...)` が落ちない shape compat)。
 	assert.Equal(t, []any{}, resp["signins"])
@@ -3597,4 +3600,36 @@ func TestAccountsCreate_AppTokenDenied(t *testing.T) {
 
 	_ = h.AccountsCreate(c)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "app/OAuth token must be denied even for root")
+}
+
+// upstream admin/show-user (show-user.ts:233-261) が返す key 集合と完全に
+// 一致することを固定する (#2287)。旧実装は PackUserDetailed をベースに
+// UserLite / UserDetailed / MeDetailed を丸ごと返しており、upstream に無い
+// id をはじめ 40 以上の余剰 field を含んでいた。
+func TestShowUser_ResponseKeysMatchUpstream(t *testing.T) {
+	want := []string{
+		"alwaysMarkNsfw", "autoAcceptFollowed", "autoSensitive", "carefulBot",
+		"email", "emailVerified", "followedMessage", "injectFeaturedNote",
+		"isHibernated", "isModerator", "isSilenced", "isSuspended",
+		"lastActiveDate", "moderationNote", "mutedInstances", "mutedWords",
+		"noCrawle", "notificationRecieveConfig", "policies", "preventAiLearning",
+		"receiveAnnouncementEmail", "roleAssigns", "roles", "signins",
+	}
+
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target"}
+
+	rec := doPost(h.ShowUser, `{"userId":"u1"}`, &model.User{ID: "admin1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+	gotKeys := make([]string, 0, len(got))
+	for k := range got {
+		gotKeys = append(gotKeys, k)
+	}
+	sort.Strings(gotKeys)
+	sort.Strings(want)
+	assert.Equal(t, want, gotKeys, "upstream に無い field を返してはいけない")
 }

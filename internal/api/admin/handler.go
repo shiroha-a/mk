@@ -909,51 +909,39 @@ func badgeRolesForMap(br *[]any) []any {
 
 // packAdminUser returns a MeDetailed-equivalent response for admin endpoints.
 func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[string]any {
-	detailed := entity.PackUserDetailed(u, profile)
+	// upstream admin/show-user (show-user.ts:233-261) が返すのはこの 24 key
+	// だけで、UserLite / UserDetailed / MeDetailed は含まない。旧実装は
+	// PackUserDetailed をベースに 70 key 近くを返しており、id をはじめ
+	// upstream に無い field を多数含んでいた (#2287)。frontend の
+	// admin-user.vue は users/show の結果を別途持っていて、こちらからは
+	// email / lastActiveDate / policies / roleAssigns / roles / isModerator /
+	// isSilenced / isSuspended / moderationNote しか読まないので、upstream の
+	// key 集合に絞っても UI は壊れない。
 	resp := map[string]any{
-		// UserLite
-		"id": detailed.ID, "name": detailed.Name, "username": detailed.Username,
-		"host": detailed.Host, "avatarUrl": detailed.AvatarURL,
-		"avatarBlurhash": detailed.AvatarBlurhash, "avatarDecorations": detailed.AvatarDecorations,
-		"isBot": detailed.IsBot, "isCat": detailed.IsCat,
-		"emojis": detailed.Emojis, "onlineStatus": detailed.OnlineStatus,
-		"badgeRoles": badgeRolesForMap(detailed.BadgeRoles),
-		// UserDetailed
-		"bannerUrl": detailed.BannerURL, "bannerBlurhash": detailed.BannerBlurhash,
-		"isLocked": detailed.IsLocked, "isSilenced": false, "isSuspended": detailed.IsSuspended,
-		"description": detailed.Description, "location": detailed.Location,
-		"birthday": detailed.Birthday, "lang": detailed.Lang, "fields": detailed.Fields,
-		"verifiedLinks": []string{}, "followersCount": detailed.FollowersCount,
-		"followingCount": detailed.FollowingCount, "notesCount": detailed.NotesCount,
-		"uri": detailed.URI, "url": detailed.URL,
-		"movedTo": nil, "alsoKnownAs": nil,
-		"updatedAt": detailed.UpdatedAt, "lastFetchedAt": nil,
-		// MeDetailed
-		"avatarId": nil, "bannerId": nil,
-		"followersVisibility": "public", "followingVisibility": "public",
-		"chatScope": "mutual", "canChat": true,
-		"followedMessage": nil, "memo": nil, "moderationNote": "",
-		"hideOnlineStatus": u.HideOnlineStatus,
-		"isAdmin":          false, "isModerator": false,
-		"isDeleted": u.IsDeleted, "isExplorable": u.IsExplorable,
-		"hasUnreadNotification": false, "hasPendingReceivedFollowRequest": false,
-		"hasUnreadAnnouncement": false, "hasUnreadAntenna": false,
-		"hasUnreadChannel": false, "hasUnreadMentions": false,
-		"hasUnreadSpecifiedNotes": false, "hasUnreadChatMessages": false,
-		"unreadNotificationsCount": 0, "unreadAnnouncements": []any{},
-		"pinnedNoteIds": []string{}, "pinnedNotes": []any{},
-		"pinnedPageId": nil, "pinnedPage": nil,
-		"loggedInDays":              0,
-		"policies":                  role.DefaultPolicies(),
-		"roles":                     []any{},
-		"achievements":              []any{},
-		"twoFactorBackupCodesStock": "none",
-		"securityKeys":              false, "securityKeysList": []any{},
-		"mutingNotificationTypes":   []any{},
+		"isSuspended":  u.IsSuspended,
+		"isHibernated": u.IsHibernated,
+		// roleService 未配線時は false / 既定 policy に倒す (fail-closed)。
+		"isModerator": false,
+		"isSilenced":  false,
+		"policies":    role.DefaultPolicies(),
+		"roles":       []any{},
+		// profile 未取得時でも key は必ず生やす (upstream は必ず返す)。
+		"email":                     nil,
+		"emailVerified":             false,
+		"followedMessage":           nil,
+		"autoAcceptFollowed":        false,
+		"noCrawle":                  false,
+		"preventAiLearning":         false,
+		"alwaysMarkNsfw":            false,
+		"autoSensitive":             false,
+		"carefulBot":                false,
+		"injectFeaturedNote":        false,
+		"receiveAnnouncementEmail":  false,
+		"mutedWords":                []any{},
+		"mutedInstances":            []any{},
 		"notificationRecieveConfig": map[string]any{},
-		"emailNotificationTypes":    []string{"follow", "receiveFollowRequest"},
+		"moderationNote":            "",
 	}
-	// Profile fields
 	if profile != nil {
 		resp["email"] = profile.Email
 		resp["emailVerified"] = profile.EmailVerified
@@ -965,61 +953,32 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 		resp["carefulBot"] = profile.CarefulBot
 		resp["injectFeaturedNote"] = profile.InjectFeaturedNote
 		resp["receiveAnnouncementEmail"] = profile.ReceiveAnnouncementEmail
-		resp["twoFactorEnabled"] = profile.TwoFactorEnabled
-		resp["usePasswordLessLogin"] = profile.UsePasswordLessLogin
 		resp["mutedWords"] = profile.MutedWords
-		resp["hardMutedWords"] = profile.HardMutedWords
 		resp["mutedInstances"] = profile.MutedInstances
-		resp["publicReactions"] = profile.PublicReactions
-		// moderation 関連の実データ (upstream show-user.ts:234-253)。旧実装は
-		// map literal の固定値 ("" / nil / {}) のままだった。
 		resp["followedMessage"] = profile.FollowedMessage
 		if profile.ModerationNote != nil {
 			resp["moderationNote"] = *profile.ModerationNote
-		} else {
-			resp["moderationNote"] = ""
 		}
 		resp["notificationRecieveConfig"] = metaJSONValue(profile.NotificationRecieveConfig, map[string]any{})
 	}
-	// createdAt
-	if t, err := h.idGen.ParseTime(u.ID); err == nil {
-		resp["createdAt"] = t.UTC().Format("2006-01-02T15:04:05.000Z")
-	}
-	// RoleService integration (#888): isAdmin / isModerator に加え、
-	// upstream Misskey TS の admin/show-user response shape では
-	// `roles` / `policies` も top-level で expected。frontend admin
-	// moderation view は user.roles / user.policies を直接参照するので
-	// 埋めないと UI が正しく動かない。
 	if h.roleService != nil {
-		resp["isAdmin"] = h.roleService.IsAdministrator(u.ID)
 		resp["isModerator"] = h.roleService.IsModerator(u.ID)
 		// isSilenced は role policy 由来 (canPublicNote を否定する role を持つか)。
-		// upstream admin/show-user も roleService から算出する。map literal の
-		// false 固定をここで上書きする。
 		resp["isSilenced"] = h.roleService.IsSilenced(u.ID)
-		// roles: GetUserRoles は assigned + expired 除外済 list を返す
-		// (= 即時 active な role の minimal shape)。err 時は frontend が
-		// `user.roles.map(...)` で例外を吐かないよう空配列に fallback し
-		// slog.Warn で観測する (= signins / roleAssigns の空配列扱いと揃え)。
+		// GetUserRoles は expired 除外済みの active role list。err 時は
+		// frontend の `.map(...)` が例外を吐かないよう空配列に倒して観測する。
 		if userRoles, rerr := h.roleService.GetUserRoles(u.ID); rerr == nil {
 			resp["roles"] = userRoles
 		} else {
 			slog.Warn("admin/show-user: failed to load roles", "userId", u.ID, "err", rerr)
 			resp["roles"] = []any{}
 		}
-		// policies: assigned roles を merge した user-specific policy
-		// (= upstream の RolePolicies 互換)。default override だけでなく
-		// user の役割に基づいて差し替わる。
 		resp["policies"] = h.roleService.GetUserPolicies(u.ID)
 	}
-	// signins / roleAssigns は upstream admin/show-user shape の必須 field
-	// (#888)。frontend admin moderation view が user の signin 履歴と role
-	// 割当履歴を直接参照するので実データで埋める (#1198)。repo / service
-	// 未配線や lookup 失敗時は frontend の `.map(...)` が例外を吐かないよう
-	// 空配列に fallback し slog.Warn で観測する (roles の扱いと揃え)。
+	// signins / roleAssigns は repo / service 未配線や lookup 失敗時も
+	// 空配列に fallback する (roles と同じ扱い、#888 / #1198)。
 	resp["signins"] = h.packUserSignins(u.ID)
 	resp["roleAssigns"] = h.packUserRoleAssigns(u.ID)
-	resp["isHibernated"] = u.IsHibernated
 	if u.LastActiveDate != nil {
 		resp["lastActiveDate"] = u.LastActiveDate.UTC().Format("2006-01-02T15:04:05.000Z")
 	} else {
