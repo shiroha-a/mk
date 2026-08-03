@@ -1,18 +1,37 @@
-name: Drop-in e2e (nightly)
+name: Drop-in e2e
 
-# Phase 13-4 (#374): drop-in 切替 e2e (`make dropin-swap-test`) を CI で
-# 定期実行して TS↔mk 互換性の regression を自動検知する。
+# Phase 13-4 (#374): drop-in 切替 e2e (`make dropin-swap-test`) を実行して
+# TS↔mk 互換性の regression を検知する。
 #
-# - schedule: 毎日 1 回 (UTC 18:00 ≒ JST 03:00) に走る
+# nightly (schedule) から PR トリガーへ移行した (#2291)。nightly は失敗に
+# 気づくのが翌日になるうえ、1 日分のマージがまとまってどの変更が壊したか
+# 特定しづらい。実測 5 分と安いので PR で回す。
+#
+# - pull_request: paths に該当する変更のみ。**branch protection の required
+#   checks には入れない**ので、落ちても merge はブロックされない。federation
+#   delivery 経路に flaky 要素があるため merge ブロッカーには適さない
 # - workflow_dispatch: リリース前に手動で発火できる
-# - PR の required check には**入れない**。8-10 min かかる上に federation
-#   delivery 経路が flaky な要素を含むため、merge ブロッカーには適さない。
-#   失敗は Actions 上で確認し、別 PR で対処する運用。
+#
+# 非ブロッキングを `continue-on-error: true` で実現しないこと。あれは job を
+# 成功扱いにするので失敗が完全に不可視になる。job は正しく失敗させ、required
+# に入れないことで非ブロッキングにする。
 
 on:
-  schedule:
-    # 毎日 18:00 UTC (= JST 03:00)。develop ブランチに対して走る。
-    - cron: "0 18 * * *"
+  pull_request:
+    branches: [develop, main]
+    # backend の挙動・DB schema・drop-in harness を触る変更だけを対象にする。
+    # ドキュメントのみの PR で待たされないようにする。
+    paths:
+      - "internal/**"
+      - "cmd/**"
+      - "migration/**"
+      - "tests/dropin/**"
+      - "tests/federation/**"
+      - "third_party/misskey"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/dropin-e2e.yml"
   workflow_dispatch:
     inputs:
       ref:
@@ -35,7 +54,10 @@ jobs:
           # に落ちる。本 workflow は drop-in 互換 regression を nightly で
           # 監視するもので、`develop` への変更が対象なので明示的に develop を
           # 指定する (Devin #375 #1)。
-          ref: ${{ inputs.ref || 'develop' }}
+          # pull_request では github.ref が refs/pull/<n>/merge になるので
+          # PR の内容が checkout される。'develop' 固定のままだと PR の変更を
+          # 一切見ずに develop をテストして常に緑になる (#2291)。
+          ref: ${{ inputs.ref || github.ref }}
           # tests/federation/common/Dockerfile.mkgo が
           # third_party/misskey/built/ + assets/ を COPY するので submodule
           # を先に展開しないと docker build が "failed to compute cache key"
@@ -118,40 +140,3 @@ jobs:
         run: |
           docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml down -v \
             >/dev/null 2>&1 || true
-
-  # nightly が壊れたまま放置されるのを防ぐ。schedule 実行が失敗したときだけ
-  # issue を起票し、既に open な同名 issue があれば何もしない (重複抑止)。
-  # 手動 dispatch では起票しない。
-  #
-  # 背景: 本 workflow は最後の success から数十日以上 failure が続いていたが、
-  # PR の required check に入っておらず通知も無かったため気付かれなかった。
-  # 原因を解消したら起票された issue を close すること (次回失敗時に再起票)。
-  notify-failure:
-    needs: [swap-test]
-    if: ${{ always() && github.event_name == 'schedule' && needs.swap-test.result == 'failure' }}
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: Open tracking issue when absent
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TITLE: "nightly dropin-e2e が失敗しています"
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$existing" ]; then
-            echo "既に open な issue #$existing があるので起票しない"
-            exit 0
-          fi
-          {
-            printf 'nightly workflow `%s` が失敗しました。\n\n' "dropin-e2e"
-            printf -- '- 失敗した run: %s\n' "$RUN_URL"
-            printf -- '- 対象 branch: develop\n\n'
-            printf 'この issue は nightly の schedule 実行が失敗したときに自動起票されます。\n'
-            printf '既に open な同名 issue がある間は重複起票しません。原因を解消したら\n'
-            printf 'この issue を close してください (次回失敗時に再度起票されます)。\n'
-          } > /tmp/nightly-issue.md
-          gh issue create --title "$TITLE" --body-file /tmp/nightly-issue.md

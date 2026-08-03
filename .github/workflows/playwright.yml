@@ -1,21 +1,45 @@
-name: Playwright (nightly)
+name: Playwright
 
-# #744 Phase 1 の Playwright spec を nightly で TS image + mk-go の両 backend
-# に対して実行し、drop-in shape drift / 連動 endpoint の regression を自動
-# 検知する。
+# #744 Phase 1 の Playwright spec を TS image + mk-go の両 backend に対して
+# 実行し、drop-in shape drift / 連動 endpoint の regression を検知する。
 #
-# - schedule: 毎日 17:00 UTC (≒ JST 02:00)。dropin-e2e (18:00 UTC) /
-#   dropin-frontend-e2e (19:00 UTC) と被らせない
+# nightly (schedule) から PR トリガーへ移行した (#2291)。nightly は失敗に
+# 気づくのが翌日になるうえ、1 日分のマージがまとまってどの変更が壊したか
+# 特定しづらい。実際 #2276 では 3 ヶ月間赤のまま放置され、しかも TS job は
+# spec を 1 件も実行していなかった。
+#
+# - pull_request: paths に該当する変更のみ。**branch protection の required
+#   checks には入れない**ので、落ちても merge はブロックされない
 # - workflow_dispatch: 任意の ref に対して手動実行可能
-# - PR の required check には**入れない**。spec 数が増えれば実行時間が伸び
-#   るのと、外部 image pull (TS image) が flaky 要素になる可能性があるため
-# - matrix: backend = [mk-go, ts] で並列実行。片方が失敗しても他方は完走
-# - 失敗時は playwright test-results + docker compose logs を artifact 化
+#
+# 非ブロッキングを `continue-on-error: true` で実現しないこと。あれは job を
+# 成功扱いにするので失敗が完全に不可視になり、上記の「3 ヶ月間緑のまま spec
+# 0 件」を招いた実装そのもの。job は正しく失敗させ、required に入れないことで
+# 非ブロッキングにする。
+#
+# TS backend は 90 分かかるうえ #2289 の 77 spec が未解消なので、PR では回さず
+# workflow_dispatch 専用にしている (plan job で matrix を切り替え)。#2289 の
+# 完了時に PR へ合流させる。
+#
+# 失敗時 (timeout 含む) は playwright test-results + docker compose logs を
+# artifact 化する。
 
 on:
-  schedule:
-    # 毎日 17:00 UTC (= JST 02:00)。develop ブランチに対して走る。
-    - cron: "0 17 * * *"
+  pull_request:
+    branches: [develop, main]
+    # backend の API 形状・DB schema・spec 自体・起動まわりを触る変更だけを
+    # 対象にする。ドキュメントのみの PR で 15 分待たされないようにする。
+    paths:
+      - "internal/**"
+      - "cmd/**"
+      - "migration/**"
+      - "tests/playwright/**"
+      - "third_party/misskey"
+      - "docker-compose.playwright*.yml"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/playwright.yml"
   workflow_dispatch:
     inputs:
       ref:
@@ -27,8 +51,69 @@ permissions:
   contents: read
 
 jobs:
+  # matrix を event ごとに切り替えるための前段 job。
+  #
+  # `jobs.<job_id>.if` は matrix context を参照できない (参照できるのは
+  # github / needs / vars / inputs) ため、「TS entry だけ pull_request で
+  # 除外する」を job 単位の if では書けない。一方 `jobs.<job_id>.strategy` は
+  # needs を参照できるので、ここで include 配列そのものを出力して差し替える。
+  #
+  # matrix.exclude は静的にしか書けず、matrix の軸を式にしても include entry は
+  # 「既存 combination に merge できなければ新規 combination を作る」semantics
+  # なので TS が復活してしまう。include 全体を式にするのが唯一の方法。
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        # backend 固有の make target / compose 引数 / prepull / timeout を
+        # ここで一元定義する (= matrix.include の単一の情報源)。
+        run: |
+          mkgo='{
+            "backend": "mk-go",
+            "up_target": "playwright-up",
+            "test_target": "playwright-test",
+            "down_target": "playwright-down",
+            "compose_args": "-f docker-compose.playwright.yml",
+            "prepull": "",
+            "timeout_minutes": 45,
+            "continue_on_error": false
+          }'
+          # prepull: upstream image を先取りで pull しておく。compose up と
+          # 並列化するため `&` で background 化したい誘惑があるが、Actions の
+          # run step は step 終了で shell が exit するため継続が保証されない。
+          # foreground で待ち、compose up 内の同 image pull を daemon cache
+          # hit (0s) にする方が確実。version は
+          # docker-compose.playwright.ts.yml と sync させること。
+          #
+          # continue_on_error: stack は #2288 で起動するようになったが spec が
+          # まだ 77 件落ちている (#2289)。解消するまでは false にしない。
+          ts='{
+            "backend": "ts",
+            "up_target": "playwright-ts-up",
+            "test_target": "playwright-ts-test",
+            "down_target": "playwright-ts-down",
+            "compose_args": "-f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml",
+            "prepull": "docker pull misskey/misskey:2026.7.0",
+            "timeout_minutes": 90,
+            "continue_on_error": true
+          }'
+          # TS backend は 90 分かかるので PR では回さない (#2291)。#2289 で
+          # 77 spec が green になった時点でこの分岐を外し、常に両方回す。
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            matrix=$(jq -c -n --argjson a "$mkgo" '[$a]')
+          else
+            matrix=$(jq -c -n --argjson a "$mkgo" --argjson b "$ts" '[$a, $b]')
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | jq .
+
   spec:
     name: spec (${{ matrix.backend }})
+    needs: plan
     runs-on: ubuntu-latest
     # backend ごとに所要時間が大きく違うので matrix 変数にする。
     # mk-go は 370 spec を 11 min で完走するが、TS backend は #2288 で初めて
@@ -39,53 +124,24 @@ jobs:
 
     strategy:
       fail-fast: false
-      # matrix.include で backend 固有の make target / compose 引数 /
-      # prepull コマンドを variables 化する。各 step は条件分岐なしで
-      # `${{ matrix.* }}` を展開するだけになり DRY を担保する。
+      # include の中身は plan job が event ごとに組み立てる。backend 固有の
+      # make target / compose 引数 / prepull / timeout はそちらで一元定義して
+      # いるので、各 step は条件分岐なしで `${{ matrix.* }}` を展開するだけ。
       matrix:
-        include:
-          - backend: mk-go
-            up_target: playwright-up
-            test_target: playwright-test
-            down_target: playwright-down
-            compose_args: -f docker-compose.playwright.yml
-            # 本 repo Dockerfile を使うので外部 image pre-pull 不要。
-            prepull: ""
-            timeout_minutes: 45
-          - backend: ts
-            up_target: playwright-ts-up
-            test_target: playwright-ts-test
-            down_target: playwright-ts-down
-            compose_args: -f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml
-            # upstream image を先取りで pull しておく。次 step の compose up
-            # と並列化するために `&` background 化したい誘惑があるが、GitHub
-            # Actions の `run:` step は step 終了で shell が exit するため
-            # background process の継続が保証されない (= pre-pull 効果が
-            # 不確実)。foreground で完了を待ち、続く compose up 内の同
-            # image pull は docker daemon の cache hit で 0s で済む方が
-            # 確実。version は docker-compose.playwright.ts.yml と sync。
-            prepull: docker pull misskey/misskey:2026.7.0
-            timeout_minutes: 90
-            # #990 で「CI 上で謎の挙動」として未解決だった起動失敗は #2288 で
-            # 解決済み。原因は NODE_ENV=test のとき compile_config.js が
-            # `.config/test.yml` を読みに行き、mount している default.yml を
-            # 無視して built/.config.json を生成しないことだった。overlay の
-            # MISSKEY_CONFIG_YML=default.yml で解消している。
-            #
-            # continue-on-error は残す: stack は起動するようになったが spec が
-            # まだ 77 件落ちており (#2289)、それが解消するまで TS matrix で
-            # mk-go matrix の green を巻き込まないようにする。#2289 完了時に
-            # 外して blocking 化する。
-            continue-on-error: true
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
-    # matrix 内の continue-on-error を有効化するため job 全体にも設定する
-    # (= 個別の TS matrix entry が fail しても workflow 全体は success)。
-    continue-on-error: ${{ matrix.continue-on-error || false }}
+    # matrix entry の continue_on_error を job に反映する。true の間は
+    # その backend が落ちても workflow 全体は success になる (= 失敗が
+    # 見えなくなる) ので、#2289 完了時に TS 側を false へ戻すこと。
+    continue-on-error: ${{ matrix.continue_on_error }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'develop' }}
+          # pull_request では github.ref が refs/pull/<n>/merge になるので
+          # PR の内容が checkout される。'develop' 固定のままだと PR の変更を
+          # 一切見ずに develop をテストして常に緑になる (#2291)。
+          ref: ${{ inputs.ref || github.ref }}
           # tests/federation/common/Dockerfile.mkgo が
           # third_party/misskey/built/ + assets/ を COPY するので、submodule
           # を先に展開しないと docker build が "failed to compute cache key:
@@ -215,32 +271,3 @@ jobs:
   # 背景: 本 workflow は最後の success から数十日以上 failure が続いていたが、
   # PR の required check に入っておらず通知も無かったため気付かれなかった。
   # 原因を解消したら起票された issue を close すること (次回失敗時に再起票)。
-  notify-failure:
-    needs: [spec]
-    if: ${{ always() && github.event_name == 'schedule' && needs.spec.result == 'failure' }}
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: Open tracking issue when absent
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TITLE: "nightly playwright が失敗しています"
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$existing" ]; then
-            echo "既に open な issue #$existing があるので起票しない"
-            exit 0
-          fi
-          {
-            printf 'nightly workflow `%s` が失敗しました。\n\n' "playwright"
-            printf -- '- 失敗した run: %s\n' "$RUN_URL"
-            printf -- '- 対象 branch: develop\n\n'
-            printf 'この issue は nightly の schedule 実行が失敗したときに自動起票されます。\n'
-            printf '既に open な同名 issue がある間は重複起票しません。原因を解消したら\n'
-            printf 'この issue を close してください (次回失敗時に再度起票されます)。\n'
-          } > /tmp/nightly-issue.md
-          gh issue create --title "$TITLE" --body-file /tmp/nightly-issue.md
