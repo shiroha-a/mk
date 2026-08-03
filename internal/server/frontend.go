@@ -27,19 +27,19 @@ import (
 // proxyAccountResolver is used to populate the embedded meta JSON's
 // proxyAccountName field; passing nil leaves the value as null (appropriate
 // for pre-setup instances).
-func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver) echo.HandlerFunc {
+func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability) echo.HandlerFunc {
 	// ビルド済みアセットからCLIENT_ENTRYを取得
 	clientEntry := frontendutil.DetectClientEntry()
 
 	return func(c echo.Context) error {
-		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, clientEntry, "")
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, "")
 	}
 }
 
 // renderFrontendShell renders the Misskey frontend SPA shell. extraHead is
 // injected verbatim into <head> (used by the OAuth consent page to add the
 // misskey:oauth:* meta tags, #1899); pass "" for the normal shell.
-func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
+func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
 	instanceName := "Misskey"
 	instanceDesc := ""
 	iconURL := "/static-assets/icons/192.png"
@@ -64,7 +64,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		if m.ThemeColor != nil && *m.ThemeColor != "" {
 			themeColor = *m.ThemeColor
 		}
-		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver)
+		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver, chunkedUpload)
 	}
 
 	// CLIENT_ENTRYの設定
@@ -127,7 +127,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 // SPA shell with the misskey:oauth:* meta tags injected, so the frontend's
 // OAuth component can render the authorization prompt (#1899). Values are
 // HTML-escaped (client name/logo are attacker-suppliable via discovery).
-func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver) oauth.ConsentRenderer {
+func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability) oauth.ConsentRenderer {
 	clientEntry := frontendutil.DetectClientEntry()
 	return func(c echo.Context, m oauth.ConsentMeta) error {
 		var sb strings.Builder
@@ -137,14 +137,14 @@ func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository,
 			sb.WriteString(`<meta name="misskey:oauth:client-logo" content="` + stdhtml.EscapeString(m.ClientLogo) + `">` + "\n")
 		}
 		sb.WriteString(`<meta name="misskey:oauth:scope" content="` + stdhtml.EscapeString(m.Scope) + `">`)
-		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, clientEntry, sb.String())
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, sb.String())
 	}
 }
 
 // buildMetaJSON constructs the /api/meta equivalent JSON for inline embedding.
 // /api/meta ハンドラ (meta/handler.go) と完全に同じフィールドを返す。
 // フロントエンドはこのJSONを先に読んで /api/meta の呼び出しを省略する。
-func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.ProxyAccountResolver) string {
+func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability) string {
 	// mascotImageUrl フォールバック
 	mascot := "/assets/ai.png"
 	if m.MascotImageURL != nil && *m.MascotImageURL != "" {
@@ -242,6 +242,17 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 			"miauth":                 true,
 		},
 	}
+	// 分割アップロードの能力告知 (#2313)。frontend の instance.ts は SSR 埋め込みを
+	// localStorage cache より優先し、以後 1 時間 /api/meta を再取得しない。ここに
+	// 載せ忘れると、admin が有効にしても client は最大 1 時間 従来の単発
+	// アップロードに倒れ続ける (100MB 超はリバースプロキシで弾かれる)。
+	// 判定関数は /api/meta と同じものを配線して値が食い違わないようにする。
+	if chunkedUpload != nil {
+		if chunkSize, ok := chunkedUpload(); ok {
+			resp["chunkedUpload"] = map[string]any{"chunkSize": chunkSize}
+		}
+	}
+
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return "{}"

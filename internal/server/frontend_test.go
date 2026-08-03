@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 
 	t.Run("default fallback to /static-assets/splash.png", func(t *testing.T) {
 		repo := testutil.NewMockMetaRepository()
-		handler := frontendHTML(cfg, repo, nil)
+		handler := frontendHTML(cfg, repo, nil, nil)
 
 		e := echo.New()
 		rec := httptest.NewRecorder()
@@ -55,7 +57,7 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 		customIcon := "https://example.test/files/server-icon.png"
 		repo.Meta = &model.Meta{ID: "x", IconURL: &customIcon}
 
-		handler := frontendHTML(cfg, repo, nil)
+		handler := frontendHTML(cfg, repo, nil, nil)
 		e := echo.New()
 		rec := httptest.NewRecorder()
 		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
@@ -73,7 +75,7 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 		mascot := "https://example.test/custom-mascot.png"
 		repo.Meta = &model.Meta{ID: "x", MascotImageURL: &mascot}
 
-		handler := frontendHTML(cfg, repo, nil)
+		handler := frontendHTML(cfg, repo, nil, nil)
 		e := echo.New()
 		rec := httptest.NewRecorder()
 		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
@@ -130,7 +132,7 @@ func TestFrontendHTML_EmbeddedMetaPolicies(t *testing.T) {
 		t.Helper()
 		repo := testutil.NewMockMetaRepository()
 		repo.Meta = m
-		handler := frontendHTML(cfg, repo, nil)
+		handler := frontendHTML(cfg, repo, nil, nil)
 
 		e := echo.New()
 		rec := httptest.NewRecorder()
@@ -181,4 +183,42 @@ func TestFrontendHTML_EmbeddedMetaPolicies(t *testing.T) {
 		assert.Equal(t, false, features["localTimeline"])
 		assert.Equal(t, false, features["globalTimeline"])
 	})
+}
+
+// #2313 / #2314: SSR 埋め込み meta にも分割アップロードの能力告知を載せる。
+// frontend の instance.ts は SSR 埋め込みを localStorage cache より優先し、以後
+// 1 時間 /api/meta を再取得しない。ここに載せ忘れると、admin が有効にしても
+// client は最大 1 時間 従来の単発アップロードに倒れ続け、100MB 超が
+// リバースプロキシで弾かれる。
+func TestFrontendHTML_EmbedsChunkedUploadCapability(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.com", Version: "2026.7.0"}
+	repo := testutil.NewMockMetaRepository()
+	repo.Meta = &model.Meta{ID: "x"}
+
+	extract := func(t *testing.T, handler echo.HandlerFunc) map[string]any {
+		t.Helper()
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		require.NoError(t, handler(e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)))
+		m := regexp.MustCompile(`(?s)id="misskey_meta"[^>]*>(.*?)</script>`).FindStringSubmatch(rec.Body.String())
+		require.Len(t, m, 2, "misskey_meta element must be present")
+		var out map[string]any
+		require.NoError(t, json.Unmarshal([]byte(html.UnescapeString(m[1])), &out))
+		return out
+	}
+
+	// 未対応構成では field ごと出さない (純正 Misskey と同じ undefined)。
+	got := extract(t, frontendHTML(cfg, repo, nil, func() (int64, bool) { return 0, false }))
+	_, present := got["chunkedUpload"]
+	assert.False(t, present)
+
+	// 未配線でも落ちない。
+	got = extract(t, frontendHTML(cfg, repo, nil, nil))
+	_, present = got["chunkedUpload"]
+	assert.False(t, present)
+
+	// 利用可能なら /api/meta と同じ shape で出す。
+	got = extract(t, frontendHTML(cfg, repo, nil, func() (int64, bool) { return 10 * 1024 * 1024, true }))
+	require.NotNil(t, got["chunkedUpload"])
+	assert.Equal(t, float64(10*1024*1024), got["chunkedUpload"].(map[string]any)["chunkSize"])
 }

@@ -1078,17 +1078,18 @@ func (s *Server) setupRoutes() {
 	metaHandler.SetProxyAccountResolver(proxyAccountResolver)
 	// 分割アップロード (#2313) の能力告知。未対応構成では field ごと出さないので、
 	// フロントエンドは undefined を見て従来の単発アップロードに倒れる。
-	metaHandler.SetChunkedUploadCapability(func() (int64, bool) {
+	chunkedUploadCapability := func() (int64, bool) {
 		settings, ok := driveService.ChunkedUploadCapability()
 		return settings.ChunkSize, ok
-	})
+	}
+	metaHandler.SetChunkedUploadCapability(chunkedUploadCapability)
 	api.POST("/meta", metaHandler.Meta)
 	api.POST("/ping", metaHandler.Ping)
 
 	// Frontend SPA shell — AP resource handlers fall back to this when the
 	// request prefers HTML over application/activity+json, and the final
 	// catch-all route at the bottom of RegisterRoutes uses the same handler.
-	frontend := frontendHTML(s.config, metaRepo, proxyAccountResolver)
+	frontend := frontendHTML(s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability)
 
 	// URL preview endpoint
 	if previewMeta, err := metaRepo.Fetch(); err == nil {
@@ -2041,7 +2042,7 @@ func (s *Server) setupRoutes() {
 		idGen,
 		s.config.URL,
 		false, // production は https client_id のみ
-		frontendConsentHTML(s.config, metaRepo, proxyAccountResolver),
+		frontendConsentHTML(s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability),
 	)
 	s.echo.GET("/oauth/authorize", oauthHandler.Authorize)
 	s.echo.POST("/oauth/decision", oauthHandler.Decision)
