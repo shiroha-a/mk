@@ -4,7 +4,7 @@
 本家の新バージョンを取り込んだ分は「Misskey 202X.Y.Z に追従」の 1 行にまとめ、以降は mk-go 独自の変更のみを記載する。
 `Client` は mk-go が同梱するフロントエンド (`third_party/misskey` fork) の変更を指す。
 
-## 1.0.0 (未リリース)
+## 1.0.0
 
 ### Note
 
@@ -15,9 +15,12 @@
 
 - Feat: Misskey 本家との仕様差分カタログ (`docs/divergence.md`) を追加し、意図的に本家と異なる挙動を一覧化
 - Enhance: mk-go と Misskey 本家に同じリクエストを投げてレスポンスを値レベルで突き合わせる差分比較 e2e を追加
-- Enhance: Playwright による e2e を mk-go / Misskey TS の両バックエンドで nightly 実行するように
+- Enhance: Playwright による e2e (370 spec) を PR ごとに実行するように。Misskey TS バックエンドに対しては upstream 追従時に実行し、spec が mk-go の挙動に引きずられていないかを検証する
+- Enhance: drop-in 互換の e2e も PR ごとに実行するように (いずれもマージはブロックしない)
 - Enhance: DB スキーマ・マイグレーション記録・インデックス命名の drift を CI で検出するゲートを追加
 - Enhance: API 互換性マトリクスを Misskey 2026.7.0 基準で再生成
+- Enhance: `make help` で全ターゲットを一覧できるように。あわせて `make check` (整形・静的解析・テスト) や `make update` (更新手順) などの常用コマンドを追加
+- Enhance: セットアップ手順とアップデート手順をドキュメントに整備
 - Fix: 依存ライブラリの既知の脆弱性を解消 (`golang.org/x/image`・`x/crypto`・`x/net`)
 
 ### Client
@@ -52,6 +55,11 @@
 - Enhance: inbox の署名検証でリモート公開鍵のパース結果をキャッシュし、受信処理を高速化
 - Enhance: タイムライン取得の N+1 を削減 (関係解決のバッチ化、リアクション取得の絞り込み)
 - Enhance: `note.mentions` / `note.fileIds` / `clip_favorite` / `drive_file` の各カラムにインデックスを追加
+- Fix: リノート数の集計条件が本家と異なり、自分の投稿を自分でリノートした場合や bot によるリノートも加算され、逆に引用リノートが加算されない問題を修正
+- Fix: `/api/antennas/create` と `/api/admin/announcements/create` が本家の必須パラメータを検証せず、不完全なリクエストを受理する問題を修正
+- Fix: `/api/admin/show-user` が本家のレスポンスに無いフィールドを多数返していた問題を修正
+- Fix: `/api/meta` が管理者向けの設定値 (アプリアイコン URL・シングルユーザーモード) を公開エンドポイントで返していた問題を修正
+- Fix: ユーザーの `updatedAt` が API リクエストのたびに更新され、本家の「最終投稿日時」と意味が異なっていた問題を修正 (「アクティブなユーザー」の絞り込みや更新日時順の並び替えに影響)
 - Fix: 引用元・返信先として埋め込まれた投稿が閲覧者の公開範囲を無視して本文ごと返っており、フォロワー限定・ダイレクトの投稿が引用や返信を介して漏れる問題を修正
 - Fix: 通知・Web Push・Webhook・ストリーミングに埋め込まれる投稿にも、受信者ごとの公開範囲チェックを適用 (2 段目の引用 / 返信まで)
 - Fix: `/api/notes/show` が非可視の投稿の本文を返す問題を修正
