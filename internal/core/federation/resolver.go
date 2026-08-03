@@ -1327,7 +1327,9 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// upstream #17576: 制限判定は「解決できたユーザー数」(= len(note.Mentions)) でなく、
 	// remote が宣言した raw mention 数 (AP tag の Mention href ユニーク数) との max で
 	// 行う。一部しか解決できなくても大量 mention をすり抜けさせない。limit 値は
-	// corenote.DefaultMentionLimit (= 20、local create path と同 policy)。
+	// corenote.DefaultMentionLimit (= 20)。local create path は role policy の
+	// 値を優先するようになったが (#2321)、こちらはリモートユーザーが対象で
+	// ローカルの role を持たないため既定値のみで判定する。
 	rawTagSet := make(map[string]struct{}, len(tagHrefs))
 	for _, h := range tagHrefs {
 		rawTagSet[h] = struct{}{}

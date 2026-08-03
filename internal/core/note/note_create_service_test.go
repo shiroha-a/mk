@@ -2238,3 +2238,104 @@ func TestCreate_WhitespaceOnlyTextRejected(t *testing.T) {
 	_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text, Visibility: model.NoteVisibilityPublic})
 	require.ErrorIs(t, err, note.ErrNoteContentRequired)
 }
+
+// stubRolePolicies is a RolePolicyProvider returning fixed policies per user.
+type stubRolePolicies struct {
+	byUser map[string]map[string]any
+}
+
+func (s *stubRolePolicies) GetUserPolicies(userID string) map[string]any {
+	if s.byUser == nil {
+		return nil
+	}
+	return s.byUser[userID]
+}
+
+// #2321: mentionLimit を role policy から引くこと。従来は DefaultMentionLimit
+// (20) 固定で、ロールで設定した値が緩める方向にも締める方向にも効かなかった。
+func TestCreateService_MentionLimitHonoursRolePolicy(t *testing.T) {
+	mentions := func(n int) string {
+		s := ""
+		for i := 0; i < n; i++ {
+			s += "@user" + strPtr254Str(i) + " "
+		}
+		return s
+	}
+
+	t.Run("policy が既定より緩ければ 20 超も通る", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		svc.SetRolePolicyProvider(&stubRolePolicies{byUser: map[string]map[string]any{
+			"u1": {"mentionLimit": 50},
+		}})
+		text := mentions(30)
+		_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
+		assert.NoError(t, err, "policy 50 なら 30 mention は通る")
+	})
+
+	t.Run("policy が既定より厳しければ 20 未満でも弾く", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		svc.SetRolePolicyProvider(&stubRolePolicies{byUser: map[string]map[string]any{
+			"u1": {"mentionLimit": 5},
+		}})
+		text := mentions(6)
+		_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
+		assert.ErrorIs(t, err, note.ErrContainsTooManyMentions, "policy 5 なら 6 mention は弾く")
+	})
+
+	t.Run("上限ちょうどは通る", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		svc.SetRolePolicyProvider(&stubRolePolicies{byUser: map[string]map[string]any{
+			"u1": {"mentionLimit": 5},
+		}})
+		text := mentions(5)
+		_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &text})
+		assert.NoError(t, err)
+	})
+
+	t.Run("ユーザーごとに独立して効く", func(t *testing.T) {
+		svc, _, _ := newCreateService(t)
+		svc.SetRolePolicyProvider(&stubRolePolicies{byUser: map[string]map[string]any{
+			"strict": {"mentionLimit": 1},
+			"loose":  {"mentionLimit": 100},
+		}})
+		text := mentions(30)
+		_, err := svc.Create(note.CreateInput{User: &model.User{ID: "loose"}, Text: &text})
+		assert.NoError(t, err)
+		_, err = svc.Create(note.CreateInput{User: &model.User{ID: "strict"}, Text: &text})
+		assert.ErrorIs(t, err, note.ErrContainsTooManyMentions)
+	})
+}
+
+// provider 未配線 / policy が取れないときは既定値 20 にフォールバックする。
+// policy が引けないことを理由に投稿そのものを止めるのは過剰なので fail-soft。
+func TestCreateService_MentionLimitFallsBackToDefault(t *testing.T) {
+	mentions := func(n int) string {
+		s := ""
+		for i := 0; i < n; i++ {
+			s += "@user" + strPtr254Str(i) + " "
+		}
+		return s
+	}
+	over := mentions(21)
+	under := mentions(20)
+
+	providers := map[string]note.RolePolicyProvider{
+		"未配線":               nil,
+		"policies が nil":    &stubRolePolicies{byUser: nil},
+		"該当ユーザーの policy 無し": &stubRolePolicies{byUser: map[string]map[string]any{"other": {"mentionLimit": 99}}},
+		"型が違う":              &stubRolePolicies{byUser: map[string]map[string]any{"u1": {"mentionLimit": "50"}}},
+	}
+	for name, p := range providers {
+		t.Run(name, func(t *testing.T) {
+			svc, _, _ := newCreateService(t)
+			if p != nil {
+				svc.SetRolePolicyProvider(p)
+			}
+			_, err := svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &over})
+			assert.ErrorIs(t, err, note.ErrContainsTooManyMentions, "既定 20 で弾かれること")
+
+			_, err = svc.Create(note.CreateInput{User: &model.User{ID: "u1"}, Text: &under})
+			assert.NoError(t, err, "既定 20 ちょうどは通ること")
+		})
+	}
+}

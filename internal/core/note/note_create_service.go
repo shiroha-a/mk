@@ -206,9 +206,18 @@ type SilencingProvider interface {
 	IsSilenced(userID string) bool
 }
 
+// RolePolicyProvider abstracts role-policy lookup for the mentionLimit gate
+// (#2321)。循環依存を避けるため interface で受け取り、実装は core/role.Service。
+type RolePolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
 // CreateService provides note creation logic.
 type CreateService struct {
-	noteRepo            repository.NoteRepository
+	noteRepo repository.NoteRepository
+	// rolePolicyProvider は mentionLimit の gate に使う (#2321)。nil なら
+	// DefaultMentionLimit にフォールバックする。
+	rolePolicyProvider  RolePolicyProvider
 	pollRepo            repository.PollRepository
 	followingRepo       repository.FollowingRepository
 	idGen               id.Generator
@@ -255,6 +264,13 @@ func (s *CreateService) SetFeaturedRanking(r FeaturedRanking) {
 // SetUserRepo attaches a UserRepository for resolving mention usernames to IDs.
 func (s *CreateService) SetUserRepo(r repository.UserRepository) {
 	s.userRepo = r
+}
+
+// SetRolePolicyProvider wires role-policy lookup so note creation honours the
+// per-user `mentionLimit` policy (#2321). nil (未配線 / test) のときは
+// DefaultMentionLimit にフォールバックする。
+func (s *CreateService) SetRolePolicyProvider(p RolePolicyProvider) {
+	s.rolePolicyProvider = p
 }
 
 // SetSilencingProvider attaches a SilencingProvider so public-visibility
@@ -503,7 +519,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	}
 
 	// mentionLimitチェック (role policiesの制限)
-	if err := s.checkMentionLimit(in.Text); err != nil {
+	if err := s.checkMentionLimit(in.User.ID, in.Text); err != nil {
 		return nil, err
 	}
 
@@ -1205,32 +1221,52 @@ func checkProhibitedWords(meta *model.Meta, text, cw *string, pollChoices []stri
 	return nil
 }
 
-// checkMentionLimit counts mentions in text and compares against the default
-// role policy's mentionLimit. Per-user role override is not yet supported
-// (TS side merges per-user policies; follow-up issue should wire that).
-func (s *CreateService) checkMentionLimit(text *string) error {
+// checkMentionLimit counts mentions in text and compares them against the
+// author's `mentionLimit` role policy (#2321).
+//
+// 判定に使う件数は upstream の「解決できたユーザー数」ではなく text から
+// 抽出した mention 数。存在しないユーザーへの mention を大量に含む note を
+// upstream より厳しく弾く意図的な差分で、upstream 自身も AP 経路では raw 数と
+// の max を取る方針 (#17576) なので厳しい側に揃えたまま維持する。
+func (s *CreateService) checkMentionLimit(userID string, text *string) error {
 	if text == nil || *text == "" {
 		return nil
 	}
 	mentions := ExtractMentionStructs(*text)
-	limit := defaultMentionLimit()
+	limit := s.mentionLimitFor(userID)
 	if limit > 0 && len(mentions) > limit {
 		return ErrContainsTooManyMentions
 	}
 	return nil
 }
 
-// DefaultMentionLimit mirrors role.DefaultPolicies().mentionLimit. corenote から
-// 直接 role.DefaultPolicies() を import すると循環依存になるため、同期を保つ
-// 意図で本家TSの現行既定値 (20) を const として直書きしている。federation 経路
-// (Resolver.IngestNote) も同じ const を参照することで policy を一元化。
-const DefaultMentionLimit = 20
-
-// defaultMentionLimit returns the baseline mentionLimit from role.DefaultPolicies.
-// 本家TSではrole per-userのmerge値を使うが、Go側は現状default値でチェック。
-func defaultMentionLimit() int {
+// mentionLimitFor resolves the effective mentionLimit for userID, falling back
+// to DefaultMentionLimit when the provider is unwired or the policy is absent /
+// of an unexpected type. fail-soft にするのは、policy が引けないことを理由に
+// 投稿そのものを止めるのは過剰なため (上限は既定値で効き続ける)。
+func (s *CreateService) mentionLimitFor(userID string) int {
+	if s.rolePolicyProvider == nil || userID == "" {
+		return DefaultMentionLimit
+	}
+	policies := s.rolePolicyProvider.GetUserPolicies(userID)
+	if policies == nil {
+		return DefaultMentionLimit
+	}
+	if v, ok := policies["mentionLimit"].(int); ok {
+		return v
+	}
 	return DefaultMentionLimit
 }
+
+// DefaultMentionLimit mirrors role.DefaultPolicies().mentionLimit. corenote から
+// 直接 role.DefaultPolicies() を import すると循環依存になるため、同期を保つ
+// 意図で本家TSの現行既定値 (20) を const として直書きしている。
+//
+// local の note 作成では role policy の値が優先され、本定数は provider 未配線 /
+// policy 不在時のフォールバックとして使う (#2321)。連合の inbound 経路
+// (Resolver.IngestNote) はリモートユーザーがローカルの role を持たないため、
+// 引き続き本定数のみで判定する。
+const DefaultMentionLimit = 20
 
 // checkFileIDs verifies all provided fileIds exist and belong to the user.
 // DriveFileRepo未設定ならskipする。
