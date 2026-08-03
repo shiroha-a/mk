@@ -81,9 +81,9 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 			seeker = bytes.NewReader(data)
 		}
 
-		buf := make([]byte, 512)
+		buf := make([]byte, coredrive.MIMESniffLen)
 		n, _ := seeker.Read(buf)
-		contentType := http.DetectContentType(buf[:n])
+		contentType := coredrive.DetectMIME(buf[:n])
 		// #2106 H3: sniff した MIME を browser-safe allowlist に通し、非該当
 		// (text/html, image/svg+xml, text/xml 等) は application/octet-stream に
 		// 矯正する。これを欠くと任意アップロードが file origin から active content

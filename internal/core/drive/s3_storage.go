@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -103,14 +102,14 @@ func (s *S3Storage) Put(accessKey string, body io.Reader) (string, error) {
 		return "", fmt.Errorf("s3 read body for %s: %w", key, err)
 	}
 	sniff := data
-	if len(sniff) > 512 {
-		sniff = sniff[:512]
+	if len(sniff) > MIMESniffLen {
+		sniff = sniff[:MIMESniffLen]
 	}
 	// #2106 H4: sniff した MIME を browser-safe allowlist に通す。public-read S3/CDN
 	// 直配信では /files ハンドラ・media proxy を両方バイパスして object の Content-Type が
 	// 描画を支配するため、非 browser-safe (HTML/SVG/XML 等) を octet-stream に矯正
 	// しないと CDN ドメイン上で stored XSS になる (upstream DriveService と同等)。
-	contentType := BrowserSafeContentType(http.DetectContentType(sniff))
+	contentType := BrowserSafeContentType(DetectMIME(sniff))
 
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),

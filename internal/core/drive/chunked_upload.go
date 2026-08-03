@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -41,10 +40,6 @@ const (
 	MinSessionTTLMinutes     = 5
 	MaxSessionTTLMinutes     = 1440
 	DefaultSessionTTLMinutes = 60
-
-	// chunkedSniffLen is how many leading bytes decide the content type. Matches
-	// http.DetectContentType's window and S3Storage.Put's sniff.
-	chunkedSniffLen = 512
 
 	// finishGracePeriod is how long the GC leaves an expired session alone while
 	// a finish is still claimed on it. finish は期限内に始まれば期限後も走り
@@ -464,10 +459,10 @@ func (s *Service) ensureMultipartUpload(ctx context.Context, ms MultipartStorage
 		return *sess.UploadID, nil
 	}
 	sniff := chunk
-	if len(sniff) > chunkedSniffLen {
-		sniff = sniff[:chunkedSniffLen]
+	if len(sniff) > MIMESniffLen {
+		sniff = sniff[:MIMESniffLen]
 	}
-	detected := http.DetectContentType(sniff)
+	detected := DetectMIME(sniff)
 	// uploadableFileTypes は finish 時の Upload でも効くが、そこまで受け切って
 	// から弾くのは無駄なので最初のパートで判定できる時点で落とす。
 	if err := s.checkUploadableType(user, detected); err != nil {
