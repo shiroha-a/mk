@@ -24,6 +24,9 @@ type Handler struct {
 	metaRepo         repository.MetaRepository
 	adRepo           repository.AdRepository
 	proxyAccountName ProxyAccountResolver
+	// chunkedUpload は分割アップロード (#2313) の能力告知。nil / ok=false なら
+	// field ごと出さない。
+	chunkedUpload ChunkedUploadCapability
 }
 
 // NewHandler creates a new meta Handler.
@@ -43,6 +46,32 @@ func (h *Handler) SetAdRepo(r repository.AdRepository) {
 // pre-setup instances), the field is reported as null.
 func (h *Handler) SetProxyAccountResolver(r ProxyAccountResolver) {
 	h.proxyAccountName = r
+}
+
+// ChunkedUploadCapability describes the chunked upload support advertised on
+// /api/meta (#2313). ok=false means the instance cannot serve chunked uploads,
+// in which case the field is omitted entirely.
+type ChunkedUploadCapability func() (chunkSize int64, ok bool)
+
+// SetChunkedUploadCapability wires the capability probe for the additive
+// `chunkedUpload` field. Unset (or reporting ok=false) omits the field, which
+// is what clients use to fall back to the single-request upload path — pure
+// Misskey never emits it either.
+func (h *Handler) SetChunkedUploadCapability(f ChunkedUploadCapability) {
+	h.chunkedUpload = f
+}
+
+// chunkedUploadInfo returns the value of the additive `chunkedUpload` field,
+// or nil when the capability is unavailable.
+func (h *Handler) chunkedUploadInfo() map[string]any {
+	if h.chunkedUpload == nil {
+		return nil
+	}
+	chunkSize, ok := h.chunkedUpload()
+	if !ok {
+		return nil
+	}
+	return map[string]any{"chunkSize": chunkSize}
 }
 
 // Meta returns server metadata.
@@ -170,6 +199,15 @@ func (h *Handler) Meta(c echo.Context) error {
 	// 旧 omit がこれらを誤って除外していたのを修正)。features / cacheRemoteFiles /
 	// cacheRemoteSensitiveFiles / requireSetup / proxyAccountName は
 	// MetaDetailedOnly なので lite から除外する。
+	// 分割アップロード (#2313) の能力告知。mk-go 独自の additive field で、純正
+	// Misskey では undefined になるのでフロントエンドの feature detection に使える。
+	// 未対応構成 (オブジェクトストレージ未使用 / meta で無効) では field ごと出さず、
+	// クライアントは従来の単発アップロードに倒れる。lite / detailed 両方に出す —
+	// アップロード経路の判定はどちらの meta を持っていても必要になる。
+	if info := h.chunkedUploadInfo(); info != nil {
+		resp["chunkedUpload"] = info
+	}
+
 	if !detail {
 		omit := map[string]struct{}{
 			"features":                  {},

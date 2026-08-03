@@ -766,3 +766,57 @@ func TestMeta_ExposesMkGoVersionSeparately(t *testing.T) {
 	assert.Equal(t, config.MkGoVersion, resp["mkGoVersion"], "mkGoVersion は mk-go の実装版")
 	assert.NotEqual(t, resp["version"], resp["mkGoVersion"], "両者は別物として出す")
 }
+
+// #2313: 分割アップロードの能力告知。未対応構成では field ごと出さないので、
+// 純正 Misskey と同じく undefined になり、クライアントは単発アップロードに
+// フォールバックできる。
+func TestMeta_ChunkedUploadCapability(t *testing.T) {
+	metaFor := func(t *testing.T, h *Handler) map[string]any {
+		t.Helper()
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		require.NoError(t, h.Meta(e.NewContext(req, rec)))
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	// 未配線 → field なし。
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	_, present := metaFor(t, h)["chunkedUpload"]
+	assert.False(t, present, "unwired capability must not emit the field")
+
+	// 配線済みだが ok=false (= オブジェクトストレージ未使用 / 無効) → field なし。
+	h.SetChunkedUploadCapability(func() (int64, bool) { return 0, false })
+	_, present = metaFor(t, h)["chunkedUpload"]
+	assert.False(t, present, "unavailable capability must not emit the field")
+
+	// 利用可能 → chunkSize を返す。
+	h.SetChunkedUploadCapability(func() (int64, bool) { return 10 * 1024 * 1024, true })
+	got := metaFor(t, h)["chunkedUpload"]
+	require.NotNil(t, got)
+	assert.Equal(t, float64(10*1024*1024), got.(map[string]any)["chunkSize"])
+}
+
+// lite (detail:false) にも出す。アップロード経路の判定はどちらの meta を
+// 持っていても必要になる。
+func TestMeta_ChunkedUploadCapabilityInLiteResponse(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	h.SetChunkedUploadCapability(func() (int64, bool) { return 5 * 1024 * 1024, true })
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/meta", strings.NewReader(`{"detail":false}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(req, rec)))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp["chunkedUpload"])
+	assert.Equal(t, float64(5*1024*1024), resp["chunkedUpload"].(map[string]any)["chunkSize"])
+}

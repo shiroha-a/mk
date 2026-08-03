@@ -20,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/captcha"
+	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
@@ -1205,6 +1206,13 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"objectStorageS3ForcePathStyle": m.ObjectStorageS3ForcePathStyle,
 		"objectStorageAccessKey":        m.ObjectStorageAccessKey,
 		"objectStorageSecretKey":        m.ObjectStorageSecretKey,
+		// Chunked upload (#2313)。mk-go 独自。オブジェクトストレージ設定画面に
+		// 出すので object storage 群と同じブロックに置く。
+		"chunkedUploadEnabled":             m.ChunkedUploadEnabled,
+		"chunkedUploadChunkSizeMb":         m.ChunkedUploadChunkSizeMb,
+		"chunkedUploadSessionTtlMinutes":   m.ChunkedUploadSessionTTLMinutes,
+		"chunkedUploadMaxSessionsPerUser":  m.ChunkedUploadMaxSessionsPerUser,
+		"chunkedUploadMaxPendingMbPerUser": m.ChunkedUploadMaxPendingMbPerUser,
 		// URLs
 		"tosUrl": m.TermsOfServiceURL, "repositoryUrl": m.RepositoryURL,
 		"feedbackUrl": m.FeedbackURL, "impressumUrl": m.ImpressumURL,
@@ -1315,6 +1323,9 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if err := validateUpdateMetaNumericMinimums(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	if err := validateUpdateMetaNumericRanges(fields); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
@@ -1502,6 +1513,42 @@ var updateMetaNumericMinimums = map[string]float64{
 	// upstream 2026.7.0 sensitiveMediaDetection 外部サービス設定 (minimum: 1)。
 	"sensitiveMediaDetectionTimeout":             1,
 	"sensitiveMediaDetectionMaxImagesPerRequest": 1,
+	// 分割アップロード (#2313)。mk-go 独自。
+	"chunkedUploadMaxSessionsPerUser":  1,
+	"chunkedUploadMaxPendingMbPerUser": 1,
+}
+
+// updateMetaNumericRanges は上下限を両方持つ integer カラム。分割アップロード
+// (#2313) の設定は S3 側の制約 (最小パートサイズ) とリバースプロキシの上限に
+// 挟まれるので、片側だけでは足りない。
+//
+// core/drive 側でも同じ範囲に clamp しているが、admin UI から入れた値が黙って
+// 別の値になるのは分かりにくいので、入口では明示的に弾く。
+var updateMetaNumericRanges = map[string]struct{ min, max float64 }{
+	"chunkedUploadChunkSizeMb":       {coredrive.MinChunkSizeMb, coredrive.MaxChunkSizeMb},
+	"chunkedUploadSessionTtlMinutes": {coredrive.MinSessionTTLMinutes, coredrive.MaxSessionTTLMinutes},
+}
+
+// validateUpdateMetaNumericRanges rejects integer columns outside their
+// supported range.
+func validateUpdateMetaNumericRanges(fields map[string]any) error {
+	for key, r := range updateMetaNumericRanges {
+		v, ok := fields[key]
+		if !ok {
+			continue
+		}
+		if v == nil {
+			return errors.New(key + " must be an integer")
+		}
+		n, ok := v.(float64)
+		if !ok || n != math.Trunc(n) {
+			return errors.New(key + " must be an integer")
+		}
+		if n < r.min || n > r.max {
+			return fmt.Errorf("%s must be between %d and %d", key, int(r.min), int(r.max))
+		}
+	}
+	return nil
 }
 
 // validateUpdateMetaNumericMinimums rejects non-numeric or below-minimum

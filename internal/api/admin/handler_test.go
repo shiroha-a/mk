@@ -14,6 +14,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
@@ -3632,4 +3633,61 @@ func TestShowUser_ResponseKeysMatchUpstream(t *testing.T) {
 	sort.Strings(gotKeys)
 	sort.Strings(want)
 	assert.Equal(t, want, gotKeys, "upstream に無い field を返してはいけない")
+}
+
+// #2313: 分割アップロード設定の範囲検証。chunkSize は S3 の最小パートサイズと
+// リバースプロキシの上限に挟まれるので、下限・上限の両方を弾く必要がある。
+// core/drive 側でも clamp するが、admin UI から入れた値が黙って別の値になるのは
+// 分かりにくいので入口で明示的に拒否する。
+func TestUpdateMeta_ChunkedUploadRanges(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+
+	tooSmall := fmt.Sprintf(`{"chunkedUploadChunkSizeMb":%d}`, coredrive.MinChunkSizeMb-1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, tooSmall, nil).Code)
+
+	tooBig := fmt.Sprintf(`{"chunkedUploadChunkSizeMb":%d}`, coredrive.MaxChunkSizeMb+1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, tooBig, nil).Code)
+
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, `{"chunkedUploadChunkSizeMb":10.5}`, nil).Code, "non-integer must be rejected")
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, `{"chunkedUploadChunkSizeMb":null}`, nil).Code, "null must be rejected")
+
+	ttlTooSmall := fmt.Sprintf(`{"chunkedUploadSessionTtlMinutes":%d}`, coredrive.MinSessionTTLMinutes-1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, ttlTooSmall, nil).Code)
+	ttlTooBig := fmt.Sprintf(`{"chunkedUploadSessionTtlMinutes":%d}`, coredrive.MaxSessionTTLMinutes+1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, ttlTooBig, nil).Code)
+
+	// サーバー cap は 1 以上。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, `{"chunkedUploadMaxSessionsPerUser":0}`, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, `{"chunkedUploadMaxPendingMbPerUser":0}`, nil).Code)
+
+	body := `{"chunkedUploadEnabled":true,"chunkedUploadChunkSizeMb":16,"chunkedUploadSessionTtlMinutes":120,` +
+		`"chunkedUploadMaxSessionsPerUser":3,"chunkedUploadMaxPendingMbPerUser":512}`
+	require.Equal(t, http.StatusNoContent, doPost(h.UpdateMeta, body, nil).Code)
+	assert.True(t, metaRepo.Meta.ChunkedUploadEnabled)
+	assert.Equal(t, 16, metaRepo.Meta.ChunkedUploadChunkSizeMb)
+	assert.Equal(t, 120, metaRepo.Meta.ChunkedUploadSessionTTLMinutes)
+	assert.Equal(t, 3, metaRepo.Meta.ChunkedUploadMaxSessionsPerUser)
+	assert.Equal(t, 512, metaRepo.Meta.ChunkedUploadMaxPendingMbPerUser)
+}
+
+// admin/meta は分割アップロード設定を返す。管理画面 (オブジェクトストレージ)
+// がここから値を読む。
+func TestAdminMeta_ChunkedUploadFields(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.ChunkedUploadEnabled = true
+	metaRepo.Meta.ChunkedUploadChunkSizeMb = 10
+	metaRepo.Meta.ChunkedUploadSessionTTLMinutes = 60
+	metaRepo.Meta.ChunkedUploadMaxSessionsPerUser = 8
+	metaRepo.Meta.ChunkedUploadMaxPendingMbPerUser = 2048
+
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, true, resp["chunkedUploadEnabled"])
+	assert.EqualValues(t, 10, resp["chunkedUploadChunkSizeMb"])
+	assert.EqualValues(t, 60, resp["chunkedUploadSessionTtlMinutes"])
+	assert.EqualValues(t, 8, resp["chunkedUploadMaxSessionsPerUser"])
+	assert.EqualValues(t, 2048, resp["chunkedUploadMaxPendingMbPerUser"])
 }
