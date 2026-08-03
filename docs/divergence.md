@@ -274,15 +274,17 @@ upstream は用途ごとに **10 queue** に分けるが、mk-go は **7 queue**
 | `inbox` | `inbox` |
 | `system` | `maintenance` (cron 群: chart tick/resync/clean, checkExpiredMutings, clean, cleanRemoteNotes, checkModeratorsActivity, instanceRefresh, retentionAggregate, chunkedUploadGc) |
 | `endedPollNotification` | **queue ではなく常駐 goroutine** (`corepoll.ExpiryWorker`、60 秒間隔) |
-| `postScheduledNote` | `maintenance` の `note:postScheduled` |
-| `db` | `export` / `import` / `importCustomEmojis` / `maintenance:deleteAccount` |
-| `relationship` | `maintenance` の `relationship:{follow,unfollow,block,unblock}` |
+| `postScheduledNote` | `deliver` の `note:postScheduled` |
+| `db` | `export` の `export` / `import` / `importCustomEmojis`、`deliver` の `maintenance:deleteAccount` |
+| `relationship` | `deliver` の `relationship:{follow,unfollow,block,unblock}` |
 | `userWebhookDeliver` | `webhook` の `webhook:user` |
 | `systemWebhookDeliver` | `webhook` の `webhook:system` |
 | `objectStorage` | `objectStorage` |
 | — | `push` (Web Push 配信、upstream は system queue 内で処理) |
 
 `objectStorage` は `deleteFile` / `cleanRemoteFiles` とも upstream と同じ job 構成 (#2325)。振り分けも upstream に揃えてあり、ローカル FS 保存 (`storedInternal=true`) の実体は同期削除、object storage 上の実体だけを queue に逃がす。`clean-remote-files` は「job 1 本が内部でバッチ削除を回す」形も upstream と同じで、リモートキャッシュの件数ぶん job を積んで Redis を圧迫することはない。
+
+`note:postScheduled` / `maintenance:deleteAccount` / `relationship:*` が task type の接頭辞と違う `deliver` に載っているのは意図的なもの。いずれも実行結果が連合配送につながるジョブで、worker 2 本の `maintenance` より 16 本の `deliver` の方が捌ける。task type と queue の対応は `internal/queue/routing_test.go` が表として固定しており、変えると落ちる (#2327)。
 
 worker 数だけは upstream の 16 に対し mk-go は 4。実体削除は S3 への I/O 待ちが主で 1 worker あたりの効率が良く、一括削除の並列度を job 数で稼ぐ設計でもないため、`deliver` と同じ理由 (worker 数 ≒ Redis 接続数) で抑えている。
 

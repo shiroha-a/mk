@@ -444,26 +444,33 @@ func (c *Client) EnqueueCleanRemoteFiles() error {
 	return c.inner.Enqueue(context.Background(), TaskTypeCleanRemoteFiles, nil, base...)
 }
 
-// EnqueueCleanRemoteNotes puts a remote notes cleaning task on the queue.
-// 重複排除のため UniqueFor を設定。
+// EnqueueCleanRemoteNotes puts a remote notes cleaning task on the
+// maintenance queue. 重複排除のため UniqueFor を設定。
+//
+// cron 経由 (Scheduler.Register) と同じ queue に積む。ここが deliver だった
+// ため、同じ task が経路によって別 queue に入っていた (#2327)。
 func (c *Client) EnqueueCleanRemoteNotes() error {
 	base := []driver.EnqueueOption{
-		driver.WithQueue(QueueName),
+		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(6 * time.Hour),
 	}
-	base = append(base, c.retentionOpts(QueueName)...)
+	base = append(base, c.retentionOpts(MaintenanceQueueName)...)
 	return c.inner.Enqueue(context.Background(), TaskTypeCleanRemoteNotes, nil, base...)
 }
 
-// EnqueueReactionFlush puts a reaction flush task on the queue.
+// EnqueueReactionFlush puts a reaction flush task on the maintenance queue.
+//
+// 30 秒 ticker から呼ばれるため、deliver に積んでいると連合配送用の worker を
+// 定期的に奪い、deliver の depth / completed が実際の配送量とずれて auto-scale
+// の判断材料が汚れる (#2327)。
 func (c *Client) EnqueueReactionFlush() error {
 	base := []driver.EnqueueOption{
-		driver.WithQueue(QueueName),
+		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(25 * time.Second),
 	}
-	base = append(base, c.retentionOpts(QueueName)...)
+	base = append(base, c.retentionOpts(MaintenanceQueueName)...)
 	return c.inner.Enqueue(context.Background(), TaskTypeReactionFlush, nil, base...)
 }
 
