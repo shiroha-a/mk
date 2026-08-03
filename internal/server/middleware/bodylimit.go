@@ -34,18 +34,33 @@ import (
 func BodyLimitByPath() echo.MiddlewareFunc {
 	apiBL := emiddleware.BodyLimit("1MiB")    // = 1024*1024 = 1048576
 	inboxBL := emiddleware.BodyLimit("64KiB") // = 1024*64   = 65536
-	const driveUploadPath = "/api/drive/files/create"
+	// chunked upload の append (#2313)。1 リクエスト = 1 チャンクなので、
+	// create のように無制限にはせず固定上限を掛ける。値は
+	// drive.MaxChunkSizeMb (32MiB) + multipart framing の余白。実際に受理する
+	// サイズはセッションに固定された chunkSize ちょうどであることを handler が
+	// 別途強制するので、ここは「それ以上は読み込ませない」ための粗い上限。
+	chunkBL := emiddleware.BodyLimit("33MiB")
+	const (
+		driveUploadPath = "/api/drive/files/create"
+		chunkAppendPath = "/api/drive/files/create-chunked/append"
+	)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		// limitedReader pool は per-route で 1 度だけ構築する (BodyLimit の
 		// MiddlewareFunc を next で 1 回 wrap)。本 middleware は global なので
 		// next は router dispatch、pool 構築も 1 度きり。
 		apiNext := apiBL(next)
 		inboxNext := inboxBL(next)
+		chunkNext := chunkBL(next)
 		return func(c echo.Context) error {
 			p := c.Request().URL.Path
 			switch {
 			case p == driveUploadPath:
-				return next(c) // 唯一の multipart upload endpoint のみ除外 (auth + maxFileSize 保護)
+				return next(c) // 唯一の無制限 multipart upload endpoint (auth + maxFileSize 保護)
+			case p == chunkAppendPath:
+				// create と同じく RequireAuth + RequireNotMoved +
+				// write:drive で保護された route。未認証で到達できる経路は
+				// 増えていない。
+				return chunkNext(c)
 			case p == "/api" || strings.HasPrefix(p, "/api/"):
 				return apiNext(c)
 			case isInboxPath(p):

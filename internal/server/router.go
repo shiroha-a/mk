@@ -439,6 +439,26 @@ func (s *Server) setupRoutes() {
 	// も返せるようにする (upstream Misskey の roleService.isModerator 経路
 	// と一致)。リモート添付メディアの詳細閲覧に必要。
 	driveService.SetRoleChecker(roleService)
+	// 分割アップロード (#2313)。設定も backend (#2315) も meta から都度読むので、
+	// admin の変更は再起動なしで効く。オブジェクトストレージ未使用の構成では
+	// backend が MultipartStorage を満たさず、配線しても機能は無効のままになる。
+	chunkedUploadSessionRepo := repository.NewChunkedUploadSessionRepository(s.db)
+	driveService.SetChunkedUpload(chunkedUploadSessionRepo, func() coredrive.ChunkedUploadSettings {
+		m, err := metaRepo.Fetch()
+		if err != nil {
+			return coredrive.ChunkedUploadSettings{}
+		}
+		return coredrive.ChunkedUploadSettingsFromMeta(m)
+	})
+	if _, ok := coredrive.ResolveStorage(driveStorage).(coredrive.MultipartStorage); !ok {
+		// 起動時点の状態を一度だけ警告する。maxFileSize がリバースプロキシの
+		// 上限を超えている構成では「設定上は許可されているのに必ず失敗する」
+		// 状態になるため、回避手段が使えないことを明示しておく。
+		// あとからオブジェクトストレージを有効にすれば再起動なしで使えるように
+		// なるので、恒久的な無効化ではない (#2315)。
+		slog.Warn("chunked upload is currently disabled: object storage is not configured",
+			"maxFileSizeMb", s.config.MaxFileSize/(1024*1024))
+	}
 
 	// Image processing (Phase 4.8)
 	imgProcessor := coredrive.NewDefaultImageProcessor()
@@ -791,6 +811,13 @@ func (s *Server) setupRoutes() {
 	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen, antennaRepo, time.Duration(s.config.DeactivateAntennaThreshold)*time.Millisecond)
 	s.queueServer.Handle(queue.TaskTypeClean, cleanGenericProcessor.Handle)
 
+	// 分割アップロードセッションの GC (#2313): scheduler の cron (*/15) が
+	// enqueue する。期限切れセッションの multipart upload を abort してから
+	// 行を消す。日次 clean に相乗りさせないのは、未完了マルチパートアップロード
+	// が課金対象で、TTL 60 分に対し 24 時間ぶん残るのを避けるため。
+	chunkedUploadGCProcessor := processors.NewChunkedUploadGCProcessor(driveService)
+	s.queueServer.Handle(queue.TaskTypeChunkedUploadGC, chunkedUploadGCProcessor.Handle)
+
 	// Reaction flush (issue #57): buffered writer 使用時は 30 秒ごとに flush。
 	flushProcessor := processors.NewReactionFlushProcessor(reactionCountWriter)
 	s.queueServer.Handle(queue.TaskTypeReactionFlush, flushProcessor.Handle)
@@ -1049,6 +1076,12 @@ func (s *Server) setupRoutes() {
 	metaHandler.SetAdRepo(repository.NewAdRepository(s.db))
 	proxyAccountResolver := newProxyAccountResolver(repository.NewSystemAccountRepository(s.db), userRepo)
 	metaHandler.SetProxyAccountResolver(proxyAccountResolver)
+	// 分割アップロード (#2313) の能力告知。未対応構成では field ごと出さないので、
+	// フロントエンドは undefined を見て従来の単発アップロードに倒れる。
+	metaHandler.SetChunkedUploadCapability(func() (int64, bool) {
+		settings, ok := driveService.ChunkedUploadCapability()
+		return settings.ChunkSize, ok
+	})
 	api.POST("/meta", metaHandler.Meta)
 	api.POST("/ping", metaHandler.Ping)
 
@@ -1883,6 +1916,14 @@ func (s *Server) setupRoutes() {
 	api.POST("/drive", driveHandler.Usage, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/drive/files", driveHandler.FilesList, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/drive/files/create", driveHandler.FilesCreate, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
+	// 分割アップロード (#2313)。mk-go 独自拡張。保護は create と同一
+	// (RequireAuth + RequireNotMoved + write:drive) — append は
+	// BodyLimitByPath の 1MiB 制限から外れるため、未認証で到達できる経路を
+	// 増やさないことが前提になっている。
+	api.POST("/drive/files/create-chunked/start", driveHandler.FilesCreateChunkedStart, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
+	api.POST("/drive/files/create-chunked/append", driveHandler.FilesCreateChunkedAppend, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
+	api.POST("/drive/files/create-chunked/finish", driveHandler.FilesCreateChunkedFinish, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
+	api.POST("/drive/files/create-chunked/abort", driveHandler.FilesCreateChunkedAbort, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:drive"))
 	api.POST("/drive/files/show", driveHandler.FilesShow, middleware.RequireAuth(), middleware.RequireScope("read:drive"))
 	api.POST("/drive/files/update", driveHandler.FilesUpdate, middleware.RequireAuth(), middleware.RequireScope("write:drive"))
 	api.POST("/drive/files/delete", driveHandler.FilesDelete, middleware.RequireAuth(), middleware.RequireScope("write:drive"))

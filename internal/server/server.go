@@ -358,6 +358,7 @@ func (s *Server) registerSchedulerJobs() {
 		{"retention", s.queueScheduler.RegisterRetentionJob},
 		{"checkExpiredMutings", s.queueScheduler.RegisterCheckExpiredMutingsJob},
 		{"clean", s.queueScheduler.RegisterCleanJob},
+		{"chunkedUploadGc", s.queueScheduler.RegisterChunkedUploadGCJob},
 		{"cleanRemoteNotes", s.queueScheduler.RegisterCleanRemoteNotesJob},
 		{"checkModeratorsActivity", s.queueScheduler.RegisterCheckModeratorsActivityJob},
 	}

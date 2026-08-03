@@ -30,6 +30,8 @@ func TestBodyLimitByPath(t *testing.T) {
 	}
 	e.POST("/api/meta", h)
 	e.POST("/api/drive/files/create", h)
+	e.POST("/api/drive/files/create-chunked/append", h)
+	e.POST("/api/drive/files/create-chunked/start", h)
 	e.POST("/inbox", h)
 	e.POST("/users/:id/inbox", h)
 	e.POST("/nolimit", h)
@@ -67,6 +69,17 @@ func TestBodyLimitByPath(t *testing.T) {
 	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/inbox", "application/activity+json", 64*kb+1, false), "inbox > 64KiB は 413")
 	assert.Equal(t, http.StatusOK, post("/inbox", "application/activity+json", 64*kb, false), "inbox ちょうど 64KiB は許容")
 	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/users/u1/inbox", "application/activity+json", 64*kb+1, false), "/users/:id/inbox も 64KiB")
+
+	// #2313: chunked upload の append は 1MiB 制限から外すが、create のように
+	// 無制限にはしない。1 リクエスト = 1 チャンクなので固定上限 (33MiB) を掛ける。
+	const appendPath = "/api/drive/files/create-chunked/append"
+	assert.Equal(t, http.StatusOK, post(appendPath, "multipart/form-data; boundary=x", 2*mb, false), "append は 1MiB 制限から外れる")
+	assert.Equal(t, http.StatusOK, post(appendPath, "multipart/form-data; boundary=x", 33*mb, false), "append ちょうど 33MiB は許容")
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post(appendPath, "multipart/form-data; boundary=x", 33*mb+1, false), "append > 33MiB は 413")
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post(appendPath, "multipart/form-data; boundary=x", 33*mb+1, true), "append chunked 超過も 413")
+	// start / finish / abort は JSON なので通常の 1MiB のまま。除外を広げすぎて
+	// いないことを固定する。
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/api/drive/files/create-chunked/start", "application/json", mb+1, false), "start は 1MiB のまま")
 
 	// 制限対象外 path は無制限。
 	assert.Equal(t, http.StatusOK, post("/nolimit", "application/json", 2*mb, false), "対象外 path は無制限")
