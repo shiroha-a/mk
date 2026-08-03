@@ -1724,3 +1724,38 @@ func TestDriveCleanRemoteFiles_WebpublicKeyAndEmptySkip(t *testing.T) {
 	// access + webpublic は削除、空文字 thumbnail key は skip。
 	assert.ElementsMatch(t, []string{"ak1", "wk1"}, sd.deleted)
 }
+
+// #2315: object storage 有効化より前に保存された storedInternal=true な行は
+// ローカル FS に実体がある。primary (= object storage) に消しに行くと空振りし、
+// ローカルに孤児が残る。
+func TestDriveCleanup_RoutesDeletesByStoredInternal(t *testing.T) {
+	legacy, current := "legacy-ak", "current-ak"
+	h, repo := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "old", UserID: nil, AccessKey: &legacy, StoredInternal: true},
+		&model.DriveFile{ID: "new", UserID: nil, AccessKey: &current, StoredInternal: false},
+	)
+	primary := &stubStorageDeleter{}
+	local := &stubStorageDeleter{}
+	h.SetStorageDeleter(primary)
+	h.SetLocalStorageDeleter(local)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, repo.Files)
+	assert.ElementsMatch(t, []string{"current-ak"}, primary.deleted)
+	assert.ElementsMatch(t, []string{"legacy-ak"}, local.deleted)
+}
+
+// local deleter 未配線なら従来どおり primary に倒す。
+func TestDriveCleanup_WithoutLocalDeleterUsesPrimary(t *testing.T) {
+	ak := "ak"
+	h, _ := setupDriveFileHandler(t,
+		&model.DriveFile{ID: "old", UserID: nil, AccessKey: &ak, StoredInternal: true},
+	)
+	primary := &stubStorageDeleter{}
+	h.SetStorageDeleter(primary)
+
+	rec := doPost(h.DriveCleanup, `{}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.ElementsMatch(t, []string{"ak"}, primary.deleted)
+}

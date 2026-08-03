@@ -142,6 +142,9 @@ type Handler struct {
 	// storageDeleter は admin の bulk drive cleanup で物理オブジェクトを消す
 	// object storage backend (nil なら DB 行のみ削除)。
 	storageDeleter StorageDeleter
+	// localStorageDeleter は storedInternal=true な行 (object storage 有効化より
+	// 前に保存されたファイル) の実体を消すためのローカル backend (#2315)。
+	localStorageDeleter StorageDeleter
 	// captchaVerifierFactory builds a one-off captcha.Verifier for
 	// admin/captcha/save verification. nil uses the real providers; tests
 	// inject a stub to avoid external HTTP calls.
@@ -518,6 +521,13 @@ func (h *Handler) SetDriveFileRepo(r repository.DriveFileRepository) {
 // DB 行削除前に object storage の物理オブジェクトを消すために使う。
 type StorageDeleter interface {
 	Delete(accessKey string) error
+}
+
+// SetLocalStorageDeleter wires the always-local backend used to delete rows
+// whose `storedInternal` is true while object storage is the active backend
+// (#2315). Optional — nil falls back to the primary deleter.
+func (h *Handler) SetLocalStorageDeleter(s StorageDeleter) {
+	h.localStorageDeleter = s
 }
 
 // SetStorageDeleter wires the object-storage backend so bulk drive cleanups can

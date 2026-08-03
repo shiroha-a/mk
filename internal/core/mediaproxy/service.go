@@ -183,16 +183,20 @@ type DriveFileVariants struct {
 
 // Service handles media proxy authorization and fetching.
 type Service struct {
-	instanceURL      string
-	driveStorage     coredrive.Storage
-	allowlist        AllowlistChecker
-	hmacSecret       []byte
-	httpClient       *http.Client
-	userAgent        string
-	driveLookup      DriveFileLookup // optional, #637 M1
-	videoThumbGen    string          // optional, #637 M2 (videoThumbnailGenerator base URL)
-	videoThumbMode   string          // "post" (default) | "get" — wire selection
-	videoThumbClient *http.Client    // built lazily from videoThumbGen, supports unix:// scheme
+	instanceURL  string
+	driveStorage coredrive.Storage
+	allowlist    AllowlistChecker
+	hmacSecret   []byte
+	httpClient   *http.Client
+	userAgent    string
+	driveLookup  DriveFileLookup // optional, #637 M1
+	// localStorage は driveStorage が object storage に切り替わったあとも
+	// `storedInternal=true` な既存ファイルを提供するための fallback (#2315)。
+	// optional — nil なら fallback しない。
+	localStorage     coredrive.Storage
+	videoThumbGen    string       // optional, #637 M2 (videoThumbnailGenerator base URL)
+	videoThumbMode   string       // "post" (default) | "get" — wire selection
+	videoThumbClient *http.Client // built lazily from videoThumbGen, supports unix:// scheme
 }
 
 // NewService creates a new media proxy Service.
@@ -217,6 +221,12 @@ func NewService(instanceURL, userAgent string, driveStorage coredrive.Storage, a
 // against local files (#637 M1)。
 func (s *Service) SetDriveLookup(l DriveFileLookup) {
 	s.driveLookup = l
+}
+
+// SetLocalStorage wires the always-local backend used as a fallback for rows
+// stored before object storage was enabled (#2315). Optional.
+func (s *Service) SetLocalStorage(st coredrive.Storage) {
+	s.localStorage = st
 }
 
 // SetDriveStorage replaces the storage backend (test ergonomics, #637 M1
@@ -334,6 +344,23 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 		if err == nil {
 			accessKey = primaryKey
 			storedMIME = "" // primary の MIME は後段で判定し直す
+		}
+	}
+	// オブジェクトストレージ有効化より前 (あるいは TS 時代) に保存された
+	// `storedInternal=true` な行はローカル FS に実体がある。それらの url は
+	// `<instanceURL>/files/<key>` のままなので、有効化した瞬間にこの経路へ来て
+	// object storage を空振りし、タイムラインの既存画像が全部壊れる (#2315)。
+	// `/files/:accessKey` は #1414 で同じ fallback を持っているが、media proxy
+	// 側が漏れていた。
+	//
+	// drive_file を引いて storedInternal を見る手もあるが、default mode で DB を
+	// 引かない設計 (#637 review UR-014) を崩したくないので、object-not-found の
+	// ときだけローカルを見に行く。ホットパスには何も足さない。
+	if errors.Is(err, coredrive.ErrObjectNotFound) && s.localStorage != nil && !coredrive.StorageIsLocal(s.driveStorage) {
+		if b, lerr := s.localStorage.Get(primaryKey); lerr == nil {
+			body, err = b, nil
+			accessKey = primaryKey
+			storedMIME = ""
 		}
 	}
 	if err != nil {

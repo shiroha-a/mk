@@ -174,3 +174,40 @@ func TestDriveReader_Nil(t *testing.T) {
 	_, _, err := r.Fetch("x")
 	assert.Error(t, err)
 }
+
+// #2315: object storage 有効化より前に保存された storedInternal=true な行は
+// ローカル FS にある。primary だけを引くと import が空振りする。
+func TestDriveReader_Fetch_RoutesByStoredInternal(t *testing.T) {
+	legacy := "legacy-key"
+	current := "current-key"
+	repo := &fakeDriveFileRepo{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", AccessKey: &legacy, StoredInternal: true},
+		"f2": {ID: "f2", AccessKey: &current, StoredInternal: false},
+	}}
+	primary := &fakeStorage{blobs: map[string][]byte{current: []byte("from-object-storage")}}
+	local := &fakeStorage{blobs: map[string][]byte{legacy: []byte("from-local-fs")}}
+
+	r := transfer.NewRepoBackedDriveReader(repo, primary)
+	r.SetLocalStorage(local)
+
+	_, body, err := r.Fetch("f1")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("from-local-fs"), body)
+
+	_, body, err = r.Fetch("f2")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("from-object-storage"), body)
+}
+
+// local 未配線なら従来どおり primary に倒す。
+func TestDriveReader_Fetch_WithoutLocalStorageUsesPrimary(t *testing.T) {
+	key := "k"
+	repo := &fakeDriveFileRepo{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", AccessKey: &key, StoredInternal: true},
+	}}
+	store := &fakeStorage{blobs: map[string][]byte{key: []byte("x")}}
+	r := transfer.NewRepoBackedDriveReader(repo, store)
+	_, body, err := r.Fetch("f1")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("x"), body)
+}

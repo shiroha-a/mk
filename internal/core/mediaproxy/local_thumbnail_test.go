@@ -210,3 +210,68 @@ func (s *stubDriveStorage) Get(key string) (io.ReadCloser, error) {
 // Put / Delete satisfy coredrive.Storage; not exercised here.
 func (s *stubDriveStorage) Put(_ string, _ io.Reader) (string, error) { return "", nil }
 func (s *stubDriveStorage) Delete(_ string) error                     { return nil }
+
+// #2315: object storage を有効にしても、その前に保存された storedInternal=true
+// な既存ファイルはローカル FS にある。url は `<instanceURL>/files/<key>` のまま
+// なのでこの経路に来る。fallback が無いと有効化した瞬間にタイムラインの既存
+// 画像が全部壊れる。
+func TestResolveLocal_FallsBackToLocalStorage(t *testing.T) {
+	primary := newStubDriveStorage() // object storage: 空 (= 移行前のファイルは無い)
+	local := newStubDriveStorage()
+	local.put("legacy-key", makePNG())
+
+	s := testService(map[string]bool{"https://example.com/files/legacy-key": true})
+	s.SetDriveStorage(primary)
+	s.SetLocalStorage(local)
+
+	res, err := s.Fetch(context.Background(), "https://example.com/files/legacy-key", ModeDefault, FormatWebP)
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	assert.Contains(t, primary.reads, "legacy-key", "まず primary を見る")
+	assert.Contains(t, local.reads, "legacy-key", "空振りしたらローカルへ倒す")
+}
+
+// primary にあるものはローカルを見に行かない (ホットパスに余計な I/O を足さない)。
+func TestResolveLocal_NoFallbackWhenPrimaryHasIt(t *testing.T) {
+	primary := newStubDriveStorage()
+	primary.put("k", makePNG())
+	local := newStubDriveStorage()
+
+	s := testService(map[string]bool{"https://example.com/files/k": true})
+	s.SetDriveStorage(primary)
+	s.SetLocalStorage(local)
+
+	res, err := s.Fetch(context.Background(), "https://example.com/files/k", ModeDefault, FormatWebP)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	assert.Empty(t, local.reads)
+}
+
+// primary 自体がローカルなら fallback は無意味なので引かない。
+func TestResolveLocal_NoFallbackWhenPrimaryIsLocal(t *testing.T) {
+	dir := t.TempDir()
+	primary := coredrive.NewLocalStorage(dir, "https://example.com/files")
+	local := newStubDriveStorage()
+
+	s := testService(map[string]bool{"https://example.com/files/missing": true})
+	s.SetDriveStorage(primary)
+	s.SetLocalStorage(local)
+
+	_, err := s.Fetch(context.Background(), "https://example.com/files/missing", ModeDefault, FormatWebP)
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.Empty(t, local.reads, "primary がローカルなら二度見しない")
+}
+
+// ローカルにも無ければ従来どおり 404。
+func TestResolveLocal_FallbackMissStillNotFound(t *testing.T) {
+	primary := newStubDriveStorage()
+	local := newStubDriveStorage()
+
+	s := testService(map[string]bool{"https://example.com/files/nope": true})
+	s.SetDriveStorage(primary)
+	s.SetLocalStorage(local)
+
+	_, err := s.Fetch(context.Background(), "https://example.com/files/nope", ModeDefault, FormatWebP)
+	assert.ErrorIs(t, err, ErrNotFound)
+}

@@ -48,6 +48,22 @@ type MediaURLContext struct {
 	// operator explicitly disables it AND no external proxy is configured, we
 	// fall back to upstream's behavior of emitting raw remote URLs.
 	proxyRemoteFiles bool
+	// ownMediaBaseURL resolves the public base URL that our own object storage
+	// serves from (meta.objectStorageBaseUrl 相当)。nil / "" は
+	// オブジェクトストレージ未使用。
+	ownMediaBaseURL func() string
+}
+
+// SetOwnMediaBaseURLResolver wires the resolver for the object storage public
+// base URL, so files we host ourselves are never sent through the media proxy
+// even when they live on a different domain (#2315).
+//
+// 想定は wire-time only (server.setupRoutes 経由)。HTTP リスナー起動後の
+// 再代入は pack 経路の concurrent read と race する。
+func (c *MediaURLContext) SetOwnMediaBaseURLResolver(f func() string) {
+	if c != nil {
+		c.ownMediaBaseURL = f
+	}
 }
 
 // NewMediaURLContext builds a context from the resolved config + meta values.
@@ -128,10 +144,22 @@ func (c *MediaURLContext) shouldProxyRemote() bool {
 	return c.externalEnabled || c.proxyRemoteFiles
 }
 
-// isRemoteOrigin reports whether rawURL points at a host other than this
-// instance. Relative URLs (e.g. "/identicon/...", "/files/...") and
-// same-origin absolute URLs are treated as local and never proxied, which also
-// prevents double-proxying an already-local /proxy or /files URL.
+// isRemoteOrigin reports whether rawURL points at a host we do not serve from.
+// Relative URLs (e.g. "/identicon/...", "/files/...") and same-origin absolute
+// URLs are treated as local and never proxied, which also prevents
+// double-proxying an already-local /proxy or /files URL.
+//
+// 「自分のホスト」は instance ドメインだけではない。オブジェクトストレージを
+// 有効にすると、自分が保存したファイルの URL は CDN / R2 の公開ドメインを指す。
+// instance ドメインとの比較だけで判定すると**自分のファイルまで remote 扱い**に
+// なり、全ドライブトラフィックが media proxy を経由する。オブジェクトストレージ
+// に逃がした意味が無くなるうえ、mk-go が全画像の再配信を背負う (#2315)。
+//
+// upstream は host 比較ではなく `file.isLink` で判定するのでこの問題が起きない。
+// mk-go が host 比較を採るのは、remote attachment を link 形式で持つ都合で
+// raw URL しか手元に無い経路 (avatar / banner 等) があるため。判定材料を
+// 「自分が配信に使うホスト集合」に広げることで、フラグの設定漏れに依存せず
+// 両方を満たす。
 func (c *MediaURLContext) isRemoteOrigin(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -140,7 +168,31 @@ func (c *MediaURLContext) isRemoteOrigin(rawURL string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return !strings.EqualFold(u.Host, c.instanceHost)
+	if strings.EqualFold(u.Host, c.instanceHost) {
+		return false
+	}
+	if h := c.ownMediaHost(); h != "" && strings.EqualFold(u.Host, h) {
+		return false
+	}
+	return true
+}
+
+// ownMediaHost returns the host of the configured object storage public base
+// URL, or "" when object storage is not in use. 設定は admin が変更しうるので
+// resolver 経由で都度引く (metaRepo は cached 実装なので安価)。
+func (c *MediaURLContext) ownMediaHost() string {
+	if c.ownMediaBaseURL == nil {
+		return ""
+	}
+	base := c.ownMediaBaseURL()
+	if base == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // GetPublicURL mirrors DriveFileEntityService.getPublicUrl for the DriveFile
@@ -203,8 +255,15 @@ func (c *MediaURLContext) GetThumbnailURL(f *model.DriveFile) *string {
 	// proxy to extract a static frame from the (possibly remote) source.
 	if strings.HasPrefix(f.Type, "video/") {
 		if f.ThumbnailURL != nil && *f.ThumbnailURL != "" {
-			return c.proxyIfRemote(f.ThumbnailURL, modeStatic)
+			if c.shouldProxyRemote() && c.isRemoteOrigin(*f.ThumbnailURL) {
+				s := c.ProxiedURL(*f.ThumbnailURL, modeStatic)
+				return &s
+			}
+			return f.ThumbnailURL
 		}
+		// stored thumbnail が無い video は proxy に still frame 抽出を頼む。
+		// これは privacy 対策ではなく機能なので、自前ホストのファイルでも
+		// 通す (thumbnail 生成に失敗した local video の poster がここで出る)。
 		if c.shouldProxyRemote() && c.isRemoteOrigin(f.URL) {
 			s := c.ProxiedURL(f.URL, modeStatic)
 			return &s

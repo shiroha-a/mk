@@ -498,3 +498,77 @@ func u(t *testing.T, s string) *url.URL {
 	}
 	return parsed
 }
+
+// #2315: オブジェクトストレージを instance と別ドメインで運用しても、自分が
+// 保存したファイルは media proxy を経由しない。ホスト比較だけで判定していた頃は
+// 全ドライブトラフィックが proxy を通り、オブジェクトストレージに逃がした意味が
+// 無くなっていた。
+func TestOwnMediaHost_NotProxied(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, true)
+	c.SetOwnMediaBaseURLResolver(func() string { return "https://cdn.example/bucket" })
+
+	thumb := "https://cdn.example/bucket/files/abc-thumb"
+	web := "https://cdn.example/bucket/files/abc-web"
+	own := &model.DriveFile{
+		Type:         "image/png",
+		URL:          "https://cdn.example/bucket/files/abc",
+		ThumbnailURL: &thumb,
+		WebpublicURL: &web,
+	}
+
+	if got := c.GetPublicURL(own, modeDefault); got != own.URL {
+		t.Errorf("own object storage url must stay raw: got %q", got)
+	}
+	if got := c.GetThumbnailURL(own); got == nil || *got != thumb {
+		t.Errorf("own thumbnail must stay raw: got %v", got)
+	}
+	if got := c.GetWebpublicURL(own); got == nil || *got != web {
+		t.Errorf("own webpublic must stay raw: got %v", got)
+	}
+}
+
+// 他所のホストは従来どおり proxy する (#1529 を弱めていないこと)。
+func TestOwnMediaHost_RemoteStillProxied(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, true)
+	c.SetOwnMediaBaseURLResolver(func() string { return "https://cdn.example/bucket" })
+
+	remote := &model.DriveFile{Type: "image/png", URL: "https://remote.example/files/abc"}
+	got := c.GetPublicURL(remote, modeDefault)
+	if got == remote.URL {
+		t.Fatalf("remote url must not be returned raw: %q", got)
+	}
+	if !strings.HasPrefix(got, "https://mk.example/proxy/") {
+		t.Errorf("remote url must be wrapped through the proxy: %q", got)
+	}
+	// proxy URL の外側に remote host が生で出ていないこと (url param 内は正常)。
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !strings.EqualFold(u.Host, "mk.example") {
+		t.Errorf("proxied url host must be ours: %q", u.Host)
+	}
+}
+
+// instance 自身のホストは resolver の有無に関わらず proxy しない。
+func TestOwnMediaHost_InstanceHostStillLocal(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, true)
+	c.SetOwnMediaBaseURLResolver(func() string { return "https://cdn.example/bucket" })
+
+	local := &model.DriveFile{Type: "image/png", URL: "https://mk.example/files/abc"}
+	if got := c.GetPublicURL(local, modeDefault); got != local.URL {
+		t.Errorf("instance-hosted url must stay raw: %q", got)
+	}
+}
+
+// resolver 未配線 / 空文字 (オブジェクトストレージ未使用) は従来挙動のまま。
+func TestOwnMediaHost_UnsetKeepsPreviousBehaviour(t *testing.T) {
+	for _, resolver := range []func() string{nil, func() string { return "" }, func() string { return "::bad url" }} {
+		c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, true)
+		c.SetOwnMediaBaseURLResolver(resolver)
+		f := &model.DriveFile{Type: "image/png", URL: "https://cdn.example/bucket/files/abc"}
+		if got := c.GetPublicURL(f, modeDefault); got == f.URL {
+			t.Errorf("without a resolver a foreign host must still be proxied: %q", got)
+		}
+	}
+}

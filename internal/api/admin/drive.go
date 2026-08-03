@@ -84,15 +84,23 @@ func (h *Handler) deleteFilesBatched(c echo.Context, list func(limit int) ([]*mo
 // (Storage.Delete の契約) が、それ以外の失敗は slog.Warn で残す (DB 行は消すので
 // orphan を後追いできるように)。upstream は thumbnailUrl/webpublicUrl の有無で
 // gate するが、mk-go は access key の有無で判定する (best-effort なので余分な key
-// への Delete は no-op)。storedInternal=true でローカル disk にある object を S3
-// backend で消そうとするケース (#1414 の二系統 storage) は本経路では消えない。
+// への Delete は no-op)。
+//
+// object storage 有効化より前に保存された storedInternal=true な行はローカル FS に
+// 実体があるので、primary (= object storage) に消しに行っても空振りしてローカルに
+// 孤児が残る。行の storedInternal を見て backend を選ぶ (#1414 の二系統 storage /
+// #2315)。localStorageDeleter 未配線なら従来どおり primary に倒す。
 func (h *Handler) deleteFileStorageObjects(c echo.Context, f *model.DriveFile) {
 	if h.storageDeleter == nil || f == nil {
 		return
 	}
+	deleter := h.storageDeleter
+	if f.StoredInternal && h.localStorageDeleter != nil {
+		deleter = h.localStorageDeleter
+	}
 	for _, key := range []*string{f.AccessKey, f.ThumbnailAccessKey, f.WebpublicAccessKey} {
 		if key != nil && *key != "" {
-			if err := h.storageDeleter.Delete(*key); err != nil {
+			if err := deleter.Delete(*key); err != nil {
 				slog.WarnContext(c.Request().Context(), "drive cleanup: storage delete failed (object may be orphaned)",
 					"fileId", f.ID, "err", err)
 			}
