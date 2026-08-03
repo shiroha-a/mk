@@ -375,8 +375,9 @@ func TestStartAutoScale_TickRecoversFromPanic(t *testing.T) {
 	inner.setPending("deliver", 1000) // 高 depth で scale-up trigger
 	d := &panickingDriver{scriptableDriver: inner}
 	// 初回 + 1 tick で発火する Resize までは success、その次の Resize で panic。
-	// 初期 Resize × 5 queue + 1 tick の Resize で 6 = panic 発火タイミング。
-	d.panicAfter.Store(6)
+	// 初期 Resize × 6 queue + 1 tick の Resize で 7 = panic 発火タイミング。
+	// queue を増減したらこの値も合わせること (autoScaledQueues 参照)。
+	d.panicAfter.Store(7)
 
 	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)

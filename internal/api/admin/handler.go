@@ -76,6 +76,16 @@ type SystemAccountFetcher interface {
 	Fetch(kind string) (*model.User, error)
 }
 
+// ObjectStorageEnqueuer schedules object storage housekeeping on the
+// `objectStorage` queue (#2325). Implemented by queue.Client; admin handlers
+// take the narrow interface so tests stay decoupled from the queue stack.
+type ObjectStorageEnqueuer interface {
+	// EnqueueDeleteObjectStorageFile queues the removal of one object.
+	EnqueueDeleteObjectStorageFile(key string) error
+	// EnqueueCleanRemoteFiles queues the bulk remote-cache sweep.
+	EnqueueCleanRemoteFiles() error
+}
+
 // UnfollowEnqueuer schedules per-pair Unfollow background jobs, used by
 // admin/federation/remove-all-following to detach all incoming follows from
 // a host without blocking the HTTP request. The job is consumed by
@@ -146,6 +156,9 @@ type Handler struct {
 	// localStorageDeleter は storedInternal=true な行 (object storage 有効化より
 	// 前に保存されたファイル) の実体を消すためのローカル backend (#2315)。
 	localStorageDeleter StorageDeleter
+	// objectStorageEnqueuer は bulk drive cleanup の実体削除を queue へ
+	// 逃がす (#2325)。nil なら従来どおり handler 内で同期削除する。
+	objectStorageEnqueuer ObjectStorageEnqueuer
 	// captchaVerifierFactory builds a one-off captcha.Verifier for
 	// admin/captcha/save verification. nil uses the real providers; tests
 	// inject a stub to avoid external HTTP calls.
@@ -529,6 +542,13 @@ type StorageDeleter interface {
 // (#2315). Optional — nil falls back to the primary deleter.
 func (h *Handler) SetLocalStorageDeleter(s StorageDeleter) {
 	h.localStorageDeleter = s
+}
+
+// SetObjectStorageEnqueuer wires the queue client used to offload drive
+// cleanup work to the `objectStorage` queue (#2325). Optional — nil keeps the
+// synchronous in-request deletion.
+func (h *Handler) SetObjectStorageEnqueuer(e ObjectStorageEnqueuer) {
+	h.objectStorageEnqueuer = e
 }
 
 // SetStorageDeleter wires the object-storage backend so bulk drive cleanups can

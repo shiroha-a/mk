@@ -438,6 +438,8 @@ func (s *Server) setupRoutes() {
 	// storedInternal=true な行 (object storage 有効化より前 / TS 時代に保存された
 	// ファイル) はローカル FS にあるので、削除経路がそちらに届くようにする。
 	driveService.SetLocalStorage(localDriveStorage)
+	// ファイル削除時の object storage 実体削除を queue に逃がす (#2325)。
+	driveService.SetObjectDeleteEnqueuer(s.queueClient)
 	// drive/files/show は moderator なら他人 / リモートユーザー所有の file
 	// も返せるようにする (upstream Misskey の roleService.isModerator 経路
 	// と一致)。リモート添付メディアの詳細閲覧に必要。
@@ -820,6 +822,14 @@ func (s *Server) setupRoutes() {
 	// が課金対象で、TTL 60 分に対し 24 時間ぶん残るのを避けるため。
 	chunkedUploadGCProcessor := processors.NewChunkedUploadGCProcessor(driveService)
 	s.queueServer.Handle(queue.TaskTypeChunkedUploadGC, chunkedUploadGCProcessor.Handle)
+
+	// object storage の実体削除 (#2325)。upstream Misskey と同じく専用 queue に
+	// 逃がすことで、大量削除で API リクエストがブロックされるのと、storage 不調で
+	// 実体が orphan になるのを防ぐ。cleanRemoteFiles は job 1 本の中でバッチ削除を
+	// 回す (件数ぶん job を積むと Redis を圧迫するため)。
+	objectStorageProcessor := processors.NewObjectStorageProcessor(driveStorage, localDriveStorage, driveFileRepo)
+	s.queueServer.Handle(queue.TaskTypeObjectStorageDeleteFile, objectStorageProcessor.HandleDeleteFile)
+	s.queueServer.Handle(queue.TaskTypeCleanRemoteFiles, objectStorageProcessor.HandleCleanRemoteFiles)
 
 	// Reaction flush (issue #57): buffered writer 使用時は 30 秒ごとに flush。
 	flushProcessor := processors.NewReactionFlushProcessor(reactionCountWriter)
@@ -2605,6 +2615,8 @@ func (s *Server) setupRoutes() {
 	// storedInternal=true な行はローカル FS にあるので、bulk cleanup がそちらも
 	// 消せるようにする (#2315)。
 	adminHandler.SetLocalStorageDeleter(localDriveStorage)
+	// clean-remote-files / cleanup の実体削除を objectStorage queue へ逃がす (#2325)。
+	adminHandler.SetObjectStorageEnqueuer(s.queueClient)
 	adminHandler.SetAdminDB(s.db)
 	adminHandler.SetUserIPRepo(userIPRepo)
 	adminHandler.SetSecurityKeyRepo(userSecurityKeyRepo)

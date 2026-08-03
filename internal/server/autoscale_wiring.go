@@ -333,9 +333,9 @@ func autoScaledQueues(cfg *config.Config) (managed, skipped []string) {
 	} else {
 		skipped = append(skipped, queue.InboxQueueName)
 	}
-	// export / push / webhook には個別 knob が無いため常に管理対象。
-	// 将来 per-queue knob を生やすときはここに分岐を追加する。
-	managed = append(managed, queue.ExportQueueName, queue.PushQueueName, queue.WebhookQueueName)
+	// export / push / webhook / objectStorage には個別 knob が無いため常に
+	// 管理対象。将来 per-queue knob を生やすときはここに分岐を追加する。
+	managed = append(managed, queue.ExportQueueName, queue.PushQueueName, queue.WebhookQueueName, queue.ObjectStorageQueueName)
 	return managed, skipped
 }
 

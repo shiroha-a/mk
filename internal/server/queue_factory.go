@@ -154,6 +154,9 @@ func applyClientPolicies(c *queue.Client, cfg *config.Config) {
 	c.SetPolicy(queue.ExportQueueName, defaultPolicy())
 	c.SetPolicy(queue.PushQueueName, defaultPolicy())
 	c.SetPolicy(queue.WebhookQueueName, defaultPolicy())
+	// objectStorage も retention を効かせる。一括削除で completed が一気に
+	// 積み上がるので、上限が無いと Redis を圧迫する (#2325)。
+	c.SetPolicy(queue.ObjectStorageQueueName, defaultPolicy())
 }
 
 // defaultPolicy returns the queue.Policy applied when no operator config

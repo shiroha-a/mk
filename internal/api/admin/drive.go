@@ -26,10 +26,20 @@ const driveCleanupMaxBatches = 10000
 //
 // upstream CleanRemoteFilesProcessorService はキャッシュ済みリモートファイル
 // (userHost IS NOT NULL AND isLink=false) を物理オブジェクトごと削除する。
-// storage backend が配線されていれば list→object storage 削除→DB 行削除を
-// バッチで回す。未配線時は DB 行のみ削除 (条件は修正済 = isLink=false)。
+// endpoint 自体は job を 1 本積んで即座に返し、実際のバッチ削除は
+// objectStorage queue の worker が回す (#2325)。
+//
+// queue 未配線時のみ、従来どおり handler 内で同期削除する。storage backend も
+// 未配線なら DB 行のみ削除 (条件は修正済 = isLink=false)。
 func (h *Handler) DriveCleanRemoteFiles(c echo.Context) error {
 	if h.driveFileRepo == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	if h.objectStorageEnqueuer != nil {
+		if err := h.objectStorageEnqueuer.EnqueueCleanRemoteFiles(); err != nil {
+			slog.ErrorContext(c.Request().Context(), "drive cleanup: enqueue cleanRemoteFiles failed", "err", err)
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		return c.NoContent(http.StatusNoContent)
 	}
 	if h.storageDeleter == nil {
@@ -94,16 +104,30 @@ func (h *Handler) deleteFileStorageObjects(c echo.Context, f *model.DriveFile) {
 	if h.storageDeleter == nil || f == nil {
 		return
 	}
+	// object storage 上の実体は queue に逃がす (#2325)。upstream の cleanup も
+	// ファイルごとに deleteFile job を積む。ローカル FS の行 (object storage
+	// 有効化より前に保存されたもの) は upstream 同様ここで同期削除する。
+	queued := !f.StoredInternal && h.objectStorageEnqueuer != nil
 	deleter := h.storageDeleter
 	if f.StoredInternal && h.localStorageDeleter != nil {
 		deleter = h.localStorageDeleter
 	}
 	for _, key := range []*string{f.AccessKey, f.ThumbnailAccessKey, f.WebpublicAccessKey} {
-		if key != nil && *key != "" {
-			if err := deleter.Delete(*key); err != nil {
-				slog.WarnContext(c.Request().Context(), "drive cleanup: storage delete failed (object may be orphaned)",
-					"fileId", f.ID, "err", err)
+		if key == nil || *key == "" {
+			continue
+		}
+		if queued {
+			err := h.objectStorageEnqueuer.EnqueueDeleteObjectStorageFile(*key)
+			if err == nil {
+				continue
 			}
+			// queue が死んでいても実体は消す。取りこぼすと追跡不能な孤児になる。
+			slog.WarnContext(c.Request().Context(), "drive cleanup: enqueue object delete failed, deleting inline",
+				"fileId", f.ID, "err", err)
+		}
+		if err := deleter.Delete(*key); err != nil {
+			slog.WarnContext(c.Request().Context(), "drive cleanup: storage delete failed (object may be orphaned)",
+				"fileId", f.ID, "err", err)
 		}
 	}
 }

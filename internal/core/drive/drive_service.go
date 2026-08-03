@@ -165,6 +165,70 @@ type Service struct {
 	// MultipartStorage を満たすときだけ機能が有効になる。
 	chunkedRepo     repository.ChunkedUploadSessionRepository
 	chunkedSettings func() ChunkedUploadSettings
+	// objectDeleteEnqueuer は object storage の実体削除を queue に逃がす
+	// (#2325)。nil なら従来どおり同期削除にフォールバックする。
+	objectDeleteEnqueuer ObjectDeleteEnqueuer
+}
+
+// ObjectDeleteEnqueuer queues the removal of one object storage object.
+// Implemented by queue.Client (EnqueueDeleteObjectStorageFile).
+type ObjectDeleteEnqueuer interface {
+	EnqueueDeleteObjectStorageFile(key string) error
+}
+
+// SetObjectDeleteEnqueuer attaches the queue client used to delete object
+// storage objects asynchronously. Optional — nil keeps inline deletion.
+func (s *Service) SetObjectDeleteEnqueuer(e ObjectDeleteEnqueuer) {
+	s.objectDeleteEnqueuer = e
+}
+
+// deleteFileObjects removes a row's primary / thumbnail / webpublic objects.
+//
+// upstream `DriveService.deleteFile` と同じ振り分け: ローカル FS
+// (storedInternal=true) は同期削除、object storage 上の実体は queue に積む。
+// 実体を持たない link 行は何もしない。
+//
+// 戻り値は primary object の削除結果だけ。サムネイル / webpublic の失敗で
+// 行の削除を止めると、消せない実体のせいで行が永久に残ってしまう。
+func (s *Service) deleteFileObjects(f *model.DriveFile) error {
+	if f == nil {
+		return nil
+	}
+	// upstream の分岐順 (`if storedInternal ... else if !isLink`) に合わせる。
+	// link 行は実体を持たないので何もしない。storedInternal が立っている行は
+	// link フラグに関わらずローカル FS を消す。
+	if !f.StoredInternal && f.IsLink {
+		return nil
+	}
+	del := s.objectDeleter(f)
+	var primaryErr error
+	if f.AccessKey != nil && *f.AccessKey != "" {
+		primaryErr = del(*f.AccessKey)
+	}
+	for _, key := range []*string{f.ThumbnailAccessKey, f.WebpublicAccessKey} {
+		if key != nil && *key != "" {
+			_ = del(*key)
+		}
+	}
+	return primaryErr
+}
+
+// objectDeleter picks the deletion strategy for f.
+//
+// enqueue に失敗したときは同期削除へ倒す。queue が死んでいるからといって実体を
+// 取りこぼすと、追跡する手掛かりが無いまま課金され続ける孤児になる。
+func (s *Service) objectDeleter(f *model.DriveFile) func(string) error {
+	if !f.StoredInternal && s.objectDeleteEnqueuer != nil {
+		return func(key string) error {
+			err := s.objectDeleteEnqueuer.EnqueueDeleteObjectStorageFile(key)
+			if err == nil {
+				return nil
+			}
+			slog.Warn("drive: enqueue object delete failed, deleting inline", "fileId", f.ID, "err", err)
+			return s.storageFor(f).Delete(key)
+		}
+	}
+	return s.storageFor(f).Delete
 }
 
 // SetFolderStreamingPublisher attaches the drive-channel publisher for folder
@@ -908,18 +972,8 @@ func (s *Service) Delete(user *model.User, id string) error {
 	if err != nil {
 		return err
 	}
-	backend := s.storageFor(f)
-	if f.AccessKey != nil {
-		if err := backend.Delete(*f.AccessKey); err != nil {
-			return err
-		}
-	}
-	// サムネイル/webpublic の storage も削除
-	if f.ThumbnailAccessKey != nil {
-		_ = backend.Delete(*f.ThumbnailAccessKey)
-	}
-	if f.WebpublicAccessKey != nil {
-		_ = backend.Delete(*f.WebpublicAccessKey)
+	if err := s.deleteFileObjects(f); err != nil {
+		return err
 	}
 	if err := s.fileRepo.Delete(f); err != nil {
 		return err
@@ -948,17 +1002,8 @@ func (s *Service) DeleteAllByHost(host string) (int64, error) {
 		return 0, err
 	}
 	for _, f := range files {
-		backend := s.storageFor(f)
-		if f.AccessKey != nil {
-			if derr := backend.Delete(*f.AccessKey); derr != nil {
-				slog.Warn("drive: delete-all-by-host storage delete failed", "host", host, "accessKey", *f.AccessKey, "err", derr)
-			}
-		}
-		if f.ThumbnailAccessKey != nil {
-			_ = backend.Delete(*f.ThumbnailAccessKey)
-		}
-		if f.WebpublicAccessKey != nil {
-			_ = backend.Delete(*f.WebpublicAccessKey)
+		if derr := s.deleteFileObjects(f); derr != nil {
+			slog.Warn("drive: delete-all-by-host storage delete failed", "host", host, "fileId", f.ID, "err", derr)
 		}
 		// usedRemote / instanceChart 等の使用量を per-file で減算する。
 		if s.chartHook != nil {
