@@ -59,14 +59,18 @@ async function tryCreateRoot(ctx: APIRequestContext): Promise<RootCreds | null> 
     }
     return { id: body.id, token: body.token, username: ROOT_USERNAME };
   }
-  // 既存 alice (= 403 ACCESS_DENIED) は idempotent re-run の正常系。
-  // それ以外 (5xx 等) は本当に失敗しているので throw する。
-  if (resp.status() !== 403) {
-    throw new Error(
-      `globalSetup admin/accounts/create unexpected status: ${resp.status()} ${await resp.text()}`,
-    );
+  // 既存 alice (= ACCESS_DENIED) は idempotent re-run の正常系。status は
+  // backend で割れる: upstream は kind:'client' の既定にあたる 400 を返し
+  // (ApiCallService.#sendApiError)、mk-go は 403 を返す。どちらの backend で
+  // 走らせても re-run できるよう、status ではなく error code で判定する。
+  // それ以外 (5xx 等) は本当に失敗しているので throw する (#2276)。
+  const body = await resp.text();
+  if ((resp.status() === 403 || resp.status() === 400) && body.includes('ACCESS_DENIED')) {
+    return null;
   }
-  return null;
+  throw new Error(
+    `globalSetup admin/accounts/create unexpected status: ${resp.status()} ${body}`,
+  );
 }
 
 // 既存 alice として signin-flow で token を再取得する。fresh DB から alice

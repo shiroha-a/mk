@@ -116,7 +116,9 @@ test.describe('UI: /admin/user suspend toggle flow', () => {
     });
     expect(showResp.status()).toBe(200);
     const shown = await showResp.json();
-    expect(shown.id).toBe(target.id);
+    // upstream の admin/show-user は id を返さない (show-user.ts の return は
+    // profile 由来の field と roles/policies/signins のみ)。mk-go は追加で id を
+    // 返すが、両 backend で通る assert にするため id は見ない (#2276)。
     expect(shown.isSuspended).toBe(true);
   });
 });

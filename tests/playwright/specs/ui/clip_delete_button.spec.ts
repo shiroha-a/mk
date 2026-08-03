@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: /clips/:id delete button flow', () => {
   let root: RootFixture;
@@ -86,7 +87,7 @@ test.describe('UI: /clips/:id delete button flow', () => {
       ignoreHTTPSErrors: true,
       data: { i: root.token, clipId },
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_CLIP');
     expect(showBody.error?.id).toBe('c3c5fe33-d62c-44d2-9ea5-d997703f5c20');

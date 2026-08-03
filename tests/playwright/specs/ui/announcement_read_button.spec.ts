@@ -33,6 +33,10 @@ test.describe('UI: /announcements read button flow', () => {
       i: root.token,
       title,
       text,
+      // upstream の paramDef は required: ['title','text','imageUrl'] なので
+      // 省くと 400 INVALID_PARAM になる。mk-go は必須にしていないため
+      // mk-go 単体では通っていたが、TS backend で落ちていた (#2276)。
+      imageUrl: null,
     });
     expect(createResp.status()).toBe(200);
 

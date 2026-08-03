@@ -14,9 +14,13 @@ export default defineConfig({
   expect: {
     timeout: 10_000,
   },
-  // CI 統合は後続 PR。本 PR はローカル make 経由で動かすので reporter は
-  // list のみ。pretty な HTML report は CI 統合時に追加する。
-  reporter: [['list']],
+  // list は人間向け、json は CI の "spec が 1 件も実行されなかった" guard
+  // (.github/workflows/playwright.yml) 向け。outputFile は runner の
+  // working_dir (/work = host の tests/playwright) 相対なので、host 側の
+  // tests/playwright/results.json に落ちる。guard がこのパスを見るので
+  // 両者を変えるときは必ず揃えること (#2276: reporter だけ入れ忘れて
+  // guard が恒常 fail していた)。
+  reporter: [['list'], ['json', { outputFile: 'results.json' }]],
   // Phase 1 では全 spec を chromium で 1 回ずつ実行。multi-browser は
   // CI 統合 PR で `projects` を追加する。
   use: {

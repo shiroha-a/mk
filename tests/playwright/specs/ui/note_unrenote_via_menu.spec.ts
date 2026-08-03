@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: own note unrenote via menu flow', () => {
   let root: RootFixture;
@@ -117,7 +118,7 @@ test.describe('UI: own note unrenote via menu flow', () => {
       i: root.token,
       noteId: renoteNoteId,
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_NOTE');
 

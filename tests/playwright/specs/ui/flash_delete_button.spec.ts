@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: /play/:id/edit delete button flow', () => {
   let root: RootFixture;
@@ -82,7 +83,7 @@ test.describe('UI: /play/:id/edit delete button flow', () => {
       i: root.token,
       flashId,
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_FLASH');
     expect(showBody.error?.id).toBe('f0d34a1a-d29a-401d-90ba-1982122b5630');

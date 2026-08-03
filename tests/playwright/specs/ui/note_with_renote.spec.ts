@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
+import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import type { RootFixture } from '../../fixtures/ui_auth';
 
 test.describe('UI: note detail page with renote chain', () => {
@@ -31,9 +32,17 @@ test.describe('UI: note detail page with renote chain', () => {
     const parentBody = await parent.json();
     const parentId = parentBody.createdNote.id;
 
-    // renote を API で作成 (= notes/create with renoteId、本文は不要)
+    // renote を API で作成 (= notes/create with renoteId、本文は不要)。
+    // 自分の note を自分で renote すると upstream は renoteCount を増やさない
+    // (NoteCreateService.ts の `data.renote.userId !== user.id` ガード) ため、
+    // 別 user から renote して両 backend で count が動く形にする (#2276)。
+    const renoter = await signupUser(
+      request,
+      `pwrn${Date.now().toString().slice(-9)}`,
+      DEFAULT_TEST_PASSWORD,
+    );
     const renote = await callApi(request, 'notes/create', {
-      i: root.token,
+      i: renoter.token,
       renoteId: parentId,
       visibility: 'public',
     });

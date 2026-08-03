@@ -31,6 +31,18 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
     const invitee = await signupUser(request, `pwinv${Date.now().toString().slice(-9)}`);
     expect(invitee.id).toBeTruthy();
 
+    // MkUserSelectDialog は users/search-by-username-and-host を引く。upstream
+    // の UserSearchService は 4 query の UNION で、`updatedAt IS NULL` を拾う
+    // のは「フォロー済み」分岐だけ (未フォローの inactive 分岐は
+    // `updatedAt <= threshold` で NULL を除外する)。signup 直後の user は
+    // updatedAt=NULL なので、root が follow していないと TS では検索に一切
+    // 出てこない。mk-go は NULL も拾うため mk-go 単体では通っていた (#2276)。
+    const followResp = await callApi(request, 'following/create', {
+      i: root.token,
+      userId: invitee.id,
+    });
+    expect(followResp.status()).toBe(200);
+
     // 2. test 用 chat room を create
     const roomName = `pw-invite-room-${Date.now().toString().slice(-9)}`;
     const roomResp = await callApi(request, 'chat/rooms/create', {

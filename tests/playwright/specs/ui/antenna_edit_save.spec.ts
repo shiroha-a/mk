@@ -35,6 +35,10 @@ test.describe('UI: /my/antennas/:id update flow', () => {
       src: 'all',
       keywords: [['*']],
       excludeKeywords: [],
+      // upstream の paramDef は users も required なので、省くと 400
+      // INVALID_PARAM になる。mk-go は必須にしていないため mk-go 単体では
+      // 通っていたが、TS backend で落ちていた (#2276)。
+      users: [],
       caseSensitive: false,
       withReplies: false,
       withFile: false,

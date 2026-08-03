@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { uploadTinyPNG } from '../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: /my/drive/file/:fileId delete flow', () => {
   let root: RootFixture;
@@ -77,7 +78,7 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
       ignoreHTTPSErrors: true,
       data: { i: root.token, fileId },
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_FILE');
     expect(showBody.error?.id).toBe('067bc436-2718-4795-b0fb-ecbe43949e31');

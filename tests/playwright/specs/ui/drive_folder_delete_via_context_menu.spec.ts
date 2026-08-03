@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: /my/drive folder delete via context menu flow', () => {
   let root: RootFixture;
@@ -101,7 +102,7 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
       i: root.token,
       folderId,
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_FOLDER');
     expect(showBody.error?.id).toBe('d74ab9eb-bb09-4bba-bf24-fb58f761e1e9');

@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: /pages/edit/:id delete button flow', () => {
   let root: RootFixture;
@@ -88,7 +89,7 @@ test.describe('UI: /pages/edit/:id delete button flow', () => {
       i: root.token,
       pageId,
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_PAGE');
     expect(showBody.error?.id).toBe('222120c0-3ead-4528-811b-b96f233388d7');

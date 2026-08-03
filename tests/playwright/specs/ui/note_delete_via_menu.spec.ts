@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
+import { NOT_FOUND_STATUS } from '../../fixtures/backend';
 
 test.describe('UI: note 3-dot menu delete flow', () => {
   let root: RootFixture;
@@ -117,7 +118,7 @@ test.describe('UI: note 3-dot menu delete flow', () => {
       i: root.token,
       noteId,
     });
-    expect(showResp.status()).toBe(404);
+    expect(showResp.status()).toBe(NOT_FOUND_STATUS);
     const showBody = await showResp.json();
     expect(showBody.error?.code).toBe('NO_SUCH_NOTE');
     expect(showBody.error?.id).toBe('24fcbfc6-2e37-42b6-8388-c29b3861a08d');

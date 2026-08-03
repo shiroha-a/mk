@@ -13,6 +13,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { callApi } from '../../fixtures/api';
 import { DEFAULT_TEST_PASSWORD, signupUser } from '../../fixtures/auth';
 import { resetRateLimit } from '../../fixtures/rate_limit';
 import { type RootFixture, uiSigninAsRoot } from '../../fixtures/ui_auth';
@@ -29,7 +30,20 @@ test.describe('UI: /explore/users renders recently-registered users', () => {
 
   test('newly signed-up user appears in /explore#users', async ({ page, baseURL, request }) => {
     const newUserName = `expnew${Date.now().toString().slice(-9)}`;
-    await signupUser(request, newUserName, DEFAULT_TEST_PASSWORD);
+    const newUser = await signupUser(request, newUserName, DEFAULT_TEST_PASSWORD);
+    // /explore#users の "recently registered" は users(state:'alive') を引く。
+    // upstream の alive は `user.updatedAt > now-5d` なので、signup 直後の
+    // updatedAt=NULL な user は比較が NULL になって一覧に出てこない
+    // (endpoints/users.ts の `case 'alive'`)。upstream で local user の
+    // updatedAt を立てるのは note 投稿時の incNotesCountOfUser だけなので
+    // (i/update では立たない)、1 件投稿させて両 backend で出るようにする。
+    // mk-go は updatedAt=NULL も含めるため mk-go 単体では通っていた (#2276)。
+    const noteResp = await callApi(request, 'notes/create', {
+      i: newUser.token,
+      text: `hello from ${newUserName}`,
+      visibility: 'public',
+    });
+    expect(noteResp.status()).toBe(200);
 
     await uiSigninAsRoot(page, baseURL, root);
     const resp = await page.goto(`${baseURL}/explore#users`, { waitUntil: 'domcontentloaded' });
