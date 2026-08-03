@@ -787,18 +787,18 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	}
 
 	// reply/renote先のカウンタを更新する。
-	// quote renoteの場合 (text/cw/poll/fileを伴うrenote) は renoteCount を増やさず、
-	// 純粋なrenoteのみ集計する。これはMisskey本家の挙動に揃えている。
 	if replyTarget != nil {
 		_ = s.noteRepo.IncrementCount(replyTarget.ID, "repliesCount", 1)
 	}
-	if renoteTarget != nil && isPureRenote(in) {
-		_ = s.noteRepo.IncrementCount(renoteTarget.ID, "renoteCount", 1)
-	}
-	// featured engagement ランキング更新 (#1687, upstream incRenoteCount 内)。
-	// renote (quote 含む) で、自身の note でなく、bot でない renoter の場合に
-	// renote 対象 note を boost する (upstream の incRenoteCount 呼び出し条件)。
+	// upstream NoteCreateService の incRenoteCount 呼び出し条件と同一
+	// (`data.renote && data.renote.userId !== user.id && !user.isBot`)。
+	// quote renote も加算対象に含まれる — upstream に pure renote 限定の
+	// 条件は無い (#2283)。自己 renote と bot の renote は加算しない。
+	//
+	// featured ランキング更新も upstream では incRenoteCount の中にあるので
+	// 同じ条件で発火させる (#1687)。
 	if renoteTarget != nil && renoteTarget.UserID != in.User.ID && !in.User.IsBot {
+		_ = s.noteRepo.IncrementCount(renoteTarget.ID, "renoteCount", 1)
 		s.updateFeaturedOnRenote(renoteTarget)
 	}
 
@@ -1087,27 +1087,6 @@ func ExtractMentionStructs(text string) []Mention {
 		out = append(out, Mention{Username: username, Host: host})
 	}
 	return out
-}
-
-// isPureRenote reports whether the create request is a pure renote (no text,
-// no cw, no poll, no files). 純粋なrenoteのみがrenoteCountに反映される。
-func isPureRenote(in CreateInput) bool {
-	if in.RenoteID == nil {
-		return false
-	}
-	if in.Text != nil && *in.Text != "" {
-		return false
-	}
-	if in.CW != nil && *in.CW != "" {
-		return false
-	}
-	if len(in.FileIDs) > 0 {
-		return false
-	}
-	if in.Poll != nil && len(in.Poll.Choices) > 0 {
-		return false
-	}
-	return true
 }
 
 // IsPureRenote reports whether the persisted note is a pure renote (no text,

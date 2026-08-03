@@ -500,6 +500,27 @@ func TestProcess_AnnounceIncrementsRenoteCount(t *testing.T) {
 	assert.Equal(t, int16(1), env.noteRepo.Notes["n1"].RenoteCount)
 }
 
+// upstream NoteCreateService の incRenoteCount 条件を inbound Announce にも
+// 適用する (#2283)。boost 対象が announcer 本人の note なら加算しない。
+func TestProcess_AnnounceSelfBoostDoesNotIncrementRenoteCount(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	// announcer を既知 ID で事前登録し、その本人の note を boost 対象にする。
+	env.userRepo.Users["ualice"] = &model.User{
+		ID: "ualice", Username: "alice",
+		Host: strPtr("remote.example"), URI: strPtr("https://remote.example/users/alice"),
+	}
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "ualice", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "Announce",
+		"id": "https://remote.example/announces/self",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1"
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	assert.Equal(t, int16(0), env.noteRepo.Notes["n1"].RenoteCount,
+		"自己 boost は renoteCount を増やさない")
+}
+
 // --- Delete ------------------------------------------------------------------
 
 // TestProcess_SingletonArrayActivity_Foundkey verifies that a valid AP

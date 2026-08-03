@@ -903,40 +903,38 @@ func TestCreateService_ReplyHappyPath(t *testing.T) {
 	assert.Equal(t, int16(1), noteRepo.Notes["target"].RepliesCount)
 }
 
-func TestCreateService_QuoteRenoteDoesNotIncrementRenoteCount(t *testing.T) {
-	svc, noteRepo, _ := newCreateService(t)
-	noteRepo.Notes["target"] = &model.Note{
-		ID: "target", UserID: "author", Visibility: model.NoteVisibilityPublic,
-	}
-
-	user := &model.User{ID: "u1"}
+// upstream NoteCreateService の incRenoteCount 条件
+// (`data.renote && data.renote.userId !== user.id && !user.isBot`) を再現する。
+// quote 除外は upstream に存在しないので、quote でも加算する (#2283)。
+func TestCreateService_RenoteCountIncrementCondition(t *testing.T) {
 	text := "quoted!"
-	renoteID := "target"
-	_, err := svc.Create(note.CreateInput{User: user, Text: &text, RenoteID: &renoteID})
-	require.NoError(t, err)
-	// quote renoteなのでrenoteCountは増えない
-	assert.Equal(t, int16(0), noteRepo.Notes["target"].RenoteCount)
-}
-
-func TestIsPureRenote(t *testing.T) {
-	target := "x"
-	choices := []string{"a", "b"}
-
 	cases := []struct {
-		name string
-		in   note.CreateInput
-		want bool
+		name       string
+		targetUser string
+		renoter    *model.User
+		text       *string
+		want       int16
 	}{
-		{"no renote", note.CreateInput{}, false},
-		{"pure", note.CreateInput{RenoteID: &target}, true},
-		{"with text", note.CreateInput{RenoteID: &target, Text: ptrString("hi")}, false},
-		{"with cw", note.CreateInput{RenoteID: &target, CW: ptrString("warn")}, false},
-		{"with file", note.CreateInput{RenoteID: &target, FileIDs: []string{"f1"}}, false},
-		{"with poll", note.CreateInput{RenoteID: &target, Poll: &note.PollInput{Choices: choices}}, false},
+		{"pure renote by other user", "author", &model.User{ID: "u1"}, nil, 1},
+		// upstream に pure renote 限定の条件は無い。
+		{"quote renote by other user", "author", &model.User{ID: "u1"}, &text, 1},
+		// `data.renote.userId !== user.id`
+		{"self renote", "u1", &model.User{ID: "u1"}, nil, 0},
+		{"self quote", "u1", &model.User{ID: "u1"}, &text, 0},
+		// `!user.isBot`
+		{"renote by bot", "author", &model.User{ID: "bot1", IsBot: true}, nil, 0},
+		{"quote by bot", "author", &model.User{ID: "bot1", IsBot: true}, &text, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, note.IsPureRenoteForTest(tc.in))
+			svc, noteRepo, _ := newCreateService(t)
+			noteRepo.Notes["target"] = &model.Note{
+				ID: "target", UserID: tc.targetUser, Visibility: model.NoteVisibilityPublic,
+			}
+			renoteID := "target"
+			_, err := svc.Create(note.CreateInput{User: tc.renoter, Text: tc.text, RenoteID: &renoteID})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, noteRepo.Notes["target"].RenoteCount)
 		})
 	}
 }

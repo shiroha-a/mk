@@ -958,7 +958,16 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 		if err := p.noteRepo.Delete(n); err != nil {
 			return err
 		}
-		_ = p.noteRepo.IncrementCount(target.ID, "renoteCount", -1)
+		// handleAnnounce の increment と同条件でのみ減算する。条件がずれると
+		// 加算しなかった boost の undo で count が負に振れる (#2283)。
+		//
+		// なお upstream は renoteCount を減算しない (incRenoteCount しか無く、
+		// note 削除時も据え置き) ため、これは mk-go の意図的な divergence。
+		// unrenote 後もカウントが残り続ける方が不自然なので維持する
+		// (docs/divergence.md 参照)。
+		if target.UserID != announcer.ID && !announcer.IsBot {
+			_ = p.noteRepo.IncrementCount(target.ID, "renoteCount", -1)
+		}
 		return nil
 	}
 	return nil
@@ -1519,7 +1528,13 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	if err := p.noteRepo.Create(renote); err != nil {
 		return err
 	}
-	_ = p.noteRepo.IncrementCount(target.ID, "renoteCount", 1)
+	// upstream NoteCreateService の incRenoteCount 条件
+	// (`data.renote.userId !== user.id && !user.isBot`) を inbound Announce
+	// にも適用する。自己 boost と bot の boost は加算しない (#2283)。
+	// Undo(Announce) 側の減算も同条件にして対称性を保つこと。
+	if target.UserID != announcer.ID && !announcer.IsBot {
+		_ = p.noteRepo.IncrementCount(target.ID, "renoteCount", 1)
+	}
 	hydrated := hydrateNoteForFanout(p.noteRepo, renote)
 	// hook はベストエフォートで safeGoFedHook 経由で非同期発火する (#1158)。
 	// handleCreate (#569) と同じく Redis LPUSH / publish 待ちで inbox worker

@@ -293,6 +293,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `federation/stats` の moderationNote | moderator には見せる | 公開 endpoint なので常に隠す |
 | moderator inactive 判定 | 空集合で登録を無効化しうる | lastActiveDate 保持者 0 人なら何もしない |
 | SSRF の IPv4-mapped IPv6 | `::ffff:0:0/96` を一律遮断 | 埋め込み v4 を IPv4 レンジで評価し private 埋め込みのみ遮断 (over-block より精密)。NAT64 / RFC6145 は別途遮断 |
+| `renoteCount` の減算 | 減算しない (`incRenoteCount` しか無く、renote 削除時も据え置き) | Undo(Announce) で減算する。unrenote 後もカウントが残り続ける方が不自然なため (増分条件は upstream と一致させてあるので対称、#2283) |
 | reversi surrender | pending game も終局させられる | NOT_STARTED で弾く (勝ち逃げ防止) |
 | webhook の note embed gate | note/reply/renote で skipHide | 全イベントで gate、viewer/repo nil は fail-closed |
 | streaming / 通知の未知 visibility | — | fail-closed (誤配信しない) |
