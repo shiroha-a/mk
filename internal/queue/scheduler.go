@@ -100,6 +100,18 @@ func (s *Scheduler) RegisterCleanJob() error {
 	)
 }
 
+// RegisterChunkedUploadGCJob registers the chunked upload session GC cron
+// (#2313) every 15 minutes. 期限切れセッションの multipart upload を abort して
+// 行を消す。頻度を上げているのは、オブジェクトストレージが未完了の
+// マルチパートアップロードにも課金するため (詳細は TaskTypeChunkedUploadGC)。
+func (s *Scheduler) RegisterChunkedUploadGCJob() error {
+	return s.inner.Register("*/15 * * * *", TaskTypeChunkedUploadGC, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(15*time.Minute),
+	)
+}
+
 // RegisterCleanRemoteNotesJob registers the daily remote-note cleanup cron
 // (#1563) at 04:00 UTC, mirroring upstream `cleanRemoteNotes`. 旧実装は
 // router.go の 6h time.Ticker だったが、TS の systemQueue cron に揃える。

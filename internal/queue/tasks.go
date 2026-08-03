@@ -61,6 +61,14 @@ const TaskTypeCheckExpiredMutings = "maintenance:checkExpiredMutings"
 // lastUsedAt refresh が無い mk-go では誤作動するため別 issue)。
 const TaskTypeClean = "maintenance:clean"
 
+// TaskTypeChunkedUploadGC is the task type for reclaiming expired chunked
+// upload sessions (#2313). mk-go 独自で upstream に対応する cron は無い。
+//
+// 日次の `clean` に相乗りさせず専用 cron (*/15) にしているのは、オブジェクト
+// ストレージが**未完了のマルチパートアップロードにも課金する**ため。既定 TTL
+// 60 分に対して日次 GC だと最大 24 時間ぶんの課金ゴミが残る。
+const TaskTypeChunkedUploadGC = "maintenance:chunkedUploadGc"
+
 // TaskTypeCheckModeratorsActivity is the task type for the hourly moderator
 // activity check. Mirrors upstream `checkModeratorsActivity` (cron `30 * * * *`)。
 // モデレーター全員が 7 日非アクティブだと登録を招待制に自動切替し、残 2 日では
