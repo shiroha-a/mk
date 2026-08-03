@@ -1646,3 +1646,82 @@ func TestGetUserPolicies_MaxFileSizeServerCap(t *testing.T) {
 	svc.SetServerMaxFileSizeMb(10)
 	assert.Equal(t, 10, svc.GetUserPolicies("user2")["maxFileSizeMb"], "cap 10 < default 30 → base-only でも 10 に cap (#2069)")
 }
+
+// #2313: 分割アップロードの policy はインスタンス設定 (meta) で cap される。
+// これが無いと admin が role に大きい値を入れるだけで、未完了マルチパート
+// アップロードでオブジェクトストレージを埋められる。
+func TestGetUserPolicies_ChunkedUploadServerCap(t *testing.T) {
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{
+		ID:                               "x",
+		ChunkedUploadMaxSessionsPerUser:  2,
+		ChunkedUploadMaxPendingMbPerUser: 64,
+	}
+
+	roleRepo.Roles["r1"] = &model.Role{
+		ID: "r1", Name: "Big",
+		Policies: datatypes.JSON([]byte(`{
+			"chunkedUploadMaxConcurrentSessions": {"useDefault": false, "priority": 0, "value": 100},
+			"chunkedUploadMaxPendingMb": {"useDefault": false, "priority": 0, "value": 100000}
+		}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+
+	p := svc.GetUserPolicies("user1")
+	assert.Equal(t, 2, p[role.PolicyChunkedUploadMaxConcurrentSessions], "role 値はインスタンス設定に丸められる")
+	assert.Equal(t, 64, p[role.PolicyChunkedUploadMaxPendingMb])
+
+	// role 無し (base-only) でも cap が効く。
+	base := svc.GetUserPolicies("user2")
+	assert.Equal(t, 2, base[role.PolicyChunkedUploadMaxConcurrentSessions])
+	assert.Equal(t, 64, base[role.PolicyChunkedUploadMaxPendingMb])
+}
+
+// cap が既定値より大きい場合は既定値のまま。cap は上限であって強制値ではない。
+func TestGetUserPolicies_ChunkedUploadCapAboveDefaultKeepsDefault(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{
+		ID:                               "x",
+		ChunkedUploadMaxSessionsPerUser:  99,
+		ChunkedUploadMaxPendingMbPerUser: 99999,
+	}
+	p := svc.GetUserPolicies("user1")
+	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions], "default 4 は cap 99 未満なので維持")
+	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
+}
+
+// meta が引けない / 値が 0 の構成では cap しない。ここで fail-closed に倒すと
+// transient DB error で全ユーザーの分割アップロードが止まる。
+func TestGetUserPolicies_ChunkedUploadCapDisabled(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+
+	// meta 取得失敗 (Meta == nil → ErrNotFound)。
+	p := svc.GetUserPolicies("user1")
+	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions])
+	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
+
+	// 0 は「cap 無効」の意味 (capServerMaxFileSize と同じ規約)。
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	p = svc.GetUserPolicies("user1")
+	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions])
+	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
+}
+
+// bool policy は OR 集約される。片方の role が許可していれば使える。
+func TestGetUserPolicies_CanUseChunkedUploadAggregation(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["deny"] = &model.Role{
+		ID: "deny", Name: "Deny",
+		Policies: datatypes.JSON([]byte(`{"canUseChunkedUpload": {"useDefault": false, "priority": 0, "value": false}}`)),
+	}
+	assignRepo.Assignments["user1:deny"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "deny"}
+	assert.Equal(t, false, svc.GetUserPolicies("user1")[role.PolicyCanUseChunkedUpload])
+
+	roleRepo.Roles["allow"] = &model.Role{
+		ID: "allow", Name: "Allow",
+		Policies: datatypes.JSON([]byte(`{"canUseChunkedUpload": {"useDefault": false, "priority": 0, "value": true}}`)),
+	}
+	assignRepo.Assignments["user1:allow"] = &model.RoleAssignment{ID: "a2", UserID: "user1", RoleID: "allow"}
+	svc.InvalidateAllRoleCaches()
+	assert.Equal(t, true, svc.GetUserPolicies("user1")[role.PolicyCanUseChunkedUpload])
+}

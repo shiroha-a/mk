@@ -59,6 +59,15 @@ const (
 	// i/update gate と共に enforcement 追加。
 	PolicyAlwaysMarkNsfw = "alwaysMarkNsfw"
 
+	// 以下は分割アップロード (#2313) の gate。mk-go 独自 policy で upstream
+	// Misskey には対応するものが無い。enforcement は core/drive の chunked
+	// upload service 側。セッションは「開いたまま放置」で S3 の未完了
+	// マルチパートアップロードを溜められるので、可否だけでなく同時数と
+	// 未完了バイト数にも上限を置く。
+	PolicyCanUseChunkedUpload                = "canUseChunkedUpload"
+	PolicyChunkedUploadMaxConcurrentSessions = "chunkedUploadMaxConcurrentSessions"
+	PolicyChunkedUploadMaxPendingMb          = "chunkedUploadMaxPendingMb"
+
 	// 以下は #1025 で admin 系 endpoint の gate に使う policy key。upstream
 	// Misskey TS は ApiCallService.ts で requiredRolePolicy のみで gate し
 	// (requireModerator/Admin flag は admin/emoji や avatar-decorations に
@@ -576,6 +585,50 @@ func (s *Service) capServerMaxFileSize(policies map[string]any) map[string]any {
 	return policies
 }
 
+// capChunkedUpload caps the chunked upload policies (#2313) at the instance
+// settings held in `meta`, in the same shape as capServerMaxFileSize. Without
+// it an admin could grant a role enough concurrent sessions / pending bytes to
+// fill object storage with incomplete multipart uploads.
+//
+// meta 由来なので startup 時の field ではなく都度 Fetch する (metaRepo は
+// cached 実装が配線される)。Fetch 失敗時は cap せず素通しにする — ここで
+// fail-closed に倒すと transient DB error で全 user の分割アップロードが
+// 止まるが、cap 漏れの影響は「admin が設定した role 値がそのまま効く」に
+// とどまるため。
+func (s *Service) capChunkedUpload(policies map[string]any) map[string]any {
+	if policies == nil || s.metaRepo == nil {
+		return policies
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil || meta == nil {
+		return policies
+	}
+	capIntPolicy(policies, PolicyChunkedUploadMaxConcurrentSessions, meta.ChunkedUploadMaxSessionsPerUser)
+	capIntPolicy(policies, PolicyChunkedUploadMaxPendingMb, meta.ChunkedUploadMaxPendingMbPerUser)
+	return policies
+}
+
+// capIntPolicy clamps policies[key] to limit. limit <= 0 disables the cap,
+// matching capServerMaxFileSize's "0 で cap 無効" convention.
+func capIntPolicy(policies map[string]any, key string, limit int) {
+	if limit <= 0 {
+		return
+	}
+	v, ok := policies[key]
+	if !ok {
+		return
+	}
+	if cur, ok := policyIntValue(v); ok && cur > limit {
+		policies[key] = limit
+	}
+}
+
+// applyServerCaps applies every instance-level cap to the aggregated policies.
+// GetUserPolicies の全 return 直前で呼ぶ。
+func (s *Service) applyServerCaps(policies map[string]any) map[string]any {
+	return s.capChunkedUpload(s.capServerMaxFileSize(policies))
+}
+
 // policyIntValue extracts an int from a policy value (int / int64 / float64)。
 func policyIntValue(v any) (int, bool) {
 	switch x := v.(type) {
@@ -596,18 +649,18 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 	s.applyMetaBasePolicies(basePolicies)
 
 	if userID == "" {
-		return s.capServerMaxFileSize(basePolicies)
+		return s.applyServerCaps(basePolicies)
 	}
 	roles, err := s.GetUserRoles(userID)
 	if err != nil {
 		// role 取得失敗時は base policies で fallback (upstream は throw
 		// するが、mk-go は fail-soft で gate を default 値に倒す)。
-		return s.capServerMaxFileSize(basePolicies)
+		return s.applyServerCaps(basePolicies)
 	}
 	if len(roles) == 0 {
 		// upstream #17389: base role only でも server cap を効かせる (旧 upstream は
 		// 素通しだった base-role-only bug を aggregate([base]) で修正)。
-		return s.capServerMaxFileSize(basePolicies)
+		return s.applyServerCaps(basePolicies)
 	}
 
 	// 各 role の policies JSON を Unmarshal して一度だけ展開する。
@@ -629,7 +682,7 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 	for key, baseVal := range basePolicies {
 		out[key] = computePolicy(key, baseVal, roleOverrides)
 	}
-	return s.capServerMaxFileSize(out)
+	return s.applyServerCaps(out)
 }
 
 // applyMetaBasePolicies overlays `meta.policies` (admin UI 設定の base
@@ -1299,5 +1352,11 @@ func buildDefaultPolicies() map[string]any {
 		"noteDraftLimit":         10,
 		"scheduledNoteLimit":     1,
 		"watermarkAvailable":     true,
+		// 分割アップロード (#2313)。mk-go 独自。既定で許可するが、インスタンス
+		// 側の `meta.chunkedUploadEnabled` が false なら機能ごと無効なので、
+		// この既定 true だけでは何も有効にならない。
+		PolicyCanUseChunkedUpload:                true,
+		PolicyChunkedUploadMaxConcurrentSessions: 4,
+		PolicyChunkedUploadMaxPendingMb:          1024,
 	}
 }
