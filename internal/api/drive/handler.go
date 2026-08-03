@@ -267,6 +267,11 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 		case errors.Is(err, coredrive.ErrNoFreeSpace):
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_FREE_SPACE", "No free space.", "d08dbc37-a6a9-463a-8c47-96c32ab5f064"))
 		}
+		// ここに来るのはストレージ書き込み失敗などの想定外エラー。ログに残さないと
+		// クライアントには汎用 INTERNAL_ERROR しか出ないため、オブジェクトストレージ
+		// の設定ミス (エンドポイント不正・認証失敗) を運用側から追跡できない。
+		slog.ErrorContext(c.Request().Context(), "drive: upload failed",
+			"userId", userIDForLog(user), "name", in.Name, "size", len(body), "err", err)
 		return apierr.JSONInternalError(c)
 	}
 	// upstream `drive/files/create` は `pack(file, { self: true })` の
@@ -1162,4 +1167,12 @@ func requestHeadersForDrive(c echo.Context) datatypes.JSON {
 		return nil
 	}
 	return datatypes.JSON(raw)
+}
+
+// userIDForLog returns a loggable user id, tolerating a nil user (system paths).
+func userIDForLog(u *model.User) string {
+	if u == nil {
+		return ""
+	}
+	return u.ID
 }
