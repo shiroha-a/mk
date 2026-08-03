@@ -229,6 +229,31 @@ upstream mkgo {
 
 upstream以外の設定はTCP構成と同じ。
 
+## オブジェクトストレージ
+
+**コントロールパネル → オブジェクトストレージ**で設定する。`meta` テーブルに保存されるため設定ファイルの編集も再起動も不要で、保存した時点から次のアップロードに反映される。
+
+`objectStorageEndpoint` は**ホスト名だけ**を入れる。`https://` などのスキームやバケット名のパスを含めると、mk-go が `https://` を前置してエンドポイント URL を組むため不正な URL になる (本家 Misskey の `S3Service.getS3Client` も同じ組み立て方をする)。
+
+| 項目 | 例 |
+|---|---|
+| エンドポイント | `s3.us-west-000.backblazeb2.com` / `<accountid>.r2.cloudflarestorage.com` |
+| バケット名 | `misskey-drive` |
+| Base URL | `https://files.example.com` (公開 URL のベース。スキーム必須) |
+| プレフィックス | `files` |
+
+保存されるファイルの公開 URL は `<Base URL>/<プレフィックス>/<アクセスキー>` になる。Base URL 側にプレフィックスを重ねると二重になるので注意。
+
+### 有効化前に保存したファイル
+
+オブジェクトストレージを有効にする前にアップロードされたファイルは、`drive_file.storedInternal = true` としてローカル FS (`./drive-files`) に残る。**これらは移動されない。** mk-go は有効化後もこの列を見て配信元を切り替えるので、既存ファイルはそのまま表示できる。
+
+したがって、有効化したあともローカルの `drive-files` を消してはいけない。まとめてオブジェクトストレージへ移す機能は未提供。
+
+### 無効化に戻す場合
+
+無効化すると、有効化中に保存されたファイル (`storedInternal = false`) はオブジェクトストレージ側にあるままなので、バケットを消すと表示できなくなる。
+
 ## TS版からの移行
 
 既存のMisskey (TypeScript版)からの移行手順は[TS版からの移行ガイド](migration-from-ts.md)を参照。
