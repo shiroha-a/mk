@@ -189,6 +189,42 @@ TypeORM の decorator から正規形を再現できないため **実 DB から
 同内容・別名の index があれば検出されるので、upstream 名に揃えるか
 `known_duplicate_indexes.json` に追加して `000068` の扱いを見直す (#2246)。
 
+### submodule bump 後に必須: TS baseline で Playwright を回す
+
+```bash
+gh workflow run playwright.yml --ref <branch>   # TS backend も含めて実行される
+# または手元で
+make playwright-ts-up && make playwright-ts-test && make playwright-ts-down
+```
+
+Playwright spec は普段 mk-go backend に対してしか走っていない (PR トリガーでも
+mk-go のみ)。**TS backend に対して回すのは upstream 追従のタイミングだけ**という
+運用にしている。
+
+理由は、spec が「mk-go の挙動を正解として」書かれてしまう事故を、追従の節目で
+検出するため。実際 #2276 で 3 ヶ月ぶりに TS backend で回したところ、spec が
+mk-go 側の挙動に引きずられていた箇所が 19 件見つかり、そのうち 5 件は mk-go の
+実バグだった (#2283 renoteCount の加算条件 / #2284 必須パラメータの未検証 /
+#2285 `user.updatedAt` のセマンティクス / #2286 ユーザー検索の実装乖離 /
+#2287 余剰フィールド)。
+
+一方で常時 (nightly や PR で) 回す価値は薄い。同一 CI 環境・同一 spec で
+所要時間を比較すると mk-go と TS に実用上の差は無く (TS/mk-go の中央値 0.94)、
+得られるのは所要時間ではなく **spec の前提が upstream とずれていないか**という
+一点だけだから。upstream が変わらない限りその答えも変わらない。
+
+失敗した spec を見るときは以下に注意する。
+
+- mk-go には `docs/divergence.md` に記録した**意図的な差分**がある
+  (例: `NO_SUCH_*` を upstream は 400、mk-go は意味的に正確な 404 で返す)。
+  spec 側は `tests/playwright/fixtures/backend.ts` の `NOT_FOUND_STATUS` の
+  ように backend ごとの期待値で吸収する。ただし**この逃げ道を足すたびに、その
+  spec は parity を証明しなくなる**ので、安易に増やさない
+- upstream 固有の前提でしか成立しない挙動もある (例: `state:'alive'` は
+  `updatedAt > now-5d` で絞るが、upstream が local user の `updatedAt` を
+  更新するのは note 投稿時だけなので、signup 直後の user は一覧に出ない)。
+  この種は spec の前提条件を直す
+
 ### mk-go 側の migration を書くときの必須ルール
 
 mk-go の migration は Misskey TS が作った既存 DB にも流れる。以下は

@@ -17,9 +17,15 @@ name: Playwright
 # 0 件」を招いた実装そのもの。job は正しく失敗させ、required に入れないことで
 # 非ブロッキングにする。
 #
-# TS backend は 90 分かかるうえ #2289 の 77 spec が未解消なので、PR では回さず
-# workflow_dispatch 専用にしている (plan job で matrix を切り替え)。#2289 の
-# 完了時に PR へ合流させる。
+# TS backend は workflow_dispatch 専用 (plan job で matrix を切り替え)。これは
+# 暫定措置ではなく、**upstream 追従のタイミングだけ回す**という運用上の決定
+# (docs/upstream-catch-up.md「submodule bump 後に必須: TS baseline で
+# Playwright を回す」)。
+#
+# TS baseline の価値は「spec が mk-go の挙動を正解として書かれていないか」を
+# 検出する一点にあり、upstream が変わらない限り答えも変わらないので、nightly や
+# PR で常時回す意味は薄い。実測でも同一 CI 環境・同一 spec の所要時間は
+# mk-go と TS で差が無く (TS/mk-go の中央値 0.94)、速度面の情報も得られない。
 #
 # 失敗時 (timeout 含む) は playwright test-results + docker compose logs を
 # artifact 化する。
@@ -89,8 +95,9 @@ jobs:
           # hit (0s) にする方が確実。version は
           # docker-compose.playwright.ts.yml と sync させること。
           #
-          # continue_on_error: stack は #2288 で起動するようになったが spec が
-          # まだ 77 件落ちている (#2289)。解消するまでは false にしない。
+          # continue_on_error: TS backend は upstream 追従時に手動で回して
+          # 差分を洗い出すための道具なので、赤でも他 job を巻き込まない。
+          # 失敗内容は artifact (trace / screenshot) から読む。
           ts='{
             "backend": "ts",
             "up_target": "playwright-ts-up",
@@ -101,8 +108,8 @@ jobs:
             "timeout_minutes": 90,
             "continue_on_error": true
           }'
-          # TS backend は 90 分かかるので PR では回さない (#2291)。#2289 で
-          # 77 spec が green になった時点でこの分岐を外し、常に両方回す。
+          # TS backend は upstream 追従のタイミングだけ回す運用なので、
+          # pull_request では matrix から落とす (#2291 / #2289)。
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             matrix=$(jq -c -n --argjson a "$mkgo" '[$a]')
           else
@@ -115,11 +122,14 @@ jobs:
     name: spec (${{ matrix.backend }})
     needs: plan
     runs-on: ubuntu-latest
-    # backend ごとに所要時間が大きく違うので matrix 変数にする。
-    # mk-go は 370 spec を 11 min で完走するが、TS backend は #2288 で初めて
-    # spec が走るようになった結果 45 min で 360/370 までしか進まず timeout
-    # した (Node backend が重く、失敗 spec の retry も所要時間を押し上げる)。
-    # mk-go 側は短いままにしておき、無限ループ的な hang を早く検出する。
+    # backend ごとに枠を変える。mk-go は 370 spec を 11 min で完走するので
+    # 45 min のままにして hang を早く検出する。TS は #2288 で初めて spec が
+    # 走った際 45 min で 360/370 までしか進まず timeout したため 90 min。
+    #
+    # 念のため: この差は backend の速度差ではない。同一 CI 環境で両方が成功した
+    # 同一 spec 263 件を突き合わせると所要時間はほぼ同じ (TS/mk-go の中央値
+    # 0.94)。TS 側が伸びたのは 77 件の失敗が retry され、成功時 1 秒台の spec が
+    # 10-20 秒の timeout 待ちに化けたため。
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
     strategy:
@@ -130,9 +140,10 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
-    # matrix entry の continue_on_error を job に反映する。true の間は
-    # その backend が落ちても workflow 全体は success になる (= 失敗が
-    # 見えなくなる) ので、#2289 完了時に TS 側を false へ戻すこと。
+    # matrix entry の continue_on_error を job に反映する。true だと
+    # その backend が落ちても workflow 全体は success になる。TS は
+    # workflow_dispatch でしか回らず、人が結果を見る前提なので true でよい。
+    # PR で常時回す backend に対しては絶対に true にしないこと。
     continue-on-error: ${{ matrix.continue_on_error }}
 
     steps:
