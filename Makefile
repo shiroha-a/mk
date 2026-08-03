@@ -1,4 +1,5 @@
 .PHONY: help check gates version frontend-check diff-check playwright-check e2e-down-all \
+	update docker-update uds-update \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-down federation-misskey-logs \
@@ -73,6 +74,36 @@ e2e-down-all: ## 検証用スタックを一括撤去 (本番 project mk は対�
 		printf "==> %s\n" "$$f"; \
 		docker compose -f "$$f" down -v --remove-orphans 2>&1 | tail -1 || true; \
 	done
+
+##@ 更新 (運用)
+
+update: ## submodule ごと pull し、frontend 再ビルドの要否を知らせる
+	@before=$$(git -C third_party/misskey rev-parse HEAD 2>/dev/null); \
+	git pull --recurse-submodules; \
+	after=$$(git -C third_party/misskey rev-parse HEAD 2>/dev/null); \
+	if [ "$$before" != "$$after" ]; then \
+		printf "\n\033[33m==> submodule が更新された。frontend の再ビルドが必要\033[0m\n"; \
+		printf "    make docker-update   (Docker Compose 構成)\n"; \
+		printf "    make uds-update      (UDS 本番構成)\n"; \
+	else \
+		printf "\n==> submodule に変更なし。frontend の再ビルドは不要\n"; \
+	fi
+
+# frontend の再ビルドと再起動は必ずセットで行う。mk-go は entry point を
+# 起動時に 1 回だけ解決してキャッシュするため、ビルドだけして再起動しないと
+# HTML が消えた古い scripts/<hash>.js を指したまま 404 になる。
+docker-update: ## pull → frontend ビルド → image 再ビルド → 再起動 (Docker Compose 構成)
+	$(MAKE) update
+	$(MAKE) e2e-frontend-build
+	docker compose build
+	docker compose up -d
+
+uds-update: ## pull → frontend ビルド → image 再ビルド → 再起動 (UDS 本番構成)
+	$(MAKE) update
+	$(MAKE) uds-frontend-build
+	$(MAKE) uds-build
+	$(MAKE) uds-up
+
 
 # Binary output
 BINARY=misskey
