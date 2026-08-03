@@ -56,6 +56,15 @@ make dev
 | `make playwright-check` | Playwright を作り直して実行 (同上) |
 | `make e2e-down-all` | 検証用スタックを一括撤去。**本番 project `mk` は対象外** |
 
+### pull して起動 (ビルド不要)
+
+| ターゲット | 内容 |
+|---|---|
+| `make image-up` / `image-down` / `image-down-v` / `image-logs` | フロントエンド同梱の `bundled` イメージを pull して起動する (`docker-compose.image.yml`) |
+| `make image-build` | `bundled` イメージを手元でビルドする (publish 前の確認用) |
+
+既存の `docker-compose.yml` / `make docker-*` (ソースからビルド) はそのまま使える。置き換えではなく並立する選択肢。
+
 ### 更新 (運用)
 
 | ターゲット | 内容 |

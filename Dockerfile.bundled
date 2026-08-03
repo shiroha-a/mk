@@ -1,0 +1,86 @@
+# フロントエンドアセットを同梱した mk-go イメージ。
+#
+# 既存の `Dockerfile` はホスト側で `pnpm install && pnpm build` 済みであること
+# を前提に submodule からアセットを COPY し、SPA 本体 (約 200MB) は
+# `third_party/misskey/built` の bind-mount で渡す。そのため
+#
+#   - イメージのビルドがホストの状態に依存して再現しない
+#   - bind-mount 先が本番の配信元と同一で、検証目的のビルドで本番を壊せる
+#   - publish したイメージが単体で起動できない
+#
+# という問題がある。こちらは fork が publish するアセット専用イメージから
+# すべてを COPY するので、submodule のホスト状態に一切依存せず、pull した
+# だけで起動できる。
+#
+# 既存の `Dockerfile` / `docker-compose.yml` / `make docker-*` は変更していない。
+# 従来のビルド&起動フローはそのまま使える。
+#
+# 使い方:
+#   docker build -f Dockerfile.bundled -t mk-go:bundled .
+#   docker compose -f docker-compose.image.yml up -d   (publish 済みイメージを pull)
+
+ARG MISSKEY_ASSETS_IMAGE=ghcr.io/shiroha-a/misskey-ts-assets:2026.7.0-mk.5
+
+# Stage 1: Go binary
+#
+# 既存 Dockerfile の builder stage と同じ手順。ただし submodule のアセットを
+# 参照しないので、`pnpm install` 済みかどうかの事前チェックは不要。
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# `-tags nodynamic` は必須。CGO_ENABLED=0 だけでは gen2brain/webp の purego
+# (dlopen) 経路が残って musl に動的リンクされ、distroless で
+# `exec /app/misskey: no such file or directory` になる (#619)。
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey && \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate
+
+# Stage 2: フロントエンドアセット
+#
+# fork (shiroha-a/misskey-ts) が `X.Y.Z-mk.N` タグごとに publish する
+# `FROM scratch` のデータイメージ。backend を含まないので 228MB
+# (Misskey フルイメージは 1.66GB)。
+#
+# タグは submodule のタグと 1:1 で対応させること。ずれるとフロントエンドと
+# backend の実装がちぐはぐになる。`make version` で両方を確認できる。
+FROM ${MISSKEY_ASSETS_IMAGE} AS assets
+
+# Stage 3: Runtime
+FROM gcr.io/distroless/static-debian13
+
+WORKDIR /app
+
+COPY --from=builder /app/built/misskey /app/misskey
+COPY --from=builder /app/built/migrate /app/migrate
+COPY --from=builder /app/migration /app/migration
+COPY .config/docker.yml.example /app/.config/default.yml
+
+# アセットはすべて assets イメージ由来。submodule には触れない。
+COPY --from=assets /backend-assets  /app/static-assets
+COPY --from=assets /repo-assets     /app/repo-assets
+COPY --from=assets /emoji-assets/twemoji      /app/twemoji
+COPY --from=assets /emoji-assets/fluent-emoji /app/fluent-emoji
+COPY --from=assets /built           /app/frontend
+COPY --from=assets /frontend-assets /app/client-assets
+
+ENV MISSKEY_STATIC_DIR=/app/static-assets \
+    MISSKEY_REPO_ASSETS_DIR=/app/repo-assets \
+    MISSKEY_TWEMOJI_DIR=/app/twemoji \
+    MISSKEY_FLUENT_EMOJI_DIR=/app/fluent-emoji \
+    MISSKEY_FRONTEND_DIR=/app/frontend/_frontend_vite_ \
+    MISSKEY_FRONTEND_DIST_DIR=/app/frontend/_frontend_dist_ \
+    MISSKEY_CLIENT_ASSETS_DIR=/app/client-assets
+
+EXPOSE 3000
+
+# 既存 Dockerfile と同じく Misskey TS 互換の UID/GID で起動する。
+# ドライブの保存先は 991:991 が書き込める所有権にすること (#621)。
+USER 991:991
+
+ENTRYPOINT ["/app/misskey"]
+CMD ["-config", ".config/default.yml"]

@@ -1,5 +1,6 @@
 .PHONY: help check gates version frontend-check diff-check playwright-check e2e-down-all \
 	update docker-update uds-update \
+	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-down federation-misskey-logs \
@@ -61,6 +62,7 @@ playwright-check: ## Playwright を作り直して実行 (クリーン DB 前提
 # 同名で動いている本番スタックを巻き込む。ここでは name: を明示している
 # 検証用 compose ファイルだけを列挙する。
 E2E_COMPOSE_FILES = \
+	docker-compose.image.yml \
 	docker-compose.diff.yml \
 	docker-compose.playwright.yml \
 	docker-compose.dropin.yml \
@@ -181,6 +183,29 @@ docker-up: ## docker compose up -d
 
 docker-down: ## docker compose down
 	docker compose down
+
+##@ pull して起動 (ビルド不要)
+
+# publish 済みの bundled image を pull して動かす。フロントエンドのビルドも
+# image のビルドも不要。既存の docker-compose.yml / make docker-* はそのまま
+# 使えるので、こちらは置き換えではなく並立する選択肢。
+IMAGE_COMPOSE=docker-compose.image.yml
+
+image-up: ## bundled image を pull して起動
+	docker compose -f $(IMAGE_COMPOSE) up -d
+
+image-down: ## 上記スタックを撤去
+	docker compose -f $(IMAGE_COMPOSE) down
+
+image-down-v: ## 上記スタックを volume ごと撤去
+	docker compose -f $(IMAGE_COMPOSE) down -v
+
+image-logs: ## 上記スタックのログを表示
+	docker compose -f $(IMAGE_COMPOSE) logs -f
+
+image-build: ## bundled image を手元でビルドする (publish 前の確認用)
+	docker build -f Dockerfile.bundled -t ghcr.io/shiroha-a/mk:bundled .
+
 
 # Federation tests ― 本家 Misskey と実際に立ち上げて連合動作を検証する。
 # 各ターゲット (misskey / mastodon / pleroma / ...) ごとに docker-compose.federation.<target>.yml を用意する。

@@ -38,7 +38,43 @@ docker compose up -d
 
 > **注意**: コンテナは **UID/GID 991** (Misskey TS と同じ) で起動するため、ホスト側の `./files` ディレクトリは UID 991 が書き込めるパーミッションでなければならない。Misskey TS から移行する場合は既に 991 所有なのでそのままで OK。**今まで mk-go の旧 root 構成で運用していて初めて 991 化に追従する場合は、一度だけ `sudo chown -R 991:991 ./files` で所有権を揃える必要がある**。
 
+## Docker Compose (bundled image / ビルド不要)
+
+フロントエンドアセットを同梱した `bundled` イメージを pull するだけで起動できる。**フロントエンドのビルドもイメージのビルドも要らない。**
+
+```bash
+git clone https://github.com/shiroha-a/mk.git
+cd mk
+
+mkdir -p files && sudo chown -R 991:991 files
+
+make image-up          # 起動 (docker-compose.image.yml)
+make image-logs        # ログ
+make image-down        # 停止
+```
+
+`url` を設定する場合は `.config/docker.yml` を用意し、`docker-compose.image.yml` の **`app` と `migrate` 両方**の volumes コメントを外す。マイグレーションは one-shot の `migrate` サービスが自動適用する。
+
+手元の変更を反映したい場合は先にイメージを作る。
+
+```bash
+make image-build       # ghcr.io/shiroha-a/mk:bundled をローカルにビルド
+```
+
+ソースからビルドする従来の構成 (`docker-compose.yml` / `make docker-*`) はそのまま使える。こちらは置き換えではなく並立する選択肢。
+
 ### prebuilt imageについて
+
+イメージは 2 種類ある。
+
+| イメージ | 内容 | 用途 |
+|---|---|---|
+| `ghcr.io/shiroha-a/mk:bundled` | Goバイナリ + マイグレーション + **フロントエンドアセット同梱** | pull して即起動 |
+| `ghcr.io/shiroha-a/mk:latest` | Goバイナリ + マイグレーションのみ | アセットを別途用意する構成 |
+
+同梱アセットは fork (`shiroha-a/misskey-ts`) が publish する `ghcr.io/shiroha-a/misskey-ts-assets:<tag>` 由来で、**mk-go 独自のフロントエンド変更を含む**。
+
+> **注意**: 下記のように upstream の `misskey/misskey` イメージからアセットをコピーする方法もあるが、その場合 **mk-go 独自のフロントエンド変更が失われる** (チャット・リバーシの連合が UI 上で「非対応」表示に戻る等)。drop-in 互換の検証目的でなければ `bundled` イメージを使うこと。
 
 `ghcr.io/shiroha-a/mk:latest`等のprebuilt imageにはGoバイナリとマイグレーションSQLのみが含まれ、フロントエンドアセットは同梱されていない。prebuilt imageを使用する場合は以下の環境変数でアセットディレクトリを指定する必要がある:
 

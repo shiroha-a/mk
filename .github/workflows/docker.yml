@@ -100,3 +100,63 @@ jobs:
           # GHA の cache backend を使って layer を再利用し、build 時間を短縮する。
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # フロントエンドアセットを同梱した bundled image。pull しただけで起動できる
+  # (docker-compose.image.yml / make image-up が使う)。
+  #
+  # 既存の build-and-push job とは独立している。あちらは従来どおり
+  # `Dockerfile` からアセット非同梱の image を作るので、既存のビルド&起動
+  # フローには影響しない。
+  #
+  # アセットは fork が publish する専用 image から COPY するため、この job は
+  # submodule も pnpm install も必要としない (= 既存 job のような事前準備が
+  # 一切要らない)。
+  build-and-push-bundled:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # submodule は不要。Dockerfile.bundled は third_party/misskey を参照せず、
+        # アセットを assets image から取る。
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # 既存 image と同じリポジトリに `-bundled` suffix 付きで publish する。
+          tags: |
+            type=semver,pattern={{version}},suffix=-bundled
+            type=semver,pattern={{major}}.{{minor}},suffix=-bundled
+            type=sha,prefix=sha-,suffix=-bundled,format=short
+            type=raw,value=bundled,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.description=Misskey rewritten in Go (frontend assets bundled)
+            org.opencontainers.image.source=${{ github.event.repository.html_url }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.bundled
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -14,7 +14,25 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 - Playwright e2e (370 spec) を PR ごとに実行。upstream 追従時は Misskey TS backend に対しても回して drop-in 互換を検証
 - `RemoteStatsFetcher` でリモートユーザーの notesCount / followersCount / followingCount を origin から取得 (mk-go 独自拡張)
 
-## クイックスタート (Docker Compose)
+## クイックスタート
+
+### 最短: pull して起動 (ビルド不要)
+
+フロントエンドアセットを同梱した `bundled` イメージを使う。ビルドが一切要らない。
+
+```bash
+git clone https://github.com/shiroha-a/mk.git
+cd mk
+
+mkdir -p files && sudo chown -R 991:991 files
+make image-up
+
+# ブラウザで http://localhost:3000 を開く
+```
+
+設定を変える場合は `.config/docker.yml` を用意し、`docker-compose.image.yml` の `app` と `migrate` 両方の volumes コメントを外す。詳細は[デプロイ](docs/deployment.md)を参照。
+
+### ソースからビルドする (Docker Compose)
 
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git
