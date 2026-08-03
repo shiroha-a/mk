@@ -424,13 +424,17 @@ func (s *Server) setupRoutes() {
 	// storedInternal=true な drive_file を `/files/:accessKey` で提供する
 	// fallback として常に保持する (#1414)。
 	localDriveStorage := coredrive.NewLocalStorage("./drive-files", s.config.DriveURL)
-	var driveStorage coredrive.Storage
-	if serverMeta, err := metaRepo.Fetch(); err == nil {
-		driveStorage = coredrive.NewStorageFromMeta(serverMeta, "./drive-files", s.config.DriveURL)
-	} else {
-		driveStorage = localDriveStorage
-	}
+	// backend は meta から都度解決する (#2315)。起動時に固定していた頃は、
+	// コントロールパネルでオブジェクトストレージを有効にしても再起動するまで
+	// ローカルに書き続けていた。upstream Misskey は metaUpdated で meta を
+	// in-place 更新し、アップロードのたびに S3 client を組み立てるので即反映
+	// される。指紋が変わらない限り backend は使い回すので、都度解決でも
+	// S3 client を作り直すコストはかからない。
+	driveStorage := coredrive.NewMetaStorage(metaRepo.Fetch, "./drive-files", s.config.DriveURL)
 	driveService := coredrive.NewService(driveFileRepo, driveFolderRepo, driveStorage, idGen)
+	// storedInternal=true な行 (object storage 有効化より前 / TS 時代に保存された
+	// ファイル) はローカル FS にあるので、削除経路がそちらに届くようにする。
+	driveService.SetLocalStorage(localDriveStorage)
 	// drive/files/show は moderator なら他人 / リモートユーザー所有の file
 	// も返せるようにする (upstream Misskey の roleService.isModerator 経路
 	// と一致)。リモート添付メディアの詳細閲覧に必要。
@@ -524,6 +528,9 @@ func (s *Server) setupRoutes() {
 		EmojiImageFetcher: coretransfer.NewHTTPEmojiImageFetcher(s.outboundClient(60*time.Second), s.config.UserAgent, 0),
 	})
 	driveReader := coretransfer.NewRepoBackedDriveReader(driveFileRepo, driveStorage)
+	// storedInternal=true な行 (object storage 有効化より前に保存されたファイル)
+	// はローカル FS にあるので、import がそちらも読めるようにする (#2315)。
+	driveReader.SetLocalStorage(localDriveStorage)
 	importer := coretransfer.NewImporter(coretransfer.ImporterDeps{
 		UserRepo:     userRepo,
 		UserListRepo: userListRepo,
@@ -1677,13 +1684,24 @@ func (s *Server) setupRoutes() {
 	if m, err := metaRepo.Fetch(); err == nil {
 		proxyRemoteFiles = m.ProxyRemoteFiles
 	}
-	entity.SetMediaURLContext(entity.NewMediaURLContext(
+	mediaURLCtx := entity.NewMediaURLContext(
 		s.config.URL,
 		s.config.MediaProxy,
 		s.config.MediaProxySecret,
 		s.config.ExternalMediaProxyEnabled,
 		proxyRemoteFiles,
-	))
+	)
+	// オブジェクトストレージの公開ドメインは instance ドメインと別なので、
+	// これを教えないと自分が保存したファイルまで remote 判定されて media proxy
+	// を経由してしまう (#2315)。設定は admin が変更しうるので都度引く。
+	mediaURLCtx.SetOwnMediaBaseURLResolver(func() string {
+		m, err := metaRepo.Fetch()
+		if err != nil {
+			return ""
+		}
+		return coredrive.PublicBaseURL(m)
+	})
+	entity.SetMediaURLContext(mediaURLCtx)
 	// PackUserDetailed の isSilenced を role policy 由来に揃える (旧実装は
 	// /api/i 以外で常に false 固定だった)。roleService.IsSilenced が
 	// entity.SilencedLookup を構造的に満たすので直接 wire する。GetUserRoles は
@@ -1889,14 +1907,11 @@ func (s *Server) setupRoutes() {
 	// な行は driveStorage が S3 でも localDriveStorage に倒して提供する (#1414)。
 	//
 	// driveStorage がローカル (= object storage 非活性) の場合は primary と
-	// local が同じローカル FS を指すため storedInternal 判定が無意味。この
-	// 経路では lookup を nil 配線し、ホットパスである `/files/:accessKey` の
-	// 毎リクエスト DB クエリを省く (filesHandler の nil-lookup 分岐に倒す)。
-	var filesLookup filesDriveLookup
-	if _, isLocal := driveStorage.(*coredrive.LocalStorage); !isLocal {
-		filesLookup = driveFileRepo
-	}
-	s.echo.GET("/files/:accessKey", filesHandler(filesLookup, driveStorage, localDriveStorage))
+	// local が同じローカル FS を指すため storedInternal 判定が無意味で、
+	// ホットパスである `/files/:accessKey` の毎リクエスト DB クエリを省ける。
+	// backend は動的に切り替わる (#2315) ので、この判定は配線時ではなく
+	// filesHandler がリクエストごとに行う。
+	s.echo.GET("/files/:accessKey", filesHandler(driveFileRepo, driveStorage, localDriveStorage))
 
 	// Media proxy endpoint
 	proxyAllowlist := coremediaproxy.NewDBAllowlistChecker(s.db)
@@ -1909,6 +1924,9 @@ func (s *Server) setupRoutes() {
 	// Local drive file の thumbnail / webpublic 変種を proxy 側で再 encode
 	// せず直接返せるようにする (#637 M1)。
 	proxyService.SetDriveLookup(driveFileLookupAdapter{repo: driveFileRepo})
+	// object storage 有効化より前に保存された storedInternal=true の実体は
+	// ローカル FS にある。primary が空振りしたときの fallback に使う (#2315)。
+	proxyService.SetLocalStorage(localDriveStorage)
 	// 動画 still frame の生成は外部 service に委譲する (#637 M2 redesign)。
 	// config.videoThumbnailGenerator が空のときは disabled (proxy は dummy
 	// PNG を返す)。`unix:///path/socket` 形式で UDS deployment にも対応。
@@ -2539,6 +2557,9 @@ func (s *Server) setupRoutes() {
 	// bulk drive cleanup (clean-remote-files / delete-all-files-of-a-user) で
 	// object storage の物理オブジェクトも消すため storage backend を渡す。
 	adminHandler.SetStorageDeleter(driveStorage)
+	// storedInternal=true な行はローカル FS にあるので、bulk cleanup がそちらも
+	// 消せるようにする (#2315)。
+	adminHandler.SetLocalStorageDeleter(localDriveStorage)
 	adminHandler.SetAdminDB(s.db)
 	adminHandler.SetUserIPRepo(userIPRepo)
 	adminHandler.SetSecurityKeyRepo(userSecurityKeyRepo)

@@ -221,3 +221,73 @@ func TestFilesHandler_NonBrowserSafeIsOctetStreamWithCSP(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Content-Security-Policy"), "default-src 'none'")
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 }
+
+// #2315: primary が現時点でローカルなら local と同じ FS を指すので
+// storedInternal 判定は無意味であり、ホットパスの DB クエリを省く。
+// backend は admin 設定で動的に切り替わるので、この判定は配線時に固定できない。
+func TestFilesHandler_SkipsLookupWhilePrimaryIsLocal(t *testing.T) {
+	key := "k"
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, key), []byte("from-local-fs"), 0o644))
+	local := coredrive.NewLocalStorage(dir, "https://example.com/files")
+
+	lookup := &countingFilesLookup{inner: &stubFilesLookup{byKey: map[string]*model.DriveFile{
+		key: {ID: "f1", StoredInternal: true},
+	}}}
+
+	// primary がローカル (object storage 無効) の間は lookup を引かない。
+	c, rec := newFilesTestContext(t, key)
+	require.NoError(t, filesHandler(lookup, local, local)(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "from-local-fs", rec.Body.String())
+	assert.Equal(t, 0, lookup.calls, "primary がローカルなら DB を引かない")
+}
+
+// object storage を有効にしたら、同じ配線のまま lookup が効いて
+// storedInternal=true の既存ファイルがローカルから提供されること。
+func TestFilesHandler_LookupEngagesWhenPrimaryBecomesRemote(t *testing.T) {
+	key := "k"
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, key), []byte("from-local-fs"), 0o644))
+	local := coredrive.NewLocalStorage(dir, "https://example.com/files")
+
+	current := &model.Meta{ID: "x"}
+	primary := coredrive.NewMetaStorage(func() (*model.Meta, error) { return current, nil }, dir, "https://example.com/files")
+	lookup := &countingFilesLookup{inner: &stubFilesLookup{byKey: map[string]*model.DriveFile{
+		key: {ID: "f1", StoredInternal: true},
+	}}}
+	h := filesHandler(lookup, primary, local)
+
+	c, rec := newFilesTestContext(t, key)
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 0, lookup.calls, "無効の間は DB を引かない")
+
+	// 再起動なしで有効化する。
+	current = &model.Meta{
+		ID:                     "x",
+		UseObjectStorage:       true,
+		ObjectStorageBucket:    strPtr("b"),
+		ObjectStorageEndpoint:  strPtr("s3.example.test"),
+		ObjectStorageAccessKey: strPtr("AK"),
+		ObjectStorageSecretKey: strPtr("SK"),
+		ObjectStorageUseSSL:    true,
+	}
+
+	c, rec = newFilesTestContext(t, key)
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "from-local-fs", rec.Body.String(), "storedInternal=true の既存ファイルはローカルから提供される")
+	assert.Equal(t, 1, lookup.calls, "有効化後は DB を引いて local へ振り分ける")
+}
+
+// countingFilesLookup records how many times the handler consulted the DB.
+type countingFilesLookup struct {
+	inner *stubFilesLookup
+	calls int
+}
+
+func (c *countingFilesLookup) FindByAnyAccessKey(key string) (*model.DriveFile, error) {
+	c.calls++
+	return c.inner.FindByAnyAccessKey(key)
+}

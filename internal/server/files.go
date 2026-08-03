@@ -30,9 +30,11 @@ type filesDriveLookup interface {
 // 合わせるため、DB を引いて storedInternal=true なら local を、それ以外
 // (= 行が無い・ false / lookup 自体が unwired) は primary を使う (#1414)。
 //
-// lookup == nil もしくは DB error 時は primary に倒す。これは
-// useObjectStorage=false で local が primary を兼ねている wiring を壊さない
-// ためで、その経路では DB lookup を省ける。
+// lookup == nil もしくは DB error 時は primary に倒す。
+//
+// primary が現時点でローカルなら local と同じ FS を指すので storedInternal 判定は
+// 無意味であり、ホットパスの DB クエリを省く。backend は admin 設定で動的に
+// 切り替わる (#2315) ため、この判定は配線時ではなくリクエストごとに行う。
 //
 // MIME type はファイル内容の先頭から自動判定し、`http.ServeContent` で
 // Range / If-Modified-Since / Content-Length 対応の正しい応答を返す。
@@ -45,7 +47,7 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 	return func(c echo.Context) error {
 		key := c.Param("accessKey")
 		storage := primary
-		if lookup != nil && local != nil {
+		if lookup != nil && local != nil && !coredrive.StorageIsLocal(primary) {
 			if f, err := lookup.FindByAnyAccessKey(key); err == nil && f.StoredInternal {
 				storage = local
 			}
