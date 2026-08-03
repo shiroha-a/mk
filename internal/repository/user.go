@@ -360,6 +360,24 @@ func applyUserSearchOrigin(q *gorm.DB, origin string) *gorm.DB {
 // 除外する quirk があり、brand-new user の discoverability を悪化させる。
 // mk-go では本 quirk を意図的に採用せず、followersCount DESC + id ASC の
 // 単純な sort を維持する (= 新規 user も即 search hit する)。詳細は #878。
+// SearchByUsernameAndHost は upstream の UserSearchService とは**意図的に別実装**。
+//
+// upstream (`buildSearchUserQueries`) は 4 query の UNION で、
+// フォロー済み×アクティブ / フォロー済み×非アクティブ / 未フォロー×アクティブ /
+// 未フォロー×非アクティブ の順に並べる。`activeThreshold` は既定 30 日で
+// `user.updatedAt` を見るが、**`updatedAt IS NULL` を拾うのはフォロー済み分岐
+// だけ**。つまり未フォローかつ未投稿の user はどの query にも一致せず、検索に
+// 一切出てこない (upstream は note 投稿時にしか updatedAt を書かないため、
+// 「まだ投稿していない新規 user」がこれに該当する)。
+//
+// mk-go は usernameLower の前方一致 + followersCount DESC の単純検索にしている。
+// この endpoint はチャット招待・リスト追加・リバーシの対戦相手選択で使う
+// MkUserSelectDialog の実体で、「新規 user をフォローするまで選べない」のは
+// 実用上の不具合に近い。upstream の 4 query 構成は並び順 (フォロー中・アクティブ
+// を優先) が主目的で、NULL 除外はその副作用と読める。
+//
+// 意図的な divergence として docs/divergence.md に記録済み (#2286)。並び順の
+// 優先度付けを入れる場合も、NULL 除外は持ち込まないこと。
 func (r *userRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
 	var users []*model.User
 	q := r.db.

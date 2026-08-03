@@ -1527,3 +1527,33 @@ func TestUserRepository_HardDeleteUser(t *testing.T) {
 	require.NoError(t, repo.HardDeleteUser(""))
 	require.NoError(t, repo.HardDeleteUser("nonexistent_hd"))
 }
+
+// mk-go は upstream の UserSearchService と違い、未フォローかつ未投稿
+// (updatedAt IS NULL) の user も検索に出す。upstream は 4 query の UNION で
+// NULL updatedAt をフォロー済み分岐でしか拾わないため、新規 user は
+// フォローするまで検索に出てこない。この endpoint は MkUserSelectDialog
+// (チャット招待 / リスト追加 / リバーシの対戦相手選択) の実体なので、
+// mk-go は意図的に単純検索を維持している (#2286、docs/divergence.md)。
+//
+// 将来「upstream に揃える」変更でこの挙動が失われないよう固定する。
+func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	u := insertTestUser(t, "srch_new", "srchnewbie")
+	defer cleanupUser(t, u.ID)
+
+	// 未投稿 user = updatedAt が NULL。#2285 以降は signup 直後が既に NULL に
+	// なるが、このテストは検索側の挙動を見るものなのでマージ順に依存しないよう
+	// 明示的に NULL へ落とす。
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = NULL WHERE id = ?`, u.ID).Error)
+
+	got, err := repo.SearchByUsernameAndHost("srchnew", nil, true, 10)
+	require.NoError(t, err)
+
+	found := false
+	for _, x := range got {
+		if x.ID == u.ID {
+			found = true
+		}
+	}
+	assert.True(t, found, "未フォロー・未投稿の user も検索に出ること (upstream は出さない)")
+}
