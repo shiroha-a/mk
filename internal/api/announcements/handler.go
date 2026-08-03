@@ -1,6 +1,7 @@
 package announcements
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -229,18 +230,27 @@ func (h *Handler) ReadAnnouncement(c echo.Context) error {
 // (admin の typo が DB に書かれる drift)。本 fix で upstream 同等の enum reject。
 func (h *Handler) AdminCreate(c echo.Context) error {
 	var req struct {
-		Title                  string  `json:"title"`
-		Text                   string  `json:"text"`
-		ImageURL               *string `json:"imageUrl"`
-		Icon                   string  `json:"icon"`
-		Display                string  `json:"display"`
-		ForExistingUsers       *bool   `json:"forExistingUsers"`
-		Silence                *bool   `json:"silence"`
-		NeedConfirmationToRead *bool   `json:"needConfirmationToRead"`
-		UserID                 *string `json:"userId"`
+		Title string `json:"title"`
+		Text  string `json:"text"`
+		// upstream paramDef は `imageUrl: {type:'string', nullable:true}` を
+		// required に含める。`null` は valid だが省略は 400 なので、両者を
+		// 区別できる json.RawMessage で受ける (*string だと不在と null が
+		// どちらも nil になり判別できない、#2284)。
+		ImageURL               json.RawMessage `json:"imageUrl"`
+		Icon                   string          `json:"icon"`
+		Display                string          `json:"display"`
+		ForExistingUsers       *bool           `json:"forExistingUsers"`
+		Silence                *bool           `json:"silence"`
+		NeedConfirmationToRead *bool           `json:"needConfirmationToRead"`
+		UserID                 *string         `json:"userId"`
 	}
-	if err := c.Bind(&req); err != nil || req.Title == "" || req.Text == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "title and text are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	if err := c.Bind(&req); err != nil || req.Title == "" || req.Text == "" || req.ImageURL == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "title, text and imageUrl are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// RawMessage を実値へ落とす。`null` は nil の *string になる。
+	var imageURL *string
+	if err := json.Unmarshal(req.ImageURL, &imageURL); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "imageUrl must be a string or null.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if req.Icon == "" {
 		req.Icon = "info"
@@ -258,7 +268,7 @@ func (h *Handler) AdminCreate(c echo.Context) error {
 		ID:       h.idGen.Generate(time.Now()),
 		Title:    req.Title,
 		Text:     req.Text,
-		ImageURL: req.ImageURL,
+		ImageURL: imageURL,
 		Icon:     req.Icon,
 		Display:  req.Display,
 		IsActive: true,

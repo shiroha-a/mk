@@ -148,6 +148,12 @@ func (h *Handler) emojiLookup() entity.EmojiLookup {
 }
 
 // CreateRequest is the request body for antennas/create.
+//
+// upstream paramDef の required
+// (`['name','src','keywords','excludeKeywords','users','caseSensitive','withReplies','withFile']`)
+// を検証するため、required な bool はポインタで受けて「不在」と `false` を
+// 区別する (#2284、admin/roles/create と同じ idiom)。配列は絶対に nil に
+// ならない `[]` と不在を nil で区別できるのでそのまま。
 type CreateRequest struct {
 	Name                           string              `json:"name"`
 	Src                            model.AntennaSource `json:"src"`
@@ -155,19 +161,26 @@ type CreateRequest struct {
 	Users                          []string            `json:"users"`
 	Keywords                       [][]string          `json:"keywords"`
 	ExcludeKeywords                [][]string          `json:"excludeKeywords"`
-	CaseSensitive                  bool                `json:"caseSensitive"`
+	CaseSensitive                  *bool               `json:"caseSensitive"`
 	ExcludeBots                    bool                `json:"excludeBots"`
-	WithReplies                    bool                `json:"withReplies"`
-	WithFile                       bool                `json:"withFile"`
+	WithReplies                    *bool               `json:"withReplies"`
+	WithFile                       *bool               `json:"withFile"`
 	LocalOnly                      bool                `json:"localOnly"`
 	ExcludeNotesInSensitiveChannel bool                `json:"excludeNotesInSensitiveChannel"`
+}
+
+// missingRequired reports whether any upstream-required field is absent.
+func (r *CreateRequest) missingRequired() bool {
+	return r.Name == "" || r.Src == "" ||
+		r.Keywords == nil || r.ExcludeKeywords == nil || r.Users == nil ||
+		r.CaseSensitive == nil || r.WithReplies == nil || r.WithFile == nil
 }
 
 // Create handles POST /api/antennas/create.
 func (h *Handler) Create(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req CreateRequest
-	if err := c.Bind(&req); err != nil || req.Name == "" {
+	if err := c.Bind(&req); err != nil || req.missingRequired() {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream create.ts: keywords と excludeKeywords が両方とも空なら EMPTY_KEYWORD。
@@ -175,17 +188,18 @@ func (h *Handler) Create(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("EMPTY_KEYWORD", "Either keywords or excludeKeywords is required.", "53ee222e-1ddd-4f9a-92e5-9fb82ddb463a"))
 	}
 	a, err := h.svc.Create(coreantenna.CreateInput{
-		OwnerID:                        user.ID,
-		Name:                           req.Name,
-		Src:                            req.Src,
-		UserListID:                     req.UserListID,
-		Users:                          req.Users,
-		Keywords:                       req.Keywords,
-		ExcludeKeywords:                req.ExcludeKeywords,
-		CaseSensitive:                  req.CaseSensitive,
+		OwnerID:         user.ID,
+		Name:            req.Name,
+		Src:             req.Src,
+		UserListID:      req.UserListID,
+		Users:           req.Users,
+		Keywords:        req.Keywords,
+		ExcludeKeywords: req.ExcludeKeywords,
+		// missingRequired() で非 nil を保証済み。
+		CaseSensitive:                  *req.CaseSensitive,
 		ExcludeBots:                    req.ExcludeBots,
-		WithReplies:                    req.WithReplies,
-		WithFile:                       req.WithFile,
+		WithReplies:                    *req.WithReplies,
+		WithFile:                       *req.WithFile,
 		LocalOnly:                      req.LocalOnly,
 		ExcludeNotesInSensitiveChannel: req.ExcludeNotesInSensitiveChannel,
 	})

@@ -70,7 +70,7 @@ func setUser(c echo.Context, userID string) {
 
 func TestCreate_Success(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -81,7 +81,7 @@ func TestCreate_Success(t *testing.T) {
 // embed しないので、mk-go も同 shape (= userId field なし) で揃える。
 func TestCreate_NoUserIdInResponse(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -123,7 +123,7 @@ func TestCreate_NameRequired(t *testing.T) {
 
 func TestCreate_InvalidSource(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"bogus","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"bogus","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -141,7 +141,7 @@ func TestCreate_RepoError(t *testing.T) {
 	repo := &failingAntennaRepo{MockAntennaRepository: mock}
 	svc := coreantenna.NewService(repo, testutil.NewMockUserRepository(), testRedis.Client, idGen)
 	h := NewHandler(svc, testutil.NewMockNoteRepository(), idGen)
-	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -163,14 +163,14 @@ func newHandlerWithUserList(t *testing.T) (*Handler, *testutil.MockAntennaReposi
 func TestCreate_EmptyKeyword(t *testing.T) {
 	h, _, _ := newHandler(t)
 	// keywords/excludeKeywords 未指定 → 両方空扱いで EMPTY_KEYWORD。
-	c, rec := newReq(t, `{"name":"alpha","src":"all"}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false,"keywords":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "EMPTY_KEYWORD")
 
 	// 空文字のみの DNF も空扱い。
-	c, rec = newReq(t, `{"name":"alpha","src":"all","keywords":[[""]],"excludeKeywords":[[""]]}`)
+	c, rec = newReq(t, `{"name":"alpha","src":"all","keywords":[[""]],"excludeKeywords":[[""]],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -179,7 +179,7 @@ func TestCreate_EmptyKeyword(t *testing.T) {
 // excludeKeywords のみ指定なら EMPTY_KEYWORD にはならない。
 func TestCreate_ExcludeKeywordOnlySatisfies(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"all","excludeKeywords":[["spam"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","excludeKeywords":[["spam"]],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false,"keywords":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -190,14 +190,14 @@ func TestCreate_NoSuchUserList(t *testing.T) {
 	h, _, lists := newHandlerWithUserList(t)
 	// 他人 (bob) 所有の list を alice が参照 → NO_SUCH_USER_LIST。
 	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "bob", Name: "theirs"}))
-	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 
 	// 存在しない list も同様。
-	c, rec = newReq(t, `{"name":"alpha","src":"list","userListId":"ghost","keywords":[["foo"]]}`)
+	c, rec = newReq(t, `{"name":"alpha","src":"list","userListId":"ghost","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -207,7 +207,7 @@ func TestCreate_NoSuchUserList(t *testing.T) {
 func TestCreate_OwnedUserListAccepted(t *testing.T) {
 	h, _, lists := newHandlerWithUserList(t)
 	require.NoError(t, lists.Create(&model.UserList{ID: "ul1", UserID: "alice", Name: "mine"}))
-	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]]}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"list","userListId":"ul1","keywords":[["foo"]],"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -216,7 +216,7 @@ func TestCreate_OwnedUserListAccepted(t *testing.T) {
 // excludeNotesInSensitiveChannel が永続化されレスポンスに反映される (#1544)。
 func TestCreate_ExcludeNotesInSensitiveChannelPersisted(t *testing.T) {
 	h, _, _ := newHandler(t)
-	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeNotesInSensitiveChannel":true}`)
+	c, rec := newReq(t, `{"name":"alpha","src":"all","keywords":[["foo"]],"excludeNotesInSensitiveChannel":true,"excludeKeywords":[],"users":[],"caseSensitive":false,"withReplies":false,"withFile":false}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -876,4 +876,48 @@ func TestNotes_FiltersBlockedHostAndSuspended(t *testing.T) {
 	assert.NotContains(t, body, "n-blocked", "blockedHosts の note を除外")
 	assert.NotContains(t, body, "n-suspended", "suspended author の note を除外")
 	assert.Contains(t, body, "n-ok", "通常 note は残る")
+}
+
+// upstream paramDef の required
+// (`['name','src','keywords','excludeKeywords','users','caseSensitive','withReplies','withFile']`)
+// を欠く payload は 400 INVALID_PARAM で弾く (#2284)。mk-go は name しか
+// 見ておらず、TS backend では 400 になる payload を 200 で受けていた。
+func TestCreate_MissingRequiredParams(t *testing.T) {
+	full := map[string]string{
+		"name":            `"alpha"`,
+		"src":             `"all"`,
+		"keywords":        `[["foo"]]`,
+		"excludeKeywords": `[]`,
+		"users":           `[]`,
+		"caseSensitive":   `false`,
+		"withReplies":     `false`,
+		"withFile":        `false`,
+	}
+	build := func(omit string) string {
+		parts := make([]string, 0, len(full))
+		for k, v := range full {
+			if k == omit {
+				continue
+			}
+			parts = append(parts, `"`+k+`":`+v)
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	}
+
+	// 完全な payload は 200。
+	c, rec := newReq(t, build(""))
+	setUser(c, "alice")
+	h, _, _ := newHandler(t)
+	require.NoError(t, h.Create(c))
+	require.Equal(t, http.StatusOK, rec.Code, "全 required が揃っていれば通る")
+
+	for k := range full {
+		t.Run("omit_"+k, func(t *testing.T) {
+			h, _, _ := newHandler(t)
+			c, rec := newReq(t, build(k))
+			setUser(c, "alice")
+			require.NoError(t, h.Create(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s を欠くと 400", k)
+		})
+	}
 }

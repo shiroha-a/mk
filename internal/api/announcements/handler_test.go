@@ -213,7 +213,7 @@ func TestReadAnnouncement_InvalidParam(t *testing.T) {
 
 func TestAdminCreate_Success(t *testing.T) {
 	h, repo := newTestHandler(t)
-	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!","imageUrl":null}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, repo.Items, 1)
 	// #1545: レスポンスは packed で createdAt (ID 由来) を含む。
@@ -253,14 +253,14 @@ func TestAdminCreate_InvalidParam(t *testing.T) {
 // PR #1108 sweep: icon が upstream enum 外の値で送られたら 400 reject。
 func TestAdminCreate_InvalidIconReturns400(t *testing.T) {
 	h, _ := newTestHandler(t)
-	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","icon":"weird"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","icon":"weird","imageUrl":null}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // display が upstream enum 外の値で送られたら 400 reject。
 func TestAdminCreate_InvalidDisplayReturns400(t *testing.T) {
 	h, _ := newTestHandler(t)
-	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","display":"weird"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"X","text":"Y","display":"weird","imageUrl":null}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -268,7 +268,7 @@ func TestAdminCreate_InvalidDisplayReturns400(t *testing.T) {
 func TestAdminCreate_PersistsExtraBoolFields(t *testing.T) {
 	h, repo := newTestHandler(t)
 	rec := doPost(h.AdminCreate,
-		`{"title":"X","text":"Y","forExistingUsers":true,"silence":true,"needConfirmationToRead":true}`, nil)
+		`{"title":"X","text":"Y","imageUrl":null,"forExistingUsers":true,"silence":true,"needConfirmationToRead":true}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Len(t, repo.Items, 1)
 	var a *model.Announcement
@@ -300,7 +300,7 @@ func TestAdminCreate_PerUserPublishesAnnouncementCreated(t *testing.T) {
 	pub := &stubMainStreamPublisher{}
 	h.SetMainStreamPublisher(pub)
 
-	rec := doPost(h.AdminCreate, `{"title":"You","text":"Hi","userId":"u1"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"You","text":"Hi","userId":"u1","imageUrl":null}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	require.Len(t, pub.calls, 1)
@@ -324,7 +324,7 @@ func TestAdminCreate_GlobalDoesNotPublish(t *testing.T) {
 
 	// userId 未指定 → global announcement。main にはemitしない (TSの
 	// publishBroadcastStream相当は別レイヤ)。
-	rec := doPost(h.AdminCreate, `{"title":"All","text":"Everyone"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"All","text":"Everyone","imageUrl":null}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Empty(t, pub.calls)
 }
@@ -655,7 +655,7 @@ func (f *failingCreateAnnouncementRepo) Create(_ *model.Announcement) error { re
 func TestAdminCreate_Error(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	h := announcements.NewHandler(&failingCreateAnnouncementRepo{testutil.NewMockAnnouncementRepository()}, idGen)
-	rec := doPost(h.AdminCreate, `{"title":"x","text":"y"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"x","text":"y","imageUrl":null}`, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -719,7 +719,7 @@ func TestAdminCreate_WritesGlobalAnnouncementLog(t *testing.T) {
 	h, _ := newTestHandler(t)
 	repo := attachAnnouncementModLog(t, h)
 
-	rec := doPost(h.AdminCreate, `{"title":"hi","text":"world"}`, &model.User{ID: "admin1"})
+	rec := doPost(h.AdminCreate, `{"title":"hi","text":"world","imageUrl":null}`, &model.User{ID: "admin1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
@@ -734,7 +734,7 @@ func TestAdminCreate_WritesUserAnnouncementLog(t *testing.T) {
 	h.SetUserRepo(userRepo)
 	repo := attachAnnouncementModLog(t, h)
 
-	rec := doPost(h.AdminCreate, `{"title":"hi","text":"world","userId":"u1"}`, &model.User{ID: "admin1"})
+	rec := doPost(h.AdminCreate, `{"title":"hi","text":"world","userId":"u1","imageUrl":null}`, &model.User{ID: "admin1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
@@ -782,7 +782,7 @@ func TestAdminCreate_GlobalBroadcasts(t *testing.T) {
 	h, _ := newTestHandler(t)
 	bc := &fakeBroadcastPub{}
 	h.SetBroadcastPublisher(bc)
-	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!"}`, nil)
+	rec := doPost(h.AdminCreate, `{"title":"News","text":"Big news!","imageUrl":null}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, []string{"announcementCreated"}, bc.events, "global は broadcast へ (#2056)")
 }
@@ -805,4 +805,29 @@ func TestList_OmitsAdminFields(t *testing.T) {
 	assert.False(t, hasForExisting, "user-facing List は forExistingUsers を出さない")
 	assert.False(t, hasIsActive, "user-facing List は isActive を出さない")
 	assert.Equal(t, "Hi", item["title"], "user-facing field は維持")
+}
+
+// upstream paramDef の required (`['title','text','imageUrl']`) を欠く payload は
+// 400 INVALID_PARAM で弾く (#2284)。imageUrl は nullable なので `null` は valid
+// だが、省略は invalid — この区別のため json.RawMessage で受けている。
+func TestAdminCreate_RequiresImageURL(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"imageUrl 省略", `{"title":"X","text":"Y"}`, http.StatusBadRequest},
+		{"imageUrl null は valid", `{"title":"X","text":"Y","imageUrl":null}`, http.StatusOK},
+		{"imageUrl 文字列は valid", `{"title":"X","text":"Y","imageUrl":"https://e.example/i.png"}`, http.StatusOK},
+		{"imageUrl の型違いは 400", `{"title":"X","text":"Y","imageUrl":123}`, http.StatusBadRequest},
+		{"title 省略", `{"text":"Y","imageUrl":null}`, http.StatusBadRequest},
+		{"text 省略", `{"title":"X","imageUrl":null}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := newTestHandler(t)
+			rec := doPost(h.AdminCreate, tc.body, nil)
+			assert.Equal(t, tc.want, rec.Code)
+		})
+	}
 }
