@@ -48,12 +48,13 @@ func NewServer(redisOpt asynq.RedisClientOpt, cfg ServerConfig) *Server {
 		// 新しい queue を増やすときはここと queue.QueueName 等の
 		// 定数追加を同時に行う。
 		queues = map[string]int{
-			"deliver":     1,
-			"inbox":       1,
-			"push":        1,
-			"export":      1,
-			"webhook":     1,
-			"maintenance": 1,
+			"deliver":       1,
+			"inbox":         1,
+			"push":          1,
+			"export":        1,
+			"webhook":       1,
+			"maintenance":   1,
+			"objectStorage": 1,
 		}
 	}
 	inner := asynq.NewServer(redisOpt, asynq.Config{

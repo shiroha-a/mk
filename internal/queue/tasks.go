@@ -29,6 +29,25 @@ const TaskTypeUserWebhook = "webhook:user"
 // TaskTypeSystemWebhook is the task type for system webhook delivery jobs.
 const TaskTypeSystemWebhook = "webhook:system"
 
+// TaskTypeObjectStorageDeleteFile is the task type for removing a single
+// object from object storage. Mirrors upstream `objectStorage` queue's
+// `deleteFile` job (#2325).
+const TaskTypeObjectStorageDeleteFile = "objectStorage:deleteFile"
+
+// TaskTypeCleanRemoteFiles is the task type for the bulk removal of cached
+// remote drive files. Mirrors upstream `objectStorage` queue's
+// `cleanRemoteFiles` job: 1 本の job が内部でバッチ削除を回す (#2325)。
+const TaskTypeCleanRemoteFiles = "objectStorage:cleanRemoteFiles"
+
+// ObjectStorageDeleteFilePayload identifies the object to remove.
+//
+// upstream の job data も `{ key }` の 1 field だけで、どの backend から消すかは
+// 持たない。queue に積むのは `storedInternal=false` の実体だけなので、処理側は
+// 常に object storage backend を見る。
+type ObjectStorageDeleteFilePayload struct {
+	Key string `json:"key"`
+}
+
 // TaskTypeCleanRemoteNotes is the task type for the periodic remote
 // notes cleaning job. ペイロードなし (meta から設定を読む)。
 const TaskTypeCleanRemoteNotes = "maintenance:cleanRemoteNotes"

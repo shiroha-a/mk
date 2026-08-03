@@ -45,6 +45,11 @@ const PushQueueName = "push"
 // WebhookQueueName is the queue for user + system webhook delivery jobs.
 const WebhookQueueName = "webhook"
 
+// ObjectStorageQueueName is the queue for object storage housekeeping
+// (object の実体削除 / リモートキャッシュ一括削除)。upstream Misskey も同名の
+// queue を持つ (#2325)。
+const ObjectStorageQueueName = "objectStorage"
+
 // InboxQueueName is the queue for inbound ActivityPub activity processing
 // (#534). Misskey TS uses the same name (lower-case "inbox") for BullMQ
 // drop-in compat.
@@ -393,6 +398,50 @@ func (c *Client) EnqueueSystemWebhook(ctx context.Context, payload WebhookPayloa
 	}
 	base = append(base, c.retentionOpts(WebhookQueueName)...)
 	return c.inner.Enqueue(ctx, TaskTypeSystemWebhook, body, base...)
+}
+
+// objectStorageDeleteMaxRetry is the number of retries (on top of the initial
+// try) allowed for an object delete.
+//
+// upstream は `attempts` を設定しないので BullMQ default = 単発試行になり、
+// 失敗した実体は failed job として残るだけで自動復旧しない。object storage の
+// 一時的な 5xx / タイムアウトは指数バックオフで待てば大抵回復するので、
+// mk-go は再試行する側に倒す (この差分は docs/divergence.md に記載)。
+const objectStorageDeleteMaxRetry = 4
+
+// EnqueueDeleteObjectStorageFile puts an object-storage delete task on the
+// queue. key は drive_file の accessKey / thumbnailAccessKey /
+// webpublicAccessKey のいずれか。
+//
+// Mirrors upstream `QueueService.createDeleteObjectStorageFileJob` (#2325).
+// ローカル FS 保存 (storedInternal=true) の実体は upstream 同様に呼び出し側で
+// 同期削除するので、ここへは積まない。
+func (c *Client) EnqueueDeleteObjectStorageFile(key string) error {
+	body := mustMarshal(ObjectStorageDeleteFilePayload{Key: key})
+	base := []driver.EnqueueOption{
+		driver.WithQueue(ObjectStorageQueueName),
+		driver.WithMaxRetry(objectStorageDeleteMaxRetry),
+		driver.WithBackoff(driver.BackoffExponential, time.Minute),
+	}
+	base = append(base, c.retentionOpts(ObjectStorageQueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeObjectStorageDeleteFile, body, base...)
+}
+
+// EnqueueCleanRemoteFiles puts a bulk remote-cache cleanup task on the queue.
+//
+// Mirrors upstream `QueueService.createCleanRemoteFilesJob`: admin endpoint は
+// job を 1 本積んで即座に応答を返し、実際のバッチ削除は worker 側で回す。
+//
+// 二重起動しても結果は同じ (削除済みの行は次の list に現れない) だが、同じ
+// 実体を二重に消しに行くのは無駄なので短い unique window で連打を吸収する。
+func (c *Client) EnqueueCleanRemoteFiles() error {
+	base := []driver.EnqueueOption{
+		driver.WithQueue(ObjectStorageQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(1 * time.Minute),
+	}
+	base = append(base, c.retentionOpts(ObjectStorageQueueName)...)
+	return c.inner.Enqueue(context.Background(), TaskTypeCleanRemoteFiles, nil, base...)
 }
 
 // EnqueueCleanRemoteNotes puts a remote notes cleaning task on the queue.

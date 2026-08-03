@@ -32,6 +32,7 @@ var QueueNames = []string{
 	"export",
 	"webhook",
 	"maintenance",
+	"objectStorage",
 }
 
 // Config is the per-driver configuration the constructor consumes.
@@ -218,7 +219,7 @@ func (d *Driver) Client() driver.Client {
 // 保持し、worker.go が "recommended pool = concurrency + 8" を warn する) なので、
 // 接続数を抑えるため deliver は upstream の 128 ではなく 16 に留める (outbound
 // bench で 2 worker でも BullMQ の 6.6x スループットがあり Go 側は余力十分)。
-// 合計 16+16+4+4+2+2 = 44 worker。worker Redis pool は New() が
+// 合計 16+16+4+4+4+2+2 = 48 worker。worker Redis pool は New() が
 // workerPoolSize() で自動的にこの合計 + poolHeadroom に合わせる。operator は
 // <queue>JobConcurrency でいつでも上書きできる (pool も追従する)。
 var defaultQueueConcurrency = map[string]int{
@@ -228,6 +229,10 @@ var defaultQueueConcurrency = map[string]int{
 	"push":        4,
 	"export":      2,
 	"maintenance": 2,
+	// upstream は 16。実体削除は S3 への I/O 待ちが主で 1 worker あたりの
+	// 効率が良く、bulk cleanup は job 1 本が内部でバッチ削除を回すため
+	// (= job 数で並列度を稼ぐ設計ではない)、deliver と同じ理由で抑える。
+	"objectStorage": 4,
 }
 
 // unknownQueueConcurrency is applied to any queue absent from
