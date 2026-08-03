@@ -30,11 +30,12 @@ jobs:
   spec:
     name: spec (${{ matrix.backend }})
     runs-on: ubuntu-latest
-    # 20 min では足りない。browser 不整合 (#2251 P0) を直すまでは page fixture
-    # を使う 192 spec が起動即失敗していたため job 全体が 8 min で終わって
-    # いたが、修正後は UI spec が実際に走るので所要時間が大幅に伸びる。
-    # 初回の手動 dispatch は 20 min の timeout で cancel された。
-    timeout-minutes: 45
+    # backend ごとに所要時間が大きく違うので matrix 変数にする。
+    # mk-go は 370 spec を 11 min で完走するが、TS backend は #2288 で初めて
+    # spec が走るようになった結果 45 min で 360/370 までしか進まず timeout
+    # した (Node backend が重く、失敗 spec の retry も所要時間を押し上げる)。
+    # mk-go 側は短いままにしておき、無限ループ的な hang を早く検出する。
+    timeout-minutes: ${{ matrix.timeout_minutes }}
 
     strategy:
       fail-fast: false
@@ -50,6 +51,7 @@ jobs:
             compose_args: -f docker-compose.playwright.yml
             # 本 repo Dockerfile を使うので外部 image pre-pull 不要。
             prepull: ""
+            timeout_minutes: 45
           - backend: ts
             up_target: playwright-ts-up
             test_target: playwright-ts-test
@@ -62,14 +64,18 @@ jobs:
             # 不確実)。foreground で完了を待ち、続く compose up 内の同
             # image pull は docker daemon の cache hit で 0s で済む方が
             # 確実。version は docker-compose.playwright.ts.yml と sync。
-            prepull: docker pull misskey/misskey:2026.5.4
-            # #978 で NODE_ENV=test を入れた副作用で compile-config が
-            # /misskey/.config/test.yml を look up し、production image の
-            # .config dir が空のため migrate 失敗で container 起動できない
-            # (#990)。3 attempt (double-mount / MISSKEY_CONFIG_YML / NODE_ENV=
-            # development) を試したが CI 上で謎の挙動 (ローカルでは動く) で
-            # 解決できなかったため、TS matrix を non-blocking 化して mk-go
-            # matrix の green を確保する。#990 で root cause 調査継続中。
+            prepull: docker pull misskey/misskey:2026.7.0
+            timeout_minutes: 90
+            # #990 で「CI 上で謎の挙動」として未解決だった起動失敗は #2288 で
+            # 解決済み。原因は NODE_ENV=test のとき compile_config.js が
+            # `.config/test.yml` を読みに行き、mount している default.yml を
+            # 無視して built/.config.json を生成しないことだった。overlay の
+            # MISSKEY_CONFIG_YML=default.yml で解消している。
+            #
+            # continue-on-error は残す: stack は起動するようになったが spec が
+            # まだ 77 件落ちており (#2289)、それが解消するまで TS matrix で
+            # mk-go matrix の green を巻き込まないようにする。#2289 完了時に
+            # 外して blocking 化する。
             continue-on-error: true
 
     # matrix 内の continue-on-error を有効化するため job 全体にも設定する
@@ -144,8 +150,13 @@ jobs:
       # TS matrix は continue-on-error なので、stack 起動に失敗して spec を
       # 0 件しか回さなくても workflow は緑になる。実際 spec (ts) は 3 ヶ月間
       # spec 0 件のまま放置され、TS baseline としての機能を失っていた。
+      #
+      # cancelled (= job timeout) では走らせない。results.json は json reporter
+      # が run 完了時にまとめて書くので、timeout で打ち切られると必ず不在に
+      # なり、「spec が 0 件」という誤ったエラーで本来の timeout を覆い隠す
+      # (#2289 で実際に踏んだ)。
       - name: Guard against zero specs executed
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           results=tests/playwright/results.json
@@ -163,8 +174,11 @@ jobs:
       # 失敗時のみ playwright test-results (trace / screenshot / video 含む)
       # を保存。video は popup menu / contextmenu / multi-step interaction
       # failure の debug 価値が高い。
+      # cancelled でも回収する。job timeout は failure ではなく cancelled に
+      # なるため `if: failure()` だと trace / screenshot が一切残らず、
+      # 45 min timeout した TS job の失敗内容を追えなかった (#2289)。
       - name: Upload test-results on failure
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-results-${{ matrix.backend }}
@@ -175,14 +189,14 @@ jobs:
       # 失敗時のみ docker compose logs を artifact 化して原因調査できる
       # ようにする。
       - name: Capture docker compose logs on failure
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p /tmp/playwright-logs
           docker compose ${{ matrix.compose_args }} logs \
             > /tmp/playwright-logs/compose.log 2>&1 || true
 
       - name: Upload logs artifact on failure
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-logs-${{ matrix.backend }}
