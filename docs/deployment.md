@@ -199,6 +199,56 @@ upstream以外の設定はTCP構成と同じ。
 
 mk-goはTS版と同じPostgreSQL/Redisを共有できるため、バイナリの差し替えだけで移行可能。マイグレーションはTS版テーブルに対して追加のみで破壊的変更を行わない。
 
+## アップデート
+
+どの構成でも共通する原則は 3 つ。
+
+1. **`git pull` だけでは submodule が更新されない**。親リポの gitlink ポインタが動くだけで `third_party/misskey/` の実ファイルは古いまま残る。`git pull --recurse-submodules` を使うか、`git config submodule.recurse true` を一度実行しておく
+2. **submodule が動いたらフロントエンドを再ビルドする**。SPA のアセットは image に焼き込まず bind-mount で渡しているため、submodule だけ進めても配信物は変わらない
+3. **フロントエンドを再ビルドしたら mk-go を再起動する**。エントリポイント (`scripts/<hash>.js`) を起動時に 1 回だけ解決してキャッシュする実装なので、再起動しないと消えた古いファイルを指し続けて 404 になる。bind-mount であっても再起動は必要
+
+マイグレーションは構成によって適用方法が違う (下記参照)。golang-migrate が `schema_migrations` で適用済みバージョンを管理するため、何度流しても冪等。
+
+### Docker Compose (TCP / UDS 共通)
+
+```bash
+git pull --recurse-submodules
+
+# third_party/misskey が動いていた場合のみ
+make e2e-frontend-build      # UDS 構成では make uds-frontend-build
+
+docker compose build
+docker compose up -d         # UDS 構成では make uds-build && make uds-up
+```
+
+マイグレーションは one-shot の `migrate` サービスが `app` の起動前に自動適用する。`docker compose up -d` が完了した時点で適用済み。
+
+`.config/docker.yml` を volume mount で使っている場合、**`migrate` 側の mount も忘れずに維持する**こと。片方だけだとマイグレーションと本体が別の DB を見る。
+
+### バイナリ直接実行
+
+```bash
+git pull --recurse-submodules
+
+# third_party/misskey が動いていた場合のみ
+make e2e-frontend-build
+
+make build
+
+# マイグレーションは手動適用 (compose と違い自動では走らない)
+export DATABASE_URL="postgres://user:pass@localhost:5432/misskey?sslmode=disable"
+make migrate-up
+
+# 再起動
+sudo systemctl restart misskey    # systemd の場合
+```
+
+### 切り戻し
+
+`schema_migrations` のバージョンが進んでいるので、バイナリだけ戻すと古い mk-go が新しいスキーマを読むことになる。追加のみのマイグレーション (`ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX`) であれば旧バイナリでも動くが、破壊的な変更を含むリリースでは `make migrate-down` で段階的に戻す必要がある。リリースノートで破壊的変更の有無を確認すること。
+
+Misskey TS へ戻す場合は[TS版からの移行](migration-from-ts.md)を参照。
+
 ## 運用上の注意
 
 ### admin/overview の federation pie chart が一時的にずれる場合

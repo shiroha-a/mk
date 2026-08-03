@@ -2,7 +2,7 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.5.4** (mk-go `0.9.1`)
+互換バージョン: **Misskey 2026.7.0** (mk-go `0.9.2`)
 
 ## 特徴
 
@@ -11,7 +11,7 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 - TypeScript版と同じPostgreSQL/Redisを共有、無停止で移行可能
 - ActivityPub連合対応（HTTP Signatures、リモートオブジェクト解決、配信キュー）
 - ジョブキューは `mkq` (BullMQ wire-compat、デフォルト) または `asynq`
-- Playwright e2e で両 backend (mk-go / TS) を nightly 比較、drop-in 互換 regression を検出
+- Playwright e2e (370 spec) を PR ごとに実行。upstream 追従時は Misskey TS backend に対しても回して drop-in 互換を検証
 - `RemoteStatsFetcher` でリモートユーザーの notesCount / followersCount / followingCount を origin から取得 (mk-go 独自拡張)
 
 ## クイックスタート (Docker Compose)
@@ -19,15 +19,74 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git
 cd mk
+```
 
-# フロントエンドビルド (初回のみ、3-10分)
+### 1. フロントエンドをビルドする (初回のみ、3-10分)
+
+```bash
+make e2e-frontend-build
+```
+
+SPA の JS/CSS は約 200MB あるため image に焼き込まず、`third_party/misskey/built` を bind-mount で渡している。これを省くとフロントエンドのアセットが 404 になり画面が表示されない。
+
+### 2. 設定ファイルを用意する
+
+```bash
+cp .config/docker.yml.example .config/docker.yml
+# .config/docker.yml の url を実際のアドレスに変更する
+```
+
+`url` は必須項目で、既定値は `https://example.tld/` のまま。編集したら `docker-compose.yml` の **`app` と `migrate` の両方**にある volumes のコメントを外す。
+
+```yaml
+- ./.config/docker.yml:/app/.config/default.yml:ro
+```
+
+`migrate` 側にも同じ mount を入れないと、マイグレーションと本体が別の DB を見にいく。
+
+ローカルで試すだけなら、この手順は省略して既定の設定のまま起動してもよい。
+
+### 3. ドライブ用ディレクトリの所有権を設定する
+
+```bash
+mkdir -p files && sudo chown -R 991:991 files
+```
+
+コンテナは Misskey TS 互換の UID/GID 991 で動くため、この所有権でないとファイルをアップロードできない。
+
+### 4. 起動する
+
+```bash
+docker compose up -d
+```
+
+DB マイグレーションは one-shot の `migrate` サービスが自動適用し、その完走を待って `app` が起動する。手動で流す必要はない。
+
+ブラウザで `http://localhost:3000` を開き、最初のアカウントを作成する。
+
+より詳しい構成 (UDS、prebuilt image、systemd、逆プロキシ) は[デプロイ](docs/deployment.md)を参照。
+
+## アップデート
+
+```bash
+# 1. submodule ごと更新する (--recurse-submodules を忘れない)
+git pull --recurse-submodules
+
+# 2. third_party/misskey が動いていたらフロントエンドを再ビルドする
 make e2e-frontend-build
 
-# 起動
+# 3. 再ビルドして起動しなおす (マイグレーションは自動適用される)
+docker compose build
 docker compose up -d
-
-# ブラウザで http://localhost:3000 を開く
 ```
+
+注意点:
+
+- **`git pull` だけでは submodule が更新されない**。親リポのポインタが動くだけで `third_party/misskey/` の中身は古いまま。`git config submodule.recurse true` を一度実行しておくと以後は自動で追従する
+- **フロントエンドを再ビルドしたら必ず mk-go を再起動する**。エントリポイントを起動時に 1 回だけ解決してキャッシュするため、再起動しないと消えた古いファイルを参照し続けて 404 になる
+- ブラウザ側に Service Worker が残っている場合はハードリロードする
+
+バイナリ直接実行や UDS 構成でのアップデート手順は[デプロイ](docs/deployment.md#アップデート)を参照。
 
 ## ローカルビルド
 
@@ -92,7 +151,7 @@ go test -race -count=1 -timeout 10m \
 | [ベンチプロファイリング](docs/bench-pprof.md) | k6負荷時のpprof取得と解析 |
 | [upstream追従手順](docs/upstream-catch-up.md) | Misskey TSの新リリース取り込みとsubmodule bump |
 | [設計メモ](docs/design/) | オートスケール、inbox verify、mkq等の設計判断 |
-| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.5.0 → 2026.5.1 → 2026.5.2 → 2026.5.4 の backend 差分 (`yyyymmdd*` 命名) |
+| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.7.0 の backend 差分 (`yyyymmdd*` 命名) |
 
 ## ライセンス
 
