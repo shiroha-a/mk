@@ -233,6 +233,9 @@ func (s *Server) setupRoutes() {
 	// canPublicNote=false の user の public note を home に降格させる
 	// silencing 機構 (#1024)。
 	noteCreateService.SetSilencingProvider(roleService)
+	// mentionLimit を role policy から引く (#2321)。未配線だと
+	// DefaultMentionLimit 固定になり、ロールで設定した値が効かない。
+	noteCreateService.SetRolePolicyProvider(roleService)
 	// reply/mention の main-stream event をスレッドミュート済 recipient に出さない (#1954)。
 	noteCreateService.SetThreadMutingRepo(noteThreadMutingRepo)
 	noteDeleteService := corenote.NewDeleteService(noteRepo)
