@@ -71,7 +71,10 @@ func isMimeImage(mime string) bool {
 		// を両方許可。mediaproxy 側 isConvertibleImage と同じ alias を扱う
 		// (#418)。
 		"image/x-icon", "image/vnd.microsoft.icon",
-		"image/vnd.mozilla.apng":
+		// APNG は 2 綴りある。判定器が改善されて `image/apng` を返すように
+		// なった (#2319) ので両方受ける。片方だけだとサムネイルが生成されなく
+		// なる (APNG の 1 フレーム目は valid な PNG なので stdlib で decode できる)。
+		"image/vnd.mozilla.apng", "image/apng":
 		return true
 	default:
 		return false
@@ -86,7 +89,7 @@ func isMimeVideo(mime string) bool {
 // isAnimatedMime returns true if the MIME type is an animated image format
 // (GIF or APNG). アニメーション画像はより小さいサムネイルを生成する。
 func isAnimatedMime(mime string) bool {
-	return mime == "image/gif" || mime == "image/vnd.mozilla.apng"
+	return mime == "image/gif" || mime == "image/vnd.mozilla.apng" || mime == "image/apng"
 }
 
 // ---------------------------------------------------------------------------

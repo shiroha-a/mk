@@ -715,7 +715,9 @@ func isConvertibleImage(mime string) bool {
 		// IANA 公式名 (image/vnd.microsoft.icon) と古い慣例 (image/x-icon)
 		// を両方許可する (#418)。
 		"image/x-icon", "image/vnd.microsoft.icon",
-		"image/vnd.mozilla.apng",
+		// APNG は 2 綴りある。drive 側の判定器が `image/apng` を返すように
+		// なった (#2319) ので両方受ける。
+		"image/vnd.mozilla.apng", "image/apng",
 		// gen2brain wazero ベースの decoder で対応 (#637 M3/M4/M5):
 		// image/avif (in/out), image/heic, image/heif, image/jxl は input 専用
 		// として decode → WebP/AVIF 出力経路に乗せる。
