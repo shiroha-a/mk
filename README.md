@@ -73,6 +73,8 @@ go test -race -count=1 -timeout 10m \
 |---|---|
 | [アーキテクチャ](docs/architecture.md) | レイヤ構成、パッケージ責務、DI、フックパターン |
 | [API互換性](docs/api-compatibility.md) | Misskey-TSとの互換性状況 |
+| [API互換性マトリクス](docs/api-compat.md) | エンドポイント単位の実装状況 (`make apicompat` で自動生成) |
+| [差分カタログ](docs/divergence.md) | 純正Misskeyに無い機能・意図的に異なる挙動の一覧 |
 | [設定リファレンス](docs/configuration.md) | 全設定項目、環境変数オーバーライド |
 | [開発ガイド](docs/development.md) | 環境セットアップ、コーディング規約、CI |
 | [テスト](docs/testing.md) | テスト戦略、カバレッジ目標、testcontainers |
@@ -83,8 +85,13 @@ go test -race -count=1 -timeout 10m \
 | [E2Eテスト](docs/e2e.md) | Cypressによるフロントエンドテスト |
 | [Drop-in e2e (pytest)](docs/dropin-e2e.md) | TS-A backend を mk-A に差し替えた state preservation 検証 |
 | [Drop-in frontend e2e (cypress)](docs/dropin-frontend-e2e.md) | 3 TS instance + cypress で frontend 視点の互換 |
+| [差分比較ハーネス](docs/diff-e2e.md) | mk-go と TS の実APIレスポンスを値レベルでdiff |
+| [シェイプドリフト検出](docs/shape-drift.md) | レスポンス形状・エラーID・権限のドリフトを検出する静的ゲート |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
 | [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
+| [ベンチプロファイリング](docs/bench-pprof.md) | k6負荷時のpprof取得と解析 |
+| [upstream追従手順](docs/upstream-catch-up.md) | Misskey TSの新リリース取り込みとsubmodule bump |
+| [設計メモ](docs/design/) | オートスケール、inbox verify、mkq等の設計判断 |
 | [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.5.0 → 2026.5.1 → 2026.5.2 → 2026.5.4 の backend 差分 (`yyyymmdd*` 命名) |
 
 ## ライセンス

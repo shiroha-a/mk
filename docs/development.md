@@ -49,6 +49,7 @@ make dev
 | `make build` | `./built/misskey`にバイナリ生成 |
 | `make dev` | `go run`で直接起動 |
 | `make run` | build + 実行 |
+| `make clean` | ビルド成果物を削除 |
 | `make tidy` | `go mod tidy` |
 
 ### コード品質
@@ -91,13 +92,55 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make docker-up` | `docker compose up -d` |
 | `make docker-down` | `docker compose down` |
 
-### テスト関連
+### 静的 parity ゲート
+
+サーバー・ブラウザ・Docker 不要で走る。CI では `go test ./...` の中でも自動実行される。詳細は[シェイプドリフト検出](shape-drift.md)。
+
+| ターゲット | 検出対象 |
+|---|---|
+| `make shapecheck` | レスポンス形状の drift。`make shapecheck-gen` で golden snapshot を再生成、`make shapecheck-report` でレポート出力 |
+| `make errorid-check` | error id / HTTP status / kind の drift |
+| `make limitspec-check` | ページネーションの default / max の drift |
+| `make perm-check` | router middleware の権限が Misskey 本家より緩くないか |
+| `make apicompat` | [API 互換性マトリクス](api-compat.md)を生成。内部で `make apicompat-routes` (route dump、stack 起動が必要) と `make apicompat-render` を実行する |
+
+### e2e・互換性検証
+
+いずれも隔離した compose project で動く。詳細は各ドキュメント参照。
+
+| ターゲット | 内容 | 詳細 |
+|---|---|---|
+| `make playwright-up` `playwright-test` `playwright-down` `playwright-logs` | mk-go backend に対する Playwright spec | — |
+| `make playwright-ts-up` `playwright-ts-test` `playwright-ts-down` | 同じ spec を Misskey TS backend に対して実行し、drop-in 互換を担保する | — |
+| `make diff-up` `diff-test` `diff-down` `diff-logs` | mk-go と TS に同一リクエストを投げてレスポンスを値レベルで diff | [差分比較ハーネス](diff-e2e.md) |
+| `make dropin-up` `dropin-test` `dropin-down` `dropin-logs` | TS 2 インスタンスの federation smoke | [Drop-in e2e](dropin-e2e.md) |
+| `make dropin-mk-up` `dropin-mk-test` `dropin-mk-down` `dropin-mk-logs` | 上記の backend を mk-go に差し替えた overlay | 同上 |
+| `make dropin-swap-test` | TS → mk-go 切替の state preservation を通しで検証 | 同上 |
+| `make dropin-fedibird-test` | Fedibird-like AP mock との Ed25519 双方向 verify | 同上 |
+| `make dropin-frontend-baseline` `dropin-frontend-up` `dropin-frontend-down` `dropin-frontend-logs` | 3 TS インスタンス + cypress | [Drop-in frontend e2e](dropin-frontend-e2e.md) |
+| `make dropin-frontend-mk-up` `dropin-frontend-mk-down` `dropin-frontend-swap-test` | 上記の mk-go overlay と切替シナリオ | 同上 |
+| `make federation-misskey-build` `federation-misskey-up` `federation-misskey-test` `federation-misskey-down` `federation-misskey-logs` | Misskey 本家インスタンスを立てて実際に連合させる | [ActivityPub連合](federation.md) |
+| `make e2e-submodule-init` `e2e-deps` `e2e-run` `e2e-open` | Cypress によるフロントエンドテスト | [E2Eテスト](e2e.md) |
+
+### ベンチマーク
+
+| ターゲット | 内容 | 詳細 |
+|---|---|---|
+| `make bench-up` `bench-run` `bench-down` `bench-logs` | k6 で mk-go と Misskey 本家に同一負荷をかけて比較 | [pprof プロファイリング](bench-pprof.md) |
+| `make queue-bench-all` (`queue-bench-up` `queue-bench-seed` `queue-bench-outbound` `queue-bench-inbound` `queue-bench-report` `queue-bench-down` `queue-bench-logs`) | BullMQ / asynq / mkq の 3-way スループット比較 | [queue-bench](queue-bench.md) |
+| `make queue-bench-autoscale-run` `queue-bench-autoscale-down` `queue-bench-autoscale-logs` | worker 数 fixed16 / fixed64 / auto の drain time 比較 | [オートスケール設計](design/auto-scale-job-workers.md) |
+
+### 本番 UDS
 
 | ターゲット | 内容 |
 |---|---|
-| `make e2e-frontend-build` | Misskeyフロントエンドビルド (Docker内、3-10分) |
-| `make e2e-run` | Cypress E2Eテスト実行 |
-| `make federation-misskey-up` | 連合テスト用Misskeyインスタンス起動 |
+| `make uds-init` `uds-build` `uds-up` `uds-down` `uds-down-v` `uds-logs` `uds-ps` | UNIX ドメインソケット構成の本番スタック操作 ([UDSデプロイ](docker-uds.md)) |
+| `make uds-frontend-build` | 本番向けフロントエンドビルド |
+
+> **警告**: `make uds-frontend-build` と `make e2e-frontend-build` は `third_party/misskey/built` に出力する。**本番コンテナがこのディレクトリを bind-mount している**ため、「ビルドが通るか確かめるだけ」のつもりで実行すると配信中のアセットが差し替わる。mk-go はエントリポイントを起動時に 1 回だけ解決してキャッシュするので、ハッシュが変わると HTML が消えたファイルを指したまま **404 でフロントが起動しなくなる**。
+>
+> - フロントの型チェックだけなら `third_party/misskey/packages/frontend` で `npx vue-tsc --noEmit` / `npx eslint` を直接叩く (Docker 不要で速い)
+> - 本番へ反映する意図で実行した場合は、続けてコンテナを再起動すること
 
 ## コーディング規約
 
@@ -136,17 +179,49 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 
 ## CI/CD
 
-`main`と`develop`へのpush/PRで3ジョブが実行される:
+### 必須チェック (`.github/workflows/ci.yml`)
 
-### buildジョブ
+`main`と`develop`へのpush/PRで実行される。branch protectionのrequired checksは`build` / `test` / `lint`の3つ。
+
+#### buildジョブ
 `go build ./...`で全パッケージのビルド確認。
 
-### testジョブ
-- PostgreSQL 16 + Redis 7をサービスコンテナで起動
-- `-race -count=1 -timeout 10m -covermode=atomic`
-- パッケージ別カバレッジ閾値: 90%以上 (`internal/api/admin`のみ60%)
-- 未達でジョブ失敗
+#### test-shardsジョブ + testジョブ
+- `shard: [1,2,3,4]`の4-way matrixで並列実行。各shardが独立したPostgreSQL 16 / Redis 7のサービスコンテナを持つ
+- 対象パッケージは`go list`でテストファイルを持つものだけに絞り、ImportPath順にソートしてから`NR % 4`で分配する。分配が決定的なので、パッケージが増えても各shardの担当は再現する
+- `-race -count=1 -timeout 10m -coverprofile=... -covermode=atomic`
+- パッケージ別カバレッジ閾値を各shard内で検証し、1つでも未達ならそのshardが失敗する
 
-### lintジョブ
+| パッケージ | 閾値 | 理由 |
+|---|---|---|
+| `internal/api/admin` | 80% | `handler_stubs.go`にSMTP / queue / DB集計等の外部依存が多く90%に届かない。現状83.8%と小マージンのため80%でロック |
+| `internal/server` | 0% | 大部分が`router.go`のwire層 (handler配線 / middleware設定) で、e2e / drop-in test経由で実挙動を検証する設計。個別handler (`avatar.go`等) は`_test.go`で個別にカバーする運用 |
+| `internal/testutil` | 0% | mock / test helper専用でproduction codeを含まない |
+| `e2e` 配下 | 0% | 実挙動カバレッジで測る意味が薄い |
+| それ以外 | 90% | |
+
+- `test`ジョブは`needs: test-shards` / `if: always()`で全shardを束ね、branch protectionが要求する`test`という単一checkを公開する。いずれかのshardが失敗すれば`exit 1`
+
+#### lintジョブ
 - `go vet ./...`
 - `gofmt -s -d .`で差分チェック (差分ありで失敗)
+
+### 非ブロッキングのPRチェック
+
+以下はPRで走るが**required checksには入っていない**ので、落ちてもマージはブロックされない。赤いチェックとして表示されるので、内容を確認して別PRで対処する。
+
+| workflow | 対象 | 内容 |
+|---|---|---|
+| `Playwright` | `internal/**` `cmd/**` `migration/**` `tests/playwright/**` 等 | mk-go backendに対するPlaywright spec。Misskey TS backendでの実行は`workflow_dispatch`のみ |
+| `Drop-in e2e` | `internal/**` `cmd/**` `migration/**` `tests/dropin/**` 等 | `make dropin-swap-test`によるTS↔mk-go切替検証 |
+
+### nightly
+
+`Drop-in frontend e2e`のみscheduleで実行される (cypress + 3インスタンスでflake要素が多く、Playwrightとカバー範囲も重なるため)。
+
+### CI失敗時の対応
+
+- カバレッジ不足 → テストケースを追加してから再push
+- `gofmt`差分 → `make fmt`を実行してから再push
+- テスト失敗 → CIログを読み、ローカルで再現させてから修正する。`--no-verify`等でフックを飛ばさない
+- testcontainersのskip-on-failure起因のflakeがあるため、PRと無関係な失敗は再実行で解消することがある
