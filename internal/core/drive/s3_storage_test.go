@@ -23,6 +23,18 @@ type mockS3API struct {
 	getBody   io.ReadCloser
 	getErr    error
 	deleteErr error
+
+	// multipart (#2313)
+	createInput    *s3.CreateMultipartUploadInput
+	createUploadID string
+	createErr      error
+	uploadInputs   []*s3.UploadPartInput
+	uploadETag     string
+	uploadErr      error
+	completeInput  *s3.CompleteMultipartUploadInput
+	completeErr    error
+	abortInput     *s3.AbortMultipartUploadInput
+	abortErr       error
 }
 
 func (m *mockS3API) PutObject(_ context.Context, input *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
@@ -39,6 +51,40 @@ func (m *mockS3API) GetObject(_ context.Context, _ *s3.GetObjectInput, _ ...func
 
 func (m *mockS3API) DeleteObject(_ context.Context, _ *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
 	return &s3.DeleteObjectOutput{}, m.deleteErr
+}
+
+func (m *mockS3API) CreateMultipartUpload(_ context.Context, input *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.createInput = input
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	id := m.createUploadID
+	return &s3.CreateMultipartUploadOutput{UploadId: &id}, nil
+}
+
+func (m *mockS3API) UploadPart(_ context.Context, input *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	m.uploadInputs = append(m.uploadInputs, input)
+	if m.uploadErr != nil {
+		return nil, m.uploadErr
+	}
+	etag := m.uploadETag
+	return &s3.UploadPartOutput{ETag: &etag}, nil
+}
+
+func (m *mockS3API) CompleteMultipartUpload(_ context.Context, input *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	m.completeInput = input
+	if m.completeErr != nil {
+		return nil, m.completeErr
+	}
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockS3API) AbortMultipartUpload(_ context.Context, input *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	m.abortInput = input
+	if m.abortErr != nil {
+		return nil, m.abortErr
+	}
+	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -179,3 +179,35 @@ func readAllString(t *testing.T, r io.Reader) string {
 	require.NoError(t, err)
 	return string(b)
 }
+
+// #2313 との統合: 分割アップロードは backend が MultipartStorage を満たすかで
+// 可否が決まる。MetaStorage が挟まると素の型アサーションでは常に false に
+// なるので、ResolveStorage 越しに判定する必要がある。
+func TestResolveStorage_MultipartCapabilityThroughMetaStorage(t *testing.T) {
+	current := &model.Meta{ID: "x"} // object storage 無効
+	st := NewMetaStorage(func() (*model.Meta, error) { return current, nil }, t.TempDir(), "https://example.com/files")
+
+	// MetaStorage 自身への直接アサーションは常に失敗する (= 素で書くと分割
+	// アップロードが永久に無効になる)。
+	var raw Storage = st
+	if _, ok := raw.(MultipartStorage); ok {
+		t.Fatal("MetaStorage itself must not satisfy MultipartStorage")
+	}
+
+	// ローカル backend は非対応。
+	if _, ok := ResolveStorage(st).(MultipartStorage); ok {
+		t.Error("local storage must not report multipart capability")
+	}
+
+	// オブジェクトストレージへ切り替えたら、再起動なしで対応になる。
+	current = objectStorageMeta()
+	if _, ok := ResolveStorage(st).(MultipartStorage); !ok {
+		t.Error("object storage must report multipart capability through ResolveStorage")
+	}
+
+	// 戻せば非対応に戻る。
+	current = &model.Meta{ID: "x"}
+	if _, ok := ResolveStorage(st).(MultipartStorage); ok {
+		t.Error("disabling object storage must drop multipart capability")
+	}
+}
