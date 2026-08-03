@@ -10,8 +10,14 @@ import (
 // User represents the `user` table.
 // Misskey互換のカラム名・型を維持する
 type User struct {
-	ID               string     `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	UpdatedAt        *time.Time `gorm:"column:updatedAt;type:timestamp with time zone" json:"updatedAt"`
+	ID string `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	// upstream が user.updatedAt を書くのは NoteCreateService.incNotesCountOfUser
+	// (= ノート投稿時) の 1 箇所だけで、i/update でもプロフィール更新でも触らない。
+	// GORM は `UpdatedAt` という名前の field を規約で自動更新するため、放置すると
+	// 全 user 行書き込み (lastActiveDate の 5 分おき更新を含む) で bump され、
+	// 意味が「最終アクセス時刻」に化けて state:'alive' フィルタや +updatedAt sort が
+	// 壊れる。自動更新を切り、IncrementNotesCount で明示的に書く (#2285)。
+	UpdatedAt        *time.Time `gorm:"column:updatedAt;type:timestamp with time zone;autoUpdateTime:false;autoCreateTime:false" json:"updatedAt"`
 	LastFetchedAt    *time.Time `gorm:"column:lastFetchedAt;type:timestamp with time zone" json:"lastFetchedAt"`
 	LastActiveDate   *time.Time `gorm:"column:lastActiveDate;type:timestamp with time zone" json:"lastActiveDate"`
 	HideOnlineStatus bool       `gorm:"column:hideOnlineStatus;default:false" json:"hideOnlineStatus"`

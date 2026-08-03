@@ -224,9 +224,17 @@ func (r *userRepository) IncrementFollowersCount(userID string, delta int) error
 }
 
 func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
-	return r.db.Model(&model.User{}).
-		Where("id = ?", userID).
-		UpdateColumn("notesCount", gorm.Expr("\"notesCount\" + ?", delta)).Error
+	q := r.db.Model(&model.User{}).Where("id = ?", userID)
+	if delta > 0 {
+		// upstream incNotesCountOfUser は notesCount の増分と同時に
+		// updatedAt を現在時刻で書く。削除側 (delta < 0) では触らない
+		// ので、ここも増分時のみ更新する (#2285)。
+		return q.UpdateColumns(map[string]any{
+			"notesCount": gorm.Expr("\"notesCount\" + ?", delta),
+			"updatedAt":  time.Now(),
+		}).Error
+	}
+	return q.UpdateColumn("notesCount", gorm.Expr("\"notesCount\" + ?", delta)).Error
 }
 
 // SearchUsers searches users by display name (ILIKE partial) OR username (prefix

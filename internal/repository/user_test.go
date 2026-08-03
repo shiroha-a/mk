@@ -823,9 +823,9 @@ func TestUserRepository_ListUsers_UpdatedAtSortNonNull(t *testing.T) {
 	defer cleanupUser(t, withUpd.ID)
 	noUpd := insertTestUser(t, "lu_upd_n", "luupdn")
 	defer cleanupUser(t, noUpd.ID)
-	// GORM は UpdatedAt を Create 時に自動設定するため、NULL updatedAt は明示的に
-	// 落として作る (upstream TypeORM では未更新 user の updatedAt が NULL になりうる)。
-	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = NULL WHERE id = ?`, noUpd.ID).Error)
+	// updatedAt は upstream 同様ノート投稿時にしか書かれない (#2285) ので、
+	// Create 直後は両者とも NULL。片方だけ明示的に立てて対比させる。
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "updatedAt" = now() WHERE id = ?`, withUpd.ID).Error)
 
 	idSet := func(filter model.UserListFilter) map[string]bool {
 		us, err := repo.ListUsers(filter)
