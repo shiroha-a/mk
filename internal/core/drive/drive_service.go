@@ -161,6 +161,10 @@ type Service struct {
 	// 指す backend。storage が object storage に切り替わっても、切替前に
 	// 保存されたファイルはこちらにある (#1414 / #2315)。
 	localStorage Storage
+	// 分割アップロード (#2313)。両方が配線され、かつ storage が
+	// MultipartStorage を満たすときだけ機能が有効になる。
+	chunkedRepo     repository.ChunkedUploadSessionRepository
+	chunkedSettings func() ChunkedUploadSettings
 }
 
 // SetFolderStreamingPublisher attaches the drive-channel publisher for folder
@@ -300,6 +304,22 @@ type UploadInput struct {
 	// の経路では空のままで OK (= row column は nil / "{}" のまま)。
 	RequestIP      *string
 	RequestHeaders datatypes.JSON
+	// PreStored marks the body as already present in storage, so Upload skips
+	// its own Put and adopts the given key/URL for the main object. Set by the
+	// chunked upload path (#2313), where the object was assembled by the
+	// storage backend's multipart API.
+	//
+	// 呼び出し側の責務: dedup で既存 file が返ったときや Upload がエラーを
+	// 返したときは、pre-stored object を消すこと。Upload は自分で Put して
+	// いない object の後始末を、fileRepo.Create 失敗の rollback 以外では
+	// 行わない。
+	PreStored *PreStoredObject
+}
+
+// PreStoredObject identifies an object that already exists in storage.
+type PreStoredObject struct {
+	AccessKey string
+	URL       string
 }
 
 // Upload writes a file to storage and creates a drive_file row. もし同じmd5の
@@ -393,16 +413,31 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	// backend は meta から動的に解決される (#2315)。本体・サムネイル・
 	// webpublic の書き込みと storedInternal の決定が途中の設定変更で
 	// ちぐはぐにならないよう、ここで一度だけ固定する。
+	//
+	// PreStored (#2313) の場合も同じ backend を使う。分割アップロードは
+	// MultipartStorage を要求するので backend は必ず object storage 側であり、
+	// storedInternal は false になる。
 	backend := ResolveStorage(s.storage)
 	storedInternal := StorageIsLocal(backend)
 
-	accessKey, err := newAccessKey()
-	if err != nil {
-		return nil, err
-	}
-	url, err := backend.Put(accessKey, bytes.NewReader(info.Body))
-	if err != nil {
-		return nil, err
+	var accessKey, url string
+	if in.PreStored != nil {
+		// chunked upload (#2313) は既に multipart で object を組み終えている。
+		// ここで Put し直すと本体をもう一度丸ごと転送することになるので skip する。
+		// 以降の gate (dedup / folder 所有権) を通らなかった場合の後始末は
+		// 呼び出し側が行う。
+		accessKey = in.PreStored.AccessKey
+		url = in.PreStored.URL
+	} else {
+		var err error
+		accessKey, err = newAccessKey()
+		if err != nil {
+			return nil, err
+		}
+		url, err = backend.Put(accessKey, bytes.NewReader(info.Body))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 画像/動画処理 (best-effort)
