@@ -11,6 +11,7 @@ require (
 	github.com/bbrks/go-blurhash v1.2.0
 	github.com/blezek/tga v0.0.0-20150626111426-80720cbc1017
 	github.com/forPelevin/gomoji v1.4.1
+	github.com/gabriel-vasile/mimetype v1.4.15
 	github.com/gen2brain/avif v0.4.4
 	github.com/gen2brain/heic v0.4.9
 	github.com/gen2brain/jpegxl v0.4.5
@@ -35,6 +36,7 @@ require (
 	github.com/piprate/json-gold v0.8.0
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/shiroha-a/mkq v1.0.3
 	github.com/shirou/gopsutil/v4 v4.26.3
@@ -141,7 +143,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/pquerna/cachecontrol v0.2.0 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

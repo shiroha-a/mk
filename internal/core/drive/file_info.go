@@ -5,7 +5,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"io"
-	"net/http"
 )
 
 // FileInfo holds the result of analysing an uploaded file's bytes.
@@ -26,7 +25,7 @@ func AnalyseFile(body io.Reader) (*FileInfo, error) {
 	}
 	bytes := buf.Bytes()
 	sum := md5.Sum(bytes)
-	mime := http.DetectContentType(bytes)
+	mime := DetectMIME(bytes)
 	return &FileInfo{
 		Body:     bytes,
 		Size:     len(bytes),
