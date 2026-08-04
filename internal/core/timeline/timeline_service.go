@@ -3,6 +3,7 @@ package timeline
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -32,11 +33,28 @@ type Service struct {
 	fanout        *FanoutTimelineService
 	noteRepo      repository.NoteRepository
 	followingRepo repository.FollowingRepository
+	// ephemeral はリレー経由でしか観測しない投稿の置き場 (#2332)。DB に無い
+	// ID をここから補う。nil なら従来どおり DB のみ。
+	ephemeral EphemeralNoteLookup
+}
+
+// EphemeralNoteLookup resolves notes that live only in Redis (#2332).
+// Implemented by ephemeral.Store; ここで narrow interface にしておくことで
+// timeline のテストが Redis 無しで書ける。
+type EphemeralNoteLookup interface {
+	GetNotes(ctx context.Context, ids []string) ([]*model.Note, error)
 }
 
 // NewService creates a new timeline Service.
 func NewService(fanout *FanoutTimelineService, noteRepo repository.NoteRepository, followingRepo repository.FollowingRepository) *Service {
 	return &Service{fanout: fanout, noteRepo: noteRepo, followingRepo: followingRepo}
+}
+
+// SetEphemeralLookup attaches the ephemeral note store so timelines can show
+// relay-delivered notes that were never written to the database (#2332).
+// Optional — nil keeps the database-only behaviour.
+func (s *Service) SetEphemeralLookup(l EphemeralNoteLookup) {
+	s.ephemeral = l
 }
 
 // HomeTimeline returns the timeline for a logged-in user. The home timeline
@@ -53,7 +71,7 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ids)
+		notes, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +98,7 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ids)
+		notes, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -107,7 +125,7 @@ func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilI
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ids)
+		notes, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -134,7 +152,7 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 	}
 	merged := mergeIDs(multi, limit)
 	if len(merged) > 0 {
-		notes, err := s.resolve(merged)
+		notes, err := s.resolve(ctx, merged)
 		if err != nil {
 			return nil, err
 		}
@@ -229,11 +247,44 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 }
 
 // resolve fetches notes from the repository preserving id ordering.
-func (s *Service) resolve(ids []string) ([]*model.Note, error) {
+func (s *Service) resolve(ctx context.Context, ids []string) ([]*model.Note, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	return s.noteRepo.FindManyByIDsWithUser(ids)
+	notes, err := s.noteRepo.FindManyByIDsWithUser(ids)
+	if err != nil {
+		return nil, err
+	}
+	if s.ephemeral == nil || len(notes) == len(ids) {
+		return notes, nil
+	}
+
+	// DB に無かった ID は ephemeral (リレー由来で未 materialize) かもしれない。
+	found := make(map[string]struct{}, len(notes))
+	for _, n := range notes {
+		found[n.ID] = struct{}{}
+	}
+	missing := make([]string, 0, len(ids)-len(notes))
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+
+	eph, err := s.ephemeral.GetNotes(ctx, missing)
+	if err != nil {
+		// Redis 障害で timeline 全体を落とさない。DB 分だけ返せば、呼び出し側の
+		// 件数不足判定が DB fallback に倒してくれる。
+		slog.WarnContext(ctx, "timeline: ephemeral lookup failed", "err", err)
+		return notes, nil
+	}
+	if len(eph) == 0 {
+		return notes, nil
+	}
+
+	merged := append(notes, eph...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
+	return merged, nil
 }
 
 // mergeIDs flattens multiple ID slices, deduplicates, sorts id desc and caps.
