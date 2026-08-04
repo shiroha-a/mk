@@ -1290,6 +1290,17 @@ func (r *noteRepository) ListGlobalTimeline(limit int, sinceID, untilID string, 
 // ON DELETE CASCADE が reactions / replies 等に効く前提。
 // mk-go の note テーブルには createdAt カラムが無い (aidx ID から時刻を
 // 導出する設計) ため、ID 文字列の lexicographic 比較で時刻切り捨てを行う。
+//
+// 保持条件は upstream CleanRemoteNotesProcessorService の removalCriteria に
+// 対応する (#2329)。ローカルユーザーが手を加えたリモートノートは、期限を過ぎても
+// 消さない。これが無いと、クリップに入れた・ピン留めした・お気に入りにした投稿が
+// 本人の操作と無関係に消える。
+//
+// `clip_note` を直接見るのは mk-go 固有の追加。upstream は非正規化カウンタの
+// `clippedCount = 0` で判定するが、mk-go はカウンタを維持せず clip_note を数える
+// 設計 (#2243) なので `clippedCount` は常に 0 で、upstream の条件をそのまま
+// 移植してもクリップを保護できない。`clippedCount` / `pageCount` の比較自体は
+// TS から切り戻したインスタンス (= カウンタが実際に入っている行) のために残す。
 func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (int64, error) {
 	if batchSize <= 0 {
 		batchSize = 100
@@ -1297,9 +1308,18 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 	cutoffID := aidxCutoffID(time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour))
 	res := r.db.Exec(`
 		DELETE FROM "note" WHERE id IN (
-			SELECT id FROM "note"
-			WHERE "userHost" IS NOT NULL
-			  AND id < ?
+			SELECT n.id FROM "note" n
+			WHERE n."userHost" IS NOT NULL
+			  AND n.id < ?
+			  AND n."clippedCount" = 0
+			  AND n."pageCount" = 0
+			  AND NOT EXISTS (SELECT 1 FROM "clip_note" c WHERE c."noteId" = n.id)
+			  AND NOT EXISTS (SELECT 1 FROM "user_note_pining" p WHERE p."noteId" = n.id)
+			  AND NOT EXISTS (SELECT 1 FROM "note_favorite" f WHERE f."noteId" = n.id)
+			  AND NOT EXISTS (
+			        SELECT 1 FROM "note_reaction" rc
+			        INNER JOIN "user" u ON u.id = rc."userId"
+			        WHERE rc."noteId" = n.id AND u.host IS NULL)
 			LIMIT ?
 		)`, cutoffID, batchSize)
 	if res.Error != nil {

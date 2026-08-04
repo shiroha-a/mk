@@ -344,6 +344,7 @@ worker 数だけは upstream の 16 に対し mk-go は 4。実体削除は S3 �
 | webhook の note embed gate | note/reply/renote で skipHide | 全イベントで gate、viewer/repo nil は fail-closed |
 | streaming / 通知の未知 visibility | — | fail-closed (誤配信しない) |
 | URL preview の scheme 判定 | 生文字列の case-sensitive `startsWith` | case-insensitive (RFC 3986 準拠)。非 http(s) の thumbnail / icon は値を落とす |
+| `cleanRemoteNotes` のクリップ保持 | `note.clippedCount = 0` で判定 | 加えて `clip_note` を直接 `NOT EXISTS` で見る。mk-go はクリップ件数の非正規化カウンタを維持せず `clip_note` を数える設計 (#2243) なので `clippedCount` は常に 0 で、upstream の条件をそのまま移植するとクリップ済みノートを保護できない (#2329)。`clippedCount` / `pageCount` の比較自体は TS から切り戻したインスタンスのために残してある |
 | `securityKeysAvailable` | unset-mfa で触らない (`securityKeys` を毎回 count するため陳腐化しない) | 全鍵削除に合わせ false にする (mk-go は列をキャッシュとして読むため) |
 | fetch-rss の URL 正規化 | WHATWG `new URL()` | host 小文字化 / default port 除去 / 空 path 補完まで再現。**IDN の punycode 変換 (UTS#46) は行わない** (取得は成功するが Unicode 表記と punycode 表記で cache key が分かれる)。空 userinfo (`http://@example.com/`) は upstream が許可するのに対し拒否 |
 
