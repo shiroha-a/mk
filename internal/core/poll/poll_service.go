@@ -2,6 +2,7 @@
 package poll
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -74,6 +75,9 @@ type Service struct {
 	federationHook   FederationDeliveryHook
 	blockingChecker  BlockingChecker
 	nowFn            func() time.Time
+	// materializer はリレー由来で DB に無い投票対象を昇格させる (#2332)。
+	// poll_vote.noteId が note への外部キー。
+	materializer NoteMaterializer
 }
 
 // NewService constructs a PollService.
@@ -129,6 +133,9 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 	}
 
 	target, err := s.noteRepo.FindByIDWithUser(noteID)
+	if s.materializeIfMissing(noteID, err) {
+		target, err = s.noteRepo.FindByIDWithUser(noteID)
+	}
 	if err != nil {
 		return ErrNoteNotFound
 	}
@@ -223,4 +230,27 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 	_ = s.notificationHook
 
 	return nil
+}
+
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (s *Service) SetNoteMaterializer(m NoteMaterializer) {
+	s.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the database
+// lookup already failed.
+//
+// 通常のノートでは Redis を一切引かないので、ホットパスに追加コストが無い。
+func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || s.materializer == nil {
+		return false
+	}
+	_, err := s.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
 }

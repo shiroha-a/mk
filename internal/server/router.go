@@ -2459,6 +2459,13 @@ func (s *Server) setupRoutes() {
 	// リレー投稿を DB ではなく Redis へ書く経路 (#2332)。有効化されていない
 	// 間は ResolveNoteEphemeral が通常経路へ倒れるので挙動は変わらない。
 	federationResolver.SetEphemeralSink(ephemeralStore)
+	// ephemeral note を DB 行へ昇格させる経路 (#2332)。外部キーで参照される
+	// 必要が生じた時点だけで呼ばれる。閲覧では呼ばない (リンクを踏まれるたびに
+	// 永続化されると DB を膨らませない目的が崩れる)。
+	ephemeralMaterializer := coreephemeral.NewMaterializer(ephemeralStore, noteRepo, federationResolver)
+	reactionService.SetNoteMaterializer(ephemeralMaterializer)   // note_reaction.noteId
+	noteCreateService.SetNoteMaterializer(ephemeralMaterializer) // note.replyId / renoteId
+	pollService.SetNoteMaterializer(ephemeralMaterializer)       // poll_vote.noteId
 	// DB 行が ephemeral を上書きしたとき FTT から旧 ID を除く。残すと hydrate で
 	// ephemeral 側が拾われ二重表示になる。
 	federationResolver.SetEphemeralTimelineRemover(timelineFanoutHook)

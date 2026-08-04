@@ -217,11 +217,15 @@ type CreateService struct {
 	noteRepo repository.NoteRepository
 	// rolePolicyProvider は mentionLimit の gate に使う (#2321)。nil なら
 	// DefaultMentionLimit にフォールバックする。
-	rolePolicyProvider  RolePolicyProvider
-	pollRepo            repository.PollRepository
-	followingRepo       repository.FollowingRepository
-	idGen               id.Generator
-	fanoutHook          TimelineFanoutHook
+	rolePolicyProvider RolePolicyProvider
+	pollRepo           repository.PollRepository
+	followingRepo      repository.FollowingRepository
+	idGen              id.Generator
+	fanoutHook         TimelineFanoutHook
+	// materializer はリレー由来で DB に無い返信 / renote 対象を昇格させる
+	// (#2332)。note.replyId / renoteId は note への外部キーなので、行が無いと
+	// INSERT が失敗する。
+	materializer        NoteMaterializer
 	notificationHook    NotificationHook
 	federationHook      FederationHook
 	channelHook         ChannelHook
@@ -436,6 +440,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 			go func() {
 				defer wg.Done()
 				replyTarget, replyFetchErr = s.noteRepo.FindByIDWithUser(*in.ReplyID)
+				if s.materializeIfMissing(*in.ReplyID, replyFetchErr) {
+					replyTarget, replyFetchErr = s.noteRepo.FindByIDWithUser(*in.ReplyID)
+				}
 			}()
 		}
 		if in.RenoteID != nil {
@@ -443,6 +450,9 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 			go func() {
 				defer wg.Done()
 				renoteTarget, renoteFetchErr = s.noteRepo.FindByIDWithUser(*in.RenoteID)
+				if s.materializeIfMissing(*in.RenoteID, renoteFetchErr) {
+					renoteTarget, renoteFetchErr = s.noteRepo.FindByIDWithUser(*in.RenoteID)
+				}
 			}()
 		}
 		wg.Wait()
@@ -1332,4 +1342,27 @@ func (s *CreateService) checkRenoteOutsideOfChannel(channelID string) error {
 		return ErrCannotRenoteOutsideOfChannel
 	}
 	return nil
+}
+
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (s *CreateService) SetNoteMaterializer(m NoteMaterializer) {
+	s.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the database
+// lookup already failed.
+//
+// 通常のノートでは Redis を一切引かないので、ホットパスに追加コストが無い。
+func (s *CreateService) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || s.materializer == nil {
+		return false
+	}
+	_, err := s.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
 }

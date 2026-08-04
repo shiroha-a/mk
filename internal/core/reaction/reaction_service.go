@@ -167,9 +167,13 @@ type Service struct {
 	webhookHook      WebhookHook
 	noteStreamHook   NoteStreamHook
 	countWriter      ReactionCountWriter
-	userRoles        UserRolesProvider
-	mediaSilence     MediaSilenceChecker
-	featuredRanking  FeaturedRanking
+	// materializer はリレー由来で DB に無いノートを昇格させる (#2332)。
+	// note_reaction.noteId が note への外部キーなので、行が無いと INSERT が
+	// 失敗する。nil なら従来どおり DB のみを見る。
+	materializer    NoteMaterializer
+	userRoles       UserRolesProvider
+	mediaSilence    MediaSilenceChecker
+	featuredRanking FeaturedRanking
 	// randFn は featured ランキング更新の 30% sampling 用。テストで固定する。
 	randFn func() float64
 }
@@ -247,6 +251,29 @@ func (s *Service) SetWebhookHook(h WebhookHook) {
 	s.webhookHook = h
 }
 
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (s *Service) SetNoteMaterializer(m NoteMaterializer) {
+	s.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the database
+// lookup already failed.
+//
+// 通常のノートでは Redis を一切引かないので、ホットパスに追加コストが無い。
+func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || s.materializer == nil {
+		return false
+	}
+	_, err := s.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
+}
+
 // SetNoteStreamHook attaches a NoteStreamHook invoked after a reaction is
 // created or removed so the stream layer can publish reacted/unreacted
 // events to the per-note pubsub topic (#700)。
@@ -267,6 +294,9 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 	// FindByIDWithUser を使うと webhook 受信側が note.renote / reply の
 	// 欠落で Misskey TS 互換が崩れる。
 	target, err := s.noteRepo.FindByIDWithRelations(noteID)
+	if s.materializeIfMissing(noteID, err) {
+		target, err = s.noteRepo.FindByIDWithRelations(noteID)
+	}
 	if err != nil {
 		return "", ErrNoteNotFound
 	}
