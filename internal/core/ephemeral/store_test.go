@@ -228,3 +228,131 @@ func TestStore_NilSafe(t *testing.T) {
 	assert.NoError(t, s.DropNote(ctx, "n1", "uri"))
 	assert.NoError(t, s.Touch(ctx, nil))
 }
+
+// --- 設定と縮退経路 ---
+
+// TTL 未設定 / 非正の値では既定値にフォールバックすること。
+func TestStore_TTLFallback(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		ttl  func() time.Duration
+	}{
+		{"ttl 関数が nil", nil},
+		{"ttl が 0", func() time.Duration { return 0 }},
+		{"ttl が負", func() time.Duration { return -time.Minute }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRedis.FlushAll(ctx)
+			s := ephemeral.NewStore(testRedis.Client, "example.com:", tc.ttl)
+			require.NoError(t, s.PutNote(ctx, sampleNote("n1", "https://remote.example/notes/1", "u1"),
+				sampleUser("u1", "https://remote.example/users/alice")))
+			got, err := s.GetNote(ctx, "n1")
+			require.NoError(t, err)
+			assert.NotNil(t, got, "既定 TTL で保存されていること")
+		})
+	}
+}
+
+// 著者 URI が無い actor でもノート自体は保存できること (逆引きだけ張らない)。
+func TestStore_PutNote_AuthorWithoutURI(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	u := sampleUser("u1", "")
+	u.URI = nil
+
+	require.NoError(t, s.PutNote(ctx, sampleNote("n1", "https://remote.example/notes/1", "u1"), u))
+	got, err := s.GetNote(ctx, "n1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotNil(t, got.User)
+}
+
+// 著者が TTL 切れで引けなくてもノートは落とさない。
+// timeline 全体が欠けるより、著者 nil で返す方がまし。
+func TestStore_GetNotes_AuthorMissingKeepsNote(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	uri := "https://remote.example/notes/1"
+	require.NoError(t, s.PutNote(ctx, sampleNote("n1", uri, "u1"),
+		sampleUser("u1", "https://remote.example/users/alice")))
+	// 著者キーだけ落とす
+	require.NoError(t, testRedis.Client.Del(ctx, "example.com:ephUser:u1").Err())
+
+	got, err := s.GetNotes(ctx, []string{"n1"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0].User)
+}
+
+// 壊れた JSON が入っていても panic せず、その ID だけ落として返す。
+func TestStore_GetNotes_MalformedEntry(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	require.NoError(t, s.PutNote(ctx, sampleNote("n1", "https://remote.example/notes/1", "u1"),
+		sampleUser("u1", "https://remote.example/users/alice")))
+	require.NoError(t, testRedis.Client.Set(ctx, "example.com:ephNote:broken", "{not json", time.Minute).Err())
+
+	got, err := s.GetNotes(ctx, []string{"broken", "n1"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "n1", got[0].ID)
+}
+
+func TestStore_GetUser_Malformed(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	require.NoError(t, testRedis.Client.Set(ctx, "example.com:ephUser:u1", "{not json", time.Minute).Err())
+
+	got, err := s.GetUser(ctx, "u1")
+	assert.Error(t, err)
+	assert.Nil(t, got)
+}
+
+func TestStore_GetUser_EmptyID(t *testing.T) {
+	s := newStore(t, time.Minute)
+	got, err := s.GetUser(context.Background(), "")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestStore_LookupID_EmptyURI(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	nid, err := s.NoteIDByURI(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, nid)
+}
+
+func TestStore_GetNotes_EmptyInput(t *testing.T) {
+	s := newStore(t, time.Minute)
+	got, err := s.GetNotes(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// URI 無しでも DropNote が動くこと (逆引きキーを消さないだけ)。
+func TestStore_DropNote_WithoutURI(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+	require.NoError(t, s.PutNote(ctx, sampleNote("n1", "https://remote.example/notes/1", "u1"),
+		sampleUser("u1", "https://remote.example/users/alice")))
+
+	require.NoError(t, s.DropNote(ctx, "n1", ""))
+	got, err := s.GetNote(ctx, "n1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestStore_DropNote_EmptyID(t *testing.T) {
+	s := newStore(t, time.Minute)
+	assert.NoError(t, s.DropNote(context.Background(), "", "uri"))
+}
+
+// URI / UserID を持たないノートでも Touch が落ちないこと。
+func TestStore_Touch_MinimalNote(t *testing.T) {
+	s := newStore(t, time.Minute)
+	assert.NoError(t, s.Touch(context.Background(), &model.Note{ID: "n1"}))
+}
