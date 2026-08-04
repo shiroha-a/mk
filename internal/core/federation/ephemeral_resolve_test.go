@@ -349,3 +349,74 @@ func TestResolveNoteEphemeral_DisabledFallsBackToDB(t *testing.T) {
 	assert.NotEmpty(t, noteRepo.Notes, "無効時は従来どおり DB に入ること")
 	assert.Empty(t, sink.notes, "無効時は ephemeral に入れないこと")
 }
+
+// --- MaterializeActor (ID 据え置き) ---
+
+// materialize では ephemeral 時に採番した ID をそのまま使う。
+// 新規採番にすると、Redis に残っている既存ノートが古い ID を指したままになり
+// ミュートが効かなくなる。
+func TestMaterializeActor_ReusesPreassignedID(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, userRepo := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+
+	got, err := r.MaterializeActor(actorURI, "preassigned-id")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "preassigned-id", got.ID, "採番済み ID が使われること")
+	assert.Contains(t, userRepo.Users, "preassigned-id")
+}
+
+// ID を渡さなければ通常どおり新規採番する。
+func TestMaterializeActor_GeneratesIDWhenNotPreassigned(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, _ := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+
+	got, err := r.MaterializeActor(actorURI, "")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotEmpty(t, got.ID)
+	assert.NotEqual(t, "preassigned-id", got.ID)
+}
+
+// 既に DB に在る actor は ID を上書きせずそのまま返す。
+func TestMaterializeActor_ExistingRowWins(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, userRepo := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+	host := "remote.example"
+	userRepo.Users["already"] = &model.User{ID: "already", Username: "alice", Host: &host, URI: &actorURI}
+
+	got, err := r.MaterializeActor(actorURI, "different-id")
+	require.NoError(t, err)
+	assert.Equal(t, "already", got.ID, "既存行の ID を勝手に変えないこと")
+}
+
+func TestMaterializeActor_FetchFailure(t *testing.T) {
+	r, _, _, _ := ephResolverDocs(t, map[string]string{})
+	_, err := r.MaterializeActor("https://remote.example/users/ghost", "x")
+	assert.Error(t, err)
+}
+
+// 著者解決の 2 番目の分岐: ephemeral store の URI 逆引きで ID を再利用する。
+// これが無いと投稿ごとに別 ID を採番して同一人物が別人として並ぶ。
+func TestResolveNoteAuthor_ReusesEphemeralUserID(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	noteURI := "https://remote.example/notes/2"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "second post",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, _, _ := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+
+	// 1 件目で採番された著者 ID を store に記録しておく。
+	host := "remote.example"
+	sink.authors["existing-author"] = &model.User{ID: "existing-author", Host: &host, URI: &actorURI}
+	sink.byURI[actorURI] = "existing-author"
+
+	note, err := r.ResolveNoteEphemeral(noteURI)
+	require.NoError(t, err)
+	assert.Equal(t, "existing-author", note.UserID, "2 件目も同じ著者 ID を使うこと")
+}
