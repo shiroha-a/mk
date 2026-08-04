@@ -508,6 +508,10 @@ func (h *Hook) recordNoteUnreads(n *model.Note, author *model.User, mentionedIDs
 				continue
 			}
 		}
+		// ephemeral note (リレー由来で DB に無い) では note_unread.noteId の
+		// 外部キーを張れないので Upsert が失敗する。materialize しないのは
+		// antenna と同じ理由 (#2332)。mention / specified は直接配送でも届く
+		// ため DB に在ることがほとんどで、実害は小さい。
 		row := &model.NoteUnread{
 			ID:          h.svc.idGen.Generate(now),
 			UserID:      uid,

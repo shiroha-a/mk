@@ -30,16 +30,21 @@ import (
 
 // Handler handles note-related API endpoints.
 type Handler struct {
-	noteRepo          repository.NoteRepository
-	createService     *note.CreateService
-	deleteService     *note.DeleteService
-	queryService      *note.QueryService
-	timelineService   *timeline.Service
-	reactionService   *reaction.Service
-	pollService       *poll.Service
-	searchService     *search.Service
-	idGen             id.Generator
-	favoriteRepo      repository.NoteFavoriteRepository
+	noteRepo        repository.NoteRepository
+	createService   *note.CreateService
+	deleteService   *note.DeleteService
+	queryService    *note.QueryService
+	timelineService *timeline.Service
+	reactionService *reaction.Service
+	pollService     *poll.Service
+	searchService   *search.Service
+	idGen           id.Generator
+	favoriteRepo    repository.NoteFavoriteRepository
+	// materializer はリレー由来で DB に無いノートを昇格させる (#2332)。
+	// note_favorite.noteId が note への外部キーなので、行が無いと INSERT が
+	// 失敗する。favorite には core service が無く、この handler が FK 行を
+	// 書いているためここが差し込み口になる。
+	materializer      NoteMaterializer
 	driveFileRepo     repository.DriveFileRepository
 	draftRepo         repository.NoteDraftRepository
 	pollRepo          repository.PollRepository

@@ -530,6 +530,16 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 		}
 		// unread tracking: antenna の所有者に対して未読 row を挿入する。
 		// Self-authored note は未読扱いしない (TS本家の挙動に合わせる)。
+		//
+		// ここでは ephemeral note の materialize を **あえて行わない** (#2332)。
+		// antenna_note_unread.noteId は note への外部キーなので、リレー由来で
+		// DB に無いノートでは Upsert が失敗して未読が付かない。それでも
+		// materialize しないのは、広い条件の antenna を 1 つ作るだけで全ての
+		// リレー投稿が DB に落ち、機能そのものが無効化されてしまうため。
+		//
+		// antenna のタイムライン自体は Redis の fanout で成立するので、欠ける
+		// のは未読バッジの件数だけ。ユーザーが実際に触れば (リアクション等)
+		// そこで materialize される。
 		if s.unreadRepo != nil && a.UserID != author.ID {
 			_ = s.unreadRepo.Create(&model.AntennaNoteUnread{
 				ID:        s.idGen.Generate(now),

@@ -2470,6 +2470,11 @@ func (s *Server) setupRoutes() {
 	// ノートを伴わない契機。いずれも user への外部キーだけを要求する。
 	mutingService.SetUserMaterializer(ephemeralMaterializer)   // muting.muteeId
 	blockingService.SetUserMaterializer(ephemeralMaterializer) // blocking.blockeeId
+	notesHandler.SetNoteMaterializer(ephemeralMaterializer)    // note_favorite.noteId
+	clipsHandler.SetNoteMaterializer(ephemeralMaterializer)    // clips/add-note の事前チェック
+	// 閲覧経路は Redis から返すだけで materialize しない。読み取りのたびに
+	// TTL を打ち直して「開いた直後に期限切れ」を防ぐ。
+	noteQueryService.SetEphemeralReader(ephemeralStore)
 	// DB 行が ephemeral を上書きしたとき FTT から旧 ID を除く。残すと hydrate で
 	// ephemeral 側が拾われ二重表示になる。
 	federationResolver.SetEphemeralTimelineRemover(timelineFanoutHook)

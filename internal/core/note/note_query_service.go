@@ -1,6 +1,7 @@
 package note
 
 import (
+	"context"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -11,6 +12,42 @@ type QueryService struct {
 	followingRepo  repository.FollowingRepository
 	favoriteRepo   repository.NoteFavoriteRepository
 	threadMuteRepo repository.NoteThreadMutingRepository
+	// ephemeral はリレー由来で DB に無いノートの読み取り元 (#2332)。
+	// **読み取り専用**。閲覧では materialize しない (リンクを踏まれるたびに
+	// 永続化されると DB を膨らませない目的が崩れる)。
+	ephemeral EphemeralNoteReader
+}
+
+// EphemeralNoteReader reads relay-delivered notes that live only in Redis
+// (#2332)。実装は core/ephemeral.Store。
+//
+// Touch は読み取りのたびに TTL を打ち直す。閲覧で materialize しない方針の
+// ため、詳細を開いた直後に期限切れでリアクションできなくなる穴が空く。
+type EphemeralNoteReader interface {
+	GetNote(ctx context.Context, id string) (*model.Note, error)
+	Touch(ctx context.Context, n *model.Note) error
+}
+
+// SetEphemeralReader attaches the ephemeral note reader. Optional — nil keeps
+// the database-only behaviour.
+func (s *QueryService) SetEphemeralReader(r EphemeralNoteReader) {
+	s.ephemeral = r
+}
+
+// readEphemeral returns the ephemeral note for noteID and extends its TTL.
+// 見つからなければ nil を返す。
+func (s *QueryService) readEphemeral(noteID string) *model.Note {
+	if s.ephemeral == nil {
+		return nil
+	}
+	ctx := context.Background()
+	n, err := s.ephemeral.GetNote(ctx, noteID)
+	if err != nil || n == nil {
+		return nil
+	}
+	// 見られているノートは生かしておく。
+	_ = s.ephemeral.Touch(ctx, n)
+	return n
 }
 
 // NewQueryService creates a new QueryService.
@@ -60,10 +97,14 @@ func (s *QueryService) Show(viewer *model.User, noteID string) (*model.Note, err
 // (= ap/handler の Show callsite) も visibility check 維持で leak しない。
 func (s *QueryService) ShowForAPI(noteID string) (*model.Note, error) {
 	n, err := s.noteRepo.FindByIDWithRelations(noteID)
-	if err != nil {
-		return nil, ErrNoteNotFound
+	if err == nil {
+		return n, nil
 	}
-	return n, nil
+	// DB に無ければ ephemeral を見る。**materialize はしない** (#2332)。
+	if eph := s.readEphemeral(noteID); eph != nil {
+		return eph, nil
+	}
+	return nil, ErrNoteNotFound
 }
 
 // RequireVisible loads a single note and verifies the viewer can see it.

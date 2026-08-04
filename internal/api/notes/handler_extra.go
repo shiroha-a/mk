@@ -44,6 +44,9 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	target, err := h.queryService.RequireVisible(user, req.NoteID)
+	if h.materializeIfMissing(req.NoteID, err) {
+		target, err = h.queryService.RequireVisible(user, req.NoteID)
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
@@ -590,4 +593,25 @@ func (h *Handler) ShowPartialBulk(c echo.Context) error {
 		})
 	}
 	return c.JSON(http.StatusOK, diffs)
+}
+
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (h *Handler) SetNoteMaterializer(m NoteMaterializer) {
+	h.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the lookup already
+// failed. 通常のノートでは Redis を一切引かない。
+func (h *Handler) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || h.materializer == nil {
+		return false
+	}
+	_, err := h.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
 }

@@ -2,6 +2,7 @@
 package clips
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -47,6 +48,8 @@ type Handler struct {
 	// noteRepo は clips/notes の renote 入れ子 mute/block 検査 (#1630) で
 	// renote 先行を batch fetch する。未配線時は入れ子検査 skip。
 	noteRepo repository.NoteRepository
+	// materializer はリレー由来で DB に無いノートを昇格させる (#2332)。
+	materializer NoteMaterializer
 }
 
 // SetNoteRepo wires a NoteRepository used by the clips/notes renote-nested
@@ -349,7 +352,11 @@ func (h *Handler) AddNote(c echo.Context) error {
 	if h.queryService == nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 	}
-	if _, err := h.queryService.RequireVisible(user, req.NoteID); err != nil {
+	_, verr := h.queryService.RequireVisible(user, req.NoteID)
+	if h.materializeIfMissing(req.NoteID, verr) {
+		_, verr = h.queryService.RequireVisible(user, req.NoteID)
+	}
+	if err := verr; err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 	}
 	if err := h.svc.AddNote(user.ID, req.ClipID, req.NoteID); err != nil {
@@ -515,4 +522,28 @@ func (h *Handler) clipExtras(cl *model.Clip, viewer *model.User) entity.ClipExtr
 		}
 	}
 	return extras
+}
+
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+//
+// clip 追加は core/clip 側でも materialize するが、この handler の
+// RequireVisible 事前チェックが先に 404 を返してしまうため、ここでも通す。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (h *Handler) SetNoteMaterializer(m NoteMaterializer) {
+	h.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the lookup already
+// failed. 通常のノートでは Redis を一切引かない。
+func (h *Handler) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || h.materializer == nil {
+		return false
+	}
+	_, err := h.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
 }
