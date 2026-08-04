@@ -86,6 +86,12 @@ type Meta struct {
 	// 下 2 つは role policy に対するサーバー cap (capServerMaxFileSize と同じ役割)。
 	// リレー経由でしか観測しない投稿を DB に入れず Redis で揮発させる (#2332)。
 	// 有効化するとグローバルタイムラインは FTT の窓より過去に遡れなくなる。
+	// リレー由来の孤児リモートユーザーを定期削除する (#2340)。転送活動の
+	// LD-Signature 検証は著者の公開鍵を DB に載せる必要があり、その経路だけは
+	// 揮発化できないため後追いで回収する。
+	EnableRelayOrphanUserCleanup bool `gorm:"column:enableRelayOrphanUserCleanup;default:false" json:"enableRelayOrphanUserCleanup"`
+	RelayOrphanUserGraceDays     int  `gorm:"column:relayOrphanUserGraceDays;default:30" json:"relayOrphanUserGraceDays"`
+
 	EnableEphemeralRelayNotes    bool `gorm:"column:enableEphemeralRelayNotes;default:false" json:"enableEphemeralRelayNotes"`
 	EphemeralRelayNoteTTLMinutes int  `gorm:"column:ephemeralRelayNoteTtlMinutes;default:60" json:"ephemeralRelayNoteTtlMinutes"`
 

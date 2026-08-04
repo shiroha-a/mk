@@ -140,6 +140,15 @@ func (r *Resolver) MaterializeActor(uri, preassignedID string) (*model.User, err
 	return r.resolveActorWithID(uri, preassignedID)
 }
 
+// RelayObservedMarker records that a remote user was first seen via a relay
+// (#2340)。実装は repository.RelayObservedUserRepository。
+type RelayObservedMarker interface {
+	MarkObserved(userID string) error
+}
+
+// SetRelayObservedMarker wires the relay-observed recorder. Optional.
+func (r *Resolver) SetRelayObservedMarker(m RelayObservedMarker) { r.relayObserved = m }
+
 // SetEphemeralSink wires the ephemeral store. Optional — nil keeps the
 // database-only behaviour.
 func (r *Resolver) SetEphemeralSink(s EphemeralSink) { r.ephemeralSink = s }
@@ -211,7 +220,7 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool) (*model.User, e
 // 混ざると片方が意図しない層へ書かれるため (note 側と同じ理由)。
 func (r *Resolver) resolveActorEphemeral(uri string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do("eph\x00"+crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, "", true)
+		return r.resolveActorOnceWithID(uri, false, "", true, false)
 	})
 	if err != nil {
 		return nil, err
@@ -298,6 +307,8 @@ type Resolver struct {
 	// ephemeralSink はリレー経由でしか観測しない投稿の置き場 (#2332)。
 	// 設定が有効かつ配線されているときだけ、DB ではなくこちらへ書く。
 	ephemeralSink EphemeralSink
+	// relayObserved はリレー経由で初めて観測した remote user の記録先 (#2340)。
+	relayObserved RelayObservedMarker
 	// ephemeralTimeline は DB 行が ephemeral を上書きしたときに FTT から旧 ID
 	// を除くためのもの。残すと hydrate で ephemeral 側が拾われ二重表示になる。
 	ephemeralTimeline EphemeralTimelineRemover
@@ -538,7 +549,7 @@ func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
 // して **ミュートしたのにタイムラインから消えない** 状態が TTL 切れまで続く。
 func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, preassignedID, false)
+		return r.resolveActorOnceWithID(uri, false, preassignedID, false, false)
 	})
 	if err != nil {
 		return nil, err
@@ -555,7 +566,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false)
+		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false, false)
 	})
 	if err != nil {
 		return nil, err
@@ -568,7 +579,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 
 // resolveActorOnce is the body of resolveActor, invoked once per URI by
 // singleflight.Do.
-func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral bool) (*model.User, error) {
+func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral, viaRelay bool) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -603,7 +614,9 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 
 	now := r.clock()
 	user := &model.User{
-		ID:            pickID(preassignedID, r.idGen, now),
+		ID: pickID(preassignedID, r.idGen, now),
+		// リレー経由で初めて観測した行に印を付ける (#2340)。孤児掃除の対象を
+		// リレー由来に限定するために使う。
 		Username:      actor.PreferredUsername,
 		UsernameLower: strings.ToLower(actor.PreferredUsername),
 		Host:          &host,
@@ -681,6 +694,15 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	}
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
+	}
+	// リレー経由で初めて観測した行を記録する (#2340)。孤児掃除の対象をリレー
+	// 由来に限定するために使う。**新規作成時のみ**。既に DB に在る行 (上の
+	// FindByURI で返る) には付けないので、リレー購読前から居る行や
+	// プロフィール閲覧で解決された行を巻き込まない。
+	if viaRelay && r.relayObserved != nil {
+		if oerr := r.relayObserved.MarkObserved(user.ID); oerr != nil {
+			slog.Warn("federation: failed to record relay-observed user", "userId", user.ID, "err", oerr)
+		}
 	}
 	// hashtag 集計 (attachedUsersCount) を新規 remote user の tags で更新する
 	// (old=nil)。remote なので isLocal=false。non-blocking hook (#1362)。
@@ -1126,6 +1148,28 @@ func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
 		return r.resolveNoteDepth(uri, 0, false, false)
 	}
 	return r.resolveNoteDepth(uri, 0, false, true)
+}
+
+// ResolveActorViaRelay resolves an actor and marks it as relay-derived when the
+// row is created (#2340).
+//
+// 転送活動の LD-Signature 検証は creator の公開鍵を DB に載せる必要があるため
+// (転送活動の唯一の認証手段)、この経路の著者は DB に残る。後追いの孤児掃除で
+// 回収できるよう、リレー由来であることを記録しておく。
+//
+// 既に DB に在る行には印を付けない。リレー購読前から居る行や、プロフィール閲覧・
+// スレッド遡りで解決された行を巻き込まないため。
+func (r *Resolver) ResolveActorViaRelay(uri string) (*model.User, error) {
+	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
+		return r.resolveActorOnceWithID(uri, false, "", false, true)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, ErrInvalidActor
+	}
+	return v.(*model.User), nil
 }
 
 // ResolveActorEphemeral resolves an actor without persisting it when the

@@ -1235,6 +1235,8 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"chunkedUploadMaxPendingMbPerUser": m.ChunkedUploadMaxPendingMbPerUser,
 		// リレー経由投稿の揮発化 (#2332)。mk-go 独自。コントロールパネル →
 		// リレー に出すので relay 設定と同じ画面で扱う (#2335)。
+		"enableRelayOrphanUserCleanup": m.EnableRelayOrphanUserCleanup,
+		"relayOrphanUserGraceDays":     m.RelayOrphanUserGraceDays,
 		"enableEphemeralRelayNotes":    m.EnableEphemeralRelayNotes,
 		"ephemeralRelayNoteTtlMinutes": m.EphemeralRelayNoteTTLMinutes,
 		// URLs

@@ -112,6 +112,20 @@ func (s *Scheduler) RegisterChunkedUploadGCJob() error {
 	)
 }
 
+// RegisterOrphanUserCleanupJob registers the daily cleanup of relay-derived
+// orphan remote users (#2340) at 05:00 UTC.
+//
+// cleanRemoteNotes (04:00) の後に置くのは、ノートが先に消えた方が「ノート 0 件」
+// の条件に合致する行が増えるため。enable gate は processor 側で meta を見るので
+// cron は無条件登録する。
+func (s *Scheduler) RegisterOrphanUserCleanupJob() error {
+	return s.inner.Register("0 5 * * *", TaskTypeOrphanUserCleanup, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(24*time.Hour),
+	)
+}
+
 // RegisterCleanRemoteNotesJob registers the daily remote-note cleanup cron
 // (#1563) at 04:00 UTC, mirroring upstream `cleanRemoteNotes`. 旧実装は
 // router.go の 6h time.Ticker だったが、TS の systemQueue cron に揃える。

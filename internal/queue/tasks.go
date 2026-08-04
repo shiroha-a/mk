@@ -48,6 +48,10 @@ type ObjectStorageDeleteFilePayload struct {
 	Key string `json:"key"`
 }
 
+// TaskTypeOrphanUserCleanup is the task type for deleting relay-derived remote
+// users that nothing references (#2340). ペイロードなし (meta から設定を読む)。
+const TaskTypeOrphanUserCleanup = "maintenance:orphanUserCleanup"
+
 // TaskTypeCleanRemoteNotes is the task type for the periodic remote
 // notes cleaning job. ペイロードなし (meta から設定を読む)。
 const TaskTypeCleanRemoteNotes = "maintenance:cleanRemoteNotes"

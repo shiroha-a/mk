@@ -360,6 +360,7 @@ func (s *Server) registerSchedulerJobs() {
 		{"clean", s.queueScheduler.RegisterCleanJob},
 		{"chunkedUploadGc", s.queueScheduler.RegisterChunkedUploadGCJob},
 		{"cleanRemoteNotes", s.queueScheduler.RegisterCleanRemoteNotesJob},
+		{"orphanUserCleanup", s.queueScheduler.RegisterOrphanUserCleanupJob},
 		{"checkModeratorsActivity", s.queueScheduler.RegisterCheckModeratorsActivityJob},
 	}
 	for _, j := range jobs {

@@ -802,6 +802,8 @@ func (s *Server) setupRoutes() {
 	// inbound throughput が ~2x に改善する (#565)。順序保証は各 activity
 	// handler の冪等性で吸収する Misskey TS 互換戦略。
 	inboxProcessor := processors.NewInboxProcessor(federationProcessor)
+	// LD-Signature 検証で解決する著者に「リレー由来」の印を付ける (#2340)。
+	inboxProcessor.SetRelayActorChecker(relaySvc)
 	inboxProcessor.SetSignatureVerifier(federationResolver)
 	inboxProcessor.SetHostBlockChecker(instanceService)
 	inboxProcessor.SetInstanceTracker(instanceTouchBuffer)
@@ -826,6 +828,22 @@ func (s *Server) setupRoutes() {
 	}
 	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfg)
 	s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
+
+	// リレー由来の孤児リモートユーザーの掃除 (#2340)。転送活動の LD-Signature
+	// 検証は著者の公開鍵を DB に載せる必要があるため、その経路だけは揮発化
+	// できない。後追いで回収する。対象は relay_observed_user に載っている行だけ。
+	orphanUserProcessor := processors.NewOrphanUserCleanupProcessor(userRepo,
+		func() processors.OrphanUserCleanerConfig {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return processors.OrphanUserCleanerConfig{}
+			}
+			return processors.OrphanUserCleanerConfig{
+				Enabled:   m.EnableRelayOrphanUserCleanup,
+				GraceDays: m.RelayOrphanUserGraceDays,
+			}
+		})
+	s.queueServer.Handle(queue.TaskTypeOrphanUserCleanup, orphanUserProcessor.Handle)
 
 	// Expired-mute prune (#1563 / #1603): scheduler の cron (*/5) が enqueue する。
 	// user mute と channel mute の両方の期限切れ行を prune する。
@@ -2459,6 +2477,9 @@ func (s *Server) setupRoutes() {
 	// リレー投稿を DB ではなく Redis へ書く経路 (#2332)。有効化されていない
 	// 間は ResolveNoteEphemeral が通常経路へ倒れるので挙動は変わらない。
 	federationResolver.SetEphemeralSink(ephemeralStore)
+	// リレー経由で初めて観測した remote user を記録する (#2340)。孤児掃除の
+	// 対象をリレー由来に限定するために使う。
+	federationResolver.SetRelayObservedMarker(repository.NewRelayObservedUserRepository(s.db))
 	// ephemeral note を DB 行へ昇格させる経路 (#2332)。外部キーで参照される
 	// 必要が生じた時点だけで呼ばれる。閲覧では呼ばない (リンクを踏まれるたびに
 	// 永続化されると DB を膨らませない目的が崩れる)。

@@ -96,6 +96,10 @@ type UserRepository interface {
 	// delete-account cascade for local users (Soft=false) so the account fully
 	// disappears instead of lingering as a suspended tombstone (#2230).
 	HardDeleteUser(userID string) error
+
+	// DeleteOrphanRemoteUsers removes remote users that nothing references,
+	// up to batchSize rows, and returns how many were deleted (#2340).
+	DeleteOrphanRemoteUsers(graceDays, batchSize int) (int64, error)
 }
 
 type userRepository struct {
@@ -718,4 +722,56 @@ func (r *userRepository) CountLocalUsersActiveSince(since time.Time) (int64, err
 		Where(`"lastActiveDate" >= ?`, since).
 		Count(&count).Error
 	return count, err
+}
+
+// DeleteOrphanRemoteUsers removes remote users that nothing in the instance
+// references, older than graceDays since they were last fetched (#2340).
+//
+// リレー転送の LD-Signature 検証は creator の公開鍵を DB に載せる必要があり
+// (転送活動の唯一の認証手段)、そこで著者行が作られる。ノートは Redis に逃がせても
+// この経路は残るため、後追いで掃除する。
+//
+// **対象は `relay_observed_user` に載っている行だけ** (INNER JOIN)。リレー購読前
+// から居る行や、プロフィール閲覧・スレッド遡りで解決された行は、孤児であっても
+// 意図して観測したものなので消さない。
+//
+// **「ノートが 0 件」は必須ガード**。`note.userId` が ON DELETE CASCADE なので、
+// ノートが残っているユーザーを消すとそのノートも道連れになり、#2329 で守った
+// 保持条件 (クリップ / ピン / お気に入り / ローカルのリアクション) が無意味になる。
+//
+// 猶予は `lastFetchedAt` で測る。ResolveActor は actorTTL (24 時間) を超えたときに
+// 再フェッチして更新するため、活動中の著者は最長 24 時間ごとに更新される。
+// graceDays を actorTTL より十分長く取らないと「削除 -> 再フェッチ」のチャーンに
+// なるので、呼び出し側で下限を設ける。
+//
+// 削除された actor が再び現れれば ResolveActor が引き直すので実害は無い。
+func (r *userRepository) DeleteOrphanRemoteUsers(graceDays, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	if graceDays <= 0 {
+		graceDays = 30
+	}
+	res := r.db.Exec(`
+		DELETE FROM "user" WHERE id IN (
+			SELECT u.id FROM "user" u
+			INNER JOIN "relay_observed_user" ro ON ro."userId" = u.id
+			WHERE u.host IS NOT NULL
+			  AND (u."lastFetchedAt" IS NULL OR u."lastFetchedAt" < now() - make_interval(days => ?))
+			  -- 必須ガード: ノートが残っていると CASCADE で道連れになる
+			  AND NOT EXISTS (SELECT 1 FROM "note" n WHERE n."userId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "following" f WHERE f."followerId" = u.id OR f."followeeId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "follow_request" fr WHERE fr."followerId" = u.id OR fr."followeeId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "blocking" b WHERE b."blockerId" = u.id OR b."blockeeId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "muting" m WHERE m."muterId" = u.id OR m."muteeId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "note_reaction" rc WHERE rc."userId" = u.id)
+			  AND NOT EXISTS (SELECT 1 FROM "note_favorite" fv WHERE fv."userId" = u.id)
+			  -- リレー actor / instance actor / proxy を消さない
+			  AND NOT EXISTS (SELECT 1 FROM "system_account" sa WHERE sa."userId" = u.id)
+			LIMIT ?
+		)`, graceDays, batchSize)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }

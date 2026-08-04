@@ -8233,3 +8233,10 @@ func (m *MockRegistrationTicketRepository) MarkPending(ticketID, pendingID strin
 	t.PendingID = &pid
 	return nil
 }
+
+// DeleteOrphanRemoteUsers implements repository.UserRepository (#2340).
+// mock は関係を追跡しないので、常に 0 件削除として振る舞う。実挙動は
+// internal/repository の統合テストで検証する。
+func (m *MockUserRepository) DeleteOrphanRemoteUsers(_, _ int) (int64, error) {
+	return 0, nil
+}

@@ -36,6 +36,27 @@ type SignerAwareProcessor interface {
 	ProcessWithSigner(body []byte, signer *model.User) error
 }
 
+// RelayAwareVerifier is an optional extension of SignatureVerifier that can
+// mark relay-derived actors when it creates them (#2340).
+//
+// 転送活動の LD-Signature 検証は creator の公開鍵を DB に載せる必要があるため、
+// この経路の著者は DB に残る。後追いの孤児掃除で回収できるよう印を付ける。
+type RelayAwareVerifier interface {
+	ResolveActorViaRelay(actorURI string) (*model.User, error)
+}
+
+// RelayActorChecker reports whether an actor is a subscribed relay.
+// Implemented by core/relay.Service.
+type RelayActorChecker interface {
+	IsRelayActor(actor *model.User) bool
+}
+
+// SetRelayActorChecker wires the relay lookup used to mark relay-derived
+// actors. Optional — nil disables the marking (掃除の対象にならないだけ)。
+func (p *InboxProcessor) SetRelayActorChecker(c RelayActorChecker) {
+	p.relayChecker = c
+}
+
 // SignatureVerifier resolves an actor and confirms an HTTP request was
 // signed with that actor's published public key. Implemented by
 // federation.Resolver in production. nil の場合 verify を skip するので、
@@ -103,9 +124,12 @@ type LDSignatureVerifier interface {
 }
 
 type InboxProcessor struct {
-	processor       FederationProcessor
-	verifier        SignatureVerifier
-	ldVerifier      LDSignatureVerifier
+	processor  FederationProcessor
+	verifier   SignatureVerifier
+	ldVerifier LDSignatureVerifier
+	// relayChecker は LD-Signature 検証で解決する著者に「リレー由来」の印を
+	// 付けるかどうかの判定に使う (#2340)。
+	relayChecker    RelayActorChecker
 	hostBlocker     HostBlockChecker
 	instanceTracker InstanceTracker
 	chartHook       InboxChartHook
@@ -329,7 +353,7 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	// は FindByKeyID の純粋 DB read で、先に解決しておかないと未知 origin actor
 	// からの最初の転送活動が常に drop される (#parity review AUTH-2、upstream
 	// getAuthUserFromKeyId は未知 actor を fetch する挙動と整合)。
-	ldUser, err := p.verifier.ResolveActor(activitypub.ResolveKeyURL(creatorKeyID))
+	ldUser, err := p.resolveLDCreator(activitypub.ResolveKeyURL(creatorKeyID), signer)
 	if err != nil {
 		return fmt.Errorf("resolve ld-signature creator %q: %w", creatorKeyID, err)
 	}
@@ -438,4 +462,21 @@ func (p *InboxProcessor) dispatch(body []byte, signer *model.User) error {
 		return sp.ProcessWithSigner(body, signer)
 	}
 	return p.processor.Process(body)
+}
+
+// resolveLDCreator resolves the LD-Signature creator, marking it as
+// relay-derived when a subscribed relay delivered the activity (#2340).
+//
+// 転送活動の署名検証には creator の公開鍵が要り、`VerifyAndCreator` は DB read
+// なので先に解決して載せる必要がある。この経路は ephemeral 化できないため、
+// 印を付けて後追いの孤児掃除で回収する。
+//
+// 既に DB に在る行には印を付けない (ResolveActorViaRelay は新規作成時のみ立てる)。
+func (p *InboxProcessor) resolveLDCreator(uri string, signer *model.User) (*model.User, error) {
+	if p.relayChecker != nil && signer != nil && p.relayChecker.IsRelayActor(signer) {
+		if rv, ok := p.verifier.(RelayAwareVerifier); ok {
+			return rv.ResolveActorViaRelay(uri)
+		}
+	}
+	return p.verifier.ResolveActor(uri)
 }
