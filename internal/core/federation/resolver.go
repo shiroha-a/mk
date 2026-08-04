@@ -111,6 +111,10 @@ const resolveRecursionLimit = 256
 // だけなので DB に入れる価値が無い。それでも保存すると流量に比例して INSERT と
 // DELETE が両方発生し、autovacuum まで含めた I/O が二重に掛かる。
 type EphemeralSink interface {
+	// Enabled は取り込みを ephemeral 経路に倒すかどうか。false なら従来どおり
+	// DB へ保存する。sink が配線されているだけで機能が入ってしまわないよう、
+	// 既定無効の担保をここで行う。
+	Enabled() bool
 	PutNote(ctx context.Context, n *model.Note, author *model.User) error
 	UserIDByURI(ctx context.Context, uri string) (string, error)
 	GetUser(ctx context.Context, id string) (*model.User, error)
@@ -1053,7 +1057,7 @@ func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
 // forge / 可視性導出 / mention 上限はいずれも分岐しない。ephemeral 用に別の
 // 構築経路を書くと検証が二重管理になり、リレー経由が検証を迂回する穴になる。
 func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
-	if r.ephemeralSink == nil {
+	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
 		return r.resolveNoteDepth(uri, 0, false, false)
 	}
 	return r.resolveNoteDepth(uri, 0, false, true)

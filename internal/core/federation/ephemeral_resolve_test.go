@@ -15,11 +15,12 @@ import (
 
 // fakeSink captures what the ephemeral path would write to Redis.
 type fakeSink struct {
-	notes   map[string]*model.Note
-	authors map[string]*model.User
-	byURI   map[string]string
-	putErr  error
-	dropped []string
+	notes    map[string]*model.Note
+	authors  map[string]*model.User
+	byURI    map[string]string
+	putErr   error
+	dropped  []string
+	disabled bool
 }
 
 func newFakeSink() *fakeSink {
@@ -29,6 +30,8 @@ func newFakeSink() *fakeSink {
 		byURI:   map[string]string{},
 	}
 }
+
+func (f *fakeSink) Enabled() bool { return !f.disabled }
 
 func (f *fakeSink) PutNote(_ context.Context, n *model.Note, author *model.User) error {
 	if f.putErr != nil {
@@ -322,4 +325,27 @@ func TestIngestNote_NoEphemeralEntryIsNoop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, sink.dropped)
 	assert.Empty(t, remover.removed)
+}
+
+// 機能が無効なら sink が配線されていても DB 経路に倒れること。
+// これが効かないと「既定では挙動が変わらない」という約束が破れる。
+func TestResolveNoteEphemeral_DisabledFallsBackToDB(t *testing.T) {
+	noteURI := "https://remote.example/notes/1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "disabled",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, noteRepo, _ := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+	sink.disabled = true
+
+	note, err := r.ResolveNoteEphemeral(noteURI)
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	assert.NotEmpty(t, noteRepo.Notes, "無効時は従来どおり DB に入ること")
+	assert.Empty(t, sink.notes, "無効時は ephemeral に入れないこと")
 }

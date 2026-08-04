@@ -40,29 +40,52 @@ const (
 // 著者だけ先に消えて後続ノートが著者不明になる。ノートより長く持たせる。
 const userTTLFactor = 4
 
+// Settings carries the operator-controlled knobs for the ephemeral store.
+type Settings struct {
+	// Enabled gates *ingestion*. 無効でも読み出しは続ける: 既に置かれている
+	// ぶんは TTL 切れまで表示できた方が、切り替えた瞬間に timeline から
+	// 消えるより自然なため。
+	Enabled bool
+	// TTL は Redis 上の保持時間。0 以下なら defaultTTL。
+	TTL time.Duration
+}
+
 // Store persists ephemeral notes and authors in Redis.
 type Store struct {
 	client    *redis.Client
 	keyPrefix string
-	ttl       func() time.Duration
+	settings  func() Settings
 }
 
 // NewStore constructs a Store bound to the given Redis database.
 //
-// ttl は meta 由来の設定を都度読むための関数。nil または 0 以下を返す場合は
-// defaultTTL を使う。keyPrefix は FanoutTimelineService と同じ `<host>:`。
-func NewStore(client *redis.Client, keyPrefix string, ttl func() time.Duration) *Store {
-	return &Store{client: client, keyPrefix: keyPrefix, ttl: ttl}
+// settings は meta 由来の設定を都度読むための関数。起動時に固定すると管理画面
+// での変更が再起動まで効かない。keyPrefix は FanoutTimelineService と同じ
+// `<host>:`。
+func NewStore(client *redis.Client, keyPrefix string, settings func() Settings) *Store {
+	return &Store{client: client, keyPrefix: keyPrefix, settings: settings}
+}
+
+// Enabled reports whether relay-delivered notes should be diverted to Redis
+// instead of the database.
+//
+// これが false のときは取り込み経路が通常の DB 保存に倒れる。既定無効の約束を
+// ここで担保する (sink が配線されているだけで機能が入ってしまわないように)。
+func (s *Store) Enabled() bool {
+	if s == nil || s.client == nil || s.settings == nil {
+		return false
+	}
+	return s.settings().Enabled
 }
 
 // defaultTTL is used when the configured TTL is unset or non-positive.
 const defaultTTL = time.Hour
 
 func (s *Store) noteTTL() time.Duration {
-	if s == nil || s.ttl == nil {
+	if s == nil || s.settings == nil {
 		return defaultTTL
 	}
-	if d := s.ttl(); d > 0 {
+	if d := s.settings().TTL; d > 0 {
 		return d
 	}
 	return defaultTTL

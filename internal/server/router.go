@@ -272,12 +272,15 @@ func (s *Server) setupRoutes() {
 	// 効かないため (#2315 と同じ轍を踏まない)。
 	ephemeralStore := coreephemeral.NewStore(
 		s.redis.Timelines, s.config.RedisForTimelines.KeyPrefix(),
-		func() time.Duration {
+		func() coreephemeral.Settings {
 			m, err := metaRepo.Fetch()
-			if err != nil || m == nil || !m.EnableEphemeralRelayNotes {
-				return 0
+			if err != nil || m == nil {
+				return coreephemeral.Settings{}
 			}
-			return time.Duration(m.EphemeralRelayNoteTTLMinutes) * time.Minute
+			return coreephemeral.Settings{
+				Enabled: m.EnableEphemeralRelayNotes,
+				TTL:     time.Duration(m.EphemeralRelayNoteTTLMinutes) * time.Minute,
+			}
 		})
 	// timeline の hydrate が DB に無い ID を Redis から補えるようにする。
 	// store 自体は常に配線し、機能の有効・無効は取り込み側で判定する

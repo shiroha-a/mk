@@ -32,7 +32,9 @@ func newStore(t *testing.T, ttl time.Duration) *ephemeral.Store {
 	t.Helper()
 	testutil.SkipIfNoDocker(t)
 	testRedis.FlushAll(context.Background())
-	return ephemeral.NewStore(testRedis.Client, "example.com:", func() time.Duration { return ttl })
+	return ephemeral.NewStore(testRedis.Client, "example.com:", func() ephemeral.Settings {
+		return ephemeral.Settings{Enabled: true, TTL: ttl}
+	})
 }
 
 func strptr(s string) *string { return &s }
@@ -238,11 +240,11 @@ func TestStore_TTLFallback(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		ttl  func() time.Duration
+		ttl  func() ephemeral.Settings
 	}{
-		{"ttl 関数が nil", nil},
-		{"ttl が 0", func() time.Duration { return 0 }},
-		{"ttl が負", func() time.Duration { return -time.Minute }},
+		{"settings 関数が nil", nil},
+		{"ttl が 0", func() ephemeral.Settings { return ephemeral.Settings{Enabled: true} }},
+		{"ttl が負", func() ephemeral.Settings { return ephemeral.Settings{Enabled: true, TTL: -time.Minute} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testRedis.FlushAll(ctx)
@@ -355,4 +357,35 @@ func TestStore_DropNote_EmptyID(t *testing.T) {
 func TestStore_Touch_MinimalNote(t *testing.T) {
 	s := newStore(t, time.Minute)
 	assert.NoError(t, s.Touch(context.Background(), &model.Note{ID: "n1"}))
+}
+
+// --- 既定無効の担保 ---
+//
+// sink は機能の有効・無効に関わらず配線されるので、Enabled() が実際に
+// 効かないと「既定では挙動が変わらない」という約束が破れる。
+
+func TestStore_Enabled(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	for _, tc := range []struct {
+		name     string
+		settings func() ephemeral.Settings
+		want     bool
+	}{
+		{"有効", func() ephemeral.Settings { return ephemeral.Settings{Enabled: true} }, true},
+		{"無効 (既定)", func() ephemeral.Settings { return ephemeral.Settings{} }, false},
+		{"settings 未配線", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := ephemeral.NewStore(testRedis.Client, "example.com:", tc.settings)
+			assert.Equal(t, tc.want, s.Enabled())
+		})
+	}
+}
+
+func TestStore_Enabled_NilReceiverAndClient(t *testing.T) {
+	var s *ephemeral.Store
+	assert.False(t, s.Enabled())
+	assert.False(t, ephemeral.NewStore(nil, "", func() ephemeral.Settings {
+		return ephemeral.Settings{Enabled: true}
+	}).Enabled(), "client 未配線なら有効化されていても false")
 }
