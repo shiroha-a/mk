@@ -1128,6 +1128,25 @@ func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
 	return r.resolveNoteDepth(uri, 0, false, true)
 }
 
+// ResolveActorEphemeral resolves an actor without persisting it when the
+// ephemeral store is active (#2338)。Create 転送経由のリレー投稿の著者に使う。
+func (r *Resolver) ResolveActorEphemeral(uri string) (*model.User, error) {
+	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
+		return r.ResolveActor(uri)
+	}
+	return r.resolveNoteAuthor(uri, true)
+}
+
+// IngestNoteEphemeral is IngestNoteWithCreated for relay-forwarded Create
+// activities: the note and its author go to the ephemeral store instead of the
+// database (#2338)。検証は通常経路と完全に同一。
+func (r *Resolver) IngestNoteEphemeral(body []byte, deliveringActorURI string) (*model.Note, bool, error) {
+	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
+		return r.IngestNoteWithCreated(body, deliveringActorURI)
+	}
+	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, true)
+}
+
 // ResolveNoteAllowCrossHost is ResolveNote for user-initiated lookups
 // (/api/ap/show) where upstream relaxes the request-url ↔ id binding to
 // CrossOrigin softfail (#1828)。entry URI が attacker 制御でないため cross-host

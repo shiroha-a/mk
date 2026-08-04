@@ -311,7 +311,24 @@ type genericActivity struct {
 // New activity handlers added below MUST preserve this invariant; otherwise
 // retried inbox jobs will produce duplicate side effects (notifications
 // fired twice, counters double-incremented, etc).
+// ProcessWithSigner is Process carrying the verified HTTP signer (#2338).
+//
+// Mastodon 系リレーは Announce ではなく Create を LD-Signature 付きで転送する。
+// その判定には「誰が配送してきたか」= HTTP 署名者が要るが、Process(body) には
+// body しか渡っていなかったため handleCreate がリレー転送を判別できず、著者が
+// DB に積み上がっていた。
+//
+// signer が nil (署名なし経路 / 未配線) のときは従来どおり DB 経路に倒れる。
+func (p *Processor) ProcessWithSigner(body []byte, signer *model.User) error {
+	return p.process(body, signer)
+}
+
+// Process handles an inbound activity without signer information.
 func (p *Processor) Process(body []byte) error {
+	return p.process(body, nil)
+}
+
+func (p *Processor) process(body []byte, signer *model.User) error {
 	// Foundkey 系 fork instance は valid な AS Activity を 1 要素 JSON
 	// array で wrap して送信してくるケースがある (#1185)。AS 仕様上
 	// inbox direct POST は object 前提なので、array が来た時は剥がして
@@ -358,7 +375,7 @@ func (p *Processor) Process(body []byte) error {
 		}
 	}
 
-	return p.dispatchActivity(act, 0)
+	return p.dispatchActivity(act, 0, signer)
 }
 
 // maxCollectionDepth bounds nested Collection/OrderedCollection unrolling so a
@@ -367,7 +384,7 @@ const maxCollectionDepth = 1
 
 // dispatchActivity routes a parsed activity to its handler. depth tracks
 // Collection/OrderedCollection unrolling so handleCollection can bound recursion.
-func (p *Processor) dispatchActivity(act genericActivity, depth int) error {
+func (p *Processor) dispatchActivity(act genericActivity, depth int, signer *model.User) error {
 	switch strings.ToLower(act.Type) {
 	case "follow":
 		return p.handleFollow(act)
@@ -376,7 +393,7 @@ func (p *Processor) dispatchActivity(act genericActivity, depth int) error {
 	case "accept":
 		return p.handleAccept(act)
 	case "create":
-		return p.handleCreate(act)
+		return p.handleCreate(act, signer)
 	case "like":
 		return p.handleLike(act)
 	case "announce":
@@ -422,7 +439,7 @@ func (p *Processor) dispatchActivity(act genericActivity, depth int) error {
 	case "misskey:chatmessage":
 		return p.handleChatMessage(act)
 	case "collection", "orderedcollection":
-		return p.handleCollection(act, depth)
+		return p.handleCollection(act, depth, signer)
 	}
 	return ErrUnsupportedActivity
 }
@@ -433,7 +450,7 @@ func (p *Processor) dispatchActivity(act genericActivity, depth int) error {
 // recursion limit を超えたら skip、各 item は extractDbHost(item.id) ==
 // extractDbHost(actor.uri) を要求する (spoofing 防止)。URI 文字列の item は解決せず
 // skip する (fetch 増幅を避ける; relay の inline 配送のみ対応、#2023)。
-func (p *Processor) handleCollection(act genericActivity, depth int) error {
+func (p *Processor) handleCollection(act genericActivity, depth int, signer *model.User) error {
 	if depth >= maxCollectionDepth {
 		return nil // skip: nested collection beyond depth limit
 	}
@@ -477,7 +494,7 @@ func (p *Processor) handleCollection(act genericActivity, depth int) error {
 		// security)。これにより third-party actor を詐称した reaction/announce 等の
 		// 注入を防ぐ。
 		itemAct.Actor = act.Actor
-		if derr := p.dispatchActivity(itemAct, depth+1); derr != nil && !errors.Is(derr, ErrUnsupportedActivity) {
+		if derr := p.dispatchActivity(itemAct, depth+1, signer); derr != nil && !errors.Is(derr, ErrUnsupportedActivity) {
 			slog.Error("federation: collection item failed", "id", itemAct.ID, "type", itemAct.Type, "err", derr)
 		}
 	}
@@ -1160,14 +1177,21 @@ func encodeAudienceIfChanged(raw json.RawMessage, merged []string) (json.RawMess
 // `_misskey_talk: true` flag が立った Note は CherryPick / レガシー Misskey の
 // 1-on-1 chat federation。notes テーブルではなく chat_messages として処理する
 // ため IngestNote をスキップして chatService にルートする (#692)。
-func (p *Processor) handleCreate(act genericActivity) error {
+func (p *Processor) handleCreate(act genericActivity, signer *model.User) error {
 	// bearcaps (bear:) object URI は未対応として skip する (#1560、upstream
 	// ApInboxService.create の 'skip: bearcaps url not supported')。
 	if isBearcapURI(act.Object) {
 		slog.Info("federation: skipping Create with bearcaps object url", "actor", act.Actor)
 		return nil
 	}
-	actor, err := p.resolver.ResolveActor(act.Actor)
+	// Mastodon 系リレーは Announce ではなく Create を LD-Signature 付きで
+	// 転送する (#2338)。配送してきたのが購読中のリレーなら、著者を DB に
+	// 作らず ephemeral 経路で解決する。
+	//
+	// signer が nil (署名なし経路 / 未配線) のときは従来どおり DB 経路に
+	// 倒れる (fail-safe)。
+	viaRelay := p.isRelayDelivery(signer)
+	actor, err := p.resolveCreateActor(act.Actor, viaRelay)
 	if err != nil {
 		if errors.Is(err, ErrHostNotAllowed) {
 			// federation policy で許可されない host の actor からの Create は
@@ -1211,7 +1235,7 @@ func (p *Processor) handleCreate(act genericActivity) error {
 	object := mergeCreateAudience(act)
 	// act.Actor を配送 actor として渡し、note の著者 (attributedTo) が配送者本人で
 	// あることを検証させる (なりすまし forge 防止、#1839)。
-	note, created, err := p.resolver.IngestNoteWithCreated(object, act.Actor)
+	note, created, err := p.ingestCreateNote(object, act.Actor, viaRelay)
 	if errors.Is(err, corenote.ErrContainsTooManyMentions) {
 		// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): role policy
 		// 由来の "note contains too many mentions" は永続的に解決しない error な
@@ -1616,6 +1640,33 @@ func (p *Processor) publishRelayDeliveredNote(target *model.Note, targetURI, rel
 	slog.Debug("federation: relay-delivered note published",
 		"relay", relayActor, "noteURI", targetURI, "authorId", author.ID)
 	return nil
+}
+
+// isRelayDelivery reports whether the activity was forwarded by a subscribed
+// relay, based on the verified HTTP signer (#2338).
+//
+// signer が nil (署名なし経路 / verifier 未配線) なら false。判定できない
+// ときはリレー扱いしない = 従来どおり DB に保存する fail-safe。
+func (p *Processor) isRelayDelivery(signer *model.User) bool {
+	return signer != nil && p.relayActorChecker != nil && p.relayActorChecker.IsRelayActor(signer)
+}
+
+// resolveCreateActor resolves the author of an inbound Create, keeping
+// relay-forwarded authors out of the database (#2338).
+func (p *Processor) resolveCreateActor(uri string, viaRelay bool) (*model.User, error) {
+	if viaRelay {
+		return p.resolver.ResolveActorEphemeral(uri)
+	}
+	return p.resolver.ResolveActor(uri)
+}
+
+// ingestCreateNote persists an inbound Create's note, diverting relay-forwarded
+// ones to the ephemeral store (#2338).
+func (p *Processor) ingestCreateNote(object []byte, deliveringActorURI string, viaRelay bool) (*model.Note, bool, error) {
+	if viaRelay {
+		return p.resolver.IngestNoteEphemeral(object, deliveringActorURI)
+	}
+	return p.resolver.IngestNoteWithCreated(object, deliveringActorURI)
 }
 
 // handleDelete removes a remote note (or actor) referenced by a Delete activity.

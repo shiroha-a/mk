@@ -6,6 +6,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
+	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -500,4 +501,95 @@ func TestResolveNoteEphemeral_ExistingDBAuthorWins(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "known", note.UserID, "DB に居る著者の実 ID を使うこと")
 	assert.Len(t, sink.notes, 1, "ノート自体は ephemeral のまま")
+}
+
+// --- Create 転送経路 (Mastodon 系リレー) ---
+
+// stubRelayChecker reports the given URIs as subscribed relay actors.
+type stubRelayChecker struct{ relays map[string]bool }
+
+func (s *stubRelayChecker) IsRelayActor(actor *model.User) bool {
+	if actor == nil || actor.URI == nil {
+		return false
+	}
+	return s.relays[*actor.URI]
+}
+
+func relayProcessor(t *testing.T, docs map[string]string, relayURI string) (
+	*federation.Processor, *fakeSink, *testutil.MockNoteRepository, *testutil.MockUserRepository,
+) {
+	t.Helper()
+	r, sink, noteRepo, userRepo := ephResolverDocs(t, docs)
+	followingSvc := corefollowing.NewService(userRepo, testutil.NewMockFollowingRepository(),
+		testutil.NewMockFollowRequestRepository(), mustIDGen(t))
+	p := federation.NewProcessor(r, followingSvc, nil, nil, userRepo, noteRepo)
+	p.SetRelayActorChecker(&stubRelayChecker{relays: map[string]bool{relayURI: true}})
+	return p, sink, noteRepo, userRepo
+}
+
+func mustIDGen(t *testing.T) id.Generator {
+	t.Helper()
+	g, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return g
+}
+
+const relayCreateBody = `{
+	"type": "Create",
+	"actor": "https://remote.example/users/alice",
+	"object": {
+		"type": "Note",
+		"id": "https://remote.example/notes/1",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "forwarded by a mastodon relay",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}
+}`
+
+// リレーが転送した Create では、ノートも著者も DB に入らないこと。
+// 本番実測で残っていた DB user 増加の直接の原因。
+func TestProcessWithSigner_RelayForwardedCreateStaysEphemeral(t *testing.T) {
+	relayURI := "https://relay.example/actor"
+	p, sink, noteRepo, userRepo := relayProcessor(t, map[string]string{
+		"https://remote.example/users/alice": ephActorDoc,
+	}, relayURI)
+
+	host := "relay.example"
+	signer := &model.User{ID: "relay1", Host: &host, URI: &relayURI}
+
+	require.NoError(t, p.ProcessWithSigner([]byte(relayCreateBody), signer))
+
+	assert.Empty(t, noteRepo.Notes, "note 行を作らない")
+	assert.Empty(t, userRepo.Users, "著者の user 行も作らない")
+	assert.Len(t, sink.notes, 1, "ephemeral store に入ること")
+	assert.Len(t, sink.authors, 1)
+}
+
+// 直接配送の Create は従来どおり DB に入ること。
+func TestProcessWithSigner_DirectCreateGoesToDB(t *testing.T) {
+	p, sink, noteRepo, _ := relayProcessor(t, map[string]string{
+		"https://remote.example/users/alice": ephActorDoc,
+	}, "https://relay.example/actor")
+
+	// 署名者が著者本人 = 直接配送。
+	authorURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	signer := &model.User{ID: "alice", Host: &host, URI: &authorURI}
+
+	require.NoError(t, p.ProcessWithSigner([]byte(relayCreateBody), signer))
+
+	assert.NotEmpty(t, noteRepo.Notes, "直接配送は DB に入ること")
+	assert.Empty(t, sink.notes, "ephemeral には入れないこと")
+}
+
+// signer が取れない経路では従来どおり DB に入ること (fail-safe)。
+func TestProcess_WithoutSignerGoesToDB(t *testing.T) {
+	p, sink, noteRepo, _ := relayProcessor(t, map[string]string{
+		"https://remote.example/users/alice": ephActorDoc,
+	}, "https://relay.example/actor")
+
+	require.NoError(t, p.Process([]byte(relayCreateBody)))
+
+	assert.NotEmpty(t, noteRepo.Notes, "判定できないときは DB に倒すこと")
+	assert.Empty(t, sink.notes)
 }

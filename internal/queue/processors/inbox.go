@@ -26,6 +26,16 @@ type FederationProcessor interface {
 	Process(body []byte) error
 }
 
+// SignerAwareProcessor is an optional extension of FederationProcessor that
+// accepts the verified HTTP signer (#2338).
+//
+// Mastodon 系リレーは Announce ではなく Create を LD-Signature 付きで転送する
+// ため、「誰が配送してきたか」が分からないとリレー転送を判別できない。既存の
+// 実装 / テスト fake を壊さないよう optional interface にしてある。
+type SignerAwareProcessor interface {
+	ProcessWithSigner(body []byte, signer *model.User) error
+}
+
 // SignatureVerifier resolves an actor and confirms an HTTP request was
 // signed with that actor's published public key. Implemented by
 // federation.Resolver in production. nil の場合 verify を skip するので、
@@ -166,6 +176,8 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	// (= legacy / direct enqueue) 経路では verify をスキップする (handler
 	// 側で既に検証済みという旧 contract)。
 	host := payload.Host
+	// 署名者は Process へ渡してリレー転送の判定に使う (#2338)。
+	var signer *model.User
 	if len(payload.Headers) > 0 && p.verifier != nil {
 		actor, err := p.verifyPayload(payload)
 		if err != nil {
@@ -196,6 +208,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		}
 		p.touchInstance(actor)
 		p.commitChart(actor)
+		signer = actor
 	} else if p.ldVerifier != nil {
 		// legacy / direct-enqueue 経路 (Headers 無し = HTTP 署名者を特定できない)。
 		// 署名者照合はできないが、body に LD-Signature があれば従来どおり検証して
@@ -208,7 +221,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	}
 	_ = host // reserved for future per-host stats; currently unused
 
-	if err := p.processor.Process(payload.Body); err != nil {
+	if err := p.dispatch(payload.Body, signer); err != nil {
 		if errors.Is(err, federation.ErrUnsupportedActivity) {
 			slog.Debug("inbox: unsupported activity, dropped", "host", payload.Host)
 			return nil
@@ -416,4 +429,13 @@ func (p *InboxProcessor) commitChart(actor *model.User) {
 		return
 	}
 	p.chartHook.OnInboxReceived(*actor.Host)
+}
+
+// dispatch hands the activity to the federation processor, passing the
+// verified HTTP signer when the processor accepts it (#2338).
+func (p *InboxProcessor) dispatch(body []byte, signer *model.User) error {
+	if sp, ok := p.processor.(SignerAwareProcessor); ok {
+		return sp.ProcessWithSigner(body, signer)
+	}
+	return p.processor.Process(body)
 }
