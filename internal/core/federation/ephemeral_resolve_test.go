@@ -145,9 +145,10 @@ func TestResolveNoteEphemeral_DoesNotTouchNoteRepo(t *testing.T) {
 	require.Len(t, sink.notes, 1, "ephemeral store に入っていること")
 	assert.Equal(t, note.ID, sink.notes[note.ID].ID)
 
-	// 著者は Phase 1 では通常経路で解決するため DB に入る。ノートが入らない
-	// ことが本 Phase の目的で、著者の ephemeral 化は Phase 2 で扱う。
-	assert.NotEmpty(t, userRepo.Users, "著者は Phase 1 では DB に入る")
+	// 著者も DB に入れない。実測でリレー購読後は note と user がほぼ 1:1 で
+	// 増えるため、著者を止めないと肥大化を抑える目的が半分しか達成できない。
+	assert.Empty(t, userRepo.Users, "著者も DB 行を作らないこと")
+	require.Len(t, sink.authors, 1, "著者は ephemeral store に入ること")
 }
 
 // 既に DB に在る URI は DB 行をそのまま返す (直接配送で来ていた場合)。
@@ -419,4 +420,84 @@ func TestResolveNoteAuthor_ReusesEphemeralUserID(t *testing.T) {
 	note, err := r.ResolveNoteEphemeral(noteURI)
 	require.NoError(t, err)
 	assert.Equal(t, "existing-author", note.UserID, "2 件目も同じ著者 ID を使うこと")
+}
+
+// --- 著者の ephemeral 化 ---
+
+// リレー由来の著者も DB に入れない。
+// 実測でリレー購読後は note と user がほぼ 1:1 で増えるため、著者を止めないと
+// 肥大化を抑える目的が半分しか達成できない。
+func TestResolveNoteEphemeral_AuthorStaysOutOfDB(t *testing.T) {
+	noteURI := "https://remote.example/notes/1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "relay only",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, noteRepo, userRepo := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+
+	note, err := r.ResolveNoteEphemeral(noteURI)
+	require.NoError(t, err)
+	require.NotNil(t, note)
+
+	assert.Empty(t, noteRepo.Notes, "note 行を作らない")
+	assert.Empty(t, userRepo.Users, "user 行も作らない")
+	require.Len(t, sink.notes, 1)
+	require.Len(t, sink.authors, 1)
+	// ノートと著者の ID が対応していること。
+	assert.Equal(t, note.UserID, sink.authors[note.UserID].ID)
+}
+
+// 同じ著者の 2 件目は ephemeral store の逆引きで同じ ID を再利用する。
+// これが崩れると同一人物が別人として並ぶ。
+func TestResolveNoteEphemeral_SecondNoteReusesAuthorID(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	docs := map[string]string{actorURI: ephActorDoc}
+	for _, id := range []string{"1", "2"} {
+		docs["https://remote.example/notes/"+id] = `{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/notes/` + id + `",
+			"type": "Note",
+			"attributedTo": "` + actorURI + `",
+			"content": "post ` + id + `",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}`
+	}
+	r, sink, _, userRepo := ephResolverDocs(t, docs)
+
+	n1, err := r.ResolveNoteEphemeral("https://remote.example/notes/1")
+	require.NoError(t, err)
+	n2, err := r.ResolveNoteEphemeral("https://remote.example/notes/2")
+	require.NoError(t, err)
+
+	assert.Equal(t, n1.UserID, n2.UserID, "同じ著者は同じ ID を持つこと")
+	assert.Len(t, sink.authors, 1, "著者が重複して作られないこと")
+	assert.Empty(t, userRepo.Users)
+}
+
+// 既に DB に居る著者 (フォロー済み / ミュート済み等) は実 ID を使う。
+// ここを飛ばすとミュートが効かなくなる。
+func TestResolveNoteEphemeral_ExistingDBAuthorWins(t *testing.T) {
+	noteURI := "https://remote.example/notes/1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "from a followed user",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, _, userRepo := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+	host := "remote.example"
+	userRepo.Users["known"] = &model.User{ID: "known", Username: "alice", Host: &host, URI: &actorURI}
+
+	note, err := r.ResolveNoteEphemeral(noteURI)
+	require.NoError(t, err)
+	assert.Equal(t, "known", note.UserID, "DB に居る著者の実 ID を使うこと")
+	assert.Len(t, sink.notes, 1, "ノート自体は ephemeral のまま")
 }

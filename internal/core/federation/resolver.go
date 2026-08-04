@@ -196,7 +196,30 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool) (*model.User, e
 			return u, nil
 		}
 	}
-	return r.ResolveActor(uri)
+	// 3. どこにも居なければ fetch して **DB に入れずに** 組み立てる。
+	//
+	// ここを ResolveActor に任せると、ノートを Redis に逃がしても著者だけが
+	// DB に積み上がる。実測でリレー購読後は note と user がほぼ 1:1 で増える
+	// ため、著者を止めないと肥大化を抑える目的が半分しか達成できない。
+	return r.resolveActorEphemeral(uri)
+}
+
+// resolveActorEphemeral fetches an actor and builds the row **without
+// persisting it** (#2332)。
+//
+// singleflight key を通常経路と分けるのは、同一 URI に対する DB 経路の解決と
+// 混ざると片方が意図しない層へ書かれるため (note 側と同じ理由)。
+func (r *Resolver) resolveActorEphemeral(uri string) (*model.User, error) {
+	v, err, _ := r.resolveActorGroup.Do("eph\x00"+crossHostKey(uri, false), func() (any, error) {
+		return r.resolveActorOnceWithID(uri, false, "", true)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, ErrInvalidActor
+	}
+	return v.(*model.User), nil
 }
 
 // DefaultActorTTL is the default duration after which a cached actor (and its
@@ -515,7 +538,7 @@ func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
 // して **ミュートしたのにタイムラインから消えない** 状態が TTL 切れまで続く。
 func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, preassignedID)
+		return r.resolveActorOnceWithID(uri, false, preassignedID, false)
 	})
 	if err != nil {
 		return nil, err
@@ -532,7 +555,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, allowCrossHost, "")
+		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false)
 	})
 	if err != nil {
 		return nil, err
@@ -545,7 +568,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 
 // resolveActorOnce is the body of resolveActor, invoked once per URI by
 // singleflight.Do.
-func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string) (*model.User, error) {
+func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral bool) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -644,6 +667,18 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	// upstream ApPersonService と同じく person.tag の Hashtag entry を user.tags に
 	// 取り込む (hashtags/users の containment query 用)。summary text からは抽出しない。
 	user.Tags = pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
+	if ephemeral {
+		// リレー経由でしか観測しない著者は DB に入れない (#2332)。呼び出し元
+		// (ingestNoteWithCreated) が PutNote でノートごと Redis に置く。
+		//
+		// 公開鍵は保存しない。リレー配送では Announce に署名するのがリレー
+		// actor で、ノート本体は origin から HTTPS で取得するため著者の鍵を
+		// 使う場面が無い。後で必要になれば (直接配送を受けた等) 通常経路の
+		// ResolveActor が引き直して DB 行ごと作る。
+		//
+		// hashtag 集計 / user_profile / chart も DB 書き込みなので行わない。
+		return user, nil
+	}
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
 	}
