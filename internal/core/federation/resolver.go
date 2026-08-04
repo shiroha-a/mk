@@ -130,6 +130,16 @@ type EphemeralTimelineRemover interface {
 	RemoveNoteID(noteID string, author *model.User, visibility string, host *string)
 }
 
+// MaterializeActor creates (or returns) the database row for a remote actor,
+// reusing preassignedID when the row does not exist yet (#2332).
+//
+// ephemeral store から著者を起こすときの入口。ID を据え置くのは、変えると
+// Redis に残っている既存ノートが古い ID を指したままになり、ミュートが効かなく
+// なるため。鍵ごと正規に作るため actor は fetch し直す。
+func (r *Resolver) MaterializeActor(uri, preassignedID string) (*model.User, error) {
+	return r.resolveActorWithID(uri, preassignedID)
+}
+
 // SetEphemeralSink wires the ephemeral store. Optional — nil keeps the
 // database-only behaviour.
 func (r *Resolver) SetEphemeralSink(s EphemeralSink) { r.ephemeralSink = s }
@@ -496,13 +506,33 @@ func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
 }
 
 // resolveActor is ResolveActor carrying the cross-host-allowed flag (#1828)。
+// resolveActorWithID resolves an actor, reusing a pre-assigned local ID when
+// the row does not exist yet (#2332).
+//
+// ephemeral として採番した ID を materialize 後もそのまま使うために要る。
+// ここを新規採番に任せると、ミュートで著者を materialize したときに ID が
+// 変わり、Redis に残っている既存ノートが古い ID を指したままになる。結果と
+// して **ミュートしたのにタイムラインから消えない** 状態が TTL 切れまで続く。
+func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, error) {
+	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
+		return r.resolveActorOnceWithID(uri, false, preassignedID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, ErrInvalidActor
+	}
+	return v.(*model.User), nil
+}
+
 func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, error) {
 	// 同一 URI への並行呼び出しは singleflight で 1 つに collapse する
 	// (#300 3-7)。cache hit 経路は微秒なので serialize の影響は無視でき、
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
-		return r.resolveActorOnce(uri, allowCrossHost)
+		return r.resolveActorOnceWithID(uri, allowCrossHost, "")
 	})
 	if err != nil {
 		return nil, err
@@ -515,7 +545,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 
 // resolveActorOnce is the body of resolveActor, invoked once per URI by
 // singleflight.Do.
-func (r *Resolver) resolveActorOnce(uri string, allowCrossHost bool) (*model.User, error) {
+func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -550,7 +580,7 @@ func (r *Resolver) resolveActorOnce(uri string, allowCrossHost bool) (*model.Use
 
 	now := r.clock()
 	user := &model.User{
-		ID:            r.idGen.Generate(now),
+		ID:            pickID(preassignedID, r.idGen, now),
 		Username:      actor.PreferredUsername,
 		UsernameLower: strings.ToLower(actor.PreferredUsername),
 		Host:          &host,
@@ -2389,6 +2419,15 @@ func assertRequestHostMatches(requestURI, objectID string) error {
 // resolves so a Strict federation-loop resolve never collapses onto a relaxed
 // in-flight one (and thereby skip its request-host binding)。Strict 経路の key は
 // uri そのままなので通常の dedup 挙動は不変。
+// pickID returns the pre-assigned ID when one was carried over from the
+// ephemeral store, and a freshly generated one otherwise (#2332)。
+func pickID(preassigned string, gen id.Generator, now time.Time) string {
+	if preassigned != "" {
+		return preassigned
+	}
+	return gen.Generate(now)
+}
+
 func crossHostKey(uri string, allowCrossHost bool) string {
 	if allowCrossHost {
 		return "xhost\x00" + uri
