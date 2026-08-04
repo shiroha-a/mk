@@ -2466,6 +2466,10 @@ func (s *Server) setupRoutes() {
 	reactionService.SetNoteMaterializer(ephemeralMaterializer)   // note_reaction.noteId
 	noteCreateService.SetNoteMaterializer(ephemeralMaterializer) // note.replyId / renoteId
 	pollService.SetNoteMaterializer(ephemeralMaterializer)       // poll_vote.noteId
+	clipService.SetNoteMaterializer(ephemeralMaterializer)       // clip_note.noteId
+	// ノートを伴わない契機。いずれも user への外部キーだけを要求する。
+	mutingService.SetUserMaterializer(ephemeralMaterializer)   // muting.muteeId
+	blockingService.SetUserMaterializer(ephemeralMaterializer) // blocking.blockeeId
 	// DB 行が ephemeral を上書きしたとき FTT から旧 ID を除く。残すと hydrate で
 	// ephemeral 側が拾われ二重表示になる。
 	federationResolver.SetEphemeralTimelineRemover(timelineFanoutHook)

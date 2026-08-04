@@ -2,6 +2,7 @@
 package muting
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -27,6 +28,9 @@ type Service struct {
 	userRepo   repository.UserRepository
 	mutingRepo repository.MutingRepository
 	idGen      id.Generator
+	// userMaterializer はリレーでしか観測していない相手を DB へ昇格させる
+	// (#2332)。muting.muteeId / blocking.blockeeId が user への外部キー。
+	userMaterializer UserMaterializer
 }
 
 // NewService constructs a UserMutingService.
@@ -43,7 +47,11 @@ func (s *Service) Mute(muterID, muteeID string, expiresAt *time.Time) (*model.Mu
 	if muterID == muteeID {
 		return nil, ErrSelfMute
 	}
-	if _, err := s.userRepo.FindByID(muteeID); err != nil {
+	_, uerr := s.userRepo.FindByID(muteeID)
+	if s.materializeUserIfMissing(muteeID, uerr) {
+		_, uerr = s.userRepo.FindByID(muteeID)
+	}
+	if uerr != nil {
 		return nil, ErrMuteeNotFound
 	}
 
@@ -165,4 +173,29 @@ func (s *RenoteService) List(muterID, sinceID, untilID string, limit, offset int
 		limit = 10
 	}
 	return s.renoteMutingRepo.ListByMuter(muterID, sinceID, untilID, limit, offset)
+}
+
+// UserMaterializer promotes a relay-only author out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+//
+// ミュート / ブロックは user への外部キーだけを要求し、ノート行は要らない。
+// リレーでしか観測していない相手をミュートしようとしたときに、対象が DB に
+// 居ないと登録できないため。
+type UserMaterializer interface {
+	EnsureUser(ctx context.Context, userID string) (*model.User, error)
+}
+
+// SetUserMaterializer attaches the ephemeral-author materializer. Optional.
+func (s *Service) SetUserMaterializer(m UserMaterializer) {
+	s.userMaterializer = m
+}
+
+// materializeUserIfMissing promotes an ephemeral author only when the database
+// lookup already failed.
+func (s *Service) materializeUserIfMissing(userID string, lookupErr error) bool {
+	if lookupErr == nil || s.userMaterializer == nil {
+		return false
+	}
+	_, err := s.userMaterializer.EnsureUser(context.Background(), userID)
+	return err == nil
 }

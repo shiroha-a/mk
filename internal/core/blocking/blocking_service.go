@@ -2,6 +2,7 @@
 package blocking
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"time"
@@ -33,6 +34,9 @@ type Service struct {
 	// federationHook は local user が remote user を (un)block した際に
 	// Block / Undo(Block) を相手 inbox へ配信する (#1560)。nil なら配信しない。
 	federationHook FederationHook
+	// userMaterializer はリレーでしか観測していない相手を DB へ昇格させる
+	// (#2332)。muting.muteeId / blocking.blockeeId が user への外部キー。
+	userMaterializer UserMaterializer
 }
 
 // FederationHook delivers Block / Undo(Block) AP activities to a remote
@@ -77,7 +81,11 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 	if blockerID == blockeeID {
 		return nil, ErrSelfBlock
 	}
-	if _, err := s.userRepo.FindByID(blockeeID); err != nil {
+	_, uerr := s.userRepo.FindByID(blockeeID)
+	if s.materializeUserIfMissing(blockeeID, uerr) {
+		_, uerr = s.userRepo.FindByID(blockeeID)
+	}
+	if uerr != nil {
 		return nil, ErrBlockeeNotFound
 	}
 
@@ -177,4 +185,29 @@ func (s *Service) removeFollowing(followerID, followeeID string) {
 			}
 		}
 	}
+}
+
+// UserMaterializer promotes a relay-only author out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+//
+// ミュート / ブロックは user への外部キーだけを要求し、ノート行は要らない。
+// リレーでしか観測していない相手をミュートしようとしたときに、対象が DB に
+// 居ないと登録できないため。
+type UserMaterializer interface {
+	EnsureUser(ctx context.Context, userID string) (*model.User, error)
+}
+
+// SetUserMaterializer attaches the ephemeral-author materializer. Optional.
+func (s *Service) SetUserMaterializer(m UserMaterializer) {
+	s.userMaterializer = m
+}
+
+// materializeUserIfMissing promotes an ephemeral author only when the database
+// lookup already failed.
+func (s *Service) materializeUserIfMissing(userID string, lookupErr error) bool {
+	if lookupErr == nil || s.userMaterializer == nil {
+		return false
+	}
+	_, err := s.userMaterializer.EnsureUser(context.Background(), userID)
+	return err == nil
 }

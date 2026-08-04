@@ -4,6 +4,7 @@
 package clip
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ type Service struct {
 	// rolePolicyProvider は clipLimit / noteEachClipsLimit の gate に使う
 	// (#1029)。nil 時は gate skip。
 	rolePolicyProvider RolePolicyProvider
+	// materializer はリレー由来で DB に無いノートを昇格させる (#2332)。
+	// clip_note.noteId が note への外部キー。
+	materializer NoteMaterializer
 }
 
 // RolePolicyProvider abstracts role-policy lookup for clip count limits (#1029)。
@@ -230,7 +234,11 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	if c.UserID != ownerID {
 		return ErrClipNotFound
 	}
-	if _, err := s.notes.FindByID(noteID); err != nil {
+	_, nerr := s.notes.FindByID(noteID)
+	if s.materializeIfMissing(noteID, nerr) {
+		_, nerr = s.notes.FindByID(noteID)
+	}
+	if nerr != nil {
 		return ErrNoteNotFound
 	}
 	if _, err := s.noteRepo.FindByPair(clipID, noteID); err == nil {
@@ -347,4 +355,27 @@ func (s *Service) Notes(requesterID, clipID, untilID, sinceID string, limit int,
 		ids = append(ids, r.NoteID)
 	}
 	return s.notes.FindManyByIDsWithUser(ids)
+}
+
+// NoteMaterializer promotes a relay-delivered note out of the ephemeral store
+// into a real database row (#2332)。実装は core/ephemeral.Materializer。
+type NoteMaterializer interface {
+	EnsureNote(ctx context.Context, noteID string) (*model.Note, error)
+}
+
+// SetNoteMaterializer attaches the ephemeral-note materializer. Optional.
+func (s *Service) SetNoteMaterializer(m NoteMaterializer) {
+	s.materializer = m
+}
+
+// materializeIfMissing promotes an ephemeral note only when the database
+// lookup already failed.
+//
+// 通常のノートでは Redis を一切引かないので、ホットパスに追加コストが無い。
+func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
+	if lookupErr == nil || s.materializer == nil {
+		return false
+	}
+	_, err := s.materializer.EnsureNote(context.Background(), noteID)
+	return err == nil
 }
