@@ -3,6 +3,7 @@
 package federation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,50 @@ var (
 // through note quote chains, matching upstream Resolver.recursionLimit (256)。
 const resolveRecursionLimit = 256
 
+// EphemeralSink receives relay-delivered notes and their authors instead of
+// the database (#2332)。実装は core/ephemeral.Store。
+//
+// リレー経由でしか観測しない投稿は、ローカルの誰とも関係が無いまま流れていく
+// だけなので DB に入れる価値が無い。それでも保存すると流量に比例して INSERT と
+// DELETE が両方発生し、autovacuum まで含めた I/O が二重に掛かる。
+type EphemeralSink interface {
+	PutNote(ctx context.Context, n *model.Note, author *model.User) error
+	UserIDByURI(ctx context.Context, uri string) (string, error)
+	GetUser(ctx context.Context, id string) (*model.User, error)
+}
+
+// SetEphemeralSink wires the ephemeral store. Optional — nil keeps the
+// database-only behaviour.
+func (r *Resolver) SetEphemeralSink(s EphemeralSink) { r.ephemeralSink = s }
+
+// resolveNoteAuthor resolves a note's author, keeping relay-only authors out
+// of the database (#2332).
+//
+// 解決順が重要:
+//
+//  1. DB を先に引く。ミュート済み / フォロー済み / 過去に materialize 済みの
+//     著者は実 ID を使う。ここを飛ばすと、ミュートしたのに ephemeral 側の
+//     別 ID を持つ投稿がタイムラインに残り続ける
+//  2. ephemeral store の URI 逆引き。同じ著者の 2 件目以降で ID を再利用する。
+//     これが無いと投稿ごとに別 ID を採番して同一人物が別人として並ぶ
+//  3. どちらにも無ければ通常の ResolveActor で解決する。DB 行は作られるが、
+//     ephemeral な著者を作る経路は Phase 2 (materialize) で扱う
+func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool) (*model.User, error) {
+	if !ephemeral || r.ephemeralSink == nil {
+		return r.ResolveActor(uri)
+	}
+	if existing, err := r.userRepo.FindByURI(uri); err == nil && existing != nil {
+		return existing, nil
+	}
+	ctx := context.Background()
+	if id, err := r.ephemeralSink.UserIDByURI(ctx, uri); err == nil && id != "" {
+		if u, uerr := r.ephemeralSink.GetUser(ctx, id); uerr == nil && u != nil {
+			return u, nil
+		}
+	}
+	return r.ResolveActor(uri)
+}
+
 // DefaultActorTTL is the default duration after which a cached actor (and its
 // public key) is considered stale and refetched on next access.
 const DefaultActorTTL = 24 * time.Hour
@@ -176,6 +221,9 @@ type Resolver struct {
 	// safehttp.NewSSRFSafeTransport を適用したもの) を渡す前提で、
 	// 未設定なら probe 自体をスキップする (安全側に倒す: SSRF リスクを
 	// 起こすくらいなら properties 空のまま運用)。
+	// ephemeralSink はリレー経由でしか観測しない投稿の置き場 (#2332)。
+	// 設定が有効かつ配線されているときだけ、DB ではなくこちらへ書く。
+	ephemeralSink    EphemeralSink
 	imageProbeClient *http.Client
 	// hostBlocker は federation 設定 (none / specified / blockedHosts) を
 	// 評価する gate。fetchActor / resolveNoteOnce / IngestNoteWithCreated
@@ -954,7 +1002,21 @@ func (r *Resolver) ResolveActorByKeyID(keyID string) (*model.User, error) {
 //   - リモート URI で既に取り込み済みなら noteRepo.FindByURI で返す
 //   - 未知のリモート URI なら fetcher で取得して IngestNote で永続化
 func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0, false)
+	return r.resolveNoteDepth(uri, 0, false, false)
+}
+
+// ResolveNoteEphemeral is ResolveNote for relay-delivered notes: the note and
+// its author are written to the ephemeral store instead of the database
+// (#2332)。既に DB に在る URI はそのまま DB 行を返す (直接配送で来ていた等)。
+//
+// **検証は ResolveNote と完全に同一の経路を通る。** host binding / attribution
+// forge / 可視性導出 / mention 上限はいずれも分岐しない。ephemeral 用に別の
+// 構築経路を書くと検証が二重管理になり、リレー経由が検証を迂回する穴になる。
+func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
+	if r.ephemeralSink == nil {
+		return r.resolveNoteDepth(uri, 0, false, false)
+	}
+	return r.resolveNoteDepth(uri, 0, false, true)
 }
 
 // ResolveNoteAllowCrossHost is ResolveNote for user-initiated lookups
@@ -962,18 +1024,21 @@ func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
 // CrossOrigin softfail (#1828)。entry URI が attacker 制御でないため cross-host
 // redirect を許容する。finalURL ↔ id binding は引き続き適用される。
 func (r *Resolver) ResolveNoteAllowCrossHost(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0, true)
+	return r.resolveNoteDepth(uri, 0, true, false)
 }
 
 // resolveNoteDepth is ResolveNote carrying the current recursion depth so the
 // note/quote chain can be bounded (#1828)。quote 解決経路 (resolveQuoteURI) が
 // depth+1 で再入する。allowCrossHost は user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost bool) (*model.Note, error) {
+func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost, ephemeral bool) (*model.Note, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
 	// 実行しないことが目的。
-	v, err, _ := r.resolveNoteGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
-		return r.resolveNoteOnce(uri, depth, allowCrossHost)
+	//
+	// ephemeral かどうかで書き込み先が変わるため singleflight key も分ける。
+	// 混ざると片方の呼び出しが意図しない層へ書かれる。
+	v, err, _ := r.resolveNoteGroup.Do(noteGroupKey(uri, allowCrossHost, ephemeral), func() (any, error) {
+		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral)
 	})
 	if err != nil {
 		return nil, err
@@ -987,7 +1052,7 @@ func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost bool) 
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
 // singleflight.Do. depth は quote chain の現在の深さ。allowCrossHost は
 // user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost bool) (*model.Note, error) {
+func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral bool) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -1053,7 +1118,7 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost bool) (
 	}
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// quote chain の depth を引き継いで再帰上限を効かせる。
-	note, _, err := r.ingestNoteWithCreated(body, "", depth)
+	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral)
 	return note, err
 }
 
@@ -1066,18 +1131,18 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost bool) (
 // 既知 note (local ID / 取り込み済み URI) を fetch 無しで優先的に引く。未知 URI は
 // ResolveNote で fetch するが、その URI が現在 ingest 中 (quote cycle) の場合は
 // fetch を skip して無限再帰を防ぐ (#1527)。
-func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int) *model.Note {
+func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int, ephemeral bool) *model.Note {
 	if r.noteRepo == nil {
 		return nil
 	}
 	// upstream ApNoteService は `[_misskey_quote, quoteUrl]` を順に解決し、最初に
 	// 成功した note を採用する (`.at(0)`)。通常は両者同値だが、片方しか解決できない
 	// ケースで取りこぼさないよう順に試す。
-	if n := r.resolveQuoteURI(misskeyQuote, depth); n != nil {
+	if n := r.resolveQuoteURI(misskeyQuote, depth, ephemeral); n != nil {
 		return n
 	}
 	if quoteURL != misskeyQuote {
-		if n := r.resolveQuoteURI(quoteURL, depth); n != nil {
+		if n := r.resolveQuoteURI(quoteURL, depth, ephemeral); n != nil {
 			return n
 		}
 	}
@@ -1087,7 +1152,7 @@ func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int) 
 // resolveQuoteURI resolves a single quote URI to a local note row. 既知 note
 // (local ID / 取り込み済み URI) は fetch 無しで引き、未知 URI は cycle でなければ
 // ResolveNote で fetch する。空 URI / 解決不能は nil。
-func (r *Resolver) resolveQuoteURI(uri string, depth int) *model.Note {
+func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model.Note {
 	if uri == "" {
 		return nil
 	}
@@ -1109,7 +1174,8 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int) *model.Note {
 		return nil
 	}
 	// quote 解決は federation-loop 扱いで Strict (request host binding 有効)。
-	if n, err := r.resolveNoteDepth(uri, depth+1, false); err == nil {
+	// ephemeral は親から引き継ぐ (引用先だけ DB に落ちるのを防ぐ)。
+	if n, err := r.resolveNoteDepth(uri, depth+1, false, ephemeral); err == nil {
 		return n
 	}
 	return nil
@@ -1124,7 +1190,7 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int) *model.Note {
 func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// id host == attributedTo host 検証は IngestNoteWithCreated 側で常に行う。
-	note, _, err := r.ingestNoteWithCreated(body, "", 0)
+	note, _, err := r.ingestNoteWithCreated(body, "", 0, false)
 	return note, err
 }
 
@@ -1152,12 +1218,12 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 // validateNote が actor 未指定時に attribution==actor を skip するのと同じ)。
 func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string) (*model.Note, bool, error) {
 	// inbound delivery 起点は quote chain depth 0。
-	return r.ingestNoteWithCreated(body, deliveringActorURI, 0)
+	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, false)
 }
 
 // ingestNoteWithCreated is the body of IngestNoteWithCreated carrying the
 // current note/quote-chain recursion depth (#1828)。
-func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string, depth int) (*model.Note, bool, error) {
+func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string, depth int, ephemeral bool) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
 		return nil, false, ErrInvalidNote
 	}
@@ -1199,7 +1265,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if !r.hostAllowedForURI(apNote.AttributedTo) {
 		return nil, false, ErrHostNotAllowed
 	}
-	actor, err := r.ResolveActor(apNote.AttributedTo)
+	actor, err := r.resolveNoteAuthor(apNote.AttributedTo, ephemeral)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1401,7 +1467,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
 	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
 	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
-	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL, depth)
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL, depth, ephemeral)
 	// 引用先が followers / specified(DM) の場合は紐付けない。本家
 	// NoteCreateService.ts:346-352 は他人の followers note と全 specified note を
 	// renote 対象から reject するため、連合の正規 quote がこれらを指すことはない。
@@ -1419,6 +1485,18 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		note.RenoteID = &quoted.ID
 		note.RenoteUserID = &quoted.UserID
 		note.RenoteUserHost = quoted.UserHost
+	}
+	if ephemeral {
+		// リレー由来の投稿は DB に入れず Redis へ置く (#2332)。ここまでの
+		// 検証 (host binding / attribution / 可視性 / mention 上限) は
+		// 通常経路と完全に同じものを通っている。
+		if err := r.ephemeralSink.PutNote(context.Background(), note, actor); err != nil {
+			return nil, false, err
+		}
+		// repliesCount / renoteCount の増分と poll 行の作成は行わない。前者は
+		// 対象が DB に無い可能性があり、後者は poll.noteId が note への FK を
+		// 持つため行を作れない。hashtag 集計も DB 書き込みなので行わない。
+		return note, true, nil
 	}
 	if err := r.noteRepo.Create(note); err != nil {
 		// dedup race: FindByURI (上) と Create の間に別の ingest が同 URI を先に
@@ -2269,6 +2347,16 @@ func crossHostKey(uri string, allowCrossHost bool) string {
 		return "xhost\x00" + uri
 	}
 	return uri
+}
+
+// noteGroupKey extends crossHostKey with the ephemeral flag so that a
+// database-bound resolve and an ephemeral one are never collapsed into the
+// same singleflight call (#2332)。
+func noteGroupKey(uri string, allowCrossHost, ephemeral bool) string {
+	if ephemeral {
+		return "eph\x00" + crossHostKey(uri, allowCrossHost)
+	}
+	return crossHostKey(uri, allowCrossHost)
 }
 
 // normalizeMatchHost canonicalizes a URL host for object-host comparison,
