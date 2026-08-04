@@ -84,6 +84,11 @@ type Meta struct {
 	ChunkedUploadChunkSizeMb       int  `gorm:"column:chunkedUploadChunkSizeMb;default:10" json:"chunkedUploadChunkSizeMb"`
 	ChunkedUploadSessionTTLMinutes int  `gorm:"column:chunkedUploadSessionTtlMinutes;default:60" json:"chunkedUploadSessionTtlMinutes"`
 	// 下 2 つは role policy に対するサーバー cap (capServerMaxFileSize と同じ役割)。
+	// リレー経由でしか観測しない投稿を DB に入れず Redis で揮発させる (#2332)。
+	// 有効化するとグローバルタイムラインは FTT の窓より過去に遡れなくなる。
+	EnableEphemeralRelayNotes    bool `gorm:"column:enableEphemeralRelayNotes;default:false" json:"enableEphemeralRelayNotes"`
+	EphemeralRelayNoteTTLMinutes int  `gorm:"column:ephemeralRelayNoteTtlMinutes;default:60" json:"ephemeralRelayNoteTtlMinutes"`
+
 	ChunkedUploadMaxSessionsPerUser  int `gorm:"column:chunkedUploadMaxSessionsPerUser;default:8" json:"chunkedUploadMaxSessionsPerUser"`
 	ChunkedUploadMaxPendingMbPerUser int `gorm:"column:chunkedUploadMaxPendingMbPerUser;default:2048" json:"chunkedUploadMaxPendingMbPerUser"`
 

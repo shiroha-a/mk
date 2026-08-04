@@ -79,6 +79,7 @@ import (
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
+	coreephemeral "github.com/shiroha-a/mk/internal/core/ephemeral"
 	"github.com/shiroha-a/mk/internal/core/event"
 	corefeatured "github.com/shiroha-a/mk/internal/core/featured"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
@@ -263,8 +264,26 @@ func (s *Server) setupRoutes() {
 	// keyPrefix で TS 本家と同じ `<host>:list:*` 名前空間に揃える (#362)。
 	fanoutTimelineService := coretimeline.NewFanoutTimelineService(
 		s.redis.Timelines, idGen, s.config.RedisForTimelines.KeyPrefix())
-	timelineService := coretimeline.NewService(fanoutTimelineService, noteRepo, followingRepo)
 	timelineFanoutHook := coretimeline.NewFanoutHook(fanoutTimelineService, followingRepo)
+
+	// リレー経由でしか観測しない投稿の置き場 (#2332)。DB に入れず Redis に
+	// TTL 付きで置き、ローカルユーザーが触ったときだけ materialize する。
+	// meta を都度読むのは、起動時固定にすると管理画面の変更が再起動まで
+	// 効かないため (#2315 と同じ轍を踏まない)。
+	ephemeralStore := coreephemeral.NewStore(
+		s.redis.Timelines, s.config.RedisForTimelines.KeyPrefix(),
+		func() time.Duration {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil || !m.EnableEphemeralRelayNotes {
+				return 0
+			}
+			return time.Duration(m.EphemeralRelayNoteTTLMinutes) * time.Minute
+		})
+	// timeline の hydrate が DB に無い ID を Redis から補えるようにする。
+	// store 自体は常に配線し、機能の有効・無効は取り込み側で判定する
+	// (無効化しても既に置かれているぶんは TTL 切れまで読めた方がよい)。
+	timelineService := coretimeline.NewService(fanoutTimelineService, noteRepo, followingRepo)
+	timelineService.SetEphemeralLookup(ephemeralStore)
 	// Phase DB-compat (#51): meta から timeline cache cap を動的に読む。
 	// 4 つのカラム (perLocal / perRemote / perHome / perList) が反映される。
 	timelineFanoutHook.SetCacheLimitsProvider(coretimeline.NewMetaRepoCacheLimits(metaRepo))
@@ -2434,6 +2453,12 @@ func (s *Server) setupRoutes() {
 	// inbound actor self-delete 時に remote user の notes/drive/following を
 	// cascade purge する job を enqueue する (#1220)。
 	federationProcessor.SetAccountDeleteEnqueuer(s.queueClient)
+	// リレー投稿を DB ではなく Redis へ書く経路 (#2332)。有効化されていない
+	// 間は ResolveNoteEphemeral が通常経路へ倒れるので挙動は変わらない。
+	federationResolver.SetEphemeralSink(ephemeralStore)
+	// DB 行が ephemeral を上書きしたとき FTT から旧 ID を除く。残すと hydrate で
+	// ephemeral 側が拾われ二重表示になる。
+	federationResolver.SetEphemeralTimelineRemover(timelineFanoutHook)
 	federationProcessor.SetFanoutHook(timelineFanoutHook)
 	federationProcessor.SetNotificationHook(notificationHook)
 
