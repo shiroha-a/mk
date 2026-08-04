@@ -2,6 +2,7 @@ package federation_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -592,4 +593,121 @@ func TestProcess_WithoutSignerGoesToDB(t *testing.T) {
 
 	assert.NotEmpty(t, noteRepo.Notes, "判定できないときは DB に倒すこと")
 	assert.Empty(t, sink.notes)
+}
+
+// --- リレー由来の記録 (#2340) ---
+
+// recordingRelayMarker captures which users were recorded as relay-derived.
+type recordingRelayMarker struct {
+	marked []string
+	err    error
+}
+
+func (m *recordingRelayMarker) MarkObserved(userID string) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.marked = append(m.marked, userID)
+	return nil
+}
+
+// ResolveActorViaRelay は新規作成時に印を付ける。
+// 孤児掃除の対象をリレー由来に限定するために要る。
+func TestResolveActorViaRelay_MarksNewUser(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, userRepo := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+	marker := &recordingRelayMarker{}
+	r.SetRelayObservedMarker(marker)
+
+	got, err := r.ResolveActorViaRelay(actorURI)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, []string{got.ID}, marker.marked, "新規作成時に記録すること")
+	assert.Contains(t, userRepo.Users, got.ID)
+}
+
+// 既に DB に在る行には印を付けない。
+// リレー購読前から居る行やプロフィール閲覧で解決された行を巻き込まないため。
+func TestResolveActorViaRelay_DoesNotMarkExisting(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, userRepo := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+	host := "remote.example"
+	userRepo.Users["known"] = &model.User{ID: "known", Username: "alice", Host: &host, URI: &actorURI}
+	marker := &recordingRelayMarker{}
+	r.SetRelayObservedMarker(marker)
+
+	got, err := r.ResolveActorViaRelay(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, "known", got.ID)
+	assert.Empty(t, marker.marked, "既存行には印を付けないこと")
+}
+
+// 記録の失敗は actor 解決を壊さない (ベストエフォート)。
+func TestResolveActorViaRelay_MarkerFailureIsBestEffort(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, _ := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+	r.SetRelayObservedMarker(&recordingRelayMarker{err: errors.New("db down")})
+
+	got, err := r.ResolveActorViaRelay(actorURI)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+}
+
+func TestResolveActorViaRelay_FetchFailure(t *testing.T) {
+	r, _, _, _ := ephResolverDocs(t, map[string]string{})
+	r.SetRelayObservedMarker(&recordingRelayMarker{})
+	_, err := r.ResolveActorViaRelay("https://remote.example/users/ghost")
+	assert.Error(t, err)
+}
+
+// marker 未配線でも動く。
+func TestResolveActorViaRelay_NoMarkerWired(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	r, _, _, _ := ephResolverDocs(t, map[string]string{actorURI: ephActorDoc})
+	got, err := r.ResolveActorViaRelay(actorURI)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+}
+
+// --- 機能無効時の入口 (#2338) ---
+
+// 無効なら ephemeral 用の入口も通常経路に倒れる。
+func TestEphemeralEntryPoints_DisabledFallBackToDB(t *testing.T) {
+	noteURI := "https://remote.example/notes/1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "disabled",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, noteRepo, userRepo := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+	sink.disabled = true
+
+	u, err := r.ResolveActorEphemeral(actorURI)
+	require.NoError(t, err)
+	require.NotNil(t, u)
+	assert.NotEmpty(t, userRepo.Users, "無効時は DB に入ること")
+
+	n, _, err := r.IngestNoteEphemeral([]byte(doc), actorURI)
+	require.NoError(t, err)
+	require.NotNil(t, n)
+	assert.NotEmpty(t, noteRepo.Notes, "無効時は DB に入ること")
+	assert.Empty(t, sink.notes)
+}
+
+// sink 未配線でも同様。
+func TestEphemeralEntryPoints_NoSink(t *testing.T) {
+	actorURI := "https://remote.example/users/alice"
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(userRepo, noteRepo, urls, &docFetcher{docs: map[string]string{actorURI: ephActorDoc}}, idGen)
+
+	u, err := r.ResolveActorEphemeral(actorURI)
+	require.NoError(t, err)
+	assert.NotNil(t, u)
 }
