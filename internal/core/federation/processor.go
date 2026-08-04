@@ -1441,7 +1441,22 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	if err != nil {
 		return err
 	}
-	target, err := p.resolver.ResolveNote(targetURI)
+	// relay 由来かどうかは **note を解決する前に** 判定する。ResolveNote は
+	// 解決と同時に DB へ永続化するので、後から判定したのでは「リレー投稿を
+	// DB に入れない」(#2332) が成立しない。
+	//
+	// announcer.Inbox / SharedInbox が registered relay の Inbox と一致した
+	// 場合のみ relay 由来と判定。
+	viaRelay := p.relayActorChecker != nil && p.relayActorChecker.IsRelayActor(announcer)
+
+	var target *model.Note
+	if viaRelay {
+		// リレー経由でしか観測しない投稿は Redis に置く。ephemeral store が
+		// 未配線 / 機能無効なら ResolveNoteEphemeral が通常経路に倒れる。
+		target, err = p.resolver.ResolveNoteEphemeral(targetURI)
+	} else {
+		target, err = p.resolver.ResolveNote(targetURI)
+	}
 	if err != nil {
 		// permanent な target resolve 失敗 (削除済 note / followers-only) は
 		// Announce 記録を skip して ack (#1183)。
@@ -1456,9 +1471,7 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	// Announce は renote として保存せず、target note 自体を timeline stream に
 	// publish する。renote 表示にしてしまうと「relay actor がリノートした」と
 	// いう偽装表示になり、原投稿者からの直接配送と区別がつかなくなるため。
-	// announcer.Inbox / SharedInbox が registered relay の Inbox と一致した
-	// 場合のみ relay 由来と判定。
-	if p.relayActorChecker != nil && p.relayActorChecker.IsRelayActor(announcer) {
+	if viaRelay {
 		return p.publishRelayDeliveredNote(target, targetURI, act.Actor)
 	}
 	// upstream announceNote の 2 つの skip guard (#1560、ApInboxService.ts:350-361):

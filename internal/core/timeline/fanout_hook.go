@@ -567,6 +567,30 @@ func (h *FanoutHook) pushWithLimit(ctx context.Context, name Name, id string, ma
 	}
 }
 
+// RemoveNoteID drops a note ID from the timeline lists it could have been
+// pushed to, without needing the full note row (#2332).
+//
+// ephemeral note が DB 行に置き換わったときに旧 ID を除くために使う。残すと
+// hydrate で ephemeral 側が拾われ続けて二重表示になる。OnNoteDeleted と違い
+// *model.Note を持たない (Redis から既に落ちている) ので、fan-out 先の判定に
+// 必要な最小限 (著者 / visibility / host) だけを受け取る。
+//
+// リレー由来の投稿はローカルにフォロワーが居ない前提なので、follower の home
+// までは辿らない。著者の userTimeline と global / local だけを掃除する。
+func (h *FanoutHook) RemoveNoteID(noteID string, author *model.User, visibility string, host *string) {
+	if h == nil || h.fanout == nil || noteID == "" || author == nil {
+		return
+	}
+	ctx := context.Background()
+	h.removeBestEffort(ctx, UserTimelineName(author.ID), noteID)
+	if visibility == string(model.NoteVisibilityPublic) {
+		h.removeBestEffort(ctx, GlobalTimeline, noteID)
+		if host == nil || *host == "" {
+			h.removeBestEffort(ctx, LocalTimeline, noteID)
+		}
+	}
+}
+
 // OnNoteDeleted purges the deleted note ID from every Redis timeline list
 // it could have been pushed to by OnNoteCreated (#379)。inbound Delete も
 // ローカル削除も同じ経路を通って届くので、ここ 1 か所で fan-out 先全てを

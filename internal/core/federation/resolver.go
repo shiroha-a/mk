@@ -114,11 +114,48 @@ type EphemeralSink interface {
 	PutNote(ctx context.Context, n *model.Note, author *model.User) error
 	UserIDByURI(ctx context.Context, uri string) (string, error)
 	GetUser(ctx context.Context, id string) (*model.User, error)
+	// NoteIDByURI / DropNote は重複解消に使う。同じ投稿が後から直接配送で
+	// DB に入ったとき、ephemeral 側を落とさないとタイムラインに 2 回出る。
+	NoteIDByURI(ctx context.Context, uri string) (string, error)
+	DropNote(ctx context.Context, id, uri string) error
+}
+
+// EphemeralTimelineRemover drops a superseded ephemeral note ID from the
+// Redis timeline lists (#2332)。実装は core/timeline.FanoutHook。
+type EphemeralTimelineRemover interface {
+	RemoveNoteID(noteID string, author *model.User, visibility string, host *string)
 }
 
 // SetEphemeralSink wires the ephemeral store. Optional — nil keeps the
 // database-only behaviour.
 func (r *Resolver) SetEphemeralSink(s EphemeralSink) { r.ephemeralSink = s }
+
+// SetEphemeralTimelineRemover wires the timeline list cleaner used when a
+// database row supersedes an ephemeral entry. Optional.
+func (r *Resolver) SetEphemeralTimelineRemover(t EphemeralTimelineRemover) { r.ephemeralTimeline = t }
+
+// dropSupersededEphemeral removes an ephemeral entry that the freshly created
+// database row supersedes, along with its now-stale ID in the timeline lists.
+//
+// ephemeral 側の ID と DB 行の ID は別物 (先に ephemeral として採番したものは
+// materialize 時にのみ引き継がれる) なので、FTT に残った旧 ID も除かないと
+// hydrate で ephemeral 側が拾われ続ける。
+func (r *Resolver) dropSupersededEphemeral(uri, visibility string, author *model.User) {
+	if r.ephemeralSink == nil || uri == "" {
+		return
+	}
+	ctx := context.Background()
+	oldID, err := r.ephemeralSink.NoteIDByURI(ctx, uri)
+	if err != nil || oldID == "" {
+		return
+	}
+	if derr := r.ephemeralSink.DropNote(ctx, oldID, uri); derr != nil {
+		slog.Warn("federation: failed to drop superseded ephemeral note", "uri", uri, "err", derr)
+	}
+	if r.ephemeralTimeline != nil && author != nil {
+		r.ephemeralTimeline.RemoveNoteID(oldID, author, visibility, author.Host)
+	}
+}
 
 // resolveNoteAuthor resolves a note's author, keeping relay-only authors out
 // of the database (#2332).
@@ -223,8 +260,11 @@ type Resolver struct {
 	// 起こすくらいなら properties 空のまま運用)。
 	// ephemeralSink はリレー経由でしか観測しない投稿の置き場 (#2332)。
 	// 設定が有効かつ配線されているときだけ、DB ではなくこちらへ書く。
-	ephemeralSink    EphemeralSink
-	imageProbeClient *http.Client
+	ephemeralSink EphemeralSink
+	// ephemeralTimeline は DB 行が ephemeral を上書きしたときに FTT から旧 ID
+	// を除くためのもの。残すと hydrate で ephemeral 側が拾われ二重表示になる。
+	ephemeralTimeline EphemeralTimelineRemover
+	imageProbeClient  *http.Client
 	// hostBlocker は federation 設定 (none / specified / blockedHosts) を
 	// 評価する gate。fetchActor / resolveNoteOnce / IngestNoteWithCreated
 	// の入口で URI の host / attributedTo の host を判定して、ホワイト
@@ -1526,6 +1566,9 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if r.pollRepo != nil && note.HasPoll {
 		r.createPollFromQuestion(note, &apNote)
 	}
+	// 同じ投稿が先に relay 経由で ephemeral に入っていたら落とす。放置すると
+	// timeline の合成で DB 行と ephemeral の両方が出て二重表示になる (#2332)。
+	r.dropSupersededEphemeral(apNote.ID, string(note.Visibility), actor)
 	// hashtag table の mentionedUsersCount / userIds 更新 (#680 / #719)。
 	// hook 実装 (core/hashtag.Service) が内部で goroutine を起こす
 	// fire-and-forget 設計なので、IngestNote から見ると即時 return する。

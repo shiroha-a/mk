@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -130,4 +131,63 @@ func TestResolve_EphemeralNotesGoThroughFilter(t *testing.T) {
 	// ApplyFilter は *model.Note を受け取るので ephemeral でもそのまま通せる。
 	filtered := ApplyFilter(got, "viewer", TimelineFilter{WithRenotes: boolPtr(false)})
 	assert.NotNil(t, filtered)
+}
+
+// --- RemoveNoteID (ephemeral が DB 行に置き換わったときの後始末) ---
+
+func newRemoveHook(t *testing.T) (*FanoutHook, *FanoutTimelineService) {
+	t.Helper()
+	testRedis.FlushAll(context.Background())
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	fanout.randFn = func() float64 { return 1.0 }
+	return NewFanoutHook(fanout, testutil.NewMockFollowingRepository()), fanout
+}
+
+func TestRemoveNoteID_DropsFromGlobalAndUserTimeline(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	h, fanout := newRemoveHook(t)
+	ctx := context.Background()
+	host := "remote.example"
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "ra", UserHost: &host, Visibility: model.NoteVisibilityPublic}
+	author := &model.User{ID: "ra", Host: &host}
+	h.OnNoteCreated(n, author)
+
+	h.RemoveNoteID(noteID, author, string(model.NoteVisibilityPublic), &host)
+
+	global, err := fanout.Get(ctx, GlobalTimeline, "", "", 10)
+	require.NoError(t, err)
+	assert.NotContains(t, global, noteID)
+	user, err := fanout.Get(ctx, UserTimelineName("ra"), "", "", 10)
+	require.NoError(t, err)
+	assert.NotContains(t, user, noteID)
+}
+
+// ローカル著者なら localTimeline からも除く。
+func TestRemoveNoteID_DropsFromLocalTimelineForLocalAuthor(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	h, fanout := newRemoveHook(t)
+	ctx := context.Background()
+
+	noteID := idGen.Generate(time.Now())
+	author := &model.User{ID: "la"}
+	h.OnNoteCreated(&model.Note{ID: noteID, UserID: "la", Visibility: model.NoteVisibilityPublic}, author)
+
+	h.RemoveNoteID(noteID, author, string(model.NoteVisibilityPublic), nil)
+
+	local, err := fanout.Get(ctx, LocalTimeline, "", "", 10)
+	require.NoError(t, err)
+	assert.NotContains(t, local, noteID)
+}
+
+func TestRemoveNoteID_NilSafe(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	h, _ := newRemoveHook(t)
+	assert.NotPanics(t, func() {
+		h.RemoveNoteID("", &model.User{ID: "x"}, "public", nil)
+		h.RemoveNoteID("id", nil, "public", nil)
+		var nilHook *FanoutHook
+		nilHook.RemoveNoteID("id", &model.User{ID: "x"}, "public", nil)
+	})
 }

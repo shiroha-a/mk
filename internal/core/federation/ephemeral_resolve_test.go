@@ -19,6 +19,7 @@ type fakeSink struct {
 	authors map[string]*model.User
 	byURI   map[string]string
 	putErr  error
+	dropped []string
 }
 
 func newFakeSink() *fakeSink {
@@ -47,6 +48,21 @@ func (f *fakeSink) UserIDByURI(_ context.Context, uri string) (string, error) {
 
 func (f *fakeSink) GetUser(_ context.Context, id string) (*model.User, error) {
 	return f.authors[id], nil
+}
+
+func (f *fakeSink) NoteIDByURI(_ context.Context, uri string) (string, error) {
+	for id, n := range f.notes {
+		if n.URI != nil && *n.URI == uri {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+func (f *fakeSink) DropNote(_ context.Context, id, _ string) error {
+	delete(f.notes, id)
+	f.dropped = append(f.dropped, id)
+	return nil
 }
 
 // docFetcher serves a different document per URI so that a note fetch and the
@@ -239,4 +255,71 @@ func TestResolveNoteAuthor_PrefersExistingDBUser(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "real", got.UserID)
 	assert.Empty(t, sink.notes)
+}
+
+// --- 重複解消 ---
+
+// stubTimelineRemover records which IDs were pulled out of the FTT lists.
+type stubTimelineRemover struct{ removed []string }
+
+func (s *stubTimelineRemover) RemoveNoteID(noteID string, _ *model.User, _ string, _ *string) {
+	s.removed = append(s.removed, noteID)
+}
+
+// 同じ投稿が先に relay 経由で ephemeral に入り、後から直接配送で DB に入った
+// 場合、ephemeral 側を落とさないとタイムラインに 2 回出る。
+func TestIngestNote_DropsSupersededEphemeral(t *testing.T) {
+	noteURI := "https://remote.example/notes/1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "relay first",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, noteRepo, _ := ephResolverDocs(t, map[string]string{
+		noteURI:  doc,
+		actorURI: ephActorDoc,
+	})
+	remover := &stubTimelineRemover{}
+	r.SetEphemeralTimelineRemover(remover)
+
+	// 1. relay 経由で ephemeral に入る
+	ephNote, err := r.ResolveNoteEphemeral(noteURI)
+	require.NoError(t, err)
+	require.Len(t, sink.notes, 1)
+	assert.Empty(t, noteRepo.Notes)
+
+	// 2. 同じ投稿が直接配送で届く
+	dbNote, err := r.IngestNote([]byte(doc))
+	require.NoError(t, err)
+	require.NotNil(t, dbNote)
+
+	assert.NotEmpty(t, noteRepo.Notes, "DB 行が作られること")
+	assert.Empty(t, sink.notes, "ephemeral 側は落とされること")
+	assert.Contains(t, remover.removed, ephNote.ID, "FTT からも旧 ID が除かれること")
+}
+
+// ephemeral に居ない URI では余計な削除をしない。
+func TestIngestNote_NoEphemeralEntryIsNoop(t *testing.T) {
+	noteURI := "https://remote.example/notes/2"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "direct only",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, _, _ := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+	remover := &stubTimelineRemover{}
+	r.SetEphemeralTimelineRemover(remover)
+
+	_, err := r.IngestNote([]byte(doc))
+	require.NoError(t, err)
+	assert.Empty(t, sink.dropped)
+	assert.Empty(t, remover.removed)
 }
