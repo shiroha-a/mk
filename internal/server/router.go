@@ -1094,6 +1094,22 @@ func (s *Server) setupRoutes() {
 		}
 	})
 
+	// 本家 (Fastify) は JSON 応答の Content-Type を
+	// `application/json; charset=utf-8` で返すが、Echo の c.JSON は charset を
+	// 付けない。本家の e2e ヘルパ (test/utils.ts の api()) は Content-Type の
+	// 完全一致で body を採るか捨てるかを決めており、この差だけで全レスポンスが
+	// 空として扱われる。drop-in 互換のため本家に合わせる。
+	api.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Response().Before(func() {
+				if c.Response().Header().Get(echo.HeaderContentType) == "application/json" {
+					c.Response().Header().Set(echo.HeaderContentType, "application/json; charset=utf-8")
+				}
+			})
+			return next(c)
+		}
+	})
+
 	// Fastify互換のJSON body事前パース (#1609)。本家はbody parseが
 	// endpoint handler (rate limit / 認証を含む) より先に走るため、
 	// rate limiterより前に登録して malformed JSON を FST_ERR_CTP_* envelope
