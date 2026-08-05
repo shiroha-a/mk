@@ -2104,6 +2104,7 @@ func (s *Server) setupRoutes() {
 	webResHandler := newWebResourceHandler(s.config, metaRepo)
 	s.echo.GET("/robots.txt", webResHandler.RobotsTxt)
 	s.echo.GET("/opensearch.xml", webResHandler.OpenSearchXML)
+	s.echo.GET("/api.json", s.OpenAPISpec)
 
 	// ユーザーフィード (#2345)。upstream ClientServerService と同じく
 	// /@:user.rss / .atom / .json を返す。
