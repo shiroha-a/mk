@@ -82,6 +82,29 @@ func TestMiddleware_NoLimitDefined(t *testing.T) {
 	assert.Empty(t, store.calls)
 }
 
+// Disable() を呼んだら、リミット定義があっても store を一切引かずに素通しする。
+// 本家 RateLimiterService が NODE_ENV !== 'production' でやっているのと同じ。
+func TestMiddleware_Disabled(t *testing.T) {
+	store := &mockLimitStore{
+		results: []mockResult{
+			{Info: LimitInfo{Remaining: 0, ResetMs: time.Now().Add(time.Hour).UnixMilli()}},
+		},
+	}
+	limits := map[string]*EndpointLimit{
+		"notes/create": {Duration: time.Hour, Max: 1},
+	}
+	rl := NewRateLimiter(store, true, limits)
+	rl.Disable()
+	e, h := setupEcho(rl)
+
+	// 上限 1 に対して 3 回叩いても 429 にならない。
+	for i := 0; i < 3; i++ {
+		rec := doRequest(e, rl.Middleware(), h, "/api/notes/create", &model.User{ID: "user1"})
+		assert.Equal(t, http.StatusOK, rec.Code)
+	}
+	assert.Empty(t, store.calls, "無効時は store を引かないこと")
+}
+
 func TestMiddleware_WithinLimit(t *testing.T) {
 	store := &mockLimitStore{
 		results: []mockResult{

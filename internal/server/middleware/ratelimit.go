@@ -121,6 +121,7 @@ type RateLimiter struct {
 	enableIPRateLimit bool
 	limits            map[string]*EndpointLimit
 	policyProvider    PolicyProvider // optional, nil なら factor=1 固定
+	disabled          bool
 }
 
 // NewRateLimiter creates a RateLimiter with the given store and config.
@@ -135,6 +136,16 @@ func NewRateLimiter(store RateLimitStore, enableIPRateLimit bool, limits map[str
 // NewRedisRateLimiter creates a RateLimiter backed by Redis.
 func NewRedisRateLimiter(rdb *redis.Client, enableIPRateLimit bool, limits map[string]*EndpointLimit) *RateLimiter {
 	return NewRateLimiter(NewRedisRateLimitStore(rdb), enableIPRateLimit, limits)
+}
+
+// Disable turns the limiter into a no-op.
+//
+// 本家 RateLimiterService は constructor で NODE_ENV !== 'production' なら
+// disabled を立て、開発・テスト環境ではレート制限を一切かけない。mk-go に
+// NODE_ENV に相当する概念は無いので、本番では必ず false になる TestMode を
+// 同じ用途で使う (呼び出しは router.go 側)。
+func (rl *RateLimiter) Disable() {
+	rl.disabled = true
 }
 
 // SetPolicyProvider wires a PolicyProvider so authenticated user の
@@ -155,6 +166,9 @@ func (rl *RateLimiter) SetPolicyProvider(p PolicyProvider) {
 func (rl *RateLimiter) Middleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			if rl.disabled {
+				return next(c)
+			}
 			endpoint := strings.TrimPrefix(c.Path(), "/api/")
 			limit, ok := rl.limits[endpoint]
 			if !ok {

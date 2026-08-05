@@ -1138,6 +1138,14 @@ func (s *Server) setupRoutes() {
 	// (#606 item 4)。trusted user に factor=2.0 等を割り当てて実効 Max を緩和
 	// する運用に対応。
 	rateLimiter.SetPolicyProvider(roleService)
+	// 本家 RateLimiterService は NODE_ENV !== 'production' でレート制限を丸ごと
+	// 無効化する。mk-go に NODE_ENV は無いので、本番では必ず false になる
+	// TestMode を同じ用途で使う。有効なままだと本家 e2e の beforeAll (大量の
+	// signup / 投稿) が 429 で落ちる。
+	if s.config.TestMode {
+		rateLimiter.Disable()
+		slog.Warn("test mode: rate limiting is disabled")
+	}
 	api.Use(rateLimiter.Middleware())
 
 	// Meta endpoint (public)
