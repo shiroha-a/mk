@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	echomw "github.com/labstack/echo/v4/middleware"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/ld"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
@@ -2173,7 +2174,19 @@ func (s *Server) setupRoutes() {
 	)
 	s.echo.GET("/oauth/authorize", oauthHandler.Authorize)
 	s.echo.POST("/oauth/decision", oauthHandler.Decision)
-	s.echo.POST("/oauth/token", oauthHandler.Token)
+	// upstream は token server にだけ fastifyCors を登録している
+	// (createTokenServer)。ブラウザ上の SPA が PKCE でトークン交換できるように
+	// するためで、authorize / decision は CORS 対象外。
+	s.echo.POST("/oauth/token", oauthHandler.Token, echomw.CORSWithConfig(echomw.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{http.MethodPost, http.MethodOptions},
+	}))
+	s.echo.OPTIONS("/oauth/token", func(c echo.Context) error {
+		return c.NoContent(http.StatusNoContent)
+	}, echomw.CORSWithConfig(echomw.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{http.MethodPost, http.MethodOptions},
+	}))
 	// unknown /oauth/* は 404 (client が endpoint 対応有無を判別できるよう、
 	// upstream の catch-all 同様)。明示ルートが優先されるので authorize/decision/
 	// token はここに落ちない。

@@ -298,18 +298,22 @@ func TestDecision_Cancel(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Location"), "error=access_denied")
 }
 
+// 不明な login_token も redirect せず直接返す (upstream の
+// #findUserByLoginToken は InvalidRequestError を投げる = 400)。
 func TestDecision_BadLoginToken(t *testing.T) {
 	hn := newHarness(t)
 	hn.store.txns["txn1"] = &transaction{ClientID: hn.clientID, RedirectURI: hn.redirect}
 	rec := hn.post(t, hn.h.Decision, url.Values{"transaction_id": {"txn1"}, "login_token": {"bogus"}})
-	require.Equal(t, http.StatusFound, rec.Code)
-	assert.Contains(t, rec.Header().Get("Location"), "error=access_denied")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, rec.Header().Get("Location"), "redirect させないこと")
 }
 
+// 期限切れ / 未知の transaction は access_denied (403)。transaction_id 欠落の
+// invalid_request (400) とは種別が違う。
 func TestDecision_ExpiredTransaction(t *testing.T) {
 	hn := newHarness(t)
 	rec := hn.post(t, hn.h.Decision, url.Values{"transaction_id": {"gone"}, "login_token": {"x"}})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Token ---
@@ -619,13 +623,36 @@ func TestAuthorize_UnsupportedResponseType(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// #2106 L21/L22: 空 login_token は lookup 前に弾く。redirect error に error_description を載せない。
+// #2106 L21: 空 login_token は lookup 前に弾く。
+//
+// upstream は decision endpoint のエラーを「Misskey 側の問題でクライアントには
+// 関係ない」として redirect せず直接返す (oauth.ts: "Do not use indirect error
+// here")。旧実装は redirect していたので 400 direct に揃えた。
 func TestDecision_EmptyLoginToken(t *testing.T) {
 	hn := newHarness(t)
 	hn.store.txns["txn1"] = &transaction{ClientID: hn.clientID, RedirectURI: hn.redirect}
 	rec := hn.post(t, hn.h.Decision, url.Values{"transaction_id": {"txn1"}, "login_token": {""}})
-	require.Equal(t, http.StatusFound, rec.Code)
-	loc := rec.Header().Get("Location")
-	assert.Contains(t, loc, "error=access_denied")
-	assert.NotContains(t, loc, "error_description", "#2106 L22: redirect に error_description を載せない")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, rec.Header().Get("Location"), "redirect させないこと")
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "invalid_request", body["error"])
+}
+
+// transaction_id 欠落は invalid_request (400)、無効 / 期限切れは
+// access_denied (403)。upstream が種別を分けているのに合わせる。
+func TestDecision_TransactionErrors(t *testing.T) {
+	hn := newHarness(t)
+
+	rec := hn.post(t, hn.h.Decision, url.Values{"login_token": {"tok"}})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "transaction_id 欠落は 400")
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "invalid_request", body["error"])
+
+	rec = hn.post(t, hn.h.Decision, url.Values{"transaction_id": {"nope"}, "login_token": {"tok"}})
+	require.Equal(t, http.StatusForbidden, rec.Code, "無効な transaction_id は 403")
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "access_denied", body["error"])
+	assert.Empty(t, rec.Header().Get("Location"))
 }

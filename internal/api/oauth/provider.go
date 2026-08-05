@@ -173,10 +173,18 @@ func (h *Handler) Decision(c echo.Context) error {
 	loginToken := c.FormValue("login_token")
 	cancel := c.FormValue("cancel")
 
+	// upstream は decision endpoint のエラーを「Misskey 側の問題でクライアントには
+	// 関係ない」と位置づけ、redirect させずに直接返す (oauth.ts のコメント
+	// "Do not use indirect error here")。cancel だけが redirect になる。
+	//
+	// transaction_id 欠落は invalid_request (400)、transaction が無効 / 期限切れは
+	// access_denied (403) と種別を分ける。
+	if transactionID == "" {
+		return directError(c, "Missing transaction ID")
+	}
 	txn, err := h.store.TakeTransaction(ctx, transactionID)
 	if err != nil {
-		// txn が無い → redirect 先も不明なので直接 400。
-		return directError(c, "invalid or expired transaction")
+		return directAccessDenied(c, "Invalid or expired transaction ID")
 	}
 
 	if cancel != "" {
@@ -187,12 +195,12 @@ func (h *Handler) Decision(c echo.Context) error {
 	// (InvalidRequestError 'No user')。空文字で FindByToken("") を実行しないようガードする
 	// (token='' 行が万一存在しても consent 完了を防ぐ defense-in-depth)。
 	if loginToken == "" {
-		return h.redirectError(c, txn.RedirectURI, txn.State, "access_denied", "no such user")
+		return directError(c, "No user")
 	}
 	// login_token は native session token のみ一致する (app token は別テーブル)。
 	user, err := h.userRepo.FindByToken(loginToken)
 	if err != nil || user == nil {
-		return h.redirectError(c, txn.RedirectURI, txn.State, "access_denied", "no such user")
+		return directError(c, "No such user")
 	}
 
 	code := misc.SecureRandomString(tokenLen, misc.AlphanumericChars)
@@ -398,6 +406,16 @@ func appendQuery(base string, params map[string]string) string {
 func directError(c echo.Context, desc string) error {
 	return c.JSON(http.StatusBadRequest, map[string]any{
 		"error":             "invalid_request",
+		"error_description": desc,
+	})
+}
+
+// directAccessDenied returns the 403 access_denied upstream's
+// createForbiddenAccessDenied produces. 無効 / 期限切れの transaction ID に
+// 使う (invalid_request の 400 とは別種別)。
+func directAccessDenied(c echo.Context, desc string) error {
+	return c.JSON(http.StatusForbidden, map[string]any{
+		"error":             "access_denied",
 		"error_description": desc,
 	})
 }
