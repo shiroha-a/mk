@@ -12,7 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var errAntennaLookup = errors.New("antenna lookup failed")
+var (
+	errAntennaLookup  = errors.New("antenna lookup failed")
+	errUserListLookup = errors.New("user list lookup failed")
+)
 
 // mockRoleChecker is a test double for AdminRoleChecker.
 type mockRoleChecker struct {
@@ -57,6 +60,29 @@ func (s *stubAntennaOwners) FindByID(id string) (*model.Antenna, error) {
 		return nil, s.err
 	}
 	return s.byID[id], nil
+}
+
+// stubUserListOwners is a test double for UserListOwnerLookup. A miss returns
+// (nil, nil) (Init rejects via list == nil); set err to exercise the lookup-error path.
+type stubUserListOwners struct {
+	byID map[string]*model.UserList
+	err  error
+}
+
+func (s *stubUserListOwners) FindByID(id string) (*model.UserList, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.byID[id], nil
+}
+
+// newUserListCh builds a userList channel whose lookup knows list "l1" owned by
+// ownerID. membership lookup は配線しないので per-member reply gate は skip される。
+func newUserListCh(ctx stream.ChannelContext, ownerID string) stream.Channel {
+	owners := &stubUserListOwners{byID: map[string]*model.UserList{
+		"l1": {ID: "l1", UserID: ownerID},
+	}}
+	return (&UserListFactory{owners: owners}).New(ctx)
 }
 
 // newAntennaCh builds an antenna channel whose lookup knows antenna "a1" owned
@@ -478,8 +504,8 @@ func TestChannelTimeline_MutedRenoteChannelDropped(t *testing.T) {
 
 func TestUserList_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 	// note 配信 topic と membership event topic の両方を subscribe する (#1549)。
 	assert.Equal(t, []string{"userListTimeline:l1", "userListStream:l1"}, ctx.subs)
 
@@ -494,8 +520,8 @@ func TestUserList_Lifecycle(t *testing.T) {
 // note filter を経由せず、そのまま client に forward される。
 func TestUserList_MembershipEventForwarded(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"type":"userAdded","body":{"id":"u2","username":"bob"}}`))
 	require.Len(t, ctx.sentType, 1)
@@ -511,7 +537,7 @@ func TestUserList_MembershipEventForwarded(t *testing.T) {
 
 func TestUserList_NoAuth(t *testing.T) {
 	ctx := newCtx(nil)
-	ch := NewUserList(ctx)
+	ch := newUserListCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{"listId":"l1"}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
@@ -519,7 +545,7 @@ func TestUserList_NoAuth(t *testing.T) {
 
 func TestUserList_MissingID(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
+	ch := newUserListCh(ctx, "alice")
 	err := ch.Init(json.RawMessage(`{}`))
 	assert.ErrorIs(t, err, stream.ErrInvalidParams)
 	assert.Empty(t, ctx.subs)
@@ -527,8 +553,8 @@ func TestUserList_MissingID(t *testing.T) {
 
 func TestUserList_WithReplies(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1","withReplies":true}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1","withReplies":true}`)), "所有 list の Init は成功する")
 	assert.Equal(t, []string{"userListTimeline:l1", "userListStream:l1"}, ctx.subs)
 
 	// リプライが通過する
@@ -545,8 +571,8 @@ func TestUserList_WithReplies(t *testing.T) {
 // で、将来 per-member gate を入れたら drop 側に書き換える。
 func TestUserList_WithRepliesFalse_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1","withReplies":false}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1","withReplies":false}`)), "所有 list の Init は成功する")
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
@@ -559,8 +585,8 @@ func TestUserList_WithRepliesFalse_ReplyPassthrough(t *testing.T) {
 func TestUserList_FollowersVisibility_NonFollowerDropped(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.followingSnap = map[string]bool{} // alice は author を follow していない
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
 	assert.Empty(t, ctx.sentType, "non-follower viewer must not receive followers note")
@@ -569,8 +595,8 @@ func TestUserList_FollowersVisibility_NonFollowerDropped(t *testing.T) {
 func TestUserList_FollowersVisibility_FollowerAccepted(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.followingSnap = map[string]bool{"author": false} // value (withReplies) は関係ない
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -580,8 +606,8 @@ func TestUserList_FollowersVisibility_FollowerAccepted(t *testing.T) {
 func TestUserList_FollowersVisibility_SelfAuthored(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	// snap は nil でも本人 short-circuit で通る
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"alice","visibility":"followers"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -591,8 +617,8 @@ func TestUserList_FollowersVisibility_NilSnapshotFailClosed(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	// followingSnap=nil (= snapshot lookup 未配線 / 取得失敗) で他人の followers
 	// note は drop される。本人は別 case (上) で通すことを確認済。
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"followers"}`))
 	assert.Empty(t, ctx.sentType, "nil snapshot must fail-closed for followers note from non-self author")
@@ -601,8 +627,8 @@ func TestUserList_FollowersVisibility_NilSnapshotFailClosed(t *testing.T) {
 func TestUserList_PublicVisibility_NoFollowCheck(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	// public は snap 無くても、follow 関係に関係なく通る
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -610,8 +636,8 @@ func TestUserList_PublicVisibility_NoFollowCheck(t *testing.T) {
 
 func TestUserList_HomeVisibility_NoFollowCheck(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"author","visibility":"home"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -621,8 +647,8 @@ func TestUserList_HomeVisibility_NoFollowCheck(t *testing.T) {
 // branch で素通りする (regression guard / 後方互換)。
 func TestUserList_NoVisibilityField_Passthrough(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -631,8 +657,8 @@ func TestUserList_NoVisibilityField_Passthrough(t *testing.T) {
 // 不正 payload はパース失敗で conservative drop される (IDOR fail-closed)。
 func TestUserList_BrokenPayload_Dropped(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	ch.OnRedisEvent([]byte(`{not json`))
 	assert.Empty(t, ctx.sentType)
@@ -651,8 +677,8 @@ func TestUserList_BrokenPayload_Dropped(t *testing.T) {
 // (TestFanoutHook_FanoutToUserLists_SpecifiedVisibilitySkipped) を見直すべき。
 func TestUserList_SpecifiedVisibility_AssumesFanoutSkips(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)), "所有 list の Init は成功する")
 
 	// alice 宛ではない specified payload。fanout 側で normally この shape は
 	// user_list stream に流れない (= shouldFanoutToFollowers で specified が
@@ -886,7 +912,7 @@ func TestNoOpClientMessages(t *testing.T) {
 		{"hashtag", NewHashtag(newCtx(nil))},
 		{"antenna", newAntennaCh(newCtx(&model.User{ID: "u1"}), "u1")},
 		{"channelTimeline", NewChannelTimeline(newCtx(nil))},
-		{"userList", NewUserList(newCtx(&model.User{ID: "u1"}))},
+		{"userList", newUserListCh(newCtx(&model.User{ID: "u1"}), "u1")},
 		{"roleTimeline", newRoleCh(newCtx(nil), true)},
 		{"admin", newAdminCh(newCtx(&model.User{ID: "u1"}), true)},
 		{"serverStats", NewServerStats(newCtx(nil))},
@@ -934,15 +960,15 @@ func TestRoleTimeline_FilteredRenote(t *testing.T) {
 
 func TestUserList_FilteredNoFiles(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
-	ch.Init(json.RawMessage(`{"listId":"l1","withFiles":true}`))
+	ch := newUserListCh(ctx, "alice")
+	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1","withFiles":true}`)), "所有 list の Init は成功する")
 	ch.OnRedisEvent([]byte(`{"text":"hello","fileIds":[]}`))
 	assert.Empty(t, ctx.sentType)
 }
 
 func TestUserList_MissingListID(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
+	ch := newUserListCh(ctx, "alice")
 	ch.Init(json.RawMessage(`{}`))
 	assert.Empty(t, ctx.subs)
 }
@@ -1014,20 +1040,26 @@ func TestHybridTimeline_FilterDefault(t *testing.T) {
 	assert.Len(t, ctx.sentType, 1) // 増えない
 }
 
-// stubMembershipLookup is a test double for UserListMembershipLookup.
+// stubMembershipLookup is a test double for UserListLookup. FindByID reports
+// every list as owned by ownerID so the Init ownership gate passes.
 type stubMembershipLookup struct {
 	members []*model.UserListMembership
+	ownerID string
 }
 
 func (s *stubMembershipLookup) ListMembers(string) ([]*model.UserListMembership, error) {
 	return s.members, nil
 }
 
+func (s *stubMembershipLookup) FindByID(id string) (*model.UserList, error) {
+	return &model.UserList{ID: id, UserID: s.ownerID}, nil
+}
+
 // #2020: userList channel は Init で per-member withReplies を snapshot し、reply を
 // upstream user-list.ts と同じ per-member gate で drop する。
 func TestUserList_PerMemberWithRepliesGate(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"}) // viewer = alice (list owner)
-	lookup := &stubMembershipLookup{members: []*model.UserListMembership{
+	lookup := &stubMembershipLookup{ownerID: "alice", members: []*model.UserListMembership{
 		{UserID: "bob", WithReplies: false},
 		{UserID: "carol", WithReplies: true},
 	}}
@@ -1064,10 +1096,49 @@ func TestUserList_PerMemberWithRepliesGate(t *testing.T) {
 	assert.Equal(t, 1, send(`{"id":"n5","userId":"bob","visibility":"public"}`), "reply でない note は pass")
 }
 
-// #2020: lookup 未配線 (NewUserList) では reply gate を skip (後方互換)。
+// 接続主が所有しない list は購読できない (本家 user-list.ts の owner check 相当)。
+func TestUserList_NotOwner_Rejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "bob"}) // l1 の owner は alice
+	ch := newUserListCh(ctx, "alice")
+	err := ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams, "他人の list は購読拒否")
+	assert.Empty(t, ctx.subs, "拒否時は topic を subscribe しない")
+}
+
+// 存在しない list id は lookup が (nil, nil) を返すので拒否される。
+func TestUserList_UnknownList_Rejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := newUserListCh(ctx, "alice")
+	err := ch.Init(json.RawMessage(`{"listId":"nope"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// lookup が error を返した場合も fail-closed で拒否する。
+func TestUserList_OwnerLookupError_Rejected(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	owners := &stubUserListOwners{err: errUserListLookup}
+	ch := (&UserListFactory{owners: owners}).New(ctx)
+	err := ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+}
+
+// owner lookup 未配線 (nil) は全購読を拒否する (antenna #1569 と同方針)。
+func TestUserList_NoOwnerLookup_FailsClosed(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "alice"})
+	ch := NewUserListFactory(nil).New(ctx)
+	err := ch.Init(json.RawMessage(`{"listId":"l1"}`))
+	assert.ErrorIs(t, err, stream.ErrInvalidParams)
+	assert.Empty(t, ctx.subs)
+	ch.Dispose() // topic 未設定でも Dispose は no-op で安全
+	assert.Empty(t, ctx.unsubs)
+}
+
+// #2020: membership lookup 未配線 (owner lookup のみ) では reply gate を skip する。
 func TestUserList_NoLookupSkipsReplyGate(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	ch := NewUserList(ctx)
+	ch := newUserListCh(ctx, "alice")
 	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
 	ctx.sentType = nil
 	ch.OnRedisEvent([]byte(`{"id":"n1","userId":"bob","visibility":"public","reply":{"userId":"dave","visibility":"public"}}`))
@@ -1078,7 +1149,7 @@ func TestUserList_NoLookupSkipsReplyGate(t *testing.T) {
 // userRemoved で除去する。userUpdated は client へ forward しない。
 func TestUserList_MembershipSnapshotLiveUpdate(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	lookup := &stubMembershipLookup{members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
+	lookup := &stubMembershipLookup{ownerID: "alice", members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
 	ch := NewUserListFactory(lookup).New(ctx)
 	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
 
@@ -1105,7 +1176,7 @@ func TestUserList_MembershipSnapshotLiveUpdate(t *testing.T) {
 // withRepliesByUser は mu で保護される。-race で並行アクセスの安全性を検証する。
 func TestUserList_ConcurrentSnapshotAndNote(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
-	lookup := &stubMembershipLookup{members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
+	lookup := &stubMembershipLookup{ownerID: "alice", members: []*model.UserListMembership{{UserID: "bob", WithReplies: false}}}
 	ch := NewUserListFactory(lookup).New(ctx)
 	require.NoError(t, ch.Init(json.RawMessage(`{"listId":"l1"}`)))
 

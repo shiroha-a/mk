@@ -15,6 +15,19 @@ type UserListMembershipLookup interface {
 	ListMembers(listID string) ([]*model.UserListMembership, error)
 }
 
+// UserListOwnerLookup resolves a list by id for the channel-side ownership
+// gate. repository.UserListRepository satisfies it (FindByID).
+type UserListOwnerLookup interface {
+	FindByID(id string) (*model.UserList, error)
+}
+
+// UserListLookup bundles the owner and membership lookups a production userList
+// channel needs. repository.UserListRepository satisfies it.
+type UserListLookup interface {
+	UserListOwnerLookup
+	UserListMembershipLookup
+}
+
 // UserListChannel forwards notes from members of a user list.
 //
 // upstream `user-list.ts` は Init で `membershipsMap[userId] = {withReplies}` を
@@ -27,6 +40,7 @@ type UserListChannel struct {
 	topic       string
 	streamTopic string
 	filter      noteFilter
+	owners      UserListOwnerLookup
 	memberships UserListMembershipLookup
 	// withRepliesByUser は member userID → withReplies の snapshot。Init で構築し、
 	// userAdded/userRemoved event で live 更新する (#2051)。nil の間は per-member
@@ -36,26 +50,25 @@ type UserListChannel struct {
 	withRepliesByUser map[string]bool
 }
 
-// NewUserList returns a "userList" channel without a membership lookup. reply は
-// per-member gate されず従来挙動 (主に test 経路)。本番は NewUserListFactory を使う。
-func NewUserList(ctx stream.ChannelContext) stream.Channel {
-	return &UserListChannel{ctx: ctx}
-}
-
-// UserListFactory carries the membership lookup so per-member withReplies gating
-// is available (#2020)。
+// UserListFactory carries the owner lookup used by the Init ownership gate and
+// the membership lookup used for per-member withReplies gating (#2020)。
 type UserListFactory struct {
+	owners      UserListOwnerLookup
 	memberships UserListMembershipLookup
 }
 
-// NewUserListFactory constructs a UserListFactory with the given membership lookup.
-func NewUserListFactory(m UserListMembershipLookup) *UserListFactory {
-	return &UserListFactory{memberships: m}
+// NewUserListFactory constructs a UserListFactory with the given lookup. owners
+// and memberships are both served by it; a nil lookup fails closed (every
+// subscription rejected).
+func NewUserListFactory(l UserListLookup) *UserListFactory {
+	// nil interface を代入すると owners / memberships も nil interface になるので、
+	// Init 側の nil check がそのまま fail-closed として効く。
+	return &UserListFactory{owners: l, memberships: l}
 }
 
 // New builds a new UserListChannel. Usable as a stream.ChannelFactory.
 func (f *UserListFactory) New(ctx stream.ChannelContext) stream.Channel {
-	return &UserListChannel{ctx: ctx, memberships: f.memberships}
+	return &UserListChannel{ctx: ctx, owners: f.owners, memberships: f.memberships}
 }
 
 func (c *UserListChannel) Init(params json.RawMessage) error {
@@ -72,6 +85,18 @@ func (c *UserListChannel) Init(params json.RawMessage) error {
 		_ = json.Unmarshal(params, &p)
 	}
 	if p.ListID == "" {
+		return stream.ErrInvalidParams
+	}
+	// Ownership gate: 接続中の user が所有する list でなければ購読を拒否する。
+	// 本家 user-list.ts の `userListsRepository.exists({id, userId})` に相当し、
+	// REST notes/user-list-timeline の owner check とも揃えている。isPublic な
+	// list も owner 以外は購読させない (本家 / REST と同じ)。
+	// owners 未配線時は fail-closed で購読拒否 (antenna #1569 と同方針)。
+	if c.owners == nil {
+		return stream.ErrInvalidParams
+	}
+	list, err := c.owners.FindByID(p.ListID)
+	if err != nil || list == nil || list.UserID != user.ID {
 		return stream.ErrInvalidParams
 	}
 	c.filter = parseNoteFilter(params)
