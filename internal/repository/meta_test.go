@@ -25,14 +25,27 @@ func TestMetaRepository_Fetch(t *testing.T) {
 	assert.Equal(t, &name, found.Name)
 }
 
-func TestMetaRepository_Fetch_NotFound(t *testing.T) {
+// 行が無ければ本家 MetaService.fetch() と同じくその場で作って返す。
+// 起動後に truncate されても全 API が 500 のまま固まらないための保証。
+func TestMetaRepository_Fetch_CreatesWhenMissing(t *testing.T) {
 	repo := NewMetaRepository(testDB)
 
-	// テーブルを空にする
 	testDB.Exec(`DELETE FROM "meta"`)
+	defer testDB.Exec(`DELETE FROM "meta"`)
 
-	_, err := repo.Fetch()
-	assert.Error(t, err)
+	found, err := repo.Fetch()
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	assert.Equal(t, defaultMetaID, found.ID)
+
+	// 2 回目は作り直さず同じ行を返す。
+	again, err := repo.Fetch()
+	require.NoError(t, err)
+	assert.Equal(t, found.ID, again.ID)
+
+	var count int64
+	require.NoError(t, testDB.Model(&model.Meta{}).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "行が重複して作られないこと")
 }
 
 func TestMetaRepository_Update(t *testing.T) {
