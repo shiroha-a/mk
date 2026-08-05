@@ -915,32 +915,7 @@ func (h *Handler) Me(c echo.Context) error {
 	}
 
 	// フロントエンド互換性フィールド (Phase 4.5c / Phase 5)
-	isAdmin := false
-	isMod := false
-	userPolicies := role.DefaultPolicies()
-	var userRoles []any
-	if h.roleProvider != nil {
-		isAdmin = h.roleProvider.IsAdministrator(u.ID)
-		isMod = h.roleProvider.IsModerator(u.ID)
-		userPolicies = h.roleProvider.GetUserPolicies(u.ID)
-		if roles, err := h.roleProvider.GetUserRoles(u.ID); err == nil {
-			for _, r := range roles {
-				userRoles = append(userRoles, map[string]any{
-					"id":              r.ID,
-					"name":            r.Name,
-					"color":           r.Color,
-					"iconUrl":         r.IconURL,
-					"description":     r.Description,
-					"isModerator":     r.IsModerator,
-					"isAdministrator": r.IsAdministrator,
-					"displayOrder":    r.DisplayOrder,
-				})
-			}
-		}
-	}
-	if userRoles == nil {
-		userRoles = []any{}
-	}
+	isAdmin, isMod, userPolicies, userRoles := h.rolePayload(u.ID)
 	resp["isAdmin"] = isAdmin
 	resp["isModerator"] = isMod
 	// upstream UserEntityService.ts:574: moderationNote は moderator viewer のみに
@@ -1125,6 +1100,40 @@ func jsonbArray(raw []byte) any {
 	return out
 }
 
+// rolePayload resolves the role-dependent MeDetailed fields (isAdmin /
+// isModerator / policies / roles) for the given user.
+//
+// PackMeDetailed は role を知らないので、これらは handler 層で埋める必要がある。
+// /api/i と /api/i/update の両方が同じ値を返さないと、フロントの
+// updateCurrentAccountPartial が `$i` に部分マージしたときに policies が
+// 消えてしまう。
+func (h *Handler) rolePayload(userID string) (isAdmin bool, isMod bool, policies map[string]any, roles []any) {
+	policies = role.DefaultPolicies()
+	if h.roleProvider != nil {
+		isAdmin = h.roleProvider.IsAdministrator(userID)
+		isMod = h.roleProvider.IsModerator(userID)
+		policies = h.roleProvider.GetUserPolicies(userID)
+		if rs, err := h.roleProvider.GetUserRoles(userID); err == nil {
+			for _, r := range rs {
+				roles = append(roles, map[string]any{
+					"id":              r.ID,
+					"name":            r.Name,
+					"color":           r.Color,
+					"iconUrl":         r.IconURL,
+					"description":     r.Description,
+					"isModerator":     r.IsModerator,
+					"isAdministrator": r.IsAdministrator,
+					"displayOrder":    r.DisplayOrder,
+				})
+			}
+		}
+	}
+	if roles == nil {
+		roles = []any{}
+	}
+	return isAdmin, isMod, policies, roles
+}
+
 // meDetailedWithUnread packs a MeDetailed for self-view stream/return paths
 // (i/update, meUpdated) and enriches it with authoritative unread values via
 // fillUnreadFields. Raw PackMeDetailed would emit the struct defaults
@@ -1138,6 +1147,11 @@ func (h *Handler) meDetailedWithUnread(ctx context.Context, u *model.User, profi
 	resp := map[string]any{}
 	_ = json.Unmarshal(b, &resp)
 	h.fillUnreadFields(ctx, u, resp)
+	// policies / roles はここでは足さない。この helper は meUpdated
+	// (ストリーミングの部分更新) でも使われ、そこに policies を混ぜると
+	// frontend の updateCurrentAccountPartial が `$i.policies` を空で clobber
+	// する (#1240 の不変条件、handler_webauthn_test.go が回帰ガード)。
+	// API 応答である i/update 側は handler で明示的に足す。
 	return resp
 }
 
@@ -1671,10 +1685,18 @@ func (h *Handler) Update(c echo.Context) error {
 	// #2106 N1: isAdmin/isModerator は role 依存で PackMeDetailed が埋めない (MeDetailed の
 	// 両 field は omitempty 無し bool なので default false が乗る)。Me handler 同様
 	// roleProvider から override し upstream の MeDetailed isMe ブロック (実値を返す) に揃える。
-	if h.roleProvider != nil {
-		resp["isAdmin"] = h.roleProvider.IsAdministrator(bundle.User.ID)
-		resp["isModerator"] = h.roleProvider.IsModerator(bundle.User.ID)
-	}
+	//
+	// policies / roles も同じ理由で埋める。upstream i/update は MeDetailed を
+	// そのまま返すので両 field を含むが、mk-go は落としていた。フロントは
+	// i/update の応答を updateCurrentAccountPartial で `$i` にマージするため、
+	// 欠けているとプロフィール更新のたびに role 由来の権限が消える。
+	// meUpdated (ストリーミング) は逆に policies を含めてはならないので
+	// (#1240)、共通 helper ではなくこの API 応答側だけで足す。
+	isAdmin, isMod, userPolicies, userRoles := h.rolePayload(bundle.User.ID)
+	resp["isAdmin"] = isAdmin
+	resp["isModerator"] = isMod
+	resp["policies"] = userPolicies
+	resp["roles"] = userRoles
 	// upstream i/update は pack(..., {includeSecrets: isSecure}) を返すため native
 	// session では email / emailVerified / securityKeysList を含める (#1919)。Token
 	// 判定は middleware が確実に load する me を使い、email は更新後の最新 profile を

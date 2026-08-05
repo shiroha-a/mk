@@ -1524,6 +1524,36 @@ func TestUpdate_InvalidatesTokenCacheOnSuccess(t *testing.T) {
 		"成功した i/update は本 request の token を invalidate するべき")
 }
 
+// i/update の応答は MeDetailed をそのまま返すので policies / roles を含む。
+// フロントは応答を updateCurrentAccountPartial で `$i` にマージするため、
+// 欠けているとプロフィール更新のたびに role 由来の権限が消える。
+//
+// meUpdated (ストリーミング) は逆に policies を含めてはいけない (#1240)。
+// 両者が同じ helper を共有しているので、取り違えの回帰ガードとして固定する。
+func TestUpdate_ResponseIncludesPolicies(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := &model.User{ID: "user1", Username: "user1", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	repo.Users["user1"] = user
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"updated"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Contains(t, resp, "policies", "i/update は policies を返すこと")
+	assert.NotEmpty(t, resp["policies"], "policies が空だとフロントの $i を clobber する")
+	assert.Contains(t, resp, "roles")
+	assert.Contains(t, resp, "isAdmin")
+	assert.Contains(t, resp, "isModerator")
+}
+
 func TestUpdate_NoInvalidatorIsNoop(t *testing.T) {
 	// invalidator が wire されていないとき (production では必ず wire するが
 	// 単体 test や router 配線忘れ時) は invalidate skip して 200 を返す。
