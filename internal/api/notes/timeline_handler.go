@@ -382,6 +382,15 @@ func (h *Handler) serveTimeline(
 		// ErrUnauthenticatedはここには到達しない。残りはRedis等の障害のみ。
 		return apierr.JSONInternalError(c)
 	}
+	// リノート先まで辿る mute / block 判定を最後に通す。SQL と
+	// timeline.ApplyFilter は note 自身の userId / replyUserId / renoteUserId しか
+	// 見ないため、「ミュート相手への返信」を第三者がリノートしたケースを取り
+	// こぼす。upstream FanoutTimelineEndpointService は note と note.renote の
+	// 両方に isUserRelated を適用しており (#2345 の調査で判明)、mk-go でも
+	// 同じ判定を持つ ApplyMuteBlockChannel を timeline 経路に通して揃える。
+	if notes, err = h.applyMuteBlock(viewer, notes); err != nil {
+		return apierr.JSONInternalError(c)
+	}
 	packed := h.packMany(c.Request().Context(), notes, viewer)
 	if cacheKey != "" {
 		if body, mErr := json.Marshal(packed); mErr == nil {

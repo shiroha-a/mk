@@ -1073,6 +1073,12 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		// 括弧で囲まれないので、明示的に囲まないとAND側の他フィルタを
 		// バイパスしてしまう (SQL優先順位: AND > OR)。
 		q = q.Where(`("channelId" IS NULL OR "channelId" NOT IN ?)`, f.MutedChannelIDs)
+		// ミュートしたチャンネルのノートを「チャンネル外で」リノートされた場合、
+		// リノート自身の channelId は NULL なので上の条件では抜けられない。
+		// upstream は同じ理由で非正規化カラム note.renoteChannelId を用意し、
+		// リノート先のチャンネルでも弾いている (users/notes.ts の
+		// 「ミュートされたチャンネルのリノート対策」)。
+		q = q.Where(`("renoteChannelId" IS NULL OR "renoteChannelId" NOT IN ?)`, f.MutedChannelIDs)
 	}
 	// muted user filter は 2 経路を持つ (#892 / #894):
 	//   1. UseMutingSubquery=true: muting テーブルへの NOT EXISTS (production)。
