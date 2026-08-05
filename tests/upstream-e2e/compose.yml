@@ -1,0 +1,30 @@
+# Misskey 本家の backend e2e を mk-go に向けて回すための PostgreSQL / Redis。
+# ポートは本家 .github/misskey/test.yml に合わせる (54312 / 56312)。
+# 127.0.0.1 バインドで外部に露出させない。
+name: mk-e2e-upstream
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: mk-e2e-upstream-pg
+    ports:
+      - "127.0.0.1:54312:5432"
+    environment:
+      POSTGRES_DB: test-misskey
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d test-misskey"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8
+    container_name: mk-e2e-upstream-redis
+    ports:
+      - "127.0.0.1:56312:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

@@ -1,0 +1,20 @@
+# 本家 .github/misskey/test.yml の mk-go 版。
+# url / port / db / redis は本家と完全に一致させる (テストが 127.0.0.1:61812 を叩く)。
+url: 'http://misskey.local'
+port: 61812
+
+db:
+  host: 127.0.0.1
+  port: 54312
+  db: test-misskey
+  user: postgres
+  pass: 'postgres'
+redis:
+  host: 127.0.0.1
+  port: 56312
+id: aidx
+
+proxyRemoteFiles: true
+
+# /api/reset-db を有効にする。setup で毎ファイル前に叩く。
+testMode: true
