@@ -2097,6 +2097,13 @@ func (s *Server) setupRoutes() {
 	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
 	// federation='none' のとき discovery を 403 で塞ぐため metaRepo を inject (#1924)。
 	wellknownHandler.SetMetaRepo(metaRepo)
+	// 非 API の Web リソース (#2345)。SPA catchall (s.echo.GET("/*")) より先に
+	// 登録しないと index.html が 200 で返り、実装済みに見えて中身が HTML という
+	// 分かりにくい壊れ方をする。
+	webResHandler := newWebResourceHandler(s.config, metaRepo)
+	s.echo.GET("/robots.txt", webResHandler.RobotsTxt)
+	s.echo.GET("/opensearch.xml", webResHandler.OpenSearchXML)
+
 	s.echo.GET("/.well-known/webfinger", wellknownHandler.Webfinger)
 	s.echo.GET("/.well-known/host-meta", wellknownHandler.HostMeta)
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
