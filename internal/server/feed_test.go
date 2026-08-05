@@ -52,14 +52,12 @@ func newFeedTestHandler(notes []*model.Note) *feedHandler {
 	}
 }
 
-func doFeedReq(t *testing.T, h func(echo.Context) error, user string) *httptest.ResponseRecorder {
+func doFeedReq(t *testing.T, h func(echo.Context, string) error, user string) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()
 	rec := httptest.NewRecorder()
 	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
-	c.SetParamNames("user")
-	c.SetParamValues(user)
-	if err := h(c); err != nil {
+	if err := h(c, user); err != nil {
 		var he *echo.HTTPError
 		if ok := asHTTPError(err, &he); ok {
 			rec.Code = he.Code
@@ -130,7 +128,7 @@ func TestFeed_JSON(t *testing.T) {
 // 存在しないユーザーは 404。upstream も同じ。
 func TestFeed_UnknownUserIs404(t *testing.T) {
 	h := newFeedTestHandler(nil)
-	for _, fn := range []func(echo.Context) error{h.RSS, h.Atom, h.JSON} {
+	for _, fn := range []func(echo.Context, string) error{h.RSS, h.Atom, h.JSON} {
 		rec := doFeedReq(t, fn, "nobody")
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	}
@@ -161,4 +159,32 @@ func TestFeed_CWBecomesSummary(t *testing.T) {
 	h := newFeedTestHandler(notes)
 	rec := doFeedReq(t, h.Atom, "alice")
 	assert.Contains(t, rec.Body.String(), "<summary>注意</summary>")
+}
+
+// Echo のルータはセグメント内リテラルを解釈できないので、/@<acct> で受けて
+// 拡張子で振り分ける。拡張子が無ければフィードとして扱わない。
+func TestFeed_TryServe(t *testing.T) {
+	h := newFeedTestHandler(sampleFeedNotes())
+	e := echo.New()
+
+	for _, tc := range []struct {
+		acct    string
+		handled bool
+		ctype   string
+	}{
+		{"alice.rss", true, "application/rss+xml; charset=utf-8"},
+		{"alice.atom", true, "application/atom+xml; charset=utf-8"},
+		{"alice.json", true, "application/json; charset=utf-8"},
+		{"alice", false, ""},
+		{"alice.png", false, ""},
+	} {
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		handled, err := h.TryServe(c, tc.acct)
+		require.NoError(t, err, tc.acct)
+		assert.Equal(t, tc.handled, handled, tc.acct)
+		if tc.handled {
+			assert.Equal(t, tc.ctype, rec.Header().Get(echo.HeaderContentType), tc.acct)
+		}
+	}
 }

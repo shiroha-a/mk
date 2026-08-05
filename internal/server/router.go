@@ -2092,20 +2092,6 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/users/:id/following", apHandler.Following)           // #1877
 	s.echo.GET("/users/:id/outbox", apHandler.Outbox)                 // #1878
 	s.echo.GET("/notes/:id", apHandler.Note)
-	s.echo.GET("/@:acct", apHandler.UserByAcct)
-
-	// Discovery endpoints
-	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
-	// federation='none' のとき discovery を 403 で塞ぐため metaRepo を inject (#1924)。
-	wellknownHandler.SetMetaRepo(metaRepo)
-	// 非 API の Web リソース (#2345)。SPA catchall (s.echo.GET("/*")) より先に
-	// 登録しないと index.html が 200 で返り、実装済みに見えて中身が HTML という
-	// 分かりにくい壊れ方をする。
-	webResHandler := newWebResourceHandler(s.config, metaRepo)
-	s.echo.GET("/robots.txt", webResHandler.RobotsTxt)
-	s.echo.GET("/opensearch.xml", webResHandler.OpenSearchXML)
-	s.echo.GET("/api.json", s.OpenAPISpec)
-
 	// ユーザーフィード (#2345)。upstream ClientServerService と同じく
 	// /@:user.rss / .atom / .json を返す。
 	feedHost := s.config.URL
@@ -2135,9 +2121,30 @@ func (s *Server) setupRoutes() {
 			return mfm.ToHTML(mfm.Parse(text), feedHost)
 		},
 	}
-	s.echo.GET("/@:user.rss", feedH.RSS)
-	s.echo.GET("/@:user.atom", feedH.Atom)
-	s.echo.GET("/@:user.json", feedH.JSON)
+
+	// /@<acct> は AP のユーザー解決とフィードの入口を兼ねる。Echo のルータは
+	// Fastify と違い `/@:user.rss` のようなセグメント内リテラルを解釈できない
+	// ので、ここで拡張子を見て振り分ける (#2345)。
+	s.echo.GET("/@:acct", func(c echo.Context) error {
+		if handled, err := feedH.TryServe(c, c.Param("acct")); handled {
+			return err
+		}
+		return apHandler.UserByAcct(c)
+	})
+
+	// Discovery endpoints
+	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
+	// federation='none' のとき discovery を 403 で塞ぐため metaRepo を inject (#1924)。
+	wellknownHandler.SetMetaRepo(metaRepo)
+	// 非 API の Web リソース (#2345)。SPA catchall (s.echo.GET("/*")) より先に
+	// 登録しないと index.html が 200 で返り、実装済みに見えて中身が HTML という
+	// 分かりにくい壊れ方をする。
+	webResHandler := newWebResourceHandler(s.config, metaRepo)
+	s.echo.GET("/robots.txt", webResHandler.RobotsTxt)
+	s.echo.GET("/opensearch.xml", webResHandler.OpenSearchXML)
+	s.echo.GET("/api.json", s.OpenAPISpec)
+	// Web Push の通知バッジ (#2345)。twemoji SVG を単色 PNG に焼いて返す。
+	s.echo.GET("/twemoji-badge/*", newTwemojiBadgeHandler(frontendutil.TwemojiDir()).Serve)
 
 	s.echo.GET("/.well-known/webfinger", wellknownHandler.Webfinger)
 	s.echo.GET("/.well-known/host-meta", wellknownHandler.HostMeta)
@@ -3381,7 +3388,10 @@ func (s *Server) setupRoutes() {
 		s.echo.Static("/static-assets", staticDir)
 		s.echo.File("/favicon.ico", filepath.Join(staticDir, "favicon.ico"))
 		s.echo.File("/apple-touch-icon.png", filepath.Join(staticDir, "apple-touch-icon.png"))
-		s.echo.File("/robots.txt", filepath.Join(staticDir, "robots.txt"))
+		// /robots.txt はここでは配らない。upstream は meta を見て動的生成する
+		// (ugcVisibilityForVisitor で Disallow が変わる) ので、上の
+		// webResourceHandler に一本化する。静的ファイルを後から登録すると
+		// そちらが後勝ちして、実体が無い環境で 404 になっていた (#2345)。
 	}
 
 	// identicon — ユーザーアイコン自動生成 (meta.enableIdenticonGeneration が

@@ -247,8 +247,8 @@ type feedHandler struct {
 //
 // upstream は存在しないユーザーに 404 を返す。SPA catchall より前に登録して
 // あるので、ここで 404 を返せばそのままクライアントに届く。
-func (h *feedHandler) serve(c echo.Context, render func(*feedData) ([]byte, error), contentType string) error {
-	username := strings.TrimSpace(c.Param("user"))
+func (h *feedHandler) serve(c echo.Context, username string, render func(*feedData) ([]byte, error), contentType string) error {
+	username = strings.TrimSpace(username)
 	if username == "" {
 		return echo.NewHTTPError(http.StatusNotFound)
 	}
@@ -339,16 +339,34 @@ func (h *feedHandler) describe(u *model.User) string {
 	return desc
 }
 
-func (h *feedHandler) RSS(c echo.Context) error {
-	return h.serve(c, (*feedData).rss2, "application/rss+xml; charset=utf-8")
+func (h *feedHandler) RSS(c echo.Context, username string) error {
+	return h.serve(c, username, (*feedData).rss2, "application/rss+xml; charset=utf-8")
 }
 
-func (h *feedHandler) Atom(c echo.Context) error {
-	return h.serve(c, (*feedData).atom1, "application/atom+xml; charset=utf-8")
+func (h *feedHandler) Atom(c echo.Context, username string) error {
+	return h.serve(c, username, (*feedData).atom1, "application/atom+xml; charset=utf-8")
 }
 
-func (h *feedHandler) JSON(c echo.Context) error {
-	return h.serve(c, (*feedData).jsonFeed, "application/json; charset=utf-8")
+func (h *feedHandler) JSON(c echo.Context, username string) error {
+	return h.serve(c, username, (*feedData).jsonFeed, "application/json; charset=utf-8")
+}
+
+// TryServe dispatches /@<acct> to a feed when the acct carries a feed
+// extension, reporting whether it handled the request.
+//
+// Echo のルータは Fastify と違い `/@:user.rss` のような「セグメント内に
+// リテラルを含むパターン」を解釈できず、パラメータ名が `user.rss` になって
+// しまう。そのため既存の /@:acct ハンドラで受けて、ここで拡張子を見て振り分ける。
+func (h *feedHandler) TryServe(c echo.Context, acct string) (bool, error) {
+	switch {
+	case strings.HasSuffix(acct, ".rss"):
+		return true, h.RSS(c, strings.TrimSuffix(acct, ".rss"))
+	case strings.HasSuffix(acct, ".atom"):
+		return true, h.Atom(c, strings.TrimSuffix(acct, ".atom"))
+	case strings.HasSuffix(acct, ".json"):
+		return true, h.JSON(c, strings.TrimSuffix(acct, ".json"))
+	}
+	return false, nil
 }
 
 // feedUserResolver adapts repository.UserRepository to FeedUserResolver.
