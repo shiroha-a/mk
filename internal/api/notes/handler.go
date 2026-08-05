@@ -728,7 +728,9 @@ func (h *Handler) applyMuteBlock(viewer *model.User, notes []*model.Note) ([]*mo
 	// muted-user / blocked-user / muted-channel / muted-instances は viewer 視点
 	// なので anonymous では対象外。
 	if viewer != nil && h.blockingRepo != nil {
-		sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+		// channelMutingRepo を渡さないと MutedChannelIDs が空のままになり、
+		// チャンネルミュートが post-fetch 側で一切効かない。
+		sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, h.channelMutingRepo, h.userRepo)
 		if err != nil {
 			return nil, err
 		}
