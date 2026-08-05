@@ -158,7 +158,17 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	} else {
 		// 2. ホームタイムライン: 投稿者本人 + フォロワー全員
 		//    follower一覧の取得は1ページずつ繰り返し読みだす
-		h.pushWithLimit(ctx, HomeTimelineName(author.ID), n.ID, homeCap)
+		//
+		// 投稿者本人の HTL は upstream NoteCreateService の「自分自身のHTL」
+		// ブロックと同じ 2 条件で絞る。
+		//   - リモートユーザーの HTL は作らない (note.userHost == null)。
+		//     こちらのインスタンスがリモートユーザーのタイムラインを持つ意味が
+		//     無く、Redis を無駄に太らせるだけ。
+		//   - visibility=specified で自分が宛先に入っている場合は push しない
+		//     (宛先としての配送が別途あるので二重になる)。
+		if author.Host == nil && !selfIsSpecifiedTarget(n, author.ID) {
+			h.pushWithLimit(ctx, HomeTimelineName(author.ID), n.ID, homeCap)
+		}
 		h.publishNote("homeTimeline:"+author.ID, n, author)
 		if h.followingRepo != nil && shouldFanoutToFollowers(n) {
 			h.fanoutToFollowersAndStream(ctx, author.ID, n, author, homeCap)
@@ -679,4 +689,23 @@ func (h *FanoutHook) removeFromUserLists(ctx context.Context, authorID, noteID s
 	for _, listID := range listIDs {
 		h.removeBestEffort(ctx, UserListTimelineName(listID), noteID)
 	}
+}
+
+// selfIsSpecifiedTarget reports whether the note is a specified-visibility note
+// that lists the author itself as a recipient.
+//
+// upstream NoteCreateService の「自分自身のHTL」条件
+// `note.visibility !== 'specified' || !note.visibleUserIds.some(v => v === user.id)`
+// の否定。宛先に自分が入っているダイレクトは、宛先としての配送で届くので
+// 自分の HTL には積まない。
+func selfIsSpecifiedTarget(n *model.Note, authorID string) bool {
+	if n.Visibility != model.NoteVisibilitySpecified {
+		return false
+	}
+	for _, id := range n.VisibleUserIDs {
+		if id == authorID {
+			return true
+		}
+	}
+	return false
 }

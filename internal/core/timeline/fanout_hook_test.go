@@ -71,6 +71,74 @@ func TestFanoutHook_RemoteAuthorSkipsLocal(t *testing.T) {
 	assert.Equal(t, []string{noteID}, out)
 }
 
+// リモートユーザーの HTL は作らない。upstream NoteCreateService の
+// 「自分自身のHTL」ブロックは note.userHost == null を条件にしている。
+// こちらのインスタンスがリモートユーザーのタイムラインを持つ意味が無く、
+// Redis を無駄に太らせるだけ。
+func TestFanoutHook_RemoteAuthorHasNoHomeTimeline(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	host := "remote.example"
+	n := &model.Note{ID: idGen.Generate(time.Now()), UserID: "ra", UserHost: &host, Visibility: model.NoteVisibilityPublic}
+	author := &model.User{ID: "ra", Host: &host}
+	h.OnNoteCreated(n, author)
+
+	out, err := fanout.Get(ctx, HomeTimelineName("ra"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "リモートユーザーの HTL は作らないこと")
+}
+
+// ローカルユーザーなら従来どおり自分の HTL に入る。
+func TestFanoutHook_LocalAuthorHasHomeTimeline(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{ID: noteID, UserID: "la", Visibility: model.NoteVisibilityPublic}
+	h.OnNoteCreated(n, &model.User{ID: "la"})
+
+	out, err := fanout.Get(ctx, HomeTimelineName("la"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out)
+}
+
+// visibility=specified で自分が宛先に入っているときは自分の HTL に積まない
+// (宛先としての配送で届くため二重になる)。upstream も同条件。
+func TestFanoutHook_SpecifiedWithSelfSkipsOwnHome(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "la",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"la", "other"},
+	}
+	h.OnNoteCreated(n, &model.User{ID: "la"})
+
+	out, err := fanout.Get(ctx, HomeTimelineName("la"), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
+// 宛先に自分が入っていない specified なら自分の HTL に積む。
+func TestFanoutHook_SpecifiedWithoutSelfKeepsOwnHome(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{
+		ID: noteID, UserID: "la",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"other"},
+	}
+	h.OnNoteCreated(n, &model.User{ID: "la"})
+
+	out, err := fanout.Get(ctx, HomeTimelineName("la"), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out)
+}
+
 func TestFanoutHook_FollowersVisibilityNoGlobal(t *testing.T) {
 	h, fanout, _ := newTestHook(t)
 	ctx := context.Background()
