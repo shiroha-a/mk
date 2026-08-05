@@ -93,7 +93,19 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
-	ids, err := s.fanout.Get(ctx, LocalTimeline, untilID, sinceID, limit)
+	// upstream は LTL を返信の有無で 3 本に分けて持ち、取得時に合流させる。
+	//   withReplies=true  -> localTimeline + localTimelineWithReplies
+	//   viewer あり        -> localTimeline + localTimelineWithReplyTo:<viewer>
+	//   viewer なし        -> localTimeline のみ
+	// これで「他人の他人への返信は出ない」「自分宛ての返信は出る」が両立する。
+	keys := []Name{LocalTimeline}
+	switch {
+	case filter.WithReplies != nil && *filter.WithReplies:
+		keys = append(keys, LocalTimelineWithReplies)
+	case viewerID != "":
+		keys = append(keys, LocalTimelineWithReplyToName(viewerID))
+	}
+	ids, err := s.fanout.GetMerged(ctx, keys, untilID, sinceID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +158,16 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 	if limit <= 0 {
 		limit = 20
 	}
-	multi, err := s.fanout.GetMulti(ctx, []Name{HomeTimelineName(viewer.ID), LocalTimeline}, untilID, sinceID, limit)
+	// LTL 側は LocalTimeline 系列を返信の有無で使い分ける (LocalTimeline と
+	// 同じ規則)。素の localTimeline には返信が入っていないので、ここで合流させ
+	// ないと withReplies=true でも返信が出てこない。
+	stlKeys := []Name{HomeTimelineName(viewer.ID), LocalTimeline}
+	if filter.WithReplies != nil && *filter.WithReplies {
+		stlKeys = append(stlKeys, LocalTimelineWithReplies)
+	} else {
+		stlKeys = append(stlKeys, LocalTimelineWithReplyToName(viewer.ID))
+	}
+	multi, err := s.fanout.GetMulti(ctx, stlKeys, untilID, sinceID, limit)
 	if err != nil {
 		return nil, err
 	}

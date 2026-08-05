@@ -25,16 +25,30 @@ type Name string
 // Well-known timeline name constructors. ローカル/グローバル/ホーム/ユーザーの
 // 4種類はPhase 2 Step Eで実装。Misskey本家のホームタイムラインsuffixをそのまま流用。
 const (
-	LocalTimeline  Name = "localTimeline"
-	GlobalTimeline Name = "globalTimeline"
-	timelineKeyFmt      = "list:%s"
-	defaultMaxLen       = 200
+	LocalTimeline Name = "localTimeline"
+	// LocalTimelineWithReplies は「自分以外への返信」だけを積む LTL 系列。
+	// upstream は LTL を返信の有無で 3 本に分けており、素の localTimeline には
+	// 返信を入れない。withReplies=true の取得時にこちらを合流させる。
+	LocalTimelineWithReplies Name = "localTimelineWithReplies"
+	GlobalTimeline           Name = "globalTimeline"
+	timelineKeyFmt                = "list:%s"
+	defaultMaxLen                 = 200
 	// trimProbability defines how often we trim a timeline list to maxLen.
 	// 全プッシュごとにLTRIMすると重いので、確率的に間引く。
 	trimProbability = 0.1
 	// recentInsertGracePeriod is how recent a note can be to skip the lindex check.
 	recentInsertGracePeriod = 3 * time.Minute
 )
+
+// LocalTimelineWithReplyToName returns the LTL key holding replies addressed to
+// the given user.
+//
+// upstream は「自分宛ての返信」だけを別キーに積み、取得時に localTimeline と
+// 合流させる。これにより「他人の他人への返信は出ない」「自分宛ての返信は出る」
+// を両立させている。
+func LocalTimelineWithReplyToName(userID string) Name {
+	return Name("localTimelineWithReplyTo:" + userID)
+}
 
 // HomeTimelineName returns the home timeline list key for a user.
 func HomeTimelineName(userID string) Name {
@@ -140,6 +154,42 @@ func (s *FanoutTimelineService) Get(ctx context.Context, name Name, untilID, sin
 		return nil, err
 	}
 	return filterAndSort(ids, untilID, sinceID, limit), nil
+}
+
+// GetMerged retrieves IDs from multiple timelines and merges them into one
+// descending-ordered, de-duplicated list.
+//
+// upstream FanoutTimelineEndpointService は redisTimelines に複数キーを渡し、
+// 取得結果をマージして 1 本の timeline として返す。LTL の返信振り分け
+// (localTimeline / WithReplies / WithReplyTo) がこれに当たる。
+func (s *FanoutTimelineService) GetMerged(ctx context.Context, names []Name, untilID, sinceID string, limit int) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if len(names) == 1 {
+		return s.Get(ctx, names[0], untilID, sinceID, limit)
+	}
+	lists, err := s.GetMulti(ctx, names, untilID, sinceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	merged := make([]string, 0, limit)
+	for _, ids := range lists {
+		for _, id := range ids {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			merged = append(merged, id)
+		}
+	}
+	// ID は時系列順なので、降順に並べ直してから limit で切る。
+	sort.Sort(sort.Reverse(sort.StringSlice(merged)))
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, nil
 }
 
 // GetMulti retrieves IDs from multiple timelines in a single pipeline call.

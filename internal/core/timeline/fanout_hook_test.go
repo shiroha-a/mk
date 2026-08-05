@@ -139,6 +139,73 @@ func TestFanoutHook_SpecifiedWithoutSelfKeepsOwnHome(t *testing.T) {
 	assert.Equal(t, []string{noteID}, out)
 }
 
+// upstream は LTL を返信の有無で 3 本に分ける。素の localTimeline に返信を
+// 入れないことで「他人の他人への返信は LTL に出ない」を成立させ、自分宛ての
+// 返信は専用キーから合流させる。
+func TestFanoutHook_ReplyGoesToSeparateLocalKeys(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	srcID := idGen.Generate(time.Now())
+	replyUser := "target"
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{
+		ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic,
+		ReplyID: &srcID, ReplyUserID: &replyUser,
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	out, err := fanout.Get(ctx, LocalTimeline, "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out, "素の localTimeline に返信を入れないこと")
+
+	out, err = fanout.Get(ctx, LocalTimelineWithReplies, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out)
+
+	out, err = fanout.Get(ctx, LocalTimelineWithReplyToName(replyUser), "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out, "宛先別キーに積むこと")
+}
+
+// 自己スレッド (自分への返信) は返信扱いしない。upstream isReply も
+// replyUserId !== userId を条件にしている。
+func TestFanoutHook_SelfThreadStaysInLocalTimeline(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	srcID := idGen.Generate(time.Now())
+	self := "author"
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{
+		ID: noteID, UserID: self, Visibility: model.NoteVisibilityPublic,
+		ReplyID: &srcID, ReplyUserID: &self,
+	}
+	h.OnNoteCreated(n, &model.User{ID: self})
+
+	out, err := fanout.Get(ctx, LocalTimeline, "", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteID}, out)
+}
+
+// リモート宛ての返信は宛先別キーを作らない (引く人が居ない)。
+func TestFanoutHook_ReplyToRemoteHasNoReplyToKey(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	srcID := idGen.Generate(time.Now())
+	replyUser, remoteHost := "remoteUser", "remote.example"
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "author", Visibility: model.NoteVisibilityPublic,
+		ReplyID: &srcID, ReplyUserID: &replyUser, ReplyUserHost: &remoteHost,
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	out, err := fanout.Get(ctx, LocalTimelineWithReplyToName(replyUser), "", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
 func TestFanoutHook_FollowersVisibilityNoGlobal(t *testing.T) {
 	h, fanout, _ := newTestHook(t)
 	ctx := context.Background()

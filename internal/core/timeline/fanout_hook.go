@@ -176,8 +176,23 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 
 		// 3. ローカルタイムライン: ローカル投稿でvisibility=publicのみ。
 		// home visibilityはフォロワー向けなのでLTLには出さない (本家と同じ挙動)。
+		//
+		// upstream は返信の有無で LTL を 3 本に分ける。素の localTimeline には
+		// 返信を入れず、「自分以外への返信」は localTimelineWithReplies と
+		// localTimelineWithReplyTo:<replyUserId> に積む。取得時にどれを合流
+		// させるかで「他人の他人への返信は出ない」「自分宛ての返信は出る」を
+		// 両立させている (NoteCreateService の isReply 分岐)。
 		if author.Host == nil && n.Visibility == model.NoteVisibilityPublic {
-			h.pushWithLimit(ctx, LocalTimeline, n.ID, MaxTimelineLength)
+			if isReplyToOther(n) {
+				h.pushWithLimit(ctx, LocalTimelineWithReplies, n.ID, MaxTimelineLength)
+				// 返信先がローカルユーザーのときだけ宛先別キーに積む
+				// (リモート宛ての返信を持っても引く人が居ない)。
+				if n.ReplyUserID != nil && (n.ReplyUserHost == nil || *n.ReplyUserHost == "") {
+					h.pushWithLimit(ctx, LocalTimelineWithReplyToName(*n.ReplyUserID), n.ID, MaxTimelineLength/10)
+				}
+			} else {
+				h.pushWithLimit(ctx, LocalTimeline, n.ID, MaxTimelineLength)
+			}
 			h.publishNote("localTimeline", n, author)
 		}
 
@@ -708,4 +723,11 @@ func selfIsSpecifiedTarget(n *model.Note, authorID string) bool {
 		}
 	}
 	return false
+}
+
+// isReplyToOther reports whether the note is a reply to someone other than its
+// own author. upstream misc/is-reply.ts の isReply(note) (viewer 指定なし) と
+// 同じ条件。
+func isReplyToOther(n *model.Note) bool {
+	return n.ReplyID != nil && n.ReplyUserID != nil && *n.ReplyUserID != n.UserID
 }
