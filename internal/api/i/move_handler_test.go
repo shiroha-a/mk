@@ -54,7 +54,7 @@ func TestMove_RootForbidden(t *testing.T) {
 	setMover(sm)
 	root := &model.User{ID: "me", Username: "me", IsRoot: true}
 	rec := post(h.Move, `{"moveToAccount":"https://x","password":"pw"}`, root)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NOT_ROOT_FORBIDDEN")
 	assert.Contains(t, rec.Body.String(), "4362e8dc-731f-4ad8-a694-be2a88922a24")
 	assert.False(t, sm.called)
@@ -96,7 +96,7 @@ func TestMove_NoProfile(t *testing.T) {
 	userRepo.Users["me"] = &model.User{ID: "me"}
 	h.SetAccountMover(&stubMover{})
 	rec := post(h.Move, `{"moveToAccount":"https://x","password":"pw"}`, &model.User{ID: "me"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 }
 
@@ -109,7 +109,7 @@ func TestMove_WrongPassword(t *testing.T) {
 	sm := &stubMover{}
 	h.SetAccountMover(sm)
 	rec := post(h.Move, `{"moveToAccount":"https://x","password":"wrong"}`, &model.User{ID: "me"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "INCORRECT_PASSWORD")
 	assert.False(t, sm.called, "パスワード誤りなら Move は呼ばれない")
 }

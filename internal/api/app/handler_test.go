@@ -292,7 +292,7 @@ func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 
 	rec := post(h.Show, `{"appId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_InvalidParam(t *testing.T) {

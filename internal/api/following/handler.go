@@ -153,7 +153,7 @@ func (h *Handler) AcceptRequest(c echo.Context) error {
 	}
 	if err := h.followingService.AcceptRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_FOLLOW_REQUEST", "No such follow request.", "bcde4f8b-0913-4614-8881-614e522fb041"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_FOLLOW_REQUEST", "No such follow request.", "bcde4f8b-0913-4614-8881-614e522fb041"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -205,7 +205,7 @@ func (h *Handler) CancelRequest(c echo.Context) error {
 
 	if err := h.followingService.CancelRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("FOLLOW_REQUEST_NOT_FOUND", "Follow request not found.", "089b125b-d338-482a-9a09-e2622ac9f8d4"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOW_REQUEST_NOT_FOUND", "Follow request not found.", "089b125b-d338-482a-9a09-e2622ac9f8d4"))
 		}
 		return apierr.JSONInternalError(c)
 	}

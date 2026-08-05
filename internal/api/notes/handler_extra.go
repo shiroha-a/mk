@@ -41,14 +41,14 @@ func (h *Handler) FavoritesCreate(c echo.Context) error {
 	// 適用不可。queryService.RequireVisible で見えない note は存在隠蔽する。
 	// queryService 未配線時は fail-closed (ShowPartialBulk と同じ pattern)。
 	if h.queryService == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	target, err := h.queryService.RequireVisible(user, req.NoteID)
 	if h.materializeIfMissing(req.NoteID, err) {
 		target, err = h.queryService.RequireVisible(user, req.NoteID)
 	}
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "6dd26674-e060-4816-909a-45ba3f4da458"))
 	}
 	if h.favoriteRepo == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -96,7 +96,7 @@ func (h *Handler) FavoritesDelete(c echo.Context) error {
 	// 操作するので visibility gate は不要 (可視性を絞られた後でも un-favorite
 	// できるべき)、存在確認のみ行う。
 	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "80848a2c-398f-4343-baa9-df1d57696c56"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "80848a2c-398f-4343-baa9-df1d57696c56"))
 	}
 	if exists, _ := h.favoriteRepo.Exists(user.ID, req.NoteID); !exists {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_FAVORITED", "You have not favorited that note.", "b625fc69-635e-45e9-86f4-dbefbef35af5"))
@@ -226,7 +226,7 @@ func (h *Handler) Unrenote(c echo.Context) error {
 	// renoteId が指定ノートの自分のノートを探して削除
 	renote, err := h.noteRepo.FindRenoteByUser(user.ID, req.NoteID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "efd4a259-2442-496b-8dd7-b255aa1a160f"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "efd4a259-2442-496b-8dd7-b255aa1a160f"))
 	}
 	if err := h.deleteService.Delete(user, renote.ID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -300,10 +300,10 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
 		}
 		if list.UserID != me.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
 		}
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
@@ -444,7 +444,7 @@ func (h *Handler) Clips(c echo.Context) error {
 	}
 	// note 存在確認 (upstream getterService.getNote)。可視性は問わず存在のみ。
 	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "47db1a1c-b0af-458d-8fb4-986e4efafe1e"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "47db1a1c-b0af-458d-8fb4-986e4efafe1e"))
 	}
 	clipIDs, err := h.clipNoteRepo.ListClipIDsByNote(req.NoteID)
 	if err != nil {
@@ -516,7 +516,7 @@ func (h *Handler) Translate(c echo.Context) error {
 	// UNAVAILABLE を返してしまうため後ろに移動する。
 	n, err := h.noteRepo.FindByID(req.NoteID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "bea9b03f-36e0-49c5-a4db-627a029f8971"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "bea9b03f-36e0-49c5-a4db-627a029f8971"))
 	}
 
 	// 旧実装は存在確認のみで visibility check が無く、note ID 既知の viewer が

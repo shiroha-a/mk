@@ -83,7 +83,7 @@ func TestResetPasswordAdmin_RootRejected(t *testing.T) {
 	rootID := "root1"
 	metaRepo.Meta.RootUserID = &rootID
 	rec := doPost(h.ResetPassword, `{"userId":"root1"}`, adminUser)
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 	assert.Contains(t, rec.Body.String(), "cda8f8ce-89a6-4f92-8055-33bbe0c1464d")
 }
@@ -95,7 +95,7 @@ func TestResetPasswordAdmin_AdministratorTargetRejected(t *testing.T) {
 	roleRepo.Roles["admrole"] = &model.Role{ID: "admrole", Name: "Admin", IsAdministrator: true}
 	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
 	rec := doPost(h.ResetPassword, `{"userId":"adm1"}`, adminUser)
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "cda8f8ce-89a6-4f92-8055-33bbe0c1464d")
 }
 

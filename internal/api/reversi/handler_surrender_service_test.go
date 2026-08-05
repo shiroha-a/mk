@@ -102,7 +102,7 @@ func TestSurrender_Service_AlreadyEnded(t *testing.T) {
 func TestSurrender_Service_NotFoundStillReturns404(t *testing.T) {
 	h, _, pub := newHandlerWithService(t)
 	rec := post(h.Surrender, `{"gameId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, pub.events)
 }
 
@@ -111,7 +111,7 @@ func TestSurrender_Service_NotPlayerCaughtByPreCheck(t *testing.T) {
 	h, repo, pub := newHandlerWithService(t)
 	repo.games["g1"] = startedGameForSurrender()
 	rec := post(h.Surrender, `{"gameId":"g1"}`, &model.User{ID: "u3"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, pub.events)
 }
 

@@ -124,7 +124,7 @@ func TestShow_Success(t *testing.T) {
 func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Show, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_InvalidParam(t *testing.T) {
@@ -143,7 +143,7 @@ func TestPush_Success(t *testing.T) {
 func TestPush_ListNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Push, `{"listId":"ghost","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestPush_InvalidParam(t *testing.T) {
@@ -546,7 +546,7 @@ func TestPush_YouHaveBeenBlocked(t *testing.T) {
 	h.SetUserRepo(userRepo)
 	h.SetBlockingRepo(blockRepo)
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
 	assert.Contains(t, rec.Body.String(), "990232c5-3f9d-4d83-9f3f-ef27b6332a4b")
 	assert.Empty(t, repo.Members, "block されている user の push は member を追加しないこと")
@@ -597,7 +597,7 @@ func TestPush_BlockRepoErrorFailsClosed(t *testing.T) {
 	h.SetUserRepo(userRepo)
 	h.SetBlockingRepo(blockRepo)
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
 	assert.Empty(t, repo.Members, "block 判定不能時は member を追加しないこと (fail-closed)")
 }
@@ -638,7 +638,7 @@ func TestShow_PrivateListNonOwnerHidden(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Private", IsPublic: false}
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }
 
@@ -649,7 +649,7 @@ func TestShow_PublicListNonOwnerNeedsForPublic(t *testing.T) {
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1", Name: "Public", IsPublic: true}
 	// default forPublic=false → 404。
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// forPublic=true → 200。
 	rec = doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "u2"})
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -708,7 +708,7 @@ func TestShow_ForPublicOwnPrivateNotFound(t *testing.T) {
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "priv", IsPublic: false}
 	h.SetFavoriteRepo(testutil.NewMockUserListFavoriteRepository())
 	rec := doPost(h.Show, `{"listId":"l1","forPublic":true}`, &model.User{ID: "owner"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }
 
@@ -718,7 +718,7 @@ func TestShow_NonOwnerPublicListNotFound(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner", Name: "pub", IsPublic: true}
 	rec := doPost(h.Show, `{"listId":"l1"}`, &model.User{ID: "other"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }
 
@@ -749,7 +749,7 @@ func TestPush_NotOwner(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "intruder"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 	assert.Empty(t, repo.Members, "owner 以外の push は member を追加しないこと")
 }
@@ -762,7 +762,7 @@ func TestPull_NotOwner(t *testing.T) {
 		{ID: "m1", UserListID: "l1", UserID: "u2"},
 	}
 	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "intruder"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 	assert.Len(t, repo.Members, 1, "owner 以外の pull は member を削除しないこと")
 }
@@ -772,7 +772,7 @@ func TestPull_NotOwner(t *testing.T) {
 func TestPull_ListNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Pull, `{"listId":"ghost","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }
 
@@ -781,7 +781,7 @@ func TestDelete_NotOwner(t *testing.T) {
 	h, repo := newTestHandler(t)
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "owner"}
 	rec := doPost(h.Delete, `{"listId":"l1"}`, &model.User{ID: "intruder"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 	assert.Contains(t, repo.Lists, "l1", "owner 以外の delete は list を削除しないこと")
 }
@@ -790,6 +790,6 @@ func TestDelete_NotOwner(t *testing.T) {
 func TestDelete_ListNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Delete, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_LIST")
 }

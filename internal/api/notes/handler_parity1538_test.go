@@ -94,7 +94,7 @@ func TestPollsVote_Blocked(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/polls/vote", `{"noteId":"n1","choice":1}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.PollsVote(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
 	assert.Contains(t, rec.Body.String(), "85a5377e-b1e9-4617-b0b9-5bea73331e49")
 }
@@ -117,7 +117,7 @@ func TestShow_RequireSigninAnonymous(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/show", `{"noteId":"n1"}`)
 	// anonymous (no setAuthUser)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "CONTENT_RESTRICTED_BY_USER")
 	assert.Contains(t, rec.Body.String(), "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab")
 }
@@ -128,7 +128,7 @@ func TestShow_UgcVisibilityNoneAnonymous(t *testing.T) {
 	seedReactionNote(noteRepo, "n1", "public")
 	c, rec := newJSONRequest(t, "/api/notes/show", `{"noteId":"n1"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "CONTENT_RESTRICTED_BY_SERVER")
 	assert.Contains(t, rec.Body.String(), "145f88d2-b03d-4087-8143-a78928883c4b")
 }

@@ -983,7 +983,7 @@ func (h *Handler) gateRelationVisibility(c echo.Context, targetID string, viewer
 		forbiddenID = "3c6a84db-d619-26af-ca14-06232a21df8a" // users/followers
 	}
 	deny := func() (bool, error) {
-		return true, c.JSON(http.StatusForbidden, apierr.Error("FORBIDDEN", "Forbidden.", forbiddenID))
+		return true, c.JSON(http.StatusBadRequest, apierr.Error("FORBIDDEN", "Forbidden.", forbiddenID))
 	}
 
 	vis := model.FollowingVisibilityPublic

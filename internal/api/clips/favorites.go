@@ -41,7 +41,7 @@ func (h *Handler) Favorite(c echo.Context) error {
 	// クリップの存在確認 (private clip の他人は Show が ErrClipNotFound を
 	// 返すので upstream favorite.ts と同じく NO_SUCH_CLIP に落ちる)
 	if _, err := h.svc.Show(user.ID, req.ClipID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "4c2aaeae-80d8-4250-9606-26cb1fdb77a5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "4c2aaeae-80d8-4250-9606-26cb1fdb77a5"))
 	}
 	already, err := h.favoriteRepo.Exists(user.ID, req.ClipID)
 	if err != nil {
@@ -83,7 +83,7 @@ func (h *Handler) Unfavorite(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	if !exists {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "2603966e-b865-426c-94a7-af4a01241dc1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "2603966e-b865-426c-94a7-af4a01241dc1"))
 	}
 	favorited, err := h.favoriteRepo.Exists(user.ID, req.ClipID)
 	if err != nil {

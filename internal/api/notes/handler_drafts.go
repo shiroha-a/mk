@@ -609,7 +609,7 @@ func (h *Handler) ThreadMutingCreate(c echo.Context) error {
 	}
 	note, err := h.noteRepo.FindByID(req.NoteID)
 	if err != nil || note == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"))
 	}
 	threadID := threadIDForMute(note)
 	// 冪等: 既存行があれば UNIQUE 制約違反 (500) を避けて成功扱い。
@@ -639,7 +639,7 @@ func (h *Handler) ThreadMutingDelete(c echo.Context) error {
 	}
 	note, err := h.noteRepo.FindByID(req.NoteID)
 	if err != nil || note == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "bddd57ac-ceb3-b29d-4334-86ea5fae481a"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "bddd57ac-ceb3-b29d-4334-86ea5fae481a"))
 	}
 	// Delete は冪等 (該当行が無くてもエラーにしない)。
 	if err := h.threadMutingRepo.Delete(user.ID, threadIDForMute(note)); err != nil {

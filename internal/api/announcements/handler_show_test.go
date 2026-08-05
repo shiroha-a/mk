@@ -22,7 +22,7 @@ func TestShow_InvalidParam(t *testing.T) {
 func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Show, `{"announcementId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_Success(t *testing.T) {
@@ -85,7 +85,7 @@ func TestShow_UserTargeted_AnonymousReturns404(t *testing.T) {
 	repo.Items["a1"] = &model.Announcement{ID: "a1", Title: "private", Text: "to alice", IsActive: true, UserID: &uid}
 
 	rec := doPost(h.Show, `{"announcementId":"a1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // upstream 2026.5.3 以前から閉じている穴 (= 他人宛 announcement へのアクセス)
@@ -97,7 +97,7 @@ func TestShow_UserTargeted_OtherUserReturns404(t *testing.T) {
 
 	bob := &model.User{ID: "bob"}
 	rec := doPost(h.Show, `{"announcementId":"a1"}`, bob)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 当該 user 本人は閲覧できる (= upstream の挙動と一致)。

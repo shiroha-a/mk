@@ -273,7 +273,7 @@ func TestDelete_AccessDeniedWhenNotCreator(t *testing.T) {
 	owner := "u2"
 	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "t1", CreatedByID: &owner}
 	rec := post(h.Delete, `{"inviteId":"t1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 }
 

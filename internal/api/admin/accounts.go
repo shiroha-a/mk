@@ -22,7 +22,7 @@ func (h *Handler) AccountsDelete(c echo.Context) error {
 	}
 	// root / system アカウントの削除は連合を壊すため拒否する (#parity review F1)。
 	if h.isProtectedAccount(req.UserID) {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// #2230: local user は物理削除 (Soft=false)、remote user は tombstone (Soft=true)。
 	user, _ := h.userRepo.FindByID(req.UserID)
@@ -49,11 +49,11 @@ func (h *Handler) AccountsFindByEmail(c echo.Context) error {
 	}
 	profile, err := h.userRepo.FindProfileByEmail(req.Email)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
 	}
 	user, err := h.userRepo.FindByID(profile.UserID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
 	}
 	// upstream admin/accounts/find-by-email.ts は pack(user, null,
 	// {schema:'UserDetailedNotMe'}) (includeSecrets 無し) を返すため email /
@@ -76,7 +76,7 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	}
 	// root / system アカウントの削除は連合を壊すため拒否する (#parity review F1)。
 	if h.isProtectedAccount(req.UserID) {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// AP Delete(actor) 配信のため、更新前に user を控える (#1759)。
 	user, _ := h.userRepo.FindByID(req.UserID)

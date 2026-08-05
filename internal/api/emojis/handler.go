@@ -74,7 +74,7 @@ func (h *Handler) Emoji(c echo.Context) error {
 	}
 	e, err := h.emojiRepo.FindByNameAndHost(req.Name, nil)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "14141e4b-dea8-41f0-9ba1-1721a6b5b92c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "14141e4b-dea8-41f0-9ba1-1721a6b5b92c"))
 	}
 	// upstream は EmojiDetailed を返す。ad-hoc map では license /
 	// roleIdsThatCanBeUsedThisEmojiAsReaction が欠落し、url も publicUrl 固定で

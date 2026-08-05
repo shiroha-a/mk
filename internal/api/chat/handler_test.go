@@ -118,7 +118,7 @@ func TestRoomsShow_Success(t *testing.T) {
 func TestRoomsShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.RoomsShow, `{"roomId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #1771: upstream show.ts の noSuchRoom id に揃える。
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "857ae02f-8759-4d20-9adb-6e95fffe4fd7")
 }
@@ -132,7 +132,7 @@ func TestRoomsShow_NonOwnerNonMember(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", Name: "owners-only", OwnerID: "u1", Owner: u1}
 	// u2 は room の owner でも member でも 招待 でもない → 404
 	rec := post(h.RoomsShow, `{"roomId":"r1"}`, u2)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 招待受信者は閲覧できる (owner でも member でもない user が room を見る経路)。
@@ -173,7 +173,7 @@ func TestRoomsUpdate_NotOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	rec := post(h.RoomsUpdate, `{"roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #1771: upstream update.ts の noSuchRoom id に揃える。
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "fcdb0f92-bda6-47f9-bd05-343e0e020932")
 }
@@ -214,7 +214,7 @@ func TestRoomsDelete_NotOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #1541: delete の NO_SUCH_ROOM golden id。
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b")
 }
@@ -252,7 +252,7 @@ func TestRoomsDelete_NonOwnerNonModerator(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{}})
 	rec := post(h.RoomsDelete, `{"roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	_, ok := repo.Rooms["r1"]
 	assert.True(t, ok, "room must not be deleted by a non-owner non-moderator")
 }
@@ -299,7 +299,7 @@ func TestRoomsMute(t *testing.T) {
 func TestRoomsMute_NoMembership(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.RoomsMute, `{"roomId":"r1","mute":true}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df")
 }
 
@@ -340,7 +340,7 @@ func TestRoomsTransferOwnership_NotOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "other"}
 	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRoomsTransferOwnership_InvalidParam(t *testing.T) {
@@ -463,11 +463,11 @@ func TestMessages_RoomPermission(t *testing.T) {
 	h, repo := newTestHandler()
 	// 存在しない room → NO_SUCH_ROOM。
 	rec := post(h.Messages, `{"roomId":"r1"}`, u1)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
 	// 非 member → NO_SUCH_ROOM。
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
-	assert.Equal(t, http.StatusNotFound, post(h.Messages, `{"roomId":"r1"}`, u1).Code)
+	assert.Equal(t, http.StatusBadRequest, post(h.Messages, `{"roomId":"r1"}`, u1).Code)
 	// member なら閲覧可。
 	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
 	assert.Equal(t, http.StatusOK, post(h.Messages, `{"roomId":"r1"}`, u1).Code)
@@ -494,7 +494,7 @@ func TestMessagesShow_Success(t *testing.T) {
 func TestMessagesShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.MessagesShow, `{"messageId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesShow_InvalidParam(t *testing.T) {
@@ -514,7 +514,7 @@ func TestMessagesUpdate_NotOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "other"}
 	rec := post(h.MessagesUpdate, `{"messageId":"m1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesUpdate_InvalidParam(t *testing.T) {
@@ -534,7 +534,7 @@ func TestMessagesDelete_NotOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "other"}
 	rec := post(h.MessagesDelete, `{"messageId":"m1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesDelete_InvalidParam(t *testing.T) {
@@ -599,7 +599,7 @@ func TestMessagesCreate_Service_NoTarget(t *testing.T) {
 func TestMessagesCreate_Service_RoomNotFound(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	rec := post(h.MessagesCreate, `{"text":"hi","toRoomId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "8098520d-2da5-4e8f-8ee1-df78b55a4ec6")
 }
 
@@ -626,7 +626,7 @@ func TestMessagesCreate_ToUser_RecipientUnavailable(t *testing.T) {
 	h.SetUserRepo(userRepo)
 	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "unavailable"})
 	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "ACCESS_DENIED", "1fb7cb09-d46a-4fff-b8df-057708cce513")
 }
 
@@ -638,7 +638,7 @@ func TestMessagesCreate_ToUser_RecipientReadonlyVsAvailable(t *testing.T) {
 	h.SetUserRepo(userRepo)
 	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "readonly"})
 	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	h.SetChatAvailabilityChecker(&stubChatAvailChecker{avail: "available"})
 	rec = post(h.MessagesCreate, `{"text":"hi","toUserId":"u2"}`, u1)
@@ -650,7 +650,7 @@ func TestMessagesCreate_Service_RoomForbidden(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "otherUser"}
 	rec := post(h.MessagesCreate, `{"text":"hi","toRoomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- #1541: create-message input validation ---
@@ -770,7 +770,7 @@ func TestMessagesDelete_Service(t *testing.T) {
 func TestMessagesDelete_Service_NotFound(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	rec := post(h.MessagesDelete, `{"messageId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesDelete_Service_Forbidden(t *testing.T) {
@@ -778,7 +778,7 @@ func TestMessagesDelete_Service_Forbidden(t *testing.T) {
 	toID := "u1"
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &toID}
 	rec := post(h.MessagesDelete, `{"messageId":"m1"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesUpdate_Service(t *testing.T) {
@@ -793,7 +793,7 @@ func TestMessagesUpdate_Service(t *testing.T) {
 func TestMessagesUpdate_Service_NotFound(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	rec := post(h.MessagesUpdate, `{"messageId":"ghost","text":"x"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesUpdate_Service_Forbidden(t *testing.T) {
@@ -802,7 +802,7 @@ func TestMessagesUpdate_Service_Forbidden(t *testing.T) {
 	orig := "old"
 	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &toID, Text: &orig}
 	rec := post(h.MessagesUpdate, `{"messageId":"m1","text":"new"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMessagesRead_Service(t *testing.T) {
@@ -816,7 +816,7 @@ func TestMessagesRead_Service(t *testing.T) {
 func TestMessagesRead_Service_NotFound(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	rec := post(h.MessagesRead, `{"messageId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 type mockUserMsgRepo struct{ *testutil.MockChatRepository }
@@ -852,7 +852,7 @@ func TestMessagesSearch(t *testing.T) {
 func TestMessagesSearch_RoomNotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.MessagesSearch, `{"query":"x","roomId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "460b3669-81b0-4dc9-a997-44442141bf83")
 }
 
@@ -861,7 +861,7 @@ func TestMessagesSearch_RoomNotMember(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
 	rec := post(h.MessagesSearch, `{"query":"x","roomId":"r1"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "460b3669-81b0-4dc9-a997-44442141bf83")
 }
 
@@ -1093,7 +1093,7 @@ func TestInvitationsCreate_NotOwnerRejected(t *testing.T) {
 	// room owner は u2。u1 は owner でないので招待を作成・連合できない。
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", Name: "General", OwnerID: "u2"}))
 	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u3"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestInvitationsCreate_Error(t *testing.T) {
@@ -1407,7 +1407,7 @@ func TestMessagesCreateToUser_Blocked(t *testing.T) {
 	h.SetService(svc)
 
 	rec := post(h.MessagesCreateToUser, `{"text":"hi","toUserId":"u2"}`, u1)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -1437,12 +1437,12 @@ func TestRoomTimeline(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, post(h.RoomTimeline, `{}`, u1).Code)
 	// 存在しない room は NO_SUCH_ROOM (endpoint 固有 id)。
 	rec0 := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
-	require.Equal(t, http.StatusNotFound, rec0.Code)
+	require.Equal(t, http.StatusBadRequest, rec0.Code)
 	assertErrorCode(t, rec0, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
 	// member でも moderator でもない第三者は NO_SUCH_ROOM。
 	rec1 := post(h.RoomTimeline, `{"roomId":"r1"}`, u1)
-	require.Equal(t, http.StatusNotFound, rec1.Code)
+	require.Equal(t, http.StatusBadRequest, rec1.Code)
 	assertErrorCode(t, rec1, "NO_SUCH_ROOM", "c4d9f88c-9270-4632-b032-6ed8cee36f7f")
 	// member なら閲覧可。
 	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
@@ -1540,13 +1540,13 @@ func TestInvitationsOutbox(t *testing.T) {
 	h, repo := newTestHandler()
 	assert.Equal(t, http.StatusBadRequest, post(h.InvitationsOutbox, `{}`, u1).Code)
 	// no room → 404
-	assert.Equal(t, http.StatusNotFound, post(h.InvitationsOutbox, `{"roomId":"r1"}`, u1).Code)
+	assert.Equal(t, http.StatusBadRequest, post(h.InvitationsOutbox, `{"roomId":"r1"}`, u1).Code)
 	// owner can see outbox
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	rec := post(h.InvitationsOutbox, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	// non-owner → 404
-	assert.Equal(t, http.StatusNotFound, post(h.InvitationsOutbox, `{"roomId":"r1"}`, u2).Code)
+	assert.Equal(t, http.StatusBadRequest, post(h.InvitationsOutbox, `{"roomId":"r1"}`, u2).Code)
 }
 
 // #1541: outbox の各 invitation は upstream packRoomInvitation 同様
@@ -1576,7 +1576,7 @@ func TestInvitationsOutbox_ShapeIncludesCreatedAtAndRoom(t *testing.T) {
 func TestInvitationsOutbox_NoSuchRoomGoldenID(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.InvitationsOutbox, `{"roomId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_ROOM", "a3c6b309-9717-4316-ae94-a69b53437237")
 }
 
@@ -1678,12 +1678,12 @@ func TestRoomsMembers(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, post(h.RoomsMembers, `{}`, u1).Code)
 	// 存在しない room は NO_SUCH_ROOM (endpoint 固有 id)。
 	rec0 := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
-	require.Equal(t, http.StatusNotFound, rec0.Code)
+	require.Equal(t, http.StatusBadRequest, rec0.Code)
 	assertErrorCode(t, rec0, "NO_SUCH_ROOM", "7b9fe84c-eafc-4d21-bf89-485458ed2c18")
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u2.ID}
 	// 非 member は NO_SUCH_ROOM (members は moderator も許可しない)。
 	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{u1.ID: true}})
-	assert.Equal(t, http.StatusNotFound, post(h.RoomsMembers, `{"roomId":"r1"}`, u1).Code)
+	assert.Equal(t, http.StatusBadRequest, post(h.RoomsMembers, `{"roomId":"r1"}`, u1).Code)
 	// member なら閲覧可。
 	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: u1.ID, RoomID: "r1"}))
 	rec := post(h.RoomsMembers, `{"roomId":"r1"}`, u1)
@@ -1726,7 +1726,7 @@ func TestMembersUpdateMembership_Auth(t *testing.T) {
 	rec := post(h.MembersUpdateMembership, `{"roomId":"r1","userId":"u2","isMuted":true}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	// non-owner → 404
-	assert.Equal(t, http.StatusNotFound, post(h.MembersUpdateMembership, `{"roomId":"r1","userId":"u2"}`, u2).Code)
+	assert.Equal(t, http.StatusBadRequest, post(h.MembersUpdateMembership, `{"roomId":"r1","userId":"u2"}`, u2).Code)
 	// not a member → 404
 	assert.Equal(t, http.StatusNotFound, post(h.MembersUpdateMembership, `{"roomId":"r1","userId":"ghost"}`, u1).Code)
 }

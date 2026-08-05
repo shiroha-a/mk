@@ -373,7 +373,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 		if viewer == nil || viewer.ID != req.UserID {
 			profile := h.userService.GetProfile(req.UserID)
 			if profile != nil && !profile.PublicReactions {
-				return c.JSON(http.StatusForbidden, apierr.Error("REACTIONS_NOT_PUBLIC", "Reactions of the user is not public.", "673a7dd2-6924-1093-e0c0-e68456ceae5c"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("REACTIONS_NOT_PUBLIC", "Reactions of the user is not public.", "673a7dd2-6924-1093-e0c0-e68456ceae5c"))
 			}
 		}
 	}

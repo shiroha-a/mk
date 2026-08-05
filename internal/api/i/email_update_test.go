@@ -97,7 +97,7 @@ func TestUpdateEmail_With2FA_AcceptsBackupCode(t *testing.T) {
 func TestVerifyEmail_InvalidCode(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	rec := postExtra(h.VerifyEmail, `{"code":"nonexistent"}`, stubUser)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestVerifyEmail_EmptyCodeRejected(t *testing.T) {

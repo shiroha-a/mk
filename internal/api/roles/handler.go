@@ -159,7 +159,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil || !r.IsPublic {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "de5502bf-009a-4639-86c1-fec349e46dcb"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de5502bf-009a-4639-86c1-fec349e46dcb"))
 	}
 	return c.JSON(http.StatusOK, h.packRole(r))
 }
@@ -185,7 +185,7 @@ func (h *Handler) Users(c echo.Context) error {
 	if err != nil || !r.IsPublic || !r.IsExplorable {
 		// upstream は findOneBy({id, isPublic:true, isExplorable:true}) が null
 		// なら NO_SUCH_ROLE。!isPublic / !isExplorable も同じ扱い。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
 	}
 
 	limit := req.Limit
@@ -275,10 +275,10 @@ func (h *Handler) Notes(c echo.Context) error {
 
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
 	}
 	if !r.IsPublic {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
 	}
 	// upstream notes.ts: role が public でも !isExplorable なら空配列を返す
 	// (role の note を explore させない policy)。このガードが無いと非 explorable

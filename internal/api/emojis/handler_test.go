@@ -286,7 +286,7 @@ func TestEmoji_MissingName(t *testing.T) {
 func TestEmoji_NotFound(t *testing.T) {
 	h, _ := setup()
 	rec := doPostEmoji(h, `{"name":"nonexist"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	errObj := body["error"].(map[string]any)

@@ -478,7 +478,7 @@ func TestEmojiCopy_Success(t *testing.T) {
 
 func TestEmojiCopy_NotFound(t *testing.T) {
 	h, _ := setupEmojiHandler(t)
-	assert.Equal(t, http.StatusNotFound,
+	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.EmojiCopy, `{"emojiId":"missing"}`, adminUser).Code)
 }
 
@@ -1110,7 +1110,7 @@ func TestDriveShowFile_Empty(t *testing.T) {
 
 func TestDriveShowFile_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNotFound, doPost(h.DriveShowFile, `{"fileId":"ghost"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.DriveShowFile, `{"fileId":"ghost"}`, adminUser).Code)
 }
 
 func TestEmojiAddAliasesBulk(t *testing.T) {
@@ -1340,7 +1340,7 @@ func TestEmojiUpdate_FileCheckedBeforeEmoji(t *testing.T) {
 	dr := testutil.NewMockDriveFileRepository()
 	h.SetDriveFileRepo(dr) // fileId は seed しない
 	rec := doPost(h.EmojiUpdate, `{"id":"ghost","fileId":"badfile"}`, adminUser)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
 	assert.Contains(t, rec.Body.String(), "14fb9fd9-0731-4e2f-aeb9-f09e4740333d")
 }
@@ -1370,7 +1370,7 @@ func TestEmojiUpdate_NoSuchFile(t *testing.T) {
 	dr := testutil.NewMockDriveFileRepository()
 	h.SetDriveFileRepo(dr)
 	rec := doPost(h.EmojiUpdate, `{"id":"e1","fileId":"ghost"}`, adminUser)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
 }
 

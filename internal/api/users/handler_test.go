@@ -1598,7 +1598,8 @@ func setupRelationVisibilityFixture(t *testing.T, followersVis, followingVis mod
 
 func assertForbiddenWithUUID(t *testing.T, rec *httptest.ResponseRecorder, wantUUID string) {
 	t.Helper()
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	// upstream は API エラーを kind:'client' = 400 で返す。403 ではない。
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	errObj, ok := body["error"].(map[string]any)

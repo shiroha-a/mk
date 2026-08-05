@@ -410,7 +410,7 @@ func (h *Handler) APIGet(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_OBJECT", "No such object.", "dc94d745-1262-4e63-a17d-fecaa57efc82"))
+	return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_OBJECT", "No such object.", "dc94d745-1262-4e63-a17d-fecaa57efc82"))
 }
 
 // APIShow handles POST /api/ap/show — URIからUser/Noteを解決して返す。
@@ -433,7 +433,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 	// (974b799e) を返す。gate 未配線なら全許可 (legacy)。
 	if host != "" && host != h.localHost && h.hostBlocker != nil {
 		if h.hostBlocker.IsBlocked(host) || !h.hostBlocker.IsAllowed(host) {
-			return c.JSON(http.StatusForbidden, apierr.Error("FEDERATION_NOT_ALLOWED", "Federation for this host is not allowed.", "974b799e-1a29-4889-b706-18d4dd93e266"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("FEDERATION_NOT_ALLOWED", "Federation for this host is not allowed.", "974b799e-1a29-4889-b706-18d4dd93e266"))
 		}
 	}
 
@@ -533,7 +533,7 @@ func (h *Handler) APIShow(c echo.Context) error {
 	if fetchRequestFailed {
 		return c.JSON(http.StatusBadGateway, apierr.Error("REQUEST_FAILED", "Request failed.", "81b539cf-4f57-4b29-bc98-032c33c0792e"))
 	}
-	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_OBJECT", "No such object.", "dc94d745-1262-4e63-a17d-fecaa57efc82"))
+	return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_OBJECT", "No such object.", "dc94d745-1262-4e63-a17d-fecaa57efc82"))
 }
 
 // apShowURIHost parses an ap/show URI and returns its hostname. Returns an

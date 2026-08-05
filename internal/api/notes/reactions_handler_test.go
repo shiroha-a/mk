@@ -78,7 +78,7 @@ func TestReactionsCreate_NoteNotFound(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/reactions/create", `{"noteId":"ghost","reaction":"👍"}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsCreate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestReactionsCreate_NotVisible(t *testing.T) {
@@ -87,7 +87,7 @@ func TestReactionsCreate_NotVisible(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/reactions/create", `{"noteId":"n1","reaction":"👍"}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsCreate(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestReactionsCreate_AlreadyReacted(t *testing.T) {
@@ -129,7 +129,7 @@ func TestReactionsCreate_Blocked(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/reactions/create", `{"noteId":"n1","reaction":"👍"}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsCreate(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// upstream create.ts は endpoint error youHaveBeenBlocked に変換する。
 	// 旧実装は内部 id (e70412a4) と code=BLOCKED を leak していた (#1538)。
 	assert.Contains(t, rec.Body.String(), "YOU_HAVE_BEEN_BLOCKED")
@@ -208,7 +208,7 @@ func TestReactionsDelete_NoteNotFound(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/reactions/delete", `{"noteId":"ghost"}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsDelete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestReactionsDelete_NotReacted(t *testing.T) {
@@ -217,7 +217,7 @@ func TestReactionsDelete_NotReacted(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/reactions/delete", `{"noteId":"n1"}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.ReactionsDelete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // failingDeleteReactionRepo causes Delete to fail.
@@ -347,7 +347,7 @@ func TestReactions_List_NoteNotFound(t *testing.T) {
 	h, _, _ := newReactionHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/reactions", `{"noteId":"ghost"}`)
 	require.NoError(t, h.Reactions(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // listFailingReactionRepo causes ListByNoteID to fail.

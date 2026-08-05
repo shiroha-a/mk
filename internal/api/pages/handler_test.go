@@ -77,7 +77,7 @@ func TestCreate_EyeCatchingImageNoSuchFile(t *testing.T) {
 	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f_ghost","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c")
 }
 
@@ -91,7 +91,7 @@ func TestCreate_EyeCatchingImageForeignFile(t *testing.T) {
 	c, rec := newReq(t, `{"title":"t","name":"alpha","eyeCatchingImageId":"f1","content":[],"variables":[]}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 自分の drive file なら作成成功。
@@ -115,7 +115,7 @@ func TestUpdate_EyeCatchingImageNoSuchFile(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1","eyeCatchingImageId":"f_ghost"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "cfc23c7c-3887-490e-af30-0ed576703c82")
 }
 
@@ -238,7 +238,7 @@ func TestShow_ByUsername_UserNotFound(t *testing.T) {
 	})
 	c, rec := newReq(t, `{"username":"ghost","name":"alpha"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_ByUsername_NoLookupConfigured(t *testing.T) {
@@ -268,7 +268,7 @@ func TestShow_NotFound(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{"pageId":"missing"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 非 public page を非所有者が show すると、存在ごと隠して 404 NO_SUCH_PAGE を
@@ -280,7 +280,7 @@ func TestShow_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
@@ -295,7 +295,7 @@ func TestShow_AccessDenied_ByName(t *testing.T) {
 	c, rec := newReq(t, `{"userId":"owner","name":"alpha"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
 }
 
@@ -309,7 +309,7 @@ func TestShow_AccessDenied_ByUsername(t *testing.T) {
 	c, rec := newReq(t, `{"username":"alice","name":"alpha"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
 }
 
@@ -324,7 +324,7 @@ func TestShow_AccessDenied_Guest(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	// setUser is intentionally NOT called — middleware.GetUser returns nil.
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_PAGE")
 }
 
@@ -352,7 +352,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_AccessDenied(t *testing.T) {
@@ -361,7 +361,7 @@ func TestUpdate_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_TitleEmpty(t *testing.T) {
@@ -430,7 +430,7 @@ func TestDelete_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_AccessDenied(t *testing.T) {
@@ -439,7 +439,7 @@ func TestDelete_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // failingDeleteRepo causes Delete to fail.
@@ -694,7 +694,7 @@ func TestLike_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"missing"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Like(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 非 public page を非所有者が like しようとすると、存在ごと隠して 404
@@ -707,7 +707,7 @@ func TestLike_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"p1"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Like(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
@@ -793,7 +793,7 @@ func TestUnlike_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"missing"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Unlike(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUnlike_NotLiked(t *testing.T) {
@@ -907,7 +907,7 @@ func TestPagePush_PageNotFound(t *testing.T) {
 	c, rec := newReq(t, `{"pageId":"ghost","event":"x"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.PagePush(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, pub.calls)
 }
 

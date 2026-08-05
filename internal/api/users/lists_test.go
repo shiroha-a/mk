@@ -55,7 +55,7 @@ func TestListsGetMemberships_NonOwnerDeniedWithoutForPublic(t *testing.T) {
 	seedListWithMember(repo, "l1", "owner", "u2", true) // public でも forPublic=false なら own-only
 	h.SetUserListRepo(repo)
 	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, &model.User{ID: "intruder"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // forPublic=true なら public list の membership を非 owner / 未認証でも取得できる。
@@ -86,14 +86,14 @@ func TestListsGetMemberships_PrivateUnauthenticatedDenied(t *testing.T) {
 	seedListWithMember(repo, "l1", "owner", "u2", false)
 	h.SetUserListRepo(repo)
 	rec := postStub(h.ListsGetMemberships, `{"listId":"l1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsGetMemberships_NoSuchList(t *testing.T) {
 	h, _ := newTestHandler(t)
 	h.SetUserListRepo(testutil.NewMockUserListRepository())
 	rec := postStub(h.ListsGetMemberships, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- ListsCreateFromPublic ---
@@ -160,7 +160,7 @@ func TestListsFavorite_PrivateNonOwner(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsFavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 	// Misskey TS `users/lists/favorite` 固有の UUID (show の NO_SUCH_LIST とは別)。
 	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
@@ -180,7 +180,7 @@ func TestListsFavorite_PrivateOwner(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsFavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
 	exists, _ := favRepo.Exists("u1", "l1")
@@ -214,7 +214,7 @@ func TestListsFavorite_NoSuchList(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsFavorite, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 	assert.Contains(t, rec.Body.String(), "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe")
 	exists, _ := favRepo.Exists("u1", "ghost")
@@ -269,7 +269,7 @@ func TestListsUnfavorite_PrivateNoSuchList(t *testing.T) {
 	h.SetUserListFavoriteRepo(favRepo)
 	h.SetUserListRepo(listRepo)
 	rec := postStub(h.ListsUnfavorite, `{"listId":"l1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 	assert.Contains(t, rec.Body.String(), "baedb33e-76b8-4b0c-86a8-9375c0a7b94b")
 	// list gate で弾かれるので fav row は残ったまま。
@@ -286,7 +286,7 @@ func TestListsUnfavorite_NoSuchList(t *testing.T) {
 	h.SetUserListFavoriteRepo(favRepo)
 	h.SetUserListRepo(listRepo)
 	rec := postStub(h.ListsUnfavorite, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER_LIST")
 	assert.Contains(t, rec.Body.String(), "baedb33e-76b8-4b0c-86a8-9375c0a7b94b")
 }
@@ -421,7 +421,7 @@ func TestListsCreateFromPublic_BlockedMember(t *testing.T) {
 	seedPublicSrc(t, listRepo, userRepo, "src", "blocker")
 	require.NoError(t, blockRepo.Create(&model.Blocking{ID: "b1", BlockerID: "blocker", BlockeeID: "me"}))
 	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "a2497f2a-2389-439c-8626-5298540530f4")
 }
 
@@ -501,7 +501,7 @@ func TestListsUpdate_NotFound(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsUpdate, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsUpdate_IsPublic(t *testing.T) {
@@ -523,7 +523,7 @@ func TestListsUpdate_NotOwner(t *testing.T) {
 
 	// u1は所有者ではないので404
 	rec := postStub(h.ListsUpdate, `{"listId":"l1","name":"hacked"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsUpdate_NilRepo(t *testing.T) {
@@ -579,7 +579,7 @@ func TestListsUpdateMembership_NotFound(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsUpdateMembership, `{"listId":"ghost","userId":"u2","withReplies":false}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsUpdateMembership_NotOwner(t *testing.T) {
@@ -589,7 +589,7 @@ func TestListsUpdateMembership_NotOwner(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"u2","withReplies":true}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsUpdateMembership_NilRepo(t *testing.T) {

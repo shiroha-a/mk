@@ -677,7 +677,7 @@ func TestAdminUpdate_Error(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	h := announcements.NewHandler(&failingUpdateAnnouncementRepo{testutil.NewMockAnnouncementRepository()}, idGen)
 	rec := doPost(h.AdminUpdate, `{"id":"x","title":"y"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 type failingDeleteAnnouncementRepo struct {
@@ -690,7 +690,7 @@ func TestAdminDelete_Error(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	h := announcements.NewHandler(&failingDeleteAnnouncementRepo{testutil.NewMockAnnouncementRepository()}, idGen)
 	rec := doPost(h.AdminDelete, `{"id":"x"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestReadAnnouncement_MarkReadError(t *testing.T) {

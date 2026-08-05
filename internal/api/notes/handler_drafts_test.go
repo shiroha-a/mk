@@ -1139,7 +1139,7 @@ func TestThreadMutingCreate_UsesThreadID(t *testing.T) {
 func TestThreadMutingCreate_NoSuchNote(t *testing.T) {
 	h, _, _ := newThreadMuteHandler()
 	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"missing"}`, &model.User{ID: "viewer"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 }
 
@@ -1167,7 +1167,7 @@ func TestThreadMutingDelete_RemovesRowIdempotently(t *testing.T) {
 func TestThreadMutingDelete_NoSuchNote(t *testing.T) {
 	h, _, _ := newThreadMuteHandler()
 	rec := postDraft(h.ThreadMutingDelete, `{"noteId":"missing"}`, &model.User{ID: "viewer"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestThreadMuting_NilRepoFailsClosed(t *testing.T) {

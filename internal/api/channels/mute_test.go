@@ -84,7 +84,7 @@ func TestMuteCreate_MissingChannelID(t *testing.T) {
 func TestMuteCreate_ChannelNotFound(t *testing.T) {
 	h, _, _, _ := newStubHandler(t)
 	rec := postStubWithBody(t, h.MuteCreate, `{"channelId":"nonexist"}`, "u1")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMuteCreate_AlreadyMuted(t *testing.T) {
@@ -123,7 +123,7 @@ func TestMuteDelete_ChannelNotFound(t *testing.T) {
 	h, _, _, mutRepo := newStubHandler(t)
 	mutRepo.Mutings["u1:ch1"] = &model.ChannelMuting{ID: "m1", UserID: "u1", ChannelID: "ch1"}
 	rec := postStubWithBody(t, h.MuteDelete, `{"channelId":"ch1"}`, "u1")
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)

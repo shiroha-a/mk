@@ -571,10 +571,10 @@ func (h *Handler) Show(c echo.Context) error {
 	// ログイン済み viewer には一切適用しない。
 	if viewer == nil {
 		if n.User != nil && n.User.RequireSigninToViewContents {
-			return c.JSON(http.StatusForbidden, apierr.Error("CONTENT_RESTRICTED_BY_USER", "This content is not available because the author requires sign-in to view it.", "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("CONTENT_RESTRICTED_BY_USER", "This content is not available because the author requires sign-in to view it.", "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab"))
 		}
 		if h.ugcVisibility == "none" || (h.ugcVisibility == "local" && n.UserHost != nil) {
-			return c.JSON(http.StatusForbidden, apierr.Error("CONTENT_RESTRICTED_BY_SERVER", "This content is not available for visitors on this server.", "145f88d2-b03d-4087-8143-a78928883c4b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("CONTENT_RESTRICTED_BY_SERVER", "This content is not available for visitors on this server.", "145f88d2-b03d-4087-8143-a78928883c4b"))
 		}
 	}
 
@@ -632,9 +632,9 @@ func (h *Handler) Delete(c echo.Context) error {
 		switch {
 		case errors.Is(err, note.ErrNoteNotFound):
 			// notes/delete は汎用 UUIDNoSuchNote ではなく endpoint 固有 id を使う
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "490be23f-8c1f-4796-819f-94cb4f9d1630"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "490be23f-8c1f-4796-819f-94cb4f9d1630"))
 		case errors.Is(err, note.ErrNoteAccessDenied):
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You are not the author of this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "You are not the author of this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		default:
 			return apierr.JSONInternalError(c)
 		}
@@ -701,7 +701,7 @@ func (h *Handler) serveList(c echo.Context, noSuchNoteID string, fn func(*model.
 	if err != nil {
 		if errors.Is(err, note.ErrNoteNotFound) {
 			// upstream は notes/renotes 等で NO_SUCH_NOTE に endpoint 固有 id を割り当てる
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", noSuchNoteID))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", noSuchNoteID))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -915,7 +915,7 @@ func (h *Handler) Conversation(c echo.Context) error {
 	notes, err := h.queryService.Conversation(viewer, req.NoteID, req.Limit, req.Offset)
 	if err != nil {
 		// 現状QueryService.ConversationはErrNoteNotFound以外を返さない
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))
 	}
 	// Conversation は非可視な祖先も raw に返すので、ここで CanSee 判定して
 	// 非可視 note を hideNote stub する (upstream packMany(_, me) の hideNote 挙動、

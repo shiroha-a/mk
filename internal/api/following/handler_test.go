@@ -435,7 +435,7 @@ func TestAcceptRequest_NoFollowRequest(t *testing.T) {
 	bob := addUser(repo, "bob", false)
 
 	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_FOLLOW_REQUEST")
 	assert.Contains(t, rec.Body.String(), "bcde4f8b-0913-4614-8881-614e522fb041")
 }
@@ -510,7 +510,7 @@ func TestCancelRequest_NotFound(t *testing.T) {
 	// request を送っていない → upstream の公開エラー FOLLOW_REQUEST_NOT_FOUND
 	// (service 内部 id 流用の旧 NO_FOLLOW_REQUEST から変更、#1562)
 	rec := postJSON(h.CancelRequest, `{"userId": "bob"}`, alice)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "FOLLOW_REQUEST_NOT_FOUND")
 	assert.Contains(t, rec.Body.String(), "089b125b-d338-482a-9a09-e2622ac9f8d4")
 }

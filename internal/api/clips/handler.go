@@ -229,7 +229,7 @@ func (h *Handler) Show(c echo.Context) error {
 	// upstream show.ts と同じ enumeration oracle 封じ)。
 	cl, err := h.svc.Show(requesterID, req.ClipID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "c3c5fe33-d62c-44d2-9ea5-d997703f5c20"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "c3c5fe33-d62c-44d2-9ea5-d997703f5c20"))
 	}
 	return c.JSON(http.StatusOK, h.clipToMap(cl, user))
 }
@@ -266,7 +266,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b4d92d70-b216-46fa-9a3f-a8c811699257"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b4d92d70-b216-46fa-9a3f-a8c811699257"))
 		case errors.Is(err, coreclip.ErrClipNameRequired):
 			return apierr.JSONInvalidParam(c)
 		}
@@ -290,7 +290,7 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Delete(user.ID, req.ClipID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "70ca08ba-6865-4630-b6fb-8494759aa754"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "70ca08ba-6865-4630-b6fb-8494759aa754"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -350,21 +350,21 @@ func (h *Handler) AddNote(c echo.Context) error {
 	// 同じ NO_SUCH_NOTE 404 に集約して oracle を塞ぐ。queryService 未配線時は
 	// fail-closed で同じ 404 を返し、unchecked note を絶対に永続化しない。
 	if h.queryService == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 	}
 	_, verr := h.queryService.RequireVisible(user, req.NoteID)
 	if h.materializeIfMissing(req.NoteID, verr) {
 		_, verr = h.queryService.RequireVisible(user, req.NoteID)
 	}
 	if err := verr; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 	}
 	if err := h.svc.AddNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "d6e76cc0-a1b5-4c7c-a287-73fa9c716dcf"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "d6e76cc0-a1b5-4c7c-a287-73fa9c716dcf"))
 		case errors.Is(err, coreclip.ErrNoteNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
 		case errors.Is(err, coreclip.ErrAlreadyClipped):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_CLIPPED", "The note has already been clipped.", "734806c4-542c-463a-9311-15c512803965"))
 		case errors.Is(err, coreclip.ErrTooManyClipNotes):
@@ -391,11 +391,11 @@ func (h *Handler) RemoveNote(c echo.Context) error {
 	if err := h.svc.RemoveNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, coreclip.ErrClipNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b80525c6-97f7-49d7-a42d-ebccd49cfd52"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "b80525c6-97f7-49d7-a42d-ebccd49cfd52"))
 		case errors.Is(err, coreclip.ErrNoteNotFound):
 			// upstream remove-note.ts は note 不在のみ NO_SUCH_NOTE を返す (#1768)。
 			// clip に含まれない note の削除は service 側で silent success になる。
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "aff017de-190e-434b-893e-33a9ff5049d8"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "aff017de-190e-434b-893e-33a9ff5049d8"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -445,7 +445,7 @@ func (h *Handler) Notes(c echo.Context) error {
 		// 非公開 clip の他人/匿名閲覧は missing と同じ ErrClipNotFound →
 		// NO_SUCH_CLIP 404 (存在秘匿、#1562)。
 		if errors.Is(err, coreclip.ErrClipNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CLIP", "No such clip.", "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CLIP", "No such clip.", "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00"))
 		}
 		return apierr.JSONInternalError(c)
 	}

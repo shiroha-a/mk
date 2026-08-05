@@ -202,7 +202,7 @@ func TestFilesCreateChunkedStart_NoSuchFolder(t *testing.T) {
 	c, rec := newJSONReq(t, `{"name":"a.bin","size":100,"folderId":"nope"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreateChunkedStart(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "NO_SUCH_FOLDER", errorCode(t, rec))
 }
 
@@ -215,7 +215,7 @@ func TestFilesCreateChunkedStart_OthersFolderIsIndistinguishable(t *testing.T) {
 	c, rec := newJSONReq(t, `{"name":"a.bin","size":100,"folderId":"fo1"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreateChunkedStart(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "NO_SUCH_FOLDER", errorCode(t, rec))
 }
 
@@ -502,11 +502,11 @@ func TestChunkedError_Mapping(t *testing.T) {
 		{coredrive.ErrChunkContentMismatch, http.StatusConflict, "CHUNK_CONTENT_MISMATCH"},
 		{coredrive.ErrIncompleteUpload, http.StatusBadRequest, "INCOMPLETE_UPLOAD"},
 		{coredrive.ErrInvalidUploadSize, http.StatusBadRequest, "INVALID_UPLOAD_SIZE"},
-		{coredrive.ErrFolderNotFound, http.StatusNotFound, "NO_SUCH_FOLDER"},
+		{coredrive.ErrFolderNotFound, http.StatusBadRequest, "NO_SUCH_FOLDER"},
 		{coredrive.ErrUnallowedFileType, http.StatusBadRequest, "UNALLOWED_FILE_TYPE"},
 		{coredrive.ErrMaxFileSizeExceeded, http.StatusRequestEntityTooLarge, "MAX_FILE_SIZE_EXCEEDED"},
 		{coredrive.ErrNoFreeSpace, http.StatusBadRequest, "NO_FREE_SPACE"},
-		{coredrive.ErrAccessDenied, http.StatusForbidden, "ACCESS_DENIED"},
+		{coredrive.ErrAccessDenied, http.StatusBadRequest, "ACCESS_DENIED"},
 		{stubError, http.StatusInternalServerError, "INTERNAL_ERROR"},
 	}
 	for _, tc := range cases {

@@ -114,7 +114,7 @@ func (h *Handler) Show(c echo.Context) error {
 
 	a, err := h.repo.FindAppByID(req.AppID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_APP", "No such app.", "dce83913-2dc6-4093-8a7b-71dbb11718a3"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_APP", "No such app.", "dce83913-2dc6-4093-8a7b-71dbb11718a3"))
 	}
 
 	// upstream app/show は isSecure = (user != null && token == null) を計算し、

@@ -228,7 +228,7 @@ func (h *Handler) chunkedError(c echo.Context, err error) error {
 	// 以降は drive/files/create と同じ code / UUID を返す。同じ制約に当たった
 	// ときに経路で error が変わるとフロントエンドが分岐を二重に持つことになる。
 	case errors.Is(err, coredrive.ErrFolderNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 	case errors.Is(err, coredrive.ErrUnallowedFileType):
 		return c.JSON(http.StatusBadRequest, apierr.Error("UNALLOWED_FILE_TYPE",
 			"Cannot upload the file because it is an unallowed file type.",
@@ -238,7 +238,7 @@ func (h *Handler) chunkedError(c echo.Context, err error) error {
 	case errors.Is(err, coredrive.ErrNoFreeSpace):
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_FREE_SPACE", "No free space.", "d08dbc37-a6a9-463a-8c47-96c32ab5f064"))
 	case errors.Is(err, coredrive.ErrAccessDenied):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 	}
 	return apierr.JSONInternalError(c)
 }

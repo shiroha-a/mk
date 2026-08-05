@@ -59,7 +59,7 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 	}
 	src, err := h.userListRepo.FindByID(req.ListID)
 	if err != nil || !src.IsPublic {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "9292f798-6175-4f7d-93f4-b6742279667d"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "9292f798-6175-4f7d-93f4-b6742279667d"))
 	}
 	// userListLimit gate (TOO_MANY_USERLISTS)。
 	if h.rolePolicyProvider != nil {
@@ -111,7 +111,7 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		if h.blockingRepo != nil && m.UserID != viewer.ID {
 			blocked, berr := h.blockingRepo.Exists(m.UserID, viewer.ID)
 			if berr != nil || blocked {
-				return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "a2497f2a-2389-439c-8626-5298540530f4"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "a2497f2a-2389-439c-8626-5298540530f4"))
 			}
 		}
 		// TOO_MANY_USERS: member 上限に達したら中断 (upstream addMember の TooManyUsersError)。
@@ -170,7 +170,7 @@ func (h *Handler) ListsFavorite(c echo.Context) error {
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
 		if err != nil || !list.IsPublic {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"))
 		}
 	}
 	// Misskey TS `users/lists/favorite` は既 fav を ALREADY_FAVORITED
@@ -210,7 +210,7 @@ func (h *Handler) ListsUnfavorite(c echo.Context) error {
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
 		if err != nil || !list.IsPublic {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "baedb33e-76b8-4b0c-86a8-9375c0a7b94b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "baedb33e-76b8-4b0c-86a8-9375c0a7b94b"))
 		}
 	}
 	// fav row が無い場合は upstream の notFavorited (code は ALREADY_FAVORITED
@@ -249,11 +249,11 @@ func (h *Handler) ListsUpdate(c echo.Context) error {
 	}
 	list, err := h.userListRepo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
 	}
 	// 所有権チェック
 	if list.UserID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
@@ -309,11 +309,11 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 	}
 	list, err := h.userListRepo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
 	// 所有権チェック
 	if list.UserID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
 	if err := h.userListRepo.UpdateMembership(req.ListID, req.UserID, req.WithReplies); err != nil {
 		// membership 行が無い (= 対象 user が list member でない) ときは NO_SUCH_USER
@@ -371,15 +371,15 @@ func (h *Handler) ListsGetMemberships(c echo.Context) error {
 	const noSuchList = "7bc05c21-1d7a-41ae-88f1-66820f4dc686"
 	list, err := h.userListRepo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
 	}
 	// upstream: !forPublic && me!=null → own list (任意 visibility)、それ以外は public list。
 	if !req.ForPublic && viewer != nil {
 		if list.UserID != viewer.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
 		}
 	} else if !list.IsPublic {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
 	}
 
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)

@@ -133,7 +133,7 @@ func (h *Handler) UpdateRegistration(c echo.Context) error {
 		// それ以外 (DB connection error 等) は 500 + slog で観測性確保
 		// (#917 / #918 と同 pattern)。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_REGISTRATION", "No such registration.", "b09d8066-8064-5613-efb6-0e963b21d012"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_REGISTRATION", "No such registration.", "b09d8066-8064-5613-efb6-0e963b21d012"))
 		}
 		slog.Error("sw/update-registration: FindByUserAndEndpoint failed",
 			"userId", user.ID, "endpoint", req.Endpoint, "err", err)

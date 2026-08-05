@@ -78,7 +78,7 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
 	}
 	return c.JSON(http.StatusOK, map[string]any{
 		// upstream i/registry/get-detail.ts:62 は updatedAt.toISOString()。

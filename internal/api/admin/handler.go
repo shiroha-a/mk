@@ -696,21 +696,21 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 		// (初期設定で作った root 以外の admin がこの API を使えなかった修正)。
 		// roleService 未配線時は旧仕様の root 本人比較に fallback (fail-closed)。
 		if user == nil {
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 		if h.roleService != nil {
 			if !h.roleService.IsAdministrator(user.ID) {
-				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 			}
 		} else if meta.RootUserID == nil || *meta.RootUserID != user.ID {
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 		// #2106 S2: upstream create.ts の inline `token !== null` gate を再現する。
 		// この endpoint は route middleware を持たず paramDef に kind も無いため、
 		// app/OAuth access token (read:account 等の狭い scope) でも root に到達して
 		// アカウント作成できる scope 越境になる。native login token のみ許可する。
 		if sc := middleware.GetAuthScope(c); sc != nil && sc.IsApp {
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 	}
 
@@ -857,7 +857,7 @@ func (h *Handler) ShowUser(c echo.Context) error {
 	if h.roleService != nil {
 		me := middleware.GetUser(c)
 		if me != nil && !h.roleService.IsAdministrator(me.ID) && h.roleService.IsAdministrator(user.ID) {
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
 		}
 	}
 
@@ -1091,7 +1091,7 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	// upstream suspend-user.ts: モデレーター/管理者 (root を含む) アカウントは
 	// 凍結できない。moderator が他の moderator/admin を凍結する権限昇格を防ぐ。
 	if user.IsRoot || (h.roleService != nil && h.roleService.IsModerator(user.ID)) {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {
@@ -2040,7 +2040,7 @@ func (h *Handler) RolesShow(c echo.Context) error {
 	}
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
 	}
 	return c.JSON(http.StatusOK, h.packRole(r))
 }
@@ -2093,7 +2093,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	}
 	before, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
@@ -2185,7 +2185,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	after, err := h.roleService.UpdateFields(req.RoleID, fields)
 	if err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -2208,7 +2208,7 @@ func (h *Handler) RolesDelete(c echo.Context) error {
 	// 削除直後だと role 情報を取れないので事前に snapshot を取って log info に含める
 	snapshot, _ := h.roleService.Show(req.RoleID)
 	if err := h.roleService.Delete(req.RoleID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"))
 	}
 	h.logModeration(c, moderationlog.LogDeleteRole, map[string]any{
 		"roleId": req.RoleID,
@@ -2257,7 +2257,7 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	}
 	if err := h.roleService.Assign(req.UserID, req.RoleID, expiresAt); err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "6503c040-6af4-4ed9-bf07-f2dd16678eab"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "6503c040-6af4-4ed9-bf07-f2dd16678eab"))
 		}
 		if err == role.ErrAlreadyAssigned {
 			return c.JSON(http.StatusConflict, apierr.Error("ALREADY_ASSIGNED", "Role already assigned.", "67d8689c-25c6-435f-8eed-6ea68e5e53e9"))
@@ -2286,7 +2286,7 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID, accessDeniedID string) (handled bool, err error) {
 	r, err := h.roleService.Show(roleID)
 	if err != nil {
-		return true, c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
+		return true, c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
 	}
 	if r.CanEditMembersByModerator {
 		return false, nil
@@ -2294,7 +2294,7 @@ func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID
 	if me := middleware.GetUser(c); me != nil && h.roleService.IsAdministrator(me.ID) {
 		return false, nil
 	}
-	return true, c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
+	return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
 }
 
 // RolesUnassign handles POST /api/admin/roles/unassign.
@@ -2320,7 +2320,7 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {
 		if err == role.ErrNotAssigned {
-			return c.JSON(http.StatusNotFound, apierr.Error("NOT_ASSIGNED", "Role not assigned.", "b9060ac7-5c94-4da4-9f55-2047c953df44"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_ASSIGNED", "Role not assigned.", "b9060ac7-5c94-4da4-9f55-2047c953df44"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -2354,7 +2354,7 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 	assignments, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
 		if err == role.ErrRoleNotFound {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROLE", "No such role.", "224eff5e-2488-4b18-b3e7-f50d94421648"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "224eff5e-2488-4b18-b3e7-f50d94421648"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -2545,7 +2545,7 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	if url == "" && req.FileID != "" && h.driveFileRepo != nil {
 		f, err := h.driveFileRepo.FindByID(req.FileID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
 		}
 		driveFile = f
 	}
@@ -2687,7 +2687,7 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		}
 		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
 		if ferr != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
 		}
 		emojiFile = f
 	}
@@ -2824,10 +2824,10 @@ func (h *Handler) EmojiDelete(c echo.Context) error {
 	// log info に snapshot を含めるため削除前に取得。取得失敗は NO_SUCH_EMOJI。
 	snapshot, err := h.emojiRepo.FindByID(req.ID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
 	}
 	if err := h.emojiRepo.Delete(req.ID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
 	}
 	h.logModeration(c, moderationlog.LogDeleteCustomEmoji, map[string]any{
 		"emojiId": req.ID,

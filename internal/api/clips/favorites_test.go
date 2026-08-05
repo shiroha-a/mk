@@ -92,7 +92,7 @@ func TestClipUnfavorite_Success(t *testing.T) {
 func TestClipUnfavorite_NoSuchClip(t *testing.T) {
 	h, _, _ := newStubHandler(t)
 	rec := postStubWithBody(t, h.Unfavorite, `{"clipId":"ghost"}`, "u1")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 	assert.Contains(t, rec.Body.String(), "2603966e-b865-426c-94a7-af4a01241dc1")
 }

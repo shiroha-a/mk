@@ -531,7 +531,7 @@ func TestDelete_NotOwner(t *testing.T) {
 
 	err := h.Delete(c)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// ノートは削除されていない
 	assert.Len(t, noteRepo.Notes, 1)
@@ -552,7 +552,7 @@ func TestDelete_NotFound(t *testing.T) {
 
 	err := h.Delete(c)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestCreate_InvalidJSON(t *testing.T) {

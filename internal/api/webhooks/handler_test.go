@@ -291,7 +291,7 @@ func TestShow_Success(t *testing.T) {
 func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Show, `{"webhookId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_InvalidParam(t *testing.T) {
@@ -353,7 +353,7 @@ func TestUpdate_SecretNullAbsentValue(t *testing.T) {
 func TestUpdate_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Update, `{"webhookId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_InvalidParam(t *testing.T) {
@@ -391,7 +391,7 @@ func TestDelete_Success(t *testing.T) {
 func TestDelete_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Delete, `{"webhookId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_InvalidParam(t *testing.T) {
@@ -492,7 +492,7 @@ func TestTest_NoDispatcherStillReturns204(t *testing.T) {
 func TestTest_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Test, `{"webhookId":"ghost","type":"note"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTest_InvalidParam(t *testing.T) {

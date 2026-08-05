@@ -180,7 +180,7 @@ func TestFilesCreate_FolderNotFound(t *testing.T) {
 	c, rec := newMultipartReq(t, "hello.txt", "hello", map[string]string{"folderId": "ghost"})
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 他人所有の宛先 folder は NO_SUCH_FOLDER(404) で返す (missing と同じ response、
@@ -192,7 +192,7 @@ func TestFilesCreate_OtherOwnerFolderNotFound(t *testing.T) {
 	c, rec := newMultipartReq(t, "hello.txt", "hello", map[string]string{"folderId": "fid"})
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
@@ -302,7 +302,7 @@ func TestFilesShow_NotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesShow(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFilesShow_AccessDenied(t *testing.T) {
@@ -312,7 +312,7 @@ func TestFilesShow_AccessDenied(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"f1"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesShow(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFilesShow_EmbedsFolderAndUser(t *testing.T) {
@@ -424,7 +424,7 @@ func TestFilesUpdate_FileNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFilesUpdate_FolderNotFound(t *testing.T) {
@@ -434,7 +434,7 @@ func TestFilesUpdate_FolderNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"f1","folderId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 他人所有の宛先 folder は missing と同じ NO_SUCH_FOLDER(404) を返す (upstream
@@ -448,7 +448,7 @@ func TestFilesUpdate_OtherOwnerFolderNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"f1","folderId":"fid"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 	assert.Contains(t, rec.Body.String(), "ea8fb7a5-af77-4a08-b608-c0218176cd73")
 }
@@ -502,7 +502,7 @@ func TestFilesDelete_NotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesDelete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- FilesFindByHash ---
@@ -622,7 +622,7 @@ func TestFoldersCreate_ParentNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"name":"x","parentId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersCreate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #977: folders/create の parent 不在 UUID は 53326628-...
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
@@ -641,7 +641,7 @@ func TestFoldersCreate_ParentOtherOwnerNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"name":"x","parentId":"p"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersCreate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
@@ -732,7 +732,7 @@ func TestFoldersShow_NotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"folderId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersShow(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #977: folders/show の target 不在 UUID は d74ab9eb-...
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
@@ -751,7 +751,7 @@ func TestFoldersShow_OtherOwnerNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"folderId":"p"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersShow(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FOLDER")
 }
 
@@ -802,7 +802,7 @@ func TestFoldersUpdate_NotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"folderId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersUpdate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #977: folders/update target not found UUID は f7974dac-...
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
@@ -821,7 +821,7 @@ func TestFoldersUpdate_ParentNotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"folderId":"c","parentId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersUpdate(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	errObj, ok := body["error"].(map[string]any)
@@ -855,7 +855,7 @@ func TestFoldersDelete_NotFound(t *testing.T) {
 	c, rec := newJSONReq(t, `{"folderId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersDelete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	// #977: folders/delete の UUID は 1069098f-...
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
@@ -1142,7 +1142,7 @@ func TestFilesMoveBulk_RejectsForeignFolder(t *testing.T) {
 	setUser(c, "u1")
 	require.NoError(t, h.FilesMoveBulk(c))
 	// 他人所有の宛先 folder は NO_SUCH_FOLDER で拒否し、移動は実行しない。
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, fileRepo.BulkFolderUserID, "must not move files into a foreign folder")
 }
 
@@ -1162,7 +1162,7 @@ func TestFilesMoveBulk_NonexistentFolder(t *testing.T) {
 	c, rec := newJSONReq(t, `{"fileIds":["f1"],"folderId":"ghost"}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesMoveBulk(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, fileRepo.BulkFolderUserID, "must not move into a nonexistent folder")
 }
 

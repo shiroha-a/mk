@@ -82,7 +82,7 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	}
 	src, err := h.emojiRepo.FindByID(req.EmojiID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "e2785b66-dca3-4087-9cac-b93c541cc425"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "e2785b66-dca3-4087-9cac-b93c541cc425"))
 	}
 	if existing, err := h.emojiRepo.FindByNameAndHost(src.Name, nil); err == nil && existing != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))

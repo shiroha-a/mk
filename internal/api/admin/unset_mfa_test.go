@@ -123,7 +123,7 @@ func TestUnsetMfa_AdministratorTargetRejected(t *testing.T) {
 	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
 
 	rec := doPost(h.UnsetMfa, `{"userId":"adm1"}`, adminUser)
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "cda8f8ce-89a6-4f92-8055-33bbe0c1464d")
 }
 

@@ -67,7 +67,7 @@ func TestFavorite_MissingChannelID(t *testing.T) {
 func TestFavorite_ChannelNotFound(t *testing.T) {
 	h, _, _, _ := newStubHandler(t)
 	rec := postStubWithBody(t, h.Favorite, `{"channelId":"nonexist"}`, "u1")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFavorite_Success(t *testing.T) {
@@ -115,7 +115,7 @@ func TestUnfavorite_Success(t *testing.T) {
 func TestUnfavorite_NoSuchChannel(t *testing.T) {
 	h, _, _, _ := newStubHandler(t)
 	rec := postStubWithBody(t, h.Unfavorite, `{"channelId":"ghost"}`, "u1")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CHANNEL")
 	assert.Contains(t, rec.Body.String(), "353c68dd-131a-476c-aa99-88a345e83668")
 }

@@ -187,14 +187,14 @@ func TestTwoFARegisterKey_WrongPassword(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
 	rec := postExtra(h.TwoFARegisterKey, `{"password":"wrong"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFARegisterKey_NoProfile(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	repo.Users["u1"] = &model.User{ID: "u1", Username: "u1"}
 	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFARegisterKey_TwoFactorNotEnabled(t *testing.T) {
@@ -202,7 +202,7 @@ func TestTwoFARegisterKey_TwoFactorNotEnabled(t *testing.T) {
 	user := setupUserWithPassword(repo, "u1", "pass")
 	// 2FA 未有効化なら upstream と同じく TWO_FACTOR_NOT_ENABLED で 403
 	rec := postExtra(h.TwoFARegisterKey, `{"password":"pass"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "TWO_FACTOR_NOT_ENABLED")
 }
 
@@ -289,14 +289,14 @@ func TestTwoFAKeyDone_WrongPassword(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
 	rec := postExtra(h.TwoFAKeyDone, `{"password":"wrong","credential":{}}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFAKeyDone_TwoFactorNotEnabled(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	rec := postExtra(h.TwoFAKeyDone, `{"password":"pass","credential":{"id":"x"}}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "TWO_FACTOR_NOT_ENABLED")
 }
 
@@ -473,7 +473,7 @@ func TestTwoFAUpdateKey_NotConfigured(t *testing.T) {
 func TestTwoFAUpdateKey_NoUser(t *testing.T) {
 	h, _, _ := newWebAuthnHandler(t)
 	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"k","name":"x"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 }
 

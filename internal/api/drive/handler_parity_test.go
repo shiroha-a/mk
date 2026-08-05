@@ -222,7 +222,7 @@ func TestFilesShow_EmptyURLIs404(t *testing.T) {
 	c, rec := newJSONReq(t, `{"url":""}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesShow(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
 
 	// fileId は format misskey:id なので空文字は INVALID_PARAM。

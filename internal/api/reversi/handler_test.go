@@ -296,7 +296,7 @@ func TestShowGame_Success(t *testing.T) {
 func TestShowGame_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.ShowGame, `{"gameId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShowGame_InvalidParam(t *testing.T) {
@@ -504,14 +504,14 @@ func TestSurrender_Success(t *testing.T) {
 func TestSurrender_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Surrender, `{"gameId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSurrender_NotPlayer(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.games["g1"] = sampleGame()
 	rec := post(h.Surrender, `{"gameId":"g1"}`, &model.User{ID: "u3"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSurrender_InvalidParam(t *testing.T) {
@@ -525,7 +525,7 @@ func TestSurrender_InvalidParam(t *testing.T) {
 func TestVerify_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Verify, `{"gameId":"ghost","crc32":"1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestVerify_InvalidParam(t *testing.T) {
@@ -1021,21 +1021,21 @@ func TestReversiErrorIDsMatchUpstream(t *testing.T) {
 	t.Run("show-game NO_SUCH_GAME", func(t *testing.T) {
 		h, _ := newTestHandler()
 		rec := post(h.ShowGame, `{"gameId":"ghost"}`, nil)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "f13a03db-fae1-46c9-87f3-43c8165419e1", errorID(t, rec))
 	})
 
 	t.Run("verify NO_SUCH_GAME", func(t *testing.T) {
 		h, _ := newTestHandler()
 		rec := post(h.Verify, `{"gameId":"ghost","crc32":"1"}`, nil)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "8fb05624-b525-43dd-90f7-511852bdfeee", errorID(t, rec))
 	})
 
 	t.Run("surrender NO_SUCH_GAME (inline)", func(t *testing.T) {
 		h, _ := newTestHandler()
 		rec := post(h.Surrender, `{"gameId":"ghost"}`, u1)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "ace0b11f-e0a6-4076-a30d-e8284c81b2df", errorID(t, rec))
 	})
 
@@ -1043,19 +1043,19 @@ func TestReversiErrorIDsMatchUpstream(t *testing.T) {
 		h, repo := newTestHandler()
 		repo.games["g1"] = sampleGame()
 		rec := post(h.Surrender, `{"gameId":"g1"}`, &model.User{ID: "u3"})
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "6e04164b-a992-4c93-8489-2123069973e1", errorID(t, rec))
 	})
 
 	t.Run("surrender NO_SUCH_GAME (service path)", func(t *testing.T) {
 		rec := surrenderErrorRec(t, corereversi.ErrGameNotFound)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "ace0b11f-e0a6-4076-a30d-e8284c81b2df", errorID(t, rec))
 	})
 
 	t.Run("surrender ACCESS_DENIED (service path)", func(t *testing.T) {
 		rec := surrenderErrorRec(t, corereversi.ErrNotPlayer)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "6e04164b-a992-4c93-8489-2123069973e1", errorID(t, rec))
 	})
 

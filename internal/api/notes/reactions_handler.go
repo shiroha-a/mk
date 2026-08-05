@@ -35,12 +35,12 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "033d0620-5bfe-4027-965d-980b0c85a3ea"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "033d0620-5bfe-4027-965d-980b0c85a3ea"))
 		case errors.Is(err, reaction.ErrNoteNotVisible):
 			// #2106 L38 (意図的 divergence): upstream は ReactionService の可視性 IdentifiableError を
 			// catch せず ApiCallService が generic INTERNAL_ERROR(500) に包む。mk-go は semantics 上
 			// 適切な 403 ACCESS_DENIED を維持する (worse な 500 拡散を避ける)。
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "You can not see this note.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, reaction.ErrAlreadyReacted):
 			return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_REACTED", "You are already reacting to that note.", "71efcf98-86d6-4e2b-b2ad-9d032369366b"))
 		case errors.Is(err, reaction.ErrCannotReactToPureRenote):
@@ -50,7 +50,7 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 			// (e70412a4…) を catch し、endpoint error youHaveBeenBlocked
 			// (code=YOU_HAVE_BEEN_BLOCKED, id=20ef5475…) に変換して返す。旧実装は
 			// 内部 id と独自 code=BLOCKED をそのまま leak していた (#1538)。
-			return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot react this note because you have been blocked by this user.", "20ef5475-9f38-4e4c-bd33-de6d979498ec"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot react this note because you have been blocked by this user.", "20ef5475-9f38-4e4c-bd33-de6d979498ec"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -74,9 +74,9 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 	if err := h.reactionService.Delete(user, req.NoteID); err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "764d9fce-f9f2-4a0e-92b1-6ceac9a7ad37"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "764d9fce-f9f2-4a0e-92b1-6ceac9a7ad37"))
 		case errors.Is(err, reaction.ErrReactionNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NOT_REACTED", "You are not reacting to that note.", "92f4426d-4196-4125-aa5b-02943e2ec8fc"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_REACTED", "You are not reacting to that note.", "92f4426d-4196-4125-aa5b-02943e2ec8fc"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -109,7 +109,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound), errors.Is(err, reaction.ErrNoteNotVisible):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_NOTE", "No such note.", "263fff3d-d0e1-4af4-bea7-8408059b451a"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "263fff3d-d0e1-4af4-bea7-8408059b451a"))
 		}
 		return apierr.JSONInternalError(c)
 	}

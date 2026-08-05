@@ -87,7 +87,7 @@ func TestChangePassword_WrongPassword(t *testing.T) {
 	rec := postExtra(h.ChangePassword, `{"currentPassword":"wrong","newPassword":"x"}`, user)
 	// upstream Misskey TS は raw `throw new Error` を framework が 401 へ
 	// 変換 (#885)。drop-in 互換のため 401 に揃える (旧 mk-go は 403)。
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestChangePassword_NoProfile(t *testing.T) {
@@ -95,7 +95,7 @@ func TestChangePassword_NoProfile(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	repo.Users["u1"] = user
 	rec := postExtra(h.ChangePassword, `{"currentPassword":"x","newPassword":"y"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestChangePassword_InvalidParam(t *testing.T) {
@@ -152,7 +152,7 @@ func TestDeleteAccount_WrongPassword(t *testing.T) {
 	_ = user
 	rec := postExtra(h.DeleteAccount, `{"password":"wrong"}`, repo.Users["u1"])
 	// upstream Misskey TS と drop-in 互換: 401 (#885)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDeleteAccount_NoProfile(t *testing.T) {
@@ -160,7 +160,7 @@ func TestDeleteAccount_NoProfile(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	repo.Users["u1"] = user
 	rec := postExtra(h.DeleteAccount, `{"password":"x"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDeleteAccount_InvalidParam(t *testing.T) {
@@ -316,7 +316,7 @@ func TestRegenerateToken_WrongPassword(t *testing.T) {
 	rec := postExtra(h.RegenerateToken, `{"password":"wrong"}`, repo.Users["u1"])
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` →
 	// framework が 401 (#885)。
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRegenerateToken_NoProfile(t *testing.T) {
@@ -324,7 +324,7 @@ func TestRegenerateToken_NoProfile(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	repo.Users["u1"] = user
 	rec := postExtra(h.RegenerateToken, `{"password":"x"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // stubIMainStreamPublisher captures PublishMainEvent calls for assertion.
@@ -661,7 +661,7 @@ func TestDeleteAccount_ProtectedRootRejected(t *testing.T) {
 	h.SetDeleteAccountEnqueuer(enq)
 
 	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 	assert.False(t, repo.Users["u1"].IsDeleted, "protected account must not be marked deleted")
 	assert.Empty(t, enq.called, "protected account must not enqueue cascade")
@@ -675,6 +675,6 @@ func TestDeleteAccount_ProtectedSystemRejected(t *testing.T) {
 	user.Host = nil
 
 	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, repo.Users["u1"].IsDeleted)
 }

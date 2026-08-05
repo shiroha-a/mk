@@ -114,7 +114,7 @@ func (h *Handler) Create(c echo.Context) error {
 	// upstream create.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
 	// 不在なら NO_SUCH_FILE (#1548)。
 	if !h.eyeCatchingImageOK(req.EyeCatchingImageID, user.ID) {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c"))
 	}
 	p, err := h.svc.Create(corepage.CreateInput{
 		OwnerID:             user.ID,
@@ -199,7 +199,7 @@ func (h *Handler) Show(c echo.Context) error {
 		}
 		bundle, ulerr := h.userSource.ShowByUsername(req.Username, nil)
 		if ulerr != nil || bundle == nil || bundle.User == nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "222120c0-3ead-4528-811b-b96f233388d7"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "222120c0-3ead-4528-811b-b96f233388d7"))
 		}
 		p, err = h.svc.ShowByName(requesterID, bundle.User.ID, req.Name)
 	default:
@@ -210,7 +210,7 @@ func (h *Handler) Show(c echo.Context) error {
 		// 隠して NO_SUCH_PAGE (404) を返す。upstream TS pages/show は可視性ゲートを
 		// 持たず noSuchPage のみ返すため shape が一致し、private page の存在を 403 で
 		// 露呈しない (#1432)。update/delete は TS に accessDenied があるため 403 のまま。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "222120c0-3ead-4528-811b-b96f233388d7"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "222120c0-3ead-4528-811b-b96f233388d7"))
 	}
 	// owner / isLiked を attach (#1134)。owner lookup miss は frontend page.vue
 	// の `v-if="page.user"` で吸収されるため fail-soft で nil 維持。
@@ -256,7 +256,7 @@ func (h *Handler) Update(c echo.Context) error {
 	// upstream update.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
 	// 不在なら NO_SUCH_FILE (#1548)。
 	if !h.eyeCatchingImageOK(req.EyeCatchingImageID, user.ID) {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", "cfc23c7c-3887-490e-af30-0ed576703c82"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "cfc23c7c-3887-490e-af30-0ed576703c82"))
 	}
 	in := corepage.UpdateInput{
 		Title:               req.Title,
@@ -285,11 +285,11 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, corepage.ErrPageNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "21149b9e-3616-4778-9592-c4ce89f5a864"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "21149b9e-3616-4778-9592-c4ce89f5a864"))
 		// upstream TS pages/update は accessDenied (UUID 3c15cd52) を持つため、
 		// show (存在隠蔽 404) とは異なり 403 を維持する (#1432)。
 		case errors.Is(err, corepage.ErrAccessDenied):
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "3c15cd52-3b4b-4274-967d-6456fc4f792b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "3c15cd52-3b4b-4274-967d-6456fc4f792b"))
 		case errors.Is(err, corepage.ErrPageNameRequired),
 			errors.Is(err, corepage.ErrPageTitleRequired),
 			errors.Is(err, corepage.ErrPageNameInvalid):
@@ -317,11 +317,11 @@ func (h *Handler) Delete(c echo.Context) error {
 	if err := h.svc.Delete(user.ID, req.PageID); err != nil {
 		switch {
 		case errors.Is(err, corepage.ErrPageNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "eb0c6e1d-d519-4764-9486-52a7e1c6392a"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "eb0c6e1d-d519-4764-9486-52a7e1c6392a"))
 		// upstream TS pages/delete は accessDenied (UUID 8b741b3e) を持つため、
 		// show (存在隠蔽 404) とは異なり 403 を維持する (#1432)。
 		case errors.Is(err, corepage.ErrAccessDenied):
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "8b741b3e-2c22-44b3-a15f-29949aa1601e"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "8b741b3e-2c22-44b3-a15f-29949aa1601e"))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -435,7 +435,7 @@ func (h *Handler) Like(c echo.Context) error {
 		// private page の存在を 403 で露呈しないようにする (#1435)。
 		case errors.Is(err, corepage.ErrPageNotFound),
 			errors.Is(err, corepage.ErrAccessDenied):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "cc98a8a2-0dc3-4123-b198-62c71df18ed3"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "cc98a8a2-0dc3-4123-b198-62c71df18ed3"))
 		case errors.Is(err, corepage.ErrYourPage):
 			// 自分の page への like は upstream TS と同じく YOUR_PAGE で弾く (#1438)。
 			return c.JSON(http.StatusBadRequest, apierr.Error("YOUR_PAGE", "You cannot like your own page.", "28800466-e6db-40f2-8fae-bf9e82aa92b8"))
@@ -469,7 +469,7 @@ func (h *Handler) PagePush(c echo.Context) error {
 	// emitする。
 	p, err := h.svc.FindByID(req.PageID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "4a13ad31-6729-46b4-b9af-e86b265c2e74"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "4a13ad31-6729-46b4-b9af-e86b265c2e74"))
 	}
 	if h.mainStreamPublisher == nil || h.userSource == nil {
 		// 配線未完了ならemitせず204を返す(API互換のため)。
@@ -513,7 +513,7 @@ func (h *Handler) Unlike(c echo.Context) error {
 	if err := h.svc.Unlike(user.ID, req.PageID); err != nil {
 		switch {
 		case errors.Is(err, corepage.ErrPageNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PAGE", "No such page.", "a0d41e20-1993-40bd-890e-f6e560ae648e"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "a0d41e20-1993-40bd-890e-f6e560ae648e"))
 		case errors.Is(err, corepage.ErrNotLiked):
 			return c.JSON(http.StatusBadRequest, apierr.Error("NOT_LIKED", "You have not liked that page.", "f5e586b0-ce93-4050-b0e3-7f31af5259ee"))
 		}

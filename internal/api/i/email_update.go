@@ -138,7 +138,7 @@ func (h *Handler) VerifyEmail(c echo.Context) error {
 
 	profile, err := h.userService.FindProfileByVerifyCode(req.Code)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CODE", "No such code.", "97c1f576-e4b8-4b8a-a6dc-9cb65e7f6f85"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CODE", "No such code.", "97c1f576-e4b8-4b8a-a6dc-9cb65e7f6f85"))
 	}
 
 	if verr := h.userService.UpdateProfileFields(profile.UserID, map[string]any{

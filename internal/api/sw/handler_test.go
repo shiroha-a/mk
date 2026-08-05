@@ -278,7 +278,7 @@ func TestUpdateRegistration_NoSendReadMessage(t *testing.T) {
 func TestUpdateRegistration_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.UpdateRegistration, `{"endpoint":"https://ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // TestUpdateRegistration_DBError は #918 review fix の regression guard。

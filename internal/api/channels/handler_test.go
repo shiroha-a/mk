@@ -167,7 +167,7 @@ func TestShow_NotFound(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	c, rec := newReq(t, `{"channelId":"missing"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // #1540: show は detailed=true 相当で pinnedNotes (展開済 Note[]) を pinnedNoteIds 順で返す。
@@ -292,7 +292,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"channelId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_AccessDenied(t *testing.T) {
@@ -302,7 +302,7 @@ func TestUpdate_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"channelId":"c1","name":"x"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_NameEmpty(t *testing.T) {
@@ -409,7 +409,7 @@ func TestUpdate_NonModeratorNonOwnerForbidden(t *testing.T) {
 	c, rec := newReq(t, `{"channelId":"c1","name":"x"}`)
 	setUser(c, "intruder")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // failingUpdateRepo causes UpdateFields to fail to exercise the internalError
@@ -460,7 +460,7 @@ func TestFollow_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"channelId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Follow(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFollow_AlreadyFollowing(t *testing.T) {
@@ -894,7 +894,7 @@ func TestTimeline_NotFound(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	c, rec := newReq(t, `{"channelId":"missing"}`)
 	require.NoError(t, h.Timeline(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTimeline_LimitClamping(t *testing.T) {

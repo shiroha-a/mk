@@ -147,7 +147,7 @@ func TestAccountsCreate_NotInitialSetup_RequiresAdmin(t *testing.T) {
 
 	// 認証なし → ACCESS_DENIED
 	rec := doPost(h.AccountsCreate, `{"username":"user2","password":"pass"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAccountsCreate_AsRootUser(t *testing.T) {
@@ -181,7 +181,7 @@ func TestAccountsCreate_AsNonRoot_Denied(t *testing.T) {
 
 	otherUser := &model.User{ID: "other", Username: "other"}
 	rec := doPost(h.AccountsCreate, `{"username":"user2","password":"pass"}`, otherUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAccountsCreate_InvalidJSON(t *testing.T) {
@@ -496,7 +496,7 @@ func TestSuspendUser_RejectsModerator(t *testing.T) {
 	assignRepo.Assignments["mod1:modrole"] = &model.RoleAssignment{ID: "a1", UserID: "mod1", RoleID: "modrole"}
 
 	rec := doPost(h.SuspendUser, `{"userId":"mod1"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, userRepo.Users["mod1"].IsSuspended, "moderator must not be suspended")
 }
 
@@ -506,7 +506,7 @@ func TestSuspendUser_RejectsRoot(t *testing.T) {
 	userRepo.Users["root"] = &model.User{ID: "root", IsRoot: true}
 
 	rec := doPost(h.SuspendUser, `{"userId":"root"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, userRepo.Users["root"].IsSuspended)
 }
 
@@ -519,7 +519,7 @@ func TestSuspendUser_RejectsAdministrator(t *testing.T) {
 	assignRepo.Assignments["adm1:admrole"] = &model.RoleAssignment{ID: "a1", UserID: "adm1", RoleID: "admrole"}
 
 	rec := doPost(h.SuspendUser, `{"userId":"adm1"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, userRepo.Users["adm1"].IsSuspended, "administrator must not be suspended")
 }
 
@@ -1330,7 +1330,7 @@ func TestRolesShow_IncludesPackedFields(t *testing.T) {
 func TestRolesShow_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesShow, `{"roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRolesShow_InvalidParam(t *testing.T) {
@@ -1512,7 +1512,7 @@ func TestRolesCreate_PersistsPreserveAssignmentOnMoveAccount(t *testing.T) {
 func TestRolesUpdate_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUpdate, `{"roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRolesUpdate_InvalidParam(t *testing.T) {
@@ -1531,7 +1531,7 @@ func TestRolesDelete_Success(t *testing.T) {
 func TestRolesDelete_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesDelete, `{"roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRolesDelete_InvalidParam(t *testing.T) {
@@ -1580,7 +1580,7 @@ func TestRolesAssign_PastExpiry_NoOp(t *testing.T) {
 func TestRolesAssign_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRolesAssign_AlreadyAssigned(t *testing.T) {
@@ -1648,7 +1648,7 @@ func TestRolesUnassign_NotAssigned(t *testing.T) {
 func TestRolesUnassign_NoSuchRole(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, _ := resp["error"].(map[string]any)
@@ -1687,7 +1687,7 @@ func TestRolesAssign_ModeratorGate_Denied(t *testing.T) {
 	// (= nil viewer) → ACCESS_DENIED。
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, _ := resp["error"].(map[string]any)
@@ -1700,7 +1700,7 @@ func TestRolesUnassign_ModeratorGate_Denied(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: false}
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, _ := resp["error"].(map[string]any)
@@ -1889,7 +1889,7 @@ func TestRolesUsers_DanglingAssignmentSkipped(t *testing.T) {
 func TestRolesUsers_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUsers, `{"roleId":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRolesUsers_InvalidParam(t *testing.T) {
@@ -1995,7 +1995,7 @@ func TestRolesUnassign_InternalError(t *testing.T) {
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	// 存在しないassignmentのunassign → NOT_ASSIGNED
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 type failingListRoleRepo struct {
@@ -2932,7 +2932,7 @@ func TestEmojiDelete_Error(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetEmojiRepo(&failingDeleteEmojiRepo{testutil.NewMockEmojiRepository()})
 	rec := doPost(h.EmojiDelete, `{"id":"e1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 type failingUpdateEmojiRepo struct {
@@ -3471,7 +3471,7 @@ func TestShowUser_AdminGuardBlocksNonAdmin(t *testing.T) {
 	// 呼び出し元 (me) は非 admin。
 	me := &model.User{ID: "modviewer", Username: "modviewer"}
 	rec := doPost(h.ShowUser, `{"userId":"`+target+`"}`, me)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
 }
 
@@ -3523,7 +3523,7 @@ func TestShowUser_AdminGuardBlocksViewingRoot(t *testing.T) {
 	metaRepo.Meta.RootUserID = &root
 	me := &model.User{ID: "modviewer3", Username: "modviewer3"}
 	rec := doPost(h.ShowUser, `{"userId":"`+root+`"}`, me)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // notificationRecieveConfig は profile があっても jsonb が空/未設定なら {} に fallback。
@@ -3600,7 +3600,7 @@ func TestAccountsCreate_AppTokenDenied(t *testing.T) {
 	c.Set(string(middleware.AuthScopeContextKey), &middleware.AuthScope{IsApp: true})
 
 	_ = h.AccountsCreate(c)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "app/OAuth token must be denied even for root")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "app/OAuth token must be denied even for root")
 }
 
 // upstream admin/show-user (show-user.ts:233-261) が返す key 集合と完全に

@@ -127,7 +127,7 @@ func TestAccountsDelete_RejectsRoot(t *testing.T) {
 	stub := &stubDeleteAccountEnqueuer{}
 	h.SetDeleteAccountEnqueuer(stub)
 	rec := doPost(h.AccountsDelete, `{"userId":"root"}`, adminUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, 0, stub.called, "root deletion must not enqueue cascade")
 	assert.False(t, userRepo.Users["root"].IsDeleted)
 }
@@ -136,7 +136,7 @@ func TestDeleteAccount_RejectsRoot(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["root"] = &model.User{ID: "root", IsRoot: true}
 	rec := doPost(h.DeleteAccount, `{"userId":"root"}`, adminUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, userRepo.Users["root"].IsDeleted)
 }
 
@@ -148,7 +148,7 @@ func TestAccountsDelete_RejectsSystemAccount(t *testing.T) {
 	stub := &stubDeleteAccountEnqueuer{}
 	h.SetDeleteAccountEnqueuer(stub)
 	rec := doPost(h.AccountsDelete, `{"userId":"sys"}`, adminUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, 0, stub.called, "system account deletion must not enqueue cascade")
 	assert.False(t, userRepo.Users["sys"].IsDeleted)
 }
@@ -161,7 +161,7 @@ func TestDeleteAccount_RejectsMetaRootUser(t *testing.T) {
 	metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &rootID}
 	userRepo.Users["metaRoot"] = &model.User{ID: "metaRoot", Username: "alice", IsRoot: false}
 	rec := doPost(h.DeleteAccount, `{"userId":"metaRoot"}`, adminUser)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, userRepo.Users["metaRoot"].IsDeleted)
 }
 
@@ -226,7 +226,7 @@ func TestAccountsFindByEmail_Empty(t *testing.T) {
 
 func TestAccountsFindByEmail_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	assert.Equal(t, http.StatusNotFound, doPost(h.AccountsFindByEmail, `{"email":"ghost@example.com"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.AccountsFindByEmail, `{"email":"ghost@example.com"}`, adminUser).Code)
 }
 
 func TestAccountsFindByEmail_Found(t *testing.T) {

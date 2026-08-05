@@ -185,13 +185,13 @@ func TestShow_NotPublic(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Priv", IsPublic: false}
 	rec := doPost(h.Show, `{"roleId":"r1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Show, `{"roleId":"ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_InvalidParam(t *testing.T) {
@@ -333,20 +333,20 @@ func TestUsers_NotExplorableIsNotFound(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: true, IsExplorable: false}
 	rec := doPost(h.Users, `{"roleId":"r1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUsers_NotPublicIsNotFound(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", IsPublic: false, IsExplorable: true}
 	rec := doPost(h.Users, `{"roleId":"r1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUsers_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Users, `{"roleId":"ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUsers_InvalidParam(t *testing.T) {
@@ -387,14 +387,14 @@ func TestNotes_InvalidParam(t *testing.T) {
 func TestNotes_RoleNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Notes, `{"roleId":"ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestNotes_NotPublic(t *testing.T) {
 	h, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Private", IsPublic: false}
 	rec := doPost(h.Notes, `{"roleId":"r1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestNotes_NilQuery(t *testing.T) {

@@ -148,7 +148,7 @@ func TestShow_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 非公開 clip の他人閲覧は missing と同じ NO_SUCH_CLIP 404 (存在秘匿、#1562)
@@ -158,7 +158,7 @@ func TestShow_PrivateHiddenFromOthers(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 	assert.Contains(t, rec.Body.String(), "c3c5fe33-d62c-44d2-9ea5-d997703f5c20")
 }
@@ -180,7 +180,7 @@ func TestShow_AnonymousPrivateHidden(t *testing.T) {
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice", IsPublic: false}
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -208,7 +208,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 非 owner mutation は upstream と同じく missing と区別不能な 404 NO_SUCH_CLIP
@@ -219,7 +219,7 @@ func TestUpdate_NonOwnerHidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","name":"x"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -278,7 +278,7 @@ func TestDelete_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_NonOwnerHidden(t *testing.T) {
@@ -287,7 +287,7 @@ func TestDelete_NonOwnerHidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -437,7 +437,7 @@ func TestAddNote_ClipNotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -450,7 +450,7 @@ func TestAddNote_NonOwnerHidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -460,7 +460,7 @@ func TestAddNote_NoteNotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 }
 
@@ -516,7 +516,7 @@ func TestAddNote_FollowersNote_NonFollower_Hidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Empty(t, clipNoteRepo.Entries, "visibility 違反 note は永続化されない")
 }
@@ -561,7 +561,7 @@ func TestAddNote_SpecifiedNote_NotInList_Hidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Empty(t, clipNoteRepo.Entries)
 }
@@ -598,7 +598,7 @@ func TestAddNote_NoQueryServiceRejects(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Empty(t, clipNoteRepo.Entries,
 		"queryService 未配線時に visibility 未検証 note を永続化してはならない")
@@ -633,7 +633,7 @@ func TestRemoveNote_ClipNotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRemoveNote_NonOwnerHidden(t *testing.T) {
@@ -642,7 +642,7 @@ func TestRemoveNote_NonOwnerHidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 }
 
@@ -653,7 +653,7 @@ func TestRemoveNote_NoSuchNote(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 }
 
@@ -722,7 +722,7 @@ func TestNotes_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestNotes_PrivateHiddenFromOthers(t *testing.T) {
@@ -731,7 +731,7 @@ func TestNotes_PrivateHiddenFromOthers(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_CLIP")
 	assert.Contains(t, rec.Body.String(), "1d7645e6-2b6d-4635-b0fe-fe22b0e72e00")
 }

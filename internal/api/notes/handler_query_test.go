@@ -144,7 +144,7 @@ func TestRenotes_NotFound(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/renotes", `{"noteId":"ghost"}`)
 	require.NoError(t, h.Renotes(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRenotes_InvalidParam(t *testing.T) {
@@ -663,7 +663,7 @@ func TestConversation_NotFound(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/conversation", `{"noteId":"ghost"}`)
 	require.NoError(t, h.Conversation(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestConversation_InvalidParam(t *testing.T) {

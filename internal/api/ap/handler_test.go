@@ -446,7 +446,7 @@ func TestAPIGet_Success_User(t *testing.T) {
 func TestAPIGet_NotFound(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	rec := postJSON(h.APIGet, `{"uri":"https://example.com/notes/ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
@@ -459,7 +459,7 @@ func TestAPIGet_InvalidParam(t *testing.T) {
 func TestAPIGet_UserNotFound(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	rec := postJSON(h.APIGet, `{"uri":"https://example.com/users/ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
@@ -470,7 +470,7 @@ func TestAPIGet_RemoteUserViaLocalURI_NotFound(t *testing.T) {
 	host := "remote.example"
 	userRepo.Users["rem1"] = &model.User{ID: "rem1", Username: "carol", Host: &host}
 	rec := postJSON(h.APIGet, `{"uri":"https://example.com/users/rem1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 	assert.NotContains(t, rec.Body.String(), "Person", "remote user must not be rendered as a local Person")
 }
@@ -481,7 +481,7 @@ func TestAPIGet_RemoteNoteViaLocalURI_NotFound(t *testing.T) {
 	host := "remote.example"
 	noteRepo.Notes["rn1"] = &model.Note{ID: "rn1", UserID: "bob", Visibility: model.NoteVisibilityPublic, UserHost: &host}
 	rec := postJSON(h.APIGet, `{"uri":"https://example.com/notes/rn1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
@@ -491,14 +491,14 @@ func TestAPIGet_UserKeypairError(t *testing.T) {
 	keypairRepo.err = errors.New("db down")
 	rec := postJSON(h.APIGet, `{"uri":"https://example.com/users/u1"}`)
 	// keypairエラー → 404
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
 func TestAPIGet_NoMatch(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	rec := postJSON(h.APIGet, `{"uri":"https://other.example/something"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAPIShow_Note(t *testing.T) {
@@ -551,7 +551,7 @@ func TestAPIShow_User(t *testing.T) {
 func TestAPIShow_NotFound(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	rec := postJSON(h.APIShow, `{"uri":"https://example.com/notes/ghost"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAPIShow_InvalidParam(t *testing.T) {
@@ -566,7 +566,7 @@ func TestAPIShow_RemoteNote(t *testing.T) {
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, UserHost: &host}
 	rec := postJSON(h.APIShow, `{"uri":"https://example.com/notes/n1"}`)
 	// リモートノートはスキップされるので NotFound になる
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAPIShow_RemoteUser(t *testing.T) {
@@ -575,7 +575,7 @@ func TestAPIShow_RemoteUser(t *testing.T) {
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "bob", Host: &host}
 	rec := postJSON(h.APIShow, `{"uri":"https://example.com/users/u1"}`)
 	// リモートユーザーはスキップされるので NotFound
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestExtractLocalID(t *testing.T) {
@@ -714,7 +714,7 @@ func TestAPIGet_RemoteFetchError(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	h.SetRemote(&mockFetcher{err: assert.AnError}, nil)
 	rec := postJSON(h.APIGet, `{"uri":"https://remote.example/notes/1"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
@@ -781,7 +781,7 @@ func TestAPIShow_RemoteFetchPerson_ResolveActorFails(t *testing.T) {
 		&mockResolver{err: assert.AnError},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/users/alice"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAPIShow_RemoteFetchServiceType(t *testing.T) {
@@ -829,7 +829,7 @@ func TestAPIShow_FederationNotAllowed(t *testing.T) {
 	h.SetFederationGate(apShowHostBlocker{blocked: map[string]bool{"blocked.example": true}}, "local.example")
 
 	rec := postJSON(h.APIShow, `{"uri":"https://blocked.example/users/x"}`)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "FEDERATION_NOT_ALLOWED")
 
 	// 自 host は gate を skip する (blocked 判定に巻き込まれない)。
@@ -862,7 +862,7 @@ func TestAPIShow_RemoteNotFound(t *testing.T) {
 		&mockResolver{err: assert.AnError},
 	)
 	rec := postJSON(h.APIShow, `{"uri":"https://remote.example/unknown"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 
@@ -1024,7 +1024,7 @@ func TestAPIGet_RemoteInvalidJSON(t *testing.T) {
 	h, _, _, _ := newHandler(t)
 	h.SetRemote(&mockFetcher{data: []byte(`not json`)}, nil)
 	rec := postJSON(h.APIGet, `{"uri":"https://remote.example/x"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_OBJECT")
 }
 

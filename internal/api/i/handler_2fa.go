@@ -49,7 +49,7 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	}
 	profile := h.userService.GetProfile(user.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// 2FA gate: upstream Misskey TS (2fa/register.ts:68/80) は twoFactorEnabled
 	// なら token 必須 (= 既に 2FA 有効な user が secret を上書き再登録するケース)。
@@ -62,7 +62,7 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "78d6c839-20c9-4c66-b90a-fc0542168b48"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "78d6c839-20c9-4c66-b90a-fc0542168b48"))
 	}
 
 	// issuer は upstream (register.ts) が config.host (instance hostname) を使う。
@@ -173,7 +173,7 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	}
 	profile := h.userService.GetProfile(user.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// 2FA gate: upstream Misskey TS (2fa/unregister.ts:53/65) は twoFactorEnabled
 	// なら token 必須。**必ず password check より先**: upstream は token-then-
@@ -186,7 +186,7 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "7add0395-9901-4098-82f9-4f67af65f775"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "7add0395-9901-4098-82f9-4f67af65f775"))
 	}
 
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
@@ -219,16 +219,16 @@ func (h *Handler) requireWebAuthn(c echo.Context, password, incorrectPwID string
 	}
 	user := middleware.GetUser(c)
 	if user == nil {
-		_ = c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		_ = c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		return nil, nil, false
 	}
 	profile := h.userService.GetProfile(user.ID)
 	if profile == nil || profile.Password == nil {
-		_ = c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		_ = c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		return nil, nil, false
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(password)); err != nil {
-		_ = c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", incorrectPwID))
+		_ = c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", incorrectPwID))
 		return nil, nil, false
 	}
 	return user, profile, true
@@ -298,7 +298,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {
-		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "bf32b864-449b-47b8-974e-f9a5468546f1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "bf32b864-449b-47b8-974e-f9a5468546f1"))
 	}
 
 	existing, err := h.securityKeyRepo.ListByUser(user.ID)
@@ -346,7 +346,7 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if !profile.TwoFactorEnabled {
-		return c.JSON(http.StatusForbidden, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "798d6847-b1ed-4f9c-b1f9-163c42655995"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("TWO_FACTOR_NOT_ENABLED", "2fa not enabled.", "798d6847-b1ed-4f9c-b1f9-163c42655995"))
 	}
 
 	existing, err := h.securityKeyRepo.ListByUser(user.ID)
@@ -450,11 +450,11 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 	user := middleware.GetUser(c)
 	if user == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	profile := h.userService.GetProfile(user.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// 2FA gate (passkey 削除は 2FA の物理 factor を 1 つ抜く操作なので強い
 	// 認証が必要)。**必ず password check より先** に置く (upstream 順)。
@@ -462,7 +462,7 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "141c598d-a825-44c8-9173-cfb9d92be493"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "141c598d-a825-44c8-9173-cfb9d92be493"))
 	}
 
 	// upstream remove-key.ts:74-78 は delete を無条件に実行し no-match でも
@@ -508,7 +508,7 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	}
 	user := middleware.GetUser(c)
 	if user == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	// upstream (update-key.ts) は key not-found (NO_SUCH_KEY) と not-owned
 	// (ACCESS_DENIED) を区別する。UpdateName は両者を ErrRecordNotFound に
@@ -548,7 +548,7 @@ func (h *Handler) TwoFAPasswordLess(c echo.Context) error {
 	}
 	user := middleware.GetUser(c)
 	if user == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	if req.Value {
 		// security key が無いと passwordless 有効化不可。upstream は同じ

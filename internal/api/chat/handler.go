@@ -175,14 +175,14 @@ func (h *Handler) SetService(svc *corechat.Service) {
 func (h *Handler) mapChatErr(c echo.Context, err error) error {
 	switch {
 	case errors.Is(err, corechat.ErrNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 	case errors.Is(err, corechat.ErrForbidden):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	case errors.Is(err, corechat.ErrInvalidTarget):
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "toUserId or toRoomId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	case errors.Is(err, corechat.ErrChatBlocked):
 		// recipient が sender を block している (upstream YOU_HAVE_BEEN_BLOCKED)。
-		return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot send a message because you have been blocked by this user.", "c15a5199-7422-4968-941a-2a462c478f7d"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot send a message because you have been blocked by this user.", "c15a5199-7422-4968-941a-2a462c478f7d"))
 	case errors.Is(err, corechat.ErrChatScopeViolation):
 		// CherryPick の `recipient is cannot chat (...)` 相当 (#692)。
 		// upstream は ApiError を持たず単なる Error を投げるので mk-go 固有
@@ -599,12 +599,12 @@ func (h *Handler) RoomsShow(c echo.Context) error {
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
 		// upstream chat/rooms/show.ts:30 の noSuchRoom id に揃える (#1771)。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
 	}
 	if h.svc != nil {
 		ok, err := h.svc.HasPermissionToViewRoomInfo(user.ID, room)
 		if err != nil || !ok {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "857ae02f-8759-4d20-9adb-6e95fffe4fd7"))
 		}
 	}
 	return c.JSON(http.StatusOK, h.packRoomDetailed(room, user.ID))
@@ -629,7 +629,7 @@ func (h *Handler) RoomsUpdate(c echo.Context) error {
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
 		// upstream chat/rooms/update.ts:30 の noSuchRoom id に揃える (#1771)。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "fcdb0f92-bda6-47f9-bd05-343e0e020932"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "fcdb0f92-bda6-47f9-bd05-343e0e020932"))
 	}
 	if req.Name != "" {
 		room.Name = req.Name
@@ -654,14 +654,14 @@ func (h *Handler) RoomsDelete(c echo.Context) error {
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
 	}
 	// upstream hasPermissionToDeleteRoom は owner OR moderator を許可する。
 	// 旧 mk-go は owner-only だったため moderator が他人の room を削除できなかった。
 	isOwner := room.OwnerID == user.ID
 	isMod := h.isModerator(user.ID)
 	if !isOwner && !isMod {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "d4e3753d-97bf-4a19-ab8e-21080fbc0f4b"))
 	}
 	_ = h.repo.DeleteRoom(req.RoomID)
 	// upstream deleteRoom は deleter が moderator なら deleteChatRoom を監査ログに残す
@@ -747,7 +747,7 @@ func (h *Handler) RoomsMute(c echo.Context) error {
 	m, err := h.repo.FindMembership(user.ID, req.RoomID)
 	if err != nil {
 		// upstream mute.ts は membership 不在で noSuchRoom を返す (以前は 204)。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c2cde4eb-8d0f-42f1-8f2f-c4d6bfc8e5df"))
 	}
 	m.IsMuted = req.Mute
 	_ = h.repo.UpdateMembership(m)
@@ -784,7 +784,7 @@ func (h *Handler) RoomsTransferOwnership(c echo.Context) error {
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
 	}
 	room.OwnerID = req.UserID
 	_ = h.repo.UpdateRoom(room)
@@ -824,7 +824,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 	// マップされ、検証順も逆だった、#1771)。
 	if toRoom && h.repo != nil {
 		if _, err := h.repo.FindRoomByID(*req.ToRoomID); err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "8098520d-2da5-4e8f-8ee1-df78b55a4ec6"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "8098520d-2da5-4e8f-8ee1-df78b55a4ec6"))
 		}
 	}
 	// create-to-user / create-to-room で CONTENT_REQUIRED / NO_SUCH_FILE の id が
@@ -891,7 +891,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		if h.chatAvail != nil {
 			policy, _ := h.chatAvail.GetUserPolicies(*req.ToUserID)["chatAvailability"].(string)
 			if !middleware.ChatAvailabilityAllows(policy, "write") {
-				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "The recipient cannot receive chat messages.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "The recipient cannot receive chat messages.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 			}
 		}
 		msg, err = h.svc.CreateMessageToUser(c.Request().Context(), user.ID, *req.ToUserID, text, fileID)
@@ -956,7 +956,7 @@ func (h *Handler) MessagesShow(c echo.Context) error {
 	}
 	msg, err := h.repo.FindMessageByID(req.MessageID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 	}
 	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
 }
@@ -975,7 +975,7 @@ func (h *Handler) MessagesUpdate(c echo.Context) error {
 		// legacy fallback
 		msg, err := h.repo.FindMessageByID(req.MessageID)
 		if err != nil || msg.FromUserID != user.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 		}
 		if req.Text != nil {
 			msg.Text = req.Text
@@ -1005,7 +1005,7 @@ func (h *Handler) MessagesDelete(c echo.Context) error {
 	if h.svc == nil {
 		msg, err := h.repo.FindMessageByID(req.MessageID)
 		if err != nil || msg.FromUserID != user.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 		}
 		_ = h.repo.DeleteMessage(req.MessageID)
 		return c.NoContent(http.StatusNoContent)
@@ -1053,10 +1053,10 @@ func (h *Handler) Messages(c echo.Context) error {
 		// 任意 room の発言を読めてしまう。
 		room, err := h.repo.FindRoomByID(req.RoomID)
 		if err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 		}
 		if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 		}
 		msgs, _ = h.repo.ListMessagesByRoom(req.RoomID, "", "", req.Limit)
 	} else if req.UserID != "" {
@@ -1087,7 +1087,7 @@ func (h *Handler) MessagesSearch(c echo.Context) error {
 	if req.RoomID != "" {
 		room, err := h.repo.FindRoomByID(req.RoomID)
 		if err != nil || !h.isRoomMember(room, user.ID) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "460b3669-81b0-4dc9-a997-44442141bf83"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "460b3669-81b0-4dc9-a997-44442141bf83"))
 		}
 	}
 	msgs, _ := h.repo.SearchMessages(user.ID, req.Query, req.Limit, req.UserID, req.RoomID)
@@ -1152,7 +1152,7 @@ func (h *Handler) InvitationsCreate(c echo.Context) error {
 	// (404) を投げるため、yourself より前に owner-check を行う (error 種別を揃える)。
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "916f9507-49ba-4e90-b57f-1fd4deaa47a5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "916f9507-49ba-4e90-b57f-1fd4deaa47a5"))
 	}
 	// upstream createRoomInvitation は room 確認後に各 soft-reject を plain Error
 	// (= generic 500) で投げる: yourself / already-member / already-invited /
@@ -1305,7 +1305,7 @@ func (h *Handler) MembersUpdateMembership(c echo.Context) error {
 	}
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "b3926861-29ef-4df6-98b5-a7c640ad2b5a"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "b3926861-29ef-4df6-98b5-a7c640ad2b5a"))
 	}
 	mem, err := h.repo.FindMembership(req.UserID, req.RoomID)
 	if err != nil {
@@ -1387,10 +1387,10 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	// 読めてしまう (security)。owner は isRoomMember で member 扱い。
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 	}
 	if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 	}
 	sinceID, untilID := req.cursor()
 	msgs, err := h.repo.ListMessagesByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(10))
@@ -1468,7 +1468,7 @@ func (h *Handler) InvitationsOutbox(c echo.Context) error {
 	// 自分が所有するルームの招待一覧を返す
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil || room.OwnerID != user.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "a3c6b309-9717-4316-ae94-a69b53437237"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "a3c6b309-9717-4316-ae94-a69b53437237"))
 	}
 	sinceID, untilID := req.cursor()
 	rows, err := h.repo.ListInvitationsByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(30))
@@ -1562,10 +1562,10 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 	// 一覧を晒さない。
 	room, err := h.repo.FindRoomByID(req.RoomID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
 	}
 	if !h.isRoomMember(room, user.ID) {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
 	}
 	sinceID, untilID := req.cursor()
 	members, err := h.repo.ListMembersByRoomPaged(req.RoomID, sinceID, untilID, req.clampedLimit(30))

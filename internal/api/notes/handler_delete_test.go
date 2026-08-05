@@ -35,7 +35,7 @@ func TestNotesDelete_NonModeratorForbidden(t *testing.T) {
 	h, noteRepo := newDeleteHandler(map[string]bool{})
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
 	rec := postDraft(h.Delete, `{"noteId":"n1"}`, &model.User{ID: "intruder"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Len(t, noteRepo.Notes, 1, "non-moderator non-author must not delete")
 }
 

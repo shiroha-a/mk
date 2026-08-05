@@ -102,7 +102,7 @@ func TestClips_NoSuchNote(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	h.SetClipRepos(testutil.NewMockClipRepository(), testutil.NewMockClipNoteRepository(), testutil.NewMockClipFavoriteRepository())
 	rec := postExtra(h.Clips, `{"noteId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Contains(t, rec.Body.String(), "47db1a1c-b0af-458d-8fb4-986e4efafe1e")
 }
@@ -143,7 +143,7 @@ func TestFavoritesCreate_AlreadyFavorited(t *testing.T) {
 func TestFavoritesCreate_NoteNotFound(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFavoritesCreate_InvalidParam(t *testing.T) {
@@ -176,7 +176,7 @@ func TestFavoritesCreate_NoQueryServiceRejects(t *testing.T) {
 	h := NewHandler(noteRepo, nil, nil, nil, nil, nil, nil, nil, idGen) // queryService=nil
 	h.SetFavoriteRepo(favRepo)
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, favRepo.Favorites,
 		"FavoritesCreate must not persist when queryService is unwired so unchecked notes never bypass visibility filtering")
 }
@@ -189,7 +189,7 @@ func TestFavoritesCreate_FollowersNote_NonFollower_Hidden(t *testing.T) {
 	h, noteRepo, favRepo, _ := newExtraHandlerWithFollowing(t)
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityFollowers}
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Empty(t, favRepo.Favorites)
 }
@@ -222,7 +222,7 @@ func TestFavoritesCreate_SpecifiedNote_NotInList_Hidden(t *testing.T) {
 		VisibleUserIDs: []string{"u3"},
 	}
 	rec := postExtra(h.FavoritesCreate, `{"noteId":"n1"}`, &model.User{ID: "u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Empty(t, favRepo.Favorites)
 }
@@ -316,7 +316,7 @@ func TestFavoritesDelete_NoSuchNote(t *testing.T) {
 	h, _, favRepo := newExtraHandler(t)
 	favRepo.Favorites["u1:n1"] = &model.NoteFavorite{UserID: "u1", NoteID: "n1"}
 	rec := postExtra(h.FavoritesDelete, `{"noteId":"n1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 	assert.Contains(t, rec.Body.String(), "80848a2c-398f-4343-baa9-df1d57696c56")
 }
@@ -417,7 +417,7 @@ func TestUnrenote_Success(t *testing.T) {
 func TestUnrenote_NotFound(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	rec := postExtra(h.Unrenote, `{"noteId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUnrenote_InvalidParam(t *testing.T) {
@@ -586,7 +586,7 @@ func TestUserListTimeline_NotOwner(t *testing.T) {
 	listRepo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "other", Name: "their list"}
 	h.SetUserListRepo(listRepo)
 	rec := postExtra(h.UserListTimeline, `{"listId":"l1"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
@@ -599,7 +599,7 @@ func TestUserListTimeline_ListNotFound(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 	// リストが存在しない場合
 	rec := postExtra(h.UserListTimeline, `{"listId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)

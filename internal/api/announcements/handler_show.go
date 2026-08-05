@@ -32,12 +32,12 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	a, err := h.repo.FindByID(req.AnnouncementID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 	}
 	me := middleware.GetUser(c)
 	if a.UserID != nil {
 		if me == nil || *a.UserID != me.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "b57b5e1d-4f49-404a-9edb-46b00268f121"))
 		}
 	}
 	// #2106 L52: forYou は viewer 自身宛てで true。匿名は viewerID="" (forYou=false)。

@@ -348,7 +348,7 @@ func TestReactions_NotPublic(t *testing.T) {
 	userRepo.Users["u_target"] = &model.User{ID: "u_target"}
 	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: false}
 	rec := postExtra(h.Reactions, `{"userId":"u_target"}`, &model.User{ID: "u_viewer"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // self view (viewer == target) なら publicReactions=false でも取得可能。

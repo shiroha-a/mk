@@ -254,7 +254,7 @@ func (h *Handler) PostsShow(c echo.Context) error {
 	}
 	var post model.GalleryPost
 	if err := h.db.Preload("User").Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c5b0-4604-85bb-5b5371b1cd45"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c5b0-4604-85bb-5b5371b1cd45"))
 	}
 	return c.JSON(http.StatusOK, h.packOne(&post, middleware.GetUser(c)))
 }
@@ -270,14 +270,14 @@ func (h *Handler) PostsDelete(c echo.Context) error {
 	}
 	var post model.GalleryPost
 	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "ae52f367-4bd7-4ecd-afc6-5672fff427f5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "ae52f367-4bd7-4ecd-afc6-5672fff427f5"))
 	}
 	// upstream delete.ts: 所有者でもモデレータでもなければ ACCESS_DENIED。
 	// モデレータは他人の post も削除でき、その場合 moderationLog を残す (#1548)。
 	isOwner := post.UserID == user.ID
 	isModerator := h.roles != nil && h.roles.IsModerator(user.ID)
 	if !isOwner && !isModerator {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "c86e09de-1c48-43ac-a435-1c7e42ed4496"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "c86e09de-1c48-43ac-a435-1c7e42ed4496"))
 	}
 	if err := h.db.Where("id = ?", post.ID).Delete(&model.GalleryPost{}).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -348,12 +348,12 @@ func (h *Handler) PostsUpdate(c echo.Context) error {
 	}
 	result := h.db.Model(&model.GalleryPost{}).Where("id = ? AND \"userId\" = ?", req.PostID, user.ID).Updates(fields)
 	if result.RowsAffected == 0 {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
 	}
 	// upstream は更新後の GalleryPost を返す (204 ではない)。
 	var post model.GalleryPost
 	if err := h.db.Preload("User").Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "1137bf14-c27b-46e0-86d3-0cbbf8b0aca5"))
 	}
 	return c.JSON(http.StatusOK, h.packOne(&post, user))
 }
@@ -371,7 +371,7 @@ func (h *Handler) PostsLike(c echo.Context) error {
 	// 既 like → ALREADY_LIKED の順で判定する (#1548)。
 	var post model.GalleryPost
 	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "56c06af3-1287-442f-9701-c93f7c4a62ff"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "56c06af3-1287-442f-9701-c93f7c4a62ff"))
 	}
 	if post.UserID == user.ID {
 		return c.JSON(http.StatusBadRequest, apierr.Error("YOUR_POST", "You cannot like your post.", "f78f1511-5ebc-4478-a888-1198d752da68"))
@@ -418,7 +418,7 @@ func (h *Handler) PostsUnlike(c echo.Context) error {
 	// upstream unlike.ts: post 不在 → NO_SUCH_POST、未 like → NOT_LIKED (#1548)。
 	var post model.GalleryPost
 	if err := h.db.Where("id = ?", req.PostID).First(&post).Error; err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_POST", "No such post.", "c32e6dd0-b555-4413-925e-b3757d19ed84"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_POST", "No such post.", "c32e6dd0-b555-4413-925e-b3757d19ed84"))
 	}
 	result := h.db.Where("\"userId\" = ? AND \"postId\" = ?", user.ID, req.PostID).Delete(&model.GalleryLike{})
 	if result.RowsAffected == 0 {

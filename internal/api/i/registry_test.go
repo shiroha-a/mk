@@ -192,7 +192,7 @@ func TestRegistryGetDetail_NotFound(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	h.SetRegistryRepo(testutil.NewMockRegistryRepository())
 	rec := postExtra(h.RegistryGetDetail, `{"key":"ghost"}`, stubUser)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // 本家互換: JSON で scope を省略した場合でも、default の empty-scope アイテムに

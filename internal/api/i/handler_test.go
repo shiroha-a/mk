@@ -2195,7 +2195,7 @@ func TestPin_InvokesDeliveryHook(t *testing.T) {
 	assert.False(t, hook.calls[1].isAddition, "unpin は isAddition=false (#2024)")
 
 	// pin 失敗 (note 不在) では hook を呼ばない。
-	require.Equal(t, http.StatusNotFound, post(h.Pin, `{"noteId":"ghost"}`, user).Code)
+	require.Equal(t, http.StatusBadRequest, post(h.Pin, `{"noteId":"ghost"}`, user).Code)
 	assert.Len(t, hook.calls, 2, "pin 失敗時は hook を呼ばない (#2024)")
 }
 
@@ -2205,7 +2205,7 @@ func TestPin_NoteNotFound(t *testing.T) {
 	repo.Users["user1"] = user
 
 	rec := post(h.Pin, `{"noteId": "ghost"}`, user)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestPin_AlreadyPinned(t *testing.T) {
@@ -2270,7 +2270,7 @@ func TestUnpin_NotFound(t *testing.T) {
 	repo.Users["user1"] = user
 
 	rec := post(h.Unpin, `{"noteId": "n1"}`, user)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUnpin_InvalidParam(t *testing.T) {
@@ -2366,7 +2366,7 @@ func TestRegistryGet_Success(t *testing.T) {
 func TestRegistryGet_NotFound(t *testing.T) {
 	h, _ := newHandlerWithRegistry(t)
 	rec := post(h.RegistryGet, `{"key":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestRegistryGet_InvalidParam(t *testing.T) {

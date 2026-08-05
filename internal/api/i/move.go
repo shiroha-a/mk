@@ -51,7 +51,7 @@ func (h *Handler) Move(c echo.Context) error {
 		}
 	}
 	if isRoot {
-		return c.JSON(http.StatusForbidden, apierr.Error(
+		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"NOT_ROOT_FORBIDDEN", "This feature is not available for the root account.",
 			"4362e8dc-731f-4ad8-a694-be2a88922a24",
 		))
@@ -60,13 +60,13 @@ func (h *Handler) Move(c echo.Context) error {
 	if req.Password != "" {
 		profile := h.userService.GetProfile(me.ID)
 		if profile == nil || profile.Password == nil {
-			return c.JSON(http.StatusForbidden, apierr.Error(
+			return c.JSON(http.StatusBadRequest, apierr.Error(
 				"ACCESS_DENIED", "No password set.",
 				"1fb7cb09-d46a-4fff-b8df-057708cce513",
 			))
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-			return c.JSON(http.StatusForbidden, apierr.Error(
+			return c.JSON(http.StatusBadRequest, apierr.Error(
 				"INCORRECT_PASSWORD", "Incorrect password.",
 				"932c904e-9460-45b7-9ce6-7ed33be7eb2c",
 			))

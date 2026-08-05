@@ -73,7 +73,7 @@ func TestPollsVote_NoteNotFound(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/polls/vote", `{"noteId":"ghost","choice":0}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.PollsVote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestPollsVote_NotVisible(t *testing.T) {
@@ -82,7 +82,7 @@ func TestPollsVote_NotVisible(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/polls/vote", `{"noteId":"n1","choice":0}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
 	require.NoError(t, h.PollsVote(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestPollsVote_InvalidChoice(t *testing.T) {

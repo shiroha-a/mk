@@ -60,14 +60,14 @@ func TestTwoFARegister_WrongPassword(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
 	rec := postExtra(h.TwoFARegister, `{"password":"wrong"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFARegister_NoProfile(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	repo.Users["u1"] = &model.User{ID: "u1"}
 	rec := postExtra(h.TwoFARegister, `{"password":"pass"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // TOTP gate (upstream drop-in 互換): 既に 2FA 有効な user が token 無しで
@@ -332,14 +332,14 @@ func TestTwoFAUnregister_WrongPassword(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	user := setupUserWithPassword(repo, "u1", "correct")
 	rec := postExtra(h.TwoFAUnregister, `{"password":"wrong"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTwoFAUnregister_NoProfile(t *testing.T) {
 	h, repo := newExtraHandler(t)
 	repo.Users["u1"] = &model.User{ID: "u1"}
 	rec := postExtra(h.TwoFAUnregister, `{"password":"pass"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- TwoFA / WebAuthn parameter validation ---

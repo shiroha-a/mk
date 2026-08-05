@@ -252,9 +252,9 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, coredrive.ErrFolderNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 		case errors.Is(err, coredrive.ErrAccessDenied):
-			return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 		case errors.Is(err, coredrive.ErrUnallowedFileType):
 			// upstream drive/files/create の unallowedFileType。frontend は
 			// この UUID で error mapping するので code/id 完全一致が要求される。
@@ -628,14 +628,14 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 		default:
 			panic(fmt.Sprintf("mapFileError: unknown fileEndpoint %d", ep))
 		}
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FILE", "No such file.", id))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", id))
 	case errors.Is(err, coredrive.ErrFolderNotFound):
 		// folder 不在は drive/files/update の parent 指定経路でのみ発生する。
 		id := "1069098f-c281-440f-b085-f9932edbe091"
 		if ep == fileEndpointUpdate {
 			id = "ea8fb7a5-af77-4a08-b608-c0218176cd73"
 		}
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
 	case errors.Is(err, coredrive.ErrAccessDenied):
 		var id string
 		switch ep {
@@ -648,7 +648,7 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 		default:
 			panic(fmt.Sprintf("mapFileError: unknown fileEndpoint %d", ep))
 		}
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", id))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", id))
 	case errors.Is(err, coredrive.ErrInvalidFileName):
 		// upstream drive/files/update の invalidFileName (#1564)。create は
 		// handler 内で別 UUID (f449b209-...) を直接返すためここには来ない。
@@ -657,7 +657,7 @@ func mapFileError(c echo.Context, err error, ep fileEndpoint) error {
 		// upstream drive/files/update の restrictedByRole は i/update と別 UUID
 		// (7f59dccb-...)。endpoint 単位で frontend が i18n 引きするので、
 		// upstream の per-endpoint UUID をそのまま使う (#1028)。
-		return c.JSON(http.StatusForbidden, apierr.Error("RESTRICTED_BY_ROLE",
+		return c.JSON(http.StatusBadRequest, apierr.Error("RESTRICTED_BY_ROLE",
 			"This feature is restricted by your role.",
 			"7f59dccb-f465-75ab-5cf4-3ce44e3282f7"))
 	}
@@ -698,14 +698,14 @@ func mapFolderError(c echo.Context, err error, ep folderEndpoint) error {
 			// frontend / spec が壊れるので fail-fast する。
 			panic(fmt.Sprintf("mapFolderError: unknown folderEndpoint %d", ep))
 		}
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", id))
 	case errors.Is(err, coredrive.ErrParentFolderNotFound):
 		// folders/update のみ NO_SUCH_PARENT_FOLDER を区別する。
 		// folders/create の parent 不在は upstream も NO_SUCH_FOLDER 扱い
 		// (ErrParentFolderNotFound はそもそも CreateFolder では返らない)。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_PARENT_FOLDER", "No such parent folder.", "ce104e3a-faaf-49d5-b459-10ff0cbbcaa1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PARENT_FOLDER", "No such parent folder.", "ce104e3a-faaf-49d5-b459-10ff0cbbcaa1"))
 	case errors.Is(err, coredrive.ErrAccessDenied):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "fe8d7103-0ea8-4ec3-814d-f8b401dc69e9"))
 	case errors.Is(err, coredrive.ErrFolderNotEmpty):
 		return c.JSON(http.StatusBadRequest, apierr.Error("HAS_CHILD_FILES_OR_FOLDERS", "Folder is not empty.", "b0fc8a17-963c-405d-bfbc-859a487295e1"))
 	case errors.Is(err, coredrive.ErrRecursiveNesting):
@@ -992,11 +992,11 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 	// folderRepo 未配線時は検証不能なので fail-closed で弾く (#parity review DRV-1)。
 	if req.FolderID != nil {
 		if h.folderRepo == nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 		}
 		folder, err := h.folderRepo.FindByID(*req.FolderID)
 		if err != nil || folder.UserID == nil || *folder.UserID != user.ID {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 		}
 	}
 	if h.fileRepo != nil {

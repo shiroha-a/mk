@@ -253,7 +253,7 @@ func TestShow_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_AccessDenied(t *testing.T) {
@@ -289,7 +289,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_AccessDenied(t *testing.T) {
@@ -410,7 +410,7 @@ func TestDelete_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_AccessDenied(t *testing.T) {
@@ -512,7 +512,7 @@ func TestNotes_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestNotes_AccessDenied(t *testing.T) {
@@ -828,14 +828,14 @@ func TestRemoveNote_NoSuchAntenna(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"a1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.RemoveNote(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_ANTENNA")
 	assert.Contains(t, rec.Body.String(), "850926e0-fd3b-49b6-b69a-b28a5dbd82fe")
 	// 未存在 antenna も NO_SUCH_ANTENNA。
 	c2, rec2 := newReq(t, `{"antennaId":"nope","noteId":"n1"}`)
 	setUser(c2, "alice")
 	require.NoError(t, h.RemoveNote(c2))
-	assert.Equal(t, http.StatusNotFound, rec2.Code)
+	assert.Equal(t, http.StatusBadRequest, rec2.Code)
 }
 
 func TestRemoveNote_BadParam(t *testing.T) {

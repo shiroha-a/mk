@@ -220,7 +220,7 @@ func TestSessionGenerate_Success(t *testing.T) {
 func TestSessionGenerate_NoSuchApp(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.SessionGenerate, `{"appSecret":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSessionGenerate_InvalidParam(t *testing.T) {
@@ -256,7 +256,7 @@ func TestSessionShow_Success(t *testing.T) {
 func TestSessionShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.SessionShow, `{"token":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSessionShow_InvalidParam(t *testing.T) {
@@ -296,7 +296,7 @@ func TestAccept_ExistingToken(t *testing.T) {
 func TestAccept_SessionNotFound(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Accept, `{"token":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestAccept_InvalidParam(t *testing.T) {
@@ -399,14 +399,14 @@ func TestSessionUserkey_NoUserRepo(t *testing.T) {
 func TestSessionUserkey_NoSuchApp(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.SessionUserkey, `{"appSecret":"ghost","token":"tok1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSessionUserkey_NoSuchSession(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1"}
 	rec := post(h.SessionUserkey, `{"appSecret":"s1","token":"ghost"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSessionUserkey_PendingSession(t *testing.T) {
@@ -415,7 +415,7 @@ func TestSessionUserkey_PendingSession(t *testing.T) {
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1", UserID: nil}
 
 	rec := post(h.SessionUserkey, `{"appSecret":"s1","token":"tok1"}`, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSessionUserkey_InvalidParam(t *testing.T) {

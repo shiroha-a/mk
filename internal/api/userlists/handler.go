@@ -215,7 +215,7 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 	list, err := h.repo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
 	// upstream show.ts は forPublic で selection を切り替える (#1948-15):
 	//   !forPublic && me != null  → {id, userId: me.id}  (= 自分の list のみ。private 可)
@@ -231,7 +231,7 @@ func (h *Handler) Show(c echo.Context) error {
 		visible = list.IsPublic
 	}
 	if !visible {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7bc05c21-1d7a-41ae-88f1-66820f4dc686"))
 	}
 	packed := entity.PackUserList(list, h.memberIDs(list.ID), h.idGen)
 	// upstream show.ts: forPublic && public のとき likedCount/isLiked を付与する。
@@ -289,13 +289,13 @@ func (h *Handler) Push(c echo.Context) error {
 	}
 	list, err := h.repo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
 	}
 	// 認証ユーザーが list 所有者でない場合は存在ごと隠す (NO_SUCH_LIST)。これが
 	// 無いと任意の認証ユーザーが他人の list に勝手に member を push できる。
 	viewer := middleware.GetUser(c)
 	if viewer == nil || list.UserID != viewer.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "2214501d-ac96-4049-b717-91e42272a711"))
 	}
 	// upstream users/lists/push は AddMember 前に対象 user の存在を
 	// getterService.getUser で検証し、不在なら NO_SUCH_USER を返す (#1550)。
@@ -316,7 +316,7 @@ func (h *Handler) Push(c echo.Context) error {
 	if h.blockingRepo != nil && req.UserID != viewer.ID {
 		blocked, err := h.blockingRepo.Exists(req.UserID, viewer.ID)
 		if err != nil || blocked {
-			return c.JSON(http.StatusForbidden, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "990232c5-3f9d-4d83-9f3f-ef27b6332a4b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("YOU_HAVE_BEEN_BLOCKED", "You cannot push this user because you have been blocked by this user.", "990232c5-3f9d-4d83-9f3f-ef27b6332a4b"))
 		}
 	}
 	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
@@ -375,11 +375,11 @@ func (h *Handler) Pull(c echo.Context) error {
 	// で識別できないようにする副次効果も得られる。
 	list, err := h.repo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
 	viewer := middleware.GetUser(c)
 	if viewer == nil || list.UserID != viewer.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
 	// upstream pull.ts は removeMember 前に対象 user の存在を getterService.getUser
 	// で検証し、不在なら NO_SUCH_USER を返す (#1550)。userRepo 未配線の test 経路
@@ -416,11 +416,11 @@ func (h *Handler) Delete(c echo.Context) error {
 	// Misskey TS users/lists/delete と一致させる。
 	list, err := h.repo.FindByID(req.ListID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
 	}
 	viewer := middleware.GetUser(c)
 	if viewer == nil || list.UserID != viewer.ID {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "78436795-db79-42f5-b1e2-55ea2cf19166"))
 	}
 	if err := h.repo.Delete(req.ListID); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

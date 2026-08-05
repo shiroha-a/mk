@@ -324,7 +324,7 @@ func (h *Handler) ShowGame(c echo.Context) error {
 	if err != nil {
 		// show-game の noSuchGame は upstream で endpoint 固有 UUID
 		// (show-game.ts:19)。surrender / verify とは別値なので使い回さない。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "f13a03db-fae1-46c9-87f3-43c8165419e1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "f13a03db-fae1-46c9-87f3-43c8165419e1"))
 	}
 	// ユーザーが invitations UI からではなく「自分の対局」一覧などから
 	// pending game に直接入った場合、/match が呼ばれないままなので相手側が
@@ -595,7 +595,7 @@ func (h *Handler) Surrender(c echo.Context) error {
 	// lookup は handler のタイミングで必要なので preload する。
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
 	}
 	// #2106 L16: upstream surrender.ts は isEnded(ALREADY_ENDED) を player 判定(ACCESS_DENIED)
 	// より先に評価する。終了済 game への非プレイヤー surrender は ALREADY_ENDED(400) を返す。
@@ -603,7 +603,7 @@ func (h *Handler) Surrender(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ENDED", "Game has already ended.", "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d"))
 	}
 	if game.User1ID != user.ID && game.User2ID != user.ID {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
 	}
 
 	// service が注入されていればそちらを経由する (本来のパス)。
@@ -643,9 +643,9 @@ func (h *Handler) Surrender(c echo.Context) error {
 func surrenderErrorResponse(c echo.Context, err error) error {
 	switch {
 	case errors.Is(err, corereversi.ErrGameNotFound):
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
 	case errors.Is(err, corereversi.ErrNotPlayer):
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "6e04164b-a992-4c93-8489-2123069973e1"))
 	case errors.Is(err, corereversi.ErrAlreadyEnded):
 		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_ENDED", "Game has already ended.", "6c2ad4a6-cbf1-4a5b-b187-b772826cfc6d"))
 	case errors.Is(err, corereversi.ErrNotStarted):
@@ -671,7 +671,7 @@ func (h *Handler) Verify(c echo.Context) error {
 	game, err := h.repo.FindByID(req.GameID)
 	if err != nil {
 		// verify の noSuchGame は upstream verify.ts:17 の endpoint 固有 UUID。
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_GAME", "No such game.", "8fb05624-b525-43dd-90f7-511852bdfeee"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "8fb05624-b525-43dd-90f7-511852bdfeee"))
 	}
 
 	// upstream checkCrc は DB 保存済みの game.crc32 と直接比較する

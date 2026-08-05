@@ -167,7 +167,7 @@ func TestShow_NotFound(t *testing.T) {
 	h, _, _ := newHandler(t)
 	c, rec := newReq(t, `{"flashId":"missing"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_WithUser(t *testing.T) {
@@ -203,7 +203,7 @@ func TestUpdate_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_AccessDenied(t *testing.T) {
@@ -212,7 +212,7 @@ func TestUpdate_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"f1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_TitleEmpty(t *testing.T) {
@@ -270,7 +270,7 @@ func TestDelete_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"missing"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_AccessDenied(t *testing.T) {
@@ -279,7 +279,7 @@ func TestDelete_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"f1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // failingDeleteRepo causes Delete to fail.
@@ -521,7 +521,7 @@ func TestLike_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"missing"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Like(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestLike_AlreadyLiked(t *testing.T) {
@@ -634,7 +634,7 @@ func TestUnlike_NotFound(t *testing.T) {
 	c, rec := newReq(t, `{"flashId":"missing"}`)
 	setUser(c, "bob")
 	require.NoError(t, h.Unlike(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUnlike_NotLiked(t *testing.T) {

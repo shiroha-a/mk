@@ -32,7 +32,7 @@ func (h *Handler) MuteCreate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "7174361e-d58f-31d6-2e7c-6fb830786a3f"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "7174361e-d58f-31d6-2e7c-6fb830786a3f"))
 	}
 	// 本家 create.ts は alreadyMuting → expiresAt-past の順でチェックする。
 	// 本家 create.ts は alreadyMuting → expiresAt-past の順でチェックする。既ミュート
@@ -79,7 +79,7 @@ func (h *Handler) MuteDelete(c echo.Context) error {
 	// 本家 delete.ts は channel 不在 → NO_SUCH_CHANNEL、未ミュート → NOT_MUTING_CHANNEL
 	// の順でチェックしてから削除する (#1540)。
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "e7998769-6e94-d9c2-6b8f-94a527314aba"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "e7998769-6e94-d9c2-6b8f-94a527314aba"))
 	}
 	if muting, _ := h.mutingRepo.Exists(user.ID, req.ChannelID); !muting {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NOT_MUTING_CHANNEL", "You are not muting that channel.", "14d55962-6ea8-d990-1333-d6bef78dc2ab"))

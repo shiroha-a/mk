@@ -28,7 +28,7 @@ func (h *Handler) Favorite(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "4938f5f3-6167-4c04-9149-6607b7542861"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "4938f5f3-6167-4c04-9149-6607b7542861"))
 	}
 	already, _ := h.favoriteRepo.Exists(user.ID, req.ChannelID)
 	if already {
@@ -61,7 +61,7 @@ func (h *Handler) Unfavorite(c echo.Context) error {
 	// 無ければ NO_SUCH_CHANNEL を返す (Favorite と対称、#1770)。unfavorite 固有の
 	// error id は favorite (4938f5f3) と異なり 353c68dd である点に注意。
 	if _, err := h.svc.Show(req.ChannelID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "353c68dd-131a-476c-aa99-88a345e83668"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "353c68dd-131a-476c-aa99-88a345e83668"))
 	}
 	if err := h.favoriteRepo.Delete(user.ID, req.ChannelID); err != nil {
 		return apierr.JSONInternalError(c)

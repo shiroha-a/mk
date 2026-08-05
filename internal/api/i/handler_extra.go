@@ -38,7 +38,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
 	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
@@ -54,7 +54,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.CurrentPassword)); err != nil {
-		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側
@@ -87,7 +87,7 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
 	// 2FA gate: upstream Misskey TS (delete-account.ts) は twoFactorEnabled
@@ -102,14 +102,14 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	// #2230: root / system アカウントの自己削除は連合・instance を壊すため拒否する
 	// (admin/delete-account の isProtectedAccount と同じ guard、upstream DeleteAccountService の
 	// rootUserId / system account ガード相当)。cascade を走らせる前に弾く。
 	if isProtectedSelfDelete(u) {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
 	// isSuspended + isDeleted を true に設定 (論理削除)
@@ -281,14 +281,14 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 
 	profile := h.userService.GetProfile(u.ID)
 	if profile == nil || profile.Password == nil {
-		return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusUnauthorized, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	b := make([]byte, 8)

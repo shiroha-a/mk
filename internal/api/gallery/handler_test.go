@@ -403,7 +403,7 @@ func TestPostsShow_IsLikedAndFiles(t *testing.T) {
 }
 
 func TestPostsShow_NotFound(t *testing.T) {
-	assert.Equal(t, http.StatusNotFound, doPost(newHandler().PostsShow, `{"postId":"ghost"}`, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().PostsShow, `{"postId":"ghost"}`, nil).Code)
 }
 
 func TestPostsShow_InvalidParam(t *testing.T) {
@@ -419,7 +419,7 @@ func TestPostsDelete_Success(t *testing.T) {
 }
 
 func TestPostsDelete_NotFound(t *testing.T) {
-	assert.Equal(t, http.StatusNotFound, doPost(newHandler().PostsDelete, `{"postId":"ghost"}`, &model.User{ID: "u1"}).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().PostsDelete, `{"postId":"ghost"}`, &model.User{ID: "u1"}).Code)
 }
 
 func TestPostsDelete_InvalidParam(t *testing.T) {
@@ -434,7 +434,7 @@ func TestPostsDelete_AccessDenied(t *testing.T) {
 	h := newHandler()
 	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{}})
 	rec := doPost(h.PostsDelete, `{"postId":"gp_ad"}`, &model.User{ID: "gal_u2"})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "c86e09de-1c48-43ac-a435-1c7e42ed4496")
 	// post は削除されていない。
 	var cnt int64
@@ -526,7 +526,7 @@ func TestPostsUpdate_FileIdsAndSensitive(t *testing.T) {
 }
 
 func TestPostsUpdate_NotFound(t *testing.T) {
-	assert.Equal(t, http.StatusNotFound, doPost(newHandler().PostsUpdate, `{"postId":"ghost","title":"x"}`, &model.User{ID: "u1"}).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().PostsUpdate, `{"postId":"ghost","title":"x"}`, &model.User{ID: "u1"}).Code)
 }
 
 func TestPostsUpdate_InvalidParam(t *testing.T) {
@@ -563,7 +563,7 @@ func TestPostsLike_YourPost(t *testing.T) {
 func TestPostsLike_NoSuchPost(t *testing.T) {
 	cleanup()
 	rec := doPost(newHandler().PostsLike, `{"postId":"ghost"}`, &model.User{ID: "gal_u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "56c06af3-1287-442f-9701-c93f7c4a62ff")
 }
 
@@ -601,7 +601,7 @@ func TestPostsUnlike_Success(t *testing.T) {
 func TestPostsUnlike_NoSuchPost(t *testing.T) {
 	cleanup()
 	rec := doPost(newHandler().PostsUnlike, `{"postId":"ghost"}`, &model.User{ID: "gal_u2"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "c32e6dd0-b555-4413-925e-b3757d19ed84")
 }
 

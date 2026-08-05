@@ -373,7 +373,7 @@ func TestListsCreateFromPublic_NonPublicRejected(t *testing.T) {
 	src := &model.UserList{ID: "src", UserID: "author", Name: "orig", IsPublic: false}
 	k.listRepo.Lists[src.ID] = src
 	rec := postP189(k.h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestListsCreateFromPublic_InvalidParam(t *testing.T) {

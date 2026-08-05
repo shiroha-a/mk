@@ -50,7 +50,7 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 		if h.roleService != nil {
 			me := middleware.GetUser(c)
 			if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
-				return c.JSON(http.StatusForbidden, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 			}
 		}
 		target = user
