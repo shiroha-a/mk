@@ -15,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/ld"
+	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	apiannouncements "github.com/shiroha-a/mk/internal/api/announcements"
 	"github.com/shiroha-a/mk/internal/api/antennas"
@@ -2103,6 +2104,39 @@ func (s *Server) setupRoutes() {
 	webResHandler := newWebResourceHandler(s.config, metaRepo)
 	s.echo.GET("/robots.txt", webResHandler.RobotsTxt)
 	s.echo.GET("/opensearch.xml", webResHandler.OpenSearchXML)
+
+	// ユーザーフィード (#2345)。upstream ClientServerService と同じく
+	// /@:user.rss / .atom / .json を返す。
+	feedHost := s.config.URL
+	if pu, err := urlpkg.Parse(s.config.URL); err == nil && pu.Host != "" {
+		feedHost = pu.Host
+	}
+	feedH := &feedHandler{
+		baseURL:   s.config.URL,
+		host:      feedHost,
+		users:     feedUserResolver{repo: userRepo},
+		notes:     noteRepo,
+		parseTime: idGen.ParseTime,
+		profiles: func(userID string) *model.UserProfile {
+			p, err := userRepo.FindProfileByUserID(userID)
+			if err != nil {
+				return nil
+			}
+			return p
+		},
+		avatarURL: func(u *model.User) string {
+			if u.AvatarURL != nil && *u.AvatarURL != "" {
+				return *u.AvatarURL
+			}
+			return entity.IdenticonURL(u)
+		},
+		toHTML: func(text string) string {
+			return mfm.ToHTML(mfm.Parse(text), feedHost)
+		},
+	}
+	s.echo.GET("/@:user.rss", feedH.RSS)
+	s.echo.GET("/@:user.atom", feedH.Atom)
+	s.echo.GET("/@:user.json", feedH.JSON)
 
 	s.echo.GET("/.well-known/webfinger", wellknownHandler.Webfinger)
 	s.echo.GET("/.well-known/host-meta", wellknownHandler.HostMeta)

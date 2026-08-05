@@ -1177,6 +1177,15 @@ func (m *MockNoteRepository) ListByUserID(userID string, untilID, sinceID string
 	}, untilID, sinceID, limit), nil
 }
 
+// ListPublicNotesForFeed mirrors the repository query: renote を除いた
+// public / home のノートを新しい順に返す。
+func (m *MockNoteRepository) ListPublicNotesForFeed(userID string, limit int) ([]*model.Note, error) {
+	return m.listFiltered(func(n *model.Note) bool {
+		return n.UserID == userID && n.RenoteID == nil &&
+			(n.Visibility == model.NoteVisibilityPublic || n.Visibility == model.NoteVisibilityHome)
+	}, "", "", limit), nil
+}
+
 func (m *MockNoteRepository) ListPublicByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	return m.listFiltered(func(n *model.Note) bool {
 		return n.UserID == userID && !n.LocalOnly &&

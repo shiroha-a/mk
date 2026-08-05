@@ -83,6 +83,8 @@ type NoteRepository interface {
 	IncrementCount(noteID, column string, delta int) error
 	IncrementReaction(noteID, reaction string, delta int) error
 	ListByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListPublicNotesForFeed returns the notes shown in a user's RSS/Atom/JSON feed.
+	ListPublicNotesForFeed(userID string, limit int) ([]*model.Note, error)
 	// ListPublicByUserID is ListByUserID restricted to AP-servable notes
 	// (visibility IN (public, home) AND NOT localOnly), for the actor outbox (#1878)。
 	ListPublicByUserID(userID string, untilID, sinceID string, limit int) ([]*model.Note, error)
@@ -404,6 +406,26 @@ func (r *noteRepository) ListPublicByUserID(userID string, untilID, sinceID stri
 // handler 側で必ず詰めること (例: handler は withReplies=true / withRenotes=true
 // / withChannelNotes=false で渡す)。filter struct ではなく bool 引数で受ける
 // のは testutil ↔ repository の import cycle を避けるため (#1021)。
+// ListPublicNotesForFeed returns the notes shown in a user's RSS/Atom/JSON feed.
+//
+// upstream FeedService と同じ条件: 自分のノートのうち renote を除き、可視性が
+// public / home のものを新しい順に取る。フォロワー限定・ダイレクトは公開
+// フィードに出してはいけない。
+func (r *noteRepository) ListPublicNotesForFeed(userID string, limit int) ([]*model.Note, error) {
+	var notes []*model.Note
+	err := preloadNoteRelations(r.db).
+		Where(`"userId" = ?`, userID).
+		Where(`"renoteId" IS NULL`).
+		Where(`visibility IN ?`, []string{string(model.NoteVisibilityPublic), string(model.NoteVisibilityHome)}).
+		Order(`id DESC`).
+		Limit(limit).
+		Find(&notes).Error
+	if err != nil {
+		return nil, err
+	}
+	return notes, nil
+}
+
 func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID string, limit int, withFiles, withReplies, withRenotes, withChannelNotes bool) ([]*model.Note, error) {
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db).Where(`"userId" = ?`, userID)
