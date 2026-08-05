@@ -1524,6 +1524,32 @@ func TestUpdate_InvalidatesTokenCacheOnSuccess(t *testing.T) {
 		"成功した i/update は本 request の token を invalidate するべき")
 }
 
+// /api/i は middleware が渡す user (tokenCache 由来、30 秒 TTL) ではなく
+// repository から取り直した最新の行を返す。フォローや投稿でカウントが変わって
+// も反映されないと、プロフィール表示が最大 30 秒古いままになる。
+func TestMe_ReturnsFreshUserNotCachedOne(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	// middleware が渡す (古い) user。
+	stale := &model.User{ID: "user1", Username: "user1", FollowingCount: 0, NotesCount: 0, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	// repository 側は更新済み。
+	repo.Users["user1"] = &model.User{ID: "user1", Username: "user1", FollowingCount: 3, NotesCount: 7, AvatarDecorations: datatypes.JSON([]byte("[]"))}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), stale)
+
+	require.NoError(t, h.Me(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.EqualValues(t, 3, resp["followingCount"], "repository の最新値を返すこと")
+	assert.EqualValues(t, 7, resp["notesCount"])
+}
+
 // i/update の応答は MeDetailed をそのまま返すので policies / roles を含む。
 // フロントは応答を updateCurrentAccountPartial で `$i` にマージするため、
 // 欠けているとプロフィール更新のたびに role 由来の権限が消える。

@@ -827,6 +827,17 @@ func (h *Handler) recordLoginDay(userID string, profile *model.UserProfile) {
 func (h *Handler) Me(c echo.Context) error {
 	u := middleware.GetUser(c)
 
+	// middleware が渡す user は tokenCache (token → user、30 秒 TTL) 由来で、
+	// フォローや投稿による followingCount / notesCount の更新に追随しない。
+	// upstream にこのキャッシュは無く、/api/i は常に最新のカウントを返す。
+	//
+	// /api/i は自分のプロフィールそのものを返す endpoint で per-session 数回の
+	// 頻度なので、repository から取り直して差を埋める。CachedUserRepository は
+	// Increment*Count で invalidate されるのでここでは fresh な行が返る。
+	if fresh, err := h.userService.ShowByID(u.ID); err == nil && fresh != nil && fresh.User != nil {
+		u = fresh.User
+	}
+
 	profile := h.userService.GetProfile(u.ID)
 
 	// upstream i.ts:67-72: /api/i アクセスごとに当日を loggedInDates に追記する
