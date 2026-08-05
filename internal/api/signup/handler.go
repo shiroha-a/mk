@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -115,8 +116,13 @@ func (h *Handler) SetEmailValidationClient(c *http.Client) {
 }
 
 type signupRequest struct {
-	Username       string `json:"username"`
-	Password       string `json:"password"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// Host は TestMode でのみ読む。upstream SignupApiService も
+	// NODE_ENV === 'test' のときだけ body.host を受け付け、リモートユーザーを
+	// 直接作れるようにしている (e2e が「リモートユーザーのノートが LTL に
+	// 出ない」等を検証するのに使う)。本番では無視する。
+	Host           string `json:"host"`
 	EmailAddress   string `json:"emailAddress"`
 	InvitationCode string `json:"invitationCode"`
 	// CAPTCHA tokens (フィールド名はTS版スキーマに準拠)
@@ -272,7 +278,14 @@ func (h *Handler) Signup(c echo.Context) error {
 	// おり、揃えないと admin 系がまとめて 403 になる。TestMode は本番で必ず
 	// false かつ起動時に警告が出る。
 	isInitialSetup := h.testMode && meta.RootUserID == nil
-	result, err := h.signupService.Signup(req.Username, req.Password, isInitialSetup)
+	// host は TestMode 限定。本番で受け付けると、ローカルユーザーを任意の
+	// リモートホスト所属に偽装できてしまう。
+	var remoteHost *string
+	if h.testMode && strings.TrimSpace(req.Host) != "" {
+		hv := strings.ToLower(strings.TrimSpace(req.Host))
+		remoteHost = &hv
+	}
+	result, err := h.signupService.SignupWithHost(req.Username, req.Password, isInitialSetup, remoteHost)
 	if err != nil {
 		// upstream の `/api/signup` は username 系 error を Fastify-style
 		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。

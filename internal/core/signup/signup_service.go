@@ -264,6 +264,17 @@ type SignupResult struct {
 // Signup creates a new local user with the given username and password.
 // isInitialSetup=true の場合、作成したユーザーを rootUser に設定する。
 func (s *Service) Signup(username, password string, isInitialSetup bool) (*SignupResult, error) {
+	return s.SignupWithHost(username, password, isInitialSetup, nil)
+}
+
+// SignupWithHost creates a user attributed to the given remote host.
+//
+// upstream SignupApiService は NODE_ENV === 'test' のときだけ body.host を
+// 受け付け、SignupService に渡してリモートユーザーを直接作れるようにしている
+// (e2e で「リモートユーザーのノートが LTL に出ない」等を検証するため)。
+// host=nil なら従来どおりローカルユーザー。呼び出し側で TestMode を確認する
+// こと。
+func (s *Service) SignupWithHost(username, password string, isInitialSetup bool, host *string) (*SignupResult, error) {
 	username, err := normalizeAndValidateUsername(username)
 	if err != nil {
 		return nil, err
@@ -328,6 +339,7 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 		// で root を判定するので冗長だが、TS との bidirectional drop-in を
 		// 担保するためマーカーを揃える。
 		IsRoot: isInitialSetup,
+		Host:   host,
 	}
 	if err := s.userRepo.Create(user); err != nil {
 		return nil, err

@@ -169,6 +169,41 @@ func TestSignup_SecondUserIsNotRootInTestMode(t *testing.T) {
 	assert.Equal(t, *first, *metaRepo.Meta.RootUserID, "rootUserId が奪われないこと")
 }
 
+// upstream SignupApiService は NODE_ENV === 'test' のときだけ body.host を
+// 受け付け、リモートユーザーを直接作れるようにしている。e2e が
+// 「リモートユーザーのノートが LTL に出ない」等を検証するのに使う。
+func TestSignup_HostAcceptedInTestMode(t *testing.T) {
+	h, userRepo, _ := newTestHandler(t)
+	h.SetTestMode(true)
+
+	rec := doPost(h.Signup, `{"username":"bob","password":"pass1234","host":"Remote.Example"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	resp := parseResp(t, rec)
+	userID, _ := resp["id"].(string)
+	require.NotEmpty(t, userID)
+	u := userRepo.Users[userID]
+	require.NotNil(t, u)
+	require.NotNil(t, u.Host, "host が設定されること")
+	assert.Equal(t, "remote.example", *u.Host, "小文字に正規化されること")
+}
+
+// 本番では host を無視する。受け付けると、ローカルユーザーを任意のリモート
+// ホスト所属に偽装できてしまう。
+func TestSignup_HostIgnoredInProduction(t *testing.T) {
+	h, userRepo, _ := newTestHandler(t)
+
+	rec := doPost(h.Signup, `{"username":"bob","password":"pass1234","host":"remote.example"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	resp := parseResp(t, rec)
+	userID, _ := resp["id"].(string)
+	require.NotEmpty(t, userID)
+	u := userRepo.Users[userID]
+	require.NotNil(t, u)
+	assert.Nil(t, u.Host, "本番では host を無視してローカルユーザーにすること")
+}
+
 // --- Validation ---
 
 func TestSignup_EmptyUsername(t *testing.T) {
