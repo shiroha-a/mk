@@ -456,6 +456,12 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 	}
 	if !withChannelNotes {
 		q = q.Where(`"channelId" IS NULL`)
+	} else if viewerID != userID {
+		// upstream users/notes.ts: withChannelNotes でも本人以外にはセンシティブ
+		// チャンネルの投稿を出さない (`channel.isSensitive = false`)。
+		q = q.Where(`("channelId" IS NULL OR EXISTS (
+			SELECT 1 FROM "channel" ch WHERE ch.id = "note"."channelId" AND ch."isSensitive" = false
+		))`)
 	}
 	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&notes).Error; err != nil {
 		return nil, err

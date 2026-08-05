@@ -1612,6 +1612,8 @@ func (s *Server) setupRoutes() {
 	// Users endpoints
 	usersHandler := users.NewHandler(userService, followingService, noteRepo, idGen)
 	usersHandler.SetChartHook(chartHooks)
+	// users/notes (withChannelNotes) の post-fetch filter でチャンネルミュートを効かせる。
+	usersHandler.SetChannelMutingRepo(channelMutingRepo)
 	// #2106 S3: 匿名 visitor への remote profile 露出を ugcVisibilityForVisitor で gate。
 	if ugcMeta, err := metaRepo.Fetch(); err == nil {
 		usersHandler.SetUGCVisibility(ugcMeta.UgcVisibilityForVisitor)
@@ -2252,6 +2254,8 @@ func (s *Server) setupRoutes() {
 	channelsHandler.SetFavoriteRepo(channelFavoriteRepo)
 	channelsHandler.SetMutingRepo(channelMutingRepo)
 	channelsHandler.SetFollowingRepo(channelFollowingRepo)
+	// channels/timeline の mute / block filter (#2345 の timelines 調査)。
+	channelsHandler.SetMuteBlockRepos(mutingRepo, blockingRepo, noteRepo)
 	channelsHandler.SetDriveFileRepo(driveFileRepo)
 	// channels/create の canCreateChannel gate は #1020 で middleware に
 	// 昇格 (handler 内 RolePolicyChecker → middleware.RequireRolePolicy)。

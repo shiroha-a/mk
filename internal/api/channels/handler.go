@@ -40,6 +40,20 @@ type Handler struct {
 	// pinnedNoteRepo は channels/show (detailed) の pinnedNotes 展開に使う
 	// (#1540)。未配線なら pinnedNotes は空配列で出す。
 	pinnedNoteRepo ChannelPinnedNoteRepo
+	// userMutingRepo / blockingRepo / noteRepo は channels/timeline の
+	// mute / block filter に使う。upstream は channel timeline にも
+	// generateMutedUserQueryForNotes / generateBlockedUserQueryForNotes 相当を
+	// 通しており、閲覧中チャンネル内でもミュート相手やブロック相手のノートは
+	// 出ない。未配線なら filter は no-op。
+	userMutingRepo repository.MutingRepository
+	blockingRepo   repository.BlockingRepository
+	noteRepo       notesfilter.RenoteLookup
+}
+
+// SetMuteBlockRepos wires the repositories used by the channels/timeline
+// mute / block filter.
+func (h *Handler) SetMuteBlockRepos(m repository.MutingRepository, b repository.BlockingRepository, n notesfilter.RenoteLookup) {
+	h.userMutingRepo, h.blockingRepo, h.noteRepo = m, b, n
 }
 
 // ChannelPinnedNoteRepo fetches the notes for the detailed channels/show
@@ -558,6 +572,20 @@ func (h *Handler) Timeline(c echo.Context) error {
 				}
 			}
 			notes = notesfilter.ApplyRenoteChannelMute(notes, mutedChannelIDs)
+		}
+	}
+	// 閲覧中チャンネル内でも、ミュート相手 / 自分をブロックしている相手の
+	// ノートは出さない (upstream channels/timeline.ts も
+	// generateMutedUserQueryForNotes / generateBlockedUserQueryForNotes を通す)。
+	// チャンネルミュート自体は上の ApplyRenoteChannelMute が担うので、ここでは
+	// channelMutingRepo を渡さない (閲覧中チャンネルを巻き込まないため)。
+	if viewer != nil && h.blockingRepo != nil {
+		sets, err := notesfilter.LoadMuteBlockSets(viewer, h.userMutingRepo, h.blockingRepo, nil, h.userRepo)
+		if err != nil {
+			return apierr.JSONInternalError(c)
+		}
+		if notes, err = notesfilter.ApplyMuteBlockChannel(notes, sets, h.noteRepo); err != nil {
+			return apierr.JSONInternalError(c)
 		}
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)

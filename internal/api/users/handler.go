@@ -34,20 +34,23 @@ type ChartHook interface {
 
 // Handler handles user-related API endpoints.
 type Handler struct {
-	userService          *user.Service
-	followingService     *corefollowing.Service
-	noteRepo             repository.NoteRepository
-	idGen                id.Generator
-	chartHook            ChartHook
-	abuseRepo            repository.AbuseReportRepository
-	followingRepo        repository.FollowingRepository
-	memoRepo             repository.UserMemoRepository
-	blockingRepo         repository.BlockingRepository
-	rolePolicyProvider   RolePolicyProvider
-	proxyFollow          ProxyFollowEnqueuer
-	moderatorLister      ModeratorLister
-	abuseNotifier        AbuseReportNotifier
-	mutingRepo           repository.MutingRepository
+	userService        *user.Service
+	followingService   *corefollowing.Service
+	noteRepo           repository.NoteRepository
+	idGen              id.Generator
+	chartHook          ChartHook
+	abuseRepo          repository.AbuseReportRepository
+	followingRepo      repository.FollowingRepository
+	memoRepo           repository.UserMemoRepository
+	blockingRepo       repository.BlockingRepository
+	rolePolicyProvider RolePolicyProvider
+	proxyFollow        ProxyFollowEnqueuer
+	moderatorLister    ModeratorLister
+	abuseNotifier      AbuseReportNotifier
+	mutingRepo         repository.MutingRepository
+	// channelMutingRepo は users/notes (withChannelNotes) の post-fetch filter で
+	// チャンネルミュートを効かせるために使う。未配線なら no-op。
+	channelMutingRepo    repository.ChannelMutingRepository
 	renoteMutingRepo     repository.RenoteMutingRepository
 	followRequestRepo    repository.FollowRequestRepository
 	instanceRepo         repository.InstanceRepository
@@ -210,6 +213,12 @@ type UserListMembershipEventPublisher interface {
 // connected userList channels when update-membership changes withReplies (#2051)。
 func (h *Handler) SetUserListEventPublisher(p UserListMembershipEventPublisher) {
 	h.userListEventPub = p
+}
+
+// SetChannelMutingRepo wires the channel muting repository used by the
+// users/notes post-fetch filter.
+func (h *Handler) SetChannelMutingRepo(r repository.ChannelMutingRepository) {
+	h.channelMutingRepo = r
 }
 
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
@@ -855,7 +864,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	// ListByUserIDFiltered は visibility のみ push down するため、ミュート/
 	// ブロックした相手の renote 連鎖や mute 対象 instance の note がここを通る
 	// までフィルタされず漏れていた。set のロード/適用失敗は fail-closed で 500。
-	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, nil, h.userRepo)
+	sets, err := notesfilter.LoadMuteBlockSets(viewer, h.mutingRepo, h.blockingRepo, h.channelMutingRepo, h.userRepo)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
