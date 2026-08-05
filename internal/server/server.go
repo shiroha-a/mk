@@ -187,6 +187,12 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 
 	// Global middleware
 	e.Use(echomw.Recover())
+	// Echo は Content-Type の charset を `UTF-8` (大文字) で出すが、本家
+	// (Fastify) は `utf-8` (小文字) を返す。HTTP 的には case-insensitive でも、
+	// 完全一致で分岐するクライアントが実在する (本家 e2e の simpleGet は
+	// `text/html; charset=utf-8` に一致しないと body をパースしない) ため、
+	// drop-in 互換として本家の表記に揃える。
+	e.Use(lowercaseCharset)
 	// Sentry middleware は Recover の直後に置く: panic を hub に送ったあと
 	// Recover に巻き戻し、5xx の最終整形は echo に任せる。
 	e.Use(mksentry.Middleware(cfg))
@@ -490,4 +496,36 @@ func (s *Server) queueRuntimeStatsObserver(setter interface{ SetObserver(driver.
 		s.queueRuntimeStats,
 	}
 	setter.SetObserver(obs)
+}
+
+// lowercaseCharset rewrites `charset=UTF-8` to `charset=utf-8` in the
+// Content-Type of every response.
+//
+// Echo は charset を大文字で出すが、本家 (Fastify) は小文字で返す。HTTP の
+// 仕様上は case-insensitive なので実害は無いはずだが、Content-Type の完全一致
+// で分岐するクライアントが実在する。本家の e2e ヘルパ (test/utils.ts の
+// simpleGet) がまさにそれで、`text/html; charset=utf-8` に一致しないと HTML を
+// パースせず body を null にしてしまう。drop-in 互換として表記を揃える。
+func lowercaseCharset(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		res := c.Response()
+		res.Before(func() {
+			ct := res.Header().Get(echo.HeaderContentType)
+			if fixed, ok := rewriteCharset(ct); ok {
+				res.Header().Set(echo.HeaderContentType, fixed)
+			}
+		})
+		return next(c)
+	}
+}
+
+// rewriteCharset returns the Content-Type with an upper-case UTF-8 charset
+// lowered, reporting whether a rewrite happened.
+func rewriteCharset(ct string) (string, bool) {
+	const upper = "charset=UTF-8"
+	idx := strings.Index(ct, upper)
+	if idx < 0 {
+		return ct, false
+	}
+	return ct[:idx] + "charset=utf-8" + ct[idx+len(upper):], true
 }
