@@ -122,7 +122,6 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/processors"
 	"github.com/shiroha-a/mk/internal/repository"
-	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/stream"
 	"github.com/shiroha-a/mk/internal/stream/channels"
@@ -2112,13 +2111,15 @@ func (s *Server) setupRoutes() {
 		oauth.NewRedisStore(s.redis.Default),
 		&http.Client{
 			Timeout:   10 * time.Second,
-			Transport: safehttp.NewSSRFSafeTransport(s.config.AllowedPrivateNetworks),
+			Transport: oauthDiscoveryTransport(s.config.AllowedPrivateNetworks, s.config.TestMode),
 		},
 		userRepo,
 		repository.NewAccessTokenRepository(s.db),
 		idGen,
 		s.config.URL,
-		false, // production は https client_id のみ
+		// 本家 OAuth2ProviderService は NODE_ENV === 'test' のとき http の
+		// client_id を許可する (本番は https のみ)。TestMode を同じ用途で使う。
+		s.config.TestMode,
 		frontendConsentHTML(s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability),
 	)
 	s.echo.GET("/oauth/authorize", oauthHandler.Authorize)
