@@ -119,6 +119,56 @@ func TestSignup_Success(t *testing.T) {
 	assert.Equal(t, true, resp["preventAiLearning"])
 }
 
+// --- root 化 (初回セットアップ) ---
+
+// 本番では /api/signup 経由で root を作らせない。本家は SignupService の中で
+// rootUserId 未設定なら無条件に root にするが、setupPassword を検証しないため
+// disableRegistration を開けた瞬間に誰でも root を取れる。mk-go は
+// setupPassword で保護された admin/accounts/create のみを root 生成経路とする。
+func TestSignup_DoesNotBecomeRootInProduction(t *testing.T) {
+	h, userRepo, metaRepo := newTestHandler(t)
+	require.Nil(t, metaRepo.Meta.RootUserID, "前提: まだ root が居ない")
+
+	rec := doPost(h.Signup, `{"username":"alice","password":"pass1234"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	assert.Nil(t, metaRepo.Meta.RootUserID, "rootUserId が設定されないこと")
+	for _, u := range userRepo.Users {
+		assert.False(t, u.IsRoot, "isRoot が立たないこと")
+	}
+}
+
+// TestMode では本家に揃える。本家の e2e は signup で作ったユーザーが管理者に
+// なる前提で書かれており、揃えないと admin 系がまとめて 403 になる。
+func TestSignup_BecomesRootInTestMode(t *testing.T) {
+	h, userRepo, metaRepo := newTestHandler(t)
+	h.SetTestMode(true)
+
+	rec := doPost(h.Signup, `{"username":"root","password":"pass1234"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	resp := parseResp(t, rec)
+	userID, _ := resp["id"].(string)
+	require.NotEmpty(t, userID)
+	require.NotNil(t, metaRepo.Meta.RootUserID)
+	assert.Equal(t, userID, *metaRepo.Meta.RootUserID, "最初の 1 人が root になること")
+	require.NotNil(t, userRepo.Users[userID])
+	assert.True(t, userRepo.Users[userID].IsRoot)
+}
+
+// TestMode でも 2 人目以降は root にしない。
+func TestSignup_SecondUserIsNotRootInTestMode(t *testing.T) {
+	h, _, metaRepo := newTestHandler(t)
+	h.SetTestMode(true)
+
+	require.Equal(t, http.StatusOK, doPost(h.Signup, `{"username":"root","password":"pass1234"}`).Code)
+	first := metaRepo.Meta.RootUserID
+	require.NotNil(t, first)
+
+	require.Equal(t, http.StatusOK, doPost(h.Signup, `{"username":"alice","password":"pass1234"}`).Code)
+	assert.Equal(t, *first, *metaRepo.Meta.RootUserID, "rootUserId が奪われないこと")
+}
+
 // --- Validation ---
 
 func TestSignup_EmptyUsername(t *testing.T) {

@@ -260,7 +260,19 @@ func (h *Handler) Signup(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 
-	result, err := h.signupService.Signup(req.Username, req.Password, false)
+	// 本家 SignupService は経路を問わず rootUserId 未設定なら、作成した
+	// アカウントを root にする (SignupService.ts:160)。mk-go は本番でこれを
+	// 認めない。本家は /api/signup 側で setupPassword を検証しないため、
+	// disableRegistration を開けた瞬間に誰でも root を取れてしまうからで、
+	// mk-go では setupPassword で保護された admin/accounts/create のみを
+	// root 生成経路とする (docs/divergence.md)。
+	//
+	// ただし TestMode では本家に揃える。本家の e2e は
+	// `root = await signup({ username: 'root' })` で管理者を作る前提で書かれて
+	// おり、揃えないと admin 系がまとめて 403 になる。TestMode は本番で必ず
+	// false かつ起動時に警告が出る。
+	isInitialSetup := h.testMode && meta.RootUserID == nil
+	result, err := h.signupService.Signup(req.Username, req.Password, isInitialSetup)
 	if err != nil {
 		// upstream の `/api/signup` は username 系 error を Fastify-style
 		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。
