@@ -82,7 +82,7 @@ func TestUpdateFollow_NoSuchUser(t *testing.T) {
 	h, repo := newTestHandler(t)
 	alice := addUser(repo, "alice", false)
 	rec := postJSON(h.UpdateFollow, `{"userId":"ghost"}`, alice)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "14318698-f67e-492a-99da-5353a5ac52be")
 }
@@ -111,7 +111,7 @@ func TestInvalidate_NoSuchUser(t *testing.T) {
 	h, repo := newTestHandler(t)
 	admin := addUser(repo, "admin", false)
 	rec := postJSON(h.Invalidate, `{"userId":"ghost"}`, admin)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "b77e6ae6-a3e5-40da-9cc8-c240115479cc")
 }

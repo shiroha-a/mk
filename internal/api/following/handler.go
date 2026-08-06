@@ -65,7 +65,7 @@ func (h *Handler) Create(c echo.Context) error {
 	// followeeを先に取得し、エラー時はNO_SUCH_USERを返す
 	bundle, err := h.userService.ShowByID(req.UserID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"))
 	}
 
 	// withReplies 引数を Service に伝搬する (#1056)。upstream Misskey TS の
@@ -114,7 +114,7 @@ func (h *Handler) Delete(c echo.Context) error {
 
 	bundle, err := h.userService.ShowByID(req.UserID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "5b12c78d-2b28-4dca-99d2-f56139b42ff8"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "5b12c78d-2b28-4dca-99d2-f56139b42ff8"))
 	}
 
 	if err := h.followingService.Unfollow(me.ID, req.UserID); err != nil {
@@ -149,7 +149,7 @@ func (h *Handler) AcceptRequest(c echo.Context) error {
 	// (id 66ce1645) を返す。request 不在は別 error NO_FOLLOW_REQUEST (bcde4f8b)
 	// で区別する (#1911)。
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "66ce1645-d66c-46bb-8b79-96739af885bd"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "66ce1645-d66c-46bb-8b79-96739af885bd"))
 	}
 	if err := h.followingService.AcceptRequest(me.ID, req.UserID); err != nil {
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
@@ -172,7 +172,7 @@ func (h *Handler) RejectRequest(c echo.Context) error {
 	// upstream reject.ts は getUser を先に呼び、userId が無効なら NO_SUCH_USER
 	// (id abc2ffa6) を返す。reject.ts に NO_FOLLOW_REQUEST 系 error は無い (#1911)。
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "abc2ffa6-25b2-4380-ba99-321ff3a94555"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "abc2ffa6-25b2-4380-ba99-321ff3a94555"))
 	}
 	// request 不在は upstream removeFollowRequest が silent return するため成功
 	// 扱い (204 No Content)。404 にしない (#1911)。
@@ -200,7 +200,7 @@ func (h *Handler) CancelRequest(c echo.Context) error {
 
 	bundle, err := h.userService.ShowByID(req.UserID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab"))
 	}
 
 	if err := h.followingService.CancelRequest(me.ID, req.UserID); err != nil {

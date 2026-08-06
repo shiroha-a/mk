@@ -85,7 +85,7 @@ func TestCreate_NoSuchUser(t *testing.T) {
 	c, rec := newReq(t, `{"userId":"ghost"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestCreate_AlreadyMuting(t *testing.T) {

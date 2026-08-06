@@ -362,7 +362,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if !iAmModerator && h.userRepo != nil {
 		target, err := h.userRepo.FindByID(req.UserID)
 		if err != nil || target == nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
 		}
 		// remote user は upstream でも display を制限している。
 		// upstream TS は `host !== null` で判定するので mk-go も nil 判定に
@@ -681,7 +681,7 @@ func (h *Handler) UpdateMemo(c echo.Context) error {
 	// upstream update-memo.ts:22-27 は getUser で target 存在を確認し、無ければ
 	// NO_SUCH_USER を返す (#1547)。旧実装は存在確認せず直接 upsert していた。
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "6fef56f3-e765-4957-88e5-c6f65329b8a5"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "6fef56f3-e765-4957-88e5-c6f65329b8a5"))
 	}
 
 	if h.memoRepo == nil {

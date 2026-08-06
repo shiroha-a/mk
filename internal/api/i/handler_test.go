@@ -1584,7 +1584,7 @@ func TestUpdate_UserNotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	user := &model.User{ID: "ghost"}
 	rec := post(h.Update, `{}`, user)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_InternalError(t *testing.T) {

@@ -412,7 +412,7 @@ func TestListsCreateFromPublic_NoSuchUserMember(t *testing.T) {
 	listRepo.Lists["src"] = &model.UserList{ID: "src", UserID: "srcowner", Name: "src", IsPublic: true}
 	require.NoError(t, listRepo.AddMember(&model.UserListMembership{ID: "sm1", UserListID: "src", UserID: "u_missing"}))
 	rec := postStub(h.ListsCreateFromPublic, `{"listId":"src","name":"mine"}`, &model.User{ID: "me"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "13c457db-a8cb-4d88-b70a-211ceeeabb5f")
 }
 
@@ -606,7 +606,7 @@ func TestListsUpdateMembership_MemberNotFound(t *testing.T) {
 	h.SetUserListRepo(listRepo)
 
 	rec := postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"ghost","withReplies":true}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // #2005: update-membership の意図的挙動を pin する。(1) withReplies 省略 (nil) は既存値を
@@ -631,7 +631,7 @@ func TestListsUpdateMembership_DeliberateDeviations(t *testing.T) {
 
 	// (2) member でない user → NO_SUCH_USER 404。
 	rec = postStub(h.ListsUpdateMembership, `{"listId":"l1","userId":"notmember"}`, owner)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER", "非 member は NO_SUCH_USER 404 (#2005)")
 }
 

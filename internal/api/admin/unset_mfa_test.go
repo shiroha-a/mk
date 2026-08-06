@@ -111,7 +111,7 @@ func TestUnsetMfa_MissingParam(t *testing.T) {
 func TestUnsetMfa_NoSuchUser(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.UnsetMfa, `{"userId":"ghost"}`, adminUser)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d")
 }
 

@@ -2242,7 +2242,7 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	// upstream assign.ts:77-81: 対象 user 不在なら NO_SUCH_USER (#1542)。
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "558ea170-f653-4700-94d0-5a818371d0df"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "558ea170-f653-4700-94d0-5a818371d0df"))
 		}
 	}
 	var expiresAt *time.Time
@@ -2315,7 +2315,7 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	// upstream unassign.ts:80-84: 対象 user 不在なら NO_SUCH_USER (#1542)。
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 		}
 	}
 	if err := h.roleService.Unassign(req.UserID, req.RoleID); err != nil {

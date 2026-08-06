@@ -608,7 +608,7 @@ func TestMessagesCreate_ToUser_NoSuchUser(t *testing.T) {
 	h, _ := newHandlerWithService(t)
 	h.SetUserRepo(testutil.NewMockUserRepository()) // recipient を seed しない
 	rec := post(h.MessagesCreate, `{"text":"hi","toUserId":"ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_USER", "11795c64-40ea-4198-b06e-3c873ed9039d")
 }
 
@@ -1333,7 +1333,7 @@ func TestUserTimeline_NoSuchUser(t *testing.T) {
 	h, _ := newTestHandler()
 	h.SetUserRepo(testutil.NewMockUserRepository()) // 空 (u_ghost 未登録)
 	rec := post(h.UserTimeline, `{"userId":"u_ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assertErrorCode(t, rec, "NO_SUCH_USER", "11795c64-40ea-4198-b06e-3c873ed9039d")
 }
 

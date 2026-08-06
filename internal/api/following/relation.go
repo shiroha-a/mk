@@ -32,7 +32,7 @@ func (h *Handler) Invalidate(c echo.Context) error {
 	}
 	bundle, err := h.userService.ShowByID(req.UserID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "b77e6ae6-a3e5-40da-9cc8-c240115479cc"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "b77e6ae6-a3e5-40da-9cc8-c240115479cc"))
 	}
 	if err := h.followingService.Unfollow(req.UserID, me.ID); err != nil {
 		if errors.Is(err, corefollowing.ErrNotFollowing) {
@@ -69,7 +69,7 @@ func (h *Handler) UpdateFollow(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("FOLLOWEE_IS_YOURSELF", "Followee is yourself.", "4c4cbaf9-962a-463b-8418-a5e365dbf2eb"))
 	}
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "14318698-f67e-492a-99da-5353a5ac52be"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "14318698-f67e-492a-99da-5353a5ac52be"))
 	}
 	if following, err := h.followingService.IsFollowing(me.ID, req.UserID); err != nil {
 		return apierr.JSONInternalError(c)

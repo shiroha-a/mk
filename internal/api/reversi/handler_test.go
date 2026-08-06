@@ -430,7 +430,7 @@ func TestMatch_AcctUnknown(t *testing.T) {
 	h.SetFederation("https://example.com", nil, nil, userRepo)
 
 	rec := post(h.Match, `{"userId":"@ghost"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestMatch_AcctEmptyPrefix(t *testing.T) {
@@ -439,7 +439,7 @@ func TestMatch_AcctEmptyPrefix(t *testing.T) {
 	h.SetFederation("https://example.com", nil, nil, userRepo)
 
 	rec := post(h.Match, `{"userId":"@"}`, u1)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- CancelMatch ---
@@ -1070,7 +1070,7 @@ func TestReversiErrorIDsMatchUpstream(t *testing.T) {
 		userRepo := testutil.NewMockUserRepository()
 		h.SetFederation("https://example.com", nil, nil, userRepo)
 		rec := post(h.Match, `{"userId":"@ghost"}`, u1)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "0b4f0559-b484-4e31-9581-3f73cee89b28", errorID(t, rec))
 	})
 

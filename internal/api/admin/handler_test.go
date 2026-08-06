@@ -1604,7 +1604,7 @@ func TestRolesAssign_NoSuchUser(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t) // userRepo は空 (u1 等 seed しない)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesAssign, `{"userId":"ghostuser","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, _ := resp["error"].(map[string]any)
@@ -1617,7 +1617,7 @@ func TestRolesUnassign_NoSuchUser(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesUnassign, `{"userId":"ghostuser","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj, _ := resp["error"].(map[string]any)
@@ -1641,7 +1641,7 @@ func TestRolesUnassign_NotAssigned(t *testing.T) {
 	h, _, _, roleRepo := newTestHandler(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", CanEditMembersByModerator: true}
 	rec := doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // role 自体が無ければ assign 同様 NO_SUCH_ROLE (404) を先に返す (#1542)。

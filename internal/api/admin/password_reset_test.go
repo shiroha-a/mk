@@ -156,7 +156,7 @@ func TestResetPasswordAdmin_TargetMissing(t *testing.T) {
 	repo := attachModLog(t, h)
 
 	rec := doPost(h.ResetPassword, `{"userId":"u1"}`, adminUser)
-	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.NotContains(t, rec.Body.String(), "password")
 

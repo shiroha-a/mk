@@ -363,7 +363,7 @@ func (h *Handler) Match(c echo.Context) error {
 		resolved, err := h.resolveAcct(req.UserID)
 		if err != nil {
 			// match の noSuchUser は upstream match.ts:22 の endpoint 固有 UUID。
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "0b4f0559-b484-4e31-9581-3f73cee89b28"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "0b4f0559-b484-4e31-9581-3f73cee89b28"))
 		}
 		req.UserID = resolved
 	}

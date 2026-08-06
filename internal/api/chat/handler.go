@@ -880,7 +880,7 @@ func (h *Handler) MessagesCreate(c echo.Context) error {
 		// いた、#1771)。user-timeline と同じ status/code/id に揃える。
 		if h.userRepo != nil {
 			if _, ferr := h.userRepo.FindByID(*req.ToUserID); ferr != nil {
-				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
 			}
 		}
 		// upstream ChatService.createMessageToUser:177-179 は recipient の
@@ -1351,7 +1351,7 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 	// NO_SUCH_USER を返す。userRepo 未配線 (legacy test) は検証 skip。
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
 		}
 	}
 	sinceID, untilID := req.cursor()

@@ -1641,7 +1641,7 @@ func (h *Handler) Update(c echo.Context) error {
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrUserNotFound):
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "fcd2eef9-a9b2-4c4f-8624-038099e90aa5"))
 		case errors.Is(err, user.ErrAvatarNotFound):
 			// upstream Misskey の NO_SUCH_AVATAR error UUID を流用 (frontend
 			// がコード固有の locale 表示をしているため一致が望ましい)。

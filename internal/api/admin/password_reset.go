@@ -40,7 +40,7 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 		user, err := h.userRepo.FindByID(req.UserID)
 		if err != nil || user == nil {
 			// #2106 L2: upstream reset-password.ts:26 固有の UUID に揃える。
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 		}
 		// upstream 2026.7.0 (fork merge): moderator が administrator の password を
 		// リセットできた improper authorization の修正。旧 root-only guard

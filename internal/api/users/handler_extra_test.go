@@ -328,7 +328,7 @@ func newReactionsHandler(t *testing.T) (*users.Handler, *testutil.MockUserReposi
 func TestReactions_NoSuchUser(t *testing.T) {
 	h, _, _ := newReactionsHandler(t)
 	rec := postExtra(h.Reactions, `{"userId":"missing"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // target が remote user (host が non-nil) → 400 IS_REMOTE_USER。
@@ -696,7 +696,7 @@ func TestUpdateMemo_Success(t *testing.T) {
 func TestUpdateMemo_NoSuchUser(t *testing.T) {
 	h, _, _ := newExtraHandler(t)
 	rec := postExtra(h.UpdateMemo, `{"userId":"ghost"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "6fef56f3-e765-4957-88e5-c6f65329b8a5")
 }

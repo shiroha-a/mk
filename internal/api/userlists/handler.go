@@ -121,7 +121,7 @@ func (h *Handler) List(c echo.Context) error {
 		if h.userRepo != nil {
 			u, uerr := h.userRepo.FindByID(req.UserID)
 			if uerr != nil || u == nil {
-				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "a8af4a82-0980-4cc4-a6af-8b0ffd54465e"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "a8af4a82-0980-4cc4-a6af-8b0ffd54465e"))
 			}
 			if u.Host != nil && *u.Host != "" {
 				return c.JSON(http.StatusBadRequest, apierr.Error("REMOTE_USER_NOT_ALLOWED", "Not allowed to load the remote user's list", "53858f1b-3315-4a01-81b7-db9b48d4b79a"))
@@ -305,7 +305,7 @@ func (h *Handler) Push(c echo.Context) error {
 		var ferr error
 		target, ferr = h.userRepo.FindByID(req.UserID)
 		if ferr != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a"))
 		}
 	}
 	// upstream は「対象 user が自分を block しているか」(blockerId=target,
@@ -389,7 +389,7 @@ func (h *Handler) Pull(c echo.Context) error {
 		var uerr error
 		target, uerr = h.userRepo.FindByID(req.UserID)
 		if uerr != nil {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
 		}
 	}
 	if err := h.repo.RemoveMember(req.ListID, req.UserID); err != nil {

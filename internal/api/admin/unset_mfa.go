@@ -29,7 +29,7 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	}
 	user, err := h.userRepo.FindByID(req.UserID)
 	if err != nil || user == nil {
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 	}
 	// reset-password と同型の administrator 保護 (upstream: 対象が admin かつ
 	// 実行者 != 対象なら ACCESS_DENIED)。

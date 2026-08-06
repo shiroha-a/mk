@@ -254,7 +254,7 @@ func TestCreate_FolloweeNotFound(t *testing.T) {
 	alice := addUser(repo, "alice", false)
 
 	rec := postJSON(h.Create, `{"userId": "ghost"}`, alice)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // stubBlockedChecker reports the configured pair as blocked.
@@ -330,7 +330,7 @@ func TestDelete_UserNotFound(t *testing.T) {
 	alice := addUser(repo, "alice", false)
 
 	rec := postJSON(h.Delete, `{"userId": "ghost"}`, alice)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestDelete_NotFollowing(t *testing.T) {
@@ -423,7 +423,7 @@ func TestAcceptRequest_NoSuchUser(t *testing.T) {
 	bob := addUser(repo, "bob", false)
 
 	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "66ce1645-d66c-46bb-8b79-96739af885bd")
 }
@@ -464,7 +464,7 @@ func TestRejectRequest_NoSuchUser(t *testing.T) {
 	bob := addUser(repo, "bob", false)
 
 	rec := postJSON(h.RejectRequest, `{"userId": "alice"}`, bob)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "abc2ffa6-25b2-4380-ba99-321ff3a94555")
 }
@@ -520,7 +520,7 @@ func TestCancelRequest_NoSuchUser(t *testing.T) {
 	alice := addUser(repo, "alice", false)
 
 	rec := postJSON(h.CancelRequest, `{"userId": "ghost"}`, alice)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "4e68c551-fc4c-4e46-bb41-7d4a37bf9dab")
 }

@@ -26,7 +26,11 @@ func JSONNotFound(c echo.Context, msg ...string) error {
 	return c.JSON(http.StatusNotFound, NotFound(msg...))
 }
 
-// JSONNoSuchUser writes a 404 NO_SUCH_USER response to the client.
+// JSONNoSuchUser writes a 404 NO_SUCH_USER response.
+//
+// upstream で NO_SUCH_USER に httpStatusCode: 404 を明示しているのは
+// users/show だけで、他 38 endpoint は kind 既定 'client' の 400。
+// このヘルパーは users/show 系専用。他の endpoint では 400 を返すこと。
 func JSONNoSuchUser(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchUser())
 }

@@ -68,7 +68,7 @@ func TestList_ByUserIDNoSuchUser(t *testing.T) {
 	h, _ := newTestHandler(t)
 	h.SetUserRepo(testutil.NewMockUserRepository())
 	rec := doPost(h.List, `{"userId":"ghost"}`, &model.User{ID: "viewer"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "a8af4a82-0980-4cc4-a6af-8b0ffd54465e")
 }
 
@@ -171,7 +171,7 @@ func TestPull_NoSuchUser(t *testing.T) {
 	repo.Lists["l1"] = &model.UserList{ID: "l1", UserID: "u1"}
 	h.SetUserRepo(testutil.NewMockUserRepository()) // u2 未登録
 	rec := doPost(h.Pull, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "588e7f72-c744-4a61-b180-d354e912bda2")
 }
 
@@ -515,7 +515,7 @@ func TestPush_NoSuchUser(t *testing.T) {
 	// u2 は登録されていない (= 不在)
 	h.SetUserRepo(userRepo)
 	rec := doPost(h.Push, `{"listId":"l1","userId":"u2"}`, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_USER")
 	assert.Contains(t, rec.Body.String(), "a89abd3d-f0bc-4cce-beb1-2f446f4f1e6a")
 	assert.Empty(t, repo.Members, "不在 user の push は member を追加しないこと")

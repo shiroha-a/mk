@@ -104,7 +104,7 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 			var uerr error
 			target, uerr = h.userRepo.FindByID(m.UserID)
 			if uerr != nil {
-				return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "13c457db-a8cb-4d88-b70a-211ceeeabb5f"))
+				return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "13c457db-a8cb-4d88-b70a-211ceeeabb5f"))
 			}
 		}
 		// YOU_HAVE_BEEN_BLOCKED: 対象が viewer を block していれば中断 (自分自身は除外)。
@@ -321,7 +321,7 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 		// NO_SUCH_USER は user 自体が無いときのみだが、mk-go は両ケースを 404 NO_SUCH_USER に
 		// 寄せた方が合理的なのでそちらを採る (#2005 で方針決定: mk-go の堅牢挙動を維持)。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "588e7f72-c744-4a61-b180-d354e912bda2"))
 		}
 		return apierr.JSONInternalError(c)
 	}
