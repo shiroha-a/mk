@@ -37,7 +37,14 @@ type Repos struct {
 // 各リポジトリへのクエリは独立なので goroutine で並列実行し、全結果が揃ってから
 // detailed に反映する (元々 users/show にインラインだった実装を共有化、#1802)。
 func (r Repos) Apply(detailed *entity.UserDetailed, viewerID string, target *model.User, profile *model.UserProfile) bool {
-	if detailed == nil || target == nil || viewerID == "" || viewerID == target.ID {
+	if detailed == nil || target == nil || viewerID == "" {
+		return false
+	}
+	if viewerID == target.ID {
+		// self には relation block (isFollowing 等) を付けない。ただし memo は
+		// upstream が `isDetailed && meId` だけで引くので self でも載せる
+		// (自分用のメモを自分のプロフィールから読める)。
+		r.applyMemo(detailed, viewerID, target.ID)
 		return false
 	}
 
@@ -129,4 +136,15 @@ func (r Repos) Apply(detailed *entity.UserDetailed, viewerID string, target *mod
 		detailed.Memo = &memo.Memo
 	}
 	return viewerIsFollowing
+}
+
+// applyMemo fills only the viewer's memo for the target. self-view で relation
+// block 抜きに memo だけ欲しいときに使う。
+func (r Repos) applyMemo(detailed *entity.UserDetailed, viewerID, targetID string) {
+	if r.Memo == nil {
+		return
+	}
+	if memo, err := r.Memo.FindByPair(viewerID, targetID); err == nil && memo != nil {
+		detailed.Memo = &memo.Memo
+	}
 }
