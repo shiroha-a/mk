@@ -554,11 +554,13 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		userHostPtr = in.User.Host
 	}
 	f := &model.DriveFile{
-		ID:         fileID,
-		UserID:     userIDPtr,
-		UserHost:   userHostPtr,
-		MD5:        info.MD5,
-		Name:       in.Name,
+		ID:       fileID,
+		UserID:   userIDPtr,
+		UserHost: userHostPtr,
+		MD5:      info.MD5,
+		// 検出した形式と食い違う拡張子は upstream と同じく足して補正する
+		// (`Belmond.png` に JPEG を上げたら `Belmond.png.jpg`)。
+		Name:       CorrectFilename(in.Name, ExtensionForMIME(info.MimeType)),
 		Type:       info.MimeType,
 		Size:       info.Size,
 		Comment:    in.Comment,

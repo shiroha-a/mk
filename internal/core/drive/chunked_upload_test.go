@@ -565,7 +565,8 @@ func TestFinishChunkedUpload_HappyPath(t *testing.T) {
 	file, err := f.svc.FinishChunkedUpload(context.Background(), f.user, sess.ID)
 	require.NoError(t, err)
 	require.NotNil(t, file)
-	assert.Equal(t, "video.bin", file.Name)
+	// 中身はテキストなので拡張子補正で .txt が付く (upstream と同じ)。
+	assert.Equal(t, "video.bin.txt", file.Name)
 	assert.Equal(t, testChunkSize+7, file.Size)
 	require.NotNil(t, file.AccessKey)
 	assert.Equal(t, sess.AccessKey, *file.AccessKey)

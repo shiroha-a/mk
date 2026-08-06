@@ -378,7 +378,8 @@ func TestFilesCreateChunkedFinish_Success(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	body := decodeJSON(t, rec)
-	assert.Equal(t, "video.bin", body["name"])
+	// 中身はテキストなので拡張子補正で .txt が付く (upstream と同じ)。
+	assert.Equal(t, "video.bin.txt", body["name"])
 	assert.Equal(t, float64(apiChunkSize+10), body["size"])
 	// pack(self) は folder / userId / user を null 化する。
 	assert.Nil(t, body["folder"])

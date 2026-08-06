@@ -25,12 +25,14 @@ func TestFilesCreate_NameTrimmed(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	assert.Equal(t, "photo.jpg", out["name"], "前後空白は trim される")
+	// 前後空白は trim される。中身はテキストなので拡張子補正で .txt が付く
+	// (upstream DriveService.addFile の correctFilename と同じ)。
+	assert.Equal(t, "photo.jpg.txt", out["name"])
 }
 
 func TestFilesCreate_BlobNameFallsBackToUntitled(t *testing.T) {
-	// upstream は 'blob' を null 化し addFile が 'untitled'(+拡張子) で保存
-	// する。mk-go は拡張子補正未実装のため 'untitled' 固定 (#1564)。
+	// upstream は 'blob' を null 化し addFile が 'untitled' + 検出拡張子で
+	// 保存する (#1564)。
 	h, _, _ := newHandler(t)
 	c, rec := newMultipartReq(t, "blob", "hello", nil)
 	setUser(c, "u1")
@@ -38,7 +40,7 @@ func TestFilesCreate_BlobNameFallsBackToUntitled(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	assert.Equal(t, "untitled", out["name"])
+	assert.Equal(t, "untitled.txt", out["name"])
 }
 
 func TestFilesCreate_InvalidName(t *testing.T) {
@@ -242,7 +244,7 @@ func TestFilesCreate_ExplicitEmptyNameFallsBackToUntitled(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	assert.Equal(t, "untitled", out["name"])
+	assert.Equal(t, "untitled.txt", out["name"])
 }
 
 func TestFoldersShow_CyclicDataDoesNotHang(t *testing.T) {
