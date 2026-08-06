@@ -6,7 +6,12 @@
 // ある。差分そのものを spec から消すと mk-go 側の検証が緩くなるので、
 // 「どちらでも通る」ゆるい assert ではなく backend ごとの厳密値を使う。
 
-/** True when the spec runs against the upstream Misskey TS backend. */
+/**
+ * True when the spec runs against the upstream Misskey TS backend.
+ *
+ * 現時点で backend ごとに期待値を変えている箇所は無い (NO_SUCH_* の status を
+ * upstream に揃えたため)。新たな意図的差分が出たときの分岐点として残す。
+ */
 export const isTsBackend = process.env.MK_BACKEND_TYPE === 'ts';
 
 /**
@@ -14,9 +19,9 @@ export const isTsBackend = process.env.MK_BACKEND_TYPE === 'ts';
  *
  * upstream は `ApiError` の `kind` 既定が `'client'` なので
  * `ApiCallService.#sendApiError` の `statusCode ?? 400` に落ちて、対象が
- * 存在しない場合も 400 を返す。mk-go は意味的に正確な 404 を返す
- * (docs/divergence.md「admin 系 error の HTTP status」)。error の `code` /
- * `id` は両者一致するので、spec 側は status だけ切り替えて code は共通に
- * assert する (#2276)。
+ * 存在しない場合も 400 を返す。mk-go はかつて意味的に正確な 404 を返して
+ * おり backend ごとに期待値を分けていたが、drop-in 互換 (status で分岐する
+ * クライアントを壊さないこと) を優先して upstream に合わせたため、現在は
+ * 両者とも 400 で一致する。
  */
-export const NOT_FOUND_STATUS = isTsBackend ? 400 : 404;
+export const NOT_FOUND_STATUS = 400;

@@ -3442,6 +3442,210 @@ func TestNoteRepository_CountLocal_Error(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// ListPublicNotesForFeed は RSS/Atom/JSON フィードに載せる note を返す。
+// upstream FeedService と同じく renote を除き、visibility ∈ {public, home} を
+// 新しい順に取る。フォロワー限定・ダイレクトは公開フィードに出してはいけない。
+func TestNoteRepository_ListPublicNotesForFeed(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_feed", "feeduser")
+	defer cleanupUser(t, u.ID)
+	other := insertTestUser(t, "u_feed2", "feeduser2")
+	defer cleanupUser(t, other.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" IN (?, ?)`, u.ID, other.ID)
+
+	mk := func(id, userID string, vis model.NoteVisibility) {
+		require.NoError(t, repo.Create(&model.Note{ID: id, UserID: userID, Visibility: vis}))
+	}
+	mk("feed_pub1", u.ID, model.NoteVisibilityPublic)
+	mk("feed_home", u.ID, model.NoteVisibilityHome)
+	mk("feed_fol", u.ID, model.NoteVisibilityFollowers)
+	mk("feed_spec", u.ID, model.NoteVisibilitySpecified)
+	mk("feed_other", other.ID, model.NoteVisibilityPublic)
+	// renote は除外される。
+	src := "feed_pub1"
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "feed_rn", UserID: u.ID, Visibility: model.NoteVisibilityPublic, RenoteID: &src,
+	}))
+
+	got, err := repo.ListPublicNotesForFeed(u.ID, 50)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["feed_pub1"], "public は含む")
+	assert.True(t, ids["feed_home"], "home は含む")
+	assert.False(t, ids["feed_fol"], "followers 限定は出さない")
+	assert.False(t, ids["feed_spec"], "ダイレクトは出さない")
+	assert.False(t, ids["feed_other"], "他人の note は含まない")
+	assert.False(t, ids["feed_rn"], "renote は含まない")
+
+	// 新しい順。
+	require.GreaterOrEqual(t, len(got), 2)
+	assert.Greater(t, got[0].ID, got[1].ID)
+
+	// limit が効く。
+	limited, err := repo.ListPublicNotesForFeed(u.ID, 1)
+	require.NoError(t, err)
+	assert.Len(t, limited, 1)
+}
+
+// ListByUserIDFiltered / ListPublicNotesForFeed のカーソル分岐を覆う。
+func TestNoteRepository_ListByUserIDFiltered_Cursor(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_cur", "curuser")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, u.ID)
+
+	for _, id := range []string{"cur_1", "cur_2", "cur_3"} {
+		require.NoError(t, repo.Create(&model.Note{ID: id, UserID: u.ID, Visibility: model.NoteVisibilityPublic}))
+	}
+
+	got, err := repo.ListByUserIDFiltered(u.ID, "", "cur_3", "", 50, false, false, true, false)
+	require.NoError(t, err)
+	for _, n := range got {
+		assert.Less(t, n.ID, "cur_3", "untilID より前だけ返る")
+	}
+
+	got, err = repo.ListByUserIDFiltered(u.ID, "", "", "cur_1", 50, false, false, true, false)
+	require.NoError(t, err)
+	for _, n := range got {
+		assert.Greater(t, n.ID, "cur_1", "sinceID より後だけ返る")
+	}
+}
+
+// HideFollowersOnlyReplyFromNonFollowee: 返信先が followers 限定の投稿で、
+// viewer がその投稿者をフォローしておらず自分でもないノートを SQL 段階で弾く。
+// post-fetch だけだと件数が limit を割って DB fallback がすり抜ける。
+func TestApplyTimelineFilter_HideFollowersOnlyReply(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "u_hfr_v", "hfrV")
+	defer cleanupUser(t, viewer.ID)
+	author := insertTestUser(t, "u_hfr_a", "hfrA")
+	defer cleanupUser(t, author.ID)
+	target := insertTestUser(t, "u_hfr_t", "hfrT")
+	defer cleanupUser(t, target.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" IN (?, ?, ?)`, viewer.ID, author.ID, target.ID)
+
+	// target の followers 限定投稿への author の返信。
+	require.NoError(t, repo.Create(&model.Note{ID: "hfr_src", UserID: target.ID, Visibility: model.NoteVisibilityFollowers}))
+	src, targetID := "hfr_src", target.ID
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "hfr_reply", UserID: author.ID, Visibility: model.NoteVisibilityPublic,
+		ReplyID: &src, ReplyUserID: &targetID,
+	}))
+	require.NoError(t, repo.Create(&model.Note{ID: "hfr_plain", UserID: author.ID, Visibility: model.NoteVisibilityPublic}))
+
+	f := model.TimelineDBFilter{ViewerID: viewer.ID, HideFollowersOnlyReplyFromNonFollowee: true}
+	got, err := repo.ListGlobalTimeline(50, "", "", f)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["hfr_plain"], "通常の投稿は残る")
+	assert.False(t, ids["hfr_reply"], "未フォローの followers 投稿への返信は弾く")
+
+	// viewer が target をフォローしていれば出る。
+	require.NoError(t, testDB.Create(&model.Following{
+		ID: "hfr_fw", FollowerID: viewer.ID, FolloweeID: target.ID,
+	}).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "hfr_fw")
+
+	got, err = repo.ListGlobalTimeline(50, "", "", f)
+	require.NoError(t, err)
+	ids = map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["hfr_reply"], "フォローしていれば出る")
+}
+
+// withReplies=false でも自己スレッド (自分の投稿への自分の返信) は残す。
+// upstream の userTimeline は fanout 側で `replyUserId !== userId` を条件に
+// 振り分けており、自己スレッドは userTimeline 側に入るため出る。
+func TestNoteRepository_ListByUserIDFiltered_SelfThreadKept(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_stf", "stfuser")
+	defer cleanupUser(t, u.ID)
+	other := insertTestUser(t, "u_stf2", "stfuser2")
+	defer cleanupUser(t, other.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" IN (?, ?)`, u.ID, other.ID)
+
+	require.NoError(t, repo.Create(&model.Note{ID: "stf_root", UserID: u.ID, Visibility: model.NoteVisibilityPublic}))
+	require.NoError(t, repo.Create(&model.Note{ID: "stf_src", UserID: other.ID, Visibility: model.NoteVisibilityPublic}))
+	root, otherID, selfID := "stf_root", other.ID, u.ID
+	// 自己スレッド。
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "stf_self", UserID: u.ID, Visibility: model.NoteVisibilityPublic,
+		ReplyID: &root, ReplyUserID: &selfID,
+	}))
+	// 他人宛ての返信。
+	src := "stf_src"
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "stf_other", UserID: u.ID, Visibility: model.NoteVisibilityPublic,
+		ReplyID: &src, ReplyUserID: &otherID,
+	}))
+
+	got, err := repo.ListByUserIDFiltered(u.ID, "", "", "", 50, false, false, true, false)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["stf_root"])
+	assert.True(t, ids["stf_self"], "自己スレッドは withReplies=false でも出る")
+	assert.False(t, ids["stf_other"], "他人宛ての返信は出さない")
+
+	// withReplies=true なら両方出る。
+	got, err = repo.ListByUserIDFiltered(u.ID, "", "", "", 50, false, true, true, false)
+	require.NoError(t, err)
+	ids = map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["stf_other"])
+}
+
+// withChannelNotes=true でも本人以外にはセンシティブチャンネルの投稿を出さない
+// (upstream users/notes.ts の `channel.isSensitive = false`)。
+func TestNoteRepository_ListByUserIDFiltered_SensitiveChannel(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_sch", "schuser")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, u.ID)
+
+	chOwner := u.ID
+	require.NoError(t, testDB.Create(&model.Channel{ID: "sch_ns", UserID: &chOwner, Name: "ns", IsSensitive: false}).Error)
+	require.NoError(t, testDB.Create(&model.Channel{ID: "sch_s", UserID: &chOwner, Name: "s", IsSensitive: true}).Error)
+	defer testDB.Exec(`DELETE FROM "channel" WHERE id IN ('sch_ns','sch_s')`)
+
+	ns, sensitive := "sch_ns", "sch_s"
+	require.NoError(t, repo.Create(&model.Note{ID: "sch_plain", UserID: u.ID, Visibility: model.NoteVisibilityPublic}))
+	require.NoError(t, repo.Create(&model.Note{ID: "sch_n1", UserID: u.ID, Visibility: model.NoteVisibilityPublic, ChannelID: &ns}))
+	require.NoError(t, repo.Create(&model.Note{ID: "sch_n2", UserID: u.ID, Visibility: model.NoteVisibilityPublic, ChannelID: &sensitive}))
+
+	// 他人が見る -> センシティブチャンネルの投稿は出ない。
+	got, err := repo.ListByUserIDFiltered(u.ID, "viewer_other", "", "", 50, false, false, true, true)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["sch_plain"])
+	assert.True(t, ids["sch_n1"])
+	assert.False(t, ids["sch_n2"], "他人にはセンシティブチャンネルの投稿を出さない")
+
+	// 本人が見る -> 出る。
+	got, err = repo.ListByUserIDFiltered(u.ID, u.ID, "", "", 50, false, false, true, true)
+	require.NoError(t, err)
+	ids = map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["sch_n2"], "本人には出る")
+}
+
 // ListPublicByUserID は visibility ∈ {public, home} かつ !localOnly の note のみを
 // id DESC / cursor で返す (AP outbox 用, #1878)。
 func TestNoteRepository_ListPublicByUserID(t *testing.T) {

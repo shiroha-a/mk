@@ -333,9 +333,14 @@ worker 数だけは upstream の 16 に対し mk-go は 4。実体削除は S3 �
 
 いずれも upstream より厳しい / 正確な方向。error `code` / `id` は upstream と一致させ、status のみ異なるものが多い。
 
+なお「API エラーの HTTP status を 404 / 403 で返す」差分は解消済み。upstream は
+`ApiError` の kind 既定が `client` なので対象が存在しない場合も 400 を返す。
+mk-go は意味的に正確な 404 / 403 を返していたが、upstream から切り替えたときに
+status で分岐するクライアントが壊れるため、drop-in 互換を優先して 400 に揃えた
+(本家 e2e を mk-go に向けて回した際に検出、44 種 / 230 箇所)。
+
 | 項目 | upstream | mk-go |
 |---|---|---|
-| admin 系 error の HTTP status | `ACCESS_DENIED` / `NO_SUCH_USER` とも 400 (kind 既定 `client`) | 403 / 404 (意味的に正確、mk-go 全 admin endpoint で統一) |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
 | `admin/promo/create` | visibility check なし | public 以外を reject (将来の IDOR 先回り) |
