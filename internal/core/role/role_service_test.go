@@ -260,6 +260,28 @@ func TestGetUserPolicies_WithRoleOverride(t *testing.T) {
 	assert.Equal(t, 500, policies["driveCapacityMb"])
 }
 
+// policies jsonb に想定外の形の entry が混ざっていても、他の key の override は
+// 生き残ること。key ごとに decode しないと 1 件の異物で role の override が
+// 丸ごと落ち、「サイレンス用ロールを割り当てたのに効かない」等の silent failure
+// になる (upstream は JS の object lookup なので余計なキーは無害)。
+func TestGetUserPolicies_MalformedEntryDoesNotDropOthers(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{
+		ID:   "r1",
+		Name: "Silenced",
+		Policies: datatypes.JSON([]byte(`{
+			"0": ["alwaysMarkNsfw", {"priority": 0, "useDefault": true, "value": false}],
+			"canPublicNote": {"useDefault": false, "priority": 0, "value": false}
+		}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{
+		ID: "a1", UserID: "user1", RoleID: "r1",
+	}
+
+	assert.Equal(t, false, svc.GetUserPolicies("user1")["canPublicNote"])
+	assert.True(t, svc.IsSilenced("user1"))
+}
+
 func TestGetUserPolicies_UseDefaultTrue_NotOverridden(t *testing.T) {
 	svc, roleRepo, assignRepo, _ := newTestService(t)
 	roleRepo.Roles["r1"] = &model.Role{

@@ -549,6 +549,33 @@ type rolePolicyOverride struct {
 	Value      any  `json:"value"`
 }
 
+// parseRolePolicies decodes a role's `policies` jsonb column, skipping entries
+// that do not have the expected `{useDefault, priority, value}` shape.
+//
+// key ごとに decode するのが要点。map 全体を 1 回で Unmarshal すると、
+// 想定外の値が 1 つ混ざっただけでその role の override が丸ごと落ちる
+// (「サイレンス用ロールを割り当てたのに効かない」等の silent failure)。
+// upstream は JS の object lookup なので既知 policy 名だけを見ており、
+// 余計なキーは何の影響も与えない。
+func parseRolePolicies(raw []byte) map[string]rolePolicyOverride {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil
+	}
+	out := make(map[string]rolePolicyOverride, len(entries))
+	for key, val := range entries {
+		var o rolePolicyOverride
+		if err := json.Unmarshal(val, &o); err != nil {
+			continue
+		}
+		out[key] = o
+	}
+	return out
+}
+
 // GetUserPolicies returns the user's effective role policies. The
 // computation mirrors upstream Misskey TS `RoleService.getUserPolicies`
 // so admin-authored policy overrides take effect identically (#1020):
@@ -670,12 +697,7 @@ func (s *Service) GetUserPolicies(userID string) map[string]any {
 			roleOverrides = append(roleOverrides, nil)
 			continue
 		}
-		var m map[string]rolePolicyOverride
-		if err := json.Unmarshal(r.Policies, &m); err != nil {
-			roleOverrides = append(roleOverrides, nil)
-			continue
-		}
-		roleOverrides = append(roleOverrides, m)
+		roleOverrides = append(roleOverrides, parseRolePolicies(r.Policies))
 	}
 
 	out := make(map[string]any, len(basePolicies))
