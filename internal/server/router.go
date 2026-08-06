@@ -3362,19 +3362,26 @@ func (s *Server) setupRoutes() {
 	api.POST("/v2/admin/emoji/list", adminHandler.EmojiListV2, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("read:admin:emoji"))
 
 	// --- その他の残りエンドポイント ---
-	// test — フロントエンドのテスト用。upstream test.ts は validate 済の ps を
-	// そのまま echo し、required:['required'] が未指定なら 400 を返す (#1551)。
-	// default は 'hello'、nullableDefault も既定 'hello'。string / id は指定時のみ
-	// 含める。explicit null と absent の区別は test 用途なので簡略化している。
+	// test — paramDef の検証挙動そのものを確認するための endpoint
+	// (upstream test.ts、#1551)。validate 済の ps をそのまま echo する。
+	//
+	//   - required:['required'] が未指定なら 400
+	//   - `id` は format:'misskey:id' なので空文字は 400
+	//   - default 付きの param はキー省略時のみ既定値。`nullableDefault: null`
+	//     は明示 null として通す (default で潰さない)
 	api.POST("/test", func(c echo.Context) error {
 		var req struct {
-			Required        *bool   `json:"required"`
-			String          *string `json:"string"`
-			Default         *string `json:"default"`
-			NullableDefault *string `json:"nullableDefault"`
-			ID              *string `json:"id"`
+			Required        *bool           `json:"required"`
+			String          *string         `json:"string"`
+			Default         *string         `json:"default"`
+			NullableDefault json.RawMessage `json:"nullableDefault"`
+			ID              *string         `json:"id"`
 		}
 		if err := c.Bind(&req); err != nil || req.Required == nil {
+			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+		}
+		// format:'misskey:id' は空文字を許さない。
+		if req.ID != nil && *req.ID == "" {
 			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
 		out := map[string]any{"required": *req.Required}
@@ -3385,9 +3392,18 @@ func (s *Server) setupRoutes() {
 		if req.Default != nil {
 			out["default"] = *req.Default
 		}
+		// キー省略なら default、`null` ならそのまま null。
 		out["nullableDefault"] = "hello"
-		if req.NullableDefault != nil {
-			out["nullableDefault"] = *req.NullableDefault
+		if len(req.NullableDefault) > 0 {
+			if string(req.NullableDefault) == "null" {
+				out["nullableDefault"] = nil
+			} else {
+				var v string
+				if err := json.Unmarshal(req.NullableDefault, &v); err != nil {
+					return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
+				}
+				out["nullableDefault"] = v
+			}
 		}
 		if req.ID != nil {
 			out["id"] = *req.ID
