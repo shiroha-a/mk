@@ -95,6 +95,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 			BlockerIDs:            h.loadBlockerIDs(viewer),
 			MutedInstances:        h.loadMutedInstances(viewer),
 			FollowedChannelIDs:    h.loadFollowedChannelIDs(viewer),
+			FollowingIDs:          h.loadFollowingIDs(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -167,6 +168,7 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
 			BlockerIDs:            h.loadBlockerIDs(viewer),
 			MutedInstances:        h.loadMutedInstances(viewer),
+			FollowingIDs:          h.loadFollowingIDs(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
@@ -280,6 +282,28 @@ func (h *Handler) loadRenoteMutedUserIDs(viewer *model.User) []string {
 // loadBlockerIDs returns the ids of users who block the viewer (被block、#1681)。
 // timeline で note/reply/renote の author が viewer を block していれば除外する
 // (upstream generateBlockedUserQueryForNotes)。
+// loadFollowingIDs returns the set of users the viewer follows.
+//
+// upstream timeline.ts は HTL の noteFilter で followings を引き、「返信先が
+// followers 限定の投稿で、その投稿者をフォローしていない」ノートを弾く。
+// fanout 側にも同等のガードはあるが DB fallback には効かないので、取得側でも
+// 同じ判定ができるようにする。
+func (h *Handler) loadFollowingIDs(viewer *model.User) map[string]struct{} {
+	if viewer == nil || h.userFollowingRepo == nil {
+		return nil
+	}
+	rows, err := h.userFollowingRepo.ListFollowing(viewer.ID, 0, 0)
+	if err != nil {
+		slog.Warn("timeline: failed to load followings", "userId", viewer.ID, "err", err)
+		return nil
+	}
+	out := make(map[string]struct{}, len(rows))
+	for _, f := range rows {
+		out[f.FolloweeID] = struct{}{}
+	}
+	return out
+}
+
 func (h *Handler) loadBlockerIDs(viewer *model.User) []string {
 	if viewer == nil || h.blockingRepo == nil {
 		return nil

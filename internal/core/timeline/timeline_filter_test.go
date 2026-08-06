@@ -374,3 +374,36 @@ func TestApplyFilter_RenoteMutedQuoteRenoteKept(t *testing.T) {
 	assert.Equal(t, "1", out[0].ID)
 	assert.Equal(t, "2", out[1].ID)
 }
+
+// upstream timeline.ts の noteFilter: 返信先が followers 限定の投稿で、その
+// 投稿者をフォローしていない (かつ自分でもない) 場合は HTL に出さない。
+func TestApplyFilter_HidesFollowersOnlyReplyFromNonFollowee(t *testing.T) {
+	reply := &model.Note{ID: "src", UserID: "carol", Visibility: model.NoteVisibilityFollowers}
+	n := &model.Note{ID: "n1", UserID: "bob", ReplyID: &reply.ID, Reply: reply}
+
+	// carol をフォローしていない -> 除外
+	out := ApplyFilter([]*model.Note{n}, "alice", TimelineFilter{FollowingIDs: map[string]struct{}{"bob": {}}})
+	assert.Empty(t, out)
+
+	// carol をフォローしている -> 残る
+	out = ApplyFilter([]*model.Note{n}, "alice", TimelineFilter{FollowingIDs: map[string]struct{}{"bob": {}, "carol": {}}})
+	assert.Len(t, out, 1)
+
+	// 自分の投稿への返信なら残る
+	self := &model.Note{ID: "src2", UserID: "alice", Visibility: model.NoteVisibilityFollowers}
+	n2 := &model.Note{ID: "n2", UserID: "bob", ReplyID: &self.ID, Reply: self}
+	out = ApplyFilter([]*model.Note{n2}, "alice", TimelineFilter{FollowingIDs: map[string]struct{}{"bob": {}}})
+	assert.Len(t, out, 1)
+
+	// FollowingIDs 未配線なら判定しない (従来挙動)
+	out = ApplyFilter([]*model.Note{n}, "alice", TimelineFilter{})
+	assert.Len(t, out, 1)
+}
+
+// 返信先が public なら素通し。
+func TestApplyFilter_PublicReplyPasses(t *testing.T) {
+	reply := &model.Note{ID: "src", UserID: "carol", Visibility: model.NoteVisibilityPublic}
+	n := &model.Note{ID: "n1", UserID: "bob", ReplyID: &reply.ID, Reply: reply}
+	out := ApplyFilter([]*model.Note{n}, "alice", TimelineFilter{FollowingIDs: map[string]struct{}{"bob": {}}})
+	assert.Len(t, out, 1)
+}

@@ -246,6 +246,9 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 		IncludeLocalRenotes:   f.IncludeLocalRenotes,
 		ViewerID:              viewerID,
 		MutedChannelIDs:       f.MutedChannelIDs,
+		// FollowingIDs が配線されている経路 (HTL / STL) でだけ SQL 側の gate も
+		// 有効にする。post-fetch だけだと DB fallback がすり抜ける。
+		HideFollowersOnlyReplyFromNonFollowee: f.FollowingIDs != nil,
 		// production の SQL 経路では muting テーブルへの subquery で filter
 		// する (#894)。viewer 単位で bind parameter 数が固定 (2) なので
 		// heavy-mute viewer (>1000 mute) でも planning コストが膨らまない。

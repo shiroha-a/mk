@@ -46,6 +46,13 @@ type TimelineFilter struct {
 	// MutedUserIDs が toDBFilter 経由で SQL の NOT IN として push-down
 	// されるので、両経路で同 semantics に保たれる (#892)。
 	MutedUserIDs []string
+	// FollowingIDs は viewer がフォローしている user の集合。
+	//
+	// upstream の HTL は取得側の noteFilter で「返信先が followers 限定の投稿で、
+	// その投稿者を自分がフォローしていない (かつ自分でもない)」ノートを弾く。
+	// fanout 側にも同等のガードはあるが、DB fallback 経路には効かないので
+	// 取得側でも同じ判定を通す。nil なら判定をスキップする (未配線)。
+	FollowingIDs map[string]struct{}
 	// RenoteMutedUserIDs は viewer が renote-mute した user の **pure renote**
 	// だけを除外する filter (#903)。MutedUserIDs と異なり:
 	//   - 投稿者の plain note (= text あり / file 付き / quote renote 含む) は
@@ -111,6 +118,22 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 	includeRenotedMyNotes := boolDefault(f.IncludeRenotedMyNotes, true)
 	includeLocalRenotes := boolDefault(f.IncludeLocalRenotes, true)
 
+	// 返信先が followers 限定なら、その投稿者をフォローしているか (または自分の
+	// 投稿か) を確認する。upstream timeline.ts の noteFilter と同じ判定。
+	hideFollowersOnlyReply := func(n *model.Note) bool {
+		if f.FollowingIDs == nil || n.Reply == nil {
+			return false
+		}
+		if n.Reply.Visibility != model.NoteVisibilityFollowers {
+			return false
+		}
+		if n.Reply.UserID == viewerID {
+			return false
+		}
+		_, following := f.FollowingIDs[n.Reply.UserID]
+		return !following
+	}
+
 	var mutedChannels map[string]struct{}
 	if len(f.MutedChannelIDs) > 0 {
 		mutedChannels = make(map[string]struct{}, len(f.MutedChannelIDs))
@@ -157,6 +180,9 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 	out := make([]*model.Note, 0, len(notes))
 	for _, n := range notes {
 		if f.WithFiles && len(n.FileIDs) == 0 {
+			continue
+		}
+		if hideFollowersOnlyReply(n) {
 			continue
 		}
 		if !withRenotes && isPureRenote(n) {

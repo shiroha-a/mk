@@ -1080,6 +1080,15 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	if f.IncludeLocalRenotes != nil && !*f.IncludeLocalRenotes {
 		q = q.Where(`NOT (` + pureRenoteCondSQL + ` AND "renoteUserHost" IS NULL)`)
 	}
+	if f.HideFollowersOnlyReplyFromNonFollowee && f.ViewerID != "" {
+		// 返信先が followers 限定なら、その投稿者を viewer がフォローしている
+		// (または viewer 自身の投稿) 場合だけ残す。
+		q = q.Where(`("replyId" IS NULL OR "replyUserId" IS NULL OR NOT EXISTS (
+			SELECT 1 FROM "note" rp WHERE rp.id = "note"."replyId" AND rp.visibility = 'followers'
+		) OR "replyUserId" = ? OR EXISTS (
+			SELECT 1 FROM "following" fw WHERE fw."followerId" = ? AND fw."followeeId" = "note"."replyUserId"
+		))`, f.ViewerID, f.ViewerID)
+	}
 	if len(f.MutedChannelIDs) > 0 {
 		// channel_mutingに登録されたチャンネルのノートはタイムラインから除外する。
 		// GORMは連続.WhereをANDで繋ぐがraw SQL側のORはデフォルトでは

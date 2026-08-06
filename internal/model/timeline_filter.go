@@ -21,6 +21,12 @@ type TimelineDBFilter struct {
 	// 使うので本フィールドは空のまま。test と非 viewer 駆動経路では literal
 	// list を直接渡す override path として残す。
 	MutedUserIDs []string
+	// HideFollowersOnlyReplyFromNonFollowee が true のとき、返信先が followers
+	// 限定の投稿で、viewer がその投稿者をフォローしておらず自分でもないノートを
+	// 除外する。upstream timeline.ts の noteFilter と同じ判定を SQL 側でも行う。
+	// post-fetch だけで弾くと、フィルタ後件数が limit を割って DB fallback が
+	// 走り、そちらが除外していないノートを持ってきてしまう。
+	HideFollowersOnlyReplyFromNonFollowee bool
 	// UseMutingSubquery が true の場合、ViewerID を使って muting テーブルへ
 	// の subquery で muted user filter を適用する (#894)。MutedUserIDs を
 	// literal IN (...) で渡す方式に対し、bind parameter 数が viewer の

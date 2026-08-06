@@ -1507,6 +1507,8 @@ func (s *Server) setupRoutes() {
 	notesHandler.SetChannelMutingRepo(channelMutingRepo)
 	// home timeline で follow 中 channel の note を含める (#1686)。
 	notesHandler.SetChannelFollowingRepo(channelFollowingRepo)
+	// HTL の「返信先が followers 限定の投稿」ガード (upstream timeline.ts の noteFilter)。
+	notesHandler.SetUserFollowingRepo(followingRepo)
 	// notes/featured の engagement ランキング読み取り (#1687)。
 	notesHandler.SetFeaturedRanking(featuredService)
 	// timeline endpoint で muted user の note を除外する filter (#874)。
