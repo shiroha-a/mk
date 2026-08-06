@@ -239,9 +239,9 @@ func NewNoteRepository(db *gorm.DB) NoteRepository {
 // renote ブランチだけ 2 段展開する: 純粋リノート (boost) が引用投稿 (quote) を
 // 包む場合、renote (= quote) のさらに renote (= 引用先) まで preload しないと
 // frontend が引用先を「削除されたノート」として描画してしまう (packer の
-// maxNoteEmbedDepth=2 と一致)。packer は renote.renote のみ depth-2 で出す
-// (renote.reply / reply.* の depth-2 は出さない) ので、preload も Renote.Renote
-// のみ 2 段にする。
+// maxNoteEmbedDepth=2 と一致)。packer は renote を detail 付きで pack するので
+// renote.renote と renote.reply の 2 つが depth-2 に出る。reply は detail 無しで
+// pack するため reply.* は展開されない。
 //
 // Poll は note.hasPoll==true のとき 1:1 で attach する (#690)。Preload は
 // 自動的に hasPoll=false の note では何も読まないので overhead は小さい
@@ -254,6 +254,8 @@ func preloadNoteRelations(db *gorm.DB) *gorm.DB {
 		Preload("Renote.Renote").
 		Preload("Renote.Renote.User").
 		Preload("Renote.Renote.Poll").
+		Preload("Renote.Reply").
+		Preload("Renote.Reply.User").
 		Preload("Reply").
 		Preload("Reply.User").
 		Preload("Reply.Poll").
@@ -690,10 +692,10 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 		}
 	}
 
-	// (2.5) 2 段目: 1 段目 renote target (= quote 候補) の renote (= 引用先) を
-	// さらに 1 query で取得し配線する。pure renote → quote → 引用先 の 3 段目を
-	// 埋めるため。packer は renote.renote のみ depth-2 で出す (renote.reply /
-	// reply.* は出さない) ので、ここも renote ブランチのみ辿る。
+	// (2.5) 2 段目: 1 段目 renote target (= quote 候補) の renote (= 引用先) と
+	// reply (= 返信先) をさらに 1 query で取得し配線する。pure renote → quote →
+	// 引用先 の 3 段目を埋めるため。packer は renote を detail 付きで pack する
+	// ので renote.renote と renote.reply が depth-2 に出る (reply.* は出さない)。
 	var renoteTargetSubs []*model.Note
 	for _, n := range notes {
 		if n.RenoteID != nil {
@@ -704,9 +706,12 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 	}
 	lvl2IDSet := make(map[string]struct{})
 	for _, s := range renoteTargetSubs {
-		if s.RenoteID != nil {
-			if _, ok := subByID[*s.RenoteID]; !ok {
-				lvl2IDSet[*s.RenoteID] = struct{}{}
+		for _, id := range []*string{s.RenoteID, s.ReplyID} {
+			if id == nil {
+				continue
+			}
+			if _, ok := subByID[*id]; !ok {
+				lvl2IDSet[*id] = struct{}{}
 			}
 		}
 	}
@@ -727,6 +732,9 @@ func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, err
 	for _, s := range renoteTargetSubs {
 		if s.RenoteID != nil {
 			s.Renote = subByID[*s.RenoteID]
+		}
+		if s.ReplyID != nil {
+			s.Reply = subByID[*s.ReplyID]
 		}
 	}
 

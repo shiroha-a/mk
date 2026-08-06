@@ -959,7 +959,7 @@ func TestNoteRepository_FindManyByIDsWithUser_HydratesNestedRenote(t *testing.T)
 
 	qtext := "quoting"
 	target := mkNote("n_nr_t", ut.ID, nil, nil, nil) // LV2 引用先
-	rtgt := mkNote("n_nr_rp", urp.ID, nil, nil, nil) // quote の reply 先 (depth-2 では hydrate されない)
+	rtgt := mkNote("n_nr_rp", urp.ID, nil, nil, nil) // quote の reply 先 (depth-2)
 	// LV1 引用投稿 = renote(target) + reply(rtgt) + text。
 	quote := mkNote("n_nr_q", uq.ID, &target.ID, &rtgt.ID, &qtext)
 	boost := mkNote("n_nr_b", ub.ID, &quote.ID, nil, nil) // LV0 pure renote
@@ -985,8 +985,11 @@ func TestNoteRepository_FindManyByIDsWithUser_HydratesNestedRenote(t *testing.T)
 	assert.Equal(t, target.ID, got.Renote.Renote.ID)
 	require.NotNil(t, got.Renote.Renote.User, "quote target user must be hydrated")
 	assert.Equal(t, ut.ID, got.Renote.Renote.User.ID)
-	// renote.reply (depth-2) は hydrate しない (packer が出さないため)。
-	assert.Nil(t, got.Renote.Reply, "renote.reply (depth-2) must not be hydrated")
+	// LV2 reply: renote 先の返信先も packer が出すので hydrate する。
+	require.NotNil(t, got.Renote.Reply, "renote.reply (depth-2) must be hydrated")
+	assert.Equal(t, rtgt.ID, got.Renote.Reply.ID)
+	require.NotNil(t, got.Renote.Reply.User, "renote.reply user must be hydrated")
+	assert.Equal(t, urp.ID, got.Renote.Reply.User.ID)
 }
 
 // aliasing 回帰: 同ページの別ノートが depth-2 ターゲットを既に depth-1 sub として

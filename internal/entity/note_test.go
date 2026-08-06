@@ -394,8 +394,10 @@ func TestPackNote_NestedRenoteEmbedPacksQuoteTarget(t *testing.T) {
 	assert.Equal(t, &targetText, e.Renote.Renote.Text)
 	// LV3: maxNoteEmbedDepth=2 で打ち切られる。
 	assert.Nil(t, e.Renote.Renote.Renote, "renote chain must stop at maxNoteEmbedDepth=2")
-	// renote embed 内の reply (depth-2) は展開しない (top-level reply のみ)。
-	assert.Nil(t, e.Renote.Reply, "renote.reply (depth-2) must not be packed")
+	// renote embed 内の reply (depth-2) も upstream と同じく展開する
+	// (renote は detail:true で pack されるため)。
+	require.NotNil(t, e.Renote.Reply, "renote.reply (depth-2) must pack like upstream")
+	assert.Equal(t, quoteReplyID, e.Renote.Reply.ID)
 
 	// reply embed は detail:false leaf なので自分の renote を展開しない (upstream 一致)。
 	require.NotNil(t, e.Reply, "top.reply should pack")

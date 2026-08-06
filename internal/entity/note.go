@@ -309,17 +309,18 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int, detail bool) 
 	// 「pure renote → quote → 引用先」の引用先 (renote.renote) を出す。これが
 	// 無いと frontend が引用先を「削除されたノート」として描画する。
 	//
-	// reply embed は top-level (depth 0) のみ展開する。renote 埋め込み内の reply
-	// (depth 2) は frontend の表示要件が無く、かつ depth-2 embed には可視性ゲート
-	// (notehide / streaming note_filter) を別途用意する必要があるため、不要な leak
-	// 面を増やさないよう展開しない (renote.renote だけを depth-2 で出す)。reply
-	// embed では clippedCount/poll/myReaction を省く (#1816)。
+	// reply embed も detail 中は depth ごとに展開する。upstream は renote を
+	// detail:true で pack するので、その中の reply (= renote.reply、depth 2) も
+	// 出る。reply 自体は detail:false で pack するため reply.reply へは伸びない。
+	// depth-2 embed には可視性ゲートが要るので、notehide / streaming note_filter /
+	// webpush / webhook の 4 箇所も renote.reply を同じ深さまで見る。
+	// reply embed では clippedCount/poll/myReaction を省く (#1816)。
 	if detail && depth < maxNoteEmbedDepth {
 		if n.Renote != nil {
 			r := packNoteAtDepth(n.Renote, idGen, depth+1, true)
 			entity.Renote = &r
 		}
-		if depth == 0 && n.Reply != nil {
+		if n.Reply != nil {
 			r := packNoteAtDepth(n.Reply, idGen, depth+1, false)
 			entity.Reply = &r
 		}

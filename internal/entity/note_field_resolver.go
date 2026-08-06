@@ -185,12 +185,8 @@ func (r *NoteFieldResolver) populateNoteFiles(n *NoteEntity, fileMap map[string]
 		return
 	}
 	n.Files = r.packNoteFiles(n.FileIDs, fileMap, folderCache, userCache)
-	if n.Renote != nil {
-		n.Renote.Files = r.packNoteFiles(n.Renote.FileIDs, fileMap, folderCache, userCache)
-	}
-	if n.Reply != nil {
-		n.Reply.Files = r.packNoteFiles(n.Reply.FileIDs, fileMap, folderCache, userCache)
-	}
+	r.populateNoteFiles(n.Renote, fileMap, folderCache, userCache)
+	r.populateNoteFiles(n.Reply, fileMap, folderCache, userCache)
 }
 
 func (r *NoteFieldResolver) packNoteFiles(fileIDs []string, fileMap map[string]*model.DriveFile, folderCache map[string]*model.DriveFolder, userCache map[string]*model.User) []any {
@@ -301,18 +297,16 @@ func (r *NoteFieldResolver) fillUserCache(ids []string, cache map[string]*model.
 // 元は internal/api/notes/handler.go に閉じていたが、本 resolver の他
 // handler への展開 (#426) に伴って entity に再配置している。
 
+// embed の深さは packer 側 (maxNoteEmbedDepth) が抑えるので、走査は素直に
+// 再帰する。depth-2 の renote.renote / renote.reply も files を持つため、
+// 1 階層で止めると添付が空のまま返る。
 func appendNoteFileIDs(dst []string, n *NoteEntity) []string {
 	if n == nil {
 		return dst
 	}
 	dst = append(dst, n.FileIDs...)
-	if n.Renote != nil {
-		dst = append(dst, n.Renote.FileIDs...)
-	}
-	if n.Reply != nil {
-		dst = append(dst, n.Reply.FileIDs...)
-	}
-	return dst
+	dst = appendNoteFileIDs(dst, n.Renote)
+	return appendNoteFileIDs(dst, n.Reply)
 }
 
 // appendNoteIDs collects note IDs whose viewer myReaction should be batch

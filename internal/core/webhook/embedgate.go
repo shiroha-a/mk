@@ -28,10 +28,11 @@ func gateNoteEmbeds(viewer *model.User, n *entity.NoteEntity, repo repository.Fo
 	follows := buildEmbedFollowSet(viewer, n, repo)
 	hideEmbedIfNeeded(viewer, n.Renote, follows, nowMs)
 	hideEmbedIfNeeded(viewer, n.Reply, follows, nowMs)
-	// depth-2 引用先 (renote.renote)。packer が pure renote → quote の引用先を出す
-	// ため、非公開の引用先が webhook payload に leak しないよう gate する。
+	// depth-2 embed (renote.renote / renote.reply)。packer がこれらを出すため、
+	// 非公開の note が webhook payload に leak しないよう gate する。
 	if n.Renote != nil {
 		hideEmbedIfNeeded(viewer, n.Renote.Renote, follows, nowMs)
+		hideEmbedIfNeeded(viewer, n.Renote.Reply, follows, nowMs)
 	}
 }
 
@@ -49,6 +50,7 @@ func buildEmbedFollowSet(viewer *model.User, n *entity.NoteEntity, repo reposito
 	collectEmbedAuthor(n.Reply, viewer.ID, seen)
 	if n.Renote != nil {
 		collectEmbedAuthor(n.Renote.Renote, viewer.ID, seen)
+		collectEmbedAuthor(n.Renote.Reply, viewer.ID, seen)
 	}
 	if len(seen) == 0 {
 		return never

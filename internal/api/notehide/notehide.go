@@ -100,11 +100,12 @@ func hideEmbedsAt(viewer *model.User, packed []entity.NoteEntity, repo repositor
 		hideTopLevelIfNeeded(viewer, &packed[i], follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Renote, follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed[i].Reply, follows, nowMs)
-		// pure renote → quote の引用先 (renote.renote, depth-2) も embed gate を適用する。
-		// packer がこの depth-2 を出すようになった (#timeline nested quote) ため、
-		// 非公開の引用先が renote 経由で leak しないようここで blank する。
+		// pure renote → quote の引用先 (renote.renote) と、renote 先の返信先
+		// (renote.reply) の depth-2 embed にも同じ gate を適用する。packer が
+		// これらを出すため、非公開の note が renote 経由で leak しないよう blank する。
 		if packed[i].Renote != nil {
 			hideEmbedIfNeeded(viewer, packed[i].Renote.Renote, follows, nowMs)
+			hideEmbedIfNeeded(viewer, packed[i].Renote.Reply, follows, nowMs)
 		}
 		// #2106 L5: treatVisibility downgrade を packed entity の visibility field にも反映する
 		// (hide 判定が元の visibility を読み終えた後に書き換える、viewer 非依存)。
@@ -113,6 +114,7 @@ func hideEmbedsAt(viewer *model.User, packed []entity.NoteEntity, repo repositor
 		downgradeVisibilityIfNeeded(packed[i].Reply, nowMs)
 		if packed[i].Renote != nil {
 			downgradeVisibilityIfNeeded(packed[i].Renote.Renote, nowMs)
+			downgradeVisibilityIfNeeded(packed[i].Renote.Reply, nowMs)
 		}
 	}
 }
@@ -164,9 +166,10 @@ func buildFollowSet(viewer *model.User, packed []entity.NoteEntity, repo reposit
 		collectTopLevelAuthor(&packed[i], viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Renote, viewer.ID, seen)
 		collectEmbedAuthor(packed[i].Reply, viewer.ID, seen)
-		// depth-2 引用先 (renote.renote) の著者も follow 判定対象に含める。
+		// depth-2 embed (renote.renote / renote.reply) の著者も follow 判定対象に含める。
 		if packed[i].Renote != nil {
 			collectEmbedAuthor(packed[i].Renote.Renote, viewer.ID, seen)
+			collectEmbedAuthor(packed[i].Renote.Reply, viewer.ID, seen)
 		}
 	}
 	if len(seen) == 0 {
