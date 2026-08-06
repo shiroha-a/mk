@@ -1053,7 +1053,7 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 		// pure renote (text/cw/files/poll/reply 全て空の renote) を除外 (#1888)。
 		q = q.Where(`NOT (` + pureRenoteCondSQL + `)`)
 	}
-	if f.WithReplies != nil && !*f.WithReplies {
+	if f.ExcludeRepliesToOthers || (f.WithReplies != nil && !*f.WithReplies) {
 		// upstream Misskey TS Home TL と完全一致: `replyId IS NULL` か、
 		// reply の場合は self-thread (= replyUserId = note.userId) のみ残す
 		// (#1047)。

@@ -291,6 +291,11 @@ func (s *Server) setupRoutes() {
 	// Phase DB-compat (#51): meta から timeline cache cap を動的に読む。
 	// 4 つのカラム (perLocal / perRemote / perHome / perList) が反映される。
 	timelineFanoutHook.SetCacheLimitsProvider(coretimeline.NewMetaRepoCacheLimits(metaRepo))
+	// meta.enableFanoutTimeline を push / read の両側に効かせる。無効時は Redis を
+	// 触らず DB 直行になる (upstream の FTT 全停止と同じ)。
+	fanoutToggle := coretimeline.NewMetaFanoutToggle(metaRepo)
+	timelineFanoutHook.SetFanoutToggle(fanoutToggle)
+	timelineService.SetFanoutToggle(fanoutToggle)
 	timelineFanoutHook.SetUserListRepo(userListRepo)
 	timelineFanoutHook.SetUserRolesLookup(roleService) // #1549: roleTimeline fanout
 	// #1686: channel note を channel follower の home timeline へ fanout する。

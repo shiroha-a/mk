@@ -36,6 +36,8 @@ type Service struct {
 	// ephemeral はリレー経由でしか観測しない投稿の置き場 (#2332)。DB に無い
 	// ID をここから補う。nil なら従来どおり DB のみ。
 	ephemeral EphemeralNoteLookup
+	// fanoutToggle は meta.enableFanoutTimeline。nil なら常に有効扱い。
+	fanoutToggle FanoutToggleProvider
 }
 
 // EphemeralNoteLookup resolves notes that live only in Redis (#2332).
@@ -57,6 +59,49 @@ func (s *Service) SetEphemeralLookup(l EphemeralNoteLookup) {
 	s.ephemeral = l
 }
 
+// SetFanoutToggle attaches meta.enableFanoutTimeline so that reads bypass Redis
+// entirely while FTT is off (upstream timeline endpoint の
+// `if (!serverSettings.enableFanoutTimeline) return getFromDb()` 相当)。
+//
+// gate が無いと、FTT を切った後も Redis に残った ID が読まれ続ける。push 側も
+// 止まっているので古い ID が押し出されることも無く、タイムラインが過去の内容で
+// 固まってしまう。
+func (s *Service) SetFanoutToggle(p FanoutToggleProvider) {
+	s.fanoutToggle = p
+}
+
+// fanoutEnabled reports whether FTT is on. Provider 未配線なら有効扱い。
+func (s *Service) fanoutEnabled() bool {
+	if s.fanoutToggle == nil {
+		return true
+	}
+	return s.fanoutToggle.FanoutTimelineEnabled()
+}
+
+// fallbackRange narrows the database fallback to the range *beyond* what was
+// already read from Redis, so the fan-out result is topped up instead of being
+// thrown away.
+//
+// upstream FanoutTimelineEndpointService は Redis から取れた分を残したまま、
+// 最後に読んだ ID を境界にして「足りない分だけ」を DB から継ぎ足す
+// (`dbUntil = noteIds[noteIds.length - 1]` → `[...redisTimeline, ...gotFromDb]`)。
+// mk-go は以前、件数が足りないと同じ範囲を DB で引き直して Redis 側の結果ごと
+// 置き換えていたため、fanout が配った note (per-follow withReplies を反映した
+// 返信など) が DB query の条件で消える現象が起きていた。
+//
+// sinceID のみ指定された昇順ページングでは境界が逆になるので、返す since/until
+// を入れ替える。
+func fallbackRange(ids []string, sinceID, untilID string) (fbSince, fbUntil string) {
+	if len(ids) == 0 {
+		return sinceID, untilID
+	}
+	boundary := ids[len(ids)-1]
+	if sinceID != "" && untilID == "" {
+		return boundary, untilID
+	}
+	return sinceID, boundary
+}
+
 // HomeTimeline returns the timeline for a logged-in user. The home timeline
 // shows notes by users they follow plus their own notes.
 func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID, sinceID string, limit int, filter TimelineFilter) ([]*model.Note, error) {
@@ -65,6 +110,14 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 	}
 	if limit <= 0 {
 		limit = 20
+	}
+	// upstream notes/timeline の getFromDb は withReplies を持たず、常に
+	// 「返信ではない or 自己スレッド」だけを返す。返信を出すかどうかは
+	// `following.withReplies` を見る fanout (push) 側の責務。
+	dbFilter := toDBFilter(filter, viewer.ID)
+	dbFilter.ExcludeRepliesToOthers = true
+	if !s.fanoutEnabled() {
+		return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)
 	}
 	ids, err := s.fanout.Get(ctx, HomeTimelineName(viewer.ID), untilID, sinceID, limit)
 	if err != nil {
@@ -77,11 +130,16 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 		}
 		notes = ApplyFilter(notes, viewer.ID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, toDBFilter(filter, viewer.ID))
+			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			rest, err := s.noteRepo.ListHomeTimeline(viewer.ID, limit-len(notes), fbSince, fbUntil, dbFilter)
+			if err != nil {
+				return nil, err
+			}
+			return append(notes, rest...), nil
 		}
 		return notes, nil
 	}
-	return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, toDBFilter(filter, viewer.ID))
+	return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)
 }
 
 // LocalTimeline returns notes posted by local users with public/home visibility.
@@ -98,6 +156,16 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 	//   viewer あり        -> localTimeline + localTimelineWithReplyTo:<viewer>
 	//   viewer なし        -> localTimeline のみ
 	// これで「他人の他人への返信は出ない」「自分宛ての返信は出る」が両立する。
+	// upstream local-timeline の getFromDb は withReplies パラメータ (既定
+	// false) が偽なら「返信ではない or 自己スレッド」に絞る。mk-go は未指定
+	// (nil) を false と同じ扱いにする必要がある。
+	dbFilter := toDBFilter(filter, viewerID)
+	if filter.WithReplies == nil || !*filter.WithReplies {
+		dbFilter.ExcludeRepliesToOthers = true
+	}
+	if !s.fanoutEnabled() {
+		return s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, dbFilter)
+	}
 	keys := []Name{LocalTimeline}
 	switch {
 	case filter.WithReplies != nil && *filter.WithReplies:
@@ -116,11 +184,16 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 		}
 		notes = ApplyFilter(notes, viewerID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			return s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, toDBFilter(filter, viewerID))
+			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			rest, err := s.noteRepo.ListLocalTimeline(limit-len(notes), fbSince, fbUntil, dbFilter)
+			if err != nil {
+				return nil, err
+			}
+			return append(notes, rest...), nil
 		}
 		return notes, nil
 	}
-	return s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, toDBFilter(filter, viewerID))
+	return s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, dbFilter)
 }
 
 // GlobalTimeline returns all public notes including federated remotes.
@@ -131,6 +204,9 @@ func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilI
 	viewerID := ""
 	if viewer != nil {
 		viewerID = viewer.ID
+	}
+	if !s.fanoutEnabled() {
+		return s.noteRepo.ListGlobalTimeline(limit, sinceID, untilID, toDBFilter(filter, viewerID))
 	}
 	ids, err := s.fanout.Get(ctx, GlobalTimeline, untilID, sinceID, limit)
 	if err != nil {
@@ -143,7 +219,12 @@ func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilI
 		}
 		notes = ApplyFilter(notes, viewerID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			return s.noteRepo.ListGlobalTimeline(limit, sinceID, untilID, toDBFilter(filter, viewerID))
+			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			rest, err := s.noteRepo.ListGlobalTimeline(limit-len(notes), fbSince, fbUntil, toDBFilter(filter, viewerID))
+			if err != nil {
+				return nil, err
+			}
+			return append(notes, rest...), nil
 		}
 		return notes, nil
 	}
@@ -161,6 +242,9 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 	// LTL 側は LocalTimeline 系列を返信の有無で使い分ける (LocalTimeline と
 	// 同じ規則)。素の localTimeline には返信が入っていないので、ここで合流させ
 	// ないと withReplies=true でも返信が出てこない。
+	if !s.fanoutEnabled() {
+		return s.hybridDBFallback(viewer, untilID, sinceID, limit, filter)
+	}
 	stlKeys := []Name{HomeTimelineName(viewer.ID), LocalTimeline}
 	if filter.WithReplies != nil && *filter.WithReplies {
 		stlKeys = append(stlKeys, LocalTimelineWithReplies)
@@ -179,7 +263,12 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 		}
 		notes = ApplyFilter(notes, viewer.ID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			return s.hybridDBFallback(viewer, untilID, sinceID, limit, filter)
+			fbSince, fbUntil := fallbackRange(merged, sinceID, untilID)
+			rest, err := s.hybridDBFallback(viewer, fbUntil, fbSince, limit-len(notes), filter)
+			if err != nil {
+				return nil, err
+			}
+			return append(notes, rest...), nil
 		}
 		return notes, nil
 	}
@@ -202,6 +291,11 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 // pagination は keyset 方式で次 page 取得時に補完される設計)。
 func (s *Service) hybridDBFallback(viewer *model.User, untilID, sinceID string, limit int, filter TimelineFilter) ([]*model.Note, error) {
 	dbFilter := toDBFilter(filter, viewer.ID)
+	// upstream hybrid-timeline も withReplies (既定 false) が偽なら
+	// 「返信ではない or 自己スレッド」に絞る。未指定 (nil) は false 扱い。
+	if filter.WithReplies == nil || !*filter.WithReplies {
+		dbFilter.ExcludeRepliesToOthers = true
+	}
 	homeNotes, err := s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)
 	if err != nil {
 		return nil, err

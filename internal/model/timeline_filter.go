@@ -56,6 +56,16 @@ type TimelineDBFilter struct {
 	// timeline.ts の followingChannelIds 分岐)。空なら従来どおり channelId IS NULL
 	// の note のみ (= followed user の channel note は home から除外される)。
 	FollowedChannelIDs []string
+	// ExcludeRepliesToOthers は WithReplies に依らず「返信ではない or 自己
+	// スレッド」だけを残す。upstream の notes/timeline (HTL) は withReplies
+	// パラメータを持たず、この条件を無条件に付ける。per-follow の
+	// `following.withReplies` は fanout (push) 側だけに効く仕様なので、
+	// DB fallback では反映しない。
+	//
+	// WithReplies を false 固定にする方法だと Redis 経路の post-fetch
+	// フィルタまで巻き込んで fanout が配った返信が消えるため、DB 専用の
+	// フラグとして分けている。
+	ExcludeRepliesToOthers bool
 }
 
 // PublicNotesFilter carries the optional filters of the upstream notes.ts

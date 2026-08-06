@@ -168,7 +168,12 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			RenoteMutedUserIDs:    h.loadRenoteMutedUserIDs(viewer),
 			BlockerIDs:            h.loadBlockerIDs(viewer),
 			MutedInstances:        h.loadMutedInstances(viewer),
-			FollowingIDs:          h.loadFollowingIDs(viewer),
+			// upstream hybrid-timeline も getFromDb で
+			// `channelId IN (followingChannelIds) OR channelId IS NULL` を
+			// 付ける。渡さないと DB 経路 (FTT 無効時・cache miss 時) で
+			// フォロー中チャンネルの投稿が STL から丸ごと落ちる。
+			FollowedChannelIDs: h.loadFollowedChannelIDs(viewer),
+			FollowingIDs:       h.loadFollowingIDs(viewer),
 		}
 		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)

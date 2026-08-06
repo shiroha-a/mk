@@ -20,6 +20,28 @@ func NewMetaRepoCacheLimits(repo repository.MetaRepository) MetaCacheLimitsProvi
 	return &metaRepoCacheLimits{repo: repo}
 }
 
+// NewMetaFanoutToggle constructs a FanoutToggleProvider backed by the given
+// MetaRepository. 通常は router から CachedMetaRepository が渡るので、
+// note 作成ごと / timeline 取得ごとの参照でも in-memory 参照で済む
+// (admin/update-meta の Update で即 invalidate される)。
+func NewMetaFanoutToggle(repo repository.MetaRepository) FanoutToggleProvider {
+	return &metaRepoCacheLimits{repo: repo}
+}
+
+// FanoutTimelineEnabled implements FanoutToggleProvider. meta を読めない場合は
+// 有効側に倒す (既定値が true なので、一時的な DB エラーで fan-out が止まるより
+// 従来どおり動くほうが害が小さい)。
+func (m *metaRepoCacheLimits) FanoutTimelineEnabled() bool {
+	if m == nil || m.repo == nil {
+		return true
+	}
+	meta, err := m.repo.Fetch()
+	if err != nil || meta == nil {
+		return true
+	}
+	return meta.EnableFanoutTimeline
+}
+
 // CacheLimits implements MetaCacheLimitsProvider. Errors are swallowed and
 // returned as zero values; resolveCap then falls back to the documented
 // Misskey defaults.

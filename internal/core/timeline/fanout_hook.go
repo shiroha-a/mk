@@ -72,6 +72,31 @@ type ChannelFollowerLister interface {
 	ListFollowerIDsPage(channelID, afterRowID string, limit int) (ids []string, nextCursor string, err error)
 }
 
+// FanoutToggleProvider reports whether meta.enableFanoutTimeline is currently
+// on. upstream は同フラグで FTT (Fanout Timeline Technique) 全体を切り、
+// NoteCreateService.pushToTl は冒頭で return、timeline endpoint は Redis を
+// 見ずに DB へ直行する。mk-go も push / read の両側を同じフラグで揃える。
+type FanoutToggleProvider interface {
+	FanoutTimelineEnabled() bool
+}
+
+// fanoutEnabledCtxKey carries the per-note-creation FTT toggle down to
+// pushWithLimit. push は全て pushWithLimit を通るので、ここ 1 箇所で弾けば
+// Redis へ一切書かなくなる。publishNote (WebSocket 配信) は FTT とは独立の
+// 機能なので gate しない。
+type fanoutEnabledCtxKey struct{}
+
+func withFanoutEnabled(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, fanoutEnabledCtxKey{}, enabled)
+}
+
+// fanoutEnabledFrom defaults to true so that call paths which never set the
+// value (tests, 旧来の呼び出し) keep the previous behaviour.
+func fanoutEnabledFrom(ctx context.Context) bool {
+	enabled, ok := ctx.Value(fanoutEnabledCtxKey{}).(bool)
+	return !ok || enabled
+}
+
 // FanoutHook implements note.TimelineFanoutHook by pushing newly-created notes
 // onto the appropriate Redis timelines (home/local/global/user).
 type FanoutHook struct {
@@ -79,6 +104,7 @@ type FanoutHook struct {
 	followingRepo       repository.FollowingRepository
 	publisher           StreamingPublisher
 	limits              MetaCacheLimitsProvider
+	fanoutToggle        FanoutToggleProvider
 	userListRepo        UserListMemberLookup
 	userRoles           UserRolesLookup
 	channelFollowerRepo ChannelFollowerLister
@@ -101,6 +127,13 @@ func (h *FanoutHook) SetStreamingPublisher(p StreamingPublisher) {
 // constant for every timeline (legacy behaviour).
 func (h *FanoutHook) SetCacheLimitsProvider(p MetaCacheLimitsProvider) {
 	h.limits = p
+}
+
+// SetFanoutToggle attaches a FanoutToggleProvider so that note creation
+// honours meta.enableFanoutTimeline. Without this setter every note is pushed
+// to Redis (legacy behaviour).
+func (h *FanoutHook) SetFanoutToggle(p FanoutToggleProvider) {
+	h.fanoutToggle = p
 }
 
 // SetUserListRepo attaches a UserListMemberLookup so that note creation
@@ -128,7 +161,10 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	if n == nil || author == nil {
 		return
 	}
-	ctx := context.Background()
+	// FTT が無効なら Redis へは一切 push しない (upstream pushToTl の冒頭 return
+	// 相当)。WebSocket 配信は下の publishNote が担うので、ここでは ctx に印を
+	// 付けて pushWithLimit 側だけを黙らせる。
+	ctx := withFanoutEnabled(context.Background(), h.fanoutEnabled())
 
 	// meta から動的な cache cap を 1 回だけ取得する。timeline 種別 4 つに
 	// 渡すので per-push fetch ではなく per-create fetch にする (DB 呼び出し回数
@@ -610,8 +646,20 @@ func (h *FanoutHook) removeFromChannelFollowerHomes(ctx context.Context, channel
 	}
 }
 
+// fanoutEnabled reports whether meta.enableFanoutTimeline is on. Provider 未配線
+// なら従来どおり有効扱い。
+func (h *FanoutHook) fanoutEnabled() bool {
+	if h.fanoutToggle == nil {
+		return true
+	}
+	return h.fanoutToggle.FanoutTimelineEnabled()
+}
+
 // pushWithLimit wraps Push with error logging and an explicit cap.
 func (h *FanoutHook) pushWithLimit(ctx context.Context, name Name, id string, maxLen int) {
+	if !fanoutEnabledFrom(ctx) {
+		return
+	}
 	if err := h.fanout.Push(ctx, name, id, maxLen); err != nil {
 		slog.Warn("timeline push failed", "name", string(name), "id", id, "err", err)
 	}
