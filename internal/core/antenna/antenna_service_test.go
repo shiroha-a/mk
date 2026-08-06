@@ -725,17 +725,6 @@ func TestNoteText_CWAndText(t *testing.T) {
 	assert.Contains(t, got, "body")
 }
 
-// normalizeKeywords drops empty rows
-func TestNormalizeKeywords(t *testing.T) {
-	got := normalizeKeywords([][]string{
-		{"a", "b"},
-		{},
-		{"   ", "c"},
-		{""},
-	})
-	assert.Equal(t, [][]string{{"a", "b"}, {"c"}}, got)
-}
-
 // --- SetClock --------------------------------------------------------------
 
 func TestSetClock(t *testing.T) {

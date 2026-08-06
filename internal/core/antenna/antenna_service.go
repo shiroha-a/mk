@@ -219,8 +219,12 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 		}
 	}
 	// Marshal of [][]string never fails, so we ignore the error.
-	keywords, _ := json.Marshal(normalizeKeywords(in.Keywords))
-	exclude, _ := json.Marshal(normalizeKeywords(in.ExcludeKeywords))
+	// upstream は送られてきた DNF をそのまま保存する。空文字を含む行を
+	// 落とすと `excludeKeywords: [[""]]` のような入力が `[]` に化けて、
+	// クライアントが保存した内容を読み戻せない。空文字は matchKeywords の
+	// strings.Contains が常に true になるので、マッチ挙動は upstream と同じ。
+	keywords, _ := json.Marshal(in.Keywords)
+	exclude, _ := json.Marshal(in.ExcludeKeywords)
 	now := s.clock()
 	a := &model.Antenna{
 		ID:                             s.idGen.Generate(now),
@@ -323,11 +327,11 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	}
 	if in.Keywords != nil {
 		// Marshal of [][]string never fails.
-		raw, _ := json.Marshal(normalizeKeywords(*in.Keywords))
+		raw, _ := json.Marshal(*in.Keywords)
 		fields["keywords"] = []byte(raw)
 	}
 	if in.ExcludeKeywords != nil {
-		raw, _ := json.Marshal(normalizeKeywords(*in.ExcludeKeywords))
+		raw, _ := json.Marshal(*in.ExcludeKeywords)
 		fields["excludeKeywords"] = []byte(raw)
 	}
 	if in.CaseSensitive != nil {
@@ -680,7 +684,16 @@ func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollows
 // excludeKeywords は emptyMatches=false)。
 func (s *Service) matchKeywords(text string, raw []byte, caseSensitive bool, emptyMatches bool) bool {
 	groups, err := decodeKeywords(raw)
-	if err != nil || len(groups) == 0 {
+	if err != nil {
+		return emptyMatches
+	}
+	// upstream AntennaService は判定の直前に空文字の要素と空になった行を
+	// 落とす (`map(xs => xs.filter(x => x !== '')).filter(xs => xs.length > 0)`)。
+	// 保存値は素通しなので、`[[""]]` のような入力は「キーワード指定なし」と
+	// 同じ扱いになる。ここで落とさないと空文字が全 note に部分一致して
+	// 全件マッチ (keywords) / 全件除外 (excludeKeywords) になる。
+	groups = cleanKeywordGroups(groups)
+	if len(groups) == 0 {
 		return emptyMatches
 	}
 	target := text
@@ -722,6 +735,24 @@ func noteText(n *model.Note) string {
 	return sb.String()
 }
 
+// cleanKeywordGroups drops empty entries and rows that become empty, mirroring
+// upstream AntennaService's clean-up right before matching.
+func cleanKeywordGroups(groups [][]string) [][]string {
+	out := make([][]string, 0, len(groups))
+	for _, row := range groups {
+		clean := make([]string, 0, len(row))
+		for _, kw := range row {
+			if kw != "" {
+				clean = append(clean, kw)
+			}
+		}
+		if len(clean) > 0 {
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
 // decodeKeywords parses the JSON-encoded DNF keyword groups.
 func decodeKeywords(raw []byte) ([][]string, error) {
 	if len(raw) == 0 {
@@ -732,24 +763,6 @@ func decodeKeywords(raw []byte) ([][]string, error) {
 		return nil, err
 	}
 	return groups, nil
-}
-
-// normalizeKeywords drops empty rows / empty entries from a DNF set so the
-// stored representation does not waste rows that always match.
-func normalizeKeywords(in [][]string) [][]string {
-	out := make([][]string, 0, len(in))
-	for _, row := range in {
-		clean := make([]string, 0, len(row))
-		for _, kw := range row {
-			if strings.TrimSpace(kw) != "" {
-				clean = append(clean, kw)
-			}
-		}
-		if len(clean) > 0 {
-			out = append(out, clean)
-		}
-	}
-	return out
 }
 
 // validSource reports whether s is one of the allowed antenna source values.
