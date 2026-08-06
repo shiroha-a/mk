@@ -34,14 +34,14 @@ func (h *Handler) Clips(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if h.clipRepo == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = &limit
+	if h.clipRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
@@ -108,14 +108,14 @@ func (h *Handler) Flashs(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if h.flashRepo == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = &limit
+	if h.flashRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream flashs.ts:54 は viewer に関係なく公開 flash のみ返す
@@ -173,14 +173,14 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if h.galleryRepo == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = &limit
+	if h.galleryRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	rows, err := h.galleryRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
@@ -278,14 +278,14 @@ func (h *Handler) Pages(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	if h.pageRepo == nil {
-		return c.JSON(http.StatusOK, []any{})
-	}
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Limit = &limit
+	if h.pageRepo == nil {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream pages.ts:54 は viewer に関係なく公開 page のみ返す
