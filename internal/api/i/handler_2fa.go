@@ -480,7 +480,8 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 	// upstream 互換: 削除でも `meUpdated` を publish して frontend UI を即時更新 (#707)。
 	h.publishMeUpdated(user.ID)
-	return c.NoContent(http.StatusNoContent)
+	// upstream は `return {}` なので 200 + 空オブジェクト (204 ではない)。
+	return c.JSON(http.StatusOK, map[string]any{})
 }
 
 // TwoFAUpdateKey handles POST /api/i/2fa/update-key.
@@ -528,7 +529,8 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	}
 	// 表示名変更も meUpdated で UI 反映 (#707)。
 	h.publishMeUpdated(user.ID)
-	return c.NoContent(http.StatusNoContent)
+	// upstream は `return {}` なので 200 + 空オブジェクト (204 ではない)。
+	return c.JSON(http.StatusOK, map[string]any{})
 }
 
 // TwoFAPasswordLess handles POST /api/i/2fa/password-less.

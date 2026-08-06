@@ -344,9 +344,11 @@ func TestTwoFARemoveKey_MissingIsNoOp(t *testing.T) {
 	h, repo, _ := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
 	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"ghost"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// upstream の i/2fa/remove-key / update-key は `return {}` なので 200 + 空
+// オブジェクト。204 ではない。
 func TestTwoFARemoveKey_Success(t *testing.T) {
 	h, repo, skRepo := newWebAuthnHandler(t)
 	user := setupUserWithPassword(repo, "u1", "pass")
@@ -354,7 +356,7 @@ func TestTwoFARemoveKey_Success(t *testing.T) {
 		ID: "key1", UserID: "u1", Name: "k", PublicKey: "pk",
 	}))
 	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"key1"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	// 残り 0 件なので securityKeysAvailable=false にされる
 	assert.False(t, repo.Profiles["u1"].SecurityKeysAvailable)
 	assert.False(t, repo.Profiles["u1"].UsePasswordLessLogin)
@@ -384,7 +386,7 @@ func TestTwoFARemoveKey_With2FA_AcceptsBackupCode(t *testing.T) {
 		ID: "key1", UserID: "u1", Name: "k", PublicKey: "pk",
 	}))
 	rec := postExtra(h.TwoFARemoveKey, `{"password":"pass","credentialId":"key1","token":"backup1"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 // upstream order regression guard: TwoFARemoveKey でも wrong-password +
@@ -428,7 +430,7 @@ func TestTwoFAUpdateKey_Success(t *testing.T) {
 		ID: "key1", UserID: "u1", Name: "old", PublicKey: "pk",
 	}))
 	rec := postExtra(h.TwoFAUpdateKey, `{"password":"pass","credentialId":"key1","name":"renamed"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "renamed", skRepo.keys["key1"].Name)
 }
 
@@ -442,7 +444,7 @@ func TestTwoFAUpdateKey_NoPasswordSucceeds(t *testing.T) {
 		ID: "key1", UserID: "u1", Name: "old", PublicKey: "pk",
 	}))
 	rec := postExtra(h.TwoFAUpdateKey, `{"credentialId":"key1","name":"renamed"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "renamed", skRepo.keys["key1"].Name)
 }
 
