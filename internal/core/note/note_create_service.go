@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ const (
 
 // Errors returned by NoteCreateService.
 var (
-	// ErrNoteContentRequired is returned when text, fileIds and renoteId are all empty.
+	// ErrNoteContentRequired is returned when text, fileIds, renoteId and poll are all empty.
 	ErrNoteContentRequired = errors.New("text, fileIds, or renoteId is required")
 	// ErrReplyTargetNotFound is returned when the replyId references a missing note.
 	ErrReplyTargetNotFound = errors.New("reply target not found")
@@ -411,8 +412,11 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 	}
 
-	// notes/createのバリデーション: text/fileIds/renoteIdのいずれかが必須
-	if (in.Text == nil || *in.Text == "") && in.RenoteID == nil && len(in.FileIDs) == 0 {
+	// notes/createのバリデーション: text/fileIds/renoteId/poll のいずれかが必須。
+	// upstream create.ts の JSON schema は renoteId/fileIds/mediaIds/poll が
+	// すべて null のときだけ text を required にするので、アンケートだけの
+	// 投稿 (text なし) も有効なコンテンツとして通す。
+	if (in.Text == nil || *in.Text == "") && in.RenoteID == nil && len(in.FileIDs) == 0 && in.Poll == nil {
 		return nil, ErrNoteContentRequired
 	}
 
@@ -528,8 +532,26 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		return nil, err
 	}
 
+	// mention の解決はここで 1 回だけ行い、上限チェックと note.Mentions の
+	// 両方で使い回す (host ごとの batch query を二重に投げないため)。
+	var (
+		mentionUserIDs   []string
+		mentionRawCount  int
+		mentionsResolved bool
+	)
+	if in.Text != nil && *in.Text != "" {
+		mentions := ExtractMentionStructs(*in.Text)
+		// 上限の判定には NoExtractMentions でも text 中の mention を数える
+		// (AP 経路で tag 由来の mention に置き換える場合でも本文の量は効く)。
+		mentionRawCount = len(mentions)
+		if len(mentions) > 0 && !in.NoExtractMentions && s.userRepo != nil {
+			mentionUserIDs = s.resolveMentionUserIDs(mentions)
+			mentionsResolved = true
+		}
+	}
+
 	// mentionLimitチェック (role policiesの制限)
-	if err := s.checkMentionLimit(in.User.ID, in.Text); err != nil {
+	if err := s.checkMentionLimit(in, visibility, replyTarget, mentionUserIDs, mentionRawCount); err != nil {
 		return nil, err
 	}
 
@@ -746,45 +768,8 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// userRepo が未設定のときは後方互換のため username 文字列をそのまま格納する。
 	if in.Text != nil && !in.NoExtractMentions {
 		if s.userRepo != nil {
-			mentions := ExtractMentionStructs(*in.Text)
-			if len(mentions) > 0 {
-				// host ごとに 1 query にまとめる (#300 1-5)。
-				// 元実装は mention 数 N に対して N 回 FindByUsernameLower を
-				// 直列に叩いていたが、host 単位で IN(?) にしてラウンドトリップ
-				// を host 種類数まで削減する。
-				byHost := make(map[string][]string)
-				for _, m := range mentions {
-					byHost[m.Host] = append(byHost[m.Host], m.Username)
-				}
-				// resolved[host][usernameLower] = userID
-				resolved := make(map[string]map[string]string, len(byHost))
-				for host, names := range byHost {
-					var hostPtr *string
-					if host != "" {
-						h := host
-						hostPtr = &h
-					}
-					users, err := s.userRepo.FindManyByUsernamesAndHost(names, hostPtr)
-					if err != nil {
-						// 1 host の lookup 失敗は当該 host の mention を
-						// 諦めて後続を続行する (元実装も err 時 skip だった)。
-						continue
-					}
-					m := make(map[string]string, len(users))
-					for _, u := range users {
-						m[u.UsernameLower] = u.ID
-					}
-					resolved[host] = m
-				}
-				ids := make([]string, 0, len(mentions))
-				for _, mn := range mentions {
-					if hostMap, ok := resolved[mn.Host]; ok {
-						if id, ok := hostMap[strings.ToLower(mn.Username)]; ok {
-							ids = append(ids, id)
-						}
-					}
-				}
-				note.Mentions = ids
+			if mentionsResolved && len(mentionUserIDs) > 0 {
+				note.Mentions = mentionUserIDs
 			}
 		} else {
 			note.Mentions = ExtractMentions(*in.Text)
@@ -1231,20 +1216,85 @@ func checkProhibitedWords(meta *model.Meta, text, cw *string, pollChoices []stri
 	return nil
 }
 
-// checkMentionLimit counts mentions in text and compares them against the
-// author's `mentionLimit` role policy (#2321).
+// resolveMentionUserIDs maps `@username[@host]` mentions to local user IDs,
+// dropping the ones that do not resolve to a known user.
 //
-// 判定に使う件数は upstream の「解決できたユーザー数」ではなく text から
-// 抽出した mention 数。存在しないユーザーへの mention を大量に含む note を
-// upstream より厳しく弾く意図的な差分で、upstream 自身も AP 経路では raw 数と
-// の max を取る方針 (#17576) なので厳しい側に揃えたまま維持する。
-func (s *CreateService) checkMentionLimit(userID string, text *string) error {
-	if text == nil || *text == "" {
+// host ごとに 1 query にまとめる (#300 1-5)。元実装は mention 数 N に対して
+// N 回 FindByUsernameLower を直列に叩いていたが、host 単位で IN(?) にして
+// ラウンドトリップを host 種類数まで削減する。
+func (s *CreateService) resolveMentionUserIDs(mentions []Mention) []string {
+	if s.userRepo == nil || len(mentions) == 0 {
 		return nil
 	}
-	mentions := ExtractMentionStructs(*text)
-	limit := s.mentionLimitFor(userID)
-	if limit > 0 && len(mentions) > limit {
+	byHost := make(map[string][]string)
+	for _, m := range mentions {
+		byHost[m.Host] = append(byHost[m.Host], m.Username)
+	}
+	// resolved[host][usernameLower] = userID
+	resolved := make(map[string]map[string]string, len(byHost))
+	for host, names := range byHost {
+		var hostPtr *string
+		if host != "" {
+			h := host
+			hostPtr = &h
+		}
+		users, err := s.userRepo.FindManyByUsernamesAndHost(names, hostPtr)
+		if err != nil {
+			// 1 host の lookup 失敗は当該 host の mention を諦めて後続を
+			// 続行する (元実装も err 時 skip だった)。
+			continue
+		}
+		m := make(map[string]string, len(users))
+		for _, u := range users {
+			m[u.UsernameLower] = u.ID
+		}
+		resolved[host] = m
+	}
+	ids := make([]string, 0, len(mentions))
+	for _, mn := range mentions {
+		if hostMap, ok := resolved[mn.Host]; ok {
+			if id, ok := hostMap[strings.ToLower(mn.Username)]; ok {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+// checkMentionLimit counts the note's mention targets and compares them against
+// the author's `mentionLimit` role policy (#2321).
+//
+// upstream NoteCreateService は text 中の mention に加えて、返信先の投稿者と
+// ダイレクト投稿の宛先 (visibleUsers) も同じ `mentionedUsers` 集合に入れて
+// 数える。text に mention が 1 つも無いダイレクト投稿でも上限に当たるのは
+// このため。宛先と text mention が同じ相手なら 1 件として数える。
+//
+// 解決できなかった mention は upstream では数に入らないが、mk-go は存在しない
+// ユーザーへの mention を大量に含む note を弾くため文字列のまま数える (意図的
+// な差分。upstream 自身も AP 経路では raw 数との max を取る方針 #17576)。
+func (s *CreateService) checkMentionLimit(in CreateInput, visibility model.NoteVisibility, replyTarget *model.Note, mentionUserIDs []string, mentionRawCount int) error {
+	targets := make(map[string]struct{})
+	for _, id := range mentionUserIDs {
+		targets[id] = struct{}{}
+	}
+	// 未解決の mention はどれが該当するか特定できないので、件数分だけ
+	// 一意なキーを足して数に入れる。
+	for i := len(mentionUserIDs); i < mentionRawCount; i++ {
+		targets["\x00unresolved:"+strconv.Itoa(i)] = struct{}{}
+	}
+	if replyTarget != nil {
+		targets[replyTarget.UserID] = struct{}{}
+	}
+	if visibility == model.NoteVisibilitySpecified {
+		for _, id := range in.VisibleUserIDs {
+			targets[id] = struct{}{}
+		}
+	}
+	// upstream の条件は `mentionCount > 0 && mentionCount > mentionLimit` で、
+	// limit 側にガードは無い。mk-go は `limit > 0` を条件にしていたため、
+	// ロールで mentionLimit=0 (メンション全面禁止) を設定しても判定ごと
+	// スキップされ、いくらでもメンションできてしまっていた。
+	if len(targets) > 0 && len(targets) > s.mentionLimitFor(in.User.ID) {
 		return ErrContainsTooManyMentions
 	}
 	return nil
