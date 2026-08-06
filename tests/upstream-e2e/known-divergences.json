@@ -26,15 +26,9 @@
 		},
 		{
 			"file": "test/e2e/users.ts",
-			"reason": "policies に mk-go 独自の分割アップロード用キー (canUseChunkedUpload / chunkedUploadMaxConcurrentSessions / chunkedUploadMaxPendingMb, #2313) が乗る。テストが policies を完全一致で比較するため、独自 policy を持つ限り必ず落ちる。",
+			"reason": "policies に mk-go 独自の分割アップロード用キー (canUseChunkedUpload / chunkedUploadMaxConcurrentSessions / chunkedUploadMaxPendingMb, #2313) が乗る。このテストは signup 応答の policies を upstream の DEFAULT_POLICIES と完全一致で比較するため、独自 policy を持つ限り必ず落ちる。",
 			"names": [
-				"ユーザー > が作れる。（作りたての状態で自分のユーザー情報が取れる）",
-				"ユーザー > をリスト形式で取得することができる（'登録日時降順'）",
-				"ユーザー > をリスト形式で取得することができる（'フォロワー昇順'）",
-				"ユーザー > をリスト形式で取得することができる（'投稿日時昇順'）",
-				"ユーザー > をID指定のリスト形式で取得することができる",
-				"ユーザー > をID&ホスト指定で検索できる('自分かつusernameが大文字')",
-				"ユーザー > をハッシュタグ指定で取得することができる('投稿日時降順')"
+				"ユーザー > が作れる。（作りたての状態で自分のユーザー情報が取れる）"
 			]
 		},
 		{
